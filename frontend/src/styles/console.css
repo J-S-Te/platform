@@ -155,3 +155,92 @@
 .console-permission-code { display: inline-block; margin: 0 6px 7px 0; padding: 5px 7px; overflow-wrap: anywhere; color: #1e3a8a; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 11px; border-radius: 5px; background: #eff6ff; }
 .console-detail-modal > footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; padding: 16px 24px; border-top: 1px solid #e2e8f0; }
 @media (max-width: 620px) { .console-iam-head { align-items: stretch; flex-direction: column; }.console-iam-head .console-button { align-self: flex-start; }.console-sub-tabs { margin-top: 16px; }.console-sub-tab { flex: 1; padding: 7px 12px; }.console-iam-filter .console-search-field { flex-basis: 100%; }.console-detail-modal { max-height: calc(100vh - 24px); }.console-detail-modal > header { padding: 18px 18px 15px; }.console-detail-grid { grid-template-columns: 1fr; margin: 18px 18px 0; }.console-detail-grid > div, .console-detail-grid > div:nth-child(odd) { border-right: 0; }.console-detail-grid > div:nth-last-child(-n+2) { border-bottom: 1px solid #e2e8f0; }.console-detail-grid > div:last-child { border-bottom: 0; }.console-detail-section { margin: 18px 18px 0; }.console-detail-modal > footer { padding: 15px 18px; }.console-detail-modal > footer .console-button { flex: 1; }.console-role-chip { max-width: 130px; } }
+
+/* AUD-001 审计中心：跨系统事件、变更摘要与链路追溯 */
+.audit-readonly-note code { padding: 1px 4px; color: #1e40af; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; border-radius: 3px; background: #eff6ff; }
+.audit-context-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 14px; }
+.audit-context-grid article { padding: 13px 14px; border: 1px solid #dbeafe; border-radius: 9px; background: #f8fbff; }
+.audit-context-grid span { display: block; color: #64748b; font-size: 11px; }
+.audit-context-grid strong { display: block; margin-top: 4px; color: #1e3a8a; font-size: 13px; }
+.audit-context-grid p { margin: 5px 0 0; color: #64748b; font-size: 11px; line-height: 1.55; }
+.audit-filter-bar { align-items: center; }
+.audit-filter-bar .console-search-field { flex: 1 1 280px; min-width: 260px; }
+.audit-filter-bar .console-select-field { min-width: 122px; }
+.audit-batch-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin: 14px 0 10px; color: #64748b; font-size: 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+.audit-batch-bar b { color: #1d4ed8; }
+.audit-batch-bar > div { display: flex; gap: 8px; }
+.audit-data-table th { white-space: nowrap; }
+.audit-data-table td { vertical-align: top; }
+.audit-check-cell { width: 34px; min-width: 34px; text-align: center !important; }
+.audit-check-cell input { width: 14px; height: 14px; accent-color: #2563eb; }
+.audit-method { display: inline-flex; padding: 3px 5px; color: #7c3aed; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; border-radius: 4px; background: #f5f3ff; }
+.audit-id { display: block; max-width: 168px; overflow: hidden; color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.audit-result-denied { color: #b91c1c; background: #fee2e2; }
+.console-text-button.danger { color: #dc2626; }
+.console-text-button.danger:hover { color: #b91c1c; background: #fef2f2; }
+.console-button:disabled, .console-text-button:disabled { cursor: not-allowed; opacity: .45; }
+.audit-table-footer { align-items: center; }
+.audit-pagination { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.audit-detail-modal { width: min(820px, 100%); }
+.audit-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; margin: 20px 24px 0; overflow: hidden; border: 1px solid #e2e8f0; border-radius: 8px; }
+.audit-detail-grid > div { min-width: 0; padding: 13px 14px; border-bottom: 1px solid #e2e8f0; }
+.audit-detail-grid > div:nth-child(odd) { border-right: 1px solid #e2e8f0; background: #f8fafc; }
+.audit-detail-grid > div:nth-last-child(-n + 2) { border-bottom: 0; }
+.audit-detail-grid span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
+.audit-detail-grid strong { display: block; overflow-wrap: anywhere; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.45; }
+.audit-detail-section small { display: block; color: #94a3b8; font-size: 11px; line-height: 1.55; }
+@media (max-width: 900px) { .audit-context-grid { grid-template-columns: 1fr; }.audit-filter-bar .console-search-field { flex-basis: 100%; }.audit-batch-bar { align-items: flex-start; flex-direction: column; }.audit-batch-bar > div { width: 100%; }.audit-batch-bar > div .console-button { flex: 1; }.audit-detail-grid { grid-template-columns: 1fr; }.audit-detail-grid > div, .audit-detail-grid > div:nth-child(odd) { border-right: 0; }.audit-detail-grid > div:nth-last-child(-n + 2) { border-bottom: 1px solid #e2e8f0; }.audit-detail-grid > div:last-child { border-bottom: 0; } }
+@media (max-width: 620px) { .audit-filter-bar .console-search-field { min-width: 100%; }.audit-detail-grid { margin: 18px 18px 0; }.audit-pagination { width: 100%; justify-content: space-between; }.audit-table-footer { align-items: flex-start; flex-direction: column; } }
+
+/* 审计表格自适应：宽屏保持列式浏览，小屏自动切换为字段卡片。 */
+.audit-table-card { max-width: 100%; }
+.audit-table-card .console-table-scroll { width: 100%; }
+.audit-data-table { table-layout: auto; }
+.audit-data-table td > strong { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-data-table .console-entity-meta { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-data-table .console-actions-cell { min-width: 92px; }
+@media (max-width: 760px) {
+  .audit-table-card { overflow: visible; border: 0; background: transparent; box-shadow: none; }
+  .audit-table-card .console-table-scroll { overflow: visible; }
+  .audit-data-table, .audit-data-table tbody, .audit-data-table tr, .audit-data-table td { display: block; width: 100%; min-width: 0; }
+  .audit-data-table { border-collapse: separate; border-spacing: 0 10px; font-size: 12px; }
+  .audit-data-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .audit-data-table tbody tr { position: relative; overflow: hidden; padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; background: #fff; box-shadow: 0 1px 3px rgba(15, 23, 42, .04); }
+  .audit-data-table tbody tr:hover td { background: transparent; }
+  .audit-data-table td { display: grid; grid-template-columns: minmax(88px, 31%) minmax(0, 1fr); gap: 10px; align-items: start; padding: 8px 0; color: var(--secondary); border-bottom: 1px dashed #e2e8f0; }
+  .audit-data-table td::before { content: attr(data-label); color: #94a3b8; font-size: 11px; font-weight: 500; line-height: 1.6; }
+  .audit-data-table td:last-child { border-bottom: 0; }
+  .audit-data-table .audit-check-cell { display: flex; width: auto; min-width: 0; padding: 3px 0 9px; text-align: left !important; border-bottom: 1px solid #e2e8f0; }
+  .audit-data-table .audit-check-cell::before { content: '选择事件'; }
+  .audit-data-table td > strong, .audit-data-table .console-entity-meta { max-width: 100%; overflow: visible; text-overflow: clip; white-space: normal; }
+  .audit-data-table .console-entity-meta { margin-top: 3px; }
+  .audit-data-table .audit-id { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+  .audit-data-table .console-actions-cell { display: flex; width: auto; min-width: 0; gap: 5px; align-items: center; justify-content: flex-end; padding-top: 10px; text-align: left; }
+  .audit-data-table .console-actions-cell::before { margin-right: auto; }
+  .audit-data-table .console-empty { display: block; padding: 36px 16px !important; text-align: center; border: 1px solid var(--border) !important; border-radius: 9px; background: #fff; }
+  .audit-data-table .console-empty::before { display: none; }
+  .audit-table-footer { margin-top: 2px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
+}
+@media (max-width: 420px) {
+  .audit-data-table td { grid-template-columns: 82px minmax(0, 1fr); gap: 7px; }
+  .audit-data-table tbody tr { padding: 8px 10px; }
+  .audit-batch-bar > div { flex-direction: column; }
+}
+
+/* 审计表格间距微调：在信息密度与可读性之间保持平衡。 */
+.audit-data-table th { padding: 11px 12px; }
+.audit-data-table td { padding: 11px 12px; }
+.audit-data-table .audit-check-cell { padding-right: 6px; padding-left: 8px; }
+.audit-data-table .console-entity-meta { margin-top: 3px; }
+.audit-data-table .console-badge { margin-bottom: 2px; }
+.audit-data-table .audit-method { margin-bottom: 3px; }
+.audit-data-table .console-actions-cell { padding-right: 10px; padding-left: 8px; }
+.audit-data-table .console-text-button + .console-text-button { margin-left: 4px; }
+@media (max-width: 760px) {
+  .audit-data-table { border-spacing: 0 8px; }
+  .audit-data-table tbody tr { padding: 6px 12px; }
+  .audit-data-table td { gap: 9px; padding: 7px 0; }
+  .audit-data-table .audit-check-cell { padding: 3px 0 8px; }
+  .audit-data-table .console-actions-cell { gap: 3px; padding: 9px 0 2px; }
+  .audit-data-table .console-text-button + .console-text-button { margin-left: 2px; }
+}
