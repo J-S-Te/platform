@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env.local
+.env.*.local
+.DS_Store
+
+# 本地环境配置：仅提交根目录 .env.example 模板
+.env
+.env.*
+!.env.example
+
+# 本地运行时产生的数据（日志、上传文件等）
+data/

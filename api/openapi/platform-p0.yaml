@@ -1,0 +1,1577 @@
+openapi: 3.1.0
+info:
+  title: 基础能力平台 API
+  version: 0.1.0-draft
+  description: |
+    基础能力平台的前后端接口草案。实现基线为 Go 模块化单体、MySQL、JWT Cookie 会话，
+    所有时间均为 UTC RFC 3339 格式。本文件与 docs/frontend-backend-contract.md 共同作为联调契约；
+    表结构和领域约束以 docs/core-models-mysql.md、docs/architecture.md 为准。
+servers:
+  - url: /api/v1
+    description: 平台 API 相对地址
+x-contract-rules:
+  tenant_context: 所有受保护接口从认证会话或应用凭据解析 tenant_id；禁止由调用方传入 tenant_id 覆盖。
+  write_operations: P0 写接口必须完成鉴权、租户隔离、参数校验、适用的 version 乐观锁和审计记录；登录与审计接收的认证/审计例外由各 operation 描述。
+  time_format: UTC RFC 3339
+security:
+  - cookieAuth: []
+tags:
+  - name: Auth
+  - name: Identity
+  - name: Organization
+  - name: Authorization
+  - name: Audit
+  - name: Configuration
+  - name: P1 Capability
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: 账号密码登录
+      description: 校验 Argon2id 凭据，签发 HttpOnly JWT Cookie，并创建 iam_session。无需前端传入 tenant_id。
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: 登录成功；响应同时通过 Set-Cookie 下发会话 Cookie。
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: HttpOnly; Secure（生产环境）; SameSite=Lax 的会话 Cookie。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '423': { $ref: '#/components/responses/AccountLocked' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /auth/token/refresh:
+    post:
+      tags: [Auth]
+      summary: 刷新当前会话
+      operationId: refreshSession
+      x-permission: authenticated
+      responses:
+        '200':
+          description: 会话仍有效，已续发 Cookie。
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: 退出当前会话
+      operationId: logout
+      x-permission: authenticated
+      x-audit-action: auth.logout
+      responses:
+        '200':
+          description: 当前 iam_session 已撤销且 Cookie 已清理。
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/EmptyEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: 获取当前控制台主体
+      operationId: getCurrentPrincipal
+      x-permission: authenticated
+      responses:
+        '200':
+          description: 当前用户、账号、租户、角色与权限摘要。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/PrincipalEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /users:
+    get:
+      tags: [Identity]
+      summary: 分页查询用户
+      operationId: listUsers
+      x-permission: "platform:user:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/UserList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Identity]
+      summary: 创建用户
+      operationId: createUser
+      x-permission: "platform:user:create"
+      x-audit-action: platform:user:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/UserCreateRequest' } }
+      responses:
+        '201':
+          description: 已创建。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/UserEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /users/{user_id}:
+    parameters: [ { $ref: '#/components/parameters/UserId' } ]
+    get:
+      tags: [Identity]
+      summary: 获取用户详情
+      operationId: getUser
+      x-permission: "platform:user:read"
+      responses:
+        '200': { $ref: '#/components/responses/User' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Identity]
+      summary: 更新用户
+      description: 必须提交当前 version；服务端从会话取得租户与操作人。
+      operationId: updateUser
+      x-permission: "platform:user:update"
+      x-audit-action: platform:user:update
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/UserUpdateRequest' } }
+      responses:
+        '200': { $ref: '#/components/responses/User' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /accounts:
+    get:
+      tags: [Identity]
+      summary: 查询账号
+      operationId: listAccounts
+      x-permission: "platform:account:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/AccountList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /accounts/{account_id}:
+    parameters: [ { $ref: '#/components/parameters/AccountId' } ]
+    patch:
+      tags: [Identity]
+      summary: 更新账号状态或显示信息
+      operationId: updateAccount
+      x-permission: "platform:account:update"
+      x-audit-action: platform:account:update
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AccountUpdateRequest' } }
+      responses:
+        '200': { $ref: '#/components/responses/Account' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /org-units:
+    get:
+      tags: [Organization]
+      summary: 查询组织单元
+      operationId: listOrgUnits
+      x-permission: "platform:organization:read"
+      parameters: [ { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/OrgUnitList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Organization]
+      summary: 创建组织单元
+      operationId: createOrgUnit
+      x-permission: "platform:organization:create"
+      x-audit-action: platform:organization:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/OrgUnitCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/OrgUnit' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /positions:
+    get:
+      tags: [Organization]
+      summary: 查询岗位
+      operationId: listPositions
+      x-permission: "platform:position:read"
+      parameters: [ { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/PositionList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Organization]
+      summary: 创建岗位
+      operationId: createPosition
+      x-permission: "platform:position:create"
+      x-audit-action: platform:position:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/PositionCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/Position' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /memberships:
+    get:
+      tags: [Organization]
+      summary: 查询用户任职
+      operationId: listMemberships
+      x-permission: "platform:membership:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/MembershipList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Organization]
+      summary: 新增用户任职
+      operationId: createMembership
+      x-permission: "platform:membership:create"
+      x-audit-action: platform:membership:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/MembershipCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/Membership' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /memberships/{membership_id}:
+    parameters: [ { $ref: '#/components/parameters/MembershipId' } ]
+    patch:
+      tags: [Organization]
+      summary: 更新任职
+      operationId: updateMembership
+      x-permission: "platform:membership:update"
+      x-audit-action: platform:membership:update
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/MembershipUpdateRequest' } }
+      responses:
+        '200': { $ref: '#/components/responses/Membership' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /resources:
+    get:
+      tags: [Authorization]
+      summary: 查询资源
+      operationId: listResources
+      x-permission: "platform:resource:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' } ]
+      responses:
+        '200': { $ref: '#/components/responses/ResourceList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Authorization]
+      summary: 创建资源
+      operationId: createResource
+      x-permission: "platform:resource:create"
+      x-audit-action: platform:resource:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ResourceCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/Resource' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /permissions:
+    get:
+      tags: [Authorization]
+      summary: 查询权限点
+      operationId: listPermissions
+      x-permission: "platform:permission:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' } ]
+      responses:
+        '200': { $ref: '#/components/responses/PermissionList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Authorization]
+      summary: 创建权限点
+      operationId: createPermission
+      x-permission: "platform:permission:create"
+      x-audit-action: platform:permission:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/PermissionCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/Permission' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /roles:
+    get:
+      tags: [Authorization]
+      summary: 查询角色
+      operationId: listRoles
+      x-permission: "platform:role:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/RoleList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Authorization]
+      summary: 创建角色
+      operationId: createRole
+      x-permission: "platform:role:create"
+      x-audit-action: platform:role:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RoleCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/Role' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /roles/{role_id}:
+    parameters: [ { $ref: '#/components/parameters/RoleId' } ]
+    get:
+      tags: [Authorization]
+      summary: 获取角色详情
+      operationId: getRole
+      x-permission: "platform:role:read"
+      responses:
+        '200': { $ref: '#/components/responses/Role' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Authorization]
+      summary: 更新角色和角色权限
+      operationId: updateRole
+      x-permission: "platform:role:update"
+      x-audit-action: platform:role:update
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RoleUpdateRequest' } }
+      responses:
+        '200': { $ref: '#/components/responses/Role' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /role-bindings:
+    get:
+      tags: [Authorization]
+      summary: 查询角色绑定
+      operationId: listRoleBindings
+      x-permission: "platform:role-binding:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/StatusFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/RoleBindingList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Authorization]
+      summary: 创建角色绑定
+      operationId: createRoleBinding
+      x-permission: "platform:role-binding:create"
+      x-audit-action: platform:role-binding:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RoleBindingCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/RoleBinding' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /role-bindings/{binding_id}:
+    parameters: [ { $ref: '#/components/parameters/BindingId' } ]
+    patch:
+      tags: [Authorization]
+      summary: 更新角色绑定
+      operationId: updateRoleBinding
+      x-permission: "platform:role-binding:update"
+      x-audit-action: platform:role-binding:update
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RoleBindingUpdateRequest' } }
+      responses:
+        '200': { $ref: '#/components/responses/RoleBinding' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /authorization/check:
+    post:
+      tags: [Authorization]
+      summary: 单次授权判定
+      description: 供接入应用调用；主体默认取认证上下文，不接受调用方覆盖 tenant_id。
+      operationId: checkAuthorization
+      security: [ { applicationAuth: [] }, { cookieAuth: [] } ]
+      x-permission: "platform:authorization:check"
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AuthorizationCheckRequest' } }
+      responses:
+        '200':
+          description: 返回允许/拒绝及匹配的策略版本。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/AuthorizationDecisionEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /authorization/batch-check:
+    post:
+      tags: [Authorization]
+      summary: 批量授权判定
+      operationId: batchCheckAuthorization
+      security: [ { applicationAuth: [] }, { cookieAuth: [] } ]
+      x-permission: "platform:authorization:check"
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AuthorizationBatchCheckRequest' } }
+      responses:
+        '200':
+          description: 顺序与输入 requests 保持一致。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/AuthorizationDecisionListEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /audit/events:
+    get:
+      tags: [Audit]
+      summary: 分页查询审计事件
+      description: 输出 DTO 仅含控制台已展示字段与变更摘要；不返回主体信息、request_id、trace_id。
+      operationId: listAuditEvents
+      x-permission: "platform:audit:view"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/AuditApplicationFilter' }, { $ref: '#/components/parameters/AuditEnvironmentFilter' }, { $ref: '#/components/parameters/AuditActionFilter' }, { $ref: '#/components/parameters/AuditResultFilter' }, { $ref: '#/components/parameters/AuditRiskFilter' }, { $ref: '#/components/parameters/OccurredFrom' }, { $ref: '#/components/parameters/OccurredTo' } ]
+      responses:
+        '200': { $ref: '#/components/responses/AuditEventList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Audit]
+      summary: 接收单条接入系统审计事件
+      description: 接收数据可携带内部关联字段，但这些字段绝不进入控制台列表、详情或导出 DTO。event_id 用于幂等去重。
+      operationId: ingestAuditEvent
+      security: [ { applicationAuth: [] } ]
+      x-permission: "platform:audit:ingest"
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AuditEventInput' } }
+      responses:
+        '202':
+          description: 已接收或幂等确认；后续持久化可异步处理。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/AuditReceiptEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  '/audit/events:batch':
+    post:
+      tags: [Audit]
+      summary: 批量接收接入系统审计事件
+      operationId: ingestAuditEventsBatch
+      security: [ { applicationAuth: [] } ]
+      x-permission: "platform:audit:ingest"
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AuditEventBatchInput' } }
+      responses:
+        '202':
+          description: 每条记录通过 event_id 幂等处理。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/AuditReceiptListEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /audit/events/{event_id}:
+    parameters: [ { $ref: '#/components/parameters/AuditEventId' } ]
+    get:
+      tags: [Audit]
+      summary: 获取审计事件详情
+      description: 不返回主体信息、request_id、trace_id。敏感变更值按照字段策略脱敏。
+      operationId: getAuditEvent
+      x-permission: "platform:audit:view"
+      responses:
+        '200': { $ref: '#/components/responses/AuditEvent' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /audit/export-jobs:
+    post:
+      tags: [Audit]
+      summary: 创建审计导出任务
+      operationId: createAuditExportJob
+      x-permission: "platform:audit:export"
+      x-audit-action: platform:audit:export.create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AuditExportJobCreateRequest' } }
+      responses:
+        '202':
+          description: 导出异步执行。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/AuditExportJobEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /audit/export-jobs/{job_id}:
+    parameters: [ { $ref: '#/components/parameters/JobId' } ]
+    get:
+      tags: [Audit]
+      summary: 查询审计导出任务
+      operationId: getAuditExportJob
+      x-permission: "platform:audit:export"
+      responses:
+        '200': { $ref: '#/components/responses/AuditExportJob' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /config/namespaces:
+    get:
+      tags: [Configuration]
+      summary: 查询配置命名空间
+      operationId: listConfigNamespaces
+      x-permission: "platform:config-namespace:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' } ]
+      responses:
+        '200': { $ref: '#/components/responses/ConfigNamespaceList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Configuration]
+      summary: 创建配置命名空间
+      operationId: createConfigNamespace
+      x-permission: "platform:config-namespace:create"
+      x-audit-action: platform:config-namespace:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ConfigNamespaceCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/ConfigNamespace' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /config/items:
+    get:
+      tags: [Configuration]
+      summary: 分页查询配置条目
+      operationId: listConfigItems
+      x-permission: "platform:config-item:read"
+      parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/PageSize' }, { $ref: '#/components/parameters/Keyword' }, { $ref: '#/components/parameters/ConfigNamespaceFilter' } ]
+      responses:
+        '200': { $ref: '#/components/responses/ConfigItemList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Configuration]
+      summary: 创建配置条目
+      operationId: createConfigItem
+      x-permission: "platform:config-item:create"
+      x-audit-action: platform:config-item:create
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ConfigItemCreateRequest' } }
+      responses:
+        '201': { $ref: '#/components/responses/ConfigItem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /config/items/{item_id}:
+    parameters: [ { $ref: '#/components/parameters/ConfigItemId' } ]
+    patch:
+      tags: [Configuration]
+      summary: 更新配置条目草稿
+      operationId: updateConfigItem
+      x-permission: "platform:config-item:update"
+      x-audit-action: platform:config-item:update
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ConfigItemUpdateRequest' } }
+      responses:
+        '200': { $ref: '#/components/responses/ConfigItem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /config/releases:
+    post:
+      tags: [Configuration]
+      summary: 发布配置版本
+      operationId: createConfigRelease
+      x-permission: "platform:config-release:publish"
+      x-audit-action: platform:config-release:publish
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ConfigReleaseCreateRequest' } }
+      responses:
+        '202':
+          description: 已创建发布任务；发布策略由命名空间定义。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/ConfigReleaseEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /config/releases/{release_id}:
+    parameters: [ { $ref: '#/components/parameters/ReleaseId' } ]
+    get:
+      tags: [Configuration]
+      summary: 查询配置发布任务
+      operationId: getConfigRelease
+      x-permission: "platform:config-release:read"
+      responses:
+        '200': { $ref: '#/components/responses/ConfigRelease' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /config/applications/{application_code}/namespaces/{namespace_code}:
+    parameters: [ { $ref: '#/components/parameters/ApplicationCode' }, { $ref: '#/components/parameters/NamespaceCode' } ]
+    get:
+      tags: [Configuration]
+      summary: 读取应用已发布配置
+      description: 只返回已发布且调用方有权读取的值；用于接入系统运行时读取。
+      operationId: getPublishedConfig
+      security: [ { applicationAuth: [] }, { cookieAuth: [] } ]
+      x-permission: "platform:config:read"
+      responses:
+        '200':
+          description: 已发布配置快照。
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/PublishedConfigEnvelope' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /settings/platform:
+    get:
+      tags: [P1 Capability]
+      summary: 获取平台基础设置（P1）
+      operationId: getPlatformSettings
+      x-capability-phase: P1
+      x-permission: "platform:settings:read"
+      responses: { '200': { $ref: '#/components/responses/P1Settings' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+    put:
+      tags: [P1 Capability]
+      summary: 保存平台基础设置（P1）
+      operationId: updatePlatformSettings
+      x-capability-phase: P1
+      x-permission: "platform:settings:update"
+      x-audit-action: platform:settings:update
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { $ref: '#/components/responses/P1Settings' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /settings/notifications:
+    get:
+      tags: [P1 Capability]
+      summary: 获取站内信与邮件通知设置（P1）
+      description: 不包含短信通知能力。
+      operationId: getNotificationSettings
+      x-capability-phase: P1
+      x-permission: "platform:notification-setting:read"
+      responses: { '200': { $ref: '#/components/responses/P1Settings' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+    put:
+      tags: [P1 Capability]
+      summary: 保存站内信与邮件通知设置（P1）
+      operationId: updateNotificationSettings
+      x-capability-phase: P1
+      x-permission: "platform:notification-setting:update"
+      x-audit-action: platform:notification-setting:update
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { $ref: '#/components/responses/P1Settings' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /security/login-policy:
+    get:
+      tags: [P1 Capability]
+      summary: 获取登录安全策略（P1）
+      operationId: getLoginPolicy
+      x-capability-phase: P1
+      x-permission: "platform:security-policy:read"
+      responses: { '200': { $ref: '#/components/responses/P1Settings' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+    put:
+      tags: [P1 Capability]
+      summary: 保存登录安全策略（P1）
+      operationId: updateLoginPolicy
+      x-capability-phase: P1
+      x-permission: "platform:security-policy:update"
+      x-audit-action: platform:security-policy:update
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { $ref: '#/components/responses/P1Settings' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /security/locked-accounts:
+    get:
+      tags: [P1 Capability]
+      summary: 查询锁定账号（P1）
+      operationId: listLockedAccounts
+      x-capability-phase: P1
+      x-permission: "platform:locked-account:read"
+      responses: { '200': { $ref: '#/components/responses/AccountList' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  '/security/locked-accounts/{account_id}:unlock':
+    parameters: [ { $ref: '#/components/parameters/AccountId' } ]
+    post:
+      tags: [P1 Capability]
+      summary: 解锁账号（P1）
+      operationId: unlockAccount
+      x-capability-phase: P1
+      x-permission: "platform:locked-account:unlock"
+      x-audit-action: platform:locked-account:unlock
+      responses: { '200': { $ref: '#/components/responses/Account' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /security/risk-events:
+    get:
+      tags: [P1 Capability]
+      summary: 查询风险事件（P1）
+      operationId: listRiskEvents
+      x-capability-phase: P1
+      x-permission: "platform:risk-event:read"
+      responses: { '200': { $ref: '#/components/responses/RiskEventList' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  '/security/risk-events/{risk_event_id}:resolve':
+    parameters: [ { $ref: '#/components/parameters/RiskEventId' } ]
+    post:
+      tags: [P1 Capability]
+      summary: 处置风险事件（P1）
+      operationId: resolveRiskEvent
+      x-capability-phase: P1
+      x-permission: "platform:risk-event:resolve"
+      x-audit-action: platform:risk-event:resolve
+      responses: { '200': { $ref: '#/components/responses/RiskEvent' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /audit/deliveries:
+    get:
+      tags: [P1 Capability]
+      summary: 查询平台审计接收状态（P1）
+      description: 仅管理平台接收侧状态，不直接操作业务系统 audit_outbox。
+      operationId: listAuditDeliveries
+      x-capability-phase: P1
+      x-permission: "platform:audit-delivery:read"
+      responses: { '200': { $ref: '#/components/responses/AuditDeliveryList' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  '/audit/deliveries/{delivery_id}:replay':
+    parameters: [ { $ref: '#/components/parameters/DeliveryId' } ]
+    post:
+      tags: [P1 Capability]
+      summary: 重放平台死信审计接收记录（P1）
+      operationId: replayAuditDelivery
+      x-capability-phase: P1
+      x-permission: "platform:audit-delivery:replay"
+      x-audit-action: platform:audit-delivery:replay
+      responses: { '202': { $ref: '#/components/responses/AuditDelivery' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /observability/services:
+    get:
+      tags: [P1 Capability]
+      summary: 查询服务遥测元数据（P1）
+      operationId: listObservableServices
+      x-capability-phase: P1
+      x-permission: "platform:observability-service:read"
+      responses: { '200': { $ref: '#/components/responses/ObservableServiceList' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /observability/alert-rules:
+    get:
+      tags: [P1 Capability]
+      summary: 查询告警规则（P1）
+      operationId: listAlertRules
+      x-capability-phase: P1
+      x-permission: "platform:alert-rule:read"
+      responses: { '200': { $ref: '#/components/responses/AlertRuleList' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+    post:
+      tags: [P1 Capability]
+      summary: 创建告警规则（P1）
+      operationId: createAlertRule
+      x-capability-phase: P1
+      x-permission: "platform:alert-rule:create"
+      x-audit-action: platform:alert-rule:create
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { $ref: '#/components/responses/AlertRule' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /observability/alert-rules/{rule_id}:
+    parameters: [ { $ref: '#/components/parameters/AlertRuleId' } ]
+    patch:
+      tags: [P1 Capability]
+      summary: 更新告警规则（P1）
+      operationId: updateAlertRule
+      x-capability-phase: P1
+      x-permission: "platform:alert-rule:update"
+      x-audit-action: platform:alert-rule:update
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { $ref: '#/components/responses/AlertRule' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+  /dictionaries:
+    get:
+      tags: [P1 Capability]
+      summary: 查询数据字典（P1）
+      operationId: listDictionaries
+      x-capability-phase: P1
+      x-permission: "platform:dictionary:read"
+      responses: { '200': { $ref: '#/components/responses/DictionaryList' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+    post:
+      tags: [P1 Capability]
+      summary: 创建数据字典（P1）
+      operationId: createDictionary
+      x-capability-phase: P1
+      x-permission: "platform:dictionary:create"
+      x-audit-action: platform:dictionary:create
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { $ref: '#/components/responses/Dictionary' }, '501': { $ref: '#/components/responses/CapabilityNotEnabled' } }
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: bp_session
+      description: JWT 会话 Cookie。实际名称由 IAM_SESSION_COOKIE_NAME 配置，默认 bp_session。
+    applicationAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 接入应用调用凭据；P0 实现可由 application_client 签发与校验。
+  parameters:
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    Keyword: { name: keyword, in: query, schema: { type: string, maxLength: 100 } }
+    StatusFilter: { name: 'filter[status]', in: query, schema: { type: string, maxLength: 40 } }
+    AuditApplicationFilter: { name: 'filter[application_code]', in: query, schema: { type: string, maxLength: 64 } }
+    AuditEnvironmentFilter: { name: 'filter[environment_code]', in: query, schema: { type: string, maxLength: 32 } }
+    AuditActionFilter: { name: 'filter[action]', in: query, schema: { type: string, maxLength: 120 } }
+    AuditResultFilter: { name: 'filter[result]', in: query, schema: { type: string, enum: [SUCCESS, FAILURE, DENIED] } }
+    AuditRiskFilter: { name: 'filter[risk_level]', in: query, schema: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] } }
+    OccurredFrom: { name: 'filter[occurred_from]', in: query, schema: { type: string, format: date-time } }
+    OccurredTo: { name: 'filter[occurred_to]', in: query, schema: { type: string, format: date-time } }
+    UserId: { name: user_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    AccountId: { name: account_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    MembershipId: { name: membership_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    RoleId: { name: role_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    BindingId: { name: binding_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    AuditEventId: { name: event_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    JobId: { name: job_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    ConfigNamespaceFilter: { name: 'filter[namespace_id]', in: query, schema: { $ref: '#/components/schemas/ULID' } }
+    ConfigItemId: { name: item_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    ReleaseId: { name: release_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    ApplicationCode: { name: application_code, in: path, required: true, schema: { type: string, pattern: '^[a-z][a-z0-9_-]{1,63}$' } }
+    NamespaceCode: { name: namespace_code, in: path, required: true, schema: { type: string, pattern: '^[a-z][a-z0-9_.-]{1,127}$' } }
+    RiskEventId: { name: risk_event_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    DeliveryId: { name: delivery_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+    AlertRuleId: { name: rule_id, in: path, required: true, schema: { $ref: '#/components/schemas/ULID' } }
+  responses:
+    Unauthenticated:
+      description: 未登录、会话已过期或应用凭据无效。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Forbidden:
+      description: 当前主体缺少权限或数据范围不允许。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    NotFound:
+      description: 资源不存在，或当前主体无权感知该资源。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Conflict:
+      description: 唯一约束、状态转换或业务冲突。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    VersionConflict:
+      description: 乐观锁冲突；前端应刷新数据后重新提交。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    ValidationError:
+      description: 请求字段校验失败。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    AccountLocked:
+      description: 账号处于锁定状态。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    CapabilityNotEnabled:
+      description: 前端已预留、后端尚未启用的 P1 能力。
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    User: { description: 用户对象, content: { application/json: { schema: { $ref: '#/components/schemas/UserEnvelope' } } } }
+    UserList: { description: 用户分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/UserListEnvelope' } } } }
+    Account: { description: 账号对象, content: { application/json: { schema: { $ref: '#/components/schemas/AccountEnvelope' } } } }
+    AccountList: { description: 账号分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/AccountListEnvelope' } } } }
+    OrgUnit: { description: 组织单元对象, content: { application/json: { schema: { $ref: '#/components/schemas/OrgUnitEnvelope' } } } }
+    OrgUnitList: { description: 组织单元列表, content: { application/json: { schema: { $ref: '#/components/schemas/OrgUnitListEnvelope' } } } }
+    Position: { description: 岗位对象, content: { application/json: { schema: { $ref: '#/components/schemas/PositionEnvelope' } } } }
+    PositionList: { description: 岗位列表, content: { application/json: { schema: { $ref: '#/components/schemas/PositionListEnvelope' } } } }
+    Membership: { description: 任职对象, content: { application/json: { schema: { $ref: '#/components/schemas/MembershipEnvelope' } } } }
+    MembershipList: { description: 任职分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/MembershipListEnvelope' } } } }
+    Resource: { description: 资源对象, content: { application/json: { schema: { $ref: '#/components/schemas/ResourceEnvelope' } } } }
+    ResourceList: { description: 资源分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/ResourceListEnvelope' } } } }
+    Permission: { description: 权限对象, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionEnvelope' } } } }
+    PermissionList: { description: 权限分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionListEnvelope' } } } }
+    Role: { description: 角色对象, content: { application/json: { schema: { $ref: '#/components/schemas/RoleEnvelope' } } } }
+    RoleList: { description: 角色分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/RoleListEnvelope' } } } }
+    RoleBinding: { description: 角色绑定对象, content: { application/json: { schema: { $ref: '#/components/schemas/RoleBindingEnvelope' } } } }
+    RoleBindingList: { description: 角色绑定分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/RoleBindingListEnvelope' } } } }
+    AuditEvent: { description: 审计事件视图, content: { application/json: { schema: { $ref: '#/components/schemas/AuditEventEnvelope' } } } }
+    AuditEventList: { description: 审计事件分页视图, content: { application/json: { schema: { $ref: '#/components/schemas/AuditEventListEnvelope' } } } }
+    AuditExportJob: { description: 审计导出任务, content: { application/json: { schema: { $ref: '#/components/schemas/AuditExportJobEnvelope' } } } }
+    ConfigNamespace: { description: 命名空间对象, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigNamespaceEnvelope' } } } }
+    ConfigNamespaceList: { description: 命名空间分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigNamespaceListEnvelope' } } } }
+    ConfigItem: { description: 配置条目对象, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigItemEnvelope' } } } }
+    ConfigItemList: { description: 配置条目分页结果, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigItemListEnvelope' } } } }
+    ConfigRelease: { description: 配置发布任务, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigReleaseEnvelope' } } } }
+    P1Settings: { description: P1 设置对象, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObjectEnvelope' } } } }
+    RiskEvent: { description: 风险事件对象, content: { application/json: { schema: { $ref: '#/components/schemas/RiskEventEnvelope' } } } }
+    RiskEventList: { description: 风险事件列表, content: { application/json: { schema: { $ref: '#/components/schemas/RiskEventListEnvelope' } } } }
+    AuditDelivery: { description: 审计接收记录, content: { application/json: { schema: { $ref: '#/components/schemas/AuditDeliveryEnvelope' } } } }
+    AuditDeliveryList: { description: 审计接收记录列表, content: { application/json: { schema: { $ref: '#/components/schemas/AuditDeliveryListEnvelope' } } } }
+    ObservableServiceList: { description: 服务元数据列表, content: { application/json: { schema: { $ref: '#/components/schemas/ObservableServiceListEnvelope' } } } }
+    AlertRule: { description: 告警规则对象, content: { application/json: { schema: { $ref: '#/components/schemas/AlertRuleEnvelope' } } } }
+    AlertRuleList: { description: 告警规则列表, content: { application/json: { schema: { $ref: '#/components/schemas/AlertRuleListEnvelope' } } } }
+    Dictionary: { description: 字典对象, content: { application/json: { schema: { $ref: '#/components/schemas/DictionaryEnvelope' } } } }
+    DictionaryList: { description: 字典列表, content: { application/json: { schema: { $ref: '#/components/schemas/DictionaryListEnvelope' } } } }
+  schemas:
+    ULID: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$', examples: ['01J123456789ABCDEFGHJKMNPQ'] }
+    Timestamp: { type: string, format: date-time, description: UTC RFC 3339 时间戳。 }
+    Version: { type: integer, minimum: 1, description: 聚合根乐观锁版本号。 }
+    Envelope:
+      type: object
+      required: [code, message, request_id, data]
+      properties:
+        code: { type: string, const: OK }
+        message: { type: string, examples: ['操作成功'] }
+        request_id: { $ref: '#/components/schemas/ULID' }
+        data: {}
+    EmptyEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { type: object, additionalProperties: false } }
+    ErrorEnvelope:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          examples: [AUTH_UNAUTHENTICATED, AUTH_FORBIDDEN, IAM_VERSION_CONFLICT, PLATFORM_CAPABILITY_NOT_ENABLED]
+        message: { type: string }
+        request_id: { $ref: '#/components/schemas/ULID' }
+        details: { type: object, additionalProperties: true }
+    PageData:
+      type: object
+      required: [items, page, page_size, total]
+      properties:
+        items: { type: array, items: {} }
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [account, password, login_type]
+      properties:
+        account: { type: string, minLength: 1, maxLength: 128 }
+        password: { type: string, minLength: 1, maxLength: 256, writeOnly: true }
+        login_type: { type: string, const: password }
+    Session:
+      type: object
+      required: [expires_at, redirect_url]
+      properties:
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        redirect_url: { type: string, examples: ['/'] }
+    LoginEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/Session' } }
+    SessionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/Session' } }
+    Principal:
+      type: object
+      required: [tenant, user, account, roles, permission_codes]
+      properties:
+        tenant: { $ref: '#/components/schemas/ReferenceName' }
+        user: { $ref: '#/components/schemas/ReferenceName' }
+        account: { $ref: '#/components/schemas/ReferenceName' }
+        roles: { type: array, items: { $ref: '#/components/schemas/ReferenceName' } }
+        permission_codes: { type: array, items: { type: string }, uniqueItems: true }
+    PrincipalEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/Principal' } }
+    ReferenceName:
+      type: object
+      required: [id, name]
+      properties:
+        id: { $ref: '#/components/schemas/ULID' }
+        name: { type: string }
+        code: { type: string }
+    User:
+      type: object
+      required: [user_id, display_name, status, version, created_at, updated_at]
+      properties:
+        user_id: { $ref: '#/components/schemas/ULID' }
+        display_name: { type: string, maxLength: 100 }
+        employee_no: { type: string, maxLength: 64 }
+        email: { type: string, format: email }
+        mobile_masked: { type: string, description: 已脱敏手机号。 }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    UserCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 100 }
+        employee_no: { type: string, maxLength: 64 }
+        email: { type: string, format: email }
+        mobile: { type: string, maxLength: 32, writeOnly: true }
+        status: { type: string, enum: [ACTIVE, DISABLED], default: ACTIVE }
+    UserUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/UserCreateRequest'
+        - type: object
+          required: [version]
+          properties: { version: { $ref: '#/components/schemas/Version' } }
+    Account:
+      type: object
+      required: [account_id, user_id, account_name, status, version, created_at, updated_at]
+      properties:
+        account_id: { $ref: '#/components/schemas/ULID' }
+        user_id: { $ref: '#/components/schemas/ULID' }
+        account_name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, LOCKED] }
+        last_login_at: { $ref: '#/components/schemas/Timestamp' }
+        version: { $ref: '#/components/schemas/Version' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    AccountUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [status, version]
+      properties:
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { $ref: '#/components/schemas/Version' }
+    OrgUnit:
+      type: object
+      required: [org_unit_id, code, name, status, version]
+      properties:
+        org_unit_id: { $ref: '#/components/schemas/ULID' }
+        parent_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 100 }
+        sort_order: { type: integer, default: 0 }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { $ref: '#/components/schemas/Version' }
+    OrgUnitCreateRequest:
+      type: object
+      required: [code, name]
+      properties:
+        parent_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 100 }
+        sort_order: { type: integer, default: 0 }
+    Position:
+      type: object
+      required: [position_id, code, name, status, version]
+      properties:
+        position_id: { $ref: '#/components/schemas/ULID' }
+        org_unit_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 100 }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { $ref: '#/components/schemas/Version' }
+    PositionCreateRequest:
+      type: object
+      required: [code, name]
+      properties:
+        org_unit_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 100 }
+    Membership:
+      type: object
+      required: [membership_id, user, org_unit, membership_type, status, version]
+      properties:
+        membership_id: { $ref: '#/components/schemas/ULID' }
+        user: { $ref: '#/components/schemas/ReferenceName' }
+        org_unit: { $ref: '#/components/schemas/ReferenceName' }
+        position: { $ref: '#/components/schemas/ReferenceName' }
+        membership_type: { type: string, enum: [PRIMARY, SECONDARY] }
+        effective_from: { type: string, format: date }
+        effective_to: { type: string, format: date }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { $ref: '#/components/schemas/Version' }
+    MembershipCreateRequest:
+      type: object
+      required: [user_id, org_unit_id, membership_type]
+      properties:
+        user_id: { $ref: '#/components/schemas/ULID' }
+        org_unit_id: { $ref: '#/components/schemas/ULID' }
+        position_id: { $ref: '#/components/schemas/ULID' }
+        membership_type: { type: string, enum: [PRIMARY, SECONDARY] }
+        effective_from: { type: string, format: date }
+        effective_to: { type: string, format: date }
+    MembershipUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/MembershipCreateRequest'
+        - type: object
+          required: [status, version]
+          properties:
+            status: { type: string, enum: [ACTIVE, DISABLED] }
+            version: { $ref: '#/components/schemas/Version' }
+    Resource:
+      type: object
+      required: [resource_id, code, name, resource_type, version]
+      properties:
+        resource_id: { $ref: '#/components/schemas/ULID' }
+        application_code: { type: string }
+        code: { type: string, maxLength: 128 }
+        name: { type: string, maxLength: 100 }
+        resource_type: { type: string, enum: [MENU, PAGE, API, DATA] }
+        version: { $ref: '#/components/schemas/Version' }
+    ResourceCreateRequest:
+      type: object
+      required: [application_code, code, name, resource_type]
+      properties:
+        application_code: { type: string }
+        code: { type: string, maxLength: 128 }
+        name: { type: string, maxLength: 100 }
+        resource_type: { type: string, enum: [MENU, PAGE, API, DATA] }
+    Permission:
+      type: object
+      required: [permission_id, code, name, resource, version]
+      properties:
+        permission_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string, examples: ['platform:user:read'] }
+        name: { type: string }
+        resource: { $ref: '#/components/schemas/ReferenceName' }
+        action: { type: string }
+        version: { $ref: '#/components/schemas/Version' }
+    PermissionCreateRequest:
+      type: object
+      required: [resource_id, code, name, action]
+      properties:
+        resource_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string, maxLength: 160 }
+        name: { type: string, maxLength: 100 }
+        action: { type: string, maxLength: 64 }
+    Role:
+      type: object
+      required: [role_id, code, name, status, permissions, version]
+      properties:
+        role_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        permissions: { type: array, items: { $ref: '#/components/schemas/ReferenceName' } }
+        version: { $ref: '#/components/schemas/Version' }
+    RoleCreateRequest:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 100 }
+        description: { type: string, maxLength: 500 }
+        permission_ids: { type: array, items: { $ref: '#/components/schemas/ULID' }, uniqueItems: true }
+    RoleUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/RoleCreateRequest'
+        - type: object
+          required: [status, version]
+          properties:
+            status: { type: string, enum: [ACTIVE, DISABLED] }
+            version: { $ref: '#/components/schemas/Version' }
+    RoleBinding:
+      type: object
+      required: [binding_id, role, subject_type, subject, scope_type, status, version]
+      properties:
+        binding_id: { $ref: '#/components/schemas/ULID' }
+        role: { $ref: '#/components/schemas/ReferenceName' }
+        subject_type: { type: string, enum: [USER, ACCOUNT, ORG_UNIT, POSITION] }
+        subject: { $ref: '#/components/schemas/ReferenceName' }
+        scope_type: { type: string, enum: [TENANT, ORG_UNIT, RESOURCE] }
+        scope_id: { $ref: '#/components/schemas/ULID' }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        version: { $ref: '#/components/schemas/Version' }
+    RoleBindingCreateRequest:
+      type: object
+      required: [role_id, subject_type, subject_id, scope_type]
+      properties:
+        role_id: { $ref: '#/components/schemas/ULID' }
+        subject_type: { type: string, enum: [USER, ACCOUNT, ORG_UNIT, POSITION] }
+        subject_id: { $ref: '#/components/schemas/ULID' }
+        scope_type: { type: string, enum: [TENANT, ORG_UNIT, RESOURCE] }
+        scope_id: { $ref: '#/components/schemas/ULID' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+    RoleBindingUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/RoleBindingCreateRequest'
+        - type: object
+          required: [status, version]
+          properties:
+            status: { type: string, enum: [ACTIVE, DISABLED] }
+            version: { $ref: '#/components/schemas/Version' }
+    AuthorizationCheckRequest:
+      type: object
+      additionalProperties: false
+      required: [permission_code]
+      properties:
+        permission_code: { type: string, examples: [contract.read] }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        context: { type: object, additionalProperties: true, description: 业务鉴权上下文，不得包含密码或敏感原文。 }
+    AuthorizationBatchCheckRequest:
+      type: object
+      required: [requests]
+      properties:
+        requests: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/AuthorizationCheckRequest' } }
+    AuthorizationDecision:
+      type: object
+      required: [allowed, permission_code, policy_version]
+      properties:
+        allowed: { type: boolean }
+        permission_code: { type: string }
+        reason_code: { type: string, examples: [ALLOW_ROLE_BINDING, DENY_NO_PERMISSION] }
+        policy_version: { type: integer, minimum: 1 }
+    AuditEventInput:
+      type: object
+      additionalProperties: false
+      required: [event_id, occurred_at, application_code, environment_code, action, result]
+      properties:
+        event_id: { $ref: '#/components/schemas/ULID' }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        application_code: { type: string, maxLength: 64 }
+        environment_code: { type: string, maxLength: 32 }
+        action: { type: string, maxLength: 160 }
+        result: { type: string, enum: [SUCCESS, FAILURE, DENIED] }
+        resource_type: { type: string, maxLength: 64 }
+        resource_id: { type: string, maxLength: 128 }
+        resource_name: { type: string, maxLength: 200 }
+        summary: { type: string, maxLength: 1000 }
+        change_summary: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/FieldChange' } }
+        subject: { type: object, additionalProperties: true, description: 内部关联字段，仅平台持久化与受控排障使用，不回显至控制台 DTO。 }
+        request_id: { type: string, maxLength: 128, description: 内部关联字段，不回显至控制台 DTO。 }
+        trace_id: { type: string, maxLength: 128, description: 内部关联字段，不回显至控制台 DTO。 }
+        metadata: { type: object, additionalProperties: true }
+    AuditEventBatchInput:
+      type: object
+      required: [events]
+      properties:
+        events: { type: array, minItems: 1, maxItems: 500, items: { $ref: '#/components/schemas/AuditEventInput' } }
+    FieldChange:
+      type: object
+      required: [field, operation]
+      properties:
+        field: { type: string }
+        label: { type: string }
+        operation: { type: string, enum: [CREATE, UPDATE, DELETE] }
+        before: { description: 已按字段策略脱敏的旧值。 }
+        after: { description: 已按字段策略脱敏的新值。 }
+        masked: { type: boolean, default: false }
+    AuditEventView:
+      type: object
+      description: 面向控制台的审计 DTO；刻意不包含 subject、request_id、trace_id。
+      required: [event_id, occurred_at, application_code, action, result]
+      properties:
+        event_id: { $ref: '#/components/schemas/ULID' }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        operator_display_name: { type: string, description: 已按访问策略过滤的操作人展示名。 }
+        action_type: { type: string }
+        application_code: { type: string }
+        application_name: { type: string }
+        environment_code: { type: string }
+        action: { type: string }
+        result: { type: string, enum: [SUCCESS, FAILURE, DENIED] }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        resource_name: { type: string }
+        method: { type: string }
+        path: { type: string }
+        client_ip: { type: string, description: 按审计策略处理后的客户端地址。 }
+        status_code: { type: integer }
+        risk_level: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+        detail: { type: string }
+        summary: { type: string }
+        change_summary: { type: array, items: { $ref: '#/components/schemas/FieldChange' } }
+    AuditReceipt:
+      type: object
+      required: [event_id, status]
+      properties:
+        event_id: { $ref: '#/components/schemas/ULID' }
+        status: { type: string, enum: [ACCEPTED, DUPLICATE] }
+    AuditExportJobCreateRequest:
+      type: object
+      properties:
+        format: { type: string, enum: [CSV, XLSX], default: CSV }
+        filters: { type: object, additionalProperties: true, description: 仅支持审计列表已公开的筛选条件。 }
+    AuditExportJob:
+      type: object
+      required: [job_id, status, created_at]
+      properties:
+        job_id: { $ref: '#/components/schemas/ULID' }
+        status: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, EXPIRED] }
+        format: { type: string, enum: [CSV, XLSX] }
+        download_url: { type: string, format: uri, description: 成功时提供短时有效下载地址。 }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        error_code: { type: string }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        completed_at: { $ref: '#/components/schemas/Timestamp' }
+    ConfigNamespace:
+      type: object
+      required: [namespace_id, code, name, version]
+      properties:
+        namespace_id: { $ref: '#/components/schemas/ULID' }
+        application: { $ref: '#/components/schemas/ReferenceName' }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        version: { $ref: '#/components/schemas/Version' }
+    ConfigNamespaceCreateRequest:
+      type: object
+      required: [application_code, code, name]
+      properties:
+        application_code: { type: string }
+        code: { type: string, maxLength: 128 }
+        name: { type: string, maxLength: 100 }
+        description: { type: string, maxLength: 500 }
+    ConfigItem:
+      type: object
+      required: [item_id, namespace, key, value_type, value, version]
+      properties:
+        item_id: { $ref: '#/components/schemas/ULID' }
+        namespace: { $ref: '#/components/schemas/ReferenceName' }
+        key: { type: string }
+        value_type: { type: string, enum: [STRING, NUMBER, BOOLEAN, JSON] }
+        value: {}
+        secret: { type: boolean, default: false }
+        version: { $ref: '#/components/schemas/Version' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    ConfigItemCreateRequest:
+      type: object
+      required: [namespace_id, key, value_type, value]
+      properties:
+        namespace_id: { $ref: '#/components/schemas/ULID' }
+        key: { type: string, maxLength: 128 }
+        value_type: { type: string, enum: [STRING, NUMBER, BOOLEAN, JSON] }
+        value: {}
+        secret: { type: boolean, default: false }
+    ConfigItemUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/ConfigItemCreateRequest'
+        - type: object
+          required: [version]
+          properties: { version: { $ref: '#/components/schemas/Version' } }
+    ConfigReleaseCreateRequest:
+      type: object
+      required: [namespace_id, item_versions]
+      properties:
+        namespace_id: { $ref: '#/components/schemas/ULID' }
+        item_versions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [item_id, version]
+            properties:
+              item_id: { $ref: '#/components/schemas/ULID' }
+              version: { $ref: '#/components/schemas/Version' }
+        comment: { type: string, maxLength: 500 }
+    ConfigRelease:
+      type: object
+      required: [release_id, namespace, version_no, status, created_at]
+      properties:
+        release_id: { $ref: '#/components/schemas/ULID' }
+        namespace: { $ref: '#/components/schemas/ReferenceName' }
+        version_no: { type: integer, minimum: 1 }
+        status: { type: string, enum: [PENDING, PUBLISHED, FAILED, ROLLED_BACK] }
+        comment: { type: string }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        published_at: { $ref: '#/components/schemas/Timestamp' }
+    PublishedConfig:
+      type: object
+      required: [application_code, namespace_code, release_version, values]
+      properties:
+        application_code: { type: string }
+        namespace_code: { type: string }
+        release_version: { type: integer, minimum: 1 }
+        values: { type: object, additionalProperties: true }
+    RiskEvent:
+      type: object
+      required: [risk_event_id, event_type, level, status, occurred_at]
+      properties:
+        risk_event_id: { $ref: '#/components/schemas/ULID' }
+        event_type: { type: string }
+        level: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+        status: { type: string, enum: [OPEN, RESOLVED, IGNORED] }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        summary: { type: string }
+    AuditDelivery:
+      type: object
+      required: [delivery_id, event_id, status, retry_count, updated_at]
+      properties:
+        delivery_id: { $ref: '#/components/schemas/ULID' }
+        event_id: { $ref: '#/components/schemas/ULID' }
+        status: { type: string, enum: [PENDING, ACCEPTED, FAILED, DEAD_LETTER] }
+        retry_count: { type: integer, minimum: 0 }
+        last_error_code: { type: string }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    ObservableService:
+      type: object
+      required: [service_id, service_name, status]
+      properties:
+        service_id: { $ref: '#/components/schemas/ULID' }
+        service_name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        telemetry_endpoint: { type: string, format: uri }
+    AlertRule:
+      type: object
+      required: [rule_id, name, status]
+      properties:
+        rule_id: { $ref: '#/components/schemas/ULID' }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        definition: { type: object, additionalProperties: true }
+    Dictionary:
+      type: object
+      required: [dictionary_id, code, name, status]
+      properties:
+        dictionary_id: { $ref: '#/components/schemas/ULID' }
+        code: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+    GenericObjectEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { type: object, additionalProperties: true } }
+    AuthorizationDecisionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/AuthorizationDecision' } }
+    AuthorizationDecisionListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/AuthorizationDecision' } } }
+    AuditReceiptEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/AuditReceipt' } }
+    AuditReceiptListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/AuditReceipt' } } }
+    PublishedConfigEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/PublishedConfig' } }
+    UserEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/User' } } } ] }
+    AccountEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Account' } } } ] }
+    OrgUnitEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/OrgUnit' } } } ] }
+    PositionEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Position' } } } ] }
+    MembershipEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Membership' } } } ] }
+    ResourceEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Resource' } } } ] }
+    PermissionEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Permission' } } } ] }
+    RoleEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Role' } } } ] }
+    RoleBindingEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/RoleBinding' } } } ] }
+    AuditEventEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AuditEventView' } } } ] }
+    AuditExportJobEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AuditExportJob' } } } ] }
+    ConfigNamespaceEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ConfigNamespace' } } } ] }
+    ConfigItemEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ConfigItem' } } } ] }
+    ConfigItemListEnvelope: { $ref: '#/components/schemas/ConfigItemListEnvelopeDefinition' }
+    ConfigReleaseEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ConfigRelease' } } } ] }
+    RiskEventEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/RiskEvent' } } } ] }
+    AuditDeliveryEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AuditDelivery' } } } ] }
+    AlertRuleEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AlertRule' } } } ] }
+    DictionaryEnvelope: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/Dictionary' } } } ] }
+    UserListEnvelope: { $ref: '#/components/schemas/UserListEnvelopeDefinition' }
+    AccountListEnvelope: { $ref: '#/components/schemas/AccountListEnvelopeDefinition' }
+    OrgUnitListEnvelope: { $ref: '#/components/schemas/OrgUnitListEnvelopeDefinition' }
+    PositionListEnvelope: { $ref: '#/components/schemas/PositionListEnvelopeDefinition' }
+    MembershipListEnvelope: { $ref: '#/components/schemas/MembershipListEnvelopeDefinition' }
+    ResourceListEnvelope: { $ref: '#/components/schemas/ResourceListEnvelopeDefinition' }
+    PermissionListEnvelope: { $ref: '#/components/schemas/PermissionListEnvelopeDefinition' }
+    RoleListEnvelope: { $ref: '#/components/schemas/RoleListEnvelopeDefinition' }
+    RoleBindingListEnvelope: { $ref: '#/components/schemas/RoleBindingListEnvelopeDefinition' }
+    AuditEventListEnvelope: { $ref: '#/components/schemas/AuditEventListEnvelopeDefinition' }
+    ConfigNamespaceListEnvelope: { $ref: '#/components/schemas/ConfigNamespaceListEnvelopeDefinition' }
+    RiskEventListEnvelope: { $ref: '#/components/schemas/RiskEventListEnvelopeDefinition' }
+    AuditDeliveryListEnvelope: { $ref: '#/components/schemas/AuditDeliveryListEnvelopeDefinition' }
+    ObservableServiceListEnvelope: { $ref: '#/components/schemas/ObservableServiceListEnvelopeDefinition' }
+    AlertRuleListEnvelope: { $ref: '#/components/schemas/AlertRuleListEnvelopeDefinition' }
+    DictionaryListEnvelope: { $ref: '#/components/schemas/DictionaryListEnvelopeDefinition' }
+    UserListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/UserPage' } } } ] }
+    AccountListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AccountPage' } } } ] }
+    OrgUnitListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/OrgUnitPage' } } } ] }
+    PositionListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/PositionPage' } } } ] }
+    MembershipListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/MembershipPage' } } } ] }
+    ResourceListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ResourcePage' } } } ] }
+    PermissionListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/PermissionPage' } } } ] }
+    RoleListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/RolePage' } } } ] }
+    RoleBindingListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/RoleBindingPage' } } } ] }
+    AuditEventListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AuditEventPage' } } } ] }
+    ConfigNamespaceListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ConfigNamespacePage' } } } ] }
+    ConfigItemListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ConfigItemPage' } } } ] }
+    RiskEventListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/RiskEventPage' } } } ] }
+    AuditDeliveryListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AuditDeliveryPage' } } } ] }
+    ObservableServiceListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/ObservableServicePage' } } } ] }
+    AlertRuleListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/AlertRulePage' } } } ] }
+    DictionaryListEnvelopeDefinition: { allOf: [ { $ref: '#/components/schemas/Envelope' }, { type: object, properties: { data: { $ref: '#/components/schemas/DictionaryPage' } } } ] }
+    UserPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/User' } } } } ] }
+    AccountPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Account' } } } } ] }
+    OrgUnitPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/OrgUnit' } } } } ] }
+    PositionPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Position' } } } } ] }
+    MembershipPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Membership' } } } } ] }
+    ResourcePage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Resource' } } } } ] }
+    PermissionPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Permission' } } } } ] }
+    RolePage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Role' } } } } ] }
+    RoleBindingPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/RoleBinding' } } } } ] }
+    AuditEventPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/AuditEventView' } } } } ] }
+    ConfigNamespacePage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/ConfigNamespace' } } } } ] }
+    ConfigItemPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/ConfigItem' } } } } ] }
+    RiskEventPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/RiskEvent' } } } } ] }
+    AuditDeliveryPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/AuditDelivery' } } } } ] }
+    ObservableServicePage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/ObservableService' } } } } ] }
+    AlertRulePage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/AlertRule' } } } } ] }
+    DictionaryPage: { allOf: [ { $ref: '#/components/schemas/PageData' }, { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Dictionary' } } } } ] }

@@ -1,80 +1,14 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>原型导航 · 机构合同管理系统</title>
-<link rel="stylesheet" href="assets/style.css">
-<style>
-  body { background: radial-gradient(1000px 500px at 50% -10%, #EFF6FF, var(--bg) 60%); }
-  .hub { max-width: 1080px; margin: 0 auto; padding: 60px 24px 80px; }
-  .hub-head { text-align: center; margin-bottom: 44px; }
-  .hub-logo { width: 60px; height: 60px; border-radius: 16px; background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color:#fff; font-size:30px; font-weight:700; display:flex; align-items:center; justify-content:center; margin: 0 auto 20px; box-shadow: var(--shadow-lg); }
-  .hub-head h1 { font-size: 30px; font-weight: 700; }
-  .hub-head p { color: var(--text-muted); font-size: 15px; margin-top: 10px; }
-  .hub-tags { display: flex; gap: 10px; justify-content: center; margin-top: 18px; flex-wrap: wrap; }
-  .hub-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
-  @media (max-width: 900px){ .hub-grid { grid-template-columns: repeat(2, 1fr);} }
-  @media (max-width: 620px){ .hub-grid { grid-template-columns: 1fr;} }
-  .proto-card { background:#fff; border:1px solid var(--card-border); border-radius: var(--radius-lg); overflow:hidden; box-shadow: var(--shadow-sm); transition: transform .2s, box-shadow .2s; cursor:pointer; text-decoration:none; color:inherit; display:block; }
-  .proto-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); }
-  .proto-thumb { height: 140px; position: relative; overflow:hidden; display:flex; align-items:center; justify-content:center; }
-  .proto-thumb .tag { position:absolute; top:12px; left:12px; }
-  .thumb-ico { width:56px; height:56px; color:#fff; opacity:.95; }
-  .t-login { background: linear-gradient(135deg,#0F172A,#1E293B); }
-  .t-dash { background: linear-gradient(135deg,#2563EB,#3B82F6); }
-  .t-list { background: linear-gradient(135deg,#059669,#10B981); }
-  .t-detail { background: linear-gradient(135deg,#8B5CF6,#a78bfa); }
-  .t-appr { background: linear-gradient(135deg,#F59E0B,#fbbf24); }
-  .t-apprd { background: linear-gradient(135deg,#DC2626,#ef4444); }
-  .proto-body { padding: 16px 18px; }
-  .proto-body h3 { font-size: 15px; font-weight: 600; }
-  .proto-body p { font-size: 12px; color: var(--text-muted); margin-top: 6px; line-height:1.6; }
-  .hub-foot { text-align:center; color: var(--text-placeholder); font-size:12px; margin-top: 44px; }
-</style>
-</head>
-<body>
-<div class="hub">
-  <div class="hub-head">
-    <div class="hub-logo">合</div>
-    <h1>机构合同管理系统 · HTML 原型</h1>
-    <p>基于《功能需求规格说明书 v2.3》与《UI 设计规范 V1.0》· 商务蓝设计系统</p>
-    <div class="hub-tags">
-      <span class="badge info">6 个页面</span>
-      <span class="badge success">设计令牌统一</span>
-      <span class="badge purple">ECharts 可视化</span>
-      <span class="badge warning">可点击跳转</span>
-    </div>
-  </div>
-
-  <div class="hub-grid">
-    <a class="proto-card" href="login.html">
-      <div class="proto-thumb t-login"><span class="tag badge gray">SYS-001</span><svg class="thumb-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg></div>
-      <div class="proto-body"><h3>登录页</h3><p>密码登录 + 钉钉扫码双入口，Token 状态提示</p></div>
-    </a>
-    <a class="proto-card" href="dashboard.html">
-      <div class="proto-thumb t-dash"><span class="tag badge info">STA-001</span><svg class="thumb-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg></div>
-      <div class="proto-body"><h3>仪表盘</h3><p>统计卡 + 月度趋势 / 类型分布 / 状态分布图表</p></div>
-    </a>
-    <a class="proto-card" href="contracts.html">
-      <div class="proto-thumb t-list"><span class="tag badge success">CON-001</span><svg class="thumb-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2z"/></svg></div>
-      <div class="proto-body"><h3>合同管理列表</h3><p>搜索筛选 + 8 列表格 + 6 色状态胶囊 + 分页</p></div>
-    </a>
-    <a class="proto-card" href="contract-detail.html">
-      <div class="proto-thumb t-detail"><span class="tag badge purple">CON-002</span><svg class="thumb-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM7 7h10v2H7V7zm0 4h10v2H7v-2zm0 4h7v2H7v-2z"/></svg></div>
-      <div class="proto-body"><h3>合同详情</h3><p>基本信息 + 审批流程时间轴 + 文档附件</p></div>
-    </a>
-    <a class="proto-card" href="approvals.html">
-      <div class="proto-thumb t-appr"><span class="tag badge warning">APP-001</span><svg class="thumb-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
-      <div class="proto-body"><h3>审批中心</h3><p>待办 Tabs + 审批卡片 + 三级流程进度</p></div>
-    </a>
-    <a class="proto-card" href="approval-detail.html">
-      <div class="proto-thumb t-apprd"><span class="tag badge danger">APP-005</span><svg class="thumb-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM9 11H7V9h2v2zm4 0h-2V9h2v2zm4 0h-2V9h2v2z"/></svg></div>
-      <div class="proto-body"><h3>审批详情</h3><p>字段变更对比 + 审批意见 + 评论 + 流程图</p></div>
-    </a>
-  </div>
-
-  <div class="hub-foot">© 2026 机构合同管理系统 · UI Designer 出品 · 点击任意卡片进入原型</div>
-</div>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="description" content="基础能力平台系统设置与审计日志" />
+    <title>系统设置 · 基础能力平台</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
 </html>
