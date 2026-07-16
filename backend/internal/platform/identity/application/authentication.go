@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/security"
 )
 
 var (

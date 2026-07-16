@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
 )
 
 // Authenticator verifies a browser session token and returns the server-side principal.

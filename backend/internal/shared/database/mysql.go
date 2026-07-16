@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	mysql "github.com/go-sql-driver/mysql"
 )
 

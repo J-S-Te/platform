@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/bootstrap"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/bootstrap"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 )
 
 func main() {

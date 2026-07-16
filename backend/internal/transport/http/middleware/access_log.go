@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 )
 
 // AccessLog records one structured event per completed HTTP request without logging credentials

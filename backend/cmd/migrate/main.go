@@ -1,4 +1,4 @@
-// Command migrate applies the embedded MySQL migrations using the project-root .env configuration.
+// Command migrate applies the embedded MySQL migrations using the configured .env file.
 package main
 
 import (
@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/migration"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/database"
-	"github.com/J-S-Te/Basic-Platform/migrations"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/migration"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/database"
+	"github.com/J-S-Te/Basic-Platform/backend/migrations"
 )
 
 func main() {

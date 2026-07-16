@@ -1,4 +1,4 @@
-module github.com/J-S-Te/Basic-Platform
+module github.com/J-S-Te/Basic-Platform/backend
 
 go 1.26.4
 

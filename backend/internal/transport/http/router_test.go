@@ -9,10 +9,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
-	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
+	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 )
 
 func TestRouterLivenessUsesStandardEnvelope(t *testing.T) {

@@ -16,13 +16,13 @@
 
 `POST /users` 和 `PATCH /users/{user_id}` 中的 `mobile` 是可选敏感字段。服务端仅保存 AES-256-GCM 密文以及用于精确检索的 HMAC-SHA-256 摘要，响应中只返回 `mobile_masked`。
 
-若要提交 `mobile`，在项目根目录 `.env` 中配置一个 Base64 编码的 32 字节密钥：
+若要提交 `mobile`，在 `backend/.env` 中配置一个 Base64 编码的 32 字节密钥：
 
 ```dotenv
 IAM_MOBILE_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
 ```
 
-本地可使用下列命令生成后粘贴到 `.env`；密钥不能提交到 Git：
+本地可使用下列命令生成后粘贴到 `backend/.env`；密钥不能提交到 Git：
 
 ```bash
 openssl rand -base64 32

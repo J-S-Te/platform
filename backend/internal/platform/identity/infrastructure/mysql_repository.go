@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
 )
 
 const consoleApplicationCode = "platform"

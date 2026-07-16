@@ -4,7 +4,7 @@
 
 ## 0. 当前实现状态（2026-07-16）
 
-- 已完成后端优先级 1：MySQL P0 建表迁移、迁移版本记录/校验、并发迁移锁和平台初始数据。迁移入口为 `go run ./cmd/migrate` 或 `make migrate`。
+- 已完成后端优先级 1：MySQL P0 建表迁移、迁移版本记录/校验、并发迁移锁和平台初始数据。从项目根目录使用 `make -C backend migrate` 执行迁移，也可进入 `backend/` 后运行 `go run ./cmd/migrate`。
 - 已完成后端优先级 2：控制台密码登录、Ed25519 JWT HttpOnly Cookie、`iam_session` 持久化、会话刷新/退出、`/auth/me` 身份摘要，以及受保护请求的 JWT/会话/账号/租户一致性校验。认证路由位于 `/api/v1/auth`。
 - 已完成后端优先级 3：用户、账号状态、组织单元、岗位和任职的 P0 HTTP/API 实现。用户和任职更新采用版本号乐观锁；手机号可选地使用 AES-256-GCM 加密保存，并仅返回脱敏值。当前公开 OpenAPI 未定义账号创建、密码初始化或重置接口，因此首个可登录管理员仍需后续受控初始化能力。
 - RBAC 写接口与授权拦截、审计接收/查询/导出、配置 API 尚未实现；当前 `/auth/me` 仅读取现有 `USER` 角色绑定及其 `ALLOW` 权限摘要，不代表 RBAC 决策 API 已交付。
@@ -21,13 +21,18 @@
 ## 2. 工程结构与依赖
 
 ```text
-cmd/{api,worker,migrate}/
-internal/
-  bootstrap/
-  platform/{tenant,applicationregistry,identity,organization,authorization,security,audit,configuration,observability,notification,dictionary}/
-  shared/{kernel,authctx,database,memorycache,messaging,observability,validation}/
-  transport/http/
-migrations/                 # 已实现 P0 建表/初始数据；后续仅新增 SQL 迁移
+backend/
+  cmd/{api,worker,migrate}/
+  internal/
+    bootstrap/
+    platform/{tenant,applicationregistry,identity,organization,authorization,security,audit,configuration,observability,notification,dictionary}/
+    shared/{kernel,authctx,database,memorycache,messaging,observability,validation}/
+    transport/http/
+  migrations/               # 已实现 P0 建表/初始数据；后续仅新增 SQL 迁移
+  Makefile
+  .env.example
+  go.mod
+  go.sum
 api/openapi/platform-p0.yaml
 frontend/
 docs/
@@ -35,13 +40,13 @@ docs/
 
 每个领域模块均采用 `domain`、`application`、`infrastructure`、`interfaces/http` 四层。HTTP 层只做协议转换与参数校验；应用层定义事务和用例；领域层不依赖 Chi、SQL 驱动或文件系统；基础设施实现仓储和外部适配。
 
-### 根目录 `.env` 约定
+### 后端 `.env` 约定
 
-- 项目根目录的 `.env` 是本地开发和后续接入系统复用的统一运行配置入口；后端默认从该文件加载，亦可通过 `ENV_FILE` 指定其他路径。
-- `.env.example` 是唯一允许提交的模板；`.env` 必须被 Git 忽略并仅限本地保存，不能写入真实密码、Token、私钥或生产配置。
+- `backend/.env` 是后端本地开发的统一运行配置入口；从 `backend/` 启动的进程默认加载该文件，亦可通过 `ENV_FILE` 指定其他路径。
+- `backend/.env.example` 是允许提交的后端模板；`backend/.env` 必须被 Git 忽略并仅限本地保存，不能写入真实密码、Token、私钥或生产配置。
 - 系统环境变量优先级高于 `.env`，以便容器、CI/CD 和各接入系统安全覆盖配置。变量按 `APP_`、`MYSQL_`、`AUTH_`、`FILE_`、`LOG_`、`OTEL_` 等前缀划分，新增共享变量必须使用明确前缀。
-- Vue/Vite 不会自动读取项目根目录 `.env`；前端仅在 `frontend/.env.local` 中使用非敏感 `VITE_*` 变量。任何认证密钥、数据库密码和服务端 Token 均不得使用 `VITE_*` 前缀。
-- API 进程启动时必须提供匹配的 Ed25519 PKCS#8 私钥与 PKIX 公钥。开发环境可运行 `make generate-dev-jwt-keys` 生成 `data/keys/` 下的本地密钥，并在根目录 `.env` 配置对应路径；密钥目录不得提交。
+- Vue/Vite 不读取 `backend/.env`；前端仅在 `frontend/.env.local` 中使用非敏感 `VITE_*` 变量。任何认证密钥、数据库密码和服务端 Token 均不得使用 `VITE_*` 前缀。
+- API 进程启动时必须提供匹配的 Ed25519 PKCS#8 私钥与 PKIX 公钥。开发环境可从项目根目录运行 `make -C backend generate-dev-jwt-keys`，在 `backend/data/keys/` 下生成本地密钥，并在 `backend/.env` 配置对应路径；密钥目录不得提交。
 
 请求链固定为：`Request ID → Recover → Access Log → CORS/Security Headers → Rate Limit → Authentication → Tenant Resolution → Authorization → Validation → Application Service → Audit`。中间件将 `Principal{tenant_id,user_id,account_id,session_id,org_ids,roles}` 写入 `context.Context`，业务代码不得自行读取认证 Header/Cookie。
 

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
 )
 
 // HealthHandler owns process liveness and dependency readiness endpoints.

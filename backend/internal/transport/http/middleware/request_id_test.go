@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 )
 
 func TestRequestIDGeneratesULIDAndStoresContext(t *testing.T) {

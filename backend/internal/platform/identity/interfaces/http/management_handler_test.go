@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 )
 
 func TestCreateUserRejectsUnknownFields(t *testing.T) {

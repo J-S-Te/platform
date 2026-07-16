@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 )
 
 // Envelope is the standard successful API response shape.

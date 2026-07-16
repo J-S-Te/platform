@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 )
 
 // NewLogger creates a JSON logger that writes to standard output and a local append-only log

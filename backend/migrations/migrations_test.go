@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/J-S-Te/Basic-Platform/internal/migration"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/migration"
 )
 
 func TestEmbeddedMigrationsCoverP0Tables(t *testing.T) {

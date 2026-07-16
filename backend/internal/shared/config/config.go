@@ -1,4 +1,4 @@
-// Package config loads process configuration from the root .env file and the environment.
+// Package config loads process configuration from .env and the environment.
 package config
 
 import (
@@ -68,8 +68,9 @@ type LoggingConfig struct {
 	Directory string
 }
 
-// Load reads the project-root .env file when present. Environment variables always take
-// precedence over values in .env, which keeps container and deployment configuration explicit.
+// Load reads ENV_FILE, or .env in the current working directory when ENV_FILE is unset.
+// Environment variables always take precedence over values in the file, which keeps container
+// and deployment configuration explicit.
 func Load() (Config, error) {
 	envFile := value("ENV_FILE", defaultEnvFile)
 	if err := LoadDotEnv(envFile); err != nil {

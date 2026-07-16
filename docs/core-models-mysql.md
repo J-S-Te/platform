@@ -1637,7 +1637,7 @@ type ApplicationReader interface {
 ## 15. 建议的首批迁移文件
 
 ```text
-migrations/
+backend/migrations/
 ├── 000001_create_tenant.sql
 ├── 000002_create_application_registry.sql
 ├── 000003_create_identity.sql

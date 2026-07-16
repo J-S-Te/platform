@@ -13,22 +13,22 @@
 
 ## 准备本地密钥
 
-根目录 `.env` 使用文件路径引用 JWT 密钥，不保存私钥内容。首次运行可执行：
+`backend/.env` 使用文件路径引用 JWT 密钥，不保存私钥内容。首次运行可从项目根目录执行：
 
 ```bash
-make generate-dev-jwt-keys
+make -C backend generate-dev-jwt-keys
 ```
 
 该命令会生成：
 
-- `data/keys/jwt-ed25519-private.pem`：PKCS#8 Ed25519 私钥，权限为 `0600`。
-- `data/keys/jwt-ed25519-public.pem`：PKIX Ed25519 公钥。
+- `backend/data/keys/jwt-ed25519-private.pem`：PKCS#8 Ed25519 私钥，权限为 `0600`。
+- `backend/data/keys/jwt-ed25519-public.pem`：PKIX Ed25519 公钥。
 
-`.env` 与 `.env.example` 中的 `AUTH_JWT_PRIVATE_KEY_PATH`、`AUTH_JWT_PUBLIC_KEY_PATH` 已指向上述开发路径。生产环境必须由部署系统通过环境变量或受控挂载提供不同的密钥文件。
+`backend/.env` 与 `backend/.env.example` 中的 `AUTH_JWT_PRIVATE_KEY_PATH`、`AUTH_JWT_PUBLIC_KEY_PATH` 已指向上述开发路径。路径相对于后端进程的工作目录 `backend/` 解析。生产环境必须由部署系统通过环境变量或受控挂载提供不同的密钥文件。
 
 ## 联调前置条件
 
-1. 配置 MySQL 后执行 `make migrate`。
+1. 配置 MySQL 后，从项目根目录执行 `make -C backend migrate`。
 2. 生成或配置 JWT 密钥。
 3. 创建一个处于 `ACTIVE` 状态的租户、用户、`LOCAL` 账号和 `argon2id` 密码凭据。
 4. 为需要在 `/auth/me` 中展示权限摘要的用户，创建 `subject_type=USER`、`status=ACTIVE` 的 `authz_role_binding`。

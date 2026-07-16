@@ -9,15 +9,15 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
-	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/infrastructure"
-	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/database"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/observability"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
-	httptransport "github.com/J-S-Te/Basic-Platform/internal/transport/http"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/infrastructure"
+	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/database"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/observability"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/security"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
+	httptransport "github.com/J-S-Te/Basic-Platform/backend/internal/transport/http"
 )
 
 // API is the dependency container for the HTTP process.

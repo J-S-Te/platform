@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"runtime/debug"
 
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 )
 
 // Recover converts unexpected panics into the standard API error response and logs the stack

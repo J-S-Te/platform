@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
-	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
+	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/transport/http/middleware"
 	"github.com/go-chi/chi/v5"
 )
 

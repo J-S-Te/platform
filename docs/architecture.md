@@ -602,48 +602,50 @@ type WorkflowService interface {
 
 ```text
 Basic-Platform/
-├── cmd/
-│   ├── api/
-│   │   └── main.go
-│   ├── worker/
-│   │   └── main.go
-│   └── migrate/
-│       └── main.go
-├── internal/
-│   ├── bootstrap/              # 配置、依赖装配、生命周期
-│   ├── platform/
-│   │   ├── tenant/
-│   │   ├── organization/
-│   │   ├── identity/
-│   │   ├── authorization/
-│   │   ├── security/
-│   │   ├── audit/
-│   │   ├── configuration/
-│   │   ├── workflow/
-│   │   ├── file/
-│   │   └── notification/
-│   ├── business/
-│   │   ├── contract/
-│   │   ├── project/
-│   │   └── expense/
-│   ├── shared/
-│   │   ├── kernel/             # ID、时间、领域事件、错误
-│   │   ├── authctx/            # 当前租户/用户/Trace 上下文
-│   │   ├── database/
-│   │   ├── memorycache/
-│   │   ├── messaging/
-│   │   ├── observability/
-│   │   └── validation/
-│   └── transport/
-│       └── http/
-├── migrations/
+├── backend/
+│   ├── cmd/
+│   │   ├── api/
+│   │   │   └── main.go
+│   │   ├── worker/
+│   │   │   └── main.go
+│   │   └── migrate/
+│   │       └── main.go
+│   ├── internal/
+│   │   ├── bootstrap/          # 配置、依赖装配、生命周期
+│   │   ├── platform/
+│   │   │   ├── tenant/
+│   │   │   ├── organization/
+│   │   │   ├── identity/
+│   │   │   ├── authorization/
+│   │   │   ├── security/
+│   │   │   ├── audit/
+│   │   │   ├── configuration/
+│   │   │   ├── workflow/
+│   │   │   ├── file/
+│   │   │   └── notification/
+│   │   ├── business/
+│   │   │   ├── contract/
+│   │   │   ├── project/
+│   │   │   └── expense/
+│   │   ├── shared/
+│   │   │   ├── kernel/         # ID、时间、领域事件、错误
+│   │   │   ├── authctx/        # 当前租户/用户/Trace 上下文
+│   │   │   ├── database/
+│   │   │   ├── memorycache/
+│   │   │   ├── messaging/
+│   │   │   ├── observability/
+│   │   │   └── validation/
+│   │   └── transport/
+│   │       └── http/
+│   ├── migrations/
+│   ├── .env.example
+│   ├── go.mod
+│   └── Makefile
 ├── api/
 │   └── openapi/
 ├── frontend/
 ├── deployments/
-├── docs/
-├── go.mod
-└── Makefile
+└── docs/
 ```
 
 每个领域模块内部统一结构：
