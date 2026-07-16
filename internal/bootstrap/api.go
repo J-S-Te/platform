@@ -70,6 +70,27 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	mobileProtector, err := security.NewMobileProtector(cfg.Identity.MobileEncryptionKey)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, err
+	}
+	managementService, err := application.NewManagementService(
+		repository, mobileProtector, ulid.Generator{}, application.SystemClock{},
+	)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, err
+	}
+	managementHandler, err := identityhttp.NewManagementHandler(managementService, logger)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, err
+	}
+
 	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth)
 	if err != nil {
 		_ = db.Close()
@@ -78,7 +99,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 
 	return &API{
-		Handler:  httptransport.NewRouter(cfg, logger, db, authHandler),
+		Handler:  httptransport.NewRouter(cfg, logger, db, authHandler, managementHandler),
 		Logger:   logger,
 		database: db,
 		logFile:  logFile,

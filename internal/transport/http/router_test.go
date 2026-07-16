@@ -21,7 +21,7 @@ func TestRouterLivenessUsesStandardEnvelope(t *testing.T) {
 		AppName:     "basic-platform",
 		CORSOrigins: []string{"http://localhost:5173"},
 	}
-	router := NewRouter(cfg, logger, &sql.DB{}, nil)
+	router := NewRouter(cfg, logger, &sql.DB{}, nil, nil)
 
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -40,7 +40,7 @@ func TestRouterLivenessUsesStandardEnvelope(t *testing.T) {
 func TestRouterRejectsUnknownRouteWithStandardError(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	cfg := config.Config{AppName: "basic-platform", CORSOrigins: []string{"http://localhost:5173"}}
-	router := NewRouter(cfg, logger, &sql.DB{}, nil)
+	router := NewRouter(cfg, logger, &sql.DB{}, nil, nil)
 
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/missing", nil))
@@ -63,7 +63,7 @@ func TestRouterProtectsAuthMeRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new authentication handler: %v", err)
 	}
-	router := NewRouter(cfg, logger, &sql.DB{}, authHandler)
+	router := NewRouter(cfg, logger, &sql.DB{}, authHandler, nil)
 
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil))

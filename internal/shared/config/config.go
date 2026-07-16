@@ -22,6 +22,7 @@ type Config struct {
 	HTTP            HTTPConfig
 	MySQL           MySQLConfig
 	Auth            AuthConfig
+	Identity        IdentityConfig
 	Logging         LoggingConfig
 	FileStorageRoot string
 	CORSOrigins     []string
@@ -53,6 +54,11 @@ type AuthConfig struct {
 	SessionCookieSecure   bool
 	SessionCookieSameSite string
 	SessionTTL            time.Duration
+}
+
+// IdentityConfig controls encryption of optional IAM-sensitive fields.
+type IdentityConfig struct {
+	MobileEncryptionKey string
 }
 
 // LoggingConfig controls structured application logs.
@@ -100,6 +106,9 @@ func Load() (Config, error) {
 			Username: value("MYSQL_USERNAME", "basic_platform"),
 			Password: value("MYSQL_PASSWORD", ""),
 			Params:   value("MYSQL_PARAMS", "charset=utf8mb4&parseTime=true&loc=UTC"),
+		},
+		Identity: IdentityConfig{
+			MobileEncryptionKey: value("IAM_MOBILE_ENCRYPTION_KEY", ""),
 		},
 		Auth: AuthConfig{
 			JWTIssuer:             value("AUTH_JWT_ISSUER", "basic-platform"),

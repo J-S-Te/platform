@@ -25,6 +25,10 @@ var (
 	Unauthenticated = New("AUTH_UNAUTHENTICATED", "登录状态无效或已过期", nil)
 	// AccountLocked is returned when a local account has an active lock window.
 	AccountLocked = New("AUTH_ACCOUNT_LOCKED", "账号已锁定，请稍后再试", nil)
+	// Conflict is returned when a create or lifecycle transition violates an IAM invariant.
+	Conflict = New("IAM_CONFLICT", "资源状态冲突", nil)
+	// VersionConflict is returned when an optimistic-lock version is stale.
+	VersionConflict = New("IAM_VERSION_CONFLICT", "数据已被更新，请刷新后重试", nil)
 	// Internal is returned after the server has logged the underlying failure.
 	Internal = New("PLATFORM_INTERNAL_ERROR", "服务暂时不可用，请稍后重试", nil)
 	// DependencyUnavailable is returned by readiness checks when a required dependency is down.
