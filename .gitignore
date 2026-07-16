@@ -4,7 +4,7 @@ dist/
 .env.*.local
 .DS_Store
 
-# 本地环境配置：仅提交根目录 .env.example 模板
+# 本地环境配置：仅提交各组件的 .env.example 模板
 .env
 .env.*
 !.env.example

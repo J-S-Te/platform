@@ -890,7 +890,7 @@ event := audit.NewBusinessEvent("contract.approve").
 ## 11. 平台单体模块结构
 
 ```text
-internal/platform/
+backend/internal/platform/
 ├── applicationregistry/    # 接入应用、环境、客户端凭证
 ├── identity/               # 用户、账号、组织、OIDC/OAuth
 ├── authorization/          # 权限、角色、授权、决策
