@@ -5,7 +5,9 @@
 ## 0. 当前实现状态（2026-07-16）
 
 - 已完成后端优先级 1：MySQL P0 建表迁移、迁移版本记录/校验、并发迁移锁和平台初始数据。迁移入口为 `go run ./cmd/migrate` 或 `make migrate`。
-- 当前仓库尚未实现登录、IAM、RBAC、审计、配置等业务 API；下述 P0 API 与模块结构是后续开发约束，不表示接口已交付。
+- 已完成后端优先级 2：控制台密码登录、Ed25519 JWT HttpOnly Cookie、`iam_session` 持久化、会话刷新/退出、`/auth/me` 身份摘要，以及受保护请求的 JWT/会话/账号/租户一致性校验。认证路由位于 `/api/v1/auth`。
+- IAM 用户/账号/组织管理、RBAC 写接口与授权拦截、审计接收/查询/导出、配置 API 尚未实现；当前 `/auth/me` 仅读取现有 `USER` 角色绑定及其 `ALLOW` 权限摘要，不代表 RBAC 决策 API 已交付。
+- 登录成功/失败和退出的审计事件写入将与后续审计模块一并实现；本阶段不会伪造已写入审计的结果。
 - 初始数据只创建默认租户、内建平台应用、开发环境、根组织、P0 权限/角色和 `platform.console` 命名空间；不创建固定密码的管理员账号。
 
 ## 1. 目标与边界
@@ -38,6 +40,7 @@ docs/
 - `.env.example` 是唯一允许提交的模板；`.env` 必须被 Git 忽略并仅限本地保存，不能写入真实密码、Token、私钥或生产配置。
 - 系统环境变量优先级高于 `.env`，以便容器、CI/CD 和各接入系统安全覆盖配置。变量按 `APP_`、`MYSQL_`、`AUTH_`、`FILE_`、`LOG_`、`OTEL_` 等前缀划分，新增共享变量必须使用明确前缀。
 - Vue/Vite 不会自动读取项目根目录 `.env`；前端仅在 `frontend/.env.local` 中使用非敏感 `VITE_*` 变量。任何认证密钥、数据库密码和服务端 Token 均不得使用 `VITE_*` 前缀。
+- API 进程启动时必须提供匹配的 Ed25519 PKCS#8 私钥与 PKIX 公钥。开发环境可运行 `make generate-dev-jwt-keys` 生成 `data/keys/` 下的本地密钥，并在根目录 `.env` 配置对应路径；密钥目录不得提交。
 
 请求链固定为：`Request ID → Recover → Access Log → CORS/Security Headers → Rate Limit → Authentication → Tenant Resolution → Authorization → Validation → Application Service → Audit`。中间件将 `Principal{tenant_id,user_id,account_id,session_id,org_ids,roles}` 写入 `context.Context`，业务代码不得自行读取认证 Header/Cookie。
 
@@ -75,7 +78,7 @@ docs/
 
 | 前端区域 | API 分组 | 实施状态 |
 |---|---|---|
-| 登录页 | `auth` | 待实现（后续优先级） |
+| 登录页 | `auth` | 已实现密码登录、刷新、退出、当前身份；首个管理员创建仍待 IAM 用户/账号优先级 |
 | 用户、账号、组织任职 | `identity`、`organization` | 待实现（后续优先级） |
 | 角色、角色绑定、权限注册 | `authorization` | 待实现（后续优先级） |
 | 审计日志 | `audit` | 待实现（后续优先级）；不支持删除 |

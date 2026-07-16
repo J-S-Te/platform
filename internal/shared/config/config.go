@@ -153,6 +153,9 @@ func (cfg Config) Validate() error {
 	if !validSameSite(cfg.Auth.SessionCookieSameSite) {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_SAME_SITE must be Lax, Strict or None")
 	}
+	if strings.EqualFold(cfg.Auth.SessionCookieSameSite, "none") && !cfg.Auth.SessionCookieSecure {
+		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when AUTH_SESSION_COOKIE_SAME_SITE is None")
+	}
 	if cfg.Logging.Directory == "" || cfg.FileStorageRoot == "" {
 		return fmt.Errorf("LOG_DIRECTORY and FILE_STORAGE_ROOT must not be empty")
 	}

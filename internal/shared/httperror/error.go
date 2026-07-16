@@ -19,6 +19,12 @@ var (
 	NotFound = New("PLATFORM_NOT_FOUND", "请求的资源不存在", nil)
 	// MethodNotAllowed is returned when a known route does not support the HTTP method.
 	MethodNotAllowed = New("PLATFORM_METHOD_NOT_ALLOWED", "请求方法不被支持", nil)
+	// Validation is returned when an API request does not satisfy its OpenAPI input contract.
+	Validation = New("PLATFORM_VALIDATION_ERROR", "请求参数不合法", nil)
+	// Unauthenticated is returned for missing, invalid, expired or revoked authentication state.
+	Unauthenticated = New("AUTH_UNAUTHENTICATED", "登录状态无效或已过期", nil)
+	// AccountLocked is returned when a local account has an active lock window.
+	AccountLocked = New("AUTH_ACCOUNT_LOCKED", "账号已锁定，请稍后再试", nil)
 	// Internal is returned after the server has logged the underlying failure.
 	Internal = New("PLATFORM_INTERNAL_ERROR", "服务暂时不可用，请稍后重试", nil)
 	// DependencyUnavailable is returned by readiness checks when a required dependency is down.

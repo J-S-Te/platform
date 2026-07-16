@@ -9,9 +9,14 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/infrastructure"
+	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/database"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/observability"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	httptransport "github.com/J-S-Te/Basic-Platform/internal/transport/http"
 )
 
@@ -43,8 +48,37 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
+	tokenManager, err := security.LoadJWTManager(
+		cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience, cfg.Auth.JWTPrivateKeyPath, cfg.Auth.JWTPublicKeyPath,
+	)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, fmt.Errorf("load JWT signing keys: %w", err)
+	}
+	repository, err := infrastructure.NewMySQLRepository(db)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, err
+	}
+	authService, err := application.NewService(
+		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, application.SystemClock{}, cfg.Auth.SessionTTL,
+	)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, err
+	}
+	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth)
+	if err != nil {
+		_ = db.Close()
+		_ = logFile.Close()
+		return nil, err
+	}
+
 	return &API{
-		Handler:  httptransport.NewRouter(cfg, logger, db),
+		Handler:  httptransport.NewRouter(cfg, logger, db, authHandler),
 		Logger:   logger,
 		database: db,
 		logFile:  logFile,
