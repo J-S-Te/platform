@@ -23,6 +23,8 @@ var (
 	Validation = New("PLATFORM_VALIDATION_ERROR", "请求参数不合法", nil)
 	// Unauthenticated is returned for missing, invalid, expired or revoked authentication state.
 	Unauthenticated = New("AUTH_UNAUTHENTICATED", "登录状态无效或已过期", nil)
+	// Forbidden is returned when an authenticated principal does not hold a required permission.
+	Forbidden = New("AUTH_FORBIDDEN", "没有执行此操作的权限", nil)
 	// AccountLocked is returned when a local account has an active lock window.
 	AccountLocked = New("AUTH_ACCOUNT_LOCKED", "账号已锁定，请稍后再试", nil)
 	// Conflict is returned when a create or lifecycle transition violates an IAM invariant.

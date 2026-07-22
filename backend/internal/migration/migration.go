@@ -4,7 +4,6 @@ package migration
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -101,66 +102,66 @@ func Load(source fs.FS) ([]Item, error) {
 // concurrent application instances from modifying the same schema at the same time. MySQL DDL can
 // perform implicit commits, so each statement is deliberately executed independently; migrations
 // are written with CREATE TABLE IF NOT EXISTS and idempotent seed statements for safe retry.
-func Run(ctx context.Context, db *sql.DB, source fs.FS) ([]Applied, error) {
+func Run(ctx context.Context, database *gorm.DB, source fs.FS) ([]Applied, error) {
 	items, err := Load(source)
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureMetadataTable(ctx, db); err != nil {
-		return nil, err
-	}
-	lockConnection, err := db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("open migration lock connection: %w", err)
-	}
-	defer lockConnection.Close()
-
-	if err := acquireLock(ctx, lockConnection); err != nil {
-		return nil, err
-	}
-	defer releaseLock(lockConnection)
-
-	applied, err := readApplied(ctx, db)
-	if err != nil {
+	if err := ensureMetadataTable(ctx, database); err != nil {
 		return nil, err
 	}
 
-	result := make([]Applied, 0, len(items))
-	for _, item := range items {
-		if checksum, exists := applied[item.Version]; exists {
-			if checksum != item.Checksum {
-				return nil, fmt.Errorf("migration %06d_%s checksum differs from applied version; create a new migration instead of editing an applied file", item.Version, item.Name)
-			}
-			continue
+	var result []Applied
+	if err := database.WithContext(ctx).Connection(func(lockDatabase *gorm.DB) error {
+		if err := acquireLock(ctx, lockDatabase); err != nil {
+			return err
 		}
+		defer releaseLock(lockDatabase)
 
-		statements, err := SplitStatements(item.SQL)
+		applied, err := readApplied(ctx, lockDatabase)
 		if err != nil {
-			return nil, fmt.Errorf("parse migration %06d_%s: %w", item.Version, item.Name, err)
-		}
-		for statementIndex, statement := range statements {
-			if _, err := db.ExecContext(ctx, statement); err != nil {
-				return nil, fmt.Errorf("execute migration %06d_%s statement %d: %w", item.Version, item.Name, statementIndex+1, err)
-			}
+			return err
 		}
 
-		if _, err := db.ExecContext(
-			ctx,
-			"INSERT INTO "+metadataTableName+" (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
-			item.Version,
-			item.Name,
-			item.Checksum[:],
-			time.Now().UTC(),
-		); err != nil {
-			return nil, fmt.Errorf("record migration %06d_%s: %w", item.Version, item.Name, err)
+		result = make([]Applied, 0, len(items))
+		for _, item := range items {
+			if checksum, exists := applied[item.Version]; exists {
+				if checksum != item.Checksum {
+					return fmt.Errorf("migration %06d_%s checksum differs from applied version; create a new migration instead of editing an applied file", item.Version, item.Name)
+				}
+				continue
+			}
+
+			statements, err := SplitStatements(item.SQL)
+			if err != nil {
+				return fmt.Errorf("parse migration %06d_%s: %w", item.Version, item.Name, err)
+			}
+			for statementIndex, statement := range statements {
+				if err := lockDatabase.WithContext(ctx).Exec(statement).Error; err != nil {
+					return fmt.Errorf("execute migration %06d_%s statement %d: %w", item.Version, item.Name, statementIndex+1, err)
+				}
+			}
+
+			if err := lockDatabase.WithContext(ctx).Exec(
+				"INSERT INTO "+metadataTableName+" (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
+				item.Version,
+				item.Name,
+				item.Checksum[:],
+				time.Now().UTC(),
+			).Error; err != nil {
+				return fmt.Errorf("record migration %06d_%s: %w", item.Version, item.Name, err)
+			}
+			result = append(result, Applied{Version: item.Version, Name: item.Name})
 		}
-		result = append(result, Applied{Version: item.Version, Name: item.Name})
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("run migrations with dedicated lock connection: %w", err)
 	}
 
 	return result, nil
 }
 
-func ensureMetadataTable(ctx context.Context, db *sql.DB) error {
+func ensureMetadataTable(ctx context.Context, database *gorm.DB) error {
 	statement := `CREATE TABLE IF NOT EXISTS platform_schema_migration (
 		version BIGINT UNSIGNED NOT NULL,
 		name VARCHAR(255) NOT NULL,
@@ -168,15 +169,15 @@ func ensureMetadataTable(ctx context.Context, db *sql.DB) error {
 		applied_at DATETIME(3) NOT NULL,
 		PRIMARY KEY (version)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
-	if _, err := db.ExecContext(ctx, statement); err != nil {
+	if err := database.WithContext(ctx).Exec(statement).Error; err != nil {
 		return fmt.Errorf("create migration metadata table: %w", err)
 	}
 	return nil
 }
 
-func acquireLock(ctx context.Context, connection *sql.Conn) error {
+func acquireLock(ctx context.Context, database *gorm.DB) error {
 	var acquired int
-	if err := connection.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", migrationLockName, migrationLockWait).Scan(&acquired); err != nil {
+	if err := database.WithContext(ctx).Raw("SELECT GET_LOCK(?, ?)", migrationLockName, migrationLockWait).Scan(&acquired).Error; err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	if acquired != 1 {
@@ -185,34 +186,30 @@ func acquireLock(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-func releaseLock(connection *sql.Conn) {
-	_, _ = connection.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", migrationLockName)
+func releaseLock(database *gorm.DB) {
+	_ = database.WithContext(context.Background()).Exec("SELECT RELEASE_LOCK(?)", migrationLockName).Error
 }
 
-func readApplied(ctx context.Context, db *sql.DB) (map[uint64][sha256.Size]byte, error) {
-	rows, err := db.QueryContext(ctx, "SELECT version, checksum FROM "+metadataTableName)
-	if err != nil {
+type appliedMigrationRecord struct {
+	Version  uint64
+	Checksum []byte
+}
+
+func readApplied(ctx context.Context, database *gorm.DB) (map[uint64][sha256.Size]byte, error) {
+	var records []appliedMigrationRecord
+	if err := database.WithContext(ctx).Raw("SELECT version, checksum FROM " + metadataTableName).Scan(&records).Error; err != nil {
 		return nil, fmt.Errorf("read applied migrations: %w", err)
 	}
-	defer rows.Close()
 
-	applied := make(map[uint64][sha256.Size]byte)
-	for rows.Next() {
-		var version uint64
-		var rawChecksum []byte
-		if err := rows.Scan(&version, &rawChecksum); err != nil {
-			return nil, fmt.Errorf("scan applied migration: %w", err)
-		}
-		if len(rawChecksum) != sha256.Size {
-			return nil, fmt.Errorf("migration %06d has an invalid checksum length", version)
+	applied := make(map[uint64][sha256.Size]byte, len(records))
+	for _, record := range records {
+		if len(record.Checksum) != sha256.Size {
+			return nil, fmt.Errorf("migration %06d has an invalid checksum length", record.Version)
 		}
 
 		var checksum [sha256.Size]byte
-		copy(checksum[:], rawChecksum)
-		applied[version] = checksum
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate applied migrations: %w", err)
+		copy(checksum[:], record.Checksum)
+		applied[record.Version] = checksum
 	}
 	return applied, nil
 }

@@ -2,6 +2,7 @@
 package security
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,19 @@ import (
 )
 
 const argon2idAlgorithm = "argon2id"
+
+// Argon2idPasswordHasher creates fresh Argon2id credentials for controlled provisioning flows.
+// It returns the raw digest and JSON verification metadata expected by iam_password_credential.
+type Argon2idPasswordHasher struct{}
+
+// Hash derives a password digest using a cryptographically random 16-byte salt.
+func (Argon2idPasswordHasher) Hash(password string) ([]byte, []byte, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, nil, fmt.Errorf("generate Argon2id salt: %w", err)
+	}
+	return HashPassword(password, DefaultArgon2idParams(salt))
+}
 
 // Argon2idParams records the exact parameters needed to verify a password credential. The
 // password digest is stored separately in iam_password_credential.password_hash.

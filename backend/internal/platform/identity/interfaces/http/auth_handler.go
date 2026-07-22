@@ -13,27 +13,43 @@ import (
 	"strings"
 	"time"
 
+	applicationregistry "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
+	auditapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/application"
+	auditdomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/domain"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
+	mfadomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/domain"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
 )
 
 const maxLoginRequestBytes = 8 * 1024
 
 // Handler exposes the OpenAPI /auth endpoints.
 type Handler struct {
-	service applicationService
-	logger  *slog.Logger
-	cookie  cookieConfig
+	service       applicationService
+	logger        *slog.Logger
+	cookie        cookieConfig
+	auditRecorder lifecycleAuditRecorder
+	auditConfig   config.AuditConfig
+	loginTargets  applicationregistry.LoginTargetResolver
 }
 
 type applicationService interface {
 	Login(ctx context.Context, input application.LoginInput) (application.SessionResult, error)
+	CompleteMFALogin(ctx context.Context, credential, code string, ipAddress net.IP, userAgent string) (application.MFALoginResult, error)
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
 	Refresh(ctx context.Context, principal authctx.Principal) (application.SessionResult, error)
 	Logout(ctx context.Context, principal authctx.Principal) error
+}
+
+// lifecycleAuditRecorder persists server-generated identity lifecycle events. Recording is best
+// effort because a completed authentication response must not be turned into a failure if audit
+// persistence is temporarily unavailable.
+type lifecycleAuditRecorder interface {
+	Ingest(ctx context.Context, tenantID string, input auditapplication.EventInput) (auditdomain.Receipt, error)
 }
 
 // cookieConfig keeps only cookie properties that must remain consistent when setting or clearing.
@@ -44,30 +60,74 @@ type cookieConfig struct {
 }
 
 // NewHandler creates the identity HTTP adapter. The caller validates the service during bootstrap.
-func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig) (*Handler, error) {
-	if service == nil || logger == nil {
+func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig, auditRecorder lifecycleAuditRecorder, auditConfig config.AuditConfig, loginTargetResolvers ...applicationregistry.LoginTargetResolver) (*Handler, error) {
+	if service == nil || logger == nil || auditRecorder == nil {
 		return nil, errors.New("identity HTTP handler dependencies must not be nil")
+	}
+	if len(loginTargetResolvers) > 1 || (len(loginTargetResolvers) == 1 && loginTargetResolvers[0] == nil) {
+		return nil, errors.New("identity HTTP handler accepts at most one non-nil login target resolver")
+	}
+	if strings.TrimSpace(auditConfig.ApplicationCode) == "" || strings.TrimSpace(auditConfig.EnvironmentCode) == "" {
+		return nil, errors.New("identity lifecycle audit configuration must not be empty")
+	}
+	cookieName := strings.TrimSpace(authConfig.SessionCookieName)
+	if cookieName == "" {
+		return nil, errors.New("identity session cookie name must not be blank")
 	}
 	sameSite, err := parseSameSite(authConfig.SessionCookieSameSite)
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{
-		service: service,
-		logger:  logger,
-		cookie:  cookieConfig{name: authConfig.SessionCookieName, secure: authConfig.SessionCookieSecure, sameSite: sameSite},
-	}, nil
+	if sameSite == http.SameSiteNoneMode && !authConfig.SessionCookieSecure {
+		return nil, errors.New("SameSite=None identity session cookie must be secure")
+	}
+	handler := &Handler{
+		service:       service,
+		logger:        logger,
+		cookie:        cookieConfig{name: cookieName, secure: authConfig.SessionCookieSecure, sameSite: sameSite},
+		auditRecorder: auditRecorder,
+		auditConfig:   auditConfig,
+	}
+	if len(loginTargetResolvers) == 1 {
+		handler.loginTargets = loginTargetResolvers[0]
+	}
+	return handler, nil
 }
 
 type loginRequest struct {
 	Account   string `json:"account"`
 	Password  string `json:"password"`
 	LoginType string `json:"login_type"`
+
+	ApplicationID   string `json:"application_id"`
+	EnvironmentID   string `json:"environment_id"`
+	LoginTargetCode string `json:"login_target_code"`
 }
 
 type sessionResponse struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 	RedirectURL string    `json:"redirect_url"`
+}
+
+// mfaRequiredResponse contains only the opaque pre-authentication credential required to finish
+// this login. It deliberately carries no account or tenant identifier and never sets a session cookie.
+type mfaRequiredResponse struct {
+	MFARequired                 bool      `json:"mfa_required"`
+	PreAuthenticationCredential string    `json:"pre_authentication_credential"`
+	ExpiresAt                   time.Time `json:"expires_at"`
+	MaxAttempts                 uint16    `json:"max_attempts"`
+	RedirectURL                 string    `json:"redirect_url"`
+}
+
+type verifyMFALoginRequest struct {
+	PreAuthenticationCredential string `json:"pre_authentication_credential"`
+	Code                        string `json:"code"`
+}
+
+type verifyMFALoginResponse struct {
+	ExpiresAt          time.Time `json:"expires_at"`
+	RedirectURL        string    `json:"redirect_url"`
+	VerificationMethod string    `json:"verification_method"`
 }
 
 // Login handles the sole P0 login type: a local account with an Argon2id password credential.
@@ -82,6 +142,7 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 		Account: payload.Account, Password: payload.Password, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
 	})
 	if err != nil {
+		handler.recordLoginFailure(request, err)
 		if errors.Is(err, application.ErrUnauthenticated) {
 			httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_UNAUTHENTICATED", "账号或密码错误", nil))
 			return
@@ -89,8 +150,72 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 		handler.writeApplicationError(writer, request, err)
 		return
 	}
+	result.RedirectURL = handler.resolveLoginRedirect(request.Context(), result.TenantID, payload)
+	if result.MFARequired {
+		httpresponse.WriteSuccess(writer, request, http.StatusAccepted, "需要 MFA 验证", mfaRequiredResponse{
+			MFARequired: true, PreAuthenticationCredential: result.PreAuthenticationCredential,
+			ExpiresAt: result.PreAuthenticationExpiresAt.UTC(), MaxAttempts: result.MFAMaxAttempts,
+			RedirectURL: result.RedirectURL,
+		})
+		return
+	}
 	handler.setSessionCookie(writer, result.Token, result.ExpiresAt)
+	handler.recordLogin(request, result)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", toSessionResponse(result))
+}
+
+// resolveLoginRedirect converts a complete target tuple into a pre-registered HTTPS address. The
+// browser never supplies a URI. Missing, inactive or temporarily unavailable targets fail closed
+// to the platform root without exposing stored addresses in application logs.
+func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID string, payload loginRequest) string {
+	if payload.ApplicationID == "" {
+		return "/"
+	}
+	if handler.loginTargets == nil {
+		handler.logger.Warn("login target resolver is not configured", "application_id", payload.ApplicationID, "environment_id", payload.EnvironmentID, "target_code", payload.LoginTargetCode)
+		return "/"
+	}
+
+	redirectURI, err := handler.loginTargets.ResolveActiveTargetURI(ctx, applicationregistry.LoginTargetResolveInput{
+		TenantID: tenantID, ApplicationID: payload.ApplicationID,
+		EnvironmentID: payload.EnvironmentID, TargetCode: payload.LoginTargetCode,
+	})
+	if err != nil {
+		handler.logger.Warn("login target resolution failed", "error", err, "tenant_id", tenantID, "application_id", payload.ApplicationID, "environment_id", payload.EnvironmentID, "target_code", payload.LoginTargetCode)
+		return "/"
+	}
+	return redirectURI
+}
+
+// VerifyMFALogin completes a password login that is paused at its bound, single-use MFA
+// pre-authentication record. A browser session and cookie are issued only after successful MFA.
+func (handler *Handler) VerifyMFALogin(writer http.ResponseWriter, request *http.Request) {
+	payload, err := decodeVerifyMFALoginRequest(writer, request)
+	if err != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		return
+	}
+	credential, usedPreAuthenticationCookie, err := handler.resolveMFALoginCredential(request, payload.PreAuthenticationCredential)
+	if err != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		return
+	}
+
+	result, err := handler.service.CompleteMFALogin(request.Context(), credential, payload.Code, remoteIP(request), request.UserAgent())
+	if err != nil {
+		handler.writeApplicationError(writer, request, err)
+		return
+	}
+	if !result.Verified {
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_MFA_VERIFICATION_FAILED", "动态验证码或恢复码错误", map[string]any{"attempts_remaining": result.AttemptsRemaining}))
+		return
+	}
+	if usedPreAuthenticationCookie {
+		handler.clearPreAuthenticationCookie(writer)
+	}
+	handler.setSessionCookie(writer, result.Token, result.ExpiresAt)
+	handler.recordMFALogin(request, result)
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", verifyMFALoginResponse{ExpiresAt: result.ExpiresAt.UTC(), RedirectURL: result.RedirectURL, VerificationMethod: result.VerificationMethod})
 }
 
 // Refresh renews the already authenticated current browser session and replaces its cookie.
@@ -122,6 +247,7 @@ func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	handler.clearSessionCookie(writer)
+	handler.recordLogout(request, principal)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "已退出登录", map[string]any{})
 }
 
@@ -145,11 +271,134 @@ func (handler *Handler) CookieName() string {
 	return handler.cookie.name
 }
 
+// recordLogin writes a successful password-login event after the session has been persisted.
+func (handler *Handler) recordLogin(request *http.Request, result application.SessionResult) {
+	handler.recordLifecycleEvent(request, result.TenantID, auditapplication.EventInput{
+		ActorType: "USER", ActorID: result.UserID, ActorName: result.UserName, SessionID: result.SessionID,
+		Action: "auth.login", ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
+		Result: "SUCCESS", RiskLevel: "LOW", Classification: "INTERNAL",
+		Summary: "本地账号密码登录成功",
+	})
+}
+
+// recordMFALogin records a completed password-and-MFA login without including the submitted code,
+// opaque credential, recovery code or TOTP seed in the audit event.
+func (handler *Handler) recordMFALogin(request *http.Request, result application.MFALoginResult) {
+	handler.recordLifecycleEvent(request, result.TenantID, auditapplication.EventInput{
+		ActorType: "USER", ActorID: result.UserID, ActorName: result.UserName, SessionID: result.SessionID,
+		Action: "auth.login.mfa", ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
+		Result: "SUCCESS", RiskLevel: "MEDIUM", Classification: "INTERNAL",
+		Summary: "本地账号密码和 MFA 登录成功",
+	})
+}
+
+// recordLoginFailure records only trusted account metadata when the authentication service found
+// an existing account. Unknown-account failures intentionally remain unlinked to prevent account
+// enumeration and avoid creating misleading identity records.
+func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
+	var failed application.LoginFailedError
+	if errors.As(err, &failed) {
+		handler.recordLifecycleEvent(request, failed.TenantID, auditapplication.EventInput{
+			ActorType: "USER", ActorID: failed.UserID, ActorName: failed.UserName,
+			Action: "auth.login.failed", ResourceType: "auth_account", ResourceID: failed.AccountID, ResourceName: failed.AccountName,
+			Result: "FAILURE", RiskLevel: "MEDIUM", Classification: "INTERNAL", Summary: "本地账号密码登录失败",
+		})
+		return
+	}
+	var locked application.AccountLockedError
+	if errors.As(err, &locked) {
+		handler.recordLifecycleEvent(request, locked.TenantID, auditapplication.EventInput{
+			ActorType: "USER", ActorID: locked.UserID, ActorName: locked.UserName,
+			Action: "auth.login.locked", ResourceType: "auth_account", ResourceID: locked.AccountID, ResourceName: locked.AccountName,
+			Result: "FAILURE", RiskLevel: "HIGH", Classification: "INTERNAL", Summary: "账号处于锁定状态，拒绝密码登录",
+		})
+	}
+}
+
+// recordLogout writes a successful logout event after the current server-side session is revoked.
+func (handler *Handler) recordLogout(request *http.Request, principal authctx.Principal) {
+	handler.recordLifecycleEvent(request, principal.Tenant.ID, auditapplication.EventInput{
+		ActorType: "USER", ActorID: principal.User.ID, ActorName: principal.User.Name, SessionID: principal.SessionID,
+		Action: "auth.logout", ResourceType: "auth_session", ResourceID: principal.SessionID, ResourceName: principal.Account.Name,
+		Result: "SUCCESS", RiskLevel: "LOW", Classification: "INTERNAL",
+		Summary: "当前会话已退出登录",
+	})
+}
+
+// recordLifecycleEvent enriches a server-generated audit event with trusted HTTP context. It never
+// records passwords, cookies, authorization headers, request IDs, or trace IDs.
+func (handler *Handler) recordLifecycleEvent(request *http.Request, tenantID string, input auditapplication.EventInput) {
+	if strings.TrimSpace(tenantID) == "" {
+		handler.logger.Error("identity lifecycle audit skipped because tenant is missing", "action", input.Action)
+		return
+	}
+	eventID, err := ulid.New(time.Now().UTC())
+	if err != nil {
+		handler.logger.Error("generate identity lifecycle audit event ID", "error", err, "action", input.Action)
+		return
+	}
+
+	input.EventID = eventID
+	input.ApplicationCode = handler.auditConfig.ApplicationCode
+	input.EnvironmentCode = handler.auditConfig.EnvironmentCode
+	input.OccurredAt = time.Now().UTC()
+	input.SourceIP = remoteIP(request).String()
+	input.UserAgent = request.UserAgent()
+	input.EventCategory = "SECURITY"
+	input.EventType = input.Action
+	input.Metadata = map[string]any{"method": request.Method, "path": request.URL.Path}
+	if _, err := handler.auditRecorder.Ingest(request.Context(), tenantID, input); err != nil {
+		handler.logger.Error("record identity lifecycle audit event", "error", err, "action", input.Action, "tenant_id", tenantID)
+	}
+}
+
 func (handler *Handler) setSessionCookie(writer http.ResponseWriter, token string, expiresAt time.Time) {
 	http.SetCookie(writer, &http.Cookie{
 		Name: handler.cookie.name, Value: token, Path: "/", HttpOnly: true,
 		Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, Expires: expiresAt.UTC(),
 	})
+}
+
+// preAuthenticationCookieName derives an independent MFA pre-authentication cookie from the
+// configured session cookie. The credential remains HttpOnly and is never written to an audit event.
+func preAuthenticationCookieName(sessionCookieName string) string {
+	return sessionCookieName + "_mfa"
+}
+
+func (handler *Handler) clearPreAuthenticationCookie(writer http.ResponseWriter) {
+	http.SetCookie(writer, &http.Cookie{
+		Name: preAuthenticationCookieName(handler.cookie.name), Value: "", Path: "/", HttpOnly: true,
+		Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite,
+		Expires: time.Unix(1, 0).UTC(), MaxAge: -1,
+	})
+}
+
+// resolveMFALoginCredential accepts the documented JSON credential for backwards compatibility.
+// When it is omitted, it falls back to the independent HttpOnly pre-authentication cookie issued
+// by an external identity callback. The opaque value is passed only to the application service.
+func (handler *Handler) resolveMFALoginCredential(request *http.Request, explicitCredential string) (string, bool, error) {
+	explicitCredential = strings.TrimSpace(explicitCredential)
+	if explicitCredential != "" {
+		if len(explicitCredential) > 512 {
+			return "", false, errors.New("MFA pre-authentication credential exceeds limit")
+		}
+		return explicitCredential, false, nil
+	}
+
+	cookie, err := request.Cookie(preAuthenticationCookieName(handler.cookie.name))
+	if err != nil {
+		return "", false, errors.New("MFA pre-authentication cookie is required")
+	}
+	credential := strings.TrimSpace(cookie.Value)
+	if credential == "" || len(credential) > 512 {
+		return "", false, errors.New("MFA pre-authentication cookie is invalid")
+	}
+	return credential, true, nil
+}
+
+// ClearSessionCookie removes the browser session cookie after a security-sensitive state change.
+func (handler *Handler) ClearSessionCookie(writer http.ResponseWriter) {
+	handler.clearSessionCookie(writer)
 }
 
 func (handler *Handler) clearSessionCookie(writer http.ResponseWriter) {
@@ -167,8 +416,16 @@ func (handler *Handler) writeApplicationError(writer http.ResponseWriter, reques
 		apiError := httperror.AccountLocked
 		apiError.Details = map[string]time.Time{"locked_until": locked.LockedUntil.UTC()}
 		httpresponse.WriteError(writer, request, http.StatusLocked, apiError)
-	case errors.Is(err, application.ErrUnauthenticated):
+	case errors.Is(err, application.ErrUnauthenticated), errors.Is(err, mfadomain.ErrLoginPreAuthenticationNotFound):
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
+	case errors.Is(err, mfadomain.ErrInvalidInput):
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+	case errors.Is(err, mfadomain.ErrLoginPreAuthenticationExpired):
+		httpresponse.WriteError(writer, request, http.StatusGone, httperror.New("AUTH_MFA_PRE_AUTH_EXPIRED", "MFA 预认证已过期", nil))
+	case errors.Is(err, mfadomain.ErrLoginPreAuthenticationConsumed):
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("AUTH_MFA_PRE_AUTH_CONSUMED", "MFA 预认证已使用", nil))
+	case errors.Is(err, mfadomain.ErrLoginPreAuthenticationAttemptsExceeded):
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_MFA_ATTEMPTS_EXCEEDED", "MFA 验证尝试次数已用尽", nil))
 	default:
 		handler.logger.Error("identity authentication request failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
@@ -188,9 +445,47 @@ func decodeLoginRequest(writer http.ResponseWriter, request *http.Request) (logi
 		return loginRequest{}, err
 	}
 	payload.Account = strings.TrimSpace(payload.Account)
+	payload.ApplicationID = strings.TrimSpace(payload.ApplicationID)
+	payload.EnvironmentID = strings.TrimSpace(payload.EnvironmentID)
+	payload.LoginTargetCode = strings.TrimSpace(payload.LoginTargetCode)
 	if payload.LoginType != "password" || payload.Account == "" || len(payload.Account) > 128 ||
-		payload.Password == "" || len(payload.Password) > 256 {
+		payload.Password == "" || len(payload.Password) > 256 || !validLoginTargetSelection(payload) {
 		return loginRequest{}, errors.New("login request does not meet contract")
+	}
+	return payload, nil
+}
+
+func validLoginTargetSelection(payload loginRequest) bool {
+	provided := 0
+	for _, value := range []string{payload.ApplicationID, payload.EnvironmentID, payload.LoginTargetCode} {
+		if value != "" {
+			provided++
+		}
+	}
+	if provided == 0 {
+		return true
+	}
+	return provided == 3 && len(payload.ApplicationID) == 26 && len(payload.EnvironmentID) == 26 &&
+		len(payload.LoginTargetCode) <= 64
+}
+
+func decodeVerifyMFALoginRequest(writer http.ResponseWriter, request *http.Request) (verifyMFALoginRequest, error) {
+	defer request.Body.Close()
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxLoginRequestBytes))
+	decoder.DisallowUnknownFields()
+
+	var payload verifyMFALoginRequest
+	if err := decoder.Decode(&payload); err != nil {
+		return verifyMFALoginRequest{}, err
+	}
+	if err := ensureSingleJSONValue(decoder); err != nil {
+		return verifyMFALoginRequest{}, err
+	}
+	payload.PreAuthenticationCredential = strings.TrimSpace(payload.PreAuthenticationCredential)
+	payload.Code = strings.TrimSpace(payload.Code)
+	if (payload.PreAuthenticationCredential != "" && len(payload.PreAuthenticationCredential) > 512) ||
+		payload.Code == "" || len(payload.Code) > 64 {
+		return verifyMFALoginRequest{}, errors.New("MFA login verification request does not meet contract")
 	}
 	return payload, nil
 }

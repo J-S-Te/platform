@@ -1,7 +1,7 @@
 # Basic-Platform JWT 文档（当前实现）
 
-> **用途**：说明当前后端实际签发、校验和使用的 JWT，不把“所有令牌都是 JWT”作为前提。  
-> **代码基线**：`backend/internal/shared/security/{jwt.go,application_jwt.go,oidc_jwt.go}`，以及对应认证中间件和 OIDC 适配器。  
+> **用途**：说明当前后端实际签发、校验和使用的 JWT，不把“所有令牌都是 JWT”作为前提。
+> **代码基线**：`backend/internal/shared/security/{jwt.go,application_jwt.go,oidc_jwt.go}`，以及对应认证中间件和 OIDC 适配器。
 > **生成日期**：2026-07-21。
 
 ## 1. 令牌总览
@@ -14,7 +14,11 @@
 | 应用 access token | `ApplicationJWTManager` | OAuth client-credentials 后返回，调用方以 `Authorization: Bearer` 发送 | `AUTH_APPLICATION_JWT_AUDIENCE` | `application` |
 | OIDC access token / ID token | `OIDCJWTManager` | `/oauth2/token` 的 OIDC 授权码或刷新令牌流程签发；JWKS 可公开获取公钥 | 目标 OAuth `client_id`（数组语义） | `access_token` 或 `id_token` |
 
-**不是 JWT 的值**：刷新令牌、OAuth 授权码、客户端密钥、MFA challenge、MFA step-up grant、登录 pre-auth credential、联邦登录 state。持久化模型为这些值设计了哈希或密文字段，不能把它们误当成可在客户端解析的 JWT。
+**不是 JWT 的值**：刷新令牌、OAuth 授权码、客户端密钥、MFA challenge、MFA step-up grant、登录 pre-auth credential、联邦登录 state，以及钉钉授权结果/授权码/上游令牌。持久化模型为这些值设计了哈希或密文字段，不能把它们误当成可在客户端解析的 JWT。钉钉原始 `unionId` 仅在进程内立即哈希查找预绑定身份，不存库、不记日志或审计。
+
+### 1.1 钉钉扫码与平台 JWT 的边界
+
+钉钉第三方企业应用扫码的 `state`、授权码、授权结果、上游访问令牌、浏览器绑定 Cookie 与 SuiteSecret/客户端密钥都不能作为平台 JWT、平台 Cookie 载荷或前端可解析令牌使用。创建扫码会话时，state 只在发起浏览器收到的 `sdk_config` 中出现；MySQL 的 `iam_dingtalk_qr_login_state` 仅保存 `state_hash` 与受 `IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY` 保护的服务端载荷，原始 state 和浏览器绑定值不持久化。回调仅接受已预绑定且有效的本地身份；官方 DTFrameLogin SDK 成功后由顶层页面导航后端 callback，callback 以 303 跳转结束：不需要 MFA 时，后端创建真实服务端会话并按 `AUTH_SESSION_COOKIE_*` 写既有浏览器会话 JWT Cookie；需要 MFA 时仅写既有预认证 Cookie，完成 MFA 后才创建会话。跳转 URL、响应、日志、审计和 Cookie 均不得包含钉钉敏感协议值。
 
 ## 2. 共同的密码学与密钥要求
 
@@ -71,6 +75,19 @@
 - `POST /api/v1/auth/token/refresh` 必须已有有效 Cookie；服务端更新当前会话，并下发替换 Cookie。
 - `POST /api/v1/auth/logout` 撤销当前服务端会话并清除 Cookie。
 - JWT 自身有效不代表服务端 session 一定仍有效；认证服务会进行存储状态校验。因此调用方不能仅离线验证 session JWT 后视为已获授权。
+
+### 3.4 外部身份登录后的会话边界
+
+- 当前 `GET /api/v1/auth/external/callback` 在完成外部 **OIDC** 回调验证与本地账号绑定后，成功时只通过重定向写入平台 session Cookie；若账号要求 MFA，则写入独立的短期 HttpOnly MFA 前置 Cookie。
+- 上游授权码、外部 `id_token`、外部 access token、联邦登录 `state` 以及 MFA 前置凭据都不是本平台 JWT，也不会写入浏览器响应 JSON。它们不得记录在日志、审计详情或浏览器持久化存储中。
+- 因此，外部身份认证只是平台会话建立前的身份确认步骤；后续平台受保护接口仍按本节的浏览器 session JWT 与服务端 session 状态完成认证。
+
+### 3.5 `DINGTALK_QR` 与 JWT 的边界
+
+- `DINGTALK_QR` 是独立的联邦身份提供商类型，不属于现有外部 OIDC 路由。扫码登录由 `POST /api/v1/auth/dingtalk/qr-sessions` 与 `GET /api/v1/auth/dingtalk/callback` 承担；短时、一次性扫码状态表已由 `000031_create_dingtalk_qr_login_state.sql` 创建。
+- 钉钉授权结果、授权码和上游令牌都不是平台 JWT，也没有钉钉专属 JWT、claim、audience 或 token 响应。登录页使用官方 DTFrameLogin SDK 获取授权结果后，由顶层页面导航 callback；callback 只以 `303 See Other` 结束。
+- 回调在校验 state 摘要、固定 `SameSite=Lax` 的浏览器绑定、有效期、一次性消费状态、钉钉身份、预绑定账号和账号状态后，复用既有 `SessionIssuer`。普通成功仅写入既有控制台会话 Cookie；需要 MFA 时仅写入既有预认证 Cookie 并跳转至 `/login?dingtalk_mfa=1&return_to=...`。
+- 钉钉 SuiteSecret/客户端密钥的持久化载体是提供商的 `client_secret_ciphertext`，而不是 JWT claim；原始 `unionId` 只在进程内立即计算 SHA-256 哈希以查询预绑定身份，不存库、不记日志、不写审计详情，也不能成为平台 JWT claim。跳转地址、响应、Cookie、日志和审计详情均不得包含 state 原文、授权码、SuiteSecret/客户端密钥、上游令牌或原始外部身份标识。
 
 ## 4. 应用 JWT（client credentials）
 
@@ -164,3 +181,6 @@ Authorization: Bearer <application-access-token>
 | 应用 Bearer 认证与 scope | `backend/internal/transport/http/middleware/application_authentication.go` |
 | MFA step-up grant 消费 | `backend/internal/transport/http/middleware/mfa_step_up.go` |
 | OIDC token / JWKS / UserInfo HTTP 端点 | `backend/internal/platform/oidc/interfaces/http/` |
+| 联邦提供商类型、敏感字段边界 | `backend/internal/platform/identity/federation/domain/model.go` |
+| 钉钉提供商配置校验（非扫码回调） | `backend/internal/platform/identity/federation/application/service.go` |
+| 钉钉扫码状态、身份换取与既有会话签发边界 | `backend/internal/platform/identity/federation/dingtalk/application/service.go`、`backend/internal/platform/identity/federation/dingtalk/infrastructure/` |

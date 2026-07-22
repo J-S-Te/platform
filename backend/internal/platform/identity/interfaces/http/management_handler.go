@@ -15,7 +15,6 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
-	"github.com/go-chi/chi/v5"
 )
 
 const maxManagementRequestBytes = 64 << 10
@@ -197,7 +196,7 @@ func (handler *ManagementHandler) GetUser(writer http.ResponseWriter, request *h
 		handler.unauthenticated(writer, request)
 		return
 	}
-	result, err := handler.service.GetUser(request.Context(), principal.Tenant.ID, chi.URLParam(request, "user_id"))
+	result, err := handler.service.GetUser(request.Context(), principal.Tenant.ID, request.PathValue("user_id"))
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -216,7 +215,7 @@ func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request
 		handler.validation(writer, request)
 		return
 	}
-	result, err := handler.service.UpdateUser(request.Context(), application.UserUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: chi.URLParam(request, "user_id"), DisplayName: payload.DisplayName, EmployeeNo: payload.EmployeeNo, Email: payload.Email, Mobile: payload.Mobile, Status: payload.Status, Version: payload.Version, UpdateMobile: payload.Mobile != nil})
+	result, err := handler.service.UpdateUser(request.Context(), application.UserUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: request.PathValue("user_id"), DisplayName: payload.DisplayName, EmployeeNo: payload.EmployeeNo, Email: payload.Email, Mobile: payload.Mobile, Status: payload.Status, Version: payload.Version, UpdateMobile: payload.Mobile != nil})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -258,7 +257,7 @@ func (handler *ManagementHandler) UpdateAccount(writer http.ResponseWriter, requ
 		handler.validation(writer, request)
 		return
 	}
-	result, err := handler.service.UpdateAccount(request.Context(), application.AccountUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, AccountID: chi.URLParam(request, "account_id"), Status: payload.Status, Version: payload.Version})
+	result, err := handler.service.UpdateAccount(request.Context(), application.AccountUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, AccountID: request.PathValue("account_id"), Status: payload.Status, Version: payload.Version})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -401,7 +400,7 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 		httpresponse.WriteSuccess(writer, request, http.StatusCreated, "任职已创建", toMembershipResponse(result))
 		return
 	}
-	result, err := handler.service.UpdateMembership(request.Context(), application.MembershipUpdateInput{MembershipCreateInput: input, MembershipID: chi.URLParam(request, "membership_id"), Status: payload.Status, Version: payload.Version})
+	result, err := handler.service.UpdateMembership(request.Context(), application.MembershipUpdateInput{MembershipCreateInput: input, MembershipID: request.PathValue("membership_id"), Status: payload.Status, Version: payload.Version})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return

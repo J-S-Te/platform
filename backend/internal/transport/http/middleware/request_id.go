@@ -3,26 +3,28 @@ package middleware
 
 import (
 	"crypto/rand"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
+	"github.com/gin-gonic/gin"
 )
 
 const requestIDHeader = "X-Request-ID"
 
-// RequestID validates or generates a ULID-shaped request identifier and stores it in context.
-func RequestID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestID := strings.ToUpper(strings.TrimSpace(r.Header.Get(requestIDHeader)))
+// RequestID validates or generates a ULID-shaped request identifier and stores it in the request
+// context so HTTP adapters, logs, and response envelopes use the same correlation value.
+func RequestID() gin.HandlerFunc {
+	return func(context *gin.Context) {
+		requestID := strings.ToUpper(strings.TrimSpace(context.GetHeader(requestIDHeader)))
 		if !isULID(requestID) {
 			requestID = newULID(time.Now().UTC())
 		}
 
-		w.Header().Set(requestIDHeader, requestID)
-		next.ServeHTTP(w, r.WithContext(requestctx.WithRequestID(r.Context(), requestID)))
-	})
+		context.Header(requestIDHeader, requestID)
+		context.Request = context.Request.WithContext(requestctx.WithRequestID(context.Request.Context(), requestID))
+		context.Next()
+	}
 }
 
 func isULID(value string) bool {

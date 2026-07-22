@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
+	mfaapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/application"
+	securityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/security"
 )
@@ -25,7 +27,25 @@ var (
 // AccountLockedError includes the lock expiry for the documented 423 response.
 type AccountLockedError struct {
 	LockedUntil time.Time
+	TenantID    string
+	UserID      string
+	UserName    string
+	AccountID   string
+	AccountName string
 }
+
+// LoginFailedError retains trusted account identity for audit logging while preserving the public
+// generic invalid-credential response.
+type LoginFailedError struct {
+	TenantID    string
+	UserID      string
+	UserName    string
+	AccountID   string
+	AccountName string
+}
+
+func (error LoginFailedError) Error() string { return ErrUnauthenticated.Error() }
+func (error LoginFailedError) Unwrap() error { return ErrUnauthenticated }
 
 func (error AccountLockedError) Error() string { return ErrAccountLocked.Error() }
 func (error AccountLockedError) Unwrap() error { return ErrAccountLocked }
@@ -33,8 +53,9 @@ func (error AccountLockedError) Unwrap() error { return ErrAccountLocked }
 // Repository defines persistence operations required by the password and session use cases.
 type Repository interface {
 	FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error)
-	RecordFailedPasswordAttempt(ctx context.Context, accountID string, attemptedAt time.Time) error
-	CreateSessionForLogin(ctx context.Context, account domain.LoginAccount, session domain.Session) error
+	FindFederatedLoginAccount(ctx context.Context, tenantID, userID, accountID string) (domain.LoginAccount, error)
+	RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error
+	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time) (domain.Principal, error)
 	RefreshSession(ctx context.Context, sessionID string, refreshedAt, expiresAt time.Time) error
 	RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time, reason string) error
@@ -61,25 +82,44 @@ type Clock interface {
 	Now() time.Time
 }
 
+// MFAService creates and verifies the short-lived, account-bound credential used between a
+// successful password verification and browser-session issuance.
+type MFAService interface {
+	BeginLoginPreAuthentication(context.Context, mfaapplication.BeginLoginPreAuthenticationInput) (mfaapplication.LoginPreAuthentication, error)
+	VerifyLoginPreAuthentication(context.Context, mfaapplication.VerifyLoginPreAuthenticationInput) (mfaapplication.LoginPreAuthenticationVerification, error)
+}
+
 // Service implements password login and server-verified cookie session operations.
 type Service struct {
-	repository Repository
-	passwords  PasswordVerifier
-	tokens     TokenManager
-	ids        IDGenerator
-	clock      Clock
-	sessionTTL time.Duration
+	repository    Repository
+	passwords     PasswordVerifier
+	tokens        TokenManager
+	ids           IDGenerator
+	clock         Clock
+	loginSecurity securityapplication.LoginFailureRecorder
+	mfa           MFAService
+	sessionTTL    time.Duration
 }
 
 // NewService validates and builds an authentication service.
-func NewService(repository Repository, passwords PasswordVerifier, tokens TokenManager, ids IDGenerator, clock Clock, sessionTTL time.Duration) (*Service, error) {
-	if repository == nil || passwords == nil || tokens == nil || ids == nil || clock == nil {
+func NewService(repository Repository, passwords PasswordVerifier, tokens TokenManager, ids IDGenerator, clock Clock, loginSecurity securityapplication.LoginFailureRecorder, sessionTTL time.Duration, mfaServices ...MFAService) (*Service, error) {
+	if repository == nil || passwords == nil || tokens == nil || ids == nil || clock == nil || loginSecurity == nil {
 		return nil, errors.New("identity authentication dependencies must not be nil")
 	}
 	if sessionTTL <= 0 {
 		return nil, errors.New("identity session TTL must be greater than zero")
 	}
-	return &Service{repository: repository, passwords: passwords, tokens: tokens, ids: ids, clock: clock, sessionTTL: sessionTTL}, nil
+	if len(mfaServices) > 1 {
+		return nil, errors.New("identity authentication accepts at most one MFA service")
+	}
+	var mfa MFAService
+	if len(mfaServices) == 1 {
+		mfa = mfaServices[0]
+		if mfa == nil {
+			return nil, errors.New("identity MFA service must not be nil when supplied")
+		}
+	}
+	return &Service{repository: repository, passwords: passwords, tokens: tokens, ids: ids, clock: clock, loginSecurity: loginSecurity, mfa: mfa, sessionTTL: sessionTTL}, nil
 }
 
 // LoginInput contains validated password-login data plus non-sensitive client metadata.
@@ -95,6 +135,30 @@ type SessionResult struct {
 	ExpiresAt   time.Time
 	RedirectURL string
 	Token       string
+
+	// Identity fields are server-side metadata for lifecycle auditing. They are deliberately not
+	// included in the HTTP response body or browser cookie.
+	SessionID   string
+	TenantID    string
+	UserID      string
+	UserName    string
+	AccountID   string
+	AccountName string
+
+	// MFARequired means the password was valid but no browser session or cookie may be issued yet.
+	// PreAuthenticationCredential is high entropy, opaque and returned only to the current client.
+	MFARequired                 bool
+	PreAuthenticationCredential string
+	PreAuthenticationExpiresAt  time.Time
+	MFAMaxAttempts              uint16
+}
+
+// MFALoginResult contains either a completed browser session or a bounded failed MFA result.
+type MFALoginResult struct {
+	SessionResult
+	Verified           bool
+	VerificationMethod string
+	AttemptsRemaining  uint16
 }
 
 // Login validates a local account's Argon2id password, persists iam_session and signs its cookie.
@@ -114,7 +178,7 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 
 	now := service.clock.Now().UTC().Truncate(time.Second)
 	if account.LockedUntil != nil && account.LockedUntil.After(now) {
-		return SessionResult{}, AccountLockedError{LockedUntil: account.LockedUntil.UTC()}
+		return SessionResult{}, lockedError(account, account.LockedUntil.UTC())
 	}
 	if !isLoginEligible(account, now) {
 		return SessionResult{}, ErrUnauthenticated
@@ -125,12 +189,127 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 		return SessionResult{}, fmt.Errorf("verify password credential: %w", err)
 	}
 	if !matched {
-		if err := service.repository.RecordFailedPasswordAttempt(ctx, account.AccountID, now); err != nil {
-			return SessionResult{}, fmt.Errorf("record failed password attempt: %w", err)
+		result, err := service.loginSecurity.RecordFailedLogin(ctx, securityapplication.LoginFailureInput{
+			TenantID: account.TenantID, AccountID: account.AccountID, AccountName: account.AccountName,
+			IPAddress: input.IPAddress, UserAgent: input.UserAgent,
+		})
+		if err != nil {
+			return SessionResult{}, fmt.Errorf("record failed password login: %w", err)
 		}
+		if result.LockedUntil != nil {
+			return SessionResult{}, lockedError(account, result.LockedUntil.UTC())
+		}
+		return SessionResult{}, loginFailedError(account)
+	}
+
+	if err := service.repository.RecordSuccessfulPasswordVerification(ctx, account, now); err != nil {
+		if errors.Is(err, ErrUnauthenticated) {
+			return SessionResult{}, ErrUnauthenticated
+		}
+		return SessionResult{}, fmt.Errorf("record successful password verification: %w", err)
+	}
+
+	if service.mfa != nil {
+		preAuthentication, err := service.mfa.BeginLoginPreAuthentication(ctx, mfaapplication.BeginLoginPreAuthenticationInput{TenantID: account.TenantID, AccountID: account.AccountID})
+		if err != nil {
+			return SessionResult{}, fmt.Errorf("begin MFA login pre-authentication: %w", err)
+		}
+		if preAuthentication.Required {
+			return mfaRequiredSessionResult(account, preAuthentication), nil
+		}
+	}
+
+	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now)
+}
+
+// FederatedLoginInput contains a trusted local identity resolved only after the external provider
+// callback, ID token and account binding have been verified by the federation login service.
+type FederatedLoginInput struct {
+	TenantID  string
+	UserID    string
+	AccountID string
+	IPAddress net.IP
+	UserAgent string
+}
+
+// LoginFederated creates a normal platform login from an active local account that was resolved by
+// an external identity binding. Upstream tokens, authorization codes and external subjects never
+// enter this service.
+func (service *Service) LoginFederated(ctx context.Context, input FederatedLoginInput) (SessionResult, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	userID := strings.TrimSpace(input.UserID)
+	accountID := strings.TrimSpace(input.AccountID)
+	if tenantID == "" || userID == "" || accountID == "" {
 		return SessionResult{}, ErrUnauthenticated
 	}
 
+	account, err := service.repository.FindFederatedLoginAccount(ctx, tenantID, userID, accountID)
+	if err != nil {
+		if errors.Is(err, ErrUnauthenticated) {
+			return SessionResult{}, ErrUnauthenticated
+		}
+		return SessionResult{}, fmt.Errorf("find federated login account: %w", err)
+	}
+
+	now := service.clock.Now().UTC().Truncate(time.Second)
+	if account.LockedUntil != nil && account.LockedUntil.After(now) {
+		return SessionResult{}, lockedError(account, account.LockedUntil.UTC())
+	}
+	if !isIdentityEligible(account) {
+		return SessionResult{}, ErrUnauthenticated
+	}
+
+	if service.mfa != nil {
+		preAuthentication, err := service.mfa.BeginLoginPreAuthentication(ctx, mfaapplication.BeginLoginPreAuthenticationInput{TenantID: account.TenantID, AccountID: account.AccountID})
+		if err != nil {
+			return SessionResult{}, fmt.Errorf("begin federated MFA login pre-authentication: %w", err)
+		}
+		if preAuthentication.Required {
+			return mfaRequiredSessionResult(account, preAuthentication), nil
+		}
+	}
+
+	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now)
+}
+
+// mfaRequiredSessionResult retains only trusted local identity metadata needed by server-side
+// adapters before MFA completion. These fields are never serialized in the public MFA response.
+func mfaRequiredSessionResult(account domain.LoginAccount, preAuthentication mfaapplication.LoginPreAuthentication) SessionResult {
+	return SessionResult{
+		TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
+		AccountID: account.AccountID, AccountName: account.AccountName,
+		MFARequired: true, PreAuthenticationCredential: preAuthentication.Credential,
+		PreAuthenticationExpiresAt: preAuthentication.ExpiresAt, MFAMaxAttempts: preAuthentication.MaxAttempts,
+	}
+}
+
+// CompleteMFALogin verifies the opaque pre-authentication credential and creates the normal browser
+// session only after its bound TOTP or recovery code succeeds.
+func (service *Service) CompleteMFALogin(ctx context.Context, credential, code string, ipAddress net.IP, userAgent string) (MFALoginResult, error) {
+	if service.mfa == nil {
+		return MFALoginResult{}, ErrUnauthenticated
+	}
+	verification, err := service.mfa.VerifyLoginPreAuthentication(ctx, mfaapplication.VerifyLoginPreAuthenticationInput{Credential: credential, Code: code})
+	if err != nil {
+		return MFALoginResult{}, err
+	}
+	if !verification.Verified {
+		return MFALoginResult{Verified: false, AttemptsRemaining: verification.AttemptsRemaining}, nil
+	}
+	account := domain.LoginAccount{
+		TenantID: verification.Identity.TenantID, TenantName: verification.Identity.TenantName, TenantCode: verification.Identity.TenantCode, TenantStatus: domain.StatusActive,
+		UserID: verification.Identity.UserID, UserName: verification.Identity.UserName, UserStatus: domain.StatusActive,
+		AccountID: verification.Identity.AccountID, AccountName: verification.Identity.AccountName, AccountStatus: domain.StatusActive,
+		CredentialStatus: domain.StatusActive,
+	}
+	session, err := service.createSession(ctx, account, ipAddress, userAgent, service.clock.Now().UTC().Truncate(time.Second))
+	if err != nil {
+		return MFALoginResult{}, err
+	}
+	return MFALoginResult{SessionResult: session, Verified: true, VerificationMethod: verification.VerificationMethod, AttemptsRemaining: verification.AttemptsRemaining}, nil
+}
+
+func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time) (SessionResult, error) {
 	sessionID, err := service.ids.New(now)
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("generate session ID: %w", err)
@@ -146,17 +325,31 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 
 	session := domain.Session{
 		ID: sessionID, TenantID: account.TenantID, AccountID: account.AccountID,
-		CreatedAt: now, ExpiresAt: expiresAt, IPAddress: normalizeIP(input.IPAddress),
-		UserAgent: truncateUserAgent(input.UserAgent),
+		CreatedAt: now, ExpiresAt: expiresAt, IPAddress: normalizeIP(ipAddress),
+		UserAgent: truncateUserAgent(userAgent),
 	}
-	if err := service.repository.CreateSessionForLogin(ctx, account, session); err != nil {
+	if err := service.repository.CreateSession(ctx, account, session); err != nil {
 		if errors.Is(err, ErrUnauthenticated) {
 			return SessionResult{}, ErrUnauthenticated
 		}
 		return SessionResult{}, fmt.Errorf("persist login session: %w", err)
 	}
 
-	return SessionResult{ExpiresAt: expiresAt, RedirectURL: "/", Token: token}, nil
+	return SessionResult{
+		ExpiresAt: expiresAt, RedirectURL: "/", Token: token,
+		SessionID: sessionID, TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
+		AccountID: account.AccountID, AccountName: account.AccountName,
+	}, nil
+}
+
+func lockedError(account domain.LoginAccount, lockedUntil time.Time) AccountLockedError {
+	return AccountLockedError{LockedUntil: lockedUntil, TenantID: account.TenantID, UserID: account.UserID,
+		UserName: account.UserName, AccountID: account.AccountID, AccountName: account.AccountName}
+}
+
+func loginFailedError(account domain.LoginAccount) LoginFailedError {
+	return LoginFailedError{TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
+		AccountID: account.AccountID, AccountName: account.AccountName}
 }
 
 // Authenticate verifies the signed cookie and cross-checks it against current session, account,
@@ -219,9 +412,16 @@ func (service *Service) Logout(ctx context.Context, principal authctx.Principal)
 }
 
 func isLoginEligible(account domain.LoginAccount, now time.Time) bool {
-	return account.TenantStatus == "ACTIVE" && account.UserStatus == "ACTIVE" &&
-		account.AccountStatus == "ACTIVE" && account.CredentialStatus == "ACTIVE" &&
-		(account.CredentialExpiry == nil || account.CredentialExpiry.After(now))
+	if !isIdentityEligible(account) || account.CredentialStatus != domain.StatusActive {
+		return false
+	}
+	return account.CredentialExpiry == nil || account.CredentialExpiry.After(now)
+}
+
+func isIdentityEligible(account domain.LoginAccount) bool {
+	return account.TenantStatus == domain.StatusActive &&
+		account.UserStatus == domain.StatusActive &&
+		account.AccountStatus == domain.StatusActive
 }
 
 func normalizeIP(ip net.IP) []byte {

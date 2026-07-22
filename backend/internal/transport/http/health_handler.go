@@ -2,44 +2,45 @@ package httptransport
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // HealthHandler owns process liveness and dependency readiness endpoints.
 type HealthHandler struct {
-	db      *sql.DB
-	appName string
+	database *gorm.DB
+	appName  string
 }
 
-// NewHealthHandler creates a handler using the application's shared database pool.
-func NewHealthHandler(db *sql.DB, appName string) HealthHandler {
-	return HealthHandler{db: db, appName: appName}
+// NewHealthHandler creates a handler using the application's shared GORM connection.
+func NewHealthHandler(database *gorm.DB, appName string) HealthHandler {
+	return HealthHandler{database: database, appName: appName}
 }
 
 // Liveness reports whether the HTTP process is running. It intentionally does not query MySQL.
-func (handler HealthHandler) Liveness(w http.ResponseWriter, r *http.Request) {
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "服务运行正常", map[string]string{
+func (handler HealthHandler) Liveness(ginContext *gin.Context) {
+	httpresponse.WriteSuccess(ginContext.Writer, ginContext.Request, http.StatusOK, "服务运行正常", map[string]string{
 		"status":  "ok",
 		"service": handler.appName,
 	})
 }
 
 // Readiness reports whether the API's required database dependency can be reached.
-func (handler HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
-	contextWithTimeout, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+func (handler HealthHandler) Readiness(ginContext *gin.Context) {
+	contextWithTimeout, cancel := context.WithTimeout(ginContext.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	if err := handler.db.PingContext(contextWithTimeout); err != nil {
-		httpresponse.WriteError(w, r, http.StatusServiceUnavailable, httperror.DependencyUnavailable)
+	if err := handler.database.WithContext(contextWithTimeout).Exec("SELECT 1").Error; err != nil {
+		httpresponse.WriteError(ginContext.Writer, ginContext.Request, http.StatusServiceUnavailable, httperror.DependencyUnavailable)
 		return
 	}
 
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "依赖服务可用", map[string]string{
+	httpresponse.WriteSuccess(ginContext.Writer, ginContext.Request, http.StatusOK, "依赖服务可用", map[string]string{
 		"status": "ok",
 		"mysql":  "available",
 	})
