@@ -1,0 +1,42 @@
+CREATE TABLE IF NOT EXISTS obs_alert_rule (
+    rule_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    application_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    metric_name VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    comparator VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    severity VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    threshold DOUBLE NOT NULL,
+    window_seconds INT UNSIGNED NOT NULL,
+    created_by CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    updated_by CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    last_state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    last_triggered_at DATETIME(3) NULL,
+    created_at DATETIME(3) NOT NULL,
+    updated_at DATETIME(3) NOT NULL,
+    version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+    PRIMARY KEY (rule_id),
+    UNIQUE KEY uk_obs_alert_rule_tenant_rule (tenant_id, rule_id),
+    KEY idx_obs_alert_rule_tenant_created (tenant_id, created_at, rule_id),
+    KEY idx_obs_alert_rule_status_created (status, created_at, rule_id),
+    CONSTRAINT fk_obs_alert_rule_tenant FOREIGN KEY (tenant_id) REFERENCES iam_tenant (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_obs_alert_rule_application FOREIGN KEY (application_id) REFERENCES platform_application (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_obs_alert_rule_created_by FOREIGN KEY (created_by) REFERENCES iam_user (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_obs_alert_rule_updated_by FOREIGN KEY (updated_by) REFERENCES iam_user (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS obs_alert_evaluation (
+    evaluation_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    rule_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    notification_status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    error_message VARCHAR(1000) NULL,
+    observed_value DOUBLE NOT NULL,
+    evaluated_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (evaluation_id),
+    KEY idx_obs_alert_evaluation_tenant_rule_time (tenant_id, rule_id, evaluated_at),
+    CONSTRAINT fk_obs_alert_evaluation_tenant FOREIGN KEY (tenant_id) REFERENCES iam_tenant (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_obs_alert_evaluation_rule FOREIGN KEY (rule_id) REFERENCES obs_alert_rule (rule_id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

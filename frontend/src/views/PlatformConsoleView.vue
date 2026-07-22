@@ -3,21 +3,22 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import ConsoleIcon from '@/components/ConsoleIcon.vue'
 import IamSettingsModule from '@/components/IamSettingsModule.vue'
 import SecurityObservabilityModule from '@/components/SecurityObservabilityModule.vue'
+import ApplicationLoginTargetModule from '@/components/ApplicationLoginTargetModule.vue'
+import NotificationCenterModule from '@/components/NotificationCenterModule.vue'
+import ObservabilityManagementModule from '@/components/ObservabilityManagementModule.vue'
+import AuditOperationsModule from '@/components/AuditOperationsModule.vue'
+import FileTaskOperationsModule from '@/components/FileTaskOperationsModule.vue'
 import '@/styles/console.css'
 
 const initialSettings = {
   organizationName: '基础能力平台',
   organizationAlias: '基础平台',
-  timezone: '(GMT+08:00) 北京 / 上海',
-  qualification: '统一社会信用代码：待后端接入 · 等保备案信息：待配置',
-  inboxEnabled: true,
-  emailEnabled: true,
-  reminderFrequency: '每日',
 }
 
 const settings = reactive({ ...initialSettings })
 const currentView = ref(resolveView(window.location.pathname))
 const activeSettingsTab = ref('iam')
+const loginTargetBoundary = reactive({ applicationId: '', environmentId: '', applicationName: '', environmentName: '' })
 const mobileMenuOpen = ref(false)
 const toastMessage = ref('')
 const auditKeyword = ref('')
@@ -36,8 +37,11 @@ let toastTimer = null
 const settingsTabs = [
   { key: 'base', label: '基础设置' },
   { key: 'iam', label: '用户与角色' },
-  { key: 'notify', label: '通知设置' },
-  { key: 'security', label: '安全与可观测' },
+  { key: 'login-targets', label: '统一登录目标' },
+  { key: 'notify', label: '通知中心' },
+  { key: 'security', label: '安全设置' },
+  { key: 'observability', label: '可观测性' },
+  { key: 'files', label: '文件与任务' },
   { key: 'dict', label: '字典管理' },
 ]
 
@@ -83,7 +87,10 @@ const viewMeta = computed(() => {
     return { title: '系统设置', crumb: '系统设置', description: 'SYS-002 ~ SYS-004 · 身份、组织、角色与权限集中配置' }
   }
   if (activeSettingsTab.value === 'security') {
-    return { title: '系统设置', crumb: '系统设置', description: 'AUD-002 · 登录安全、审计上报与运行可观测性集中配置' }
+    return { title: '系统设置', crumb: '系统设置', description: 'AUD-002 · 登录安全与风险策略集中配置' }
+  }
+  if (activeSettingsTab.value === 'observability') {
+    return { title: '系统设置', crumb: '系统设置', description: 'OBS-001 · 运行日志、Trace、Metric 与告警规则运营' }
   }
   return { title: '系统设置', crumb: '系统设置', description: 'SYS-001 · 平台级参数、通知与安全策略集中配置' }
 })
@@ -334,6 +341,8 @@ onBeforeUnmount(() => {
             </div>
             <footer class="console-table-footer audit-table-footer"><span>第 {{ auditPage }} / {{ auditTotalPages }} 页 · 共 {{ filteredAuditRecords.length }} 条前端示例事件 · 生产环境应使用受控保留策略</span><div class="audit-pagination"><button class="console-text-button" type="button" :disabled="auditPage === 1" @click="changeAuditPage(auditPage - 1)">上一页</button><span class="console-page-token">{{ auditPage }} / {{ auditTotalPages }}</span><button class="console-text-button" type="button" :disabled="auditPage === auditTotalPages" @click="changeAuditPage(auditPage + 1)">下一页</button></div></footer>
           </div>
+
+          <AuditOperationsModule @toast="showToast" />
         </section>
 
         <section v-else class="settings-view" aria-label="系统设置">
@@ -344,13 +353,11 @@ onBeforeUnmount(() => {
           <div v-if="activeSettingsTab === 'base'" class="console-card settings-card">
             <div class="console-card-body">
               <h2>平台基础信息</h2>
-              <p class="console-card-hint">用于定义基础能力平台的展示名称、时区和备案信息。</p>
+              <p class="console-card-hint">用于定义基础能力平台的展示名称与平台标识。</p>
               <div class="console-form-grid">
                 <label class="console-form-item"><span>平台名称</span><input v-model="settings.organizationName" /></label>
                 <label class="console-form-item"><span>平台简称</span><input v-model="settings.organizationAlias" /></label>
-                <label class="console-form-item"><span>系统时区</span><select v-model="settings.timezone"><option>(GMT+08:00) 北京 / 上海</option><option>(GMT+09:00) 东京</option><option>(GMT+00:00) 伦敦</option></select></label>
                 <div class="console-form-item"><span>平台标识</span><div class="console-logo-preview"><b>基</b><small>默认文字标识，后续可接入本地文件上传。</small></div></div>
-                <label class="console-form-item full"><span>备案 / 资质信息</span><textarea v-model="settings.qualification" rows="3"></textarea></label>
               </div>
               <div class="console-form-actions"><button class="console-button primary" type="button" @click="saveSettings"><ConsoleIcon name="save" />保存设置</button><button class="console-button ghost" type="button" @click="resetSettings">重置</button></div>
             </div>
@@ -358,16 +365,18 @@ onBeforeUnmount(() => {
 
           <IamSettingsModule v-else-if="activeSettingsTab === 'iam'" @toast="showToast" />
 
-          <div v-else-if="activeSettingsTab === 'notify'" class="console-card settings-card"><div class="console-card-body"><h2>通知设置</h2><p class="console-card-hint">配置基础平台内的安全事件、审计导出和系统告警通知方式。</p>
-            <div class="console-setting-list">
-              <div class="console-setting-row"><div><strong>站内信</strong><p>安全策略变更、审计导出等重要事件推送到平台通知中心。</p></div><button class="console-switch" :class="{ on: settings.inboxEnabled }" type="button" :aria-pressed="settings.inboxEnabled" @click="settings.inboxEnabled = !settings.inboxEnabled"><i></i></button></div>
-              <div class="console-setting-row"><div><strong>邮件通知</strong><p>将高风险审计事件和安全告警发送至已配置的管理员邮箱。</p></div><button class="console-switch" :class="{ on: settings.emailEnabled }" type="button" :aria-pressed="settings.emailEnabled" @click="settings.emailEnabled = !settings.emailEnabled"><i></i></button></div>
-              <label class="console-setting-row"><span><strong>提醒频率</strong><p>安全告警的批量推送频率。</p></span><select v-model="settings.reminderFrequency" class="console-control-select"><option>每日</option><option>每 4 小时</option><option>仅一次</option></select></label>
-            </div>
-            <div class="console-form-actions"><button class="console-button primary" type="button" @click="saveSettings"><ConsoleIcon name="save" />保存设置</button></div>
-          </div></div>
+          <div v-else-if="activeSettingsTab === 'login-targets'" class="settings-module-stack">
+            <div class="console-card settings-card"><div class="console-card-body"><h2>管理边界</h2><p class="console-card-hint">登录目标严格归属于一个应用环境；目标地址必须是登记后的 HTTPS 白名单地址，且与 OAuth redirect_uri 分离。</p><div class="console-form-grid"><label class="console-form-item"><span>应用 ID</span><input v-model.trim="loginTargetBoundary.applicationId" placeholder="输入 application_id" /></label><label class="console-form-item"><span>环境 ID</span><input v-model.trim="loginTargetBoundary.environmentId" placeholder="输入 environment_id" /></label><label class="console-form-item"><span>应用名称（展示）</span><input v-model.trim="loginTargetBoundary.applicationName" placeholder="可选" /></label><label class="console-form-item"><span>环境名称（展示）</span><input v-model.trim="loginTargetBoundary.environmentName" placeholder="可选" /></label></div></div></div>
+            <ApplicationLoginTargetModule :application-id="loginTargetBoundary.applicationId" :environment-id="loginTargetBoundary.environmentId" :application-name="loginTargetBoundary.applicationName" :environment-name="loginTargetBoundary.environmentName" @toast="showToast" />
+          </div>
+
+          <NotificationCenterModule v-else-if="activeSettingsTab === 'notify'" @toast="showToast" />
 
           <SecurityObservabilityModule v-else-if="activeSettingsTab === 'security'" @toast="showToast" />
+
+          <ObservabilityManagementModule v-else-if="activeSettingsTab === 'observability'" @toast="showToast" />
+
+          <FileTaskOperationsModule v-else-if="activeSettingsTab === 'files'" @toast="showToast" />
 
           <div v-else class="console-card settings-card"><div class="console-card-body"><h2>字典管理</h2><p class="console-card-hint">本期保留字典管理入口，字典项维护接口后续由平台配置模块接入。</p>
             <div class="console-setting-list">

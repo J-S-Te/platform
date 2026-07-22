@@ -1,9 +1,17 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
-import { loginWithPassword } from '@/api/auth'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { createDingTalkQrSession, loginWithPassword, verifyMfaLogin } from '@/api/auth'
+import {
+  isDingTalkFrameRenderMode,
+  mountDingTalkFrameLogin,
+  normalizeDingTalkQrSDKConfig,
+} from '@/utils/dingtalkQr'
+import { resolveSameOriginRedirect, resolveServerApprovedRedirect } from '@/utils/navigation'
 
 const STORAGE_KEY = 'basic-platform.remembered-account'
 const LOGIN_SUCCESS_URL = import.meta.env.VITE_LOGIN_SUCCESS_URL || '/'
+const DINGTALK_PROVIDER_CODE = import.meta.env.VITE_DINGTALK_PROVIDER_CODE || 'DINGTALK_QR'
+const DINGTALK_QR_CONTAINER_ID = 'dingtalk-qr-frame-login'
 
 const activeTab = ref('password')
 const account = ref(localStorage.getItem(STORAGE_KEY) || '')
@@ -13,9 +21,22 @@ const passwordVisible = ref(false)
 const submitting = ref(false)
 const formError = ref('')
 const formSuccess = ref('')
-const qrVersion = ref(1)
-const qrSeconds = ref(300)
+const tenantId = ref(new URLSearchParams(window.location.search).get('tenant_id') || '')
+const qrStatus = ref('idle')
+const qrError = ref('')
+const qrSession = ref(null)
+const qrSeconds = ref(0)
+const qrContainer = ref(null)
+const mfaRequired = ref(false)
+const mfaCode = ref('')
+const mfaError = ref('')
+const mfaSubmitting = ref(false)
+const mfaReturnTo = ref('')
+const mfaLoginSource = ref('')
+let mfaPreAuthenticationCredential = ''
 let qrTimer = null
+let qrRequestController = null
+let qrRequestVersion = 0
 
 const currentYear = new Date().getFullYear()
 const countdown = computed(() => {
@@ -23,6 +44,40 @@ const countdown = computed(() => {
   const seconds = String(qrSeconds.value % 60).padStart(2, '0')
   return `${minutes}:${seconds}`
 })
+const qrIsReady = computed(() => qrStatus.value === 'ready' && Boolean(qrSession.value))
+const qrIsExpired = computed(() => qrStatus.value === 'expired')
+
+function getLoginReturnTo() {
+  const oidcReturnTo = new URLSearchParams(window.location.search).get('return_to')
+  return resolveSameOriginRedirect(oidcReturnTo || LOGIN_SUCCESS_URL)
+}
+
+function getLoginTargetSelection() {
+  const parameters = new URLSearchParams(window.location.search)
+  return {
+    applicationId: parameters.get('application_id')?.trim() || '',
+    environmentId: parameters.get('environment_id')?.trim() || '',
+    loginTargetCode: parameters.get('login_target_code')?.trim() || '',
+  }
+}
+
+function redirectTopLevel(candidate, allowApprovedCrossOrigin = false) {
+  const redirectUrl = allowApprovedCrossOrigin
+    ? resolveServerApprovedRedirect(candidate)
+    : resolveSameOriginRedirect(candidate)
+
+  if (window.top === window) {
+    window.location.assign(redirectUrl)
+    return
+  }
+
+  try {
+    window.top.location.assign(redirectUrl)
+  } catch {
+    // 嵌入宿主无权导航顶层窗口时，仍只在当前同源页面完成受控跳转。
+    window.location.assign(redirectUrl)
+  }
+}
 
 function switchTab(tab) {
   activeTab.value = tab
@@ -30,10 +85,26 @@ function switchTab(tab) {
   formSuccess.value = ''
 
   if (tab === 'qrcode') {
-    startQrCountdown()
-  } else {
-    stopQrCountdown()
+    void ensureDingTalkQrSession()
+    return
   }
+
+  abortQrSessionRequest()
+  resetQrSession()
+  qrStatus.value = 'idle'
+  qrError.value = ''
+}
+
+function handleTenantIdInput() {
+  if (!qrSession.value && qrStatus.value === 'idle') {
+    qrError.value = ''
+    return
+  }
+
+  abortQrSessionRequest()
+  resetQrSession()
+  qrStatus.value = 'idle'
+  qrError.value = ''
 }
 
 function validateForm() {
@@ -65,10 +136,13 @@ async function submitLogin() {
   submitting.value = true
 
   try {
-    const result = await loginWithPassword({
+    const response = await loginWithPassword({
       account: account.value.trim(),
       password: password.value,
+      ...getLoginTargetSelection(),
     })
+    const result = response.body
+    const data = result?.data || result
 
     if (rememberAccount.value) {
       localStorage.setItem(STORAGE_KEY, account.value.trim())
@@ -76,15 +150,29 @@ async function submitLogin() {
       localStorage.removeItem(STORAGE_KEY)
     }
 
-    formSuccess.value = result.message || result.msg || '登录成功，正在进入平台…'
+    if (response.status === 202 || data?.mfa_required === true) {
+      const preAuthenticationCredential =
+        typeof data?.pre_authentication_credential === 'string' ? data.pre_authentication_credential.trim() : ''
+
+      // 此凭据只保存在当前组件闭包中，用于下一次 MFA 请求；不进入响应式状态或浏览器存储。
+      enterMfa({
+        returnTo: data?.redirect_url || getLoginReturnTo(),
+        source: 'password',
+        preAuthenticationCredential,
+      })
+      password.value = ''
+      return
+    }
+
+    formSuccess.value = result?.message || result?.msg || '登录成功，正在进入平台…'
 
     const redirectUrl =
-      result?.data?.redirect_url ||
-      result?.data?.redirectUrl ||
+      data?.redirect_url ||
+      data?.redirectUrl ||
       result?.redirect_url ||
       LOGIN_SUCCESS_URL
 
-    window.setTimeout(() => window.location.assign(redirectUrl), 450)
+    window.setTimeout(() => redirectTopLevel(redirectUrl, true), 450)
   } catch (error) {
     const traceText = error.traceId ? `（追踪号：${error.traceId}）` : ''
     formError.value = `${error.message || '登录失败，请稍后重试。'}${traceText}`
@@ -98,6 +186,29 @@ function showAccountHelp() {
   formError.value = '请联系平台管理员重置密码；重置操作将记录到安全审计日志。'
 }
 
+function validateTenantId() {
+  const normalizedTenantId = tenantId.value.trim()
+
+  if (!normalizedTenantId) {
+    return '请输入租户 ID 后再获取钉钉二维码。'
+  }
+
+  if (normalizedTenantId.length > 128) {
+    return '租户 ID 长度不能超过 128 个字符。'
+  }
+
+  return ''
+}
+
+function abortQrSessionRequest() {
+  qrRequestVersion += 1
+
+  if (qrRequestController) {
+    qrRequestController.abort()
+    qrRequestController = null
+  }
+}
+
 function stopQrCountdown() {
   if (qrTimer) {
     window.clearInterval(qrTimer)
@@ -105,31 +216,309 @@ function stopQrCountdown() {
   }
 }
 
-function startQrCountdown() {
+function startQrCountdown(sessionID, expiresAt) {
   stopQrCountdown()
 
-  if (qrSeconds.value <= 0) {
-    qrSeconds.value = 300
-  }
-
-  qrTimer = window.setInterval(() => {
-    if (qrSeconds.value <= 1) {
-      qrSeconds.value = 0
+  const expiresAtMs = Date.parse(expiresAt)
+  const updateCountdown = () => {
+    if (qrSession.value?.sessionId !== sessionID || qrStatus.value !== 'ready') {
       stopQrCountdown()
       return
     }
 
-    qrSeconds.value -= 1
-  }, 1000)
+    const secondsRemaining = Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000))
+    qrSeconds.value = secondsRemaining
+
+    if (secondsRemaining === 0) {
+      resetQrSession()
+      qrStatus.value = 'expired'
+    }
+  }
+
+  updateCountdown()
+  if (qrStatus.value === 'ready') {
+    qrTimer = window.setInterval(updateCountdown, 1000)
+  }
+}
+
+function resetQrSession() {
+  stopQrCountdown()
+  qrContainer.value?.replaceChildren()
+  qrSession.value = null
+  qrSeconds.value = 0
+}
+
+async function ensureDingTalkQrSession() {
+  if (mfaRequired.value || activeTab.value !== 'qrcode' || qrIsReady.value || qrStatus.value === 'loading') {
+    return
+  }
+
+  await requestDingTalkQrSession()
+}
+
+function handleDingTalkQrSuccess(sessionID, callbackURL) {
+  if (qrSession.value?.sessionId !== sessionID || qrStatus.value !== 'ready') {
+    return
+  }
+
+  qrStatus.value = 'completing'
+  abortQrSessionRequest()
+  resetQrSession()
+
+  // callbackURL 已由 SDK 适配器校验为后端登记的 redirect_uri，授权码仅随本次顶层跳转发送。
+  if (window.top === window) {
+    window.location.assign(callbackURL)
+    return
+  }
+
+  try {
+    window.top.location.assign(callbackURL)
+  } catch {
+    window.location.assign(callbackURL)
+  }
+}
+
+function handleDingTalkQrFailure(sessionID, error) {
+  if (qrSession.value?.sessionId !== sessionID || qrStatus.value === 'completing') {
+    return
+  }
+
+  abortQrSessionRequest()
+  resetQrSession()
+  qrStatus.value = 'error'
+  qrError.value = error instanceof Error && error.message ? error.message : '钉钉二维码初始化失败，请稍后重试。'
+}
+
+async function requestDingTalkQrSession() {
+  if (mfaRequired.value || activeTab.value !== 'qrcode') {
+    return
+  }
+
+  const tenantError = validateTenantId()
+  if (tenantError) {
+    resetQrSession()
+    qrStatus.value = 'idle'
+    qrError.value = tenantError
+    return
+  }
+
+  abortQrSessionRequest()
+  resetQrSession()
+  qrStatus.value = 'loading'
+  qrError.value = ''
+  const requestVersion = qrRequestVersion + 1
+  qrRequestVersion = requestVersion
+  const requestController = new AbortController()
+  qrRequestController = requestController
+
+  try {
+    const result = await createDingTalkQrSession(
+      {
+        tenantId: tenantId.value.trim(),
+        providerCode: DINGTALK_PROVIDER_CODE,
+        returnTo: getLoginReturnTo(),
+      },
+      { signal: requestController.signal },
+    )
+    if (requestVersion !== qrRequestVersion || mfaRequired.value || activeTab.value !== 'qrcode') {
+      return
+    }
+
+    const data = result?.data || result
+    const sessionId = typeof data?.session_id === 'string' ? data.session_id.trim() : ''
+    const expiresAt = typeof data?.expires_at === 'string' ? data.expires_at : ''
+    const renderMode = typeof data?.render_mode === 'string' ? data.render_mode : ''
+    const expiresAtMs = Date.parse(expiresAt)
+    const sdkConfig = normalizeDingTalkQrSDKConfig(data?.sdk_config)
+
+    if (!sessionId || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+      throw new Error('扫码服务返回的数据不完整或已失效。')
+    }
+    if (!isDingTalkFrameRenderMode(renderMode)) {
+      throw new Error('扫码服务返回的呈现方式不受支持。')
+    }
+
+    qrSession.value = {
+      sessionId,
+      expiresAt,
+      sdkConfig,
+    }
+    qrStatus.value = 'ready'
+    startQrCountdown(sessionId, expiresAt)
+    await nextTick()
+
+    if (requestVersion !== qrRequestVersion || qrSession.value?.sessionId !== sessionId || qrStatus.value !== 'ready') {
+      return
+    }
+
+    await mountDingTalkFrameLogin({
+      containerID: DINGTALK_QR_CONTAINER_ID,
+      sdkConfig,
+      onSuccess: (callbackURL) => handleDingTalkQrSuccess(sessionId, callbackURL),
+      onError: (error) => handleDingTalkQrFailure(sessionId, error),
+      isActive: () =>
+        requestVersion === qrRequestVersion &&
+        qrSession.value?.sessionId === sessionId &&
+        qrStatus.value === 'ready' &&
+        activeTab.value === 'qrcode' &&
+        !mfaRequired.value,
+    })
+  } catch (error) {
+    if (error?.name === 'AbortError' || requestVersion !== qrRequestVersion) {
+      return
+    }
+
+    resetQrSession()
+    qrStatus.value = 'error'
+    qrError.value = error.message || '钉钉二维码初始化失败，请稍后重试。'
+  } finally {
+    if (qrRequestController === requestController) {
+      qrRequestController = null
+    }
+  }
 }
 
 function refreshQrCode() {
-  qrVersion.value += 1
-  qrSeconds.value = 300
-  startQrCountdown()
+  void requestDingTalkQrSession()
 }
 
-onBeforeUnmount(stopQrCountdown)
+function getDingTalkFailureMessage(errorCode) {
+  switch (errorCode) {
+    case 'AUTH_DINGTALK_QR_SESSION_INVALID':
+      return '二维码已失效或已使用，请重新获取后扫码。'
+    case 'AUTH_DINGTALK_EXTERNAL_IDENTITY_NOT_BOUND':
+      return '当前钉钉账号尚未绑定平台账号，请联系管理员。'
+    case 'AUTH_DINGTALK_PROVIDER_DISABLED':
+    case 'AUTH_DINGTALK_PROVIDER_NOT_AVAILABLE':
+      return '钉钉扫码登录暂不可用，请稍后重试。'
+    default:
+      return '无法完成钉钉登录，请重新获取二维码后重试。'
+  }
+}
+
+function enterMfa({ returnTo, source, preAuthenticationCredential = '' }) {
+  const normalizedCredential =
+    typeof preAuthenticationCredential === 'string' ? preAuthenticationCredential.trim() : ''
+
+  if (source !== 'password' && source !== 'dingtalk') {
+    throw new Error('不支持的 MFA 登录来源。')
+  }
+  if (source === 'password' && (normalizedCredential.length < 32 || normalizedCredential.length > 512)) {
+    throw new Error('登录服务未返回有效的 MFA 验证信息，请重新登录。')
+  }
+
+  abortQrSessionRequest()
+  resetQrSession()
+  qrStatus.value = 'idle'
+  qrError.value = ''
+  mfaReturnTo.value = source === 'password'
+    ? resolveServerApprovedRedirect(returnTo)
+    : resolveSameOriginRedirect(returnTo)
+  mfaLoginSource.value = source
+  mfaPreAuthenticationCredential = normalizedCredential
+  mfaCode.value = ''
+  mfaError.value = ''
+  mfaRequired.value = true
+}
+
+function clearMfaLoginState() {
+  mfaPreAuthenticationCredential = ''
+  mfaLoginSource.value = ''
+  mfaCode.value = ''
+  mfaError.value = ''
+  mfaReturnTo.value = ''
+}
+
+function validateMfaCode() {
+  const code = mfaCode.value.trim()
+
+  if (!code) {
+    return '请输入动态验证码或恢复码。'
+  }
+  if (code.length > 64) {
+    return '动态验证码或恢复码长度不能超过 64 个字符。'
+  }
+
+  return ''
+}
+
+async function submitMfaLogin() {
+  mfaError.value = validateMfaCode()
+  if (mfaError.value || mfaSubmitting.value) {
+    return
+  }
+
+  mfaSubmitting.value = true
+  try {
+    const result = await verifyMfaLogin({
+      code: mfaCode.value.trim(),
+      preAuthenticationCredential: mfaPreAuthenticationCredential,
+    })
+    const data = result?.data || result
+    const redirectUrl = mfaReturnTo.value || (typeof data?.redirect_url === 'string' ? data.redirect_url : '')
+    const allowApprovedCrossOrigin = mfaLoginSource.value === 'password'
+
+    // 登录完成后立即清除仅存在于页面内存中的本地密码 MFA 预认证凭据。
+    mfaPreAuthenticationCredential = ''
+    mfaLoginSource.value = ''
+    redirectTopLevel(redirectUrl || getLoginReturnTo(), allowApprovedCrossOrigin)
+  } catch (error) {
+    const traceText = error.traceId ? `（追踪号：${error.traceId}）` : ''
+    mfaError.value = `${error.message || 'MFA 验证失败，请重新输入。'}${traceText}`
+  } finally {
+    mfaCode.value = ''
+    mfaSubmitting.value = false
+  }
+}
+
+function returnToLoginChoices() {
+  clearMfaLoginState()
+  mfaRequired.value = false
+  activeTab.value = 'password'
+}
+
+function clearDingTalkCallbackParameters() {
+  const currentURL = new URL(window.location.href)
+  currentURL.searchParams.delete('dingtalk_mfa')
+  currentURL.searchParams.delete('dingtalk_error')
+  currentURL.searchParams.delete('return_to')
+  window.history.replaceState(window.history.state, '', `${currentURL.pathname}${currentURL.search}${currentURL.hash}`)
+}
+
+function consumeDingTalkCallbackResult() {
+  const parameters = new URLSearchParams(window.location.search)
+  const dingtalkError = parameters.get('dingtalk_error')
+  const requiresMfa = parameters.get('dingtalk_mfa')
+  const returnTo = parameters.get('return_to')
+
+  if (!dingtalkError && requiresMfa !== '1') {
+    return
+  }
+
+  abortQrSessionRequest()
+  resetQrSession()
+  clearDingTalkCallbackParameters()
+
+  if (dingtalkError) {
+    activeTab.value = 'qrcode'
+    qrStatus.value = dingtalkError === 'AUTH_DINGTALK_QR_SESSION_INVALID' ? 'expired' : 'error'
+    qrError.value = getDingTalkFailureMessage(dingtalkError)
+    return
+  }
+
+  enterMfa({ returnTo, source: 'dingtalk' })
+}
+
+onMounted(() => {
+  consumeDingTalkCallbackResult()
+})
+
+onBeforeUnmount(() => {
+  abortQrSessionRequest()
+  stopQrCountdown()
+  resetQrSession()
+  clearMfaLoginState()
+})
 </script>
 
 <template>
@@ -203,6 +592,67 @@ onBeforeUnmount(stopQrCountdown)
           <p>请验证您的身份以继续访问平台</p>
         </header>
 
+        <section v-if="mfaRequired" class="mfa-panel" aria-labelledby="mfa-heading">
+          <div class="mfa-heading">
+            <span class="login-kicker">SECURITY CHECK</span>
+            <h3 id="mfa-heading">完成安全验证</h3>
+            <p>
+              {{
+                mfaLoginSource === 'dingtalk'
+                  ? '钉钉身份已确认，请输入动态验证码或恢复码以继续登录。'
+                  : '账号密码已验证，请输入动态验证码或恢复码以继续登录。'
+              }}
+            </p>
+          </div>
+
+          <form class="mfa-form" novalidate @submit.prevent="submitMfaLogin">
+            <div class="field-group">
+              <label for="mfa-code">动态验证码或恢复码</label>
+              <div class="input-wrap">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4.5 5.4v5.1c0 4.7 3.2 9 7.5 10.2 4.3-1.2 7.5-5.5 7.5-10.2V5.4L12 2Zm0 2.2 5.5 2.5v3.8c0 3.5-2.2 6.8-5.5 8-3.3-1.2-5.5-4.5-5.5-8V6.7L12 4.2Zm-1 4v5.6h2V8.2h-2Zm0 7.3v2h2v-2h-2Z" /></svg>
+                <input
+                  id="mfa-code"
+                  v-model.trim="mfaCode"
+                  type="text"
+                  name="mfa-code"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  maxlength="64"
+                  placeholder="输入 6 位动态码或恢复码"
+                  :disabled="mfaSubmitting"
+                />
+              </div>
+            </div>
+
+            <p v-if="mfaError" class="form-message error" role="alert">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm-1-5h2v2h-2v-2Zm0-8h2v6h-2V7Z" /></svg>
+              <span>{{ mfaError }}</span>
+            </p>
+
+            <button class="login-button" type="submit" :disabled="mfaSubmitting">
+              <span v-if="mfaSubmitting" class="button-spinner" aria-hidden="true"></span>
+              <span>{{ mfaSubmitting ? '正在验证…' : '完成验证' }}</span>
+              <svg v-if="!mfaSubmitting" viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-1.4 1.4 4.6 4.6H4v2h12.2l-4.6 4.6L13 19l7-7-7-7Z" /></svg>
+            </button>
+
+            <button class="mfa-back" type="button" :disabled="mfaSubmitting" @click="returnToLoginChoices">
+              返回其他登录方式
+            </button>
+
+            <div class="security-tip">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4.5 5.4v5.1c0 4.7 3.2 9 7.5 10.2 4.3-1.2 7.5-5.5 7.5-10.2V5.4L12 2Zm0 2.2 5.5 2.5v3.8c0 3.5-2.2 6.8-5.5 8-3.3-1.2-5.5-4.5-5.5-8V6.7L12 4.2Zm-1 4v5.6h2V8.2h-2Zm0 7.3v2h2v-2h-2Z" /></svg>
+              <span>
+                {{
+                  mfaLoginSource === 'password'
+                    ? '本次 MFA 预认证凭据仅保存在当前页面内存，完成或离开页面后即清除'
+                    : 'MFA 预认证凭据仅由安全 Cookie 管理，不会暴露给前端'
+                }}
+              </span>
+            </div>
+          </form>
+        </section>
+
+        <template v-else>
         <div class="login-tabs" role="tablist" aria-label="登录方式">
           <button
             id="password-tab"
@@ -323,31 +773,81 @@ onBeforeUnmount(stopQrCountdown)
         >
           <div class="qr-heading">
             <h3>使用钉钉扫码登录</h3>
-            <p>请在钉钉 App 中完成身份确认</p>
+            <p>确认租户后，请在钉钉 App 中完成身份确认</p>
           </div>
 
-          <div class="qr-shell" :class="{ expired: qrSeconds === 0 }">
-            <svg :key="qrVersion" class="qr-code" viewBox="0 0 160 160" aria-label="钉钉登录二维码占位图" role="img">
-              <rect width="160" height="160" rx="3" fill="#fff" />
-              <g fill="#0f172a">
-                <path d="M8 8h42v42H8V8Zm8 8v26h26V16H16Zm7 7h12v12H23V23ZM110 8h42v42h-42V8Zm8 8v26h26V16h-26Zm7 7h12v12h-12V23ZM8 110h42v42H8v-42Zm8 8v26h26v-26H16Zm7 7h12v12H23v-12Z" />
-                <path d="M60 8h9v9h-9V8Zm17 0h9v17h-9V8Zm18 8h9v9h-9v-9ZM59 34h18v9H59v-9Zm27 0h9v17h-9V34Zm-26 25h9v9h-9v-9Zm17 0h17v9H77v-9Zm26 0h9v17h-9V59Zm18 0h9v9h-9v-9Zm17 8h9v9h-9v-9ZM59 80h17v9H59v-9Zm25 8h9v9h-9v-9Zm18-9h9v18h-9V79Zm18 8h18v9h-18v-9Zm-61 17h9v18h-9v-18Zm18 0h18v9H77v-9Zm26 8h9v9h-9v-9Zm18-9h9v18h-9v-18Zm18 8h18v9h-18v-9Zm-69 18h18v9H60v-9Zm26 0h9v18h-9v-18Zm18 9h18v9h-18v-9Zm26-9h9v18h-9v-18Z" />
-              </g>
-            </svg>
-            <div v-if="qrSeconds === 0" class="qr-expired">
+          <div class="qr-tenant-field">
+            <label for="dingtalk-tenant-id">租户 ID</label>
+            <input
+              id="dingtalk-tenant-id"
+              v-model.trim="tenantId"
+              type="text"
+              maxlength="128"
+              autocomplete="organization"
+              placeholder="请输入管理员提供的租户 ID"
+              :disabled="qrStatus === 'loading' || qrStatus === 'completing'"
+              @input="handleTenantIdInput"
+              @blur="ensureDingTalkQrSession"
+              @keydown.enter.prevent="refreshQrCode"
+            />
+            <p>仅允许管理员已预先绑定的平台账号完成扫码登录。</p>
+          </div>
+
+          <div
+            class="qr-shell"
+            :class="{
+              loading: qrStatus === 'loading',
+              expired: qrIsExpired,
+              error: qrStatus === 'error',
+            }"
+          >
+            <div v-if="qrStatus === 'loading'" class="qr-state" role="status">
+              <span class="qr-spinner" aria-hidden="true"></span>
+              <strong>正在初始化二维码…</strong>
+              <span>请稍候</span>
+            </div>
+            <div
+              v-else-if="qrIsReady"
+              :id="DINGTALK_QR_CONTAINER_ID"
+              :key="qrSession.sessionId"
+              ref="qrContainer"
+              class="qr-frame"
+              aria-label="钉钉扫码登录二维码"
+            ></div>
+            <div v-else-if="qrIsExpired" class="qr-state">
               <strong>二维码已失效</strong>
+              <span>请重新获取后扫码</span>
               <button type="button" @click="refreshQrCode">立即刷新</button>
             </div>
-            <span class="ding-mark" aria-hidden="true">钉</span>
+            <div v-else-if="qrStatus === 'error'" class="qr-state qr-state-error" role="alert">
+              <strong>二维码初始化失败</strong>
+              <span>请检查租户信息或稍后重试</span>
+              <button type="button" @click="refreshQrCode">重新获取</button>
+            </div>
+            <div v-else class="qr-state">
+              <strong>等待获取二维码</strong>
+              <span>输入租户 ID 后获取</span>
+            </div>
           </div>
 
-          <p class="qr-status"><i></i>等待扫码 · {{ countdown }}</p>
-          <button class="qr-refresh" type="button" @click="refreshQrCode">
+          <p v-if="qrIsReady" class="qr-status"><i></i>请使用钉钉扫码 · {{ countdown }}</p>
+          <p v-else-if="qrStatus === 'loading'" class="qr-status"><i></i>正在生成安全扫码会话</p>
+          <p v-else-if="qrStatus === 'completing'" class="qr-status"><i></i>登录已确认，正在进入平台…</p>
+          <p v-else class="qr-status"><i></i>二维码有效期由认证服务控制</p>
+          <p v-if="qrError" class="qr-inline-error" role="alert">{{ qrError }}</p>
+
+          <button
+            class="qr-refresh"
+            type="button"
+            :disabled="qrStatus === 'loading' || qrStatus === 'completing'"
+            @click="refreshQrCode"
+          >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.7 6.3A8 8 0 0 0 4.3 9H2l3 3 3-3H6.3a6 6 0 1 1-.1 6.8l-1.7 1A8 8 0 1 0 17.7 6.3Z" /></svg>
-            刷新二维码
+            {{ qrIsReady ? '刷新二维码' : '获取二维码' }}
           </button>
-          <p class="qr-note">启用扫码登录前，需由管理员在认证服务中配置钉钉应用。</p>
+          <p class="qr-note">扫码授权仅用于完成本次平台登录；授权完成后会在当前窗口进入平台。</p>
         </section>
+        </template>
       </div>
 
       <footer class="form-footer">
