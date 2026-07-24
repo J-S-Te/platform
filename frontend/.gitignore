@@ -13,7 +13,6 @@ coverage/
 .env
 .env.*
 !.env.example
-.env.*.local
 
 # Logs
 *.log
@@ -28,6 +27,3 @@ pnpm-debug.log*
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
-
-# 本地运行时产生的数据（日志、上传文件等）
-data/

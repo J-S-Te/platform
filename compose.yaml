@@ -1,0 +1,88 @@
+name: basic-platform
+
+services:
+  mysql:
+    image: mysql:8.4
+    env_file:
+      - ./docker/.env
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ./backend
+    env_file:
+      - ./docker/.env
+    command: ["./migrate"]
+    volumes:
+      - ./data/keys:/app/data/keys
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - ./docker/.env
+    command: ["./api"]
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - ./data/logs:/app/data/logs
+      - ./data/uploads:/app/data/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    env_file:
+      - ./docker/.env
+    command: ["./worker"]
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - ./data/logs:/app/data/logs
+      - ./data/uploads:/app/data/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api/v1
+        VITE_LOGIN_SUCCESS_URL: /
+    ports:
+      - "7898:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

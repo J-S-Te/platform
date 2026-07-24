@@ -146,7 +146,7 @@ func Load() (Config, error) {
 	}
 
 	publicBaseURL := value("APP_PUBLIC_BASE_URL", "http://localhost:8080")
-	oidcIssuer := value("OIDC_ISSUER", publicBaseURL)
+	oidcIssuer := valueOrDefault("OIDC_ISSUER", publicBaseURL)
 
 	cfg := Config{
 		Environment: value("APP_ENV", "development"),
@@ -341,6 +341,16 @@ func value(key, fallback string) string {
 		return strings.TrimSpace(raw)
 	}
 	return fallback
+}
+
+// valueOrDefault returns fallback when the variable is unset or intentionally blank.
+// It is used for optional settings whose safe default is derived from another setting.
+func valueOrDefault(key, fallback string) string {
+	value := value(key, "")
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func integer(key string, fallback int) (int, error) {
