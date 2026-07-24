@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Production output
+dist/
+
+# Test and tooling output
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Local environment files (keep the documented template)
+.env
+.env.*
+!.env.example
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# 本地运行时产生的数据（日志、上传文件等）
+data/

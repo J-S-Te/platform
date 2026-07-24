@@ -1,0 +1,26 @@
+-- 为批量审计 Outbox 投递动作独立保存接收链路，避免覆盖 audit_event 中每条业务事件的原始关联三元组。
+CREATE TABLE IF NOT EXISTS audit_ingestion_receipt (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    application_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    environment_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    client_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    request_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    trace_id CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    correlation_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    event_count SMALLINT UNSIGNED NOT NULL,
+    accepted_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    duplicate_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    source_ip VARBINARY(16) NULL,
+    user_agent VARCHAR(1000) NULL,
+    received_at DATETIME(3) NOT NULL,
+    created_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_audit_ingestion_receipt_tenant_received (tenant_id, received_at),
+    KEY idx_audit_ingestion_receipt_delivery (application_id, request_id, received_at),
+    KEY idx_audit_ingestion_receipt_correlation (correlation_id, received_at),
+    CONSTRAINT fk_audit_ingestion_receipt_tenant FOREIGN KEY (tenant_id) REFERENCES iam_tenant (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_audit_ingestion_receipt_application FOREIGN KEY (application_id) REFERENCES platform_application (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_audit_ingestion_receipt_environment FOREIGN KEY (environment_id) REFERENCES platform_application_environment (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
