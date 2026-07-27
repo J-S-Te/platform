@@ -11,9 +11,9 @@
 #   portal-gateway.sh add <code> <path_prefix> <upstream_url>
 #   portal-gateway.sh remove <code>
 #   portal-gateway.sh list
-#   portal-gateway.sh sync   # 拉管理后台数据全量重写
+#   portal-gateway.sh sync   # 仅在部署管理 API 认证适配层后拉取并全量重写
 #   portal-gateway.sh reload
-#   portal-gateway.sh apply  # sync 后立即 reload
+#   portal-gateway.sh apply  # 仅在 sync 可认证时执行 sync + reload
 #
 # 维护的 nginx include 文件默认写入项目的 docker/portal-apps-locations.conf，由 compose 挂载到 frontend Nginx。
 # 传统宿主机 Nginx 可通过 PORTAL_GATEWAY_NGINX_INCLUDE 覆盖该路径。
@@ -49,18 +49,19 @@ usage() {
       列出当前已注册的子系（按 code 字母序）。
   sync
       从平台管理后台拉所有 ACTIVE application/environment，全量重写 include 文件。
-      需要通过环境变量 PORTAL_GATEWAY_API_BASE_URL 和 PORTAL_GATEWAY_API_TOKEN
-      提供一个拥有 application/environment 读权限的访问令牌。
+      当前管理接口默认只接受平台会话 Cookie，而本命令发送 Bearer Token；默认部署不可直接使用。
+      只有部署了受控认证适配层后，才可通过 PORTAL_GATEWAY_API_BASE_URL 和
+      PORTAL_GATEWAY_API_TOKEN 提供 application/environment 读权限。
   reload
       触发 nginx 重载配置。
   apply
-      从平台管理后台同步配置，并在同步成功后立即重载 nginx。
+      在 sync 已具备受控认证适配层时同步配置，并在成功后立即重载 nginx。
 
 环境变量：
   PORTAL_GATEWAY_NGINX_INCLUDE     include 文件绝对路径
   PORTAL_GATEWAY_NGINX_RELOAD_CMD  reload 命令
-  PORTAL_GATEWAY_API_BASE_URL      sync 用的平台 API 入口
-  PORTAL_GATEWAY_API_TOKEN         sync 用的 Bearer token
+  PORTAL_GATEWAY_API_BASE_URL      sync 认证适配层的平台 API 入口
+  PORTAL_GATEWAY_API_TOKEN         认证适配层接受的 Bearer token
   PORTAL_GATEWAY_PAGE_LIMIT        列表接口单页大小
 USAGE
 }
@@ -306,7 +307,8 @@ do_reload() {
 }
 
 # sync 子命令：从平台管理后台拉取所有 ACTIVE 的 application/environment，
-# 全量重写 include 文件。该路径依赖管理后台的列表接口和读权限。
+# 全量重写 include 文件。当前管理接口默认使用会话 Cookie，而此实现发送 Bearer Token；
+# 只有部署受控认证适配层并授予只读权限后才能使用。默认部署请使用 add + reload。
 do_sync() {
   require_arg "$API_TOKEN" "sync 需要 PORTAL_GATEWAY_API_TOKEN"
   validate_page_limit
