@@ -69,8 +69,6 @@ type AccountResolver interface {
 }
 
 // SessionIssuer creates a trusted local authentication outcome from a verified local identity intent.
-// The returned BrowserSession is either a completed browser session or an MFA pre-authentication
-// challenge; the issuer must never turn an MFA challenge into a completed session.
 type SessionIssuer interface {
 	IssueBrowserSession(context.Context, domain.SessionIssue) (domain.BrowserSession, error)
 }
@@ -298,15 +296,7 @@ func (service *Service) CompleteCallbackWithLifecycle(ctx context.Context, input
 }
 
 func validBrowserSessionOutcome(session domain.BrowserSession, now time.Time) bool {
-	if session.MFARequired {
-		return strings.TrimSpace(session.CookieValue) == "" && session.ExpiresAt.IsZero() &&
-			strings.TrimSpace(session.PreAuthenticationCredential) != "" &&
-			session.PreAuthenticationExpiresAt.After(now) && session.MFAMaxAttempts > 0
-	}
-
-	return strings.TrimSpace(session.CookieValue) != "" && session.ExpiresAt.After(now) &&
-		strings.TrimSpace(session.PreAuthenticationCredential) == "" &&
-		session.PreAuthenticationExpiresAt.IsZero() && session.MFAMaxAttempts == 0
+	return strings.TrimSpace(session.CookieValue) != "" && session.ExpiresAt.After(now)
 }
 
 func (service *Service) newProtocolSecrets() (string, string, string, error) {

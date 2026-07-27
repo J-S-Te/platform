@@ -31,9 +31,9 @@ type SystemClock struct{}
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
 type PageRequest struct {
-	Page, PageSize                                                       int
-	Keyword, ApplicationCode, EnvironmentCode, Action, Result, RiskLevel string
-	OccurredFrom, OccurredTo                                             *time.Time
+	Page, PageSize                                                                       int
+	Keyword, ApplicationCode, EnvironmentCode, Action, ActionCategory, Result, RiskLevel string
+	OccurredFrom, OccurredTo                                                             *time.Time
 }
 type PageResult[T any] struct {
 	Items    []T   `json:"items"`
@@ -119,7 +119,11 @@ func (s *Service) IngestBatch(ctx context.Context, tenantID string, delivery Bat
 	return s.repository.IngestBatch(ctx, tenantID, normalizeBatchDelivery(delivery), normalized, s.clock.Now())
 }
 func (s *Service) List(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Event], error) {
-	return s.repository.List(ctx, tenantID, normalizePage(query))
+	query = normalizePage(query)
+	if !validActionCategory(query.ActionCategory) {
+		return PageResult[domain.Event]{}, validation("action_category is invalid")
+	}
+	return s.repository.List(ctx, tenantID, query)
 }
 func (s *Service) Get(ctx context.Context, tenantID, eventID string) (domain.Event, error) {
 	if strings.TrimSpace(eventID) == "" {
@@ -131,11 +135,15 @@ func (s *Service) CreateExportJob(ctx context.Context, tenantID, operatorID stri
 	if strings.TrimSpace(operatorID) == "" {
 		return domain.ExportJob{}, validation("operator is required")
 	}
+	query = normalizePage(query)
+	if !validActionCategory(query.ActionCategory) {
+		return domain.ExportJob{}, validation("action_category is invalid")
+	}
 	id, err := s.ids.New(s.clock.Now())
 	if err != nil {
 		return domain.ExportJob{}, fmt.Errorf("generate export job ID: %w", err)
 	}
-	return s.repository.CreateExportJob(ctx, tenantID, operatorID, normalizePage(query), id, s.clock.Now())
+	return s.repository.CreateExportJob(ctx, tenantID, operatorID, query, id, s.clock.Now())
 }
 func (s *Service) GetExportJob(ctx context.Context, tenantID, jobID string) (domain.ExportJob, error) {
 	if strings.TrimSpace(jobID) == "" {
@@ -144,6 +152,7 @@ func (s *Service) GetExportJob(ctx context.Context, tenantID, jobID string) (dom
 	return s.repository.GetExportJob(ctx, tenantID, strings.TrimSpace(jobID))
 }
 func normalizePage(query PageRequest) PageRequest {
+	query.ActionCategory = strings.ToUpper(strings.TrimSpace(query.ActionCategory))
 	if query.Page < 1 {
 		query.Page = 1
 	}
@@ -154,6 +163,10 @@ func normalizePage(query PageRequest) PageRequest {
 		query.PageSize = 100
 	}
 	return query
+}
+
+func validActionCategory(category string) bool {
+	return category == "" || oneOf(category, "LOGIN", "CREATE", "UPDATE", "EXPORT", "STATUS_CHANGE")
 }
 
 // completeCorrelation fills only missing event correlation fields from the trusted request

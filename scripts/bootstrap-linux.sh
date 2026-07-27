@@ -42,6 +42,9 @@ REQUIRED_GO_VERSION=""
 REQUIRED_NODE_VERSION="${NODE_VERSION:-22.17.0}"
 ROOT_PREFIX=(command)
 TEMP_PATHS=()
+BOOTSTRAP_ADMIN_DISPLAY_NAME=""
+BOOTSTRAP_ADMIN_ACCOUNT_NAME=""
+BOOTSTRAP_ADMIN_PASSWORD=""
 CHECK_FAILURES=0
 
 mkdir -p "$(dirname -- "$LOG_FILE")"
@@ -86,7 +89,7 @@ usage() {
 环境变量：
   NODE_VERSION                 覆盖默认 Node.js 版本（默认 22.17.0）
   MYSQL_ADMIN_USERNAME         本地 MySQL 管理账号（默认 root）
-  MYSQL_ADMIN_PASSWORD         本地 MySQL 管理密码；Ubuntu socket 管理可不设置
+  MYSQL_ADMIN_PASSWORD         MySQL 管理密码；本机 socket 管理可不设置，远程首次建库必须安全提供
   BASIC_PLATFORM_BOOTSTRAP_LOG 覆盖日志文件路径
   BASIC_PLATFORM_RUNTIME_USER  覆盖原生服务运行用户（默认 basic-platform）
   BASIC_PLATFORM_RUNTIME_GROUP 覆盖原生服务运行用户组（默认 basic-platform）
@@ -916,7 +919,6 @@ configure_environment() {
   merge_env_defaults
   ensure_env_secret MYSQL_PASSWORD hex
   ensure_env_secret IAM_MOBILE_ENCRYPTION_KEY base64
-  ensure_env_secret IAM_MFA_ENCRYPTION_KEY base64
   ensure_env_secret IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY base64
   ensure_env_secret IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY base64
   ensure_env_secret IAM_BOOTSTRAP_TOKEN hex
@@ -1034,7 +1036,13 @@ MYSQL_PORT=3306
 MYSQL_DATABASE=basic_platform
 MYSQL_USERNAME=basic_platform
 MYSQL_PASSWORD=REPLACE_WITH_DATABASE_PASSWORD
+# For remote MySQL, set the fixed application-server source address or an approved MySQL host pattern.
+# For local MySQL this may remain blank. Do not use '%' unless that access has been explicitly approved.
+MYSQL_APPLICATION_ALLOWED_HOST=
 MYSQL_PARAMS=charset=utf8mb4&parseTime=true&loc=UTC
+# Database administrator credentials are deliberately not persisted in this file. For remote first-time
+# database creation, provide MYSQL_ADMIN_USERNAME (default root) and MYSQL_ADMIN_PASSWORD only to the
+# controlled deployment process.
 
 AUTH_JWT_ISSUER=basic-platform
 AUTH_JWT_AUDIENCE=basic-platform-console
@@ -1050,7 +1058,6 @@ AUTH_SESSION_TTL=8h
 
 # The four values below must be distinct Base64-encoded 32-byte keys.
 IAM_MOBILE_ENCRYPTION_KEY=REPLACE_WITH_BASE64_32_BYTE_KEY
-IAM_MFA_ENCRYPTION_KEY=REPLACE_WITH_DIFFERENT_BASE64_32_BYTE_KEY
 IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY=REPLACE_WITH_DIFFERENT_BASE64_32_BYTE_KEY
 IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY=REPLACE_WITH_DIFFERENT_BASE64_32_BYTE_KEY
 IAM_EXTERNAL_OIDC_HTTP_TIMEOUT=10s
@@ -1060,6 +1067,11 @@ IAM_EXTERNAL_OIDC_ALLOWED_HOSTS=
 # Leave empty to keep the first-super-admin endpoint disabled. Set a random value of at
 # least 32 characters only for the controlled first-super-admin initialization, then remove it.
 IAM_BOOTSTRAP_TOKEN=
+# Used only by the deployment script when no first super administrator exists. Supply approved values
+# before the first deployment; IAM_BOOTSTRAP_ADMIN_PASSWORD is automatically cleared after success.
+IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME=REPLACE_WITH_INITIAL_ADMIN_DISPLAY_NAME
+IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME=REPLACE_WITH_INITIAL_ADMIN_ACCOUNT_NAME
+IAM_BOOTSTRAP_ADMIN_PASSWORD=REPLACE_WITH_INITIAL_ADMIN_PASSWORD
 
 AUDIT_APPLICATION_CODE=platform
 AUDIT_ENVIRONMENT_CODE=prod
@@ -1079,7 +1091,7 @@ ENV_TEMPLATE
   run_cmd install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$env_directory"
   run_cmd install -o root -g "$RUNTIME_GROUP" -m 0640 "$template_file" "$ENV_FILE"
   PRODUCTION_ENV_TEMPLATE_CREATED=true
-  log "WARN" "已创建生产环境模板：${ENV_FILE}。脚本不会猜测域名、数据库地址或数据库密码；请替换所有 REPLACE_WITH_* 值后重新执行同一部署命令。IAM_BOOTSTRAP_TOKEN 默认留空，首次管理员初始化时再临时设置。"
+  log "WARN" "已创建生产环境模板：${ENV_FILE}。脚本不会猜测域名、数据库地址或数据库密码；请替换所有 REPLACE_WITH_* 值后重新执行同一部署命令。IAM_BOOTSTRAP_TOKEN 默认留空；请填写 IAM_BOOTSTRAP_ADMIN_* 以供首次部署自动创建超级管理员，成功后密码会自动清除。"
 }
 
 validate_production_env_values() {
@@ -1096,7 +1108,7 @@ validate_production_env_values() {
     MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USERNAME MYSQL_PASSWORD
     AUTH_JWT_ISSUER AUTH_JWT_AUDIENCE AUTH_APPLICATION_JWT_AUDIENCE
     AUTH_JWT_PRIVATE_KEY_PATH AUTH_JWT_PUBLIC_KEY_PATH
-    IAM_MOBILE_ENCRYPTION_KEY IAM_MFA_ENCRYPTION_KEY
+    IAM_MOBILE_ENCRYPTION_KEY
     IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY
     AUDIT_APPLICATION_CODE AUDIT_ENVIRONMENT_CODE
     FILE_STORAGE_ROOT ASYNC_WORKER_ID LOG_DIRECTORY
@@ -1358,109 +1370,274 @@ mysql_defaults_file() {
   chmod 600 "$file"
 }
 
+is_local_mysql_host() {
+  local host="$1"
+  [[ "$host" == "127.0.0.1" || "$host" == "localhost" || "$host" == "::1" ]]
+}
+
+valid_mysql_account_host() {
+  # MySQL account host values support host names, IPv4/IPv6 literals and the % wildcard.
+  # Quotes, whitespace and path-like characters are rejected before interpolating into SQL.
+  [[ "$1" =~ ^[A-Za-z0-9._:%-]+$ ]]
+}
+
 initialize_database() {
   if [[ "$SKIP_DATABASE_INIT" == true ]]; then
     log "INFO" "已跳过数据库和应用账号初始化。"
     return 0
   fi
-  CURRENT_STEP="初始化 MySQL 数据库与账号"
-  if [[ "$DRY_RUN" != true ]]; then
-    require_command mysql
-    mysql_is_supported || {
-      log "ERROR" "mysql 客户端不是受支持的 Oracle MySQL 8.x，脚本不会继续初始化。"
-      return 1
-    }
-  fi
 
-  local host port database username password
-  host="$(get_env_value MYSQL_HOST)"
-  port="$(get_env_value MYSQL_PORT)"
-  database="$(get_env_value MYSQL_DATABASE)"
-  username="$(get_env_value MYSQL_USERNAME)"
+  CURRENT_STEP="初始化 MySQL 数据库与应用账号"
+  local host port database username password admin_user admin_password application_allowed_host
+  host="$(get_env_value MYSQL_HOST || true)"
+  port="$(get_env_value MYSQL_PORT || true)"
+  database="$(get_env_value MYSQL_DATABASE || true)"
+  username="$(get_env_value MYSQL_USERNAME || true)"
   password="$(get_env_value MYSQL_PASSWORD || true)"
-  if [[ "$DRY_RUN" == true && -z "$password" ]]; then
-    password="dry-run-generated-secret"
-  fi
-  [[ "$host" == "127.0.0.1" || "$host" == "localhost" ]] || {
-    log "INFO" "MYSQL_HOST=${host} 是远程地址，跳过本地数据库创建，仅在验证阶段检查连接。"
-    return 0
+  application_allowed_host="$(get_env_value MYSQL_APPLICATION_ALLOWED_HOST || true)"
+
+  [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || {
+    log "ERROR" "MYSQL_PORT 无效：${port:-<空>}。"
+    return 1
   }
   [[ "$database" =~ ^[A-Za-z0-9_]+$ ]] || {
     log "ERROR" "MYSQL_DATABASE 只允许字母、数字和下划线。"
     return 1
   }
   [[ "$username" =~ ^[A-Za-z0-9_.-]+$ ]] || {
-    log "ERROR" "MYSQL_USERNAME 包含不安全字符。"
-    return 1
-  }
-  [[ -n "$password" ]] || {
-    log "ERROR" "MYSQL_PASSWORD 不能为空。"
+    log "ERROR" "MYSQL_USERNAME 只允许字母、数字、点、下划线和短横线。"
     return 1
   }
   [[ "$password" =~ ^[A-Za-z0-9._~!@%+=:-]+$ ]] || {
-    log "ERROR" "MYSQL_PASSWORD 含有自动建库流程不接受的字符；请使用字母、数字或 ._~!@%+=:-，也可以人工创建账号后增加 --skip-database-init。"
+    log "ERROR" "MYSQL_PASSWORD 必须非空，且仅允许字母、数字和 ._~!@%+=:-，以安全生成 MySQL 初始化 SQL。"
     return 1
   }
 
-  local temp_dir admin_file sql_file admin_user admin_password escaped_password
+  admin_user="${MYSQL_ADMIN_USERNAME:-root}"
+  admin_password="${MYSQL_ADMIN_PASSWORD:-}"
+  [[ "$admin_user" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+    log "ERROR" "MYSQL_ADMIN_USERNAME 包含不安全字符。"
+    return 1
+  }
+  [[ "$admin_password" != *$'\n'* && "$admin_password" != *$'\r'* ]] || {
+    log "ERROR" "MYSQL_ADMIN_PASSWORD 不能包含换行符。"
+    return 1
+  }
+
+  local -a account_hosts=()
+  if is_local_mysql_host "$host"; then
+    if [[ "$host" == "::1" ]]; then
+      account_hosts=("::1" "localhost")
+    else
+      account_hosts=("127.0.0.1" "localhost")
+    fi
+    if [[ -n "$application_allowed_host" ]]; then
+      valid_mysql_account_host "$application_allowed_host" || {
+        log "ERROR" "MYSQL_APPLICATION_ALLOWED_HOST 包含不安全字符。"
+        return 1
+      }
+      local already_present=false account_host
+      for account_host in "${account_hosts[@]}"; do
+        [[ "$account_host" == "$application_allowed_host" ]] && already_present=true
+      done
+      [[ "$already_present" == true ]] || account_hosts+=("$application_allowed_host")
+    fi
+  else
+    [[ -n "$admin_password" ]] || {
+      log "ERROR" "MYSQL_HOST=${host} 为远程 MySQL。首次自动创建数据库需要通过进程环境安全提供 MYSQL_ADMIN_USERNAME（默认 root）和 MYSQL_ADMIN_PASSWORD；脚本不会猜测或持久化数据库管理员凭据。"
+      return 1
+    }
+    [[ -n "$application_allowed_host" ]] || {
+      log "ERROR" "MYSQL_HOST=${host} 为远程 MySQL。请设置 MYSQL_APPLICATION_ALLOWED_HOST 为应用服务器的固定 IP、主机名或经审批的 MySQL 主机模式；脚本不会默认授予 '%' 通配访问。"
+      return 1
+    }
+    valid_mysql_account_host "$application_allowed_host" || {
+      log "ERROR" "MYSQL_APPLICATION_ALLOWED_HOST 包含不安全字符。"
+      return 1
+    }
+    account_hosts=("$application_allowed_host")
+  fi
+
+  if [[ "$DRY_RUN" != true ]]; then
+    require_command mysql
+    mysql_is_supported || {
+      log "ERROR" "mysql 客户端必须是 Oracle MySQL 8.x，当前客户端不受支持。"
+      return 1
+    }
+  fi
+
+  local temp_dir admin_file app_file sql_file account_host
   temp_dir="$(mktemp -d)"
   TEMP_PATHS+=("$temp_dir")
   admin_file="${temp_dir}/admin.cnf"
+  app_file="${temp_dir}/application.cnf"
   sql_file="${temp_dir}/init.sql"
-  admin_user="${MYSQL_ADMIN_USERNAME:-root}"
-  admin_password="${MYSQL_ADMIN_PASSWORD:-}"
-  escaped_password="${password//\'/\'\'}"
 
-  cat >"$sql_file" <<SQL
-CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${username}'@'127.0.0.1' IDENTIFIED BY '${escaped_password}';
-ALTER USER '${username}'@'127.0.0.1' IDENTIFIED BY '${escaped_password}';
-GRANT ALL PRIVILEGES ON \`${database}\`.* TO '${username}'@'127.0.0.1';
-CREATE USER IF NOT EXISTS '${username}'@'localhost' IDENTIFIED BY '${escaped_password}';
-ALTER USER '${username}'@'localhost' IDENTIFIED BY '${escaped_password}';
-GRANT ALL PRIVILEGES ON \`${database}\`.* TO '${username}'@'localhost';
-FLUSH PRIVILEGES;
-SQL
+  {
+    printf 'CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n' "$database"
+    for account_host in "${account_hosts[@]}"; do
+      # Do not issue ALTER USER here. Re-deploying must not rotate an existing
+      # application credential or overwrite a password managed by the database owner.
+      # A pre-existing account whose password differs from MYSQL_PASSWORD will fail the
+      # connection probe below and requires an explicit operator/DBA correction.
+      printf "CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '%s';\n" "$username" "$account_host" "$password"
+      printf "GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%s';\n" "$database" "$username" "$account_host"
+    done
+    printf 'FLUSH PRIVILEGES;\n'
+  } >"$sql_file"
   chmod 600 "$sql_file"
 
-  if [[ -z "$admin_password" && "$SKIP_MYSQL_SERVER" == false ]]; then
-    log "INFO" "尝试通过本机管理员 socket 初始化数据库。"
-    if [[ "$DRY_RUN" == true ]]; then
-      log "CMD" "sudo mysql < <受保护的初始化 SQL>"
-    elif (( EUID == 0 )); then
-      mysql <"$sql_file" >>"$LOG_FILE" 2>&1
-    else
-      sudo mysql <"$sql_file" >>"$LOG_FILE" 2>&1
-    fi
-  else
-    mysql_defaults_file "$admin_file" "$admin_user" "$admin_password" "$host" "$port"
-    if [[ "$DRY_RUN" == true ]]; then
-      log "CMD" "mysql --defaults-extra-file=<临时凭据文件> < <受保护的初始化 SQL>"
-    else
-      mysql --defaults-extra-file="$admin_file" <"$sql_file" >>"$LOG_FILE" 2>&1
-    fi
-  fi
   if [[ "$DRY_RUN" == true ]]; then
-    log "INFO" "将初始化数据库和应用账号。"
-  else
-    log "INFO" "数据库和应用账号初始化完成。"
-  fi
-}
-
-install_project_dependencies() {
-  if [[ "$SKIP_PROJECT_DEPS" == true ]]; then
-    log "INFO" "已跳过项目依赖安装。"
+    log "CMD" "mysql --defaults-extra-file=<临时凭据文件> < <受保护的数据库初始化 SQL>"
+    log "INFO" "预演：将创建数据库 ${database}、应用账号 ${username} 并仅授权给配置的应用连接来源。"
     return 0
   fi
-  CURRENT_STEP="安装 Go Module 依赖"
-  run_retry 3 bash -c 'cd "$1" && go mod download' _ "${PROJECT_ROOT}/backend"
-  CURRENT_STEP="安装 npm 项目依赖"
-  run_retry 3 bash -c 'cd "$1" && npm ci --no-audit --no-fund' _ "${PROJECT_ROOT}/frontend"
-  if [[ "$DRY_RUN" == true ]]; then
-    log "INFO" "将安装 Go Module 和 npm 依赖；不会执行前端 build。"
+
+  if [[ -n "$admin_password" ]]; then
+    mysql_defaults_file "$admin_file" "$admin_user" "$admin_password" "$host" "$port"
+    run_cmd mysql --defaults-extra-file="$admin_file" <"$sql_file"
+  elif is_local_mysql_host "$host"; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      log "INFO" "未提供 MYSQL_ADMIN_PASSWORD，尝试使用 root 本机 socket 认证初始化数据库。"
+      run_cmd mysql <"$sql_file"
+    else
+      require_command sudo
+      log "INFO" "未提供 MYSQL_ADMIN_PASSWORD，尝试使用 sudo root 本机 socket 认证初始化数据库。"
+      run_cmd sudo mysql <"$sql_file"
+    fi
   else
-    log "INFO" "项目依赖已安装；未执行前端 build。"
+    log "ERROR" "远程 MySQL 初始化缺少管理员密码。"
+    return 1
   fi
+
+  mysql_defaults_file "$app_file" "$username" "$password" "$host" "$port"
+  run_cmd mysql --defaults-extra-file="$app_file" --database="$database" --batch --skip-column-names --execute='SELECT 1'
+  log "INFO" "数据库 ${database} 和应用账号 ${username} 初始化完成，应用连接验证通过。"
+}
+
+is_bootstrap_admin_placeholder() {
+  [[ "$1" == REPLACE_WITH_* ]]
+}
+
+clear_bootstrap_admin_password() {
+  local configured_password
+  configured_password="$(get_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD || true)"
+  [[ -n "$configured_password" ]] || return 0
+
+  CURRENT_STEP="清除一次性超级管理员密码"
+  set_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD ""
+  run_cmd chown root:"$RUNTIME_GROUP" "$ENV_FILE"
+  run_cmd chmod 0640 "$ENV_FILE"
+  log "INFO" "已清除环境文件中的一次性 IAM_BOOTSTRAP_ADMIN_PASSWORD；现有管理员未被修改。"
+}
+
+load_bootstrap_admin_input() {
+  BOOTSTRAP_ADMIN_DISPLAY_NAME="$(get_env_value IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME || true)"
+  BOOTSTRAP_ADMIN_ACCOUNT_NAME="$(get_env_value IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME || true)"
+  BOOTSTRAP_ADMIN_PASSWORD="$(get_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD || true)"
+
+  is_bootstrap_admin_placeholder "$BOOTSTRAP_ADMIN_DISPLAY_NAME" && BOOTSTRAP_ADMIN_DISPLAY_NAME=""
+  is_bootstrap_admin_placeholder "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" && BOOTSTRAP_ADMIN_ACCOUNT_NAME=""
+  is_bootstrap_admin_placeholder "$BOOTSTRAP_ADMIN_PASSWORD" && BOOTSTRAP_ADMIN_PASSWORD=""
+
+  if [[ -z "$BOOTSTRAP_ADMIN_DISPLAY_NAME" || -z "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" || -z "$BOOTSTRAP_ADMIN_PASSWORD" ]]; then
+    if [[ "$ASSUME_YES" == true || ! -t 0 ]]; then
+      log "ERROR" "首次创建超级管理员需要在 ${ENV_FILE} 设置 IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME、IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME 和 IAM_BOOTSTRAP_ADMIN_PASSWORD。密码仅在成功初始化后自动清除。"
+      return 1
+    fi
+
+    if [[ -z "$BOOTSTRAP_ADMIN_DISPLAY_NAME" ]]; then
+      read -r -p "首个超级管理员显示名称: " BOOTSTRAP_ADMIN_DISPLAY_NAME
+    fi
+    if [[ -z "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" ]]; then
+      read -r -p "首个超级管理员账号: " BOOTSTRAP_ADMIN_ACCOUNT_NAME
+    fi
+    if [[ -z "$BOOTSTRAP_ADMIN_PASSWORD" ]]; then
+      local confirmation
+      read -r -s -p "首个超级管理员密码: " BOOTSTRAP_ADMIN_PASSWORD
+      printf '\n'
+      read -r -s -p "再次输入首个超级管理员密码: " confirmation
+      printf '\n'
+      if [[ "$BOOTSTRAP_ADMIN_PASSWORD" != "$confirmation" ]]; then
+        log "ERROR" "两次输入的首个超级管理员密码不一致。"
+        BOOTSTRAP_ADMIN_PASSWORD=""
+        return 1
+      fi
+    fi
+  fi
+
+  [[ -n "$BOOTSTRAP_ADMIN_DISPLAY_NAME" && -n "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" && -n "$BOOTSTRAP_ADMIN_PASSWORD" ]] || {
+    log "ERROR" "首个超级管理员显示名称、账号和密码均不能为空。"
+    return 1
+  }
+}
+
+run_bootstrap_admin_status() {
+  local bootstrap_binary="$1"
+  CURRENT_STEP="检查首个超级管理员初始化状态"
+  log "CMD" "runuser -u ${RUNTIME_USER} -- env ENV_FILE=<受保护环境文件> ${bootstrap_binary} --status"
+  if [[ "$DRY_RUN" == true ]]; then
+    return 3
+  fi
+  if runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" --status >>"$LOG_FILE" 2>&1; then
+    return 0
+  fi
+  local status=$?
+  [[ "$status" -eq 3 ]] && return 3
+  log "ERROR" "无法检查首个超级管理员初始化状态。请先确认迁移已成功执行且运行用户可读取环境文件。"
+  return "$status"
+}
+
+run_bootstrap_admin_initialize() {
+  local bootstrap_binary="$1"
+  CURRENT_STEP="初始化首个超级管理员"
+  log "CMD" "runuser -u ${RUNTIME_USER} -- env ENV_FILE=<受保护环境文件> ${bootstrap_binary} --display-name <已配置> --account-name <已配置> --password-stdin"
+
+  if [[ "$VERBOSE" == true ]]; then
+    if printf '%s' "$BOOTSTRAP_ADMIN_PASSWORD" | runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" \
+      --display-name "$BOOTSTRAP_ADMIN_DISPLAY_NAME" --account-name "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" --password-stdin 2>&1 | tee -a "$LOG_FILE"; then
+      return 0
+    fi
+  elif printf '%s' "$BOOTSTRAP_ADMIN_PASSWORD" | runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" \
+    --display-name "$BOOTSTRAP_ADMIN_DISPLAY_NAME" --account-name "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" --password-stdin >>"$LOG_FILE" 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+bootstrap_first_super_admin() {
+  local bootstrap_binary="$1"
+  [[ -x "$bootstrap_binary" ]] || {
+    log "ERROR" "未找到首个超级管理员初始化二进制：${bootstrap_binary}"
+    return 1
+  }
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "INFO" "预演：数据库迁移完成后将检查首个超级管理员；未初始化时将从受保护环境文件或交互输入读取一次性凭据。"
+    return 0
+  fi
+
+  local status
+  if run_bootstrap_admin_status "$bootstrap_binary"; then
+    log "INFO" "首个超级管理员已初始化，跳过创建且不覆盖现有账号。"
+    clear_bootstrap_admin_password
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "$status" -ne 3 ]]; then
+    return "$status"
+  fi
+
+  load_bootstrap_admin_input
+  if ! run_bootstrap_admin_initialize "$bootstrap_binary"; then
+    log "ERROR" "首个超级管理员初始化失败；未清除一次性密码，以便修复配置后重试。"
+    return 1
+  fi
+
+  clear_bootstrap_admin_password
+  BOOTSTRAP_ADMIN_PASSWORD=""
+  log "INFO" "首个超级管理员初始化完成。"
 }
 
 run_migrations() {
@@ -1493,7 +1670,7 @@ check_runtime_configuration() {
     APP_NAME APP_HTTP_ADDR APP_PUBLIC_BASE_URL APP_CORS_ALLOWED_ORIGINS
     MYSQL_HOST MYSQL_PORT MYSQL_DATABASE MYSQL_USERNAME MYSQL_PASSWORD
     AUTH_JWT_PRIVATE_KEY_PATH AUTH_JWT_PUBLIC_KEY_PATH
-    IAM_MOBILE_ENCRYPTION_KEY IAM_MFA_ENCRYPTION_KEY
+    IAM_MOBILE_ENCRYPTION_KEY
     IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY
     AUDIT_APPLICATION_CODE AUDIT_ENVIRONMENT_CODE FILE_STORAGE_ROOT LOG_DIRECTORY
   )
@@ -1727,6 +1904,7 @@ build_release_artifacts() {
   run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/api" ./cmd/api' _ "${PROJECT_ROOT}/backend" "$staging_dir"
   run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/worker" ./cmd/worker' _ "${PROJECT_ROOT}/backend" "$staging_dir"
   run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/migrate" ./cmd/migrate' _ "${PROJECT_ROOT}/backend" "$staging_dir"
+  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/bootstrap-admin" ./cmd/bootstrap-admin' _ "${PROJECT_ROOT}/backend" "$staging_dir"
 
   CURRENT_STEP="构建前端静态资源"
   run_cmd bash -c 'cd "$1" && npm run build && cp -a dist/. "$2/frontend/"' _ "${PROJECT_ROOT}/frontend" "$staging_dir"
@@ -1734,7 +1912,7 @@ build_release_artifacts() {
   CURRENT_STEP="写入发布元数据"
   run_cmd bash -c 'printf "release_id=%s\\nbuilt_at_utc=%s\\nsource_revision=%s\\n" "$1" "$2" "$3" > "$4/release-info"' _ "$DEPLOY_RELEASE_ID" "$build_timestamp" "$revision" "$staging_dir"
   # 发布目录不包含运行密钥；显式开放可执行/遍历权限，供 systemd 运行用户读取二进制和 Nginx 读取静态资源。
-  run_cmd chmod 0755 "$staging_dir/bin" "$staging_dir/bin/api" "$staging_dir/bin/worker" "$staging_dir/bin/migrate"
+  run_cmd chmod 0755 "$staging_dir/bin" "$staging_dir/bin/api" "$staging_dir/bin/worker" "$staging_dir/bin/migrate" "$staging_dir/bin/bootstrap-admin"
   run_cmd find "$staging_dir/frontend" -type d -exec chmod 0755 '{}' +
   run_cmd find "$staging_dir/frontend" -type f -exec chmod 0644 '{}' +
 }
@@ -1786,6 +1964,11 @@ deploy_application() {
   }
   validate_production_env_values
 
+  # 在执行迁移前先确保本机 MySQL 数据库和应用账号存在。该操作使用
+  # CREATE ... IF NOT EXISTS/ALTER USER，重复执行是幂等的；远程 MySQL
+  # 则由 initialize_database 按安全策略跳过，随后由迁移步骤验证应用账号的实际连接权限。
+  initialize_database
+
   # The release build uses go mod download and npm ci. Ensure both toolchains
   # are installed before resolving project dependencies, rather than relying
   # on an arbitrary Node.js/npm pair already present on the host.
@@ -1833,10 +2016,11 @@ deploy_application() {
   chmod 0755 "$release_dir"
 
   if [[ "$SKIP_MIGRATION" == true ]]; then
-    log "WARN" "已按参数跳过数据库迁移；只有确认本次版本不包含未执行迁移时才可使用。"
+    log "WARN" "已按参数跳过数据库迁移，同时跳过首个超级管理员自动初始化。"
   else
     CURRENT_STEP="执行发布数据库迁移"
     run_cmd env ENV_FILE="$ENV_FILE" "$release_dir/bin/migrate"
+    bootstrap_first_super_admin "${release_dir}/bin/bootstrap-admin"
   fi
 
   CURRENT_STEP="原子切换当前发布版本"

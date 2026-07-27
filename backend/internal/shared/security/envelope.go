@@ -13,7 +13,7 @@ import (
 )
 
 // EnvelopeProtector encrypts small, sensitive values before persistence with AES-256-GCM.
-// The stored format is nonce || ciphertext. It is suitable for data such as TOTP seeds; callers
+// The stored format is nonce || ciphertext. It is suitable for sensitive values; callers
 // must keep the base64-encoded key outside the database and must not reuse a key for unrelated
 // trust domains.
 type EnvelopeProtector struct {

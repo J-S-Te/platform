@@ -47,7 +47,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -73,12 +73,16 @@ services:
 
   frontend:
     build:
-      context: ./frontend
+      context: ../frontend
       args:
         VITE_API_BASE_URL: /api/v1
         VITE_LOGIN_SUCCESS_URL: /
+        VITE_CONTRACT_API_BASE_URL: /contract/api/v1
+    volumes:
+      # 由 portal-gateway.sh 维护的动态子系统反代 location；空文件也必须存在。
+      - ./docker/portal-apps-locations.conf:/etc/nginx/portal-apps.d/managed.conf:ro
     ports:
-      - "7898:80"
+      - "8081:80"
     depends_on:
       api:
         condition: service_healthy

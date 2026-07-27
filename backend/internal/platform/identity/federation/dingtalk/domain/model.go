@@ -53,8 +53,8 @@ type UserProfile struct {
 }
 
 // LocalAccount, SessionIssue and BrowserSession intentionally reuse the existing federated-login
-// contracts. This permits bootstrap to inject the same FederatedSessionIssuer for a completed
-// session or an MFA pre-authentication challenge without duplicating security decisions.
+// contracts. This permits bootstrap to inject the same FederatedSessionIssuer without duplicating
+// security decisions.
 type LocalAccount = logindomain.LocalAccount
 type SessionIssue = logindomain.SessionIssue
 type BrowserSession = logindomain.BrowserSession

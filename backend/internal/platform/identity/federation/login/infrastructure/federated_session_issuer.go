@@ -26,8 +26,6 @@ type FederatedLoginUseCase interface {
 }
 
 // FederatedSessionIssuer adapts a verified external identity into identityapplication.Service.
-// It implements loginapplication.SessionIssuer and preserves the identity service's two mutually
-// exclusive outcomes: an authenticated browser session or an MFA pre-authentication challenge.
 type FederatedSessionIssuer struct {
 	authentication FederatedLoginUseCase
 }
@@ -42,9 +40,6 @@ func NewFederatedSessionIssuer(authentication FederatedLoginUseCase) (*Federated
 }
 
 // IssueBrowserSession maps a verified local federation identity to identityapplication.Service.
-// A returned BrowserSession is either a completed session cookie or a short-lived MFA
-// pre-authentication credential. The adapter never downgrades an MFA requirement to a normal
-// browser session.
 func (issuer *FederatedSessionIssuer) IssueBrowserSession(ctx context.Context, issue domain.SessionIssue) (domain.BrowserSession, error) {
 	if issuer == nil || issuer.authentication == nil {
 		return domain.BrowserSession{}, errors.New("federated login use case must not be nil")
@@ -84,23 +79,7 @@ func federatedLoginInputFromIssue(issue domain.SessionIssue) (identityapplicatio
 }
 
 func browserSessionFromLoginResult(result identityapplication.SessionResult) (domain.BrowserSession, error) {
-	if result.MFARequired {
-		if strings.TrimSpace(result.Token) != "" || !result.ExpiresAt.IsZero() ||
-			strings.TrimSpace(result.PreAuthenticationCredential) == "" ||
-			result.PreAuthenticationExpiresAt.IsZero() || result.MFAMaxAttempts == 0 {
-			return domain.BrowserSession{}, ErrInvalidFederatedLoginResult
-		}
-		return domain.BrowserSession{
-			MFARequired:                 true,
-			PreAuthenticationCredential: result.PreAuthenticationCredential,
-			PreAuthenticationExpiresAt:  result.PreAuthenticationExpiresAt,
-			MFAMaxAttempts:              result.MFAMaxAttempts,
-		}, nil
-	}
-
-	if strings.TrimSpace(result.Token) == "" || result.ExpiresAt.IsZero() ||
-		strings.TrimSpace(result.PreAuthenticationCredential) != "" ||
-		!result.PreAuthenticationExpiresAt.IsZero() || result.MFAMaxAttempts != 0 {
+	if strings.TrimSpace(result.Token) == "" || result.ExpiresAt.IsZero() {
 		return domain.BrowserSession{}, ErrInvalidFederatedLoginResult
 	}
 	return domain.BrowserSession{CookieValue: result.Token, ExpiresAt: result.ExpiresAt}, nil

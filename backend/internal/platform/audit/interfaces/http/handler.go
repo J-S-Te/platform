@@ -75,6 +75,7 @@ type exportPayload struct {
 	ApplicationCode string     `json:"application_code,omitempty"`
 	EnvironmentCode string     `json:"environment_code,omitempty"`
 	Action          string     `json:"action,omitempty"`
+	ActionCategory  string     `json:"action_category,omitempty"`
 	Result          string     `json:"result,omitempty"`
 	RiskLevel       string     `json:"risk_level,omitempty"`
 	Keyword         string     `json:"keyword,omitempty"`
@@ -210,7 +211,7 @@ func (h *Handler) CreateExportJob(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &payload) {
 		return
 	}
-	job, err := h.service.CreateExportJob(r.Context(), principal.Tenant.ID, principal.User.ID, application.PageRequest{Keyword: payload.Keyword, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, Action: payload.Action, Result: payload.Result, RiskLevel: payload.RiskLevel, OccurredFrom: payload.OccurredFrom, OccurredTo: payload.OccurredTo})
+	job, err := h.service.CreateExportJob(r.Context(), principal.Tenant.ID, principal.User.ID, application.PageRequest{Keyword: payload.Keyword, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, Action: payload.Action, ActionCategory: payload.ActionCategory, Result: payload.Result, RiskLevel: payload.RiskLevel, OccurredFrom: payload.OccurredFrom, OccurredTo: payload.OccurredTo})
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -318,7 +319,7 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	return true
 }
 func pageQuery(r *http.Request) application.PageRequest {
-	query := application.PageRequest{Page: parseInt(r.URL.Query().Get("page"), 1), PageSize: parseInt(r.URL.Query().Get("page_size"), 20), Keyword: strings.TrimSpace(r.URL.Query().Get("keyword")), ApplicationCode: strings.TrimSpace(r.URL.Query().Get("filter[application_code]")), EnvironmentCode: strings.TrimSpace(r.URL.Query().Get("filter[environment_code]")), Action: strings.TrimSpace(r.URL.Query().Get("filter[action]")), Result: strings.TrimSpace(r.URL.Query().Get("filter[result]")), RiskLevel: strings.TrimSpace(r.URL.Query().Get("filter[risk_level]"))}
+	query := application.PageRequest{Page: parseInt(r.URL.Query().Get("page"), 1), PageSize: parseInt(r.URL.Query().Get("page_size"), 20), Keyword: strings.TrimSpace(r.URL.Query().Get("keyword")), ApplicationCode: strings.TrimSpace(r.URL.Query().Get("filter[application_code]")), EnvironmentCode: strings.TrimSpace(r.URL.Query().Get("filter[environment_code]")), Action: strings.TrimSpace(r.URL.Query().Get("filter[action]")), ActionCategory: strings.TrimSpace(r.URL.Query().Get("filter[action_category]")), Result: strings.TrimSpace(r.URL.Query().Get("filter[result]")), RiskLevel: strings.TrimSpace(r.URL.Query().Get("filter[risk_level]"))}
 	query.OccurredFrom = parseTime(r.URL.Query().Get("filter[occurred_from]"))
 	query.OccurredTo = parseTime(r.URL.Query().Get("filter[occurred_to]"))
 	return query

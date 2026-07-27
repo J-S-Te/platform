@@ -1,0 +1,108 @@
+name: basic-platform-local
+
+# 本地 Docker 编排：只有 frontend 暴露宿主机端口，MySQL/API/Worker 仅在 Compose 内网通信。
+x-runtime-env: &runtime-env
+  - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-./docker/.env.local}
+
+x-backend-image: &backend-image
+  build:
+    context: ./backend
+  image: basic-platform/backend:local
+
+services:
+  mysql:
+    image: mysql:8.4
+    env_file: *runtime-env
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql_local_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend-image
+    env_file: *runtime-env
+    command: ["./migrate"]
+    volumes:
+      - ./data/keys:/app/data/keys
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  # 该服务不由普通 `up` 自动启动，由 scripts/docker-local.sh 在迁移成功后按需 run。
+  # bootstrap-admin 本身会检查数据库状态，已初始化时直接成功退出，因此可重复执行。
+  bootstrap-admin:
+    <<: *backend-image
+    env_file: *runtime-env
+    command: ["./bootstrap-admin"]
+    volumes:
+      - ./data/keys:/app/data/keys
+    depends_on:
+      mysql:
+        condition: service_healthy
+    profiles: ["bootstrap"]
+    restart: "no"
+
+  api:
+    <<: *backend-image
+    env_file: *runtime-env
+    command: ["./api"]
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - ./data/logs:/app/data/logs
+      - ./data/uploads:/app/data/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    <<: *backend-image
+    env_file: *runtime-env
+    command: ["./worker"]
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - ./data/logs:/app/data/logs
+      - ./data/uploads:/app/data/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        VITE_API_BASE_URL: /api/v1
+        VITE_LOGIN_SUCCESS_URL: /
+    image: basic-platform/frontend:local
+    volumes:
+      - ./docker/portal-apps-locations.conf:/etc/nginx/conf.d/portal-apps-locations.conf:ro
+    ports:
+      - "8081:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_local_data:
+    name: basic-platform-local-mysql-data

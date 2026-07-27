@@ -52,22 +52,10 @@ type ApplicationService interface {
 	CompleteCallbackWithLifecycle(context.Context, application.CallbackInput) (application.CallbackResult, CallbackLifecycle, error)
 }
 
-// CallbackCompletion is the HTTP-safe callback outcome. In the MFA branch the opaque credential
-// is placed only into a separate HttpOnly cookie; it must not be logged, audited or sent in a body.
+// CallbackCompletion is the HTTP-safe callback outcome.
 type CallbackCompletion struct {
-	Session                     domain.BrowserSession
-	RedirectTo                  string
-	MFARequired                 bool
-	PreAuthenticationCredential string
-	PreAuthenticationExpiresAt  time.Time
-	MFAMaxAttempts              uint16
-}
-
-// mfaCallbackCompletionService is an optional extension for an application adapter that can pause
-// external login after the provider callback and require local MFA. Keeping it optional preserves
-// the existing callback contract until the application adapter exposes the MFA outcome.
-type mfaCallbackCompletionService interface {
-	CompleteCallbackWithLifecycleAndMFA(context.Context, application.CallbackInput) (CallbackCompletion, CallbackLifecycle, error)
+	Session    domain.BrowserSession
+	RedirectTo string
 }
 
 // lifecycleAuditRecorder persists server-generated identity lifecycle events. Recording is best
@@ -77,7 +65,7 @@ type lifecycleAuditRecorder interface {
 	Ingest(context.Context, string, auditapplication.EventInput) (auditdomain.Receipt, error)
 }
 
-// CookieConfig controls both the platform session and independent MFA pre-authentication cookies.
+// CookieConfig controls the platform session cookie and external-login browser-binding cookie.
 type CookieConfig struct {
 	Name     string
 	Path     string
@@ -91,9 +79,8 @@ type CookieConfig struct {
 //	GET /auth/external/login?tenant_id=...&provider_code=...&return_to=/
 //	GET /auth/external/callback?state=...&code=...
 //
-// The callback intentionally emits only a redirect and an HttpOnly session or MFA
-// pre-authentication cookie; no token, upstream subject or authorization code is written to the
-// browser response body.
+// The callback intentionally emits only a redirect and an HttpOnly session cookie; no token,
+// upstream subject or authorization code is written to the browser response body.
 type Handler struct {
 	service       ApplicationService
 	cookie        CookieConfig
@@ -165,8 +152,7 @@ func (handler *Handler) Start(writer http.ResponseWriter, request *http.Request)
 	http.Redirect(writer, request, result.AuthorizationURL, http.StatusFound)
 }
 
-// Callback validates the upstream callback and writes either a local browser session cookie or,
-// when the application pauses completion for MFA, a separate HttpOnly pre-authentication cookie.
+// Callback validates the upstream callback and writes a local browser session cookie.
 func (handler *Handler) Callback(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		writer.Header().Set("Allow", http.MethodGet)
@@ -201,11 +187,7 @@ func (handler *Handler) Callback(writer http.ResponseWriter, request *http.Reque
 	handler.recordCallbackSuccess(request, lifecycle)
 	handler.recordBindingSuccess(request, lifecycle)
 
-	if result.MFARequired {
-		handler.setPreAuthenticationCookie(writer, result.PreAuthenticationCredential, result.PreAuthenticationExpiresAt)
-	} else {
-		handler.setSessionCookie(writer, result.Session)
-	}
+	handler.setSessionCookie(writer, result.Session)
 	writeNoStoreHeaders(writer)
 	http.Redirect(writer, request, result.RedirectTo, http.StatusFound)
 }
@@ -345,13 +327,8 @@ func (lifecycle CallbackLifecycle) providerResourceID() string {
 	return strings.TrimSpace(lifecycle.ProviderCode)
 }
 
-// completeCallback adapts the established application result to the HTTP completion model and
-// uses MFA data only when the application adapter explicitly provides the optional extension.
+// completeCallback adapts the established application result to the HTTP completion model.
 func (handler *Handler) completeCallback(ctx context.Context, input application.CallbackInput) (CallbackCompletion, CallbackLifecycle, error) {
-	if service, ok := handler.service.(mfaCallbackCompletionService); ok {
-		return service.CompleteCallbackWithLifecycleAndMFA(ctx, input)
-	}
-
 	result, lifecycle, err := handler.service.CompleteCallbackWithLifecycle(ctx, input)
 	if err != nil {
 		return CallbackCompletion{}, lifecycle, err
@@ -361,10 +338,6 @@ func (handler *Handler) completeCallback(ctx context.Context, input application.
 
 func (handler *Handler) setSessionCookie(writer http.ResponseWriter, session domain.BrowserSession) {
 	handler.setCookie(writer, handler.cookie.Name, session.CookieValue, session.ExpiresAt)
-}
-
-func (handler *Handler) setPreAuthenticationCookie(writer http.ResponseWriter, credential string, expiresAt time.Time) {
-	handler.setCookie(writer, preAuthenticationCookieName(handler.cookie.Name), credential, expiresAt)
 }
 
 func (handler *Handler) setBrowserBindingCookie(writer http.ResponseWriter, credential string, expiresAt time.Time) {
@@ -398,12 +371,7 @@ func (handler *Handler) setCookie(writer http.ResponseWriter, name, value string
 	})
 }
 
-// preAuthenticationCookieName must match the local MFA verification handler's cookie lookup.
-func preAuthenticationCookieName(sessionCookieName string) string {
-	return sessionCookieName + "_mfa"
-}
-
-// browserBindingCookieName is independent from both the authenticated session and MFA challenge.
+// browserBindingCookieName is independent from the authenticated session.
 // Its value exists only to bind one external authorization response to the browser that initiated it.
 func browserBindingCookieName(sessionCookieName string) string {
 	return sessionCookieName + "_external_login"
@@ -418,16 +386,8 @@ func newBrowserBinding() (string, error) {
 }
 
 func validCallbackCompletion(result CallbackCompletion, now time.Time) bool {
-	if strings.TrimSpace(result.RedirectTo) == "" {
-		return false
-	}
-	if result.MFARequired {
-		return strings.TrimSpace(result.Session.CookieValue) == "" && result.Session.ExpiresAt.IsZero() &&
-			strings.TrimSpace(result.PreAuthenticationCredential) != "" && len(result.PreAuthenticationCredential) <= 512 &&
-			result.PreAuthenticationExpiresAt.After(now) && result.MFAMaxAttempts > 0
-	}
-	return strings.TrimSpace(result.Session.CookieValue) != "" && result.Session.ExpiresAt.After(now) &&
-		strings.TrimSpace(result.PreAuthenticationCredential) == "" && result.PreAuthenticationExpiresAt.IsZero() && result.MFAMaxAttempts == 0
+	return strings.TrimSpace(result.RedirectTo) != "" &&
+		strings.TrimSpace(result.Session.CookieValue) != "" && result.Session.ExpiresAt.After(now)
 }
 
 func supportedSameSite(value http.SameSite) bool {

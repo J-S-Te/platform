@@ -9,6 +9,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ListUsers reads tenant-scoped users and leaves mobile masking to the application layer.
@@ -30,28 +31,96 @@ func (repository *GORMRepository) ListUsers(ctx context.Context, tenantID string
 	return application.PageResult[domain.User]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// CreateUser persists a natural person but intentionally does not create a login account.
+// CreateUser preserves the single-user repository contract while delegating to the same atomic
+// user-and-role-binding transaction used by batch creation.
 func (repository *GORMRepository) CreateUser(ctx context.Context, write application.UserWrite) (domain.User, error) {
-	now := time.Now().UTC()
-	if err := repository.database.WithContext(ctx).Create(&userModel{
-		ID:               write.ID,
-		TenantID:         write.TenantID,
-		EmployeeNo:       nullableString(write.EmployeeNo),
-		DisplayName:      write.DisplayName,
-		Email:            nullableString(write.Email),
-		MobileCiphertext: nullableBytes(write.MobileCiphertext),
-		MobileHash:       nullableBytes(write.MobileHash),
-		EmploymentStatus: "EMPLOYED",
-		Status:           write.Status,
-		Version:          1,
-		CreatedAt:        now,
-		CreatedBy:        nullableString(&write.OperatorID),
-		UpdatedAt:        now,
-		UpdatedBy:        nullableString(&write.OperatorID),
-	}).Error; err != nil {
-		return domain.User{}, mapWriteError(err, "create user")
+	users, err := repository.CreateUsers(ctx, []application.UserWrite{write})
+	if err != nil {
+		return domain.User{}, err
 	}
-	return repository.GetUser(ctx, write.TenantID, write.ID)
+	return users[0], nil
+}
+
+// CreateUsers persists users, ordinary-user role bindings, and the authorization policy revision
+// in one transaction. A missing platform application or baseline role is treated as deployment
+// seed corruption instead of silently creating users without their required role.
+func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []application.UserWrite) ([]domain.User, error) {
+	if len(writes) == 0 {
+		return nil, application.ErrValidation
+	}
+
+	users := make([]domain.User, 0, len(writes))
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		tenantID := writes[0].TenantID
+		var platformApplication bootstrapApplicationModel
+		result := transaction.Where(
+			"tenant_id = ? AND code = ? AND status = ?",
+			tenantID, application.DefaultPlatformApplicationCode, domain.StatusActive,
+		).First(&platformApplication)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("resolve platform application: %w", application.ErrNotFound)
+		}
+		if result.Error != nil {
+			return fmt.Errorf("resolve platform application: %w", result.Error)
+		}
+
+		var ordinaryUserRole bootstrapRoleModel
+		result = transaction.Where(
+			"tenant_id = ? AND application_id = ? AND code = ? AND status = ?",
+			tenantID, platformApplication.ID, application.DefaultUserRoleCode, domain.StatusActive,
+		).First(&ordinaryUserRole)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("resolve ordinary-user role: %w", application.ErrNotFound)
+		}
+		if result.Error != nil {
+			return fmt.Errorf("resolve ordinary-user role: %w", result.Error)
+		}
+
+		now := time.Now().UTC()
+		for _, write := range writes {
+			if write.TenantID != tenantID || write.ID == "" || write.RoleBindingID == "" || write.OperatorID == "" {
+				return application.ErrValidation
+			}
+			row := userModel{
+				ID: write.ID, TenantID: write.TenantID, EmployeeNo: nullableString(write.EmployeeNo),
+				DisplayName: write.DisplayName, Email: nullableString(write.Email),
+				MobileCiphertext: nullableBytes(write.MobileCiphertext), MobileHash: nullableBytes(write.MobileHash),
+				EmploymentStatus: "EMPLOYED", Status: write.Status, Version: 1,
+				CreatedAt: now, CreatedBy: nullableString(&write.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.OperatorID),
+			}
+			if err := transaction.Create(&row).Error; err != nil {
+				return mapWriteError(err, "create user")
+			}
+			binding := bootstrapRoleBindingModel{
+				ID: write.RoleBindingID, TenantID: tenantID, ApplicationID: platformApplication.ID,
+				RoleID: ordinaryUserRole.ID, SubjectType: "USER", SubjectID: write.ID,
+				ScopeType: "TENANT", ScopeID: "", Status: domain.StatusActive, Version: 1,
+				CreatedAt: now, CreatedBy: nullableString(&write.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.OperatorID),
+			}
+			if err := transaction.Create(&binding).Error; err != nil {
+				return mapWriteError(err, "bind ordinary-user role")
+			}
+			users = append(users, toDomainUser(row))
+		}
+
+		result = transaction.Model(&identityPolicyRevisionModel{}).
+			Where("tenant_id = ? AND application_id = ?", tenantID, platformApplication.ID).
+			Updates(map[string]any{
+				"revision": gorm.Expr("revision + 1"), "changed_at": now,
+				"change_reason": "自动绑定新建用户的普通用户角色",
+			})
+		if result.Error != nil {
+			return fmt.Errorf("advance authorization policy revision: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("advance authorization policy revision: %w", application.ErrNotFound)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
 // GetUser retrieves exactly one tenant-scoped user.
@@ -99,6 +168,62 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 		return domain.User{}, repository.versionedUserError(ctx, input.TenantID, input.UserID)
 	}
 	return repository.GetUser(ctx, input.TenantID, input.UserID)
+}
+
+// DeleteUser performs a tenant-scoped logical deletion. Identity rows are retained because
+// downstream memberships, audit records and foreign keys refer to the user. All login paths are
+// disabled and existing sessions are revoked in the same transaction.
+func (repository *GORMRepository) DeleteUser(ctx context.Context, input application.UserDeleteInput) error {
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var user userModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", input.TenantID, input.UserID).First(&user)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock user for deletion: %w", result.Error)
+		}
+		if user.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		if user.Status != domain.StatusActive {
+			return application.ErrConflict
+		}
+
+		now := time.Now().UTC()
+		if err := transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.UserID, input.Version).
+			Updates(map[string]any{
+				"status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1"),
+			}).Error; err != nil {
+			return mapWriteError(err, "delete user")
+		}
+
+		accountIDs := transaction.Model(&accountModel{}).Select("id").
+			Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID)
+		if err := transaction.Model(&accountModel{}).
+			Where("tenant_id = ? AND user_id = ? AND status <> ?", input.TenantID, input.UserID, domain.StatusDisabled).
+			Updates(map[string]any{"status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			return mapWriteError(err, "disable user accounts")
+		}
+		if err := transaction.Model(&passwordCredentialModel{}).
+			Where("account_id IN (?) AND status <> ?", accountIDs, domain.StatusDisabled).
+			Updates(map[string]any{"status": domain.StatusDisabled, "updated_at": now}).Error; err != nil {
+			return fmt.Errorf("disable user password credentials: %w", err)
+		}
+		if err := transaction.Model(&membershipModel{}).
+			Where("tenant_id = ? AND user_id = ? AND status <> ?", input.TenantID, input.UserID, domain.StatusDisabled).
+			Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			return mapWriteError(err, "disable user memberships")
+		}
+		reason := "USER_DELETED"
+		if err := transaction.Model(&sessionModel{}).
+			Where("tenant_id = ? AND account_id IN (?) AND status = ? AND revoked_at IS NULL", input.TenantID, accountIDs, domain.StatusActive).
+			Updates(map[string]any{"status": domain.StatusDisabled, "revoked_at": now, "revoke_reason": reason}).Error; err != nil {
+			return fmt.Errorf("revoke user sessions: %w", err)
+		}
+		return nil
+	})
 }
 
 func (repository *GORMRepository) versionedUserError(ctx context.Context, tenantID, userID string) error {

@@ -129,22 +129,19 @@ func (s *Service) CreatePermission(ctx context.Context, in PermissionCreateInput
 }
 
 type RoleCreateInput struct {
-	TenantID, OperatorID, Code, Name string
-	Description                      *string
-	PermissionIDs                    []string
+	TenantID, OperatorID, Name string
+	Description                *string
+	PermissionIDs              []string
 }
 
 func (s *Service) ListRoles(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Role], error) {
 	return s.repository.ListRoles(ctx, tenantID, normalizePage(query))
 }
 func (s *Service) CreateRole(ctx context.Context, in RoleCreateInput) (domain.Role, error) {
-	if err := require(in.TenantID, in.OperatorID, in.Code, in.Name); err != nil {
+	if err := require(in.TenantID, in.OperatorID, in.Name); err != nil {
 		return domain.Role{}, err
 	}
 	if err := uniqueIDs(in.PermissionIDs); err != nil {
-		return domain.Role{}, err
-	}
-	if err := lengthAtMost("code", in.Code, 64); err != nil {
 		return domain.Role{}, err
 	}
 	if err := lengthAtMost("name", in.Name, 100); err != nil {
@@ -159,7 +156,7 @@ func (s *Service) CreateRole(ctx context.Context, in RoleCreateInput) (domain.Ro
 	if err != nil {
 		return domain.Role{}, fmt.Errorf("generate role ID: %w", err)
 	}
-	return s.repository.CreateRole(ctx, in.TenantID, in.OperatorID, domain.Role{ID: id, Code: strings.TrimSpace(in.Code), Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: domain.StatusActive}, in.PermissionIDs)
+	return s.repository.CreateRole(ctx, in.TenantID, in.OperatorID, domain.Role{ID: id, Code: generatedRoleCode(id), Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: domain.StatusActive}, in.PermissionIDs)
 }
 func (s *Service) GetRole(ctx context.Context, tenantID, roleID string) (domain.Role, error) {
 	if err := require(tenantID, roleID); err != nil {
@@ -169,14 +166,14 @@ func (s *Service) GetRole(ctx context.Context, tenantID, roleID string) (domain.
 }
 
 type RoleUpdateInput struct {
-	TenantID, OperatorID, RoleID, Code, Name, Status string
-	Description                                      *string
-	PermissionIDs                                    []string
-	Version                                          uint64
+	TenantID, OperatorID, RoleID, Name, Status string
+	Description                                *string
+	PermissionIDs                              []string
+	Version                                    uint64
 }
 
 func (s *Service) UpdateRole(ctx context.Context, in RoleUpdateInput) (domain.Role, error) {
-	if err := require(in.TenantID, in.OperatorID, in.RoleID, in.Code, in.Name, in.Status); err != nil {
+	if err := require(in.TenantID, in.OperatorID, in.RoleID, in.Name, in.Status); err != nil {
 		return domain.Role{}, err
 	}
 	if in.Version == 0 {
@@ -188,9 +185,6 @@ func (s *Service) UpdateRole(ctx context.Context, in RoleUpdateInput) (domain.Ro
 	if err := uniqueIDs(in.PermissionIDs); err != nil {
 		return domain.Role{}, err
 	}
-	if err := lengthAtMost("code", in.Code, 64); err != nil {
-		return domain.Role{}, err
-	}
 	if err := lengthAtMost("name", in.Name, 100); err != nil {
 		return domain.Role{}, err
 	}
@@ -199,7 +193,12 @@ func (s *Service) UpdateRole(ctx context.Context, in RoleUpdateInput) (domain.Ro
 			return domain.Role{}, err
 		}
 	}
-	return s.repository.UpdateRole(ctx, in.TenantID, in.OperatorID, domain.Role{ID: in.RoleID, Code: strings.TrimSpace(in.Code), Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: in.Status, Version: in.Version}, in.PermissionIDs)
+	return s.repository.UpdateRole(ctx, in.TenantID, in.OperatorID, domain.Role{ID: in.RoleID, Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: in.Status, Version: in.Version}, in.PermissionIDs)
+}
+
+// generatedRoleCode creates a stable custom-role code from its ULID primary key.
+func generatedRoleCode(id string) string {
+	return "ROLE-" + strings.ToUpper(strings.TrimSpace(id))
 }
 
 type RoleBindingCreateInput struct {

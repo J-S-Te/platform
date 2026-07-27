@@ -137,7 +137,7 @@ func (r *Repository) ListItems(ctx context.Context, tenantID string, query appli
 		Version                                                             uint64
 		UpdatedAt                                                           time.Time
 	}
-	err := db.Select("item.id, item.namespace_id, namespace.name AS namespace_code, namespace.display_name AS namespace_name, item.config_key, item.value_type, item.value_text, item.value_json, item.sensitive, item.version, item.updated_at").Order("item.updated_at DESC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).Scan(&rows).Error
+	err := db.Select("item.id, item.namespace_id, namespace.name AS namespace_code, namespace.display_name AS namespace_name, item.config_key, item.value_type, item.value_text, item.value_json, item.`sensitive`, item.version, item.updated_at").Order("item.updated_at DESC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).Scan(&rows).Error
 	if err != nil {
 		return application.PageResult[domain.Item]{}, err
 	}
@@ -307,7 +307,7 @@ func (r *Repository) GetPublished(ctx context.Context, tenantID, applicationCode
 		return domain.PublishedConfig{}, application.ErrNotFound
 	}
 	var items []releaseItemModel
-	if err := r.database.WithContext(ctx).Where("release_id = ? AND sensitive = ?", release.ID, false).Find(&items).Error; err != nil {
+	if err := r.database.WithContext(ctx).Where("release_id = ? AND `sensitive` = ?", release.ID, false).Find(&items).Error; err != nil {
 		return domain.PublishedConfig{}, err
 	}
 	values := make(map[string]any, len(items))
@@ -329,7 +329,7 @@ func (r *Repository) itemByID(ctx context.Context, tenantID, itemID string) (dom
 		Version                                                             uint64
 		UpdatedAt                                                           time.Time
 	}
-	err := r.database.WithContext(ctx).Table("cfg_item AS item").Joins("JOIN cfg_namespace AS namespace ON namespace.id = item.namespace_id").Where("item.id = ? AND namespace.tenant_id = ?", itemID, tenantID).Select("item.id, item.namespace_id, namespace.name AS namespace_code, namespace.display_name AS namespace_name, item.config_key, item.value_type, item.value_text, item.value_json, item.sensitive, item.version, item.updated_at").Scan(&row).Error
+	err := r.database.WithContext(ctx).Table("cfg_item AS item").Joins("JOIN cfg_namespace AS namespace ON namespace.id = item.namespace_id").Where("item.id = ? AND namespace.tenant_id = ?", itemID, tenantID).Select("item.id, item.namespace_id, namespace.name AS namespace_code, namespace.display_name AS namespace_name, item.config_key, item.value_type, item.value_text, item.value_json, item.`sensitive`, item.version, item.updated_at").Scan(&row).Error
 	if err != nil {
 		return domain.Item{}, r.mapError(err)
 	}

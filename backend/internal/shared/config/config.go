@@ -63,7 +63,6 @@ type AuthConfig struct {
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
 type IdentityConfig struct {
 	MobileEncryptionKey                  string
-	MFAEncryptionKey                     string
 	FederatedProviderSecretEncryptionKey string
 	ExternalLoginStateEncryptionKey      string
 	// ExternalOIDCHTTPTimeout bounds each outbound request to an external OIDC provider.
@@ -166,7 +165,6 @@ func Load() (Config, error) {
 		},
 		Identity: IdentityConfig{
 			MobileEncryptionKey:                  value("IAM_MOBILE_ENCRYPTION_KEY", ""),
-			MFAEncryptionKey:                     value("IAM_MFA_ENCRYPTION_KEY", ""),
 			FederatedProviderSecretEncryptionKey: value("IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY", ""),
 			ExternalLoginStateEncryptionKey:      value("IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY", ""),
 			ExternalOIDCHTTPTimeout:              externalOIDCHTTPTimeout,

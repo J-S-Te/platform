@@ -117,7 +117,7 @@ func (store *GORMStateStore) Save(ctx context.Context, state domain.State) error
 
 // Consume atomically verifies the initiating browser and then consumes the one-time state. A
 // browser-binding mismatch does not invalidate another browser's valid QR session. After a valid
-// browser consumes the state, downstream protocol, binding or MFA failures cannot make it reusable.
+// browser consumes the state, downstream protocol or binding failures cannot make it reusable.
 func (store *GORMStateStore) Consume(ctx context.Context, stateHash, browserBindingHash [32]byte, now time.Time) (domain.State, error) {
 	var model dingTalkQRLoginStateModel
 	var state domain.State

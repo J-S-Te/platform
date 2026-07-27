@@ -277,7 +277,7 @@ func (handler *OAuthClientManagementHandler) UpdateOAuthClientJWKs(writer stdhtt
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "OAuth 客户端公钥已更新", toOAuthClientJWKsResponse(view))
 }
 
-// DisableOAuthClient handles POST /api/v1/oauth-clients/:oauth_client_id:disable.
+// DisableOAuthClient handles POST /api/v1/oauth-clients/:oauth_client_id/disable.
 func (handler *OAuthClientManagementHandler) DisableOAuthClient(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -327,7 +327,7 @@ func (handler *OAuthClientManagementHandler) CreateCredential(writer stdhttp.Res
 	})
 }
 
-// DisableCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials/:credential_id:disable.
+// DisableCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials/:credential_id/disable.
 func (handler *OAuthClientManagementHandler) DisableCredential(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -347,7 +347,7 @@ func (handler *OAuthClientManagementHandler) DisableCredential(writer stdhttp.Re
 	writer.WriteHeader(stdhttp.StatusNoContent)
 }
 
-// RotateCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials:rotate.
+// RotateCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials/rotate.
 func (handler *OAuthClientManagementHandler) RotateCredential(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {

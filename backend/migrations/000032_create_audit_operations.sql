@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS audit_archive (
     archive_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     application_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    storage_relative_path VARCHAR(1000) NOT NULL,
+    storage_relative_path VARCHAR(1000) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     media_type VARCHAR(128) NOT NULL,
     sha256 BINARY(32) NOT NULL,
     event_count BIGINT UNSIGNED NOT NULL,

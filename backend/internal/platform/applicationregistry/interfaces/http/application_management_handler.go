@@ -70,6 +70,8 @@ type applicationUpdateRequest struct {
 type environmentCreateRequest struct {
 	Environment string          `json:"environment"`
 	BaseURL     *string         `json:"base_url"`
+	UpstreamURL *string         `json:"upstream_url"`
+	PathPrefix  *string         `json:"path_prefix"`
 	IssuerAlias *string         `json:"issuer_alias"`
 	Metadata    json.RawMessage `json:"metadata"`
 	Status      string          `json:"status"`
@@ -77,6 +79,8 @@ type environmentCreateRequest struct {
 
 type environmentUpdateRequest struct {
 	BaseURL     *string         `json:"base_url"`
+	UpstreamURL *string         `json:"upstream_url"`
+	PathPrefix  *string         `json:"path_prefix"`
 	IssuerAlias *string         `json:"issuer_alias"`
 	Metadata    json.RawMessage `json:"metadata"`
 	Status      string          `json:"status"`
@@ -103,6 +107,8 @@ type environmentResponse struct {
 	ApplicationID string          `json:"application_id"`
 	Environment   string          `json:"environment"`
 	BaseURL       *string         `json:"base_url,omitempty"`
+	UpstreamURL   *string         `json:"upstream_url,omitempty"`
+	PathPrefix    *string         `json:"path_prefix,omitempty"`
 	IssuerAlias   *string         `json:"issuer_alias,omitempty"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
 	Status        string          `json:"status"`
@@ -260,6 +266,8 @@ func (handler *ManagementHandler) CreateEnvironment(writer http.ResponseWriter, 
 		OperatorID:    principal.User.ID,
 		Environment:   payload.Environment,
 		BaseURL:       payload.BaseURL,
+		UpstreamURL:   payload.UpstreamURL,
+		PathPrefix:    payload.PathPrefix,
 		IssuerAlias:   payload.IssuerAlias,
 		Metadata:      payload.Metadata,
 		Status:        payload.Status,
@@ -289,6 +297,8 @@ func (handler *ManagementHandler) UpdateEnvironment(writer http.ResponseWriter, 
 		EnvironmentID: request.PathValue("environment_id"),
 		OperatorID:    principal.User.ID,
 		BaseURL:       payload.BaseURL,
+		UpstreamURL:   payload.UpstreamURL,
+		PathPrefix:    payload.PathPrefix,
 		IssuerAlias:   payload.IssuerAlias,
 		Metadata:      payload.Metadata,
 		Status:        payload.Status,
@@ -370,7 +380,8 @@ func applicationToResponse(item application.Application) applicationResponse {
 func environmentToResponse(item application.Environment) environmentResponse {
 	return environmentResponse{
 		EnvironmentID: item.ID, ApplicationID: item.ApplicationID, Environment: item.Environment,
-		BaseURL: item.BaseURL, IssuerAlias: item.IssuerAlias, Metadata: item.Metadata, Status: item.Status,
+		BaseURL: item.BaseURL, UpstreamURL: item.UpstreamURL, PathPrefix: item.PathPrefix,
+		IssuerAlias: item.IssuerAlias, Metadata: item.Metadata, Status: item.Status,
 		Version: item.Version, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 }
