@@ -247,7 +247,7 @@ func (projection lockedAccountProjection) toDomain() securitydomain.LockedAccoun
 }
 
 func loginPolicyToDomain(row loginPolicyModel) securitydomain.LoginPolicy {
-	return securitydomain.LoginPolicy{TenantID: row.TenantID, MaxFailedAttempts: row.MaxFailedAttempts, LockoutDurationSeconds: row.LockoutDurationSeconds, FailureResetWindowSeconds: row.FailureResetWindowSeconds, Version: row.Version, UpdatedAt: row.UpdatedAt}
+	return securitydomain.LoginPolicy{TenantID: row.TenantID, MaxFailedAttempts: row.MaxFailedAttempts, LockoutDurationSeconds: row.LockoutDurationSeconds, FailureResetWindowSeconds: row.FailureResetWindowSeconds, IdleTimeoutSeconds: row.IdleTimeoutSeconds, Version: row.Version, UpdatedAt: row.UpdatedAt}
 }
 
 func ipBytes(address net.IP) []byte {

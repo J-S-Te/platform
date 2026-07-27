@@ -24,7 +24,8 @@ umask 077
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NGINX_INCLUDE="${PORTAL_GATEWAY_NGINX_INCLUDE:-${PROJECT_ROOT}/docker/portal-apps-locations.conf}"
-NGINX_RELOAD_CMD="${PORTAL_GATEWAY_NGINX_RELOAD_CMD:-docker compose -f ${PROJECT_ROOT}/compose.yaml exec -T frontend nginx -s reload}"
+NGINX_RELOAD_CMD="${PORTAL_GATEWAY_NGINX_RELOAD_CMD:-}"
+COMPOSE_FILE="${PORTAL_GATEWAY_COMPOSE_FILE:-}"
 API_BASE_URL="${PORTAL_GATEWAY_API_BASE_URL:-http://127.0.0.1:8080}"
 API_TOKEN="${PORTAL_GATEWAY_API_TOKEN:-}"
 PAGE_LIMIT="${PORTAL_GATEWAY_PAGE_LIMIT:-100}"
@@ -59,7 +60,8 @@ usage() {
 
 环境变量：
   PORTAL_GATEWAY_NGINX_INCLUDE     include 文件绝对路径
-  PORTAL_GATEWAY_NGINX_RELOAD_CMD  reload 命令
+  PORTAL_GATEWAY_NGINX_RELOAD_CMD  自定义 reload 命令（设置后优先使用）
+  PORTAL_GATEWAY_COMPOSE_FILE       frontend 所在 Compose 文件；未设置时自动探测
   PORTAL_GATEWAY_API_BASE_URL      sync 认证适配层的平台 API 入口
   PORTAL_GATEWAY_API_TOKEN         认证适配层接受的 Bearer token
   PORTAL_GATEWAY_PAGE_LIMIT        列表接口单页大小
@@ -228,7 +230,10 @@ HEADER
     IFS=$'\t' read -r entry_code entry_prefix entry_upstream <<<"$entry"
     render_location "$entry_code" "$entry_prefix" "$entry_upstream" >> "$tmp"
   done
-  mv -- "$tmp" "$file"
+  # 该文件通常以单文件方式 bind mount 到 Nginx 容器。不能用 mv 替换 inode，
+  # 否则运行中的容器仍会读取旧文件；保留 inode 并覆盖内容。
+  cat -- "$tmp" > "$file"
+  rm -f -- "$tmp"
   chmod 0644 "$file"
 }
 
@@ -301,9 +306,42 @@ do_list() {
   done
 }
 
+resolve_compose_file() {
+  if [[ -n "$COMPOSE_FILE" ]]; then
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
+      log "ERROR" "PORTAL_GATEWAY_COMPOSE_FILE 不存在：$COMPOSE_FILE"
+      return 1
+    fi
+    printf '%s' "$COMPOSE_FILE"
+    return
+  fi
+
+  local candidate
+  for candidate in "${PROJECT_ROOT}/compose.local.yaml" "${PROJECT_ROOT}/compose.yaml"; do
+    [[ -f "$candidate" ]] || continue
+    if docker compose -f "$candidate" ps --status running --services 2>/dev/null | grep -Fxq 'frontend'; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+
+  log "ERROR" "未找到正在运行的 frontend 服务；请先启动平台，或设置 PORTAL_GATEWAY_COMPOSE_FILE"
+  return 1
+}
+
 do_reload() {
-  log "INFO" "触发 nginx reload: ${NGINX_RELOAD_CMD}"
-  bash -c "$NGINX_RELOAD_CMD"
+  if [[ -n "$NGINX_RELOAD_CMD" ]]; then
+    log "INFO" "触发自定义 nginx reload: ${NGINX_RELOAD_CMD}"
+    bash -c "$NGINX_RELOAD_CMD"
+    return
+  fi
+
+  local compose_file
+  compose_file="$(resolve_compose_file)"
+  log "INFO" "校验 nginx 配置: docker compose -f ${compose_file} exec -T frontend nginx -t"
+  docker compose -f "$compose_file" exec -T frontend nginx -t
+  log "INFO" "触发 nginx reload: docker compose -f ${compose_file} exec -T frontend nginx -s reload"
+  docker compose -f "$compose_file" exec -T frontend nginx -s reload
 }
 
 # sync 子命令：从平台管理后台拉取所有 ACTIVE 的 application/environment，
@@ -412,8 +450,9 @@ HEADER
     render_location "$code" "$prefix" "$upstream" >> "$rendered"
   done < <(sort -t $'\t' -k1,1 "$sync_input")
 
-  mv -- "$rendered" "$NGINX_INCLUDE"
-  rm -f "$sync_input"
+  # 保留单文件 bind mount 的 inode，确保运行中的 Nginx 容器看到新内容。
+  cat -- "$rendered" > "$NGINX_INCLUDE"
+  rm -f -- "$rendered" "$sync_input"
   chmod 0644 "$NGINX_INCLUDE"
   log "INFO" "sync 完成，请执行 reload 让 nginx 生效"
 }

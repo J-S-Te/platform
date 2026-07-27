@@ -245,8 +245,8 @@ start_stack() {
     build_images
     run_migrations
     bootstrap_admin_if_needed
-    log "启动 API、Worker、Frontend；宿主机仅发布 8081"
-    compose_run up -d api worker frontend
+    log "启动基础平台后端（API + Worker）与统一前端；宿主机仅发布 8081"
+    compose_run up -d api frontend
     compose_run ps
     log "本地地址：http://localhost:8081"
 }

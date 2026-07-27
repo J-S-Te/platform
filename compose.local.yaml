@@ -54,6 +54,8 @@ services:
   api:
     <<: *backend-image
     env_file: *runtime-env
+    environment:
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
     command: ["./api"]
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -70,9 +72,14 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    networks:
+      default:
+        aliases:
+          - platform-api
     restart: unless-stopped
 
   worker:
+    profiles: ["split-runtime"]
     <<: *backend-image
     env_file: *runtime-env
     command: ["./worker"]
