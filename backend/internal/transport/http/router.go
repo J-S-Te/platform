@@ -18,12 +18,9 @@ import (
 	federationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/interfaces/http"
 	federatedloginhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/login/interfaces/http"
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
-	mfahttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/interfaces/http"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/interfaces/http"
-	observabilityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/observability/interfaces/http"
 	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
 	securityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/interfaces/http"
-	mfastepuphttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/mfastepup/interfaces/http"
 	settingshttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
@@ -37,12 +34,9 @@ import (
 // Keeping them in one value prevents the composition root from growing another long positional
 // argument list and lets router tests omit the whole group safely.
 type OperationalModules struct {
-	LoginTargets    *applicationregistryhttp.LoginTargetManagementHandler
-	Notifications   *notificationhttp.Handler
-	Observability   *observabilityhttp.Handler
-	Telemetry       gin.HandlerFunc
-	AuditOperations *audithttp.OperationsHandler
-	FilesAndJobs    *filetaskhttp.Handler
+	LoginTargets  *applicationregistryhttp.LoginTargetManagementHandler
+	Notifications *notificationhttp.Handler
+	FilesAndJobs  *filetaskhttp.Handler
 }
 
 // NewRouter creates the shared middleware chain and registers infrastructure endpoints. Domain
@@ -70,9 +64,6 @@ func NewRouter(
 	auditRecorder middleware.AuditRecorder,
 	oidcHandler *oidchttp.Handler,
 	federationHandler *federationhttp.Handler,
-	mfaHandler *mfahttp.Handler,
-	mfaStepUpHandler *mfastepuphttp.Handler,
-	mfaStepUpGrantConsumer middleware.MFAStepUpGrantConsumer,
 	operational OperationalModules,
 ) *gin.Engine {
 	router := gin.New()
@@ -84,10 +75,6 @@ func NewRouter(
 		middleware.SecurityHeaders(),
 		middleware.CORS(cfg.CORSOrigins),
 	)
-	if operational.Telemetry != nil {
-		router.Use(operational.Telemetry)
-	}
-
 	healthHandler := NewHealthHandler(database, cfg.AppName)
 	router.GET("/healthz", healthHandler.Liveness)
 	router.GET("/readyz", healthHandler.Readiness)
@@ -127,7 +114,6 @@ func NewRouter(
 		authRouter := router.Group("/api/v1/auth")
 		if authHandler != nil {
 			authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
-			authRouter.POST("/login/mfa:verify", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.VerifyMFALogin))
 
 			protected := authRouter.Group("")
 			protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
@@ -164,28 +150,13 @@ func NewRouter(
 			apiRouter.DELETE("/users/:user_id/external-identities/:binding_id", middleware.RequirePermission("platform:identity-binding:delete"), adaptHandler(federationHandler.UnbindUser))
 		}
 
-		if mfaHandler != nil {
-			// MFA operations are strictly self-bound: the handler reads account and tenant only from
-			// the authenticated session, so no administrator delegation permission is exposed here.
-			apiRouter.POST("/mfa/totp:prepare", adaptHandler(mfaHandler.PrepareTOTP))
-			apiRouter.POST("/mfa/totp:confirm", adaptHandler(mfaHandler.ConfirmTOTP))
-			apiRouter.POST("/mfa/totp:disable", adaptHandler(mfaHandler.DisableTOTP))
-			apiRouter.POST("/mfa/challenges", adaptHandler(mfaHandler.CreateChallenge))
-			apiRouter.POST("/mfa/challenges:verify", adaptHandler(mfaHandler.VerifyChallenge))
-		}
-
-		if mfaStepUpHandler != nil {
-			// Step-up challenges are also self-bound. The returned one-time grant is consumed only
-			// after the target route has passed its authorization middleware.
-			apiRouter.POST("/mfa/step-up/challenges", adaptHandler(mfaStepUpHandler.CreateChallenge))
-			apiRouter.POST("/mfa/step-up/challenges:verify", adaptHandler(mfaStepUpHandler.VerifyChallenge))
-		}
-
 		if managementHandler != nil {
 			apiRouter.GET("/users", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.ListUsers))
 			apiRouter.POST("/users", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUser))
+			apiRouter.POST("/users/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUsersBatch))
 			apiRouter.GET("/users/:user_id", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.GetUser))
 			apiRouter.PATCH("/users/:user_id", middleware.RequirePermission("platform:user:update"), adaptHandler(managementHandler.UpdateUser))
+			apiRouter.DELETE("/users/:user_id", middleware.RequirePermission("platform:user:delete"), adaptHandler(managementHandler.DeleteUser))
 			apiRouter.GET("/accounts", middleware.RequirePermission("platform:account:read"), adaptHandler(managementHandler.ListAccounts))
 			apiRouter.PATCH("/accounts/:account_id", middleware.RequirePermission("platform:account:update"), adaptHandler(managementHandler.UpdateAccount))
 			apiRouter.GET("/org-units", middleware.RequirePermission("platform:organization:read"), adaptHandler(managementHandler.ListOrgUnits))
@@ -223,38 +194,27 @@ func NewRouter(
 			apiRouter.GET("/oauth-clients/:oauth_client_id/post-logout-redirect-uris", middleware.RequirePermission("platform:oauth-client:read"), adaptHandler(oauthClientManagementHandler.GetOAuthClientPostLogoutRedirectURIs))
 			apiRouter.PUT("/oauth-clients/:oauth_client_id/post-logout-redirect-uris", middleware.RequirePermission("platform:oauth-client:post-logout-redirect-uri-update"), adaptHandler(oauthClientManagementHandler.UpdateOAuthClientPostLogoutRedirectURIs))
 			apiRouter.GET("/oauth-clients/:oauth_client_id/jwks", middleware.RequirePermission("platform:oauth-client:read"), adaptHandler(oauthClientManagementHandler.GetOAuthClientJWKs))
-			apiRouter.PUT("/oauth-clients/:oauth_client_id/jwks", middleware.RequirePermission("platform:oauth-client:jwk-update"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(oauthClientManagementHandler.UpdateOAuthClientJWKs))
-			apiRouter.POST("/oauth-clients/:oauth_client_id:disable", middleware.RequirePermission("platform:oauth-client:disable"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(oauthClientManagementHandler.DisableOAuthClient))
-			apiRouter.POST("/oauth-clients/:oauth_client_id/credentials", middleware.RequirePermission("platform:oauth-client-credential:create"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(oauthClientManagementHandler.CreateCredential))
-			apiRouter.POST("/oauth-clients/:oauth_client_id/credentials:rotate", middleware.RequirePermission("platform:oauth-client-credential:rotate"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(oauthClientManagementHandler.RotateCredential))
-			apiRouter.POST("/oauth-clients/:oauth_client_id/credentials/:credential_id:disable", middleware.RequirePermission("platform:oauth-client-credential:disable"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(oauthClientManagementHandler.DisableCredential))
+			apiRouter.PUT("/oauth-clients/:oauth_client_id/jwks", middleware.RequirePermission("platform:oauth-client:jwk-update"), adaptHandler(oauthClientManagementHandler.UpdateOAuthClientJWKs))
+			apiRouter.POST("/oauth-clients/:oauth_client_id/disable", middleware.RequirePermission("platform:oauth-client:disable"), adaptHandler(oauthClientManagementHandler.DisableOAuthClient))
+			apiRouter.POST("/oauth-clients/:oauth_client_id/credentials", middleware.RequirePermission("platform:oauth-client-credential:create"), adaptHandler(oauthClientManagementHandler.CreateCredential))
+			apiRouter.POST("/oauth-clients/:oauth_client_id/credentials/rotate", middleware.RequirePermission("platform:oauth-client-credential:rotate"), adaptHandler(oauthClientManagementHandler.RotateCredential))
+			apiRouter.POST("/oauth-clients/:oauth_client_id/credentials/:credential_id/disable", middleware.RequirePermission("platform:oauth-client-credential:disable"), adaptHandler(oauthClientManagementHandler.DisableCredential))
 		}
 
 		if accountLifecycleHandler != nil {
 			apiRouter.POST("/accounts", middleware.RequirePermission("platform:account:create"), adaptHandler(accountLifecycleHandler.CreateLocalAccount))
-			apiRouter.POST("/accounts/:account_id/password:initialize", middleware.RequirePermission("platform:account:password-initialize"), adaptHandler(accountLifecycleHandler.InitializePassword))
-			apiRouter.POST("/accounts/:account_id/password:reset", middleware.RequirePermission("platform:account:password-reset"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(accountLifecycleHandler.ResetPassword))
-			apiRouter.POST("/auth/password:change", adaptHandler(accountLifecycleHandler.ChangeOwnPassword))
+			apiRouter.POST("/accounts/:account_id/password/initialize", middleware.RequirePermission("platform:account:password-initialize"), adaptHandler(accountLifecycleHandler.InitializePassword))
+			apiRouter.POST("/accounts/:account_id/password/reset", middleware.RequirePermission("platform:account:password-reset"), adaptHandler(accountLifecycleHandler.ResetPassword))
+			apiRouter.POST("/auth/password/change", adaptHandler(accountLifecycleHandler.ChangeOwnPassword))
 		}
 
 		if auditHandler != nil {
 			auditQueryRateLimit := middleware.FixedWindowRateLimit(60, time.Minute)
 			apiRouter.GET("/audit/events", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.ListEvents))
 			apiRouter.GET("/audit/events/:event_id", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.GetEvent))
-			apiRouter.POST("/audit/export-jobs", middleware.RequirePermission("platform:audit:export"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(auditHandler.CreateExportJob))
+			apiRouter.POST("/audit/export-jobs", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.CreateExportJob))
 			apiRouter.GET("/audit/export-jobs/:job_id", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.GetExportJob))
 			apiRouter.GET("/audit/export-jobs/:job_id/download", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.DownloadExport))
-		}
-
-		if operational.AuditOperations != nil {
-			apiRouter.GET("/audit/ingestion-receipts", middleware.RequirePermission("platform:audit:ingestion-receipt:view"), adaptHandler(operational.AuditOperations.ListIngestionReceipts))
-			apiRouter.GET("/audit/dead-letters", middleware.RequirePermission("platform:audit:dead-letter:view"), adaptHandler(operational.AuditOperations.ListDeadLetters))
-			apiRouter.GET("/audit/dead-letters/status", middleware.RequirePermission("platform:audit:dead-letter:view"), adaptHandler(operational.AuditOperations.GetDeadLetterStatus))
-			apiRouter.GET("/audit/dead-letters/:dead_letter_id", middleware.RequirePermission("platform:audit:dead-letter:view"), adaptHandler(operational.AuditOperations.GetDeadLetter))
-			apiRouter.POST("/audit/dead-letters/:dead_letter_id:replay", middleware.RequirePermission("platform:audit:dead-letter:replay"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(operational.AuditOperations.ReplayDeadLetter))
-			apiRouter.POST("/audit/dead-letters:replay", middleware.RequirePermission("platform:audit:dead-letter:replay"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(operational.AuditOperations.ReplayDeadLetters))
-			apiRouter.GET("/audit/retention-tasks", middleware.RequirePermission("platform:audit:retention:manage"), adaptHandler(operational.AuditOperations.ListRetentionTasks))
-			apiRouter.POST("/audit/retention-tasks", middleware.RequirePermission("platform:audit:retention:manage"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(operational.AuditOperations.CreateRetentionTask))
 		}
 
 		if operational.Notifications != nil {
@@ -264,42 +224,30 @@ func NewRouter(
 			apiRouter.PATCH("/notifications/templates/:template_id/status", middleware.RequirePermission("platform:notification:template:update"), adaptHandler(operational.Notifications.ChangeTemplateStatus))
 			apiRouter.POST("/notifications/messages", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.CreateMessage))
 			apiRouter.GET("/notifications/deliveries", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.ListDeliveries))
-			apiRouter.POST("/notifications/deliveries:retry", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.RetryFailed))
+			apiRouter.POST("/notifications/deliveries/retry", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.RetryFailed))
 			apiRouter.GET("/notifications/inbox", adaptHandler(operational.Notifications.ListInbox))
 			apiRouter.GET("/notifications/inbox/unread-count", adaptHandler(operational.Notifications.UnreadCount))
 			apiRouter.GET("/notifications/inbox/:delivery_id", adaptHandler(operational.Notifications.GetInboxItem))
-			apiRouter.POST("/notifications/inbox/:delivery_id:read", adaptHandler(operational.Notifications.MarkRead))
-			apiRouter.POST("/notifications/inbox:read-all", adaptHandler(operational.Notifications.MarkAllRead))
-		}
-
-		if operational.Observability != nil {
-			apiRouter.GET("/observability/logs", middleware.RequirePermission("platform:observability:log:view"), operational.Observability.ListLogs)
-			apiRouter.GET("/observability/traces", middleware.RequirePermission("platform:observability:trace:view"), operational.Observability.ListTraces)
-			apiRouter.GET("/observability/metrics", middleware.RequirePermission("platform:observability:metric:view"), operational.Observability.ListMetrics)
-			apiRouter.GET("/observability/alert-rules", middleware.RequirePermission("platform:observability:alert:manage"), operational.Observability.ListAlertRules)
-			apiRouter.POST("/observability/alert-rules", middleware.RequirePermission("platform:observability:alert:manage"), operational.Observability.CreateAlertRule)
-			apiRouter.PATCH("/observability/alert-rules/:rule_id", middleware.RequirePermission("platform:observability:alert:manage"), operational.Observability.UpdateAlertRule)
-			apiRouter.POST("/observability/alert-rules/:rule_id:execute", middleware.RequirePermission("platform:observability:alert:execute"), operational.Observability.ExecuteAlertRule)
+			apiRouter.POST("/notifications/inbox/:delivery_id/read", adaptHandler(operational.Notifications.MarkRead))
+			apiRouter.POST("/notifications/inbox/read-all", adaptHandler(operational.Notifications.MarkAllRead))
 		}
 
 		if operational.FilesAndJobs != nil {
 			apiRouter.POST("/files", middleware.RequirePermission("platform:file:upload"), adaptHandler(operational.FilesAndJobs.Upload))
 			apiRouter.GET("/files/:file_id/content", middleware.RequirePermission("platform:file:download"), adaptHandler(operational.FilesAndJobs.Download))
-			apiRouter.POST("/files:cleanup", middleware.RequirePermission("platform:file:cleanup"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(operational.FilesAndJobs.CleanupFiles))
+			apiRouter.POST("/files/cleanup", middleware.RequirePermission("platform:file:cleanup"), adaptHandler(operational.FilesAndJobs.CleanupFiles))
 			apiRouter.POST("/async-jobs", middleware.RequirePermission("platform:async-job:create"), adaptHandler(operational.FilesAndJobs.CreateJob))
 			apiRouter.GET("/async-jobs", middleware.RequirePermission("platform:async-job:read"), adaptHandler(operational.FilesAndJobs.ListJobs))
-			apiRouter.POST("/async-jobs/:job_id:cancel", middleware.RequirePermission("platform:async-job:cancel"), adaptHandler(operational.FilesAndJobs.CancelJob))
-			apiRouter.POST("/async-jobs/:job_id:retry", middleware.RequirePermission("platform:async-job:retry"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(operational.FilesAndJobs.RetryJob))
-			apiRouter.POST("/async-jobs/:job_id:rerun", middleware.RequirePermission("platform:async-job:rerun"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(operational.FilesAndJobs.RerunJob))
+			apiRouter.POST("/async-jobs/:job_id/cancel", middleware.RequirePermission("platform:async-job:cancel"), adaptHandler(operational.FilesAndJobs.CancelJob))
+			apiRouter.POST("/async-jobs/:job_id/retry", middleware.RequirePermission("platform:async-job:retry"), adaptHandler(operational.FilesAndJobs.RetryJob))
+			apiRouter.POST("/async-jobs/:job_id/rerun", middleware.RequirePermission("platform:async-job:rerun"), adaptHandler(operational.FilesAndJobs.RerunJob))
 		}
 
 		if securityHandler != nil {
 			apiRouter.GET("/security/login-policy", middleware.RequirePermission("platform:security-policy:read"), adaptHandler(securityHandler.GetLoginPolicy))
-			apiRouter.PUT("/security/login-policy", middleware.RequirePermission("platform:security-policy:update"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(securityHandler.UpdateLoginPolicy))
+			apiRouter.PUT("/security/login-policy", middleware.RequirePermission("platform:security-policy:update"), adaptHandler(securityHandler.UpdateLoginPolicy))
 			apiRouter.GET("/security/locked-accounts", middleware.RequirePermission("platform:locked-account:read"), adaptHandler(securityHandler.ListLockedAccounts))
-			apiRouter.POST("/security/locked-accounts/:account_id/unlock", middleware.RequirePermission("platform:locked-account:unlock"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(securityHandler.UnlockAccount))
-			apiRouter.GET("/security/risk-events", middleware.RequirePermission("platform:risk-event:read"), adaptHandler(securityHandler.ListRiskEvents))
-			apiRouter.POST("/security/risk-events/:risk_event_id/resolve", middleware.RequirePermission("platform:risk-event:resolve"), adaptHandler(securityHandler.ResolveRiskEvent))
+			apiRouter.POST("/security/locked-accounts/:account_id/unlock", middleware.RequirePermission("platform:locked-account:unlock"), adaptHandler(securityHandler.UnlockAccount))
 		}
 
 		if configurationHandler != nil {
@@ -333,16 +281,16 @@ func NewRouter(
 
 		if authorizationHandler != nil {
 			apiRouter.GET("/resources", middleware.RequirePermission("platform:resource:read"), adaptHandler(authorizationHandler.ListResources))
-			apiRouter.POST("/resources", middleware.RequirePermission("platform:resource:create"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(authorizationHandler.CreateResource))
+			apiRouter.POST("/resources", middleware.RequirePermission("platform:resource:create"), adaptHandler(authorizationHandler.CreateResource))
 			apiRouter.GET("/permissions", middleware.RequirePermission("platform:permission:read"), adaptHandler(authorizationHandler.ListPermissions))
-			apiRouter.POST("/permissions", middleware.RequirePermission("platform:permission:create"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(authorizationHandler.CreatePermission))
+			apiRouter.POST("/permissions", middleware.RequirePermission("platform:permission:create"), adaptHandler(authorizationHandler.CreatePermission))
 			apiRouter.GET("/roles", middleware.RequirePermission("platform:role:read"), adaptHandler(authorizationHandler.ListRoles))
-			apiRouter.POST("/roles", middleware.RequirePermission("platform:role:create"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(authorizationHandler.CreateRole))
+			apiRouter.POST("/roles", middleware.RequirePermission("platform:role:create"), adaptHandler(authorizationHandler.CreateRole))
 			apiRouter.GET("/roles/:role_id", middleware.RequirePermission("platform:role:read"), adaptHandler(authorizationHandler.GetRole))
-			apiRouter.PATCH("/roles/:role_id", middleware.RequirePermission("platform:role:update"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(authorizationHandler.UpdateRole))
+			apiRouter.PATCH("/roles/:role_id", middleware.RequirePermission("platform:role:update"), adaptHandler(authorizationHandler.UpdateRole))
 			apiRouter.GET("/role-bindings", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(authorizationHandler.ListRoleBindings))
-			apiRouter.POST("/role-bindings", middleware.RequirePermission("platform:role-binding:create"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(authorizationHandler.CreateRoleBinding))
-			apiRouter.PATCH("/role-bindings/:binding_id", middleware.RequirePermission("platform:role-binding:update"), middleware.RequireMFAStepUp(mfaStepUpGrantConsumer), adaptHandler(authorizationHandler.UpdateRoleBinding))
+			apiRouter.POST("/role-bindings", middleware.RequirePermission("platform:role-binding:create"), adaptHandler(authorizationHandler.CreateRoleBinding))
+			apiRouter.PATCH("/role-bindings/:binding_id", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(authorizationHandler.UpdateRoleBinding))
 			apiRouter.POST("/authorization/check", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.Check))
 			apiRouter.POST("/authorization/batch-check", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.BatchCheck))
 		}
@@ -354,7 +302,7 @@ func NewRouter(
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
 		integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
-		integrationRouter.POST("/audit/events:batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
+		integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
 	}
 
 	router.NoRoute(func(context *gin.Context) {

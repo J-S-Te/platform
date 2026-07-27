@@ -17,7 +17,7 @@ import (
 
 const (
 	// AuditIngestPath is the application-authenticated batch endpoint exposed by Basic Platform.
-	AuditIngestPath = "/api/v1/integration/audit/events:batch"
+	AuditIngestPath = "/api/v1/integration/audit/events/batch"
 	maxBatchSize    = 100
 )
 

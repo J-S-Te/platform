@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var (
+	safeUpstreamURLPattern = regexp.MustCompile(`^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~-]+)(:([0-9]{1,5}))?(/[A-Za-z0-9._~!%+/@-]*)?$`)
+
 	// ErrNotFound means a tenant-scoped application registry resource does not exist.
 	ErrNotFound = errors.New("application registry resource not found")
 	// ErrConflict means a requested registry mutation violates a uniqueness or lifecycle rule.
@@ -68,12 +72,23 @@ type Application struct {
 
 // Environment is a deployment boundary under an application. Metadata is non-secret JSON
 // object data only; OAuth credentials and private keys are intentionally not modeled here.
+//
+// Gateway fields split the public-facing address from the internal upstream so the platform can
+// act as a single-entry reverse proxy:
+//   - BaseURL:     public base URL every external caller (browser, OAuth client) sees for this
+//     environment; used as the prefix when LoginTarget.TargetURI is relative.
+//   - UpstreamURL: internal address of the registered sub-system, only reachable from the portal
+//     host (e.g. http://127.0.0.1:8081). Used to render the nginx upstream map.
+//   - PathPrefix:  sub-system path prefix under the portal (e.g. /contract); when set, the
+//     portal gateway strips/forwards it to UpstreamURL.
 type Environment struct {
 	ID            string
 	TenantID      string
 	ApplicationID string
 	Environment   string
 	BaseURL       *string
+	UpstreamURL   *string
+	PathPrefix    *string
 	IssuerAlias   *string
 	Metadata      json.RawMessage
 	Status        string
@@ -119,6 +134,8 @@ type EnvironmentCreateInput struct {
 	ApplicationID string
 	Environment   string
 	BaseURL       *string
+	UpstreamURL   *string
+	PathPrefix    *string
 	IssuerAlias   *string
 	Metadata      json.RawMessage
 	Status        string
@@ -131,6 +148,8 @@ type EnvironmentUpdateInput struct {
 	ApplicationID string
 	EnvironmentID string
 	BaseURL       *string
+	UpstreamURL   *string
+	PathPrefix    *string
 	IssuerAlias   *string
 	Metadata      json.RawMessage
 	Status        string
@@ -316,7 +335,9 @@ func normalizeEnvironmentCreate(input EnvironmentCreateInput) EnvironmentCreateI
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
 	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
 	input.Environment = strings.ToLower(strings.TrimSpace(input.Environment))
-	input.BaseURL = normalizeOptional(input.BaseURL)
+	input.BaseURL = normalizeOptionalBaseURL(input.BaseURL)
+	input.UpstreamURL = normalizeOptionalUpstreamURL(input.UpstreamURL)
+	input.PathPrefix = normalizeOptionalPathPrefix(input.PathPrefix)
 	input.IssuerAlias = normalizeOptional(input.IssuerAlias)
 	input.Status = strings.ToUpper(strings.TrimSpace(input.Status))
 	return input
@@ -327,7 +348,9 @@ func normalizeEnvironmentUpdate(input EnvironmentUpdateInput) EnvironmentUpdateI
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
 	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
 	input.EnvironmentID = strings.TrimSpace(input.EnvironmentID)
-	input.BaseURL = normalizeOptional(input.BaseURL)
+	input.BaseURL = normalizeOptionalBaseURL(input.BaseURL)
+	input.UpstreamURL = normalizeOptionalUpstreamURL(input.UpstreamURL)
+	input.PathPrefix = normalizeOptionalPathPrefix(input.PathPrefix)
 	input.IssuerAlias = normalizeOptional(input.IssuerAlias)
 	input.Status = strings.ToUpper(strings.TrimSpace(input.Status))
 	return input
@@ -351,13 +374,18 @@ func validApplicationUpdate(input ApplicationUpdateInput) bool {
 
 func validEnvironmentCreate(input EnvironmentCreateInput) bool {
 	return input.TenantID != "" && input.OperatorID != "" && input.ApplicationID != "" &&
-		validEnvironmentCode(input.Environment) && validOptionalURL(input.BaseURL) &&
+		validEnvironmentCode(input.Environment) && validOptionalBaseURL(input.BaseURL) &&
+		validOptionalUpstreamURL(input.UpstreamURL) && validOptionalPathPrefix(input.PathPrefix) &&
+		validGatewayTripleConsistent(input.BaseURL, input.UpstreamURL, input.PathPrefix) &&
 		validOptionalCode(input.IssuerAlias, 128) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
 }
 
 func validEnvironmentUpdate(input EnvironmentUpdateInput) bool {
 	return input.TenantID != "" && input.OperatorID != "" && input.ApplicationID != "" && input.EnvironmentID != "" && input.Version > 0 &&
-		validOptionalURL(input.BaseURL) && validOptionalCode(input.IssuerAlias, 128) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
+		validOptionalBaseURL(input.BaseURL) && validOptionalUpstreamURL(input.UpstreamURL) &&
+		validOptionalPathPrefix(input.PathPrefix) &&
+		validGatewayTripleConsistent(input.BaseURL, input.UpstreamURL, input.PathPrefix) &&
+		validOptionalCode(input.IssuerAlias, 128) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
 }
 
 func validApplicationStatus(value string) bool {
@@ -445,6 +473,137 @@ func validOptionalURL(value *string) bool {
 	}
 	parsed, err := url.ParseRequestURI(*value)
 	return err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
+}
+
+// validOptionalBaseURL validates the public portal address used to compose browser redirects.
+// Unlike a general homepage URL it must not contain credentials, a query or a fragment.
+func validOptionalBaseURL(value *string) bool {
+	if value == nil || *value == "" {
+		return true
+	}
+	if len(*value) > 512 || strings.Contains(*value, "#") {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(*value)
+	return err == nil && parsed.Host != "" && parsed.User == nil && parsed.Opaque == "" &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+func normalizeOptionalBaseURL(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	normalized := strings.TrimSpace(*value)
+	if normalized == "" {
+		return nil
+	}
+	normalized = strings.TrimRight(normalized, "/")
+	return &normalized
+}
+
+// validOptionalUpstreamURL is the strictly-internal counterpart to validOptionalURL. It is used
+// for the reverse-proxy target only and may point at private/loopback addresses, so it does not
+// share the public-suffix concerns of the public BaseURL.
+func validOptionalUpstreamURL(value *string) bool {
+	if value == nil || *value == "" {
+		return true
+	}
+	if len(*value) > 512 {
+		return false
+	}
+	matches := safeUpstreamURLPattern.FindStringSubmatch(*value)
+	if matches == nil {
+		return false
+	}
+	if matches[3] != "" {
+		port, err := strconv.Atoi(matches[3])
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+	}
+	parsed, err := url.ParseRequestURI(*value)
+	return err == nil && parsed.Host != "" && parsed.User == nil && parsed.Opaque == "" &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+func normalizeOptionalUpstreamURL(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	normalized := strings.TrimSpace(*value)
+	if normalized == "" {
+		return nil
+	}
+	normalized = strings.TrimRight(normalized, "/")
+	return &normalized
+}
+
+// validOptionalPathPrefix accepts an absolute path under the portal root. The trailing slash is
+// optional; // (protocol-relative), \\ (windows) and any :// (scheme) are rejected.
+func validOptionalPathPrefix(value *string) bool {
+	if value == nil || *value == "" {
+		return true
+	}
+	// The portal root is reserved for the portal UI and cannot be assigned to a sub-system.
+	return *value != "/" && validPortalPath(*value, 128)
+}
+
+// validPortalPath accepts one single-rooted, query-free path using the same conservative
+// character set as the nginx gateway renderer. Encoded characters and traversal are rejected.
+func validPortalPath(value string, limit int) bool {
+	if value == "" || len(value) > limit || !strings.HasPrefix(value, "/") || strings.Contains(value, "//") {
+		return false
+	}
+	// Keep this character set aligned with scripts/portal-gateway.sh. Besides avoiding nginx
+	// configuration metacharacters, rejecting percent-encoding prevents browser/nginx double-
+	// decoding disagreements before a LoginTarget is joined to the public BaseURL.
+	for _, character := range []byte(value) {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("/._~!+-", rune(character)) {
+			continue
+		}
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	parsed, err := url.ParseRequestURI(value)
+	return err == nil && parsed.Path != "" && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+func normalizeOptionalPathPrefix(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	normalized := strings.TrimSpace(*value)
+	if normalized == "" {
+		return nil
+	}
+	normalized = strings.TrimRight(normalized, "/")
+	if normalized == "" {
+		return nil
+	}
+	return &normalized
+}
+
+// validGatewayTripleConsistent enforces a coarse invariant for the gateway fields:
+//   - path_prefix only makes sense when paired with a BaseURL (relative LoginTarget.TargetURI is
+//     resolved against BaseURL), so the presence of path_prefix implies BaseURL is set.
+//   - upstream_url + path_prefix describe a single reverse-proxy entry, so they must be set
+//     together (or both left empty when the environment is only used as a logical boundary).
+func validGatewayTripleConsistent(baseURL, upstreamURL, pathPrefix *string) bool {
+	hasBaseURL := baseURL != nil && *baseURL != ""
+	hasUpstream := upstreamURL != nil && *upstreamURL != ""
+	hasPrefix := pathPrefix != nil && *pathPrefix != ""
+	if hasPrefix && !hasBaseURL {
+		return false
+	}
+	if hasUpstream != hasPrefix {
+		return false
+	}
+	return true
 }
 
 func validMetadata(value json.RawMessage) bool {

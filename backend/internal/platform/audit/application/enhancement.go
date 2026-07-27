@@ -11,15 +11,6 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/domain"
 )
 
-const (
-	// PermissionRetentionManage 是主路由为归档和清理管理接口校验的权限编码。
-	PermissionRetentionManage = "platform:audit:retention:manage"
-	// PermissionDeadLetterView 是死信运营状态查询所需权限。
-	PermissionDeadLetterView = "platform:audit:dead-letter:view"
-	// PermissionDeadLetterReplay 是人工重放所需权限。
-	PermissionDeadLetterReplay = "platform:audit:dead-letter:replay"
-)
-
 // AuditRecord 是内部治理动作产生的审计记录，不暴露任何认证秘密。
 type AuditRecord struct {
 	EventID, TenantID, ApplicationCode, EnvironmentCode, ActorID, ActorName string

@@ -110,7 +110,8 @@ type permissionCreatePayload struct {
 }
 
 type roleCreatePayload struct {
-	Code          string   `json:"code"`
+	// Code is accepted only for rolling compatibility and is ignored.
+	Code          *string  `json:"code,omitempty"`
 	Name          string   `json:"name"`
 	Description   *string  `json:"description"`
 	PermissionIDs []string `json:"permission_ids"`
@@ -278,7 +279,6 @@ func (h *Handler) CreateRole(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.CreateRole(r.Context(), application.RoleCreateInput{
 		TenantID:      principal.Tenant.ID,
 		OperatorID:    principal.User.ID,
-		Code:          payload.Code,
 		Name:          payload.Name,
 		Description:   payload.Description,
 		PermissionIDs: payload.PermissionIDs,
@@ -323,7 +323,6 @@ func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 		TenantID:      principal.Tenant.ID,
 		OperatorID:    principal.User.ID,
 		RoleID:        r.PathValue("role_id"),
-		Code:          payload.Code,
 		Name:          payload.Name,
 		Description:   payload.Description,
 		Status:        payload.Status,

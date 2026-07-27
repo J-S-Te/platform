@@ -36,6 +36,8 @@ type Account struct {
 	TenantID    string
 	UserID      *string
 	AccountName string
+	AccountType string
+	AuthSource  string
 	Status      string
 	LastLoginAt *time.Time
 	Version     uint64

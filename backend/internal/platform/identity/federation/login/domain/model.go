@@ -127,19 +127,8 @@ type SessionIssue struct {
 }
 
 // BrowserSession is the trusted local authentication outcome returned only to the HTTP adapter.
-// Exactly one outcome is valid:
-//   - MFARequired is false and CookieValue/ExpiresAt describe a completed HttpOnly browser session; or
-//   - MFARequired is true and the pre-authentication fields describe a short-lived, one-time MFA
-//     challenge.
-//
-// The pre-authentication credential is opaque and must never be logged, persisted in browser storage,
-// or returned in a JSON response. The HTTP adapter may place it only in a short-lived HttpOnly cookie.
+// A valid value contains the server-issued HttpOnly session cookie and its expiration.
 type BrowserSession struct {
 	CookieValue string
 	ExpiresAt   time.Time
-
-	MFARequired                 bool
-	PreAuthenticationCredential string
-	PreAuthenticationExpiresAt  time.Time
-	MFAMaxAttempts              uint16
 }

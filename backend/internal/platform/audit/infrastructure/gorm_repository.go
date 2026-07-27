@@ -55,6 +55,16 @@ type eventModel struct {
 
 func (eventModel) TableName() string { return "audit_event" }
 
+// eventQueryRow is the flattened scan target used by audit list, detail and export queries.
+// Event must be an exported field: GORM ignores unexported embedded fields while parsing a
+// destination schema, which would otherwise leave every audit_event column at its Go zero value.
+type eventQueryRow struct {
+	Event           eventModel `gorm:"embedded"`
+	ApplicationCode string     `gorm:"column:application_code"`
+	ApplicationName string     `gorm:"column:application_name"`
+	EnvironmentCode string     `gorm:"column:environment_code"`
+}
+
 type dedupModel struct {
 	ApplicationID, EventID string
 	AuditRowID             *uint64
@@ -253,31 +263,23 @@ func (r *Repository) List(ctx context.Context, tenantID string, query applicatio
 	if err := db.Count(&total).Error; err != nil {
 		return application.PageResult[domain.Event]{}, err
 	}
-	type row struct {
-		eventModel
-		ApplicationCode, ApplicationName, EnvironmentCode string
-	}
-	var rows []row
+	var rows []eventQueryRow
 	if err := db.Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Order("audit_event.occurred_at DESC, audit_event.id DESC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).Scan(&rows).Error; err != nil {
 		return application.PageResult[domain.Event]{}, err
 	}
 	items := make([]domain.Event, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, toEvent(row.eventModel, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
+		items = append(items, toEvent(row.Event, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
 	}
 	return application.PageResult[domain.Event]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.Event, error) {
-	type row struct {
-		eventModel
-		ApplicationCode, ApplicationName, EnvironmentCode string
-	}
-	var record row
+	var record eventQueryRow
 	err := r.database.WithContext(ctx).Table("audit_event").Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Where("audit_event.tenant_id = ? AND audit_event.event_id = ?", tenantID, eventID).Order("audit_event.occurred_at DESC, audit_event.id DESC").Take(&record).Error
 	if err != nil {
 		return domain.Event{}, r.mapError(err)
 	}
-	return toEvent(record.eventModel, record.ApplicationCode, record.ApplicationName, record.EnvironmentCode), nil
+	return toEvent(record.Event, record.ApplicationCode, record.ApplicationName, record.EnvironmentCode), nil
 }
 func (r *Repository) CreateExportJob(ctx context.Context, tenantID, operatorID string, query application.PageRequest, publicID string, now time.Time) (domain.ExportJob, error) {
 	var platformApplication applicationModel
@@ -346,17 +348,13 @@ func (r *Repository) ClaimExportJob(ctx context.Context, workerID string, now, s
 
 func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery) ([]domain.Event, error) {
 	db := r.eventQuery(ctx, tenantID, pageRequest(query))
-	type row struct {
-		eventModel
-		ApplicationCode, ApplicationName, EnvironmentCode string
-	}
-	var rows []row
+	var rows []eventQueryRow
 	if err := db.Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Order("audit_event.occurred_at DESC, audit_event.id DESC").Limit(10000).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	items := make([]domain.Event, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, toEvent(row.eventModel, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
+		items = append(items, toEvent(row.Event, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
 	}
 	return items, nil
 }
@@ -409,16 +407,17 @@ func (r *Repository) GetExportFile(ctx context.Context, tenantID, jobID string) 
 }
 
 func exportQuery(query application.PageRequest) domain.ExportQuery {
-	return domain.ExportQuery{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo}
+	return domain.ExportQuery{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, ActionCategory: query.ActionCategory, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo}
 }
 func pageRequest(query domain.ExportQuery) application.PageRequest {
-	return application.PageRequest{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo, Page: 1, PageSize: 100}
+	return application.PageRequest{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, ActionCategory: query.ActionCategory, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo, Page: 1, PageSize: 100}
 }
 
 func (r *Repository) eventQuery(ctx context.Context, tenantID string, query application.PageRequest) *gorm.DB {
 	db := r.database.WithContext(ctx).Table("audit_event").Where("audit_event.tenant_id = ?", tenantID)
 	if query.Keyword != "" {
-		db = db.Where("(audit_event.action LIKE ? OR audit_event.resource_name_snapshot LIKE ? OR audit_event.summary LIKE ?)", "%"+query.Keyword+"%", "%"+query.Keyword+"%", "%"+query.Keyword+"%")
+		// action 使用 ASCII 字符集存储。先显式转换为 utf8mb4，避免中文关键词触发 MySQL 3988。
+		db = db.Where("(CONVERT(audit_event.action USING utf8mb4) LIKE ? OR audit_event.resource_name_snapshot LIKE ? OR audit_event.summary LIKE ?)", "%"+query.Keyword+"%", "%"+query.Keyword+"%", "%"+query.Keyword+"%")
 	}
 	if query.ApplicationCode != "" {
 		db = db.Joins("JOIN platform_application filter_app ON filter_app.id = audit_event.application_id").Where("filter_app.code = ?", query.ApplicationCode)
@@ -427,7 +426,12 @@ func (r *Repository) eventQuery(ctx context.Context, tenantID string, query appl
 		db = db.Joins("JOIN platform_application_environment filter_env ON filter_env.id = audit_event.environment_id").Where("filter_env.environment = ?", query.EnvironmentCode)
 	}
 	if query.Action != "" {
-		db = db.Where("audit_event.action = ?", query.Action)
+		// 显式转换也保护直接调用接口的客户端，非 ASCII action 只会返回空结果而不会导致 500。
+		db = db.Where("CONVERT(audit_event.action USING utf8mb4) = ?", query.Action)
+	}
+	if query.ActionCategory != "" {
+		clause, arguments := actionCategoryPredicate(query.ActionCategory)
+		db = db.Where(clause, arguments...)
 	}
 	if query.Result != "" {
 		db = db.Where("audit_event.result = ?", query.Result)
@@ -443,6 +447,34 @@ func (r *Repository) eventQuery(ctx context.Context, tenantID string, query appl
 	}
 	return db
 }
+
+// actionCategoryPredicate converts the UI's stable operation category into predicates over the
+// machine-readable action and HTTP metadata. Values are never interpolated into SQL.
+func actionCategoryPredicate(category string) (string, []any) {
+	const (
+		action = "LOWER(CONVERT(audit_event.action USING utf8mb4))"
+		method = "UPPER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(audit_event.metadata, '$.method')), ''))"
+		path   = "LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(audit_event.metadata, '$.path')), ''))"
+	)
+	const statusPattern = "(^|[.:/ _-])(enable|disable|activate|deactivate|lock|unlock|publish|resolve|replay|retry|cancel|rerun|read|read-all)([.:/ _-]|$)"
+
+	switch strings.ToUpper(strings.TrimSpace(category)) {
+	case "LOGIN":
+		return "(" + action + " = ? OR " + action + " LIKE ?)", []any{"auth.login", "auth.login.%"}
+	case "EXPORT":
+		return "(" + action + " LIKE ? OR " + path + " LIKE ?)", []any{"%export%", "%export%"}
+	case "STATUS_CHANGE":
+		return "(" + action + " REGEXP ? OR " + path + " REGEXP ?)", []any{statusPattern, statusPattern}
+	case "UPDATE":
+		return "((" + method + " IN (?, ?) OR " + action + " REGEXP ?) AND NOT (" + action + " LIKE ? OR " + path + " LIKE ?) AND NOT (" + action + " REGEXP ? OR " + path + " REGEXP ?))", []any{"PUT", "PATCH", "(^|[.:/ _-])update([.:/ _-]|$)", "%export%", "%export%", statusPattern, statusPattern}
+	case "CREATE":
+		return "((" + method + " = ? OR " + action + " REGEXP ?) AND NOT (" + action + " = ? OR " + action + " LIKE ?) AND NOT (" + action + " LIKE ? OR " + path + " LIKE ?) AND NOT (" + action + " REGEXP ? OR " + path + " REGEXP ?))", []any{"POST", "(^|[.:/ _-])create([.:/ _-]|$)", "auth.login", "auth.login.%", "%export%", "%export%", statusPattern, statusPattern}
+	default:
+		// 应用层会拒绝未知分类；该分支用于防御绕过应用层的仓储调用。
+		return "1 = 0", nil
+	}
+}
+
 func (r *Repository) mapError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return application.ErrNotFound

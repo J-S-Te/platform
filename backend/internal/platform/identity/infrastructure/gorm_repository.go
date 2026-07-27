@@ -81,7 +81,7 @@ func (repository *GORMRepository) FindFederatedLoginAccount(ctx context.Context,
 }
 
 // RecordSuccessfulPasswordVerification clears password-failure state immediately after the primary
-// credential succeeds, including when MFA postpones browser-session creation.
+// credential succeeds, after the primary credential succeeds.
 func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		verifiedAt := now.UTC()
@@ -166,7 +166,31 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 
 // FindPrincipalBySession verifies current session and account state, then loads the platform
 // application's active role and permission summary.
-func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time) (domain.Principal, error) {
+func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error) {
+	if idleTimeout <= 0 {
+		return domain.Principal{}, application.ErrUnauthenticated
+	}
+	now = now.UTC()
+	idleCutoff := now.Add(-idleTimeout)
+
+	var session sessionModel
+	if err := repository.database.WithContext(ctx).
+		Select("id", "tenant_id", "account_id", "last_seen_at", "expires_at", "revoked_at", "status").
+		Where("id = ?", sessionID).Take(&session).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.Principal{}, application.ErrUnauthenticated
+		}
+		return domain.Principal{}, fmt.Errorf("query session activity: %w", err)
+	}
+	if session.Status != domain.StatusActive || session.RevokedAt != nil || !session.ExpiresAt.After(now) {
+		return domain.Principal{}, application.ErrUnauthenticated
+	}
+	if !session.LastSeenAt.After(idleCutoff) {
+		if err := repository.RevokeAccountSessions(ctx, session.TenantID, session.AccountID, now, "IDLE_TIMEOUT"); err != nil {
+			return domain.Principal{}, err
+		}
+		return domain.Principal{}, application.ErrUnauthenticated
+	}
 	var row principalProjection
 	result := repository.database.WithContext(ctx).
 		Table("iam_session AS session").
@@ -176,7 +200,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ?", domain.StatusActive).
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = session.tenant_id AND user.status = ?", domain.StatusActive).
 		Where("session.id = ? AND session.status = ?", sessionID, domain.StatusActive).
-		Where("session.revoked_at IS NULL AND session.expires_at > ?", now.UTC()).
+		Where("session.revoked_at IS NULL AND session.expires_at > ? AND session.last_seen_at > ?", now, idleCutoff).
 		Limit(1).
 		Find(&row)
 	if result.Error != nil {
@@ -185,12 +209,34 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	if result.RowsAffected == 0 {
 		return domain.Principal{}, application.ErrUnauthenticated
 	}
+	touch := repository.database.WithContext(ctx).Model(&sessionModel{}).
+		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+		Update("last_seen_at", now)
+	if touch.Error != nil {
+		return domain.Principal{}, fmt.Errorf("touch authenticated session: %w", touch.Error)
+	}
+	if touch.RowsAffected == 0 {
+		// MySQL reports zero changed rows when concurrent browser requests write the same
+		// DATETIME(3) value. Re-check instead of treating that harmless no-op as a logout;
+		// the extra read still rejects a session revoked concurrently with this request.
+		var activeSession sessionModel
+		check := repository.database.WithContext(ctx).
+			Select("id").
+			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+			Take(&activeSession)
+		if check.Error != nil {
+			if errors.Is(check.Error, gorm.ErrRecordNotFound) {
+				return domain.Principal{}, application.ErrUnauthenticated
+			}
+			return domain.Principal{}, fmt.Errorf("recheck authenticated session after touch: %w", check.Error)
+		}
+	}
 
-	roles, err := repository.findRoles(ctx, row.TenantID, row.UserID, now)
+	roles, err := repository.findRoles(ctx, row.TenantID, row.UserID, row.AccountID, now)
 	if err != nil {
 		return domain.Principal{}, err
 	}
-	permissions, err := repository.findPermissionCodes(ctx, row.TenantID, row.UserID, now)
+	permissions, err := repository.findPermissionCodes(ctx, row.TenantID, row.UserID, row.AccountID, now)
 	if err != nil {
 		return domain.Principal{}, err
 	}
@@ -237,17 +283,33 @@ func (repository *GORMRepository) RevokeSession(ctx context.Context, sessionID s
 	return nil
 }
 
-func (repository *GORMRepository) findRoles(ctx context.Context, tenantID, userID string, now time.Time) ([]domain.ReferenceName, error) {
+// RevokeAccountSessions invalidates all active SSO sessions for one tenant account. It is used
+// both for explicit global logout and for inactivity expiry discovered in any child system.
+func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error {
+	result := repository.database.WithContext(ctx).
+		Model(&sessionModel{}).
+		Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, domain.StatusActive).
+		Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt.UTC(), "revoke_reason": reason})
+	if result.Error != nil {
+		return fmt.Errorf("revoke account sessions: %w", result.Error)
+	}
+	return nil
+}
+
+func (repository *GORMRepository) findRoles(ctx context.Context, tenantID, userID, accountID string, now time.Time) ([]domain.ReferenceName, error) {
 	var rows []roleProjection
+	now = now.UTC()
+	subjectSQL, subjectArgs := principalBindingSubjectFilter(userID, accountID, now)
 	result := repository.database.WithContext(ctx).
 		Table("authz_role_binding AS binding").
 		Distinct("role.id", "role.name", "role.code").
 		Select("role.id, role.name, role.code").
 		Joins("JOIN platform_application AS application ON application.id = binding.application_id AND application.tenant_id = binding.tenant_id AND application.code = ? AND application.status = ?", consoleApplicationCode, domain.StatusActive).
 		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id AND role.status = ?", domain.StatusActive).
-		Where("binding.tenant_id = ? AND binding.subject_type = ? AND binding.subject_id = ? AND binding.scope_type = ? AND binding.scope_id = ? AND binding.status = ?", tenantID, "USER", userID, "TENANT", "", domain.StatusActive).
-		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now.UTC()).
-		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now.UTC()).
+		Where("binding.tenant_id = ? AND binding.scope_type = ? AND binding.scope_id = ? AND binding.status = ?", tenantID, "TENANT", "", domain.StatusActive).
+		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now).
+		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now).
+		Where(subjectSQL, subjectArgs...).
 		Order("role.code").
 		Find(&rows)
 	if result.Error != nil {
@@ -260,8 +322,10 @@ func (repository *GORMRepository) findRoles(ctx context.Context, tenantID, userI
 	return roles, nil
 }
 
-func (repository *GORMRepository) findPermissionCodes(ctx context.Context, tenantID, userID string, now time.Time) ([]string, error) {
+func (repository *GORMRepository) findPermissionCodes(ctx context.Context, tenantID, userID, accountID string, now time.Time) ([]string, error) {
 	var rows []permissionProjection
+	now = now.UTC()
+	subjectSQL, subjectArgs := principalBindingSubjectFilter(userID, accountID, now)
 	result := repository.database.WithContext(ctx).
 		Table("authz_role_binding AS binding").
 		Distinct("permission.code").
@@ -270,9 +334,10 @@ func (repository *GORMRepository) findPermissionCodes(ctx context.Context, tenan
 		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id AND role.status = ?", domain.StatusActive).
 		Joins("JOIN authz_role_permission AS role_permission ON role_permission.role_id = role.id AND role_permission.effect = ?", "ALLOW").
 		Joins("JOIN authz_permission AS permission ON permission.id = role_permission.permission_id AND permission.tenant_id = binding.tenant_id AND permission.application_id = binding.application_id AND permission.status = ?", domain.StatusActive).
-		Where("binding.tenant_id = ? AND binding.subject_type = ? AND binding.subject_id = ? AND binding.scope_type = ? AND binding.scope_id = ? AND binding.status = ?", tenantID, "USER", userID, "TENANT", "", domain.StatusActive).
-		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now.UTC()).
-		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now.UTC()).
+		Where("binding.tenant_id = ? AND binding.scope_type = ? AND binding.scope_id = ? AND binding.status = ?", tenantID, "TENANT", "", domain.StatusActive).
+		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now).
+		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now).
+		Where(subjectSQL, subjectArgs...).
 		Order("permission.code").
 		Find(&rows)
 	if result.Error != nil {
@@ -283,4 +348,45 @@ func (repository *GORMRepository) findPermissionCodes(ctx context.Context, tenan
 		permissions = append(permissions, row.Code)
 	}
 	return permissions, nil
+}
+
+// principalBindingSubjectFilter mirrors authorization checks when constructing the principal
+// consumed by route middleware. It keeps USER, ACCOUNT, ORG_UNIT and POSITION bindings in one
+// authorization model rather than making organization-derived roles display-only.
+func principalBindingSubjectFilter(userID, accountID string, now time.Time) (string, []any) {
+	return `(
+		(binding.subject_type = ? AND binding.subject_id = ?)
+		OR (binding.subject_type = ? AND binding.subject_id = ?)
+		OR (
+			binding.subject_type IN (?, ?)
+			AND EXISTS (
+				SELECT 1
+				FROM iam_membership AS membership
+				JOIN iam_org_unit AS organization
+					ON organization.id = membership.org_unit_id
+					AND organization.tenant_id = membership.tenant_id
+					AND organization.status = ?
+				JOIN iam_position AS position
+					ON position.id = membership.position_id
+					AND position.tenant_id = membership.tenant_id
+					AND position.status = ?
+				WHERE membership.tenant_id = binding.tenant_id
+					AND membership.user_id = ?
+					AND membership.status = ?
+					AND (membership.valid_from IS NULL OR membership.valid_from <= ?)
+					AND (membership.valid_until IS NULL OR membership.valid_until > ?)
+					AND (
+						(binding.subject_type = ? AND membership.org_unit_id = binding.subject_id)
+						OR (binding.subject_type = ? AND membership.position_id = binding.subject_id)
+					)
+			)
+		)
+	)`, []any{
+			"USER", userID,
+			"ACCOUNT", accountID,
+			"ORG_UNIT", "POSITION",
+			domain.StatusActive, domain.StatusActive,
+			userID, domain.StatusActive, now, now,
+			"ORG_UNIT", "POSITION",
+		}
 }

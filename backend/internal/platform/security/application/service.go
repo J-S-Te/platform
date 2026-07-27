@@ -1,4 +1,4 @@
-// Package application coordinates login-policy, lockout, and risk-event use cases.
+// Package application coordinates login-policy and account-lockout use cases.
 package application
 
 import (
@@ -24,12 +24,8 @@ const (
 	defaultMaxFailedAttempts         = 5
 	defaultLockoutDurationSeconds    = 15 * 60
 	defaultFailureResetWindowSeconds = 30 * 60
+	defaultIdleTimeoutSeconds        = 30 * 60
 )
-
-// IdentifierGenerator creates ULID-compatible identifiers for risk events.
-type IdentifierGenerator interface {
-	New(time.Time) (string, error)
-}
 
 // Clock enables deterministic security-policy tests.
 type Clock interface {
@@ -58,6 +54,18 @@ type LoginFailureRecorder interface {
 	RecordFailedLogin(context.Context, LoginFailureInput) (LoginFailureResult, error)
 }
 
+// SessionIdleTimeoutProvider exposes the tenant-specific inactivity timeout without leaking
+// security storage details into the identity module.
+type SessionIdleTimeoutProvider interface {
+	SessionIdleTimeout(context.Context, string) (time.Duration, error)
+}
+
+// LoginSecurityService is the dependency required by identity authentication.
+type LoginSecurityService interface {
+	LoginFailureRecorder
+	SessionIdleTimeoutProvider
+}
+
 // LoginFailureResult tells the authentication flow whether this failed attempt created a lock.
 type LoginFailureResult struct {
 	LockedUntil *time.Time
@@ -70,15 +78,15 @@ type LoginPolicyUpdateInput struct {
 	MaxFailedAttempts         uint
 	LockoutDurationSeconds    uint
 	FailureResetWindowSeconds uint
+	IdleTimeoutSeconds        uint
 	Version                   uint64
 }
 
-// PageRequest contains list filters shared by locked-account and risk-event queries.
+// PageRequest contains list filters for locked-account queries.
 type PageRequest struct {
 	Page     int
 	PageSize int
 	Keyword  string
-	Status   string
 }
 
 // PageResult is a tenant-scoped, page-number based result set.
@@ -96,39 +104,27 @@ type UnlockInput struct {
 	OperatorID string
 }
 
-// RiskEventResolveInput contains an explicit risk-event disposition.
-type RiskEventResolveInput struct {
-	TenantID          string
-	RiskEventID       string
-	OperatorID        string
-	ResolutionComment string
-	Version           uint64
-}
-
-// Repository persists security aggregates. All read and write methods must enforce tenant scope.
+// Repository persists login-security aggregates. All operations must enforce tenant scope.
 type Repository interface {
 	GetLoginPolicy(context.Context, string) (domain.LoginPolicy, error)
 	UpdateLoginPolicy(context.Context, LoginPolicyUpdateInput, time.Time) (domain.LoginPolicy, error)
-	RecordFailedLogin(context.Context, LoginFailureInput, domain.LoginPolicy, string, time.Time) (LoginFailureResult, error)
+	RecordFailedLogin(context.Context, LoginFailureInput, domain.LoginPolicy, time.Time) (LoginFailureResult, error)
 	ListLockedAccounts(context.Context, string, PageRequest, time.Time) (PageResult[domain.LockedAccount], error)
-	UnlockAccount(context.Context, UnlockInput, string, time.Time) (domain.LockedAccount, error)
-	ListRiskEvents(context.Context, string, PageRequest) (PageResult[domain.RiskEvent], error)
-	ResolveRiskEvent(context.Context, RiskEventResolveInput, time.Time) (domain.RiskEvent, error)
+	UnlockAccount(context.Context, UnlockInput, time.Time) (domain.LockedAccount, error)
 }
 
-// Service applies security-policy validation and creates IDs before repository operations.
+// Service applies login-security validation before repository operations.
 type Service struct {
 	repository Repository
-	ids        IdentifierGenerator
 	clock      Clock
 }
 
 // NewService creates a security application service.
-func NewService(repository Repository, ids IdentifierGenerator, clock Clock) (*Service, error) {
-	if repository == nil || ids == nil || clock == nil {
+func NewService(repository Repository, clock Clock) (*Service, error) {
+	if repository == nil || clock == nil {
 		return nil, errors.New("security service dependencies must not be nil")
 	}
-	return &Service{repository: repository, ids: ids, clock: clock}, nil
+	return &Service{repository: repository, clock: clock}, nil
 }
 
 // GetLoginPolicy returns a persisted policy, or documented defaults for a tenant that has not
@@ -147,10 +143,20 @@ func (service *Service) GetLoginPolicy(ctx context.Context, tenantID string) (do
 // UpdateLoginPolicy validates and persists an administrator-selected tenant login policy.
 func (service *Service) UpdateLoginPolicy(ctx context.Context, input LoginPolicyUpdateInput) (domain.LoginPolicy, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" ||
-		!validPolicy(input.MaxFailedAttempts, input.LockoutDurationSeconds, input.FailureResetWindowSeconds) {
+		!validPolicy(input.MaxFailedAttempts, input.LockoutDurationSeconds, input.FailureResetWindowSeconds, input.IdleTimeoutSeconds) {
 		return domain.LoginPolicy{}, ErrValidation
 	}
 	return service.repository.UpdateLoginPolicy(ctx, input, service.clock.Now().UTC())
+}
+
+// SessionIdleTimeout returns the effective inactivity timeout for a tenant. A session that has
+// no authenticated activity for this duration must be revoked by the identity repository.
+func (service *Service) SessionIdleTimeout(ctx context.Context, tenantID string) (time.Duration, error) {
+	policy, err := service.GetLoginPolicy(ctx, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(policy.IdleTimeoutSeconds) * time.Second, nil
 }
 
 // RecordFailedLogin applies the current tenant policy to one verified-account password failure.
@@ -163,11 +169,7 @@ func (service *Service) RecordFailedLogin(ctx context.Context, input LoginFailur
 		return LoginFailureResult{}, err
 	}
 	now := service.clock.Now().UTC().Truncate(time.Millisecond)
-	riskEventID, err := service.ids.New(now)
-	if err != nil {
-		return LoginFailureResult{}, err
-	}
-	return service.repository.RecordFailedLogin(ctx, input, policy, riskEventID, now)
+	return service.repository.RecordFailedLogin(ctx, input, policy, now)
 }
 
 // ListLockedAccounts returns currently locked accounts visible to a tenant security administrator.
@@ -183,28 +185,7 @@ func (service *Service) UnlockAccount(ctx context.Context, input UnlockInput) (d
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.AccountID) == "" || strings.TrimSpace(input.OperatorID) == "" {
 		return domain.LockedAccount{}, ErrValidation
 	}
-	unlockEventID, err := service.ids.New(service.clock.Now().UTC())
-	if err != nil {
-		return domain.LockedAccount{}, err
-	}
-	return service.repository.UnlockAccount(ctx, input, unlockEventID, service.clock.Now().UTC())
-}
-
-// ListRiskEvents returns risk events without exposing authentication secrets.
-func (service *Service) ListRiskEvents(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.RiskEvent], error) {
-	if strings.TrimSpace(tenantID) == "" {
-		return PageResult[domain.RiskEvent]{}, ErrValidation
-	}
-	return service.repository.ListRiskEvents(ctx, tenantID, normalizePage(query))
-}
-
-// ResolveRiskEvent marks an open event resolved with the security administrator's comment.
-func (service *Service) ResolveRiskEvent(ctx context.Context, input RiskEventResolveInput) (domain.RiskEvent, error) {
-	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.RiskEventID) == "" || strings.TrimSpace(input.OperatorID) == "" ||
-		strings.TrimSpace(input.ResolutionComment) == "" || len(strings.TrimSpace(input.ResolutionComment)) > 500 || input.Version == 0 {
-		return domain.RiskEvent{}, ErrValidation
-	}
-	return service.repository.ResolveRiskEvent(ctx, input, service.clock.Now().UTC())
+	return service.repository.UnlockAccount(ctx, input, service.clock.Now().UTC())
 }
 
 func defaultLoginPolicy(tenantID string) domain.LoginPolicy {
@@ -212,14 +193,16 @@ func defaultLoginPolicy(tenantID string) domain.LoginPolicy {
 		TenantID: tenantID, MaxFailedAttempts: defaultMaxFailedAttempts,
 		LockoutDurationSeconds:    defaultLockoutDurationSeconds,
 		FailureResetWindowSeconds: defaultFailureResetWindowSeconds,
+		IdleTimeoutSeconds:        defaultIdleTimeoutSeconds,
 		Version:                   1,
 	}
 }
 
-func validPolicy(maxAttempts, lockoutSeconds, resetSeconds uint) bool {
+func validPolicy(maxAttempts, lockoutSeconds, resetSeconds, idleTimeoutSeconds uint) bool {
 	return maxAttempts >= 1 && maxAttempts <= 20 &&
 		lockoutSeconds >= 60 && lockoutSeconds <= 24*60*60 &&
-		resetSeconds >= 60 && resetSeconds <= 24*60*60
+		resetSeconds >= 60 && resetSeconds <= 24*60*60 &&
+		idleTimeoutSeconds >= 60 && idleTimeoutSeconds <= 24*60*60
 }
 
 func normalizePage(query PageRequest) PageRequest {
@@ -233,6 +216,5 @@ func normalizePage(query PageRequest) PageRequest {
 		query.PageSize = 100
 	}
 	query.Keyword = strings.TrimSpace(query.Keyword)
-	query.Status = strings.ToUpper(strings.TrimSpace(query.Status))
 	return query
 }

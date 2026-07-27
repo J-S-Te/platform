@@ -57,7 +57,7 @@ type AccountResolver interface {
 	ResolveAccount(context.Context, string, string, string) (domain.LocalAccount, error)
 }
 
-// SessionIssuer creates either a completed local browser session or an MFA pre-authentication result.
+// SessionIssuer creates a completed local browser session.
 type SessionIssuer interface {
 	IssueBrowserSession(context.Context, domain.SessionIssue) (domain.BrowserSession, error)
 }
@@ -209,7 +209,7 @@ func (service *Service) CreateQRSession(ctx context.Context, input CreateQRSessi
 }
 
 // CompleteCallback consumes state before contacting DingTalk, resolves only a pre-bound active
-// account, and delegates the completed-session versus MFA decision to the existing session issuer.
+// account and delegates session creation to the existing session issuer.
 func (service *Service) CompleteCallback(ctx context.Context, input CallbackInput) (CallbackResult, error) {
 	input.State = strings.TrimSpace(input.State)
 	input.AuthorizationCode = strings.TrimSpace(input.AuthorizationCode)
@@ -297,9 +297,6 @@ func validAccount(account domain.LocalAccount, tenantID, providerID string) bool
 }
 
 func validBrowserSession(session domain.BrowserSession, now time.Time) bool {
-	if session.MFARequired {
-		return strings.TrimSpace(session.PreAuthenticationCredential) != "" && session.PreAuthenticationExpiresAt.After(now) && session.MFAMaxAttempts > 0
-	}
 	return strings.TrimSpace(session.CookieValue) != "" && session.ExpiresAt.After(now)
 }
 

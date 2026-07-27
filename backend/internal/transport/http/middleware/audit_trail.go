@@ -97,7 +97,7 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger) gin.HandlerFunc {
 }
 
 func shouldRecordAuditTrail(method, route string) bool {
-	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events:batch") {
+	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch") {
 		return false
 	}
 	if strings.HasPrefix(route, "/api/v1/audit/") {

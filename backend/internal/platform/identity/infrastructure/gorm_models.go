@@ -259,3 +259,16 @@ type bootstrapRoleBindingModel struct {
 }
 
 func (bootstrapRoleBindingModel) TableName() string { return "authz_role_binding" }
+
+// identityPolicyRevisionModel projects the authorization cache revision updated when identity
+// management automatically assigns a role. It is local to this bounded context to avoid coupling
+// identity persistence to authorization infrastructure implementation types.
+type identityPolicyRevisionModel struct {
+	TenantID      string    `gorm:"column:tenant_id;primaryKey"`
+	ApplicationID string    `gorm:"column:application_id;primaryKey"`
+	Revision      uint64    `gorm:"column:revision"`
+	ChangedAt     time.Time `gorm:"column:changed_at"`
+	ChangeReason  string    `gorm:"column:change_reason"`
+}
+
+func (identityPolicyRevisionModel) TableName() string { return "authz_policy_revision" }

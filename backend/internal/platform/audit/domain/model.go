@@ -44,8 +44,8 @@ type ExportWork struct {
 
 // ExportQuery is the persisted filter set used to produce an audit export.
 type ExportQuery struct {
-	Keyword, ApplicationCode, EnvironmentCode, Action, Result, RiskLevel string
-	OccurredFrom, OccurredTo                                             *time.Time
+	Keyword, ApplicationCode, EnvironmentCode, Action, ActionCategory, Result, RiskLevel string
+	OccurredFrom, OccurredTo                                                             *time.Time
 }
 
 // ExportFile describes the local file attached to a completed audit export job.

@@ -38,6 +38,11 @@ mkdir -p "${project_root}/docker" \
     "${project_root}/data/uploads"
 chmod 700 "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
 
+if [[ ! -e "${project_root}/docker/portal-apps-locations.conf" ]]; then
+    printf '# DO NOT EDIT: managed by scripts/portal-gateway.sh.\n# No registered sub-system routes yet.\n' > "${project_root}/docker/portal-apps-locations.conf"
+    chmod 644 "${project_root}/docker/portal-apps-locations.conf"
+fi
+
 umask 077
 cat > "$env_file" <<ENV
 # 由 scripts/prepare-docker-env.sh 于 $(date '+%Y-%m-%d %H:%M:%S %z') 生成。
@@ -46,8 +51,8 @@ APP_ENV=development
 APP_NAME=basic-platform
 APP_TIMEZONE=Asia/Shanghai
 APP_HTTP_ADDR=:8080
-APP_PUBLIC_BASE_URL=http://localhost:7897
-APP_CORS_ALLOWED_ORIGINS=http://localhost:7897
+APP_PUBLIC_BASE_URL=http://localhost:8081
+APP_CORS_ALLOWED_ORIGINS=http://localhost:8081
 
 MYSQL_HOST=mysql
 MYSQL_PORT=3306
@@ -68,10 +73,9 @@ AUTH_SESSION_COOKIE_SECURE=false
 AUTH_SESSION_COOKIE_SAME_SITE=Lax
 AUTH_SESSION_TTL=8h
 
-OIDC_ISSUER=http://localhost:7897
+OIDC_ISSUER=http://localhost:8081
 
 IAM_MOBILE_ENCRYPTION_KEY=$(base64_key)
-IAM_MFA_ENCRYPTION_KEY=$(base64_key)
 IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY=$(base64_key)
 IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY=$(base64_key)
 IAM_EXTERNAL_OIDC_HTTP_TIMEOUT=10s

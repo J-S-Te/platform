@@ -120,8 +120,7 @@ func validateExternalLoginRuntime(identity config.IdentityConfig, providerSecret
 }
 
 // externalLoginHTTPService maps the application lifecycle type to the HTTP adapter's audit-only
-// lifecycle type. It also exposes the MFA-aware completion contract without leaking the opaque
-// pre-authentication credential into a response body or audit event.
+// lifecycle type.
 type externalLoginHTTPService struct {
 	service *federatedloginapplication.Service
 }
@@ -133,22 +132,6 @@ func (adapter externalLoginHTTPService) Begin(ctx context.Context, input federat
 func (adapter externalLoginHTTPService) CompleteCallbackWithLifecycle(ctx context.Context, input federatedloginapplication.CallbackInput) (federatedloginapplication.CallbackResult, federatedloginhttp.CallbackLifecycle, error) {
 	result, lifecycle, err := adapter.service.CompleteCallbackWithLifecycle(ctx, input)
 	return result, externalLoginHTTPLifecycle(lifecycle), err
-}
-
-func (adapter externalLoginHTTPService) CompleteCallbackWithLifecycleAndMFA(ctx context.Context, input federatedloginapplication.CallbackInput) (federatedloginhttp.CallbackCompletion, federatedloginhttp.CallbackLifecycle, error) {
-	result, lifecycle, err := adapter.service.CompleteCallbackWithLifecycle(ctx, input)
-	if err != nil {
-		return federatedloginhttp.CallbackCompletion{}, externalLoginHTTPLifecycle(lifecycle), err
-	}
-	session := result.Session
-	return federatedloginhttp.CallbackCompletion{
-		Session:                     session,
-		RedirectTo:                  result.RedirectTo,
-		MFARequired:                 session.MFARequired,
-		PreAuthenticationCredential: session.PreAuthenticationCredential,
-		PreAuthenticationExpiresAt:  session.PreAuthenticationExpiresAt,
-		MFAMaxAttempts:              session.MFAMaxAttempts,
-	}, externalLoginHTTPLifecycle(lifecycle), nil
 }
 
 func externalLoginHTTPLifecycle(lifecycle federatedloginapplication.CallbackLifecycle) federatedloginhttp.CallbackLifecycle {
@@ -163,6 +146,3 @@ func externalLoginHTTPLifecycle(lifecycle federatedloginapplication.CallbackLife
 }
 
 var _ federatedloginhttp.ApplicationService = externalLoginHTTPService{}
-var _ interface {
-	CompleteCallbackWithLifecycleAndMFA(context.Context, federatedloginapplication.CallbackInput) (federatedloginhttp.CallbackCompletion, federatedloginhttp.CallbackLifecycle, error)
-} = externalLoginHTTPService{}

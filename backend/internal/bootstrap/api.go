@@ -2,7 +2,6 @@
 package bootstrap
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,9 +31,6 @@ import (
 	federationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/infrastructure"
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
-	mfaapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/application"
-	mfainfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/infrastructure"
-	mfahttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/interfaces/http"
 	oidcapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/application"
 	oidcinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/infrastructure"
 	oidcaccesssubject "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/accesssubject"
@@ -43,9 +39,6 @@ import (
 	securityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/application"
 	securityinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/infrastructure"
 	securityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/interfaces/http"
-	mfastepupapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/mfastepup/application"
-	mfastepupinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/mfastepup/infrastructure"
-	mfastepuphttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/mfastepup/interfaces/http"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/application"
 	settingsinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/infrastructure"
 	settingshttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/interfaces/http"
@@ -63,10 +56,8 @@ type API struct {
 	Handler http.Handler
 	Logger  *slog.Logger
 
-	database      *gorm.DB
-	logFile       io.Closer
-	runtimeCancel context.CancelFunc
-	runtimeDone   chan struct{}
+	database *gorm.DB
+	logFile  io.Closer
 }
 
 // NewAPI creates the local storage directories, structured logger, database pool and HTTP router.
@@ -125,7 +116,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	loginSecurityService, err := securityapplication.NewService(
-		loginSecurityRepository, ulid.Generator{}, securityapplication.SystemClock{},
+		loginSecurityRepository, securityapplication.SystemClock{},
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -241,38 +232,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	mfaRepository, err := mfainfrastructure.NewRepository(db)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	mfaProtector, err := security.NewEnvelopeProtector(cfg.Identity.MFAEncryptionKey, "IAM_MFA_ENCRYPTION_KEY")
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	mfaService, err := mfaapplication.NewService(mfaRepository, mfaProtector, ulid.Generator{}, mfaapplication.SystemClock{}, mfaapplication.Config{
-		Issuer: cfg.Auth.OIDCIssuer, EnrollmentTTL: 5 * time.Minute, FactorTTL: 365 * 24 * time.Hour,
-		ChallengeTTL: 5 * time.Minute, MaxChallengeAttempts: 5, RecoveryCodeCount: 10,
-	})
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	mfaHandler, err := mfahttp.NewHandler(mfaService, logger)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-
-	// Password authentication depends on the MFA service so an enrolled account cannot receive a
-	// browser session before it completes the second factor.
 	authService, err := identityapplication.NewService(
-		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL, mfaService,
+		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL,
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -322,28 +283,6 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	accountLifecycleHandler, err := identityhttp.NewAccountLifecycleHandler(accountLifecycleService, authHandler, logger)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-
-	mfaStepUpRepository, err := mfastepupinfrastructure.NewRepository(db)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	mfaStepUpService, err := mfastepupapplication.NewService(
-		mfaStepUpRepository, mfaService, ulid.Generator{}, mfastepupapplication.SystemClock{},
-		mfastepupapplication.Config{GrantTTL: 2 * time.Minute},
-	)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	mfaStepUpHandler, err := mfastepuphttp.NewHandler(mfaStepUpService, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -541,39 +480,25 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	operational, err := buildOperationalModules(cfg, db, logger, auditService, auditRepository)
+	operational, err := buildOperationalModules(cfg, db, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
-	runtimeContext, runtimeCancel := context.WithCancel(context.Background())
-	runtimeDone := make(chan struct{})
-	go func() {
-		defer close(runtimeDone)
-		operational.alertRunner.Run(runtimeContext)
-	}()
 
 	return &API{
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, externalLoginHandler, dingTalkLoginHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, federationHandler, mfaHandler, mfaStepUpHandler, mfaStepUpService, operational.modules,
+			cfg, logger, db, authHandler, externalLoginHandler, dingTalkLoginHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, federationHandler, operational,
 		),
-		Logger:        logger,
-		database:      db,
-		logFile:       logFile,
-		runtimeCancel: runtimeCancel,
-		runtimeDone:   runtimeDone,
+		Logger:   logger,
+		database: db,
+		logFile:  logFile,
 	}, nil
 }
 
 // Close releases process-owned resources. It is safe to defer after a successful NewAPI call.
 func (api *API) Close() {
-	if api.runtimeCancel != nil {
-		api.runtimeCancel()
-	}
-	if api.runtimeDone != nil {
-		<-api.runtimeDone
-	}
 	if api.database != nil {
 		if err := database.Close(api.database); err != nil {
 			api.Logger.Error("close mysql database handle", "error", err)

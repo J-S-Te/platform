@@ -189,7 +189,7 @@ func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID st
 			return err
 		}
 		now := time.Now().UTC()
-		result = tx.Model(&roleModel{}).Where("id = ? AND version = ?", role.ID, role.Version).Updates(map[string]any{"code": role.Code, "name": role.Name, "description": role.Description, "status": role.Status, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": operatorID})
+		result = tx.Model(&roleModel{}).Where("id = ? AND version = ?", role.ID, role.Version).Updates(map[string]any{"name": role.Name, "description": role.Description, "status": role.Status, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": operatorID})
 		if result.Error != nil {
 			return fmt.Errorf("update role: %w", result.Error)
 		}
@@ -316,14 +316,16 @@ func (r *GORMRepository) Check(ctx context.Context, input application.CheckInput
 	decision := domain.Decision{Allowed: false, PermissionCode: input.PermissionCode, PolicyVersion: revision.Revision, ReasonCode: "DENY_NO_MATCH"}
 	now := time.Now().UTC()
 	scopeSQL, scopeArgs := scopeFilter(input)
+	subjectSQL, subjectArgs := roleBindingSubjectFilter(input.UserID, input.AccountID, now)
 	query := r.database.WithContext(ctx).
 		Table("authz_role_binding AS binding").
 		Joins("JOIN authz_role AS role ON role.id = binding.role_id").
 		Joins("JOIN authz_role_permission AS role_permission ON role_permission.role_id = role.id AND role_permission.effect = 'ALLOW'").
 		Joins("JOIN authz_permission AS permission ON permission.id = role_permission.permission_id").
 		Where("binding.tenant_id = ? AND binding.application_id = ? AND binding.status = ? AND role.status = ? AND permission.status = ? AND permission.code = ?", input.TenantID, app.ID, domain.StatusActive, domain.StatusActive, domain.StatusActive, input.PermissionCode).
+		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now).
 		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now).
-		Where("(binding.subject_type = ? AND binding.subject_id = ?) OR (binding.subject_type = ? AND binding.subject_id = ?)", "USER", input.UserID, "ACCOUNT", input.AccountID).
+		Where(subjectSQL, subjectArgs...).
 		Where(scopeSQL, scopeArgs...)
 
 	var matches int64
@@ -403,6 +405,48 @@ func (r *GORMRepository) bumpRevision(tx *gorm.DB, tenantID, applicationID strin
 	}
 	return nil
 }
+
+// roleBindingSubjectFilter resolves effective role subjects. Organization and position bindings
+// apply only while the requesting user has an active, currently effective membership in the
+// corresponding active organization unit or position.
+func roleBindingSubjectFilter(userID, accountID string, now time.Time) (string, []any) {
+	return `(
+		(binding.subject_type = ? AND binding.subject_id = ?)
+		OR (binding.subject_type = ? AND binding.subject_id = ?)
+		OR (
+			binding.subject_type IN (?, ?)
+			AND EXISTS (
+				SELECT 1
+				FROM iam_membership AS membership
+				JOIN iam_org_unit AS organization
+					ON organization.id = membership.org_unit_id
+					AND organization.tenant_id = membership.tenant_id
+					AND organization.status = ?
+				JOIN iam_position AS position
+					ON position.id = membership.position_id
+					AND position.tenant_id = membership.tenant_id
+					AND position.status = ?
+				WHERE membership.tenant_id = binding.tenant_id
+					AND membership.user_id = ?
+					AND membership.status = ?
+					AND (membership.valid_from IS NULL OR membership.valid_from <= ?)
+					AND (membership.valid_until IS NULL OR membership.valid_until > ?)
+					AND (
+						(binding.subject_type = ? AND membership.org_unit_id = binding.subject_id)
+						OR (binding.subject_type = ? AND membership.position_id = binding.subject_id)
+					)
+			)
+		)
+	)`, []any{
+			"USER", userID,
+			"ACCOUNT", accountID,
+			"ORG_UNIT", "POSITION",
+			domain.StatusActive, domain.StatusActive,
+			userID, domain.StatusActive, now, now,
+			"ORG_UNIT", "POSITION",
+		}
+}
+
 func scopeFilter(input application.CheckInput) (string, []any) {
 	clauses := []string{"(binding.scope_type = ? AND binding.scope_id = ?)"}
 	arguments := []any{"TENANT", ""}

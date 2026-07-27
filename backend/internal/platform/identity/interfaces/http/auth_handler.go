@@ -17,7 +17,6 @@ import (
 	auditapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/application"
 	auditdomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/domain"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
-	mfadomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/mfa/domain"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
@@ -39,10 +38,10 @@ type Handler struct {
 
 type applicationService interface {
 	Login(ctx context.Context, input application.LoginInput) (application.SessionResult, error)
-	CompleteMFALogin(ctx context.Context, credential, code string, ipAddress net.IP, userAgent string) (application.MFALoginResult, error)
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
 	Refresh(ctx context.Context, principal authctx.Principal) (application.SessionResult, error)
 	Logout(ctx context.Context, principal authctx.Principal) error
+	SessionIdleTimeout(ctx context.Context, tenantID string) (time.Duration, error)
 }
 
 // lifecycleAuditRecorder persists server-generated identity lifecycle events. Recording is best
@@ -109,25 +108,9 @@ type sessionResponse struct {
 	RedirectURL string    `json:"redirect_url"`
 }
 
-// mfaRequiredResponse contains only the opaque pre-authentication credential required to finish
-// this login. It deliberately carries no account or tenant identifier and never sets a session cookie.
-type mfaRequiredResponse struct {
-	MFARequired                 bool      `json:"mfa_required"`
-	PreAuthenticationCredential string    `json:"pre_authentication_credential"`
-	ExpiresAt                   time.Time `json:"expires_at"`
-	MaxAttempts                 uint16    `json:"max_attempts"`
-	RedirectURL                 string    `json:"redirect_url"`
-}
-
-type verifyMFALoginRequest struct {
-	PreAuthenticationCredential string `json:"pre_authentication_credential"`
-	Code                        string `json:"code"`
-}
-
-type verifyMFALoginResponse struct {
-	ExpiresAt          time.Time `json:"expires_at"`
-	RedirectURL        string    `json:"redirect_url"`
-	VerificationMethod string    `json:"verification_method"`
+type principalResponse struct {
+	authctx.Principal
+	IdleTimeoutSeconds uint `json:"idle_timeout_seconds"`
 }
 
 // Login handles the sole P0 login type: a local account with an Argon2id password credential.
@@ -151,14 +134,6 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	result.RedirectURL = handler.resolveLoginRedirect(request.Context(), result.TenantID, payload)
-	if result.MFARequired {
-		httpresponse.WriteSuccess(writer, request, http.StatusAccepted, "需要 MFA 验证", mfaRequiredResponse{
-			MFARequired: true, PreAuthenticationCredential: result.PreAuthenticationCredential,
-			ExpiresAt: result.PreAuthenticationExpiresAt.UTC(), MaxAttempts: result.MFAMaxAttempts,
-			RedirectURL: result.RedirectURL,
-		})
-		return
-	}
 	handler.setSessionCookie(writer, result.Token, result.ExpiresAt)
 	handler.recordLogin(request, result)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", toSessionResponse(result))
@@ -185,37 +160,6 @@ func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID strin
 		return "/"
 	}
 	return redirectURI
-}
-
-// VerifyMFALogin completes a password login that is paused at its bound, single-use MFA
-// pre-authentication record. A browser session and cookie are issued only after successful MFA.
-func (handler *Handler) VerifyMFALogin(writer http.ResponseWriter, request *http.Request) {
-	payload, err := decodeVerifyMFALoginRequest(writer, request)
-	if err != nil {
-		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
-		return
-	}
-	credential, usedPreAuthenticationCookie, err := handler.resolveMFALoginCredential(request, payload.PreAuthenticationCredential)
-	if err != nil {
-		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
-		return
-	}
-
-	result, err := handler.service.CompleteMFALogin(request.Context(), credential, payload.Code, remoteIP(request), request.UserAgent())
-	if err != nil {
-		handler.writeApplicationError(writer, request, err)
-		return
-	}
-	if !result.Verified {
-		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_MFA_VERIFICATION_FAILED", "动态验证码或恢复码错误", map[string]any{"attempts_remaining": result.AttemptsRemaining}))
-		return
-	}
-	if usedPreAuthenticationCookie {
-		handler.clearPreAuthenticationCookie(writer)
-	}
-	handler.setSessionCookie(writer, result.Token, result.ExpiresAt)
-	handler.recordMFALogin(request, result)
-	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", verifyMFALoginResponse{ExpiresAt: result.ExpiresAt.UTC(), RedirectURL: result.RedirectURL, VerificationMethod: result.VerificationMethod})
 }
 
 // Refresh renews the already authenticated current browser session and replaces its cookie.
@@ -248,7 +192,7 @@ func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request
 	}
 	handler.clearSessionCookie(writer)
 	handler.recordLogout(request, principal)
-	httpresponse.WriteSuccess(writer, request, http.StatusOK, "已退出登录", map[string]any{})
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "已退出所有应用系统", map[string]any{})
 }
 
 // Me returns only the principal that middleware obtained by verifying the JWT and persisted state.
@@ -258,7 +202,12 @@ func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
 		return
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", principal)
+	idleTimeout, err := handler.service.SessionIdleTimeout(request.Context(), principal.Tenant.ID)
+	if err != nil {
+		handler.writeApplicationError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)})
 }
 
 // Authenticate delegates token verification to the application service for HTTP middleware.
@@ -278,17 +227,6 @@ func (handler *Handler) recordLogin(request *http.Request, result application.Se
 		Action: "auth.login", ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
 		Result: "SUCCESS", RiskLevel: "LOW", Classification: "INTERNAL",
 		Summary: "本地账号密码登录成功",
-	})
-}
-
-// recordMFALogin records a completed password-and-MFA login without including the submitted code,
-// opaque credential, recovery code or TOTP seed in the audit event.
-func (handler *Handler) recordMFALogin(request *http.Request, result application.MFALoginResult) {
-	handler.recordLifecycleEvent(request, result.TenantID, auditapplication.EventInput{
-		ActorType: "USER", ActorID: result.UserID, ActorName: result.UserName, SessionID: result.SessionID,
-		Action: "auth.login.mfa", ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
-		Result: "SUCCESS", RiskLevel: "MEDIUM", Classification: "INTERNAL",
-		Summary: "本地账号密码和 MFA 登录成功",
 	})
 }
 
@@ -321,7 +259,7 @@ func (handler *Handler) recordLogout(request *http.Request, principal authctx.Pr
 		ActorType: "USER", ActorID: principal.User.ID, ActorName: principal.User.Name, SessionID: principal.SessionID,
 		Action: "auth.logout", ResourceType: "auth_session", ResourceID: principal.SessionID, ResourceName: principal.Account.Name,
 		Result: "SUCCESS", RiskLevel: "LOW", Classification: "INTERNAL",
-		Summary: "当前会话已退出登录",
+		Summary: "已退出所有应用系统",
 	})
 }
 
@@ -359,43 +297,6 @@ func (handler *Handler) setSessionCookie(writer http.ResponseWriter, token strin
 	})
 }
 
-// preAuthenticationCookieName derives an independent MFA pre-authentication cookie from the
-// configured session cookie. The credential remains HttpOnly and is never written to an audit event.
-func preAuthenticationCookieName(sessionCookieName string) string {
-	return sessionCookieName + "_mfa"
-}
-
-func (handler *Handler) clearPreAuthenticationCookie(writer http.ResponseWriter) {
-	http.SetCookie(writer, &http.Cookie{
-		Name: preAuthenticationCookieName(handler.cookie.name), Value: "", Path: "/", HttpOnly: true,
-		Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite,
-		Expires: time.Unix(1, 0).UTC(), MaxAge: -1,
-	})
-}
-
-// resolveMFALoginCredential accepts the documented JSON credential for backwards compatibility.
-// When it is omitted, it falls back to the independent HttpOnly pre-authentication cookie issued
-// by an external identity callback. The opaque value is passed only to the application service.
-func (handler *Handler) resolveMFALoginCredential(request *http.Request, explicitCredential string) (string, bool, error) {
-	explicitCredential = strings.TrimSpace(explicitCredential)
-	if explicitCredential != "" {
-		if len(explicitCredential) > 512 {
-			return "", false, errors.New("MFA pre-authentication credential exceeds limit")
-		}
-		return explicitCredential, false, nil
-	}
-
-	cookie, err := request.Cookie(preAuthenticationCookieName(handler.cookie.name))
-	if err != nil {
-		return "", false, errors.New("MFA pre-authentication cookie is required")
-	}
-	credential := strings.TrimSpace(cookie.Value)
-	if credential == "" || len(credential) > 512 {
-		return "", false, errors.New("MFA pre-authentication cookie is invalid")
-	}
-	return credential, true, nil
-}
-
 // ClearSessionCookie removes the browser session cookie after a security-sensitive state change.
 func (handler *Handler) ClearSessionCookie(writer http.ResponseWriter) {
 	handler.clearSessionCookie(writer)
@@ -416,16 +317,8 @@ func (handler *Handler) writeApplicationError(writer http.ResponseWriter, reques
 		apiError := httperror.AccountLocked
 		apiError.Details = map[string]time.Time{"locked_until": locked.LockedUntil.UTC()}
 		httpresponse.WriteError(writer, request, http.StatusLocked, apiError)
-	case errors.Is(err, application.ErrUnauthenticated), errors.Is(err, mfadomain.ErrLoginPreAuthenticationNotFound):
+	case errors.Is(err, application.ErrUnauthenticated):
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
-	case errors.Is(err, mfadomain.ErrInvalidInput):
-		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
-	case errors.Is(err, mfadomain.ErrLoginPreAuthenticationExpired):
-		httpresponse.WriteError(writer, request, http.StatusGone, httperror.New("AUTH_MFA_PRE_AUTH_EXPIRED", "MFA 预认证已过期", nil))
-	case errors.Is(err, mfadomain.ErrLoginPreAuthenticationConsumed):
-		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("AUTH_MFA_PRE_AUTH_CONSUMED", "MFA 预认证已使用", nil))
-	case errors.Is(err, mfadomain.ErrLoginPreAuthenticationAttemptsExceeded):
-		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_MFA_ATTEMPTS_EXCEEDED", "MFA 验证尝试次数已用尽", nil))
 	default:
 		handler.logger.Error("identity authentication request failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
@@ -467,27 +360,6 @@ func validLoginTargetSelection(payload loginRequest) bool {
 	}
 	return provided == 3 && len(payload.ApplicationID) == 26 && len(payload.EnvironmentID) == 26 &&
 		len(payload.LoginTargetCode) <= 64
-}
-
-func decodeVerifyMFALoginRequest(writer http.ResponseWriter, request *http.Request) (verifyMFALoginRequest, error) {
-	defer request.Body.Close()
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxLoginRequestBytes))
-	decoder.DisallowUnknownFields()
-
-	var payload verifyMFALoginRequest
-	if err := decoder.Decode(&payload); err != nil {
-		return verifyMFALoginRequest{}, err
-	}
-	if err := ensureSingleJSONValue(decoder); err != nil {
-		return verifyMFALoginRequest{}, err
-	}
-	payload.PreAuthenticationCredential = strings.TrimSpace(payload.PreAuthenticationCredential)
-	payload.Code = strings.TrimSpace(payload.Code)
-	if (payload.PreAuthenticationCredential != "" && len(payload.PreAuthenticationCredential) > 512) ||
-		payload.Code == "" || len(payload.Code) > 64 {
-		return verifyMFALoginRequest{}, errors.New("MFA login verification request does not meet contract")
-	}
-	return payload, nil
 }
 
 func ensureSingleJSONValue(decoder *json.Decoder) error {

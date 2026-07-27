@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strings"
 )
 
 const loginTargetStatusActive = "ACTIVE"
@@ -34,6 +35,7 @@ type LoginTarget struct {
 // environment boundary. Implementations must not provide fallback or prefix matching behavior.
 type LoginTargetRepository interface {
 	FindActiveLoginTarget(context.Context, LoginTargetResolveInput) (LoginTarget, error)
+	FindActiveEnvironment(context.Context, string, string, string) (Environment, error)
 }
 
 // LoginTargetResolver is the internal contract used after the caller has established a trusted
@@ -59,6 +61,13 @@ func NewLoginTargetService(repository LoginTargetRepository) (*LoginTargetServic
 
 // ResolveActiveTargetURI resolves one exact ACTIVE business landing target. The returned URI is
 // registry-controlled data and is not an OAuth redirect_uri.
+//
+// TargetURI accepts two forms:
+//   - Absolute https URL: returned as-is.
+//   - Absolute path beginning with a single '/': resolved against the parent environment's public
+//     BaseURL and optional PathPrefix so administrators can register sub-systems without
+//     hard-coding the portal host and port. A relative TargetURI without a usable BaseURL is
+//     treated as a resolution failure and reported as not found.
 func (service *LoginTargetService) ResolveActiveTargetURI(ctx context.Context, input LoginTargetResolveInput) (string, error) {
 	if !validLoginTargetResolveInput(input) {
 		return "", ErrValidation
@@ -72,6 +81,13 @@ func (service *LoginTargetService) ResolveActiveTargetURI(ctx context.Context, i
 		target.EnvironmentID != input.EnvironmentID || target.TargetCode != input.TargetCode ||
 		target.Status != loginTargetStatusActive || !validLoginTargetURI(target.TargetURI) {
 		return "", ErrNotFound
+	}
+	if isRelativeLoginTargetURI(target.TargetURI) {
+		environment, err := service.repository.FindActiveEnvironment(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
+		if err != nil || environment.BaseURL == nil || *environment.BaseURL == "" {
+			return "", ErrNotFound
+		}
+		return joinEnvironmentBaseURLAndTargetURI(*environment.BaseURL, environment.PathPrefix, target.TargetURI)
 	}
 	return target.TargetURI, nil
 }
@@ -87,6 +103,13 @@ func validLoginTargetIdentifier(value string) bool {
 	return len(value) == 26 && validIdentifier(value)
 }
 
+// validLoginTargetURI accepts both an absolute public URL and an absolute path under the portal.
+//
+//   - Absolute public URL: scheme https, host non-empty, no userinfo, no opaque component.
+//   - Relative path: a single leading '/', no scheme, no query/fragment, ASCII printable only.
+//
+// Pure hostname strings (e.g. "example.com"), scheme-relative ("//x") and protocol-bearing
+// garbage are rejected to keep this from being abused as an open redirect helper.
 func validLoginTargetURI(value string) bool {
 	if value == "" || len(value) > 2048 {
 		return false
@@ -96,7 +119,54 @@ func validLoginTargetURI(value string) bool {
 			return false
 		}
 	}
+	if isRelativeLoginTargetURI(value) {
+		return true
+	}
 	parsed, err := url.Parse(value)
 	return err == nil && parsed.IsAbs() && parsed.Host != "" && parsed.User == nil &&
-		parsed.Opaque == "" && parsed.Scheme == "https"
+		parsed.Opaque == "" && strings.EqualFold(parsed.Scheme, "https")
+}
+
+// isRelativeLoginTargetURI returns true when value is a safe absolute path the resolver is
+// allowed to expand against the parent environment's BaseURL.
+func isRelativeLoginTargetURI(value string) bool {
+	if !validPortalPath(value, 2048) {
+		return false
+	}
+	return true
+}
+
+// joinBaseURLAndTargetURI stitches a parent BaseURL and a portal-relative TargetURI into one
+// externally visible landing URL. Trailing slashes on the base and leading slashes on the target
+// are normalized; the path part of the base is preserved (so a BaseURL of http://h/api/v1 still
+// keeps /api/v1 in front of the target).
+func joinBaseURLAndTargetURI(baseURL, targetURI string) (string, error) {
+	return joinEnvironmentBaseURLAndTargetURI(baseURL, nil, targetURI)
+}
+
+// joinEnvironmentBaseURLAndTargetURI composes the externally visible landing URL from three
+// independently managed values: the portal BaseURL, the environment PathPrefix and the target's
+// relative path. Internal UpstreamURL values never participate in browser redirects.
+func joinEnvironmentBaseURLAndTargetURI(baseURL string, pathPrefix *string, targetURI string) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil ||
+		parsed.Opaque != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", ErrNotFound
+	}
+	if !isRelativeLoginTargetURI(targetURI) {
+		return "", ErrNotFound
+	}
+
+	prefix := ""
+	if pathPrefix != nil && *pathPrefix != "" {
+		prefix = strings.TrimRight(*pathPrefix, "/")
+		if !validPortalPath(prefix, 128) {
+			return "", ErrNotFound
+		}
+	}
+
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + prefix + targetURI
+	parsed.RawPath = ""
+	return parsed.String(), nil
 }

@@ -27,6 +27,8 @@ func toDomainAccount(model accountModel) domain.Account {
 		TenantID:    model.TenantID,
 		UserID:      copyString(model.UserID),
 		AccountName: valueOrEmpty(model.Username),
+		AccountType: model.AccountType,
+		AuthSource:  model.AuthSource,
 		Status:      model.Status,
 		LastLoginAt: copyTime(model.LastLoginAt),
 		Version:     model.Version,

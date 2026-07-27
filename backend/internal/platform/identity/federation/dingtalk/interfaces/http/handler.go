@@ -224,13 +224,6 @@ func (handler *Handler) Callback(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	if result.Session.MFARequired {
-		handler.setCookie(writer, preAuthenticationCookieName(handler.cookie.Name), result.Session.PreAuthenticationCredential, result.Session.PreAuthenticationExpiresAt)
-		handler.recordCallback(request, result.Lifecycle, nil, "")
-		redirectSeeOther(writer, mfaLoginRedirect(result.RedirectTo))
-		return
-	}
-
 	handler.setCookie(writer, handler.cookie.Name, result.Session.CookieValue, result.Session.ExpiresAt)
 	handler.recordCallback(request, result.Lifecycle, nil, "")
 	redirectSeeOther(writer, result.RedirectTo)
@@ -275,15 +268,8 @@ func validQRSessionResult(result application.CreateQRSessionResult, now time.Tim
 }
 
 func validCallbackResult(result application.CallbackResult, now time.Time) bool {
-	if strings.TrimSpace(result.SessionID) == "" || !validSameOriginRelativeURL(result.RedirectTo) {
-		return false
-	}
-	if result.Session.MFARequired {
-		return strings.TrimSpace(result.Session.CookieValue) == "" && result.Session.ExpiresAt.IsZero() &&
-			strings.TrimSpace(result.Session.PreAuthenticationCredential) != "" && result.Session.PreAuthenticationExpiresAt.After(now) && result.Session.MFAMaxAttempts > 0
-	}
-	return strings.TrimSpace(result.Session.CookieValue) != "" && result.Session.ExpiresAt.After(now) &&
-		strings.TrimSpace(result.Session.PreAuthenticationCredential) == "" && result.Session.PreAuthenticationExpiresAt.IsZero() && result.Session.MFAMaxAttempts == 0
+	return strings.TrimSpace(result.SessionID) != "" && validSameOriginRelativeURL(result.RedirectTo) &&
+		strings.TrimSpace(result.Session.CookieValue) != "" && result.Session.ExpiresAt.After(now)
 }
 
 // validSameOriginRelativeURL prevents the callback endpoint from becoming an open redirect.
@@ -337,15 +323,6 @@ func parseCallbackQuery(rawQuery string) (url.Values, error) {
 		}
 	}
 	return values, nil
-}
-
-func mfaLoginRedirect(returnTo string) string {
-	loginURL := url.URL{Path: "/login"}
-	query := loginURL.Query()
-	query.Set("dingtalk_mfa", "1")
-	query.Set("return_to", returnTo)
-	loginURL.RawQuery = query.Encode()
-	return loginURL.String()
 }
 
 func redirectSeeOther(writer http.ResponseWriter, location string) {
@@ -568,8 +545,6 @@ func (handler *Handler) record(request *http.Request, tenantID string, input aud
 func browserBindingCookieName(sessionCookieName string) string {
 	return sessionCookieName + "_dingtalk_qr"
 }
-func preAuthenticationCookieName(sessionCookieName string) string { return sessionCookieName + "_mfa" }
-
 func newOpaqueCredential(size int) (string, error) {
 	buffer := make([]byte, size)
 	if _, err := rand.Read(buffer); err != nil {

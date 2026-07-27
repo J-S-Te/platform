@@ -153,3 +153,31 @@ func (repository *GORMRepository) BootstrapFirstSuperAdmin(ctx context.Context, 
 	}
 	return output, err
 }
+
+// FirstSuperAdminInitialized reports whether the one-time bootstrap state has already been
+// committed for the migration-seeded default tenant. It does not expose any account data.
+func (repository *GORMRepository) FirstSuperAdminInitialized(ctx context.Context) (bool, error) {
+	var tenant tenantModel
+	result := repository.database.WithContext(ctx).
+		Select("id").
+		Where("code = ?", application.BootstrapTenantCode).
+		Limit(1).
+		Find(&tenant)
+	if result.Error != nil {
+		return false, fmt.Errorf("find bootstrap tenant: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return false, application.ErrBootstrapUnavailable
+	}
+
+	var state bootstrapStateModel
+	result = repository.database.WithContext(ctx).
+		Select("id").
+		Where("tenant_id = ?", tenant.ID).
+		Limit(1).
+		Find(&state)
+	if result.Error != nil {
+		return false, fmt.Errorf("check bootstrap state: %w", result.Error)
+	}
+	return result.RowsAffected > 0, nil
+}

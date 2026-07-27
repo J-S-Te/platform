@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS cfg_item (
     secret_ref VARCHAR(512) NULL,
     schema_json JSON NULL,
     description VARCHAR(1000) NULL,
-    sensitive TINYINT(1) NOT NULL DEFAULT 0,
+    `sensitive` TINYINT(1) NOT NULL DEFAULT 0,
     status VARCHAR(32) NOT NULL,
     version BIGINT UNSIGNED NOT NULL DEFAULT 1,
     created_at DATETIME(3) NOT NULL,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS cfg_release_item (
     value_json JSON NULL,
     secret_ref VARCHAR(512) NULL,
     schema_json JSON NULL,
-    sensitive TINYINT(1) NOT NULL DEFAULT 0,
+    `sensitive` TINYINT(1) NOT NULL DEFAULT 0,
     PRIMARY KEY (release_id, config_key),
     CONSTRAINT fk_cfg_release_item_release FOREIGN KEY (release_id) REFERENCES cfg_release (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

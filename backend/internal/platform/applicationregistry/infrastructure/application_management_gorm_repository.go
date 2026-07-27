@@ -51,6 +51,8 @@ type managementEnvironmentModel struct {
 	ApplicationID string          `gorm:"column:application_id"`
 	Environment   string          `gorm:"column:environment"`
 	BaseURL       *string         `gorm:"column:base_url"`
+	UpstreamURL   *string         `gorm:"column:upstream_url"`
+	PathPrefix    *string         `gorm:"column:path_prefix"`
 	IssuerAlias   *string         `gorm:"column:issuer_alias"`
 	Metadata      json.RawMessage `gorm:"column:metadata"`
 	Status        string          `gorm:"column:status"`
@@ -147,7 +149,7 @@ func (repository *ManagementRepository) ListEnvironments(ctx context.Context, te
 	}
 	if query.Keyword != "" {
 		keyword := "%" + query.Keyword + "%"
-		database = database.Where("environment LIKE ? OR base_url LIKE ? OR issuer_alias LIKE ?", keyword, keyword, keyword)
+		database = database.Where("environment LIKE ? OR base_url LIKE ? OR issuer_alias LIKE ? OR upstream_url LIKE ? OR path_prefix LIKE ?", keyword, keyword, keyword, keyword, keyword)
 	}
 
 	var total int64
@@ -170,7 +172,8 @@ func (repository *ManagementRepository) ListEnvironments(ctx context.Context, te
 func (repository *ManagementRepository) CreateEnvironment(ctx context.Context, input application.EnvironmentCreateInput, environmentID string, now time.Time) (application.Environment, error) {
 	model := managementEnvironmentModel{
 		ID: environmentID, TenantID: input.TenantID, ApplicationID: input.ApplicationID, Environment: input.Environment,
-		BaseURL: copyString(input.BaseURL), IssuerAlias: copyString(input.IssuerAlias), Metadata: copyJSON(input.Metadata), Status: input.Status,
+		BaseURL: copyString(input.BaseURL), UpstreamURL: copyString(input.UpstreamURL), PathPrefix: copyString(input.PathPrefix),
+		IssuerAlias: copyString(input.IssuerAlias), Metadata: copyJSON(input.Metadata), Status: input.Status,
 		Version: 1, CreatedAt: now.UTC(), CreatedBy: stringPointer(input.OperatorID), UpdatedAt: now.UTC(), UpdatedBy: stringPointer(input.OperatorID),
 	}
 	if err := repository.database.WithContext(ctx).Create(&model).Error; err != nil {
@@ -192,6 +195,8 @@ func (repository *ManagementRepository) GetEnvironment(ctx context.Context, tena
 func (repository *ManagementRepository) UpdateEnvironment(ctx context.Context, input application.EnvironmentUpdateInput, now time.Time) (application.Environment, error) {
 	updates := map[string]any{
 		"base_url":     copyString(input.BaseURL),
+		"upstream_url": copyString(input.UpstreamURL),
+		"path_prefix":  copyString(input.PathPrefix),
 		"issuer_alias": copyString(input.IssuerAlias),
 		"metadata":     copyJSON(input.Metadata),
 		"status":       input.Status,
@@ -244,7 +249,8 @@ func toApplication(model managementApplicationModel) application.Application {
 func toEnvironment(model managementEnvironmentModel) application.Environment {
 	return application.Environment{
 		ID: model.ID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, Environment: model.Environment,
-		BaseURL: copyString(model.BaseURL), IssuerAlias: copyString(model.IssuerAlias), Metadata: copyJSON(model.Metadata), Status: model.Status,
+		BaseURL: copyString(model.BaseURL), UpstreamURL: copyString(model.UpstreamURL), PathPrefix: copyString(model.PathPrefix),
+		IssuerAlias: copyString(model.IssuerAlias), Metadata: copyJSON(model.Metadata), Status: model.Status,
 		Version: model.Version, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
 	}
 }

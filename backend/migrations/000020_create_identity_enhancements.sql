@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS platform_oauth_post_logout_redirect_uri (
     oauth_client_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    post_logout_redirect_uri VARCHAR(2048) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    post_logout_redirect_uri VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     created_at DATETIME(3) NOT NULL,
     PRIMARY KEY (oauth_client_id, post_logout_redirect_uri),
     CONSTRAINT fk_oauth_post_logout_redirect_client FOREIGN KEY (oauth_client_id)
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS iam_federated_identity_provider (
     tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     provider_code VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     provider_type VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    issuer VARCHAR(2048) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    issuer VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     display_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
     status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     created_at DATETIME(3) NOT NULL,
