@@ -6,6 +6,7 @@ import "context"
 type requestIDKey struct{}
 type traceIDKey struct{}
 type correlationIDKey struct{}
+type clientIPKey struct{}
 
 func WithRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, requestIDKey{}, requestID)
@@ -37,5 +38,17 @@ func WithCorrelationID(ctx context.Context, correlationID string) context.Contex
 // CorrelationID returns the trusted cross-application business correlation identifier, if any.
 func CorrelationID(ctx context.Context) string {
 	value, _ := ctx.Value(correlationIDKey{}).(string)
+	return value
+}
+
+// WithClientIP stores a client address resolved by the trusted-proxy middleware. Application
+// handlers must use this value instead of reading forwarding headers themselves.
+func WithClientIP(ctx context.Context, clientIP string) context.Context {
+	return context.WithValue(ctx, clientIPKey{}, clientIP)
+}
+
+// ClientIP returns the transport-validated client address, if one was resolved.
+func ClientIP(ctx context.Context) string {
+	value, _ := ctx.Value(clientIPKey{}).(string)
 	return value
 }

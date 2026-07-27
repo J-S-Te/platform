@@ -218,7 +218,7 @@ func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string
 	err := r.database.WithContext(ctx).Table("iam_session").
 		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.expires_at").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
-		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ?", activeStatus).
+		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
 		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now).
 		Take(&row).Error
@@ -389,7 +389,7 @@ func (r *Repository) ResolveUserInfo(ctx context.Context, query application.User
 	err := r.database.WithContext(ctx).Table("iam_session").
 		Select("iam_session.tenant_id, platform_oauth_client.id AS oauth_client_id, iam_session.id AS session_id, iam_user.id AS user_id, iam_user.display_name, iam_account.username AS preferred_username, iam_user.email").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
-		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ?", activeStatus).
+		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
 		Joins("JOIN platform_oauth_client ON platform_oauth_client.id = ? AND platform_oauth_client.tenant_id = iam_session.tenant_id AND platform_oauth_client.status = ?", query.OAuthClientID, activeStatus).
 		Where("iam_session.id = ? AND iam_session.tenant_id = ? AND iam_user.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", query.SessionID, query.TenantID, query.UserID, activeStatus, now).

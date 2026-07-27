@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"strings"
+	"time"
 
 	identitydomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
 	federationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/application"
@@ -89,7 +90,7 @@ func (resolver *GORMRuntimeResolver) ResolveAccount(ctx context.Context, tenantI
 		Joins("JOIN "+dingTalkProviderTable+" AS provider ON provider.id = binding.provider_id AND provider.tenant_id = binding.tenant_id AND provider.provider_type = ? AND provider.status = ?", federationdomain.ProviderTypeDingTalkQR, federationdomain.ProviderStatusActive).
 		Joins("JOIN "+dingTalkTenantTable+" AS tenant ON tenant.id = binding.tenant_id AND tenant.status = ?", identitydomain.StatusActive).
 		Joins("JOIN "+dingTalkUserTable+" AS user ON user.id = binding.user_id AND user.tenant_id = binding.tenant_id AND user.status = ?", identitydomain.StatusActive).
-		Joins("JOIN "+dingTalkAccountTable+" AS account ON account.user_id = binding.user_id AND account.tenant_id = binding.tenant_id AND account.status = ?", identitydomain.StatusActive).
+		Joins("JOIN "+dingTalkAccountTable+" AS account ON account.user_id = binding.user_id AND account.tenant_id = binding.tenant_id AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", identitydomain.StatusActive, time.Now().UTC()).
 		Where(`binding.tenant_id = ? AND provider.provider_code = ? AND binding.subject_hash = ? AND binding.status = ?`, tenantID, providerCode, subjectHash[:], federationdomain.BindingStatusActive).
 		Order("account.created_at ASC, account.id ASC").Take(&row).Error
 	if err != nil || !validDingTalkAccountRow(row, tenantID) {

@@ -209,7 +209,7 @@ func (handler *Handler) Callback(writer http.ResponseWriter, request *http.Reque
 	handler.clearBrowserBindingCookie(writer)
 	result, err := handler.service.CompleteCallback(request.Context(), application.CallbackInput{
 		State: query.Get("state"), AuthorizationCode: authCode, ProviderError: query.Get("error"),
-		BrowserBinding: browserBinding, IPAddress: remoteIP(request.RemoteAddr), UserAgent: request.UserAgent(),
+		BrowserBinding: browserBinding, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
 	})
 	result.Lifecycle = mergeCallbackLifecycle(result.Lifecycle, auditLifecycle)
 	if err != nil {
@@ -443,7 +443,7 @@ func (handler *Handler) logUnscopedCallbackFailure(request *http.Request, reason
 		"request_id", requestctx.RequestID(request.Context()),
 		"trace_id", requestctx.TraceID(request.Context()),
 		"correlation_id", requestctx.CorrelationID(request.Context()),
-		"source_ip", sourceIP(request.RemoteAddr),
+		"source_ip", sourceIP(request),
 	)
 }
 
@@ -533,7 +533,7 @@ func (handler *Handler) record(request *http.Request, tenantID string, input aud
 	input.ApplicationCode = handler.auditConfig.ApplicationCode
 	input.EnvironmentCode = handler.auditConfig.EnvironmentCode
 	input.OccurredAt = time.Now().UTC()
-	input.SourceIP = sourceIP(request.RemoteAddr)
+	input.SourceIP = sourceIP(request)
 	input.UserAgent = request.UserAgent()
 	input.EventCategory = "SECURITY"
 	input.EventType = input.Action
@@ -568,16 +568,20 @@ func writeNoStoreHeaders(writer http.ResponseWriter) {
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-func remoteIP(remoteAddress string) net.IP {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddress))
-	if err != nil {
-		return nil
+func remoteIP(request *http.Request) net.IP {
+	remoteAddress := requestctx.ClientIP(request.Context())
+	if remoteAddress == "" {
+		remoteAddress = request.RemoteAddr
 	}
-	return net.ParseIP(host)
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddress))
+	if err == nil {
+		return net.ParseIP(host)
+	}
+	return net.ParseIP(strings.TrimSpace(remoteAddress))
 }
 
-func sourceIP(remoteAddress string) string {
-	ip := remoteIP(remoteAddress)
+func sourceIP(request *http.Request) string {
+	ip := remoteIP(request)
 	if ip == nil {
 		return ""
 	}

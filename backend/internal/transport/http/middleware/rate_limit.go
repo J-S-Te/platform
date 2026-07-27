@@ -1,9 +1,7 @@
 package middleware
 
 import (
-	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +23,10 @@ func FixedWindowRateLimit(limit int, window time.Duration) gin.HandlerFunc {
 	lastCleanup := time.Now()
 	return func(context *gin.Context) {
 		now := time.Now()
-		key := remoteIP(context.Request)
+		key := RequestClientIP(context.Request)
+		if key == "" {
+			key = "unknown"
+		}
 		mutex.Lock()
 		if now.Sub(lastCleanup) >= window {
 			for candidate, current := range buckets {
@@ -50,11 +51,4 @@ func FixedWindowRateLimit(limit int, window time.Duration) gin.HandlerFunc {
 		}
 		context.Next()
 	}
-}
-func remoteIP(request *http.Request) string {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(request.RemoteAddr))
-	if err != nil || host == "" {
-		return strings.TrimSpace(request.RemoteAddr)
-	}
-	return host
 }

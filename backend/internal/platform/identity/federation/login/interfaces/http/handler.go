@@ -17,6 +17,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/login/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/login/domain"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
 )
 
@@ -168,7 +169,7 @@ func (handler *Handler) Callback(writer http.ResponseWriter, request *http.Reque
 
 	input := application.CallbackInput{
 		State: request.URL.Query().Get("state"), AuthorizationCode: request.URL.Query().Get("code"), ProviderError: request.URL.Query().Get("error"),
-		BrowserBinding: browserBinding, IPAddress: remoteIP(request.RemoteAddr), UserAgent: request.UserAgent(),
+		BrowserBinding: browserBinding, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
 	}
 	result, lifecycle, err := handler.completeCallback(request.Context(), input)
 	if err != nil {
@@ -297,7 +298,7 @@ func (handler *Handler) recordLifecycleEvent(request *http.Request, tenantID str
 	input.ApplicationCode = handler.auditConfig.ApplicationCode
 	input.EnvironmentCode = handler.auditConfig.EnvironmentCode
 	input.OccurredAt = time.Now().UTC()
-	input.SourceIP = remoteIP(request.RemoteAddr).String()
+	input.SourceIP = remoteIP(request).String()
 	input.UserAgent = request.UserAgent()
 	input.EventCategory = "SECURITY"
 	input.EventType = input.Action
@@ -429,10 +430,14 @@ func writeNoStoreHeaders(writer http.ResponseWriter) {
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-func remoteIP(remoteAddress string) net.IP {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddress))
-	if err != nil {
-		return nil
+func remoteIP(request *http.Request) net.IP {
+	remoteAddress := requestctx.ClientIP(request.Context())
+	if remoteAddress == "" {
+		remoteAddress = request.RemoteAddr
 	}
-	return net.ParseIP(host)
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddress))
+	if err == nil {
+		return net.ParseIP(host)
+	}
+	return net.ParseIP(strings.TrimSpace(remoteAddress))
 }

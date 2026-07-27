@@ -34,9 +34,10 @@ import (
 // Keeping them in one value prevents the composition root from growing another long positional
 // argument list and lets router tests omit the whole group safely.
 type OperationalModules struct {
-	LoginTargets  *applicationregistryhttp.LoginTargetManagementHandler
-	Notifications *notificationhttp.Handler
-	FilesAndJobs  *filetaskhttp.Handler
+	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
+	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
+	Notifications       *notificationhttp.Handler
+	FilesAndJobs        *filetaskhttp.Handler
 }
 
 // NewRouter creates the shared middleware chain and registers infrastructure endpoints. Domain
@@ -68,8 +69,15 @@ func NewRouter(
 ) *gin.Engine {
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
+	if err := router.SetTrustedProxies(cfg.HTTP.TrustedProxies); err != nil {
+		panic("invalid trusted proxy configuration: " + err.Error())
+	}
+	allowedBrowserOrigins := append([]string(nil), cfg.CORSOrigins...)
+	allowedBrowserOrigins = append(allowedBrowserOrigins, cfg.Auth.OIDCIssuer)
+
 	router.Use(
 		middleware.RequestID(),
+		middleware.ClientIP(),
 		middleware.Recover(logger),
 		middleware.AccessLog(logger),
 		middleware.SecurityHeaders(),
@@ -80,10 +88,11 @@ func NewRouter(
 	router.GET("/readyz", healthHandler.Readiness)
 
 	if oidcHandler != nil {
+		oauthRateLimit := middleware.FixedWindowRateLimit(60, time.Minute)
 		router.GET("/authorize", adaptHandler(oidcHandler.Authorize))
-		router.POST("/oauth2/token", adaptHandler(oidcHandler.Token))
-		router.POST("/oauth2/par", adaptHandler(oidcHandler.PAR))
-		router.POST("/oauth2/revoke", adaptHandler(oidcHandler.Revoke))
+		router.POST("/oauth2/token", oauthRateLimit, adaptHandler(oidcHandler.Token))
+		router.POST("/oauth2/par", oauthRateLimit, adaptHandler(oidcHandler.PAR))
+		router.POST("/oauth2/revoke", oauthRateLimit, adaptHandler(oidcHandler.Revoke))
 		router.GET("/oauth2/consent", adaptHandler(oidcHandler.Consent))
 		consentRouter := router.Group("/oauth2/consent")
 		consentRouter.Use(middleware.RequireSameOrigin(cfg.Auth.OIDCIssuer))
@@ -94,15 +103,16 @@ func NewRouter(
 		router.GET("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
 		router.POST("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
 		router.GET("/oauth2/logout", adaptHandler(oidcHandler.Logout))
-		router.POST("/oauth2/logout", adaptHandler(oidcHandler.Logout))
+		router.POST("/oauth2/logout", middleware.RequireSameOrigin(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 	} else if applicationTokenHandler != nil {
 		// Retain the existing machine-to-machine endpoint for deployments that have not yet
 		// configured the complete OIDC dependency graph.
-		router.POST("/oauth2/token", adaptHandler(applicationTokenHandler.IssueToken))
+		router.POST("/oauth2/token", middleware.FixedWindowRateLimit(60, time.Minute), adaptHandler(applicationTokenHandler.IssueToken))
 	}
 
 	if bootstrapHandler != nil {
 		bootstrapRouter := router.Group("/api/v1/iam/bootstrap")
+		bootstrapRouter.Use(middleware.RequireSafeWriteContentType())
 		bootstrapRouteHandlers := []gin.HandlerFunc{adaptHandler(bootstrapHandler.InitializeFirstSuperAdmin)}
 		if strings.TrimSpace(cfg.Identity.BootstrapToken) != "" {
 			bootstrapRouteHandlers = append([]gin.HandlerFunc{middleware.FixedWindowRateLimit(5, time.Minute)}, bootstrapRouteHandlers...)
@@ -112,6 +122,7 @@ func NewRouter(
 
 	if authHandler != nil || externalLoginHandler != nil || dingTalkLoginHandler != nil {
 		authRouter := router.Group("/api/v1/auth")
+		authRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		if authHandler != nil {
 			authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
 
@@ -135,6 +146,7 @@ func NewRouter(
 
 	if authHandler != nil {
 		apiRouter := router.Group("/api/v1")
+		apiRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
 			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger))
@@ -176,6 +188,17 @@ func NewRouter(
 			apiRouter.GET("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:read"), adaptHandler(applicationManagementHandler.ListEnvironments))
 			apiRouter.POST("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:create"), adaptHandler(applicationManagementHandler.CreateEnvironment))
 			apiRouter.PATCH("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:update"), adaptHandler(applicationManagementHandler.UpdateEnvironment))
+		}
+
+		if operational.SubsystemOnboarding != nil {
+			apiRouter.GET("/portal/applications", adaptHandler(operational.SubsystemOnboarding.ListPortalApplications))
+			apiRouter.POST("/subsystem-onboarding",
+				middleware.RequirePermission("platform:application:create"),
+				middleware.RequirePermission("platform:application-environment:create"),
+				middleware.RequirePermission("platform:application-login-target:create"),
+				middleware.RequirePermission("platform:oauth-client:create"),
+				adaptHandler(operational.SubsystemOnboarding.OnboardSubsystem),
+			)
 		}
 
 		if operational.LoginTargets != nil {

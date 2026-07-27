@@ -71,7 +71,7 @@ func validatePKCE(required bool, challenge, method string) (string, string, erro
 		}
 		return "", "", nil
 	}
-	if challenge == "" || !pkceChallengePattern.MatchString(challenge) || !oneOf(method, "S256", "plain") {
+	if challenge == "" || !pkceChallengePattern.MatchString(challenge) || method != "S256" {
 		return "", "", ErrInvalidRequest
 	}
 	return challenge, method, nil
@@ -84,16 +84,11 @@ func verifyPKCE(challenge, method, verifier string) bool {
 	if !pkceVerifierPattern.MatchString(verifier) {
 		return false
 	}
-	var candidate string
-	switch method {
-	case "S256":
-		hash := sha256.Sum256([]byte(verifier))
-		candidate = base64.RawURLEncoding.EncodeToString(hash[:])
-	case "plain":
-		candidate = verifier
-	default:
+	if method != "S256" {
 		return false
 	}
+	hash := sha256.Sum256([]byte(verifier))
+	candidate := base64.RawURLEncoding.EncodeToString(hash[:])
 	return subtle.ConstantTimeCompare([]byte(candidate), []byte(challenge)) == 1
 }
 

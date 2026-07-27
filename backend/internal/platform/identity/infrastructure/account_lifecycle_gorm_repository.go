@@ -26,13 +26,13 @@ func (repository *GORMRepository) CreateLocalAccount(ctx context.Context, write 
 		}
 		accountName := write.AccountName
 		operatorID := write.OperatorID
-		if err := transaction.Create(&accountModel{ID: write.AccountID, TenantID: write.TenantID, UserID: &write.UserID, Username: &accountName, AccountType: "HUMAN", AuthSource: "LOCAL", Status: domain.StatusActive, Version: 1, CreatedAt: write.OccurredAt, CreatedBy: &operatorID, UpdatedAt: write.OccurredAt, UpdatedBy: &operatorID}).Error; err != nil {
+		if err := transaction.Create(&accountModel{ID: write.AccountID, TenantID: write.TenantID, UserID: &write.UserID, Username: &accountName, AccountType: "HUMAN", AuthSource: "LOCAL", Status: domain.StatusActive, ValidUntil: copyTime(write.ValidUntil), Version: 1, CreatedAt: write.OccurredAt, CreatedBy: &operatorID, UpdatedAt: write.OccurredAt, UpdatedBy: &operatorID}).Error; err != nil {
 			return mapWriteError(err, "create local account")
 		}
 		if err := transaction.Create(&passwordCredentialModel{ID: write.CredentialID, AccountID: write.AccountID, PasswordHash: append([]byte(nil), write.PasswordDigest...), HashAlgorithm: "argon2id", AlgorithmParams: append([]byte(nil), write.AlgorithmParams...), MustChange: false, FailedAttempts: 0, Status: domain.StatusActive, PasswordChangedAt: write.OccurredAt, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}).Error; err != nil {
 			return mapWriteError(err, "create local account credential")
 		}
-		account = domain.Account{ID: write.AccountID, TenantID: write.TenantID, UserID: &write.UserID, AccountName: write.AccountName, Status: domain.StatusActive, Version: 1, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}
+		account = domain.Account{ID: write.AccountID, TenantID: write.TenantID, UserID: &write.UserID, AccountName: write.AccountName, Status: domain.StatusActive, ValidUntil: copyTime(write.ValidUntil), Version: 1, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}
 		return nil
 	})
 	if err != nil {

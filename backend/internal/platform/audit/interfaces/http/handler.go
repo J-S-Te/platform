@@ -440,6 +440,9 @@ func storagePath(root, relativePath string) (string, error) {
 }
 
 func clientIP(r *http.Request) string {
+	if trusted := strings.TrimSpace(requestctx.ClientIP(r.Context())); net.ParseIP(trusted) != nil {
+		return net.ParseIP(trusted).String()
+	}
 	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err != nil || host == "" {
 		return strings.TrimSpace(r.RemoteAddr)

@@ -46,6 +46,7 @@ type accountModel struct {
 	AuthSource  string     `gorm:"column:auth_source"`
 	LockedUntil *time.Time `gorm:"column:locked_until"`
 	LastLoginAt *time.Time `gorm:"column:last_login_at"`
+	ValidUntil  *time.Time `gorm:"column:valid_until"`
 	Status      string     `gorm:"column:status"`
 	Version     uint64     `gorm:"column:version"`
 	CreatedAt   time.Time  `gorm:"column:created_at"`

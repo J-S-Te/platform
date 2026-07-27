@@ -44,7 +44,7 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
 		Joins("JOIN iam_password_credential AS credential ON credential.account_id = account.id").
-		Where("account.username = ? AND account.auth_source = ?", accountName, "LOCAL").
+		Where("account.username = ? AND account.auth_source = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", accountName, "LOCAL", time.Now().UTC()).
 		Limit(1).
 		Find(&row)
 	if result.Error != nil {
@@ -68,7 +68,7 @@ func (repository *GORMRepository) FindFederatedLoginAccount(ctx context.Context,
 			account.id AS account_id, COALESCE(account.username, account.id) AS account_name, account.status AS account_status, account.locked_until`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
-		Where("account.tenant_id = ? AND account.user_id = ? AND account.id = ?", tenantID, userID, accountID).
+		Where("account.tenant_id = ? AND account.user_id = ? AND account.id = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", tenantID, userID, accountID, time.Now().UTC()).
 		Limit(1).
 		Find(&row)
 	if result.Error != nil {
@@ -130,6 +130,7 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 			Select("id").
 			Where("id = ? AND tenant_id = ? AND user_id = ? AND status = ?", account.AccountID, account.TenantID, account.UserID, domain.StatusActive).
 			Where("locked_until IS NULL OR locked_until <= ?", now).
+			Where("valid_until IS NULL OR valid_until > ?", now).
 			Where("EXISTS (?)", activeUser).
 			Where("EXISTS (?)", activeTenant).
 			Limit(1).
@@ -197,7 +198,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		Select(`session.id AS session_id, tenant.id AS tenant_id, tenant.name AS tenant_name, tenant.code AS tenant_code,
 			user.id AS user_id, user.display_name AS user_name, account.id AS account_id, COALESCE(account.username, account.id) AS account_name`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = session.tenant_id AND tenant.status = ?", domain.StatusActive).
-		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ?", domain.StatusActive).
+		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", domain.StatusActive, now).
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = session.tenant_id AND user.status = ?", domain.StatusActive).
 		Where("session.id = ? AND session.status = ?", sessionID, domain.StatusActive).
 		Where("session.revoked_at IS NULL AND session.expires_at > ? AND session.last_seen_at > ?", now, idleCutoff).

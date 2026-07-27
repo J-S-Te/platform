@@ -95,7 +95,7 @@ services:
         VITE_LOGIN_SUCCESS_URL: /
     image: basic-platform/frontend:local
     volumes:
-      - ./docker/portal-apps-locations.conf:/etc/nginx/conf.d/portal-apps-locations.conf:ro
+      - ./docker/portal-apps-locations.conf:/etc/nginx/portal-apps.d/managed.conf:ro
     ports:
       - "8081:80"
     depends_on:

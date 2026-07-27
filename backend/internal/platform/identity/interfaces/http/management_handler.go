@@ -138,6 +138,7 @@ type accountResponse struct {
 	AuthSource  string     `json:"auth_source"`
 	Status      string     `json:"status"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+	ValidUntil  *time.Time `json:"valid_until,omitempty"`
 	Version     uint64     `json:"version"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
@@ -588,7 +589,7 @@ func toUserResponse(value application.UserView) userResponse {
 	return userResponse{UserID: value.ID, DisplayName: value.DisplayName, EmployeeNo: value.EmployeeNo, Email: value.Email, MobileMasked: value.MobileMasked, Status: value.Status, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 func toAccountResponse(value domain.Account) accountResponse {
-	return accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, Status: value.Status, LastLoginAt: value.LastLoginAt, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	return accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, Status: value.Status, LastLoginAt: value.LastLoginAt, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 func toOrgUnitResponse(value domain.OrgUnit) orgUnitResponse {
 	return orgUnitResponse{OrgUnitID: value.ID, ParentID: value.ParentID, Code: value.Code, Name: value.Name, SortOrder: value.SortOrder, Status: value.Status, Version: value.Version}
