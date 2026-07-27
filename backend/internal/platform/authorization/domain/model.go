@@ -66,3 +66,55 @@ type Decision struct {
 	PolicyVersion  uint64
 	ReasonCode     string
 }
+
+// AccessSource describes the active role-binding path that grants a role or permission.
+// Scope is returned as metadata: callers must still evaluate a concrete resource or organization
+// context before treating a scoped permission as allowed.
+type AccessSource struct {
+	BindingID   string
+	SubjectType string
+	Subject     Reference
+	ScopeType   string
+	ScopeID     *string
+}
+
+// EffectiveRole is a currently active role with every binding source that makes it effective.
+type EffectiveRole struct {
+	Role    Reference
+	Sources []AccessSource
+}
+
+// EffectivePermission is a currently active permission with role-binding provenance.
+type EffectivePermission struct {
+	Permission Permission
+	Sources    []AccessSource
+}
+
+// EffectiveAccessPreview exposes the same active binding paths used by authorization checks for
+// a selected account. It is an administrative explanation surface, not a client-side decision API.
+type EffectiveAccessPreview struct {
+	User                      Reference
+	Account                   Reference
+	LoginEligible             bool
+	PolicyVersion             uint64
+	GeneratedAt               time.Time
+	Roles                     []EffectiveRole
+	Permissions               []EffectivePermission
+	ExternalIdentityProviders []Reference
+}
+
+// RoleBindingImpactPreview describes the active users that would immediately receive a proposed
+// binding. User samples are capped by the repository while TotalAffectedUsers remains exact.
+type RoleBindingImpactPreview struct {
+	Role               Reference
+	Permissions        []Reference
+	SubjectType        string
+	Subject            Reference
+	ScopeType          string
+	ScopeID            *string
+	ExpiresAt          *time.Time
+	TotalAffectedUsers int64
+	Users              []Reference
+	Truncated          bool
+	GeneratedAt        time.Time
+}

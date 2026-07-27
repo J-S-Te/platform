@@ -29,6 +29,9 @@ func (authenticationRepositoryStub) CreateSession(context.Context, domain.LoginA
 func (authenticationRepositoryStub) FindPrincipalBySession(context.Context, string, time.Time, time.Duration) (domain.Principal, error) {
 	return domain.Principal{}, ErrUnauthenticated
 }
+func (authenticationRepositoryStub) RecordSessionInteraction(context.Context, string, time.Time, time.Duration) error {
+	return nil
+}
 func (authenticationRepositoryStub) RefreshSession(context.Context, string, time.Time, time.Time) error {
 	return nil
 }

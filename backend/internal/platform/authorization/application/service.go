@@ -62,6 +62,8 @@ type Repository interface {
 	ListRoleBindings(context.Context, string, PageRequest) (PageResult[domain.RoleBinding], error)
 	CreateRoleBinding(context.Context, string, string, domain.RoleBinding) (domain.RoleBinding, error)
 	UpdateRoleBinding(context.Context, string, string, domain.RoleBinding) (domain.RoleBinding, error)
+	PreviewEffectiveAccess(context.Context, string, string, string, time.Time) (domain.EffectiveAccessPreview, error)
+	PreviewRoleBindingImpact(context.Context, RoleBindingImpactInput, time.Time) (domain.RoleBindingImpactPreview, error)
 	Check(context.Context, CheckInput) (domain.Decision, error)
 }
 
@@ -247,6 +249,30 @@ func (s *Service) UpdateRoleBinding(ctx context.Context, in RoleBindingUpdateInp
 }
 func bindingFromInput(id string, in RoleBindingCreateInput, version uint64) domain.RoleBinding {
 	return domain.RoleBinding{ID: id, Role: domain.Reference{ID: strings.TrimSpace(in.RoleID)}, SubjectType: in.SubjectType, Subject: domain.Reference{ID: strings.TrimSpace(in.SubjectID)}, ScopeType: in.ScopeType, ScopeID: trimPointer(in.ScopeID), Status: domain.StatusActive, ExpiresAt: copyTime(in.ExpiresAt), Version: version}
+}
+
+// PreviewEffectiveAccess explains the roles and permissions that are currently effective for a
+// specific login account. The account is required so account-level grants remain unambiguous.
+func (s *Service) PreviewEffectiveAccess(ctx context.Context, tenantID, userID, accountID string) (domain.EffectiveAccessPreview, error) {
+	if err := require(tenantID, userID, accountID); err != nil {
+		return domain.EffectiveAccessPreview{}, err
+	}
+	return s.repository.PreviewEffectiveAccess(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(accountID), s.clock.Now())
+}
+
+// RoleBindingImpactInput mirrors a proposed role binding without assigning it an ID or persisting it.
+type RoleBindingImpactInput struct {
+	TenantID, OperatorID, RoleID, SubjectType, SubjectID, ScopeType string
+	ScopeID                                                         *string
+	ExpiresAt                                                       *time.Time
+}
+
+// PreviewRoleBindingImpact returns the users that would receive the proposed active binding now.
+func (s *Service) PreviewRoleBindingImpact(ctx context.Context, in RoleBindingImpactInput) (domain.RoleBindingImpactPreview, error) {
+	if err := validateBinding(in.TenantID, in.OperatorID, in.RoleID, in.SubjectType, in.SubjectID, in.ScopeType, in.ScopeID, in.ExpiresAt, s.clock.Now()); err != nil {
+		return domain.RoleBindingImpactPreview{}, err
+	}
+	return s.repository.PreviewRoleBindingImpact(ctx, in, s.clock.Now())
 }
 
 type CheckInput struct {

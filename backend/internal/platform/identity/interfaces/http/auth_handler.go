@@ -40,6 +40,7 @@ type Handler struct {
 type applicationService interface {
 	Login(ctx context.Context, input application.LoginInput) (application.SessionResult, error)
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
+	RecordInteraction(ctx context.Context, principal authctx.Principal) error
 	Refresh(ctx context.Context, principal authctx.Principal) (application.SessionResult, error)
 	Logout(ctx context.Context, principal authctx.Principal) error
 	SessionIdleTimeout(ctx context.Context, tenantID string) (time.Duration, error)
@@ -161,6 +162,26 @@ func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID strin
 		return "/"
 	}
 	return redirectURI
+}
+
+// Activity records an interaction explicitly reported by the browser. It is intentionally a
+// separate endpoint so regular authenticated API traffic cannot extend the idle timeout.
+func (handler *Handler) Activity(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	if err := handler.service.RecordInteraction(request.Context(), principal); err != nil {
+		handler.writeApplicationError(writer, request, err)
+		return
+	}
+	idleTimeout, err := handler.service.SessionIdleTimeout(request.Context(), principal.Tenant.ID)
+	if err != nil {
+		handler.writeApplicationError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "用户活动已记录", principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)})
 }
 
 // Refresh renews the already authenticated current browser session and replaces its cookie.

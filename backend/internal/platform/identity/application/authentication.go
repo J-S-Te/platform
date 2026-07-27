@@ -60,6 +60,7 @@ type Repository interface {
 	RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error
 	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error)
+	RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error
 	RefreshSession(ctx context.Context, sessionID string, refreshedAt, expiresAt time.Time) error
 	RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time, reason string) error
 	RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error
@@ -302,6 +303,30 @@ func (service *Service) Authenticate(ctx context.Context, token string) (authctx
 		return authctx.Principal{}, ErrUnauthenticated
 	}
 	return toAuthContextPrincipal(principal), nil
+}
+
+// RecordInteraction marks a session as actively used only after a browser reports a trusted
+// click, key press, scroll, or touch event. Authentication itself intentionally does not extend
+// idle expiry, so background requests cannot prevent automatic logout.
+func (service *Service) RecordInteraction(ctx context.Context, principal authctx.Principal) error {
+	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.Account.ID == "" {
+		return ErrUnauthenticated
+	}
+	now := service.clock.Now().UTC()
+	idleTimeout, err := service.loginSecurity.SessionIdleTimeout(ctx, principal.Tenant.ID)
+	if err != nil {
+		return fmt.Errorf("read session inactivity policy: %w", err)
+	}
+	if err := service.repository.RecordSessionInteraction(ctx, principal.SessionID, now, idleTimeout); err != nil {
+		if errors.Is(err, ErrUnauthenticated) {
+			if revokeErr := service.repository.RevokeAccountSessions(ctx, principal.Tenant.ID, principal.Account.ID, now, "IDLE_TIMEOUT"); revokeErr != nil {
+				return fmt.Errorf("revoke expired account sessions: %w", revokeErr)
+			}
+			return ErrUnauthenticated
+		}
+		return fmt.Errorf("record active browser interaction: %w", err)
+	}
+	return nil
 }
 
 // Refresh renews the current active session and returns a new JWT Cookie value.
