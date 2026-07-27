@@ -31,6 +31,54 @@ func RequireSameOrigin(issuer string) gin.HandlerFunc {
 	}
 }
 
+// RequireAllowedOriginForUnsafeMethods protects cookie-backed APIs from cross-site writes while
+// preserving non-browser integrations that do not send browser fetch metadata. Modern browsers
+// send Origin and Sec-Fetch-Site on cross-site POST/PUT/PATCH/DELETE requests, so either signal is
+// sufficient to reject a forged request.
+func RequireAllowedOriginForUnsafeMethods(origins ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		if normalized := issuerOrigin(origin); normalized != "" {
+			allowed[normalized] = struct{}{}
+		}
+	}
+
+	return func(context *gin.Context) {
+		if !isUnsafeMethod(context.Request.Method) {
+			context.Next()
+			return
+		}
+
+		originHeader := strings.TrimSpace(context.GetHeader("Origin"))
+		if originHeader != "" {
+			origin := normalizedOrigin(originHeader)
+			if _, ok := allowed[origin]; !ok || origin == "" {
+				context.Abort()
+				httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
+				return
+			}
+			context.Next()
+			return
+		}
+
+		if strings.EqualFold(strings.TrimSpace(context.GetHeader("Sec-Fetch-Site")), "cross-site") {
+			context.Abort()
+			httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
+			return
+		}
+		context.Next()
+	}
+}
+
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 func issuerOrigin(raw string) string {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {

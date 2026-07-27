@@ -448,7 +448,13 @@ func (service *OAuthClientManagementService) DisableOAuthClientSecret(ctx contex
 }
 
 func (service *OAuthClientManagementService) newSecretWrite(now time.Time, validUntil *time.Time) (SecretWrite, string, error) {
-	credentialID, err := service.ids.New(now)
+	return newOAuthClientSecretWrite(service.ids, now, validUntil)
+}
+
+// newOAuthClientSecretWrite centralizes secret generation for both standalone OAuth client
+// management and the atomic subsystem-onboarding workflow.
+func newOAuthClientSecretWrite(ids ManagementIdentifierGenerator, now time.Time, validUntil *time.Time) (SecretWrite, string, error) {
+	credentialID, err := ids.New(now)
 	if err != nil {
 		return SecretWrite{}, "", fmt.Errorf("generate OAuth client credential id: %w", err)
 	}

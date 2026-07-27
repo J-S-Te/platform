@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -21,6 +22,9 @@ var (
 	ErrUnauthenticated = errors.New("unauthenticated")
 	// ErrAccountLocked is returned only when an existing account has an active lock window.
 	ErrAccountLocked = errors.New("account locked")
+
+	dummyPasswordDigest   = make([]byte, 32)
+	dummyPasswordMetadata = mustDummyPasswordMetadata()
 )
 
 // AccountLockedError includes the lock expiry for the documented 423 response.
@@ -138,33 +142,30 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 	account, err := service.repository.FindLoginAccount(ctx, accountName)
 	if err != nil {
 		if errors.Is(err, ErrUnauthenticated) {
+			service.consumeUnknownAccountPassword(input.Password)
 			return SessionResult{}, ErrUnauthenticated
 		}
 		return SessionResult{}, fmt.Errorf("find password login account: %w", err)
 	}
 
 	now := service.clock.Now().UTC().Truncate(time.Second)
-	if account.LockedUntil != nil && account.LockedUntil.After(now) {
-		return SessionResult{}, lockedError(account, account.LockedUntil.UTC())
-	}
-	if !isLoginEligible(account, now) {
-		return SessionResult{}, ErrUnauthenticated
-	}
-
 	matched, err := service.passwords.Verify(input.Password, account.HashAlgorithm, account.PasswordHash, account.AlgorithmParams)
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("verify password credential: %w", err)
 	}
+	if account.LockedUntil != nil && account.LockedUntil.After(now) {
+		return SessionResult{}, loginFailedError(account)
+	}
+	if !isLoginEligible(account, now) {
+		return SessionResult{}, loginFailedError(account)
+	}
 	if !matched {
-		result, err := service.loginSecurity.RecordFailedLogin(ctx, securityapplication.LoginFailureInput{
+		_, err := service.loginSecurity.RecordFailedLogin(ctx, securityapplication.LoginFailureInput{
 			TenantID: account.TenantID, AccountID: account.AccountID, AccountName: account.AccountName,
 			IPAddress: input.IPAddress, UserAgent: input.UserAgent,
 		})
 		if err != nil {
 			return SessionResult{}, fmt.Errorf("record failed password login: %w", err)
-		}
-		if result.LockedUntil != nil {
-			return SessionResult{}, lockedError(account, result.LockedUntil.UTC())
 		}
 		return SessionResult{}, loginFailedError(account)
 	}
@@ -177,6 +178,21 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 	}
 
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now)
+}
+
+func (service *Service) consumeUnknownAccountPassword(password string) {
+	// The fixed dummy credential deliberately performs the same Argon2id work as a real account.
+	// The result and any verifier error are discarded so unknown accounts always receive the same
+	// public authentication failure response.
+	_, _ = service.passwords.Verify(password, "argon2id", dummyPasswordDigest, dummyPasswordMetadata)
+}
+
+func mustDummyPasswordMetadata() []byte {
+	metadata, err := json.Marshal(security.DefaultArgon2idParams([]byte("fixed-dummy-salt")))
+	if err != nil {
+		panic("marshal dummy password metadata: " + err.Error())
+	}
+	return metadata
 }
 
 // FederatedLoginInput contains a trusted local identity resolved only after the external provider

@@ -31,3 +31,6 @@ pnpm-debug.log*
 
 # 本地运行时产生的数据（日志、上传文件等）
 data/
+
+# 本地初始化凭据只允许由启动脚本生成，禁止进入版本库。
+docker/.initial-admin-password

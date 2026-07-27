@@ -40,6 +40,7 @@ type Account struct {
 	AuthSource  string
 	Status      string
 	LastLoginAt *time.Time
+	ValidUntil  *time.Time
 	Version     uint64
 	CreatedAt   time.Time
 	UpdatedAt   time.Time

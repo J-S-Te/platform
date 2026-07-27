@@ -40,6 +40,19 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		return httptransport.OperationalModules{}, err
 	}
 
+	subsystemRepository, err := applicationregistryinfrastructure.NewSubsystemOnboardingGORMRepository(database)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemService, err := applicationregistryapplication.NewSubsystemOnboardingService(subsystemRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{})
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(subsystemService, cfg.Auth.OIDCIssuer, logger)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+
 	notificationRepository, err := notificationinfrastructure.NewRepository(database)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -83,8 +96,9 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	}
 
 	return httptransport.OperationalModules{
-		LoginTargets:  loginTargetHandler,
-		Notifications: notificationHandler,
-		FilesAndJobs:  fileTaskHandler,
+		LoginTargets:        loginTargetHandler,
+		SubsystemOnboarding: subsystemHandler,
+		Notifications:       notificationHandler,
+		FilesAndJobs:        fileTaskHandler,
 	}, nil
 }

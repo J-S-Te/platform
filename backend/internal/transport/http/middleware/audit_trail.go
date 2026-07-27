@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -87,7 +86,7 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger) gin.HandlerFunc {
 				"path":        route,
 				"status_code": statusCode,
 			},
-			SourceIP:  auditClientIP(context.Request),
+			SourceIP:  RequestClientIP(context.Request),
 			UserAgent: context.Request.UserAgent(),
 		}
 		if _, err := recorder.Ingest(context.Request.Context(), principal.Tenant.ID, input); err != nil {
@@ -156,14 +155,6 @@ func auditRiskLevel(statusCode int) string {
 
 func auditSummary(method, route string, statusCode int) string {
 	return method + " " + route + " completed with HTTP " + http.StatusText(statusCode)
-}
-
-func auditClientIP(request *http.Request) string {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(request.RemoteAddr))
-	if err == nil && host != "" {
-		return host
-	}
-	return strings.TrimSpace(request.RemoteAddr)
 }
 
 func newPlatformAuditEventID() string {

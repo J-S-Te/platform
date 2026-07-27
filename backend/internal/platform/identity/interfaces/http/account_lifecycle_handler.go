@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
@@ -38,9 +39,10 @@ func NewAccountLifecycleHandler(service accountLifecycleApplicationService, auth
 }
 
 type localAccountCreateRequest struct {
-	UserID          string `json:"user_id"`
-	AccountName     string `json:"account_name"`
-	InitialPassword string `json:"initial_password"`
+	UserID          string     `json:"user_id"`
+	AccountName     string     `json:"account_name"`
+	InitialPassword string     `json:"initial_password"`
+	ValidUntil      *time.Time `json:"valid_until"`
 }
 
 type passwordInitializeRequest struct {
@@ -81,6 +83,7 @@ func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseW
 		UserID:          payload.UserID,
 		AccountName:     payload.AccountName,
 		InitialPassword: payload.InitialPassword,
+		ValidUntil:      payload.ValidUntil,
 	})
 	if err != nil {
 		handler.writeError(writer, request, err)

@@ -53,7 +53,7 @@ func (h *Handler) PAR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	challenge, method := strings.TrimSpace(r.Form.Get("code_challenge")), strings.TrimSpace(r.Form.Get("code_challenge_method"))
-	if (challenge == "") != (method == "") || (method != "" && method != "S256" && method != "plain") || !validPKCEChallenge(challenge) {
+	if (challenge == "") != (method == "") || (method != "" && method != "S256") || !validPKCEChallenge(challenge) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "")
 		return
 	}

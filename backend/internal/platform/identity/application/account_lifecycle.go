@@ -95,6 +95,7 @@ type LocalAccountCreateInput struct {
 	UserID          string
 	AccountName     string
 	InitialPassword string
+	ValidUntil      *time.Time
 }
 
 // PasswordInitializeInput initializes a missing local password credential exactly once.
@@ -136,6 +137,7 @@ type LocalAccountCreateWrite struct {
 	PasswordDigest  []byte
 	AlgorithmParams []byte
 	OccurredAt      time.Time
+	ValidUntil      *time.Time
 }
 
 // PasswordWrite updates a local credential and revokes active browser sessions atomically.
@@ -197,6 +199,9 @@ func (service *AccountLifecycleService) CreateLocalAccount(ctx context.Context, 
 		return domain.Account{}, fmt.Errorf("hash initial password: %w", err)
 	}
 	now := service.clock.Now().UTC()
+	if input.ValidUntil != nil && !input.ValidUntil.After(now) {
+		return domain.Account{}, ErrValidation
+	}
 	accountID, err := service.ids.New(now)
 	if err != nil {
 		return domain.Account{}, fmt.Errorf("generate account ID: %w", err)
@@ -206,7 +211,7 @@ func (service *AccountLifecycleService) CreateLocalAccount(ctx context.Context, 
 		return domain.Account{}, fmt.Errorf("generate password credential ID: %w", err)
 	}
 	return service.repository.CreateLocalAccount(ctx, LocalAccountCreateWrite{
-		AccountID: accountID, CredentialID: credentialID, TenantID: strings.TrimSpace(input.TenantID), UserID: strings.TrimSpace(input.UserID), OperatorID: strings.TrimSpace(input.OperatorID), AccountName: strings.TrimSpace(input.AccountName), PasswordDigest: digest, AlgorithmParams: metadata, OccurredAt: now,
+		AccountID: accountID, CredentialID: credentialID, TenantID: strings.TrimSpace(input.TenantID), UserID: strings.TrimSpace(input.UserID), OperatorID: strings.TrimSpace(input.OperatorID), AccountName: strings.TrimSpace(input.AccountName), PasswordDigest: digest, AlgorithmParams: metadata, OccurredAt: now, ValidUntil: normalizedFutureTime(input.ValidUntil),
 	})
 }
 
@@ -288,6 +293,14 @@ func validateLocalAccountCreateInput(input LocalAccountCreateInput) error {
 		return ErrValidation
 	}
 	return nil
+}
+
+func normalizedFutureTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	normalized := value.UTC()
+	return &normalized
 }
 
 func validatePasswordInitializeInput(input PasswordInitializeInput) error {

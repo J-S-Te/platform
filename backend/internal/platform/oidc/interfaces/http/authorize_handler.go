@@ -159,7 +159,7 @@ func parseDirectAuthorizationInput(query url.Values, clientID string) (applicati
 		return application.AuthorizationInput{}, err
 	}
 	challenge, method := strings.TrimSpace(query.Get("code_challenge")), strings.TrimSpace(query.Get("code_challenge_method"))
-	if (challenge == "") != (method == "") || (method != "" && method != "S256" && method != "plain") || !validPKCEChallenge(challenge) {
+	if (challenge == "") != (method == "") || (method != "" && method != "S256") || !validPKCEChallenge(challenge) {
 		return application.AuthorizationInput{}, errors.New("PKCE parameters are invalid")
 	}
 	return application.AuthorizationInput{

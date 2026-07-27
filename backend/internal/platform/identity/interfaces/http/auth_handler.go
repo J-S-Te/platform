@@ -21,6 +21,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
 )
 
@@ -391,9 +392,13 @@ func toSessionResponse(result application.SessionResult) sessionResponse {
 }
 
 func remoteIP(request *http.Request) net.IP {
-	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	remoteAddress := requestctx.ClientIP(request.Context())
+	if remoteAddress == "" {
+		remoteAddress = request.RemoteAddr
+	}
+	host, _, err := net.SplitHostPort(remoteAddress)
 	if err == nil {
 		return net.ParseIP(host)
 	}
-	return net.ParseIP(request.RemoteAddr)
+	return net.ParseIP(remoteAddress)
 }

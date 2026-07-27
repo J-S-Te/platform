@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,8 +33,9 @@ type Config struct {
 
 // HTTPConfig controls the API listener and public address.
 type HTTPConfig struct {
-	Addr          string
-	PublicBaseURL string
+	Addr           string
+	PublicBaseURL  string
+	TrustedProxies []string
 }
 
 // MySQLConfig contains the connection inputs used to build a MySQL DSN.
@@ -152,8 +154,9 @@ func Load() (Config, error) {
 		AppName:     value("APP_NAME", "basic-platform"),
 		Timezone:    value("APP_TIMEZONE", "Asia/Shanghai"),
 		HTTP: HTTPConfig{
-			Addr:          value("APP_HTTP_ADDR", ":8080"),
-			PublicBaseURL: publicBaseURL,
+			Addr:           value("APP_HTTP_ADDR", ":8080"),
+			PublicBaseURL:  publicBaseURL,
+			TrustedProxies: commaSeparated(value("APP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")),
 		},
 		MySQL: MySQLConfig{
 			Host:     value("MYSQL_HOST", "127.0.0.1"),
@@ -217,6 +220,11 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.HTTP.Addr == "" {
 		return fmt.Errorf("APP_HTTP_ADDR must not be empty")
+	}
+	for _, proxy := range cfg.HTTP.TrustedProxies {
+		if !validTrustedProxy(proxy) {
+			return fmt.Errorf("APP_TRUSTED_PROXIES contains invalid IP address or CIDR %q", proxy)
+		}
 	}
 	publicBaseURL, err := url.ParseRequestURI(cfg.HTTP.PublicBaseURL)
 	if err != nil || publicBaseURL.Scheme == "" || publicBaseURL.Host == "" || publicBaseURL.User != nil || publicBaseURL.RawQuery != "" || publicBaseURL.Fragment != "" {
@@ -294,6 +302,18 @@ func (cfg Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validTrustedProxy(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.Contains(value, "/") {
+		_, _, err := net.ParseCIDR(value)
+		return err == nil
+	}
+	return net.ParseIP(value) != nil
 }
 
 // resolveEnvFile selects the explicit ENV_FILE path when present. Without an override, the
