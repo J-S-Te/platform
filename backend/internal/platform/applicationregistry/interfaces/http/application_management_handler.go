@@ -25,6 +25,7 @@ type managementApplicationService interface {
 	CreateApplication(context.Context, application.ApplicationCreateInput) (application.Application, error)
 	GetApplication(context.Context, string, string) (application.Application, error)
 	UpdateApplication(context.Context, application.ApplicationUpdateInput) (application.Application, error)
+	DeleteApplication(context.Context, application.ApplicationDeleteInput) (application.Application, error)
 	ListEnvironments(context.Context, string, string, application.PageRequest) (application.PageResult[application.Environment], error)
 	CreateEnvironment(context.Context, application.EnvironmentCreateInput) (application.Environment, error)
 	UpdateEnvironment(context.Context, application.EnvironmentUpdateInput) (application.Environment, error)
@@ -65,6 +66,11 @@ type applicationUpdateRequest struct {
 	Description     *string `json:"description"`
 	Status          string  `json:"status"`
 	Version         uint64  `json:"version"`
+}
+
+type applicationDeleteRequest struct {
+	ConfirmationCode string `json:"confirmation_code"`
+	Version          uint64 `json:"version"`
 }
 
 type environmentCreateRequest struct {
@@ -222,6 +228,33 @@ func (handler *ManagementHandler) UpdateApplication(writer http.ResponseWriter, 
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用已更新", applicationToResponse(updated))
+}
+
+// DeleteApplication handles DELETE /api/v1/applications/:application_id. The application is
+// retired rather than physically removed so existing integration and audit history stay intact.
+func (handler *ManagementHandler) DeleteApplication(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+
+	var payload applicationDeleteRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+
+	retired, err := handler.service.DeleteApplication(request.Context(), application.ApplicationDeleteInput{
+		TenantID:         principal.Tenant.ID,
+		OperatorID:       principal.User.ID,
+		ApplicationID:    request.PathValue("application_id"),
+		ConfirmationCode: payload.ConfirmationCode,
+		Version:          payload.Version,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用登记已删除，历史配置已保留", applicationToResponse(retired))
 }
 
 // ListEnvironments handles GET /api/v1/applications/:application_id/environments.

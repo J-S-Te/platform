@@ -44,7 +44,12 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	subsystemService, err := applicationregistryapplication.NewSubsystemOnboardingService(subsystemRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{})
+	subsystemService, err := applicationregistryapplication.NewSubsystemOnboardingService(
+		subsystemRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+		applicationregistryapplication.RedirectURIValidationPolicy{
+			AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs,
+		},
+	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}

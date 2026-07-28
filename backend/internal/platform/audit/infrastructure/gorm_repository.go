@@ -460,7 +460,8 @@ func actionCategoryPredicate(category string) (string, []any) {
 
 	switch strings.ToUpper(strings.TrimSpace(category)) {
 	case "LOGIN":
-		return "(" + action + " = ? OR " + action + " LIKE ?)", []any{"auth.login", "auth.login.%"}
+		// 登录分类覆盖认证会话的建立与退出，避免 POST /auth/logout 被误判为新增操作。
+		return "(" + action + " = ? OR " + action + " LIKE ? OR " + action + " = ? OR " + action + " LIKE ?)", []any{"auth.login", "auth.login.%", "auth.logout", "auth.logout.%"}
 	case "EXPORT":
 		return "(" + action + " LIKE ? OR " + path + " LIKE ?)", []any{"%export%", "%export%"}
 	case "STATUS_CHANGE":
@@ -468,7 +469,7 @@ func actionCategoryPredicate(category string) (string, []any) {
 	case "UPDATE":
 		return "((" + method + " IN (?, ?) OR " + action + " REGEXP ?) AND NOT (" + action + " LIKE ? OR " + path + " LIKE ?) AND NOT (" + action + " REGEXP ? OR " + path + " REGEXP ?))", []any{"PUT", "PATCH", "(^|[.:/ _-])update([.:/ _-]|$)", "%export%", "%export%", statusPattern, statusPattern}
 	case "CREATE":
-		return "((" + method + " = ? OR " + action + " REGEXP ?) AND NOT (" + action + " = ? OR " + action + " LIKE ?) AND NOT (" + action + " LIKE ? OR " + path + " LIKE ?) AND NOT (" + action + " REGEXP ? OR " + path + " REGEXP ?))", []any{"POST", "(^|[.:/ _-])create([.:/ _-]|$)", "auth.login", "auth.login.%", "%export%", "%export%", statusPattern, statusPattern}
+		return "((" + method + " = ? OR " + action + " REGEXP ?) AND NOT (" + action + " = ? OR " + action + " LIKE ? OR " + action + " = ? OR " + action + " LIKE ?) AND NOT (" + action + " LIKE ? OR " + path + " LIKE ?) AND NOT (" + action + " REGEXP ? OR " + path + " REGEXP ?))", []any{"POST", "(^|[.:/ _-])create([.:/ _-]|$)", "auth.login", "auth.login.%", "auth.logout", "auth.logout.%", "%export%", "%export%", statusPattern, statusPattern}
 	default:
 		// 应用层会拒绝未知分类；该分支用于防御绕过应用层的仓储调用。
 		return "1 = 0", nil

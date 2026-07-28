@@ -22,6 +22,9 @@ var (
 	ErrUnauthenticated = errors.New("unauthenticated")
 	// ErrAccountLocked is returned only when an existing account has an active lock window.
 	ErrAccountLocked = errors.New("account locked")
+	// ErrConcurrentSession prevents one login account from creating a second active browser
+	// session on another terminal.
+	ErrConcurrentSession = errors.New("account already has an active session")
 
 	dummyPasswordDigest   = make([]byte, 32)
 	dummyPasswordMetadata = mustDummyPasswordMetadata()
@@ -30,6 +33,16 @@ var (
 // AccountLockedError includes the lock expiry for the documented 423 response.
 type AccountLockedError struct {
 	LockedUntil time.Time
+	TenantID    string
+	UserID      string
+	UserName    string
+	AccountID   string
+	AccountName string
+}
+
+// ConcurrentSessionError retains trusted account identity for security audit logging while the
+// public API returns only a stable conflict code and client-safe message.
+type ConcurrentSessionError struct {
 	TenantID    string
 	UserID      string
 	UserName    string
@@ -53,13 +66,17 @@ func (error LoginFailedError) Unwrap() error { return ErrUnauthenticated }
 func (error AccountLockedError) Error() string { return ErrAccountLocked.Error() }
 func (error AccountLockedError) Unwrap() error { return ErrAccountLocked }
 
+func (error ConcurrentSessionError) Error() string { return ErrConcurrentSession.Error() }
+func (error ConcurrentSessionError) Unwrap() error { return ErrConcurrentSession }
+
 // Repository defines persistence operations required by the password and session use cases.
 type Repository interface {
 	FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error)
 	FindFederatedLoginAccount(ctx context.Context, tenantID, userID, accountID string) (domain.LoginAccount, error)
 	RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error
-	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session) error
+	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error)
+	RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error
 	RefreshSession(ctx context.Context, sessionID string, refreshedAt, expiresAt time.Time) error
 	RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time, reason string) error
 	RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error
@@ -236,6 +253,14 @@ func (service *Service) LoginFederated(ctx context.Context, input FederatedLogin
 }
 
 func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time) (SessionResult, error) {
+	idleTimeout, err := service.loginSecurity.SessionIdleTimeout(ctx, account.TenantID)
+	if err != nil {
+		return SessionResult{}, fmt.Errorf("read session inactivity policy: %w", err)
+	}
+	if idleTimeout <= 0 {
+		return SessionResult{}, errors.New("session inactivity policy must be greater than zero")
+	}
+
 	sessionID, err := service.ids.New(now)
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("generate session ID: %w", err)
@@ -254,7 +279,10 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 		CreatedAt: now, ExpiresAt: expiresAt, IPAddress: normalizeIP(ipAddress),
 		UserAgent: truncateUserAgent(userAgent),
 	}
-	if err := service.repository.CreateSession(ctx, account, session); err != nil {
+	if err := service.repository.CreateSession(ctx, account, session, idleTimeout); err != nil {
+		if errors.Is(err, ErrConcurrentSession) {
+			return SessionResult{}, concurrentSessionError(account)
+		}
 		if errors.Is(err, ErrUnauthenticated) {
 			return SessionResult{}, ErrUnauthenticated
 		}
@@ -266,6 +294,11 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 		SessionID: sessionID, TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
 		AccountID: account.AccountID, AccountName: account.AccountName,
 	}, nil
+}
+
+func concurrentSessionError(account domain.LoginAccount) ConcurrentSessionError {
+	return ConcurrentSessionError{TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
+		AccountID: account.AccountID, AccountName: account.AccountName}
 }
 
 func lockedError(account domain.LoginAccount, lockedUntil time.Time) AccountLockedError {
@@ -302,6 +335,30 @@ func (service *Service) Authenticate(ctx context.Context, token string) (authctx
 		return authctx.Principal{}, ErrUnauthenticated
 	}
 	return toAuthContextPrincipal(principal), nil
+}
+
+// RecordInteraction marks a session as actively used only after a browser reports a trusted
+// click, key press, scroll, or touch event. Authentication itself intentionally does not extend
+// idle expiry, so background requests cannot prevent automatic logout.
+func (service *Service) RecordInteraction(ctx context.Context, principal authctx.Principal) error {
+	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.Account.ID == "" {
+		return ErrUnauthenticated
+	}
+	now := service.clock.Now().UTC()
+	idleTimeout, err := service.loginSecurity.SessionIdleTimeout(ctx, principal.Tenant.ID)
+	if err != nil {
+		return fmt.Errorf("read session inactivity policy: %w", err)
+	}
+	if err := service.repository.RecordSessionInteraction(ctx, principal.SessionID, now, idleTimeout); err != nil {
+		if errors.Is(err, ErrUnauthenticated) {
+			if revokeErr := service.repository.RevokeAccountSessions(ctx, principal.Tenant.ID, principal.Account.ID, now, "IDLE_TIMEOUT"); revokeErr != nil {
+				return fmt.Errorf("revoke expired account sessions: %w", revokeErr)
+			}
+			return ErrUnauthenticated
+		}
+		return fmt.Errorf("record active browser interaction: %w", err)
+	}
+	return nil
 }
 
 // Refresh renews the current active session and returns a new JWT Cookie value.

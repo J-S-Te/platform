@@ -48,6 +48,11 @@ type OIDCTokenClaims struct {
 	ClientID           string
 	Nonce              string
 	TokenUse           OIDCTokenUse
+	TenantID           string
+	Roles              []string
+	Permissions        []string
+	RoleConfigHash     string
+	AuthzRevision      uint64
 }
 
 // OIDCPublicJWK is the public Ed25519 signing key in RFC 7517/RFC 8037 JWK form.
@@ -265,6 +270,11 @@ func (manager *OIDCJWTManager) issue(claims OIDCTokenClaims, tokenUse OIDCTokenU
 		ClientID:           claims.ClientID,
 		Nonce:              claims.Nonce,
 		TokenUse:           claims.TokenUse,
+		TenantID:           claims.TenantID,
+		Roles:              append([]string(nil), claims.Roles...),
+		Permissions:        append([]string(nil), claims.Permissions...),
+		RoleConfigHash:     claims.RoleConfigHash,
+		AuthzRevision:      claims.AuthzRevision,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal OIDC JWT payload: %w", err)
@@ -294,6 +304,11 @@ type oidcJWTPayload struct {
 	ClientID           string       `json:"client_id"`
 	Nonce              string       `json:"nonce"`
 	TokenUse           OIDCTokenUse `json:"token_use"`
+	TenantID           string       `json:"tenant_id"`
+	Roles              []string     `json:"roles"`
+	Permissions        []string     `json:"permissions"`
+	RoleConfigHash     string       `json:"role_config_hash"`
+	AuthzRevision      uint64       `json:"authz_revision"`
 }
 
 type oidcAudience []string
@@ -350,6 +365,11 @@ func oidcClaimsFromPayload(payload oidcJWTPayload) (OIDCTokenClaims, error) {
 		ClientID:           payload.ClientID,
 		Nonce:              payload.Nonce,
 		TokenUse:           payload.TokenUse,
+		TenantID:           payload.TenantID,
+		Roles:              append([]string(nil), payload.Roles...),
+		Permissions:        append([]string(nil), payload.Permissions...),
+		RoleConfigHash:     payload.RoleConfigHash,
+		AuthzRevision:      payload.AuthzRevision,
 	}, nil
 }
 

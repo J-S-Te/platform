@@ -252,26 +252,36 @@ type OAuthClientCreateResult struct {
 	PlaintextSecret string
 }
 
+// RedirectURIValidationPolicy controls which OAuth client callback schemes may be registered.
+// HTTPS is always allowed. HTTP is limited to loopback by default and may be enabled for
+// trusted server deployments through AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS.
+type RedirectURIValidationPolicy struct {
+	AllowInsecureHTTP bool
+}
+
 // OAuthClientManagementService coordinates validation, cryptographic secret generation, hashing,
 // and tenant-scoped persistence for OAuth client registrations.
 type OAuthClientManagementService struct {
-	repository OAuthClientManagementRepository
-	ids        ManagementIdentifierGenerator
-	clock      Clock
+	repository                  OAuthClientManagementRepository
+	ids                         ManagementIdentifierGenerator
+	clock                       Clock
+	redirectURIValidationPolicy RedirectURIValidationPolicy
 }
 
 // NewOAuthClientManagementService constructs the management service.
-func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock) (*OAuthClientManagementService, error) {
+func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy) (*OAuthClientManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("OAuth client management service dependencies must not be nil")
 	}
-	return &OAuthClientManagementService{repository: repository, ids: ids, clock: clock}, nil
+	return &OAuthClientManagementService{
+		repository: repository, ids: ids, clock: clock, redirectURIValidationPolicy: redirectURIValidationPolicy,
+	}, nil
 }
 
 // CreateOAuthClient registers an OAuth client and creates its initial secret only for
 // client_secret_basic registrations.
 func (service *OAuthClientManagementService) CreateOAuthClient(ctx context.Context, input OAuthClientCreateInput) (OAuthClientCreateResult, error) {
-	input, err := normalizeOAuthClientCreate(input)
+	input, err := normalizeOAuthClientCreate(input, service.redirectURIValidationPolicy)
 	if err != nil {
 		return OAuthClientCreateResult{}, err
 	}
@@ -333,7 +343,7 @@ func (service *OAuthClientManagementService) ReplaceOAuthClientScopes(ctx contex
 func (service *OAuthClientManagementService) ReplaceOAuthClientRedirectURIs(ctx context.Context, input OAuthClientRedirectURIsUpdateInput) (OAuthClientView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	input.RedirectURIs = normalizeStrings(input.RedirectURIs)
-	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.RedirectURIs) {
+	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.RedirectURIs, service.redirectURIValidationPolicy) {
 		return OAuthClientView{}, ErrManagementValidation
 	}
 	return service.repository.ReplaceOAuthClientRedirectURIs(ctx, input, service.clock.Now().UTC())
@@ -352,7 +362,7 @@ func (service *OAuthClientManagementService) GetOAuthClientPostLogoutRedirectURI
 func (service *OAuthClientManagementService) ReplaceOAuthClientPostLogoutRedirectURIs(ctx context.Context, input OAuthClientPostLogoutRedirectURIsUpdateInput) (OAuthClientPostLogoutRedirectURIsView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	input.PostLogoutRedirectURIs = normalizeStrings(input.PostLogoutRedirectURIs)
-	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.PostLogoutRedirectURIs) {
+	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.PostLogoutRedirectURIs, service.redirectURIValidationPolicy) {
 		return OAuthClientPostLogoutRedirectURIsView{}, ErrManagementValidation
 	}
 	return service.repository.ReplaceOAuthClientPostLogoutRedirectURIs(ctx, input, service.clock.Now().UTC())
@@ -469,7 +479,7 @@ func newOAuthClientSecretWrite(ids ManagementIdentifierGenerator, now time.Time,
 	return SecretWrite{CredentialID: credentialID, SecretHash: hash, Fingerprint: secretFingerprint(plaintext), ValidUntil: validUntil}, plaintext, nil
 }
 
-func normalizeOAuthClientCreate(input OAuthClientCreateInput) (OAuthClientCreateInput, error) {
+func normalizeOAuthClientCreate(input OAuthClientCreateInput, redirectURIValidationPolicy RedirectURIValidationPolicy) (OAuthClientCreateInput, error) {
 	input.TenantID, input.ApplicationID, input.EnvironmentID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ApplicationID), strings.TrimSpace(input.EnvironmentID), strings.TrimSpace(input.OperatorID)
 	input.ClientID, input.ClientName = strings.TrimSpace(input.ClientID), strings.TrimSpace(input.ClientName)
 	input.ClientType, input.TokenAuthMethod = strings.TrimSpace(input.ClientType), strings.TrimSpace(input.TokenAuthMethod)
@@ -477,7 +487,7 @@ func normalizeOAuthClientCreate(input OAuthClientCreateInput) (OAuthClientCreate
 	input.SecretValidUntil = normalizeSecretValidUntil(input.SecretValidUntil)
 	if input.TenantID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || input.OperatorID == "" ||
 		!clientIDPattern.MatchString(input.ClientID) || !validOAuthClientName(input.ClientName) ||
-		!validClientConfiguration(input) || !validScopes(input.Scopes) || !validRedirectURIs(input.RedirectURIs) {
+		!validClientConfiguration(input) || !validScopes(input.Scopes) || !validRedirectURIs(input.RedirectURIs, redirectURIValidationPolicy) {
 		return OAuthClientCreateInput{}, ErrManagementValidation
 	}
 	return input, nil
@@ -528,25 +538,32 @@ func validScopes(values []string) bool {
 	return true
 }
 
-func validRedirectURIs(values []string) bool {
+func validRedirectURIs(values []string, policy RedirectURIValidationPolicy) bool {
 	for _, value := range values {
-		if len(value) > 2048 || !validRedirectURI(value) {
+		if len(value) > 2048 || !validRedirectURI(value, policy) {
 			return false
 		}
 	}
 	return true
 }
 
-func validRedirectURI(value string) bool {
+// validRedirectURI accepts an absolute HTTP(S) callback address. The authorization endpoint still
+// requires an exact match with the URI registered for the OAuth client, so this does not turn the
+// callback target into an open redirect. HTTP callback URLs outside loopback require explicit
+// process configuration because authorization codes must otherwise traverse an insecure channel.
+func validRedirectURI(value string, policy RedirectURIValidationPolicy) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 		return false
 	}
-	if parsed.Scheme == "https" {
+	if strings.EqualFold(parsed.Scheme, "https") {
 		return true
 	}
-	if parsed.Scheme != "http" {
+	if !strings.EqualFold(parsed.Scheme, "http") {
 		return false
+	}
+	if policy.AllowInsecureHTTP {
+		return true
 	}
 	host := parsed.Hostname()
 	return strings.EqualFold(host, "localhost") || net.ParseIP(host).IsLoopback()

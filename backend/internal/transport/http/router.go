@@ -11,6 +11,7 @@ import (
 	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/interfaces/http"
 	audithttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/interfaces/http"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
+	authorizationsys004 "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/sys004"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
@@ -53,6 +54,7 @@ func NewRouter(
 	managementHandler *identityhttp.ManagementHandler,
 	accountLifecycleHandler *identityhttp.AccountLifecycleHandler,
 	authorizationHandler *authorizationhttp.Handler,
+	contractAccessHandler *authorizationsys004.Handler,
 	auditHandler *audithttp.Handler,
 	configurationHandler *configurationhttp.Handler,
 	settingsHandler *settingshttp.Handler,
@@ -129,6 +131,7 @@ func NewRouter(
 			protected := authRouter.Group("")
 			protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 			protected.POST("/token/refresh", adaptHandler(authHandler.Refresh))
+			protected.POST("/activity", adaptHandler(authHandler.Activity))
 			protected.POST("/logout", adaptHandler(authHandler.Logout))
 			protected.GET("/me", adaptHandler(authHandler.Me))
 		}
@@ -185,6 +188,7 @@ func NewRouter(
 			apiRouter.POST("/applications", middleware.RequirePermission("platform:application:create"), adaptHandler(applicationManagementHandler.CreateApplication))
 			apiRouter.GET("/applications/:application_id", middleware.RequirePermission("platform:application:read"), adaptHandler(applicationManagementHandler.GetApplication))
 			apiRouter.PATCH("/applications/:application_id", middleware.RequirePermission("platform:application:update"), adaptHandler(applicationManagementHandler.UpdateApplication))
+			apiRouter.DELETE("/applications/:application_id", middleware.RequirePermission("platform:application:update"), adaptHandler(applicationManagementHandler.DeleteApplication))
 			apiRouter.GET("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:read"), adaptHandler(applicationManagementHandler.ListEnvironments))
 			apiRouter.POST("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:create"), adaptHandler(applicationManagementHandler.CreateEnvironment))
 			apiRouter.PATCH("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:update"), adaptHandler(applicationManagementHandler.UpdateEnvironment))
@@ -229,6 +233,11 @@ func NewRouter(
 			apiRouter.POST("/accounts/:account_id/password/initialize", middleware.RequirePermission("platform:account:password-initialize"), adaptHandler(accountLifecycleHandler.InitializePassword))
 			apiRouter.POST("/accounts/:account_id/password/reset", middleware.RequirePermission("platform:account:password-reset"), adaptHandler(accountLifecycleHandler.ResetPassword))
 			apiRouter.POST("/auth/password/change", adaptHandler(accountLifecycleHandler.ChangeOwnPassword))
+		}
+
+		if contractAccessHandler != nil {
+			apiRouter.GET("/users/:user_id/applications/contract_management/access", middleware.RequirePermission("platform:user:read"), adaptHandler(contractAccessHandler.GetAccess))
+			apiRouter.PUT("/users/:user_id/applications/contract_management/access", middleware.RequirePermission("platform:user:update"), adaptHandler(contractAccessHandler.UpdateAccess))
 		}
 
 		if auditHandler != nil {

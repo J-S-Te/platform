@@ -114,10 +114,15 @@ func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx conte
 }
 
 // CreateSession records a successful local or external account login and inserts iam_session. The
-// status predicates prevent a concurrent disable or lock operation from creating a usable session.
-func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session) error {
+// account row lock serializes every login for the same account, so two terminals cannot both pass
+// the active-session check and create concurrent sessions.
+func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration) error {
+	if idleTimeout <= 0 {
+		return application.ErrUnauthenticated
+	}
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		now := session.CreatedAt.UTC()
+		idleCutoff := now.Add(-idleTimeout)
 		activeUser := transaction.Model(&userModel{}).
 			Select("1").
 			Where("id = iam_account.user_id AND tenant_id = iam_account.tenant_id AND status = ?", domain.StatusActive)
@@ -141,6 +146,33 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 		if result.RowsAffected != 1 {
 			return application.ErrUnauthenticated
 		}
+
+		absoluteTimeoutReason := "ABSOLUTE_TIMEOUT"
+		if err := transaction.Model(&sessionModel{}).
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL AND expires_at <= ?", account.TenantID, account.AccountID, domain.StatusActive, now).
+			Updates(map[string]any{"status": "EXPIRED", "revoked_at": now, "revoke_reason": absoluteTimeoutReason}).Error; err != nil {
+			return fmt.Errorf("expire account sessions past absolute timeout: %w", err)
+		}
+
+		idleTimeoutReason := "IDLE_TIMEOUT"
+		if err := transaction.Model(&sessionModel{}).
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?", account.TenantID, account.AccountID, domain.StatusActive, now).
+			Where("COALESCE(last_interactive_at, last_seen_at) <= ?", idleCutoff).
+			Updates(map[string]any{"status": "EXPIRED", "revoked_at": now, "revoke_reason": idleTimeoutReason}).Error; err != nil {
+			return fmt.Errorf("expire idle account sessions before login: %w", err)
+		}
+
+		var activeSessionCount int64
+		if err := transaction.Model(&sessionModel{}).
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", account.TenantID, account.AccountID, domain.StatusActive).
+			Where("expires_at > ? AND COALESCE(last_interactive_at, last_seen_at) > ?", now, idleCutoff).
+			Count(&activeSessionCount).Error; err != nil {
+			return fmt.Errorf("count active account sessions before login: %w", err)
+		}
+		if activeSessionCount > 0 {
+			return application.ErrConcurrentSession
+		}
+
 		if err := transaction.Model(&accountModel{}).
 			Where("id = ?", persistedAccount.ID).
 			Updates(map[string]any{"last_login_at": now, "updated_at": now}).Error; err != nil {
@@ -149,15 +181,16 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 
 		userAgent := session.UserAgent
 		if err := transaction.Create(&sessionModel{
-			ID:         session.ID,
-			TenantID:   session.TenantID,
-			AccountID:  session.AccountID,
-			IPAddress:  nullableBytes(session.IPAddress),
-			UserAgent:  nullableString(&userAgent),
-			CreatedAt:  now,
-			LastSeenAt: now,
-			ExpiresAt:  session.ExpiresAt.UTC(),
-			Status:     domain.StatusActive,
+			ID:                session.ID,
+			TenantID:          session.TenantID,
+			AccountID:         session.AccountID,
+			IPAddress:         nullableBytes(session.IPAddress),
+			UserAgent:         nullableString(&userAgent),
+			CreatedAt:         now,
+			LastSeenAt:        now,
+			LastInteractiveAt: now,
+			ExpiresAt:         session.ExpiresAt.UTC(),
+			Status:            domain.StatusActive,
 		}).Error; err != nil {
 			return fmt.Errorf("insert browser session: %w", err)
 		}
@@ -176,7 +209,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 
 	var session sessionModel
 	if err := repository.database.WithContext(ctx).
-		Select("id", "tenant_id", "account_id", "last_seen_at", "expires_at", "revoked_at", "status").
+		Select("id", "tenant_id", "account_id", "last_seen_at", "last_interactive_at", "expires_at", "revoked_at", "status").
 		Where("id = ?", sessionID).Take(&session).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return domain.Principal{}, application.ErrUnauthenticated
@@ -186,7 +219,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	if session.Status != domain.StatusActive || session.RevokedAt != nil || !session.ExpiresAt.After(now) {
 		return domain.Principal{}, application.ErrUnauthenticated
 	}
-	if !session.LastSeenAt.After(idleCutoff) {
+	if !session.LastInteractiveAt.After(idleCutoff) {
 		if err := repository.RevokeAccountSessions(ctx, session.TenantID, session.AccountID, now, "IDLE_TIMEOUT"); err != nil {
 			return domain.Principal{}, err
 		}
@@ -201,7 +234,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", domain.StatusActive, now).
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = session.tenant_id AND user.status = ?", domain.StatusActive).
 		Where("session.id = ? AND session.status = ?", sessionID, domain.StatusActive).
-		Where("session.revoked_at IS NULL AND session.expires_at > ? AND session.last_seen_at > ?", now, idleCutoff).
+		Where("session.revoked_at IS NULL AND session.expires_at > ? AND session.last_interactive_at > ?", now, idleCutoff).
 		Limit(1).
 		Find(&row)
 	if result.Error != nil {
@@ -211,7 +244,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		return domain.Principal{}, application.ErrUnauthenticated
 	}
 	touch := repository.database.WithContext(ctx).Model(&sessionModel{}).
-		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
 		Update("last_seen_at", now)
 	if touch.Error != nil {
 		return domain.Principal{}, fmt.Errorf("touch authenticated session: %w", touch.Error)
@@ -264,6 +297,43 @@ func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID 
 	}
 	if result.RowsAffected != 1 {
 		return application.ErrUnauthenticated
+	}
+	return nil
+}
+
+// RecordSessionInteraction records a browser event that was explicitly initiated by the user.
+// Ordinary authenticated requests must not call this method: they only update last_seen_at in
+// FindPrincipalBySession so background polling cannot keep an idle session alive.
+func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error {
+	if idleTimeout <= 0 {
+		return application.ErrUnauthenticated
+	}
+	interactedAt = interactedAt.UTC()
+	idleCutoff := interactedAt.Add(-idleTimeout)
+	result := repository.database.WithContext(ctx).
+		Model(&sessionModel{}).
+		Where("id = ? AND status = ? AND revoked_at IS NULL", sessionID, domain.StatusActive).
+		Where("expires_at > ? AND last_interactive_at > ?", interactedAt, idleCutoff).
+		Updates(map[string]any{"last_seen_at": interactedAt, "last_interactive_at": interactedAt})
+	if result.Error != nil {
+		return fmt.Errorf("record session interaction: %w", result.Error)
+	}
+	if result.RowsAffected != 0 {
+		return nil
+	}
+
+	// A concurrent activity ping may write the same DATETIME(3) value. Verify that the session
+	// remains usable before deciding whether a zero-row update is an actual expiry/revocation.
+	var activeSession sessionModel
+	check := repository.database.WithContext(ctx).
+		Select("id").
+		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, interactedAt, idleCutoff).
+		Take(&activeSession)
+	if check.Error != nil {
+		if errors.Is(check.Error, gorm.ErrRecordNotFound) {
+			return application.ErrUnauthenticated
+		}
+		return fmt.Errorf("recheck session interaction: %w", check.Error)
 	}
 	return nil
 }

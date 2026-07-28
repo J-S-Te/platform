@@ -21,24 +21,49 @@ type jwtSigner interface {
 // Issuer signs end-user OAuth access tokens and optional OpenID Connect ID tokens. Refresh tokens
 // intentionally remain outside this component because they are opaque secrets managed by the OIDC
 // application service and stored only as one-way digests.
+type AuthorizationClaims struct {
+	TenantID       string
+	Roles          []string
+	Permissions    []string
+	RoleConfigHash string
+	AuthzRevision  uint64
+}
+
+// AuthorizationResolver resolves permissions for the OAuth client's application.
+// Implementations must not return permissions belonging to a different application.
+type AuthorizationResolver interface {
+	ResolveOIDCAuthorization(context.Context, string, string, string) (AuthorizationClaims, error)
+}
+
 type Issuer struct {
-	signer jwtSigner
-	ids    oidcapplication.IDGenerator
+	signer   jwtSigner
+	ids      oidcapplication.IDGenerator
+	resolver AuthorizationResolver
 }
 
 // New creates a token issuer backed by the configured OIDC JWT manager.
-func New(manager *security.OIDCJWTManager, ids oidcapplication.IDGenerator) (*Issuer, error) {
-	return newIssuer(manager, ids)
+func New(manager *security.OIDCJWTManager, ids oidcapplication.IDGenerator, resolvers ...AuthorizationResolver) (*Issuer, error) {
+	return newIssuer(manager, ids, resolvers...)
 }
 
-func newIssuer(signer jwtSigner, ids oidcapplication.IDGenerator) (*Issuer, error) {
+func newIssuer(signer jwtSigner, ids oidcapplication.IDGenerator, resolvers ...AuthorizationResolver) (*Issuer, error) {
 	if signer == nil || ids == nil {
 		return nil, errors.New("OIDC token issuer signer and ID generator must not be nil")
 	}
 	if signer.Issuer() == "" {
 		return nil, errors.New("OIDC token issuer issuer must not be empty")
 	}
-	return &Issuer{signer: signer, ids: ids}, nil
+	var resolver AuthorizationResolver
+	if len(resolvers) > 1 {
+		return nil, errors.New("OIDC token issuer accepts at most one authorization resolver")
+	}
+	if len(resolvers) == 1 {
+		resolver = resolvers[0]
+		if resolver == nil {
+			return nil, errors.New("OIDC token issuer authorization resolver must not be nil")
+		}
+	}
+	return &Issuer{signer: signer, ids: ids, resolver: resolver}, nil
 }
 
 // IssueOIDCTokens implements application.TokenIssuer after authorization-code or refresh-grant
@@ -49,6 +74,15 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 	}
 	if err := ctx.Err(); err != nil {
 		return oidcapplication.IssuedTokens{}, err
+	}
+
+	authorization := AuthorizationClaims{TenantID: issue.TenantID}
+	if issuer.resolver != nil {
+		resolved, err := issuer.resolver.ResolveOIDCAuthorization(ctx, issue.TenantID, issue.ClientID, issue.UserID)
+		if err != nil {
+			return oidcapplication.IssuedTokens{}, fmt.Errorf("resolve OIDC application authorization: %w", err)
+		}
+		authorization = resolved
 	}
 
 	claims := security.OIDCTokenClaims{
@@ -63,6 +97,11 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 		Scope:              append([]string(nil), issue.Scopes...),
 		ClientID:           issue.ClientID,
 		Nonce:              issue.Nonce,
+		TenantID:           authorization.TenantID,
+		Roles:              append([]string(nil), authorization.Roles...),
+		Permissions:        append([]string(nil), authorization.Permissions...),
+		RoleConfigHash:     authorization.RoleConfigHash,
+		AuthzRevision:      authorization.AuthzRevision,
 	}
 	accessToken, err := issuer.signer.IssueAccessToken(claims)
 	if err != nil {

@@ -29,6 +29,8 @@ COMPOSE_FILE="${PORTAL_GATEWAY_COMPOSE_FILE:-}"
 API_BASE_URL="${PORTAL_GATEWAY_API_BASE_URL:-http://127.0.0.1:8080}"
 API_TOKEN="${PORTAL_GATEWAY_API_TOKEN:-}"
 PAGE_LIMIT="${PORTAL_GATEWAY_PAGE_LIMIT:-100}"
+# 这些模块已经编译进统一 Vue 前端，只允许代理其后端 API 子路径，不能生成整站反代。
+INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management,contract-management}"
 
 log() {
   local level="$1"
@@ -73,6 +75,18 @@ require_arg() {
     log "ERROR" "$2"
     exit 2
   fi
+}
+
+is_integrated_frontend_code() {
+  local target="$1" item
+  local items=()
+  IFS=',' read -r -a items <<<"$INTEGRATED_FRONTEND_CODES"
+  for item in "${items[@]}"; do
+    item="${item#${item%%[![:space:]]*}}"
+    item="${item%${item##*[![:space:]]}}"
+    [[ "$target" != "$item" ]] || return 0
+  done
+  return 1
 }
 
 validate_code() {
@@ -243,6 +257,12 @@ do_add() {
   validate_path_prefix "$path_prefix"
   validate_upstream_url "$upstream_url"
 
+  if is_integrated_frontend_code "$code"; then
+    do_remove "$code"
+    log "INFO" "${code} 已内置于统一前端，跳过整站反向代理登记"
+    return 0
+  fi
+
   ensure_include_file "$NGINX_INCLUDE"
 
   local entries=()
@@ -381,6 +401,10 @@ do_sync() {
 
     while IFS=$'\t' read -r application_id application_code; do
       [[ -z "$application_id" || -z "$application_code" ]] && continue
+      if is_integrated_frontend_code "$application_code"; then
+        log "INFO" "跳过统一前端内置模块的整站反代：${application_code}"
+        continue
+      fi
       local environment_page=1
       while :; do
         local env_payload

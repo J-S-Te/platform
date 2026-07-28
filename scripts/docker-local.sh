@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# 本地 Docker 编排入口：准备配置、构建镜像、执行迁移和幂等初始化超级管理员。
+# 统一 Docker 编排入口：一个前端、一个基础平台后端、一个合同管理后端。
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
+workspace_root="$(cd "${project_root}/.." && pwd)"
+contract_root="${workspace_root}/contract_management"
 compose_file="${project_root}/compose.local.yaml"
-template_file="${project_root}/docker/.env.local.example"
+platform_template_file="${project_root}/docker/.env.local.example"
 env_file="${project_root}/docker/.env.local"
+contract_template_file="${contract_root}/.env.example"
+contract_env_file="${contract_root}/.env.local"
 compose_project="basic-platform-local"
 command_name="up"
 force_build=false
+pull_images=false
 admin_display_name="${BASIC_PLATFORM_ADMIN_DISPLAY_NAME:-}"
 admin_account_name="${BASIC_PLATFORM_ADMIN_ACCOUNT_NAME:-}"
 admin_password="${BASIC_PLATFORM_ADMIN_PASSWORD:-}"
@@ -21,35 +26,53 @@ usage() {
     cat <<USAGE
 用法：
   bash scripts/docker-local.sh up [选项]
-  bash scripts/docker-local.sh down
+  bash scripts/docker-local.sh down [--volumes]
   bash scripts/docker-local.sh stop
   bash scripts/docker-local.sh restart [选项]
   bash scripts/docker-local.sh ps
   bash scripts/docker-local.sh logs [服务名...]
+  bash scripts/docker-local.sh config
+  bash scripts/docker-local.sh verify
 
 up/restart 选项：
-  --build                         重新构建后端和前端镜像
+  --build                         重新构建三个业务镜像
+  --pull                          串行拉取缺失的基础镜像，降低代理网络并发失败概率
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
-  --admin-password PASSWORD       首次初始化密码；仅建议本地临时使用，避免出现在 shell 历史
-  --env-file PATH                 使用指定运行环境文件（默认 docker/.env.local）
+  --admin-password PASSWORD       首次初始化密码；仅建议本地临时使用
+  --env-file PATH                 基础平台环境文件（默认 platform/docker/.env.local）
+  --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   -h, --help                      显示帮助
 
-首次启动若数据库中尚未存在超级管理员，必须提供上述三个管理员参数，或设置：
+应用容器：
+  frontend      基础平台前端 + 合同管理前端（宿主机仅发布 8081）
+  api           基础平台 API + Worker
+  contract-api  合同管理 API + Temporal Worker
+
+首次启动若数据库中尚未存在超级管理员，必须提供三个管理员参数，或设置：
   BASIC_PLATFORM_ADMIN_DISPLAY_NAME
   BASIC_PLATFORM_ADMIN_ACCOUNT_NAME
   BASIC_PLATFORM_ADMIN_PASSWORD
 USAGE
 }
 
+remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-        up|down|stop|restart|ps|logs)
+        up|down|stop|restart|ps|logs|config|verify)
             command_name="$1"
             shift
             ;;
         --build)
             force_build=true
+            shift
+            ;;
+        --pull)
+            pull_images=true
+            shift
+            ;;
+        --volumes)
+            remove_volumes=true
             shift
             ;;
         --admin-display-name)
@@ -72,6 +95,11 @@ while (($# > 0)); do
             env_file="$2"
             shift 2
             ;;
+        --contract-env-file)
+            (($# >= 2)) || fail "$1 缺少参数"
+            contract_env_file="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -91,55 +119,83 @@ fi
 command -v docker >/dev/null 2>&1 || fail "未找到 docker 命令"
 docker compose version >/dev/null 2>&1 || fail "当前 Docker 不支持 docker compose 子命令"
 [[ -f "$compose_file" ]] || fail "Compose 文件不存在：$compose_file"
+[[ -d "$contract_root" ]] || fail "合同管理后端目录不存在：$contract_root"
 
-# Compose 中的 env_file 路径需要由脚本显式传入，方便 --env-file 使用绝对路径。
 export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
-# 部署助手把这些宿主机绝对路径原样传给 Docker daemon。API 本身不会挂载这些目录。
+export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
-export SUBSYSTEM_HOST_PROJECTS_ROOT="$(dirname "$project_root")"
+export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
 
 compose() {
-    docker compose --project-name "$compose_project" --file "$compose_file" --env-file "$env_file" "$@"
+    docker compose \
+        --project-name "$compose_project" \
+        --file "$compose_file" \
+        --env-file "$env_file" \
+        --env-file "$contract_env_file" \
+        "$@"
 }
 
-replace_line() {
-    local key="$1" value="$2" tmp
-    tmp="$(mktemp "${TMPDIR:-/tmp}/basic-platform-env.XXXXXX")"
+replace_line_in_file() {
+    local file="$1" key="$2" value="$3" tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/docker-local-env.XXXXXX")"
     awk -v key="$key" -v value="$value" '
         index($0, key "=") == 1 { print key "=" value; found=1; next }
         { print }
         END { if (!found) print key "=" value }
-    ' "$env_file" > "$tmp"
+    ' "$file" > "$tmp"
     chmod 600 "$tmp"
-    mv "$tmp" "$env_file"
+    mv "$tmp" "$file"
 }
 
 random_hex() { openssl rand -hex "$1" | tr -d '\n'; }
 random_key() { openssl rand -base64 32 | tr -d '\n'; }
 
-ensure_env_file() {
+ensure_platform_env_file() {
     command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成本地密码和密钥"
     mkdir -p "$(dirname "$env_file")" "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
     chmod 700 "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
 
     if [[ ! -f "$env_file" ]]; then
-        [[ -f "$template_file" ]] || fail "本地环境模板不存在：$template_file"
-        cp "$template_file" "$env_file"
+        [[ -f "$platform_template_file" ]] || fail "基础平台环境模板不存在：$platform_template_file"
+        cp "$platform_template_file" "$env_file"
         chmod 600 "$env_file"
-        replace_line MYSQL_PASSWORD "$(random_hex 24)"
-        replace_line MYSQL_ROOT_PASSWORD "$(random_hex 32)"
-        replace_line IAM_MOBILE_ENCRYPTION_KEY "$(random_key)"
-        replace_line IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY "$(random_key)"
-        replace_line IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY "$(random_key)"
-        replace_line IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
-        log "已根据模板生成本地环境文件：$env_file"
+        replace_line_in_file "$env_file" MYSQL_PASSWORD "$(random_hex 24)"
+        replace_line_in_file "$env_file" MYSQL_ROOT_PASSWORD "$(random_hex 32)"
+        replace_line_in_file "$env_file" IAM_MOBILE_ENCRYPTION_KEY "$(random_key)"
+        replace_line_in_file "$env_file" IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY "$(random_key)"
+        replace_line_in_file "$env_file" IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY "$(random_key)"
+        replace_line_in_file "$env_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
+        log "已根据模板生成基础平台环境文件：$env_file"
     fi
 
     local unresolved
     unresolved="$(grep -E 'REPLACE_WITH_' "$env_file" | grep -v '^#' || true)"
-    if [[ -n "$unresolved" ]]; then
-        printf '%s\n' "$unresolved" >&2
-        fail "本地环境文件仍包含未填写占位符或必需空值：$env_file"
+    [[ -z "$unresolved" ]] || fail "基础平台环境文件仍包含未填写占位符：$env_file"
+}
+
+ensure_contract_env_file() {
+    local strict="${1:-false}"
+    command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成合同数据库密码"
+
+    if [[ ! -f "$contract_env_file" ]]; then
+        [[ -f "$contract_template_file" ]] || fail "合同管理环境模板不存在：$contract_template_file"
+        cp "$contract_template_file" "$contract_env_file"
+        chmod 600 "$contract_env_file"
+        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_PASSWORD "$(random_hex 24)"
+        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD "$(random_hex 32)"
+        replace_line_in_file "$contract_env_file" PLATFORM_BASE_URL "http://localhost:8081"
+        replace_line_in_file "$contract_env_file" OIDC_ISSUER "http://localhost:8081"
+        replace_line_in_file "$contract_env_file" OIDC_REDIRECT_URI "http://localhost:8081/contract_management/auth/callback"
+        replace_line_in_file "$contract_env_file" APP_PUBLIC_URL "http://localhost:8081/contract_management/dashboard"
+        replace_line_in_file "$contract_env_file" APP_PATH_PREFIX "/contract_management"
+        log "已生成合同管理环境文件：$contract_env_file"
+        log "请先在基础平台完成合同管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
+    fi
+
+    if [[ "$strict" == true ]]; then
+        local unresolved
+        unresolved="$(grep -E 'REPLACE_WITH_' "$contract_env_file" | grep -v '^#' || true)"
+        [[ -z "$unresolved" ]] || fail "合同管理环境文件仍包含接入占位符：$contract_env_file"
     fi
 }
 
@@ -148,29 +204,21 @@ compose_run() {
 }
 
 pull_image_with_retry() {
-    local image="$1"
-    local max_attempts="${2:-5}"
-    local attempt delay
-
+    local image="$1" max_attempts="${2:-5}" attempt delay
     if docker image inspect "$image" >/dev/null 2>&1; then
         log "基础镜像已存在，跳过拉取：$image"
         return 0
     fi
-
     for ((attempt = 1; attempt <= max_attempts; attempt++)); do
         log "串行拉取基础镜像（${attempt}/${max_attempts}）：$image"
-        if docker pull "$image"; then
-            return 0
-        fi
-
+        if docker pull "$image"; then return 0; fi
         if ((attempt < max_attempts)); then
             delay=$((attempt * 5))
             log "基础镜像拉取失败，${delay} 秒后重试：$image"
             sleep "$delay"
         fi
     done
-
-    fail "基础镜像拉取失败：$image。请确认 Docker Desktop 的 HTTP/HTTPS 代理均指向 Clash 地址 http://127.0.0.1:7897，然后重试。"
+    fail "基础镜像拉取失败：$image。请检查 Docker Desktop 代理和 Docker Hub 连通性。"
 }
 
 prepare_base_images() {
@@ -183,29 +231,43 @@ prepare_base_images() {
         "mysql:8.4"
         "temporalio/auto-setup:1.29.7"
     )
-
-    log "检查并串行准备 Docker 构建及运行所需基础镜像"
-    for image in "${images[@]}"; do
-        pull_image_with_retry "$image"
-    done
+    log "检查并串行准备基础镜像"
+    for image in "${images[@]}"; do pull_image_with_retry "$image"; done
 }
 
 build_images() {
+    [[ "$pull_images" == false ]] || prepare_base_images
     if [[ "$force_build" == true ]]; then
-        log "重新构建后端和前端镜像"
+        log "重新构建统一前端、基础平台后端和合同管理后端镜像"
     else
-        log "构建缺失或变更后的镜像"
+        log "构建缺失或有变更的三个业务镜像"
     fi
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build \
+        migrate bootstrap-admin api subsystem-provisioner contract-api frontend
+}
 
+<<<<<<< HEAD
     # 限制 Compose 并发，避免 Docker Desktop 经代理同时访问 Docker Hub 时出现 EOF 或令牌请求超时。
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build migrate bootstrap-admin api worker contract-api frontend
+=======
+prepare_gateway_config() {
+    local gateway_script="${project_root}/scripts/portal-gateway.sh"
+    [[ -x "$gateway_script" ]] || chmod +x "$gateway_script"
+    PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
+        "$gateway_script" remove contract_management >/dev/null
+    PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
+        "$gateway_script" remove contract-management >/dev/null
+    log "已清理合同管理旧式整站反向代理；合同前端由统一 frontend 容器直接承载"
+>>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
 }
 
 run_migrations() {
-    log "启动 MySQL 并等待健康检查"
-    compose_run up -d --wait mysql
-    log "执行现有数据库迁移"
+    log "启动两个 MySQL 与 Temporal，并等待健康检查"
+    compose_run up -d --wait mysql contract-mysql temporal
+    log "执行基础平台数据库迁移"
     compose_run run --rm --no-deps migrate ./migrate
+    log "执行合同管理幂等数据库迁移"
+    compose_run run --rm --no-deps contract-migrate
 }
 
 bootstrap_admin_if_needed() {
@@ -215,19 +277,14 @@ bootstrap_admin_if_needed() {
     compose_run --profile bootstrap run --rm --no-deps bootstrap-admin ./bootstrap-admin --status
     status_rc=$?
     set -e
-
     if [[ "$status_rc" -eq 0 ]]; then
         log "超级管理员已存在，跳过初始化"
         return 0
     fi
     [[ "$status_rc" -eq 3 ]] || fail "检查超级管理员状态失败，退出码：$status_rc"
 
-    if [[ -z "$admin_display_name" && -t 0 ]]; then
-        read -r -p '首次超级管理员显示名称：' admin_display_name
-    fi
-    if [[ -z "$admin_account_name" && -t 0 ]]; then
-        read -r -p '首次超级管理员账号：' admin_account_name
-    fi
+    if [[ -z "$admin_display_name" && -t 0 ]]; then read -r -p '首次超级管理员显示名称：' admin_display_name; fi
+    if [[ -z "$admin_account_name" && -t 0 ]]; then read -r -p '首次超级管理员账号：' admin_account_name; fi
     if [[ -z "$admin_password" && -t 0 ]]; then
         read -r -s -p '首次超级管理员密码：' admin_password
         printf '\n'
@@ -236,7 +293,7 @@ bootstrap_admin_if_needed() {
     [[ -n "$admin_account_name" ]] || fail "首次初始化需要 --admin-account-name 或 BASIC_PLATFORM_ADMIN_ACCOUNT_NAME"
     [[ -n "$admin_password" ]] || fail "首次初始化需要 --admin-password 或 BASIC_PLATFORM_ADMIN_PASSWORD"
 
-    log "初始化第一个超级管理员（后端命令具备数据库状态检查和并发幂等保护）"
+    log "初始化第一个超级管理员"
     printf '%s\n' "$admin_password" | compose_run --profile bootstrap run --rm --no-deps -T bootstrap-admin ./bootstrap-admin \
         --display-name "$admin_display_name" \
         --account-name "$admin_account_name" \
@@ -244,42 +301,155 @@ bootstrap_admin_if_needed() {
     unset admin_password BASIC_PLATFORM_ADMIN_PASSWORD
 }
 
+# 从统一前端容器内部访问公开路径，返回第一次 HTTP 响应的状态码。
+# 使用容器自带的 wget，避免部署主机必须额外安装 curl。
+frontend_http_status() {
+    local route="$1" output status
+
+    output="$(
+        compose_run exec -T frontend \
+            wget -S -O /dev/null "http://127.0.0.1${route}" 2>&1 || true
+    )"
+    status="$(printf '%s\n' "$output" | awk '$1 ~ /^HTTP\// { print $2; exit }')"
+    if [[ -z "$status" ]]; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    printf '%s' "$status"
+}
+
+# 返回第一次重定向响应中的 Location。该函数用于验证合同系统实际生成的
+# OIDC 授权地址，避免仅检查 /auth/login=302 而遗漏后续 /authorize 转发错误。
+frontend_http_location() {
+    local route="$1" output location
+
+    output="$(
+        compose_run exec -T frontend \
+            wget -S -O /dev/null "http://127.0.0.1${route}" 2>&1 || true
+    )"
+    location="$(printf '%s\n' "$output" | awk 'tolower($1) == "location:" { sub(/\r$/, "", $2); print $2; exit }')"
+    if [[ -z "$location" ]]; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    printf '%s' "$location"
+}
+
+# 将公开绝对地址转换为前端容器内可访问的路径，并完整保留查询参数。
+public_url_to_route() {
+    local public_url="$1" route
+
+    case "$public_url" in
+        http://*|https://*)
+            route="$(printf '%s' "$public_url" | sed -E 's#^https?://[^/]+##')"
+            ;;
+        /*)
+            route="$public_url"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ "$route" == /* ]] || return 1
+    printf '%s' "$route"
+}
+
+verify_gateway_routes() {
+    local contract_health_status contract_session_status contract_login_status
+    local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url
+
+    log "校验统一前端 Nginx 配置"
+    compose_run exec -T frontend nginx -t >/dev/null
+
+    contract_health_status="$(frontend_http_status /contract_management/healthz)" || \
+        fail "无法访问合同管理健康检查路径"
+    [[ "$contract_health_status" == "200" ]] || \
+        fail "合同管理健康检查路径返回 ${contract_health_status}，预期为 200"
+
+    # 自检请求不携带登录 Cookie，因此 /auth/me 应返回 401。若返回 404，说明
+    # /contract_management 前缀未被正确移除，部署必须立即失败。
+    contract_session_status="$(frontend_http_status /contract_management/api/v1/auth/me)" || \
+        fail "无法访问合同管理登录状态接口"
+    [[ "$contract_session_status" == "401" ]] || \
+        fail "合同管理登录状态接口返回 ${contract_session_status}，预期未登录状态为 401"
+
+    contract_login_status="$(frontend_http_status /contract_management/auth/login)" || \
+        fail "无法访问合同管理登录入口"
+    [[ "$contract_login_status" == "302" ]] || \
+        fail "合同管理登录入口返回 ${contract_login_status}，预期为 302 OIDC 跳转"
+
+    # 继续验证合同后端生成的真实授权地址。若 Nginx 在转发 /authorize 时丢失
+    # client_id、redirect_uri、state、nonce 或 PKCE 参数，此处会得到 400 并阻止部署。
+    contract_authorize_url="$(frontend_http_location /contract_management/auth/login)" || \
+        fail "合同管理登录入口未返回 OIDC 授权地址"
+    contract_authorize_route="$(public_url_to_route "$contract_authorize_url")" || \
+        fail "合同管理登录入口返回了无法识别的 OIDC 授权地址"
+    [[ "$contract_authorize_route" == /authorize\?* ]] || \
+        fail "合同管理登录入口未跳转到统一身份平台 /authorize"
+
+    platform_authorize_status="$(frontend_http_status "$contract_authorize_route")" || \
+        fail "无法通过统一前端访问 OIDC 授权端点"
+    [[ "$platform_authorize_status" == "302" ]] || \
+        fail "OIDC 授权端点返回 ${platform_authorize_status}，预期未登录状态为 302；请检查 /authorize 是否完整保留查询参数"
+
+    platform_login_url="$(frontend_http_location "$contract_authorize_route")" || \
+        fail "OIDC 授权端点未返回统一登录页地址"
+    case "$platform_login_url" in
+        /login.html\?return_to=*|http://*/login.html\?return_to=*|https://*/login.html\?return_to=*) ;;
+        *) fail "OIDC 授权端点未跳转到统一登录页" ;;
+    esac
+
+    log "合同管理 OIDC 网关校验通过：healthz=200，auth/me=401，auth/login=302，authorize=302"
+}
+
 start_stack() {
-    ensure_env_file
+    ensure_platform_env_file
+    ensure_contract_env_file true
+    prepare_gateway_config
     build_images
     run_migrations
     bootstrap_admin_if_needed
-    log "启动基础平台后端（API + Worker）与统一前端；宿主机仅发布 8081"
-    compose_run up -d api frontend
+    log "启动三个业务应用容器：frontend、api、contract-api"
+    compose_run up -d --wait subsystem-provisioner api contract-api frontend
+    verify_gateway_routes
     compose_run ps
-    log "本地地址：http://localhost:8081"
+    log "统一访问地址：http://localhost:${FRONTEND_HTTP_PORT:-8081}"
+    log "合同管理前端：http://localhost:${FRONTEND_HTTP_PORT:-8081}/contract_management/"
+}
+
+prepare_operational_env() {
+    ensure_platform_env_file
+    ensure_contract_env_file false
 }
 
 case "$command_name" in
-    up)
-        start_stack
-        ;;
-    restart)
+    up|restart)
         start_stack
         ;;
     down)
-        ensure_env_file
-        compose_run down
+        prepare_operational_env
+        if [[ "$remove_volumes" == true ]]; then compose_run down --volumes; else compose_run down; fi
         ;;
     stop)
-        ensure_env_file
+        prepare_operational_env
         compose_run stop
         ;;
     ps)
-        ensure_env_file
+        prepare_operational_env
         compose_run ps
         ;;
     logs)
-        ensure_env_file
-        if ((${#log_services[@]} > 0)); then
-            compose_run logs -f "${log_services[@]}"
-        else
-            compose_run logs -f
-        fi
+        prepare_operational_env
+        if ((${#log_services[@]} > 0)); then compose_run logs -f "${log_services[@]}"; else compose_run logs -f; fi
+        ;;
+    config)
+        ensure_platform_env_file
+        ensure_contract_env_file true
+        compose_run config --quiet
+        log "Compose 配置校验通过"
+        ;;
+    verify)
+        prepare_operational_env
+        verify_gateway_routes
         ;;
 esac

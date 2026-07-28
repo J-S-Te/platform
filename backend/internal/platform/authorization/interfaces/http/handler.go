@@ -72,6 +72,7 @@ type roleResponse struct {
 	Name        string              `json:"name"`
 	Description *string             `json:"description,omitempty"`
 	Status      string              `json:"status"`
+	BuiltIn     bool                `json:"built_in"`
 	Permissions []referenceResponse `json:"permissions"`
 	Version     uint64              `json:"version"`
 }
@@ -587,6 +588,7 @@ func roleToResponse(value domain.Role) roleResponse {
 		Name:        value.Name,
 		Description: value.Description,
 		Status:      value.Status,
+		BuiltIn:     value.BuiltIn,
 		Permissions: permissions,
 		Version:     value.Version,
 	}
