@@ -171,7 +171,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		RefreshTokenTTLSeconds: defaultSubsystemRefreshTokenTTLSeconds,
 		RequirePKCE:            true, GrantTypes: []string{"authorization_code", "refresh_token"},
 		Scopes: []string{"openid", "profile"}, RedirectURIs: []string{redirectURI},
-	}, false)
+	})
 	if err != nil {
 		return SubsystemOnboardingResult{}, err
 	}
@@ -271,7 +271,7 @@ func resolvePortalTarget(baseURL, targetURI string) (string, error) {
 		return "", err
 	}
 	if parsed.IsAbs() {
-		if !validRedirectURI(targetURI, false) {
+		if !validRedirectURI(targetURI) {
 			return "", ErrValidation
 		}
 		return targetURI, nil

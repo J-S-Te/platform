@@ -51,17 +51,16 @@ type MySQLConfig struct {
 
 // AuthConfig contains the shared authentication settings used by later IAM work.
 type AuthConfig struct {
-	JWTIssuer                     string
-	JWTAudience                   string
-	ApplicationJWTAudience        string
-	OIDCIssuer                    string
-	AllowInsecureHTTPRedirectURIs bool
-	JWTPrivateKeyPath             string
-	JWTPublicKeyPath              string
-	SessionCookieName             string
-	SessionCookieSecure           bool
-	SessionCookieSameSite         string
-	SessionTTL                    time.Duration
+	JWTIssuer              string
+	JWTAudience            string
+	ApplicationJWTAudience string
+	OIDCIssuer             string
+	JWTPrivateKeyPath      string
+	JWTPublicKeyPath       string
+	SessionCookieName      string
+	SessionCookieSecure    bool
+	SessionCookieSameSite  string
+	SessionTTL             time.Duration
 }
 
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
@@ -167,10 +166,6 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	allowInsecureHTTPRedirectURIs, err := boolean("OIDC_ALLOW_INSECURE_HTTP_REDIRECT_URIS", false)
-	if err != nil {
-		return Config{}, err
-	}
 	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -207,17 +202,16 @@ func Load() (Config, error) {
 			BootstrapToken:                       strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
 		},
 		Auth: AuthConfig{
-			JWTIssuer:                     value("AUTH_JWT_ISSUER", "basic-platform"),
-			JWTAudience:                   value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
-			ApplicationJWTAudience:        value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
-			OIDCIssuer:                    strings.TrimRight(oidcIssuer, "/"),
-			AllowInsecureHTTPRedirectURIs: allowInsecureHTTPRedirectURIs,
-			JWTPrivateKeyPath:             resolveConfigPath(envFile, value("AUTH_JWT_PRIVATE_KEY_PATH", "")),
-			JWTPublicKeyPath:              resolveConfigPath(envFile, value("AUTH_JWT_PUBLIC_KEY_PATH", "")),
-			SessionCookieName:             value("AUTH_SESSION_COOKIE_NAME", "bp_session"),
-			SessionCookieSecure:           cookieSecure,
-			SessionCookieSameSite:         value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
-			SessionTTL:                    sessionTTL,
+			JWTIssuer:              value("AUTH_JWT_ISSUER", "basic-platform"),
+			JWTAudience:            value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
+			ApplicationJWTAudience: value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
+			OIDCIssuer:             strings.TrimRight(oidcIssuer, "/"),
+			JWTPrivateKeyPath:      resolveConfigPath(envFile, value("AUTH_JWT_PRIVATE_KEY_PATH", "")),
+			JWTPublicKeyPath:       resolveConfigPath(envFile, value("AUTH_JWT_PUBLIC_KEY_PATH", "")),
+			SessionCookieName:      value("AUTH_SESSION_COOKIE_NAME", "bp_session"),
+			SessionCookieSecure:    cookieSecure,
+			SessionCookieSameSite:  value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
+			SessionTTL:             sessionTTL,
 		},
 		Logging: LoggingConfig{
 			Level:     value("LOG_LEVEL", "info"),
@@ -313,9 +307,6 @@ func (cfg Config) Validate() error {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when AUTH_SESSION_COOKIE_SAME_SITE is None")
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Environment), "production") {
-		if cfg.Auth.AllowInsecureHTTPRedirectURIs {
-			return fmt.Errorf("OIDC_ALLOW_INSECURE_HTTP_REDIRECT_URIS must be false when APP_ENV is production")
-		}
 		if !cfg.Auth.SessionCookieSecure {
 			return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when APP_ENV is production")
 		}
