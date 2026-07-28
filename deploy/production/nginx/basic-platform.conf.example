@@ -1,0 +1,57 @@
+server {
+    listen 80;
+    server_name platform.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name platform.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/platform.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/platform.example.com/privkey.pem;
+
+    client_max_body_size 25m;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+
+    location = /healthz {
+        proxy_pass http://127.0.0.1:18080/healthz;
+    }
+
+    location = /readyz {
+        proxy_pass http://127.0.0.1:18080/readyz;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:18080;
+    }
+
+    location = /authorize {
+        proxy_pass http://127.0.0.1:18080/authorize;
+    }
+
+    location = /.well-known/openid-configuration {
+        proxy_pass http://127.0.0.1:18080/.well-known/openid-configuration;
+    }
+
+    location /oauth2/ {
+        proxy_pass http://127.0.0.1:18080;
+    }
+
+    location = /contract {
+        return 308 /contract/;
+    }
+
+    location /contract/ {
+        proxy_set_header X-Forwarded-Prefix /contract;
+        proxy_pass http://127.0.0.1:18081/;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:18082;
+    }
+}

@@ -230,6 +230,7 @@ prepare_base_images() {
         "nginx:1.27-alpine"
         "mysql:8.4"
         "temporalio/auto-setup:1.29.7"
+        "temporalio/auto-setup:1.29.7"
     )
     log "检查并串行准备基础镜像"
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
