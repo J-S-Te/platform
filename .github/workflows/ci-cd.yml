@@ -67,7 +67,7 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: image
     runs-on: ubuntu-latest
-    environment: production
+    environment: test
     steps:
       - uses: actions/checkout@v4
       - name: Sync production deployment assets
