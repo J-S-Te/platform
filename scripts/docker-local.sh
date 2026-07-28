@@ -178,6 +178,7 @@ prepare_base_images() {
         "node:22-alpine"
         "nginx:1.27-alpine"
         "mysql:8.4"
+        "temporalio/auto-setup:1.29.7"
     )
 
     log "检查并串行准备 Docker 构建及运行所需基础镜像"
@@ -194,7 +195,7 @@ build_images() {
     fi
 
     # 限制 Compose 并发，避免 Docker Desktop 经代理同时访问 Docker Hub 时出现 EOF 或令牌请求超时。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build migrate bootstrap-admin api worker frontend
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build migrate bootstrap-admin api worker contract-api frontend
 }
 
 run_migrations() {
@@ -245,8 +246,8 @@ start_stack() {
     build_images
     run_migrations
     bootstrap_admin_if_needed
-    log "启动 API、Worker、Frontend；宿主机仅发布 8081"
-    compose_run up -d api worker frontend
+    log "启动 Platform、Contract Management 与 Frontend；宿主机仅发布 8081"
+    compose_run up -d api worker contract-api contract-worker frontend
     compose_run ps
     log "本地地址：http://localhost:8081"
 }

@@ -9,6 +9,25 @@ x-backend-image: &backend-image
     context: ./backend
   image: basic-platform/backend:local
 
+x-contract-environment: &contract-environment
+  HTTP_ADDRESS: :8081
+  MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+  PLATFORM_BASE_URL: http://api:8080
+  AUTH_SESSION_COOKIE_NAME: bp_session
+  PLATFORM_AUDIT_CLIENT_ID: ${CONTRACT_PLATFORM_AUDIT_CLIENT_ID:-}
+  PLATFORM_AUDIT_CLIENT_SECRET: ${CONTRACT_PLATFORM_AUDIT_CLIENT_SECRET:-}
+  PLATFORM_APPLICATION_CODE: contract_management
+  PLATFORM_ENVIRONMENT_CODE: dev
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: contract-management
+  TEMPORAL_TLS: "false"
+  APPROVAL_NODE_TIMEOUT: 72h
+  APPROVAL_REMINDER_INTERVAL: 24h
+  ARCHIVE_CRON_SCHEDULE: "0 16 * * *"
+  APPROVER_ROLE_ASSIGNMENTS_JSON: ${CONTRACT_APPROVER_ROLE_ASSIGNMENTS_JSON:-{}}
+  GIN_MODE: release
+
 services:
   mysql:
     image: mysql:8.4
@@ -87,6 +106,86 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  contract-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: contract_management
+      MYSQL_USER: contract
+      MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - contract_mysql_local_data:/var/lib/mysql
+      - ../contract_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
+      - ../contract_management/migrations/000001_contract_workflow.sql:/docker-entrypoint-initdb.d/010_contract_workflow.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucontract -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    environment:
+      DB: mysql8
+      DB_PORT: 3306
+      MYSQL_SEEDS: contract-mysql
+      MYSQL_USER: contract
+      MYSQL_PWD: ${CONTRACT_MYSQL_PASSWORD}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  contract-api:
+    build:
+      context: ../contract_management
+    image: contract-management:local
+    environment:
+      <<: *contract-environment
+      CONTRACT_MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
+    depends_on:
+      api:
+        condition: service_healthy
+      contract-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  contract-worker:
+    image: contract-management:local
+    command: ["./worker"]
+    environment:
+      <<: *contract-environment
+      CONTRACT_MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
+    depends_on:
+      api:
+        condition: service_healthy
+      contract-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
   frontend:
     build:
       context: ../frontend
@@ -101,8 +200,12 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      contract-api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   mysql_local_data:
     name: basic-platform-local-mysql-data
+  contract_mysql_local_data:
+    name: basic-platform-local-contract-mysql-data

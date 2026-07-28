@@ -1,0 +1,5 @@
+.env
+.release.env
+.deploy.lock
+backups/
+data/
