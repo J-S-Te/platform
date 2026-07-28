@@ -92,7 +92,8 @@ jobs:
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           tar -C deploy/production -czf /tmp/production-deploy.tgz .
-          scp -P "$DEPLOY_PORT" /tmp/production-deploy.tgz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/production-deploy.tgz"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cat > /tmp/production-deploy.tgz' < /tmp/production-deploy.tgz
           printf -v install_command 'install -d -m 750 %q && exec 9>%q/.deploy.lock && flock -w 900 9 && tar -xzf /tmp/production-deploy.tgz -C %q && chmod 750 %q/bin/deploy-service.sh && rm -f /tmp/production-deploy.tgz' "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH"
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$install_command"
       - name: Migrate and deploy immutable platform image
