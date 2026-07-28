@@ -5,12 +5,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      deploy_production:
-        description: "是否在本次手动运行中部署到生产环境（仅 main 分支）"
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -70,7 +64,8 @@ jobs:
         run: echo "image_ref=${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   deploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production && github.ref == 'refs/heads/main'
+    # main 分支构建镜像成功后必须部署；部署凭据缺失时应直接失败，不能静默跳过。
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: image
     runs-on: ubuntu-latest
     environment: test
