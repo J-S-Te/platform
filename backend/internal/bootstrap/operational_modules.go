@@ -48,7 +48,15 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(subsystemService, cfg.Auth.OIDCIssuer, logger)
+	subsystemProvisioner, err := applicationregistryinfrastructure.NewUnixSocketSubsystemProvisioner(
+		cfg.SubsystemOnboarding.Enabled,
+		cfg.SubsystemOnboarding.SocketPath,
+		cfg.SubsystemOnboarding.Timeout,
+	)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(subsystemService, subsystemProvisioner, cfg.Auth.OIDCIssuer, logger)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}

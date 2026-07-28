@@ -17,18 +17,19 @@ const defaultEnvFile = ".env"
 // Config contains process-level configuration. Runtime business configuration belongs in the
 // configuration module and must not be added to this type.
 type Config struct {
-	Environment     string
-	AppName         string
-	Timezone        string
-	HTTP            HTTPConfig
-	MySQL           MySQLConfig
-	Auth            AuthConfig
-	Identity        IdentityConfig
-	Logging         LoggingConfig
-	Worker          WorkerConfig
-	Audit           AuditConfig
-	FileStorageRoot string
-	CORSOrigins     []string
+	Environment         string
+	AppName             string
+	Timezone            string
+	HTTP                HTTPConfig
+	MySQL               MySQLConfig
+	Auth                AuthConfig
+	Identity            IdentityConfig
+	Logging             LoggingConfig
+	Worker              WorkerConfig
+	Audit               AuditConfig
+	SubsystemOnboarding SubsystemOnboardingAutomationConfig
+	FileStorageRoot     string
+	CORSOrigins         []string
 }
 
 // HTTPConfig controls the API listener and public address.
@@ -100,6 +101,22 @@ type AuditConfig struct {
 	EnvironmentCode string
 }
 
+// SubsystemOnboardingAutomationConfig controls trusted local Docker automation for one-click
+// subsystem onboarding. The API uses only the configured Unix Socket; Docker Socket and sibling
+// project access belong exclusively to the isolated deployment helper.
+type SubsystemOnboardingAutomationConfig struct {
+	Enabled                 bool
+	ProjectsRoot            string
+	GatewayScriptPath       string
+	GatewayIncludePath      string
+	SocketPath              string
+	PlatformComposeProject  string
+	PlatformFrontendService string
+	PlatformDockerNetwork   string
+	DockerBinary            string
+	Timeout                 time.Duration
+}
+
 // Load reads ENV_FILE when explicitly set. Otherwise, it loads .env from the current
 // directory and falls back to its parent directory. The fallback lets backend commands run from
 // backend/ while the repository-root .env remains the single shared local configuration file.
@@ -142,6 +159,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	workerStaleLockTimeout, err := duration("ASYNC_WORKER_STALE_LOCK_TIMEOUT", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	subsystemAutomationEnabled, err := boolean("SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
 	}
@@ -201,6 +226,18 @@ func Load() (Config, error) {
 		Audit: AuditConfig{
 			ApplicationCode: value("AUDIT_APPLICATION_CODE", "platform"),
 			EnvironmentCode: value("AUDIT_ENVIRONMENT_CODE", "dev"),
+		},
+		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
+			Enabled:                 subsystemAutomationEnabled,
+			ProjectsRoot:            value("SUBSYSTEM_PROJECTS_ROOT", ""),
+			GatewayScriptPath:       value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
+			GatewayIncludePath:      value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
+			SocketPath:              value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
+			PlatformComposeProject:  value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
+			PlatformFrontendService: value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
+			PlatformDockerNetwork:   value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
+			DockerBinary:            value("SUBSYSTEM_DOCKER_BINARY", "docker"),
+			Timeout:                 subsystemAutomationTimeout,
 		},
 		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
 		CORSOrigins:     commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
@@ -288,6 +325,18 @@ func (cfg Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Audit.ApplicationCode) == "" || strings.TrimSpace(cfg.Audit.EnvironmentCode) == "" {
 		return fmt.Errorf("AUDIT_APPLICATION_CODE and AUDIT_ENVIRONMENT_CODE must not be empty")
+	}
+	if cfg.SubsystemOnboarding.Enabled {
+		if strings.TrimSpace(cfg.SubsystemOnboarding.ProjectsRoot) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.GatewayScriptPath) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.GatewayIncludePath) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.SocketPath) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.PlatformComposeProject) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.PlatformFrontendService) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.PlatformDockerNetwork) == "" ||
+			strings.TrimSpace(cfg.SubsystemOnboarding.DockerBinary) == "" || cfg.SubsystemOnboarding.Timeout <= 0 {
+			return fmt.Errorf("subsystem onboarding automation configuration is incomplete")
+		}
 	}
 	if len(cfg.CORSOrigins) == 0 {
 		return fmt.Errorf("APP_CORS_ALLOWED_ORIGINS must contain at least one exact origin")

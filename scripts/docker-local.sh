@@ -94,6 +94,9 @@ docker compose version >/dev/null 2>&1 || fail "当前 Docker 不支持 docker c
 
 # Compose 中的 env_file 路径需要由脚本显式传入，方便 --env-file 使用绝对路径。
 export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
+# 部署助手把这些宿主机绝对路径原样传给 Docker daemon。API 本身不会挂载这些目录。
+export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
+export SUBSYSTEM_HOST_PROJECTS_ROOT="$(dirname "$project_root")"
 
 compose() {
     docker compose --project-name "$compose_project" --file "$compose_file" --env-file "$env_file" "$@"
