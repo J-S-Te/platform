@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: "是否在本次手动运行中部署到生产环境（仅 main 分支）"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -30,7 +36,7 @@ jobs:
       - run: go vet ./...
 
   image:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     outputs:
@@ -64,7 +70,7 @@ jobs:
         run: echo "image_ref=${{ steps.vars.outputs.image }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production && github.ref == 'refs/heads/main'
     needs: image
     runs-on: ubuntu-latest
     environment: production

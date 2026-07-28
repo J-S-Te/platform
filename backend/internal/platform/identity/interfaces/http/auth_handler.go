@@ -100,9 +100,10 @@ type loginRequest struct {
 	Password  string `json:"password"`
 	LoginType string `json:"login_type"`
 
-	ApplicationID   string `json:"application_id"`
-	EnvironmentID   string `json:"environment_id"`
-	LoginTargetCode string `json:"login_target_code"`
+	ApplicationID          string `json:"application_id"`
+	EnvironmentID          string `json:"environment_id"`
+	LoginTargetCode        string `json:"login_target_code"`
+	ReplaceExistingSession bool   `json:"replace_existing_session"`
 }
 
 type sessionResponse struct {
@@ -125,6 +126,7 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 
 	result, err := handler.service.Login(request.Context(), application.LoginInput{
 		Account: payload.Account, Password: payload.Password, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
+		ReplaceExistingSession: payload.ReplaceExistingSession,
 	})
 	if err != nil {
 		handler.recordLoginFailure(request, err)
@@ -244,11 +246,18 @@ func (handler *Handler) CookieName() string {
 
 // recordLogin writes a successful password-login event after the session has been persisted.
 func (handler *Handler) recordLogin(request *http.Request, result application.SessionResult) {
+	action := "auth.login"
+	riskLevel := "LOW"
+	summary := "本地账号密码登录成功"
+	if result.ReplacedExistingSession {
+		action = "auth.login.session_replaced"
+		riskLevel = "MEDIUM"
+		summary = "用户重新验证口令并退出原会话后登录"
+	}
 	handler.recordLifecycleEvent(request, result.TenantID, auditapplication.EventInput{
 		ActorType: "USER", ActorID: result.UserID, ActorName: result.UserName, SessionID: result.SessionID,
-		Action: "auth.login", ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
-		Result: "SUCCESS", RiskLevel: "LOW", Classification: "INTERNAL",
-		Summary: "本地账号密码登录成功",
+		Action: action, ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
+		Result: "SUCCESS", RiskLevel: riskLevel, Classification: "INTERNAL", Summary: summary,
 	})
 }
 

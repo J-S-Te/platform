@@ -13,12 +13,14 @@ type orgUnitCreateRepositoryStub struct {
 	ManagementRepository
 	createCalls int
 	created     domain.OrgUnit
+	positions   []domain.Position
 	operatorID  string
 }
 
-func (repository *orgUnitCreateRepositoryStub) CreateOrgUnit(_ context.Context, orgUnit domain.OrgUnit, operatorID string) (domain.OrgUnit, error) {
+func (repository *orgUnitCreateRepositoryStub) CreateOrgUnit(_ context.Context, orgUnit domain.OrgUnit, positions []domain.Position, operatorID string) (domain.OrgUnit, error) {
 	repository.createCalls++
 	repository.created = orgUnit
+	repository.positions = positions
 	repository.operatorID = operatorID
 	return orgUnit, nil
 }
@@ -30,7 +32,7 @@ func TestManagementServiceCreateOrgUnitGeneratesManagedCode(t *testing.T) {
 	service, err := NewManagementService(
 		repository,
 		userCreateMobileProtectionStub{},
-		&sequenceIDGenerator{ids: []string{"01KYDVHC000000000000000001"}},
+		&sequenceIDGenerator{ids: []string{"01KYDVHC000000000000000001", "01KYDVHC000000000000000002", "01KYDVHC000000000000000003", "01KYDVHC000000000000000004", "01KYDVHC000000000000000005", "01KYDVHC000000000000000006", "01KYDVHC000000000000000007"}},
 		fixedClock{now: time.Date(2026, time.July, 27, 8, 0, 0, 0, time.UTC)},
 	)
 	if err != nil {
@@ -54,6 +56,25 @@ func TestManagementServiceCreateOrgUnitGeneratesManagedCode(t *testing.T) {
 	}
 	if repository.operatorID != "operator-1" {
 		t.Errorf("operator ID = %q, want operator-1", repository.operatorID)
+	}
+	if len(repository.positions) != len(DefaultOrganizationPositionNames) {
+		t.Fatalf("default positions = %d, want %d", len(repository.positions), len(DefaultOrganizationPositionNames))
+	}
+	expectedPositionIDs := []string{
+		"01KYDVHC000000000000000002",
+		"01KYDVHC000000000000000003",
+		"01KYDVHC000000000000000004",
+		"01KYDVHC000000000000000005",
+		"01KYDVHC000000000000000006",
+		"01KYDVHC000000000000000007",
+	}
+	for index, position := range repository.positions {
+		if position.OrgUnitID != created.ID || position.TenantID != created.TenantID {
+			t.Errorf("position[%d] scope = %#v", index, position)
+		}
+		if position.ID != expectedPositionIDs[index] || position.Name != DefaultOrganizationPositionNames[index] || position.Code != "POS-"+expectedPositionIDs[index] {
+			t.Errorf("position[%d] = %#v", index, position)
+		}
 	}
 	if created.ID != "01KYDVHC000000000000000001" {
 		t.Errorf("organization ID = %q", created.ID)

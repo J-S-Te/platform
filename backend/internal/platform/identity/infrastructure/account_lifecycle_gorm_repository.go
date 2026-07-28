@@ -55,7 +55,11 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 	var account domain.Account
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var row accountModel
-		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ?", write.TenantID, write.AccountID).First(&row)
+		ownerClause, ownerArgs := accountOwnerVisibilityFilter()
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", write.TenantID, write.AccountID).
+			Where(ownerClause, ownerArgs...).
+			First(&row)
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return application.ErrNotFound
 		}

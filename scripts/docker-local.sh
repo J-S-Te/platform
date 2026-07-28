@@ -14,7 +14,6 @@ contract_env_file="${contract_root}/.env.local"
 compose_project="basic-platform-local"
 command_name="up"
 force_build=false
-pull_images=false
 admin_display_name="${BASIC_PLATFORM_ADMIN_DISPLAY_NAME:-}"
 admin_account_name="${BASIC_PLATFORM_ADMIN_ACCOUNT_NAME:-}"
 admin_password="${BASIC_PLATFORM_ADMIN_PASSWORD:-}"
@@ -36,7 +35,7 @@ usage() {
 
 up/restart 选项：
   --build                         重新构建三个业务镜像
-  --pull                          串行拉取缺失的基础镜像，降低代理网络并发失败概率
+  --pull                          兼容选项；启动前默认会串行拉取缺失的基础镜像
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
   --admin-password PASSWORD       首次初始化密码；仅建议本地临时使用
@@ -68,7 +67,7 @@ while (($# > 0)); do
             shift
             ;;
         --pull)
-            pull_images=true
+            # 兼容旧命令；缺失基础镜像现在默认会预拉取。
             shift
             ;;
         --volumes)
@@ -218,7 +217,7 @@ pull_image_with_retry() {
             sleep "$delay"
         fi
     done
-    fail "基础镜像拉取失败：$image。请检查 Docker Desktop 代理和 Docker Hub 连通性。"
+    fail "基础镜像拉取失败：$image。Docker Hub 认证端点不可达；请检查 Docker Desktop 的 Proxies/镜像加速器配置后重试。"
 }
 
 prepare_base_images() {
@@ -230,14 +229,16 @@ prepare_base_images() {
         "nginx:1.27-alpine"
         "mysql:8.4"
         "temporalio/auto-setup:1.29.7"
-        "temporalio/auto-setup:1.29.7"
     )
     log "检查并串行准备基础镜像"
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
 }
 
 build_images() {
-    [[ "$pull_images" == false ]] || prepare_base_images
+    # Compose/BuildKit 会并发解析多个 Docker Hub 基础镜像。网络或代理不稳定时，
+    # 任意一次匿名令牌请求超时都会让整个构建立即失败。先串行拉取缺失镜像并
+    # 对每个镜像重试，使普通的 `up --build` 在全新环境中也具备容错能力。
+    prepare_base_images
     if [[ "$force_build" == true ]]; then
         log "重新构建统一前端、基础平台后端和合同管理后端镜像"
     else
@@ -351,11 +352,18 @@ public_url_to_route() {
 }
 
 verify_gateway_routes() {
-    local contract_health_status contract_session_status contract_login_status
+    local platform_membership_status contract_health_status contract_session_status contract_login_status
     local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url
 
     log "校验统一前端 Nginx 配置"
     compose_run exec -T frontend nginx -t >/dev/null
+
+    # 任职关系接口属于基础平台 API。未携带会话时应被认证层拒绝为 401；
+    # 404 代表前端网关或 api 容器仍在使用未包含该路由的旧版本。
+    platform_membership_status="$(frontend_http_status /api/v1/memberships)" || \
+        fail "无法访问基础平台任职关系接口"
+    [[ "$platform_membership_status" == "401" ]] || \
+        fail "基础平台任职关系接口返回 ${platform_membership_status}，预期未登录状态为 401；请重新构建并启动 api 与 frontend 容器"
 
     contract_health_status="$(frontend_http_status /contract_management/healthz)" || \
         fail "无法访问合同管理健康检查路径"

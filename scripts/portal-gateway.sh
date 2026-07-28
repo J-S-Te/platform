@@ -3,6 +3,9 @@
 # 反向代理 location 配置，并 reload nginx。配合 applicationregistry 的
 # Environment.UpstreamURL / Environment.PathPrefix 字段使用。
 #
+# 注意：这是底层网关维护工具。完整子系统接入请使用 scripts/subsystem-onboarding.sh，
+# 不要仅执行 add/reload，否则不会创建 Application、Environment、LoginTarget 和 OAuth Client。
+#
 # 设计：所有用户访问都从门户统一入口进入，门户的 frontend nginx 把
 # 配置的 path_prefix（例如 /contract/）反代到子系真实内网地址。这样子系不需要对外暴露端口，
 # 也不需要在 OAuth redirect_uri、LoginTarget.TargetURI 里写任何子系端口。
@@ -42,6 +45,10 @@ usage() {
   cat <<'USAGE'
 用法：
   portal-gateway.sh <command> [args]
+
+完整接入：
+  bash scripts/subsystem-onboarding.sh --help
+  本脚本仅维护网关，不创建应用、环境、登录目标或 OAuth 客户端。
 
 命令：
   add <code> <path_prefix> <upstream_url>

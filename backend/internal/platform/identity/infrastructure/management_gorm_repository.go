@@ -126,7 +126,7 @@ func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []appl
 // GetUser retrieves exactly one tenant-scoped user.
 func (repository *GORMRepository) GetUser(ctx context.Context, tenantID, userID string) (domain.User, error) {
 	var row userModel
-	result := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, userID).First(&row)
+	result := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", tenantID, userID).First(&row)
 	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return domain.User{}, application.ErrNotFound
 	}
@@ -170,9 +170,10 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 	return repository.GetUser(ctx, input.TenantID, input.UserID)
 }
 
-// DeleteUser performs a tenant-scoped logical deletion. Identity rows are retained because
-// downstream memberships, audit records and foreign keys refer to the user. All login paths are
-// disabled and existing sessions are revoked in the same transaction.
+// DeleteUser performs a tenant-scoped business deletion. The user, account and membership rows are
+// retained as disabled records for audit and foreign-key integrity, but associated login accounts
+// and appointments are removed from normal management views. Existing sessions are revoked in the
+// same transaction so the deleted user loses access immediately.
 func (repository *GORMRepository) DeleteUser(ctx context.Context, input application.UserDeleteInput) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var user userModel
@@ -194,7 +195,7 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 		now := time.Now().UTC()
 		if err := transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.UserID, input.Version).
 			Updates(map[string]any{
-				"status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1"),
+				"status": domain.StatusDisabled, "primary_org_id": nil, "deleted_at": now, "deleted_by": input.OperatorID, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1"),
 			}).Error; err != nil {
 			return mapWriteError(err, "delete user")
 		}
@@ -202,8 +203,8 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 		accountIDs := transaction.Model(&accountModel{}).Select("id").
 			Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID)
 		if err := transaction.Model(&accountModel{}).
-			Where("tenant_id = ? AND user_id = ? AND status <> ?", input.TenantID, input.UserID, domain.StatusDisabled).
-			Updates(map[string]any{"status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID).
+			Updates(map[string]any{"username": nil, "status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 			return mapWriteError(err, "disable user accounts")
 		}
 		if err := transaction.Model(&passwordCredentialModel{}).
@@ -228,7 +229,7 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 
 func (repository *GORMRepository) versionedUserError(ctx context.Context, tenantID, userID string) error {
 	var total int64
-	if err := repository.database.WithContext(ctx).Model(&userModel{}).Where("tenant_id = ? AND id = ?", tenantID, userID).Count(&total).Error; err != nil {
+	if err := repository.database.WithContext(ctx).Model(&userModel{}).Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", tenantID, userID).Count(&total).Error; err != nil {
 		return fmt.Errorf("check user after update: %w", err)
 	}
 	if total == 0 {
@@ -256,8 +257,10 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 }
 
 func (repository *GORMRepository) UpdateAccount(ctx context.Context, input application.AccountUpdateInput) (domain.Account, error) {
+	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
 	result := repository.database.WithContext(ctx).Model(&accountModel{}).
 		Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.AccountID, input.Version).
+		Where(ownerClause, ownerArgs...).
 		Updates(map[string]any{
 			"status":     input.Status,
 			"updated_at": time.Now().UTC(),
@@ -275,7 +278,11 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 
 func (repository *GORMRepository) versionedAccountError(ctx context.Context, tenantID, accountID string) error {
 	var total int64
-	if err := repository.database.WithContext(ctx).Model(&accountModel{}).Where("tenant_id = ? AND id = ?", tenantID, accountID).Count(&total).Error; err != nil {
+	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
+	if err := repository.database.WithContext(ctx).Model(&accountModel{}).
+		Where("tenant_id = ? AND id = ?", tenantID, accountID).
+		Where(ownerClause, ownerArgs...).
+		Count(&total).Error; err != nil {
 		return fmt.Errorf("check account after update: %w", err)
 	}
 	if total == 0 {
@@ -286,7 +293,11 @@ func (repository *GORMRepository) versionedAccountError(ctx context.Context, ten
 
 func (repository *GORMRepository) getAccount(ctx context.Context, tenantID, accountID string) (domain.Account, error) {
 	var row accountModel
-	result := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, accountID).First(&row)
+	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
+	result := repository.database.WithContext(ctx).
+		Where("tenant_id = ? AND id = ?", tenantID, accountID).
+		Where(ownerClause, ownerArgs...).
+		First(&row)
 	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return domain.Account{}, application.ErrNotFound
 	}
@@ -314,7 +325,7 @@ func (repository *GORMRepository) ListOrgUnits(ctx context.Context, tenantID, ke
 	return application.PageResult[domain.OrgUnit]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit domain.OrgUnit, operatorID string) (domain.OrgUnit, error) {
+func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit domain.OrgUnit, positions []domain.Position, operatorID string) (domain.OrgUnit, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		path, depth := "/"+orgUnit.ID+"/", uint(1)
 		if orgUnit.ParentID != nil {
@@ -348,6 +359,30 @@ func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit dom
 			UpdatedBy: nullableString(&operatorID),
 		}).Error; err != nil {
 			return mapWriteError(err, "create organization unit")
+		}
+		positionRows := make([]positionModel, 0, len(positions))
+		for _, position := range positions {
+			if position.TenantID != orgUnit.TenantID || position.OrgUnitID != orgUnit.ID {
+				return fmt.Errorf("default position does not belong to organization")
+			}
+			positionRows = append(positionRows, positionModel{
+				ID:        position.ID,
+				TenantID:  position.TenantID,
+				OrgUnitID: position.OrgUnitID,
+				Code:      position.Code,
+				Name:      position.Name,
+				Status:    position.Status,
+				Version:   1,
+				CreatedAt: now,
+				CreatedBy: nullableString(&operatorID),
+				UpdatedAt: now,
+				UpdatedBy: nullableString(&operatorID),
+			})
+		}
+		if len(positionRows) > 0 {
+			if err := transaction.Create(&positionRows).Error; err != nil {
+				return mapWriteError(err, "create default organization positions")
+			}
 		}
 		return nil
 	})
@@ -606,7 +641,7 @@ func ensureNoOtherPrimary(ctx context.Context, database *gorm.DB, tenantID, user
 }
 
 func applyUserFilter(database *gorm.DB, tenantID string, query application.PageRequest) *gorm.DB {
-	database = database.Where("tenant_id = ?", tenantID)
+	database = database.Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
 	if query.Keyword != "" {
 		like := "%" + query.Keyword + "%"
 		database = database.Where("display_name LIKE ? OR employee_no LIKE ? OR email LIKE ?", like, like, like)
@@ -618,7 +653,8 @@ func applyUserFilter(database *gorm.DB, tenantID string, query application.PageR
 }
 
 func applyAccountFilter(database *gorm.DB, tenantID string, query application.PageRequest) *gorm.DB {
-	database = database.Where("tenant_id = ?", tenantID)
+	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
+	database = database.Where("tenant_id = ?", tenantID).Where(ownerClause, ownerArgs...)
 	if query.Keyword != "" {
 		database = database.Where("username LIKE ?", "%"+query.Keyword+"%")
 	}
@@ -626,6 +662,18 @@ func applyAccountFilter(database *gorm.DB, tenantID string, query application.Pa
 		database = database.Where("status = ?", query.Status)
 	}
 	return database
+}
+
+// accountOwnerVisibilityFilter hides login accounts whose owning user has been business-deleted.
+// Disabled but non-deleted users remain manageable. Service accounts without a user_id remain
+// visible. Account rows stay in the database so security and audit references keep integrity.
+func accountOwnerVisibilityFilter() (string, []any) {
+	return `(iam_account.user_id IS NULL OR EXISTS (
+		SELECT 1 FROM iam_user AS linked_user
+		WHERE linked_user.id = iam_account.user_id
+		  AND linked_user.tenant_id = iam_account.tenant_id
+		  AND linked_user.deleted_at IS NULL
+	))`, nil
 }
 
 func applyOrganizationFilter(database *gorm.DB, tenantID, keyword, status string) *gorm.DB {

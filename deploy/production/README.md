@@ -51,9 +51,12 @@ GHCR 包为私有时，服务器登录使用的 PAT 至少需要 `read:packages`
 同步本目录的 Compose 和发布脚本；不会覆盖服务器上的 `.env` 与
 `.release.env`。
 
-推送 `main` 后，流水线依次执行测试、构建并推送 GHCR 镜像、通过 SSH 发布
-不可变的 `image@sha256:digest`。同一仓库及服务器上的发布会串行执行，避免中途
-取消或三个仓库同时更新 Compose 状态。
+推送 `main` 后，流水线只执行测试并构建、推送 GHCR 镜像；不会因为尚未配置
+生产服务器密钥而自动发起 SSH 部署。需要发布时，在 GitHub Actions 中从 `main`
+手动运行 `platform-ci-cd`，并勾选 `deploy_production`。此时流水线才会通过 SSH
+发布不可变的 `image@sha256:digest`；如果上述生产 Environment secrets 未配置，任务会
+明确失败并指出缺失的配置。相同仓库及服务器上的发布会串行执行，避免中途取消或三个
+仓库同时更新 Compose 状态。
 
 ## 3. 首次上线顺序
 
@@ -70,18 +73,26 @@ printf '%s\n' "$ADMIN_PASSWORD" | docker compose \
 unset ADMIN_PASSWORD
 ```
 
-登录平台后按“平台接入说明”创建 `contract-management` 子系统和独立审计机器
-客户端。推荐值：
+“统一登录目标”不在前端配置。生产接入前必须先部署并启用受控 subsystem provisioner；
+当前生产 Compose 若未包含该服务，不能直接执行接入脚本并假设它能修改服务器文件或 Docker。
+完成 provisioner 部署后，在平台目录执行：
 
-- 应用编码：`contract-management`
-- 接入类型：Confidential OIDC
-- 外部路径：`/contract`
-- 内部上游：`http://contract-api:8081`
-- 回调：`https://你的域名/contract/auth/callback`
-- 登出回调：`https://你的域名/contract/logged-out`
+```bash
+bash scripts/subsystem-onboarding.sh \
+  --application-code contract_management \
+  --application-name '合同管理系统' \
+  --environment prod \
+  --public-base-url https://你的域名 \
+  --upstream-url http://contract-api:8081 \
+  --path-prefix /contract \
+  --client-type confidential \
+  --account admin
+```
 
-把平台返回的租户 ID、OIDC Client ID/Secret 和审计 Client ID/Secret 写入
-服务器 `.env`，然后触发 `contract_management` 发布。
+应用编码使用与项目目录一致的 `contract_management`；公开路径可以独立使用 `/contract`。
+脚本调用后端原子创建应用、环境、相对登录目标和 OAuth Client，Client Secret 只在后端内存中
+交给 provisioner，不返回浏览器或命令行。独立审计机器客户端仍按审计客户端管理流程创建，
+不能复用浏览器 OIDC Client。完成运行时配置后再触发 `contract_management` 发布。
 
 ## 4. 发布与恢复
 

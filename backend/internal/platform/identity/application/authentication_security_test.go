@@ -25,7 +25,7 @@ func (authenticationRepositoryStub) FindFederatedLoginAccount(context.Context, s
 func (authenticationRepositoryStub) RecordSuccessfulPasswordVerification(context.Context, domain.LoginAccount, time.Time) error {
 	return nil
 }
-func (authenticationRepositoryStub) CreateSession(context.Context, domain.LoginAccount, domain.Session, time.Duration) error {
+func (authenticationRepositoryStub) CreateSession(context.Context, domain.LoginAccount, domain.Session, time.Duration, bool) error {
 	return nil
 }
 func (authenticationRepositoryStub) FindPrincipalBySession(context.Context, string, time.Time, time.Duration) (domain.Principal, error) {
@@ -66,12 +66,14 @@ func (stub authenticationClockStub) Now() time.Time { return stub.now }
 
 type createSessionRepositorySpy struct {
 	authenticationRepositoryStub
-	createErr   error
-	idleTimeout time.Duration
+	createErr       error
+	idleTimeout     time.Duration
+	replaceExisting bool
 }
 
-func (spy *createSessionRepositorySpy) CreateSession(_ context.Context, _ domain.LoginAccount, _ domain.Session, idleTimeout time.Duration) error {
+func (spy *createSessionRepositorySpy) CreateSession(_ context.Context, _ domain.LoginAccount, _ domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
 	spy.idleTimeout = idleTimeout
+	spy.replaceExisting = replaceExisting
 	return spy.createErr
 }
 
@@ -154,7 +156,7 @@ func TestCreateSessionRejectsConcurrentTerminalLogin(t *testing.T) {
 		AccountID: "account-1", AccountName: "zhangsan",
 	}
 
-	_, err := service.createSession(context.Background(), account, nil, "test-terminal", now)
+	_, err := service.createSession(context.Background(), account, nil, "test-terminal", now, false)
 	if !errors.Is(err, ErrConcurrentSession) {
 		t.Fatalf("createSession() error = %v, want ErrConcurrentSession", err)
 	}
@@ -168,5 +170,30 @@ func TestCreateSessionRejectsConcurrentTerminalLogin(t *testing.T) {
 	}
 	if repository.idleTimeout != 30*time.Minute {
 		t.Fatalf("CreateSession() idle timeout = %s, want 30m", repository.idleTimeout)
+	}
+}
+
+func TestCreateSessionForwardsReplacementChoice(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 10, 0, 0, 0, time.UTC)
+	repository := &createSessionRepositorySpy{}
+	service := &Service{
+		repository: repository,
+		tokens:     authenticationTokenManagerStub{}, ids: authenticationIDGeneratorStub{},
+		loginSecurity: loginSecurityStub{idleTimeout: 30 * time.Minute}, sessionTTL: 12 * time.Hour,
+	}
+	account := domain.LoginAccount{
+		TenantID: "tenant-1", UserID: "user-1", UserName: "张三",
+		AccountID: "account-1", AccountName: "zhangsan",
+	}
+
+	result, err := service.createSession(context.Background(), account, nil, "replacement-terminal", now, true)
+	if err != nil {
+		t.Fatalf("createSession() error = %v", err)
+	}
+	if !repository.replaceExisting {
+		t.Fatal("CreateSession() did not receive replaceExisting=true")
+	}
+	if !result.ReplacedExistingSession {
+		t.Fatal("SessionResult.ReplacedExistingSession = false, want true")
 	}
 }

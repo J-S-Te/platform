@@ -276,6 +276,12 @@ func mapManagementError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return application.ErrNotFound
 	}
+	// mysql.go enables GORM TranslateError, which converts duplicate-key errors into
+	// gorm.ErrDuplicatedKey before they reach this repository. Map both forms so a
+	// client conflict never leaks through the HTTP handler as a generic 500.
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return application.ErrConflict
+	}
 	var mysqlError *mysql.MySQLError
 	if errors.As(err, &mysqlError) && mysqlError.Number == 1062 {
 		return application.ErrConflict

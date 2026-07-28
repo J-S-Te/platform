@@ -23,17 +23,33 @@ func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardi
 	return &SubsystemOnboardingGORMRepository{database: database}, nil
 }
 
-// CreateSubsystem persists all control-plane resources atomically. Existing repositories are
-// reused inside the same transaction so their tenant boundaries, uniqueness mapping and safe
-// projections remain the single source of truth.
+// CreateSubsystem persists all control-plane resources atomically. A previously registered
+// application with the same tenant-scoped code is reused only to add a new environment; existing
+// environments, login targets and OAuth clients are never overwritten by this create-only flow.
 func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context.Context, write application.SubsystemOnboardingWrite, now time.Time) (application.SubsystemOnboardingResult, error) {
 	var result application.SubsystemOnboardingResult
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		management := &ManagementRepository{database: transaction}
 		createdApplication, err := management.CreateApplication(ctx, write.Application, write.ApplicationID, now)
 		if err != nil {
-			return err
+			if !errors.Is(err, application.ErrConflict) {
+				return err
+			}
+			createdApplication, err = repository.findApplicationByCode(ctx, transaction, write.Application.TenantID, write.Application.Code)
+			if err != nil {
+				return err
+			}
+			if createdApplication.Status != "DRAFT" && createdApplication.Status != "ACTIVE" {
+				return application.ErrConflict
+			}
 		}
+
+		// The application might have been reused, so always bind every child write to
+		// the canonical persisted application ID rather than the generated candidate ID.
+		write.Environment.ApplicationID = createdApplication.ID
+		write.LoginTarget.ApplicationID = createdApplication.ID
+		write.OAuthClient.ApplicationID = createdApplication.ID
+
 		createdEnvironment, err := management.CreateEnvironment(ctx, write.Environment, write.EnvironmentID, now)
 		if err != nil {
 			return err
@@ -58,6 +74,17 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		return nil
 	})
 	return result, err
+}
+
+// findApplicationByCode retrieves only the exact tenant-scoped application that caused a
+// duplicate create attempt. It is intentionally private to the onboarding transaction so a
+// request cannot use it to cross a tenant boundary or overwrite an existing application.
+func (repository *SubsystemOnboardingGORMRepository) findApplicationByCode(ctx context.Context, database *gorm.DB, tenantID, code string) (application.Application, error) {
+	var model managementApplicationModel
+	if err := database.WithContext(ctx).Where("tenant_id = ? AND code = ?", tenantID, code).Take(&model).Error; err != nil {
+		return application.Application{}, mapManagementError(err)
+	}
+	return toApplication(model), nil
 }
 
 type portalApplicationRow struct {

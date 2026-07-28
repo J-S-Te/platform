@@ -661,6 +661,9 @@ func mapOAuthClientManagementError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return application.ErrManagementNotFound
 	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return application.ErrManagementConflict
+	}
 	var mysqlError *mysql.MySQLError
 	if errors.As(err, &mysqlError) && mysqlError.Number == 1062 {
 		return application.ErrManagementConflict

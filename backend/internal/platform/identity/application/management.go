@@ -30,6 +30,17 @@ const (
 	MaxBatchUserCreateItems = 100
 )
 
+// DefaultOrganizationPositionNames are created for every organization unit. They are
+// organization-side appointment choices only; they do not grant authorization roles.
+var DefaultOrganizationPositionNames = [...]string{
+	"超级管理员",
+	"销售总监",
+	"技术总监",
+	"财务总监",
+	"销售人员",
+	"审计管理员",
+}
+
 // PageRequest is the common bounded list query contract.
 type PageRequest struct {
 	Page     int
@@ -173,7 +184,7 @@ type ManagementRepository interface {
 	UpdateAccount(context.Context, AccountUpdateInput) (domain.Account, error)
 
 	ListOrgUnits(context.Context, string, string, string, PageRequest) (PageResult[domain.OrgUnit], error)
-	CreateOrgUnit(context.Context, domain.OrgUnit, string) (domain.OrgUnit, error)
+	CreateOrgUnit(context.Context, domain.OrgUnit, []domain.Position, string) (domain.OrgUnit, error)
 	ListPositions(context.Context, string, string, string, PageRequest) (PageResult[domain.Position], error)
 	CreatePosition(context.Context, domain.Position, string) (domain.Position, error)
 
@@ -362,7 +373,18 @@ func (service *ManagementService) CreateOrgUnit(ctx context.Context, input OrgUn
 		return domain.OrgUnit{}, fmt.Errorf("generate organization ID: %w", err)
 	}
 	orgUnit := domain.OrgUnit{ID: id, TenantID: input.TenantID, ParentID: normalizedOptional(input.ParentID), Code: generatedOrganizationCode(id), Name: strings.TrimSpace(input.Name), OrgType: "DEPARTMENT", SortOrder: input.SortOrder, Status: domain.StatusActive, Version: 1}
-	return service.repository.CreateOrgUnit(ctx, orgUnit, input.OperatorID)
+	positions := make([]domain.Position, 0, len(DefaultOrganizationPositionNames))
+	for _, name := range DefaultOrganizationPositionNames {
+		positionID, err := service.ids.New(now)
+		if err != nil {
+			return domain.OrgUnit{}, fmt.Errorf("generate default position ID: %w", err)
+		}
+		positions = append(positions, domain.Position{
+			ID: positionID, TenantID: input.TenantID, OrgUnitID: orgUnit.ID,
+			Code: generatedPositionCode(positionID), Name: name, Status: domain.StatusActive, Version: 1,
+		})
+	}
+	return service.repository.CreateOrgUnit(ctx, orgUnit, positions, input.OperatorID)
 }
 
 // generatedOrganizationCode creates a stable, tenant-unique business code from the same ULID

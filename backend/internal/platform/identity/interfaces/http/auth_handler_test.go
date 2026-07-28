@@ -30,7 +30,7 @@ func TestWriteApplicationErrorReturnsConflictForConcurrentSession(t *testing.T) 
 	if envelope.Code != "AUTH_CONCURRENT_SESSION" {
 		t.Fatalf("code = %q, want AUTH_CONCURRENT_SESSION", envelope.Code)
 	}
-	if envelope.Message != "该账号已在其他终端登录，请先退出原会话后再试" {
+	if envelope.Message != "该账号已有有效会话；如原页面已关闭，可选择退出原会话并重新登录" {
 		t.Fatalf("message = %q", envelope.Message)
 	}
 }

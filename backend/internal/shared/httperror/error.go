@@ -28,7 +28,7 @@ var (
 	// AccountLocked is returned when a local account has an active lock window.
 	AccountLocked = New("AUTH_ACCOUNT_LOCKED", "账号已锁定，请稍后再试", nil)
 	// ConcurrentSession is returned when the same account already has an active terminal session.
-	ConcurrentSession = New("AUTH_CONCURRENT_SESSION", "该账号已在其他终端登录，请先退出原会话后再试", nil)
+	ConcurrentSession = New("AUTH_CONCURRENT_SESSION", "该账号已有有效会话；如原页面已关闭，可选择退出原会话并重新登录", nil)
 	// Conflict is returned when a create or lifecycle transition violates an IAM invariant.
 	Conflict = New("IAM_CONFLICT", "资源状态冲突", nil)
 	// VersionConflict is returned when an optimistic-lock version is stale.

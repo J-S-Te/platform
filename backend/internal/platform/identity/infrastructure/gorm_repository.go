@@ -116,7 +116,7 @@ func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx conte
 // CreateSession records a successful local or external account login and inserts iam_session. The
 // account row lock serializes every login for the same account, so two terminals cannot both pass
 // the active-session check and create concurrent sessions.
-func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration) error {
+func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
 	if idleTimeout <= 0 {
 		return application.ErrUnauthenticated
 	}
@@ -169,8 +169,17 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 			Count(&activeSessionCount).Error; err != nil {
 			return fmt.Errorf("count active account sessions before login: %w", err)
 		}
-		if activeSessionCount > 0 {
+		if activeSessionCount > 0 && !replaceExisting {
 			return application.ErrConcurrentSession
+		}
+		if activeSessionCount > 0 {
+			if err := transaction.Model(&sessionModel{}).
+				Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", account.TenantID, account.AccountID, domain.StatusActive).
+				Updates(map[string]any{
+					"status": "REVOKED", "revoked_at": now, "revoke_reason": "REPLACED_BY_PASSWORD_LOGIN",
+				}).Error; err != nil {
+				return fmt.Errorf("revoke existing account sessions before replacement login: %w", err)
+			}
 		}
 
 		if err := transaction.Model(&accountModel{}).

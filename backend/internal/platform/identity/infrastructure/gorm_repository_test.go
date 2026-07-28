@@ -38,3 +38,22 @@ func TestPrincipalBindingSubjectFilterIncludesAccountAndEffectiveMembership(t *t
 		t.Fatalf("effective time arguments = %#v, want %v", args[10:12], now)
 	}
 }
+
+func TestAccountOwnerVisibilityFilterExcludesBusinessDeletedUsers(t *testing.T) {
+	clause, args := accountOwnerVisibilityFilter()
+
+	for _, fragment := range []string{
+		"iam_account.user_id IS NULL",
+		"FROM iam_user AS linked_user",
+		"linked_user.id = iam_account.user_id",
+		"linked_user.tenant_id = iam_account.tenant_id",
+		"linked_user.deleted_at IS NULL",
+	} {
+		if !strings.Contains(clause, fragment) {
+			t.Errorf("account owner visibility filter is missing %q", fragment)
+		}
+	}
+	if len(args) != 0 {
+		t.Fatalf("visibility arguments = %#v, want none", args)
+	}
+}

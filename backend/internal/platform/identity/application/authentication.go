@@ -74,7 +74,7 @@ type Repository interface {
 	FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error)
 	FindFederatedLoginAccount(ctx context.Context, tenantID, userID, accountID string) (domain.LoginAccount, error)
 	RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error
-	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration) error
+	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error)
 	RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error
 	RefreshSession(ctx context.Context, sessionID string, refreshedAt, expiresAt time.Time) error
@@ -127,10 +127,11 @@ func NewService(repository Repository, passwords PasswordVerifier, tokens TokenM
 
 // LoginInput contains validated password-login data plus non-sensitive client metadata.
 type LoginInput struct {
-	Account   string
-	Password  string
-	IPAddress net.IP
-	UserAgent string
+	Account                string
+	Password               string
+	IPAddress              net.IP
+	UserAgent              string
+	ReplaceExistingSession bool
 }
 
 // SessionResult is the non-sensitive API session representation plus the HttpOnly cookie value.
@@ -141,12 +142,13 @@ type SessionResult struct {
 
 	// Identity fields are server-side metadata for lifecycle auditing. They are deliberately not
 	// included in the HTTP response body or browser cookie.
-	SessionID   string
-	TenantID    string
-	UserID      string
-	UserName    string
-	AccountID   string
-	AccountName string
+	SessionID               string
+	TenantID                string
+	UserID                  string
+	UserName                string
+	AccountID               string
+	AccountName             string
+	ReplacedExistingSession bool
 }
 
 // Login validates a local account's Argon2id password, persists iam_session and signs its cookie.
@@ -194,7 +196,7 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 		return SessionResult{}, fmt.Errorf("record successful password verification: %w", err)
 	}
 
-	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now)
+	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
 
 func (service *Service) consumeUnknownAccountPassword(password string) {
@@ -249,10 +251,10 @@ func (service *Service) LoginFederated(ctx context.Context, input FederatedLogin
 		return SessionResult{}, ErrUnauthenticated
 	}
 
-	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now)
+	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, false)
 }
 
-func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time) (SessionResult, error) {
+func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time, replaceExisting bool) (SessionResult, error) {
 	idleTimeout, err := service.loginSecurity.SessionIdleTimeout(ctx, account.TenantID)
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("read session inactivity policy: %w", err)
@@ -279,7 +281,7 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 		CreatedAt: now, ExpiresAt: expiresAt, IPAddress: normalizeIP(ipAddress),
 		UserAgent: truncateUserAgent(userAgent),
 	}
-	if err := service.repository.CreateSession(ctx, account, session, idleTimeout); err != nil {
+	if err := service.repository.CreateSession(ctx, account, session, idleTimeout, replaceExisting); err != nil {
 		if errors.Is(err, ErrConcurrentSession) {
 			return SessionResult{}, concurrentSessionError(account)
 		}
@@ -293,6 +295,7 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 		ExpiresAt: expiresAt, RedirectURL: "/", Token: token,
 		SessionID: sessionID, TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
 		AccountID: account.AccountID, AccountName: account.AccountName,
+		ReplacedExistingSession: replaceExisting,
 	}, nil
 }
 
