@@ -16,4 +16,43 @@ if [ -n "$private_key_path" ] && [ -n "$public_key_path" ]; then
     fi
 fi
 
+run_api_with_worker() {
+    ./worker &
+    worker_pid=$!
+    ./api &
+    api_pid=$!
+
+    stop_children() {
+        kill -TERM "$api_pid" "$worker_pid" 2>/dev/null || true
+    }
+    trap stop_children INT TERM HUP
+
+    # 任一进程退出都终止另一个进程，避免容器只剩 API 或只剩后台任务。
+    while kill -0 "$api_pid" 2>/dev/null && kill -0 "$worker_pid" 2>/dev/null; do
+        sleep 1
+    done
+
+    status=0
+    if ! kill -0 "$api_pid" 2>/dev/null; then
+        set +e
+        wait "$api_pid"
+        status=$?
+        set -e
+        kill -TERM "$worker_pid" 2>/dev/null || true
+        wait "$worker_pid" 2>/dev/null || true
+    else
+        set +e
+        wait "$worker_pid"
+        status=$?
+        set -e
+        kill -TERM "$api_pid" 2>/dev/null || true
+        wait "$api_pid" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+
+if [ "${BASIC_PLATFORM_RUN_WORKER_WITH_API:-false}" = "true" ] && [ "${1:-}" = "./api" ]; then
+    run_api_with_worker
+fi
+
 exec "$@"

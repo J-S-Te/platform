@@ -73,25 +73,74 @@ services:
   api:
     <<: *backend-image
     env_file: *runtime-env
+    environment:
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
+      SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
+      SUBSYSTEM_PROJECTS_ROOT: ${SUBSYSTEM_HOST_PROJECTS_ROOT}
+      SUBSYSTEM_GATEWAY_SCRIPT_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/scripts/portal-gateway.sh
+      SUBSYSTEM_GATEWAY_INCLUDE_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/docker/portal-apps-locations.conf
+      SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
+      SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: basic-platform-local
+      SUBSYSTEM_PLATFORM_FRONTEND_SERVICE: frontend
+      SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
+      SUBSYSTEM_DOCKER_BINARY: docker
+      SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
     command: ["./api"]
     volumes:
       - ./data/keys:/app/data/keys:ro
       - ./data/logs:/app/data/logs
       - ./data/uploads:/app/data/uploads
+      # API 仅通过 Unix Socket 向隔离助手提交固定动作，不直接访问 Docker Socket 或宿主机项目目录。
+      - subsystem_provisioner_socket:/run/basic-platform-provisioner
     depends_on:
       mysql:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      subsystem-provisioner:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 10s
+    networks:
+      default:
+        aliases:
+          - platform-api
+    restart: unless-stopped
+
+  # 隔离部署助手不暴露网络端口，也不承载业务接口。它是唯一挂载 Docker Socket
+  # 和子系统父目录的容器，并通过共享 Unix Socket 接收 API 发出的严格白名单动作。
+  subsystem-provisioner:
+    <<: *backend-image
+    environment:
+      SUBSYSTEM_PROJECTS_ROOT: ${SUBSYSTEM_HOST_PROJECTS_ROOT}
+      SUBSYSTEM_GATEWAY_SCRIPT_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/scripts/portal-gateway.sh
+      SUBSYSTEM_GATEWAY_INCLUDE_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/docker/portal-apps-locations.conf
+      SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
+      SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: basic-platform-local
+      SUBSYSTEM_PLATFORM_FRONTEND_SERVICE: frontend
+      SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
+      SUBSYSTEM_DOCKER_BINARY: docker
+      SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+    command: ["./subsystem-provisioner"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SUBSYSTEM_HOST_PROJECTS_ROOT}:${SUBSYSTEM_HOST_PROJECTS_ROOT}
+      - subsystem_provisioner_socket:/run/basic-platform-provisioner
+    network_mode: none
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/basic-platform-provisioner/provisioner.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
     restart: unless-stopped
 
   worker:
+    profiles: ["split-runtime"]
     <<: *backend-image
     env_file: *runtime-env
     command: ["./worker"]
@@ -207,5 +256,5 @@ services:
 volumes:
   mysql_local_data:
     name: basic-platform-local-mysql-data
-  contract_mysql_local_data:
-    name: basic-platform-local-contract-mysql-data
+  subsystem_provisioner_socket:
+    name: basic-platform-local-provisioner-socket

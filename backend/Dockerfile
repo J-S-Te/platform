@@ -11,12 +11,14 @@ COPY . ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./cmd/api \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/migrate ./cmd/migrate \
-    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/subsystem-provisioner ./cmd/subsystem-provisioner
 
-# 运行阶段只保留应用二进制文件、证书和生成 JWT 密钥需要的 openssl。
+# API 运行容器不挂载 Docker Socket；同一镜像中的部署助手由独立服务运行。
+# 部署助手需要 Docker CLI/Compose 与 bash 来执行经过白名单约束的本地编排和网关脚本。
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates openssl tzdata wget
+RUN apk add --no-cache bash ca-certificates docker-cli docker-cli-compose openssl tzdata wget
 
 WORKDIR /app
 
@@ -24,6 +26,7 @@ COPY --from=builder /out/api ./api
 COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin
+COPY --from=builder /out/subsystem-provisioner ./subsystem-provisioner
 COPY docker-entrypoint.sh /usr/local/bin/basic-platform-entrypoint
 
 RUN chmod +x /usr/local/bin/basic-platform-entrypoint

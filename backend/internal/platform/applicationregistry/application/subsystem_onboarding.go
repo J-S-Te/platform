@@ -93,6 +93,17 @@ func NewSubsystemOnboardingService(repository SubsystemOnboardingRepository, ids
 	return &SubsystemOnboardingService{repository: repository, ids: ids, clock: clock}, nil
 }
 
+// ValidateSubsystemOnboardingInput validates the public one-click onboarding contract without
+// creating database records or credentials. It lets infrastructure preflight run before the atomic
+// registration transaction.
+func ValidateSubsystemOnboardingInput(input SubsystemOnboardingInput) error {
+	input = normalizeSubsystemOnboardingInput(input)
+	if !validSubsystemOnboardingInput(input) {
+		return ErrValidation
+	}
+	return nil
+}
+
 // OnboardSubsystem validates and creates the application, environment, login target and OAuth
 // client in one repository transaction.
 func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context, input SubsystemOnboardingInput) (SubsystemOnboardingResult, error) {

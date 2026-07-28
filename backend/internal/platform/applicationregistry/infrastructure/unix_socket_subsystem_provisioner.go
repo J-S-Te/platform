@@ -1,0 +1,164 @@
+package infrastructure
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
+)
+
+const subsystemProvisioningProtocolVersion = 1
+
+type subsystemProvisioningRequest struct {
+	Version int                                     `json:"version"`
+	Action  string                                  `json:"action"`
+	Code    string                                  `json:"code,omitempty"`
+	Input   *application.SubsystemProvisioningInput `json:"input,omitempty"`
+}
+
+type subsystemProvisioningReply struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+// UnixSocketSubsystemProvisioner is the unprivileged API-side client. It can request only the two
+// fixed operations supported by the isolated deployment helper and never receives command output.
+type UnixSocketSubsystemProvisioner struct {
+	enabled    bool
+	socketPath string
+	timeout    time.Duration
+}
+
+// NewUnixSocketSubsystemProvisioner constructs the API-side automatic deployment client.
+func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration) (*UnixSocketSubsystemProvisioner, error) {
+	socketPath = strings.TrimSpace(socketPath)
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	if enabled && socketPath == "" {
+		return nil, errors.New("subsystem provisioning socket path is required")
+	}
+	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout}, nil
+}
+
+func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context, applicationCode string) error {
+	if !provisioner.enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	return provisioner.exchange(ctx, subsystemProvisioningRequest{
+		Version: subsystemProvisioningProtocolVersion,
+		Action:  "preflight",
+		Code:    strings.TrimSpace(applicationCode),
+	})
+}
+
+func (provisioner *UnixSocketSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if !provisioner.enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	return provisioner.exchange(ctx, subsystemProvisioningRequest{
+		Version: subsystemProvisioningProtocolVersion,
+		Action:  "provision",
+		Input:   &input,
+	})
+}
+
+func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context, request subsystemProvisioningRequest) error {
+	operationCtx, cancel := context.WithTimeout(ctx, provisioner.timeout)
+	defer cancel()
+	dialer := net.Dialer{}
+	connection, err := dialer.DialContext(operationCtx, "unix", provisioner.socketPath)
+	if err != nil {
+		return provisioningError("deployment helper is unavailable")
+	}
+	defer connection.Close()
+	if deadline, ok := operationCtx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	if err := json.NewEncoder(connection).Encode(request); err != nil {
+		return provisioningError("send deployment request")
+	}
+	var reply subsystemProvisioningReply
+	if err := json.NewDecoder(io.LimitReader(connection, 64*1024)).Decode(&reply); err != nil {
+		return provisioningError("read deployment response")
+	}
+	if !reply.Success {
+		return provisioningError("deployment helper rejected the request")
+	}
+	return nil
+}
+
+// RunSubsystemProvisioningServer serves the narrow Unix-socket deployment protocol. The listener
+// is intended for an isolated helper container with no published network ports.
+func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, executor application.SubsystemProvisioner) error {
+	if executor == nil || strings.TrimSpace(socketPath) == "" {
+		return errors.New("subsystem provisioning server dependencies are required")
+	}
+	socketPath = filepath.Clean(strings.TrimSpace(socketPath))
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
+		return fmt.Errorf("create provisioning socket directory: %w", err)
+	}
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale provisioning socket: %w", err)
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("listen on provisioning socket: %w", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+	if err := os.Chmod(socketPath, 0o660); err != nil {
+		return fmt.Errorf("set provisioning socket permissions: %w", err)
+	}
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	for {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("accept provisioning request: %w", acceptErr)
+		}
+		go handleSubsystemProvisioningConnection(ctx, connection, executor)
+	}
+}
+
+func handleSubsystemProvisioningConnection(ctx context.Context, connection net.Conn, executor application.SubsystemProvisioner) {
+	defer connection.Close()
+	var request subsystemProvisioningRequest
+	if err := json.NewDecoder(io.LimitReader(connection, 1024*1024)).Decode(&request); err != nil {
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false})
+		return
+	}
+	if request.Version != subsystemProvisioningProtocolVersion {
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false})
+		return
+	}
+	var err error
+	switch request.Action {
+	case "preflight":
+		err = executor.Preflight(ctx, request.Code)
+	case "provision":
+		if request.Input == nil {
+			err = application.ErrSubsystemProvisioningUnavailable
+		} else {
+			err = executor.Provision(ctx, *request.Input)
+		}
+	default:
+		err = application.ErrSubsystemProvisioningUnavailable
+	}
+	_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: err == nil})
+}

@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	stdhttp "net/http"
 	"strings"
@@ -20,22 +19,24 @@ type subsystemOnboardingService interface {
 }
 
 // SubsystemOnboardingHandler exposes the simplified onboarding workflow and authenticated portal
-// catalog. The configured OIDC issuer is returned to administrators as integration metadata.
+// catalog. The configured OIDC issuer is used only by the isolated deployment workflow and is not
+// returned to the browser together with generated credentials or infrastructure commands.
 type SubsystemOnboardingHandler struct {
-	service    subsystemOnboardingService
-	oidcIssuer string
-	logger     *slog.Logger
+	service     subsystemOnboardingService
+	provisioner application.SubsystemProvisioner
+	oidcIssuer  string
+	logger      *slog.Logger
 }
 
 // NewSubsystemOnboardingHandler constructs the subsystem onboarding HTTP adapter.
-func NewSubsystemOnboardingHandler(service subsystemOnboardingService, oidcIssuer string, logger *slog.Logger) (*SubsystemOnboardingHandler, error) {
-	if service == nil || strings.TrimSpace(oidcIssuer) == "" {
-		return nil, errors.New("subsystem onboarding service and OIDC issuer are required")
+func NewSubsystemOnboardingHandler(service subsystemOnboardingService, provisioner application.SubsystemProvisioner, oidcIssuer string, logger *slog.Logger) (*SubsystemOnboardingHandler, error) {
+	if service == nil || provisioner == nil || strings.TrimSpace(oidcIssuer) == "" {
+		return nil, errors.New("subsystem onboarding service, provisioner and OIDC issuer are required")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &SubsystemOnboardingHandler{service: service, oidcIssuer: strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger}, nil
+	return &SubsystemOnboardingHandler{service: service, provisioner: provisioner, oidcIssuer: strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger}, nil
 }
 
 type subsystemOnboardingRequest struct {
@@ -49,25 +50,17 @@ type subsystemOnboardingRequest struct {
 	ClientType      string  `json:"client_type"`
 }
 
-type subsystemIntegrationResponse struct {
-	Issuer          string `json:"issuer"`
-	ClientID        string `json:"client_id"`
-	ClientSecret    string `json:"client_secret,omitempty"`
-	ClientType      string `json:"client_type"`
-	TokenAuthMethod string `json:"token_auth_method"`
-	RedirectURI     string `json:"redirect_uri"`
-	Scopes          string `json:"scopes"`
-	PublicURL       string `json:"public_url"`
-	EnvironmentFile string `json:"environment_file"`
-	GatewayCommand  string `json:"gateway_command"`
+type subsystemAutomationResponse struct {
+	Status    string `json:"status"`
+	PublicURL string `json:"public_url"`
 }
 
 type subsystemOnboardingResponse struct {
-	Application applicationResponse          `json:"application"`
-	Environment environmentResponse          `json:"environment"`
-	LoginTarget loginTargetResponse          `json:"login_target"`
-	OAuthClient oauthClientResponse          `json:"oauth_client"`
-	Integration subsystemIntegrationResponse `json:"integration"`
+	Application applicationResponse         `json:"application"`
+	Environment environmentResponse         `json:"environment"`
+	LoginTarget loginTargetResponse         `json:"login_target"`
+	OAuthClient oauthClientResponse         `json:"oauth_client"`
+	Automation  subsystemAutomationResponse `json:"automation"`
 }
 
 type portalApplicationResponse struct {
@@ -93,27 +86,51 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	if !decodeApplicationManagementJSON(writer, request, &payload) {
 		return
 	}
-	result, err := handler.service.OnboardSubsystem(request.Context(), application.SubsystemOnboardingInput{
+	onboardingInput := application.SubsystemOnboardingInput{
 		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
 		ApplicationCode: payload.ApplicationCode, ApplicationName: payload.ApplicationName,
 		Description: payload.Description, Environment: payload.Environment,
 		PublicBaseURL: payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL,
 		PathPrefix: payload.PathPrefix, ClientType: payload.ClientType,
-	})
+	}
+	if err := application.ValidateSubsystemOnboardingInput(onboardingInput); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	if err := handler.provisioner.Preflight(request.Context(), onboardingInput.ApplicationCode); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	result, err := handler.service.OnboardSubsystem(request.Context(), onboardingInput)
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
-
-	integration := handler.integrationResponse(result)
+	pathPrefix, upstreamURL := "", ""
+	if result.Environment.PathPrefix != nil {
+		pathPrefix = *result.Environment.PathPrefix
+	}
+	if result.Environment.UpstreamURL != nil {
+		upstreamURL = *result.Environment.UpstreamURL
+	}
+	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
+		TenantID: principal.Tenant.ID, ApplicationCode: result.Application.Code,
+		Environment: result.Environment.Environment, Issuer: handler.oidcIssuer,
+		ClientID: result.OAuthClient.ClientID, ClientSecret: result.PlaintextSecret,
+		RedirectURI: result.RedirectURI, PublicURL: result.PublicURL,
+		PathPrefix: pathPrefix, UpstreamURL: upstreamURL,
+	}); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
-	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "子系统接入配置已创建", subsystemOnboardingResponse{
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "子系统已完成自动接入和部署", subsystemOnboardingResponse{
 		Application: applicationToResponse(result.Application),
 		Environment: environmentToResponse(result.Environment),
 		LoginTarget: loginTargetToResponse(result.LoginTarget),
 		OAuthClient: toOAuthClientResponse(result.OAuthClient),
-		Integration: integration,
+		Automation:  subsystemAutomationResponse{Status: "completed", PublicURL: result.PublicURL},
 	})
 }
 
@@ -140,35 +157,6 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
 }
 
-func (handler *SubsystemOnboardingHandler) integrationResponse(result application.SubsystemOnboardingResult) subsystemIntegrationResponse {
-	lines := []string{
-		"OIDC_ISSUER=" + handler.oidcIssuer,
-		"OIDC_CLIENT_ID=" + result.OAuthClient.ClientID,
-	}
-	if result.PlaintextSecret != "" {
-		lines = append(lines, "OIDC_CLIENT_SECRET="+result.PlaintextSecret)
-	}
-	lines = append(lines,
-		"OIDC_REDIRECT_URI="+result.RedirectURI,
-		"OIDC_SCOPES=openid profile",
-	)
-	pathPrefix, upstreamURL := "", ""
-	if result.Environment.PathPrefix != nil {
-		pathPrefix = *result.Environment.PathPrefix
-	}
-	if result.Environment.UpstreamURL != nil {
-		upstreamURL = *result.Environment.UpstreamURL
-	}
-	gatewayCommand := fmt.Sprintf("bash scripts/portal-gateway.sh add '%s' '%s' '%s' && bash scripts/portal-gateway.sh reload", result.Application.Code, pathPrefix, upstreamURL)
-	return subsystemIntegrationResponse{
-		Issuer: handler.oidcIssuer, ClientID: result.OAuthClient.ClientID,
-		ClientSecret: result.PlaintextSecret, ClientType: result.OAuthClient.ClientType,
-		TokenAuthMethod: result.OAuthClient.TokenAuthMethod, RedirectURI: result.RedirectURI,
-		Scopes: "openid profile", PublicURL: result.PublicURL,
-		EnvironmentFile: strings.Join(lines, "\n"), GatewayCommand: gatewayCommand,
-	}
-}
-
 func subsystemPrincipal(writer stdhttp.ResponseWriter, request *stdhttp.Request) (authctx.Principal, bool) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" || strings.TrimSpace(principal.User.ID) == "" {
@@ -186,6 +174,9 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		httpresponse.WriteError(writer, request, stdhttp.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, application.ErrConflict), errors.Is(err, application.ErrVersionConflict), errors.Is(err, application.ErrManagementConflict):
 		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.Conflict)
+	case errors.Is(err, application.ErrSubsystemProvisioningUnavailable):
+		handler.logger.Error("subsystem automatic provisioning failed", "path", request.URL.Path, "error", err)
+		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.DependencyUnavailable)
 	default:
 		handler.logger.Error("subsystem onboarding request failed", "path", request.URL.Path, "error", err)
 		httpresponse.WriteError(writer, request, stdhttp.StatusInternalServerError, httperror.Internal)
