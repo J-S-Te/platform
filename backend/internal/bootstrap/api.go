@@ -2,6 +2,7 @@
 package bootstrap
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	authorizationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/application"
 	authorizationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/infrastructure"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
+	authorizationsys004 "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/sys004"
 	configurationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/application"
 	configurationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/infrastructure"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
@@ -179,6 +181,26 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+
+	contractAccessService, err := authorizationsys004.NewService(
+		db, ulid.Generator{}, authorizationsys004.SystemClock{}, logger, &contractAccessAuditAdapter{service: auditService, config: cfg.Audit},
+	)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	if err := contractAccessService.EnsureExistingApplications(context.Background()); err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("initialize SYS-004 contract authorization catalog: %w", err)
+	}
+	contractAccessHandler, err := authorizationsys004.NewHandler(contractAccessService, logger)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
 	bootstrapService, err := identityapplication.NewBootstrapService(
 		repository, security.Argon2idPasswordHasher{}, ulid.Generator{}, identityapplication.SystemClock{},
 	)
@@ -323,7 +345,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	oidcIssuer, err := oidctokenissuer.New(oidcTokenManager, ulid.Generator{})
+	oidcIssuer, err := oidctokenissuer.New(
+		oidcTokenManager, ulid.Generator{}, sys004OIDCAuthorizationResolver{service: contractAccessService},
+	)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -397,6 +421,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	oauthClientManagementService, err := applicationregistryapplication.NewOAuthClientManagementService(
 		oauthClientManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+		applicationregistryapplication.RedirectURIValidationPolicy{
+			AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs,
+		},
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -489,11 +516,29 @@ func NewAPI(cfg config.Config) (*API, error) {
 
 	return &API{
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, externalLoginHandler, dingTalkLoginHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, federationHandler, operational,
+			cfg, logger, db, authHandler, externalLoginHandler, dingTalkLoginHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, contractAccessHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, federationHandler, operational,
 		),
 		Logger:   logger,
 		database: db,
 		logFile:  logFile,
+	}, nil
+}
+
+type sys004OIDCAuthorizationResolver struct {
+	service *authorizationsys004.Service
+}
+
+func (resolver sys004OIDCAuthorizationResolver) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (oidctokenissuer.AuthorizationClaims, error) {
+	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
+	if err != nil {
+		return oidctokenissuer.AuthorizationClaims{}, err
+	}
+	return oidctokenissuer.AuthorizationClaims{
+		TenantID:       resolved.TenantID,
+		Roles:          append([]string(nil), resolved.Roles...),
+		Permissions:    append([]string(nil), resolved.Permissions...),
+		RoleConfigHash: resolved.RoleConfigHash,
+		AuthzRevision:  resolved.AuthzRevision,
 	}, nil
 }
 

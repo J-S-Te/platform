@@ -71,7 +71,7 @@ func (clock fixedSubsystemClock) Now() time.Time { return clock.now }
 func TestOnboardSubsystemBuildsAtomicOIDCRegistration(t *testing.T) {
 	repository := &subsystemOnboardingRepositoryStub{}
 	clock := fixedSubsystemClock{now: time.Date(2026, time.July, 27, 10, 0, 0, 0, time.UTC)}
-	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, clock)
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, clock, RedirectURIValidationPolicy{})
 	if err != nil {
 		t.Fatalf("construct service: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestListPortalApplicationsResolvesRelativeTargets(t *testing.T) {
 		{ApplicationID: "app-1", Code: "business-app", Name: "业务应用", Environment: "prod", PublicURL: "https://portal.example.com", TargetURI: "/business-app/"},
 		{ApplicationID: "app-broken", Code: "broken", Name: "错误配置", Environment: "prod", PublicURL: "", TargetURI: "relative"},
 	}}
-	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Now()})
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Now()}, RedirectURIValidationPolicy{})
 	if err != nil {
 		t.Fatalf("construct service: %v", err)
 	}

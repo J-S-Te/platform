@@ -36,6 +36,10 @@ services:
       context: ./backend
     env_file:
       - ./docker/.env
+    networks:
+      default:
+        aliases:
+          - platform-api
     command: ["./api"]
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -64,6 +68,8 @@ services:
       - ./data/keys:/app/data/keys:ro
       - ./data/logs:/app/data/logs
       - ./data/uploads:/app/data/uploads
+    profiles:
+      - split-runtime
     depends_on:
       mysql:
         condition: service_healthy
@@ -77,6 +83,8 @@ services:
       args:
         VITE_API_BASE_URL: /api/v1
         VITE_LOGIN_SUCCESS_URL: /
+        VITE_CONTRACT_PUBLIC_PATH_PREFIX: /contract_management
+        VITE_CONTRACT_API_BASE_URL: /contract_management/api/v1
     volumes:
       # 由 portal-gateway.sh 维护的动态子系统反代 location；空文件也必须存在。
       - ./docker/portal-apps-locations.conf:/etc/nginx/portal-apps.d/managed.conf:ro

@@ -1,18 +1,27 @@
 name: basic-platform-local
 
-# 本地 Docker 编排：只有 frontend 暴露宿主机端口，MySQL/API/Worker 仅在 Compose 内网通信。
-x-runtime-env: &runtime-env
+# 统一本地编排：三类业务应用容器分别为 frontend、api、contract-api。
+# MySQL、Temporal、迁移任务和隔离部署助手属于基础设施/一次性任务，不对宿主机发布业务端口。
+x-platform-runtime-env: &platform-runtime-env
   - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-./docker/.env.local}
 
-x-backend-image: &backend-image
+x-contract-runtime-env: &contract-runtime-env
+  - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
+
+x-platform-backend-image: &platform-backend-image
   build:
     context: ./backend
   image: basic-platform/backend:local
 
+x-contract-backend-image: &contract-backend-image
+  build:
+    context: ../contract_management
+  image: contract-management/backend:local
+
 services:
   mysql:
     image: mysql:8.4
-    env_file: *runtime-env
+    env_file: *platform-runtime-env
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
@@ -27,8 +36,8 @@ services:
     restart: unless-stopped
 
   migrate:
-    <<: *backend-image
-    env_file: *runtime-env
+    <<: *platform-backend-image
+    env_file: *platform-runtime-env
     command: ["./migrate"]
     volumes:
       - ./data/keys:/app/data/keys
@@ -40,8 +49,8 @@ services:
   # 该服务不由普通 `up` 自动启动，由 scripts/docker-local.sh 在迁移成功后按需 run。
   # bootstrap-admin 本身会检查数据库状态，已初始化时直接成功退出，因此可重复执行。
   bootstrap-admin:
-    <<: *backend-image
-    env_file: *runtime-env
+    <<: *platform-backend-image
+    env_file: *platform-runtime-env
     command: ["./bootstrap-admin"]
     volumes:
       - ./data/keys:/app/data/keys
@@ -51,9 +60,10 @@ services:
     profiles: ["bootstrap"]
     restart: "no"
 
+  # 基础平台后端容器：API 与后台 Worker 运行在同一容器中。
   api:
-    <<: *backend-image
-    env_file: *runtime-env
+    <<: *platform-backend-image
+    env_file: *platform-runtime-env
     environment:
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
       SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
@@ -71,7 +81,6 @@ services:
       - ./data/keys:/app/data/keys:ro
       - ./data/logs:/app/data/logs
       - ./data/uploads:/app/data/uploads
-      # API 仅通过 Unix Socket 向隔离助手提交固定动作，不直接访问 Docker Socket 或宿主机项目目录。
       - subsystem_provisioner_socket:/run/basic-platform-provisioner
     depends_on:
       mysql:
@@ -92,10 +101,10 @@ services:
           - platform-api
     restart: unless-stopped
 
-  # 隔离部署助手不暴露网络端口，也不承载业务接口。它是唯一挂载 Docker Socket
-  # 和子系统父目录的容器，并通过共享 Unix Socket 接收 API 发出的严格白名单动作。
+  # 隔离部署助手不承载业务接口。它是唯一挂载 Docker Socket 和子系统父目录的容器，
+  # 仅通过共享 Unix Socket 接收基础平台 API 发出的严格白名单动作。
   subsystem-provisioner:
-    <<: *backend-image
+    <<: *platform-backend-image
     environment:
       SUBSYSTEM_PROJECTS_ROOT: ${SUBSYSTEM_HOST_PROJECTS_ROOT}
       SUBSYSTEM_GATEWAY_SCRIPT_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/scripts/portal-gateway.sh
@@ -122,8 +131,8 @@ services:
 
   worker:
     profiles: ["split-runtime"]
-    <<: *backend-image
-    env_file: *runtime-env
+    <<: *platform-backend-image
+    env_file: *platform-runtime-env
     command: ["./worker"]
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -136,24 +145,131 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  contract-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: contract_management
+      MYSQL_USER: contract
+      MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - contract_mysql_local_data:/var/lib/mysql
+      - ../contract_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
+      - ../contract_management/migrations/000001_contract_workflow.sql:/docker-entrypoint-initdb.d/010_contract_workflow.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucontract -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      default:
+        aliases:
+          - contract-mysql
+    restart: unless-stopped
+
+  # 每次部署均重复执行幂等建表脚本，兼顾首次建库与已有数据卷的结构补齐。
+  contract-migrate:
+    image: mysql:8.4
+    environment:
+      CONTRACT_MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
+      CONTRACT_MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ../contract_management/docker/mysql-init/000_databases.sql:/migrations/000_databases.sql:ro
+      - ../contract_management/migrations/000001_contract_workflow.sql:/migrations/000001_contract_workflow.sql:ro
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    command:
+      - sh
+      - -ec
+      - |
+        MYSQL_PWD="$${CONTRACT_MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h contract-mysql -uroot < /migrations/000_databases.sql
+        MYSQL_PWD="$${CONTRACT_MYSQL_PASSWORD}" mysql --protocol=TCP -h contract-mysql -ucontract contract_management < /migrations/000001_contract_workflow.sql
+    restart: "no"
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    environment:
+      DB: mysql8
+      DB_PORT: 3306
+      MYSQL_SEEDS: contract-mysql
+      MYSQL_USER: contract
+      MYSQL_PWD: ${CONTRACT_MYSQL_PASSWORD}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # 合同管理后端容器：API 与 Temporal Worker 运行在同一容器中。
+  contract-api:
+    <<: *contract-backend-image
+    env_file: *contract-runtime-env
+    environment:
+      HTTP_ADDRESS: :8081
+      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      PLATFORM_BASE_URL: http://platform-api:8080
+      OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      CONTRACT_RUN_WORKER_WITH_API: "true"
+      GIN_MODE: release
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    expose:
+      - "8081"
+    networks:
+      default:
+        aliases:
+          - contract-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  # 一个前端容器同时承载基础平台和合同管理 Vue 模块，并统一反向代理两个后端。
   frontend:
     build:
       context: ../frontend
       args:
         VITE_API_BASE_URL: /api/v1
         VITE_LOGIN_SUCCESS_URL: /
+        VITE_CONTRACT_PUBLIC_PATH_PREFIX: /contract_management
+        VITE_CONTRACT_API_BASE_URL: /contract_management/api/v1
     image: basic-platform/frontend:local
     volumes:
       - ./docker/portal-apps-locations.conf:/etc/nginx/portal-apps.d/managed.conf:ro
     ports:
-      - "8081:80"
+      - "${FRONTEND_HTTP_PORT:-8081}:80"
     depends_on:
       api:
+        condition: service_healthy
+      contract-api:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
   mysql_local_data:
     name: basic-platform-local-mysql-data
+  contract_mysql_local_data:
+    name: basic-platform-local-contract-mysql-data
   subsystem_provisioner_socket:
     name: basic-platform-local-provisioner-socket

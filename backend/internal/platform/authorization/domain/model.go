@@ -42,6 +42,7 @@ type Role struct {
 	Name        string
 	Description *string
 	Status      string
+	BuiltIn     bool
 	Permissions []Reference
 	Version     uint64
 }

@@ -61,6 +61,8 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
+	// OAuthClientAllowInsecureHTTPRedirectURIs permits registered OAuth callback URLs on HTTP hosts other than loopback.
+	OAuthClientAllowInsecureHTTPRedirectURIs bool
 }
 
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
@@ -138,6 +140,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	oauthClientAllowInsecureHTTPRedirectURIs, err := boolean("AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS", false)
+	if err != nil {
+		return Config{}, err
+	}
+
 	sessionTTL, err := duration("AUTH_SESSION_TTL", 8*time.Hour)
 	if err != nil {
 		return Config{}, err
@@ -202,16 +209,17 @@ func Load() (Config, error) {
 			BootstrapToken:                       strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
 		},
 		Auth: AuthConfig{
-			JWTIssuer:              value("AUTH_JWT_ISSUER", "basic-platform"),
-			JWTAudience:            value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
-			ApplicationJWTAudience: value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
-			OIDCIssuer:             strings.TrimRight(oidcIssuer, "/"),
-			JWTPrivateKeyPath:      resolveConfigPath(envFile, value("AUTH_JWT_PRIVATE_KEY_PATH", "")),
-			JWTPublicKeyPath:       resolveConfigPath(envFile, value("AUTH_JWT_PUBLIC_KEY_PATH", "")),
-			SessionCookieName:      value("AUTH_SESSION_COOKIE_NAME", "bp_session"),
-			SessionCookieSecure:    cookieSecure,
-			SessionCookieSameSite:  value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
-			SessionTTL:             sessionTTL,
+			JWTIssuer:                                value("AUTH_JWT_ISSUER", "basic-platform"),
+			JWTAudience:                              value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
+			ApplicationJWTAudience:                   value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
+			OIDCIssuer:                               strings.TrimRight(oidcIssuer, "/"),
+			JWTPrivateKeyPath:                        resolveConfigPath(envFile, value("AUTH_JWT_PRIVATE_KEY_PATH", "")),
+			JWTPublicKeyPath:                         resolveConfigPath(envFile, value("AUTH_JWT_PUBLIC_KEY_PATH", "")),
+			SessionCookieName:                        value("AUTH_SESSION_COOKIE_NAME", "bp_session"),
+			SessionCookieSecure:                      cookieSecure,
+			SessionCookieSameSite:                    value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
+			SessionTTL:                               sessionTTL,
+			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
 		},
 		Logging: LoggingConfig{
 			Level:     value("LOG_LEVEL", "info"),

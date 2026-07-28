@@ -393,7 +393,7 @@ func (r *GORMRepository) roleWithPermissionsTx(tx *gorm.DB, role roleModel) (dom
 	for _, row := range rows {
 		permissions = append(permissions, domain.Reference{ID: row.ID, Code: row.Code, Name: row.Name})
 	}
-	return domain.Role{ID: role.ID, Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, Permissions: permissions, Version: role.Version}, nil
+	return domain.Role{ID: role.ID, Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, BuiltIn: role.BuiltIn, Permissions: permissions, Version: role.Version}, nil
 }
 func (r *GORMRepository) bumpRevision(tx *gorm.DB, tenantID, applicationID string, now time.Time, reason string) error {
 	result := tx.Model(&policyRevisionModel{}).Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).Updates(map[string]any{"revision": gorm.Expr("revision + 1"), "changed_at": now, "change_reason": reason})

@@ -80,17 +80,20 @@ type SubsystemOnboardingRepository interface {
 
 // SubsystemOnboardingService coordinates the simplified subsystem registration workflow.
 type SubsystemOnboardingService struct {
-	repository SubsystemOnboardingRepository
-	ids        ManagementIdentifierGenerator
-	clock      Clock
+	repository                  SubsystemOnboardingRepository
+	ids                         ManagementIdentifierGenerator
+	clock                       Clock
+	redirectURIValidationPolicy RedirectURIValidationPolicy
 }
 
 // NewSubsystemOnboardingService constructs the simplified subsystem onboarding service.
-func NewSubsystemOnboardingService(repository SubsystemOnboardingRepository, ids ManagementIdentifierGenerator, clock Clock) (*SubsystemOnboardingService, error) {
+func NewSubsystemOnboardingService(repository SubsystemOnboardingRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy) (*SubsystemOnboardingService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("subsystem onboarding dependencies must not be nil")
 	}
-	return &SubsystemOnboardingService{repository: repository, ids: ids, clock: clock}, nil
+	return &SubsystemOnboardingService{
+		repository: repository, ids: ids, clock: clock, redirectURIValidationPolicy: redirectURIValidationPolicy,
+	}, nil
 }
 
 // ValidateSubsystemOnboardingInput validates the public one-click onboarding contract without
@@ -171,7 +174,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		RefreshTokenTTLSeconds: defaultSubsystemRefreshTokenTTLSeconds,
 		RequirePKCE:            true, GrantTypes: []string{"authorization_code", "refresh_token"},
 		Scopes: []string{"openid", "profile"}, RedirectURIs: []string{redirectURI},
-	})
+	}, service.redirectURIValidationPolicy)
 	if err != nil {
 		return SubsystemOnboardingResult{}, err
 	}
@@ -271,7 +274,7 @@ func resolvePortalTarget(baseURL, targetURI string) (string, error) {
 		return "", err
 	}
 	if parsed.IsAbs() {
-		if !validRedirectURI(targetURI) {
+		if !validRedirectURI(targetURI, RedirectURIValidationPolicy{}) {
 			return "", ErrValidation
 		}
 		return targetURI, nil

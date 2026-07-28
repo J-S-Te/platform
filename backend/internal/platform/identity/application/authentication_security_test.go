@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
+	securityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/application"
+	sharedsecurity "github.com/J-S-Te/Basic-Platform/backend/internal/shared/security"
 )
 
 type authenticationRepositoryStub struct {
@@ -23,11 +25,14 @@ func (authenticationRepositoryStub) FindFederatedLoginAccount(context.Context, s
 func (authenticationRepositoryStub) RecordSuccessfulPasswordVerification(context.Context, domain.LoginAccount, time.Time) error {
 	return nil
 }
-func (authenticationRepositoryStub) CreateSession(context.Context, domain.LoginAccount, domain.Session) error {
+func (authenticationRepositoryStub) CreateSession(context.Context, domain.LoginAccount, domain.Session, time.Duration) error {
 	return nil
 }
 func (authenticationRepositoryStub) FindPrincipalBySession(context.Context, string, time.Time, time.Duration) (domain.Principal, error) {
 	return domain.Principal{}, ErrUnauthenticated
+}
+func (authenticationRepositoryStub) RecordSessionInteraction(context.Context, string, time.Time, time.Duration) error {
+	return nil
 }
 func (authenticationRepositoryStub) RefreshSession(context.Context, string, time.Time, time.Time) error {
 	return nil
@@ -58,6 +63,41 @@ func (spy *passwordVerifierSpy) Verify(_ string, algorithm string, digest, metad
 type authenticationClockStub struct{ now time.Time }
 
 func (stub authenticationClockStub) Now() time.Time { return stub.now }
+
+type createSessionRepositorySpy struct {
+	authenticationRepositoryStub
+	createErr   error
+	idleTimeout time.Duration
+}
+
+func (spy *createSessionRepositorySpy) CreateSession(_ context.Context, _ domain.LoginAccount, _ domain.Session, idleTimeout time.Duration) error {
+	spy.idleTimeout = idleTimeout
+	return spy.createErr
+}
+
+type authenticationTokenManagerStub struct{}
+
+func (authenticationTokenManagerStub) Issue(sharedsecurity.TokenClaims) (string, error) {
+	return "signed-session-token", nil
+}
+
+func (authenticationTokenManagerStub) Verify(string, time.Time) (sharedsecurity.TokenClaims, error) {
+	return sharedsecurity.TokenClaims{}, nil
+}
+
+type authenticationIDGeneratorStub struct{}
+
+func (authenticationIDGeneratorStub) New(time.Time) (string, error) { return "session-1", nil }
+
+type loginSecurityStub struct{ idleTimeout time.Duration }
+
+func (loginSecurityStub) RecordFailedLogin(context.Context, securityapplication.LoginFailureInput) (securityapplication.LoginFailureResult, error) {
+	return securityapplication.LoginFailureResult{}, nil
+}
+
+func (stub loginSecurityStub) SessionIdleTimeout(context.Context, string) (time.Duration, error) {
+	return stub.idleTimeout, nil
+}
 
 func TestUnknownAccountConsumesPasswordVerificationWork(t *testing.T) {
 	verifier := &passwordVerifierSpy{}
@@ -98,5 +138,35 @@ func TestLockedPasswordAccountReturnsGenericFailureAfterVerification(t *testing.
 	}
 	if verifier.calls != 1 {
 		t.Fatalf("password verification calls = %d, want 1", verifier.calls)
+	}
+}
+
+func TestCreateSessionRejectsConcurrentTerminalLogin(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 10, 0, 0, 0, time.UTC)
+	repository := &createSessionRepositorySpy{createErr: ErrConcurrentSession}
+	service := &Service{
+		repository: repository,
+		tokens:     authenticationTokenManagerStub{}, ids: authenticationIDGeneratorStub{},
+		loginSecurity: loginSecurityStub{idleTimeout: 30 * time.Minute}, sessionTTL: 12 * time.Hour,
+	}
+	account := domain.LoginAccount{
+		TenantID: "tenant-1", UserID: "user-1", UserName: "张三",
+		AccountID: "account-1", AccountName: "zhangsan",
+	}
+
+	_, err := service.createSession(context.Background(), account, nil, "test-terminal", now)
+	if !errors.Is(err, ErrConcurrentSession) {
+		t.Fatalf("createSession() error = %v, want ErrConcurrentSession", err)
+	}
+	var concurrent ConcurrentSessionError
+	if !errors.As(err, &concurrent) {
+		t.Fatalf("createSession() error type = %T, want ConcurrentSessionError", err)
+	}
+	if concurrent.TenantID != account.TenantID || concurrent.UserID != account.UserID ||
+		concurrent.AccountID != account.AccountID || concurrent.AccountName != account.AccountName {
+		t.Fatalf("ConcurrentSessionError = %#v, want trusted account identity", concurrent)
+	}
+	if repository.idleTimeout != 30*time.Minute {
+		t.Fatalf("CreateSession() idle timeout = %s, want 30m", repository.idleTimeout)
 	}
 }

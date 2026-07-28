@@ -1,6 +1,7 @@
 package infrastructure
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -43,8 +44,8 @@ func TestActionCategoryPredicate(t *testing.T) {
 		wantArgs  int
 		wantEmpty bool
 	}{
-		{name: "login", category: "LOGIN", wantArgs: 2},
-		{name: "create normalized", category: " create ", wantArgs: 8},
+		{name: "login", category: "LOGIN", wantArgs: 4},
+		{name: "create normalized", category: " create ", wantArgs: 10},
 		{name: "update", category: "UPDATE", wantArgs: 7},
 		{name: "export", category: "EXPORT", wantArgs: 2},
 		{name: "status change", category: "STATUS_CHANGE", wantArgs: 2},
@@ -67,6 +68,22 @@ func TestActionCategoryPredicate(t *testing.T) {
 				t.Fatalf("known category produced non-matching clause %q", clause)
 			}
 		})
+	}
+}
+
+// TestActionCategoryPredicateIncludesLogout verifies that authentication-session termination is
+// shown under the login category and explicitly excluded from the broad POST-based create category.
+func TestActionCategoryPredicateIncludesLogout(t *testing.T) {
+	_, loginArgs := actionCategoryPredicate("LOGIN")
+	wantLoginArgs := []any{"auth.login", "auth.login.%", "auth.logout", "auth.logout.%"}
+	if !reflect.DeepEqual(loginArgs, wantLoginArgs) {
+		t.Fatalf("login category arguments = %#v, want %#v", loginArgs, wantLoginArgs)
+	}
+
+	_, createArgs := actionCategoryPredicate("CREATE")
+	wantCreateAuthExclusions := []any{"auth.login", "auth.login.%", "auth.logout", "auth.logout.%"}
+	if len(createArgs) < 6 || !reflect.DeepEqual(createArgs[2:6], wantCreateAuthExclusions) {
+		t.Fatalf("create category authentication exclusions = %#v, want %#v", createArgs, wantCreateAuthExclusions)
 	}
 }
 

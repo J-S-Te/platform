@@ -64,3 +64,16 @@ func TestValidateRejectsInvalidTrustedProxy(t *testing.T) {
 		t.Fatal("Validate() error = nil, want invalid trusted proxy error")
 	}
 }
+
+func TestLoadReadsOAuthClientInsecureHTTPRedirectURIsSetting(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs {
+		t.Fatal("OAuthClientAllowInsecureHTTPRedirectURIs = false, want true")
+	}
+}

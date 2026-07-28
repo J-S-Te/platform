@@ -76,17 +76,18 @@ type passwordCredentialModel struct {
 func (passwordCredentialModel) TableName() string { return "iam_password_credential" }
 
 type sessionModel struct {
-	ID           string     `gorm:"column:id;primaryKey"`
-	TenantID     string     `gorm:"column:tenant_id"`
-	AccountID    string     `gorm:"column:account_id"`
-	IPAddress    []byte     `gorm:"column:ip_address"`
-	UserAgent    *string    `gorm:"column:user_agent"`
-	CreatedAt    time.Time  `gorm:"column:created_at"`
-	LastSeenAt   time.Time  `gorm:"column:last_seen_at"`
-	ExpiresAt    time.Time  `gorm:"column:expires_at"`
-	RevokedAt    *time.Time `gorm:"column:revoked_at"`
-	RevokeReason *string    `gorm:"column:revoke_reason"`
-	Status       string     `gorm:"column:status"`
+	ID                string     `gorm:"column:id;primaryKey"`
+	TenantID          string     `gorm:"column:tenant_id"`
+	AccountID         string     `gorm:"column:account_id"`
+	IPAddress         []byte     `gorm:"column:ip_address"`
+	UserAgent         *string    `gorm:"column:user_agent"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	LastSeenAt        time.Time  `gorm:"column:last_seen_at"`
+	LastInteractiveAt time.Time  `gorm:"column:last_interactive_at"`
+	ExpiresAt         time.Time  `gorm:"column:expires_at"`
+	RevokedAt         *time.Time `gorm:"column:revoked_at"`
+	RevokeReason      *string    `gorm:"column:revoke_reason"`
+	Status            string     `gorm:"column:status"`
 }
 
 func (sessionModel) TableName() string { return "iam_session" }

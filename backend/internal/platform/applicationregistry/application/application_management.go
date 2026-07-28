@@ -29,6 +29,7 @@ const (
 	defaultManagementPageSize = 20
 	maxManagementPageSize     = 100
 	maxMetadataBytes          = 64 << 10
+	builtInApplicationCode    = "platform"
 )
 
 // IdentifierGenerator supplies sortable identifiers for applications and environments.
@@ -125,6 +126,17 @@ type ApplicationUpdateInput struct {
 	Description     *string
 	Status          string
 	Version         uint64
+}
+
+// ApplicationDeleteInput retires an application registration after the caller confirms its
+// stable code. The operation is intentionally logical: related environments, OAuth clients,
+// login targets and audit history remain available for traceability.
+type ApplicationDeleteInput struct {
+	TenantID         string
+	OperatorID       string
+	ApplicationID    string
+	ConfirmationCode string
+	Version          uint64
 }
 
 // EnvironmentCreateInput contains writable fields for one deployment environment.
@@ -227,6 +239,50 @@ func (service *ManagementService) UpdateApplication(ctx context.Context, input A
 		return Application{}, ErrValidation
 	}
 	return service.repository.UpdateApplication(ctx, input, service.clock.Now().UTC())
+}
+
+// DeleteApplication logically deletes one application registration by moving it to RETIRED.
+// Physical deletion is deliberately avoided because environments, OAuth clients, login targets
+// and audit records may still reference the stable application identity.
+func (service *ManagementService) DeleteApplication(ctx context.Context, input ApplicationDeleteInput) (Application, error) {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
+	input.ConfirmationCode = strings.TrimSpace(input.ConfirmationCode)
+	if input.TenantID == "" || input.OperatorID == "" || input.ApplicationID == "" || input.ConfirmationCode == "" || input.Version == 0 {
+		return Application{}, ErrValidation
+	}
+
+	current, err := service.repository.GetApplication(ctx, input.TenantID, input.ApplicationID)
+	if err != nil {
+		return Application{}, err
+	}
+	if current.Code == builtInApplicationCode {
+		return Application{}, ErrConflict
+	}
+	if input.ConfirmationCode != current.Code {
+		return Application{}, ErrValidation
+	}
+	if input.Version != current.Version {
+		return Application{}, ErrVersionConflict
+	}
+	if current.Status == "RETIRED" {
+		return current, nil
+	}
+
+	return service.repository.UpdateApplication(ctx, ApplicationUpdateInput{
+		TenantID:        current.TenantID,
+		OperatorID:      input.OperatorID,
+		ApplicationID:   current.ID,
+		Name:            current.Name,
+		ApplicationType: current.ApplicationType,
+		OwnerOrgID:      current.OwnerOrgID,
+		OwnerUserID:     current.OwnerUserID,
+		HomepageURL:     current.HomepageURL,
+		Description:     current.Description,
+		Status:          "RETIRED",
+		Version:         input.Version,
+	}, service.clock.Now().UTC())
 }
 
 // ListEnvironments returns the environments registered beneath one tenant-scoped application.

@@ -59,7 +59,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	service, err := application.NewSubsystemOnboardingService(repository, ulid.Generator{}, application.SystemClock{})
+	service, err := application.NewSubsystemOnboardingService(
+		repository, ulid.Generator{}, application.SystemClock{},
+		application.RedirectURIValidationPolicy{
+			AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -69,9 +74,9 @@ func run() error {
 	defer cancel()
 	result, err := service.OnboardSubsystem(ctx, application.SubsystemOnboardingInput{
 		TenantID: tenantID, OperatorID: operatorID,
-		ApplicationCode: "contract-management", ApplicationName: "合同管理系统", Description: &description,
+		ApplicationCode: "contract_management", ApplicationName: "合同管理系统", Description: &description,
 		Environment: "dev", PublicBaseURL: "http://localhost:8081", UpstreamURL: "http://contract-api:8081",
-		PathPrefix: "/contract", ClientType: "confidential",
+		PathPrefix: "/contract_management", ClientType: "confidential",
 	})
 	if err != nil {
 		return err
