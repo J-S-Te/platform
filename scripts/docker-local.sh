@@ -230,6 +230,7 @@ prepare_base_images() {
         "nginx:1.27-alpine"
         "mysql:8.4"
         "temporalio/auto-setup:1.29.7"
+        "temporalio/auto-setup:1.29.7"
     )
     log "检查并串行准备基础镜像"
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
@@ -246,10 +247,6 @@ build_images() {
         migrate bootstrap-admin api subsystem-provisioner contract-api frontend
 }
 
-<<<<<<< HEAD
-    # 限制 Compose 并发，避免 Docker Desktop 经代理同时访问 Docker Hub 时出现 EOF 或令牌请求超时。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build migrate bootstrap-admin api worker contract-api frontend
-=======
 prepare_gateway_config() {
     local gateway_script="${project_root}/scripts/portal-gateway.sh"
     [[ -x "$gateway_script" ]] || chmod +x "$gateway_script"
@@ -258,7 +255,6 @@ prepare_gateway_config() {
     PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
         "$gateway_script" remove contract-management >/dev/null
     log "已清理合同管理旧式整站反向代理；合同前端由统一 frontend 容器直接承载"
->>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
 }
 
 run_migrations() {

@@ -13,31 +13,10 @@ x-platform-backend-image: &platform-backend-image
     context: ./backend
   image: basic-platform/backend:local
 
-<<<<<<< HEAD
-x-contract-environment: &contract-environment
-  HTTP_ADDRESS: :8081
-  MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
-  PLATFORM_BASE_URL: http://api:8080
-  AUTH_SESSION_COOKIE_NAME: bp_session
-  PLATFORM_AUDIT_CLIENT_ID: ${CONTRACT_PLATFORM_AUDIT_CLIENT_ID:-}
-  PLATFORM_AUDIT_CLIENT_SECRET: ${CONTRACT_PLATFORM_AUDIT_CLIENT_SECRET:-}
-  PLATFORM_APPLICATION_CODE: contract_management
-  PLATFORM_ENVIRONMENT_CODE: dev
-  TEMPORAL_ADDRESS: temporal:7233
-  TEMPORAL_NAMESPACE: default
-  TEMPORAL_TASK_QUEUE: contract-management
-  TEMPORAL_TLS: "false"
-  APPROVAL_NODE_TIMEOUT: 72h
-  APPROVAL_REMINDER_INTERVAL: 24h
-  ARCHIVE_CRON_SCHEDULE: "0 16 * * *"
-  APPROVER_ROLE_ASSIGNMENTS_JSON: ${CONTRACT_APPROVER_ROLE_ASSIGNMENTS_JSON:-{}}
-  GIN_MODE: release
-=======
 x-contract-backend-image: &contract-backend-image
   build:
     context: ../contract_management
   image: contract-management/backend:local
->>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
 
 services:
   mysql:
@@ -186,10 +165,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
-<<<<<<< HEAD
-    restart: unless-stopped
-
-=======
     networks:
       default:
         aliases:
@@ -216,7 +191,6 @@ services:
         MYSQL_PWD="$${CONTRACT_MYSQL_PASSWORD}" mysql --protocol=TCP -h contract-mysql -ucontract contract_management < /migrations/000001_contract_workflow.sql
     restart: "no"
 
->>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
   temporal:
     image: temporalio/auto-setup:1.29.7
     depends_on:
@@ -238,18 +212,6 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-<<<<<<< HEAD
-  contract-api:
-    build:
-      context: ../contract_management
-    image: contract-management:local
-    environment:
-      <<: *contract-environment
-      CONTRACT_MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
-    depends_on:
-      api:
-        condition: service_healthy
-=======
   # 合同管理后端容器：API 与 Temporal Worker 运行在同一容器中。
   contract-api:
     <<: *contract-backend-image
@@ -263,13 +225,10 @@ services:
       CONTRACT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
     depends_on:
->>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
       contract-mysql:
         condition: service_healthy
       temporal:
         condition: service_healthy
-<<<<<<< HEAD
-=======
       api:
         condition: service_healthy
     expose:
@@ -278,38 +237,15 @@ services:
       default:
         aliases:
           - contract-api
->>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
       interval: 10s
       timeout: 5s
-<<<<<<< HEAD
-      retries: 12
-      start_period: 10s
-    restart: unless-stopped
-
-  contract-worker:
-    image: contract-management:local
-    command: ["./worker"]
-    environment:
-      <<: *contract-environment
-      CONTRACT_MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
-    depends_on:
-      api:
-        condition: service_healthy
-      contract-mysql:
-        condition: service_healthy
-      temporal:
-        condition: service_healthy
-    restart: unless-stopped
-
-=======
       retries: 15
       start_period: 10s
     restart: unless-stopped
 
   # 一个前端容器同时承载基础平台和合同管理 Vue 模块，并统一反向代理两个后端。
->>>>>>> 667e86f3f7161e2c4b8b48648b80f0d684b37698
   frontend:
     build:
       context: ../frontend
