@@ -64,3 +64,26 @@ func TestValidateRejectsInvalidTrustedProxy(t *testing.T) {
 		t.Fatal("Validate() error = nil, want invalid trusted proxy error")
 	}
 }
+
+func TestValidateRejectsInsecureHTTPRedirectPolicyInProduction(t *testing.T) {
+	cfg := Config{
+		Environment: "production", AppName: "basic-platform",
+		HTTP:  HTTPConfig{Addr: ":8080", PublicBaseURL: "https://platform.example.com", TrustedProxies: []string{"127.0.0.1/32"}},
+		MySQL: MySQLConfig{Host: "127.0.0.1", Port: 3306, Database: "basic_platform", Username: "basic_platform"},
+		Auth: AuthConfig{
+			JWTIssuer: "basic-platform", JWTAudience: "console", ApplicationJWTAudience: "application",
+			OIDCIssuer: "https://platform.example.com", AllowInsecureHTTPRedirectURIs: true,
+			SessionCookieName: "bp_session", SessionCookieSecure: true, SessionCookieSameSite: "Lax", SessionTTL: 8 * time.Hour,
+		},
+		Identity:        IdentityConfig{ExternalOIDCHTTPTimeout: 10 * time.Second, DingTalkHTTPTimeout: 10 * time.Second},
+		Logging:         LoggingConfig{Directory: "/tmp/logs"},
+		FileStorageRoot: "/tmp/uploads",
+		Worker:          WorkerConfig{ID: "worker", PollInterval: time.Second, StaleLockTimeout: time.Minute},
+		Audit:           AuditConfig{ApplicationCode: "platform", EnvironmentCode: "prod"},
+		CORSOrigins:     []string{"https://platform.example.com"},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want insecure redirect policy production error")
+	}
+}

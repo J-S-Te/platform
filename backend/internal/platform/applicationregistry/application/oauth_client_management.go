@@ -255,23 +255,41 @@ type OAuthClientCreateResult struct {
 // OAuthClientManagementService coordinates validation, cryptographic secret generation, hashing,
 // and tenant-scoped persistence for OAuth client registrations.
 type OAuthClientManagementService struct {
-	repository OAuthClientManagementRepository
-	ids        ManagementIdentifierGenerator
-	clock      Clock
+	repository                    OAuthClientManagementRepository
+	ids                           ManagementIdentifierGenerator
+	clock                         Clock
+	allowInsecureHTTPRedirectURIs bool
+}
+
+// OAuthClientManagementOption configures narrowly scoped OAuth client registration policy.
+type OAuthClientManagementOption func(*OAuthClientManagementService)
+
+// WithInsecureHTTPRedirectURIs permits absolute HTTP callbacks outside loopback addresses.
+// Callers must restrict this option to non-production test environments.
+func WithInsecureHTTPRedirectURIs() OAuthClientManagementOption {
+	return func(service *OAuthClientManagementService) {
+		service.allowInsecureHTTPRedirectURIs = true
+	}
 }
 
 // NewOAuthClientManagementService constructs the management service.
-func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock) (*OAuthClientManagementService, error) {
+func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock, options ...OAuthClientManagementOption) (*OAuthClientManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("OAuth client management service dependencies must not be nil")
 	}
-	return &OAuthClientManagementService{repository: repository, ids: ids, clock: clock}, nil
+	service := &OAuthClientManagementService{repository: repository, ids: ids, clock: clock}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service, nil
 }
 
 // CreateOAuthClient registers an OAuth client and creates its initial secret only for
 // client_secret_basic registrations.
 func (service *OAuthClientManagementService) CreateOAuthClient(ctx context.Context, input OAuthClientCreateInput) (OAuthClientCreateResult, error) {
-	input, err := normalizeOAuthClientCreate(input)
+	input, err := normalizeOAuthClientCreate(input, service.allowInsecureHTTPRedirectURIs)
 	if err != nil {
 		return OAuthClientCreateResult{}, err
 	}
@@ -333,7 +351,7 @@ func (service *OAuthClientManagementService) ReplaceOAuthClientScopes(ctx contex
 func (service *OAuthClientManagementService) ReplaceOAuthClientRedirectURIs(ctx context.Context, input OAuthClientRedirectURIsUpdateInput) (OAuthClientView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	input.RedirectURIs = normalizeStrings(input.RedirectURIs)
-	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.RedirectURIs) {
+	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.RedirectURIs, service.allowInsecureHTTPRedirectURIs) {
 		return OAuthClientView{}, ErrManagementValidation
 	}
 	return service.repository.ReplaceOAuthClientRedirectURIs(ctx, input, service.clock.Now().UTC())
@@ -352,7 +370,7 @@ func (service *OAuthClientManagementService) GetOAuthClientPostLogoutRedirectURI
 func (service *OAuthClientManagementService) ReplaceOAuthClientPostLogoutRedirectURIs(ctx context.Context, input OAuthClientPostLogoutRedirectURIsUpdateInput) (OAuthClientPostLogoutRedirectURIsView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	input.PostLogoutRedirectURIs = normalizeStrings(input.PostLogoutRedirectURIs)
-	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.PostLogoutRedirectURIs) {
+	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validRedirectURIs(input.PostLogoutRedirectURIs, service.allowInsecureHTTPRedirectURIs) {
 		return OAuthClientPostLogoutRedirectURIsView{}, ErrManagementValidation
 	}
 	return service.repository.ReplaceOAuthClientPostLogoutRedirectURIs(ctx, input, service.clock.Now().UTC())
@@ -469,7 +487,7 @@ func newOAuthClientSecretWrite(ids ManagementIdentifierGenerator, now time.Time,
 	return SecretWrite{CredentialID: credentialID, SecretHash: hash, Fingerprint: secretFingerprint(plaintext), ValidUntil: validUntil}, plaintext, nil
 }
 
-func normalizeOAuthClientCreate(input OAuthClientCreateInput) (OAuthClientCreateInput, error) {
+func normalizeOAuthClientCreate(input OAuthClientCreateInput, allowInsecureHTTPRedirectURIs bool) (OAuthClientCreateInput, error) {
 	input.TenantID, input.ApplicationID, input.EnvironmentID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ApplicationID), strings.TrimSpace(input.EnvironmentID), strings.TrimSpace(input.OperatorID)
 	input.ClientID, input.ClientName = strings.TrimSpace(input.ClientID), strings.TrimSpace(input.ClientName)
 	input.ClientType, input.TokenAuthMethod = strings.TrimSpace(input.ClientType), strings.TrimSpace(input.TokenAuthMethod)
@@ -477,7 +495,7 @@ func normalizeOAuthClientCreate(input OAuthClientCreateInput) (OAuthClientCreate
 	input.SecretValidUntil = normalizeSecretValidUntil(input.SecretValidUntil)
 	if input.TenantID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || input.OperatorID == "" ||
 		!clientIDPattern.MatchString(input.ClientID) || !validOAuthClientName(input.ClientName) ||
-		!validClientConfiguration(input) || !validScopes(input.Scopes) || !validRedirectURIs(input.RedirectURIs) {
+		!validClientConfiguration(input) || !validScopes(input.Scopes) || !validRedirectURIs(input.RedirectURIs, allowInsecureHTTPRedirectURIs) {
 		return OAuthClientCreateInput{}, ErrManagementValidation
 	}
 	return input, nil
@@ -528,16 +546,16 @@ func validScopes(values []string) bool {
 	return true
 }
 
-func validRedirectURIs(values []string) bool {
+func validRedirectURIs(values []string, allowInsecureHTTP bool) bool {
 	for _, value := range values {
-		if len(value) > 2048 || !validRedirectURI(value) {
+		if len(value) > 2048 || !validRedirectURI(value, allowInsecureHTTP) {
 			return false
 		}
 	}
 	return true
 }
 
-func validRedirectURI(value string) bool {
+func validRedirectURI(value string, allowInsecureHTTP bool) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 		return false
@@ -547,6 +565,9 @@ func validRedirectURI(value string) bool {
 	}
 	if parsed.Scheme != "http" {
 		return false
+	}
+	if allowInsecureHTTP {
+		return true
 	}
 	host := parsed.Hostname()
 	return strings.EqualFold(host, "localhost") || net.ParseIP(host).IsLoopback()

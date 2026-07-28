@@ -395,8 +395,12 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	oauthClientManagementOptions := make([]applicationregistryapplication.OAuthClientManagementOption, 0, 1)
+	if cfg.Auth.AllowInsecureHTTPRedirectURIs {
+		oauthClientManagementOptions = append(oauthClientManagementOptions, applicationregistryapplication.WithInsecureHTTPRedirectURIs())
+	}
 	oauthClientManagementService, err := applicationregistryapplication.NewOAuthClientManagementService(
-		oauthClientManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+		oauthClientManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{}, oauthClientManagementOptions...,
 	)
 	if err != nil {
 		_ = database.Close(db)
