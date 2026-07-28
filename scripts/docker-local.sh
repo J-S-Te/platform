@@ -253,8 +253,6 @@ prepare_gateway_config() {
     [[ -x "$gateway_script" ]] || chmod +x "$gateway_script"
     PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
         "$gateway_script" remove contract_management >/dev/null
-    PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
-        "$gateway_script" remove contract-management >/dev/null
     log "已清理合同管理旧式整站反向代理；合同前端由统一 frontend 容器直接承载"
 }
 
