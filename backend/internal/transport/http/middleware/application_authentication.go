@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/appctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
 	"github.com/gin-gonic/gin"
@@ -71,4 +72,43 @@ func bearerToken(header string) (string, bool) {
 		return "", false
 	}
 	return parts[1], true
+}
+
+// ConsoleOrApplicationAuthentication accepts either the browser session cookie used by the
+// platform console or an OAuth application bearer token used by an application-owned integration
+// client. It is intended only for endpoints whose handler performs the corresponding authorization
+// check for both principal types.
+func ConsoleOrApplicationAuthentication(console Authenticator, cookieName string, application ApplicationAuthenticator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if console == nil || strings.TrimSpace(cookieName) == "" || application == nil {
+			httpresponse.WriteError(c.Writer, c.Request, http.StatusInternalServerError, httperror.Internal)
+			c.Abort()
+			return
+		}
+		if cookie, err := c.Request.Cookie(cookieName); err == nil && strings.TrimSpace(cookie.Value) != "" {
+			principal, authErr := console.Authenticate(c.Request.Context(), cookie.Value)
+			if authErr != nil {
+				httpresponse.WriteError(c.Writer, c.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+				c.Abort()
+				return
+			}
+			c.Request = c.Request.WithContext(authctx.WithPrincipal(c.Request.Context(), principal))
+			c.Next()
+			return
+		}
+		token, ok := bearerToken(c.GetHeader("Authorization"))
+		if !ok {
+			httpresponse.WriteError(c.Writer, c.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+			c.Abort()
+			return
+		}
+		principal, authErr := application.Authenticate(c.Request.Context(), token)
+		if authErr != nil || !principal.Valid() {
+			httpresponse.WriteError(c.Writer, c.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+			c.Abort()
+			return
+		}
+		c.Request = c.Request.WithContext(appctx.WithPrincipal(c.Request.Context(), principal))
+		c.Next()
+	}
 }

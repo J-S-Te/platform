@@ -10,8 +10,8 @@ import (
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/interfaces/http"
 	audithttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/interfaces/http"
+	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
-	authorizationsys004 "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/sys004"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
@@ -49,7 +49,7 @@ func NewRouter(
 	managementHandler *identityhttp.ManagementHandler,
 	accountLifecycleHandler *identityhttp.AccountLifecycleHandler,
 	authorizationHandler *authorizationhttp.Handler,
-	contractAccessHandler *authorizationsys004.Handler,
+	applicationAccessHandler *applicationaccess.Handler,
 	auditHandler *audithttp.Handler,
 	configurationHandler *configurationhttp.Handler,
 	settingsHandler *settingshttp.Handler,
@@ -210,9 +210,10 @@ func NewRouter(
 			apiRouter.POST("/auth/password/change", adaptHandler(accountLifecycleHandler.ChangeOwnPassword))
 		}
 
-		if contractAccessHandler != nil {
-			apiRouter.GET("/users/:user_id/applications/contract_management/access", middleware.RequirePermission("platform:user:read"), adaptHandler(contractAccessHandler.GetAccess))
-			apiRouter.PUT("/users/:user_id/applications/contract_management/access", middleware.RequirePermission("platform:user:update"), adaptHandler(contractAccessHandler.UpdateAccess))
+		if applicationAccessHandler != nil {
+			apiRouter.GET("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:user:read"), adaptHandler(applicationAccessHandler.GetAccess))
+			apiRouter.PUT("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:user:update"), adaptHandler(applicationAccessHandler.UpdateAccess))
+			apiRouter.DELETE("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:user:update"), adaptHandler(applicationAccessHandler.DeleteAccess))
 		}
 
 		if auditHandler != nil {
@@ -301,6 +302,23 @@ func NewRouter(
 			apiRouter.POST("/authorization/check", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.Check))
 			apiRouter.POST("/authorization/batch-check", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.BatchCheck))
 		}
+	}
+
+	// Application authorization catalogs support both the platform console session and an
+	// application-owned OAuth client credential. The handler enforces the matching console
+	// permission/ownership or the target application's catalog scope.
+	if applicationAccessHandler != nil && authHandler != nil {
+		catalogRouter := router.Group("/api/v1")
+		if applicationAuthenticator != nil {
+			catalogRouter.Use(middleware.RequireAllowedOriginForUnsafeMethodsOrBearer(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType(), middleware.ConsoleOrApplicationAuthentication(authHandler, authHandler.CookieName(), applicationAuthenticator))
+		} else {
+			// Keep console catalog management available in reduced/test deployments that do not
+			// construct the application bearer authenticator. Full deployments additionally expose
+			// the application-owned credential path above.
+			catalogRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType(), middleware.Authentication(authHandler, authHandler.CookieName()))
+		}
+		catalogRouter.GET("/applications/:application_id/authorization-catalog", adaptHandler(applicationAccessHandler.GetCatalog))
+		catalogRouter.PUT("/applications/:application_id/authorization-catalog", adaptHandler(applicationAccessHandler.SyncCatalog))
 	}
 
 	// Integration audit ingestion has a separate bearer-token boundary. Console user roles do

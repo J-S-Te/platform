@@ -96,3 +96,17 @@ func normalizedOrigin(raw string) string {
 	}
 	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
 }
+
+// RequireAllowedOriginForUnsafeMethodsOrBearer keeps the CSRF protection used by browser
+// sessions while allowing a validated OAuth bearer request to come from a backend service with no
+// browser Origin header. Authentication still happens in the following middleware.
+func RequireAllowedOriginForUnsafeMethodsOrBearer(origins ...string) gin.HandlerFunc {
+	browserGuard := RequireAllowedOriginForUnsafeMethods(origins...)
+	return func(context *gin.Context) {
+		if isUnsafeMethod(context.Request.Method) && strings.TrimSpace(context.GetHeader("Authorization")) != "" {
+			context.Next()
+			return
+		}
+		browserGuard(context)
+	}
+}

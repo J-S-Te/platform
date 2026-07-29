@@ -1,11 +1,15 @@
 package middleware
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/appctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/gin-gonic/gin"
 )
 
@@ -105,5 +109,68 @@ func TestRequireSafeWriteContentType(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
 			}
 		})
+	}
+}
+
+type testConsoleAuthenticator struct{}
+
+func (testConsoleAuthenticator) Authenticate(_ context.Context, token string) (authctx.Principal, error) {
+	if token != "session" {
+		return authctx.Principal{}, errors.New("invalid session")
+	}
+	return authctx.Principal{Tenant: authctx.ReferenceName{ID: "tenant"}, User: authctx.ReferenceName{ID: "user"}}, nil
+}
+
+type testApplicationAuthenticator struct{}
+
+func (testApplicationAuthenticator) Authenticate(_ context.Context, token string) (appctx.Principal, error) {
+	if token != "application-token" {
+		return appctx.Principal{}, errors.New("invalid application token")
+	}
+	return appctx.Principal{
+		OAuthClientID:   "client",
+		ClientID:        "client",
+		TenantID:        "tenant",
+		ApplicationID:   "application",
+		ApplicationCode: "sample",
+		EnvironmentID:   "environment",
+		EnvironmentCode: "dev",
+		Scopes:          map[string]struct{}{"authorization.catalog.sync": {}},
+	}, nil
+}
+
+func TestRequireAllowedOriginForUnsafeMethodsOrBearerAllowsValidatedBearerWithoutOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(
+		RequireAllowedOriginForUnsafeMethodsOrBearer("https://portal.example.com"),
+		ConsoleOrApplicationAuthentication(testConsoleAuthenticator{}, "session", testApplicationAuthenticator{}),
+	)
+	router.PUT("/catalog", func(context *gin.Context) { context.Status(http.StatusNoContent) })
+
+	request := httptest.NewRequest(http.MethodPut, "/catalog", strings.NewReader(`{"catalog_version":"1"}`))
+	request.Header.Set("Authorization", "Bearer application-token")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("validated bearer status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestRequireAllowedOriginForUnsafeMethodsOrBearerKeepsBrowserOriginProtection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(
+		RequireAllowedOriginForUnsafeMethodsOrBearer("https://portal.example.com"),
+		ConsoleOrApplicationAuthentication(testConsoleAuthenticator{}, "session", testApplicationAuthenticator{}),
+	)
+	router.PUT("/catalog", func(context *gin.Context) { context.Status(http.StatusNoContent) })
+
+	request := httptest.NewRequest(http.MethodPut, "/catalog", strings.NewReader(`{"catalog_version":"1"}`))
+	request.AddCookie(&http.Cookie{Name: "session", Value: "session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing browser origin status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 }

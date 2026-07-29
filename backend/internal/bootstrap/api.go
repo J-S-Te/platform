@@ -2,8 +2,6 @@
 package bootstrap
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,9 +17,9 @@ import (
 	auditinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/infrastructure"
 	audithttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/interfaces/http"
 	authorizationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/application"
+	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	authorizationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/infrastructure"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
-	authorizationsys004 "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/sys004"
 	configurationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/application"
 	configurationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/infrastructure"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
@@ -180,20 +178,14 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	contractAccessService, err := authorizationsys004.NewService(
-		db, ulid.Generator{}, authorizationsys004.SystemClock{}, logger, &contractAccessAuditAdapter{service: auditService, config: cfg.Audit},
-	)
+	applicationAccessAudit := &applicationAccessAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
+	applicationAccessService, err := applicationaccess.NewService(db, ulid.Generator{}, applicationaccess.SystemClock{}, applicationAccessAudit)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
-	if err := contractAccessService.EnsureExistingApplications(context.Background()); err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, fmt.Errorf("initialize SYS-004 contract authorization catalog: %w", err)
-	}
-	contractAccessHandler, err := authorizationsys004.NewHandler(contractAccessService, logger)
+	applicationAccessHandler, err := applicationaccess.NewHandler(applicationAccessService)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -289,8 +281,14 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	oidcAuthorizationResolver, err := applicationaccess.NewApplicationAuthorizationResolver(applicationAccessService)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
 	oidcIssuer, err := oidctokenissuer.New(
-		oidcTokenManager, ulid.Generator{}, sys004OIDCAuthorizationResolver{service: contractAccessService},
+		oidcTokenManager, ulid.Generator{}, oidcAuthorizationResolver,
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -451,7 +449,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	operational, err := buildOperationalModules(cfg, db, logger, contractAccessService)
+	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -460,32 +458,11 @@ func NewAPI(cfg config.Config) (*API, error) {
 
 	return &API{
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, contractAccessHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
+			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
 		Logger:   logger,
 		database: db,
 		logFile:  logFile,
-	}, nil
-}
-
-type sys004OIDCAuthorizationResolver struct {
-	service *authorizationsys004.Service
-}
-
-func (resolver sys004OIDCAuthorizationResolver) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (oidctokenissuer.AuthorizationClaims, error) {
-	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
-	if err != nil {
-		if errors.Is(err, authorizationsys004.ErrNotConfigured) {
-			return oidctokenissuer.AuthorizationClaims{}, oidcapplication.ErrAccessDenied
-		}
-		return oidctokenissuer.AuthorizationClaims{}, err
-	}
-	return oidctokenissuer.AuthorizationClaims{
-		TenantID:       resolved.TenantID,
-		Roles:          append([]string(nil), resolved.Roles...),
-		Permissions:    append([]string(nil), resolved.Permissions...),
-		RoleConfigHash: resolved.RoleConfigHash,
-		AuthzRevision:  resolved.AuthzRevision,
 	}, nil
 }
 

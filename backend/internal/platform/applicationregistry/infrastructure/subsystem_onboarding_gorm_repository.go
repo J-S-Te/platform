@@ -146,18 +146,38 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 				WHERE catalog_role.tenant_id = application.tenant_id
 					AND catalog_role.application_id = application.id
 					AND catalog_role.status = 'ACTIVE'
+					AND catalog_role.role_type <> 'COMPATIBILITY'
 			)
 			OR EXISTS (
-				SELECT 1 FROM authz_user_application_role AS access_assignment
+				SELECT 1 FROM authz_role_binding AS access_assignment
 				JOIN authz_role AS assigned_role ON assigned_role.id = access_assignment.role_id
 				WHERE access_assignment.tenant_id = application.tenant_id
 					AND access_assignment.application_id = application.id
-					AND access_assignment.user_id = ?
+					AND access_assignment.subject_type = 'USER'
+					AND access_assignment.subject_id = ?
+					AND access_assignment.status = 'ACTIVE'
+					AND (access_assignment.valid_from IS NULL OR access_assignment.valid_from <= UTC_TIMESTAMP(3))
+					AND (access_assignment.valid_until IS NULL OR access_assignment.valid_until > UTC_TIMESTAMP(3))
+					AND (
+						(access_assignment.scope_type = 'TENANT' AND access_assignment.scope_id = '')
+						OR (access_assignment.scope_type = 'ENVIRONMENT' AND access_assignment.scope_id = environment.id)
+					)
 					AND assigned_role.tenant_id = application.tenant_id
 					AND assigned_role.application_id = application.id
 					AND assigned_role.status = 'ACTIVE'
+					AND assigned_role.role_type <> 'COMPATIBILITY'
 			)
-		)`, userID)
+			OR EXISTS (
+				SELECT 1 FROM authz_user_permission AS direct_permission
+				JOIN authz_permission AS assigned_permission ON assigned_permission.id = direct_permission.permission_id
+				WHERE direct_permission.tenant_id = application.tenant_id
+					AND direct_permission.application_id = application.id
+					AND direct_permission.user_id = ?
+					AND assigned_permission.tenant_id = application.tenant_id
+					AND assigned_permission.application_id = application.id
+					AND assigned_permission.status = 'ACTIVE'
+			)
+		)`, userID, userID)
 	if environment != "" {
 		query = query.Where("environment.environment = ?", environment)
 	}

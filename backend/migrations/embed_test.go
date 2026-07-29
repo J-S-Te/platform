@@ -12,8 +12,9 @@ func TestEmbeddedMigrationsAreContiguousAndParseable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if len(items) == 0 || items[len(items)-1].Version != 57 {
-		t.Fatalf("last migration version = %d, want 57", items[len(items)-1].Version)
+	const latestMigrationVersion = 60
+	if len(items) == 0 || items[len(items)-1].Version != latestMigrationVersion {
+		t.Fatalf("last migration version = %d, want %d", items[len(items)-1].Version, latestMigrationVersion)
 	}
 	for _, item := range items {
 		if _, err := migration.SplitStatements(item.SQL); err != nil {

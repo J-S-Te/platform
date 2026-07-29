@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/infrastructure"
 	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/interfaces/http"
-	authorizationsys004 "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/sys004"
+	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	filetaskapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/application"
 	filetaskinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/infrastructure"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
@@ -25,8 +24,8 @@ import (
 // buildOperationalModules wires the remaining platform operations modules through their public
 // application contracts. Schema changes remain explicit SQL migrations; this function never calls
 // GORM AutoMigrate.
-func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, contractAccessService *authorizationsys004.Service) (httptransport.OperationalModules, error) {
-	if database == nil || logger == nil || contractAccessService == nil {
+func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service) (httptransport.OperationalModules, error) {
+	if database == nil || logger == nil || applicationAccessService == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
 	}
 
@@ -67,7 +66,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(
 		subsystemService,
 		subsystemProvisioner,
-		subsystemInitialAccessManager{contractAccess: contractAccessService},
+		subsystemInitialAccessManager{applicationAccess: applicationAccessService},
 		cfg.Auth.OIDCIssuer,
 		logger,
 	)
@@ -125,11 +124,11 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	}, nil
 }
 
-// subsystemInitialAccessManager bridges subsystem onboarding to the protected
-// contract-management authorization catalog. Generic applications keep their existing
-// authorization model; contract-management receives an explicit initial administrator.
+// subsystemInitialAccessManager assigns a conventional initial administrator role when
+// the newly registered application's catalog already defines one. The manager is intentionally
+// application-agnostic: application code is only data passed to the generic authorization service.
 type subsystemInitialAccessManager struct {
-	contractAccess *authorizationsys004.Service
+	applicationAccess *applicationaccess.Service
 }
 
 func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
@@ -139,23 +138,25 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 	userID string,
 	operatorID string,
 ) (string, error) {
-	if strings.TrimSpace(applicationCode) != authorizationsys004.ApplicationCode {
-		return "", nil
+	if manager.applicationAccess == nil {
+		return "", errors.New("application authorization service is unavailable")
 	}
-	if manager.contractAccess == nil {
-		return "", errors.New("contract application access service is unavailable")
-	}
-	_, err := manager.contractAccess.UpdateAccess(ctx, authorizationsys004.UpdateAccessInput{
-		TenantID:   tenantID,
-		UserID:     userID,
-		OperatorID: operatorID,
-		RoleCode:   "admin",
-	})
+	_, err := manager.applicationAccess.UpdateAccess(ctx, applicationaccess.UpdateAccessInput{
+		TenantID:      tenantID,
+		UserID:        userID,
+		OperatorID:    operatorID,
+		Roles:         []applicationaccess.RoleInput{{RoleCode: "admin", ScopeType: "APPLICATION"}},
+		RolesProvided: true,
+	}, applicationCode)
 	if err != nil {
+		// A subsystem may be onboarded before it publishes its role catalog. In that
+		// case there is no generic admin role to assign yet; onboarding itself remains
+		// successful and the platform administrator can assign roles after catalog sync.
+		if errors.Is(err, applicationaccess.ErrValidation) {
+			return "", nil
+		}
 		switch {
-		case errors.Is(err, authorizationsys004.ErrValidation):
-			return "", applicationregistryapplication.ErrValidation
-		case errors.Is(err, authorizationsys004.ErrNotFound):
+		case errors.Is(err, applicationaccess.ErrNotFound):
 			return "", applicationregistryapplication.ErrNotFound
 		default:
 			return "", err
