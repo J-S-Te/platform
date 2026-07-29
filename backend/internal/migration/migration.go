@@ -127,7 +127,13 @@ func Run(ctx context.Context, database *gorm.DB, source fs.FS) ([]Applied, error
 		for _, item := range items {
 			if checksum, exists := applied[item.Version]; exists {
 				if checksum != item.Checksum {
-					return fmt.Errorf("migration %06d_%s checksum differs from applied version; create a new migration instead of editing an applied file", item.Version, item.Name)
+					return fmt.Errorf(
+						"migration %06d_%s checksum differs from applied version (database=%x, file=%x); create a new migration instead of editing an applied file",
+						item.Version,
+						item.Name,
+						checksum,
+						item.Checksum,
+					)
 				}
 				continue
 			}
