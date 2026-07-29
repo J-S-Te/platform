@@ -152,6 +152,8 @@ func (h *Handler) writeOIDCTokenError(w http.ResponseWriter, err error) {
 		writeInvalidClient(w)
 	case errors.Is(err, application.ErrUnauthorizedClient):
 		writeOAuthError(w, http.StatusBadRequest, "unauthorized_client", "")
+	case errors.Is(err, application.ErrAccessDenied):
+		writeOAuthError(w, http.StatusForbidden, "access_denied", "")
 	case errors.Is(err, application.ErrInvalidScope):
 		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "")
 	case errors.Is(err, application.ErrInvalidGrant), errors.Is(err, application.ErrRefreshTokenReplay):

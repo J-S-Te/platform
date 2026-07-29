@@ -67,18 +67,8 @@ type AuthConfig struct {
 
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
 type IdentityConfig struct {
-	MobileEncryptionKey                  string
-	FederatedProviderSecretEncryptionKey string
-	ExternalLoginStateEncryptionKey      string
-	// ExternalOIDCHTTPTimeout bounds each outbound request to an external OIDC provider.
-	ExternalOIDCHTTPTimeout time.Duration
-	// DingTalkHTTPTimeout bounds each outbound request to the DingTalk OAuth APIs.
-	DingTalkHTTPTimeout time.Duration
-	// ExternalOIDCAllowInsecureHTTP permits HTTP only for explicitly configured non-production providers.
-	ExternalOIDCAllowInsecureHTTP bool
-	// ExternalOIDCAllowedHosts restricts outbound OIDC requests to exact issuer hosts.
-	ExternalOIDCAllowedHosts []string
-	BootstrapToken           string
+	MobileEncryptionKey string
+	BootstrapToken      string
 }
 
 // LoggingConfig controls structured application logs.
@@ -149,18 +139,6 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	externalOIDCHTTPTimeout, err := duration("IAM_EXTERNAL_OIDC_HTTP_TIMEOUT", 10*time.Second)
-	if err != nil {
-		return Config{}, err
-	}
-	dingTalkHTTPTimeout, err := duration("IAM_DINGTALK_HTTP_TIMEOUT", 10*time.Second)
-	if err != nil {
-		return Config{}, err
-	}
-	externalOIDCAllowInsecureHTTP, err := boolean("IAM_EXTERNAL_OIDC_ALLOW_INSECURE_HTTP", false)
-	if err != nil {
-		return Config{}, err
-	}
 	workerPollInterval, err := duration("ASYNC_WORKER_POLL_INTERVAL", 2*time.Second)
 	if err != nil {
 		return Config{}, err
@@ -199,14 +177,8 @@ func Load() (Config, error) {
 			Params:   value("MYSQL_PARAMS", "charset=utf8mb4&parseTime=true&loc=UTC"),
 		},
 		Identity: IdentityConfig{
-			MobileEncryptionKey:                  value("IAM_MOBILE_ENCRYPTION_KEY", ""),
-			FederatedProviderSecretEncryptionKey: value("IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY", ""),
-			ExternalLoginStateEncryptionKey:      value("IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY", ""),
-			ExternalOIDCHTTPTimeout:              externalOIDCHTTPTimeout,
-			DingTalkHTTPTimeout:                  dingTalkHTTPTimeout,
-			ExternalOIDCAllowInsecureHTTP:        externalOIDCAllowInsecureHTTP,
-			ExternalOIDCAllowedHosts:             commaSeparated(value("IAM_EXTERNAL_OIDC_ALLOWED_HOSTS", "")),
-			BootstrapToken:                       strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
+			MobileEncryptionKey: value("IAM_MOBILE_ENCRYPTION_KEY", ""),
+			BootstrapToken:      strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
 		},
 		Auth: AuthConfig{
 			JWTIssuer:                                value("AUTH_JWT_ISSUER", "basic-platform"),
@@ -290,17 +262,6 @@ func (cfg Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Identity.BootstrapToken) != "" && len(strings.TrimSpace(cfg.Identity.BootstrapToken)) < 32 {
 		return fmt.Errorf("IAM_BOOTSTRAP_TOKEN must be at least 32 characters when set")
-	}
-	if cfg.Identity.ExternalOIDCHTTPTimeout <= 0 || cfg.Identity.ExternalOIDCHTTPTimeout > time.Minute {
-		return fmt.Errorf("IAM_EXTERNAL_OIDC_HTTP_TIMEOUT must be greater than zero and no more than one minute")
-	}
-	if cfg.Identity.DingTalkHTTPTimeout <= 0 || cfg.Identity.DingTalkHTTPTimeout > time.Minute {
-		return fmt.Errorf("IAM_DINGTALK_HTTP_TIMEOUT must be greater than zero and no more than one minute")
-	}
-	for _, host := range cfg.Identity.ExternalOIDCAllowedHosts {
-		if !validExternalOIDCHost(host) {
-			return fmt.Errorf("IAM_EXTERNAL_OIDC_ALLOWED_HOSTS contains invalid host %q", host)
-		}
 	}
 	if cfg.Auth.SessionCookieName == "" {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_NAME must not be empty")
@@ -464,25 +425,6 @@ func commaSeparated(raw string) []string {
 		}
 	}
 	return values
-}
-
-// validExternalOIDCHost accepts an exact host or host:port, but no scheme, wildcard,
-// credentials, path, query or fragment. It mirrors the outbound OIDC client's exact-host
-// allow-list contract without requiring external login to be enabled when the list is empty.
-func validExternalOIDCHost(value string) bool {
-	raw := strings.TrimSpace(value)
-	if raw == "" || strings.Contains(raw, "://") || strings.Contains(raw, "*") {
-		return false
-	}
-	parsed, err := url.Parse("https://" + raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Hostname() == "" {
-		return false
-	}
-	if port := parsed.Port(); port != "" {
-		portNumber, err := strconv.Atoi(port)
-		return err == nil && portNumber >= 1 && portNumber <= 65535
-	}
-	return true
 }
 
 func validSameSite(value string) bool {

@@ -3,6 +3,8 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	stdhttp "net/http"
@@ -27,7 +29,8 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 		PublicURL:       "http://localhost:8081/contract_management/",
 	}}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
-	handler, err := NewSubsystemOnboardingHandler(service, provisioner, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
+	handler, err := NewSubsystemOnboardingHandler(service, provisioner, access, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("construct handler: %v", err)
 	}
@@ -54,21 +57,90 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	if !strings.Contains(body, `"automation"`) || !strings.Contains(body, `"status":"completed"`) {
 		t.Fatalf("response missing safe automation status: %s", body)
 	}
+	if !strings.Contains(body, `"authorization"`) || !strings.Contains(body, `"initial_admin_user_id":"user-1"`) || !strings.Contains(body, `"role_code":"admin"`) {
+		t.Fatalf("response missing explicit initial administrator assignment: %s", body)
+	}
+	if access.userID != "user-1" || access.operatorID != "user-1" || access.applicationCode != "contract_management" {
+		t.Fatalf("unexpected access assignment: %#v", access)
+	}
 	if provisioner.input.ClientSecret != "must-never-reach-browser" {
 		t.Fatalf("deployment helper did not receive generated secret")
 	}
 }
 
+func TestOnboardSubsystemExistingEnvironmentReturnsActionableConflict(t *testing.T) {
+	t.Parallel()
+	service := &stubSubsystemOnboardingService{err: &application.SubsystemOnboardingConflict{
+		ApplicationCode: "contract_management",
+		Environment:     "prod",
+		Status:          "ACTIVE",
+	}}
+	handler, err := NewSubsystemOnboardingHandler(service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{}, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	requestBody := `{"application_code":"contract_management","application_name":"合同管理系统","environment":"prod","public_base_url":"http://localhost:8081","upstream_url":"http://contract-api:8081","path_prefix":"/contract_management","client_type":"confidential"}`
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.OnboardSubsystem(response, request)
+	if response.Code != stdhttp.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Code    string            `json:"code"`
+		Details map[string]string `json:"details"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Code != "IAM_SUBSYSTEM_ALREADY_ONBOARDED" {
+		t.Fatalf("code = %q", body.Code)
+	}
+	if body.Details["application_code"] != "contract_management" || body.Details["environment"] != "prod" || body.Details["status"] != "ACTIVE" {
+		t.Fatalf("unexpected details: %#v", body.Details)
+	}
+	if !strings.Contains(body.Details["next_action"], "日常代码") || !strings.Contains(body.Details["next_action"], "无需执行接入或撤销脚本") {
+		t.Fatalf("conflict guidance must keep normal subsystem releases separate from onboarding: %#v", body.Details)
+	}
+	if !errors.Is(service.err, application.ErrSubsystemOnboardingAlreadyExists) {
+		t.Fatal("typed conflict must support errors.Is")
+	}
+}
+
 type stubSubsystemOnboardingService struct {
 	result application.SubsystemOnboardingResult
+	err    error
 }
 
 func (service *stubSubsystemOnboardingService) OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
-	return service.result, nil
+	return service.result, service.err
 }
 
-func (*stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string) ([]application.PortalApplication, error) {
+func (*stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
 	return nil, nil
+}
+
+type recordingSubsystemAccessManager struct {
+	tenantID        string
+	applicationCode string
+	userID          string
+	operatorID      string
+	roleCode        string
+	err             error
+}
+
+func (manager *recordingSubsystemAccessManager) AssignInitialAdministrator(_ context.Context, tenantID, applicationCode, userID, operatorID string) (string, error) {
+	manager.tenantID = tenantID
+	manager.applicationCode = applicationCode
+	manager.userID = userID
+	manager.operatorID = operatorID
+	return manager.roleCode, manager.err
 }
 
 type recordingHTTPSubsystemProvisioner struct {

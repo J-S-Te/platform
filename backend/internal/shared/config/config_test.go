@@ -54,7 +54,7 @@ func TestValidateRejectsInvalidTrustedProxy(t *testing.T) {
 		HTTP:     HTTPConfig{Addr: ":8080", PublicBaseURL: "http://localhost:8080", TrustedProxies: []string{"not-an-ip"}},
 		MySQL:    MySQLConfig{Host: "127.0.0.1", Port: 3306, Database: "basic_platform", Username: "basic_platform"},
 		Auth:     AuthConfig{JWTIssuer: "basic-platform", JWTAudience: "console", ApplicationJWTAudience: "application", OIDCIssuer: "http://localhost:8080", SessionCookieName: "bp_session", SessionCookieSameSite: "Lax", SessionTTL: 8 * time.Hour},
-		Identity: IdentityConfig{ExternalOIDCHTTPTimeout: 10 * time.Second, DingTalkHTTPTimeout: 10 * time.Second},
+		Identity: IdentityConfig{},
 		Logging:  LoggingConfig{Directory: "/tmp/logs"}, FileStorageRoot: "/tmp/uploads",
 		Worker:      WorkerConfig{ID: "worker", PollInterval: time.Second, StaleLockTimeout: time.Minute},
 		Audit:       AuditConfig{ApplicationCode: "platform", EnvironmentCode: "dev"},

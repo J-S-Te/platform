@@ -9,6 +9,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	mysql "github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ManagementRepository persists the application/environment aggregate without handling OAuth
@@ -214,6 +215,95 @@ func (repository *ManagementRepository) UpdateEnvironment(ctx context.Context, i
 		return application.Environment{}, repository.environmentVersionOrNotFound(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
 	}
 	return repository.GetEnvironment(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
+}
+
+// DeleteEnvironment removes a single deployment environment and integration records that are
+// derived from it. Configuration namespaces and audit receipts are deliberately retained; their
+// existence blocks deletion instead of silently destroying operational evidence.
+func (repository *ManagementRepository) DeleteEnvironment(ctx context.Context, input application.EnvironmentDeleteInput) (application.Environment, error) {
+	var removed managementEnvironmentModel
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND application_id = ? AND id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+			Take(&removed).Error; err != nil {
+			return mapManagementError(err)
+		}
+		if removed.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+
+		for _, retainedTable := range []string{"cfg_namespace", "audit_ingestion_receipt"} {
+			var count int64
+			if err := transaction.Table(retainedTable).
+				Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return application.ErrEnvironmentDeletionBlocked
+			}
+		}
+
+		var clientIDs []string
+		if err := transaction.Model(&oauthClientManagementModel{}).
+			Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+			Pluck("id", &clientIDs).Error; err != nil {
+			return err
+		}
+		if err := deleteEnvironmentOAuthClientRecords(transaction, clientIDs); err != nil {
+			return err
+		}
+		if err := transaction.Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+			Delete(&loginTargetModel{}).Error; err != nil {
+			return err
+		}
+
+		result := transaction.Where("tenant_id = ? AND application_id = ? AND id = ? AND version = ?", input.TenantID, input.ApplicationID, input.EnvironmentID, input.Version).
+			Delete(&managementEnvironmentModel{})
+		if result.Error != nil {
+			return mapManagementError(result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrVersionConflict
+		}
+		return nil
+	})
+	if err != nil {
+		return application.Environment{}, err
+	}
+	return toEnvironment(removed), nil
+}
+
+func deleteEnvironmentOAuthClientRecords(transaction *gorm.DB, clientIDs []string) error {
+	if len(clientIDs) == 0 {
+		return nil
+	}
+
+	// Refresh-token lineage is self-referential, so detach parent links before deleting rows.
+	if err := transaction.Exec("UPDATE oauth_refresh_token SET parent_refresh_token_id = NULL WHERE oauth_client_id IN ?", clientIDs).Error; err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		"DELETE FROM oauth_authorization_code WHERE oauth_client_id IN ?",
+		"DELETE FROM oauth_refresh_token WHERE oauth_client_id IN ?",
+		"DELETE FROM oauth_token_family WHERE oauth_client_id IN ?",
+		"DELETE FROM oauth_token_revocation WHERE oauth_client_id IN ?",
+		"DELETE FROM oauth_client_assertion_replay WHERE oauth_client_id IN ?",
+		"DELETE FROM oauth_pushed_authorization_request WHERE oauth_client_id IN ?",
+		"DELETE FROM iam_oidc_user_consent WHERE oauth_client_id IN ?",
+		"DELETE FROM oauth_client_jwk WHERE oauth_client_id IN ?",
+		"DELETE FROM platform_oauth_post_logout_redirect_uri WHERE oauth_client_id IN ?",
+		"DELETE FROM platform_oauth_client_credential WHERE oauth_client_id IN ?",
+		"DELETE FROM platform_oauth_redirect_uri WHERE oauth_client_id IN ?",
+		"DELETE FROM platform_oauth_grant_type WHERE oauth_client_id IN ?",
+		"DELETE FROM platform_oauth_client_scope WHERE oauth_client_id IN ?",
+		"DELETE FROM platform_oauth_client WHERE id IN ?",
+	} {
+		if err := transaction.Exec(statement, clientIDs).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (repository *ManagementRepository) versionOrNotFound(ctx context.Context, tenantID, applicationID string) error {

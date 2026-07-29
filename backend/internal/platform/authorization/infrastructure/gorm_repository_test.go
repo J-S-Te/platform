@@ -39,3 +39,29 @@ func TestRoleBindingSubjectFilterIncludesEffectiveOrganizationMembership(t *test
 		t.Fatalf("effective time arguments = %#v, want %v", args[10:12], now)
 	}
 }
+
+func TestProtectedRoleCode(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []string{
+		"platform-super-admin",
+		" PLATFORM-SUPER-ADMIN ",
+		"platform-emergency-admin",
+		"platform-break-glass-production",
+	} {
+		if !isProtectedRoleCode(code) {
+			t.Errorf("isProtectedRoleCode(%q) = false, want true", code)
+		}
+	}
+
+	for _, code := range []string{
+		"platform-security-admin",
+		"role-custom-admin",
+		"platform-breakglass-admin",
+		"",
+	} {
+		if isProtectedRoleCode(code) {
+			t.Errorf("isProtectedRoleCode(%q) = true, want false", code)
+		}
+	}
+}

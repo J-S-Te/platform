@@ -15,9 +15,6 @@ import (
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
-	dingtalkhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/dingtalk/interfaces/http"
-	federationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/interfaces/http"
-	federatedloginhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/login/interfaces/http"
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/interfaces/http"
 	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
@@ -48,8 +45,6 @@ func NewRouter(
 	logger *slog.Logger,
 	database *gorm.DB,
 	authHandler *identityhttp.Handler,
-	externalLoginHandler *federatedloginhttp.Handler,
-	dingTalkLoginHandler *dingtalkhttp.Handler,
 	bootstrapHandler *identityhttp.BootstrapHandler,
 	managementHandler *identityhttp.ManagementHandler,
 	accountLifecycleHandler *identityhttp.AccountLifecycleHandler,
@@ -66,7 +61,6 @@ func NewRouter(
 	applicationAuthenticator *applicationregistryapplication.Service,
 	auditRecorder middleware.AuditRecorder,
 	oidcHandler *oidchttp.Handler,
-	federationHandler *federationhttp.Handler,
 	operational OperationalModules,
 ) *gin.Engine {
 	router := gin.New()
@@ -122,29 +116,17 @@ func NewRouter(
 		bootstrapRouter.POST("/first-super-admin", bootstrapRouteHandlers...)
 	}
 
-	if authHandler != nil || externalLoginHandler != nil || dingTalkLoginHandler != nil {
+	if authHandler != nil {
 		authRouter := router.Group("/api/v1/auth")
 		authRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
-		if authHandler != nil {
-			authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
+		authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
 
-			protected := authRouter.Group("")
-			protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
-			protected.POST("/token/refresh", adaptHandler(authHandler.Refresh))
-			protected.POST("/activity", adaptHandler(authHandler.Activity))
-			protected.POST("/logout", adaptHandler(authHandler.Logout))
-			protected.GET("/me", adaptHandler(authHandler.Me))
-		}
-		if externalLoginHandler != nil {
-			externalLoginRateLimit := middleware.FixedWindowRateLimit(30, time.Minute)
-			authRouter.GET("/external/login", externalLoginRateLimit, adaptHandler(externalLoginHandler.Start))
-			authRouter.GET("/external/callback", externalLoginRateLimit, adaptHandler(externalLoginHandler.Callback))
-		}
-		if dingTalkLoginHandler != nil {
-			dingTalkRateLimit := middleware.FixedWindowRateLimit(30, time.Minute)
-			authRouter.POST("/dingtalk/qr-sessions", dingTalkRateLimit, adaptHandler(dingTalkLoginHandler.CreateQRSession))
-			authRouter.GET("/dingtalk/callback", dingTalkRateLimit, adaptHandler(dingTalkLoginHandler.Callback))
-		}
+		protected := authRouter.Group("")
+		protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
+		protected.POST("/token/refresh", adaptHandler(authHandler.Refresh))
+		protected.POST("/activity", adaptHandler(authHandler.Activity))
+		protected.POST("/logout", adaptHandler(authHandler.Logout))
+		protected.GET("/me", adaptHandler(authHandler.Me))
 	}
 
 	if authHandler != nil {
@@ -153,16 +135,6 @@ func NewRouter(
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
 			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger))
-		}
-
-		if federationHandler != nil {
-			apiRouter.GET("/identity-providers", middleware.RequirePermission("platform:identity-provider:read"), adaptHandler(federationHandler.ListProviders))
-			apiRouter.POST("/identity-providers", middleware.RequirePermission("platform:identity-provider:create"), adaptHandler(federationHandler.CreateProvider))
-			apiRouter.GET("/identity-providers/:provider_id", middleware.RequirePermission("platform:identity-provider:read"), adaptHandler(federationHandler.GetProvider))
-			apiRouter.PATCH("/identity-providers/:provider_id", middleware.RequirePermission("platform:identity-provider:update"), adaptHandler(federationHandler.UpdateProvider))
-			apiRouter.GET("/users/:user_id/external-identities", middleware.RequirePermission("platform:identity-binding:read"), adaptHandler(federationHandler.ListUserBindings))
-			apiRouter.POST("/users/:user_id/external-identities", middleware.RequirePermission("platform:identity-binding:create"), adaptHandler(federationHandler.BindUser))
-			apiRouter.DELETE("/users/:user_id/external-identities/:binding_id", middleware.RequirePermission("platform:identity-binding:delete"), adaptHandler(federationHandler.UnbindUser))
 		}
 
 		if managementHandler != nil {
@@ -176,6 +148,8 @@ func NewRouter(
 			apiRouter.PATCH("/accounts/:account_id", middleware.RequirePermission("platform:account:update"), adaptHandler(managementHandler.UpdateAccount))
 			apiRouter.GET("/org-units", middleware.RequirePermission("platform:organization:read"), adaptHandler(managementHandler.ListOrgUnits))
 			apiRouter.POST("/org-units", middleware.RequirePermission("platform:organization:create"), adaptHandler(managementHandler.CreateOrgUnit))
+			apiRouter.PATCH("/org-units/:org_unit_id", middleware.RequirePermission("platform:organization:update"), adaptHandler(managementHandler.UpdateOrgUnit))
+			apiRouter.DELETE("/org-units/:org_unit_id", middleware.RequirePermission("platform:organization:delete"), adaptHandler(managementHandler.DeleteOrgUnit))
 			apiRouter.GET("/positions", middleware.RequirePermission("platform:position:read"), adaptHandler(managementHandler.ListPositions))
 			apiRouter.POST("/positions", middleware.RequirePermission("platform:position:create"), adaptHandler(managementHandler.CreatePosition))
 			apiRouter.GET("/memberships", middleware.RequirePermission("platform:membership:read"), adaptHandler(managementHandler.ListMemberships))
@@ -192,6 +166,7 @@ func NewRouter(
 			apiRouter.GET("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:read"), adaptHandler(applicationManagementHandler.ListEnvironments))
 			apiRouter.POST("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:create"), adaptHandler(applicationManagementHandler.CreateEnvironment))
 			apiRouter.PATCH("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:update"), adaptHandler(applicationManagementHandler.UpdateEnvironment))
+			apiRouter.DELETE("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:delete"), adaptHandler(applicationManagementHandler.DeleteEnvironment))
 		}
 
 		if operational.SubsystemOnboarding != nil {

@@ -3,6 +3,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,9 +29,6 @@ import (
 	dictionaryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/infrastructure"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
 	identityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
-	federationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/application"
-	federationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/infrastructure"
-	federationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/federation/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/infrastructure"
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
 	oidcapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/application"
@@ -216,44 +214,6 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	federationRepository, err := federationinfrastructure.NewRepository(db)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	var federatedProviderSecretProtector *security.EnvelopeProtector
-	if strings.TrimSpace(cfg.Identity.FederatedProviderSecretEncryptionKey) != "" {
-		federatedProviderSecretProtector, err = security.NewEnvelopeProtector(
-			cfg.Identity.FederatedProviderSecretEncryptionKey,
-			"IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY",
-		)
-		if err != nil {
-			_ = database.Close(db)
-			_ = logFile.Close()
-			return nil, err
-		}
-	}
-	var federationService *federationapplication.Service
-	if federatedProviderSecretProtector == nil {
-		federationService, err = federationapplication.NewService(federationRepository, ulid.Generator{}, federationapplication.SystemClock{})
-	} else {
-		federationService, err = federationapplication.NewService(
-			federationRepository, ulid.Generator{}, federationapplication.SystemClock{}, federatedProviderSecretProtector,
-		)
-	}
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	federationHandler, err := federationhttp.NewHandler(federationService, logger)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-
 	authService, err := identityapplication.NewService(
 		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL,
 	)
@@ -275,22 +235,6 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth, auditService, cfg.Audit, loginTargetResolver)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	externalLoginHandler, err := buildExternalLoginHandler(
-		cfg, db, authService, federatedProviderSecretProtector, logger, auditService,
-	)
-	if err != nil {
-		_ = database.Close(db)
-		_ = logFile.Close()
-		return nil, err
-	}
-	dingTalkLoginHandler, err := buildDingTalkLoginHandler(
-		cfg, db, authService, federatedProviderSecretProtector, logger, auditService,
-	)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -507,7 +451,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	operational, err := buildOperationalModules(cfg, db, logger)
+	operational, err := buildOperationalModules(cfg, db, logger, contractAccessService)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -516,7 +460,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 
 	return &API{
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, externalLoginHandler, dingTalkLoginHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, contractAccessHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, federationHandler, operational,
+			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, contractAccessHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
 		Logger:   logger,
 		database: db,
@@ -531,6 +475,9 @@ type sys004OIDCAuthorizationResolver struct {
 func (resolver sys004OIDCAuthorizationResolver) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (oidctokenissuer.AuthorizationClaims, error) {
 	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
 	if err != nil {
+		if errors.Is(err, authorizationsys004.ErrNotConfigured) {
+			return oidctokenissuer.AuthorizationClaims{}, oidcapplication.ErrAccessDenied
+		}
 		return oidctokenissuer.AuthorizationClaims{}, err
 	}
 	return oidctokenissuer.AuthorizationClaims{

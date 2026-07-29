@@ -32,6 +32,7 @@ usage() {
   bash scripts/docker-local.sh logs [服务名...]
   bash scripts/docker-local.sh config
   bash scripts/docker-local.sh verify
+  bash scripts/docker-local.sh refresh-api
 
 up/restart 选项：
   --build                         重新构建三个业务镜像
@@ -42,6 +43,10 @@ up/restart 选项：
   --env-file PATH                 基础平台环境文件（默认 platform/docker/.env.local）
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   -h, --help                      显示帮助
+
+refresh-api：
+  只重建并重启基础平台 API、受控 provisioner，且仅执行基础平台迁移。
+  不构建 frontend 或 contract-api；适用于后端路由、迁移或权限改动后的快速更新。
 
 应用容器：
   frontend      基础平台前端 + 合同管理前端（宿主机仅发布 8081）
@@ -58,7 +63,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-        up|down|stop|restart|ps|logs|config|verify)
+        up|down|stop|restart|ps|logs|config|verify|refresh-api)
             command_name="$1"
             shift
             ;;
@@ -161,8 +166,6 @@ ensure_platform_env_file() {
         replace_line_in_file "$env_file" MYSQL_PASSWORD "$(random_hex 24)"
         replace_line_in_file "$env_file" MYSQL_ROOT_PASSWORD "$(random_hex 32)"
         replace_line_in_file "$env_file" IAM_MOBILE_ENCRYPTION_KEY "$(random_key)"
-        replace_line_in_file "$env_file" IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY "$(random_key)"
-        replace_line_in_file "$env_file" IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY "$(random_key)"
         replace_line_in_file "$env_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
         log "已根据模板生成基础平台环境文件：$env_file"
     fi
@@ -231,6 +234,18 @@ prepare_base_images() {
         "temporalio/auto-setup:1.29.7"
     )
     log "检查并串行准备基础镜像"
+    for image in "${images[@]}"; do pull_image_with_retry "$image"; done
+}
+
+prepare_platform_api_base_images() {
+    # refresh-api 只涉及 Go 后端镜像；不要因为 Node/Nginx 镜像拉取失败而阻塞
+    # 后端安全修复、路由或迁移的发布。
+    local image
+    local images=(
+        "golang:1.26.4-alpine"
+        "alpine:3.21"
+    )
+    log "检查并串行准备基础平台 API 所需镜像"
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
 }
 
@@ -421,6 +436,30 @@ start_stack() {
     log "合同管理前端：http://localhost:${FRONTEND_HTTP_PORT:-8081}/contract_management/"
 }
 
+refresh_platform_api() {
+    # 仅刷新基础平台后端：当前 API 不会包含新增路由时，使用该命令即可。
+    # compose() 固定携带合同环境文件，所以这里只保证它存在，不校验其 OIDC 占位符。
+    prepare_operational_env
+    prepare_platform_api_base_images
+
+    log "重新构建基础平台后端镜像（不构建 frontend 或 contract-api）"
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build \
+        migrate api subsystem-provisioner
+
+    log "启动基础平台 MySQL，并执行基础平台数据库迁移"
+    compose_run up -d --wait mysql
+    compose_run run --rm --no-deps migrate ./migrate
+
+    # api 依赖 provisioner 的 Unix Socket。先以新镜像重建 provisioner，再重启 api，
+    # 避免 API 启动后连接到过期 helper 的情况。
+    log "重建受控子系统 provisioner"
+    compose_run up -d --wait --no-deps subsystem-provisioner
+    log "重建基础平台 API"
+    compose_run up -d --wait --no-deps api
+    compose_run ps api subsystem-provisioner mysql
+    log "基础平台 API 已刷新；现在可以重新执行 subsystem-offboarding.sh"
+}
+
 prepare_operational_env() {
     ensure_platform_env_file
     ensure_contract_env_file false
@@ -455,5 +494,8 @@ case "$command_name" in
     verify)
         prepare_operational_env
         verify_gateway_routes
+        ;;
+    refresh-api)
+        refresh_platform_api
         ;;
 esac

@@ -1,12 +1,15 @@
 package bootstrap
 
 import (
+	"context"
 	"errors"
 	"log/slog"
+	"strings"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/infrastructure"
 	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/interfaces/http"
+	authorizationsys004 "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/sys004"
 	filetaskapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/application"
 	filetaskinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/infrastructure"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
@@ -22,8 +25,8 @@ import (
 // buildOperationalModules wires the remaining platform operations modules through their public
 // application contracts. Schema changes remain explicit SQL migrations; this function never calls
 // GORM AutoMigrate.
-func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger) (httptransport.OperationalModules, error) {
-	if database == nil || logger == nil {
+func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, contractAccessService *authorizationsys004.Service) (httptransport.OperationalModules, error) {
+	if database == nil || logger == nil || contractAccessService == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
 	}
 
@@ -61,7 +64,13 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(subsystemService, subsystemProvisioner, cfg.Auth.OIDCIssuer, logger)
+	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(
+		subsystemService,
+		subsystemProvisioner,
+		subsystemInitialAccessManager{contractAccess: contractAccessService},
+		cfg.Auth.OIDCIssuer,
+		logger,
+	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
@@ -114,4 +123,43 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		Notifications:       notificationHandler,
 		FilesAndJobs:        fileTaskHandler,
 	}, nil
+}
+
+// subsystemInitialAccessManager bridges subsystem onboarding to the protected
+// contract-management authorization catalog. Generic applications keep their existing
+// authorization model; contract-management receives an explicit initial administrator.
+type subsystemInitialAccessManager struct {
+	contractAccess *authorizationsys004.Service
+}
+
+func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
+	ctx context.Context,
+	tenantID string,
+	applicationCode string,
+	userID string,
+	operatorID string,
+) (string, error) {
+	if strings.TrimSpace(applicationCode) != authorizationsys004.ApplicationCode {
+		return "", nil
+	}
+	if manager.contractAccess == nil {
+		return "", errors.New("contract application access service is unavailable")
+	}
+	_, err := manager.contractAccess.UpdateAccess(ctx, authorizationsys004.UpdateAccessInput{
+		TenantID:   tenantID,
+		UserID:     userID,
+		OperatorID: operatorID,
+		RoleCode:   "admin",
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, authorizationsys004.ErrValidation):
+			return "", applicationregistryapplication.ErrValidation
+		case errors.Is(err, authorizationsys004.ErrNotFound):
+			return "", applicationregistryapplication.ErrNotFound
+		default:
+			return "", err
+		}
+	}
+	return "admin", nil
 }

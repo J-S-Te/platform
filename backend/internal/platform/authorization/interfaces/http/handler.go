@@ -278,11 +278,12 @@ func (h *Handler) CreateRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := h.service.CreateRole(r.Context(), application.RoleCreateInput{
-		TenantID:      principal.Tenant.ID,
-		OperatorID:    principal.User.ID,
-		Name:          payload.Name,
-		Description:   payload.Description,
-		PermissionIDs: payload.PermissionIDs,
+		TenantID:          principal.Tenant.ID,
+		OperatorID:        principal.User.ID,
+		OperatorAccountID: principal.Account.ID,
+		Name:              payload.Name,
+		Description:       payload.Description,
+		PermissionIDs:     payload.PermissionIDs,
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -321,14 +322,15 @@ func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := h.service.UpdateRole(r.Context(), application.RoleUpdateInput{
-		TenantID:      principal.Tenant.ID,
-		OperatorID:    principal.User.ID,
-		RoleID:        r.PathValue("role_id"),
-		Name:          payload.Name,
-		Description:   payload.Description,
-		Status:        payload.Status,
-		PermissionIDs: payload.PermissionIDs,
-		Version:       payload.Version,
+		TenantID:          principal.Tenant.ID,
+		OperatorID:        principal.User.ID,
+		OperatorAccountID: principal.Account.ID,
+		RoleID:            r.PathValue("role_id"),
+		Name:              payload.Name,
+		Description:       payload.Description,
+		Status:            payload.Status,
+		PermissionIDs:     payload.PermissionIDs,
+		Version:           payload.Version,
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -501,6 +503,8 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, application.ErrConflict):
 		httpresponse.WriteError(w, r, http.StatusConflict, httperror.Conflict)
+	case errors.Is(err, application.ErrForbidden):
+		httpresponse.WriteError(w, r, http.StatusForbidden, httperror.Forbidden)
 	case errors.Is(err, application.ErrVersionConflict):
 		httpresponse.WriteError(w, r, http.StatusConflict, httperror.VersionConflict)
 	default:

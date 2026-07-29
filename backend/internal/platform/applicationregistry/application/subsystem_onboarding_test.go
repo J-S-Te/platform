@@ -52,7 +52,7 @@ func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.C
 	}, nil
 }
 
-func (repository *subsystemOnboardingRepositoryStub) ListPortalApplications(_ context.Context, _, _ string) ([]PortalApplication, error) {
+func (repository *subsystemOnboardingRepositoryStub) ListPortalApplications(_ context.Context, _, _, _ string) ([]PortalApplication, error) {
 	repository.listCalls++
 	return repository.portalItems, nil
 }
@@ -125,7 +125,7 @@ func TestListPortalApplicationsResolvesRelativeTargets(t *testing.T) {
 		t.Fatalf("construct service: %v", err)
 	}
 
-	items, err := service.ListPortalApplications(context.Background(), "tenant-1", "prod")
+	items, err := service.ListPortalApplications(context.Background(), "tenant-1", "user-1", "prod")
 	if err != nil {
 		t.Fatalf("list portal applications: %v", err)
 	}

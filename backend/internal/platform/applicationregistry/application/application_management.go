@@ -23,6 +23,9 @@ var (
 	ErrVersionConflict = errors.New("application registry version conflict")
 	// ErrValidation means a management request cannot be safely persisted.
 	ErrValidation = errors.New("invalid application registry input")
+	// ErrEnvironmentDeletionBlocked means an environment still has configuration or audit evidence
+	// that must be retained instead of being deleted.
+	ErrEnvironmentDeletionBlocked = errors.New("application environment deletion blocked by retained records")
 )
 
 const (
@@ -168,6 +171,17 @@ type EnvironmentUpdateInput struct {
 	Version       uint64
 }
 
+// EnvironmentDeleteInput physically removes one non-development deployment environment and its
+// derived login-target/OAuth integration records after explicit scoped confirmation.
+type EnvironmentDeleteInput struct {
+	TenantID         string
+	OperatorID       string
+	ApplicationID    string
+	EnvironmentID    string
+	ConfirmationCode string
+	Version          uint64
+}
+
 // ManagementRepository owns tenant-scoped persistence for application and environment
 // management. It does not expose OAuth client or credential mutation operations.
 type ManagementRepository interface {
@@ -180,6 +194,7 @@ type ManagementRepository interface {
 	CreateEnvironment(context.Context, EnvironmentCreateInput, string, time.Time) (Environment, error)
 	GetEnvironment(context.Context, string, string, string) (Environment, error)
 	UpdateEnvironment(context.Context, EnvironmentUpdateInput, time.Time) (Environment, error)
+	DeleteEnvironment(context.Context, EnvironmentDeleteInput) (Environment, error)
 }
 
 // ManagementService coordinates controlled, tenant-isolated application and environment changes.
@@ -341,6 +356,39 @@ func (service *ManagementService) UpdateEnvironment(ctx context.Context, input E
 		return Environment{}, ErrValidation
 	}
 	return service.repository.UpdateEnvironment(ctx, input, service.clock.Now().UTC())
+}
+
+// DeleteEnvironment removes one non-development environment while preserving its parent
+// application and every other environment. The repository atomically removes only derived
+// integration records and rejects deletion when configuration or audit evidence exists.
+func (service *ManagementService) DeleteEnvironment(ctx context.Context, input EnvironmentDeleteInput) (Environment, error) {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
+	input.EnvironmentID = strings.TrimSpace(input.EnvironmentID)
+	input.ConfirmationCode = strings.TrimSpace(input.ConfirmationCode)
+	if input.TenantID == "" || input.OperatorID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || input.ConfirmationCode == "" || input.Version == 0 {
+		return Environment{}, ErrValidation
+	}
+
+	registeredApplication, err := service.repository.GetApplication(ctx, input.TenantID, input.ApplicationID)
+	if err != nil {
+		return Environment{}, err
+	}
+	environment, err := service.repository.GetEnvironment(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
+	if err != nil {
+		return Environment{}, err
+	}
+	if registeredApplication.Code == builtInApplicationCode || environment.Environment == "dev" {
+		return Environment{}, ErrConflict
+	}
+	if input.ConfirmationCode != registeredApplication.Code+"/"+environment.Environment {
+		return Environment{}, ErrValidation
+	}
+	if input.Version != environment.Version {
+		return Environment{}, ErrVersionConflict
+	}
+	return service.repository.DeleteEnvironment(ctx, input)
 }
 
 func normalizePageRequest(query PageRequest) PageRequest {

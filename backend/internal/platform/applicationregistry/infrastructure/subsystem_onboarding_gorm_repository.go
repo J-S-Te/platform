@@ -50,6 +50,22 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		write.LoginTarget.ApplicationID = createdApplication.ID
 		write.OAuthClient.ApplicationID = createdApplication.ID
 
+		// Onboarding is intentionally create-only: an existing environment can already
+		// own a LoginTarget and OAuth client whose secret cannot be recovered safely.
+		// Detect it before any child write and return an actionable conflict instead of
+		// a generic duplicate-key response.
+		existingEnvironment, findErr := repository.findEnvironmentByCode(ctx, transaction, write.Environment.TenantID, createdApplication.ID, write.Environment.Environment)
+		if findErr == nil {
+			return &application.SubsystemOnboardingConflict{
+				ApplicationCode: createdApplication.Code,
+				Environment:     existingEnvironment.Environment,
+				Status:          existingEnvironment.Status,
+			}
+		}
+		if !errors.Is(findErr, application.ErrNotFound) {
+			return findErr
+		}
+
 		createdEnvironment, err := management.CreateEnvironment(ctx, write.Environment, write.EnvironmentID, now)
 		if err != nil {
 			return err
@@ -87,6 +103,18 @@ func (repository *SubsystemOnboardingGORMRepository) findApplicationByCode(ctx c
 	return toApplication(model), nil
 }
 
+// findEnvironmentByCode looks up an existing tenant/application environment for the create-only
+// conflict check. Its caller must already have resolved the application in the same transaction.
+func (repository *SubsystemOnboardingGORMRepository) findEnvironmentByCode(ctx context.Context, database *gorm.DB, tenantID, applicationID, environment string) (application.Environment, error) {
+	var model managementEnvironmentModel
+	if err := database.WithContext(ctx).
+		Where("tenant_id = ? AND application_id = ? AND environment = ?", tenantID, applicationID, environment).
+		Take(&model).Error; err != nil {
+		return application.Environment{}, mapManagementError(err)
+	}
+	return toEnvironment(model), nil
+}
+
 type portalApplicationRow struct {
 	ApplicationID string  `gorm:"column:application_id"`
 	Code          string  `gorm:"column:code"`
@@ -102,7 +130,7 @@ type portalApplicationRow struct {
 
 // ListPortalApplications returns one preferred active environment/target per active application.
 // Preference order without an explicit environment is prod, staging, test, dev, then lexical.
-func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx context.Context, tenantID, environment string) ([]application.PortalApplication, error) {
+func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx context.Context, tenantID, userID, environment string) ([]application.PortalApplication, error) {
 	query := repository.database.WithContext(ctx).
 		Table("platform_application AS application").
 		Select(`application.id AS application_id, application.code, application.name, application.description,
@@ -110,7 +138,26 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 			target.target_code, target.target_uri`).
 		Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
 		Joins("JOIN platform_application_login_target AS target ON target.environment_id = environment.id AND target.application_id = application.id AND target.tenant_id = application.tenant_id").
-		Where("application.tenant_id = ? AND application.status = ? AND environment.status = ? AND target.status = ?", tenantID, "ACTIVE", "ACTIVE", "ACTIVE")
+		Where("application.tenant_id = ? AND application.status = ? AND environment.status = ? AND target.status = ?", tenantID, "ACTIVE", "ACTIVE", "ACTIVE").
+		Where(`(
+			application.code = 'platform'
+			OR NOT EXISTS (
+				SELECT 1 FROM authz_role AS catalog_role
+				WHERE catalog_role.tenant_id = application.tenant_id
+					AND catalog_role.application_id = application.id
+					AND catalog_role.status = 'ACTIVE'
+			)
+			OR EXISTS (
+				SELECT 1 FROM authz_user_application_role AS access_assignment
+				JOIN authz_role AS assigned_role ON assigned_role.id = access_assignment.role_id
+				WHERE access_assignment.tenant_id = application.tenant_id
+					AND access_assignment.application_id = application.id
+					AND access_assignment.user_id = ?
+					AND assigned_role.tenant_id = application.tenant_id
+					AND assigned_role.application_id = application.id
+					AND assigned_role.status = 'ACTIVE'
+			)
+		)`, userID)
 	if environment != "" {
 		query = query.Where("environment.environment = ?", environment)
 	}

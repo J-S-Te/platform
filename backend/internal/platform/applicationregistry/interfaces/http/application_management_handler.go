@@ -29,6 +29,7 @@ type managementApplicationService interface {
 	ListEnvironments(context.Context, string, string, application.PageRequest) (application.PageResult[application.Environment], error)
 	CreateEnvironment(context.Context, application.EnvironmentCreateInput) (application.Environment, error)
 	UpdateEnvironment(context.Context, application.EnvironmentUpdateInput) (application.Environment, error)
+	DeleteEnvironment(context.Context, application.EnvironmentDeleteInput) (application.Environment, error)
 }
 
 // ManagementHandler serves controlled application registrations and their environments. It
@@ -91,6 +92,11 @@ type environmentUpdateRequest struct {
 	Metadata    json.RawMessage `json:"metadata"`
 	Status      string          `json:"status"`
 	Version     uint64          `json:"version"`
+}
+
+type environmentDeleteRequest struct {
+	ConfirmationCode string `json:"confirmation_code"`
+	Version          uint64 `json:"version"`
 }
 
 type applicationResponse struct {
@@ -344,6 +350,42 @@ func (handler *ManagementHandler) UpdateEnvironment(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境已更新", environmentToResponse(updated))
 }
 
+// DeleteEnvironment handles DELETE /api/v1/applications/:application_id/environments/:environment_id.
+// It requires the caller to confirm the exact application-code/environment pair and only removes
+// integration records derived from that one environment.
+func (handler *ManagementHandler) DeleteEnvironment(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+
+	var payload environmentDeleteRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+
+	removed, err := handler.service.DeleteEnvironment(request.Context(), application.EnvironmentDeleteInput{
+		TenantID:         principal.Tenant.ID,
+		OperatorID:       principal.User.ID,
+		ApplicationID:    request.PathValue("application_id"),
+		EnvironmentID:    request.PathValue("environment_id"),
+		ConfirmationCode: payload.ConfirmationCode,
+		Version:          payload.Version,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	handler.logger.Info("application environment offboarded",
+		"tenant_id", principal.Tenant.ID,
+		"application_id", removed.ApplicationID,
+		"environment_id", removed.ID,
+		"environment", removed.Environment,
+		"operator_id", principal.User.ID,
+	)
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境已删除，关联的登录目标与 OAuth 客户端配置已清理", environmentToResponse(removed))
+}
+
 func (handler *ManagementHandler) principal(writer http.ResponseWriter, request *http.Request) (authctx.Principal, bool) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" || strings.TrimSpace(principal.User.ID) == "" {
@@ -359,6 +401,9 @@ func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
 	case errors.Is(err, application.ErrNotFound):
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
+	case errors.Is(err, application.ErrEnvironmentDeletionBlocked):
+		handler.logger.Warn("application environment deletion blocked by retained records", "path", request.URL.Path, "error", err)
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("IAM_ENVIRONMENT_DELETE_BLOCKED", "环境仍有关联配置或审计记录，已拒绝删除", nil))
 	case errors.Is(err, application.ErrConflict):
 		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.Conflict)
 	case errors.Is(err, application.ErrVersionConflict):

@@ -18,6 +18,8 @@ var (
 	ErrConflict = errors.New("authorization resource conflict")
 	// ErrVersionConflict identifies stale optimistic-lock input.
 	ErrVersionConflict = errors.New("authorization version conflict")
+	// ErrForbidden identifies an authorization-management operation the current operator may not perform.
+	ErrForbidden = errors.New("authorization operation forbidden")
 	// ErrValidation signals a caller-correctable request error.
 	ErrValidation = errors.New("authorization validation failed")
 )
@@ -56,9 +58,9 @@ type Repository interface {
 	ListPermissions(context.Context, string, PageRequest) (PageResult[domain.Permission], error)
 	CreatePermission(context.Context, string, string, domain.Permission) (domain.Permission, error)
 	ListRoles(context.Context, string, PageRequest) (PageResult[domain.Role], error)
-	CreateRole(context.Context, string, string, domain.Role, []string) (domain.Role, error)
+	CreateRole(context.Context, string, string, string, domain.Role, []string) (domain.Role, error)
 	GetRole(context.Context, string, string) (domain.Role, error)
-	UpdateRole(context.Context, string, string, domain.Role, []string) (domain.Role, error)
+	UpdateRole(context.Context, string, string, string, domain.Role, []string) (domain.Role, error)
 	ListRoleBindings(context.Context, string, PageRequest) (PageResult[domain.RoleBinding], error)
 	CreateRoleBinding(context.Context, string, string, domain.RoleBinding) (domain.RoleBinding, error)
 	UpdateRoleBinding(context.Context, string, string, domain.RoleBinding) (domain.RoleBinding, error)
@@ -129,16 +131,16 @@ func (s *Service) CreatePermission(ctx context.Context, in PermissionCreateInput
 }
 
 type RoleCreateInput struct {
-	TenantID, OperatorID, Name string
-	Description                *string
-	PermissionIDs              []string
+	TenantID, OperatorID, OperatorAccountID, Name string
+	Description                                   *string
+	PermissionIDs                                 []string
 }
 
 func (s *Service) ListRoles(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Role], error) {
 	return s.repository.ListRoles(ctx, tenantID, normalizePage(query))
 }
 func (s *Service) CreateRole(ctx context.Context, in RoleCreateInput) (domain.Role, error) {
-	if err := require(in.TenantID, in.OperatorID, in.Name); err != nil {
+	if err := require(in.TenantID, in.OperatorID, in.OperatorAccountID, in.Name); err != nil {
 		return domain.Role{}, err
 	}
 	if err := uniqueIDs(in.PermissionIDs); err != nil {
@@ -156,7 +158,7 @@ func (s *Service) CreateRole(ctx context.Context, in RoleCreateInput) (domain.Ro
 	if err != nil {
 		return domain.Role{}, fmt.Errorf("generate role ID: %w", err)
 	}
-	return s.repository.CreateRole(ctx, in.TenantID, in.OperatorID, domain.Role{ID: id, Code: generatedRoleCode(id), Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: domain.StatusActive}, in.PermissionIDs)
+	return s.repository.CreateRole(ctx, in.TenantID, in.OperatorID, in.OperatorAccountID, domain.Role{ID: id, Code: generatedRoleCode(id), Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: domain.StatusActive}, in.PermissionIDs)
 }
 func (s *Service) GetRole(ctx context.Context, tenantID, roleID string) (domain.Role, error) {
 	if err := require(tenantID, roleID); err != nil {
@@ -166,14 +168,14 @@ func (s *Service) GetRole(ctx context.Context, tenantID, roleID string) (domain.
 }
 
 type RoleUpdateInput struct {
-	TenantID, OperatorID, RoleID, Name, Status string
-	Description                                *string
-	PermissionIDs                              []string
-	Version                                    uint64
+	TenantID, OperatorID, OperatorAccountID, RoleID, Name, Status string
+	Description                                                   *string
+	PermissionIDs                                                 []string
+	Version                                                       uint64
 }
 
 func (s *Service) UpdateRole(ctx context.Context, in RoleUpdateInput) (domain.Role, error) {
-	if err := require(in.TenantID, in.OperatorID, in.RoleID, in.Name, in.Status); err != nil {
+	if err := require(in.TenantID, in.OperatorID, in.OperatorAccountID, in.RoleID, in.Name, in.Status); err != nil {
 		return domain.Role{}, err
 	}
 	if in.Version == 0 {
@@ -193,7 +195,7 @@ func (s *Service) UpdateRole(ctx context.Context, in RoleUpdateInput) (domain.Ro
 			return domain.Role{}, err
 		}
 	}
-	return s.repository.UpdateRole(ctx, in.TenantID, in.OperatorID, domain.Role{ID: in.RoleID, Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: in.Status, Version: in.Version}, in.PermissionIDs)
+	return s.repository.UpdateRole(ctx, in.TenantID, in.OperatorID, in.OperatorAccountID, domain.Role{ID: in.RoleID, Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: in.Status, Version: in.Version}, in.PermissionIDs)
 }
 
 // generatedRoleCode creates a stable custom-role code from its ULID primary key.
@@ -319,14 +321,16 @@ func validateBinding(tenant, operator, role, subjectType, subjectID, scopeType s
 	if !oneOf(subjectType, "USER", "ACCOUNT", "ORG_UNIT", "POSITION") {
 		return validation("subject_type is invalid")
 	}
-	if !oneOf(scopeType, "TENANT", "ORG_UNIT", "RESOURCE") {
-		return validation("scope_type is invalid")
+	// Management routes currently authorize only a tenant-wide, server-loaded permission
+	// set. Until every protected resource is evaluated by a trusted resource-scope policy
+	// enforcement point, accepting an organization/resource binding would create a misleading
+	// configuration that cannot safely authorize those routes. Fail closed instead of silently
+	// widening it to a tenant permission.
+	if scopeType != "TENANT" {
+		return validation("only tenant scope is supported until resource-scope authorization is enforced")
 	}
-	if scopeType == "TENANT" && scopeID != nil && strings.TrimSpace(*scopeID) != "" {
+	if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
 		return validation("tenant scope must not include scope_id")
-	}
-	if scopeType != "TENANT" && (scopeID == nil || strings.TrimSpace(*scopeID) == "") {
-		return validation("scope_id is required for non-tenant scope")
 	}
 	if expiresAt != nil && !expiresAt.After(now.UTC()) {
 		return validation("expires_at must be in the future")

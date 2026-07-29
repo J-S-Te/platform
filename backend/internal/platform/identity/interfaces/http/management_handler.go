@@ -36,6 +36,8 @@ type managementApplicationService interface {
 	UpdateAccount(context.Context, application.AccountUpdateInput) (domain.Account, error)
 	ListOrgUnits(context.Context, string, application.PageRequest) (application.PageResult[domain.OrgUnit], error)
 	CreateOrgUnit(context.Context, application.OrgUnitCreateInput) (domain.OrgUnit, error)
+	UpdateOrgUnit(context.Context, application.OrgUnitUpdateInput) (domain.OrgUnit, error)
+	DeleteOrgUnit(context.Context, application.OrgUnitDeleteInput) error
 	ListPositions(context.Context, string, application.PageRequest) (application.PageResult[domain.Position], error)
 	CreatePosition(context.Context, application.PositionCreateInput) (domain.Position, error)
 	ListMemberships(context.Context, string, application.PageRequest) (application.PageResult[domain.Membership], error)
@@ -95,6 +97,17 @@ type orgUnitCreateRequest struct {
 	Code      *string `json:"code,omitempty"`
 	Name      string  `json:"name"`
 	SortOrder int     `json:"sort_order"`
+}
+
+type orgUnitUpdateRequest struct {
+	ParentID  *string `json:"parent_id"`
+	Name      string  `json:"name"`
+	SortOrder int     `json:"sort_order"`
+	Version   uint64  `json:"version"`
+}
+
+type orgUnitDeleteRequest struct {
+	Version uint64 `json:"version"`
 }
 
 // positionCreateRequest keeps code as an ignored compatibility field for rolling deployments.
@@ -397,6 +410,48 @@ func (handler *ManagementHandler) CreateOrgUnit(writer http.ResponseWriter, requ
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "组织单元已创建", toOrgUnitResponse(result))
+}
+
+func (handler *ManagementHandler) UpdateOrgUnit(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		handler.unauthenticated(writer, request)
+		return
+	}
+	var payload orgUnitUpdateRequest
+	if !decodeManagementRequest(writer, request, &payload) {
+		handler.validation(writer, request)
+		return
+	}
+	result, err := handler.service.UpdateOrgUnit(request.Context(), application.OrgUnitUpdateInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: request.PathValue("org_unit_id"),
+		ParentID: payload.ParentID, Name: payload.Name, SortOrder: payload.SortOrder, Version: payload.Version,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "组织单元已更新", toOrgUnitResponse(result))
+}
+
+func (handler *ManagementHandler) DeleteOrgUnit(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		handler.unauthenticated(writer, request)
+		return
+	}
+	var payload orgUnitDeleteRequest
+	if !decodeManagementRequest(writer, request, &payload) {
+		handler.validation(writer, request)
+		return
+	}
+	if err := handler.service.DeleteOrgUnit(request.Context(), application.OrgUnitDeleteInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: request.PathValue("org_unit_id"), Version: payload.Version,
+	}); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "组织单元已删除，相关岗位和任职关系已停用", map[string]any{})
 }
 
 func (handler *ManagementHandler) ListPositions(writer http.ResponseWriter, request *http.Request) {

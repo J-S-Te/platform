@@ -31,10 +31,11 @@ func RequireSameOrigin(issuer string) gin.HandlerFunc {
 	}
 }
 
-// RequireAllowedOriginForUnsafeMethods protects cookie-backed APIs from cross-site writes while
-// preserving non-browser integrations that do not send browser fetch metadata. Modern browsers
-// send Origin and Sec-Fetch-Site on cross-site POST/PUT/PATCH/DELETE requests, so either signal is
-// sufficient to reject a forged request.
+// RequireAllowedOriginForUnsafeMethods protects cookie-backed APIs from cross-site writes.
+// Every unsafe browser-session request must supply an explicitly allowed Origin. Failing closed
+// when Origin is absent avoids treating a missing or stripped browser header as proof that a
+// request is same-origin. Non-browser automation must use its bearer-token/service-account
+// boundary instead of a browser session cookie.
 func RequireAllowedOriginForUnsafeMethods(origins ...string) gin.HandlerFunc {
 	allowed := make(map[string]struct{}, len(origins))
 	for _, origin := range origins {
@@ -61,12 +62,10 @@ func RequireAllowedOriginForUnsafeMethods(origins ...string) gin.HandlerFunc {
 			return
 		}
 
-		if strings.EqualFold(strings.TrimSpace(context.GetHeader("Sec-Fetch-Site")), "cross-site") {
-			context.Abort()
-			httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
-			return
-		}
-		context.Next()
+		// Sec-Fetch-Site is useful telemetry/defense in depth, but it is neither universal
+		// nor an authentication signal. Do not allow a missing Origin based on this header.
+		context.Abort()
+		httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
 	}
 }
 

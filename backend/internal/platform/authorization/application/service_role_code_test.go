@@ -11,18 +11,28 @@ import (
 
 type roleRepositoryStub struct {
 	Repository
-	created domain.Role
-	updated domain.Role
+	created                 domain.Role
+	updated                 domain.Role
+	createOperatorAccountID string
+	updateOperatorAccountID string
+	roleBindingCalls        int
 }
 
-func (repository *roleRepositoryStub) CreateRole(_ context.Context, _, _ string, role domain.Role, _ []string) (domain.Role, error) {
+func (repository *roleRepositoryStub) CreateRole(_ context.Context, _, _, operatorAccountID string, role domain.Role, _ []string) (domain.Role, error) {
 	repository.created = role
+	repository.createOperatorAccountID = operatorAccountID
 	return role, nil
 }
 
-func (repository *roleRepositoryStub) UpdateRole(_ context.Context, _, _ string, role domain.Role, _ []string) (domain.Role, error) {
+func (repository *roleRepositoryStub) UpdateRole(_ context.Context, _, _, operatorAccountID string, role domain.Role, _ []string) (domain.Role, error) {
 	repository.updated = role
+	repository.updateOperatorAccountID = operatorAccountID
 	return role, nil
+}
+
+func (repository *roleRepositoryStub) CreateRoleBinding(_ context.Context, _, _ string, binding domain.RoleBinding) (domain.RoleBinding, error) {
+	repository.roleBindingCalls++
+	return binding, nil
 }
 
 type roleIDGeneratorStub struct{ id string }
@@ -48,7 +58,7 @@ func TestServiceCreateRoleGeneratesManagedCode(t *testing.T) {
 	}
 
 	created, err := service.CreateRole(context.Background(), RoleCreateInput{
-		TenantID: "tenant-1", OperatorID: "operator-1", Name: "  审计查看员  ", PermissionIDs: []string{"permission-1"},
+		TenantID: "tenant-1", OperatorID: "operator-1", OperatorAccountID: "account-1", Name: "  审计查看员  ", PermissionIDs: []string{"permission-1"},
 	})
 	if err != nil {
 		t.Fatalf("create role: %v", err)
@@ -58,6 +68,9 @@ func TestServiceCreateRoleGeneratesManagedCode(t *testing.T) {
 	}
 	if created.Name != "审计查看员" || created.Status != domain.StatusActive {
 		t.Errorf("created role = %#v", created)
+	}
+	if repository.createOperatorAccountID != "account-1" {
+		t.Errorf("create operator account ID = %q, want account-1", repository.createOperatorAccountID)
 	}
 }
 
@@ -71,12 +84,35 @@ func TestServiceUpdateRoleDoesNotAcceptCodeMutation(t *testing.T) {
 	}
 
 	_, err = service.UpdateRole(context.Background(), RoleUpdateInput{
-		TenantID: "tenant-1", OperatorID: "operator-1", RoleID: "role-1", Name: "新名称", Status: domain.StatusActive, PermissionIDs: []string{"permission-1"}, Version: 2,
+		TenantID: "tenant-1", OperatorID: "operator-1", OperatorAccountID: "account-1", RoleID: "role-1", Name: "新名称", Status: domain.StatusActive, PermissionIDs: []string{"permission-1"}, Version: 2,
 	})
 	if err != nil {
 		t.Fatalf("update role: %v", err)
 	}
 	if repository.updated.Code != "" {
 		t.Errorf("application update unexpectedly supplied code %q", repository.updated.Code)
+	}
+	if repository.updateOperatorAccountID != "account-1" {
+		t.Errorf("update operator account ID = %q, want account-1", repository.updateOperatorAccountID)
+	}
+}
+
+func TestServiceRoleBindingRejectsUnenforcedScopes(t *testing.T) {
+	t.Parallel()
+
+	repository := &roleRepositoryStub{}
+	service, err := NewService(repository, roleIDGeneratorStub{id: "01KYDVHC000000000000000003"}, roleClockStub{now: time.Date(2026, time.July, 28, 9, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("construct authorization service: %v", err)
+	}
+	scopeID := "org-1"
+	_, err = service.CreateRoleBinding(context.Background(), RoleBindingCreateInput{
+		TenantID: "tenant-1", OperatorID: "operator-1", RoleID: "role-1", SubjectType: "USER", SubjectID: "user-1", ScopeType: "ORG_UNIT", ScopeID: &scopeID,
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("create organization-scoped binding error = %v, want ErrValidation", err)
+	}
+	if repository.roleBindingCalls != 0 {
+		t.Fatalf("CreateRoleBinding calls = %d, want 0", repository.roleBindingCalls)
 	}
 }

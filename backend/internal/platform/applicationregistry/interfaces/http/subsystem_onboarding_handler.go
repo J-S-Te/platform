@@ -15,7 +15,13 @@ import (
 
 type subsystemOnboardingService interface {
 	OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error)
-	ListPortalApplications(context.Context, string, string) ([]application.PortalApplication, error)
+	ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error)
+}
+
+// subsystemInitialAccessManager keeps subsystem-specific authorization outside the application
+// registry. An empty role code means the registered subsystem has no managed role catalog yet.
+type subsystemInitialAccessManager interface {
+	AssignInitialAdministrator(context.Context, string, string, string, string) (string, error)
 }
 
 // SubsystemOnboardingHandler exposes the simplified onboarding workflow and authenticated portal
@@ -24,19 +30,20 @@ type subsystemOnboardingService interface {
 type SubsystemOnboardingHandler struct {
 	service     subsystemOnboardingService
 	provisioner application.SubsystemProvisioner
+	access      subsystemInitialAccessManager
 	oidcIssuer  string
 	logger      *slog.Logger
 }
 
 // NewSubsystemOnboardingHandler constructs the subsystem onboarding HTTP adapter.
-func NewSubsystemOnboardingHandler(service subsystemOnboardingService, provisioner application.SubsystemProvisioner, oidcIssuer string, logger *slog.Logger) (*SubsystemOnboardingHandler, error) {
-	if service == nil || provisioner == nil || strings.TrimSpace(oidcIssuer) == "" {
-		return nil, errors.New("subsystem onboarding service, provisioner and OIDC issuer are required")
+func NewSubsystemOnboardingHandler(service subsystemOnboardingService, provisioner application.SubsystemProvisioner, access subsystemInitialAccessManager, oidcIssuer string, logger *slog.Logger) (*SubsystemOnboardingHandler, error) {
+	if service == nil || provisioner == nil || access == nil || strings.TrimSpace(oidcIssuer) == "" {
+		return nil, errors.New("subsystem onboarding service, provisioner, access manager and OIDC issuer are required")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &SubsystemOnboardingHandler{service: service, provisioner: provisioner, oidcIssuer: strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger}, nil
+	return &SubsystemOnboardingHandler{service: service, provisioner: provisioner, access: access, oidcIssuer: strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger}, nil
 }
 
 type subsystemOnboardingRequest struct {
@@ -48,6 +55,7 @@ type subsystemOnboardingRequest struct {
 	UpstreamURL     string  `json:"upstream_url"`
 	PathPrefix      string  `json:"path_prefix"`
 	ClientType      string  `json:"client_type"`
+	InitialAdminID  string  `json:"initial_admin_user_id"`
 }
 
 type subsystemAutomationResponse struct {
@@ -56,11 +64,17 @@ type subsystemAutomationResponse struct {
 }
 
 type subsystemOnboardingResponse struct {
-	Application applicationResponse         `json:"application"`
-	Environment environmentResponse         `json:"environment"`
-	LoginTarget loginTargetResponse         `json:"login_target"`
-	OAuthClient oauthClientResponse         `json:"oauth_client"`
-	Automation  subsystemAutomationResponse `json:"automation"`
+	Application   applicationResponse             `json:"application"`
+	Environment   environmentResponse             `json:"environment"`
+	LoginTarget   loginTargetResponse             `json:"login_target"`
+	OAuthClient   oauthClientResponse             `json:"oauth_client"`
+	Automation    subsystemAutomationResponse     `json:"automation"`
+	Authorization *subsystemAuthorizationResponse `json:"authorization,omitempty"`
+}
+
+type subsystemAuthorizationResponse struct {
+	InitialAdminUserID string `json:"initial_admin_user_id"`
+	RoleCode           string `json:"role_code"`
 }
 
 type portalApplicationResponse struct {
@@ -106,6 +120,17 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
+	initialAdminUserID := strings.TrimSpace(payload.InitialAdminID)
+	if initialAdminUserID == "" {
+		initialAdminUserID = principal.User.ID
+	}
+	roleCode, err := handler.access.AssignInitialAdministrator(
+		request.Context(), principal.Tenant.ID, result.Application.Code, initialAdminUserID, principal.User.ID,
+	)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	pathPrefix, upstreamURL := "", ""
 	if result.Environment.PathPrefix != nil {
 		pathPrefix = *result.Environment.PathPrefix
@@ -125,13 +150,17 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	}
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
-	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "子系统已完成自动接入和部署", subsystemOnboardingResponse{
+	response := subsystemOnboardingResponse{
 		Application: applicationToResponse(result.Application),
 		Environment: environmentToResponse(result.Environment),
 		LoginTarget: loginTargetToResponse(result.LoginTarget),
 		OAuthClient: toOAuthClientResponse(result.OAuthClient),
 		Automation:  subsystemAutomationResponse{Status: "completed", PublicURL: result.PublicURL},
-	})
+	}
+	if roleCode != "" {
+		response.Authorization = &subsystemAuthorizationResponse{InitialAdminUserID: initialAdminUserID, RoleCode: roleCode}
+	}
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "子系统已完成自动接入和部署", response)
 }
 
 // ListPortalApplications handles GET /api/v1/portal/applications. All authenticated users may read
@@ -141,7 +170,7 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 	if !ok {
 		return
 	}
-	items, err := handler.service.ListPortalApplications(request.Context(), principal.Tenant.ID, request.URL.Query().Get("environment"))
+	items, err := handler.service.ListPortalApplications(request.Context(), principal.Tenant.ID, principal.User.ID, request.URL.Query().Get("environment"))
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -167,7 +196,25 @@ func subsystemPrincipal(writer stdhttp.ResponseWriter, request *stdhttp.Request)
 }
 
 func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWriter, request *stdhttp.Request, err error) {
+	var onboardingConflict *application.SubsystemOnboardingConflict
 	switch {
+	case errors.As(err, &onboardingConflict):
+		handler.logger.Warn("subsystem onboarding skipped because environment already exists",
+			"path", request.URL.Path,
+			"application_code", onboardingConflict.ApplicationCode,
+			"environment", onboardingConflict.Environment,
+			"environment_status", onboardingConflict.Status,
+		)
+		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+			"IAM_SUBSYSTEM_ALREADY_ONBOARDED",
+			"该应用环境已存在；接入脚本不会覆盖已有登录目标或 OAuth 客户端",
+			map[string]string{
+				"application_code": onboardingConflict.ApplicationCode,
+				"environment":      onboardingConflict.Environment,
+				"status":           onboardingConflict.Status,
+				"next_action":      "该环境已完成接入。子系统日常代码、镜像、功能模块和业务迁移发布无需执行接入或撤销脚本；仅基础设施入口参数变更时使用环境、登录目标或 OAuth 客户端的受控更新接口",
+			},
+		))
 	case errors.Is(err, application.ErrValidation), errors.Is(err, application.ErrManagementValidation):
 		httpresponse.WriteError(writer, request, stdhttp.StatusUnprocessableEntity, httperror.Validation)
 	case errors.Is(err, application.ErrNotFound), errors.Is(err, application.ErrManagementNotFound):

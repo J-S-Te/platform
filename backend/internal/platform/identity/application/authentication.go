@@ -72,7 +72,6 @@ func (error ConcurrentSessionError) Unwrap() error { return ErrConcurrentSession
 // Repository defines persistence operations required by the password and session use cases.
 type Repository interface {
 	FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error)
-	FindFederatedLoginAccount(ctx context.Context, tenantID, userID, accountID string) (domain.LoginAccount, error)
 	RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error
 	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error)
@@ -212,46 +211,6 @@ func mustDummyPasswordMetadata() []byte {
 		panic("marshal dummy password metadata: " + err.Error())
 	}
 	return metadata
-}
-
-// FederatedLoginInput contains a trusted local identity resolved only after the external provider
-// callback, ID token and account binding have been verified by the federation login service.
-type FederatedLoginInput struct {
-	TenantID  string
-	UserID    string
-	AccountID string
-	IPAddress net.IP
-	UserAgent string
-}
-
-// LoginFederated creates a normal platform login from an active local account that was resolved by
-// an external identity binding. Upstream tokens, authorization codes and external subjects never
-// enter this service.
-func (service *Service) LoginFederated(ctx context.Context, input FederatedLoginInput) (SessionResult, error) {
-	tenantID := strings.TrimSpace(input.TenantID)
-	userID := strings.TrimSpace(input.UserID)
-	accountID := strings.TrimSpace(input.AccountID)
-	if tenantID == "" || userID == "" || accountID == "" {
-		return SessionResult{}, ErrUnauthenticated
-	}
-
-	account, err := service.repository.FindFederatedLoginAccount(ctx, tenantID, userID, accountID)
-	if err != nil {
-		if errors.Is(err, ErrUnauthenticated) {
-			return SessionResult{}, ErrUnauthenticated
-		}
-		return SessionResult{}, fmt.Errorf("find federated login account: %w", err)
-	}
-
-	now := service.clock.Now().UTC().Truncate(time.Second)
-	if account.LockedUntil != nil && account.LockedUntil.After(now) {
-		return SessionResult{}, lockedError(account, account.LockedUntil.UTC())
-	}
-	if !isIdentityEligible(account) {
-		return SessionResult{}, ErrUnauthenticated
-	}
-
-	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, false)
 }
 
 func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time, replaceExisting bool) (SessionResult, error) {

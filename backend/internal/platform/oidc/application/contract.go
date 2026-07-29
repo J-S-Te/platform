@@ -16,6 +16,9 @@ var (
 	ErrInvalidClient = errors.New("invalid OIDC/OAuth client")
 	// ErrUnauthorizedClient means a valid client is not registered for the requested grant.
 	ErrUnauthorizedClient = errors.New("OIDC/OAuth client is not authorized for this grant")
+	// ErrAccessDenied means the authenticated resource owner has no application-level access.
+	// Transport adapters must expose only the standard OAuth error code and must not leak role data.
+	ErrAccessDenied = errors.New("OIDC/OAuth resource owner access is denied")
 	// ErrInvalidScope identifies an unregistered or malformed requested scope.
 	ErrInvalidScope = errors.New("invalid OIDC/OAuth scope")
 	// ErrInvalidGrant deliberately covers expired, consumed, mismatched, and unknown grants.

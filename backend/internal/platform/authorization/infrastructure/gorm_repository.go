@@ -12,7 +12,15 @@ import (
 	"gorm.io/gorm"
 )
 
-const platformApplicationCode = "platform"
+const (
+	platformApplicationCode = "platform"
+
+	// Protected role assignments control the platform control plane. Only an effective tenant-scoped
+	// super administrator can create, modify, or disable bindings involving these roles.
+	platformSuperAdminRoleCode     = "platform-super-admin"
+	platformEmergencyAdminRoleCode = "platform-emergency-admin"
+	platformBreakGlassRolePrefix   = "platform-break-glass-"
+)
 
 // GORMRepository persists RBAC aggregates in tables owned by SQL migrations. It deliberately does
 // not call AutoMigrate so schema history remains explicit and reviewable.
@@ -132,7 +140,7 @@ func (r *GORMRepository) ListRoles(ctx context.Context, tenantID string, page ap
 	return application.PageResult[domain.Role]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
-func (r *GORMRepository) CreateRole(ctx context.Context, tenantID, operatorID string, role domain.Role, permissionIDs []string) (domain.Role, error) {
+func (r *GORMRepository) CreateRole(ctx context.Context, tenantID, operatorID, operatorAccountID string, role domain.Role, permissionIDs []string) (domain.Role, error) {
 	returnRole := domain.Role{}
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		app, err := r.activeApplicationTx(tx, tenantID, platformApplicationCode)
@@ -140,6 +148,9 @@ func (r *GORMRepository) CreateRole(ctx context.Context, tenantID, operatorID st
 			return err
 		}
 		if err := r.verifyPermissions(tx, tenantID, app.ID, permissionIDs); err != nil {
+			return err
+		}
+		if err := r.verifyDelegablePermissions(tx, tenantID, operatorID, operatorAccountID, app.ID, permissionIDs); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
@@ -171,7 +182,7 @@ func (r *GORMRepository) GetRole(ctx context.Context, tenantID, roleID string) (
 	}
 	return r.roleWithPermissions(ctx, model)
 }
-func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID string, role domain.Role, permissionIDs []string) (domain.Role, error) {
+func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID, operatorAccountID string, role domain.Role, permissionIDs []string) (domain.Role, error) {
 	var output domain.Role
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var model roleModel
@@ -186,6 +197,9 @@ func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID st
 			return application.ErrVersionConflict
 		}
 		if err := r.verifyPermissions(tx, tenantID, model.ApplicationID, permissionIDs); err != nil {
+			return err
+		}
+		if err := r.verifyDelegablePermissions(tx, tenantID, operatorID, operatorAccountID, model.ApplicationID, permissionIDs); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
@@ -247,6 +261,9 @@ func (r *GORMRepository) CreateRoleBinding(ctx context.Context, tenantID, operat
 		if result.Error != nil {
 			return translateNotFound(result.Error, "role")
 		}
+		if err := r.ensureProtectedRoleBindingOperator(tx, tenantID, operatorID, role); err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		operator := operatorID
 		scopeID := ""
@@ -281,6 +298,18 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 		if result.Error != nil {
 			return translateNotFound(result.Error, "role")
 		}
+		if err := r.ensureProtectedRoleBindingOperator(tx, tenantID, operatorID, role); err != nil {
+			return err
+		}
+		if existing.RoleID != role.ID {
+			var existingRole roleModel
+			if err := tx.Where("id = ? AND tenant_id = ? AND application_id = ?", existing.RoleID, tenantID, existing.ApplicationID).First(&existingRole).Error; err != nil {
+				return translateNotFound(err, "role")
+			}
+			if err := r.ensureProtectedRoleBindingOperator(tx, tenantID, operatorID, existingRole); err != nil {
+				return err
+			}
+		}
 		now := time.Now().UTC()
 		scopeID := ""
 		if binding.ScopeID != nil {
@@ -300,6 +329,41 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 		return nil
 	})
 	return output, err
+}
+
+// ensureProtectedRoleBindingOperator restricts control-plane roles to a tenant-scoped super
+// administrator. A role binding is security-critical: without this check a security administrator
+// could bind the super-admin role to itself or another ordinary account.
+func (r *GORMRepository) ensureProtectedRoleBindingOperator(tx *gorm.DB, tenantID, operatorID string, role roleModel) error {
+	if !isProtectedRoleCode(role.Code) {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	subjectSQL, subjectArgs := roleBindingSubjectFilter(operatorID, "", now)
+	var total int64
+	result := tx.Table("authz_role_binding AS binding").
+		Joins("JOIN authz_role AS operator_role ON operator_role.id = binding.role_id").
+		Where("binding.tenant_id = ? AND binding.application_id = ?", tenantID, role.ApplicationID).
+		Where("binding.status = ? AND (binding.valid_until IS NULL OR binding.valid_until > ?)", domain.StatusActive, now).
+		Where("binding.scope_type = ? AND binding.scope_id = ?", "TENANT", "").
+		Where("operator_role.code = ? AND operator_role.status = ?", platformSuperAdminRoleCode, domain.StatusActive).
+		Where(subjectSQL, subjectArgs...).
+		Count(&total)
+	if result.Error != nil {
+		return fmt.Errorf("check protected role-binding operator: %w", result.Error)
+	}
+	if total == 0 {
+		return application.ErrForbidden
+	}
+	return nil
+}
+
+func isProtectedRoleCode(code string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(code))
+	return normalized == platformSuperAdminRoleCode ||
+		normalized == platformEmergencyAdminRoleCode ||
+		strings.HasPrefix(normalized, platformBreakGlassRolePrefix)
 }
 
 func (r *GORMRepository) Check(ctx context.Context, input application.CheckInput) (domain.Decision, error) {
@@ -350,6 +414,39 @@ func (r *GORMRepository) activeApplicationTx(tx *gorm.DB, tenantID, code string)
 	}
 	return app, nil
 }
+
+// verifyDelegablePermissions ensures a custom role cannot become a privilege-escalation
+// mechanism. The selected permissions must all be effective for the current authenticated
+// operator at tenant scope; having role-management permissions alone is not enough.
+func (r *GORMRepository) verifyDelegablePermissions(tx *gorm.DB, tenantID, operatorID, operatorAccountID, applicationID string, permissionIDs []string) error {
+	if len(permissionIDs) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	subjectSQL, subjectArgs := roleBindingSubjectFilter(operatorID, operatorAccountID, now)
+	var total int64
+	result := tx.Table("authz_role_binding AS binding").
+		Distinct("permission.id").
+		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id AND role.status = ?", domain.StatusActive).
+		Joins("JOIN authz_role_permission AS role_permission ON role_permission.role_id = role.id AND role_permission.effect = ?", "ALLOW").
+		Joins("JOIN authz_permission AS permission ON permission.id = role_permission.permission_id AND permission.tenant_id = binding.tenant_id AND permission.application_id = binding.application_id AND permission.status = ?", domain.StatusActive).
+		Where("binding.tenant_id = ? AND binding.application_id = ? AND binding.status = ?", tenantID, applicationID, domain.StatusActive).
+		Where("binding.scope_type = ? AND binding.scope_id = ?", "TENANT", "").
+		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now).
+		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now).
+		Where("permission.id IN ?", permissionIDs).
+		Where(subjectSQL, subjectArgs...).
+		Count(&total)
+	if result.Error != nil {
+		return fmt.Errorf("verify delegable permissions: %w", result.Error)
+	}
+	if total != int64(len(permissionIDs)) {
+		return application.ErrForbidden
+	}
+	return nil
+}
+
 func (r *GORMRepository) verifyPermissions(tx *gorm.DB, tenantID, applicationID string, ids []string) error {
 	if len(ids) == 0 {
 		return nil

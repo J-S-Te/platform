@@ -152,6 +152,14 @@ func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input s
 			Updates(map[string]any{"locked_until": lockedUntil, "updated_at": now}).Error; err != nil {
 			return fmt.Errorf("lock account after login failures: %w", err)
 		}
+		// Existing browser sessions must not remain usable while an account is locked.
+		// Keep this in the same transaction as the lock so a failed session revocation rolls back
+		// the lock instead of creating an ambiguous partially applied security state.
+		if err := transaction.Table("iam_session").
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, "ACTIVE").
+			Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "ACCOUNT_LOCKED"}).Error; err != nil {
+			return fmt.Errorf("revoke sessions after account lock: %w", err)
+		}
 		result.LockedUntil = &lockedUntil
 		return nil
 	})

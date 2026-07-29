@@ -53,7 +53,7 @@ type clientJWKRow struct {
 type authorizationCodeRow struct {
 	ID                  string
 	TenantID            string
-	OAuthClientID       string
+	OAuthClientID       string `gorm:"column:oauth_client_id"`
 	SessionID           string
 	AccountID           string
 	UserID              string
@@ -72,7 +72,7 @@ type authorizationCodeRow struct {
 type tokenFamilyRow struct {
 	ID            string
 	TenantID      string
-	OAuthClientID string
+	OAuthClientID string `gorm:"column:oauth_client_id"`
 	SessionID     string
 	AccountID     string
 	UserID        string
@@ -88,7 +88,7 @@ type tokenFamilyRow struct {
 type refreshTokenRow struct {
 	ID                   string
 	TenantID             string
-	OAuthClientID        string
+	OAuthClientID        string `gorm:"column:oauth_client_id"`
 	TokenFamilyID        string
 	ParentRefreshTokenID *string
 	TokenHash            []byte
@@ -103,7 +103,7 @@ type refreshTokenRow struct {
 type refreshProjection struct {
 	ID                   string
 	TenantID             string
-	OAuthClientID        string
+	OAuthClientID        string `gorm:"column:oauth_client_id"`
 	TokenFamilyID        string
 	ParentRefreshTokenID *string
 	TokenHash            []byte
@@ -126,12 +126,22 @@ type refreshProjection struct {
 type tokenRevocationRow struct {
 	ID            string
 	TenantID      string
-	OAuthClientID string
+	OAuthClientID string `gorm:"column:oauth_client_id"`
 	TokenHash     []byte
 	TokenType     string
 	RevokedAt     time.Time
 	ExpiresAt     *time.Time
 	Reason        string
+}
+
+type userInfoProjection struct {
+	TenantID          string
+	OAuthClientID     string `gorm:"column:oauth_client_id"`
+	SessionID         string
+	UserID            string
+	DisplayName       string
+	PreferredUsername string
+	Email             string
 }
 
 // FindClient resolves one active registration and its exact redirect URI, grants, scopes, and
@@ -385,7 +395,7 @@ func (r *Repository) IsTokenRevoked(ctx context.Context, tenantID string, tokenH
 }
 
 func (r *Repository) ResolveUserInfo(ctx context.Context, query application.UserInfoQuery, now time.Time) (domain.UserInfoSubject, error) {
-	var row struct{ TenantID, OAuthClientID, SessionID, UserID, DisplayName, PreferredUsername, Email string }
+	var row userInfoProjection
 	err := r.database.WithContext(ctx).Table("iam_session").
 		Select("iam_session.tenant_id, platform_oauth_client.id AS oauth_client_id, iam_session.id AS session_id, iam_user.id AS user_id, iam_user.display_name, iam_account.username AS preferred_username, iam_user.email").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
@@ -580,7 +590,9 @@ var _ application.ConsentRepository = (*Repository)(nil)
 var _ application.PostLogoutRedirectRepository = (*Repository)(nil)
 
 type parRow struct {
-	ID, TenantID, OAuthClientID                                          string
+	ID                                                                   string
+	TenantID                                                             string
+	OAuthClientID                                                        string `gorm:"column:oauth_client_id"`
 	RequestURIHash                                                       []byte
 	RedirectURI, Scope, State, Nonce, CodeChallenge, CodeChallengeMethod string
 	RequestObjectHash                                                    []byte

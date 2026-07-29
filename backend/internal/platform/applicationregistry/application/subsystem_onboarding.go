@@ -14,6 +14,30 @@ const (
 	defaultSubsystemRefreshTokenTTLSeconds = 30 * 24 * 60 * 60
 )
 
+// ErrSubsystemOnboardingAlreadyExists marks a create-only onboarding request that would
+// overwrite an already registered application environment. Callers can use errors.Is to return
+// a client-safe, actionable conflict without exposing credential or database details.
+var ErrSubsystemOnboardingAlreadyExists = errors.New("subsystem onboarding environment already exists")
+
+// SubsystemOnboardingConflict identifies the tenant-scoped resource which prevents a create-only
+// onboarding request from proceeding. It deliberately carries only operator-supplied application
+// and environment codes plus the non-sensitive lifecycle status; OAuth client credentials and IDs
+// are never attached to this error or serialized to clients.
+type SubsystemOnboardingConflict struct {
+	ApplicationCode string
+	Environment     string
+	Status          string
+}
+
+func (conflict *SubsystemOnboardingConflict) Error() string {
+	return fmt.Sprintf("subsystem onboarding environment already exists: application=%s environment=%s status=%s", conflict.ApplicationCode, conflict.Environment, conflict.Status)
+}
+
+// Is supports errors.Is(err, ErrSubsystemOnboardingAlreadyExists).
+func (*SubsystemOnboardingConflict) Is(target error) bool {
+	return target == ErrSubsystemOnboardingAlreadyExists
+}
+
 // SubsystemOnboardingInput contains the minimum information required to register a browser-facing
 // subsystem. IDs, login target, OAuth callback and OAuth credentials are derived by the service so
 // administrators do not have to coordinate four independent management APIs manually.
@@ -75,7 +99,7 @@ type PortalApplication struct {
 // portal registrations. Implementations must keep every query tenant-scoped.
 type SubsystemOnboardingRepository interface {
 	CreateSubsystem(context.Context, SubsystemOnboardingWrite, time.Time) (SubsystemOnboardingResult, error)
-	ListPortalApplications(context.Context, string, string) ([]PortalApplication, error)
+	ListPortalApplications(context.Context, string, string, string) ([]PortalApplication, error)
 }
 
 // SubsystemOnboardingService coordinates the simplified subsystem registration workflow.
@@ -206,12 +230,14 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 
 // ListPortalApplications returns active, resolvable subsystem cards for the authenticated tenant.
 // When environment is blank the repository applies its deterministic environment preference.
-func (service *SubsystemOnboardingService) ListPortalApplications(ctx context.Context, tenantID, environment string) ([]PortalApplication, error) {
-	tenantID, environment = strings.TrimSpace(tenantID), strings.ToLower(strings.TrimSpace(environment))
-	if tenantID == "" || (environment != "" && !validEnvironmentCode(environment)) {
+func (service *SubsystemOnboardingService) ListPortalApplications(ctx context.Context, tenantID, userID, environment string) ([]PortalApplication, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	userID = strings.TrimSpace(userID)
+	environment = strings.ToLower(strings.TrimSpace(environment))
+	if tenantID == "" || userID == "" || (environment != "" && !validEnvironmentCode(environment)) {
 		return nil, ErrValidation
 	}
-	items, err := service.repository.ListPortalApplications(ctx, tenantID, environment)
+	items, err := service.repository.ListPortalApplications(ctx, tenantID, userID, environment)
 	if err != nil {
 		return nil, err
 	}

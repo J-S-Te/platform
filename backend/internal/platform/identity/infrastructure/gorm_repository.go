@@ -56,30 +56,6 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 	return toDomainLoginAccount(row), nil
 }
 
-// FindFederatedLoginAccount returns the exact local identity selected by a verified external
-// identity binding. It deliberately does not load a password credential because external login
-// eligibility is based on the current tenant, user, account and lock state.
-func (repository *GORMRepository) FindFederatedLoginAccount(ctx context.Context, tenantID, userID, accountID string) (domain.LoginAccount, error) {
-	var row loginAccountProjection
-	result := repository.database.WithContext(ctx).
-		Table("iam_account AS account").
-		Select(`tenant.id AS tenant_id, tenant.name AS tenant_name, tenant.code AS tenant_code, tenant.status AS tenant_status,
-			user.id AS user_id, user.display_name AS user_name, user.status AS user_status,
-			account.id AS account_id, COALESCE(account.username, account.id) AS account_name, account.status AS account_status, account.locked_until`).
-		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
-		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
-		Where("account.tenant_id = ? AND account.user_id = ? AND account.id = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", tenantID, userID, accountID, time.Now().UTC()).
-		Limit(1).
-		Find(&row)
-	if result.Error != nil {
-		return domain.LoginAccount{}, fmt.Errorf("query federated login account: %w", result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return domain.LoginAccount{}, application.ErrUnauthenticated
-	}
-	return toDomainLoginAccount(row), nil
-}
-
 // RecordSuccessfulPasswordVerification clears password-failure state immediately after the primary
 // credential succeeds, after the primary credential succeeds.
 func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error {

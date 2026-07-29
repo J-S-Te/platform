@@ -19,9 +19,6 @@ type authenticationRepositoryStub struct {
 func (stub authenticationRepositoryStub) FindLoginAccount(context.Context, string) (domain.LoginAccount, error) {
 	return stub.account, stub.err
 }
-func (authenticationRepositoryStub) FindFederatedLoginAccount(context.Context, string, string, string) (domain.LoginAccount, error) {
-	return domain.LoginAccount{}, ErrUnauthenticated
-}
 func (authenticationRepositoryStub) RecordSuccessfulPasswordVerification(context.Context, domain.LoginAccount, time.Time) error {
 	return nil
 }

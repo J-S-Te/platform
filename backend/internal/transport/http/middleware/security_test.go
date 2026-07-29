@@ -57,7 +57,7 @@ func TestRequireAllowedOriginForUnsafeMethods(t *testing.T) {
 		{name: "same origin", origin: "https://portal.example.com", wantStatus: http.StatusNoContent},
 		{name: "cross origin", origin: "https://evil.example", wantStatus: http.StatusForbidden},
 		{name: "cross site browser without origin", secFetchSite: "cross-site", wantStatus: http.StatusForbidden},
-		{name: "non browser integration", wantStatus: http.StatusNoContent},
+		{name: "missing origin is rejected", wantStatus: http.StatusForbidden},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

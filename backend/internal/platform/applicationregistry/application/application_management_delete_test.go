@@ -8,12 +8,17 @@ import (
 )
 
 type applicationDeleteRepositoryStub struct {
-	current     Application
-	getErr      error
-	updateErr   error
-	updateCalls int
-	updateInput ApplicationUpdateInput
-	updatedAt   time.Time
+	current                Application
+	getErr                 error
+	updateErr              error
+	updateCalls            int
+	updateInput            ApplicationUpdateInput
+	updatedAt              time.Time
+	environment            Environment
+	environmentErr         error
+	deleteEnvironmentErr   error
+	deleteEnvironmentCalls int
+	deleteEnvironmentInput EnvironmentDeleteInput
 }
 
 func (repository *applicationDeleteRepositoryStub) ListApplications(context.Context, string, PageRequest) (PageResult[Application], error) {
@@ -60,11 +65,23 @@ func (repository *applicationDeleteRepositoryStub) CreateEnvironment(context.Con
 }
 
 func (repository *applicationDeleteRepositoryStub) GetEnvironment(context.Context, string, string, string) (Environment, error) {
-	return Environment{}, nil
+	if repository.environmentErr != nil {
+		return Environment{}, repository.environmentErr
+	}
+	return repository.environment, nil
 }
 
 func (repository *applicationDeleteRepositoryStub) UpdateEnvironment(context.Context, EnvironmentUpdateInput, time.Time) (Environment, error) {
 	return Environment{}, nil
+}
+
+func (repository *applicationDeleteRepositoryStub) DeleteEnvironment(_ context.Context, input EnvironmentDeleteInput) (Environment, error) {
+	repository.deleteEnvironmentCalls++
+	repository.deleteEnvironmentInput = input
+	if repository.deleteEnvironmentErr != nil {
+		return Environment{}, repository.deleteEnvironmentErr
+	}
+	return repository.environment, nil
 }
 
 type applicationDeleteIDGenerator struct{}
@@ -99,6 +116,96 @@ func contractApplicationForDelete() Application {
 		Description:     &description,
 		Status:          "ACTIVE",
 		Version:         3,
+	}
+}
+
+func contractProductionEnvironmentForDelete() Environment {
+	return Environment{
+		ID:            "01K1ENV000000000000000001",
+		TenantID:      "01K1TENANT00000000000001",
+		ApplicationID: "01K1APP000000000000000001",
+		Environment:   "prod",
+		Status:        "ACTIVE",
+		Version:       5,
+	}
+}
+
+func TestDeleteEnvironmentRemovesOnlyConfirmedNonDevelopmentEnvironment(t *testing.T) {
+	repository := &applicationDeleteRepositoryStub{
+		current:     contractApplicationForDelete(),
+		environment: contractProductionEnvironmentForDelete(),
+	}
+	service := newApplicationDeleteService(t, repository)
+
+	removed, err := service.DeleteEnvironment(context.Background(), EnvironmentDeleteInput{
+		TenantID:         repository.current.TenantID,
+		OperatorID:       "01K1USER0000000000000001",
+		ApplicationID:    repository.current.ID,
+		EnvironmentID:    repository.environment.ID,
+		ConfirmationCode: repository.current.Code + "/" + repository.environment.Environment,
+		Version:          repository.environment.Version,
+	})
+	if err != nil {
+		t.Fatalf("delete environment: %v", err)
+	}
+	if repository.deleteEnvironmentCalls != 1 {
+		t.Fatalf("expected one environment deletion, got %d", repository.deleteEnvironmentCalls)
+	}
+	if repository.deleteEnvironmentInput.ConfirmationCode != "contract-management/prod" {
+		t.Fatalf("unexpected confirmation: %q", repository.deleteEnvironmentInput.ConfirmationCode)
+	}
+	if removed.ID != repository.environment.ID || removed.Environment != "prod" {
+		t.Fatalf("unexpected removed environment: %#v", removed)
+	}
+}
+
+func TestDeleteEnvironmentRejectsDevelopmentEnvironment(t *testing.T) {
+	environment := contractProductionEnvironmentForDelete()
+	environment.Environment = "dev"
+	repository := &applicationDeleteRepositoryStub{current: contractApplicationForDelete(), environment: environment}
+	service := newApplicationDeleteService(t, repository)
+
+	_, err := service.DeleteEnvironment(context.Background(), EnvironmentDeleteInput{
+		TenantID: repository.current.TenantID, OperatorID: "operator-1", ApplicationID: repository.current.ID,
+		EnvironmentID: environment.ID, ConfirmationCode: repository.current.Code + "/dev", Version: environment.Version,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+	if repository.deleteEnvironmentCalls != 0 {
+		t.Fatalf("development environment must not be deleted, got %d calls", repository.deleteEnvironmentCalls)
+	}
+}
+
+func TestDeleteEnvironmentRequiresExactScopedConfirmation(t *testing.T) {
+	repository := &applicationDeleteRepositoryStub{current: contractApplicationForDelete(), environment: contractProductionEnvironmentForDelete()}
+	service := newApplicationDeleteService(t, repository)
+
+	_, err := service.DeleteEnvironment(context.Background(), EnvironmentDeleteInput{
+		TenantID: repository.current.TenantID, OperatorID: "operator-1", ApplicationID: repository.current.ID,
+		EnvironmentID: repository.environment.ID, ConfirmationCode: repository.current.Code, Version: repository.environment.Version,
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+	if repository.deleteEnvironmentCalls != 0 {
+		t.Fatalf("mismatched confirmation must not delete, got %d calls", repository.deleteEnvironmentCalls)
+	}
+}
+
+func TestDeleteEnvironmentRejectsStaleVersion(t *testing.T) {
+	repository := &applicationDeleteRepositoryStub{current: contractApplicationForDelete(), environment: contractProductionEnvironmentForDelete()}
+	service := newApplicationDeleteService(t, repository)
+
+	_, err := service.DeleteEnvironment(context.Background(), EnvironmentDeleteInput{
+		TenantID: repository.current.TenantID, OperatorID: "operator-1", ApplicationID: repository.current.ID,
+		EnvironmentID: repository.environment.ID, ConfirmationCode: repository.current.Code + "/prod", Version: repository.environment.Version - 1,
+	})
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("expected ErrVersionConflict, got %v", err)
+	}
+	if repository.deleteEnvironmentCalls != 0 {
+		t.Fatalf("stale version must not delete, got %d calls", repository.deleteEnvironmentCalls)
 	}
 }
 

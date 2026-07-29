@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
@@ -256,22 +257,58 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 	return application.PageResult[domain.Account]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// UpdateAccount changes an account status with its session invalidation in the same transaction.
+//
+// A disabled account must never regain access by simply being re-enabled while an old session is
+// still inside its expiry window. The row lock makes the status transition and revocation atomic:
+// if either write fails, neither becomes visible.
 func (repository *GORMRepository) UpdateAccount(ctx context.Context, input application.AccountUpdateInput) (domain.Account, error) {
 	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
-	result := repository.database.WithContext(ctx).Model(&accountModel{}).
-		Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.AccountID, input.Version).
-		Where(ownerClause, ownerArgs...).
-		Updates(map[string]any{
-			"status":     input.Status,
-			"updated_at": time.Now().UTC(),
-			"updated_by": input.OperatorID,
-			"version":    gorm.Expr("version + 1"),
-		})
-	if result.Error != nil {
-		return domain.Account{}, mapWriteError(result.Error, "update account")
-	}
-	if result.RowsAffected == 0 {
-		return domain.Account{}, repository.versionedAccountError(ctx, input.TenantID, input.AccountID)
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var existing accountModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.AccountID, input.Version).
+			Where(ownerClause, ownerArgs...).
+			First(&existing)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return repository.versionedAccountError(ctx, input.TenantID, input.AccountID)
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock account before update: %w", result.Error)
+		}
+
+		now := time.Now().UTC()
+		result = transaction.Model(&accountModel{}).
+			Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.AccountID, input.Version).
+			Updates(map[string]any{
+				"status":     input.Status,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			})
+		if result.Error != nil {
+			return mapWriteError(result.Error, "update account")
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrVersionConflict
+		}
+
+		// Re-enabling is deliberately not a session restoration operation. Any session that
+		// existed before a disable transition was revoked below and the user must authenticate
+		// again. Management cannot set LOCKED, but retaining the non-ACTIVE check keeps this
+		// invariant valid if a future lifecycle path reuses the repository operation.
+		if existing.Status == domain.StatusActive && input.Status != domain.StatusActive {
+			result = transaction.Model(&sessionModel{}).
+				Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, domain.StatusActive).
+				Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "ACCOUNT_STATUS_CHANGED"})
+			if result.Error != nil {
+				return fmt.Errorf("revoke account sessions after status change: %w", result.Error)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Account{}, err
 	}
 	return repository.getAccount(ctx, input.TenantID, input.AccountID)
 }
@@ -390,6 +427,167 @@ func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit dom
 		return domain.OrgUnit{}, err
 	}
 	return orgUnit, nil
+}
+
+// UpdateOrgUnit changes the organization node and, if it is moved, rewrites every descendant
+// path/depth in the same transaction. A parent cannot be the node itself or any of its descendants.
+func (repository *GORMRepository) UpdateOrgUnit(ctx context.Context, input application.OrgUnitUpdateInput) (domain.OrgUnit, error) {
+	var updated domain.OrgUnit
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var existing orgUnitModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", input.TenantID, input.OrgUnitID).
+			First(&existing)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock organization unit for update: %w", result.Error)
+		}
+		if existing.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		if existing.Status != domain.StatusActive {
+			return application.ErrConflict
+		}
+
+		newPath, newDepth := "/"+existing.ID+"/", uint(1)
+		if input.ParentID != nil {
+			if *input.ParentID == existing.ID {
+				return application.ErrConflict
+			}
+			var parent orgUnitModel
+			result = transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("tenant_id = ? AND id = ? AND status = ?", input.TenantID, *input.ParentID, domain.StatusActive).
+				First(&parent)
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return application.ErrNotFound
+			}
+			if result.Error != nil {
+				return fmt.Errorf("lock organization parent for update: %w", result.Error)
+			}
+			if strings.HasPrefix(parent.Path, existing.Path) {
+				return application.ErrConflict
+			}
+			newPath, newDepth = parent.Path+existing.ID+"/", parent.Depth+1
+		}
+
+		now := time.Now().UTC()
+		result = transaction.Model(&orgUnitModel{}).
+			Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.OrgUnitID, input.Version).
+			Updates(map[string]any{
+				"parent_id":  nullableString(input.ParentID),
+				"name":       input.Name,
+				"path":       newPath,
+				"depth":      newDepth,
+				"sort_order": input.SortOrder,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			})
+		if result.Error != nil {
+			return mapWriteError(result.Error, "update organization unit")
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrVersionConflict
+		}
+
+		if existing.Path != newPath {
+			depthOffset := int(newDepth) - int(existing.Depth)
+			result = transaction.Model(&orgUnitModel{}).
+				Where("tenant_id = ? AND id <> ? AND path LIKE ?", input.TenantID, existing.ID, existing.Path+"%").
+				Updates(map[string]any{
+					"path":       gorm.Expr("REPLACE(path, ?, ?)", existing.Path, newPath),
+					"depth":      gorm.Expr("depth + ?", depthOffset),
+					"updated_at": now,
+					"updated_by": input.OperatorID,
+					"version":    gorm.Expr("version + 1"),
+				})
+			if result.Error != nil {
+				return mapWriteError(result.Error, "update organization subtree path")
+			}
+		}
+
+		var row orgUnitModel
+		if err := transaction.Where("tenant_id = ? AND id = ?", input.TenantID, input.OrgUnitID).First(&row).Error; err != nil {
+			return fmt.Errorf("read updated organization unit: %w", err)
+		}
+		updated = toDomainOrgUnit(row)
+		return nil
+	})
+	if err != nil {
+		return domain.OrgUnit{}, err
+	}
+	return updated, nil
+}
+
+// DeleteOrgUnit logically deletes an organization subtree. The hierarchy remains queryable by
+// status for audit purposes, while dependent positions and appointments become unavailable.
+func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input application.OrgUnitDeleteInput) error {
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var existing orgUnitModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", input.TenantID, input.OrgUnitID).
+			First(&existing)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock organization unit for deletion: %w", result.Error)
+		}
+		if existing.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		if existing.Status != domain.StatusActive {
+			return application.ErrConflict
+		}
+
+		now := time.Now().UTC()
+		organizationIDs := transaction.Model(&orgUnitModel{}).Select("id").
+			Where("tenant_id = ? AND path LIKE ?", input.TenantID, existing.Path+"%")
+		if result = transaction.Model(&orgUnitModel{}).
+			Where("tenant_id = ? AND path LIKE ? AND status <> ?", input.TenantID, existing.Path+"%", domain.StatusDisabled).
+			Updates(map[string]any{
+				"status":     domain.StatusDisabled,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "disable organization subtree")
+		}
+		if result = transaction.Model(&positionModel{}).
+			Where("tenant_id = ? AND org_unit_id IN (?) AND status <> ?", input.TenantID, organizationIDs, domain.StatusDisabled).
+			Updates(map[string]any{
+				"status":     domain.StatusDisabled,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "disable organization positions")
+		}
+		if result = transaction.Model(&membershipModel{}).
+			Where("tenant_id = ? AND org_unit_id IN (?) AND status <> ?", input.TenantID, organizationIDs, domain.StatusDisabled).
+			Updates(map[string]any{
+				"status":     domain.StatusDisabled,
+				"is_primary": false,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "disable organization memberships")
+		}
+		if result = transaction.Model(&userModel{}).
+			Where("tenant_id = ? AND primary_org_id IN (?)", input.TenantID, organizationIDs).
+			Updates(map[string]any{
+				"primary_org_id": nil,
+				"updated_at":     now,
+				"updated_by":     input.OperatorID,
+				"version":        gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "clear users primary organization")
+		}
+		return nil
+	})
 }
 
 func (repository *GORMRepository) ListPositions(ctx context.Context, tenantID, keyword, status string, query application.PageRequest) (application.PageResult[domain.Position], error) {
