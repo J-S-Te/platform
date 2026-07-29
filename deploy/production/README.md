@@ -84,12 +84,12 @@ bash scripts/subsystem-onboarding.sh \
   --environment prod \
   --public-base-url https://你的域名 \
   --upstream-url http://contract-api:8081 \
-  --path-prefix /contract \
+  --path-prefix /contract_management \
   --client-type confidential \
   --account admin
 ```
 
-应用编码使用与项目目录一致的 `contract_management`；公开路径可以独立使用 `/contract`。
+应用编码与公开路径统一使用 `contract_management`；公开路径固定为 `/contract_management`。
 脚本调用后端原子创建应用、环境、相对登录目标和 OAuth Client，Client Secret 只在后端内存中
 交给 provisioner，不返回浏览器或命令行。独立审计机器客户端仍按审计客户端管理流程创建，
 不能复用浏览器 OIDC Client。完成运行时配置后再触发 `contract_management` 发布。

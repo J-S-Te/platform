@@ -30,9 +30,9 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 	}
 
 	if err := updateSubsystemEnvironment(source, destination, map[string]string{
-		"OIDC_CLIENT_ID":     "contract-management-dev-web",
+		"OIDC_CLIENT_ID":     "contract_management-dev-web",
 		"OIDC_CLIENT_SECRET": "generated-oauth-secret",
-		"OIDC_REDIRECT_URI":  "http://localhost:8081/contract/auth/callback",
+		"OIDC_REDIRECT_URI":  "http://localhost:8081/contract_management/auth/callback",
 	}); err != nil {
 		t.Fatalf("update environment: %v", err)
 	}
@@ -44,9 +44,9 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 	result := string(resultBytes)
 	for _, expected := range []string{
 		"CUSTOM_SETTING=keep-me",
-		"OIDC_CLIENT_ID=contract-management-dev-web",
+		"OIDC_CLIENT_ID=contract_management-dev-web",
 		"OIDC_CLIENT_SECRET=generated-oauth-secret",
-		"OIDC_REDIRECT_URI=http://localhost:8081/contract/auth/callback",
+		"OIDC_REDIRECT_URI=http://localhost:8081/contract_management/auth/callback",
 	} {
 		if !strings.Contains(result, expected) {
 			t.Fatalf("generated environment missing %q:\n%s", expected, result)

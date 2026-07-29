@@ -7,7 +7,7 @@
 # 不要仅执行 add/reload，否则不会创建 Application、Environment、LoginTarget 和 OAuth Client。
 #
 # 设计：所有用户访问都从门户统一入口进入，门户的 frontend nginx 把
-# 配置的 path_prefix（例如 /contract/）反代到子系真实内网地址。这样子系不需要对外暴露端口，
+# 配置的 path_prefix（例如 /external_system/）反代到子系真实内网地址。这样子系不需要对外暴露端口，
 # 也不需要在 OAuth redirect_uri、LoginTarget.TargetURI 里写任何子系端口。
 #
 # 用法：
@@ -33,7 +33,7 @@ API_BASE_URL="${PORTAL_GATEWAY_API_BASE_URL:-http://127.0.0.1:8080}"
 API_TOKEN="${PORTAL_GATEWAY_API_TOKEN:-}"
 PAGE_LIMIT="${PORTAL_GATEWAY_PAGE_LIMIT:-100}"
 # 这些模块已经编译进统一 Vue 前端，只允许代理其后端 API 子路径，不能生成整站反代。
-INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management,contract-management}"
+INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management}"
 
 log() {
   local level="$1"

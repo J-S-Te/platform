@@ -42,13 +42,31 @@ server {
         proxy_pass http://127.0.0.1:18080;
     }
 
-    location = /contract {
-        return 308 /contract/;
+    location = /contract_management/healthz {
+        proxy_pass http://127.0.0.1:18081/healthz;
     }
 
-    location /contract/ {
-        proxy_set_header X-Forwarded-Prefix /contract;
-        proxy_pass http://127.0.0.1:18081/;
+    location /contract_management/auth/ {
+        proxy_set_header X-Forwarded-Prefix /contract_management;
+        proxy_pass http://127.0.0.1:18081/auth/;
+    }
+
+    location = /contract_management/logged-out {
+        proxy_set_header X-Forwarded-Prefix /contract_management;
+        proxy_pass http://127.0.0.1:18081/logged-out;
+    }
+
+    location /contract_management/api/ {
+        proxy_set_header X-Forwarded-Prefix /contract_management;
+        proxy_pass http://127.0.0.1:18081/api/;
+    }
+
+    location = /contract_management {
+        return 308 /contract_management/;
+    }
+
+    location /contract_management/ {
+        proxy_pass http://127.0.0.1:18082;
     }
 
     location / {
