@@ -149,9 +149,16 @@ func (provisioner *LocalDockerSubsystemProvisioner) Provision(ctx context.Contex
 		"OIDC_TENANT_ID":            input.TenantID,
 		"APP_PUBLIC_URL":            input.PublicURL,
 		"APP_PATH_PREFIX":           input.PathPrefix,
+		"PLATFORM_APPLICATION_ID":   input.ApplicationID,
 		"PLATFORM_APPLICATION_CODE": input.ApplicationCode,
 		"PLATFORM_ENVIRONMENT_CODE": input.Environment,
-		"PLATFORM_DOCKER_NETWORK":   provisioner.config.PlatformDockerNetwork,
+		// Contract management consumes these canonical catalog-publisher keys.
+		// Keep this service credential separate from the browser OIDC client above.
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "true",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID":      input.CatalogPublisherClientID,
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  input.CatalogPublisherClientSecret,
+		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": input.ApplicationID,
+		"PLATFORM_DOCKER_NETWORK":                       provisioner.config.PlatformDockerNetwork,
 	}
 	if err := updateSubsystemEnvironment(environmentSource, environmentPath, values); err != nil {
 		return provisioningError("write subsystem environment file")

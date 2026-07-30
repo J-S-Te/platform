@@ -131,21 +131,22 @@ type positionModel struct {
 func (positionModel) TableName() string { return "iam_position" }
 
 type membershipModel struct {
-	ID             string     `gorm:"column:id;primaryKey"`
-	TenantID       string     `gorm:"column:tenant_id"`
-	UserID         string     `gorm:"column:user_id"`
-	OrgUnitID      string     `gorm:"column:org_unit_id"`
-	PositionID     string     `gorm:"column:position_id"`
-	MembershipType string     `gorm:"column:membership_type"`
-	IsPrimary      bool       `gorm:"column:is_primary"`
-	ValidFrom      *time.Time `gorm:"column:valid_from"`
-	ValidUntil     *time.Time `gorm:"column:valid_until"`
-	Status         string     `gorm:"column:status"`
-	Version        uint64     `gorm:"column:version"`
-	CreatedAt      time.Time  `gorm:"column:created_at"`
-	CreatedBy      *string    `gorm:"column:created_by"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at"`
-	UpdatedBy      *string    `gorm:"column:updated_by"`
+	ID                   string     `gorm:"column:id;primaryKey"`
+	TenantID             string     `gorm:"column:tenant_id"`
+	UserID               string     `gorm:"column:user_id"`
+	OrgUnitID            string     `gorm:"column:org_unit_id"`
+	PositionID           string     `gorm:"column:position_id"`
+	MembershipType       string     `gorm:"column:membership_type"`
+	IsPrimary            bool       `gorm:"column:is_primary"`
+	InheritAuthorization bool       `gorm:"column:inherit_authorization"`
+	ValidFrom            *time.Time `gorm:"column:valid_from"`
+	ValidUntil           *time.Time `gorm:"column:valid_until"`
+	Status               string     `gorm:"column:status"`
+	Version              uint64     `gorm:"column:version"`
+	CreatedAt            time.Time  `gorm:"column:created_at"`
+	CreatedBy            *string    `gorm:"column:created_by"`
+	UpdatedAt            time.Time  `gorm:"column:updated_at"`
+	UpdatedBy            *string    `gorm:"column:updated_by"`
 }
 
 func (membershipModel) TableName() string { return "iam_membership" }
@@ -193,20 +194,21 @@ type permissionProjection struct {
 }
 
 type membershipProjection struct {
-	ID             string     `gorm:"column:id"`
-	TenantID       string     `gorm:"column:tenant_id"`
-	UserID         string     `gorm:"column:user_id"`
-	UserName       string     `gorm:"column:user_name"`
-	OrgUnitID      string     `gorm:"column:org_unit_id"`
-	OrgUnitName    string     `gorm:"column:org_unit_name"`
-	PositionID     string     `gorm:"column:position_id"`
-	PositionName   string     `gorm:"column:position_name"`
-	MembershipType string     `gorm:"column:membership_type"`
-	ValidFrom      *time.Time `gorm:"column:valid_from"`
-	ValidUntil     *time.Time `gorm:"column:valid_until"`
-	Status         string     `gorm:"column:status"`
-	Version        uint64     `gorm:"column:version"`
-	IsPrimary      bool       `gorm:"column:is_primary"`
+	ID                   string     `gorm:"column:id"`
+	TenantID             string     `gorm:"column:tenant_id"`
+	UserID               string     `gorm:"column:user_id"`
+	UserName             string     `gorm:"column:user_name"`
+	OrgUnitID            string     `gorm:"column:org_unit_id"`
+	OrgUnitName          string     `gorm:"column:org_unit_name"`
+	PositionID           string     `gorm:"column:position_id"`
+	PositionName         string     `gorm:"column:position_name"`
+	MembershipType       string     `gorm:"column:membership_type"`
+	ValidFrom            *time.Time `gorm:"column:valid_from"`
+	ValidUntil           *time.Time `gorm:"column:valid_until"`
+	Status               string     `gorm:"column:status"`
+	Version              uint64     `gorm:"column:version"`
+	IsPrimary            bool       `gorm:"column:is_primary"`
+	InheritAuthorization bool       `gorm:"column:inherit_authorization"`
 }
 
 // bootstrapStateModel is the migration-owned one-time initialization marker.

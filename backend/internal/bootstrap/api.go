@@ -20,6 +20,7 @@ import (
 	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	authorizationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/infrastructure"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
+	positiongrant "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/positiongrant"
 	configurationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/application"
 	configurationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/infrastructure"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
@@ -128,7 +129,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	managementService, err := identityapplication.NewManagementService(
-		repository, mobileProtector, ulid.Generator{}, identityapplication.SystemClock{},
+		repository, mobileProtector, ulid.Generator{}, identityapplication.SystemClock{}, security.Argon2idPasswordHasher{},
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -179,6 +180,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 
 	applicationAccessAudit := &applicationAccessAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
+	// Application authorization catalogs are published by the owning subsystem through
+	// its OAuth machine credential. Do not bootstrap a contract_management catalog here:
+	// the platform only mirrors the directory and assigns published roles.
 	applicationAccessService, err := applicationaccess.NewService(db, ulid.Generator{}, applicationaccess.SystemClock{}, applicationAccessAudit)
 	if err != nil {
 		_ = database.Close(db)
@@ -186,6 +190,18 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	applicationAccessHandler, err := applicationaccess.NewHandler(applicationAccessService)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	positionGrantService, err := positiongrant.NewService(db, ulid.Generator{}, positiongrant.SystemClock{})
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	positionGrantHandler, err := positiongrant.NewHandler(positionGrantService)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -458,7 +474,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 
 	return &API{
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
+			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
 		Logger:   logger,
 		database: db,

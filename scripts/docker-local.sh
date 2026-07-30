@@ -33,6 +33,8 @@ usage() {
   bash scripts/docker-local.sh config
   bash scripts/docker-local.sh verify
   bash scripts/docker-local.sh refresh-api
+  bash scripts/docker-local.sh refresh-frontend
+  bash scripts/docker-local.sh refresh-contract-api
 
 up/restart 选项：
   --build                         重新构建三个业务镜像
@@ -44,9 +46,13 @@ up/restart 选项：
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   -h, --help                      显示帮助
 
-refresh-api：
-  只重建并重启基础平台 API、受控 provisioner，且仅执行基础平台迁移。
-  不构建 frontend 或 contract-api；适用于后端路由、迁移或权限改动后的快速更新。
+定向更新：
+  refresh-api           只重建基础平台后端镜像，执行基础平台迁移，并重启 api/受控 provisioner
+  refresh-frontend      只重建并重启统一 frontend；基础平台前端与合同管理前端同时更新
+  refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
+
+  三种定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
+  因此不会影响已经完成的子系统统一登录接入。
 
 应用容器：
   frontend      基础平台前端 + 合同管理前端（宿主机仅发布 8081）
@@ -63,7 +69,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-        up|down|stop|restart|ps|logs|config|verify|refresh-api)
+        up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api)
             command_name="$1"
             shift
             ;;
@@ -237,15 +243,24 @@ prepare_base_images() {
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
 }
 
-prepare_platform_api_base_images() {
-    # refresh-api 只涉及 Go 后端镜像；不要因为 Node/Nginx 镜像拉取失败而阻塞
-    # 后端安全修复、路由或迁移的发布。
+prepare_go_backend_base_images() {
+    local target_name="${1:-Go 后端}"
     local image
     local images=(
         "golang:1.26.4-alpine"
         "alpine:3.21"
     )
-    log "检查并串行准备基础平台 API 所需镜像"
+    log "检查并串行准备${target_name}所需基础镜像"
+    for image in "${images[@]}"; do pull_image_with_retry "$image"; done
+}
+
+prepare_frontend_base_images() {
+    local image
+    local images=(
+        "node:22-alpine"
+        "nginx:1.27-alpine"
+    )
+    log "检查并串行准备统一前端所需基础镜像"
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
 }
 
@@ -259,8 +274,10 @@ build_images() {
     else
         log "构建缺失或有变更的三个业务镜像"
     fi
+    # migrate/bootstrap-admin/subsystem-provisioner 都复用 api 构建出的
+    # basic-platform/backend:local；这里只构建三个业务镜像各一次。
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build \
-        migrate bootstrap-admin api subsystem-provisioner contract-api frontend
+        api contract-api frontend
 }
 
 prepare_gateway_config() {
@@ -438,11 +455,10 @@ refresh_platform_api() {
     # 仅刷新基础平台后端：当前 API 不会包含新增路由时，使用该命令即可。
     # compose() 固定携带合同环境文件，所以这里只保证它存在，不校验其 OIDC 占位符。
     prepare_operational_env
-    prepare_platform_api_base_images
+    prepare_go_backend_base_images "基础平台后端"
 
     log "重新构建基础平台后端镜像（不构建 frontend 或 contract-api）"
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build \
-        migrate api subsystem-provisioner
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build api
 
     log "启动基础平台 MySQL，并执行基础平台数据库迁移"
     compose_run up -d --wait mysql
@@ -455,7 +471,36 @@ refresh_platform_api() {
     log "重建基础平台 API"
     compose_run up -d --wait --no-deps api
     compose_run ps api subsystem-provisioner mysql
-    log "基础平台 API 已刷新；现在可以重新执行 subsystem-offboarding.sh"
+    log "基础平台后端已刷新；统一前端、合同管理后端和现有统一登录接入配置保持不变"
+}
+
+refresh_unified_frontend() {
+    prepare_operational_env
+    prepare_frontend_base_images
+    prepare_gateway_config
+
+    log "重新构建统一前端镜像（基础平台前端 + 合同管理前端）"
+    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
+    log "重建统一 frontend 容器；两个后端容器和统一登录接入配置保持不变"
+    compose_run up -d --wait --no-deps frontend
+    verify_gateway_routes
+    compose_run ps frontend
+}
+
+refresh_contract_backend() {
+    ensure_platform_env_file
+    ensure_contract_env_file true
+    prepare_go_backend_base_images "合同管理后端"
+
+    log "重新构建合同管理后端镜像（不构建 frontend 或基础平台 api）"
+    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build contract-api
+    log "启动合同数据库与 Temporal，并执行合同管理数据库迁移"
+    compose_run up -d --wait contract-mysql temporal
+    compose_run run --rm --no-deps contract-migrate
+    log "重建 contract-api 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
+    compose_run up -d --wait --no-deps contract-api
+    verify_gateway_routes
+    compose_run ps contract-api contract-mysql temporal
 }
 
 prepare_operational_env() {
@@ -495,5 +540,11 @@ case "$command_name" in
         ;;
     refresh-api)
         refresh_platform_api
+        ;;
+    refresh-frontend)
+        refresh_unified_frontend
+        ;;
+    refresh-contract-api)
+        refresh_contract_backend
         ;;
 esac

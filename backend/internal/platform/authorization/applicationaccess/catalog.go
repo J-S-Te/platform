@@ -19,12 +19,19 @@ import (
 // The platform stores the catalog in generic authorization tables; it does not assign business
 // meaning to permission codes.
 type CatalogInput struct {
-	CatalogVersion   string             `json:"catalog_version"`
-	Checksum         string             `json:"checksum"`
+	CatalogVersion string `json:"catalog_version"`
+	Checksum       string `json:"checksum"`
+	// SourceType and SourceIdentifier are provenance fields managed by the HTTP
+	// transport from a verified application bearer; request values must not be trusted.
 	SourceType       string             `json:"source_type"`
 	SourceIdentifier string             `json:"source_identifier"`
 	Permissions      []PermissionInput  `json:"permissions"`
 	Roles            []CatalogRoleInput `json:"roles"`
+	Policy           CatalogPolicyInput `json:"policy,omitempty"`
+	// ClaimsRoleConfigHash is application-owned opaque Claims compatibility
+	// metadata. The platform stores and forwards it, but does not derive it from
+	// application-specific roles or permissions.
+	ClaimsRoleConfigHash string `json:"claims_role_config_hash,omitempty"`
 }
 
 type PermissionInput struct {
@@ -44,18 +51,20 @@ type CatalogRoleInput struct {
 }
 
 type CatalogView struct {
-	ApplicationID    string                  `json:"application_id"`
-	ApplicationCode  string                  `json:"application_code"`
-	CatalogVersion   string                  `json:"catalog_version"`
-	Checksum         string                  `json:"checksum"`
-	SourceType       string                  `json:"source_type"`
-	SourceIdentifier string                  `json:"source_identifier"`
-	SyncStatus       string                  `json:"sync_status"`
-	LastSyncedAt     *time.Time              `json:"last_synced_at,omitempty"`
-	LastSyncedBy     string                  `json:"last_synced_by,omitempty"`
-	ErrorMessage     string                  `json:"error_message,omitempty"`
-	Permissions      []CatalogPermissionView `json:"permissions"`
-	Roles            []CatalogRoleView       `json:"roles"`
+	ApplicationID        string                         `json:"application_id"`
+	ApplicationCode      string                         `json:"application_code"`
+	CatalogVersion       string                         `json:"catalog_version"`
+	Checksum             string                         `json:"checksum"`
+	SourceType           string                         `json:"source_type"`
+	SourceIdentifier     string                         `json:"source_identifier"`
+	SyncStatus           string                         `json:"sync_status"`
+	LastSyncedAt         *time.Time                     `json:"last_synced_at,omitempty"`
+	LastSyncedBy         string                         `json:"last_synced_by,omitempty"`
+	ErrorMessage         string                         `json:"error_message,omitempty"`
+	Policy               ApplicationAuthorizationPolicy `json:"policy"`
+	ClaimsRoleConfigHash string                         `json:"claims_role_config_hash,omitempty"`
+	Permissions          []CatalogPermissionView        `json:"permissions"`
+	Roles                []CatalogRoleView              `json:"roles"`
 }
 
 type CatalogPermissionView struct {
@@ -76,16 +85,17 @@ type CatalogRoleView struct {
 }
 
 type catalogMetadataRow struct {
-	TenantID         string     `gorm:"column:tenant_id"`
-	ApplicationID    string     `gorm:"column:application_id"`
-	CatalogVersion   string     `gorm:"column:catalog_version"`
-	CatalogHash      string     `gorm:"column:catalog_hash"`
-	SourceType       string     `gorm:"column:source_type"`
-	SourceIdentifier string     `gorm:"column:source_identifier"`
-	SyncStatus       string     `gorm:"column:sync_status"`
-	LastSyncedAt     *time.Time `gorm:"column:last_synced_at"`
-	LastSyncedBy     string     `gorm:"column:last_synced_by"`
-	ErrorMessage     string     `gorm:"column:error_message"`
+	TenantID             string     `gorm:"column:tenant_id"`
+	ApplicationID        string     `gorm:"column:application_id"`
+	CatalogVersion       string     `gorm:"column:catalog_version"`
+	CatalogHash          string     `gorm:"column:catalog_hash"`
+	ClaimsRoleConfigHash string     `gorm:"column:claims_role_config_hash"`
+	SourceType           string     `gorm:"column:source_type"`
+	SourceIdentifier     string     `gorm:"column:source_identifier"`
+	SyncStatus           string     `gorm:"column:sync_status"`
+	LastSyncedAt         *time.Time `gorm:"column:last_synced_at"`
+	LastSyncedBy         string     `gorm:"column:last_synced_by"`
+	ErrorMessage         string     `gorm:"column:error_message"`
 }
 
 type catalogPermissionRow struct {
@@ -123,6 +133,8 @@ func (s *Service) GetCatalog(ctx context.Context, tenantID, applicationID string
 }
 
 // SyncCatalog validates and atomically replaces the application-owned role catalog.
+// Every application, including contract_management, uses this application-owned mirror;
+// contract-specific role-assignment and token-issuance guardrails live in Service access logic.
 func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, operatorID string, input CatalogInput) (CatalogView, error) {
 	app, err := s.findApplicationByID(ctx, tenantID, applicationID)
 	if err != nil {
@@ -219,7 +231,10 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		if err := tx.Table("authz_permission").Where("tenant_id = ? AND application_id = ? AND code NOT IN ?", tenantID, app.ID, permissionCodes).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": operatorID}).Error; err != nil {
 			return fmt.Errorf("disable removed catalog permissions: %w", err)
 		}
-		metadata := map[string]any{"tenant_id": tenantID, "application_id": app.ID, "catalog_version": input.CatalogVersion, "catalog_hash": input.Checksum, "source_type": input.SourceType, "source_identifier": input.SourceIdentifier, "sync_status": "SYNCED", "last_synced_at": now, "last_synced_by": operatorID, "error_message": nil, "created_at": now, "created_by": operatorID, "updated_at": now, "updated_by": operatorID}
+		if err := s.upsertCatalogPolicy(tx, tenantID, app.ID, operatorID, now, input); err != nil {
+			return err
+		}
+		metadata := map[string]any{"tenant_id": tenantID, "application_id": app.ID, "catalog_version": input.CatalogVersion, "catalog_hash": input.Checksum, "claims_role_config_hash": input.ClaimsRoleConfigHash, "source_type": input.SourceType, "source_identifier": input.SourceIdentifier, "sync_status": "SYNCED", "last_synced_at": now, "last_synced_by": operatorID, "error_message": nil, "created_at": now, "created_by": operatorID, "updated_at": now, "updated_by": operatorID}
 		if err := tx.Table("authz_authorization_catalog").Clauses(gormOnConflictCatalog()).Create(metadata).Error; err != nil {
 			return fmt.Errorf("save authorization catalog metadata: %w", err)
 		}
@@ -328,6 +343,20 @@ func normalizeCatalog(input CatalogInput) (CatalogInput, string, error) {
 		resourceActions[resourceAction] = struct{}{}
 		permissions[item.Code] = item
 	}
+	input.ClaimsRoleConfigHash = strings.TrimSpace(input.ClaimsRoleConfigHash)
+	if len(input.ClaimsRoleConfigHash) > 128 {
+		return CatalogInput{}, "", validation("claims_role_config_hash must be at most 128 characters")
+	}
+	for _, value := range input.ClaimsRoleConfigHash {
+		if !((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == ':' || value == '.' || value == '_' || value == '-') {
+			return CatalogInput{}, "", validation("claims_role_config_hash contains unsupported characters")
+		}
+	}
+	policy, err := normalizeCatalogPolicy(input.Policy)
+	if err != nil {
+		return CatalogInput{}, "", err
+	}
+	input.Policy = policy
 	input.Permissions = input.Permissions[:0]
 	for _, item := range permissions {
 		input.Permissions = append(input.Permissions, item)
@@ -359,14 +388,15 @@ func normalizeCatalog(input CatalogInput) (CatalogInput, string, error) {
 		Version     string             `json:"catalog_version"`
 		Permissions []PermissionInput  `json:"permissions"`
 		Roles       []CatalogRoleInput `json:"roles"`
-	}{input.CatalogVersion, input.Permissions, input.Roles}
+		Policy      CatalogPolicyInput `json:"policy"`
+	}{input.CatalogVersion, input.Permissions, input.Roles, input.Policy}
 	encoded, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(encoded)
 	return input, hex.EncodeToString(sum[:]), nil
 }
 
 func gormOnConflictCatalog() clause.OnConflict {
-	return clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}}, DoUpdates: clause.AssignmentColumns([]string{"catalog_version", "catalog_hash", "source_type", "source_identifier", "sync_status", "last_synced_at", "last_synced_by", "error_message", "updated_at", "updated_by"})}
+	return clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}}, DoUpdates: clause.AssignmentColumns([]string{"catalog_version", "catalog_hash", "claims_role_config_hash", "source_type", "source_identifier", "sync_status", "last_synced_at", "last_synced_by", "error_message", "updated_at", "updated_by"})}
 }
 
 func (s *Service) findApplicationByID(ctx context.Context, tenantID, id string) (applicationRow, error) {
@@ -465,6 +495,10 @@ func (s *Service) upsertCatalogRole(tx *gorm.DB, tenantID, appID, operatorID str
 }
 
 func (s *Service) catalogView(ctx context.Context, app applicationRow, metadata catalogMetadataRow) (CatalogView, error) {
+	policy, err := s.ResolveApplicationAuthorizationPolicy(ctx, app.TenantID, app.ID)
+	if err != nil {
+		return CatalogView{}, err
+	}
 	var permissions []catalogPermissionRow
 	if err := s.db.WithContext(ctx).Table("authz_permission AS p").Select("p.id, p.code, p.name, p.action, r.code AS resource_code, p.risk_level, p.status").Joins("JOIN authz_resource AS r ON r.id = p.resource_id").Where("p.tenant_id = ? AND p.application_id = ?", app.TenantID, app.ID).Order("p.code ASC").Find(&permissions).Error; err != nil {
 		return CatalogView{}, err
@@ -485,5 +519,5 @@ func (s *Service) catalogView(ctx context.Context, app applicationRow, metadata 
 		}
 		roleViews = append(roleViews, CatalogRoleView{Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, Permissions: sortedUnique(perms)})
 	}
-	return CatalogView{ApplicationID: app.ID, ApplicationCode: app.Code, CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash, SourceType: metadata.SourceType, SourceIdentifier: metadata.SourceIdentifier, SyncStatus: metadata.SyncStatus, LastSyncedAt: metadata.LastSyncedAt, LastSyncedBy: metadata.LastSyncedBy, ErrorMessage: metadata.ErrorMessage, Permissions: permissionViews, Roles: roleViews}, nil
+	return CatalogView{ApplicationID: app.ID, ApplicationCode: app.Code, CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash, ClaimsRoleConfigHash: metadata.ClaimsRoleConfigHash, SourceType: metadata.SourceType, SourceIdentifier: metadata.SourceIdentifier, SyncStatus: metadata.SyncStatus, LastSyncedAt: metadata.LastSyncedAt, LastSyncedBy: metadata.LastSyncedBy, ErrorMessage: metadata.ErrorMessage, Policy: policy, Permissions: permissionViews, Roles: roleViews}, nil
 }

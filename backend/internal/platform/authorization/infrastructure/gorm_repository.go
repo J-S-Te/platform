@@ -62,6 +62,9 @@ func (r *GORMRepository) CreateResource(ctx context.Context, tenantID, operatorI
 	if err != nil {
 		return domain.Resource{}, err
 	}
+	if err := r.ensureApplicationCatalogWritable(ctx, tenantID, app.ID); err != nil {
+		return domain.Resource{}, err
+	}
 	now := time.Now().UTC()
 	operator := operatorID
 	model := resourceModel{ID: resource.ID, TenantID: tenantID, ApplicationID: app.ID, Code: resource.Code, Name: resource.Name, ResourceType: resource.ResourceType, Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: &operator, UpdatedAt: now, UpdatedBy: &operator}
@@ -101,6 +104,9 @@ func (r *GORMRepository) CreatePermission(ctx context.Context, tenantID, operato
 	result := r.database.WithContext(ctx).Where("id = ? AND tenant_id = ? AND status = ?", permission.Resource.ID, tenantID, domain.StatusActive).First(&resource)
 	if result.Error != nil {
 		return domain.Permission{}, translateNotFound(result.Error, "resource")
+	}
+	if err := r.ensureApplicationCatalogWritable(ctx, tenantID, resource.ApplicationID); err != nil {
+		return domain.Permission{}, err
 	}
 	now := time.Now().UTC()
 	operator := operatorID
@@ -190,8 +196,8 @@ func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID, o
 		if result.Error != nil {
 			return translateNotFound(result.Error, "role")
 		}
-		if model.BuiltIn {
-			return application.ErrConflict
+		if err := ensureRoleEditable(model); err != nil {
+			return err
 		}
 		if model.Version != role.Version {
 			return application.ErrVersionConflict
@@ -230,6 +236,55 @@ func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID, o
 	return output, err
 }
 
+// ensureRoleEditable preserves the ownership boundary for roles. Built-in platform roles
+// and application-defined roles are not mutable through the generic role-management API.
+// Application roles must be changed by the owning subsystem through its catalog sync flow.
+func ensureRoleEditable(role roleModel) error {
+	if role.BuiltIn || strings.EqualFold(strings.TrimSpace(role.RoleType), "APPLICATION") {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+// ensureApplicationRoleBindingManaged keeps application-owned catalog roles on
+// the application-access path, where grant provenance and effective-role limits
+// are enforced. Generic RBAC binding APIs remain available for platform roles.
+func ensureApplicationRoleBindingManaged(role roleModel) error {
+	if strings.EqualFold(strings.TrimSpace(role.RoleType), "APPLICATION") {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+// catalogMirrorReadOnly treats a successfully synchronized catalog as application
+// owned. A retained version/hash also keeps it read-only after a later failed
+// resync; a sync failure must not reopen the directory for console mutations.
+func catalogMirrorReadOnly(syncStatus, catalogVersion, catalogHash string) bool {
+	return strings.EqualFold(strings.TrimSpace(syncStatus), "SYNCED") ||
+		strings.TrimSpace(catalogVersion) != "" || strings.TrimSpace(catalogHash) != ""
+}
+
+func (r *GORMRepository) ensureApplicationCatalogWritable(ctx context.Context, tenantID, applicationID string) error {
+	var metadata struct {
+		SyncStatus     string `gorm:"column:sync_status"`
+		CatalogVersion string `gorm:"column:catalog_version"`
+		CatalogHash    string `gorm:"column:catalog_hash"`
+	}
+	err := r.database.WithContext(ctx).Table("authz_authorization_catalog").
+		Select("sync_status, catalog_version, catalog_hash").
+		Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).Take(&metadata).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load authorization catalog ownership: %w", err)
+	}
+	if catalogMirrorReadOnly(metadata.SyncStatus, metadata.CatalogVersion, metadata.CatalogHash) {
+		return application.ErrConflict
+	}
+	return nil
+}
+
 func (r *GORMRepository) ListRoleBindings(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.RoleBinding], error) {
 	query := r.database.WithContext(ctx).Table("authz_role_binding AS binding").Joins("JOIN authz_role AS role ON role.id = binding.role_id").Where("binding.tenant_id = ?", tenantID)
 	if page.Keyword != "" {
@@ -260,6 +315,9 @@ func (r *GORMRepository) CreateRoleBinding(ctx context.Context, tenantID, operat
 		result := tx.Where("id = ? AND tenant_id = ? AND status = ?", binding.Role.ID, tenantID, domain.StatusActive).First(&role)
 		if result.Error != nil {
 			return translateNotFound(result.Error, "role")
+		}
+		if err := ensureApplicationRoleBindingManaged(role); err != nil {
+			return err
 		}
 		if err := r.ensureProtectedRoleBindingOperator(tx, tenantID, operatorID, role); err != nil {
 			return err
@@ -298,6 +356,9 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 		if result.Error != nil {
 			return translateNotFound(result.Error, "role")
 		}
+		if err := ensureApplicationRoleBindingManaged(role); err != nil {
+			return err
+		}
 		if err := r.ensureProtectedRoleBindingOperator(tx, tenantID, operatorID, role); err != nil {
 			return err
 		}
@@ -305,6 +366,9 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 			var existingRole roleModel
 			if err := tx.Where("id = ? AND tenant_id = ? AND application_id = ?", existing.RoleID, tenantID, existing.ApplicationID).First(&existingRole).Error; err != nil {
 				return translateNotFound(err, "role")
+			}
+			if err := ensureApplicationRoleBindingManaged(existingRole); err != nil {
+				return err
 			}
 			if err := r.ensureProtectedRoleBindingOperator(tx, tenantID, operatorID, existingRole); err != nil {
 				return err
@@ -526,6 +590,7 @@ func roleBindingSubjectFilter(userID, accountID string, now time.Time) (string, 
 				WHERE membership.tenant_id = binding.tenant_id
 					AND membership.user_id = ?
 					AND membership.status = ?
+					AND membership.inherit_authorization = 1
 					AND (membership.valid_from IS NULL OR membership.valid_from <= ?)
 					AND (membership.valid_until IS NULL OR membership.valid_until > ?)
 					AND (

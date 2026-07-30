@@ -80,6 +80,75 @@ func (h *Handler) UpdateAccess(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "应用权限已更新", access)
 }
 
+func (h *Handler) GetSubjectAccess(w http.ResponseWriter, r *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	subjectType := strings.TrimSpace(r.PathValue("subject_type"))
+	subjectID := strings.TrimSpace(r.PathValue("subject_id"))
+	applicationCode := strings.TrimSpace(r.PathValue("application_code"))
+	access, err := h.service.GetSubjectAccess(r.Context(), principal.Tenant.ID, subjectType, subjectID, applicationCode)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", access)
+}
+
+func (h *Handler) UpdateSubjectAccess(w http.ResponseWriter, r *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	var payload updatePayload
+	if !decodePayload(w, r, &payload) {
+		return
+	}
+	if payload.CustomPermissions != nil {
+		writeError(w, r, validation("custom_permissions are not supported; assign an application role instead"))
+		return
+	}
+	roles, provided, err := payloadRoles(payload)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	access, err := h.service.UpdateSubjectAccess(r.Context(), UpdateSubjectAccessInput{
+		TenantID: principal.Tenant.ID, SubjectType: strings.TrimSpace(r.PathValue("subject_type")),
+		SubjectID: strings.TrimSpace(r.PathValue("subject_id")), OperatorID: principal.User.ID,
+		Roles: roles, RolesProvided: provided,
+	}, strings.TrimSpace(r.PathValue("application_code")))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "主体应用权限已更新", access)
+}
+
+func (h *Handler) DeleteSubjectAccess(w http.ResponseWriter, r *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	subjectType := strings.TrimSpace(r.PathValue("subject_type"))
+	subjectID := strings.TrimSpace(r.PathValue("subject_id"))
+	applicationCode := strings.TrimSpace(r.PathValue("application_code"))
+	err := h.service.DeleteSubjectAccess(r.Context(), DeleteSubjectAccessInput{
+		TenantID: principal.Tenant.ID, SubjectType: subjectType, SubjectID: subjectID, OperatorID: principal.User.ID,
+	}, applicationCode)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "主体直接授权已撤销", map[string]any{
+		"application_code": applicationCode, "subject_type": subjectType, "subject_id": subjectID,
+	})
+}
+
 func (h *Handler) DeleteAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -110,9 +179,9 @@ func payloadRoles(payload updatePayload) ([]RoleInput, bool, error) {
 		return []RoleInput{{RoleCode: payload.RoleCode, ScopeType: "APPLICATION"}}, true, nil
 	}
 	if payload.CustomPermissions != nil {
-		// Compatibility callers may update only direct permissions. Preserve
-		// the user's existing role bindings instead of replacing them with an
-		// empty role set.
+		// The service rejects direct permission updates. Preserve roles here so
+		// the request is rejected for its unsupported field rather than being
+		// misreported as an empty role replacement.
 		return nil, false, nil
 	}
 	return nil, false, validation("roles is required")
@@ -179,7 +248,7 @@ func (h *Handler) GetCatalog(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	applicationID := strings.TrimSpace(r.PathValue("application_id"))
-	tenantID, operatorID, err := h.catalogPrincipal(r, applicationID, "authorization.catalog.sync", "platform:application:update")
+	principal, err := catalogSyncApplicationPrincipal(r, applicationID)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -188,7 +257,11 @@ func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	if !decodePayload(w, r, &payload) {
 		return
 	}
-	catalog, err := h.service.SyncCatalog(r.Context(), tenantID, applicationID, operatorID, payload)
+	// The catalog owner is established from the verified application bearer token.
+	// Never trust caller-provided provenance fields: they are accepted only for
+	// backwards-compatible request decoding and are overwritten before persistence.
+	payload.SourceType, payload.SourceIdentifier = catalogSourceFromApplicationPrincipal(principal)
+	catalog, err := h.service.SyncCatalog(r.Context(), principal.TenantID, applicationID, "application:"+principal.ClientID, payload)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -196,9 +269,24 @@ func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "应用授权目录已同步", catalog)
 }
 
-// catalogPrincipal authorizes catalog access for either a platform console user or the OAuth
-// application that owns the catalog. Application bearer tokens are constrained to their own
-// application and must carry the endpoint-specific catalog scope.
+// catalogSyncApplicationPrincipal authorizes writes to an authorization catalog. Catalogs are
+// application-owned declarations, so a platform console principal (including an administrator or
+// application owner) is deliberately never sufficient. The application bearer must be bound to
+// the target application and explicitly carry authorization.catalog.sync.
+func catalogSyncApplicationPrincipal(r *http.Request, applicationID string) (appctx.Principal, error) {
+	principal, ok := appctx.PrincipalFromContext(r.Context())
+	if !ok || principal.ApplicationID != applicationID || !principal.HasScope("authorization.catalog.sync") {
+		return appctx.Principal{}, ErrAccessDenied
+	}
+	return principal, nil
+}
+
+func catalogSourceFromApplicationPrincipal(principal appctx.Principal) (sourceType, sourceIdentifier string) {
+	return "APPLICATION", "oauth_client:" + principal.OAuthClientID
+}
+
+// catalogPrincipal authorizes read access for either a platform console user or the OAuth
+// application that owns the catalog. Writes use catalogSyncApplicationPrincipal instead.
 func (h *Handler) catalogPrincipal(r *http.Request, applicationID, applicationScope, consolePermission string) (tenantID, operatorID string, err error) {
 	if principal, ok := authctx.PrincipalFromContext(r.Context()); ok {
 		if hasPermission(principal, consolePermission) {

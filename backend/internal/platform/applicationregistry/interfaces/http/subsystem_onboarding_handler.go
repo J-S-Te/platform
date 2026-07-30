@@ -139,10 +139,12 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		upstreamURL = *result.Environment.UpstreamURL
 	}
 	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
-		TenantID: principal.Tenant.ID, ApplicationCode: result.Application.Code,
+		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
 		Environment: result.Environment.Environment, Issuer: handler.oidcIssuer,
 		ClientID: result.OAuthClient.ClientID, ClientSecret: result.PlaintextSecret,
-		RedirectURI: result.RedirectURI, PublicURL: result.PublicURL,
+		CatalogPublisherClientID:     result.CatalogPublisherOAuthClient.ClientID,
+		CatalogPublisherClientSecret: result.CatalogPublisherPlaintextSecret,
+		RedirectURI:                  result.RedirectURI, PublicURL: result.PublicURL,
 		PathPrefix: pathPrefix, UpstreamURL: upstreamURL,
 	}); err != nil {
 		handler.writeError(writer, request, err)

@@ -107,7 +107,7 @@ deploy_platform() {
   compose up -d --wait --wait-timeout 180 platform-mysql || return
   backup_database platform-mysql basic_platform || return
   compose --profile release run --rm platform-migrate ./migrate || return
-  compose up -d --no-deps platform-api platform-worker || return
+  compose up -d --no-deps platform-api || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz"
 }
 
@@ -115,7 +115,7 @@ deploy_contract() {
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
   compose --profile release run --rm contract-migrate ./migrate || return
-  compose up -d --no-deps contract-api contract-worker || return
+  compose up -d --no-deps contract-api || return
   wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"
 }
 
@@ -127,8 +127,8 @@ deploy_frontend() {
 rollback_runtime() {
   case "$service" in
     frontend) compose up -d --no-deps frontend ;;
-    platform) compose up -d --no-deps platform-api platform-worker ;;
-    contract) compose up -d --no-deps contract-api contract-worker ;;
+    platform) compose up -d --no-deps platform-api ;;
+    contract) compose up -d --no-deps contract-api ;;
   esac
 }
 

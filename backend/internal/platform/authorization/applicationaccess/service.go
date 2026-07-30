@@ -1,8 +1,8 @@
 // Package applicationaccess provides application-aware authorization for OAuth/OIDC clients.
 //
 // The package deliberately resolves access from the OAuth client registration instead of from a
-// hard-coded subsystem name.  This keeps roles and permissions isolated by application while
-// allowing one user to hold more than one role in the same application.
+// hard-coded subsystem name. This keeps roles and permissions isolated by application.
+// Application-owned catalog policies determine any maximum effective-role constraint.
 package applicationaccess
 
 import (
@@ -23,8 +23,22 @@ const (
 	activeStatus         = "ACTIVE"
 	disabledStatus       = "DISABLED"
 	subjectTypeUser      = "USER"
+	subjectTypeOrgUnit   = "ORG_UNIT"
+	subjectTypePosition  = "POSITION"
 	scopeTypeTenant      = "TENANT"
 	scopeTypeEnvironment = "ENVIRONMENT"
+
+	authorizationUnauthorized = "UNAUTHORIZED"
+	authorizationGranted      = "GRANTED"
+	authorizationConflict     = "CONFLICT"
+
+	grantOriginManual   = "MANUAL"
+	grantOriginTemplate = "TEMPLATE"
+	grantOriginSystem   = "SYSTEM"
+
+	sourceKindManual    = "MANUAL"
+	sourceKindInherited = "INHERITED"
+	sourceKindSystem    = "SYSTEM"
 )
 
 var (
@@ -75,6 +89,25 @@ type RoleView struct {
 	EnvironmentCode string     `json:"environment_code,omitempty"`
 	ValidFrom       *time.Time `json:"valid_from,omitempty"`
 	ValidUntil      *time.Time `json:"valid_until,omitempty"`
+	SourceType      string     `json:"source_type"`
+	SourceID        string     `json:"source_id"`
+	SourceName      string     `json:"source_name"`
+	Direct          bool       `json:"direct"`
+
+	// GrantOrigin is the durable provenance of the binding. It is intentionally
+	// separate from SourceType: SourceType says which subject owns the binding,
+	// while GrantOrigin says how the binding was granted.
+	GrantOrigin  string `json:"grant_origin"`
+	OriginID     string `json:"origin_id"`
+	OriginItemID string `json:"origin_item_id"`
+	SourceKind   string `json:"source_kind"`
+
+	AssignmentID string `json:"assignment_id,omitempty"`
+	TemplateID   string `json:"template_id,omitempty"`
+	TemplateCode string `json:"template_code,omitempty"`
+	TemplateName string `json:"template_name,omitempty"`
+	PositionID   string `json:"position_id,omitempty"`
+	PositionName string `json:"position_name,omitempty"`
 }
 
 type RoleInput struct {
@@ -89,6 +122,12 @@ type Access struct {
 	ApplicationCode string     `json:"application_code"`
 	EnvironmentCode string     `json:"environment_code,omitempty"`
 	Roles           []RoleView `json:"roles"`
+	DirectRoles     []RoleView `json:"direct_roles"`
+	InheritedRoles  []RoleView `json:"inherited_roles"`
+	// ManualRoles contains only direct, manually managed user grants. It is
+	// provided so management screens can edit manual access without replacing
+	// template-inherited or system-provisioned bindings.
+	ManualRoles []RoleView `json:"manual_roles"`
 	// Role is retained for clients of the old SYS-004 access endpoint.  New clients should use
 	// Roles, which can contain more than one application role.
 	Role                 RoleView `json:"role"`
@@ -97,6 +136,8 @@ type Access struct {
 	EffectivePermissions []string `json:"effective_permissions"`
 	RoleConfigHash       string   `json:"role_config_hash"`
 	AuthzRevision        uint64   `json:"authz_revision"`
+	AuthorizationState   string   `json:"authorization_state"`
+	Conflicts            []string `json:"conflicts"`
 }
 
 type UpdateAccessInput struct {
@@ -113,6 +154,22 @@ type DeleteAccessInput struct {
 	TenantID   string
 	UserID     string
 	OperatorID string
+}
+
+type UpdateSubjectAccessInput struct {
+	TenantID      string
+	SubjectType   string
+	SubjectID     string
+	OperatorID    string
+	Roles         []RoleInput
+	RolesProvided bool
+}
+
+type DeleteSubjectAccessInput struct {
+	TenantID    string
+	SubjectType string
+	SubjectID   string
+	OperatorID  string
 }
 
 type TokenAuthorization struct {
@@ -157,6 +214,18 @@ type assignedRoleRow struct {
 	EnvironmentCode string     `gorm:"column:environment_code"`
 	ValidFrom       *time.Time `gorm:"column:valid_from"`
 	ValidUntil      *time.Time `gorm:"column:valid_until"`
+	SubjectType     string     `gorm:"column:subject_type"`
+	SubjectID       string     `gorm:"column:subject_id"`
+	SourceName      string     `gorm:"column:source_name"`
+	GrantOrigin     string     `gorm:"column:grant_origin"`
+	OriginID        string     `gorm:"column:origin_id"`
+	OriginItemID    string     `gorm:"column:origin_item_id"`
+	AssignmentID    string     `gorm:"column:assignment_id"`
+	TemplateID      string     `gorm:"column:template_id"`
+	TemplateCode    string     `gorm:"column:template_code"`
+	TemplateName    string     `gorm:"column:template_name"`
+	PositionID      string     `gorm:"column:position_id"`
+	PositionName    string     `gorm:"column:position_name"`
 }
 
 type bindingRow struct {
@@ -170,15 +239,23 @@ type bindingRow struct {
 	Version    uint64     `gorm:"column:version"`
 }
 
-type catalogRow struct {
-	RoleCode       string `gorm:"column:role_code"`
-	PermissionCode string `gorm:"column:permission_code"`
-	Effect         string `gorm:"column:effect"`
+type resolvedBinding struct {
+	roleID    string
+	scopeType string
+	scopeID   string
+	role      RoleInput
 }
 
-type permissionRow struct {
-	ID   string `gorm:"column:id"`
-	Code string `gorm:"column:code"`
+type catalogRow struct {
+	RoleCode         string `gorm:"column:role_code"`
+	RoleName         string `gorm:"column:role_name"`
+	RoleType         string `gorm:"column:role_type"`
+	RoleBuiltIn      bool   `gorm:"column:role_built_in"`
+	RoleStatus       string `gorm:"column:role_status"`
+	PermissionCode   string `gorm:"column:permission_code"`
+	PermissionName   string `gorm:"column:permission_name"`
+	PermissionStatus string `gorm:"column:permission_status"`
+	Effect           string `gorm:"column:effect"`
 }
 
 func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (TokenAuthorization, error) {
@@ -189,6 +266,9 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	access, err := s.getAccessByApplication(ctx, tenantID, userID, client.ApplicationID, client.ApplicationCode, client.EnvironmentID, client.EnvironmentCode)
 	if err != nil {
 		return TokenAuthorization{}, err
+	}
+	if err := requireGrantedAuthorization(access); err != nil {
+		return TokenAuthorization{}, ErrAccessDenied
 	}
 	roles := make([]string, 0, len(access.Roles))
 	for _, role := range access.Roles {
@@ -222,7 +302,7 @@ func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCo
 	if revisionErr != nil {
 		return Access{}, revisionErr
 	}
-	return Access{ApplicationCode: application.Code, RoleConfigHash: roleConfigHash, AuthzRevision: revision}, nil
+	return emptyAccess(application.Code, "", roleConfigHash, revision), nil
 }
 
 func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applicationCode string) (Access, error) {
@@ -237,6 +317,9 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if err != nil {
 		return Access{}, err
 	}
+	if err := validateCustomPermissionsUpdate(in.CustomPermissionsProvided); err != nil {
+		return Access{}, err
+	}
 	if err := s.ensureUser(ctx, in.TenantID, in.UserID); err != nil {
 		return Access{}, err
 	}
@@ -245,106 +328,22 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if err != nil {
 		return Access{}, err
 	}
-	permissionIDs, _, err := s.resolvePermissionCodes(ctx, in.TenantID, application.ID, in.CustomPermissions, in.CustomPermissionsProvided)
+	resolved, err := s.resolveRoleBindings(ctx, in.TenantID, application.ID, normalizedRoles)
 	if err != nil {
 		return Access{}, err
 	}
-
-	type resolvedBinding struct {
-		roleID    string
-		scopeType string
-		scopeID   string
-		role      RoleInput
-	}
-	resolved := make([]resolvedBinding, 0, len(normalizedRoles))
-	for _, role := range normalizedRoles {
-		var roleRow roleRow
-		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type <> ?", in.TenantID, application.ID, activeStatus, role.RoleCode, "COMPATIBILITY").Take(&roleRow).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return Access{}, validation("one or more application roles do not exist or are disabled")
-			}
-			return Access{}, fmt.Errorf("load application role: %w", err)
-		}
-		scopeType, scopeID := scopeTypeTenant, ""
-		if role.ScopeType == "ENVIRONMENT" {
-			var environment struct {
-				ID string `gorm:"column:id"`
-			}
-			if err := s.db.WithContext(ctx).Table("platform_application_environment").Select("id").Where("tenant_id = ? AND application_id = ? AND environment = ? AND status = ?", in.TenantID, application.ID, role.EnvironmentCode, activeStatus).Take(&environment).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return Access{}, validation("environment does not exist or is disabled")
-				}
-				return Access{}, fmt.Errorf("load application environment: %w", err)
-			}
-			scopeType, scopeID = scopeTypeEnvironment, environment.ID
-		}
-		resolved = append(resolved, resolvedBinding{roleID: roleRow.ID, scopeType: scopeType, scopeID: scopeID, role: role})
+	if err := s.validateDirectRoleLimit(ctx, in.TenantID, application.ID, resolved); err != nil {
+		return Access{}, err
 	}
 
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if in.RolesProvided {
-			var existing []bindingRow
-			if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND r.role_type <> ?", in.TenantID, application.ID, subjectTypeUser, in.UserID, "COMPATIBILITY").Find(&existing).Error; err != nil {
-				return fmt.Errorf("load existing application role bindings: %w", err)
+			roleChanged, err := s.replaceSubjectRoleBindings(tx, in.TenantID, application.ID, subjectTypeUser, in.UserID, in.OperatorID, resolved, now)
+			if err != nil {
+				return err
 			}
-			key := func(roleID, scopeType, scopeID string) string { return roleID + "\x00" + scopeType + "\x00" + scopeID }
-			byKey := make(map[string]bindingRow, len(existing))
-			for _, binding := range existing {
-				byKey[key(binding.RoleID, binding.ScopeType, binding.ScopeID)] = binding
-			}
-			desired := make(map[string]resolvedBinding, len(resolved))
-			for _, item := range resolved {
-				desired[key(item.roleID, item.scopeType, item.scopeID)] = item
-			}
-			for _, binding := range existing {
-				if _, keep := desired[key(binding.RoleID, binding.ScopeType, binding.ScopeID)]; keep || binding.Status != activeStatus {
-					continue
-				}
-				if err := tx.Table("authz_role_binding").Where("id = ?", binding.ID).Updates(map[string]any{"status": disabledStatus, "version": binding.Version + 1, "updated_at": now, "updated_by": in.OperatorID}).Error; err != nil {
-					return fmt.Errorf("disable removed application role binding: %w", err)
-				}
-				changed = true
-			}
-			for bindingKey, item := range desired {
-				if binding, exists := byKey[bindingKey]; exists {
-					if binding.Status == activeStatus && sameValidity(binding.ValidFrom, item.role.ValidFrom) && sameValidity(binding.ValidUntil, item.role.ValidUntil) {
-						continue
-					}
-					if err := tx.Table("authz_role_binding").Where("id = ?", binding.ID).Updates(map[string]any{"status": activeStatus, "valid_from": item.role.ValidFrom, "valid_until": item.role.ValidUntil, "version": binding.Version + 1, "updated_at": now, "updated_by": in.OperatorID}).Error; err != nil {
-						return fmt.Errorf("activate application role binding: %w", err)
-					}
-					changed = true
-					continue
-				}
-				id, err := s.ids.New(now)
-				if err != nil {
-					return fmt.Errorf("generate application role binding ID: %w", err)
-				}
-				if err := tx.Table("authz_role_binding").Create(map[string]any{"id": id, "tenant_id": in.TenantID, "application_id": application.ID, "role_id": item.roleID, "subject_type": subjectTypeUser, "subject_id": in.UserID, "scope_type": item.scopeType, "scope_id": item.scopeID, "valid_from": item.role.ValidFrom, "valid_until": item.role.ValidUntil, "status": activeStatus, "version": 1, "created_at": now, "created_by": in.OperatorID, "updated_at": now, "updated_by": in.OperatorID}).Error; err != nil {
-					return fmt.Errorf("create application role binding: %w", err)
-				}
-				changed = true
-			}
-		}
-		if in.CustomPermissionsProvided {
-			var existingPermissionIDs []string
-			if err := tx.Table("authz_user_permission").Where("tenant_id = ? AND application_id = ? AND user_id = ?", in.TenantID, application.ID, in.UserID).Order("permission_id ASC").Pluck("permission_id", &existingPermissionIDs).Error; err != nil {
-				return fmt.Errorf("load existing legacy user permissions: %w", err)
-			}
-			desiredPermissionIDs := append([]string(nil), permissionIDs...)
-			sort.Strings(desiredPermissionIDs)
-			if !sameStringSlice(existingPermissionIDs, desiredPermissionIDs) {
-				if err := tx.Table("authz_user_permission").Where("tenant_id = ? AND application_id = ? AND user_id = ?", in.TenantID, application.ID, in.UserID).Delete(nil).Error; err != nil {
-					return fmt.Errorf("replace legacy user permissions: %w", err)
-				}
-				for _, permissionID := range permissionIDs {
-					if err := tx.Table("authz_user_permission").Create(map[string]any{"tenant_id": in.TenantID, "application_id": application.ID, "user_id": in.UserID, "permission_id": permissionID, "created_at": now, "created_by": in.OperatorID}).Error; err != nil {
-						return fmt.Errorf("create legacy user permission: %w", err)
-					}
-				}
-				changed = true
-			}
+			changed = changed || roleChanged
 		}
 		if changed {
 			return bumpRevision(tx, in.TenantID, application.ID, now, "user application authorization changed")
@@ -382,7 +381,8 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	now := s.clock.Now().UTC()
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Table("authz_role_binding").Where("tenant_id = ? AND application_id = ? AND subject_type = ? AND subject_id = ? AND status = ?", in.TenantID, application.ID, subjectTypeUser, in.UserID, activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
+		directClause, directArgs := manualDirectApplicationRoleBindingFilter(in.TenantID, application.ID, in.UserID)
+		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.status = ?", activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
 		if result.Error != nil {
 			return fmt.Errorf("revoke application role bindings: %w", result.Error)
 		}
@@ -414,6 +414,155 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	return nil
 }
 
+// GetSubjectAccess returns bindings assigned directly to an organization unit or position.
+// Unlike GetAccess, it never expands memberships because the requested subject is the managed
+// authorization principal itself.
+func (s *Service) GetSubjectAccess(ctx context.Context, tenantID, subjectType, subjectID, applicationCode string) (Access, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	subjectID = strings.TrimSpace(subjectID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	subjectType, err := normalizeManagedSubjectType(subjectType)
+	if err != nil {
+		return Access{}, err
+	}
+	if tenantID == "" || subjectID == "" || applicationCode == "" {
+		return Access{}, validation("tenant_id, subject_type, subject_id and application_code are required")
+	}
+	application, err := s.findApplication(ctx, tenantID, applicationCode)
+	if err != nil {
+		return Access{}, err
+	}
+	if err := s.ensureManagedSubject(ctx, tenantID, subjectType, subjectID); err != nil {
+		return Access{}, err
+	}
+	access, err := s.getSubjectAccessByApplication(ctx, tenantID, subjectType, subjectID, application.ID, application.Code, "", "")
+	if !errors.Is(err, ErrNotConfigured) {
+		return access, err
+	}
+	roleConfigHash, err := s.loadRoleConfigHash(ctx, tenantID, application.ID)
+	if err != nil {
+		return Access{}, err
+	}
+	revision, err := s.loadRevision(ctx, tenantID, application.ID)
+	if err != nil {
+		return Access{}, err
+	}
+	return emptyAccess(application.Code, "", roleConfigHash, revision), nil
+}
+
+// UpdateSubjectAccess replaces only the selected organization or position's direct role bindings.
+func (s *Service) UpdateSubjectAccess(ctx context.Context, in UpdateSubjectAccessInput, applicationCode string) (Access, error) {
+	in.TenantID = strings.TrimSpace(in.TenantID)
+	in.SubjectID = strings.TrimSpace(in.SubjectID)
+	in.OperatorID = strings.TrimSpace(in.OperatorID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	subjectType, err := normalizeManagedSubjectType(in.SubjectType)
+	if err != nil {
+		return Access{}, err
+	}
+	if in.TenantID == "" || in.SubjectID == "" || in.OperatorID == "" || applicationCode == "" {
+		return Access{}, validation("tenant_id, subject_type, subject_id, operator_id and application_code are required")
+	}
+	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
+	if err != nil {
+		return Access{}, err
+	}
+	if err := s.ensureManagedSubject(ctx, in.TenantID, subjectType, in.SubjectID); err != nil {
+		return Access{}, err
+	}
+	now := s.clock.Now().UTC()
+	normalizedRoles, err := normalizeRoleInputs(in.Roles, in.RolesProvided, now)
+	if err != nil {
+		return Access{}, err
+	}
+	resolved, err := s.resolveRoleBindings(ctx, in.TenantID, application.ID, normalizedRoles)
+	if err != nil {
+		return Access{}, err
+	}
+	if err := s.validateDirectRoleLimit(ctx, in.TenantID, application.ID, resolved); err != nil {
+		return Access{}, err
+	}
+	changed := false
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if !in.RolesProvided {
+			return nil
+		}
+		roleChanged, err := s.replaceSubjectRoleBindings(tx, in.TenantID, application.ID, subjectType, in.SubjectID, in.OperatorID, resolved, now)
+		if err != nil {
+			return err
+		}
+		changed = roleChanged
+		if changed {
+			return bumpRevision(tx, in.TenantID, application.ID, now, "application subject authorization changed")
+		}
+		return nil
+	})
+	if err != nil {
+		return Access{}, err
+	}
+	access, err := s.GetSubjectAccess(ctx, in.TenantID, subjectType, in.SubjectID, application.Code)
+	if err != nil {
+		return Access{}, err
+	}
+	s.recordAudit(ctx, AuditEvent{
+		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
+		OperatorID: in.OperatorID, SubjectID: in.SubjectID, Action: "authorization.application_subject_access.updated",
+		ResourceType: "application_subject_access", ResourceID: in.SubjectID, Result: "SUCCESS", RiskLevel: "HIGH",
+		Summary: "应用组织岗位授权已更新", OccurredAt: now,
+		Metadata: map[string]any{"subject_type": subjectType, "roles_provided": in.RolesProvided, "changed": changed},
+	})
+	return access, nil
+}
+
+// DeleteSubjectAccess disables only the selected organization or position's direct bindings.
+func (s *Service) DeleteSubjectAccess(ctx context.Context, in DeleteSubjectAccessInput, applicationCode string) error {
+	in.TenantID = strings.TrimSpace(in.TenantID)
+	in.SubjectID = strings.TrimSpace(in.SubjectID)
+	in.OperatorID = strings.TrimSpace(in.OperatorID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	subjectType, err := normalizeManagedSubjectType(in.SubjectType)
+	if err != nil {
+		return err
+	}
+	if in.TenantID == "" || in.SubjectID == "" || in.OperatorID == "" || applicationCode == "" {
+		return validation("tenant_id, subject_type, subject_id, operator_id and application_code are required")
+	}
+	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureManagedSubject(ctx, in.TenantID, subjectType, in.SubjectID); err != nil {
+		return err
+	}
+	now := s.clock.Now().UTC()
+	changed := false
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		directClause, directArgs := manualSubjectRoleBindingFilter(in.TenantID, application.ID, subjectType, in.SubjectID)
+		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.status = ?", activeStatus).Updates(map[string]any{
+			"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID,
+		})
+		if result.Error != nil {
+			return fmt.Errorf("revoke application subject role bindings: %w", result.Error)
+		}
+		changed = result.RowsAffected > 0
+		if changed {
+			return bumpRevision(tx, in.TenantID, application.ID, now, "application subject access revoked")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.recordAudit(ctx, AuditEvent{
+		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
+		OperatorID: in.OperatorID, SubjectID: in.SubjectID, Action: "authorization.application_subject_access.deleted",
+		ResourceType: "application_subject_access", ResourceID: in.SubjectID, Result: "SUCCESS", RiskLevel: "HIGH",
+		Summary: "应用组织岗位授权已删除", OccurredAt: now,
+		Metadata: map[string]any{"subject_type": subjectType, "changed": changed},
+	})
+	return nil
+}
+
 // IsApplicationOwner reports whether the authenticated user owns the application.
 // Application owners may synchronize their own authorization catalog without receiving
 // broad platform administration permissions.
@@ -429,6 +578,133 @@ func (s *Service) IsApplicationOwner(ctx context.Context, tenantID, applicationI
 		return false, fmt.Errorf("check application owner: %w", err)
 	}
 	return count > 0, nil
+}
+
+func normalizeManagedSubjectType(subjectType string) (string, error) {
+	subjectType = strings.ToUpper(strings.TrimSpace(subjectType))
+	if subjectType != subjectTypeOrgUnit && subjectType != subjectTypePosition {
+		return "", validation("subject_type must be ORG_UNIT or POSITION")
+	}
+	return subjectType, nil
+}
+
+func (s *Service) ensureManagedSubject(ctx context.Context, tenantID, subjectType, subjectID string) error {
+	var count int64
+	var query *gorm.DB
+	switch subjectType {
+	case subjectTypeOrgUnit:
+		query = s.db.WithContext(ctx).Table("iam_org_unit").Where("tenant_id = ? AND id = ? AND status = ?", tenantID, subjectID, activeStatus)
+	case subjectTypePosition:
+		query = s.db.WithContext(ctx).Table("iam_position AS p").Joins("JOIN iam_org_unit AS o ON o.id = p.org_unit_id AND o.tenant_id = p.tenant_id AND o.status = ?", activeStatus).Where("p.tenant_id = ? AND p.id = ? AND p.status = ?", tenantID, subjectID, activeStatus)
+	default:
+		return validation("subject_type must be ORG_UNIT or POSITION")
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return fmt.Errorf("load application authorization subject: %w", err)
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, applicationID string, roles []RoleInput) ([]resolvedBinding, error) {
+	resolved := make([]resolvedBinding, 0, len(roles))
+	for _, role := range roles {
+		var roleRecord roleRow
+		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type = ?", tenantID, applicationID, activeStatus, role.RoleCode, "APPLICATION").Take(&roleRecord).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, validation("one or more application roles do not exist or are disabled")
+			}
+			return nil, fmt.Errorf("load application role: %w", err)
+		}
+		scopeType, scopeID := scopeTypeTenant, ""
+		if role.ScopeType == scopeTypeEnvironment {
+			var environment struct {
+				ID string `gorm:"column:id"`
+			}
+			if err := s.db.WithContext(ctx).Table("platform_application_environment").Select("id").Where("tenant_id = ? AND application_id = ? AND environment = ? AND status = ?", tenantID, applicationID, role.EnvironmentCode, activeStatus).Take(&environment).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, validation("environment does not exist or is disabled")
+				}
+				return nil, fmt.Errorf("load application environment: %w", err)
+			}
+			scopeType, scopeID = scopeTypeEnvironment, environment.ID
+		}
+		resolved = append(resolved, resolvedBinding{roleID: roleRecord.ID, scopeType: scopeType, scopeID: scopeID, role: role})
+	}
+	return resolved, nil
+}
+
+// validateDirectRoleLimit rejects a role set that the target application can never
+// authorize. This protects management writes from persisting an immediately
+// conflicting direct assignment. Cross-source conflicts remain fail-closed at
+// authorization resolution because they depend on effective memberships.
+func (s *Service) validateDirectRoleLimit(ctx context.Context, tenantID, applicationID string, resolved []resolvedBinding) error {
+	policy, err := s.ResolveApplicationAuthorizationPolicy(ctx, tenantID, applicationID)
+	if err != nil {
+		return err
+	}
+	roleIDs := make([]string, 0, len(resolved))
+	for _, binding := range resolved {
+		roleIDs = append(roleIDs, binding.roleID)
+	}
+	return validateMaximumRoleCount(policy.MaxEffectiveRoles, roleIDs)
+}
+
+func validateMaximumRoleCount(maximum int, roleIDs []string) error {
+	if maximum <= 0 || len(sortedUnique(roleIDs)) <= maximum {
+		return nil
+	}
+	return validation("the selected roles exceed the application's maximum effective role count")
+}
+
+func (s *Service) replaceSubjectRoleBindings(tx *gorm.DB, tenantID, applicationID, subjectType, subjectID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
+	var existing []bindingRow
+	directClause, directArgs := manualSubjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID)
+	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", "APPLICATION").Find(&existing).Error; err != nil {
+		return false, fmt.Errorf("load existing application role bindings: %w", err)
+	}
+	key := func(roleID, scopeType, scopeID string) string { return roleID + "\x00" + scopeType + "\x00" + scopeID }
+	byKey := make(map[string]bindingRow, len(existing))
+	for _, binding := range existing {
+		byKey[key(binding.RoleID, binding.ScopeType, binding.ScopeID)] = binding
+	}
+	desired := make(map[string]resolvedBinding, len(resolved))
+	for _, item := range resolved {
+		desired[key(item.roleID, item.scopeType, item.scopeID)] = item
+	}
+	changed := false
+	for _, binding := range existing {
+		if _, keep := desired[key(binding.RoleID, binding.ScopeType, binding.ScopeID)]; keep || binding.Status != activeStatus {
+			continue
+		}
+		if err := tx.Table("authz_role_binding").Where("id = ?", binding.ID).Updates(map[string]any{"status": disabledStatus, "version": binding.Version + 1, "updated_at": now, "updated_by": operatorID}).Error; err != nil {
+			return false, fmt.Errorf("disable removed application role binding: %w", err)
+		}
+		changed = true
+	}
+	for bindingKey, item := range desired {
+		if binding, exists := byKey[bindingKey]; exists {
+			if binding.Status == activeStatus && sameValidity(binding.ValidFrom, item.role.ValidFrom) && sameValidity(binding.ValidUntil, item.role.ValidUntil) {
+				continue
+			}
+			if err := tx.Table("authz_role_binding").Where("id = ?", binding.ID).Updates(map[string]any{"status": activeStatus, "valid_from": item.role.ValidFrom, "valid_until": item.role.ValidUntil, "version": binding.Version + 1, "updated_at": now, "updated_by": operatorID}).Error; err != nil {
+				return false, fmt.Errorf("activate application role binding: %w", err)
+			}
+			changed = true
+			continue
+		}
+		id, err := s.ids.New(now)
+		if err != nil {
+			return false, fmt.Errorf("generate application role binding ID: %w", err)
+		}
+		if err := tx.Table("authz_role_binding").Create(map[string]any{"id": id, "tenant_id": tenantID, "application_id": applicationID, "role_id": item.roleID, "subject_type": subjectType, "subject_id": subjectID, "scope_type": item.scopeType, "scope_id": item.scopeID, "valid_from": item.role.ValidFrom, "valid_until": item.role.ValidUntil, "status": activeStatus, "grant_origin": grantOriginManual, "origin_id": "", "origin_item_id": "", "version": 1, "created_at": now, "created_by": operatorID, "updated_at": now, "updated_by": operatorID}).Error; err != nil {
+			return false, fmt.Errorf("create application role binding: %w", err)
+		}
+		changed = true
+	}
+	return changed, nil
 }
 
 func (s *Service) findClientApplication(ctx context.Context, tenantID, clientID string) (clientApplicationRow, error) {
@@ -470,6 +746,57 @@ func (s *Service) ensureUser(ctx context.Context, tenantID, userID string) error
 	return nil
 }
 
+func emptyAccess(applicationCode, environmentCode, roleConfigHash string, revision uint64) Access {
+	return Access{
+		ApplicationCode: applicationCode,
+		EnvironmentCode: environmentCode,
+		Roles:           []RoleView{}, DirectRoles: []RoleView{}, InheritedRoles: []RoleView{}, ManualRoles: []RoleView{},
+		RolePermissions: []string{}, CustomPermissions: []string{}, EffectivePermissions: []string{},
+		RoleConfigHash: roleConfigHash, AuthzRevision: revision,
+		AuthorizationState: authorizationUnauthorized, Conflicts: []string{},
+	}
+}
+
+func (s *Service) getSubjectAccessByApplication(ctx context.Context, tenantID, subjectType, subjectID, applicationID, applicationCode, environmentID, environmentCode string) (Access, error) {
+	roles, err := s.loadSubjectRoles(ctx, tenantID, applicationID, subjectType, subjectID, environmentID, s.clock.Now().UTC())
+	if err != nil {
+		return Access{}, err
+	}
+	roleIDs, roleViews, directRoles, _ := resolveAssignedRoles(roles, subjectType)
+	state, conflicts, permissionRoleIDs, err := s.applicationRolePolicy(ctx, tenantID, applicationID, roles, roleIDs)
+	if err != nil {
+		return Access{}, err
+	}
+	if state == authorizationUnauthorized {
+		return Access{}, ErrNotConfigured
+	}
+	rolePermissions := []string{}
+	if state == authorizationGranted {
+		rolePermissions, err = s.loadRolePermissions(ctx, tenantID, applicationID, permissionRoleIDs)
+		if err != nil {
+			return Access{}, err
+		}
+		rolePermissions = sortedUnique(rolePermissions)
+	}
+	roleConfigHash, err := s.loadRoleConfigHash(ctx, tenantID, applicationID)
+	if err != nil {
+		return Access{}, err
+	}
+	revision, err := s.loadRevision(ctx, tenantID, applicationID)
+	if err != nil {
+		return Access{}, err
+	}
+	access := Access{
+		ApplicationCode: applicationCode, EnvironmentCode: environmentCode,
+		Roles: roleViews, DirectRoles: directRoles, InheritedRoles: []RoleView{}, ManualRoles: filterManualRoles(roleViews),
+		RolePermissions: rolePermissions, CustomPermissions: []string{}, EffectivePermissions: append([]string(nil), rolePermissions...),
+		RoleConfigHash: roleConfigHash, AuthzRevision: revision,
+		AuthorizationState: state, Conflicts: conflicts,
+	}
+	access.Role = roleViews[0]
+	return access, nil
+}
+
 func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, applicationID, applicationCode, environmentID, environmentCode string) (Access, error) {
 	userID = strings.TrimSpace(userID)
 	if strings.TrimSpace(tenantID) == "" || userID == "" || applicationID == "" {
@@ -480,31 +807,24 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 	if err != nil {
 		return Access{}, err
 	}
-	roleIDs := make([]string, 0, len(roles))
-	roleViews := make([]RoleView, 0, len(roles))
-	seenRoles := map[string]struct{}{}
-	for _, role := range roles {
-		roleIDs = append(roleIDs, role.RoleID)
-		roleKey := role.Code + "\x00" + role.ScopeType + "\x00" + role.ScopeID
-		if _, exists := seenRoles[roleKey]; exists {
-			continue
+	roleIDs, roleViews, directRoles, inheritedRoles := resolveAssignedRoles(roles, subjectTypeUser)
+	state, conflicts, permissionRoleIDs, err := s.applicationRolePolicy(ctx, tenantID, applicationID, roles, roleIDs)
+	if err != nil {
+		return Access{}, err
+	}
+	rolePermissions := []string{}
+	if state == authorizationGranted {
+		rolePermissions, err = s.loadRolePermissions(ctx, tenantID, applicationID, permissionRoleIDs)
+		if err != nil {
+			return Access{}, err
 		}
-		seenRoles[roleKey] = struct{}{}
-		roleViews = append(roleViews, RoleView{Code: role.Code, Name: role.Name, ScopeType: externalScopeType(role.ScopeType), EnvironmentCode: role.EnvironmentCode, ValidFrom: role.ValidFrom, ValidUntil: role.ValidUntil})
+		rolePermissions = sortedUnique(rolePermissions)
 	}
-	rolePermissions, err := s.loadRolePermissions(ctx, tenantID, applicationID, sortedUnique(roleIDs))
+	effective, err := effectivePermissionsForApplication(state, rolePermissions)
 	if err != nil {
 		return Access{}, err
 	}
-	customPermissions, err := s.loadCustomPermissions(ctx, tenantID, applicationID, userID)
-	if err != nil {
-		return Access{}, err
-	}
-	rolePermissions, customPermissions = sortedUnique(rolePermissions), sortedUnique(customPermissions)
-	effective := sortedUnique(append(append([]string(nil), rolePermissions...), customPermissions...))
-	if len(roleViews) == 0 && len(effective) == 0 {
-		return Access{}, ErrNotConfigured
-	}
+
 	roleConfigHash, err := s.loadRoleConfigHash(ctx, tenantID, applicationID)
 	if err != nil {
 		return Access{}, err
@@ -513,12 +833,96 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 	if err != nil {
 		return Access{}, err
 	}
-	access := Access{ApplicationCode: applicationCode, EnvironmentCode: environmentCode, Roles: roleViews, RolePermissions: rolePermissions, CustomPermissions: customPermissions, EffectivePermissions: effective, RoleConfigHash: roleConfigHash, AuthzRevision: revision}
+	access := Access{
+		ApplicationCode: applicationCode, EnvironmentCode: environmentCode,
+		Roles: roleViews, DirectRoles: directRoles, InheritedRoles: inheritedRoles, ManualRoles: filterManualRoles(roleViews),
+		RolePermissions: rolePermissions, CustomPermissions: []string{}, EffectivePermissions: effective,
+		RoleConfigHash: roleConfigHash, AuthzRevision: revision,
+		AuthorizationState: state, Conflicts: conflicts,
+	}
 	if len(roleViews) > 0 {
 		access.Role = roleViews[0]
 	}
 	return access, nil
 }
+
+// applicationRolePolicy applies the target application's catalog-declared
+// effective-role limit. The platform never derives this rule from an
+// application code, a role name, or a permission code.
+func (s *Service) applicationRolePolicy(ctx context.Context, tenantID, applicationID string, rows []assignedRoleRow, roleIDs []string) (string, []string, []string, error) {
+	policy, err := s.ResolveApplicationAuthorizationPolicy(ctx, tenantID, applicationID)
+	if err != nil {
+		return authorizationUnauthorized, nil, nil, err
+	}
+	state, conflicts, permittedRoleIDs := applyApplicationRolePolicy(policy, rows, roleIDs)
+	return state, conflicts, permittedRoleIDs, nil
+}
+
+// applyApplicationRolePolicy is intentionally side-effect free so the limit
+// semantics remain independently testable. Rows are used only to provide a
+// stable, administrator-readable conflict list; role IDs determine effective
+// cardinality because they are the actual assigned role records.
+func applyApplicationRolePolicy(policy ApplicationAuthorizationPolicy, rows []assignedRoleRow, roleIDs []string) (string, []string, []string) {
+	distinctRoleIDs := sortedUnique(roleIDs)
+	if len(distinctRoleIDs) == 0 {
+		return authorizationUnauthorized, []string{}, []string{}
+	}
+	if policy.MaxEffectiveRoles == 0 || len(distinctRoleIDs) <= policy.MaxEffectiveRoles {
+		return authorizationGranted, []string{}, distinctRoleIDs
+	}
+
+	roleCodeByID := make(map[string]string, len(rows))
+	for _, row := range rows {
+		roleID := strings.TrimSpace(row.RoleID)
+		roleCode := strings.TrimSpace(row.Code)
+		if roleID == "" || roleCode == "" {
+			continue
+		}
+		if existing, exists := roleCodeByID[roleID]; !exists || roleCode < existing {
+			roleCodeByID[roleID] = roleCode
+		}
+	}
+	conflicts := make([]string, 0, len(distinctRoleIDs))
+	for _, roleID := range distinctRoleIDs {
+		if code := roleCodeByID[roleID]; code != "" {
+			conflicts = append(conflicts, code)
+		} else {
+			conflicts = append(conflicts, roleID)
+		}
+	}
+	return authorizationConflict, sortedUnique(conflicts), []string{}
+}
+
+// validateCustomPermissionsUpdate enforces the platform boundary: applications
+// publish their role-permission catalog, while the platform assigns roles only.
+// Historical authz_user_permission rows are never read for authorization.
+func validateCustomPermissionsUpdate(customPermissionsProvided bool) error {
+	if customPermissionsProvided {
+		return validation("custom_permissions are not supported; assign an application role instead")
+	}
+	return nil
+}
+
+// effectivePermissionsForApplication derives every effective permission from the
+// synchronized application role catalog. A conflict fails closed and an
+// unconfigured user cannot receive permissions from historical direct grants.
+func effectivePermissionsForApplication(state string, rolePermissions []string) ([]string, error) {
+	if state == authorizationConflict {
+		return []string{}, nil
+	}
+	if state == authorizationUnauthorized {
+		return nil, ErrNotConfigured
+	}
+	return sortedUnique(rolePermissions), nil
+}
+
+func requireGrantedAuthorization(access Access) error {
+	if access.AuthorizationState != authorizationGranted {
+		return ErrAccessDenied
+	}
+	return nil
+}
+
 func externalScopeType(scopeType string) string {
 	if scopeType == scopeTypeTenant {
 		return "APPLICATION"
@@ -526,22 +930,200 @@ func externalScopeType(scopeType string) string {
 	return scopeType
 }
 
+func resolveAssignedRoles(rows []assignedRoleRow, directSubjectType string) ([]string, []RoleView, []RoleView, []RoleView) {
+	roleIDs := make([]string, 0, len(rows))
+	roles := make([]RoleView, 0, len(rows))
+	directRoles := make([]RoleView, 0, len(rows))
+	inheritedRoles := make([]RoleView, 0, len(rows))
+	seenBindings := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		roleIDs = append(roleIDs, row.RoleID)
+		bindingKey := row.RoleID + "\x00" + row.SubjectType + "\x00" + row.SubjectID + "\x00" + row.ScopeType + "\x00" + row.ScopeID
+		if _, exists := seenBindings[bindingKey]; exists {
+			continue
+		}
+		seenBindings[bindingKey] = struct{}{}
+		sourceKind := sourceKindForRole(row, row.SubjectType == directSubjectType)
+		view := RoleView{
+			Code: row.Code, Name: row.Name, ScopeType: externalScopeType(row.ScopeType),
+			EnvironmentCode: row.EnvironmentCode, ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil,
+			SourceType: row.SubjectType, SourceID: row.SubjectID, SourceName: row.SourceName,
+			Direct: row.SubjectType == directSubjectType, GrantOrigin: normalizedGrantOrigin(row.GrantOrigin),
+			OriginID: row.OriginID, OriginItemID: row.OriginItemID, SourceKind: sourceKind,
+			AssignmentID: row.AssignmentID, TemplateID: row.TemplateID, TemplateCode: row.TemplateCode, TemplateName: row.TemplateName,
+			PositionID: row.PositionID, PositionName: row.PositionName,
+		}
+		roles = append(roles, view)
+		if view.Direct {
+			directRoles = append(directRoles, view)
+		} else {
+			inheritedRoles = append(inheritedRoles, view)
+		}
+	}
+	return sortedUnique(roleIDs), roles, directRoles, inheritedRoles
+}
+
+func normalizedGrantOrigin(origin string) string {
+	origin = strings.ToUpper(strings.TrimSpace(origin))
+	if origin == "" {
+		return grantOriginManual
+	}
+	return origin
+}
+
+func sourceKindForRole(row assignedRoleRow, direct bool) string {
+	switch normalizedGrantOrigin(row.GrantOrigin) {
+	case grantOriginSystem:
+		return sourceKindSystem
+	case grantOriginTemplate:
+		return sourceKindInherited
+	default:
+		if direct {
+			return sourceKindManual
+		}
+		return sourceKindInherited
+	}
+}
+
+func filterManualRoles(rows []RoleView) []RoleView {
+	result := make([]RoleView, 0, len(rows))
+	for _, row := range rows {
+		if row.SourceKind == sourceKindManual && row.Direct {
+			result = append(result, row)
+		}
+	}
+	return result
+}
+
+func applicationAccessSubjectFilter(userID string, now time.Time) (string, []any) {
+	return `(
+		rb.subject_type = ? AND rb.subject_id = ?
+		OR (
+			rb.subject_type IN (?, ?)
+			AND EXISTS (
+				SELECT 1
+				FROM iam_membership AS membership
+				JOIN iam_org_unit AS organization
+					ON organization.id = membership.org_unit_id
+					AND organization.tenant_id = membership.tenant_id
+					AND organization.status = ?
+				JOIN iam_position AS position
+					ON position.id = membership.position_id
+					AND position.tenant_id = membership.tenant_id
+					AND position.org_unit_id = membership.org_unit_id
+					AND position.status = ?
+				WHERE membership.tenant_id = rb.tenant_id
+					AND membership.user_id = ?
+					AND membership.status = ?
+					AND membership.inherit_authorization = ?
+					AND (membership.valid_from IS NULL OR membership.valid_from <= ?)
+					AND (membership.valid_until IS NULL OR membership.valid_until > ?)
+					AND (
+						(rb.subject_type = ? AND membership.org_unit_id = rb.subject_id)
+						OR (rb.subject_type = ? AND membership.position_id = rb.subject_id)
+					)
+			)
+		)
+	)`, []any{
+			subjectTypeUser, userID,
+			subjectTypeOrgUnit, subjectTypePosition,
+			activeStatus, activeStatus,
+			userID, activeStatus, true, now, now,
+			subjectTypeOrgUnit, subjectTypePosition,
+		}
+}
+
+func applicationAccessScopeFilter(environmentID string) (string, []any) {
+	if strings.TrimSpace(environmentID) == "" {
+		// Management reads return all environment-specific bindings so administrators can see
+		// the complete assignment set. OIDC always supplies an environment ID.
+		return "((rb.scope_type = ? AND rb.scope_id = ?) OR rb.scope_type = ?)", []any{scopeTypeTenant, "", scopeTypeEnvironment}
+	}
+	return "((rb.scope_type = ? AND rb.scope_id = ?) OR (rb.scope_type = ? AND rb.scope_id = ?))", []any{scopeTypeTenant, "", scopeTypeEnvironment, environmentID}
+}
+
+func subjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID string) (string, []any) {
+	return "rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ?", []any{tenantID, applicationID, subjectType, subjectID}
+}
+
+func manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID string) (string, []any) {
+	clause, args := subjectRoleBindingFilter(tenantID, applicationID, subjectTypeUser, userID)
+	return clause + " AND rb.grant_origin = ?", append(args, grantOriginManual)
+}
+
+// directApplicationRoleBindingFilter is retained for callers/tests that need the subject-only
+// predicate. Mutation code uses the manual variant so template/system bindings are protected.
+func directApplicationRoleBindingFilter(tenantID, applicationID, userID string) (string, []any) {
+	return subjectRoleBindingFilter(tenantID, applicationID, subjectTypeUser, userID)
+}
+
+func manualSubjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID string) (string, []any) {
+	clause, args := subjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID)
+	return clause + " AND rb.grant_origin = ?", append(args, grantOriginManual)
+}
+
+func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID, subjectType, subjectID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
+	var rows []assignedRoleRow
+	scopeClause, scopeArgs := applicationAccessScopeFilter(environmentID)
+	query := s.db.WithContext(ctx).Table("authz_role_binding AS rb").Select(`
+		r.id AS role_id, r.code, r.name, rb.scope_type, rb.scope_id,
+		e.environment AS environment_code, rb.valid_from, rb.valid_until,
+		rb.subject_type, rb.subject_id, rb.grant_origin, rb.origin_id, rb.origin_item_id,
+		ta.id AS assignment_id, ta.template_id, template.code AS template_code, template.name AS template_name,
+		rb.subject_id AS position_id, COALESCE(p.name, '') AS position_name,
+		CASE rb.subject_type
+			WHEN 'ORG_UNIT' THEN COALESCE(o.name, '')
+			WHEN 'POSITION' THEN COALESCE(p.name, '')
+			ELSE ''
+		END AS source_name`).
+		Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id AND r.status = ?", activeStatus).
+		Joins("LEFT JOIN platform_application_environment AS e ON e.id = rb.scope_id AND e.application_id = rb.application_id AND e.tenant_id = rb.tenant_id").
+		Joins("LEFT JOIN iam_org_unit AS o ON rb.subject_type = ? AND o.id = rb.subject_id AND o.tenant_id = rb.tenant_id", subjectTypeOrgUnit).
+		Joins("LEFT JOIN iam_position AS p ON rb.subject_type = ? AND p.id = rb.subject_id AND p.tenant_id = rb.tenant_id", subjectTypePosition).
+		Joins("LEFT JOIN authz_position_grant_template_assignment AS ta ON ta.tenant_id = rb.tenant_id AND ta.id = rb.origin_id AND rb.grant_origin = ?", grantOriginTemplate).
+		Joins("LEFT JOIN authz_position_grant_template AS template ON template.tenant_id = ta.tenant_id AND template.id = ta.template_id").
+		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND rb.status = ? AND r.role_type <> ?", tenantID, applicationID, subjectType, subjectID, activeStatus, "COMPATIBILITY").
+		Where("(rb.valid_from IS NULL OR rb.valid_from <= ?) AND (rb.valid_until IS NULL OR rb.valid_until > ?)", now, now).
+		Where(scopeClause, scopeArgs...)
+	if err := query.Order("r.code ASC, rb.scope_type ASC, rb.scope_id ASC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("load application subject role bindings: %w", err)
+	}
+	return rows, nil
+}
+
 func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID, userID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
 	var rows []assignedRoleRow
-	query := s.db.WithContext(ctx).Table("authz_role_binding AS rb").Select("r.id AS role_id, r.code, r.name, rb.scope_type, rb.scope_id, e.environment AS environment_code, rb.valid_from, rb.valid_until").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id AND r.status = ?", activeStatus).Joins("LEFT JOIN platform_application_environment AS e ON e.id = rb.scope_id AND e.application_id = rb.application_id AND e.tenant_id = rb.tenant_id").Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND rb.status = ? AND r.role_type <> ?", tenantID, applicationID, subjectTypeUser, userID, activeStatus, "COMPATIBILITY").Where("(rb.valid_from IS NULL OR rb.valid_from <= ?) AND (rb.valid_until IS NULL OR rb.valid_until > ?)", now, now)
-	if strings.TrimSpace(environmentID) == "" {
-		// Management reads return the complete application authorization set.
-		// OIDC reads always provide the OAuth client's environment ID and are
-		// therefore restricted to tenant-wide plus that environment's bindings.
-		query = query.Where("(rb.scope_type = ? AND rb.scope_id = ?) OR rb.scope_type = ?", scopeTypeTenant, "", scopeTypeEnvironment)
-	} else {
-		query = query.Where("(rb.scope_type = ? AND rb.scope_id = ?) OR (rb.scope_type = ? AND rb.scope_id = ?)", scopeTypeTenant, "", scopeTypeEnvironment, environmentID)
-	}
-	if err := query.Order("r.code ASC, rb.scope_type ASC, rb.scope_id ASC").Find(&rows).Error; err != nil {
+	subjectClause, subjectArgs := applicationAccessSubjectFilter(userID, now)
+	scopeClause, scopeArgs := applicationAccessScopeFilter(environmentID)
+	query := s.db.WithContext(ctx).Table("authz_role_binding AS rb").Select(`
+		r.id AS role_id, r.code, r.name, rb.scope_type, rb.scope_id,
+		e.environment AS environment_code, rb.valid_from, rb.valid_until,
+		rb.subject_type, rb.subject_id, rb.grant_origin, rb.origin_id, rb.origin_item_id,
+		ta.id AS assignment_id, ta.template_id, template.code AS template_code, template.name AS template_name,
+		rb.subject_id AS position_id, COALESCE(p.name, '') AS position_name,
+		CASE rb.subject_type
+			WHEN 'USER' THEN COALESCE(u.display_name, '')
+			WHEN 'ORG_UNIT' THEN COALESCE(o.name, '')
+			WHEN 'POSITION' THEN COALESCE(p.name, '')
+			ELSE ''
+		END AS source_name`).
+		Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id AND r.status = ?", activeStatus).
+		Joins("LEFT JOIN platform_application_environment AS e ON e.id = rb.scope_id AND e.application_id = rb.application_id AND e.tenant_id = rb.tenant_id").
+		Joins("LEFT JOIN iam_user AS u ON rb.subject_type = ? AND u.id = rb.subject_id AND u.tenant_id = rb.tenant_id", subjectTypeUser).
+		Joins("LEFT JOIN iam_org_unit AS o ON rb.subject_type = ? AND o.id = rb.subject_id AND o.tenant_id = rb.tenant_id", subjectTypeOrgUnit).
+		Joins("LEFT JOIN iam_position AS p ON rb.subject_type = ? AND p.id = rb.subject_id AND p.tenant_id = rb.tenant_id", subjectTypePosition).
+		Joins("LEFT JOIN authz_position_grant_template_assignment AS ta ON ta.tenant_id = rb.tenant_id AND ta.id = rb.origin_id AND rb.grant_origin = ?", grantOriginTemplate).
+		Joins("LEFT JOIN authz_position_grant_template AS template ON template.tenant_id = ta.tenant_id AND template.id = ta.template_id").
+		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.status = ? AND r.role_type <> ?", tenantID, applicationID, activeStatus, "COMPATIBILITY").
+		Where(subjectClause, subjectArgs...).
+		Where("(rb.valid_from IS NULL OR rb.valid_from <= ?) AND (rb.valid_until IS NULL OR rb.valid_until > ?)", now, now).
+		Where(scopeClause, scopeArgs...)
+	if err := query.Order("CASE rb.subject_type WHEN 'USER' THEN 0 WHEN 'ORG_UNIT' THEN 1 WHEN 'POSITION' THEN 2 ELSE 3 END ASC, r.code ASC, rb.scope_type ASC, rb.scope_id ASC, rb.subject_id ASC").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("load application role bindings: %w", err)
 	}
 	return rows, nil
 }
+
 func (s *Service) loadRolePermissions(ctx context.Context, tenantID, applicationID string, roleIDs []string) ([]string, error) {
 	if len(roleIDs) == 0 {
 		return nil, nil
@@ -556,52 +1138,26 @@ func (s *Service) loadRolePermissions(ctx context.Context, tenantID, application
 	return codes, nil
 }
 
-func (s *Service) loadCustomPermissions(ctx context.Context, tenantID, applicationID, userID string) ([]string, error) {
-	var codes []string
-	err := s.db.WithContext(ctx).Table("authz_user_permission AS up").Select("p.code").
-		Joins("JOIN authz_permission AS p ON p.id = up.permission_id AND p.tenant_id = ? AND p.application_id = ? AND p.status = ?", tenantID, applicationID, activeStatus).
-		Where("up.tenant_id = ? AND up.application_id = ? AND up.user_id = ?", tenantID, applicationID, userID).Find(&codes).Error
-	if err != nil {
-		return nil, fmt.Errorf("load user permissions: %w", err)
-	}
-	return codes, nil
-}
-
-func (s *Service) resolvePermissionCodes(ctx context.Context, tenantID, applicationID string, codes []string, provided bool) ([]string, []string, error) {
-	if !provided {
-		return nil, nil, nil
-	}
-	codes = sortedUnique(codes)
-	if len(codes) == 0 {
-		return nil, nil, nil
-	}
-	var rows []permissionRow
-	if err := s.db.WithContext(ctx).Table("authz_permission").Select("id, code").Where(
-		"tenant_id = ? AND application_id = ? AND status = ? AND code IN ?", tenantID, applicationID, activeStatus, codes,
-	).Find(&rows).Error; err != nil {
-		return nil, nil, fmt.Errorf("load application permissions: %w", err)
-	}
-	if len(rows) != len(codes) {
-		return nil, nil, validation("one or more permissions do not exist or are disabled")
-	}
-	byCode := make(map[string]string, len(rows))
-	for _, row := range rows {
-		byCode[row.Code] = row.ID
-	}
-	ids := make([]string, 0, len(codes))
-	for _, code := range codes {
-		id, ok := byCode[code]
-		if !ok {
-			return nil, nil, validation("one or more permissions do not exist or are disabled")
-		}
-		ids = append(ids, id)
-	}
-	return ids, codes, nil
-}
-
 func (s *Service) loadRoleConfigHash(ctx context.Context, tenantID, applicationID string) (string, error) {
+	// A subsystem may publish an opaque configuration hash for its own Claims
+	// compatibility contract. The base platform deliberately does not inspect or
+	// recompute that value from business role/permission semantics.
+	var metadata catalogMetadataRow
+	err := s.db.WithContext(ctx).Table("authz_authorization_catalog").
+		Select("claims_role_config_hash").
+		Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).
+		Take(&metadata).Error
+	if err == nil && strings.TrimSpace(metadata.ClaimsRoleConfigHash) != "" {
+		return metadata.ClaimsRoleConfigHash, nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", fmt.Errorf("load application claims role configuration hash: %w", err)
+	}
+
+	// Catalogs that do not publish an application-specific Claims hash retain a
+	// generic, deterministic mirror hash. This is a fallback, not a per-app rule.
 	var rows []catalogRow
-	err := s.db.WithContext(ctx).Table("authz_role AS r").Select("r.code AS role_code, p.code AS permission_code, rp.effect").
+	err = s.db.WithContext(ctx).Table("authz_role AS r").Select("r.code AS role_code, p.code AS permission_code, rp.effect").
 		Joins("LEFT JOIN authz_role_permission AS rp ON rp.role_id = r.id").
 		Joins("LEFT JOIN authz_permission AS p ON p.id = rp.permission_id AND p.tenant_id = r.tenant_id AND p.application_id = r.application_id AND p.status = ?", activeStatus).
 		Where("r.tenant_id = ? AND r.application_id = ? AND r.status = ?", tenantID, applicationID, activeStatus).
@@ -609,13 +1165,21 @@ func (s *Service) loadRoleConfigHash(ctx context.Context, tenantID, applicationI
 	if err != nil {
 		return "", fmt.Errorf("load application role configuration: %w", err)
 	}
+	return roleConfigHash(rows), nil
+}
+
+// roleConfigHash is the generic catalog version carried in tokens when the
+// application did not publish an explicit Claims compatibility hash. It hashes
+// synchronized role-permission mappings only: role names, source type and
+// built-in flags are presentation/provenance metadata, not authorization policy.
+func roleConfigHash(rows []catalogRow) string {
 	parts := make([]string, 0, len(rows))
 	for _, row := range rows {
-		parts = append(parts, row.RoleCode+"\x00"+row.PermissionCode+"\x00"+row.Effect)
+		parts = append(parts, strings.TrimSpace(row.RoleCode)+"\x00"+strings.TrimSpace(row.PermissionCode)+"\x00"+strings.TrimSpace(row.Effect))
 	}
 	sort.Strings(parts)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) loadRevision(ctx context.Context, tenantID, applicationID string) (uint64, error) {
@@ -650,7 +1214,7 @@ func normalizeRoleInputs(inputs []RoleInput, provided bool, now time.Time) ([]Ro
 	if !provided {
 		return nil, nil
 	}
-	byKey := make(map[string]RoleInput, len(inputs))
+	byRoleCode := make(map[string]RoleInput, len(inputs))
 	for _, input := range inputs {
 		input.RoleCode = strings.TrimSpace(input.RoleCode)
 		input.ScopeType = strings.ToUpper(strings.TrimSpace(input.ScopeType))
@@ -675,17 +1239,19 @@ func normalizeRoleInputs(inputs []RoleInput, provided bool, now time.Time) ([]Ro
 		if input.ValidUntil != nil && !input.ValidUntil.After(now) {
 			return nil, validation("valid_until must be in the future")
 		}
-		key := input.RoleCode + "\x00" + input.ScopeType + "\x00" + input.EnvironmentCode
-		byKey[key] = input
+		if _, exists := byRoleCode[input.RoleCode]; exists {
+			return nil, validation("the same application role can only be assigned once")
+		}
+		byRoleCode[input.RoleCode] = input
 	}
-	keys := make([]string, 0, len(byKey))
-	for key := range byKey {
-		keys = append(keys, key)
+	roleCodes := make([]string, 0, len(byRoleCode))
+	for roleCode := range byRoleCode {
+		roleCodes = append(roleCodes, roleCode)
 	}
-	sort.Strings(keys)
-	result := make([]RoleInput, 0, len(keys))
-	for _, key := range keys {
-		result = append(result, byKey[key])
+	sort.Strings(roleCodes)
+	result := make([]RoleInput, 0, len(roleCodes))
+	for _, roleCode := range roleCodes {
+		result = append(result, byRoleCode[roleCode])
 	}
 	return result, nil
 }

@@ -12,6 +12,7 @@ import (
 	audithttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/interfaces/http"
 	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
+	positiongrant "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/positiongrant"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
@@ -50,6 +51,7 @@ func NewRouter(
 	accountLifecycleHandler *identityhttp.AccountLifecycleHandler,
 	authorizationHandler *authorizationhttp.Handler,
 	applicationAccessHandler *applicationaccess.Handler,
+	positionGrantHandler *positiongrant.Handler,
 	auditHandler *audithttp.Handler,
 	configurationHandler *configurationhttp.Handler,
 	settingsHandler *settingshttp.Handler,
@@ -140,6 +142,7 @@ func NewRouter(
 		if managementHandler != nil {
 			apiRouter.GET("/users", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.ListUsers))
 			apiRouter.POST("/users", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUser))
+			apiRouter.POST("/employees", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateEmployee))
 			apiRouter.POST("/users/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUsersBatch))
 			apiRouter.GET("/users/:user_id", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.GetUser))
 			apiRouter.PATCH("/users/:user_id", middleware.RequirePermission("platform:user:update"), adaptHandler(managementHandler.UpdateUser))
@@ -211,9 +214,25 @@ func NewRouter(
 		}
 
 		if applicationAccessHandler != nil {
-			apiRouter.GET("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:user:read"), adaptHandler(applicationAccessHandler.GetAccess))
-			apiRouter.PUT("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:user:update"), adaptHandler(applicationAccessHandler.UpdateAccess))
-			apiRouter.DELETE("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:user:update"), adaptHandler(applicationAccessHandler.DeleteAccess))
+			apiRouter.GET("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(applicationAccessHandler.GetAccess))
+			apiRouter.PUT("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(applicationAccessHandler.UpdateAccess))
+			apiRouter.DELETE("/users/:user_id/applications/:application_code/access", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(applicationAccessHandler.DeleteAccess))
+			apiRouter.GET("/authorization-subjects/:subject_type/:subject_id/applications/:application_code/access", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(applicationAccessHandler.GetSubjectAccess))
+			apiRouter.PUT("/authorization-subjects/:subject_type/:subject_id/applications/:application_code/access", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(applicationAccessHandler.UpdateSubjectAccess))
+			apiRouter.DELETE("/authorization-subjects/:subject_type/:subject_id/applications/:application_code/access", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(applicationAccessHandler.DeleteSubjectAccess))
+		}
+
+		if positionGrantHandler != nil {
+			apiRouter.GET("/position-authorization-targets", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListAuthorizationTargets))
+			apiRouter.GET("/position-authorization-positions", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListAuthorizationPositions))
+			apiRouter.GET("/position-authorization-templates", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.List))
+			apiRouter.POST("/position-authorization-templates", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(positionGrantHandler.Create))
+			apiRouter.GET("/position-authorization-templates/:template_id", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.Get))
+			apiRouter.PATCH("/position-authorization-templates/:template_id", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(positionGrantHandler.Update))
+			apiRouter.DELETE("/position-authorization-templates/:template_id", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(positionGrantHandler.Delete))
+			apiRouter.GET("/positions/:position_id/authorization-templates", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListPositionAssignments))
+			apiRouter.PUT("/positions/:position_id/authorization-templates", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(positionGrantHandler.ReplacePositionAssignments))
+			apiRouter.POST("/position-authorization-preview", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.Preview))
 		}
 
 		if auditHandler != nil {

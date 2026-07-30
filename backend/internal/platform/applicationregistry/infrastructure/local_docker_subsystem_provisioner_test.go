@@ -30,9 +30,14 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 	}
 
 	if err := updateSubsystemEnvironment(source, destination, map[string]string{
-		"OIDC_CLIENT_ID":     "contract_management-dev-web",
-		"OIDC_CLIENT_SECRET": "generated-oauth-secret",
-		"OIDC_REDIRECT_URI":  "http://localhost:8081/contract_management/auth/callback",
+		"OIDC_CLIENT_ID":                                "contract_management-dev-web",
+		"OIDC_CLIENT_SECRET":                            "generated-oauth-secret",
+		"OIDC_REDIRECT_URI":                             "http://localhost:8081/contract_management/auth/callback",
+		"PLATFORM_APPLICATION_ID":                       "app-1",
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "true",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID":      "contract_management-dev-catalog-publisher",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  "catalog-publisher-secret",
+		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": "app-1",
 	}); err != nil {
 		t.Fatalf("update environment: %v", err)
 	}
@@ -47,6 +52,11 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 		"OIDC_CLIENT_ID=contract_management-dev-web",
 		"OIDC_CLIENT_SECRET=generated-oauth-secret",
 		"OIDC_REDIRECT_URI=http://localhost:8081/contract_management/auth/callback",
+		"PLATFORM_APPLICATION_ID=app-1",
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED=true",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=contract_management-dev-catalog-publisher",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=catalog-publisher-secret",
+		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID=app-1",
 	} {
 		if !strings.Contains(result, expected) {
 			t.Fatalf("generated environment missing %q:\n%s", expected, result)

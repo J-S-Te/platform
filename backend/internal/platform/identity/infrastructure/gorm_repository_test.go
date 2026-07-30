@@ -18,6 +18,7 @@ func TestPrincipalBindingSubjectFilterIncludesAccountAndEffectiveMembership(t *t
 		"JOIN iam_org_unit AS organization",
 		"JOIN iam_position AS position",
 		"membership.status = ?",
+		"membership.inherit_authorization = 1",
 		"membership.valid_from IS NULL OR membership.valid_from <= ?",
 		"membership.valid_until IS NULL OR membership.valid_until > ?",
 	} {

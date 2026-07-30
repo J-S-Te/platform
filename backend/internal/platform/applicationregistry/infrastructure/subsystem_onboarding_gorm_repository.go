@@ -49,6 +49,7 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		write.Environment.ApplicationID = createdApplication.ID
 		write.LoginTarget.ApplicationID = createdApplication.ID
 		write.OAuthClient.ApplicationID = createdApplication.ID
+		write.CatalogPublisherOAuthClient.ApplicationID = createdApplication.ID
 
 		// Onboarding is intentionally create-only: an existing environment can already
 		// own a LoginTarget and OAuth client whose secret cannot be recovered safely.
@@ -82,10 +83,15 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		if err != nil {
 			return err
 		}
+		createdCatalogPublisherOAuthClient, err := oauthClients.CreateOAuthClient(ctx, write.CatalogPublisherOAuthClient, write.CatalogPublisherOAuthClientID, write.CatalogPublisherOAuthClientSecret, now)
+		if err != nil {
+			return err
+		}
 
 		result = application.SubsystemOnboardingResult{
 			Application: createdApplication, Environment: createdEnvironment,
 			LoginTarget: createdLoginTarget, OAuthClient: createdOAuthClient,
+			CatalogPublisherOAuthClient: createdCatalogPublisherOAuthClient,
 		}
 		return nil
 	})
@@ -131,6 +137,7 @@ type portalApplicationRow struct {
 // ListPortalApplications returns one preferred active environment/target per active application.
 // Preference order without an explicit environment is prod, staging, test, dev, then lexical.
 func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx context.Context, tenantID, userID, environment string) ([]application.PortalApplication, error) {
+	accessFilter, accessArgs := portalApplicationAccessFilter(userID)
 	query := repository.database.WithContext(ctx).
 		Table("platform_application AS application").
 		Select(`application.id AS application_id, application.code, application.name, application.description,
@@ -139,45 +146,7 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 		Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
 		Joins("JOIN platform_application_login_target AS target ON target.environment_id = environment.id AND target.application_id = application.id AND target.tenant_id = application.tenant_id").
 		Where("application.tenant_id = ? AND application.status = ? AND environment.status = ? AND target.status = ?", tenantID, "ACTIVE", "ACTIVE", "ACTIVE").
-		Where(`(
-			application.code = 'platform'
-			OR NOT EXISTS (
-				SELECT 1 FROM authz_role AS catalog_role
-				WHERE catalog_role.tenant_id = application.tenant_id
-					AND catalog_role.application_id = application.id
-					AND catalog_role.status = 'ACTIVE'
-					AND catalog_role.role_type <> 'COMPATIBILITY'
-			)
-			OR EXISTS (
-				SELECT 1 FROM authz_role_binding AS access_assignment
-				JOIN authz_role AS assigned_role ON assigned_role.id = access_assignment.role_id
-				WHERE access_assignment.tenant_id = application.tenant_id
-					AND access_assignment.application_id = application.id
-					AND access_assignment.subject_type = 'USER'
-					AND access_assignment.subject_id = ?
-					AND access_assignment.status = 'ACTIVE'
-					AND (access_assignment.valid_from IS NULL OR access_assignment.valid_from <= UTC_TIMESTAMP(3))
-					AND (access_assignment.valid_until IS NULL OR access_assignment.valid_until > UTC_TIMESTAMP(3))
-					AND (
-						(access_assignment.scope_type = 'TENANT' AND access_assignment.scope_id = '')
-						OR (access_assignment.scope_type = 'ENVIRONMENT' AND access_assignment.scope_id = environment.id)
-					)
-					AND assigned_role.tenant_id = application.tenant_id
-					AND assigned_role.application_id = application.id
-					AND assigned_role.status = 'ACTIVE'
-					AND assigned_role.role_type <> 'COMPATIBILITY'
-			)
-			OR EXISTS (
-				SELECT 1 FROM authz_user_permission AS direct_permission
-				JOIN authz_permission AS assigned_permission ON assigned_permission.id = direct_permission.permission_id
-				WHERE direct_permission.tenant_id = application.tenant_id
-					AND direct_permission.application_id = application.id
-					AND direct_permission.user_id = ?
-					AND assigned_permission.tenant_id = application.tenant_id
-					AND assigned_permission.application_id = application.id
-					AND assigned_permission.status = 'ACTIVE'
-			)
-		)`, userID, userID)
+		Where(accessFilter, accessArgs...)
 	if environment != "" {
 		query = query.Where("environment.environment = ?", environment)
 	}
@@ -205,4 +174,127 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 		})
 	}
 	return items, nil
+}
+
+// portalApplicationAccessFilter keeps portal visibility aligned with the effective authorization
+// subject model. In addition to a direct USER binding, an active membership can contribute the
+// role bound to its active organization or position. The role binding is still constrained to the
+// tenant or the environment row currently being considered by the outer portal query.
+func portalApplicationAccessFilter(userID string) (string, []any) {
+	return `(
+			application.code = 'platform'
+			OR NOT EXISTS (
+				SELECT 1 FROM authz_role AS catalog_role
+				WHERE catalog_role.tenant_id = application.tenant_id
+					AND catalog_role.application_id = application.id
+					AND catalog_role.status = 'ACTIVE'
+					AND catalog_role.role_type <> 'COMPATIBILITY'
+			)
+			OR EXISTS (
+				SELECT 1 FROM authz_role_binding AS access_assignment
+				JOIN authz_role AS assigned_role ON assigned_role.id = access_assignment.role_id
+				WHERE access_assignment.tenant_id = application.tenant_id
+					AND access_assignment.application_id = application.id
+					AND (
+						(access_assignment.subject_type = 'USER' AND access_assignment.subject_id = ?)
+						OR (
+							access_assignment.subject_type IN ('ORG_UNIT', 'POSITION')
+							AND EXISTS (
+								SELECT 1
+								FROM iam_membership AS membership
+								JOIN iam_org_unit AS organization
+									ON organization.id = membership.org_unit_id
+									AND organization.tenant_id = membership.tenant_id
+									AND organization.status = 'ACTIVE'
+								JOIN iam_position AS position
+									ON position.id = membership.position_id
+									AND position.tenant_id = membership.tenant_id
+									AND position.org_unit_id = membership.org_unit_id
+									AND position.status = 'ACTIVE'
+								WHERE membership.tenant_id = access_assignment.tenant_id
+									AND membership.user_id = ?
+									AND membership.status = 'ACTIVE'
+									AND membership.inherit_authorization = 1
+									AND (membership.valid_from IS NULL OR membership.valid_from <= UTC_TIMESTAMP(3))
+									AND (membership.valid_until IS NULL OR membership.valid_until > UTC_TIMESTAMP(3))
+									AND (
+										(access_assignment.subject_type = 'ORG_UNIT' AND access_assignment.subject_id = membership.org_unit_id)
+										OR (access_assignment.subject_type = 'POSITION' AND access_assignment.subject_id = membership.position_id)
+									)
+							)
+						)
+					)
+					AND access_assignment.status = 'ACTIVE'
+					AND (access_assignment.valid_from IS NULL OR access_assignment.valid_from <= UTC_TIMESTAMP(3))
+					AND (access_assignment.valid_until IS NULL OR access_assignment.valid_until > UTC_TIMESTAMP(3))
+					AND (
+						(access_assignment.scope_type = 'TENANT' AND access_assignment.scope_id = '')
+						OR (access_assignment.scope_type = 'ENVIRONMENT' AND access_assignment.scope_id = environment.id)
+					)
+					AND assigned_role.tenant_id = application.tenant_id
+					AND assigned_role.application_id = application.id
+					AND assigned_role.status = 'ACTIVE'
+					AND assigned_role.role_type <> 'COMPATIBILITY'
+			)
+			OR EXISTS (
+				SELECT 1 FROM authz_user_permission AS direct_permission
+				JOIN authz_permission AS assigned_permission ON assigned_permission.id = direct_permission.permission_id
+				WHERE direct_permission.tenant_id = application.tenant_id
+					AND direct_permission.application_id = application.id
+					AND direct_permission.user_id = ?
+					AND assigned_permission.tenant_id = application.tenant_id
+					AND assigned_permission.application_id = application.id
+					AND assigned_permission.status = 'ACTIVE'
+			)
+		)
+		AND (
+			application.code <> 'contract_management'
+			OR (
+				SELECT COUNT(DISTINCT contract_role.code)
+				FROM authz_role_binding AS contract_assignment
+				JOIN authz_role AS contract_role ON contract_role.id = contract_assignment.role_id
+				WHERE contract_assignment.tenant_id = application.tenant_id
+					AND contract_assignment.application_id = application.id
+					AND (
+						(contract_assignment.subject_type = 'USER' AND contract_assignment.subject_id = ?)
+						OR (
+							contract_assignment.subject_type IN ('ORG_UNIT', 'POSITION')
+							AND EXISTS (
+								SELECT 1
+								FROM iam_membership AS contract_membership
+								JOIN iam_org_unit AS contract_organization
+									ON contract_organization.id = contract_membership.org_unit_id
+									AND contract_organization.tenant_id = contract_membership.tenant_id
+									AND contract_organization.status = 'ACTIVE'
+								JOIN iam_position AS contract_position
+									ON contract_position.id = contract_membership.position_id
+									AND contract_position.tenant_id = contract_membership.tenant_id
+									AND contract_position.org_unit_id = contract_membership.org_unit_id
+									AND contract_position.status = 'ACTIVE'
+								WHERE contract_membership.tenant_id = contract_assignment.tenant_id
+									AND contract_membership.user_id = ?
+									AND contract_membership.status = 'ACTIVE'
+									AND contract_membership.inherit_authorization = 1
+									AND (contract_membership.valid_from IS NULL OR contract_membership.valid_from <= UTC_TIMESTAMP(3))
+									AND (contract_membership.valid_until IS NULL OR contract_membership.valid_until > UTC_TIMESTAMP(3))
+									AND (
+										(contract_assignment.subject_type = 'ORG_UNIT' AND contract_assignment.subject_id = contract_membership.org_unit_id)
+										OR (contract_assignment.subject_type = 'POSITION' AND contract_assignment.subject_id = contract_membership.position_id)
+									)
+							)
+						)
+					)
+					AND contract_assignment.status = 'ACTIVE'
+					AND (contract_assignment.valid_from IS NULL OR contract_assignment.valid_from <= UTC_TIMESTAMP(3))
+					AND (contract_assignment.valid_until IS NULL OR contract_assignment.valid_until > UTC_TIMESTAMP(3))
+					AND (
+						(contract_assignment.scope_type = 'TENANT' AND contract_assignment.scope_id = '')
+						OR (contract_assignment.scope_type = 'ENVIRONMENT' AND contract_assignment.scope_id = environment.id)
+					)
+					AND contract_role.tenant_id = application.tenant_id
+					AND contract_role.application_id = application.id
+					AND contract_role.status = 'ACTIVE'
+					AND contract_role.role_type <> 'COMPATIBILITY'
+			) = 1
+		)`, []any{userID, userID, userID, userID, userID}
 }

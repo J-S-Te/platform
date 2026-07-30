@@ -21,12 +21,14 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	pathPrefix := "/contract_management"
 	upstreamURL := "http://contract-api:8081"
 	service := &stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
-		Application:     application.Application{ID: "app-1", TenantID: "tenant-1", Code: "contract_management", Name: "合同管理系统", Status: "ACTIVE"},
-		Environment:     application.Environment{ID: "env-1", TenantID: "tenant-1", ApplicationID: "app-1", Environment: "dev", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL, Status: "ACTIVE"},
-		OAuthClient:     application.OAuthClientView{ID: "client-1", ClientID: "contract_management-dev-web", ClientName: "合同管理系统 Web", ClientType: "confidential", Status: "ACTIVE"},
-		PlaintextSecret: "must-never-reach-browser",
-		RedirectURI:     "http://localhost:8081/contract_management/auth/callback",
-		PublicURL:       "http://localhost:8081/contract_management/",
+		Application:                     application.Application{ID: "app-1", TenantID: "tenant-1", Code: "contract_management", Name: "合同管理系统", Status: "ACTIVE"},
+		Environment:                     application.Environment{ID: "env-1", TenantID: "tenant-1", ApplicationID: "app-1", Environment: "dev", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL, Status: "ACTIVE"},
+		OAuthClient:                     application.OAuthClientView{ID: "client-1", ClientID: "contract_management-dev-web", ClientName: "合同管理系统 Web", ClientType: "confidential", Status: "ACTIVE"},
+		CatalogPublisherOAuthClient:     application.OAuthClientView{ID: "client-2", ClientID: "contract_management-dev-catalog-publisher", ClientName: "合同管理系统 Authorization Catalog Publisher", ClientType: "service", TokenAuthMethod: "client_secret_basic", Status: "ACTIVE"},
+		PlaintextSecret:                 "must-never-reach-browser",
+		CatalogPublisherPlaintextSecret: "catalog-publisher-secret-must-never-reach-browser",
+		RedirectURI:                     "http://localhost:8081/contract_management/auth/callback",
+		PublicURL:                       "http://localhost:8081/contract_management/",
 	}}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
@@ -49,7 +51,7 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, forbidden := range []string{"must-never-reach-browser", `"integration"`, "environment_file", "gateway_command", "OIDC_CLIENT_SECRET"} {
+	for _, forbidden := range []string{"must-never-reach-browser", "catalog-publisher-secret-must-never-reach-browser", `"integration"`, "environment_file", "gateway_command", "OIDC_CLIENT_SECRET", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("response leaked %q: %s", forbidden, body)
 		}
@@ -63,8 +65,11 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	if access.userID != "user-1" || access.operatorID != "user-1" || access.applicationCode != "contract_management" {
 		t.Fatalf("unexpected access assignment: %#v", access)
 	}
-	if provisioner.input.ClientSecret != "must-never-reach-browser" {
-		t.Fatalf("deployment helper did not receive generated secret")
+	if provisioner.input.ApplicationID != "app-1" || provisioner.input.ClientSecret != "must-never-reach-browser" {
+		t.Fatalf("deployment helper did not receive browser OIDC integration: %#v", provisioner.input)
+	}
+	if provisioner.input.CatalogPublisherClientID != "contract_management-dev-catalog-publisher" || provisioner.input.CatalogPublisherClientSecret != "catalog-publisher-secret-must-never-reach-browser" {
+		t.Fatalf("deployment helper did not receive isolated catalog publisher integration: %#v", provisioner.input)
 	}
 }
 

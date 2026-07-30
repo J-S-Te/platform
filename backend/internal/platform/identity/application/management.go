@@ -164,14 +164,15 @@ type PositionCreateInput struct {
 // MembershipCreateInput contains a user's appointment. PositionID is mandatory at persistence
 // level even though it was accidentally optional in the original OpenAPI property list.
 type MembershipCreateInput struct {
-	TenantID       string
-	OperatorID     string
-	UserID         string
-	OrgUnitID      string
-	PositionID     string
-	MembershipType string
-	EffectiveFrom  *time.Time
-	EffectiveTo    *time.Time
+	TenantID             string
+	OperatorID           string
+	UserID               string
+	OrgUnitID            string
+	PositionID           string
+	MembershipType       string
+	EffectiveFrom        *time.Time
+	EffectiveTo          *time.Time
+	InheritAuthorization *bool
 }
 
 // MembershipUpdateInput updates one appointment with optimistic locking.
@@ -229,14 +230,19 @@ type ManagementService struct {
 	mobiles    MobileProtection
 	ids        IDGenerator
 	clock      Clock
+	hasher     PasswordHasher
 }
 
 // NewManagementService creates the P0 IAM management service.
-func NewManagementService(repository ManagementRepository, mobiles MobileProtection, ids IDGenerator, clock Clock) (*ManagementService, error) {
+func NewManagementService(repository ManagementRepository, mobiles MobileProtection, ids IDGenerator, clock Clock, passwordHashers ...PasswordHasher) (*ManagementService, error) {
 	if repository == nil || mobiles == nil || ids == nil || clock == nil {
 		return nil, errors.New("identity management dependencies must not be nil")
 	}
-	return &ManagementService{repository: repository, mobiles: mobiles, ids: ids, clock: clock}, nil
+	var hasher PasswordHasher
+	if len(passwordHashers) > 0 {
+		hasher = passwordHashers[0]
+	}
+	return &ManagementService{repository: repository, mobiles: mobiles, ids: ids, clock: clock, hasher: hasher}, nil
 }
 
 // ListUsers returns tenant-scoped users and masks mobile values before returning them.
@@ -474,6 +480,12 @@ func (service *ManagementService) CreateMembership(ctx context.Context, input Me
 	if err := validateMembership(input.TenantID, input.OperatorID, input.UserID, input.OrgUnitID, input.PositionID, input.MembershipType, input.EffectiveFrom, input.EffectiveTo); err != nil {
 		return domain.Membership{}, err
 	}
+	// Backward compatibility: callers that do not send the new switch keep the historical
+	// behavior where an active appointment participates in organization/position inheritance.
+	if input.InheritAuthorization == nil {
+		enabled := true
+		input.InheritAuthorization = &enabled
+	}
 	now := service.clock.Now().UTC()
 	id, err := service.ids.New(now)
 	if err != nil {
@@ -490,6 +502,10 @@ func (service *ManagementService) UpdateMembership(ctx context.Context, input Me
 	}
 	if err := validateMembership(input.TenantID, input.OperatorID, input.UserID, input.OrgUnitID, input.PositionID, input.MembershipType, input.EffectiveFrom, input.EffectiveTo); err != nil {
 		return domain.Membership{}, err
+	}
+	if input.InheritAuthorization == nil {
+		enabled := true
+		input.InheritAuthorization = &enabled
 	}
 	return service.repository.UpdateMembership(ctx, input)
 }

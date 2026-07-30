@@ -8,14 +8,13 @@ x-platform-runtime-env: &platform-runtime-env
 x-contract-runtime-env: &contract-runtime-env
   - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
 
-x-platform-backend-image: &platform-backend-image
-  build:
-    context: ./backend
+# 基础平台迁移、初始化和受控部署助手复用同一个后端镜像，但只有 api 服务拥有构建定义。
+# 这样 Compose 每次部署只构建一次基础平台后端镜像，不会把辅助任务误认为独立业务镜像。
+x-platform-backend-runtime: &platform-backend-runtime
   image: basic-platform/backend:local
 
-x-contract-backend-image: &contract-backend-image
-  build:
-    context: ../contract_management
+# 合同管理 API 与 Temporal Worker 位于同一个后端运行镜像中。
+x-contract-backend-runtime: &contract-backend-runtime
   image: contract-management/backend:local
 
 services:
@@ -36,7 +35,7 @@ services:
     restart: unless-stopped
 
   migrate:
-    <<: *platform-backend-image
+    <<: *platform-backend-runtime
     env_file: *platform-runtime-env
     command: ["./migrate"]
     volumes:
@@ -49,7 +48,7 @@ services:
   # 该服务不由普通 `up` 自动启动，由 scripts/docker-local.sh 在迁移成功后按需 run。
   # bootstrap-admin 本身会检查数据库状态，已初始化时直接成功退出，因此可重复执行。
   bootstrap-admin:
-    <<: *platform-backend-image
+    <<: *platform-backend-runtime
     env_file: *platform-runtime-env
     command: ["./bootstrap-admin"]
     volumes:
@@ -62,7 +61,9 @@ services:
 
   # 基础平台后端容器：API 与后台 Worker 运行在同一容器中。
   api:
-    <<: *platform-backend-image
+    <<: *platform-backend-runtime
+    build:
+      context: ./backend
     env_file: *platform-runtime-env
     environment:
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
@@ -104,7 +105,7 @@ services:
   # 隔离部署助手不承载业务接口。它是唯一挂载 Docker Socket 和子系统父目录的容器，
   # 仅通过共享 Unix Socket 接收基础平台 API 发出的严格白名单动作。
   subsystem-provisioner:
-    <<: *platform-backend-image
+    <<: *platform-backend-runtime
     environment:
       SUBSYSTEM_PROJECTS_ROOT: ${SUBSYSTEM_HOST_PROJECTS_ROOT}
       SUBSYSTEM_GATEWAY_SCRIPT_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/scripts/portal-gateway.sh
@@ -131,7 +132,7 @@ services:
 
   worker:
     profiles: ["split-runtime"]
-    <<: *platform-backend-image
+    <<: *platform-backend-runtime
     env_file: *platform-runtime-env
     command: ["./worker"]
     volumes:
@@ -214,7 +215,9 @@ services:
 
   # 合同管理后端容器：API 与 Temporal Worker 运行在同一容器中。
   contract-api:
-    <<: *contract-backend-image
+    <<: *contract-backend-runtime
+    build:
+      context: ../contract_management
     env_file: *contract-runtime-env
     environment:
       HTTP_ADDRESS: :8081

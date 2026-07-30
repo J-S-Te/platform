@@ -74,15 +74,16 @@ type Position struct {
 
 // Membership represents a user appointment, including primary and secondary positions.
 type Membership struct {
-	ID             string
-	TenantID       string
-	User           ReferenceName
-	OrgUnit        ReferenceName
-	Position       ReferenceName
-	MembershipType string
-	EffectiveFrom  *time.Time
-	EffectiveTo    *time.Time
-	Status         string
-	Version        uint64
-	IsPrimary      bool
+	ID                   string
+	TenantID             string
+	User                 ReferenceName
+	OrgUnit              ReferenceName
+	Position             ReferenceName
+	MembershipType       string
+	EffectiveFrom        *time.Time
+	EffectiveTo          *time.Time
+	Status               string
+	Version              uint64
+	IsPrimary            bool
+	InheritAuthorization bool
 }

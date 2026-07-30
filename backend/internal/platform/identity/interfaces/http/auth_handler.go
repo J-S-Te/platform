@@ -221,6 +221,12 @@ func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request
 
 // Me returns only the principal that middleware obtained by verifying the JWT and persisted state.
 func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
+	// The authenticated principal contains a live server-side authorization snapshot.
+	// It must never be stored by browsers or shared proxies, otherwise a role change could
+	// leave an active page rendering a stale set of permissions.
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
+	writer.Header().Set("Vary", "Cookie")
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)

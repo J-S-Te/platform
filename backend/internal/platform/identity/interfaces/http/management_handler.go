@@ -28,6 +28,7 @@ type ManagementHandler struct {
 type managementApplicationService interface {
 	ListUsers(context.Context, string, application.PageRequest) (application.PageResult[application.UserView], error)
 	CreateUser(context.Context, application.UserCreateInput) (application.UserView, error)
+	CreateEmployee(context.Context, application.EmployeeCreateInput) (application.EmployeeCreateResult, error)
 	CreateUsersBatch(context.Context, application.UserBatchCreateInput) ([]application.UserView, error)
 	GetUser(context.Context, string, string) (application.UserView, error)
 	UpdateUser(context.Context, application.UserUpdateInput) (application.UserView, error)
@@ -75,6 +76,35 @@ type userBatchCreateRequest struct {
 	Items []userCreateRequest `json:"items"`
 }
 
+// employeeCreateRequest keeps employee onboarding atomic while preserving the legacy /users,
+// /accounts and /memberships request contracts for independent maintenance operations.
+type employeeCreateRequest struct {
+	User       userCreateRequest                `json:"user"`
+	Account    *employeeAccountCreateRequest    `json:"account"`
+	Membership *employeeMembershipCreateRequest `json:"membership"`
+}
+
+type employeeAccountCreateRequest struct {
+	AccountName     string     `json:"account_name"`
+	InitialPassword string     `json:"initial_password"`
+	ValidUntil      *time.Time `json:"valid_until"`
+}
+
+type employeeMembershipCreateRequest struct {
+	OrgUnitID            string  `json:"org_unit_id"`
+	PositionID           string  `json:"position_id"`
+	MembershipType       string  `json:"membership_type"`
+	EffectiveFrom        *string `json:"effective_from"`
+	EffectiveTo          *string `json:"effective_to"`
+	InheritAuthorization *bool   `json:"inherit_authorization"`
+}
+
+type employeeCreateResponse struct {
+	User       userResponse        `json:"user"`
+	Account    *accountResponse    `json:"account,omitempty"`
+	Membership *membershipResponse `json:"membership,omitempty"`
+}
+
 type userBatchCreateResponse struct {
 	Items []userResponse `json:"items"`
 	Total int            `json:"total"`
@@ -118,14 +148,15 @@ type positionCreateRequest struct {
 	Name      string  `json:"name"`
 }
 type membershipRequest struct {
-	UserID         string  `json:"user_id"`
-	OrgUnitID      string  `json:"org_unit_id"`
-	PositionID     string  `json:"position_id"`
-	MembershipType string  `json:"membership_type"`
-	EffectiveFrom  *string `json:"effective_from"`
-	EffectiveTo    *string `json:"effective_to"`
-	Status         *string `json:"status"`
-	Version        uint64  `json:"version"`
+	UserID               string  `json:"user_id"`
+	OrgUnitID            string  `json:"org_unit_id"`
+	PositionID           string  `json:"position_id"`
+	MembershipType       string  `json:"membership_type"`
+	EffectiveFrom        *string `json:"effective_from"`
+	EffectiveTo          *string `json:"effective_to"`
+	InheritAuthorization *bool   `json:"inherit_authorization"`
+	Status               *string `json:"status"`
+	Version              uint64  `json:"version"`
 }
 
 type referenceResponse struct {
@@ -174,15 +205,16 @@ type positionResponse struct {
 	Version    uint64 `json:"version"`
 }
 type membershipResponse struct {
-	MembershipID   string            `json:"membership_id"`
-	User           referenceResponse `json:"user"`
-	OrgUnit        referenceResponse `json:"org_unit"`
-	Position       referenceResponse `json:"position"`
-	MembershipType string            `json:"membership_type"`
-	EffectiveFrom  *string           `json:"effective_from,omitempty"`
-	EffectiveTo    *string           `json:"effective_to,omitempty"`
-	Status         string            `json:"status"`
-	Version        uint64            `json:"version"`
+	MembershipID         string            `json:"membership_id"`
+	User                 referenceResponse `json:"user"`
+	OrgUnit              referenceResponse `json:"org_unit"`
+	Position             referenceResponse `json:"position"`
+	MembershipType       string            `json:"membership_type"`
+	EffectiveFrom        *string           `json:"effective_from,omitempty"`
+	EffectiveTo          *string           `json:"effective_to,omitempty"`
+	Status               string            `json:"status"`
+	InheritAuthorization bool              `json:"inherit_authorization"`
+	Version              uint64            `json:"version"`
 }
 type pageResponse[T any] struct {
 	Items    []T   `json:"items"`
@@ -235,6 +267,82 @@ func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已创建", toUserResponse(result))
+}
+
+// CreateEmployee atomically creates the user, baseline platform role, optional local account and
+// optional initial appointment.  It is the preferred daily onboarding endpoint; the independent
+// resource endpoints remain available for maintenance and exceptional workflows.
+func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		handler.unauthenticated(writer, request)
+		return
+	}
+	var payload employeeCreateRequest
+	if !decodeManagementRequest(writer, request, &payload) {
+		handler.validation(writer, request)
+		return
+	}
+	if payload.Account != nil && !principalHasPermission(principal, "platform:account:create") {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
+	if payload.Membership != nil && !principalHasPermission(principal, "platform:membership:create") {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
+	status := domain.StatusActive
+	if payload.User.Status != nil {
+		status = *payload.User.Status
+	}
+	input := application.EmployeeCreateInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, DisplayName: payload.User.DisplayName,
+		Email: payload.User.Email, Mobile: payload.User.Mobile, Status: status,
+	}
+	if payload.Account != nil {
+		input.Account = &application.EmployeeAccountCreateInput{AccountName: payload.Account.AccountName, InitialPassword: payload.Account.InitialPassword, ValidUntil: payload.Account.ValidUntil}
+	}
+	if payload.Membership != nil {
+		from, err := parseDate(payload.Membership.EffectiveFrom)
+		if err != nil {
+			handler.validation(writer, request)
+			return
+		}
+		to, err := parseDate(payload.Membership.EffectiveTo)
+		if err != nil {
+			handler.validation(writer, request)
+			return
+		}
+		input.Membership = &application.EmployeeMembershipCreateInput{
+			OrgUnitID: payload.Membership.OrgUnitID, PositionID: payload.Membership.PositionID,
+			MembershipType: payload.Membership.MembershipType, EffectiveFrom: from, EffectiveTo: to,
+			InheritAuthorization: payload.Membership.InheritAuthorization,
+		}
+	}
+	result, err := handler.service.CreateEmployee(request.Context(), input)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	response := employeeCreateResponse{User: toUserResponse(result.User)}
+	if result.Account != nil {
+		account := toAccountResponse(*result.Account)
+		response.Account = &account
+	}
+	if result.Membership != nil {
+		membership := toMembershipResponse(*result.Membership)
+		response.Membership = &membership
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "员工已创建", response)
+}
+
+func principalHasPermission(principal authctx.Principal, expected string) bool {
+	for _, permission := range principal.PermissionCodes {
+		if permission == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateUsersBatch creates up to one hundred ordinary users atomically. Employee numbers and the
@@ -547,7 +655,7 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 		handler.validation(writer, request)
 		return
 	}
-	input := application.MembershipCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: payload.UserID, OrgUnitID: payload.OrgUnitID, PositionID: payload.PositionID, MembershipType: payload.MembershipType, EffectiveFrom: from, EffectiveTo: to}
+	input := application.MembershipCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: payload.UserID, OrgUnitID: payload.OrgUnitID, PositionID: payload.PositionID, MembershipType: payload.MembershipType, EffectiveFrom: from, EffectiveTo: to, InheritAuthorization: payload.InheritAuthorization}
 	if !update {
 		result, err := handler.service.CreateMembership(request.Context(), input)
 		if err != nil {
@@ -653,5 +761,5 @@ func toPositionResponse(value domain.Position) positionResponse {
 	return positionResponse{PositionID: value.ID, OrgUnitID: value.OrgUnitID, Code: value.Code, Name: value.Name, Status: value.Status, Version: value.Version}
 }
 func toMembershipResponse(value domain.Membership) membershipResponse {
-	return membershipResponse{MembershipID: value.ID, User: referenceResponse{ID: value.User.ID, Name: value.User.Name}, OrgUnit: referenceResponse{ID: value.OrgUnit.ID, Name: value.OrgUnit.Name}, Position: referenceResponse{ID: value.Position.ID, Name: value.Position.Name}, MembershipType: value.MembershipType, EffectiveFrom: dateString(value.EffectiveFrom), EffectiveTo: dateString(value.EffectiveTo), Status: value.Status, Version: value.Version}
+	return membershipResponse{MembershipID: value.ID, User: referenceResponse{ID: value.User.ID, Name: value.User.Name}, OrgUnit: referenceResponse{ID: value.OrgUnit.ID, Name: value.OrgUnit.Name}, Position: referenceResponse{ID: value.Position.ID, Name: value.Position.Name}, MembershipType: value.MembershipType, EffectiveFrom: dateString(value.EffectiveFrom), EffectiveTo: dateString(value.EffectiveTo), Status: value.Status, InheritAuthorization: value.InheritAuthorization, Version: value.Version}
 }

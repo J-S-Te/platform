@@ -672,21 +672,22 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 		}
 		now := time.Now().UTC()
 		if err := transaction.Create(&membershipModel{
-			ID:             id,
-			TenantID:       input.TenantID,
-			UserID:         input.UserID,
-			OrgUnitID:      input.OrgUnitID,
-			PositionID:     input.PositionID,
-			MembershipType: input.MembershipType,
-			IsPrimary:      isPrimary,
-			ValidFrom:      nullableTime(input.EffectiveFrom),
-			ValidUntil:     nullableTime(input.EffectiveTo),
-			Status:         domain.StatusActive,
-			Version:        1,
-			CreatedAt:      now,
-			CreatedBy:      nullableString(&input.OperatorID),
-			UpdatedAt:      now,
-			UpdatedBy:      nullableString(&input.OperatorID),
+			ID:                   id,
+			TenantID:             input.TenantID,
+			UserID:               input.UserID,
+			OrgUnitID:            input.OrgUnitID,
+			PositionID:           input.PositionID,
+			MembershipType:       input.MembershipType,
+			IsPrimary:            isPrimary,
+			InheritAuthorization: input.InheritAuthorization == nil || *input.InheritAuthorization,
+			ValidFrom:            nullableTime(input.EffectiveFrom),
+			ValidUntil:           nullableTime(input.EffectiveTo),
+			Status:               domain.StatusActive,
+			Version:              1,
+			CreatedAt:            now,
+			CreatedBy:            nullableString(&input.OperatorID),
+			UpdatedAt:            now,
+			UpdatedBy:            nullableString(&input.OperatorID),
 		}).Error; err != nil {
 			return mapWriteError(err, "create membership")
 		}
@@ -700,6 +701,9 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 			if result.Error != nil {
 				return fmt.Errorf("set user primary organization: %w", result.Error)
 			}
+		}
+		if err := advanceMembershipAuthorizationRevisions(transaction, input.TenantID, now, "任职关系创建导致组织/岗位继承授权变化"); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -735,21 +739,25 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 		}
 
 		now := time.Now().UTC()
+		updates := map[string]any{
+			"user_id":         input.UserID,
+			"org_unit_id":     input.OrgUnitID,
+			"position_id":     input.PositionID,
+			"membership_type": input.MembershipType,
+			"is_primary":      isPrimary,
+			"valid_from":      nullableTime(input.EffectiveFrom),
+			"valid_until":     nullableTime(input.EffectiveTo),
+			"status":          status,
+			"updated_at":      now,
+			"updated_by":      input.OperatorID,
+			"version":         gorm.Expr("version + 1"),
+		}
+		if input.InheritAuthorization != nil {
+			updates["inherit_authorization"] = *input.InheritAuthorization
+		}
 		result = transaction.Model(&membershipModel{}).
 			Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.MembershipID, input.Version).
-			Updates(map[string]any{
-				"user_id":         input.UserID,
-				"org_unit_id":     input.OrgUnitID,
-				"position_id":     input.PositionID,
-				"membership_type": input.MembershipType,
-				"is_primary":      isPrimary,
-				"valid_from":      nullableTime(input.EffectiveFrom),
-				"valid_until":     nullableTime(input.EffectiveTo),
-				"status":          status,
-				"updated_at":      now,
-				"updated_by":      input.OperatorID,
-				"version":         gorm.Expr("version + 1"),
-			})
+			Updates(updates)
 		if result.Error != nil {
 			return mapWriteError(result.Error, "update membership")
 		}
@@ -773,6 +781,9 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 				return fmt.Errorf("set updated primary organization: %w", result.Error)
 			}
 		}
+		if err := advanceMembershipAuthorizationRevisions(transaction, input.TenantID, now, "任职关系更新导致组织/岗位继承授权变化"); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -781,9 +792,39 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 	return repository.getMembership(ctx, input.TenantID, input.MembershipID)
 }
 
+// advanceMembershipAuthorizationRevisions invalidates authorization snapshots for applications
+// whose roles can be inherited through an organization or position binding. It intentionally
+// updates every such application in the tenant, rather than trying to infer only the old and new
+// organization/position matches, so scheduled validity changes and future binding resolution use
+// one conservative and transactionally consistent invalidation rule.
+func advanceMembershipAuthorizationRevisions(transaction *gorm.DB, tenantID string, now time.Time, reason string) error {
+	result := buildMembershipAuthorizationRevisionUpdate(transaction, tenantID, now, reason)
+	if result.Error != nil {
+		return fmt.Errorf("advance membership authorization policy revisions: %w", result.Error)
+	}
+	return nil
+}
+
+func buildMembershipAuthorizationRevisionUpdate(transaction *gorm.DB, tenantID string, now time.Time, reason string) *gorm.DB {
+	return transaction.Model(&identityPolicyRevisionModel{}).
+		Where("tenant_id = ?", tenantID).
+		Where(`EXISTS (
+			SELECT 1
+			FROM authz_role_binding AS inherited_binding
+			WHERE inherited_binding.tenant_id = authz_policy_revision.tenant_id
+				AND inherited_binding.application_id = authz_policy_revision.application_id
+				AND inherited_binding.subject_type IN ('ORG_UNIT', 'POSITION')
+		)`).
+		Updates(map[string]any{
+			"revision":      gorm.Expr("revision + 1"),
+			"changed_at":    now,
+			"change_reason": reason,
+		})
+}
+
 const membershipSelectColumns = `m.id, m.tenant_id, u.id AS user_id, u.display_name AS user_name,
 	o.id AS org_unit_id, o.name AS org_unit_name, p.id AS position_id, p.name AS position_name,
-	m.membership_type, m.valid_from, m.valid_until, m.status, m.version, m.is_primary`
+	m.membership_type, m.valid_from, m.valid_until, m.status, m.version, m.is_primary, m.inherit_authorization`
 
 func (repository *GORMRepository) membershipQuery(ctx context.Context) *gorm.DB {
 	return repository.database.WithContext(ctx).

@@ -429,6 +429,7 @@ func principalBindingSubjectFilter(userID, accountID string, now time.Time) (str
 				WHERE membership.tenant_id = binding.tenant_id
 					AND membership.user_id = ?
 					AND membership.status = ?
+					AND membership.inherit_authorization = 1
 					AND (membership.valid_from IS NULL OR membership.valid_from <= ?)
 					AND (membership.valid_until IS NULL OR membership.valid_until > ?)
 					AND (

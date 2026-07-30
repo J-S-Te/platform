@@ -15,15 +15,20 @@ var ErrSubsystemProvisioningUnavailable = errors.New("subsystem provisioning una
 // must never be logged, returned from an API, or passed on a command line.
 type SubsystemProvisioningInput struct {
 	TenantID        string
+	ApplicationID   string
 	ApplicationCode string
 	Environment     string
 	Issuer          string
 	ClientID        string
 	ClientSecret    string
-	RedirectURI     string
-	PublicURL       string
-	PathPrefix      string
-	UpstreamURL     string
+	// CatalogPublisherClientID and CatalogPublisherClientSecret are a separate
+	// service credential for authorization catalog synchronization.
+	CatalogPublisherClientID     string
+	CatalogPublisherClientSecret string
+	RedirectURI                  string
+	PublicURL                    string
+	PathPrefix                   string
+	UpstreamURL                  string
 }
 
 // SubsystemProvisioner validates and performs the local subsystem deployment workflow.

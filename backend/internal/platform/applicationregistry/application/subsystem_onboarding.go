@@ -67,18 +67,30 @@ type SubsystemOnboardingWrite struct {
 	OAuthClient       OAuthClientCreateInput
 	OAuthClientID     string
 	OAuthClientSecret *SecretWrite
+
+	// CatalogPublisherOAuthClient is an isolated machine client used only by the
+	// subsystem to publish its authorization catalog. It must never be reused by
+	// a browser OIDC callback or another operational integration.
+	CatalogPublisherOAuthClient       OAuthClientCreateInput
+	CatalogPublisherOAuthClientID     string
+	CatalogPublisherOAuthClientSecret *SecretWrite
 }
 
 // SubsystemOnboardingResult returns the newly created control-plane objects. PlaintextSecret is
 // returned exactly once and must never be logged, persisted or included in later list responses.
 type SubsystemOnboardingResult struct {
-	Application     Application
-	Environment     Environment
-	LoginTarget     LoginTargetManagementItem
-	OAuthClient     OAuthClientView
-	PlaintextSecret string
-	RedirectURI     string
-	PublicURL       string
+	Application Application
+	Environment Environment
+	LoginTarget LoginTargetManagementItem
+	OAuthClient OAuthClientView
+	// CatalogPublisherOAuthClient is returned without credential material for
+	// auditability. Its plaintext secret is deliberately private to onboarding
+	// and is forwarded only to the trusted deployment provisioner.
+	CatalogPublisherOAuthClient     OAuthClientView
+	PlaintextSecret                 string
+	CatalogPublisherPlaintextSecret string
+	RedirectURI                     string
+	PublicURL                       string
 }
 
 // PortalApplication is the safe, read-only projection shown on the authenticated subsystem portal.
@@ -173,6 +185,10 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	if err != nil {
 		return SubsystemOnboardingResult{}, err
 	}
+	catalogPublisherOAuthClientID, err := service.newID(now, "authorization catalog publisher OAuth client")
+	if err != nil {
+		return SubsystemOnboardingResult{}, err
+	}
 
 	environmentInput := normalizeEnvironmentCreate(EnvironmentCreateInput{
 		TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
@@ -213,16 +229,41 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		secret, plaintextSecret = &write, plaintext
 	}
 
+	// Every onboarded subsystem receives a separate confidential service client
+	// for authorization-catalog publishing. This client is intentionally fixed
+	// to client_credentials/client_secret_basic and has exactly one scope.
+	catalogPublisherClientInput, err := normalizeOAuthClientCreate(OAuthClientCreateInput{
+		TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
+		EnvironmentID: environmentID, ClientID: input.ApplicationCode + "-" + input.Environment + "-catalog-publisher",
+		ClientName: input.ApplicationName + " Authorization Catalog Publisher",
+		ClientType: "service", TokenAuthMethod: "client_secret_basic",
+		AccessTokenTTLSeconds:  defaultSubsystemAccessTokenTTLSeconds,
+		RefreshTokenTTLSeconds: 0, RequirePKCE: false,
+		GrantTypes: []string{"client_credentials"},
+		Scopes:     []string{"authorization.catalog.sync"},
+	}, service.redirectURIValidationPolicy)
+	if err != nil {
+		return SubsystemOnboardingResult{}, err
+	}
+	catalogPublisherSecretWrite, catalogPublisherPlaintextSecret, err := newOAuthClientSecretWrite(service.ids, now, nil)
+	if err != nil {
+		return SubsystemOnboardingResult{}, err
+	}
+
 	result, err := service.repository.CreateSubsystem(ctx, SubsystemOnboardingWrite{
 		Application: applicationInput, ApplicationID: applicationID,
 		Environment: environmentInput, EnvironmentID: environmentID,
 		LoginTarget: loginTargetInput, LoginTargetID: loginTargetID,
 		OAuthClient: oauthClientInput, OAuthClientID: oauthClientID, OAuthClientSecret: secret,
+		CatalogPublisherOAuthClient:       catalogPublisherClientInput,
+		CatalogPublisherOAuthClientID:     catalogPublisherOAuthClientID,
+		CatalogPublisherOAuthClientSecret: &catalogPublisherSecretWrite,
 	}, now)
 	if err != nil {
 		return SubsystemOnboardingResult{}, err
 	}
 	result.PlaintextSecret = plaintextSecret
+	result.CatalogPublisherPlaintextSecret = catalogPublisherPlaintextSecret
 	result.RedirectURI = redirectURI
 	result.PublicURL = publicURL
 	return result, nil

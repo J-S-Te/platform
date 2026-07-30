@@ -49,6 +49,17 @@ func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.C
 			Scopes: write.OAuthClient.Scopes, RedirectURIs: write.OAuthClient.RedirectURIs,
 			Status: oauthClientStatusActive,
 		},
+		CatalogPublisherOAuthClient: OAuthClientView{
+			ID: write.CatalogPublisherOAuthClientID, TenantID: write.CatalogPublisherOAuthClient.TenantID,
+			ApplicationID: write.CatalogPublisherOAuthClient.ApplicationID, EnvironmentID: write.CatalogPublisherOAuthClient.EnvironmentID,
+			ClientID: write.CatalogPublisherOAuthClient.ClientID, ClientName: write.CatalogPublisherOAuthClient.ClientName,
+			ClientType: write.CatalogPublisherOAuthClient.ClientType, TokenAuthMethod: write.CatalogPublisherOAuthClient.TokenAuthMethod,
+			AccessTokenTTLSeconds:  write.CatalogPublisherOAuthClient.AccessTokenTTLSeconds,
+			RefreshTokenTTLSeconds: write.CatalogPublisherOAuthClient.RefreshTokenTTLSeconds,
+			RequirePKCE:            write.CatalogPublisherOAuthClient.RequirePKCE, GrantTypes: write.CatalogPublisherOAuthClient.GrantTypes,
+			Scopes: write.CatalogPublisherOAuthClient.Scopes, RedirectURIs: write.CatalogPublisherOAuthClient.RedirectURIs,
+			Status: oauthClientStatusActive,
+		},
 	}, nil
 }
 
@@ -104,7 +115,17 @@ func TestOnboardSubsystemBuildsAtomicOIDCRegistration(t *testing.T) {
 	if len(write.OAuthClient.RedirectURIs) != 1 || write.OAuthClient.RedirectURIs[0] != "https://portal.example.com/business-app/auth/callback" {
 		t.Fatalf("unexpected redirect URIs: %#v", write.OAuthClient.RedirectURIs)
 	}
-	if result.PublicURL != "https://portal.example.com/business-app/" || result.PlaintextSecret == "" {
+	publisher := write.CatalogPublisherOAuthClient
+	if publisher.ClientID != "business-app-prod-catalog-publisher" || publisher.ClientType != "service" || publisher.TokenAuthMethod != "client_secret_basic" || publisher.RequirePKCE {
+		t.Fatalf("unexpected catalog publisher client: %#v", publisher)
+	}
+	if len(publisher.GrantTypes) != 1 || publisher.GrantTypes[0] != "client_credentials" || len(publisher.Scopes) != 1 || publisher.Scopes[0] != "authorization.catalog.sync" || len(publisher.RedirectURIs) != 0 || publisher.RefreshTokenTTLSeconds != 0 {
+		t.Fatalf("catalog publisher client has broader capabilities than expected: %#v", publisher)
+	}
+	if publisher.ClientID == write.OAuthClient.ClientID || publisher.ApplicationID != write.OAuthClient.ApplicationID || publisher.EnvironmentID != write.OAuthClient.EnvironmentID {
+		t.Fatalf("catalog publisher must be a distinct client within the same application/environment: browser=%#v publisher=%#v", write.OAuthClient, publisher)
+	}
+	if result.PublicURL != "https://portal.example.com/business-app/" || result.PlaintextSecret == "" || result.CatalogPublisherPlaintextSecret == "" {
 		t.Fatalf("unexpected integration result: public_url=%q has_secret=%t", result.PublicURL, result.PlaintextSecret != "")
 	}
 	if write.OAuthClientSecret == nil || len(write.OAuthClientSecret.SecretHash) == 0 {
@@ -112,6 +133,15 @@ func TestOnboardSubsystemBuildsAtomicOIDCRegistration(t *testing.T) {
 	}
 	if err := bcrypt.CompareHashAndPassword(write.OAuthClientSecret.SecretHash, []byte(result.PlaintextSecret)); err != nil {
 		t.Fatalf("stored hash does not match returned one-time secret: %v", err)
+	}
+	if write.CatalogPublisherOAuthClientSecret == nil || len(write.CatalogPublisherOAuthClientSecret.SecretHash) == 0 {
+		t.Fatal("expected a protected catalog publisher secret to cross the repository boundary")
+	}
+	if err := bcrypt.CompareHashAndPassword(write.CatalogPublisherOAuthClientSecret.SecretHash, []byte(result.CatalogPublisherPlaintextSecret)); err != nil {
+		t.Fatalf("stored hash does not match catalog publisher secret: %v", err)
+	}
+	if result.PlaintextSecret == result.CatalogPublisherPlaintextSecret {
+		t.Fatal("browser and catalog publisher clients must use independent secrets")
 	}
 }
 

@@ -1,6 +1,13 @@
 package applicationaccess
 
-import "testing"
+import (
+	"context"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/appctx"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
+)
 
 func TestNormalizeCatalogCanonicalizesAndHashesDeterministically(t *testing.T) {
 	first, checksum1, err := normalizeCatalog(CatalogInput{
@@ -33,6 +40,23 @@ func TestNormalizeCatalogCanonicalizesAndHashesDeterministically(t *testing.T) {
 	}
 }
 
+func TestNormalizeCatalogClaimsRoleConfigHashIsCanonicalAndValidated(t *testing.T) {
+	input, checksum, err := normalizeCatalog(CatalogInput{
+		CatalogVersion: "1", ClaimsRoleConfigHash: "  sm3:abc_123  ",
+		Permissions: []PermissionInput{{Code: "contract.read", Name: "查看合同", Action: "read", ResourceCode: "contract"}},
+	})
+	if err != nil {
+		t.Fatalf("normalizeCatalog returned error: %v", err)
+	}
+	if input.ClaimsRoleConfigHash != "sm3:abc_123" || checksum == "" {
+		t.Fatalf("unexpected claims hash normalization: %#v checksum=%q", input, checksum)
+	}
+	_, _, err = normalizeCatalog(CatalogInput{CatalogVersion: "1", ClaimsRoleConfigHash: "bad hash", Permissions: input.Permissions})
+	if err == nil || !errorsIs(err, ErrValidation) {
+		t.Fatalf("invalid claims role config hash must be rejected, got %v", err)
+	}
+}
+
 func TestNormalizeCatalogRejectsUnknownRolePermission(t *testing.T) {
 	_, _, err := normalizeCatalog(CatalogInput{
 		CatalogVersion: "1",
@@ -54,5 +78,115 @@ func TestNormalizeCatalogRejectsDuplicateResourceAction(t *testing.T) {
 	})
 	if err == nil || !errorsIs(err, ErrValidation) {
 		t.Fatalf("expected validation error, got %v", err)
+	}
+}
+
+func TestContractCatalogUsesTheGenericApplicationOwnedPayload(t *testing.T) {
+	input, checksum, err := normalizeCatalog(CatalogInput{
+		CatalogVersion: "2026.07.29.1",
+		Permissions: []PermissionInput{
+			{Code: "contract.read", Name: "查看合同", Action: "read", ResourceCode: "contract"},
+		},
+		Roles: []CatalogRoleInput{{Code: "sales", Name: "销售人员", Permissions: []string{"contract.read"}}},
+	})
+	if err != nil {
+		t.Fatalf("contract catalog must use the generic synchronization payload: %v", err)
+	}
+	if checksum == "" || len(input.Roles) != 1 || input.Roles[0].Code != "sales" {
+		t.Fatalf("unexpected normalized contract catalog: %#v, checksum=%q", input, checksum)
+	}
+}
+
+func TestCatalogSyncApplicationPrincipalRequiresMatchingScopedApplicationBearer(t *testing.T) {
+	applicationID := "app-contract"
+	valid := appctx.Principal{
+		OAuthClientID: "oauth-client-1", ClientID: "catalog-publisher", TenantID: "tenant-1",
+		ApplicationID: applicationID, ApplicationCode: "contract_management",
+		EnvironmentID: "env-prod", EnvironmentCode: "prod",
+		Scopes: map[string]struct{}{"authorization.catalog.sync": {}},
+	}
+
+	t.Run("accepts contract machine bearer and derives server provenance", func(t *testing.T) {
+		request := httptest.NewRequest("PUT", "/api/v1/applications/"+applicationID+"/authorization-catalog", nil)
+		request = request.WithContext(appctx.WithPrincipal(request.Context(), valid))
+		principal, err := catalogSyncApplicationPrincipal(request, applicationID)
+		if err != nil {
+			t.Fatalf("catalog sync principal was rejected: %v", err)
+		}
+		if principal.ClientID != valid.ClientID || principal.TenantID != valid.TenantID {
+			t.Fatalf("unexpected principal: %#v", principal)
+		}
+		sourceType, sourceIdentifier := catalogSourceFromApplicationPrincipal(principal)
+		if sourceType != "APPLICATION" || sourceIdentifier != "oauth_client:"+valid.OAuthClientID {
+			t.Fatalf("unexpected trusted catalog provenance: %q, %q", sourceType, sourceIdentifier)
+		}
+	})
+
+	t.Run("rejects console principal even when it has application update permission", func(t *testing.T) {
+		request := httptest.NewRequest("PUT", "/api/v1/applications/"+applicationID+"/authorization-catalog", nil)
+		request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+			Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "admin-1"},
+			PermissionCodes: []string{"platform:application:update"},
+		}))
+		if _, err := catalogSyncApplicationPrincipal(request, applicationID); err == nil || !errorsIs(err, ErrAccessDenied) {
+			t.Fatalf("console principal must not sync a catalog, got %v", err)
+		}
+	})
+
+	t.Run("rejects different application and missing scope", func(t *testing.T) {
+		wrongApplication := valid
+		wrongApplication.ApplicationID = "another-app"
+		request := httptest.NewRequest("PUT", "/api/v1/applications/"+applicationID+"/authorization-catalog", nil)
+		request = request.WithContext(appctx.WithPrincipal(context.Background(), wrongApplication))
+		if _, err := catalogSyncApplicationPrincipal(request, applicationID); err == nil || !errorsIs(err, ErrAccessDenied) {
+			t.Fatalf("mismatched application bearer must be rejected, got %v", err)
+		}
+
+		missingScope := valid
+		missingScope.Scopes = map[string]struct{}{"authorization.catalog.read": {}}
+		request = httptest.NewRequest("PUT", "/api/v1/applications/"+applicationID+"/authorization-catalog", nil)
+		request = request.WithContext(appctx.WithPrincipal(context.Background(), missingScope))
+		if _, err := catalogSyncApplicationPrincipal(request, applicationID); err == nil || !errorsIs(err, ErrAccessDenied) {
+			t.Fatalf("application bearer without sync scope must be rejected, got %v", err)
+		}
+	})
+}
+
+func TestNormalizeCatalogPolicyIsIncludedInChecksum(t *testing.T) {
+	unlimited, unlimitedChecksum, err := normalizeCatalog(CatalogInput{
+		CatalogVersion: "2026.07.29.1",
+		Permissions:    []PermissionInput{{Code: "contract.read", Name: "查看合同", Action: "read", ResourceCode: "contract"}},
+		Roles:          []CatalogRoleInput{{Code: "sales", Name: "销售人员", Permissions: []string{"contract.read"}}},
+	})
+	if err != nil {
+		t.Fatalf("normalize unlimited catalog: %v", err)
+	}
+	limited, limitedChecksum, err := normalizeCatalog(CatalogInput{
+		CatalogVersion: "2026.07.29.1",
+		Permissions:    []PermissionInput{{Code: "contract.read", Name: "查看合同", Action: "read", ResourceCode: "contract"}},
+		Roles:          []CatalogRoleInput{{Code: "sales", Name: "销售人员", Permissions: []string{"contract.read"}}},
+		Policy:         CatalogPolicyInput{MaxEffectiveRoles: 1},
+	})
+	if err != nil {
+		t.Fatalf("normalize limited catalog: %v", err)
+	}
+	if unlimited.Policy.MaxEffectiveRoles != 0 || limited.Policy.MaxEffectiveRoles != 1 {
+		t.Fatalf("unexpected normalized policies: unlimited=%+v limited=%+v", unlimited.Policy, limited.Policy)
+	}
+	if unlimitedChecksum == limitedChecksum {
+		t.Fatal("catalog checksum must include max_effective_roles")
+	}
+}
+
+func TestNormalizeCatalogRejectsInvalidMaxEffectiveRoles(t *testing.T) {
+	for _, limit := range []int{-1, maxAuthorizationPolicyEffectiveRoles + 1} {
+		_, _, err := normalizeCatalog(CatalogInput{
+			CatalogVersion: "1",
+			Permissions:    []PermissionInput{{Code: "contract.read", Name: "查看合同", Action: "read", ResourceCode: "contract"}},
+			Policy:         CatalogPolicyInput{MaxEffectiveRoles: limit},
+		})
+		if err == nil || !errorsIs(err, ErrValidation) {
+			t.Fatalf("limit %d: expected validation error, got %v", limit, err)
+		}
 	}
 }

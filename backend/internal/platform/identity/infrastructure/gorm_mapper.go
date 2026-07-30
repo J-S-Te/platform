@@ -68,17 +68,18 @@ func toDomainPosition(model positionModel) domain.Position {
 
 func toDomainMembership(model membershipProjection) domain.Membership {
 	return domain.Membership{
-		ID:             model.ID,
-		TenantID:       model.TenantID,
-		User:           domain.ReferenceName{ID: model.UserID, Name: model.UserName},
-		OrgUnit:        domain.ReferenceName{ID: model.OrgUnitID, Name: model.OrgUnitName},
-		Position:       domain.ReferenceName{ID: model.PositionID, Name: model.PositionName},
-		MembershipType: model.MembershipType,
-		EffectiveFrom:  copyTime(model.ValidFrom),
-		EffectiveTo:    copyTime(model.ValidUntil),
-		Status:         model.Status,
-		Version:        model.Version,
-		IsPrimary:      model.IsPrimary,
+		ID:                   model.ID,
+		TenantID:             model.TenantID,
+		User:                 domain.ReferenceName{ID: model.UserID, Name: model.UserName},
+		OrgUnit:              domain.ReferenceName{ID: model.OrgUnitID, Name: model.OrgUnitName},
+		Position:             domain.ReferenceName{ID: model.PositionID, Name: model.PositionName},
+		MembershipType:       model.MembershipType,
+		EffectiveFrom:        copyTime(model.ValidFrom),
+		EffectiveTo:          copyTime(model.ValidUntil),
+		Status:               model.Status,
+		Version:              model.Version,
+		IsPrimary:            model.IsPrimary,
+		InheritAuthorization: model.InheritAuthorization,
 	}
 }
 

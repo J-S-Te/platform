@@ -1,10 +1,12 @@
 package infrastructure
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/domain"
 )
 
@@ -17,6 +19,7 @@ func TestRoleBindingSubjectFilterIncludesEffectiveOrganizationMembership(t *test
 		"FROM iam_membership AS membership",
 		"JOIN iam_org_unit AS organization",
 		"JOIN iam_position AS position",
+		"membership.inherit_authorization = 1",
 		"membership.valid_from IS NULL OR membership.valid_from <= ?",
 		"membership.valid_until IS NULL OR membership.valid_until > ?",
 		"membership.org_unit_id = binding.subject_id",
@@ -63,5 +66,79 @@ func TestProtectedRoleCode(t *testing.T) {
 		if isProtectedRoleCode(code) {
 			t.Errorf("isProtectedRoleCode(%q) = true, want false", code)
 		}
+	}
+}
+
+func TestEnsureRoleEditableProtectsApplicationRoles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		role    roleModel
+		wantErr error
+	}{
+		{
+			name:    "contract catalog mirror role is not console editable",
+			role:    roleModel{RoleType: "APPLICATION"},
+			wantErr: application.ErrConflict,
+		},
+		{
+			name:    "application role comparison tolerates storage formatting",
+			role:    roleModel{RoleType: " application "},
+			wantErr: application.ErrConflict,
+		},
+		{
+			name:    "built in role remains protected",
+			role:    roleModel{RoleType: "BUILT_IN", BuiltIn: true},
+			wantErr: application.ErrConflict,
+		},
+		{
+			name: "custom role remains editable",
+			role: roleModel{RoleType: "CUSTOM", BuiltIn: false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ensureRoleEditable(tt.role)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ensureRoleEditable(%+v) error = %v, want %v", tt.role, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEnsureApplicationRoleBindingManaged(t *testing.T) {
+	t.Parallel()
+
+	if err := ensureApplicationRoleBindingManaged(roleModel{RoleType: "APPLICATION"}); !errors.Is(err, application.ErrConflict) {
+		t.Fatalf("application catalog role binding error = %v, want conflict", err)
+	}
+	if err := ensureApplicationRoleBindingManaged(roleModel{RoleType: "CUSTOM"}); err != nil {
+		t.Fatalf("custom platform role binding error = %v, want nil", err)
+	}
+}
+
+func TestCatalogMirrorReadOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  string
+		version string
+		hash    string
+		want    bool
+	}{
+		{name: "not synchronized", status: "NOT_SYNCED"},
+		{name: "synchronized", status: "SYNCED", want: true},
+		{name: "failed resync retains version", status: "FAILED", version: "2026.07.30", want: true},
+		{name: "failed resync retains hash", status: "FAILED", hash: "sha256:abc", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := catalogMirrorReadOnly(tt.status, tt.version, tt.hash); got != tt.want {
+				t.Fatalf("catalogMirrorReadOnly(%q, %q, %q) = %v, want %v", tt.status, tt.version, tt.hash, got, tt.want)
+			}
+		})
 	}
 }

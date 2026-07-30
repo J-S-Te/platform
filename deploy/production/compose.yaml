@@ -48,8 +48,11 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # 基础平台后端单容器：入口脚本同时启动 API 与后台 Worker。
   platform-api:
     <<: *platform-service
+    environment:
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
     command: ["./api"]
     ports:
       - "127.0.0.1:${PLATFORM_API_PORT:-18080}:8080"
@@ -62,13 +65,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
-
-  platform-worker:
-    <<: *platform-service
-    command: ["./worker"]
-    depends_on:
-      platform-mysql:
-        condition: service_healthy
 
   contract-mysql:
     image: mysql:8.4
@@ -121,8 +117,17 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # 合同管理后端单容器：入口脚本同时启动 API 与 Temporal Worker。
   contract-api:
     <<: *contract-service
+    environment:
+      HTTP_ADDRESS: :8081
+      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      PLATFORM_BASE_URL: http://platform-api:8080
+      OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      CONTRACT_RUN_WORKER_WITH_API: "true"
+      GIN_MODE: release
     command: ["./api"]
     ports:
       - "127.0.0.1:${CONTRACT_API_PORT:-18081}:8081"
@@ -139,15 +144,6 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
-
-  contract-worker:
-    <<: *contract-service
-    command: ["./worker"]
-    depends_on:
-      contract-mysql:
-        condition: service_healthy
-      temporal:
-        condition: service_healthy
 
   frontend:
     image: ${FRONTEND_IMAGE}
