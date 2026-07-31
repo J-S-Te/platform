@@ -27,6 +27,16 @@ jobs:
           cache-dependency-path: backend/go.sum
       - run: go test ./...
       - run: go vet ./...
+      - name: Validate production deployment scripts
+        working-directory: .
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n deploy/production/bin/*.sh
+          if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' deploy/production; then
+            echo "unresolved merge conflict marker found in production deployment assets" >&2
+            exit 1
+          fi
 
   image:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
