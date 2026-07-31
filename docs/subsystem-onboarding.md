@@ -1,246 +1,378 @@
-# 统一登录目标脚本配置操作说明
+# 子系统开发与统一身份接入手册
 
-> 更新日期：2026-07-28
-> 配置方式：通过 `scripts/subsystem-onboarding.sh` 接入、通过 `scripts/subsystem-offboarding.sh` 撤销单个环境；基础平台前端不展示统一登录目标配置。
+> 更新日期：2026-07-31
+> 适用对象：子系统开发人员、联调人员、平台管理员和部署人员。
+> 官方入口：`scripts/subsystem.sh`；兼容入口 `subsystem-onboarding.sh`、`subsystem-offboarding.sh` 仍可使用。
 
-“统一登录目标”属于基础设施接入配置，当前**不在基础平台前端展示**。新增子系统统一使用：
+## 1. 先理解三个边界
 
-```bash
-bash scripts/subsystem-onboarding.sh [认证参数] [接入参数]
+### 1.1 首次接入不等于日常发布
+
+统一登录接入属于平台控制面；子系统代码、镜像、数据库迁移和容器重启属于发布面。
+
+| 场景 | 正确操作 |
+| --- | --- |
+| 首次创建一个不存在的应用环境 | `subsystem.sh onboard` |
+| 更新代码、镜像、前后端模块或业务迁移 | 使用子系统自己的 CI/CD，不执行 onboard/offboard |
+| 只需要重建现有子系统容器 | `subsystem.sh update`，或子系统自己的部署命令 |
+| 修改 BaseURL、Upstream、PathPrefix 或 OAuth 回调 | 先走受控管理 API，并同步子系统运行配置；不要撤销重建 |
+| 环境永久下线 | 完成数据、会话和恢复预案后执行 `subsystem.sh offboard` |
+
+收到 HTTP `409 IAM_SUBSYSTEM_ALREADY_ONBOARDED` 表示现有接入受到保护，没有被覆盖。不要为了日常发布先下线再重新接入。
+
+### 1.2 三类 URL 不能混用
+
+| 名称 | 使用者 | 示例 |
+| --- | --- | --- |
+| 平台管理 API | 接入脚本向平台登录和写控制面数据 | `http://127.0.0.1:8081/api/v1` |
+| Public BaseURL | 用户浏览器访问统一门户的 origin | `http://192.168.3.11:8081` |
+| UpstreamURL | 门户网关在 Docker/内网中访问子系统 | `http://customer-api:8080` |
+
+容器中的 `localhost` 只表示当前容器。不要将 `http://localhost:8080` 作为另一个容器的 Upstream。
+
+### 1.3 浏览器 OAuth Client 与服务客户端分离
+
+- 浏览器登录 Client：`<application-code>-<environment>-web`；通常使用 Authorization Code + PKCE。
+- 授权目录发布 Client：独立的 catalog-publisher 服务凭据，不得交给浏览器。
+- 审计、批处理等机器 Client：按各自用途单独创建，不能复用浏览器 Client。
+- Client Secret 只能保存在权限为 `0600` 的运行配置或 Secret 管理系统中，不进入 Git、命令行参数和日志。
+
+## 2. 子系统必须提供的项目结构
+
+本地受控 provisioner 根据 `application-code` 在 `SUBSYSTEM_PROJECTS_ROOT` 下查找同名目录。例如：
+
+```text
+Unified_Identity_Authentication_Platform/
+├── platform/
+└── customer_management/       # 必须与 application-code 一致
+    ├── compose.yaml            # 也支持 compose.yml/docker-compose.yml/docker-compose.yaml
+    └── .env.example            # 首次接入的安全模板
 ```
 
-脚本调用 `POST /api/v1/subsystem-onboarding`。当应用编码尚不存在时，后端会创建 Application、Environment、相对路径 LoginTarget 和 OAuth Client；当同一租户下的应用编码已存在但指定环境尚不存在时，只复用既有 Application 并创建该环境及其 LoginTarget、OAuth Client。脚本不会覆盖已有环境、登录目标或客户端，并把生成的 OIDC 密钥直接交给受控 provisioner。浏览器和脚本输出都不会返回 Client Secret。
+要求：
 
-## 核心边界：接入配置与子系统发布解耦
+1. 应用编码匹配 `^[a-z][a-z0-9._-]{0,63}$`，目录不能通过符号链接逃出项目根目录。
+2. Compose 文件必须能执行 `docker compose --project-directory <dir> --env-file .env.local -f <file> up -d --build`。
+3. 必须提供 `.env.example`；如果已有 `.env.local`，provisioner 会基于它保留未托管配置并替换平台托管字段。
+4. `.env.local` 不得提交。首次接入生成后权限为 `0600`。
+5. 子系统服务必须加入网关可达的 Docker 网络，且 UpstreamURL 使用该网络中的服务名和容器端口。
+6. 健康检查必须覆盖数据库迁移、OIDC discovery 和必要依赖，避免容器“已启动但不可登录”。
 
-统一登录接入属于基础平台控制面配置；子系统代码、镜像、前端、后端、功能模块和业务数据库迁移属于子系统发布面。两者必须解耦：
+### 2.1 provisioner 写入的标准环境变量
 
-| 场景 | 是否运行接入/撤销脚本 | 正确操作 |
-| --- | --- | --- |
-| 首次接入一个尚不存在的应用环境 | 运行 `subsystem-onboarding.sh` | 创建该环境的统一登录配置 |
-| 常规代码、镜像、前端/后端功能模块更新 | **不运行** | 仅执行子系统自身的构建、迁移、发布或重启流程 |
-| 子系统容器重启、重新部署或回滚 | **不运行** | 仅操作子系统运行时；基础平台中已有接入配置保持不变 |
-| 变更 BaseURL、UpstreamURL、PathPrefix、OAuth 回调 | 不用撤销重建 | 走基础平台受控配置变更流程，并同步运行时配置 |
-| 某个环境永久下线 | 运行 `subsystem-offboarding.sh` | 在完成数据保留与会话处置后永久撤销该环境接入 |
+子系统应支持以下键；未出现在模板中的键会被追加：
 
-> **禁止事项：** 不得为了子系统的日常更新、镜像重建、功能迭代或故障恢复而先撤销再重新接入。若误执行接入脚本并收到 `IAM_SUBSYSTEM_ALREADY_ONBOARDED`（HTTP 409），表示现有接入已受保护且没有被覆盖；停止重复执行即可。
+| 变量 | 含义 |
+| --- | --- |
+| `PLATFORM_BASE_URL` | 平台配置的 OIDC issuer |
+| `OIDC_ISSUER` | ID Token 的预期 issuer |
+| `OIDC_CLIENT_ID` | 浏览器登录 Client ID |
+| `OIDC_CLIENT_SECRET` | confidential Client Secret |
+| `OIDC_REDIRECT_URI` | 精确回调地址 |
+| `OIDC_SCOPES` | 当前写入 `openid profile` |
+| `OIDC_TENANT_ID` | 平台租户 ID |
+| `APP_PUBLIC_URL` | 用户实际进入子系统的公开地址，含路径前缀和尾斜线 |
+| `APP_PATH_PREFIX` | 门户路径前缀 |
+| `PLATFORM_APPLICATION_ID/CODE` | 平台应用标识 |
+| `PLATFORM_ENVIRONMENT_CODE` | `dev/test/staging/prod` |
+| `PLATFORM_DOCKER_NETWORK` | 平台与子系统互通的 Docker 网络 |
+| `PLATFORM_AUTHORIZATION_CATALOG_*` | 授权目录发布凭据；仅后端使用 |
 
-## 1. 前置条件
+子系统可另外配置 `OIDC_BACKCHANNEL_BASE_URL`，让服务端 discovery/token/userinfo 走容器内地址；但必须继续验证公开 `OIDC_ISSUER`，不能把内网地址当作 Token issuer。
 
-- 基础平台 API 已启动；本地默认地址为 `http://127.0.0.1:8081/api/v1`。
-- 运行环境已启用受控子系统 provisioner。本地 `compose.local.yaml` 已启用；生产环境必须先部署并启用对应 provisioner，不能只部署 API 后直接执行脚本。
-- `--application-code` 对应的子系统项目目录已存在于 provisioner 配置的项目根目录中。
-- 执行账号具备以下权限：
+## 3. OIDC 客户端实现要求
+
+### 3.1 标准流程
+
+1. 未登录用户访问业务页。
+2. 子系统生成高熵 `state`、`nonce` 和 PKCE `code_verifier`，服务端保存或以防篡改方式绑定当前浏览器会话。
+3. 浏览器跳转到平台 authorization endpoint。
+4. 平台只重定向到已注册的精确 `OIDC_REDIRECT_URI`。
+5. 回调校验 `state`，服务端用授权码和 `code_verifier` 换 Token。
+6. 校验 ID Token 签名、`iss`、`aud`、`exp`、`iat`、`nonce`；密钥只能来自受信任 issuer 的 JWKS。
+7. 建立子系统会话。会话有效期不得超过 ID Token/平台授权允许的有效期；权限变化和账号禁用后必须重新验证或撤销会话。
+8. 登出时撤销子系统会话；需要平台统一登出时使用平台注册的 post-logout redirect URI。
+
+OIDC discovery：
+
+```text
+<OIDC_ISSUER>/.well-known/openid-configuration
+```
+
+不要硬编码 Token、JWKS、UserInfo 或 Logout 路径，应优先读取 discovery。
+
+### 3.2 回调路径约定
+
+onboard 自动派生：
+
+```text
+LoginTarget.TargetURI = <path-prefix>/
+redirect_uri          = <public-base-url><path-prefix>/auth/callback
+client_id             = <application-code>-<environment>-web
+```
+
+例如：
+
+```text
+Public BaseURL : http://192.168.3.11:8081
+PathPrefix     : /customer_management
+Redirect URI  : http://192.168.3.11:8081/customer_management/auth/callback
+```
+
+### 3.3 HTTP 回调策略
+
+生产环境应使用 HTTPS。平台 OAuth 回调是否允许非回环 HTTP，由平台后端配置独立控制：
+
+```dotenv
+AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true
+```
+
+该配置只放宽 OAuth Client 回调校验，不等同于允许接入脚本把管理员密码发送到任意 HTTP API。
+
+平台管理 API 传输规则：
+
+- `https://...`：允许；
+- `http://localhost`、`127.0.0.0/8`、`::1`：允许；
+- 其他 HTTP 主机：默认拒绝，可信局域网必须同时显式配置开关和精确主机白名单。
+
+```dotenv
+BASIC_PLATFORM_ALLOW_INSECURE_HTTP_API=true
+BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
+```
+
+推荐仍让脚本通过 `http://127.0.0.1:8081/api/v1` 调用平台 API，同时把 `--public-base-url` 和 `--platform-origin` 配成局域网地址。这样不需要打开非回环管理 API HTTP 例外，局域网 OAuth 回调仍正常工作。
+
+## 4. 首次接入
+
+### 4.1 前置条件
+
+- 平台 API、MySQL、迁移和 `subsystem-provisioner` 正常。
+- Docker daemon 可用，项目目录、Compose 和 `.env.example` 已准备好。
+- 网关 include 文件可写，frontend 容器可唯一定位。
+- 执行账号至少具有：
   - `platform:application:create`
   - `platform:application-environment:create`
   - `platform:application-login-target:create`
   - `platform:oauth-client:create`
+- 角色管理权限不会自动代表可以授予超级管理员；初始管理员授权仍受平台的受保护角色与可委派权限策略约束。
 
-撤销单个既有环境还需要：
+### 4.2 参数
 
-- `platform:application-environment:delete`
+| 参数 | 说明 |
+| --- | --- |
+| `--application-code` | 唯一应用编码，同时用于项目目录定位 |
+| `--application-name` | 门户展示名 |
+| `--environment` | `dev/test/staging/prod`，默认 `prod` |
+| `--public-base-url` | 浏览器看到的 origin，不带业务路径 |
+| `--upstream-url` | 网关可达的内部 HTTP(S) 地址 |
+| `--path-prefix` | 非根绝对路径，默认 `/<application-code>` |
+| `--client-type` | `confidential` 或 `public` |
+| `--initial-admin-user-id` | 可选；不传则使用当前平台操作者 |
+| `--description` | 应用说明 |
+| `--api-base-url` | 平台管理 API 根地址 |
+| `--platform-origin` | Cookie 写请求 Origin，应在平台 CORS/同源策略允许范围内 |
 
-## 2. 参数映射
-
-| 脚本参数 | 后端字段 | 含义 |
-| --- | --- | --- |
-| `--application-code` | `Application.Code` | 子系统唯一编码；同时参与项目目录定位和 Client ID 派生 |
-| `--application-name` | `Application.Name` | 门户显示名称 |
-| `--description` | `Application.Description` | 应用说明；默认 `门户路径接入：<path-prefix>` |
-| `--environment` | `Environment.Environment` | `dev`、`test`、`staging` 或 `prod`，默认 `prod` |
-| `--public-base-url` | `Environment.BaseURL` | 用户访问的门户 origin，不包含业务路径 |
-| `--upstream-url` | `Environment.UpstreamURL` | 门户 Nginx/容器能够访问的子系统内部地址 |
-| `--path-prefix` | `Environment.PathPrefix` | 门户路径前缀，默认 `/<application-code>` |
-| `--client-type` | `OAuthClient.ClientType` | `confidential` 或 `public`，默认 `confidential` |
-
-后端自动派生，不需要额外参数：
-
-```text
-LoginTarget.TargetURI = <path-prefix>/
-OAuth redirect_uri     = <public-base-url><path-prefix>/auth/callback
-OAuth client_id        = <application-code>-<environment>-web
-```
-
-`BaseURL` 与 `UpstreamURL` 必须解耦：前者是浏览器看到的统一入口，后者是网关访问的内部地址。不要把容器内的 `localhost` 当作其他容器的 Upstream。
-
-## 3. 交互向导、快捷预设与预检
-
-### 3.1 中文交互向导
-
-在终端中直接运行即可进入中文配置向导；如果只填写了一部分必填参数，脚本也会自动补问缺失项：
+### 4.3 先 dry-run
 
 ```bash
-cd /Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/platform
-bash scripts/subsystem-onboarding.sh
-```
+cd /path/to/Unified_Identity_Authentication_Platform/platform
 
-向导会逐项校验应用编码、环境、对外 BaseURL、内部 UpstreamURL 和路径前缀，最后回显**不含密码、Cookie 和 Client Secret**的配置摘要。输入 `y` 或 `yes` 后才会登录并创建接入。
-
-即使参数已完整，仍可强制进入向导核对：
-
-```bash
-bash scripts/subsystem-onboarding.sh --interactive --account admin
-```
-
-### 3.2 合同管理本地快捷配置
-
-`contract-management-local` 预设填充本地合同系统的常用配置：
-
-```text
-应用编码：contract_management
-应用名称：合同管理系统
-环境：prod
-对外 BaseURL：http://localhost:8081
-内部 UpstreamURL：http://contract-api:8081
-路径前缀：/contract_management
-```
-
-执行：
-
-```bash
-bash scripts/subsystem-onboarding.sh \
-  --preset contract-management-local \
-  --account admin
-```
-
-脚本仍会在创建前回显摘要并要求确认。显式传入的参数优先于预设，例如可通过 `--environment staging` 覆盖预设环境。
-
-### 3.3 仅校验、不写入（dry-run）
-
-先检查参数和最终派生地址，不登录、不调用平台 API、不写入任何配置：
-
-```bash
-bash scripts/subsystem-onboarding.sh \
-  --preset contract-management-local \
-  --dry-run \
-  --yes
-```
-
-`--yes` 仅跳过“最终确认”，适用于受控 CI；日常人工操作不要使用它。`--password-stdin` 不能与需要交互补问参数的向导同时使用；CI 应提供完整参数或预设及 `--account`，再从标准输入传入密码。
-
-## 4. 本地合同管理系统示例
-
-合同系统项目目录名为 `contract_management`，本地统一前端/API 入口为 `http://localhost:8081`，合同后端在 Compose 网络内的服务地址为 `http://contract-api:8081`。
-
-> 合同管理系统的 `dev` 环境由数据库迁移预置，且由统一前端直接承载；它**不会**出现在 `portal-gateway.sh list` 输出中。下面命令仅用于首次新增一个尚不存在的 `prod` 环境。若 `prod` 已存在，脚本会返回 `IAM_SUBSYSTEM_ALREADY_ONBOARDED`，此时不能用重复执行脚本覆盖 BaseURL、Upstream、路径、登录目标或 OAuth Client。
-
-```bash
-cd /Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/platform
-
-bash scripts/subsystem-onboarding.sh \
-  --application-code contract_management \
-  --application-name '合同管理系统' \
-  --environment prod \
-  --public-base-url http://localhost:8081 \
-  --upstream-url http://contract-api:8081 \
-  --path-prefix /contract_management \
+bash scripts/subsystem.sh onboard \
+  --application-code customer_management \
+  --application-name '客户管理系统' \
+  --environment dev \
+  --public-base-url http://192.168.3.11:8081 \
+  --upstream-url http://customer-api:8080 \
+  --path-prefix /customer_management \
   --client-type confidential \
-  --account admin
+  --api-base-url http://127.0.0.1:8081/api/v1 \
+  --platform-origin http://192.168.3.11:8081 \
+  --dry-run --yes
 ```
 
-脚本会安全交互读取密码。用于受控 CI 时可以从标准输入传入：
+dry-run 不登录、不调用 API、不写 `.env.local`、不启动容器、不改网关。
+
+### 4.4 正式执行
 
 ```bash
-printf '%s\n' "$PLATFORM_ADMIN_PASSWORD" | bash scripts/subsystem-onboarding.sh \
-  --password-stdin \
-  --account admin \
-  --application-code contract_management \
-  --application-name '合同管理系统' \
-  --public-base-url http://localhost:8081 \
-  --upstream-url http://contract-api:8081 \
-  --path-prefix /contract_management
+bash scripts/subsystem.sh onboard \
+  --application-code customer_management \
+  --application-name '客户管理系统' \
+  --environment dev \
+  --public-base-url http://192.168.3.11:8081 \
+  --upstream-url http://customer-api:8080 \
+  --path-prefix /customer_management \
+  --client-type confidential \
+  --api-base-url http://127.0.0.1:8081/api/v1 \
+  --platform-origin http://192.168.3.11:8081 \
+  --account admins
 ```
 
-也可通过 `--cookie-file FILE` 复用已有平台会话。脚本会把 Cookie 复制到私有临时目录，不覆盖调用者文件。
-
-## 5. 单终端登录注意事项
-
-平台禁止同一账号同时保持多个终端会话。脚本使用账号口令登录时，会在执行结束后自动调用 `/auth/logout`，避免运维脚本遗留会话导致管理员之后无法登录。
-
-如果管理员账号已有会话，优先在原终端正常退出。只有明确要撤销原会话时才使用：
+交互方式不会回显密码。CI 使用 stdin：
 
 ```bash
---replace-existing-session
+printf '%s\n' "$PLATFORM_ADMIN_PASSWORD" | bash scripts/subsystem.sh onboard \
+  --password-stdin --yes \
+  --account admins \
+  --application-code customer_management \
+  --application-name '客户管理系统' \
+  --environment dev \
+  --public-base-url http://192.168.3.11:8081 \
+  --upstream-url http://customer-api:8080 \
+  --path-prefix /customer_management \
+  --client-type confidential \
+  --api-base-url http://127.0.0.1:8081/api/v1 \
+  --platform-origin http://192.168.3.11:8081
 ```
 
-该参数会使原终端会话立即失效，不应作为默认配置。
+不要把密码写到命令行。也可用 `--cookie-file` 复制已有会话，但文件必须来自同一平台且未过期。
 
-## 6. 与 portal-gateway.sh 的边界
+### 4.5 接入期间发生什么
 
-`scripts/portal-gateway.sh` 是低层 Nginx 路由维护工具，只处理路径到 Upstream 的映射，不创建 Application、Environment、LoginTarget 或 OAuth Client。
+1. 脚本校验并显示配置摘要。
+2. 以平台管理员会话调用 `POST /api/v1/subsystem-onboarding`。
+3. 平台原子创建或复用 Application，并创建新 Environment、LoginTarget、浏览器 OAuth Client 和目录发布 Client。
+4. Client Secret 只在后端内存中交给 provisioner，不回显给浏览器或脚本。
+5. provisioner 基于 `.env.example` 写出权限为 `0600` 的 `.env.local`。
+6. 执行子系统 Compose `up -d --build`。
+7. 更新门户网关、执行 `nginx -t` 并 reload。
+8. 对配置的目标子系统尝试同步授权目录。目录同步失败当前是非致命错误，应查看 provisioner 日志并单独修复。
+9. 脚本退出前注销自己创建的平台会话。
 
-新增子系统不要只执行 `portal-gateway.sh add`；应执行 `subsystem-onboarding.sh`，让后端受控 provisioner 完成配置写入、子系统启动和网关更新。`portal-gateway.sh` 仅用于故障排查、删除路由或受控运维。
+若第 6～8 步失败，控制面记录或 `.env.local` 可能已经创建。不要盲目重复接入；先根据 request ID 和日志确认失败阶段。
 
-## 7. 常用检查与冲突处理
+## 5. 接入后验收清单
 
 ```bash
-bash scripts/subsystem-onboarding.sh --help
 bash scripts/docker-local.sh ps
+bash scripts/docker-local.sh logs api subsystem-provisioner
+bash scripts/portal-gateway.sh list
 ```
 
-`portal-gateway.sh list` 仅列出需要独立 Nginx 整站代理的外部子系统；`contract_management` 已集成到统一前端，**不应**要求它出现在该列表中。合同系统入口固定为：
+逐项确认：
 
-```text
-http://localhost:8081/contract_management/
-```
+- `.env.local` 权限为 `0600`，并已填充 OIDC Client、Tenant、Application 和路径；
+- 子系统容器 healthy，能从 frontend 所在网络访问 Upstream；
+- discovery 的 issuer 与 `OIDC_ISSUER` 完全一致；
+- 未登录访问触发登录，回调后返回原业务页；
+- 篡改/重放 state、错误 nonce、错误 issuer/audience 均被拒绝；
+- 无授权用户收到 403，而不是仅靠前端隐藏菜单；
+- 登出后子系统会话失效；
+- 日志中没有 Client Secret、Cookie、授权码、Access Token 或完整 ID Token；
+- 路径前缀下的静态资源、API、重定向和刷新均正常。
 
-脚本是创建/新增环境流程，不是更新或覆盖流程。相同租户下已有应用编码时，若指定环境尚不存在，脚本会复用该 Application 并新增该环境。重复使用相同的应用编码和环境时，平台会返回 `IAM_SUBSYSTEM_ALREADY_ONBOARDED`（HTTP 409）及应用、环境和状态；不会覆盖任何现有配置或重新生成/泄露 OAuth Secret。需要修改现有接入配置时，应使用受控的 Application Environment、LoginTarget 或 OAuth Client 更新接口，不能通过重复执行接入脚本绕过唯一性约束。
+`contract_management` 已集成到统一前端，不登记整站反代，因此不应出现在 `portal-gateway.sh list` 中。
 
+## 6. 日常更新与配置变更
 
-## 8. 撤销单个环境（保留 Application 与 dev）
+### 6.1 代码/镜像更新
 
-当只需要删除 `contract_management/prod` 的统一登录接入时，使用环境级撤销脚本：
+不执行 onboard/offboard。使用子系统 CI/CD，或者：
 
 ```bash
-cd /Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/platform
+bash scripts/subsystem.sh update \
+  --application-code customer_management \
+  --environment dev \
+  --account admins
+```
 
-bash scripts/subsystem-offboarding.sh \
-  --application-code contract_management \
+`update` 只按现有 `.env.local` 重建 Compose；不会重写该文件，也不会修改平台 DB 或重新签发 OAuth Secret。
+
+### 6.2 修改 BaseURL、Upstream、PathPrefix 或回调
+
+这是一个多资源受控变更，至少涉及：
+
+1. `PATCH /api/v1/applications/{application_id}/environments/{environment_id}`；
+2. `PATCH .../login-targets/{login_target_id}`；
+3. `PUT /api/v1/oauth-clients/{oauth_client_id}/redirect-uris`；
+4. 必要时更新 post-logout redirect URI；
+5. 安全地同步子系统 `.env.local` 中的公开 URL、路径和回调；
+6. 重建子系统并验证网关。
+
+这些接口使用乐观锁 `version`。必须先 GET 当前记录再提交新版本；发生 `IAM_VERSION_CONFLICT` 时重新读取，不要覆盖他人的变更。浏览器 OAuth Secret 不会因普通 URL 变更重新回显，不能删除 `.env.local` 后期待平台恢复明文 Secret。
+
+## 7. 网关工具与并发锁
+
+`portal-gateway.sh` 是底层工具，不创建平台控制面数据。正常新增子系统必须走 onboard。
+
+```bash
+bash scripts/portal-gateway.sh list
+bash scripts/portal-gateway.sh add <code> <path-prefix> <upstream-url>
+bash scripts/portal-gateway.sh remove <code>
+bash scripts/portal-gateway.sh reload
+```
+
+`add/remove/list/sync/apply` 使用跨进程锁：
+
+- Linux 优先使用 util-linux `flock`；
+- 没有 `flock` 时使用原子目录锁；
+- 默认锁文件为 `<include>.lock`，等待 60 秒；
+- 可通过 `PORTAL_GATEWAY_LOCK_FILE`、`PORTAL_GATEWAY_LOCK_TIMEOUT` 调整。
+
+不要删除一个正在使用的 `.lock` 或 `.lock.d`，也不要让多个主机通过不支持可靠文件锁的共享文件系统并发维护同一 include。
+
+## 8. 授权目录同步
+
+`sync-contract-catalog.sh` 只接受受保护的 `PLATFORM_*` 环境变量，不再接受命令行位置参数。它需要 `curl`、`jq`、Docker CLI，以及目标 MySQL 容器中的 mysql 客户端。
+
+手工补偿示例（不要开启 shell tracing）：
+
+```bash
+set +x
+export PLATFORM_APPLICATION_ID='<26位大写ULID>'
+export PLATFORM_BASE_URL='http://127.0.0.1:8081'
+export PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID='<publisher-client-id>'
+export PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET='<secret>'
+export PLATFORM_MYSQL_CONTAINER='basic-platform-local-mysql-1'
+export PLATFORM_MYSQL_USER='basic_platform'
+export PLATFORM_MYSQL_PASSWORD='<password>'
+export PLATFORM_MYSQL_DATABASE='basic_platform'
+bash scripts/sync-contract-catalog.sh
+unset PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET PLATFORM_MYSQL_PASSWORD
+```
+
+凭据和 Bearer Token 通过进程环境与权限为 `0600` 的临时 curl 配置传递，不放入 argv。不要把这些变量写进公共 CI 输出或普通日志。
+
+## 9. 永久下线
+
+默认 offboard 是深清理：先停止容器、删除 `.env.local`、移除网关并 reload，再删除 Environment 控制面记录。
+
+```bash
+bash scripts/subsystem.sh offboard \
+  --application-code customer_management \
   --environment prod \
-  --confirm contract_management/prod \
-  --account admin
+  --confirm customer_management/prod \
+  --account admins
 ```
 
-`--account admin` 指的是**基础平台管理员账号**，用于调用基础平台 API；它不是合同管理系统的业务账号。执行账号必须具备 `platform:application-environment:delete` 权限。脚本使用应用编码和环境查询当前版本，再调用：
+安全边界：
 
-```http
-DELETE /api/v1/applications/{application_id}/environments/{environment_id}
-```
+- 不允许删除 `dev` 或平台自身环境；
+- 不提供 `--force`；配置命名空间或审计回执仍存在时平台会拒绝；
+- `--delete-application` 仅在最后一个环境删除后使用；
+- `--shallow` 只用于应急修复，会保留容器、`.env.local` 和网关，容易制造漂移；
+- 下线不会删除子系统业务数据库和备份，必须另走数据保留流程。
 
-`--confirm` 是强制二次确认，必须精确写成 `<application-code>/<environment>`。对本例只能是 `contract_management/prod`；不能省略、不能写成其他环境。
+深清理分两阶段，当前不是跨 Docker/文件系统/数据库的全局事务。若运行时清理成功、DB 删除失败，会形成“平台记录仍在但服务已停止”的半状态。执行前应备份 `.env.local`、记录网关配置和 Environment version；失败后不要重新 onboard，应先恢复运行时或完成剩余删除。
 
-成功后，平台会在一个事务内删除**这个环境派生的** LoginTarget、OAuth Client 及其授权码、刷新令牌、客户端凭据、重定向 URI、JWK 等关联配置，并删除目标 Environment。下列内容不会删除：
+## 10. 故障排查
 
-- `contract_management` Application；
-- 其他环境，特别是预置的 `contract_management/dev`；
-- Docker 容器、镜像、Nginx 进程或统一前端；
-- 合同、客户、审批等子系统业务数据；
-- 配置命名空间和审计回执。
+| 现象 | 处理 |
+| --- | --- |
+| `AUTH_CONCURRENT_SESSION` | 先从原终端退出；确认要抢占时才用 `--replace-existing-session` |
+| 非回环平台 API 必须使用 HTTPS | 改走 `127.0.0.1`/HTTPS；可信局域网才配置 HTTP 开关和精确白名单 |
+| 登录接口 403 | `--platform-origin` 未被同源/CORS 策略允许，或账号被拒绝 |
+| 接入接口 403 | 操作者缺少应用、环境、登录目标、OAuth Client 创建权限，或初始角色不可委派 |
+| `IAM_SUBSYSTEM_ALREADY_ONBOARDED` | 环境已存在；停止重复接入，日常发布走 update/CI |
+| `IAM_CONFLICT` | Client ID、路径或资源唯一性冲突，核对现有记录 |
+| `PLATFORM_DEPENDENCY_UNAVAILABLE` | 查看 `api`、`subsystem-provisioner`、Docker、项目目录和 Socket |
+| `subsystem project ... unavailable` | 应用编码与目录名不一致，或缺 Compose/`.env.example` |
+| Compose 启动失败 | 在子系统目录用生成的 `.env.local` 单独执行 `docker compose config` 和 `up` 排查 |
+| `nginx -t` 失败 | 检查 path prefix、Upstream、include；不要绕过验证直接 reload |
+| 等待网关锁超时 | 查找并发 CI/provisioner；确认没有活跃进程后再处理遗留目录锁 |
+| OAuth `redirect_uri` 不匹配 | 浏览器请求值、平台登记值和子系统配置必须逐字符一致 |
+| 登录后循环跳转 | 检查 Cookie Secure/SameSite、代理头、issuer、路径前缀和回调会话持久化 |
+| 目录同步失败 | 查看 provisioner stderr；核对 publisher、MySQL 坐标、应用 ULID、curl/jq |
+| offboard 后 DB 删除失败 | 按第 9 节恢复运行时或完成剩余删除，禁止重新 onboard 覆盖 |
 
-安全限制：
-
-- 不允许删除 `dev`，也不能删除基础平台 `platform` 的环境；
-- 不提供 `--force`；若返回 `IAM_ENVIRONMENT_DELETE_BLOCKED`（HTTP 409），说明该环境仍存在配置命名空间或审计回执，必须按数据保留策略处理，脚本不会销毁这些记录；
-- 脚本不会调用 `portal-gateway.sh`、Docker 或 Nginx。对于由统一前端承载的合同系统，通常无需额外删除网关路由；
-- 已发出的浏览器会话或令牌应按原有会话/令牌到期策略失效。需要立即切断用户访问时，应先在平台侧注销相关会话，再执行撤销。
-
-只有在该环境已经**永久下线**、并在后续被当作一个新环境重新投入使用时，才使用第 3 节的交互向导或第 4 节的完整示例重新接入。不得为了子系统代码更新、镜像重建、功能模块迭代、容器重启或日常发布而撤销后重建。部署基础平台时需先应用迁移 `000053_add_application_environment_delete_permission.sql`，否则管理员不会获得此环境删除权限。
-
-## 9. 接入与撤销故障处理
-
-| 现象 | 原因 | 处理方式 |
-| --- | --- | --- |
-| `AUTH_CONCURRENT_SESSION` | 平台管理员账号已有有效会话 | 先在原终端退出；只有明确要替换时才传入 `--replace-existing-session` |
-| API 连接失败 | API 地址错误、服务未启动或网络不可达 | 脚本会提示检查 `bash scripts/docker-local.sh ps`；确认 `--api-base-url` 指向正确基础平台 API |
-| HTTP `401`（接入脚本） | 管理员密码错误、Cookie 失效或基础平台地址不一致 | 改用 `--account` 重新认证；不要复用过期 Cookie |
-| HTTP `403`（接入脚本） | 账号缺少应用、环境、登录目标或 OAuth Client 创建权限 | 由超级管理员补齐接入权限后重试 |
-| HTTP `409` / `IAM_SUBSYSTEM_ALREADY_ONBOARDED` | 同一应用和环境已存在 | 这是保护现有接入的正常结果；子系统日常发布无需执行接入脚本。仅在 BaseURL、UpstreamURL、PathPrefix 或 OAuth 回调确需变更时走受控配置变更流程；不要为常规更新撤销后重建 |
-| HTTP `409` / `IAM_CONFLICT` | Client ID、路径前缀或环境资源冲突 | 核对应用编码、环境、路径前缀；不要重复创建覆盖 |
-| HTTP `422`（接入脚本） | BaseURL、UpstreamURL、路径前缀或环境不合法 | 对外 BaseURL 只写 origin；Upstream 使用网关可达内网地址；PathPrefix 必须是非根绝对路径 |
-| HTTP `5xx` / `PLATFORM_DEPENDENCY_UNAVAILABLE` | 基础平台 API 或受控 provisioner 不可用 | 执行 `bash scripts/docker-local.sh ps` 和 `bash scripts/docker-local.sh logs api subsystem-provisioner`；后端更新后执行 `bash scripts/docker-local.sh refresh-api` |
-| HTTP `405` / `PLATFORM_METHOD_NOT_ALLOWED` | 运行中的 `api` 容器仍是未注册 `DELETE /api/v1/applications/{application_id}/environments/{environment_id}` 的旧镜像 | 在 `platform` 目录执行 `bash scripts/docker-local.sh refresh-api`；该命令只更新基础平台 API、受控 provisioner 和基础平台迁移，不会构建前端或合同后端。成功后重新执行撤销命令 |
-| HTTP `403` | 账号缺少 `platform:application-environment:delete` | 为基础平台管理员授予环境删除权限，并确认迁移 000053 已执行 |
-| HTTP `409` / `IAM_ENVIRONMENT_DELETE_BLOCKED` | 环境关联了配置命名空间或审计回执 | 按保留与审计流程处理；没有 `--force`，不要直接删库 |
-| HTTP `409` / `IAM_VERSION_CONFLICT` | 查询后环境版本已变更 | 重新执行脚本，读取新版本后再次明确确认 |
-| 未找到应用或环境 | `contract_management/prod` 本来不存在或输入不精确 | 核对应用编码和环境；脚本不会执行删除 |
-| 参数校验失败 | 尝试删除 `dev`、`platform` 或确认字符串不匹配 | 仅对 test、staging、prod 使用与目标完全一致的 `--confirm` |
+保留平台响应中的 `request_id`，用它关联 API、审计和 provisioner 日志。

@@ -14,6 +14,8 @@ umask 077
 # ============================ 全局默认值与共享状态 ============================
 API_BASE_URL="${BASIC_PLATFORM_API_BASE_URL:-http://localhost:8081/api/v1}"
 PLATFORM_ORIGIN="${BASIC_PLATFORM_ORIGIN:-}"
+ALLOW_INSECURE_HTTP_API="${BASIC_PLATFORM_ALLOW_INSECURE_HTTP_API:-false}"
+INSECURE_HTTP_API_ALLOWED_HOSTS="${BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS:-}"
 
 # 通用认证参数
 ACCOUNT=""
@@ -71,6 +73,12 @@ usage() {
   --cookie-file FILE             复用已登录的平台 Cookie 文件
   --replace-existing-session     撤销该账号原有会话后登录
 
+平台 API 传输保护：
+  HTTPS 及 localhost/回环 HTTP 默认允许。可信局域网必须同时设置
+  BASIC_PLATFORM_ALLOW_INSECURE_HTTP_API=true 和
+  BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=<精确主机列表>。
+  此规则不限制 --public-base-url 或 OAuth HTTP 回调。
+
 通用控制：
   -y, --yes                      跳过确认；适用于 CI
   -h, --help                     显示本帮助
@@ -84,6 +92,41 @@ require_command() {
     log "ERROR" "缺少命令：$1"
     exit 2
   }
+}
+
+# 管理员口令和 Cookie 只能通过 HTTPS 或本机回环 HTTP 发送。局域网确需直接访问
+# HTTP API 时必须显式开启并列出主机；该规则不限制 public-base-url/OAuth 回调地址。
+validate_api_transport() {
+  python3 - "$API_BASE_URL" "$ALLOW_INSECURE_HTTP_API" "$INSECURE_HTTP_API_ALLOWED_HOSTS" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+value, allow_insecure, allowed_hosts = sys.argv[1:]
+parsed = urlsplit(value)
+host = (parsed.hostname or "").rstrip(".").lower()
+if parsed.scheme == "https":
+    raise SystemExit(0)
+is_loopback = host == "localhost"
+try:
+    is_loopback = is_loopback or ipaddress.ip_address(host).is_loopback
+except ValueError:
+    pass
+if parsed.scheme == "http" and is_loopback:
+    raise SystemExit(0)
+enabled = allow_insecure.strip().lower() in {"1", "true", "yes", "on"}
+allowed = {item.strip().rstrip(".").lower() for item in allowed_hosts.split(",") if item.strip()}
+if parsed.scheme == "http" and enabled and host in allowed:
+    raise SystemExit(0)
+print(
+    "非回环平台 API 必须使用 HTTPS；可信局域网确需 HTTP 时，请同时设置 "
+    "BASIC_PLATFORM_ALLOW_INSECURE_HTTP_API=true 和 "
+    "BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=<精确主机列表>。"
+    "该限制不影响 public-base-url 或 OAuth HTTP 回调。",
+    file=sys.stderr,
+)
+raise SystemExit(2)
+PY
 }
 
 can_interact() {
@@ -558,6 +601,8 @@ PY
     IFS= read -r PLATFORM_ORIGIN
   } <"$normalized_file"
 
+  validate_api_transport || return 2
+
   if [[ -z "$DESCRIPTION" ]]; then
     DESCRIPTION="门户路径接入：${PATH_PREFIX}"
   fi
@@ -1009,6 +1054,8 @@ PY
     IFS= read -r PLATFORM_ORIGIN
   } <"$normalized_file"
 
+  validate_api_transport || return 2
+
   if [[ -z "$COOKIE_FILE" && -z "${ACCOUNT//[[:space:]]/}" ]]; then
     log "ERROR" "未使用 --cookie-file 时必须提供 --account"
     return 2
@@ -1273,6 +1320,8 @@ PY
     IFS= read -r API_BASE_URL
     IFS= read -r PLATFORM_ORIGIN
   } <"$normalized_file"
+
+  validate_api_transport || return 2
 
   if [[ -z "$COOKIE_FILE" && -z "${ACCOUNT//[[:space:]]/}" ]]; then
     log "ERROR" "未使用 --cookie-file 时必须提供 --account"

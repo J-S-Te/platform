@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./c
 # 部署助手需要 Docker CLI/Compose 与 bash 来执行经过白名单约束的本地编排和网关脚本。
 FROM alpine:3.21
 
-RUN apk add --no-cache bash ca-certificates docker-cli docker-cli-compose openssl tzdata wget
+RUN apk add --no-cache bash ca-certificates curl docker-cli docker-cli-compose jq openssl tzdata util-linux wget
 
 WORKDIR /app
 

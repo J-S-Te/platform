@@ -251,8 +251,34 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 		return application.PageResult[domain.Account]{}, fmt.Errorf("list accounts: %w", err)
 	}
 	items := make([]domain.Account, 0, len(rows))
+	linkedUserIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, toAccountWithFallbackName(row))
+		if row.UserID != nil && strings.TrimSpace(*row.UserID) != "" {
+			linkedUserIDs = append(linkedUserIDs, strings.TrimSpace(*row.UserID))
+		}
+	}
+	if len(linkedUserIDs) > 0 {
+		var linkedUsers []userModel
+		if err := repository.database.WithContext(ctx).
+			Select("id", "display_name").
+			Where("tenant_id = ? AND id IN ? AND deleted_at IS NULL", tenantID, linkedUserIDs).
+			Find(&linkedUsers).Error; err != nil {
+			return application.PageResult[domain.Account]{}, fmt.Errorf("list account users: %w", err)
+		}
+		userNames := make(map[string]string, len(linkedUsers))
+		for _, user := range linkedUsers {
+			userNames[user.ID] = user.DisplayName
+		}
+		for index := range items {
+			if items[index].UserID == nil {
+				continue
+			}
+			userID := strings.TrimSpace(*items[index].UserID)
+			if displayName, ok := userNames[userID]; ok {
+				items[index].User = &domain.ReferenceName{ID: userID, Name: displayName}
+			}
+		}
 	}
 	return application.PageResult[domain.Account]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
@@ -346,6 +372,7 @@ func (repository *GORMRepository) getAccount(ctx context.Context, tenantID, acco
 
 func (repository *GORMRepository) ListOrgUnits(ctx context.Context, tenantID, keyword, status string, query application.PageRequest) (application.PageResult[domain.OrgUnit], error) {
 	database := applyOrganizationFilter(repository.database.WithContext(ctx).Model(&orgUnitModel{}), tenantID, keyword, status)
+	database = applyManagementAuthorizationScope(database, query, "id", "id")
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
 		return application.PageResult[domain.OrgUnit]{}, fmt.Errorf("count organization units: %w", err)
@@ -592,6 +619,7 @@ func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input appli
 
 func (repository *GORMRepository) ListPositions(ctx context.Context, tenantID, keyword, status string, query application.PageRequest) (application.PageResult[domain.Position], error) {
 	database := applyPositionFilter(repository.database.WithContext(ctx).Model(&positionModel{}), tenantID, keyword, status)
+	database = applyManagementAuthorizationScope(database, query, "id", "org_unit_id")
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
 		return application.PageResult[domain.Position]{}, fmt.Errorf("count positions: %w", err)
@@ -709,6 +737,7 @@ func (repository *GORMRepository) DeletePosition(ctx context.Context, input appl
 
 func (repository *GORMRepository) ListMemberships(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Membership], error) {
 	database := applyMembershipFilter(repository.membershipQuery(ctx), tenantID, query)
+	database = applyManagementAuthorizationScope(database, query, "m.id", "m.org_unit_id")
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
 		return application.PageResult[domain.Membership]{}, fmt.Errorf("count memberships: %w", err)
@@ -1015,6 +1044,26 @@ func applyMembershipFilter(database *gorm.DB, tenantID string, query application
 		database = database.Where("m.status = ?", query.Status)
 	}
 	return database
+}
+
+func applyManagementAuthorizationScope(database *gorm.DB, query application.PageRequest, resourceColumn, organizationColumn string) *gorm.DB {
+	if !query.ScopeRestricted {
+		return database
+	}
+	clauses := make([]string, 0, 2)
+	arguments := make([]any, 0, 2)
+	if len(query.AllowedOrgUnitIDs) > 0 {
+		clauses = append(clauses, organizationColumn+" IN ?")
+		arguments = append(arguments, query.AllowedOrgUnitIDs)
+	}
+	if len(query.AllowedResourceIDs) > 0 {
+		clauses = append(clauses, resourceColumn+" IN ?")
+		arguments = append(arguments, query.AllowedResourceIDs)
+	}
+	if len(clauses) == 0 {
+		return database.Where("1 = 0")
+	}
+	return database.Where("("+strings.Join(clauses, " OR ")+")", arguments...)
 }
 
 func pageOffset(query application.PageRequest) int {

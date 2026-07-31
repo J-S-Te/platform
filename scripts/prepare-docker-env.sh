@@ -20,7 +20,13 @@ fi
 
 if [[ -e "$env_file" && "$force" != true ]]; then
     echo "配置文件已存在：$env_file" >&2
-    echo "如确认需要重新生成（会替换数据库密码和初始化令牌），请使用：$0 --force" >&2
+    echo "为避免环境文件密码与已有 MySQL 数据卷失配，本脚本不会覆盖已有配置。" >&2
+    exit 1
+fi
+
+if [[ -e "$env_file" && "$force" == true ]]; then
+    echo "拒绝直接覆盖已有配置：重新生成文件密码不会同步轮换已有 MySQL 数据卷中的账号密码。" >&2
+    echo "请使用受控凭据轮换流程；如需全新本地环境，先明确删除旧环境和数据卷后再生成。" >&2
     exit 1
 fi
 

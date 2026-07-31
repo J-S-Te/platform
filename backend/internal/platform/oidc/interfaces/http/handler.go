@@ -11,6 +11,7 @@ import (
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/application"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/tokenissuer"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/security"
 )
@@ -103,6 +104,7 @@ type Config struct {
 	SessionLogout                 BrowserSessionLogout
 	PostLogoutRedirectValidator   PostLogoutRedirectValidator
 	AccessTokenSubjectResolver    AccessTokenSubjectResolver
+	AuthorizationResolver         tokenissuer.AuthorizationResolver
 	SessionCookieName             string
 	SessionCookieSecure           bool
 	SessionCookieSameSite         http.SameSite
@@ -112,16 +114,17 @@ type Config struct {
 
 // Handler contains only transport policy. Durable protocol state remains in application.Service.
 type Handler struct {
-	service             Service
-	jwtManager          JWTManager
-	legacyIssuer        LegacyClientCredentialsIssuer
-	sessionAuth         BrowserSessionAuthenticator
-	sessionLogout       BrowserSessionLogout
-	logoutRedirects     PostLogoutRedirectValidator
-	accessTokenSubjects AccessTokenSubjectResolver
-	cookie              cookieConfig
-	clock               Clock
-	logger              *slog.Logger
+	service               Service
+	jwtManager            JWTManager
+	legacyIssuer          LegacyClientCredentialsIssuer
+	sessionAuth           BrowserSessionAuthenticator
+	sessionLogout         BrowserSessionLogout
+	logoutRedirects       PostLogoutRedirectValidator
+	accessTokenSubjects   AccessTokenSubjectResolver
+	authorizationResolver tokenissuer.AuthorizationResolver
+	cookie                cookieConfig
+	clock                 Clock
+	logger                *slog.Logger
 }
 
 type cookieConfig struct {
@@ -152,7 +155,8 @@ func NewHandler(config Config) (*Handler, error) {
 		service: config.Service, jwtManager: config.JWTManager, legacyIssuer: config.LegacyClientCredentialsIssuer,
 		sessionAuth: config.SessionAuthenticator, sessionLogout: config.SessionLogout,
 		logoutRedirects: config.PostLogoutRedirectValidator, accessTokenSubjects: config.AccessTokenSubjectResolver,
-		cookie: cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
-		clock:  config.Clock, logger: config.Logger,
+		authorizationResolver: config.AuthorizationResolver,
+		cookie:                cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
+		clock:                 config.Clock, logger: config.Logger,
 	}, nil
 }

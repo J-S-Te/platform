@@ -139,7 +139,7 @@ func (testApplicationAuthenticator) Authenticate(_ context.Context, token string
 	}, nil
 }
 
-func TestRequireAllowedOriginForUnsafeMethodsOrBearerAllowsValidatedBearerWithoutOrigin(t *testing.T) {
+func TestRequireAllowedOriginForUnsafeMethodsOrBearer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(
@@ -148,29 +148,137 @@ func TestRequireAllowedOriginForUnsafeMethodsOrBearerAllowsValidatedBearerWithou
 	)
 	router.PUT("/catalog", func(context *gin.Context) { context.Status(http.StatusNoContent) })
 
-	request := httptest.NewRequest(http.MethodPut, "/catalog", strings.NewReader(`{"catalog_version":"1"}`))
-	request.Header.Set("Authorization", "Bearer application-token")
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("validated bearer status = %d, want %d", response.Code, http.StatusNoContent)
+	tests := []struct {
+		name          string
+		authorization string
+		origin        string
+		secFetchSite  string
+		cookie        *http.Cookie
+		wantStatus    int
+	}{
+		{
+			name:          "valid bearer without cookie or origin reaches application authentication",
+			authorization: "Bearer application-token",
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "syntactically valid but invalid bearer is rejected by authentication",
+			authorization: "Bearer invalid-token",
+			wantStatus:    http.StatusUnauthorized,
+		},
+		{
+			name:          "session cookie and fake authorization without origin is forbidden",
+			authorization: "not-a-real-authorization",
+			cookie:        &http.Cookie{Name: "session", Value: "session"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "session cookie and valid bearer without origin is forbidden",
+			authorization: "Bearer application-token",
+			cookie:        &http.Cookie{Name: "session", Value: "session"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "session cookie with allowed origin uses console authentication",
+			authorization: "not-a-real-authorization",
+			origin:        "https://portal.example.com",
+			cookie:        &http.Cookie{Name: "session", Value: "session"},
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "unrelated cookie also requires origin",
+			authorization: "Bearer application-token",
+			cookie:        &http.Cookie{Name: "preferences", Value: "compact"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "basic authorization cannot bypass missing origin",
+			authorization: "Basic Y2xpZW50OnNlY3JldA==",
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "arbitrary authorization cannot bypass missing origin",
+			authorization: "ApiKey secret",
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "malformed bearer token68 cannot bypass missing origin",
+			authorization: "Bearer invalid,token",
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "bearer with extra field cannot bypass missing origin",
+			authorization: "Bearer application-token extra",
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "cross origin valid bearer is forbidden",
+			authorization: "Bearer application-token",
+			origin:        "https://evil.example",
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "cross site fetch valid bearer without origin is forbidden",
+			authorization: "Bearer application-token",
+			secFetchSite:  "cross-site",
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "same origin valid bearer is allowed",
+			authorization: "Bearer application-token",
+			origin:        "https://portal.example.com",
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:       "missing authorization and origin is forbidden",
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPut, "/catalog", strings.NewReader(`{"catalog_version":"1"}`))
+			if test.authorization != "" {
+				request.Header.Set("Authorization", test.authorization)
+			}
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if test.secFetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.secFetchSite)
+			}
+			if test.cookie != nil {
+				request.AddCookie(test.cookie)
+			}
+
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+		})
 	}
 }
 
-func TestRequireAllowedOriginForUnsafeMethodsOrBearerKeepsBrowserOriginProtection(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	router.Use(
-		RequireAllowedOriginForUnsafeMethodsOrBearer("https://portal.example.com"),
-		ConsoleOrApplicationAuthentication(testConsoleAuthenticator{}, "session", testApplicationAuthenticator{}),
-	)
-	router.PUT("/catalog", func(context *gin.Context) { context.Status(http.StatusNoContent) })
-
-	request := httptest.NewRequest(http.MethodPut, "/catalog", strings.NewReader(`{"catalog_version":"1"}`))
-	request.AddCookie(&http.Cookie{Name: "session", Value: "session"})
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("missing browser origin status = %d, want %d", response.Code, http.StatusForbidden)
+func TestHasStrictBearerAuthorization(t *testing.T) {
+	tests := []struct {
+		header string
+		want   bool
+	}{
+		{header: "Bearer abcDEF012-._~+/==", want: true},
+		{header: "bearer application-token", want: true},
+		{header: "Bearer"},
+		{header: "Basic abc"},
+		{header: "Bearer abc def"},
+		{header: "Bearer invalid,token"},
+		{header: "Bearer =padding"},
+		{header: "Bearer abc=def"},
+	}
+	for _, test := range tests {
+		t.Run(test.header, func(t *testing.T) {
+			if got := hasStrictBearerAuthorization(test.header); got != test.want {
+				t.Fatalf("hasStrictBearerAuthorization(%q) = %v, want %v", test.header, got, test.want)
+			}
+		})
 	}
 }

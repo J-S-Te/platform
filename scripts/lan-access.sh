@@ -146,6 +146,7 @@ APP_PUBLIC_BASE_URL=${public_origin}
 APP_CORS_ALLOWED_ORIGINS=${public_origin}
 OIDC_ISSUER=${public_origin}
 OIDC_ISSUER_BASE_URL=${public_origin}
+AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true
 OIDC_REDIRECT_URI=${public_origin}/contract_management/auth/callback
 APP_PUBLIC_URL=${public_origin}/contract_management/
 EOF

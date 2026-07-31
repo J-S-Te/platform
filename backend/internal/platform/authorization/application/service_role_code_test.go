@@ -97,7 +97,7 @@ func TestServiceUpdateRoleDoesNotAcceptCodeMutation(t *testing.T) {
 	}
 }
 
-func TestServiceRoleBindingRejectsUnenforcedScopes(t *testing.T) {
+func TestServiceRoleBindingAcceptsEnforcedOrganizationScope(t *testing.T) {
 	t.Parallel()
 
 	repository := &roleRepositoryStub{}
@@ -109,10 +109,10 @@ func TestServiceRoleBindingRejectsUnenforcedScopes(t *testing.T) {
 	_, err = service.CreateRoleBinding(context.Background(), RoleBindingCreateInput{
 		TenantID: "tenant-1", OperatorID: "operator-1", RoleID: "role-1", SubjectType: "USER", SubjectID: "user-1", ScopeType: "ORG_UNIT", ScopeID: &scopeID,
 	})
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("create organization-scoped binding error = %v, want ErrValidation", err)
+	if err != nil {
+		t.Fatalf("create organization-scoped binding: %v", err)
 	}
-	if repository.roleBindingCalls != 0 {
-		t.Fatalf("CreateRoleBinding calls = %d, want 0", repository.roleBindingCalls)
+	if repository.roleBindingCalls != 1 {
+		t.Fatalf("CreateRoleBinding calls = %d, want 1", repository.roleBindingCalls)
 	}
 }

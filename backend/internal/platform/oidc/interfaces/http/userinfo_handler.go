@@ -74,7 +74,27 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
 		return
 	}
-	payload := map[string]string{"sub": info.Subject}
+	if h.authorizationResolver == nil {
+		h.logger.Error("OIDC UserInfo authorization resolver is not configured")
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
+		return
+	}
+	authorization, err := h.authorizationResolver.ResolveOIDCAuthorization(r.Context(), subject.TenantID, claims.ClientID, claims.Subject)
+	if err != nil || authorization.TenantID != subject.TenantID || authorization.AuthzRevision == 0 || strings.TrimSpace(authorization.RoleConfigHash) == "" {
+		if err != nil {
+			h.logger.Warn("OIDC UserInfo current authorization resolution failed", "error", err)
+		}
+		writeUserInfoUnauthorized(w)
+		return
+	}
+	payload := map[string]any{
+		"sub":              info.Subject,
+		"tenant_id":        authorization.TenantID,
+		"roles":            append([]string(nil), authorization.Roles...),
+		"permissions":      append([]string(nil), authorization.Permissions...),
+		"role_config_hash": authorization.RoleConfigHash,
+		"authz_revision":   authorization.AuthzRevision,
+	}
 	if hasScope(claims.Scope, "profile") {
 		if info.Name != "" {
 			payload["name"] = info.Name

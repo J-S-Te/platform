@@ -321,16 +321,18 @@ func validateBinding(tenant, operator, role, subjectType, subjectID, scopeType s
 	if !oneOf(subjectType, "USER", "ACCOUNT", "ORG_UNIT", "POSITION") {
 		return validation("subject_type is invalid")
 	}
-	// Management routes currently authorize only a tenant-wide, server-loaded permission
-	// set. Until every protected resource is evaluated by a trusted resource-scope policy
-	// enforcement point, accepting an organization/resource binding would create a misleading
-	// configuration that cannot safely authorize those routes. Fail closed instead of silently
-	// widening it to a tenant permission.
-	if scopeType != "TENANT" {
-		return validation("only tenant scope is supported until resource-scope authorization is enforced")
+	if !oneOf(scopeType, "TENANT", "ORG_UNIT", "RESOURCE") {
+		return validation("scope_type is invalid")
 	}
-	if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
+	normalizedScopeID := ""
+	if scopeID != nil {
+		normalizedScopeID = strings.TrimSpace(*scopeID)
+	}
+	if scopeType == "TENANT" && normalizedScopeID != "" {
 		return validation("tenant scope must not include scope_id")
+	}
+	if scopeType != "TENANT" && normalizedScopeID == "" {
+		return validation("organization and resource scopes require scope_id")
 	}
 	if expiresAt != nil && !expiresAt.After(now.UTC()) {
 		return validation("expires_at must be in the future")

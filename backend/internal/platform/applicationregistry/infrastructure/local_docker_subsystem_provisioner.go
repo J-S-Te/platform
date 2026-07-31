@@ -36,13 +36,13 @@ type LocalDockerSubsystemProvisionerConfig struct {
 	// the provisioner runs the contract_management catalog sync image after the subsystem Compose
 	// stack is up, so the platform's authorization catalog reflects the subsystem's role and
 	// permission declarations without any in-band code change in the subsystem itself.
-	CatalogSyncEnabled         bool
-	CatalogSyncImage           string
-	CatalogSyncMysqlContainer  string
-	CatalogSyncMysqlUser       string
-	CatalogSyncMysqlPassword   string
-	CatalogSyncMysqlDatabase   string
-	CatalogSyncTargetAppCode   string
+	CatalogSyncEnabled        bool
+	CatalogSyncImage          string
+	CatalogSyncMysqlContainer string
+	CatalogSyncMysqlUser      string
+	CatalogSyncMysqlPassword  string
+	CatalogSyncMysqlDatabase  string
+	CatalogSyncTargetAppCode  string
 }
 
 type subsystemCommandRunner interface {
@@ -371,18 +371,30 @@ func (provisioner *LocalDockerSubsystemProvisioner) maybeSyncContractCatalogLock
 	arguments := []string{
 		"run", "--rm", "--network=host",
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
-		"-e", "PLATFORM_APPLICATION_ID=" + input.ApplicationID,
-		"-e", "PLATFORM_BASE_URL=" + input.Issuer,
-		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=" + input.CatalogPublisherClientID,
-		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=" + input.CatalogPublisherClientSecret,
-		"-e", "PLATFORM_MYSQL_CONTAINER=" + provisioner.config.CatalogSyncMysqlContainer,
-		"-e", "PLATFORM_MYSQL_USER=" + provisioner.config.CatalogSyncMysqlUser,
-		"-e", "PLATFORM_MYSQL_PASSWORD=" + provisioner.config.CatalogSyncMysqlPassword,
-		"-e", "PLATFORM_MYSQL_DATABASE=" + provisioner.config.CatalogSyncMysqlDatabase,
+		// `-e NAME` forwards the runner environment without placing secret values in
+		// docker's argv (and therefore /proc/<pid>/cmdline / command audit logs).
+		"-e", "PLATFORM_APPLICATION_ID",
+		"-e", "PLATFORM_BASE_URL",
+		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID",
+		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET",
+		"-e", "PLATFORM_MYSQL_CONTAINER",
+		"-e", "PLATFORM_MYSQL_USER",
+		"-e", "PLATFORM_MYSQL_PASSWORD",
+		"-e", "PLATFORM_MYSQL_DATABASE",
 		provisioner.config.CatalogSyncImage,
 		"/usr/local/bin/sync-contract-catalog.sh",
 	}
-	return provisioner.runner.Run(operationCtx, "/var/run/docker.sock", os.Environ(), provisioner.config.DockerBinary, arguments...)
+	runnerEnvironment := append(os.Environ(),
+		"PLATFORM_APPLICATION_ID="+input.ApplicationID,
+		"PLATFORM_BASE_URL="+input.Issuer,
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID="+input.CatalogPublisherClientID,
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET="+input.CatalogPublisherClientSecret,
+		"PLATFORM_MYSQL_CONTAINER="+provisioner.config.CatalogSyncMysqlContainer,
+		"PLATFORM_MYSQL_USER="+provisioner.config.CatalogSyncMysqlUser,
+		"PLATFORM_MYSQL_PASSWORD="+provisioner.config.CatalogSyncMysqlPassword,
+		"PLATFORM_MYSQL_DATABASE="+provisioner.config.CatalogSyncMysqlDatabase,
+	)
+	return provisioner.runner.Run(operationCtx, "/var/run/docker.sock", runnerEnvironment, provisioner.config.DockerBinary, arguments...)
 }
 
 // logTeardownLeftovers removes the gateway entry and .env.local for a subsystem whose Compose

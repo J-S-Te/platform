@@ -36,6 +36,8 @@ const (
 	grantOriginTemplate = "TEMPLATE"
 	grantOriginSystem   = "SYSTEM"
 
+	applicationRoleType = "APPLICATION"
+
 	sourceKindManual    = "MANUAL"
 	sourceKindInherited = "INHERITED"
 	sourceKindSystem    = "SYSTEM"
@@ -229,9 +231,10 @@ type applicationRow struct {
 func (applicationRow) TableName() string { return "platform_application" }
 
 type roleRow struct {
-	ID   string `gorm:"column:id"`
-	Code string `gorm:"column:code"`
-	Name string `gorm:"column:name"`
+	ID       string `gorm:"column:id"`
+	Code     string `gorm:"column:code"`
+	Name     string `gorm:"column:name"`
+	RoleType string `gorm:"column:role_type"`
 }
 
 type assignedRoleRow struct {
@@ -411,7 +414,8 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		directClause, directArgs := manualDirectApplicationRoleBindingFilter(in.TenantID, application.ID, in.UserID)
-		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.status = ?", activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
+		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, application.ID, applicationRoleType)
+		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.role_id IN (?)", applicationRoleIDs).Where("rb.status = ?", activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
 		if result.Error != nil {
 			return fmt.Errorf("revoke application role bindings: %w", result.Error)
 		}
@@ -567,7 +571,8 @@ func (s *Service) DeleteSubjectAccess(ctx context.Context, in DeleteSubjectAcces
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		directClause, directArgs := manualSubjectRoleBindingFilter(in.TenantID, application.ID, subjectType, in.SubjectID)
-		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.status = ?", activeStatus).Updates(map[string]any{
+		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, application.ID, applicationRoleType)
+		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.role_id IN (?)", applicationRoleIDs).Where("rb.status = ?", activeStatus).Updates(map[string]any{
 			"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID,
 		})
 		if result.Error != nil {
@@ -641,15 +646,18 @@ func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, application
 	resolved := make([]resolvedBinding, 0, len(roles))
 	for _, role := range roles {
 		var roleRecord roleRow
-		// The catalog mirror surfaces both APPLICATION roles (synced from a subsystem) and
-		// PLATFORM roles (built-in to the platform itself). Both must be assignable through
-		// the user authorization endpoint; COMPATIBILITY roles are reserved for legacy
-		// compatibility grants and stay hidden from this validation.
-		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type <> ?", tenantID, applicationID, activeStatus, role.RoleCode, "COMPATIBILITY").Take(&roleRecord).Error; err != nil {
+		// Application access is an application-owned boundary. Platform control-plane roles
+		// must only be managed by the generic, protected role-binding API. Keeping the role
+		// type predicate here prevents a platform-super-admin assignment from being smuggled
+		// through an application access update.
+		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type = ?", tenantID, applicationID, activeStatus, role.RoleCode, applicationRoleType).Take(&roleRecord).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, validation("one or more application roles do not exist or are disabled")
 			}
 			return nil, fmt.Errorf("load application role: %w", err)
+		}
+		if err := ensureApplicationAccessRole(roleRecord); err != nil {
+			return nil, err
 		}
 		scopeType, scopeID := scopeTypeTenant, ""
 		if role.ScopeType == scopeTypeEnvironment {
@@ -667,6 +675,13 @@ func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, application
 		resolved = append(resolved, resolvedBinding{roleID: roleRecord.ID, scopeType: scopeType, scopeID: scopeID, role: role})
 	}
 	return resolved, nil
+}
+
+func ensureApplicationAccessRole(role roleRow) error {
+	if !strings.EqualFold(strings.TrimSpace(role.RoleType), applicationRoleType) {
+		return validation("one or more application roles do not exist or are disabled")
+	}
+	return nil
 }
 
 // validateDirectRoleLimit rejects a role set that the target application can never
@@ -695,7 +710,7 @@ func validateMaximumRoleCount(maximum int, roleIDs []string) error {
 func (s *Service) replaceSubjectRoleBindings(tx *gorm.DB, tenantID, applicationID, subjectType, subjectID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
 	var existing []bindingRow
 	directClause, directArgs := manualSubjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID)
-	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type <> ?", "COMPATIBILITY").Find(&existing).Error; err != nil {
+	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", applicationRoleType).Find(&existing).Error; err != nil {
 		return false, fmt.Errorf("load existing application role bindings: %w", err)
 	}
 	key := func(roleID, scopeType, scopeID string) string { return roleID + "\x00" + scopeType + "\x00" + scopeID }
@@ -1115,7 +1130,7 @@ func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID,
 		Joins("LEFT JOIN iam_position AS p ON rb.subject_type = ? AND p.id = rb.subject_id AND p.tenant_id = rb.tenant_id", subjectTypePosition).
 		Joins("LEFT JOIN authz_position_grant_template_assignment AS ta ON ta.tenant_id = rb.tenant_id AND ta.id = rb.origin_id AND rb.grant_origin = ?", grantOriginTemplate).
 		Joins("LEFT JOIN authz_position_grant_template AS template ON template.tenant_id = ta.tenant_id AND template.id = ta.template_id").
-		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND rb.status = ? AND r.role_type <> ?", tenantID, applicationID, subjectType, subjectID, activeStatus, "COMPATIBILITY").
+		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND rb.status = ? AND r.role_type = ?", tenantID, applicationID, subjectType, subjectID, activeStatus, applicationRoleType).
 		Where("(rb.valid_from IS NULL OR rb.valid_from <= ?) AND (rb.valid_until IS NULL OR rb.valid_until > ?)", now, now).
 		Where(scopeClause, scopeArgs...)
 	if err := query.Order("r.code ASC, rb.scope_type ASC, rb.scope_id ASC").Find(&rows).Error; err != nil {
@@ -1147,7 +1162,7 @@ func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID,
 		Joins("LEFT JOIN iam_position AS p ON rb.subject_type = ? AND p.id = rb.subject_id AND p.tenant_id = rb.tenant_id", subjectTypePosition).
 		Joins("LEFT JOIN authz_position_grant_template_assignment AS ta ON ta.tenant_id = rb.tenant_id AND ta.id = rb.origin_id AND rb.grant_origin = ?", grantOriginTemplate).
 		Joins("LEFT JOIN authz_position_grant_template AS template ON template.tenant_id = ta.tenant_id AND template.id = ta.template_id").
-		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.status = ? AND r.role_type <> ?", tenantID, applicationID, activeStatus, "COMPATIBILITY").
+		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.status = ? AND r.role_type = ?", tenantID, applicationID, activeStatus, applicationRoleType).
 		Where(subjectClause, subjectArgs...).
 		Where("(rb.valid_from IS NULL OR rb.valid_from <= ?) AND (rb.valid_until IS NULL OR rb.valid_until > ?)", now, now).
 		Where(scopeClause, scopeArgs...)

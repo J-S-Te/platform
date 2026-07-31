@@ -98,15 +98,77 @@ func normalizedOrigin(raw string) string {
 }
 
 // RequireAllowedOriginForUnsafeMethodsOrBearer keeps the CSRF protection used by browser
-// sessions while allowing a validated OAuth bearer request to come from a backend service with no
-// browser Origin header. Authentication still happens in the following middleware.
+// sessions while allowing an OAuth bearer request to come from a backend service with no browser
+// Origin header. Only the Authorization header syntax is checked here; token authentication still
+// happens in the following middleware.
 func RequireAllowedOriginForUnsafeMethodsOrBearer(origins ...string) gin.HandlerFunc {
 	browserGuard := RequireAllowedOriginForUnsafeMethods(origins...)
 	return func(context *gin.Context) {
-		if isUnsafeMethod(context.Request.Method) && strings.TrimSpace(context.GetHeader("Authorization")) != "" {
+		if !isUnsafeMethod(context.Request.Method) {
+			context.Next()
+			return
+		}
+
+		// Cookie-backed requests must always pass the browser Origin check, even when an
+		// Authorization header is also present. Treat any Cookie header conservatively so a
+		// malformed or unrelated cookie cannot turn a browser request into a bearer request.
+		if strings.TrimSpace(context.GetHeader("Cookie")) != "" {
+			browserGuard(context)
+			return
+		}
+
+		// A supplied Origin remains authoritative. In particular, a syntactically valid bearer
+		// token must not override an explicitly cross-origin browser request.
+		if strings.TrimSpace(context.GetHeader("Origin")) != "" {
+			browserGuard(context)
+			return
+		}
+
+		// Sec-Fetch-Site is not an authentication signal, but an explicit cross-site value is
+		// strong evidence that this is a browser request rather than backend automation.
+		if strings.EqualFold(strings.TrimSpace(context.GetHeader("Sec-Fetch-Site")), "cross-site") {
+			browserGuard(context)
+			return
+		}
+
+		if hasStrictBearerAuthorization(context.GetHeader("Authorization")) {
 			context.Next()
 			return
 		}
 		browserGuard(context)
 	}
+}
+
+// hasStrictBearerAuthorization accepts the token68 form used by OAuth bearer credentials:
+// one or more alphanumeric or -._~+/ characters followed only by optional trailing '=' padding.
+// bearerToken also keeps this check aligned with the following authentication middleware's scheme,
+// field-count and maximum-length validation.
+func hasStrictBearerAuthorization(header string) bool {
+	token, ok := bearerToken(header)
+	if !ok {
+		return false
+	}
+
+	seenTokenCharacter := false
+	seenPadding := false
+	for _, character := range token {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			strings.ContainsRune("-._~+/", character):
+			if seenPadding {
+				return false
+			}
+			seenTokenCharacter = true
+		case character == '=':
+			if !seenTokenCharacter {
+				return false
+			}
+			seenPadding = true
+		default:
+			return false
+		}
+	}
+	return seenTokenCharacter
 }
