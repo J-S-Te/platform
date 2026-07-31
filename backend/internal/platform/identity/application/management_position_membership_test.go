@@ -14,12 +14,18 @@ type positionMembershipRepositoryStub struct {
 	createdPosition  domain.Position
 	positionOperator string
 	membershipCalls  int
+	deletedPosition  PositionDeleteInput
 }
 
 func (repository *positionMembershipRepositoryStub) CreatePosition(_ context.Context, position domain.Position, operatorID string) (domain.Position, error) {
 	repository.createdPosition = position
 	repository.positionOperator = operatorID
 	return position, nil
+}
+
+func (repository *positionMembershipRepositoryStub) DeletePosition(_ context.Context, input PositionDeleteInput) error {
+	repository.deletedPosition = input
+	return nil
 }
 
 func (repository *positionMembershipRepositoryStub) CreateMembership(_ context.Context, input MembershipCreateInput, membershipID string) (domain.Membership, error) {
@@ -106,5 +112,34 @@ func TestManagementServiceMembershipRequiresCompleteShortTermRange(t *testing.T)
 
 	if repository.membershipCalls != 2 {
 		t.Fatalf("CreateMembership calls = %d, want 2 valid writes", repository.membershipCalls)
+	}
+}
+
+func TestManagementServiceDeletePositionRequiresVersionAndDelegates(t *testing.T) {
+	t.Parallel()
+
+	repository := &positionMembershipRepositoryStub{}
+	service, err := NewManagementService(
+		repository,
+		userCreateMobileProtectionStub{},
+		&sequenceIDGenerator{},
+		fixedClock{now: time.Date(2026, time.July, 30, 9, 0, 0, 0, time.UTC)},
+	)
+	if err != nil {
+		t.Fatalf("construct management service: %v", err)
+	}
+
+	if err := service.DeletePosition(context.Background(), PositionDeleteInput{
+		TenantID: "tenant-1", OperatorID: "operator-1", PositionID: "position-1",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing version error = %v, want ErrValidation", err)
+	}
+
+	input := PositionDeleteInput{TenantID: "tenant-1", OperatorID: "operator-1", PositionID: "position-1", Version: 3}
+	if err := service.DeletePosition(context.Background(), input); err != nil {
+		t.Fatalf("delete position: %v", err)
+	}
+	if repository.deletedPosition != input {
+		t.Fatalf("delegated input = %#v, want %#v", repository.deletedPosition, input)
 	}
 }

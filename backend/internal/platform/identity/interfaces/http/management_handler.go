@@ -41,6 +41,7 @@ type managementApplicationService interface {
 	DeleteOrgUnit(context.Context, application.OrgUnitDeleteInput) error
 	ListPositions(context.Context, string, application.PageRequest) (application.PageResult[domain.Position], error)
 	CreatePosition(context.Context, application.PositionCreateInput) (domain.Position, error)
+	DeletePosition(context.Context, application.PositionDeleteInput) error
 	ListMemberships(context.Context, string, application.PageRequest) (application.PageResult[domain.Membership], error)
 	CreateMembership(context.Context, application.MembershipCreateInput) (domain.Membership, error)
 	UpdateMembership(context.Context, application.MembershipUpdateInput) (domain.Membership, error)
@@ -146,6 +147,10 @@ type positionCreateRequest struct {
 	OrgUnitID string  `json:"org_unit_id"`
 	Code      *string `json:"code,omitempty"`
 	Name      string  `json:"name"`
+}
+
+type positionDeleteRequest struct {
+	Version uint64 `json:"version"`
 }
 type membershipRequest struct {
 	UserID               string  `json:"user_id"`
@@ -602,6 +607,27 @@ func (handler *ManagementHandler) CreatePosition(writer http.ResponseWriter, req
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "岗位已创建", toPositionResponse(result))
+}
+
+func (handler *ManagementHandler) DeletePosition(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		handler.unauthenticated(writer, request)
+		return
+	}
+	var payload positionDeleteRequest
+	if !decodeManagementRequest(writer, request, &payload) {
+		handler.validation(writer, request)
+		return
+	}
+	if err := handler.service.DeletePosition(request.Context(), application.PositionDeleteInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
+		PositionID: request.PathValue("position_id"), Version: payload.Version,
+	}); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "岗位已删除，相关任职关系已停用", map[string]any{})
 }
 
 func (handler *ManagementHandler) ListMemberships(writer http.ResponseWriter, request *http.Request) {

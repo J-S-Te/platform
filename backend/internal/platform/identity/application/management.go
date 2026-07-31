@@ -161,6 +161,16 @@ type PositionCreateInput struct {
 	Name       string
 }
 
+// PositionDeleteInput logically deletes a position using optimistic locking. Historical
+// memberships remain queryable but are disabled so the deleted position can no longer confer
+// inherited authorization.
+type PositionDeleteInput struct {
+	TenantID   string
+	OperatorID string
+	PositionID string
+	Version    uint64
+}
+
 // MembershipCreateInput contains a user's appointment. PositionID is mandatory at persistence
 // level even though it was accidentally optional in the original OpenAPI property list.
 type MembershipCreateInput struct {
@@ -211,6 +221,7 @@ type ManagementRepository interface {
 	DeleteOrgUnit(context.Context, OrgUnitDeleteInput) error
 	ListPositions(context.Context, string, string, string, PageRequest) (PageResult[domain.Position], error)
 	CreatePosition(context.Context, domain.Position, string) (domain.Position, error)
+	DeletePosition(context.Context, PositionDeleteInput) error
 
 	ListMemberships(context.Context, string, PageRequest) (PageResult[domain.Membership], error)
 	CreateMembership(context.Context, MembershipCreateInput, string) (domain.Membership, error)
@@ -468,6 +479,16 @@ func (service *ManagementService) CreatePosition(ctx context.Context, input Posi
 // generatedPositionCode creates a stable position code from its ULID primary key.
 func generatedPositionCode(id string) string {
 	return "POS-" + strings.ToUpper(strings.TrimSpace(id))
+}
+
+// DeletePosition preserves the position and appointment history while disabling the position and
+// all active memberships that reference it. New inherited authorization snapshots are invalidated
+// by the repository in the same transaction.
+func (service *ManagementService) DeletePosition(ctx context.Context, input PositionDeleteInput) error {
+	if input.TenantID == "" || input.OperatorID == "" || input.PositionID == "" || input.Version == 0 {
+		return ErrValidation
+	}
+	return service.repository.DeletePosition(ctx, input)
 }
 
 // ListMemberships returns historical and active tenant-scoped appointments.

@@ -23,6 +23,9 @@ const (
 	subjectPosition     = "POSITION"
 	scopeTenant         = "TENANT"
 	scopeEnvironment    = "ENVIRONMENT"
+	roleTypeApplication = "APPLICATION"
+	roleTypePlatform    = "PLATFORM"
+	catalogStatusSynced = "SYNCED"
 )
 
 var (
@@ -147,9 +150,12 @@ type Preview struct {
 }
 
 type AuthorizationTargetRoleView struct {
-	RoleID   string `json:"role_id"`
-	RoleCode string `json:"role_code"`
-	RoleName string `json:"role_name"`
+	RoleID     string `json:"role_id"`
+	RoleCode   string `json:"role_code"`
+	RoleName   string `json:"role_name"`
+	RoleType   string `json:"role_type"`
+	RoleStatus string `json:"status"`
+	Assignable bool   `json:"assignable"`
 }
 
 // AuthorizationPositionView contains exactly the active position fields needed to assign a
@@ -170,19 +176,25 @@ type authorizationPositionRow struct {
 // position authorization template. It must not expose application management configuration or a
 // full application authorization catalog to a role-binding operator.
 type AuthorizationTargetView struct {
-	ApplicationID   string                        `json:"application_id"`
-	ApplicationCode string                        `json:"application_code"`
-	ApplicationName string                        `json:"application_name"`
-	Roles           []AuthorizationTargetRoleView `json:"roles"`
+	ApplicationID    string                        `json:"application_id"`
+	ApplicationCode  string                        `json:"application_code"`
+	ApplicationName  string                        `json:"application_name"`
+	CatalogVersion   string                        `json:"catalog_version,omitempty"`
+	CatalogSyncState string                        `json:"catalog_sync_status"`
+	Roles            []AuthorizationTargetRoleView `json:"roles"`
 }
 
 type authorizationTargetRow struct {
-	ApplicationID   string `gorm:"column:application_id"`
-	ApplicationCode string `gorm:"column:application_code"`
-	ApplicationName string `gorm:"column:application_name"`
-	RoleID          string `gorm:"column:role_id"`
-	RoleCode        string `gorm:"column:role_code"`
-	RoleName        string `gorm:"column:role_name"`
+	ApplicationID    string `gorm:"column:application_id"`
+	ApplicationCode  string `gorm:"column:application_code"`
+	ApplicationName  string `gorm:"column:application_name"`
+	CatalogVersion   string `gorm:"column:catalog_version"`
+	CatalogSyncState string `gorm:"column:catalog_sync_status"`
+	RoleID           string `gorm:"column:role_id"`
+	RoleCode         string `gorm:"column:role_code"`
+	RoleName         string `gorm:"column:role_name"`
+	RoleType         string `gorm:"column:role_type"`
+	RoleStatus       string `gorm:"column:role_status"`
 }
 
 type templateModel struct {
@@ -222,31 +234,35 @@ type roleProjection struct {
 	RoleCode        string `gorm:"column:role_code"`
 	RoleName        string `gorm:"column:role_name"`
 }
-type assignmentProjection struct {
-	assignmentModel
-	PositionName string `gorm:"column:position_name"`
-}
 type bindingProjection struct {
 	ID, ApplicationID, RoleID, ScopeType, ScopeID, Status, OriginItemID string
 	ValidFrom, ValidUntil                                               *time.Time
 	Version                                                             uint64
 }
 
-// ListAuthorizationTargets returns only active applications with active, non-compatibility
-// roles. It shares the role-binding permission boundary used by position templates and avoids
-// requiring broad application-management or authorization-catalog read access.
+// ListAuthorizationTargets returns only roles that can be selected by a position template.
+// Platform-native roles are authoritative in the platform database and therefore do not require
+// an application-owned catalog. Subsystem roles are exposed only after their catalog is SYNCED.
+// Keeping the catalog state in this task-specific response also avoids requiring the broader
+// platform:application:read permission merely to build a position template.
 func (s *Service) ListAuthorizationTargets(ctx context.Context, tenantID string) ([]AuthorizationTargetView, error) {
 	var rows []authorizationTargetRow
 	err := s.db.WithContext(ctx).
 		Table("platform_application AS application").
-		Select("application.id AS application_id, application.code AS application_code, application.name AS application_name, role.id AS role_id, role.code AS role_code, role.name AS role_name").
-		Joins("JOIN authz_role AS role ON role.tenant_id=application.tenant_id AND role.application_id=application.id AND role.status=? AND role.role_type=?", activeStatus, "APPLICATION").
+		Select("application.id AS application_id, application.code AS application_code, application.name AS application_name, COALESCE(catalog.catalog_version, '') AS catalog_version, COALESCE(catalog.sync_status, '') AS catalog_sync_status, role.id AS role_id, role.code AS role_code, role.name AS role_name, role.role_type AS role_type, role.status AS role_status").
+		Joins("JOIN authz_role AS role ON role.tenant_id=application.tenant_id AND role.application_id=application.id AND role.status=?", activeStatus).
+		Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id=application.tenant_id AND catalog.application_id=application.id").
 		Where("application.tenant_id=? AND application.status=?", tenantID, activeStatus).
+		Where("role.role_type=? OR (role.role_type=? AND catalog.sync_status=?)", roleTypePlatform, roleTypeApplication, catalogStatusSynced).
 		Order("application.code ASC, role.code ASC").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("list position authorization targets: %w", err)
 	}
+	return authorizationTargetViews(rows), nil
+}
+
+func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTargetView {
 	targets := make([]AuthorizationTargetView, 0)
 	indexes := make(map[string]int)
 	for _, row := range rows {
@@ -254,14 +270,25 @@ func (s *Service) ListAuthorizationTargets(ctx context.Context, tenantID string)
 		if !ok {
 			index = len(targets)
 			indexes[row.ApplicationID] = index
+			catalogVersion, catalogSyncState := row.CatalogVersion, row.CatalogSyncState
+			if row.RoleType == roleTypePlatform {
+				catalogVersion, catalogSyncState = "built-in", catalogStatusSynced
+			}
 			targets = append(targets, AuthorizationTargetView{
 				ApplicationID: row.ApplicationID, ApplicationCode: row.ApplicationCode, ApplicationName: row.ApplicationName,
+				CatalogVersion: catalogVersion, CatalogSyncState: catalogSyncState,
 				Roles: make([]AuthorizationTargetRoleView, 0),
 			})
 		}
-		targets[index].Roles = append(targets[index].Roles, AuthorizationTargetRoleView{RoleID: row.RoleID, RoleCode: row.RoleCode, RoleName: row.RoleName})
+		if row.RoleType == roleTypePlatform {
+			targets[index].CatalogVersion, targets[index].CatalogSyncState = "built-in", catalogStatusSynced
+		}
+		targets[index].Roles = append(targets[index].Roles, AuthorizationTargetRoleView{
+			RoleID: row.RoleID, RoleCode: row.RoleCode, RoleName: row.RoleName,
+			RoleType: row.RoleType, RoleStatus: row.RoleStatus, Assignable: true,
+		})
 	}
-	return targets, nil
+	return targets
 }
 
 // ListAuthorizationPositions returns active positions for the same role-binding
@@ -420,8 +447,16 @@ func (s *Service) ListPositionAssignments(ctx context.Context, tenantID, positio
 	if err := s.ensurePosition(ctx, tenantID, positionID); err != nil {
 		return nil, err
 	}
-	var rows []assignmentProjection
-	err := s.db.WithContext(ctx).Table("authz_position_grant_template_assignment AS a").Select("a.*, p.name AS position_name").Joins("JOIN iam_position AS p ON p.id=a.position_id AND p.tenant_id=a.tenant_id").Where("a.tenant_id=? AND a.position_id=?", tenantID, positionID).Order("a.created_at DESC,a.id DESC").Find(&rows).Error
+	// The position has already been validated above, and AssignmentView does not expose the
+	// position name. Query the assignment model directly instead of scanning an aliased `a.*`
+	// projection into an embedded model. GORM does not reliably populate that embedded model
+	// for aliased wildcard selects, which previously left TemplateID empty and made a successful
+	// save return PLATFORM_NOT_FOUND while loading the response.
+	var rows []assignmentModel
+	err := s.db.WithContext(ctx).
+		Where("tenant_id=? AND position_id=?", tenantID, positionID).
+		Order("created_at DESC,id DESC").
+		Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("list position template assignments: %w", err)
 	}
@@ -532,7 +567,7 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 		ItemFrom        *time.Time `gorm:"column:item_from"`
 		ItemUntil       *time.Time `gorm:"column:item_until"`
 	}
-	err := s.db.WithContext(ctx).Table("authz_position_grant_template_assignment AS assignment").Select("assignment.template_id, template.name AS template_name, item.application_id, application.code AS application_code, application.name AS application_name, item.role_id, role.code AS role_code, role.name AS role_name, assignment.valid_from AS assignment_from, assignment.valid_until AS assignment_until, item.valid_from AS item_from, item.valid_until AS item_until").Joins("JOIN authz_position_grant_template AS template ON template.id=assignment.template_id AND template.tenant_id=assignment.tenant_id AND template.status=?", activeStatus).Joins("JOIN authz_position_grant_template_role AS item ON item.template_id=template.id AND item.tenant_id=template.tenant_id AND item.status=?", activeStatus).Joins("JOIN platform_application AS application ON application.id=item.application_id AND application.tenant_id=item.tenant_id AND application.status=?", activeStatus).Joins("JOIN authz_role AS role ON role.id=item.role_id AND role.application_id=item.application_id AND role.tenant_id=item.tenant_id AND role.status=? AND role.role_type=?", activeStatus, "APPLICATION").Where("assignment.tenant_id=? AND assignment.position_id=? AND assignment.status=?", tenantID, input.PositionID, activeStatus).Find(&rows).Error
+	err := s.db.WithContext(ctx).Table("authz_position_grant_template_assignment AS assignment").Select("assignment.template_id, template.name AS template_name, item.application_id, application.code AS application_code, application.name AS application_name, item.role_id, role.code AS role_code, role.name AS role_name, assignment.valid_from AS assignment_from, assignment.valid_until AS assignment_until, item.valid_from AS item_from, item.valid_until AS item_until").Joins("JOIN authz_position_grant_template AS template ON template.id=assignment.template_id AND template.tenant_id=assignment.tenant_id AND template.status=?", activeStatus).Joins("JOIN authz_position_grant_template_role AS item ON item.template_id=template.id AND item.tenant_id=template.tenant_id AND item.status=?", activeStatus).Joins("JOIN platform_application AS application ON application.id=item.application_id AND application.tenant_id=item.tenant_id AND application.status=?", activeStatus).Joins("JOIN authz_role AS role ON role.id=item.role_id AND role.application_id=item.application_id AND role.tenant_id=item.tenant_id AND role.status=? AND role.role_type IN ?", activeStatus, []string{roleTypeApplication, roleTypePlatform}).Where("assignment.tenant_id=? AND assignment.position_id=? AND assignment.status=?", tenantID, input.PositionID, activeStatus).Find(&rows).Error
 	if err != nil {
 		return Preview{}, fmt.Errorf("preview position authorization: %w", err)
 	}
@@ -706,12 +741,17 @@ func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID strin
 	}
 	for _, item := range items {
 		var count int64
-		query := tx.WithContext(ctx).Table("authz_role AS role").Joins("JOIN platform_application AS application ON application.id=role.application_id AND application.tenant_id=role.tenant_id AND application.status=?", activeStatus).Where("role.tenant_id=? AND role.id=? AND role.application_id=? AND role.status=? AND role.role_type=?", tenantID, item.RoleID, item.ApplicationID, activeStatus, "APPLICATION")
+		query := tx.WithContext(ctx).
+			Table("authz_role AS role").
+			Joins("JOIN platform_application AS application ON application.id=role.application_id AND application.tenant_id=role.tenant_id AND application.status=?", activeStatus).
+			Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id=role.tenant_id AND catalog.application_id=role.application_id").
+			Where("role.tenant_id=? AND role.id=? AND role.application_id=? AND role.status=?", tenantID, item.RoleID, item.ApplicationID, activeStatus).
+			Where("role.role_type=? OR (role.role_type=? AND catalog.sync_status=?)", roleTypePlatform, roleTypeApplication, catalogStatusSynced)
 		if err := query.Count(&count).Error; err != nil {
 			return fmt.Errorf("validate template role: %w", err)
 		}
 		if count != 1 {
-			return validation("application role must exist, be active, synchronized and belong to the selected application")
+			return validation("application role must exist, be active, assignable and belong to the selected application; subsystem catalogs must be synchronized")
 		}
 		if item.ScopeType == scopeEnvironment {
 			var envCount int64

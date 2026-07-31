@@ -641,6 +641,72 @@ func (repository *GORMRepository) CreatePosition(ctx context.Context, position d
 	return position, nil
 }
 
+// DeletePosition logically deletes one position and disables every active membership that points
+// to it. The transaction also clears affected users' primary organization shortcut and advances
+// inherited-authorization revisions so refreshed subsystem claims stop carrying the position role.
+func (repository *GORMRepository) DeletePosition(ctx context.Context, input application.PositionDeleteInput) error {
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var existing positionModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", input.TenantID, input.PositionID).
+			First(&existing)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock position for deletion: %w", result.Error)
+		}
+		if existing.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		if existing.Status != domain.StatusActive {
+			return application.ErrConflict
+		}
+
+		now := time.Now().UTC()
+		primaryUserIDs := transaction.Model(&membershipModel{}).Select("user_id").
+			Where("tenant_id = ? AND position_id = ? AND status = ? AND is_primary = ?", input.TenantID, input.PositionID, domain.StatusActive, true)
+		if result = transaction.Model(&userModel{}).
+			Where("tenant_id = ? AND id IN (?)", input.TenantID, primaryUserIDs).
+			Updates(map[string]any{
+				"primary_org_id": nil,
+				"updated_at":     now,
+				"updated_by":     input.OperatorID,
+				"version":        gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "clear deleted position primary organizations")
+		}
+		if result = transaction.Model(&membershipModel{}).
+			Where("tenant_id = ? AND position_id = ? AND status <> ?", input.TenantID, input.PositionID, domain.StatusDisabled).
+			Updates(map[string]any{
+				"status":     domain.StatusDisabled,
+				"is_primary": false,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "disable deleted position memberships")
+		}
+		if result = transaction.Model(&positionModel{}).
+			Where("tenant_id = ? AND id = ? AND version = ? AND status = ?", input.TenantID, input.PositionID, input.Version, domain.StatusActive).
+			Updates(map[string]any{
+				"status":     domain.StatusDisabled,
+				"updated_at": now,
+				"updated_by": input.OperatorID,
+				"version":    gorm.Expr("version + 1"),
+			}); result.Error != nil {
+			return mapWriteError(result.Error, "disable position")
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrVersionConflict
+		}
+		if err := advanceMembershipAuthorizationRevisions(transaction, input.TenantID, now, "岗位删除导致岗位继承授权变化"); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 func (repository *GORMRepository) ListMemberships(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Membership], error) {
 	database := applyMembershipFilter(repository.membershipQuery(ctx), tenantID, query)
 	var total int64

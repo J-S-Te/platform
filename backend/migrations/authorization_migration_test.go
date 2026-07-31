@@ -89,3 +89,22 @@ func TestAuthorizationCatalogClaimsRoleConfigHashMigrationIsAdditive(t *testing.
 		}
 	}
 }
+
+func TestPositionDeletePermissionMigrationIsAdditiveAndHighRisk(t *testing.T) {
+	migrationSQL, err := migrations.Files.ReadFile("000064_add_position_delete_permission.sql")
+	if err != nil {
+		t.Fatalf("read position delete permission migration: %v", err)
+	}
+	for _, fragment := range []string{
+		"platform:position:delete",
+		"'delete'",
+		"'HIGH'",
+		"platform-super-admin",
+		"platform-security-admin",
+		"GREATEST(revision, 15)",
+	} {
+		if !strings.Contains(string(migrationSQL), fragment) {
+			t.Fatalf("position delete permission migration is missing %q", fragment)
+		}
+	}
+}

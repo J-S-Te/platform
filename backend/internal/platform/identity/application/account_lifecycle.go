@@ -17,7 +17,7 @@ import (
 const (
 	accountNameMinLength = 3
 	accountNameMaxLength = 64
-	passwordMinRunes     = 12
+	passwordMinRunes     = 8
 	passwordMaxRunes     = 128
 	generatedPasswordLen = 24
 )
@@ -329,7 +329,7 @@ func validAccountName(value string) bool {
 	return len(value) >= accountNameMinLength && len(value) <= accountNameMaxLength && accountNamePattern.MatchString(value)
 }
 
-// validateStrongPassword enforces the shared account-password policy: 12–128 runes, no Unicode
+// validateStrongPassword enforces the shared account-password policy: 8–128 runes, no Unicode
 // whitespace, and at least one uppercase letter, lowercase letter, digit and symbol.
 func validateStrongPassword(password string) error {
 	length := len([]rune(password))

@@ -3,7 +3,7 @@
 # 反向代理 location 配置，并 reload nginx。配合 applicationregistry 的
 # Environment.UpstreamURL / Environment.PathPrefix 字段使用。
 #
-# 注意：这是底层网关维护工具。完整子系统接入请使用 scripts/subsystem-onboarding.sh，
+# 注意：这是底层网关维护工具。完整子系统接入请使用 scripts/subsystem.sh onboard，
 # 不要仅执行 add/reload，否则不会创建 Application、Environment、LoginTarget 和 OAuth Client。
 #
 # 设计：所有用户访问都从门户统一入口进入，门户的 frontend nginx 把
@@ -47,7 +47,7 @@ usage() {
   portal-gateway.sh <command> [args]
 
 完整接入：
-  bash scripts/subsystem-onboarding.sh --help
+  bash scripts/subsystem.sh onboard --help
   本脚本仅维护网关，不创建应用、环境、登录目标或 OAuth 客户端。
 
 命令：
