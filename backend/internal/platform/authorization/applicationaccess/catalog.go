@@ -521,3 +521,126 @@ func (s *Service) catalogView(ctx context.Context, app applicationRow, metadata 
 	}
 	return CatalogView{ApplicationID: app.ID, ApplicationCode: app.Code, CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash, ClaimsRoleConfigHash: metadata.ClaimsRoleConfigHash, SourceType: metadata.SourceType, SourceIdentifier: metadata.SourceIdentifier, SyncStatus: metadata.SyncStatus, LastSyncedAt: metadata.LastSyncedAt, LastSyncedBy: metadata.LastSyncedBy, ErrorMessage: metadata.ErrorMessage, Policy: policy, Permissions: permissionViews, Roles: roleViews}, nil
 }
+
+// EnsurePlatformCatalogSynced mirrors the migration-seeded built-in platform roles and
+// permissions into the application-owned catalog row when the platform's own subsystem has not
+// published a catalog. The platform has no catalog-publisher OAuth client for itself, so this
+// bootstrap is the only path that surfaces the built-in data through the application-owned
+// catalog mirror. The function is idempotent: a SYNCED row whose catalog_hash matches the
+// current built-in data only refreshes last_synced_at/last_synced_by/updated_at/updated_by so
+// the catalog row tracks whoever (or whatever) most recently re-acknowledged the built-in data.
+//
+// The function deliberately avoids SyncCatalog: SyncCatalog is designed for subsystem-published
+// manifests and would overwrite the platform's role_type=PLATFORM / built_in=1 metadata with
+// role_type=APPLICATION / built_in=0. Mirroring only the catalog row preserves the platform's
+// built-in distinctions.
+func (s *Service) EnsurePlatformCatalogSynced(ctx context.Context, tenantID, operatorID string) (CatalogView, error) {
+	app, err := s.findApplicationByCode(ctx, tenantID, PlatformApplicationCode)
+	if err != nil {
+		return CatalogView{}, err
+	}
+	hash, err := s.computePlatformCatalogHash(ctx, app.TenantID, app.ID)
+	if err != nil {
+		return CatalogView{}, err
+	}
+	var existing catalogMetadataRow
+	lookupErr := s.db.WithContext(ctx).Table("authz_authorization_catalog").
+		Where("tenant_id = ? AND application_id = ?", tenantID, app.ID).
+		Take(&existing).Error
+	if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		return CatalogView{}, fmt.Errorf("load existing platform catalog: %w", lookupErr)
+	}
+	now := s.clock.Now().UTC()
+	updates := map[string]any{
+		"tenant_id":               tenantID,
+		"application_id":          app.ID,
+		"catalog_version":         PlatformCatalogVersion,
+		"catalog_hash":            hash,
+		"claims_role_config_hash": "",
+		"source_type":             PlatformCatalogSourceType,
+		"source_identifier":       PlatformCatalogSourceIdentifier,
+		"sync_status":             "SYNCED",
+		"last_synced_at":          now,
+		"last_synced_by":          operatorID,
+		"error_message":           nil,
+		"updated_at":              now,
+		"updated_by":              operatorID,
+	}
+	contentChanged := errors.Is(lookupErr, gorm.ErrRecordNotFound) ||
+		existing.SyncStatus != "SYNCED" ||
+		!strings.EqualFold(existing.CatalogHash, hash)
+	if !contentChanged && existing.LastSyncedBy == operatorID {
+		// Truly idempotent: the row already reflects the current built-in data and the same
+		// operator. Returning the live view is cheap and keeps callers consistent.
+		return s.GetCatalog(ctx, tenantID, app.ID)
+	}
+	var writeErr error
+	if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		updates["created_at"] = now
+		updates["created_by"] = operatorID
+		writeErr = s.db.WithContext(ctx).Table("authz_authorization_catalog").
+			Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}}, DoUpdates: clause.AssignmentColumns([]string{"catalog_version", "catalog_hash", "claims_role_config_hash", "source_type", "source_identifier", "sync_status", "last_synced_at", "last_synced_by", "error_message", "updated_at", "updated_by"})}).
+			Create(updates).Error
+	} else {
+		writeErr = s.db.WithContext(ctx).Table("authz_authorization_catalog").
+			Where("tenant_id = ? AND application_id = ?", tenantID, app.ID).
+			Updates(updates).Error
+	}
+	if writeErr != nil {
+		return CatalogView{}, fmt.Errorf("persist platform catalog metadata: %w", writeErr)
+	}
+	s.recordAudit(ctx, AuditEvent{
+		TenantID: tenantID, ApplicationID: app.ID, ApplicationCode: app.Code, OperatorID: operatorID,
+		Action: "authorization.application_catalog.synced", ResourceType: "authorization_catalog", ResourceID: app.ID,
+		Result: "SUCCESS", RiskLevel: "HIGH", Summary: "基础能力平台授权目录已同步（内置）", OccurredAt: now,
+		Metadata: map[string]any{
+			"catalog_version":   PlatformCatalogVersion,
+			"checksum":          hash,
+			"source_type":       PlatformCatalogSourceType,
+			"source_identifier": PlatformCatalogSourceIdentifier,
+			"bootstrap":         true,
+			"content_changed":   contentChanged,
+		},
+	})
+	return s.GetCatalog(ctx, tenantID, app.ID)
+}
+
+// computePlatformCatalogHash returns a stable sha256 digest of the platform's currently
+// active role and permission codes. Re-syncing is skipped while the hash is unchanged, so an
+// idempotent API restart does not churn the catalog row or the audit log.
+func (s *Service) computePlatformCatalogHash(ctx context.Context, tenantID, appID string) (string, error) {
+	var roleCodes []string
+	if err := s.db.WithContext(ctx).Table("authz_role").
+		Where("tenant_id = ? AND application_id = ? AND status = ?", tenantID, appID, activeStatus).
+		Order("code ASC").Pluck("code", &roleCodes).Error; err != nil {
+		return "", fmt.Errorf("load platform role codes: %w", err)
+	}
+	var permissionCodes []string
+	if err := s.db.WithContext(ctx).Table("authz_permission").
+		Where("tenant_id = ? AND application_id = ? AND status = ?", tenantID, appID, activeStatus).
+		Order("code ASC").Pluck("code", &permissionCodes).Error; err != nil {
+		return "", fmt.Errorf("load platform permission codes: %w", err)
+	}
+	canonical := struct {
+		Roles       []string `json:"roles"`
+		Permissions []string `json:"permissions"`
+	}{roleCodes, permissionCodes}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("marshal platform catalog payload: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func (s *Service) findApplicationByCode(ctx context.Context, tenantID, code string) (applicationRow, error) {
+	var row applicationRow
+	err := s.db.WithContext(ctx).Where("tenant_id = ? AND code = ? AND status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(code), activeStatus).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return applicationRow{}, ErrNotFound
+	}
+	if err != nil {
+		return applicationRow{}, fmt.Errorf("load application by code: %w", err)
+	}
+	return row, nil
+}

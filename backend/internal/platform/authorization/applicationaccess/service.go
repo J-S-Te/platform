@@ -39,6 +39,35 @@ const (
 	sourceKindManual    = "MANUAL"
 	sourceKindInherited = "INHERITED"
 	sourceKindSystem    = "SYSTEM"
+
+	// PlatformApplicationCode is the migration-seeded built-in application that owns the
+	// platform's own roles and permissions. The catalog mirror is normally published by a
+	// subsystem's catalog-publisher OAuth client; the platform does not have such a client for
+	// itself, so the API bootstrap mirrors the migration-seeded role/permission data into the
+	// application-owned catalog row instead.
+	PlatformApplicationCode = "platform"
+	// PlatformCatalogVersion is the stable catalog_version assigned to the bootstrap mirror.
+	// Drift detection relies on the catalog_hash; the version is intentionally fixed so the
+	// platform can re-acknowledge its built-in data without the UI inferring "new version" on
+	// every API restart.
+	PlatformCatalogVersion = "v1-platform-builtin"
+	// PlatformCatalogSourceType is the source_type used when the API mirror publishes the
+	// built-in data. Subsystem catalogs use "APPLICATION"; the platform mirror is its own thing
+	// and is not an externally published manifest.
+	PlatformCatalogSourceType = "BUILTIN"
+	// PlatformCatalogSourceIdentifier is the source_identifier paired with
+	// PlatformCatalogSourceType. It is purely descriptive for the audit history.
+	PlatformCatalogSourceIdentifier = "platform:bootstrap"
+	// BootstrapSuperAdminRoleCode is the built-in role assigned only by the controlled first
+	// super administrator flow. It mirrors identityapplication.BootstrapSuperAdminRoleCode so
+	// the platform catalog bootstrap can locate the first admin without importing the
+	// identity application package (which would create an import cycle).
+	BootstrapSuperAdminRoleCode = "platform-super-admin"
+	// PlatformCatalogBootstrapOperatorID is a 26-char Crockford Base32 placeholder used as the
+	// last_synced_by for the platform catalog when no first super administrator has been
+	// created yet. The "PLATFSY" suffix makes the placeholder easy to spot in audit history
+	// and impossible to confuse with a real ULID-encoded user id.
+	PlatformCatalogBootstrapOperatorID = "01J0000000000000PLATFSY000"
 )
 
 var (
@@ -612,7 +641,11 @@ func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, application
 	resolved := make([]resolvedBinding, 0, len(roles))
 	for _, role := range roles {
 		var roleRecord roleRow
-		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type = ?", tenantID, applicationID, activeStatus, role.RoleCode, "APPLICATION").Take(&roleRecord).Error; err != nil {
+		// The catalog mirror surfaces both APPLICATION roles (synced from a subsystem) and
+		// PLATFORM roles (built-in to the platform itself). Both must be assignable through
+		// the user authorization endpoint; COMPATIBILITY roles are reserved for legacy
+		// compatibility grants and stay hidden from this validation.
+		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type <> ?", tenantID, applicationID, activeStatus, role.RoleCode, "COMPATIBILITY").Take(&roleRecord).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, validation("one or more application roles do not exist or are disabled")
 			}
@@ -662,7 +695,7 @@ func validateMaximumRoleCount(maximum int, roleIDs []string) error {
 func (s *Service) replaceSubjectRoleBindings(tx *gorm.DB, tenantID, applicationID, subjectType, subjectID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
 	var existing []bindingRow
 	directClause, directArgs := manualSubjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID)
-	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", "APPLICATION").Find(&existing).Error; err != nil {
+	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type <> ?", "COMPATIBILITY").Find(&existing).Error; err != nil {
 		return false, fmt.Errorf("load existing application role bindings: %w", err)
 	}
 	key := func(roleID, scopeType, scopeID string) string { return roleID + "\x00" + scopeType + "\x00" + scopeID }
