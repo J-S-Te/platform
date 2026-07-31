@@ -155,6 +155,7 @@ func NewRouter(
 			apiRouter.DELETE("/org-units/:org_unit_id", middleware.RequirePermission("platform:organization:delete"), adaptHandler(managementHandler.DeleteOrgUnit))
 			apiRouter.GET("/positions", middleware.RequirePermission("platform:position:read"), adaptHandler(managementHandler.ListPositions))
 			apiRouter.POST("/positions", middleware.RequirePermission("platform:position:create"), adaptHandler(managementHandler.CreatePosition))
+			apiRouter.DELETE("/positions/:position_id", middleware.RequirePermission("platform:position:delete"), adaptHandler(managementHandler.DeletePosition))
 			apiRouter.GET("/memberships", middleware.RequirePermission("platform:membership:read"), adaptHandler(managementHandler.ListMemberships))
 			apiRouter.POST("/memberships", middleware.RequirePermission("platform:membership:create"), adaptHandler(managementHandler.CreateMembership))
 			apiRouter.PATCH("/memberships/:membership_id", middleware.RequirePermission("platform:membership:update"), adaptHandler(managementHandler.UpdateMembership))
@@ -180,6 +181,34 @@ func NewRouter(
 				middleware.RequirePermission("platform:application-login-target:create"),
 				middleware.RequirePermission("platform:oauth-client:create"),
 				adaptHandler(operational.SubsystemOnboarding.OnboardSubsystem),
+			)
+			// Reapply a previously-onboarded subsystem: rewrite .env.local, rebuild containers,
+			// refresh the portal gateway include. Caller is expected to have already updated
+			// /environments and /oauth-clients via PATCH if BaseURL/UpstreamURL/PathPrefix changed.
+			// Use oauth-client:disable (not :update) because the platform's permission catalog
+			// only has granular update permissions (scope/redirect-uri/jwk), no generic :update.
+			// Re-provisioning effectively re-issues the running OAuth client binding, so :disable
+			// is the closest existing permission.
+			apiRouter.POST("/subsystem-update",
+				middleware.RequirePermission("platform:application:update"),
+				middleware.RequirePermission("platform:application-environment:update"),
+				middleware.RequirePermission("platform:application-login-target:update"),
+				middleware.RequirePermission("platform:oauth-client:disable"),
+				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
+			)
+			// Tear down an onboarded subsystem: stop containers, remove .env.local, remove
+			// the portal gateway include, reload nginx. The HTTP layer does NOT delete the DB
+			// rows here; the script is expected to follow up with DELETE /environments and
+			// (optionally) DELETE /applications so the audit trail is preserved per step.
+			// Use lifecycle-update permissions, not :delete, because this endpoint mutates
+			// infrastructure state (containers/files/gateway), not DB rows. The DB delete is
+			// gated by the regular DELETE /environments endpoint's own :delete permission.
+			apiRouter.POST("/subsystem-teardown",
+				middleware.RequirePermission("platform:application:update"),
+				middleware.RequirePermission("platform:application-environment:update"),
+				middleware.RequirePermission("platform:application-login-target:update"),
+				middleware.RequirePermission("platform:oauth-client:disable"),
+				adaptHandler(operational.SubsystemOnboarding.TeardownSubsystem),
 			)
 		}
 

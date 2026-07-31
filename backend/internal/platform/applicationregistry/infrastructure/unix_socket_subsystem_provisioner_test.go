@@ -54,6 +54,22 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 		t.Fatalf("provision input = %#v, want %#v", received, input)
 	}
 
+	if err := client.Update(context.Background(), application.SubsystemProvisioningInput{
+		ApplicationCode: "contract_management", Environment: "dev",
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := executor.updateInputSnapshot(); got.ApplicationCode != "contract_management" || got.Environment != "dev" {
+		t.Fatalf("update input = %#v", got)
+	}
+
+	if err := client.Teardown(context.Background(), "contract_management", "dev"); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if gotCode, gotEnv := executor.teardownSnapshot(); gotCode != "contract_management" || gotEnv != "dev" {
+		t.Fatalf("teardown (%q, %q)", gotCode, gotEnv)
+	}
+
 	cancelServer()
 	select {
 	case err := <-serverDone:
@@ -89,9 +105,12 @@ func waitForProvisioningSocket(t *testing.T, socketPath string) {
 }
 
 type recordingSubsystemProvisioner struct {
-	mutex sync.Mutex
-	code  string
-	input application.SubsystemProvisioningInput
+	mutex         sync.Mutex
+	code          string
+	input         application.SubsystemProvisioningInput
+	teardownCode  string
+	teardownEnv   string
+	updateInput   application.SubsystemProvisioningInput
 }
 
 func (provisioner *recordingSubsystemProvisioner) Preflight(_ context.Context, code string) error {
@@ -108,8 +127,35 @@ func (provisioner *recordingSubsystemProvisioner) Provision(_ context.Context, i
 	return nil
 }
 
+func (provisioner *recordingSubsystemProvisioner) Update(_ context.Context, input application.SubsystemProvisioningInput) error {
+	provisioner.mutex.Lock()
+	defer provisioner.mutex.Unlock()
+	provisioner.updateInput = input
+	return nil
+}
+
+func (provisioner *recordingSubsystemProvisioner) Teardown(_ context.Context, code, environment string) error {
+	provisioner.mutex.Lock()
+	defer provisioner.mutex.Unlock()
+	provisioner.teardownCode = code
+	provisioner.teardownEnv = environment
+	return nil
+}
+
 func (provisioner *recordingSubsystemProvisioner) snapshot() (string, application.SubsystemProvisioningInput) {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	return provisioner.code, provisioner.input
+}
+
+func (provisioner *recordingSubsystemProvisioner) updateInputSnapshot() application.SubsystemProvisioningInput {
+	provisioner.mutex.Lock()
+	defer provisioner.mutex.Unlock()
+	return provisioner.updateInput
+}
+
+func (provisioner *recordingSubsystemProvisioner) teardownSnapshot() (string, string) {
+	provisioner.mutex.Lock()
+	defer provisioner.mutex.Unlock()
+	return provisioner.teardownCode, provisioner.teardownEnv
 }

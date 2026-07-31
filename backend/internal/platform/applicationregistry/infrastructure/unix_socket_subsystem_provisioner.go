@@ -18,10 +18,11 @@ import (
 const subsystemProvisioningProtocolVersion = 1
 
 type subsystemProvisioningRequest struct {
-	Version int                                     `json:"version"`
-	Action  string                                  `json:"action"`
-	Code    string                                  `json:"code,omitempty"`
-	Input   *application.SubsystemProvisioningInput `json:"input,omitempty"`
+	Version     int                                     `json:"version"`
+	Action      string                                  `json:"action"`
+	Code        string                                  `json:"code,omitempty"`
+	Environment string                                  `json:"environment,omitempty"`
+	Input       *application.SubsystemProvisioningInput `json:"input,omitempty"`
 }
 
 type subsystemProvisioningReply struct {
@@ -68,6 +69,29 @@ func (provisioner *UnixSocketSubsystemProvisioner) Provision(ctx context.Context
 		Version: subsystemProvisioningProtocolVersion,
 		Action:  "provision",
 		Input:   &input,
+	})
+}
+
+func (provisioner *UnixSocketSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if !provisioner.enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	return provisioner.exchange(ctx, subsystemProvisioningRequest{
+		Version: subsystemProvisioningProtocolVersion,
+		Action:  "update",
+		Input:   &input,
+	})
+}
+
+func (provisioner *UnixSocketSubsystemProvisioner) Teardown(ctx context.Context, applicationCode, environment string) error {
+	if !provisioner.enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	return provisioner.exchange(ctx, subsystemProvisioningRequest{
+		Version:     subsystemProvisioningProtocolVersion,
+		Action:      "teardown",
+		Code:        strings.TrimSpace(applicationCode),
+		Environment: strings.TrimSpace(environment),
 	})
 }
 
@@ -157,6 +181,14 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		} else {
 			err = executor.Provision(ctx, *request.Input)
 		}
+	case "update":
+		if request.Input == nil {
+			err = application.ErrSubsystemProvisioningUnavailable
+		} else {
+			err = executor.Update(ctx, *request.Input)
+		}
+	case "teardown":
+		err = executor.Teardown(ctx, request.Code, request.Environment)
 	default:
 		err = application.ErrSubsystemProvisioningUnavailable
 	}

@@ -261,7 +261,10 @@ func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	// Never trust caller-provided provenance fields: they are accepted only for
 	// backwards-compatible request decoding and are overwritten before persistence.
 	payload.SourceType, payload.SourceIdentifier = catalogSourceFromApplicationPrincipal(principal)
-	catalog, err := h.service.SyncCatalog(r.Context(), principal.TenantID, applicationID, "application:"+principal.ClientID, payload)
+	// Persist the operator as the OAuth client's platform-side primary key (a 26-char ULID) so it
+	// fits the CHAR(26) created_by/updated_by columns without truncation. The human-readable
+	// client_id is preserved separately in the catalog's source_identifier column.
+	catalog, err := h.service.SyncCatalog(r.Context(), principal.TenantID, applicationID, principal.OAuthClientID, payload)
 	if err != nil {
 		writeError(w, r, err)
 		return

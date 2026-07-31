@@ -25,15 +25,22 @@ func main() {
 	}
 
 	executor, err := infrastructure.NewLocalDockerSubsystemProvisioner(infrastructure.LocalDockerSubsystemProvisionerConfig{
-		Enabled:                 true,
-		ProjectsRoot:            os.Getenv("SUBSYSTEM_PROJECTS_ROOT"),
-		GatewayScriptPath:       os.Getenv("SUBSYSTEM_GATEWAY_SCRIPT_PATH"),
-		GatewayIncludePath:      os.Getenv("SUBSYSTEM_GATEWAY_INCLUDE_PATH"),
-		PlatformComposeProject:  envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
-		PlatformFrontendService: envOrDefault("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
-		PlatformDockerNetwork:   envOrDefault("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
-		DockerBinary:            envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
-		Timeout:                 timeout,
+		Enabled:                    true,
+		ProjectsRoot:               os.Getenv("SUBSYSTEM_PROJECTS_ROOT"),
+		GatewayScriptPath:          os.Getenv("SUBSYSTEM_GATEWAY_SCRIPT_PATH"),
+		GatewayIncludePath:         os.Getenv("SUBSYSTEM_GATEWAY_INCLUDE_PATH"),
+		PlatformComposeProject:     envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
+		PlatformFrontendService:    envOrDefault("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
+		PlatformDockerNetwork:      envOrDefault("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
+		DockerBinary:               envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
+		Timeout:                    timeout,
+		CatalogSyncEnabled:         envOrDefault("SUBSYSTEM_CATALOG_SYNC_ENABLED", "true") == "true",
+		CatalogSyncImage:           envOrDefault("SUBSYSTEM_CATALOG_SYNC_IMAGE", "basic-platform/backend:local"),
+		CatalogSyncMysqlContainer:  envOrDefault("SUBSYSTEM_CATALOG_SYNC_MYSQL_CONTAINER", "basic-platform-local-mysql-1"),
+		CatalogSyncMysqlUser:       envOrDefault("SUBSYSTEM_CATALOG_SYNC_MYSQL_USER", "basic_platform"),
+		CatalogSyncMysqlPassword:   os.Getenv("SUBSYSTEM_CATALOG_SYNC_MYSQL_PASSWORD"),
+		CatalogSyncMysqlDatabase:   envOrDefault("SUBSYSTEM_CATALOG_SYNC_MYSQL_DATABASE", "basic_platform"),
+		CatalogSyncTargetAppCode:   envOrDefault("SUBSYSTEM_CATALOG_SYNC_TARGET_APP_CODE", "contract_management"),
 	})
 	if err != nil {
 		logger.Error("initialize subsystem provisioning executor")

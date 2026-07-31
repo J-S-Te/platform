@@ -149,7 +149,8 @@ func (manager *recordingSubsystemAccessManager) AssignInitialAdministrator(_ con
 }
 
 type recordingHTTPSubsystemProvisioner struct {
-	input application.SubsystemProvisioningInput
+	input        application.SubsystemProvisioningInput
+	teardownCode string
 }
 
 func (*recordingHTTPSubsystemProvisioner) Preflight(context.Context, string) error {
@@ -159,4 +160,103 @@ func (*recordingHTTPSubsystemProvisioner) Preflight(context.Context, string) err
 func (provisioner *recordingHTTPSubsystemProvisioner) Provision(_ context.Context, input application.SubsystemProvisioningInput) error {
 	provisioner.input = input
 	return nil
+}
+
+func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, input application.SubsystemProvisioningInput) error {
+	provisioner.input = input
+	return nil
+}
+
+func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, applicationCode, _ string) error {
+	provisioner.teardownCode = applicationCode
+	return nil
+}
+
+func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{}, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	requestBody := `{"application_code":"contract_management","environment":"prod"}`
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.input.ApplicationCode != "contract_management" || provisioner.input.Environment != "prod" {
+		t.Fatalf("update input = %#v, want minimal {contract_management, prod}", provisioner.input)
+	}
+	// Update MUST NOT carry the OAuth secret forward: a re-run of .env.local would need the
+	// bcrypt-hashed plaintext, which the service has not retained.
+	if provisioner.input.ClientSecret != "" || provisioner.input.CatalogPublisherClientSecret != "" {
+		t.Fatalf("update must not carry client secrets: %#v", provisioner.input)
+	}
+}
+
+func TestUpdateSubsystemRejectsMissingFields(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{}, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	requestBody := `{"application_code":"","environment":"prod"}`
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+	if response.Code != stdhttp.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.input.ApplicationCode != "" {
+		t.Fatalf("update must not be invoked on validation failure: %#v", provisioner.input)
+	}
+}
+
+func TestTeardownSubsystemCallsProvisionerAndAcknowledgesDeepCleanup(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{}, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	requestBody := `{"application_code":"contract_management","environment":"prod"}`
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-teardown", bytes.NewBufferString(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.TeardownSubsystem(response, request)
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.teardownCode != "contract_management" {
+		t.Fatalf("teardown code = %q, want contract_management", provisioner.teardownCode)
+	}
+	if !strings.Contains(response.Body.String(), `"status":"torn_down"`) {
+		t.Fatalf("response missing torn_down status: %s", response.Body.String())
+	}
 }

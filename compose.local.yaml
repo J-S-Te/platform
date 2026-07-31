@@ -2,11 +2,15 @@ name: basic-platform-local
 
 # 统一本地编排：三类业务应用容器分别为 frontend、api、contract-api。
 # MySQL、Temporal、迁移任务和隔离部署助手属于基础设施/一次性任务，不对宿主机发布业务端口。
+# LAN 临时访问使用单独的覆盖文件，不修改本地或生产环境的常规环境文件。
+# 默认加载空占位文件；scripts/lan-access.sh enable 时才会替换为临时覆盖文件。
 x-platform-runtime-env: &platform-runtime-env
   - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-./docker/.env.local}
+  - ${BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
 
 x-contract-runtime-env: &contract-runtime-env
   - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
+  - ${CONTRACT_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
 
 # 基础平台迁移、初始化和受控部署助手复用同一个后端镜像，但只有 api 服务拥有构建定义。
 # 这样 Compose 每次部署只构建一次基础平台后端镜像，不会把辅助任务误认为独立业务镜像。
@@ -63,7 +67,8 @@ services:
   api:
     <<: *platform-backend-runtime
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     env_file: *platform-runtime-env
     environment:
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
@@ -77,6 +82,9 @@ services:
       SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # catalog-publisher 长期凭据，供 subsystem-update 触发的 post-rebuild sync 使用。
+      CONTRACT_CATALOG_PUBLISHER_CLIENT_ID: ${CONTRACT_CATALOG_PUBLISHER_CLIENT_ID}
+      CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET: ${CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET}
     command: ["./api"]
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -116,6 +124,15 @@ services:
       SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # 部署助手在子系统容器起来后，自动调 sync-contract-catalog.sh 把子系统
+      # 角色/权限目录推给平台；仅对 contract_management 触发。
+      SUBSYSTEM_CATALOG_SYNC_ENABLED: ${SUBSYSTEM_CATALOG_SYNC_ENABLED}
+      SUBSYSTEM_CATALOG_SYNC_IMAGE: ${SUBSYSTEM_CATALOG_SYNC_IMAGE}
+      SUBSYSTEM_CATALOG_SYNC_MYSQL_CONTAINER: ${SUBSYSTEM_CATALOG_SYNC_MYSQL_CONTAINER}
+      SUBSYSTEM_CATALOG_SYNC_MYSQL_USER: ${SUBSYSTEM_CATALOG_SYNC_MYSQL_USER}
+      SUBSYSTEM_CATALOG_SYNC_MYSQL_PASSWORD: ${SUBSYSTEM_CATALOG_SYNC_MYSQL_PASSWORD}
+      SUBSYSTEM_CATALOG_SYNC_MYSQL_DATABASE: ${SUBSYSTEM_CATALOG_SYNC_MYSQL_DATABASE}
+      SUBSYSTEM_CATALOG_SYNC_TARGET_APP_CODE: ${SUBSYSTEM_CATALOG_SYNC_TARGET_APP_CODE}
     command: ["./subsystem-provisioner"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -160,6 +177,7 @@ services:
       - contract_mysql_local_data:/var/lib/mysql
       - ../contract_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
       - ../contract_management/migrations/000001_contract_workflow.sql:/docker-entrypoint-initdb.d/010_contract_workflow.sql:ro
+      - ../contract_management/migrations/000002_oidc_login_transactions.sql:/docker-entrypoint-initdb.d/011_oidc_login_transactions.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucontract -p\"$${MYSQL_PASSWORD}\" --silent"]
       interval: 5s
@@ -181,6 +199,7 @@ services:
     volumes:
       - ../contract_management/docker/mysql-init/000_databases.sql:/migrations/000_databases.sql:ro
       - ../contract_management/migrations/000001_contract_workflow.sql:/migrations/000001_contract_workflow.sql:ro
+      - ../contract_management/migrations/000002_oidc_login_transactions.sql:/migrations/000002_oidc_login_transactions.sql:ro
     depends_on:
       contract-mysql:
         condition: service_healthy
@@ -190,6 +209,7 @@ services:
       - |
         MYSQL_PWD="$${CONTRACT_MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h contract-mysql -uroot < /migrations/000_databases.sql
         MYSQL_PWD="$${CONTRACT_MYSQL_PASSWORD}" mysql --protocol=TCP -h contract-mysql -ucontract contract_management < /migrations/000001_contract_workflow.sql
+        MYSQL_PWD="$${CONTRACT_MYSQL_PASSWORD}" mysql --protocol=TCP -h contract-mysql -ucontract contract_management < /migrations/000002_oidc_login_transactions.sql
     restart: "no"
 
   temporal:
@@ -261,7 +281,8 @@ services:
     volumes:
       - ./docker/portal-apps-locations.conf:/etc/nginx/portal-apps.d/managed.conf:ro
     ports:
-      - "${FRONTEND_HTTP_PORT:-8081}:80"
+      # 默认只监听本机；临时 LAN 模式由 scripts/lan-access.sh 显式开启。
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_HTTP_PORT:-8081}:80"
     depends_on:
       api:
         condition: service_healthy

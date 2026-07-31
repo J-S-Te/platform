@@ -1,12 +1,13 @@
 # 构建 API、Worker 与数据库迁移二进制文件，保持运行镜像最小化。
+# build context: platform/ (整个 platform 仓库根)，所以可以 COPY scripts/...
 FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
+COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 
-COPY . ./
+COPY backend/ ./
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./cmd/api \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
@@ -27,9 +28,10 @@ COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin
 COPY --from=builder /out/subsystem-provisioner ./subsystem-provisioner
-COPY docker-entrypoint.sh /usr/local/bin/basic-platform-entrypoint
+COPY backend/docker-entrypoint.sh /usr/local/bin/basic-platform-entrypoint
+COPY scripts/sync-contract-catalog.sh /usr/local/bin/sync-contract-catalog.sh
 
-RUN chmod +x /usr/local/bin/basic-platform-entrypoint
+RUN chmod +x /usr/local/bin/basic-platform-entrypoint /usr/local/bin/sync-contract-catalog.sh
 
 ENTRYPOINT ["/usr/local/bin/basic-platform-entrypoint"]
 CMD ["./api"]

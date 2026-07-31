@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	stdhttp "net/http"
+	"os"
 	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
@@ -12,6 +13,42 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
 )
+
+// readCatalogPublisherCredentials returns the long-lived catalog-publisher OAuth client
+// credentials that the platform operator has provisioned for the contract_management
+// subsystem. The credentials live in the platform's own environment so that the API container
+// (which intentionally has no access to the subsystem's .env.local on disk) can hand them
+// to the deployment helper for the post-rebuild catalog sync.
+func readCatalogPublisherCredentials() (string, string, bool) {
+	id := strings.TrimSpace(os.Getenv("CONTRACT_CATALOG_PUBLISHER_CLIENT_ID"))
+	secret := strings.TrimSpace(os.Getenv("CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET"))
+	if id == "" || secret == "" {
+		return "", "", false
+	}
+	return id, secret, true
+}
+
+// resolveApplicationContext looks up the (application, environment) identifiers for a
+// (code, environment-name) pair. The post-rebuild catalog sync needs the platform-side primary
+// keys, not the human-readable codes, to address the right application. The lookup piggybacks
+// on the existing portal listing path so no new repository method is needed.
+func (handler *SubsystemOnboardingHandler) resolveApplicationContext(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) (string, string, bool) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		return "", "", false
+	}
+	items, err := handler.service.ListPortalApplications(request.Context(), principal.Tenant.ID, principal.User.ID, environment)
+	if err != nil {
+		return "", "", false
+	}
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Code), applicationCode) &&
+			strings.EqualFold(strings.TrimSpace(item.Environment), environment) {
+			return strings.TrimSpace(item.ApplicationID), strings.TrimSpace(item.EnvironmentID), true
+		}
+	}
+	return "", "", false
+}
 
 type subsystemOnboardingService interface {
 	OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error)
@@ -56,6 +93,15 @@ type subsystemOnboardingRequest struct {
 	PathPrefix      string  `json:"path_prefix"`
 	ClientType      string  `json:"client_type"`
 	InitialAdminID  string  `json:"initial_admin_user_id"`
+}
+
+// subsystemLifecycleRequest is the shared payload for Update and Teardown. Both endpoints
+// only need the application code + environment to find the existing DB row; any value
+// changes (BaseURL, UpstreamURL, PathPrefix, OAuth client) must be PATCHed via the regular
+// management endpoints first, then `update` re-provisions the running subsystem.
+type subsystemLifecycleRequest struct {
+	ApplicationCode string `json:"application_code"`
+	Environment     string `json:"environment"`
 }
 
 type subsystemAutomationResponse struct {
@@ -186,6 +232,110 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 		})
 	}
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
+}
+
+// UpdateSubsystem handles POST /api/v1/subsystem-update. The handler assumes the caller has
+// already updated any DB aggregate (Environment base URL, OAuth redirect URI) via the regular
+// management PATCH endpoints. This endpoint only re-runs the provisioner so the running subsystem
+// picks up the new .env.local values and the portal gateway is reloaded.
+func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	var payload subsystemLifecycleRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+	if err := validateLifecycleRequest(payload); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	applicationCode := strings.TrimSpace(payload.ApplicationCode)
+	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
+	// Update only re-runs the rebuild path: it never re-issues the OAuth client secret, so we
+	// deliberately send a minimal SubsystemProvisioningInput with just the identifiers the
+	// provisioner needs to locate the project directory and compose stack.
+	//
+	// The catalog-publisher client is not re-issued either. The post-rebuild catalog sync (if
+	// enabled) needs the long-lived publisher credentials to authenticate against the platform.
+	// Those credentials are read from the platform operator's environment, not from the
+	// subsystem's .env.local, so both the API process and the deployment helper can pick them
+	// up without exposing the host filesystem into the API container.
+	updateInput := application.SubsystemProvisioningInput{
+		ApplicationCode: applicationCode,
+		Environment:     environment,
+		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
+		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
+		// issuer as a stable source of truth instead of having the client send it in.
+		Issuer: handler.oidcIssuer,
+	}
+	if applicationID, _, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
+		updateInput.ApplicationID = applicationID
+	}
+	if publisherID, publisherSecret, ok := readCatalogPublisherCredentials(); ok {
+		updateInput.CatalogPublisherClientID = publisherID
+		updateInput.CatalogPublisherClientSecret = publisherSecret
+	}
+	if err := handler.provisioner.Update(request.Context(), updateInput); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统已重新部署", subsystemAutomationResponse{
+		Status:    "reapplied",
+		PublicURL: "",
+	})
+	handler.logger.Info("subsystem re-provisioned", "path", request.URL.Path,
+		"application_code", applicationCode, "environment", environment,
+		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
+	)
+}
+
+// TeardownSubsystem handles POST /api/v1/subsystem-teardown. Stops containers, removes
+// .env.local, drops the portal gateway include, and reloads nginx. The HTTP layer does not
+// delete the corresponding DB rows here: the script follows up with DELETE /environments and
+// (optionally) DELETE /applications so the audit trail preserves each cleanup step.
+func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	var payload subsystemLifecycleRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+	if err := validateLifecycleRequest(payload); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	if err := handler.provisioner.Teardown(request.Context(), strings.TrimSpace(payload.ApplicationCode), strings.TrimSpace(payload.Environment)); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统已拆解", map[string]string{
+		"status":          "torn_down",
+		"application_code": strings.TrimSpace(payload.ApplicationCode),
+		"environment":     strings.TrimSpace(payload.Environment),
+	})
+	handler.logger.Warn("subsystem torn down", "path", request.URL.Path,
+		"application_code", strings.TrimSpace(payload.ApplicationCode),
+		"environment", strings.TrimSpace(payload.Environment),
+		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
+	)
+}
+
+func validateLifecycleRequest(payload subsystemLifecycleRequest) error {
+	if strings.TrimSpace(payload.ApplicationCode) == "" {
+		return application.ErrValidation
+	}
+	if strings.TrimSpace(payload.Environment) == "" {
+		return application.ErrValidation
+	}
+	return nil
 }
 
 func subsystemPrincipal(writer stdhttp.ResponseWriter, request *stdhttp.Request) (authctx.Principal, bool) {

@@ -32,7 +32,21 @@ type SubsystemProvisioningInput struct {
 }
 
 // SubsystemProvisioner validates and performs the local subsystem deployment workflow.
+//
+// Lifecycle (called via Unix-socket transport from the API process):
+//   - Preflight: cheap environment checks before any state-changing operation.
+//   - Provision: full atomic onboard (write .env.local + docker compose up + reload nginx).
+//   - Update:    re-apply the integration to a subsystem that is already onboarded (rewrite
+//     .env.local, rebuild containers, reload nginx). DB rows are not touched; caller must
+//     have already updated them via PATCH /environments when BaseURL/UpstreamURL/PathPrefix
+//     changed.
+//   - Teardown:  full atomic offboard of the subsystem (docker compose down + remove
+//     .env.local + remove gateway include + reload nginx). DB rows are not touched; the
+//     HTTP layer is responsible for the subsequent DELETE on /environments and
+//     /applications.
 type SubsystemProvisioner interface {
 	Preflight(context.Context, string) error
 	Provision(context.Context, SubsystemProvisioningInput) error
+	Update(context.Context, SubsystemProvisioningInput) error
+	Teardown(context.Context, string, string) error
 }
