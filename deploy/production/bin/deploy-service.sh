@@ -130,7 +130,6 @@ deploy_contract() {
   require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
   require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
   require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
-  require_runtime_value USER_DISPLAY_NAMES_JSON || return
   if [[ "$(env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1

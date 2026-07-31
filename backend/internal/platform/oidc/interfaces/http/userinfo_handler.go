@@ -103,6 +103,20 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 			payload["preferred_username"] = info.PreferredUsername
 		}
 	}
+	if hasScope(claims.Scope, "profile") {
+		if h.personnelDirectory == nil {
+			h.logger.Error("OIDC personnel directory resolver is not configured")
+			writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
+			return
+		}
+		personnel, err := h.personnelDirectory.ListActivePersonnel(r.Context(), subject.TenantID, subject.OAuthClientID)
+		if err != nil {
+			h.logger.Error("OIDC personnel directory resolution failed", "error", err)
+			writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
+			return
+		}
+		payload["personnel_directory"] = personnel
+	}
 	if hasScope(claims.Scope, "email") && info.Email != "" {
 		payload["email"] = info.Email
 	}
