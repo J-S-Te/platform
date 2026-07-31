@@ -2,6 +2,8 @@
 package bootstrap
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -182,9 +184,17 @@ func NewAPI(cfg config.Config) (*API, error) {
 	applicationAccessAudit := &applicationAccessAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
 	// Application authorization catalogs are published by the owning subsystem through
 	// its OAuth machine credential. Do not bootstrap a contract_management catalog here:
-	// the platform only mirrors the directory and assigns published roles.
+	// the platform only mirrors the directory and assigns published roles. The platform's
+	// own catalog is bootstrapped below because the platform has no catalog-publisher
+	// client for itself; without that mirror the UI blocks role assignment for built-in
+	// platform roles.
 	applicationAccessService, err := applicationaccess.NewService(db, ulid.Generator{}, applicationaccess.SystemClock{}, applicationAccessAudit)
 	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	if err := bootstrapPlatformCatalog(applicationAccessService, db, logger); err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -480,6 +490,104 @@ func NewAPI(cfg config.Config) (*API, error) {
 		database: db,
 		logFile:  logFile,
 	}, nil
+}
+
+// bootstrapPlatformCatalog ensures the platform application's own authorization catalog row
+// reflects the migration-seeded built-in roles and permissions. Subsystem-owned catalogs
+// (e.g. contract_management) are published by their catalog-publisher OAuth client and are
+// intentionally not touched here. The platform has no such client for itself; without this
+// bootstrap the UI blocks role assignment with "目录同步: 未同步" even though the
+// built-in data is already in the database.
+func bootstrapPlatformCatalog(
+	svc *applicationaccess.Service,
+	db *gorm.DB,
+	logger *slog.Logger,
+) error {
+	if svc == nil || db == nil || logger == nil {
+		return errors.New("bootstrap platform catalog dependencies must not be nil")
+	}
+	tenantID, err := resolveDefaultTenantID(db)
+	if err != nil {
+		return fmt.Errorf("resolve default tenant for platform catalog bootstrap: %w", err)
+	}
+	operatorID, err := resolvePlatformCatalogOperatorID(db, tenantID)
+	if err != nil {
+		return fmt.Errorf("resolve platform catalog bootstrap operator: %w", err)
+	}
+	bootstrapCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	view, err := svc.EnsurePlatformCatalogSynced(bootstrapCtx, tenantID, operatorID)
+	if err != nil {
+		return fmt.Errorf("ensure platform catalog synced: %w", err)
+	}
+	logger.Info(
+		"platform authorization catalog bootstrapped",
+		"application_code", applicationaccess.PlatformApplicationCode,
+		"catalog_version", view.CatalogVersion,
+		"checksum", view.Checksum,
+		"role_count", len(view.Roles),
+		"permission_count", len(view.Permissions),
+		"operator_id", operatorID,
+	)
+	return nil
+}
+
+// resolveDefaultTenantID looks up the migration-seeded "default" tenant. The bootstrap path
+// must not hard-code the tenant ULID; future multi-tenant installs will share the same code.
+func resolveDefaultTenantID(db *gorm.DB) (string, error) {
+	var tenantID string
+	err := db.WithContext(context.Background()).
+		Table("iam_tenant").
+		Where("code = ? AND status = ?", "default", "ACTIVE").
+		Limit(1).
+		Pluck("id", &tenantID).Error
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return "", errors.New("default tenant not found")
+	}
+	return tenantID, nil
+}
+
+// resolvePlatformCatalogOperatorID prefers the first super administrator's user id so the
+// audit history aligns with whoever initially set the platform up. If bootstrap has not yet
+// happened, a stable system identity is used so the catalog row still has a valid 26-char
+// last_synced_by reference until the first admin takes over.
+func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, error) {
+	// application code "platform" + role code "platform-super-admin" are migration-seeded by
+	// 000011_seed_platform_defaults.sql; look them up dynamically so this bootstrap tolerates
+	// future schema renames.
+	var platformAppID string
+	if err := db.WithContext(context.Background()).
+		Table("platform_application").
+		Where("tenant_id = ? AND code = ? AND status = ?", tenantID, applicationaccess.PlatformApplicationCode, "ACTIVE").
+		Limit(1).
+		Pluck("id", &platformAppID).Error; err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(platformAppID) == "" {
+		return "", errors.New("platform application not found")
+	}
+	var adminUserID string
+	err := db.WithContext(context.Background()).
+		Table("iam_user AS u").
+		Where("u.tenant_id = ? AND u.status = ? AND u.employment_status = ?", tenantID, "ACTIVE", "ACTIVE").
+		Where("EXISTS (SELECT 1 FROM authz_role_binding rb JOIN authz_role r ON r.id = rb.role_id WHERE rb.subject_type = 'USER' AND rb.subject_id = u.id AND rb.application_id = ? AND r.code = ? AND rb.status = 'ACTIVE')",
+			platformAppID, applicationaccess.BootstrapSuperAdminRoleCode).
+		Order("u.created_at ASC").
+		Limit(1).
+		Pluck("u.id", &adminUserID).Error
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(adminUserID) != "" {
+		return adminUserID, nil
+	}
+	// Pre-bootstrap: use a stable system identity until the first admin takes over. The
+	// 26-char placeholder is a valid Crockford Base32 ULID with a non-overlapping "PLATFSY"
+	// suffix so it can never collide with a real user id.
+	return applicationaccess.PlatformCatalogBootstrapOperatorID, nil
 }
 
 // Close releases process-owned resources. It is safe to defer after a successful NewAPI call.

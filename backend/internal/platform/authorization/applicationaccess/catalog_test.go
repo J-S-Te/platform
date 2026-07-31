@@ -190,3 +190,27 @@ func TestNormalizeCatalogRejectsInvalidMaxEffectiveRoles(t *testing.T) {
 		}
 	}
 }
+
+func TestPlatformCatalogConstantsAreStableAndWellFormed(t *testing.T) {
+	// The bootstrap mirror exposes these constants to the API bootstrap, the platform audit
+	// adapter, and the on-disk catalog row. Drift between Go and the migrations would be
+	// silent; lock the values down with a unit test so any change forces a conscious review.
+	if PlatformApplicationCode != "platform" {
+		t.Fatalf("PlatformApplicationCode drift: got %q want %q", PlatformApplicationCode, "platform")
+	}
+	if PlatformCatalogVersion != "v1-platform-builtin" {
+		t.Fatalf("PlatformCatalogVersion drift: got %q want %q", PlatformCatalogVersion, "v1-platform-builtin")
+	}
+	if PlatformCatalogSourceType != "BUILTIN" {
+		t.Fatalf("PlatformCatalogSourceType drift: got %q want %q", PlatformCatalogSourceType, "BUILTIN")
+	}
+	if PlatformCatalogSourceIdentifier != "platform:bootstrap" {
+		t.Fatalf("PlatformCatalogSourceIdentifier drift: got %q want %q", PlatformCatalogSourceIdentifier, "platform:bootstrap")
+	}
+	if BootstrapSuperAdminRoleCode != "platform-super-admin" {
+		t.Fatalf("BootstrapSuperAdminRoleCode drift: got %q want %q", BootstrapSuperAdminRoleCode, "platform-super-admin")
+	}
+	if got := len(PlatformCatalogBootstrapOperatorID); got != 26 {
+		t.Fatalf("PlatformCatalogBootstrapOperatorID must be a 26-char ULID placeholder to fit CHAR(26) last_synced_by; got length=%d value=%q", got, PlatformCatalogBootstrapOperatorID)
+	}
+}
