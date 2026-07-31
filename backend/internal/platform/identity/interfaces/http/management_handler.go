@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/managementscope"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
@@ -21,8 +22,9 @@ const maxManagementRequestBytes = 64 << 10
 
 // ManagementHandler is the HTTP adapter for P0 IAM user, account and organization operations.
 type ManagementHandler struct {
-	service managementApplicationService
-	logger  *slog.Logger
+	service         managementApplicationService
+	logger          *slog.Logger
+	scopeAuthorizer managementscope.Authorizer
 }
 
 type managementApplicationService interface {
@@ -48,11 +50,11 @@ type managementApplicationService interface {
 }
 
 // NewManagementHandler constructs an IAM management HTTP adapter.
-func NewManagementHandler(service managementApplicationService, logger *slog.Logger) (*ManagementHandler, error) {
-	if service == nil || logger == nil {
+func NewManagementHandler(service managementApplicationService, logger *slog.Logger, scopeAuthorizer managementscope.Authorizer) (*ManagementHandler, error) {
+	if service == nil || logger == nil || scopeAuthorizer == nil {
 		return nil, errors.New("identity management handler dependencies must not be nil")
 	}
-	return &ManagementHandler{service: service, logger: logger}, nil
+	return &ManagementHandler{service: service, logger: logger, scopeAuthorizer: scopeAuthorizer}, nil
 }
 
 // userCreateRequest intentionally excludes employee_no and version. Employee numbers are
@@ -180,17 +182,18 @@ type userResponse struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 type accountResponse struct {
-	AccountID   string     `json:"account_id"`
-	UserID      *string    `json:"user_id,omitempty"`
-	AccountName string     `json:"account_name"`
-	AccountType string     `json:"account_type"`
-	AuthSource  string     `json:"auth_source"`
-	Status      string     `json:"status"`
-	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
-	ValidUntil  *time.Time `json:"valid_until,omitempty"`
-	Version     uint64     `json:"version"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	AccountID   string             `json:"account_id"`
+	UserID      *string            `json:"user_id,omitempty"`
+	User        *referenceResponse `json:"user,omitempty"`
+	AccountName string             `json:"account_name"`
+	AccountType string             `json:"account_type"`
+	AuthSource  string             `json:"auth_source"`
+	Status      string             `json:"status"`
+	LastLoginAt *time.Time         `json:"last_login_at,omitempty"`
+	ValidUntil  *time.Time         `json:"valid_until,omitempty"`
+	Version     uint64             `json:"version"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   time.Time          `json:"updated_at"`
 }
 type orgUnitResponse struct {
 	OrgUnitID string  `json:"org_unit_id"`
@@ -494,6 +497,11 @@ func (handler *ManagementHandler) ListOrgUnits(writer http.ResponseWriter, reque
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:read")
+	if !ok {
+		return
+	}
+	query = applyManagementScope(query, scope)
 	result, err := handler.service.ListOrgUnits(request.Context(), principal.Tenant.ID, query)
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -517,6 +525,19 @@ func (handler *ManagementHandler) CreateOrgUnit(writer http.ResponseWriter, requ
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:create")
+	if !ok {
+		return
+	}
+	if payload.ParentID == nil {
+		if !scope.Unrestricted {
+			handler.forbidden(writer, request)
+			return
+		}
+	} else if !scope.Allows(*payload.ParentID, *payload.ParentID) {
+		handler.forbidden(writer, request)
+		return
+	}
 	result, err := handler.service.CreateOrgUnit(request.Context(), application.OrgUnitCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, ParentID: payload.ParentID, Name: payload.Name, SortOrder: payload.SortOrder})
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -536,8 +557,17 @@ func (handler *ManagementHandler) UpdateOrgUnit(writer http.ResponseWriter, requ
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:update")
+	if !ok {
+		return
+	}
+	orgUnitID := request.PathValue("org_unit_id")
+	if !scope.Allows(orgUnitID, orgUnitID) || (!scope.Unrestricted && payload.ParentID == nil) || (payload.ParentID != nil && !scope.Allows(*payload.ParentID, *payload.ParentID)) {
+		handler.forbidden(writer, request)
+		return
+	}
 	result, err := handler.service.UpdateOrgUnit(request.Context(), application.OrgUnitUpdateInput{
-		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: request.PathValue("org_unit_id"),
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: orgUnitID,
 		ParentID: payload.ParentID, Name: payload.Name, SortOrder: payload.SortOrder, Version: payload.Version,
 	})
 	if err != nil {
@@ -558,8 +588,17 @@ func (handler *ManagementHandler) DeleteOrgUnit(writer http.ResponseWriter, requ
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:delete")
+	if !ok {
+		return
+	}
+	orgUnitID := request.PathValue("org_unit_id")
+	if !scope.Allows(orgUnitID, orgUnitID) {
+		handler.forbidden(writer, request)
+		return
+	}
 	if err := handler.service.DeleteOrgUnit(request.Context(), application.OrgUnitDeleteInput{
-		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: request.PathValue("org_unit_id"), Version: payload.Version,
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: orgUnitID, Version: payload.Version,
 	}); err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -578,6 +617,11 @@ func (handler *ManagementHandler) ListPositions(writer http.ResponseWriter, requ
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:position:read")
+	if !ok {
+		return
+	}
+	query = applyManagementScope(query, scope)
 	result, err := handler.service.ListPositions(request.Context(), principal.Tenant.ID, query)
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -601,6 +645,14 @@ func (handler *ManagementHandler) CreatePosition(writer http.ResponseWriter, req
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:position:create")
+	if !ok {
+		return
+	}
+	if !scope.Allows(payload.OrgUnitID, "") {
+		handler.forbidden(writer, request)
+		return
+	}
 	result, err := handler.service.CreatePosition(request.Context(), application.PositionCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OrgUnitID: payload.OrgUnitID, Name: payload.Name})
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -620,9 +672,17 @@ func (handler *ManagementHandler) DeletePosition(writer http.ResponseWriter, req
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:position:delete")
+	if !ok {
+		return
+	}
+	positionID := request.PathValue("position_id")
+	if !handler.requireExistingResourceScope(writer, request, principal.Tenant.ID, scope, managementscope.ResourcePosition, positionID) {
+		return
+	}
 	if err := handler.service.DeletePosition(request.Context(), application.PositionDeleteInput{
 		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
-		PositionID: request.PathValue("position_id"), Version: payload.Version,
+		PositionID: positionID, Version: payload.Version,
 	}); err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -641,6 +701,11 @@ func (handler *ManagementHandler) ListMemberships(writer http.ResponseWriter, re
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:membership:read")
+	if !ok {
+		return
+	}
+	query = applyManagementScope(query, scope)
 	result, err := handler.service.ListMemberships(request.Context(), principal.Tenant.ID, query)
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -671,6 +736,21 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 		handler.validation(writer, request)
 		return
 	}
+	permissionCode := "platform:membership:create"
+	if update {
+		permissionCode = "platform:membership:update"
+	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, permissionCode)
+	if !ok {
+		return
+	}
+	if update && !handler.requireExistingResourceScope(writer, request, principal.Tenant.ID, scope, managementscope.ResourceMembership, request.PathValue("membership_id")) {
+		return
+	}
+	if !scope.Allows(payload.OrgUnitID, "") {
+		handler.forbidden(writer, request)
+		return
+	}
 	from, err := parseDate(payload.EffectiveFrom)
 	if err != nil {
 		handler.validation(writer, request)
@@ -697,6 +777,59 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "任职已更新", toMembershipResponse(result))
+}
+
+func (handler *ManagementHandler) requireManagementScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, permissionCode string) (managementscope.Scope, bool) {
+	scope, err := handler.scopeAuthorizer.Resolve(request.Context(), managementscope.Subject{
+		TenantID:  principal.Tenant.ID,
+		UserID:    principal.User.ID,
+		AccountID: principal.Account.ID,
+	}, permissionCode)
+	if err != nil {
+		handler.logger.Error("resolve management authorization scope", "permission", permissionCode, "error", err)
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return managementscope.Scope{}, false
+	}
+	if scope.Empty() {
+		handler.forbidden(writer, request)
+		return managementscope.Scope{}, false
+	}
+	return scope, true
+}
+
+func applyManagementScope(query application.PageRequest, scope managementscope.Scope) application.PageRequest {
+	if scope.Unrestricted {
+		return query
+	}
+	query.ScopeRestricted = true
+	query.AllowedOrgUnitIDs = append([]string(nil), scope.OrgUnitIDs...)
+	query.AllowedResourceIDs = append([]string(nil), scope.ResourceIDs...)
+	return query
+}
+
+func (handler *ManagementHandler) requireExistingResourceScope(writer http.ResponseWriter, request *http.Request, tenantID string, scope managementscope.Scope, resourceType, resourceID string) bool {
+	if scope.Unrestricted {
+		return true
+	}
+	resource, err := handler.scopeAuthorizer.ResourceContext(request.Context(), tenantID, resourceType, resourceID)
+	if errors.Is(err, managementscope.ErrResourceNotFound) {
+		handler.forbidden(writer, request)
+		return false
+	}
+	if err != nil {
+		handler.logger.Error("load management authorization resource", "resource_type", resourceType, "resource_id", resourceID, "error", err)
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return false
+	}
+	if !scope.Allows(resource.OrgUnitID, resource.ResourceID) {
+		handler.forbidden(writer, request)
+		return false
+	}
+	return true
+}
+
+func (handler *ManagementHandler) forbidden(writer http.ResponseWriter, request *http.Request) {
+	httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 }
 
 func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request *http.Request, err error) {
@@ -778,7 +911,11 @@ func toUserResponse(value application.UserView) userResponse {
 	return userResponse{UserID: value.ID, DisplayName: value.DisplayName, EmployeeNo: value.EmployeeNo, Email: value.Email, MobileMasked: value.MobileMasked, Status: value.Status, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 func toAccountResponse(value domain.Account) accountResponse {
-	return accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, Status: value.Status, LastLoginAt: value.LastLoginAt, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	response := accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, Status: value.Status, LastLoginAt: value.LastLoginAt, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	if value.User != nil {
+		response.User = &referenceResponse{ID: value.User.ID, Name: value.User.Name}
+	}
+	return response
 }
 func toOrgUnitResponse(value domain.OrgUnit) orgUnitResponse {
 	return orgUnitResponse{OrgUnitID: value.ID, ParentID: value.ParentID, Code: value.Code, Name: value.Name, SortOrder: value.SortOrder, Status: value.Status, Version: value.Version}

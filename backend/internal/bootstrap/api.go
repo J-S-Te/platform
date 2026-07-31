@@ -22,6 +22,7 @@ import (
 	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	authorizationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/infrastructure"
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
+	managementscope "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/managementscope"
 	positiongrant "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/positiongrant"
 	configurationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/application"
 	configurationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/infrastructure"
@@ -138,7 +139,13 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	managementHandler, err := identityhttp.NewManagementHandler(managementService, logger)
+	managementScopeAuthorizer, err := managementscope.New(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	managementHandler, err := identityhttp.NewManagementHandler(managementService, logger, managementScopeAuthorizer)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -349,6 +356,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		SessionLogout:                 authService,
 		PostLogoutRedirectValidator:   oidcService,
 		AccessTokenSubjectResolver:    oidcAccessTokenSubjects,
+		AuthorizationResolver:         oidcAuthorizationResolver,
 		SessionCookieName:             cfg.Auth.SessionCookieName,
 		SessionCookieSecure:           cfg.Auth.SessionCookieSecure,
 		SessionCookieSameSite:         oidcCookieSameSite,

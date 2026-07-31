@@ -19,6 +19,7 @@ force_build=false
 admin_display_name="${BASIC_PLATFORM_ADMIN_DISPLAY_NAME:-}"
 admin_account_name="${BASIC_PLATFORM_ADMIN_ACCOUNT_NAME:-}"
 admin_password="${BASIC_PLATFORM_ADMIN_PASSWORD:-}"
+admin_password_stdin=false
 frontend_public_origin=""
 
 log() { printf '[docker-local] %s\n' "$*"; }
@@ -44,7 +45,8 @@ up/restart 选项：
   --pull                          兼容选项；启动前默认会串行拉取缺失的基础镜像
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
-  --admin-password PASSWORD       首次初始化密码；仅建议本地临时使用
+  --admin-password PASSWORD       首次初始化密码；仅为兼容旧调用保留，不建议使用
+  --admin-password-stdin          从标准输入读取首次初始化密码；适合 CI Secret
   --env-file PATH                 基础平台环境文件（默认 platform/docker/.env.local）
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   -h, --help                      显示帮助
@@ -101,7 +103,12 @@ while (($# > 0)); do
         --admin-password)
             (($# >= 2)) || fail "$1 缺少参数"
             admin_password="$2"
+            log "WARN: --admin-password 会暴露在进程参数中，请改用 --admin-password-stdin"
             shift 2
+            ;;
+        --admin-password-stdin)
+            admin_password_stdin=true
+            shift
             ;;
         --env-file)
             (($# >= 2)) || fail "$1 缺少参数"
@@ -433,7 +440,9 @@ bootstrap_admin_if_needed() {
 
     if [[ -z "$admin_display_name" && -t 0 ]]; then read -r -p '首次超级管理员显示名称：' admin_display_name; fi
     if [[ -z "$admin_account_name" && -t 0 ]]; then read -r -p '首次超级管理员账号：' admin_account_name; fi
-    if [[ -z "$admin_password" && -t 0 ]]; then
+    if [[ -z "$admin_password" && "$admin_password_stdin" == true ]]; then
+        IFS= read -r admin_password || true
+    elif [[ -z "$admin_password" && -t 0 ]]; then
         read -r -s -p '首次超级管理员密码：' admin_password
         printf '\n'
     fi

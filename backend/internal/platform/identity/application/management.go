@@ -43,10 +43,13 @@ var DefaultOrganizationPositionNames = [...]string{
 
 // PageRequest is the common bounded list query contract.
 type PageRequest struct {
-	Page     int
-	PageSize int
-	Keyword  string
-	Status   string
+	Page               int
+	PageSize           int
+	Keyword            string
+	Status             string
+	ScopeRestricted    bool
+	AllowedOrgUnitIDs  []string
+	AllowedResourceIDs []string
 }
 
 // PageResult is the common list response model used by the HTTP adapter.

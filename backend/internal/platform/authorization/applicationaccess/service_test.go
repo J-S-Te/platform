@@ -363,3 +363,27 @@ func TestRoleConfigHashReflectsSynchronizedRolePermissionMappings(t *testing.T) 
 		t.Fatal("changed synchronized role-permission mapping must change token config hash")
 	}
 }
+
+func TestApplicationAccessRejectsPlatformControlPlaneRole(t *testing.T) {
+	err := ensureApplicationAccessRole(roleRow{
+		ID:       "role-super-admin",
+		Code:     BootstrapSuperAdminRoleCode,
+		Name:     "平台超级管理员",
+		RoleType: "PLATFORM",
+	})
+	if err == nil || !errorsIs(err, ErrValidation) {
+		t.Fatalf("application access platform role error = %v, want validation rejection", err)
+	}
+}
+
+func TestApplicationAccessAllowsApplicationOwnedRole(t *testing.T) {
+	err := ensureApplicationAccessRole(roleRow{
+		ID:       "role-contract-admin",
+		Code:     "contract-admin",
+		Name:     "合同管理员",
+		RoleType: " application ",
+	})
+	if err != nil {
+		t.Fatalf("application-owned role unexpectedly rejected: %v", err)
+	}
+}

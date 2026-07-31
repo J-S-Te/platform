@@ -10,35 +10,53 @@
 #
 # 由 platform 部署助手（subsystem-provisioner 容器）在 contract-api 启动后调用，
 # 也会被 docker-local.sh 的 subsystem onboarding 流程复用。
-# 也可以手动执行：bash sync-contract-catalog.sh
-#   <app_id> <issuer> <client_id> <client_secret>
-#   [catalog_version] [mysql_container] [mysql_user] [mysql_password]
+# 手动执行时通过下列 PLATFORM_* 环境变量传入；敏感值不接受命令行参数，
+# 避免进入 shell history、CI 日志和进程 argv。
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
 
 LOG_PREFIX="[contract-catalog-sync]"
 
-APP_ID="${1:-${PLATFORM_APPLICATION_ID:-}}"
-ISSUER="${2:-${PLATFORM_BASE_URL:-}}"
-CLIENT_ID="${3:-${PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID:-}}"
-CLIENT_SECRET="${4:-${PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET:-}}"
-CATALOG_VERSION="${5:-auto}"
-MYSQL_CONTAINER="${6:-${PLATFORM_MYSQL_CONTAINER:-basic-platform-local-mysql-1}}"
-MYSQL_USER="${7:-${PLATFORM_MYSQL_USER:-basic_platform}}"
-MYSQL_PASSWORD="${8:-${PLATFORM_MYSQL_PASSWORD:-}}"
-DB_NAME="${9:-${PLATFORM_MYSQL_DATABASE:-basic_platform}}"
+if (( $# > 0 )); then
+  echo "$LOG_PREFIX ERROR: command-line arguments are disabled; use protected PLATFORM_* environment variables" >&2
+  exit 2
+fi
+
+APP_ID="${PLATFORM_APPLICATION_ID:-}"
+ISSUER="${PLATFORM_BASE_URL:-}"
+CLIENT_ID="${PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID:-}"
+CLIENT_SECRET="${PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET:-}"
+CATALOG_VERSION="${PLATFORM_AUTHORIZATION_CATALOG_VERSION:-auto}"
+MYSQL_CONTAINER="${PLATFORM_MYSQL_CONTAINER:-basic-platform-local-mysql-1}"
+MYSQL_USER="${PLATFORM_MYSQL_USER:-basic_platform}"
+MYSQL_PASSWORD="${PLATFORM_MYSQL_PASSWORD:-}"
+DB_NAME="${PLATFORM_MYSQL_DATABASE:-basic_platform}"
 CLAIMS_ROLE_CONFIG_HASH="${CLAIMS_ROLE_CONFIG_HASH:-}"
 
 if [[ -z "$APP_ID" || -z "$ISSUER" || -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-  echo "$LOG_PREFIX ERROR: missing arguments. expected: <app_id> <issuer> <client_id> <client_secret> [catalog_version] [mysql_container] [mysql_user] [mysql_password] [db_name]" >&2
+  echo "$LOG_PREFIX ERROR: PLATFORM_APPLICATION_ID, PLATFORM_BASE_URL and catalog publisher credentials are required" >&2
   exit 2
 fi
 
 if [[ -z "$MYSQL_PASSWORD" ]]; then
-  echo "$LOG_PREFIX ERROR: MYSQL_PASSWORD not set (env PLATFORM_MYSQL_PASSWORD or arg 8)" >&2
+  echo "$LOG_PREFIX ERROR: PLATFORM_MYSQL_PASSWORD not set" >&2
   exit 2
 fi
+
+[[ "$APP_ID" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] || {
+  echo "$LOG_PREFIX ERROR: PLATFORM_APPLICATION_ID must be an uppercase ULID" >&2
+  exit 2
+}
+
+command -v jq >/dev/null 2>&1 || {
+  echo "$LOG_PREFIX ERROR: jq is required" >&2
+  exit 2
+}
+command -v curl >/dev/null 2>&1 || {
+  echo "$LOG_PREFIX ERROR: curl is required" >&2
+  exit 2
+}
 
 if [[ "$CATALOG_VERSION" == "auto" ]]; then
   CATALOG_VERSION="v1-$(date -u +%Y%m%d%H%M%S)"
@@ -46,19 +64,36 @@ fi
 
 # 1) 拉 access_token
 echo "$LOG_PREFIX step 1: requesting access_token from ${ISSUER%/}/oauth2/token" >&2
-TOKEN_JSON=$(wget -q -O- \
-  --user "$CLIENT_ID" \
-  --password "$CLIENT_SECRET" \
-  --post-data "grant_type=client_credentials&scope=authorization.catalog.sync" \
+CURL_CONFIG_FILE="$(mktemp)"
+PAYLOAD_FILE=""
+cleanup() {
+  rm -f -- "$CURL_CONFIG_FILE" ${PAYLOAD_FILE:+"$PAYLOAD_FILE"}
+}
+trap cleanup EXIT
+chmod 0600 "$CURL_CONFIG_FILE"
+[[ "$ISSUER" =~ ^https?://[^/?#]+$ ]] || {
+  echo "$LOG_PREFIX ERROR: PLATFORM_BASE_URL must be an absolute HTTP(S) URL" >&2
+  exit 2
+}
+curl_config_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+printf 'silent\nshow-error\nfail-with-body\nuser = "%s:%s"\n' \
+  "$(curl_config_escape "$CLIENT_ID")" "$(curl_config_escape "$CLIENT_SECRET")" >"$CURL_CONFIG_FILE"
+
+TOKEN_JSON=$(curl --config "$CURL_CONFIG_FILE" \
+  --data-urlencode "grant_type=client_credentials" \
+  --data-urlencode "scope=authorization.catalog.sync" \
   --header "Content-Type: application/x-www-form-urlencoded" \
-  --timeout 15 \
+  --max-time 15 \
   "${ISSUER%/}/oauth2/token" 2>/dev/null) || {
   echo "$LOG_PREFIX ERROR: token endpoint unreachable" >&2
   exit 3
 }
-ACCESS_TOKEN=$(printf '%s' "$TOKEN_JSON" | sed -nE 's/.*"access_token":"([^"]+)".*/\1/p')
+ACCESS_TOKEN=$(printf '%s' "$TOKEN_JSON" | jq -er '.access_token // empty' 2>/dev/null || true)
 if [[ -z "$ACCESS_TOKEN" ]]; then
-  echo "$LOG_PREFIX ERROR: token response missing access_token: $TOKEN_JSON" >&2
+  TOKEN_ERROR=$(printf '%s' "$TOKEN_JSON" | jq -r '[.error, .error_description] | map(select(type == "string" and length > 0)) | join(": ")' 2>/dev/null || true)
+  echo "$LOG_PREFIX ERROR: token response missing access_token${TOKEN_ERROR:+: $TOKEN_ERROR}" >&2
   exit 3
 fi
 echo "$LOG_PREFIX step 1: got access_token (length=${#ACCESS_TOKEN})" >&2
@@ -69,11 +104,6 @@ run_mysql() {
   docker exec -i -e "MYSQL_PWD=$MYSQL_PASSWORD" "$MYSQL_CONTAINER" \
     mysql -u"$MYSQL_USER" --default-character-set=utf8mb4 -N -B \
     "$DB_NAME" -e "$1" 2>/dev/null
-}
-
-# JSON-escape 工具：把 stdin 的字符串 escape 成合法 JSON 字符串（不含外侧引号）
-json_escape() {
-  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/	/\\t/g"
 }
 
 echo "$LOG_PREFIX step 2: reading resources / permissions / roles from $MYSQL_CONTAINER" >&2
@@ -104,13 +134,9 @@ PERMS_JSON="["
 first=1
 while IFS=$'\t' read -r code name action risk rcode; do
   [[ -z "$code" ]] && continue
-  code_e=$(printf '%s' "$code" | json_escape)
-  name_e=$(printf '%s' "$name" | json_escape)
-  action_e=$(printf '%s' "$action" | json_escape)
-  rcode_e=$(printf '%s' "$rcode" | json_escape)
-  rname_e=$(printf '%s' "${RESOURCE_NAME[$rcode]:-$rcode}" | json_escape)
-  risk_e=$(printf '%s' "$risk" | json_escape)
-  obj="{\"code\":\"$code_e\",\"name\":\"$name_e\",\"action\":\"$action_e\",\"resource_code\":\"$rcode_e\",\"resource_name\":\"$rname_e\",\"risk_level\":\"$risk_e\"}"
+  obj=$(jq -cn --arg code "$code" --arg name "$name" --arg action "$action" \
+    --arg rcode "$rcode" --arg rname "${RESOURCE_NAME[$rcode]:-$rcode}" --arg risk "$risk" \
+    '{code:$code,name:$name,action:$action,resource_code:$rcode,resource_name:$rname,risk_level:$risk}')
   if [[ $first -eq 1 ]]; then PERMS_JSON+="$obj"; first=0; else PERMS_JSON+=",$obj"; fi
 done <<< "$PERMS_TSV"
 PERMS_JSON+="]"
@@ -131,46 +157,42 @@ while IFS=$'\t' read -r code name desc; do
   PERMS_LIST=""
   for p in "${perms_arr[@]}"; do
     [[ -z "$p" ]] && continue
-    p_e=$(printf '%s' "$p" | json_escape)
-    PERMS_LIST+=",\"$p_e\""
+    p_json=$(jq -cn --arg value "$p" '$value')
+    PERMS_LIST+=",$p_json"
   done
   PERMS_LIST="${PERMS_LIST#,}"
-  code_e=$(printf '%s' "$code" | json_escape)
-  name_e=$(printf '%s' "$name" | json_escape)
-  desc_e=$(printf '%s' "$desc" | json_escape)
-  obj="{\"code\":\"$code_e\",\"name\":\"$name_e\",\"description\":\"$desc_e\",\"permissions\":[$PERMS_LIST]}"
+  obj=$(jq -cn --arg code "$code" --arg name "$name" --arg description "$desc" \
+    --argjson permissions "[$PERMS_LIST]" '{code:$code,name:$name,description:$description,permissions:$permissions}')
   if [[ $first -eq 1 ]]; then ROLES_JSON+="$obj"; first=0; else ROLES_JSON+=",$obj"; fi
 done <<< "$ROLES_TSV"
 ROLES_JSON+="]"
 
 # 拼最终 payload
-PAYLOAD=$(cat <<EOF
-{
-  "catalog_version": "$CATALOG_VERSION",
-  "permissions": $PERMS_JSON,
-  "roles": $ROLES_JSON,
-  "policy": {"max_effective_roles": 8},
-  "claims_role_config_hash": "$CLAIMS_ROLE_CONFIG_HASH"
-}
-EOF
-)
+PAYLOAD_FILE="$(mktemp)"
+chmod 0600 "$PAYLOAD_FILE"
+jq -cn --arg catalog_version "$CATALOG_VERSION" \
+  --argjson permissions "$PERMS_JSON" --argjson roles "$ROLES_JSON" \
+  --arg claims_role_config_hash "$CLAIMS_ROLE_CONFIG_HASH" \
+  '{catalog_version:$catalog_version,permissions:$permissions,roles:$roles,policy:{max_effective_roles:8},claims_role_config_hash:$claims_role_config_hash}' \
+  >"$PAYLOAD_FILE"
 
 # 3) PUT
 echo "$LOG_PREFIX step 3: PUT ${ISSUER%/}/api/v1/applications/$APP_ID/authorization-catalog" >&2
-PUT_RESPONSE=$(wget -q -O- \
-  --header "Authorization: Bearer $ACCESS_TOKEN" \
+printf 'silent\nshow-error\nfail-with-body\nheader = "Authorization: Bearer %s"\n' \
+  "$(curl_config_escape "$ACCESS_TOKEN")" >"$CURL_CONFIG_FILE"
+PUT_RESPONSE=$(curl --config "$CURL_CONFIG_FILE" \
   --header "Content-Type: application/json" \
   --header "Origin: $ISSUER" \
-  --body-data "$PAYLOAD" \
-  --timeout 20 \
-  --method PUT \
+  --data-binary "@$PAYLOAD_FILE" \
+  --max-time 20 \
+  --request PUT \
   "${ISSUER%/}/api/v1/applications/$APP_ID/authorization-catalog" 2>&1) || {
   echo "$LOG_PREFIX ERROR: PUT failed: $PUT_RESPONSE" >&2
   exit 4
 }
 
-SYNC_STATUS=$(printf '%s' "$PUT_RESPONSE" | sed -nE 's/.*"sync_status":"([^"]+)".*/\1/p')
-ROLE_COUNT=$(printf '%s' "$PUT_RESPONSE" | grep -o '"code":"[a-z_]*"' | wc -l | tr -d ' ')
+SYNC_STATUS=$(printf '%s' "$PUT_RESPONSE" | jq -r '.data.sync_status // .sync_status // empty' 2>/dev/null || true)
+ROLE_COUNT=$(printf '%s' "$PUT_RESPONSE" | jq -r '(.data.roles // .roles // []) | length' 2>/dev/null || printf '0')
 
 if [[ "$SYNC_STATUS" == "SYNCED" ]]; then
   echo "$LOG_PREFIX OK: app=$APP_ID roles=$ROLE_COUNT version=$CATALOG_VERSION"

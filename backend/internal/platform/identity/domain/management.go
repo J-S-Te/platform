@@ -32,9 +32,13 @@ type User struct {
 
 // Account is a login subject associated with a user where applicable.
 type Account struct {
-	ID          string
-	TenantID    string
-	UserID      *string
+	ID       string
+	TenantID string
+	UserID   *string
+	// User is the display reference for the linked natural person. UserID remains
+	// available for compatibility and write operations, while management reads use
+	// this reference to avoid forcing every client to issue one request per account.
+	User        *ReferenceName
 	AccountName string
 	AccountType string
 	AuthSource  string

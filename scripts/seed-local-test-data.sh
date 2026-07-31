@@ -6,9 +6,9 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-COMPOSE_FILE="${PROJECT_ROOT}/compose.yaml"
-ENV_FILE="${PROJECT_ROOT}/docker/.env"
-PROJECT_NAME="basic-platform"
+COMPOSE_FILE="${PROJECT_ROOT}/compose.local.yaml"
+ENV_FILE="${PROJECT_ROOT}/docker/.env.local"
+PROJECT_NAME="basic-platform-local"
 SQL_FILE="${PROJECT_ROOT}/docker/seed-local-test-data.sql"
 DRY_RUN=false
 
@@ -27,9 +27,9 @@ usage() {
   bash scripts/seed-local-test-data.sh [选项]
 
 选项：
-  --compose-file FILE  Compose 文件，默认 compose.yaml
-  --env-file FILE      Compose 环境文件，默认 docker/.env
-  --project-name NAME  Compose 项目名，默认 basic-platform
+  --compose-file FILE  Compose 文件，默认 compose.local.yaml
+  --env-file FILE      Compose 环境文件，默认 docker/.env.local
+  --project-name NAME  Compose 项目名，默认 basic-platform-local
   --dry-run            仅检查前置条件，不写数据库
   -h, --help           显示帮助
 
@@ -80,6 +80,21 @@ command -v docker >/dev/null 2>&1 || fail '未找到 docker 命令'
 docker compose version >/dev/null 2>&1 || fail '当前 Docker 未提供 compose 子命令'
 docker info >/dev/null 2>&1 || fail 'Docker daemon 未运行或当前用户无权访问'
 
+read_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    $1 == key { print substr($0, index($0, "=") + 1); exit }
+  ' "$ENV_FILE"
+}
+
+app_env="$(read_env_value APP_ENV)"
+mysql_database="$(read_env_value MYSQL_DATABASE)"
+[[ "$app_env" == "development" || "$app_env" == "test" || "$app_env" == "local" ]] || \
+  fail "拒绝向非本地环境写入测试数据：APP_ENV=${app_env:-'(空)'}"
+[[ "$mysql_database" == "basic_platform" ]] || \
+  fail "拒绝向非预期数据库写入测试数据：MYSQL_DATABASE=${mysql_database:-'(空)'}"
+
 compose=(
   docker compose
   --project-name "$PROJECT_NAME"
@@ -87,7 +102,7 @@ compose=(
   --file "$COMPOSE_FILE"
 )
 
-running_services="$(${compose[@]} ps --status running --services)"
+running_services="$("${compose[@]}" ps --status running --services)"
 grep -qx 'mysql' <<<"$running_services" || fail 'mysql 服务未运行，请先启动本地 Docker 环境'
 
 mysql_exec() {

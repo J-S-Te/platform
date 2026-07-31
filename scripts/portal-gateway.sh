@@ -32,6 +32,8 @@ COMPOSE_FILE="${PORTAL_GATEWAY_COMPOSE_FILE:-}"
 API_BASE_URL="${PORTAL_GATEWAY_API_BASE_URL:-http://127.0.0.1:8080}"
 API_TOKEN="${PORTAL_GATEWAY_API_TOKEN:-}"
 PAGE_LIMIT="${PORTAL_GATEWAY_PAGE_LIMIT:-100}"
+LOCK_FILE="${PORTAL_GATEWAY_LOCK_FILE:-${NGINX_INCLUDE}.lock}"
+LOCK_TIMEOUT="${PORTAL_GATEWAY_LOCK_TIMEOUT:-60}"
 # 这些模块已经编译进统一 Vue 前端，只允许代理其后端 API 子路径，不能生成整站反代。
 INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management}"
 
@@ -74,7 +76,49 @@ usage() {
   PORTAL_GATEWAY_API_BASE_URL      sync 认证适配层的平台 API 入口
   PORTAL_GATEWAY_API_TOKEN         认证适配层接受的 Bearer token
   PORTAL_GATEWAY_PAGE_LIMIT        列表接口单页大小
+  PORTAL_GATEWAY_LOCK_FILE         配置写锁文件；默认 <include>.lock
+  PORTAL_GATEWAY_LOCK_TIMEOUT      等待配置写锁的秒数；默认 60
 USAGE
+}
+
+# Linux 优先使用 util-linux flock；macOS 等缺少 flock 的环境回退到原子 mkdir 锁。
+# 锁覆盖完整的 read/merge/write 流程，避免 CI、provisioner 与人工操作并发时丢路由。
+run_with_gateway_lock() {
+  local operation="$1"
+  shift
+  [[ "$LOCK_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || {
+    log "ERROR" "PORTAL_GATEWAY_LOCK_TIMEOUT 必须是正整数：$LOCK_TIMEOUT"
+    return 2
+  }
+  mkdir -p -- "$(dirname -- "$LOCK_FILE")"
+
+  if command -v flock >/dev/null 2>&1; then
+    local rc
+    exec 9>"$LOCK_FILE"
+    if ! flock -w "$LOCK_TIMEOUT" 9; then
+      log "ERROR" "等待网关配置锁超时：$LOCK_FILE（操作：$operation）"
+      exec 9>&-
+      return 1
+    fi
+    if ( "$@" ); then rc=0; else rc=$?; fi
+    flock -u 9 || true
+    exec 9>&-
+    return "$rc"
+  fi
+
+  local lock_dir="${LOCK_FILE}.d" waited=0 rc
+  while ! mkdir -- "$lock_dir" 2>/dev/null; do
+    if (( waited >= LOCK_TIMEOUT )); then
+      log "ERROR" "等待网关配置目录锁超时：$lock_dir（操作：$operation）"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # 子进程隔离可确保被调用函数中的 exit 不会跳过目录锁清理。
+  if ( "$@" ); then rc=0; else rc=$?; fi
+  rmdir -- "$lock_dir" 2>/dev/null || true
+  return "$rc"
 }
 
 require_arg() {
@@ -495,12 +539,12 @@ main() {
     exit 1
   fi
   case "$command" in
-    add) shift; require_arg "${1:-}" "缺少 <code>"; require_arg "${2:-}" "缺少 <path_prefix>"; require_arg "${3:-}" "缺少 <upstream_url>"; do_add "$1" "$2" "$3" ;;
-    remove) shift; require_arg "${1:-}" "缺少 <code>"; do_remove "$1" ;;
-    list) do_list ;;
-    sync) do_sync ;;
+    add) shift; require_arg "${1:-}" "缺少 <code>"; require_arg "${2:-}" "缺少 <path_prefix>"; require_arg "${3:-}" "缺少 <upstream_url>"; run_with_gateway_lock add do_add "$1" "$2" "$3" ;;
+    remove) shift; require_arg "${1:-}" "缺少 <code>"; run_with_gateway_lock remove do_remove "$1" ;;
+    list) run_with_gateway_lock list do_list ;;
+    sync) run_with_gateway_lock sync do_sync ;;
     reload) do_reload ;;
-    apply) do_sync && do_reload ;;
+    apply) run_with_gateway_lock sync do_sync && do_reload ;;
     -h|--help|help) usage ;;
     *) log "ERROR" "未知命令: $command"; usage; exit 1 ;;
   esac

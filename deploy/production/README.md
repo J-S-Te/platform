@@ -1,5 +1,9 @@
 # 生产环境 CI/CD 部署
 
+> 更新日期：2026-07-31
+> 子系统开发、OIDC、安全回调和首次接入的完整要求见
+> [`docs/subsystem-onboarding.md`](../../docs/subsystem-onboarding.md)。
+
 该目录是三仓库共用的远程运行目录。三个项目各构建一个镜像：统一前端镜像同时
 承载基础平台与合同管理前端；`platform-api` 在一个容器内运行基础平台 API 与 Worker；
 `contract-api` 在一个容器内运行合同 API 与 Temporal Worker。迁移任务复用对应后端
@@ -124,3 +128,6 @@ CI 实际调用：
 执行迁移、更新单个后端容器并检查健康状态。失败时恢复上一镜像；已经成功执行的数据库
 迁移不会自动反向迁移。数据库备份和历史 release 文件位于 `backups/`。
 平台上传文件、JWT 密钥和 Docker volumes 仍应纳入服务器级定期异地备份。
+
+发布脚本和子系统接入互相独立：发布新镜像不会删除或重建 Application、Environment、
+LoginTarget、OAuth Client；已接入子系统也不需要重新执行接入脚本。

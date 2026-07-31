@@ -84,6 +84,7 @@ usage() {
   2. rollback 不会自动执行数据库回退；迁移上线前必须确认新旧应用与数据库结构兼容。
   3. backup 不会复制环境文件或私钥，避免把密钥写入普通备份目录；密钥须按独立安全流程备份。
   4. Linux 区分大小写。服务名、环境变量、目录、文件和 URL 路径必须按本帮助原样使用。
+  5. --backup-dir 与 FILE_STORAGE_ROOT 不能是系统根目录，也不能相同或互为父子目录。
 USAGE
 }
 
@@ -154,6 +155,20 @@ validate_absolute_path() {
     [[ "$path" == /* ]] || fatal "生产路径必须是绝对路径：${path}"
 }
 
+canonical_path() {
+    readlink -m -- "$1"
+}
+
+reject_dangerous_directory() {
+    local label="$1" path
+    path="$(canonical_path "$2")"
+    case "$path" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var)
+            fatal "${label} 不能直接指向系统目录：${path}"
+            ;;
+    esac
+}
+
 initialize_settings() {
     require_linux
     validate_service_name "$API_SERVICE"
@@ -161,6 +176,7 @@ initialize_settings() {
     validate_absolute_path "$DEPLOY_ROOT"
     validate_absolute_path "$ENV_FILE"
     validate_absolute_path "$BACKUP_DIR"
+    reject_dangerous_directory "备份目录" "$BACKUP_DIR"
     [[ "$HEALTH_URL" =~ ^https?://[^/]+(:[0-9]+)?$ ]] || fatal "--health-url 仅接受不带路径的 HTTP/HTTPS 地址，例如 http://127.0.0.1:8080。"
     initialize_log
 }
@@ -479,6 +495,12 @@ backup_uploads() {
     local storage_root timestamp temporary_file backup_file
     storage_root="$(require_nonempty_env_value FILE_STORAGE_ROOT)"
     [[ "$storage_root" == /* ]] || fatal "生产环境 FILE_STORAGE_ROOT 必须是绝对路径：${storage_root}"
+    reject_dangerous_directory "FILE_STORAGE_ROOT" "$storage_root"
+    local canonical_storage canonical_backup
+    canonical_storage="$(canonical_path "$storage_root")"
+    canonical_backup="$(canonical_path "$BACKUP_DIR")"
+    [[ "$canonical_storage" != "$canonical_backup" && "$canonical_storage" != "$canonical_backup/"* && "$canonical_backup" != "$canonical_storage/"* ]] || \
+        fatal "FILE_STORAGE_ROOT 与备份目录不能相同或互为父子目录：${canonical_storage} / ${canonical_backup}"
     [[ -d "$storage_root" ]] || fatal "上传文件目录不存在：${storage_root}"
     timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
     temporary_file="$(mktemp "${BACKUP_DIR}/uploads/.uploads-${timestamp}.XXXXXX.tar.gz")"
