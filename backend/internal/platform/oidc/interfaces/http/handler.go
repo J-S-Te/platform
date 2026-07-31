@@ -84,6 +84,18 @@ type AccessTokenSubjectResolver interface {
 	ResolveAccessTokenSubject(context.Context, string, string, string) (AccessTokenSubject, error)
 }
 
+// PersonnelDirectoryEntry is the minimal tenant personnel projection exposed to profile-scoped
+// subsystem sessions. Login names and employee numbers are deliberately excluded.
+type PersonnelDirectoryEntry struct {
+	UserID      string   `json:"user_id"`
+	DisplayName string   `json:"display_name"`
+	Roles       []string `json:"roles"`
+}
+
+type PersonnelDirectoryResolver interface {
+	ListActivePersonnel(context.Context, string, string) ([]PersonnelDirectoryEntry, error)
+}
+
 // Clock makes JWT verification deterministic in unit tests.
 type Clock interface {
 	Now() time.Time
@@ -105,6 +117,7 @@ type Config struct {
 	PostLogoutRedirectValidator   PostLogoutRedirectValidator
 	AccessTokenSubjectResolver    AccessTokenSubjectResolver
 	AuthorizationResolver         tokenissuer.AuthorizationResolver
+	PersonnelDirectoryResolver    PersonnelDirectoryResolver
 	SessionCookieName             string
 	SessionCookieSecure           bool
 	SessionCookieSameSite         http.SameSite
@@ -122,6 +135,7 @@ type Handler struct {
 	logoutRedirects       PostLogoutRedirectValidator
 	accessTokenSubjects   AccessTokenSubjectResolver
 	authorizationResolver tokenissuer.AuthorizationResolver
+	personnelDirectory    PersonnelDirectoryResolver
 	cookie                cookieConfig
 	clock                 Clock
 	logger                *slog.Logger
@@ -155,8 +169,8 @@ func NewHandler(config Config) (*Handler, error) {
 		service: config.Service, jwtManager: config.JWTManager, legacyIssuer: config.LegacyClientCredentialsIssuer,
 		sessionAuth: config.SessionAuthenticator, sessionLogout: config.SessionLogout,
 		logoutRedirects: config.PostLogoutRedirectValidator, accessTokenSubjects: config.AccessTokenSubjectResolver,
-		authorizationResolver: config.AuthorizationResolver,
-		cookie:                cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
-		clock:                 config.Clock, logger: config.Logger,
+		authorizationResolver: config.AuthorizationResolver, personnelDirectory: config.PersonnelDirectoryResolver,
+		cookie: cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
+		clock:  config.Clock, logger: config.Logger,
 	}, nil
 }

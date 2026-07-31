@@ -37,6 +37,7 @@ import (
 	oidcinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/infrastructure"
 	oidcaccesssubject "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/accesssubject"
 	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
+	oidcpersonneldirectory "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/personneldirectory"
 	oidctokenissuer "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/tokenissuer"
 	securityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/application"
 	securityinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/infrastructure"
@@ -342,6 +343,12 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	oidcPersonnelDirectory, err := oidcpersonneldirectory.New(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
 	oidcCookieSameSite, err := parseSameSite(cfg.Auth.SessionCookieSameSite)
 	if err != nil {
 		_ = database.Close(db)
@@ -357,6 +364,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		PostLogoutRedirectValidator:   oidcService,
 		AccessTokenSubjectResolver:    oidcAccessTokenSubjects,
 		AuthorizationResolver:         oidcAuthorizationResolver,
+		PersonnelDirectoryResolver:    oidcPersonnelDirectory,
 		SessionCookieName:             cfg.Auth.SessionCookieName,
 		SessionCookieSecure:           cfg.Auth.SessionCookieSecure,
 		SessionCookieSameSite:         oidcCookieSameSite,
