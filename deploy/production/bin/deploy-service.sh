@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 usage() {
-  echo "usage: $0 {frontend|platform|contract} ghcr.io/owner/image@sha256:<64-hex-digest>" >&2
+  echo "usage: $0 {frontend|platform|contract} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
   exit 2
 }
 
@@ -16,7 +16,9 @@ case "$service" in
   *) usage ;;
 esac
 
-if [[ ! "$image_ref" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]]; then
+acr_enterprise_or_new_personal='^[a-z0-9.-]+\.cr\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
+acr_legacy_personal='^registry(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
+if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal ]]; then
   echo "拒绝可变或格式错误的镜像引用：$image_ref" >&2
   exit 2
 fi

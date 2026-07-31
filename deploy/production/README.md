@@ -21,7 +21,7 @@ cd /opt/basic-platform
 cp .env.example .env
 cp .release.env.example .release.env
 chmod 600 .env .release.env
-docker login ghcr.io
+docker login <ACR 专有网络域名>
 ```
 
 把示例域名和所有 `REPLACE_WITH_...` 替换为真实值。密钥可用以下方式生成：
@@ -31,7 +31,8 @@ openssl rand -base64 32
 openssl rand -hex 32
 ```
 
-GHCR 包为私有时，服务器登录使用的 PAT 至少需要 `read:packages`。
+ACR 仓库为私有时，服务器必须使用有 Pull 权限的 ACR 访问凭证登录。ECS 与
+ACR 在同一 VPC 时应使用控制台提供的专有网络域名。
 不要提交 `.env`、`.release.env` 或备份文件。
 
 把 `nginx/basic-platform.conf.example` 复制到主机 Nginx 配置目录，替换域名和
@@ -42,17 +43,27 @@ GHCR 包为私有时，服务器登录使用的 PAT 至少需要 `read:packages`
 在 `frontend`、`platform`、`contract_management` 三个 GitHub 仓库中创建
 `production` Environment，并配置相同的 Actions secrets：
 
+- `ACR_USERNAME`：有镜像 Push 权限的 ACR 登录名
+- `ACR_PASSWORD`：对应的 ACR 访问凭证密码
 - `DEPLOY_HOST`：服务器地址
 - `DEPLOY_USER`：拥有该目录且可运行 Docker 的低权限发布用户
 - `DEPLOY_PORT`：SSH 端口，可省略，默认 22
 - `DEPLOY_SSH_KEY`：发布用户的 SSH 私钥
 - `DEPLOY_KNOWN_HOSTS`：用 `ssh-keyscan -H <host>` 预先核验后保存的主机公钥
 
-可选仓库变量 `DEPLOY_PATH` 默认为 `/opt/basic-platform`。平台仓库每次发布还会
+同时配置以下 Actions variables：
+
+- `ACR_PUSH_REGISTRY`：供 GitHub 托管 Runner 使用的 ACR 公网域名
+- `ACR_PULL_REGISTRY`：供 ECS 使用的同一 ACR 实例专有网络域名
+- `ACR_NAMESPACE`：ACR 命名空间
+- `ACR_REPOSITORY`：当前仓库对应的 ACR 镜像仓库名称
+- `DEPLOY_PATH`：可选，默认为 `/opt/basic-platform`
+
+平台仓库每次发布还会
 同步本目录的 Compose 和发布脚本；不会覆盖服务器上的 `.env` 与
 `.release.env`。
 
-推送 `main` 后，流水线只执行测试并构建、推送 GHCR 镜像；不会因为尚未配置
+推送 `main` 后，流水线执行测试并构建、推送 ACR 镜像；不会因为尚未配置
 生产服务器密钥而自动发起 SSH 部署。需要发布时，在 GitHub Actions 中从 `main`
 手动运行 `platform-ci-cd`，并勾选 `deploy_production`。此时流水线才会通过 SSH
 发布不可变的 `image@sha256:digest`；如果上述生产 Environment secrets 未配置，任务会
@@ -100,9 +111,9 @@ bash scripts/subsystem-onboarding.sh \
 CI 实际调用：
 
 ```bash
-./bin/deploy-service.sh platform ghcr.io/owner/platform@sha256:<digest>
-./bin/deploy-service.sh frontend ghcr.io/owner/frontend@sha256:<digest>
-./bin/deploy-service.sh contract ghcr.io/owner/contract_management@sha256:<digest>
+./bin/deploy-service.sh platform <acr-vpc-host>/<namespace>/platform@sha256:<digest>
+./bin/deploy-service.sh frontend <acr-vpc-host>/<namespace>/frontend@sha256:<digest>
+./bin/deploy-service.sh contract <acr-vpc-host>/<namespace>/contract_management@sha256:<digest>
 ```
 
 脚本串行锁定发布，拉取镜像、校验 Compose、在后端发布前备份对应 MySQL、
