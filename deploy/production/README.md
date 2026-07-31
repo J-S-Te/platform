@@ -11,8 +11,9 @@
 
 ## 1. 服务器初始化
 
-服务器需要 Linux、Docker Engine、Docker Compose v2、Nginx、`curl`、`gzip`
-和 `flock`。建议只开放 SSH、80、443，应用端口只监听 `127.0.0.1`。
+服务器需要 Linux、Docker Engine、Docker Compose v2、`curl`、`gzip`
+和 `flock`。正式域名和 HTTPS 部署建议使用主机 Nginx，只开放 SSH、80、443，
+应用端口监听 `127.0.0.1`。
 
 ```bash
 sudo install -d -o deploy -g deploy -m 750 /opt/basic-platform
@@ -42,10 +43,26 @@ ACR 在同一 VPC 时应使用控制台提供的专有网络域名。
 把 `nginx/basic-platform.conf.example` 复制到主机 Nginx 配置目录，替换域名和
 证书路径后执行 `sudo nginx -t` 并重载 Nginx。
 
+没有域名和主机 Nginx 的测试服务器，可以让统一前端直接承载公网 HTTP 入口：
+
+```dotenv
+FRONTEND_BIND_ADDRESS=0.0.0.0
+FRONTEND_PORT=8081
+APP_PUBLIC_BASE_URL=http://47.111.20.119:8081
+APP_CORS_ALLOWED_ORIGINS=http://47.111.20.119:8081
+OIDC_ISSUER=http://47.111.20.119:8081
+AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true
+AUTH_SESSION_COOKIE_SECURE=false
+OIDC_SESSION_COOKIE_SECURE=false
+```
+
+此模式不提供 TLS，只适用于受控测试环境；安全组需要放行 TCP/8081。
+
 ## 2. GitHub 配置
 
-在 `frontend`、`platform`、`contract_management` 三个 GitHub 仓库中创建
-`production` Environment，并配置相同的 Actions secrets：
+当前三个 workflow 使用 `test` Environment。在 `frontend`、`platform`、
+`contract_management` 三个 GitHub 仓库中创建该 Environment，并配置相同的
+Actions secrets：
 
 - `ACR_USERNAME`：有镜像 Push 权限的 ACR 登录名
 - `ACR_PASSWORD`：对应的 ACR 访问凭证密码
@@ -67,17 +84,13 @@ ACR 在同一 VPC 时应使用控制台提供的专有网络域名。
 同步本目录的 Compose 和发布脚本；不会覆盖服务器上的 `.env` 与
 `.release.env`。
 
-推送 `main` 后，流水线执行测试并构建、推送 ACR 镜像；不会因为尚未配置
-生产服务器密钥而自动发起 SSH 部署。需要发布时，在 GitHub Actions 中从 `main`
-手动运行 `platform-ci-cd`，并勾选 `deploy_production`。此时流水线才会通过 SSH
-发布不可变的 `image@sha256:digest`；如果上述生产 Environment secrets 未配置，任务会
-明确失败并指出缺失的配置。相同仓库及服务器上的发布会串行执行，避免中途取消或三个
-仓库同时更新 Compose 状态。
+推送 `main` 后，流水线会执行测试、构建并推送 ACR 镜像，然后自动通过 SSH
+发布不可变的 `image@sha256:digest`。Environment secrets 缺失时部署任务会明确失败。
+三个仓库可能同时到达服务器，但远端 `flock` 会把 Compose 更新串行化。
 
 ## 3. 首次上线顺序
 
-先手动触发或推送 `platform`，再部署 `frontend`。平台数据库迁移成功后初始化
-管理员：
+首次上线依次推送 `platform`、`frontend`。平台数据库迁移成功后初始化管理员：
 
 ```bash
 cd /opt/basic-platform
@@ -89,61 +102,17 @@ printf '%s\n' "$ADMIN_PASSWORD" | docker compose \
 unset ADMIN_PASSWORD
 ```
 
-### 3.1 当前生产 Compose 的限制
+随后在平台应用管理中为已有的 `contract_management` 应用完成生产环境配置，并创建两套
+独立 OAuth Client：
 
-“统一登录目标”不在前端配置。当前本目录的生产 `compose.yaml` **没有**
-`subsystem-provisioner` 服务，也没有把 Docker Socket、子系统项目目录和动态网关 include
-授权给平台 API。因此仅部署本目录后，不能直接执行 `subsystem.sh onboard`（或兼容壳 `subsystem-onboarding.sh`）并假设它会：
+- 浏览器 Client：`authorization_code + refresh_token`、PKCE、`openid profile`，
+  回调地址为 `http://47.111.20.119:8081/contract_management/auth/callback`。
+- 目录发布 Client：`client_credentials + client_secret_basic`，只授予
+  `authorization.catalog.sync`。
 
-- 写入子系统 `.env.local`；
-- 启动子系统 Compose；
-- 修改生产 Nginx；
-- 自动发布授权目录。
-
-生产环境必须先选择并评审一种方案：
-
-1. 部署与本地相同安全边界的独立 provisioner，限制 Unix Socket 动作、项目目录、Docker
-   网络、网关脚本和 include 路径；或
-2. 由运维在受控变更单中完成运行配置、容器和 Nginx 部署，再通过平台管理 API登记相同
-   Application/Environment/LoginTarget/OAuth Client。
-
-禁止为了图方便给普通 `platform-api` 容器直接挂载 Docker Socket。
-
-### 3.2 provisioner 已部署时的首次接入
-
-平台 API 应通过本机回环或 HTTPS 调用。生产 OAuth 回调必须使用 HTTPS：
-
-```bash
-bash scripts/subsystem.sh onboard \
-  --application-code contract_management \
-  --application-name '合同管理系统' \
-  --environment prod \
-  --public-base-url https://你的域名 \
-  --upstream-url http://contract-api:8081 \
-  --path-prefix /contract_management \
-  --client-type confidential \
-  --api-base-url http://127.0.0.1:${PLATFORM_API_PORT:-18080}/api/v1 \
-  --platform-origin https://你的域名 \
-  --account admin
-```
-
-应用编码与公开路径统一使用 `contract_management`；公开路径固定为 `/contract_management`。
-脚本调用后端原子创建应用、环境、相对登录目标和 OAuth Client，Client Secret 只在后端内存中
-交给 provisioner，不返回浏览器或命令行。独立审计机器客户端仍按审计客户端管理流程创建，
-不能复用浏览器 OIDC Client。完成运行时配置后再触发 `contract_management` 发布。
-
-接入前先执行同一命令并增加 `--dry-run --yes`。接入只用于首次创建不存在的环境；常规
-镜像发布、迁移、容器重启、回滚均不得执行 onboard/offboard。
-
-### 3.3 生产安全要求
-
-- `.env`、`.release.env` 和子系统 `.env.local` 权限保持 `0600`；
-- `AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=false`；
-- 不启用 `BASIC_PLATFORM_ALLOW_INSECURE_HTTP_API`；管理 API 使用回环或 HTTPS；
-- 浏览器 Client、授权目录 publisher、审计客户端使用独立凭据；
-- 网关更新使用 `portal-gateway.sh` 的跨进程锁。Linux 应安装 util-linux `flock`；
-- offboard 不是跨 Docker/文件/DB 的全局事务，执行前必须备份子系统运行配置并准备补偿；
-- Secret 不放入命令行、GitHub Actions 普通变量或命令输出。
+把应用 ID、两套 Client 凭据、Tenant ID 和精确回调地址写入服务器 `.env`。
+`PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED` 必须设为 `true`。审计机器 Client
+仍需单独创建，不能复用上述 Client。配置完成后再推送 `contract_management`。
 
 ## 4. 发布与恢复
 
