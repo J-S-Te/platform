@@ -148,7 +148,7 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE}
     ports:
-      - "127.0.0.1:${FRONTEND_PORT:-18082}:80"
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-18082}:80"
     networks: [application]
     depends_on:
       platform-api:

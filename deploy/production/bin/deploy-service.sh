@@ -67,6 +67,16 @@ env_value() {
   ' "$runtime_file"
 }
 
+require_runtime_value() {
+  local key="$1"
+  local value
+  value="$(env_value "$key")"
+  if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+    echo "运行配置缺失或仍为占位值：$key" >&2
+    return 1
+  fi
+}
+
 port_value() {
   local key="$1"
   local fallback="$2"
@@ -114,6 +124,16 @@ deploy_platform() {
 }
 
 deploy_contract() {
+  require_runtime_value OIDC_CLIENT_ID || return
+  require_runtime_value OIDC_CLIENT_SECRET || return
+  require_runtime_value OIDC_TENANT_ID || return
+  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
+  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
+  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
+  if [[ "$(env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
+    echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
+    return 1
+  fi
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
   compose --profile release run --rm contract-migrate ./migrate || return
