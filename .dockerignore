@@ -1,0 +1,5 @@
+**
+!backend/
+!backend/**
+!scripts/
+!scripts/sync-contract-catalog.sh
