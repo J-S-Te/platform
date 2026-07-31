@@ -66,6 +66,18 @@ type userCreateRequest struct {
 	Status      *string `json:"status"`
 }
 
+type applicationRoleAssignmentRequest struct {
+	ApplicationCode string `json:"application_code,omitempty"`
+	ApplicationName string `json:"application_name,omitempty"`
+	RoleCode        string `json:"role_code,omitempty"`
+	RoleName        string `json:"role_name,omitempty"`
+}
+
+type userBatchCreateItemRequest struct {
+	userCreateRequest
+	ApplicationRoles []applicationRoleAssignmentRequest `json:"application_roles,omitempty"`
+}
+
 type userRequest struct {
 	DisplayName string  `json:"display_name"`
 	EmployeeNo  *string `json:"employee_no"`
@@ -76,7 +88,7 @@ type userRequest struct {
 }
 
 type userBatchCreateRequest struct {
-	Items []userCreateRequest `json:"items"`
+	Items []userBatchCreateItemRequest `json:"items"`
 }
 
 // employeeCreateRequest keeps employee onboarding atomic while preserving the legacy /users,
@@ -367,14 +379,27 @@ func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, r
 		return
 	}
 	items := make([]application.UserCreateInput, 0, len(payload.Items))
+	hasApplicationRoles := false
 	for _, item := range payload.Items {
 		status := domain.StatusActive
 		if item.Status != nil {
 			status = *item.Status
 		}
+		roles := make([]application.ApplicationRoleAssignment, 0, len(item.ApplicationRoles))
+		for _, role := range item.ApplicationRoles {
+			hasApplicationRoles = true
+			roles = append(roles, application.ApplicationRoleAssignment{
+				ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName,
+				RoleCode: role.RoleCode, RoleName: role.RoleName,
+			})
+		}
 		items = append(items, application.UserCreateInput{
-			DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: status,
+			DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: status, ApplicationRoles: roles,
 		})
+	}
+	if hasApplicationRoles && !principalHasPermission(principal, "platform:role-binding:update") {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
 	}
 	result, err := handler.service.CreateUsersBatch(request.Context(), application.UserBatchCreateInput{
 		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, Items: items,

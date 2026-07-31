@@ -24,8 +24,8 @@
 
 | 名称 | 使用者 | 示例 |
 | --- | --- | --- |
-| 平台管理 API | 接入脚本向平台登录和写控制面数据 | `http://127.0.0.1:8081/api/v1` |
-| Public BaseURL | 用户浏览器访问统一门户的 origin | `http://192.168.3.11:8081` |
+| 平台管理 API | 接入脚本向平台登录和写控制面数据 | `http://localhost:8081/api/v1` |
+| Public BaseURL | 用户浏览器访问统一门户的 origin | `http://localhost:8081` |
 | UpstreamURL | 门户网关在 Docker/内网中访问子系统 | `http://customer-api:8080` |
 
 容器中的 `localhost` 只表示当前容器。不要将 `http://localhost:8080` 作为另一个容器的 Upstream。
@@ -111,12 +111,12 @@ redirect_uri          = <public-base-url><path-prefix>/auth/callback
 client_id             = <application-code>-<environment>-web
 ```
 
-例如：
+本机开发示例：
 
 ```text
-Public BaseURL : http://192.168.3.11:8081
+Public BaseURL : http://localhost:8081
 PathPrefix     : /customer_management
-Redirect URI  : http://192.168.3.11:8081/customer_management/auth/callback
+Redirect URI  : http://localhost:8081/customer_management/auth/callback
 ```
 
 ### 3.3 HTTP 回调策略
@@ -172,7 +172,40 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
 | `--api-base-url` | 平台管理 API 根地址 |
 | `--platform-origin` | Cookie 写请求 Origin，应在平台 CORS/同源策略允许范围内 |
 
-### 4.3 先 dry-run
+### 4.3 合同管理本地快速路径
+
+当前合同管理本地环境统一使用 `dev`。如果数据库中已经存在
+`contract_management/dev`，不要再次接入，日常更新直接执行：
+
+```bash
+bash scripts/docker-local.sh refresh-contract-api
+bash scripts/docker-local.sh refresh-frontend
+```
+
+只有首次环境不存在时才执行：
+
+```bash
+bash scripts/subsystem.sh onboard \
+  --preset contract-management-local \
+  --environment dev \
+  --api-base-url http://localhost:8081/api/v1 \
+  --platform-origin http://localhost:8081 \
+  --account admins \
+  --dry-run --yes
+```
+
+确认摘要中是以下值后，去掉 `--dry-run`：
+
+```text
+Application    contract_management
+Environment    dev
+Public URL     http://localhost:8081/contract_management/
+OAuth Client   contract_management-dev-web
+Redirect URI   http://localhost:8081/contract_management/auth/callback
+Upstream       http://contract-api:8081
+```
+
+### 4.4 通用新子系统先 dry-run
 
 ```bash
 cd /path/to/Unified_Identity_Authentication_Platform/platform
@@ -181,30 +214,30 @@ bash scripts/subsystem.sh onboard \
   --application-code customer_management \
   --application-name '客户管理系统' \
   --environment dev \
-  --public-base-url http://192.168.3.11:8081 \
+  --public-base-url http://localhost:8081 \
   --upstream-url http://customer-api:8080 \
   --path-prefix /customer_management \
   --client-type confidential \
-  --api-base-url http://127.0.0.1:8081/api/v1 \
-  --platform-origin http://192.168.3.11:8081 \
+  --api-base-url http://localhost:8081/api/v1 \
+  --platform-origin http://localhost:8081 \
   --dry-run --yes
 ```
 
 dry-run 不登录、不调用 API、不写 `.env.local`、不启动容器、不改网关。
 
-### 4.4 正式执行
+### 4.5 正式执行
 
 ```bash
 bash scripts/subsystem.sh onboard \
   --application-code customer_management \
   --application-name '客户管理系统' \
   --environment dev \
-  --public-base-url http://192.168.3.11:8081 \
+  --public-base-url http://localhost:8081 \
   --upstream-url http://customer-api:8080 \
   --path-prefix /customer_management \
   --client-type confidential \
-  --api-base-url http://127.0.0.1:8081/api/v1 \
-  --platform-origin http://192.168.3.11:8081 \
+  --api-base-url http://localhost:8081/api/v1 \
+  --platform-origin http://localhost:8081 \
   --account admins
 ```
 
@@ -217,21 +250,21 @@ printf '%s\n' "$PLATFORM_ADMIN_PASSWORD" | bash scripts/subsystem.sh onboard \
   --application-code customer_management \
   --application-name '客户管理系统' \
   --environment dev \
-  --public-base-url http://192.168.3.11:8081 \
+  --public-base-url http://localhost:8081 \
   --upstream-url http://customer-api:8080 \
   --path-prefix /customer_management \
   --client-type confidential \
-  --api-base-url http://127.0.0.1:8081/api/v1 \
-  --platform-origin http://192.168.3.11:8081
+  --api-base-url http://localhost:8081/api/v1 \
+  --platform-origin http://localhost:8081
 ```
 
 不要把密码写到命令行。也可用 `--cookie-file` 复制已有会话，但文件必须来自同一平台且未过期。
 
-### 4.5 接入期间发生什么
+### 4.6 接入期间发生什么
 
 1. 脚本校验并显示配置摘要。
 2. 以平台管理员会话调用 `POST /api/v1/subsystem-onboarding`。
-3. 平台原子创建或复用 Application，并创建新 Environment、LoginTarget、浏览器 OAuth Client 和目录发布 Client。
+3. 平台原子创建 Application、Environment、LoginTarget、浏览器 OAuth Client 和独立目录发布 Client；角色目录存在时再为初始管理员建立应用角色授权。
 4. Client Secret 只在后端内存中交给 provisioner，不回显给浏览器或脚本。
 5. provisioner 基于 `.env.example` 写出权限为 `0600` 的 `.env.local`。
 6. 执行子系统 Compose `up -d --build`。

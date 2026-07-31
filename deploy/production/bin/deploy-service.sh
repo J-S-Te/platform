@@ -127,14 +127,6 @@ deploy_contract() {
   require_runtime_value OIDC_CLIENT_ID || return
   require_runtime_value OIDC_CLIENT_SECRET || return
   require_runtime_value OIDC_TENANT_ID || return
-  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
-  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
-  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
-  require_runtime_value USER_DISPLAY_NAMES_JSON || return
-  if [[ "$(env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
-    echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
-    return 1
-  fi
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
   compose --profile release run --rm contract-migrate ./migrate || return

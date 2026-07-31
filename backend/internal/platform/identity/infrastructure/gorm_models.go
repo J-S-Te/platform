@@ -227,6 +227,7 @@ type bootstrapApplicationModel struct {
 	ID       string `gorm:"column:id;primaryKey"`
 	TenantID string `gorm:"column:tenant_id"`
 	Code     string `gorm:"column:code"`
+	Name     string `gorm:"column:name"`
 	Status   string `gorm:"column:status"`
 }
 
@@ -239,6 +240,7 @@ type bootstrapRoleModel struct {
 	ApplicationID string `gorm:"column:application_id"`
 	Code          string `gorm:"column:code"`
 	Name          string `gorm:"column:name"`
+	RoleType      string `gorm:"column:role_type"`
 	Status        string `gorm:"column:status"`
 }
 
@@ -257,6 +259,9 @@ type bootstrapRoleBindingModel struct {
 	ValidFrom     *time.Time `gorm:"column:valid_from"`
 	ValidUntil    *time.Time `gorm:"column:valid_until"`
 	Status        string     `gorm:"column:status"`
+	GrantOrigin   string     `gorm:"column:grant_origin"`
+	OriginID      string     `gorm:"column:origin_id"`
+	OriginItemID  string     `gorm:"column:origin_item_id"`
 	Version       uint64     `gorm:"column:version"`
 	CreatedAt     time.Time  `gorm:"column:created_at"`
 	CreatedBy     *string    `gorm:"column:created_by"`

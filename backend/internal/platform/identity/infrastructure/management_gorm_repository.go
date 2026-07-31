@@ -77,7 +77,13 @@ func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []appl
 			return fmt.Errorf("resolve ordinary-user role: %w", result.Error)
 		}
 
+		resolvedApplicationRoles, err := resolveImportedApplicationRoles(transaction, tenantID, writes)
+		if err != nil {
+			return err
+		}
+
 		now := time.Now().UTC()
+		changedApplications := map[string]struct{}{platformApplication.ID: {}}
 		for _, write := range writes {
 			if write.TenantID != tenantID || write.ID == "" || write.RoleBindingID == "" || write.OperatorID == "" {
 				return application.ErrValidation
@@ -95,26 +101,46 @@ func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []appl
 			binding := bootstrapRoleBindingModel{
 				ID: write.RoleBindingID, TenantID: tenantID, ApplicationID: platformApplication.ID,
 				RoleID: ordinaryUserRole.ID, SubjectType: "USER", SubjectID: write.ID,
-				ScopeType: "TENANT", ScopeID: "", Status: domain.StatusActive, Version: 1,
+				ScopeType: "TENANT", ScopeID: "", Status: domain.StatusActive, GrantOrigin: "SYSTEM", Version: 1,
 				CreatedAt: now, CreatedBy: nullableString(&write.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.OperatorID),
 			}
 			if err := transaction.Create(&binding).Error; err != nil {
 				return mapWriteError(err, "bind ordinary-user role")
 			}
+			for _, imported := range write.ApplicationRoleBindings {
+				resolved, ok := resolvedApplicationRoles[importedApplicationRoleKey(imported)]
+				if !ok {
+					return application.ErrValidation
+				}
+				applicationBinding := bootstrapRoleBindingModel{
+					ID: imported.ID, TenantID: tenantID, ApplicationID: resolved.ApplicationID,
+					RoleID: resolved.RoleID, SubjectType: "USER", SubjectID: write.ID,
+					ScopeType: "TENANT", ScopeID: "", Status: domain.StatusActive,
+					GrantOrigin: "MANUAL", Version: 1,
+					CreatedAt: now, CreatedBy: nullableString(&write.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.OperatorID),
+				}
+				if err := transaction.Create(&applicationBinding).Error; err != nil {
+					return mapWriteError(err, "bind imported application role")
+				}
+				changedApplications[resolved.ApplicationID] = struct{}{}
+			}
 			users = append(users, toDomainUser(row))
 		}
 
-		result = transaction.Model(&identityPolicyRevisionModel{}).
-			Where("tenant_id = ? AND application_id = ?", tenantID, platformApplication.ID).
-			Updates(map[string]any{
-				"revision": gorm.Expr("revision + 1"), "changed_at": now,
-				"change_reason": "自动绑定新建用户的普通用户角色",
-			})
-		if result.Error != nil {
-			return fmt.Errorf("advance authorization policy revision: %w", result.Error)
-		}
-		if result.RowsAffected == 0 {
-			return fmt.Errorf("advance authorization policy revision: %w", application.ErrNotFound)
+		for applicationID := range changedApplications {
+			reason := "批量导入用户并绑定角色"
+			if applicationID == platformApplication.ID {
+				reason = "自动绑定新建用户的普通用户角色"
+			}
+			result = transaction.Model(&identityPolicyRevisionModel{}).
+				Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).
+				Updates(map[string]any{"revision": gorm.Expr("revision + 1"), "changed_at": now, "change_reason": reason})
+			if result.Error != nil {
+				return fmt.Errorf("advance authorization policy revision: %w", result.Error)
+			}
+			if result.RowsAffected == 0 {
+				return fmt.Errorf("advance authorization policy revision: %w", application.ErrNotFound)
+			}
 		}
 		return nil
 	})
@@ -122,6 +148,131 @@ func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []appl
 		return nil, err
 	}
 	return users, nil
+}
+
+type importedApplicationRole struct {
+	ApplicationID string
+	RoleID        string
+}
+
+// resolveImportedApplicationRoles validates all CSV roles before the first user is written. It
+// accepts either stable codes (backwards compatibility) or exact human-readable names. Ambiguous
+// names fail closed. Only ACTIVE application-owned catalog roles are assignable.
+func resolveImportedApplicationRoles(transaction *gorm.DB, tenantID string, writes []application.UserWrite) (map[string]importedApplicationRole, error) {
+	requested := make(map[string]application.ApplicationRoleBindingWrite)
+	for _, write := range writes {
+		for _, role := range write.ApplicationRoleBindings {
+			key := importedApplicationRoleKey(role)
+			requested[key] = role
+		}
+	}
+	if len(requested) == 0 {
+		return map[string]importedApplicationRole{}, nil
+	}
+
+	applicationCodes := make([]string, 0, len(requested))
+	applicationNames := make([]string, 0, len(requested))
+	seenApplicationCodes := make(map[string]struct{})
+	seenApplicationNames := make(map[string]struct{})
+	for _, request := range requested {
+		if request.ApplicationCode != "" {
+			if _, exists := seenApplicationCodes[request.ApplicationCode]; exists {
+				continue
+			}
+			seenApplicationCodes[request.ApplicationCode] = struct{}{}
+			applicationCodes = append(applicationCodes, request.ApplicationCode)
+			continue
+		}
+		if _, exists := seenApplicationNames[request.ApplicationName]; !exists {
+			seenApplicationNames[request.ApplicationName] = struct{}{}
+			applicationNames = append(applicationNames, request.ApplicationName)
+		}
+	}
+	query := transaction.Where("tenant_id = ? AND status = ?", tenantID, domain.StatusActive)
+	if len(applicationCodes) > 0 && len(applicationNames) > 0 {
+		query = query.Where("(code IN ? OR name IN ?)", applicationCodes, applicationNames)
+	} else if len(applicationCodes) > 0 {
+		query = query.Where("code IN ?", applicationCodes)
+	} else {
+		query = query.Where("name IN ?", applicationNames)
+	}
+	var applications []bootstrapApplicationModel
+	if err := query.Find(&applications).Error; err != nil {
+		return nil, fmt.Errorf("resolve imported role applications: %w", err)
+	}
+	applicationsByCode := make(map[string]bootstrapApplicationModel, len(applications))
+	applicationsByName := make(map[string][]bootstrapApplicationModel, len(applications))
+	for _, item := range applications {
+		applicationsByCode[item.Code] = item
+		applicationsByName[item.Name] = append(applicationsByName[item.Name], item)
+	}
+
+	resolved := make(map[string]importedApplicationRole, len(requested))
+	for key, request := range requested {
+		var app bootstrapApplicationModel
+		if request.ApplicationCode != "" {
+			var exists bool
+			app, exists = applicationsByCode[request.ApplicationCode]
+			if !exists {
+				return nil, application.ErrValidation
+			}
+		} else {
+			matches := applicationsByName[request.ApplicationName]
+			if len(matches) != 1 {
+				return nil, application.ErrValidation
+			}
+			app = matches[0]
+		}
+
+		roleQuery := transaction.Where(
+			"tenant_id = ? AND application_id = ? AND role_type = ? AND status = ?",
+			tenantID, app.ID, "APPLICATION", domain.StatusActive,
+		)
+		if request.RoleCode != "" {
+			roleQuery = roleQuery.Where("code = ?", request.RoleCode)
+		} else {
+			roleQuery = roleQuery.Where("name = ?", request.RoleName)
+		}
+		var roles []bootstrapRoleModel
+		if err := roleQuery.Limit(2).Find(&roles).Error; err != nil {
+			return nil, fmt.Errorf("resolve imported application role: %w", err)
+		}
+		if len(roles) != 1 {
+			return nil, application.ErrValidation
+		}
+		resolved[key] = importedApplicationRole{ApplicationID: app.ID, RoleID: roles[0].ID}
+	}
+
+	for _, write := range writes {
+		rolesByApplication := make(map[string]map[string]struct{})
+		for _, request := range write.ApplicationRoleBindings {
+			role := resolved[importedApplicationRoleKey(request)]
+			if rolesByApplication[role.ApplicationID] == nil {
+				rolesByApplication[role.ApplicationID] = make(map[string]struct{})
+			}
+			if _, duplicate := rolesByApplication[role.ApplicationID][role.RoleID]; duplicate {
+				return nil, application.ErrValidation
+			}
+			rolesByApplication[role.ApplicationID][role.RoleID] = struct{}{}
+		}
+		for applicationID, roleIDs := range rolesByApplication {
+			var policy struct {
+				MaxEffectiveRoles int `gorm:"column:max_effective_roles"`
+			}
+			err := transaction.Table("authz_application_authorization_policy").Select("max_effective_roles").Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).Take(&policy).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("load imported role application policy: %w", err)
+			}
+			if policy.MaxEffectiveRoles > 0 && len(roleIDs) > policy.MaxEffectiveRoles {
+				return nil, application.ErrValidation
+			}
+		}
+	}
+	return resolved, nil
+}
+
+func importedApplicationRoleKey(role application.ApplicationRoleBindingWrite) string {
+	return role.ApplicationCode + "\x00" + role.ApplicationName + "\x00" + role.RoleCode + "\x00" + role.RoleName
 }
 
 // GetUser retrieves exactly one tenant-scoped user.
