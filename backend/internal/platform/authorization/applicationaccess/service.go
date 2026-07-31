@@ -292,6 +292,15 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	if err != nil {
 		return TokenAuthorization{}, err
 	}
+	if client.ApplicationCode != PlatformApplicationCode {
+		inherited, ok, inheritErr := s.resolvePlatformSuperAdminAuthorization(ctx, tenantID, userID, client)
+		if inheritErr != nil {
+			return TokenAuthorization{}, inheritErr
+		}
+		if ok {
+			return inherited, nil
+		}
+	}
 	access, err := s.getAccessByApplication(ctx, tenantID, userID, client.ApplicationID, client.ApplicationCode, client.EnvironmentID, client.EnvironmentCode)
 	if err != nil {
 		return TokenAuthorization{}, err
@@ -312,6 +321,65 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 		RoleConfigHash:  access.RoleConfigHash,
 		AuthzRevision:   access.AuthzRevision,
 	}, nil
+}
+
+// resolvePlatformSuperAdminAuthorization gives the tenant's controlled platform super
+// administrator the target application's canonical admin role. It does not copy platform
+// permissions into a subsystem token: the emitted permissions still come exclusively from the
+// target application's active admin role and catalog.
+func (s *Service) resolvePlatformSuperAdminAuthorization(ctx context.Context, tenantID, userID string, client clientApplicationRow) (TokenAuthorization, bool, error) {
+	now := s.clock.Now().UTC()
+	var bindingCount int64
+	err := s.db.WithContext(ctx).Table("authz_role_binding AS binding").
+		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id AND role.status = ?", activeStatus).
+		Joins("JOIN platform_application AS application ON application.id = binding.application_id AND application.tenant_id = binding.tenant_id AND application.status = ?", activeStatus).
+		Where(
+			"binding.tenant_id = ? AND binding.subject_type = ? AND binding.subject_id = ? AND binding.scope_type = ? AND binding.scope_id = '' AND binding.status = ? AND "+
+				"application.code = ? AND role.code = ? AND (binding.valid_from IS NULL OR binding.valid_from <= ?) AND "+
+				"(binding.valid_until IS NULL OR binding.valid_until > ?)",
+			strings.TrimSpace(tenantID), subjectTypeUser, strings.TrimSpace(userID), scopeTypeTenant, activeStatus,
+			PlatformApplicationCode, BootstrapSuperAdminRoleCode, now, now,
+		).
+		Count(&bindingCount).Error
+	if err != nil {
+		return TokenAuthorization{}, false, fmt.Errorf("load platform super administrator binding: %w", err)
+	}
+	if bindingCount == 0 {
+		return TokenAuthorization{}, false, nil
+	}
+
+	var adminRole roleRow
+	err = s.db.WithContext(ctx).Table("authz_role").
+		Select("id", "code", "name").
+		Where("tenant_id = ? AND application_id = ? AND code = ? AND status = ?", tenantID, client.ApplicationID, "admin", activeStatus).
+		Take(&adminRole).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return TokenAuthorization{}, false, ErrNotConfigured
+	}
+	if err != nil {
+		return TokenAuthorization{}, false, fmt.Errorf("load target application admin role: %w", err)
+	}
+	permissions, err := s.loadRolePermissions(ctx, tenantID, client.ApplicationID, []string{adminRole.ID})
+	if err != nil {
+		return TokenAuthorization{}, false, err
+	}
+	roleConfigHash, err := s.loadRoleConfigHash(ctx, tenantID, client.ApplicationID)
+	if err != nil {
+		return TokenAuthorization{}, false, err
+	}
+	revision, err := s.loadRevision(ctx, tenantID, client.ApplicationID)
+	if err != nil {
+		return TokenAuthorization{}, false, err
+	}
+	return TokenAuthorization{
+		ApplicationCode: client.ApplicationCode,
+		EnvironmentCode: client.EnvironmentCode,
+		TenantID:        tenantID,
+		Roles:           []string{adminRole.Code},
+		Permissions:     sortedUnique(permissions),
+		RoleConfigHash:  roleConfigHash,
+		AuthzRevision:   revision,
+	}, true, nil
 }
 
 func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCode string) (Access, error) {
