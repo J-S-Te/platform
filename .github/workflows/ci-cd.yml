@@ -46,6 +46,13 @@ jobs:
             --env-file deploy/production/.env \
             --env-file deploy/production/.release.env \
             config --quiet
+          sed -i '/^PROJECT_/d' deploy/production/.env deploy/production/.release.env
+          docker compose \
+            --project-directory deploy/production \
+            --file deploy/production/compose.yaml \
+            --env-file deploy/production/.env \
+            --env-file deploy/production/.release.env \
+            config --quiet
 
   image:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

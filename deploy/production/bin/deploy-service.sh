@@ -145,8 +145,11 @@ deploy_contract() {
 }
 
 deploy_project() {
+  require_runtime_value PROJECT_MYSQL_PASSWORD || return
+  require_runtime_value PROJECT_MYSQL_ROOT_PASSWORD || return
   require_runtime_value PROJECT_OIDC_CLIENT_ID || return
   require_runtime_value PROJECT_OIDC_CLIENT_SECRET || return
+  require_runtime_value PROJECT_OIDC_REDIRECT_URI || return
   require_runtime_value PROJECT_OIDC_TENANT_ID || return
   compose up -d --wait --wait-timeout 240 project-mysql temporal || return
   backup_database project-mysql project_management || return
