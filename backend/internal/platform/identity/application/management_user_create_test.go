@@ -81,6 +81,7 @@ func TestManagementServiceCreateUsersBatchGeneratesManagedFields(t *testing.T) {
 	repository := &userCreateRepositoryStub{}
 	ids := &sequenceIDGenerator{ids: []string{
 		"01KUSER000000000000000001", "01KBINDING0000000000000001",
+		"01KAPPBIND0000000000000001",
 		"01KUSER000000000000000002", "01KBINDING0000000000000002",
 	}}
 	service, err := NewManagementService(
@@ -99,7 +100,8 @@ func TestManagementServiceCreateUsersBatchGeneratesManagedFields(t *testing.T) {
 		TenantID:   "tenant-1",
 		OperatorID: "operator-1",
 		Items: []UserCreateInput{
-			{DisplayName: "用户甲", EmployeeNo: &manualEmployeeNo, Mobile: &mobile, Status: domain.StatusActive},
+			{DisplayName: "用户甲", EmployeeNo: &manualEmployeeNo, Mobile: &mobile, Status: domain.StatusActive,
+				ApplicationRoles: []ApplicationRoleAssignment{{ApplicationName: "合同管理系统", RoleName: "销售人员"}}},
 			{DisplayName: "用户乙", Status: domain.StatusDisabled},
 		},
 	})
@@ -132,6 +134,9 @@ func TestManagementServiceCreateUsersBatchGeneratesManagedFields(t *testing.T) {
 			t.Errorf("write[%d] role binding ID = %q, want %q", index, write.RoleBindingID, wantBindingIDs[index])
 		}
 	}
+	if got := repository.writes[0].ApplicationRoleBindings; len(got) != 1 || got[0].ID != "01KAPPBIND0000000000000001" || got[0].ApplicationName != "合同管理系统" || got[0].RoleName != "销售人员" {
+		t.Fatalf("application role bindings = %#v", got)
+	}
 	if got := string(repository.writes[0].MobileCiphertext); got != "encrypted:+8613800138000" {
 		t.Errorf("mobile ciphertext = %q", got)
 	}
@@ -147,6 +152,41 @@ func TestManagementServiceCreateUsersBatchGeneratesManagedFields(t *testing.T) {
 			got = *views[0].MobileMasked
 		}
 		t.Errorf("masked mobile = %q, want %q", got, "+86****8000")
+	}
+}
+
+func TestNormalizeApplicationRoleAssignmentsSupportsNamesAndCodes(t *testing.T) {
+	t.Parallel()
+
+	got, err := normalizeApplicationRoleAssignments([]ApplicationRoleAssignment{
+		{ApplicationName: "  合同管理系统 ", RoleName: " 销售人员  "},
+		{ApplicationCode: "customer_management", RoleCode: "manager"},
+	})
+	if err != nil {
+		t.Fatalf("normalize application roles: %v", err)
+	}
+	want := []ApplicationRoleAssignment{
+		{ApplicationName: "合同管理系统", RoleName: "销售人员"},
+		{ApplicationCode: "customer_management", RoleCode: "manager"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized roles = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeApplicationRoleAssignmentsRejectsAmbiguousIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	invalid := [][]ApplicationRoleAssignment{
+		{{ApplicationName: "合同管理系统", RoleName: ""}},
+		{{ApplicationCode: "contract_management", ApplicationName: "合同管理系统", RoleCode: "sales"}},
+		{{ApplicationName: "合同管理系统", RoleCode: "sales", RoleName: "销售人员"}},
+		{{ApplicationName: "合同管理系统", RoleName: "销售人员"}, {ApplicationName: "合同管理系统", RoleName: "销售人员"}},
+	}
+	for index, assignments := range invalid {
+		if _, err := normalizeApplicationRoleAssignments(assignments); !errors.Is(err, ErrValidation) {
+			t.Errorf("case %d error = %v, want ErrValidation", index, err)
+		}
 	}
 }
 

@@ -83,6 +83,20 @@ type UserCreateInput struct {
 	Email       *string
 	Mobile      *string
 	Status      string
+	// ApplicationRoles contains optional application-owned role assignments imported together
+	// with the user. The repository resolves these codes against synchronized ACTIVE catalogs and
+	// persists all users/bindings atomically; callers can never submit role IDs directly.
+	ApplicationRoles []ApplicationRoleAssignment
+}
+
+// ApplicationRoleAssignment identifies one application-owned role by either stable codes or the
+// human-readable names shown in the management console. Name-based import is resolved exactly in
+// the current tenant; persistence still uses stable application/role IDs.
+type ApplicationRoleAssignment struct {
+	ApplicationCode string
+	ApplicationName string
+	RoleCode        string
+	RoleName        string
 }
 
 // UserBatchCreateInput creates multiple ordinary users in one all-or-nothing transaction.
@@ -199,10 +213,21 @@ type MembershipUpdateInput struct {
 // UserWrite is the storage-ready user mutation. It holds encrypted mobile data only.
 type UserWrite struct {
 	UserCreateInput
-	ID               string
-	RoleBindingID    string
-	MobileCiphertext []byte
-	MobileHash       []byte
+	ID                      string
+	RoleBindingID           string
+	ApplicationRoleBindings []ApplicationRoleBindingWrite
+	MobileCiphertext        []byte
+	MobileHash              []byte
+}
+
+// ApplicationRoleBindingWrite carries a server-generated binding ID plus a code- or name-based
+// catalog reference into the identity repository's atomic user import transaction.
+type ApplicationRoleBindingWrite struct {
+	ID              string
+	ApplicationCode string
+	ApplicationName string
+	RoleCode        string
+	RoleName        string
 }
 
 // ManagementRepository defines persistence behavior for the IAM management endpoints. The
@@ -305,6 +330,11 @@ func (service *ManagementService) CreateUsersBatch(ctx context.Context, input Us
 		// Employee numbers are backend-managed. Ignore values supplied by direct
 		// application callers before validation, then assign the generated value.
 		item.EmployeeNo = nil
+		applicationRoles, err := normalizeApplicationRoleAssignments(item.ApplicationRoles)
+		if err != nil {
+			return nil, err
+		}
+		item.ApplicationRoles = applicationRoles
 		if err := validateUserCreate(item); err != nil {
 			return nil, err
 		}
@@ -323,6 +353,18 @@ func (service *ManagementService) CreateUsersBatch(ctx context.Context, input Us
 			return nil, err
 		}
 		write.RoleBindingID = bindingID
+		write.ApplicationRoleBindings = make([]ApplicationRoleBindingWrite, 0, len(applicationRoles))
+		for _, role := range applicationRoles {
+			roleBindingID, err := service.ids.New(now)
+			if err != nil {
+				return nil, fmt.Errorf("generate imported application role binding ID: %w", err)
+			}
+			write.ApplicationRoleBindings = append(write.ApplicationRoleBindings, ApplicationRoleBindingWrite{
+				ID:              roleBindingID,
+				ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName,
+				RoleCode: role.RoleCode, RoleName: role.RoleName,
+			})
+		}
 		writes = append(writes, write)
 	}
 
@@ -339,6 +381,37 @@ func (service *ManagementService) CreateUsersBatch(ctx context.Context, input Us
 		views = append(views, view)
 	}
 	return views, nil
+}
+
+func normalizeApplicationRoleAssignments(assignments []ApplicationRoleAssignment) ([]ApplicationRoleAssignment, error) {
+	if len(assignments) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(assignments))
+	result := make([]ApplicationRoleAssignment, 0, len(assignments))
+	for _, assignment := range assignments {
+		assignment.ApplicationCode = strings.TrimSpace(assignment.ApplicationCode)
+		assignment.ApplicationName = strings.TrimSpace(assignment.ApplicationName)
+		assignment.RoleCode = strings.TrimSpace(assignment.RoleCode)
+		assignment.RoleName = strings.TrimSpace(assignment.RoleName)
+		if (assignment.ApplicationCode == "") == (assignment.ApplicationName == "") ||
+			(assignment.RoleCode == "") == (assignment.RoleName == "") ||
+			len(assignment.ApplicationCode) > 64 || len([]rune(assignment.ApplicationName)) > 128 ||
+			len(assignment.RoleCode) > 128 || len([]rune(assignment.RoleName)) > 128 {
+			return nil, ErrValidation
+		}
+		key := applicationRoleAssignmentKey(assignment.ApplicationCode, assignment.ApplicationName, assignment.RoleCode, assignment.RoleName)
+		if _, exists := seen[key]; exists {
+			return nil, ErrValidation
+		}
+		seen[key] = struct{}{}
+		result = append(result, assignment)
+	}
+	return result, nil
+}
+
+func applicationRoleAssignmentKey(applicationCode, applicationName, roleCode, roleName string) string {
+	return applicationCode + "\x00" + applicationName + "\x00" + roleCode + "\x00" + roleName
 }
 
 // DeleteUser logically removes a user while retaining its identity row for audit and referential integrity.

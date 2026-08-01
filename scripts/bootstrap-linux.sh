@@ -1075,9 +1075,6 @@ LOG_LEVEL=info
 LOG_FORMAT=json
 LOG_DIRECTORY=/var/log/basic-platform
 
-OTEL_ENABLED=false
-OTEL_SERVICE_NAME=basic-platform
-OTEL_EXPORTER_OTLP_ENDPOINT=
 ENV_TEMPLATE
 
   run_cmd install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$env_directory"
