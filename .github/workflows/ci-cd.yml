@@ -37,22 +37,6 @@ jobs:
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1
           fi
-          cp deploy/production/.env.example deploy/production/.env
-          cp deploy/production/.release.env.example deploy/production/.release.env
-          trap 'rm -f deploy/production/.env deploy/production/.release.env' EXIT
-          docker compose \
-            --project-directory deploy/production \
-            --file deploy/production/compose.yaml \
-            --env-file deploy/production/.env \
-            --env-file deploy/production/.release.env \
-            config --quiet
-          sed -i '/^PROJECT_/d' deploy/production/.env deploy/production/.release.env
-          docker compose \
-            --project-directory deploy/production \
-            --file deploy/production/compose.yaml \
-            --env-file deploy/production/.env \
-            --env-file deploy/production/.release.env \
-            config --quiet
 
   image:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

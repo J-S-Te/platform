@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 usage() {
-  echo "usage: $0 {frontend|platform|contract|project} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "usage: $0 {frontend|platform|contract} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
   exit 2
 }
 
@@ -13,7 +13,6 @@ case "$service" in
   frontend) image_key=FRONTEND_IMAGE ;;
   platform) image_key=PLATFORM_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
-  project) image_key=PROJECT_IMAGE ;;
   *) usage ;;
 esac
 
@@ -144,20 +143,6 @@ deploy_contract() {
   wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"
 }
 
-deploy_project() {
-  require_runtime_value PROJECT_MYSQL_PASSWORD || return
-  require_runtime_value PROJECT_MYSQL_ROOT_PASSWORD || return
-  require_runtime_value PROJECT_OIDC_CLIENT_ID || return
-  require_runtime_value PROJECT_OIDC_CLIENT_SECRET || return
-  require_runtime_value PROJECT_OIDC_REDIRECT_URI || return
-  require_runtime_value PROJECT_OIDC_TENANT_ID || return
-  compose up -d --wait --wait-timeout 240 project-mysql temporal || return
-  backup_database project-mysql project_management || return
-  compose --profile release run --rm project-migrate || return
-  compose up -d --no-deps project-api || return
-  wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18083)/healthz"
-}
-
 deploy_frontend() {
   compose up -d --no-deps frontend || return
   wait_for_health "http://127.0.0.1:$(port_value FRONTEND_PORT 18082)/"
@@ -168,7 +153,6 @@ rollback_runtime() {
     frontend) compose up -d --no-deps frontend ;;
     platform) compose up -d --no-deps platform-api ;;
     contract) compose up -d --no-deps contract-api ;;
-    project) compose up -d --no-deps project-api ;;
   esac
 }
 

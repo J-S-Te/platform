@@ -1,6 +1,6 @@
 # 生产环境 CI/CD 部署
 
-> 更新日期：2026-08-01。生产目录承载 platform、frontend、contract 和 project 四个不可变镜像。
+> 更新日期：2026-07-31。生产目录承载 platform、frontend 和 contract 三个不可变镜像。
 
 ## 1. 服务器要求
 
@@ -21,12 +21,13 @@ chmod 600 .env .release.env
 
 ## 2. 镜像仓库
 
-- 四个仓库的 workflow 都使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`。
+- `platform` 和 `frontend` workflow 使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`。
+- `contract_management` workflow 当前推送 GHCR，并使用仓库 `GITHUB_TOKEN`；服务器必须能够拉取对应 GHCR 包。
 - 远端发布统一使用 `image@sha256:digest`，不使用可变 tag 作为最终发布标识。
 
 ## 3. GitHub Environment
 
-四个仓库的 deploy job 当前使用 `test` Environment。配置：
+三个仓库的 deploy job 当前使用 `test` Environment。配置：
 
 ### Secrets
 
@@ -40,7 +41,7 @@ chmod 600 .env .release.env
 ### Variables
 
 - `DEPLOY_PATH`（可选，默认 `/opt/basic-platform`）
-- 每个仓库需要配置对应的 ACR variables
+- platform/frontend 仓库需要对应 ACR variables
 
 `DEPLOY_KNOWN_HOSTS` 必须在可信网络核对服务器指纹后生成。变量缺失时 deploy 任务会失败，不会跳过发布。
 
@@ -52,8 +53,6 @@ chmod 600 .env .release.env
 4. 在平台创建或核对 `contract_management/prod`、浏览器 Client、catalog-publisher Client 和精确回调；
 5. 把受控接入结果写入服务器 `.env`；
 6. 发布 contract。
-7. 在平台创建或核对 `project_management/prod` 及其独立浏览器 Client；
-8. 将 `PROJECT_OIDC_*` 和项目数据库密码写入服务器 `.env`，再发布 project。
 
 管理员初始化：
 
@@ -83,7 +82,6 @@ CI 远端调用：
 ./bin/deploy-service.sh platform <image@sha256:digest>
 ./bin/deploy-service.sh frontend <image@sha256:digest>
 ./bin/deploy-service.sh contract <image@sha256:digest>
-./bin/deploy-service.sh project <image@sha256:digest>
 ```
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。
@@ -96,7 +94,6 @@ CI 远端调用：
 
 - platform MySQL；
 - contract MySQL；
-- project MySQL；
 - 平台上传文件；
 - JWT 密钥；
 - `.env` 和 `.release.env` 的安全副本；
