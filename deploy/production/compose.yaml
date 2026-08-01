@@ -23,6 +23,40 @@ x-contract-service: &contract-service
   networks: [application]
   restart: unless-stopped
 
+x-project-service: &project-service
+  image: ${PROJECT_IMAGE}
+  env_file: [.env]
+  environment:
+    PM_HTTP_ADDR: :8082
+    MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+    PLATFORM_BASE_URL: http://platform-api:8080
+    PLATFORM_APPLICATION_CODE: project_management
+    PLATFORM_ENVIRONMENT_CODE: prod
+    OIDC_ISSUER: ${OIDC_ISSUER}
+    OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+    OIDC_CLIENT_ID: ${PROJECT_OIDC_CLIENT_ID}
+    OIDC_CLIENT_SECRET: ${PROJECT_OIDC_CLIENT_SECRET}
+    OIDC_REDIRECT_URI: ${PROJECT_OIDC_REDIRECT_URI}
+    OIDC_POST_LOGOUT_REDIRECT_URI: ${PROJECT_OIDC_POST_LOGOUT_REDIRECT_URI}
+    OIDC_TENANT_ID: ${PROJECT_OIDC_TENANT_ID}
+    OIDC_SESSION_COOKIE_NAME: project_management_session
+    OIDC_SESSION_COOKIE_SECURE: ${PROJECT_OIDC_SESSION_COOKIE_SECURE:-true}
+    OIDC_SESSION_TTL: ${PROJECT_OIDC_SESSION_TTL:-8h}
+    APP_PATH_PREFIX: /project_management
+    TEMPORAL_ADDRESS: temporal:7233
+    TEMPORAL_NAMESPACE: default
+    TEMPORAL_TASK_QUEUE: project-management
+    PROJECT_RUN_WORKER_WITH_API: "true"
+    PLATFORM_AUDIT_CLIENT_ID: ${PROJECT_PLATFORM_AUDIT_CLIENT_ID:-}
+    PLATFORM_AUDIT_CLIENT_SECRET: ${PROJECT_PLATFORM_AUDIT_CLIENT_SECRET:-}
+    PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: ${PROJECT_PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED:-false}
+    PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: ${PROJECT_PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID:-}
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: ${PROJECT_PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID:-}
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: ${PROJECT_PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET:-}
+    GIN_MODE: release
+  networks: [application]
+  restart: unless-stopped
+
 services:
   platform-mysql:
     image: mysql:8.4
@@ -112,6 +146,25 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  project-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: project_management
+      MYSQL_USER: project
+      MYSQL_PASSWORD: ${PROJECT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${PROJECT_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - project-mysql-data:/var/lib/mysql
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uproject -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
   contract-migrate:
     <<: *contract-service
     command: ["./migrate"]
@@ -149,6 +202,33 @@ services:
       retries: 15
       start_period: 10s
 
+  project-migrate:
+    <<: *project-service
+    entrypoint: ["/usr/local/bin/project-migrate"]
+    profiles: ["release"]
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  project-api:
+    <<: *project-service
+    ports:
+      - "127.0.0.1:${PROJECT_API_PORT:-18083}:8082"
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
   frontend:
     image: ${FRONTEND_IMAGE}
     ports:
@@ -166,3 +246,4 @@ networks:
 volumes:
   platform-mysql-data:
   contract-mysql-data:
+  project-mysql-data:
