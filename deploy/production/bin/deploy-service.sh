@@ -136,7 +136,9 @@ deploy_contract() {
   fi
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
-  compose --profile release run --rm contract-migrate ./migrate || return
+  # The migration command is owned by compose.yaml. A non-zero migration exit stops
+  # the release before the API image is replaced.
+  compose --profile release run --rm contract-migrate || return
   compose up -d --no-deps contract-api || return
   wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"
 }
