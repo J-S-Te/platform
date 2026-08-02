@@ -158,18 +158,31 @@ type AuthorizationTargetRoleView struct {
 	Assignable bool   `json:"assignable"`
 }
 
-// AuthorizationPositionView contains exactly the active position fields needed to assign a
-// position authorization template. It intentionally omits organization-management details.
+// AuthorizationPositionView contains the active position and its active organization context
+// needed to group the task-specific assignment catalog. It deliberately remains narrower than
+// the organization- and position-management resources.
 type AuthorizationPositionView struct {
-	PositionID   string `json:"position_id"`
-	PositionCode string `json:"position_code"`
-	PositionName string `json:"position_name"`
+	PositionID       string `json:"position_id"`
+	PositionCode     string `json:"position_code"`
+	PositionName     string `json:"position_name"`
+	OrgUnitID        string `json:"org_unit_id"`
+	OrgUnitCode      string `json:"org_unit_code"`
+	OrgUnitName      string `json:"org_unit_name"`
+	OrgUnitPath      string `json:"org_unit_path"`
+	OrgUnitDepth     uint   `json:"org_unit_depth"`
+	OrgUnitSortOrder int    `json:"org_unit_sort_order"`
 }
 
 type authorizationPositionRow struct {
-	PositionID   string `gorm:"column:position_id"`
-	PositionCode string `gorm:"column:position_code"`
-	PositionName string `gorm:"column:position_name"`
+	PositionID       string `gorm:"column:position_id"`
+	PositionCode     string `gorm:"column:position_code"`
+	PositionName     string `gorm:"column:position_name"`
+	OrgUnitID        string `gorm:"column:org_unit_id"`
+	OrgUnitCode      string `gorm:"column:org_unit_code"`
+	OrgUnitName      string `gorm:"column:org_unit_name"`
+	OrgUnitPath      string `gorm:"column:org_unit_path"`
+	OrgUnitDepth     uint   `gorm:"column:org_unit_depth"`
+	OrgUnitSortOrder int    `gorm:"column:org_unit_sort_order"`
 }
 
 // AuthorizationTargetView is intentionally limited to the information needed when building a
@@ -297,18 +310,27 @@ func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTarg
 func (s *Service) ListAuthorizationPositions(ctx context.Context, tenantID string) ([]AuthorizationPositionView, error) {
 	var rows []authorizationPositionRow
 	if err := s.db.WithContext(ctx).
-		Table("iam_position").
-		Select("id AS position_id, code AS position_code, name AS position_name").
-		Where("tenant_id=? AND status=?", tenantID, activeStatus).
-		Order("name ASC, code ASC").
+		Table("iam_position AS position").
+		Select("position.id AS position_id, position.code AS position_code, position.name AS position_name, organization.id AS org_unit_id, organization.code AS org_unit_code, organization.name AS org_unit_name, organization.path AS org_unit_path, organization.depth AS org_unit_depth, organization.sort_order AS org_unit_sort_order").
+		Joins("JOIN iam_org_unit AS organization ON organization.tenant_id=position.tenant_id AND organization.id=position.org_unit_id AND organization.status=?", activeStatus).
+		Where("position.tenant_id=? AND position.status=?", tenantID, activeStatus).
+		Order("organization.path ASC, organization.sort_order ASC, organization.code ASC, position.name ASC, position.code ASC, position.id ASC").
 		Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list position authorization positions: %w", err)
 	}
+	return authorizationPositionViews(rows), nil
+}
+
+func authorizationPositionViews(rows []authorizationPositionRow) []AuthorizationPositionView {
 	items := make([]AuthorizationPositionView, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, AuthorizationPositionView{PositionID: row.PositionID, PositionCode: row.PositionCode, PositionName: row.PositionName})
+		items = append(items, AuthorizationPositionView{
+			PositionID: row.PositionID, PositionCode: row.PositionCode, PositionName: row.PositionName,
+			OrgUnitID: row.OrgUnitID, OrgUnitCode: row.OrgUnitCode, OrgUnitName: row.OrgUnitName,
+			OrgUnitPath: row.OrgUnitPath, OrgUnitDepth: row.OrgUnitDepth, OrgUnitSortOrder: row.OrgUnitSortOrder,
+		})
 	}
-	return items, nil
+	return items
 }
 
 func (s *Service) List(ctx context.Context, tenantID string) ([]TemplateView, error) {

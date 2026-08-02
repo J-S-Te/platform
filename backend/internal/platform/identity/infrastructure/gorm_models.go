@@ -18,6 +18,7 @@ type userModel struct {
 	ID               string     `gorm:"column:id;primaryKey"`
 	TenantID         string     `gorm:"column:tenant_id"`
 	EmployeeNo       *string    `gorm:"column:employee_no"`
+	PMSPersonID      *string    `gorm:"column:pms_person_id"`
 	DisplayName      string     `gorm:"column:display_name"`
 	LegalName        *string    `gorm:"column:legal_name"`
 	Email            *string    `gorm:"column:email"`
@@ -40,21 +41,22 @@ type userModel struct {
 func (userModel) TableName() string { return "iam_user" }
 
 type accountModel struct {
-	ID          string     `gorm:"column:id;primaryKey"`
-	TenantID    string     `gorm:"column:tenant_id"`
-	UserID      *string    `gorm:"column:user_id"`
-	Username    *string    `gorm:"column:username"`
-	AccountType string     `gorm:"column:account_type"`
-	AuthSource  string     `gorm:"column:auth_source"`
-	LockedUntil *time.Time `gorm:"column:locked_until"`
-	LastLoginAt *time.Time `gorm:"column:last_login_at"`
-	ValidUntil  *time.Time `gorm:"column:valid_until"`
-	Status      string     `gorm:"column:status"`
-	Version     uint64     `gorm:"column:version"`
-	CreatedAt   time.Time  `gorm:"column:created_at"`
-	CreatedBy   *string    `gorm:"column:created_by"`
-	UpdatedAt   time.Time  `gorm:"column:updated_at"`
-	UpdatedBy   *string    `gorm:"column:updated_by"`
+	ID                  string     `gorm:"column:id;primaryKey"`
+	TenantID            string     `gorm:"column:tenant_id"`
+	UserID              *string    `gorm:"column:user_id"`
+	Username            *string    `gorm:"column:username"`
+	AccountType         string     `gorm:"column:account_type"`
+	AuthSource          string     `gorm:"column:auth_source"`
+	PasswordInitialized bool       `gorm:"column:password_initialized;->"`
+	LockedUntil         *time.Time `gorm:"column:locked_until"`
+	LastLoginAt         *time.Time `gorm:"column:last_login_at"`
+	ValidUntil          *time.Time `gorm:"column:valid_until"`
+	Status              string     `gorm:"column:status"`
+	Version             uint64     `gorm:"column:version"`
+	CreatedAt           time.Time  `gorm:"column:created_at"`
+	CreatedBy           *string    `gorm:"column:created_by"`
+	UpdatedAt           time.Time  `gorm:"column:updated_at"`
+	UpdatedBy           *string    `gorm:"column:updated_by"`
 }
 
 func (accountModel) TableName() string { return "iam_account" }

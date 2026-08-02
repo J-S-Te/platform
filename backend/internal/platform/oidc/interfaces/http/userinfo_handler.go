@@ -90,10 +90,15 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]any{
 		"sub":              info.Subject,
 		"tenant_id":        authorization.TenantID,
+		"primary_org_id":   authorization.PrimaryOrgID,
+		"organization_ids": append([]string{}, authorization.OrganizationIDs...),
 		"roles":            append([]string(nil), authorization.Roles...),
 		"permissions":      append([]string(nil), authorization.Permissions...),
 		"role_config_hash": authorization.RoleConfigHash,
 		"authz_revision":   authorization.AuthzRevision,
+	}
+	if authorization.PersonID != "" {
+		payload["person_id"] = authorization.PersonID
 	}
 	if hasScope(claims.Scope, "profile") {
 		if info.Name != "" {

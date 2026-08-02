@@ -115,7 +115,11 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 		return provisioningError("read deployment response")
 	}
 	if !reply.Success {
-		return provisioningError("deployment helper rejected the request")
+		message := strings.TrimSpace(reply.Message)
+		if message == "" {
+			message = "deployment helper rejected the request"
+		}
+		return provisioningError(message)
 	}
 	return nil
 }
@@ -168,7 +172,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		return
 	}
 	if request.Version != subsystemProvisioningProtocolVersion {
-		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false})
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false, Message: "deployment protocol version is unsupported"})
 		return
 	}
 	var err error
@@ -192,5 +196,26 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	default:
 		err = application.ErrSubsystemProvisioningUnavailable
 	}
-	_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: err == nil})
+	reply := subsystemProvisioningReply{Success: err == nil}
+	if err != nil {
+		reply.Message = safeSubsystemProvisioningMessage(err)
+		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] action=%s code=%s failed: %s\n", request.Action, requestCode(request), reply.Message)
+	}
+	_ = json.NewEncoder(connection).Encode(reply)
+}
+
+func safeSubsystemProvisioningMessage(err error) string {
+	message := strings.TrimSpace(err.Error())
+	message = strings.TrimSpace(strings.TrimPrefix(message, application.ErrSubsystemProvisioningUnavailable.Error()+":"))
+	if message == "" || len(message) > 256 || strings.ContainsAny(message, "\r\n\x00") {
+		return "deployment helper rejected the request"
+	}
+	return message
+}
+
+func requestCode(request subsystemProvisioningRequest) string {
+	if request.Input != nil {
+		return strings.TrimSpace(request.Input.ApplicationCode)
+	}
+	return strings.TrimSpace(request.Code)
 }

@@ -12,6 +12,7 @@ type AuditEvent struct {
 	ApplicationID   string
 	ApplicationCode string
 	OperatorID      string
+	OperatorName    string
 	SubjectID       string
 	Action          string
 	ResourceType    string
@@ -21,6 +22,14 @@ type AuditEvent struct {
 	Summary         string
 	OccurredAt      time.Time
 	Metadata        map[string]any
+	Changes         []AuditFieldChange
+}
+
+// AuditFieldChange captures a secret-safe before/after business change.
+type AuditFieldChange struct {
+	Field  string
+	Before any
+	After  any
 }
 
 // AuditRecorder is optional so the authorization service remains usable in processes that do not

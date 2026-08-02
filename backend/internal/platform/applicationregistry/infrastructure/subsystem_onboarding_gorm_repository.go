@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
@@ -14,6 +15,26 @@ import (
 type SubsystemOnboardingGORMRepository struct {
 	database *gorm.DB
 }
+
+type subsystemDeploymentStateModel struct {
+	TenantID        string     `gorm:"column:tenant_id"`
+	ApplicationID   string     `gorm:"column:application_id"`
+	EnvironmentID   string     `gorm:"column:environment_id"`
+	ApplicationCode string     `gorm:"column:application_code"`
+	Environment     string     `gorm:"column:environment_code"`
+	Status          string     `gorm:"column:status"`
+	Operation       string     `gorm:"column:operation"`
+	Generation      uint64     `gorm:"column:generation"`
+	AttemptCount    uint       `gorm:"column:attempt_count"`
+	LastErrorCode   *string    `gorm:"column:last_error_code"`
+	LastError       *string    `gorm:"column:last_error_message"`
+	StartedAt       *time.Time `gorm:"column:started_at"`
+	CompletedAt     *time.Time `gorm:"column:completed_at"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+}
+
+func (subsystemDeploymentStateModel) TableName() string { return "subsystem_deployment_state" }
 
 // NewSubsystemOnboardingGORMRepository constructs the onboarding repository.
 func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardingGORMRepository, error) {
@@ -50,6 +71,9 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		write.LoginTarget.ApplicationID = createdApplication.ID
 		write.OAuthClient.ApplicationID = createdApplication.ID
 		write.CatalogPublisherOAuthClient.ApplicationID = createdApplication.ID
+		for index := range write.ServiceClients {
+			write.ServiceClients[index].OAuthClient.ApplicationID = createdApplication.ID
+		}
 
 		// Onboarding is intentionally create-only: an existing environment can already
 		// own a LoginTarget and OAuth client whose secret cannot be recovered safely.
@@ -87,11 +111,38 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		if err != nil {
 			return err
 		}
+		createdServiceCredentials := make([]application.SubsystemServiceCredential, 0, len(write.ServiceClients))
+		for _, serviceClient := range write.ServiceClients {
+			created, createErr := oauthClients.CreateOAuthClient(ctx, serviceClient.OAuthClient, serviceClient.OAuthClientID, serviceClient.OAuthClientSecret, now)
+			if createErr != nil {
+				return createErr
+			}
+			createdServiceCredentials = append(createdServiceCredentials, application.SubsystemServiceCredential{
+				Purpose: serviceClient.Purpose, OAuthClient: created,
+			})
+		}
+		if err := transaction.Create(&subsystemDeploymentStateModel{
+			TenantID:        createdApplication.TenantID,
+			ApplicationID:   createdApplication.ID,
+			EnvironmentID:   createdEnvironment.ID,
+			ApplicationCode: createdApplication.Code,
+			Environment:     createdEnvironment.Environment,
+			Status:          application.SubsystemDeploymentStatusProvisioning,
+			Operation:       "ONBOARD",
+			Generation:      1,
+			AttemptCount:    1,
+			StartedAt:       timePointer(now.UTC()),
+			CreatedAt:       now.UTC(),
+			UpdatedAt:       now.UTC(),
+		}).Error; err != nil {
+			return err
+		}
 
 		result = application.SubsystemOnboardingResult{
 			Application: createdApplication, Environment: createdEnvironment,
 			LoginTarget: createdLoginTarget, OAuthClient: createdOAuthClient,
 			CatalogPublisherOAuthClient: createdCatalogPublisherOAuthClient,
+			ServiceCredentials:          createdServiceCredentials,
 		}
 		return nil
 	})
@@ -145,6 +196,7 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 			target.target_code, target.target_uri`).
 		Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
 		Joins("JOIN platform_application_login_target AS target ON target.environment_id = environment.id AND target.application_id = application.id AND target.tenant_id = application.tenant_id").
+		Joins("JOIN subsystem_deployment_state AS deployment ON deployment.tenant_id = application.tenant_id AND deployment.application_id = application.id AND deployment.environment_id = environment.id AND deployment.status = ?", application.SubsystemDeploymentStatusReady).
 		Where("application.tenant_id = ? AND application.status = ? AND environment.status = ? AND target.status = ?", tenantID, "ACTIVE", "ACTIVE", "ACTIVE").
 		Where(accessFilter, accessArgs...)
 	if environment != "" {
@@ -174,6 +226,85 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 		})
 	}
 	return items, nil
+}
+
+// TransitionSubsystemDeployment records a lifecycle transition using the registered application
+// and environment codes. Error details are operator-safe and deliberately truncated before they
+// enter the database; credentials and command output never belong in this table.
+func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, now time.Time) error {
+	status = strings.TrimSpace(status)
+	operation = strings.TrimSpace(operation)
+	errorCode = strings.TrimSpace(errorCode)
+	errorMessage = strings.TrimSpace(errorMessage)
+	if len(errorCode) > 128 {
+		errorCode = errorCode[:128]
+	}
+	if len(errorMessage) > 1000 {
+		errorMessage = errorMessage[:1000]
+	}
+	updates := map[string]any{
+		"status":             status,
+		"operation":          operation,
+		"last_error_code":    nullableString(errorCode),
+		"last_error_message": nullableString(errorMessage),
+		"updated_at":         now.UTC(),
+	}
+	if status == application.SubsystemDeploymentStatusProvisioning || status == application.SubsystemDeploymentStatusUpdating || status == application.SubsystemDeploymentStatusVerifying || status == application.SubsystemDeploymentStatusDraining {
+		// A generation identifies one lifecycle attempt; terminal transitions keep the same
+		// generation so status polling can distinguish retries from completion updates.
+		if status != application.SubsystemDeploymentStatusProvisioning {
+			updates["generation"] = gorm.Expr("generation + 1")
+		}
+		updates["attempt_count"] = gorm.Expr("attempt_count + 1")
+		updates["started_at"] = now.UTC()
+		updates["completed_at"] = nil
+	}
+	if status == application.SubsystemDeploymentStatusReady || status == application.SubsystemDeploymentStatusFailed || status == application.SubsystemDeploymentStatusOffboarded {
+		updates["completed_at"] = now.UTC()
+	}
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrNotFound
+	}
+	return nil
+}
+
+// GetSubsystemDeploymentState returns only tenant-scoped lifecycle metadata.
+func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState(ctx context.Context, tenantID, applicationCode, environment string) (application.SubsystemDeploymentState, error) {
+	var model subsystemDeploymentStateModel
+	if err := repository.database.WithContext(ctx).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+		Take(&model).Error; err != nil {
+		return application.SubsystemDeploymentState{}, mapManagementError(err)
+	}
+	return application.SubsystemDeploymentState{
+		TenantID: model.TenantID, ApplicationID: model.ApplicationID, EnvironmentID: model.EnvironmentID,
+		ApplicationCode: model.ApplicationCode, Environment: model.Environment, Status: model.Status,
+		Operation: model.Operation, Generation: model.Generation, AttemptCount: model.AttemptCount,
+		LastErrorCode: dereferenceString(model.LastErrorCode), LastError: dereferenceString(model.LastError),
+		StartedAt: model.StartedAt, CompletedAt: model.CompletedAt, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
+	}, nil
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
+func nullableString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func dereferenceString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // portalApplicationAccessFilter keeps portal visibility aligned with the effective authorization

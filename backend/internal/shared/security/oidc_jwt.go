@@ -49,6 +49,9 @@ type OIDCTokenClaims struct {
 	Nonce              string
 	TokenUse           OIDCTokenUse
 	TenantID           string
+	PersonID           string
+	PrimaryOrgID       string
+	OrganizationIDs    []string
 	Roles              []string
 	Permissions        []string
 	RoleConfigHash     string
@@ -271,6 +274,9 @@ func (manager *OIDCJWTManager) issue(claims OIDCTokenClaims, tokenUse OIDCTokenU
 		Nonce:              claims.Nonce,
 		TokenUse:           claims.TokenUse,
 		TenantID:           claims.TenantID,
+		PersonID:           claims.PersonID,
+		PrimaryOrgID:       claims.PrimaryOrgID,
+		OrganizationIDs:    append([]string{}, claims.OrganizationIDs...),
 		Roles:              append([]string(nil), claims.Roles...),
 		Permissions:        append([]string(nil), claims.Permissions...),
 		RoleConfigHash:     claims.RoleConfigHash,
@@ -305,6 +311,9 @@ type oidcJWTPayload struct {
 	Nonce              string       `json:"nonce"`
 	TokenUse           OIDCTokenUse `json:"token_use"`
 	TenantID           string       `json:"tenant_id"`
+	PersonID           string       `json:"person_id,omitempty"`
+	PrimaryOrgID       string       `json:"primary_org_id"`
+	OrganizationIDs    []string     `json:"organization_ids"`
 	Roles              []string     `json:"roles"`
 	Permissions        []string     `json:"permissions"`
 	RoleConfigHash     string       `json:"role_config_hash"`
@@ -366,6 +375,9 @@ func oidcClaimsFromPayload(payload oidcJWTPayload) (OIDCTokenClaims, error) {
 		Nonce:              payload.Nonce,
 		TokenUse:           payload.TokenUse,
 		TenantID:           payload.TenantID,
+		PersonID:           payload.PersonID,
+		PrimaryOrgID:       payload.PrimaryOrgID,
+		OrganizationIDs:    append([]string(nil), payload.OrganizationIDs...),
 		Roles:              append([]string(nil), payload.Roles...),
 		Permissions:        append([]string(nil), payload.Permissions...),
 		RoleConfigHash:     payload.RoleConfigHash,
@@ -380,7 +392,7 @@ func validateOIDCTokenClaims(claims OIDCTokenClaims, expectedIssuer string, expe
 	if claims.TokenUse != expectedTokenUse {
 		return errors.New("OIDC JWT token use does not match")
 	}
-	for _, value := range []string{claims.Subject, claims.JWTID, claims.SessionID, claims.ClientID} {
+	for _, value := range []string{claims.Subject, claims.JWTID, claims.SessionID, claims.ClientID, claims.TenantID} {
 		if !validOIDCString(value) {
 			return errors.New("OIDC JWT contains an empty or whitespace-padded required claim")
 		}
@@ -406,9 +418,56 @@ func validateOIDCTokenClaims(claims OIDCTokenClaims, expectedIssuer string, expe
 	if err := validateOIDCScopes(claims.Scope); err != nil {
 		return err
 	}
+	if err := validateOIDCOrganizations(claims.PrimaryOrgID, claims.OrganizationIDs); err != nil {
+		return err
+	}
+	if claims.PersonID != "" && !validPMSPersonID(claims.PersonID) {
+		return errors.New("OIDC JWT contains an invalid PMS person identifier")
+	}
 	if claims.IssuedAt.IsZero() || claims.ExpiresAt.IsZero() || claims.AuthenticationTime.IsZero() ||
 		!claims.ExpiresAt.After(claims.IssuedAt) || claims.AuthenticationTime.After(claims.IssuedAt) {
 		return errors.New("OIDC JWT has invalid iat, exp, or auth_time claims")
+	}
+	return nil
+}
+
+func validPMSPersonID(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if character > 0x7f || !(character == '-' || character == '_' || character == '.' || character == ':' ||
+			character >= '0' && character <= '9' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+const maxOIDCOrganizationIDs = 100
+
+// validateOIDCOrganizations keeps organization claims bounded and canonical. Organization IDs
+// are opaque direct-membership identifiers; callers must not encode descendant expansion here.
+func validateOIDCOrganizations(primaryOrgID string, organizationIDs []string) error {
+	if len(organizationIDs) > maxOIDCOrganizationIDs {
+		return errors.New("OIDC JWT organization list exceeds the supported maximum")
+	}
+	primaryFound := primaryOrgID == ""
+	previous := ""
+	for index, organizationID := range organizationIDs {
+		if !validOIDCString(organizationID) || len([]byte(organizationID)) > 64 {
+			return errors.New("OIDC JWT contains an invalid organization identifier")
+		}
+		if index > 0 && organizationID <= previous {
+			return errors.New("OIDC JWT organization identifiers are not a sorted unique set")
+		}
+		if organizationID == primaryOrgID {
+			primaryFound = true
+		}
+		previous = organizationID
+	}
+	if primaryOrgID != "" && (!validOIDCString(primaryOrgID) || len([]byte(primaryOrgID)) > 64 || !primaryFound) {
+		return errors.New("OIDC JWT primary organization is not an active direct membership")
 	}
 	return nil
 }

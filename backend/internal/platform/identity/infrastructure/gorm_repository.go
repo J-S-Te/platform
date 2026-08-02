@@ -339,17 +339,59 @@ func (repository *GORMRepository) RevokeSession(ctx context.Context, sessionID s
 	return nil
 }
 
-// RevokeAccountSessions invalidates all active SSO sessions for one tenant account. It is used
-// both for explicit global logout and for inactivity expiry discovered in any child system.
+// RevokeAccountSessions invalidates all active SSO sessions and every OIDC refresh-token family
+// derived from them for one tenant account. It is used both for explicit global logout and for
+// inactivity expiry discovered in any child system.
 func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error {
-	result := repository.database.WithContext(ctx).
-		Model(&sessionModel{}).
-		Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, domain.StatusActive).
-		Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt.UTC(), "revoke_reason": reason})
-	if result.Error != nil {
-		return fmt.Errorf("revoke account sessions: %w", result.Error)
-	}
-	return nil
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		revokedAt = revokedAt.UTC()
+		// Lock every active browser session for this account. Authorization-code consumption locks
+		// the same session row before creating a refresh family, so logout and code exchange are
+		// serialized and neither can recreate an old user's grant after revocation.
+		var lockedSessions []sessionModel
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id").Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, domain.StatusActive).
+			Find(&lockedSessions).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return application.ErrUnauthenticated
+			}
+			return fmt.Errorf("lock account sessions before revocation: %w", err)
+		}
+		if len(lockedSessions) == 0 {
+			return application.ErrUnauthenticated
+		}
+		// Revoke OAuth refresh-token families first while the session IDs are still available. This
+		// prevents an RP from refreshing an old user's ID/access token after global logout.
+		var activeFamilyIDs []string
+		if err := transaction.Table("oauth_token_family").
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, "ACTIVE").
+			Pluck("id", &activeFamilyIDs).Error; err != nil {
+			return fmt.Errorf("list account OAuth token families: %w", err)
+		}
+		if len(activeFamilyIDs) > 0 {
+			if err := transaction.Table("oauth_refresh_token").
+				Where("tenant_id = ? AND token_family_id IN ? AND revoked_at IS NULL", tenantID, activeFamilyIDs).
+				Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt, "revoke_reason": reason}).Error; err != nil {
+				return fmt.Errorf("revoke account OAuth refresh tokens: %w", err)
+			}
+		}
+		if err := transaction.Table("oauth_token_family").
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, "ACTIVE").
+			Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt, "revoke_reason": reason}).Error; err != nil {
+			return fmt.Errorf("revoke account OAuth token families: %w", err)
+		}
+		if err := transaction.Table("oauth_authorization_code").
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND consumed_at IS NULL", tenantID, accountID, "ACTIVE").
+			Update("status", "REVOKED").Error; err != nil {
+			return fmt.Errorf("revoke account OAuth authorization codes: %w", err)
+		}
+		if err := transaction.Model(&sessionModel{}).
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, domain.StatusActive).
+			Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt, "revoke_reason": reason}).Error; err != nil {
+			return fmt.Errorf("revoke account sessions: %w", err)
+		}
+		return nil
+	})
 }
 
 func (repository *GORMRepository) findRoles(ctx context.Context, tenantID, userID, accountID string, now time.Time) ([]domain.ReferenceName, error) {

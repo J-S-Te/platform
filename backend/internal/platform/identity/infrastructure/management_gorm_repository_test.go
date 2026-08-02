@@ -87,6 +87,91 @@ func TestMembershipAuthorizationRevisionUpdateTargetsInheritedBindingApplication
 	}
 }
 
+func TestDisablePositionAuthorizationArtifactsClosesAssignmentsAndBindings(t *testing.T) {
+	database := newDryRunManagementDatabase(t)
+	positionIDs := database.Table("iam_position").Select("id").Where("tenant_id = ? AND id = ?", "tenant-1", "position-1")
+	now := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.UTC)
+
+	assignmentResult := buildDisablePositionAuthorizationTemplateAssignments(database.Session(&gorm.Session{}), "tenant-1", positionIDs, "operator-1", now)
+	for _, fragment := range []string{
+		"UPDATE `authz_position_grant_template_assignment`",
+		"position_id IN",
+		"status <> ?",
+		"`status`=?",
+		"`version`=version + 1",
+	} {
+		if !strings.Contains(assignmentResult.Statement.SQL.String(), fragment) {
+			t.Errorf("disable position template assignment SQL is missing %q; SQL=%s", fragment, assignmentResult.Statement.SQL.String())
+		}
+	}
+
+	bindingResult := buildDisablePositionRoleBindings(database.Session(&gorm.Session{}), "tenant-1", positionIDs, "operator-1", now)
+	statement := bindingResult.Statement.SQL.String()
+	for _, fragment := range []string{
+		"UPDATE `authz_role_binding`",
+		"subject_type = ?",
+		"subject_id IN",
+		"status <> ?",
+		"`status`=?",
+		"`version`=version + 1",
+	} {
+		if !strings.Contains(statement, fragment) {
+			t.Errorf("disable position authorization SQL is missing %q; SQL=%s", fragment, statement)
+		}
+	}
+	for _, value := range []any{"tenant-1", "POSITION", "DISABLED", "operator-1", now} {
+		if !containsStatementVariable(bindingResult.Statement.Vars, value) {
+			t.Errorf("disable position authorization variables do not contain %#v: %#v", value, bindingResult.Statement.Vars)
+		}
+	}
+}
+
+func TestDisableOrganizationRoleBindingsOnlyClosesActiveOrganizationBindings(t *testing.T) {
+	database := newDryRunManagementDatabase(t)
+	organizationIDs := database.Table("iam_org_unit").Select("id").
+		Where("tenant_id = ? AND path LIKE ?", "tenant-1", "/root/%")
+	now := time.Date(2026, time.August, 1, 10, 0, 0, 0, time.UTC)
+
+	result := buildDisableOrganizationRoleBindings(
+		database.Session(&gorm.Session{}),
+		"tenant-1",
+		organizationIDs,
+		"operator-1",
+		now,
+	)
+	if result.Error != nil {
+		t.Fatalf("build organization role binding cleanup: %v", result.Error)
+	}
+
+	statement := result.Statement.SQL.String()
+	for _, fragment := range []string{
+		"UPDATE `authz_role_binding`",
+		"subject_type = ?",
+		"subject_id IN",
+		"status = ?",
+		"`status`=?",
+		"`updated_at`=?",
+		"`updated_by`=?",
+		"`version`=version + 1",
+		"FROM `iam_org_unit`",
+		"path LIKE ?",
+	} {
+		if !strings.Contains(statement, fragment) {
+			t.Errorf("disable organization authorization SQL is missing %q; SQL=%s", fragment, statement)
+		}
+	}
+	for _, value := range []any{"tenant-1", "ORG_UNIT", "ACTIVE", "DISABLED", "operator-1", "/root/%", now} {
+		if !containsStatementVariable(result.Statement.Vars, value) {
+			t.Errorf("disable organization authorization variables do not contain %#v: %#v", value, result.Statement.Vars)
+		}
+	}
+	for _, forbidden := range []string{"subject_type IN", "POSITION", "USER", "grant_origin"} {
+		if strings.Contains(statement, forbidden) {
+			t.Errorf("organization cleanup must not broaden to %q; SQL=%s", forbidden, statement)
+		}
+	}
+}
+
 func newDryRunManagementDatabase(t *testing.T) *gorm.DB {
 	t.Helper()
 	sqlDatabase, err := sql.Open("mysql", "")

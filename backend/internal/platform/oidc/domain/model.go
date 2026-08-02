@@ -12,6 +12,8 @@ const (
 	AuthorizationCodeStatusActive = "ACTIVE"
 	// AuthorizationCodeStatusConsumed marks a code permanently used by the token endpoint.
 	AuthorizationCodeStatusConsumed = "CONSUMED"
+	// AuthorizationCodeStatusRevoked marks an unconsumed code invalidated with its browser session.
+	AuthorizationCodeStatusRevoked = "REVOKED"
 	// TokenFamilyStatusActive marks a refresh-token family that can still rotate.
 	TokenFamilyStatusActive = "ACTIVE"
 	// TokenFamilyStatusRevoked marks a family invalid after logout, revocation, or replay.

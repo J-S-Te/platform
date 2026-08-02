@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/authctx"
@@ -118,6 +120,24 @@ func TestOnboardSubsystemExistingEnvironmentReturnsActionableConflict(t *testing
 	}
 }
 
+func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{preflightErr: fmt.Errorf("%w: subsystem Compose file is unavailable", application.ErrSubsystemProvisioningUnavailable)}
+	handler, err := NewSubsystemOnboardingHandler(&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{}, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestBody := `{"application_code":"customer_and_opportunity","application_name":"客户与商机管理系统","environment":"dev","public_base_url":"http://localhost:8081","upstream_url":"http://customer-api:8090","path_prefix":"/customer-opportunity","client_type":"confidential"}`
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"}}))
+	response := httptest.NewRecorder()
+	handler.OnboardSubsystem(response, request)
+	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "compose.yaml") || strings.Contains(response.Body.String(), "/Users/") {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+}
+
 type stubSubsystemOnboardingService struct {
 	result application.SubsystemOnboardingResult
 	err    error
@@ -129,6 +149,38 @@ func (service *stubSubsystemOnboardingService) OnboardSubsystem(context.Context,
 
 func (*stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
 	return nil, nil
+}
+
+func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T) {
+	t.Parallel()
+	service := &stubSubsystemOnboardingService{}
+	handler, err := NewSubsystemOnboardingHandler(
+		service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/portal/applications", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.ListPortalApplications(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store, private" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := response.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q", got)
+	}
+	if got := response.Header().Get("Vary"); got != "Cookie" {
+		t.Fatalf("Vary = %q", got)
+	}
 }
 
 type recordingSubsystemAccessManager struct {
@@ -151,25 +203,29 @@ func (manager *recordingSubsystemAccessManager) AssignInitialAdministrator(_ con
 type recordingHTTPSubsystemProvisioner struct {
 	input        application.SubsystemProvisioningInput
 	teardownCode string
+	preflightErr error
+	provisionErr error
+	updateErr    error
+	teardownErr  error
 }
 
-func (*recordingHTTPSubsystemProvisioner) Preflight(context.Context, string) error {
-	return nil
+func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, string) error {
+	return provisioner.preflightErr
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Provision(_ context.Context, input application.SubsystemProvisioningInput) error {
 	provisioner.input = input
-	return nil
+	return provisioner.provisionErr
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, input application.SubsystemProvisioningInput) error {
 	provisioner.input = input
-	return nil
+	return provisioner.updateErr
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, applicationCode, _ string) error {
 	provisioner.teardownCode = applicationCode
-	return nil
+	return provisioner.teardownErr
 }
 
 func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
@@ -258,5 +314,139 @@ func TestTeardownSubsystemCallsProvisionerAndAcknowledgesDeepCleanup(t *testing.
 	}
 	if !strings.Contains(response.Body.String(), `"status":"torn_down"`) {
 		t.Fatalf("response missing torn_down status: %s", response.Body.String())
+	}
+}
+
+type recordedDeploymentTransition struct {
+	tenantID        string
+	applicationCode string
+	environment     string
+	status          string
+	operation       string
+	errorCode       string
+	errorMessage    string
+}
+
+type recordingSubsystemDeploymentStateStore struct {
+	transitions   []recordedDeploymentTransition
+	state         application.SubsystemDeploymentState
+	transitionErr error
+	getErr        error
+}
+
+func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(_ context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
+	store.transitions = append(store.transitions, recordedDeploymentTransition{
+		tenantID: tenantID, applicationCode: applicationCode, environment: environment,
+		status: status, operation: operation, errorCode: errorCode, errorMessage: errorMessage,
+	})
+	return store.transitionErr
+}
+
+func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentState(context.Context, string, string, string) (application.SubsystemDeploymentState, error) {
+	return store.state, store.getErr
+}
+
+func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(stateStore.transitions) != 2 {
+		t.Fatalf("transitions = %#v, want UPDATING then READY", stateStore.transitions)
+	}
+	if stateStore.transitions[0].status != application.SubsystemDeploymentStatusUpdating || stateStore.transitions[0].operation != "RETRY" {
+		t.Fatalf("start transition = %#v", stateStore.transitions[0])
+	}
+	if stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "RETRY" {
+		t.Fatalf("terminal transition = %#v", stateStore.transitions[1])
+	}
+}
+
+func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{}
+	provisioner := &recordingHTTPSubsystemProvisioner{updateErr: application.ErrSubsystemProvisioningUnavailable}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(stateStore.transitions) != 2 || stateStore.transitions[1].status != application.SubsystemDeploymentStatusFailed {
+		t.Fatalf("transitions = %#v", stateStore.transitions)
+	}
+	failed := stateStore.transitions[1]
+	if failed.errorCode != "DEPLOYMENT_AGENT_FAILED" || failed.errorMessage != "部署 Agent 执行失败" {
+		t.Fatalf("unsafe or unexpected failure summary = %#v", failed)
+	}
+}
+
+func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
+		ApplicationCode: "customer_management", Environment: "dev",
+		Status: application.SubsystemDeploymentStatusFailed, Operation: "RETRY",
+		Generation: 2, AttemptCount: 2, LastErrorCode: "DEPLOYMENT_AGENT_FAILED",
+		LastError: "部署 Agent 执行失败", UpdatedAt: now,
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-status?application_code=customer_management&environment=dev", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.GetSubsystemStatus(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"status":"PROVISION_FAILED"`, `"operation":"RETRY"`, `"attempt_count":2`, `"last_error_code":"DEPLOYMENT_AGENT_FAILED"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("response missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"client_secret", "command", "filesystem", "container_id"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("status response leaked %q: %s", forbidden, body)
+		}
 	}
 }

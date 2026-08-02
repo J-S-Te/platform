@@ -108,3 +108,28 @@ func TestPositionDeletePermissionMigrationIsAdditiveAndHighRisk(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyDefaultPositionRetirementIsConservativeAndRepeatable(t *testing.T) {
+	migrationSQL, err := migrations.Files.ReadFile("000066_retire_unreferenced_default_positions.sql")
+	if err != nil {
+		t.Fatalf("read default position retirement migration: %v", err)
+	}
+	sql := string(migrationSQL)
+	for _, fragment := range []string{
+		"UPDATE iam_position AS position",
+		"POS-DEFAULT-%",
+		"NOT EXISTS (",
+		"FROM iam_membership AS membership",
+		"FROM authz_position_grant_template_assignment AS assignment",
+		"FROM authz_role_binding AS binding",
+		"binding.subject_type = 'POSITION'",
+		"position.status = 'DISABLED'",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("default position retirement migration is missing %q", fragment)
+		}
+	}
+	if strings.Contains(strings.ToUpper(sql), "DELETE FROM IAM_POSITION") {
+		t.Fatal("legacy default positions must be logically disabled, not physically deleted")
+	}
+}

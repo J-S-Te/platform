@@ -221,17 +221,24 @@ func (r *Repository) withCapabilities(ctx context.Context, database *gorm.DB, cl
 // ResolveSessionSubject returns a subject only while the local session and all tenant-scoped
 // identity records remain active and the session is neither expired nor revoked.
 func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string, now time.Time) (domain.SessionSubject, error) {
+	return r.resolveSessionSubject(ctx, r.database, sessionID, now, false)
+}
+
+func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.DB, sessionID string, now time.Time, lock bool) (domain.SessionSubject, error) {
 	var row struct {
 		TenantID, SessionID, AccountID, UserID string
 		ExpiresAt                              time.Time
 	}
-	err := r.database.WithContext(ctx).Table("iam_session").
+	query := database.WithContext(ctx).Table("iam_session").
 		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.expires_at").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
 		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
-		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now).
-		Take(&row).Error
+		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now)
+	if lock {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.Take(&row).Error
 	if err != nil {
 		return domain.SessionSubject{}, mapError(err)
 	}
@@ -273,6 +280,14 @@ func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command appli
 		if code.TenantID != client.TenantID || code.OAuthClientID != client.ID || !r.hasGrant(ctx, tx, client.ID, "authorization_code") {
 			return application.ErrAuthorizationCodeUnavailable
 		}
+		// Recheck the durable browser session inside the same transaction that consumes the code.
+		// This closes the race where logout happens after the application-layer preview but before
+		// code consumption and refresh-family creation.
+		subject, err := r.resolveSessionSubject(ctx, tx, code.SessionID, now, true)
+		if err != nil || subject.TenantID != code.TenantID || subject.SessionID != code.SessionID ||
+			subject.AccountID != code.AccountID || subject.UserID != code.UserID {
+			return application.ErrAuthorizationCodeUnavailable
+		}
 		if err := tx.Table("oauth_authorization_code").Where("id = ? AND status = ? AND consumed_at IS NULL", code.ID, domain.AuthorizationCodeStatusActive).
 			Updates(map[string]any{"status": domain.AuthorizationCodeStatusConsumed, "consumed_at": now.UTC()}).Error; err != nil {
 			return err
@@ -294,12 +309,12 @@ func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command appli
 	return grant, nil
 }
 
-func (r *Repository) FindRefreshToken(ctx context.Context, tokenHash [32]byte, _ time.Time) (domain.RefreshToken, error) {
+func (r *Repository) FindRefreshToken(ctx context.Context, tokenHash [32]byte, now time.Time) (domain.RefreshToken, error) {
 	row, err := r.refreshByHash(ctx, r.database, tokenHash, false)
 	if err != nil {
 		return domain.RefreshToken{}, mapError(err)
 	}
-	return refreshFromProjection(row), nil
+	return refreshFromProjection(row, now), nil
 }
 
 // RotateRefreshToken makes one active node consumed and inserts its successor. Reusing any
@@ -469,10 +484,22 @@ func authorizationCodeFromRow(row authorizationCodeRow) domain.AuthorizationCode
 	return domain.AuthorizationCode{ID: row.ID, TenantID: row.TenantID, OAuthClientID: row.OAuthClientID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, CodeHash: hash, RedirectURI: row.RedirectURI, Scopes: parseScopes(row.Scope), Nonce: row.Nonce, CodeChallenge: row.CodeChallenge, CodeChallengeMethod: row.CodeChallengeMethod, CreatedAt: row.CreatedAt.UTC(), ExpiresAt: row.ExpiresAt.UTC(), ConsumedAt: utcPointer(row.ConsumedAt), Status: row.Status}
 }
 
-func refreshFromProjection(row refreshProjection) domain.RefreshToken {
+func refreshFromProjection(row refreshProjection, now time.Time) domain.RefreshToken {
 	var hash [32]byte
 	copy(hash[:], row.TokenHash)
-	return domain.RefreshToken{ID: row.ID, TenantID: row.TenantID, OAuthClientID: row.OAuthClientID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, Scopes: parseScopes(row.Scope), AuthorizedAt: row.AuthorizedAt.UTC(), TokenFamilyID: row.TokenFamilyID, ParentRefreshTokenID: dereference(row.ParentRefreshTokenID), TokenHash: hash, IssuedAt: row.IssuedAt.UTC(), ExpiresAt: row.ExpiresAt.UTC(), UsedAt: utcPointer(row.UsedAt), RevokedAt: utcPointer(row.RevokedAt), RevokeReason: row.RevokeReason, Status: row.Status}
+	status := row.Status
+	revokedAt := utcPointer(row.RevokedAt)
+	revokeReason := row.RevokeReason
+	if row.FamilyStatus != domain.TokenFamilyStatusActive || row.FamilyRevokedAt != nil || !row.FamilyExpiresAt.After(now.UTC()) {
+		status = domain.RefreshTokenStatusRevoked
+		if revokedAt == nil {
+			revokedAt = utcPointer(row.FamilyRevokedAt)
+		}
+		if revokeReason == "" {
+			revokeReason = "TOKEN_FAMILY_INACTIVE"
+		}
+	}
+	return domain.RefreshToken{ID: row.ID, TenantID: row.TenantID, OAuthClientID: row.OAuthClientID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, Scopes: parseScopes(row.Scope), AuthorizedAt: row.AuthorizedAt.UTC(), TokenFamilyID: row.TokenFamilyID, ParentRefreshTokenID: dereference(row.ParentRefreshTokenID), TokenHash: hash, IssuedAt: row.IssuedAt.UTC(), ExpiresAt: row.ExpiresAt.UTC(), UsedAt: utcPointer(row.UsedAt), RevokedAt: revokedAt, RevokeReason: revokeReason, Status: status}
 }
 
 func grantFromCode(code authorizationCodeRow, clientID string) domain.TokenGrant {

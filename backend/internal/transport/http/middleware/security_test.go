@@ -121,6 +121,31 @@ func (testConsoleAuthenticator) Authenticate(_ context.Context, token string) (a
 	return authctx.Principal{Tenant: authctx.ReferenceName{ID: "tenant"}, User: authctx.ReferenceName{ID: "user"}}, nil
 }
 
+func TestAuthenticationDisablesCachingAcrossSessionCookies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(Authentication(testConsoleAuthenticator{}, "session"))
+	router.GET("/principal", func(context *gin.Context) { context.Status(http.StatusNoContent) })
+
+	request := httptest.NewRequest(http.MethodGet, "/principal", nil)
+	request.AddCookie(&http.Cookie{Name: "session", Value: "session"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store, private" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := response.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q", got)
+	}
+	if got := response.Header().Get("Vary"); got != "Cookie" {
+		t.Fatalf("Vary = %q", got)
+	}
+}
+
 type testApplicationAuthenticator struct{}
 
 func (testApplicationAuthenticator) Authenticate(_ context.Context, token string) (appctx.Principal, error) {

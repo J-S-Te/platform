@@ -144,6 +144,9 @@ func (service *Service) ExchangeAuthorizationCode(ctx context.Context, input Aut
 	if !validAuthorizationCode(code, client, input.RedirectURI, now) || !verifyPKCE(code.CodeChallenge, code.CodeChallengeMethod, input.CodeVerifier) {
 		return TokenResult{}, ErrInvalidGrant
 	}
+	if err := service.validateGrantSession(ctx, code.TenantID, code.SessionID, code.AccountID, code.UserID, now); err != nil {
+		return TokenResult{}, err
+	}
 
 	preview := grantFromAuthorizationCode(code, client)
 	refresh, rawRefresh, err := service.newRefreshToken(client, preview, "", now)
@@ -189,6 +192,13 @@ func (service *Service) Refresh(ctx context.Context, input RefreshTokenInput) (T
 	if current.OAuthClientID != client.ID || current.TenantID != client.TenantID {
 		return TokenResult{}, ErrInvalidGrant
 	}
+	// Refresh tokens are descendants of a browser SSO session. Global logout, account disablement,
+	// or session expiry must prevent further token issuance even if a stale family row has not yet
+	// been cleaned up. This check also protects existing databases created before logout cascaded to
+	// OAuth token families.
+	if err := service.validateGrantSession(ctx, current.TenantID, current.SessionID, current.AccountID, current.UserID, now); err != nil {
+		return TokenResult{}, err
+	}
 	preview := grantFromRefreshToken(current, client)
 	if !validRefreshToken(current, now) {
 		// A consumed node is a replay signal. Delegate to the transactional repository so it locks
@@ -232,6 +242,21 @@ func (service *Service) Refresh(ctx context.Context, input RefreshTokenInput) (T
 		return TokenResult{}, errors.New("refresh token rotation returned a mismatched grant")
 	}
 	return result, nil
+}
+
+func (service *Service) validateGrantSession(ctx context.Context, tenantID, sessionID, accountID, userID string, now time.Time) error {
+	subject, err := service.repository.ResolveSessionSubject(ctx, sessionID, now)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrInvalidGrant
+		}
+		return fmt.Errorf("resolve OAuth grant browser session: %w", err)
+	}
+	if subject.TenantID != tenantID || subject.SessionID != sessionID || subject.AccountID != accountID ||
+		subject.UserID != userID || !subject.ExpiresAt.After(now) {
+		return ErrInvalidGrant
+	}
+	return nil
 }
 
 // Revoke persists a token revocation. Refresh-token revocation invalidates the complete family;

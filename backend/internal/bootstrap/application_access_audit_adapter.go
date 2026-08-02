@@ -6,6 +6,7 @@ import (
 	"time"
 
 	auditapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/application"
+	auditdomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/domain"
 	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
@@ -47,12 +48,17 @@ func (adapter *applicationAccessAuditAdapter) RecordApplicationAccessAudit(
 	if strings.TrimSpace(event.OperatorID) != "" {
 		actorType = "USER"
 	}
+	changes := make([]auditdomain.FieldChange, 0, len(event.Changes))
+	for _, change := range event.Changes {
+		changes = append(changes, auditdomain.FieldChange{Field: change.Field, Before: change.Before, After: change.After})
+	}
 	_, err = adapter.service.Ingest(ctx, event.TenantID, auditapplication.EventInput{
 		EventID:         eventID,
 		ApplicationCode: adapter.config.ApplicationCode,
 		EnvironmentCode: adapter.config.EnvironmentCode,
 		ActorType:       actorType,
 		ActorID:         event.OperatorID,
+		ActorName:       event.OperatorName,
 		OccurredAt:      now,
 		Action:          event.Action,
 		ResourceType:    event.ResourceType,
@@ -62,6 +68,7 @@ func (adapter *applicationAccessAuditAdapter) RecordApplicationAccessAudit(
 		Classification:  "INTERNAL",
 		Summary:         event.Summary,
 		Metadata:        metadata,
+		Changes:         changes,
 		EventCategory:   "PLATFORM_AUTHORIZATION",
 		EventType:       event.Action,
 	})

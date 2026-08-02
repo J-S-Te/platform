@@ -1,0 +1,174 @@
+openapi: 3.1.0
+info:
+  title: Platform External Customer Identity Management API
+  version: 1.0.0
+  description: >-
+    Machine-only contract for external customer pre-provisioning and Portal role convergence.
+    Provisioning reserves a HUMAN/LOCAL login account without creating a password credential.
+    Password initialization, recovery, MFA and later account lifecycle changes remain owned by the
+    platform administrator and are intentionally absent from this API.
+servers:
+  - url: https://identity.example.com/api/v1
+paths:
+  /internal/external-users:
+    post:
+      operationId: ProvisionExternalUser
+      security: [{ oauth2: [external_user.provision] }]
+      parameters: &writeHeaders
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IntegrationTimestamp'
+        - $ref: '#/components/parameters/IntegrationNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProvisionRequest'}
+      responses:
+        '200':
+          description: New or exact existing external identity reservation.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProvisionEnvelope'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Validation'}
+  /internal/application-roles:
+    post:
+      operationId: AssignApplicationRole
+      security: [{ oauth2: [application_role.assign] }]
+      parameters: *writeHeaders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RoleRequest'}
+      responses:
+        '200':
+          description: Portal role converged to ACTIVE.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RoleEnvelope'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Validation'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /internal/application-roles/revoke:
+    post:
+      operationId: RevokeApplicationRole
+      security: [{ oauth2: [application_role.revoke] }]
+      parameters: *writeHeaders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RoleRequest'}
+      responses:
+        '200':
+          description: Portal role converged to DISABLED.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RoleEnvelope'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Validation'}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://identity.example.com/oauth2/token
+          scopes:
+            external_user.provision: Pre-provision a stable external OIDC subject.
+            application_role.assign: Assign the Portal customer role.
+            application_role.revoke: Revoke the Portal customer role.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    IntegrationTimestamp:
+      name: X-Integration-Timestamp
+      in: header
+      required: true
+      schema: {type: string, format: date-time}
+    IntegrationNonce:
+      name: X-Integration-Nonce
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+  schemas:
+    ProvisionRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      anyOf: [{required: [mobile]}, {required: [email]}]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 128}
+        mobile: {type: string, maxLength: 32}
+        email: {type: string, format: email, maxLength: 320}
+    RoleRequest:
+      type: object
+      additionalProperties: false
+      required: [platform_user_id, application_code, role_code]
+      properties:
+        platform_user_id: {type: string, minLength: 1, maxLength: 128}
+        application_code: {const: customer_portal}
+        role_code: {const: portal_customer}
+    ProvisionData:
+      type: object
+      additionalProperties: false
+      required: [platform_user_id, account_no]
+      properties:
+        platform_user_id: {type: string}
+        account_no: {type: string}
+    RoleData:
+      type: object
+      additionalProperties: false
+      required: [platform_user_id, application_code, role_code, status]
+      properties:
+        platform_user_id: {type: string}
+        application_code: {const: customer_portal}
+        role_code: {const: portal_customer}
+        status: {enum: [ACTIVE, DISABLED]}
+    ProvisionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/ProvisionData'}}
+    RoleEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/RoleData'}}
+    Envelope:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, data]
+      properties:
+        code: {const: OK}
+        message: {type: string}
+        request_id: {type: string}
+        data: {}
+    ErrorEnvelope:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        request_id: {type: string}
+        details: {}
+  responses:
+    Conflict:
+      description: Idempotency payload conflict, nonce replay, or identity locator conflict.
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    Validation:
+      description: Invalid body or integration proof headers.
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    NotFound:
+      description: External identity or active role binding does not exist.
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    Unavailable:
+      description: The target Portal application catalog or role is not synchronized.
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}

@@ -35,7 +35,7 @@ PAGE_LIMIT="${PORTAL_GATEWAY_PAGE_LIMIT:-100}"
 LOCK_FILE="${PORTAL_GATEWAY_LOCK_FILE:-${NGINX_INCLUDE}.lock}"
 LOCK_TIMEOUT="${PORTAL_GATEWAY_LOCK_TIMEOUT:-60}"
 # 这些模块已经编译进统一 Vue 前端，只允许代理其后端 API 子路径，不能生成整站反代。
-INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management}"
+INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management customer_and_opportunity customer-opportunity}"
 
 log() {
   local level="$1"

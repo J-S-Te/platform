@@ -76,7 +76,12 @@ func (w *ExportWorker) ProcessOne(ctx context.Context) bool {
 		if len(message) > 1000 {
 			message = message[:1000]
 		}
-		if failErr := w.service.FailExportJob(ctx, work, "AUDIT_EXPORT_FAILED", message, time.Now().UTC().Add(backoff(work.Attempts))); failErr != nil {
+		errorCode := "AUDIT_EXPORT_FAILED"
+		if strings.Contains(message, "more than 10000 events") {
+			errorCode = "AUDIT_EXPORT_TOO_LARGE"
+			work.Attempts = work.MaxAttempts
+		}
+		if failErr := w.service.FailExportJob(ctx, work, errorCode, message, time.Now().UTC().Add(backoff(work.Attempts))); failErr != nil {
 			w.logger.Error("mark audit export job failed", "job_id", work.JobID, "error", failErr)
 		}
 	}
@@ -133,11 +138,11 @@ func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (
 
 	hash := sha256.New()
 	writer := csv.NewWriter(io.MultiWriter(output, hash))
-	if err := writer.Write([]string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary"}); err != nil {
+	if err := writer.Write([]string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent"}); err != nil {
 		return domain.ExportFile{}, "", fmt.Errorf("write audit export header: %w", err)
 	}
 	for _, event := range events {
-		if err := writer.Write([]string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary}); err != nil {
+		if err := writer.Write([]string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary, event.RequestID, event.TraceID, event.CorrelationID, event.Method, event.Path, event.ClientIP, event.UserAgent}); err != nil {
 			return domain.ExportFile{}, "", fmt.Errorf("write audit export row: %w", err)
 		}
 	}

@@ -299,6 +299,9 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 	if input.EmployeeNo != nil {
 		updates["employee_no"] = nullableString(input.EmployeeNo)
 	}
+	if input.PMSPersonID != nil {
+		updates["pms_person_id"] = nullableString(input.PMSPersonID)
+	}
 	if input.Email != nil {
 		updates["email"] = nullableString(input.Email)
 	}
@@ -398,7 +401,10 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 	}
 
 	var rows []accountModel
-	if err := database.Order("created_at DESC, id DESC").Limit(query.PageSize).Offset(pageOffset(query)).Find(&rows).Error; err != nil {
+	if err := database.Select(`iam_account.*, EXISTS (
+		SELECT 1 FROM iam_password_credential AS credential
+		WHERE credential.account_id = iam_account.id AND credential.status = 'ACTIVE'
+	) AS password_initialized`).Order("created_at DESC, id DESC").Limit(query.PageSize).Offset(pageOffset(query)).Find(&rows).Error; err != nil {
 		return application.PageResult[domain.Account]{}, fmt.Errorf("list accounts: %w", err)
 	}
 	items := make([]domain.Account, 0, len(rows))
@@ -509,6 +515,10 @@ func (repository *GORMRepository) getAccount(ctx context.Context, tenantID, acco
 	var row accountModel
 	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
 	result := repository.database.WithContext(ctx).
+		Select(`iam_account.*, EXISTS (
+			SELECT 1 FROM iam_password_credential AS credential
+			WHERE credential.account_id = iam_account.id AND credential.status = 'ACTIVE'
+		) AS password_initialized`).
 		Where("tenant_id = ? AND id = ?", tenantID, accountID).
 		Where(ownerClause, ownerArgs...).
 		First(&row)
@@ -540,7 +550,7 @@ func (repository *GORMRepository) ListOrgUnits(ctx context.Context, tenantID, ke
 	return application.PageResult[domain.OrgUnit]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit domain.OrgUnit, positions []domain.Position, operatorID string) (domain.OrgUnit, error) {
+func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit domain.OrgUnit, operatorID string) (domain.OrgUnit, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		path, depth := "/"+orgUnit.ID+"/", uint(1)
 		if orgUnit.ParentID != nil {
@@ -574,30 +584,6 @@ func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit dom
 			UpdatedBy: nullableString(&operatorID),
 		}).Error; err != nil {
 			return mapWriteError(err, "create organization unit")
-		}
-		positionRows := make([]positionModel, 0, len(positions))
-		for _, position := range positions {
-			if position.TenantID != orgUnit.TenantID || position.OrgUnitID != orgUnit.ID {
-				return fmt.Errorf("default position does not belong to organization")
-			}
-			positionRows = append(positionRows, positionModel{
-				ID:        position.ID,
-				TenantID:  position.TenantID,
-				OrgUnitID: position.OrgUnitID,
-				Code:      position.Code,
-				Name:      position.Name,
-				Status:    position.Status,
-				Version:   1,
-				CreatedAt: now,
-				CreatedBy: nullableString(&operatorID),
-				UpdatedAt: now,
-				UpdatedBy: nullableString(&operatorID),
-			})
-		}
-		if len(positionRows) > 0 {
-			if err := transaction.Create(&positionRows).Error; err != nil {
-				return mapWriteError(err, "create default organization positions")
-			}
 		}
 		return nil
 	})
@@ -723,6 +709,14 @@ func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input appli
 		now := time.Now().UTC()
 		organizationIDs := transaction.Model(&orgUnitModel{}).Select("id").
 			Where("tenant_id = ? AND path LIKE ?", input.TenantID, existing.Path+"%")
+		positionIDs := transaction.Model(&positionModel{}).Select("id").
+			Where("tenant_id = ? AND org_unit_id IN (?)", input.TenantID, organizationIDs)
+		if err := disableOrganizationRoleBindings(transaction, input.TenantID, organizationIDs, input.OperatorID, now); err != nil {
+			return err
+		}
+		if err := disablePositionAuthorizationArtifacts(transaction, input.TenantID, positionIDs, input.OperatorID, now); err != nil {
+			return err
+		}
 		if result = transaction.Model(&orgUnitModel{}).
 			Where("tenant_id = ? AND path LIKE ? AND status <> ?", input.TenantID, existing.Path+"%", domain.StatusDisabled).
 			Updates(map[string]any{
@@ -764,8 +758,34 @@ func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input appli
 			}); result.Error != nil {
 			return mapWriteError(result.Error, "clear users primary organization")
 		}
+		if err := advanceMembershipAuthorizationRevisions(transaction, input.TenantID, now, "组织删除导致组织/岗位继承授权变化"); err != nil {
+			return err
+		}
 		return nil
 	})
+}
+
+// disableOrganizationRoleBindings closes every role binding owned by an organization in the
+// deleted subtree. The rows remain available for audit, while the subject type predicate keeps
+// user and position bindings outside this subject-lifecycle cleanup operation. This cleanup is
+// intentionally broader than the management UI, which permits revoking MANUAL bindings only.
+func disableOrganizationRoleBindings(transaction *gorm.DB, tenantID string, organizationIDs *gorm.DB, operatorID string, now time.Time) error {
+	result := buildDisableOrganizationRoleBindings(transaction, tenantID, organizationIDs, operatorID, now)
+	if result.Error != nil {
+		return mapWriteError(result.Error, "disable organization role bindings")
+	}
+	return nil
+}
+
+func buildDisableOrganizationRoleBindings(transaction *gorm.DB, tenantID string, organizationIDs *gorm.DB, operatorID string, now time.Time) *gorm.DB {
+	return transaction.Table("authz_role_binding").
+		Where("tenant_id = ? AND subject_type = ? AND subject_id IN (?) AND status = ?", tenantID, "ORG_UNIT", organizationIDs, domain.StatusActive).
+		Updates(map[string]any{
+			"status":     domain.StatusDisabled,
+			"updated_at": now,
+			"updated_by": operatorID,
+			"version":    gorm.Expr("version + 1"),
+		})
 }
 
 func (repository *GORMRepository) ListPositions(ctx context.Context, tenantID, keyword, status string, query application.PageRequest) (application.PageResult[domain.Position], error) {
@@ -843,6 +863,11 @@ func (repository *GORMRepository) DeletePosition(ctx context.Context, input appl
 		}
 
 		now := time.Now().UTC()
+		positionIDs := transaction.Model(&positionModel{}).Select("id").
+			Where("tenant_id = ? AND id = ?", input.TenantID, input.PositionID)
+		if err := disablePositionAuthorizationArtifacts(transaction, input.TenantID, positionIDs, input.OperatorID, now); err != nil {
+			return err
+		}
 		primaryUserIDs := transaction.Model(&membershipModel{}).Select("user_id").
 			Where("tenant_id = ? AND position_id = ? AND status = ? AND is_primary = ?", input.TenantID, input.PositionID, domain.StatusActive, true)
 		if result = transaction.Model(&userModel{}).
@@ -884,6 +909,44 @@ func (repository *GORMRepository) DeletePosition(ctx context.Context, input appl
 		}
 		return nil
 	})
+}
+
+// disablePositionAuthorizationArtifacts closes every active authorization edge owned by a
+// position before that position is disabled. Keeping the rows as DISABLED preserves audit and
+// optimistic-lock history while preventing stale template assignments from appearing active.
+func disablePositionAuthorizationArtifacts(transaction *gorm.DB, tenantID string, positionIDs *gorm.DB, operatorID string, now time.Time) error {
+	assignmentResult := buildDisablePositionAuthorizationTemplateAssignments(transaction, tenantID, positionIDs, operatorID, now)
+	if assignmentResult.Error != nil {
+		return mapWriteError(assignmentResult.Error, "disable position authorization template assignments")
+	}
+
+	bindingResult := buildDisablePositionRoleBindings(transaction, tenantID, positionIDs, operatorID, now)
+	if bindingResult.Error != nil {
+		return mapWriteError(bindingResult.Error, "disable position role bindings")
+	}
+	return nil
+}
+
+func buildDisablePositionAuthorizationTemplateAssignments(transaction *gorm.DB, tenantID string, positionIDs *gorm.DB, operatorID string, now time.Time) *gorm.DB {
+	return transaction.Table("authz_position_grant_template_assignment").
+		Where("tenant_id = ? AND position_id IN (?) AND status <> ?", tenantID, positionIDs, domain.StatusDisabled).
+		Updates(map[string]any{
+			"status":     domain.StatusDisabled,
+			"updated_at": now,
+			"updated_by": operatorID,
+			"version":    gorm.Expr("version + 1"),
+		})
+}
+
+func buildDisablePositionRoleBindings(transaction *gorm.DB, tenantID string, positionIDs *gorm.DB, operatorID string, now time.Time) *gorm.DB {
+	return transaction.Table("authz_role_binding").
+		Where("tenant_id = ? AND subject_type = ? AND subject_id IN (?) AND status <> ?", tenantID, "POSITION", positionIDs, domain.StatusDisabled).
+		Updates(map[string]any{
+			"status":     domain.StatusDisabled,
+			"updated_at": now,
+			"updated_by": operatorID,
+			"version":    gorm.Expr("version + 1"),
+		})
 }
 
 func (repository *GORMRepository) ListMemberships(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Membership], error) {

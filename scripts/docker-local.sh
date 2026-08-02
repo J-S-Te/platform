@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# 统一 Docker 编排入口：一个前端、一个基础平台后端、一个合同管理后端。
+# 统一 Docker 编排入口：一个统一前端，以及彼此隔离的平台、合同、CRM 和客户门户后端。
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
 workspace_root="$(cd "${project_root}/.." && pwd)"
 contract_root="${workspace_root}/contract_management"
+customer_root="${workspace_root}/customer_and_opportunity"
 compose_file="${project_root}/compose.local.yaml"
 platform_template_file="${project_root}/docker/.env.local.example"
 env_file="${project_root}/docker/.env.local"
 contract_template_file="${contract_root}/.env.example"
 contract_env_file="${contract_root}/.env.local"
+customer_template_file="${project_root}/docker/.env.customer.local.example"
+customer_env_file="${project_root}/docker/.env.customer.local"
+portal_template_file="${project_root}/docker/.env.portal.local.example"
+portal_env_file="${project_root}/docker/.env.portal.local"
 lan_override_file="${project_root}/docker/.env.lan"
+customer_lan_override_file="${project_root}/docker/.env.customer.lan"
 lan_placeholder_file="${project_root}/docker/.env.lan.disabled"
 compose_project="basic-platform-local"
 command_name="up"
@@ -39,9 +45,11 @@ usage() {
   bash scripts/docker-local.sh refresh-api
   bash scripts/docker-local.sh refresh-frontend
   bash scripts/docker-local.sh refresh-contract-api
+  bash scripts/docker-local.sh refresh-customer-api
+  bash scripts/docker-local.sh refresh-portal-api
 
 up/restart 选项：
-  --build                         重新构建三个业务镜像
+  --build                         重新构建统一前端和三个常驻后端镜像；已接入门户另行构建 portal-api
   --pull                          兼容选项；启动前默认会串行拉取缺失的基础镜像
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
@@ -49,20 +57,26 @@ up/restart 选项：
   --admin-password-stdin          从标准输入读取首次初始化密码；适合 CI Secret
   --env-file PATH                 基础平台环境文件（默认 platform/docker/.env.local）
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
+  --customer-env-file PATH        客户与商机后端环境文件（默认 platform/docker/.env.customer.local）
+  --portal-env-file PATH          客户自助门户环境文件（默认 platform/docker/.env.portal.local）
   -h, --help                      显示帮助
 
 定向更新：
   refresh-api           只重建基础平台后端镜像，执行基础平台迁移，并重启 api/受控 provisioner
-  refresh-frontend      只重建并重启统一 frontend；基础平台前端与合同管理前端同时更新
+  refresh-frontend      只重建并重启统一 frontend；四个前端模块同时更新
   refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
+  refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
+  refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
 
-  三种定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
+  四种定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
   因此不会影响已经完成的子系统统一登录接入。
 
 应用容器：
-  frontend      基础平台前端 + 合同管理前端（宿主机仅发布 8081）
+  frontend      基础平台 + 合同管理 + 客户与商机管理 + 客户自助门户前端（宿主机仅发布 8081）
   api           基础平台 API + Worker
   contract-api  合同管理 API + Temporal Worker
+  customer-api  客户与商机管理 API
+  portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
 
 首次启动若数据库中尚未存在超级管理员，必须提供三个管理员参数，或设置：
   BASIC_PLATFORM_ADMIN_DISPLAY_NAME
@@ -74,7 +88,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-        up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api)
+		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api)
             command_name="$1"
             shift
             ;;
@@ -120,6 +134,16 @@ while (($# > 0)); do
             contract_env_file="$2"
             shift 2
             ;;
+		--customer-env-file)
+            (($# >= 2)) || fail "$1 缺少参数"
+            customer_env_file="$2"
+			shift 2
+			;;
+		--portal-env-file)
+			(($# >= 2)) || fail "$1 缺少参数"
+			portal_env_file="$2"
+			shift 2
+			;;
         -h|--help)
             usage
             exit 0
@@ -140,16 +164,19 @@ command -v docker >/dev/null 2>&1 || fail "未找到 docker 命令"
 docker compose version >/dev/null 2>&1 || fail "当前 Docker 不支持 docker compose 子命令"
 [[ -f "$compose_file" ]] || fail "Compose 文件不存在：$compose_file"
 [[ -d "$contract_root" ]] || fail "合同管理后端目录不存在：$contract_root"
+[[ -d "$customer_root" ]] || fail "客户与商机管理后端目录不存在：$customer_root"
 
 export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
+export CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file"
+export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
 
 # scripts/lan-access.sh 通过 docker/.env.lan 标记临时局域网模式。docker-local
-# 必须继续为基础平台和合同后端加载同一份覆盖配置，否则基础平台发布的
-# OIDC issuer 与合同后端期望的 issuer 会分别落到 LAN 地址和 localhost，
-# contract-api 将因 discovery 校验失败而持续重启。
+# 必须继续为基础平台、合同后端和客户商机后端加载同源覆盖配置，否则平台
+# 发布的 OIDC issuer 与子系统期望的 issuer 会分别落到 LAN 地址和 localhost，
+# 业务后端将因 discovery 校验失败而持续重启。
 #
 # 同时：每次 up 启动时实时检测当前网络的 IPv4 地址（不再信任 docker/.env.lan
 # 里写死的值）。当网段切换、远程 ssh 或换 WiFi 后，up 仍然能用正确的 IP 配置
@@ -195,6 +222,23 @@ rewrite_lan_override_file() {
     [[ -z "$file_port" ]] && file_port="${FRONTEND_HTTP_PORT:-8081}"
     sed -i.bak -E "s|http://${file_ip}:${file_port}|http://${new_ip}:${file_port}|g" "$lan_override_file"
     rm -f "$lan_override_file.bak"
+    if [[ -f "$customer_lan_override_file" ]]; then
+        sed -i.bak -E "s|http://${file_ip}:${file_port}|http://${new_ip}:${file_port}|g" "$customer_lan_override_file"
+        rm -f "$customer_lan_override_file.bak"
+    fi
+}
+
+write_customer_lan_override() {
+    local public_origin="$1"
+    umask 077
+    cat > "$customer_lan_override_file" <<EOF
+# 由 scripts/docker-local.sh/lan-access.sh 自动维护；仅用于临时局域网访问。
+APP_PUBLIC_ORIGIN=${public_origin}
+OIDC_ISSUER=${public_origin}
+OIDC_REDIRECT_URI=${public_origin}/customer-opportunity/auth/callback
+OIDC_POST_LOGOUT_REDIRECT_URI=${public_origin}/customer-opportunity/
+EOF
+    chmod 600 "$customer_lan_override_file"
 }
 
 configure_access_mode() {
@@ -205,6 +249,8 @@ configure_access_mode() {
     if [[ ! -f "$lan_override_file" ]]; then
         export BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
         export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
+		export CUSTOMER_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
+		export PORTAL_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
         export FRONTEND_BIND_ADDRESS="${FRONTEND_BIND_ADDRESS:-127.0.0.1}"
         frontend_public_origin="http://localhost:${FRONTEND_HTTP_PORT:-8081}"
         return 0
@@ -227,8 +273,11 @@ configure_access_mode() {
     lan_port="${public_origin##*:}"
     ((lan_port <= 65535)) || fail "局域网覆盖文件中的端口无效：$lan_port"
 
+    write_customer_lan_override "$public_origin"
     export BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
     export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
+	export CUSTOMER_LAN_OVERRIDE_ENV_FILE="$customer_lan_override_file"
+	export PORTAL_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
     export FRONTEND_BIND_ADDRESS="0.0.0.0"
     export FRONTEND_HTTP_PORT="$lan_port"
     frontend_public_origin="$public_origin"
@@ -243,6 +292,8 @@ compose() {
         --file "$compose_file" \
         --env-file "$env_file" \
         --env-file "$contract_env_file" \
+		--env-file "$customer_env_file" \
+		--env-file "$portal_env_file" \
         "$@"
 }
 
@@ -305,6 +356,135 @@ ensure_contract_env_file() {
         local unresolved
         unresolved="$(grep -E 'REPLACE_WITH_' "$contract_env_file" | grep -v '^#' || true)"
         [[ -z "$unresolved" ]] || fail "合同管理环境文件仍包含接入占位符：$contract_env_file"
+    fi
+
+    # 旧版本曾在基础平台环境文件中保存合同数据库凭据。统一部署继续使用已有
+    # 数据卷时，优先沿用这组凭据，避免新建合同环境文件后静默生成第二套密码。
+    # MySQL 的 MYSQL_PASSWORD 只在空数据目录首次初始化时生效，单纯修改 env
+    # 文件不会更新已有数据库账号。
+    local legacy_contract_password legacy_contract_root_password current_contract_password current_contract_root_password
+    legacy_contract_password="$(env_value "$env_file" CONTRACT_MYSQL_PASSWORD)"
+    legacy_contract_root_password="$(env_value "$env_file" CONTRACT_MYSQL_ROOT_PASSWORD)"
+    current_contract_password="$(env_value "$contract_env_file" CONTRACT_MYSQL_PASSWORD)"
+    current_contract_root_password="$(env_value "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD)"
+    if [[ -n "$legacy_contract_password" && -n "$legacy_contract_root_password" ]] && \
+       [[ "$legacy_contract_password" != "$current_contract_password" || "$legacy_contract_root_password" != "$current_contract_root_password" ]]; then
+        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_PASSWORD "$legacy_contract_password"
+        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD "$legacy_contract_root_password"
+        log "已沿用基础平台环境文件中的既有合同数据库凭据，避免已有数据卷认证失败"
+    fi
+}
+
+ensure_customer_env_file() {
+    command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成客户与商机管理数据库密码和敏感字段密钥"
+    if [[ ! -f "$customer_env_file" ]]; then
+        [[ -f "$customer_template_file" ]] || fail "客户与商机管理环境模板不存在：$customer_template_file"
+        cp "$customer_template_file" "$customer_env_file"
+        chmod 600 "$customer_env_file"
+
+        local password root_password encryption_key hmac_key
+        password="$(random_hex 24)"
+        root_password="$(random_hex 32)"
+        encryption_key="$(random_key)"
+        hmac_key="$(random_key)"
+        replace_line_in_file "$customer_env_file" CUSTOMER_MYSQL_PASSWORD "$password"
+        replace_line_in_file "$customer_env_file" CUSTOMER_MYSQL_ROOT_PASSWORD "$root_password"
+        replace_line_in_file "$customer_env_file" MYSQL_DSN "customer:${password}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=True&loc=UTC&multiStatements=true"
+        replace_line_in_file "$customer_env_file" SENSITIVE_ENCRYPTION_KEY_BASE64 "$encryption_key"
+        replace_line_in_file "$customer_env_file" SENSITIVE_HMAC_KEY_BASE64 "$hmac_key"
+        log "已生成客户与商机管理环境文件：$customer_env_file"
+    fi
+
+    local unresolved
+    unresolved="$(grep -E 'REPLACE_WITH_' "$customer_env_file" | grep -v '^#' || true)"
+    [[ -z "$unresolved" ]] || fail "客户与商机管理环境文件仍包含未填写占位符：$customer_env_file"
+}
+
+ensure_portal_env_file() {
+	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成客户门户数据库密码和安全密钥"
+	if [[ ! -f "$portal_env_file" ]]; then
+		[[ -f "$portal_template_file" ]] || fail "客户自助门户环境模板不存在：$portal_template_file"
+		cp "$portal_template_file" "$portal_env_file"
+		chmod 600 "$portal_env_file"
+
+		local password root_password encryption_key descriptor_key hmac_key
+		password="$(random_hex 24)"
+		root_password="$(random_hex 32)"
+		encryption_key="$(random_key)"
+		descriptor_key="$(random_key)"
+		hmac_key="$(random_key)"
+		replace_line_in_file "$portal_env_file" PORTAL_MYSQL_PASSWORD "$password"
+		replace_line_in_file "$portal_env_file" PORTAL_MYSQL_ROOT_PASSWORD "$root_password"
+		replace_line_in_file "$portal_env_file" PORTAL_MYSQL_DSN "portal:${password}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true"
+		replace_line_in_file "$portal_env_file" PORTAL_ENCRYPTION_KEY_BASE64 "$encryption_key"
+		replace_line_in_file "$portal_env_file" PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 "$descriptor_key"
+		replace_line_in_file "$portal_env_file" PORTAL_HMAC_KEY_BASE64 "$hmac_key"
+		log "已生成客户自助门户环境文件：$portal_env_file"
+	fi
+
+	local unresolved
+	unresolved="$(grep -E 'REPLACE_WITH_' "$portal_env_file" | grep -v '^#' || true)"
+	[[ -z "$unresolved" ]] || fail "客户自助门户环境文件仍包含未填写占位符：$portal_env_file"
+}
+
+portal_configured() {
+	[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_ID)" ]] &&
+		[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_SECRET)" ]] &&
+		[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_TENANT_ID)" ]] &&
+		[[ -n "$(env_value "$portal_env_file" PORTAL_ROLE_CONFIG_HASH)" ]]
+}
+
+ensure_catalog_publisher_credentials_consistent() {
+    local runtime_id runtime_secret platform_id platform_secret
+    runtime_id="$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID)"
+    runtime_secret="$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET)"
+    platform_id="$(env_value "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_ID)"
+    platform_secret="$(env_value "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET)"
+
+    if [[ -n "$platform_id" && -n "$platform_secret" ]]; then
+        if [[ "$platform_id" != "$runtime_id" || "$platform_secret" != "$runtime_secret" ]]; then
+            # 平台环境中的长期凭据是既有 OAuth 客户端的运维记录。子系统配置可能
+            # 来自更早一次接入，必须由平台向子系统同步，不能用已失效值反向覆盖。
+            replace_line_in_file "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID "$platform_id"
+            replace_line_in_file "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET "$platform_secret"
+            log "已将平台保存的有效授权目录发布凭据同步到合同后端运行配置"
+        fi
+        return 0
+    fi
+    if [[ -n "$runtime_id" && -n "$runtime_secret" ]]; then
+        # 兼容首次接入：旧平台环境尚未记录 publisher 凭据，但 provisioner 已将
+        # 一次性明文安全写入子系统环境文件。此时补齐平台侧的长期运维记录。
+        replace_line_in_file "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_ID "$runtime_id"
+        replace_line_in_file "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET "$runtime_secret"
+        log "已从首次接入配置补齐平台授权目录发布凭据"
+    fi
+}
+
+env_value() {
+    local file="$1" key="$2" value
+    [[ -f "$file" ]] || return 0
+    value="$(awk -v key="$key" '
+        index($0, key "=") == 1 {
+            value=substr($0, length(key) + 2)
+            print value
+            exit
+        }
+    ' "$file")"
+    if [[ ${#value} -ge 2 ]]; then
+        case "$value" in
+            \"*\") value="${value:1:${#value}-2}" ;;
+            \'*\') value="${value:1:${#value}-2}" ;;
+        esac
+    fi
+    printf '%s' "$value"
+}
+
+disable_contract_startup_catalog_sync() {
+    # 本地授权目录由隔离 provisioner 在接入/更新流程中发布。旧环境若仍启用
+    # contract-api 启动同步，失效的 publisher 凭据会令 API 和 Worker 一起重启。
+    if [[ "$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]; then
+        replace_line_in_file "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED false
+        log "已关闭合同后端启动期授权目录同步；目录改由受控 provisioner 发布"
     fi
 }
 
@@ -398,14 +578,14 @@ build_images() {
     # 对每个镜像重试，使普通的 `up --build` 在全新环境中也具备容错能力。
     prepare_base_images
     if [[ "$force_build" == true ]]; then
-        log "重新构建统一前端、基础平台后端和合同管理后端镜像"
+        log "重新构建统一前端、基础平台、合同管理和客户与商机管理后端镜像"
     else
-        log "构建缺失或有变更的三个业务镜像"
+        log "构建缺失或有变更的四个业务镜像"
     fi
     # migrate/bootstrap-admin/subsystem-provisioner 都复用 api 构建出的
-    # basic-platform/backend:local；这里只构建三个业务镜像各一次。
+    # basic-platform/backend:local；这里只构建四个业务镜像各一次。
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build \
-        api contract-api frontend
+        api contract-api customer-api frontend
 }
 
 prepare_gateway_config() {
@@ -413,16 +593,29 @@ prepare_gateway_config() {
     [[ -x "$gateway_script" ]] || chmod +x "$gateway_script"
     PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
         "$gateway_script" remove contract_management >/dev/null
-    log "已清理合同管理旧式整站反向代理；合同前端由统一 frontend 容器直接承载"
+    PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
+        "$gateway_script" remove customer_and_opportunity >/dev/null
+	PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
+		"$gateway_script" remove customer-opportunity >/dev/null
+	PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
+		"$gateway_script" remove customer_portal >/dev/null
+	log "已清理内置业务模块的旧式整站反向代理；四个前端均由统一 frontend 容器直接承载"
 }
 
 run_migrations() {
-    log "启动两个 MySQL 与 Temporal，并等待健康检查"
-    compose_run up -d --wait mysql contract-mysql temporal
+	log "启动基础平台、合同、CRM 三个 MySQL 与 Temporal，并等待健康检查"
+	compose_run up -d --wait mysql contract-mysql customer-mysql temporal
     log "执行基础平台数据库迁移"
     compose_run run --rm --no-deps migrate ./migrate
-    log "执行合同管理幂等数据库迁移"
+    log "执行合同管理版本化数据库迁移"
     compose_run run --rm --no-deps contract-migrate
+	log "执行客户与商机管理 CRM 清单迁移"
+	compose_run run --rm --no-deps customer-migrate
+	if portal_configured; then
+		log "启动客户自助门户 MySQL 并执行 Portal 清单迁移"
+		compose_run --profile portal up -d --wait portal-mysql
+		compose_run --profile portal run --rm --no-deps portal-migrate
+	fi
 }
 
 bootstrap_admin_if_needed() {
@@ -513,6 +706,7 @@ public_url_to_route() {
 
 verify_gateway_routes() {
     local platform_membership_status contract_health_status contract_session_status contract_login_status
+	local customer_health_status customer_session_status portal_health_status portal_session_status
     local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url
 
     log "校验统一前端 Nginx 配置"
@@ -563,37 +757,75 @@ verify_gateway_routes() {
         *) fail "OIDC 授权端点未跳转到统一登录页" ;;
     esac
 
-    log "合同管理 OIDC 网关校验通过：healthz=200，auth/me=401，auth/login=302，authorize=302"
+    customer_health_status="$(frontend_http_status /customer-opportunity/healthz)" || \
+        fail "无法访问客户与商机管理健康检查路径"
+    [[ "$customer_health_status" == "200" ]] || \
+        fail "客户与商机管理健康检查路径返回 ${customer_health_status}，预期为 200"
+
+	customer_session_status="$(frontend_http_status /customer-opportunity/api/v1/auth/me)" || \
+        fail "无法访问客户与商机管理登录状态接口"
+    case "$customer_session_status" in
+        401|503) ;;
+        *) fail "客户与商机管理登录状态接口返回 ${customer_session_status}，预期开发认证未携带身份时为 401（或认证未配置时为 503）" ;;
+	esac
+
+	if portal_configured; then
+		portal_health_status="$(frontend_http_status /customer-portal/healthz)" || \
+			fail "无法访问客户自助门户健康检查路径"
+		[[ "$portal_health_status" == "200" ]] || \
+			fail "客户自助门户健康检查路径返回 ${portal_health_status}，预期为 200"
+		portal_session_status="$(frontend_http_status /customer-portal/api/v1/auth/me)" || \
+			fail "无法访问客户自助门户登录状态接口"
+		[[ "$portal_session_status" == "401" ]] || \
+			fail "客户自助门户登录状态接口返回 ${portal_session_status}，预期未登录状态为 401"
+	fi
+
+    log "统一网关校验通过：platform API=401，contract healthz=200，customer healthz=200"
 }
 
 start_stack() {
     ensure_platform_env_file
     ensure_contract_env_file true
+	ensure_customer_env_file
+	ensure_portal_env_file
+    ensure_catalog_publisher_credentials_consistent
+    disable_contract_startup_catalog_sync
     prepare_gateway_config
     build_images
     run_migrations
     bootstrap_admin_if_needed
-    # 分阶段启动，避免 api、contract-api 和 frontend 在同一次 Compose wait 中
+    # 分阶段启动，避免三个 API 和 frontend 在同一次 Compose wait 中
     # 把下游的短暂冷启动误报为整套部署失败，同时让错误日志能够准确指向服务。
     log "启动基础平台 API 与受控子系统 provisioner"
     compose_up_wait "基础平台 API" subsystem-provisioner api
     log "启动合同管理后端"
     compose_up_wait "合同管理后端" contract-api
+	log "启动客户与商机管理后端"
+	compose_up_wait "客户与商机管理后端" customer-api
+	if portal_configured; then
+		log "启动已接入的客户自助门户后端"
+		compose_run --profile portal up -d --wait portal-api
+	else
+		log "客户自助门户尚未接入，跳过 portal-api；可在应用接入中创建 customer_portal/dev"
+	fi
     log "启动统一前端"
     compose_up_wait "统一前端" frontend
     verify_gateway_routes
     compose_run ps
     log "统一访问地址：${frontend_public_origin}"
     log "合同管理前端：${frontend_public_origin}/contract_management/"
+	log "客户与商机管理前端：${frontend_public_origin}/customer-opportunity/"
+	if portal_configured; then log "客户自助门户：${frontend_public_origin}/customer-portal/"; fi
 }
 
 refresh_platform_api() {
     # 仅刷新基础平台后端：当前 API 不会包含新增路由时，使用该命令即可。
     # compose() 固定携带合同环境文件，所以这里只保证它存在，不校验其 OIDC 占位符。
     prepare_operational_env
+    ensure_catalog_publisher_credentials_consistent
     prepare_go_backend_base_images "基础平台后端"
 
-    log "重新构建基础平台后端镜像（不构建 frontend 或 contract-api）"
+    log "重新构建基础平台后端镜像（不构建 frontend、contract-api 或 customer-api）"
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build api
 
     log "启动基础平台 MySQL，并执行基础平台数据库迁移"
@@ -607,7 +839,7 @@ refresh_platform_api() {
     log "重建基础平台 API"
     compose_run up -d --wait --no-deps api
     compose_run ps api subsystem-provisioner mysql
-    log "基础平台后端已刷新；统一前端、合同管理后端和现有统一登录接入配置保持不变"
+    log "基础平台后端已刷新；统一前端、合同/CRM 后端、可选门户后端和现有统一登录接入配置保持不变"
 }
 
 refresh_unified_frontend() {
@@ -615,9 +847,9 @@ refresh_unified_frontend() {
     prepare_frontend_base_images
     prepare_gateway_config
 
-    log "重新构建统一前端镜像（基础平台前端 + 合同管理前端）"
+    log "重新构建统一前端镜像（基础平台 + 合同管理 + 客户与商机管理前端）"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
-    log "重建统一 frontend 容器；两个后端容器和统一登录接入配置保持不变"
+    log "重建统一 frontend 容器；平台/合同/CRM 后端、可选门户后端和统一登录接入配置保持不变"
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
     compose_run ps frontend
@@ -626,7 +858,16 @@ refresh_unified_frontend() {
 refresh_contract_backend() {
     ensure_platform_env_file
     ensure_contract_env_file true
+    ensure_customer_env_file
+	ensure_portal_env_file
+    ensure_catalog_publisher_credentials_consistent
+    disable_contract_startup_catalog_sync
     prepare_go_backend_base_images "合同管理后端"
+
+    # 平台 API 读取同一组 publisher 凭据为受控 update 流程服务。若脚本刚完成
+    # 凭据归一化，必须重建 API 与 provisioner，不能让旧容器继续持有旧环境。
+    log "重建基础平台 API 与 provisioner，使授权目录发布凭据保持一致"
+    compose_run up -d --wait --force-recreate --no-deps subsystem-provisioner api
 
     log "重新构建合同管理后端镜像（不构建 frontend 或基础平台 api）"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build contract-api
@@ -639,9 +880,56 @@ refresh_contract_backend() {
     compose_run ps contract-api contract-mysql temporal
 }
 
+refresh_customer_backend() {
+    ensure_platform_env_file
+    ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
+    prepare_go_backend_base_images "客户与商机管理后端"
+
+    log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
+    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api
+    prepare_gateway_config
+    log "重新构建统一前端网关，使客户与商机管理路径转发到 customer-api"
+    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
+    log "启动客户与商机数据库并执行 CRM 清单迁移"
+    compose_run up -d --wait customer-mysql
+    compose_run run --rm --no-deps customer-migrate
+    log "重建 customer-api 与统一前端网关；另外两个后端和统一登录接入配置保持不变"
+    compose_run up -d --wait --no-deps customer-api
+    compose_run up -d --wait --no-deps frontend
+    verify_gateway_routes
+	compose_run ps customer-api customer-mysql
+}
+
+refresh_portal_backend() {
+	ensure_platform_env_file
+	ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
+	portal_configured || fail "客户自助门户尚未完成 customer_portal/dev 应用接入，不能启动 portal-api"
+	prepare_go_backend_base_images "客户自助门户后端"
+
+	log "重新构建客户/门户共享后端镜像"
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile portal --ansi never build portal-api
+	prepare_gateway_config
+	log "刷新统一前端网关中的客户门户路由"
+	COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
+	log "启动门户数据库并执行 Portal 清单迁移"
+	compose_run --profile portal up -d --wait portal-mysql
+	compose_run --profile portal run --rm --no-deps portal-migrate
+	log "重建 portal-api 与统一前端"
+	compose_run --profile portal up -d --wait --no-deps portal-api
+	compose_run up -d --wait --no-deps frontend
+	verify_gateway_routes
+	compose_run --profile portal ps portal-api portal-mysql frontend
+}
+
 prepare_operational_env() {
     ensure_platform_env_file
     ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
 }
 
 case "$command_name" in
@@ -667,6 +955,10 @@ case "$command_name" in
     config)
         ensure_platform_env_file
         ensure_contract_env_file true
+		ensure_customer_env_file
+		ensure_portal_env_file
+        ensure_catalog_publisher_credentials_consistent
+        disable_contract_startup_catalog_sync
         compose_run config --quiet
         log "Compose 配置校验通过"
         ;;
@@ -683,4 +975,10 @@ case "$command_name" in
     refresh-contract-api)
         refresh_contract_backend
         ;;
+	refresh-customer-api)
+		refresh_customer_backend
+		;;
+	refresh-portal-api)
+		refresh_portal_backend
+		;;
 esac

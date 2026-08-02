@@ -19,7 +19,7 @@ type subsystemOnboardingRepositoryStub struct {
 func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.Context, write SubsystemOnboardingWrite, now time.Time) (SubsystemOnboardingResult, error) {
 	repository.write = write
 	repository.createCalls++
-	return SubsystemOnboardingResult{
+	result := SubsystemOnboardingResult{
 		Application: Application{
 			ID: write.ApplicationID, TenantID: write.Application.TenantID, Code: write.Application.Code,
 			Name: write.Application.Name, ApplicationType: write.Application.ApplicationType,
@@ -60,7 +60,71 @@ func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.C
 			Scopes: write.CatalogPublisherOAuthClient.Scopes, RedirectURIs: write.CatalogPublisherOAuthClient.RedirectURIs,
 			Status: oauthClientStatusActive,
 		},
-	}, nil
+	}
+	for _, item := range write.ServiceClients {
+		result.ServiceCredentials = append(result.ServiceCredentials, SubsystemServiceCredential{
+			Purpose: item.Purpose,
+			OAuthClient: OAuthClientView{
+				ID: item.OAuthClientID, TenantID: item.OAuthClient.TenantID,
+				ApplicationID: item.OAuthClient.ApplicationID, EnvironmentID: item.OAuthClient.EnvironmentID,
+				ClientID: item.OAuthClient.ClientID, ClientName: item.OAuthClient.ClientName,
+				ClientType: item.OAuthClient.ClientType, TokenAuthMethod: item.OAuthClient.TokenAuthMethod,
+				AccessTokenTTLSeconds: item.OAuthClient.AccessTokenTTLSeconds,
+				GrantTypes:            item.OAuthClient.GrantTypes, Scopes: item.OAuthClient.Scopes,
+				Status: oauthClientStatusActive,
+			},
+		})
+	}
+	return result, nil
+}
+
+func TestOnboardCustomerPortalCreatesSixIndependentLeastPrivilegeServiceClients(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.OnboardSubsystem(context.Background(), SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: integratedPortalApplicationCode, ApplicationName: "客户自助门户", Environment: "dev",
+		PublicBaseURL: "http://localhost:8081", UpstreamURL: integratedPortalUpstreamURL,
+		PathPrefix: integratedPortalPathPrefix, ClientType: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedScopes := map[string]string{
+		ServiceCredentialExternalUserProvision:  "external_user.provision",
+		ServiceCredentialApplicationRoleAssign:  "application_role.assign",
+		ServiceCredentialApplicationRoleRevoke:  "application_role.revoke",
+		ServiceCredentialPortalMappingProvision: "portal.identity_mapping.provision",
+		ServiceCredentialPortalMappingDisable:   "portal.identity_mapping.disable",
+		ServiceCredentialPortalInviteVerify:     "portal.invite.verify",
+	}
+	if len(repository.write.ServiceClients) != len(expectedScopes) || len(result.ServiceCredentials) != len(expectedScopes) {
+		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
+	}
+	clientIDs, plaintextSecrets := map[string]bool{}, map[string]bool{}
+	for _, credential := range result.ServiceCredentials {
+		expectedScope, ok := expectedScopes[credential.Purpose]
+		if !ok {
+			t.Fatalf("unexpected purpose %q", credential.Purpose)
+		}
+		client := credential.OAuthClient
+		if client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" || len(client.Scopes) != 1 || client.Scopes[0] != expectedScope {
+			t.Fatalf("client %q has broader capabilities: %#v", credential.Purpose, client)
+		}
+		if credential.PlaintextSecret == "" || plaintextSecrets[credential.PlaintextSecret] {
+			t.Fatalf("purpose %q has missing or reused secret", credential.Purpose)
+		}
+		if clientIDs[client.ClientID] {
+			t.Fatalf("duplicate client id %q", client.ClientID)
+		}
+		clientIDs[client.ClientID], plaintextSecrets[credential.PlaintextSecret] = true, true
+	}
+	if result.RedirectURI != "http://localhost:8081/customer-portal/auth/callback" {
+		t.Fatalf("redirect = %q", result.RedirectURI)
+	}
 }
 
 func (repository *subsystemOnboardingRepositoryStub) ListPortalApplications(_ context.Context, _, _, _ string) ([]PortalApplication, error) {
@@ -142,6 +206,32 @@ func TestOnboardSubsystemBuildsAtomicOIDCRegistration(t *testing.T) {
 	}
 	if result.PlaintextSecret == result.CatalogPublisherPlaintextSecret {
 		t.Fatal("browser and catalog publisher clients must use independent secrets")
+	}
+}
+
+func TestOnboardSubsystemCanonicalizesIntegratedCustomerPrototypeAddresses(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.OnboardSubsystem(context.Background(), SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: integratedCustomerApplicationCode, ApplicationName: "客户与商机管理系统", Environment: "dev",
+		PublicBaseURL: "http://localhost:8081", UpstreamURL: legacyCustomerUpstreamURL,
+		PathPrefix: legacyCustomerPathPrefix, ClientType: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.write.Environment.UpstreamURL == nil || *repository.write.Environment.UpstreamURL != integratedCustomerUpstreamURL {
+		t.Fatalf("canonical upstream = %#v", repository.write.Environment.UpstreamURL)
+	}
+	if repository.write.Environment.PathPrefix == nil || *repository.write.Environment.PathPrefix != integratedCustomerPathPrefix {
+		t.Fatalf("canonical path prefix = %#v", repository.write.Environment.PathPrefix)
+	}
+	if result.RedirectURI != "http://localhost:8081/customer-opportunity/auth/callback" || result.PublicURL != "http://localhost:8081/customer-opportunity/" {
+		t.Fatalf("canonical public registration = redirect %q public %q", result.RedirectURI, result.PublicURL)
 	}
 }
 

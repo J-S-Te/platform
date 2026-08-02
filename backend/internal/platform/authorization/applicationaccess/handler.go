@@ -69,7 +69,7 @@ func (h *Handler) UpdateAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	access, err := h.service.UpdateAccess(r.Context(), UpdateAccessInput{
-		TenantID: principal.Tenant.ID, UserID: strings.TrimSpace(r.PathValue("user_id")), OperatorID: principal.User.ID,
+		TenantID: principal.Tenant.ID, UserID: strings.TrimSpace(r.PathValue("user_id")), OperatorID: principal.User.ID, OperatorName: principal.User.Name,
 		Roles: roles, RolesProvided: provided,
 		CustomPermissions: valueOrEmpty(payload.CustomPermissions), CustomPermissionsProvided: payload.CustomPermissions != nil,
 	}, strings.TrimSpace(r.PathValue("application_code")))
@@ -118,7 +118,7 @@ func (h *Handler) UpdateSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	access, err := h.service.UpdateSubjectAccess(r.Context(), UpdateSubjectAccessInput{
 		TenantID: principal.Tenant.ID, SubjectType: strings.TrimSpace(r.PathValue("subject_type")),
-		SubjectID: strings.TrimSpace(r.PathValue("subject_id")), OperatorID: principal.User.ID,
+		SubjectID: strings.TrimSpace(r.PathValue("subject_id")), OperatorID: principal.User.ID, OperatorName: principal.User.Name,
 		Roles: roles, RolesProvided: provided,
 	}, strings.TrimSpace(r.PathValue("application_code")))
 	if err != nil {
@@ -138,7 +138,7 @@ func (h *Handler) DeleteSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	subjectID := strings.TrimSpace(r.PathValue("subject_id"))
 	applicationCode := strings.TrimSpace(r.PathValue("application_code"))
 	err := h.service.DeleteSubjectAccess(r.Context(), DeleteSubjectAccessInput{
-		TenantID: principal.Tenant.ID, SubjectType: subjectType, SubjectID: subjectID, OperatorID: principal.User.ID,
+		TenantID: principal.Tenant.ID, SubjectType: subjectType, SubjectID: subjectID, OperatorID: principal.User.ID, OperatorName: principal.User.Name,
 	}, applicationCode)
 	if err != nil {
 		writeError(w, r, err)
@@ -156,7 +156,7 @@ func (h *Handler) DeleteAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.service.DeleteAccess(r.Context(), DeleteAccessInput{
-		TenantID: principal.Tenant.ID, UserID: strings.TrimSpace(r.PathValue("user_id")), OperatorID: principal.User.ID,
+		TenantID: principal.Tenant.ID, UserID: strings.TrimSpace(r.PathValue("user_id")), OperatorID: principal.User.ID, OperatorName: principal.User.Name,
 	}, strings.TrimSpace(r.PathValue("application_code")))
 	if err != nil {
 		writeError(w, r, err)

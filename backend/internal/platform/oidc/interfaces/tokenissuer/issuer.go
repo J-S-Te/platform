@@ -22,11 +22,14 @@ type jwtSigner interface {
 // intentionally remain outside this component because they are opaque secrets managed by the OIDC
 // application service and stored only as one-way digests.
 type AuthorizationClaims struct {
-	TenantID       string
-	Roles          []string
-	Permissions    []string
-	RoleConfigHash string
-	AuthzRevision  uint64
+	TenantID        string
+	PersonID        string
+	PrimaryOrgID    string
+	OrganizationIDs []string
+	Roles           []string
+	Permissions     []string
+	RoleConfigHash  string
+	AuthzRevision   uint64
 }
 
 // AuthorizationResolver resolves permissions for the OAuth client's application.
@@ -82,6 +85,13 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 		if err != nil {
 			return oidcapplication.IssuedTokens{}, fmt.Errorf("resolve OIDC application authorization: %w", err)
 		}
+		// The authorization-code or refresh-token grant is the authoritative
+		// tenant boundary. A resolver is an internal adapter, but its result must
+		// still be treated as untrusted at this boundary so a wiring regression
+		// cannot sign a token carrying another tenant's organization claims.
+		if resolved.TenantID != issue.TenantID {
+			return oidcapplication.IssuedTokens{}, errors.New("resolved OIDC authorization tenant does not match token grant")
+		}
 		authorization = resolved
 	}
 
@@ -98,6 +108,9 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 		ClientID:           issue.ClientID,
 		Nonce:              issue.Nonce,
 		TenantID:           authorization.TenantID,
+		PersonID:           authorization.PersonID,
+		PrimaryOrgID:       authorization.PrimaryOrgID,
+		OrganizationIDs:    append([]string(nil), authorization.OrganizationIDs...),
 		Roles:              append([]string(nil), authorization.Roles...),
 		Permissions:        append([]string(nil), authorization.Permissions...),
 		RoleConfigHash:     authorization.RoleConfigHash,

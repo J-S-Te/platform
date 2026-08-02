@@ -15,6 +15,7 @@ import (
 	positiongrant "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/positiongrant"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
+	externalidentityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/externalidentity/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/interfaces/http"
@@ -37,6 +38,7 @@ type OperationalModules struct {
 	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
 	Notifications       *notificationhttp.Handler
 	FilesAndJobs        *filetaskhttp.Handler
+	ExternalIdentity    *externalidentityhttp.Handler
 }
 
 // NewRouter creates the shared middleware chain and registers infrastructure endpoints. Domain
@@ -136,7 +138,7 @@ func NewRouter(
 		apiRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
-			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger))
+			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger, middleware.AuditSource{ApplicationCode: cfg.Audit.ApplicationCode, EnvironmentCode: cfg.Audit.EnvironmentCode}))
 		}
 
 		if managementHandler != nil {
@@ -175,6 +177,7 @@ func NewRouter(
 
 		if operational.SubsystemOnboarding != nil {
 			apiRouter.GET("/portal/applications", adaptHandler(operational.SubsystemOnboarding.ListPortalApplications))
+			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemStatus))
 			apiRouter.POST("/subsystem-onboarding",
 				middleware.RequirePermission("platform:application:create"),
 				middleware.RequirePermission("platform:application-environment:create"),
@@ -190,6 +193,15 @@ func NewRouter(
 			// Re-provisioning effectively re-issues the running OAuth client binding, so :disable
 			// is the closest existing permission.
 			apiRouter.POST("/subsystem-update",
+				middleware.RequirePermission("platform:application:update"),
+				middleware.RequirePermission("platform:application-environment:update"),
+				middleware.RequirePermission("platform:application-login-target:update"),
+				middleware.RequirePermission("platform:oauth-client:disable"),
+				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
+			)
+			// Retry uses the same safe reapply path as update, but records RETRY in the durable
+			// deployment state so operators can distinguish a recovery from a routine reapply.
+			apiRouter.POST("/subsystem-retry",
 				middleware.RequirePermission("platform:application:update"),
 				middleware.RequirePermission("platform:application-environment:update"),
 				middleware.RequirePermission("platform:application-login-target:update"),
@@ -365,17 +377,27 @@ func NewRouter(
 			// the application-owned credential path above.
 			catalogRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType(), middleware.Authentication(authHandler, authHandler.CookieName()))
 		}
+		if auditRecorder != nil {
+			catalogRouter.Use(middleware.AuditTrail(auditRecorder, logger, middleware.AuditSource{ApplicationCode: cfg.Audit.ApplicationCode, EnvironmentCode: cfg.Audit.EnvironmentCode}))
+		}
 		catalogRouter.GET("/applications/:application_id/authorization-catalog", adaptHandler(applicationAccessHandler.GetCatalog))
 		catalogRouter.PUT("/applications/:application_id/authorization-catalog", adaptHandler(applicationAccessHandler.SyncCatalog))
 	}
 
 	// Integration audit ingestion has a separate bearer-token boundary. Console user roles do
 	// not grant an external business system permission to submit audit events.
-	if auditHandler != nil && applicationAuthenticator != nil {
+	if applicationAuthenticator != nil && (auditHandler != nil || operational.ExternalIdentity != nil) {
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
-		integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
-		integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
+		if auditHandler != nil {
+			integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
+			integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
+		}
+		if operational.ExternalIdentity != nil {
+			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))
+			integrationRouter.POST("/internal/application-roles", middleware.RequireApplicationScope("application_role.assign"), adaptHandler(operational.ExternalIdentity.AssignRole))
+			integrationRouter.POST("/internal/application-roles/revoke", middleware.RequireApplicationScope("application_role.revoke"), adaptHandler(operational.ExternalIdentity.RevokeRole))
+		}
 	}
 
 	router.NoRoute(func(context *gin.Context) {

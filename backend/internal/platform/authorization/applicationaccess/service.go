@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -175,6 +176,7 @@ type UpdateAccessInput struct {
 	TenantID                  string
 	UserID                    string
 	OperatorID                string
+	OperatorName              string
 	Roles                     []RoleInput
 	RolesProvided             bool
 	CustomPermissions         []string
@@ -182,9 +184,10 @@ type UpdateAccessInput struct {
 }
 
 type DeleteAccessInput struct {
-	TenantID   string
-	UserID     string
-	OperatorID string
+	TenantID     string
+	UserID       string
+	OperatorID   string
+	OperatorName string
 }
 
 type UpdateSubjectAccessInput struct {
@@ -192,21 +195,26 @@ type UpdateSubjectAccessInput struct {
 	SubjectType   string
 	SubjectID     string
 	OperatorID    string
+	OperatorName  string
 	Roles         []RoleInput
 	RolesProvided bool
 }
 
 type DeleteSubjectAccessInput struct {
-	TenantID    string
-	SubjectType string
-	SubjectID   string
-	OperatorID  string
+	TenantID     string
+	SubjectType  string
+	SubjectID    string
+	OperatorID   string
+	OperatorName string
 }
 
 type TokenAuthorization struct {
 	ApplicationCode string
 	EnvironmentCode string
 	TenantID        string
+	PersonID        string
+	PrimaryOrgID    string
+	OrganizationIDs []string
 	Roles           []string
 	Permissions     []string
 	RoleConfigHash  string
@@ -301,7 +309,7 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 			return TokenAuthorization{}, inheritErr
 		}
 		if ok {
-			return inherited, nil
+			return s.attachOrganizationClaims(ctx, inherited, userID)
 		}
 	}
 	access, err := s.getAccessByApplication(ctx, tenantID, userID, client.ApplicationID, client.ApplicationCode, client.EnvironmentID, client.EnvironmentCode)
@@ -315,7 +323,7 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	for _, role := range access.Roles {
 		roles = append(roles, role.Code)
 	}
-	return TokenAuthorization{
+	return s.attachOrganizationClaims(ctx, TokenAuthorization{
 		ApplicationCode: client.ApplicationCode,
 		EnvironmentCode: client.EnvironmentCode,
 		TenantID:        tenantID,
@@ -323,13 +331,113 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 		Permissions:     append([]string(nil), access.EffectivePermissions...),
 		RoleConfigHash:  access.RoleConfigHash,
 		AuthzRevision:   access.AuthzRevision,
-	}, nil
+	}, userID)
+}
+
+const maxOIDCOrganizationIDs = 100
+
+type organizationClaimRow struct {
+	OrganizationID string `gorm:"column:organization_id"`
+	IsPrimary      bool   `gorm:"column:is_primary"`
+}
+
+// attachOrganizationClaims resolves only the user's current direct memberships. It deliberately
+// does not expand organization descendants: downstream systems receive the exact active
+// membership set maintained by the platform.
+func (s *Service) attachOrganizationClaims(ctx context.Context, authorization TokenAuthorization, userID string) (TokenAuthorization, error) {
+	now := s.clock.Now().UTC()
+	rows := make([]organizationClaimRow, 0)
+	err := buildOrganizationClaimsQuery(s.db.WithContext(ctx), authorization.TenantID, userID, now).
+		Find(&rows).Error
+	if err != nil {
+		return TokenAuthorization{}, fmt.Errorf("load OIDC organization claims: %w", err)
+	}
+	primaryOrgID, organizationIDs, err := organizationClaimsFromRows(rows)
+	if err != nil {
+		return TokenAuthorization{}, err
+	}
+	authorization.PrimaryOrgID = primaryOrgID
+	authorization.OrganizationIDs = organizationIDs
+	personID, err := s.resolvePMSPersonID(ctx, authorization.TenantID, userID)
+	if err != nil {
+		return TokenAuthorization{}, err
+	}
+	authorization.PersonID = personID
+	return authorization, nil
+}
+
+// resolvePMSPersonID returns only the explicit tenant-scoped binding on an active platform user.
+// An absent binding is a valid empty claim and must never be replaced by userID, employee_no, or
+// any login identifier.
+func (s *Service) resolvePMSPersonID(ctx context.Context, tenantID, userID string) (string, error) {
+	var row struct {
+		PMSPersonID *string `gorm:"column:pms_person_id"`
+	}
+	err := s.db.WithContext(ctx).Table("iam_user").
+		Select("pms_person_id").
+		Where("tenant_id = ? AND id = ? AND status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(userID), activeStatus).
+		Take(&row).Error
+	if err != nil {
+		return "", fmt.Errorf("load OIDC PMS person binding: %w", err)
+	}
+	if row.PMSPersonID == nil {
+		return "", nil
+	}
+	personID := *row.PMSPersonID
+	if personID == "" || personID != strings.TrimSpace(personID) || len([]byte(personID)) > 64 || strings.IndexFunc(personID, func(r rune) bool { return r <= 0x20 || r == 0x7f }) >= 0 {
+		return "", errors.New("OIDC PMS person binding is invalid")
+	}
+	return personID, nil
+}
+
+func buildOrganizationClaimsQuery(database *gorm.DB, tenantID, userID string, now time.Time) *gorm.DB {
+	return database.
+		Table("iam_membership AS membership").
+		Select(`membership.org_unit_id AS organization_id,
+			MAX(CASE WHEN membership.is_primary = 1 AND user.primary_org_id = membership.org_unit_id THEN 1 ELSE 0 END) AS is_primary`).
+		Joins("JOIN iam_user AS user ON user.id = membership.user_id AND user.tenant_id = membership.tenant_id AND user.status = ?", activeStatus).
+		Joins("JOIN iam_org_unit AS organization ON organization.id = membership.org_unit_id AND organization.tenant_id = membership.tenant_id AND organization.status = ?", activeStatus).
+		Where("membership.tenant_id = ? AND membership.user_id = ? AND membership.status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(userID), activeStatus).
+		Where("(membership.valid_from IS NULL OR membership.valid_from <= ?) AND (membership.valid_until IS NULL OR membership.valid_until > ?)", now, now).
+		Group("membership.org_unit_id").
+		Order("membership.org_unit_id ASC").
+		Limit(maxOIDCOrganizationIDs + 1)
+}
+
+func organizationClaimsFromRows(rows []organizationClaimRow) (string, []string, error) {
+	if len(rows) > maxOIDCOrganizationIDs {
+		return "", nil, errors.New("OIDC organization list exceeds the supported maximum")
+	}
+	organizationIDs := make([]string, 0, len(rows))
+	primaryOrgID := ""
+	for _, row := range rows {
+		organizationID := strings.TrimSpace(row.OrganizationID)
+		if organizationID == "" || len([]byte(organizationID)) > 64 {
+			return "", nil, errors.New("OIDC organization query returned an invalid identifier")
+		}
+		if len(organizationIDs) > 0 && organizationIDs[len(organizationIDs)-1] >= organizationID {
+			return "", nil, errors.New("OIDC organization query returned a non-canonical set")
+		}
+		organizationIDs = append(organizationIDs, organizationID)
+		if row.IsPrimary {
+			if primaryOrgID != "" {
+				return "", nil, errors.New("OIDC organization query returned multiple primary memberships")
+			}
+			primaryOrgID = organizationID
+		}
+	}
+	return primaryOrgID, organizationIDs, nil
 }
 
 // resolvePlatformSuperAdminAuthorization gives the tenant's controlled platform super
-// administrator the target application's canonical admin role. It does not copy platform
-// permissions into a subsystem token: the emitted permissions still come exclusively from the
-// target application's active admin role and catalog.
+// administrator access only when the target application exposes one unambiguous canonical admin
+// role. Applications that model administration as several least-privilege roles intentionally
+// have no synthetic "admin" role; for those applications this resolver declines inheritance and
+// lets the normal application bindings decide access.
+//
+// It does not copy platform permissions into a subsystem token: when inheritance is applicable,
+// the emitted permissions still come exclusively from the target application's active admin role
+// and catalog.
 func (s *Service) resolvePlatformSuperAdminAuthorization(ctx context.Context, tenantID, userID string, client clientApplicationRow) (TokenAuthorization, bool, error) {
 	now := s.clock.Now().UTC()
 	var bindingCount int64
@@ -356,11 +464,12 @@ func (s *Service) resolvePlatformSuperAdminAuthorization(ctx context.Context, te
 		Select("id", "code", "name").
 		Where("tenant_id = ? AND application_id = ? AND code = ? AND status = ?", tenantID, client.ApplicationID, "admin", activeStatus).
 		Take(&adminRole).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return TokenAuthorization{}, false, ErrNotConfigured
-	}
+	adminRole, available, err := canonicalAdminRoleResult(adminRole, err)
 	if err != nil {
-		return TokenAuthorization{}, false, fmt.Errorf("load target application admin role: %w", err)
+		return TokenAuthorization{}, false, err
+	}
+	if !available {
+		return TokenAuthorization{}, false, nil
 	}
 	permissions, err := s.loadRolePermissions(ctx, tenantID, client.ApplicationID, []string{adminRole.ID})
 	if err != nil {
@@ -383,6 +492,19 @@ func (s *Service) resolvePlatformSuperAdminAuthorization(ctx context.Context, te
 		RoleConfigHash:  roleConfigHash,
 		AuthzRevision:   revision,
 	}, true, nil
+}
+
+// canonicalAdminRoleResult converts the optional conventional admin-role lookup into the
+// inheritance decision used by OIDC authorization. A missing role is not an authorization error:
+// it means the application uses its own assigned role model and resolution must continue there.
+func canonicalAdminRoleResult(role roleRow, err error) (roleRow, bool, error) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return roleRow{}, false, nil
+	}
+	if err != nil {
+		return roleRow{}, false, fmt.Errorf("load target application admin role: %w", err)
+	}
+	return role, true, nil
 }
 
 func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCode string) (Access, error) {
@@ -435,11 +557,15 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if err := s.validateDirectRoleLimit(ctx, in.TenantID, application.ID, resolved); err != nil {
 		return Access{}, err
 	}
+	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
+	if err != nil && !errors.Is(err, ErrNotConfigured) {
+		return Access{}, err
+	}
 
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if in.RolesProvided {
-			roleChanged, err := s.replaceSubjectRoleBindings(tx, in.TenantID, application.ID, subjectTypeUser, in.UserID, in.OperatorID, resolved, now)
+			roleChanged, err := s.replaceManualUserRoleBindings(tx, in.TenantID, application.ID, in.UserID, in.OperatorID, resolved, now)
 			if err != nil {
 				return err
 			}
@@ -459,10 +585,11 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	}
 	s.recordAudit(ctx, AuditEvent{
 		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
-		OperatorID: in.OperatorID, SubjectID: in.UserID, Action: "authorization.application_access.updated",
+		OperatorID: in.OperatorID, OperatorName: in.OperatorName, SubjectID: in.UserID, Action: "authorization.application_access.updated",
 		ResourceType: "application_access", ResourceID: in.UserID, Result: "SUCCESS", RiskLevel: "HIGH",
 		Summary: "应用用户授权已更新", OccurredAt: now,
-		Metadata: map[string]any{"roles_provided": in.RolesProvided, "custom_permissions_provided": in.CustomPermissionsProvided, "changed": changed},
+		Metadata: map[string]any{"roles_provided": in.RolesProvided, "custom_permissions_provided": in.CustomPermissionsProvided, "changed": changed, "grant_origin": grantOriginManual, "authorization_revision": access.AuthzRevision},
+		Changes:  accessAuditChanges(before, access),
 	})
 	return access, nil
 }
@@ -476,6 +603,10 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	}
 	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
 	if err != nil {
+		return err
+	}
+	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
+	if err != nil && !errors.Is(err, ErrNotConfigured) {
 		return err
 	}
 	now := s.clock.Now().UTC()
@@ -505,12 +636,17 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	if err != nil {
 		return err
 	}
+	after, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
+	if err != nil && !errors.Is(err, ErrNotConfigured) {
+		return err
+	}
 	s.recordAudit(ctx, AuditEvent{
 		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
-		OperatorID: in.OperatorID, SubjectID: in.UserID, Action: "authorization.application_access.deleted",
+		OperatorID: in.OperatorID, OperatorName: in.OperatorName, SubjectID: in.UserID, Action: "authorization.application_access.deleted",
 		ResourceType: "application_access", ResourceID: in.UserID, Result: "SUCCESS", RiskLevel: "HIGH",
 		Summary: "应用用户授权已删除", OccurredAt: now,
-		Metadata: map[string]any{"changed": changed},
+		Metadata: map[string]any{"changed": changed, "grant_origin": grantOriginManual, "authorization_revision": after.AuthzRevision},
+		Changes:  accessAuditChanges(before, after),
 	})
 	return nil
 }
@@ -551,7 +687,11 @@ func (s *Service) GetSubjectAccess(ctx context.Context, tenantID, subjectType, s
 	return emptyAccess(application.Code, "", roleConfigHash, revision), nil
 }
 
-// UpdateSubjectAccess replaces only the selected organization or position's direct role bindings.
+// UpdateSubjectAccess is retained as a compatibility boundary for callers of the historical
+// organization/position write endpoint. Standard personnel authorization is now materialized
+// exclusively by position authorization templates, so this method always rejects manual writes.
+// Existing MANUAL bindings remain visible through GetSubjectAccess and can be cleaned up through
+// DeleteSubjectAccess.
 func (s *Service) UpdateSubjectAccess(ctx context.Context, in UpdateSubjectAccessInput, applicationCode string) (Access, error) {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.SubjectID = strings.TrimSpace(in.SubjectID)
@@ -564,55 +704,7 @@ func (s *Service) UpdateSubjectAccess(ctx context.Context, in UpdateSubjectAcces
 	if in.TenantID == "" || in.SubjectID == "" || in.OperatorID == "" || applicationCode == "" {
 		return Access{}, validation("tenant_id, subject_type, subject_id, operator_id and application_code are required")
 	}
-	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
-	if err != nil {
-		return Access{}, err
-	}
-	if err := s.ensureManagedSubject(ctx, in.TenantID, subjectType, in.SubjectID); err != nil {
-		return Access{}, err
-	}
-	now := s.clock.Now().UTC()
-	normalizedRoles, err := normalizeRoleInputs(in.Roles, in.RolesProvided, now)
-	if err != nil {
-		return Access{}, err
-	}
-	resolved, err := s.resolveRoleBindings(ctx, in.TenantID, application.ID, normalizedRoles)
-	if err != nil {
-		return Access{}, err
-	}
-	if err := s.validateDirectRoleLimit(ctx, in.TenantID, application.ID, resolved); err != nil {
-		return Access{}, err
-	}
-	changed := false
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if !in.RolesProvided {
-			return nil
-		}
-		roleChanged, err := s.replaceSubjectRoleBindings(tx, in.TenantID, application.ID, subjectType, in.SubjectID, in.OperatorID, resolved, now)
-		if err != nil {
-			return err
-		}
-		changed = roleChanged
-		if changed {
-			return bumpRevision(tx, in.TenantID, application.ID, now, "application subject authorization changed")
-		}
-		return nil
-	})
-	if err != nil {
-		return Access{}, err
-	}
-	access, err := s.GetSubjectAccess(ctx, in.TenantID, subjectType, in.SubjectID, application.Code)
-	if err != nil {
-		return Access{}, err
-	}
-	s.recordAudit(ctx, AuditEvent{
-		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
-		OperatorID: in.OperatorID, SubjectID: in.SubjectID, Action: "authorization.application_subject_access.updated",
-		ResourceType: "application_subject_access", ResourceID: in.SubjectID, Result: "SUCCESS", RiskLevel: "HIGH",
-		Summary: "应用组织岗位授权已更新", OccurredAt: now,
-		Metadata: map[string]any{"subject_type": subjectType, "roles_provided": in.RolesProvided, "changed": changed},
-	})
-	return access, nil
+	return Access{}, validateSubjectAccessWritePolicy(subjectType)
 }
 
 // DeleteSubjectAccess disables only the selected organization or position's direct bindings.
@@ -657,7 +749,7 @@ func (s *Service) DeleteSubjectAccess(ctx context.Context, in DeleteSubjectAcces
 	}
 	s.recordAudit(ctx, AuditEvent{
 		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
-		OperatorID: in.OperatorID, SubjectID: in.SubjectID, Action: "authorization.application_subject_access.deleted",
+		OperatorID: in.OperatorID, OperatorName: in.OperatorName, SubjectID: in.SubjectID, Action: "authorization.application_subject_access.deleted",
 		ResourceType: "application_subject_access", ResourceID: in.SubjectID, Result: "SUCCESS", RiskLevel: "HIGH",
 		Summary: "应用组织岗位授权已删除", OccurredAt: now,
 		Metadata: map[string]any{"subject_type": subjectType, "changed": changed},
@@ -688,6 +780,19 @@ func normalizeManagedSubjectType(subjectType string) (string, error) {
 		return "", validation("subject_type must be ORG_UNIT or POSITION")
 	}
 	return subjectType, nil
+}
+
+// validateSubjectAccessWritePolicy prevents the generic application-access endpoint from
+// becoming a second standard-authorization mechanism. Organization and position bindings that
+// predate position templates are migration residue: administrators may inspect and revoke them,
+// but only the positiongrant materializer may create TEMPLATE-origin POSITION bindings.
+func validateSubjectAccessWritePolicy(subjectType string) error {
+	switch subjectType {
+	case subjectTypeOrgUnit, subjectTypePosition:
+		return validation("manual ORG_UNIT/POSITION application role writes are disabled; use a position authorization template")
+	default:
+		return validation("subject application role writes are not supported")
+	}
 }
 
 func (s *Service) ensureManagedSubject(ctx context.Context, tenantID, subjectType, subjectID string) error {
@@ -775,9 +880,12 @@ func validateMaximumRoleCount(maximum int, roleIDs []string) error {
 	return validation("the selected roles exceed the application's maximum effective role count")
 }
 
-func (s *Service) replaceSubjectRoleBindings(tx *gorm.DB, tenantID, applicationID, subjectType, subjectID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
+// replaceManualUserRoleBindings owns only MANUAL USER grants. Keeping USER fixed inside this
+// persistence helper makes it impossible for a future caller to accidentally use it for ACCOUNT,
+// ORG_UNIT or POSITION bindings; TEMPLATE and SYSTEM rows are excluded by the query predicate.
+func (s *Service) replaceManualUserRoleBindings(tx *gorm.DB, tenantID, applicationID, userID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
 	var existing []bindingRow
-	directClause, directArgs := manualSubjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID)
+	directClause, directArgs := manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID)
 	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", applicationRoleType).Find(&existing).Error; err != nil {
 		return false, fmt.Errorf("load existing application role bindings: %w", err)
 	}
@@ -815,12 +923,36 @@ func (s *Service) replaceSubjectRoleBindings(tx *gorm.DB, tenantID, applicationI
 		if err != nil {
 			return false, fmt.Errorf("generate application role binding ID: %w", err)
 		}
-		if err := tx.Table("authz_role_binding").Create(map[string]any{"id": id, "tenant_id": tenantID, "application_id": applicationID, "role_id": item.roleID, "subject_type": subjectType, "subject_id": subjectID, "scope_type": item.scopeType, "scope_id": item.scopeID, "valid_from": item.role.ValidFrom, "valid_until": item.role.ValidUntil, "status": activeStatus, "grant_origin": grantOriginManual, "origin_id": "", "origin_item_id": "", "version": 1, "created_at": now, "created_by": operatorID, "updated_at": now, "updated_by": operatorID}).Error; err != nil {
+		if err := tx.Table("authz_role_binding").Create(map[string]any{"id": id, "tenant_id": tenantID, "application_id": applicationID, "role_id": item.roleID, "subject_type": subjectTypeUser, "subject_id": userID, "scope_type": item.scopeType, "scope_id": item.scopeID, "valid_from": item.role.ValidFrom, "valid_until": item.role.ValidUntil, "status": activeStatus, "grant_origin": grantOriginManual, "origin_id": "", "origin_item_id": "", "version": 1, "created_at": now, "created_by": operatorID, "updated_at": now, "updated_by": operatorID}).Error; err != nil {
 			return false, fmt.Errorf("create application role binding: %w", err)
 		}
 		changed = true
 	}
 	return changed, nil
+}
+
+func accessAuditChanges(before, after Access) []AuditFieldChange {
+	changes := make([]AuditFieldChange, 0, 4)
+	appendChange := func(field string, left, right any) {
+		if reflect.DeepEqual(left, right) {
+			return
+		}
+		changes = append(changes, AuditFieldChange{Field: field, Before: left, After: right})
+	}
+	appendChange("manual_role_codes", manualRoleCodes(before.ManualRoles), manualRoleCodes(after.ManualRoles))
+	appendChange("effective_role_codes", roleViewCodes(before.Roles), roleViewCodes(after.Roles))
+	appendChange("effective_permissions", before.EffectivePermissions, after.EffectivePermissions)
+	appendChange("authorization_state", before.AuthorizationState, after.AuthorizationState)
+	return changes
+}
+
+func manualRoleCodes(roles []RoleView) []string { return roleViewCodes(roles) }
+func roleViewCodes(roles []RoleView) []string {
+	codes := make([]string, 0, len(roles))
+	for _, role := range roles {
+		codes = append(codes, role.Code)
+	}
+	return sortedUnique(codes)
 }
 
 func (s *Service) findClientApplication(ctx context.Context, tenantID, clientID string) (clientApplicationRow, error) {
@@ -1054,7 +1186,11 @@ func resolveAssignedRoles(rows []assignedRoleRow, directSubjectType string) ([]s
 	seenBindings := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
 		roleIDs = append(roleIDs, row.RoleID)
-		bindingKey := row.RoleID + "\x00" + row.SubjectType + "\x00" + row.SubjectID + "\x00" + row.ScopeType + "\x00" + row.ScopeID
+		// Provenance is part of a displayed binding. A manual and a template binding can
+		// legitimately grant the same role from the same position and must remain
+		// separately traceable, even though the effective role count is de-duplicated by
+		// role ID below.
+		bindingKey := row.RoleID + "\x00" + row.SubjectType + "\x00" + row.SubjectID + "\x00" + row.ScopeType + "\x00" + row.ScopeID + "\x00" + normalizedGrantOrigin(row.GrantOrigin) + "\x00" + row.OriginID + "\x00" + row.OriginItemID
 		if _, exists := seenBindings[bindingKey]; exists {
 			continue
 		}

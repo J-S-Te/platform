@@ -228,8 +228,9 @@ func (service *AccountLifecycleService) InitializePassword(ctx context.Context, 
 	return service.writeAdministratorPassword(ctx, input.TenantID, input.AccountID, input.OperatorID, input.Version, input.Password, credentialID, "PASSWORD_INITIALIZED")
 }
 
-// ResetPassword creates a strong password, returns it once, replaces the stored digest and revokes
-// every active session of the target account. The plaintext never crosses the repository boundary.
+// ResetPassword creates a strong password and returns it once. For an ordinary account it replaces
+// the existing digest; for a credential-free external account reservation it initializes the first
+// credential. The plaintext never crosses the repository boundary.
 func (service *AccountLifecycleService) ResetPassword(ctx context.Context, input PasswordResetInput) (PasswordResetResult, error) {
 	if err := validatePasswordResetInput(input); err != nil {
 		return PasswordResetResult{}, err
@@ -242,7 +243,19 @@ func (service *AccountLifecycleService) ResetPassword(ctx context.Context, input
 		return PasswordResetResult{}, fmt.Errorf("generated password violates policy: %w", err)
 	}
 	if _, err = service.writeAdministratorPassword(ctx, input.TenantID, input.AccountID, input.OperatorID, input.Version, password, "", "ADMIN_PASSWORD_RESET"); err != nil {
-		return PasswordResetResult{}, err
+		if !errors.Is(err, ErrConflict) {
+			return PasswordResetResult{}, err
+		}
+		// The external identity provider reserves a HUMAN/LOCAL account but intentionally stores no
+		// password. Reuse the same strong server-generated value to initialize it, preserving the
+		// one-time offline-delivery response used by the management UI.
+		credentialID, idErr := service.ids.New(service.clock.Now().UTC())
+		if idErr != nil {
+			return PasswordResetResult{}, fmt.Errorf("generate initialized password credential ID: %w", idErr)
+		}
+		if _, initErr := service.writeAdministratorPassword(ctx, input.TenantID, input.AccountID, input.OperatorID, input.Version, password, credentialID, "PASSWORD_INITIALIZED"); initErr != nil {
+			return PasswordResetResult{}, initErr
+		}
 	}
 	return PasswordResetResult{AccountID: strings.TrimSpace(input.AccountID), TemporaryPassword: password}, nil
 }

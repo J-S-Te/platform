@@ -12,6 +12,23 @@ import (
 const (
 	defaultSubsystemAccessTokenTTLSeconds  = 15 * 60
 	defaultSubsystemRefreshTokenTTLSeconds = 30 * 24 * 60 * 60
+	integratedCustomerApplicationCode      = "customer_and_opportunity"
+	integratedCustomerPathPrefix           = "/customer-opportunity"
+	integratedCustomerUpstreamURL          = "http://customer-api:8090"
+	legacyCustomerPathPrefix               = "/customer_and_opportunity"
+	legacyCustomerUpstreamURL              = "http://opportunity-api:8082"
+	integratedPortalApplicationCode        = "customer_portal"
+	integratedPortalPathPrefix             = "/customer-portal"
+	integratedPortalUpstreamURL            = "http://portal-api:8091"
+)
+
+const (
+	ServiceCredentialExternalUserProvision  = "external_user_provision"
+	ServiceCredentialApplicationRoleAssign  = "application_role_assign"
+	ServiceCredentialApplicationRoleRevoke  = "application_role_revoke"
+	ServiceCredentialPortalMappingProvision = "portal_mapping_provision"
+	ServiceCredentialPortalMappingDisable   = "portal_mapping_disable"
+	ServiceCredentialPortalInviteVerify     = "portal_invite_verify"
 )
 
 // ErrSubsystemOnboardingAlreadyExists marks a create-only onboarding request that would
@@ -74,6 +91,25 @@ type SubsystemOnboardingWrite struct {
 	CatalogPublisherOAuthClient       OAuthClientCreateInput
 	CatalogPublisherOAuthClientID     string
 	CatalogPublisherOAuthClientSecret *SecretWrite
+
+	// ServiceClients contains optional, purpose-bound machine clients required by an integrated
+	// subsystem. Each client has one exact scope and an independent secret. Generic applications
+	// receive no extra clients; customer_portal receives only the six integration capabilities it
+	// needs for external identity provisioning and CRM/Portal communication.
+	ServiceClients []SubsystemServiceClientWrite
+}
+
+type SubsystemServiceClientWrite struct {
+	Purpose           string
+	OAuthClient       OAuthClientCreateInput
+	OAuthClientID     string
+	OAuthClientSecret *SecretWrite
+}
+
+type SubsystemServiceCredential struct {
+	Purpose         string
+	OAuthClient     OAuthClientView
+	PlaintextSecret string
 }
 
 // SubsystemOnboardingResult returns the newly created control-plane objects. PlaintextSecret is
@@ -89,6 +125,7 @@ type SubsystemOnboardingResult struct {
 	CatalogPublisherOAuthClient     OAuthClientView
 	PlaintextSecret                 string
 	CatalogPublisherPlaintextSecret string
+	ServiceCredentials              []SubsystemServiceCredential
 	RedirectURI                     string
 	PublicURL                       string
 }
@@ -249,6 +286,10 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	if err != nil {
 		return SubsystemOnboardingResult{}, err
 	}
+	serviceClients, serviceCredentials, err := service.buildIntegratedServiceClients(input, applicationID, environmentID, now)
+	if err != nil {
+		return SubsystemOnboardingResult{}, err
+	}
 
 	result, err := service.repository.CreateSubsystem(ctx, SubsystemOnboardingWrite{
 		Application: applicationInput, ApplicationID: applicationID,
@@ -258,15 +299,70 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		CatalogPublisherOAuthClient:       catalogPublisherClientInput,
 		CatalogPublisherOAuthClientID:     catalogPublisherOAuthClientID,
 		CatalogPublisherOAuthClientSecret: &catalogPublisherSecretWrite,
+		ServiceClients:                    serviceClients,
 	}, now)
 	if err != nil {
 		return SubsystemOnboardingResult{}, err
 	}
 	result.PlaintextSecret = plaintextSecret
 	result.CatalogPublisherPlaintextSecret = catalogPublisherPlaintextSecret
+	for index := range result.ServiceCredentials {
+		if secret, ok := serviceCredentials[result.ServiceCredentials[index].Purpose]; ok {
+			result.ServiceCredentials[index].PlaintextSecret = secret
+		}
+	}
 	result.RedirectURI = redirectURI
 	result.PublicURL = publicURL
 	return result, nil
+}
+
+func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input SubsystemOnboardingInput, applicationID, environmentID string, now time.Time) ([]SubsystemServiceClientWrite, map[string]string, error) {
+	if input.ApplicationCode != integratedPortalApplicationCode {
+		return nil, nil, nil
+	}
+	definitions := []struct {
+		purpose string
+		suffix  string
+		name    string
+		scope   string
+	}{
+		{ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
+		{ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
+		{ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
+		{ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
+		{ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
+		{ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
+	}
+	writes := make([]SubsystemServiceClientWrite, 0, len(definitions))
+	secrets := make(map[string]string, len(definitions))
+	for _, definition := range definitions {
+		client, err := normalizeOAuthClientCreate(OAuthClientCreateInput{
+			TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
+			EnvironmentID: environmentID,
+			ClientID:      input.ApplicationCode + "-" + input.Environment + "-" + definition.suffix,
+			ClientName:    input.ApplicationName + " " + definition.name,
+			ClientType:    "service", TokenAuthMethod: "client_secret_basic",
+			AccessTokenTTLSeconds: defaultSubsystemAccessTokenTTLSeconds, RequirePKCE: false,
+			GrantTypes: []string{"client_credentials"}, Scopes: []string{definition.scope},
+		}, service.redirectURIValidationPolicy)
+		if err != nil {
+			return nil, nil, err
+		}
+		clientID, err := service.newID(now, definition.purpose+" OAuth client")
+		if err != nil {
+			return nil, nil, err
+		}
+		secretWrite, plaintext, err := newOAuthClientSecretWrite(service.ids, now, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		writes = append(writes, SubsystemServiceClientWrite{
+			Purpose: definition.purpose, OAuthClient: client, OAuthClientID: clientID,
+			OAuthClientSecret: &secretWrite,
+		})
+		secrets[definition.purpose] = plaintext
+	}
+	return writes, secrets, nil
 }
 
 // ListPortalApplications returns active, resolvable subsystem cards for the authenticated tenant.
@@ -317,6 +413,22 @@ func normalizeSubsystemOnboardingInput(input SubsystemOnboardingInput) Subsystem
 	input.PathPrefix = strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/")
 	if input.PathPrefix == "" && input.ApplicationCode != "" {
 		input.PathPrefix = "/" + input.ApplicationCode
+	}
+	// The local workspace ships customer_and_opportunity inside the unified frontend/Compose
+	// topology. Accept the values used by the original standalone prototype, but persist the
+	// canonical route and Docker network alias so OAuth callbacks and gateway routing agree.
+	if input.ApplicationCode == integratedCustomerApplicationCode &&
+		input.PathPrefix == legacyCustomerPathPrefix && input.UpstreamURL == legacyCustomerUpstreamURL {
+		input.PathPrefix = integratedCustomerPathPrefix
+		input.UpstreamURL = integratedCustomerUpstreamURL
+	}
+	if input.ApplicationCode == integratedPortalApplicationCode {
+		if input.PathPrefix == "/customer_portal" {
+			input.PathPrefix = integratedPortalPathPrefix
+		}
+		if input.UpstreamURL == "http://customer-portal-api:8091" {
+			input.UpstreamURL = integratedPortalUpstreamURL
+		}
 	}
 	input.ClientType = strings.ToLower(strings.TrimSpace(input.ClientType))
 	if input.ClientType == "" {

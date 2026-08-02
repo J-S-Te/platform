@@ -301,7 +301,7 @@ func (r *Repository) GetExportJob(ctx context.Context, tenantID, jobID string) (
 	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND public_id = ? AND job_type = ?", tenantID, jobID, "AUDIT_EXPORT").Take(&job).Error; err != nil {
 		return domain.ExportJob{}, r.mapError(err)
 	}
-	result := domain.ExportJob{JobID: jobID, Status: job.Status, CreatedAt: job.CreatedAt}
+	result := domain.ExportJob{JobID: jobID, Status: job.Status, CreatedAt: job.CreatedAt, ErrorCode: value(job.LastErrorCode), ErrorMessage: value(job.LastErrorMessage)}
 	if job.CompletedAt != nil {
 		result.CompletedAt = *job.CompletedAt
 	}
@@ -346,11 +346,16 @@ func (r *Repository) ClaimExportJob(ctx context.Context, workerID string, now, s
 	return result, result.JobID != "", nil
 }
 
+const maxAuditExportEvents = 10000
+
 func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery) ([]domain.Event, error) {
 	db := r.eventQuery(ctx, tenantID, pageRequest(query))
 	var rows []eventQueryRow
-	if err := db.Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Order("audit_event.occurred_at DESC, audit_event.id DESC").Limit(10000).Scan(&rows).Error; err != nil {
+	if err := db.Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Order("audit_event.occurred_at DESC, audit_event.id DESC").Limit(maxAuditExportEvents + 1).Scan(&rows).Error; err != nil {
 		return nil, err
+	}
+	if len(rows) > maxAuditExportEvents {
+		return nil, fmt.Errorf("audit export contains more than %d events; narrow the filters before retrying", maxAuditExportEvents)
 	}
 	items := make([]domain.Event, 0, len(rows))
 	for _, row := range rows {
@@ -416,8 +421,19 @@ func pageRequest(query domain.ExportQuery) application.PageRequest {
 func (r *Repository) eventQuery(ctx context.Context, tenantID string, query application.PageRequest) *gorm.DB {
 	db := r.database.WithContext(ctx).Table("audit_event").Where("audit_event.tenant_id = ?", tenantID)
 	if query.Keyword != "" {
-		// action 使用 ASCII 字符集存储。先显式转换为 utf8mb4，避免中文关键词触发 MySQL 3988。
-		db = db.Where("(CONVERT(audit_event.action USING utf8mb4) LIKE ? OR audit_event.resource_name_snapshot LIKE ? OR audit_event.summary LIKE ?)", "%"+query.Keyword+"%", "%"+query.Keyword+"%", "%"+query.Keyword+"%")
+		// Search every administrator-visible correlation dimension promised by the console. ASCII
+		// columns are converted before comparison so Chinese input cannot trigger MySQL collation errors.
+		pattern := "%" + query.Keyword + "%"
+		db = db.Where(`(
+			CONVERT(audit_event.action USING utf8mb4) LIKE ? OR
+			audit_event.actor_name_snapshot LIKE ? OR
+			audit_event.resource_name_snapshot LIKE ? OR
+			audit_event.summary LIKE ? OR
+			CONVERT(COALESCE(audit_event.request_id, '') USING utf8mb4) LIKE ? OR
+			CONVERT(COALESCE(audit_event.trace_id, '') USING utf8mb4) LIKE ? OR
+			CONVERT(COALESCE(audit_event.correlation_id, '') USING utf8mb4) LIKE ? OR
+			COALESCE(JSON_UNQUOTE(JSON_EXTRACT(audit_event.metadata, '$.path')), '') LIKE ?
+		)`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	if query.ApplicationCode != "" {
 		db = db.Joins("JOIN platform_application filter_app ON filter_app.id = audit_event.application_id").Where("filter_app.code = ?", query.ApplicationCode)
@@ -464,6 +480,20 @@ func actionCategoryPredicate(category string) (string, []any) {
 		return "(" + action + " = ? OR " + action + " LIKE ? OR " + action + " = ? OR " + action + " LIKE ?)", []any{"auth.login", "auth.login.%", "auth.logout", "auth.logout.%"}
 	case "EXPORT":
 		return "(" + action + " LIKE ? OR " + path + " LIKE ?)", []any{"%export%", "%export%"}
+	case "DELETE":
+		return "(" + method + " = ? OR " + action + " REGEXP ?)", []any{"DELETE", "(^|[.:/ _-])(delete|remove|revoke)([.:/ _-]|$)"}
+	case "AUTHORIZATION_CHANGE":
+		return "(" + action + " LIKE ? OR " + path + " LIKE ? OR " + path + " LIKE ?)", []any{"authorization.%", "%role-binding%", "%/access%"}
+	case "SECRET_ROTATION":
+		return "(" + action + " REGEXP ? OR " + path + " REGEXP ?)", []any{"(^|[.:/ _-])(secret|credential).*(rotate|revoke)", "(credential|secret).*(rotate|revoke)"}
+	case "PASSWORD_RESET":
+		return "(" + action + " LIKE ? OR " + path + " LIKE ?)", []any{"%password%reset%", "%password%reset%"}
+	case "CATALOG_SYNC":
+		return "(" + action + " LIKE ? OR " + path + " LIKE ?)", []any{"%catalog%sync%", "%authorization-catalog%"}
+	case "AUDIT_ACCESS":
+		return "(" + path + " LIKE ?)", []any{"%/audit/%"}
+	case "IMPORT":
+		return "(" + action + " LIKE ? OR " + path + " LIKE ? OR " + path + " LIKE ?)", []any{"%import%", "%import%", "%/batch%"}
 	case "STATUS_CHANGE":
 		return "(" + action + " REGEXP ? OR " + path + " REGEXP ?)", []any{statusPattern, statusPattern}
 	case "UPDATE":
@@ -485,7 +515,7 @@ func (r *Repository) mapError(err error) error {
 func toEvent(model eventModel, appCode, appName, environmentCode string) domain.Event {
 	var changes []domain.FieldChange
 	_ = json.Unmarshal(model.Changes, &changes)
-	return domain.Event{ID: fmt.Sprint(model.ID), EventID: model.EventID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, ApplicationCode: appCode, ApplicationName: appName, EnvironmentID: model.EnvironmentID, EnvironmentCode: environmentCode, OccurredAt: model.OccurredAt, OperatorDisplayName: value(model.ActorNameSnapshot), ActionType: model.EventType, Action: model.Action, Result: model.Result, ResourceType: model.ResourceType, ResourceID: value(model.ResourceID), ResourceName: value(model.ResourceNameSnapshot), Method: valueFromMetadata(model.Metadata, "method"), Path: valueFromMetadata(model.Metadata, "path"), ClientIP: ipString(model.SourceIP), StatusCode: intFromMetadata(model.Metadata, "status_code"), RiskLevel: model.RiskLevel, Detail: value(model.ReasonCode), Summary: value(model.Summary), ChangeSummary: changes}
+	return domain.Event{ID: fmt.Sprint(model.ID), EventID: model.EventID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, ApplicationCode: appCode, ApplicationName: appName, EnvironmentID: model.EnvironmentID, EnvironmentCode: environmentCode, OccurredAt: model.OccurredAt, OperatorDisplayName: value(model.ActorNameSnapshot), ActionType: model.EventType, Action: model.Action, Result: model.Result, ResourceType: model.ResourceType, ResourceID: value(model.ResourceID), ResourceName: value(model.ResourceNameSnapshot), Method: valueFromMetadata(model.Metadata, "method"), Path: valueFromMetadata(model.Metadata, "path"), ClientIP: ipString(model.SourceIP), UserAgent: value(model.UserAgent), RequestID: value(model.RequestID), TraceID: value(model.TraceID), CorrelationID: value(model.CorrelationID), StatusCode: intFromMetadata(model.Metadata, "status_code"), RiskLevel: model.RiskLevel, Detail: value(model.ReasonCode), Summary: value(model.Summary), ChangeSummary: changes}
 }
 func optional(value string) *string {
 	value = strings.TrimSpace(value)

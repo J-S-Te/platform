@@ -105,6 +105,10 @@ type eventResponse struct {
 	Method              string               `json:"method,omitempty"`
 	Path                string               `json:"path,omitempty"`
 	ClientIP            string               `json:"client_ip,omitempty"`
+	UserAgent           string               `json:"user_agent,omitempty"`
+	RequestID           string               `json:"request_id,omitempty"`
+	TraceID             string               `json:"trace_id,omitempty"`
+	CorrelationID       string               `json:"correlation_id,omitempty"`
 	StatusCode          int                  `json:"status_code,omitempty"`
 	RiskLevel           string               `json:"risk_level"`
 	Detail              string               `json:"detail,omitempty"`
@@ -112,11 +116,13 @@ type eventResponse struct {
 	ChangeSummary       []domain.FieldChange `json:"change_summary"`
 }
 type exportResponse struct {
-	JobID       string     `json:"job_id"`
-	Status      string     `json:"status"`
-	DownloadURL string     `json:"download_url,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	JobID        string     `json:"job_id"`
+	Status       string     `json:"status"`
+	DownloadURL  string     `json:"download_url,omitempty"`
+	ErrorCode    string     `json:"error_code,omitempty"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
@@ -400,10 +406,10 @@ func copyMetadata(metadata map[string]any) map[string]any {
 	return copy
 }
 func eventToResponse(event domain.Event) eventResponse {
-	return eventResponse{EventID: event.EventID, OccurredAt: event.OccurredAt, OperatorDisplayName: event.OperatorDisplayName, ActionType: event.ActionType, ApplicationCode: event.ApplicationCode, ApplicationName: event.ApplicationName, EnvironmentCode: event.EnvironmentCode, Action: event.Action, Result: event.Result, ResourceType: event.ResourceType, ResourceID: event.ResourceID, ResourceName: event.ResourceName, Method: event.Method, Path: event.Path, ClientIP: event.ClientIP, StatusCode: event.StatusCode, RiskLevel: event.RiskLevel, Detail: event.Detail, Summary: event.Summary, ChangeSummary: event.ChangeSummary}
+	return eventResponse{EventID: event.EventID, OccurredAt: event.OccurredAt, OperatorDisplayName: event.OperatorDisplayName, ActionType: event.ActionType, ApplicationCode: event.ApplicationCode, ApplicationName: event.ApplicationName, EnvironmentCode: event.EnvironmentCode, Action: event.Action, Result: event.Result, ResourceType: event.ResourceType, ResourceID: event.ResourceID, ResourceName: event.ResourceName, Method: event.Method, Path: event.Path, ClientIP: event.ClientIP, UserAgent: event.UserAgent, RequestID: event.RequestID, TraceID: event.TraceID, CorrelationID: event.CorrelationID, StatusCode: event.StatusCode, RiskLevel: event.RiskLevel, Detail: event.Detail, Summary: event.Summary, ChangeSummary: event.ChangeSummary}
 }
 func exportToResponse(job domain.ExportJob) exportResponse {
-	result := exportResponse{JobID: job.JobID, Status: job.Status, DownloadURL: job.DownloadURL, CreatedAt: job.CreatedAt}
+	result := exportResponse{JobID: job.JobID, Status: job.Status, DownloadURL: job.DownloadURL, ErrorCode: job.ErrorCode, ErrorMessage: job.ErrorMessage, CreatedAt: job.CreatedAt}
 	if !job.CompletedAt.IsZero() {
 		completed := job.CompletedAt
 		result.CompletedAt = &completed

@@ -11,6 +11,7 @@ func toDomainUser(model userModel) domain.User {
 		ID:               model.ID,
 		TenantID:         model.TenantID,
 		EmployeeNo:       copyString(model.EmployeeNo),
+		PMSPersonID:      copyString(model.PMSPersonID),
 		DisplayName:      model.DisplayName,
 		Email:            copyString(model.Email),
 		MobileCiphertext: append([]byte(nil), model.MobileCiphertext...),
@@ -23,18 +24,19 @@ func toDomainUser(model userModel) domain.User {
 
 func toDomainAccount(model accountModel) domain.Account {
 	return domain.Account{
-		ID:          model.ID,
-		TenantID:    model.TenantID,
-		UserID:      copyString(model.UserID),
-		AccountName: valueOrEmpty(model.Username),
-		AccountType: model.AccountType,
-		AuthSource:  model.AuthSource,
-		Status:      model.Status,
-		LastLoginAt: copyTime(model.LastLoginAt),
-		ValidUntil:  copyTime(model.ValidUntil),
-		Version:     model.Version,
-		CreatedAt:   model.CreatedAt.UTC(),
-		UpdatedAt:   model.UpdatedAt.UTC(),
+		ID:                  model.ID,
+		TenantID:            model.TenantID,
+		UserID:              copyString(model.UserID),
+		AccountName:         valueOrEmpty(model.Username),
+		AccountType:         model.AccountType,
+		AuthSource:          model.AuthSource,
+		PasswordInitialized: model.PasswordInitialized,
+		Status:              model.Status,
+		LastLoginAt:         copyTime(model.LastLoginAt),
+		ValidUntil:          copyTime(model.ValidUntil),
+		Version:             model.Version,
+		CreatedAt:           model.CreatedAt.UTC(),
+		UpdatedAt:           model.UpdatedAt.UTC(),
 	}
 }
 

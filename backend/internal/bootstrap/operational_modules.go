@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/infrastructure"
@@ -69,6 +70,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		subsystemInitialAccessManager{applicationAccess: applicationAccessService},
 		cfg.Auth.OIDCIssuer,
 		logger,
+		subsystemRepository,
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -141,12 +143,19 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 	if manager.applicationAccess == nil {
 		return "", errors.New("application authorization service is unavailable")
 	}
+	roleCodes := initialSubsystemAdministratorRoles(applicationCode)
+	// customer_portal is an external-customer application. The internal operator who performs
+	// onboarding must not automatically receive the portal_customer role or a misleading portal
+	// card; each external customer is provisioned and scoped by the CRM invitation workflow.
+	if len(roleCodes) == 0 {
+		return "", nil
+	}
+	roles := make([]applicationaccess.RoleInput, 0, len(roleCodes))
+	for _, roleCode := range roleCodes {
+		roles = append(roles, applicationaccess.RoleInput{RoleCode: roleCode, ScopeType: "APPLICATION"})
+	}
 	_, err := manager.applicationAccess.UpdateAccess(ctx, applicationaccess.UpdateAccessInput{
-		TenantID:      tenantID,
-		UserID:        userID,
-		OperatorID:    operatorID,
-		Roles:         []applicationaccess.RoleInput{{RoleCode: "admin", ScopeType: "APPLICATION"}},
-		RolesProvided: true,
+		TenantID: tenantID, UserID: userID, OperatorID: operatorID, Roles: roles, RolesProvided: true,
 	}, applicationCode)
 	if err != nil {
 		// A subsystem may be onboarded before it publishes its role catalog. In that
@@ -162,5 +171,18 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 			return "", err
 		}
 	}
-	return "admin", nil
+	return strings.Join(roleCodes, ","), nil
+}
+
+func initialSubsystemAdministratorRoles(applicationCode string) []string {
+	switch strings.TrimSpace(applicationCode) {
+	case "customer_and_opportunity":
+		// CRM intentionally has no synthetic all-powerful admin role. Its initial administrator
+		// receives the three catalog roles that cover system operation while preserving the
+		// application's max_effective_roles=3 policy and normal data-scope semantics.
+		return []string{"sales_director", "team_lead", "technical_lead"}
+	case "customer_portal":
+		return nil
+	}
+	return []string{"admin"}
 }

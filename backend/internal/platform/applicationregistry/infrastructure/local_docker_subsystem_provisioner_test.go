@@ -34,7 +34,7 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 		"OIDC_CLIENT_SECRET":                            "generated-oauth-secret",
 		"OIDC_REDIRECT_URI":                             "http://localhost:8081/contract_management/auth/callback",
 		"PLATFORM_APPLICATION_ID":                       "app-1",
-		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "true",
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "false",
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID":      "contract_management-dev-catalog-publisher",
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  "catalog-publisher-secret",
 		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": "app-1",
@@ -53,7 +53,7 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 		"OIDC_CLIENT_SECRET=generated-oauth-secret",
 		"OIDC_REDIRECT_URI=http://localhost:8081/contract_management/auth/callback",
 		"PLATFORM_APPLICATION_ID=app-1",
-		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED=true",
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED=false",
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=contract_management-dev-catalog-publisher",
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=catalog-publisher-secret",
 		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID=app-1",
@@ -125,10 +125,10 @@ func (noOpSubsystemRunner) Run(_ context.Context, _ string, _ []string, _ string
 }
 
 type recordingSubsystemRunnerCall struct {
-	directory    string
-	environment  []string
-	binary       string
-	arguments    []string
+	directory   string
+	environment []string
+	binary      string
+	arguments   []string
 }
 
 type recordingSubsystemRunner struct {
@@ -158,13 +158,13 @@ func (runner *recordingSubsystemRunner) firstCallMatching(t *testing.T, predicat
 	return recordingSubsystemRunnerCall{}
 }
 
-func TestLocalDockerSubsystemProvisionerUpdateRebuildsWithoutTouchingGatewayOrEnvFile(t *testing.T) {
+func TestLocalDockerSubsystemProvisionerUpdateRebuildsStandaloneSubsystemWithoutTouchingGatewayOrEnvFile(t *testing.T) {
 	t.Parallel()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolve temp root: %v", err)
 	}
-	project := filepath.Join(root, "contract_management")
+	project := filepath.Join(root, "customer_management")
 	if err := os.Mkdir(project, 0o755); err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestLocalDockerSubsystemProvisionerUpdateRebuildsWithoutTouchingGatewayOrEn
 	}
 
 	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
-		ApplicationCode: "contract_management",
+		ApplicationCode: "customer_management",
 		Environment:     "prod",
 	}); err != nil {
 		t.Fatalf("update: %v", err)
@@ -242,7 +242,7 @@ func TestLocalDockerSubsystemProvisionerTeardownStopsContainersRemovesEnvAndGate
 	if err != nil {
 		t.Fatalf("resolve temp root: %v", err)
 	}
-	project := filepath.Join(root, "contract_management")
+	project := filepath.Join(root, "customer_management")
 	if err := os.Mkdir(project, 0o755); err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestLocalDockerSubsystemProvisionerTeardownStopsContainersRemovesEnvAndGate
 		t.Fatalf("construct provisioner: %v", err)
 	}
 
-	if err := provisioner.Teardown(context.Background(), "contract_management", "prod"); err != nil {
+	if err := provisioner.Teardown(context.Background(), "customer_management", "prod"); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -292,13 +292,392 @@ func TestLocalDockerSubsystemProvisionerTeardownStopsContainersRemovesEnvAndGate
 	if !containsString(gatewayCall.environment, "PORTAL_GATEWAY_NGINX_INCLUDE="+filepath.Join(gatewayDir, "includes.d")) {
 		t.Fatalf("gateway call did not pass PORTAL_GATEWAY_NGINX_INCLUDE: %v", gatewayCall.environment)
 	}
-	if gatewayCall.arguments[2] != "contract_management" {
-		t.Fatalf("gateway call application code = %q, want contract_management", gatewayCall.arguments[2])
+	if gatewayCall.arguments[2] != "customer_management" {
+		t.Fatalf("gateway call application code = %q, want customer_management", gatewayCall.arguments[2])
 	}
 
 	if _, err := os.Stat(envPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf(".env.local still exists after teardown: err = %v", err)
 	}
+}
+
+func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	project := filepath.Join(root, "contract_management")
+	for _, directory := range []string{filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"), project} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):            "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):          "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
+		filepath.Join(project, "docker-compose.yml"):                 "services: {}\n",
+		filepath.Join(project, ".env.local"):                         "OIDC_CLIENT_ID=contract_management-prod-web\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+		ApplicationCode: "contract_management", Environment: "prod",
+	}); err != nil {
+		t.Fatalf("update integrated contract subsystem: %v", err)
+	}
+
+	if len(runner.calls) != 3 {
+		t.Fatalf("integrated contract update calls = %d, want 3: %#v", len(runner.calls), runner.calls)
+	}
+	for _, call := range runner.calls {
+		if call.directory != platformRoot {
+			t.Fatalf("compose directory = %q, want %q", call.directory, platformRoot)
+		}
+		for _, expected := range []string{
+			"BASIC_PLATFORM_RUNTIME_ENV_FILE=" + filepath.Join(platformRoot, "docker", ".env.local"),
+			"CONTRACT_RUNTIME_ENV_FILE=" + filepath.Join(project, ".env.local"),
+			"CUSTOMER_RUNTIME_ENV_FILE=" + filepath.Join(platformRoot, "docker", ".env.customer.local"),
+			"BASIC_PLATFORM_HOST_PROJECT_ROOT=" + platformRoot,
+			"SUBSYSTEM_HOST_PROJECTS_ROOT=" + root,
+		} {
+			if !containsString(call.environment, expected) {
+				t.Fatalf("compose environment missing %q: %v", expected, call.environment)
+			}
+		}
+		if !containsString(call.arguments, "--project-name") || !containsString(call.arguments, "basic-platform-local") {
+			t.Fatalf("compose call missing unified project name: %v", call.arguments)
+		}
+		if containsString(call.arguments, filepath.Join(project, "docker-compose.yml")) {
+			t.Fatalf("integrated update must not use standalone contract Compose: %v", call.arguments)
+		}
+	}
+	if !containsString(runner.calls[0].arguments, "contract-mysql") || !containsString(runner.calls[0].arguments, "temporal") {
+		t.Fatalf("first call must ensure integrated dependencies: %v", runner.calls[0].arguments)
+	}
+	if !containsString(runner.calls[1].arguments, "contract-migrate") {
+		t.Fatalf("second call must run integrated migrations: %v", runner.calls[1].arguments)
+	}
+	if !containsString(runner.calls[2].arguments, "contract-api") || !containsString(runner.calls[2].arguments, "--build") {
+		t.Fatalf("third call must rebuild integrated contract API: %v", runner.calls[2].arguments)
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReloadGateway(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	project := filepath.Join(root, "contract_management")
+	for _, directory := range []string{filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"), project} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):            "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):          "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
+		filepath.Join(project, "docker-compose.yml"):                 "services: {}\n",
+		filepath.Join(project, ".env.example"):                       "CONTRACT_MYSQL_PASSWORD=REPLACE_WITH_CONTRACT_PASSWORD\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		GatewayIncludePath:     filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+	if err := provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+		TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: "contract_management", Environment: "prod",
+		Issuer: "http://localhost:8081", ClientID: "contract_management-prod-web", ClientSecret: "browser-secret",
+		RedirectURI: "http://localhost:8081/contract_management/auth/callback", PublicURL: "http://localhost:8081/contract_management/",
+		PathPrefix: "/contract_management", UpstreamURL: "http://contract-api:8081",
+		CatalogPublisherClientID: "contract_management-prod-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
+	}); err != nil {
+		t.Fatalf("provision integrated contract subsystem: %v", err)
+	}
+
+	if len(runner.calls) != 3 {
+		t.Fatalf("integrated contract provision calls = %d, want 3 unified Compose calls: %#v", len(runner.calls), runner.calls)
+	}
+	for _, call := range runner.calls {
+		if call.binary == "/bin/bash" || containsString(call.arguments, "nginx") {
+			t.Fatalf("integrated contract provisioning must not mutate or reload the current gateway: %#v", call)
+		}
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerPreflightIntegratedCustomerDoesNotRequireStandaloneCompose(t *testing.T) {
+	t.Parallel()
+	root, platformRoot, project, gatewayScript := createIntegratedProvisionerFixture(t, integratedCustomerApplicationCode)
+	if err := os.WriteFile(filepath.Join(project, ".env.example"), []byte("DEV_AUTH_ENABLED=true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root, GatewayScriptPath: gatewayScript,
+		GatewayIncludePath:     filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Preflight(context.Background(), integratedCustomerApplicationCode); err != nil {
+		t.Fatalf("integrated customer preflight rejected without standalone Compose: %v", err)
+	}
+	if len(runner.calls) != 1 || !containsString(runner.calls[0].arguments, "version") {
+		t.Fatalf("unexpected preflight calls: %#v", runner.calls)
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedEnvPublishesCatalogAndSkipsGateway(t *testing.T) {
+	t.Parallel()
+	root, platformRoot, _, gatewayScript := createIntegratedProvisionerFixture(t, integratedCustomerApplicationCode)
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root, GatewayScriptPath: gatewayScript,
+		GatewayIncludePath:     filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+		TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: integratedCustomerApplicationCode, Environment: "dev",
+		Issuer: "http://localhost:8081", ClientID: "customer_and_opportunity-dev-web", ClientSecret: "browser-secret",
+		RedirectURI: "http://localhost:8081/customer-opportunity/auth/callback", PublicURL: "http://localhost:8081/customer-opportunity/",
+		PathPrefix: "/customer-opportunity", UpstreamURL: "http://customer-api:8090",
+		CatalogPublisherClientID: "customer_and_opportunity-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
+	}); err != nil {
+		t.Fatalf("provision integrated customer subsystem: %v", err)
+	}
+
+	contents, readErr := os.ReadFile(filepath.Join(platformRoot, "docker", ".env.customer.local"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, expected := range []string{
+		"DEV_AUTH_ENABLED=false", "APP_PATH_PREFIX=/customer-opportunity", "APP_PUBLIC_ORIGIN=http://localhost:8081",
+		"OIDC_CLIENT_ID=customer_and_opportunity-dev-web", "OIDC_SESSION_COOKIE_SECURE=false", "OIDC_ROLE_CONFIG_HASH=" + integratedCustomerRoleConfigHash,
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=customer_and_opportunity-dev-catalog-publisher",
+	} {
+		if !strings.Contains(string(contents), expected) {
+			t.Fatalf("shared customer environment missing %q:\n%s", expected, contents)
+		}
+	}
+	if len(runner.calls) != 5 {
+		t.Fatalf("integrated customer provision calls = %d, want 5: %#v", len(runner.calls), runner.calls)
+	}
+	publishCall := runner.firstCallMatching(t, func(call recordingSubsystemRunnerCall) bool {
+		return containsString(call.arguments, "./authz-catalog") && containsString(call.arguments, "publish")
+	})
+	if !containsString(publishCall.arguments, "crm") {
+		t.Fatalf("catalog publish call missing CRM manifest: %v", publishCall.arguments)
+	}
+	for _, call := range runner.calls {
+		if call.binary == "/bin/bash" || containsString(call.arguments, "nginx") {
+			t.Fatalf("integrated customer provisioning must not mutate the generated gateway: %#v", call)
+		}
+		if !containsString(call.environment, "CUSTOMER_RUNTIME_ENV_FILE="+filepath.Join(platformRoot, "docker", ".env.customer.local")) {
+			t.Fatalf("compose environment missing customer runtime file: %v", call.environment)
+		}
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerProvisionIntegratedPortalWritesIsolatedRuntimeAndCRMIntegration(t *testing.T) {
+	t.Parallel()
+	root, platformRoot, _, gatewayScript := createIntegratedProvisionerFixture(t, integratedPortalApplicationCode)
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root, GatewayScriptPath: gatewayScript,
+		GatewayIncludePath:     filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := portalServiceCredentialsForTest()
+	if err := provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+		TenantID: "tenant-1", ApplicationID: "portal-app-1", ApplicationCode: integratedPortalApplicationCode, Environment: "dev",
+		Issuer: "http://localhost:8081", ClientID: "customer_portal-dev-web", ClientSecret: "portal-browser-secret",
+		RedirectURI: "http://localhost:8081/customer-portal/auth/callback", PublicURL: "http://localhost:8081/customer-portal/",
+		PathPrefix: "/customer-portal", UpstreamURL: "http://portal-api:8091",
+		CatalogPublisherClientID: "customer_portal-dev-catalog-publisher", CatalogPublisherClientSecret: "portal-publisher-secret",
+		ServiceCredentials: credentials,
+	}); err != nil {
+		t.Fatalf("provision integrated Portal subsystem: %v", err)
+	}
+
+	portalBytes, err := os.ReadFile(filepath.Join(platformRoot, "docker", ".env.portal.local"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	portalEnvironment := string(portalBytes)
+	for _, expected := range []string{
+		"PORTAL_OIDC_CLIENT_ID=customer_portal-dev-web",
+		"PORTAL_ROLE_CONFIG_HASH=" + integratedPortalRoleConfigHash,
+		"PORTAL_CRM_INVITE_CLIENT_ID=customer_portal-dev-portal-invite-verify",
+		"PORTAL_CRM_PROVISION_CLIENT_SUBJECT=customer_portal-dev-portal-mapping-provision",
+		"PORTAL_CRM_DISABLE_CLIENT_SUBJECT=customer_portal-dev-portal-mapping-disable",
+		"PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID=customer_portal-dev-catalog-publisher",
+	} {
+		if !strings.Contains(portalEnvironment, expected) {
+			t.Fatalf("Portal environment missing %q:\n%s", expected, portalEnvironment)
+		}
+	}
+	if strings.Contains(portalEnvironment, "REPLACE_WITH_") {
+		t.Fatalf("Portal environment still contains a secret placeholder:\n%s", portalEnvironment)
+	}
+	passwordMatch := regexp.MustCompile(`(?m)^PORTAL_MYSQL_PASSWORD=([0-9a-f]{64})$`).FindStringSubmatch(portalEnvironment)
+	if len(passwordMatch) != 2 || !strings.Contains(portalEnvironment, "PORTAL_MYSQL_DSN=\"portal:"+passwordMatch[1]+"@tcp(portal-mysql:3306)") {
+		t.Fatalf("Portal DSN does not use the generated database password:\n%s", portalEnvironment)
+	}
+
+	customerBytes, err := os.ReadFile(filepath.Join(platformRoot, "docker", ".env.customer.local"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"PORTAL_INVITE_ENABLED=true",
+		"PLATFORM_EXTERNAL_IDENTITY_ENABLED=true",
+		"PLATFORM_PORTAL_APPLICATION_CODE=customer_portal",
+		"PLATFORM_EXTERNAL_USER_CLIENT_ID=customer_portal-dev-external-user-provision",
+		"PLATFORM_ROLE_ASSIGN_CLIENT_ID=customer_portal-dev-role-assign",
+		"PLATFORM_ROLE_REVOKE_CLIENT_ID=customer_portal-dev-role-revoke",
+	} {
+		if !strings.Contains(string(customerBytes), expected) {
+			t.Fatalf("CRM environment missing %q:\n%s", expected, customerBytes)
+		}
+	}
+	if len(runner.calls) != 6 {
+		t.Fatalf("integrated Portal provision calls = %d, want 6: %#v", len(runner.calls), runner.calls)
+	}
+	publishCall := runner.firstCallMatching(t, func(call recordingSubsystemRunnerCall) bool {
+		return containsString(call.arguments, "./authz-catalog") && containsString(call.arguments, "publish")
+	})
+	if !containsString(publishCall.arguments, "portal") {
+		t.Fatalf("catalog publish call missing Portal manifest: %v", publishCall.arguments)
+	}
+	for _, call := range runner.calls {
+		if call.binary == "/bin/bash" || containsString(call.arguments, "nginx") {
+			t.Fatalf("integrated Portal provisioning must not mutate the generated gateway: %#v", call)
+		}
+		if !containsString(call.environment, "PORTAL_RUNTIME_ENV_FILE="+filepath.Join(platformRoot, "docker", ".env.portal.local")) {
+			t.Fatalf("compose environment missing Portal runtime file: %v", call.environment)
+		}
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerPortalRequiresEveryPurposeBoundCredential(t *testing.T) {
+	t.Parallel()
+	root, platformRoot, _, gatewayScript := createIntegratedProvisionerFixture(t, integratedPortalApplicationCode)
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root, GatewayScriptPath: gatewayScript,
+		GatewayIncludePath: filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"), Timeout: 30 * time.Second,
+	}, &recordingSubsystemRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := portalServiceCredentialsForTest()
+	credentials = credentials[:len(credentials)-1]
+	err = provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+		TenantID: "tenant-1", ApplicationID: "portal-app-1", ApplicationCode: integratedPortalApplicationCode, Environment: "dev",
+		Issuer: "http://localhost:8081", ClientID: "customer_portal-dev-web", ClientSecret: "browser-secret",
+		RedirectURI: "http://localhost:8081/customer-portal/auth/callback", PublicURL: "http://localhost:8081/customer-portal/",
+		PathPrefix: "/customer-portal", UpstreamURL: "http://portal-api:8091", ServiceCredentials: credentials,
+	})
+	if !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
+		t.Fatalf("missing service credential error = %v", err)
+	}
+}
+
+func portalServiceCredentialsForTest() []application.SubsystemServiceCredential {
+	definitions := []struct{ purpose, suffix string }{
+		{application.ServiceCredentialExternalUserProvision, "external-user-provision"},
+		{application.ServiceCredentialApplicationRoleAssign, "role-assign"},
+		{application.ServiceCredentialApplicationRoleRevoke, "role-revoke"},
+		{application.ServiceCredentialPortalMappingProvision, "portal-mapping-provision"},
+		{application.ServiceCredentialPortalMappingDisable, "portal-mapping-disable"},
+		{application.ServiceCredentialPortalInviteVerify, "portal-invite-verify"},
+	}
+	result := make([]application.SubsystemServiceCredential, 0, len(definitions))
+	for _, definition := range definitions {
+		result = append(result, application.SubsystemServiceCredential{
+			Purpose:         definition.purpose,
+			OAuthClient:     application.OAuthClientView{ClientID: "customer_portal-dev-" + definition.suffix},
+			PlaintextSecret: "secret-" + definition.suffix,
+		})
+	}
+	return result
+}
+
+func createIntegratedProvisionerFixture(t *testing.T, applicationCode string) (string, string, string, string) {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	contractProject := filepath.Join(root, integratedContractApplicationCode)
+	projectCode := applicationCode
+	if applicationCode == integratedPortalApplicationCode {
+		projectCode = integratedCustomerApplicationCode
+	}
+	project := filepath.Join(root, projectCode)
+	for _, directory := range []string{filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"), contractProject, project} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gatewayScript := filepath.Join(platformRoot, "scripts", "portal-gateway.sh")
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):                    "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):                  "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"):         "CUSTOMER_MYSQL_PASSWORD=keep\nDEV_AUTH_ENABLED=true\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local.example"): "CUSTOMER_MYSQL_PASSWORD=template\n",
+		filepath.Join(platformRoot, "docker", ".env.portal.local.example"): strings.Join([]string{
+			"PORTAL_MYSQL_PASSWORD=REPLACE_WITH_GENERATED_PORTAL_PASSWORD",
+			"PORTAL_MYSQL_ROOT_PASSWORD=REPLACE_WITH_GENERATED_PORTAL_ROOT_PASSWORD",
+			"PORTAL_MYSQL_DSN=portal:REPLACE_WITH_GENERATED_PORTAL_PASSWORD@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+			"PORTAL_ENCRYPTION_KEY_BASE64=REPLACE_WITH_GENERATED_PORTAL_ENCRYPTION_KEY",
+			"PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64=REPLACE_WITH_GENERATED_PORTAL_REPORT_DESCRIPTOR_KEY",
+			"PORTAL_HMAC_KEY_BASE64=REPLACE_WITH_GENERATED_PORTAL_HMAC_KEY", "",
+		}, "\n"),
+		filepath.Join(contractProject, ".env.local"): "CONTRACT_SETTING=keep\n",
+		gatewayScript: "#!/bin/sh\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, platformRoot, project, gatewayScript
 }
 
 func TestLocalDockerSubsystemProvisionerTeardownWithoutProjectDirStillRemovesGateway(t *testing.T) {

@@ -120,8 +120,8 @@ func (s *Service) IngestBatch(ctx context.Context, tenantID string, delivery Bat
 }
 func (s *Service) List(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Event], error) {
 	query = normalizePage(query)
-	if !validActionCategory(query.ActionCategory) {
-		return PageResult[domain.Event]{}, validation("action_category is invalid")
+	if err := validatePage(query); err != nil {
+		return PageResult[domain.Event]{}, err
 	}
 	return s.repository.List(ctx, tenantID, query)
 }
@@ -136,8 +136,8 @@ func (s *Service) CreateExportJob(ctx context.Context, tenantID, operatorID stri
 		return domain.ExportJob{}, validation("operator is required")
 	}
 	query = normalizePage(query)
-	if !validActionCategory(query.ActionCategory) {
-		return domain.ExportJob{}, validation("action_category is invalid")
+	if err := validatePage(query); err != nil {
+		return domain.ExportJob{}, err
 	}
 	id, err := s.ids.New(s.clock.Now())
 	if err != nil {
@@ -152,7 +152,13 @@ func (s *Service) GetExportJob(ctx context.Context, tenantID, jobID string) (dom
 	return s.repository.GetExportJob(ctx, tenantID, strings.TrimSpace(jobID))
 }
 func normalizePage(query PageRequest) PageRequest {
+	query.Keyword = strings.TrimSpace(query.Keyword)
+	query.ApplicationCode = strings.TrimSpace(query.ApplicationCode)
+	query.EnvironmentCode = strings.TrimSpace(query.EnvironmentCode)
+	query.Action = strings.TrimSpace(query.Action)
 	query.ActionCategory = strings.ToUpper(strings.TrimSpace(query.ActionCategory))
+	query.Result = strings.ToUpper(strings.TrimSpace(query.Result))
+	query.RiskLevel = strings.ToUpper(strings.TrimSpace(query.RiskLevel))
 	if query.Page < 1 {
 		query.Page = 1
 	}
@@ -166,7 +172,23 @@ func normalizePage(query PageRequest) PageRequest {
 }
 
 func validActionCategory(category string) bool {
-	return category == "" || oneOf(category, "LOGIN", "CREATE", "UPDATE", "EXPORT", "STATUS_CHANGE")
+	return category == "" || oneOf(category, "LOGIN", "CREATE", "UPDATE", "DELETE", "EXPORT", "STATUS_CHANGE", "AUTHORIZATION_CHANGE", "SECRET_ROTATION", "PASSWORD_RESET", "CATALOG_SYNC", "AUDIT_ACCESS", "IMPORT")
+}
+
+func validatePage(query PageRequest) error {
+	if !validActionCategory(query.ActionCategory) {
+		return validation("action_category is invalid")
+	}
+	if query.Result != "" && !oneOf(query.Result, "SUCCESS", "FAILURE", "DENIED") {
+		return validation("result is invalid")
+	}
+	if query.RiskLevel != "" && !oneOf(query.RiskLevel, "LOW", "MEDIUM", "HIGH", "CRITICAL") {
+		return validation("risk_level is invalid")
+	}
+	if query.OccurredFrom != nil && query.OccurredTo != nil && query.OccurredFrom.After(*query.OccurredTo) {
+		return validation("occurred_from must not be after occurred_to")
+	}
+	return nil
 }
 
 // completeCorrelation fills only missing event correlation fields from the trusted request

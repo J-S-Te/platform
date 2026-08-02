@@ -31,7 +31,8 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx c
 		return tokenissuer.AuthorizationClaims{}, err
 	}
 	return tokenissuer.AuthorizationClaims{
-		TenantID: resolved.TenantID, Roles: append([]string(nil), resolved.Roles...),
+		TenantID: resolved.TenantID, PersonID: resolved.PersonID, PrimaryOrgID: resolved.PrimaryOrgID,
+		OrganizationIDs: append([]string(nil), resolved.OrganizationIDs...), Roles: append([]string(nil), resolved.Roles...),
 		Permissions: append([]string(nil), resolved.Permissions...), RoleConfigHash: resolved.RoleConfigHash,
 		AuthzRevision: resolved.AuthzRevision,
 	}, nil

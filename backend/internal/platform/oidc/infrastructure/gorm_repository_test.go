@@ -3,7 +3,9 @@ package infrastructure
 import (
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/domain"
 	"gorm.io/gorm/schema"
 )
 
@@ -43,5 +45,20 @@ func TestOAuthClientIDColumnMappings(t *testing.T) {
 				t.Fatalf("OAuthClientID column = %q, want oauth_client_id", field.DBName)
 			}
 		})
+	}
+}
+
+func TestRefreshProjectionRejectsInactiveTokenFamily(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	familyRevokedAt := now.Add(-time.Minute)
+	token := refreshFromProjection(refreshProjection{
+		ID: "refresh-1", Status: domain.RefreshTokenStatusActive, ExpiresAt: now.Add(time.Hour),
+		FamilyStatus: domain.TokenFamilyStatusRevoked, FamilyRevokedAt: &familyRevokedAt,
+		FamilyExpiresAt: now.Add(time.Hour),
+	}, now)
+
+	if token.Status != domain.RefreshTokenStatusRevoked || token.RevokedAt == nil || !token.RevokedAt.Equal(familyRevokedAt) {
+		t.Fatalf("refresh token = %#v", token)
 	}
 }

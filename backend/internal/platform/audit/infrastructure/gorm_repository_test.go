@@ -47,9 +47,16 @@ func TestActionCategoryPredicate(t *testing.T) {
 		{name: "login", category: "LOGIN", wantArgs: 4},
 		{name: "create normalized", category: " create ", wantArgs: 10},
 		{name: "update", category: "UPDATE", wantArgs: 7},
+		{name: "delete", category: "DELETE", wantArgs: 2},
 		{name: "export", category: "EXPORT", wantArgs: 2},
+		{name: "authorization change", category: "AUTHORIZATION_CHANGE", wantArgs: 3},
+		{name: "secret rotation", category: "SECRET_ROTATION", wantArgs: 2},
+		{name: "password reset", category: "PASSWORD_RESET", wantArgs: 2},
+		{name: "catalog sync", category: "CATALOG_SYNC", wantArgs: 2},
+		{name: "audit access", category: "AUDIT_ACCESS", wantArgs: 1},
+		{name: "import", category: "IMPORT", wantArgs: 3},
 		{name: "status change", category: "STATUS_CHANGE", wantArgs: 2},
-		{name: "unknown", category: "DELETE", wantArgs: 0, wantEmpty: true},
+		{name: "unknown", category: "UNKNOWN", wantArgs: 0, wantEmpty: true},
 	}
 
 	for _, test := range tests {
@@ -98,5 +105,30 @@ func TestExportQueryPreservesActionCategory(t *testing.T) {
 	restored := pageRequest(persisted)
 	if restored.ActionCategory != page.ActionCategory {
 		t.Fatalf("restored action category = %q, want %q", restored.ActionCategory, page.ActionCategory)
+	}
+}
+
+func TestToEventExposesCorrelationAndClientContext(t *testing.T) {
+	requestID := "request-1"
+	traceID := "0123456789abcdef0123456789abcdef"
+	correlationID := "correlation-1"
+	userAgent := "audit-test-agent"
+	model := eventModel{
+		ID:            7,
+		EventID:       "event-1",
+		RequestID:     &requestID,
+		TraceID:       &traceID,
+		CorrelationID: &correlationID,
+		UserAgent:     &userAgent,
+		Metadata:      []byte(`{"method":"PATCH","path":"/api/v1/roles/role-1","status_code":200}`),
+		Changes:       []byte(`[]`),
+	}
+
+	event := toEvent(model, "platform", "基础能力平台", "prod")
+	if event.RequestID != requestID || event.TraceID != traceID || event.CorrelationID != correlationID || event.UserAgent != userAgent {
+		t.Fatalf("correlation fields not exposed: %#v", event)
+	}
+	if event.Method != "PATCH" || event.Path != "/api/v1/roles/role-1" || event.StatusCode != 200 {
+		t.Fatalf("HTTP context not exposed: %#v", event)
 	}
 }

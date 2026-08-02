@@ -1,10 +1,14 @@
 package applicationaccess
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func TestSortedUniqueTrimsDeduplicatesAndSorts(t *testing.T) {
@@ -17,6 +21,25 @@ func TestSortedUniqueTrimsDeduplicatesAndSorts(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+func TestCanonicalAdminRoleResultFallsBackWhenApplicationHasNoAdminRole(t *testing.T) {
+	role, available, err := canonicalAdminRoleResult(roleRow{}, gorm.ErrRecordNotFound)
+	if err != nil || available || role.ID != "" {
+		t.Fatalf("missing canonical admin must fall back to assigned roles: role=%+v available=%v err=%v", role, available, err)
+	}
+}
+
+func TestCanonicalAdminRoleResultAcceptsExistingRoleAndPreservesDatabaseErrors(t *testing.T) {
+	existing := roleRow{ID: "role-admin", Code: "admin", Name: "管理员"}
+	role, available, err := canonicalAdminRoleResult(existing, nil)
+	if err != nil || !available || role.ID != existing.ID {
+		t.Fatalf("existing canonical admin rejected: role=%+v available=%v err=%v", role, available, err)
+	}
+	databaseErr := errors.New("database unavailable")
+	if _, _, err := canonicalAdminRoleResult(roleRow{}, databaseErr); !errors.Is(err, databaseErr) {
+		t.Fatalf("database error not preserved: %v", err)
 	}
 }
 
@@ -145,6 +168,22 @@ func TestResolveAssignedRolesPreservesAllSourcesForTheSameRole(t *testing.T) {
 	}
 }
 
+func TestResolveAssignedRolesPreservesDifferentOriginsOnSamePosition(t *testing.T) {
+	rows := []assignedRoleRow{
+		{RoleID: "role-sales", Code: "sales", SubjectType: subjectTypePosition, SubjectID: "position-1", ScopeType: scopeTypeTenant, GrantOrigin: grantOriginManual},
+		{RoleID: "role-sales", Code: "sales", SubjectType: subjectTypePosition, SubjectID: "position-1", ScopeType: scopeTypeTenant, GrantOrigin: grantOriginTemplate, OriginID: "assignment-1", OriginItemID: "template-item-1"},
+	}
+
+	roleIDs, roles, direct, inherited := resolveAssignedRoles(rows, subjectTypeUser)
+	assertStrings(t, roleIDs, []string{"role-sales"})
+	if len(roles) != 2 || len(direct) != 0 || len(inherited) != 2 {
+		t.Fatalf("manual and template provenance must both remain visible: roles=%+v direct=%+v inherited=%+v", roles, direct, inherited)
+	}
+	if roles[0].GrantOrigin != grantOriginManual || roles[1].GrantOrigin != grantOriginTemplate {
+		t.Fatalf("unexpected preserved origins: %+v", roles)
+	}
+}
+
 func TestApplicationAccessSubjectFilterRequiresEffectiveActiveMembership(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	clause, args := applicationAccessSubjectFilter("user-1", now)
@@ -211,6 +250,75 @@ func TestManagedSubjectFilterTargetsOnlySelectedOrganizationOrPosition(t *testin
 	}
 }
 
+func TestManualBindingFiltersProtectGrantOrigin(t *testing.T) {
+	tests := []struct {
+		name            string
+		clause          string
+		args            []any
+		wantSubjectType string
+		wantSubjectID   string
+	}{
+		{
+			name: "user exception",
+			clause: func() string {
+				clause, _ := manualDirectApplicationRoleBindingFilter("tenant-1", "application-1", "user-1")
+				return clause
+			}(),
+			args: func() []any {
+				_, args := manualDirectApplicationRoleBindingFilter("tenant-1", "application-1", "user-1")
+				return args
+			}(),
+			wantSubjectType: subjectTypeUser,
+			wantSubjectID:   "user-1",
+		},
+		{
+			name: "legacy organization cleanup",
+			clause: func() string {
+				clause, _ := manualSubjectRoleBindingFilter("tenant-1", "application-1", subjectTypeOrgUnit, "org-1")
+				return clause
+			}(),
+			args: func() []any {
+				_, args := manualSubjectRoleBindingFilter("tenant-1", "application-1", subjectTypeOrgUnit, "org-1")
+				return args
+			}(),
+			wantSubjectType: subjectTypeOrgUnit,
+			wantSubjectID:   "org-1",
+		},
+		{
+			name: "legacy position cleanup",
+			clause: func() string {
+				clause, _ := manualSubjectRoleBindingFilter("tenant-1", "application-1", subjectTypePosition, "position-1")
+				return clause
+			}(),
+			args: func() []any {
+				_, args := manualSubjectRoleBindingFilter("tenant-1", "application-1", subjectTypePosition, "position-1")
+				return args
+			}(),
+			wantSubjectType: subjectTypePosition,
+			wantSubjectID:   "position-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(tt.clause, "rb.grant_origin = ?") {
+				t.Fatalf("manual mutation filter does not constrain grant origin: %q", tt.clause)
+			}
+			wantArgs := []any{"tenant-1", "application-1", tt.wantSubjectType, tt.wantSubjectID, grantOriginManual}
+			if !reflect.DeepEqual(tt.args, wantArgs) {
+				t.Fatalf("manual mutation args=%#v", tt.args)
+			}
+			for _, protectedOrigin := range []string{grantOriginTemplate, grantOriginSystem} {
+				for _, arg := range tt.args {
+					if arg == protectedOrigin {
+						t.Fatalf("manual filter unexpectedly targets protected origin %q", protectedOrigin)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestNormalizeManagedSubjectTypeOnlyAllowsOrganizationAndPosition(t *testing.T) {
 	for _, input := range []string{"ORG_UNIT", " org_unit ", "POSITION", " position "} {
 		got, err := normalizeManagedSubjectType(input)
@@ -221,6 +329,37 @@ func TestNormalizeManagedSubjectTypeOnlyAllowsOrganizationAndPosition(t *testing
 	for _, input := range []string{"", "USER", "ACCOUNT", "TENANT"} {
 		if _, err := normalizeManagedSubjectType(input); err == nil || !errorsIs(err, ErrValidation) {
 			t.Fatalf("normalizeManagedSubjectType(%q) expected validation error, got %v", input, err)
+		}
+	}
+}
+
+func TestSubjectAccessWritePolicyRejectsOrganizationAndPosition(t *testing.T) {
+	for _, subjectType := range []string{subjectTypeOrgUnit, subjectTypePosition} {
+		err := validateSubjectAccessWritePolicy(subjectType)
+		if err == nil || !errorsIs(err, ErrValidation) {
+			t.Fatalf("subject_type=%q expected validation error, got %v", subjectType, err)
+		}
+		if !strings.Contains(err.Error(), "position authorization template") {
+			t.Fatalf("subject_type=%q returned unactionable error: %v", subjectType, err)
+		}
+	}
+}
+
+func TestUpdateSubjectAccessRejectsManualWriteBeforePersistence(t *testing.T) {
+	// A service without persistence dependencies is intentional: the policy must reject the
+	// historical write endpoint before any application, role, subject or binding query is made.
+	service := &Service{}
+	for _, subjectType := range []string{subjectTypeOrgUnit, subjectTypePosition} {
+		_, err := service.UpdateSubjectAccess(context.Background(), UpdateSubjectAccessInput{
+			TenantID:      "tenant-1",
+			SubjectType:   subjectType,
+			SubjectID:     "subject-1",
+			OperatorID:    "operator-1",
+			Roles:         []RoleInput{{RoleCode: "sales", ScopeType: "APPLICATION"}},
+			RolesProvided: true,
+		}, "contract_management")
+		if err == nil || !errorsIs(err, ErrValidation) {
+			t.Fatalf("subject_type=%q expected pre-persistence validation error, got %v", subjectType, err)
 		}
 	}
 }
@@ -385,5 +524,39 @@ func TestApplicationAccessAllowsApplicationOwnedRole(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("application-owned role unexpectedly rejected: %v", err)
+	}
+}
+
+func TestAccessAuditChangesReportsSecurityRelevantBeforeAndAfter(t *testing.T) {
+	before := Access{
+		Roles:                []RoleView{{Code: "sales"}},
+		ManualRoles:          []RoleView{{Code: "sales"}},
+		EffectivePermissions: []string{"contract.read"},
+		AuthorizationState:   "ACTIVE",
+	}
+	after := Access{
+		Roles:                []RoleView{{Code: "audit_admin"}, {Code: "sales"}},
+		ManualRoles:          []RoleView{{Code: "audit_admin"}, {Code: "sales"}},
+		EffectivePermissions: []string{"audit.read", "contract.read"},
+		AuthorizationState:   "ACTIVE",
+	}
+
+	changes := accessAuditChanges(before, after)
+	if len(changes) != 3 {
+		t.Fatalf("change count = %d, want 3: %#v", len(changes), changes)
+	}
+	wantFields := []string{"manual_role_codes", "effective_role_codes", "effective_permissions"}
+	for index, field := range wantFields {
+		if changes[index].Field != field {
+			t.Fatalf("change %d field = %q, want %q", index, changes[index].Field, field)
+		}
+	}
+}
+
+func TestAccessAuditChangesIgnoresRoleOrdering(t *testing.T) {
+	before := Access{Roles: []RoleView{{Code: "sales"}, {Code: "audit_admin"}}}
+	after := Access{Roles: []RoleView{{Code: "audit_admin"}, {Code: "sales"}}}
+	if changes := accessAuditChanges(before, after); len(changes) != 0 {
+		t.Fatalf("role ordering created false audit change: %#v", changes)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,7 +52,7 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 	if code != "contract_management" {
 		t.Fatalf("preflight code = %q", code)
 	}
-	if received != input {
+	if !reflect.DeepEqual(received, input) {
 		t.Fatalf("provision input = %#v, want %#v", received, input)
 	}
 
@@ -92,6 +94,29 @@ func TestUnixSocketSubsystemProvisionerDisabled(t *testing.T) {
 	}
 }
 
+func TestUnixSocketSubsystemProvisionerReturnsSafeActionableExecutorMessage(t *testing.T) {
+	t.Parallel()
+	socketDirectory, err := os.MkdirTemp("/tmp", "bp-provisioner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socketPath := filepath.Join(socketDirectory, "provisioner.sock")
+	executor := &recordingSubsystemProvisioner{preflightErr: provisioningError("subsystem Compose file is unavailable")}
+	serverContext, cancelServer := context.WithCancel(context.Background())
+	t.Cleanup(cancelServer)
+	go func() { _ = RunSubsystemProvisioningServer(serverContext, socketPath, executor) }()
+	waitForProvisioningSocket(t, socketPath)
+	client, err := NewUnixSocketSubsystemProvisioner(true, socketPath, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Preflight(context.Background(), "customer_and_opportunity")
+	if !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) || !strings.Contains(err.Error(), "Compose file is unavailable") {
+		t.Fatalf("preflight error = %v", err)
+	}
+}
+
 func waitForProvisioningSocket(t *testing.T, socketPath string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -105,19 +130,20 @@ func waitForProvisioningSocket(t *testing.T, socketPath string) {
 }
 
 type recordingSubsystemProvisioner struct {
-	mutex         sync.Mutex
-	code          string
-	input         application.SubsystemProvisioningInput
-	teardownCode  string
-	teardownEnv   string
-	updateInput   application.SubsystemProvisioningInput
+	mutex        sync.Mutex
+	code         string
+	input        application.SubsystemProvisioningInput
+	teardownCode string
+	teardownEnv  string
+	updateInput  application.SubsystemProvisioningInput
+	preflightErr error
 }
 
 func (provisioner *recordingSubsystemProvisioner) Preflight(_ context.Context, code string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	provisioner.code = code
-	return nil
+	return provisioner.preflightErr
 }
 
 func (provisioner *recordingSubsystemProvisioner) Provision(_ context.Context, input application.SubsystemProvisioningInput) error {

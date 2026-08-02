@@ -31,6 +31,12 @@ func Authentication(authenticator Authenticator, cookieName string) gin.HandlerF
 			httpresponse.WriteError(context.Writer, context.Request, http.StatusUnauthorized, httperror.Unauthenticated)
 			return
 		}
+		// Every Cookie-authenticated response is tenant/user specific. Disable browser and shared
+		// proxy caching before the handler writes headers, otherwise an account switch can reuse the
+		// previous bp_session user's data or navigation permissions for the same URL.
+		context.Header("Cache-Control", "no-store, private")
+		context.Header("Pragma", "no-cache")
+		context.Writer.Header().Add("Vary", "Cookie")
 		context.Request = context.Request.WithContext(authctx.WithPrincipal(context.Request.Context(), principal))
 		context.Next()
 	}

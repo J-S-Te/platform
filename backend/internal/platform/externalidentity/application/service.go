@@ -1,0 +1,288 @@
+// Package application implements machine-only external customer provisioning and Portal role
+// convergence. It may reserve a credential-free local login account, but never creates, receives,
+// generates, or returns password or other credential material.
+package application
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"errors"
+	"fmt"
+	"net/mail"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/externalidentity/domain"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/appctx"
+)
+
+const (
+	PortalApplicationCode = "customer_portal"
+	PortalCustomerRole    = "portal_customer"
+	maxClockSkew          = 5 * time.Minute
+	nonceRetention        = 10 * time.Minute
+)
+
+var (
+	ErrValidation  = errors.New("external identity validation failed")
+	ErrConflict    = errors.New("external identity conflict")
+	ErrNotFound    = errors.New("external identity not found")
+	ErrReplay      = errors.New("external identity integration replay detected")
+	ErrUnavailable = errors.New("external identity dependency unavailable")
+)
+
+type Clock interface{ Now() time.Time }
+type IDGenerator interface {
+	New(time.Time) (string, error)
+}
+
+type MobileProtection interface {
+	Encrypt(string) ([]byte, error)
+	Digest(string) []byte
+}
+
+type RequestProof struct {
+	IdempotencyKey string
+	Timestamp      time.Time
+	Nonce          string
+}
+
+type ProvisionInput struct {
+	DisplayName string
+	Mobile      string
+	Email       string
+}
+
+type ProvisionResult struct {
+	PlatformUserID string `json:"platform_user_id"`
+	AccountNo      string `json:"account_no"`
+}
+
+type RoleInput struct {
+	PlatformUserID  string
+	ApplicationCode string
+	RoleCode        string
+}
+
+type ProvisionCommand struct {
+	Principal      appctx.Principal
+	IdempotencyKey string
+	RequestHash    [32]byte
+	NonceHash      [32]byte
+	NonceExpiresAt time.Time
+	DisplayName    string
+	Email          *string
+	EmailDigest    []byte
+	MobileCipher   []byte
+	MobileDigest   []byte
+	IdentityID     string
+	PlatformUserID string
+	AccountID      string
+	AccountNo      string
+	EventID        string
+	OccurredAt     time.Time
+}
+
+type RoleCommand struct {
+	Principal       appctx.Principal
+	IdempotencyKey  string
+	RequestHash     [32]byte
+	NonceHash       [32]byte
+	NonceExpiresAt  time.Time
+	PlatformUserID  string
+	ApplicationCode string
+	RoleCode        string
+	BindingID       string
+	EventID         string
+	OccurredAt      time.Time
+}
+
+type Repository interface {
+	Provision(context.Context, ProvisionCommand) (ProvisionResult, error)
+	AssignRole(context.Context, RoleCommand) (domain.RoleResult, error)
+	RevokeRole(context.Context, RoleCommand) (domain.RoleResult, error)
+}
+
+type Service struct {
+	repository Repository
+	mobiles    MobileProtection
+	ids        IDGenerator
+	clock      Clock
+}
+
+func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator, clock Clock) (*Service, error) {
+	if repository == nil || mobiles == nil || ids == nil || clock == nil {
+		return nil, errors.New("external identity service dependencies must not be nil")
+	}
+	return &Service{repository: repository, mobiles: mobiles, ids: ids, clock: clock}, nil
+}
+
+func (service *Service) Provision(ctx context.Context, principal appctx.Principal, proof RequestProof, input ProvisionInput) (ProvisionResult, error) {
+	now, nonceHash, err := validateProof(principal, proof, service.clock.Now())
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	displayName := strings.TrimSpace(input.DisplayName)
+	if displayName == "" || utf8.RuneCountInString(displayName) > 128 || containsControl(displayName) {
+		return ProvisionResult{}, ErrValidation
+	}
+	email, emailDigest, err := service.prepareEmail(input.Email)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	mobile, mobileCipher, mobileDigest, err := service.prepareMobile(input.Mobile)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	if email == nil && mobile == "" {
+		return ProvisionResult{}, ErrValidation
+	}
+	requestHash := hashProvisionRequest(displayName, mobile, email)
+	identityID, userID, eventID, err := service.newIDs(now, 3)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	accountID, err := service.ids.New(now)
+	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("generate external login account identifier: %w", err)
+	}
+	return service.repository.Provision(ctx, ProvisionCommand{
+		Principal: principal, IdempotencyKey: normalizedIdempotencyKey(proof), RequestHash: requestHash,
+		NonceHash: nonceHash, NonceExpiresAt: now.Add(nonceRetention), DisplayName: displayName,
+		Email: email, EmailDigest: emailDigest, MobileCipher: mobileCipher, MobileDigest: mobileDigest,
+		IdentityID: identityID, PlatformUserID: userID, AccountID: accountID, AccountNo: "EXT-" + strings.ToUpper(userID),
+		EventID: eventID, OccurredAt: now,
+	})
+}
+
+func (service *Service) AssignPortalRole(ctx context.Context, principal appctx.Principal, proof RequestProof, input RoleInput) (domain.RoleResult, error) {
+	return service.role(ctx, principal, proof, input, false)
+}
+
+func (service *Service) RevokePortalRole(ctx context.Context, principal appctx.Principal, proof RequestProof, input RoleInput) (domain.RoleResult, error) {
+	return service.role(ctx, principal, proof, input, true)
+}
+
+func (service *Service) role(ctx context.Context, principal appctx.Principal, proof RequestProof, input RoleInput, revoke bool) (domain.RoleResult, error) {
+	now, nonceHash, err := validateProof(principal, proof, service.clock.Now())
+	if err != nil {
+		return domain.RoleResult{}, err
+	}
+	input.PlatformUserID = strings.TrimSpace(input.PlatformUserID)
+	input.ApplicationCode = strings.TrimSpace(input.ApplicationCode)
+	input.RoleCode = strings.TrimSpace(input.RoleCode)
+	if input.PlatformUserID == "" || len(input.PlatformUserID) > 128 || input.ApplicationCode != PortalApplicationCode || input.RoleCode != PortalCustomerRole {
+		return domain.RoleResult{}, ErrValidation
+	}
+	requestHash := hashRoleRequest(input, revoke)
+	bindingID, eventID, _, err := service.newIDs(now, 2)
+	if err != nil {
+		return domain.RoleResult{}, err
+	}
+	command := RoleCommand{
+		Principal: principal, IdempotencyKey: normalizedIdempotencyKey(proof), RequestHash: requestHash,
+		NonceHash: nonceHash, NonceExpiresAt: now.Add(nonceRetention), PlatformUserID: input.PlatformUserID,
+		ApplicationCode: input.ApplicationCode, RoleCode: input.RoleCode,
+		BindingID: bindingID, EventID: eventID, OccurredAt: now,
+	}
+	if revoke {
+		return service.repository.RevokeRole(ctx, command)
+	}
+	return service.repository.AssignRole(ctx, command)
+}
+
+func validateProof(principal appctx.Principal, proof RequestProof, now time.Time) (time.Time, [32]byte, error) {
+	now = now.UTC()
+	proof.IdempotencyKey = strings.TrimSpace(proof.IdempotencyKey)
+	proof.Nonce = strings.TrimSpace(proof.Nonce)
+	if !principal.Valid() || proof.IdempotencyKey == "" || len(proof.IdempotencyKey) > 128 || proof.Nonce == "" || len(proof.Nonce) > 128 || proof.Timestamp.IsZero() {
+		return time.Time{}, [32]byte{}, ErrValidation
+	}
+	timestamp := proof.Timestamp.UTC()
+	if timestamp.Before(now.Add(-maxClockSkew)) || timestamp.After(now.Add(maxClockSkew)) {
+		return time.Time{}, [32]byte{}, ErrReplay
+	}
+	return now, sha256.Sum256([]byte(proof.Nonce)), nil
+}
+
+func normalizedIdempotencyKey(proof RequestProof) string {
+	return strings.TrimSpace(proof.IdempotencyKey)
+}
+
+func (service *Service) prepareEmail(value string) (*string, []byte, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return nil, nil, nil
+	}
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value || len(value) > 320 || containsControl(value) {
+		return nil, nil, ErrValidation
+	}
+	return &value, append([]byte(nil), service.mobiles.Digest("email\x00"+value)...), nil
+}
+
+func (service *Service) prepareMobile(value string) (string, []byte, []byte, error) {
+	value = strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(value), " ", ""), "-", "")
+	if value == "" {
+		return "", nil, nil, nil
+	}
+	if len(value) > 32 {
+		return "", nil, nil, ErrValidation
+	}
+	for index, character := range value {
+		if !(character >= '0' && character <= '9') && !(character == '+' && index == 0) {
+			return "", nil, nil, ErrValidation
+		}
+	}
+	ciphertext, err := service.mobiles.Encrypt(value)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("protect external customer mobile: %w", ErrUnavailable)
+	}
+	return value, ciphertext, append([]byte(nil), service.mobiles.Digest("mobile\x00"+value)...), nil
+}
+
+func (service *Service) newIDs(now time.Time, count int) (string, string, string, error) {
+	values := make([]string, count)
+	for index := range values {
+		value, err := service.ids.New(now)
+		if err != nil {
+			return "", "", "", fmt.Errorf("generate external identity identifier: %w", err)
+		}
+		values[index] = value
+	}
+	if count == 2 {
+		return values[0], values[1], "", nil
+	}
+	return values[0], values[1], values[2], nil
+}
+
+func hashProvisionRequest(displayName, mobile string, email *string) [32]byte {
+	emailValue := ""
+	if email != nil {
+		emailValue = *email
+	}
+	return sha256.Sum256([]byte("provision\x00" + displayName + "\x00" + mobile + "\x00" + emailValue))
+}
+
+func hashRoleRequest(input RoleInput, revoke bool) [32]byte {
+	action := "assign"
+	if revoke {
+		action = "revoke"
+	}
+	return sha256.Sum256([]byte(action + "\x00" + input.PlatformUserID + "\x00" + input.ApplicationCode + "\x00" + input.RoleCode))
+}
+
+func containsControl(value string) bool {
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func SameDigest(left, right []byte) bool {
+	return len(left) == sha256.Size && len(right) == sha256.Size && subtle.ConstantTimeCompare(left, right) == 1
+}

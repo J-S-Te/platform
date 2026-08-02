@@ -33,7 +33,11 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"request_object_signing_alg_values_supported": []string{"EdDSA", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"},
 		"code_challenge_methods_supported":            []string{"S256"},
 		"scopes_supported":                            []string{"openid", "profile", "email"},
-		"claims_supported":                            []string{"sub", "name", "preferred_username", "email"},
+		"claims_supported": []string{
+			"sub", "name", "preferred_username", "email",
+			"tenant_id", "person_id", "primary_org_id", "organization_ids", "roles", "permissions",
+			"role_config_hash", "authz_revision",
+		},
 	}, false)
 }
 

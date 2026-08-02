@@ -3,7 +3,7 @@ set -euo pipefail
 
 # 临时局域网访问开关。
 # 仅适用于 compose.local.yaml；不修改 compose.yaml 和常规 .env.local 文件。
-# enable 会重建 api、contract-api、frontend，使公开地址和 OIDC 回调全部切换为 LAN 地址。
+# enable 会重建 api、contract-api、customer-api、frontend，使公开地址和 OIDC 回调全部切换为 LAN 地址。
 # disable 会删除临时覆盖文件并将 frontend 重新绑定到 127.0.0.1。
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +13,9 @@ contract_root="${workspace_root}/contract_management"
 compose_file="${project_root}/compose.local.yaml"
 platform_env_file="${project_root}/docker/.env.local"
 contract_env_file="${contract_root}/.env.local"
+customer_env_file="${project_root}/docker/.env.customer.local"
 override_file="${project_root}/docker/.env.lan"
+customer_override_file="${project_root}/docker/.env.customer.lan"
 placeholder_file="${project_root}/docker/.env.lan.disabled"
 compose_project="basic-platform-local"
 
@@ -29,7 +31,7 @@ usage() {
 
 说明：
   enable  使用检测到的局域网 IPv4（或 --address 指定地址）发布统一前端，
-          并临时同步基础平台/合同管理的公开地址、OIDC issuer 和回调地址。
+          并临时同步基础平台、合同管理和客户与商机管理的公开地址与回调地址。
   disable 关闭局域网监听，删除临时覆盖文件，并恢复为仅本机 127.0.0.1 访问。
 
 示例：
@@ -71,6 +73,7 @@ done
 [[ -f "$compose_file" ]] || fail "Compose 文件不存在：$compose_file"
 [[ -f "$platform_env_file" ]] || fail "基础平台环境文件不存在：$platform_env_file；请先执行 bash scripts/docker-local.sh up"
 [[ -f "$contract_env_file" ]] || fail "合同管理环境文件不存在：$contract_env_file；请先执行 bash scripts/docker-local.sh up"
+[[ -f "$customer_env_file" ]] || fail "客户与商机管理环境文件不存在：$customer_env_file；请先执行 bash scripts/docker-local.sh up"
 [[ -f "$placeholder_file" ]] || fail "局域网占位环境文件不存在：$placeholder_file"
 command -v docker >/dev/null 2>&1 || fail '未找到 docker 命令'
 docker compose version >/dev/null 2>&1 || fail '当前 Docker 不支持 docker compose 子命令'
@@ -107,8 +110,10 @@ detect_lan_address() {
 compose_with_lan() {
     BASIC_PLATFORM_RUNTIME_ENV_FILE="$platform_env_file" \
     CONTRACT_RUNTIME_ENV_FILE="$contract_env_file" \
+    CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file" \
     BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$override_file" \
     CONTRACT_LAN_OVERRIDE_ENV_FILE="$override_file" \
+    CUSTOMER_LAN_OVERRIDE_ENV_FILE="$customer_override_file" \
     BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root" \
     SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root" \
     FRONTEND_BIND_ADDRESS=0.0.0.0 \
@@ -117,14 +122,17 @@ compose_with_lan() {
         --file "$compose_file" \
         --env-file "$platform_env_file" \
         --env-file "$contract_env_file" \
+        --env-file "$customer_env_file" \
         "$@"
 }
 
 compose_local_only() {
     BASIC_PLATFORM_RUNTIME_ENV_FILE="$platform_env_file" \
     CONTRACT_RUNTIME_ENV_FILE="$contract_env_file" \
+    CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file" \
     BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$placeholder_file" \
     CONTRACT_LAN_OVERRIDE_ENV_FILE="$placeholder_file" \
+    CUSTOMER_LAN_OVERRIDE_ENV_FILE="$placeholder_file" \
     BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root" \
     SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root" \
     FRONTEND_BIND_ADDRESS=127.0.0.1 \
@@ -133,6 +141,7 @@ compose_local_only() {
         --file "$compose_file" \
         --env-file "$platform_env_file" \
         --env-file "$contract_env_file" \
+        --env-file "$customer_env_file" \
         "$@"
 }
 
@@ -150,7 +159,15 @@ AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true
 OIDC_REDIRECT_URI=${public_origin}/contract_management/auth/callback
 APP_PUBLIC_URL=${public_origin}/contract_management/
 EOF
+    cat > "$customer_override_file" <<EOF
+# 由 scripts/lan-access.sh 自动生成；执行 disable 会删除本文件。
+APP_PUBLIC_ORIGIN=${public_origin}
+OIDC_ISSUER=${public_origin}
+OIDC_REDIRECT_URI=${public_origin}/customer-opportunity/auth/callback
+OIDC_POST_LOGOUT_REDIRECT_URI=${public_origin}/customer-opportunity/
+EOF
     chmod 600 "$override_file"
+    chmod 600 "$customer_override_file"
 }
 
 case "$command_name" in
@@ -164,16 +181,17 @@ case "$command_name" in
         public_origin="http://${address}:${port}"
         write_override "$public_origin"
         log "正在发布临时局域网地址：${public_origin}"
-        log '将重建 api、contract-api、frontend；数据库、角色、用户和生产 compose 配置不会被修改。'
-        compose_with_lan up -d --wait --force-recreate api contract-api frontend
+        log '将重建 api、contract-api、customer-api、frontend；数据库、角色、用户和生产 compose 配置不会被修改。'
+        compose_with_lan up -d --wait --force-recreate api contract-api customer-api frontend
         log "已启用。局域网访问地址：${public_origin}"
         log "合同管理地址：${public_origin}/contract_management/"
+        log "客户与商机管理地址：${public_origin}/customer-opportunity/"
         log '请仅在可信局域网使用；当前模式为 HTTP，不应暴露到互联网。'
         ;;
     disable)
-        rm -f "$override_file"
+        rm -f "$override_file" "$customer_override_file"
         log '正在关闭临时局域网访问并恢复仅本机监听…'
-        compose_local_only up -d --wait --force-recreate api contract-api frontend
+        compose_local_only up -d --wait --force-recreate api contract-api customer-api frontend
         log "已关闭。仅可通过 http://127.0.0.1:${port} 访问。"
         ;;
     status)

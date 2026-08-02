@@ -6,10 +6,41 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
 )
+
+func TestSessionCookieSetAndClearUseMatchingSecurityScope(t *testing.T) {
+	t.Parallel()
+	handler := &Handler{cookie: cookieConfig{name: "bp_session", secure: true, sameSite: http.SameSiteLaxMode}}
+
+	setResponse := httptest.NewRecorder()
+	handler.setSessionCookie(setResponse, "signed-token", time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC))
+	setCookies := setResponse.Result().Cookies()
+	if len(setCookies) != 1 {
+		t.Fatalf("set cookies = %d", len(setCookies))
+	}
+	setCookie := setCookies[0]
+	if setCookie.Name != "bp_session" || setCookie.Value != "signed-token" || setCookie.Path != "/" ||
+		!setCookie.HttpOnly || !setCookie.Secure || setCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("set cookie = %#v", setCookie)
+	}
+
+	clearResponse := httptest.NewRecorder()
+	handler.clearSessionCookie(clearResponse)
+	clearCookies := clearResponse.Result().Cookies()
+	if len(clearCookies) != 1 {
+		t.Fatalf("clear cookies = %d", len(clearCookies))
+	}
+	clearCookie := clearCookies[0]
+	if clearCookie.Name != setCookie.Name || clearCookie.Path != setCookie.Path ||
+		clearCookie.HttpOnly != setCookie.HttpOnly || clearCookie.Secure != setCookie.Secure ||
+		clearCookie.SameSite != setCookie.SameSite || clearCookie.MaxAge != -1 {
+		t.Fatalf("clear cookie = %#v, set cookie = %#v", clearCookie, setCookie)
+	}
+}
 
 func TestWriteApplicationErrorReturnsConflictForConcurrentSession(t *testing.T) {
 	handler := &Handler{}

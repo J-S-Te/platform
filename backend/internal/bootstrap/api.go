@@ -30,6 +30,9 @@ import (
 	dictionaryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/application"
 	dictionaryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/infrastructure"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
+	externalidentityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/externalidentity/application"
+	externalidentityinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/externalidentity/infrastructure"
+	externalidentityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/externalidentity/interfaces/http"
 	identityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/infrastructure"
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
@@ -183,6 +186,24 @@ func NewAPI(cfg config.Config) (*API, error) {
 	auditService, err := auditapplication.NewService(
 		auditRepository, ulid.Generator{}, auditapplication.SystemClock{},
 	)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	externalIdentityRepository, err := externalidentityinfrastructure.NewGORMRepository(db, auditService)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	externalIdentityService, err := externalidentityapplication.NewService(externalIdentityRepository, mobileProtector, ulid.Generator{}, externalidentityapplication.SystemClock{})
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	externalIdentityHandler, err := externalidentityhttp.NewHandler(externalIdentityService, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -497,6 +518,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	operational.ExternalIdentity = externalIdentityHandler
 
 	return &API{
 		Handler: httptransport.NewRouter(

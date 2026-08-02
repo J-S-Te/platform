@@ -2,6 +2,8 @@
 # 统一管理子系统的全生命周期：
 #   onboard  — 首次接入子系统（创建 Application/Environment/LoginTarget/OAuth Client + 写入 .env.local + 启动容器 + 配置门户网关）
 #   update   — 一键重建子系统容器，DB 字段更新请走 PATCH /environments 等受控接口
+#   retry    — 重试失败的部署 Agent 操作，不重复创建接入记录
+#   status   — 查询子系统部署 Agent 的持久化状态
 #   offboard — 深清理子系统（停止容器 + 删除 .env.local + 删除门户网关入口 + 重新加载 nginx + 删除 DB 记录）
 #
 # 这是基础平台子系统接入的官方入口；请勿在子系统代码、镜像、功能模块或业务迁移的日常发布中重复执行。
@@ -28,6 +30,7 @@ APPLICATION_CODE=""
 APPLICATION_NAME=""
 DESCRIPTION=""
 ENVIRONMENT="prod"
+ENVIRONMENT_EXPLICIT=false
 PUBLIC_BASE_URL=""
 UPSTREAM_URL=""
 PATH_PREFIX=""
@@ -36,6 +39,7 @@ INITIAL_ADMIN_USER_ID=""
 
 # 通用控制
 SUBCOMMAND=""
+RETRY_MODE=false
 PRESET=""
 INTERACTIVE=false
 ASSUME_YES=false
@@ -57,11 +61,13 @@ log() {
 usage() {
   cat <<'USAGE'
 用法：
-  subsystem.sh <onboard|update|offboard> [通用认证参数] [子命令参数]
+  subsystem.sh <onboard|update|retry|status|offboard> [通用认证参数] [子命令参数]
 
 子命令：
   onboard    首次接入子系统（创建 DB 记录 + 写入 .env.local + 启动容器 + 配置门户网关）
   update     一键重建子系统容器；DB 字段变更请先走 PATCH
+  retry      重试失败的部署 Agent 操作；不会重复创建 Application/OAuth Client
+  status     查询部署 Agent 状态（PROVISIONING/READY/PROVISION_FAILED 等）
   offboard   深清理子系统（停止容器 + 删除 .env.local + 删除门户网关入口 + 删除 DB 记录）
              --shallow   退回旧版语义：只删 DB 记录（仅供紧急修复使用）
 
@@ -83,7 +89,7 @@ usage() {
   -y, --yes                      跳过确认；适用于 CI
   -h, --help                     显示本帮助
 
-执行 onboard / update / offboard -h 查看子命令各自的参数说明。
+执行 onboard / update / retry / status / offboard -h 查看子命令各自的参数说明。
 USAGE
 }
 
@@ -284,7 +290,7 @@ elif code == "IAM_SUBSYSTEM_ALREADY_ONBOARDED":
         state = details.get("status") or "-"
         next_action = details.get("next_action") or "请使用环境、登录目标或 OAuth 客户端的更新接口变更配置。"
         print(f"当前已存在：应用 {application_code}，环境 {environment}（状态：{state}）。{next_action}", file=sys.stderr)
-    print("处理建议：该环境已经完成接入。子系统代码、镜像、前端、后端、功能模块和业务迁移的正常更新均不需要执行接入或撤销脚本，现有统一登录配置会保留。只有永久下线该环境时才使用 subsystem.sh offboard；若确需变更 BaseURL、UpstreamURL、PathPrefix 或 OAuth 回调，请走受控配置变更流程（subsystem.sh update 之前先 PATCH），不能通过撤销后重建绕过。", file=sys.stderr)
+    print("处理建议：该环境的控制面记录已经存在。子系统代码、镜像、前端、后端、功能模块和业务迁移的正常更新均不需要执行接入或撤销脚本，现有统一登录配置会保留。只有永久下线该环境时才使用 subsystem.sh offboard；若确需变更 BaseURL、UpstreamURL、PathPrefix 或 OAuth 回调，请走受控配置变更流程（subsystem.sh update 之前先 PATCH），不能通过撤销后重建绕过。若此前部署 Agent 失败，请先使用 subsystem.sh status 查询，再使用 subsystem.sh retry。", file=sys.stderr)
 elif code in {"IAM_CONFLICT", "IAM_VERSION_CONFLICT"}:
     print("处理建议：存在资源冲突或配置已变更。检查应用编码、环境、路径前缀和 OAuth Client 是否被其他接入占用；不要通过重复执行脚本覆盖现有配置。", file=sys.stderr)
 elif code in {"PLATFORM_DEPENDENCY_UNAVAILABLE", "PLATFORM_INTERNAL_ERROR"} or status.startswith("5"):
@@ -393,6 +399,11 @@ onboard_usage() {
       contract_management / 合同管理系统 / prod /
       http://localhost:8081 / http://contract-api:8081 / /contract_management
       已显式传入的接入参数优先于预设值。
+  --preset customer-portal-local
+      填入客户自助门户本地 Docker 默认配置：
+      customer_portal / 客户自助门户 / dev /
+      http://localhost:8081 / http://portal-api:8091 / /customer-portal
+      接入 Agent 会同时创建外部身份、角色和 CRM/Portal 通信所需的六个最小权限服务客户端。
 
 接入参数（对应后端 POST /api/v1/subsystem-onboarding）：
   --application-code CODE       Application.Code，必填，例如 contract_management
@@ -423,8 +434,17 @@ apply_preset() {
       [[ -n "$PATH_PREFIX" ]] || PATH_PREFIX="/contract_management"
       [[ -n "$DESCRIPTION" ]] || DESCRIPTION="合同创建、审批与客户管理系统"
       ;;
+    customer-portal-local|customer_portal_local)
+      [[ -n "$APPLICATION_CODE" ]] || APPLICATION_CODE="customer_portal"
+      [[ -n "$APPLICATION_NAME" ]] || APPLICATION_NAME="客户自助门户"
+      [[ "$ENVIRONMENT_EXPLICIT" == true ]] || ENVIRONMENT="dev"
+      [[ -n "$PUBLIC_BASE_URL" ]] || PUBLIC_BASE_URL="http://localhost:8081"
+      [[ -n "$UPSTREAM_URL" ]] || UPSTREAM_URL="http://portal-api:8091"
+      [[ -n "$PATH_PREFIX" ]] || PATH_PREFIX="/customer-portal"
+      [[ -n "$DESCRIPTION" ]] || DESCRIPTION="外部客户项目、报告、备案、评价与反馈自助门户"
+      ;;
     *)
-      log "ERROR" "未知快捷预设：${PRESET}。当前仅支持 contract-management-local"
+	  log "ERROR" "未知快捷预设：${PRESET}。支持 contract-management-local、customer-portal-local"
       exit 2 ;;
   esac
 }
@@ -643,6 +663,10 @@ PY
 }
 
 onboard_print_configuration_summary() {
+	local initial_access_summary="${INITIAL_ADMIN_USER_ID:-当前登录的平台操作者}"
+	if [[ "$APPLICATION_CODE" == "customer_portal" ]]; then
+		initial_access_summary="不授予内部管理员；由 CRM 邀请流程开通外部客户"
+	fi
   cat >&2 <<EOF_SUMMARY
 
 即将首次创建以下统一登录接入（不会覆盖已有环境）：
@@ -656,7 +680,7 @@ onboard_print_configuration_summary() {
   OAuth 回调地址：${PUBLIC_BASE_URL}${PATH_PREFIX}/auth/callback
   OAuth Client ID：${APPLICATION_CODE}-${ENVIRONMENT}-web
   OAuth Client 类型：${CLIENT_TYPE}
-  初始业务管理员：${INITIAL_ADMIN_USER_ID:-当前登录的平台操作者}
+  初始业务管理员：${initial_access_summary}
   平台 API：${API_BASE_URL}
   平台请求 Origin：${PLATFORM_ORIGIN}
 EOF_SUMMARY
@@ -760,7 +784,7 @@ parse_onboard_args() {
         DESCRIPTION="$2"; shift 2 ;;
       --environment)
         [[ $# -ge 2 ]] || { log "ERROR" "--environment 缺少参数"; exit 2; }
-        ENVIRONMENT="$2"; shift 2 ;;
+        ENVIRONMENT="$2"; ENVIRONMENT_EXPLICIT=true; shift 2 ;;
       --public-base-url)
         [[ $# -ge 2 ]] || { log "ERROR" "--public-base-url 缺少参数"; exit 2; }
         PUBLIC_BASE_URL="$2"; shift 2 ;;
@@ -861,7 +885,7 @@ cmd_onboard() {
 # ============================ update 子命令 ============================
 update_usage() {
   cat <<'USAGE'
-用法：subsystem.sh update [认证参数] --application-code CODE --environment ENV
+用法：subsystem.sh update|retry [认证参数] --application-code CODE --environment ENV
 
 update 是一键重建子系统容器的快捷入口。它不会重新写入 .env.local，也不会变更 DB 记录。
 要修改 BaseURL / UpstreamURL / OAuth 配置，请先通过 PATCH /environments 与 /oauth-clients
@@ -875,8 +899,14 @@ update 是一键重建子系统容器的快捷入口。它不会重新写入 .en
   -y, --yes                 跳过最终确认
   -h, --help                显示本帮助
 
-示例：
+示例（正常重建）：
   bash scripts/subsystem.sh update \
+    --application-code contract_management \
+    --environment prod \
+    --account admin
+
+部署失败后的重试：
+  bash scripts/subsystem.sh retry \
     --application-code contract_management \
     --environment prod \
     --account admin
@@ -1099,18 +1129,93 @@ cmd_update() {
   local status=""
   update_write_payload "$payload_file"
 
-  log "INFO" "开始重建 ${APPLICATION_CODE}/${ENVIRONMENT} 容器"
-  status="$(http_post_json "/subsystem-update" "$payload_file" "$RESPONSE_FILE" 900)" || {
-    diagnose_connection_failure "/subsystem-update"
+  local endpoint="/subsystem-update"
+  local action="重建"
+  if [[ "$RETRY_MODE" == true ]]; then
+    endpoint="/subsystem-retry"
+    action="重试部署"
+  fi
+  log "INFO" "开始${action} ${APPLICATION_CODE}/${ENVIRONMENT} 容器"
+  status="$(http_post_json "$endpoint" "$payload_file" "$RESPONSE_FILE" 900)" || {
+    diagnose_connection_failure "$endpoint"
     exit 1
   }
 
   if [[ "$status" != "200" ]]; then
-    print_api_error "$status" "$RESPONSE_FILE" "/subsystem-update"
+    print_api_error "$status" "$RESPONSE_FILE" "$endpoint"
     exit 1
   fi
 
   update_print_success "$RESPONSE_FILE"
+}
+
+# ============================ status 子命令 ============================
+status_usage() {
+  cat <<'USAGE'
+用法：subsystem.sh status [认证参数] --application-code CODE --environment ENV
+
+查询基础平台记录的部署 Agent 状态。常见状态：
+  PROVISIONING  首次接入记录已创建，Agent 尚未完成
+  UPDATING      正在重建或重试
+  READY         Agent 已成功完成，门户才会展示该子系统
+  PROVISION_FAILED  最近一次 Agent 操作失败，可使用 retry 重试
+  DRAINING      正在下线
+  OFFBOARDED    基础设施已拆解，等待或已经完成 DB 清理
+USAGE
+}
+
+cmd_status() {
+  local argument=""
+  for argument in "$@"; do
+    if [[ "$argument" == "-h" || "$argument" == "--help" ]]; then
+      status_usage
+      exit 0
+    fi
+  done
+  parse_update_args "$@"
+  require_command curl
+  require_command python3
+
+  TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/subsystem-status.XXXXXX")"
+  RESPONSE_FILE="$TEMP_DIR/status-response.json"
+  trap cleanup EXIT
+
+  if update_required_configuration_missing; then
+    log "ERROR" "status 必须提供 --application-code 和 --environment"
+    status_usage >&2
+    exit 2
+  fi
+  if ! update_validate_and_normalize; then
+    exit 2
+  fi
+  ensure_authenticated
+
+  local endpoint="/subsystem-status?application_code=${APPLICATION_CODE}&environment=${ENVIRONMENT}"
+  local status=""
+  status="$(http_get "$endpoint" "$RESPONSE_FILE")" || {
+    diagnose_connection_failure "/subsystem-status"
+    exit 1
+  }
+  if [[ "$status" != "200" ]]; then
+    print_api_error "$status" "$RESPONSE_FILE" "/subsystem-status"
+    exit 1
+  fi
+  python3 - "$RESPONSE_FILE" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    envelope = json.load(handle)
+data = envelope.get("data") or {}
+print("子系统部署状态：")
+for key, label in (("application_code", "应用"), ("environment", "环境"), ("status", "状态"),
+                   ("operation", "最近操作"), ("generation", "代次"), ("attempt_count", "尝试次数"),
+                   ("last_error_code", "错误编码"), ("last_error", "错误说明"),
+                   ("updated_at", "更新时间")):
+    value = data.get(key)
+    if value not in (None, ""):
+        print(f"  {label}：{value}")
+print(f"  追踪号：{envelope.get('request_id') or '-'}")
+PY
 }
 
 # ============================ offboard 子命令 ============================
@@ -1558,11 +1663,13 @@ dispatch() {
   shift
   case "$SUBCOMMAND" in
     onboard)   cmd_onboard   "$@" ;;
-    update)    cmd_update    "$@" ;;
+    update)    RETRY_MODE=false; cmd_update "$@" ;;
+    retry)     RETRY_MODE=true; cmd_update "$@" ;;
+    status)    cmd_status    "$@" ;;
     offboard)  cmd_offboard  "$@" ;;
     -h|--help|help) usage; exit 0 ;;
     *)
-      log "ERROR" "未知子命令：${SUBCOMMAND}。支持：onboard、update、offboard"
+      log "ERROR" "未知子命令：${SUBCOMMAND}。支持：onboard、update、retry、status、offboard"
       usage >&2
       exit 2
       ;;

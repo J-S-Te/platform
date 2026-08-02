@@ -120,6 +120,7 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 		}
 		row.Version++
 		row.UpdatedAt = write.OccurredAt
+		row.PasswordInitialized = true
 		account = toAccountWithFallbackName(row)
 		return nil
 	})

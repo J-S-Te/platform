@@ -30,17 +30,6 @@ const (
 	MaxBatchUserCreateItems = 100
 )
 
-// DefaultOrganizationPositionNames are created for every organization unit. They are
-// organization-side appointment choices only; they do not grant authorization roles.
-var DefaultOrganizationPositionNames = [...]string{
-	"超级管理员",
-	"销售总监",
-	"技术总监",
-	"财务总监",
-	"销售人员",
-	"审计管理员",
-}
-
 // PageRequest is the common bounded list query contract.
 type PageRequest struct {
 	Page               int
@@ -66,6 +55,7 @@ type UserView struct {
 	ID           string
 	DisplayName  string
 	EmployeeNo   *string
+	PMSPersonID  *string
 	Email        *string
 	MobileMasked *string
 	Status       string
@@ -122,6 +112,7 @@ type UserUpdateInput struct {
 	UserID       string
 	DisplayName  string
 	EmployeeNo   *string
+	PMSPersonID  *string
 	Email        *string
 	Mobile       *string
 	Status       *string
@@ -244,7 +235,7 @@ type ManagementRepository interface {
 	UpdateAccount(context.Context, AccountUpdateInput) (domain.Account, error)
 
 	ListOrgUnits(context.Context, string, string, string, PageRequest) (PageResult[domain.OrgUnit], error)
-	CreateOrgUnit(context.Context, domain.OrgUnit, []domain.Position, string) (domain.OrgUnit, error)
+	CreateOrgUnit(context.Context, domain.OrgUnit, string) (domain.OrgUnit, error)
 	UpdateOrgUnit(context.Context, OrgUnitUpdateInput) (domain.OrgUnit, error)
 	DeleteOrgUnit(context.Context, OrgUnitDeleteInput) error
 	ListPositions(context.Context, string, string, string, PageRequest) (PageResult[domain.Position], error)
@@ -479,6 +470,8 @@ func (service *ManagementService) ListOrgUnits(ctx context.Context, tenantID str
 
 // CreateOrgUnit appends a tenant-scoped organization node. The organization code is derived
 // from the server-generated ULID and therefore does not depend on mutable names or caller input.
+// Positions represent organization-specific duties and must be created separately; application
+// role names must not be copied into every new organization as appointment data.
 func (service *ManagementService) CreateOrgUnit(ctx context.Context, input OrgUnitCreateInput) (domain.OrgUnit, error) {
 	if input.TenantID == "" || input.OperatorID == "" || !validName(input.Name, 100) {
 		return domain.OrgUnit{}, ErrValidation
@@ -489,18 +482,7 @@ func (service *ManagementService) CreateOrgUnit(ctx context.Context, input OrgUn
 		return domain.OrgUnit{}, fmt.Errorf("generate organization ID: %w", err)
 	}
 	orgUnit := domain.OrgUnit{ID: id, TenantID: input.TenantID, ParentID: normalizedOptional(input.ParentID), Code: generatedOrganizationCode(id), Name: strings.TrimSpace(input.Name), OrgType: "DEPARTMENT", SortOrder: input.SortOrder, Status: domain.StatusActive, Version: 1}
-	positions := make([]domain.Position, 0, len(DefaultOrganizationPositionNames))
-	for _, name := range DefaultOrganizationPositionNames {
-		positionID, err := service.ids.New(now)
-		if err != nil {
-			return domain.OrgUnit{}, fmt.Errorf("generate default position ID: %w", err)
-		}
-		positions = append(positions, domain.Position{
-			ID: positionID, TenantID: input.TenantID, OrgUnitID: orgUnit.ID,
-			Code: generatedPositionCode(positionID), Name: name, Status: domain.StatusActive, Version: 1,
-		})
-	}
-	return service.repository.CreateOrgUnit(ctx, orgUnit, positions, input.OperatorID)
+	return service.repository.CreateOrgUnit(ctx, orgUnit, input.OperatorID)
 }
 
 // UpdateOrgUnit updates a tenant-scoped organization node. Moving a node is allowed only when it
@@ -634,7 +616,7 @@ func (service *ManagementService) protectMobile(mobile *string) ([]byte, []byte,
 }
 
 func (service *ManagementService) toUserView(user domain.User) (UserView, error) {
-	view := UserView{ID: user.ID, DisplayName: user.DisplayName, EmployeeNo: user.EmployeeNo, Email: user.Email, Status: user.Status, Version: user.Version, CreatedAt: user.CreatedAt.UTC(), UpdatedAt: user.UpdatedAt.UTC()}
+	view := UserView{ID: user.ID, DisplayName: user.DisplayName, EmployeeNo: user.EmployeeNo, PMSPersonID: user.PMSPersonID, Email: user.Email, Status: user.Status, Version: user.Version, CreatedAt: user.CreatedAt.UTC(), UpdatedAt: user.UpdatedAt.UTC()}
 	if len(user.MobileCiphertext) == 0 {
 		return view, nil
 	}
@@ -678,11 +660,30 @@ func validateUserCreate(input UserCreateInput) error {
 	return nil
 }
 
+func validOptionalPersonID(value string) bool {
+	if value == "" {
+		return true
+	}
+	if value != strings.TrimSpace(value) || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if character > 0x7f || !(character == '-' || character == '_' || character == '.' || character == ':' ||
+			character >= '0' && character <= '9' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z') {
+			return false
+		}
+	}
+	return true
+}
+
 func validateUserUpdate(input UserUpdateInput) error {
 	if input.TenantID == "" || input.OperatorID == "" || input.UserID == "" || input.Version == 0 || !validName(input.DisplayName, 100) {
 		return ErrValidation
 	}
 	if input.EmployeeNo != nil && len(strings.TrimSpace(*input.EmployeeNo)) > 64 {
+		return ErrValidation
+	}
+	if input.PMSPersonID != nil && !validOptionalPersonID(*input.PMSPersonID) {
 		return ErrValidation
 	}
 	if input.Email != nil && !validEmail(*input.Email) {

@@ -81,6 +81,7 @@ type userBatchCreateItemRequest struct {
 type userRequest struct {
 	DisplayName string  `json:"display_name"`
 	EmployeeNo  *string `json:"employee_no"`
+	PMSPersonID *string `json:"pms_person_id"`
 	Email       *string `json:"email"`
 	Mobile      *string `json:"mobile"`
 	Status      *string `json:"status"`
@@ -186,6 +187,7 @@ type userResponse struct {
 	UserID       string    `json:"user_id"`
 	DisplayName  string    `json:"display_name"`
 	EmployeeNo   *string   `json:"employee_no,omitempty"`
+	PMSPersonID  *string   `json:"pms_person_id,omitempty"`
 	Email        *string   `json:"email,omitempty"`
 	MobileMasked *string   `json:"mobile_masked,omitempty"`
 	Status       string    `json:"status"`
@@ -194,18 +196,19 @@ type userResponse struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 type accountResponse struct {
-	AccountID   string             `json:"account_id"`
-	UserID      *string            `json:"user_id,omitempty"`
-	User        *referenceResponse `json:"user,omitempty"`
-	AccountName string             `json:"account_name"`
-	AccountType string             `json:"account_type"`
-	AuthSource  string             `json:"auth_source"`
-	Status      string             `json:"status"`
-	LastLoginAt *time.Time         `json:"last_login_at,omitempty"`
-	ValidUntil  *time.Time         `json:"valid_until,omitempty"`
-	Version     uint64             `json:"version"`
-	CreatedAt   time.Time          `json:"created_at"`
-	UpdatedAt   time.Time          `json:"updated_at"`
+	AccountID           string             `json:"account_id"`
+	UserID              *string            `json:"user_id,omitempty"`
+	User                *referenceResponse `json:"user,omitempty"`
+	AccountName         string             `json:"account_name"`
+	AccountType         string             `json:"account_type"`
+	AuthSource          string             `json:"auth_source"`
+	PasswordInitialized bool               `json:"password_initialized"`
+	Status              string             `json:"status"`
+	LastLoginAt         *time.Time         `json:"last_login_at,omitempty"`
+	ValidUntil          *time.Time         `json:"valid_until,omitempty"`
+	Version             uint64             `json:"version"`
+	CreatedAt           time.Time          `json:"created_at"`
+	UpdatedAt           time.Time          `json:"updated_at"`
 }
 type orgUnitResponse struct {
 	OrgUnitID string  `json:"org_unit_id"`
@@ -440,7 +443,7 @@ func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request
 		handler.validation(writer, request)
 		return
 	}
-	result, err := handler.service.UpdateUser(request.Context(), application.UserUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: request.PathValue("user_id"), DisplayName: payload.DisplayName, EmployeeNo: payload.EmployeeNo, Email: payload.Email, Mobile: payload.Mobile, Status: payload.Status, Version: payload.Version, UpdateMobile: payload.Mobile != nil})
+	result, err := handler.service.UpdateUser(request.Context(), application.UserUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: request.PathValue("user_id"), DisplayName: payload.DisplayName, EmployeeNo: payload.EmployeeNo, PMSPersonID: payload.PMSPersonID, Email: payload.Email, Mobile: payload.Mobile, Status: payload.Status, Version: payload.Version, UpdateMobile: payload.Mobile != nil})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -933,10 +936,10 @@ func dateString(value *time.Time) *string {
 	return &formatted
 }
 func toUserResponse(value application.UserView) userResponse {
-	return userResponse{UserID: value.ID, DisplayName: value.DisplayName, EmployeeNo: value.EmployeeNo, Email: value.Email, MobileMasked: value.MobileMasked, Status: value.Status, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	return userResponse{UserID: value.ID, DisplayName: value.DisplayName, EmployeeNo: value.EmployeeNo, PMSPersonID: value.PMSPersonID, Email: value.Email, MobileMasked: value.MobileMasked, Status: value.Status, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 func toAccountResponse(value domain.Account) accountResponse {
-	response := accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, Status: value.Status, LastLoginAt: value.LastLoginAt, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	response := accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, PasswordInitialized: value.PasswordInitialized, Status: value.Status, LastLoginAt: value.LastLoginAt, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 	if value.User != nil {
 		response.User = &referenceResponse{ID: value.User.ID, Name: value.User.Name}
 	}

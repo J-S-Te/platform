@@ -1,6 +1,7 @@
 name: basic-platform-local
 
-# 统一本地编排：三类业务应用容器分别为 frontend、api、contract-api。
+# 统一本地编排：统一 frontend 承载三个前端模块；api、contract-api、customer-api
+# 分别承载基础平台、合同管理、客户与商机管理三个后端。
 # MySQL、Temporal、迁移任务和隔离部署助手属于基础设施/一次性任务，不对宿主机发布业务端口。
 # LAN 临时访问使用单独的覆盖文件，不修改本地或生产环境的常规环境文件。
 # 默认加载空占位文件；scripts/lan-access.sh enable 时才会替换为临时覆盖文件。
@@ -12,6 +13,14 @@ x-contract-runtime-env: &contract-runtime-env
   - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
   - ${CONTRACT_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
 
+x-customer-runtime-env: &customer-runtime-env
+  - ${CUSTOMER_RUNTIME_ENV_FILE:-./docker/.env.customer.local}
+  - ${CUSTOMER_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
+
+x-portal-runtime-env: &portal-runtime-env
+  - ${PORTAL_RUNTIME_ENV_FILE:-./docker/.env.portal.local}
+  - ${PORTAL_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
+
 # 基础平台迁移、初始化和受控部署助手复用同一个后端镜像，但只有 api 服务拥有构建定义。
 # 这样 Compose 每次部署只构建一次基础平台后端镜像，不会把辅助任务误认为独立业务镜像。
 x-platform-backend-runtime: &platform-backend-runtime
@@ -20,6 +29,10 @@ x-platform-backend-runtime: &platform-backend-runtime
 # 合同管理 API 与 Temporal Worker 位于同一个后端运行镜像中。
 x-contract-backend-runtime: &contract-backend-runtime
   image: contract-management/backend:local
+
+# 客户与商机管理 API 与本地迁移任务复用同一个后端镜像。
+x-customer-backend-runtime: &customer-backend-runtime
+  image: customer-opportunity/backend:local
 
 services:
   mysql:
@@ -176,10 +189,8 @@ services:
     volumes:
       - contract_mysql_local_data:/var/lib/mysql
       - ../contract_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
-      - ../contract_management/migrations/000001_contract_workflow.sql:/docker-entrypoint-initdb.d/010_contract_workflow.sql:ro
-      - ../contract_management/migrations/000002_oidc_login_transactions.sql:/docker-entrypoint-initdb.d/011_oidc_login_transactions.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucontract -p\"$${MYSQL_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -190,26 +201,17 @@ services:
           - contract-mysql
     restart: unless-stopped
 
-  # 每次部署均重复执行幂等建表脚本，兼顾首次建库与已有数据卷的结构补齐。
+  # 使用合同后端内置迁移器按版本执行完整迁移，禁止绕过 con_schema_migration
+  # 手工挑选 SQL，以免新增迁移在已有数据卷中漏执行。
   contract-migrate:
-    image: mysql:8.4
+    <<: *contract-backend-runtime
+    env_file: *contract-runtime-env
     environment:
-      CONTRACT_MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
-      CONTRACT_MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
-    volumes:
-      - ../contract_management/docker/mysql-init/000_databases.sql:/migrations/000_databases.sql:ro
-      - ../contract_management/migrations/000001_contract_workflow.sql:/migrations/000001_contract_workflow.sql:ro
-      - ../contract_management/migrations/000002_oidc_login_transactions.sql:/migrations/000002_oidc_login_transactions.sql:ro
+      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     depends_on:
       contract-mysql:
         condition: service_healthy
-    command:
-      - sh
-      - -ec
-      - |
-        MYSQL_PWD="$${CONTRACT_MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h contract-mysql -uroot < /migrations/000_databases.sql
-        MYSQL_PWD="$${CONTRACT_MYSQL_PASSWORD}" mysql --protocol=TCP -h contract-mysql -ucontract contract_management < /migrations/000001_contract_workflow.sql
-        MYSQL_PWD="$${CONTRACT_MYSQL_PASSWORD}" mysql --protocol=TCP -h contract-mysql -ucontract contract_management < /migrations/000002_oidc_login_transactions.sql
+    command: ["./migrate"]
     restart: "no"
 
   temporal:
@@ -250,6 +252,8 @@ services:
     depends_on:
       contract-mysql:
         condition: service_healthy
+      contract-migrate:
+        condition: service_completed_successfully
       temporal:
         condition: service_healthy
       api:
@@ -268,7 +272,150 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # 一个前端容器同时承载基础平台和合同管理 Vue 模块，并统一反向代理两个后端。
+  customer-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: customer_opportunity
+      MYSQL_USER: customer
+      MYSQL_PASSWORD: ${CUSTOMER_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CUSTOMER_MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - customer_mysql_local_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  # 客户与商机管理本地迁移严格使用 CRM 清单，不会把客户 Portal 的 SQL
+  # 混入同一个 schema；生产仍使用发布平台的语句级迁移控制。
+  customer-migrate:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    command: ["./local-migrate", "--schema", "crm"]
+    restart: "no"
+
+  # 客户与商机管理后端为独立业务容器，不与基础平台或合同后端共享进程。
+  customer-api:
+    <<: *customer-backend-runtime
+    build:
+      context: ../customer_and_opportunity
+    env_file: *customer-runtime-env
+    environment:
+      HTTP_ADDRESS: :8090
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PLATFORM_BASE_URL: http://platform-api:8080
+      OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      GIN_MODE: release
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    expose:
+      - "8090"
+    networks:
+      default:
+        aliases:
+          - customer-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8090/customer-opportunity/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  # 客户自助门户使用独立数据库，避免外部客户会话、身份映射和备案材料与 CRM
+  # 员工域混库。门户与 CRM 复用同一只不可变后端镜像，但运行在不同进程中。
+  portal-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: customer_portal
+      MYSQL_USER: portal
+      MYSQL_PASSWORD: ${PORTAL_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${PORTAL_MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - portal_mysql_local_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  portal-migrate:
+    <<: *customer-backend-runtime
+    env_file: *portal-runtime-env
+    environment:
+      PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+    command: ["./local-migrate", "--schema", "portal"]
+    profiles: ["portal"]
+    restart: "no"
+
+  portal-api:
+    <<: *customer-backend-runtime
+    build:
+      context: ../customer_and_opportunity
+    env_file: *portal-runtime-env
+    environment:
+      PORTAL_HTTP_ADDRESS: :8091
+      PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+      PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+      PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      GIN_MODE: release
+    command: ["./portal-server"]
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+      portal-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+      customer-api:
+        condition: service_healthy
+    expose:
+      - "8091"
+    networks:
+      default:
+        aliases:
+          - portal-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8091/customer-portal/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    profiles: ["portal"]
+    restart: unless-stopped
+
+  # 一个前端容器同时承载基础平台、合同管理、客户与商机管理和客户自助门户 Vue 模块，
+  # 并统一反向代理四个独立后端进程。
   frontend:
     build:
       context: ../frontend
@@ -277,6 +424,10 @@ services:
         VITE_LOGIN_SUCCESS_URL: /
         VITE_CONTRACT_PUBLIC_PATH_PREFIX: /contract_management
         VITE_CONTRACT_API_BASE_URL: /contract_management/api/v1
+        VITE_CRM_PUBLIC_PATH_PREFIX: /customer-opportunity
+        VITE_CRM_API_BASE_URL: /customer-opportunity/api/v1
+        VITE_CUSTOMER_PORTAL_PUBLIC_PATH_PREFIX: /customer-portal
+        VITE_CUSTOMER_PORTAL_API_BASE_URL: /customer-portal/api/v1
     image: basic-platform/frontend:local
     volumes:
       - ./docker/portal-apps-locations.conf:/etc/nginx/portal-apps.d/managed.conf:ro
@@ -295,5 +446,9 @@ volumes:
     name: basic-platform-local-mysql-data
   contract_mysql_local_data:
     name: basic-platform-local-contract-mysql-data
+  customer_mysql_local_data:
+    name: basic-platform-local-customer-mysql-data
+  portal_mysql_local_data:
+    name: basic-platform-local-portal-mysql-data
   subsystem_provisioner_socket:
     name: basic-platform-local-provisioner-socket

@@ -3,15 +3,16 @@ package domain
 
 import "time"
 
-// Event is an append-only audit record. Internal correlation and subject fields are intentionally
-// kept separate from console DTOs by the HTTP adapter.
+// Event is an append-only audit record exposed to authorized audit-console readers.
+// Correlation fields are included so an administrator can trace the event across services.
 type Event struct {
 	ID, EventID, TenantID, ApplicationID, ApplicationCode, ApplicationName string
 	EnvironmentID, EnvironmentCode                                         string
 	OccurredAt                                                             time.Time
 	OperatorDisplayName, ActionType, Action, Result                        string
 	ResourceType, ResourceID, ResourceName                                 string
-	Method, Path, ClientIP, RiskLevel, Detail, Summary                     string
+	Method, Path, ClientIP, UserAgent, RiskLevel, Detail, Summary          string
+	RequestID, TraceID, CorrelationID                                      string
 	StatusCode                                                             int
 	ChangeSummary                                                          []FieldChange
 }
@@ -32,6 +33,7 @@ type Receipt struct {
 // ExportJob represents an asynchronously processed audit export.
 type ExportJob struct {
 	JobID, Status, DownloadURL string
+	ErrorCode, ErrorMessage    string
 	CreatedAt, CompletedAt     time.Time
 }
 

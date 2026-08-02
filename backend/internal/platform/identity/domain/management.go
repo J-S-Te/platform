@@ -21,6 +21,7 @@ type User struct {
 	ID               string
 	TenantID         string
 	EmployeeNo       *string
+	PMSPersonID      *string
 	DisplayName      string
 	Email            *string
 	MobileCiphertext []byte
@@ -42,12 +43,16 @@ type Account struct {
 	AccountName string
 	AccountType string
 	AuthSource  string
-	Status      string
-	LastLoginAt *time.Time
-	ValidUntil  *time.Time
-	Version     uint64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// PasswordInitialized is management metadata only; no credential hash or failure state is
+	// exposed. It lets administrators distinguish a credential-free reserved external account
+	// from an account whose password may be reset.
+	PasswordInitialized bool
+	Status              string
+	LastLoginAt         *time.Time
+	ValidUntil          *time.Time
+	Version             uint64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // OrgUnit represents one node in a tenant-scoped organization tree.
