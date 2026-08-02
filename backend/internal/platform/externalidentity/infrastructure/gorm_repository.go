@@ -79,6 +79,7 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 			}
 			identity = byMobile
 		}
+		loginAccountCreated := false
 		if identity.ID == "" {
 			operator := command.Principal.OAuthClientID
 			employeeNo := "EXT-" + strings.ToUpper(command.PlatformUserID)
@@ -90,14 +91,23 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 			}).Error; err != nil {
 				return mapWriteError(err)
 			}
+			// iam_external_identity.login_account_id is NOT NULL since
+			// migration 000071, so the HUMAN/LOCAL login account must exist
+			// before the identity row is inserted. No password credential is
+			// created; initialization stays an explicit admin lifecycle action.
+			accountID, accountErr := createExternalLoginAccount(tx, command, command.PlatformUserID, command.AccountNo)
+			if accountErr != nil {
+				return mapWriteError(accountErr)
+			}
 			identity = identityModel{ID: command.IdentityID, TenantID: command.Principal.TenantID, PlatformUserID: command.PlatformUserID, AccountNo: command.AccountNo, EmailDigest: command.EmailDigest, MobileDigest: command.MobileDigest, Status: domain.IdentityPendingActivation}
 			if err := tx.Table(identityModel{}.TableName()).Create(map[string]any{
 				"id": identity.ID, "tenant_id": identity.TenantID, "platform_user_id": identity.PlatformUserID, "account_no": identity.AccountNo,
-				"email_digest": nullableBytes(identity.EmailDigest), "mobile_digest": nullableBytes(identity.MobileDigest), "status": identity.Status,
+				"login_account_id": accountID, "email_digest": nullableBytes(identity.EmailDigest), "mobile_digest": nullableBytes(identity.MobileDigest), "status": identity.Status,
 				"created_at": command.OccurredAt, "created_by": operator, "updated_at": command.OccurredAt, "updated_by": operator,
 			}).Error; err != nil {
 				return mapWriteError(err)
 			}
+			loginAccountCreated = true
 		} else {
 			if identity.Status == domain.IdentityDisabled {
 				return application.ErrConflict
@@ -124,8 +134,13 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 		// Reserve one active HUMAN/LOCAL login account without any password credential. Credential
 		// initialization remains an explicit platform-admin account-lifecycle action, so CRM and
 		// Portal never handle a password. The deterministic account_no is the initial login name.
-		if err := ensureExternalLoginAccount(tx, command, identity.PlatformUserID, identity.AccountNo); err != nil {
-			return err
+		// New identities already created and linked their login account during the insert (the
+		// column is NOT NULL since migration 000071), so the follow-up is only needed for existing
+		// or replayed identities; a same-value UPDATE would otherwise report zero changed rows.
+		if !loginAccountCreated {
+			if err := ensureExternalLoginAccount(tx, command, identity.PlatformUserID, identity.AccountNo); err != nil {
+				return err
+			}
 		}
 		response = application.ProvisionResult{PlatformUserID: identity.PlatformUserID, AccountNo: identity.AccountNo}
 		if err := createIdempotency(tx, command.Principal.TenantID, command.Principal.OAuthClientID, "PROVISION", command.IdempotencyKey, command.RequestHash[:], identity.ID, encodeProvision(response), command.OccurredAt); err != nil {
@@ -143,6 +158,27 @@ func ensureExternalLoginAccount(tx *gorm.DB, command application.ProvisionComman
 		Take(&identity).Error; err != nil {
 		return err
 	}
+	accountID, err := createExternalLoginAccount(tx, command, platformUserID, accountNo)
+	if err != nil {
+		return err
+	}
+	update := tx.Model(&identityModel{}).
+		Where("id = ? AND tenant_id = ? AND (login_account_id IS NULL OR login_account_id = ?)", identity.ID, identity.TenantID, accountID).
+		Update("login_account_id", accountID)
+	if update.Error != nil {
+		return mapWriteError(update.Error)
+	}
+	if update.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+// createExternalLoginAccount reserves the single ACTIVE HUMAN/LOCAL login
+// account for an external customer without creating any password credential.
+// It is idempotent: an existing account with the same username wins, while a
+// conflicting account type or auth source is rejected.
+func createExternalLoginAccount(tx *gorm.DB, command application.ProvisionCommand, platformUserID, accountNo string) (string, error) {
 	var account struct {
 		ID, Username, AccountType, AuthSource string
 	}
@@ -157,25 +193,17 @@ func ensureExternalLoginAccount(tx *gorm.DB, command application.ProvisionComman
 			"username": accountNo, "account_type": "HUMAN", "auth_source": "LOCAL", "status": activeStatus,
 			"version": 1, "created_at": command.OccurredAt, "created_by": operator, "updated_at": command.OccurredAt, "updated_by": operator,
 		}).Error; err != nil {
-			return mapWriteError(err)
+			return "", mapWriteError(err)
 		}
-		account.ID, account.Username, account.AccountType, account.AuthSource = command.AccountID, accountNo, "HUMAN", "LOCAL"
-	} else if result.Error != nil {
-		return result.Error
+		return command.AccountID, nil
+	}
+	if result.Error != nil {
+		return "", result.Error
 	}
 	if account.Username != accountNo || account.AccountType != "HUMAN" || account.AuthSource != "LOCAL" {
-		return application.ErrConflict
+		return "", application.ErrConflict
 	}
-	update := tx.Model(&identityModel{}).
-		Where("id = ? AND tenant_id = ? AND (login_account_id IS NULL OR login_account_id = ?)", identity.ID, identity.TenantID, account.ID).
-		Update("login_account_id", account.ID)
-	if update.Error != nil {
-		return mapWriteError(update.Error)
-	}
-	if update.RowsAffected != 1 {
-		return application.ErrConflict
-	}
-	return nil
+	return account.ID, nil
 }
 
 func (repository *GORMRepository) AssignRole(ctx context.Context, command application.RoleCommand) (domain.RoleResult, error) {
