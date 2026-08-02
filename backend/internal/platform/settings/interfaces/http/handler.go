@@ -25,21 +25,27 @@ type service interface {
 	UpdatePlatformSettings(ctx context.Context, input settingsapplication.PlatformSettingsUpdateInput) (settingsdomain.PlatformSettings, error)
 	GetNotificationSettings(ctx context.Context, tenantID string) (settingsdomain.NotificationSettings, error)
 	UpdateNotificationSettings(ctx context.Context, input settingsapplication.NotificationSettingsUpdateInput) (settingsdomain.NotificationSettings, error)
+	GetAccessSettings(ctx context.Context, tenantID string) (settingsdomain.AccessSettings, error)
+	UpdateAccessSettings(ctx context.Context, input settingsapplication.AccessSettingsUpdateInput) (settingsdomain.AccessSettings, error)
+	ApplyAccessSettings(ctx context.Context, tenantID string, applier settingsapplication.AccessApplier) (settingsdomain.AccessSettings, error)
 }
 
 // Handler provides authenticated tenant-scoped settings endpoints.
 type Handler struct {
 	service service
+	applier settingsapplication.AccessApplier
 	logger  *slog.Logger
 }
 
-// NewHandler validates dependencies and creates the settings HTTP adapter.
-func NewHandler(service service, logger *slog.Logger) (*Handler, error) {
+// NewHandler validates dependencies and creates the settings HTTP adapter. The applier is
+// optional: the public-access apply endpoint returns a clear error when no deployment agent
+// (production/remote deployment) is wired.
+func NewHandler(service service, applier settingsapplication.AccessApplier, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("settings HTTP handler dependencies must not be nil")
 	}
 
-	return &Handler{service: service, logger: logger}, nil
+	return &Handler{service: service, applier: applier, logger: logger}, nil
 }
 
 type platformSettingsPayload struct {
@@ -74,6 +80,20 @@ type notificationSettingsResponse struct {
 	ReminderFrequency string `json:"reminder_frequency"`
 	Version           uint64 `json:"version"`
 	UpdatedAt         string `json:"updated_at,omitempty"`
+}
+
+type accessSettingsPayload struct {
+	PublicOrigin              string `json:"public_origin"`
+	AllowInsecureHTTPRedirect bool   `json:"allow_insecure_http_redirect"`
+	Version                   uint64 `json:"version"`
+}
+
+type accessSettingsResponse struct {
+	ID                        string `json:"id,omitempty"`
+	PublicOrigin              string `json:"public_origin"`
+	AllowInsecureHTTPRedirect bool   `json:"allow_insecure_http_redirect"`
+	Version                   uint64 `json:"version"`
+	UpdatedAt                 string `json:"updated_at,omitempty"`
 }
 
 // GetPlatformSettings returns the tenant's typed management-console settings.
@@ -236,4 +256,74 @@ func notificationSettingsToResponse(settings settingsdomain.NotificationSettings
 	}
 
 	return response
+}
+
+// GetAccessSettings returns the tenant's public-access configuration.
+func (handler *Handler) GetAccessSettings(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	settings, err := handler.service.GetAccessSettings(request.Context(), principal.Tenant.ID)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "对外访问配置查询成功", accessSettingsToResponse(settings))
+}
+
+// UpdateAccessSettings replaces the tenant's public-access configuration using optimistic locking.
+func (handler *Handler) UpdateAccessSettings(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	var payload accessSettingsPayload
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+	settings, err := handler.service.UpdateAccessSettings(request.Context(), settingsapplication.AccessSettingsUpdateInput{
+		TenantID:                  principal.Tenant.ID,
+		OperatorID:                principal.User.ID,
+		PublicOrigin:              payload.PublicOrigin,
+		AllowInsecureHTTPRedirect: payload.AllowInsecureHTTPRedirect,
+		Version:                   payload.Version,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "对外访问配置已保存", accessSettingsToResponse(settings))
+}
+
+// ApplyAccessSettings applies the saved public-access configuration through the deployment agent.
+func (handler *Handler) ApplyAccessSettings(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	if handler.applier == nil {
+		httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New(
+			"PLATFORM_DEPENDENCY_UNAVAILABLE",
+			"该环境未启用部署 Agent，不支持在界面上应用对外访问配置",
+			map[string]string{"next_action": "生产/远程环境请直接修改服务器 docker/.env.lan 或使用 lan-access.sh；本地开发请确认 subsystem-provisioner 已随 docker-local.sh 启动"},
+		))
+		return
+	}
+	settings, err := handler.service.ApplyAccessSettings(request.Context(), principal.Tenant.ID, handler.applier)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "对外访问配置已应用", accessSettingsToResponse(settings))
+}
+
+func accessSettingsToResponse(settings settingsdomain.AccessSettings) accessSettingsResponse {
+	return accessSettingsResponse{
+		ID:                        settings.ID,
+		PublicOrigin:              settings.PublicOrigin,
+		AllowInsecureHTTPRedirect: settings.AllowInsecureHTTPRedirect,
+		Version:                   settings.Version,
+		UpdatedAt:                 settings.UpdatedAt.Format(time.RFC3339),
+	}
 }

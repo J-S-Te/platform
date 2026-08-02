@@ -22,6 +22,7 @@ import (
 	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
 	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/ownerdirectory/interfaces/http"
 	securityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/interfaces/http"
+	settingsapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/application"
 	settingshttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
@@ -41,6 +42,9 @@ type OperationalModules struct {
 	FilesAndJobs        *filetaskhttp.Handler
 	ExternalIdentity    *externalidentityhttp.Handler
 	OwnerDirectory      *ownerdirectoryhttp.Handler
+	// AccessApplier is the optional deployment agent used by the management-console
+	// "对外访问" apply action. Production/remote deployments leave it nil.
+	AccessApplier settingsapplication.AccessApplier
 }
 
 // NewRouter creates the shared middleware chain and registers infrastructure endpoints. Domain
@@ -336,6 +340,9 @@ func NewRouter(
 			apiRouter.PUT("/settings/platform", middleware.RequirePermission("platform:settings:update"), adaptHandler(settingsHandler.UpdatePlatformSettings))
 			apiRouter.GET("/settings/notifications", middleware.RequirePermission("platform:notification-setting:read"), adaptHandler(settingsHandler.GetNotificationSettings))
 			apiRouter.PUT("/settings/notifications", middleware.RequirePermission("platform:notification-setting:update"), adaptHandler(settingsHandler.UpdateNotificationSettings))
+			apiRouter.GET("/settings/access", middleware.RequirePermission("platform:settings:read"), adaptHandler(settingsHandler.GetAccessSettings))
+			apiRouter.PUT("/settings/access", middleware.RequirePermission("platform:settings:update"), adaptHandler(settingsHandler.UpdateAccessSettings))
+			apiRouter.POST("/settings/access/apply", middleware.RequirePermission("platform:settings:update"), adaptHandler(settingsHandler.ApplyAccessSettings))
 		}
 
 		if dictionaryHandler != nil {

@@ -4,6 +4,8 @@ package application
 import (
 	"context"
 	"errors"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,6 +50,27 @@ type PlatformSettingsUpdateInput struct {
 	Version           uint64
 }
 
+// AccessSettingsUpdateInput replaces the typed public-access settings for one tenant.
+type AccessSettingsUpdateInput struct {
+	TenantID                  string
+	OperatorID                string
+	PublicOrigin              string
+	AllowInsecureHTTPRedirect bool
+	Version                   uint64
+}
+
+// AccessApplyInput carries the neutral runtime values the deployment agent needs to apply.
+type AccessApplyInput struct {
+	PublicOrigin              string
+	AllowInsecureHTTPRedirect bool
+}
+
+// AccessApplier applies the access configuration to the local unified orchestration
+// (writes override environment files and recreates affected containers).
+type AccessApplier interface {
+	ApplyAccess(context.Context, AccessApplyInput) error
+}
+
 // NotificationSettingsUpdateInput replaces the typed notification settings for one tenant.
 type NotificationSettingsUpdateInput struct {
 	TenantID          string
@@ -64,6 +87,8 @@ type Repository interface {
 	SavePlatformSettings(ctx context.Context, input PlatformSettingsUpdateInput, settingsID string, now time.Time) (domain.PlatformSettings, error)
 	GetNotificationSettings(ctx context.Context, tenantID string) (domain.NotificationSettings, error)
 	SaveNotificationSettings(ctx context.Context, input NotificationSettingsUpdateInput, settingsID string, now time.Time) (domain.NotificationSettings, error)
+	GetAccessSettings(ctx context.Context, tenantID string) (domain.AccessSettings, error)
+	SaveAccessSettings(ctx context.Context, input AccessSettingsUpdateInput, settingsID string, now time.Time) (domain.AccessSettings, error)
 }
 
 // Service exposes settings application use cases.
@@ -164,4 +189,97 @@ func validReminderFrequency(value domain.ReminderFrequency) bool {
 	default:
 		return false
 	}
+}
+
+// GetAccessSettings returns saved access settings or the local-only default.
+func (service *Service) GetAccessSettings(ctx context.Context, tenantID string) (domain.AccessSettings, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return domain.AccessSettings{}, ErrValidation
+	}
+	settings, err := service.repository.GetAccessSettings(ctx, tenantID)
+	if errors.Is(err, ErrNotFound) {
+		return defaultAccessSettings(tenantID), nil
+	}
+	return settings, err
+}
+
+// UpdateAccessSettings validates and saves one tenant's public-access settings.
+func (service *Service) UpdateAccessSettings(ctx context.Context, input AccessSettingsUpdateInput) (domain.AccessSettings, error) {
+	input = normalizeAccessSettings(input)
+	if !validAccessSettings(input) {
+		return domain.AccessSettings{}, ErrValidation
+	}
+	settingsID, err := service.ids.New(service.clock.Now().UTC())
+	if err != nil {
+		return domain.AccessSettings{}, err
+	}
+	return service.repository.SaveAccessSettings(ctx, input, settingsID, service.clock.Now().UTC())
+}
+
+// ApplyAccessSettings applies the saved access configuration through the deployment agent.
+// The agent rewrites the local override environment files and recreates the affected
+// containers, so this action may briefly interrupt the unified frontend and API services.
+func (service *Service) ApplyAccessSettings(ctx context.Context, tenantID string, applier AccessApplier) (domain.AccessSettings, error) {
+	if strings.TrimSpace(tenantID) == "" || applier == nil {
+		return domain.AccessSettings{}, ErrValidation
+	}
+	settings, err := service.GetAccessSettings(ctx, tenantID)
+	if err != nil {
+		return domain.AccessSettings{}, err
+	}
+	if err := applier.ApplyAccess(ctx, AccessApplyInput{
+		PublicOrigin:              settings.PublicOrigin,
+		AllowInsecureHTTPRedirect: settings.AllowInsecureHTTPRedirect,
+	}); err != nil {
+		return domain.AccessSettings{}, err
+	}
+	return settings, nil
+}
+
+func defaultAccessSettings(tenantID string) domain.AccessSettings {
+	return domain.AccessSettings{TenantID: tenantID, Version: 1}
+}
+
+// normalizeAccessSettings trims the origin and forces the insecure-HTTP flag on whenever the
+// configured public origin is HTTP on a non-loopback host (authorization codes must otherwise
+// traverse an insecure channel and the OAuth client would reject the callback).
+func normalizeAccessSettings(input AccessSettingsUpdateInput) AccessSettingsUpdateInput {
+	input.PublicOrigin = strings.TrimRight(strings.TrimSpace(input.PublicOrigin), "/")
+	if isHTTPPublicOrigin(input.PublicOrigin) {
+		input.AllowInsecureHTTPRedirect = true
+	}
+	return input
+}
+
+func validAccessSettings(input AccessSettingsUpdateInput) bool {
+	if strings.TrimSpace(input.TenantID) == "" || input.Version == 0 {
+		return false
+	}
+	if input.PublicOrigin == "" {
+		return true
+	}
+	parsed, err := url.Parse(input.PublicOrigin)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil ||
+		parsed.Fragment != "" || parsed.RawQuery != "" || parsed.Path != "" {
+		return false
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+	if isHTTPPublicOrigin(input.PublicOrigin) && !input.AllowInsecureHTTPRedirect {
+		return false
+	}
+	return true
+}
+
+func isHTTPPublicOrigin(origin string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") || parsed.Hostname() == "" {
+		return false
+	}
+	host := parsed.Hostname()
+	return !strings.EqualFold(host, "localhost") && !net.ParseIP(host).IsLoopback()
 }

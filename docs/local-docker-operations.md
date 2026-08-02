@@ -97,6 +97,11 @@ bash scripts/docker-local.sh refresh-portal-api
 
 `docker-local.sh up` 会始终构建上述四个后端镜像。客户门户在首次受控接入前不会创建常驻 `portal-api` 容器，因为此时 OIDC Client、租户、角色目录和最小权限机器凭据尚不存在；完成 `customer_portal/dev` 接入后，再次执行 `up` 或 `refresh-portal-api` 即会启动第四个后端容器。MySQL、Temporal、迁移任务和 provisioner 属于基础设施或一次性任务，不计为业务应用容器。
 
+## 7. 远程服务器运行（测试/演示）
+
+把 `docker-local.sh` 全家桶（含"一键接入"）跑在远程服务器上的完整步骤、备份、开机自启与
+安全提醒见 [在远程服务器上运行本地统一编排](./server-local-orchestration.md)。
+
 ## 7. 网关并发锁
 
 `portal-gateway.sh` 的读写命令都持有跨进程锁。Linux 使用 `flock`，无该命令时回退到原子目录锁。当前基础平台后端镜像已经安装 util-linux。

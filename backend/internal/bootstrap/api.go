@@ -498,7 +498,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	settingsHandler, err := settingshttp.NewHandler(settingsService, logger)
+	settingsHandler, err := settingshttp.NewHandler(settingsService, nil, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -534,6 +534,13 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 
 	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	// 把可选的部署 Agent 注入设置处理器，供"对外访问"的"应用"按钮使用。
+	settingsHandler, err = settingshttp.NewHandler(settingsService, operational.AccessApplier, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()

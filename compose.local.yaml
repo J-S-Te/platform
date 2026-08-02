@@ -22,6 +22,17 @@ x-portal-runtime-env: &portal-runtime-env
   - ${PORTAL_RUNTIME_ENV_FILE:-./docker/.env.portal.local}
   - ${PORTAL_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
 
+# 数据库与一次性迁移/初始化任务不需要 LAN 覆盖环境，固定使用常规运行时环境，
+# 避免"对外访问"配置应用时把 MySQL、迁移或 Worker 容器一并重建。
+x-platform-db-env: &platform-db-env
+  - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-./docker/.env.local}
+
+x-contract-db-env: &contract-db-env
+  - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
+
+x-customer-db-env: &customer-db-env
+  - ${CUSTOMER_RUNTIME_ENV_FILE:-./docker/.env.customer.local}
+
 # 基础平台迁移、初始化和受控部署助手复用同一个后端镜像，但只有 api 服务拥有构建定义。
 # 这样 Compose 每次部署只构建一次基础平台后端镜像，不会把辅助任务误认为独立业务镜像。
 x-platform-backend-runtime: &platform-backend-runtime
@@ -43,7 +54,7 @@ x-portal-backend-runtime: &portal-backend-runtime
 services:
   mysql:
     image: mysql:8.4
-    env_file: *platform-runtime-env
+    env_file: *platform-db-env
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
@@ -59,7 +70,7 @@ services:
 
   migrate:
     <<: *platform-backend-runtime
-    env_file: *platform-runtime-env
+    env_file: *platform-db-env
     command: ["./migrate"]
     volumes:
       - ./data/keys:/app/data/keys
@@ -72,7 +83,7 @@ services:
   # bootstrap-admin 本身会检查数据库状态，已初始化时直接成功退出，因此可重复执行。
   bootstrap-admin:
     <<: *platform-backend-runtime
-    env_file: *platform-runtime-env
+    env_file: *platform-db-env
     command: ["./bootstrap-admin"]
     volumes:
       - ./data/keys:/app/data/keys
@@ -169,7 +180,7 @@ services:
   worker:
     profiles: ["split-runtime"]
     <<: *platform-backend-runtime
-    env_file: *platform-runtime-env
+    env_file: *platform-db-env
     command: ["./worker"]
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -211,7 +222,7 @@ services:
   # 手工挑选 SQL，以免新增迁移在已有数据卷中漏执行。
   contract-migrate:
     <<: *contract-backend-runtime
-    env_file: *contract-runtime-env
+    env_file: *contract-db-env
     environment:
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     depends_on:
@@ -302,7 +313,7 @@ services:
   # 混入同一个 schema；生产仍使用发布平台的语句级迁移控制。
   customer-migrate:
     <<: *customer-backend-runtime
-    env_file: *customer-runtime-env
+    env_file: *customer-db-env
     environment:
       MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     depends_on:

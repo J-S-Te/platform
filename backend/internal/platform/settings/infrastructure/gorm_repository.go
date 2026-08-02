@@ -58,6 +58,20 @@ type notificationSettingsModel struct {
 
 func (notificationSettingsModel) TableName() string { return "notification_setting" }
 
+type accessSettingsModel struct {
+	ID                        string    `gorm:"column:id;primaryKey"`
+	TenantID                  string    `gorm:"column:tenant_id"`
+	PublicOrigin              string    `gorm:"column:public_origin"`
+	AllowInsecureHTTPRedirect bool      `gorm:"column:allow_insecure_http_redirect"`
+	Version                   uint64    `gorm:"column:version"`
+	CreatedAt                 time.Time `gorm:"column:created_at"`
+	CreatedBy                 *string   `gorm:"column:created_by"`
+	UpdatedAt                 time.Time `gorm:"column:updated_at"`
+	UpdatedBy                 *string   `gorm:"column:updated_by"`
+}
+
+func (accessSettingsModel) TableName() string { return "settings_access" }
+
 // GetPlatformSettings retrieves exactly one tenant settings aggregate.
 func (repository *Repository) GetPlatformSettings(ctx context.Context, tenantID string) (domain.PlatformSettings, error) {
 	var row platformSettingsModel
@@ -173,6 +187,67 @@ func (repository *Repository) SaveNotificationSettings(ctx context.Context, inpu
 		return domain.NotificationSettings{}, err
 	}
 	return saved, nil
+}
+
+// GetAccessSettings retrieves exactly one tenant access settings aggregate.
+func (repository *Repository) GetAccessSettings(ctx context.Context, tenantID string) (domain.AccessSettings, error) {
+	var row accessSettingsModel
+	if err := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.AccessSettings{}, application.ErrNotFound
+		}
+		return domain.AccessSettings{}, fmt.Errorf("get access settings: %w", err)
+	}
+	return accessSettingsToDomain(row), nil
+}
+
+// SaveAccessSettings creates the initial tenant row or replaces it under optimistic locking.
+func (repository *Repository) SaveAccessSettings(ctx context.Context, input application.AccessSettingsUpdateInput, settingsID string, now time.Time) (domain.AccessSettings, error) {
+	var saved domain.AccessSettings
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var row accessSettingsModel
+		err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ?", input.TenantID).Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if input.Version != 1 {
+				return application.ErrVersionConflict
+			}
+			operatorID := input.OperatorID
+			row = accessSettingsModel{ID: settingsID, TenantID: input.TenantID, PublicOrigin: input.PublicOrigin, AllowInsecureHTTPRedirect: input.AllowInsecureHTTPRedirect, Version: 1, CreatedAt: now, CreatedBy: &operatorID, UpdatedAt: now, UpdatedBy: &operatorID}
+			if err := transaction.Create(&row).Error; err != nil {
+				return mapError(err)
+			}
+			saved = accessSettingsToDomain(row)
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("lock access settings: %w", err)
+		}
+		if row.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		operatorID := input.OperatorID
+		row.PublicOrigin = input.PublicOrigin
+		row.AllowInsecureHTTPRedirect = input.AllowInsecureHTTPRedirect
+		row.Version++
+		row.UpdatedAt = now
+		row.UpdatedBy = &operatorID
+		if err := transaction.Model(&accessSettingsModel{}).
+			Where("id = ? AND tenant_id = ?", row.ID, input.TenantID).
+			Select("public_origin", "allow_insecure_http_redirect", "version", "updated_at", "updated_by").
+			Updates(&row).Error; err != nil {
+			return fmt.Errorf("save access settings: %w", err)
+		}
+		saved = accessSettingsToDomain(row)
+		return nil
+	})
+	if err != nil {
+		return domain.AccessSettings{}, err
+	}
+	return saved, nil
+}
+
+func accessSettingsToDomain(row accessSettingsModel) domain.AccessSettings {
+	return domain.AccessSettings{ID: row.ID, TenantID: row.TenantID, PublicOrigin: row.PublicOrigin, AllowInsecureHTTPRedirect: row.AllowInsecureHTTPRedirect, Version: row.Version, UpdatedAt: row.UpdatedAt}
 }
 
 func platformSettingsToDomain(row platformSettingsModel) domain.PlatformSettings {

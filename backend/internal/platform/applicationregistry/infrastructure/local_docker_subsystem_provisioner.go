@@ -8,15 +8,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
+	settingsapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/application"
 )
 
 var subsystemDirectoryCodePattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
@@ -1003,4 +1006,107 @@ func sortedEnvironmentKeys(values map[string]string) []string {
 
 func provisioningError(message string) error {
 	return fmt.Errorf("%w: %s", application.ErrSubsystemProvisioningUnavailable, message)
+}
+
+// ApplyAccess rewrites the local override environment files and recreates the affected
+// containers so the unified frontend, OIDC issuer and subsystem callbacks use the configured
+// public origin. An empty PublicOrigin restores local-only access (127.0.0.1). This mirrors
+// scripts/lan-access.sh but is driven by the platform management console through the socket.
+func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Context, input settingsapplication.AccessApplyInput) error {
+	provisioner.mutex.Lock()
+	defer provisioner.mutex.Unlock()
+
+	platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, err := provisioner.integratedComposeConfiguration()
+	if err != nil {
+		return err
+	}
+
+	overrideFile := filepath.Join(platformRoot, "docker", ".env.lan")
+	customerOverrideFile := filepath.Join(platformRoot, "docker", ".env.customer.lan")
+	placeholderFile := filepath.Join(platformRoot, "docker", ".env.lan.disabled")
+	if info, statErr := os.Stat(placeholderFile); statErr != nil || info.IsDir() {
+		return provisioningError("access placeholder environment file is unavailable")
+	}
+
+	origin := strings.TrimSpace(input.PublicOrigin)
+	port := accessHTTPPort(origin)
+	if origin == "" {
+		_ = os.Remove(overrideFile)
+		_ = os.Remove(customerOverrideFile)
+		return provisioner.runAccessCompose(ctx, platformRoot, workspaceRoot, composeFile,
+			platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment,
+			placeholderFile, placeholderFile, "127.0.0.1", port,
+			"up", "-d", "--no-deps", "--wait", "api", "contract-api", "customer-api", "frontend")
+	}
+
+	if err := writeAccessOverrideFiles(overrideFile, customerOverrideFile, origin, input.AllowInsecureHTTPRedirect); err != nil {
+		return err
+	}
+	return provisioner.runAccessCompose(ctx, platformRoot, workspaceRoot, composeFile,
+		platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment,
+		overrideFile, customerOverrideFile, "0.0.0.0", port,
+		"up", "-d", "--no-deps", "--wait", "api", "contract-api", "customer-api", "frontend")
+}
+
+func (provisioner *LocalDockerSubsystemProvisioner) runAccessCompose(ctx context.Context, platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, lanOverride, customerOverride, bindAddress, port string, arguments ...string) error {
+	composeArguments := []string{
+		"compose", "--project-name", provisioner.config.PlatformComposeProject,
+		"--project-directory", platformRoot,
+		"--env-file", platformEnvironment,
+		"--env-file", contractEnvironment,
+		"--env-file", customerEnvironment,
+		"--env-file", portalEnvironment,
+		"-f", composeFile,
+	}
+	composeArguments = append(composeArguments, arguments...)
+	runnerEnvironment := append([]string{}, os.Environ()...)
+	runnerEnvironment = append(runnerEnvironment,
+		"BASIC_PLATFORM_RUNTIME_ENV_FILE="+platformEnvironment,
+		"CONTRACT_RUNTIME_ENV_FILE="+contractEnvironment,
+		"CUSTOMER_RUNTIME_ENV_FILE="+customerEnvironment,
+		"BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="+lanOverride,
+		"CONTRACT_LAN_OVERRIDE_ENV_FILE="+lanOverride,
+		"CUSTOMER_LAN_OVERRIDE_ENV_FILE="+customerOverride,
+		"PORTAL_RUNTIME_ENV_FILE="+portalEnvironment,
+		"PORTAL_LAN_OVERRIDE_ENV_FILE="+filepath.Join(platformRoot, "docker", ".env.lan.disabled"),
+		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
+		"SUBSYSTEM_HOST_PROJECTS_ROOT="+workspaceRoot,
+		"FRONTEND_BIND_ADDRESS="+bindAddress,
+		"FRONTEND_HTTP_PORT="+port,
+	)
+	return provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+}
+
+func writeAccessOverrideFiles(overrideFile, customerOverrideFile, origin string, allowInsecureHTTP bool) error {
+	if err := writeAccessOverrideFile(overrideFile, "docker/.env.lan",
+		"APP_PUBLIC_BASE_URL="+origin+"\n"+
+			"APP_CORS_ALLOWED_ORIGINS="+origin+"\n"+
+			"OIDC_ISSUER="+origin+"\n"+
+			"OIDC_ISSUER_BASE_URL="+origin+"\n"+
+			"AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS="+strconv.FormatBool(allowInsecureHTTP)+"\n"+
+			"OIDC_REDIRECT_URI="+origin+"/contract_management/auth/callback\n"+
+			"APP_PUBLIC_URL="+origin+"/contract_management/\n"); err != nil {
+		return err
+	}
+	return writeAccessOverrideFile(customerOverrideFile, "docker/.env.customer.lan",
+		"APP_PUBLIC_ORIGIN="+origin+"\n"+
+			"OIDC_ISSUER="+origin+"\n"+
+			"OIDC_REDIRECT_URI="+origin+"/customer-opportunity/auth/callback\n"+
+			"OIDC_POST_LOGOUT_REDIRECT_URI="+origin+"/customer-opportunity/\n")
+}
+
+func writeAccessOverrideFile(path, description, content string) error {
+	payload := "# 由平台「对外访问」配置自动生成；执行恢复本机访问会删除本文件。\n# 仅用于临时访问，不要提交到版本库。\n" + content
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		return provisioningError("write " + description + ": " + err.Error())
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func accessHTTPPort(origin string) string {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || parsed.Port() == "" {
+		return "8081"
+	}
+	return parsed.Port()
 }

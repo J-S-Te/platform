@@ -123,6 +123,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		SubsystemOnboarding: subsystemHandler,
 		Notifications:       notificationHandler,
 		FilesAndJobs:        fileTaskHandler,
+		AccessApplier:       subsystemProvisioner,
 	}, nil
 }
 

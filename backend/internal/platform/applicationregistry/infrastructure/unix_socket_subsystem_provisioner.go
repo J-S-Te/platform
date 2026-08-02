@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
+	settingsapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/application"
 )
 
 const subsystemProvisioningProtocolVersion = 1
@@ -23,6 +24,13 @@ type subsystemProvisioningRequest struct {
 	Code        string                                  `json:"code,omitempty"`
 	Environment string                                  `json:"environment,omitempty"`
 	Input       *application.SubsystemProvisioningInput `json:"input,omitempty"`
+	Access      *subsystemAccessApplyPayload            `json:"access,omitempty"`
+}
+
+// subsystemAccessApplyPayload carries the public-access configuration for the apply-access action.
+type subsystemAccessApplyPayload struct {
+	PublicOrigin              string `json:"public_origin"`
+	AllowInsecureHTTPRedirect bool   `json:"allow_insecure_http_redirect"`
 }
 
 type subsystemProvisioningReply struct {
@@ -80,6 +88,23 @@ func (provisioner *UnixSocketSubsystemProvisioner) Update(ctx context.Context, i
 		Version: subsystemProvisioningProtocolVersion,
 		Action:  "update",
 		Input:   &input,
+	})
+}
+
+// ApplyAccess asks the deployment helper to rewrite the local override environment files and
+// recreate the affected containers so the unified frontend and subsystem callbacks use the
+// configured public origin (empty origin restores local-only access).
+func (provisioner *UnixSocketSubsystemProvisioner) ApplyAccess(ctx context.Context, input settingsapplication.AccessApplyInput) error {
+	if !provisioner.enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	return provisioner.exchange(ctx, subsystemProvisioningRequest{
+		Version: subsystemProvisioningProtocolVersion,
+		Action:  "apply-access",
+		Access: &subsystemAccessApplyPayload{
+			PublicOrigin:              input.PublicOrigin,
+			AllowInsecureHTTPRedirect: input.AllowInsecureHTTPRedirect,
+		},
 	})
 }
 
@@ -193,6 +218,22 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		}
 	case "teardown":
 		err = executor.Teardown(ctx, request.Code, request.Environment)
+	case "apply-access":
+		if request.Access == nil {
+			err = application.ErrSubsystemProvisioningUnavailable
+			break
+		}
+		applier, ok := executor.(interface {
+			ApplyAccess(context.Context, settingsapplication.AccessApplyInput) error
+		})
+		if !ok {
+			err = application.ErrSubsystemProvisioningUnavailable
+			break
+		}
+		err = applier.ApplyAccess(ctx, settingsapplication.AccessApplyInput{
+			PublicOrigin:              request.Access.PublicOrigin,
+			AllowInsecureHTTPRedirect: request.Access.AllowInsecureHTTPRedirect,
+		})
 	default:
 		err = application.ErrSubsystemProvisioningUnavailable
 	}
