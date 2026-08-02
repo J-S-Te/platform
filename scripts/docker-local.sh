@@ -49,7 +49,7 @@ usage() {
   bash scripts/docker-local.sh refresh-portal-api
 
 up/restart 选项：
-  --build                         重新构建统一前端和三个常驻后端镜像；已接入门户另行构建 portal-api
+  --build                         重新构建统一前端和四个独立后端镜像；Portal 未接入时只构建不启动
   --pull                          兼容选项；启动前默认会串行拉取缺失的基础镜像
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
@@ -287,13 +287,30 @@ configure_access_mode() {
 configure_access_mode
 
 compose() {
+    # macOS 自带 Bash 3.2 在 `set -u` 下展开空数组会报 unbound variable，
+    # 因此不使用可选数组，而是按是否接入 Portal 显式分支。
+    # customer_portal/dev 接入成功后，普通 up/down/stop/ps/logs/config 自动纳入
+    # portal-api。首次接入前不能强行启动，因为此时浏览器 OIDC Client、租户、
+    # 角色目录和六组机器凭据尚不存在；平台与 CRM 需先运行以完成受控接入。
+    if portal_configured; then
+        docker compose \
+            --project-name "$compose_project" \
+            --file "$compose_file" \
+            --env-file "$env_file" \
+            --env-file "$contract_env_file" \
+            --env-file "$customer_env_file" \
+            --env-file "$portal_env_file" \
+            --profile portal \
+            "$@"
+        return
+    fi
     docker compose \
         --project-name "$compose_project" \
         --file "$compose_file" \
         --env-file "$env_file" \
         --env-file "$contract_env_file" \
-		--env-file "$customer_env_file" \
-		--env-file "$portal_env_file" \
+        --env-file "$customer_env_file" \
+        --env-file "$portal_env_file" \
         "$@"
 }
 
@@ -577,15 +594,18 @@ build_images() {
     # 任意一次匿名令牌请求超时都会让整个构建立即失败。先串行拉取缺失镜像并
     # 对每个镜像重试，使普通的 `up --build` 在全新环境中也具备容错能力。
     prepare_base_images
+    # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
+    # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定为四个独立后端。
+    local build_services=(api contract-api customer-api portal-api frontend)
     if [[ "$force_build" == true ]]; then
-        log "重新构建统一前端、基础平台、合同管理和客户与商机管理后端镜像"
+        log "重新构建一个统一前端及平台、合同、CRM、客户门户四个独立后端镜像"
     else
-        log "构建缺失或有变更的四个业务镜像"
+        log "构建缺失或有变更的统一前端及独立后端镜像"
     fi
     # migrate/bootstrap-admin/subsystem-provisioner 都复用 api 构建出的
-    # basic-platform/backend:local；这里只构建四个业务镜像各一次。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build \
-        api contract-api customer-api frontend
+    # basic-platform/backend:local；CRM 与 Portal 使用不同 target/镜像，不会
+    # 把 crm-server 和 portal-server 运行在同一个业务容器中。
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --ansi never build "${build_services[@]}"
 }
 
 prepare_gateway_config() {
@@ -603,7 +623,7 @@ prepare_gateway_config() {
 }
 
 run_migrations() {
-	log "启动基础平台、合同、CRM 三个 MySQL 与 Temporal，并等待健康检查"
+	log "启动基础平台、合同、CRM 三个常驻 MySQL 与 Temporal，并等待健康检查"
 	compose_run up -d --wait mysql contract-mysql customer-mysql temporal
     log "执行基础平台数据库迁移"
     compose_run run --rm --no-deps migrate ./migrate
@@ -613,8 +633,8 @@ run_migrations() {
 	compose_run run --rm --no-deps customer-migrate
 	if portal_configured; then
 		log "启动客户自助门户 MySQL 并执行 Portal 清单迁移"
-		compose_run --profile portal up -d --wait portal-mysql
-		compose_run --profile portal run --rm --no-deps portal-migrate
+		compose_run up -d --wait portal-mysql
+		compose_run run --rm --no-deps portal-migrate
 	fi
 }
 
@@ -794,7 +814,7 @@ start_stack() {
     build_images
     run_migrations
     bootstrap_admin_if_needed
-    # 分阶段启动，避免三个 API 和 frontend 在同一次 Compose wait 中
+    # 分阶段启动，避免四个 API 和 frontend 在同一次 Compose wait 中
     # 把下游的短暂冷启动误报为整套部署失败，同时让错误日志能够准确指向服务。
     log "启动基础平台 API 与受控子系统 provisioner"
     compose_up_wait "基础平台 API" subsystem-provisioner api
@@ -804,7 +824,7 @@ start_stack() {
 	compose_up_wait "客户与商机管理后端" customer-api
 	if portal_configured; then
 		log "启动已接入的客户自助门户后端"
-		compose_run --profile portal up -d --wait portal-api
+		compose_run up -d --wait portal-api
 	else
 		log "客户自助门户尚未接入，跳过 portal-api；可在应用接入中创建 customer_portal/dev"
 	fi
@@ -910,19 +930,19 @@ refresh_portal_backend() {
 	portal_configured || fail "客户自助门户尚未完成 customer_portal/dev 应用接入，不能启动 portal-api"
 	prepare_go_backend_base_images "客户自助门户后端"
 
-	log "重新构建客户/门户共享后端镜像"
-	COMPOSE_PARALLEL_LIMIT=1 compose --profile portal --ansi never build portal-api
+	log "重新构建客户自助门户独立后端镜像"
+	COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build portal-api
 	prepare_gateway_config
 	log "刷新统一前端网关中的客户门户路由"
 	COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
 	log "启动门户数据库并执行 Portal 清单迁移"
-	compose_run --profile portal up -d --wait portal-mysql
-	compose_run --profile portal run --rm --no-deps portal-migrate
+	compose_run up -d --wait portal-mysql
+	compose_run run --rm --no-deps portal-migrate
 	log "重建 portal-api 与统一前端"
-	compose_run --profile portal up -d --wait --no-deps portal-api
+	compose_run up -d --wait --no-deps portal-api
 	compose_run up -d --wait --no-deps frontend
 	verify_gateway_routes
-	compose_run --profile portal ps portal-api portal-mysql frontend
+	compose_run ps portal-api portal-mysql frontend
 }
 
 prepare_operational_env() {

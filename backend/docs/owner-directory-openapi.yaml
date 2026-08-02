@@ -1,0 +1,104 @@
+openapi: 3.1.0
+info:
+  title: Platform Owner Directory Machine API
+  version: 1.0.0
+  description: |-
+    Machine-only directory used by the CRM customer and opportunity subsystem.
+    The endpoint returns the minimum data needed to choose a responsible user
+    and one of that user's effective CRM-authorized organizations.
+servers:
+  - url: https://identity.example.invalid
+paths:
+  /api/v1/internal/owner-directory:
+    get:
+      operationId: listOwnerDirectory
+      tags: [Owner directory]
+      security:
+        - platformClientCredentials: [owner_directory.read]
+      parameters:
+        - name: keyword
+          in: query
+          description: Case-insensitive display-name search or exact OIDC subject.
+          schema: {type: string, maxLength: 100}
+        - name: user_id
+          in: query
+          description: Exact OIDC subject lookup; mutually exclusive with keyword.
+          schema: {type: string, minLength: 1, maxLength: 64}
+        - name: page
+          in: query
+          schema: {type: integer, minimum: 1, default: 1}
+        - name: page_size
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 50, default: 20}
+      responses:
+        '200':
+          description: Active internal users with selectable organization memberships.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OwnerDirectoryEnvelope'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    platformClientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://identity.example.invalid/oauth2/token
+          scopes:
+            owner_directory.read: Read the minimum CRM owner directory projection.
+  schemas:
+    OwnerDirectoryOrganization:
+      type: object
+      additionalProperties: false
+      required: [organization_id, organization_name, is_primary]
+      properties:
+        organization_id: {type: string, minLength: 1, maxLength: 64}
+        organization_name: {type: string, minLength: 1, maxLength: 200}
+        is_primary: {type: boolean}
+    OwnerDirectoryUser:
+      type: object
+      additionalProperties: false
+      required: [user_id, display_name, organizations]
+      properties:
+        user_id: {type: string, minLength: 1, maxLength: 64, description: Platform OIDC subject (`sub`).}
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        organizations:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/OwnerDirectoryOrganization'}
+    OwnerDirectoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, page_size, total]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/OwnerDirectoryUser'}}
+        page: {type: integer, minimum: 1}
+        page_size: {type: integer, minimum: 1, maximum: 50}
+        total: {type: integer, format: int64, minimum: 0}
+    OwnerDirectoryEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, data]
+      properties:
+        code: {type: string, const: '0'}
+        message: {type: string}
+        request_id: {type: string}
+        data: {$ref: '#/components/schemas/OwnerDirectoryPage'}
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        request_id: {type: string}
+        details: {}
+  responses:
+    Error:
+      description: Platform error envelope.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}

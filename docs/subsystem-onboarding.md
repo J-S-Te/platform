@@ -73,7 +73,7 @@ Compose、维护门户网关并执行必要的部署后动作。API 不直接挂
 | PathPrefix | `/customer-portal` |
 | 本地访问地址 | `http://localhost:8081/customer-portal/` |
 
-Portal 与 CRM 复用 `customer_and_opportunity` 仓库和同一不可变后端镜像，但不能复用浏览器 OIDC Client、数据库、Cookie 或机器 Client。部署 Agent 会启动 `portal-mysql`、运行 Portal 专用 migration、发布 Portal 目录、启动 `portal-api`，再重建 `customer-api` 使邀请服务取得最新最小权限凭据。
+Portal 与 CRM 复用 `customer_and_opportunity` 源码仓库，但 Dockerfile 分别构建 `customer-opportunity/backend:local`（`crm-runtime`）和 `customer-portal/backend:local`（`portal-runtime`），不能复用后端镜像、浏览器 OIDC Client、数据库、Cookie 或机器 Client。部署 Agent 会启动 `portal-mysql`、运行 Portal 专用 migration、发布 Portal 目录、启动独立 `portal-api`，再重建 `customer-api` 使邀请服务取得最新最小权限凭据。
 
 ### 1.4 浏览器 OAuth Client 与服务客户端分离
 

@@ -29,6 +29,7 @@ const (
 	ServiceCredentialPortalMappingProvision = "portal_mapping_provision"
 	ServiceCredentialPortalMappingDisable   = "portal_mapping_disable"
 	ServiceCredentialPortalInviteVerify     = "portal_invite_verify"
+	ServiceCredentialOwnerDirectoryRead     = "owner_directory_read"
 )
 
 // ErrSubsystemOnboardingAlreadyExists marks a create-only onboarding request that would
@@ -317,7 +318,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 }
 
 func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input SubsystemOnboardingInput, applicationID, environmentID string, now time.Time) ([]SubsystemServiceClientWrite, map[string]string, error) {
-	if input.ApplicationCode != integratedPortalApplicationCode {
+	if input.ApplicationCode != integratedPortalApplicationCode && input.ApplicationCode != integratedCustomerApplicationCode {
 		return nil, nil, nil
 	}
 	definitions := []struct {
@@ -325,13 +326,23 @@ func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input S
 		suffix  string
 		name    string
 		scope   string
-	}{
-		{ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
-		{ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
-		{ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
-		{ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
-		{ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
-		{ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
+	}{}
+	if input.ApplicationCode == integratedCustomerApplicationCode {
+		definitions = append(definitions, struct {
+			purpose string
+			suffix  string
+			name    string
+			scope   string
+		}{ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"})
+	} else {
+		definitions = append(definitions,
+			struct{ purpose, suffix, name, scope string }{ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
+			struct{ purpose, suffix, name, scope string }{ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
+			struct{ purpose, suffix, name, scope string }{ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
+			struct{ purpose, suffix, name, scope string }{ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
+			struct{ purpose, suffix, name, scope string }{ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
+			struct{ purpose, suffix, name, scope string }{ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
+		)
 	}
 	writes := make([]SubsystemServiceClientWrite, 0, len(definitions))
 	secrets := make(map[string]string, len(definitions))

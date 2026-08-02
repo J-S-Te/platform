@@ -42,6 +42,9 @@ import (
 	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
 	oidcpersonneldirectory "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/personneldirectory"
 	oidctokenissuer "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/tokenissuer"
+	ownerdirectoryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/ownerdirectory/application"
+	ownerdirectoryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/ownerdirectory/infrastructure"
+	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/ownerdirectory/interfaces/http"
 	securityapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/application"
 	securityinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/infrastructure"
 	securityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/interfaces/http"
@@ -204,6 +207,24 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	externalIdentityHandler, err := externalidentityhttp.NewHandler(externalIdentityService, logger)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	ownerDirectoryRepository, err := ownerdirectoryinfrastructure.NewRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	ownerDirectoryService, err := ownerdirectoryapplication.NewService(ownerDirectoryRepository)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	ownerDirectoryHandler, err := ownerdirectoryhttp.NewHandler(ownerDirectoryService, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -519,6 +540,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	operational.ExternalIdentity = externalIdentityHandler
+	operational.OwnerDirectory = ownerDirectoryHandler
 
 	return &API{
 		Handler: httptransport.NewRouter(

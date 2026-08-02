@@ -17,7 +17,7 @@ bash scripts/docker-local.sh logs api subsystem-provisioner
 
 - 只在缺失时从模板创建基础平台、合同管理、客户与商机管理及客户自助门户环境文件；
 - 不要求重建已有 `.env.local`；
-- 构建一个统一前端镜像和基础平台、合同管理、客户与商机管理三个常驻独立后端镜像；客户自助门户完成接入后再按同一编排启动独立 `portal-api`；
+- 构建一个统一前端镜像，以及基础平台、合同管理、客户与商机管理、客户自助门户四个独立后端镜像；客户自助门户完成接入前只构建镜像、不启动 `portal-api`；
 - 执行迁移，按需初始化管理员，再分阶段启动服务；
 - 不删除已存在的 Application、Environment、LoginTarget 或 OAuth Client。
 
@@ -60,7 +60,7 @@ bash scripts/lan-access.sh status
 bash scripts/lan-access.sh disable
 ```
 
-enable 会生成权限为 `0600` 的临时覆盖文件并重建三个 API 和统一 frontend。它保留数据库和统一登录控制面记录。该模式使用 HTTP，只适用于可信局域网。
+enable 会生成权限为 `0600` 的临时覆盖文件并重建统一 frontend、基础平台 API、合同 API 和 CRM API；若客户自助门户已接入，也会重建独立 Portal API。它保留数据库和统一登录控制面记录。该模式使用 HTTP，只适用于可信局域网。
 
 局域网 OAuth HTTP 回调与接入脚本访问平台 API 是两套策略，详见 [子系统开发与统一身份接入手册](./subsystem-onboarding.md#33-http-回调策略)。
 
@@ -85,15 +85,17 @@ bash scripts/docker-local.sh refresh-portal-api
 
 ## 6. 业务容器拓扑
 
-| 服务 | 内容 | 宿主机端口 |
-| --- | --- | --- |
-| `frontend` | 基础平台前端 + 合同管理前端 + 客户与商机管理前端 + 客户自助门户前端 | `127.0.0.1:8081` |
-| `api` | 基础平台 API + Worker | 不发布 |
-| `contract-api` | 合同管理 API + Temporal Worker | 不发布 |
-| `customer-api` | 客户与商机管理 API | 不发布 |
-| `portal-api` | 客户自助门户 API；仅在 `customer_portal/dev` 接入后启动 | 不发布 |
+| Compose 服务 | Docker 镜像 | 内容 | 宿主机端口 |
+| --- | --- | --- | --- |
+| `frontend` | `basic-platform/frontend:local` | 基础平台前端 + 合同管理前端 + 客户与商机管理前端 + 客户自助门户前端 | `127.0.0.1:8081` |
+| `api` | `basic-platform/backend:local` | 基础平台 API + Worker | 不发布 |
+| `contract-api` | `contract-management/backend:local` | 合同管理 API + Temporal Worker | 不发布 |
+| `customer-api` | `customer-opportunity/backend:local` | 客户与商机管理 API，只包含 `crm-server` | 不发布 |
+| `portal-api` | `customer-portal/backend:local` | 客户自助门户 API，只包含 `portal-server`；仅在 `customer_portal/dev` 接入后启动 | 不发布 |
 
-四个后端进程只通过 Compose 内网被统一 Nginx 访问。CRM 与 Portal 复用同一不可变后端镜像，但使用独立进程、独立 MySQL、独立 OIDC Client 和独立会话。MySQL、Temporal、迁移任务和 provisioner 属于基础设施或一次性任务，不计为业务应用容器。
+四个后端服务使用四个独立镜像、四个独立容器和四套运行配置，只通过 Compose 内网被统一 Nginx 访问。CRM 与 Portal 虽然从同一个 `customer_and_opportunity` 源码仓库构建，但 Dockerfile 使用 `crm-runtime`、`portal-runtime` 两个目标：CRM 镜像不包含 `portal-server`，Portal 镜像不包含 `crm-server`。二者还使用独立 MySQL、独立 OIDC Client 和独立会话。
+
+`docker-local.sh up` 会始终构建上述四个后端镜像。客户门户在首次受控接入前不会创建常驻 `portal-api` 容器，因为此时 OIDC Client、租户、角色目录和最小权限机器凭据尚不存在；完成 `customer_portal/dev` 接入后，再次执行 `up` 或 `refresh-portal-api` 即会启动第四个后端容器。MySQL、Temporal、迁移任务和 provisioner 属于基础设施或一次性任务，不计为业务应用容器。
 
 ## 7. 网关并发锁
 

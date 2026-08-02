@@ -127,6 +127,34 @@ func TestOnboardCustomerPortalCreatesSixIndependentLeastPrivilegeServiceClients(
 	}
 }
 
+func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.OnboardSubsystem(context.Background(), SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: integratedCustomerApplicationCode, ApplicationName: "客户与商机管理", Environment: "dev",
+		PublicBaseURL: "http://localhost:8081", UpstreamURL: integratedCustomerUpstreamURL,
+		PathPrefix: integratedCustomerPathPrefix, ClientType: "confidential",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.write.ServiceClients) != 1 || len(result.ServiceCredentials) != 1 {
+		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
+	}
+	credential := result.ServiceCredentials[0]
+	client := credential.OAuthClient
+	if credential.Purpose != ServiceCredentialOwnerDirectoryRead || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" || len(client.Scopes) != 1 || client.Scopes[0] != "owner_directory.read" {
+		t.Fatalf("owner directory credential=%#v", credential)
+	}
+	if credential.PlaintextSecret == "" {
+		t.Fatal("owner directory plaintext secret must be returned once during onboarding")
+	}
+}
+
 func (repository *subsystemOnboardingRepositoryStub) ListPortalApplications(_ context.Context, _, _, _ string) ([]PortalApplication, error) {
 	repository.listCalls++
 	return repository.portalItems, nil

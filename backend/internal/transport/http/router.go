@@ -20,6 +20,7 @@ import (
 	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/interfaces/http"
 	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
+	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/ownerdirectory/interfaces/http"
 	securityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/interfaces/http"
 	settingshttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
@@ -39,6 +40,7 @@ type OperationalModules struct {
 	Notifications       *notificationhttp.Handler
 	FilesAndJobs        *filetaskhttp.Handler
 	ExternalIdentity    *externalidentityhttp.Handler
+	OwnerDirectory      *ownerdirectoryhttp.Handler
 }
 
 // NewRouter creates the shared middleware chain and registers infrastructure endpoints. Domain
@@ -386,7 +388,7 @@ func NewRouter(
 
 	// Integration audit ingestion has a separate bearer-token boundary. Console user roles do
 	// not grant an external business system permission to submit audit events.
-	if applicationAuthenticator != nil && (auditHandler != nil || operational.ExternalIdentity != nil) {
+	if applicationAuthenticator != nil && (auditHandler != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil) {
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
 		if auditHandler != nil {
@@ -397,6 +399,9 @@ func NewRouter(
 			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))
 			integrationRouter.POST("/internal/application-roles", middleware.RequireApplicationScope("application_role.assign"), adaptHandler(operational.ExternalIdentity.AssignRole))
 			integrationRouter.POST("/internal/application-roles/revoke", middleware.RequireApplicationScope("application_role.revoke"), adaptHandler(operational.ExternalIdentity.RevokeRole))
+		}
+		if operational.OwnerDirectory != nil {
+			integrationRouter.GET("/internal/owner-directory", middleware.RequireApplicationScope("owner_directory.read"), adaptHandler(operational.OwnerDirectory.List))
 		}
 	}
 

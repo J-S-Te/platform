@@ -1,7 +1,8 @@
 name: basic-platform-local
 
-# 统一本地编排：统一 frontend 承载三个前端模块；api、contract-api、customer-api
-# 分别承载基础平台、合同管理、客户与商机管理三个后端。
+# 统一本地编排：一个 frontend 容器承载基础平台、合同管理、客户与商机管理、
+# 客户自助门户四个前端模块；api、contract-api、customer-api、portal-api 分别
+# 承载四个彼此隔离的后端进程和运行配置。
 # MySQL、Temporal、迁移任务和隔离部署助手属于基础设施/一次性任务，不对宿主机发布业务端口。
 # LAN 临时访问使用单独的覆盖文件，不修改本地或生产环境的常规环境文件。
 # 默认加载空占位文件；scripts/lan-access.sh enable 时才会替换为临时覆盖文件。
@@ -30,9 +31,14 @@ x-platform-backend-runtime: &platform-backend-runtime
 x-contract-backend-runtime: &contract-backend-runtime
   image: contract-management/backend:local
 
-# 客户与商机管理 API 与本地迁移任务复用同一个后端镜像。
+# 客户与商机管理 API 与 CRM 本地迁移任务复用同一个后端镜像。
 x-customer-backend-runtime: &customer-backend-runtime
   image: customer-opportunity/backend:local
+
+# 客户自助门户使用独立镜像和容器。虽然源码与 CRM 位于同一仓库，但镜像只包含
+# portal-server，不把两个 HTTP 进程打包进同一业务容器。
+x-portal-backend-runtime: &portal-backend-runtime
+  image: customer-portal/backend:local
 
 services:
   mysql:
@@ -310,6 +316,7 @@ services:
     <<: *customer-backend-runtime
     build:
       context: ../customer_and_opportunity
+      target: crm-runtime
     env_file: *customer-runtime-env
     environment:
       HTTP_ADDRESS: :8090
@@ -342,7 +349,7 @@ services:
     restart: unless-stopped
 
   # 客户自助门户使用独立数据库，避免外部客户会话、身份映射和备案材料与 CRM
-  # 员工域混库。门户与 CRM 复用同一只不可变后端镜像，但运行在不同进程中。
+  # 员工域混库。门户与 CRM 从同一源码仓库构建，但使用不同 target、不同镜像和不同容器。
   portal-mysql:
     image: mysql:8.4
     environment:
@@ -364,7 +371,7 @@ services:
     restart: unless-stopped
 
   portal-migrate:
-    <<: *customer-backend-runtime
+    <<: *portal-backend-runtime
     env_file: *portal-runtime-env
     environment:
       PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
@@ -376,9 +383,10 @@ services:
     restart: "no"
 
   portal-api:
-    <<: *customer-backend-runtime
+    <<: *portal-backend-runtime
     build:
       context: ../customer_and_opportunity
+      target: portal-runtime
     env_file: *portal-runtime-env
     environment:
       PORTAL_HTTP_ADDRESS: :8091
