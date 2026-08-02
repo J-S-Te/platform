@@ -498,9 +498,13 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.Conflict)
 	case errors.Is(err, application.ErrSubsystemProvisioningUnavailable):
 		handler.logger.Error("subsystem automatic provisioning failed", "path", request.URL.Path, "error", err)
+		message := httperror.DependencyUnavailable.Message
+		if strings.Contains(strings.ToLower(err.Error()), "disabled") {
+			message = "该环境未启用自动部署 Agent（生产/远程部署默认关闭），不支持一键接入"
+		}
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
 			httperror.DependencyUnavailable.Code,
-			httperror.DependencyUnavailable.Message,
+			message,
 			map[string]string{"next_action": subsystemProvisioningNextAction(err)},
 		))
 	default:
@@ -512,6 +516,8 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 func subsystemProvisioningNextAction(err error) string {
 	message := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(message, "disabled"):
+		return "生产/远程环境请使用“应用登记、环境设置、OAuth 客户端、登录目标”控制面功能完成接入，并把生成的凭据写入服务器 .env 后发布子系统镜像；本地开发请先执行 docker-local.sh up"
 	case strings.Contains(message, "compose file"):
 		return "部署 Agent 未找到子系统 Compose；内置客户与商机系统请更新平台代码并重启 api 与 subsystem-provisioner，独立子系统请在同名项目目录提供 compose.yaml"
 	case strings.Contains(message, "environment template"):
