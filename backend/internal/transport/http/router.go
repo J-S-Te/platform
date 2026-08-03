@@ -212,6 +212,7 @@ func NewRouter(
 				middleware.RequirePermission("platform:application-environment:update"),
 				middleware.RequirePermission("platform:application-login-target:update"),
 				middleware.RequirePermission("platform:oauth-client:disable"),
+				middleware.RequirePermission("platform:role-binding:update"),
 				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
 			)
 			// Tear down an onboarded subsystem: stop containers, remove .env.local, remove

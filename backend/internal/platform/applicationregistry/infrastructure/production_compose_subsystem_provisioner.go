@@ -180,7 +180,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Con
 	if !provisioner.config.Enabled || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment {
 		return provisioningError("production contract deployment request is invalid")
 	}
-	if err := provisioner.validateOrBindTenant(input.TenantID, false); err != nil {
+	if err := provisioner.validateTenant(input.TenantID); err != nil {
 		return err
 	}
 	if err := provisioner.validateDeploymentFiles(false); err != nil {
@@ -204,7 +204,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.C
 	if !provisioner.config.Enabled || strings.TrimSpace(applicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(environment)) != productionContractEnvironment {
 		return provisioningError("production contract teardown request is invalid")
 	}
-	if err := provisioner.validateOrBindTenant(tenantID, false); err != nil {
+	if err := provisioner.validateTenant(tenantID); err != nil {
 		return err
 	}
 	if err := provisioner.validateDeploymentFiles(false); err != nil {
@@ -366,7 +366,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) validateProvisioningIn
 	if !provisioner.config.Enabled || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment {
 		return provisioningError("production contract deployment request is invalid")
 	}
-	if err := provisioner.validateOrBindTenant(input.TenantID, true); err != nil {
+	if err := provisioner.validateTenant(input.TenantID); err != nil {
 		return err
 	}
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
@@ -385,7 +385,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) validateProvisioningIn
 	return provisioner.validateDeploymentFiles(true)
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) validateOrBindTenant(tenantID string, _ bool) error {
+func (provisioner *ProductionComposeSubsystemProvisioner) validateTenant(tenantID string) error {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" || tenantID != provisioner.config.AllowedTenantID || strings.ContainsAny(tenantID, "\r\n\x00") {
 		return provisioningError("production subsystem tenant is not allowed")

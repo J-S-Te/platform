@@ -163,6 +163,7 @@ type subsystemDeploymentStateResponse struct {
 
 // OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
 func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
 		return
@@ -286,6 +287,7 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 // management PATCH endpoints. This endpoint only re-runs the provisioner so the running subsystem
 // picks up the new .env.local values and the portal gateway is reloaded.
 func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
 		return
@@ -341,6 +343,19 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
+	if operation == "RETRY" {
+		// A first-time deployment can fail after credentials are created but before the role
+		// catalog and initial administrator are ready. Retry therefore reapplies the conventional
+		// administrator role to the current operator after the Agent succeeds. UpdateAccess is
+		// idempotent for an already assigned role and never requires recovering an OAuth secret.
+		if _, err := handler.access.AssignInitialAdministrator(
+			request.Context(), principal.Tenant.ID, applicationCode, principal.User.ID, principal.User.ID,
+		); err != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
+			handler.writeError(writer, request, err)
+			return
+		}
+	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusReady, operation, "", ""); err != nil {
 		handler.logger.Error("subsystem update completed but state update failed", "application_code", applicationCode, "environment", environment, "error", err)
 		handler.writeError(writer, request, err)
@@ -363,6 +378,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 // delete the corresponding DB rows here: the script follows up with DELETE /environments and
 // (optionally) DELETE /applications so the audit trail preserves each cleanup step.
 func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
 		return
@@ -403,6 +419,16 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 		"environment", environment,
 		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
 	)
+}
+
+const subsystemDeploymentHTTPTimeout = 16 * time.Minute
+
+// extendSubsystemDeploymentWriteDeadline keeps the synchronous control-plane request alive for
+// the Agent's bounded 15-minute deployment window. ResponseController unwraps Gin's writer to the
+// underlying network connection; httptest and unsupported writers safely ignore the capability.
+func extendSubsystemDeploymentWriteDeadline(writer stdhttp.ResponseWriter) {
+	controller := stdhttp.NewResponseController(writer)
+	_ = controller.SetWriteDeadline(time.Now().Add(subsystemDeploymentHTTPTimeout))
 }
 
 // GetSubsystemStatus handles GET /api/v1/subsystem-status. It exposes durable lifecycle
