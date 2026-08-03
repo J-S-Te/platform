@@ -700,7 +700,9 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 	case strings.Contains(message, "preflight values are inconsistent"), strings.Contains(message, "integration values are inconsistent"), strings.Contains(message, "deployment request is invalid"):
 		diagnosis = "页面提交的应用编码、环境、回调地址或上游地址与服务器审核清单不一致；请刷新应用接入页面并重新选择服务器接入目标"
 	case strings.Contains(message, "infrastructure secrets are incomplete"):
-		diagnosis = "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成数据库和 IAM 等生产基础设施初始化"
+		diagnosis = "服务器仍运行会在预检阶段检查全部基础设施密钥的旧版 Agent；请同步最新生产资产并同时重建 platform-api、subsystem-provisioner"
+	case strings.Contains(message, "subsystem database credentials are incomplete"):
+		diagnosis = "当前子系统实际使用的数据库凭据仍为空或占位值；这些凭据可能已绑定持久化数据，Agent 不会自动生成或轮换，请完成一次性数据库初始化"
 	case strings.Contains(message, "generated runtime secret is invalid"):
 		diagnosis = "目标 runtime 中已有业务密钥不是合法的 32 字节 base64 值；为避免误轮换，Agent 不会覆盖非占位值，请先备份并修正该异常值"
 	case strings.Contains(message, "runtime secrets are incomplete"):

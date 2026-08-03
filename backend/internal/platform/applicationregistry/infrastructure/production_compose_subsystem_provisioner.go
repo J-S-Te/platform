@@ -230,7 +230,10 @@ func (target *productionComposeTarget) Preflight(ctx context.Context, input appl
 	if err := target.validatePreflightInput(input); err != nil {
 		return err
 	}
-	if err := target.validateDeploymentFiles(true); err != nil {
+	// 预检只验证部署文件本身及清单声明的运行文件结构。基础设施密钥可能仍
+	// 是发布包中的占位值；这不应阻止控制面先登记接入目标，真正写运行配置
+	// 和启动服务前再由 Provision 严格校验。
+	if err := target.validateDeploymentFiles(true, false); err != nil {
 		return err
 	}
 	checkContext, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -275,7 +278,7 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if !target.matches(input.ApplicationCode, input.Environment) {
 		return provisioningError("production subsystem deployment request is invalid")
 	}
-	if err := target.validateDeploymentFiles(false); err != nil {
+	if err := target.validateDeploymentFiles(false, true); err != nil {
 		return err
 	}
 	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
@@ -295,7 +298,7 @@ func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID st
 	if err := target.validateTenant(tenantID); err != nil {
 		return err
 	}
-	if err := target.validateDeploymentFiles(false); err != nil {
+	if err := target.validateDeploymentFiles(false, true); err != nil {
 		return err
 	}
 	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
@@ -456,7 +459,7 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 	return "", provisioningError("production subsystem runtime binding is unsupported")
 }
 
-func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEnvironment bool) error {
+func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEnvironment, validateInfrastructureSecrets bool) error {
 	root, err := canonicalProductionDeployRoot(target.config.DeployRoot)
 	if err != nil {
 		return provisioningError("production deployment directory is unavailable")
@@ -504,8 +507,10 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 			}
 		}
 	}
-	if err := validateProductionRequiredEnvironmentKeys(target.config.RuntimeEnvPath, target.config.Profile.Manifest.Runtime.RequiredInfrastructureKeys, "production infrastructure secrets are incomplete"); err != nil {
-		return err
+	if validateInfrastructureSecrets {
+		if err := validateProductionRequiredEnvironmentKeys(target.config.RuntimeEnvPath, target.config.Profile.Manifest.Runtime.RequiredInfrastructureKeys, "production subsystem database credentials are incomplete"); err != nil {
+			return err
+		}
 	}
 	for _, imageKey := range target.config.Profile.Manifest.Compose.ReleaseImageKeys {
 		if err := validateProductionReleaseImage(target.config.ReleaseEnvPath, imageKey); err != nil {
@@ -769,7 +774,7 @@ func (target *productionComposeTarget) validateProvisioningInput(input applicati
 			}
 		}
 	}
-	return target.validateDeploymentFiles(true)
+	return target.validateDeploymentFiles(true, true)
 }
 
 func (target *productionComposeTarget) validateTenant(tenantID string) error {

@@ -115,6 +115,37 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	}
 }
 
+func TestProductionComposeSubsystemProvisionerPreflightAllowsInfrastructurePlaceholders(t *testing.T) {
+	t.Parallel()
+	provisioner, runner, _ := productionProvisionerFixture(t)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	placeholderEnvironment := "MYSQL_PASSWORD=REPLACE_WITH_PLATFORM_PASSWORD\n" +
+		"MYSQL_ROOT_PASSWORD=REPLACE_WITH_PLATFORM_ROOT_PASSWORD\n" +
+		"IAM_MOBILE_ENCRYPTION_KEY=REPLACE_WITH_IAM_KEY\n" +
+		"IAM_BOOTSTRAP_TOKEN=REPLACE_WITH_BOOTSTRAP_TOKEN\n" +
+		"CONTRACT_MYSQL_PASSWORD=REPLACE_WITH_CONTRACT_PASSWORD\n" +
+		"CONTRACT_MYSQL_ROOT_PASSWORD=REPLACE_WITH_CONTRACT_ROOT_PASSWORD\n"
+	if err := os.WriteFile(target.config.RuntimeEnvPath, []byte(placeholderEnvironment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode)); err != nil {
+		t.Fatalf("preflight rejected infrastructure placeholders: %v", err)
+	}
+	preflightCalls := len(runner.calls)
+	if err := provisioner.Provision(context.Background(), productionContractInput("https://platform.example.com")); err == nil {
+		t.Fatal("provision accepted missing production infrastructure secrets")
+	} else if !strings.Contains(err.Error(), "production subsystem database credentials are incomplete") {
+		t.Fatalf("provision error = %v, want infrastructure secret validation error", err)
+	}
+	if len(runner.calls) != preflightCalls {
+		t.Fatalf("provision reached Docker before infrastructure validation: %#v", runner.calls[preflightCalls:])
+	}
+}
+
 func TestProductionComposeSubsystemProvisionerInitializesMissingRuntimeFromReviewedTemplate(t *testing.T) {
 	t.Parallel()
 	provisioner, _, runtimePath := productionProvisionerFixture(t)
