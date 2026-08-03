@@ -182,6 +182,7 @@ func NewRouter(
 
 		if operational.SubsystemOnboarding != nil {
 			apiRouter.GET("/portal/applications", adaptHandler(operational.SubsystemOnboarding.ListPortalApplications))
+			apiRouter.GET("/subsystem-capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemCapabilities))
 			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemStatus))
 			apiRouter.POST("/subsystem-onboarding",
 				middleware.RequirePermission("platform:application:create"),

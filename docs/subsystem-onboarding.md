@@ -1,6 +1,6 @@
 # 子系统开发与统一身份接入手册
 
-> 更新日期：2026-08-02
+> 更新日期：2026-08-03
 > 适用对象：子系统开发人员、联调人员、平台管理员和部署人员。
 > 推荐入口：基础平台“应用接入”页面。生产环境的首次接入、重试、运行时更新和下线均从页面完成；`scripts/subsystem.sh` 仅保留给本地自动化、无人值守和故障排查。
 
@@ -14,7 +14,8 @@
 | --- | --- |
 | 首次创建一个不存在的应用环境 | 基础平台“应用接入 → 新增接入” |
 | 更新代码、镜像、前后端模块或业务迁移 | 使用子系统自己的 CI/CD，不执行 onboard/offboard |
-| 只需要重建现有子系统容器 | `subsystem.sh update`，或子系统自己的部署命令 |
+| 生产环境只需按现有配置重建子系统 | 基础平台页面“更新运行时” |
+| 本地环境只需重建现有子系统容器 | `subsystem.sh update`，或子系统自己的部署命令 |
 | 首次接入或重建因 Agent 故障失败 | 页面查看部署状态并点击“重试”；不要重复新增接入 |
 | 修改 BaseURL、Upstream、PathPrefix 或 OAuth 回调 | 先走受控管理 API，并同步子系统运行配置；不要撤销重建 |
 | 环境永久下线 | 完成数据、会话和恢复预案后在页面确认“下线并删除控制面记录” |
@@ -204,7 +205,11 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
 
 正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理内置 `contract_management/prod`，把一次性 OIDC、目录发布与审计凭据原子写入权限为 `0600` 的独立 `runtime/contract.env`，再执行固定的合同迁移和 `contract-api` 重建。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
 
-### 4.2 参数
+接入 API 可指定 `initial_admin_user_id`；当前生产管理页面默认使用当前平台操作者。平台将该选择持久化到部署状态：如果首次部署在初始授权前失败，页面“重试”仍向原选择用户授权，而不是改授给点击重试的人；初始授权完成后，普通更新或重试不会恢复管理员后来主动移除的角色。`customer_portal` 等按外部邀请预配身份的受控应用可不建立内部初始管理员。
+
+镜像仓库凭据、平台密钥、数据库、Docker/Compose、生产部署目录和隔离 Agent 是一次性基础设施初始化，由部署人员或 CI/CD 完成。完成后，日常平台管理员只使用“应用接入”页面进行首次接入、查看状态、按页面“下一步操作”排障、重试、更新和下线，不登录服务器，也不手工复制 OAuth Client ID/Secret。
+
+### 4.2 本地脚本参数（生产页面不需要输入这些命令）
 
 | 参数 | 说明 |
 | --- | --- |
@@ -373,20 +378,22 @@ printf '%s\n' "$PLATFORM_ADMIN_PASSWORD" | bash scripts/subsystem.sh onboard \
 
 ### 4.7 接入期间发生什么
 
-1. 脚本校验并显示配置摘要。
-2. 以平台管理员会话调用 `POST /api/v1/subsystem-onboarding`。
+1. 基础平台页面校验并显示配置摘要；本地脚本模式提供等价的交互校验。
+2. 以当前平台管理员会话调用 `POST /api/v1/subsystem-onboarding`。
 3. 平台原子创建 Application、Environment、LoginTarget、浏览器 OAuth Client 和独立目录发布 Client；部署 Agent 发布角色目录后再为初始管理员建立应用角色授权。采用规范 `admin` 角色的子系统分配 `admin`；内置客户与商机系统按其 `max_effective_roles=3` 策略分配 `sales_director + team_lead + technical_lead`。`customer_portal` 不把内部平台操作者设为外部客户角色，访问必须来自 CRM 邀请链路。
 4. 平台同时写入 `PROVISIONING` 部署状态；在 Agent 成功前，门户不会展示该环境。
 5. Client Secret 只在后端内存中交给部署 Agent，不回显给浏览器或脚本。
 6. Agent 基于 `.env.example` 写出权限为 `0600` 的 `.env.local`。
 7. 执行子系统 Compose `up -d --build`。
 8. 更新门户网关、执行 `nginx -t` 并 reload。
-9. 对配置的目标子系统尝试同步授权目录。目录同步失败当前是非致命错误，应查看 Agent 日志并单独修复。
+9. 同步目标子系统授权目录。对需要内部初始管理员的受控应用，目录缺失会使初始授权无法完成，部署记录进入 `PROVISION_FAILED`；修复 Agent、发布凭据或子系统目录后，应在原记录上点击“重试”，不能重复新增接入。按外部邀请预配身份且无需内部管理员的应用可按自身策略处理目录发布结果。
 10. 成功后状态切换为 `READY`；失败时记录为 `PROVISION_FAILED`。
-11. 脚本退出前注销自己创建的平台会话。
+11. 页面继续使用当前平台会话；本地脚本会注销自己创建的临时平台会话。
 
 若 Agent 阶段失败，控制面记录会保留，这是为了避免重新签发 OAuth Client 和丢失仅交付一次的
-Secret。不要重复 onboard，按下面方式恢复：
+Secret。生产环境不要重复新增接入：在环境卡片读取脱敏错误与“下一步操作”，修复所指向的一次性基础设施问题后点击“重试”。`subsystem-status` 返回的 `next_action` 与页面提示一致，不包含可执行命令或 Secret。
+
+以下命令只用于本地开发或服务器故障排查，不是生产日常管理员流程：
 
 ```bash
 bash scripts/subsystem.sh status \
@@ -403,7 +410,7 @@ bash scripts/subsystem.sh retry \
 ```
 
 `retry` 只重新执行现有环境的部署 Agent 流程，不重新创建 Application、Environment、登录目标或
-OAuth Client。每次重试都会增加 `generation` 和 `attempt_count`，便于审计和排障。
+OAuth Client。每次重试都会增加 `generation` 和 `attempt_count`，便于审计和排障。首次授权未完成时，重试沿用接入时保存的初始管理员；已完成时不会重复授予或恢复后来被主动移除的角色。
 
 ## 5. 接入后验收清单
 
@@ -536,7 +543,7 @@ bash scripts/subsystem.sh offboard \
 | `IAM_SUBSYSTEM_ALREADY_ONBOARDED` | 环境已存在；停止重复接入，日常发布走 update/CI |
 | `IAM_CONFLICT` | Client ID、路径或资源唯一性冲突，核对现有记录 |
 | `PLATFORM_DEPENDENCY_UNAVAILABLE` | 查看 `api`、`subsystem-provisioner`、Docker、项目目录和 Socket |
-| `status=PROVISION_FAILED` | 先查看 `subsystem.sh status` 和 Agent 日志；修复后执行 `subsystem.sh retry`，不要重复 onboard |
+| `status=PROVISION_FAILED` | 生产在页面读取 `next_action`，修复后点击“重试”；本地/排障可使用 `subsystem.sh status/retry`，不要重复 onboard |
 | `subsystem project ... unavailable` | 应用编码与目录名不一致，或缺 Compose/`.env.example` |
 | Compose 启动失败 | 在子系统目录用生成的 `.env.local` 单独执行 `docker compose config` 和 `up` 排查 |
 | `nginx -t` 失败 | 检查 path prefix、Upstream、include；不要绕过验证直接 reload |

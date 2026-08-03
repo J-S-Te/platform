@@ -46,18 +46,45 @@ type UnixSocketSubsystemProvisioner struct {
 	enabled    bool
 	socketPath string
 	timeout    time.Duration
+	mode       string
 }
 
 // NewUnixSocketSubsystemProvisioner constructs the API-side automatic deployment client.
-func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration) (*UnixSocketSubsystemProvisioner, error) {
+func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration, modes ...string) (*UnixSocketSubsystemProvisioner, error) {
 	socketPath = strings.TrimSpace(socketPath)
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
+	mode := "local"
+	if len(modes) > 1 {
+		return nil, errors.New("subsystem provisioning accepts at most one deployment mode")
+	}
+	if len(modes) == 1 && strings.TrimSpace(modes[0]) != "" {
+		mode = strings.ToLower(strings.TrimSpace(modes[0]))
+	}
+	if mode != "local" && mode != "production" {
+		return nil, errors.New("subsystem provisioning mode must be local or production")
+	}
 	if enabled && socketPath == "" {
 		return nil, errors.New("subsystem provisioning socket path is required")
 	}
-	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout}, nil
+	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout, mode: mode}, nil
+}
+
+// Capabilities returns the API-side deployment policy used by the management console. The
+// privileged Agent enforces the same restrictions again; this method is only a safe UI hint and
+// cannot expand the executor's fixed command or filesystem boundary.
+func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
+	capabilities := application.SubsystemProvisioningCapabilities{
+		Enabled:               provisioner.enabled,
+		Mode:                  provisioner.mode,
+		SupportedEnvironments: []string{"dev", "test", "staging", "prod"},
+	}
+	if provisioner.mode == "production" {
+		capabilities.SupportedApplicationCodes = []string{"contract_management"}
+		capabilities.SupportedEnvironments = []string{"prod"}
+	}
+	return capabilities
 }
 
 func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {

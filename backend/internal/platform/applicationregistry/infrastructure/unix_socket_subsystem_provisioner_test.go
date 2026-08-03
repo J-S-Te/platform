@@ -95,6 +95,35 @@ func TestUnixSocketSubsystemProvisionerDisabled(t *testing.T) {
 	}
 }
 
+func TestUnixSocketSubsystemProvisionerReportsProductionCapabilities(t *testing.T) {
+	t.Parallel()
+	client, err := NewUnixSocketSubsystemProvisioner(true, "/tmp/subsystem-provisioner.sock", time.Second, " production ")
+	if err != nil {
+		t.Fatalf("construct production client: %v", err)
+	}
+
+	capabilities := client.Capabilities()
+	if !capabilities.Enabled || capabilities.Mode != "production" {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management"}) {
+		t.Fatalf("supported application codes = %#v", capabilities.SupportedApplicationCodes)
+	}
+	if !reflect.DeepEqual(capabilities.SupportedEnvironments, []string{"prod"}) {
+		t.Fatalf("supported environments = %#v", capabilities.SupportedEnvironments)
+	}
+}
+
+func TestUnixSocketSubsystemProvisionerRejectsInvalidMode(t *testing.T) {
+	t.Parallel()
+
+	for _, modes := range [][]string{{"remote"}, {"local", "production"}} {
+		if client, err := NewUnixSocketSubsystemProvisioner(false, "", time.Second, modes...); err == nil || client != nil {
+			t.Fatalf("modes %q returned client=%#v err=%v", modes, client, err)
+		}
+	}
+}
+
 func TestUnixSocketSubsystemProvisionerReturnsSafeActionableExecutorMessage(t *testing.T) {
 	t.Parallel()
 	socketDirectory, err := os.MkdirTemp("/tmp", "bp-provisioner-")

@@ -51,6 +51,16 @@ type SubsystemDeploymentStateStore interface {
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
 }
 
+// SubsystemProvisioningCapabilities describes the safe deployment boundary exposed to the
+// management console. It intentionally contains no host paths, tenant binding, image reference,
+// credentials, or arbitrary command/service names.
+type SubsystemProvisioningCapabilities struct {
+	Enabled                   bool
+	Mode                      string
+	SupportedApplicationCodes []string
+	SupportedEnvironments     []string
+}
+
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
 // 进程内接口与受限 Unix socket 到达部署 Agent，不得写日志、返回浏览器或出现在命令行参数中。
 type SubsystemProvisioningInput struct {

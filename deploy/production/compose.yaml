@@ -25,6 +25,40 @@ x-contract-service: &contract-service
   networks: [application]
   restart: unless-stopped
 
+x-customer-service: &customer-service
+  image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+  env_file:
+    - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+  environment:
+    HTTP_ADDRESS: :8090
+    MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    PLATFORM_BASE_URL: http://platform-api:8080
+    OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+    MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    GIN_MODE: release
+  networks: [application]
+  volumes:
+    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+  restart: unless-stopped
+
+x-portal-service: &portal-service
+  image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
+  env_file:
+    - ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
+  environment:
+    PORTAL_HTTP_ADDRESS: :8091
+    PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+    PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+    PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
+    PORTAL_CRM_INVITE_TOKEN_URL: http://platform-api:8080/oauth2/token
+    PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    GIN_MODE: release
+  networks: [application]
+  volumes:
+    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+  restart: unless-stopped
+
 services:
   platform-mysql:
     image: mysql:8.4
@@ -204,6 +238,104 @@ services:
       retries: 15
       start_period: 10s
 
+  customer-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: customer_opportunity
+      MYSQL_USER: customer
+      MYSQL_PASSWORD: ${CUSTOMER_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CUSTOMER_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - customer-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    profiles: ["customer"]
+
+  customer-migrate:
+    <<: *customer-service
+    command: ["./production-migrate", "--schema", "crm"]
+    profiles: ["customer-release"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  customer-api:
+    <<: *customer-service
+    command: ["./crm-server"]
+    ports:
+      - "127.0.0.1:${CUSTOMER_API_PORT:-18083}:8090"
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8090/customer-opportunity/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    profiles: ["customer"]
+
+  portal-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: customer_portal
+      MYSQL_USER: portal
+      MYSQL_PASSWORD: ${PORTAL_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${PORTAL_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - portal-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    profiles: ["customer"]
+
+  portal-migrate:
+    <<: *portal-service
+    command: ["./production-migrate", "--schema", "portal"]
+    profiles: ["customer-release"]
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  portal-api:
+    <<: *portal-service
+    command: ["./portal-server"]
+    ports:
+      - "127.0.0.1:${PORTAL_API_PORT:-18084}:8091"
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+      customer-api:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8091/customer-portal/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    profiles: ["customer"]
+
   frontend:
     image: ${FRONTEND_IMAGE}
     ports:
@@ -221,4 +353,6 @@ networks:
 volumes:
   platform-mysql-data:
   contract-mysql-data:
+  customer-mysql-data:
+  portal-mysql-data:
   subsystem-provisioner-socket:

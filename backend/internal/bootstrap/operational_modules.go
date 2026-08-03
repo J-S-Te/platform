@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -59,6 +60,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		cfg.SubsystemOnboarding.Enabled,
 		cfg.SubsystemOnboarding.SocketPath,
 		cfg.SubsystemOnboarding.Timeout,
+		cfg.SubsystemOnboarding.Mode,
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -158,10 +160,11 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 		TenantID: tenantID, UserID: userID, OperatorID: operatorID, Roles: roles, RolesProvided: true,
 	}, applicationCode)
 	if err != nil {
-		// 子系统可能先接入、后发布权限目录。目录尚不存在不是基础设施接入失败，保留接入结果，
-		// 待目录同步后再由管理员显式授权；其他错误仍需向上返回，避免吞掉真实故障。
+		// Provision returns only after the subsystem has published its role catalog. Treat a missing
+		// or disabled administrator role as an incomplete deployment instead of silently marking the
+		// environment READY without granting the operator access. Retry remains safe and idempotent.
 		if errors.Is(err, applicationaccess.ErrValidation) {
-			return "", nil
+			return "", fmt.Errorf("%w: initial administrator role is unavailable", applicationregistryapplication.ErrSubsystemProvisioningUnavailable)
 		}
 		switch {
 		case errors.Is(err, applicationaccess.ErrNotFound):
