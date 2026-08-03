@@ -391,16 +391,13 @@ resolve_compose_file() {
     return
   fi
 
-  local candidate
-  for candidate in "${PROJECT_ROOT}/compose.local.yaml" "${PROJECT_ROOT}/compose.yaml"; do
-    [[ -f "$candidate" ]] || continue
-    if docker compose -f "$candidate" ps --status running --services 2>/dev/null | grep -Fxq 'frontend'; then
-      printf '%s' "$candidate"
-      return
-    fi
-  done
+  local candidate="${PROJECT_ROOT}/compose.local.yaml"
+  if [[ -f "$candidate" ]] && docker compose -f "$candidate" ps --status running --services 2>/dev/null | grep -Fxq 'frontend'; then
+    printf '%s' "$candidate"
+    return
+  fi
 
-  log "ERROR" "未找到正在运行的 frontend 服务；请先启动平台，或设置 PORTAL_GATEWAY_COMPOSE_FILE"
+  log "ERROR" "未找到 compose.local.yaml 中正在运行的 frontend 服务；请先执行 docker-local.sh up，或设置 PORTAL_GATEWAY_COMPOSE_FILE"
   return 1
 }
 
