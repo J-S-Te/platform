@@ -43,15 +43,15 @@ type ProductionComposeSubsystemProvisioner struct {
 }
 
 type productionComposeTargetConfig struct {
-	DeployRoot      string
-	RuntimeEnvPath  string
-	ReleaseEnvPath  string
-	ComposeFile     string
-	AllowedTenantID string
-	ComposeProject  string
-	DockerBinary    string
-	Timeout         time.Duration
-	Profile         productionSubsystemProfile
+	DeployRoot            string
+	RuntimeEnvPath        string
+	ReleaseEnvPath        string
+	ComposeFile           string
+	AllowedTenantID       string
+	ComposeProject        string
+	DockerBinary          string
+	Timeout               time.Duration
+	Profile               productionSubsystemProfile
 	RuntimeBootstrapFiles []productionSubsystemRuntimeFileManifest
 }
 
@@ -115,7 +115,7 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	}
 	provisioner.capabilities.Enabled = config.Enabled
 	for _, profile := range profiles {
-		 target := &productionComposeTarget{config: productionComposeTargetConfig{
+		target := &productionComposeTarget{config: productionComposeTargetConfig{
 			DeployRoot: root, RuntimeEnvPath: config.RuntimeEnvPath, ReleaseEnvPath: config.ReleaseEnvPath,
 			ComposeFile: config.ComposeFile, AllowedTenantID: config.AllowedTenantID,
 			ComposeProject: config.ComposeProject, DockerBinary: config.DockerBinary,

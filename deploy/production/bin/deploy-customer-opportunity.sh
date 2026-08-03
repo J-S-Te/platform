@@ -60,8 +60,16 @@ initialize_runtime_file() {
     install -m 600 "$template" "$target"
     echo "已初始化 $target；基础平台应用接入会由 Agent 自动补齐受管字段和声明的业务密钥"
   fi
+  [[ ! -L "$target" ]] || {
+    echo "拒绝符号链接运行配置：$target" >&2
+    exit 1
+  }
+  chmod 600 "$target" || {
+    echo "无法将运行配置权限收紧为 0600：$target" >&2
+    exit 1
+  }
   [[ "$(stat -c '%a' "$target")" == "600" ]] || {
-    echo "运行配置权限必须为 0600：$target" >&2
+    echo "运行配置权限无法收紧为 0600：$target" >&2
     exit 1
   }
 }
