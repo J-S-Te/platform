@@ -28,8 +28,8 @@ runtime_file="$deploy_dir/.env"
 release_file="$deploy_dir/.release.env"
 customer_runtime_file="$deploy_dir/runtime/customer.env"
 portal_runtime_file="$deploy_dir/runtime/portal.env"
-customer_runtime_template="$deploy_dir/customer.env.example"
-portal_runtime_template="$deploy_dir/portal.env.example"
+customer_runtime_template="$deploy_dir/subsystem-templates/customer.env.example"
+portal_runtime_template="$deploy_dir/subsystem-templates/portal.env.example"
 compose_file="$deploy_dir/compose.yaml"
 profiles_dir="$deploy_dir/subsystems.d"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_runtime_file"
@@ -58,7 +58,7 @@ initialize_runtime_file() {
   if [[ ! -f "$target" ]]; then
     [[ -f "$template" ]] || { echo "缺少运行配置模板：$template" >&2; exit 1; }
     install -m 600 "$template" "$target"
-    echo "已初始化 $target；需补齐 PENDING_ONBOARDING/REPLACE_WITH 项后才能启动服务"
+    echo "已初始化 $target；基础平台应用接入会由 Agent 自动补齐受管字段和声明的业务密钥"
   fi
   [[ "$(stat -c '%a' "$target")" == "600" ]] || {
     echo "运行配置权限必须为 0600：$target" >&2
@@ -204,7 +204,7 @@ fi
 if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready; then
   release_committed=true
   echo "CRM/Portal 镜像已安全暂存；运行凭据尚未完整配置，未启动数据库迁移或业务服务。"
-  echo "请补齐 runtime/customer.env 与 runtime/portal.env 后重新运行同一发布命令。"
+  echo "请先在基础平台应用接入页面完成或重试对应环境；Agent 会补齐 runtime 配置，随后重新运行同一发布命令。"
   exit 0
 fi
 

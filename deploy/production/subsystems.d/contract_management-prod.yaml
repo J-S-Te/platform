@@ -18,6 +18,7 @@ runtime:
     - CONTRACT_MYSQL_ROOT_PASSWORD
   files:
     - path: runtime/contract.env
+      template_path: subsystem-templates/contract.env.example
       compose_environment_key: CONTRACT_RUNTIME_ENV_FILE
       required_existing_keys: []
       values:

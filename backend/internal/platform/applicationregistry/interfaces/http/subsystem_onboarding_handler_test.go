@@ -409,9 +409,17 @@ func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *test
 			errMessage: "subsystem provisioning unavailable: production subsystem target is not allowed",
 			want:       "subsystems.d",
 		},
-		"CRM runtime secrets": {
+		"dependent runtime credentials": {
 			errMessage: "subsystem provisioning unavailable: production subsystem runtime secrets are incomplete",
-			want:       "runtime/*.env",
+			want:       "前置子系统",
+		},
+		"runtime template unavailable": {
+			errMessage: "subsystem provisioning unavailable: production subsystem runtime template is unavailable",
+			want:       "自动创建文件",
+		},
+		"existing generated key is malformed": {
+			errMessage: "subsystem provisioning unavailable: production subsystem generated runtime secret is invalid",
+			want:       "避免误轮换",
 		},
 		"CRM image not published": {
 			errMessage: "subsystem provisioning unavailable: production subsystem image must use an immutable digest",

@@ -18,8 +18,10 @@ runtime:
     - CUSTOMER_MYSQL_ROOT_PASSWORD
   files:
     - path: runtime/customer.env
+      template_path: subsystem-templates/customer.env.example
       compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
-      required_existing_keys:
+      required_existing_keys: []
+      generated_keys:
         - SENSITIVE_ENCRYPTION_KEY_BASE64
         - SENSITIVE_HMAC_KEY_BASE64
         - PORTAL_INVITE_PEPPER_BASE64

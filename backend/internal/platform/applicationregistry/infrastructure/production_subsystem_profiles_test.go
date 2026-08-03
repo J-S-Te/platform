@@ -61,6 +61,18 @@ func TestProductionSubsystemProfilesRejectUnknownFieldsAndUnsafeBindings(t *test
 		"unsupported service purpose": func(manifest string) string {
 			return strings.Replace(manifest, "OIDC_CLIENT_ID: client_id", "OIDC_CLIENT_ID: service.unreviewed_scope.client_id", 1)
 		},
+		"template escapes deployment root": func(manifest string) string {
+			return strings.Replace(manifest, "template_path: sample.env.example", "template_path: ../sample.env.example", 1)
+		},
+		"generated key has unsupported shape": func(manifest string) string {
+			return strings.Replace(manifest, "SAMPLE_KEY_BASE64", "SAMPLE_SECRET", 1)
+		},
+		"generated key overlaps binding": func(manifest string) string {
+			return strings.Replace(manifest, "OIDC_CLIENT_ID: client_id", "OIDC_CLIENT_ID: client_id\n        SAMPLE_KEY_BASE64: client_secret", 1)
+		},
+		"generated key overlaps required key": func(manifest string) string {
+			return strings.Replace(manifest, "required_existing_keys: []", "required_existing_keys: [SAMPLE_KEY_BASE64]", 1)
+		},
 		"reserved platform service": func(manifest string) string {
 			return strings.Replace(manifest, "runtime_services: [sample-api]", "runtime_services: [platform-api]", 1)
 		},
@@ -102,6 +114,23 @@ func TestProductionSubsystemProfilesRejectDuplicateTargetsAndWritableManifest(t 
 	})
 }
 
+func TestProductionSubsystemProfilesAllowReviewedTemplateWithoutManagedBindings(t *testing.T) {
+	t.Parallel()
+	root, profilesPath := productionProfilesFixture(t)
+	manifest := strings.Replace(minimalProductionProfileYAML, `      required_existing_keys: []
+      generated_keys: [SAMPLE_KEY_BASE64]
+      values: {OIDC_SCOPES: "openid profile"}
+      bindings:
+        OIDC_CLIENT_ID: client_id`, `      required_existing_keys: []
+      generated_keys: []
+      values: {}
+      bindings: {}`, 1)
+	writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+	if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err != nil {
+		t.Fatalf("reviewed template-only runtime file was rejected: %v", err)
+	}
+}
+
 func productionProfilesFixture(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -139,8 +168,10 @@ runtime:
   required_infrastructure_keys: [SAMPLE_MYSQL_PASSWORD]
   files:
     - path: runtime/sample.env
+      template_path: sample.env.example
       compose_environment_key: SAMPLE_RUNTIME_ENV_FILE
       required_existing_keys: []
+      generated_keys: [SAMPLE_KEY_BASE64]
       values: {OIDC_SCOPES: "openid profile"}
       bindings:
         OIDC_CLIENT_ID: client_id

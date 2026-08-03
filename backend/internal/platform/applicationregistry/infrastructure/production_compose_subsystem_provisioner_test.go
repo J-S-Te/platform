@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,25 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("runtime environment permissions = %v", info.Mode().Perm())
 	}
+	generatedKey := parseEnvironmentValues(string(contents))["CONTRACT_TEST_KEY_BASE64"]
+	decodedKey, err := base64.StdEncoding.DecodeString(generatedKey)
+	if err != nil || len(decodedKey) != 32 {
+		t.Fatalf("generated runtime key is invalid: length=%d error=%v", len(decodedKey), err)
+	}
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := target.writeRuntimeConfiguration(input); err != nil {
+		t.Fatalf("repeat runtime write: %v", err)
+	}
+	repeatedContents, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedKey := parseEnvironmentValues(string(repeatedContents))["CONTRACT_TEST_KEY_BASE64"]; repeatedKey != generatedKey {
+		t.Fatal("repeat runtime write rotated the generated key")
+	}
 
 	// Preflight performs Docker and Compose validation. Provision then performs exactly the
 	// dependency, migration and contract API operations; no browser value becomes an argument.
@@ -92,6 +112,60 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	}
 	if !containsString(runner.calls[5].arguments, "contract-api") {
 		t.Fatalf("contract API call is not fixed: %v", runner.calls[5].arguments)
+	}
+}
+
+func TestProductionComposeSubsystemProvisionerInitializesMissingRuntimeFromReviewedTemplate(t *testing.T) {
+	t.Parallel()
+	provisioner, _, runtimePath := productionProvisionerFixture(t)
+	if err := os.Remove(runtimePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode)); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	contents, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "UNMANAGED_TEMPLATE_VALUE=preserved") ||
+		!strings.Contains(string(contents), "CONTRACT_TEST_KEY_BASE64=REPLACE_WITH_32_BYTE_BASE64_KEY") {
+		t.Fatalf("runtime file was not initialized from template:\n%s", contents)
+	}
+	info, err := os.Stat(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("initialized runtime mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestProductionComposeSubsystemProvisionerTightensRuntimeModeAndPreservesUnknownKeys(t *testing.T) {
+	t.Parallel()
+	provisioner, _, runtimePath := productionProvisionerFixture(t)
+	if err := os.WriteFile(runtimePath, []byte("OIDC_CLIENT_ID=PENDING_ONBOARDING\nCUSTOM_FUTURE_SETTING=enabled\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runtimePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode)); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	info, err := os.Stat(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("runtime mode = %o, want 600", info.Mode().Perm())
+	}
+	contents, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "CUSTOM_FUTURE_SETTING=enabled") {
+		t.Fatalf("unknown subsystem setting was removed:\n%s", contents)
 	}
 }
 
@@ -130,6 +204,7 @@ func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProv
 	}
 	runtimePath := filepath.Join(canonicalRoot, ".env")
 	contractPath := filepath.Join(canonicalRoot, "runtime", "contract.env")
+	contractTemplatePath := filepath.Join(canonicalRoot, "contract.env.example")
 	releasePath := filepath.Join(canonicalRoot, ".release.env")
 	composePath := filepath.Join(canonicalRoot, "compose.yaml")
 	profilesPath := filepath.Join(canonicalRoot, "subsystems.d")
@@ -140,10 +215,11 @@ func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProv
 		t.Fatal(err)
 	}
 	for path, contents := range map[string]string{
-		runtimePath:  "MYSQL_PASSWORD=platform-password\nMYSQL_ROOT_PASSWORD=platform-root-password\nIAM_MOBILE_ENCRYPTION_KEY=valid-key\nIAM_BOOTSTRAP_TOKEN=valid-bootstrap-token\nCONTRACT_MYSQL_PASSWORD=contract-password\nCONTRACT_MYSQL_ROOT_PASSWORD=contract-root-password\nOIDC_CLIENT_ID=PENDING_ONBOARDING\nOIDC_CLIENT_SECRET=PENDING_ONBOARDING\n",
-		contractPath: "OIDC_CLIENT_ID=PENDING_ONBOARDING\nOIDC_CLIENT_SECRET=PENDING_ONBOARDING\n",
-		releasePath:  "PLATFORM_IMAGE=example/platform@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nCONTRACT_IMAGE=example/contract@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
-		composePath:  "services: {}\n",
+		runtimePath:          "MYSQL_PASSWORD=platform-password\nMYSQL_ROOT_PASSWORD=platform-root-password\nIAM_MOBILE_ENCRYPTION_KEY=valid-key\nIAM_BOOTSTRAP_TOKEN=valid-bootstrap-token\nCONTRACT_MYSQL_PASSWORD=contract-password\nCONTRACT_MYSQL_ROOT_PASSWORD=contract-root-password\nOIDC_CLIENT_ID=PENDING_ONBOARDING\nOIDC_CLIENT_SECRET=PENDING_ONBOARDING\n",
+		contractPath:         "OIDC_CLIENT_ID=PENDING_ONBOARDING\nOIDC_CLIENT_SECRET=PENDING_ONBOARDING\n",
+		contractTemplatePath: "OIDC_CLIENT_ID=PENDING_ONBOARDING\nOIDC_CLIENT_SECRET=PENDING_ONBOARDING\nCONTRACT_TEST_KEY_BASE64=REPLACE_WITH_32_BYTE_BASE64_KEY\nUNMANAGED_TEMPLATE_VALUE=preserved\n",
+		releasePath:          "PLATFORM_IMAGE=example/platform@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nCONTRACT_IMAGE=example/contract@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+		composePath:          "services: {}\n",
 	} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
@@ -163,8 +239,10 @@ runtime:
   required_infrastructure_keys: [MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD, IAM_MOBILE_ENCRYPTION_KEY, IAM_BOOTSTRAP_TOKEN, CONTRACT_MYSQL_PASSWORD, CONTRACT_MYSQL_ROOT_PASSWORD]
   files:
     - path: runtime/contract.env
+      template_path: contract.env.example
       compose_environment_key: CONTRACT_RUNTIME_ENV_FILE
       required_existing_keys: []
+      generated_keys: [CONTRACT_TEST_KEY_BASE64]
       values:
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
       bindings:

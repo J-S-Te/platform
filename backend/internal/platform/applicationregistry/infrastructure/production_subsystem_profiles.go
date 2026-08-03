@@ -46,10 +46,12 @@ type productionSubsystemRuntimeManifest struct {
 
 type productionSubsystemRuntimeFileManifest struct {
 	Path                  string            `yaml:"path"`
+	TemplatePath          string            `yaml:"template_path"`
 	ComposeEnvironmentKey string            `yaml:"compose_environment_key"`
 	Bindings              map[string]string `yaml:"bindings"`
 	Values                map[string]string `yaml:"values"`
 	RequiredExistingKeys  []string          `yaml:"required_existing_keys"`
+	GeneratedKeys         []string          `yaml:"generated_keys"`
 }
 
 type productionSubsystemComposeManifest struct {
@@ -203,7 +205,7 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 
 	runtime := &manifest.Runtime
 	runtime.RequiredInfrastructureKeys = normalizedProductionEnvironmentKeys(runtime.RequiredInfrastructureKeys)
-	if runtime.RequiredInfrastructureKeys == nil || len(runtime.Files) == 0 || len(runtime.Files) > 8 {
+	if runtime.RequiredInfrastructureKeys == nil || len(runtime.Files) == 0 || len(runtime.Files) > 32 {
 		return errors.New("runtime file policy is invalid")
 	}
 	seenPaths := make(map[string]struct{}, len(runtime.Files))
@@ -211,9 +213,10 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	for index := range runtime.Files {
 		file := &runtime.Files[index]
 		file.Path = filepath.ToSlash(filepath.Clean(strings.TrimSpace(file.Path)))
+		file.TemplatePath = normalizedProductionTemplatePath(file.TemplatePath)
 		file.ComposeEnvironmentKey = strings.TrimSpace(file.ComposeEnvironmentKey)
 		if file.Path == "." || filepath.IsAbs(file.Path) || file.Path == "runtime" || !strings.HasPrefix(file.Path, "runtime/") ||
-			strings.Contains(file.Path, "../") || !validEnvironmentKey(file.ComposeEnvironmentKey) {
+			strings.Contains(file.Path, "../") || !validEnvironmentKey(file.ComposeEnvironmentKey) || file.TemplatePath == "." {
 			return errors.New("runtime file path or Compose environment key is invalid")
 		}
 		if _, duplicate := seenPaths[file.Path]; duplicate {
@@ -224,9 +227,6 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		}
 		seenPaths[file.Path] = struct{}{}
 		seenComposeKeys[file.ComposeEnvironmentKey] = struct{}{}
-		if len(file.Bindings) == 0 {
-			return errors.New("runtime file must contain at least one managed binding")
-		}
 		for key, source := range file.Bindings {
 			source = strings.TrimSpace(source)
 			if !validEnvironmentKey(key) || !validProductionBindingSource(source) ||
@@ -246,6 +246,35 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		file.RequiredExistingKeys = normalizedProductionEnvironmentKeys(file.RequiredExistingKeys)
 		if file.RequiredExistingKeys == nil {
 			return errors.New("runtime required-existing key is invalid")
+		}
+		file.GeneratedKeys = normalizedProductionEnvironmentKeys(file.GeneratedKeys)
+		if file.GeneratedKeys == nil {
+			return errors.New("runtime generated key is invalid")
+		}
+		if len(file.GeneratedKeys) > 0 && file.TemplatePath == "" {
+			return errors.New("runtime generated keys require a reviewed template")
+		}
+		requiredKeys := make(map[string]struct{}, len(file.RequiredExistingKeys))
+		for _, key := range file.RequiredExistingKeys {
+			requiredKeys[key] = struct{}{}
+		}
+		for _, key := range file.GeneratedKeys {
+			if !validProductionGeneratedEnvironmentKey(key) {
+				return errors.New("runtime generated key must be a base64 key or pepper")
+			}
+			if _, duplicate := file.Bindings[key]; duplicate {
+				return errors.New("runtime generated key overlaps a managed binding")
+			}
+			if _, duplicate := file.Values[key]; duplicate {
+				return errors.New("runtime generated key overlaps a fixed value")
+			}
+			if _, duplicate := requiredKeys[key]; duplicate {
+				return errors.New("runtime generated key overlaps a required-existing key")
+			}
+		}
+		if file.TemplatePath == "" && len(file.Bindings) == 0 && len(file.Values) == 0 &&
+			len(file.RequiredExistingKeys) == 0 && len(file.GeneratedKeys) == 0 {
+			return errors.New("runtime file policy is empty")
 		}
 	}
 
@@ -294,6 +323,26 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	}
 	compose.ReleaseImageKeys = images
 	return nil
+}
+
+// normalizedProductionTemplatePath 允许随发布包增加新的受控模板，而不要求为每个
+// 子系统修改 Agent 代码。空值表示兼容既有的预置 runtime 文件；非空值必须是部署根
+// 内的 *.env.example 相对路径，运行时还会再次拒绝符号链接和越界解析。
+func normalizedProductionTemplatePath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(value))
+	if cleaned == "." || filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, "../") ||
+		strings.Contains(cleaned, "\x00") || !strings.HasSuffix(cleaned, ".env.example") {
+		return "."
+	}
+	return cleaned
+}
+
+func validProductionGeneratedEnvironmentKey(value string) bool {
+	return strings.HasSuffix(value, "_KEY_BASE64") || strings.HasSuffix(value, "_PEPPER_BASE64")
 }
 
 func validProductionBindingSource(source string) bool {

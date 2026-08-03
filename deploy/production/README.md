@@ -15,13 +15,10 @@ cd /opt/basic-platform
 cp .env.example .env
 cp .release.env.example .release.env
 install -d -m 700 runtime
-cp contract.env.example runtime/contract.env
-cp customer.env.example runtime/customer.env
-cp portal.env.example runtime/portal.env
-chmod 600 .env .release.env runtime/contract.env runtime/customer.env runtime/portal.env
+chmod 600 .env .release.env
 ```
 
-替换 `.env` 中所有基础设施占位值；`.release.env` 的镜像 digest 由 CI/CD 发布自动更新。`runtime/contract.env`、`runtime/customer.env`、`runtime/portal.env` 中的 OIDC、授权目录和服务 Client 占位值由基础平台接入页面和生产 Agent 按审核清单替换。CRM/Portal 模板中的业务加密密钥仍必须由部署人员先生成并替换；Agent 不生成或覆盖这些长期业务密钥。首次镜像发布在接入凭据未补齐时只安全暂存 digest，不启动数据库迁移或 API。不要提交运行环境文件、私钥或备份。
+替换 `.env` 中所有基础设施占位值；`.release.env` 的镜像 digest 由 CI/CD 发布自动更新。`runtime/*.env` 不要求管理员手工创建：首次接入时，Agent 会从审核清单指定的 `*.env.example` 初始化缺失文件、自动收紧为 `0600`，写入 OIDC/授权目录/用途 Client，并为清单声明的业务密钥生成一次性 32 字节随机 base64 值。已有合法密钥、未知环境变量、注释及清单外文件都会保留，重试或更新不会轮换。部署人员也可以提前通过 Secret 管理系统写入合法密钥，Agent 会继续复用。首次镜像发布在接入凭据未补齐时只安全暂存 digest，不启动数据库迁移或 API。不要提交运行环境文件、私钥或备份。
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 
@@ -59,7 +56,7 @@ chmod 600 .env .release.env runtime/contract.env runtime/customer.env runtime/po
 3. 发布 frontend，并确认 `platform-api` 与隔离的 `subsystem-provisioner` 健康；
 4. 发布所需子系统的不可变镜像。尚未接入时，发布脚本只安全暂存 digest，不会因 OIDC 占位值启动失败；
 5. 登录基础平台，在“应用接入”中从服务器审核目标列表选择 `contract_management/prod`、`customer_and_opportunity/prod` 或 `customer_portal/prod`；客户 Portal 依赖 CRM，必须先完成 `customer_and_opportunity/prod`；
-6. 平台自动创建应用环境、浏览器 Client、catalog-publisher Client、按用途拆分的服务 Client、精确回调和适用的初始管理员授权；Agent 将一次性凭据写入对应的 `runtime/*.env`，再按目标执行固定备份、迁移和 API 重建。
+6. 平台自动创建应用环境、浏览器 Client、catalog-publisher Client、按用途拆分的服务 Client、精确回调和适用的初始管理员授权；Agent 自动初始化对应 `runtime/*.env`、生成清单声明的长期业务密钥并写入一次性凭据，再按目标执行固定备份、迁移和 API 重建。
 
 生产接入不再要求管理员在命令行复制 OAuth Client Secret。Secret 只在平台后端内存、受限 Unix Socket 和权限为 `0600` 的服务器 `runtime/*.env` 之间流转，不返回浏览器，也不进入命令行参数或日志。生产 Agent 只允许 `subsystems.d/*.yaml` 中随发布包审核的应用/环境和固定 Compose 服务，不接受浏览器指定的文件、命令、镜像或服务名。
 
@@ -80,10 +77,10 @@ PLATFORM_AUDIT_CLIENT_SECRET
 
 ### 4.1 新增生产子系统目标（部署人员）
 
-新增子系统时不再向 `.env` 增加一组 `SUBSYSTEM_PRODUCTION_APPLICATION_*` 白名单。部署人员应在代码评审中新增 `subsystems.d/<application>-<environment>.yaml`，并同步准备 Compose 服务、不可变镜像键和 `runtime/*.env.example`。清单只允许声明：
+新增子系统时不再向 `.env` 增加一组 `SUBSYSTEM_PRODUCTION_APPLICATION_*` 白名单。部署人员应在代码评审中新增 `subsystems.d/<application>-<environment>.yaml`，并同步准备 Compose 服务、不可变镜像键和 `subsystem-templates/*.env.example`。该模板目录整体只读挂载给 Agent，后续新增模板不需要再修改 Compose volume。清单只允许声明：
 
 - 应用编码、环境、固定 PathPrefix/UpstreamURL 和客户端类型；
-- 部署根 `runtime/` 下的环境文件，以及平台输入到明确环境变量的绑定；
+- 部署根 `runtime/` 下的环境文件、受控初始化模板、可首次生成的 base64 密钥，以及平台输入到明确环境变量的绑定；
 - 固定 Compose profile、依赖、数据库备份目标、迁移服务、运行服务和下线服务；
 - `.release.env` 中必须为 `image@sha256:digest` 的镜像键。
 
@@ -106,8 +103,10 @@ runtime:
   required_infrastructure_keys: [BILLING_MYSQL_PASSWORD, BILLING_MYSQL_ROOT_PASSWORD]
   files:
     - path: runtime/billing.env
+      template_path: subsystem-templates/billing.env.example
       compose_environment_key: BILLING_RUNTIME_ENV_FILE
-      required_existing_keys: [BILLING_ENCRYPTION_KEY]
+      required_existing_keys: []
+      generated_keys: [BILLING_ENCRYPTION_KEY_BASE64]
       values:
         OIDC_SCOPES: openid profile
       bindings:
@@ -132,7 +131,9 @@ compose:
   release_image_keys: [BILLING_IMAGE]
 ```
 
-`bindings` 的值不是模板表达式，而是 Agent 内置的有限数据源。通用来源包括 `issuer`、`client_id`、`client_secret`、`redirect_uri`、`public_url`、`tenant_id`、`application_id`、`application_code`、`environment`、`path_prefix`、`cookie_secure` 和 catalog-publisher 凭据；用途 Client 使用 `service.<purpose>.client_id` / `service.<purpose>.client_secret`。如果子系统需要新的机器用途，应先在平台控制面增加最小 scope 的用途 Client，再在清单引用，不能复用浏览器 Client。
+`template_path` 是部署根内随版本审核的 `*.env.example` 相对路径；缺失的 runtime 文件会从这里原子初始化。`generated_keys` 只接受明确声明的 `*_KEY_BASE64` / `*_PEPPER_BASE64`，仅在键缺失或仍为 `REPLACE_WITH_*` / `PENDING_*` 时生成，已有合法值不覆盖。`bindings` 的值不是模板表达式，而是 Agent 内置的有限数据源。通用来源包括 `issuer`、`client_id`、`client_secret`、`redirect_uri`、`public_url`、`tenant_id`、`application_id`、`application_code`、`environment`、`path_prefix`、`cookie_secure` 和 catalog-publisher 凭据；用途 Client 使用 `service.<purpose>.client_id` / `service.<purpose>.client_secret`。如果子系统需要新的机器用途，应先在平台控制面增加最小 scope 的用途 Client，再在清单引用，不能复用浏览器 Client。
+
+Agent 采用“只管理声明键”的兼容策略：子系统以后新增环境变量、注释、证书或其他文件不会因为未列入清单而被删除或拒绝；需要平台生成/注入的新 runtime 文件时，只增加模板和 YAML 文件项，无需修改 Agent Go 代码。仍需严格声明的是宿主机写入目标、平台凭据映射和 Compose 服务，浏览器不能动态指定这些高权限操作。
 
 完成上述一次性服务器初始化后，Application、Environment、登录目标、OAuth Client、运行时凭据、首次管理员授权、失败重试和安全下线都从基础平台页面操作。接入时未另选初始管理员则使用当前操作者；平台会保存这一选择，首次部署失败后的页面重试仍使用原选择，不会改授给点击重试的人。初始授权完成后，普通更新或重试不会恢复后来主动移除的角色。
 
@@ -154,7 +155,7 @@ docker compose --env-file .env --env-file .release.env \
 
 1. `platform-api` 与 `subsystem-provisioner` 必须使用同一个最新 `PLATFORM_IMAGE`，并且生产清单目录包含 `subsystems.d/customer_and_opportunity-prod.yaml`；只更新平台 API、不重建 Agent 会导致目标被旧 Agent 拒绝。
 2. `.release.env` 必须包含 `CUSTOMER_CRM_IMAGE=image@sha256:<64位摘要>`；不能使用普通 tag 或占位值。
-3. `runtime/customer.env` 必须存在、权限为 `0600`，并预先填写 `SENSITIVE_ENCRYPTION_KEY_BASE64`、`SENSITIVE_HMAC_KEY_BASE64`、`PORTAL_INVITE_PEPPER_BASE64` 等长期业务密钥。平台接入流程只写 OIDC 和平台机器凭据，不生成或覆盖这些业务密钥。
+3. 不再需要手工创建 `runtime/customer.env` 或填写三个长期业务密钥。新版 Agent 会从 `subsystem-templates/customer.env.example` 初始化、自动收紧到 `0600`，并首次生成 `SENSITIVE_ENCRYPTION_KEY_BASE64`、`SENSITIVE_HMAC_KEY_BASE64`、`PORTAL_INVITE_PEPPER_BASE64`；若仍提示 runtime/模板错误，通常是 Agent 仍运行旧镜像、模板目录未随生产资产发布或 `runtime/` 不可写。
 4. 若日志显示数据库、迁移或 API 健康检查失败，先处理对应容器；若显示 `deployment helper is unavailable`，先恢复 Agent；若显示 `target is not allowed`，同步完整生产部署资产并同时重建 `platform-api`、`subsystem-provisioner`。
 
 请求响应中的追踪号会同步写入 Agent 日志的 `request_id` 字段。预检失败时控制面尚未创建应用环境，应修复后重新提交接入；只有已经生成环境并进入 `PROVISION_FAILED` 时才点击页面上的“重试”，不要重复 onboard。
@@ -200,19 +201,16 @@ CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth C
 
 ### 安装或升级客户商机生产资产
 
-将本目录的 `compose.yaml`、`customer.env.example`、`portal.env.example`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
+将本目录的 `compose.yaml`、完整 `subsystem-templates/`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
 
 ```bash
 cd /opt/basic-platform
 install -d -m 700 runtime backups backups/releases
-test -f runtime/customer.env || install -m 600 customer.env.example runtime/customer.env
-test -f runtime/portal.env || install -m 600 portal.env.example runtime/portal.env
-chmod 600 .env .release.env runtime/customer.env runtime/portal.env
+chmod 600 .env .release.env
 chmod 750 bin/deploy-customer-opportunity.sh
-docker compose --env-file .env --env-file .release.env config --quiet
 ```
 
-已有运行配置禁止用模板覆盖，只补新增字段。更新 Nginx 后先执行 `nginx -t`，再 reload。GitHub `test` Environment 的 `CUSTOMER_DEPLOY_SCRIPT` 必须与实际安装绝对路径一致。
+随后从基础平台“应用接入”页面执行首次接入；Agent 会初始化缺失的 runtime 文件。已有运行配置禁止用模板覆盖，Agent 只更新清单管理键并保留新增字段。更新 Nginx 后先执行 `nginx -t`，再 reload。GitHub `test` Environment 的 `CUSTOMER_DEPLOY_SCRIPT` 必须与实际安装绝对路径一致。
 
 ## 6. 恢复和备份
 
