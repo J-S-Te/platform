@@ -677,12 +677,26 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
 			httperror.DependencyUnavailable.Code,
 			message,
-			map[string]string{"next_action": subsystemProvisioningNextAction(err, provisioningStages...)},
+			map[string]string{
+				"next_action": subsystemProvisioningNextAction(err, provisioningStages...),
+				"detail":      subsystemProvisioningDetail(err),
+			},
 		))
 	default:
 		handler.logger.Error("subsystem onboarding request failed", "path", request.URL.Path, "error", err)
 		httpresponse.WriteError(writer, request, stdhttp.StatusInternalServerError, httperror.Internal)
 	}
+}
+
+// subsystemProvisioningDetail 把脱敏后的 Agent 错误原文附到响应里，让页面直接显示目标 API
+// 未能启动的具体日志原因；错误文本已被 Agent 侧去除明文凭据并限制长度。
+func subsystemProvisioningDetail(err error) string {
+	const limit = 4000
+	message := strings.TrimSpace(err.Error())
+	if len(message) > limit {
+		message = message[:limit] + "...(truncated)"
+	}
+	return message
 }
 
 func subsystemProvisioningNextAction(err error, stages ...string) string {

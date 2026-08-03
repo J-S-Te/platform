@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,12 +309,66 @@ func TestProductionComposeSubsystemProvisionerBindsFirstTenantAndRejectsAnotherT
 	}
 }
 
+// productionFailureOutputRunner 模拟生产 Agent：固定部署步骤失败时支持 RunOutput 抓取日志，
+// 用于验证失败详情会携带目标容器日志摘要。
+type productionFailureOutputRunner struct {
+	calls  []recordingSubsystemRunnerCall
+	failUp bool
+	logs   string
+}
+
+func (runner *productionFailureOutputRunner) record(directory string, environment []string, name string, arguments ...string) {
+	runner.calls = append(runner.calls, recordingSubsystemRunnerCall{
+		directory: directory, environment: environment, binary: name, arguments: append([]string(nil), arguments...),
+	})
+}
+
+func (runner *productionFailureOutputRunner) Run(_ context.Context, directory string, environment []string, name string, arguments ...string) error {
+	runner.record(directory, environment, name, arguments...)
+	joined := strings.Join(arguments, " ")
+	if runner.failUp && strings.Contains(joined, "up") && strings.Contains(joined, "contract-api") {
+		return errors.New("container exited before health check")
+	}
+	return nil
+}
+
+func (runner *productionFailureOutputRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
+	runner.record(directory, environment, name, arguments...)
+	if strings.Contains(strings.Join(arguments, " "), "logs") {
+		return []byte(runner.logs), nil
+	}
+	return nil, runner.Run(ctx, directory, environment, name, arguments...)
+}
+
+func TestProductionComposeSubsystemProvisionerSurfacesRuntimeServiceLogsOnFailure(t *testing.T) {
+	t.Parallel()
+	runner := &productionFailureOutputRunner{
+		failUp: true,
+		logs:   "CRM startup failed: authorization catalog token returned HTTP 401\ncontainer exited",
+	}
+	provisioner, _ := productionProvisionerFixtureWithRunner(t, false, runner)
+	err := provisioner.Provision(context.Background(), productionContractInput("https://platform.example.com"))
+	if err == nil {
+		t.Fatal("provision unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "authorization catalog token returned HTTP 401") {
+		t.Fatalf("provision error does not carry container logs: %v", err)
+	}
+}
+
 func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProvisioner, *recordingSubsystemRunner, string) {
 	t.Helper()
 	return productionProvisionerFixtureWithPlaceholderAllowance(t, false)
 }
 
 func productionProvisionerFixtureWithPlaceholderAllowance(t *testing.T, allowPlaceholderDatabaseCredentials bool) (*ProductionComposeSubsystemProvisioner, *recordingSubsystemRunner, string) {
+	t.Helper()
+	runner := &recordingSubsystemRunner{}
+	provisioner, contractPath := productionProvisionerFixtureWithRunner(t, allowPlaceholderDatabaseCredentials, runner)
+	return provisioner, runner, contractPath
+}
+
+func productionProvisionerFixtureWithRunner(t *testing.T, allowPlaceholderDatabaseCredentials bool, runner subsystemCommandRunner) (*ProductionComposeSubsystemProvisioner, string) {
 	t.Helper()
 	root := t.TempDir()
 	canonicalRoot, err := filepath.EvalSymlinks(root)
@@ -384,7 +439,6 @@ compose:
 	if err := os.WriteFile(filepath.Join(profilesPath, "contract.yaml"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runner := &recordingSubsystemRunner{}
 	provisioner, err := newProductionComposeSubsystemProvisioner(ProductionComposeSubsystemProvisionerConfig{
 		Enabled: true, DeployRoot: canonicalRoot, ProfilesDirectory: profilesPath, RuntimeEnvPath: runtimePath,
 		ReleaseEnvPath: releasePath, ComposeFile: composePath, ComposeProject: "basic-platform-production",
@@ -394,7 +448,7 @@ compose:
 	if err != nil {
 		t.Fatal(err)
 	}
-	return provisioner, runner, contractPath
+	return provisioner, contractPath
 }
 
 func productionPreflightInput(origin, applicationCode string) application.SubsystemPreflightInput {
