@@ -11,6 +11,13 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 )
 
+const (
+	testProductionApplicationCode = "contract_management"
+	testProductionEnvironment     = "prod"
+	testProductionPathPrefix      = "/contract_management"
+	testProductionUpstreamURL     = "http://contract-api:8081"
+)
+
 func TestProductionComposeSubsystemProvisionerRejectsAnythingExceptContractProd(t *testing.T) {
 	t.Parallel()
 	provisioner, _, _ := productionProvisionerFixture(t)
@@ -28,7 +35,7 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	t.Parallel()
 	provisioner, runner, runtimePath := productionProvisionerFixture(t)
 	input := productionContractInput("https://platform.example.com")
-	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", integratedContractApplicationCode)); err != nil {
+	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode)); err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
 	if err := provisioner.Provision(context.Background(), input); err != nil {
@@ -104,10 +111,10 @@ func TestProductionComposeSubsystemProvisionerRejectsInconsistentPublicIntegrati
 func TestProductionComposeSubsystemProvisionerBindsFirstTenantAndRejectsAnotherTenant(t *testing.T) {
 	t.Parallel()
 	provisioner, _, _ := productionProvisionerFixture(t)
-	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", integratedContractApplicationCode)); err != nil {
+	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode)); err != nil {
 		t.Fatalf("first tenant preflight: %v", err)
 	}
-	other := productionPreflightInput("https://platform.example.com", integratedContractApplicationCode)
+	other := productionPreflightInput("https://platform.example.com", testProductionApplicationCode)
 	other.TenantID = "tenant-2"
 	if err := provisioner.Preflight(context.Background(), other); err == nil {
 		t.Fatal("second tenant was allowed to claim the shared production contract runtime")
@@ -142,7 +149,10 @@ func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProv
 	provisioner, err := newProductionComposeSubsystemProvisioner(ProductionComposeSubsystemProvisionerConfig{
 		Enabled: true, DeployRoot: canonicalRoot, RuntimeEnvPath: runtimePath, ContractEnvPath: contractPath,
 		ReleaseEnvPath: releasePath, ComposeFile: composePath, ComposeProject: "basic-platform-production",
-		AllowedTenantID: "tenant-1",
+		AllowedTenantID: "tenant-1", ApplicationCode: testProductionApplicationCode,
+		Environment: testProductionEnvironment, PathPrefix: testProductionPathPrefix, UpstreamURL: testProductionUpstreamURL,
+		DependencyServices: []string{"contract-mysql", "temporal"}, DatabaseService: "contract-mysql",
+		DatabaseName: "contract_management", MigrateService: "contract-migrate", APIService: "contract-api", ReleaseImageKey: "CONTRACT_IMAGE",
 		DockerBinary: "docker", Timeout: time.Minute,
 	}, runner)
 	if err != nil {
@@ -153,22 +163,22 @@ func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProv
 
 func productionPreflightInput(origin, applicationCode string) application.SubsystemPreflightInput {
 	return application.SubsystemPreflightInput{
-		TenantID: "tenant-1", ApplicationCode: applicationCode, Environment: productionContractEnvironment,
-		Issuer: origin, PublicBaseURL: origin, UpstreamURL: productionContractUpstreamURL,
-		PathPrefix: productionContractPathPrefix, ClientType: "confidential",
+		TenantID: "tenant-1", ApplicationCode: applicationCode, Environment: testProductionEnvironment,
+		Issuer: origin, PublicBaseURL: origin, UpstreamURL: testProductionUpstreamURL,
+		PathPrefix: testProductionPathPrefix, ClientType: "confidential",
 	}
 }
 
 func productionContractInput(origin string) application.SubsystemProvisioningInput {
 	return application.SubsystemProvisioningInput{
-		TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: integratedContractApplicationCode,
-		Environment: productionContractEnvironment, Issuer: origin,
+		TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: testProductionApplicationCode,
+		Environment: testProductionEnvironment, Issuer: origin,
 		ClientID: "contract_management-prod-web", ClientSecret: "browser-secret",
 		CatalogPublisherClientID:     "contract_management-prod-catalog-publisher",
 		CatalogPublisherClientSecret: "publisher-secret",
-		RedirectURI:                  origin + productionContractPathPrefix + "/auth/callback",
-		PublicURL:                    origin + productionContractPathPrefix + "/",
-		PathPrefix:                   productionContractPathPrefix, UpstreamURL: productionContractUpstreamURL,
+		RedirectURI:                  origin + testProductionPathPrefix + "/auth/callback",
+		PublicURL:                    origin + testProductionPathPrefix + "/",
+		PathPrefix:                   testProductionPathPrefix, UpstreamURL: testProductionUpstreamURL,
 		ServiceCredentials: []application.SubsystemServiceCredential{{
 			Purpose:         application.ServiceCredentialAuditIngest,
 			OAuthClient:     application.OAuthClientView{ClientID: "contract_management-prod-audit-publisher"},

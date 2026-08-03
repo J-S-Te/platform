@@ -188,7 +188,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.
 	if err := updateProductionSubsystemEnvironment(provisioner.config.ContractEnvPath, values); err != nil {
 		return provisioningError("write production contract runtime configuration")
 	}
-	if err := provisioner.deployContractLocked(operationContext); err != nil {
+	if err := provisioner.deployTargetLocked(operationContext); err != nil {
 		return err
 	}
 	return nil

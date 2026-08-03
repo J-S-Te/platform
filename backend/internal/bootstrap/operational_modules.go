@@ -60,23 +60,9 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		cfg.SubsystemOnboarding.Enabled,
 		cfg.SubsystemOnboarding.SocketPath,
 		cfg.SubsystemOnboarding.Timeout,
-<<<<<<< Updated upstream
-		cfg.SubsystemOnboarding.Mode,
-=======
-		applicationregistryapplication.SubsystemProvisioningCapabilities{
-			Enabled: cfg.SubsystemOnboarding.Enabled,
-			Mode: cfg.SubsystemOnboarding.Mode,
-			SupportedApplicationCodes: productionCapabilityValues(cfg.SubsystemOnboarding.Mode, cfg.SubsystemOnboarding.ProductionApplicationCode),
-			SupportedEnvironments: subsystemCapabilityEnvironments(cfg.SubsystemOnboarding.Mode, cfg.SubsystemOnboarding.ProductionEnvironment),
-			DefaultApplicationCode: cfg.SubsystemOnboarding.ProductionApplicationCode,
-			DefaultApplicationName: cfg.SubsystemOnboarding.ProductionApplicationName,
-			DefaultDescription: cfg.SubsystemOnboarding.ProductionDescription,
-			DefaultEnvironment: cfg.SubsystemOnboarding.ProductionEnvironment,
-			DefaultUpstreamURL: cfg.SubsystemOnboarding.ProductionUpstreamURL,
-			DefaultPathPrefix: cfg.SubsystemOnboarding.ProductionPathPrefix,
-			DefaultClientType: cfg.SubsystemOnboarding.ProductionClientType,
-		},
->>>>>>> Stashed changes
+		applicationregistryinfrastructure.SubsystemProvisioningCapabilitiesForConfig(
+			cfg.SubsystemOnboarding,
+		),
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err

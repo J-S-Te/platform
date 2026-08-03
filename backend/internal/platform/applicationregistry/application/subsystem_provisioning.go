@@ -51,22 +51,16 @@ type SubsystemDeploymentStateStore interface {
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
 }
 
-<<<<<<< Updated upstream
 // SubsystemProvisioningCapabilities describes the safe deployment boundary exposed to the
 // management console. It intentionally contains no host paths, tenant binding, image reference,
-// credentials, or arbitrary command/service names.
-=======
-// SubsystemProvisioningCapabilities exposes only the non-sensitive deployment policy required
-// by the management console. Production targets come from server configuration; host paths,
-// tenant bindings, credentials and Compose service names are deliberately excluded.
->>>>>>> Stashed changes
+// credentials, or arbitrary command/service names. Targets are loaded from reviewed server-side
+// deployment manifests; the browser can select one of them but cannot create a new target.
 type SubsystemProvisioningCapabilities struct {
 	Enabled                   bool
 	Mode                      string
 	SupportedApplicationCodes []string
 	SupportedEnvironments     []string
-<<<<<<< Updated upstream
-=======
+	Targets                   []SubsystemProvisioningTarget
 	DefaultApplicationCode    string
 	DefaultApplicationName    string
 	DefaultDescription        string
@@ -74,7 +68,19 @@ type SubsystemProvisioningCapabilities struct {
 	DefaultUpstreamURL        string
 	DefaultPathPrefix         string
 	DefaultClientType         string
->>>>>>> Stashed changes
+}
+
+// SubsystemProvisioningTarget is the non-sensitive projection of one reviewed deployment
+// manifest. PublicBaseURL is intentionally omitted: the platform OIDC issuer is the only public
+// origin accepted by the onboarding service.
+type SubsystemProvisioningTarget struct {
+	ApplicationCode string
+	ApplicationName string
+	Description     string
+	Environment     string
+	UpstreamURL     string
+	PathPrefix      string
+	ClientType      string
 }
 
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
