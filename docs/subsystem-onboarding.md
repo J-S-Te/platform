@@ -211,6 +211,8 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
 
 镜像仓库凭据、平台密钥、数据库、Docker/Compose、生产部署目录和隔离 Agent 是一次性基础设施初始化，由部署人员或 CI/CD 完成。完成后，日常平台管理员只使用“应用接入”页面进行首次接入、查看状态、按页面“下一步操作”排障、重试、更新和下线，不登录服务器，也不手工复制 OAuth Client ID/Secret。
 
+仅限测试服务器：若没有历史数据且只想验证接入流程，可在服务器 `.env` 中设置 `SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=true`，Agent 会跳过子系统数据库凭据校验，让 Compose 在首次创建空数据库时使用占位密码完成接入。生产环境必须保持 `false`；已有持久化数据的数据库不会被该开关自动改密。
+
 ### 4.2 本地脚本参数（生产页面不需要输入这些命令）
 
 | 参数 | 说明 |

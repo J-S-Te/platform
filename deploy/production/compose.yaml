@@ -141,6 +141,8 @@ services:
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # 仅测试服务器可设为 true：跳过子系统数据库凭据校验，允许占位密码首次初始化。
+      SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS: ${SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS:-false}
     command: ["./subsystem-provisioner"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
