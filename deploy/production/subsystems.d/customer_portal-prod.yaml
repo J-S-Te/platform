@@ -10,10 +10,6 @@ application:
   client_type: confidential
 runtime:
   required_infrastructure_keys:
-    - MYSQL_PASSWORD
-    - MYSQL_ROOT_PASSWORD
-    - IAM_MOBILE_ENCRYPTION_KEY
-    - IAM_BOOTSTRAP_TOKEN
     - CUSTOMER_MYSQL_PASSWORD
     - CUSTOMER_MYSQL_ROOT_PASSWORD
     - PORTAL_MYSQL_PASSWORD

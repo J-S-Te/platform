@@ -413,6 +413,14 @@ func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *test
 			errMessage: "subsystem provisioning unavailable: production subsystem runtime secrets are incomplete",
 			want:       "前置子系统",
 		},
+		"stale Agent infrastructure validation": {
+			errMessage: "subsystem provisioning unavailable: production infrastructure secrets are incomplete",
+			want:       "旧版 Agent",
+		},
+		"target database credentials": {
+			errMessage: "subsystem provisioning unavailable: production subsystem database credentials are incomplete",
+			want:       "实际使用的数据库凭据",
+		},
 		"runtime template unavailable": {
 			errMessage: "subsystem provisioning unavailable: production subsystem runtime template is unavailable",
 			want:       "自动创建文件",

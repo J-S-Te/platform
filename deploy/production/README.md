@@ -22,6 +22,8 @@ chmod 600 .env .release.env
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 
+应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前三个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*` 或 `CUSTOMER_MYSQL_* + PORTAL_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。
+
 ## 2. 镜像仓库
 
 - `platform` 和 `frontend` workflow 使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`。
@@ -100,6 +102,8 @@ application:
   upstream_url: http://billing-api:8080
   client_type: confidential
 runtime:
+  # 仅声明该子系统实际使用且不可安全自动轮换的数据库凭据。
+  # 这些键在真正 Provision 前校验，不会因为预检阶段仍有平台级占位值而阻止登记接入。
   required_infrastructure_keys: [BILLING_MYSQL_PASSWORD, BILLING_MYSQL_ROOT_PASSWORD]
   files:
     - path: runtime/billing.env
