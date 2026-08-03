@@ -60,6 +60,15 @@ if [[ ! -f "$contract_runtime_file" ]]; then
   install -m 600 "$contract_runtime_template" "$contract_runtime_file"
   echo "已初始化 $contract_runtime_file；合同服务接入前仍需由平台写入运行凭据"
 fi
+[[ ! -L "$contract_runtime_file" ]] || {
+  echo "拒绝符号链接运行配置：$contract_runtime_file" >&2
+  exit 1
+}
+chmod 600 "$contract_runtime_file"
+[[ "$(stat -c '%a' "$contract_runtime_file")" == "600" ]] || {
+  echo "无法将运行配置权限收紧为 0600：$contract_runtime_file" >&2
+  exit 1
+}
 
 mkdir -p "$deploy_dir/backups/releases"
 exec 9>"$deploy_dir/runtime/.deploy.lock"

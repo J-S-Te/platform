@@ -118,6 +118,18 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 func TestProductionComposeSubsystemProvisionerInitializesMissingRuntimeFromReviewedTemplate(t *testing.T) {
 	t.Parallel()
 	provisioner, _, runtimePath := productionProvisionerFixture(t)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auxiliaryTemplatePath := filepath.Join(target.config.DeployRoot, "auxiliary.env.example")
+	auxiliaryRuntimePath := filepath.Join(target.config.DeployRoot, "runtime", "auxiliary.env")
+	if err := os.WriteFile(auxiliaryTemplatePath, []byte("AUXILIARY_SETTING=preserved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target.config.RuntimeBootstrapFiles = append(target.config.RuntimeBootstrapFiles, productionSubsystemRuntimeFileManifest{
+		Path: "runtime/auxiliary.env", TemplatePath: "auxiliary.env.example", ComposeEnvironmentKey: "AUXILIARY_RUNTIME_ENV_FILE",
+	})
 	if err := os.Remove(runtimePath); err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +150,28 @@ func TestProductionComposeSubsystemProvisionerInitializesMissingRuntimeFromRevie
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("initialized runtime mode = %o", info.Mode().Perm())
+	}
+	auxiliaryContents, err := os.ReadFile(auxiliaryRuntimePath)
+	if err != nil {
+		t.Fatalf("read supporting runtime initialized from another reviewed profile: %v", err)
+	}
+	if string(auxiliaryContents) != "AUXILIARY_SETTING=preserved\n" {
+		t.Fatalf("supporting runtime contents = %q", auxiliaryContents)
+	}
+}
+
+func TestProductionRuntimeBootstrapFilesRejectsCrossProfileTemplateMismatch(t *testing.T) {
+	t.Parallel()
+	profiles := []productionSubsystemProfile{
+		{Manifest: productionSubsystemManifest{Runtime: productionSubsystemRuntimeManifest{Files: []productionSubsystemRuntimeFileManifest{{
+			Path: "runtime/shared.env", TemplatePath: "one.env.example", ComposeEnvironmentKey: "SHARED_RUNTIME_ENV_FILE",
+		}}}}},
+		{Manifest: productionSubsystemManifest{Runtime: productionSubsystemRuntimeManifest{Files: []productionSubsystemRuntimeFileManifest{{
+			Path: "runtime/shared.env", TemplatePath: "two.env.example", ComposeEnvironmentKey: "SHARED_RUNTIME_ENV_FILE",
+		}}}}},
+	}
+	if _, err := productionRuntimeBootstrapFiles(profiles); err == nil {
+		t.Fatal("cross-profile runtime template mismatch was accepted")
 	}
 }
 
