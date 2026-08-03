@@ -83,6 +83,50 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	}
 }
 
+func TestOnboardSubsystemPersistsSelectedAdministratorForRetry(t *testing.T) {
+	t.Parallel()
+	pathPrefix := "/contract_management"
+	upstreamURL := "http://contract-api:8081"
+	service := &stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
+		Application:                 application.Application{ID: "app-1", Code: "contract_management"},
+		Environment:                 application.Environment{Environment: "prod", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL},
+		OAuthClient:                 application.OAuthClientView{ClientID: "contract_management-prod-web"},
+		CatalogPublisherOAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-catalog-publisher"},
+		PlaintextSecret:             "browser-secret", CatalogPublisherPlaintextSecret: "publisher-secret",
+		RedirectURI: "http://localhost:8081/contract_management/auth/callback",
+		PublicURL:   "http://localhost:8081/contract_management/",
+		ServiceCredentials: []application.SubsystemServiceCredential{{
+			Purpose:         application.ServiceCredentialAuditIngest,
+			OAuthClient:     application.OAuthClientView{ClientID: "contract_management-prod-audit-publisher"},
+			PlaintextSecret: "audit-secret",
+		}},
+	}}
+	stateStore := &recordingSubsystemDeploymentStateStore{}
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
+	handler, err := NewSubsystemOnboardingHandler(service, &recordingHTTPSubsystemProvisioner{}, access, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(`{"application_code":"contract_management","application_name":"合同管理系统","environment":"prod","public_base_url":"http://localhost:8081","upstream_url":"http://contract-api:8081","path_prefix":"/contract_management","client_type":"confidential","initial_admin_user_id":"01K10D00000000000000000001"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.OnboardSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusCreated {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if service.input.InitialAdminUserID != "01K10D00000000000000000001" || access.userID != service.input.InitialAdminUserID {
+		t.Fatalf("selected administrator was not carried through: input=%#v access=%#v", service.input, access)
+	}
+	if stateStore.initialAccessMarks != 1 {
+		t.Fatalf("initial access completion marks = %d", stateStore.initialAccessMarks)
+	}
+}
+
 func TestOnboardSubsystemExistingEnvironmentReturnsActionableConflict(t *testing.T) {
 	t.Parallel()
 	service := &stubSubsystemOnboardingService{err: &application.SubsystemOnboardingConflict{
@@ -148,20 +192,38 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 
 type stubSubsystemOnboardingService struct {
 	result application.SubsystemOnboardingResult
+	input  application.SubsystemOnboardingInput
+	portalItems []application.PortalApplication
 	err    error
 }
 
-func (service *stubSubsystemOnboardingService) OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
+func (service *stubSubsystemOnboardingService) OnboardSubsystem(_ context.Context, input application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
+	service.input = input
 	return service.result, service.err
 }
 
-func (*stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
-	return nil, nil
+func (service *stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
+	if service.portalItems != nil {
+		return service.portalItems, nil
+	}
+	applicationID := service.result.Application.ID
+	if applicationID == "" {
+		applicationID = "app-1"
+	}
+	environment := service.result.Environment.Environment
+	if environment == "" {
+		environment = "prod"
+	}
+	code := service.result.Application.Code
+	if code == "" {
+		code = "contract_management"
+	}
+	return []application.PortalApplication{{ApplicationID: applicationID, Code: code, Environment: environment}}, nil
 }
 
 func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T) {
 	t.Parallel()
-	service := &stubSubsystemOnboardingService{}
+	service := &stubSubsystemOnboardingService{portalItems: []application.PortalApplication{}}
 	handler, err := NewSubsystemOnboardingHandler(
 		service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
 		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -336,10 +398,11 @@ type recordedDeploymentTransition struct {
 }
 
 type recordingSubsystemDeploymentStateStore struct {
-	transitions   []recordedDeploymentTransition
-	state         application.SubsystemDeploymentState
-	transitionErr error
-	getErr        error
+	transitions        []recordedDeploymentTransition
+	state              application.SubsystemDeploymentState
+	initialAccessMarks int
+	transitionErr      error
+	getErr             error
 }
 
 func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(_ context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
@@ -354,11 +417,21 @@ func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentState
 	return store.state, store.getErr
 }
 
+func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentContext(context.Context, string, string, string) (application.SubsystemDeploymentState, error) {
+	return store.state, store.getErr
+}
+
+func (store *recordingSubsystemDeploymentStateStore) MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error {
+	store.initialAccessMarks++
+	return nil
+}
+
 func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T) {
 	t.Parallel()
-	stateStore := &recordingSubsystemDeploymentStateStore{}
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "user-1"}}
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
 	handler, err := NewSubsystemOnboardingHandler(
-		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, access,
 		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
 	)
 	if err != nil {
@@ -384,6 +457,40 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	}
 	if stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "RETRY" {
 		t.Fatalf("terminal transition = %#v", stateStore.transitions[1])
+	}
+	if access.userID != "user-1" || stateStore.initialAccessMarks != 1 {
+		t.Fatalf("retry did not complete pending initial access: access=%#v marks=%d", access, stateStore.initialAccessMarks)
+	}
+}
+
+func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T) {
+	t.Parallel()
+	assignedAt := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
+		ApplicationID: "app-1", InitialAdminUserID: "original-admin", InitialAccessAssignedAt: &assignedAt,
+	}}
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, access,
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"contract_management","environment":"prod"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "operator-2"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if access.userID != "" || stateStore.initialAccessMarks != 0 {
+		t.Fatalf("retry unexpectedly restored initial access: access=%#v marks=%d", access, stateStore.initialAccessMarks)
 	}
 }
 

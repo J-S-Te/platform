@@ -31,10 +31,11 @@ deploy_dir="$(cd -- "$script_dir/.." && pwd)"
 release_file="$deploy_dir/.release.env"
 runtime_file="$deploy_dir/.env"
 contract_runtime_file="$deploy_dir/runtime/contract.env"
+contract_runtime_template="$deploy_dir/contract.env.example"
 compose_file="$deploy_dir/compose.yaml"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 
-for command_name in docker curl gzip flock awk mktemp; do
+for command_name in docker curl gzip flock awk mktemp install; do
   command -v "$command_name" >/dev/null || {
     echo "缺少命令：$command_name" >&2
     exit 1
@@ -42,11 +43,22 @@ for command_name in docker curl gzip flock awk mktemp; do
 done
 docker compose version >/dev/null
 [[ -f "$runtime_file" ]] || { echo "缺少 $runtime_file" >&2; exit 1; }
-[[ -f "$contract_runtime_file" ]] || { echo "缺少 $contract_runtime_file" >&2; exit 1; }
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
 [[ -f "$compose_file" ]] || { echo "缺少 $compose_file" >&2; exit 1; }
 
-mkdir -p "$deploy_dir/backups/releases" "$deploy_dir/runtime"
+install -d -m 700 "$deploy_dir/runtime"
+if [[ ! -f "$contract_runtime_file" ]]; then
+  [[ -f "$contract_runtime_template" ]] || {
+    echo "缺少 $contract_runtime_file，且没有可用于初始化的 $contract_runtime_template" >&2
+    exit 1
+  }
+  # 前端和平台发布也需要 Compose 能解析合同服务的 env_file。仅在文件不存在时从
+  # 无秘密模板初始化；合同服务真正发布前仍会校验 OIDC/目录凭据并拒绝占位值。
+  install -m 600 "$contract_runtime_template" "$contract_runtime_file"
+  echo "已初始化 $contract_runtime_file；合同服务接入前仍需由平台写入运行凭据"
+fi
+
+mkdir -p "$deploy_dir/backups/releases"
 exec 9>"$deploy_dir/runtime/.deploy.lock"
 # 锁覆盖“备份—迁移—切镜像—健康检查—回退”完整窗口，防止并发发布互相覆盖 .release.env。
 flock -w 900 9 || {
@@ -103,6 +115,25 @@ require_contract_runtime_value() {
     echo "合同运行配置缺失或仍为占位值：$key" >&2
     return 1
   fi
+}
+
+contract_runtime_ready() {
+  local key value
+  for key in \
+    OIDC_CLIENT_ID \
+    OIDC_CLIENT_SECRET \
+    OIDC_TENANT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET \
+    PLATFORM_AUDIT_CLIENT_ID \
+    PLATFORM_AUDIT_CLIENT_SECRET; do
+    value="$(contract_env_value "$key")"
+    if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+      return 1
+    fi
+  done
+  [[ "$(contract_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]
 }
 
 port_value() {
@@ -221,6 +252,15 @@ if ! docker pull "$image_ref" || ! compose config --quiet; then
   rm -f "$previous_release"
   echo "镜像拉取或 Compose 校验失败，发布配置已恢复" >&2
   exit 1
+fi
+
+# 首次上线时合同镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
+# contract-api，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
+if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
+  rm -f "$previous_release"
+  echo "合同镜像已安全暂存：$image_ref"
+  echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 contract_management/prod 接入。"
+  exit 0
 fi
 
 echo "开始发布 $service"

@@ -172,8 +172,12 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	if !decodeApplicationManagementJSON(writer, request, &payload) {
 		return
 	}
+	initialAdminUserID := strings.TrimSpace(payload.InitialAdminID)
+	if initialAdminUserID == "" {
+		initialAdminUserID = principal.User.ID
+	}
 	onboardingInput := application.SubsystemOnboardingInput{
-		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, InitialAdminUserID: initialAdminUserID,
 		ApplicationCode: payload.ApplicationCode, ApplicationName: payload.ApplicationName,
 		Description: payload.Description, Environment: payload.Environment,
 		PublicBaseURL: payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL,
@@ -221,15 +225,16 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	// The application-owned role catalog is published by the deployment Agent. Assigning the
 	// conventional admin role before Provision meant every new subsystem silently skipped its
 	// initial administrator because the role did not exist yet.
-	initialAdminUserID := strings.TrimSpace(payload.InitialAdminID)
-	if initialAdminUserID == "" {
-		initialAdminUserID = principal.User.ID
-	}
 	roleCode, err := handler.access.AssignInitialAdministrator(
 		request.Context(), principal.Tenant.ID, result.Application.Code, initialAdminUserID, principal.User.ID,
 	)
 	if err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
+		handler.writeError(writer, request, err)
+		return
+	}
+	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment); err != nil {
+		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -320,11 +325,23 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		// issuer as a stable source of truth instead of having the client send it in.
 		Issuer: handler.oidcIssuer,
 	}
-	// Resolve the identifiers before marking the deployment non-ready. The portal intentionally
-	// hides UPDATING/FAILED environments, so resolving after the transition would make a normal
-	// retry unable to find the application context needed by catalog synchronization.
-	if applicationID, _, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
+	// Resolve identifiers from the deployment control plane, not the portal projection: failed
+	// and updating environments are intentionally hidden from the user-facing portal catalog.
+	var deploymentContext application.SubsystemDeploymentState
+	if handler.deploymentState != nil {
+		state, err := handler.deploymentState.GetSubsystemDeploymentContext(request.Context(), principal.Tenant.ID, applicationCode, environment)
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		deploymentContext = state
+		updateInput.ApplicationID = state.ApplicationID
+	} else if applicationID, _, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
 		updateInput.ApplicationID = applicationID
+	}
+	if strings.TrimSpace(updateInput.ApplicationID) == "" {
+		handler.writeError(writer, request, application.ErrNotFound)
+		return
 	}
 	if publisherID, publisherSecret, ok := readCatalogPublisherCredentials(); ok {
 		updateInput.CatalogPublisherClientID = publisherID
@@ -333,6 +350,14 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	operation := "UPDATE"
 	if strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry") {
 		operation = "RETRY"
+	}
+	retryAdminUserID := principal.User.ID
+	retryNeedsInitialAccess := false
+	if operation == "RETRY" && handler.deploymentState != nil {
+		if storedAdminUserID := strings.TrimSpace(deploymentContext.InitialAdminUserID); storedAdminUserID != "" {
+			retryAdminUserID = storedAdminUserID
+		}
+		retryNeedsInitialAccess = deploymentContext.InitialAccessAssignedAt == nil
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusUpdating, operation, "", ""); err != nil {
 		handler.writeError(writer, request, err)
@@ -343,15 +368,20 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
-	if operation == "RETRY" {
+	if operation == "RETRY" && retryNeedsInitialAccess {
 		// A first-time deployment can fail after credentials are created but before the role
 		// catalog and initial administrator are ready. Retry therefore reapplies the conventional
 		// administrator role to the current operator after the Agent succeeds. UpdateAccess is
 		// idempotent for an already assigned role and never requires recovering an OAuth secret.
 		if _, err := handler.access.AssignInitialAdministrator(
-			request.Context(), principal.Tenant.ID, applicationCode, principal.User.ID, principal.User.ID,
+			request.Context(), principal.Tenant.ID, applicationCode, retryAdminUserID, principal.User.ID,
 		); err != nil {
 			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
+			handler.writeError(writer, request, err)
+			return
+		}
+		if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
 			handler.writeError(writer, request, err)
 			return
 		}
@@ -475,6 +505,13 @@ func (handler *SubsystemOnboardingHandler) transitionDeployment(ctx context.Cont
 		return nil
 	}
 	return handler.deploymentState.TransitionSubsystemDeployment(ctx, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage, time.Now().UTC())
+}
+
+func (handler *SubsystemOnboardingHandler) markInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment string) error {
+	if handler.deploymentState == nil {
+		return nil
+	}
+	return handler.deploymentState.MarkSubsystemInitialAccessAssigned(ctx, tenantID, applicationCode, environment, time.Now().UTC())
 }
 
 func (handler *SubsystemOnboardingHandler) markDeploymentFailed(ctx context.Context, tenantID, applicationCode, environment, operation, errorCode, errorMessage string) {

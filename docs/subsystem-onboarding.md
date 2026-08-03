@@ -2,7 +2,7 @@
 
 > 更新日期：2026-08-02
 > 适用对象：子系统开发人员、联调人员、平台管理员和部署人员。
-> 推荐入口：基础平台“应用接入”页面；`scripts/subsystem.sh` 用于本地自动化、无人值守和故障排查，兼容入口仍可使用。
+> 推荐入口：基础平台“应用接入”页面。生产环境的首次接入、重试、运行时更新和下线均从页面完成；`scripts/subsystem.sh` 仅保留给本地自动化、无人值守和故障排查。
 
 ## 1. 先理解三个边界
 
@@ -12,12 +12,12 @@
 
 | 场景 | 正确操作 |
 | --- | --- |
-| 首次创建一个不存在的应用环境 | `subsystem.sh onboard` |
+| 首次创建一个不存在的应用环境 | 基础平台“应用接入 → 新增接入” |
 | 更新代码、镜像、前后端模块或业务迁移 | 使用子系统自己的 CI/CD，不执行 onboard/offboard |
 | 只需要重建现有子系统容器 | `subsystem.sh update`，或子系统自己的部署命令 |
-| 首次接入或重建因 Agent 故障失败 | 先 `subsystem.sh status`，再 `subsystem.sh retry`；不要重复 onboard |
+| 首次接入或重建因 Agent 故障失败 | 页面查看部署状态并点击“重试”；不要重复新增接入 |
 | 修改 BaseURL、Upstream、PathPrefix 或 OAuth 回调 | 先走受控管理 API，并同步子系统运行配置；不要撤销重建 |
-| 环境永久下线 | 完成数据、会话和恢复预案后执行 `subsystem.sh offboard` |
+| 环境永久下线 | 完成数据、会话和恢复预案后在页面确认“下线并删除控制面记录” |
 
 收到 HTTP `409 IAM_SUBSYSTEM_ALREADY_ONBOARDED` 表示现有接入受到保护，没有被覆盖。不要为了日常发布先下线再重新接入。
 
@@ -199,6 +199,7 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
   - `platform:application-environment:create`
   - `platform:application-login-target:create`
   - `platform:oauth-client:create`
+  - `platform:role-binding:update`
 - 角色管理权限不会自动代表可以授予超级管理员；初始管理员授权仍受平台的受保护角色与可委派权限策略约束。
 
 正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理内置 `contract_management/prod`，把一次性 OIDC、目录发布与审计凭据原子写入权限为 `0600` 的独立 `runtime/contract.env`，再执行固定的合同迁移和 `contract-api` 重建。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。

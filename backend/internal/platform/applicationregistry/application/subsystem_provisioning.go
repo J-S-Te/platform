@@ -23,27 +23,31 @@ const (
 // SubsystemDeploymentState 是最近一次部署尝试的持久控制面视图。Generation 区分重试轮次，
 // 状态中刻意不保存凭据和原始命令输出，避免轮询接口成为秘密或主机信息泄露面。
 type SubsystemDeploymentState struct {
-	TenantID        string
-	ApplicationID   string
-	EnvironmentID   string
-	ApplicationCode string
-	Environment     string
-	Status          string
-	Operation       string
-	Generation      uint64
-	AttemptCount    uint
-	LastErrorCode   string
-	LastError       string
-	StartedAt       *time.Time
-	CompletedAt     *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	TenantID                string
+	ApplicationID           string
+	EnvironmentID           string
+	ApplicationCode         string
+	Environment             string
+	InitialAdminUserID      string
+	InitialAccessAssignedAt *time.Time
+	Status                  string
+	Operation               string
+	Generation              uint64
+	AttemptCount            uint
+	LastErrorCode           string
+	LastError               string
+	StartedAt               *time.Time
+	CompletedAt             *time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // SubsystemDeploymentStateStore 将生命周期状态与耗时部署 Agent 解耦，使失败后可以仅重试部署，
 // 而不重新创建无法恢复明文的 OAuth 凭据或重复执行首次接入。
 type SubsystemDeploymentStateStore interface {
 	TransitionSubsystemDeployment(context.Context, string, string, string, string, string, string, string, time.Time) error
+	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error
+	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
 }
 

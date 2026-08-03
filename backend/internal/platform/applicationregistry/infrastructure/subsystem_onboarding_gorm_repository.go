@@ -17,21 +17,23 @@ type SubsystemOnboardingGORMRepository struct {
 }
 
 type subsystemDeploymentStateModel struct {
-	TenantID        string     `gorm:"column:tenant_id"`
-	ApplicationID   string     `gorm:"column:application_id"`
-	EnvironmentID   string     `gorm:"column:environment_id"`
-	ApplicationCode string     `gorm:"column:application_code"`
-	Environment     string     `gorm:"column:environment_code"`
-	Status          string     `gorm:"column:status"`
-	Operation       string     `gorm:"column:operation"`
-	Generation      uint64     `gorm:"column:generation"`
-	AttemptCount    uint       `gorm:"column:attempt_count"`
-	LastErrorCode   *string    `gorm:"column:last_error_code"`
-	LastError       *string    `gorm:"column:last_error_message"`
-	StartedAt       *time.Time `gorm:"column:started_at"`
-	CompletedAt     *time.Time `gorm:"column:completed_at"`
-	CreatedAt       time.Time  `gorm:"column:created_at"`
-	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+	TenantID                string     `gorm:"column:tenant_id"`
+	ApplicationID           string     `gorm:"column:application_id"`
+	EnvironmentID           string     `gorm:"column:environment_id"`
+	ApplicationCode         string     `gorm:"column:application_code"`
+	Environment             string     `gorm:"column:environment_code"`
+	InitialAdminUserID      *string    `gorm:"column:initial_admin_user_id"`
+	InitialAccessAssignedAt *time.Time `gorm:"column:initial_access_assigned_at"`
+	Status                  string     `gorm:"column:status"`
+	Operation               string     `gorm:"column:operation"`
+	Generation              uint64     `gorm:"column:generation"`
+	AttemptCount            uint       `gorm:"column:attempt_count"`
+	LastErrorCode           *string    `gorm:"column:last_error_code"`
+	LastError               *string    `gorm:"column:last_error_message"`
+	StartedAt               *time.Time `gorm:"column:started_at"`
+	CompletedAt             *time.Time `gorm:"column:completed_at"`
+	CreatedAt               time.Time  `gorm:"column:created_at"`
+	UpdatedAt               time.Time  `gorm:"column:updated_at"`
 }
 
 func (subsystemDeploymentStateModel) TableName() string { return "subsystem_deployment_state" }
@@ -124,18 +126,19 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 			})
 		}
 		if err := transaction.Create(&subsystemDeploymentStateModel{
-			TenantID:        createdApplication.TenantID,
-			ApplicationID:   createdApplication.ID,
-			EnvironmentID:   createdEnvironment.ID,
-			ApplicationCode: createdApplication.Code,
-			Environment:     createdEnvironment.Environment,
-			Status:          application.SubsystemDeploymentStatusProvisioning,
-			Operation:       "ONBOARD",
-			Generation:      1,
-			AttemptCount:    1,
-			StartedAt:       timePointer(now.UTC()),
-			CreatedAt:       now.UTC(),
-			UpdatedAt:       now.UTC(),
+			TenantID:           createdApplication.TenantID,
+			ApplicationID:      createdApplication.ID,
+			EnvironmentID:      createdEnvironment.ID,
+			ApplicationCode:    createdApplication.Code,
+			Environment:        createdEnvironment.Environment,
+			InitialAdminUserID: optionalStringPointer(write.InitialAdminUserID),
+			Status:             application.SubsystemDeploymentStatusProvisioning,
+			Operation:          "ONBOARD",
+			Generation:         1,
+			AttemptCount:       1,
+			StartedAt:          timePointer(now.UTC()),
+			CreatedAt:          now.UTC(),
+			UpdatedAt:          now.UTC(),
 		}).Error; err != nil {
 			return err
 		}
@@ -288,13 +291,62 @@ func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState
 		Take(&model).Error; err != nil {
 		return application.SubsystemDeploymentState{}, mapManagementError(err)
 	}
+	return deploymentStateFromModel(model), nil
+}
+
+func deploymentStateFromModel(model subsystemDeploymentStateModel) application.SubsystemDeploymentState {
 	return application.SubsystemDeploymentState{
 		TenantID: model.TenantID, ApplicationID: model.ApplicationID, EnvironmentID: model.EnvironmentID,
 		ApplicationCode: model.ApplicationCode, Environment: model.Environment, Status: model.Status,
+		InitialAdminUserID: modelString(model.InitialAdminUserID), InitialAccessAssignedAt: model.InitialAccessAssignedAt,
 		Operation: model.Operation, Generation: model.Generation, AttemptCount: model.AttemptCount,
 		LastErrorCode: dereferenceString(model.LastErrorCode), LastError: dereferenceString(model.LastError),
 		StartedAt: model.StartedAt, CompletedAt: model.CompletedAt, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
-	}, nil
+	}
+}
+
+// GetSubsystemDeploymentContext resolves application/environment identifiers from control-plane
+// registration regardless of deployment status. Retry cannot use the portal projection because
+// PROVISION_FAILED environments are intentionally hidden there.
+func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentContext(ctx context.Context, tenantID, applicationCode, environment string) (application.SubsystemDeploymentState, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	environment = strings.ToLower(strings.TrimSpace(environment))
+	var model subsystemDeploymentStateModel
+	if err := repository.database.WithContext(ctx).
+		Table("subsystem_deployment_state AS deployment").
+		Select("deployment.*").
+		Joins("JOIN platform_application AS application ON application.tenant_id = deployment.tenant_id AND application.id = deployment.application_id AND application.code = ?", applicationCode).
+		Joins("JOIN platform_application_environment AS environment ON environment.tenant_id = deployment.tenant_id AND environment.application_id = deployment.application_id AND environment.id = deployment.environment_id AND environment.environment = ?", environment).
+		Where("deployment.tenant_id = ? AND deployment.application_code = ? AND deployment.environment_code = ?", tenantID, applicationCode, environment).
+		Take(&model).Error; err != nil {
+		return application.SubsystemDeploymentState{}, mapManagementError(err)
+	}
+	return deploymentStateFromModel(model), nil
+}
+
+// MarkSubsystemInitialAccessAssigned records the authorization side effect independently from
+// READY. If a later state write or HTTP response fails, retry can see that access is already
+// complete and will not grant the administrator role again.
+func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment string, now time.Time) error {
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND initial_access_assigned_at IS NULL", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+		Updates(map[string]any{"initial_access_assigned_at": now.UTC(), "updated_at": now.UTC()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		if err := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+			Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND initial_access_assigned_at IS NOT NULL", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 1 {
+			return application.ErrNotFound
+		}
+	}
+	return nil
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
@@ -306,11 +358,21 @@ func nullableString(value string) any {
 	return value
 }
 
-func dereferenceString(value *string) string {
+func modelString(value *string) string {
 	if value == nil {
 		return ""
 	}
 	return *value
+}
+
+func dereferenceString(value *string) string { return modelString(value) }
+
+func optionalStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // portalApplicationAccessFilter keeps portal visibility aligned with the effective authorization

@@ -62,30 +62,34 @@ func (*SubsystemOnboardingConflict) Is(target error) bool {
 // 输入只接收管理员需要决定的公开信息；资源 ID、门户目标、OAuth 回调及凭据由服务端
 // 统一推导，避免分别调用多个管理接口时形成环境错配或遗漏安全参数。
 type SubsystemOnboardingInput struct {
-	TenantID        string
-	OperatorID      string
-	ApplicationCode string
-	ApplicationName string
-	Description     *string
-	Environment     string
-	PublicBaseURL   string
-	UpstreamURL     string
-	PathPrefix      string
-	ClientType      string
+	TenantID   string
+	OperatorID string
+	// InitialAdminUserID is persisted with the deployment state so a failed first deployment
+	// can grant the originally selected administrator after a safe retry.
+	InitialAdminUserID string
+	ApplicationCode    string
+	ApplicationName    string
+	Description        *string
+	Environment        string
+	PublicBaseURL      string
+	UpstreamURL        string
+	PathPrefix         string
+	ClientType         string
 }
 
 // 写模型汇总一次接入产生的控制面对象，仓储在一个数据库事务内持久化；明文密钥不进入
 // 写模型，持久化边界只接收经过保护的 SecretWrite。
 type SubsystemOnboardingWrite struct {
-	Application       ApplicationCreateInput
-	ApplicationID     string
-	Environment       EnvironmentCreateInput
-	EnvironmentID     string
-	LoginTarget       LoginTargetCreateInput
-	LoginTargetID     string
-	OAuthClient       OAuthClientCreateInput
-	OAuthClientID     string
-	OAuthClientSecret *SecretWrite
+	InitialAdminUserID string
+	Application        ApplicationCreateInput
+	ApplicationID      string
+	Environment        EnvironmentCreateInput
+	EnvironmentID      string
+	LoginTarget        LoginTargetCreateInput
+	LoginTargetID      string
+	OAuthClient        OAuthClientCreateInput
+	OAuthClientID      string
+	OAuthClientSecret  *SecretWrite
 
 	// 授权目录发布使用独立机器客户端，不能与浏览器 OIDC 回调或其他系统集成复用。
 	CatalogPublisherOAuthClient       OAuthClientCreateInput
@@ -289,7 +293,8 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	}
 
 	result, err := service.repository.CreateSubsystem(ctx, SubsystemOnboardingWrite{
-		Application: applicationInput, ApplicationID: applicationID,
+		InitialAdminUserID: input.InitialAdminUserID,
+		Application:        applicationInput, ApplicationID: applicationID,
 		Environment: environmentInput, EnvironmentID: environmentID,
 		LoginTarget: loginTargetInput, LoginTargetID: loginTargetID,
 		OAuthClient: oauthClientInput, OAuthClientID: oauthClientID, OAuthClientSecret: secret,
@@ -415,6 +420,10 @@ func (service *SubsystemOnboardingService) newID(now time.Time, resource string)
 func normalizeSubsystemOnboardingInput(input SubsystemOnboardingInput) SubsystemOnboardingInput {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	input.InitialAdminUserID = strings.TrimSpace(input.InitialAdminUserID)
+	if input.InitialAdminUserID == "" {
+		input.InitialAdminUserID = input.OperatorID
+	}
 	input.ApplicationCode = strings.ToLower(strings.TrimSpace(input.ApplicationCode))
 	input.ApplicationName = strings.TrimSpace(input.ApplicationName)
 	input.Description = normalizeOptional(input.Description)
@@ -453,7 +462,9 @@ func normalizeSubsystemOnboardingInput(input SubsystemOnboardingInput) Subsystem
 
 func validSubsystemOnboardingInput(input SubsystemOnboardingInput) bool {
 	baseURL, upstreamURL, pathPrefix := input.PublicBaseURL, input.UpstreamURL, input.PathPrefix
-	return input.TenantID != "" && input.OperatorID != "" && validCode(input.ApplicationCode, 64) &&
+	return len(input.TenantID) == 26 && validIdentifier(input.TenantID) &&
+		len(input.OperatorID) == 26 && validIdentifier(input.OperatorID) &&
+		len(input.InitialAdminUserID) == 26 && validIdentifier(input.InitialAdminUserID) && validCode(input.ApplicationCode, 64) &&
 		validManagementText(input.ApplicationName, 128, false) && validEnvironmentCode(input.Environment) &&
 		validOptionalBaseURL(&baseURL) && validOptionalUpstreamURL(&upstreamURL) &&
 		validOptionalPathPrefix(&pathPrefix) && validGatewayTripleConsistent(&baseURL, &upstreamURL, &pathPrefix) &&
