@@ -118,6 +118,7 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 func TestProductionComposeSubsystemProvisionerPreflightAllowsInfrastructurePlaceholders(t *testing.T) {
 	t.Parallel()
 	provisioner, runner, _ := productionProvisionerFixture(t)
+
 	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +144,33 @@ func TestProductionComposeSubsystemProvisionerPreflightAllowsInfrastructurePlace
 	}
 	if len(runner.calls) != preflightCalls {
 		t.Fatalf("provision reached Docker before infrastructure validation: %#v", runner.calls[preflightCalls:])
+	}
+}
+
+func TestProductionComposeSubsystemProvisionerTestServerAllowsPlaceholderDatabaseCredentials(t *testing.T) {
+	t.Parallel()
+	provisioner, runner, _ := productionProvisionerFixtureWithPlaceholderAllowance(t, true)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	placeholderEnvironment := "MYSQL_PASSWORD=REPLACE_WITH_PLATFORM_PASSWORD\n" +
+		"MYSQL_ROOT_PASSWORD=REPLACE_WITH_PLATFORM_ROOT_PASSWORD\n" +
+		"IAM_MOBILE_ENCRYPTION_KEY=REPLACE_WITH_IAM_KEY\n" +
+		"IAM_BOOTSTRAP_TOKEN=REPLACE_WITH_BOOTSTRAP_TOKEN\n" +
+		"CONTRACT_MYSQL_PASSWORD=REPLACE_WITH_CONTRACT_PASSWORD\n" +
+		"CONTRACT_MYSQL_ROOT_PASSWORD=REPLACE_WITH_CONTRACT_ROOT_PASSWORD\n"
+	if err := os.WriteFile(target.config.RuntimeEnvPath, []byte(placeholderEnvironment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode)); err != nil {
+		t.Fatalf("preflight rejected placeholders with allowance enabled: %v", err)
+	}
+	if err := provisioner.Provision(context.Background(), productionContractInput("https://platform.example.com")); err != nil {
+		t.Fatalf("test server provision rejected placeholder database credentials: %v", err)
+	}
+	if len(runner.calls) == 0 {
+		t.Fatal("test server provision did not reach fixed deployment steps")
 	}
 }
 
@@ -262,6 +290,11 @@ func TestProductionComposeSubsystemProvisionerBindsFirstTenantAndRejectsAnotherT
 
 func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProvisioner, *recordingSubsystemRunner, string) {
 	t.Helper()
+	return productionProvisionerFixtureWithPlaceholderAllowance(t, false)
+}
+
+func productionProvisionerFixtureWithPlaceholderAllowance(t *testing.T, allowPlaceholderDatabaseCredentials bool) (*ProductionComposeSubsystemProvisioner, *recordingSubsystemRunner, string) {
+	t.Helper()
 	root := t.TempDir()
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -336,6 +369,7 @@ compose:
 		Enabled: true, DeployRoot: canonicalRoot, ProfilesDirectory: profilesPath, RuntimeEnvPath: runtimePath,
 		ReleaseEnvPath: releasePath, ComposeFile: composePath, ComposeProject: "basic-platform-production",
 		AllowedTenantID: "tenant-1", DockerBinary: "docker", Timeout: time.Minute,
+		AllowPlaceholderDatabaseCredentials: allowPlaceholderDatabaseCredentials,
 	}, runner)
 	if err != nil {
 		t.Fatal(err)

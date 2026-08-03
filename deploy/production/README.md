@@ -24,6 +24,8 @@ chmod 600 .env .release.env
 
 应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前三个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*` 或 `CUSTOMER_MYSQL_* + PORTAL_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。
 
+测试服务器（一次性验证接入流程、没有历史数据）可在 `.env` 中设置 `SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=true`，Agent 将跳过数据库凭据校验，让 Compose 在首次创建空数据库时使用占位密码完成接入。该开关只应出现在测试服务器：已有持久化数据的数据库不会因为开关而自动改密，生产环境必须保持 `false`。
+
 ## 2. 镜像仓库
 
 - `platform` 和 `frontend` workflow 使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`。

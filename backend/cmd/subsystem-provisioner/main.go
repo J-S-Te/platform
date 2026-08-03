@@ -79,6 +79,12 @@ func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner,
 			ComposeProject:    envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-production"),
 			DockerBinary:      envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
 			Timeout:           timeout,
+			// 测试服务器可显式允许数据库占位凭据，让 Agent 先完成接入并由
+			// Compose 在首次创建空数据库时使用该值；生产默认关闭此开关。
+			AllowPlaceholderDatabaseCredentials: strings.EqualFold(
+				strings.TrimSpace(os.Getenv("SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS")),
+				"true",
+			),
 		})
 	default:
 		return nil, fmt.Errorf("unsupported SUBSYSTEM_ONBOARDING_MODE")

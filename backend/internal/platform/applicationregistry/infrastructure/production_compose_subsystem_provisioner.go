@@ -32,6 +32,10 @@ type ProductionComposeSubsystemProvisionerConfig struct {
 	ComposeProject    string
 	DockerBinary      string
 	Timeout           time.Duration
+	// AllowPlaceholderDatabaseCredentials 仅用于测试服务器：为 true 时跳过子系统
+	// 数据库凭据校验，允许 Compose 在首次创建空数据库时使用占位密码完成接入。
+	// 生产环境必须保持 false，避免已有持久化数据库因密码未初始化而不可控。
+	AllowPlaceholderDatabaseCredentials bool
 }
 
 // ProductionComposeSubsystemProvisioner 是按 application_code/environment 分派的生产
@@ -43,16 +47,17 @@ type ProductionComposeSubsystemProvisioner struct {
 }
 
 type productionComposeTargetConfig struct {
-	DeployRoot            string
-	RuntimeEnvPath        string
-	ReleaseEnvPath        string
-	ComposeFile           string
-	AllowedTenantID       string
-	ComposeProject        string
-	DockerBinary          string
-	Timeout               time.Duration
-	Profile               productionSubsystemProfile
-	RuntimeBootstrapFiles []productionSubsystemRuntimeFileManifest
+	DeployRoot                          string
+	RuntimeEnvPath                      string
+	ReleaseEnvPath                      string
+	ComposeFile                         string
+	AllowedTenantID                     string
+	ComposeProject                      string
+	DockerBinary                        string
+	Timeout                             time.Duration
+	Profile                             productionSubsystemProfile
+	RuntimeBootstrapFiles               []productionSubsystemRuntimeFileManifest
+	AllowPlaceholderDatabaseCredentials bool
 }
 
 type productionComposeTarget struct {
@@ -120,6 +125,7 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 			ComposeFile: config.ComposeFile, AllowedTenantID: config.AllowedTenantID,
 			ComposeProject: config.ComposeProject, DockerBinary: config.DockerBinary,
 			Timeout: config.Timeout, Profile: profile, RuntimeBootstrapFiles: runtimeBootstrapFiles,
+			AllowPlaceholderDatabaseCredentials: config.AllowPlaceholderDatabaseCredentials,
 		}, runner: runner}
 		key := productionSubsystemTargetKey(profile.Manifest.Application.Code, profile.Manifest.Application.Environment)
 		provisioner.targets[key] = target
@@ -507,7 +513,8 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 			}
 		}
 	}
-	if validateInfrastructureSecrets {
+	// 测试服务器可显式允许数据库占位凭据，让 Agent 先完成接入；生产默认严格校验。
+	if validateInfrastructureSecrets && !target.config.AllowPlaceholderDatabaseCredentials {
 		if err := validateProductionRequiredEnvironmentKeys(target.config.RuntimeEnvPath, target.config.Profile.Manifest.Runtime.RequiredInfrastructureKeys, "production subsystem database credentials are incomplete"); err != nil {
 			return err
 		}
