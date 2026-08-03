@@ -68,6 +68,14 @@ type subsystemCommandRunner interface {
 type execSubsystemCommandRunner struct{}
 
 func (execSubsystemCommandRunner) Run(ctx context.Context, directory string, environment []string, name string, arguments ...string) error {
+	_, err := execSubsystemCommandRunner{}.RunOutput(ctx, directory, environment, name, arguments...)
+	return err
+}
+
+// RunOutput 与 Run 等价，但额外把命令合并输出返回给调用方。生产 Agent 在固定部署步骤
+// 失败时会用它在受限时间内抓取目标容器日志摘要，把真实原因附到 provisioning 错误里，
+// 让平台页面直接看到而不是只显示通用的健康检查提示。输出仍先截断再写入 Agent 标准错误。
+func (execSubsystemCommandRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, arguments...)
 	// `directory` is treated as a hint: command.Dir only accepts real directories, so the
 	// caller may pass a unix socket path (e.g. /var/run/docker.sock) for documentation. Fall
@@ -78,16 +86,16 @@ func (execSubsystemCommandRunner) Run(ctx context.Context, directory string, env
 		command.Dir = string(filepath.Separator)
 	}
 	command.Env = environment
-	if output, err := command.CombinedOutput(); err != nil {
+	output, err := command.CombinedOutput()
+	if err != nil {
 		// Surface a truncated excerpt of the failed command's output to stderr so operators
 		// can diagnose provisioning failures. Do not return command arguments or output
 		// verbatim: either may contain implementation details. The OAuth secret is never
 		// supplied as an argument, but this rule keeps future changes safe.
 		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] %s %v failed: %v\noutput: %s\n",
 			name, truncateArgs(arguments), err, truncateOutput(output))
-		return err
 	}
-	return nil
+	return output, err
 }
 
 func truncateArgs(args []string) []string {

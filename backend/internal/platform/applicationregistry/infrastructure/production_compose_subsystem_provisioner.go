@@ -271,7 +271,7 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.writeRuntimeConfiguration(input); err != nil {
 		return err
 	}
-	return target.deployLocked(operationContext)
+	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
 // Update 只重用已落盘配置，不尝试从数据库恢复 OAuth 明文或隐式轮换密钥。
@@ -294,7 +294,7 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
-	return target.deployLocked(operationContext)
+	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
 // Teardown 仅停止清单列出的运行服务，保留数据库、备份、运行时秘密和发布指针。
@@ -323,13 +323,13 @@ func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID st
 	return nil
 }
 
-func (target *productionComposeTarget) deployLocked(ctx context.Context) error {
+func (target *productionComposeTarget) deployLocked(ctx context.Context, redactValues ...string) error {
 	compose := target.config.Profile.Manifest.Compose
 	if len(compose.DependencyServices) > 0 {
 		arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240"}
 		arguments = append(arguments, compose.DependencyServices...)
 		if err := target.runCompose(ctx, arguments...); err != nil {
-			return provisioningError("start production subsystem dependencies")
+			return target.subsystemServiceFailure(ctx, "start production subsystem dependencies", compose.DependencyServices, redactValues)
 		}
 	}
 	if compose.Database != nil {
@@ -351,12 +351,46 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context) error {
 	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
 	arguments = append(arguments, compose.RuntimeServices...)
 	if err := target.runCompose(ctx, arguments...); err != nil {
-		return provisioningError("start production subsystem services")
+		return target.subsystemServiceFailure(ctx, "start production subsystem services", compose.RuntimeServices, redactValues)
 	}
 	return nil
 }
 
+// subsystemServiceFailure 在依赖或目标 API 启动失败时，用受限超时抓取受影响容器最近日志，
+// 脱敏后附加到 provisioning 错误里。这样平台页面能直接看到“为什么没通过健康检查”，而不是
+// 只返回通用提示；抓取日志本身失败时仍回退为原始步骤错误，不影响既有错误语义。
+func (target *productionComposeTarget) subsystemServiceFailure(ctx context.Context, step string, services []string, redactValues []string) error {
+	if len(services) == 0 {
+		return provisioningError(step)
+	}
+	outputRunner, ok := target.runner.(interface {
+		RunOutput(context.Context, string, []string, string, ...string) ([]byte, error)
+	})
+	if !ok {
+		return provisioningError(step)
+	}
+	logContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	arguments, environment := target.composeCommand("logs", "--tail", "80", "--no-color")
+	arguments = append(arguments, services...)
+	output, runErr := outputRunner.RunOutput(logContext, target.config.DeployRoot, environment, target.config.DockerBinary, arguments...)
+	if runErr != nil {
+		return provisioningError(step)
+	}
+	detail := sanitizeProvisioningLog(string(output), redactValues)
+	if detail == "" {
+		return provisioningError(step)
+	}
+	return provisioningError(step + ": " + detail)
+}
+
 func (target *productionComposeTarget) runCompose(ctx context.Context, arguments ...string) error {
+	fullArguments, runnerEnvironment := target.composeCommand(arguments...)
+	return target.runner.Run(ctx, target.config.DeployRoot, runnerEnvironment, target.config.DockerBinary, fullArguments...)
+}
+
+// composeCommand 构造与 runCompose 相同的 docker compose 前缀和运行环境，供失败日志抓取复用。
+func (target *productionComposeTarget) composeCommand(arguments ...string) ([]string, []string) {
 	prefix := []string{
 		"compose", "--project-name", target.config.ComposeProject,
 		"--project-directory", target.config.DeployRoot,
@@ -372,7 +406,7 @@ func (target *productionComposeTarget) runCompose(ctx context.Context, arguments
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
 		runnerEnvironment = append(runnerEnvironment, runtimeFile.ComposeEnvironmentKey+"="+filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path)))
 	}
-	return target.runner.Run(ctx, target.config.DeployRoot, runnerEnvironment, target.config.DockerBinary, append(prefix, arguments...)...)
+	return append(prefix, arguments...), runnerEnvironment
 }
 
 func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
@@ -738,6 +772,39 @@ func validateProductionReleaseImage(path, key string) error {
 		}
 	}
 	return nil
+}
+
+// productionProvisioningSecrets 收集本次一次性交付的明文凭据，供容器日志脱敏使用；
+// 任何凭据都不会写回日志或平台页面。
+func productionProvisioningSecrets(input application.SubsystemProvisioningInput) []string {
+	values := make([]string, 0, 2+len(input.ServiceCredentials))
+	for _, value := range []string{input.ClientSecret, input.CatalogPublisherClientSecret} {
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	for _, credential := range input.ServiceCredentials {
+		if credential.PlaintextSecret != "" {
+			values = append(values, credential.PlaintextSecret)
+		}
+	}
+	return values
+}
+
+// sanitizeProvisioningLog 截断并从容器日志中移除一次性明文凭据，避免错误详情成为秘密泄露面。
+func sanitizeProvisioningLog(output string, redactValues []string) string {
+	const limit = 4 * 1024
+	result := strings.TrimSpace(output)
+	for _, value := range redactValues {
+		if value != "" {
+			result = strings.ReplaceAll(result, value, "[REDACTED]")
+		}
+	}
+	result = strings.TrimSpace(result)
+	if len(result) > limit {
+		result = result[:limit] + "...(truncated)"
+	}
+	return result
 }
 
 func parseEnvironmentValues(content string) map[string]string {
