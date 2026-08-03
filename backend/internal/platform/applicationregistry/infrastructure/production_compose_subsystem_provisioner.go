@@ -3,7 +3,10 @@ package infrastructure
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -49,6 +52,7 @@ type productionComposeTargetConfig struct {
 	DockerBinary    string
 	Timeout         time.Duration
 	Profile         productionSubsystemProfile
+	RuntimeBootstrapFiles []productionSubsystemRuntimeFileManifest
 }
 
 type productionComposeTarget struct {
@@ -100,6 +104,10 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	if err != nil {
 		return nil, err
 	}
+	runtimeBootstrapFiles, err := productionRuntimeBootstrapFiles(profiles)
+	if err != nil {
+		return nil, err
+	}
 	provisioner := &ProductionComposeSubsystemProvisioner{
 		enabled:      config.Enabled,
 		targets:      make(map[string]*productionComposeTarget, len(profiles)),
@@ -107,11 +115,11 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	}
 	provisioner.capabilities.Enabled = config.Enabled
 	for _, profile := range profiles {
-		target := &productionComposeTarget{config: productionComposeTargetConfig{
+		 target := &productionComposeTarget{config: productionComposeTargetConfig{
 			DeployRoot: root, RuntimeEnvPath: config.RuntimeEnvPath, ReleaseEnvPath: config.ReleaseEnvPath,
 			ComposeFile: config.ComposeFile, AllowedTenantID: config.AllowedTenantID,
 			ComposeProject: config.ComposeProject, DockerBinary: config.DockerBinary,
-			Timeout: config.Timeout, Profile: profile,
+			Timeout: config.Timeout, Profile: profile, RuntimeBootstrapFiles: runtimeBootstrapFiles,
 		}, runner: runner}
 		key := productionSubsystemTargetKey(profile.Manifest.Application.Code, profile.Manifest.Application.Environment)
 		provisioner.targets[key] = target
@@ -127,6 +135,37 @@ func productionConfigPath(root, configured, fallback string) string {
 		configured = filepath.Join(root, configured)
 	}
 	return filepath.Clean(configured)
+}
+
+// productionRuntimeBootstrapFiles 汇总所有已审核目标的 runtime 文件，只用于首次创建和
+// 权限修复。不同目标对同一文件可以声明不同的受管键，但模板和 Compose 环境变量必须
+// 一致；实际凭据校验和写入仍只使用当前目标自己的清单，避免把一个应用的凭据写给另一个。
+func productionRuntimeBootstrapFiles(profiles []productionSubsystemProfile) ([]productionSubsystemRuntimeFileManifest, error) {
+	files := make([]productionSubsystemRuntimeFileManifest, 0)
+	byPath := make(map[string]int)
+	for _, profile := range profiles {
+		for _, runtimeFile := range profile.Manifest.Runtime.Files {
+			index, exists := byPath[runtimeFile.Path]
+			if !exists {
+				byPath[runtimeFile.Path] = len(files)
+				files = append(files, productionSubsystemRuntimeFileManifest{
+					Path: runtimeFile.Path, TemplatePath: runtimeFile.TemplatePath,
+					ComposeEnvironmentKey: runtimeFile.ComposeEnvironmentKey,
+				})
+				continue
+			}
+			existing := &files[index]
+			if existing.ComposeEnvironmentKey != runtimeFile.ComposeEnvironmentKey {
+				return nil, errors.New("production runtime file Compose environment key is inconsistent across profiles")
+			}
+			if existing.TemplatePath == "" {
+				existing.TemplatePath = runtimeFile.TemplatePath
+			} else if runtimeFile.TemplatePath != "" && existing.TemplatePath != runtimeFile.TemplatePath {
+				return nil, errors.New("production runtime file template is inconsistent across profiles")
+			}
+		}
+	}
+	return files, nil
 }
 
 // Capabilities 返回防御性副本，供测试和未来的 Agent 诊断使用。API 侧独立加载同一清单，
@@ -327,20 +366,35 @@ func (target *productionComposeTarget) runCompose(ctx context.Context, arguments
 }
 
 func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
+	type runtimeEnvironmentUpdate struct {
+		path   string
+		values map[string]string
+	}
+	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
-		values := make(map[string]string, len(runtimeFile.Bindings)+len(runtimeFile.Values))
+		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
+		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
+		if err != nil {
+			return err
+		}
+		values := make(map[string]string, len(runtimeFile.Bindings)+len(runtimeFile.Values)+len(generatedValues))
 		for key, value := range runtimeFile.Values {
 			values[key] = value
 		}
+		for key, value := range generatedValues {
+			values[key] = value
+		}
 		for key, source := range runtimeFile.Bindings {
-			value, err := resolveProductionBinding(input, source)
-			if err != nil {
-				return err
+			value, resolveErr := resolveProductionBinding(input, source)
+			if resolveErr != nil {
+				return resolveErr
 			}
 			values[key] = value
 		}
-		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
-		if err := updateProductionSubsystemEnvironment(path, values); err != nil {
+		updates = append(updates, runtimeEnvironmentUpdate{path: path, values: values})
+	}
+	for _, update := range updates {
+		if err := updateProductionSubsystemEnvironment(update.path, update.values); err != nil {
 			return provisioningError("write production subsystem runtime configuration")
 		}
 	}
@@ -407,10 +461,18 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 	if err != nil {
 		return provisioningError("production deployment directory is unavailable")
 	}
-	paths := []string{target.config.RuntimeEnvPath, target.config.ReleaseEnvPath, target.config.ComposeFile}
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
-		paths = append(paths, filepath.Join(root, filepath.FromSlash(runtimeFile.Path)))
+	// runtime 文件属于 Agent 的受控输出：首次接入可从随发布包审核的模板初始化，
+	// 已有文件只收紧权限且绝不整体覆盖。清单之外的文件和环境变量不会参与校验。
+	runtimeFilesToPrepare := target.config.Profile.Manifest.Runtime.Files
+	if requireWritableEnvironment {
+		runtimeFilesToPrepare = target.config.RuntimeBootstrapFiles
 	}
+	for _, runtimeFile := range runtimeFilesToPrepare {
+		if err := ensureProductionRuntimeFile(root, runtimeFile, requireWritableEnvironment); err != nil {
+			return err
+		}
+	}
+	paths := []string{target.config.RuntimeEnvPath, target.config.ReleaseEnvPath, target.config.ComposeFile}
 	for _, path := range paths {
 		resolved, resolveErr := filepath.EvalSymlinks(path)
 		if resolveErr != nil || resolved != filepath.Clean(path) || !pathWithinRoot(root, resolved) {
@@ -426,9 +488,6 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 	}
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
 		path := filepath.Join(root, filepath.FromSlash(runtimeFile.Path))
-		if info, statErr := os.Stat(path); statErr != nil || info.Mode().Perm()&0o077 != 0 {
-			return provisioningError("production subsystem environment permissions must be 0600")
-		}
 		if err := validateProductionRequiredEnvironmentKeys(path, runtimeFile.RequiredExistingKeys, "production subsystem runtime secrets are incomplete"); err != nil {
 			return err
 		}
@@ -456,6 +515,185 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 	return nil
 }
 
+// ensureProductionRuntimeFile 将人工步骤压缩为可重复的 Agent 操作：缺失时复制审核模板，
+// 已存在时保留全部内容，仅把权限收紧到 0600。符号链接、越界路径和非普通文件仍拒绝，
+// 防止清单更新被利用为宿主机任意文件写入。
+func ensureProductionRuntimeFile(root string, runtimeFile productionSubsystemRuntimeFileManifest, allowInitialize bool) error {
+	path := filepath.Clean(filepath.Join(root, filepath.FromSlash(runtimeFile.Path)))
+	if !pathWithinRoot(root, path) {
+		return provisioningError("production subsystem runtime environment path is invalid")
+	}
+	if err := ensureProductionRuntimeDirectory(root, filepath.Dir(path), allowInitialize); err != nil {
+		return provisioningError("production subsystem runtime directory is unavailable")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if !allowInitialize || strings.TrimSpace(runtimeFile.TemplatePath) == "" {
+			return provisioningError("production subsystem runtime environment is unavailable")
+		}
+		if err := initializeProductionRuntimeFile(root, path, runtimeFile.TemplatePath); err != nil {
+			return provisioningError("production subsystem runtime template is unavailable")
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return provisioningError("production subsystem runtime environment is unavailable")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return provisioningError("production subsystem runtime environment permissions cannot be tightened")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path || !pathWithinRoot(root, resolved) {
+		return provisioningError("production subsystem runtime environment path is invalid")
+	}
+	info, err = os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return provisioningError("production subsystem runtime environment permissions must be 0600")
+	}
+	return nil
+}
+
+func initializeProductionRuntimeFile(root, destinationPath, templateRelativePath string) error {
+	templatePath := filepath.Clean(filepath.Join(root, filepath.FromSlash(templateRelativePath)))
+	if !pathWithinRoot(root, templatePath) {
+		return errors.New("runtime template is outside deployment root")
+	}
+	resolvedTemplate, err := filepath.EvalSymlinks(templatePath)
+	if err != nil || resolvedTemplate != templatePath || !pathWithinRoot(root, resolvedTemplate) {
+		return errors.New("runtime template path is unavailable")
+	}
+	templateInfo, err := os.Lstat(resolvedTemplate)
+	if err != nil || templateInfo.Mode()&os.ModeSymlink != 0 || !templateInfo.Mode().IsRegular() || templateInfo.Mode().Perm()&0o022 != 0 {
+		return errors.New("runtime template metadata is unsafe")
+	}
+	if err := ensureProductionRuntimeDirectory(root, filepath.Dir(destinationPath), true); err != nil {
+		return err
+	}
+
+	source, err := os.Open(resolvedTemplate)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	temporary, err := os.CreateTemp(filepath.Dir(destinationPath), ".runtime-env.*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		_, err = io.Copy(temporary, source)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if stat, ok := templateInfo.Sys().(*syscall.Stat_t); ok {
+		temporaryInfo, statErr := os.Stat(temporaryPath)
+		if statErr != nil {
+			return statErr
+		}
+		if temporaryStat, ok := temporaryInfo.Sys().(*syscall.Stat_t); ok &&
+			(temporaryStat.Uid != stat.Uid || temporaryStat.Gid != stat.Gid) {
+			if err := os.Chown(temporaryPath, int(stat.Uid), int(stat.Gid)); err != nil {
+				return err
+			}
+		}
+	}
+	// 硬链接提供“不覆盖已存在文件”的原子语义；并发预检时先完成者成为唯一初始化结果。
+	if err := os.Link(temporaryPath, destinationPath); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(destinationPath))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
+func ensureProductionRuntimeDirectory(root, directory string, allowCreate bool) error {
+	relative, err := filepath.Rel(root, directory)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("runtime directory is outside deployment root")
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." || component == ".." {
+			return errors.New("runtime directory component is invalid")
+		}
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if !allowCreate {
+				return statErr
+			}
+			if mkdirErr := os.Mkdir(current, 0o700); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return mkdirErr
+			}
+			info, statErr = os.Lstat(current)
+		}
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+			return errors.New("runtime directory metadata is unsafe")
+		}
+		resolved, resolveErr := filepath.EvalSymlinks(current)
+		if resolveErr != nil || resolved != current || !pathWithinRoot(root, resolved) {
+			return errors.New("runtime directory path is unsafe")
+		}
+	}
+	return nil
+}
+
+// productionGeneratedEnvironmentValues 只为清单声明的长期 base64 密钥填充占位值。
+// 已有合法值永远不返回为 replacement，因此接入重试、更新和 Agent 重启都不会轮换密钥。
+func productionGeneratedEnvironmentValues(path string, keys []string) (map[string]string, error) {
+	generated := make(map[string]string)
+	if len(keys) == 0 {
+		return generated, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, provisioningError("production subsystem runtime environment is unavailable")
+	}
+	values := parseEnvironmentValues(string(content))
+	for _, key := range keys {
+		value := strings.TrimSpace(values[key])
+		if !productionEnvironmentValueMissing(value) {
+			if !validProductionGeneratedEnvironmentValue(key, value) {
+				return nil, provisioningError("production subsystem generated runtime secret is invalid")
+			}
+			continue
+		}
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			return nil, provisioningError("generate production subsystem runtime secret")
+		}
+		generated[key] = base64.StdEncoding.EncodeToString(secret)
+	}
+	return generated, nil
+}
+
+func validProductionGeneratedEnvironmentValue(key, value string) bool {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	if strings.Contains(key, "HMAC") || strings.Contains(key, "PEPPER") {
+		return len(decoded) >= 32
+	}
+	return len(decoded) == 32
+}
+
+func productionEnvironmentValueMissing(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || strings.HasPrefix(value, "REPLACE_WITH_") || strings.HasPrefix(value, "PENDING_")
+}
+
 func validateProductionRequiredEnvironmentKeys(path string, keys []string, message string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -463,8 +701,7 @@ func validateProductionRequiredEnvironmentKeys(path string, keys []string, messa
 	}
 	values := parseEnvironmentValues(string(content))
 	for _, key := range keys {
-		value := strings.TrimSpace(values[key])
-		if value == "" || strings.HasPrefix(value, "REPLACE_WITH_") || strings.HasPrefix(value, "PENDING_") {
+		if productionEnvironmentValueMissing(values[key]) {
 			return provisioningError(message)
 		}
 	}

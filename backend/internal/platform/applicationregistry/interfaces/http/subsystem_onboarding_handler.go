@@ -701,8 +701,14 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 		diagnosis = "页面提交的应用编码、环境、回调地址或上游地址与服务器审核清单不一致；请刷新应用接入页面并重新选择服务器接入目标"
 	case strings.Contains(message, "infrastructure secrets are incomplete"):
 		diagnosis = "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成数据库和 IAM 等生产基础设施初始化"
-	case strings.Contains(message, "runtime secrets are incomplete"), strings.Contains(message, "production environment is unavailable"):
-		diagnosis = "目标子系统的 runtime 环境文件缺失、仍有占位密钥或权限不安全；请准备对应 runtime/*.env（权限 0600）并补齐业务加密密钥"
+	case strings.Contains(message, "generated runtime secret is invalid"):
+		diagnosis = "目标 runtime 中已有业务密钥不是合法的 32 字节 base64 值；为避免误轮换，Agent 不会覆盖非占位值，请先备份并修正该异常值"
+	case strings.Contains(message, "runtime secrets are incomplete"):
+		diagnosis = "目标 runtime 仍缺少必须由前置子系统接入产生的凭据；请先完成依赖子系统接入，再重试当前目标"
+	case strings.Contains(message, "runtime template"), strings.Contains(message, "runtime directory"):
+		diagnosis = "Agent 无法从随发布包审核的模板初始化 runtime；请确认最新 *.env.example 已部署且 runtime 目录可写，Agent 会自动创建文件并收紧为 0600"
+	case strings.Contains(message, "production environment is unavailable"):
+		diagnosis = "目标子系统 runtime 尚不可用；新版 Agent 会从审核模板自动初始化，请确认 platform-api、subsystem-provisioner 和生产部署资产版本一致"
 	case strings.Contains(message, "release environment is unavailable"), strings.Contains(message, "immutable digest"):
 		diagnosis = "目标子系统尚未发布有效的不可变镜像 digest；请先完成该子系统镜像发布并确认 .release.env 可读"
 	case strings.Contains(message, "initial administrator role"):
@@ -710,7 +716,7 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 	case strings.Contains(message, "production deployment file"), strings.Contains(message, "production deployment directory"), strings.Contains(message, "production compose configuration"):
 		diagnosis = "服务器生产部署资产缺失、路径不规范或 Compose 校验失败；请重新发布平台生产部署资产并确认 Agent 健康"
 	case strings.Contains(message, "runtime environment") || strings.Contains(message, "runtime configuration"):
-		diagnosis = "目标子系统运行配置文件缺失、权限不安全或不可写；请恢复对应 runtime/*.env 的属主和 0600 权限"
+		diagnosis = "Agent 无法安全更新目标运行配置；请确认 runtime 目录可写且文件不是符号链接，普通权限过宽会由 Agent 自动收紧为 0600"
 	case strings.Contains(message, "start production subsystem dependencies"):
 		diagnosis = "目标子系统的数据库或依赖服务未通过健康检查；请查看 subsystem-provisioner、目标数据库和依赖容器日志"
 	case strings.Contains(message, "backup production subsystem database"), strings.Contains(message, "prepare production subsystem backup"):

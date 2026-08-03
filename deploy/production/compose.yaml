@@ -149,6 +149,7 @@ services:
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml:ro
       - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystem-templates:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystem-templates:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups
       - subsystem-provisioner-socket:/run/basic-platform-provisioner
