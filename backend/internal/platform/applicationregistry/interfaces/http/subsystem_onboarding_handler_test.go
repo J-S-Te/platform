@@ -188,6 +188,9 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "compose.yaml") || strings.Contains(response.Body.String(), "/Users/") {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), "尚未创建应用环境") || strings.Contains(response.Body.String(), "点击“重试”") {
+		t.Fatalf("preflight guidance must ask for resubmission instead of retrying a non-existent environment: %s", response.Body.String())
+	}
 }
 
 type stubSubsystemOnboardingService struct {
@@ -389,6 +392,56 @@ func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
 		if strings.Contains(strings.ToLower(body), forbidden) {
 			t.Fatalf("capability response leaked %q: %s", forbidden, body)
 		}
+	}
+}
+
+func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		errMessage string
+		want       string
+	}{
+		"Agent unavailable": {
+			errMessage: "subsystem provisioning unavailable: deployment helper is unavailable",
+			want:       "subsystem-provisioner",
+		},
+		"stale Agent target registry": {
+			errMessage: "subsystem provisioning unavailable: production subsystem target is not allowed",
+			want:       "subsystems.d",
+		},
+		"CRM runtime secrets": {
+			errMessage: "subsystem provisioning unavailable: production subsystem runtime secrets are incomplete",
+			want:       "runtime/*.env",
+		},
+		"CRM image not published": {
+			errMessage: "subsystem provisioning unavailable: production subsystem image must use an immutable digest",
+			want:       ".release.env",
+		},
+		"database dependency failed": {
+			errMessage: "subsystem provisioning unavailable: start production subsystem dependencies",
+			want:       "数据库或依赖服务",
+		},
+		"migration failed": {
+			errMessage: "subsystem provisioning unavailable: migrate production subsystem database",
+			want:       "migrate",
+		},
+		"API health failed": {
+			errMessage: "subsystem provisioning unavailable: start production subsystem services",
+			want:       "目标 API",
+		},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			nextAction := subsystemProvisioningNextAction(errors.New(test.errMessage))
+			if !strings.Contains(nextAction, test.want) {
+				t.Fatalf("next action = %q, want substring %q", nextAction, test.want)
+			}
+			if strings.Contains(nextAction, "请查看平台部署 Agent 与目标 API 的运行日志") {
+				t.Fatalf("production failure fell back to the generic next action: %q", nextAction)
+			}
+		})
 	}
 }
 

@@ -228,7 +228,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		PublicBaseURL: onboardingInput.PublicBaseURL, UpstreamURL: onboardingInput.UpstreamURL,
 		PathPrefix: onboardingInput.PathPrefix, ClientType: onboardingInput.ClientType,
 	}); err != nil {
-		handler.writeError(writer, request, err)
+		handler.writeError(writer, request, err, "preflight")
 		return
 	}
 	result, err := handler.service.OnboardSubsystem(request.Context(), onboardingInput)
@@ -642,7 +642,7 @@ func subsystemPrincipal(writer stdhttp.ResponseWriter, request *stdhttp.Request)
 	return principal, true
 }
 
-func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWriter, request *stdhttp.Request, err error) {
+func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWriter, request *stdhttp.Request, err error, provisioningStages ...string) {
 	var onboardingConflict *application.SubsystemOnboardingConflict
 	switch {
 	case errors.As(err, &onboardingConflict):
@@ -677,7 +677,7 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
 			httperror.DependencyUnavailable.Code,
 			message,
-			map[string]string{"next_action": subsystemProvisioningNextAction(err)},
+			map[string]string{"next_action": subsystemProvisioningNextAction(err, provisioningStages...)},
 		))
 	default:
 		handler.logger.Error("subsystem onboarding request failed", "path", request.URL.Path, "error", err)
@@ -685,42 +685,57 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 	}
 }
 
-func subsystemProvisioningNextAction(err error) string {
+func subsystemProvisioningNextAction(err error, stages ...string) string {
 	message := strings.ToLower(err.Error())
+	diagnosis := "平台部署 Agent 或目标 API 暂时不可用"
 	switch {
 	case strings.Contains(message, "disabled"):
-		return "请升级并重新发布当前环境的生产部署资产，确认 platform-api 与 subsystem-provisioner 均健康后在本页面重试；不要手工复制 OAuth Secret 或重复创建环境"
+		diagnosis = "当前环境未启用受控部署 Agent；请升级并重新发布生产部署资产，确认 platform-api 与 subsystem-provisioner 均健康"
+	case strings.Contains(message, "deployment helper is unavailable"), strings.Contains(message, "read deployment response"), strings.Contains(message, "send deployment request"):
+		diagnosis = "平台 API 无法连接生产部署 Agent；请检查 subsystem-provisioner 状态和启动日志，并确认 Agent 与 platform-api 使用同一版本"
+	case strings.Contains(message, "target is not allowed"):
+		diagnosis = "该应用/环境未被当前 Agent 的审核清单允许，或 Agent 仍运行旧版本；请同步最新 subsystems.d 清单并同时重建 platform-api、subsystem-provisioner"
 	case strings.Contains(message, "tenant is not allowed"):
-		return "当前租户不是该服务器合同实例绑定的生产租户；请核对服务器部署配置中的允许租户 ID，禁止用其他租户覆盖现有合同实例"
-	case strings.Contains(message, "preflight values are inconsistent"):
-		return "生产一键接入目前只支持合同管理系统 prod、confidential 客户端和页面自动填充的固定地址；请恢复预设后重试"
+		diagnosis = "当前租户不是该服务器绑定的生产租户；请核对 SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID，禁止用其他租户覆盖现有实例"
+	case strings.Contains(message, "preflight values are inconsistent"), strings.Contains(message, "integration values are inconsistent"), strings.Contains(message, "deployment request is invalid"):
+		diagnosis = "页面提交的应用编码、环境、回调地址或上游地址与服务器审核清单不一致；请刷新应用接入页面并重新选择服务器接入目标"
 	case strings.Contains(message, "infrastructure secrets are incomplete"):
-		return "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成生产平台初始化，接入页面不会自动改动数据库和 IAM 密钥"
-	case strings.Contains(message, "immutable digest"):
-		return "服务器尚未发布合同管理的不可变镜像 digest；请先完成合同镜像发布，再回到本页面接入"
+		diagnosis = "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成数据库和 IAM 等生产基础设施初始化"
+	case strings.Contains(message, "runtime secrets are incomplete"), strings.Contains(message, "production environment is unavailable"):
+		diagnosis = "目标子系统的 runtime 环境文件缺失、仍有占位密钥或权限不安全；请准备对应 runtime/*.env（权限 0600）并补齐业务加密密钥"
+	case strings.Contains(message, "release environment is unavailable"), strings.Contains(message, "immutable digest"):
+		diagnosis = "目标子系统尚未发布有效的不可变镜像 digest；请先完成该子系统镜像发布并确认 .release.env 可读"
 	case strings.Contains(message, "initial administrator role"):
-		return "合同运行时已启动，但权限目录中缺少可用的 admin 角色；请检查 contract-api 的目录同步日志，修复后在当前环境点击“重试”"
+		diagnosis = "目标运行时已启动，但权限目录中缺少可用的初始角色；请检查目标 API 的目录同步日志"
 	case strings.Contains(message, "production deployment file"), strings.Contains(message, "production deployment directory"), strings.Contains(message, "production compose configuration"):
-		return "服务器生产部署资产缺失、路径不规范或 Compose 校验失败；请重新发布平台部署资产并确认 Agent 健康后在本页面重试"
+		diagnosis = "服务器生产部署资产缺失、路径不规范或 Compose 校验失败；请重新发布平台生产部署资产并确认 Agent 健康"
 	case strings.Contains(message, "runtime environment") || strings.Contains(message, "runtime configuration"):
-		return "合同运行配置文件缺失、权限不安全或不可写；请由部署管理员恢复 runtime/contract.env 的属主和 0600 权限后在本页面重试"
-	case strings.Contains(message, "start production contract dependencies"):
-		return "合同数据库或 Temporal 未通过健康检查；请查看对应容器和部署 Agent 日志，恢复后在本页面重试"
-	case strings.Contains(message, "backup production contract database"), strings.Contains(message, "prepare production contract backup"):
-		return "合同数据库备份失败；请检查数据库健康状态与 backups 目录权限，确认备份可用后在本页面重试"
-	case strings.Contains(message, "migrate production contract database"):
-		return "合同数据库迁移失败；请查看 contract-migrate 日志并处理迁移错误，必要时使用接入前备份恢复，然后在本页面重试"
-	case strings.Contains(message, "start production contract api"):
-		return "合同 API 未通过启动或健康检查；请查看 contract-api 的配置、目录同步和健康检查日志，修复后在本页面重试"
+		diagnosis = "目标子系统运行配置文件缺失、权限不安全或不可写；请恢复对应 runtime/*.env 的属主和 0600 权限"
+	case strings.Contains(message, "start production subsystem dependencies"):
+		diagnosis = "目标子系统的数据库或依赖服务未通过健康检查；请查看 subsystem-provisioner、目标数据库和依赖容器日志"
+	case strings.Contains(message, "backup production subsystem database"), strings.Contains(message, "prepare production subsystem backup"):
+		diagnosis = "目标子系统数据库备份失败；请检查数据库健康状态与 backups 目录权限"
+	case strings.Contains(message, "migrate production subsystem database"):
+		diagnosis = "目标子系统数据库迁移失败；请查看对应 migrate 容器日志并处理迁移错误，必要时使用接入前备份恢复"
+	case strings.Contains(message, "start production subsystem services"):
+		diagnosis = "目标 API 未能启动或通过健康检查；请查看目标 API 容器日志、runtime 配置和目录同步日志"
+	case strings.Contains(message, "write production subsystem runtime configuration"):
+		diagnosis = "Agent 无法安全写入目标 runtime 环境文件；请检查文件属主、0600 权限和 runtime 目录可写性"
+	case strings.Contains(message, "production deployment lock is unavailable"):
+		diagnosis = "服务器上已有发布或接入任务占用部署锁；请等待该任务结束，不要并行执行发布"
+	case strings.Contains(message, "service credential is incomplete"), strings.Contains(message, "integration credential is incomplete"):
+		diagnosis = "服务器审核清单引用的用途凭据尚未由平台控制面创建或交付；请同步最新平台镜像与清单，并确认 Agent 与 platform-api 版本一致"
 	case strings.Contains(message, "compose file"):
-		return "部署 Agent 未找到子系统 Compose；内置客户与商机系统请更新平台代码并重启 api 与 subsystem-provisioner，独立子系统请在同名项目目录提供 compose.yaml"
+		diagnosis = "部署 Agent 未找到生产 compose.yaml；请重新发布完整 platform/deploy/production 资产，并同时重建 platform-api、subsystem-provisioner"
 	case strings.Contains(message, "environment template"):
-		return "部署 Agent 未找到运行配置模板；请提供 .env.example，内置客户与商机系统请检查 platform/docker/.env.customer.local"
+		diagnosis = "部署 Agent 未找到目标运行配置模板；请重新发布完整生产部署资产并确认 runtime/*.env 已初始化"
 	case strings.Contains(message, "docker service"):
-		return "Docker 服务不可用；请启动 Docker 后重试"
+		diagnosis = "Docker 服务不可用；请启动 Docker 并确认部署 Agent 可以访问 Docker Socket"
 	case strings.Contains(message, "start subsystem containers"), strings.Contains(message, "rebuild subsystem containers"):
-		return "子系统构建或启动失败；请查看 subsystem-provisioner 与目标 API 容器日志，修复后使用“重试部署”"
-	default:
-		return "请查看平台部署 Agent 与目标 API 的运行日志；修复后在当前环境点击“重试”，不要重复创建应用环境"
+		diagnosis = "子系统构建或启动失败；请查看 subsystem-provisioner 与目标 API 容器日志"
 	}
+	if len(stages) > 0 && stages[0] == "preflight" {
+		return diagnosis + "；修复后重新提交本次接入。该失败发生在预检阶段，平台尚未创建应用环境"
+	}
+	return diagnosis + "；修复后在当前环境点击“重试”，不要重复创建应用环境"
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/application"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 )
 
 const subsystemProvisioningProtocolVersion = 1
@@ -21,6 +22,7 @@ const subsystemProvisioningProtocolVersion = 1
 type subsystemProvisioningRequest struct {
 	Version     int                                     `json:"version"`
 	Action      string                                  `json:"action"`
+	RequestID   string                                  `json:"request_id,omitempty"`
 	Code        string                                  `json:"code,omitempty"`
 	TenantID    string                                  `json:"tenant_id,omitempty"`
 	Environment string                                  `json:"environment,omitempty"`
@@ -222,6 +224,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 	// 连接、发送和响应，防止部署 Agent 卡住后耗尽 API 请求协程。
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.timeout)
 	defer cancel()
+	// HTTP 层生成的规范请求号随受限协议传到 Agent，只用于日志关联，不参与授权、文件名
+	// 或命令参数。这样浏览器给出的追踪号能够直接定位到对应的 Agent 失败行。
+	request.RequestID = normalizedProvisioningRequestID(requestctx.RequestID(ctx))
 	dialer := net.Dialer{}
 	connection, err := dialer.DialContext(operationCtx, "unix", provisioner.socketPath)
 	if err != nil {
@@ -301,6 +306,11 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false, Message: "deployment protocol version is unsupported"})
 		return
 	}
+	request.RequestID = normalizedProvisioningRequestID(request.RequestID)
+	operationContext := ctx
+	if request.RequestID != "" {
+		operationContext = requestctx.WithRequestID(operationContext, request.RequestID)
+	}
 	// action 是显式白名单，网络对端不能传入任意命令、路径或参数。新增动作必须同时升级
 	// 协议结构和分派逻辑，不能退化成通用 shell 执行接口。
 	var err error
@@ -309,22 +319,22 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		if request.Preflight == nil {
 			err = application.ErrSubsystemProvisioningUnavailable
 		} else {
-			err = executor.Preflight(ctx, *request.Preflight)
+			err = executor.Preflight(operationContext, *request.Preflight)
 		}
 	case "provision":
 		if request.Input == nil {
 			err = application.ErrSubsystemProvisioningUnavailable
 		} else {
-			err = executor.Provision(ctx, *request.Input)
+			err = executor.Provision(operationContext, *request.Input)
 		}
 	case "update":
 		if request.Input == nil {
 			err = application.ErrSubsystemProvisioningUnavailable
 		} else {
-			err = executor.Update(ctx, *request.Input)
+			err = executor.Update(operationContext, *request.Input)
 		}
 	case "teardown":
-		err = executor.Teardown(ctx, request.TenantID, request.Code, request.Environment)
+		err = executor.Teardown(operationContext, request.TenantID, request.Code, request.Environment)
 	case "apply-access":
 		if request.Access == nil {
 			err = application.ErrSubsystemProvisioningUnavailable
@@ -337,7 +347,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			err = application.ErrSubsystemProvisioningUnavailable
 			break
 		}
-		err = applier.ApplyAccess(ctx, settingsapplication.AccessApplyInput{
+		err = applier.ApplyAccess(operationContext, settingsapplication.AccessApplyInput{
 			PublicOrigin:              request.Access.PublicOrigin,
 			AllowInsecureHTTPRedirect: request.Access.AllowInsecureHTTPRedirect,
 		})
@@ -347,9 +357,26 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	reply := subsystemProvisioningReply{Success: err == nil}
 	if err != nil {
 		reply.Message = safeSubsystemProvisioningMessage(err)
-		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] action=%s code=%s failed: %s\n", request.Action, requestCode(request), reply.Message)
+		requestID := request.RequestID
+		if requestID == "" {
+			requestID = "-"
+		}
+		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] request_id=%s action=%s code=%s failed: %s\n", requestID, request.Action, requestCode(request), reply.Message)
 	}
 	_ = json.NewEncoder(connection).Encode(reply)
+}
+
+func normalizedProvisioningRequestID(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if len(value) != 26 {
+		return ""
+	}
+	for _, character := range value {
+		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", character) {
+			return ""
+		}
+	}
+	return value
 }
 
 func safeSubsystemProvisioningMessage(err error) string {
