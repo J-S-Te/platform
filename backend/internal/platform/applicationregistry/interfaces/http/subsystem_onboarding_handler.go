@@ -156,6 +156,7 @@ type subsystemDeploymentStateResponse struct {
 	AttemptCount    uint       `json:"attempt_count"`
 	LastErrorCode   string     `json:"last_error_code,omitempty"`
 	LastError       string     `json:"last_error,omitempty"`
+	NextAction      string     `json:"next_action,omitempty"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 	UpdatedAt       time.Time  `json:"updated_at"`
@@ -494,10 +495,21 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 		AttemptCount:    state.AttemptCount,
 		LastErrorCode:   state.LastErrorCode,
 		LastError:       state.LastError,
+		NextAction:      subsystemDeploymentStateNextAction(state),
 		StartedAt:       state.StartedAt,
 		CompletedAt:     state.CompletedAt,
 		UpdatedAt:       state.UpdatedAt,
 	})
+}
+
+func subsystemDeploymentStateNextAction(state application.SubsystemDeploymentState) string {
+	if state.Status != application.SubsystemDeploymentStatusFailed {
+		return ""
+	}
+	if state.LastErrorCode == "INITIAL_ACCESS_ASSIGNMENT_FAILED" || state.LastErrorCode == "INITIAL_ACCESS_STATE_FAILED" {
+		return "部署运行时已完成，但初始管理员授权尚未完成；确认目标用户有效且授权目录已同步后，点击“重试”"
+	}
+	return "请检查部署 Agent、Docker 和目标 API 健康状态，修复后在当前环境点击“重试”；不要重复新增接入"
 }
 
 func (handler *SubsystemOnboardingHandler) transitionDeployment(ctx context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string) error {

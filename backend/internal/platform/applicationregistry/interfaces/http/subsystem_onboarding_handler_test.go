@@ -23,8 +23,8 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	pathPrefix := "/contract_management"
 	upstreamURL := "http://contract-api:8081"
 	service := &stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
-		Application:                     application.Application{ID: "app-1", TenantID: "tenant-1", Code: "contract_management", Name: "合同管理系统", Status: "ACTIVE"},
-		Environment:                     application.Environment{ID: "env-1", TenantID: "tenant-1", ApplicationID: "app-1", Environment: "dev", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL, Status: "ACTIVE"},
+		Application:                     application.Application{ID: "app-1", TenantID: "01K10A00000000000000000001", Code: "contract_management", Name: "合同管理系统", Status: "ACTIVE"},
+		Environment:                     application.Environment{ID: "env-1", TenantID: "01K10A00000000000000000001", ApplicationID: "app-1", Environment: "dev", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL, Status: "ACTIVE"},
 		OAuthClient:                     application.OAuthClientView{ID: "client-1", ClientID: "contract_management-dev-web", ClientName: "合同管理系统 Web", ClientType: "confidential", Status: "ACTIVE"},
 		CatalogPublisherOAuthClient:     application.OAuthClientView{ID: "client-2", ClientID: "contract_management-dev-catalog-publisher", ClientName: "合同管理系统 Authorization Catalog Publisher", ClientType: "service", TokenAuthMethod: "client_secret_basic", Status: "ACTIVE"},
 		PlaintextSecret:                 "must-never-reach-browser",
@@ -48,8 +48,8 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -66,10 +66,10 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	if !strings.Contains(body, `"automation"`) || !strings.Contains(body, `"status":"completed"`) {
 		t.Fatalf("response missing safe automation status: %s", body)
 	}
-	if !strings.Contains(body, `"authorization"`) || !strings.Contains(body, `"initial_admin_user_id":"user-1"`) || !strings.Contains(body, `"role_code":"admin"`) {
+	if !strings.Contains(body, `"authorization"`) || !strings.Contains(body, `"initial_admin_user_id":"01K10B00000000000000000001"`) || !strings.Contains(body, `"role_code":"admin"`) {
 		t.Fatalf("response missing explicit initial administrator assignment: %s", body)
 	}
-	if access.userID != "user-1" || access.operatorID != "user-1" || access.applicationCode != "contract_management" {
+	if access.userID != "01K10B00000000000000000001" || access.operatorID != "01K10B00000000000000000001" || access.applicationCode != "contract_management" {
 		t.Fatalf("unexpected access assignment: %#v", access)
 	}
 	if provisioner.input.ApplicationID != "app-1" || provisioner.input.ClientSecret != "must-never-reach-browser" {
@@ -142,8 +142,8 @@ func TestOnboardSubsystemExistingEnvironmentReturnsActionableConflict(t *testing
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -182,7 +182,7 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 	requestBody := `{"application_code":"customer_and_opportunity","application_name":"客户与商机管理系统","environment":"dev","public_base_url":"http://localhost:8081","upstream_url":"http://customer-api:8090","path_prefix":"/customer-opportunity","client_type":"confidential"}`
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"}}))
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"}}))
 	response := httptest.NewRecorder()
 	handler.OnboardSubsystem(response, request)
 	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "compose.yaml") || strings.Contains(response.Body.String(), "/Users/") {
@@ -191,10 +191,10 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 }
 
 type stubSubsystemOnboardingService struct {
-	result application.SubsystemOnboardingResult
-	input  application.SubsystemOnboardingInput
+	result      application.SubsystemOnboardingResult
+	input       application.SubsystemOnboardingInput
 	portalItems []application.PortalApplication
-	err    error
+	err         error
 }
 
 func (service *stubSubsystemOnboardingService) OnboardSubsystem(_ context.Context, input application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
@@ -233,7 +233,7 @@ func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T)
 	}
 	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/portal/applications", nil)
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -311,8 +311,8 @@ func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -343,8 +343,8 @@ func TestUpdateSubsystemRejectsMissingFields(t *testing.T) {
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -370,8 +370,8 @@ func TestTeardownSubsystemCallsProvisionerAndAcknowledgesDeepCleanup(t *testing.
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-teardown", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -403,6 +403,7 @@ type recordingSubsystemDeploymentStateStore struct {
 	initialAccessMarks int
 	transitionErr      error
 	getErr             error
+	contextErr         error
 }
 
 func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(_ context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
@@ -418,7 +419,7 @@ func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentState
 }
 
 func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentContext(context.Context, string, string, string) (application.SubsystemDeploymentState, error) {
-	return store.state, store.getErr
+	return store.state, store.contextErr
 }
 
 func (store *recordingSubsystemDeploymentStateStore) MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error {
@@ -428,7 +429,7 @@ func (store *recordingSubsystemDeploymentStateStore) MarkSubsystemInitialAccessA
 
 func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T) {
 	t.Parallel()
-	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "user-1"}}
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "01K10B00000000000000000001"}}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
 	handler, err := NewSubsystemOnboardingHandler(
 		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, access,
@@ -440,7 +441,7 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -458,7 +459,7 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	if stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "RETRY" {
 		t.Fatalf("terminal transition = %#v", stateStore.transitions[1])
 	}
-	if access.userID != "user-1" || stateStore.initialAccessMarks != 1 {
+	if access.userID != "01K10B00000000000000000001" || stateStore.initialAccessMarks != 1 {
 		t.Fatalf("retry did not complete pending initial access: access=%#v marks=%d", access, stateStore.initialAccessMarks)
 	}
 }
@@ -467,7 +468,7 @@ func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T)
 	t.Parallel()
 	assignedAt := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
 	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
-		ApplicationID: "app-1", InitialAdminUserID: "original-admin", InitialAccessAssignedAt: &assignedAt,
+		ApplicationID: "app-1", InitialAdminUserID: "01K10D00000000000000000001", InitialAccessAssignedAt: &assignedAt,
 	}}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
 	handler, err := NewSubsystemOnboardingHandler(
@@ -480,7 +481,7 @@ func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"contract_management","environment":"prod"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "operator-2"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10E00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -496,7 +497,7 @@ func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T)
 
 func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 	t.Parallel()
-	stateStore := &recordingSubsystemDeploymentStateStore{}
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "01K10B00000000000000000001"}}
 	provisioner := &recordingHTTPSubsystemProvisioner{updateErr: application.ErrSubsystemProvisioningUnavailable}
 	handler, err := NewSubsystemOnboardingHandler(
 		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
@@ -508,7 +509,7 @@ func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -544,7 +545,7 @@ func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 	}
 	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-status?application_code=customer_management&environment=dev", nil)
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -558,6 +559,9 @@ func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("response missing %s: %s", expected, body)
 		}
+	}
+	if !strings.Contains(body, `"next_action":`) || !strings.Contains(body, "不要重复新增接入") {
+		t.Fatalf("status response missing actionable recovery guidance: %s", body)
 	}
 	for _, forbidden := range []string{"client_secret", "command", "filesystem", "container_id"} {
 		if strings.Contains(body, forbidden) {
