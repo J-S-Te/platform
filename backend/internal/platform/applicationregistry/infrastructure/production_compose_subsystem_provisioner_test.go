@@ -147,6 +147,26 @@ func TestProductionComposeSubsystemProvisionerPreflightAllowsInfrastructurePlace
 	}
 }
 
+func TestProductionComposeSubsystemProvisionerTeardownDoesNotRequireDatabaseCredentials(t *testing.T) {
+	t.Parallel()
+	provisioner, runner, _ := productionProvisionerFixture(t)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	placeholderEnvironment := "CONTRACT_MYSQL_PASSWORD=REPLACE_WITH_CONTRACT_PASSWORD\n" +
+		"CONTRACT_MYSQL_ROOT_PASSWORD=REPLACE_WITH_CONTRACT_ROOT_PASSWORD\n"
+	if err := os.WriteFile(target.config.RuntimeEnvPath, []byte(placeholderEnvironment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Teardown(context.Background(), "tenant-1", testProductionApplicationCode, testProductionEnvironment); err != nil {
+		t.Fatalf("teardown rejected placeholder database credentials: %v", err)
+	}
+	if len(runner.calls) != 1 || !containsString(runner.calls[0].arguments, "stop") {
+		t.Fatalf("teardown did not run the fixed stop step: %#v", runner.calls)
+	}
+}
+
 func TestProductionComposeSubsystemProvisionerTestServerAllowsPlaceholderDatabaseCredentials(t *testing.T) {
 	t.Parallel()
 	provisioner, runner, _ := productionProvisionerFixtureWithPlaceholderAllowance(t, true)
