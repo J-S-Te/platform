@@ -16,6 +16,7 @@ customer_template_file="${project_root}/docker/.env.customer.local.example"
 customer_env_file="${project_root}/docker/.env.customer.local"
 portal_template_file="${project_root}/docker/.env.portal.local.example"
 portal_env_file="${project_root}/docker/.env.portal.local"
+presale_worker_env_file="${customer_root}/.env.presale-worker"
 lan_override_file="${project_root}/docker/.env.lan"
 customer_lan_override_file="${project_root}/docker/.env.customer.lan"
 lan_placeholder_file="${project_root}/docker/.env.lan.disabled"
@@ -47,6 +48,7 @@ usage() {
   bash scripts/docker-local.sh refresh-contract-api
   bash scripts/docker-local.sh refresh-customer-api
   bash scripts/docker-local.sh refresh-portal-api
+  bash scripts/docker-local.sh start-presale-worker [--presale-worker-env-file PATH]
 
 up/restart 选项：
   --build                         重新构建统一前端和四个独立后端镜像；Portal 未接入时只构建不启动
@@ -59,6 +61,7 @@ up/restart 选项：
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   --customer-env-file PATH        客户与商机后端环境文件（默认 platform/docker/.env.customer.local）
   --portal-env-file PATH          客户自助门户环境文件（默认 platform/docker/.env.portal.local）
+  --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
 
 定向更新：
@@ -67,6 +70,7 @@ up/restart 选项：
   refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
   refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
   refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
+  start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳
 
   四种定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
   因此不会影响已经完成的子系统统一登录接入。
@@ -88,7 +92,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api)
+		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|start-presale-worker)
             command_name="$1"
             shift
             ;;
@@ -144,6 +148,11 @@ while (($# > 0)); do
 			portal_env_file="$2"
 			shift 2
 			;;
+		--presale-worker-env-file)
+			(($# >= 2)) || fail "$1 缺少参数"
+			presale_worker_env_file="$2"
+			shift 2
+			;;
         -h|--help)
             usage
             exit 0
@@ -170,6 +179,7 @@ export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
+export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
 
@@ -952,6 +962,45 @@ refresh_portal_backend() {
 	compose_run ps portal-api portal-mysql frontend
 }
 
+start_presale_worker() {
+	ensure_platform_env_file
+	ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
+	[[ -f "$presale_worker_env_file" ]] || \
+		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
+	[[ -s "$presale_worker_env_file" ]] || \
+		fail "售前投递 Worker 环境文件为空：${presale_worker_env_file}"
+	prepare_go_backend_base_images "售前投递 Worker"
+
+	log "构建 CRM 迁移镜像和售前投递 Worker；统一认证、审批和 PMS 地址仅从指定环境文件注入"
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile presale-worker --ansi never build customer-api presale-worker
+	log "启动客户与商机数据库并执行 CRM 清单迁移"
+	compose_run --profile presale-worker up -d --wait customer-mysql
+	compose_run --profile presale-worker run --rm --no-deps customer-migrate
+	log "启动售前投递 Worker"
+	compose_run --profile presale-worker up -d --no-deps presale-worker
+
+	local attempt heartbeat
+	for attempt in $(seq 1 20); do
+		heartbeat="$(
+			compose_run exec -T customer-mysql sh -c \
+				'MYSQL_PWD="$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 -u"$MYSQL_USER" -D "$MYSQL_DATABASE" -Nse "SELECT EXISTS(SELECT 1 FROM crm_worker_heartbeats WHERE worker_type=0x70726573616c655f64656c6976657279 AND heartbeat_at >= UTC_TIMESTAMP(3) - INTERVAL 15 SECOND)"' \
+				2>/dev/null || true
+		)"
+		if [[ "$heartbeat" == "1" ]]; then
+			compose_run --profile presale-worker ps presale-worker
+			log "售前投递 Worker 已启动，数据库新鲜心跳已确认"
+			return 0
+		fi
+		sleep 1
+	done
+
+	compose_run --profile presale-worker ps -a presale-worker >&2 || true
+	compose_run --profile presale-worker logs --tail 80 presale-worker >&2 || true
+	fail "售前投递 Worker 未在 20 秒内产生新鲜心跳；申请入口保持安全关闭"
+}
+
 prepare_operational_env() {
     ensure_platform_env_file
     ensure_contract_env_file false
@@ -1007,5 +1056,8 @@ case "$command_name" in
 		;;
 	refresh-portal-api)
 		refresh_portal_backend
+		;;
+	start-presale-worker)
+		start_presale_worker
 		;;
 esac

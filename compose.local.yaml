@@ -368,7 +368,8 @@ services:
       context: ../customer_and_opportunity
       target: presale-worker-runtime
     env_file:
-      - ${PRESALE_WORKER_ENV_FILE:-../customer_and_opportunity/.env.presale-worker}
+      - path: ${PRESALE_WORKER_ENV_FILE:-../customer_and_opportunity/.env.presale-worker}
+        required: false
     environment:
       MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     depends_on:
