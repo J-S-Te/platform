@@ -14,6 +14,11 @@ coverage/
 .env.*
 !.env.example
 .env.*.local
+# 当前 compose.local.yaml 的运行模板与空 LAN 覆盖文件必须随代码发布。
+!docker/.env.local.example
+!docker/.env.customer.local.example
+!docker/.env.portal.local.example
+!docker/.env.lan.disabled
 
 # Logs
 *.log
