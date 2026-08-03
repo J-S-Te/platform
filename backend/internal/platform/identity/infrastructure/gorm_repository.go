@@ -241,7 +241,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		var activeSession sessionModel
 		check := repository.database.WithContext(ctx).
 			Select("id").
-			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
 			Take(&activeSession)
 		if check.Error != nil {
 			if errors.Is(check.Error, gorm.ErrRecordNotFound) {

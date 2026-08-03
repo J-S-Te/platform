@@ -368,6 +368,8 @@ func NewRouter(
 			apiRouter.GET("/role-bindings", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(authorizationHandler.ListRoleBindings))
 			apiRouter.POST("/role-bindings", middleware.RequirePermission("platform:role-binding:create"), adaptHandler(authorizationHandler.CreateRoleBinding))
 			apiRouter.PATCH("/role-bindings/:binding_id", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(authorizationHandler.UpdateRoleBinding))
+			apiRouter.GET("/authorization/effective-access", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.PreviewEffectiveAccess))
+			apiRouter.POST("/authorization/role-binding-impact", middleware.RequirePermission("platform:role-binding:create"), adaptHandler(authorizationHandler.PreviewRoleBindingImpact))
 			apiRouter.POST("/authorization/check", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.Check))
 			apiRouter.POST("/authorization/batch-check", middleware.RequirePermission("platform:authorization:check"), adaptHandler(authorizationHandler.BatchCheck))
 		}

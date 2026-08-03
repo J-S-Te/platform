@@ -96,6 +96,50 @@ type decisionResponse struct {
 	ReasonCode     string `json:"reason_code"`
 }
 
+type accessSourceResponse struct {
+	BindingID   string            `json:"binding_id"`
+	SubjectType string            `json:"subject_type"`
+	Subject     referenceResponse `json:"subject"`
+	ScopeType   string            `json:"scope_type"`
+	ScopeID     *string           `json:"scope_id,omitempty"`
+}
+
+type effectiveRoleResponse struct {
+	Role    referenceResponse      `json:"role"`
+	Sources []accessSourceResponse `json:"sources"`
+}
+
+type effectivePermissionResponse struct {
+	Permission permissionResponse     `json:"permission"`
+	Sources    []accessSourceResponse `json:"sources"`
+}
+
+type effectiveAccessPreviewResponse struct {
+	User                      referenceResponse             `json:"user"`
+	Account                   referenceResponse             `json:"account"`
+	LoginEligible             bool                          `json:"login_eligible"`
+	PolicyVersion             uint64                        `json:"policy_version"`
+	GeneratedAt               time.Time                     `json:"generated_at"`
+	Roles                     []effectiveRoleResponse       `json:"roles"`
+	Permissions               []effectivePermissionResponse `json:"permissions"`
+	ExternalIdentityProviders []referenceResponse           `json:"external_identity_providers"`
+	ExternalIdentityNote      string                        `json:"external_identity_note"`
+}
+
+type roleBindingImpactResponse struct {
+	Role               referenceResponse   `json:"role"`
+	Permissions        []referenceResponse `json:"permissions"`
+	SubjectType        string              `json:"subject_type"`
+	Subject            referenceResponse   `json:"subject"`
+	ScopeType          string              `json:"scope_type"`
+	ScopeID            *string             `json:"scope_id,omitempty"`
+	ExpiresAt          *time.Time          `json:"expires_at,omitempty"`
+	TotalAffectedUsers int64               `json:"total_affected_users"`
+	Users              []referenceResponse `json:"users"`
+	Truncated          bool                `json:"truncated"`
+	GeneratedAt        time.Time           `json:"generated_at"`
+}
+
 type resourceCreatePayload struct {
 	ApplicationCode string `json:"application_code"`
 	Code            string `json:"code"`
@@ -144,6 +188,15 @@ type checkPayload struct {
 
 type batchCheckPayload struct {
 	Requests []checkPayload `json:"requests"`
+}
+
+type roleBindingImpactPayload struct {
+	RoleID      string     `json:"role_id"`
+	SubjectType string     `json:"subject_type"`
+	SubjectID   string     `json:"subject_id"`
+	ScopeType   string     `json:"scope_type"`
+	ScopeID     *string    `json:"scope_id"`
+	ExpiresAt   *time.Time `json:"expires_at"`
 }
 
 // ListResources returns resources available in the current tenant.
@@ -424,6 +477,42 @@ func (h *Handler) UpdateRoleBinding(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "角色绑定已更新", roleBindingToResponse(result))
 }
 
+// PreviewEffectiveAccess explains active role and permission sources for one login account.
+func (h *Handler) PreviewEffectiveAccess(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.PreviewEffectiveAccess(r.Context(), principal.Tenant.ID, strings.TrimSpace(r.URL.Query().Get("user_id")), strings.TrimSpace(r.URL.Query().Get("account_id")))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", effectiveAccessPreviewToResponse(result))
+}
+
+// PreviewRoleBindingImpact calculates the currently affected active users before a binding is saved.
+func (h *Handler) PreviewRoleBindingImpact(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	var payload roleBindingImpactPayload
+	if !decode(w, r, &payload) {
+		return
+	}
+	result, err := h.service.PreviewRoleBindingImpact(r.Context(), application.RoleBindingImpactInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, RoleID: payload.RoleID,
+		SubjectType: payload.SubjectType, SubjectID: payload.SubjectID, ScopeType: payload.ScopeType,
+		ScopeID: payload.ScopeID, ExpiresAt: payload.ExpiresAt,
+	})
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", roleBindingImpactToResponse(result))
+}
+
 // Check evaluates one permission code for the authenticated user.
 func (h *Handler) Check(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -619,4 +708,44 @@ func decisionToResponse(value domain.Decision) decisionResponse {
 		PolicyVersion:  value.PolicyVersion,
 		ReasonCode:     value.ReasonCode,
 	}
+}
+
+func accessSourceToResponse(value domain.AccessSource) accessSourceResponse {
+	return accessSourceResponse{BindingID: value.BindingID, SubjectType: value.SubjectType, Subject: referenceToResponse(value.Subject), ScopeType: value.ScopeType, ScopeID: value.ScopeID}
+}
+
+func effectiveAccessPreviewToResponse(value domain.EffectiveAccessPreview) effectiveAccessPreviewResponse {
+	roles := make([]effectiveRoleResponse, 0, len(value.Roles))
+	for _, role := range value.Roles {
+		sources := make([]accessSourceResponse, 0, len(role.Sources))
+		for _, source := range role.Sources {
+			sources = append(sources, accessSourceToResponse(source))
+		}
+		roles = append(roles, effectiveRoleResponse{Role: referenceToResponse(role.Role), Sources: sources})
+	}
+	permissions := make([]effectivePermissionResponse, 0, len(value.Permissions))
+	for _, permission := range value.Permissions {
+		sources := make([]accessSourceResponse, 0, len(permission.Sources))
+		for _, source := range permission.Sources {
+			sources = append(sources, accessSourceToResponse(source))
+		}
+		permissions = append(permissions, effectivePermissionResponse{Permission: permissionToResponse(permission.Permission), Sources: sources})
+	}
+	providers := make([]referenceResponse, 0, len(value.ExternalIdentityProviders))
+	for _, provider := range value.ExternalIdentityProviders {
+		providers = append(providers, referenceToResponse(provider))
+	}
+	return effectiveAccessPreviewResponse{User: referenceToResponse(value.User), Account: referenceToResponse(value.Account), LoginEligible: value.LoginEligible, PolicyVersion: value.PolicyVersion, GeneratedAt: value.GeneratedAt, Roles: roles, Permissions: permissions, ExternalIdentityProviders: providers, ExternalIdentityNote: "外部身份仅用于映射到本地用户，不直接授予角色或权限。"}
+}
+
+func roleBindingImpactToResponse(value domain.RoleBindingImpactPreview) roleBindingImpactResponse {
+	permissions := make([]referenceResponse, 0, len(value.Permissions))
+	for _, permission := range value.Permissions {
+		permissions = append(permissions, referenceToResponse(permission))
+	}
+	users := make([]referenceResponse, 0, len(value.Users))
+	for _, user := range value.Users {
+		users = append(users, referenceToResponse(user))
+	}
+	return roleBindingImpactResponse{Role: referenceToResponse(value.Role), Permissions: permissions, SubjectType: value.SubjectType, Subject: referenceToResponse(value.Subject), ScopeType: value.ScopeType, ScopeID: value.ScopeID, ExpiresAt: value.ExpiresAt, TotalAffectedUsers: value.TotalAffectedUsers, Users: users, Truncated: value.Truncated, GeneratedAt: value.GeneratedAt}
 }
