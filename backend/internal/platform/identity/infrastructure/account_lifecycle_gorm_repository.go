@@ -11,8 +11,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// CreateLocalAccount creates one active local human account and its password credential in one
-// transaction. A tenant-scoped active user is required so arbitrary identities cannot be linked.
+// CreateLocalAccount 在一个事务内创建本地人工账号及其密码凭据；目标用户必须属于同一
+// 租户且处于活动状态，防止借账号创建接口关联跨租户或已停用身份。
 func (repository *GORMRepository) CreateLocalAccount(ctx context.Context, write application.LocalAccountCreateWrite) (domain.Account, error) {
 	var account domain.Account
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -52,6 +52,8 @@ func (repository *GORMRepository) ResetPassword(ctx context.Context, write appli
 }
 
 func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context, write application.PasswordWrite, initialize bool) (domain.Account, error) {
+	// 账号行锁与版本条件共同保护管理员并发操作；密码写入和活动会话撤销必须原子完成，
+	// 否则旧浏览器会话可能在新凭据生效后继续访问。
 	var account domain.Account
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var row accountModel
@@ -175,6 +177,8 @@ func (repository *GORMRepository) ChangeOwnPassword(ctx context.Context, write a
 }
 
 func revokeActiveSessions(transaction *gorm.DB, write application.PasswordWrite) error {
+	// 保留会话记录并标记撤销原因，而非物理删除，既支持安全审计，也保证重新启用账号
+	// 或重新初始化密码时旧 Cookie 不会“复活”。
 	reason := write.RevokeReason
 	if err := transaction.Model(&sessionModel{}).Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", write.TenantID, write.AccountID, domain.StatusActive).Updates(map[string]any{"revoked_at": write.OccurredAt, "revoke_reason": &reason, "status": "REVOKED"}).Error; err != nil {
 		return fmt.Errorf("revoke account sessions: %w", err)

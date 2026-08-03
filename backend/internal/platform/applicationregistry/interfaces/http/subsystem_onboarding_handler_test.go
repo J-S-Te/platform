@@ -31,6 +31,11 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 		CatalogPublisherPlaintextSecret: "catalog-publisher-secret-must-never-reach-browser",
 		RedirectURI:                     "http://localhost:8081/contract_management/auth/callback",
 		PublicURL:                       "http://localhost:8081/contract_management/",
+		ServiceCredentials: []application.SubsystemServiceCredential{{
+			Purpose:         application.ServiceCredentialAuditIngest,
+			OAuthClient:     application.OAuthClientView{ClientID: "contract_management-dev-audit-publisher"},
+			PlaintextSecret: "audit-secret-must-never-reach-browser",
+		}},
 	}}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
@@ -53,7 +58,7 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, forbidden := range []string{"must-never-reach-browser", "catalog-publisher-secret-must-never-reach-browser", `"integration"`, "environment_file", "gateway_command", "OIDC_CLIENT_SECRET", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"} {
+	for _, forbidden := range []string{"must-never-reach-browser", "catalog-publisher-secret-must-never-reach-browser", "audit-secret-must-never-reach-browser", `"integration"`, "environment_file", "gateway_command", "OIDC_CLIENT_SECRET", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("response leaked %q: %s", forbidden, body)
 		}
@@ -72,6 +77,9 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	}
 	if provisioner.input.CatalogPublisherClientID != "contract_management-dev-catalog-publisher" || provisioner.input.CatalogPublisherClientSecret != "catalog-publisher-secret-must-never-reach-browser" {
 		t.Fatalf("deployment helper did not receive isolated catalog publisher integration: %#v", provisioner.input)
+	}
+	if credential, ok := provisioner.input.ServiceCredential(application.ServiceCredentialAuditIngest); !ok || credential.PlaintextSecret != "audit-secret-must-never-reach-browser" {
+		t.Fatalf("deployment helper did not receive isolated audit integration: %#v", provisioner.input.ServiceCredentials)
 	}
 }
 
@@ -209,7 +217,7 @@ type recordingHTTPSubsystemProvisioner struct {
 	teardownErr  error
 }
 
-func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, string) error {
+func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, application.SubsystemPreflightInput) error {
 	return provisioner.preflightErr
 }
 

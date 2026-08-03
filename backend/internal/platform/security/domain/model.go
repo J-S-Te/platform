@@ -3,7 +3,7 @@ package domain
 
 import "time"
 
-// LoginPolicy controls password login failure handling for one tenant.
+// LoginPolicy 是单租户密码登录防护策略；Version 用于管理端乐观锁，避免并发策略覆盖。
 type LoginPolicy struct {
 	TenantID                  string
 	MaxFailedAttempts         uint
@@ -14,7 +14,7 @@ type LoginPolicy struct {
 	UpdatedAt                 time.Time
 }
 
-// LockedAccount is the minimal account information exposed to security administrators.
+// LockedAccount 是安全管理员可见的最小账号投影，不包含凭据、会话令牌或失败请求正文。
 type LockedAccount struct {
 	AccountID    string
 	AccountName  string

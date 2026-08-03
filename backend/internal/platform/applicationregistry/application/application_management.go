@@ -273,6 +273,8 @@ func (service *ManagementService) DeleteApplication(ctx context.Context, input A
 		return Application{}, err
 	}
 	if current.Code == builtInApplicationCode {
+		// 平台自身是登录与授权控制面根节点，禁止通过普通应用管理接口退役；否则会同时
+		// 破坏 OIDC 发行方、门户入口以及后续审计所依赖的父资源。
 		return Application{}, ErrConflict
 	}
 	if input.ConfirmationCode != current.Code {
@@ -698,6 +700,8 @@ func normalizeOptionalPathPrefix(value *string) *string {
 //   - upstream_url + path_prefix describe a single reverse-proxy entry, so they must be set
 //     together (or both left empty when the environment is only used as a logical boundary).
 func validGatewayTripleConsistent(baseURL, upstreamURL, pathPrefix *string) bool {
+	// 网关三元组必须保持可组合：路径前缀必须有公网基址，且内部上游与路径前缀必须
+	// 同时出现，防止形成“门户可见但无法代理”的半配置状态。
 	hasBaseURL := baseURL != nil && *baseURL != ""
 	hasUpstream := upstreamURL != nil && *upstreamURL != ""
 	hasPrefix := pathPrefix != nil && *pathPrefix != ""

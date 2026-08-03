@@ -38,6 +38,8 @@ type membershipRow struct {
 
 func (repository *Repository) List(ctx context.Context, tenantID, applicationID, environmentID string, query application.Query) (domain.Page, error) {
 	now := repository.now().UTC()
+	// 候选用户不仅要有有效任职，还必须在调用应用/环境中实际获得有效角色。组织和岗位绑定
+	// 只有在任职允许继承时才生效，且岗位必须仍属于同一组织，避免错组织关系扩大可选负责人范围。
 	authorized := repository.db.WithContext(ctx).Table("iam_user AS user").
 		Select("DISTINCT user.id AS user_id, user.display_name AS display_name").
 		Joins("JOIN iam_membership AS membership ON membership.tenant_id = user.tenant_id AND membership.user_id = user.id").
@@ -61,6 +63,7 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 	if query.UserID != "" {
 		authorized = authorized.Where("user.id = ?", query.UserID)
 	} else if query.Keyword != "" {
+		// LIKE 通配符按字面转义，搜索词不能借助 % 或 _ 扩大结果集；精确用户 ID 仍可直接命中。
 		like := "%" + strings.ReplaceAll(strings.ReplaceAll(query.Keyword, "\\", "\\\\"), "%", "\\%") + "%"
 		like = strings.ReplaceAll(like, "_", "\\_")
 		authorized = authorized.Where("user.display_name LIKE ? ESCAPE '\\\\' OR user.id = ?", like, query.Keyword)
@@ -86,6 +89,8 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 		userIDs = append(userIDs, row.UserID)
 		byID[row.UserID] = &result.Items[len(result.Items)-1]
 	}
+	// 第二次查询重复执行相同授权约束，不能把用户的所有组织任职都返回给子系统；
+	// 每个组织必须自身通过该应用环境的角色绑定边界。
 	memberships := make([]membershipRow, 0)
 	if err := repository.db.WithContext(ctx).Table("iam_membership AS membership").
 		Select("membership.user_id, organization.id AS organization_id, organization.name AS organization_name, membership.is_primary").

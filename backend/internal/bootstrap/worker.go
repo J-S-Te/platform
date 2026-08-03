@@ -1,4 +1,4 @@
-// Package bootstrap wires infrastructure dependencies into runnable processes.
+// Package bootstrap 负责把基础设施依赖装配成可独立启动的进程。
 package bootstrap
 
 import (
@@ -24,7 +24,7 @@ type ProcessRunner interface {
 	Run(context.Context)
 }
 
-// concurrentRunner keeps independent MySQL-backed workers alive under one cancellation context.
+// concurrentRunner 让互不依赖的后台循环共享同一取消信号；关闭时等待全部循环完成清理再退出进程。
 type concurrentRunner struct {
 	runners []ProcessRunner
 }
@@ -53,8 +53,8 @@ type Worker struct {
 	logFile  io.Closer
 }
 
-// NewWorker creates the MySQL-backed audit export and retention workers. Database schema changes
-// remain the responsibility of the explicit migrate command; GORM AutoMigrate is never invoked.
+// NewWorker 装配审计导出与留存清理任务。Worker 不执行 AutoMigrate，数据库变更只能由独立
+// migrate 命令完成，避免扩容或重启后台任务时意外竞争 DDL。
 func NewWorker(cfg config.Config) (*Worker, error) {
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)
@@ -73,6 +73,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 
 	repository, err := auditinfrastructure.NewRepository(db)
 	if err != nil {
+		// 装配任一步失败都按创建顺序逆向释放资源，不能留下占用日志文件或连接池的半成品进程。
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -114,6 +115,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		return nil, err
 	}
 
+	// 两类任务共享数据库但使用独立租约；其中一个退出不应静默停止另一个，统一由上层 context 收敛。
 	runner := &concurrentRunner{runners: []ProcessRunner{exportRunner, retentionRunner}}
 	return &Worker{Runner: runner, Logger: logger, database: db, logFile: logFile}, nil
 }

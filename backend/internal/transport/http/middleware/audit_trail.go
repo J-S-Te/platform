@@ -33,10 +33,8 @@ type AuditRecorder interface {
 	Ingest(context.Context, string, auditapplication.EventInput) (auditdomain.Receipt, error)
 }
 
-// AuditTrail records successful, failed, and denied platform write operations. It also records
-// audit-console queries and export job access, because those operations disclose security data.
-// The external audit ingestion endpoints are intentionally excluded to avoid generating duplicate
-// records for an event that is already being persisted by the audit application service.
+// AuditTrail 在处理器完成后记录成功、失败和拒绝的写操作，也记录会泄露安全信息的审计查询/导出。
+// 外部审计摄取接口有意排除，因为其载荷本身就是待保存事件，再生成一条平台审计会造成重复。
 func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSource) gin.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
@@ -52,6 +50,7 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 	}
 
 	return func(context *gin.Context) {
+		// 必须先执行后续链，才能采集最终路由模板、HTTP 状态和授权拒绝结果。
 		context.Next()
 
 		if recorder == nil || context.Request == nil {
@@ -114,9 +113,8 @@ func shouldRecordAuditTrail(method, route string) bool {
 	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch") {
 		return false
 	}
-	// Successful user access writes and subject-access revocations emit a richer business audit
-	// event after persistence. Keep rejected subject PUTs in the generic trail so denied attempts
-	// are still visible.
+	// 用户应用授权等操作在持久化成功后会写更完整的业务审计，这里避免成功事件重复；
+	// 被拒绝的尝试仍由通用轨迹保留，确保攻击和误操作可见。
 	if strings.HasPrefix(route, "/api/v1/users/") && strings.Contains(route, "/applications/:application_code/access") && (method == http.MethodPut || method == http.MethodDelete) {
 		return false
 	}

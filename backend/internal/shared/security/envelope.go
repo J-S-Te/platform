@@ -12,17 +12,14 @@ import (
 	"strings"
 )
 
-// EnvelopeProtector encrypts small, sensitive values before persistence with AES-256-GCM.
-// The stored format is nonce || ciphertext. It is suitable for sensitive values; callers
-// must keep the base64-encoded key outside the database and must not reuse a key for unrelated
-// trust domains.
+// EnvelopeProtector 用 AES-256-GCM 保护落库前的小型敏感值，格式为 nonce || ciphertext。
+// 密钥必须存放在数据库之外；不同信任域不应复用密钥，否则一个域的密钥泄露会扩大解密范围。
 type EnvelopeProtector struct {
 	key []byte
 }
 
-// NewEnvelopeProtector creates a configured AES-256-GCM protector. The configuration value must
-// be a base64-encoded, exactly 32-byte key; an empty value is rejected so sensitive data is never
-// written in plaintext as a fallback.
+// NewEnvelopeProtector 只接受 Base64 编码的 32 字节密钥。空配置直接失败，禁止在加密配置缺失时
+// 静默退化为明文持久化。
 func NewEnvelopeProtector(encodedKey, environmentName string) (*EnvelopeProtector, error) {
 	environmentName = strings.TrimSpace(environmentName)
 	if environmentName == "" {
@@ -42,8 +39,8 @@ func NewEnvelopeProtector(encodedKey, environmentName string) (*EnvelopeProtecto
 	return &EnvelopeProtector{key: key}, nil
 }
 
-// Encrypt seals plaintext using a fresh random nonce. Context is accepted so this type satisfies
-// application-layer protection interfaces; cryptographic work itself is not cancellable.
+// Encrypt 每次使用新的随机 nonce；返回值把 nonce 置于密文前供解密拆分。context 仅用于满足
+// 应用层接口，单次本地密码运算本身不可取消。
 func (protector *EnvelopeProtector) Encrypt(_ context.Context, plaintext []byte) ([]byte, error) {
 	gcm, err := protector.gcm()
 	if err != nil {
@@ -56,7 +53,7 @@ func (protector *EnvelopeProtector) Encrypt(_ context.Context, plaintext []byte)
 	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 
-// Decrypt authenticates and opens ciphertext created by Encrypt.
+// Decrypt 在返回明文前先验证 GCM 标签，密文截断、篡改或使用错误密钥都会失败关闭。
 func (protector *EnvelopeProtector) Decrypt(_ context.Context, ciphertext []byte) ([]byte, error) {
 	gcm, err := protector.gcm()
 	if err != nil {

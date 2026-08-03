@@ -40,8 +40,8 @@ func (repository *GORMRepository) GetLoginPolicy(ctx context.Context, tenantID s
 	return loginPolicyToDomain(row), nil
 }
 
-// UpdateLoginPolicy applies an optimistic-lock update, creating the first persisted policy from
-// the documented default version when a tenant has not customized it before.
+// UpdateLoginPolicy 使用乐观锁替换策略。租户第一次保存时必须提交默认版本 1，落库后从版本 2
+// 开始，确保“未持久化默认值”与第一次管理端编辑仍处于同一版本序列。
 func (repository *GORMRepository) UpdateLoginPolicy(ctx context.Context, input securityapplication.LoginPolicyUpdateInput, now time.Time) (securitydomain.LoginPolicy, error) {
 	var result securitydomain.LoginPolicy
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -96,8 +96,8 @@ func (repository *GORMRepository) UpdateLoginPolicy(ctx context.Context, input s
 	return result, nil
 }
 
-// RecordFailedLogin stores an invalid-password attempt and locks the account atomically when the
-// tenant threshold is met. The password itself is never persisted.
+// RecordFailedLogin 保存非秘密的失败证据，并在达到租户阈值时于同一事务锁定账号、撤销活跃会话；
+// 密码及其派生值均不进入安全事件表。
 func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input securityapplication.LoginFailureInput, policy securitydomain.LoginPolicy, now time.Time) (securityapplication.LoginFailureResult, error) {
 	var result securityapplication.LoginFailureResult
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -112,6 +112,7 @@ func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input s
 			return fmt.Errorf("lock login account: %w", err)
 		}
 		if account.LockedUntil != nil && account.LockedUntil.After(now) {
+			// 已锁定账号不重复累计失败次数，也不延长锁定窗口，避免攻击流量无限推迟正常恢复时间。
 			result.LockedUntil = account.LockedUntil
 			return nil
 		}
@@ -152,9 +153,8 @@ func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input s
 			Updates(map[string]any{"locked_until": lockedUntil, "updated_at": now}).Error; err != nil {
 			return fmt.Errorf("lock account after login failures: %w", err)
 		}
-		// Existing browser sessions must not remain usable while an account is locked.
-		// Keep this in the same transaction as the lock so a failed session revocation rolls back
-		// the lock instead of creating an ambiguous partially applied security state.
+		// 账号锁定后旧浏览器会话不能继续使用。撤销与锁定处于同一事务：撤销失败会回滚锁定，
+		// 避免出现“账号显示已锁但旧会话仍有效”的模糊安全状态。
 		if err := transaction.Table("iam_session").
 			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, "ACTIVE").
 			Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "ACCOUNT_LOCKED"}).Error; err != nil {
@@ -197,8 +197,8 @@ func (repository *GORMRepository) ListLockedAccounts(ctx context.Context, tenant
 	return securityapplication.PageResult[securitydomain.LockedAccount]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// UnlockAccount clears the lock and active failures, resolves unresolved lock events, and creates
-// a non-sensitive administrative disposition event in the same database transaction.
+// UnlockAccount 在同一事务清除账号锁、凭据计数和仍生效的失败尝试。这里只解除认证阻断，
+// 不重新激活锁定期间已撤销的会话。
 func (repository *GORMRepository) UnlockAccount(ctx context.Context, input securityapplication.UnlockInput, now time.Time) (securitydomain.LockedAccount, error) {
 	var unlocked securitydomain.LockedAccount
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {

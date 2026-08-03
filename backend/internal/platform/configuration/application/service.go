@@ -141,7 +141,8 @@ func (s *Service) ListNamespaces(ctx context.Context, tenantID string, query Pag
 	return s.repository.ListNamespaces(ctx, tenantID, normalizePage(query))
 }
 
-// CreateNamespace creates an active namespace for an active application in the development environment.
+// CreateNamespace 只接受稳定编码，并把“应用必须存在且 dev 环境有效”的事实交给仓储从可信数据中确认，
+// 避免调用方用名称或客户端提交的环境标识伪造配置归属。
 func (s *Service) CreateNamespace(ctx context.Context, input NamespaceCreateInput) (domain.Namespace, error) {
 	if strings.TrimSpace(input.TenantID) == "" ||
 		strings.TrimSpace(input.OperatorID) == "" ||
@@ -169,7 +170,8 @@ func (s *Service) ListItems(ctx context.Context, tenantID string, query PageRequ
 	return s.repository.ListItems(ctx, tenantID, normalizePage(query))
 }
 
-// CreateItem creates an editable draft item. Plaintext secrets are deliberately unsupported.
+// CreateItem 创建可编辑草稿。Secret=true 被有意拒绝：本模块没有密钥托管能力，不能把“敏感”标签
+// 当成加密措施后继续保存明文。
 func (s *Service) CreateItem(ctx context.Context, input ItemCreateInput) (domain.Item, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" {
 		return domain.Item{}, ErrValidation
@@ -202,7 +204,8 @@ func (s *Service) UpdateItem(ctx context.Context, input ItemUpdateInput) (domain
 	return s.repository.UpdateItem(ctx, normalizeUpdateItem(input), s.clock.Now())
 }
 
-// CreateRelease creates an immutable published snapshot of the selected draft versions.
+// CreateRelease 要求调用方明确提交每个草稿的版本，并在进入仓储前去重。这样一次发布对应一个
+// 可重复校验的输入集合，不能通过重复 item 放大计数或制造含义不清的快照。
 func (s *Service) CreateRelease(ctx context.Context, input ReleaseCreateInput) (domain.Release, error) {
 	if strings.TrimSpace(input.TenantID) == "" ||
 		strings.TrimSpace(input.OperatorID) == "" ||
@@ -311,6 +314,8 @@ func validCode(value string) bool {
 }
 
 func validateItem(namespaceID, key, valueType string, value any, secret bool) error {
+	// 配置值来自 JSON 解码后的动态类型；这里先收紧类型，再由仓储按同一 ValueType 编码，
+	// 防止“声明为数字、实际保存字符串”导致不同客户端解释不一致。
 	if strings.TrimSpace(namespaceID) == "" || !validCode(key) || value == nil || secret {
 		return ErrValidation
 	}
@@ -340,6 +345,7 @@ func validateItem(namespaceID, key, valueType string, value any, secret bool) er
 }
 
 func isJSONNumber(value any) bool {
+	// JSON 不定义 NaN 和无穷大；即便 Go 浮点可以表达，也不能让它们进入可发布快照。
 	switch number := value.(type) {
 	case json.Number:
 		_, err := number.Float64()

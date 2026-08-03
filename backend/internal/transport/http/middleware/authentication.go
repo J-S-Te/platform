@@ -15,8 +15,8 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
 }
 
-// Authentication verifies the configured HttpOnly session cookie before a protected route runs.
-// It never trusts identity headers supplied by a browser or external caller.
+// Authentication 在受保护路由前校验 HttpOnly 会话 Cookie。用户、租户和权限只能来自服务端
+// 会话解析结果，浏览器可伪造的身份请求头永远不进入可信上下文。
 func Authentication(authenticator Authenticator, cookieName string) gin.HandlerFunc {
 	return func(context *gin.Context) {
 		cookie, err := context.Request.Cookie(cookieName)
@@ -31,9 +31,8 @@ func Authentication(authenticator Authenticator, cookieName string) gin.HandlerF
 			httpresponse.WriteError(context.Writer, context.Request, http.StatusUnauthorized, httperror.Unauthenticated)
 			return
 		}
-		// Every Cookie-authenticated response is tenant/user specific. Disable browser and shared
-		// proxy caching before the handler writes headers, otherwise an account switch can reuse the
-		// previous bp_session user's data or navigation permissions for the same URL.
+		// Cookie 响应与租户、用户绑定，必须在业务处理器写响应前禁用浏览器和共享代理缓存；
+		// 否则同一 URL 在切换账号后可能复用上一用户的数据或导航权限。
 		context.Header("Cache-Control", "no-store, private")
 		context.Header("Pragma", "no-cache")
 		context.Writer.Header().Add("Vary", "Cookie")

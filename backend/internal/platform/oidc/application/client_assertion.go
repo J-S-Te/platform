@@ -25,12 +25,12 @@ import (
 
 const clientAssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
-// ErrClientAssertionReplay is returned by durable repositories when a jti has already been
-// accepted for the same OAuth client. It intentionally maps to invalid_client at the protocol edge.
+// ErrClientAssertionReplay 表示同一客户端的 jti 已被持久化占用。协议边界统一映射为
+// invalid_client，避免向攻击者区分签名、时间窗和重放校验中的具体失败点。
 var ErrClientAssertionReplay = errors.New("OIDC client assertion was already used")
 
-// ClientAssertionReplayRepository persists a digest of an accepted jti. A unique insert is the
-// cross-instance replay protection; an in-memory cache is deliberately not used.
+// ClientAssertionReplayRepository 保存已接受 jti 的摘要；数据库唯一约束负责跨实例防重放，
+// 不能替换成仅对单进程有效的内存缓存。
 type ClientAssertionReplayRepository interface {
 	RecordClientAssertionReplay(ctx context.Context, oauthClientID string, jtiHash [32]byte, expiresAt, now time.Time) error
 }
@@ -43,6 +43,8 @@ type compactJWT struct {
 }
 
 func authenticatePrivateKeyJWT(ctx context.Context, repo Repository, client domain.Client, auth ClientAuthentication, now time.Time) error {
+	// 断言同时绑定 iss、sub、aud 与当前客户端，且有效期最多五分钟。签名正确并不足以证明
+	// 断言可用于当前令牌端点，尤其不能把为其他 audience 签发的 JWT 拿来复用。
 	if strings.TrimSpace(auth.ClientAssertionType) != clientAssertionTypeJWTBearer ||
 		!validProtocolText(strings.TrimSpace(auth.ClientAssertionAudience), 2048) {
 		return ErrInvalidClient
@@ -77,6 +79,7 @@ func authenticatePrivateKeyJWT(ctx context.Context, repo Repository, client doma
 	if !ok {
 		return ErrInvalidClient
 	}
+	// 只有全部声明和签名通过后才占用 jti；保存摘要而非原文，减少认证材料在数据库中的暴露。
 	if err := replays.RecordClientAssertionReplay(ctx, client.ID, sha256.Sum256([]byte(jti)), expiresAt.UTC(), now.UTC()); err != nil {
 		if errors.Is(err, ErrClientAssertionReplay) {
 			return ErrInvalidClient
@@ -115,8 +118,8 @@ func parseCompactJWT(value string) (compactJWT, error) {
 	return compactJWT{Header: header, Claims: claims, SigningInput: []byte(parts[0] + "." + parts[1]), Signature: signature}, nil
 }
 
-// decodeUniqueJSONObject rejects duplicate top-level names. Accepting duplicate JWT header or
-// claim names can make different components select different values from the same signed input.
+// decodeUniqueJSONObject 拒绝顶层重名字段。若允许重复的 JWT header/claim，不同 JSON
+// 实现可能从同一签名输入选择不同值，造成“验签看到一个值、授权使用另一个值”的解析差异。
 func decodeUniqueJSONObject(value []byte) (map[string]json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(value))
 	token, err := decoder.Token()
@@ -156,6 +159,8 @@ func decodeUniqueJSONObject(value []byte) (map[string]json.RawMessage, error) {
 }
 
 func verifyCompactJWT(token compactJWT, keys []domain.ClientJWK) error {
+	// 不支持的 crit 必须失败关闭；kid 必须唯一命中登记公钥，禁止尝试所有密钥或在同名键间任选，
+	// 否则密钥轮换期间会产生算法与密钥选择歧义。
 	if _, usesCriticalHeaders := token.Header["crit"]; usesCriticalHeaders {
 		return errors.New("unsupported critical JWT header")
 	}

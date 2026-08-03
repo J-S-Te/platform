@@ -1,5 +1,5 @@
-// Package personneldirectory exposes the platform's active tenant personnel list to the OIDC
-// UserInfo boundary without leaking login names, employee numbers, email addresses or mobile data.
+// Package personneldirectory 向 OIDC UserInfo 提供租户内活跃人员的最小投影；
+// 登录名、工号、邮箱和手机号均不进入该目录，避免 profile scope 扩大为账号目录读取权。
 package personneldirectory
 
 import (
@@ -49,6 +49,8 @@ func (resolver *Resolver) ListActivePersonnel(ctx context.Context, tenantID, oau
 	}
 
 	now := time.Now().UTC()
+	// 应用角色必须与 OAuth 客户端所属应用一致，且只承认 TENANT/当前 ENVIRONMENT 范围；
+	// 组织和岗位绑定还要求有效任职关系显式开启 inherit_authorization。
 	roleRows := make([]roleRow, 0)
 	err := resolver.database.WithContext(ctx).
 		Table("iam_user AS person").
@@ -94,6 +96,8 @@ func (resolver *Resolver) ListActivePersonnel(ctx context.Context, tenantID, oau
 		return nil, fmt.Errorf("list effective application roles for tenant personnel: %w", err)
 	}
 	superAdminRows := make([]roleRow, 0)
+	// 平台超级管理员映射为目标应用的 admin 角色，而不是把平台角色码直接泄露给子系统；
+	// 目标应用必须已登记同名 admin 角色，否则不会产生隐式权限。
 	err = resolver.database.WithContext(ctx).
 		Table("iam_user AS person").
 		Select("DISTINCT person.id AS user_id, target_admin.code AS role_code").

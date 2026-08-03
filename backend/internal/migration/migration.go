@@ -1,4 +1,4 @@
-// Package migration executes versioned MySQL schema migrations.
+// Package migration 负责按版本执行 MySQL 架构迁移，并校验已发布迁移不可被篡改。
 package migration
 
 import (
@@ -25,7 +25,7 @@ const (
 
 var migrationFilePattern = regexp.MustCompile(`^(\d{6})_([a-z0-9_]+)\.sql$`)
 
-// Item is one immutable, ordered SQL migration.
+// Item 表示一份按版本排序且发布后不可修改的 SQL 迁移；Checksum 用来阻止直接改写历史文件。
 type Item struct {
 	Version  uint64
 	Name     string
@@ -33,13 +33,13 @@ type Item struct {
 	Checksum [sha256.Size]byte
 }
 
-// Applied contains the identity of a migration successfully recorded by Run.
+// Applied 仅返回本次新落库的迁移，调用方可据此记录发布日志，而不会把历史版本重复上报。
 type Applied struct {
 	Version uint64
 	Name    string
 }
 
-// Load reads and validates versioned migration files from source.
+// Load 在连接数据库前先校验文件命名、版本连续性、重复版本和空内容，避免执行到一半才发现发布包不完整。
 func Load(source fs.FS) ([]Item, error) {
 	paths, err := fs.Glob(source, "*.sql")
 	if err != nil {
@@ -98,10 +98,9 @@ func Load(source fs.FS) ([]Item, error) {
 	return items, nil
 }
 
-// Run applies every pending migration in version order. It uses a MySQL advisory lock to prevent
-// concurrent application instances from modifying the same schema at the same time. MySQL DDL can
-// perform implicit commits, so each statement is deliberately executed independently; migrations
-// are written with CREATE TABLE IF NOT EXISTS and idempotent seed statements for safe retry.
+// Run 按版本执行所有待应用迁移。MySQL 建议锁必须绑定到同一条物理连接，因此整个流程放在
+// Connection 回调内，防止多个发布实例同时修改同一 schema。MySQL DDL 可能隐式提交，无法用
+// 一个事务可靠回滚整份文件，所以语句逐条执行，迁移文件本身必须采用可安全重试的 DDL/DML。
 func Run(ctx context.Context, database *gorm.DB, source fs.FS) ([]Applied, error) {
 	items, err := Load(source)
 	if err != nil {
@@ -126,6 +125,7 @@ func Run(ctx context.Context, database *gorm.DB, source fs.FS) ([]Applied, error
 		result = make([]Applied, 0, len(items))
 		for _, item := range items {
 			if checksum, exists := applied[item.Version]; exists {
+				// 已执行版本只能跳过，不能“以文件为准”重跑；否则不同实例可能面对不同数据库结构。
 				if checksum != item.Checksum {
 					return fmt.Errorf(
 						"migration %06d_%s checksum differs from applied version (database=%x, file=%x); create a new migration instead of editing an applied file",
@@ -193,6 +193,7 @@ func acquireLock(ctx context.Context, database *gorm.DB) error {
 }
 
 func releaseLock(database *gorm.DB) {
+	// 即使原请求已取消也要尽力释放会话锁；沿用已取得锁的专用连接，不能切回连接池中的另一连接。
 	_ = database.WithContext(context.Background()).Exec("SELECT RELEASE_LOCK(?)", migrationLockName).Error
 }
 
@@ -220,9 +221,8 @@ func readApplied(ctx context.Context, database *gorm.DB) (map[uint64][sha256.Siz
 	return applied, nil
 }
 
-// SplitStatements separates a migration script into SQL statements without splitting semicolons
-// inside SQL string literals or quoted identifiers. Stored procedures and DELIMITER directives are
-// intentionally unsupported; migrations must use ordinary DDL/DML statements only.
+// SplitStatements 是受限 SQL 切分器：字符串、反引号标识符和注释内的分号不会被误切。
+// 这里有意不支持存储过程和 DELIMITER，迁移必须保持为普通 DDL/DML，才能维持逐语句重试边界。
 func SplitStatements(script string) ([]string, error) {
 	const (
 		normal = iota

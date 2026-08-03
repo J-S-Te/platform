@@ -26,7 +26,8 @@ var (
 	jobTypePattern       = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,63}$`)
 )
 
-// FileService owns the state machine that bridges durable metadata and local binary storage.
+// FileService 管理数据库元数据与本地二进制之间的状态机；两种存储无法共享事务，
+// 因此每个跨边界步骤都必须有明确失败状态或补偿动作。
 type FileService struct {
 	repository FileRepository
 	store      LocalStore
@@ -35,8 +36,8 @@ type FileService struct {
 	policy     UploadPolicy
 }
 
-// NewFileService creates a file service with an explicit policy. No default "accept everything"
-// mode exists: a non-positive maximum and an empty MIME allowlist are rejected.
+// NewFileService 要求显式上传策略。大小未配置时使用保守默认值，但 MIME 白名单不能为空，
+// 不存在“接受任意文件类型”的降级模式。
 func NewFileService(repository FileRepository, store LocalStore, ids IDGenerator, clock Clock, policy UploadPolicy) (*FileService, error) {
 	if repository == nil || store == nil || ids == nil || clock == nil {
 		return nil, errors.New("file service dependencies must not be nil")
@@ -59,8 +60,8 @@ func NewFileService(repository FileRepository, store LocalStore, ids IDGenerator
 	return &FileService{repository: repository, store: store, ids: ids, clock: clock, policy: policy}, nil
 }
 
-// DefaultUploadPolicy is deliberately conservative. Business modules that need additional file
-// types must extend the server-side policy explicitly rather than relying on client MIME values.
+// DefaultUploadPolicy 只开放平台明确处理的少量格式。业务模块需要其他类型时必须修改服务端
+// 白名单，浏览器声明的 Content-Type 不能扩大信任边界。
 func DefaultUploadPolicy() UploadPolicy {
 	return UploadPolicy{
 		MaxBytes: defaultUploadMaxBytes,
@@ -74,9 +75,9 @@ func DefaultUploadPolicy() UploadPolicy {
 	}
 }
 
-// Upload creates WRITING metadata, atomically persists the binary, then promotes both records to
-// AVAILABLE. A file-system failure marks metadata FAILED; a database promotion failure removes the
-// newly written binary before returning the error.
+// Upload 先创建 WRITING 元数据，再原子发布文件，最后把文件及版本推进到 AVAILABLE。
+// 文件系统失败会把元数据标为 FAILED；数据库推进失败则删除新文件并标记失败，尽量补偿
+// MySQL 与文件系统之间无法实现分布式事务造成的不一致窗口。
 func (service *FileService) Upload(ctx context.Context, input UploadInput) (domain.File, error) {
 	if err := validateUploadInput(input); err != nil {
 		return domain.File{}, err
@@ -140,8 +141,8 @@ func (service *FileService) Upload(ctx context.Context, input UploadInput) (doma
 	return file, nil
 }
 
-// OpenDownload resolves an AVAILABLE file, enforces owner-or-permission access and opens a verified
-// local handle. The caller must close the returned handle after streaming it.
+// OpenDownload 只解析 AVAILABLE 文件，并在打开本地句柄前再次执行“所有者或下载权限”判断。
+// 即使路由权限配置错误，应用层也不会让任意已登录用户绕过文件归属；调用方负责流式发送后关闭句柄。
 func (service *FileService) OpenDownload(ctx context.Context, access DownloadAccess, fileID string) (domain.StoredFile, io.ReadSeekCloser, error) {
 	if strings.TrimSpace(access.TenantID) == "" || strings.TrimSpace(access.UserID) == "" || strings.TrimSpace(fileID) == "" {
 		return domain.StoredFile{}, nil, validation("download identity and file_id are required")
@@ -160,9 +161,8 @@ func (service *FileService) OpenDownload(ctx context.Context, access DownloadAcc
 	return stored, handle, nil
 }
 
-// CleanupUnboundExpired deletes only unbound AVAILABLE files older than cutoff. The existing schema
-// has no per-file expiration column, so callers supply a policy-derived cutoff; per-file expiration
-// requires an additive migration documented in 文件与异步任务开发说明.md.
+// CleanupUnboundExpired 只清理早于截止时间、无业务绑定且状态为 AVAILABLE 的文件。
+// 现有表没有逐文件过期时间，所以截止点来自外部策略；若要支持每个文件独立过期，必须新增迁移。
 func (service *FileService) CleanupUnboundExpired(ctx context.Context, tenantID string, cutoff time.Time, maxFiles int) (domain.CleanupResult, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" || cutoff.IsZero() || maxFiles <= 0 {
@@ -184,6 +184,7 @@ func (service *FileService) CleanupUnboundExpired(ctx context.Context, tenantID 
 			continue
 		}
 		if err := service.repository.MarkDeleted(ctx, stored.File.TenantID, stored.File.ID, service.clock.Now().UTC()); err != nil {
+			// 二进制已删除但数据库推进失败时不能恢复文件；记录失败计数，DELETING 元数据需由后续对账修复。
 			result.FailedFiles++
 			continue
 		}
@@ -215,8 +216,8 @@ func (service *FileService) resolveMediaType(declared, extension string, header 
 		}
 	}
 
-	// CSV is often detected as text/plain. Treat it as CSV only when the filename and declared type
-	// both identify CSV; all other declared/detected differences are rejected conservatively.
+	// CSV 常被内容探测识别为 text/plain；只有扩展名和声明类型同时确认 CSV 时才修正。
+	// 其他“声明/扩展名/内容”不一致一律拒绝，防止仅靠客户端 MIME 绕过白名单。
 	if extension == "csv" && detected == "text/plain" && declaredCanonical == "text/csv" {
 		detected = "text/csv"
 	}
@@ -250,9 +251,8 @@ func validateUploadInput(input UploadInput) error {
 	return nil
 }
 
-// validStorageSegment prevents identity and application values from forming a path traversal
-// segment before metadata is created. IDs are allowed to use ordinary punctuation because the
-// platform stores both ULIDs and configured application codes.
+// validStorageSegment 在创建元数据前阻止租户或应用标识形成路径穿越片段。平台同时使用 ULID
+// 与配置型应用编码，因此允许普通标点，但路径分隔符、控制字符及 . / .. 明确禁止。
 func validStorageSegment(value string) bool {
 	if len(value) > 128 || value == "." || value == ".." || strings.ContainsAny(value, "/\\") {
 		return false

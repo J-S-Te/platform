@@ -1,5 +1,5 @@
-// Command reset-admin-password-codex performs a one-time local recovery of an existing
-// administrator password by reusing the production repository transaction.
+// Command reset-admin-password-codex 用生产仓储事务执行一次性本地管理员凭据恢复，
+// 使密码版本更新、旧会话撤销和审计语义与正常重置流程保持一致。
 package main
 
 import (
@@ -68,6 +68,7 @@ func run(input io.Reader) error {
 	defer cancel()
 
 	var accounts []accountRow
+	// 最多读取两条即可证明账号名不唯一；恢复工具拒绝猜测租户或选择任意账号。
 	result := db.WithContext(ctx).
 		Table("iam_account").
 		Where("username = ?", "admin").
@@ -108,6 +109,7 @@ func run(input io.Reader) error {
 		return fmt.Errorf("reset administrator password: %w", err)
 	}
 
+	// 写入后立即从仓储重读并验证，避免工具在事务未真正更新目标凭据时误报恢复成功。
 	credential, err := repository.FindLocalPasswordCredential(ctx, account.TenantID, account.ID)
 	if err != nil {
 		return fmt.Errorf("read updated credential: %w", err)
@@ -126,6 +128,7 @@ func readPassword(reader io.Reader) (string, error) {
 	if reader == nil {
 		return "", errors.New("password standard input is unavailable")
 	}
+	// 标准输入避免密码暴露在 shell 历史和进程参数；多读一字节用于可靠识别超长输入。
 	content, err := io.ReadAll(io.LimitReader(reader, maximumPasswordInputBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read password from standard input: %w", err)

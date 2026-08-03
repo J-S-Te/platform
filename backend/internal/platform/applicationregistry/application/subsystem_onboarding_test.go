@@ -94,6 +94,7 @@ func TestOnboardCustomerPortalCreatesSixIndependentLeastPrivilegeServiceClients(
 		t.Fatal(err)
 	}
 	expectedScopes := map[string]string{
+		ServiceCredentialAuditIngest:            "audit.ingest",
 		ServiceCredentialExternalUserProvision:  "external_user.provision",
 		ServiceCredentialApplicationRoleAssign:  "application_role.assign",
 		ServiceCredentialApplicationRoleRevoke:  "application_role.revoke",
@@ -142,10 +143,18 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 1 || len(result.ServiceCredentials) != 1 {
+	if len(repository.write.ServiceClients) != 2 || len(result.ServiceCredentials) != 2 {
 		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
 	}
-	credential := result.ServiceCredentials[0]
+	credentials := make(map[string]SubsystemServiceCredential, len(result.ServiceCredentials))
+	for _, credential := range result.ServiceCredentials {
+		credentials[credential.Purpose] = credential
+	}
+	auditCredential := credentials[ServiceCredentialAuditIngest]
+	if len(auditCredential.OAuthClient.Scopes) != 1 || auditCredential.OAuthClient.Scopes[0] != "audit.ingest" || auditCredential.PlaintextSecret == "" {
+		t.Fatalf("audit credential=%#v", auditCredential)
+	}
+	credential := credentials[ServiceCredentialOwnerDirectoryRead]
 	client := credential.OAuthClient
 	if credential.Purpose != ServiceCredentialOwnerDirectoryRead || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" || len(client.Scopes) != 1 || client.Scopes[0] != "owner_directory.read" {
 		t.Fatalf("owner directory credential=%#v", credential)

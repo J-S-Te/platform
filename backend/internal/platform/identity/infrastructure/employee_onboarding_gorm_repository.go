@@ -11,9 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// CreateEmployee persists the complete employee onboarding aggregate in one database transaction.
-// It intentionally does not call the public CreateUsers/CreateLocalAccount/CreateMembership methods:
-// each owns its own transaction and would reintroduce partial-success states.
+// CreateEmployee 用一个数据库事务持久化完整入职聚合。这里不串联各自拥有事务边界的
+// CreateUsers/CreateLocalAccount/CreateMembership，否则后一步失败时无法回滚前面已提交的数据。
 func (repository *GORMRepository) CreateEmployee(ctx context.Context, write application.EmployeeOnboardingWrite) (domain.User, *domain.Account, *domain.Membership, error) {
 	if write.User.ID == "" || write.User.RoleBindingID == "" || write.User.TenantID == "" || write.User.OperatorID == "" {
 		return domain.User{}, nil, nil, application.ErrValidation
@@ -45,6 +44,8 @@ func (repository *GORMRepository) CreateEmployee(ctx context.Context, write appl
 		if result.Error != nil {
 			return fmt.Errorf("resolve ordinary-user role: %w", result.Error)
 		}
+		// 平台普通用户角色是所有员工身份的基线授权；种子应用或角色缺失属于部署损坏，
+		// 必须让整次入职失败，不能创建一个无法进入平台的孤立用户。
 
 		now := write.OccurredAt.UTC()
 		if now.IsZero() {
@@ -134,6 +135,8 @@ func (repository *GORMRepository) CreateEmployee(ctx context.Context, write appl
 			if err := advanceMembershipAuthorizationRevisions(transaction, write.Membership.TenantID, now, "新增员工任职关系导致组织/岗位继承授权变化"); err != nil {
 				return err
 			}
+			// 任职与授权 revision 同事务提交，子系统不会观察到“任职已存在但仍沿用旧授权
+			// 快照”的中间状态。
 			membershipID = write.MembershipID
 		}
 		return nil

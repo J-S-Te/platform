@@ -19,6 +19,7 @@ import (
 )
 
 const (
+	// 机器接口只能收敛到客户门户的低权限客户角色；应用码和角色码不是调用方可自由选择的委派入口。
 	PortalApplicationCode = "customer_portal"
 	PortalCustomerRole    = "portal_customer"
 	maxClockSkew          = 5 * time.Minute
@@ -44,6 +45,7 @@ type MobileProtection interface {
 }
 
 type RequestProof struct {
+	// 幂等键保证业务重试返回原结果；时间戳和 nonce 则阻断截获请求在时间窗内外被再次利用。
 	IdempotencyKey string
 	Timestamp      time.Time
 	Nonce          string
@@ -120,6 +122,7 @@ func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator
 }
 
 func (service *Service) Provision(ctx context.Context, principal appctx.Principal, proof RequestProof, input ProvisionInput) (ProvisionResult, error) {
+	// 先验证机器主体与防重放证明，再处理个人信息；验证失败时不执行加密、摘要或写库。
 	now, nonceHash, err := validateProof(principal, proof, service.clock.Now())
 	if err != nil {
 		return ProvisionResult{}, err
@@ -139,6 +142,7 @@ func (service *Service) Provision(ctx context.Context, principal appctx.Principa
 	if email == nil && mobile == "" {
 		return ProvisionResult{}, ErrValidation
 	}
+	// 幂等键还必须绑定规范化后的完整请求。相同键携带不同客户资料会被仓储判定为冲突。
 	requestHash := hashProvisionRequest(displayName, mobile, email)
 	identityID, userID, eventID, err := service.newIDs(now, 3)
 	if err != nil {
@@ -173,6 +177,7 @@ func (service *Service) role(ctx context.Context, principal appctx.Principal, pr
 	input.PlatformUserID = strings.TrimSpace(input.PlatformUserID)
 	input.ApplicationCode = strings.TrimSpace(input.ApplicationCode)
 	input.RoleCode = strings.TrimSpace(input.RoleCode)
+	// 严格固定应用与角色，避免具备该机器接口权限的 CRM 客户端借此绑定平台或其他应用高权角色。
 	if input.PlatformUserID == "" || len(input.PlatformUserID) > 128 || input.ApplicationCode != PortalApplicationCode || input.RoleCode != PortalCustomerRole {
 		return domain.RoleResult{}, ErrValidation
 	}
@@ -201,6 +206,7 @@ func validateProof(principal appctx.Principal, proof RequestProof, now time.Time
 		return time.Time{}, [32]byte{}, ErrValidation
 	}
 	timestamp := proof.Timestamp.UTC()
+	// 同时拒绝过旧和显著超前的请求，避免服务器时钟偏差被利用来延长重放窗口。
 	if timestamp.Before(now.Add(-maxClockSkew)) || timestamp.After(now.Add(maxClockSkew)) {
 		return time.Time{}, [32]byte{}, ErrReplay
 	}
@@ -212,6 +218,7 @@ func normalizedIdempotencyKey(proof RequestProof) string {
 }
 
 func (service *Service) prepareEmail(value string) (*string, []byte, error) {
+	// 邮箱先做唯一规范化再摘要，确保大小写差异不会创建两个外部身份。
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		return nil, nil, nil
@@ -224,6 +231,7 @@ func (service *Service) prepareEmail(value string) (*string, []byte, error) {
 }
 
 func (service *Service) prepareMobile(value string) (string, []byte, []byte, error) {
+	// 密文用于必要的受控展示，带域分隔的摘要用于查重；数据库查重不需要解密手机号。
 	value = strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(value), " ", ""), "-", "")
 	if value == "" {
 		return "", nil, nil, nil
@@ -284,5 +292,6 @@ func containsControl(value string) bool {
 }
 
 func SameDigest(left, right []byte) bool {
+	// 摘要比较采用常量时间，避免在机器接口冲突路径上泄漏前缀匹配信息。
 	return len(left) == sha256.Size && len(right) == sha256.Size && subtle.ConstantTimeCompare(left, right) == 1
 }

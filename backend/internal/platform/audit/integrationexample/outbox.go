@@ -1,10 +1,8 @@
-// Package integrationexample provides a copyable reference implementation for another Go service
-// that publishes audit events through a local transactional outbox.
+// Package integrationexample 给出子系统通过本地事务发件箱发布审计事件的可复制参考实现。
 //
-// The package intentionally contains no platform-internal imports. A business system can copy this
-// directory, implement Store with GORM/MySQL, and keep the business write plus OutboxRecord insert
-// in the same database transaction. It must never place application tokens, client secrets, or raw
-// password values in Payload or ErrorMessage.
+// 本包刻意不依赖平台内部代码。业务系统可复制该目录并以 GORM/MySQL 实现 Store，但必须让
+// 业务变更与 OutboxRecord 插入处于同一事务；Payload 和错误信息不得保存应用令牌、客户端密钥
+// 或原始密码。
 package integrationexample
 
 import (
@@ -57,16 +55,15 @@ type OutboxRecord struct {
 	AvailableAt time.Time
 }
 
-// Receipt is the receiver acknowledgement for a submitted event. Both ACCEPTED and DUPLICATE are
-// terminal successes because Basic Platform deduplicates by the application and event ID boundary.
+// Receipt 是接收端对单条事件的确认。ACCEPTED 与 DUPLICATE 都是终态成功，因为平台按
+// “来源应用 + event_id”去重，网络重试不应制造新的业务失败。
 type Receipt struct {
 	EventID string `json:"event_id"`
 	Status  string `json:"status"`
 }
 
-// Store is implemented by the integrated service using GORM/MySQL. Claim must use a row lock or
-// optimistic claim and only return rows that are due. MarkRetry chooses exponential backoff and,
-// after the service policy's maximum attempts, moves the record to its own local dead-letter state.
+// Store 由接入系统使用 GORM/MySQL 实现。Claim 必须通过行锁或条件更新原子领取到期行；
+// MarkRetry 使用退避时间，超过系统策略上限后将记录转入该子系统自己的本地死信状态。
 type Store interface {
 	Claim(ctx context.Context, workerID string, limit int, staleBefore time.Time) ([]OutboxRecord, error)
 	MarkDelivered(ctx context.Context, recordID string, deliveredAt time.Time) error
@@ -104,8 +101,8 @@ func NewWorker(store Store, sender Sender, workerID string, maxAttempts uint) (*
 	return &Worker{store: store, sender: sender, clock: systemClock{}, workerID: workerID, maxAttempts: maxAttempts}, nil
 }
 
-// DeliverOnce claims up to 100 due rows and records the outcome per event. A malformed local row
-// cannot block the rest of the batch; it is moved to the local dead-letter state with a stable code.
+// DeliverOnce 至多领取 100 条到期记录，并按 event_id 分别落投递结果。损坏的本地载荷会以
+// 稳定错误码转入本地死信，不阻塞同批其他记录；缺少回执的项则按可重试故障处理。
 func (worker *Worker) DeliverOnce(ctx context.Context) (int, error) {
 	now := worker.clock.Now().UTC()
 	records, err := worker.store.Claim(ctx, worker.workerID, maxBatchSize, now.Add(-5*time.Minute))

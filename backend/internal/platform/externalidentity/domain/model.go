@@ -1,19 +1,19 @@
-// Package domain contains the platform-owned external identity projection.
+// Package domain 定义平台持有的外部客户身份投影，外部系统只负责提出收敛请求，
+// iam_user 主体、账号和角色绑定的最终所有权仍属于平台。
 package domain
 
 import "time"
 
 const (
-	// IdentityPendingActivation means the stable OIDC subject has been reserved, but the
-	// platform has not completed its own credential or upstream-identity activation flow.
+	// IdentityPendingActivation 表示稳定 OIDC subject 已预留，但平台尚未完成凭据初始化
+	// 或上游身份激活；外部系统不能把该状态等同于可登录。
 	IdentityPendingActivation = "PENDING_ACTIVATION"
 	IdentityActive            = "ACTIVE"
 	IdentityDisabled          = "DISABLED"
 )
 
-// Identity is the non-secret external-customer identity projection. PlatformUserID is the
-// authoritative OIDC subject (iam_user.id). AccountNo is an operator-facing reference only and
-// is never accepted as a login credential.
+// Identity 是不含秘密的外部客户身份投影。PlatformUserID（iam_user.id）是权威 OIDC subject；
+// AccountNo 仅供运营定位记录，不能作为登录凭据或跨系统主键。
 type Identity struct {
 	ID             string
 	TenantID       string

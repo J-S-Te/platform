@@ -1,11 +1,10 @@
-// Package domain defines application integration credentials without exposing secret material.
+// Package domain 定义应用集成认证所需的运行时快照，管理面明文密钥不会进入该模型。
 package domain
 
 import "time"
 
-// OAuthClient is the active portion of an application client registration needed to issue
-// and validate Client Credentials access tokens. Credential hashes are never returned from
-// this model because callers must not persist or log them.
+// OAuthClient 仅包含签发和校验 Client Credentials 令牌所需的活跃登记边界；租户、应用、
+// 环境必须整体匹配。凭据摘要由仓储留在校验路径，不通过该模型向调用方扩散。
 type OAuthClient struct {
 	ID                    string
 	TenantID              string

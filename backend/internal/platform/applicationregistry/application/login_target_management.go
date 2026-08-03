@@ -67,9 +67,8 @@ type LoginTargetManagementRepository interface {
 	UpdateLoginTarget(context.Context, LoginTargetUpdateInput, time.Time) (LoginTargetManagementItem, error)
 }
 
-// LoginTargetManagementService coordinates the control plane for approved cross-application
-// landing targets. Runtime resolution remains a separate read-only service so these targets can
-// never be mistaken for OAuth authorization-code callback registrations.
+// LoginTargetManagementService 管理登录后的跨应用落点；运行时解析由独立只读服务完成。
+// 登录目标不是 OAuth 授权码回调地址，两类白名单不能共用，否则会把门户导航能力扩大成凭据回传能力。
 type LoginTargetManagementService struct {
 	repository LoginTargetManagementRepository
 	ids        IdentifierGenerator
@@ -161,8 +160,8 @@ func (service *LoginTargetService) ResolvePostLoginRedirect(ctx context.Context,
 	return LoginTargetRedirectDecision{Location: location, TargetResolved: true}, nil
 }
 
-// SafePlatformLoginFallback restricts an exceptional post-login fallback to this platform. It is
-// intentionally not an open redirect helper and must not be used to validate application targets.
+// SafePlatformLoginFallback 只接受平台本域相对路径作为异常回退；它不是通用 URL 校验器，
+// 也不能用于放行应用登录目标，否则会绕过登记仓储和租户/环境边界。
 func SafePlatformLoginFallback(candidate string) string {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {

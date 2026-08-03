@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# 每次发布只接受带 sha256 digest 的阿里云镜像。版本指针写入 .release.env，运行密钥仍留在
+# 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
+
 usage() {
   echo "usage: $0 {frontend|platform|contract} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
   exit 2
@@ -27,7 +30,9 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 deploy_dir="$(cd -- "$script_dir/.." && pwd)"
 release_file="$deploy_dir/.release.env"
 runtime_file="$deploy_dir/.env"
+contract_runtime_file="$deploy_dir/runtime/contract.env"
 compose_file="$deploy_dir/compose.yaml"
+export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 
 for command_name in docker curl gzip flock awk mktemp; do
   command -v "$command_name" >/dev/null || {
@@ -37,11 +42,13 @@ for command_name in docker curl gzip flock awk mktemp; do
 done
 docker compose version >/dev/null
 [[ -f "$runtime_file" ]] || { echo "缺少 $runtime_file" >&2; exit 1; }
+[[ -f "$contract_runtime_file" ]] || { echo "缺少 $contract_runtime_file" >&2; exit 1; }
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
 [[ -f "$compose_file" ]] || { echo "缺少 $compose_file" >&2; exit 1; }
 
-mkdir -p "$deploy_dir/backups/releases"
-exec 9>"$deploy_dir/.deploy.lock"
+mkdir -p "$deploy_dir/backups/releases" "$deploy_dir/runtime"
+exec 9>"$deploy_dir/runtime/.deploy.lock"
+# 锁覆盖“备份—迁移—切镜像—健康检查—回退”完整窗口，防止并发发布互相覆盖 .release.env。
 flock -w 900 9 || {
   echo "等待其他发布任务超时" >&2
   exit 1
@@ -67,12 +74,33 @@ env_value() {
   ' "$runtime_file"
 }
 
+contract_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$contract_runtime_file"
+}
+
 require_runtime_value() {
   local key="$1"
   local value
   value="$(env_value "$key")"
   if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
     echo "运行配置缺失或仍为占位值：$key" >&2
+    return 1
+  fi
+}
+
+require_contract_runtime_value() {
+  local key="$1"
+  local value
+  value="$(contract_env_value "$key")"
+  if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+    echo "合同运行配置缺失或仍为占位值：$key" >&2
     return 1
   fi
 }
@@ -109,6 +137,7 @@ backup_database() {
   local database="$2"
   local output="$deploy_dir/backups/${service}-${release_id}.sql.gz"
   echo "备份数据库到 $output"
+  # single-transaction 为 InnoDB 提供一致性快照，备份管道任一环节失败都会因 pipefail 中止发布。
   compose exec -T "$mysql_service" sh -c \
     'exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$1"' \
     _ "$database" \
@@ -119,25 +148,28 @@ deploy_platform() {
   compose up -d --wait --wait-timeout 180 platform-mysql || return
   backup_database platform-mysql basic_platform || return
   compose --profile release run --rm platform-migrate ./migrate || return
+  # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
+  # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
+  compose up -d --wait --wait-timeout 60 --no-deps subsystem-provisioner || return
   compose up -d --no-deps platform-api || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz"
 }
 
 deploy_contract() {
-  require_runtime_value OIDC_CLIENT_ID || return
-  require_runtime_value OIDC_CLIENT_SECRET || return
-  require_runtime_value OIDC_TENANT_ID || return
-  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
-  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
-  require_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
-  if [[ "$(env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
+  # 子系统只有在浏览器 OIDC 与机器目录发布凭据全部就绪后才能启动，避免容器进入 401 重启循环。
+  require_contract_runtime_value OIDC_CLIENT_ID || return
+  require_contract_runtime_value OIDC_CLIENT_SECRET || return
+  require_contract_runtime_value OIDC_TENANT_ID || return
+  require_contract_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
+  require_contract_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
+  require_contract_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
+  if [[ "$(contract_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1
   fi
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
-  # The migration command is owned by compose.yaml. A non-zero migration exit stops
-  # the release before the API image is replaced.
+  # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
   compose --profile release run --rm contract-migrate || return
   compose up -d --no-deps contract-api || return
   wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"
@@ -151,7 +183,10 @@ deploy_frontend() {
 rollback_runtime() {
   case "$service" in
     frontend) compose up -d --no-deps frontend ;;
-    platform) compose up -d --no-deps platform-api ;;
+    platform)
+      compose up -d --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
+      compose up -d --no-deps platform-api
+      ;;
     contract) compose up -d --no-deps contract-api ;;
   esac
 }
@@ -160,7 +195,9 @@ release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 previous_release="$(mktemp "$deploy_dir/.release.env.previous.XXXXXX")"
 next_release="$(mktemp "$deploy_dir/.release.env.next.XXXXXX")"
 chmod 600 "$previous_release" "$next_release"
+# 临时版本文件与正式指针位于同一文件系统，mv 后不会暴露半写入的镜像 digest。
 cp "$release_file" "$previous_release"
+# 每次发布保留旧版本指针快照，但不复制包含运行密钥的 .env。
 cp "$release_file" "$deploy_dir/backups/releases/${release_id}.env"
 
 awk -F= -v key="$image_key" -v value="$image_ref" '
@@ -194,6 +231,7 @@ if "deploy_${service}"; then
 fi
 
 echo "发布失败，恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+# 应用镜像可回退，数据库迁移不可自动逆转；迁移必须保持前后版本兼容或由人工执行恢复方案。
 cp "$previous_release" "$release_file"
 rm -f "$previous_release"
 rollback_runtime || true

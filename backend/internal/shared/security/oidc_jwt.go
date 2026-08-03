@@ -14,9 +14,8 @@ import (
 	"unicode"
 )
 
-// OIDCTokenUse identifies the protocol purpose of an OIDC JWT. Verifiers must
-// always validate this value so an ID token cannot be accepted as an access token
-// (or vice versa).
+// OIDCTokenUse 标识 OIDC JWT 的协议用途。验证方必须固定期望值，避免 ID Token 与
+// Access Token 在签名密钥和部分声明相同的情况下被跨用途重放。
 type OIDCTokenUse string
 
 const (
@@ -27,14 +26,9 @@ const (
 	OIDCTokenUseIDToken OIDCTokenUse = "id_token"
 )
 
-// OIDCTokenClaims is the complete claim set shared by user-facing access tokens
-// and ID tokens. Issuer is fixed by OIDCJWTManager when a token is issued; callers
-// may leave it empty, but may not override it.
-//
-// Audience uses the JWT array form. Scope is encoded in the standard, space-
-// delimited OAuth 2.0 scope claim. All fields are required for both supported
-// token uses so callers do not accidentally issue a token without the data needed
-// by UserInfo, logout, revocation, or replay protection flows.
+// OIDCTokenClaims 是用户 Access Token 与 ID Token 共用的完整声明集。Issuer 由管理器固定，
+// Audience 使用数组形态，Scope 按 OAuth 2.0 空格分隔格式编码。会话、jti、认证时间和授权版本
+// 均作为必需数据，保证 UserInfo、注销、撤销和权限重验不依赖客户端补传状态。
 type OIDCTokenClaims struct {
 	Issuer             string
 	Subject            string
@@ -58,8 +52,8 @@ type OIDCTokenClaims struct {
 	AuthzRevision      uint64
 }
 
-// OIDCPublicJWK is the public Ed25519 signing key in RFC 7517/RFC 8037 JWK form.
-// It intentionally contains no private-key material.
+// OIDCPublicJWK 是 RFC 7517/RFC 8037 形式的 Ed25519 公钥；JWKS 只暴露验签材料，
+// 不得从进程中的私钥结构派生或序列化任何私钥字段。
 type OIDCPublicJWK struct {
 	KeyType   string `json:"kty"`
 	Curve     string `json:"crv"`
@@ -74,10 +68,8 @@ type OIDCJWKS struct {
 	Keys []OIDCPublicJWK `json:"keys"`
 }
 
-// OIDCJWTManager signs and validates end-user OAuth 2.0 access tokens and OpenID
-// Connect ID tokens. It deliberately has no dependency on the existing browser
-// session or client-credentials JWT managers, although it loads the same Ed25519
-// PEM key pair.
+// OIDCJWTManager 负责终端用户 OAuth/OIDC Token。虽然加载同一 Ed25519 PEM 密钥，
+// 它不依赖浏览器 Cookie 或机器客户端 JWT 管理器，协议用途由 kid、issuer、audience 和 token_use 共同约束。
 type OIDCJWTManager struct {
 	issuer     string
 	keyID      string
@@ -85,9 +77,8 @@ type OIDCJWTManager struct {
 	publicKey  ed25519.PublicKey
 }
 
-// LoadOIDCJWTManager loads a matching PKCS#8 Ed25519 private key and PKIX Ed25519
-// public key from PEM files. The key ID is deterministically derived from the
-// public key, so it is stable across process restarts and changes on key rotation.
+// LoadOIDCJWTManager 加载并核对 PKCS#8 私钥与 PKIX 公钥。kid 由公钥摘要确定：同一密钥重启后
+// 保持稳定，轮换密钥时自动变化，使子系统能通过 JWKS 选择正确验签公钥。
 func LoadOIDCJWTManager(issuer, privateKeyPath, publicKeyPath string) (*OIDCJWTManager, error) {
 	if !validOIDCString(issuer) {
 		return nil, errors.New("OIDC JWT issuer must not be empty or contain surrounding whitespace")
@@ -150,9 +141,9 @@ func (manager *OIDCJWTManager) VerifyIDToken(token, expectedAudience string, now
 	return manager.Verify(token, expectedAudience, OIDCTokenUseIDToken, now)
 }
 
-// Verify validates a compact OIDC JWT, including its EdDSA signature, fixed key
-// ID, issuer, audience, token use, required claims, expiry, and future iat.
-// now is explicit to keep validation deterministic for callers and tests.
+// Verify 对紧凑 JWT 执行严格 JSON 解码，并校验 EdDSA、kid、issuer、audience、token_use、
+// 必需声明和时间窗口。now 由调用方传入，使过期边界和测试可重复；OIDC Token 不采用浏览器
+// 会话 JWT 的时钟宽限，签发节点时钟超前会直接失败。
 func (manager *OIDCJWTManager) Verify(token, expectedAudience string, expectedTokenUse OIDCTokenUse, now time.Time) (OIDCTokenClaims, error) {
 	if manager == nil {
 		return OIDCTokenClaims{}, errors.New("OIDC JWT manager must not be nil")
@@ -323,6 +314,7 @@ type oidcJWTPayload struct {
 type oidcAudience []string
 
 func (audience *oidcAudience) UnmarshalJSON(data []byte) error {
+	// 兼容 JWT 规范允许的单字符串与字符串数组输入，进入领域声明后统一为切片表示。
 	var single string
 	if err := json.Unmarshal(data, &single); err == nil {
 		*audience = oidcAudience{single}
@@ -338,6 +330,7 @@ func (audience *oidcAudience) UnmarshalJSON(data []byte) error {
 }
 
 func decodeOIDCJWTJSON(encoded string, destination any) error {
+	// 拒绝未知字段和尾随第二个 JSON 值，避免签发方与验证方对同一载荷产生不同解释。
 	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		return err
@@ -397,8 +390,7 @@ func validateOIDCTokenClaims(claims OIDCTokenClaims, expectedIssuer string, expe
 			return errors.New("OIDC JWT contains an empty or whitespace-padded required claim")
 		}
 	}
-	// nonce is optional in the authorization-code flow. When a client supplied it, the value
-	// must retain the exact opaque form so the client can correlate the returned ID token.
+	// nonce 在授权码流程中可选；一旦客户端提供，就必须保留其不透明原值供客户端关联 ID Token。
 	if claims.Nonce != "" && !validOIDCString(claims.Nonce) {
 		return errors.New("OIDC JWT contains an invalid nonce claim")
 	}
@@ -446,8 +438,8 @@ func validPMSPersonID(value string) bool {
 
 const maxOIDCOrganizationIDs = 100
 
-// validateOIDCOrganizations keeps organization claims bounded and canonical. Organization IDs
-// are opaque direct-membership identifiers; callers must not encode descendant expansion here.
+// validateOIDCOrganizations 将组织声明限制为有序唯一的直接任职集合，并要求主组织属于该集合。
+// 这里不展开组织树后代，资源范围授权必须由服务端根据可信资源归属另行计算。
 func validateOIDCOrganizations(primaryOrgID string, organizationIDs []string) error {
 	if len(organizationIDs) > maxOIDCOrganizationIDs {
 		return errors.New("OIDC JWT organization list exceeds the supported maximum")

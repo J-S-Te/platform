@@ -7,9 +7,8 @@ import (
 	"strings"
 )
 
-// LoadDotEnv reads a simple KEY=VALUE file without overriding values that were already
-// supplied by the host environment. A missing file is valid because production deployments
-// commonly provide configuration through the process environment or a secret manager.
+// LoadDotEnv 读取受限 KEY=VALUE 语法且不覆盖宿主环境已有值。这里不执行 source，
+// 环境文件中的命令替换或 Shell 语句不会被执行；文件不存在适配纯环境变量/密钥管理部署。
 func LoadDotEnv(path string) error {
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {

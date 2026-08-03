@@ -1,4 +1,4 @@
-// Package infrastructure implements MySQL/GORM adapters for in-app notifications.
+// Package infrastructure 实现站内信模板、消息和投递状态的 MySQL/GORM 适配器。
 package infrastructure
 
 import (
@@ -131,6 +131,7 @@ func (repository *Repository) CreateTemplate(ctx context.Context, template domai
 }
 
 func (repository *Repository) AppendTemplateVersion(ctx context.Context, tenantID, templateID, operatorID, versionID, titleTemplate, bodyTemplate string, variables []domain.VariableDefinition, now time.Time) (domain.Template, domain.TemplateVersion, error) {
+	// 锁住模板聚合后计算下一版本并切换当前版本，保证并发发布不会生成相同 version_no。
 	encoded, err := marshalVariables(variables)
 	if err != nil {
 		return domain.Template{}, domain.TemplateVersion{}, err
@@ -163,6 +164,7 @@ func (repository *Repository) AppendTemplateVersion(ctx context.Context, tenantI
 }
 
 func (repository *Repository) ChangeTemplateStatus(ctx context.Context, input application.ChangeTemplateStatusInput, now time.Time) (domain.Template, error) {
+	// 行锁与 Version 双重约束把旧管理页面的覆盖写转换为明确的版本冲突。
 	var row templateModel
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ?", input.TemplateID, input.TenantID).Take(&row).Error; err != nil {
@@ -224,6 +226,8 @@ func (repository *Repository) GetActiveTemplateByCode(ctx context.Context, tenan
 }
 
 func (repository *Repository) CreateMessage(ctx context.Context, message domain.Message, deliveries []domain.Delivery) (application.MessageCreation, error) {
+	// 租户内幂等键命中时返回原消息及投递，不创建第二套收件箱项；首次消息和全部收件人
+	// 在一个事务中写入，不能留下只有消息而没有投递的半成品。
 	var output application.MessageCreation
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		row := messageToModel(message)
@@ -250,6 +254,7 @@ func (repository *Repository) CreateMessage(ctx context.Context, message domain.
 }
 
 func (repository *Repository) CompleteDelivery(ctx context.Context, tenantID, deliveryID string, now time.Time) (domain.Delivery, error) {
+	// PENDING 与 PROCESSING 都可完成，以兼容首次同步投递和租约重试；其他终态不能被覆盖。
 	delivered := now
 	result := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND status IN ?", deliveryID, tenantID, []string{string(domain.DeliveryStatusPending), string(domain.DeliveryStatusProcessing)}).Updates(map[string]any{"status": string(domain.DeliveryStatusDelivered), "delivered_at": delivered, "next_retry_at": nil, "locked_until": nil, "last_error": "", "updated_at": now})
 	if result.Error != nil {
@@ -275,6 +280,8 @@ func (repository *Repository) FailDelivery(ctx context.Context, tenantID, delive
 	return nil
 }
 func (repository *Repository) ClaimFailedDeliveries(ctx context.Context, tenantID string, limit int, leaseUntil, now time.Time) ([]domain.Delivery, error) {
+	// SKIP LOCKED 允许多个重试实例各取不同记录；next_retry_at 在 PROCESSING 阶段充当租约到期时间，
+	// 进程崩溃后记录可被重新纳入领取条件。
 	var rows []deliveryModel
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("tenant_id = ? AND status = ? AND next_retry_at <= ? AND (locked_until IS NULL OR locked_until < ?)", tenantID, domain.DeliveryStatusFailed, now, now).Order("next_retry_at ASC,id ASC").Limit(limit).Find(&rows).Error; err != nil {

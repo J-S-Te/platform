@@ -1,4 +1,4 @@
-// Package domain defines protocol-neutral OIDC/OAuth runtime state.
+// Package domain 定义与 HTTP 和 JWT 编码无关的 OIDC/OAuth 运行时状态。
 package domain
 
 import "time"
@@ -30,8 +30,8 @@ const (
 	TokenTypeRefresh = "refresh_token"
 )
 
-// Client is the active client registration used by protocol runtime. It contains no raw secret
-// material; ClientCredentials retains only the one-way verifier hashes read from storage.
+// Client 是协议运行时读取的活跃客户端快照，不包含任何明文密钥；Credentials 仅携带
+// 持久化的单向校验摘要，JWKs 也只允许公开验签材料。
 type Client struct {
 	ID                     string
 	TenantID               string
@@ -65,8 +65,8 @@ type SessionSubject struct {
 	ExpiresAt time.Time
 }
 
-// AuthorizationCode is the persistent, one-time protocol credential. CodeHash is always a
-// SHA-256 digest of a cryptographically random value and must never contain the raw code.
+// AuthorizationCode 是持久化的一次性凭据。CodeHash 固定为高熵随机授权码的 SHA-256 摘要，
+// RedirectURI、PKCE 与会话主体一并冻结，兑换时不得从当前请求重新推断。
 type AuthorizationCode struct {
 	ID                  string
 	TenantID            string
@@ -86,8 +86,8 @@ type AuthorizationCode struct {
 	Status              string
 }
 
-// RefreshToken is a persistent rotation node. A family has at most one ACTIVE token; reuse of a
-// consumed node revokes every remaining token in that family.
+// RefreshToken 是轮换链中的持久节点。一个令牌族最多允许一个 ACTIVE 节点；已消费节点重放时，
+// 整族剩余令牌都会撤销，以把并发异常视为潜在泄露而非普通失败。
 type RefreshToken struct {
 	ID                   string
 	TenantID             string

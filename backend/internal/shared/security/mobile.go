@@ -1,4 +1,4 @@
-// Package security contains process-local cryptographic helpers.
+// Package security 提供平台模块共享的进程内密码学原语。
 package security
 
 import (
@@ -13,16 +13,14 @@ import (
 	"io"
 )
 
-// MobileProtector protects mobile numbers before they are persisted. The ciphertext format is
-// nonce || AES-GCM ciphertext; the corresponding SHA-256 digest supports exact matching without
-// exposing the original number in a database index.
+// MobileProtector 把手机号以 nonce || AES-GCM 密文保存，同时生成定长 HMAC 摘要用于精确查询，
+// 避免数据库索引直接暴露原值。调用方必须先完成手机号规范化，否则同一号码会得到不同摘要。
 type MobileProtector struct {
 	key []byte
 }
 
-// NewMobileProtector creates a protector from a base64-encoded 32-byte AES-256 key. An empty key
-// is allowed so development environments that do not collect mobile numbers can still start; an
-// attempt to persist a mobile number then fails explicitly instead of storing plaintext.
+// NewMobileProtector 接受 Base64 编码的 32 字节 AES 密钥。开发环境可不配置以便启动，但真正
+// 写入手机号时会明确失败，绝不以明文作为降级路径。
 func NewMobileProtector(encodedKey string) (*MobileProtector, error) {
 	if encodedKey == "" {
 		return &MobileProtector{}, nil
@@ -66,9 +64,8 @@ func (protector *MobileProtector) Decrypt(ciphertext []byte) (string, error) {
 	return string(plaintext), nil
 }
 
-// Digest returns the fixed-width keyed exact-match digest stored in iam_user.mobile_hash.
-// The encryption key is deliberately also the HMAC key so a lookup digest cannot be brute-forced
-// from the database alone.
+// Digest 返回 iam_user.mobile_hash 使用的定长键控摘要。数据库泄露者缺少进程密钥时，
+// 不能仅靠低熵手机号字典离线重建索引值。
 func (protector *MobileProtector) Digest(value string) []byte {
 	if protector == nil || len(protector.key) == 0 {
 		digest := sha256.Sum256([]byte(value))

@@ -170,7 +170,8 @@ func (repository *Repository) GetDictionary(
 	return dictionaryToDomain(row.dictionaryModel, row.ItemCount), nil
 }
 
-// UpdateDictionary updates one dictionary under a tenant-scoped row lock.
+// UpdateDictionary 先按租户锁定目标行，再核对版本；锁负责串行化并发提交，Version 负责识别
+// 管理端基于旧快照发起的覆盖写。
 func (repository *Repository) UpdateDictionary(
 	ctx context.Context,
 	input dictionaryapplication.DictionaryUpdateInput,
@@ -242,7 +243,7 @@ func (repository *Repository) GetDictionaryByCode(
 	return dictionaryToDomain(row, 0), nil
 }
 
-// ListItems lists dictionary items after verifying the tenant-owned parent dictionary exists.
+// ListItems 先确认父字典属于当前租户，再读取子项；仅凭 dictionary_id 不能跨过租户边界。
 func (repository *Repository) ListItems(
 	ctx context.Context,
 	tenantID string,
@@ -294,7 +295,7 @@ func (repository *Repository) ListItems(
 	}, nil
 }
 
-// CreateItem inserts one dictionary item after validating the parent tenant boundary.
+// CreateItem 在同一事务确认父字典租户归属并插入子项，避免客户端提交其他租户的 dictionary_id。
 func (repository *Repository) CreateItem(
 	ctx context.Context,
 	input dictionaryapplication.ItemCreateInput,
@@ -344,7 +345,7 @@ func (repository *Repository) CreateItem(
 	return created, nil
 }
 
-// UpdateItem updates one dictionary item after applying the parent tenant boundary.
+// UpdateItem 的锁定条件同时包含 item、dictionary 与 tenant，防止移动子项或通过全局 ID 跨租户更新。
 func (repository *Repository) UpdateItem(
 	ctx context.Context,
 	input dictionaryapplication.ItemUpdateInput,

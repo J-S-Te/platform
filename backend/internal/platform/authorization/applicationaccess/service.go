@@ -304,6 +304,8 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 		return TokenAuthorization{}, err
 	}
 	if client.ApplicationCode != PlatformApplicationCode {
+		// 平台超级管理员进入子系统时也不携带平台权限。只有目标应用存在约定的 admin
+		// 角色时，才以该应用目录中的角色和权限生成令牌；否则回到普通绑定解析。
 		inherited, ok, inheritErr := s.resolvePlatformSuperAdminAuthorization(ctx, tenantID, userID, client)
 		if inheritErr != nil {
 			return TokenAuthorization{}, inheritErr
@@ -319,6 +321,8 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	if err := requireGrantedAuthorization(access); err != nil {
 		return TokenAuthorization{}, ErrAccessDenied
 	}
+	// OIDC 声明来自当前数据库授权快照，而不是登录时缓存；目录哈希和修订号供
+	// 子系统检测目录变化或权限撤销，避免长期复用已经失效的权限集合。
 	roles := make([]string, 0, len(access.Roles))
 	for _, role := range access.Roles {
 		roles = append(roles, role.Code)
@@ -557,6 +561,8 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if err := s.validateDirectRoleLimit(ctx, in.TenantID, application.ID, resolved); err != nil {
 		return Access{}, err
 	}
+	// 先读取完整生效视图用于审计差异；真正写入只替换 MANUAL 来源的用户直绑，
+	// 组织、岗位模板和系统来源不会被一次用户编辑意外覆盖。
 	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
 	if err != nil && !errors.Is(err, ErrNotConfigured) {
 		return Access{}, err
@@ -572,6 +578,7 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 			changed = changed || roleChanged
 		}
 		if changed {
+			// 授权数据和 revision 必须原子提交，子系统才能可靠识别旧授权快照。
 			return bumpRevision(tx, in.TenantID, application.ID, now, "user application authorization changed")
 		}
 		return nil
@@ -612,6 +619,8 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	now := s.clock.Now().UTC()
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 删除应用授权是逻辑撤销：仅停用人工直绑并清理历史自定义权限，不触碰岗位
+		// 模板等可追溯来源；若用户仍有继承角色，有效视图仍会如实保留。
 		directClause, directArgs := manualDirectApplicationRoleBindingFilter(in.TenantID, application.ID, in.UserID)
 		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, application.ID, applicationRoleType)
 		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.role_id IN (?)", applicationRoleIDs).Where("rb.status = ?", activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
@@ -816,6 +825,8 @@ func (s *Service) ensureManagedSubject(ctx context.Context, tenantID, subjectTyp
 }
 
 func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, applicationID string, roles []RoleInput) ([]resolvedBinding, error) {
+	// 外部只提交稳定角色编码和作用域；此处解析为当前租户、当前应用的活动目录角色，
+	// 禁止使用数据库 ID 绕过目录所有权、角色状态或受保护角色策略。
 	resolved := make([]resolvedBinding, 0, len(roles))
 	for _, role := range roles {
 		var roleRecord roleRow
@@ -884,6 +895,8 @@ func validateMaximumRoleCount(maximum int, roleIDs []string) error {
 // persistence helper makes it impossible for a future caller to accidentally use it for ACCOUNT,
 // ORG_UNIT or POSITION bindings; TEMPLATE and SYSTEM rows are excluded by the query predicate.
 func (s *Service) replaceManualUserRoleBindings(tx *gorm.DB, tenantID, applicationID, userID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
+	// 采用集合对账而非“全删全建”：保留未变化绑定的 ID 和审计链，恢复历史同源
+	// 绑定时递增版本；只将本次不再需要的 MANUAL 绑定置为 DISABLED。
 	var existing []bindingRow
 	directClause, directArgs := manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID)
 	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", applicationRoleType).Find(&existing).Error; err != nil {
@@ -1118,6 +1131,8 @@ func applyApplicationRolePolicy(policy ApplicationAuthorizationPolicy, rows []as
 	if policy.MaxEffectiveRoles == 0 || len(distinctRoleIDs) <= policy.MaxEffectiveRoles {
 		return authorizationGranted, []string{}, distinctRoleIDs
 	}
+	// 冲突来源继续返回给管理界面解释，但不把任何冲突角色放入有效权限，防止通过
+	// 叠加用户、组织、岗位等来源绕过应用声明的最大角色数。
 
 	roleCodeByID := make(map[string]string, len(rows))
 	for _, row := range rows {
@@ -1344,6 +1359,8 @@ func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID,
 }
 
 func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID, userID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
+	// 用户直绑、组织绑定和岗位绑定在查询时合并；组织/岗位来源仅对当前有效且允许
+	// 继承授权的任职生效，因此任职调整无需等待重新登录。
 	var rows []assignedRoleRow
 	subjectClause, subjectArgs := applicationAccessSubjectFilter(userID, now)
 	scopeClause, scopeArgs := applicationAccessScopeFilter(environmentID)
@@ -1449,6 +1466,7 @@ func (s *Service) loadRevision(ctx context.Context, tenantID, applicationID stri
 }
 
 func bumpRevision(tx *gorm.DB, tenantID, applicationID string, now time.Time, reason string) error {
+	// revision 是子系统授权缓存失效协议的一部分；数据库原子自增避免并发修改丢版本。
 	row := map[string]any{"tenant_id": tenantID, "application_id": applicationID, "revision": 1, "changed_at": now, "change_reason": reason}
 	err := tx.Table("authz_policy_revision").Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}},
@@ -1464,6 +1482,7 @@ func bumpRevision(tx *gorm.DB, tenantID, applicationID string, now time.Time, re
 
 func normalizeRoleInputs(inputs []RoleInput, provided bool, now time.Time) ([]RoleInput, error) {
 	if !provided {
+		// 未提供 roles 表示“不修改”；显式空数组才表示撤销全部人工直绑。
 		return nil, nil
 	}
 	byRoleCode := make(map[string]RoleInput, len(inputs))

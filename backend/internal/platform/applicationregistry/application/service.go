@@ -82,6 +82,8 @@ func (s *Service) IssueClientCredentials(ctx context.Context, clientID, clientSe
 		return TokenResult{}, ErrUnauthenticated
 	}
 
+	// 空 scope 遵循客户端登记的默认集合；显式 scope 则必须逐项属于登记集合，不能通过
+	// token 请求临时扩大机器客户端能力。
 	scopes, err := allowedScopes(client.Scopes, requestedScopes)
 	if err != nil {
 		return TokenResult{}, err
@@ -117,6 +119,8 @@ func (s *Service) Authenticate(ctx context.Context, token string) (appctx.Princi
 		return appctx.Principal{}, ErrUnauthenticated
 	}
 	client, err := s.repository.FindActiveByID(ctx, claims.OAuthClientID, s.clock.Now().UTC())
+	// JWT 签名有效只证明“曾被平台签发”；这里把令牌内边界与当前登记再次对齐，使客户
+	// 端禁用、迁移或重新绑定后，旧令牌不能继续代表原资源范围。
 	if err != nil || client.ClientID != claims.ClientID || client.TenantID != claims.TenantID ||
 		client.ApplicationID != claims.ApplicationID || client.EnvironmentID != claims.EnvironmentID ||
 		client.ApplicationCode != claims.ApplicationCode || client.EnvironmentCode != claims.EnvironmentCode {

@@ -1,4 +1,4 @@
-// Package config loads process configuration from .env and the environment.
+// Package config 从 .env 与进程环境加载启动配置，并在装配业务模块前统一执行安全校验。
 package config
 
 import (
@@ -14,8 +14,8 @@ import (
 
 const defaultEnvFile = ".env"
 
-// Config contains process-level configuration. Runtime business configuration belongs in the
-// configuration module and must not be added to this type.
+// Config 只包含进程启动所需配置；可在线修改的业务配置属于 configuration/settings 模块，
+// 不能加入此结构后假装能够热更新。
 type Config struct {
 	Environment         string
 	AppName             string
@@ -61,7 +61,7 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
-	// OAuthClientAllowInsecureHTTPRedirectURIs permits registered OAuth callback URLs on HTTP hosts other than loopback.
+	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；生产环境仍由整体配置校验约束 HTTPS。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
 }
 
@@ -93,15 +93,21 @@ type AuditConfig struct {
 	EnvironmentCode string
 }
 
-// SubsystemOnboardingAutomationConfig controls trusted local Docker automation for one-click
-// subsystem onboarding. The API uses only the configured Unix Socket; Docker Socket and sibling
-// project access belong exclusively to the isolated deployment helper.
+// SubsystemOnboardingAutomationConfig 控制一键接入的受信部署 Agent。API 只连接 Unix Socket，
+// Docker Socket、宿主机文件和相邻项目目录权限必须留在隔离进程中。
 type SubsystemOnboardingAutomationConfig struct {
 	Enabled                 bool
+	Mode                    string
 	ProjectsRoot            string
 	GatewayScriptPath       string
 	GatewayIncludePath      string
 	SocketPath              string
+	ProductionDeployRoot    string
+	ProductionRuntimeEnv    string
+	ProductionContractEnv   string
+	ProductionReleaseEnv    string
+	ProductionComposeFile   string
+	ProductionAllowedTenant string
 	PlatformComposeProject  string
 	PlatformFrontendService string
 	PlatformDockerNetwork   string
@@ -109,11 +115,8 @@ type SubsystemOnboardingAutomationConfig struct {
 	Timeout                 time.Duration
 }
 
-// Load reads ENV_FILE when explicitly set. Otherwise, it loads .env from the current
-// directory and falls back to its parent directory. The fallback lets backend commands run from
-// backend/ while the repository-root .env remains the single shared local configuration file.
-// Environment variables always take precedence over values in the file, which keeps container
-// and deployment configuration explicit.
+// Load 显式设置 ENV_FILE 时只读取该文件；否则在当前目录及父目录寻找 .env，使 backend/ 下运行的
+// 命令仍共享仓库根配置。宿主环境始终优先于文件，容器编排和密钥注入不会被本地文件覆盖。
 func Load() (Config, error) {
 	envFile := resolveEnvFile()
 	if err := LoadDotEnv(envFile); err != nil {
@@ -209,10 +212,17 @@ func Load() (Config, error) {
 		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
 			Enabled:                 subsystemAutomationEnabled,
+			Mode:                    strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
 			ProjectsRoot:            value("SUBSYSTEM_PROJECTS_ROOT", ""),
 			GatewayScriptPath:       value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
 			GatewayIncludePath:      value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
 			SocketPath:              value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
+			ProductionDeployRoot:    value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
+			ProductionRuntimeEnv:    value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
+			ProductionContractEnv:   value("SUBSYSTEM_PRODUCTION_CONTRACT_ENV_PATH", ""),
+			ProductionReleaseEnv:    value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
+			ProductionComposeFile:   value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
+			ProductionAllowedTenant: value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
 			PlatformComposeProject:  value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
 			PlatformFrontendService: value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
 			PlatformDockerNetwork:   value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
@@ -230,7 +240,8 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// Validate rejects configuration that would make the process unsafe or impossible to start.
+// Validate 在创建网络监听和数据库连接前拒绝不安全配置。生产模式额外强制 HTTPS 与 Secure Cookie；
+// CORS 使用凭据时禁止通配源；部署自动化只有在所选模式所需路径完整时才允许启用。
 func (cfg Config) Validate() error {
 	if cfg.AppName == "" {
 		return fmt.Errorf("APP_NAME must not be empty")
@@ -296,15 +307,27 @@ func (cfg Config) Validate() error {
 		return fmt.Errorf("AUDIT_APPLICATION_CODE and AUDIT_ENVIRONMENT_CODE must not be empty")
 	}
 	if cfg.SubsystemOnboarding.Enabled {
-		if strings.TrimSpace(cfg.SubsystemOnboarding.ProjectsRoot) == "" ||
-			strings.TrimSpace(cfg.SubsystemOnboarding.GatewayScriptPath) == "" ||
-			strings.TrimSpace(cfg.SubsystemOnboarding.GatewayIncludePath) == "" ||
-			strings.TrimSpace(cfg.SubsystemOnboarding.SocketPath) == "" ||
+		if strings.TrimSpace(cfg.SubsystemOnboarding.SocketPath) == "" ||
 			strings.TrimSpace(cfg.SubsystemOnboarding.PlatformComposeProject) == "" ||
-			strings.TrimSpace(cfg.SubsystemOnboarding.PlatformFrontendService) == "" ||
-			strings.TrimSpace(cfg.SubsystemOnboarding.PlatformDockerNetwork) == "" ||
 			strings.TrimSpace(cfg.SubsystemOnboarding.DockerBinary) == "" || cfg.SubsystemOnboarding.Timeout <= 0 {
 			return fmt.Errorf("subsystem onboarding automation configuration is incomplete")
+		}
+		switch cfg.SubsystemOnboarding.Mode {
+		case "local":
+			if strings.TrimSpace(cfg.SubsystemOnboarding.ProjectsRoot) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.GatewayScriptPath) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.GatewayIncludePath) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.PlatformFrontendService) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.PlatformDockerNetwork) == "" {
+				return fmt.Errorf("local subsystem onboarding automation configuration is incomplete")
+			}
+		case "production":
+			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" {
+				return fmt.Errorf("production subsystem onboarding automation configuration is incomplete")
+			}
+		default:
+			return fmt.Errorf("SUBSYSTEM_ONBOARDING_MODE must be local or production")
 		}
 	}
 	if len(cfg.CORSOrigins) == 0 {
@@ -334,9 +357,8 @@ func validTrustedProxy(value string) bool {
 	return net.ParseIP(value) != nil
 }
 
-// resolveEnvFile selects the explicit ENV_FILE path when present. Without an override, the
-// project-root file is discovered from a backend working directory without making production
-// deployments depend on a local file; LoadDotEnv treats a missing candidate as valid.
+// resolveEnvFile 优先采用显式 ENV_FILE；未覆盖时从 backend 工作目录定位仓库根文件。
+// 候选文件不存在仍是合法状态，因为生产部署可以完全依赖进程环境或密钥管理系统。
 func resolveEnvFile() string {
 	if path, exists := os.LookupEnv("ENV_FILE"); exists {
 		return strings.TrimSpace(path)
@@ -363,8 +385,8 @@ func defaultEnvFilePath(workingDirectory string) string {
 	return candidates[0]
 }
 
-// resolveConfigPath anchors relative local paths to the selected environment file. This keeps
-// repository-root configuration stable whether a command starts from the root or backend/.
+// resolveConfigPath 将相对路径锚定到选中的环境文件目录，而不是当前工作目录，
+// 避免同一配置由 API、迁移命令或 Worker 从不同目录启动时解析成不同文件。
 func resolveConfigPath(envFile, value string) string {
 	if value == "" || filepath.IsAbs(value) {
 		return value

@@ -165,6 +165,8 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 	var existingMetadata catalogMetadataRow
 	metadataErr := s.db.WithContext(ctx).Table("authz_authorization_catalog").Where("tenant_id = ? AND application_id = ?", tenantID, app.ID).Take(&existingMetadata).Error
 	if metadataErr == nil && existingMetadata.SyncStatus == "SYNCED" && existingMetadata.CatalogVersion == input.CatalogVersion && strings.EqualFold(existingMetadata.CatalogHash, input.Checksum) {
+		// 同版本同摘要视为幂等确认，不重写角色关系或推进 revision，避免应用重启后
+		// 周期同步制造无意义的令牌失效和审计噪声。
 		view, viewErr := s.catalogView(ctx, app, existingMetadata)
 		if viewErr != nil {
 			return CatalogView{}, viewErr
@@ -183,6 +185,8 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		return CatalogView{}, metadataLoadErr
 	}
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 目录、角色权限关系、应用策略、同步元数据和 revision 必须作为一个版本发布。
+		// 任一环节失败都会回滚，令牌签发始终只能看到上一份完整目录或新目录。
 		permissionIDs := make(map[string]string, len(input.Permissions))
 		for _, item := range input.Permissions {
 			resourceID, err := s.upsertCatalogResource(tx, tenantID, app.ID, operatorID, now, item)
@@ -221,6 +225,8 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		if err := tx.Table("authz_role").Where("tenant_id = ? AND application_id = ? AND role_type <> ? AND code NOT IN ?", tenantID, app.ID, "COMPATIBILITY", roleCodes).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": operatorID}).Error; err != nil {
 			return fmt.Errorf("disable removed catalog roles: %w", err)
 		}
+		// 不物理删除目录中移除的角色/权限：历史绑定和审计仍需可追溯；置为 DISABLED
+		// 后它们会立即退出授权查询，并可在后续同步中按稳定编码恢复。
 		permissionCodes := make([]string, 0, len(input.Permissions))
 		for _, item := range input.Permissions {
 			permissionCodes = append(permissionCodes, item.Code)
@@ -319,6 +325,8 @@ func normalizeCatalog(input CatalogInput) (CatalogInput, string, error) {
 		return CatalogInput{}, "", validation("catalog_version is required")
 	}
 	permissions := make(map[string]PermissionInput, len(input.Permissions))
+	// 先规范化并构造确定性内容，再计算摘要；输入顺序和重复项不能改变同一目录的
+	// 身份，也不能让角色引用一个未在本次目录声明的权限。
 	resourceActions := make(map[string]struct{}, len(input.Permissions))
 	for _, item := range input.Permissions {
 		item.Code, item.Name, item.Action, item.ResourceCode = strings.TrimSpace(item.Code), strings.TrimSpace(item.Name), strings.TrimSpace(item.Action), strings.TrimSpace(item.ResourceCode)

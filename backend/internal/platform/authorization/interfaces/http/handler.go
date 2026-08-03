@@ -318,7 +318,8 @@ func (h *Handler) ListRoles(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", newPageResponse(items, result))
 }
 
-// CreateRole creates a custom role and its allow-permission set.
+// HTTP 层只传递经过认证的操作者身份和请求权限集合；自定义角色是否仅包含操作者可委派
+// 权限、是否触及受保护权限，必须由应用服务按当前数据库状态再次校验。
 func (h *Handler) CreateRole(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -362,7 +363,8 @@ func (h *Handler) GetRole(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", roleToResponse(result))
 }
 
-// UpdateRole updates a custom role with optimistic locking.
+// 更新携带版本号防止覆盖并发编辑；内置角色保护和新权限集合的可委派性仍由应用服务
+// 判断，不能仅依赖路由上的“角色更新”权限。
 func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -414,7 +416,8 @@ func (h *Handler) ListRoleBindings(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", newPageResponse(items, result))
 }
 
-// CreateRoleBinding binds a role to a subject within a permitted scope.
+// 绑定接口不会信任请求中的角色、主体或 scope 声明；应用服务会校验租户归属、受保护
+// 角色、操作者可委派资格及资源范围，HTTP 层只注入可信的当前用户作为操作者。
 func (h *Handler) CreateRoleBinding(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -444,7 +447,8 @@ func (h *Handler) CreateRoleBinding(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "角色绑定已创建", roleBindingToResponse(result))
 }
 
-// UpdateRoleBinding updates a role binding with optimistic locking.
+// 更新可能同时替换角色、主体和范围，因此必须按“新绑定”重新执行完整委派检查；版本号
+// 仅解决并发覆盖，不能代替高权角色和资源范围校验。
 func (h *Handler) UpdateRoleBinding(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -513,7 +517,8 @@ func (h *Handler) PreviewRoleBindingImpact(w http.ResponseWriter, r *http.Reques
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", roleBindingImpactToResponse(result))
 }
 
-// Check evaluates one permission code for the authenticated user.
+// 权限决策使用会话中的可信用户/账号作为主体，同时把资源类型和 ID 交给策略服务解析；
+// 客户端 context 只能提供策略输入，不能自行证明资源归属或扩大授权范围。
 func (h *Handler) Check(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {

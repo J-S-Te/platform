@@ -1,4 +1,4 @@
-// Command migrate applies the embedded MySQL migrations using the configured .env file.
+// Command migrate 使用编译进二进制的 MySQL 迁移集升级 schema；发布机不能在运行时替换迁移文件。
 package main
 
 import (
@@ -36,6 +36,7 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	// migration.Run 自行持有数据库建议锁并校验历史 checksum；多个发布任务并发执行时仍保持单写者。
 	applied, err := migration.Run(ctx, db, migrations.Files)
 	if err != nil {
 		return err

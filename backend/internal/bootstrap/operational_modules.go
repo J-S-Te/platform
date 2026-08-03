@@ -22,9 +22,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// buildOperationalModules wires the remaining platform operations modules through their public
-// application contracts. Schema changes remain explicit SQL migrations; this function never calls
-// GORM AutoMigrate.
+// buildOperationalModules 只通过各模块公开的应用契约完成装配，不让路由层接触仓储实现。
+// 这里同样禁止 AutoMigrate：进程启动与 schema 发布必须保持两个独立生命周期。
 func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service) (httptransport.OperationalModules, error) {
 	if database == nil || logger == nil || applicationAccessService == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
@@ -64,6 +63,8 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	// API 只持有受限 Unix Socket 客户端，Docker Socket 和宿主机文件写权限留在隔离的部署 Agent；
+	// 这样后台管理权限不会直接等价为容器宿主机权限。
 	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(
 		subsystemService,
 		subsystemProvisioner,
@@ -127,9 +128,8 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	}, nil
 }
 
-// subsystemInitialAccessManager assigns a conventional initial administrator role when
-// the newly registered application's catalog already defines one. The manager is intentionally
-// application-agnostic: application code is only data passed to the generic authorization service.
+// subsystemInitialAccessManager 在子系统目录已经发布时分配约定的初始管理员角色。
+// 真正的角色有效性仍由通用授权服务校验，接入流程不能绕开可委派权限和角色目录边界。
 type subsystemInitialAccessManager struct {
 	applicationAccess *applicationaccess.Service
 }
@@ -145,9 +145,8 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 		return "", errors.New("application authorization service is unavailable")
 	}
 	roleCodes := initialSubsystemAdministratorRoles(applicationCode)
-	// customer_portal is an external-customer application. The internal operator who performs
-	// onboarding must not automatically receive the portal_customer role or a misleading portal
-	// card; each external customer is provisioned and scoped by the CRM invitation workflow.
+	// customer_portal 面向外部客户：执行接入的内部管理员不能自动获得客户角色或门户入口，
+	// 外部客户身份和数据范围必须由 CRM 邀请流程逐个建立。
 	if len(roleCodes) == 0 {
 		return "", nil
 	}
@@ -159,9 +158,8 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 		TenantID: tenantID, UserID: userID, OperatorID: operatorID, Roles: roles, RolesProvided: true,
 	}, applicationCode)
 	if err != nil {
-		// A subsystem may be onboarded before it publishes its role catalog. In that
-		// case there is no generic admin role to assign yet; onboarding itself remains
-		// successful and the platform administrator can assign roles after catalog sync.
+		// 子系统可能先接入、后发布权限目录。目录尚不存在不是基础设施接入失败，保留接入结果，
+		// 待目录同步后再由管理员显式授权；其他错误仍需向上返回，避免吞掉真实故障。
 		if errors.Is(err, applicationaccess.ErrValidation) {
 			return "", nil
 		}
@@ -178,9 +176,8 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 func initialSubsystemAdministratorRoles(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case "customer_and_opportunity":
-		// CRM intentionally has no synthetic all-powerful admin role. Its initial administrator
-		// receives the three catalog roles that cover system operation while preserving the
-		// application's max_effective_roles=3 policy and normal data-scope semantics.
+		// CRM 不创建绕过业务范围的“万能管理员”。三个目录角色共同覆盖运营职责，同时仍受
+		// max_effective_roles=3 和各角色数据范围约束。
 		return []string{"sales_director", "team_lead", "technical_lead"}
 	case "customer_portal":
 		return nil

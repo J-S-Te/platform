@@ -20,9 +20,8 @@ type ApplicationAuthenticator interface {
 	Authenticate(context.Context, string) (appctx.Principal, error)
 }
 
-// ApplicationAuthentication requires an OAuth application bearer token and exposes its trusted
-// client/app/environment binding in the request context. All token failures intentionally map to
-// one public response so callers cannot distinguish forged, expired, revoked or mismatched tokens.
+// ApplicationAuthentication 校验应用 OAuth Bearer，并把可信的客户端/应用/环境绑定写入上下文。
+// 伪造、过期、撤销和绑定不匹配统一返回未认证，避免向攻击者泄露凭据状态差异。
 func ApplicationAuthentication(authenticator ApplicationAuthenticator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if authenticator == nil {
@@ -47,8 +46,7 @@ func ApplicationAuthentication(authenticator ApplicationAuthenticator) gin.Handl
 	}
 }
 
-// RequireApplicationScope checks a scope granted to the integration client rather than a console
-// user's role permission.
+// RequireApplicationScope 校验集成客户端 scope，而不是后台用户角色权限；两种授权模型不能互换。
 func RequireApplicationScope(scope string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if scope == "" || strings.TrimSpace(scope) != scope {
@@ -74,10 +72,8 @@ func bearerToken(header string) (string, bool) {
 	return parts[1], true
 }
 
-// ConsoleOrApplicationAuthentication accepts either the browser session cookie used by the
-// platform console or an OAuth application bearer token used by an application-owned integration
-// client. It is intended only for endpoints whose handler performs the corresponding authorization
-// check for both principal types.
+// ConsoleOrApplicationAuthentication 允许后台 Cookie 或应用 Bearer 二选一，仅适用于处理器能分别
+// 对两类主体完成授权判断的接口。Cookie 优先，防止浏览器附带 Bearer 后绕过用户权限边界。
 func ConsoleOrApplicationAuthentication(console Authenticator, cookieName string, application ApplicationAuthenticator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if console == nil || strings.TrimSpace(cookieName) == "" || application == nil {

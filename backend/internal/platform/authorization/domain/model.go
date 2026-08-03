@@ -48,6 +48,8 @@ type Role struct {
 }
 
 // RoleBinding assigns a role to a subject within a scope.
+// RoleBinding 同时描述“谁获得角色”和“该角色可在哪个范围生效”。ScopeID 为空只对
+// TENANT 合法；ORG_UNIT/RESOURCE 必须由服务端验证其租户归属后才能参与决策。
 type RoleBinding struct {
 	ID          string
 	Role        Reference

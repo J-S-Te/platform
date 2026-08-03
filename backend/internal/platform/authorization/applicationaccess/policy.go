@@ -13,9 +13,8 @@ import (
 
 const maxAuthorizationPolicyEffectiveRoles = 65535
 
-// CatalogPolicyInput is an application-owned authorization constraint carried in the
-// signed/verified catalog synchronization payload. A zero limit deliberately means
-// that the application permits any number of effective roles.
+// CatalogPolicyInput 来自经过认证的应用目录同步负载，约束所有来源合并后的有效角色数；
+// 零值明确表示应用不限制角色数量，而不是“未配置即拒绝”。
 type CatalogPolicyInput struct {
 	MaxEffectiveRoles int `json:"max_effective_roles,omitempty"`
 }
@@ -46,14 +45,9 @@ type applicationAuthorizationPolicyRow struct {
 	LastSyncedBy      string     `gorm:"column:last_synced_by"`
 }
 
-// ResolveApplicationAuthorizationPolicy loads the catalog policy for an application
-// ID. It is intentionally keyed by ID because token issuance already resolves the
-// target application before calculating effective roles. No row is equivalent to the
-// safe backward-compatible default: max_effective_roles = 0 (unlimited).
-//
-// Service authorization paths can call this once after resolving the target
-// application and reject a role set only when MaxEffectiveRoles > 0 and the count
-// of distinct effective roles exceeds the returned limit.
+// ResolveApplicationAuthorizationPolicy 以已解析的应用 ID 读取目录策略，防止同名或编码
+// 别名混淆授权目标。缺少策略行按兼容默认值处理：max_effective_roles=0，不限制角色数。
+// 只有正数限制且去重后的有效角色超过限制时，授权路径才应拒绝。
 func (s *Service) ResolveApplicationAuthorizationPolicy(ctx context.Context, tenantID, applicationID string) (ApplicationAuthorizationPolicy, error) {
 	policy := ApplicationAuthorizationPolicy{
 		ApplicationID:     strings.TrimSpace(applicationID),
@@ -96,9 +90,8 @@ func applicationAuthorizationPolicyFromRow(row applicationAuthorizationPolicyRow
 	}
 }
 
-// upsertCatalogPolicy persists the complete policy on every successful catalog sync.
-// Omitting policy from a later catalog intentionally resets max_effective_roles to 0,
-// preventing an obsolete catalog restriction from surviving a catalog version change.
+// upsertCatalogPolicy 在每次成功目录同步时覆盖完整策略。新目录省略限制会显式重置为 0，
+// 防止上一目录版本的旧约束在目录升级后残留。
 func (s *Service) upsertCatalogPolicy(tx *gorm.DB, tenantID, applicationID, operatorID string, now time.Time, input CatalogInput) error {
 	values := map[string]any{
 		"tenant_id":           tenantID,

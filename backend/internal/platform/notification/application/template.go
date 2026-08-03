@@ -59,8 +59,8 @@ func validatePlaceholders(template string, definitions map[string]domain.Variabl
 		}
 		covered += match[1] - match[0]
 	}
-	// After removing every valid placeholder, no delimiter may remain. This rejects malformed
-	// constructs such as {{name}, {{ name }}, or {{unknown}} without rejecting valid input.
+	// 移除所有合法占位符后不应残留分隔符；这样能拒绝 {{name}、{{ name }} 或 {{unknown}}
+	// 等畸形/未声明表达式，同时不误伤已经验证的变量。
 	remaining := placeholderPattern.ReplaceAllString(template, "")
 	if strings.Contains(remaining, "{{") || strings.Contains(remaining, "}}") {
 		return ErrValidation

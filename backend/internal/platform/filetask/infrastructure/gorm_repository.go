@@ -12,8 +12,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Repository maps the existing file_object, file_version, file_binding and async_job migrations
-// with GORM. It never invokes AutoMigrate: schema ownership remains the numbered SQL migrations.
+// Repository 映射既有 file_object、file_version、file_binding 与 async_job 表。
+// 运行时不调用 AutoMigrate，表结构和状态约束只由编号 SQL 迁移维护。
 type Repository struct{ database *gorm.DB }
 
 func NewGORMRepository(database *gorm.DB) (*Repository, error) {
@@ -87,6 +87,7 @@ func (repository *Repository) CreateWriting(ctx context.Context, file domain.Fil
 }
 
 func (repository *Repository) MarkAvailable(ctx context.Context, tenantID, fileID string, size uint64, digest []byte, updatedAt time.Time) error {
+	// 文件和当前版本必须在同一事务中同时从“写入中”推进为“可用”，避免下载查询看见半完成状态。
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var object fileObjectModel
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ? AND status = ?", tenantID, fileID, domain.FileStatusUploading).Take(&object).Error; err != nil {
@@ -143,8 +144,8 @@ func (repository *Repository) GetAvailable(ctx context.Context, tenantID, fileID
 	return domain.StoredFile{File: toFile(object), Version: toVersion(version)}, nil
 }
 
-// ClaimExpiredUnbound selects one old, unbound file with FOR UPDATE SKIP LOCKED, then moves it to
-// DELETING. The caller performs slow disk removal only after this short transaction commits.
+// ClaimExpiredUnbound 用 FOR UPDATE SKIP LOCKED 领取一条旧且无绑定的文件，再推进到 DELETING。
+// 慢速磁盘删除在短事务提交后执行，因此多个清理实例不会互相等待，也不会同时删除同一文件。
 func (repository *Repository) ClaimExpiredUnbound(ctx context.Context, tenantID string, cutoff time.Time) (domain.StoredFile, bool, error) {
 	var result domain.StoredFile
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -259,6 +260,8 @@ func (repository *Repository) GetJob(ctx context.Context, tenantID, jobID string
 }
 
 func (repository *Repository) ClaimJob(ctx context.Context, workerID string, allowedTypes []string, now, staleBefore time.Time) (domain.Job, bool, error) {
+	// PENDING 到期任务和锁已过期的 RUNNING 任务都可被领取；行锁只覆盖选择与状态更新，
+	// worker 的耗时业务处理不占用数据库锁。
 	var claimed domain.Job
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		// A stale worker cannot retain a job forever. Existing audit exports use the same recovery
@@ -294,6 +297,7 @@ func (repository *Repository) ClaimJob(ctx context.Context, workerID string, all
 }
 
 func (repository *Repository) CompleteJob(ctx context.Context, tenantID, jobID string, completedAt time.Time) error {
+	// 只有 RUNNING 可完成；RowsAffected 校验把重复完成或已被其他 worker 接管转换为显式冲突。
 	result := repository.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND status = ?", tenantID, jobID, domain.JobStatusRunning).Updates(map[string]any{"status": domain.JobStatusSucceeded, "completed_at": completedAt.UTC(), "locked_by": nil, "locked_at": nil, "last_error_code": nil, "last_error_message": nil})
 	if result.Error != nil {
 		return mapError(result.Error)
@@ -305,6 +309,7 @@ func (repository *Repository) CompleteJob(ctx context.Context, tenantID, jobID s
 }
 
 func (repository *Repository) FailJob(ctx context.Context, job domain.Job, code, message string, retryable bool, retryAt, now time.Time) error {
+	// 状态转换同时核对 locked_by，过期 worker 不能覆盖新持有者已经推进的任务状态。
 	updates := map[string]any{"locked_by": nil, "locked_at": nil, "last_error_code": optional(code), "last_error_message": optional(message)}
 	if !retryable {
 		updates["status"] = domain.JobStatusDead

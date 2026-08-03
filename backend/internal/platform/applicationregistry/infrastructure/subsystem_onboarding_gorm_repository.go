@@ -49,6 +49,8 @@ func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardi
 // environments, login targets and OAuth clients are never overwritten by this create-only flow.
 func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context.Context, write application.SubsystemOnboardingWrite, now time.Time) (application.SubsystemOnboardingResult, error) {
 	var result application.SubsystemOnboardingResult
+	// 应用、环境、登录目标、浏览器客户端、目录发布客户端和初始部署状态必须同成同败。
+	// 只要任一子资源写入失败，事务回滚，避免门户出现无法完成 OAuth 登录的半接入卡片。
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		management := &ManagementRepository{database: transaction}
 		createdApplication, err := management.CreateApplication(ctx, write.Application, write.ApplicationID, now)
@@ -215,6 +217,8 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 	seen := make(map[string]struct{}, len(rows))
 	items := make([]application.PortalApplication, 0, len(rows))
 	for _, row := range rows {
+		// SQL 排序已把环境和 home 目标的优先级固定；这里按应用取首条，确保同一应用
+		// 不因登记多个环境/目标而在门户重复展示。
 		if _, exists := seen[row.ApplicationID]; exists {
 			continue
 		}
@@ -250,6 +254,8 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 		"updated_at":         now.UTC(),
 	}
 	if status == application.SubsystemDeploymentStatusProvisioning || status == application.SubsystemDeploymentStatusUpdating || status == application.SubsystemDeploymentStatusVerifying || status == application.SubsystemDeploymentStatusDraining {
+		// 非终态开始新的尝试并清空完成时间；终态只收口当前尝试。状态接口因此可以区分
+		// “上次失败”与“本次仍在执行”，而无需暴露部署命令输出。
 		// A generation identifies one lifecycle attempt; terminal transitions keep the same
 		// generation so status polling can distinguish retries from completion updates.
 		if status != application.SubsystemDeploymentStatusProvisioning {
@@ -312,6 +318,9 @@ func dereferenceString(value *string) string {
 // role bound to its active organization or position. The role binding is still constrained to the
 // tenant or the environment row currently being considered by the outer portal query.
 func portalApplicationAccessFilter(userID string) (string, []any) {
+	// 可见性由数据库中的有效授权事实决定，而不是前端缓存：直接用户绑定、开启继承的
+	// 在职组织/岗位绑定或用户直授权限均可贡献访问。所有路径都同时约束租户、应用、
+	// 环境范围和生效时间；合同系统另要求恰好一个有效角色，避免角色冲突进入子系统。
 	return `(
 			application.code = 'platform'
 			OR NOT EXISTS (

@@ -10,9 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// FixedWindowRateLimit protects sensitive read endpoints without an external cache. The map is
-// bounded by periodic cleanup, so it is suitable for this monolith but intentionally not a
-// distributed rate-limit implementation.
+// FixedWindowRateLimit 用进程内固定窗口保护敏感端点。互斥锁同时保护计数和清理；它适用于
+// 单体或单副本防护，不提供跨实例总额度，扩容后必须改用共享限流存储或网关策略。
 func FixedWindowRateLimit(limit int, window time.Duration) gin.HandlerFunc {
 	type bucket struct {
 		startedAt time.Time
@@ -28,6 +27,7 @@ func FixedWindowRateLimit(limit int, window time.Duration) gin.HandlerFunc {
 			key = "unknown"
 		}
 		mutex.Lock()
+		// 清理与请求计数共用临界区，避免删除刚被另一请求刷新过的桶；清理频率最多每窗口一次。
 		if now.Sub(lastCleanup) >= window {
 			for candidate, current := range buckets {
 				if now.Sub(current.startedAt) >= window {

@@ -88,6 +88,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
+	// 三类 JWT 共用签名密钥但隔离 issuer/audience 与用途：平台会话令牌不能充当应用
+	// 机器令牌，应用机器令牌也不能冒充 OIDC ID/Access Token。各验证器必须只接受
+	// 自己的受众，不能因为密钥相同而跨协议复用。
 	tokenManager, err := security.LoadJWTManager(
 		cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience, cfg.Auth.JWTPrivateKeyPath, cfg.Auth.JWTPublicKeyPath,
 	)
@@ -232,12 +235,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 
 	applicationAccessAudit := &applicationAccessAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
-	// Application authorization catalogs are published by the owning subsystem through
-	// its OAuth machine credential. Do not bootstrap a contract_management catalog here:
-	// the platform only mirrors the directory and assigns published roles. The platform's
-	// own catalog is bootstrapped below because the platform has no catalog-publisher
-	// client for itself; without that mirror the UI blocks role assignment for built-in
-	// platform roles.
+	// 子系统通过各自的目录发布机器凭据维护授权目录，平台只保存镜像并据此分配应用角色，
+	// 因此这里不能替合同等子系统擅自初始化目录。平台自身没有目录发布客户端，必须在启动
+	// 时同步迁移预置的角色和权限，否则前端无法把平台内置角色用于授权。
 	applicationAccessService, err := applicationaccess.NewService(db, ulid.Generator{}, applicationaccess.SystemClock{}, applicationAccessAudit)
 	if err != nil {
 		_ = database.Close(db)
@@ -498,6 +498,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	// 设置服务先以空部署器完成纯配置装配；部署 Agent 属于后面构造的运行模块，待其就绪
+	// 后再重建处理器并注入 AccessApplier，避免设置领域反向依赖部署基础设施。
 	settingsHandler, err := settingshttp.NewHandler(settingsService, nil, logger)
 	if err != nil {
 		_ = database.Close(db)
@@ -539,7 +541,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	// 把可选的部署 Agent 注入设置处理器，供"对外访问"的"应用"按钮使用。
+	// 部署 Agent 可选：未启用时设置仍可保存，但“应用配置”会失败关闭；启用时只把受限的
+	// 对外访问操作接口注入处理器，不向普通设置逻辑暴露 Docker 或宿主机权限。
 	settingsHandler, err = settingshttp.NewHandler(settingsService, operational.AccessApplier, logger)
 	if err != nil {
 		_ = database.Close(db)
@@ -657,7 +660,8 @@ func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, err
 	return applicationaccess.PlatformCatalogBootstrapOperatorID, nil
 }
 
-// Close releases process-owned resources. It is safe to defer after a successful NewAPI call.
+// 仅 NewAPI 完整成功后才由 API 接管数据库和日志文件；此前任一装配步骤失败都在原分支
+// 立即按“数据库后开先关、日志最后关闭”的顺序释放，成功后可统一 defer Close。
 func (api *API) Close() {
 	if api.database != nil {
 		if err := database.Close(api.database); err != nil {

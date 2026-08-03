@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,6 +76,41 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 	}
 	if permission := info.Mode().Perm(); permission != 0o600 {
 		t.Fatalf("environment permissions = %o, want 600", permission)
+	}
+}
+
+func TestUpdateProductionSubsystemEnvironmentPreservesOwnerAndRejectsDuplicateManagedKeys(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("OIDC_CLIENT_ID=old\nUNRELATED=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateProductionSubsystemEnvironment(path, map[string]string{"OIDC_CLIENT_ID": "new"}); err != nil {
+		t.Fatalf("update production environment: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStat, beforeOK := before.Sys().(*syscall.Stat_t)
+	afterStat, afterOK := after.Sys().(*syscall.Stat_t)
+	if beforeOK && afterOK && (beforeStat.Uid != afterStat.Uid || beforeStat.Gid != afterStat.Gid) {
+		t.Fatalf("environment owner changed from %d:%d to %d:%d", beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(contents), "OIDC_CLIENT_ID=new") || !strings.Contains(string(contents), "UNRELATED=value") {
+		t.Fatalf("unexpected environment contents: %v %s", err, contents)
+	}
+
+	if err := os.WriteFile(path, []byte("OIDC_CLIENT_ID=one\nOIDC_CLIENT_ID=two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateProductionSubsystemEnvironment(path, map[string]string{"OIDC_CLIENT_ID": "new"}); err == nil {
+		t.Fatal("duplicate managed environment key was accepted")
 	}
 }
 
@@ -449,7 +485,7 @@ func TestLocalDockerSubsystemProvisionerPreflightIntegratedCustomerDoesNotRequir
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := provisioner.Preflight(context.Background(), integratedCustomerApplicationCode); err != nil {
+	if err := provisioner.Preflight(context.Background(), application.SubsystemPreflightInput{ApplicationCode: integratedCustomerApplicationCode}); err != nil {
 		t.Fatalf("integrated customer preflight rejected without standalone Compose: %v", err)
 	}
 	if len(runner.calls) != 1 || !containsString(runner.calls[0].arguments, "version") {

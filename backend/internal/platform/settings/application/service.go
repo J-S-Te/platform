@@ -216,9 +216,8 @@ func (service *Service) UpdateAccessSettings(ctx context.Context, input AccessSe
 	return service.repository.SaveAccessSettings(ctx, input, settingsID, service.clock.Now().UTC())
 }
 
-// ApplyAccessSettings applies the saved access configuration through the deployment agent.
-// The agent rewrites the local override environment files and recreates the affected
-// containers, so this action may briefly interrupt the unified frontend and API services.
+// ApplyAccessSettings 只应用已经持久化的配置，不接受临时请求值。部署 Agent 会改写本地覆盖文件
+// 并重建受影响容器，因此调用可能短暂中断统一前端和 API；生产/远程模式未注入 Agent 时必须失败。
 func (service *Service) ApplyAccessSettings(ctx context.Context, tenantID string, applier AccessApplier) (domain.AccessSettings, error) {
 	if strings.TrimSpace(tenantID) == "" || applier == nil {
 		return domain.AccessSettings{}, ErrValidation
@@ -240,9 +239,8 @@ func defaultAccessSettings(tenantID string) domain.AccessSettings {
 	return domain.AccessSettings{TenantID: tenantID, Version: 1}
 }
 
-// normalizeAccessSettings trims the origin and forces the insecure-HTTP flag on whenever the
-// configured public origin is HTTP on a non-loopback host (authorization codes must otherwise
-// traverse an insecure channel and the OAuth client would reject the callback).
+// normalizeAccessSettings 规范化 origin。非回环 HTTP 对外地址会强制启用不安全回调开关，
+// 这是对当前局域网开发模式的显式兼容，不代表 HTTP 回调具备与 HTTPS 相同的安全性。
 func normalizeAccessSettings(input AccessSettingsUpdateInput) AccessSettingsUpdateInput {
 	input.PublicOrigin = strings.TrimRight(strings.TrimSpace(input.PublicOrigin), "/")
 	if isHTTPPublicOrigin(input.PublicOrigin) {

@@ -201,6 +201,8 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
   - `platform:oauth-client:create`
 - 角色管理权限不会自动代表可以授予超级管理员；初始管理员授权仍受平台的受保护角色与可委派权限策略约束。
 
+正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理内置 `contract_management/prod`，把一次性 OIDC 与目录发布凭据原子写入权限为 `0600` 的生产 `.env`，再执行固定的合同迁移和 `contract-api` 重建。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
+
 ### 4.2 参数
 
 | 参数 | 说明 |

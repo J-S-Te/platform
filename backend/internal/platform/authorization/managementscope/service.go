@@ -68,9 +68,8 @@ type Authorizer interface {
 	ResourceContext(context.Context, string, string, string) (ResourceContext, error)
 }
 
-// Service resolves current role bindings directly from the database. This
-// deliberately avoids cached session permission state for scoped decisions so
-// role revocation takes effect on the next request.
+// Service 直接从数据库解析当前绑定，不复用会话中的扁平权限码。组织/资源范围决策因此
+// 能同时校验权限与作用域，撤销角色或任职后下一次管理请求即失效。
 type Service struct{ database *gorm.DB }
 
 func New(database *gorm.DB) (*Service, error) {
@@ -100,6 +99,8 @@ func (service *Service) Resolve(ctx context.Context, subject Subject, permission
 	}
 
 	now := time.Now().UTC()
+	// USER/ACCOUNT 绑定直接匹配主体；ORG_UNIT/POSITION 绑定只有在用户存在当前有效、
+	// 允许继承且组织岗位仍活动的任职时才成为候选。
 	var grants []grantRow
 	query := service.database.WithContext(ctx).
 		Table("authz_role_binding AS binding").
@@ -153,6 +154,7 @@ func (service *Service) Resolve(ctx context.Context, subject Subject, permission
 	pathClauses := make([]string, 0, len(roots))
 	pathArguments := make([]any, 0, len(roots))
 	for _, root := range roots {
+		// 组织授权根按物化路径展开到全部后代；资源直绑保持精确 ID，不随组织树扩张。
 		pathClauses = append(pathClauses, "path LIKE ?")
 		pathArguments = append(pathArguments, strings.TrimSpace(root.Path)+"%")
 	}
@@ -215,6 +217,8 @@ func managementSubjectArguments(userID, accountID string, now time.Time) []any {
 }
 
 func (service *Service) ResourceContext(ctx context.Context, tenantID, resourceType, resourceID string) (ResourceContext, error) {
+	// 资源归属必须由服务端按租户从数据库读取。调用方传入的组织字段只能用于定位，
+	// 不能直接参与 Scope.Allows，否则可伪造 org_unit_id 绕过范围限制。
 	tenantID = strings.TrimSpace(tenantID)
 	resourceID = strings.TrimSpace(resourceID)
 	if tenantID == "" || resourceID == "" {

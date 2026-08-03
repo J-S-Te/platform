@@ -12,8 +12,8 @@ import (
 
 const maxPARTTL = 90 * time.Second
 
-// PushedAuthorizationRequest is the durable, one-time authorization request stored by PAR. It
-// contains canonical request fields only; neither a raw request object nor a request URI is stored.
+// PushedAuthorizationRequest 是 PAR 的短期一次性状态，只保存规范化参数与敏感值摘要；
+// 原始 request object 和可兑换 request_uri 都不落库，数据库泄露时不能直接重放浏览器授权。
 type PushedAuthorizationRequest struct {
 	ID, TenantID, OAuthClientID                      string
 	RequestURIHash                                   [32]byte
@@ -57,8 +57,8 @@ type PushedAuthorizationRequestRepository interface {
 	ConsumePushedAuthorizationRequest(context.Context, string, string, [32]byte, time.Time) (PushedAuthorizationRequest, error)
 }
 
-// PushAuthorizationRequest authenticates a client, validates an optional signed request object,
-// and persists a short-lived one-time authorization request.
+// PushAuthorizationRequest 在后端通道认证客户端，并把普通参数与可选签名请求对象合并成唯一规范形态。
+// 浏览器随后只携带短期 request_uri，避免长授权参数经过地址栏、历史记录和代理日志。
 func (service *Service) PushAuthorizationRequest(ctx context.Context, input PushAuthorizationRequestInput) (PushAuthorizationRequestResult, error) {
 	input = normalizePARInput(input)
 	if input.ClientID == "" || input.ResponseType != "code" || input.TTL <= 0 || input.TTL > maxPARTTL {
@@ -112,6 +112,7 @@ func (service *Service) PushAuthorizationRequest(ctx context.Context, input Push
 		CodeChallenge: input.CodeChallenge, CodeChallengeMethod: input.CodeChallengeMethod, RequestObjectHash: requestHash,
 		CreatedAt: now, ExpiresAt: expires,
 	}
+	// request_uri 与授权码一样按摘要检索；返回给客户端的 bearer 值只在后续 /authorize 使用一次。
 	if err = repository.CreatePushedAuthorizationRequest(ctx, request); err != nil {
 		return PushAuthorizationRequestResult{}, fmt.Errorf("create PAR: %w", err)
 	}
@@ -146,9 +147,8 @@ func (service *Service) ConsumePushedAuthorizationRequest(ctx context.Context, i
 	}, nil
 }
 
-// ResolveRequestObject verifies a signed request object submitted to /authorize and combines its
-// signed values with matching direct parameters. Signed values are used when their direct
-// counterparts are absent; conflicting values are rejected rather than silently preferred.
+// ResolveRequestObject 验证直接提交给 /authorize 的 JAR，并与查询参数逐项合并。
+// 同一字段若在两处出现必须语义一致，不能用“签名值优先”掩盖外层参数被篡改或客户端实现错误。
 func (service *Service) ResolveRequestObject(ctx context.Context, input RequestObjectAuthorizationInput) (AuthorizationInput, error) {
 	input.AuthorizationInput = normalizeAuthorizationInput(input.AuthorizationInput)
 	input.ResponseType = strings.TrimSpace(input.ResponseType)
@@ -183,6 +183,8 @@ type requestObjectFields struct {
 }
 
 func validateRequestObject(raw string, client domain.Client, audience string, now time.Time) (requestObjectFields, error) {
+	// JAR 的受众固定为平台授权端点，而非 token 端点；短 exp 和可选 iat/nbf 时间窗限制了
+	// 被截获请求对象的可重放周期。真正的一次性语义则由 PAR request_uri 的消费事务提供。
 	token, err := parseCompactJWT(raw)
 	if err != nil || verifyCompactJWT(token, client.JWKs) != nil {
 		return requestObjectFields{}, errors.New("invalid request object")
@@ -290,6 +292,7 @@ func mergeRequestFields(redirect, scope, state, nonce, challenge, method, signed
 	if err != nil {
 		return "", "", "", "", "", "", err
 	}
+	// scope 是无序集合，比较前先排序去重；否则仅顺序不同也会被误判成签名内容冲突。
 	canonicalScope := strings.Join(normalizeScopes(strings.Fields(scope)), " ")
 	canonicalSignedScope := strings.Join(normalizeScopes(strings.Fields(signedScope)), " ")
 	mergedScope, err := merge(canonicalScope, canonicalSignedScope)

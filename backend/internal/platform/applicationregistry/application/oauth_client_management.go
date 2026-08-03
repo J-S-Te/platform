@@ -237,9 +237,8 @@ type OAuthClientView struct {
 	UpdatedAt              time.Time
 }
 
-// OAuthClientSecretResult is returned only by creation and secret lifecycle operations. Its
-// PlaintextSecret must be serialized exactly once by the corresponding HTTP response and never
-// logged, audited, cached, or persisted.
+// OAuthClientSecretResult 只允许出现在创建或密钥生命周期操作的即时结果中。PlaintextSecret
+// 必须由对应 HTTP 响应一次性呈现，禁止日志、审计、缓存和持久化；后续无法从平台恢复。
 type OAuthClientSecretResult struct {
 	Credential      OAuthClientCredentialView
 	PlaintextSecret string
@@ -252,9 +251,8 @@ type OAuthClientCreateResult struct {
 	PlaintextSecret string
 }
 
-// RedirectURIValidationPolicy controls which OAuth client callback schemes may be registered.
-// HTTPS is always allowed. HTTP is limited to loopback by default and may be enabled for
-// trusted server deployments through AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS.
+// RedirectURIValidationPolicy 控制可登记的回调协议。HTTPS 始终允许；HTTP 默认仅限回环地址，
+// 可信服务器确需明文回调时必须通过配置显式开启，并仍由授权端点执行完整字符串精确匹配。
 type RedirectURIValidationPolicy struct {
 	AllowInsecureHTTP bool
 }
@@ -425,8 +423,8 @@ func (service *OAuthClientManagementService) CreateOAuthClientSecret(ctx context
 	return OAuthClientSecretResult{Credential: credential, PlaintextSecret: plaintext}, nil
 }
 
-// RotateOAuthClientSecret creates a new active secret and limits old active secrets to a bounded
-// overlap period, allowing consumers to deploy the new secret without a gap.
+// RotateOAuthClientSecret 生成新密钥，并把旧活跃密钥限制在有上限的重叠窗口内；
+// 这样消费者可无中断发布，同时不会因忘记下线旧密钥而形成永久双凭据。
 func (service *OAuthClientManagementService) RotateOAuthClientSecret(ctx context.Context, input OAuthClientSecretRotateInput) (OAuthClientSecretResult, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || time.Duration(input.OverlapSeconds)*time.Second > maxRotationOverlap {
@@ -461,8 +459,8 @@ func (service *OAuthClientManagementService) newSecretWrite(now time.Time, valid
 	return newOAuthClientSecretWrite(service.ids, now, validUntil)
 }
 
-// newOAuthClientSecretWrite centralizes secret generation for both standalone OAuth client
-// management and the atomic subsystem-onboarding workflow.
+// newOAuthClientSecretWrite 统一独立客户端管理与子系统接入的密钥生成规则。返回值刻意拆分为
+// 可持久化哈希写模型和一次性明文，防止仓储接口获得原始 secret。
 func newOAuthClientSecretWrite(ids ManagementIdentifierGenerator, now time.Time, validUntil *time.Time) (SecretWrite, string, error) {
 	credentialID, err := ids.New(now)
 	if err != nil {
@@ -692,6 +690,8 @@ func validOAuthClientJWKKeyID(value string) bool {
 }
 
 func validateAndCanonicalizePublicJWK(raw json.RawMessage, expectedKeyID, requestedAlgorithm string) (json.RawMessage, string, error) {
+	// 登记阶段不仅检查 JSON 结构，还实际解析曲线点、RSA 模数等公钥材料并重新编码为规范 JSON；
+	// 私钥成员、算法不匹配或不可验签的 key_ops 均失败关闭，运行时无需容忍多种等价表示。
 	var values map[string]json.RawMessage
 	if len(raw) == 0 || json.Unmarshal(raw, &values) != nil || values == nil {
 		return nil, "", errors.New("invalid JWK")

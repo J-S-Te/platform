@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	// ErrNotFound hides whether a notification belonged to another tenant or recipient.
+	// ErrNotFound 统一隐藏通知不存在、属于其他租户或属于其他收件人的差异。
 	ErrNotFound = errors.New("notification resource not found")
-	// ErrConflict identifies idempotency or optimistic-lock conflicts.
+	// ErrConflict 表示幂等键或状态转换冲突，不暴露已存在消息的正文。
 	ErrConflict = errors.New("notification resource conflict")
 	// ErrVersionConflict identifies a stale template status update.
 	ErrVersionConflict = errors.New("notification template version conflict")
@@ -47,7 +47,8 @@ func NewService(repository Repository, policy InboxPolicy, resolver RecipientRes
 	return &Service{repository: repository, policy: policy, resolver: resolver, ids: ids, clock: clock}, nil
 }
 
-// CreateTemplate creates the first immutable published version of a tenant-owned template.
+// CreateTemplate 在同一事务中建立模板和首个不可变已发布版本；后续通知始终引用具体版本，
+// 模板演进不会改写历史消息的渲染依据。
 func (service *Service) CreateTemplate(ctx context.Context, input CreateTemplateInput) (domain.Template, domain.TemplateVersion, error) {
 	if err := validateTemplateInput(input.TenantID, input.OperatorID, input.Code, input.Name, input.Status, input.TitleTemplate, input.BodyTemplate, input.Variables); err != nil {
 		return domain.Template{}, domain.TemplateVersion{}, err
@@ -67,7 +68,7 @@ func (service *Service) CreateTemplate(ctx context.Context, input CreateTemplate
 	return service.repository.CreateTemplate(ctx, template, version)
 }
 
-// CreateTemplateVersion appends a new immutable published version and makes it current.
+// CreateTemplateVersion 追加不可变版本并原子切换 current_version，防止并发创建得到重复版本号。
 func (service *Service) CreateTemplateVersion(ctx context.Context, input CreateTemplateVersionInput) (domain.Template, domain.TemplateVersion, error) {
 	if err := validateTemplateVersionInput(input); err != nil {
 		return domain.Template{}, domain.TemplateVersion{}, err
@@ -80,7 +81,7 @@ func (service *Service) CreateTemplateVersion(ctx context.Context, input CreateT
 	return service.repository.AppendTemplateVersion(ctx, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.TemplateID), strings.TrimSpace(input.OperatorID), versionID, input.TitleTemplate, input.BodyTemplate, cloneVariables(input.Variables), now)
 }
 
-// ChangeTemplateStatus enables or disables future message creation from a template.
+// ChangeTemplateStatus 只影响未来消息创建，已经渲染并持久化的收件箱内容不随模板禁用而消失。
 func (service *Service) ChangeTemplateStatus(ctx context.Context, input ChangeTemplateStatusInput) (domain.Template, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" || strings.TrimSpace(input.TemplateID) == "" || input.Version == 0 || !validTemplateStatus(input.Status) {
 		return domain.Template{}, ErrValidation
@@ -99,8 +100,8 @@ func (service *Service) ListTemplates(ctx context.Context, tenantID string, page
 	return service.repository.ListTemplates(ctx, strings.TrimSpace(tenantID), normalizePage(page))
 }
 
-// Create renders and resolves an in-app notification before persisting it idempotently. No record
-// is written when the public settings policy disables the tenant inbox.
+// Create 先读取租户站内信开关，再用当前发布模板渲染并解析有效收件人，最后按幂等键持久化。
+// 开关关闭时不写任何消息或投递记录；重复请求返回原投递集合，避免业务重试产生重复提醒。
 func (service *Service) Create(ctx context.Context, input CreateInput) (CreateResult, error) {
 	if err := validateCreateInput(input); err != nil {
 		return CreateResult{}, err
@@ -155,6 +156,7 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (CreateRe
 	}
 	result := CreateResult{MessageID: created.Message.ID, DeliveryIDs: deliveryIDs(created.Deliveries), Replayed: created.Replayed}
 	if created.Replayed {
+		// 幂等重放已存在完整投递状态，不能再次执行 CompleteDelivery，否则会重复推进或制造冲突。
 		return result, nil
 	}
 	for _, delivery := range created.Deliveries {
@@ -167,7 +169,8 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (CreateRe
 	return result, nil
 }
 
-// RetryFailedDeliveries attempts a bounded number of due failed in-app delivery state transitions.
+// RetryFailedDeliveries 领取有限数量的到期失败投递。领取动作把记录置为带租约的 PROCESSING，
+// 多实例不会同时处理同一收件人；租约过期后才允许其他实例接管。
 func (service *Service) RetryFailedDeliveries(ctx context.Context, tenantID string, limit int) (RetryResult, error) {
 	if strings.TrimSpace(tenantID) == "" || limit < 1 {
 		return RetryResult{}, ErrValidation
@@ -205,7 +208,7 @@ func (service *Service) ListDeliveries(ctx context.Context, tenantID string, sta
 	return service.repository.ListDeliveries(ctx, strings.TrimSpace(tenantID), status, normalizePage(page))
 }
 
-// ListInbox reads delivered items for exactly one authenticated recipient.
+// ListInbox 只读取当前认证用户的 DELIVERED 项；运维投递列表与用户收件箱是两条不同的数据边界。
 func (service *Service) ListInbox(ctx context.Context, tenantID, userID string, page PageRequest) (PageResult[domain.InboxItem], error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
 		return PageResult[domain.InboxItem]{}, ErrValidation
@@ -229,7 +232,7 @@ func (service *Service) CountUnread(ctx context.Context, tenantID, userID string
 	return service.repository.CountUnread(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID))
 }
 
-// MarkRead atomically marks one recipient-owned delivered inbox item as read.
+// MarkRead 只更新当前收件人拥有且已投递的记录；重复已读操作保持幂等，不泄露其他用户的投递 ID。
 func (service *Service) MarkRead(ctx context.Context, tenantID, userID, deliveryID string) (domain.InboxItem, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(deliveryID) == "" {
 		return domain.InboxItem{}, ErrValidation

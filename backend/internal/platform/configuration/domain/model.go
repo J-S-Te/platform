@@ -10,7 +10,8 @@ type Reference struct {
 	Name string
 }
 
-// Namespace is an application configuration namespace scoped to a tenant and environment.
+// Namespace 是配置生命周期的隔离边界。同一应用在不同租户或环境中的草稿与发布版本
+// 必须通过该边界分开，运行时不能绕过命名空间读取其他环境的数据。
 type Namespace struct {
 	ID          string
 	Application Reference
@@ -20,7 +21,8 @@ type Namespace struct {
 	Version     uint64
 }
 
-// Item is a draft configuration value. Sensitive values are never returned in plaintext.
+// Item 表示尚可编辑的配置草稿。当前实现不接收明文密钥；Secret 字段用于阻止调用方
+// 将敏感值误当成普通文本存入配置表，而不是一个可绕过密钥管理的开关。
 type Item struct {
 	ID        string
 	Namespace Reference
@@ -38,7 +40,7 @@ type VersionedItem struct {
 	Version uint64
 }
 
-// Release is an immutable configuration snapshot publication record.
+// Release 是一次不可变发布的元数据；发布后运行时读取的是快照，而不是可能继续变化的草稿。
 type Release struct {
 	ID          string
 	Namespace   Reference

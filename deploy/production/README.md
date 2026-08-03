@@ -50,9 +50,24 @@ chmod 600 .env .release.env
 1. 发布 platform，使生产部署资产、平台镜像和迁移到位；
 2. 初始化首个管理员；
 3. 发布 frontend；
-4. 在平台创建或核对 `contract_management/prod`、浏览器 Client、catalog-publisher Client 和精确回调；
-5. 把受控接入结果写入服务器 `.env`；
-6. 发布 contract。
+4. 发布 frontend，并确认 `platform-api` 与隔离的 `subsystem-provisioner` 健康；
+5. 登录基础平台，在“应用接入”中选择合同管理系统和 `prod` 环境完成接入；
+6. 平台自动创建 `contract_management/prod`、浏览器 Client、catalog-publisher Client、精确回调和初始管理员授权，同时将一次性凭据安全写入服务器 `.env`，执行合同迁移并重建 `contract-api`。
+
+生产接入不再要求管理员在命令行复制 OAuth Client Secret。Secret 只在平台后端内存、受限 Unix Socket 和权限为 `0600` 的服务器 `.env` 之间流转，不返回浏览器，也不进入命令行参数或日志。生产 Agent 只允许 `contract_management/prod` 和固定 Compose 服务，不接受浏览器指定的文件、命令、镜像或服务名。
+
+首次接入前，`.env` 中的以下字段可以保留占位值，由平台接入流程替换：
+
+```text
+OIDC_CLIENT_ID
+OIDC_CLIENT_SECRET
+OIDC_TENANT_ID
+PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID
+PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID
+PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET
+```
+
+`SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT` 必须填写当前生产部署目录的规范绝对路径，默认 `/opt/basic-platform`。平台镜像更新后需同时重建 `platform-api` 和 `subsystem-provisioner`，二者通过共享 Unix Socket 通信；只有 Agent 挂载 Docker Socket。
 
 管理员初始化：
 
@@ -72,7 +87,7 @@ unset ADMIN_PASSWORD
 https://<正式域名>/contract_management/auth/callback
 ```
 
-不要把本地 `dev` Client、localhost 回调或局域网 HTTP 配置复制到生产。
+不要把本地 `dev` Client、localhost 回调或局域网 HTTP 配置复制到生产，也不要手工修改平台数据库伪造 `READY` 状态。
 
 ## 5. 发布行为
 

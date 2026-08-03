@@ -292,9 +292,9 @@ func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已创建", toUserResponse(result))
 }
 
-// CreateEmployee atomically creates the user, baseline platform role, optional local account and
-// optional initial appointment.  It is the preferred daily onboarding endpoint; the independent
-// resource endpoints remain available for maintenance and exceptional workflows.
+// 员工入职会在一个应用事务内创建用户、平台基线角色以及可选账号和首个任职。HTTP 层
+// 根据请求实际包含的子资源追加检查账号、任职权限，避免只有用户创建权限的操作者借聚合
+// 接口间接创建账号或任职；独立资源接口仅用于维护和例外流程。
 func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -368,8 +368,8 @@ func principalHasPermission(principal authctx.Principal, expected string) bool {
 	return false
 }
 
-// CreateUsersBatch creates up to one hundred ordinary users atomically. Employee numbers and the
-// baseline role assignment are controlled by the application service rather than request input.
+// 批量导入最多一次提交一百名普通用户并保持整批原子性。应用角色是额外授权动作，只有
+// 请求实际携带角色时才要求角色绑定更新权限；工号和平台基线角色仍由应用服务强制生成。
 func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -808,6 +808,8 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 }
 
 func (handler *ManagementHandler) requireManagementScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, permissionCode string) (managementscope.Scope, bool) {
+	// 会话中的扁平权限码只决定是否可能执行操作；实际可管理的组织和资源范围由服务端
+	// 根据当前主体重新解析，避免把前端提交的 org_unit_id 当成授权证据。
 	scope, err := handler.scopeAuthorizer.Resolve(request.Context(), managementscope.Subject{
 		TenantID:  principal.Tenant.ID,
 		UserID:    principal.User.ID,
@@ -826,6 +828,8 @@ func (handler *ManagementHandler) requireManagementScope(writer http.ResponseWri
 }
 
 func applyManagementScope(query application.PageRequest, scope managementscope.Scope) application.PageRequest {
+	// 受限范围被下推到仓储查询，而不是先读取全租户数据再在内存中过滤，防止分页总数、
+	// 搜索结果或错误分支泄露范围外资源。
 	if scope.Unrestricted {
 		return query
 	}
@@ -839,6 +843,8 @@ func (handler *ManagementHandler) requireExistingResourceScope(writer http.Respo
 	if scope.Unrestricted {
 		return true
 	}
+	// 更新和删除必须用路径中的资源 ID 回查其真实组织归属；客户端提交的组织字段可能被
+	// 篡改，不能用于证明该资源位于操作者的授权范围内。
 	resource, err := handler.scopeAuthorizer.ResourceContext(request.Context(), tenantID, resourceType, resourceID)
 	if errors.Is(err, managementscope.ErrResourceNotFound) {
 		handler.forbidden(writer, request)

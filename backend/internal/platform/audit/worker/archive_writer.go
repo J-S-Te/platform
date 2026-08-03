@@ -18,8 +18,8 @@ import (
 
 const archiveMediaType = "application/x-ndjson+gzip"
 
-// ArchiveWriter writes gzip-compressed NDJSON into a controlled local directory. It never exposes
-// absolute paths; callers persist only StorageRelativePath and a SHA-256 digest.
+// ArchiveWriter 把审计事件写成 gzip 压缩 NDJSON。数据库只持久化相对路径和 SHA-256，
+// 不把宿主机绝对路径暴露为归档元数据；底层目录若可能被不可信进程替换，仍需文件系统权限隔离。
 type ArchiveWriter struct{ storageRoot string }
 
 func NewArchiveWriter(storageRoot string) (*ArchiveWriter, error) {
@@ -55,6 +55,7 @@ func (writer *ArchiveWriter) WriteArchive(ctx context.Context, task domain.Reten
 		}
 	}()
 	hash := sha256.New()
+	// 哈希计算的是最终 gzip 字节而非解压后的事件；校验时可直接验证归档文件是否被替换或损坏。
 	compressed := gzip.NewWriter(io.MultiWriter(temporary, hash))
 	encoder := json.NewEncoder(compressed)
 	var occurredFrom, occurredTo time.Time
@@ -84,6 +85,7 @@ func (writer *ArchiveWriter) WriteArchive(ctx context.Context, task domain.Reten
 	if err := os.Rename(temporaryPath, absolutePath); err != nil {
 		return domain.Archive{}, fmt.Errorf("publish audit archive: %w", err)
 	}
+	// rename 发布完整文件后再降为只读；数据库清单只会引用已经完整落盘的归档。
 	if err := os.Chmod(absolutePath, 0o440); err != nil {
 		return domain.Archive{}, fmt.Errorf("set audit archive read-only: %w", err)
 	}

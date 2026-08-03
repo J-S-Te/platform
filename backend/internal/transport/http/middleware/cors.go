@@ -7,7 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// CORS allows credentialed browser requests only from exact configured origins.
+// CORS 仅对精确配置的 Origin 返回凭据许可，并设置 Vary: Origin，防止共享缓存把一个来源的
+// Access-Control-Allow-Origin 响应复用于另一个来源。未命中来源时不回显请求值。
 func CORS(allowedOrigins []string) gin.HandlerFunc {
 	allowed := make(map[string]struct{}, len(allowedOrigins))
 	for _, origin := range allowedOrigins {
@@ -42,8 +43,7 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 	}
 }
 
-// ContainsExactOrigin reports whether an origin is configured. It is kept separate to make the
-// exact-origin rule testable without exercising a full HTTP request.
+// ContainsExactOrigin 保持字符串精确匹配；协议、端口或主机任一不同都属于另一个安全来源。
 func ContainsExactOrigin(allowedOrigins []string, origin string) bool {
 	for _, allowed := range allowedOrigins {
 		if strings.TrimSpace(allowed) == origin {

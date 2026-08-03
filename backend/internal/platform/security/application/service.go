@@ -1,4 +1,4 @@
-// Package application coordinates login-policy and account-lockout use cases.
+// Package application 编排租户登录策略、失败计数、账号锁定和人工解锁用例。
 package application
 
 import (
@@ -127,8 +127,8 @@ func NewService(repository Repository, clock Clock) (*Service, error) {
 	return &Service{repository: repository, clock: clock}, nil
 }
 
-// GetLoginPolicy returns a persisted policy, or documented defaults for a tenant that has not
-// explicitly customized its policy yet.
+// GetLoginPolicy 对尚未持久化自定义策略的租户返回文档化默认值。默认值只在应用层合成，
+// 仓储的“未找到”仍可与真实数据库错误区分。
 func (service *Service) GetLoginPolicy(ctx context.Context, tenantID string) (domain.LoginPolicy, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return domain.LoginPolicy{}, ErrValidation
@@ -149,8 +149,8 @@ func (service *Service) UpdateLoginPolicy(ctx context.Context, input LoginPolicy
 	return service.repository.UpdateLoginPolicy(ctx, input, service.clock.Now().UTC())
 }
 
-// SessionIdleTimeout returns the effective inactivity timeout for a tenant. A session that has
-// no authenticated activity for this duration must be revoked by the identity repository.
+// SessionIdleTimeout 提供租户实际空闲超时；identity 仓储必须据此在每次认证访问时判断会话，
+// 不能只依赖 Cookie 或会话自身的绝对过期时间。
 func (service *Service) SessionIdleTimeout(ctx context.Context, tenantID string) (time.Duration, error) {
 	policy, err := service.GetLoginPolicy(ctx, tenantID)
 	if err != nil {
@@ -159,7 +159,8 @@ func (service *Service) SessionIdleTimeout(ctx context.Context, tenantID string)
 	return time.Duration(policy.IdleTimeoutSeconds) * time.Second, nil
 }
 
-// RecordFailedLogin applies the current tenant policy to one verified-account password failure.
+// RecordFailedLogin 仅记录已定位到真实账号后的密码失败；未知用户名不进入该接口，
+// 从而避免用安全记录反向枚举账号，同时由仓储原子决定是否达到锁定阈值。
 func (service *Service) RecordFailedLogin(ctx context.Context, input LoginFailureInput) (LoginFailureResult, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.AccountID) == "" || strings.TrimSpace(input.AccountName) == "" {
 		return LoginFailureResult{}, ErrValidation
@@ -180,7 +181,8 @@ func (service *Service) ListLockedAccounts(ctx context.Context, tenantID string,
 	return service.repository.ListLockedAccounts(ctx, tenantID, normalizePage(query), service.clock.Now().UTC())
 }
 
-// UnlockAccount clears the account lock and logically closes outstanding failed-login attempts.
+// UnlockAccount 清除锁定并逻辑关闭仍生效的失败尝试，但不会恢复锁定时已经撤销的会话，
+// 用户必须重新登录建立新会话。
 func (service *Service) UnlockAccount(ctx context.Context, input UnlockInput) (domain.LockedAccount, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.AccountID) == "" || strings.TrimSpace(input.OperatorID) == "" {
 		return domain.LockedAccount{}, ErrValidation

@@ -69,8 +69,8 @@ func newIssuer(signer jwtSigner, ids oidcapplication.IDGenerator, resolvers ...A
 	return &Issuer{signer: signer, ids: ids, resolver: resolver}, nil
 }
 
-// IssueOIDCTokens implements application.TokenIssuer after authorization-code or refresh-grant
-// validation. It never receives or emits a refresh-token secret.
+// IssueOIDCTokens 在授权码或刷新授权完成后签名访问令牌和可选 ID Token；刷新令牌始终由应用层
+// 以不透明密钥管理，不进入 JWT 适配器，避免把两种生命周期混为一体。
 func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication.TokenIssue) (oidcapplication.IssuedTokens, error) {
 	if issuer == nil || issuer.signer == nil || issuer.ids == nil {
 		return oidcapplication.IssuedTokens{}, errors.New("OIDC token issuer is not initialized")
@@ -85,10 +85,8 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 		if err != nil {
 			return oidcapplication.IssuedTokens{}, fmt.Errorf("resolve OIDC application authorization: %w", err)
 		}
-		// The authorization-code or refresh-token grant is the authoritative
-		// tenant boundary. A resolver is an internal adapter, but its result must
-		// still be treated as untrusted at this boundary so a wiring regression
-		// cannot sign a token carrying another tenant's organization claims.
+		// 授权码或刷新令牌中的租户才是权威边界。即使 resolver 是内部适配器，也要把结果按
+		// 不可信输入复核，防止装配错误把其他租户的组织和权限声明签进令牌。
 		if resolved.TenantID != issue.TenantID {
 			return oidcapplication.IssuedTokens{}, errors.New("resolved OIDC authorization tenant does not match token grant")
 		}
@@ -130,6 +128,7 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 		return oidcapplication.IssuedTokens{}, fmt.Errorf("generate ID token ID: %w", err)
 	}
 	claims.JWTID = idTokenID
+	// ID Token 与 Access Token 共享本次身份/授权快照，但使用独立 jti，便于审计和撤销语义区分。
 	idToken, err := issuer.signer.IssueIDToken(claims)
 	if err != nil {
 		return oidcapplication.IssuedTokens{}, fmt.Errorf("sign OIDC ID token: %w", err)

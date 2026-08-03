@@ -142,8 +142,8 @@ type oauthClientCredentialViewRow struct {
 	Status      string     `gorm:"column:status"`
 }
 
-// CreateOAuthClient writes the client aggregate and, if supplied, one initial bcrypt-protected
-// secret. The plaintext secret is never accepted by this repository.
+// CreateOAuthClient 在同一事务中写入客户端、授权模式、scope、回调地址及可选初始密钥哈希。
+// 任一子表失败都会回滚整个聚合；仓储接口从类型上不接受明文 secret。
 func (repository *OAuthClientManagementRepository) CreateOAuthClient(ctx context.Context, input application.OAuthClientCreateInput, oauthClientID string, secret *application.SecretWrite, now time.Time) (application.OAuthClientView, error) {
 	var result application.OAuthClientView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -202,7 +202,8 @@ func (repository *OAuthClientManagementRepository) GetOAuthClient(ctx context.Co
 	return view, mapOAuthClientManagementError(err)
 }
 
-// ReplaceOAuthClientScopes replaces allowed scopes with optimistic locking.
+// ReplaceOAuthClientScopes 先锁定聚合并校验版本，再整体替换 scope 子表并递增版本；
+// 管理员基于旧页面提交时不会静默覆盖另一管理员刚完成的安全收紧。
 func (repository *OAuthClientManagementRepository) ReplaceOAuthClientScopes(ctx context.Context, input application.OAuthClientScopesUpdateInput, now time.Time) (application.OAuthClientView, error) {
 	var result application.OAuthClientView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -228,7 +229,8 @@ func (repository *OAuthClientManagementRepository) ReplaceOAuthClientScopes(ctx 
 	return result, mapOAuthClientManagementError(err)
 }
 
-// ReplaceOAuthClientRedirectURIs replaces callback URLs with optimistic locking.
+// ReplaceOAuthClientRedirectURIs 以客户端聚合版本保护整组回调地址替换，避免逐条更新留下
+// 新旧集合混合的中间状态或并发管理操作相互覆盖。
 func (repository *OAuthClientManagementRepository) ReplaceOAuthClientRedirectURIs(ctx context.Context, input application.OAuthClientRedirectURIsUpdateInput, now time.Time) (application.OAuthClientView, error) {
 	var result application.OAuthClientView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -376,8 +378,8 @@ func (repository *OAuthClientManagementRepository) CreateOAuthClientSecret(ctx c
 	return result, mapOAuthClientManagementError(err)
 }
 
-// RotateOAuthClientSecret bounds the validity of all active prior secrets before writing the new
-// secret version atomically.
+// RotateOAuthClientSecret 在一个事务中先收紧所有旧活跃密钥的有效期，再插入新版本。
+// overlap=0 表示立即撤销；非零窗口只会缩短既有截止时间，绝不会把原本更早过期的密钥延长。
 func (repository *OAuthClientManagementRepository) RotateOAuthClientSecret(ctx context.Context, input application.OAuthClientSecretRotateInput, secret application.SecretWrite, now time.Time) (application.OAuthClientCredentialView, error) {
 	var result application.OAuthClientCredentialView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -436,6 +438,8 @@ func (repository *OAuthClientManagementRepository) DisableOAuthClientSecret(ctx 
 }
 
 func verifyOAuthClientParent(transaction *gorm.DB, tenantID, applicationID, environmentID string) error {
+	// 创建客户端前同时锁定应用和环境父记录，并要求环境确实属于该租户与应用；
+	// 不能仅依赖全局唯一 ID 或前端级联选择来保证多租户归属。
 	var applicationRow oauthClientApplicationModel
 	if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ? AND tenant_id = ? AND status = ?", applicationID, tenantID, "ACTIVE").Take(&applicationRow).Error; err != nil {

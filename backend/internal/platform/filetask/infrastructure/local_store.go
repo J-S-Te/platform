@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// LocalStore stores binaries below one configured root. It never accepts an absolute path or a
-// path containing traversal segments, and it refuses to open symlinked files or directories.
+// LocalStore 只接受可信根目录下的相对路径，并拒绝绝对路径、穿越片段及检查时可见的符号链接，
+// 用于降低数据库路径被篡改后的目录逃逸风险。检查与打开/删除不是基于同一目录文件描述符，
+// 因而不能把这层校验视为可抵御并发替换目录的完整沙箱。
 type LocalStore struct {
 	root     string
 	realRoot string
@@ -39,8 +40,8 @@ func NewLocalStore(root string) (*LocalStore, error) {
 	return &LocalStore{root: absoluteRoot, realRoot: realRoot}, nil
 }
 
-// WriteAtomically streams one upload into a sibling temporary file, fsyncs it and atomically
-// renames it to finalPath. The temporary suffix is purpose-built for CleanupTemporary.
+// WriteAtomically 将上传流写入同目录临时文件，完成 fsync 后原子 rename 为最终路径。
+// 临时后缀与 CleanupTemporary 约定一致，使进程崩溃留下的半文件可被定向清理。
 func (store *LocalStore) WriteAtomically(ctx context.Context, relativePath string, content io.Reader, maxBytes int64) (uint64, []byte, error) {
 	if content == nil || maxBytes <= 0 {
 		return 0, nil, errors.New("upload content and positive max bytes are required")
@@ -88,6 +89,7 @@ func (store *LocalStore) WriteAtomically(ctx context.Context, relativePath strin
 }
 
 func (store *LocalStore) OpenVerified(relativePath string) (io.ReadSeekCloser, error) {
+	// safePath 校验字符串边界后仍需 Lstat：合法路径上的符号链接也可能在运行时把读取重定向到根目录外。
 	absolutePath, err := store.safePath(relativePath)
 	if err != nil {
 		return nil, err
@@ -133,8 +135,8 @@ func (store *LocalStore) Remove(relativePath string) error {
 	return nil
 }
 
-// CleanupTemporary removes only module-created .part-* files older than cutoff. It skips any
-// symlink and never follows directories outside the configured root.
+// CleanupTemporary 只删除本模块生成且早于截止时间的 .part-* 文件；遍历时跳过符号链接，
+// 不跟随任何可能指向存储根目录外的目录项。
 func (store *LocalStore) CleanupTemporary(cutoff time.Time) (int, error) {
 	removed := 0
 	err := filepath.WalkDir(store.realRoot, func(path string, entry os.DirEntry, walkErr error) error {

@@ -1,4 +1,4 @@
-// Package database owns infrastructure-level database connection construction.
+// Package database 统一构造基础设施层数据库连接，避免各业务模块自行拼接 DSN 或连接池参数。
 package database
 
 import (
@@ -15,9 +15,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// OpenMySQL creates the shared GORM database handle. Automatic pinging is disabled so the API
-// process can expose /healthz while MySQL is temporarily unavailable; /readyz verifies the
-// dependency with a bounded query.
+// OpenMySQL 创建共享 GORM 句柄。启动阶段有意关闭自动 Ping：MySQL 暂时不可用时 API 仍能
+// 提供 /healthz 表示进程存活，而 /readyz 再用有界查询表达依赖是否就绪。
 func OpenMySQL(cfg config.MySQLConfig) (*gorm.DB, error) {
 	params, err := parseParameters(cfg.Params)
 	if err != nil {
@@ -30,6 +29,7 @@ func OpenMySQL(cfg config.MySQLConfig) (*gorm.DB, error) {
 	}
 
 	database, err := gorm.Open(gormmysql.New(driverConfig), &gorm.Config{
+		// 默认事务会给每次单语句写入增加额外开销；真正需要原子性的业务仓储必须显式开启事务。
 		DisableAutomaticPing:   true,
 		SkipDefaultTransaction: true,
 		TranslateError:         true,
@@ -94,6 +94,7 @@ func parseParameters(raw string) (map[string]string, error) {
 		if len(value) == 0 {
 			continue
 		}
+		// 时间解析和时区属于平台级一致性约束，不能被 MYSQL_PARAMS 覆盖成驱动默认值或本地时区。
 		if strings.EqualFold(key, "parseTime") || strings.EqualFold(key, "loc") {
 			continue
 		}

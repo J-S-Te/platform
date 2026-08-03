@@ -1,4 +1,4 @@
-// Package application coordinates append-only audit ingestion, querying and export job creation.
+// Package application 编排只追加审计写入、租户隔离查询和异步导出任务。
 package application
 
 import (
@@ -52,9 +52,8 @@ type EventInput struct {
 	SourceIP, UserAgent, EventCategory, EventType                                                 string
 }
 
-// BatchDeliveryInput identifies one transport delivery of one or more audit events. Its
-// correlation triplet belongs to the receiver delivery chain; EventInput keeps each audited
-// operation's original correlation triplet.
+// BatchDeliveryInput 描述一次传输批次。这里的关联标识属于“子系统到平台接收端”的投递链路；
+// EventInput 中的同名字段仍保留被审计业务操作自己的链路，二者不能互相覆盖。
 type BatchDeliveryInput struct {
 	ApplicationCode, EnvironmentCode, ClientID string
 	RequestID, TraceID, CorrelationID          string
@@ -95,9 +94,9 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, input EventInput)
 	return s.repository.Ingest(ctx, tenantID, normalizeInput(input), s.clock.Now())
 }
 
-// IngestBatch validates every event before persistence and delegates the accepted/duplicate
-// decision to one repository transaction. Any validation or storage failure therefore produces no
-// batch delivery receipt and no partial event write; duplicates remain successful per-event results.
+// IngestBatch 在持久化前校验整批事件，并把“首次接收/幂等重复”的判定交给同一个仓储事务。
+// 任一事件无效或事务失败都不会留下部分事件或批次回执；重复事件则作为逐条成功结果返回，
+// 使采用事务发件箱重试的子系统无需把已接收事件误判为失败。
 func (s *Service) IngestBatch(ctx context.Context, tenantID string, delivery BatchDeliveryInput, inputs []EventInput) ([]domain.Receipt, error) {
 	if len(inputs) == 0 || len(inputs) > 100 {
 		return nil, validation("events must contain 1 to 100 items")
@@ -191,10 +190,9 @@ func validatePage(query PageRequest) error {
 	return nil
 }
 
-// completeCorrelation fills only missing event correlation fields from the trusted request
-// context. A reporting subsystem's own request_id and trace_id describe the audited operation and
-// are therefore retained when supplied. Source application, environment, client, address, and user
-// agent are bound by the HTTP adapter rather than by this helper.
+// completeCorrelation 只用可信请求上下文补齐缺失的关联字段。子系统主动上报的 request_id 与
+// trace_id 描述原业务操作，存在时必须保留；应用、环境、客户端及网络来源则由 HTTP 适配层
+// 根据已验证主体绑定，不能在这里从事件正文推断。
 func completeCorrelation(ctx context.Context, input EventInput) EventInput {
 	input.RequestID = strings.TrimSpace(input.RequestID)
 	input.TraceID = strings.TrimSpace(input.TraceID)
@@ -307,8 +305,8 @@ func oneOf(value string, allowed ...string) bool {
 	return false
 }
 
-// ClaimExportJob claims one due export job for the named worker. The returned work is owned by
-// that worker until it is completed or failed.
+// ClaimExportJob 为指定 worker 领取一个到期任务。领取后只有持有该 worker 标识的执行者
+// 可以完成或失败该任务；超时租约由仓储允许其他实例重新领取。
 func (s *Service) ClaimExportJob(ctx context.Context, workerID string, staleBefore time.Time) (domain.ExportWork, bool, error) {
 	if strings.TrimSpace(workerID) == "" {
 		return domain.ExportWork{}, false, validation("worker ID is required")
@@ -316,7 +314,8 @@ func (s *Service) ClaimExportJob(ctx context.Context, workerID string, staleBefo
 	return s.repository.ClaimExportJob(ctx, strings.TrimSpace(workerID), s.clock.Now(), staleBefore.UTC())
 }
 
-// ListExportEvents returns the complete, filtered event set used by the local export worker.
+// ListExportEvents 返回导出快照使用的完整过滤结果；这里有硬上限，防止一次导出把审计表
+// 和本地内存拖垮，超限任务由 worker 标记为不可自动重试的失败。
 func (s *Service) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery) ([]domain.Event, error) {
 	return s.repository.ListExportEvents(ctx, tenantID, query)
 }
@@ -329,8 +328,8 @@ func (s *Service) FailExportJob(ctx context.Context, work domain.ExportWork, cod
 	return s.repository.FailExportJob(ctx, work, strings.TrimSpace(code), strings.TrimSpace(message), retryAt.UTC(), s.clock.Now())
 }
 
-// GetExportFile loads the local file metadata for a completed job without exposing its physical
-// path to API consumers.
+// GetExportFile 只读取已完成任务关联的文件元数据。物理路径仍是仓储/下载适配器内部信息，
+// API 调用方不能通过提交路径选择服务器上的任意文件。
 func (s *Service) GetExportFile(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return domain.ExportFile{}, validation("job_id is required")

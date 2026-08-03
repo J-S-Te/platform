@@ -9,8 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ClientIP resolves the request address through Gin's explicitly configured trusted-proxy list
-// and stores the result in the standard request context for downstream net/http handlers.
+// ClientIP 只通过 Gin 已配置的可信代理链解析客户端地址，再写入标准 request context。
+// 下游不能自行信任 X-Forwarded-For，否则攻击者可影响限流键和审计来源地址。
 func ClientIP() gin.HandlerFunc {
 	return func(context *gin.Context) {
 		clientIP := normalizeClientIP(context.ClientIP())
@@ -19,8 +19,8 @@ func ClientIP() gin.HandlerFunc {
 	}
 }
 
-// RequestClientIP returns only the address established by ClientIP. The RemoteAddr fallback is
-// retained for unit tests or adapters invoked without the normal router middleware chain.
+// RequestClientIP 优先返回中间件建立的可信地址；RemoteAddr 回退仅服务于未经过完整路由链的
+// 单元测试或内部适配器，不解析任何转发请求头。
 func RequestClientIP(request *http.Request) string {
 	if request == nil {
 		return ""

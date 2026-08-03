@@ -1,4 +1,4 @@
-// Package worker runs MySQL-backed audit export jobs and stores generated CSV files locally.
+// Package worker 执行由 MySQL 协调的审计导出任务，并将结果文件写入受控本地目录。
 package worker
 
 import (
@@ -23,8 +23,8 @@ const (
 	exportMediaType = "text/csv; charset=utf-8"
 )
 
-// ExportWorker processes one audit export at a time. The lock itself lives in MySQL; this process
-// is therefore safe to run in more than one instance without Redis or a message queue.
+// ExportWorker 单次处理一个导出任务。任务所有权保存在 MySQL 而不是进程内，因此多个实例
+// 可以并行轮询，无需依赖 Redis 或消息队列来避免重复领取。
 type ExportWorker struct {
 	service          *application.Service
 	logger           *slog.Logger
@@ -44,8 +44,7 @@ func NewExportWorker(service *application.Service, logger *slog.Logger, storageR
 	return &ExportWorker{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot), workerID: workerID, pollInterval: pollInterval, staleLockTimeout: staleLockTimeout}, nil
 }
 
-// Run polls MySQL until context cancellation. Errors on one job are persisted and do not stop
-// later jobs from being processed.
+// Run 持续轮询直到上下文取消。单个任务的错误会写回任务状态，不会终止后续任务处理。
 func (w *ExportWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
@@ -59,8 +58,8 @@ func (w *ExportWorker) Run(ctx context.Context) {
 	}
 }
 
-// ProcessOne claims and processes at most one due export job. It returns true only when a job was
-// claimed, which makes it useful for deterministic worker tests and controlled command execution.
+// ProcessOne 至多领取一个到期任务；返回值仅表示是否成功领取，不表示导出成功。
+// 这种语义便于确定性测试，也避免调度器把“已领取但已记录失败”再次当成立即重试信号。
 func (w *ExportWorker) ProcessOne(ctx context.Context) bool {
 	work, claimed, err := w.service.ClaimExportJob(ctx, w.workerID, time.Now().UTC().Add(-w.staleLockTimeout))
 	if err != nil {
@@ -98,6 +97,7 @@ func (w *ExportWorker) process(ctx context.Context, work domain.ExportWork) erro
 		return err
 	}
 	if err := w.service.CompleteExportJob(ctx, work, file); err != nil {
+		// 文件先于数据库完成记录落盘；若元数据提交失败，删除孤儿文件，让过期租约可安全重试。
 		_ = os.Remove(absolutePath)
 		return fmt.Errorf("record audit export file: %w", err)
 	}
@@ -137,6 +137,7 @@ func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (
 	}()
 
 	hash := sha256.New()
+	// CSV 字节在写盘的同时进入哈希，避免二次读取大文件；摘要覆盖最终文件的精确内容。
 	writer := csv.NewWriter(io.MultiWriter(output, hash))
 	if err := writer.Write([]string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent"}); err != nil {
 		return domain.ExportFile{}, "", fmt.Errorf("write audit export header: %w", err)
@@ -159,6 +160,7 @@ func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (
 	if err := os.Rename(temporaryPath, absolutePath); err != nil {
 		return domain.ExportFile{}, "", fmt.Errorf("publish audit export file: %w", err)
 	}
+	// 同目录 rename 是发布边界：下载端只会看到完整文件，不会读到仍在生成的 CSV。
 	info, err := os.Stat(absolutePath)
 	if err != nil {
 		return domain.ExportFile{}, "", fmt.Errorf("stat audit export file: %w", err)

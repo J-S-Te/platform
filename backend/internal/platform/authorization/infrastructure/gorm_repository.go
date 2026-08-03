@@ -157,6 +157,8 @@ func (r *GORMRepository) CreateRole(ctx context.Context, tenantID, operatorID, o
 		if err := r.verifyPermissions(tx, tenantID, app.ID, permissionIDs); err != nil {
 			return err
 		}
+		// “拥有角色管理权限”不等于“可以授予平台全部权限”。在创建角色和权限关系前，
+		// 以操作者当前有效绑定重新计算可委派集合，整个检查与写入共享同一事务快照。
 		if err := r.verifyDelegablePermissions(tx, tenantID, operatorID, operatorAccountID, app.ID, permissionIDs); err != nil {
 			return err
 		}
@@ -203,6 +205,8 @@ func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID, o
 		if model.Version != role.Version {
 			return application.ErrVersionConflict
 		}
+		// 更新既有角色同样可能扩权，因此不能复用旧角色权限或只验证权限存在；必须按
+		// 本次提交的完整权限集合重新执行可委派校验。
 		if err := r.verifyPermissions(tx, tenantID, model.ApplicationID, permissionIDs); err != nil {
 			return err
 		}
@@ -320,6 +324,8 @@ func (r *GORMRepository) CreateRoleBinding(ctx context.Context, tenantID, operat
 		if err := ensureApplicationRoleBindingManaged(role); err != nil {
 			return err
 		}
+		// 应用目录角色只能通过应用授权入口管理；通用绑定入口仅处理平台角色，并在
+		// 这里同时防护受保护角色和“角色内权限不可委派”两条提权路径。
 		if err := r.ensureProtectedRoleBindingOperator(ctx, tx, tenantID, operatorID, role); err != nil {
 			return err
 		}
@@ -373,6 +379,8 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 			return err
 		}
 		if existing.RoleID != role.ID {
+			// 替换角色时，旧角色也要经过受保护角色检查。否则普通管理员可通过“把高权
+			// 绑定改成低权绑定”的更新动作间接停用紧急/超级管理员访问。
 			var existingRole roleModel
 			if err := tx.Where("id = ? AND tenant_id = ? AND application_id = ?", existing.RoleID, tenantID, existing.ApplicationID).First(&existingRole).Error; err != nil {
 				return translateNotFound(err, "role")
@@ -521,6 +529,8 @@ func (r *GORMRepository) Check(ctx context.Context, input application.CheckInput
 	}
 	decision := domain.Decision{Allowed: false, PermissionCode: input.PermissionCode, PolicyVersion: revision.Revision, ReasonCode: "DENY_NO_MATCH"}
 	now := time.Now().UTC()
+	// scopeFilter 只消费上层从可信资源归属解析出的上下文；HTTP 请求体中的组织 ID
+	// 不能直接构造 CheckInput，否则会把数据定位参数误当作授权事实。
 	scopeSQL, scopeArgs := scopeFilter(input)
 	subjectSQL, subjectArgs := roleBindingSubjectFilter(input.UserID, input.AccountID, now)
 	query := r.database.WithContext(ctx).
@@ -698,6 +708,8 @@ func (r *GORMRepository) bumpRevision(tx *gorm.DB, tenantID, applicationID strin
 // apply only while the requesting user has an active, currently effective membership in the
 // corresponding active organization unit or position.
 func roleBindingSubjectFilter(userID, accountID string, now time.Time) (string, []any) {
+	// 组织/岗位角色不会被提前摊平成会话权限：每次决策都要求存在当前有效任职，且
+	// 任职明确允许继承授权。停用组织、岗位或任职后，下一次请求立即失去该来源。
 	return `(
 		(binding.subject_type = ? AND binding.subject_id = ?)
 		OR (binding.subject_type = ? AND binding.subject_id = ?)
@@ -737,6 +749,8 @@ func roleBindingSubjectFilter(userID, accountID string, now time.Time) (string, 
 }
 
 func scopeFilter(input application.CheckInput) (string, []any) {
+	// 租户级绑定始终参与候选；资源和组织级绑定只有在本次服务端资源上下文精确匹配
+	// 时才参与，避免“有权限码但作用域不符”仍被放行。
 	clauses := []string{"(binding.scope_type = ? AND binding.scope_id = ?)"}
 	arguments := []any{"TENANT", ""}
 	if input.ResourceID != "" {

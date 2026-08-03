@@ -182,7 +182,12 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
-	if err := handler.provisioner.Preflight(request.Context(), onboardingInput.ApplicationCode); err != nil {
+	if err := handler.provisioner.Preflight(request.Context(), application.SubsystemPreflightInput{
+		TenantID: principal.Tenant.ID, ApplicationCode: onboardingInput.ApplicationCode,
+		Environment: onboardingInput.Environment, Issuer: handler.oidcIssuer,
+		PublicBaseURL: onboardingInput.PublicBaseURL, UpstreamURL: onboardingInput.UpstreamURL,
+		PathPrefix: onboardingInput.PathPrefix, ClientType: onboardingInput.ClientType,
+	}); err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -500,7 +505,7 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		handler.logger.Error("subsystem automatic provisioning failed", "path", request.URL.Path, "error", err)
 		message := httperror.DependencyUnavailable.Message
 		if strings.Contains(strings.ToLower(err.Error()), "disabled") {
-			message = "该环境未启用自动部署 Agent（生产/远程部署默认关闭），不支持一键接入"
+			message = "当前部署未启用受控部署 Agent，无法在平台内完成一键接入"
 		}
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
 			httperror.DependencyUnavailable.Code,
@@ -517,7 +522,15 @@ func subsystemProvisioningNextAction(err error) string {
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "disabled"):
-		return "生产/远程环境请使用“应用登记、环境设置、OAuth 客户端、登录目标”控制面功能完成接入，并把生成的凭据写入服务器 .env 后发布子系统镜像；本地开发请先执行 docker-local.sh up"
+		return "请升级并重新发布当前环境的生产部署资产，确认 platform-api 与 subsystem-provisioner 均健康后在本页面重试；不要手工复制 OAuth Secret 或重复创建环境"
+	case strings.Contains(message, "tenant is not allowed"):
+		return "当前租户不是该服务器合同实例绑定的生产租户；请核对服务器部署配置中的允许租户 ID，禁止用其他租户覆盖现有合同实例"
+	case strings.Contains(message, "preflight values are inconsistent"):
+		return "生产一键接入目前只支持合同管理系统 prod、confidential 客户端和页面自动填充的固定地址；请恢复预设后重试"
+	case strings.Contains(message, "infrastructure secrets are incomplete"):
+		return "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成生产平台初始化，接入页面不会自动改动数据库和 IAM 密钥"
+	case strings.Contains(message, "immutable digest"):
+		return "服务器尚未发布合同管理的不可变镜像 digest；请先完成合同镜像发布，再回到本页面接入"
 	case strings.Contains(message, "compose file"):
 		return "部署 Agent 未找到子系统 Compose；内置客户与商机系统请更新平台代码并重启 api 与 subsystem-provisioner，独立子系统请在同名项目目录提供 compose.yaml"
 	case strings.Contains(message, "environment template"):

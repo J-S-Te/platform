@@ -1,6 +1,6 @@
-// Command deployment-onboard-codex performs the atomic subsystem onboarding workflow for a
-// controlled local Docker deployment. It writes the one-time OAuth client secret only to the
-// caller-selected file and never prints it to standard output.
+// Command deployment-onboard-codex 先在数据库事务内完成受控本地 Docker 接入，再把一次性 OAuth
+// Secret 写入调用方指定文件；文件写入失败不会回滚已完成的数据库接入。Secret 不输出到标准输出或日志，
+// 调用方还需保证目标文件不存在或预先收紧权限，因为覆盖已有文件时 0600 参数不会改变原文件权限。
 package main
 
 import (
@@ -90,6 +90,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("encode onboarding output: %w", err)
 	}
+	// 文件包含不可再次查询的明文 Secret；权限在创建时一次性设定，调用方负责选择受保护路径。
 	if err := os.WriteFile(outputPath, append(payload, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write onboarding output: %w", err)
 	}

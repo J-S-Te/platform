@@ -160,6 +160,8 @@ func (s *Service) CreateRole(ctx context.Context, in RoleCreateInput) (domain.Ro
 	if err != nil {
 		return domain.Role{}, fmt.Errorf("generate role ID: %w", err)
 	}
+	// 自定义角色编码由不可变的 ULID 派生，名称调整不会改变外部引用；真正的“能否授予”
+	// 仍由仓储在同一事务内按操作者可委派权限集合校验，不能只相信管理接口权限。
 	return s.repository.CreateRole(ctx, in.TenantID, in.OperatorID, in.OperatorAccountID, domain.Role{ID: id, Code: generatedRoleCode(id), Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: domain.StatusActive}, in.PermissionIDs)
 }
 func (s *Service) GetRole(ctx context.Context, tenantID, roleID string) (domain.Role, error) {
@@ -197,6 +199,8 @@ func (s *Service) UpdateRole(ctx context.Context, in RoleUpdateInput) (domain.Ro
 			return domain.Role{}, err
 		}
 	}
+	// 版本号保护管理员并发编辑；权限子集和内置角色不可编辑等安全边界由仓储结合
+	// 当前数据库状态复核，避免校验与写入之间出现时序窗口。
 	return s.repository.UpdateRole(ctx, in.TenantID, in.OperatorID, in.OperatorAccountID, domain.Role{ID: in.RoleID, Name: strings.TrimSpace(in.Name), Description: trimPointer(in.Description), Status: in.Status, Version: in.Version}, in.PermissionIDs)
 }
 
@@ -222,6 +226,8 @@ func (s *Service) CreateRoleBinding(ctx context.Context, in RoleBindingCreateInp
 	if err != nil {
 		return domain.RoleBinding{}, fmt.Errorf("generate role binding ID: %w", err)
 	}
+	// 此处只规范绑定形状；受保护角色、操作者可委派范围、主体归属和作用域目标
+	// 必须在事务内基于可信数据库记录再次校验。
 	return s.repository.CreateRoleBinding(ctx, in.TenantID, in.OperatorID, bindingFromInput(id, in, 0))
 }
 
@@ -286,6 +292,8 @@ func (s *Service) Check(ctx context.Context, input CheckInput) (domain.Decision,
 	if err := require(input.TenantID, input.UserID, input.PermissionCode); err != nil {
 		return domain.Decision{}, err
 	}
+	// 授权判断不能由会话中的扁平权限码单独完成；仓储还会把用户、账号、任职关系
+	// 以及服务端解析出的组织/资源上下文共同带入策略查询。
 	return s.repository.Check(ctx, input)
 }
 
@@ -360,6 +368,8 @@ func validateBinding(tenant, operator, role, subjectType, subjectID, scopeType s
 	if scopeType != "TENANT" && normalizedScopeID == "" {
 		return validation("organization and resource scopes require scope_id")
 	}
+	// TENANT 用空 scope_id 表示全租户；组织和资源作用域必须显式指向目标。
+	// 这一规范化约定也是数据库唯一约束和后续策略匹配的组成部分。
 	if expiresAt != nil && !expiresAt.After(now.UTC()) {
 		return validation("expires_at must be in the future")
 	}
