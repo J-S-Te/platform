@@ -322,8 +322,7 @@ func (cfg Config) Validate() error {
 				return fmt.Errorf("local subsystem onboarding automation configuration is incomplete")
 			}
 		case "production":
-			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" ||
-				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" {
+			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" {
 				return fmt.Errorf("production subsystem onboarding automation configuration is incomplete")
 			}
 		default:

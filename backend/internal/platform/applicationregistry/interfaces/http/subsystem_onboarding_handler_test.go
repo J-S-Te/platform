@@ -231,7 +231,7 @@ func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, 
 	return provisioner.updateErr
 }
 
-func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, applicationCode, _ string) error {
+func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, _ string, applicationCode, _ string) error {
 	provisioner.teardownCode = applicationCode
 	return provisioner.teardownErr
 }

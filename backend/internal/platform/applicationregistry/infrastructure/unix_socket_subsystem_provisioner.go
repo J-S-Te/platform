@@ -22,6 +22,7 @@ type subsystemProvisioningRequest struct {
 	Version     int                                     `json:"version"`
 	Action      string                                  `json:"action"`
 	Code        string                                  `json:"code,omitempty"`
+	TenantID    string                                  `json:"tenant_id,omitempty"`
 	Environment string                                  `json:"environment,omitempty"`
 	Preflight   *application.SubsystemPreflightInput    `json:"preflight,omitempty"`
 	Input       *application.SubsystemProvisioningInput `json:"input,omitempty"`
@@ -64,9 +65,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context
 		return provisioningError("automatic subsystem deployment is disabled")
 	}
 	return provisioner.exchange(ctx, subsystemProvisioningRequest{
-		Version: subsystemProvisioningProtocolVersion,
-		Action:  "preflight",
-		Code:    strings.TrimSpace(input.ApplicationCode),
+		Version:   subsystemProvisioningProtocolVersion,
+		Action:    "preflight",
+		Code:      strings.TrimSpace(input.ApplicationCode),
 		Preflight: &input,
 	})
 }
@@ -110,13 +111,14 @@ func (provisioner *UnixSocketSubsystemProvisioner) ApplyAccess(ctx context.Conte
 	})
 }
 
-func (provisioner *UnixSocketSubsystemProvisioner) Teardown(ctx context.Context, applicationCode, environment string) error {
+func (provisioner *UnixSocketSubsystemProvisioner) Teardown(ctx context.Context, tenantID, applicationCode, environment string) error {
 	if !provisioner.enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
 	}
 	return provisioner.exchange(ctx, subsystemProvisioningRequest{
 		Version:     subsystemProvisioningProtocolVersion,
 		Action:      "teardown",
+		TenantID:    strings.TrimSpace(tenantID),
 		Code:        strings.TrimSpace(applicationCode),
 		Environment: strings.TrimSpace(environment),
 	})
@@ -229,7 +231,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			err = executor.Update(ctx, *request.Input)
 		}
 	case "teardown":
-		err = executor.Teardown(ctx, request.Code, request.Environment)
+		err = executor.Teardown(ctx, request.TenantID, request.Code, request.Environment)
 	case "apply-access":
 		if request.Access == nil {
 			err = application.ErrSubsystemProvisioningUnavailable

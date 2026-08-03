@@ -66,7 +66,7 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 		t.Fatalf("update input = %#v", got)
 	}
 
-	if err := client.Teardown(context.Background(), "contract_management", "dev"); err != nil {
+	if err := client.Teardown(context.Background(), "tenant-1", "contract_management", "dev"); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 	if gotCode, gotEnv := executor.teardownSnapshot(); gotCode != "contract_management" || gotEnv != "dev" {
@@ -161,7 +161,7 @@ func (provisioner *recordingSubsystemProvisioner) Update(_ context.Context, inpu
 	return nil
 }
 
-func (provisioner *recordingSubsystemProvisioner) Teardown(_ context.Context, code, environment string) error {
+func (provisioner *recordingSubsystemProvisioner) Teardown(_ context.Context, _ string, code, environment string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	provisioner.teardownCode = code

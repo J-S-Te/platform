@@ -311,7 +311,7 @@ func TestLocalDockerSubsystemProvisionerTeardownStopsContainersRemovesEnvAndGate
 		t.Fatalf("construct provisioner: %v", err)
 	}
 
-	if err := provisioner.Teardown(context.Background(), "customer_management", "prod"); err != nil {
+	if err := provisioner.Teardown(context.Background(), "tenant-1", "customer_management", "prod"); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -745,7 +745,7 @@ func TestLocalDockerSubsystemProvisionerTeardownWithoutProjectDirStillRemovesGat
 		t.Fatalf("construct provisioner: %v", err)
 	}
 
-	if err := provisioner.Teardown(context.Background(), "missing_subsystem", "prod"); err != nil {
+	if err := provisioner.Teardown(context.Background(), "tenant-1", "missing_subsystem", "prod"); err != nil {
 		t.Fatalf("teardown without project: %v", err)
 	}
 

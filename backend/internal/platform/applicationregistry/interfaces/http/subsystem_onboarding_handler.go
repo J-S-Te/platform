@@ -310,6 +310,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	// subsystem's .env.local, so both the API process and the deployment helper can pick them
 	// up without exposing the host filesystem into the API container.
 	updateInput := application.SubsystemProvisioningInput{
+		TenantID:        principal.Tenant.ID,
 		ApplicationCode: applicationCode,
 		Environment:     environment,
 		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
@@ -380,7 +381,7 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 		handler.writeError(writer, request, err)
 		return
 	}
-	if err := handler.provisioner.Teardown(request.Context(), applicationCode, environment); err != nil {
+	if err := handler.provisioner.Teardown(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, "TEARDOWN", "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
 		handler.writeError(writer, request, err)
 		return

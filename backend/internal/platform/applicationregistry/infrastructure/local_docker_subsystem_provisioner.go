@@ -203,7 +203,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) Update(ctx context.Context, 
 // Teardown stops the subsystem Compose stack, removes its generated .env.local, drops the
 // portal gateway include, and reloads nginx. The HTTP layer is responsible for the subsequent
 // DELETE on /environments and /applications.
-func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context, applicationCode, _ /* environment */ string) error {
+func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context, _ /* tenant */ string, applicationCode, _ /* environment */ string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 

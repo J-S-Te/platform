@@ -113,5 +113,5 @@ type SubsystemProvisioner interface {
 	Preflight(context.Context, SubsystemPreflightInput) error
 	Provision(context.Context, SubsystemProvisioningInput) error
 	Update(context.Context, SubsystemProvisioningInput) error
-	Teardown(context.Context, string, string) error
+	Teardown(context.Context, string, string, string) error
 }

@@ -14,10 +14,12 @@ sudo install -d -o deploy -g deploy -m 750 /opt/basic-platform
 cd /opt/basic-platform
 cp .env.example .env
 cp .release.env.example .release.env
-chmod 600 .env .release.env
+install -d -m 700 runtime
+cp contract.env.example runtime/contract.env
+chmod 600 .env .release.env runtime/contract.env
 ```
 
-替换所有 `REPLACE_WITH_...`。不要提交 `.env`、`.release.env`、私钥或备份。
+替换 `.env` 与 `.release.env` 中所有基础设施占位值；`runtime/contract.env` 内的 OIDC、授权目录和审计占位值由基础平台接入页面和生产 Agent 自动替换。不要提交运行环境文件、私钥或备份。
 
 ## 2. 镜像仓库
 
@@ -49,14 +51,13 @@ chmod 600 .env .release.env
 
 1. 发布 platform，使生产部署资产、平台镜像和迁移到位；
 2. 初始化首个管理员；
-3. 发布 frontend；
-4. 发布 frontend，并确认 `platform-api` 与隔离的 `subsystem-provisioner` 健康；
-5. 登录基础平台，在“应用接入”中选择合同管理系统和 `prod` 环境完成接入；
-6. 平台自动创建 `contract_management/prod`、浏览器 Client、catalog-publisher Client、精确回调和初始管理员授权，同时将一次性凭据安全写入服务器 `.env`，执行合同迁移并重建 `contract-api`。
+3. 发布 frontend，并确认 `platform-api` 与隔离的 `subsystem-provisioner` 健康；
+4. 登录基础平台，在“应用接入”中选择合同管理系统和 `prod` 环境完成接入；
+5. 平台自动创建 `contract_management/prod`、浏览器 Client、catalog-publisher Client、审计 Client、精确回调和初始管理员授权，同时将一次性凭据安全写入服务器 `runtime/contract.env`，执行合同备份、迁移并重建 `contract-api`。
 
-生产接入不再要求管理员在命令行复制 OAuth Client Secret。Secret 只在平台后端内存、受限 Unix Socket 和权限为 `0600` 的服务器 `.env` 之间流转，不返回浏览器，也不进入命令行参数或日志。生产 Agent 只允许 `contract_management/prod` 和固定 Compose 服务，不接受浏览器指定的文件、命令、镜像或服务名。
+生产接入不再要求管理员在命令行复制 OAuth Client Secret。Secret 只在平台后端内存、受限 Unix Socket 和权限为 `0600` 的服务器 `runtime/contract.env` 之间流转，不返回浏览器，也不进入命令行参数或日志。生产 Agent 只允许 `contract_management/prod` 和固定 Compose 服务，不接受浏览器指定的文件、命令、镜像或服务名。
 
-首次接入前，`.env` 中的以下字段可以保留占位值，由平台接入流程替换：
+首次接入前，`runtime/contract.env` 中的以下字段可以保留占位值，由平台接入流程替换：
 
 ```text
 OIDC_CLIENT_ID
@@ -65,6 +66,8 @@ OIDC_TENANT_ID
 PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID
 PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID
 PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET
+PLATFORM_AUDIT_CLIENT_ID
+PLATFORM_AUDIT_CLIENT_SECRET
 ```
 
 `SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT` 必须填写当前生产部署目录的规范绝对路径，默认 `/opt/basic-platform`。平台镜像更新后需同时重建 `platform-api` 和 `subsystem-provisioner`，二者通过共享 Unix Socket 通信；只有 Agent 挂载 Docker Socket。
@@ -101,7 +104,7 @@ CI 远端调用：
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。
 
-发布不会删除或重建 Application、Environment、LoginTarget、OAuth Client，也不会覆盖服务器 `.env` 和 `.release.env`。
+CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth Client，也不会覆盖服务器 `.env`、`.release.env` 或 `runtime/contract.env`；仅基础平台首次接入会原子更新 `runtime/contract.env` 的固定白名单字段。
 
 ## 6. 恢复和备份
 
