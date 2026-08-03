@@ -138,6 +138,27 @@ compose:
 
 日常管理员不需要登录服务器、执行子系统接入脚本或在命令行复制 OAuth 配置；服务器命令仅保留给 CI/CD、首个管理员初始化和基础设施故障恢复。部署失败时先读取环境卡片的脱敏错误与“下一步操作”，修复后点击“重试”，不要重复新增接入。
 
+### 4.2 客户与商机接入返回 503 时
+
+`PLATFORM_DEPENDENCY_UNAVAILABLE` 只是平台对外的安全错误码，不代表一定是 CRM API 本身故障。先在服务器检查 Agent、目标依赖和目标 API：
+
+```bash
+cd /opt/basic-platform
+docker compose --env-file .env --env-file .release.env \
+  -f compose.yaml ps subsystem-provisioner customer-mysql customer-api customer-migrate
+docker compose --env-file .env --env-file .release.env \
+  -f compose.yaml logs --tail 200 subsystem-provisioner customer-mysql customer-api customer-migrate
+```
+
+重点核对：
+
+1. `platform-api` 与 `subsystem-provisioner` 必须使用同一个最新 `PLATFORM_IMAGE`，并且生产清单目录包含 `subsystems.d/customer_and_opportunity-prod.yaml`；只更新平台 API、不重建 Agent 会导致目标被旧 Agent 拒绝。
+2. `.release.env` 必须包含 `CUSTOMER_CRM_IMAGE=image@sha256:<64位摘要>`；不能使用普通 tag 或占位值。
+3. `runtime/customer.env` 必须存在、权限为 `0600`，并预先填写 `SENSITIVE_ENCRYPTION_KEY_BASE64`、`SENSITIVE_HMAC_KEY_BASE64`、`PORTAL_INVITE_PEPPER_BASE64` 等长期业务密钥。平台接入流程只写 OIDC 和平台机器凭据，不生成或覆盖这些业务密钥。
+4. 若日志显示数据库、迁移或 API 健康检查失败，先处理对应容器；若显示 `deployment helper is unavailable`，先恢复 Agent；若显示 `target is not allowed`，同步完整生产部署资产并同时重建 `platform-api`、`subsystem-provisioner`。
+
+请求响应中的追踪号会同步写入 Agent 日志的 `request_id` 字段。预检失败时控制面尚未创建应用环境，应修复后重新提交接入；只有已经生成环境并进入 `PROVISION_FAILED` 时才点击页面上的“重试”，不要重复 onboard。
+
 管理员初始化：
 
 ```bash

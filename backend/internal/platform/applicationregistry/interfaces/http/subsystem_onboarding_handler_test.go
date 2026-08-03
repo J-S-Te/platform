@@ -188,6 +188,9 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "compose.yaml") || strings.Contains(response.Body.String(), "/Users/") {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), "尚未创建应用环境") || strings.Contains(response.Body.String(), "点击“重试”") {
+		t.Fatalf("preflight guidance must ask for resubmission instead of retrying a non-existent environment: %s", response.Body.String())
+	}
 }
 
 type stubSubsystemOnboardingService struct {

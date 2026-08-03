@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/requestctx"
 )
 
 func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testing.T) {
@@ -35,8 +36,13 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 		t.Fatalf("construct socket client: %v", err)
 	}
 	preflight := application.SubsystemPreflightInput{TenantID: "tenant-1", ApplicationCode: "contract_management", Environment: "dev"}
-	if err := client.Preflight(context.Background(), preflight); err != nil {
+	const requestID = "01KZ42MPYY9168FKFPBXVTX677"
+	preflightContext := requestctx.WithRequestID(context.Background(), requestID)
+	if err := client.Preflight(preflightContext, preflight); err != nil {
 		t.Fatalf("preflight: %v", err)
+	}
+	if got := executor.requestIDSnapshot(); got != requestID {
+		t.Fatalf("executor request id = %q, want %q", got, requestID)
 	}
 	input := application.SubsystemProvisioningInput{
 		TenantID: "tenant-1", ApplicationCode: "contract_management", Environment: "dev",
@@ -92,6 +98,18 @@ func TestUnixSocketSubsystemProvisionerDisabled(t *testing.T) {
 	}
 	if err := client.Preflight(context.Background(), application.SubsystemPreflightInput{ApplicationCode: "contract_management"}); !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
 		t.Fatalf("disabled preflight error = %v", err)
+	}
+}
+
+func TestNormalizedProvisioningRequestIDRejectsLogInjection(t *testing.T) {
+	t.Parallel()
+	if got := normalizedProvisioningRequestID(" 01kz42mpyy9168fkfpbxvtx677 "); got != "01KZ42MPYY9168FKFPBXVTX677" {
+		t.Fatalf("normalized request id = %q", got)
+	}
+	for _, value := range []string{"", "01KZ42MPYY9168FKFPBXVTX67", "01KZ42MPYY9168FKFPBXVTX67I", "01KZ42MPYY9168FKFPBXVTX6\n"} {
+		if got := normalizedProvisioningRequestID(value); got != "" {
+			t.Fatalf("unsafe request id %q normalized to %q", value, got)
+		}
 	}
 }
 
@@ -171,6 +189,7 @@ func waitForProvisioningSocket(t *testing.T, socketPath string) {
 type recordingSubsystemProvisioner struct {
 	mutex        sync.Mutex
 	code         string
+	requestID    string
 	input        application.SubsystemProvisioningInput
 	teardownCode string
 	teardownEnv  string
@@ -178,10 +197,11 @@ type recordingSubsystemProvisioner struct {
 	preflightErr error
 }
 
-func (provisioner *recordingSubsystemProvisioner) Preflight(_ context.Context, input application.SubsystemPreflightInput) error {
+func (provisioner *recordingSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	provisioner.code = input.ApplicationCode
+	provisioner.requestID = requestctx.RequestID(ctx)
 	return provisioner.preflightErr
 }
 
@@ -211,6 +231,12 @@ func (provisioner *recordingSubsystemProvisioner) snapshot() (string, applicatio
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	return provisioner.code, provisioner.input
+}
+
+func (provisioner *recordingSubsystemProvisioner) requestIDSnapshot() string {
+	provisioner.mutex.Lock()
+	defer provisioner.mutex.Unlock()
+	return provisioner.requestID
 }
 
 func (provisioner *recordingSubsystemProvisioner) updateInputSnapshot() application.SubsystemProvisioningInput {
