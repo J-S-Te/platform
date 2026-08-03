@@ -1,6 +1,6 @@
 # 生产环境 CI/CD 部署
 
-> 更新日期：2026-08-03。生产目录承载 platform、frontend 和 contract 三个不可变镜像。
+> 更新日期：2026-08-03。生产目录承载 platform、frontend、contract、CRM 和客户 Portal 不可变镜像。
 
 ## 1. 服务器要求
 
@@ -16,10 +16,12 @@ cp .env.example .env
 cp .release.env.example .release.env
 install -d -m 700 runtime
 cp contract.env.example runtime/contract.env
-chmod 600 .env .release.env runtime/contract.env
+cp customer.env.example runtime/customer.env
+cp portal.env.example runtime/portal.env
+chmod 600 .env .release.env runtime/contract.env runtime/customer.env runtime/portal.env
 ```
 
-替换 `.env` 中所有基础设施占位值；`.release.env` 的镜像 digest 由 CI/CD 发布自动更新。`runtime/contract.env` 内的 OIDC、授权目录和审计占位值由基础平台接入页面和生产 Agent 自动替换。不要提交运行环境文件、私钥或备份。
+替换 `.env` 中所有基础设施占位值；`.release.env` 的镜像 digest 由 CI/CD 发布自动更新。`runtime/contract.env` 内的 OIDC、授权目录和审计占位值由基础平台接入页面和生产 Agent 自动替换。CRM 与 Portal 使用独立的 `runtime/customer.env`、`runtime/portal.env`；首次镜像发布在凭据未补齐时只安全暂存 digest，不启动数据库迁移或 API。不要提交运行环境文件、私钥或备份。
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 
@@ -46,6 +48,7 @@ chmod 600 .env .release.env runtime/contract.env
 
 - `DEPLOY_PATH`（可选，默认 `/opt/basic-platform`）
 - platform/frontend 仓库需要对应 ACR variables
+- customer_and_opportunity 仓库可设置 `CUSTOMER_DEPLOY_SCRIPT`（默认 `/opt/basic-platform/bin/deploy-customer-opportunity.sh`）
 
 `DEPLOY_KNOWN_HOSTS` 必须在可信网络核对服务器指纹后生成。变量缺失时 deploy 任务会失败，不会跳过发布。
 
@@ -107,11 +110,32 @@ CI 远端调用：
 ./bin/deploy-service.sh platform <image@sha256:digest>
 ./bin/deploy-service.sh frontend <image@sha256:digest>
 ./bin/deploy-service.sh contract <image@sha256:digest>
+./bin/deploy-customer-opportunity.sh <crm-image@sha256:digest> <portal-image@sha256:digest>
 ```
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。首次发布 contract 且接入凭据仍为占位值时只保存不可变镜像指针，实际迁移和启动由基础平台页面接入触发。
 
 CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth Client，也不会覆盖服务器 `.env`、`.release.env` 或 `runtime/contract.env`；仅基础平台首次接入会原子更新 `runtime/contract.env` 的固定白名单字段。
+
+客户与商机发布使用独立 `customer` Compose profile，不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成一致性备份、执行两个 schema 的语句级迁移，再切换 CRM 和 Portal API 并检查健康状态。
+
+语句级迁移表为 `app_schema_migration_statements`。每条 SQL 在执行前记录 `RUNNING`，成功后才改为 `APPLIED`；重启发现遗留 `RUNNING` 会拒绝继续。必须人工核验对应表、列、索引、约束和必要回填后，按变更评审结果处理该检查点，禁止把 duplicate table/column/index 笼统视为成功。迁移器只自动接管空 schema；已有业务表但没有生产元数据表时拒绝发布，必须先建立经评审的生产基线。
+
+### 安装或升级客户商机生产资产
+
+将本目录的 `compose.yaml`、`customer.env.example`、`portal.env.example`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
+
+```bash
+cd /opt/basic-platform
+install -d -m 700 runtime backups backups/releases
+test -f runtime/customer.env || install -m 600 customer.env.example runtime/customer.env
+test -f runtime/portal.env || install -m 600 portal.env.example runtime/portal.env
+chmod 600 .env .release.env runtime/customer.env runtime/portal.env
+chmod 750 bin/deploy-customer-opportunity.sh
+docker compose --env-file .env --env-file .release.env config --quiet
+```
+
+已有运行配置禁止用模板覆盖，只补新增字段。更新 Nginx 后先执行 `nginx -t`，再 reload。GitHub `test` Environment 的 `CUSTOMER_DEPLOY_SCRIPT` 必须与实际安装绝对路径一致。
 
 ## 6. 恢复和备份
 
@@ -122,6 +146,7 @@ CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth C
 - 平台上传文件；
 - JWT 密钥；
 - `.env`、`.release.env` 和 `runtime/contract.env` 的安全副本；
+- `runtime/customer.env` 与 `runtime/portal.env` 的安全副本；
 - 生产 Nginx 配置。
 
 恢复演练要验证数据库、文件、Issuer、Client 凭据和上一镜像能共同恢复；只回退镜像不能逆转不兼容迁移。

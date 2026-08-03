@@ -32,7 +32,16 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          for asset in \
+            deploy/production/bin/deploy-service.sh \
+            deploy/production/bin/deploy-customer-opportunity.sh \
+            deploy/production/customer.env.example \
+            deploy/production/portal.env.example; do
+            test -f "$asset" || { echo "missing production deployment asset: $asset" >&2; exit 1; }
+          done
           bash -n deploy/production/bin/*.sh
+          test -x deploy/production/bin/deploy-service.sh
+          test -x deploy/production/bin/deploy-customer-opportunity.sh
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' deploy/production; then
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1
@@ -116,7 +125,7 @@ jobs:
           tar -C deploy/production -czf /tmp/production-deploy.tgz .
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             'cat > /tmp/production-deploy.tgz' < /tmp/production-deploy.tgz
-          printf -v install_command 'install -d -m 750 %q && install -d -m 700 %q/runtime && exec 9>%q/runtime/.deploy.lock && flock -w 900 9 && tar -xzf /tmp/production-deploy.tgz -C %q && chmod 750 %q/bin/deploy-service.sh && if test ! -f %q/runtime/contract.env; then install -m 600 %q/contract.env.example %q/runtime/contract.env; fi && if test -f %q/.env; then configured_path=$(awk -F= '\''$1 == "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {print substr($0, index($0,"=")+1); exit}'\'' %q/.env); test -z "$configured_path" || test "$configured_path" = %q || { echo "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致" >&2; exit 1; }; fi && rm -f /tmp/production-deploy.tgz' "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH" "$DEPLOY_PATH"
+          printf -v install_command 'deploy_path=%q; install -d -m 750 "$deploy_path" && install -d -m 700 "$deploy_path/runtime" && exec 9>"$deploy_path/runtime/.deploy.lock" && flock -w 900 9 && tar -xzf /tmp/production-deploy.tgz -C "$deploy_path" && chmod 750 "$deploy_path/bin/deploy-service.sh" "$deploy_path/bin/deploy-customer-opportunity.sh" && if test ! -f "$deploy_path/runtime/contract.env"; then install -m 600 "$deploy_path/contract.env.example" "$deploy_path/runtime/contract.env"; fi && if test ! -f "$deploy_path/runtime/customer.env"; then install -m 600 "$deploy_path/customer.env.example" "$deploy_path/runtime/customer.env"; fi && if test ! -f "$deploy_path/runtime/portal.env"; then install -m 600 "$deploy_path/portal.env.example" "$deploy_path/runtime/portal.env"; fi && if test -f "$deploy_path/.env"; then configured_path=$(awk -F= '\''$1 == "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {print substr($0, index($0,"=")+1); exit}'\'' "$deploy_path/.env"); test -z "$configured_path" || test "$configured_path" = "$deploy_path" || { echo "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致" >&2; exit 1; }; fi && rm -f /tmp/production-deploy.tgz' "$DEPLOY_PATH"
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$install_command"
       - name: Migrate and deploy immutable platform image
         shell: bash
