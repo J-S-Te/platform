@@ -62,6 +62,10 @@ type subsystemInitialAccessManager interface {
 	AssignInitialAdministrator(context.Context, string, string, string, string) (string, error)
 }
 
+type subsystemProvisioningCapabilityProvider interface {
+	Capabilities() application.SubsystemProvisioningCapabilities
+}
+
 // SubsystemOnboardingHandler exposes the simplified onboarding workflow and authenticated portal
 // catalog. The configured OIDC issuer is used only by the isolated deployment workflow and is not
 // returned to the browser together with generated credentials or infrastructure commands.
@@ -160,6 +164,25 @@ type subsystemDeploymentStateResponse struct {
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type subsystemProvisioningCapabilitiesResponse struct {
+	AutomationEnabled        bool                         `json:"automation_enabled"`
+	DeploymentMode           string                       `json:"deployment_mode"`
+	SupportedApplicationCodes []string                     `json:"supported_application_codes"`
+	SupportedEnvironments    []string                     `json:"supported_environments"`
+	Defaults                 subsystemOnboardingDefaults `json:"defaults"`
+}
+
+type subsystemOnboardingDefaults struct {
+	ApplicationCode string `json:"application_code,omitempty"`
+	ApplicationName string `json:"application_name,omitempty"`
+	Description     string `json:"description,omitempty"`
+	Environment     string `json:"environment"`
+	PublicBaseURL   string `json:"public_base_url"`
+	UpstreamURL     string `json:"upstream_url,omitempty"`
+	PathPrefix      string `json:"path_prefix,omitempty"`
+	ClientType      string `json:"client_type"`
 }
 
 // OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
@@ -286,6 +309,43 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 		})
 	}
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
+}
+
+// GetSubsystemCapabilities returns only the non-sensitive policy required to render the
+// onboarding form correctly. The Agent still performs authoritative preflight validation before
+// any Application or OAuth credential is created.
+func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	if _, ok := subsystemPrincipal(writer, request); !ok {
+		return
+	}
+	capabilities := application.SubsystemProvisioningCapabilities{
+		Enabled:               false,
+		Mode:                  "unknown",
+		SupportedEnvironments: []string{},
+	}
+	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
+		capabilities = provider.Capabilities()
+	}
+	response := subsystemProvisioningCapabilitiesResponse{
+		AutomationEnabled:         capabilities.Enabled,
+		DeploymentMode:            capabilities.Mode,
+		SupportedApplicationCodes: append([]string(nil), capabilities.SupportedApplicationCodes...),
+		SupportedEnvironments:     append([]string(nil), capabilities.SupportedEnvironments...),
+		Defaults: subsystemOnboardingDefaults{
+			Environment: "dev", PublicBaseURL: handler.oidcIssuer, ClientType: "confidential",
+		},
+	}
+	if capabilities.Mode == "production" {
+		response.Defaults = subsystemOnboardingDefaults{
+			ApplicationCode: "contract_management", ApplicationName: "合同管理系统",
+			Description: "合同创建、审批与客户管理系统", Environment: "prod",
+			PublicBaseURL: handler.oidcIssuer, UpstreamURL: "http://contract-api:8081",
+			PathPrefix: "/contract_management", ClientType: "confidential",
+		}
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署能力查询成功", response)
 }
 
 // UpdateSubsystem handles POST /api/v1/subsystem-update. The handler assumes the caller has
@@ -607,6 +667,20 @@ func subsystemProvisioningNextAction(err error) string {
 		return "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成生产平台初始化，接入页面不会自动改动数据库和 IAM 密钥"
 	case strings.Contains(message, "immutable digest"):
 		return "服务器尚未发布合同管理的不可变镜像 digest；请先完成合同镜像发布，再回到本页面接入"
+	case strings.Contains(message, "initial administrator role"):
+		return "合同运行时已启动，但权限目录中缺少可用的 admin 角色；请检查 contract-api 的目录同步日志，修复后在当前环境点击“重试”"
+	case strings.Contains(message, "production deployment file"), strings.Contains(message, "production deployment directory"), strings.Contains(message, "production compose configuration"):
+		return "服务器生产部署资产缺失、路径不规范或 Compose 校验失败；请重新发布平台部署资产并确认 Agent 健康后在本页面重试"
+	case strings.Contains(message, "runtime environment") || strings.Contains(message, "runtime configuration"):
+		return "合同运行配置文件缺失、权限不安全或不可写；请由部署管理员恢复 runtime/contract.env 的属主和 0600 权限后在本页面重试"
+	case strings.Contains(message, "start production contract dependencies"):
+		return "合同数据库或 Temporal 未通过健康检查；请查看对应容器和部署 Agent 日志，恢复后在本页面重试"
+	case strings.Contains(message, "backup production contract database"), strings.Contains(message, "prepare production contract backup"):
+		return "合同数据库备份失败；请检查数据库健康状态与 backups 目录权限，确认备份可用后在本页面重试"
+	case strings.Contains(message, "migrate production contract database"):
+		return "合同数据库迁移失败；请查看 contract-migrate 日志并处理迁移错误，必要时使用接入前备份恢复，然后在本页面重试"
+	case strings.Contains(message, "start production contract api"):
+		return "合同 API 未通过启动或健康检查；请查看 contract-api 的配置、目录同步和健康检查日志，修复后在本页面重试"
 	case strings.Contains(message, "compose file"):
 		return "部署 Agent 未找到子系统 Compose；内置客户与商机系统请更新平台代码并重启 api 与 subsystem-provisioner，独立子系统请在同名项目目录提供 compose.yaml"
 	case strings.Contains(message, "environment template"):
@@ -616,6 +690,6 @@ func subsystemProvisioningNextAction(err error) string {
 	case strings.Contains(message, "start subsystem containers"), strings.Contains(message, "rebuild subsystem containers"):
 		return "子系统构建或启动失败；请查看 subsystem-provisioner 与目标 API 容器日志，修复后使用“重试部署”"
 	default:
-		return "请执行 docker-local.sh ps，并查看 api、subsystem-provisioner 与目标 API 容器日志；修复后使用“重试部署”，不要重复创建应用环境"
+		return "请查看平台部署 Agent 与目标 API 的运行日志；修复后在当前环境点击“重试”，不要重复创建应用环境"
 	}
 }

@@ -341,10 +341,40 @@ replace_line_in_file() {
 random_hex() { openssl rand -hex "$1" | tr -d '\n'; }
 random_key() { openssl rand -base64 32 | tr -d '\n'; }
 
+ensure_platform_jwt_key_pair() {
+    local key_dir="${project_root}/data/keys"
+    local private_key="${key_dir}/jwt-ed25519-private.pem"
+    local public_key="${key_dir}/jwt-ed25519-public.pem"
+    if [[ -f "$private_key" && -f "$public_key" ]]; then
+        chmod 600 "$private_key" "$public_key"
+        return
+    fi
+    if [[ -e "$private_key" || -e "$public_key" ]]; then
+        fail "JWT 密钥对不完整；请恢复配套公私钥，或同时移走 ${private_key} 和 ${public_key} 后重新生成"
+    fi
+
+    local temporary_dir
+    temporary_dir="$(mktemp -d "${key_dir}/.jwt-keys.XXXXXX")"
+    openssl genpkey -algorithm ED25519 -out "${temporary_dir}/private.pem" >/dev/null 2>&1 || {
+        rm -rf -- "$temporary_dir"
+        fail "生成 Ed25519 JWT 私钥失败"
+    }
+    openssl pkey -in "${temporary_dir}/private.pem" -pubout -out "${temporary_dir}/public.pem" >/dev/null 2>&1 || {
+        rm -rf -- "$temporary_dir"
+        fail "生成 Ed25519 JWT 公钥失败"
+    }
+    chmod 600 "${temporary_dir}/private.pem" "${temporary_dir}/public.pem"
+    mv "${temporary_dir}/private.pem" "$private_key"
+    mv "${temporary_dir}/public.pem" "$public_key"
+    rmdir "$temporary_dir"
+    log "已生成本地 Ed25519 JWT 密钥对：${key_dir}"
+}
+
 ensure_platform_env_file() {
     command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成本地密码和密钥"
     mkdir -p "$(dirname "$env_file")" "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
     chmod 700 "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
+    ensure_platform_jwt_key_pair
 
     # 仅在文件不存在时生成密钥；重复 up 绝不轮换既有数据库密码和加密密钥。
     if [[ ! -f "$env_file" ]]; then
@@ -354,6 +384,8 @@ ensure_platform_env_file() {
         replace_line_in_file "$env_file" MYSQL_PASSWORD "$(random_hex 24)"
         replace_line_in_file "$env_file" MYSQL_ROOT_PASSWORD "$(random_hex 32)"
         replace_line_in_file "$env_file" IAM_MOBILE_ENCRYPTION_KEY "$(random_key)"
+        replace_line_in_file "$env_file" IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY "$(random_key)"
+        replace_line_in_file "$env_file" IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY "$(random_key)"
         replace_line_in_file "$env_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
         log "已根据模板生成基础平台环境文件：$env_file"
     fi

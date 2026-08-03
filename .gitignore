@@ -9,11 +9,12 @@ coverage/
 .vite/
 *.tsbuildinfo
 
-# Local environment files (keep the documented template)
+# 实际环境文件一律忽略；只保留仓库根开发模板和当前 compose.local.yaml 所需模板。
 .env
 .env.*
-!.env.example
+.env.local
 .env.*.local
+!.env.example
 # 当前 compose.local.yaml 的运行模板与空 LAN 覆盖文件必须随代码发布。
 !docker/.env.local.example
 !docker/.env.customer.local.example
