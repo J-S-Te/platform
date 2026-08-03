@@ -69,41 +69,20 @@ func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner,
 		})
 	case "production":
 		return infrastructure.NewProductionComposeSubsystemProvisioner(infrastructure.ProductionComposeSubsystemProvisionerConfig{
-			Enabled:         true,
-			DeployRoot:      os.Getenv("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT"),
-			RuntimeEnvPath:  os.Getenv("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH"),
-			ContractEnvPath: os.Getenv("SUBSYSTEM_PRODUCTION_CONTRACT_ENV_PATH"),
-			ReleaseEnvPath:  os.Getenv("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH"),
-			ComposeFile:     os.Getenv("SUBSYSTEM_PRODUCTION_COMPOSE_FILE"),
-			AllowedTenantID: os.Getenv("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID"),
-			ApplicationCode: os.Getenv("SUBSYSTEM_PRODUCTION_APPLICATION_CODE"),
-			Environment:     os.Getenv("SUBSYSTEM_PRODUCTION_ENVIRONMENT"),
-			PathPrefix:      os.Getenv("SUBSYSTEM_PRODUCTION_PATH_PREFIX"),
-			UpstreamURL:     os.Getenv("SUBSYSTEM_PRODUCTION_UPSTREAM_URL"),
-			DependencyServices: splitConfiguredList(os.Getenv("SUBSYSTEM_PRODUCTION_DEPENDENCY_SERVICES")),
-			DatabaseService:    os.Getenv("SUBSYSTEM_PRODUCTION_DATABASE_SERVICE"),
-			DatabaseName:       os.Getenv("SUBSYSTEM_PRODUCTION_DATABASE_NAME"),
-			MigrateService:     os.Getenv("SUBSYSTEM_PRODUCTION_MIGRATE_SERVICE"),
-			APIService:         os.Getenv("SUBSYSTEM_PRODUCTION_API_SERVICE"),
-			ReleaseImageKey:    os.Getenv("SUBSYSTEM_PRODUCTION_RELEASE_IMAGE_KEY"),
-			ComposeProject:  envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-production"),
-			DockerBinary:    envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
-			Timeout:         timeout,
+			Enabled:           true,
+			DeployRoot:        os.Getenv("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT"),
+			ProfilesDirectory: os.Getenv("SUBSYSTEM_PRODUCTION_PROFILES_DIR"),
+			RuntimeEnvPath:    os.Getenv("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH"),
+			ReleaseEnvPath:    os.Getenv("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH"),
+			ComposeFile:       os.Getenv("SUBSYSTEM_PRODUCTION_COMPOSE_FILE"),
+			AllowedTenantID:   os.Getenv("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID"),
+			ComposeProject:    envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-production"),
+			DockerBinary:      envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
+			Timeout:           timeout,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported SUBSYSTEM_ONBOARDING_MODE")
 	}
-}
-
-func splitConfiguredList(value string) []string {
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
 }
 
 func envOrDefault(key, fallback string) string {

@@ -56,13 +56,31 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	provisioningCapabilities := applicationregistryapplication.SubsystemProvisioningCapabilities{
+		Enabled: cfg.SubsystemOnboarding.Enabled,
+		Mode:    cfg.SubsystemOnboarding.Mode,
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.SubsystemOnboarding.Mode), "production") {
+		if cfg.SubsystemOnboarding.Enabled {
+			provisioningCapabilities, err = applicationregistryinfrastructure.LoadProductionSubsystemCapabilities(
+				cfg.SubsystemOnboarding.ProductionDeployRoot,
+				cfg.SubsystemOnboarding.ProductionProfilesDirectory,
+			)
+			if err != nil {
+				return httptransport.OperationalModules{}, fmt.Errorf("load production subsystem capabilities: %w", err)
+			}
+			provisioningCapabilities.Enabled = true
+		}
+	} else {
+		provisioningCapabilities.SupportedEnvironments = []string{"dev", "test", "staging", "prod"}
+		provisioningCapabilities.DefaultEnvironment = "dev"
+		provisioningCapabilities.DefaultClientType = "confidential"
+	}
 	subsystemProvisioner, err := applicationregistryinfrastructure.NewUnixSocketSubsystemProvisioner(
 		cfg.SubsystemOnboarding.Enabled,
 		cfg.SubsystemOnboarding.SocketPath,
 		cfg.SubsystemOnboarding.Timeout,
-		applicationregistryinfrastructure.SubsystemProvisioningCapabilitiesForConfig(
-			cfg.SubsystemOnboarding,
-		),
+		provisioningCapabilities,
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -130,20 +148,6 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		FilesAndJobs:        fileTaskHandler,
 		AccessApplier:       subsystemProvisioner,
 	}, nil
-}
-
-func productionCapabilityValues(mode, configured string) []string {
-	if strings.EqualFold(strings.TrimSpace(mode), "production") && strings.TrimSpace(configured) != "" {
-		return []string{configured}
-	}
-	return nil
-}
-
-func subsystemCapabilityEnvironments(mode, configured string) []string {
-	if strings.EqualFold(strings.TrimSpace(mode), "production") && strings.TrimSpace(configured) != "" {
-		return []string{configured}
-	}
-	return []string{"dev", "test", "staging", "prod"}
 }
 
 // subsystemInitialAccessManager 在子系统目录已经发布时分配约定的初始管理员角色。

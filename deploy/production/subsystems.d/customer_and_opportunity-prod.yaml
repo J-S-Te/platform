@@ -1,0 +1,62 @@
+version: 1
+default: false
+application:
+  code: customer_and_opportunity
+  name: 客户与商机管理系统
+  description: 客户、商机与售前协作管理系统
+  environment: prod
+  path_prefix: /customer-opportunity
+  upstream_url: http://customer-api:8090
+  client_type: confidential
+runtime:
+  required_infrastructure_keys:
+    - MYSQL_PASSWORD
+    - MYSQL_ROOT_PASSWORD
+    - IAM_MOBILE_ENCRYPTION_KEY
+    - IAM_BOOTSTRAP_TOKEN
+    - CUSTOMER_MYSQL_PASSWORD
+    - CUSTOMER_MYSQL_ROOT_PASSWORD
+  files:
+    - path: runtime/customer.env
+      compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
+      required_existing_keys:
+        - SENSITIVE_ENCRYPTION_KEY_BASE64
+        - SENSITIVE_HMAC_KEY_BASE64
+        - PORTAL_INVITE_PEPPER_BASE64
+      values:
+        DEV_AUTH_ENABLED: "false"
+        OIDC_SCOPES: openid profile
+        OIDC_ROLE_CONFIG_HASH: sha256:1160c3133e8d95ee8f4f0d589960c368f431a6237a283d7b803bd21fe107ca6e
+        OIDC_MAX_EFFECTIVE_ROLES: "3"
+        OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
+        PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
+        PLATFORM_BASE_URL: http://platform-api:8080
+        OWNER_DIRECTORY_ENABLED: "true"
+        PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
+        PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
+        PLATFORM_OWNER_DIRECTORY_SCOPE: owner_directory.read
+      bindings:
+        APP_PUBLIC_ORIGIN: public_origin
+        APP_PATH_PREFIX: path_prefix
+        OIDC_ISSUER: issuer
+        OIDC_CLIENT_ID: client_id
+        OIDC_CLIENT_SECRET: client_secret
+        OIDC_REDIRECT_URI: redirect_uri
+        OIDC_POST_LOGOUT_REDIRECT_URI: public_url
+        OIDC_TENANT_ID: tenant_id
+        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_OWNER_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
+        PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
+compose:
+  profiles: [customer, customer-release]
+  dependency_services: [customer-mysql]
+  database:
+    service: customer-mysql
+    name: customer_opportunity
+  migrate_service: customer-migrate
+  runtime_services: [customer-api]
+  teardown_services: [customer-api]
+  release_image_keys: [CUSTOMER_CRM_IMAGE]

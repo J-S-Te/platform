@@ -31,6 +31,7 @@ portal_runtime_file="$deploy_dir/runtime/portal.env"
 customer_runtime_template="$deploy_dir/customer.env.example"
 portal_runtime_template="$deploy_dir/portal.env.example"
 compose_file="$deploy_dir/compose.yaml"
+profiles_dir="$deploy_dir/subsystems.d"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_runtime_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_runtime_file"
 
@@ -44,6 +45,10 @@ docker compose version >/dev/null
 for required_file in "$runtime_file" "$release_file" "$compose_file"; do
   [[ -f "$required_file" ]] || { echo "缺少 $required_file" >&2; exit 1; }
 done
+[[ -f "$profiles_dir/customer_and_opportunity-prod.yaml" && -f "$profiles_dir/customer_portal-prod.yaml" ]] || {
+  echo "缺少 CRM/Portal 生产接入审核清单，请先发布最新 platform 生产资产" >&2
+  exit 1
+}
 [[ "$(stat -c '%a' "$runtime_file")" == "600" ]] || { echo "运行配置权限必须为 0600：$runtime_file" >&2; exit 1; }
 [[ "$(stat -c '%a' "$release_file")" == "600" ]] || { echo "发布配置权限必须为 0600：$release_file" >&2; exit 1; }
 

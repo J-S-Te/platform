@@ -33,6 +33,7 @@ runtime_file="$deploy_dir/.env"
 contract_runtime_file="$deploy_dir/runtime/contract.env"
 contract_runtime_template="$deploy_dir/contract.env.example"
 compose_file="$deploy_dir/compose.yaml"
+profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 
 for command_name in docker curl gzip flock awk mktemp install; do
@@ -45,6 +46,8 @@ docker compose version >/dev/null
 [[ -f "$runtime_file" ]] || { echo "缺少 $runtime_file" >&2; exit 1; }
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
 [[ -f "$compose_file" ]] || { echo "缺少 $compose_file" >&2; exit 1; }
+[[ -d "$profiles_dir" ]] || { echo "缺少生产子系统审核清单目录：$profiles_dir" >&2; exit 1; }
+compgen -G "$profiles_dir/*.yaml" >/dev/null || { echo "生产子系统审核清单目录中没有 YAML 文件" >&2; exit 1; }
 
 install -d -m 700 "$deploy_dir/runtime"
 if [[ ! -f "$contract_runtime_file" ]]; then

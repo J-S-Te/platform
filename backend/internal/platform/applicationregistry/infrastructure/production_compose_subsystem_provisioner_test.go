@@ -18,7 +18,7 @@ const (
 	testProductionUpstreamURL     = "http://contract-api:8081"
 )
 
-func TestProductionComposeSubsystemProvisionerRejectsAnythingExceptContractProd(t *testing.T) {
+func TestProductionComposeSubsystemProvisionerRejectsTargetsMissingFromReviewedProfiles(t *testing.T) {
 	t.Parallel()
 	provisioner, _, _ := productionProvisionerFixture(t)
 	if err := provisioner.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", "customer_portal")); err == nil {
@@ -132,7 +132,11 @@ func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProv
 	contractPath := filepath.Join(canonicalRoot, "runtime", "contract.env")
 	releasePath := filepath.Join(canonicalRoot, ".release.env")
 	composePath := filepath.Join(canonicalRoot, "compose.yaml")
+	profilesPath := filepath.Join(canonicalRoot, "subsystems.d")
 	if err := os.Mkdir(filepath.Join(canonicalRoot, "runtime"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(profilesPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for path, contents := range map[string]string{
@@ -145,15 +149,50 @@ func productionProvisionerFixture(t *testing.T) (*ProductionComposeSubsystemProv
 			t.Fatal(err)
 		}
 	}
+	manifest := `version: 1
+default: true
+application:
+  code: contract_management
+  name: 合同管理系统
+  description: 合同创建与审批
+  environment: prod
+  path_prefix: /contract_management
+  upstream_url: http://contract-api:8081
+  client_type: confidential
+runtime:
+  required_infrastructure_keys: [MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD, IAM_MOBILE_ENCRYPTION_KEY, IAM_BOOTSTRAP_TOKEN, CONTRACT_MYSQL_PASSWORD, CONTRACT_MYSQL_ROOT_PASSWORD]
+  files:
+    - path: runtime/contract.env
+      compose_environment_key: CONTRACT_RUNTIME_ENV_FILE
+      required_existing_keys: []
+      values:
+        PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
+      bindings:
+        OIDC_ISSUER: issuer
+        OIDC_CLIENT_ID: client_id
+        OIDC_CLIENT_SECRET: client_secret
+        OIDC_TENANT_ID: tenant_id
+        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
+        PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+compose:
+  profiles: [release]
+  dependency_services: [contract-mysql, temporal]
+  database: {service: contract-mysql, name: contract_management}
+  migrate_service: contract-migrate
+  runtime_services: [contract-api]
+  teardown_services: [contract-api]
+  release_image_keys: [CONTRACT_IMAGE]
+`
+	if err := os.WriteFile(filepath.Join(profilesPath, "contract.yaml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingSubsystemRunner{}
 	provisioner, err := newProductionComposeSubsystemProvisioner(ProductionComposeSubsystemProvisionerConfig{
-		Enabled: true, DeployRoot: canonicalRoot, RuntimeEnvPath: runtimePath, ContractEnvPath: contractPath,
+		Enabled: true, DeployRoot: canonicalRoot, ProfilesDirectory: profilesPath, RuntimeEnvPath: runtimePath,
 		ReleaseEnvPath: releasePath, ComposeFile: composePath, ComposeProject: "basic-platform-production",
-		AllowedTenantID: "tenant-1", ApplicationCode: testProductionApplicationCode,
-		Environment: testProductionEnvironment, PathPrefix: testProductionPathPrefix, UpstreamURL: testProductionUpstreamURL,
-		DependencyServices: []string{"contract-mysql", "temporal"}, DatabaseService: "contract-mysql",
-		DatabaseName: "contract_management", MigrateService: "contract-migrate", APIService: "contract-api", ReleaseImageKey: "CONTRACT_IMAGE",
-		DockerBinary: "docker", Timeout: time.Minute,
+		AllowedTenantID: "tenant-1", DockerBinary: "docker", Timeout: time.Minute,
 	}, runner)
 	if err != nil {
 		t.Fatal(err)

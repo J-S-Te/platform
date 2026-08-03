@@ -96,30 +96,23 @@ type AuditConfig struct {
 // SubsystemOnboardingAutomationConfig 控制一键接入的受信部署 Agent。API 只连接 Unix Socket，
 // Docker Socket、宿主机文件和相邻项目目录权限必须留在隔离进程中。
 type SubsystemOnboardingAutomationConfig struct {
-	Enabled                 bool
-	Mode                    string
-	ProjectsRoot            string
-	GatewayScriptPath       string
-	GatewayIncludePath      string
-	SocketPath              string
-	ProductionDeployRoot    string
-	ProductionRuntimeEnv    string
-	ProductionContractEnv   string
-	ProductionReleaseEnv    string
-	ProductionComposeFile   string
-	ProductionAllowedTenant string
-	ProductionApplicationCode string
-	ProductionApplicationName string
-	ProductionDescription     string
-	ProductionEnvironment     string
-	ProductionUpstreamURL     string
-	ProductionPathPrefix      string
-	ProductionClientType      string
-	PlatformComposeProject  string
-	PlatformFrontendService string
-	PlatformDockerNetwork   string
-	DockerBinary            string
-	Timeout                 time.Duration
+	Enabled                     bool
+	Mode                        string
+	ProjectsRoot                string
+	GatewayScriptPath           string
+	GatewayIncludePath          string
+	SocketPath                  string
+	ProductionDeployRoot        string
+	ProductionRuntimeEnv        string
+	ProductionReleaseEnv        string
+	ProductionComposeFile       string
+	ProductionAllowedTenant     string
+	ProductionProfilesDirectory string
+	PlatformComposeProject      string
+	PlatformFrontendService     string
+	PlatformDockerNetwork       string
+	DockerBinary                string
+	Timeout                     time.Duration
 }
 
 // Load 显式设置 ENV_FILE 时只读取该文件；否则在当前目录及父目录寻找 .env，使 backend/ 下运行的
@@ -218,30 +211,23 @@ func Load() (Config, error) {
 			EnvironmentCode: value("AUDIT_ENVIRONMENT_CODE", "dev"),
 		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
-			Enabled:                 subsystemAutomationEnabled,
-			Mode:                    strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
-			ProjectsRoot:            value("SUBSYSTEM_PROJECTS_ROOT", ""),
-			GatewayScriptPath:       value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
-			GatewayIncludePath:      value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
-			SocketPath:              value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
-			ProductionDeployRoot:    value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
-			ProductionRuntimeEnv:    value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
-			ProductionContractEnv:   value("SUBSYSTEM_PRODUCTION_CONTRACT_ENV_PATH", ""),
-			ProductionReleaseEnv:    value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
-			ProductionComposeFile:   value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
-			ProductionAllowedTenant: value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
-			ProductionApplicationCode: value("SUBSYSTEM_PRODUCTION_APPLICATION_CODE", ""),
-			ProductionApplicationName: value("SUBSYSTEM_PRODUCTION_APPLICATION_NAME", ""),
-			ProductionDescription:     value("SUBSYSTEM_PRODUCTION_APPLICATION_DESCRIPTION", ""),
-			ProductionEnvironment:     strings.ToLower(value("SUBSYSTEM_PRODUCTION_ENVIRONMENT", "")),
-			ProductionUpstreamURL:     value("SUBSYSTEM_PRODUCTION_UPSTREAM_URL", ""),
-			ProductionPathPrefix:      value("SUBSYSTEM_PRODUCTION_PATH_PREFIX", ""),
-			ProductionClientType:      strings.ToLower(value("SUBSYSTEM_PRODUCTION_CLIENT_TYPE", "")),
-			PlatformComposeProject:  value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
-			PlatformFrontendService: value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
-			PlatformDockerNetwork:   value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
-			DockerBinary:            value("SUBSYSTEM_DOCKER_BINARY", "docker"),
-			Timeout:                 subsystemAutomationTimeout,
+			Enabled:                     subsystemAutomationEnabled,
+			Mode:                        strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
+			ProjectsRoot:                value("SUBSYSTEM_PROJECTS_ROOT", ""),
+			GatewayScriptPath:           value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
+			GatewayIncludePath:          value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
+			SocketPath:                  value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
+			ProductionDeployRoot:        value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
+			ProductionRuntimeEnv:        value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
+			ProductionReleaseEnv:        value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
+			ProductionComposeFile:       value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
+			ProductionAllowedTenant:     value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
+			ProductionProfilesDirectory: value("SUBSYSTEM_PRODUCTION_PROFILES_DIR", ""),
+			PlatformComposeProject:      value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
+			PlatformFrontendService:     value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
+			PlatformDockerNetwork:       value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
+			DockerBinary:                value("SUBSYSTEM_DOCKER_BINARY", "docker"),
+			Timeout:                     subsystemAutomationTimeout,
 		},
 		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
 		CORSOrigins:     commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
@@ -336,10 +322,9 @@ func (cfg Config) Validate() error {
 				return fmt.Errorf("local subsystem onboarding automation configuration is incomplete")
 			}
 		case "production":
-			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" ||
-				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionApplicationCode) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionApplicationName) == "" ||
-				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionEnvironment) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionUpstreamURL) == "" ||
-				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionPathPrefix) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionClientType) == "" {
+			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionProfilesDirectory) == "" {
 				return fmt.Errorf("production subsystem onboarding automation configuration is incomplete")
 			}
 		default:
