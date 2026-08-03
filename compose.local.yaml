@@ -453,6 +453,8 @@ services:
     ports:
       # 默认只监听本机；临时 LAN 模式由 scripts/lan-access.sh 显式开启。
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_HTTP_PORT:-8081}:80"
+      # 本地无端口访问入口（http://localhost/）；仅用于本机调试，不影响其他子系统 OIDC 配置。
+      - "80:80"
     depends_on:
       api:
         condition: service_healthy
