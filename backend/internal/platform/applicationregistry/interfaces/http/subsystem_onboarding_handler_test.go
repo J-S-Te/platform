@@ -273,10 +273,15 @@ func (manager *recordingSubsystemAccessManager) AssignInitialAdministrator(_ con
 type recordingHTTPSubsystemProvisioner struct {
 	input        application.SubsystemProvisioningInput
 	teardownCode string
+	capabilities application.SubsystemProvisioningCapabilities
 	preflightErr error
 	provisionErr error
 	updateErr    error
 	teardownErr  error
+}
+
+func (provisioner *recordingHTTPSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
+	return provisioner.capabilities
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, application.SubsystemPreflightInput) error {
@@ -296,6 +301,74 @@ func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, 
 func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, _ string, applicationCode, _ string) error {
 	provisioner.teardownCode = applicationCode
 	return provisioner.teardownErr
+}
+
+func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{capabilities: application.SubsystemProvisioningCapabilities{
+		Enabled:                   true,
+		Mode:                      "production",
+		SupportedApplicationCodes: []string{"contract_management"},
+		SupportedEnvironments:     []string{"prod"},
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"https://portal.example.com/", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-capabilities", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.GetSubsystemCapabilities(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store, private" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	var envelope struct {
+		Data struct {
+			AutomationEnabled         bool     `json:"automation_enabled"`
+			DeploymentMode            string   `json:"deployment_mode"`
+			SupportedApplicationCodes []string `json:"supported_application_codes"`
+			SupportedEnvironments     []string `json:"supported_environments"`
+			Defaults                  struct {
+				ApplicationCode string `json:"application_code"`
+				Environment     string `json:"environment"`
+				PublicBaseURL   string `json:"public_base_url"`
+				UpstreamURL     string `json:"upstream_url"`
+				PathPrefix      string `json:"path_prefix"`
+				ClientType      string `json:"client_type"`
+			} `json:"defaults"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data := envelope.Data
+	if !data.AutomationEnabled || data.DeploymentMode != "production" ||
+		len(data.SupportedApplicationCodes) != 1 || data.SupportedApplicationCodes[0] != "contract_management" ||
+		len(data.SupportedEnvironments) != 1 || data.SupportedEnvironments[0] != "prod" {
+		t.Fatalf("unexpected production policy: %#v", data)
+	}
+	if data.Defaults.ApplicationCode != "contract_management" || data.Defaults.Environment != "prod" ||
+		data.Defaults.PublicBaseURL != "https://portal.example.com" || data.Defaults.UpstreamURL != "http://contract-api:8081" ||
+		data.Defaults.PathPrefix != "/contract_management" || data.Defaults.ClientType != "confidential" {
+		t.Fatalf("unexpected production defaults: %#v", data.Defaults)
+	}
+	body := response.Body.String()
+	for _, forbidden := range []string{"client_secret", "password", "tenant_id", "socket", "docker.sock", "image_digest", "compose_file", "host_path", "command"} {
+		if strings.Contains(strings.ToLower(body), forbidden) {
+			t.Fatalf("capability response leaked %q: %s", forbidden, body)
+		}
+	}
 }
 
 func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
@@ -431,8 +504,9 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	t.Parallel()
 	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "01K10B00000000000000000001"}}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
+	provisioner := &recordingHTTPSubsystemProvisioner{}
 	handler, err := NewSubsystemOnboardingHandler(
-		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, access,
+		&stubSubsystemOnboardingService{}, provisioner, access,
 		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
 	)
 	if err != nil {
@@ -441,7 +515,7 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10E00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -461,6 +535,12 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	}
 	if access.userID != "01K10B00000000000000000001" || stateStore.initialAccessMarks != 1 {
 		t.Fatalf("retry did not complete pending initial access: access=%#v marks=%d", access, stateStore.initialAccessMarks)
+	}
+	if access.operatorID != "01K10E00000000000000000001" {
+		t.Fatalf("retry operator = %q, want current operator", access.operatorID)
+	}
+	if provisioner.input.ApplicationID != "app-1" || provisioner.input.ApplicationCode != "customer_management" || provisioner.input.Environment != "dev" {
+		t.Fatalf("retry did not reuse persisted application context: %#v", provisioner.input)
 	}
 }
 

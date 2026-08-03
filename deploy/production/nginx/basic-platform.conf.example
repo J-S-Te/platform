@@ -31,11 +31,11 @@ server {
     }
 
     # 接入、更新、重试和下线会在受控 Agent 中串行执行备份、迁移与健康检查。
-    # 精确匹配放在通用 /api/ 前后均可生效，并与后端 15 分钟部署上限保持一致。
+    # Agent 最长执行 15 分钟；外层代理额外保留 1 分钟传输余量，避免浏览器误判失败后重复接入。
     location ~ ^/api/v1/subsystem-(onboarding|update|retry|teardown)$ {
-        proxy_connect_timeout 10s;
-        proxy_send_timeout 900s;
-        proxy_read_timeout 900s;
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 960s;
+        proxy_read_timeout 960s;
         proxy_pass http://127.0.0.1:18080;
     }
 
@@ -75,6 +75,46 @@ server {
     }
 
     location /contract_management/ {
+        proxy_pass http://127.0.0.1:18082;
+    }
+
+    location = /customer-opportunity/healthz {
+        proxy_pass http://127.0.0.1:18083/customer-opportunity/healthz;
+    }
+
+    location /customer-opportunity/auth/ {
+        proxy_pass http://127.0.0.1:18083/customer-opportunity/auth/;
+    }
+
+    location /customer-opportunity/api/ {
+        proxy_pass http://127.0.0.1:18083/customer-opportunity/api/;
+    }
+
+    location = /customer-opportunity {
+        return 308 /customer-opportunity/;
+    }
+
+    location /customer-opportunity/ {
+        proxy_pass http://127.0.0.1:18082;
+    }
+
+    location = /customer-portal/healthz {
+        proxy_pass http://127.0.0.1:18084/customer-portal/healthz;
+    }
+
+    location /customer-portal/auth/ {
+        proxy_pass http://127.0.0.1:18084/customer-portal/auth/;
+    }
+
+    location /customer-portal/api/ {
+        proxy_pass http://127.0.0.1:18084/customer-portal/api/;
+    }
+
+    location = /customer-portal {
+        return 308 /customer-portal/;
+    }
+
+    location /customer-portal/ {
         proxy_pass http://127.0.0.1:18082;
     }
 

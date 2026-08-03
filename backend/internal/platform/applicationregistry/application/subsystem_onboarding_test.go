@@ -201,6 +201,9 @@ func TestOnboardSubsystemBuildsAtomicOIDCRegistration(t *testing.T) {
 		t.Fatalf("expected one atomic repository call, got %d", repository.createCalls)
 	}
 	write := repository.write
+	if write.InitialAdminUserID != input.OperatorID {
+		t.Fatalf("initial administrator = %q, want default operator %q", write.InitialAdminUserID, input.OperatorID)
+	}
 	if write.Application.Code != "business-app" || write.Environment.Environment != "prod" {
 		t.Fatalf("unexpected normalized registration: code=%q environment=%q", write.Application.Code, write.Environment.Environment)
 	}

@@ -3,7 +3,34 @@ package infrastructure
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 )
+
+func TestDeploymentStateFromModelPreservesRetryContext(t *testing.T) {
+	t.Parallel()
+	initialAdminUserID := "01K10B00000000000000000001"
+	assignedAt := time.Date(2026, time.August, 3, 8, 30, 0, 0, time.UTC)
+	model := subsystemDeploymentStateModel{
+		TenantID:                "01K10A00000000000000000001",
+		ApplicationID:           "01K10C00000000000000000001",
+		EnvironmentID:           "01K10D00000000000000000001",
+		ApplicationCode:         "contract_management",
+		Environment:             "prod",
+		InitialAdminUserID:      &initialAdminUserID,
+		InitialAccessAssignedAt: &assignedAt,
+		Status:                  application.SubsystemDeploymentStatusReady,
+	}
+
+	state := deploymentStateFromModel(model)
+	if state.ApplicationID != model.ApplicationID || state.EnvironmentID != model.EnvironmentID {
+		t.Fatalf("deployment identifiers were not preserved: %#v", state)
+	}
+	if state.InitialAdminUserID != initialAdminUserID || state.InitialAccessAssignedAt == nil || !state.InitialAccessAssignedAt.Equal(assignedAt) {
+		t.Fatalf("initial access context was not preserved: %#v", state)
+	}
+}
 
 func TestPortalApplicationAccessFilterIncludesEffectiveMembershipSubjects(t *testing.T) {
 	clause, args := portalApplicationAccessFilter("user-1")

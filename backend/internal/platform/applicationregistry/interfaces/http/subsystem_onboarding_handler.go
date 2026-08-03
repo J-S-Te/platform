@@ -167,11 +167,11 @@ type subsystemDeploymentStateResponse struct {
 }
 
 type subsystemProvisioningCapabilitiesResponse struct {
-	AutomationEnabled        bool                         `json:"automation_enabled"`
-	DeploymentMode           string                       `json:"deployment_mode"`
-	SupportedApplicationCodes []string                     `json:"supported_application_codes"`
-	SupportedEnvironments    []string                     `json:"supported_environments"`
-	Defaults                 subsystemOnboardingDefaults `json:"defaults"`
+	AutomationEnabled         bool                        `json:"automation_enabled"`
+	DeploymentMode            string                      `json:"deployment_mode"`
+	SupportedApplicationCodes []string                    `json:"supported_application_codes"`
+	SupportedEnvironments     []string                    `json:"supported_environments"`
+	Defaults                  subsystemOnboardingDefaults `json:"defaults"`
 }
 
 type subsystemOnboardingDefaults struct {
