@@ -106,6 +106,7 @@ run_with_gateway_lock() {
     return "$rc"
   fi
 
+  # macOS 没有系统 flock 时，mkdir 的原子性提供互斥；锁目录只使用固定后缀，不拼入操作参数。
   local lock_dir="${LOCK_FILE}.d" waited=0 rc
   while ! mkdir -- "$lock_dir" 2>/dev/null; do
     if (( waited >= LOCK_TIMEOUT )); then
@@ -220,6 +221,7 @@ render_location() {
   trimmed_prefix="$(trim_trailing_slash "$path_prefix")"
   local trimmed_upstream
   trimmed_upstream="$(trim_trailing_slash "$upstream_url")"
+  # 上游结尾斜杠与 location 成对规范化，使 Nginx 去掉门户前缀后再转发，并把原前缀传给子系统。
   cat <<EOF
 
 # redirect code=${code}
@@ -296,7 +298,7 @@ HEADER
     render_location "$entry_code" "$entry_prefix" "$entry_upstream" >> "$tmp"
   done
   # 该文件通常以单文件方式 bind mount 到 Nginx 容器。不能用 mv 替换 inode，
-  # 否则运行中的容器仍会读取旧文件；保留 inode 并覆盖内容。
+  # 否则运行中的容器仍会读取旧文件；外层互斥锁保证覆盖期间没有另一写者，reload 前再做语法校验。
   cat -- "$tmp" > "$file"
   rm -f -- "$tmp"
   chmod 0644 "$file"
@@ -309,6 +311,7 @@ do_add() {
   validate_upstream_url "$upstream_url"
 
   if is_integrated_frontend_code "$code"; then
+    # 已编译进统一前端的模块只能保留 API 专用路由；整站代理会遮蔽 SPA 静态资源和前端路由。
     do_remove "$code"
     log "INFO" "${code} 已内置于统一前端，跳过整站反向代理登记"
     return 0
@@ -320,6 +323,7 @@ do_add() {
   if [[ -s "$NGINX_INCLUDE" ]]; then
     while IFS=$'\t' read -r existing_code existing_prefix existing_upstream; do
       if [[ -n "$existing_code" && "$existing_code" != "$code" ]]; then
+        # 同一路径只能有一个 ACTIVE 上游，避免 Nginx 匹配顺序把请求送往错误子系统。
         if [[ "$(trim_trailing_slash "$existing_prefix")" == "$(trim_trailing_slash "$path_prefix")" ]]; then
           log "ERROR" "path_prefix 已被子系 ${existing_code} 占用：$path_prefix"
           exit 2
@@ -410,6 +414,7 @@ do_reload() {
   local compose_file
   compose_file="$(resolve_compose_file)"
   log "INFO" "校验 nginx 配置: docker compose -f ${compose_file} exec -T frontend nginx -t"
+  # 先校验后平滑 reload；非法配置不能影响当前仍在服务的 Nginx worker。
   docker compose -f "$compose_file" exec -T frontend nginx -t
   log "INFO" "触发 nginx reload: docker compose -f ${compose_file} exec -T frontend nginx -s reload"
   docker compose -f "$compose_file" exec -T frontend nginx -s reload
@@ -507,6 +512,7 @@ do_sync() {
   done
 
   local duplicate_prefix
+  # 全量写入前先在规范化路径上查重，发现冲突时保留旧 include，不产生部分更新。
   duplicate_prefix=$(cut -f2 "$sync_input" | sed 's:/*$::' | sort | uniq -d)
   if [[ -n "$duplicate_prefix" ]]; then
     rm -f "$sync_input"

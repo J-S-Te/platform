@@ -16,6 +16,7 @@ customer_template_file="${project_root}/docker/.env.customer.local.example"
 customer_env_file="${project_root}/docker/.env.customer.local"
 portal_template_file="${project_root}/docker/.env.portal.local.example"
 portal_env_file="${project_root}/docker/.env.portal.local"
+presale_worker_env_file="${customer_root}/.env.presale-worker"
 lan_override_file="${project_root}/docker/.env.lan"
 customer_lan_override_file="${project_root}/docker/.env.customer.lan"
 lan_placeholder_file="${project_root}/docker/.env.lan.disabled"
@@ -47,6 +48,7 @@ usage() {
   bash scripts/docker-local.sh refresh-contract-api
   bash scripts/docker-local.sh refresh-customer-api
   bash scripts/docker-local.sh refresh-portal-api
+  bash scripts/docker-local.sh start-presale-worker [--presale-worker-env-file PATH]
 
 up/restart 选项：
   --build                         重新构建统一前端和四个独立后端镜像；Portal 未接入时只构建不启动
@@ -59,6 +61,7 @@ up/restart 选项：
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   --customer-env-file PATH        客户与商机后端环境文件（默认 platform/docker/.env.customer.local）
   --portal-env-file PATH          客户自助门户环境文件（默认 platform/docker/.env.portal.local）
+  --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
 
 定向更新：
@@ -67,6 +70,7 @@ up/restart 选项：
   refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
   refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
   refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
+  start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳
 
   四种定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
   因此不会影响已经完成的子系统统一登录接入。
@@ -88,7 +92,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api)
+		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|start-presale-worker)
             command_name="$1"
             shift
             ;;
@@ -144,6 +148,11 @@ while (($# > 0)); do
 			portal_env_file="$2"
 			shift 2
 			;;
+		--presale-worker-env-file)
+			(($# >= 2)) || fail "$1 缺少参数"
+			presale_worker_env_file="$2"
+			shift 2
+			;;
         -h|--help)
             usage
             exit 0
@@ -170,6 +179,7 @@ export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
+export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
 
@@ -317,6 +327,8 @@ compose() {
 replace_line_in_file() {
     local file="$1" key="$2" value="$3" tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/docker-local-env.XXXXXX")"
+    # 先写入临时文件并设为 0600，再原子替换，避免中断时留下半行配置或短暂放宽密钥权限。
+    # 临时文件位于系统临时目录，mv 跨文件系统时未必原子；调用者应避免并发执行多个编排命令。
     awk -v key="$key" -v value="$value" '
         index($0, key "=") == 1 { print key "=" value; found=1; next }
         { print }
@@ -334,6 +346,7 @@ ensure_platform_env_file() {
     mkdir -p "$(dirname "$env_file")" "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
     chmod 700 "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
 
+    # 仅在文件不存在时生成密钥；重复 up 绝不轮换既有数据库密码和加密密钥。
     if [[ ! -f "$env_file" ]]; then
         [[ -f "$platform_template_file" ]] || fail "基础平台环境模板不存在：$platform_template_file"
         cp "$platform_template_file" "$env_file"
@@ -394,6 +407,7 @@ ensure_contract_env_file() {
 
 ensure_customer_env_file() {
     command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成客户与商机管理数据库密码和敏感字段密钥"
+    # CRM 的加密键与检索 HMAC 键职责不同，首次生成后都必须稳定保留，否则历史敏感字段不可读/不可查。
     if [[ ! -f "$customer_env_file" ]]; then
         [[ -f "$customer_template_file" ]] || fail "客户与商机管理环境模板不存在：$customer_template_file"
         cp "$customer_template_file" "$customer_env_file"
@@ -445,6 +459,7 @@ ensure_portal_env_file() {
 }
 
 portal_configured() {
+	# 不能只看镜像或数据库是否存在；四项接入产物齐全才允许把 Portal 纳入默认 profile 启动。
 	[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_ID)" ]] &&
 		[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_SECRET)" ]] &&
 		[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_TENANT_ID)" ]] &&
@@ -509,11 +524,8 @@ compose_run() {
     compose --ansi never "$@"
 }
 
-# Compose --wait may return as soon as a newly-created service is reported unhealthy,
-# even when the process is still completing a recoverable cold start. Start related
-# services in bounded stages and retry the wait once; if the service still cannot become
-# healthy, print the relevant status and logs instead of leaving only the generic
-# "dependency failed to start" message.
+# Compose --wait 可能在冷启动尚可恢复时立即因 unhealthy 返回。这里做一次有界重试；
+# 仍失败则输出服务状态与日志，避免只留下无法定位的 dependency failed to start。
 compose_up_wait() {
     local description="$1"
     shift
@@ -605,6 +617,7 @@ build_images() {
     # migrate/bootstrap-admin/subsystem-provisioner 都复用 api 构建出的
     # basic-platform/backend:local；CRM 与 Portal 使用不同 target/镜像，不会
     # 把 crm-server 和 portal-server 运行在同一个业务容器中。
+    # 限制并发既降低匿名镜像令牌抖动，也避免本地机器同时编译四个后端造成资源争抢。
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --ansi never build "${build_services[@]}"
 }
 
@@ -623,6 +636,8 @@ prepare_gateway_config() {
 }
 
 run_migrations() {
+	# 数据库先就绪、迁移再串行执行，业务 API 只能在全部 schema 成功后启动；禁止由 API 自动建表。
+	# 各数据库互相独立，不存在跨库事务；某个后续迁移失败时，已成功数据库按自身幂等迁移规则重试。
 	log "启动基础平台、合同、CRM 三个常驻 MySQL 与 Temporal，并等待健康检查"
 	compose_run up -d --wait mysql contract-mysql customer-mysql temporal
     log "执行基础平台数据库迁移"
@@ -641,6 +656,7 @@ run_migrations() {
 bootstrap_admin_if_needed() {
     local status_rc
     log "检查超级管理员是否已初始化"
+    # status 的退出码 3 是“尚未初始化”的协议结果，不是脚本错误；局部关闭 errexit 后必须立即恢复。
     set +e
     compose_run --profile bootstrap run --rm --no-deps bootstrap-admin ./bootstrap-admin --status
     status_rc=$?
@@ -664,6 +680,7 @@ bootstrap_admin_if_needed() {
     [[ -n "$admin_password" ]] || fail "首次初始化需要 --admin-password 或 BASIC_PLATFORM_ADMIN_PASSWORD"
 
     log "初始化第一个超级管理员"
+    # 密码经 stdin 进入一次性容器，不拼进容器命令行；完成后清除当前 shell 中的明文变量。
     printf '%s\n' "$admin_password" | compose_run --profile bootstrap run --rm --no-deps -T bootstrap-admin ./bootstrap-admin \
         --display-name "$admin_display_name" \
         --account-name "$admin_account_name" \
@@ -945,6 +962,45 @@ refresh_portal_backend() {
 	compose_run ps portal-api portal-mysql frontend
 }
 
+start_presale_worker() {
+	ensure_platform_env_file
+	ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
+	[[ -f "$presale_worker_env_file" ]] || \
+		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
+	[[ -s "$presale_worker_env_file" ]] || \
+		fail "售前投递 Worker 环境文件为空：${presale_worker_env_file}"
+	prepare_go_backend_base_images "售前投递 Worker"
+
+	log "构建 CRM 迁移镜像和售前投递 Worker；统一认证、审批和 PMS 地址仅从指定环境文件注入"
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile presale-worker --ansi never build customer-api presale-worker
+	log "启动客户与商机数据库并执行 CRM 清单迁移"
+	compose_run --profile presale-worker up -d --wait customer-mysql
+	compose_run --profile presale-worker run --rm --no-deps customer-migrate
+	log "启动售前投递 Worker"
+	compose_run --profile presale-worker up -d --no-deps presale-worker
+
+	local attempt heartbeat
+	for attempt in $(seq 1 20); do
+		heartbeat="$(
+			compose_run exec -T customer-mysql sh -c \
+				'MYSQL_PWD="$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 -u"$MYSQL_USER" -D "$MYSQL_DATABASE" -Nse "SELECT EXISTS(SELECT 1 FROM crm_worker_heartbeats WHERE worker_type=0x70726573616c655f64656c6976657279 AND heartbeat_at >= UTC_TIMESTAMP(3) - INTERVAL 15 SECOND)"' \
+				2>/dev/null || true
+		)"
+		if [[ "$heartbeat" == "1" ]]; then
+			compose_run --profile presale-worker ps presale-worker
+			log "售前投递 Worker 已启动，数据库新鲜心跳已确认"
+			return 0
+		fi
+		sleep 1
+	done
+
+	compose_run --profile presale-worker ps -a presale-worker >&2 || true
+	compose_run --profile presale-worker logs --tail 80 presale-worker >&2 || true
+	fail "售前投递 Worker 未在 20 秒内产生新鲜心跳；申请入口保持安全关闭"
+}
+
 prepare_operational_env() {
     ensure_platform_env_file
     ensure_contract_env_file false
@@ -1000,5 +1056,8 @@ case "$command_name" in
 		;;
 	refresh-portal-api)
 		refresh_portal_backend
+		;;
+	start-presale-worker)
+		start_presale_worker
 		;;
 esac

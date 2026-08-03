@@ -66,7 +66,7 @@ type DictionaryCreateInput struct {
 	Status      domain.Status
 }
 
-// DictionaryUpdateInput updates a dictionary type under optimistic locking.
+// DictionaryUpdateInput 通过 Version 更新字典；调用方必须基于刚读取的版本提交，旧页面不能静默覆盖新值。
 type DictionaryUpdateInput struct {
 	TenantID     string
 	DictionaryID string
@@ -222,6 +222,7 @@ func (service *Service) UpdateItem(ctx context.Context, input ItemUpdateInput) (
 // ListActiveItemsByCode returns only active items for an active dictionary. It is suitable for
 // read-only business selection controls and intentionally does not expose disabled values.
 func (service *Service) ListActiveItemsByCode(ctx context.Context, tenantID, code string, query PageRequest) (PageResult[domain.Item], error) {
+	// 运行时选择接口同时要求父字典和子项为 ACTIVE；管理端列表则保留禁用项以便审计和恢复。
 	tenantID = strings.TrimSpace(tenantID)
 	code = strings.TrimSpace(code)
 	if tenantID == "" || !validCode(code) {

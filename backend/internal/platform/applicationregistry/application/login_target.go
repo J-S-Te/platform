@@ -80,6 +80,8 @@ func (service *LoginTargetService) ResolveActiveTargetURI(ctx context.Context, i
 	if target.TenantID != input.TenantID || target.ApplicationID != input.ApplicationID ||
 		target.EnvironmentID != input.EnvironmentID || target.TargetCode != input.TargetCode ||
 		target.Status != loginTargetStatusActive || !validLoginTargetURI(target.TargetURI) {
+		// 即使仓储错误地返回了其他租户或环境的数据，也在应用层失败关闭；登录目标属于
+		// 安全跳转边界，不能只依赖调用方传入的 application_id。
 		return "", ErrNotFound
 	}
 	if isRelativeLoginTargetURI(target.TargetURI) {

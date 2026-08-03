@@ -17,13 +17,11 @@ import (
 )
 
 var (
-	// ErrUnauthenticated deliberately covers unknown accounts, invalid passwords and disabled
-	// credentials so the login endpoint cannot be used to enumerate valid accounts.
+	// 未知账号、错误密码和不可用凭据统一映射为未认证，避免攻击者根据错误差异枚举有效账号。
 	ErrUnauthenticated = errors.New("unauthenticated")
-	// ErrAccountLocked is returned only when an existing account has an active lock window.
+	// 锁定错误只在已确认账号仍处于锁定窗口时使用，具体身份仅供服务端安全审计。
 	ErrAccountLocked = errors.New("account locked")
-	// ErrConcurrentSession prevents one login account from creating a second active browser
-	// session on another terminal.
+	// 并发会话冲突阻止同一登录账号在另一终端再建立一个活动浏览器会话。
 	ErrConcurrentSession = errors.New("account already has an active session")
 
 	dummyPasswordDigest   = make([]byte, 32)
@@ -199,9 +197,8 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 }
 
 func (service *Service) consumeUnknownAccountPassword(password string) {
-	// The fixed dummy credential deliberately performs the same Argon2id work as a real account.
-	// The result and any verifier error are discarded so unknown accounts always receive the same
-	// public authentication failure response.
+	// 对不存在的账号仍执行一次固定参数的 Argon2id 校验，使其计算成本接近真实账号；
+	// 结果和校验器错误均不向外暴露，从响应内容与耗时两侧降低账号枚举风险。
 	_, _ = service.passwords.Verify(password, "argon2id", dummyPasswordDigest, dummyPasswordMetadata)
 }
 
@@ -214,6 +211,8 @@ func mustDummyPasswordMetadata() []byte {
 }
 
 func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time, replaceExisting bool) (SessionResult, error) {
+	// 绝对有效期由平台会话 TTL 决定，空闲有效期则读取租户当前安全策略。二者由仓储
+	// 同时校验，因此放宽 Cookie/JWT 的 exp 也不能绕过服务端空闲超时。
 	idleTimeout, err := service.loginSecurity.SessionIdleTimeout(ctx, account.TenantID)
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("read session inactivity policy: %w", err)
@@ -273,8 +272,8 @@ func loginFailedError(account domain.LoginAccount) LoginFailedError {
 		AccountID: account.AccountID, AccountName: account.AccountName}
 }
 
-// Authenticate verifies the signed cookie and cross-checks it against current session, account,
-// user and tenant state before a protected handler may trust the principal.
+// Authenticate 不把已签名 JWT 当作完整授权快照：JWT 只提供不可篡改的会话和主体标识，
+// 仓储仍会复核当前会话、账号、用户、租户状态，并重新加载平台角色与权限。
 func (service *Service) Authenticate(ctx context.Context, token string) (authctx.Principal, error) {
 	now := service.clock.Now().UTC()
 	claims, err := service.tokens.Verify(token, now)
@@ -299,9 +298,8 @@ func (service *Service) Authenticate(ctx context.Context, token string) (authctx
 	return toAuthContextPrincipal(principal), nil
 }
 
-// RecordInteraction marks a session as actively used only after a browser reports a trusted
-// click, key press, scroll, or touch event. Authentication itself intentionally does not extend
-// idle expiry, so background requests cannot prevent automatic logout.
+// RecordInteraction 只在浏览器上报可信点击、按键、滚动或触摸后推进交互时间；普通鉴权
+// 请求不会续期空闲窗口，避免轮询、后台标签页或恶意请求让无人操作的会话永久存活。
 func (service *Service) RecordInteraction(ctx context.Context, principal authctx.Principal) error {
 	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.Account.ID == "" {
 		return ErrUnauthenticated
@@ -346,8 +344,8 @@ func (service *Service) Refresh(ctx context.Context, principal authctx.Principal
 	return SessionResult{ExpiresAt: expiresAt, RedirectURL: "/", Token: token}, nil
 }
 
-// Logout revokes every active session for the current tenant account. This is intentionally
-// account-wide so signing out from any child application invalidates the SSO session everywhere.
+// Logout 按租户账号撤销全部活动会话，而不是只撤销当前 SessionID；从任一子系统退出后，
+// 同一统一登录会话在其他入口也会立即失效，保持单点退出语义。
 func (service *Service) Logout(ctx context.Context, principal authctx.Principal) error {
 	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.Account.ID == "" {
 		return ErrUnauthenticated

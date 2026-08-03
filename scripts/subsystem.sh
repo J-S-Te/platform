@@ -188,6 +188,7 @@ write_login_payload() {
   local password="$2"
   local password_file="$TEMP_DIR/password.txt"
 
+  # 口令经权限受 umask 077 约束的临时文件传给 JSON 编码器，既不进入 argv，也不经 Shell 插值。
   printf '%s' "$password" >"$password_file"
   python3 - "$ACCOUNT" "$REPLACE_EXISTING_SESSION" "$password_file" >"$destination" <<'PY'
 import json
@@ -368,6 +369,7 @@ ensure_authenticated() {
       log "ERROR" "Cookie 文件不可读：$COOKIE_FILE"
       exit 2
     fi
+    # 用户提供的 Cookie 文件只读复制到本次临时目录；登录、刷新或退出不能覆盖调用方的会话文件。
     local source_cookie_file="$COOKIE_FILE"
     COOKIE_FILE="$TEMP_DIR/cookies.txt"
     cp "$source_cookie_file" "$COOKIE_FILE"
@@ -380,6 +382,7 @@ ensure_authenticated() {
 
 cleanup() {
   local status=$?
+  # 先移除 EXIT trap，避免 logout 或临时目录清理失败时递归进入 cleanup；始终保留原命令退出码。
   trap - EXIT
   logout_owned_session
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then

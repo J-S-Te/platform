@@ -7,8 +7,7 @@
 
 ## 0. 先说清楚一个事实
 
-"一键接入"依赖本地编排里的 **部署 Agent（subsystem-provisioner）+ Docker Socket + 完整工作区**，
-生产目录刻意不提供。所以在这台服务器上跑通"一键接入"= 把服务器当**本地开发机**跑：
+测试/演示环境的一键接入依赖 **本地部署 Agent + Docker Socket + 完整工作区**。正式生产目录也提供独立的受控 Agent，但只允许内置 `contract_management/prod`、不可变镜像和固定 Compose 服务；本文仍只介绍把服务器当**本地开发机**的方式：
 
 ```text
 一个 frontend 容器（四个前端模块）
@@ -222,7 +221,7 @@ cd platform && bash scripts/docker-local.sh up --build
 
 | 现象 | 处理 |
 | --- | --- |
-| UI 一键接入 503"未启用自动部署 Agent" | 确认跑的是 `compose.local.yaml` 且 `docker-local.sh up` 正常启动过 `subsystem-provisioner`；不要在生产目录里硬开 |
+| UI 一键接入 503"未启用自动部署 Agent" | 本地确认 `compose.local.yaml` 已启动 `subsystem-provisioner`；生产确认已同步最新 `deploy/production` 资产并且 `platform-api`、`subsystem-provisioner` 健康 |
 | 登录回调被拒 / unauthorized_client | `AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true` 没生效；改后需重建 api（`docker-local.sh up`） |
 | 外部访问 8081 不通 | 检查 ECS 安全组 + 本机防火墙 + `FRONTEND_BIND_ADDRESS=0.0.0.0`（lan-access enable 后应已设置） |
 | 平台账号提示已有有效会话 | 使用 `--replace-existing-session` 或先在原终端退出 |

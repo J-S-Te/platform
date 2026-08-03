@@ -56,8 +56,8 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 	return toDomainLoginAccount(row), nil
 }
 
-// RecordSuccessfulPasswordVerification clears password-failure state immediately after the primary
-// credential succeeds, after the primary credential succeeds.
+// RecordSuccessfulPasswordVerification 在密码验证成功后锁定当前活动凭据并清除失败状态；
+// 锁内再次检查凭据有效期，避免校验完成到状态落库之间凭据被停用或过期。
 func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		verifiedAt := now.UTC()
@@ -89,9 +89,8 @@ func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx conte
 	})
 }
 
-// CreateSession records a successful local or external account login and inserts iam_session. The
-// account row lock serializes every login for the same account, so two terminals cannot both pass
-// the active-session check and create concurrent sessions.
+// CreateSession 以账号行的排他锁串行化同一账号的登录。清理过期会话、判断并发会话、
+// 可选替换旧会话和插入新会话处于同一事务，两个终端不能同时越过活动会话检查。
 func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
 	if idleTimeout <= 0 {
 		return application.ErrUnauthenticated
@@ -183,8 +182,8 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 	})
 }
 
-// FindPrincipalBySession verifies current session and account state, then loads the platform
-// application's active role and permission summary.
+// FindPrincipalBySession 每次都以数据库当前状态验证会话、账号、用户和租户，再加载平台
+// 应用的活动角色与权限；Cookie 中不缓存权限，因此停用主体或撤销角色无需等待 JWT 过期。
 func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error) {
 	if idleTimeout <= 0 {
 		return domain.Principal{}, application.ErrUnauthenticated

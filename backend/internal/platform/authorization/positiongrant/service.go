@@ -430,7 +430,8 @@ func (s *Service) Update(ctx context.Context, tenantID, operatorID, templateID s
 		if err := s.validateItems(ctx, tx, tenantID, input.Roles); err != nil {
 			return err
 		}
-		// Code is immutable: updates may change the template content, never its system-generated identifier.
+		// 模板编码由系统生成且不可变；更新只能调整展示信息、有效期和角色集合，避免外部
+		// 引用因重命名或编辑模板内容而失效。
 		result = tx.Model(&templateModel{}).Where("tenant_id=? AND id=? AND version=?", tenantID, templateID, input.Version).Updates(map[string]any{"name": input.Name, "description": input.Description, "status": input.Status, "valid_from": input.ValidFrom, "valid_until": input.ValidUntil, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")})
 		if result.Error != nil {
 			return writeError(result.Error, "update template")
@@ -469,11 +470,9 @@ func (s *Service) ListPositionAssignments(ctx context.Context, tenantID, positio
 	if err := s.ensurePosition(ctx, tenantID, positionID); err != nil {
 		return nil, err
 	}
-	// The position has already been validated above, and AssignmentView does not expose the
-	// position name. Query the assignment model directly instead of scanning an aliased `a.*`
-	// projection into an embedded model. GORM does not reliably populate that embedded model
-	// for aliased wildcard selects, which previously left TemplateID empty and made a successful
-	// save return PLATFORM_NOT_FOUND while loading the response.
+	// 岗位已在上方验证，AssignmentView 也不需要岗位名称，因此直接读取 assignmentModel。
+	// 避免把带别名的 a.* 扫描进嵌入模型：GORM 对该形态填充不稳定，曾导致 TemplateID
+	// 为空，使实际保存成功后的响应加载误报 PLATFORM_NOT_FOUND。
 	var rows []assignmentModel
 	err := s.db.WithContext(ctx).
 		Where("tenant_id=? AND position_id=?", tenantID, positionID).
@@ -503,6 +502,8 @@ func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, oper
 	}
 	changedApps := map[string]struct{}{}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 以“模板 ID 集合”对账而非物理删除：移除项逻辑停用，已有项复用并递增版本，
+		// 新增项创建；每一步同步生成角色绑定，最后统一推进受影响应用的 revision。
 		var existing []assignmentModel
 		if err := tx.Where("tenant_id=? AND position_id=?", tenantID, positionID).Find(&existing).Error; err != nil {
 			return fmt.Errorf("load position assignments: %w", err)
@@ -596,6 +597,8 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 	byApp := map[string]map[string]struct{}{}
 	applicationLabels := map[string]string{}
 	for _, row := range rows {
+		// 一个岗位角色只有在预览任职、模板、模板分配和模板条目的有效期存在交集时
+		// 才生效；交集边界也会成为最终生成绑定的有效期。
 		from, until, ok := intersect(input.EffectiveFrom, input.EffectiveTo, row.AssignmentFrom, row.AssignmentUntil, row.ItemFrom, row.ItemUntil)
 		if !ok {
 			continue
@@ -630,6 +633,8 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 }
 
 func (s *Service) upsertTemplateItems(tx *gorm.DB, tenantID, templateID, operatorID string, inputs []TemplateRoleInput, now time.Time) error {
+	// 应用、角色和作用域共同构成模板条目的稳定身份。集合对账保留历史 ID 和审计链，
+	// 被移除条目仅停用；重新加入同一条目时复用原记录并更新版本。
 	var existing []templateRoleModel
 	if err := tx.Where("tenant_id=? AND template_id=?", tenantID, templateID).Find(&existing).Error; err != nil {
 		return fmt.Errorf("load template roles: %w", err)
@@ -684,6 +689,8 @@ func (s *Service) syncTemplateAssignments(ctx context.Context, tx *gorm.DB, tena
 	return bumpChanged(tx, tenantID, changedApps, now, "position authorization template synchronized")
 }
 func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, assignmentID, operatorID string, now time.Time, changedApps map[string]struct{}) error {
+	// 模板分配不是查询时临时拼接，而是物化为来源可追踪的 POSITION 角色绑定。
+	// origin_id/origin_item_id 将每条绑定精确关联回分配和模板项，便于幂等对账与撤销。
 	var assignment assignmentModel
 	err := tx.Where("tenant_id=? AND id=?", tenantID, assignmentID).Take(&assignment).Error
 	if err != nil {
@@ -748,6 +755,8 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 	return nil
 }
 func bumpChanged(tx *gorm.DB, tenantID string, applications map[string]struct{}, now time.Time, reason string) error {
+	// 一个事务可能改动同一应用的多条生成绑定；按应用去重后只推进一次 revision，
+	// 既保证缓存失效，又避免 revision 增量依赖模板条目数量。
 	for appID := range applications {
 		row := map[string]any{"tenant_id": tenantID, "application_id": appID, "revision": 1, "changed_at": now, "change_reason": reason}
 		if err := tx.Table("authz_policy_revision").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}}, DoUpdates: clause.Assignments(map[string]any{"revision": gorm.Expr("revision + 1"), "changed_at": now, "change_reason": reason})}).Create(row).Error; err != nil {

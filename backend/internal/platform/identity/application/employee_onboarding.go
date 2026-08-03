@@ -66,9 +66,9 @@ type EmployeeOnboardingRepository interface {
 	CreateEmployee(context.Context, EmployeeOnboardingWrite) (domain.User, *domain.Account, *domain.Membership, error)
 }
 
-// CreateEmployee atomically creates a user, the built-in platform-user binding, and optional
-// local account / first membership.  Any failed validation or persistence step rolls everything
-// back, eliminating the old "user created but account failed" partial state.
+// CreateEmployee 先在应用层完成校验、密码散列和全部 ID 生成，再把用户、平台普通用户
+// 角色、可选本地账号和首次任职作为一个聚合交给仓储落库；任一环节失败都不能留下
+// “已有用户但账号或任职缺失”的部分状态。
 func (service *ManagementService) CreateEmployee(ctx context.Context, input EmployeeCreateInput) (EmployeeCreateResult, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" {
 		return EmployeeCreateResult{}, ErrValidation
@@ -135,6 +135,8 @@ func (service *ManagementService) CreateEmployee(ctx context.Context, input Empl
 	}
 
 	if input.Membership != nil {
+		// 首次任职默认参与组织/岗位授权继承；只有调用方显式传 false 才关闭，避免新增
+		// 员工已有岗位却因遗漏可选字段而无法获得岗位模板授权。
 		membership := MembershipCreateInput{
 			TenantID: input.TenantID, OperatorID: input.OperatorID, UserID: userID,
 			OrgUnitID: input.Membership.OrgUnitID, PositionID: input.Membership.PositionID,

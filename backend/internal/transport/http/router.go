@@ -1,4 +1,4 @@
-// Package httptransport assembles the HTTP transport without embedding business logic.
+// Package httptransport 负责装配 HTTP 路由和跨模块中间件，不在传输层复制业务规则。
 package httptransport
 
 import (
@@ -32,9 +32,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// OperationalModules groups optional platform capabilities added after the original P0 router.
-// Keeping them in one value prevents the composition root from growing another long positional
-// argument list and lets router tests omit the whole group safely.
+// OperationalModules 聚合后续扩展能力，避免组合根继续增长位置参数，也允许路由测试整体省略
+// 可选模块。字段为 nil 时只表示该能力未装配，不应注册一个会绕过依赖检查的空路由。
 type OperationalModules struct {
 	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
 	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
@@ -47,8 +46,8 @@ type OperationalModules struct {
 	AccessApplier settingsapplication.AccessApplier
 }
 
-// NewRouter creates the shared middleware chain and registers infrastructure endpoints. Domain
-// modules register their own routes here only through their public HTTP adapters.
+// NewRouter 先建立请求标识、可信代理、日志、恢复、CORS、CSRF 与内容类型等统一边界，
+// 再通过各领域公开 HTTP 适配器注册路由；具体仓储实现不能泄漏到传输层。
 func NewRouter(
 	cfg config.Config,
 	logger *slog.Logger,
@@ -189,6 +188,7 @@ func NewRouter(
 				middleware.RequirePermission("platform:application-environment:create"),
 				middleware.RequirePermission("platform:application-login-target:create"),
 				middleware.RequirePermission("platform:oauth-client:create"),
+				middleware.RequirePermission("platform:role-binding:update"),
 				adaptHandler(operational.SubsystemOnboarding.OnboardSubsystem),
 			)
 			// Reapply a previously-onboarded subsystem: rewrite .env.local, rebuild containers,
@@ -212,6 +212,7 @@ func NewRouter(
 				middleware.RequirePermission("platform:application-environment:update"),
 				middleware.RequirePermission("platform:application-login-target:update"),
 				middleware.RequirePermission("platform:oauth-client:disable"),
+				middleware.RequirePermission("platform:role-binding:update"),
 				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
 			)
 			// Tear down an onboarded subsystem: stop containers, remove .env.local, remove
@@ -424,9 +425,8 @@ func NewRouter(
 	return router
 }
 
-// adaptHandler allows existing module HTTP adapters to retain their response validation and
-// envelope logic while Gin owns routing and middleware execution. Gin path parameters are copied
-// into net/http request path values before the module handler runs.
+// adaptHandler 让既有 net/http 适配器保留响应封装和输入校验，同时由 Gin 执行路由与中间件。
+// 路径参数先复制到 Request.PathValue，模块处理器无需依赖 Gin context。
 func adaptHandler(handler http.HandlerFunc) gin.HandlerFunc {
 	return func(context *gin.Context) {
 		for _, parameter := range context.Params {

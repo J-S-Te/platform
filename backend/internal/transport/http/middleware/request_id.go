@@ -12,8 +12,8 @@ import (
 
 const requestIDHeader = "X-Request-ID"
 
-// RequestID validates or generates a ULID-shaped request identifier and stores it in the request
-// context so HTTP adapters, logs, and response envelopes use the same correlation value.
+// RequestID 仅接收规范 ULID 形态的外部追踪号，否则重新生成，并把同一值贯穿日志、响应与审计。
+// 这样既保留调用链关联，又避免任意长或带控制字符的请求头污染日志。
 func RequestID() gin.HandlerFunc {
 	return func(context *gin.Context) {
 		requestID := strings.ToUpper(strings.TrimSpace(context.GetHeader(requestIDHeader)))
@@ -43,8 +43,7 @@ func newULID(now time.Time) string {
 	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 	var entropy [10]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
-		// crypto/rand failure is exceptional. The timestamp and nanoseconds still prevent a
-		// predictable constant ID while allowing the current request to receive a correlation ID.
+		// 系统熵源失败时仍要给请求可关联的 ID；纳秒降级值不是安全随机数，只用于避免固定追踪号。
 		nanoseconds := now.UnixNano()
 		for index := range entropy {
 			entropy[index] = byte(nanoseconds >> (index % 8 * 8))

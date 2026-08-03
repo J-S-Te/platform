@@ -1,4 +1,5 @@
-// Package http exposes configuration management through the platform response envelope.
+// Package http 将配置管理用例适配为统一响应协议。租户和操作者信息只取自已认证上下文，
+// 请求体不能指定或覆盖其配置作用域。
 package http
 
 import (
@@ -215,6 +216,7 @@ func (h *Handler) GetRelease(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "配置发布记录查询成功", releaseToResponse(result))
 }
 func (h *Handler) GetPublished(w http.ResponseWriter, r *http.Request) {
+	// 应用编码和命名空间只是查找条件；真正的租户边界仍来自认证主体。
 	principal, ok := h.principal(w, r)
 	if !ok {
 		return

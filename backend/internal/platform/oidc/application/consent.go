@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// ConsentDecision defaults to Required=true and Granted=false so an absent record never silently
-// authorizes an application. The authorize UI/service decides whether to collect approval.
+// ConsentDecision 的零记录语义是“需要同意且尚未授权”，避免缺失数据被解释成默认允许。
+// 它只描述持久决定，是否展示同意页仍由授权流程结合客户端和请求范围决定。
 type ConsentDecision struct {
 	Required bool
 	Granted  bool
@@ -71,6 +71,7 @@ func (service *Service) GrantConsent(ctx context.Context, input ConsentInput) er
 	if client.TenantID != input.TenantID {
 		return ErrInvalidClient
 	}
+	// 持久同意只能覆盖客户端当前登记的 scope；客户端登记被收紧后，旧同意记录不能用来恢复已删除范围。
 	if _, err = registeredScopes(client, input.Scopes); err != nil {
 		return err
 	}
@@ -134,6 +135,7 @@ func normalizedConsentInput(input ConsentInput) ConsentInput {
 	return input
 }
 func scopeSetContains(granted, requested []string) bool {
+	// 同意采用集合包含而非字符串相等：已同意更大集合时可免重复确认，但任何新增 scope 都会重新触发同意。
 	values := map[string]struct{}{}
 	for _, scope := range granted {
 		values[scope] = struct{}{}

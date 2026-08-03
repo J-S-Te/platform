@@ -67,7 +67,8 @@ func NewRetentionService(repository RetentionRepository, writer ArchiveWriter, i
 	return &RetentionService{repository: repository, writer: writer, ids: ids, clock: clock, recorder: recorder}, nil
 }
 
-// Request creates a controlled task. PURGE requires a previously completed archive manifest.
+// Request 只创建受控任务，不直接触碰在线审计记录。PURGE 必须引用已完成归档清单，
+// 从接口层消除“未留存证据即删除”的路径。
 func (service *RetentionService) Request(ctx context.Context, input RetentionTaskInput) (domain.RetentionTask, error) {
 	if err := validateRetentionTask(input); err != nil {
 		return domain.RetentionTask{}, err
@@ -88,8 +89,8 @@ func (service *RetentionService) Request(ctx context.Context, input RetentionTas
 	return created, nil
 }
 
-// RunOnce claims and executes exactly one due retention task. workerID must be stable per worker.
-// RetentionTaskPageRequest controls tenant-isolated operational task history queries.
+// RunOnce 每次只领取一个到期任务；workerID 在一个执行实例生命周期内必须稳定，仓储才能
+// 区分正常持有与超时接管。RetentionTaskPageRequest 仅用于租户隔离的运维历史查询。
 type RetentionTaskPageRequest struct {
 	Page, PageSize              int
 	ApplicationID, Mode, Status string
@@ -131,8 +132,8 @@ func (service *RetentionService) archive(ctx context.Context, task domain.Retent
 	if err != nil {
 		return service.fail(ctx, task, "ARCHIVE_SOURCE_COUNT_FAILED", err, now)
 	}
-	// The archive writer produces one manifest-backed immutable file per task. Refuse a task that
-	// exceeds its verified bound instead of marking a partial archive as completed.
+	// 一个任务只生成一个由清单背书的不可变文件。超过上限时整项拒绝，不能把截断文件
+	// 标成成功，否则后续 PURGE 会把“未归档部分”误认为已有留存副本。
 	if err := service.repository.SetRetentionTaskCandidateCount(ctx, task.TaskID, candidateCount); err != nil {
 		return service.fail(ctx, task, "ARCHIVE_CANDIDATE_COUNT_UPDATE_FAILED", err, now)
 	}
@@ -237,8 +238,8 @@ func validateRetentionTask(input RetentionTaskInput) error {
 	return nil
 }
 
-// DeadLetterInput comes from a delivery adapter after an ingestion failure. The adapter must not
-// include access tokens or client secrets in ErrorMessage or Event.Metadata.
+// DeadLetterInput 来自投递适配器的接收失败路径。ErrorMessage 与 Event.Metadata 在进入此层前
+// 不得包含访问令牌或客户端密钥，死信是可长期保留并可被运维人员查看的故障证据。
 type DeadLetterInput struct {
 	TenantID, ApplicationCode, EnvironmentCode, ErrorCode, ErrorMessage string
 	Event                                                               EventInput
@@ -249,7 +250,7 @@ type DeadLetterPageRequest struct {
 	ApplicationCode, Status string
 }
 
-// DeadLetterRepository persists the redacted payload and all operator state transitions.
+// DeadLetterRepository 保存已脱敏载荷及全部人工状态转换；每个操作都必须同时带租户边界。
 type DeadLetterRepository interface {
 	CreateDeadLetter(context.Context, domain.DeadLetter) (domain.DeadLetter, error)
 	GetDeadLetter(context.Context, string, string) (domain.DeadLetter, error)
@@ -323,7 +324,8 @@ func (service *DeadLetterService) Status(ctx context.Context, tenantID, applicat
 	return service.repository.DeadLetterStatus(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode))
 }
 
-// Replay uses the original redacted, validated event. A successful replay is itself audited.
+// Replay 复用已脱敏且经过校验的原事件，保持原 event_id，从而让接收端幂等键阻止重复写入；
+// 重放成功本身也属于高风险治理动作，必须另记一条审计记录。
 func (service *DeadLetterService) Replay(ctx context.Context, tenantID, deadLetterID, operatorID string) (domain.Receipt, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(deadLetterID) == "" || strings.TrimSpace(operatorID) == "" {
 		return domain.Receipt{}, validation("tenant_id, dead_letter_id and operator_id are required")
@@ -342,8 +344,7 @@ func (service *DeadLetterService) Replay(ctx context.Context, tenantID, deadLett
 	receipt, err := service.ingestor.Ingest(ctx, tenantID, event)
 	if err != nil {
 		now := service.clock.Now().UTC().Truncate(time.Millisecond)
-		// Preserve a safe, bounded failure state for operations without exposing any
-		// upstream token, response body, or original audit-event payload.
+		// 运维状态只保留有界且安全的失败摘要，不落上游令牌、响应正文或原始事件载荷。
 		if markErr := service.repository.MarkDeadLetterReplayFailed(ctx, tenantID, letter.DeadLetterID, "AUDIT_INGEST_REPLAY_FAILED", truncateError(err), now); markErr != nil {
 			return domain.Receipt{}, fmt.Errorf("record audit dead-letter replay failure: %w", markErr)
 		}
@@ -429,8 +430,8 @@ func normalizeReceiptPageRequest(query IngestionReceiptPageRequest) IngestionRec
 	return query
 }
 
-// ReplayBatch replays pending letters independently. A failed item remains pending for a later
-// controlled retry; one failure never prevents other explicitly selected letters from running.
+// ReplayBatch 独立重放每条待处理死信：单条失败继续保持可受控重试，不阻塞同批其他明确选择项；
+// 这不是数据库原子批次，返回结果必须逐项解释。
 func (service *DeadLetterService) ReplayBatch(ctx context.Context, tenantID string, deadLetterIDs []string, operatorID string) ([]domain.DeadLetterReplayResult, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(operatorID) == "" {
 		return nil, validation("tenant_id and operator_id are required")

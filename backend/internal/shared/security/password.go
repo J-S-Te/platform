@@ -1,4 +1,4 @@
-// Package security provides low-level security primitives shared by platform modules.
+// Package security 提供平台模块共享的底层安全原语。
 package security
 
 import (
@@ -14,8 +14,8 @@ import (
 
 const argon2idAlgorithm = "argon2id"
 
-// Argon2idPasswordHasher creates fresh Argon2id credentials for controlled provisioning flows.
-// It returns the raw digest and JSON verification metadata expected by iam_password_credential.
+// Argon2idPasswordHasher 为受控开户和重置流程生成新凭据，返回原始摘要以及
+// iam_password_credential 所需的参数元数据；盐不会与摘要混成不可升级的私有格式。
 type Argon2idPasswordHasher struct{}
 
 // Hash derives a password digest using a cryptographically random 16-byte salt.
@@ -38,8 +38,8 @@ type Argon2idParams struct {
 	KeyLength   uint32 `json:"key_length"`
 }
 
-// DefaultArgon2idParams returns the baseline parameters used by future password-provisioning
-// flows. Verification always reads the stored parameters so planned upgrades remain possible.
+// DefaultArgon2idParams 是新凭据的基线成本。验证始终读取每条凭据保存的参数，
+// 因此提高默认成本不会让历史密码立即失效，可在后续成功登录时渐进升级。
 func DefaultArgon2idParams(salt []byte) Argon2idParams {
 	return Argon2idParams{
 		Version:     argon2.Version,
@@ -51,8 +51,8 @@ func DefaultArgon2idParams(salt []byte) Argon2idParams {
 	}
 }
 
-// HashPassword derives a raw Argon2id password digest and serializes its verification metadata.
-// It is intentionally provided for future operator-driven account provisioning, not HTTP input.
+// HashPassword 生成原始 Argon2id 摘要并序列化验证参数。输入应来自已完成强度与长度校验的
+// 应用流程，本原语不承担 HTTP 请求策略校验。
 func HashPassword(password string, params Argon2idParams) ([]byte, []byte, error) {
 	if err := validateArgon2idParams(params); err != nil {
 		return nil, nil, err
@@ -69,8 +69,8 @@ func HashPassword(password string, params Argon2idParams) ([]byte, []byte, error
 	return digest, metadata, nil
 }
 
-// VerifyPassword verifies an Argon2id credential stored as a raw digest plus JSON metadata.
-// It returns false for a well-formed credential with a non-matching password.
+// VerifyPassword 使用持久化参数重算摘要，并用恒定时间比较结果。格式或成本参数非法属于凭据错误，
+// 与格式正确但密码不匹配的 false 结果分开返回。
 func VerifyPassword(password string, algorithm string, digest, metadata []byte) (bool, error) {
 	if !strings.EqualFold(algorithm, argon2idAlgorithm) {
 		return false, fmt.Errorf("unsupported password hash algorithm %q", algorithm)

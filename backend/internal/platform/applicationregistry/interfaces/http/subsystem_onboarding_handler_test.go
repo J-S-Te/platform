@@ -23,14 +23,19 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	pathPrefix := "/contract_management"
 	upstreamURL := "http://contract-api:8081"
 	service := &stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
-		Application:                     application.Application{ID: "app-1", TenantID: "tenant-1", Code: "contract_management", Name: "合同管理系统", Status: "ACTIVE"},
-		Environment:                     application.Environment{ID: "env-1", TenantID: "tenant-1", ApplicationID: "app-1", Environment: "dev", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL, Status: "ACTIVE"},
+		Application:                     application.Application{ID: "app-1", TenantID: "01K10A00000000000000000001", Code: "contract_management", Name: "合同管理系统", Status: "ACTIVE"},
+		Environment:                     application.Environment{ID: "env-1", TenantID: "01K10A00000000000000000001", ApplicationID: "app-1", Environment: "dev", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL, Status: "ACTIVE"},
 		OAuthClient:                     application.OAuthClientView{ID: "client-1", ClientID: "contract_management-dev-web", ClientName: "合同管理系统 Web", ClientType: "confidential", Status: "ACTIVE"},
 		CatalogPublisherOAuthClient:     application.OAuthClientView{ID: "client-2", ClientID: "contract_management-dev-catalog-publisher", ClientName: "合同管理系统 Authorization Catalog Publisher", ClientType: "service", TokenAuthMethod: "client_secret_basic", Status: "ACTIVE"},
 		PlaintextSecret:                 "must-never-reach-browser",
 		CatalogPublisherPlaintextSecret: "catalog-publisher-secret-must-never-reach-browser",
 		RedirectURI:                     "http://localhost:8081/contract_management/auth/callback",
 		PublicURL:                       "http://localhost:8081/contract_management/",
+		ServiceCredentials: []application.SubsystemServiceCredential{{
+			Purpose:         application.ServiceCredentialAuditIngest,
+			OAuthClient:     application.OAuthClientView{ClientID: "contract_management-dev-audit-publisher"},
+			PlaintextSecret: "audit-secret-must-never-reach-browser",
+		}},
 	}}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
@@ -43,8 +48,8 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -53,7 +58,7 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, forbidden := range []string{"must-never-reach-browser", "catalog-publisher-secret-must-never-reach-browser", `"integration"`, "environment_file", "gateway_command", "OIDC_CLIENT_SECRET", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"} {
+	for _, forbidden := range []string{"must-never-reach-browser", "catalog-publisher-secret-must-never-reach-browser", "audit-secret-must-never-reach-browser", `"integration"`, "environment_file", "gateway_command", "OIDC_CLIENT_SECRET", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("response leaked %q: %s", forbidden, body)
 		}
@@ -61,10 +66,10 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	if !strings.Contains(body, `"automation"`) || !strings.Contains(body, `"status":"completed"`) {
 		t.Fatalf("response missing safe automation status: %s", body)
 	}
-	if !strings.Contains(body, `"authorization"`) || !strings.Contains(body, `"initial_admin_user_id":"user-1"`) || !strings.Contains(body, `"role_code":"admin"`) {
+	if !strings.Contains(body, `"authorization"`) || !strings.Contains(body, `"initial_admin_user_id":"01K10B00000000000000000001"`) || !strings.Contains(body, `"role_code":"admin"`) {
 		t.Fatalf("response missing explicit initial administrator assignment: %s", body)
 	}
-	if access.userID != "user-1" || access.operatorID != "user-1" || access.applicationCode != "contract_management" {
+	if access.userID != "01K10B00000000000000000001" || access.operatorID != "01K10B00000000000000000001" || access.applicationCode != "contract_management" {
 		t.Fatalf("unexpected access assignment: %#v", access)
 	}
 	if provisioner.input.ApplicationID != "app-1" || provisioner.input.ClientSecret != "must-never-reach-browser" {
@@ -72,6 +77,53 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	}
 	if provisioner.input.CatalogPublisherClientID != "contract_management-dev-catalog-publisher" || provisioner.input.CatalogPublisherClientSecret != "catalog-publisher-secret-must-never-reach-browser" {
 		t.Fatalf("deployment helper did not receive isolated catalog publisher integration: %#v", provisioner.input)
+	}
+	if credential, ok := provisioner.input.ServiceCredential(application.ServiceCredentialAuditIngest); !ok || credential.PlaintextSecret != "audit-secret-must-never-reach-browser" {
+		t.Fatalf("deployment helper did not receive isolated audit integration: %#v", provisioner.input.ServiceCredentials)
+	}
+}
+
+func TestOnboardSubsystemPersistsSelectedAdministratorForRetry(t *testing.T) {
+	t.Parallel()
+	pathPrefix := "/contract_management"
+	upstreamURL := "http://contract-api:8081"
+	service := &stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
+		Application:                 application.Application{ID: "app-1", Code: "contract_management"},
+		Environment:                 application.Environment{Environment: "prod", PathPrefix: &pathPrefix, UpstreamURL: &upstreamURL},
+		OAuthClient:                 application.OAuthClientView{ClientID: "contract_management-prod-web"},
+		CatalogPublisherOAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-catalog-publisher"},
+		PlaintextSecret:             "browser-secret", CatalogPublisherPlaintextSecret: "publisher-secret",
+		RedirectURI: "http://localhost:8081/contract_management/auth/callback",
+		PublicURL:   "http://localhost:8081/contract_management/",
+		ServiceCredentials: []application.SubsystemServiceCredential{{
+			Purpose:         application.ServiceCredentialAuditIngest,
+			OAuthClient:     application.OAuthClientView{ClientID: "contract_management-prod-audit-publisher"},
+			PlaintextSecret: "audit-secret",
+		}},
+	}}
+	stateStore := &recordingSubsystemDeploymentStateStore{}
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
+	handler, err := NewSubsystemOnboardingHandler(service, &recordingHTTPSubsystemProvisioner{}, access, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(`{"application_code":"contract_management","application_name":"合同管理系统","environment":"prod","public_base_url":"http://localhost:8081","upstream_url":"http://contract-api:8081","path_prefix":"/contract_management","client_type":"confidential","initial_admin_user_id":"01K10D00000000000000000001"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.OnboardSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusCreated {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if service.input.InitialAdminUserID != "01K10D00000000000000000001" || access.userID != service.input.InitialAdminUserID {
+		t.Fatalf("selected administrator was not carried through: input=%#v access=%#v", service.input, access)
+	}
+	if stateStore.initialAccessMarks != 1 {
+		t.Fatalf("initial access completion marks = %d", stateStore.initialAccessMarks)
 	}
 }
 
@@ -90,8 +142,8 @@ func TestOnboardSubsystemExistingEnvironmentReturnsActionableConflict(t *testing
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -130,7 +182,7 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 	requestBody := `{"application_code":"customer_and_opportunity","application_name":"客户与商机管理系统","environment":"dev","public_base_url":"http://localhost:8081","upstream_url":"http://customer-api:8090","path_prefix":"/customer-opportunity","client_type":"confidential"}`
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"}}))
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"}}))
 	response := httptest.NewRecorder()
 	handler.OnboardSubsystem(response, request)
 	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "compose.yaml") || strings.Contains(response.Body.String(), "/Users/") {
@@ -139,21 +191,39 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 }
 
 type stubSubsystemOnboardingService struct {
-	result application.SubsystemOnboardingResult
-	err    error
+	result      application.SubsystemOnboardingResult
+	input       application.SubsystemOnboardingInput
+	portalItems []application.PortalApplication
+	err         error
 }
 
-func (service *stubSubsystemOnboardingService) OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
+func (service *stubSubsystemOnboardingService) OnboardSubsystem(_ context.Context, input application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
+	service.input = input
 	return service.result, service.err
 }
 
-func (*stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
-	return nil, nil
+func (service *stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
+	if service.portalItems != nil {
+		return service.portalItems, nil
+	}
+	applicationID := service.result.Application.ID
+	if applicationID == "" {
+		applicationID = "app-1"
+	}
+	environment := service.result.Environment.Environment
+	if environment == "" {
+		environment = "prod"
+	}
+	code := service.result.Application.Code
+	if code == "" {
+		code = "contract_management"
+	}
+	return []application.PortalApplication{{ApplicationID: applicationID, Code: code, Environment: environment}}, nil
 }
 
 func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T) {
 	t.Parallel()
-	service := &stubSubsystemOnboardingService{}
+	service := &stubSubsystemOnboardingService{portalItems: []application.PortalApplication{}}
 	handler, err := NewSubsystemOnboardingHandler(
 		service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
 		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -163,7 +233,7 @@ func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T)
 	}
 	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/portal/applications", nil)
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -209,7 +279,7 @@ type recordingHTTPSubsystemProvisioner struct {
 	teardownErr  error
 }
 
-func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, string) error {
+func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, application.SubsystemPreflightInput) error {
 	return provisioner.preflightErr
 }
 
@@ -223,7 +293,7 @@ func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, 
 	return provisioner.updateErr
 }
 
-func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, applicationCode, _ string) error {
+func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, _ string, applicationCode, _ string) error {
 	provisioner.teardownCode = applicationCode
 	return provisioner.teardownErr
 }
@@ -241,8 +311,8 @@ func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -273,8 +343,8 @@ func TestUpdateSubsystemRejectsMissingFields(t *testing.T) {
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -300,8 +370,8 @@ func TestTeardownSubsystemCallsProvisionerAndAcknowledgesDeepCleanup(t *testing.
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-teardown", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"},
-		User:   authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -328,10 +398,12 @@ type recordedDeploymentTransition struct {
 }
 
 type recordingSubsystemDeploymentStateStore struct {
-	transitions   []recordedDeploymentTransition
-	state         application.SubsystemDeploymentState
-	transitionErr error
-	getErr        error
+	transitions        []recordedDeploymentTransition
+	state              application.SubsystemDeploymentState
+	initialAccessMarks int
+	transitionErr      error
+	getErr             error
+	contextErr         error
 }
 
 func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(_ context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
@@ -346,11 +418,21 @@ func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentState
 	return store.state, store.getErr
 }
 
+func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentContext(context.Context, string, string, string) (application.SubsystemDeploymentState, error) {
+	return store.state, store.contextErr
+}
+
+func (store *recordingSubsystemDeploymentStateStore) MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error {
+	store.initialAccessMarks++
+	return nil
+}
+
 func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T) {
 	t.Parallel()
-	stateStore := &recordingSubsystemDeploymentStateStore{}
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "01K10B00000000000000000001"}}
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
 	handler, err := NewSubsystemOnboardingHandler(
-		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, access,
 		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
 	)
 	if err != nil {
@@ -359,7 +441,7 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -377,11 +459,45 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	if stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "RETRY" {
 		t.Fatalf("terminal transition = %#v", stateStore.transitions[1])
 	}
+	if access.userID != "01K10B00000000000000000001" || stateStore.initialAccessMarks != 1 {
+		t.Fatalf("retry did not complete pending initial access: access=%#v marks=%d", access, stateStore.initialAccessMarks)
+	}
+}
+
+func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T) {
+	t.Parallel()
+	assignedAt := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
+		ApplicationID: "app-1", InitialAdminUserID: "01K10D00000000000000000001", InitialAccessAssignedAt: &assignedAt,
+	}}
+	access := &recordingSubsystemAccessManager{roleCode: "admin"}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, access,
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"contract_management","environment":"prod"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10E00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if access.userID != "" || stateStore.initialAccessMarks != 0 {
+		t.Fatalf("retry unexpectedly restored initial access: access=%#v marks=%d", access, stateStore.initialAccessMarks)
+	}
 }
 
 func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 	t.Parallel()
-	stateStore := &recordingSubsystemDeploymentStateStore{}
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "01K10B00000000000000000001"}}
 	provisioner := &recordingHTTPSubsystemProvisioner{updateErr: application.ErrSubsystemProvisioningUnavailable}
 	handler, err := NewSubsystemOnboardingHandler(
 		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
@@ -393,7 +509,7 @@ func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -429,7 +545,7 @@ func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 	}
 	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-status?application_code=customer_management&environment=dev", nil)
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
-		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
 	}))
 	response := httptest.NewRecorder()
 
@@ -443,6 +559,9 @@ func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("response missing %s: %s", expected, body)
 		}
+	}
+	if !strings.Contains(body, `"next_action":`) || !strings.Contains(body, "不要重复新增接入") {
+		t.Fatalf("status response missing actionable recovery guidance: %s", body)
 	}
 	for _, forbidden := range []string{"client_secret", "command", "filesystem", "container_id"} {
 		if strings.Contains(body, forbidden) {

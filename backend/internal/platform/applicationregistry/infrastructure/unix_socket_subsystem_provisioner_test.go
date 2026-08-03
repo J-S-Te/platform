@@ -34,7 +34,8 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 	if err != nil {
 		t.Fatalf("construct socket client: %v", err)
 	}
-	if err := client.Preflight(context.Background(), "contract_management"); err != nil {
+	preflight := application.SubsystemPreflightInput{TenantID: "tenant-1", ApplicationCode: "contract_management", Environment: "dev"}
+	if err := client.Preflight(context.Background(), preflight); err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
 	input := application.SubsystemProvisioningInput{
@@ -65,7 +66,7 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 		t.Fatalf("update input = %#v", got)
 	}
 
-	if err := client.Teardown(context.Background(), "contract_management", "dev"); err != nil {
+	if err := client.Teardown(context.Background(), "tenant-1", "contract_management", "dev"); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 	if gotCode, gotEnv := executor.teardownSnapshot(); gotCode != "contract_management" || gotEnv != "dev" {
@@ -89,7 +90,7 @@ func TestUnixSocketSubsystemProvisionerDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct disabled client: %v", err)
 	}
-	if err := client.Preflight(context.Background(), "contract_management"); !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
+	if err := client.Preflight(context.Background(), application.SubsystemPreflightInput{ApplicationCode: "contract_management"}); !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
 		t.Fatalf("disabled preflight error = %v", err)
 	}
 }
@@ -111,7 +112,7 @@ func TestUnixSocketSubsystemProvisionerReturnsSafeActionableExecutorMessage(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = client.Preflight(context.Background(), "customer_and_opportunity")
+	err = client.Preflight(context.Background(), application.SubsystemPreflightInput{ApplicationCode: "customer_and_opportunity"})
 	if !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) || !strings.Contains(err.Error(), "Compose file is unavailable") {
 		t.Fatalf("preflight error = %v", err)
 	}
@@ -139,10 +140,10 @@ type recordingSubsystemProvisioner struct {
 	preflightErr error
 }
 
-func (provisioner *recordingSubsystemProvisioner) Preflight(_ context.Context, code string) error {
+func (provisioner *recordingSubsystemProvisioner) Preflight(_ context.Context, input application.SubsystemPreflightInput) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
-	provisioner.code = code
+	provisioner.code = input.ApplicationCode
 	return provisioner.preflightErr
 }
 
@@ -160,7 +161,7 @@ func (provisioner *recordingSubsystemProvisioner) Update(_ context.Context, inpu
 	return nil
 }
 
-func (provisioner *recordingSubsystemProvisioner) Teardown(_ context.Context, code, environment string) error {
+func (provisioner *recordingSubsystemProvisioner) Teardown(_ context.Context, _ string, code, environment string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	provisioner.teardownCode = code

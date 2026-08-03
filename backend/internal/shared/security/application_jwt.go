@@ -10,9 +10,8 @@ import (
 	"time"
 )
 
-// ApplicationTokenClaims is the signed, short-lived identity of an OAuth client.
-// Every binding field is carried in the token and re-checked against the active OAuth client
-// registration before the token can become an application principal.
+// ApplicationTokenClaims 是 OAuth 客户端的短期机器身份。Token 携带租户、应用、环境和 scope
+// 完整绑定，但认证器仍会回查当前客户端登记；禁用客户端或收回 scope 不能仅依赖 Token 到期。
 type ApplicationTokenClaims struct {
 	OAuthClientID   string
 	ClientID        string
@@ -44,8 +43,8 @@ type applicationJWTPayload struct {
 	ExpiresAt       int64    `json:"exp"`
 }
 
-// ApplicationJWTManager signs and validates OAuth client access tokens. It uses the same
-// Ed25519 key pair as the session token manager but a separate audience and token_use claim.
+// ApplicationJWTManager 与浏览器会话复用 Ed25519 密钥，但使用独立 audience 和 token_use；
+// 密钥复用不代表信任域可互换，验证方必须同时检查这两个用途隔离字段。
 type ApplicationJWTManager struct {
 	issuer     string
 	audience   string
@@ -69,8 +68,8 @@ func LoadApplicationJWTManager(issuer, audience, privateKeyPath, publicKeyPath s
 	return &ApplicationJWTManager{issuer: issuer, audience: audience, privateKey: privateKey, publicKey: publicKey}, nil
 }
 
-// Issue signs a client-credentials access token. An application token becomes usable no earlier
-// than its issue time unless a later NotBefore value is explicitly supplied.
+// Issue 签发 client_credentials Token。NotBefore 默认为签发时刻；调用方可推迟生效，
+// 但不能构造早于 IssuedAt 的有效窗口。
 func (manager *ApplicationJWTManager) Issue(claims ApplicationTokenClaims) (string, error) {
 	if manager == nil {
 		return "", errors.New("application JWT manager must not be nil")
@@ -101,9 +100,8 @@ func (manager *ApplicationJWTManager) Issue(claims ApplicationTokenClaims) (stri
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-// Verify validates the signature, issuer, audience, token type, temporal claims and the
-// complete tenant/application/environment binding. Database-backed registration and scope
-// validation remain the responsibility of the application registry authenticator.
+// Verify 校验签名、用途、时间窗口和租户/应用/环境绑定。这里只证明 Token 自洽且由平台签发，
+// 客户端当前是否启用、登记是否仍匹配以及 scope 是否撤销由应用注册认证器继续校验。
 func (manager *ApplicationJWTManager) Verify(token string, now time.Time) (ApplicationTokenClaims, error) {
 	if manager == nil {
 		return ApplicationTokenClaims{}, errors.New("application JWT manager must not be nil")
@@ -153,6 +151,7 @@ func (manager *ApplicationJWTManager) Verify(token string, now time.Time) (Appli
 }
 
 func canonicalApplicationClaims(claims ApplicationTokenClaims) ApplicationTokenClaims {
+	// JWT NumericDate 以秒为精度；签发和验证统一截断，避免数据库或测试中的亚秒值造成边界漂移。
 	claims.IssuedAt = claims.IssuedAt.UTC().Truncate(time.Second)
 	claims.NotBefore = claims.NotBefore.UTC().Truncate(time.Second)
 	claims.ExpiresAt = claims.ExpiresAt.UTC().Truncate(time.Second)

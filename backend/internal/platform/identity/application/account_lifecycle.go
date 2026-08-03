@@ -228,9 +228,8 @@ func (service *AccountLifecycleService) InitializePassword(ctx context.Context, 
 	return service.writeAdministratorPassword(ctx, input.TenantID, input.AccountID, input.OperatorID, input.Version, input.Password, credentialID, "PASSWORD_INITIALIZED")
 }
 
-// ResetPassword creates a strong password and returns it once. For an ordinary account it replaces
-// the existing digest; for a credential-free external account reservation it initializes the first
-// credential. The plaintext never crosses the repository boundary.
+// ResetPassword 生成只在本次响应中返回的强密码。已有本地凭据时替换摘要；外部身份预留
+// 的 HUMAN/LOCAL 账号尚无凭据时则初始化首个凭据。明文始终不会跨越仓储边界。
 func (service *AccountLifecycleService) ResetPassword(ctx context.Context, input PasswordResetInput) (PasswordResetResult, error) {
 	if err := validatePasswordResetInput(input); err != nil {
 		return PasswordResetResult{}, err
@@ -246,9 +245,8 @@ func (service *AccountLifecycleService) ResetPassword(ctx context.Context, input
 		if !errors.Is(err, ErrConflict) {
 			return PasswordResetResult{}, err
 		}
-		// The external identity provider reserves a HUMAN/LOCAL account but intentionally stores no
-		// password. Reuse the same strong server-generated value to initialize it, preserving the
-		// one-time offline-delivery response used by the management UI.
+		// 外部身份源可能预留 HUMAN/LOCAL 账号但不写密码；普通重置返回冲突时，复用同一份
+		// 服务端强密码完成首次初始化，仍保持管理界面“一次生成、线下交付”的语义。
 		credentialID, idErr := service.ids.New(service.clock.Now().UTC())
 		if idErr != nil {
 			return PasswordResetResult{}, fmt.Errorf("generate initialized password credential ID: %w", idErr)
@@ -260,8 +258,8 @@ func (service *AccountLifecycleService) ResetPassword(ctx context.Context, input
 	return PasswordResetResult{AccountID: strings.TrimSpace(input.AccountID), TemporaryPassword: password}, nil
 }
 
-// ChangeOwnPassword verifies the current password, replaces its digest and revokes every session,
-// including the current browser session. The caller must clear its session cookie afterwards.
+// ChangeOwnPassword 使用读取到的旧摘要作为并发条件更新凭据，并在同一事务撤销该账号
+// 全部会话（包括当前浏览器）；调用方随后必须清理 Cookie，避免旧会话表面仍显示已登录。
 func (service *AccountLifecycleService) ChangeOwnPassword(ctx context.Context, input PasswordChangeInput) error {
 	if err := validatePasswordChangeInput(input); err != nil {
 		return err

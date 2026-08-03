@@ -359,6 +359,27 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # 售前投递进程独立于 CRM API 部署。审批、统一认证和 PMS 地址只从指定的
+  # Worker 环境文件注入，可以按环境指向本地 HTTPS 服务或远端服务器；Compose
+  # 不提供任何地址默认值。显式启用 profile 才会启动，缺配置时保持失败关闭。
+  presale-worker:
+    image: customer-opportunity/presale-worker:local
+    build:
+      context: ../customer_and_opportunity
+      target: presale-worker-runtime
+    env_file:
+      - path: ${PRESALE_WORKER_ENV_FILE:-../customer_and_opportunity/.env.presale-worker}
+        required: false
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["presale-worker"]
+    restart: unless-stopped
+
   # 客户自助门户使用独立数据库，避免外部客户会话、身份映射和备案材料与 CRM
   # 员工域混库。门户与 CRM 从同一源码仓库构建，但使用不同 target、不同镜像和不同容器。
   portal-mysql:

@@ -156,6 +156,7 @@ type subsystemDeploymentStateResponse struct {
 	AttemptCount    uint       `json:"attempt_count"`
 	LastErrorCode   string     `json:"last_error_code,omitempty"`
 	LastError       string     `json:"last_error,omitempty"`
+	NextAction      string     `json:"next_action,omitempty"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 	UpdatedAt       time.Time  `json:"updated_at"`
@@ -163,6 +164,7 @@ type subsystemDeploymentStateResponse struct {
 
 // OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
 func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
 		return
@@ -171,8 +173,12 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	if !decodeApplicationManagementJSON(writer, request, &payload) {
 		return
 	}
+	initialAdminUserID := strings.TrimSpace(payload.InitialAdminID)
+	if initialAdminUserID == "" {
+		initialAdminUserID = principal.User.ID
+	}
 	onboardingInput := application.SubsystemOnboardingInput{
-		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, InitialAdminUserID: initialAdminUserID,
 		ApplicationCode: payload.ApplicationCode, ApplicationName: payload.ApplicationName,
 		Description: payload.Description, Environment: payload.Environment,
 		PublicBaseURL: payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL,
@@ -182,7 +188,12 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
-	if err := handler.provisioner.Preflight(request.Context(), onboardingInput.ApplicationCode); err != nil {
+	if err := handler.provisioner.Preflight(request.Context(), application.SubsystemPreflightInput{
+		TenantID: principal.Tenant.ID, ApplicationCode: onboardingInput.ApplicationCode,
+		Environment: onboardingInput.Environment, Issuer: handler.oidcIssuer,
+		PublicBaseURL: onboardingInput.PublicBaseURL, UpstreamURL: onboardingInput.UpstreamURL,
+		PathPrefix: onboardingInput.PathPrefix, ClientType: onboardingInput.ClientType,
+	}); err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -215,15 +226,16 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	// The application-owned role catalog is published by the deployment Agent. Assigning the
 	// conventional admin role before Provision meant every new subsystem silently skipped its
 	// initial administrator because the role did not exist yet.
-	initialAdminUserID := strings.TrimSpace(payload.InitialAdminID)
-	if initialAdminUserID == "" {
-		initialAdminUserID = principal.User.ID
-	}
 	roleCode, err := handler.access.AssignInitialAdministrator(
 		request.Context(), principal.Tenant.ID, result.Application.Code, initialAdminUserID, principal.User.ID,
 	)
 	if err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
+		handler.writeError(writer, request, err)
+		return
+	}
+	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment); err != nil {
+		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -281,6 +293,7 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 // management PATCH endpoints. This endpoint only re-runs the provisioner so the running subsystem
 // picks up the new .env.local values and the portal gateway is reloaded.
 func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
 		return
@@ -305,6 +318,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	// subsystem's .env.local, so both the API process and the deployment helper can pick them
 	// up without exposing the host filesystem into the API container.
 	updateInput := application.SubsystemProvisioningInput{
+		TenantID:        principal.Tenant.ID,
 		ApplicationCode: applicationCode,
 		Environment:     environment,
 		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
@@ -312,11 +326,23 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		// issuer as a stable source of truth instead of having the client send it in.
 		Issuer: handler.oidcIssuer,
 	}
-	// Resolve the identifiers before marking the deployment non-ready. The portal intentionally
-	// hides UPDATING/FAILED environments, so resolving after the transition would make a normal
-	// retry unable to find the application context needed by catalog synchronization.
-	if applicationID, _, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
+	// Resolve identifiers from the deployment control plane, not the portal projection: failed
+	// and updating environments are intentionally hidden from the user-facing portal catalog.
+	var deploymentContext application.SubsystemDeploymentState
+	if handler.deploymentState != nil {
+		state, err := handler.deploymentState.GetSubsystemDeploymentContext(request.Context(), principal.Tenant.ID, applicationCode, environment)
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		deploymentContext = state
+		updateInput.ApplicationID = state.ApplicationID
+	} else if applicationID, _, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
 		updateInput.ApplicationID = applicationID
+	}
+	if strings.TrimSpace(updateInput.ApplicationID) == "" {
+		handler.writeError(writer, request, application.ErrNotFound)
+		return
 	}
 	if publisherID, publisherSecret, ok := readCatalogPublisherCredentials(); ok {
 		updateInput.CatalogPublisherClientID = publisherID
@@ -326,6 +352,14 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	if strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry") {
 		operation = "RETRY"
 	}
+	retryAdminUserID := principal.User.ID
+	retryNeedsInitialAccess := false
+	if operation == "RETRY" && handler.deploymentState != nil {
+		if storedAdminUserID := strings.TrimSpace(deploymentContext.InitialAdminUserID); storedAdminUserID != "" {
+			retryAdminUserID = storedAdminUserID
+		}
+		retryNeedsInitialAccess = deploymentContext.InitialAccessAssignedAt == nil
+	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusUpdating, operation, "", ""); err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -334,6 +368,24 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
 		handler.writeError(writer, request, err)
 		return
+	}
+	if operation == "RETRY" && retryNeedsInitialAccess {
+		// A first-time deployment can fail after credentials are created but before the role
+		// catalog and initial administrator are ready. Retry therefore reapplies the conventional
+		// administrator role to the current operator after the Agent succeeds. UpdateAccess is
+		// idempotent for an already assigned role and never requires recovering an OAuth secret.
+		if _, err := handler.access.AssignInitialAdministrator(
+			request.Context(), principal.Tenant.ID, applicationCode, retryAdminUserID, principal.User.ID,
+		); err != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
+			handler.writeError(writer, request, err)
+			return
+		}
+		if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
+			handler.writeError(writer, request, err)
+			return
+		}
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusReady, operation, "", ""); err != nil {
 		handler.logger.Error("subsystem update completed but state update failed", "application_code", applicationCode, "environment", environment, "error", err)
@@ -357,6 +409,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 // delete the corresponding DB rows here: the script follows up with DELETE /environments and
 // (optionally) DELETE /applications so the audit trail preserves each cleanup step.
 func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
 		return
@@ -375,7 +428,7 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 		handler.writeError(writer, request, err)
 		return
 	}
-	if err := handler.provisioner.Teardown(request.Context(), applicationCode, environment); err != nil {
+	if err := handler.provisioner.Teardown(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, "TEARDOWN", "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
 		handler.writeError(writer, request, err)
 		return
@@ -397,6 +450,16 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 		"environment", environment,
 		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
 	)
+}
+
+const subsystemDeploymentHTTPTimeout = 16 * time.Minute
+
+// extendSubsystemDeploymentWriteDeadline keeps the synchronous control-plane request alive for
+// the Agent's bounded 15-minute deployment window. ResponseController unwraps Gin's writer to the
+// underlying network connection; httptest and unsupported writers safely ignore the capability.
+func extendSubsystemDeploymentWriteDeadline(writer stdhttp.ResponseWriter) {
+	controller := stdhttp.NewResponseController(writer)
+	_ = controller.SetWriteDeadline(time.Now().Add(subsystemDeploymentHTTPTimeout))
 }
 
 // GetSubsystemStatus handles GET /api/v1/subsystem-status. It exposes durable lifecycle
@@ -432,10 +495,21 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 		AttemptCount:    state.AttemptCount,
 		LastErrorCode:   state.LastErrorCode,
 		LastError:       state.LastError,
+		NextAction:      subsystemDeploymentStateNextAction(state),
 		StartedAt:       state.StartedAt,
 		CompletedAt:     state.CompletedAt,
 		UpdatedAt:       state.UpdatedAt,
 	})
+}
+
+func subsystemDeploymentStateNextAction(state application.SubsystemDeploymentState) string {
+	if state.Status != application.SubsystemDeploymentStatusFailed {
+		return ""
+	}
+	if state.LastErrorCode == "INITIAL_ACCESS_ASSIGNMENT_FAILED" || state.LastErrorCode == "INITIAL_ACCESS_STATE_FAILED" {
+		return "部署运行时已完成，但初始管理员授权尚未完成；确认目标用户有效且授权目录已同步后，点击“重试”"
+	}
+	return "请检查部署 Agent、Docker 和目标 API 健康状态，修复后在当前环境点击“重试”；不要重复新增接入"
 }
 
 func (handler *SubsystemOnboardingHandler) transitionDeployment(ctx context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string) error {
@@ -443,6 +517,13 @@ func (handler *SubsystemOnboardingHandler) transitionDeployment(ctx context.Cont
 		return nil
 	}
 	return handler.deploymentState.TransitionSubsystemDeployment(ctx, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage, time.Now().UTC())
+}
+
+func (handler *SubsystemOnboardingHandler) markInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment string) error {
+	if handler.deploymentState == nil {
+		return nil
+	}
+	return handler.deploymentState.MarkSubsystemInitialAccessAssigned(ctx, tenantID, applicationCode, environment, time.Now().UTC())
 }
 
 func (handler *SubsystemOnboardingHandler) markDeploymentFailed(ctx context.Context, tenantID, applicationCode, environment, operation, errorCode, errorMessage string) {
@@ -500,7 +581,7 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		handler.logger.Error("subsystem automatic provisioning failed", "path", request.URL.Path, "error", err)
 		message := httperror.DependencyUnavailable.Message
 		if strings.Contains(strings.ToLower(err.Error()), "disabled") {
-			message = "该环境未启用自动部署 Agent（生产/远程部署默认关闭），不支持一键接入"
+			message = "当前部署未启用受控部署 Agent，无法在平台内完成一键接入"
 		}
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
 			httperror.DependencyUnavailable.Code,
@@ -517,7 +598,15 @@ func subsystemProvisioningNextAction(err error) string {
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "disabled"):
-		return "生产/远程环境请使用“应用登记、环境设置、OAuth 客户端、登录目标”控制面功能完成接入，并把生成的凭据写入服务器 .env 后发布子系统镜像；本地开发请先执行 docker-local.sh up"
+		return "请升级并重新发布当前环境的生产部署资产，确认 platform-api 与 subsystem-provisioner 均健康后在本页面重试；不要手工复制 OAuth Secret 或重复创建环境"
+	case strings.Contains(message, "tenant is not allowed"):
+		return "当前租户不是该服务器合同实例绑定的生产租户；请核对服务器部署配置中的允许租户 ID，禁止用其他租户覆盖现有合同实例"
+	case strings.Contains(message, "preflight values are inconsistent"):
+		return "生产一键接入目前只支持合同管理系统 prod、confidential 客户端和页面自动填充的固定地址；请恢复预设后重试"
+	case strings.Contains(message, "infrastructure secrets are incomplete"):
+		return "服务器基础设施密钥仍为空或占位值；请先由部署管理员完成生产平台初始化，接入页面不会自动改动数据库和 IAM 密钥"
+	case strings.Contains(message, "immutable digest"):
+		return "服务器尚未发布合同管理的不可变镜像 digest；请先完成合同镜像发布，再回到本页面接入"
 	case strings.Contains(message, "compose file"):
 		return "部署 Agent 未找到子系统 Compose；内置客户与商机系统请更新平台代码并重启 api 与 subsystem-provisioner，独立子系统请在同名项目目录提供 compose.yaml"
 	case strings.Contains(message, "environment template"):

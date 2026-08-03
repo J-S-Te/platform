@@ -1,4 +1,5 @@
-// Package http exposes the machine-only external identity management contract.
+// Package http 暴露仅供机器客户端调用的外部身份管理协议。浏览器会话不能构造 appctx.Principal，
+// 防重放所需的幂等键、时间戳和 nonce 也必须来自受信任集成方。
 package http
 
 import (
@@ -100,6 +101,7 @@ func (handler *Handler) changeRole(writer http.ResponseWriter, request *http.Req
 }
 
 func requestContext(writer http.ResponseWriter, request *http.Request) (appctx.Principal, application.RequestProof, bool) {
+	// OAuth 客户端身份由前置中间件验证；这里仅从上下文读取，绝不接受请求体声明 client 或 tenant。
 	principal, ok := appctx.PrincipalFromContext(request.Context())
 	if !ok {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
@@ -115,6 +117,7 @@ func requestContext(writer http.ResponseWriter, request *http.Request) (appctx.P
 }
 
 func decode(writer http.ResponseWriter, request *http.Request, target any) bool {
+	// 限制请求体并拒绝未知/多余 JSON，减少协议漂移和超大载荷占用内存的风险。
 	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBytes)
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()

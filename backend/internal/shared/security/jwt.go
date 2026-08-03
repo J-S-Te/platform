@@ -15,7 +15,8 @@ import (
 
 const allowedClockSkew = time.Minute
 
-// TokenClaims is the server-side JWT claim set used for browser session cookies.
+// TokenClaims 是浏览器会话 Cookie 中的最小身份索引。JWT 只证明这些字段由平台签发，
+// 会话是否撤销、账号是否禁用以及权限是否变化仍必须通过 SessionID 回查数据库。
 type TokenClaims struct {
 	SessionID string
 	UserID    string
@@ -41,8 +42,8 @@ type jwtPayload struct {
 	ExpiresAt int64  `json:"exp"`
 }
 
-// JWTManager signs and verifies Ed25519 JWTs. It accepts only the EdDSA algorithm and validates
-// issuer, audience and required session identity claims.
+// JWTManager 使用 Ed25519 签发和验证浏览器会话 JWT，并固定算法、签发者和受众，
+// 防止其他用途的 JWT 被当成平台 Cookie 使用。
 type JWTManager struct {
 	issuer     string
 	audience   string
@@ -50,7 +51,8 @@ type JWTManager struct {
 	publicKey  ed25519.PublicKey
 }
 
-// LoadJWTManager loads matching PKCS#8 Ed25519 private and PKIX Ed25519 public keys from files.
+// LoadJWTManager 同时加载 PKCS#8 私钥和 PKIX 公钥，并验证二者匹配；配置错误必须在启动时暴露，
+// 不能出现“当前实例签发、其他实例无法验证”的分裂状态。
 func LoadJWTManager(issuer, audience, privateKeyPath, publicKeyPath string) (*JWTManager, error) {
 	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(audience) == "" {
 		return nil, errors.New("JWT issuer and audience must not be empty")
@@ -69,7 +71,8 @@ func LoadJWTManager(issuer, audience, privateKeyPath, publicKeyPath string) (*JW
 	return &JWTManager{issuer: issuer, audience: audience, privateKey: privateKey, publicKey: publicKey}, nil
 }
 
-// Issue creates a signed JWT from the supplied session claims.
+// Issue 只把服务端已建立的会话索引签入 Cookie，不把角色或权限快照写入 Token，
+// 因此权限降级和会话撤销可以在下一次数据库回查时立即生效。
 func (manager *JWTManager) Issue(claims TokenClaims) (string, error) {
 	if err := validateClaims(claims); err != nil {
 		return "", err
@@ -95,7 +98,8 @@ func (manager *JWTManager) Issue(claims TokenClaims) (string, error) {
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-// Verify validates and returns a token's required session claims at the supplied time.
+// Verify 先固定算法并验证签名，再接受载荷中的身份字段。允许一分钟签发时间偏差只用于容忍
+// 节点时钟漂移，不延长 ExpiresAt，也不替代后续数据库会话状态校验。
 func (manager *JWTManager) Verify(token string, now time.Time) (TokenClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 || anyEmpty(parts) {

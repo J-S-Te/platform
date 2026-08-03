@@ -15,8 +15,8 @@ import (
 
 const maxAuthorizationCodeTTL = 10 * time.Minute
 
-// Service implements authorization-code, PKCE, refresh-token rotation, revocation, and UserInfo
-// state transitions. It is deliberately independent of HTTP, discovery, JWKS, and JWT encoding.
+// Service 编排授权码、PKCE、刷新令牌轮换、撤销与 UserInfo 的状态转换。
+// HTTP 参数解析、发现文档、JWKS 和 JWT 编码刻意留在边界适配器中，避免协议传输细节渗入事务规则。
 type Service struct {
 	repository           Repository
 	issuer               TokenIssuer
@@ -58,8 +58,8 @@ func (service *Service) IsRegisteredRedirectURI(ctx context.Context, clientID, r
 	return registered, nil
 }
 
-// Authorize validates an exact client redirect and the current local browser session, then creates
-// a one-time opaque authorization code. The code value returned here is never persisted directly.
+// Authorize 只有在回调地址精确命中登记值、客户端允许授权码模式且浏览器会话仍属于同一租户时，
+// 才签发一次性授权码。数据库只保存摘要，原始授权码仅经浏览器回传给客户端。
 func (service *Service) Authorize(ctx context.Context, input AuthorizationInput) (AuthorizationResult, error) {
 	input = normalizeAuthorizationInput(input)
 	if input.ClientID == "" || input.RedirectURI == "" || input.SessionID == "" || !validProtocolText(input.State, 2048) || !validProtocolText(input.Nonce, 255) {
@@ -112,6 +112,7 @@ func (service *Service) Authorize(ctx context.Context, input AuthorizationInput)
 		Scopes: scopes, Nonce: input.Nonce, CodeChallenge: challenge, CodeChallengeMethod: method,
 		CreatedAt: now, ExpiresAt: expiresAt, Status: domain.AuthorizationCodeStatusActive,
 	}
+	// state 不属于平台授权状态，也不进入授权码记录；平台仅原样回送，供客户端关联发起登录的浏览器会话。
 	if err := service.repository.CreateAuthorizationCode(ctx, code); err != nil {
 		return AuthorizationResult{}, fmt.Errorf("persist authorization code: %w", err)
 	}
@@ -120,9 +121,8 @@ func (service *Service) Authorize(ctx context.Context, input AuthorizationInput)
 	}, nil
 }
 
-// ExchangeAuthorizationCode validates client authentication and PKCE, signs response tokens, and
-// atomically consumes the code. A concurrent second exchange sees invalid_grant and never obtains
-// a durable refresh token.
+// ExchangeAuthorizationCode 先校验客户端、回调地址、PKCE 与原浏览器会话，再由仓储原子消费授权码。
+// 并发兑换可以同时完成无副作用的预计算，但只有持有行锁并成功提交的一方能获得响应和持久刷新令牌。
 func (service *Service) ExchangeAuthorizationCode(ctx context.Context, input AuthorizationCodeExchangeInput) (TokenResult, error) {
 	input = normalizeCodeExchangeInput(input)
 	if input.ClientID == "" || input.Code == "" || input.RedirectURI == "" {
@@ -164,13 +164,15 @@ func (service *Service) ExchangeAuthorizationCode(ctx context.Context, input Aut
 		return TokenResult{}, mapGrantError(err)
 	}
 	if !sameGrant(preview, committedGrant) {
+		// 仓储在锁内重新读取客户端、会话和授权码；结果不一致说明预校验与提交边界发生异常漂移，
+		// 此时不能把已预计算的令牌响应交给调用方。
 		return TokenResult{}, errors.New("authorization code consumption returned a mismatched grant")
 	}
 	return result, nil
 }
 
-// Refresh rotates an active refresh token. If a previously consumed token is presented, the
-// repository revokes its complete family before ErrRefreshTokenReplay is returned.
+// Refresh 每次使用后都会生成后继节点并消费当前节点。再次提交已消费节点被视为密钥泄露信号，
+// 仓储会在锁定令牌族后撤销整条后代链，而不是只拒绝这一次请求。
 func (service *Service) Refresh(ctx context.Context, input RefreshTokenInput) (TokenResult, error) {
 	input = normalizeRefreshInput(input)
 	if input.ClientID == "" || input.RefreshToken == "" {
@@ -192,17 +194,15 @@ func (service *Service) Refresh(ctx context.Context, input RefreshTokenInput) (T
 	if current.OAuthClientID != client.ID || current.TenantID != client.TenantID {
 		return TokenResult{}, ErrInvalidGrant
 	}
-	// Refresh tokens are descendants of a browser SSO session. Global logout, account disablement,
-	// or session expiry must prevent further token issuance even if a stale family row has not yet
-	// been cleaned up. This check also protects existing databases created before logout cascaded to
-	// OAuth token families.
+	// 刷新令牌继承最初浏览器 SSO 会话的存续条件。即使历史数据尚未级联清理令牌族，
+	// 全局退出、账号禁用或会话过期也必须立即阻止继续签发。
 	if err := service.validateGrantSession(ctx, current.TenantID, current.SessionID, current.AccountID, current.UserID, now); err != nil {
 		return TokenResult{}, err
 	}
 	preview := grantFromRefreshToken(current, client)
 	if !validRefreshToken(current, now) {
-		// A consumed node is a replay signal. Delegate to the transactional repository so it locks
-		// the family and revokes all descendants before returning the protocol-safe error.
+		// 已消费节点不能在应用层直接返回：必须进入仓储的事务分支，取得令牌族锁并完成整族撤销，
+		// 然后才向协议层返回不泄漏内部状态的重放错误。
 		if current.Status == domain.RefreshTokenStatusConsumed || current.UsedAt != nil {
 			replayRefresh, _, generateErr := service.newRefreshToken(client, preview, current.ID, now)
 			if generateErr != nil {
@@ -245,6 +245,8 @@ func (service *Service) Refresh(ctx context.Context, input RefreshTokenInput) (T
 }
 
 func (service *Service) validateGrantSession(ctx context.Context, tenantID, sessionID, accountID, userID string, now time.Time) error {
+	// 令牌族保存的四元组必须与当前会话完全一致，不能仅凭 session_id 存在就续期；
+	// 这同时防止跨租户碰撞和会话记录被重新绑定后继续使用旧授权。
 	subject, err := service.repository.ResolveSessionSubject(ctx, sessionID, now)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -304,8 +306,8 @@ func (service *Service) IsAccessTokenRevoked(ctx context.Context, tenantID, rawA
 	return revoked, nil
 }
 
-// ResolveUserInfo re-resolves a verified user access token against active local session, account,
-// user, client and tenant state. It returns only claims allowed by the access token's scopes.
+// ResolveUserInfo 不把已验签 JWT 当成永久身份快照，而是重新确认客户端、会话、账号、用户和租户均有效；
+// 最终披露字段仍受令牌 scope 限制，profile 与 email 不能互相隐式扩权。
 func (service *Service) ResolveUserInfo(ctx context.Context, input UserInfoInput) (UserInfo, error) {
 	input = normalizeUserInfoInput(input)
 	if input.TenantID == "" || input.OAuthClientID == "" || input.SessionID == "" || input.UserID == "" || !hasSlice(input.Scopes, "openid") {
@@ -340,6 +342,7 @@ func (service *Service) authenticatedClient(ctx context.Context, input ClientAut
 		return domain.Client{}, mapClientError(err)
 	}
 	switch client.TokenAuthMethod {
+	// 认证方法由登记数据决定，请求不能通过同时携带多种凭据来协商或降级认证方式。
 	case "none":
 		if strings.TrimSpace(input.ClientSecret) != "" || client.ClientType != "public" {
 			return domain.Client{}, ErrInvalidClient

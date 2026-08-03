@@ -1,4 +1,5 @@
 .env
+runtime/
 .release.env
 .deploy.lock
 backups/

@@ -117,6 +117,7 @@ trap on_error ERR
 initialize_log() {
     local timestamp
     timestamp="$(date '+%Y%m%d-%H%M%S')"
+    # 日志不记录密钥，但可能包含部署路径和故障细节；目录不可用时降级到仅当前用户可读的临时文件。
     if mkdir -p -- "$LOG_DIRECTORY" 2>/dev/null && chmod 0750 -- "$LOG_DIRECTORY" 2>/dev/null; then
         LOG_FILE="${LOG_DIRECTORY}/ops-${timestamp}-$$.log"
     else
@@ -463,6 +464,8 @@ backup_database() {
     backup_file="${BACKUP_DIR}/mysql/${mysql_database}-${timestamp}.sql.gz"
 
     log "INFO" "开始备份 MySQL 数据库 ${mysql_database} 到 ${backup_file}。"
+    # --single-transaction 为事务表提供一致性快照且不长时间锁表；DDL 仍会破坏快照，
+    # 因此发布流程必须在迁移前完成备份，并避免同时运行人工 schema 变更。
     if ! MYSQL_PWD="$mysql_password" mysqldump \
         --host="$mysql_host" \
         --port="$mysql_port" \
@@ -477,6 +480,7 @@ backup_database() {
         rm -f -- "$temporary_file"
         fatal "MySQL 备份失败；请检查数据库连通性、账号权限和磁盘空间。"
     fi
+    # 临时文件与最终文件位于同一目录，mv 只在压缩流完整结束后原子发布备份名称。
     mv -- "$temporary_file" "$backup_file"
     chmod 0600 -- "$backup_file"
     sha256sum -- "$backup_file" >"${backup_file}.sha256"
@@ -557,6 +561,7 @@ command_deploy() {
         log "INFO" "发布已取消。"
         return 0
     }
+    # 备份与后续迁移不是一个事务，但备份先完成且带校验和，至少保证失败时存在可验证的迁移前恢复点。
     backup_database
 
     local deploy_arguments=(--deploy --yes --env-file "$ENV_FILE" --deploy-root "$DEPLOY_ROOT" --restart-services)
@@ -573,6 +578,7 @@ command_deploy() {
 replace_current_link() {
     local target_path="$1"
     local temporary_link="${DEPLOY_ROOT}/.current.new.$$"
+    # 先构造临时符号链接再原子替换 current，systemd 不会观察到“链接短暂不存在”的中间状态。
     ln -s -- "$target_path" "$temporary_link"
     mv -Tf -- "$temporary_link" "${DEPLOY_ROOT}/current"
 }
@@ -598,6 +604,7 @@ command_rollback() {
         return 0
     }
 
+    # 先切应用并验证就绪；失败时只恢复应用指针，绝不猜测数据库逆迁移。
     replace_current_link "$target_path"
     systemctl restart "$API_SERVICE" "$WORKER_SERVICE"
     if wait_for_ready; then
@@ -639,6 +646,7 @@ command_prune_backups() {
     }
 
     local backup_subdirectory
+    # 只删除脚本约定扩展名且位于两个固定子目录中的文件，避免清理人工备份或密钥。
     for backup_subdirectory in "$BACKUP_DIR/mysql" "$BACKUP_DIR/uploads"; do
         [[ -d "$backup_subdirectory" ]] || continue
         find "$backup_subdirectory" -type f \( -name '*.sql.gz' -o -name '*.sql.gz.sha256' -o -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -mtime "+${RETAIN_DAYS}" -print -delete

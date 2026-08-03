@@ -201,7 +201,8 @@ func (repository *Repository) GetAccessSettings(ctx context.Context, tenantID st
 	return accessSettingsToDomain(row), nil
 }
 
-// SaveAccessSettings creates the initial tenant row or replaces it under optimistic locking.
+// SaveAccessSettings 首次保存只接受默认版本 1；已有记录先加行锁再核对 Version，
+// 防止两个管理端同时修改对外地址时后提交者静默覆盖先提交者。
 func (repository *Repository) SaveAccessSettings(ctx context.Context, input application.AccessSettingsUpdateInput, settingsID string, now time.Time) (domain.AccessSettings, error) {
 	var saved domain.AccessSettings
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {

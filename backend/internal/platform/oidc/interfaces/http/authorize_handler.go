@@ -18,9 +18,8 @@ type parsedAuthorizationRequest struct {
 	responseType  string
 }
 
-// Authorize implements the browser-facing authorization-code endpoint. It accepts normal
-// parameters, a one-time PAR request_uri, or a signed JAR request object. It only redirects to a
-// client URI after Service.Authorize has validated that URI against the client registration.
+// Authorize 接受普通参数、一次性 PAR request_uri 或签名 JAR，但三种输入形态不能混用。
+// 只有 Service.Authorize 已精确验证登记回调地址后才向客户端跳转；此前所有错误都在平台本域返回。
 func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -108,6 +107,7 @@ func parseAuthorizationRequest(r *http.Request) (parsedAuthorizationRequest, err
 		return parsedAuthorizationRequest{}, errors.New("client_id is invalid")
 	}
 	requestURI, requestObject := strings.TrimSpace(query.Get("request_uri")), strings.TrimSpace(query.Get("request"))
+	// PAR/JAR 已封装授权参数，若同时携带外层 redirect_uri、scope 等字段会产生双重解释，故直接拒绝。
 	if requestURI != "" {
 		if requestObject != "" || hasAnyParameter(query, "response_type", "redirect_uri", "scope", "state", "nonce", "prompt", "code_challenge", "code_challenge_method") {
 			return parsedAuthorizationRequest{}, errors.New("request_uri cannot be combined with authorization parameters")
@@ -203,6 +203,7 @@ func redirectToPlatformLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func safeReturnTo(r *http.Request) string {
+	// 登录页 return_to 只允许当前站点的绝对路径，并保留原查询参数；禁止 //host 形式绕过同源跳转。
 	if r == nil || r.URL == nil {
 		return "/authorize"
 	}
@@ -225,7 +226,7 @@ func writeAuthorizeServiceError(w http.ResponseWriter, logger interface{ Error(s
 	case errors.Is(err, application.ErrInvalidClient), errors.Is(err, application.ErrUnauthorizedClient):
 		writeAuthorizationError(w, http.StatusBadRequest, "unauthorized_client")
 	case errors.Is(err, application.ErrInvalidGrant):
-		// The redirect URI was not proven safe because authorization did not succeed.
+		// 授权未成功时回调地址尚未被证明安全，因此错误只能留在平台本域，不能重定向给请求方。
 		writeAuthorizationError(w, http.StatusBadRequest, "invalid_request")
 	default:
 		logger.Error("OIDC authorization failed", "error", err)

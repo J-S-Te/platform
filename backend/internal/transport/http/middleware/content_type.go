@@ -10,8 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RequireSafeWriteContentType rejects browser-simple text/form bodies on JSON APIs. Multipart is
-// retained for the authenticated file upload endpoint. Empty-body action endpoints remain valid.
+// RequireSafeWriteContentType 拒绝浏览器可无预检发送的 text/form 写请求，缩小 CSRF 攻击面。
+// multipart 只为认证文件上传保留；无请求体动作仍由 Origin/认证中间件继续保护。
 func RequireSafeWriteContentType() gin.HandlerFunc {
 	return func(context *gin.Context) {
 		request := context.Request

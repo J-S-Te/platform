@@ -1,6 +1,5 @@
-// Command bootstrap-admin initializes the first platform super administrator after the
-// migration-owned IAM schema has been applied. It is intentionally separate from the HTTP
-// bootstrap endpoint so native deployment can complete without exposing a public setup route.
+// Command bootstrap-admin 在迁移完成后初始化首个平台超级管理员。它与公开 HTTP 启动接口分离，
+// 使原生部署可以通过受保护的标准输入完成一次性初始化，而无需暴露网络设置入口。
 package main
 
 import (
@@ -83,6 +82,7 @@ func run(arguments []string, stdin io.Reader) error {
 		return nil
 	}
 	if initialized {
+		// 快速检查只减少重复工作，真正的并发唯一性仍由仓储事务和数据库约束保证。
 		slog.Info("first super administrator is already initialized; bootstrap was skipped")
 		return nil
 	}
@@ -109,6 +109,7 @@ func run(arguments []string, stdin io.Reader) error {
 		Password:    password,
 	})
 	if errors.Is(err, identityapplication.ErrBootstrapAlreadyInitialized) {
+		// 两个发布任务并发通过前置检查时，只有事务获胜者写入；失败者视为幂等成功。
 		slog.Info("first super administrator is already initialized; concurrent bootstrap was skipped")
 		return nil
 	}
@@ -160,6 +161,7 @@ func readPassword(reader io.Reader, enabled bool) (string, error) {
 		return "", errors.New("password standard input is unavailable")
 	}
 
+	// 多读一个字节才能区分“恰好达到上限”和“输入被截断”，且密码不会进入命令行参数。
 	content, err := io.ReadAll(io.LimitReader(reader, maxBootstrapPasswordBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read password from standard input: %w", err)
@@ -179,5 +181,6 @@ func clearString(value *string) {
 	if value == nil {
 		return
 	}
+	// Go 字符串不可原地擦除，此操作只能缩短当前引用的生命周期，不能保证底层字节立即清零。
 	*value = ""
 }

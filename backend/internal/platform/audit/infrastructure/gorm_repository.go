@@ -137,6 +137,8 @@ type exportPayload struct {
 func (asyncJobModel) TableName() string { return "async_job" }
 
 func (r *Repository) Ingest(ctx context.Context, tenantID string, input application.EventInput, now time.Time) (domain.Receipt, error) {
+	// 来源应用和环境必须在同一租户内保持启用；解析来源、写事件和写去重行放在同一事务，
+	// 避免出现事件已保存但重试仍被当作首次提交的窗口。
 	var receipt domain.Receipt
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		app, env, err := resolveActiveSource(tx, tenantID, input.ApplicationCode, input.EnvironmentCode)
@@ -152,9 +154,8 @@ func (r *Repository) Ingest(ctx context.Context, tenantID string, input applicat
 	return receipt, nil
 }
 
-// IngestBatch persists all accepted audit events, duplicate receipts, and the delivery receipt in
-// one transaction. A database failure rolls back the entire delivery; duplicate event IDs are a
-// normal completed-delivery outcome and are counted independently.
+// 批量接收把新事件、重复事件判定及整批投递回执放在同一事务；数据库任一步失败会回滚
+// 整批。重复 event_id 是可重试投递的正常完成结果，会单独计数而不是让整批失败。
 func (r *Repository) IngestBatch(ctx context.Context, tenantID string, delivery application.BatchDeliveryInput, inputs []application.EventInput, now time.Time) ([]domain.Receipt, error) {
 	receipts := make([]domain.Receipt, 0, len(inputs))
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -191,6 +192,8 @@ func (r *Repository) IngestBatch(ctx context.Context, tenantID string, delivery 
 }
 
 func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environmentCode string) (applicationModel, environmentModel, error) {
+	// 来源由机器凭据对应租户和事件声明的应用/环境共同解析，只接受有效登记，防止审计
+	// 发布者把事件归入其他租户或已经下线的环境。
 	var app applicationModel
 	if err := database.Where("tenant_id = ? AND code = ? AND status = ?", tenantID, applicationCode, "ACTIVE").Take(&app).Error; err != nil {
 		return applicationModel{}, environmentModel{}, err
@@ -203,6 +206,8 @@ func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environme
 }
 
 func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environmentModel, input application.EventInput, now time.Time) (domain.Receipt, error) {
+	// 去重键按应用隔离，同一应用重试相同 event_id 返回 DUPLICATE；事件行和去重行在同一
+	// 事务写入，即使并发竞争唯一键，也不会留下只有一侧记录的不完整状态。
 	var existing dedupModel
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("application_id = ? AND event_id = ?", app.ID, input.EventID).Take(&existing).Error
 	if err == nil {
@@ -212,6 +217,8 @@ func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environ
 		return domain.Receipt{}, err
 	}
 
+	// 可展示的元数据和字段变更先脱敏再持久化；payload_hash 则对原始规范输入计算，用于
+	// 完整性取证。摘要不提供明文恢复能力，但其访问权限仍应按敏感审计数据控制。
 	metadata, err := json.Marshal(redactMetadata(input.Metadata))
 	if err != nil {
 		return domain.Receipt{}, fmt.Errorf("marshal audit metadata: %w", err)
@@ -237,6 +244,8 @@ func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environ
 }
 
 func newIngestionReceiptModel(tenantID string, app applicationModel, env environmentModel, delivery application.BatchDeliveryInput, eventCount, acceptedCount, duplicateCount uint, now time.Time) ingestionReceiptModel {
+	// 投递级回执保留客户端、请求链路和计数证据，便于发布方确认批次已被完整消费；它不
+	// 复制每条事件正文，事件详情仍以 audit_event 为权威来源。
 	receivedAt := now.UTC()
 	return ingestionReceiptModel{
 		TenantID:       tenantID,
@@ -282,6 +291,8 @@ func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.
 	return toEvent(record.Event, record.ApplicationCode, record.ApplicationName, record.EnvironmentCode), nil
 }
 func (r *Repository) CreateExportJob(ctx context.Context, tenantID, operatorID string, query application.PageRequest, publicID string, now time.Time) (domain.ExportJob, error) {
+	// 导出条件和操作者固化进任务快照，Worker 不再读取浏览器请求上下文；任务归属平台
+	// 应用仅用于文件元数据关联，所有后续读取仍必须携带租户 ID。
 	var platformApplication applicationModel
 	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND code = ? AND status = ?", tenantID, "platform", "ACTIVE").Take(&platformApplication).Error; err != nil {
 		return domain.ExportJob{}, r.mapError(err)
@@ -311,8 +322,8 @@ func (r *Repository) GetExportJob(ctx context.Context, tenantID, jobID string) (
 	return result, nil
 }
 
-// ClaimExportJob uses a short row-lock transaction. File creation intentionally happens after the
-// transaction so a slow local disk cannot hold MySQL locks.
+// 领取时先回收超时租约，再用 SKIP LOCKED 让多个 Worker 并行争抢不同任务；事务只更新
+// 状态和租约，文件生成放在事务外，避免慢磁盘长期占用 MySQL 行锁。
 func (r *Repository) ClaimExportJob(ctx context.Context, workerID string, now, staleBefore time.Time) (domain.ExportWork, bool, error) {
 	var result domain.ExportWork
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -365,6 +376,8 @@ func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, quer
 }
 
 func (r *Repository) CompleteExportJob(ctx context.Context, work domain.ExportWork, file domain.ExportFile, completedAt time.Time) error {
+	// 文件对象、首个版本和任务成功状态在同一数据库事务发布；只有仍处于 RUNNING 的任务
+	// 能完成，迟到 Worker 不能覆盖已经重试或终结的任务元数据。
 	return r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		object := fileObjectModel{ID: file.FileID, TenantID: work.TenantID, ApplicationID: work.ApplicationID, OriginalName: file.OriginalName, FileExtension: optional("csv"), MediaType: file.MediaType, Classification: "INTERNAL", OwnerUserID: optional(work.OperatorID), CurrentVersionNo: 1, CurrentVersionID: optional(file.VersionID), Status: "ACTIVE", CreatedAt: completedAt.UTC(), UpdatedAt: completedAt.UTC(), CreatedBy: optional(work.OperatorID), UpdatedBy: optional(work.OperatorID)}
 		if err := tx.Create(&object).Error; err != nil {
@@ -387,6 +400,8 @@ func (r *Repository) CompleteExportJob(ctx context.Context, work domain.ExportWo
 }
 
 func (r *Repository) FailExportJob(ctx context.Context, work domain.ExportWork, code, message string, retryAt, now time.Time) error {
+	// 达到最大尝试次数后终结任务，否则清除租约并按退避时间重新排队；限定 RUNNING 状态
+	// 可避免迟到失败回写把后来已成功的任务重新置为待处理。
 	updates := map[string]any{"last_error_code": optional(code), "last_error_message": optional(message), "locked_by": nil, "locked_at": nil}
 	if work.Attempts >= work.MaxAttempts {
 		updates["status"] = "FAILED"

@@ -10,8 +10,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/application"
 )
 
-// UserInfo returns claims for a verified, non-revoked end-user access token. It intentionally
-// does not accept a bearer token in query or form parameters, which prevents accidental logging.
+// UserInfo 只接受 Authorization: Bearer，避免令牌进入 URL、表单日志或浏览器历史。
+// JWT 验签后仍重查活跃会话、撤销记录与当前应用授权，防止权限降级后继续返回旧快照。
 func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
@@ -23,8 +23,8 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeUserInfoUnauthorized(w)
 		return
 	}
-	// The client_id below is decoded without trust only to select the expected audience. The JWT
-	// manager verifies its signature and requires the signed client_id/audience before claims are used.
+	// 此处未验签解码 client_id 仅用于选择预期 audience；任何声明投入业务使用前，JWT 管理器
+	// 都会验证签名并要求 client_id 与受众一致，不能把这次解码当成可信身份解析。
 	expectedAudience, ok := unverifiedJWTClientID(rawToken)
 	if !ok {
 		writeUserInfoUnauthorized(w)
@@ -80,6 +80,8 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authorization, err := h.authorizationResolver.ResolveOIDCAuthorization(r.Context(), subject.TenantID, claims.ClientID, claims.Subject)
+	// 权限、角色和修订号来自当前数据库快照，而非访问令牌中可能已经过时的声明；子系统可用
+	// role_config_hash/authz_revision 使本地会话缓存失效。
 	if err != nil || authorization.TenantID != subject.TenantID || authorization.AuthzRevision == 0 || strings.TrimSpace(authorization.RoleConfigHash) == "" {
 		if err != nil {
 			h.logger.Warn("OIDC UserInfo current authorization resolution failed", "error", err)
@@ -108,6 +110,8 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 			payload["preferred_username"] = info.PreferredUsername
 		}
 	}
+	// 人员目录同属 profile 扩展信息，只有显式授权 profile 时才查询和返回，避免 openid
+	// 最小 scope 意外暴露同租户人员及其应用角色。
 	if hasScope(claims.Scope, "profile") {
 		if h.personnelDirectory == nil {
 			h.logger.Error("OIDC personnel directory resolver is not configured")

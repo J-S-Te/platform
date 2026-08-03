@@ -1,4 +1,4 @@
-// Command worker processes MySQL-backed asynchronous jobs for the Basic Platform.
+// Command worker 运行以 MySQL 租约协调的异步任务；进程信号通过同一 context 传给全部后台循环。
 package main
 
 import (

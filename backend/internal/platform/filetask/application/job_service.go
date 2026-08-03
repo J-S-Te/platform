@@ -11,8 +11,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/domain"
 )
 
-// JobService is the generic scheduler control plane. It owns enqueue, claim, retry, cancellation
-// and operator-triggered rerun state transitions; individual workers own their payload semantics.
+// JobService 是通用任务调度控制面，负责入队、领取、失败重试、取消和人工重跑状态转换；
+// Payload 的业务含义只属于注册该 JobType 的 worker，本服务既不解释也不执行它。
 type JobService struct {
 	repository JobRepository
 	ids        IDGenerator
@@ -76,8 +76,8 @@ func (service *JobService) Complete(ctx context.Context, tenantID, jobID string)
 	return service.repository.CompleteJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID), service.clock.Now().UTC())
 }
 
-// Fail returns retriable jobs to PENDING with the supplied backoff. Non-retriable jobs become
-// DEAD; exhausted retriable jobs become FAILED and require an explicit operator retry or rerun.
+// Fail 将仍可重试的任务按退避时间退回 PENDING；不可重试任务进入 DEAD，耗尽自动次数的任务
+// 进入 FAILED。后二者都必须由操作者明确 Retry 或 Rerun，避免错误任务形成无限重试风暴。
 func (service *JobService) Fail(ctx context.Context, job domain.Job, code, message string, retryable bool) error {
 	if strings.TrimSpace(job.TenantID) == "" || strings.TrimSpace(job.PublicID) == "" || job.Status != domain.JobStatusRunning {
 		return validation("running job tenant and job ID are required")
@@ -102,9 +102,8 @@ func (service *JobService) Retry(ctx context.Context, tenantID, jobID string) er
 	return service.repository.RetryJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID), service.clock.Now().UTC())
 }
 
-// Rerun creates a new PENDING job rather than mutating a terminal job, preserving its operational
-// history. The existing async_job schema has no parent_job_id; a lineage column needs migration if
-// UIs require durable direct links between the original job and its rerun.
+// Rerun 新建 PENDING 任务而不改写终态记录，从而保留原任务的操作历史。现有 async_job
+// 没有 parent_job_id；若界面需要持久化展示重跑谱系，必须通过新增迁移扩展模型。
 func (service *JobService) Rerun(ctx context.Context, tenantID, jobID string) (domain.Job, error) {
 	original, err := service.repository.GetJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID))
 	if err != nil {
@@ -177,8 +176,8 @@ func backoff(attempts uint) time.Duration {
 	return time.Second * time.Duration(1<<(attempts-1))
 }
 
-// containsSensitivePayloadKey rejects the common credential field names before a generic job
-// reaches MySQL. It is defense in depth, not an excuse for job producers to send secrets.
+// containsSensitivePayloadKey 在通用任务进入 MySQL 前递归拒绝常见凭据字段。这只是纵深防御，
+// 生产者仍负有不发送秘密的责任；键名检查不能识别伪装在普通字段中的敏感值。
 func containsSensitivePayloadKey(payload json.RawMessage) bool {
 	var value any
 	if json.Unmarshal(payload, &value) != nil {

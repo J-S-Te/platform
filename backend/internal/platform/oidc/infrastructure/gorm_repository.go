@@ -261,8 +261,8 @@ func (r *Repository) FindAuthorizationCode(ctx context.Context, codeHash [32]byt
 	return authorizationCodeFromRow(row), nil
 }
 
-// ConsumeAuthorizationCode locks the digest row, repeats all critical checks, then consumes it and
-// creates the first refresh-token family/node in the same transaction.
+// ConsumeAuthorizationCode 锁定授权码摘要行，在事务内重做客户端、回调地址、授权模式和会话校验，
+// 并原子地消费授权码、创建首个刷新令牌族节点。应用层的预校验不能替代这里的最终提交判断。
 func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command application.ConsumeAuthorizationCodeCommand, now time.Time) (domain.TokenGrant, error) {
 	var grant domain.TokenGrant
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -280,9 +280,8 @@ func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command appli
 		if code.TenantID != client.TenantID || code.OAuthClientID != client.ID || !r.hasGrant(ctx, tx, client.ID, "authorization_code") {
 			return application.ErrAuthorizationCodeUnavailable
 		}
-		// Recheck the durable browser session inside the same transaction that consumes the code.
-		// This closes the race where logout happens after the application-layer preview but before
-		// code consumption and refresh-family creation.
+		// 会话行与授权码一起在事务内复核并加锁，关闭“应用层预校验后用户退出，随后仍创建
+		// 刷新令牌族”的竞态窗口。
 		subject, err := r.resolveSessionSubject(ctx, tx, code.SessionID, now, true)
 		if err != nil || subject.TenantID != code.TenantID || subject.SessionID != code.SessionID ||
 			subject.AccountID != code.AccountID || subject.UserID != code.UserID {
@@ -317,8 +316,8 @@ func (r *Repository) FindRefreshToken(ctx context.Context, tokenHash [32]byte, n
 	return refreshFromProjection(row, now), nil
 }
 
-// RotateRefreshToken makes one active node consumed and inserts its successor. Reusing any
-// consumed node revokes the entire locked family before ErrRefreshTokenReplay is returned.
+// RotateRefreshToken 在锁内把当前节点标记为已消费并插入唯一后继。任意已消费节点被再次提交时，
+// 会先撤销整个令牌族再返回重放错误，使并发刷新和窃取后的重放都不能留下可用后代。
 func (r *Repository) RotateRefreshToken(ctx context.Context, command application.RotateRefreshTokenCommand, now time.Time) (domain.TokenGrant, error) {
 	var grant domain.TokenGrant
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -334,6 +333,7 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, command application
 			return mapError(err)
 		}
 		if row.Status == domain.RefreshTokenStatusConsumed || row.UsedAt != nil {
+			// 必须在持有 family 行锁时撤销，确保另一实例不能同时从后代节点继续轮换。
 			if err := revokeFamily(tx, family, now, "refresh_token_replay"); err != nil {
 				return err
 			}
@@ -555,7 +555,8 @@ func mapError(err error) error {
 
 var _ application.Repository = (*Repository)(nil)
 
-// RecordClientAssertionReplay atomically reserves a client assertion jti digest until assertion expiry.
+// RecordClientAssertionReplay 依靠 (oauth_client_id, jti_hash) 唯一键原子占用断言标识，
+// 过期时间用于后续清理；插入冲突即代表跨实例重放。
 func (r *Repository) RecordClientAssertionReplay(ctx context.Context, oauthClientID string, jtiHash [32]byte, expiresAt, now time.Time) error {
 	row := map[string]any{"oauth_client_id": oauthClientID, "jti_hash": jtiHash[:], "expires_at": expiresAt.UTC(), "created_at": now.UTC()}
 	if err := r.database.WithContext(ctx).Table("oauth_client_assertion_replay").Create(row).Error; err != nil {
@@ -599,6 +600,7 @@ func (r *Repository) FindConsent(ctx context.Context, tenantID, userID, oauthCli
 	return parseScopes(row.Scope), row.Status == activeStatus && row.RevokedAt == nil, nil
 }
 func (r *Repository) GrantConsent(ctx context.Context, tenantID, userID, oauthClientID string, scopes []string, now time.Time) error {
+	// 同一用户与客户端只有一条同意聚合；重复授权整体替换 scope 并递增版本，撤销后再次授权也复用该行。
 	row := map[string]any{"tenant_id": tenantID, "user_id": userID, "oauth_client_id": oauthClientID, "scope": joinScopes(scopes), "granted_at": now.UTC(), "revoked_at": nil, "updated_at": now.UTC(), "status": activeStatus, "version": 1}
 	return r.database.WithContext(ctx).Table("iam_oidc_user_consent").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "user_id"}, {Name: "oauth_client_id"}}, DoUpdates: clause.Assignments(map[string]any{"scope": joinScopes(scopes), "granted_at": now.UTC(), "revoked_at": nil, "updated_at": now.UTC(), "status": activeStatus, "version": gorm.Expr("version + 1")})}).Create(row).Error
 }
@@ -636,6 +638,8 @@ func (r *Repository) CreatePushedAuthorizationRequest(ctx context.Context, reque
 	return r.database.WithContext(ctx).Table("oauth_pushed_authorization_request").Create(map[string]any{"id": request.ID, "tenant_id": request.TenantID, "oauth_client_id": request.OAuthClientID, "request_uri_hash": request.RequestURIHash[:], "redirect_uri": request.RedirectURI, "scope": joinScopes(request.Scopes), "state": stringPointer(request.State), "nonce": stringPointer(request.Nonce), "code_challenge": stringPointer(request.CodeChallenge), "code_challenge_method": stringPointer(request.CodeChallengeMethod), "request_object_hash": objectHash, "created_at": request.CreatedAt.UTC(), "expires_at": request.ExpiresAt.UTC(), "status": activeStatus}).Error
 }
 func (r *Repository) ConsumePushedAuthorizationRequest(ctx context.Context, tenantID, oauthClientID string, hash [32]byte, now time.Time) (application.PushedAuthorizationRequest, error) {
+	// request_uri 的查找、租户/客户端绑定、过期判断和状态转换必须在同一行锁内完成，
+	// 否则两个并发浏览器请求可能把同一 PAR 兑换成两个授权码流程。
 	var row parRow
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("oauth_pushed_authorization_request").Where("tenant_id = ? AND oauth_client_id = ? AND request_uri_hash = ?", tenantID, oauthClientID, hash[:]).Take(&row).Error; err != nil {

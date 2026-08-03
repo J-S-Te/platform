@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
@@ -143,10 +144,11 @@ func newLocalDockerSubsystemProvisioner(config LocalDockerSubsystemProvisionerCo
 
 // Preflight rejects missing or unsafe local project configuration before the database aggregate and
 // its one-time OAuth secret are created.
-func (provisioner *LocalDockerSubsystemProvisioner) Preflight(ctx context.Context, applicationCode string) error {
+func (provisioner *LocalDockerSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
 	if !provisioner.config.Enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
 	}
+	applicationCode := strings.TrimSpace(input.ApplicationCode)
 	projectDirectory, err := provisioner.projectDirectory(applicationCode)
 	if err != nil {
 		return err
@@ -179,6 +181,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) Preflight(ctx context.Contex
 // Provision applies the generated configuration and performs the deployment. Calls are serialized
 // because each run mutates shared Docker and nginx state.
 func (provisioner *LocalDockerSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	// 所有接入/更新/下线共享同一把进程锁，因为它们会改写公共 Compose 与 nginx 配置；
+	// 并发执行可能让一个请求覆盖另一个请求刚写好的密钥或网关片段。
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 	return provisioner.applyLocked(ctx, input)
@@ -199,7 +203,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) Update(ctx context.Context, 
 // Teardown stops the subsystem Compose stack, removes its generated .env.local, drops the
 // portal gateway include, and reloads nginx. The HTTP layer is responsible for the subsequent
 // DELETE on /environments and /applications.
-func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context, applicationCode, _ /* environment */ string) error {
+func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context, _ /* tenant */ string, applicationCode, _ /* environment */ string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 
@@ -214,6 +218,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
 
+	// 集成子系统与平台共用 Compose 项目，因此只能停止自己的 API 服务，不能执行 down；
+	// 独立子系统则拥有完整栈和 .env.local，可按项目整体清理。
 	// Standalone Compose stacks and their .env.local live under the subsystem project directory.
 	// The integrated contract, customer and Portal APIs share the platform Compose project, so teardown
 	// only stops their API service and deliberately preserves database/key material in the shared
@@ -351,6 +357,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": input.ApplicationID,
 		"PLATFORM_DOCKER_NETWORK":                       provisioner.config.PlatformDockerNetwork,
 	}
+	// 这里构造的 map 是密钥进入运行时文件的唯一通道。后续写文件使用受限权限，命令行
+	// 只传 env-file 路径，避免 secret 出现在进程列表或部署日志中。
 	if input.ApplicationCode == integratedCustomerApplicationCode {
 		// customer-api is compiled into the unified local topology. OIDC still uses the public
 		// issuer, while discovery/token calls are routed over the private Compose alias. The
@@ -941,6 +949,86 @@ func updateSubsystemEnvironment(sourcePath, destinationPath string, replacements
 		return err
 	}
 	return os.Rename(temporaryPath, destinationPath)
+}
+
+// updateProductionSubsystemEnvironment 只更新显式白名单键。它不沿用本地模板的密码自动生成
+// 逻辑，并保留原文件所有者，防止 root Agent 原子替换后让低权限发布账号失去读取权限。
+func updateProductionSubsystemEnvironment(path string, replacements map[string]string) error {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("production environment file is unavailable")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	for key, value := range replacements {
+		if !validEnvironmentKey(key) || !validEnvironmentValue(value) {
+			return errors.New("invalid production environment replacement")
+		}
+	}
+
+	remaining := make(map[string]string, len(replacements))
+	for key, value := range replacements {
+		remaining[key] = value
+	}
+	seenManaged := make(map[string]struct{}, len(replacements))
+	lines := make([]string, 0, strings.Count(string(content), "\n")+len(replacements)+1)
+	scanner := bufio.NewScanner(strings.NewReader(string(content)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, ok := environmentLineKey(line)
+		if replacement, managed := replacements[key]; managed && ok {
+			if _, duplicate := seenManaged[key]; duplicate {
+				return fmt.Errorf("duplicate managed production environment key %s", key)
+			}
+			seenManaged[key] = struct{}{}
+			lines = append(lines, key+"="+encodeEnvironmentValue(replacement))
+			delete(remaining, key)
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	for _, key := range sortedEnvironmentKeys(remaining) {
+		lines = append(lines, key+"="+encodeEnvironmentValue(remaining[key]))
+	}
+	output := strings.Join(lines, "\n") + "\n"
+
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".production-env.*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(0o600); err == nil {
+		_, err = temporary.WriteString(output)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		if err := os.Chown(temporaryPath, int(stat.Uid), int(stat.Gid)); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func environmentLineKey(line string) (string, bool) {

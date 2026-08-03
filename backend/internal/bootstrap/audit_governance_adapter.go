@@ -8,9 +8,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
 )
 
-// governanceAuditAdapter records background retention actions through the same append-only audit
-// ingestion path used by the rest of the platform. It is retained for the worker even though the
-// interactive audit-operations management module is no longer exposed.
+// governanceAuditAdapter 让后台留存动作复用平台追加式审计入口。即使交互式治理页面未暴露，
+// Worker 的清理行为仍必须留下与其他平台事件一致的来源、结果和风险记录。
 type governanceAuditAdapter struct {
 	service *auditapplication.Service
 	config  config.AuditConfig

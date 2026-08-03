@@ -69,7 +69,8 @@ type releaseItemModel struct {
 
 func (releaseItemModel) TableName() string { return "cfg_release_item" }
 
-// Repository implements application.Repository using explicit GORM queries. It never uses AutoMigrate.
+// Repository 使用迁移维护的表执行显式查询，不调用 AutoMigrate。配置表结构和发布快照属于受控协议，
+// 运行时自动改表会破坏历史版本的可重放性。
 type Repository struct{ database *gorm.DB }
 
 func NewRepository(database *gorm.DB) (*Repository, error) {
@@ -103,6 +104,7 @@ func (r *Repository) ListNamespaces(ctx context.Context, tenantID string, query 
 	return application.PageResult[domain.Namespace]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 func (r *Repository) CreateNamespace(ctx context.Context, input application.NamespaceCreateInput, id string, now time.Time) (domain.Namespace, error) {
+	// 应用和环境归属始终从平台注册表反查；当前配置控制面只允许为 ACTIVE 的 dev 环境建命名空间。
 	var app applicationModel
 	if err := r.database.WithContext(ctx).Where("code = ? AND status = ?", input.ApplicationCode, "ACTIVE").Take(&app).Error; err != nil {
 		return domain.Namespace{}, r.mapError(err)
@@ -169,6 +171,7 @@ func (r *Repository) UpdateItem(ctx context.Context, input application.ItemUpdat
 	}
 
 	err = r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 先在租户连接下读取当前项，再校验目标命名空间；两次检查都在事务中，防止跨租户移动配置。
 		var current itemModel
 		if err := tx.Table("cfg_item AS item").
 			Joins("JOIN cfg_namespace AS namespace ON namespace.id = item.namespace_id").
@@ -186,6 +189,7 @@ func (r *Repository) UpdateItem(ctx context.Context, input application.ItemUpdat
 			return r.mapError(err)
 		}
 
+		// version 条件把并发覆盖变成显式冲突；零行更新不能被当成成功，否则旧页面会静默覆盖新草稿。
 		result := tx.Model(&itemModel{}).
 			Where("id = ? AND version = ?", input.ItemID, input.Version).
 			Updates(map[string]any{
@@ -216,6 +220,7 @@ func (r *Repository) UpdateItem(ctx context.Context, input application.ItemUpdat
 }
 func (r *Repository) CreateRelease(ctx context.Context, input application.ReleaseCreateInput, id string, now time.Time) (domain.Release, error) {
 	var result domain.Release
+	// 锁定命名空间后，在同一事务中校验草稿版本、生成快照并推进当前发布号；任一步失败都不留下半成品发布。
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var namespace namespaceModel
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND status = ?", input.NamespaceID, input.TenantID, "ACTIVE").Take(&namespace).Error; err != nil {
@@ -227,6 +232,7 @@ func (r *Repository) CreateRelease(ctx context.Context, input application.Releas
 			ids = append(ids, selected.ItemID)
 			versions[selected.ItemID] = selected.Version
 		}
+		// config_key 排序让快照内容与校验和不依赖数据库偶然的返回顺序。
 		var items []itemModel
 		if err := tx.Where("namespace_id = ? AND id IN ?", namespace.ID, ids).Order("config_key ASC").Find(&items).Error; err != nil {
 			return err
@@ -295,6 +301,7 @@ func (r *Repository) GetRelease(ctx context.Context, tenantID, releaseID string)
 	return domain.Release{ID: row.ID, Namespace: domain.Reference{ID: row.NamespaceID, Code: row.NamespaceCode, Name: row.NamespaceName}, VersionNo: row.ReleaseNo, Status: row.ReleaseStatus, Comment: row.ChangeSummary, CreatedAt: row.CreatedAt, PublishedAt: row.ReleasedAt}, nil
 }
 func (r *Repository) GetPublished(ctx context.Context, tenantID, applicationCode, namespaceCode string) (domain.PublishedConfig, error) {
+	// 运行时只解析命名空间指向的当前 PUBLISHED 快照，绝不回退读取仍可变化的 DRAFT 项。
 	var release struct {
 		ID        string
 		ReleaseNo uint64
@@ -306,6 +313,7 @@ func (r *Repository) GetPublished(ctx context.Context, tenantID, applicationCode
 	if release.ID == "" {
 		return domain.PublishedConfig{}, application.ErrNotFound
 	}
+	// 即使历史数据意外包含敏感项，也在查询层再次排除，避免运行时接口返回密钥材料。
 	var items []releaseItemModel
 	if err := r.database.WithContext(ctx).Where("release_id = ? AND `sensitive` = ?", release.ID, false).Find(&items).Error; err != nil {
 		return domain.PublishedConfig{}, err

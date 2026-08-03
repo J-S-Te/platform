@@ -9,8 +9,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/application"
 )
 
-// Token dispatches the supported OAuth token grants. Client credentials remain delegated to the
-// pre-existing issuer so clients keep their current access-token format and authorization policy.
+// Token 端点只接受表单 POST，拒绝查询串、重复敏感参数和未知授权类型；授权码与刷新令牌
+// 走 OIDC 服务，机器凭据暂由既有签发器处理，以保持应用令牌格式和权限策略兼容。
 func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -44,6 +44,8 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) exchangeAuthorizationCode(w http.ResponseWriter, r *http.Request) {
+	// 客户端认证通过后，应用层仍会绑定授权码的 client_id、redirect_uri 和 PKCE verifier；
+	// 传输层只负责收集参数，不能把认证成功等同于授权码可兑换。
 	authentication, ok := h.tokenClientAuthentication(w, r, true, true)
 	if !ok {
 		return
@@ -60,6 +62,8 @@ func (h *Handler) exchangeAuthorizationCode(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
+	// 刷新令牌同样绑定原客户端；重放和令牌族撤销由应用层统一处理，HTTP 层只映射为
+	// 标准 invalid_grant，避免向调用方暴露令牌是否存在等内部状态。
 	authentication, ok := h.tokenClientAuthentication(w, r, true, true)
 	if !ok {
 		return
@@ -75,6 +79,8 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) issueClientCredentials(w http.ResponseWriter, r *http.Request) {
+	// client_credentials 不允许公共客户端表单身份或 private_key_jwt；当前兼容签发器要求
+	// HTTP Basic，并在服务端校验该机器客户端可用的最小 scope。
 	if h.legacyIssuer == nil {
 		writeOAuthError(w, http.StatusBadRequest, "unauthorized_client", "")
 		return
@@ -101,12 +107,9 @@ func (h *Handler) issueClientCredentials(w http.ResponseWriter, r *http.Request)
 	writeLegacyTokenResult(w, result)
 }
 
-// tokenClientAuthentication only accepts HTTP Basic for confidential clients. Public end-user
-// grants (authorization_code and refresh_token) may instead provide client_id in the form without
-// a client_secret; client_credentials always requires HTTP Basic.
-// tokenClientAuthentication supports client_secret_basic, public client_id form authentication, and
-// private_key_jwt for OIDC user grants. The assertion audience is derived from trusted server
-// configuration; the non-standard client_assertion_audience form value is rejected.
+// 用户授权类型支持三种互斥身份：机密客户端 HTTP Basic、公共客户端表单 client_id，或
+// private_key_jwt。断言 audience 始终由服务端 issuer 推导，拒绝客户端自报 audience；
+// 同时出现多种认证材料或多个 Authorization 头时失败关闭，避免解析差异造成身份混淆。
 func (h *Handler) tokenClientAuthentication(w http.ResponseWriter, r *http.Request, allowPublicClientForm, allowClientAssertion bool) (application.ClientAuthentication, bool) {
 	basicClientID, basicClientSecret, hasBasic := r.BasicAuth()
 	authorizationValues := r.Header.Values("Authorization")
@@ -147,6 +150,8 @@ func (h *Handler) tokenEndpointAudience() string {
 }
 
 func (h *Handler) writeOIDCTokenError(w http.ResponseWriter, err error) {
+	// 对外只返回 OAuth 标准错误类别；内部数据库、验签和策略错误写服务端日志，不能把
+	// 令牌存在性、客户端配置或调用栈暴露给调用方。
 	switch {
 	case errors.Is(err, application.ErrInvalidClient):
 		writeInvalidClient(w)

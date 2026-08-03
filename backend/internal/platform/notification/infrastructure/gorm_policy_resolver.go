@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// InboxPolicy reads the tenant-owned in-app notification switch without importing settings internals.
+// InboxPolicy 读取租户站内信开关，但不让 notification 依赖 settings 的内部模型。
 type InboxPolicy struct{ database *gorm.DB }
 
 // NewInboxPolicy constructs the settings read adapter used by notification creation.
@@ -28,7 +28,7 @@ type inboxSettingRow struct {
 
 func (inboxSettingRow) TableName() string { return "notification_setting" }
 
-// InboxEnabled defaults to true before a tenant writes notification settings, matching the existing settings read model.
+// InboxEnabled 在租户尚未保存设置时按既有读模型默认为开启；数据库故障不能伪装成默认值。
 func (policy *InboxPolicy) InboxEnabled(ctx context.Context, tenantID string) (bool, error) {
 	var row inboxSettingRow
 	err := policy.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error
@@ -41,8 +41,8 @@ func (policy *InboxPolicy) InboxEnabled(ctx context.Context, tenantID string) (b
 	return false, fmt.Errorf("read notification inbox policy: %w", err)
 }
 
-// RecipientResolver resolves only active users in the current tenant. Role and organization
-// audiences are data selectors; they never imply a permission grant.
+// RecipientResolver 只解析当前租户的有效用户。角色和组织在这里仅用于选择通知受众，
+// 绝不产生角色绑定或业务权限。
 type RecipientResolver struct{ database *gorm.DB }
 
 // NewRecipientResolver constructs the GORM tenant audience resolver.

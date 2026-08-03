@@ -52,6 +52,8 @@ func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []appl
 
 	users := make([]domain.User, 0, len(writes))
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// 整批用户必须属于同一租户；应用角色先整体解析再开始写入，任何歧义、越界或
+		// 角色数量冲突都会使整批失败，避免 CSV 导入留下半批成功数据。
 		tenantID := writes[0].TenantID
 		var platformApplication bootstrapApplicationModel
 		result := transaction.Where(
@@ -476,10 +478,8 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 			return application.ErrVersionConflict
 		}
 
-		// Re-enabling is deliberately not a session restoration operation. Any session that
-		// existed before a disable transition was revoked below and the user must authenticate
-		// again. Management cannot set LOCKED, but retaining the non-ACTIVE check keeps this
-		// invariant valid if a future lifecycle path reuses the repository operation.
+		// 重新启用账号不是恢复会话：从 ACTIVE 进入任一非活动状态时撤销旧会话，之后
+		// 即使重新启用也必须重新认证。这里保留泛化的非 ACTIVE 判断，供后续锁定生命周期复用。
 		if existing.Status == domain.StatusActive && input.Status != domain.StatusActive {
 			result = transaction.Model(&sessionModel{}).
 				Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, domain.StatusActive).
@@ -552,6 +552,8 @@ func (repository *GORMRepository) ListOrgUnits(ctx context.Context, tenantID, ke
 
 func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit domain.OrgUnit, operatorID string) (domain.OrgUnit, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// path 采用包含自身 ID 的物化路径，既支持稳定的子树前缀查询，也使移动节点时能
+		// 一次批量替换所有后代路径；父节点必须来自同一租户且处于活动状态。
 		path, depth := "/"+orgUnit.ID+"/", uint(1)
 		if orgUnit.ParentID != nil {
 			var parent orgUnitModel
@@ -593,8 +595,8 @@ func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit dom
 	return orgUnit, nil
 }
 
-// UpdateOrgUnit changes the organization node and, if it is moved, rewrites every descendant
-// path/depth in the same transaction. A parent cannot be the node itself or any of its descendants.
+// UpdateOrgUnit 移动组织节点时，在同一事务内重写全部后代的物化路径和深度；新父节点
+// 不能是自身或自身后代，避免形成环并破坏后续组织范围授权的子树展开。
 func (repository *GORMRepository) UpdateOrgUnit(ctx context.Context, input application.OrgUnitUpdateInput) (domain.OrgUnit, error) {
 	var updated domain.OrgUnit
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -685,8 +687,8 @@ func (repository *GORMRepository) UpdateOrgUnit(ctx context.Context, input appli
 	return updated, nil
 }
 
-// DeleteOrgUnit logically deletes an organization subtree. The hierarchy remains queryable by
-// status for audit purposes, while dependent positions and appointments become unavailable.
+// DeleteOrgUnit 逻辑停用整个组织子树，并同步停用其岗位、任职及组织/岗位授权产物；
+// 数据仍按状态保留用于审计，但不能再作为身份归属或授权继承来源。
 func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input application.OrgUnitDeleteInput) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var existing orgUnitModel
@@ -970,6 +972,9 @@ func (repository *GORMRepository) ListMemberships(ctx context.Context, tenantID 
 
 func (repository *GORMRepository) CreateMembership(ctx context.Context, input application.MembershipCreateInput, id string) (domain.Membership, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// 服务端以联表校验用户、组织、岗位同租户且岗位确属该组织，不能信任前端提交的
+		// org_unit_id/position_id 组合；主任职唯一性当前仅做事务内应用层检查，并发完整性仍需
+		// 数据库约束或用户级锁兜底。用户快捷主组织与任职写入则在同一事务内提交。
 		if err := ensureMembershipReferences(ctx, transaction, input); err != nil {
 			return err
 		}
@@ -1024,6 +1029,8 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 
 func (repository *GORMRepository) UpdateMembership(ctx context.Context, input application.MembershipUpdateInput) (domain.Membership, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// 任职更新可能同时换用户、组织、岗位、主次和继承开关；先验证新引用，再用版本号
+		// 更新，并在同一事务清理旧主组织、设置新主组织和推进授权修订号。
 		var existing membershipModel
 		result := transaction.Where("tenant_id = ? AND id = ?", input.TenantID, input.MembershipID).First(&existing)
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
@@ -1101,11 +1108,9 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 	return repository.getMembership(ctx, input.TenantID, input.MembershipID)
 }
 
-// advanceMembershipAuthorizationRevisions invalidates authorization snapshots for applications
-// whose roles can be inherited through an organization or position binding. It intentionally
-// updates every such application in the tenant, rather than trying to infer only the old and new
-// organization/position matches, so scheduled validity changes and future binding resolution use
-// one conservative and transactionally consistent invalidation rule.
+// advanceMembershipAuthorizationRevisions 使所有可能通过组织或岗位继承角色的应用授权
+// 快照失效。这里保守更新租户内全部相关应用，而不猜测新旧任职具体命中了哪些绑定，
+// 从而覆盖有效期切换和后续绑定解析，并保持事务内一致。
 func advanceMembershipAuthorizationRevisions(transaction *gorm.DB, tenantID string, now time.Time, reason string) error {
 	result := buildMembershipAuthorizationRevisionUpdate(transaction, tenantID, now, reason)
 	if result.Error != nil {
@@ -1156,6 +1161,8 @@ func (repository *GORMRepository) getMembership(ctx context.Context, tenantID, m
 }
 
 func ensureMembershipReferences(ctx context.Context, database *gorm.DB, input application.MembershipCreateInput) error {
+	// 一条联表查询同时证明：用户活动、组织活动、岗位活动、三者同租户且岗位属于组织。
+	// 这道应用层约束是跨租户与组织岗位错配写入的主要防线。
 	var total int64
 	result := database.WithContext(ctx).
 		Model(&userModel{}).

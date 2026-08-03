@@ -48,6 +48,7 @@ func (idempotencyModel) TableName() string { return "iam_external_identity_idemp
 
 func (repository *GORMRepository) Provision(ctx context.Context, command application.ProvisionCommand) (application.ProvisionResult, error) {
 	var response application.ProvisionResult
+	// nonce、幂等结果、用户/账号/外部身份和审计事件在同一事务中提交，避免平台返回成功却缺少任一安全记录。
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := recordNonce(tx, command.Principal.TenantID, command.NonceHash[:], command.NonceExpiresAt, command.OccurredAt); err != nil {
 			return err
@@ -61,6 +62,7 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 			return err
 		}
 
+		// 邮箱和手机号独立查重；若二者命中不同身份，不能猜测合并，必须显式报冲突。
 		byEmail, err := findIdentityByDigest(tx, command.Principal.TenantID, "email_digest", command.EmailDigest)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -131,12 +133,9 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 				}
 			}
 		}
-		// Reserve one active HUMAN/LOCAL login account without any password credential. Credential
-		// initialization remains an explicit platform-admin account-lifecycle action, so CRM and
-		// Portal never handle a password. The deterministic account_no is the initial login name.
-		// New identities already created and linked their login account during the insert (the
-		// column is NOT NULL since migration 000071), so the follow-up is only needed for existing
-		// or replayed identities; a same-value UPDATE would otherwise report zero changed rows.
+		// 这里只预留 HUMAN/LOCAL 登录账号，不创建密码凭据。凭据初始化仍由平台管理员显式完成，
+		// 因而 CRM 和门户永远不接触密码。新身份已在插入时关联账号；该补偿只服务历史或重放身份，
+		// 避免同值 UPDATE 的零受影响行被误判为冲突。
 		if !loginAccountCreated {
 			if err := ensureExternalLoginAccount(tx, command, identity.PlatformUserID, identity.AccountNo); err != nil {
 				return err
@@ -174,10 +173,8 @@ func ensureExternalLoginAccount(tx *gorm.DB, command application.ProvisionComman
 	return nil
 }
 
-// createExternalLoginAccount reserves the single ACTIVE HUMAN/LOCAL login
-// account for an external customer without creating any password credential.
-// It is idempotent: an existing account with the same username wins, while a
-// conflicting account type or auth source is rejected.
+// createExternalLoginAccount 为外部客户预留唯一 ACTIVE HUMAN/LOCAL 账号，但不创建密码凭据。
+// 已存在的同构账号可幂等复用；账号类型或认证源不一致时拒绝接管，防止覆盖其他登录体系。
 func createExternalLoginAccount(tx *gorm.DB, command application.ProvisionCommand, platformUserID, accountNo string) (string, error) {
 	var account struct {
 		ID, Username, AccountType, AuthSource string
@@ -220,6 +217,7 @@ func (repository *GORMRepository) changeRole(ctx context.Context, command applic
 		operation, action, summary = "REVOKE_ROLE", "application_role.revoke", "Portal 客户角色已回收"
 	}
 	var response domain.RoleResult
+	// 角色绑定、策略修订号、幂等结果和高风险审计必须原子提交。策略修订号用于让子系统尽快淘汰旧权限缓存。
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := recordNonce(tx, command.Principal.TenantID, command.NonceHash[:], command.NonceExpiresAt, command.OccurredAt); err != nil {
 			return err
@@ -236,6 +234,7 @@ func (repository *GORMRepository) changeRole(ctx context.Context, command applic
 			}
 			return err
 		}
+		// 角色必须来自已同步的应用授权目录，而不是仅按客户端提交的 code 命中任意同名角色。
 		var target struct{ ApplicationID, RoleID string }
 		if err := tx.Table("platform_application AS application").Select("application.id AS application_id, role.id AS role_id").Joins("JOIN authz_role AS role ON role.tenant_id = application.tenant_id AND role.application_id = application.id AND role.code = ? AND role.role_type = ? AND role.status = ?", command.RoleCode, "APPLICATION", activeStatus).Joins("JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id = application.tenant_id AND catalog.application_id = application.id AND catalog.sync_status = ?", "SYNCED").Where("application.tenant_id = ? AND application.code = ? AND application.status = ?", command.Principal.TenantID, command.ApplicationCode, activeStatus).Take(&target).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -279,6 +278,7 @@ func (repository *GORMRepository) changeRole(ctx context.Context, command applic
 }
 
 func recordNonce(tx *gorm.DB, tenantID string, digest []byte, expiresAt, now any) error {
+	// 唯一键承担并发防重放：两个相同 nonce 同时到达时，只有一个事务能够插入成功。
 	if err := tx.Exec("DELETE FROM iam_external_identity_nonce_replay WHERE expires_at <= ?", now).Error; err != nil {
 		return err
 	}
@@ -320,6 +320,7 @@ func loadIdempotency(tx *gorm.DB, tenantID, clientID, operation, key string, dig
 	if err := tx.Where("tenant_id = ? AND oauth_client_id = ? AND operation = ? AND idempotency_key = ?", tenantID, clientID, operation, key).Take(&row).Error; err != nil {
 		return row, err
 	}
+	// 相同幂等键只允许重放同一规范化请求；否则返回冲突而不是泄漏或复用旧结果。
 	if !application.SameDigest(row.RequestHash, digest) {
 		return row, application.ErrConflict
 	}
@@ -363,6 +364,7 @@ func isDuplicate(err error) bool {
 }
 
 func ingestAudit(ctx context.Context, tx *gorm.DB, _ *auditapplication.Service, eventID string, principal appctx.Principal, occurredAt time.Time, action, resourceID, summary string, metadata map[string]any) error {
+	// 使用当前事务重新装配审计仓储，使审计落库与身份变更共享提交/回滚边界。
 	repository, err := auditinfrastructure.NewRepository(tx)
 	if err != nil {
 		return err

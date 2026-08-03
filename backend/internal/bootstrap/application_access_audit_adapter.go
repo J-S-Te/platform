@@ -12,9 +12,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
 )
 
-// applicationAccessAuditAdapter maps generic application authorization events to the platform's
-// append-only audit application. The configured platform application is the audit event source;
-// the target application and subject are retained as resource metadata.
+// applicationAccessAuditAdapter 把通用应用授权事件映射到平台追加式审计模型。事件来源固定为
+// 平台自身，目标应用和被授权用户保留在资源元数据中，避免把“执行者系统”和“授权目标”混淆。
 type applicationAccessAuditAdapter struct {
 	service *auditapplication.Service
 	config  config.AuditConfig
@@ -35,6 +34,7 @@ func (adapter *applicationAccessAuditAdapter) RecordApplicationAccessAudit(
 	}
 
 	metadata := make(map[string]any, len(event.Metadata)+4)
+	// 复制调用方 map，适配器补充审计字段时不能反向修改业务事件或引发并发 map 写入。
 	for key, value := range event.Metadata {
 		metadata[key] = value
 	}
@@ -45,6 +45,7 @@ func (adapter *applicationAccessAuditAdapter) RecordApplicationAccessAudit(
 	}
 
 	actorType := "SYSTEM"
+	// 空 OperatorID 表示后台补偿或系统任务；有操作者时才记录为 USER，不能伪造占位用户。
 	if strings.TrimSpace(event.OperatorID) != "" {
 		actorType = "USER"
 	}

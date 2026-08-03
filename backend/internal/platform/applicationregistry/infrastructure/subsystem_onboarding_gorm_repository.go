@@ -17,21 +17,23 @@ type SubsystemOnboardingGORMRepository struct {
 }
 
 type subsystemDeploymentStateModel struct {
-	TenantID        string     `gorm:"column:tenant_id"`
-	ApplicationID   string     `gorm:"column:application_id"`
-	EnvironmentID   string     `gorm:"column:environment_id"`
-	ApplicationCode string     `gorm:"column:application_code"`
-	Environment     string     `gorm:"column:environment_code"`
-	Status          string     `gorm:"column:status"`
-	Operation       string     `gorm:"column:operation"`
-	Generation      uint64     `gorm:"column:generation"`
-	AttemptCount    uint       `gorm:"column:attempt_count"`
-	LastErrorCode   *string    `gorm:"column:last_error_code"`
-	LastError       *string    `gorm:"column:last_error_message"`
-	StartedAt       *time.Time `gorm:"column:started_at"`
-	CompletedAt     *time.Time `gorm:"column:completed_at"`
-	CreatedAt       time.Time  `gorm:"column:created_at"`
-	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+	TenantID                string     `gorm:"column:tenant_id"`
+	ApplicationID           string     `gorm:"column:application_id"`
+	EnvironmentID           string     `gorm:"column:environment_id"`
+	ApplicationCode         string     `gorm:"column:application_code"`
+	Environment             string     `gorm:"column:environment_code"`
+	InitialAdminUserID      *string    `gorm:"column:initial_admin_user_id"`
+	InitialAccessAssignedAt *time.Time `gorm:"column:initial_access_assigned_at"`
+	Status                  string     `gorm:"column:status"`
+	Operation               string     `gorm:"column:operation"`
+	Generation              uint64     `gorm:"column:generation"`
+	AttemptCount            uint       `gorm:"column:attempt_count"`
+	LastErrorCode           *string    `gorm:"column:last_error_code"`
+	LastError               *string    `gorm:"column:last_error_message"`
+	StartedAt               *time.Time `gorm:"column:started_at"`
+	CompletedAt             *time.Time `gorm:"column:completed_at"`
+	CreatedAt               time.Time  `gorm:"column:created_at"`
+	UpdatedAt               time.Time  `gorm:"column:updated_at"`
 }
 
 func (subsystemDeploymentStateModel) TableName() string { return "subsystem_deployment_state" }
@@ -49,6 +51,8 @@ func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardi
 // environments, login targets and OAuth clients are never overwritten by this create-only flow.
 func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context.Context, write application.SubsystemOnboardingWrite, now time.Time) (application.SubsystemOnboardingResult, error) {
 	var result application.SubsystemOnboardingResult
+	// 应用、环境、登录目标、浏览器客户端、目录发布客户端和初始部署状态必须同成同败。
+	// 只要任一子资源写入失败，事务回滚，避免门户出现无法完成 OAuth 登录的半接入卡片。
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		management := &ManagementRepository{database: transaction}
 		createdApplication, err := management.CreateApplication(ctx, write.Application, write.ApplicationID, now)
@@ -122,18 +126,19 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 			})
 		}
 		if err := transaction.Create(&subsystemDeploymentStateModel{
-			TenantID:        createdApplication.TenantID,
-			ApplicationID:   createdApplication.ID,
-			EnvironmentID:   createdEnvironment.ID,
-			ApplicationCode: createdApplication.Code,
-			Environment:     createdEnvironment.Environment,
-			Status:          application.SubsystemDeploymentStatusProvisioning,
-			Operation:       "ONBOARD",
-			Generation:      1,
-			AttemptCount:    1,
-			StartedAt:       timePointer(now.UTC()),
-			CreatedAt:       now.UTC(),
-			UpdatedAt:       now.UTC(),
+			TenantID:           createdApplication.TenantID,
+			ApplicationID:      createdApplication.ID,
+			EnvironmentID:      createdEnvironment.ID,
+			ApplicationCode:    createdApplication.Code,
+			Environment:        createdEnvironment.Environment,
+			InitialAdminUserID: optionalStringPointer(write.InitialAdminUserID),
+			Status:             application.SubsystemDeploymentStatusProvisioning,
+			Operation:          "ONBOARD",
+			Generation:         1,
+			AttemptCount:       1,
+			StartedAt:          timePointer(now.UTC()),
+			CreatedAt:          now.UTC(),
+			UpdatedAt:          now.UTC(),
 		}).Error; err != nil {
 			return err
 		}
@@ -215,6 +220,8 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 	seen := make(map[string]struct{}, len(rows))
 	items := make([]application.PortalApplication, 0, len(rows))
 	for _, row := range rows {
+		// SQL 排序已把环境和 home 目标的优先级固定；这里按应用取首条，确保同一应用
+		// 不因登记多个环境/目标而在门户重复展示。
 		if _, exists := seen[row.ApplicationID]; exists {
 			continue
 		}
@@ -250,6 +257,8 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 		"updated_at":         now.UTC(),
 	}
 	if status == application.SubsystemDeploymentStatusProvisioning || status == application.SubsystemDeploymentStatusUpdating || status == application.SubsystemDeploymentStatusVerifying || status == application.SubsystemDeploymentStatusDraining {
+		// 非终态开始新的尝试并清空完成时间；终态只收口当前尝试。状态接口因此可以区分
+		// “上次失败”与“本次仍在执行”，而无需暴露部署命令输出。
 		// A generation identifies one lifecycle attempt; terminal transitions keep the same
 		// generation so status polling can distinguish retries from completion updates.
 		if status != application.SubsystemDeploymentStatusProvisioning {
@@ -282,13 +291,62 @@ func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState
 		Take(&model).Error; err != nil {
 		return application.SubsystemDeploymentState{}, mapManagementError(err)
 	}
+	return deploymentStateFromModel(model), nil
+}
+
+func deploymentStateFromModel(model subsystemDeploymentStateModel) application.SubsystemDeploymentState {
 	return application.SubsystemDeploymentState{
 		TenantID: model.TenantID, ApplicationID: model.ApplicationID, EnvironmentID: model.EnvironmentID,
 		ApplicationCode: model.ApplicationCode, Environment: model.Environment, Status: model.Status,
+		InitialAdminUserID: modelString(model.InitialAdminUserID), InitialAccessAssignedAt: model.InitialAccessAssignedAt,
 		Operation: model.Operation, Generation: model.Generation, AttemptCount: model.AttemptCount,
 		LastErrorCode: dereferenceString(model.LastErrorCode), LastError: dereferenceString(model.LastError),
 		StartedAt: model.StartedAt, CompletedAt: model.CompletedAt, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
-	}, nil
+	}
+}
+
+// GetSubsystemDeploymentContext resolves application/environment identifiers from control-plane
+// registration regardless of deployment status. Retry cannot use the portal projection because
+// PROVISION_FAILED environments are intentionally hidden there.
+func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentContext(ctx context.Context, tenantID, applicationCode, environment string) (application.SubsystemDeploymentState, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	environment = strings.ToLower(strings.TrimSpace(environment))
+	var model subsystemDeploymentStateModel
+	if err := repository.database.WithContext(ctx).
+		Table("subsystem_deployment_state AS deployment").
+		Select("deployment.*").
+		Joins("JOIN platform_application AS application ON application.tenant_id = deployment.tenant_id AND application.id = deployment.application_id AND application.code = ?", applicationCode).
+		Joins("JOIN platform_application_environment AS environment ON environment.tenant_id = deployment.tenant_id AND environment.application_id = deployment.application_id AND environment.id = deployment.environment_id AND environment.environment = ?", environment).
+		Where("deployment.tenant_id = ? AND deployment.application_code = ? AND deployment.environment_code = ?", tenantID, applicationCode, environment).
+		Take(&model).Error; err != nil {
+		return application.SubsystemDeploymentState{}, mapManagementError(err)
+	}
+	return deploymentStateFromModel(model), nil
+}
+
+// MarkSubsystemInitialAccessAssigned records the authorization side effect independently from
+// READY. If a later state write or HTTP response fails, retry can see that access is already
+// complete and will not grant the administrator role again.
+func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment string, now time.Time) error {
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND initial_access_assigned_at IS NULL", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+		Updates(map[string]any{"initial_access_assigned_at": now.UTC(), "updated_at": now.UTC()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		if err := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+			Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND initial_access_assigned_at IS NOT NULL", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 1 {
+			return application.ErrNotFound
+		}
+	}
+	return nil
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
@@ -300,11 +358,21 @@ func nullableString(value string) any {
 	return value
 }
 
-func dereferenceString(value *string) string {
+func modelString(value *string) string {
 	if value == nil {
 		return ""
 	}
 	return *value
+}
+
+func dereferenceString(value *string) string { return modelString(value) }
+
+func optionalStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // portalApplicationAccessFilter keeps portal visibility aligned with the effective authorization
@@ -312,6 +380,9 @@ func dereferenceString(value *string) string {
 // role bound to its active organization or position. The role binding is still constrained to the
 // tenant or the environment row currently being considered by the outer portal query.
 func portalApplicationAccessFilter(userID string) (string, []any) {
+	// 可见性由数据库中的有效授权事实决定，而不是前端缓存：直接用户绑定、开启继承的
+	// 在职组织/岗位绑定或用户直授权限均可贡献访问。所有路径都同时约束租户、应用、
+	// 环境范围和生效时间；合同系统另要求恰好一个有效角色，避免角色冲突进入子系统。
 	return `(
 			application.code = 'platform'
 			OR NOT EXISTS (

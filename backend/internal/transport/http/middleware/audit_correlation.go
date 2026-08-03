@@ -19,9 +19,8 @@ const (
 var auditCorrelationIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 var lowercaseHexPattern = regexp.MustCompile(`^[0-9a-f]+$`)
 
-// AuditIngestionCorrelation validates the transport correlation headers required on subsystem
-// audit ingestion routes. Only values validated here are stored in requestctx and may therefore be
-// trusted by the audit application service.
+// AuditIngestionCorrelation 校验子系统审计摄取所需的关联头。只有在此处完成长度、字符集和
+// traceparent 规范校验的值才进入可信 context，审计服务不会直接读取外部请求头。
 func AuditIngestionCorrelation() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := strings.TrimSpace(c.GetHeader(requestIDHeader))
@@ -46,9 +45,8 @@ func validAuditCorrelationIdentifier(value string) bool {
 	return auditCorrelationIdentifierPattern.MatchString(value)
 }
 
-// parseTraceparent validates the W3C traceparent base format and returns its trace identifier.
-// Version ff, all-zero trace/parent identifiers, uppercase hexadecimal and additional fields are
-// rejected so the stored value has one canonical representation.
+// parseTraceparent 接受 W3C traceparent 基础格式并提取 trace-id。拒绝 ff 版本、全零 ID、
+// 大写十六进制和附加字段，使持久化关联值只有一种规范表示，便于跨系统精确查询。
 func parseTraceparent(value string) (string, bool) {
 	parts := strings.Split(value, "-")
 	if len(parts) != 4 || len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {

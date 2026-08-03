@@ -10,13 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RequireSameOrigin rejects state-changing browser requests that do not originate from the
-// configured OIDC issuer. It is intended for cookie-authenticated OIDC consent operations, where
-// an external site must not be able to grant or revoke an end user's consent with their session.
-//
-// The caller provides a validated absolute issuer URL from configuration. The middleware compares
-// only the normalized scheme and host origin; issuer paths are intentionally not part of an Origin
-// header and must therefore not participate in the comparison.
+// RequireSameOrigin 保护 Cookie 认证的 OIDC 同意写操作，阻止外站借用用户会话授权或撤销授权。
+// Origin 协议只包含 scheme 与 host，因此比较时有意忽略 issuer 路径，但任何缺失或非法 Origin
+// 都按失败关闭处理。
 func RequireSameOrigin(issuer string) gin.HandlerFunc {
 	allowedOrigin := issuerOrigin(issuer)
 
@@ -31,11 +27,8 @@ func RequireSameOrigin(issuer string) gin.HandlerFunc {
 	}
 }
 
-// RequireAllowedOriginForUnsafeMethods protects cookie-backed APIs from cross-site writes.
-// Every unsafe browser-session request must supply an explicitly allowed Origin. Failing closed
-// when Origin is absent avoids treating a missing or stripped browser header as proof that a
-// request is same-origin. Non-browser automation must use its bearer-token/service-account
-// boundary instead of a browser session cookie.
+// RequireAllowedOriginForUnsafeMethods 对 Cookie 写接口执行 CSRF 防护。所有不安全方法必须携带
+// 明确允许的 Origin；Origin 被代理剥离或缺失时也拒绝。非浏览器自动化应走 Bearer/服务账号边界。
 func RequireAllowedOriginForUnsafeMethods(origins ...string) gin.HandlerFunc {
 	allowed := make(map[string]struct{}, len(origins))
 	for _, origin := range origins {
@@ -62,8 +55,7 @@ func RequireAllowedOriginForUnsafeMethods(origins ...string) gin.HandlerFunc {
 			return
 		}
 
-		// Sec-Fetch-Site is useful telemetry/defense in depth, but it is neither universal
-		// nor an authentication signal. Do not allow a missing Origin based on this header.
+		// Sec-Fetch-Site 仅作为浏览器侧纵深信号，既不普遍存在也不是身份凭据，不能据此放行缺失 Origin。
 		context.Abort()
 		httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
 	}
@@ -97,10 +89,8 @@ func normalizedOrigin(raw string) string {
 	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
 }
 
-// RequireAllowedOriginForUnsafeMethodsOrBearer keeps the CSRF protection used by browser
-// sessions while allowing an OAuth bearer request to come from a backend service with no browser
-// Origin header. Only the Authorization header syntax is checked here; token authentication still
-// happens in the following middleware.
+// RequireAllowedOriginForUnsafeMethodsOrBearer 保留浏览器 CSRF 防线，同时允许无 Origin 的后端
+// OAuth Bearer 调用。这里只严格判定凭据语法，签名、过期和客户端绑定仍由后续认证中间件完成。
 func RequireAllowedOriginForUnsafeMethodsOrBearer(origins ...string) gin.HandlerFunc {
 	browserGuard := RequireAllowedOriginForUnsafeMethods(origins...)
 	return func(context *gin.Context) {
@@ -109,23 +99,20 @@ func RequireAllowedOriginForUnsafeMethodsOrBearer(origins ...string) gin.Handler
 			return
 		}
 
-		// Cookie-backed requests must always pass the browser Origin check, even when an
-		// Authorization header is also present. Treat any Cookie header conservatively so a
-		// malformed or unrelated cookie cannot turn a browser request into a bearer request.
+		// 只要带 Cookie 就按浏览器请求处理，即使同时出现 Authorization；否则攻击者可附加伪 Bearer
+		// 把 Cookie 请求降级成不校验 Origin 的服务端请求。
 		if strings.TrimSpace(context.GetHeader("Cookie")) != "" {
 			browserGuard(context)
 			return
 		}
 
-		// A supplied Origin remains authoritative. In particular, a syntactically valid bearer
-		// token must not override an explicitly cross-origin browser request.
+		// 请求一旦声明 Origin，它就是权威浏览器信号；格式正确的 Bearer 也不能覆盖明确的跨域来源。
 		if strings.TrimSpace(context.GetHeader("Origin")) != "" {
 			browserGuard(context)
 			return
 		}
 
-		// Sec-Fetch-Site is not an authentication signal, but an explicit cross-site value is
-		// strong evidence that this is a browser request rather than backend automation.
+		// cross-site 值虽不是认证信息，却足以证明请求来自浏览器上下文，应回到 Origin 防护链拒绝。
 		if strings.EqualFold(strings.TrimSpace(context.GetHeader("Sec-Fetch-Site")), "cross-site") {
 			browserGuard(context)
 			return
@@ -139,10 +126,8 @@ func RequireAllowedOriginForUnsafeMethodsOrBearer(origins ...string) gin.Handler
 	}
 }
 
-// hasStrictBearerAuthorization accepts the token68 form used by OAuth bearer credentials:
-// one or more alphanumeric or -._~+/ characters followed only by optional trailing '=' padding.
-// bearerToken also keeps this check aligned with the following authentication middleware's scheme,
-// field-count and maximum-length validation.
+// hasStrictBearerAuthorization 只接受 OAuth token68 字符集及末尾可选填充，并复用 bearerToken
+// 的 scheme、字段数和长度限制；目的只是防止任意非空 Authorization 头绕过 CSRF。
 func hasStrictBearerAuthorization(header string) bool {
 	token, ok := bearerToken(header)
 	if !ok {
