@@ -298,13 +298,14 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 }
 
 // Teardown 仅停止清单列出的运行服务，保留数据库、备份、运行时秘密和发布指针。
+// 下线不连接数据库，因此不校验数据库凭据；即使 .env 仍是占位值也应允许停止服务。
 func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID string) error {
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
 	if err := target.validateTenant(tenantID); err != nil {
 		return err
 	}
-	if err := target.validateDeploymentFiles(false, true); err != nil {
+	if err := target.validateDeploymentFiles(false, false); err != nil {
 		return err
 	}
 	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
