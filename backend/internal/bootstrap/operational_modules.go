@@ -60,7 +60,23 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		cfg.SubsystemOnboarding.Enabled,
 		cfg.SubsystemOnboarding.SocketPath,
 		cfg.SubsystemOnboarding.Timeout,
+<<<<<<< Updated upstream
 		cfg.SubsystemOnboarding.Mode,
+=======
+		applicationregistryapplication.SubsystemProvisioningCapabilities{
+			Enabled: cfg.SubsystemOnboarding.Enabled,
+			Mode: cfg.SubsystemOnboarding.Mode,
+			SupportedApplicationCodes: productionCapabilityValues(cfg.SubsystemOnboarding.Mode, cfg.SubsystemOnboarding.ProductionApplicationCode),
+			SupportedEnvironments: subsystemCapabilityEnvironments(cfg.SubsystemOnboarding.Mode, cfg.SubsystemOnboarding.ProductionEnvironment),
+			DefaultApplicationCode: cfg.SubsystemOnboarding.ProductionApplicationCode,
+			DefaultApplicationName: cfg.SubsystemOnboarding.ProductionApplicationName,
+			DefaultDescription: cfg.SubsystemOnboarding.ProductionDescription,
+			DefaultEnvironment: cfg.SubsystemOnboarding.ProductionEnvironment,
+			DefaultUpstreamURL: cfg.SubsystemOnboarding.ProductionUpstreamURL,
+			DefaultPathPrefix: cfg.SubsystemOnboarding.ProductionPathPrefix,
+			DefaultClientType: cfg.SubsystemOnboarding.ProductionClientType,
+		},
+>>>>>>> Stashed changes
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -128,6 +144,20 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		FilesAndJobs:        fileTaskHandler,
 		AccessApplier:       subsystemProvisioner,
 	}, nil
+}
+
+func productionCapabilityValues(mode, configured string) []string {
+	if strings.EqualFold(strings.TrimSpace(mode), "production") && strings.TrimSpace(configured) != "" {
+		return []string{configured}
+	}
+	return nil
+}
+
+func subsystemCapabilityEnvironments(mode, configured string) []string {
+	if strings.EqualFold(strings.TrimSpace(mode), "production") && strings.TrimSpace(configured) != "" {
+		return []string{configured}
+	}
+	return []string{"dev", "test", "staging", "prod"}
 }
 
 // subsystemInitialAccessManager 在子系统目录已经发布时分配约定的初始管理员角色。

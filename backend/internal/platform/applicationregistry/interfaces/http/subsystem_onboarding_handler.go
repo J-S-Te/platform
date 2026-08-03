@@ -56,6 +56,10 @@ type subsystemOnboardingService interface {
 	ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error)
 }
 
+type subsystemProvisioningCapabilityProvider interface {
+	Capabilities() application.SubsystemProvisioningCapabilities
+}
+
 // subsystemInitialAccessManager keeps subsystem-specific authorization outside the application
 // registry. An empty role code means the registered subsystem has no managed role catalog yet.
 type subsystemInitialAccessManager interface {
@@ -166,6 +170,7 @@ type subsystemDeploymentStateResponse struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+<<<<<<< Updated upstream
 type subsystemProvisioningCapabilitiesResponse struct {
 	AutomationEnabled         bool                        `json:"automation_enabled"`
 	DeploymentMode            string                      `json:"deployment_mode"`
@@ -174,6 +179,8 @@ type subsystemProvisioningCapabilitiesResponse struct {
 	Defaults                  subsystemOnboardingDefaults `json:"defaults"`
 }
 
+=======
+>>>>>>> Stashed changes
 type subsystemOnboardingDefaults struct {
 	ApplicationCode string `json:"application_code,omitempty"`
 	ApplicationName string `json:"application_name,omitempty"`
@@ -185,6 +192,17 @@ type subsystemOnboardingDefaults struct {
 	ClientType      string `json:"client_type"`
 }
 
+<<<<<<< Updated upstream
+=======
+type subsystemProvisioningCapabilitiesResponse struct {
+	AutomationEnabled         bool                        `json:"automation_enabled"`
+	DeploymentMode            string                      `json:"deployment_mode"`
+	SupportedApplicationCodes []string                    `json:"supported_application_codes"`
+	SupportedEnvironments     []string                    `json:"supported_environments"`
+	Defaults                  subsystemOnboardingDefaults `json:"defaults"`
+}
+
+>>>>>>> Stashed changes
 // OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
 func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	extendSubsystemDeploymentWriteDeadline(writer)
@@ -311,27 +329,51 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
 }
 
+<<<<<<< Updated upstream
 // GetSubsystemCapabilities returns only the non-sensitive policy required to render the
 // onboarding form correctly. The Agent still performs authoritative preflight validation before
 // any Application or OAuth credential is created.
+=======
+// GetSubsystemCapabilities exposes the non-sensitive, server-configured onboarding policy used
+// to render the management form. The isolated Agent still performs authoritative validation.
+>>>>>>> Stashed changes
 func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	if _, ok := subsystemPrincipal(writer, request); !ok {
 		return
 	}
 	capabilities := application.SubsystemProvisioningCapabilities{
+<<<<<<< Updated upstream
 		Enabled:               false,
 		Mode:                  "unknown",
 		SupportedEnvironments: []string{},
+=======
+		Enabled: false, Mode: "unknown", SupportedEnvironments: []string{},
+>>>>>>> Stashed changes
 	}
 	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
 		capabilities = provider.Capabilities()
 	}
+<<<<<<< Updated upstream
+=======
+	defaultEnvironment := strings.TrimSpace(capabilities.DefaultEnvironment)
+	if defaultEnvironment == "" && len(capabilities.SupportedEnvironments) > 0 {
+		defaultEnvironment = capabilities.SupportedEnvironments[0]
+	}
+	if defaultEnvironment == "" {
+		defaultEnvironment = "dev"
+	}
+	defaultClientType := strings.TrimSpace(capabilities.DefaultClientType)
+	if defaultClientType == "" {
+		defaultClientType = "confidential"
+	}
+>>>>>>> Stashed changes
 	response := subsystemProvisioningCapabilitiesResponse{
 		AutomationEnabled:         capabilities.Enabled,
 		DeploymentMode:            capabilities.Mode,
 		SupportedApplicationCodes: append([]string(nil), capabilities.SupportedApplicationCodes...),
 		SupportedEnvironments:     append([]string(nil), capabilities.SupportedEnvironments...),
 		Defaults: subsystemOnboardingDefaults{
+<<<<<<< Updated upstream
 			Environment: "dev", PublicBaseURL: handler.oidcIssuer, ClientType: "confidential",
 		},
 	}
@@ -343,6 +385,18 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 			PathPrefix: "/contract_management", ClientType: "confidential",
 		}
 	}
+=======
+			ApplicationCode: capabilities.DefaultApplicationCode,
+			ApplicationName: capabilities.DefaultApplicationName,
+			Description: capabilities.DefaultDescription,
+			Environment: defaultEnvironment,
+			PublicBaseURL: handler.oidcIssuer,
+			UpstreamURL: capabilities.DefaultUpstreamURL,
+			PathPrefix: capabilities.DefaultPathPrefix,
+			ClientType: defaultClientType,
+		},
+	}
+>>>>>>> Stashed changes
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署能力查询成功", response)

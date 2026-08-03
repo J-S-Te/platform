@@ -51,14 +51,30 @@ type SubsystemDeploymentStateStore interface {
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
 }
 
+<<<<<<< Updated upstream
 // SubsystemProvisioningCapabilities describes the safe deployment boundary exposed to the
 // management console. It intentionally contains no host paths, tenant binding, image reference,
 // credentials, or arbitrary command/service names.
+=======
+// SubsystemProvisioningCapabilities exposes only the non-sensitive deployment policy required
+// by the management console. Production targets come from server configuration; host paths,
+// tenant bindings, credentials and Compose service names are deliberately excluded.
+>>>>>>> Stashed changes
 type SubsystemProvisioningCapabilities struct {
 	Enabled                   bool
 	Mode                      string
 	SupportedApplicationCodes []string
 	SupportedEnvironments     []string
+<<<<<<< Updated upstream
+=======
+	DefaultApplicationCode    string
+	DefaultApplicationName    string
+	DefaultDescription        string
+	DefaultEnvironment        string
+	DefaultUpstreamURL        string
+	DefaultPathPrefix         string
+	DefaultClientType         string
+>>>>>>> Stashed changes
 }
 
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过

@@ -16,12 +16,6 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 )
 
-const (
-	productionContractEnvironment = "prod"
-	productionContractPathPrefix  = "/contract_management"
-	productionContractUpstreamURL = "http://contract-api:8081"
-)
-
 // ProductionComposeSubsystemProvisionerConfig 固定运维方掌控的生产部署目录。所有路径、Compose
 // 项目和可执行文件都来自服务端配置，浏览器输入不能选择主机文件、镜像、服务或命令。
 type ProductionComposeSubsystemProvisionerConfig struct {
@@ -32,6 +26,16 @@ type ProductionComposeSubsystemProvisionerConfig struct {
 	ReleaseEnvPath  string
 	ComposeFile     string
 	AllowedTenantID string
+	ApplicationCode string
+	Environment     string
+	PathPrefix      string
+	UpstreamURL     string
+	DependencyServices []string
+	DatabaseService    string
+	DatabaseName       string
+	MigrateService     string
+	APIService         string
+	ReleaseImageKey    string
 	ComposeProject  string
 	DockerBinary    string
 	Timeout         time.Duration
@@ -68,6 +72,24 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	if config.AllowedTenantID == "" {
 		return nil, errors.New("production subsystem allowed tenant is required")
 	}
+	config.ApplicationCode = strings.ToLower(strings.TrimSpace(config.ApplicationCode))
+	config.Environment = strings.ToLower(strings.TrimSpace(config.Environment))
+	config.PathPrefix = strings.TrimRight(strings.TrimSpace(config.PathPrefix), "/")
+	config.UpstreamURL = strings.TrimRight(strings.TrimSpace(config.UpstreamURL), "/")
+	if !validProductionTargetCode(config.ApplicationCode, 64) || !validProductionTargetCode(config.Environment, 16) ||
+		!validProductionPathPrefix(config.PathPrefix) || !validProductionUpstreamURL(config.UpstreamURL) {
+		return nil, errors.New("production subsystem target configuration is invalid")
+	}
+	config.DependencyServices = normalizedProductionServices(config.DependencyServices)
+	config.DatabaseService = strings.TrimSpace(config.DatabaseService)
+	config.DatabaseName = strings.TrimSpace(config.DatabaseName)
+	config.MigrateService = strings.TrimSpace(config.MigrateService)
+	config.APIService = strings.TrimSpace(config.APIService)
+	config.ReleaseImageKey = strings.TrimSpace(config.ReleaseImageKey)
+	if len(config.DependencyServices) == 0 || !validProductionComposeService(config.DatabaseService) || !validProductionDatabaseName(config.DatabaseName) ||
+		!validProductionComposeService(config.MigrateService) || !validProductionComposeService(config.APIService) || !validProductionReleaseImageKey(config.ReleaseImageKey) {
+		return nil, errors.New("production subsystem Compose target configuration is invalid")
+	}
 	if config.RuntimeEnvPath = strings.TrimSpace(config.RuntimeEnvPath); config.RuntimeEnvPath == "" {
 		config.RuntimeEnvPath = filepath.Join(config.DeployRoot, ".env")
 	}
@@ -98,14 +120,14 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Preflight(ctx context.
 	if !provisioner.config.Enabled {
 		return provisioningError("production subsystem deployment is disabled")
 	}
-	if err := validateProductionPreflightInput(input); err != nil {
+	if err := provisioner.validatePreflightInput(input); err != nil {
 		return err
 	}
 	if strings.TrimSpace(input.TenantID) != provisioner.config.AllowedTenantID {
 		return provisioningError("production subsystem tenant is not allowed")
 	}
-	if strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode {
-		return provisioningError("production automatic deployment supports only contract_management")
+	if strings.ToLower(strings.TrimSpace(input.ApplicationCode)) != provisioner.config.ApplicationCode {
+		return provisioningError("production subsystem target is not allowed")
 	}
 	if err := provisioner.validateDeploymentFiles(true); err != nil {
 		return err
@@ -150,12 +172,12 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.
 		"OIDC_POST_LOGOUT_REDIRECT_URI":                 strings.TrimRight(input.PublicURL, "/") + "/logged-out",
 		"OIDC_SCOPES":                                   "openid profile",
 		"OIDC_TENANT_ID":                                input.TenantID,
-		"OIDC_SESSION_COOKIE_NAME":                      "contract_management_session",
+		"OIDC_SESSION_COOKIE_NAME":                      provisioner.config.ApplicationCode + "_session",
 		"OIDC_SESSION_COOKIE_SECURE":                    booleanEnvironmentValue(secureCookie),
 		"APP_PUBLIC_URL":                                input.PublicURL,
 		"APP_PATH_PREFIX":                               input.PathPrefix,
-		"PLATFORM_APPLICATION_CODE":                     integratedContractApplicationCode,
-		"PLATFORM_ENVIRONMENT_CODE":                     productionContractEnvironment,
+		"PLATFORM_APPLICATION_CODE":                     provisioner.config.ApplicationCode,
+		"PLATFORM_ENVIRONMENT_CODE":                     provisioner.config.Environment,
 		"PLATFORM_AUDIT_CLIENT_ID":                      auditCredential.OAuthClient.ClientID,
 		"PLATFORM_AUDIT_CLIENT_SECRET":                  auditCredential.PlaintextSecret,
 		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "true",
@@ -177,8 +199,8 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.
 func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
-	if !provisioner.config.Enabled || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment {
-		return provisioningError("production contract deployment request is invalid")
+	if !provisioner.matchesTarget(input.ApplicationCode, input.Environment) {
+		return provisioningError("production subsystem deployment request is invalid")
 	}
 	if err := provisioner.validateTenant(input.TenantID); err != nil {
 		return err
@@ -193,7 +215,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Con
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
-	return provisioner.deployContractLocked(operationContext)
+	return provisioner.deployTargetLocked(operationContext)
 }
 
 // Teardown stops only the contract API. Databases, runtime secrets, release pointers, platform
@@ -201,8 +223,8 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Con
 func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.Context, tenantID, applicationCode, environment string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
-	if !provisioner.config.Enabled || strings.TrimSpace(applicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(environment)) != productionContractEnvironment {
-		return provisioningError("production contract teardown request is invalid")
+	if !provisioner.matchesTarget(applicationCode, environment) {
+		return provisioningError("production subsystem teardown request is invalid")
 	}
 	if err := provisioner.validateTenant(tenantID); err != nil {
 		return err
@@ -217,30 +239,32 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.C
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
-	if err := provisioner.runCompose(operationContext, "stop", "contract-api"); err != nil {
-		return provisioningError("stop production contract API")
+	if err := provisioner.runCompose(operationContext, "stop", provisioner.config.APIService); err != nil {
+		return provisioningError("stop production subsystem API")
 	}
 	return nil
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) deployContractLocked(ctx context.Context) error {
-	if err := provisioner.runCompose(ctx, "up", "-d", "--wait", "--wait-timeout", "240", "contract-mysql", "temporal"); err != nil {
-		return provisioningError("start production contract dependencies")
+func (provisioner *ProductionComposeSubsystemProvisioner) deployTargetLocked(ctx context.Context) error {
+	dependencyArguments := []string{"up", "-d", "--wait", "--wait-timeout", "240"}
+	dependencyArguments = append(dependencyArguments, provisioner.config.DependencyServices...)
+	if err := provisioner.runCompose(ctx, dependencyArguments...); err != nil {
+		return provisioningError("start production subsystem dependencies")
 	}
-	backupName := "contract-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
+	backupName := provisioner.config.ApplicationCode + "-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
 	if err := os.MkdirAll(filepath.Join(provisioner.config.DeployRoot, "backups"), 0o750); err != nil {
 		return provisioningError("prepare production contract backup")
 	}
-	if err := provisioner.runCompose(ctx, "exec", "-T", "contract-mysql", "sh", "-c",
-		`set -eu; umask 077; exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" contract_management > "/backups/$1"`,
-		"_", backupName); err != nil {
-		return provisioningError("backup production contract database")
+	if err := provisioner.runCompose(ctx, "exec", "-T", provisioner.config.DatabaseService, "sh", "-c",
+		`set -eu; umask 077; exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$2" > "/backups/$1"`,
+		"_", backupName, provisioner.config.DatabaseName); err != nil {
+		return provisioningError("backup production subsystem database")
 	}
-	if err := provisioner.runCompose(ctx, "--profile", "release", "run", "--rm", "--no-deps", "contract-migrate"); err != nil {
-		return provisioningError("migrate production contract database")
+	if err := provisioner.runCompose(ctx, "--profile", "release", "run", "--rm", "--no-deps", provisioner.config.MigrateService); err != nil {
+		return provisioningError("migrate production subsystem database")
 	}
-	if err := provisioner.runCompose(ctx, "up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps", "contract-api"); err != nil {
-		return provisioningError("start production contract API")
+	if err := provisioner.runCompose(ctx, "up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps", provisioner.config.APIService); err != nil {
+		return provisioningError("start production subsystem API")
 	}
 	return nil
 }
@@ -291,7 +315,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) validateDeploymentFile
 	if err := validateProductionRuntimePrerequisites(provisioner.config.RuntimeEnvPath); err != nil {
 		return err
 	}
-	if err := validateProductionReleaseImage(provisioner.config.ReleaseEnvPath, "CONTRACT_IMAGE"); err != nil {
+	if err := validateProductionReleaseImage(provisioner.config.ReleaseEnvPath, provisioner.config.ReleaseImageKey); err != nil {
 		return err
 	}
 	if requireWritableEnvironment {
@@ -363,19 +387,19 @@ func parseEnvironmentValues(content string) map[string]string {
 }
 
 func (provisioner *ProductionComposeSubsystemProvisioner) validateProvisioningInput(input application.SubsystemProvisioningInput) error {
-	if !provisioner.config.Enabled || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment {
-		return provisioningError("production contract deployment request is invalid")
+	if !provisioner.matchesTarget(input.ApplicationCode, input.Environment) {
+		return provisioningError("production subsystem deployment request is invalid")
 	}
 	if err := provisioner.validateTenant(input.TenantID); err != nil {
 		return err
 	}
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
-	expectedPublicURL := issuer + productionContractPathPrefix + "/"
-	expectedRedirectURI := issuer + productionContractPathPrefix + "/auth/callback"
+	expectedPublicURL := issuer + provisioner.config.PathPrefix + "/"
+	expectedRedirectURI := issuer + provisioner.config.PathPrefix + "/auth/callback"
 	if mustParseURL(issuer) == nil || strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.ApplicationID) == "" ||
 		strings.TrimSpace(input.ClientID) == "" || strings.TrimSpace(input.ClientSecret) == "" ||
 		strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" ||
-		input.PathPrefix != productionContractPathPrefix || input.UpstreamURL != productionContractUpstreamURL ||
+		input.PathPrefix != provisioner.config.PathPrefix || input.UpstreamURL != provisioner.config.UpstreamURL ||
 		input.PublicURL != expectedPublicURL || input.RedirectURI != expectedRedirectURI {
 		return provisioningError("production contract integration values are inconsistent")
 	}
@@ -393,18 +417,84 @@ func (provisioner *ProductionComposeSubsystemProvisioner) validateTenant(tenantI
 	return nil
 }
 
-func validateProductionPreflightInput(input application.SubsystemPreflightInput) error {
+func (provisioner *ProductionComposeSubsystemProvisioner) validatePreflightInput(input application.SubsystemPreflightInput) error {
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
 	expectedPublicBaseURL := issuer
-	if mustParseURL(issuer) == nil || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode ||
-		strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment ||
+	if mustParseURL(issuer) == nil || strings.ToLower(strings.TrimSpace(input.ApplicationCode)) != provisioner.config.ApplicationCode ||
+		strings.ToLower(strings.TrimSpace(input.Environment)) != provisioner.config.Environment ||
 		strings.ToLower(strings.TrimSpace(input.ClientType)) != "confidential" ||
 		strings.TrimRight(strings.TrimSpace(input.PublicBaseURL), "/") != expectedPublicBaseURL ||
-		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != productionContractUpstreamURL ||
-		strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/") != productionContractPathPrefix {
-		return provisioningError("production contract preflight values are inconsistent")
+		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != provisioner.config.UpstreamURL ||
+		strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/") != provisioner.config.PathPrefix {
+		return provisioningError("production subsystem preflight values are inconsistent")
 	}
 	return nil
+}
+
+func (provisioner *ProductionComposeSubsystemProvisioner) matchesTarget(applicationCode, environment string) bool {
+	return provisioner.config.Enabled &&
+		strings.ToLower(strings.TrimSpace(applicationCode)) == provisioner.config.ApplicationCode &&
+		strings.ToLower(strings.TrimSpace(environment)) == provisioner.config.Environment
+}
+
+func validProductionTargetCode(value string, maximum int) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || index > 0 && (character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validProductionPathPrefix(value string) bool {
+	return strings.HasPrefix(value, "/") && value != "/" && !strings.Contains(value, "//") && !strings.Contains(value, "..") && !strings.ContainsAny(value, "?#\\\r\n\x00")
+}
+
+func validProductionUpstreamURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+func normalizedProductionServices(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if !validProductionComposeService(value) {
+			return nil
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func validProductionComposeService(value string) bool {
+	return validProductionTargetCode(value, 64)
+}
+
+func validProductionDatabaseName(value string) bool {
+	return validProductionTargetCode(value, 64)
+}
+
+func validProductionReleaseImageKey(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'A' && character <= 'Z' || index > 0 && (character >= '0' && character <= '9' || character == '_') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func mustParseURL(value string) *url.URL {

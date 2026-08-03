@@ -108,6 +108,13 @@ type SubsystemOnboardingAutomationConfig struct {
 	ProductionReleaseEnv    string
 	ProductionComposeFile   string
 	ProductionAllowedTenant string
+	ProductionApplicationCode string
+	ProductionApplicationName string
+	ProductionDescription     string
+	ProductionEnvironment     string
+	ProductionUpstreamURL     string
+	ProductionPathPrefix      string
+	ProductionClientType      string
 	PlatformComposeProject  string
 	PlatformFrontendService string
 	PlatformDockerNetwork   string
@@ -223,6 +230,13 @@ func Load() (Config, error) {
 			ProductionReleaseEnv:    value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
 			ProductionComposeFile:   value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
 			ProductionAllowedTenant: value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
+			ProductionApplicationCode: value("SUBSYSTEM_PRODUCTION_APPLICATION_CODE", ""),
+			ProductionApplicationName: value("SUBSYSTEM_PRODUCTION_APPLICATION_NAME", ""),
+			ProductionDescription:     value("SUBSYSTEM_PRODUCTION_APPLICATION_DESCRIPTION", ""),
+			ProductionEnvironment:     strings.ToLower(value("SUBSYSTEM_PRODUCTION_ENVIRONMENT", "")),
+			ProductionUpstreamURL:     value("SUBSYSTEM_PRODUCTION_UPSTREAM_URL", ""),
+			ProductionPathPrefix:      value("SUBSYSTEM_PRODUCTION_PATH_PREFIX", ""),
+			ProductionClientType:      strings.ToLower(value("SUBSYSTEM_PRODUCTION_CLIENT_TYPE", "")),
 			PlatformComposeProject:  value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
 			PlatformFrontendService: value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
 			PlatformDockerNetwork:   value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
@@ -322,7 +336,10 @@ func (cfg Config) Validate() error {
 				return fmt.Errorf("local subsystem onboarding automation configuration is incomplete")
 			}
 		case "production":
-			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" {
+			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionApplicationCode) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionApplicationName) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionEnvironment) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionUpstreamURL) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionPathPrefix) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionClientType) == "" {
 				return fmt.Errorf("production subsystem onboarding automation configuration is incomplete")
 			}
 		default:

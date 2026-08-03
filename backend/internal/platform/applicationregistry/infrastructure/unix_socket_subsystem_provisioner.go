@@ -43,6 +43,7 @@ type subsystemProvisioningReply struct {
 // UnixSocketSubsystemProvisioner is the unprivileged API-side client. It can request only the two
 // fixed operations supported by the isolated deployment helper and never receives command output.
 type UnixSocketSubsystemProvisioner struct {
+<<<<<<< Updated upstream
 	enabled    bool
 	socketPath string
 	timeout    time.Duration
@@ -51,10 +52,21 @@ type UnixSocketSubsystemProvisioner struct {
 
 // NewUnixSocketSubsystemProvisioner constructs the API-side automatic deployment client.
 func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration, modes ...string) (*UnixSocketSubsystemProvisioner, error) {
+=======
+	enabled      bool
+	socketPath   string
+	timeout      time.Duration
+	capabilities application.SubsystemProvisioningCapabilities
+}
+
+// NewUnixSocketSubsystemProvisioner constructs the API-side automatic deployment client.
+func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration, policies ...application.SubsystemProvisioningCapabilities) (*UnixSocketSubsystemProvisioner, error) {
+>>>>>>> Stashed changes
 	socketPath = strings.TrimSpace(socketPath)
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
+<<<<<<< Updated upstream
 	mode := "local"
 	if len(modes) > 1 {
 		return nil, errors.New("subsystem provisioning accepts at most one deployment mode")
@@ -63,11 +75,26 @@ func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout 
 		mode = strings.ToLower(strings.TrimSpace(modes[0]))
 	}
 	if mode != "local" && mode != "production" {
+=======
+	if len(policies) > 1 {
+		return nil, errors.New("subsystem provisioning accepts at most one capability policy")
+	}
+	capabilities := application.SubsystemProvisioningCapabilities{
+		Enabled: enabled, Mode: "local",
+		SupportedEnvironments: []string{"dev", "test", "staging", "prod"},
+	}
+	if len(policies) == 1 {
+		capabilities = normalizeSubsystemProvisioningCapabilities(policies[0])
+		capabilities.Enabled = enabled
+	}
+	if capabilities.Mode != "local" && capabilities.Mode != "production" {
+>>>>>>> Stashed changes
 		return nil, errors.New("subsystem provisioning mode must be local or production")
 	}
 	if enabled && socketPath == "" {
 		return nil, errors.New("subsystem provisioning socket path is required")
 	}
+<<<<<<< Updated upstream
 	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout, mode: mode}, nil
 }
 
@@ -85,6 +112,52 @@ func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.Su
 		capabilities.SupportedEnvironments = []string{"prod"}
 	}
 	return capabilities
+=======
+	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout, capabilities: capabilities}, nil
+}
+
+// Capabilities returns a defensive copy of the server-configured deployment policy. The
+// privileged Agent independently enforces the same values and never trusts this UI projection.
+func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
+	capabilities := provisioner.capabilities
+	capabilities.SupportedApplicationCodes = append([]string(nil), capabilities.SupportedApplicationCodes...)
+	capabilities.SupportedEnvironments = append([]string(nil), capabilities.SupportedEnvironments...)
+	return capabilities
+}
+
+func normalizeSubsystemProvisioningCapabilities(capabilities application.SubsystemProvisioningCapabilities) application.SubsystemProvisioningCapabilities {
+	capabilities.Mode = strings.ToLower(strings.TrimSpace(capabilities.Mode))
+	if capabilities.Mode == "" {
+		capabilities.Mode = "local"
+	}
+	capabilities.SupportedApplicationCodes = normalizedCapabilityValues(capabilities.SupportedApplicationCodes)
+	capabilities.SupportedEnvironments = normalizedCapabilityValues(capabilities.SupportedEnvironments)
+	capabilities.DefaultApplicationCode = strings.ToLower(strings.TrimSpace(capabilities.DefaultApplicationCode))
+	capabilities.DefaultApplicationName = strings.TrimSpace(capabilities.DefaultApplicationName)
+	capabilities.DefaultDescription = strings.TrimSpace(capabilities.DefaultDescription)
+	capabilities.DefaultEnvironment = strings.ToLower(strings.TrimSpace(capabilities.DefaultEnvironment))
+	capabilities.DefaultUpstreamURL = strings.TrimRight(strings.TrimSpace(capabilities.DefaultUpstreamURL), "/")
+	capabilities.DefaultPathPrefix = strings.TrimRight(strings.TrimSpace(capabilities.DefaultPathPrefix), "/")
+	capabilities.DefaultClientType = strings.ToLower(strings.TrimSpace(capabilities.DefaultClientType))
+	return capabilities
+}
+
+func normalizedCapabilityValues(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+>>>>>>> Stashed changes
 }
 
 func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
