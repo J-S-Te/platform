@@ -174,6 +174,36 @@ func TestUnixSocketSubsystemProvisionerReturnsSafeActionableExecutorMessage(t *t
 	}
 }
 
+func TestUnixSocketSubsystemProvisionerCarriesMultiLineExecutorDetail(t *testing.T) {
+	t.Parallel()
+	socketDirectory, err := os.MkdirTemp("/tmp", "bp-provisioner-detail-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socketPath := filepath.Join(socketDirectory, "provisioner.sock")
+	executor := &recordingSubsystemProvisioner{preflightErr: provisioningError(
+		"start production subsystem services: CRM startup failed: authorization catalog token returned HTTP 401\ncontainer exited before health check\n",
+	)}
+	serverContext, cancelServer := context.WithCancel(context.Background())
+	t.Cleanup(cancelServer)
+	go func() { _ = RunSubsystemProvisioningServer(serverContext, socketPath, executor) }()
+	waitForProvisioningSocket(t, socketPath)
+	client, err := NewUnixSocketSubsystemProvisioner(true, socketPath, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Preflight(context.Background(), application.SubsystemPreflightInput{ApplicationCode: "customer_and_opportunity"})
+	if !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
+		t.Fatalf("preflight error = %v", err)
+	}
+	for _, expected := range []string{"start production subsystem services", "authorization catalog token returned HTTP 401", "container exited before health check"} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Fatalf("preflight error missing %q: %v", expected, err)
+		}
+	}
+}
+
 func waitForProvisioningSocket(t *testing.T, socketPath string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

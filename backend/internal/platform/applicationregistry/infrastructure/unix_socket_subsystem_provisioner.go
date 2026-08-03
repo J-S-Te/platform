@@ -38,8 +38,11 @@ type subsystemAccessApplyPayload struct {
 }
 
 type subsystemProvisioningReply struct {
-	Success bool   `json:"success"`
+	Success bool `json:"success"`
+	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
+	// 单独放 Detail，避免被安全过滤整段吞掉。
 	Message string `json:"message,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // UnixSocketSubsystemProvisioner is the unprivileged API-side client. It can request only the two
@@ -248,7 +251,13 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 		if message == "" {
 			message = "deployment helper rejected the request"
 		}
-		return provisioningError(message)
+		detail := strings.TrimSpace(reply.Detail)
+		if detail == "" {
+			return provisioningError(message)
+		}
+		// 优先携带 Agent 返回的脱敏详情，让平台页面直接看到目标容器日志的失败原因；
+		// Message 保持短单行以兼容 next_action 的稳定匹配。
+		return provisioningError(message + ": " + detail)
 	}
 	return nil
 }
@@ -357,6 +366,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	reply := subsystemProvisioningReply{Success: err == nil}
 	if err != nil {
 		reply.Message = safeSubsystemProvisioningMessage(err)
+		reply.Detail = safeSubsystemProvisioningDetail(err)
 		requestID := request.RequestID
 		if requestID == "" {
 			requestID = "-"
@@ -379,11 +389,29 @@ func normalizedProvisioningRequestID(value string) string {
 	return value
 }
 
+// safeSubsystemProvisioningMessage 生成单行短摘要：折叠换行、保留可执行步骤前缀，供平台
+// next_action 稳定匹配；长文本和换行交给 safeSubsystemProvisioningDetail。
 func safeSubsystemProvisioningMessage(err error) string {
 	message := strings.TrimSpace(err.Error())
 	message = strings.TrimSpace(strings.TrimPrefix(message, application.ErrSubsystemProvisioningUnavailable.Error()+":"))
-	if message == "" || len(message) > 256 || strings.ContainsAny(message, "\r\n\x00") {
+	message = strings.Join(strings.Fields(message), " ")
+	if message == "" || len(message) > 256 {
 		return "deployment helper rejected the request"
+	}
+	return message
+}
+
+// safeSubsystemProvisioningDetail 返回脱敏错误详情（可能包含换行），限制长度避免协议和
+// 页面被超大输出淹没。Agent 已在生成详情时移除明文凭据，这里只做兜底截断。
+func safeSubsystemProvisioningDetail(err error) string {
+	const limit = 4 * 1024
+	message := strings.TrimSpace(err.Error())
+	message = strings.TrimSpace(strings.TrimPrefix(message, application.ErrSubsystemProvisioningUnavailable.Error()+":"))
+	if message == "" {
+		return ""
+	}
+	if len(message) > limit {
+		message = message[:limit] + "...(truncated)"
 	}
 	return message
 }
