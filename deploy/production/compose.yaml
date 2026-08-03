@@ -98,6 +98,7 @@ services:
       SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
       SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}
       SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
@@ -115,6 +116,7 @@ services:
       - ./data/platform/keys:/app/data/keys
       - ./data/platform/logs:/app/data/logs
       - ./data/platform/uploads:/app/data/uploads
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:ro
       - subsystem-provisioner-socket:/run/basic-platform-provisioner
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
@@ -123,8 +125,8 @@ services:
       retries: 15
       start_period: 10s
 
-  # 生产接入 Agent 仅通过 Unix Socket 接收固定的合同系统动作。平台 API 不挂载
-  # Docker Socket；Agent 也没有网络端口，且只允许 contract_management/prod。
+  # 生产接入 Agent 仅通过 Unix Socket 接收固定生命周期动作。平台 API 不挂载
+  # Docker Socket；Agent 也没有网络端口，目标只能来自只读 subsystems.d 审核清单。
   subsystem-provisioner:
     image: ${PLATFORM_IMAGE}
     environment:
@@ -132,8 +134,8 @@ services:
       SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
       SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}
       SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}
       SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env
-      SUBSYSTEM_PRODUCTION_CONTRACT_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime/contract.env
       SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env
       SUBSYSTEM_PRODUCTION_COMPOSE_FILE: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
@@ -146,6 +148,7 @@ services:
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml:ro
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups
       - subsystem-provisioner-socket:/run/basic-platform-provisioner

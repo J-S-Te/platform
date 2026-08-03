@@ -203,7 +203,9 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
   - `platform:role-binding:update`
 - 角色管理权限不会自动代表可以授予超级管理员；初始管理员授权仍受平台的受保护角色与可委派权限策略约束。
 
-正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理内置 `contract_management/prod`，把一次性 OIDC、目录发布与审计凭据原子写入权限为 `0600` 的独立 `runtime/contract.env`，再执行固定的合同迁移和 `contract-api` 重建。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
+正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理服务器 `subsystems.d/*.yaml` 审核清单内的精确应用/环境；当前随包提供合同管理、客户与商机管理和客户自助门户三个 `prod` 目标。Agent 把一次性 OIDC、目录发布及用途隔离的服务凭据写入权限为 `0600` 的对应 `runtime/*.env`，再执行清单允许的固定备份、迁移和 API 重建。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
+
+新增生产子系统时，由部署人员在平台生产资产中提交并评审一个清单，同时准备 Compose 服务、运行时模板和不可变镜像键；发布后管理页面自动显示该目标。无需在每台服务器手工添加应用白名单，也不需要修改 Agent Go 代码。清单不支持命令、脚本或任意宿主机路径，平台 API 的能力列表只是 UI 提示，特权 Agent 会独立重新加载并校验同一只读清单。详细格式和安全边界见 [`deploy/production/README.md`](../deploy/production/README.md#41-新增生产子系统目标部署人员)。
 
 接入 API 可指定 `initial_admin_user_id`；当前生产管理页面默认使用当前平台操作者。平台将该选择持久化到部署状态：如果首次部署在初始授权前失败，页面“重试”仍向原选择用户授权，而不是改授给点击重试的人；初始授权完成后，普通更新或重试不会恢复管理员后来主动移除的角色。`customer_portal` 等按外部邀请预配身份的受控应用可不建立内部初始管理员。
 

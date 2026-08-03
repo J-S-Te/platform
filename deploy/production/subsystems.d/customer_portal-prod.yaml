@@ -1,0 +1,97 @@
+version: 1
+default: false
+application:
+  code: customer_portal
+  name: 客户自助门户
+  description: 面向外部客户的自助服务门户
+  environment: prod
+  path_prefix: /customer-portal
+  upstream_url: http://portal-api:8091
+  client_type: confidential
+runtime:
+  required_infrastructure_keys:
+    - MYSQL_PASSWORD
+    - MYSQL_ROOT_PASSWORD
+    - IAM_MOBILE_ENCRYPTION_KEY
+    - IAM_BOOTSTRAP_TOKEN
+    - CUSTOMER_MYSQL_PASSWORD
+    - CUSTOMER_MYSQL_ROOT_PASSWORD
+    - PORTAL_MYSQL_PASSWORD
+    - PORTAL_MYSQL_ROOT_PASSWORD
+  files:
+    - path: runtime/portal.env
+      compose_environment_key: PORTAL_RUNTIME_ENV_FILE
+      required_existing_keys:
+        - PORTAL_ENCRYPTION_KEY_BASE64
+        - PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64
+        - PORTAL_HMAC_KEY_BASE64
+      values:
+        PORTAL_OIDC_SCOPES: openid profile
+        PORTAL_ROLE_CONFIG_HASH: sha256:ef9f349797479d02c43191000adc8eefa596fe20558381313c40a3e30ed4d446
+        PORTAL_SESSION_COOKIE_NAME: customer_portal_session
+        PORTAL_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
+        PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+      bindings:
+        PORTAL_PUBLIC_ORIGIN: public_origin
+        PORTAL_PATH_PREFIX: path_prefix
+        PORTAL_OIDC_ISSUER: issuer
+        PORTAL_OIDC_CLIENT_ID: client_id
+        PORTAL_OIDC_CLIENT_SECRET: client_secret
+        PORTAL_OIDC_REDIRECT_URI: redirect_uri
+        PORTAL_OIDC_TENANT_ID: tenant_id
+        PORTAL_SESSION_COOKIE_SECURE: cookie_secure
+        PORTAL_ACCOUNT_SECURITY_CENTER_URL: issuer_security_center_url
+        PORTAL_CRM_PROVISION_CLIENT_SUBJECT: service.portal_mapping_provision.client_id
+        PORTAL_CRM_DISABLE_CLIENT_SUBJECT: service.portal_mapping_disable.client_id
+        PORTAL_CRM_INVITE_CLIENT_ID: service.portal_invite_verify.client_id
+        PORTAL_CRM_INVITE_CLIENT_SECRET: service.portal_invite_verify.client_secret
+        PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
+        PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
+        PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+    - path: runtime/customer.env
+      compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
+      required_existing_keys:
+        - SENSITIVE_ENCRYPTION_KEY_BASE64
+        - SENSITIVE_HMAC_KEY_BASE64
+        - PORTAL_INVITE_PEPPER_BASE64
+        - OIDC_CLIENT_ID
+        - OIDC_CLIENT_SECRET
+        - OIDC_TENANT_ID
+        - PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID
+        - PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID
+        - PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET
+        - PLATFORM_OWNER_DIRECTORY_CLIENT_ID
+        - PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET
+      values:
+        PORTAL_INVITE_ENABLED: "true"
+        PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
+        PORTAL_PROVISION_TOKEN_URL: http://platform-api:8080/oauth2/token
+        PORTAL_DISABLE_URL: http://portal-api:8091/customer-portal/internal/accounts/disable
+        PLATFORM_EXTERNAL_IDENTITY_ENABLED: "true"
+        PLATFORM_EXTERNAL_USER_PROVISION_URL: http://platform-api:8080/api/v1/internal/external-users
+        PLATFORM_APPLICATION_ROLE_ASSIGN_URL: http://platform-api:8080/api/v1/internal/application-roles
+        PLATFORM_APPLICATION_ROLE_REVOKE_URL: http://platform-api:8080/api/v1/internal/application-roles/revoke
+        PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
+        PLATFORM_PORTAL_APPLICATION_CODE: customer_portal
+      bindings:
+        PORTAL_PUBLIC_URL: public_url_no_trailing_slash
+        PORTAL_PROVISION_CLIENT_ID: service.portal_mapping_provision.client_id
+        PORTAL_PROVISION_CLIENT_SECRET: service.portal_mapping_provision.client_secret
+        PORTAL_DISABLE_CLIENT_ID: service.portal_mapping_disable.client_id
+        PORTAL_DISABLE_CLIENT_SECRET: service.portal_mapping_disable.client_secret
+        PLATFORM_EXTERNAL_USER_CLIENT_ID: service.external_user_provision.client_id
+        PLATFORM_EXTERNAL_USER_CLIENT_SECRET: service.external_user_provision.client_secret
+        PLATFORM_ROLE_ASSIGN_CLIENT_ID: service.application_role_assign.client_id
+        PLATFORM_ROLE_ASSIGN_CLIENT_SECRET: service.application_role_assign.client_secret
+        PLATFORM_ROLE_REVOKE_CLIENT_ID: service.application_role_revoke.client_id
+        PLATFORM_ROLE_REVOKE_CLIENT_SECRET: service.application_role_revoke.client_secret
+compose:
+  profiles: [customer, customer-release]
+  dependency_services: [portal-mysql, customer-api]
+  database:
+    service: portal-mysql
+    name: customer_portal
+  migrate_service: portal-migrate
+  runtime_services: [customer-api, portal-api]
+  teardown_services: [portal-api]
+  release_image_keys: [CUSTOMER_CRM_IMAGE, CUSTOMER_PORTAL_IMAGE]

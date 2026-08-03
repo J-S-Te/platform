@@ -43,48 +43,114 @@ type subsystemProvisioningReply struct {
 // UnixSocketSubsystemProvisioner is the unprivileged API-side client. It can request only the two
 // fixed operations supported by the isolated deployment helper and never receives command output.
 type UnixSocketSubsystemProvisioner struct {
-	enabled    bool
-	socketPath string
-	timeout    time.Duration
-	mode       string
+	enabled      bool
+	socketPath   string
+	timeout      time.Duration
+	capabilities application.SubsystemProvisioningCapabilities
 }
 
 // NewUnixSocketSubsystemProvisioner constructs the API-side automatic deployment client.
-func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration, modes ...string) (*UnixSocketSubsystemProvisioner, error) {
+func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration, policies ...application.SubsystemProvisioningCapabilities) (*UnixSocketSubsystemProvisioner, error) {
 	socketPath = strings.TrimSpace(socketPath)
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
-	mode := "local"
-	if len(modes) > 1 {
-		return nil, errors.New("subsystem provisioning accepts at most one deployment mode")
+	if len(policies) > 1 {
+		return nil, errors.New("subsystem provisioning accepts at most one capability policy")
 	}
-	if len(modes) == 1 && strings.TrimSpace(modes[0]) != "" {
-		mode = strings.ToLower(strings.TrimSpace(modes[0]))
+	capabilities := application.SubsystemProvisioningCapabilities{
+		Enabled: enabled, Mode: "local",
+		SupportedEnvironments: []string{"dev", "test", "staging", "prod"},
 	}
-	if mode != "local" && mode != "production" {
+	if len(policies) == 1 {
+		capabilities = normalizeSubsystemProvisioningCapabilities(policies[0])
+		capabilities.Enabled = enabled
+	}
+	if capabilities.Mode != "local" && capabilities.Mode != "production" {
 		return nil, errors.New("subsystem provisioning mode must be local or production")
 	}
 	if enabled && socketPath == "" {
 		return nil, errors.New("subsystem provisioning socket path is required")
 	}
-	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout, mode: mode}, nil
+	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout, capabilities: capabilities}, nil
 }
 
-// Capabilities returns the API-side deployment policy used by the management console. The
-// privileged Agent enforces the same restrictions again; this method is only a safe UI hint and
-// cannot expand the executor's fixed command or filesystem boundary.
+// Capabilities returns a defensive copy of the server-configured deployment policy. The
+// privileged Agent independently enforces the same values and never trusts this UI projection.
 func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
-	capabilities := application.SubsystemProvisioningCapabilities{
-		Enabled:               provisioner.enabled,
-		Mode:                  provisioner.mode,
-		SupportedEnvironments: []string{"dev", "test", "staging", "prod"},
+	capabilities := provisioner.capabilities
+	capabilities.SupportedApplicationCodes = append([]string(nil), capabilities.SupportedApplicationCodes...)
+	capabilities.SupportedEnvironments = append([]string(nil), capabilities.SupportedEnvironments...)
+	capabilities.Targets = append([]application.SubsystemProvisioningTarget(nil), capabilities.Targets...)
+	return capabilities
+}
+
+func normalizeSubsystemProvisioningCapabilities(capabilities application.SubsystemProvisioningCapabilities) application.SubsystemProvisioningCapabilities {
+	capabilities.Mode = strings.ToLower(strings.TrimSpace(capabilities.Mode))
+	if capabilities.Mode == "" {
+		capabilities.Mode = "local"
 	}
-	if provisioner.mode == "production" {
-		capabilities.SupportedApplicationCodes = []string{"contract_management"}
-		capabilities.SupportedEnvironments = []string{"prod"}
+	capabilities.SupportedApplicationCodes = normalizedCapabilityValues(capabilities.SupportedApplicationCodes)
+	capabilities.SupportedEnvironments = normalizedCapabilityValues(capabilities.SupportedEnvironments)
+	capabilities.DefaultApplicationCode = strings.ToLower(strings.TrimSpace(capabilities.DefaultApplicationCode))
+	capabilities.DefaultApplicationName = strings.TrimSpace(capabilities.DefaultApplicationName)
+	capabilities.DefaultDescription = strings.TrimSpace(capabilities.DefaultDescription)
+	capabilities.DefaultEnvironment = strings.ToLower(strings.TrimSpace(capabilities.DefaultEnvironment))
+	capabilities.DefaultUpstreamURL = strings.TrimRight(strings.TrimSpace(capabilities.DefaultUpstreamURL), "/")
+	capabilities.DefaultPathPrefix = strings.TrimRight(strings.TrimSpace(capabilities.DefaultPathPrefix), "/")
+	capabilities.DefaultClientType = strings.ToLower(strings.TrimSpace(capabilities.DefaultClientType))
+	capabilities.Targets = append([]application.SubsystemProvisioningTarget(nil), capabilities.Targets...)
+	for index := range capabilities.Targets {
+		capabilities.Targets[index].ApplicationCode = strings.ToLower(strings.TrimSpace(capabilities.Targets[index].ApplicationCode))
+		capabilities.Targets[index].ApplicationName = strings.TrimSpace(capabilities.Targets[index].ApplicationName)
+		capabilities.Targets[index].Description = strings.TrimSpace(capabilities.Targets[index].Description)
+		capabilities.Targets[index].Environment = strings.ToLower(strings.TrimSpace(capabilities.Targets[index].Environment))
+		capabilities.Targets[index].UpstreamURL = strings.TrimRight(strings.TrimSpace(capabilities.Targets[index].UpstreamURL), "/")
+		capabilities.Targets[index].PathPrefix = strings.TrimRight(strings.TrimSpace(capabilities.Targets[index].PathPrefix), "/")
+		capabilities.Targets[index].ClientType = strings.ToLower(strings.TrimSpace(capabilities.Targets[index].ClientType))
+	}
+	if len(capabilities.Targets) > 0 {
+		defaultTarget := capabilities.Targets[0]
+		if capabilities.DefaultApplicationCode == "" {
+			capabilities.DefaultApplicationCode = defaultTarget.ApplicationCode
+		}
+		if capabilities.DefaultApplicationName == "" {
+			capabilities.DefaultApplicationName = defaultTarget.ApplicationName
+		}
+		if capabilities.DefaultDescription == "" {
+			capabilities.DefaultDescription = defaultTarget.Description
+		}
+		if capabilities.DefaultEnvironment == "" {
+			capabilities.DefaultEnvironment = defaultTarget.Environment
+		}
+		if capabilities.DefaultUpstreamURL == "" {
+			capabilities.DefaultUpstreamURL = defaultTarget.UpstreamURL
+		}
+		if capabilities.DefaultPathPrefix == "" {
+			capabilities.DefaultPathPrefix = defaultTarget.PathPrefix
+		}
+		if capabilities.DefaultClientType == "" {
+			capabilities.DefaultClientType = defaultTarget.ClientType
+		}
 	}
 	return capabilities
+}
+
+func normalizedCapabilityValues(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,37 +15,49 @@ import (
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 )
 
-const (
-	productionContractEnvironment = "prod"
-	productionContractPathPrefix  = "/contract_management"
-	productionContractUpstreamURL = "http://contract-api:8081"
-)
-
-// ProductionComposeSubsystemProvisionerConfig 固定运维方掌控的生产部署目录。所有路径、Compose
-// 项目和可执行文件都来自服务端配置，浏览器输入不能选择主机文件、镜像、服务或命令。
+// ProductionComposeSubsystemProvisionerConfig 固定生产部署根、租户和 Compose 入口。
+// 可接入目标由 ProfilesDirectory 中随发布包审核的 YAML 清单提供，不再为每个新子系统
+// 增加一组环境变量，也不允许 HTTP 请求指定文件、镜像、服务或命令。
 type ProductionComposeSubsystemProvisionerConfig struct {
-	Enabled         bool
+	Enabled           bool
+	DeployRoot        string
+	ProfilesDirectory string
+	RuntimeEnvPath    string
+	ReleaseEnvPath    string
+	ComposeFile       string
+	AllowedTenantID   string
+	ComposeProject    string
+	DockerBinary      string
+	Timeout           time.Duration
+}
+
+// ProductionComposeSubsystemProvisioner 是按 application_code/environment 分派的生产
+// 执行器。所有目标都来自本地审核清单；未知目标在访问 Docker 或运行时文件前即被拒绝。
+type ProductionComposeSubsystemProvisioner struct {
+	enabled      bool
+	targets      map[string]*productionComposeTarget
+	capabilities application.SubsystemProvisioningCapabilities
+}
+
+type productionComposeTargetConfig struct {
 	DeployRoot      string
 	RuntimeEnvPath  string
-	ContractEnvPath string
 	ReleaseEnvPath  string
 	ComposeFile     string
 	AllowedTenantID string
 	ComposeProject  string
 	DockerBinary    string
 	Timeout         time.Duration
+	Profile         productionSubsystemProfile
 }
 
-// ProductionComposeSubsystemProvisioner delivers one-time integration credentials to the
-// already-installed production stack and recreates only the contract runtime. It deliberately
-// supports no arbitrary project discovery or browser-selected Compose operation.
-type ProductionComposeSubsystemProvisioner struct {
-	config ProductionComposeSubsystemProvisionerConfig
+type productionComposeTarget struct {
+	config productionComposeTargetConfig
 	runner subsystemCommandRunner
 	mutex  sync.Mutex
 }
 
-// NewProductionComposeSubsystemProvisioner constructs the production deployment adapter.
+// NewProductionComposeSubsystemProvisioner 加载并验证所有审核清单后构造 Agent 执行器。
 func NewProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemProvisionerConfig) (*ProductionComposeSubsystemProvisioner, error) {
 	return newProductionComposeSubsystemProvisioner(config, execSubsystemCommandRunner{})
 }
@@ -55,273 +66,406 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	if runner == nil {
 		return nil, errors.New("production subsystem command runner is required")
 	}
-	config.DeployRoot = strings.TrimSpace(config.DeployRoot)
-	if config.DeployRoot == "" {
-		return nil, errors.New("production subsystem deploy root is required")
-	}
-	absoluteRoot, err := filepath.Abs(config.DeployRoot)
+	root, err := canonicalProductionDeployRoot(config.DeployRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve production deploy root: %w", err)
+		return nil, err
 	}
-	config.DeployRoot = filepath.Clean(absoluteRoot)
+	config.DeployRoot = root
 	config.AllowedTenantID = strings.TrimSpace(config.AllowedTenantID)
-	if config.AllowedTenantID == "" {
+	if config.AllowedTenantID == "" || strings.ContainsAny(config.AllowedTenantID, "\r\n\x00") {
 		return nil, errors.New("production subsystem allowed tenant is required")
 	}
-	if config.RuntimeEnvPath = strings.TrimSpace(config.RuntimeEnvPath); config.RuntimeEnvPath == "" {
-		config.RuntimeEnvPath = filepath.Join(config.DeployRoot, ".env")
-	}
-	if config.ContractEnvPath = strings.TrimSpace(config.ContractEnvPath); config.ContractEnvPath == "" {
-		config.ContractEnvPath = filepath.Join(config.DeployRoot, "runtime", "contract.env")
-	}
-	if config.ReleaseEnvPath = strings.TrimSpace(config.ReleaseEnvPath); config.ReleaseEnvPath == "" {
-		config.ReleaseEnvPath = filepath.Join(config.DeployRoot, ".release.env")
-	}
-	if config.ComposeFile = strings.TrimSpace(config.ComposeFile); config.ComposeFile == "" {
-		config.ComposeFile = filepath.Join(config.DeployRoot, "compose.yaml")
-	}
-	if config.ComposeProject = strings.TrimSpace(config.ComposeProject); config.ComposeProject == "" {
+	config.RuntimeEnvPath = productionConfigPath(root, config.RuntimeEnvPath, ".env")
+	config.ReleaseEnvPath = productionConfigPath(root, config.ReleaseEnvPath, ".release.env")
+	config.ComposeFile = productionConfigPath(root, config.ComposeFile, "compose.yaml")
+	config.ComposeProject = strings.TrimSpace(config.ComposeProject)
+	if config.ComposeProject == "" {
 		config.ComposeProject = "basic-platform-production"
 	}
-	if config.DockerBinary = strings.TrimSpace(config.DockerBinary); config.DockerBinary == "" {
+	if !validProductionComposeService(config.ComposeProject) {
+		return nil, errors.New("production Compose project name is invalid")
+	}
+	config.DockerBinary = strings.TrimSpace(config.DockerBinary)
+	if config.DockerBinary == "" {
 		config.DockerBinary = "docker"
+	}
+	if strings.ContainsAny(config.DockerBinary, "/\\\r\n\x00") {
+		return nil, errors.New("production Docker binary must be a command name")
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = 15 * time.Minute
 	}
-	return &ProductionComposeSubsystemProvisioner{config: config, runner: runner}, nil
+
+	profiles, _, err := loadProductionSubsystemProfiles(root, config.ProfilesDirectory)
+	if err != nil {
+		return nil, err
+	}
+	provisioner := &ProductionComposeSubsystemProvisioner{
+		enabled:      config.Enabled,
+		targets:      make(map[string]*productionComposeTarget, len(profiles)),
+		capabilities: productionSubsystemCapabilities(profiles),
+	}
+	provisioner.capabilities.Enabled = config.Enabled
+	for _, profile := range profiles {
+		target := &productionComposeTarget{config: productionComposeTargetConfig{
+			DeployRoot: root, RuntimeEnvPath: config.RuntimeEnvPath, ReleaseEnvPath: config.ReleaseEnvPath,
+			ComposeFile: config.ComposeFile, AllowedTenantID: config.AllowedTenantID,
+			ComposeProject: config.ComposeProject, DockerBinary: config.DockerBinary,
+			Timeout: config.Timeout, Profile: profile,
+		}, runner: runner}
+		key := productionSubsystemTargetKey(profile.Manifest.Application.Code, profile.Manifest.Application.Environment)
+		provisioner.targets[key] = target
+	}
+	return provisioner, nil
 }
 
-// Preflight validates the immutable production deployment boundary before the platform creates
-// OAuth credentials. Only the built-in contract application is currently supported.
-func (provisioner *ProductionComposeSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
-	if !provisioner.config.Enabled {
-		return provisioningError("production subsystem deployment is disabled")
+func productionConfigPath(root, configured, fallback string) string {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		configured = filepath.Join(root, fallback)
+	} else if !filepath.IsAbs(configured) {
+		configured = filepath.Join(root, configured)
 	}
-	if err := validateProductionPreflightInput(input); err != nil {
+	return filepath.Clean(configured)
+}
+
+// Capabilities 返回防御性副本，供测试和未来的 Agent 诊断使用。API 侧独立加载同一清单，
+// 不通过 Unix Socket获取宿主机路径或其他敏感配置。
+func (provisioner *ProductionComposeSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
+	capabilities := provisioner.capabilities
+	capabilities.SupportedApplicationCodes = append([]string(nil), capabilities.SupportedApplicationCodes...)
+	capabilities.SupportedEnvironments = append([]string(nil), capabilities.SupportedEnvironments...)
+	capabilities.Targets = append([]application.SubsystemProvisioningTarget(nil), capabilities.Targets...)
+	return capabilities
+}
+
+func (provisioner *ProductionComposeSubsystemProvisioner) target(applicationCode, environment string) (*productionComposeTarget, error) {
+	if provisioner == nil || !provisioner.enabled {
+		return nil, provisioningError("production subsystem deployment is disabled")
+	}
+	target, ok := provisioner.targets[productionSubsystemTargetKey(applicationCode, environment)]
+	if !ok {
+		return nil, provisioningError("production subsystem target is not allowed")
+	}
+	return target, nil
+}
+
+func (provisioner *ProductionComposeSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
+	target, err := provisioner.target(input.ApplicationCode, input.Environment)
+	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(input.TenantID) != provisioner.config.AllowedTenantID {
-		return provisioningError("production subsystem tenant is not allowed")
+	return target.Preflight(ctx, input)
+}
+
+func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	target, err := provisioner.target(input.ApplicationCode, input.Environment)
+	if err != nil {
+		return err
 	}
-	if strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode {
-		return provisioningError("production automatic deployment supports only contract_management")
+	return target.Provision(ctx, input)
+}
+
+func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	target, err := provisioner.target(input.ApplicationCode, input.Environment)
+	if err != nil {
+		return err
 	}
-	if err := provisioner.validateDeploymentFiles(true); err != nil {
+	return target.Update(ctx, input)
+}
+
+func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.Context, tenantID, applicationCode, environment string) error {
+	target, err := provisioner.target(applicationCode, environment)
+	if err != nil {
+		return err
+	}
+	return target.Teardown(ctx, tenantID)
+}
+
+// Preflight 在创建不可恢复的 OAuth 明文前验证租户、目标、文件权限、不可变镜像和
+// Compose 配置。请求中的公开字段必须与审核清单完全一致。
+func (target *productionComposeTarget) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
+	if err := target.validateTenant(input.TenantID); err != nil {
+		return err
+	}
+	if err := target.validatePreflightInput(input); err != nil {
+		return err
+	}
+	if err := target.validateDeploymentFiles(true); err != nil {
 		return err
 	}
 	checkContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := provisioner.runner.Run(checkContext, provisioner.config.DeployRoot, os.Environ(), provisioner.config.DockerBinary, "version", "--format", "{{.Server.Version}}"); err != nil {
+	if err := target.runner.Run(checkContext, target.config.DeployRoot, os.Environ(), target.config.DockerBinary, "version", "--format", "{{.Server.Version}}"); err != nil {
 		return provisioningError("Docker service is unavailable")
 	}
-	if err := provisioner.runCompose(checkContext, "config", "--quiet"); err != nil {
+	if err := target.runCompose(checkContext, "config", "--quiet"); err != nil {
 		return provisioningError("production Compose configuration is invalid")
 	}
 	return nil
 }
 
-// Provision 串行写入平台管理的 OIDC 配置、执行迁移并等待合同 API 健康。进程互斥锁解决
-// 单 Agent 并发，文件锁则与主机上的 CI/CD 脚本共享排他边界，避免两条发布链互相覆盖环境文件。
-func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
-	provisioner.mutex.Lock()
-	defer provisioner.mutex.Unlock()
-	if err := provisioner.validateProvisioningInput(input); err != nil {
+// Provision 串行写入清单允许的键，并在与 CI/CD 共用的文件锁内执行固定部署步骤。
+func (target *productionComposeTarget) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	if err := target.validateProvisioningInput(input); err != nil {
 		return err
 	}
-	operationContext, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
+	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
 	defer cancel()
-	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(provisioner.config.DeployRoot, "runtime", ".deploy.lock"))
+	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
 	if err != nil {
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
 
-	secureCookie := strings.EqualFold(mustParseURL(input.Issuer).Scheme, "https")
-	auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
-	if !ok {
-		return provisioningError("production contract audit credential is incomplete")
-	}
-	values := map[string]string{
-		"OIDC_ISSUER":                                   strings.TrimRight(input.Issuer, "/"),
-		"OIDC_CLIENT_ID":                                input.ClientID,
-		"OIDC_CLIENT_SECRET":                            input.ClientSecret,
-		"OIDC_REDIRECT_URI":                             input.RedirectURI,
-		"OIDC_POST_LOGOUT_REDIRECT_URI":                 strings.TrimRight(input.PublicURL, "/") + "/logged-out",
-		"OIDC_SCOPES":                                   "openid profile",
-		"OIDC_TENANT_ID":                                input.TenantID,
-		"OIDC_SESSION_COOKIE_NAME":                      "contract_management_session",
-		"OIDC_SESSION_COOKIE_SECURE":                    booleanEnvironmentValue(secureCookie),
-		"APP_PUBLIC_URL":                                input.PublicURL,
-		"APP_PATH_PREFIX":                               input.PathPrefix,
-		"PLATFORM_APPLICATION_CODE":                     integratedContractApplicationCode,
-		"PLATFORM_ENVIRONMENT_CODE":                     productionContractEnvironment,
-		"PLATFORM_AUDIT_CLIENT_ID":                      auditCredential.OAuthClient.ClientID,
-		"PLATFORM_AUDIT_CLIENT_SECRET":                  auditCredential.PlaintextSecret,
-		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "true",
-		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": input.ApplicationID,
-		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID":      input.CatalogPublisherClientID,
-		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  input.CatalogPublisherClientSecret,
-	}
-	if err := updateProductionSubsystemEnvironment(provisioner.config.ContractEnvPath, values); err != nil {
-		return provisioningError("write production contract runtime configuration")
-	}
-	if err := provisioner.deployContractLocked(operationContext); err != nil {
+	if err := target.writeRuntimeConfiguration(input); err != nil {
 		return err
 	}
-	return nil
+	return target.deployLocked(operationContext)
 }
 
-// Update reapplies the already-delivered production configuration. OAuth secrets are not
-// recoverable from the platform database and therefore are never rotated implicitly here.
-func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
-	provisioner.mutex.Lock()
-	defer provisioner.mutex.Unlock()
-	if !provisioner.config.Enabled || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment {
-		return provisioningError("production contract deployment request is invalid")
-	}
-	if err := provisioner.validateTenant(input.TenantID); err != nil {
+// Update 只重用已落盘配置，不尝试从数据库恢复 OAuth 明文或隐式轮换密钥。
+func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	if err := target.validateTenant(input.TenantID); err != nil {
 		return err
 	}
-	if err := provisioner.validateDeploymentFiles(false); err != nil {
+	if !target.matches(input.ApplicationCode, input.Environment) {
+		return provisioningError("production subsystem deployment request is invalid")
+	}
+	if err := target.validateDeploymentFiles(false); err != nil {
 		return err
 	}
-	operationContext, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
+	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
 	defer cancel()
-	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(provisioner.config.DeployRoot, "runtime", ".deploy.lock"))
+	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
 	if err != nil {
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
-	return provisioner.deployContractLocked(operationContext)
+	return target.deployLocked(operationContext)
 }
 
-// Teardown stops only the contract API. Databases, runtime secrets, release pointers, platform
-// containers, and backups remain untouched so an explicit recovery remains possible.
-func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.Context, tenantID, applicationCode, environment string) error {
-	provisioner.mutex.Lock()
-	defer provisioner.mutex.Unlock()
-	if !provisioner.config.Enabled || strings.TrimSpace(applicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(environment)) != productionContractEnvironment {
-		return provisioningError("production contract teardown request is invalid")
-	}
-	if err := provisioner.validateTenant(tenantID); err != nil {
+// Teardown 仅停止清单列出的运行服务，保留数据库、备份、运行时秘密和发布指针。
+func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID string) error {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	if err := target.validateTenant(tenantID); err != nil {
 		return err
 	}
-	if err := provisioner.validateDeploymentFiles(false); err != nil {
+	if err := target.validateDeploymentFiles(false); err != nil {
 		return err
 	}
-	operationContext, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
+	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
 	defer cancel()
-	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(provisioner.config.DeployRoot, "runtime", ".deploy.lock"))
+	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
 	if err != nil {
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
-	if err := provisioner.runCompose(operationContext, "stop", "contract-api"); err != nil {
-		return provisioningError("stop production contract API")
+	arguments := []string{"stop"}
+	arguments = append(arguments, target.config.Profile.Manifest.Compose.TeardownServices...)
+	if err := target.runCompose(operationContext, arguments...); err != nil {
+		return provisioningError("stop production subsystem services")
 	}
 	return nil
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) deployContractLocked(ctx context.Context) error {
-	if err := provisioner.runCompose(ctx, "up", "-d", "--wait", "--wait-timeout", "240", "contract-mysql", "temporal"); err != nil {
-		return provisioningError("start production contract dependencies")
+func (target *productionComposeTarget) deployLocked(ctx context.Context) error {
+	compose := target.config.Profile.Manifest.Compose
+	if len(compose.DependencyServices) > 0 {
+		arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240"}
+		arguments = append(arguments, compose.DependencyServices...)
+		if err := target.runCompose(ctx, arguments...); err != nil {
+			return provisioningError("start production subsystem dependencies")
+		}
 	}
-	backupName := "contract-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
-	if err := os.MkdirAll(filepath.Join(provisioner.config.DeployRoot, "backups"), 0o750); err != nil {
-		return provisioningError("prepare production contract backup")
+	if compose.Database != nil {
+		backupName := target.config.Profile.Manifest.Application.Code + "-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
+		if err := os.MkdirAll(filepath.Join(target.config.DeployRoot, "backups"), 0o750); err != nil {
+			return provisioningError("prepare production subsystem backup")
+		}
+		if err := target.runCompose(ctx, "exec", "-T", compose.Database.Service, "sh", "-c",
+			`set -eu; umask 077; exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$2" > "/backups/$1"`,
+			"_", backupName, compose.Database.Name); err != nil {
+			return provisioningError("backup production subsystem database")
+		}
 	}
-	if err := provisioner.runCompose(ctx, "exec", "-T", "contract-mysql", "sh", "-c",
-		`set -eu; umask 077; exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" contract_management > "/backups/$1"`,
-		"_", backupName); err != nil {
-		return provisioningError("backup production contract database")
+	if compose.MigrateService != "" {
+		if err := target.runCompose(ctx, "run", "--rm", "--no-deps", compose.MigrateService); err != nil {
+			return provisioningError("migrate production subsystem database")
+		}
 	}
-	if err := provisioner.runCompose(ctx, "--profile", "release", "run", "--rm", "--no-deps", "contract-migrate"); err != nil {
-		return provisioningError("migrate production contract database")
-	}
-	if err := provisioner.runCompose(ctx, "up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps", "contract-api"); err != nil {
-		return provisioningError("start production contract API")
+	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
+	arguments = append(arguments, compose.RuntimeServices...)
+	if err := target.runCompose(ctx, arguments...); err != nil {
+		return provisioningError("start production subsystem services")
 	}
 	return nil
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) runCompose(ctx context.Context, arguments ...string) error {
+func (target *productionComposeTarget) runCompose(ctx context.Context, arguments ...string) error {
 	prefix := []string{
-		"compose", "--project-name", provisioner.config.ComposeProject,
-		"--project-directory", provisioner.config.DeployRoot,
-		"--env-file", provisioner.config.RuntimeEnvPath,
-		"--env-file", provisioner.config.ReleaseEnvPath,
-		"--file", provisioner.config.ComposeFile,
+		"compose", "--project-name", target.config.ComposeProject,
+		"--project-directory", target.config.DeployRoot,
+		"--env-file", target.config.RuntimeEnvPath,
+		"--env-file", target.config.ReleaseEnvPath,
+		"--file", target.config.ComposeFile,
+	}
+	for _, profile := range target.config.Profile.Manifest.Compose.Profiles {
+		prefix = append(prefix, "--profile", profile)
 	}
 	runnerEnvironment := append([]string{}, os.Environ()...)
-	runnerEnvironment = append(runnerEnvironment, "BASIC_PLATFORM_RUNTIME_ENV_FILE="+provisioner.config.RuntimeEnvPath)
-	runnerEnvironment = append(runnerEnvironment, "CONTRACT_RUNTIME_ENV_FILE="+provisioner.config.ContractEnvPath)
-	return provisioner.runner.Run(ctx, provisioner.config.DeployRoot, runnerEnvironment, provisioner.config.DockerBinary, append(prefix, arguments...)...)
+	runnerEnvironment = append(runnerEnvironment, "BASIC_PLATFORM_RUNTIME_ENV_FILE="+target.config.RuntimeEnvPath)
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		runnerEnvironment = append(runnerEnvironment, runtimeFile.ComposeEnvironmentKey+"="+filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path)))
+	}
+	return target.runner.Run(ctx, target.config.DeployRoot, runnerEnvironment, target.config.DockerBinary, append(prefix, arguments...)...)
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) validateDeploymentFiles(requireWritableEnvironment bool) error {
-	// EvalSymlinks 后必须仍位于固定部署根目录，防止运维目录中的符号链接把 Agent 的受控写入
-	// 转向主机其他文件；运行时环境文件还要求组和其他用户均无权限。
-	root, err := filepath.EvalSymlinks(provisioner.config.DeployRoot)
+func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		values := make(map[string]string, len(runtimeFile.Bindings)+len(runtimeFile.Values))
+		for key, value := range runtimeFile.Values {
+			values[key] = value
+		}
+		for key, source := range runtimeFile.Bindings {
+			value, err := resolveProductionBinding(input, source)
+			if err != nil {
+				return err
+			}
+			values[key] = value
+		}
+		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
+		if err := updateProductionSubsystemEnvironment(path, values); err != nil {
+			return provisioningError("write production subsystem runtime configuration")
+		}
+	}
+	return nil
+}
+
+func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
+	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
+	switch source {
+	case "issuer", "public_origin":
+		return issuer, nil
+	case "client_id":
+		return input.ClientID, nil
+	case "client_secret":
+		return input.ClientSecret, nil
+	case "redirect_uri":
+		return input.RedirectURI, nil
+	case "logged_out_url":
+		return strings.TrimRight(input.PublicURL, "/") + "/logged-out", nil
+	case "public_url":
+		return input.PublicURL, nil
+	case "public_url_no_trailing_slash":
+		return strings.TrimRight(input.PublicURL, "/"), nil
+	case "tenant_id":
+		return input.TenantID, nil
+	case "application_id":
+		return input.ApplicationID, nil
+	case "application_code":
+		return input.ApplicationCode, nil
+	case "environment":
+		return input.Environment, nil
+	case "path_prefix":
+		return input.PathPrefix, nil
+	case "upstream_url":
+		return input.UpstreamURL, nil
+	case "cookie_secure":
+		parsed := mustParseURL(issuer)
+		return booleanEnvironmentValue(parsed != nil && strings.EqualFold(parsed.Scheme, "https")), nil
+	case "catalog_publisher_client_id":
+		return input.CatalogPublisherClientID, nil
+	case "catalog_publisher_client_secret":
+		return input.CatalogPublisherClientSecret, nil
+	case "issuer_security_center_url":
+		return issuer + "/settings/security", nil
+	}
+	parts := strings.Split(source, ".")
+	if len(parts) == 3 && parts[0] == "service" {
+		credential, ok := input.ServiceCredential(parts[1])
+		if !ok {
+			return "", provisioningError("production subsystem service credential is incomplete")
+		}
+		switch parts[2] {
+		case "client_id":
+			return credential.OAuthClient.ClientID, nil
+		case "client_secret":
+			return credential.PlaintextSecret, nil
+		}
+	}
+	return "", provisioningError("production subsystem runtime binding is unsupported")
+}
+
+func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEnvironment bool) error {
+	root, err := canonicalProductionDeployRoot(target.config.DeployRoot)
 	if err != nil {
 		return provisioningError("production deployment directory is unavailable")
 	}
-	if root != provisioner.config.DeployRoot {
-		return provisioningError("production deployment directory must use its canonical path")
+	paths := []string{target.config.RuntimeEnvPath, target.config.ReleaseEnvPath, target.config.ComposeFile}
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		paths = append(paths, filepath.Join(root, filepath.FromSlash(runtimeFile.Path)))
 	}
-	for _, path := range []string{provisioner.config.RuntimeEnvPath, provisioner.config.ContractEnvPath, provisioner.config.ReleaseEnvPath, provisioner.config.ComposeFile} {
+	for _, path := range paths {
 		resolved, resolveErr := filepath.EvalSymlinks(path)
-		if resolveErr != nil || !pathWithinRoot(root, resolved) {
+		if resolveErr != nil || resolved != filepath.Clean(path) || !pathWithinRoot(root, resolved) {
 			return provisioningError("production deployment file is unavailable")
 		}
 		info, statErr := os.Stat(resolved)
-		if statErr != nil || !info.Mode().IsRegular() {
-			return provisioningError("production deployment file is unavailable")
-		}
-		if info.Mode().Perm()&0o022 != 0 {
-			return provisioningError("production deployment files must not be group or world writable")
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+			return provisioningError("production deployment files have unsafe permissions")
 		}
 	}
-	if info, statErr := os.Stat(provisioner.config.RuntimeEnvPath); statErr != nil || info.Mode().Perm()&0o077 != 0 {
-		return provisioningError("production runtime environment permissions must be 0600")
+	if info, statErr := os.Stat(target.config.RuntimeEnvPath); statErr != nil || info.Mode().Perm()&0o077 != 0 {
+		return provisioningError("production infrastructure environment permissions must be 0600")
 	}
-	if info, statErr := os.Stat(provisioner.config.ContractEnvPath); statErr != nil || info.Mode().Perm()&0o077 != 0 {
-		return provisioningError("production contract environment permissions must be 0600")
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		path := filepath.Join(root, filepath.FromSlash(runtimeFile.Path))
+		if info, statErr := os.Stat(path); statErr != nil || info.Mode().Perm()&0o077 != 0 {
+			return provisioningError("production subsystem environment permissions must be 0600")
+		}
+		if err := validateProductionRequiredEnvironmentKeys(path, runtimeFile.RequiredExistingKeys, "production subsystem runtime secrets are incomplete"); err != nil {
+			return err
+		}
+		if requireWritableEnvironment {
+			temporary, createErr := os.CreateTemp(filepath.Dir(path), ".provisioning-write-check.*")
+			if createErr != nil {
+				return provisioningError("production subsystem environment is not writable")
+			}
+			temporaryPath := temporary.Name()
+			closeErr := temporary.Close()
+			removeErr := os.Remove(temporaryPath)
+			if closeErr != nil || removeErr != nil {
+				return provisioningError("production subsystem environment is not writable")
+			}
+		}
 	}
-	if err := validateProductionRuntimePrerequisites(provisioner.config.RuntimeEnvPath); err != nil {
+	if err := validateProductionRequiredEnvironmentKeys(target.config.RuntimeEnvPath, target.config.Profile.Manifest.Runtime.RequiredInfrastructureKeys, "production infrastructure secrets are incomplete"); err != nil {
 		return err
 	}
-	if err := validateProductionReleaseImage(provisioner.config.ReleaseEnvPath, "CONTRACT_IMAGE"); err != nil {
-		return err
-	}
-	if requireWritableEnvironment {
-		temporary, createErr := os.CreateTemp(filepath.Dir(provisioner.config.ContractEnvPath), ".provisioning-write-check.*")
-		if createErr != nil {
-			return provisioningError("production runtime environment is not writable")
-		}
-		temporaryPath := temporary.Name()
-		closeErr := temporary.Close()
-		removeErr := os.Remove(temporaryPath)
-		if closeErr != nil || removeErr != nil {
-			return provisioningError("production runtime environment is not writable")
+	for _, imageKey := range target.config.Profile.Manifest.Compose.ReleaseImageKeys {
+		if err := validateProductionReleaseImage(target.config.ReleaseEnvPath, imageKey); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func validateProductionRuntimePrerequisites(path string) error {
+func validateProductionRequiredEnvironmentKeys(path string, keys []string, message string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return provisioningError("production runtime environment is unavailable")
+		return provisioningError("production environment is unavailable")
 	}
 	values := parseEnvironmentValues(string(content))
-	for _, key := range []string{
-		"MYSQL_PASSWORD", "MYSQL_ROOT_PASSWORD", "IAM_MOBILE_ENCRYPTION_KEY", "IAM_BOOTSTRAP_TOKEN",
-		"CONTRACT_MYSQL_PASSWORD", "CONTRACT_MYSQL_ROOT_PASSWORD",
-	} {
+	for _, key := range keys {
 		value := strings.TrimSpace(values[key])
 		if value == "" || strings.HasPrefix(value, "REPLACE_WITH_") || strings.HasPrefix(value, "PENDING_") {
-			return provisioningError("production infrastructure secrets are incomplete")
+			return provisioningError(message)
 		}
 	}
 	return nil
@@ -336,11 +480,11 @@ func validateProductionReleaseImage(path, key string) error {
 	marker := "@sha256:"
 	index := strings.LastIndex(value, marker)
 	if index <= 0 || len(value[index+len(marker):]) != 64 {
-		return provisioningError("production contract image must use an immutable digest")
+		return provisioningError("production subsystem image must use an immutable digest")
 	}
 	for _, character := range value[index+len(marker):] {
 		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return provisioningError("production contract image must use an immutable digest")
+			return provisioningError("production subsystem image must use an immutable digest")
 		}
 	}
 	return nil
@@ -362,49 +506,120 @@ func parseEnvironmentValues(content string) map[string]string {
 	return values
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) validateProvisioningInput(input application.SubsystemProvisioningInput) error {
-	if !provisioner.config.Enabled || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode || strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment {
-		return provisioningError("production contract deployment request is invalid")
+func (target *productionComposeTarget) validateProvisioningInput(input application.SubsystemProvisioningInput) error {
+	if !target.matches(input.ApplicationCode, input.Environment) {
+		return provisioningError("production subsystem deployment request is invalid")
 	}
-	if err := provisioner.validateTenant(input.TenantID); err != nil {
+	if err := target.validateTenant(input.TenantID); err != nil {
 		return err
 	}
+	app := target.config.Profile.Manifest.Application
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
-	expectedPublicURL := issuer + productionContractPathPrefix + "/"
-	expectedRedirectURI := issuer + productionContractPathPrefix + "/auth/callback"
-	if mustParseURL(issuer) == nil || strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.ApplicationID) == "" ||
-		strings.TrimSpace(input.ClientID) == "" || strings.TrimSpace(input.ClientSecret) == "" ||
-		strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" ||
-		input.PathPrefix != productionContractPathPrefix || input.UpstreamURL != productionContractUpstreamURL ||
-		input.PublicURL != expectedPublicURL || input.RedirectURI != expectedRedirectURI {
-		return provisioningError("production contract integration values are inconsistent")
+	expectedPublicURL := issuer + app.PathPrefix + "/"
+	expectedRedirectURI := issuer + app.PathPrefix + "/auth/callback"
+	if mustParseURL(issuer) == nil || strings.TrimSpace(input.ApplicationID) == "" || strings.TrimSpace(input.ClientID) == "" ||
+		strings.TrimSpace(input.ClientSecret) == "" || strings.TrimSpace(input.CatalogPublisherClientID) == "" ||
+		strings.TrimSpace(input.CatalogPublisherClientSecret) == "" || input.PathPrefix != app.PathPrefix ||
+		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL || input.PublicURL != expectedPublicURL || input.RedirectURI != expectedRedirectURI {
+		return provisioningError("production subsystem integration values are inconsistent")
 	}
-	if _, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest); !ok {
-		return provisioningError("production contract audit credential is incomplete")
+	// 先解析所有映射，确保缺少任一用途凭据时不会先写入部分运行时文件。
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		for _, source := range runtimeFile.Bindings {
+			value, err := resolveProductionBinding(input, source)
+			if err != nil || !validEnvironmentValue(value) {
+				return provisioningError("production subsystem integration credential is incomplete")
+			}
+		}
 	}
-	return provisioner.validateDeploymentFiles(true)
+	return target.validateDeploymentFiles(true)
 }
 
-func (provisioner *ProductionComposeSubsystemProvisioner) validateTenant(tenantID string) error {
+func (target *productionComposeTarget) validateTenant(tenantID string) error {
 	tenantID = strings.TrimSpace(tenantID)
-	if tenantID == "" || tenantID != provisioner.config.AllowedTenantID || strings.ContainsAny(tenantID, "\r\n\x00") {
+	if tenantID == "" || tenantID != target.config.AllowedTenantID || strings.ContainsAny(tenantID, "\r\n\x00") {
 		return provisioningError("production subsystem tenant is not allowed")
 	}
 	return nil
 }
 
-func validateProductionPreflightInput(input application.SubsystemPreflightInput) error {
+func (target *productionComposeTarget) validatePreflightInput(input application.SubsystemPreflightInput) error {
+	app := target.config.Profile.Manifest.Application
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
-	expectedPublicBaseURL := issuer
-	if mustParseURL(issuer) == nil || strings.TrimSpace(input.ApplicationCode) != integratedContractApplicationCode ||
-		strings.ToLower(strings.TrimSpace(input.Environment)) != productionContractEnvironment ||
-		strings.ToLower(strings.TrimSpace(input.ClientType)) != "confidential" ||
-		strings.TrimRight(strings.TrimSpace(input.PublicBaseURL), "/") != expectedPublicBaseURL ||
-		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != productionContractUpstreamURL ||
-		strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/") != productionContractPathPrefix {
-		return provisioningError("production contract preflight values are inconsistent")
+	if mustParseURL(issuer) == nil || !target.matches(input.ApplicationCode, input.Environment) ||
+		strings.ToLower(strings.TrimSpace(input.ClientType)) != app.ClientType ||
+		strings.TrimRight(strings.TrimSpace(input.PublicBaseURL), "/") != issuer ||
+		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL ||
+		strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/") != app.PathPrefix {
+		return provisioningError("production subsystem preflight values are inconsistent")
 	}
 	return nil
+}
+
+func (target *productionComposeTarget) matches(applicationCode, environment string) bool {
+	app := target.config.Profile.Manifest.Application
+	return strings.ToLower(strings.TrimSpace(applicationCode)) == app.Code && strings.ToLower(strings.TrimSpace(environment)) == app.Environment
+}
+
+func validProductionTargetCode(value string, maximum int) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || index > 0 && (character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validProductionPathPrefix(value string) bool {
+	return strings.HasPrefix(value, "/") && value != "/" && !strings.HasSuffix(value, "/") && !strings.Contains(value, "//") &&
+		!strings.Contains(value, "..") && !strings.ContainsAny(value, "?#\\\r\n\x00")
+}
+
+func validProductionUpstreamURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+func normalizedProductionServices(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if !validProductionComposeService(value) {
+			return nil
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func validProductionComposeService(value string) bool {
+	return validProductionTargetCode(value, 64)
+}
+
+func validProductionDatabaseName(value string) bool {
+	return validProductionTargetCode(value, 64)
+}
+
+func validProductionReleaseImageKey(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'A' && character <= 'Z' || index > 0 && (character >= '0' && character <= '9' || character == '_') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func mustParseURL(value string) *url.URL {
@@ -424,8 +639,8 @@ func pathWithinRoot(root, candidate string) bool {
 }
 
 func acquireProvisioningFileLock(ctx context.Context, path string) (*os.File, error) {
-	// 非阻塞 flock 配合短轮询，使等待可响应请求取消/超时；锁文件描述符保持打开即代表持锁，
-	// 因而可与 shell 中使用同一路径的 flock 跨进程互斥。
+	// Linux/macOS 上使用同一路径 flock，与 deploy-service.sh 的发布锁跨进程互斥；
+	// 非阻塞轮询让请求超时或取消可以及时结束，而不是永久卡住 Agent。
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err

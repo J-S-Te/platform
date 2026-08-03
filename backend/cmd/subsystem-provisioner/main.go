@@ -69,16 +69,16 @@ func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner,
 		})
 	case "production":
 		return infrastructure.NewProductionComposeSubsystemProvisioner(infrastructure.ProductionComposeSubsystemProvisionerConfig{
-			Enabled:         true,
-			DeployRoot:      os.Getenv("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT"),
-			RuntimeEnvPath:  os.Getenv("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH"),
-			ContractEnvPath: os.Getenv("SUBSYSTEM_PRODUCTION_CONTRACT_ENV_PATH"),
-			ReleaseEnvPath:  os.Getenv("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH"),
-			ComposeFile:     os.Getenv("SUBSYSTEM_PRODUCTION_COMPOSE_FILE"),
-			AllowedTenantID: os.Getenv("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID"),
-			ComposeProject:  envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-production"),
-			DockerBinary:    envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
-			Timeout:         timeout,
+			Enabled:           true,
+			DeployRoot:        os.Getenv("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT"),
+			ProfilesDirectory: os.Getenv("SUBSYSTEM_PRODUCTION_PROFILES_DIR"),
+			RuntimeEnvPath:    os.Getenv("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH"),
+			ReleaseEnvPath:    os.Getenv("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH"),
+			ComposeFile:       os.Getenv("SUBSYSTEM_PRODUCTION_COMPOSE_FILE"),
+			AllowedTenantID:   os.Getenv("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID"),
+			ComposeProject:    envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-production"),
+			DockerBinary:      envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
+			Timeout:           timeout,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported SUBSYSTEM_ONBOARDING_MODE")

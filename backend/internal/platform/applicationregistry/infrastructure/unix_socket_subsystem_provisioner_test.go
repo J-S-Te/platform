@@ -97,7 +97,11 @@ func TestUnixSocketSubsystemProvisionerDisabled(t *testing.T) {
 
 func TestUnixSocketSubsystemProvisionerReportsProductionCapabilities(t *testing.T) {
 	t.Parallel()
-	client, err := NewUnixSocketSubsystemProvisioner(true, "/tmp/subsystem-provisioner.sock", time.Second, " production ")
+	client, err := NewUnixSocketSubsystemProvisioner(true, "/tmp/subsystem-provisioner.sock", time.Second, application.SubsystemProvisioningCapabilities{
+		Mode: " production ", SupportedApplicationCodes: []string{" billing_management ", "billing_management"},
+		SupportedEnvironments: []string{" dev "}, DefaultApplicationCode: " billing_management ",
+		DefaultEnvironment: " dev ", DefaultPathPrefix: " /billing/ ",
+	})
 	if err != nil {
 		t.Fatalf("construct production client: %v", err)
 	}
@@ -106,21 +110,26 @@ func TestUnixSocketSubsystemProvisionerReportsProductionCapabilities(t *testing.
 	if !capabilities.Enabled || capabilities.Mode != "production" {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
-	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management"}) {
+	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"billing_management"}) {
 		t.Fatalf("supported application codes = %#v", capabilities.SupportedApplicationCodes)
 	}
-	if !reflect.DeepEqual(capabilities.SupportedEnvironments, []string{"prod"}) {
+	if !reflect.DeepEqual(capabilities.SupportedEnvironments, []string{"dev"}) {
 		t.Fatalf("supported environments = %#v", capabilities.SupportedEnvironments)
+	}
+	if capabilities.DefaultApplicationCode != "billing_management" || capabilities.DefaultEnvironment != "dev" || capabilities.DefaultPathPrefix != "/billing" {
+		t.Fatalf("normalized defaults = %#v", capabilities)
 	}
 }
 
 func TestUnixSocketSubsystemProvisionerRejectsInvalidMode(t *testing.T) {
 	t.Parallel()
 
-	for _, modes := range [][]string{{"remote"}, {"local", "production"}} {
-		if client, err := NewUnixSocketSubsystemProvisioner(false, "", time.Second, modes...); err == nil || client != nil {
-			t.Fatalf("modes %q returned client=%#v err=%v", modes, client, err)
-		}
+	invalidMode := application.SubsystemProvisioningCapabilities{Mode: "remote"}
+	if client, err := NewUnixSocketSubsystemProvisioner(false, "", time.Second, invalidMode); err == nil || client != nil {
+		t.Fatalf("invalid mode returned client=%#v err=%v", client, err)
+	}
+	if client, err := NewUnixSocketSubsystemProvisioner(false, "", time.Second, invalidMode, invalidMode); err == nil || client != nil {
+		t.Fatalf("multiple policies returned client=%#v err=%v", client, err)
 	}
 }
 

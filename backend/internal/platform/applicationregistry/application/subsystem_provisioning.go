@@ -53,12 +53,34 @@ type SubsystemDeploymentStateStore interface {
 
 // SubsystemProvisioningCapabilities describes the safe deployment boundary exposed to the
 // management console. It intentionally contains no host paths, tenant binding, image reference,
-// credentials, or arbitrary command/service names.
+// credentials, or arbitrary command/service names. Targets are loaded from reviewed server-side
+// deployment manifests; the browser can select one of them but cannot create a new target.
 type SubsystemProvisioningCapabilities struct {
 	Enabled                   bool
 	Mode                      string
 	SupportedApplicationCodes []string
 	SupportedEnvironments     []string
+	Targets                   []SubsystemProvisioningTarget
+	DefaultApplicationCode    string
+	DefaultApplicationName    string
+	DefaultDescription        string
+	DefaultEnvironment        string
+	DefaultUpstreamURL        string
+	DefaultPathPrefix         string
+	DefaultClientType         string
+}
+
+// SubsystemProvisioningTarget is the non-sensitive projection of one reviewed deployment
+// manifest. PublicBaseURL is intentionally omitted: the platform OIDC issuer is the only public
+// origin accepted by the onboarding service.
+type SubsystemProvisioningTarget struct {
+	ApplicationCode string
+	ApplicationName string
+	Description     string
+	Environment     string
+	UpstreamURL     string
+	PathPrefix      string
+	ClientType      string
 }
 
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过

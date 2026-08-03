@@ -310,6 +310,18 @@ func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
 		Mode:                      "production",
 		SupportedApplicationCodes: []string{"contract_management"},
 		SupportedEnvironments:     []string{"prod"},
+		Targets: []application.SubsystemProvisioningTarget{{
+			ApplicationCode: "contract_management", ApplicationName: "合同管理系统",
+			Description: "合同创建与审批", Environment: "prod", UpstreamURL: "http://contract-api:8081",
+			PathPrefix: "/contract_management", ClientType: "confidential",
+		}},
+		DefaultApplicationCode: "contract_management",
+		DefaultApplicationName: "合同管理系统",
+		DefaultDescription:     "合同创建与审批",
+		DefaultEnvironment:     "prod",
+		DefaultUpstreamURL:     "http://contract-api:8081",
+		DefaultPathPrefix:      "/contract_management",
+		DefaultClientType:      "confidential",
 	}}
 	handler, err := NewSubsystemOnboardingHandler(
 		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
@@ -339,7 +351,12 @@ func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
 			DeploymentMode            string   `json:"deployment_mode"`
 			SupportedApplicationCodes []string `json:"supported_application_codes"`
 			SupportedEnvironments     []string `json:"supported_environments"`
-			Defaults                  struct {
+			Targets                   []struct {
+				ApplicationCode string `json:"application_code"`
+				Environment     string `json:"environment"`
+				PathPrefix      string `json:"path_prefix"`
+			} `json:"targets"`
+			Defaults struct {
 				ApplicationCode string `json:"application_code"`
 				Environment     string `json:"environment"`
 				PublicBaseURL   string `json:"public_base_url"`
@@ -362,6 +379,10 @@ func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
 		data.Defaults.PublicBaseURL != "https://portal.example.com" || data.Defaults.UpstreamURL != "http://contract-api:8081" ||
 		data.Defaults.PathPrefix != "/contract_management" || data.Defaults.ClientType != "confidential" {
 		t.Fatalf("unexpected production defaults: %#v", data.Defaults)
+	}
+	if len(data.Targets) != 1 || data.Targets[0].ApplicationCode != "contract_management" ||
+		data.Targets[0].Environment != "prod" || data.Targets[0].PathPrefix != "/contract_management" {
+		t.Fatalf("unexpected reviewed targets: %#v", data.Targets)
 	}
 	body := response.Body.String()
 	for _, forbidden := range []string{"client_secret", "password", "tenant_id", "socket", "docker.sock", "image_digest", "compose_file", "host_path", "command"} {

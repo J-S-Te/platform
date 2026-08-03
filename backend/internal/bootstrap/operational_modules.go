@@ -56,11 +56,31 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	provisioningCapabilities := applicationregistryapplication.SubsystemProvisioningCapabilities{
+		Enabled: cfg.SubsystemOnboarding.Enabled,
+		Mode:    cfg.SubsystemOnboarding.Mode,
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.SubsystemOnboarding.Mode), "production") {
+		if cfg.SubsystemOnboarding.Enabled {
+			provisioningCapabilities, err = applicationregistryinfrastructure.LoadProductionSubsystemCapabilities(
+				cfg.SubsystemOnboarding.ProductionDeployRoot,
+				cfg.SubsystemOnboarding.ProductionProfilesDirectory,
+			)
+			if err != nil {
+				return httptransport.OperationalModules{}, fmt.Errorf("load production subsystem capabilities: %w", err)
+			}
+			provisioningCapabilities.Enabled = true
+		}
+	} else {
+		provisioningCapabilities.SupportedEnvironments = []string{"dev", "test", "staging", "prod"}
+		provisioningCapabilities.DefaultEnvironment = "dev"
+		provisioningCapabilities.DefaultClientType = "confidential"
+	}
 	subsystemProvisioner, err := applicationregistryinfrastructure.NewUnixSocketSubsystemProvisioner(
 		cfg.SubsystemOnboarding.Enabled,
 		cfg.SubsystemOnboarding.SocketPath,
 		cfg.SubsystemOnboarding.Timeout,
-		cfg.SubsystemOnboarding.Mode,
+		provisioningCapabilities,
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err

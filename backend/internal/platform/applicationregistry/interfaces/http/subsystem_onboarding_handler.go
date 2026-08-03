@@ -56,14 +56,14 @@ type subsystemOnboardingService interface {
 	ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error)
 }
 
+type subsystemProvisioningCapabilityProvider interface {
+	Capabilities() application.SubsystemProvisioningCapabilities
+}
+
 // subsystemInitialAccessManager keeps subsystem-specific authorization outside the application
 // registry. An empty role code means the registered subsystem has no managed role catalog yet.
 type subsystemInitialAccessManager interface {
 	AssignInitialAdministrator(context.Context, string, string, string, string) (string, error)
-}
-
-type subsystemProvisioningCapabilityProvider interface {
-	Capabilities() application.SubsystemProvisioningCapabilities
 }
 
 // SubsystemOnboardingHandler exposes the simplified onboarding workflow and authenticated portal
@@ -166,14 +166,6 @@ type subsystemDeploymentStateResponse struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
-type subsystemProvisioningCapabilitiesResponse struct {
-	AutomationEnabled         bool                        `json:"automation_enabled"`
-	DeploymentMode            string                      `json:"deployment_mode"`
-	SupportedApplicationCodes []string                    `json:"supported_application_codes"`
-	SupportedEnvironments     []string                    `json:"supported_environments"`
-	Defaults                  subsystemOnboardingDefaults `json:"defaults"`
-}
-
 type subsystemOnboardingDefaults struct {
 	ApplicationCode string `json:"application_code,omitempty"`
 	ApplicationName string `json:"application_name,omitempty"`
@@ -183,6 +175,25 @@ type subsystemOnboardingDefaults struct {
 	UpstreamURL     string `json:"upstream_url,omitempty"`
 	PathPrefix      string `json:"path_prefix,omitempty"`
 	ClientType      string `json:"client_type"`
+}
+
+type subsystemProvisioningTargetResponse struct {
+	ApplicationCode string `json:"application_code"`
+	ApplicationName string `json:"application_name"`
+	Description     string `json:"description,omitempty"`
+	Environment     string `json:"environment"`
+	UpstreamURL     string `json:"upstream_url"`
+	PathPrefix      string `json:"path_prefix"`
+	ClientType      string `json:"client_type"`
+}
+
+type subsystemProvisioningCapabilitiesResponse struct {
+	AutomationEnabled         bool                                  `json:"automation_enabled"`
+	DeploymentMode            string                                `json:"deployment_mode"`
+	SupportedApplicationCodes []string                              `json:"supported_application_codes"`
+	SupportedEnvironments     []string                              `json:"supported_environments"`
+	Targets                   []subsystemProvisioningTargetResponse `json:"targets,omitempty"`
+	Defaults                  subsystemOnboardingDefaults           `json:"defaults"`
 }
 
 // OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
@@ -311,37 +322,57 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
 }
 
-// GetSubsystemCapabilities returns only the non-sensitive policy required to render the
-// onboarding form correctly. The Agent still performs authoritative preflight validation before
-// any Application or OAuth credential is created.
+// GetSubsystemCapabilities exposes the non-sensitive, server-configured onboarding policy used
+// to render the management form. The isolated Agent still performs authoritative validation.
 func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	if _, ok := subsystemPrincipal(writer, request); !ok {
 		return
 	}
 	capabilities := application.SubsystemProvisioningCapabilities{
-		Enabled:               false,
-		Mode:                  "unknown",
-		SupportedEnvironments: []string{},
+		Enabled: false, Mode: "unknown", SupportedEnvironments: []string{},
 	}
 	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
 		capabilities = provider.Capabilities()
+	}
+	defaultEnvironment := strings.TrimSpace(capabilities.DefaultEnvironment)
+	if defaultEnvironment == "" && len(capabilities.SupportedEnvironments) > 0 {
+		defaultEnvironment = capabilities.SupportedEnvironments[0]
+	}
+	if defaultEnvironment == "" {
+		defaultEnvironment = "dev"
+	}
+	defaultClientType := strings.TrimSpace(capabilities.DefaultClientType)
+	if defaultClientType == "" {
+		defaultClientType = "confidential"
+	}
+	targets := make([]subsystemProvisioningTargetResponse, 0, len(capabilities.Targets))
+	for _, target := range capabilities.Targets {
+		targets = append(targets, subsystemProvisioningTargetResponse{
+			ApplicationCode: target.ApplicationCode,
+			ApplicationName: target.ApplicationName,
+			Description:     target.Description,
+			Environment:     target.Environment,
+			UpstreamURL:     target.UpstreamURL,
+			PathPrefix:      target.PathPrefix,
+			ClientType:      target.ClientType,
+		})
 	}
 	response := subsystemProvisioningCapabilitiesResponse{
 		AutomationEnabled:         capabilities.Enabled,
 		DeploymentMode:            capabilities.Mode,
 		SupportedApplicationCodes: append([]string(nil), capabilities.SupportedApplicationCodes...),
 		SupportedEnvironments:     append([]string(nil), capabilities.SupportedEnvironments...),
+		Targets:                   targets,
 		Defaults: subsystemOnboardingDefaults{
-			Environment: "dev", PublicBaseURL: handler.oidcIssuer, ClientType: "confidential",
+			ApplicationCode: capabilities.DefaultApplicationCode,
+			ApplicationName: capabilities.DefaultApplicationName,
+			Description:     capabilities.DefaultDescription,
+			Environment:     defaultEnvironment,
+			PublicBaseURL:   handler.oidcIssuer,
+			UpstreamURL:     capabilities.DefaultUpstreamURL,
+			PathPrefix:      capabilities.DefaultPathPrefix,
+			ClientType:      defaultClientType,
 		},
-	}
-	if capabilities.Mode == "production" {
-		response.Defaults = subsystemOnboardingDefaults{
-			ApplicationCode: "contract_management", ApplicationName: "合同管理系统",
-			Description: "合同创建、审批与客户管理系统", Environment: "prod",
-			PublicBaseURL: handler.oidcIssuer, UpstreamURL: "http://contract-api:8081",
-			PathPrefix: "/contract_management", ClientType: "confidential",
-		}
 	}
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
