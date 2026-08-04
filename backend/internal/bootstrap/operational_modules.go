@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
 	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/infrastructure"
@@ -15,6 +16,7 @@ import (
 	filetaskinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/infrastructure"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
 	notificationapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/application"
+	notificationdomain "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/domain"
 	notificationinfrastructure "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/infrastructure"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
@@ -85,20 +87,6 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	// API 只持有受限 Unix Socket 客户端，Docker Socket 和宿主机文件写权限留在隔离的部署 Agent；
-	// 这样后台管理权限不会直接等价为容器宿主机权限。
-	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandler(
-		subsystemService,
-		subsystemProvisioner,
-		subsystemInitialAccessManager{applicationAccess: applicationAccessService},
-		cfg.Auth.OIDCIssuer,
-		logger,
-		subsystemRepository,
-	)
-	if err != nil {
-		return httptransport.OperationalModules{}, err
-	}
-
 	notificationRepository, err := notificationinfrastructure.NewRepository(database)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -112,6 +100,20 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		return httptransport.OperationalModules{}, err
 	}
 	notificationService, err := notificationapplication.NewService(notificationRepository, inboxPolicy, recipientResolver, ulid.Generator{}, notificationapplication.SystemClock{})
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	// API 只持有受限 Unix Socket 客户端，Docker Socket 和宿主机文件写权限留在隔离的部署 Agent；
+	// 这样后台管理权限不会直接等价为容器宿主机权限。接入生命周期通知依赖通知服务，先装配通知服务。
+	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandlerWithNotifications(
+		subsystemService,
+		subsystemProvisioner,
+		subsystemInitialAccessManager{applicationAccess: applicationAccessService},
+		cfg.Auth.OIDCIssuer,
+		logger,
+		onboardingNotificationSink{service: notificationService},
+		subsystemRepository,
+	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
@@ -154,6 +156,40 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 // 真正的角色有效性仍由通用授权服务校验，接入流程不能绕开可委派权限和角色目录边界。
 type subsystemInitialAccessManager struct {
 	applicationAccess *applicationaccess.Service
+}
+
+// onboardingNotificationSink 把子系统接入生命周期事件转成租户内站内通知，投递给操作人。
+type onboardingNotificationSink struct {
+	service *notificationapplication.Service
+}
+
+func (sink onboardingNotificationSink) SendSubsystemLifecycle(ctx context.Context, input applicationregistryhttp.SubsystemLifecycleNotification) error {
+	if sink.service == nil {
+		return nil
+	}
+	templateCode := "subsystem.lifecycle.succeeded"
+	if !input.Succeeded {
+		templateCode = "subsystem.lifecycle.failed"
+	}
+	variables := map[string]string{
+		"application_name": input.ApplicationName,
+		"application_code": input.ApplicationCode,
+		"environment":      input.Environment,
+	}
+	if input.Detail != "" {
+		variables["detail"] = input.Detail
+	}
+	idempotency := fmt.Sprintf("subsystem.lifecycle.%s.%s.%s.%d", input.ApplicationCode, input.Environment, input.OperatorID, time.Now().UTC().UnixNano())
+	_, err := sink.service.Create(ctx, notificationapplication.CreateInput{
+		TenantID:       input.TenantID,
+		OperatorID:     input.OperatorID,
+		TemplateCode:   templateCode,
+		Category:       "subsystem",
+		Variables:      variables,
+		Recipients:     []notificationdomain.RecipientTarget{{Type: notificationdomain.RecipientTypeUser, ID: input.OperatorID}},
+		IdempotencyKey: idempotency,
+	})
+	return err
 }
 
 func (manager subsystemInitialAccessManager) AssignInitialAdministrator(

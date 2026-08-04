@@ -66,6 +66,23 @@ type subsystemInitialAccessManager interface {
 	AssignInitialAdministrator(context.Context, string, string, string, string) (string, error)
 }
 
+// subsystemNotificationSink 发送租户内站内通知，用于把子系统接入生命周期结果通知给操作人。
+// 该接口由基础平台实现，子系统代码无需改动；nil 时处理器保持轻量测试可用。
+type subsystemNotificationSink interface {
+	SendSubsystemLifecycle(ctx context.Context, input SubsystemLifecycleNotification) error
+}
+
+// SubsystemLifecycleNotification 描述一次子系统接入/重试/更新的结果通知，供装配层适配器使用。
+type SubsystemLifecycleNotification struct {
+	TenantID        string
+	OperatorID      string
+	ApplicationName string
+	ApplicationCode string
+	Environment     string
+	Succeeded       bool
+	Detail          string
+}
+
 // SubsystemOnboardingHandler exposes the simplified onboarding workflow and authenticated portal
 // catalog. The configured OIDC issuer is used only by the isolated deployment workflow and is not
 // returned to the browser together with generated credentials or infrastructure commands.
@@ -74,6 +91,7 @@ type SubsystemOnboardingHandler struct {
 	provisioner     application.SubsystemProvisioner
 	access          subsystemInitialAccessManager
 	deploymentState application.SubsystemDeploymentStateStore
+	notifications   subsystemNotificationSink
 	oidcIssuer      string
 	logger          *slog.Logger
 }
@@ -82,6 +100,11 @@ type SubsystemOnboardingHandler struct {
 // state store keeps compatibility with lightweight callers/tests while production wiring passes
 // the durable control-plane repository.
 func NewSubsystemOnboardingHandler(service subsystemOnboardingService, provisioner application.SubsystemProvisioner, access subsystemInitialAccessManager, oidcIssuer string, logger *slog.Logger, stateStores ...application.SubsystemDeploymentStateStore) (*SubsystemOnboardingHandler, error) {
+	return NewSubsystemOnboardingHandlerWithNotifications(service, provisioner, access, oidcIssuer, logger, nil, stateStores...)
+}
+
+// NewSubsystemOnboardingHandlerWithNotifications 额外注入站内通知发送器（可选）。
+func NewSubsystemOnboardingHandlerWithNotifications(service subsystemOnboardingService, provisioner application.SubsystemProvisioner, access subsystemInitialAccessManager, oidcIssuer string, logger *slog.Logger, notifications subsystemNotificationSink, stateStores ...application.SubsystemDeploymentStateStore) (*SubsystemOnboardingHandler, error) {
 	if service == nil || provisioner == nil || access == nil || strings.TrimSpace(oidcIssuer) == "" {
 		return nil, errors.New("subsystem onboarding service, provisioner, access manager and OIDC issuer are required")
 	}
@@ -94,8 +117,23 @@ func NewSubsystemOnboardingHandler(service subsystemOnboardingService, provision
 	}
 	return &SubsystemOnboardingHandler{
 		service: service, provisioner: provisioner, access: access, deploymentState: deploymentState,
-		oidcIssuer: strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger,
+		notifications: notifications,
+		oidcIssuer:    strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger,
 	}, nil
+}
+
+// notifySubsystemLifecycle 在接入/重试/更新成功或失败时向操作人发送站内通知；通知失败只记日志，
+// 不阻断接入结果（接入本身是否成功由控制面状态决定）。
+func (handler *SubsystemOnboardingHandler) notifySubsystemLifecycle(ctx context.Context, tenantID, operatorID, applicationName, applicationCode, environment string, succeeded bool, detail string) {
+	if handler.notifications == nil || strings.TrimSpace(operatorID) == "" {
+		return
+	}
+	if err := handler.notifications.SendSubsystemLifecycle(ctx, SubsystemLifecycleNotification{
+		TenantID: tenantID, OperatorID: operatorID, ApplicationName: applicationName,
+		ApplicationCode: applicationCode, Environment: environment, Succeeded: succeeded, Detail: detail,
+	}); err != nil {
+		handler.logger.Warn("subsystem lifecycle notification failed", "application_code", applicationCode, "environment", environment, "error", err)
+	}
 }
 
 type subsystemOnboardingRequest struct {
@@ -254,6 +292,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		PathPrefix: pathPrefix, UpstreamURL: upstreamURL,
 	}); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -265,19 +304,23 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	)
 	if err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
 	}
 	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, application.SubsystemDeploymentStatusReady, "ONBOARD", "", ""); err != nil {
 		handler.logger.Error("subsystem deployment completed but state update failed", "application_code", result.Application.Code, "environment", result.Environment.Environment, "error", err)
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
 	}
+	handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, true, "")
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	response := subsystemOnboardingResponse{
@@ -457,6 +500,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	}
 	if err := handler.provisioner.Update(request.Context(), updateInput); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -480,9 +524,11 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusReady, operation, "", ""); err != nil {
 		handler.logger.Error("subsystem update completed but state update failed", "application_code", applicationCode, "environment", environment, "error", err)
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
 	}
+	handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, true, "")
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统已重新部署", subsystemAutomationResponse{

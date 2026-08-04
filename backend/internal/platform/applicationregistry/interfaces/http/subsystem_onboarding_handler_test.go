@@ -11,6 +11,7 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -518,6 +519,53 @@ func TestUpdateSubsystemRejectsMissingFields(t *testing.T) {
 	if provisioner.input.ApplicationCode != "" {
 		t.Fatalf("update must not be invoked on validation failure: %#v", provisioner.input)
 	}
+}
+
+type recordingNotificationSink struct {
+	mu    sync.Mutex
+	calls []SubsystemLifecycleNotification
+}
+
+func (sink *recordingNotificationSink) SendSubsystemLifecycle(_ context.Context, input SubsystemLifecycleNotification) error {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.calls = append(sink.calls, input)
+	return nil
+}
+
+func TestNotifySubsystemLifecycleUsesSink(t *testing.T) {
+	sink := &recordingNotificationSink{}
+	handler, err := NewSubsystemOnboardingHandlerWithNotifications(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), sink,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.notifySubsystemLifecycle(context.Background(), "tenant-1", "user-1", "合同管理系统", "contract_management", "prod", true, "")
+	handler.notifySubsystemLifecycle(context.Background(), "tenant-1", "user-1", "客户自助门户", "customer_portal", "prod", false, "boom")
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.calls) != 2 {
+		t.Fatalf("calls = %d, want 2: %#v", len(sink.calls), sink.calls)
+	}
+	if !sink.calls[0].Succeeded || sink.calls[0].ApplicationCode != "contract_management" {
+		t.Fatalf("first call = %#v", sink.calls[0])
+	}
+	if sink.calls[1].Succeeded || sink.calls[1].Detail != "boom" {
+		t.Fatalf("second call = %#v", sink.calls[1])
+	}
+}
+
+func TestNotifySubsystemLifecycleNilSinkIsNoop(t *testing.T) {
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.notifySubsystemLifecycle(context.Background(), "tenant-1", "user-1", "合同管理系统", "contract_management", "prod", true, "")
 }
 
 func TestTeardownSubsystemCallsProvisionerAndAcknowledgesDeepCleanup(t *testing.T) {
