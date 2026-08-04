@@ -193,11 +193,17 @@ deploy_platform() {
   compose --profile release run --rm platform-migrate ./migrate || return
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
-  # 强制重建让 Agent/API 每次部署都重新加载 subsystems.d 清单，否则清单更新
-  # （新增目标、受管键等）不会反映到运行中的进程。
-  compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || return
-  compose up -d --force-recreate --no-deps platform-api || return
-  wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz"
+  # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；
+  # platform-api 只在镜像 digest 变化时由 compose 自动重建，不在此强制重建，
+  # 避免每次部署都打断门户/接入操作造成 502。
+  compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
+  compose up -d --no-deps platform-api || return
+  wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || {
+    # 兜底：新镜像首启异常时强制重建一次并再次等待，避免平台 API 停留在宕机状态。
+    echo "platform-api 未通过健康检查，强制重建一次后重试" >&2
+    compose up -d --force-recreate --no-deps platform-api || return
+    wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || return
+  }
 }
 
 deploy_contract() {
@@ -230,7 +236,7 @@ rollback_runtime() {
     frontend) compose up -d --no-deps frontend ;;
     platform)
       compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
-      compose up -d --force-recreate --no-deps platform-api
+      compose up -d --no-deps platform-api
       ;;
     contract) compose up -d --no-deps contract-api ;;
   esac
