@@ -29,6 +29,9 @@ runtime:
         PORTAL_SESSION_COOKIE_NAME: customer_portal_session
         PORTAL_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+        # 测试服务器使用非回环 HTTP，未配置 HTTPS：显式允许非 Secure Cookie 和非 HTTPS
+        # 安全中心链接。生产部署必须使用 HTTPS 并移除/保持 false。
+        PORTAL_ALLOW_INSECURE_HTTP_SESSION: "true"
       bindings:
         PORTAL_PUBLIC_ORIGIN: public_origin
         PORTAL_PATH_PREFIX: path_prefix
