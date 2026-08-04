@@ -106,12 +106,14 @@ jobs:
         with:
           fetch-depth: 2
       - name: Detect backend image changes
-        # 只有后端源码变化才需要部署新镜像并重启 platform-api；纯清单/文档变更
-        # 只同步资产并重启 Agent 重载清单，避免每次 push 都打断门户与接入操作。
+        # 只有会改变平台镜像内容的文件（backend 非测试源码、Dockerfile、go 模块、
+        # CI 工作流）变化才需要部署新镜像并重启 platform-api；纯清单/文档/部署脚本
+        # 变更只同步资产并重启 Agent 重载清单，避免每次 push 都打断门户与接入操作。
         id: detect
         shell: bash
         run: |
-          if git diff --name-only HEAD^ HEAD | grep -E '^(backend/|Dockerfile|go\.mod|go\.sum|\.github/workflows/ci-cd\.yml)' >/dev/null; then
+          changed="$(git diff --name-only HEAD^ HEAD || true)"
+          if grep -E '^\.github/workflows/ci-cd\.yml$' <<<"$changed" >/dev/null             || { grep -E '^backend/' <<<"$changed" | grep -vE '_test\.go$' | grep -q .; }; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
@@ -169,6 +171,33 @@ jobs:
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           printf -v remote_command 'cd %q && if grep -q "^SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=" .env; then sed -i "s/^SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=.*/SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=%q/" .env; else echo "SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=%q" >> .env; fi && chmod 600 .env && echo "placeholder switch applied"' "$DEPLOY_PATH" "$SWITCH_VALUE" "$SWITCH_VALUE"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
+
+      - name: Restart agent to reload manifests
+        # 纯清单/配置变更时只重建 Agent 重载 subsystems.d，不触碰 platform-api，
+        # 避免接入和门户访问被部署打断。后端镜像变更时由 deploy-service.sh 一并重建。
+        if: steps.detect.outputs.backend_changed != 'true'
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/basic-platform}"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          printf -v remote_command 'cd %q && docker compose --env-file .env --env-file .release.env -f compose.yaml up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner' "$DEPLOY_PATH"
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
 
       - name: Migrate and deploy immutable platform image
