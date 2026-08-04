@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -334,11 +335,13 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	if len(compose.DependencyServices) > 0 {
 		arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240"}
 		arguments = append(arguments, compose.DependencyServices...)
+		target.stepLog("step=dependencies services=%v", compose.DependencyServices)
 		if err := target.runCompose(ctx, arguments...); err != nil {
 			return target.subsystemServiceFailure(ctx, "start production subsystem dependencies", compose.DependencyServices, redactValues)
 		}
 	}
 	if compose.Database != nil {
+		target.stepLog("step=backup database=%s", compose.Database.Name)
 		backupName := target.config.Profile.Manifest.Application.Code + "-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
 		if err := os.MkdirAll(filepath.Join(target.config.DeployRoot, "backups"), 0o750); err != nil {
 			return provisioningError("prepare production subsystem backup")
@@ -350,6 +353,7 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		}
 	}
 	if compose.MigrateService != "" {
+		target.stepLog("step=migrate service=%s", compose.MigrateService)
 		// 迁移是 run --rm 一次性容器，失败后无法再取日志；因此在失败时直接捕获
 		// 本次迁移输出，脱敏后附到错误里让页面显示真实原因。
 		if output, err := target.runComposeOutput(ctx, "run", "--rm", "--no-deps", compose.MigrateService); err != nil {
@@ -362,10 +366,17 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	}
 	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
 	arguments = append(arguments, compose.RuntimeServices...)
+	target.stepLog("step=runtime services=%v", compose.RuntimeServices)
 	if err := target.runCompose(ctx, arguments...); err != nil {
 		return target.subsystemServiceFailure(ctx, "start production subsystem services", compose.RuntimeServices, redactValues)
 	}
 	return nil
+}
+
+// stepLog 把固定部署步骤写入 Agent 标准错误（容器日志），用于定位长耗时或卡住的步骤。
+func (target *productionComposeTarget) stepLog(format string, args ...any) {
+	manifest := target.config.Profile.Manifest.Application
+	fmt.Fprintf(os.Stderr, "[subsystem-provisioner] code=%s env=%s "+format+"\n", append([]any{manifest.Code, manifest.Environment}, args...)...)
 }
 
 // subsystemServiceFailure 在依赖或目标 API 启动失败时，用受限超时抓取受影响容器最近日志，
