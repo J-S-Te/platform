@@ -363,6 +363,47 @@ func (runner *productionFailureOutputRunner) RunOutput(ctx context.Context, dire
 	return nil, runner.Run(ctx, directory, environment, name, arguments...)
 }
 
+// productionMigrateFailureOutputRunner 模拟迁移失败，并让 RunOutput 返回迁移容器输出。
+type productionMigrateFailureOutputRunner struct {
+	calls []recordingSubsystemRunnerCall
+	logs  string
+}
+
+func (runner *productionMigrateFailureOutputRunner) record(directory string, environment []string, name string, arguments ...string) {
+	runner.calls = append(runner.calls, recordingSubsystemRunnerCall{
+		directory: directory, environment: environment, binary: name, arguments: append([]string(nil), arguments...),
+	})
+}
+
+func (runner *productionMigrateFailureOutputRunner) Run(_ context.Context, directory string, environment []string, name string, arguments ...string) error {
+	runner.record(directory, environment, name, arguments...)
+	if strings.Contains(strings.Join(arguments, " "), "contract-migrate") {
+		return errors.New("migrate exited non-zero")
+	}
+	return nil
+}
+
+func (runner *productionMigrateFailureOutputRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
+	runner.record(directory, environment, name, arguments...)
+	if strings.Contains(strings.Join(arguments, " "), "contract-migrate") {
+		return []byte(runner.logs), errors.New("migrate exited non-zero")
+	}
+	return nil, nil
+}
+
+func TestProductionComposeSubsystemProvisionerSurfacesMigrateLogsOnFailure(t *testing.T) {
+	t.Parallel()
+	runner := &productionMigrateFailureOutputRunner{logs: "configuration failed: OIDC_CLIENT_SECRET is required"}
+	provisioner, _ := productionProvisionerFixtureWithRunner(t, false, runner)
+	err := provisioner.Provision(context.Background(), productionContractInput("https://platform.example.com"))
+	if err == nil {
+		t.Fatal("provision unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "OIDC_CLIENT_SECRET is required") {
+		t.Fatalf("migrate error does not carry container output: %v", err)
+	}
+}
+
 func TestProductionComposeSubsystemProvisionerSurfacesRuntimeServiceLogsOnFailure(t *testing.T) {
 	t.Parallel()
 	runner := &productionFailureOutputRunner{

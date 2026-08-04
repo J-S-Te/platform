@@ -350,8 +350,14 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		}
 	}
 	if compose.MigrateService != "" {
-		if err := target.runCompose(ctx, "run", "--rm", "--no-deps", compose.MigrateService); err != nil {
-			return provisioningError("migrate production subsystem database")
+		// 迁移是 run --rm 一次性容器，失败后无法再取日志；因此在失败时直接捕获
+		// 本次迁移输出，脱敏后附到错误里让页面显示真实原因。
+		if output, err := target.runComposeOutput(ctx, "run", "--rm", "--no-deps", compose.MigrateService); err != nil {
+			detail := sanitizeProvisioningLog(string(output), redactValues)
+			if detail == "" {
+				return provisioningError("migrate production subsystem database")
+			}
+			return provisioningError("migrate production subsystem database: " + detail)
 		}
 	}
 	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
@@ -393,6 +399,19 @@ func (target *productionComposeTarget) subsystemServiceFailure(ctx context.Conte
 func (target *productionComposeTarget) runCompose(ctx context.Context, arguments ...string) error {
 	fullArguments, runnerEnvironment := target.composeCommand(arguments...)
 	return target.runner.Run(ctx, target.config.DeployRoot, runnerEnvironment, target.config.DockerBinary, fullArguments...)
+}
+
+// runComposeOutput 与 runCompose 等价，但尽量通过 RunOutput 捕获命令输出，供失败时
+// 回显容器日志；不支持的 runner 回退为仅返回错误。
+func (target *productionComposeTarget) runComposeOutput(ctx context.Context, arguments ...string) ([]byte, error) {
+	fullArguments, runnerEnvironment := target.composeCommand(arguments...)
+	outputRunner, ok := target.runner.(interface {
+		RunOutput(context.Context, string, []string, string, ...string) ([]byte, error)
+	})
+	if !ok {
+		return nil, target.runner.Run(ctx, target.config.DeployRoot, runnerEnvironment, target.config.DockerBinary, fullArguments...)
+	}
+	return outputRunner.RunOutput(ctx, target.config.DeployRoot, runnerEnvironment, target.config.DockerBinary, fullArguments...)
 }
 
 // composeCommand 构造与 runCompose 相同的 docker compose 前缀和运行环境，供失败日志抓取复用。
