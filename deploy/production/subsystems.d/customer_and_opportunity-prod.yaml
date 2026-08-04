@@ -33,9 +33,6 @@ runtime:
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
         PLATFORM_OWNER_DIRECTORY_SCOPE: owner_directory.read
-        # 仅无 HTTPS 的测试服务器需要；显式允许非回环 HTTP 源使用非 Secure 会话 Cookie。
-        # 生产部署必须保持 false（默认），并使用 HTTPS。
-        OIDC_ALLOW_INSECURE_HTTP_SESSION: "true"
       bindings:
         APP_PUBLIC_ORIGIN: public_origin
         APP_PATH_PREFIX: path_prefix
