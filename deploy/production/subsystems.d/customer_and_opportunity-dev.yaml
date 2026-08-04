@@ -43,6 +43,9 @@ runtime:
         OIDC_POST_LOGOUT_REDIRECT_URI: public_url
         OIDC_TENANT_ID: tenant_id
         OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        # 仅无 HTTPS 的测试服务器需要；显式允许非回环 HTTP 源使用非 Secure 会话 Cookie。
+        # 生产部署必须保持 false（默认），并使用 HTTPS。
+        OIDC_ALLOW_INSECURE_HTTP_SESSION: "true"
         PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
