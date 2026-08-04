@@ -1,0 +1,50 @@
+version: 1
+default: false
+application:
+  code: project_management
+  name: 项目服务内容管理系统
+  description: 项目、服务项拆解与配置规则管理系统
+  environment: prod
+  path_prefix: /project_management
+  upstream_url: http://project-api:8082
+  client_type: confidential
+runtime:
+  required_infrastructure_keys:
+    - PROJECT_MYSQL_PASSWORD
+    - PROJECT_MYSQL_ROOT_PASSWORD
+  files:
+    - path: runtime/project.env
+      template_path: subsystem-templates/project.env.example
+      compose_environment_key: PROJECT_RUNTIME_ENV_FILE
+      required_existing_keys: []
+      values:
+        OIDC_SESSION_COOKIE_NAME: project_management_session
+        OIDC_SESSION_TTL: 15m
+        OIDC_AUTHORIZATION_REFRESH_INTERVAL: 1m
+        PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
+        PLATFORM_APPLICATION_CODE: project_management
+        PLATFORM_ENVIRONMENT_CODE: prod
+      bindings:
+        OIDC_ISSUER: issuer
+        OIDC_CLIENT_ID: client_id
+        OIDC_CLIENT_SECRET: client_secret
+        OIDC_REDIRECT_URI: redirect_uri
+        OIDC_POST_LOGOUT_REDIRECT_URI: logged_out_url
+        OIDC_TENANT_ID: tenant_id
+        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        APP_PATH_PREFIX: path_prefix
+        PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
+        PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+compose:
+  profiles: [project-release]
+  dependency_services: [project-mysql, temporal]
+  database:
+    service: project-mysql
+    name: project_management
+  migrate_service: project-migrate
+  runtime_services: [project-api]
+  teardown_services: [project-api]
+  release_image_keys: [PROJECT_IMAGE]

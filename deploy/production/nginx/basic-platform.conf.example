@@ -78,6 +78,33 @@ server {
         proxy_pass http://127.0.0.1:18082;
     }
 
+    location = /project_management/healthz {
+        proxy_pass http://127.0.0.1:18085/healthz;
+    }
+
+    location /project_management/auth/ {
+        proxy_set_header X-Forwarded-Prefix /project_management;
+        proxy_pass http://127.0.0.1:18085/auth/;
+    }
+
+    location = /project_management/logged-out {
+        proxy_set_header X-Forwarded-Prefix /project_management;
+        proxy_pass http://127.0.0.1:18085/logged-out;
+    }
+
+    location /project_management/api/ {
+        proxy_set_header X-Forwarded-Prefix /project_management;
+        proxy_pass http://127.0.0.1:18085/api/;
+    }
+
+    location = /project_management {
+        return 308 /project_management/;
+    }
+
+    location /project_management/ {
+        proxy_pass http://127.0.0.1:18082;
+    }
+
     location = /customer-opportunity/healthz {
         proxy_pass http://127.0.0.1:18083/customer-opportunity/healthz;
     }
