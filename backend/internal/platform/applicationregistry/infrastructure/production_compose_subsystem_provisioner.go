@@ -274,7 +274,10 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
-// Update 只重用已落盘配置，不尝试从数据库恢复 OAuth 明文或隐式轮换密钥。
+// Update 只重用已落盘配置，不尝试从数据库恢复 OAuth 明文或隐式轮换密钥。重试/更新时
+// 仍会把清单中的固定值（values）和缺失的生成密钥写入 runtime 文件，使清单新增的固定
+// 配置（如测试服务器的非 Secure Cookie 开关）无需重新 onboarding 即可生效；绑定项需要
+// 一次性 OAuth 明文，保持只在首次 Provision 写入。
 func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
@@ -285,6 +288,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 		return provisioningError("production subsystem deployment request is invalid")
 	}
 	if err := target.validateDeploymentFiles(false, true); err != nil {
+		return err
+	}
+	if err := target.writeRuntimeFixedValues(input); err != nil {
 		return err
 	}
 	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
@@ -407,6 +413,37 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 		runnerEnvironment = append(runnerEnvironment, runtimeFile.ComposeEnvironmentKey+"="+filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path)))
 	}
 	return append(prefix, arguments...), runnerEnvironment
+}
+
+// writeRuntimeFixedValues 只写入清单固定值与首次缺失的生成密钥，不写任何绑定项。
+// 供 Update/Retry 使用：绑定项需要一次性 OAuth 明文，Update 入参不携带这些凭据。
+func (target *productionComposeTarget) writeRuntimeFixedValues(input application.SubsystemProvisioningInput) error {
+	type runtimeEnvironmentUpdate struct {
+		path   string
+		values map[string]string
+	}
+	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
+		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
+		if err != nil {
+			return err
+		}
+		values := make(map[string]string, len(runtimeFile.Values)+len(generatedValues))
+		for key, value := range runtimeFile.Values {
+			values[key] = value
+		}
+		for key, value := range generatedValues {
+			values[key] = value
+		}
+		updates = append(updates, runtimeEnvironmentUpdate{path: path, values: values})
+	}
+	for _, update := range updates {
+		if err := updateProductionSubsystemEnvironment(update.path, update.values); err != nil {
+			return provisioningError("write production subsystem runtime configuration")
+		}
+	}
+	return nil
 }
 
 func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
