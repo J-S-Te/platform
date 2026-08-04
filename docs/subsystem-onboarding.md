@@ -203,9 +203,11 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
   - `platform:role-binding:update`
 - 角色管理权限不会自动代表可以授予超级管理员；初始管理员授权仍受平台的受保护角色与可委派权限策略约束。
 
-正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理服务器 `subsystems.d/*.yaml` 审核清单内的精确应用/环境；当前随包提供合同管理、客户与商机管理和客户自助门户三个 `prod` 目标。Agent 会从清单指定的审核模板初始化缺失的 `runtime/*.env`、把权限自动收紧为 `0600`、首次生成声明的业务 base64 密钥，再写入一次性 OIDC、目录发布及用途隔离的服务凭据，最后执行固定备份、迁移和 API 重建。已有合法密钥、子系统新增环境变量和清单外文件都会保留，重试或更新不会轮换。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
+正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理服务器 `subsystems.d/*.yaml` 审核清单内的精确应用/环境；当前随包提供合同管理、客户与商机管理、客户自助门户和项目管理四个 `prod` 目标。Agent 会从清单指定的审核模板初始化缺失的 `runtime/*.env`、把权限自动收紧为 `0600`、首次生成声明的业务 base64 密钥，再写入一次性 OIDC、目录发布及用途隔离的服务凭据，最后执行固定备份、迁移和 API 重建。已有合法密钥、子系统新增环境变量和清单外文件都会保留，重试或更新不会轮换。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
 
-新增生产子系统时，由部署人员在平台生产资产中提交并评审一个清单，同时准备 Compose 服务、运行时模板和不可变镜像键；发布后管理页面自动显示该目标。无需在每台服务器手工添加应用白名单，也不需要修改 Agent Go 代码。以后新增普通文件或环境变量不会被 Agent 拒绝；只有需要 Agent 创建/注入的新 runtime 文件或平台凭据才加入清单。清单不支持命令、脚本或任意宿主机路径，平台 API 的能力列表只是 UI 提示，特权 Agent 会独立重新加载并校验同一只读清单。详细格式和安全边界见 [`deploy/production/README.md`](../deploy/production/README.md#41-新增生产子系统目标部署人员)。
+新增生产子系统时，由部署人员在平台生产资产中提交并评审一个清单，同时准备 Compose 服务、运行时模板和不可变镜像键；发布后管理页面自动显示该目标。
+
+`project_management/prod` 对应项目服务内容管理系统：PathPrefix `/project_management`、Upstream `http://project-api:8082`、迁移服务 `project-migrate`，需要 `PROJECT_MYSQL_PASSWORD` / `PROJECT_MYSQL_ROOT_PASSWORD` 基础设施凭据；接入后初始管理员按平台默认授予该应用 `admin` 角色。该目标已随包审核登记在 `subsystems.d/project_management-prod.yaml`，管理页面选择目标后自动填充固定参数。无需在每台服务器手工添加应用白名单，也不需要修改 Agent Go 代码。以后新增普通文件或环境变量不会被 Agent 拒绝；只有需要 Agent 创建/注入的新 runtime 文件或平台凭据才加入清单。清单不支持命令、脚本或任意宿主机路径，平台 API 的能力列表只是 UI 提示，特权 Agent 会独立重新加载并校验同一只读清单。详细格式和安全边界见 [`deploy/production/README.md`](../deploy/production/README.md#41-新增生产子系统目标部署人员)。
 
 接入 API 可指定 `initial_admin_user_id`；当前生产管理页面默认使用当前平台操作者。平台将该选择持久化到部署状态：如果首次部署在初始授权前失败，页面“重试”仍向原选择用户授权，而不是改授给点击重试的人；初始授权完成后，普通更新或重试不会恢复管理员后来主动移除的角色。`customer_portal` 等按外部邀请预配身份的受控应用可不建立内部初始管理员。
 

@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
 
 usage() {
-  echo "usage: $0 {frontend|platform|contract} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "usage: $0 {frontend|platform|contract|project} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
   exit 2
 }
 
@@ -16,6 +16,7 @@ case "$service" in
   frontend) image_key=FRONTEND_IMAGE ;;
   platform) image_key=PLATFORM_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
+  project) image_key=PROJECT_IMAGE ;;
   *) usage ;;
 esac
 
@@ -32,9 +33,12 @@ release_file="$deploy_dir/.release.env"
 runtime_file="$deploy_dir/.env"
 contract_runtime_file="$deploy_dir/runtime/contract.env"
 contract_runtime_template="$deploy_dir/subsystem-templates/contract.env.example"
+project_runtime_file="$deploy_dir/runtime/project.env"
+project_runtime_template="$deploy_dir/subsystem-templates/project.env.example"
 compose_file="$deploy_dir/compose.yaml"
 profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
+export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
 
 for command_name in docker curl gzip flock awk mktemp install; do
   command -v "$command_name" >/dev/null || {
@@ -67,6 +71,25 @@ fi
 chmod 600 "$contract_runtime_file"
 [[ "$(stat -c '%a' "$contract_runtime_file")" == "600" ]] || {
   echo "无法将运行配置权限收紧为 0600：$contract_runtime_file" >&2
+  exit 1
+}
+
+if [[ ! -f "$project_runtime_file" ]]; then
+  [[ -f "$project_runtime_template" ]] || {
+    echo "缺少 $project_runtime_file，且没有可用于初始化的 $project_runtime_template" >&2
+    exit 1
+  }
+  # 与合同服务一致：仅在文件不存在时从无秘密模板初始化，真正发布前仍会校验 OIDC/目录凭据。
+  install -m 600 "$project_runtime_template" "$project_runtime_file"
+  echo "已初始化 $project_runtime_file；项目管理服务接入前仍需由平台写入运行凭据"
+fi
+[[ ! -L "$project_runtime_file" ]] || {
+  echo "拒绝符号链接运行配置：$project_runtime_file" >&2
+  exit 1
+}
+chmod 600 "$project_runtime_file"
+[[ "$(stat -c '%a' "$project_runtime_file")" == "600" ]] || {
+  echo "无法将运行配置权限收紧为 0600：$project_runtime_file" >&2
   exit 1
 }
 
@@ -107,6 +130,38 @@ contract_env_value() {
       exit
     }
   ' "$contract_runtime_file"
+}
+
+project_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$project_runtime_file"
+}
+
+require_project_runtime_value() {
+  local key="$1"
+  local value
+  value="$(project_env_value "$key")"
+  if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+    echo "项目管理运行配置缺失或仍为占位值：$key" >&2
+    return 1
+  fi
+}
+
+project_runtime_ready() {
+  local key value
+  for key in     OIDC_CLIENT_ID     OIDC_CLIENT_SECRET     OIDC_TENANT_ID     PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID     PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID     PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET; do
+    value="$(project_env_value "$key")"
+    if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+      return 1
+    fi
+  done
+  [[ "$(project_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]
 }
 
 require_runtime_value() {
@@ -226,6 +281,26 @@ deploy_contract() {
   wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"
 }
 
+deploy_project() {
+  # 子系统只有在浏览器 OIDC 与机器目录发布凭据全部就绪后才能启动，避免容器进入 401 重启循环。
+  require_project_runtime_value OIDC_CLIENT_ID || return
+  require_project_runtime_value OIDC_CLIENT_SECRET || return
+  require_project_runtime_value OIDC_TENANT_ID || return
+  require_project_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
+  require_project_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
+  require_project_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
+  if [[ "$(project_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
+    echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
+    return 1
+  fi
+  compose up -d --wait --wait-timeout 240 project-mysql temporal || return
+  backup_database project-mysql project_management || return
+  # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
+  compose --profile project-release run --rm project-migrate || return
+  compose up -d --no-deps project-api || return
+  wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18085)/healthz"
+}
+
 deploy_frontend() {
   compose up -d --no-deps frontend || return
   wait_for_health "http://127.0.0.1:$(port_value FRONTEND_PORT 18082)/"
@@ -239,6 +314,7 @@ rollback_runtime() {
       compose up -d --no-deps platform-api
       ;;
     contract) compose up -d --no-deps contract-api ;;
+    project) compose up -d --no-deps project-api ;;
   esac
 }
 
@@ -274,12 +350,18 @@ if ! docker pull "$image_ref" || ! compose config --quiet; then
   exit 1
 fi
 
-# 首次上线时合同镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
-# contract-api，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
+# 首次上线时子系统镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
+# 子系统 API，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
 if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
   rm -f "$previous_release"
   echo "合同镜像已安全暂存：$image_ref"
   echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 contract_management/prod 接入。"
+  exit 0
+fi
+if [[ "$service" == "project" ]] && ! project_runtime_ready; then
+  rm -f "$previous_release"
+  echo "项目管理镜像已安全暂存：$image_ref"
+  echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 project_management/prod 接入。"
   exit 0
 fi
 
