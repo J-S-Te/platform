@@ -336,7 +336,11 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240"}
 		arguments = append(arguments, compose.DependencyServices...)
 		target.stepLog("step=dependencies services=%v", compose.DependencyServices)
-		if err := target.runCompose(ctx, arguments...); err != nil {
+		// 依赖步骤加硬超时：compose --wait 异常时不能无限挂起拖垮接入与平台。
+		stepContext, cancelStep := context.WithTimeout(ctx, 5*time.Minute)
+		err := target.runCompose(stepContext, arguments...)
+		cancelStep()
+		if err != nil {
 			return target.subsystemServiceFailure(ctx, "start production subsystem dependencies", compose.DependencyServices, redactValues)
 		}
 	}
@@ -367,7 +371,11 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
 	arguments = append(arguments, compose.RuntimeServices...)
 	target.stepLog("step=runtime services=%v", compose.RuntimeServices)
-	if err := target.runCompose(ctx, arguments...); err != nil {
+	// 运行步骤同样加硬超时，避免健康检查或镜像拉取异常时长期挂起。
+	stepContext, cancelStep := context.WithTimeout(ctx, 5*time.Minute)
+	err := target.runCompose(stepContext, arguments...)
+	cancelStep()
+	if err != nil {
 		return target.subsystemServiceFailure(ctx, "start production subsystem services", compose.RuntimeServices, redactValues)
 	}
 	return nil
