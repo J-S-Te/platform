@@ -193,8 +193,10 @@ deploy_platform() {
   compose --profile release run --rm platform-migrate ./migrate || return
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
-  compose up -d --wait --wait-timeout 60 --no-deps subsystem-provisioner || return
-  compose up -d --no-deps platform-api || return
+  # 强制重建让 Agent/API 每次部署都重新加载 subsystems.d 清单，否则清单更新
+  # （新增目标、受管键等）不会反映到运行中的进程。
+  compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || return
+  compose up -d --force-recreate --no-deps platform-api || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz"
 }
 
@@ -227,8 +229,8 @@ rollback_runtime() {
   case "$service" in
     frontend) compose up -d --no-deps frontend ;;
     platform)
-      compose up -d --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
-      compose up -d --no-deps platform-api
+      compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
+      compose up -d --force-recreate --no-deps platform-api
       ;;
     contract) compose up -d --no-deps contract-api ;;
   esac
