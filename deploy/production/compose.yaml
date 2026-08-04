@@ -59,7 +59,7 @@ x-portal-service: &portal-service
     - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 x-project-service: &project-service
-  image: ${PROJECT_IMAGE}
+  image: ${PROJECT_IMAGE:-project-management/project:pending}
   env_file:
     - ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
   environment:
