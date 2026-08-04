@@ -30,7 +30,7 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management", "customer_and_opportunity", "customer_portal"}) {
 		t.Fatalf("supported applications = %#v", capabilities.SupportedApplicationCodes)
 	}
-	if len(capabilities.Targets) != 3 {
+	if len(capabilities.Targets) != 4 {
 		t.Fatalf("targets = %#v", capabilities.Targets)
 	}
 
