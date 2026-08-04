@@ -168,6 +168,29 @@ func TestProductionComposeSubsystemProvisionerTeardownDoesNotRequireDatabaseCred
 	}
 }
 
+func TestProductionComposeSubsystemProvisionerUpdateWritesManifestFixedValues(t *testing.T) {
+	t.Parallel()
+	provisioner, _, contractPath := productionProvisionerFixture(t)
+	if err := provisioner.Update(context.Background(), productionContractInput("https://platform.example.com")); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	contents, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED=true",
+		"CONTRACT_TEST_KEY_BASE64=",
+	} {
+		if !strings.Contains(string(contents), expected) {
+			t.Fatalf("update did not write manifest fixed value %q:\n%s", expected, contents)
+		}
+	}
+	if strings.Contains(string(contents), "OIDC_CLIENT_SECRET=browser-secret") {
+		t.Fatalf("update unexpectedly wrote a binding value:\n%s", contents)
+	}
+}
+
 func TestProductionComposeSubsystemProvisionerTestServerAllowsPlaceholderDatabaseCredentials(t *testing.T) {
 	t.Parallel()
 	provisioner, runner, _ := productionProvisionerFixtureWithPlaceholderAllowance(t, true)
