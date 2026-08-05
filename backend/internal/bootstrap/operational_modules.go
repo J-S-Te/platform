@@ -108,7 +108,12 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	subsystemHandler, err := applicationregistryhttp.NewSubsystemOnboardingHandlerWithNotifications(
 		subsystemService,
 		subsystemProvisioner,
-		subsystemInitialAccessManager{applicationAccess: applicationAccessService},
+		subsystemInitialAccessManager{
+			applicationAccess:              applicationAccessService,
+			initialAdminRolesByApplication: initialAdminRolesByApplication(provisioningCapabilities),
+			fromManifest:                   cfg.SubsystemOnboarding.InitialAdminRolesFromManifest,
+			logger:                         logger,
+		},
 		cfg.Auth.OIDCIssuer,
 		logger,
 		onboardingNotificationSink{service: notificationService},
@@ -156,6 +161,24 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 // 真正的角色有效性仍由通用授权服务校验，接入流程不能绕开可委派权限和角色目录边界。
 type subsystemInitialAccessManager struct {
 	applicationAccess *applicationaccess.Service
+	// initialAdminRolesByApplication 由 subsystems.d 清单声明（B1 解耦）；fromManifest=false
+	// 时仍走平台硬编码默认，保证既有行为不变。
+	initialAdminRolesByApplication map[string][]string
+	fromManifest                   bool
+	logger                         *slog.Logger
+}
+
+// initialAdminRolesByApplication 从能力列表构建“应用编码 → 初始管理员角色”映射；
+// 仅收集清单显式声明了 initial_admin_roles 的目标。
+func initialAdminRolesByApplication(capabilities applicationregistryapplication.SubsystemProvisioningCapabilities) map[string][]string {
+	rolesByApplication := make(map[string][]string)
+	for _, target := range capabilities.Targets {
+		if target.InitialAdminRoles == nil {
+			continue
+		}
+		rolesByApplication[target.ApplicationCode] = append([]string(nil), target.InitialAdminRoles...)
+	}
+	return rolesByApplication
 }
 
 // onboardingNotificationSink 把子系统接入生命周期事件转成租户内站内通知，投递给操作人。
@@ -202,7 +225,7 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 	if manager.applicationAccess == nil {
 		return "", errors.New("application authorization service is unavailable")
 	}
-	roleCodes := initialSubsystemAdministratorRoles(applicationCode)
+	roleCodes := manager.initialAdministratorRoles(applicationCode)
 	// customer_portal 面向外部客户：执行接入的内部管理员不能自动获得客户角色或门户入口，
 	// 外部客户身份和数据范围必须由 CRM 邀请流程逐个建立。
 	if len(roleCodes) == 0 {
@@ -232,7 +255,9 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 	return strings.Join(roleCodes, ","), nil
 }
 
-func initialSubsystemAdministratorRoles(applicationCode string) []string {
+// hardcodedInitialSubsystemAdministratorRoles 是平台内置默认：未开启清单驱动或清单未声明时
+// 使用，保证既有子系统行为不变。
+func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case "customer_and_opportunity":
 		// CRM 不创建绕过业务范围的“万能管理员”。三个目录角色共同覆盖运营职责，同时仍受
@@ -242,4 +267,37 @@ func initialSubsystemAdministratorRoles(applicationCode string) []string {
 		return nil
 	}
 	return []string{"admin"}
+}
+
+// initialAdministratorRoles 在开启清单驱动时优先使用清单声明的角色；清单未声明或开关关闭时
+// 回退到平台硬编码默认。清单值与默认不一致只记 WARN，不阻断接入（兜底：行为始终可预期）。
+func (manager subsystemInitialAccessManager) initialAdministratorRoles(applicationCode string) []string {
+	code := strings.TrimSpace(applicationCode)
+	if manager.fromManifest {
+		if roles, declared := manager.initialAdminRolesByApplication[code]; declared {
+			defaultRoles := hardcodedInitialSubsystemAdministratorRoles(code)
+			if !equalStringSlices(roles, defaultRoles) {
+				logger := manager.logger
+				if logger == nil {
+					logger = slog.Default()
+				}
+				logger.Warn("subsystem initial admin roles differ from platform default",
+					"application_code", code, "manifest_roles", roles, "default_roles", defaultRoles)
+			}
+			return roles
+		}
+	}
+	return hardcodedInitialSubsystemAdministratorRoles(code)
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

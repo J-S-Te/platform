@@ -71,8 +71,9 @@ type SubsystemProvisioningCapabilities struct {
 }
 
 // SubsystemProvisioningTarget is the non-sensitive projection of one reviewed deployment
-// manifest. PublicBaseURL is intentionally omitted: the platform OIDC issuer is the only public
-// origin accepted by the onboarding service.
+// manifest. PublicBaseURL is entered by the operator because the browser-facing origin may vary
+// by host, port or reverse-proxy deployment; the Agent still validates the reviewed path/upstream
+// and the exact callback derived from that origin.
 type SubsystemProvisioningTarget struct {
 	ApplicationCode string
 	ApplicationName string
@@ -81,6 +82,8 @@ type SubsystemProvisioningTarget struct {
 	UpstreamURL     string
 	PathPrefix      string
 	ClientType      string
+	// InitialAdminRoles 是清单声明的接入初始管理员角色；nil 表示未声明（由平台默认决定）。
+	InitialAdminRoles []string
 }
 
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
