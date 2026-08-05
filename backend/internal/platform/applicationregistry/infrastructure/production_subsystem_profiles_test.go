@@ -116,6 +116,56 @@ func TestProductionSubsystemProfilesRejectDuplicateTargetsAndWritableManifest(t 
 	})
 }
 
+func TestProductionSubsystemProfilesManifestServiceBindingsDriveValidation(t *testing.T) {
+	t.Parallel()
+	base := minimalProductionProfileYAML
+	// 声明 allowed_service_bindings=[sample_scope]，并加一个该用途的绑定
+	withDeclared := strings.Replace(base, "  client_type: confidential\n", "  client_type: confidential\n  allowed_service_bindings: [sample_scope]\n", 1)
+	withDeclared = strings.Replace(withDeclared, "        OIDC_CLIENT_ID: client_id\n", "        OIDC_CLIENT_ID: client_id\n        SAMPLE_SCOPE_CLIENT_ID: service.sample_scope.client_id\n", 1)
+
+	t.Run("declared binding allowed", func(t *testing.T) {
+		root, profilesPath := productionProfilesFixture(t)
+		writeProductionProfileForTest(t, profilesPath, "sample.yaml", withDeclared)
+		if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err != nil {
+			t.Fatalf("declared service binding was rejected: %v", err)
+		}
+	})
+	t.Run("undeclared binding rejected", func(t *testing.T) {
+		root, profilesPath := productionProfilesFixture(t)
+		manifest := strings.Replace(withDeclared, "SAMPLE_SCOPE_CLIENT_ID: service.sample_scope.client_id", "OTHER_SCOPE_CLIENT_ID: service.other_scope.client_id", 1)
+		writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+		if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err == nil {
+			t.Fatal("undeclared service binding was accepted")
+		}
+	})
+	t.Run("empty declaration only audit allowed", func(t *testing.T) {
+		root, profilesPath := productionProfilesFixture(t)
+		manifest := strings.Replace(base, "  client_type: confidential\n", "  client_type: confidential\n  allowed_service_bindings: []\n", 1)
+		manifest = strings.Replace(manifest, "        OIDC_CLIENT_ID: client_id\n", "        OIDC_CLIENT_ID: client_id\n        SAMPLE_SCOPE_CLIENT_ID: service.sample_scope.client_id\n", 1)
+		writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+		if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err == nil {
+			t.Fatal("binding beyond empty declaration was accepted")
+		}
+	})
+	t.Run("undeclared field falls back to hardcoded default", func(t *testing.T) {
+		// 未声明 allowed_service_bindings 时，未知应用只允许 audit_ingest（硬编码默认）。
+		root, profilesPath := productionProfilesFixture(t)
+		manifest := strings.Replace(base, "        OIDC_CLIENT_ID: client_id\n", "        OIDC_CLIENT_ID: client_id\n        SAMPLE_SCOPE_CLIENT_ID: service.sample_scope.client_id\n", 1)
+		writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+		if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err == nil {
+			t.Fatal("hardcoded fallback accepted an undeclared service binding")
+		}
+	})
+	t.Run("audit baseline always allowed", func(t *testing.T) {
+		root, profilesPath := productionProfilesFixture(t)
+		manifest := strings.Replace(base, "        OIDC_CLIENT_ID: client_id\n", "        OIDC_CLIENT_ID: client_id\n        SAMPLE_AUDIT_CLIENT_ID: service.audit_ingest.client_id\n", 1)
+		writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+		if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err != nil {
+			t.Fatalf("audit baseline binding was rejected: %v", err)
+		}
+	})
+}
+
 func TestProductionSubsystemProfilesAllowReviewedTemplateWithoutManagedBindings(t *testing.T) {
 	t.Parallel()
 	root, profilesPath := productionProfilesFixture(t)
