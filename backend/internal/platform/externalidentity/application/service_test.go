@@ -71,6 +71,19 @@ func TestProvisionNormalizesAndNeverCreatesCredentialInput(t *testing.T) {
 	}
 }
 
+func TestPortalApplicationCodeCanBeOverridden(t *testing.T) {
+	now := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
+	repository := &serviceRepositoryStub{}
+	service, err := NewService(repository, mobileStub{}, &idsStub{values: []string{"binding-1", "event-1"}}, clockStub{now: now}, WithPortalApplicationCode("custom_portal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 覆盖后，平台默认门户应用码 customer_portal 不再被接受（B4 解耦：门户应用码可配置）。
+	if _, err := service.AssignPortalRole(context.Background(), principal(), RequestProof{IdempotencyKey: "key", Timestamp: now, Nonce: "nonce"}, RoleInput{PlatformUserID: "user", ApplicationCode: PortalApplicationCode, RoleCode: PortalCustomerRole}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("default portal code should be rejected after override, error=%v", err)
+	}
+}
+
 func TestProofAndPortalRoleFailClosed(t *testing.T) {
 	now := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
 	repository := &serviceRepositoryStub{}
