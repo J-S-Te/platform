@@ -128,6 +128,97 @@ func TestOnboardCustomerPortalCreatesSixIndependentLeastPrivilegeServiceClients(
 	}
 }
 
+func TestOnboardSubsystemServiceBindingsFromManifestDriveClientCreation(t *testing.T) {
+	// 清单声明 allowed_service_bindings 时，只创建声明的用途（+审计基线）。
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.OnboardSubsystem(context.Background(), SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: integratedPortalApplicationCode, ApplicationName: "客户自助门户", Environment: "dev",
+		PublicBaseURL: "http://localhost:8081", UpstreamURL: integratedPortalUpstreamURL,
+		PathPrefix: integratedPortalPathPrefix, ClientType: "confidential",
+		AllowedServiceBindings: []string{
+			ServiceCredentialExternalUserProvision,
+			ServiceCredentialApplicationRoleAssign,
+			ServiceCredentialApplicationRoleRevoke,
+			ServiceCredentialPortalMappingProvision,
+			ServiceCredentialPortalMappingDisable,
+			ServiceCredentialPortalInviteVerify,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]bool, len(repository.write.ServiceClients))
+	for _, item := range repository.write.ServiceClients {
+		got[item.Purpose] = true
+	}
+	want := []string{
+		ServiceCredentialAuditIngest,
+		ServiceCredentialExternalUserProvision,
+		ServiceCredentialApplicationRoleAssign,
+		ServiceCredentialApplicationRoleRevoke,
+		ServiceCredentialPortalMappingProvision,
+		ServiceCredentialPortalMappingDisable,
+		ServiceCredentialPortalInviteVerify,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("clients = %v, want %v", got, want)
+	}
+	for _, purpose := range want {
+		if !got[purpose] {
+			t.Fatalf("missing client for purpose %s", purpose)
+		}
+	}
+}
+
+func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testing.T) {
+	// 未声明 allowed_service_bindings 时回退平台硬编码默认：customer 只创建 owner_directory + 审计。
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.OnboardSubsystem(context.Background(), SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: integratedCustomerApplicationCode, ApplicationName: "客户与商机管理", Environment: "dev",
+		PublicBaseURL: "http://localhost:8081", UpstreamURL: integratedCustomerUpstreamURL,
+		PathPrefix: integratedCustomerPathPrefix, ClientType: "confidential",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.write.ServiceClients) != 2 {
+		t.Fatalf("fallback clients = %d, want audit + owner_directory", len(repository.write.ServiceClients))
+	}
+	purposes := map[string]bool{}
+	for _, item := range repository.write.ServiceClients {
+		purposes[item.Purpose] = true
+	}
+	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] {
+		t.Fatalf("fallback clients = %v", purposes)
+	}
+}
+
+func TestOnboardSubsystemRejectsUnregisteredServiceBindingPurpose(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.OnboardSubsystem(context.Background(), SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: integratedContractApplicationCode, ApplicationName: "合同管理", Environment: "prod",
+		PublicBaseURL: "http://localhost:8081", UpstreamURL: integratedContractApplicationCode + "-api:8081",
+		PathPrefix: "/" + integratedContractApplicationCode, ClientType: "confidential",
+		AllowedServiceBindings: []string{"unreviewed_scope"},
+	})
+	if err == nil {
+		t.Fatal("unregistered service binding purpose was accepted")
+	}
+}
+
 func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testing.T) {
 	repository := &subsystemOnboardingRepositoryStub{}
 	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})

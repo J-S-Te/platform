@@ -502,6 +502,9 @@ func productionSubsystemCapabilities(profiles []productionSubsystemProfile) appl
 		if app.InitialAdminRoles != nil {
 			target.InitialAdminRoles = append([]string(nil), (*app.InitialAdminRoles)...)
 		}
+		if app.AllowedServiceBindings != nil {
+			target.AllowedServiceBindings = append([]string(nil), (*app.AllowedServiceBindings)...)
+		}
 		capabilities.Targets = append(capabilities.Targets, target)
 	}
 	if len(profiles) > 0 {

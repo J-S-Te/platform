@@ -20,19 +20,22 @@ const (
 	integratedPortalApplicationCode        = "customer_portal"
 	integratedPortalPathPrefix             = "/customer-portal"
 	integratedPortalUpstreamURL            = "http://portal-api:8091"
+	integratedContractApplicationCode      = "contract_management"
 )
 
 const (
 	// 审计写入客户端是所有接入环境的基线能力，只能追加审计事件；它与浏览器登录、
 	// 授权目录发布和子系统间业务调用使用不同客户端，避免任一密钥泄露后权限横向扩散。
-	ServiceCredentialAuditIngest            = "audit_ingest"
-	ServiceCredentialExternalUserProvision  = "external_user_provision"
-	ServiceCredentialApplicationRoleAssign  = "application_role_assign"
-	ServiceCredentialApplicationRoleRevoke  = "application_role_revoke"
-	ServiceCredentialPortalMappingProvision = "portal_mapping_provision"
-	ServiceCredentialPortalMappingDisable   = "portal_mapping_disable"
-	ServiceCredentialPortalInviteVerify     = "portal_invite_verify"
-	ServiceCredentialOwnerDirectoryRead     = "owner_directory_read"
+	ServiceCredentialAuditIngest                    = "audit_ingest"
+	ServiceCredentialExternalUserProvision          = "external_user_provision"
+	ServiceCredentialApplicationRoleAssign          = "application_role_assign"
+	ServiceCredentialApplicationRoleRevoke          = "application_role_revoke"
+	ServiceCredentialPortalMappingProvision         = "portal_mapping_provision"
+	ServiceCredentialPortalMappingDisable           = "portal_mapping_disable"
+	ServiceCredentialPortalInviteVerify             = "portal_invite_verify"
+	ServiceCredentialOwnerDirectoryRead             = "owner_directory_read"
+	ServiceCredentialContractOpportunitySignedWrite = "contract_opportunity_signed_write"
+	ServiceCredentialContractSummaryRead            = "contract_summary_read"
 )
 
 // 上述用途常量同时是“凭据最小权限”的协议标识：部署 Agent 按用途把不同密钥写入
@@ -75,6 +78,9 @@ type SubsystemOnboardingInput struct {
 	UpstreamURL        string
 	PathPrefix         string
 	ClientType         string
+	// AllowedServiceBindings 是该应用清单声明的可创建服务凭据用途（不含 audit_ingest 基线）。
+	// 为空且清单未声明时回退到平台硬编码默认，保证既有行为不变。
+	AllowedServiceBindings []string
 }
 
 // 写模型汇总一次接入产生的控制面对象，仓储在一个数据库事务内持久化；明文密钥不进入
@@ -320,35 +326,78 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	return result, nil
 }
 
+// integratedServicePurposeDefinition 描述一个服务用途客户端的固定元数据（scope/suffix/name）。
+// 这是平台级的通用注册表，不属于任何具体子系统；清单声明 allowed_service_bindings 后，
+// 接入服务按注册表创建对应客户端。
+type integratedServicePurposeDefinition struct {
+	purpose string
+	suffix  string
+	name    string
+	scope   string
+}
+
+var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefinition{
+	ServiceCredentialAuditIngest:                    {ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
+	ServiceCredentialOwnerDirectoryRead:             {ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"},
+	ServiceCredentialExternalUserProvision:          {ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
+	ServiceCredentialApplicationRoleAssign:          {ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
+	ServiceCredentialApplicationRoleRevoke:          {ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
+	ServiceCredentialPortalMappingProvision:         {ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
+	ServiceCredentialPortalMappingDisable:           {ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
+	ServiceCredentialPortalInviteVerify:             {ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
+	ServiceCredentialContractOpportunitySignedWrite: {ServiceCredentialContractOpportunitySignedWrite, "opportunity-intake", "Opportunity Signed Intake", "opportunity.signed.write"},
+	ServiceCredentialContractSummaryRead:            {ServiceCredentialContractSummaryRead, "contract-summary", "Contract Summary Reader", "contract.summary.read"},
+}
+
+// hardcodedIntegratedServicePurposes 是平台内置默认的集成服务用途（不含 audit_ingest 基线）。
+// 清单未声明 allowed_service_bindings 时使用，保证既有行为不变。
+func hardcodedIntegratedServicePurposes(applicationCode string) []string {
+	switch strings.TrimSpace(applicationCode) {
+	case integratedCustomerApplicationCode:
+		return []string{ServiceCredentialOwnerDirectoryRead}
+	case integratedPortalApplicationCode:
+		return []string{
+			ServiceCredentialExternalUserProvision,
+			ServiceCredentialApplicationRoleAssign,
+			ServiceCredentialApplicationRoleRevoke,
+			ServiceCredentialPortalMappingProvision,
+			ServiceCredentialPortalMappingDisable,
+			ServiceCredentialPortalInviteVerify,
+		}
+	case integratedContractApplicationCode:
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead}
+	}
+	return nil
+}
+
 func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input SubsystemOnboardingInput, applicationID, environmentID string, now time.Time) ([]SubsystemServiceClientWrite, map[string]string, error) {
 	// 集中审计写入是所有接入环境的基线，而不是特定应用的可选集成；每个环境都使用
 	// 自己的单 scope 客户端，平台可据此绑定来源应用和环境。
-	definitions := []struct {
-		purpose string
-		suffix  string
-		name    string
-		scope   string
-	}{
-		{ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
+	purposes := []string{ServiceCredentialAuditIngest}
+	if input.AllowedServiceBindings != nil {
+		// 清单驱动（B3）：按清单声明的用途创建；审计基线恒在。
+		for _, purpose := range input.AllowedServiceBindings {
+			purposes = append(purposes, strings.TrimSpace(purpose))
+		}
+	} else {
+		// 缺省回退：平台硬编码默认，保证既有行为不变。
+		purposes = append(purposes, hardcodedIntegratedServicePurposes(input.ApplicationCode)...)
 	}
-	if input.ApplicationCode == integratedCustomerApplicationCode {
-		// CRM 只需读取负责人目录；客户门户涉及外部身份生命周期，因此拆成多个单 scope
-		// 客户端，使单个凭据泄露时的可执行动作保持在最小范围。
-		definitions = append(definitions, struct {
-			purpose string
-			suffix  string
-			name    string
-			scope   string
-		}{ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"})
-	} else if input.ApplicationCode == integratedPortalApplicationCode {
-		definitions = append(definitions,
-			struct{ purpose, suffix, name, scope string }{ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
-			struct{ purpose, suffix, name, scope string }{ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
-			struct{ purpose, suffix, name, scope string }{ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
-			struct{ purpose, suffix, name, scope string }{ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
-			struct{ purpose, suffix, name, scope string }{ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
-			struct{ purpose, suffix, name, scope string }{ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
-		)
+	definitions := make([]integratedServicePurposeDefinition, 0, len(purposes))
+	seen := make(map[string]struct{}, len(purposes))
+	for _, purpose := range purposes {
+		if purpose == "" {
+			continue
+		}
+		if _, duplicate := seen[purpose]; duplicate {
+			continue
+		}
+		definition, known := integratedServicePurposeRegistry[purpose]
+		if !known {
+			return nil, nil, fmt.Errorf("subsystem service purpose %q is not registered", purpose)
+		}
+		seen[purpose] = struct{}{}
+		definitions = append(definitions, definition)
 	}
 	writes := make([]SubsystemServiceClientWrite, 0, len(definitions))
 	secrets := make(map[string]string, len(definitions))
