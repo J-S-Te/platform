@@ -122,6 +122,22 @@ func NewSubsystemOnboardingHandlerWithNotifications(service subsystemOnboardingS
 	}, nil
 }
 
+// allowedServiceBindingsForTarget 返回服务器清单为该应用/环境声明的服务用途白名单；
+// 未声明时返回 nil，应用层回退到平台硬编码默认。
+func (handler *SubsystemOnboardingHandler) allowedServiceBindingsForTarget(applicationCode, environment string) []string {
+	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
+		for _, target := range provider.Capabilities().Targets {
+			if target.ApplicationCode == strings.TrimSpace(applicationCode) && target.Environment == strings.TrimSpace(environment) {
+				if target.AllowedServiceBindings == nil {
+					return nil
+				}
+				return append([]string(nil), target.AllowedServiceBindings...)
+			}
+		}
+	}
+	return nil
+}
+
 // notifySubsystemLifecycle 在接入/重试/更新成功或失败时向操作人发送站内通知；通知失败只记日志，
 // 不阻断接入结果（接入本身是否成功由控制面状态决定）。
 func (handler *SubsystemOnboardingHandler) notifySubsystemLifecycle(ctx context.Context, tenantID, operatorID, applicationName, applicationCode, environment string, succeeded bool, detail string) {
@@ -148,13 +164,15 @@ type subsystemOnboardingRequest struct {
 	InitialAdminID  string  `json:"initial_admin_user_id"`
 }
 
-// subsystemLifecycleRequest is the shared payload for Update and Teardown. Both endpoints
-// only need the application code + environment to find the existing DB row; any value
-// changes (BaseURL, UpstreamURL, PathPrefix, OAuth client) must be PATCHed via the regular
-// management endpoints first, then `update` re-provisions the running subsystem.
+// subsystemLifecycleRequest is the shared payload for Update and Teardown. Update may also carry
+// the already-persisted public gateway fields so the Agent can reapply non-secret runtime values;
+// Teardown ignores them.
 type subsystemLifecycleRequest struct {
 	ApplicationCode string `json:"application_code"`
 	Environment     string `json:"environment"`
+	PublicBaseURL   string `json:"public_base_url"`
+	UpstreamURL     string `json:"upstream_url"`
+	PathPrefix      string `json:"path_prefix"`
 }
 
 type subsystemAutomationResponse struct {
@@ -255,6 +273,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		Description: payload.Description, Environment: payload.Environment,
 		PublicBaseURL: payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL,
 		PathPrefix: payload.PathPrefix, ClientType: payload.ClientType,
+		AllowedServiceBindings: handler.allowedServiceBindingsForTarget(payload.ApplicationCode, payload.Environment),
 	}
 	if err := application.ValidateSubsystemOnboardingInput(onboardingInput); err != nil {
 		handler.writeError(writer, request, err)
@@ -442,9 +461,8 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	}
 	applicationCode := strings.TrimSpace(payload.ApplicationCode)
 	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
-	// Update only re-runs the rebuild path: it never re-issues the OAuth client secret, so we
-	// deliberately send a minimal SubsystemProvisioningInput with just the identifiers the
-	// provisioner needs to locate the project directory and compose stack.
+	// Update never re-issues the OAuth client secret. It sends identifiers plus optional public
+	// gateway fields; the provisioner only writes the non-secret subset and preserves secrets.
 	//
 	// The catalog-publisher client is not re-issued either. The post-rebuild catalog sync (if
 	// enabled) needs the long-lived publisher credentials to authenticate against the platform.
@@ -459,6 +477,23 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
 		// issuer as a stable source of truth instead of having the client send it in.
 		Issuer: handler.oidcIssuer,
+	}
+	publicBaseURL := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/")
+	upstreamURL := strings.TrimRight(strings.TrimSpace(payload.UpstreamURL), "/")
+	pathPrefix := strings.TrimRight(strings.TrimSpace(payload.PathPrefix), "/")
+	// When the management page supplies the current gateway fields, carry the derived
+	// browser URLs to the Agent so a changed host/port updates both runtime config and
+	// the OIDC callback without re-onboarding the environment. Legacy callers may omit
+	// the fields and retain the rebuild-only behavior.
+	if publicBaseURL != "" || upstreamURL != "" || pathPrefix != "" {
+		if publicBaseURL == "" || upstreamURL == "" || pathPrefix == "" {
+			handler.writeError(writer, request, application.ErrValidation)
+			return
+		}
+		updateInput.PublicURL = publicBaseURL + pathPrefix + "/"
+		updateInput.RedirectURI = publicBaseURL + pathPrefix + "/auth/callback"
+		updateInput.PathPrefix = pathPrefix
+		updateInput.UpstreamURL = upstreamURL
 	}
 	// Resolve identifiers from the deployment control plane, not the portal projection: failed
 	// and updating environments are intentionally hidden from the user-facing portal catalog.

@@ -84,6 +84,8 @@ type SubsystemProvisioningTarget struct {
 	ClientType      string
 	// InitialAdminRoles 是清单声明的接入初始管理员角色；nil 表示未声明（由平台默认决定）。
 	InitialAdminRoles []string
+	// AllowedServiceBindings 是清单声明的服务用途白名单（不含 audit_ingest 基线）；nil 表示未声明。
+	AllowedServiceBindings []string
 }
 
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
