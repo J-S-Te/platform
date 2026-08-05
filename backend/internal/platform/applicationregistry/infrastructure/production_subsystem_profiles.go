@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +41,9 @@ type productionSubsystemApplicationManifest struct {
 	// InitialAdminRoles 是接入时给操作人授予的初始管理员角色（按该子系统目录中的角色码）。
 	// 指针区分“未声明（回退平台默认）”与“显式空（不授予内部管理员）”。
 	InitialAdminRoles *[]string `yaml:"initial_admin_roles"`
+	// AllowedServiceBindings 是该应用可绑定的服务用途客户端白名单（audit_ingest 恒允许）。
+	// 指针区分“未声明（回退平台硬编码默认）”与“显式空（仅 audit_ingest）”。
+	AllowedServiceBindings *[]string `yaml:"allowed_service_bindings"`
 }
 
 type productionSubsystemRuntimeManifest struct {
@@ -215,6 +219,16 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 			}
 		}
 	}
+	if app.AllowedServiceBindings != nil {
+		if len(*app.AllowedServiceBindings) > 32 {
+			return errors.New("allowed service bindings must be at most 32")
+		}
+		for _, purpose := range *app.AllowedServiceBindings {
+			if !validProductionTargetCode(purpose, 64) {
+				return errors.New("allowed service binding purpose is invalid")
+			}
+		}
+	}
 
 	runtime := &manifest.Runtime
 	runtime.RequiredInfrastructureKeys = normalizedProductionEnvironmentKeys(runtime.RequiredInfrastructureKeys)
@@ -243,7 +257,7 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		for key, source := range file.Bindings {
 			source = strings.TrimSpace(source)
 			if !validEnvironmentKey(key) || !validProductionBindingSource(source) ||
-				!validProductionServiceBindingForApplication(app.Code, source) {
+				!productionServiceBindingAllowed(app, source) {
 				return errors.New("runtime binding is invalid")
 			}
 			file.Bindings[key] = source
@@ -369,10 +383,10 @@ func validProductionBindingSource(source string) bool {
 	return len(parts) == 3 && parts[0] == "service" && validProductionTargetCode(parts[1], 64) && (parts[2] == "client_id" || parts[2] == "client_secret")
 }
 
-// validProductionServiceBindingForApplication 把清单中的用途凭据限制在控制面真正会为
-// 该应用创建的最小权限 Client 集合。这样拼写错误或未经实现的新用途会在 API/Agent
-// 启动时失败，而不是等控制面已落库、一次性明文已经生成后才在部署阶段失败。
-func validProductionServiceBindingForApplication(applicationCode, source string) bool {
+// productionServiceBindingAllowed 决定某服务用途绑定是否被允许。B2 解耦：清单显式声明
+// allowed_service_bindings 时按清单校验；未声明时回退到平台硬编码默认（保证既有行为不变）。
+// audit_ingest 是所有接入环境的基线能力，恒允许。
+func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest, source string) bool {
 	parts := strings.Split(source, ".")
 	if len(parts) != 3 || parts[0] != "service" {
 		return true
@@ -381,22 +395,47 @@ func validProductionServiceBindingForApplication(applicationCode, source string)
 	if purpose == application.ServiceCredentialAuditIngest {
 		return true
 	}
-	switch applicationCode {
+	if app.AllowedServiceBindings != nil {
+		if !stringSliceContains(*app.AllowedServiceBindings, purpose) {
+			return false
+		}
+		defaultPurposes := hardcodedProductionServiceBindingPurposes(app.Code)
+		if !stringSliceContains(defaultPurposes, purpose) {
+			// 清单比平台默认多放了某个用途：允许（清单是权威），但记录告警便于审计。
+			slog.Warn("subsystem service binding declared beyond platform default",
+				"application_code", app.Code, "purpose", purpose)
+		}
+		return true
+	}
+	return stringSliceContains(hardcodedProductionServiceBindingPurposes(app.Code), purpose)
+}
+
+// hardcodedProductionServiceBindingPurposes 是平台内置默认用途集合（不含恒允许的 audit_ingest）。
+// 清单未声明 allowed_service_bindings 时使用，保证既有子系统行为不变。
+func hardcodedProductionServiceBindingPurposes(applicationCode string) []string {
+	switch strings.TrimSpace(applicationCode) {
 	case "customer_and_opportunity":
-		switch purpose {
-		case application.ServiceCredentialOwnerDirectoryRead,
+		return []string{
+			application.ServiceCredentialOwnerDirectoryRead,
 			application.ServiceCredentialContractSummaryRead,
-			application.ServiceCredentialContractOpportunitySignedWrite:
-			return true
+			application.ServiceCredentialContractOpportunitySignedWrite,
 		}
 	case "customer_portal":
-		switch purpose {
-		case application.ServiceCredentialExternalUserProvision,
+		return []string{
+			application.ServiceCredentialExternalUserProvision,
 			application.ServiceCredentialApplicationRoleAssign,
 			application.ServiceCredentialApplicationRoleRevoke,
 			application.ServiceCredentialPortalMappingProvision,
 			application.ServiceCredentialPortalMappingDisable,
-			application.ServiceCredentialPortalInviteVerify:
+			application.ServiceCredentialPortalInviteVerify,
+		}
+	}
+	return nil
+}
+
+func stringSliceContains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
 			return true
 		}
 	}
