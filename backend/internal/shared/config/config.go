@@ -28,8 +28,10 @@ type Config struct {
 	Worker              WorkerConfig
 	Audit               AuditConfig
 	SubsystemOnboarding SubsystemOnboardingAutomationConfig
-	FileStorageRoot     string
-	CORSOrigins         []string
+	// PortalApplicationCode 是外部客户门户应用编码（B4 解耦，默认 customer_portal）。
+	PortalApplicationCode string
+	FileStorageRoot       string
+	CORSOrigins           []string
 }
 
 // HTTPConfig controls the API listener and public address.
@@ -233,8 +235,9 @@ func Load() (Config, error) {
 			Timeout:                       subsystemAutomationTimeout,
 			InitialAdminRolesFromManifest: value("SUBSYSTEM_INITIAL_ADMIN_ROLES_FROM_MANIFEST", "") == "true",
 		},
-		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
-		CORSOrigins:     commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
+		FileStorageRoot:       resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
+		CORSOrigins:           commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
+		PortalApplicationCode: value("PLATFORM_PORTAL_APPLICATION_CODE", "customer_portal"),
 	}
 
 	if err := cfg.Validate(); err != nil {

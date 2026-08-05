@@ -20,11 +20,29 @@ import (
 
 const (
 	// 机器接口只能收敛到客户门户的低权限客户角色；应用码和角色码不是调用方可自由选择的委派入口。
+	// PortalApplicationCode 是平台默认门户应用码，B4 解耦后可通过 Options 覆盖。
 	PortalApplicationCode = "customer_portal"
 	PortalCustomerRole    = "portal_customer"
 	maxClockSkew          = 5 * time.Minute
 	nonceRetention        = 10 * time.Minute
 )
+
+// Options 允许装配层覆盖门户应用码，缺省保持平台默认，保证既有行为不变。
+type Options struct {
+	PortalApplicationCode string
+}
+
+// ServiceOption 是构造选项函数。
+type ServiceOption func(*Options)
+
+// WithPortalApplicationCode 覆盖客户门户应用码（默认 customer_portal）。
+func WithPortalApplicationCode(code string) ServiceOption {
+	return func(options *Options) {
+		if strings.TrimSpace(code) != "" {
+			options.PortalApplicationCode = strings.TrimSpace(code)
+		}
+	}
+}
 
 var (
 	ErrValidation  = errors.New("external identity validation failed")
@@ -108,17 +126,25 @@ type Repository interface {
 }
 
 type Service struct {
-	repository Repository
-	mobiles    MobileProtection
-	ids        IDGenerator
-	clock      Clock
+	repository            Repository
+	mobiles               MobileProtection
+	ids                   IDGenerator
+	clock                 Clock
+	portalApplicationCode string
 }
 
-func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator, clock Clock) (*Service, error) {
+func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator, clock Clock, options ...ServiceOption) (*Service, error) {
 	if repository == nil || mobiles == nil || ids == nil || clock == nil {
 		return nil, errors.New("external identity service dependencies must not be nil")
 	}
-	return &Service{repository: repository, mobiles: mobiles, ids: ids, clock: clock}, nil
+	opts := Options{PortalApplicationCode: PortalApplicationCode}
+	for _, apply := range options {
+		apply(&opts)
+	}
+	return &Service{
+		repository: repository, mobiles: mobiles, ids: ids, clock: clock,
+		portalApplicationCode: opts.PortalApplicationCode,
+	}, nil
 }
 
 func (service *Service) Provision(ctx context.Context, principal appctx.Principal, proof RequestProof, input ProvisionInput) (ProvisionResult, error) {
@@ -178,7 +204,7 @@ func (service *Service) role(ctx context.Context, principal appctx.Principal, pr
 	input.ApplicationCode = strings.TrimSpace(input.ApplicationCode)
 	input.RoleCode = strings.TrimSpace(input.RoleCode)
 	// 严格固定应用与角色，避免具备该机器接口权限的 CRM 客户端借此绑定平台或其他应用高权角色。
-	if input.PlatformUserID == "" || len(input.PlatformUserID) > 128 || input.ApplicationCode != PortalApplicationCode || input.RoleCode != PortalCustomerRole {
+	if input.PlatformUserID == "" || len(input.PlatformUserID) > 128 || input.ApplicationCode != service.portalApplicationCode || input.RoleCode != PortalCustomerRole {
 		return domain.RoleResult{}, ErrValidation
 	}
 	requestHash := hashRoleRequest(input, revoke)
