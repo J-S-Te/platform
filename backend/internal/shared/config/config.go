@@ -113,6 +113,9 @@ type SubsystemOnboardingAutomationConfig struct {
 	PlatformDockerNetwork       string
 	DockerBinary                string
 	Timeout                     time.Duration
+	// InitialAdminRolesFromManifest 控制子系统接入初始管理员角色是否由清单 initial_admin_roles
+	// 驱动；默认 false（仍走平台硬编码默认，保证既有行为不变），验证等价后开启。
+	InitialAdminRolesFromManifest bool
 }
 
 // Load 显式设置 ENV_FILE 时只读取该文件；否则在当前目录及父目录寻找 .env，使 backend/ 下运行的
@@ -211,23 +214,24 @@ func Load() (Config, error) {
 			EnvironmentCode: value("AUDIT_ENVIRONMENT_CODE", "dev"),
 		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
-			Enabled:                     subsystemAutomationEnabled,
-			Mode:                        strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
-			ProjectsRoot:                value("SUBSYSTEM_PROJECTS_ROOT", ""),
-			GatewayScriptPath:           value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
-			GatewayIncludePath:          value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
-			SocketPath:                  value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
-			ProductionDeployRoot:        value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
-			ProductionRuntimeEnv:        value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
-			ProductionReleaseEnv:        value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
-			ProductionComposeFile:       value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
-			ProductionAllowedTenant:     value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
-			ProductionProfilesDirectory: value("SUBSYSTEM_PRODUCTION_PROFILES_DIR", ""),
-			PlatformComposeProject:      value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
-			PlatformFrontendService:     value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
-			PlatformDockerNetwork:       value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
-			DockerBinary:                value("SUBSYSTEM_DOCKER_BINARY", "docker"),
-			Timeout:                     subsystemAutomationTimeout,
+			Enabled:                       subsystemAutomationEnabled,
+			Mode:                          strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
+			ProjectsRoot:                  value("SUBSYSTEM_PROJECTS_ROOT", ""),
+			GatewayScriptPath:             value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
+			GatewayIncludePath:            value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
+			SocketPath:                    value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
+			ProductionDeployRoot:          value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
+			ProductionRuntimeEnv:          value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
+			ProductionReleaseEnv:          value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
+			ProductionComposeFile:         value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
+			ProductionAllowedTenant:       value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
+			ProductionProfilesDirectory:   value("SUBSYSTEM_PRODUCTION_PROFILES_DIR", ""),
+			PlatformComposeProject:        value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
+			PlatformFrontendService:       value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
+			PlatformDockerNetwork:         value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
+			DockerBinary:                  value("SUBSYSTEM_DOCKER_BINARY", "docker"),
+			Timeout:                       subsystemAutomationTimeout,
+			InitialAdminRolesFromManifest: value("SUBSYSTEM_INITIAL_ADMIN_ROLES_FROM_MANIFEST", "") == "true",
 		},
 		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
 		CORSOrigins:     commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),

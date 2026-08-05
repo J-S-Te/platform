@@ -37,6 +37,9 @@ type productionSubsystemApplicationManifest struct {
 	PathPrefix  string `yaml:"path_prefix"`
 	UpstreamURL string `yaml:"upstream_url"`
 	ClientType  string `yaml:"client_type"`
+	// InitialAdminRoles 是接入时给操作人授予的初始管理员角色（按该子系统目录中的角色码）。
+	// 指针区分“未声明（回退平台默认）”与“显式空（不授予内部管理员）”。
+	InitialAdminRoles *[]string `yaml:"initial_admin_roles"`
 }
 
 type productionSubsystemRuntimeManifest struct {
@@ -201,6 +204,16 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		!validProductionTargetCode(app.Environment, 16) || !validProductionPathPrefix(app.PathPrefix) ||
 		!validProductionUpstreamURL(app.UpstreamURL) || app.ClientType != "confidential" {
 		return errors.New("application target is invalid")
+	}
+	if app.InitialAdminRoles != nil {
+		if len(*app.InitialAdminRoles) > 16 {
+			return errors.New("initial admin roles must be at most 16")
+		}
+		for _, role := range *app.InitialAdminRoles {
+			if !validProductionTargetCode(role, 64) {
+				return errors.New("initial admin role is invalid")
+			}
+		}
 	}
 
 	runtime := &manifest.Runtime
@@ -370,7 +383,12 @@ func validProductionServiceBindingForApplication(applicationCode, source string)
 	}
 	switch applicationCode {
 	case "customer_and_opportunity":
-		return purpose == application.ServiceCredentialOwnerDirectoryRead
+		switch purpose {
+		case application.ServiceCredentialOwnerDirectoryRead,
+			application.ServiceCredentialContractSummaryRead,
+			application.ServiceCredentialContractOpportunitySignedWrite:
+			return true
+		}
 	case "customer_portal":
 		switch purpose {
 		case application.ServiceCredentialExternalUserProvision,
@@ -438,10 +456,14 @@ func productionSubsystemCapabilities(profiles []productionSubsystemProfile) appl
 			seenEnvironments[app.Environment] = struct{}{}
 			capabilities.SupportedEnvironments = append(capabilities.SupportedEnvironments, app.Environment)
 		}
-		capabilities.Targets = append(capabilities.Targets, application.SubsystemProvisioningTarget{
+		target := application.SubsystemProvisioningTarget{
 			ApplicationCode: app.Code, ApplicationName: app.Name, Description: app.Description,
 			Environment: app.Environment, UpstreamURL: app.UpstreamURL, PathPrefix: app.PathPrefix, ClientType: app.ClientType,
-		})
+		}
+		if app.InitialAdminRoles != nil {
+			target.InitialAdminRoles = append([]string(nil), (*app.InitialAdminRoles)...)
+		}
+		capabilities.Targets = append(capabilities.Targets, target)
 	}
 	if len(profiles) > 0 {
 		app := profiles[defaultIndex].Manifest.Application
