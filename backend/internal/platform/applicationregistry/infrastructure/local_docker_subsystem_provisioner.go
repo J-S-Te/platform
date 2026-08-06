@@ -25,6 +25,45 @@ import (
 
 var subsystemDirectoryCodePattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
 
+// publicOriginFromURL extracts the browser-visible origin from a registered public URL.
+// PublicURL includes the subsystem path, while runtime origin variables must not.
+func publicOriginFromURL(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("invalid public URL")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
+// publicBaseOrigin validates a manually entered public base URL. It must be an origin;
+// the subsystem path is supplied independently by the reviewed deployment target.
+func publicBaseOrigin(value string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", false
+	}
+	return parsed.Scheme + "://" + parsed.Host, true
+}
+
+// publicURLOrigin validates that a provisioned public URL has exactly the reviewed
+// subsystem path, while allowing its origin to be supplied by the operator.
+func publicURLOrigin(value, pathPrefix string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", false
+	}
+	origin, ok := publicBaseOrigin(parsed.Scheme + "://" + parsed.Host)
+	if !ok || parsed.Path != strings.TrimRight(strings.TrimSpace(pathPrefix), "/")+"/" {
+		return "", false
+	}
+	return origin, true
+}
+
 const (
 	integratedContractApplicationCode = "contract_management"
 	integratedCustomerApplicationCode = "customer_and_opportunity"
