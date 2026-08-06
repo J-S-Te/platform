@@ -787,3 +787,36 @@ func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 		}
 	}
 }
+
+func TestGetSubsystemStatusRecoversStaleProvisioningStateForRetry(t *testing.T) {
+	t.Parallel()
+	startedAt := time.Now().UTC().Add(-subsystemDeploymentStaleAfter - time.Minute)
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
+		TenantID: "01K10A00000000000000000001", ApplicationCode: "customer_portal", Environment: "prod",
+		Status: application.SubsystemDeploymentStatusProvisioning, Operation: "ONBOARD", StartedAt: &startedAt,
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-status?application_code=customer_portal&environment=prod", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.GetSubsystemStatus(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"status":"PROVISION_FAILED"`) || !strings.Contains(response.Body.String(), `"last_error_code":"DEPLOYMENT_INTERRUPTED"`) {
+		t.Fatalf("response did not expose recoverable failure: %s", response.Body.String())
+	}
+	if len(stateStore.transitions) != 1 || stateStore.transitions[0].status != application.SubsystemDeploymentStatusFailed {
+		t.Fatalf("transitions = %#v", stateStore.transitions)
+	}
+}
