@@ -29,6 +29,12 @@ type subsystemProvisioningRequest struct {
 	Preflight   *application.SubsystemPreflightInput    `json:"preflight,omitempty"`
 	Input       *application.SubsystemProvisioningInput `json:"input,omitempty"`
 	Access      *subsystemAccessApplyPayload            `json:"access,omitempty"`
+	Discovery   *subsystemServiceDiscoveryRequest       `json:"discovery,omitempty"`
+}
+
+type subsystemServiceDiscoveryRequest struct {
+	ApplicationCode string `json:"application_code"`
+	Environment     string `json:"environment"`
 }
 
 // subsystemAccessApplyPayload carries the public-access configuration for the apply-access action.
@@ -41,8 +47,13 @@ type subsystemProvisioningReply struct {
 	Success bool `json:"success"`
 	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
 	// 单独放 Detail，避免被安全过滤整段吞掉。
-	Message string `json:"message,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	Message  string                                 `json:"message,omitempty"`
+	Detail   string                                 `json:"detail,omitempty"`
+	Services []application.SubsystemServiceInstance `json:"services,omitempty"`
+}
+
+type subsystemServiceDiscovery interface {
+	DiscoverSubsystemServices(context.Context, string, string) ([]application.SubsystemServiceInstance, error)
 }
 
 // UnixSocketSubsystemProvisioner is the unprivileged API-side client. It can request only the two
@@ -222,6 +233,20 @@ func (provisioner *UnixSocketSubsystemProvisioner) Teardown(ctx context.Context,
 	})
 }
 
+// Discover asks the isolated Agent for services declared by the current runtime.
+// The response contains routing metadata only; secrets and host paths never cross
+// the socket.
+func (provisioner *UnixSocketSubsystemProvisioner) Discover(ctx context.Context, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
+	if !provisioner.enabled {
+		return nil, provisioningError("automatic subsystem deployment is disabled")
+	}
+	services, err := provisioner.exchangeDiscovery(ctx, subsystemServiceDiscoveryRequest{ApplicationCode: strings.TrimSpace(applicationCode), Environment: strings.TrimSpace(environment)})
+	if err != nil {
+		return nil, err
+	}
+	return services, nil
+}
+
 func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context, request subsystemProvisioningRequest) error {
 	// API 容器不持有 Docker socket，只能通过受限 Unix 协议请求固定动作。超时同时作用于
 	// 连接、发送和响应，防止部署 Agent 卡住后耗尽 API 请求协程。
@@ -260,6 +285,35 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 		return provisioningError(message + ": " + detail)
 	}
 	return nil
+}
+
+func (provisioner *UnixSocketSubsystemProvisioner) exchangeDiscovery(ctx context.Context, discovery subsystemServiceDiscoveryRequest) ([]application.SubsystemServiceInstance, error) {
+	operationCtx, cancel := context.WithTimeout(ctx, provisioner.timeout)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(operationCtx, "unix", provisioner.socketPath)
+	if err != nil {
+		return nil, provisioningError("deployment helper is unavailable")
+	}
+	defer connection.Close()
+	if deadline, ok := operationCtx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	request := subsystemProvisioningRequest{Version: subsystemProvisioningProtocolVersion, Action: "discover", Discovery: &discovery}
+	if err := json.NewEncoder(connection).Encode(request); err != nil {
+		return nil, provisioningError("send discovery request")
+	}
+	var reply subsystemProvisioningReply
+	if err := json.NewDecoder(io.LimitReader(connection, 256*1024)).Decode(&reply); err != nil {
+		return nil, provisioningError("read discovery response")
+	}
+	if !reply.Success {
+		message := strings.TrimSpace(reply.Message)
+		if message == "" {
+			message = "deployment helper rejected the discovery request"
+		}
+		return nil, provisioningError(message)
+	}
+	return reply.Services, nil
 }
 
 // RunSubsystemProvisioningServer serves the narrow Unix-socket deployment protocol. The listener
@@ -360,6 +414,19 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			PublicOrigin:              request.Access.PublicOrigin,
 			AllowInsecureHTTPRedirect: request.Access.AllowInsecureHTTPRedirect,
 		})
+	case "discover":
+		discoverer, ok := executor.(subsystemServiceDiscovery)
+		if request.Discovery == nil || !ok {
+			err = application.ErrSubsystemProvisioningUnavailable
+			break
+		}
+		services, discoverErr := discoverer.DiscoverSubsystemServices(operationContext, request.Discovery.ApplicationCode, request.Discovery.Environment)
+		if discoverErr != nil {
+			err = discoverErr
+		} else {
+			_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, Services: services})
+			return
+		}
 	default:
 		err = application.ErrSubsystemProvisioningUnavailable
 	}

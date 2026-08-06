@@ -90,7 +90,10 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]any{
-		"sub":              info.Subject,
+		"sub": info.Subject,
+		// identity_id is the explicit platform alias for the canonical iam_user.id.
+		// Account IDs, person IDs and subsystem-local IDs remain business mappings.
+		"identity_id":      info.Subject,
 		"tenant_id":        authorization.TenantID,
 		"primary_org_id":   authorization.PrimaryOrgID,
 		"organization_ids": append([]string{}, authorization.OrganizationIDs...),

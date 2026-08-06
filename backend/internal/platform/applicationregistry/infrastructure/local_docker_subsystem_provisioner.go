@@ -190,6 +190,15 @@ func newLocalDockerSubsystemProvisioner(config LocalDockerSubsystemProvisionerCo
 	return &LocalDockerSubsystemProvisioner{config: config, runner: runner}, nil
 }
 
+// DiscoverSubsystemServices reports Compose containers through the existing Agent transport.
+// Discovery is read-only and does not rewrite .env, Compose, or gateway files.
+func (provisioner *LocalDockerSubsystemProvisioner) DiscoverSubsystemServices(ctx context.Context, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
+	if provisioner == nil || !provisioner.config.Enabled {
+		return nil, provisioningError("automatic subsystem deployment is disabled")
+	}
+	return discoverDockerLabelServices(ctx, provisioner.config.DockerBinary, applicationCode, environment)
+}
+
 // Preflight rejects missing or unsafe local project configuration before the database aggregate and
 // its one-time OAuth secret are created.
 func (provisioner *LocalDockerSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {

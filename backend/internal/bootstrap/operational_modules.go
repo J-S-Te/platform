@@ -49,6 +49,10 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	subsystemServiceRouteHandler, err := applicationregistryhttp.NewSubsystemServiceRouteHandler(subsystemRepository)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
 	subsystemService, err := applicationregistryapplication.NewSubsystemOnboardingService(
 		subsystemRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
 		applicationregistryapplication.RedirectURIValidationPolicy{
@@ -149,11 +153,12 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	}
 
 	return httptransport.OperationalModules{
-		LoginTargets:        loginTargetHandler,
-		SubsystemOnboarding: subsystemHandler,
-		Notifications:       notificationHandler,
-		FilesAndJobs:        fileTaskHandler,
-		AccessApplier:       subsystemProvisioner,
+		LoginTargets:           loginTargetHandler,
+		SubsystemOnboarding:    subsystemHandler,
+		SubsystemServiceRoutes: subsystemServiceRouteHandler,
+		Notifications:          notificationHandler,
+		FilesAndJobs:           fileTaskHandler,
+		AccessApplier:          subsystemProvisioner,
 	}, nil
 }
 

@@ -49,7 +49,7 @@ func TestDiscoveryAdvertisesActuallyIssuedAuthorizationClaims(t *testing.T) {
 		claims[claim] = true
 	}
 	for _, claim := range []string{
-		"sub", "name", "preferred_username", "email", "tenant_id", "person_id", "primary_org_id",
+		"sub", "identity_id", "name", "preferred_username", "email", "tenant_id", "person_id", "primary_org_id",
 		"organization_ids", "roles", "permissions", "role_config_hash", "authz_revision",
 	} {
 		if !claims[claim] {

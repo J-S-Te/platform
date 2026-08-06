@@ -67,19 +67,22 @@ type permissionResponse struct {
 }
 
 type roleResponse struct {
-	ID          string              `json:"role_id"`
-	Code        string              `json:"code"`
-	Name        string              `json:"name"`
-	Description *string             `json:"description,omitempty"`
-	Status      string              `json:"status"`
-	BuiltIn     bool                `json:"built_in"`
-	Permissions []referenceResponse `json:"permissions"`
-	Version     uint64              `json:"version"`
+	ID            string              `json:"role_id"`
+	ApplicationID string              `json:"application_id"`
+	Code          string              `json:"code"`
+	Name          string              `json:"name"`
+	RoleType      string              `json:"role_type"`
+	Description   *string             `json:"description,omitempty"`
+	Status        string              `json:"status"`
+	BuiltIn       bool                `json:"built_in"`
+	Permissions   []referenceResponse `json:"permissions"`
+	Version       uint64              `json:"version"`
 }
 
 type roleBindingResponse struct {
 	ID          string            `json:"binding_id"`
 	Role        referenceResponse `json:"role"`
+	GrantOrigin string            `json:"grant_origin"`
 	SubjectType string            `json:"subject_type"`
 	Subject     referenceResponse `json:"subject"`
 	ScopeType   string            `json:"scope_type"`
@@ -681,14 +684,16 @@ func roleToResponse(value domain.Role) roleResponse {
 	}
 
 	return roleResponse{
-		ID:          value.ID,
-		Code:        value.Code,
-		Name:        value.Name,
-		Description: value.Description,
-		Status:      value.Status,
-		BuiltIn:     value.BuiltIn,
-		Permissions: permissions,
-		Version:     value.Version,
+		ID:            value.ID,
+		ApplicationID: value.ApplicationID,
+		Code:          value.Code,
+		Name:          value.Name,
+		RoleType:      value.RoleType,
+		Description:   value.Description,
+		Status:        value.Status,
+		BuiltIn:       value.BuiltIn,
+		Permissions:   permissions,
+		Version:       value.Version,
 	}
 }
 
@@ -696,6 +701,7 @@ func roleBindingToResponse(value domain.RoleBinding) roleBindingResponse {
 	return roleBindingResponse{
 		ID:          value.ID,
 		Role:        referenceToResponse(value.Role),
+		GrantOrigin: value.GrantOrigin,
 		SubjectType: value.SubjectType,
 		Subject:     referenceToResponse(value.Subject),
 		ScopeType:   value.ScopeType,

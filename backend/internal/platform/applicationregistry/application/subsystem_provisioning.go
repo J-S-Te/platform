@@ -3,6 +3,8 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"time"
 )
 
@@ -18,7 +20,53 @@ const (
 	SubsystemDeploymentStatusFailed       = "PROVISION_FAILED"
 	SubsystemDeploymentStatusDraining     = "DRAINING"
 	SubsystemDeploymentStatusOffboarded   = "OFFBOARDED"
+	SubsystemServiceStatusDiscovered      = "DISCOVERED"
+	SubsystemServiceStatusHealthy         = "HEALTHY"
+	SubsystemServiceStatusUnavailable     = "UNAVAILABLE"
 )
+
+// SubsystemServiceInstance is the lightweight control-plane view of a discovered
+// service. It contains routing metadata only; credentials and host filesystem paths
+// are deliberately excluded.
+type SubsystemServiceInstance struct {
+	TenantID        string
+	ApplicationID   string
+	EnvironmentID   string
+	ApplicationCode string
+	Environment     string
+	ServiceName     string
+	ServiceRole     string
+	Protocol        string
+	InternalHost    string
+	InternalPort    uint
+	PathPrefix      string
+	HealthEndpoint  string
+	Version         string
+	Status          string
+	LastSeenAt      *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// UpstreamURL returns the service address that a gateway/proxy may use. It is derived from
+// discovery data at request time and is never persisted as a generated server configuration file.
+func (instance SubsystemServiceInstance) UpstreamURL() (string, error) {
+	if instance.Protocol != "http" && instance.Protocol != "https" && instance.Protocol != "tcp" {
+		return "", errors.New("unsupported service protocol")
+	}
+	if instance.InternalHost == "" || instance.InternalPort == 0 || instance.InternalPort > 65535 {
+		return "", errors.New("invalid service address")
+	}
+	return fmt.Sprintf("%s://%s", instance.Protocol, net.JoinHostPort(instance.InternalHost, fmt.Sprintf("%d", instance.InternalPort))), nil
+}
+
+// SubsystemServiceRegistry persists discovered service instances. The Agent will use
+// this contract through the existing local transport in the next migration step.
+type SubsystemServiceRegistry interface {
+	UpsertSubsystemServiceInstance(context.Context, SubsystemServiceInstance) error
+	ListSubsystemServiceInstances(context.Context, string, string, string) ([]SubsystemServiceInstance, error)
+	MarkUnavailableSubsystemServiceInstances(context.Context, time.Time, time.Time) error
+}
 
 // SubsystemDeploymentState 是最近一次部署尝试的持久控制面视图。Generation 区分重试轮次，
 // 状态中刻意不保存凭据和原始命令输出，避免轮询接口成为秘密或主机信息泄露面。

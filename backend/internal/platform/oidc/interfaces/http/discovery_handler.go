@@ -34,7 +34,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"code_challenge_methods_supported":            []string{"S256"},
 		"scopes_supported":                            []string{"openid", "profile", "email"},
 		"claims_supported": []string{
-			"sub", "name", "preferred_username", "email",
+			"sub", "identity_id", "name", "preferred_username", "email",
 			"tenant_id", "person_id", "primary_org_id", "organization_ids", "roles", "permissions",
 			"role_config_hash", "authz_revision",
 		},

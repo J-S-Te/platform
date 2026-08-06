@@ -85,6 +85,7 @@ type roleBindingModel struct {
 	SubjectID     string     `gorm:"column:subject_id"`
 	ScopeType     string     `gorm:"column:scope_type"`
 	ScopeID       string     `gorm:"column:scope_id"`
+	GrantOrigin   string     `gorm:"column:grant_origin"`
 	ValidUntil    *time.Time `gorm:"column:valid_until"`
 	Status        string     `gorm:"column:status"`
 	Version       uint64     `gorm:"column:version"`

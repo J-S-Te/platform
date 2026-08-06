@@ -121,7 +121,9 @@ func (r *GORMRepository) CreatePermission(ctx context.Context, tenantID, operato
 }
 
 func (r *GORMRepository) ListRoles(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.Role], error) {
-	query := r.database.WithContext(ctx).Model(&roleModel{}).Where("tenant_id = ?", tenantID)
+	query := r.database.WithContext(ctx).Model(&roleModel{}).
+		Joins("JOIN platform_application AS application ON application.id = authz_role.application_id AND application.tenant_id = authz_role.tenant_id").
+		Where("authz_role.tenant_id = ? AND application.code = ?", tenantID, platformApplicationCode)
 	if page.Keyword != "" {
 		query = query.Where("code LIKE ? OR name LIKE ?", like(page.Keyword), like(page.Keyword))
 	}
@@ -291,7 +293,10 @@ func (r *GORMRepository) ensureApplicationCatalogWritable(ctx context.Context, t
 }
 
 func (r *GORMRepository) ListRoleBindings(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.RoleBinding], error) {
-	query := r.database.WithContext(ctx).Table("authz_role_binding AS binding").Joins("JOIN authz_role AS role ON role.id = binding.role_id").Where("binding.tenant_id = ?", tenantID)
+	query := r.database.WithContext(ctx).Table("authz_role_binding AS binding").
+		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id").
+		Joins("JOIN platform_application AS application ON application.id = role.application_id AND application.tenant_id = role.tenant_id").
+		Where("binding.tenant_id = ? AND application.code = ?", tenantID, platformApplicationCode)
 	if page.Keyword != "" {
 		query = query.Where("binding.subject_id LIKE ? OR role.name LIKE ?", like(page.Keyword), like(page.Keyword))
 	}
@@ -303,7 +308,7 @@ func (r *GORMRepository) ListRoleBindings(ctx context.Context, tenantID string, 
 		return application.PageResult[domain.RoleBinding]{}, fmt.Errorf("count role bindings: %w", err)
 	}
 	var rows []bindingProjection
-	result := query.Select("binding.id, binding.role_id, role.code AS role_code, role.name AS role_name, binding.subject_type, binding.subject_id, binding.scope_type, binding.scope_id, binding.valid_until, binding.status, binding.version").Order("binding.created_at DESC").Offset((page.Page - 1) * page.PageSize).Limit(page.PageSize).Scan(&rows)
+	result := query.Select("binding.id, binding.role_id, role.code AS role_code, role.name AS role_name, binding.grant_origin, binding.subject_type, binding.subject_id, binding.scope_type, binding.scope_id, binding.valid_until, binding.status, binding.version").Order("binding.created_at DESC").Offset((page.Page - 1) * page.PageSize).Limit(page.PageSize).Scan(&rows)
 	if result.Error != nil {
 		return application.PageResult[domain.RoleBinding]{}, fmt.Errorf("list role bindings: %w", result.Error)
 	}
@@ -341,14 +346,14 @@ func (r *GORMRepository) CreateRoleBinding(ctx context.Context, tenantID, operat
 		if binding.ScopeID != nil {
 			scopeID = *binding.ScopeID
 		}
-		model := roleBindingModel{ID: binding.ID, TenantID: tenantID, ApplicationID: role.ApplicationID, RoleID: role.ID, SubjectType: binding.SubjectType, SubjectID: binding.Subject.ID, ScopeType: binding.ScopeType, ScopeID: scopeID, ValidUntil: binding.ExpiresAt, Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: &operator, UpdatedAt: now, UpdatedBy: &operator}
+		model := roleBindingModel{ID: binding.ID, TenantID: tenantID, ApplicationID: role.ApplicationID, RoleID: role.ID, SubjectType: binding.SubjectType, SubjectID: binding.Subject.ID, ScopeType: binding.ScopeType, ScopeID: scopeID, GrantOrigin: "MANUAL", ValidUntil: binding.ExpiresAt, Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: &operator, UpdatedAt: now, UpdatedBy: &operator}
 		if err := tx.Create(&model).Error; err != nil {
 			return translateError(err, "create role binding")
 		}
 		if err := r.bumpRevision(tx, tenantID, role.ApplicationID, now, "role binding created"); err != nil {
 			return err
 		}
-		output = bindingProjectionToDomain(bindingProjection{ID: model.ID, RoleID: role.ID, RoleCode: role.Code, RoleName: role.Name, SubjectType: model.SubjectType, SubjectID: model.SubjectID, ScopeType: model.ScopeType, ScopeID: model.ScopeID, ValidUntil: model.ValidUntil, Status: model.Status, Version: model.Version})
+		output = bindingProjectionToDomain(bindingProjection{ID: model.ID, RoleID: role.ID, RoleCode: role.Code, RoleName: role.Name, GrantOrigin: model.GrantOrigin, SubjectType: model.SubjectType, SubjectID: model.SubjectID, ScopeType: model.ScopeType, ScopeID: model.ScopeID, ValidUntil: model.ValidUntil, Status: model.Status, Version: model.Version})
 		return nil
 	})
 	return output, err
@@ -413,7 +418,7 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 		if err := r.bumpRevision(tx, tenantID, existing.ApplicationID, now, "role binding updated"); err != nil {
 			return err
 		}
-		output = bindingProjectionToDomain(bindingProjection{ID: binding.ID, RoleID: role.ID, RoleCode: role.Code, RoleName: role.Name, SubjectType: binding.SubjectType, SubjectID: binding.Subject.ID, ScopeType: binding.ScopeType, ScopeID: scopeID, ValidUntil: binding.ExpiresAt, Status: binding.Status, Version: binding.Version + 1})
+		output = bindingProjectionToDomain(bindingProjection{ID: binding.ID, RoleID: role.ID, RoleCode: role.Code, RoleName: role.Name, GrantOrigin: existing.GrantOrigin, SubjectType: binding.SubjectType, SubjectID: binding.Subject.ID, ScopeType: binding.ScopeType, ScopeID: scopeID, ValidUntil: binding.ExpiresAt, Status: binding.Status, Version: binding.Version + 1})
 		return nil
 	})
 	return output, err
@@ -664,7 +669,7 @@ func (r *GORMRepository) roleWithPermissionsTx(tx *gorm.DB, role roleModel) (dom
 	if err != nil {
 		return domain.Role{}, err
 	}
-	return domain.Role{ID: role.ID, Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, Permissions: permissions, Version: role.Version}, nil
+	return domain.Role{ID: role.ID, ApplicationID: role.ApplicationID, Code: role.Code, Name: role.Name, RoleType: role.RoleType, Description: role.Description, Status: role.Status, BuiltIn: role.BuiltIn, Permissions: permissions, Version: role.Version}, nil
 }
 
 // activeRolePermissionReferences mirrors the permission-status requirement in authorization
@@ -800,9 +805,9 @@ type permissionProjection struct {
 }
 type permissionReferenceProjection struct{ ID, Code, Name string }
 type bindingProjection struct {
-	ID, RoleID, RoleCode, RoleName, SubjectType, SubjectID, ScopeType, ScopeID, Status string
-	ValidUntil                                                                         *time.Time
-	Version                                                                            uint64
+	ID, RoleID, RoleCode, RoleName, GrantOrigin, SubjectType, SubjectID, ScopeType, ScopeID, Status string
+	ValidUntil                                                                                      *time.Time
+	Version                                                                                         uint64
 }
 
 func bindingProjectionToDomain(row bindingProjection) domain.RoleBinding {
@@ -811,7 +816,7 @@ func bindingProjectionToDomain(row bindingProjection) domain.RoleBinding {
 		copy := row.ScopeID
 		scopeID = &copy
 	}
-	return domain.RoleBinding{ID: row.ID, Role: domain.Reference{ID: row.RoleID, Code: row.RoleCode, Name: row.RoleName}, SubjectType: row.SubjectType, Subject: domain.Reference{ID: row.SubjectID, Name: row.SubjectID}, ScopeType: row.ScopeType, ScopeID: scopeID, Status: row.Status, ExpiresAt: row.ValidUntil, Version: row.Version}
+	return domain.RoleBinding{ID: row.ID, Role: domain.Reference{ID: row.RoleID, Code: row.RoleCode, Name: row.RoleName}, GrantOrigin: row.GrantOrigin, SubjectType: row.SubjectType, Subject: domain.Reference{ID: row.SubjectID, Name: row.SubjectID}, ScopeType: row.ScopeType, ScopeID: scopeID, Status: row.Status, ExpiresAt: row.ValidUntil, Version: row.Version}
 }
 
 // previewAccountProjection is intentionally local to authorization because it only supports the
