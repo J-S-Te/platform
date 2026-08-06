@@ -331,7 +331,7 @@ func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, req
 			handler.validation(writer, request)
 			return
 		}
-		to, err := parseDate(payload.Membership.EffectiveTo)
+		to, err := parseDateEnd(payload.Membership.EffectiveTo)
 		if err != nil {
 			handler.validation(writer, request)
 			return
@@ -784,7 +784,7 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 		handler.validation(writer, request)
 		return
 	}
-	to, err := parseDate(payload.EffectiveTo)
+	to, err := parseDateEnd(payload.EffectiveTo)
 	if err != nil {
 		handler.validation(writer, request)
 		return
@@ -933,6 +933,17 @@ func parseDate(value *string) (*time.Time, error) {
 	}
 	parsed = parsed.UTC()
 	return &parsed, nil
+}
+
+// parseDateEnd treats a date-only expiration as inclusive through the end of that
+// calendar day. Authorization queries compare valid_until with the current instant.
+func parseDateEnd(value *string) (*time.Time, error) {
+	parsed, err := parseDate(value)
+	if err != nil || parsed == nil {
+		return parsed, err
+	}
+	end := parsed.Add(24*time.Hour - time.Nanosecond)
+	return &end, nil
 }
 func dateString(value *time.Time) *string {
 	if value == nil {

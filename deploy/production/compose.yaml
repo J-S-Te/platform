@@ -356,6 +356,46 @@ services:
       start_period: 10s
     profiles: ["customer"]
 
+  customer-opportunity-alert-worker:
+    <<: *customer-service
+    command: ["./opportunity-alert-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    profiles: ["customer"]
+
+  customer-owner-notification-worker:
+    <<: *customer-service
+    command: ["./opportunity-owner-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    profiles: ["customer"]
+
+  customer-presale-alert-worker:
+    <<: *customer-service
+    command: ["./presale-alert-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    profiles: ["customer"]
+
+  customer-presale-assignment-notification-worker:
+    <<: *customer-service
+    command: ["./presale-assignment-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    profiles: ["customer"]
+
+  customer-presale-progress-notification-worker:
+    <<: *customer-service
+    command: ["./presale-progress-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    profiles: ["customer"]
+
   portal-mysql:
     image: mysql:8.4
     environment:

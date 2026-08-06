@@ -453,8 +453,9 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 	return append(prefix, arguments...), runnerEnvironment
 }
 
-// writeRuntimeFixedValues 只写入清单固定值与首次缺失的生成密钥，不写任何绑定项。
-// 供 Update/Retry 使用：绑定项需要一次性 OAuth 明文，Update 入参不携带这些凭据。
+// writeRuntimeFixedValues writes manifest constants, generated keys and the non-secret public
+// runtime bindings when the management page supplied a changed gateway address. Secret bindings
+// remain untouched because Update/Retry never receives or rotates one-time OAuth credentials.
 func (target *productionComposeTarget) writeRuntimeFixedValues(input application.SubsystemProvisioningInput) error {
 	type runtimeEnvironmentUpdate struct {
 		path   string
@@ -474,6 +475,18 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		for key, value := range generatedValues {
 			values[key] = value
 		}
+		if strings.TrimSpace(input.PublicURL) != "" {
+			for key, source := range runtimeFile.Bindings {
+				if !isPublicRuntimeBinding(source) {
+					continue
+				}
+				value, resolveErr := resolveProductionBinding(input, source)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				values[key] = value
+			}
+		}
 		updates = append(updates, runtimeEnvironmentUpdate{path: path, values: values})
 	}
 	for _, update := range updates {
@@ -482,6 +495,16 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		}
 	}
 	return nil
+}
+
+func isPublicRuntimeBinding(source string) bool {
+	switch source {
+	case "public_origin", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash",
+		"path_prefix", "upstream_url", "cookie_secure", "issuer_security_center_url":
+		return true
+	default:
+		return false
+	}
 }
 
 func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
@@ -523,8 +546,14 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
 	switch source {
-	case "issuer", "public_origin":
+	case "issuer":
 		return issuer, nil
+	case "public_origin":
+		publicOrigin, publicOriginErr := publicOriginFromURL(input.PublicURL)
+		if publicOriginErr != nil {
+			return "", provisioningError("production subsystem public URL is invalid")
+		}
+		return publicOrigin, nil
 	case "client_id":
 		return input.ClientID, nil
 	case "client_secret":
@@ -550,7 +579,11 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 	case "upstream_url":
 		return input.UpstreamURL, nil
 	case "cookie_secure":
-		parsed := mustParseURL(issuer)
+		publicOrigin, publicOriginErr := publicOriginFromURL(input.PublicURL)
+		if publicOriginErr != nil {
+			return "", provisioningError("production subsystem public URL is invalid")
+		}
+		parsed := mustParseURL(publicOrigin)
 		return booleanEnvironmentValue(parsed != nil && strings.EqualFold(parsed.Scheme, "https")), nil
 	case "catalog_publisher_client_id":
 		return input.CatalogPublisherClientID, nil
@@ -907,12 +940,13 @@ func (target *productionComposeTarget) validateProvisioningInput(input applicati
 	}
 	app := target.config.Profile.Manifest.Application
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
-	expectedPublicURL := issuer + app.PathPrefix + "/"
-	expectedRedirectURI := issuer + app.PathPrefix + "/auth/callback"
+	publicOrigin, publicURLValid := publicURLOrigin(input.PublicURL, app.PathPrefix)
+	expectedPublicURL := publicOrigin + app.PathPrefix + "/"
+	expectedRedirectURI := publicOrigin + app.PathPrefix + "/auth/callback"
 	if mustParseURL(issuer) == nil || strings.TrimSpace(input.ApplicationID) == "" || strings.TrimSpace(input.ClientID) == "" ||
 		strings.TrimSpace(input.ClientSecret) == "" || strings.TrimSpace(input.CatalogPublisherClientID) == "" ||
 		strings.TrimSpace(input.CatalogPublisherClientSecret) == "" || input.PathPrefix != app.PathPrefix ||
-		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL || input.PublicURL != expectedPublicURL || input.RedirectURI != expectedRedirectURI {
+		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL || !publicURLValid || input.PublicURL != expectedPublicURL || input.RedirectURI != expectedRedirectURI {
 		return provisioningError("production subsystem integration values are inconsistent")
 	}
 	// 先解析所有映射，确保缺少任一用途凭据时不会先写入部分运行时文件。
@@ -938,9 +972,10 @@ func (target *productionComposeTarget) validateTenant(tenantID string) error {
 func (target *productionComposeTarget) validatePreflightInput(input application.SubsystemPreflightInput) error {
 	app := target.config.Profile.Manifest.Application
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
+	_, publicBaseValid := publicBaseOrigin(input.PublicBaseURL)
 	if mustParseURL(issuer) == nil || !target.matches(input.ApplicationCode, input.Environment) ||
 		strings.ToLower(strings.TrimSpace(input.ClientType)) != app.ClientType ||
-		strings.TrimRight(strings.TrimSpace(input.PublicBaseURL), "/") != issuer ||
+		!publicBaseValid ||
 		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL ||
 		strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/") != app.PathPrefix {
 		return provisioningError("production subsystem preflight values are inconsistent")

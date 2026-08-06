@@ -16,6 +16,9 @@ customer_template_file="${project_root}/docker/.env.customer.local.example"
 customer_env_file="${project_root}/docker/.env.customer.local"
 portal_template_file="${project_root}/docker/.env.portal.local.example"
 portal_env_file="${project_root}/docker/.env.portal.local"
+project_management_root="${workspace_root}/project_management"
+project_template_file="${project_management_root}/.env.example"
+project_env_file="${project_management_root}/.env.local"
 presale_worker_env_file="${customer_root}/.env.presale-worker"
 lan_override_file="${project_root}/docker/.env.lan"
 customer_lan_override_file="${project_root}/docker/.env.customer.lan"
@@ -48,6 +51,7 @@ usage() {
   bash scripts/docker-local.sh refresh-contract-api
   bash scripts/docker-local.sh refresh-customer-api
   bash scripts/docker-local.sh refresh-portal-api
+  bash scripts/docker-local.sh refresh-project-api
   bash scripts/docker-local.sh start-presale-worker [--presale-worker-env-file PATH]
 
 up/restart 选项：
@@ -61,6 +65,7 @@ up/restart 选项：
   --contract-env-file PATH        合同后端环境文件（默认 contract_management/.env.local）
   --customer-env-file PATH        客户与商机后端环境文件（默认 platform/docker/.env.customer.local）
   --portal-env-file PATH          客户自助门户环境文件（默认 platform/docker/.env.portal.local）
+  --project-env-file PATH         项目管理系统环境文件（默认 project_management/.env.local）
   --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
 
@@ -70,9 +75,10 @@ up/restart 选项：
   refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
   refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
   refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
+  refresh-project-api   重建项目管理系统后端、执行项目迁移；仅在已完成应用接入后启动
   start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳
 
-  四种定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
+  各定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
   因此不会影响已经完成的子系统统一登录接入。
 
 应用容器：
@@ -81,6 +87,7 @@ up/restart 选项：
   contract-api  合同管理 API + Temporal Worker
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
+  project-api   项目管理系统 API + Temporal Worker（完成 project_management/dev 接入后启用）
 
 首次启动若数据库中尚未存在超级管理员，必须提供三个管理员参数，或设置：
   BASIC_PLATFORM_ADMIN_DISPLAY_NAME
@@ -92,7 +99,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|start-presale-worker)
+		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|start-presale-worker)
             command_name="$1"
             shift
             ;;
@@ -148,6 +155,11 @@ while (($# > 0)); do
 			portal_env_file="$2"
 			shift 2
 			;;
+		--project-env-file)
+			(($# >= 2)) || fail "$1 缺少参数"
+			project_env_file="$2"
+			shift 2
+			;;
 		--presale-worker-env-file)
 			(($# >= 2)) || fail "$1 缺少参数"
 			presale_worker_env_file="$2"
@@ -174,11 +186,13 @@ docker compose version >/dev/null 2>&1 || fail "当前 Docker 不支持 docker c
 [[ -f "$compose_file" ]] || fail "Compose 文件不存在：$compose_file"
 [[ -d "$contract_root" ]] || fail "合同管理后端目录不存在：$contract_root"
 [[ -d "$customer_root" ]] || fail "客户与商机管理后端目录不存在：$customer_root"
+[[ -d "$project_management_root" ]] || fail "项目管理系统后端目录不存在：$project_management_root"
 
 export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
+export PROJECT_RUNTIME_ENV_FILE="$project_env_file"
 export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
@@ -261,6 +275,7 @@ configure_access_mode() {
         export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
 		export CUSTOMER_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
 		export PORTAL_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
+		export PROJECT_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
         export FRONTEND_BIND_ADDRESS="${FRONTEND_BIND_ADDRESS:-127.0.0.1}"
         frontend_public_origin="http://localhost:${FRONTEND_HTTP_PORT:-8081}"
         return 0
@@ -285,9 +300,10 @@ configure_access_mode() {
 
     write_customer_lan_override "$public_origin"
     export BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
-    export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
+	export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
 	export CUSTOMER_LAN_OVERRIDE_ENV_FILE="$customer_lan_override_file"
 	export PORTAL_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
+	export PROJECT_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
     export FRONTEND_BIND_ADDRESS="0.0.0.0"
     export FRONTEND_HTTP_PORT="$lan_port"
     frontend_public_origin="$public_origin"
@@ -302,6 +318,20 @@ compose() {
     # customer_portal/dev 接入成功后，普通 up/down/stop/ps/logs/config 自动纳入
     # portal-api。首次接入前不能强行启动，因为此时浏览器 OIDC Client、租户、
     # 角色目录和六组机器凭据尚不存在；平台与 CRM 需先运行以完成受控接入。
+    if portal_configured && project_configured; then
+        docker compose \
+            --project-name "$compose_project" \
+            --file "$compose_file" \
+            --env-file "$env_file" \
+            --env-file "$contract_env_file" \
+            --env-file "$customer_env_file" \
+            --env-file "$portal_env_file" \
+            --env-file "$project_env_file" \
+            --profile portal \
+            --profile project \
+            "$@"
+        return
+    fi
     if portal_configured; then
         docker compose \
             --project-name "$compose_project" \
@@ -310,7 +340,21 @@ compose() {
             --env-file "$contract_env_file" \
             --env-file "$customer_env_file" \
             --env-file "$portal_env_file" \
+            --env-file "$project_env_file" \
             --profile portal \
+            "$@"
+        return
+    fi
+    if project_configured; then
+        docker compose \
+            --project-name "$compose_project" \
+            --file "$compose_file" \
+            --env-file "$env_file" \
+            --env-file "$contract_env_file" \
+            --env-file "$customer_env_file" \
+            --env-file "$portal_env_file" \
+            --env-file "$project_env_file" \
+            --profile project \
             "$@"
         return
     fi
@@ -321,6 +365,7 @@ compose() {
         --env-file "$contract_env_file" \
         --env-file "$customer_env_file" \
         --env-file "$portal_env_file" \
+        --env-file "$project_env_file" \
         "$@"
 }
 
@@ -490,6 +535,40 @@ ensure_portal_env_file() {
 	[[ -z "$unresolved" ]] || fail "客户自助门户环境文件仍包含未填写占位符：$portal_env_file"
 }
 
+ensure_project_env_file() {
+	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成项目管理系统数据库密码"
+	if [[ ! -f "$project_env_file" ]]; then
+		[[ -f "$project_template_file" ]] || fail "项目管理系统环境模板不存在：$project_template_file"
+		cp "$project_template_file" "$project_env_file"
+		chmod 600 "$project_env_file"
+
+		local password root_password
+		password="$(random_hex 24)"
+		root_password="$(random_hex 32)"
+		replace_line_in_file "$project_env_file" PROJECT_MYSQL_PASSWORD "$password"
+		replace_line_in_file "$project_env_file" PROJECT_MYSQL_ROOT_PASSWORD "$root_password"
+		replace_line_in_file "$project_env_file" MYSQL_DSN "project:${password}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+		replace_line_in_file "$project_env_file" PLATFORM_BASE_URL "http://localhost:8081"
+		replace_line_in_file "$project_env_file" PROJECT_PLATFORM_BACKCHANNEL_BASE_URL "http://platform-api:8080"
+		replace_line_in_file "$project_env_file" OIDC_ISSUER "http://localhost:8081"
+		replace_line_in_file "$project_env_file" OIDC_REDIRECT_URI "http://localhost:8081/project_management/auth/callback"
+		replace_line_in_file "$project_env_file" OIDC_POST_LOGOUT_REDIRECT_URI "http://localhost:8081/project_management/logged-out"
+		replace_line_in_file "$project_env_file" APP_PATH_PREFIX "/project_management"
+		replace_line_in_file "$project_env_file" OIDC_SESSION_COOKIE_SECURE "false"
+		replace_line_in_file "$project_env_file" PLATFORM_ENVIRONMENT_CODE "dev"
+		log "已生成项目管理系统环境文件：$project_env_file"
+		log "请先在基础平台完成项目管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
+	fi
+}
+
+project_configured() {
+	# 项目后端启动强校验 OIDC 四项接入值；缺少任何一项都视为尚未完成 project_management/dev 接入。
+	[[ -n "$(env_value "$project_env_file" OIDC_CLIENT_ID)" ]] &&
+		[[ -n "$(env_value "$project_env_file" OIDC_CLIENT_SECRET)" ]] &&
+		[[ -n "$(env_value "$project_env_file" OIDC_REDIRECT_URI)" ]] &&
+		[[ -n "$(env_value "$project_env_file" OIDC_TENANT_ID)" ]]
+}
+
 portal_configured() {
 	# 不能只看镜像或数据库是否存在；四项接入产物齐全才允许把 Portal 纳入默认 profile 启动。
 	[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_ID)" ]] &&
@@ -640,9 +719,9 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定为四个独立后端。
-    local build_services=(api contract-api customer-api portal-api frontend)
+    local build_services=(api contract-api customer-api portal-api project-api frontend)
     if [[ "$force_build" == true ]]; then
-        log "重新构建一个统一前端及平台、合同、CRM、客户门户四个独立后端镜像"
+        log "重新构建一个统一前端及平台、合同、CRM、客户门户、项目管理系统五个独立后端镜像"
     else
         log "构建缺失或有变更的统一前端及独立后端镜像"
     fi
@@ -650,7 +729,7 @@ build_images() {
     # basic-platform/backend:local；CRM 与 Portal 使用不同 target/镜像，不会
     # 把 crm-server 和 portal-server 运行在同一个业务容器中。
     # 限制并发既降低匿名镜像令牌抖动，也避免本地机器同时编译四个后端造成资源争抢。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --ansi never build "${build_services[@]}"
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --profile project --ansi never build "${build_services[@]}"
 }
 
 prepare_gateway_config() {
@@ -664,13 +743,15 @@ prepare_gateway_config() {
 		"$gateway_script" remove customer-opportunity >/dev/null
 	PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
 		"$gateway_script" remove customer_portal >/dev/null
-	log "已清理内置业务模块的旧式整站反向代理；四个前端均由统一 frontend 容器直接承载"
+	PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
+		"$gateway_script" remove project_management >/dev/null
+	log "已清理内置业务模块的旧式整站反向代理；五个前端均由统一 frontend 容器直接承载"
 }
 
 run_migrations() {
 	# 数据库先就绪、迁移再串行执行，业务 API 只能在全部 schema 成功后启动；禁止由 API 自动建表。
 	# 各数据库互相独立，不存在跨库事务；某个后续迁移失败时，已成功数据库按自身幂等迁移规则重试。
-	log "启动基础平台、合同、CRM 三个常驻 MySQL 与 Temporal，并等待健康检查"
+	log "启动基础平台、合同、CRM 常驻 MySQL 与 Temporal，并等待健康检查"
 	compose_run up -d --wait mysql contract-mysql customer-mysql temporal
     log "执行基础平台数据库迁移"
     compose_run run --rm --no-deps migrate ./migrate
@@ -682,6 +763,11 @@ run_migrations() {
 		log "启动客户自助门户 MySQL 并执行 Portal 清单迁移"
 		compose_run up -d --wait portal-mysql
 		compose_run run --rm --no-deps portal-migrate
+	fi
+	if project_configured; then
+		log "启动项目管理系统 MySQL 并执行项目清单迁移"
+		compose_run up -d --wait project-mysql
+		compose_run run --rm --no-deps project-migrate
 	fi
 }
 
@@ -776,6 +862,7 @@ public_url_to_route() {
 verify_gateway_routes() {
     local platform_membership_status contract_health_status contract_session_status contract_login_status
 	local customer_health_status customer_session_status portal_health_status portal_session_status
+	local project_health_status project_session_status
     local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url
 
     log "校验统一前端 Nginx 配置"
@@ -849,6 +936,17 @@ verify_gateway_routes() {
 			fail "客户自助门户登录状态接口返回 ${portal_session_status}，预期未登录状态为 401"
 	fi
 
+	if project_configured; then
+		project_health_status="$(frontend_http_status /project_management/healthz)" || \
+			fail "无法访问项目管理系统健康检查路径"
+		[[ "$project_health_status" == "200" ]] || \
+			fail "项目管理系统健康检查路径返回 ${project_health_status}，预期为 200"
+		project_session_status="$(frontend_http_status /project_management/api/v1/auth/me)" || \
+			fail "无法访问项目管理系统登录状态接口"
+		[[ "$project_session_status" == "401" ]] || \
+			fail "项目管理系统登录状态接口返回 ${project_session_status}，预期未登录状态为 401"
+	fi
+
     log "统一网关校验通过：platform API=401，contract healthz=200，customer healthz=200"
 }
 
@@ -857,6 +955,7 @@ start_stack() {
     ensure_contract_env_file true
 	ensure_customer_env_file
 	ensure_portal_env_file
+	ensure_project_env_file
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
     prepare_gateway_config
@@ -877,6 +976,12 @@ start_stack() {
 	else
 		log "客户自助门户尚未接入，跳过 portal-api；可在应用接入中创建 customer_portal/dev"
 	fi
+	if project_configured; then
+		log "启动已接入的项目管理系统后端"
+		compose_up_wait "项目管理系统后端" project-api
+	else
+		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
+	fi
     log "启动统一前端"
     compose_up_wait "统一前端" frontend
     verify_gateway_routes
@@ -885,6 +990,7 @@ start_stack() {
     log "合同管理前端：${frontend_public_origin}/contract_management/"
 	log "客户与商机管理前端：${frontend_public_origin}/customer-opportunity/"
 	if portal_configured; then log "客户自助门户：${frontend_public_origin}/customer-portal/"; fi
+	if project_configured; then log "项目管理系统：${frontend_public_origin}/project_management/"; fi
 }
 
 refresh_platform_api() {
@@ -916,9 +1022,9 @@ refresh_unified_frontend() {
     prepare_frontend_base_images
     prepare_gateway_config
 
-    log "重新构建统一前端镜像（基础平台 + 合同管理 + 客户与商机管理前端）"
+    log "重新构建统一前端镜像（基础平台 + 合同管理 + 客户与商机管理 + 客户自助门户 + 项目管理系统前端）"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
-    log "重建统一 frontend 容器；平台/合同/CRM 后端、可选门户后端和统一登录接入配置保持不变"
+    log "重建统一 frontend 容器；平台/合同/CRM 后端、可选门户/项目后端和统一登录接入配置保持不变"
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
     compose_run ps frontend
@@ -928,6 +1034,7 @@ refresh_contract_backend() {
     ensure_platform_env_file
     ensure_contract_env_file true
     ensure_customer_env_file
+	ensure_project_env_file
 	ensure_portal_env_file
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
@@ -976,6 +1083,7 @@ refresh_portal_backend() {
 	ensure_contract_env_file false
 	ensure_customer_env_file
 	ensure_portal_env_file
+	ensure_project_env_file
 	portal_configured || fail "客户自助门户尚未完成 customer_portal/dev 应用接入，不能启动 portal-api"
 	prepare_go_backend_base_images "客户自助门户后端"
 
@@ -994,11 +1102,32 @@ refresh_portal_backend() {
 	compose_run ps portal-api portal-mysql frontend
 }
 
+refresh_project_backend() {
+	ensure_platform_env_file
+	ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
+	ensure_project_env_file
+	project_configured || fail "项目管理系统尚未完成 project_management/dev 应用接入，不能启动 project-api"
+	prepare_go_backend_base_images "项目管理系统后端"
+
+	log "重新构建项目管理系统独立后端镜像"
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile project --ansi never build project-api
+	log "启动项目管理系统 MySQL 并执行项目清单迁移"
+	compose_run up -d --wait project-mysql
+	compose_run run --rm --no-deps project-migrate
+	log "重建 project-api 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
+	compose_run up -d --wait --no-deps project-api
+	verify_gateway_routes
+	compose_run ps project-api project-mysql
+}
+
 start_presale_worker() {
 	ensure_platform_env_file
 	ensure_contract_env_file false
 	ensure_customer_env_file
 	ensure_portal_env_file
+	ensure_project_env_file
 	[[ -f "$presale_worker_env_file" ]] || \
 		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
 	[[ -s "$presale_worker_env_file" ]] || \
@@ -1006,10 +1135,12 @@ start_presale_worker() {
 	prepare_go_backend_base_images "售前投递 Worker"
 
 	log "构建 CRM 迁移镜像和售前投递 Worker；统一认证、审批和 PMS 地址仅从指定环境文件注入"
-	COMPOSE_PARALLEL_LIMIT=1 compose --profile presale-worker --ansi never build customer-api presale-worker
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile presale-worker --ansi never build customer-api presale-worker presale-integration-mock
 	log "启动客户与商机数据库并执行 CRM 清单迁移"
 	compose_run --profile presale-worker up -d --wait customer-mysql
 	compose_run --profile presale-worker run --rm --no-deps customer-migrate
+	log "启动本地售前集成 Mock（仅开发联调使用）"
+	compose_run --profile presale-worker up -d --wait presale-integration-mock
 	log "启动售前投递 Worker"
 	compose_run --profile presale-worker up -d --no-deps presale-worker
 
@@ -1038,6 +1169,7 @@ prepare_operational_env() {
     ensure_contract_env_file false
 	ensure_customer_env_file
 	ensure_portal_env_file
+	ensure_project_env_file
 }
 
 case "$command_name" in
@@ -1065,6 +1197,7 @@ case "$command_name" in
         ensure_contract_env_file true
 		ensure_customer_env_file
 		ensure_portal_env_file
+		ensure_project_env_file
         ensure_catalog_publisher_credentials_consistent
         disable_contract_startup_catalog_sync
         compose_run config --quiet
@@ -1088,6 +1221,9 @@ case "$command_name" in
 		;;
 	refresh-portal-api)
 		refresh_portal_backend
+		;;
+	refresh-project-api)
+		refresh_project_backend
 		;;
 	start-presale-worker)
 		start_presale_worker

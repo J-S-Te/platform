@@ -2,6 +2,8 @@ version: 1
 default: false
 application:
   code: project_management
+  initial_admin_roles: [admin]
+  allowed_service_bindings: []
   name: 项目服务内容管理系统
   description: 项目、服务项拆解与配置规则管理系统
   environment: prod

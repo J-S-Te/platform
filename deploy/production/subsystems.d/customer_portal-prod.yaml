@@ -2,6 +2,8 @@ version: 1
 default: false
 application:
   code: customer_portal
+  initial_admin_roles: []
+  allowed_service_bindings: [external_user_provision, application_role_assign, application_role_revoke, portal_mapping_provision, portal_mapping_disable, portal_invite_verify]
   name: 客户自助门户
   description: 面向外部客户的自助服务门户
   environment: prod
@@ -25,10 +27,12 @@ runtime:
         - PORTAL_HMAC_KEY_BASE64
       values:
         PORTAL_OIDC_SCOPES: openid profile
-        PORTAL_ROLE_CONFIG_HASH: sha256:ef9f349797479d02c43191000adc8eefa596fe20558381313c40a3e30ed4d446
+        PORTAL_ROLE_CONFIG_HASH: sha256:f67121b52d6d850e99d1c4520d661fb85e26512c7ee50cd83182a8dc39b368d4
         PORTAL_SESSION_COOKIE_NAME: customer_portal_session
         PORTAL_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+        PLATFORM_APPLICATION_CODE: customer_portal
+        PLATFORM_ENVIRONMENT_CODE: prod
         # 测试服务器使用非回环 HTTP，未配置 HTTPS：显式允许非 Secure Cookie 和非 HTTPS
         # 安全中心链接。生产部署必须使用 HTTPS 并移除/保持 false。
         PORTAL_ALLOW_INSECURE_HTTP_SESSION: "true"
@@ -49,6 +53,8 @@ runtime:
         PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
+        PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
     - path: runtime/customer.env
       template_path: subsystem-templates/customer.env.example
       compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
@@ -59,6 +65,10 @@ runtime:
         - PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID
         - PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID
         - PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET
+        - PLATFORM_APPLICATION_CODE
+        - PLATFORM_ENVIRONMENT_CODE
+        - PLATFORM_AUDIT_CLIENT_ID
+        - PLATFORM_AUDIT_CLIENT_SECRET
         - PLATFORM_OWNER_DIRECTORY_CLIENT_ID
         - PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET
       generated_keys:

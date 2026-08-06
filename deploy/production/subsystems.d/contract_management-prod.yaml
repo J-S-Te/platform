@@ -2,6 +2,8 @@ version: 1
 default: true
 application:
   code: contract_management
+  initial_admin_roles: [admin]
+  allowed_service_bindings: []
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -23,6 +25,9 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: contract_management
         PLATFORM_ENVIRONMENT_CODE: prod
+        CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
+        CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
+        CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       bindings:
         OIDC_ISSUER: issuer
         OIDC_CLIENT_ID: client_id
