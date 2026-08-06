@@ -274,6 +274,60 @@ func (repository *ManagementRepository) DeleteEnvironment(ctx context.Context, i
 	return toEnvironment(removed), nil
 }
 
+// PurgeEnvironment permanently removes the environment and all tenant-scoped derived records.
+// This operation is reachable only through the application-layer confirmation workflow.
+func (repository *ManagementRepository) PurgeEnvironment(ctx context.Context, input application.EnvironmentPurgeInput) (application.Environment, error) {
+	var removed managementEnvironmentModel
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND application_id = ? AND id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+			Take(&removed).Error; err != nil {
+			return mapManagementError(err)
+		}
+		if removed.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		var clientIDs []string
+		if err := transaction.Model(&oauthClientManagementModel{}).
+			Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+			Pluck("id", &clientIDs).Error; err != nil {
+			return err
+		}
+		if err := deleteEnvironmentOAuthClientRecords(transaction, clientIDs); err != nil {
+			return err
+		}
+		for _, table := range []string{"platform_application_login_target", "subsystem_service_instance", "subsystem_deployment_state", "cfg_release_item", "cfg_item", "cfg_release", "cfg_namespace", "audit_ingestion_receipt"} {
+			if table == "cfg_item" || table == "cfg_release" {
+				if err := transaction.Exec("DELETE FROM "+table+" WHERE namespace_id IN (SELECT id FROM cfg_namespace WHERE tenant_id = ? AND application_id = ? AND environment_id = ?)", input.TenantID, input.ApplicationID, input.EnvironmentID).Error; err != nil {
+					return err
+				}
+				continue
+			}
+			if table == "cfg_release_item" {
+				if err := transaction.Exec("DELETE FROM cfg_release_item WHERE release_id IN (SELECT id FROM cfg_release WHERE namespace_id IN (SELECT id FROM cfg_namespace WHERE tenant_id = ? AND application_id = ? AND environment_id = ?))", input.TenantID, input.ApplicationID, input.EnvironmentID).Error; err != nil {
+					return err
+				}
+				continue
+			}
+			if err := transaction.Exec("DELETE FROM "+table+" WHERE tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).Error; err != nil {
+				return err
+			}
+		}
+		result := transaction.Where("tenant_id = ? AND application_id = ? AND id = ? AND version = ?", input.TenantID, input.ApplicationID, input.EnvironmentID, input.Version).Delete(&managementEnvironmentModel{})
+		if result.Error != nil {
+			return mapManagementError(result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrVersionConflict
+		}
+		return nil
+	})
+	if err != nil {
+		return application.Environment{}, err
+	}
+	return toEnvironment(removed), nil
+}
+
 func deleteEnvironmentOAuthClientRecords(transaction *gorm.DB, clientIDs []string) error {
 	if len(clientIDs) == 0 {
 		return nil

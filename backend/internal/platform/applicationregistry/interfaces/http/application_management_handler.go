@@ -32,6 +32,10 @@ type managementApplicationService interface {
 	DeleteEnvironment(context.Context, application.EnvironmentDeleteInput) (application.Environment, error)
 }
 
+type environmentPurger interface {
+	PurgeEnvironment(context.Context, application.EnvironmentPurgeInput) (application.Environment, error)
+}
+
 // ManagementHandler serves controlled application registrations and their environments. It
 // deliberately has no OAuth client, callback, scope, or credential management endpoints.
 type ManagementHandler struct {
@@ -384,6 +388,43 @@ func (handler *ManagementHandler) DeleteEnvironment(writer http.ResponseWriter, 
 		"operator_id", principal.User.ID,
 	)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境已删除，关联的登录目标与 OAuth 客户端配置已清理", environmentToResponse(removed))
+}
+
+// PurgeEnvironment permanently removes a previously offboarded environment after explicit
+// retention and scope confirmations. It is intentionally separate from DELETE.
+func (handler *ManagementHandler) PurgeEnvironment(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	service, ok := handler.service.(environmentPurger)
+	if !ok {
+		httpresponse.WriteError(writer, request, http.StatusNotImplemented, httperror.New("IAM_ENVIRONMENT_PURGE_UNAVAILABLE", "环境清理能力未启用", nil))
+		return
+	}
+	var payload struct {
+		ConfirmationCode    string `json:"confirmation_code"`
+		RetentionApprovalID string `json:"retention_approval_id"`
+		RetentionConfirmed  bool   `json:"retention_confirmed"`
+		OffboardedConfirmed bool   `json:"offboarded_confirmed"`
+		Version             uint64 `json:"version"`
+	}
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+	removed, err := service.PurgeEnvironment(request.Context(), application.EnvironmentPurgeInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
+		ApplicationID: request.PathValue("application_id"), EnvironmentID: request.PathValue("environment_id"),
+		ConfirmationCode: payload.ConfirmationCode, RetentionConfirmed: payload.RetentionConfirmed,
+		RetentionApprovalID: payload.RetentionApprovalID,
+		OffboardedConfirmed: payload.OffboardedConfirmed, Version: payload.Version,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	handler.logger.Warn("application environment permanently purged", "tenant_id", principal.Tenant.ID, "application_id", removed.ApplicationID, "environment_id", removed.ID, "operator_id", principal.User.ID)
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境及关联数据已永久清理", environmentToResponse(removed))
 }
 
 func (handler *ManagementHandler) principal(writer http.ResponseWriter, request *http.Request) (authctx.Principal, bool) {

@@ -179,6 +179,7 @@ func NewRouter(
 			apiRouter.POST("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:create"), adaptHandler(applicationManagementHandler.CreateEnvironment))
 			apiRouter.PATCH("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:update"), adaptHandler(applicationManagementHandler.UpdateEnvironment))
 			apiRouter.DELETE("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:delete"), adaptHandler(applicationManagementHandler.DeleteEnvironment))
+			apiRouter.POST("/applications/:application_id/environments/:environment_id/purge", middleware.RequirePermission("platform:application-environment:delete"), adaptHandler(applicationManagementHandler.PurgeEnvironment))
 		}
 
 		if operational.SubsystemOnboarding != nil {

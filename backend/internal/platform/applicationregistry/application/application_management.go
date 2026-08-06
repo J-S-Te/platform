@@ -182,6 +182,21 @@ type EnvironmentDeleteInput struct {
 	Version          uint64
 }
 
+// EnvironmentPurgeInput is the irreversible, reviewed cleanup operation. It is intentionally
+// separate from DeleteEnvironment: callers must explicitly acknowledge that retained config and
+// audit evidence will be destroyed after the subsystem has been offboarded.
+type EnvironmentPurgeInput struct {
+	TenantID            string
+	OperatorID          string
+	ApplicationID       string
+	EnvironmentID       string
+	ConfirmationCode    string
+	RetentionApprovalID string
+	RetentionConfirmed  bool
+	OffboardedConfirmed bool
+	Version             uint64
+}
+
 // ManagementRepository owns tenant-scoped persistence for application and environment
 // management. It does not expose OAuth client or credential mutation operations.
 type ManagementRepository interface {
@@ -391,6 +406,39 @@ func (service *ManagementService) DeleteEnvironment(ctx context.Context, input E
 		return Environment{}, ErrVersionConflict
 	}
 	return service.repository.DeleteEnvironment(ctx, input)
+}
+
+// PurgeEnvironment invokes the optional destructive repository operation only after strict,
+// scoped confirmations. Existing repositories that do not implement purge remain safe.
+func (service *ManagementService) PurgeEnvironment(ctx context.Context, input EnvironmentPurgeInput) (Environment, error) {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
+	input.EnvironmentID = strings.TrimSpace(input.EnvironmentID)
+	input.ConfirmationCode = strings.TrimSpace(input.ConfirmationCode)
+	input.RetentionApprovalID = strings.TrimSpace(input.RetentionApprovalID)
+	if input.TenantID == "" || input.OperatorID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || input.Version == 0 || input.RetentionApprovalID == "" || !input.RetentionConfirmed || !input.OffboardedConfirmed {
+		return Environment{}, ErrValidation
+	}
+	app, err := service.repository.GetApplication(ctx, input.TenantID, input.ApplicationID)
+	if err != nil {
+		return Environment{}, err
+	}
+	environment, err := service.repository.GetEnvironment(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
+	if err != nil {
+		return Environment{}, err
+	}
+	expected := "PURGE/" + app.Code + "/" + environment.Environment
+	if input.ConfirmationCode != expected || input.Version != environment.Version || app.Code == builtInApplicationCode || environment.Environment == "dev" {
+		return Environment{}, ErrValidation
+	}
+	purger, ok := service.repository.(interface {
+		PurgeEnvironment(context.Context, EnvironmentPurgeInput) (Environment, error)
+	})
+	if !ok {
+		return Environment{}, errors.New("environment purge is unavailable")
+	}
+	return purger.PurgeEnvironment(ctx, input)
 }
 
 func normalizePageRequest(query PageRequest) PageRequest {
