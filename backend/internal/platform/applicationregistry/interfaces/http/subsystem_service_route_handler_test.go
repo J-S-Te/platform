@@ -75,6 +75,8 @@ func TestSubsystemServiceRouteHandlerProxiesDiscoveredRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest("GET", "/api/v1/subsystems/orders/health?environment=prod&service_role=business&source=portal", nil)
+	request.SetPathValue("application_code", "orders")
+	request.SetPathValue("path", "/health")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "tenant-1"}}))
 	response := httptest.NewRecorder()
 	handler.Proxy(response, request)
