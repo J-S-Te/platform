@@ -37,7 +37,10 @@ runtime:
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
         PLATFORM_OWNER_DIRECTORY_SCOPE: owner_directory.read
-        CONTRACT_VERIFICATION_ENABLED: "true"
+        # 合同摘要凭据只在运行时已完成密钥交付后显式开启。历史环境的
+        # Retry/Update 不会从平台数据库恢复 OAuth 明文，因此默认关闭可
+        # 安全修复旧环境，避免把缺失凭据误报成 Docker/目录不可用。
+        CONTRACT_VERIFICATION_ENABLED: "false"
         CONTRACT_SUMMARY_URL: http://contract-api:8081/internal/contract-summary
         CONTRACT_SUMMARY_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_SUMMARY_SCOPE: contract.summary.read
