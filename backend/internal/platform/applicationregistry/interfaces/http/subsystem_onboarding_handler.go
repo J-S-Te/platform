@@ -626,6 +626,14 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 
 const subsystemDeploymentHTTPTimeout = 16 * time.Minute
 
+// A deployment state is written before the long-running Agent call. If the API
+// process is terminated during that call, the state must not remain in a
+// non-terminal status forever: the management UI only exposes retry for a
+// failed attempt. Keep this slightly above the synchronous request timeout so
+// a genuinely slow but still live deployment is not interrupted by a status
+// poll.
+const subsystemDeploymentStaleAfter = 20 * time.Minute
+
 // extendSubsystemDeploymentWriteDeadline keeps the synchronous control-plane request alive for
 // the Agent's bounded 15-minute deployment window. ResponseController unwraps Gin's writer to the
 // underlying network connection; httptest and unsupported writers safely ignore the capability.
@@ -656,6 +664,7 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 		handler.writeError(writer, request, err)
 		return
 	}
+	state = handler.recoverStaleSubsystemDeployment(request.Context(), state)
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署状态查询成功", subsystemDeploymentStateResponse{
@@ -672,6 +681,52 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 		CompletedAt:     state.CompletedAt,
 		UpdatedAt:       state.UpdatedAt,
 	})
+}
+
+// recoverStaleSubsystemDeployment closes the only lifecycle states that can be
+// left behind by an API/Agent restart. The transition is deliberately performed
+// from the authenticated status path, so an operator refreshing the page can
+// recover the UI without a direct database operation or a second onboarding.
+func (handler *SubsystemOnboardingHandler) recoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState) application.SubsystemDeploymentState {
+	if !staleSubsystemDeployment(state, time.Now().UTC()) {
+		return state
+	}
+	operation := strings.TrimSpace(state.Operation)
+	if operation == "" {
+		operation = "ONBOARD"
+	}
+	if err := handler.deploymentState.TransitionSubsystemDeployment(
+		ctx, state.TenantID, state.ApplicationCode, state.Environment,
+		application.SubsystemDeploymentStatusFailed, operation,
+		"DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试",
+		time.Now().UTC(),
+	); err != nil {
+		handler.logger.Warn("stale subsystem deployment could not be recovered",
+			"application_code", state.ApplicationCode, "environment", state.Environment, "error", err)
+		return state
+	}
+	state.Status = application.SubsystemDeploymentStatusFailed
+	state.LastErrorCode = "DEPLOYMENT_INTERRUPTED"
+	state.LastError = "部署请求中断，请点击重试"
+	state.CompletedAt = pointerToTime(time.Now().UTC())
+	state.UpdatedAt = time.Now().UTC()
+	return state
+}
+
+func staleSubsystemDeployment(state application.SubsystemDeploymentState, now time.Time) bool {
+	if state.Status != application.SubsystemDeploymentStatusProvisioning &&
+		state.Status != application.SubsystemDeploymentStatusUpdating &&
+		state.Status != application.SubsystemDeploymentStatusVerifying {
+		return false
+	}
+	if state.StartedAt == nil {
+		return false
+	}
+	return now.Sub(state.StartedAt.UTC()) > subsystemDeploymentStaleAfter
+}
+
+func pointerToTime(value time.Time) *time.Time {
+	return &value
 }
 
 func subsystemDeploymentStateNextAction(state application.SubsystemDeploymentState) string {
