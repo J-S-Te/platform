@@ -228,6 +228,17 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.C
 	return target.Teardown(ctx, tenantID)
 }
 
+// DiscoverSubsystemServices reads service labels from the reviewed production target's Docker
+// project. The target allow-list remains authoritative; the request cannot select arbitrary Docker
+// objects or alter any server-side runtime file.
+func (provisioner *ProductionComposeSubsystemProvisioner) DiscoverSubsystemServices(ctx context.Context, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
+	target, err := provisioner.target(applicationCode, environment)
+	if err != nil {
+		return nil, err
+	}
+	return discoverDockerLabelServices(ctx, target.config.DockerBinary, applicationCode, environment)
+}
+
 // Preflight 在创建不可恢复的 OAuth 明文前验证租户、目标、文件权限、不可变镜像和
 // Compose 配置。请求中的公开字段必须与审核清单完全一致。
 func (target *productionComposeTarget) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {

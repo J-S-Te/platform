@@ -36,6 +36,84 @@ type subsystemDeploymentStateModel struct {
 	UpdatedAt               time.Time  `gorm:"column:updated_at"`
 }
 
+type subsystemServiceInstanceModel struct {
+	TenantID        string     `gorm:"column:tenant_id"`
+	ApplicationID   string     `gorm:"column:application_id"`
+	EnvironmentID   string     `gorm:"column:environment_id"`
+	ApplicationCode string     `gorm:"column:application_code"`
+	Environment     string     `gorm:"column:environment_code"`
+	ServiceName     string     `gorm:"column:service_name"`
+	ServiceRole     string     `gorm:"column:service_role"`
+	Protocol        string     `gorm:"column:protocol"`
+	InternalHost    string     `gorm:"column:internal_host"`
+	InternalPort    uint       `gorm:"column:internal_port"`
+	PathPrefix      string     `gorm:"column:path_prefix"`
+	HealthEndpoint  string     `gorm:"column:health_endpoint"`
+	Version         string     `gorm:"column:version"`
+	Status          string     `gorm:"column:status"`
+	LastSeenAt      *time.Time `gorm:"column:last_seen_at"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+}
+
+func (subsystemServiceInstanceModel) TableName() string { return "subsystem_service_instance" }
+
+func (repository *SubsystemOnboardingGORMRepository) UpsertSubsystemServiceInstance(ctx context.Context, value application.SubsystemServiceInstance) error {
+	now := value.UpdatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	model := subsystemServiceInstanceModel{
+		TenantID: value.TenantID, ApplicationID: value.ApplicationID, EnvironmentID: value.EnvironmentID,
+		ApplicationCode: value.ApplicationCode, Environment: value.Environment, ServiceName: value.ServiceName,
+		ServiceRole: value.ServiceRole, Protocol: value.Protocol, InternalHost: value.InternalHost,
+		InternalPort: value.InternalPort, PathPrefix: value.PathPrefix, HealthEndpoint: value.HealthEndpoint,
+		Version: value.Version, Status: value.Status, LastSeenAt: value.LastSeenAt, CreatedAt: now, UpdatedAt: now,
+	}
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var existing subsystemServiceInstanceModel
+		result := transaction.Where("tenant_id = ? AND environment_id = ? AND service_name = ? AND service_role = ?", value.TenantID, value.EnvironmentID, value.ServiceName, value.ServiceRole).First(&existing)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return transaction.Create(&model).Error
+		}
+		if result.Error != nil {
+			return result.Error
+		}
+		return transaction.Model(&subsystemServiceInstanceModel{}).
+			Where("tenant_id = ? AND environment_id = ? AND service_name = ? AND service_role = ?", value.TenantID, value.EnvironmentID, value.ServiceName, value.ServiceRole).
+			Updates(map[string]any{"application_id": model.ApplicationID, "application_code": model.ApplicationCode, "environment_code": model.Environment, "protocol": model.Protocol, "internal_host": model.InternalHost, "internal_port": model.InternalPort, "path_prefix": model.PathPrefix, "health_endpoint": model.HealthEndpoint, "version": model.Version, "status": model.Status, "last_seen_at": model.LastSeenAt, "updated_at": now}).Error
+	})
+}
+
+func (repository *SubsystemOnboardingGORMRepository) ListSubsystemServiceInstances(ctx context.Context, tenantID, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
+	query := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID)
+	if applicationCode != "" {
+		query = query.Where("application_code = ?", applicationCode)
+	}
+	if environment != "" {
+		query = query.Where("environment_code = ?", environment)
+	}
+	var rows []subsystemServiceInstanceModel
+	if err := query.Order("application_code ASC, environment_code ASC, service_name ASC, service_role ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make([]application.SubsystemServiceInstance, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, subsystemServiceInstanceFromModel(row))
+	}
+	return result, nil
+}
+
+func (repository *SubsystemOnboardingGORMRepository) MarkUnavailableSubsystemServiceInstances(ctx context.Context, before, now time.Time) error {
+	return repository.database.WithContext(ctx).Model(&subsystemServiceInstanceModel{}).
+		Where("last_seen_at IS NULL OR last_seen_at < ?", before).
+		Updates(map[string]any{"status": application.SubsystemServiceStatusUnavailable, "updated_at": now}).Error
+}
+
+func subsystemServiceInstanceFromModel(row subsystemServiceInstanceModel) application.SubsystemServiceInstance {
+	return application.SubsystemServiceInstance{TenantID: row.TenantID, ApplicationID: row.ApplicationID, EnvironmentID: row.EnvironmentID, ApplicationCode: row.ApplicationCode, Environment: row.Environment, ServiceName: row.ServiceName, ServiceRole: row.ServiceRole, Protocol: row.Protocol, InternalHost: row.InternalHost, InternalPort: row.InternalPort, PathPrefix: row.PathPrefix, HealthEndpoint: row.HealthEndpoint, Version: row.Version, Status: row.Status, LastSeenAt: row.LastSeenAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
 func (subsystemDeploymentStateModel) TableName() string { return "subsystem_deployment_state" }
 
 // NewSubsystemOnboardingGORMRepository constructs the onboarding repository.

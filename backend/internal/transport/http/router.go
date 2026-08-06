@@ -35,12 +35,13 @@ import (
 // OperationalModules 聚合后续扩展能力，避免组合根继续增长位置参数，也允许路由测试整体省略
 // 可选模块。字段为 nil 时只表示该能力未装配，不应注册一个会绕过依赖检查的空路由。
 type OperationalModules struct {
-	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
-	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
-	Notifications       *notificationhttp.Handler
-	FilesAndJobs        *filetaskhttp.Handler
-	ExternalIdentity    *externalidentityhttp.Handler
-	OwnerDirectory      *ownerdirectoryhttp.Handler
+	LoginTargets           *applicationregistryhttp.LoginTargetManagementHandler
+	SubsystemOnboarding    *applicationregistryhttp.SubsystemOnboardingHandler
+	SubsystemServiceRoutes *applicationregistryhttp.SubsystemServiceRouteHandler
+	Notifications          *notificationhttp.Handler
+	FilesAndJobs           *filetaskhttp.Handler
+	ExternalIdentity       *externalidentityhttp.Handler
+	OwnerDirectory         *ownerdirectoryhttp.Handler
 	// AccessApplier is the optional deployment agent used by the management-console
 	// "对外访问" apply action. Production/remote deployments leave it nil.
 	AccessApplier settingsapplication.AccessApplier
@@ -230,6 +231,10 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.TeardownSubsystem),
 			)
+		}
+		if operational.SubsystemServiceRoutes != nil {
+			apiRouter.GET("/subsystem-service-route", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemServiceRoutes.Resolve))
+			apiRouter.Any("/subsystems/:application_code/*path", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemServiceRoutes.Proxy))
 		}
 
 		if operational.LoginTargets != nil {

@@ -37,9 +37,14 @@ type Permission struct {
 
 // Role is a tenant-scoped collection of allow permissions.
 type Role struct {
-	ID          string
-	Code        string
-	Name        string
+	ID            string
+	ApplicationID string
+	Code          string
+	Name          string
+	// RoleType identifies ownership: PLATFORM, CUSTOM, or APPLICATION.
+	// APPLICATION roles are synchronized from a subsystem catalog and are
+	// read-only through the generic platform role-management API.
+	RoleType    string
 	Description *string
 	Status      string
 	BuiltIn     bool
@@ -53,6 +58,7 @@ type Role struct {
 type RoleBinding struct {
 	ID          string
 	Role        Reference
+	GrantOrigin string
 	SubjectType string
 	Subject     Reference
 	ScopeType   string
