@@ -34,6 +34,13 @@ compose_file="$deploy_dir/compose.yaml"
 profiles_dir="$deploy_dir/subsystems.d"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_runtime_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_runtime_file"
+customer_worker_services=(
+  customer-opportunity-alert-worker
+  customer-owner-notification-worker
+  customer-presale-alert-worker
+  customer-presale-assignment-notification-worker
+  customer-presale-progress-notification-worker
+)
 
 for command_name in docker curl gzip flock awk mktemp install stat; do
   command -v "$command_name" >/dev/null || {
@@ -124,6 +131,7 @@ customer_runtime_ready() {
     APP_PUBLIC_ORIGIN OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID OIDC_ROLE_CONFIG_HASH \
     MACHINE_TOKEN_ISSUER MACHINE_TOKEN_AUDIENCE MACHINE_TOKEN_PUBLIC_KEY_PATH \
     PLATFORM_BASE_URL PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET \
+    PLATFORM_APPLICATION_CODE PLATFORM_ENVIRONMENT_CODE PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET \
     SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do
     require_value "$customer_runtime_file" "$key" || return 1
   done
@@ -144,7 +152,8 @@ portal_runtime_ready() {
     PORTAL_ACCOUNT_SECURITY_CENTER_URL PORTAL_MACHINE_TOKEN_ISSUER PORTAL_MACHINE_TOKEN_AUDIENCE PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH \
     PORTAL_CRM_PROVISION_CLIENT_SUBJECT PORTAL_CRM_DISABLE_CLIENT_SUBJECT PORTAL_CRM_INVITE_BASE_URL PORTAL_CRM_INVITE_TOKEN_URL PORTAL_CRM_INVITE_CLIENT_ID PORTAL_CRM_INVITE_CLIENT_SECRET \
     PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_HMAC_KEY_BASE64 \
-    PORTAL_PLATFORM_BASE_URL PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET; do
+    PORTAL_PLATFORM_BASE_URL PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET \
+    PLATFORM_APPLICATION_CODE PLATFORM_ENVIRONMENT_CODE PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET; do
     require_value "$portal_runtime_file" "$key" || return 1
   done
   [[ "$(env_value_from "$portal_runtime_file" PORTAL_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || {
@@ -252,6 +261,24 @@ wait_for_health() {
   return 1
 }
 
+wait_for_workers() {
+  local attempt state service all_running
+  for ((attempt=1; attempt<=30; attempt++)); do
+    state="$(compose ps --status running --services)"
+    all_running=true
+    for service in "${customer_worker_services[@]}"; do
+      case $'\n'"$state"$'\n' in
+        *$'\n'"$service"$'\n'*) ;;
+        *) all_running=false ;;
+      esac
+    done
+    [[ "$all_running" == true ]] && return 0
+    sleep 2
+  done
+  echo "CRM Worker 运行状态检查超时" >&2
+  return 1
+}
+
 rollback_runtime() {
   restore_release
   local previous_crm previous_portal
@@ -259,11 +286,11 @@ rollback_runtime() {
   previous_portal="$(env_value_from "$release_file" CUSTOMER_PORTAL_IMAGE)"
   if [[ "$previous_crm" =~ $acr_enterprise_or_new_personal || "$previous_crm" =~ $acr_legacy_personal ]] && \
      [[ "$previous_portal" =~ $acr_enterprise_or_new_personal || "$previous_portal" =~ $acr_legacy_personal ]]; then
-    compose up -d --no-deps customer-api portal-api || true
+    compose up -d --no-deps customer-api portal-api "${customer_worker_services[@]}" || true
     return
   fi
   echo "没有可验证的上一版不可变 CRM/Portal 镜像，停止新 API，等待人工恢复" >&2
-  compose stop customer-api portal-api || true
+  compose stop customer-api portal-api "${customer_worker_services[@]}" || true
 }
 
 echo "启动 CRM/Portal 数据库"
@@ -311,6 +338,15 @@ if ! compose up -d --no-deps portal-api || \
   exit 1
 fi
 
+echo "切换 CRM 站内告警与通知投影 Worker"
+if ! compose up -d --no-deps "${customer_worker_services[@]}" || ! wait_for_workers; then
+  compose logs --tail 100 "${customer_worker_services[@]}" >&2 || true
+  rollback_runtime
+  rm -f "$previous_release"
+  echo "CRM Worker 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+  exit 1
+fi
+
 release_committed=true
-compose ps customer-api portal-api customer-mysql portal-mysql
+compose ps customer-api portal-api "${customer_worker_services[@]}" customer-mysql portal-mysql
 echo "CRM/Portal 发布成功：$crm_image_ref / $portal_image_ref"

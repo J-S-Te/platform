@@ -2,6 +2,8 @@ version: 1
 default: false
 application:
   code: customer_and_opportunity
+  initial_admin_roles: [sales_director, team_lead, technical_lead]
+  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write]
   name: 客户与商机管理系统
   description: 客户、商机与售前协作管理系统
   environment: prod
@@ -29,10 +31,19 @@ runtime:
         OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_BASE_URL: http://platform-api:8080
+        PLATFORM_APPLICATION_CODE: customer_and_opportunity
+        PLATFORM_ENVIRONMENT_CODE: prod
         OWNER_DIRECTORY_ENABLED: "true"
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
         PLATFORM_OWNER_DIRECTORY_SCOPE: owner_directory.read
+        CONTRACT_VERIFICATION_ENABLED: "true"
+        CONTRACT_SUMMARY_URL: http://contract-api:8081/internal/contract-summary
+        CONTRACT_SUMMARY_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_SUMMARY_SCOPE: contract.summary.read
+        CONTRACT_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_OPPORTUNITY_INTAKE_URL: http://contract-api:8081/internal/opportunity-signed-events
+        CONTRACT_SCOPE: opportunity.signed.write
         # 测试服务器使用非回环 HTTP，未配置 HTTPS：显式允许非 Secure 会话 Cookie。
         # 生产部署必须使用 HTTPS 并移除/保持 false。
         OIDC_ALLOW_INSECURE_HTTP_SESSION: "true"
@@ -49,8 +60,14 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
+        PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
         PLATFORM_OWNER_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
         PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
+        CONTRACT_SUMMARY_CLIENT_ID: service.contract_summary_read.client_id
+        CONTRACT_SUMMARY_CLIENT_SECRET: service.contract_summary_read.client_secret
+        CONTRACT_CLIENT_ID: service.contract_opportunity_signed_write.client_id
+        CONTRACT_CLIENT_SECRET: service.contract_opportunity_signed_write.client_secret
 compose:
   profiles: [customer, customer-release]
   dependency_services: [customer-mysql]
@@ -58,6 +75,6 @@ compose:
     service: customer-mysql
     name: customer_opportunity
   migrate_service: customer-migrate
-  runtime_services: [customer-api]
-  teardown_services: [customer-api]
+  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker]
+  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker]
   release_image_keys: [CUSTOMER_CRM_IMAGE]

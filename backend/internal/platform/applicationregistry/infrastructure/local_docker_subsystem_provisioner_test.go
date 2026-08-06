@@ -456,6 +456,11 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 		RedirectURI: "http://localhost:8081/contract_management/auth/callback", PublicURL: "http://localhost:8081/contract_management/",
 		PathPrefix: "/contract_management", UpstreamURL: "http://contract-api:8081",
 		CatalogPublisherClientID: "contract_management-prod-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
+		ServiceCredentials: []application.SubsystemServiceCredential{
+			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-audit-publisher"}, PlaintextSecret: "audit-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedWrite, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-opportunity-intake"}, PlaintextSecret: "intake-secret"},
+			{Purpose: application.ServiceCredentialContractSummaryRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-contract-summary"}, PlaintextSecret: "summary-secret"},
+		},
 	}); err != nil {
 		t.Fatalf("provision integrated contract subsystem: %v", err)
 	}
@@ -511,6 +516,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		RedirectURI: "http://localhost:8081/customer-opportunity/auth/callback", PublicURL: "http://localhost:8081/customer-opportunity/",
 		PathPrefix: "/customer-opportunity", UpstreamURL: "http://customer-api:8090",
 		CatalogPublisherClientID: "customer_and_opportunity-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
+		ServiceCredentials: []application.SubsystemServiceCredential{{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "audit-secret"}},
 	}); err != nil {
 		t.Fatalf("provision integrated customer subsystem: %v", err)
 	}
@@ -521,8 +527,10 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 	}
 	for _, expected := range []string{
 		"DEV_AUTH_ENABLED=false", "APP_PATH_PREFIX=/customer-opportunity", "APP_PUBLIC_ORIGIN=http://localhost:8081",
+		"PLATFORM_BASE_URL=http://platform-api:8080",
 		"OIDC_CLIENT_ID=customer_and_opportunity-dev-web", "OIDC_SESSION_COOKIE_SECURE=false", "OIDC_ROLE_CONFIG_HASH=" + integratedCustomerRoleConfigHash,
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=customer_and_opportunity-dev-catalog-publisher",
+		"PLATFORM_AUDIT_CLIENT_ID=customer_and_opportunity-dev-audit-publisher",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("shared customer environment missing %q:\n%s", expected, contents)
@@ -583,6 +591,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedPortalWritesIsolatedR
 		"PORTAL_CRM_PROVISION_CLIENT_SUBJECT=customer_portal-dev-portal-mapping-provision",
 		"PORTAL_CRM_DISABLE_CLIENT_SUBJECT=customer_portal-dev-portal-mapping-disable",
 		"PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID=customer_portal-dev-catalog-publisher",
+		"PLATFORM_AUDIT_CLIENT_ID=customer_portal-dev-audit-publisher",
 	} {
 		if !strings.Contains(portalEnvironment, expected) {
 			t.Fatalf("Portal environment missing %q:\n%s", expected, portalEnvironment)
@@ -656,6 +665,7 @@ func TestLocalDockerSubsystemProvisionerPortalRequiresEveryPurposeBoundCredentia
 
 func portalServiceCredentialsForTest() []application.SubsystemServiceCredential {
 	definitions := []struct{ purpose, suffix string }{
+		{application.ServiceCredentialAuditIngest, "audit-publisher"},
 		{application.ServiceCredentialExternalUserProvision, "external-user-provision"},
 		{application.ServiceCredentialApplicationRoleAssign, "role-assign"},
 		{application.ServiceCredentialApplicationRoleRevoke, "role-revoke"},

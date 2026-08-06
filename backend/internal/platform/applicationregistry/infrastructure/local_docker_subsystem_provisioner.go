@@ -29,11 +29,12 @@ const (
 	integratedContractApplicationCode = "contract_management"
 	integratedCustomerApplicationCode = "customer_and_opportunity"
 	integratedPortalApplicationCode   = "customer_portal"
+	integratedProjectApplicationCode  = "project_management"
 	// This is the compatibility hash compiled into the customer authorization catalog. The
 	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
 	// deployment contract to be updated in the same reviewed release.
 	integratedCustomerRoleConfigHash = "sha256:1160c3133e8d95ee8f4f0d589960c368f431a6237a283d7b803bd21fe107ca6e"
-	integratedPortalRoleConfigHash   = "sha256:ef9f349797479d02c43191000adc8eefa596fe20558381313c40a3e30ed4d446"
+	integratedPortalRoleConfigHash   = "sha256:f67121b52d6d850e99d1c4520d661fb85e26512c7ee50cd83182a8dc39b368d4"
 )
 
 // LocalDockerSubsystemProvisionerConfig controls the trusted local Docker automation used by the
@@ -162,7 +163,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) Preflight(ctx context.Contex
 		return err
 	}
 	if isIntegratedSubsystem(applicationCode) {
-		if _, _, _, _, _, _, _, err = provisioner.integratedComposeConfiguration(); err != nil {
+		if _, _, _, _, _, _, _, _, err = provisioner.integratedComposeConfiguration(); err != nil {
 			return err
 		}
 	} else if _, err = locateComposeFile(projectDirectory); err != nil {
@@ -278,8 +279,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 	return nil
 }
 
-// rebuildLocked rebuilds the subsystem Compose stack without modifying the gateway or the
-// generated environment file. The caller must hold the mutex.
+// rebuildLocked rebuilds the subsystem Compose stack without modifying the gateway. When the
+// management page supplies the current gateway fields, it also updates the non-secret public
+// runtime values while preserving the one-time credentials already on disk.
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if !provisioner.config.Enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
@@ -291,7 +293,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 	if err != nil {
 		return err
 	}
-	environmentPath := filepath.Join(projectDirectory, ".env.local")
+	_, environmentPath, err := provisioner.subsystemEnvironmentPaths(input.ApplicationCode, projectDirectory)
+	if err != nil {
+		return provisioningError("subsystem environment template is unavailable")
+	}
+	if strings.TrimSpace(input.PublicURL) != "" {
+		if err := provisioner.updatePublicRuntimeConfiguration(input, environmentPath); err != nil {
+			return err
+		}
+	}
 	var rebuildErr error
 	switch input.ApplicationCode {
 	case integratedContractApplicationCode:
@@ -320,6 +330,67 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 	return nil
 }
 
+func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfiguration(input application.SubsystemProvisioningInput, environmentPath string) error {
+	publicOrigin, err := publicOriginFromURL(input.PublicURL)
+	if err != nil {
+		return provisioningError("subsystem public URL is invalid")
+	}
+	secure := booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(publicOrigin), "https://"))
+	values := map[string]string{}
+	switch input.ApplicationCode {
+	case integratedContractApplicationCode:
+		values = map[string]string{
+			"APP_PUBLIC_URL":                input.PublicURL,
+			"APP_PATH_PREFIX":               input.PathPrefix,
+			"OIDC_REDIRECT_URI":             input.RedirectURI,
+			"OIDC_POST_LOGOUT_REDIRECT_URI": input.PublicURL,
+			"OIDC_SESSION_COOKIE_SECURE":    secure,
+		}
+	case integratedCustomerApplicationCode:
+		values = map[string]string{
+			"APP_PUBLIC_ORIGIN":             publicOrigin,
+			"APP_PATH_PREFIX":               input.PathPrefix,
+			"OIDC_REDIRECT_URI":             input.RedirectURI,
+			"OIDC_POST_LOGOUT_REDIRECT_URI": input.PublicURL,
+			"OIDC_SESSION_COOKIE_SECURE":    secure,
+		}
+	case integratedPortalApplicationCode:
+		values = map[string]string{
+			"PORTAL_PUBLIC_ORIGIN":         publicOrigin,
+			"PORTAL_PATH_PREFIX":           input.PathPrefix,
+			"PORTAL_OIDC_REDIRECT_URI":     input.RedirectURI,
+			"PORTAL_SESSION_COOKIE_SECURE": secure,
+		}
+	case integratedProjectApplicationCode:
+		values = map[string]string{
+			"APP_PATH_PREFIX":               input.PathPrefix,
+			"OIDC_REDIRECT_URI":             input.RedirectURI,
+			"OIDC_POST_LOGOUT_REDIRECT_URI": input.PublicURL,
+			"OIDC_SESSION_COOKIE_SECURE":    secure,
+		}
+	default:
+		values = map[string]string{
+			"APP_PUBLIC_URL":             input.PublicURL,
+			"APP_PATH_PREFIX":            input.PathPrefix,
+			"OIDC_REDIRECT_URI":          input.RedirectURI,
+			"OIDC_SESSION_COOKIE_SECURE": secure,
+		}
+	}
+	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {
+		return provisioningError("write subsystem public runtime configuration")
+	}
+	if input.ApplicationCode == integratedPortalApplicationCode {
+		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
+		customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
+		if err := updateSubsystemEnvironment(customerEnvironment, customerEnvironment, map[string]string{
+			"PORTAL_PUBLIC_URL": strings.TrimRight(input.PublicURL, "/"),
+		}); err != nil {
+			return provisioningError("write CRM Portal public runtime configuration")
+		}
+	}
+	return nil
+}
+
 // applyLocked contains the shared Provision body. Caller must hold the mutex.
 func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if !provisioner.config.Enabled {
@@ -342,6 +413,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 	environmentSource, environmentPath, err := provisioner.subsystemEnvironmentPaths(input.ApplicationCode, projectDirectory)
 	if err != nil {
 		return provisioningError("subsystem environment template is unavailable")
+	}
+	publicOrigin, publicOriginErr := publicOriginFromURL(input.PublicURL)
+	if publicOriginErr != nil {
+		return provisioningError("subsystem public URL is invalid")
 	}
 	values := map[string]string{
 		"PLATFORM_BASE_URL":         input.Issuer,
@@ -372,12 +447,31 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		// issuer, while discovery/token calls are routed over the private Compose alias. The
 		// compatibility hash is derived from the application's embedded catalog at startup so a
 		// catalog-only release cannot drift from a platform-side hard-coded value.
-		values["APP_PUBLIC_ORIGIN"] = input.Issuer
+		values["APP_PUBLIC_ORIGIN"] = publicOrigin
 		values["DEV_AUTH_ENABLED"] = "false"
+		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
 		values["OIDC_BACKCHANNEL_BASE_URL"] = "http://platform-api:8080"
 		values["OIDC_POST_LOGOUT_REDIRECT_URI"] = input.PublicURL
 		values["OIDC_ROLE_CONFIG_HASH"] = integratedCustomerRoleConfigHash
 		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(input.Issuer), "https://"))
+		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
+		if !ok {
+			return provisioningError("customer audit publisher credential is unavailable")
+		}
+		values["PLATFORM_AUDIT_CLIENT_ID"] = auditCredential.OAuthClient.ClientID
+		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
+	}
+	if input.ApplicationCode == integratedProjectApplicationCode {
+		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
+		values["OIDC_BACKCHANNEL_BASE_URL"] = "http://platform-api:8080"
+		values["OIDC_POST_LOGOUT_REDIRECT_URI"] = input.PublicURL
+		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(input.Issuer), "https://"))
+		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
+		if !ok {
+			return provisioningError("project audit publisher credential is unavailable")
+		}
+		values["PLATFORM_AUDIT_CLIENT_ID"] = auditCredential.OAuthClient.ClientID
+		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
 	}
 	if input.ApplicationCode == integratedPortalApplicationCode {
 		credentials, credentialErr := requiredPortalServiceCredentials(input)
@@ -385,7 +479,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 			return credentialErr
 		}
 		values = map[string]string{
-			"PORTAL_PUBLIC_ORIGIN":                        input.Issuer,
+			"PORTAL_PUBLIC_ORIGIN":                        publicOrigin,
 			"PORTAL_PATH_PREFIX":                          input.PathPrefix,
 			"PORTAL_OIDC_ISSUER":                          input.Issuer,
 			"PORTAL_OIDC_BACKCHANNEL_BASE_URL":            "http://platform-api:8080",
@@ -395,7 +489,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 			"PORTAL_OIDC_SCOPES":                          "openid profile",
 			"PORTAL_OIDC_TENANT_ID":                       input.TenantID,
 			"PORTAL_ROLE_CONFIG_HASH":                     integratedPortalRoleConfigHash,
-			"PORTAL_SESSION_COOKIE_SECURE":                booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(input.Issuer), "https://")),
+			"PORTAL_SESSION_COOKIE_SECURE":                booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(publicOrigin), "https://")),
 			"PORTAL_ACCOUNT_SECURITY_CENTER_URL":          strings.TrimRight(input.Issuer, "/") + "/settings/security",
 			"PORTAL_MACHINE_TOKEN_ISSUER":                 "basic-platform",
 			"PORTAL_MACHINE_TOKEN_AUDIENCE":               "basic-platform-application",
@@ -411,6 +505,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 			"PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID": input.ApplicationID,
 			"PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID":      input.CatalogPublisherClientID,
 			"PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET":  input.CatalogPublisherClientSecret,
+			"PLATFORM_APPLICATION_CODE":                   integratedPortalApplicationCode,
+			"PLATFORM_ENVIRONMENT_CODE":                   input.Environment,
+			"PLATFORM_AUDIT_CLIENT_ID":                    credentials[application.ServiceCredentialAuditIngest].OAuthClient.ClientID,
+			"PLATFORM_AUDIT_CLIENT_SECRET":                credentials[application.ServiceCredentialAuditIngest].PlaintextSecret,
 		}
 		runtimeSecrets, secretErr := portalRuntimeSecrets(environmentSource)
 		if secretErr != nil {
@@ -449,6 +547,33 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 			return provisioningError("write CRM Portal integration configuration")
 		}
 	}
+	if input.ApplicationCode == integratedContractApplicationCode {
+		credentials, credentialErr := requiredContractServiceCredentials(input)
+		if credentialErr != nil {
+			return credentialErr
+		}
+		values["CONTRACT_MACHINE_TOKEN_ISSUER"] = "basic-platform"
+		values["CONTRACT_MACHINE_TOKEN_AUDIENCE"] = "basic-platform-application"
+		values["CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
+		customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
+		customerValues := map[string]string{
+			"CONTRACT_VERIFICATION_ENABLED":   "true",
+			"CONTRACT_SUMMARY_URL":            "http://contract-api:8081/internal/contract-summary",
+			"CONTRACT_SUMMARY_TOKEN_URL":      "http://platform-api:8080/oauth2/token",
+			"CONTRACT_SUMMARY_CLIENT_ID":      credentials[application.ServiceCredentialContractSummaryRead].OAuthClient.ClientID,
+			"CONTRACT_SUMMARY_CLIENT_SECRET":  credentials[application.ServiceCredentialContractSummaryRead].PlaintextSecret,
+			"CONTRACT_SUMMARY_SCOPE":          "contract.summary.read",
+			"CONTRACT_TOKEN_URL":              "http://platform-api:8080/oauth2/token",
+			"CONTRACT_OPPORTUNITY_INTAKE_URL": "http://contract-api:8081/internal/opportunity-signed-events",
+			"CONTRACT_CLIENT_ID":              credentials[application.ServiceCredentialContractOpportunitySignedWrite].OAuthClient.ClientID,
+			"CONTRACT_CLIENT_SECRET":          credentials[application.ServiceCredentialContractOpportunitySignedWrite].PlaintextSecret,
+			"CONTRACT_SCOPE":                  "opportunity.signed.write",
+		}
+		if err := updateSubsystemEnvironment(customerEnvironment, customerEnvironment, customerValues); err != nil {
+			return provisioningError("write CRM contract integration configuration")
+		}
+	}
 	if err := updateSubsystemEnvironment(environmentSource, environmentPath, values); err != nil {
 		return provisioningError("write subsystem environment file")
 	}
@@ -473,6 +598,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		startErr = provisioner.rebuildIntegratedCustomerStack(operationCtx)
 	case integratedPortalApplicationCode:
 		startErr = provisioner.rebuildIntegratedPortalStack(operationCtx)
+	case integratedProjectApplicationCode:
+		startErr = provisioner.rebuildIntegratedProjectStack(operationCtx)
 	default:
 		startErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
 			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
@@ -518,6 +645,23 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 	return nil
 }
 
+func requiredContractServiceCredentials(input application.SubsystemProvisioningInput) (map[string]application.SubsystemServiceCredential, error) {
+	purposes := []string{
+		application.ServiceCredentialAuditIngest,
+		application.ServiceCredentialContractOpportunitySignedWrite,
+		application.ServiceCredentialContractSummaryRead,
+	}
+	result := make(map[string]application.SubsystemServiceCredential, len(purposes))
+	for _, purpose := range purposes {
+		credential, ok := input.ServiceCredential(purpose)
+		if !ok {
+			return nil, provisioningError("contract service credentials are incomplete")
+		}
+		result[purpose] = credential
+	}
+	return result, nil
+}
+
 // rebuildIntegratedContractStack keeps contract_management on the workspace's single local
 // Compose topology. The unified frontend already routes to basic-platform-local/contract-api;
 // starting the subsystem's standalone Compose file as well would create a second contract-api
@@ -530,6 +674,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractSta
 		return err
 	}
 	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--build", "--no-deps", "contract-api")
+}
+
+// rebuildIntegratedProjectStack keeps project_management on the workspace's single local
+// Compose topology. The unified frontend already routes to basic-platform-local/project-api;
+// starting the subsystem's standalone Compose file as well would create a second project-api
+// network alias backed by a different MySQL volume and make requests non-deterministic.
+func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedProjectStack(ctx context.Context) error {
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "project-mysql"); err != nil {
+		return err
+	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "project-migrate"); err != nil {
+		return err
+	}
+	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--build", "--no-deps", "project-api")
 }
 
 // rebuildIntegratedCustomerStack publishes the application-owned authorization catalog before
@@ -575,7 +733,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedPortalStack
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose(ctx context.Context, arguments ...string) error {
-	platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, err := provisioner.integratedComposeConfiguration()
+	platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment, err := provisioner.integratedComposeConfiguration()
 	if err != nil {
 		return err
 	}
@@ -586,6 +744,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"--env-file", contractEnvironment,
 		"--env-file", customerEnvironment,
 		"--env-file", portalEnvironment,
+		"--env-file", projectEnvironment,
 		"-f", composeFile,
 	}
 	composeArguments = append(composeArguments, arguments...)
@@ -595,13 +754,14 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"CONTRACT_RUNTIME_ENV_FILE="+contractEnvironment,
 		"CUSTOMER_RUNTIME_ENV_FILE="+customerEnvironment,
 		"PORTAL_RUNTIME_ENV_FILE="+portalEnvironment,
+		"PROJECT_RUNTIME_ENV_FILE="+projectEnvironment,
 		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
 		"SUBSYSTEM_HOST_PROJECTS_ROOT="+workspaceRoot,
 	)
 	return provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
 }
 
-func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfiguration() (string, string, string, string, string, string, string, error) {
+func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfiguration() (string, string, string, string, string, string, string, string, error) {
 	platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
 	workspaceRoot := filepath.Dir(platformRoot)
 	composeFile := filepath.Join(platformRoot, "compose.local.yaml")
@@ -609,9 +769,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfigurati
 	contractEnvironment := filepath.Join(workspaceRoot, integratedContractApplicationCode, ".env.local")
 	customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
 	portalEnvironment := filepath.Join(platformRoot, "docker", ".env.portal.local")
+	projectEnvironment := filepath.Join(workspaceRoot, integratedProjectApplicationCode, ".env.local")
 	for _, required := range []string{composeFile, platformEnvironment, contractEnvironment, customerEnvironment} {
 		if info, err := os.Stat(required); err != nil || info.IsDir() {
-			return "", "", "", "", "", "", "", provisioningError("integrated subsystem Compose configuration is unavailable")
+			return "", "", "", "", "", "", "", "", provisioningError("integrated subsystem Compose configuration is unavailable")
 		}
 	}
 	// Existing local installations predate customer_portal. Other integrated subsystems must
@@ -620,7 +781,13 @@ func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfigurati
 	if info, err := os.Stat(portalEnvironment); err != nil || info.IsDir() {
 		portalEnvironment = os.DevNull
 	}
-	return platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, nil
+	// Existing local installations predate project_management. The project environment file is
+	// written by Provision before the integrated stack is started; treat a missing file the same
+	// as Portal so pre-existing workspaces keep working until the first onboarding.
+	if info, err := os.Stat(projectEnvironment); err != nil || info.IsDir() {
+		projectEnvironment = os.DevNull
+	}
+	return platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment, nil
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) subsystemEnvironmentPaths(applicationCode, projectDirectory string) (string, string, error) {
@@ -657,7 +824,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) subsystemEnvironmentPaths(ap
 
 func isIntegratedSubsystem(applicationCode string) bool {
 	switch strings.TrimSpace(applicationCode) {
-	case integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode:
+	case integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode:
 		return true
 	default:
 		return false
@@ -666,6 +833,7 @@ func isIntegratedSubsystem(applicationCode string) bool {
 
 func requiredPortalServiceCredentials(input application.SubsystemProvisioningInput) (map[string]application.SubsystemServiceCredential, error) {
 	purposes := []string{
+		application.ServiceCredentialAuditIngest,
 		application.ServiceCredentialExternalUserProvision,
 		application.ServiceCredentialApplicationRoleAssign,
 		application.ServiceCredentialApplicationRoleRevoke,
@@ -1112,7 +1280,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Cont
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 
-	platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, err := provisioner.integratedComposeConfiguration()
+	platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment, err := provisioner.integratedComposeConfiguration()
 	if err != nil {
 		return err
 	}
@@ -1130,7 +1298,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Cont
 		_ = os.Remove(overrideFile)
 		_ = os.Remove(customerOverrideFile)
 		return provisioner.runAccessCompose(ctx, platformRoot, workspaceRoot, composeFile,
-			platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment,
+			platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment,
 			placeholderFile, placeholderFile, "127.0.0.1", port,
 			"up", "-d", "--no-deps", "--wait", "api", "contract-api", "customer-api", "frontend")
 	}
@@ -1139,12 +1307,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Cont
 		return err
 	}
 	return provisioner.runAccessCompose(ctx, platformRoot, workspaceRoot, composeFile,
-		platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment,
+		platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment,
 		overrideFile, customerOverrideFile, "0.0.0.0", port,
 		"up", "-d", "--no-deps", "--wait", "api", "contract-api", "customer-api", "frontend")
 }
 
-func (provisioner *LocalDockerSubsystemProvisioner) runAccessCompose(ctx context.Context, platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, lanOverride, customerOverride, bindAddress, port string, arguments ...string) error {
+func (provisioner *LocalDockerSubsystemProvisioner) runAccessCompose(ctx context.Context, platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment, lanOverride, customerOverride, bindAddress, port string, arguments ...string) error {
 	composeArguments := []string{
 		"compose", "--project-name", provisioner.config.PlatformComposeProject,
 		"--project-directory", platformRoot,
@@ -1152,6 +1320,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) runAccessCompose(ctx context
 		"--env-file", contractEnvironment,
 		"--env-file", customerEnvironment,
 		"--env-file", portalEnvironment,
+		"--env-file", projectEnvironment,
 		"-f", composeFile,
 	}
 	composeArguments = append(composeArguments, arguments...)
@@ -1165,6 +1334,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) runAccessCompose(ctx context
 		"CUSTOMER_LAN_OVERRIDE_ENV_FILE="+customerOverride,
 		"PORTAL_RUNTIME_ENV_FILE="+portalEnvironment,
 		"PORTAL_LAN_OVERRIDE_ENV_FILE="+filepath.Join(platformRoot, "docker", ".env.lan.disabled"),
+		"PROJECT_RUNTIME_ENV_FILE="+projectEnvironment,
+		"PROJECT_LAN_OVERRIDE_ENV_FILE="+lanOverride,
 		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
 		"SUBSYSTEM_HOST_PROJECTS_ROOT="+workspaceRoot,
 		"FRONTEND_BIND_ADDRESS="+bindAddress,

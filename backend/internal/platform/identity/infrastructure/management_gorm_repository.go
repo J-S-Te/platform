@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -292,37 +293,76 @@ func (repository *GORMRepository) GetUser(ctx context.Context, tenantID, userID 
 
 // UpdateUser applies an optimistic-lock update with an explicit persistence-field whitelist.
 func (repository *GORMRepository) UpdateUser(ctx context.Context, input application.UserUpdateInput, mobileCiphertext, mobileHash []byte) (domain.User, error) {
-	updates := map[string]any{
-		"display_name": input.DisplayName,
-		"updated_at":   time.Now().UTC(),
-		"updated_by":   input.OperatorID,
-		"version":      gorm.Expr("version + 1"),
-	}
-	if input.EmployeeNo != nil {
-		updates["employee_no"] = nullableString(input.EmployeeNo)
-	}
-	if input.PMSPersonID != nil {
-		updates["pms_person_id"] = nullableString(input.PMSPersonID)
-	}
-	if input.Email != nil {
-		updates["email"] = nullableString(input.Email)
-	}
-	if input.Status != nil {
-		updates["status"] = *input.Status
-	}
-	if input.UpdateMobile {
-		updates["mobile_ciphertext"] = nullableBytes(mobileCiphertext)
-		updates["mobile_hash"] = nullableBytes(mobileHash)
-	}
-
-	result := repository.database.WithContext(ctx).Model(&userModel{}).
-		Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.UserID, input.Version).
-		Updates(updates)
-	if result.Error != nil {
-		return domain.User{}, mapWriteError(result.Error, "update user")
-	}
-	if result.RowsAffected == 0 {
-		return domain.User{}, repository.versionedUserError(ctx, input.TenantID, input.UserID)
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var existing userModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", input.TenantID, input.UserID).First(&existing)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock user for update: %w", result.Error)
+		}
+		if existing.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		now := time.Now().UTC()
+		updates := map[string]any{
+			"display_name": input.DisplayName,
+			"updated_at":   now,
+			"updated_by":   input.OperatorID,
+			"version":      gorm.Expr("version + 1"),
+		}
+		if input.EmployeeNo != nil {
+			updates["employee_no"] = nullableString(input.EmployeeNo)
+		}
+		if input.PMSPersonID != nil {
+			updates["pms_person_id"] = nullableString(input.PMSPersonID)
+		}
+		if input.Email != nil {
+			updates["email"] = nullableString(input.Email)
+		}
+		if input.Status != nil {
+			updates["status"] = *input.Status
+		}
+		if input.UpdateMobile {
+			updates["mobile_ciphertext"] = nullableBytes(mobileCiphertext)
+			updates["mobile_hash"] = nullableBytes(mobileHash)
+		}
+		result = transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.UserID, input.Version).Updates(updates)
+		if result.Error != nil {
+			return mapWriteError(result.Error, "update user")
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrVersionConflict
+		}
+		if input.Status != nil && *input.Status == domain.StatusDisabled && existing.Status != domain.StatusDisabled {
+			accountIDs := transaction.Model(&accountModel{}).Select("id").Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID)
+			if err := transaction.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID).
+				Updates(map[string]any{"username": nil, "status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "disable user accounts")
+			}
+			if err := transaction.Model(&passwordCredentialModel{}).Where("account_id IN (?) AND status <> ?", accountIDs, domain.StatusDisabled).
+				Updates(map[string]any{"status": domain.StatusDisabled, "updated_at": now}).Error; err != nil {
+				return fmt.Errorf("disable user password credentials: %w", err)
+			}
+			if err := transaction.Model(&membershipModel{}).Where("tenant_id = ? AND user_id = ? AND status <> ?", input.TenantID, input.UserID, domain.StatusDisabled).
+				Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "disable user memberships")
+			}
+			if err := transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ?", input.TenantID, input.UserID).
+				Updates(map[string]any{"primary_org_id": nil, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "clear user primary organization")
+			}
+			if err := transaction.Model(&sessionModel{}).Where("tenant_id = ? AND account_id IN (?) AND status = ? AND revoked_at IS NULL", input.TenantID, accountIDs, domain.StatusActive).
+				Updates(map[string]any{"status": domain.StatusDisabled, "revoked_at": now, "revoke_reason": "USER_DISABLED"}).Error; err != nil {
+				return fmt.Errorf("revoke disabled user sessions: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.User{}, err
 	}
 	return repository.GetUser(ctx, input.TenantID, input.UserID)
 }
@@ -978,6 +1018,9 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 		if err := ensureMembershipReferences(ctx, transaction, input); err != nil {
 			return err
 		}
+		if err := lockMembershipUsers(ctx, transaction, input.TenantID, input.UserID); err != nil {
+			return err
+		}
 		isPrimary := input.MembershipType == domain.MembershipPrimary
 		if isPrimary {
 			if err := ensureNoOtherPrimary(ctx, transaction, input.TenantID, input.UserID, ""); err != nil {
@@ -1040,6 +1083,9 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 			return fmt.Errorf("get membership before update: %w", result.Error)
 		}
 		if err := ensureMembershipReferences(ctx, transaction, input.MembershipCreateInput); err != nil {
+			return err
+		}
+		if err := lockMembershipUsers(ctx, transaction, input.TenantID, existing.UserID, input.UserID); err != nil {
 			return err
 		}
 
@@ -1191,6 +1237,38 @@ func ensureNoOtherPrimary(ctx context.Context, database *gorm.DB, tenantID, user
 	}
 	if total > 0 {
 		return application.ErrConflict
+	}
+	return nil
+}
+
+// lockMembershipUsers serializes all primary-membership changes for the affected users.
+// IDs are locked in deterministic order so moving an appointment between users cannot
+// deadlock with another concurrent move in the opposite direction.
+func lockMembershipUsers(ctx context.Context, database *gorm.DB, tenantID string, userIDs ...string) error {
+	ids := make([]string, 0, len(userIDs))
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		var user userModel
+		result := database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ? AND status = ?", tenantID, id, domain.StatusActive).First(&user)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock membership user: %w", result.Error)
+		}
 	}
 	return nil
 }

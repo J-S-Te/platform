@@ -1,8 +1,8 @@
 name: basic-platform-local
 
 # 统一本地编排：一个 frontend 容器承载基础平台、合同管理、客户与商机管理、
-# 客户自助门户四个前端模块；api、contract-api、customer-api、portal-api 分别
-# 承载四个彼此隔离的后端进程和运行配置。
+# 客户自助门户、项目管理系统五个前端模块；api、contract-api、customer-api、
+# portal-api、project-api 分别承载五个彼此隔离的后端进程和运行配置。
 # MySQL、Temporal、迁移任务和隔离部署助手属于基础设施/一次性任务，不对宿主机发布业务端口。
 # LAN 临时访问使用单独的覆盖文件，不修改本地或生产环境的常规环境文件。
 # 默认加载空占位文件；scripts/lan-access.sh enable 时才会替换为临时覆盖文件。
@@ -22,6 +22,10 @@ x-portal-runtime-env: &portal-runtime-env
   - ${PORTAL_RUNTIME_ENV_FILE:-./docker/.env.portal.local}
   - ${PORTAL_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
 
+x-project-runtime-env: &project-runtime-env
+  - ${PROJECT_RUNTIME_ENV_FILE:-../project_management/.env.local}
+  - ${PROJECT_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
+
 # 数据库与一次性迁移/初始化任务不需要 LAN 覆盖环境，固定使用常规运行时环境，
 # 避免"对外访问"配置应用时把 MySQL、迁移或 Worker 容器一并重建。
 x-platform-db-env: &platform-db-env
@@ -32,6 +36,9 @@ x-contract-db-env: &contract-db-env
 
 x-customer-db-env: &customer-db-env
   - ${CUSTOMER_RUNTIME_ENV_FILE:-./docker/.env.customer.local}
+
+x-project-db-env: &project-db-env
+  - ${PROJECT_RUNTIME_ENV_FILE:-../project_management/.env.local}
 
 # 基础平台迁移、初始化和受控部署助手复用同一个后端镜像，但只有 api 服务拥有构建定义。
 # 这样 Compose 每次部署只构建一次基础平台后端镜像，不会把辅助任务误认为独立业务镜像。
@@ -50,6 +57,10 @@ x-customer-backend-runtime: &customer-backend-runtime
 # portal-server，不把两个 HTTP 进程打包进同一业务容器。
 x-portal-backend-runtime: &portal-backend-runtime
   image: customer-portal/backend:local
+
+# 项目管理系统使用独立仓库、独立镜像和容器；API 与 Temporal Worker 位于同一后端运行镜像中。
+x-project-backend-runtime: &project-backend-runtime
+  image: project-management/backend:local
 
 services:
   mysql:
@@ -266,6 +277,11 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       CONTRACT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
+      CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
+      CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
+      CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    volumes:
+      - ./data/keys:/app/data/keys:ro
     depends_on:
       contract-mysql:
         condition: service_healthy
@@ -283,6 +299,85 @@ services:
           - contract-api
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  project-mysql:
+    image: mysql:8.4
+    profiles: ["project"]
+    environment:
+      MYSQL_DATABASE: project_management
+      MYSQL_USER: project
+      MYSQL_PASSWORD: ${PROJECT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${PROJECT_MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - project_mysql_local_data:/var/lib/mysql
+      - ../project_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      default:
+        aliases:
+          - project-mysql
+    restart: unless-stopped
+
+  # 使用项目后端内置迁移器按版本执行完整迁移，禁止绕过 schema 迁移表手工挑选 SQL。
+  project-migrate:
+    <<: *project-backend-runtime
+    profiles: ["project"]
+    env_file: *project-db-env
+    environment:
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+    entrypoint: ["/usr/local/bin/project-migrate"]
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  # 项目管理系统后端容器：API 与 Temporal Worker 运行在同一容器中。
+  project-api:
+    <<: *project-backend-runtime
+    profiles: ["project"]
+    build:
+      context: ../project_management
+    env_file: *project-runtime-env
+    environment:
+      PM_HTTP_ADDR: :8082
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      PLATFORM_BASE_URL: http://platform-api:8080
+      OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: project-management
+      PROJECT_RUN_WORKER_WITH_API: "true"
+      GIN_MODE: release
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+      project-migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    expose:
+      - "8082"
+    networks:
+      default:
+        aliases:
+          - project-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -359,6 +454,21 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # 商机签约事件到合同系统受理箱的常驻投递进程，复用 CRM 后端镜像中的 worker。
+  contract-transfer-worker:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    command: ["./contract-transfer-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["customer"]
+    restart: unless-stopped
+
   # 售前投递进程独立于 CRM API 部署。审批、统一认证和 PMS 地址只从指定的
   # Worker 环境文件注入，可以按环境指向本地 HTTPS 服务或远端服务器；Compose
   # 不提供任何地址默认值。显式启用 profile 才会启动，缺配置时保持失败关闭。
@@ -377,6 +487,18 @@ services:
         condition: service_healthy
       customer-migrate:
         condition: service_completed_successfully
+    profiles: ["presale-worker"]
+    restart: unless-stopped
+
+  # 本地售前联调桩：提供 OAuth Token、审批开始/动作和 PMS 工时接口。
+  # 仅用于开发联调，正式环境必须使用真实审批/PMS 服务并保持 HTTPS。
+  presale-integration-mock:
+    image: customer-opportunity/presale-integration-mock:local
+    build:
+      context: ../customer_and_opportunity
+      target: presale-integration-mock-runtime
+    ports:
+      - "127.0.0.1:${PRESALE_MOCK_PORT:-18099}:8092"
     profiles: ["presale-worker"]
     restart: unless-stopped
 
@@ -464,6 +586,8 @@ services:
         VITE_LOGIN_SUCCESS_URL: /
         VITE_CONTRACT_PUBLIC_PATH_PREFIX: /contract_management
         VITE_CONTRACT_API_BASE_URL: /contract_management/api/v1
+        VITE_PROJECT_PUBLIC_PATH_PREFIX: /project_management
+        VITE_PROJECT_API_BASE_URL: /project_management/api/v1
         VITE_CRM_PUBLIC_PATH_PREFIX: /customer-opportunity
         VITE_CRM_API_BASE_URL: /customer-opportunity/api/v1
         VITE_CUSTOMER_PORTAL_PUBLIC_PATH_PREFIX: /customer-portal
@@ -492,5 +616,7 @@ volumes:
     name: basic-platform-local-customer-mysql-data
   portal_mysql_local_data:
     name: basic-platform-local-portal-mysql-data
+  project_mysql_local_data:
+    name: basic-platform-local-project-mysql-data
   subsystem_provisioner_socket:
     name: basic-platform-local-provisioner-socket
