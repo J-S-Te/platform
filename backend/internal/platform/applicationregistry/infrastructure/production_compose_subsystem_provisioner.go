@@ -294,6 +294,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.writeRuntimeFixedValues(input); err != nil {
 		return err
 	}
+	if err := target.validateRuntimeIntegrationConfiguration(); err != nil {
+		return err
+	}
 	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
 	defer cancel()
 	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
@@ -302,6 +305,30 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	}
 	defer releaseProvisioningFileLock(lock)
 	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
+}
+
+// validateRuntimeIntegrationConfiguration checks feature flags whose credentials are
+// intentionally preserved across Update/Retry. Update does not receive one-time OAuth
+// secrets, so starting Compose with an old/incomplete runtime file would only produce a
+// misleading container health-check failure. Fail before touching Docker and identify the
+// exact keys an operator must restore from the secret store.
+func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration() error {
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return provisioningError("read production subsystem runtime configuration")
+		}
+		values := parseEnvironmentValues(string(content))
+		if strings.EqualFold(strings.TrimSpace(values["CONTRACT_VERIFICATION_ENABLED"]), "true") {
+			for _, key := range []string{"CONTRACT_SUMMARY_URL", "CONTRACT_SUMMARY_TOKEN_URL", "CONTRACT_SUMMARY_CLIENT_ID", "CONTRACT_SUMMARY_CLIENT_SECRET"} {
+				if strings.TrimSpace(values[key]) == "" || strings.HasPrefix(values[key], "PENDING_") {
+					return provisioningError("production subsystem runtime configuration is incomplete: " + key + " is required when CONTRACT_VERIFICATION_ENABLED=true")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Teardown 仅停止清单列出的运行服务，保留数据库、备份、运行时秘密和发布指针。
