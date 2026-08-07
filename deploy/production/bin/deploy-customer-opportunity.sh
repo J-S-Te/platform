@@ -218,6 +218,19 @@ if ! docker pull "$portal_image_ref" || ! compose config --quiet; then
   exit 1
 fi
 
+# 角色/权限目录必须与实际运行的不可变 CRM 镜像完全一致。不要依赖人工维护的
+# runtime/customer.env 旧值：从本次镜像中的 authz-catalog 读取兼容哈希，并通过
+# Compose environment 覆盖传入 customer-api，随后由发布步骤同步到基础平台。
+embedded_crm_hash="$(docker run --rm --entrypoint ./authz-catalog "$crm_image_ref" print crm 2>/dev/null \
+  | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
+if [[ ! "$embedded_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+  restore_release
+  echo "无法从 CRM 不可变镜像读取有效授权目录哈希" >&2
+  exit 1
+fi
+export OIDC_ROLE_CONFIG_HASH="$embedded_crm_hash"
+echo "使用 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
+
 if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready; then
   release_committed=true
   echo "CRM/Portal 镜像已安全暂存；运行凭据尚未完整配置，未启动数据库迁移或业务服务。"
@@ -325,6 +338,14 @@ if ! compose up -d --no-deps customer-api || \
   rollback_runtime
   rm -f "$previous_release"
   echo "CRM 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+  exit 1
+fi
+echo "自动发布 CRM 授权目录（角色及有效角色数量策略）"
+if ! compose --profile customer-release run --rm --no-deps customer-api ./authz-catalog publish crm; then
+  compose logs --tail 100 customer-api >&2 || true
+  rollback_runtime
+  rm -f "$previous_release"
+  echo "CRM 授权目录发布失败；已恢复运行时配置，未继续切换 Portal" >&2
   exit 1
 fi
 

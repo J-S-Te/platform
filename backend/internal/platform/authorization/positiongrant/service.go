@@ -65,6 +65,41 @@ type TemplateRoleInput struct {
 	Status        string     `json:"status,omitempty"`
 }
 
+type RoleInheritanceInput struct {
+	SourceRoleID        string     `json:"source_role_id"`
+	TargetApplicationID string     `json:"target_application_id"`
+	TargetRoleID        string     `json:"target_role_id"`
+	ScopeType           string     `json:"scope_type,omitempty"`
+	ScopeID             string     `json:"scope_id,omitempty"`
+	ValidFrom           *time.Time `json:"valid_from,omitempty"`
+	ValidUntil          *time.Time `json:"valid_until,omitempty"`
+	Status              string     `json:"status,omitempty"`
+}
+
+type RoleInheritanceView struct {
+	MappingID             string     `json:"mapping_id"`
+	SourceApplicationID   string     `json:"source_application_id"`
+	SourceRoleID          string     `json:"source_role_id"`
+	SourceRoleCode        string     `json:"source_role_code"`
+	SourceRoleName        string     `json:"source_role_name"`
+	TargetApplicationID   string     `json:"target_application_id"`
+	TargetApplicationCode string     `json:"target_application_code"`
+	TargetApplicationName string     `json:"target_application_name"`
+	TargetRoleID          string     `json:"target_role_id"`
+	TargetRoleCode        string     `json:"target_role_code"`
+	TargetRoleName        string     `json:"target_role_name"`
+	ScopeType             string     `json:"scope_type"`
+	ScopeID               string     `json:"scope_id,omitempty"`
+	ValidFrom             *time.Time `json:"valid_from,omitempty"`
+	ValidUntil            *time.Time `json:"valid_until,omitempty"`
+	Status                string     `json:"status"`
+}
+
+type RoleInheritanceReplaceInput struct {
+	SourceRoleID string                 `json:"source_role_id"`
+	Mappings     []RoleInheritanceInput `json:"mappings"`
+}
+
 // TemplateInput deliberately does not accept a code. Template codes are immutable system
 // identifiers generated from the template ULID when the template is created.
 type TemplateInput struct {
@@ -228,6 +263,16 @@ type templateRoleModel struct {
 	CreatedBy, UpdatedBy                                                        *string
 }
 
+type roleInheritanceModel struct {
+	ID, TenantID, SourceApplicationID, SourceRoleID, TargetApplicationID, TargetRoleID, ScopeType, ScopeID, Status string
+	ValidFrom, ValidUntil                                                                                          *time.Time
+	Version                                                                                                        uint64
+	CreatedAt, UpdatedAt                                                                                           time.Time
+	CreatedBy, UpdatedBy                                                                                           *string
+}
+
+func (roleInheritanceModel) TableName() string { return "authz_role_inheritance_mapping" }
+
 func (templateRoleModel) TableName() string { return "authz_position_grant_template_role" }
 
 type assignmentModel struct {
@@ -302,6 +347,138 @@ func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTarg
 		})
 	}
 	return targets
+}
+
+// ListRoleInheritances returns the durable platform-role to subsystem-role mappings.
+func (s *Service) ListRoleInheritances(ctx context.Context, tenantID string) ([]RoleInheritanceView, error) {
+	var rows []struct {
+		roleInheritanceModel
+		SourceRoleCode        string `gorm:"column:source_role_code"`
+		SourceRoleName        string `gorm:"column:source_role_name"`
+		TargetApplicationCode string `gorm:"column:target_application_code"`
+		TargetApplicationName string `gorm:"column:target_application_name"`
+		TargetRoleCode        string `gorm:"column:target_role_code"`
+		TargetRoleName        string `gorm:"column:target_role_name"`
+	}
+	err := s.db.WithContext(ctx).Table("authz_role_inheritance_mapping AS mapping").Select("mapping.*, source_role.code AS source_role_code, source_role.name AS source_role_name, target_application.code AS target_application_code, target_application.name AS target_application_name, target_role.code AS target_role_code, target_role.name AS target_role_name").
+		Joins("JOIN authz_role AS source_role ON source_role.tenant_id=mapping.tenant_id AND source_role.application_id=mapping.source_application_id AND source_role.id=mapping.source_role_id").
+		Joins("JOIN platform_application AS target_application ON target_application.tenant_id=mapping.tenant_id AND target_application.id=mapping.target_application_id").
+		Joins("JOIN authz_role AS target_role ON target_role.tenant_id=mapping.tenant_id AND target_role.application_id=mapping.target_application_id AND target_role.id=mapping.target_role_id").
+		Where("mapping.tenant_id=?", tenantID).Order("source_role.code, target_application.code, target_role.code, mapping.id").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list role inheritance mappings: %w", err)
+	}
+	items := make([]RoleInheritanceView, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, RoleInheritanceView{MappingID: row.ID, SourceApplicationID: row.SourceApplicationID, SourceRoleID: row.SourceRoleID, SourceRoleCode: row.SourceRoleCode, SourceRoleName: row.SourceRoleName, TargetApplicationID: row.TargetApplicationID, TargetApplicationCode: row.TargetApplicationCode, TargetApplicationName: row.TargetApplicationName, TargetRoleID: row.TargetRoleID, TargetRoleCode: row.TargetRoleCode, TargetRoleName: row.TargetRoleName, ScopeType: row.ScopeType, ScopeID: row.ScopeID, ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil, Status: row.Status})
+	}
+	return items, nil
+}
+
+func (s *Service) ReplaceRoleInheritances(ctx context.Context, tenantID, operatorID string, input RoleInheritanceReplaceInput) ([]RoleInheritanceView, error) {
+	input.SourceRoleID = strings.TrimSpace(input.SourceRoleID)
+	if input.SourceRoleID == "" || len(input.Mappings) > 200 {
+		return nil, ErrValidation
+	}
+	now := s.clock.Now().UTC()
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var source struct{ ID, ApplicationID, RoleType, Status string }
+		if err := tx.Table("authz_role").Where("tenant_id=? AND id=?", tenantID, input.SourceRoleID).Take(&source).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrValidation
+			}
+			return err
+		}
+		var sourceApp struct{ Code, Status string }
+		if err := tx.Table("platform_application").Where("tenant_id=? AND id=?", tenantID, source.ApplicationID).Take(&sourceApp).Error; err != nil {
+			return err
+		}
+		if source.Status != activeStatus || source.RoleType != roleTypePlatform || sourceApp.Code != "platform" || sourceApp.Status != activeStatus {
+			return validation("source role must be an active platform role")
+		}
+		desired := map[string]RoleInheritanceInput{}
+		for _, mapping := range input.Mappings {
+			mapping.SourceRoleID = input.SourceRoleID
+			mapping.TargetApplicationID = strings.TrimSpace(mapping.TargetApplicationID)
+			mapping.TargetRoleID = strings.TrimSpace(mapping.TargetRoleID)
+			mapping.ScopeType = strings.ToUpper(strings.TrimSpace(mapping.ScopeType))
+			mapping.ScopeID = strings.TrimSpace(mapping.ScopeID)
+			mapping.Status = strings.ToUpper(strings.TrimSpace(mapping.Status))
+			if mapping.ScopeType == "" {
+				mapping.ScopeType = scopeTenant
+			}
+			if mapping.Status == "" {
+				mapping.Status = activeStatus
+			}
+			if mapping.TargetApplicationID == "" || mapping.TargetRoleID == "" || mapping.Status != activeStatus || (mapping.ScopeType != scopeTenant && mapping.ScopeType != scopeEnvironment) || (mapping.ScopeType == scopeEnvironment && mapping.ScopeID == "") {
+				return ErrValidation
+			}
+			var count int64
+			if err := tx.Table("authz_role AS role").Joins("JOIN platform_application AS app ON app.tenant_id=role.tenant_id AND app.id=role.application_id AND app.status=?", activeStatus).Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id=role.tenant_id AND catalog.application_id=role.application_id").Where("role.tenant_id=? AND role.id=? AND role.application_id=? AND role.status=? AND role.role_type=? AND catalog.sync_status=?", tenantID, mapping.TargetRoleID, mapping.TargetApplicationID, activeStatus, roleTypeApplication, catalogStatusSynced).Count(&count).Error; err != nil {
+				return err
+			}
+			if count != 1 {
+				return validation("target role must be an active synchronized subsystem role")
+			}
+			key := mapping.TargetApplicationID + "\x00" + mapping.TargetRoleID + "\x00" + mapping.ScopeType + "\x00" + mapping.ScopeID
+			if _, ok := desired[key]; ok {
+				return validation("role inheritance mapping must not repeat the same target role")
+			}
+			desired[key] = mapping
+		}
+		var existing []roleInheritanceModel
+		if err := tx.Where("tenant_id=? AND source_role_id=?", tenantID, input.SourceRoleID).Find(&existing).Error; err != nil {
+			return err
+		}
+		byKey := map[string]roleInheritanceModel{}
+		for _, row := range existing {
+			byKey[row.TargetApplicationID+"\x00"+row.TargetRoleID+"\x00"+row.ScopeType+"\x00"+row.ScopeID] = row
+		}
+		for _, old := range existing {
+			if _, ok := desired[old.TargetApplicationID+"\x00"+old.TargetRoleID+"\x00"+old.ScopeType+"\x00"+old.ScopeID]; !ok && old.Status == activeStatus {
+				if err := tx.Model(&roleInheritanceModel{}).Where("id=?", old.ID).Updates(map[string]any{"status": disabledStatus, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		for key, mapping := range desired {
+			if old, ok := byKey[key]; ok {
+				if err := tx.Model(&roleInheritanceModel{}).Where("id=?", old.ID).Updates(map[string]any{"status": activeStatus, "valid_from": mapping.ValidFrom, "valid_until": mapping.ValidUntil, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+					return err
+				}
+				continue
+			}
+			id, err := s.ids.New(now)
+			if err != nil {
+				return err
+			}
+			row := roleInheritanceModel{ID: id, TenantID: tenantID, SourceApplicationID: source.ApplicationID, SourceRoleID: input.SourceRoleID, TargetApplicationID: mapping.TargetApplicationID, TargetRoleID: mapping.TargetRoleID, ScopeType: mapping.ScopeType, ScopeID: mapping.ScopeID, Status: activeStatus, ValidFrom: mapping.ValidFrom, ValidUntil: mapping.ValidUntil, Version: 1, CreatedAt: now, UpdatedAt: now, CreatedBy: &operatorID, UpdatedBy: &operatorID}
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		// Mapping changes must take effect for already assigned templates immediately;
+		// otherwise existing positions would keep stale materialized subsystem bindings
+		// until an unrelated template or assignment change occurs.
+		var assignments []assignmentModel
+		if err := tx.Where("tenant_id=? AND status=?", tenantID, activeStatus).Find(&assignments).Error; err != nil {
+			return err
+		}
+		changedApps := map[string]struct{}{}
+		for _, assignment := range assignments {
+			if err := s.syncAssignment(ctx, tx, tenantID, assignment.ID, operatorID, now, changedApps); err != nil {
+				return err
+			}
+		}
+		if err := bumpChanged(tx, tenantID, changedApps, now, "role inheritance mapping synchronized"); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.ListRoleInheritances(ctx, tenantID)
 }
 
 // ListAuthorizationPositions returns active positions for the same role-binding
@@ -395,14 +572,11 @@ func (s *Service) Create(ctx context.Context, tenantID, operatorID string, input
 		return TemplateView{}, fmt.Errorf("generate template ID: %w", err)
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := s.validateItems(ctx, tx, tenantID, input.Roles); err != nil {
-			return err
-		}
 		row := templateModel{ID: id, TenantID: tenantID, Code: generatedTemplateCode(id), Name: input.Name, Description: input.Description, Status: input.Status, ValidFrom: input.ValidFrom, ValidUntil: input.ValidUntil, Version: 1, CreatedAt: now, UpdatedAt: now, CreatedBy: &operatorID, UpdatedBy: &operatorID}
 		if err := tx.Create(&row).Error; err != nil {
 			return writeError(err, "create position authorization template")
 		}
-		return s.upsertTemplateItems(tx, tenantID, id, operatorID, input.Roles, now)
+		return s.saveTemplateItems(ctx, tx, tenantID, id, operatorID, input.Roles, now)
 	})
 	if err != nil {
 		return TemplateView{}, err
@@ -427,19 +601,12 @@ func (s *Service) Update(ctx context.Context, tenantID, operatorID, templateID s
 		if input.Version == 0 || existing.Version != input.Version {
 			return ErrConflict
 		}
-		if err := s.validateItems(ctx, tx, tenantID, input.Roles); err != nil {
-			return err
-		}
 		// 模板编码由系统生成且不可变；更新只能调整展示信息、有效期和角色集合，避免外部
 		// 引用因重命名或编辑模板内容而失效。
-		result = tx.Model(&templateModel{}).Where("tenant_id=? AND id=? AND version=?", tenantID, templateID, input.Version).Updates(map[string]any{"name": input.Name, "description": input.Description, "status": input.Status, "valid_from": input.ValidFrom, "valid_until": input.ValidUntil, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")})
-		if result.Error != nil {
-			return writeError(result.Error, "update template")
+		if err := updateTemplateRecord(tx, tenantID, templateID, input, operatorID, now); err != nil {
+			return err
 		}
-		if result.RowsAffected == 0 {
-			return ErrConflict
-		}
-		if err := s.upsertTemplateItems(tx, tenantID, templateID, operatorID, input.Roles, now); err != nil {
+		if err := s.saveTemplateItems(ctx, tx, tenantID, templateID, operatorID, input.Roles, now); err != nil {
 			return err
 		}
 		return s.syncTemplateAssignments(ctx, tx, tenantID, templateID, operatorID, now, changedApps)
@@ -632,6 +799,30 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 	return preview, nil
 }
 
+func (s *Service) saveTemplateItems(ctx context.Context, tx *gorm.DB, tenantID, templateID, operatorID string, inputs []TemplateRoleInput, now time.Time) error {
+	if err := s.validateItems(ctx, tx, tenantID, inputs); err != nil {
+		return err
+	}
+	return s.upsertTemplateItems(tx, tenantID, templateID, operatorID, inputs, now)
+}
+
+func updateTemplateRecord(tx *gorm.DB, tenantID, templateID string, input TemplateInput, operatorID string, now time.Time) error {
+	result := tx.Model(&templateModel{}).
+		Where("tenant_id=? AND id=? AND version=?", tenantID, templateID, input.Version).
+		Updates(map[string]any{
+			"name": input.Name, "description": input.Description, "status": input.Status,
+			"valid_from": input.ValidFrom, "valid_until": input.ValidUntil,
+			"updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1"),
+		})
+	if result.Error != nil {
+		return writeError(result.Error, "update template")
+	}
+	if result.RowsAffected == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (s *Service) upsertTemplateItems(tx *gorm.DB, tenantID, templateID, operatorID string, inputs []TemplateRoleInput, now time.Time) error {
 	// 应用、角色和作用域共同构成模板条目的稳定身份。集合对账保留历史 ID 和审计链，
 	// 被移除条目仅停用；重新加入同一条目时复用原记录并更新版本。
@@ -639,19 +830,16 @@ func (s *Service) upsertTemplateItems(tx *gorm.DB, tenantID, templateID, operato
 	if err := tx.Where("tenant_id=? AND template_id=?", tenantID, templateID).Find(&existing).Error; err != nil {
 		return fmt.Errorf("load template roles: %w", err)
 	}
-	key := func(v TemplateRoleInput) string {
-		return v.ApplicationID + "\x00" + v.RoleID + "\x00" + v.ScopeType + "\x00" + v.ScopeID
-	}
 	byKey := map[string]templateRoleModel{}
 	for _, item := range existing {
-		byKey[item.ApplicationID+"\x00"+item.RoleID+"\x00"+item.ScopeType+"\x00"+item.ScopeID] = item
+		byKey[templateRoleKey(item.ApplicationID, item.RoleID, item.ScopeType, item.ScopeID)] = item
 	}
 	desired := map[string]TemplateRoleInput{}
 	for _, item := range inputs {
-		desired[key(item)] = item
+		desired[templateRoleKey(item.ApplicationID, item.RoleID, item.ScopeType, item.ScopeID)] = item
 	}
 	for _, old := range existing {
-		if _, ok := desired[old.ApplicationID+"\x00"+old.RoleID+"\x00"+old.ScopeType+"\x00"+old.ScopeID]; ok || old.Status == disabledStatus {
+		if _, ok := desired[templateRoleKey(old.ApplicationID, old.RoleID, old.ScopeType, old.ScopeID)]; ok || old.Status == disabledStatus {
 			continue
 		}
 		if err := tx.Model(&templateRoleModel{}).Where("id=?", old.ID).Updates(map[string]any{"status": disabledStatus, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
@@ -659,7 +847,7 @@ func (s *Service) upsertTemplateItems(tx *gorm.DB, tenantID, templateID, operato
 		}
 	}
 	for _, item := range inputs {
-		if old, ok := byKey[key(item)]; ok {
+		if old, ok := byKey[templateRoleKey(item.ApplicationID, item.RoleID, item.ScopeType, item.ScopeID)]; ok {
 			if err := tx.Model(&templateRoleModel{}).Where("id=?", old.ID).Updates(map[string]any{"status": item.Status, "valid_from": item.ValidFrom, "valid_until": item.ValidUntil, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return writeError(err, "update template role")
 			}
@@ -710,6 +898,12 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 		if err := tx.Where("tenant_id=? AND template_id=? AND status=?", tenantID, template.ID, activeStatus).Find(&items).Error; err != nil {
 			return fmt.Errorf("load active template roles: %w", err)
 		}
+		var expanded []templateRoleModel
+		expanded, err = s.expandInheritedTemplateRoles(ctx, tx, tenantID, items)
+		if err != nil {
+			return err
+		}
+		items = append(items, expanded...)
 	}
 	desired := map[string]templateRoleModel{}
 	for _, item := range items {
@@ -753,6 +947,34 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 		changedApps[item.ApplicationID] = struct{}{}
 	}
 	return nil
+}
+
+// expandInheritedTemplateRoles adds one synthetic template item per active mapping.
+// The mapping ID becomes origin_item_id, so changing a mapping can be reconciled and
+// audited without overwriting the source platform-role binding.
+func (s *Service) expandInheritedTemplateRoles(ctx context.Context, tx *gorm.DB, tenantID string, items []templateRoleModel) ([]templateRoleModel, error) {
+	platformRoles := make([]string, 0)
+	for _, item := range items {
+		var roleType string
+		if err := tx.WithContext(ctx).Table("authz_role").Select("role_type").Where("tenant_id=? AND application_id=? AND id=?", tenantID, item.ApplicationID, item.RoleID).Scan(&roleType).Error; err != nil {
+			return nil, err
+		}
+		if roleType == roleTypePlatform {
+			platformRoles = append(platformRoles, item.RoleID)
+		}
+	}
+	if len(platformRoles) == 0 {
+		return nil, nil
+	}
+	var mappings []roleInheritanceModel
+	if err := tx.WithContext(ctx).Where("tenant_id=? AND source_role_id IN ? AND status=?", tenantID, platformRoles, activeStatus).Find(&mappings).Error; err != nil {
+		return nil, fmt.Errorf("load role inheritance mappings: %w", err)
+	}
+	result := make([]templateRoleModel, 0, len(mappings))
+	for _, mapping := range mappings {
+		result = append(result, templateRoleModel{ID: mapping.ID, TenantID: tenantID, ApplicationID: mapping.TargetApplicationID, RoleID: mapping.TargetRoleID, ScopeType: mapping.ScopeType, ScopeID: mapping.ScopeID, Status: activeStatus, ValidFrom: mapping.ValidFrom, ValidUntil: mapping.ValidUntil, Version: 1})
+	}
+	return result, nil
 }
 func bumpChanged(tx *gorm.DB, tenantID string, applications map[string]struct{}, now time.Time, reason string) error {
 	// 一个事务可能改动同一应用的多条生成绑定；按应用去重后只推进一次 revision，
@@ -813,13 +1035,20 @@ func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID strin
 func validateTemplateRoleSet(items []TemplateRoleInput) error {
 	seen := map[string]struct{}{}
 	for _, item := range items {
-		key := item.ApplicationID + "\x00" + item.RoleID
+		key := templateRoleKey(item.ApplicationID, item.RoleID, "", "")
 		if _, ok := seen[key]; ok {
 			return validation("template roles must not repeat the same application role across scopes")
 		}
 		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+// templateRoleKey is the canonical identity of a template role. Scope is part of the
+// persisted item identity, while validateTemplateRoleSet intentionally passes empty scope
+// to reject assigning the same application role more than once across scopes.
+func templateRoleKey(applicationID, roleID, scopeType, scopeID string) string {
+	return applicationID + "\x00" + roleID + "\x00" + scopeType + "\x00" + scopeID
 }
 
 func activeRoleIDsByApplication(items []TemplateRoleInput) map[string]map[string]struct{} {

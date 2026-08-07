@@ -18,6 +18,8 @@ var (
 	ErrConflict = errors.New("identity resource conflict")
 	// ErrVersionConflict means the caller supplied a stale aggregate version.
 	ErrVersionConflict = errors.New("identity version conflict")
+	// ErrMembershipRequired prevents creating an IAM user that has no personnel appointment.
+	ErrMembershipRequired = errors.New("user must be created with an appointment")
 )
 
 const (
@@ -296,23 +298,17 @@ func (service *ManagementService) ListUsers(ctx context.Context, tenantID string
 // CreateUser creates one tenant-scoped natural person and assigns the built-in ordinary-user role.
 // Login accounts remain a separate lifecycle and are not provisioned by this operation.
 func (service *ManagementService) CreateUser(ctx context.Context, input UserCreateInput) (UserView, error) {
-	users, err := service.CreateUsersBatch(ctx, UserBatchCreateInput{
-		TenantID: input.TenantID, OperatorID: input.OperatorID, Items: []UserCreateInput{input},
-	})
-	if err != nil {
-		return UserView{}, err
-	}
-	return users[0], nil
+	return UserView{}, ErrMembershipRequired
 }
 
 // 批量创建先完成整批校验、手机号保护及角色引用规范化，再一次性交给仓储事务写入；
 // 任一用户失败会回滚整批。工号、普通用户基线角色绑定及应用角色绑定 ID 均由后端生成，
 // 请求方不能借自定义标识跳过基线授权或制造绑定碰撞。
 func (service *ManagementService) CreateUsersBatch(ctx context.Context, input UserBatchCreateInput) ([]UserView, error) {
-	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" ||
-		len(input.Items) == 0 || len(input.Items) > MaxBatchUserCreateItems {
+	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" || len(input.Items) == 0 || len(input.Items) > MaxBatchUserCreateItems {
 		return nil, ErrValidation
 	}
+	return nil, ErrMembershipRequired
 
 	now := service.clock.Now().UTC()
 	writes := make([]UserWrite, 0, len(input.Items))

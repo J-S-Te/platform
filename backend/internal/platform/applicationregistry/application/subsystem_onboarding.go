@@ -487,12 +487,15 @@ func normalizeSubsystemOnboardingInput(input SubsystemOnboardingInput) Subsystem
 		input.PathPrefix = "/" + input.ApplicationCode
 	}
 	// The local workspace ships customer_and_opportunity inside the unified frontend/Compose
-	// topology. Accept the values used by the original standalone prototype, but persist the
-	// canonical route and Docker network alias so OAuth callbacks and gateway routing agree.
-	if input.ApplicationCode == integratedCustomerApplicationCode &&
-		input.PathPrefix == legacyCustomerPathPrefix && input.UpstreamURL == legacyCustomerUpstreamURL {
-		input.PathPrefix = integratedCustomerPathPrefix
-		input.UpstreamURL = integratedCustomerUpstreamURL
+	// topology. Historical deployments may have migrated the upstream URL and path prefix
+	// independently, so normalize each known legacy value rather than requiring a legacy pair.
+	if input.ApplicationCode == integratedCustomerApplicationCode {
+		if input.PathPrefix == legacyCustomerPathPrefix {
+			input.PathPrefix = integratedCustomerPathPrefix
+		}
+		if input.UpstreamURL == legacyCustomerUpstreamURL {
+			input.UpstreamURL = integratedCustomerUpstreamURL
+		}
 	}
 	if input.ApplicationCode == integratedPortalApplicationCode {
 		if input.PathPrefix == "/customer_portal" {

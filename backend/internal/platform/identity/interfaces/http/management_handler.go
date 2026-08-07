@@ -870,6 +870,8 @@ func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request
 	switch {
 	case errors.Is(err, application.ErrValidation):
 		handler.validation(writer, request)
+	case errors.Is(err, application.ErrMembershipRequired):
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.Conflict)
 	case errors.Is(err, application.ErrNotFound):
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, application.ErrConflict):

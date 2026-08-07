@@ -278,6 +278,8 @@ func NewRouter(
 		}
 
 		if positionGrantHandler != nil {
+			apiRouter.GET("/role-inheritance-mappings", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListRoleInheritances))
+			apiRouter.PUT("/role-inheritance-mappings", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(positionGrantHandler.ReplaceRoleInheritances))
 			apiRouter.GET("/position-authorization-targets", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListAuthorizationTargets))
 			apiRouter.GET("/position-authorization-positions", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListAuthorizationPositions))
 			apiRouter.GET("/position-authorization-templates", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.List))

@@ -119,8 +119,8 @@ func TestManagementServiceCreateEmployeeRejectsInvalidAccountBeforeRepositoryWri
 		TenantID: "tenant-1", OperatorID: "operator-1", DisplayName: "张三", Status: domain.StatusActive,
 		Account: &EmployeeAccountCreateInput{AccountName: "ab", InitialPassword: "StrongPass!2026"},
 	})
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("error = %v, want ErrValidation", err)
+	if !errors.Is(err, ErrMembershipRequired) {
+		t.Fatalf("error = %v, want ErrMembershipRequired", err)
 	}
 	if repository.calls != 0 {
 		t.Fatalf("repository calls = %d, want 0", repository.calls)

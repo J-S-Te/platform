@@ -429,6 +429,8 @@ services:
       MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PLATFORM_BASE_URL: http://platform-api:8080
       OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+      # refresh-customer-api 从本次构建镜像自动读取并注入，避免角色目录哈希过期。
+      OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
       MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       GIN_MODE: release
     volumes:

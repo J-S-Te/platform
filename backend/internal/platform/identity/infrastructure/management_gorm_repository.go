@@ -16,7 +16,10 @@ import (
 
 // ListUsers reads tenant-scoped users and leaves mobile masking to the application layer.
 func (repository *GORMRepository) ListUsers(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.User], error) {
-	database := applyUserFilter(repository.database.WithContext(ctx).Model(&userModel{}), tenantID, query)
+	// IAM 用户就是任职关系中的人员主档案；没有任何任职记录的历史/外部孤儿用户
+	// 不进入用户模块，避免用户列表与人员列表出现两套事实来源。
+	database := applyUserFilter(repository.database.WithContext(ctx).Model(&userModel{}).
+		Where("EXISTS (SELECT 1 FROM iam_membership AS membership WHERE membership.tenant_id = iam_user.tenant_id AND membership.user_id = iam_user.id)"), tenantID, query)
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
 		return application.PageResult[domain.User]{}, fmt.Errorf("count users: %w", err)
