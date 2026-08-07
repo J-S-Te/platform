@@ -78,6 +78,6 @@ compose:
     service: customer-mysql
     name: customer_opportunity
   migrate_service: customer-migrate
-  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker]
-  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker]
+  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-presale-worker]
+  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-presale-worker]
   release_image_keys: [CUSTOMER_CRM_IMAGE]

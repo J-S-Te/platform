@@ -55,7 +55,7 @@ usage() {
   bash scripts/docker-local.sh start-presale-worker [--presale-worker-env-file PATH]
 
 up/restart 选项：
-  --build                         重新构建统一前端和四个独立后端镜像；Portal 未接入时只构建不启动
+  --build                         重新构建统一前端、独立后端和售前投递 Worker 镜像
   --pull                          兼容选项；启动前默认会串行拉取缺失的基础镜像
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
@@ -76,7 +76,7 @@ up/restart 选项：
   refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
   refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
   refresh-project-api   重建项目管理系统后端、执行项目迁移；仅在已完成应用接入后启动
-  start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳
+  start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳（up 已自动执行）
 
   各定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
   因此不会影响已经完成的子系统统一登录接入。
@@ -88,6 +88,7 @@ up/restart 选项：
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
   project-api   项目管理系统 API + Temporal Worker（完成 project_management/dev 接入后启用）
+  presale-worker 售前申请审批/PMS 投递 Worker（up 默认启动）
 
 首次启动若数据库中尚未存在超级管理员，必须提供三个管理员参数，或设置：
   BASIC_PLATFORM_ADMIN_DISPLAY_NAME
@@ -329,6 +330,7 @@ compose() {
             --env-file "$project_env_file" \
             --profile portal \
             --profile project \
+            --profile presale-worker \
             "$@"
         return
     fi
@@ -342,6 +344,7 @@ compose() {
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
             --profile portal \
+            --profile presale-worker \
             "$@"
         return
     fi
@@ -355,6 +358,7 @@ compose() {
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
             --profile project \
+            --profile presale-worker \
             "$@"
         return
     fi
@@ -366,6 +370,7 @@ compose() {
         --env-file "$customer_env_file" \
         --env-file "$portal_env_file" \
         --env-file "$project_env_file" \
+        --profile presale-worker \
         "$@"
 }
 
@@ -718,18 +723,18 @@ build_images() {
     # 对每个镜像重试，使普通的 `up --build` 在全新环境中也具备容错能力。
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
-    # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定为四个独立后端。
-    local build_services=(api contract-api customer-api portal-api project-api frontend)
+    # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
+    local build_services=(api contract-api customer-api portal-api project-api frontend presale-worker presale-integration-mock)
     if [[ "$force_build" == true ]]; then
-        log "重新构建一个统一前端及平台、合同、CRM、客户门户、项目管理系统五个独立后端镜像"
+        log "重新构建统一前端、平台/合同/CRM/门户/项目后端及售前投递 Worker 镜像"
     else
         log "构建缺失或有变更的统一前端及独立后端镜像"
     fi
     # migrate/bootstrap-admin/subsystem-provisioner 都复用 api 构建出的
-    # basic-platform/backend:local；CRM 与 Portal 使用不同 target/镜像，不会
-    # 把 crm-server 和 portal-server 运行在同一个业务容器中。
+    # basic-platform/backend:local；CRM、Portal 和售前 Worker 使用不同 target/镜像，不会
+    # 把 crm-server、portal-server 和 Worker 运行在同一个业务容器中。
     # 限制并发既降低匿名镜像令牌抖动，也避免本地机器同时编译四个后端造成资源争抢。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --profile project --ansi never build "${build_services[@]}"
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --profile project --profile presale-worker --ansi never build "${build_services[@]}"
 }
 
 prepare_gateway_config() {
@@ -970,6 +975,10 @@ start_stack() {
     compose_up_wait "合同管理后端" contract-api
 	log "启动客户与商机管理后端"
 	compose_up_wait "客户与商机管理后端" customer-api
+	# 售前申请提交依赖独立 Worker 的新鲜心跳。up 现在默认一并启动本地
+	# 集成 Mock 和 Worker，避免只启动 customer-api 后页面始终提示 Worker 未就绪。
+	log "启动售前投递 Worker 并确认新鲜心跳"
+	start_presale_worker --skip-build --skip-migrate
 	if portal_configured; then
 		log "启动已接入的客户自助门户后端"
 		compose_run up -d --wait portal-api
@@ -1123,6 +1132,14 @@ refresh_project_backend() {
 }
 
 start_presale_worker() {
+	local skip_build=false skip_migrate=false option
+	for option in "$@"; do
+		case "$option" in
+			--skip-build) skip_build=true ;;
+			--skip-migrate) skip_migrate=true ;;
+			*) fail "start-presale-worker 不支持参数：$option" ;;
+		esac
+	done
 	ensure_platform_env_file
 	ensure_contract_env_file false
 	ensure_customer_env_file
@@ -1132,13 +1149,16 @@ start_presale_worker() {
 		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
 	[[ -s "$presale_worker_env_file" ]] || \
 		fail "售前投递 Worker 环境文件为空：${presale_worker_env_file}"
-	prepare_go_backend_base_images "售前投递 Worker"
-
-	log "构建 CRM 迁移镜像和售前投递 Worker；统一认证、审批和 PMS 地址仅从指定环境文件注入"
-	COMPOSE_PARALLEL_LIMIT=1 compose --profile presale-worker --ansi never build customer-api presale-worker presale-integration-mock
-	log "启动客户与商机数据库并执行 CRM 清单迁移"
-	compose_run --profile presale-worker up -d --wait customer-mysql
-	compose_run --profile presale-worker run --rm --no-deps customer-migrate
+	if [[ "$skip_build" != true ]]; then
+		prepare_go_backend_base_images "售前投递 Worker"
+		log "构建售前投递 Worker 与本地集成 Mock；统一认证、审批和 PMS 地址仅从指定环境文件注入"
+		COMPOSE_PARALLEL_LIMIT=1 compose --profile presale-worker --ansi never build presale-worker presale-integration-mock
+	fi
+	if [[ "$skip_migrate" != true ]]; then
+		log "启动客户与商机数据库并执行 CRM 清单迁移"
+		compose_run --profile presale-worker up -d --wait customer-mysql
+		compose_run --profile presale-worker run --rm --no-deps customer-migrate
+	fi
 	log "启动本地售前集成 Mock（仅开发联调使用）"
 	compose_run --profile presale-worker up -d --wait presale-integration-mock
 	log "启动售前投递 Worker"
