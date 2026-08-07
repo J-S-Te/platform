@@ -40,7 +40,6 @@ customer_worker_services=(
   customer-presale-alert-worker
   customer-presale-assignment-notification-worker
   customer-presale-progress-notification-worker
-  customer-presale-worker
 )
 
 for command_name in docker curl gzip flock awk mktemp install stat; do
@@ -133,9 +132,7 @@ customer_runtime_ready() {
     MACHINE_TOKEN_ISSUER MACHINE_TOKEN_AUDIENCE MACHINE_TOKEN_PUBLIC_KEY_PATH \
     PLATFORM_BASE_URL PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET \
     PLATFORM_APPLICATION_CODE PLATFORM_ENVIRONMENT_CODE PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET \
-    SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64 \
-    APPROVAL_TOKEN_URL APPROVAL_CLIENT_ID APPROVAL_CLIENT_SECRET APPROVAL_START_URL APPROVAL_ACTION_URL \
-    PMS_TOKEN_URL PMS_CLIENT_ID PMS_CLIENT_SECRET PMS_WORKLOG_URL; do
+    SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do
     require_value "$customer_runtime_file" "$key" || return 1
   done
   [[ "$(env_value_from "$customer_runtime_file" DEV_AUTH_ENABLED)" == "false" ]] || {
