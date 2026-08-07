@@ -2,13 +2,10 @@ package applicationaccess
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 func TestSortedUniqueTrimsDeduplicatesAndSorts(t *testing.T) {
@@ -24,22 +21,17 @@ func TestSortedUniqueTrimsDeduplicatesAndSorts(t *testing.T) {
 	}
 }
 
-func TestCanonicalAdminRoleResultFallsBackWhenApplicationHasNoAdminRole(t *testing.T) {
-	role, available, err := canonicalAdminRoleResult(roleRow{}, gorm.ErrRecordNotFound)
-	if err != nil || available || role.ID != "" {
-		t.Fatalf("missing canonical admin must fall back to assigned roles: role=%+v available=%v err=%v", role, available, err)
+func TestExplicitPlatformRoleMappingIsReportedAsInherited(t *testing.T) {
+	_, roles, direct, inherited := resolveAssignedRoles([]assignedRoleRow{{
+		RoleID: "role-crm-admin", Code: "crm_super_admin", Name: "CRM 超级管理员",
+		SubjectType: "PLATFORM_ROLE", SubjectID: "role-platform-admin", SourceName: "平台超级管理员",
+		GrantOrigin: grantOriginInherited, OriginItemID: "mapping-1",
+	}}, subjectTypeUser)
+	if len(roles) != 1 || len(direct) != 0 || len(inherited) != 1 {
+		t.Fatalf("roles/direct/inherited = %d/%d/%d", len(roles), len(direct), len(inherited))
 	}
-}
-
-func TestCanonicalAdminRoleResultAcceptsExistingRoleAndPreservesDatabaseErrors(t *testing.T) {
-	existing := roleRow{ID: "role-admin", Code: "admin", Name: "管理员"}
-	role, available, err := canonicalAdminRoleResult(existing, nil)
-	if err != nil || !available || role.ID != existing.ID {
-		t.Fatalf("existing canonical admin rejected: role=%+v available=%v err=%v", role, available, err)
-	}
-	databaseErr := errors.New("database unavailable")
-	if _, _, err := canonicalAdminRoleResult(roleRow{}, databaseErr); !errors.Is(err, databaseErr) {
-		t.Fatalf("database error not preserved: %v", err)
+	if inherited[0].SourceKind != sourceKindInherited || inherited[0].Direct || inherited[0].OriginItemID != "mapping-1" {
+		t.Fatalf("unexpected inherited platform-role view: %+v", inherited[0])
 	}
 }
 
