@@ -308,67 +308,9 @@ func (service *ManagementService) CreateUsersBatch(ctx context.Context, input Us
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" || len(input.Items) == 0 || len(input.Items) > MaxBatchUserCreateItems {
 		return nil, ErrValidation
 	}
+	// Standalone user creation is intentionally disabled; users must be created together
+	// with a membership so organization and position authorization is never bypassed.
 	return nil, ErrMembershipRequired
-
-	now := service.clock.Now().UTC()
-	writes := make([]UserWrite, 0, len(input.Items))
-	for _, item := range input.Items {
-		item.TenantID = input.TenantID
-		item.OperatorID = input.OperatorID
-		// 即使调用者绕过 HTTP 层直接调用应用服务，也忽略其工号并以用户 ULID 生成，
-		// 确保工号命名规则和唯一性不依赖不可信输入。
-		item.EmployeeNo = nil
-		applicationRoles, err := normalizeApplicationRoleAssignments(item.ApplicationRoles)
-		if err != nil {
-			return nil, err
-		}
-		item.ApplicationRoles = applicationRoles
-		if err := validateUserCreate(item); err != nil {
-			return nil, err
-		}
-		id, err := service.ids.New(now)
-		if err != nil {
-			return nil, fmt.Errorf("generate user ID: %w", err)
-		}
-		bindingID, err := service.ids.New(now)
-		if err != nil {
-			return nil, fmt.Errorf("generate ordinary-user role binding ID: %w", err)
-		}
-		employeeNo := "EMP-" + strings.ToUpper(id)
-		item.EmployeeNo = &employeeNo
-		write, err := service.prepareUserWrite(item, id)
-		if err != nil {
-			return nil, err
-		}
-		write.RoleBindingID = bindingID
-		write.ApplicationRoleBindings = make([]ApplicationRoleBindingWrite, 0, len(applicationRoles))
-		for _, role := range applicationRoles {
-			roleBindingID, err := service.ids.New(now)
-			if err != nil {
-				return nil, fmt.Errorf("generate imported application role binding ID: %w", err)
-			}
-			write.ApplicationRoleBindings = append(write.ApplicationRoleBindings, ApplicationRoleBindingWrite{
-				ID:              roleBindingID,
-				ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName,
-				RoleCode: role.RoleCode, RoleName: role.RoleName,
-			})
-		}
-		writes = append(writes, write)
-	}
-
-	users, err := service.repository.CreateUsers(ctx, writes)
-	if err != nil {
-		return nil, err
-	}
-	views := make([]UserView, 0, len(users))
-	for _, user := range users {
-		view, err := service.toUserView(user)
-		if err != nil {
-			return nil, err
-		}
-		views = append(views, view)
-	}
-	return views, nil
 }
 
 func normalizeApplicationRoleAssignments(assignments []ApplicationRoleAssignment) ([]ApplicationRoleAssignment, error) {
