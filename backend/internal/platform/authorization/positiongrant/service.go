@@ -426,6 +426,9 @@ func (s *Service) ReplaceRoleInheritances(ctx context.Context, tenantID, operato
 			}
 			desired[key] = mapping
 		}
+		if err := validateRoleInheritanceLimits(ctx, tx, tenantID, desired); err != nil {
+			return err
+		}
 		var existing []roleInheritanceModel
 		if err := tx.Where("tenant_id=? AND source_role_id=?", tenantID, input.SourceRoleID).Find(&existing).Error; err != nil {
 			return err
@@ -479,6 +482,26 @@ func (s *Service) ReplaceRoleInheritances(ctx context.Context, tenantID, operato
 		return nil, err
 	}
 	return s.ListRoleInheritances(ctx, tenantID)
+}
+
+func validateRoleInheritanceLimits(ctx context.Context, tx *gorm.DB, tenantID string, mappings map[string]RoleInheritanceInput) error {
+	rolesByApplication := make(map[string]map[string]struct{})
+	for _, mapping := range mappings {
+		if rolesByApplication[mapping.TargetApplicationID] == nil {
+			rolesByApplication[mapping.TargetApplicationID] = make(map[string]struct{})
+		}
+		rolesByApplication[mapping.TargetApplicationID][mapping.TargetRoleID] = struct{}{}
+	}
+	limits, err := applicationRoleLimits(ctx, tx, tenantID, mapKeys(rolesByApplication))
+	if err != nil {
+		return err
+	}
+	for applicationID, roles := range rolesByApplication {
+		if limit := limits[applicationID]; limit > 0 && len(roles) > limit {
+			return validation(fmt.Sprintf("application %s allows at most %d inherited roles", applicationID, limit))
+		}
+	}
+	return nil
 }
 
 // ListAuthorizationPositions returns active positions for the same role-binding

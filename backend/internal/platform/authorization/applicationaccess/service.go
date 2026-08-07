@@ -33,11 +33,13 @@ const (
 	authorizationGranted      = "GRANTED"
 	authorizationConflict     = "CONFLICT"
 
-	grantOriginManual   = "MANUAL"
-	grantOriginTemplate = "TEMPLATE"
-	grantOriginSystem   = "SYSTEM"
+	grantOriginManual    = "MANUAL"
+	grantOriginTemplate  = "TEMPLATE"
+	grantOriginSystem    = "SYSTEM"
+	grantOriginInherited = "INHERITANCE"
 
 	applicationRoleType = "APPLICATION"
+	platformRoleType    = "PLATFORM"
 
 	sourceKindManual    = "MANUAL"
 	sourceKindInherited = "INHERITED"
@@ -303,17 +305,6 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	if err != nil {
 		return TokenAuthorization{}, err
 	}
-	if client.ApplicationCode != PlatformApplicationCode {
-		// 平台超级管理员进入子系统时也不携带平台权限。只有目标应用存在约定的 admin
-		// 角色时，才以该应用目录中的角色和权限生成令牌；否则回到普通绑定解析。
-		inherited, ok, inheritErr := s.resolvePlatformSuperAdminAuthorization(ctx, tenantID, userID, client)
-		if inheritErr != nil {
-			return TokenAuthorization{}, inheritErr
-		}
-		if ok {
-			return s.attachOrganizationClaims(ctx, inherited, userID)
-		}
-	}
 	access, err := s.getAccessByApplication(ctx, tenantID, userID, client.ApplicationID, client.ApplicationCode, client.EnvironmentID, client.EnvironmentCode)
 	if err != nil {
 		return TokenAuthorization{}, err
@@ -431,84 +422,6 @@ func organizationClaimsFromRows(rows []organizationClaimRow) (string, []string, 
 		}
 	}
 	return primaryOrgID, organizationIDs, nil
-}
-
-// resolvePlatformSuperAdminAuthorization gives the tenant's controlled platform super
-// administrator access only when the target application exposes one unambiguous canonical admin
-// role. Applications that model administration as several least-privilege roles intentionally
-// have no synthetic "admin" role; for those applications this resolver declines inheritance and
-// lets the normal application bindings decide access.
-//
-// It does not copy platform permissions into a subsystem token: when inheritance is applicable,
-// the emitted permissions still come exclusively from the target application's active admin role
-// and catalog.
-func (s *Service) resolvePlatformSuperAdminAuthorization(ctx context.Context, tenantID, userID string, client clientApplicationRow) (TokenAuthorization, bool, error) {
-	now := s.clock.Now().UTC()
-	var bindingCount int64
-	err := s.db.WithContext(ctx).Table("authz_role_binding AS binding").
-		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id AND role.status = ?", activeStatus).
-		Joins("JOIN platform_application AS application ON application.id = binding.application_id AND application.tenant_id = binding.tenant_id AND application.status = ?", activeStatus).
-		Where(
-			"binding.tenant_id = ? AND binding.subject_type = ? AND binding.subject_id = ? AND binding.scope_type = ? AND binding.scope_id = '' AND binding.status = ? AND "+
-				"application.code = ? AND role.code = ? AND (binding.valid_from IS NULL OR binding.valid_from <= ?) AND "+
-				"(binding.valid_until IS NULL OR binding.valid_until > ?)",
-			strings.TrimSpace(tenantID), subjectTypeUser, strings.TrimSpace(userID), scopeTypeTenant, activeStatus,
-			PlatformApplicationCode, BootstrapSuperAdminRoleCode, now, now,
-		).
-		Count(&bindingCount).Error
-	if err != nil {
-		return TokenAuthorization{}, false, fmt.Errorf("load platform super administrator binding: %w", err)
-	}
-	if bindingCount == 0 {
-		return TokenAuthorization{}, false, nil
-	}
-
-	var adminRole roleRow
-	err = s.db.WithContext(ctx).Table("authz_role").
-		Select("id", "code", "name").
-		Where("tenant_id = ? AND application_id = ? AND code = ? AND status = ?", tenantID, client.ApplicationID, "admin", activeStatus).
-		Take(&adminRole).Error
-	adminRole, available, err := canonicalAdminRoleResult(adminRole, err)
-	if err != nil {
-		return TokenAuthorization{}, false, err
-	}
-	if !available {
-		return TokenAuthorization{}, false, nil
-	}
-	permissions, err := s.loadRolePermissions(ctx, tenantID, client.ApplicationID, []string{adminRole.ID})
-	if err != nil {
-		return TokenAuthorization{}, false, err
-	}
-	roleConfigHash, err := s.loadRoleConfigHash(ctx, tenantID, client.ApplicationID)
-	if err != nil {
-		return TokenAuthorization{}, false, err
-	}
-	revision, err := s.loadRevision(ctx, tenantID, client.ApplicationID)
-	if err != nil {
-		return TokenAuthorization{}, false, err
-	}
-	return TokenAuthorization{
-		ApplicationCode: client.ApplicationCode,
-		EnvironmentCode: client.EnvironmentCode,
-		TenantID:        tenantID,
-		Roles:           []string{adminRole.Code},
-		Permissions:     sortedUnique(permissions),
-		RoleConfigHash:  roleConfigHash,
-		AuthzRevision:   revision,
-	}, true, nil
-}
-
-// canonicalAdminRoleResult converts the optional conventional admin-role lookup into the
-// inheritance decision used by OIDC authorization. A missing role is not an authorization error:
-// it means the application uses its own assigned role model and resolution must continue there.
-func canonicalAdminRoleResult(role roleRow, err error) (roleRow, bool, error) {
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return roleRow{}, false, nil
-	}
-	if err != nil {
-		return roleRow{}, false, fmt.Errorf("load target application admin role: %w", err)
-	}
-	return role, true, nil
 }
 
 func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCode string) (Access, error) {
@@ -1068,6 +981,11 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 	if err != nil {
 		return Access{}, err
 	}
+	inheritedPlatformRoles, err := s.loadInheritedPlatformRoles(ctx, tenantID, applicationID, userID, environmentID, now)
+	if err != nil {
+		return Access{}, err
+	}
+	roles = append(roles, inheritedPlatformRoles...)
 	roleIDs, roleViews, directRoles, inheritedRoles := resolveAssignedRoles(roles, subjectTypeUser)
 	state, conflicts, permissionRoleIDs, err := s.applicationRolePolicy(ctx, tenantID, applicationID, roles, roleIDs)
 	if err != nil {
@@ -1242,7 +1160,7 @@ func sourceKindForRole(row assignedRoleRow, direct bool) string {
 	switch normalizedGrantOrigin(row.GrantOrigin) {
 	case grantOriginSystem:
 		return sourceKindSystem
-	case grantOriginTemplate:
+	case grantOriginTemplate, grantOriginInherited:
 		return sourceKindInherited
 	default:
 		if direct {
@@ -1356,6 +1274,50 @@ func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID,
 		return nil, fmt.Errorf("load application subject role bindings: %w", err)
 	}
 	return rows, nil
+}
+
+// loadInheritedPlatformRoles resolves direct USER bindings to platform roles through the same
+// explicit inheritance mappings used by position templates. The result is query-only: target
+// subsystem bindings are not copied to the user, and provenance remains the source platform role.
+func (s *Service) loadInheritedPlatformRoles(ctx context.Context, tenantID, targetApplicationID, userID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
+	type inheritedRow struct {
+		RoleID, Code, Name, ScopeType, ScopeID, EnvironmentCode string
+		ValidFrom, ValidUntil                                   *time.Time
+		SourceRoleID, SourceRoleName, MappingID                 string
+	}
+	var rows []inheritedRow
+	query := s.db.WithContext(ctx).Table("authz_role_inheritance_mapping AS mapping").Select(`
+		target_role.id AS role_id, target_role.code, target_role.name,
+		mapping.scope_type, mapping.scope_id, COALESCE(environment.environment, '') AS environment_code,
+		mapping.valid_from, mapping.valid_until,
+		source_role.id AS source_role_id, source_role.name AS source_role_name, mapping.id AS mapping_id`).
+		Joins("JOIN authz_role AS source_role ON source_role.tenant_id=mapping.tenant_id AND source_role.id=mapping.source_role_id AND source_role.role_type=? AND source_role.status=?", platformRoleType, activeStatus).
+		Joins("JOIN platform_application AS source_application ON source_application.tenant_id=source_role.tenant_id AND source_application.id=source_role.application_id AND source_application.code=? AND source_application.status=?", PlatformApplicationCode, activeStatus).
+		Joins("JOIN authz_role_binding AS source_binding ON source_binding.tenant_id=source_role.tenant_id AND source_binding.application_id=source_role.application_id AND source_binding.role_id=source_role.id AND source_binding.subject_type=? AND source_binding.subject_id=? AND source_binding.scope_type=? AND source_binding.scope_id='' AND source_binding.status=?", subjectTypeUser, userID, scopeTypeTenant, activeStatus).
+		Joins("JOIN authz_role AS target_role ON target_role.tenant_id=mapping.tenant_id AND target_role.application_id=mapping.target_application_id AND target_role.id=mapping.target_role_id AND target_role.role_type=? AND target_role.status=?", applicationRoleType, activeStatus).
+		Joins("LEFT JOIN platform_application_environment AS environment ON environment.tenant_id=mapping.tenant_id AND environment.application_id=mapping.target_application_id AND environment.id=mapping.scope_id").
+		Where("mapping.tenant_id=? AND mapping.target_application_id=? AND mapping.status=?", tenantID, targetApplicationID, activeStatus).
+		Where("(mapping.valid_from IS NULL OR mapping.valid_from<=?) AND (mapping.valid_until IS NULL OR mapping.valid_until>?)", now, now).
+		Where("(source_binding.valid_from IS NULL OR source_binding.valid_from<=?) AND (source_binding.valid_until IS NULL OR source_binding.valid_until>?)", now, now)
+	if strings.TrimSpace(environmentID) == "" {
+		query = query.Where("(mapping.scope_type=? AND mapping.scope_id='' OR mapping.scope_type=?)", scopeTypeTenant, scopeTypeEnvironment)
+	} else {
+		query = query.Where("(mapping.scope_type=? AND mapping.scope_id='' OR mapping.scope_type=? AND mapping.scope_id=?)", scopeTypeTenant, scopeTypeEnvironment, environmentID)
+	}
+	if err := query.Order("target_role.code ASC, mapping.scope_type ASC, mapping.scope_id ASC, source_role.code ASC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("load inherited platform role mappings: %w", err)
+	}
+	result := make([]assignedRoleRow, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, assignedRoleRow{
+			RoleID: row.RoleID, Code: row.Code, Name: row.Name,
+			ScopeType: row.ScopeType, ScopeID: row.ScopeID, EnvironmentCode: row.EnvironmentCode,
+			ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil,
+			SubjectType: "PLATFORM_ROLE", SubjectID: row.SourceRoleID, SourceName: row.SourceRoleName,
+			GrantOrigin: grantOriginInherited, OriginItemID: row.MappingID,
+		})
+	}
+	return result, nil
 }
 
 func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID, userID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
