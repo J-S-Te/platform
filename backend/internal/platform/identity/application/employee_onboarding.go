@@ -73,6 +73,9 @@ func (service *ManagementService) CreateEmployee(ctx context.Context, input Empl
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" {
 		return EmployeeCreateResult{}, ErrValidation
 	}
+	if input.Membership == nil {
+		return EmployeeCreateResult{}, ErrMembershipRequired
+	}
 
 	userInput := UserCreateInput{
 		TenantID: input.TenantID, OperatorID: input.OperatorID, DisplayName: input.DisplayName,

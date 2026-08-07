@@ -34,6 +34,8 @@ x-customer-service: &customer-service
     MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     PLATFORM_BASE_URL: http://platform-api:8080
     OIDC_BACKCHANNEL_BASE_URL: http://platform-api:8080
+    # 发布脚本从本次不可变 CRM 镜像自动读取，覆盖运行环境文件中的旧值。
+    OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
     MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     GIN_MODE: release
   networks: [application]

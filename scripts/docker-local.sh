@@ -1074,6 +1074,11 @@ refresh_customer_backend() {
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api
+    local_crm_hash="$(compose_run run --rm --no-deps customer-api ./authz-catalog print crm \
+        | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
+    [[ "$local_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "无法从本地 CRM 镜像读取有效授权目录哈希"
+    export OIDC_ROLE_CONFIG_HASH="$local_crm_hash"
+    log "使用本地 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
     prepare_gateway_config
     log "重新构建统一前端网关，使客户与商机管理路径转发到 customer-api"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
@@ -1082,6 +1087,8 @@ refresh_customer_backend() {
     compose_run run --rm --no-deps customer-migrate
     log "重建 customer-api 与统一前端网关；另外两个后端和统一登录接入配置保持不变"
     compose_run up -d --wait --no-deps customer-api
+    log "自动发布客户与商机管理授权目录（角色及有效角色数量策略）"
+    compose_run run --rm --no-deps customer-api ./authz-catalog publish crm
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
 	compose_run ps customer-api customer-mysql

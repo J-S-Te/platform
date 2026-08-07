@@ -221,7 +221,16 @@ func decodePayload(w http.ResponseWriter, r *http.Request, target any) bool {
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrValidation):
-		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+		// Validation messages are deliberately limited to static, client-safe contract
+		// explanations (for example, an unavailable role or invalid scope). Returning the
+		// detail lets the IAM UI distinguish a stale catalog from a malformed selection while
+		// keeping infrastructure errors and credentials out of the response.
+		detail := strings.TrimSpace(strings.TrimPrefix(err.Error(), ErrValidation.Error()+": "))
+		apiError := httperror.Validation
+		if detail != "" {
+			apiError = httperror.New(apiError.Code, apiError.Message, map[string]string{"reason": detail})
+		}
+		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, apiError)
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrNotConfigured):
 		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, ErrAccessDenied):

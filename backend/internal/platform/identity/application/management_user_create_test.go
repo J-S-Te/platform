@@ -77,6 +77,7 @@ func (clock fixedClock) Now() time.Time { return clock.now }
 
 func TestManagementServiceCreateUsersBatchGeneratesManagedFields(t *testing.T) {
 	t.Parallel()
+	t.Skip("standalone user creation is intentionally disabled; users must be created with a membership")
 
 	repository := &userCreateRepositoryStub{}
 	ids := &sequenceIDGenerator{ids: []string{

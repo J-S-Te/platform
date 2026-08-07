@@ -34,7 +34,37 @@ func (h *Handler) ListAuthorizationTargets(w http.ResponseWriter, r *http.Reques
 		writeHTTPError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", map[string]any{"items": items, "total": len(items)})
+	writeItems(w, r, items, "操作成功")
+}
+
+func (h *Handler) ListRoleInheritances(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	items, err := h.service.ListRoleInheritances(r.Context(), principal.Tenant.ID)
+	if err != nil {
+		writeHTTPError(w, r, err)
+		return
+	}
+	writeItems(w, r, items, "操作成功")
+}
+
+func (h *Handler) ReplaceRoleInheritances(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	var payload RoleInheritanceReplaceInput
+	if !decode(w, r, &payload) {
+		return
+	}
+	items, err := h.service.ReplaceRoleInheritances(r.Context(), principal.Tenant.ID, principal.User.ID, payload)
+	if err != nil {
+		writeHTTPError(w, r, err)
+		return
+	}
+	writeItems(w, r, items, "角色继承映射已保存")
 }
 
 func (h *Handler) ListAuthorizationPositions(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +77,7 @@ func (h *Handler) ListAuthorizationPositions(w http.ResponseWriter, r *http.Requ
 		writeHTTPError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", map[string]any{"items": items, "total": len(items)})
+	writeItems(w, r, items, "操作成功")
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
@@ -60,14 +90,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", map[string]any{"items": items, "total": len(items)})
+	writeItems(w, r, items, "操作成功")
 }
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	principal, ok := principal(w, r)
 	if !ok {
 		return
 	}
-	item, err := h.service.Get(r.Context(), principal.Tenant.ID, strings.TrimSpace(r.PathValue("template_id")))
+	item, err := h.service.Get(r.Context(), principal.Tenant.ID, pathValue(r, "template_id"))
 	if err != nil {
 		writeHTTPError(w, r, err)
 		return
@@ -99,7 +129,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &payload) {
 		return
 	}
-	item, err := h.service.Update(r.Context(), principal.Tenant.ID, principal.User.ID, strings.TrimSpace(r.PathValue("template_id")), payload)
+	item, err := h.service.Update(r.Context(), principal.Tenant.ID, principal.User.ID, pathValue(r, "template_id"), payload)
 	if err != nil {
 		writeHTTPError(w, r, err)
 		return
@@ -116,23 +146,23 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
 		return
 	}
-	if err := h.service.Delete(r.Context(), principal.Tenant.ID, principal.User.ID, strings.TrimSpace(r.PathValue("template_id")), version); err != nil {
+	if err := h.service.Delete(r.Context(), principal.Tenant.ID, principal.User.ID, pathValue(r, "template_id"), version); err != nil {
 		writeHTTPError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "岗位授权模板已停用", map[string]any{"template_id": r.PathValue("template_id")})
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "岗位授权模板已停用", map[string]any{"template_id": pathValue(r, "template_id")})
 }
 func (h *Handler) ListPositionAssignments(w http.ResponseWriter, r *http.Request) {
 	principal, ok := principal(w, r)
 	if !ok {
 		return
 	}
-	items, err := h.service.ListPositionAssignments(r.Context(), principal.Tenant.ID, strings.TrimSpace(r.PathValue("position_id")))
+	items, err := h.service.ListPositionAssignments(r.Context(), principal.Tenant.ID, pathValue(r, "position_id"))
 	if err != nil {
 		writeHTTPError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", map[string]any{"items": items, "total": len(items)})
+	writeItems(w, r, items, "操作成功")
 }
 func (h *Handler) ReplacePositionAssignments(w http.ResponseWriter, r *http.Request) {
 	principal, ok := principal(w, r)
@@ -143,12 +173,12 @@ func (h *Handler) ReplacePositionAssignments(w http.ResponseWriter, r *http.Requ
 	if !decode(w, r, &payload) {
 		return
 	}
-	items, err := h.service.ReplacePositionAssignments(r.Context(), principal.Tenant.ID, principal.User.ID, strings.TrimSpace(r.PathValue("position_id")), payload)
+	items, err := h.service.ReplacePositionAssignments(r.Context(), principal.Tenant.ID, principal.User.ID, pathValue(r, "position_id"), payload)
 	if err != nil {
 		writeHTTPError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "岗位授权模板已更新", map[string]any{"items": items, "total": len(items)})
+	writeItems(w, r, items, "岗位授权模板已更新")
 }
 func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	principal, ok := principal(w, r)
@@ -174,6 +204,30 @@ func principal(w http.ResponseWriter, r *http.Request) (authctx.Principal, bool)
 	}
 	return value, ok
 }
+
+func pathValue(r *http.Request, name string) string {
+	return strings.TrimSpace(r.PathValue(name))
+}
+
+func writeItems(w http.ResponseWriter, r *http.Request, items any, message string) {
+	// All collection endpoints in this handler expose the same bounded response shape.
+	// Keeping it here prevents individual handlers from drifting in item/total formatting.
+	total := 0
+	switch values := items.(type) {
+	case []TemplateView:
+		total = len(values)
+	case []AssignmentView:
+		total = len(values)
+	case []AuthorizationTargetView:
+		total = len(values)
+	case []AuthorizationPositionView:
+		total = len(values)
+	case []RoleInheritanceView:
+		total = len(values)
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, message, map[string]any{"items": items, "total": total})
+}
+
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	decoder := json.NewDecoder(r.Body)
