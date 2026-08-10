@@ -29,6 +29,14 @@ func readCatalogPublisherCredentials() (string, string, bool) {
 	return id, secret, true
 }
 
+func optionalIssuerAlias(value string) *string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == "platform" || value == "basic_platform" {
+		return nil
+	}
+	return &value
+}
+
 // resolveApplicationContext looks up the (application, environment) identifiers for a
 // (code, environment-name) pair. The post-rebuild catalog sync needs the platform-side primary
 // keys, not the human-readable codes, to address the right application. The lookup piggybacks
@@ -66,6 +74,12 @@ type subsystemInitialAccessManager interface {
 	AssignInitialAdministrator(context.Context, string, string, string, string) (string, error)
 }
 
+// keycloakBrokerProvisioner creates the one dedicated platform OAuth client
+// used by Keycloak as an upstream broker. Its secret never reaches HTTP.
+type keycloakBrokerProvisioner interface {
+	EnsureKeycloakBroker(context.Context, string) (string, string, error)
+}
+
 // subsystemNotificationSink 发送租户内站内通知，用于把子系统接入生命周期结果通知给操作人。
 // 该接口由基础平台实现，子系统代码无需改动；nil 时处理器保持轻量测试可用。
 type subsystemNotificationSink interface {
@@ -93,7 +107,45 @@ type SubsystemOnboardingHandler struct {
 	deploymentState application.SubsystemDeploymentStateStore
 	notifications   subsystemNotificationSink
 	oidcIssuer      string
+	keycloakIssuer  string
+	keycloakRealm   string
+	keycloakEnabled bool
+	keycloakControl *keycloakControlPlane
+	keycloakBroker  keycloakBrokerProvisioner
 	logger          *slog.Logger
+}
+
+// ConfigureKeycloak enables Keycloak as an explicit deployment provider.  The
+// credentials remain solely between the API and the deployment Agent; this
+// object intentionally carries only public status information.
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloak(enabled bool, publicIssuer, realm string) {
+	handler.keycloakEnabled = enabled
+	handler.keycloakIssuer = strings.TrimRight(strings.TrimSpace(publicIssuer), "/")
+	handler.keycloakRealm = strings.TrimSpace(realm)
+}
+
+// ConfigureKeycloakControlPlane is called only from the composition root.  The
+// browser never receives this object or its Keycloak administrative credentials.
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloakControlPlane(control *keycloakControlPlane) {
+	handler.keycloakControl = control
+}
+
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloakBroker(provisioner keycloakBrokerProvisioner) {
+	handler.keycloakBroker = provisioner
+}
+
+func (handler *SubsystemOnboardingHandler) issuerForAlias(alias string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(alias)) {
+	case "", "platform", "basic_platform":
+		return handler.oidcIssuer, nil
+	case "keycloak":
+		if !handler.keycloakEnabled || handler.keycloakIssuer == "" || handler.keycloakRealm == "" {
+			return "", application.ErrValidation
+		}
+		return handler.keycloakIssuer, nil
+	default:
+		return "", application.ErrValidation
+	}
 }
 
 // NewSubsystemOnboardingHandler constructs the subsystem onboarding HTTP adapter. The optional
@@ -162,6 +214,7 @@ type subsystemOnboardingRequest struct {
 	PathPrefix      string  `json:"path_prefix"`
 	ClientType      string  `json:"client_type"`
 	InitialAdminID  string  `json:"initial_admin_user_id"`
+	IssuerAlias     string  `json:"issuer_alias"`
 }
 
 // subsystemLifecycleRequest is the shared payload for Update and Teardown. Update may also carry
@@ -173,6 +226,15 @@ type subsystemLifecycleRequest struct {
 	PublicBaseURL   string `json:"public_base_url"`
 	UpstreamURL     string `json:"upstream_url"`
 	PathPrefix      string `json:"path_prefix"`
+	IssuerAlias     string `json:"issuer_alias"`
+}
+
+type keycloakClientSyncResponse struct {
+	Alias       string `json:"alias"`
+	Realm       string `json:"realm"`
+	ClientID    string `json:"client_id"`
+	ClaimsState string `json:"claims_state"`
+	SwitchReady bool   `json:"switch_ready"`
 }
 
 type subsystemAutomationResponse struct {
@@ -244,12 +306,25 @@ type subsystemProvisioningTargetResponse struct {
 }
 
 type subsystemProvisioningCapabilitiesResponse struct {
-	AutomationEnabled         bool                                  `json:"automation_enabled"`
-	DeploymentMode            string                                `json:"deployment_mode"`
-	SupportedApplicationCodes []string                              `json:"supported_application_codes"`
-	SupportedEnvironments     []string                              `json:"supported_environments"`
-	Targets                   []subsystemProvisioningTargetResponse `json:"targets,omitempty"`
-	Defaults                  subsystemOnboardingDefaults           `json:"defaults"`
+	AutomationEnabled         bool                                      `json:"automation_enabled"`
+	DeploymentMode            string                                    `json:"deployment_mode"`
+	SupportedApplicationCodes []string                                  `json:"supported_application_codes"`
+	SupportedEnvironments     []string                                  `json:"supported_environments"`
+	Targets                   []subsystemProvisioningTargetResponse     `json:"targets,omitempty"`
+	Defaults                  subsystemOnboardingDefaults               `json:"defaults"`
+	AuthenticationProviders   []subsystemAuthenticationProviderResponse `json:"authentication_providers"`
+}
+
+// subsystemAuthenticationProviderResponse is deliberately non-sensitive.  It
+// is the page contract for provider state, switch availability and rollback.
+type subsystemAuthenticationProviderResponse struct {
+	Alias       string `json:"alias"`
+	Name        string `json:"name"`
+	Issuer      string `json:"issuer"`
+	Realm       string `json:"realm,omitempty"`
+	Status      string `json:"status"`
+	SwitchReady bool   `json:"switch_ready"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
@@ -273,15 +348,21 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		Description: payload.Description, Environment: payload.Environment,
 		PublicBaseURL: payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL,
 		PathPrefix: payload.PathPrefix, ClientType: payload.ClientType,
+		IssuerAlias:            optionalIssuerAlias(payload.IssuerAlias),
 		AllowedServiceBindings: handler.allowedServiceBindingsForTarget(payload.ApplicationCode, payload.Environment),
 	}
 	if err := application.ValidateSubsystemOnboardingInput(onboardingInput); err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
+	issuer, err := handler.issuerForAlias(payload.IssuerAlias)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	if err := handler.provisioner.Preflight(request.Context(), application.SubsystemPreflightInput{
 		TenantID: principal.Tenant.ID, ApplicationCode: onboardingInput.ApplicationCode,
-		Environment: onboardingInput.Environment, Issuer: handler.oidcIssuer,
+		Environment: onboardingInput.Environment, Issuer: issuer,
 		PublicBaseURL: onboardingInput.PublicBaseURL, UpstreamURL: onboardingInput.UpstreamURL,
 		PathPrefix: onboardingInput.PathPrefix, ClientType: onboardingInput.ClientType,
 	}); err != nil {
@@ -300,10 +381,28 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	if result.Environment.UpstreamURL != nil {
 		upstreamURL = *result.Environment.UpstreamURL
 	}
+	provisioningClientID, provisioningClientSecret := result.OAuthClient.ClientID, result.PlaintextSecret
+	if strings.EqualFold(strings.TrimSpace(payload.IssuerAlias), "keycloak") {
+		if handler.keycloakControl == nil || handler.keycloakBroker == nil {
+			handler.writeError(writer, request, application.ErrValidation)
+			return
+		}
+		brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
+		if brokerErr != nil || handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret) != nil {
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), result.Application.Code+"-"+result.Environment.Environment+"-web", result.Application.Name+" "+result.Environment.Environment, result.RedirectURI)
+		if clientErr != nil {
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		provisioningClientID, provisioningClientSecret = client.ClientID, client.ClientSecret
+	}
 	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
 		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
-		Environment: result.Environment.Environment, Issuer: handler.oidcIssuer,
-		ClientID: result.OAuthClient.ClientID, ClientSecret: result.PlaintextSecret,
+		Environment: result.Environment.Environment, Issuer: issuer,
+		ClientID: provisioningClientID, ClientSecret: provisioningClientSecret,
 		CatalogPublisherClientID:     result.CatalogPublisherOAuthClient.ClientID,
 		CatalogPublisherClientSecret: result.CatalogPublisherPlaintextSecret,
 		ServiceCredentials:           result.ServiceCredentials,
@@ -435,10 +534,76 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 			PathPrefix:      capabilities.DefaultPathPrefix,
 			ClientType:      defaultClientType,
 		},
+		AuthenticationProviders: []subsystemAuthenticationProviderResponse{{
+			Alias: "platform", Name: "基础平台 OIDC", Issuer: handler.oidcIssuer,
+			Status: "READY", SwitchReady: true,
+		}},
 	}
+	keycloak := subsystemAuthenticationProviderResponse{
+		Alias: "keycloak", Name: "Keycloak", Issuer: handler.keycloakIssuer,
+		Realm: handler.keycloakRealm, Status: "NOT_CONFIGURED",
+		Detail: "尚未由平台配置 Keycloak 管理连接和 Broker Client。",
+	}
+	if handler.keycloakEnabled && handler.keycloakControl != nil && handler.keycloakBroker != nil && handler.keycloakIssuer != "" && handler.keycloakRealm != "" {
+		keycloak.Status = "READY"
+		// A dedicated upstream broker credential is intentionally required for
+		// cutover. Realm/Client initialization may still be performed from the
+		// page before that credential is issued by the platform control plane.
+		keycloak.SwitchReady = true
+		if keycloak.SwitchReady {
+			keycloak.Detail = "切换时会先同步 Realm Client 与 Claims 映射，再由部署 Agent 安全下发。"
+		} else {
+			keycloak.Detail = "Realm Client 可先同步；等待平台自动创建专用 Broker Client 后才允许切换。"
+		}
+	}
+	response.AuthenticationProviders = append(response.AuthenticationProviders, keycloak)
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署能力查询成功", response)
+}
+
+// SyncKeycloakClient creates or updates the selected subsystem's Keycloak RP
+// and its required token claim mappers.  It is deliberately separate from the
+// issuer switch: a successful Admin API write is not proof that brokered login
+// has been tested, so the final runtime cutover remains fail-closed.
+func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	if _, ok := subsystemPrincipal(writer, request); !ok {
+		return
+	}
+	if handler.keycloakControl == nil || handler.keycloakBroker == nil || !handler.keycloakEnabled {
+		handler.writeError(writer, request, application.ErrValidation)
+		return
+	}
+	var payload subsystemLifecycleRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+	if err := validateLifecycleRequest(payload); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	principal, _ := authctx.PrincipalFromContext(request.Context())
+	brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
+	if brokerErr != nil {
+		handler.logger.Warn("Keycloak broker synchronization preparation failed", "error", brokerErr)
+		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		return
+	}
+	if err := handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret); err != nil {
+		handler.logger.Warn("Keycloak broker synchronization failed", "error", err)
+		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		return
+	}
+	clientID := strings.ToLower(strings.TrimSpace(payload.ApplicationCode)) + "-" + strings.ToLower(strings.TrimSpace(payload.Environment)) + "-web"
+	redirectURI := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/") + strings.TrimRight(strings.TrimSpace(payload.PathPrefix), "/") + "/auth/callback"
+	result, err := handler.keycloakControl.EnsureClient(request.Context(), clientID, "Basic Platform "+clientID, redirectURI)
+	if err != nil {
+		handler.logger.Warn("Keycloak Client synchronization failed", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
+		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak Realm Client 与 Claims 映射已同步", keycloakClientSyncResponse{Alias: "keycloak", Realm: handler.keycloakRealm, ClientID: result.ClientID, ClaimsState: "MAPPERS_SYNCED", SwitchReady: false})
 }
 
 // UpdateSubsystem handles POST /api/v1/subsystem-update. The handler assumes the caller has
@@ -469,6 +634,11 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	// Those credentials are read from the platform operator's environment, not from the
 	// subsystem's .env.local, so both the API process and the deployment helper can pick them
 	// up without exposing the host filesystem into the API container.
+	issuer, err := handler.issuerForAlias(payload.IssuerAlias)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	updateInput := application.SubsystemProvisioningInput{
 		TenantID:        principal.Tenant.ID,
 		ApplicationCode: applicationCode,
@@ -476,7 +646,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
 		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
 		// issuer as a stable source of truth instead of having the client send it in.
-		Issuer: handler.oidcIssuer,
+		Issuer: issuer,
 	}
 	publicBaseURL := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/")
 	upstreamURL := strings.TrimRight(strings.TrimSpace(payload.UpstreamURL), "/")
@@ -494,6 +664,24 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		updateInput.RedirectURI = publicBaseURL + pathPrefix + "/auth/callback"
 		updateInput.PathPrefix = pathPrefix
 		updateInput.UpstreamURL = upstreamURL
+	}
+	if strings.EqualFold(strings.TrimSpace(payload.IssuerAlias), "keycloak") {
+		if handler.keycloakControl == nil || handler.keycloakBroker == nil || publicBaseURL == "" || pathPrefix == "" {
+			handler.writeError(writer, request, application.ErrValidation)
+			return
+		}
+		brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
+		if brokerErr != nil || handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret) != nil {
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), applicationCode+"-"+environment+"-web", "Basic Platform "+applicationCode+" "+environment, publicBaseURL+pathPrefix+"/auth/callback")
+		if clientErr != nil {
+			handler.logger.Warn("Keycloak Client synchronization before switch failed", "application_code", applicationCode, "environment", environment, "error", clientErr)
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		updateInput.ClientID, updateInput.ClientSecret = client.ClientID, client.ClientSecret
 	}
 	// Resolve identifiers from the deployment control plane, not the portal projection: failed
 	// and updating environments are intentionally hidden from the user-facing portal catalog.

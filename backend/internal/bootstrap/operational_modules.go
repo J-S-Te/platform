@@ -27,7 +27,7 @@ import (
 
 // buildOperationalModules 只通过各模块公开的应用契约完成装配，不让路由层接触仓储实现。
 // 这里同样禁止 AutoMigrate：进程启动与 schema 发布必须保持两个独立生命周期。
-func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service) (httptransport.OperationalModules, error) {
+func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service, applicationManagementService *applicationregistryapplication.ManagementService, oauthClientManagementService *applicationregistryapplication.OAuthClientManagementService) (httptransport.OperationalModules, error) {
 	if database == nil || logger == nil || applicationAccessService == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
 	}
@@ -125,6 +125,21 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
+	}
+	// Keycloak is optional.  Keeping this explicit means a page can show it as
+	// unavailable instead of letting an operator save an issuer alias that the
+	// deployment Agent cannot honour.
+	subsystemHandler.ConfigureKeycloak(
+		cfg.Keycloak.Enabled,
+		keycloakRealmIssuer(cfg.Keycloak.PublicURL, cfg.Keycloak.Realm),
+		cfg.Keycloak.Realm,
+	)
+	if cfg.Keycloak.Enabled {
+		subsystemHandler.ConfigureKeycloakControlPlane(applicationregistryhttp.NewKeycloakControlPlane(
+			cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, cfg.Keycloak.AdminUsername, cfg.Keycloak.AdminPassword,
+			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret, cfg.Auth.OIDCIssuer,
+		))
+		subsystemHandler.ConfigureKeycloakBroker(keycloakBrokerRegistrar{applications: applicationManagementService, oauth: oauthClientManagementService, publicURL: cfg.Keycloak.PublicURL, realm: cfg.Keycloak.Realm})
 	}
 	notificationHandler, err := notificationhttp.NewHandler(notificationService, logger)
 	if err != nil {
@@ -305,4 +320,13 @@ func equalStringSlices(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func keycloakRealmIssuer(publicURL, realm string) string {
+	publicURL = strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	realm = strings.Trim(strings.TrimSpace(realm), "/")
+	if publicURL == "" || realm == "" {
+		return ""
+	}
+	return publicURL + "/realms/" + realm
 }

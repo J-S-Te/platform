@@ -285,3 +285,30 @@ type identityPolicyRevisionModel struct {
 }
 
 func (identityPolicyRevisionModel) TableName() string { return "authz_policy_revision" }
+
+// personnelChangeRequestModel is the durable control-plane record for a
+// personnel change. It intentionally contains no computed permissions: those
+// are generated at preview/execution time from the current role catalog.
+type personnelChangeRequestModel struct {
+	ID                 string     `gorm:"column:id;primaryKey"`
+	TenantID           string     `gorm:"column:tenant_id"`
+	UserID             string     `gorm:"column:user_id"`
+	SourceMembershipID *string    `gorm:"column:source_membership_id"`
+	TargetOrgUnitID    *string    `gorm:"column:target_org_unit_id"`
+	TargetPositionID   *string    `gorm:"column:target_position_id"`
+	ChangeType         string     `gorm:"column:change_type"`
+	Status             string     `gorm:"column:status"`
+	Reason             string     `gorm:"column:reason"`
+	ApprovalReference  *string    `gorm:"column:approval_reference"`
+	EffectiveAt        time.Time  `gorm:"column:effective_at"`
+	SubmittedBy        string     `gorm:"column:submitted_by"`
+	ApprovedBy         *string    `gorm:"column:approved_by"`
+	ApprovedAt         *time.Time `gorm:"column:approved_at"`
+	ExecutedAt         *time.Time `gorm:"column:executed_at"`
+	CancelledAt        *time.Time `gorm:"column:cancelled_at"`
+	Version            uint64     `gorm:"column:version"`
+	CreatedAt          time.Time  `gorm:"column:created_at"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at"`
+}
+
+func (personnelChangeRequestModel) TableName() string { return "iam_personnel_change_request" }
