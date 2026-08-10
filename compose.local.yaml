@@ -432,9 +432,12 @@ services:
       # refresh-customer-api 从本次构建镜像自动读取并注入，避免角色目录哈希过期。
       OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
       MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
       GIN_MODE: release
     volumes:
       - ./data/keys:/app/data/keys:ro
+      - customer_attachment_local_data:/app/data/attachments
     depends_on:
       customer-mysql:
         condition: service_healthy
@@ -616,6 +619,8 @@ volumes:
     name: basic-platform-local-contract-mysql-data
   customer_mysql_local_data:
     name: basic-platform-local-customer-mysql-data
+  customer_attachment_local_data:
+    name: basic-platform-local-customer-attachment-data
   portal_mysql_local_data:
     name: basic-platform-local-portal-mysql-data
   project_mysql_local_data:

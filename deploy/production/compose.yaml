@@ -37,6 +37,8 @@ x-customer-service: &customer-service
     # 发布脚本从本次不可变 CRM 镜像自动读取，覆盖运行环境文件中的旧值。
     OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
     MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    ATTACHMENT_LOCAL_ENABLED: "true"
+    ATTACHMENT_LOCAL_ROOT: /app/data/attachments
     GIN_MODE: release
   networks: [application]
   volumes:
@@ -343,6 +345,9 @@ services:
   customer-api:
     <<: *customer-service
     command: ["./crm-server"]
+    volumes:
+      - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+      - customer-attachment-data:/app/data/attachments
     ports:
       - "127.0.0.1:${CUSTOMER_API_PORT:-18083}:8090"
     depends_on:
@@ -476,6 +481,7 @@ volumes:
   platform-mysql-data:
   contract-mysql-data:
   customer-mysql-data:
+  customer-attachment-data:
   portal-mysql-data:
   project-mysql-data:
   subsystem-provisioner-socket:
