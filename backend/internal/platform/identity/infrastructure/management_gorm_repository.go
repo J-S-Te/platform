@@ -10,6 +10,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/domain"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -1074,6 +1075,7 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 }
 
 func (repository *GORMRepository) UpdateMembership(ctx context.Context, input application.MembershipUpdateInput) (domain.Membership, error) {
+	resultID := input.MembershipID
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		// 任职更新可能同时换用户、组织、岗位、主次和继承开关；先验证新引用，再用版本号
 		// 更新，并在同一事务清理旧主组织、设置新主组织和推进授权修订号。
@@ -1104,6 +1106,36 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 		}
 
 		now := time.Now().UTC()
+		// 岗位、组织或主次任职发生变化属于人员异动，绝不能覆盖历史任职。
+		// 结束旧任职并创建新任职，使晋升、降职和调岗的授权来源可审计。
+		if existing.OrgUnitID != input.OrgUnitID || existing.PositionID != input.PositionID || existing.MembershipType != input.MembershipType {
+			newID, idErr := ulid.Generator{}.New(now)
+			if idErr != nil {
+				return fmt.Errorf("generate personnel change membership id: %w", idErr)
+			}
+			if err := transaction.Model(&membershipModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, existing.ID, existing.Version).Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": nullableTime(input.EffectiveFrom), "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "close prior membership")
+			}
+			primary := input.MembershipType == domain.MembershipPrimary && *input.Status == domain.StatusActive
+			if primary {
+				if err := ensureNoOtherPrimary(ctx, transaction, input.TenantID, input.UserID, ""); err != nil {
+					return err
+				}
+			}
+			if err := transaction.Create(&membershipModel{ID: newID, TenantID: input.TenantID, UserID: input.UserID, OrgUnitID: input.OrgUnitID, PositionID: input.PositionID, MembershipType: input.MembershipType, IsPrimary: primary, InheritAuthorization: input.InheritAuthorization == nil || *input.InheritAuthorization, ValidFrom: nullableTime(input.EffectiveFrom), ValidUntil: nullableTime(input.EffectiveTo), Status: *input.Status, Version: 1, CreatedAt: now, CreatedBy: nullableString(&input.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&input.OperatorID)}).Error; err != nil {
+				return mapWriteError(err, "create changed membership")
+			}
+			if primary {
+				if err := transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ?", input.TenantID, input.UserID).Updates(map[string]any{"primary_org_id": input.OrgUnitID, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+					return err
+				}
+			}
+			if err := advanceMembershipAuthorizationRevisions(transaction, input.TenantID, now, "人员异动导致岗位继承授权变化"); err != nil {
+				return err
+			}
+			resultID = newID
+			return nil
+		}
 		updates := map[string]any{
 			"user_id":         input.UserID,
 			"org_unit_id":     input.OrgUnitID,
@@ -1154,7 +1186,7 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 	if err != nil {
 		return domain.Membership{}, err
 	}
-	return repository.getMembership(ctx, input.TenantID, input.MembershipID)
+	return repository.getMembership(ctx, input.TenantID, resultID)
 }
 
 // advanceMembershipAuthorizationRevisions 使所有可能通过组织或岗位继承角色的应用授权

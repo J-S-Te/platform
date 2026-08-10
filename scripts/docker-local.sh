@@ -331,6 +331,7 @@ compose() {
             --profile portal \
             --profile project \
             --profile presale-worker \
+            --profile keycloak \
             "$@"
         return
     fi
@@ -345,6 +346,7 @@ compose() {
             --env-file "$project_env_file" \
             --profile portal \
             --profile presale-worker \
+            --profile keycloak \
             "$@"
         return
     fi
@@ -359,6 +361,7 @@ compose() {
             --env-file "$project_env_file" \
             --profile project \
             --profile presale-worker \
+            --profile keycloak \
             "$@"
         return
     fi
@@ -371,6 +374,7 @@ compose() {
         --env-file "$portal_env_file" \
         --env-file "$project_env_file" \
         --profile presale-worker \
+        --profile keycloak \
         "$@"
 }
 
@@ -437,8 +441,37 @@ ensure_platform_env_file() {
         replace_line_in_file "$env_file" IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY "$(random_key)"
         replace_line_in_file "$env_file" IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY "$(random_key)"
         replace_line_in_file "$env_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
+        replace_line_in_file "$env_file" KEYCLOAK_DB_PASSWORD "$(random_hex 24)"
+        replace_line_in_file "$env_file" KEYCLOAK_DB_ROOT_PASSWORD "$(random_hex 32)"
+        replace_line_in_file "$env_file" KEYCLOAK_ADMIN_PASSWORD "$(random_hex 32)"
         log "已根据模板生成基础平台环境文件：$env_file"
     fi
+
+    # Keycloak 使用独立 MySQL 卷；升级到该编排版本时，仅为新增字段
+    # 生成凭据，不轮换已有真实凭据。
+    local keycloak_db_password keycloak_db_root_password keycloak_admin_username keycloak_admin_password
+    keycloak_db_password="$(env_value "$env_file" KEYCLOAK_DB_PASSWORD)"
+    keycloak_db_root_password="$(env_value "$env_file" KEYCLOAK_DB_ROOT_PASSWORD)"
+    keycloak_admin_username="$(env_value "$env_file" KEYCLOAK_ADMIN_USERNAME)"
+    keycloak_admin_password="$(env_value "$env_file" KEYCLOAK_ADMIN_PASSWORD)"
+    if [[ -z "$keycloak_db_password" || "$keycloak_db_password" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$env_file" KEYCLOAK_DB_PASSWORD "$(random_hex 24)"
+    fi
+    if [[ -z "$keycloak_db_root_password" || "$keycloak_db_root_password" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$env_file" KEYCLOAK_DB_ROOT_PASSWORD "$(random_hex 32)"
+    fi
+    if [[ -z "$keycloak_admin_password" || "$keycloak_admin_password" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$env_file" KEYCLOAK_ADMIN_PASSWORD "$(random_hex 32)"
+    fi
+    if [[ -z "$keycloak_admin_username" || "$keycloak_admin_username" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$env_file" KEYCLOAK_ADMIN_USERNAME admin
+    fi
+    # The management page performs Realm/Client initialization through the
+    # platform API.  These are non-secret local routing defaults.
+    replace_line_in_file "$env_file" KEYCLOAK_MANAGEMENT_ENABLED true
+    replace_line_in_file "$env_file" KEYCLOAK_ADMIN_URL http://keycloak:8080
+    replace_line_in_file "$env_file" KEYCLOAK_PUBLIC_URL http://localhost:18090
+    replace_line_in_file "$env_file" KEYCLOAK_REALM basic-platform
 
     local unresolved
     unresolved="$(grep -E 'REPLACE_WITH_' "$env_file" | grep -v '^#' || true)"
@@ -690,6 +723,7 @@ prepare_base_images() {
         "node:22-alpine"
         "nginx:1.27-alpine"
         "mysql:8.4"
+        "quay.io/keycloak/keycloak:26.2"
         "temporalio/auto-setup:1.29.7"
     )
     log "检查并串行准备基础镜像"
@@ -967,10 +1001,13 @@ start_stack() {
     build_images
     run_migrations
     bootstrap_admin_if_needed
+    log "启动独立 Keycloak 认证容器与 MySQL"
+    compose_up_wait "Keycloak" keycloak-db keycloak
     # 分阶段启动，避免四个 API 和 frontend 在同一次 Compose wait 中
     # 把下游的短暂冷启动误报为整套部署失败，同时让错误日志能够准确指向服务。
     log "启动基础平台 API 与受控子系统 provisioner"
     compose_up_wait "基础平台 API" subsystem-provisioner api
+    sync_crm_authorization_catalog
     log "启动合同管理后端"
     compose_up_wait "合同管理后端" contract-api
 	log "启动客户与商机管理后端"
@@ -981,13 +1018,18 @@ start_stack() {
 	start_presale_worker --skip-build --skip-migrate
 	if portal_configured; then
 		log "启动已接入的客户自助门户后端"
-		compose_run up -d --wait portal-api
+		# portal-migrate 已在 run_migrations 中串行成功执行；再次让
+		# `up --wait` 解析其 service_completed_successfully 依赖会重建一次性
+		# 容器，并可能在等待阶段引用已被 Compose 清理的旧容器 ID。
+		compose_run up -d --wait --no-deps portal-api
 	else
 		log "客户自助门户尚未接入，跳过 portal-api；可在应用接入中创建 customer_portal/dev"
 	fi
 	if project_configured; then
 		log "启动已接入的项目管理系统后端"
-		compose_up_wait "项目管理系统后端" project-api
+		# project-migrate 同样已在 run_migrations 中完成，避免 Compose 在
+		# `--wait` 时重复重建一次性迁移容器。
+		compose_run up -d --wait --no-deps project-api
 	else
 		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
 	fi
@@ -1074,24 +1116,32 @@ refresh_customer_backend() {
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api
-    local_crm_hash="$(compose_run run --rm --no-deps customer-api ./authz-catalog print crm \
-        | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
-    [[ "$local_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "无法从本地 CRM 镜像读取有效授权目录哈希"
-    export OIDC_ROLE_CONFIG_HASH="$local_crm_hash"
-    log "使用本地 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
+    sync_crm_authorization_catalog
     prepare_gateway_config
     log "重新构建统一前端网关，使客户与商机管理路径转发到 customer-api"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
     log "启动客户与商机数据库并执行 CRM 清单迁移"
     compose_run up -d --wait customer-mysql
     compose_run run --rm --no-deps customer-migrate
-    log "重建 customer-api 与统一前端网关；另外两个后端和统一登录接入配置保持不变"
-    compose_run up -d --wait --no-deps customer-api
-    log "自动发布客户与商机管理授权目录（角色及有效角色数量策略）"
-    compose_run run --rm --no-deps customer-api ./authz-catalog publish crm
+	log "重建 customer-api 与统一前端网关；另外两个后端和统一登录接入配置保持不变"
+	compose_run up -d --wait --no-deps customer-api
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
 	compose_run ps customer-api customer-mysql
+}
+
+# CRM 启动时会严格校验基础平台已发布目录的 claims_role_config_hash。
+# 所有启动入口都必须在启动 customer-api 前完成同一镜像目录的发布，
+# 否则服务会因旧目录进入重启循环，而发布命令也无法稳定执行。
+sync_crm_authorization_catalog() {
+    local local_crm_hash
+    local_crm_hash="$(compose_run run --rm --no-deps customer-api ./authz-catalog print crm \
+        | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
+    [[ "$local_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "无法从本地 CRM 镜像读取有效授权目录哈希"
+    export OIDC_ROLE_CONFIG_HASH="$local_crm_hash"
+    log "使用本地 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
+    log "启动 CRM 前发布客户与商机管理授权目录"
+    compose_run run --rm --no-deps customer-api ./authz-catalog publish crm
 }
 
 refresh_portal_backend() {

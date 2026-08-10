@@ -78,6 +78,10 @@ type SubsystemOnboardingInput struct {
 	UpstreamURL        string
 	PathPrefix         string
 	ClientType         string
+	// IssuerAlias is the selected authentication provider.  It is persisted on
+	// the environment so a later deploy/retry has an explicit, auditable choice
+	// instead of guessing from the current process configuration.
+	IssuerAlias *string
 	// AllowedServiceBindings 是该应用清单声明的可创建服务凭据用途（不含 audit_ingest 基线）。
 	// 为空且清单未声明时回退到平台硬编码默认，保证既有行为不变。
 	AllowedServiceBindings []string
@@ -236,7 +240,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	environmentInput := normalizeEnvironmentCreate(EnvironmentCreateInput{
 		TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
 		Environment: input.Environment, BaseURL: stringPointer(input.PublicBaseURL),
-		UpstreamURL: stringPointer(input.UpstreamURL), PathPrefix: stringPointer(input.PathPrefix), Status: "ACTIVE",
+		UpstreamURL: stringPointer(input.UpstreamURL), PathPrefix: stringPointer(input.PathPrefix), IssuerAlias: input.IssuerAlias, Status: "ACTIVE",
 	})
 	if !validEnvironmentCreate(environmentInput) {
 		return SubsystemOnboardingResult{}, ErrValidation

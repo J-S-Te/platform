@@ -208,6 +208,11 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
 			)
+			apiRouter.POST("/subsystem-keycloak/sync",
+				middleware.RequirePermission("platform:application:update"),
+				middleware.RequirePermission("platform:application-environment:update"),
+				adaptHandler(operational.SubsystemOnboarding.SyncKeycloakClient),
+			)
 			// Retry uses the same safe reapply path as update, but records RETRY in the durable
 			// deployment state so operators can distinguish a recovery from a routine reapply.
 			apiRouter.POST("/subsystem-retry",

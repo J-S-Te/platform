@@ -537,7 +537,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService)
+	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService, applicationManagementService, oauthClientManagementService)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()

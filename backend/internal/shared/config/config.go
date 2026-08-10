@@ -28,6 +28,10 @@ type Config struct {
 	Worker              WorkerConfig
 	Audit               AuditConfig
 	SubsystemOnboarding SubsystemOnboardingAutomationConfig
+	// Keycloak is an optional authentication edge.  The platform remains the
+	// source of people, organisations and final permissions; this section only
+	// supplies the control-plane connection used to create Realm clients.
+	Keycloak KeycloakConfig
 	// PortalApplicationCode 是外部客户门户应用编码（B4 解耦，默认 customer_portal）。
 	PortalApplicationCode string
 	FileStorageRoot       string
@@ -95,6 +99,19 @@ type AuditConfig struct {
 	EnvironmentCode string
 }
 
+// KeycloakConfig separates the container-internal admin endpoint from the
+// browser-visible issuer.  Never expose AdminPassword through an HTTP response.
+type KeycloakConfig struct {
+	Enabled            bool
+	AdminURL           string
+	PublicURL          string
+	Realm              string
+	AdminUsername      string
+	AdminPassword      string
+	BrokerClientID     string
+	BrokerClientSecret string
+}
+
 // SubsystemOnboardingAutomationConfig 控制一键接入的受信部署 Agent。API 只连接 Unix Socket，
 // Docker Socket、宿主机文件和相邻项目目录权限必须留在隔离进程中。
 type SubsystemOnboardingAutomationConfig struct {
@@ -159,6 +176,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	keycloakEnabled, err := boolean("KEYCLOAK_MANAGEMENT_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -214,6 +235,16 @@ func Load() (Config, error) {
 		Audit: AuditConfig{
 			ApplicationCode: value("AUDIT_APPLICATION_CODE", "platform"),
 			EnvironmentCode: value("AUDIT_ENVIRONMENT_CODE", "dev"),
+		},
+		Keycloak: KeycloakConfig{
+			Enabled:            keycloakEnabled,
+			AdminURL:           strings.TrimRight(value("KEYCLOAK_ADMIN_URL", "http://keycloak:8080"), "/"),
+			PublicURL:          strings.TrimRight(value("KEYCLOAK_PUBLIC_URL", ""), "/"),
+			Realm:              value("KEYCLOAK_REALM", "basic-platform"),
+			AdminUsername:      value("KEYCLOAK_ADMIN_USERNAME", ""),
+			AdminPassword:      value("KEYCLOAK_ADMIN_PASSWORD", ""),
+			BrokerClientID:     value("KEYCLOAK_PLATFORM_CLIENT_ID", ""),
+			BrokerClientSecret: value("KEYCLOAK_PLATFORM_CLIENT_SECRET", ""),
 		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
 			Enabled:                       subsystemAutomationEnabled,
@@ -348,6 +379,25 @@ func (cfg Config) Validate() error {
 		parsed, err := url.ParseRequestURI(origin)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("APP_CORS_ALLOWED_ORIGINS contains invalid origin %q", origin)
+		}
+	}
+	if cfg.Keycloak.Enabled {
+		for key, value := range map[string]string{
+			"KEYCLOAK_ADMIN_URL":      cfg.Keycloak.AdminURL,
+			"KEYCLOAK_PUBLIC_URL":     cfg.Keycloak.PublicURL,
+			"KEYCLOAK_REALM":          cfg.Keycloak.Realm,
+			"KEYCLOAK_ADMIN_USERNAME": cfg.Keycloak.AdminUsername,
+			"KEYCLOAK_ADMIN_PASSWORD": cfg.Keycloak.AdminPassword,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%s must not be empty when KEYCLOAK_MANAGEMENT_ENABLED is true", key)
+			}
+		}
+		for key, raw := range map[string]string{"KEYCLOAK_ADMIN_URL": cfg.Keycloak.AdminURL, "KEYCLOAK_PUBLIC_URL": cfg.Keycloak.PublicURL} {
+			parsed, parseErr := url.ParseRequestURI(raw)
+			if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return fmt.Errorf("%s must be an absolute URL without query or fragment", key)
+			}
 		}
 	}
 	return nil
