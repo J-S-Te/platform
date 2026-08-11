@@ -18,13 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: backend
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - run: go test ./...
       - run: go vet ./...
       - name: Validate production deployment scripts
@@ -82,7 +82,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: backend/Dockerfile
+          file: Dockerfile
           push: true
           platforms: linux/amd64
           tags: |
@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: |
           changed="$(git diff --name-only HEAD^ HEAD || true)"
-          if grep -E '^\.github/workflows/ci-cd\.yml$' <<<"$changed" >/dev/null             || { grep -E '^backend/' <<<"$changed" | grep -vE '_test\.go$' | grep -q .; }; then
+          if grep -E '^\.github/workflows/ci-cd\.yml$' <<<"$changed" >/dev/null             || { grep -E '^(cmd|internal|migrations)/|^(Dockerfile|go\.mod|go\.sum|docker-entrypoint\.sh)$|^scripts/sync-contract-catalog\.sh$' <<<"$changed" | grep -vE '_test\.go$' | grep -q .; }; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"

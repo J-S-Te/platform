@@ -136,7 +136,7 @@ cleanup() {
 error_hint() {
   case "$CURRENT_STEP" in
     *软件包*) printf '%s' '检查软件源、DNS、代理和 sudo 权限，然后根据日志中的包名重试。' ;;
-    *Go\ Module*) printf '%s' '检查 GOPROXY、网络和 backend/go.sum；不要手工删除校验失败的依赖记录。' ;;
+    *Go\ Module*) printf '%s' '检查 GOPROXY、网络和 go.sum；不要手工删除校验失败的依赖记录。' ;;
     *Go*) printf '%s' '检查 go.dev 网络连通性、系统架构和 /usr/local 写权限；也可预先安装 go.mod 要求的 Go 版本。' ;;
     *Node*) printf '%s' '检查 nodejs.org 网络连通性、系统架构和 /usr/local 写权限；也可通过 NODE_VERSION 指定兼容版本。' ;;
     *MySQL*|*数据库*) printf '%s' '检查 MySQL 服务状态、管理员凭据、.env 连接参数和端口占用；远程数据库可使用 --skip-mysql-server --skip-database-init。' ;;
@@ -383,9 +383,9 @@ detect_system() {
     return 1
   fi
 
-  REQUIRED_GO_VERSION="$(awk '$1 == "go" { print $2; exit }' "${PROJECT_ROOT}/backend/go.mod")"
+  REQUIRED_GO_VERSION="$(awk '$1 == "go" { print $2; exit }' "${PROJECT_ROOT}/go.mod")"
   [[ "$REQUIRED_GO_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || {
-    log "ERROR" "backend/go.mod 中的 Go 版本格式无效：${REQUIRED_GO_VERSION:-<空>}"
+    log "ERROR" "go.mod 中的 Go 版本格式无效：${REQUIRED_GO_VERSION:-<空>}"
     return 1
   }
   [[ "$REQUIRED_NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
@@ -1634,7 +1634,7 @@ run_migrations() {
     return 0
   fi
   CURRENT_STEP="执行 MySQL 迁移"
-  run_cmd env ENV_FILE="$ENV_FILE" make -C "${PROJECT_ROOT}/backend" migrate
+  run_cmd env ENV_FILE="$ENV_FILE" make -C "${PROJECT_ROOT}" migrate
 }
 
 check_item() {
@@ -1786,7 +1786,7 @@ check_environment() {
     check_item "前端依赖" warn "已按参数跳过依赖完整性检测"
   else
     if [[ "$go_compatible" == true ]]; then
-      if (cd "${PROJECT_ROOT}/backend" && go mod verify >>"$LOG_FILE" 2>&1); then
+      if (cd "${PROJECT_ROOT}" && go mod verify >>"$LOG_FILE" 2>&1); then
         check_item "Go Module" ok "go mod verify 通过"
       else
         check_item "Go Module" missing "依赖缺失或校验失败；详细原因见 ${LOG_FILE}"
@@ -1813,10 +1813,10 @@ check_environment() {
 
 verify_environment() {
   CURRENT_STEP="验证后端 Go 代码"
-  run_cmd bash -c 'cd "$1" && test -z "$(gofmt -l .)"' _ "${PROJECT_ROOT}/backend"
-  run_cmd bash -c 'cd "$1" && go mod verify' _ "${PROJECT_ROOT}/backend"
-  run_cmd bash -c 'cd "$1" && go vet ./...' _ "${PROJECT_ROOT}/backend"
-  run_cmd bash -c 'cd "$1" && go test ./...' _ "${PROJECT_ROOT}/backend"
+  run_cmd bash -c 'cd "$1" && test -z "$(gofmt -l .)"' _ "${PROJECT_ROOT}"
+  run_cmd bash -c 'cd "$1" && go mod verify' _ "${PROJECT_ROOT}"
+  run_cmd bash -c 'cd "$1" && go vet ./...' _ "${PROJECT_ROOT}"
+  run_cmd bash -c 'cd "$1" && go test ./...' _ "${PROJECT_ROOT}"
 
   CURRENT_STEP="验证前端代码"
   run_cmd bash -c 'cd "$1" && npm test' _ "${PROJECT_ROOT}/frontend"
@@ -1888,10 +1888,10 @@ build_release_artifacts() {
 
   CURRENT_STEP="构建后端发布二进制"
   run_cmd mkdir -p "$staging_dir/bin" "$staging_dir/frontend"
-  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/api" ./cmd/api' _ "${PROJECT_ROOT}/backend" "$staging_dir"
-  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/worker" ./cmd/worker' _ "${PROJECT_ROOT}/backend" "$staging_dir"
-  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/migrate" ./cmd/migrate' _ "${PROJECT_ROOT}/backend" "$staging_dir"
-  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/bootstrap-admin" ./cmd/bootstrap-admin' _ "${PROJECT_ROOT}/backend" "$staging_dir"
+  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/api" ./cmd/api' _ "${PROJECT_ROOT}" "$staging_dir"
+  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/worker" ./cmd/worker' _ "${PROJECT_ROOT}" "$staging_dir"
+  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/migrate" ./cmd/migrate' _ "${PROJECT_ROOT}" "$staging_dir"
+  run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/bootstrap-admin" ./cmd/bootstrap-admin' _ "${PROJECT_ROOT}" "$staging_dir"
 
   CURRENT_STEP="构建前端静态资源"
   run_cmd bash -c 'cd "$1" && npm run build && cp -a dist/. "$2/frontend/"' _ "${PROJECT_ROOT}/frontend" "$staging_dir"

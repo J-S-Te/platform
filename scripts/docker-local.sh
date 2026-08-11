@@ -55,7 +55,7 @@ usage() {
   bash scripts/docker-local.sh start-presale-worker [--presale-worker-env-file PATH]
 
 up/restart 选项：
-  --build                         重新构建统一前端、独立后端和售前投递 Worker 镜像
+  --build                         重新构建镜像并强制重建使用新镜像的业务容器
   --pull                          兼容选项；启动前默认会串行拉取缺失的基础镜像
   --admin-display-name NAME       首次初始化超级管理员显示名称
   --admin-account-name NAME       首次初始化超级管理员账号
@@ -197,6 +197,19 @@ export PROJECT_RUNTIME_ENV_FILE="$project_env_file"
 export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
+
+validate_local_automation_paths() {
+    [[ -d "$BASIC_PLATFORM_HOST_PROJECT_ROOT" ]] || \
+        fail "基础平台宿主机项目目录不存在：$BASIC_PLATFORM_HOST_PROJECT_ROOT"
+    [[ -d "$SUBSYSTEM_HOST_PROJECTS_ROOT" ]] || \
+        fail "子系统宿主机根目录不存在：$SUBSYSTEM_HOST_PROJECTS_ROOT"
+    [[ -f "$BASIC_PLATFORM_HOST_PROJECT_ROOT/scripts/portal-gateway.sh" ]] || \
+        fail "基础平台网关脚本不存在：$BASIC_PLATFORM_HOST_PROJECT_ROOT/scripts/portal-gateway.sh"
+    [[ -f "$BASIC_PLATFORM_HOST_PROJECT_ROOT/docker/portal-apps-locations.conf" ]] || \
+        fail "基础平台网关配置不存在：$BASIC_PLATFORM_HOST_PROJECT_ROOT/docker/portal-apps-locations.conf"
+}
+
+validate_local_automation_paths
 
 # scripts/lan-access.sh 通过 docker/.env.lan 标记临时局域网模式。docker-local
 # 必须继续为基础平台、合同后端和客户商机后端加载同源覆盖配置，否则平台
@@ -678,10 +691,14 @@ compose_run() {
 compose_up_wait() {
     local description="$1"
     shift
-    local attempt
+    local attempt recreate_flag=""
+
+    if [[ "$force_build" == true ]]; then
+        recreate_flag="--force-recreate"
+    fi
 
     for attempt in 1 2; do
-        if compose_run up -d --wait "$@"; then
+        if compose_run up -d --wait $recreate_flag "$@"; then
             return 0
         fi
         if [[ "$attempt" -eq 1 ]]; then
