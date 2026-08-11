@@ -1,5 +1,12 @@
 **
-!backend/
-!backend/**
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!migrations/
+!migrations/**
+!go.mod
+!go.sum
+!docker-entrypoint.sh
 !scripts/
 !scripts/sync-contract-catalog.sh

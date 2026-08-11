@@ -20,6 +20,8 @@ chmod 600 .env .release.env
 
 替换 `.env` 中所有基础设施占位值；`.release.env` 的镜像 digest 由 CI/CD 发布自动更新。`runtime/*.env` 不要求管理员手工创建：首次接入时，Agent 会从审核清单指定的 `*.env.example` 初始化缺失文件、自动收紧为 `0600`，写入 OIDC/授权目录/用途 Client，并为清单声明的业务密钥生成一次性 32 字节随机 base64 值。已有合法密钥、未知环境变量、注释及清单外文件都会保留，重试或更新不会轮换。部署人员也可以提前通过 Secret 管理系统写入合法密钥，Agent 会继续复用。首次镜像发布在接入凭据未补齐时只安全暂存 digest，不启动数据库迁移或 API。不要提交运行环境文件、私钥或备份。
 
+Keycloak 的独立数据库、可选 bootstrap service account、HTTP/HTTPS 网关策略、轮换、备份恢复、HA、监控告警和灾备演练遵循 [Keycloak 生产运维 Runbook](../../docs/keycloak-production-operations.md)。该 Runbook 不强制 HTTPS：是否使用 TLS 由入口网关和 `KEYCLOAK_PUBLIC_URL` 决定。
+
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 
 应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前四个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*`、`CUSTOMER_MYSQL_* + PORTAL_MYSQL_*` 或 `PROJECT_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。

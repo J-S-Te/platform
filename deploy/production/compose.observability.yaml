@@ -1,0 +1,30 @@
+# Optional observability overlay. It is inactive unless explicitly supplied.
+# Prometheus and node-exporter remain on the internal application network; no
+# monitoring port is published to the host by this example.
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/keycloak-alerts.yml:/etc/prometheus/keycloak-alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks: [application]
+    restart: unless-stopped
+
+  keycloak-backup-metrics:
+    image: prom/node-exporter:v1.9.1
+    command:
+      - --collector.disable-defaults
+      - --collector.textfile
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - ./monitoring/textfile:/textfile:ro
+    networks: [application]
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:

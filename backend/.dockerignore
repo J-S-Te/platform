@@ -1,8 +1,0 @@
-.git
-.gitignore
-.env
-.env.*
-data
-tmp
-coverage
-*.log

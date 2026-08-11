@@ -88,7 +88,7 @@ bash scripts/docker-local.sh refresh-portal-api
 | Compose 服务 | Docker 镜像 | 内容 | 宿主机端口 |
 | --- | --- | --- | --- |
 | `frontend` | `basic-platform/frontend:local` | 基础平台前端 + 合同管理前端 + 客户与商机管理前端 + 客户自助门户前端 | `127.0.0.1:8081` |
-| `api` | `basic-platform/backend:local` | 基础平台 API + Worker | 不发布 |
+| `api` | `basic-platform:local` | 基础平台 API + Worker | 不发布 |
 | `contract-api` | `contract-management/backend:local` | 合同管理 API + Temporal Worker | 不发布 |
 | `customer-api` | `customer-opportunity/backend:local` | 客户与商机管理 API，只包含 `crm-server` | 不发布 |
 | `portal-api` | `customer-portal/backend:local` | 客户自助门户 API，只包含 `portal-server`；仅在 `customer_portal/dev` 接入后启动 | 不发布 |

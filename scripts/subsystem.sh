@@ -36,6 +36,7 @@ UPSTREAM_URL=""
 PATH_PREFIX=""
 CLIENT_TYPE="confidential"
 INITIAL_ADMIN_USER_ID=""
+ISSUER_ALIAS=""
 
 # 通用控制
 SUBCOMMAND=""
@@ -897,6 +898,7 @@ update 是一键重建子系统容器的快捷入口。它不会重新写入 .en
 必填参数：
   --application-code CODE   Application.Code，例如 contract_management
   --environment ENV         Environment.Environment：dev/test/staging/prod
+  --issuer-alias ALIAS     认证提供方别名，例如 keycloak 或 platform
 
 执行控制：
   -y, --yes                 跳过最终确认
@@ -921,14 +923,17 @@ update_required_configuration_missing() {
 }
 
 update_write_payload() {
-  python3 - "$APPLICATION_CODE" "$ENVIRONMENT" >"$1" <<'PY'
+  python3 - "$APPLICATION_CODE" "$ENVIRONMENT" "$ISSUER_ALIAS" >"$1" <<'PY'
 import json
 import sys
-code, environment = sys.argv[1:]
-json.dump({
+code, environment, issuer_alias = sys.argv[1:]
+payload = {
     "application_code": code.strip(),
     "environment": environment.strip(),
-}, sys.stdout, ensure_ascii=False)
+}
+if issuer_alias.strip():
+    payload["issuer_alias"] = issuer_alias.strip()
+json.dump(payload, sys.stdout, ensure_ascii=False)
 PY
 }
 
@@ -1006,6 +1011,9 @@ parse_update_args() {
       --environment)
         [[ $# -ge 2 ]] || { log "ERROR" "--environment 缺少参数"; exit 2; }
         ENVIRONMENT="$2"; shift 2 ;;
+      --issuer-alias)
+        [[ $# -ge 2 ]] || { log "ERROR" "--issuer-alias 缺少参数"; exit 2; }
+        ISSUER_ALIAS="$2"; shift 2 ;;
       -h|--help)
         update_usage; exit 0 ;;
       --)

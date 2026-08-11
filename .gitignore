@@ -40,3 +40,8 @@ data/*
 
 # 本地初始化凭据只允许由启动脚本生成，禁止进入版本库。
 docker/.initial-admin-password
+data/logs/*.jsonl
+
+# 生产备份和监控输出可能包含数据库记录或运行时状态。
+deploy/production/backups/
+deploy/production/monitoring/textfile/
