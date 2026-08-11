@@ -615,6 +615,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		upstreamURL = *result.Environment.UpstreamURL
 	}
 	provisioningClientID, provisioningClientSecret := result.OAuthClient.ClientID, result.PlaintextSecret
+	keycloakClientID := ""
 	if strings.EqualFold(effectiveIssuerAlias, "keycloak") {
 		if handler.keycloakControl == nil || handler.keycloakBroker == nil {
 			handler.writeError(writer, request, application.ErrValidation)
@@ -631,6 +632,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 			return
 		}
 		provisioningClientID, provisioningClientSecret = client.ClientID, client.ClientSecret
+		keycloakClientID = client.ClientID
 	}
 	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
 		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
@@ -664,6 +666,41 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
+	}
+	// The deployment Agent has now published the application-owned role catalog and the
+	// initial administrator binding exists.  A Keycloak-first onboarding must complete the
+	// same projection work as an existing environment's “同步 Keycloak” action before it
+	// is exposed as READY; otherwise the new Client could issue tokens without its final
+	// role/permission claims.
+	if keycloakClientID != "" {
+		if handler.keycloakCatalog == nil || handler.keycloakMappings == nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_MAPPING_UNAVAILABLE", "Keycloak 授权映射组件不可用")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		roleCodes, catalogErr := handler.keycloakCatalog.ListKeycloakRoleCodes(request.Context(), principal.Tenant.ID, result.Application.ID)
+		if catalogErr != nil || handler.keycloakControl.EnsureClientRoles(request.Context(), keycloakClientID, roleCodes) != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_ROLE_CATALOG_SYNC_FAILED", "Keycloak 角色目录同步失败")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if mappingErr := handler.keycloakMappings.SaveKeycloakClientMapping(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID, handler.keycloakRealm, keycloakClientID); mappingErr != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_CLIENT_MAPPING_FAILED", "Keycloak Client 映射保存失败")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if backfillErr := handler.keycloakMappings.BackfillKeycloakAuthorization(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID); backfillErr != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_AUTHORIZATION_BACKFILL_FAILED", "Keycloak 授权投影回填失败")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if updater, ok := handler.keycloakReadiness.(keycloakSwitchReadinessUpdater); ok {
+			if readinessErr := updater.MarkKeycloakClientAndRoleCatalogSynced(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID); readinessErr != nil {
+				handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_READINESS_UPDATE_FAILED", "Keycloak 就绪状态写入失败")
+				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+				return
+			}
+		}
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, application.SubsystemDeploymentStatusReady, "ONBOARD", "", ""); err != nil {
 		handler.logger.Error("subsystem deployment completed but state update failed", "application_code", result.Application.Code, "environment", result.Environment.Environment, "error", err)

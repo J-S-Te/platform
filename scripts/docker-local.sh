@@ -485,6 +485,9 @@ ensure_platform_env_file() {
     replace_line_in_file "$env_file" KEYCLOAK_ADMIN_URL http://keycloak:8080
     replace_line_in_file "$env_file" KEYCLOAK_PUBLIC_URL http://localhost:18090
     replace_line_in_file "$env_file" KEYCLOAK_REALM basic-platform
+    # 新接入环境默认走 Keycloak；已有环境的 issuer_alias 存在于平台数据库，
+    # 不会因这里变更而被隐式切换，仍需通过应用接入页完成受控迁移。
+    replace_line_in_file "$env_file" SUBSYSTEM_DEFAULT_ISSUER_ALIAS keycloak
 
     local unresolved
     unresolved="$(grep -E 'REPLACE_WITH_' "$env_file" | grep -v '^#' || true)"
