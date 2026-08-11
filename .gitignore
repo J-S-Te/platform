@@ -41,3 +41,10 @@ data/*
 # 本地初始化凭据只允许由启动脚本生成，禁止进入版本库。
 docker/.initial-admin-password
 data/logs/*.jsonl
+
+# Production backups and monitoring output may contain database records or runtime state.
+deploy/production/backups/
+deploy/production/monitoring/textfile/
+
+# Never commit the local platform signing key; only the public key may be versioned.
+data/keys/jwt-ed25519-private.pem
