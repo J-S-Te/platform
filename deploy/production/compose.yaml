@@ -19,7 +19,7 @@ x-contract-service: &contract-service
     HTTP_ADDRESS: :8081
     MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     PLATFORM_BASE_URL: http://platform-api:8080
-    OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-https://sso.example.com}/realms/${KEYCLOAK_REALM:-basic-platform}}
+    OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}/realms/${KEYCLOAK_REALM:-basic-platform}}
     OIDC_BACKCHANNEL_BASE_URL: ${SUBSYSTEM_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     TEMPORAL_ADDRESS: temporal:7233
     GIN_MODE: release
@@ -34,7 +34,7 @@ x-customer-service: &customer-service
     HTTP_ADDRESS: :8090
     MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     PLATFORM_BASE_URL: http://platform-api:8080
-    OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-https://sso.example.com}/realms/${KEYCLOAK_REALM:-basic-platform}}
+    OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}/realms/${KEYCLOAK_REALM:-basic-platform}}
     OIDC_BACKCHANNEL_BASE_URL: ${SUBSYSTEM_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     # 发布脚本从本次不可变 CRM 镜像自动读取，覆盖运行环境文件中的旧值。
     OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
@@ -55,7 +55,7 @@ x-portal-service: &portal-service
     PORTAL_HTTP_ADDRESS: :8091
     PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD:-PENDING_PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
-    PORTAL_OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-https://sso.example.com}/realms/${KEYCLOAK_REALM:-basic-platform}}
+    PORTAL_OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}/realms/${KEYCLOAK_REALM:-basic-platform}}
     PORTAL_OIDC_BACKCHANNEL_BASE_URL: ${SUBSYSTEM_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
     PORTAL_CRM_INVITE_TOKEN_URL: http://platform-api:8080/oauth2/token
@@ -73,7 +73,7 @@ x-project-service: &project-service
     PM_HTTP_ADDR: :8082
     MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     PLATFORM_BASE_URL: http://platform-api:8080
-    OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-https://sso.example.com}/realms/${KEYCLOAK_REALM:-basic-platform}}
+    OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}/realms/${KEYCLOAK_REALM:-basic-platform}}
     OIDC_BACKCHANNEL_BASE_URL: ${SUBSYSTEM_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
@@ -120,7 +120,7 @@ services:
       # 留空不会创建 bootstrap service account，保留既有 admin/password 启动方式。
       KC_BOOTSTRAP_ADMIN_CLIENT_ID: ${KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_ID:-}
       KC_BOOTSTRAP_ADMIN_CLIENT_SECRET: ${KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_SECRET:-}
-      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-https://sso.example.com}
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}
       KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
       KC_PROXY_HEADERS: ${KEYCLOAK_PROXY_HEADERS:-xforwarded}
       KC_HTTP_ENABLED: ${KEYCLOAK_HTTP_ENABLED:-true}
@@ -308,7 +308,7 @@ services:
       HTTP_ADDRESS: :8081
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
-      OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-https://sso.example.com}/realms/${KEYCLOAK_REALM:-basic-platform}}
+      OIDC_ISSUER: ${SUBSYSTEM_OIDC_ISSUER:-${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}/realms/${KEYCLOAK_REALM:-basic-platform}}
       OIDC_BACKCHANNEL_BASE_URL: ${SUBSYSTEM_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
       TEMPORAL_ADDRESS: temporal:7233
       CONTRACT_RUN_WORKER_WITH_API: "true"
