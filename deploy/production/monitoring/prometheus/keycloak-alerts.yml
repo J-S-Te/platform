@@ -1,0 +1,29 @@
+groups:
+  - name: keycloak-production
+    rules:
+      - alert: KeycloakMetricsUnavailable
+        expr: up{job="keycloak"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Keycloak metrics endpoint is unavailable
+          runbook: platform/docs/keycloak-production-operations.md#4-健康检查监控与告警
+
+      - alert: KeycloakBackupStale
+        expr: time() - keycloak_backup_last_success_unixtime > 93600
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: No verified Keycloak MySQL backup has completed within 26 hours
+          runbook: platform/docs/keycloak-production-operations.md#3-备份与恢复
+
+      - alert: KeycloakBackupMetricMissing
+        expr: absent(keycloak_backup_last_success_unixtime)
+        for: 26h
+        labels:
+          severity: warning
+        annotations:
+          summary: Keycloak backup success metric has never been observed
+          runbook: platform/docs/keycloak-production-operations.md#3-备份与恢复

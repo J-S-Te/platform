@@ -1,0 +1,22 @@
+# OPTIONAL Keycloak HA overlay. It is intentionally not part of compose.yaml.
+# Before use, provide an external HA MySQL endpoint and put an external load
+# balancer on the application network (or another network attached to every
+# Keycloak replica). The LB is responsible for the public listener and health
+# checks; this file exposes no replica port on the Docker host.
+services:
+  keycloak-db:
+    profiles: [single-node-keycloak]
+
+  keycloak:
+    profiles: [keycloak-ha]
+    ports: !reset []
+    depends_on: !reset []
+    environment:
+      KC_DB_URL: ${KEYCLOAK_HA_DB_URL:?Set a JDBC URL for the external shared MySQL database}
+      KC_DB_USERNAME: ${KEYCLOAK_HA_DB_USER:?Set the external MySQL user}
+      KC_DB_PASSWORD: ${KEYCLOAK_HA_DB_PASSWORD:?Set the external MySQL password}
+      KC_CACHE_STACK: jdbc-ping
+    deploy:
+      replicas: ${KEYCLOAK_HA_REPLICAS:-2}
+      restart_policy:
+        condition: any

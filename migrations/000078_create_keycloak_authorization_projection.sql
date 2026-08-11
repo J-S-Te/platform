@@ -1,0 +1,46 @@
+-- Keycloak 仅保存基础平台授权的受控投影；身份、组织、岗位与最终权限仍以基础平台为准。
+CREATE TABLE IF NOT EXISTS keycloak_authorization_projection (
+    tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    identity_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    application_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    application_code VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    keycloak_client_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    authorization_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    role_config_hash VARCHAR(128) NOT NULL DEFAULT '',
+    status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    last_synced_at DATETIME(3) NULL,
+    last_error_code VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    last_error_message VARCHAR(1000) NULL,
+    created_at DATETIME(3) NOT NULL,
+    updated_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (tenant_id, identity_id, application_id),
+    KEY idx_keycloak_projection_application_status (tenant_id, application_id, status, updated_at),
+    CONSTRAINT fk_keycloak_projection_user FOREIGN KEY (tenant_id, identity_id) REFERENCES iam_user (tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_keycloak_projection_application FOREIGN KEY (tenant_id, application_id) REFERENCES platform_application (tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT chk_keycloak_projection_status CHECK (status IN ('PENDING', 'SYNCING', 'SYNCED', 'FAILED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS keycloak_authorization_outbox (
+    id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    identity_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    application_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    event_type VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    authorization_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    available_at DATETIME(3) NOT NULL,
+    locked_by VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    locked_at DATETIME(3) NULL,
+    attempts INT UNSIGNED NOT NULL DEFAULT 0,
+    last_error_code VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    last_error_message VARCHAR(1000) NULL,
+    created_at DATETIME(3) NOT NULL,
+    completed_at DATETIME(3) NULL,
+    PRIMARY KEY (id),
+    KEY idx_keycloak_outbox_poll (status, available_at, created_at),
+    KEY idx_keycloak_outbox_subject (tenant_id, identity_id, application_id, status),
+    CONSTRAINT fk_keycloak_outbox_user FOREIGN KEY (tenant_id, identity_id) REFERENCES iam_user (tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_keycloak_outbox_application FOREIGN KEY (tenant_id, application_id) REFERENCES platform_application (tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT chk_keycloak_outbox_status CHECK (status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+    CONSTRAINT chk_keycloak_outbox_event CHECK (event_type IN ('AUTHORIZATION_CHANGED', 'ORGANIZATION_CHANGED', 'IDENTITY_CHANGED', 'FULL_RECONCILE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
