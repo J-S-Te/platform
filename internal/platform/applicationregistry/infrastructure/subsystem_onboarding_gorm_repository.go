@@ -32,6 +32,28 @@ func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironme
 	return row.ApplicationID, row.EnvironmentID, nil
 }
 
+// ResolveEnvironmentIssuerAlias reads the persisted provider for the exact
+// tenant/application/environment tuple. The cutover gate must distinguish a
+// first platform -> Keycloak switch from an ordinary update of an environment
+// that is already running on Keycloak.
+func (repository *SubsystemOnboardingGORMRepository) ResolveEnvironmentIssuerAlias(ctx context.Context, tenantID, applicationCode, environment string) (string, error) {
+	var row struct {
+		IssuerAlias *string `gorm:"column:issuer_alias"`
+	}
+	err := repository.database.WithContext(ctx).Table("platform_application_environment AS environment").
+		Select("environment.issuer_alias").
+		Joins("JOIN platform_application AS application ON application.id = environment.application_id AND application.tenant_id = environment.tenant_id").
+		Where("environment.tenant_id = ? AND application.code = ? AND environment.environment = ?", tenantID, applicationCode, environment).
+		Take(&row).Error
+	if err != nil {
+		return "", err
+	}
+	if row.IssuerAlias == nil || strings.TrimSpace(*row.IssuerAlias) == "" {
+		return "platform", nil
+	}
+	return strings.ToLower(strings.TrimSpace(*row.IssuerAlias)), nil
+}
+
 type subsystemDeploymentStateModel struct {
 	TenantID                string     `gorm:"column:tenant_id"`
 	ApplicationID           string     `gorm:"column:application_id"`

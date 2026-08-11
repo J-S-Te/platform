@@ -73,6 +73,14 @@ type subsystemOnboardingService interface {
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
 }
 
+// subsystemEnvironmentIssuerResolver is an optional capability implemented by
+// the durable control-plane repository. It lets UpdateSubsystem tell a real
+// issuer cutover apart from a rebuild of an environment already using the
+// requested provider, while lightweight test services remain compatible.
+type subsystemEnvironmentIssuerResolver interface {
+	ResolveEnvironmentIssuerAlias(context.Context, string, string, string) (string, error)
+}
+
 type keycloakAuthorizationCatalog interface {
 	ListKeycloakRoleCodes(context.Context, string, string) ([]string, error)
 }
@@ -272,6 +280,25 @@ func writeKeycloakSwitchBlocked(writer stdhttp.ResponseWriter, request *stdhttp.
 		"认证提供方尚未满足切换门禁，Issuer 未下发到运行时",
 		map[string]any{"switch_gates": readiness.Gates, "next_action": readiness.NextAction},
 	))
+}
+
+func (handler *SubsystemOnboardingHandler) keycloakCutoverRequired(ctx context.Context, tenantID, applicationCode, environment string) bool {
+	// The onboarding service owns the environment aggregate in normal
+	// composition.  Keep the state-store fallback for older compositions that
+	// expose this optional lookup there instead.
+	for _, candidate := range []any{handler.service, handler.deploymentState} {
+		resolver, ok := candidate.(subsystemEnvironmentIssuerResolver)
+		if !ok {
+			continue
+		}
+		currentAlias, err := resolver.ResolveEnvironmentIssuerAlias(ctx, tenantID, applicationCode, environment)
+		if err == nil {
+			return !strings.EqualFold(strings.TrimSpace(currentAlias), "keycloak")
+		}
+	}
+	// Unknown state must remain fail-closed. Production wires the durable
+	// resolver, while lightweight callers/tests retain the first-switch rule.
+	return true
 }
 
 func (handler *SubsystemOnboardingHandler) issuerForAlias(alias string) (string, error) {
@@ -938,7 +965,8 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	// subsystem's .env.local, so both the API process and the deployment helper can pick them
 	// up without exposing the host filesystem into the API container.
 	effectiveIssuerAlias := handler.effectiveIssuerAlias(payload.IssuerAlias)
-	if strings.EqualFold(effectiveIssuerAlias, "keycloak") {
+	keycloakCutover := strings.EqualFold(effectiveIssuerAlias, "keycloak") && handler.keycloakCutoverRequired(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	if keycloakCutover {
 		readiness := handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, applicationCode, environment)
 		if !readiness.SwitchReady {
 			writeKeycloakSwitchBlocked(writer, request, readiness)
@@ -976,7 +1004,7 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		updateInput.PathPrefix = pathPrefix
 		updateInput.UpstreamURL = upstreamURL
 	}
-	if strings.EqualFold(effectiveIssuerAlias, "keycloak") {
+	if keycloakCutover {
 		if handler.keycloakControl == nil || handler.keycloakBroker == nil || publicBaseURL == "" || pathPrefix == "" {
 			handler.writeError(writer, request, application.ErrValidation)
 			return

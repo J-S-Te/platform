@@ -20,6 +20,7 @@ runtime:
       compose_environment_key: CONTRACT_RUNTIME_ENV_FILE
       required_existing_keys: []
       values:
+        OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
         OIDC_SESSION_COOKIE_NAME: contract_management_session
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"

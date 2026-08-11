@@ -97,12 +97,81 @@ func TestUpdateSubsystemRejectsKeycloakWithoutAuthoritativeGateEvidence(t *testi
 	}
 }
 
+type keycloakIssuerStateStore struct {
+	recordingSubsystemDeploymentStateStore
+	issuerAlias string
+}
+
+func (store *keycloakIssuerStateStore) ResolveEnvironmentIssuerAlias(context.Context, string, string, string) (string, error) {
+	return store.issuerAlias, nil
+}
+
+func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		issuerAlias string
+		path        string
+		wantStatus  int
+		wantGated   bool
+	}{
+		"first switch is blocked without all four gates": {
+			issuerAlias: "platform", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusConflict, wantGated: true,
+		},
+		"same issuer update bypasses switch gates": {
+			issuerAlias: "keycloak", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusOK,
+		},
+		"same issuer retry bypasses switch gates": {
+			issuerAlias: "keycloak", path: "/api/v1/subsystem-retry", wantStatus: stdhttp.StatusOK,
+		},
+	}
+	for name, test := range tests {
+		test := test
+		t.Run(name, func(t *testing.T) {
+			stateStore := &keycloakIssuerStateStore{
+				recordingSubsystemDeploymentStateStore: recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1"}},
+				issuerAlias:                            test.issuerAlias,
+			}
+			provisioner := &recordingHTTPSubsystemProvisioner{}
+			handler, err := NewSubsystemOnboardingHandler(
+				&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+				"https://portal.example.com", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readiness := &recordingKeycloakReadiness{}
+			handler.ConfigureKeycloak(true, "https://sso.example.com", "basic-platform")
+			handler.ConfigureKeycloakSwitchReadinessInspector(readiness)
+			request := httptest.NewRequest(stdhttp.MethodPost, test.path, strings.NewReader(`{"application_code":"contract_management","environment":"prod","issuer_alias":"keycloak"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+				Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+			}))
+			response := httptest.NewRecorder()
+
+			handler.UpdateSubsystem(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if gotGated := readiness.inspectCalls > 0; gotGated != test.wantGated {
+				t.Fatalf("switch readiness inspected = %v, want %v", gotGated, test.wantGated)
+			}
+			if !test.wantGated && (provisioner.input.Issuer != "https://sso.example.com" || provisioner.input.ClientSecret != "") {
+				t.Fatalf("same-issuer update must reuse runtime credentials: %#v", provisioner.input)
+			}
+		})
+	}
+}
+
 type recordingKeycloakReadiness struct {
 	verification KeycloakBrokerLoginVerification
 	called       bool
+	inspectCalls int
 }
 
 func (readiness *recordingKeycloakReadiness) InspectKeycloakSwitchReadiness(context.Context, string, string, string) (KeycloakSwitchReadiness, error) {
+	readiness.inspectCalls++
 	return unverifiedKeycloakSwitchReadiness(), nil
 }
 
