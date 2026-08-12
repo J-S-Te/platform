@@ -11,6 +11,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +91,180 @@ func TestKeycloakBrokerAuthenticationFailsClosed(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, want)
 			}
 		})
+	}
+}
+
+func TestKeycloakBrokerJWTVerifierCachesFreshJWKS(t *testing.T) {
+	privateKey := newTestKeycloakRSAKey(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writeKeycloakJWKS(t, writer, map[string]*rsa.PrivateKey{"current": privateKey})
+	}))
+	defer server.Close()
+
+	issuer := server.URL + "/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifier(issuer, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	verifier.now = func() time.Time { return now }
+	token := signedKeycloakBrokerJWT(t, privateKey, "current", validKeycloakBrokerClaims(issuer, now))
+	for range 2 {
+		if _, err := verifier.Verify(context.Background(), token); err != nil {
+			t.Fatalf("Verify() error = %v", err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("JWKS requests = %d, want 1 fresh-cache request", got)
+	}
+}
+
+func TestKeycloakBrokerJWTVerifierRefreshesImmediatelyOnUnknownKid(t *testing.T) {
+	firstKey, secondKey := newTestKeycloakRSAKey(t), newTestKeycloakRSAKey(t)
+	var keys atomic.Value
+	keys.Store(map[string]*rsa.PrivateKey{"first": firstKey})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writeKeycloakJWKS(t, writer, keys.Load().(map[string]*rsa.PrivateKey))
+	}))
+	defer server.Close()
+
+	issuer := server.URL + "/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifier(issuer, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	verifier.now = func() time.Time { return now }
+	if _, err := verifier.Verify(context.Background(), signedKeycloakBrokerJWT(t, firstKey, "first", validKeycloakBrokerClaims(issuer, now))); err != nil {
+		t.Fatalf("first Verify() error = %v", err)
+	}
+	keys.Store(map[string]*rsa.PrivateKey{"first": firstKey, "second": secondKey})
+	if _, err := verifier.Verify(context.Background(), signedKeycloakBrokerJWT(t, secondKey, "second", validKeycloakBrokerClaims(issuer, now))); err != nil {
+		t.Fatalf("rotated-key Verify() error = %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("JWKS requests = %d, want 2 after kid miss", got)
+	}
+}
+
+func TestKeycloakBrokerJWTVerifierUsesOnlyBoundedStaleVerifiedKeyset(t *testing.T) {
+	privateKey := newTestKeycloakRSAKey(t)
+	var serveKeys atomic.Bool
+	serveKeys.Store(true)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		if !serveKeys.Load() {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeKeycloakJWKS(t, writer, map[string]*rsa.PrivateKey{"current": privateKey})
+	}))
+	defer server.Close()
+
+	issuer := server.URL + "/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifier(issuer, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Second)
+	now := base
+	verifier.now = func() time.Time { return now }
+	verifier.cacheTTL = time.Minute
+	verifier.maxStale = 30 * time.Second
+	claims := validKeycloakBrokerClaims(issuer, base)
+	claims["exp"] = base.Add(10 * time.Minute).Unix()
+	token := signedKeycloakBrokerJWT(t, privateKey, "current", claims)
+	if _, err := verifier.Verify(context.Background(), token); err != nil {
+		t.Fatalf("initial Verify() error = %v", err)
+	}
+
+	serveKeys.Store(false)
+	now = base.Add(time.Minute + time.Second)
+	if _, err := verifier.Verify(context.Background(), token); err != nil {
+		t.Fatalf("Verify() should use bounded stale keyset, got %v", err)
+	}
+	now = base.Add(time.Minute + 31*time.Second)
+	if _, err := verifier.Verify(context.Background(), token); err == nil {
+		t.Fatal("Verify() succeeded after stale JWKS allowance elapsed")
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("JWKS requests = %d, want 3", got)
+	}
+}
+
+func TestKeycloakBrokerJWTVerifierCoalescesConcurrentJWKSRefresh(t *testing.T) {
+	privateKey := newTestKeycloakRSAKey(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		writeKeycloakJWKS(t, writer, map[string]*rsa.PrivateKey{"current": privateKey})
+	}))
+	defer server.Close()
+
+	issuer := server.URL + "/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifier(issuer, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	verifier.now = func() time.Time { return now }
+	token := signedKeycloakBrokerJWT(t, privateKey, "current", validKeycloakBrokerClaims(issuer, now))
+
+	const callers = 8
+	errorsByCaller := make(chan error, callers)
+	for range callers {
+		go func() { _, err := verifier.Verify(context.Background(), token); errorsByCaller <- err }()
+	}
+	<-started
+	close(release)
+	for range callers {
+		if err := <-errorsByCaller; err != nil {
+			t.Fatalf("concurrent Verify() error = %v", err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("JWKS requests = %d, want 1 coalesced refresh", got)
+	}
+}
+
+func newTestKeycloakRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func validKeycloakBrokerClaims(issuer string, now time.Time) map[string]any {
+	return map[string]any{
+		"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Add(-time.Second).Unix(),
+		"sid": "sid", "tenant_id": "tenant", "identity_id": "identity",
+	}
+}
+
+func writeKeycloakJWKS(t *testing.T, writer http.ResponseWriter, keys map[string]*rsa.PrivateKey) {
+	t.Helper()
+	document := make([]map[string]string, 0, len(keys))
+	for keyID, privateKey := range keys {
+		document = append(document, map[string]string{
+			"kid": keyID, "kty": "RSA", "alg": "RS256", "use": "sig",
+			"n": base64.RawURLEncoding.EncodeToString(privateKey.PublicKey.N.Bytes()),
+			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privateKey.PublicKey.E)).Bytes()),
+		})
+	}
+	if err := json.NewEncoder(writer).Encode(map[string]any{"keys": document}); err != nil {
+		t.Errorf("write JWKS: %v", err)
 	}
 }
 

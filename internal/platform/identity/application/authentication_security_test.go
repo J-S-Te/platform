@@ -19,6 +19,9 @@ type authenticationRepositoryStub struct {
 func (stub authenticationRepositoryStub) FindLoginAccount(context.Context, string) (domain.LoginAccount, error) {
 	return stub.account, stub.err
 }
+func (stub authenticationRepositoryStub) FindLoginAccountByIdentityID(context.Context, string) (domain.LoginAccount, error) {
+	return stub.account, stub.err
+}
 func (authenticationRepositoryStub) RecordSuccessfulPasswordVerification(context.Context, domain.LoginAccount, time.Time) error {
 	return nil
 }
@@ -167,6 +170,24 @@ func TestCreateSessionRejectsConcurrentTerminalLogin(t *testing.T) {
 	}
 	if repository.idleTimeout != 30*time.Minute {
 		t.Fatalf("CreateSession() idle timeout = %s, want 30m", repository.idleTimeout)
+	}
+}
+
+func TestLoginOIDCUsesStableIdentityWithoutPasswordVerification(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 10, 0, 0, 0, time.UTC)
+	verifier := &passwordVerifierSpy{}
+	account := domain.LoginAccount{TenantID: "tenant-1", TenantStatus: domain.StatusActive, UserID: "identity-1", UserStatus: domain.StatusActive, AccountID: "account-1", AccountName: "alice", AccountStatus: domain.StatusActive}
+	service := &Service{
+		repository: authenticationRepositoryStub{account: account}, passwords: verifier,
+		tokens: authenticationTokenManagerStub{}, ids: authenticationIDGeneratorStub{}, clock: authenticationClockStub{now: now},
+		loginSecurity: loginSecurityStub{idleTimeout: 30 * time.Minute}, sessionTTL: 12 * time.Hour,
+	}
+	result, err := service.LoginOIDC(context.Background(), OIDCLoginInput{IdentityID: "identity-1"})
+	if err != nil {
+		t.Fatalf("LoginOIDC() error = %v", err)
+	}
+	if result.UserID != "identity-1" || verifier.calls != 0 {
+		t.Fatalf("result=%#v password verification calls=%d", result, verifier.calls)
 	}
 }
 

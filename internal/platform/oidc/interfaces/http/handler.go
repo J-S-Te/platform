@@ -84,6 +84,21 @@ type AccessTokenSubjectResolver interface {
 	ResolveAccessTokenSubject(context.Context, string, string, string) (AccessTokenSubject, error)
 }
 
+// ExternalAuthorizationTokenVerifier is the narrow trust boundary for an upstream
+// identity provider such as Keycloak. It is used only by authorization-context;
+// normal platform OAuth endpoints continue to accept platform-issued access tokens.
+type ExternalAuthorizationTokenClaims struct {
+	Subject         string
+	TenantID        string
+	SessionID       string
+	AuthorizedParty string
+	Audience        []string
+}
+
+type ExternalAuthorizationTokenVerifier interface {
+	Verify(context.Context, string) (ExternalAuthorizationTokenClaims, error)
+}
+
 // PersonnelDirectoryEntry is the minimal tenant personnel projection exposed to profile-scoped
 // subsystem sessions. Login names and employee numbers are deliberately excluded.
 type PersonnelDirectoryEntry struct {
@@ -116,7 +131,9 @@ type Config struct {
 	SessionLogout                 BrowserSessionLogout
 	PostLogoutRedirectValidator   PostLogoutRedirectValidator
 	AccessTokenSubjectResolver    AccessTokenSubjectResolver
+	ExternalAuthorizationVerifier ExternalAuthorizationTokenVerifier
 	AuthorizationResolver         tokenissuer.AuthorizationResolver
+	AuthorizationContextResolver  tokenissuer.AuthorizationContextResolver
 	PersonnelDirectoryResolver    PersonnelDirectoryResolver
 	SessionCookieName             string
 	SessionCookieSecure           bool
@@ -127,18 +144,20 @@ type Config struct {
 
 // Handler contains only transport policy. Durable protocol state remains in application.Service.
 type Handler struct {
-	service               Service
-	jwtManager            JWTManager
-	legacyIssuer          LegacyClientCredentialsIssuer
-	sessionAuth           BrowserSessionAuthenticator
-	sessionLogout         BrowserSessionLogout
-	logoutRedirects       PostLogoutRedirectValidator
-	accessTokenSubjects   AccessTokenSubjectResolver
-	authorizationResolver tokenissuer.AuthorizationResolver
-	personnelDirectory    PersonnelDirectoryResolver
-	cookie                cookieConfig
-	clock                 Clock
-	logger                *slog.Logger
+	service                       Service
+	jwtManager                    JWTManager
+	legacyIssuer                  LegacyClientCredentialsIssuer
+	sessionAuth                   BrowserSessionAuthenticator
+	sessionLogout                 BrowserSessionLogout
+	logoutRedirects               PostLogoutRedirectValidator
+	accessTokenSubjects           AccessTokenSubjectResolver
+	externalAuthorizationVerifier ExternalAuthorizationTokenVerifier
+	authorizationResolver         tokenissuer.AuthorizationResolver
+	authorizationContextResolver  tokenissuer.AuthorizationContextResolver
+	personnelDirectory            PersonnelDirectoryResolver
+	cookie                        cookieConfig
+	clock                         Clock
+	logger                        *slog.Logger
 }
 
 type cookieConfig struct {
@@ -169,8 +188,10 @@ func NewHandler(config Config) (*Handler, error) {
 		service: config.Service, jwtManager: config.JWTManager, legacyIssuer: config.LegacyClientCredentialsIssuer,
 		sessionAuth: config.SessionAuthenticator, sessionLogout: config.SessionLogout,
 		logoutRedirects: config.PostLogoutRedirectValidator, accessTokenSubjects: config.AccessTokenSubjectResolver,
-		authorizationResolver: config.AuthorizationResolver, personnelDirectory: config.PersonnelDirectoryResolver,
-		cookie: cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
-		clock:  config.Clock, logger: config.Logger,
+		externalAuthorizationVerifier: config.ExternalAuthorizationVerifier,
+		authorizationResolver:         config.AuthorizationResolver, authorizationContextResolver: config.AuthorizationContextResolver,
+		personnelDirectory: config.PersonnelDirectoryResolver,
+		cookie:             cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
+		clock:              config.Clock, logger: config.Logger,
 	}, nil
 }

@@ -20,6 +20,7 @@ func NewApplicationAuthorizationResolver(service *Service) (*ApplicationAuthoriz
 }
 
 var _ tokenissuer.AuthorizationResolver = (*ApplicationAuthorizationResolver)(nil)
+var _ tokenissuer.AuthorizationContextResolver = (*ApplicationAuthorizationResolver)(nil)
 
 func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (tokenissuer.AuthorizationClaims, error) {
 	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
@@ -31,10 +32,18 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx c
 		}
 		return tokenissuer.AuthorizationClaims{}, err
 	}
-	return tokenissuer.AuthorizationClaims{
-		TenantID: resolved.TenantID, PersonID: resolved.PersonID, PrimaryOrgID: resolved.PrimaryOrgID,
-		OrganizationIDs: append([]string(nil), resolved.OrganizationIDs...), Roles: append([]string(nil), resolved.Roles...),
-		Permissions: append([]string(nil), resolved.Permissions...), RoleConfigHash: resolved.RoleConfigHash,
-		AuthzRevision: resolved.AuthzRevision,
-	}, nil
+	return tokenissuer.AuthorizationClaims{TenantID: resolved.TenantID, PersonID: resolved.PersonID, Roles: append([]string(nil), resolved.Roles...)}, nil
+}
+
+func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorizationContext(ctx context.Context, tenantID, clientID, userID string) (tokenissuer.AuthorizationContext, error) {
+	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
+	if err != nil {
+		if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrAccessDenied) {
+			return tokenissuer.AuthorizationContext{}, oidcapplication.ErrAccessDenied
+		}
+		return tokenissuer.AuthorizationContext{}, err
+	}
+	return tokenissuer.AuthorizationContext{TenantID: resolved.TenantID, PersonID: resolved.PersonID,
+		Roles: append([]string(nil), resolved.Roles...), Permissions: append([]string(nil), resolved.Permissions...), DataScopes: append([]tokenissuer.DataScope(nil), resolved.DataScopes...),
+		AuthorizationRevision: resolved.AuthzRevision}, nil
 }

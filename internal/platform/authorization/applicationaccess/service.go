@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/tokenissuer"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -120,6 +121,7 @@ type RoleView struct {
 	Code            string     `json:"code"`
 	Name            string     `json:"name"`
 	ScopeType       string     `json:"scope_type"`
+	ScopeID         string     `json:"scope_id,omitempty"`
 	EnvironmentCode string     `json:"environment_code,omitempty"`
 	ValidFrom       *time.Time `json:"valid_from,omitempty"`
 	ValidUntil      *time.Time `json:"valid_until,omitempty"`
@@ -221,6 +223,7 @@ type TokenAuthorization struct {
 	Permissions     []string
 	RoleConfigHash  string
 	AuthzRevision   uint64
+	DataScopes      []tokenissuer.DataScope
 }
 
 // KeycloakAuthorizationSnapshot is the application-scoped authorization result
@@ -348,6 +351,10 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	for _, role := range access.Roles {
 		roles = append(roles, role.Code)
 	}
+	dataScopes := make([]tokenissuer.DataScope, 0, len(access.Roles))
+	for _, role := range access.Roles {
+		dataScopes = append(dataScopes, tokenissuer.DataScope{RoleCode: role.Code, ScopeType: role.ScopeType, ScopeID: role.ScopeID, EnvironmentCode: role.EnvironmentCode})
+	}
 	return s.attachOrganizationClaims(ctx, TokenAuthorization{
 		ApplicationCode: client.ApplicationCode,
 		EnvironmentCode: client.EnvironmentCode,
@@ -356,6 +363,7 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 		Permissions:     append([]string(nil), access.EffectivePermissions...),
 		RoleConfigHash:  access.RoleConfigHash,
 		AuthzRevision:   access.AuthzRevision,
+		DataScopes:      dataScopes,
 	}, userID)
 }
 
@@ -1230,6 +1238,7 @@ func resolveAssignedRoles(rows []assignedRoleRow, directSubjectType string) ([]s
 		sourceKind := sourceKindForRole(row, row.SubjectType == directSubjectType)
 		view := RoleView{
 			Code: row.Code, Name: row.Name, ScopeType: externalScopeType(row.ScopeType),
+			ScopeID:         row.ScopeID,
 			EnvironmentCode: row.EnvironmentCode, ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil,
 			SourceType: row.SubjectType, SourceID: row.SubjectID, SourceName: row.SourceName,
 			Direct: row.SubjectType == directSubjectType, GrantOrigin: normalizedGrantOrigin(row.GrantOrigin),

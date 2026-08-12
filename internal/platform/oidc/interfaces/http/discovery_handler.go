@@ -19,6 +19,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint":                              issuer + "/oauth2/token",
 		"pushed_authorization_request_endpoint":       issuer + "/oauth2/par",
 		"userinfo_endpoint":                           issuer + "/oauth2/userinfo",
+		"authorization_context_endpoint":              issuer + "/oauth2/authorization-context",
 		"jwks_uri":                                    issuer + "/oauth2/jwks",
 		"revocation_endpoint":                         issuer + "/oauth2/revoke",
 		"end_session_endpoint":                        issuer + "/oauth2/logout",
@@ -35,8 +36,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"scopes_supported":                            []string{"openid", "profile", "email"},
 		"claims_supported": []string{
 			"sub", "identity_id", "name", "preferred_username", "email",
-			"tenant_id", "person_id", "primary_org_id", "organization_ids", "roles", "permissions",
-			"role_config_hash", "authz_revision",
+			"tenant_id", "person_id", "roles",
 		},
 	}, false)
 }

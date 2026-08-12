@@ -36,17 +36,12 @@ func (resolver fixedAuthorizationResolver) ResolveOIDCAuthorization(context.Cont
 	return resolver.claims, nil
 }
 
-func TestIssueOIDCTokensCarriesOrganizationClaimsIntoBothTokens(t *testing.T) {
+func TestIssueOIDCTokensCarriesStableIdentityAndCoarseRolesOnly(t *testing.T) {
 	signer := &capturingSigner{}
 	issuer, err := newIssuer(signer, fixedIDGenerator{value: "id-token-id"}, fixedAuthorizationResolver{claims: AuthorizationClaims{
-		TenantID:        "tenant-1",
-		PersonID:        "PMS-U10086",
-		PrimaryOrgID:    "org-a",
-		OrganizationIDs: []string{"org-a", "org-b"},
-		Roles:           []string{"sales"},
-		Permissions:     []string{"customer.read"},
-		RoleConfigHash:  "role-hash",
-		AuthzRevision:   9,
+		TenantID: "tenant-1",
+		PersonID: "PMS-U10086",
+		Roles:    []string{"sales"},
 	}})
 	if err != nil {
 		t.Fatalf("newIssuer() error = %v", err)
@@ -74,8 +69,8 @@ func TestIssueOIDCTokensCarriesOrganizationClaimsIntoBothTokens(t *testing.T) {
 		if claims.PersonID != "PMS-U10086" {
 			t.Fatalf("%s token person_id = %q", name, claims.PersonID)
 		}
-		if claims.PrimaryOrgID != "org-a" || len(claims.OrganizationIDs) != 2 || claims.OrganizationIDs[0] != "org-a" || claims.OrganizationIDs[1] != "org-b" {
-			t.Fatalf("%s token organization claims = %#v", name, claims)
+		if claims.Subject != "user-1" || len(claims.Roles) != 1 || claims.Roles[0] != "sales" {
+			t.Fatalf("%s token identity/roles = %#v", name, claims)
 		}
 	}
 	if signer.access.JWTID != "access-token-id" || signer.id.JWTID != "id-token-id" {
@@ -86,8 +81,7 @@ func TestIssueOIDCTokensCarriesOrganizationClaimsIntoBothTokens(t *testing.T) {
 func TestIssueOIDCTokensRejectsAuthorizationFromAnotherTenant(t *testing.T) {
 	signer := &capturingSigner{}
 	issuer, err := newIssuer(signer, fixedIDGenerator{value: "id-token-id"}, fixedAuthorizationResolver{claims: AuthorizationClaims{
-		TenantID:        "tenant-2",
-		OrganizationIDs: []string{"org-foreign"},
+		TenantID: "tenant-2",
 	}})
 	if err != nil {
 		t.Fatalf("newIssuer() error = %v", err)

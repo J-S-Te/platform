@@ -3,6 +3,9 @@ package identityhttp
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,10 +39,22 @@ type Handler struct {
 	auditRecorder lifecycleAuditRecorder
 	auditConfig   config.AuditConfig
 	loginTargets  applicationregistry.LoginTargetResolver
+	oidc          oidcLoginConfig
+}
+
+type oidcLoginConfig struct {
+	enabled       bool
+	issuer        string
+	clientID      string
+	clientSecret  string
+	redirectPath  string
+	publicBaseURL string
+	stateCookie   string
 }
 
 type applicationService interface {
 	Login(ctx context.Context, input application.LoginInput) (application.SessionResult, error)
+	LoginOIDC(ctx context.Context, input application.OIDCLoginInput) (application.SessionResult, error)
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
 	RecordInteraction(ctx context.Context, principal authctx.Principal) error
 	Refresh(ctx context.Context, principal authctx.Principal) (application.SessionResult, error)
@@ -83,9 +99,18 @@ func NewHandler(service applicationService, logger *slog.Logger, authConfig conf
 		return nil, errors.New("SameSite=None identity session cookie must be secure")
 	}
 	handler := &Handler{
-		service:       service,
-		logger:        logger,
-		cookie:        cookieConfig{name: cookieName, secure: authConfig.SessionCookieSecure, sameSite: sameSite},
+		service: service,
+		logger:  logger,
+		cookie:  cookieConfig{name: cookieName, secure: authConfig.SessionCookieSecure, sameSite: sameSite},
+		oidc: oidcLoginConfig{
+			enabled:       authConfig.KeycloakOIDCEnabled,
+			issuer:        strings.TrimRight(strings.TrimSpace(authConfig.KeycloakOIDCIssuer), "/"),
+			clientID:      strings.TrimSpace(authConfig.KeycloakOIDCClientID),
+			clientSecret:  authConfig.KeycloakOIDCClientSecret,
+			redirectPath:  strings.TrimSpace(authConfig.KeycloakOIDCRedirectPath),
+			publicBaseURL: strings.TrimRight(strings.TrimSpace(authConfig.PublicBaseURL), "/"),
+			stateCookie:   "bp_oidc_state",
+		},
 		auditRecorder: auditRecorder,
 		auditConfig:   auditConfig,
 	}
@@ -123,6 +148,11 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(payload.LoginType), "keycloak") ||
+		(payload.Account == "" && payload.Password == "" && handler.oidc.enabled) {
+		handler.BeginOIDCLogin(writer, request)
+		return
+	}
 
 	result, err := handler.service.Login(request.Context(), application.LoginInput{
 		Account: payload.Account, Password: payload.Password, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
@@ -141,6 +171,148 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 	handler.setSessionCookie(writer, result.Token, result.ExpiresAt)
 	handler.recordLogin(request, result)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", toSessionResponse(result))
+}
+
+// BeginOIDCLogin starts the platform's normal browser login. It is an RP
+// redirect only; no Broker Verification endpoint is called here.
+func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http.Request) {
+	if !handler.oidc.enabled || handler.oidc.issuer == "" || handler.oidc.clientID == "" || handler.oidc.redirectPath == "" {
+		httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New("AUTH_OIDC_UNAVAILABLE", "统一认证暂不可用", nil))
+		return
+	}
+	state, err := randomOIDCState()
+	if err != nil {
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return
+	}
+	secure := handler.cookie.secure
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: state, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: 600})
+	query := url.Values{
+		"client_id": {handler.oidc.clientID}, "response_type": {"code"},
+		"scope": {"openid profile"}, "state": {state},
+		"redirect_uri":   {handler.oidc.redirectURI(request)},
+		"code_challenge": {oidcCodeChallenge(state)}, "code_challenge_method": {"S256"},
+	}
+	http.Redirect(writer, request, handler.oidc.issuer+"/protocol/openid-connect/auth?"+query.Encode(), http.StatusFound)
+}
+
+// OIDCCallback exchanges the code with Keycloak and resolves identity through
+// UserInfo. Keycloak has already validated the access token before UserInfo
+// returns; this callback never performs Broker Verification or records a gate.
+func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.Request) {
+	if !handler.oidc.enabled {
+		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
+		return
+	}
+	stateCookie, err := request.Cookie(handler.oidc.stateCookie)
+	if err != nil || stateCookie.Value == "" || request.URL.Query().Get("state") == "" || stateCookie.Value != request.URL.Query().Get("state") {
+		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
+		return
+	}
+	code := strings.TrimSpace(request.URL.Query().Get("code"))
+	if code == "" {
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
+		return
+	}
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: "", Path: "/", HttpOnly: true, Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, MaxAge: -1})
+	accessToken, err := handler.exchangeOIDCCode(request.Context(), request, code, stateCookie.Value)
+	if err != nil {
+		handler.logger.Warn("Keycloak OIDC code exchange failed", "error", err)
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
+		return
+	}
+	identityID, err := handler.fetchOIDCIdentity(request.Context(), accessToken)
+	if err != nil {
+		handler.logger.Warn("Keycloak OIDC identity lookup failed", "error", err)
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
+		return
+	}
+	result, err := handler.service.LoginOIDC(request.Context(), application.OIDCLoginInput{IdentityID: identityID, IPAddress: remoteIP(request), UserAgent: request.UserAgent()})
+	if err != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_ACCOUNT_NOT_LINKED", "统一身份尚未绑定平台账号", nil))
+		return
+	}
+	handler.setSessionCookie(writer, result.Token, result.ExpiresAt)
+	handler.recordLogin(request, result)
+	http.Redirect(writer, request, "/", http.StatusFound)
+}
+
+func randomOIDCState() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func oidcCodeChallenge(verifier string) string {
+	digest := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func (config oidcLoginConfig) redirectURI(request *http.Request) string {
+	if strings.HasPrefix(config.redirectPath, "http://") || strings.HasPrefix(config.redirectPath, "https://") {
+		return config.redirectPath
+	}
+	if config.publicBaseURL != "" {
+		return config.publicBaseURL + "/" + strings.TrimLeft(config.redirectPath, "/")
+	}
+	return "http://" + request.Host + "/" + strings.TrimLeft(config.redirectPath, "/")
+}
+
+func (handler *Handler) exchangeOIDCCode(ctx context.Context, request *http.Request, code, verifier string) (string, error) {
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {handler.oidc.clientID}, "redirect_uri": {handler.oidc.redirectURI(request)}, "code_verifier": {verifier}}
+	if handler.oidc.clientSecret != "" {
+		form.Set("client_secret", handler.oidc.clientSecret)
+	}
+	tokenRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, handler.oidc.issuer+"/protocol/openid-connect/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(tokenRequest)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("OIDC token endpoint returned %s", response.Status)
+	}
+	var payload struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil || payload.AccessToken == "" {
+		return "", errors.New("OIDC token response has no access_token")
+	}
+	return payload.AccessToken, nil
+}
+
+func (handler *Handler) fetchOIDCIdentity(ctx context.Context, accessToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, handler.oidc.issuer+"/protocol/openid-connect/userinfo", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("OIDC userinfo endpoint returned %s", response.Status)
+	}
+	var payload struct {
+		Subject    string `json:"sub"`
+		IdentityID string `json:"identity_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+		return "", err
+	}
+	identityID := strings.TrimSpace(payload.IdentityID)
+	if identityID == "" || strings.TrimSpace(payload.Subject) == "" || identityID != strings.TrimSpace(payload.Subject) {
+		return "", errors.New("OIDC identity_id does not match sub")
+	}
+	return identityID, nil
 }
 
 // resolveLoginRedirect converts a complete target tuple into a pre-registered HTTPS address. The

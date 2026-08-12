@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -23,16 +24,41 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const maxKeycloakBrokerJWTLength = 16 * 1024
+const (
+	maxKeycloakBrokerJWTLength = 16 * 1024
+
+	// Keycloak JWKS normally changes only during signing-key rotation. Keep the
+	// normal cache relatively short so rotations converge quickly, and permit a
+	// much shorter stale window only for a previously validated keyset. The
+	// stale window is deliberately not an authentication bypass: a token still
+	// has to be signed by a known cached key and pass all regular claim checks.
+	defaultKeycloakJWKSCacheTTL = 5 * time.Minute
+	defaultKeycloakJWKSMaxStale = time.Minute
+)
 
 // KeycloakBrokerJWTVerifier verifies only end-user JWTs issued by the one
 // configured Keycloak realm. It deliberately does not provide a reusable
 // platform authentication mechanism.
 type KeycloakBrokerJWTVerifier struct {
-	issuer  string
-	jwksURL string
-	client  *http.Client
-	now     func() time.Time
+	issuer   string
+	jwksURL  string
+	client   *http.Client
+	now      func() time.Time
+	cacheTTL time.Duration
+	maxStale time.Duration
+	cache    keycloakJWKSCache
+}
+
+// keycloakJWKSCache coalesces concurrent refreshes without holding its mutex
+// over a network request. A completed fetch replaces the map instead of
+// mutating it, so keys returned to concurrent verifications remain immutable.
+type keycloakJWKSCache struct {
+	mu         sync.Mutex
+	keys       map[string]*rsa.PublicKey
+	freshUntil time.Time
+	staleUntil time.Time
+	refreshing bool
+	done       chan struct{}
 }
 
 func NewKeycloakBrokerJWTVerifier(issuer string, client *http.Client) (*KeycloakBrokerJWTVerifier, error) {
@@ -46,13 +72,15 @@ func NewKeycloakBrokerJWTVerifier(issuer string, client *http.Client) (*Keycloak
 	}
 	return &KeycloakBrokerJWTVerifier{
 		issuer: issuer, jwksURL: issuer + "/protocol/openid-connect/certs", client: client, now: time.Now,
+		cacheTTL: defaultKeycloakJWKSCacheTTL, maxStale: defaultKeycloakJWKSMaxStale,
 	}, nil
 }
 
 // KeycloakBrokerAuthentication accepts a bearer token only for the dedicated
-// broker-verification route. A JWKS request is made for every verification so
-// a Keycloak outage fails this broker evidence flow closed rather than turning
-// an old local key cache into an implicit authentication source.
+// broker-verification route. Verification uses a bounded cache of successfully
+// parsed Keycloak JWKS documents. A Keycloak outage therefore does not make
+// every in-flight broker verification fail at once, but a cache never accepts
+// an unknown key and cannot outlive its short stale allowance.
 func KeycloakBrokerAuthentication(verifier *KeycloakBrokerJWTVerifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if verifier == nil {
@@ -93,31 +121,35 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 	if err := decodeKeycloakJSONObject(parts[0], &header); err != nil || header.Algorithm != "RS256" || strings.TrimSpace(header.KeyID) == "" || len(header.Critical) != 0 {
 		return keycloakctx.BrokerClaims{}, errors.New("unsupported Keycloak broker JWT header")
 	}
-	keys, err := verifier.fetchKeys(ctx)
+	key, err := verifier.keyFor(ctx, header.KeyID)
 	if err != nil {
 		return keycloakctx.BrokerClaims{}, fmt.Errorf("fetch Keycloak JWKS: %w", err)
-	}
-	key, ok := keys[header.KeyID]
-	if !ok {
-		return keycloakctx.BrokerClaims{}, errors.New("Keycloak broker JWT signing key is unknown")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || rsa.VerifyPKCS1v15(key, crypto.SHA256, sha256Digest(parts[0]+"."+parts[1]), signature) != nil {
 		return keycloakctx.BrokerClaims{}, errors.New("Keycloak broker JWT signature is invalid")
 	}
 	var payload struct {
-		Issuer     string          `json:"iss"`
-		Subject    string          `json:"sub"`
-		Audience   json.RawMessage `json:"aud"`
-		ExpiresAt  json.RawMessage `json:"exp"`
-		IssuedAt   json.RawMessage `json:"iat"`
-		NotBefore  json.RawMessage `json:"nbf"`
-		SessionID  string          `json:"sid"`
-		TenantID   string          `json:"tenant_id"`
-		IdentityID string          `json:"identity_id"`
+		Issuer          string          `json:"iss"`
+		Subject         string          `json:"sub"`
+		Audience        json.RawMessage `json:"aud"`
+		ExpiresAt       json.RawMessage `json:"exp"`
+		IssuedAt        json.RawMessage `json:"iat"`
+		NotBefore       json.RawMessage `json:"nbf"`
+		SessionID       string          `json:"sid"`
+		TenantID        string          `json:"tenant_id"`
+		IdentityID      string          `json:"identity_id"`
+		AuthorizedParty string          `json:"azp"`
 	}
 	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
 		return keycloakctx.BrokerClaims{}, errors.New("invalid Keycloak broker JWT claims")
+	}
+	// Keycloak's reserved `sub` claim is the canonical subject. A user-attribute
+	// mapper may project identity_id into that reserved claim without emitting a
+	// second identity_id field; normalize that compact representation before the
+	// invariant check so identity_id == sub remains explicit to downstream code.
+	if strings.TrimSpace(payload.IdentityID) == "" {
+		payload.IdentityID = payload.Subject
 	}
 	audience, ok := keycloakAudience(payload.Audience)
 	expiresAt, okExp := keycloakNumericDate(payload.ExpiresAt)
@@ -135,7 +167,72 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 			return keycloakctx.BrokerClaims{}, errors.New("Keycloak broker JWT is not yet valid")
 		}
 	}
-	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, Audience: audience}, nil
+	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, AuthorizedParty: strings.TrimSpace(payload.AuthorizedParty), Audience: audience}, nil
+}
+
+// keyFor returns a validated Keycloak signing key. A cache hit is used only
+// while fresh. A missing kid always forces one refresh, even when the cached
+// set is fresh, which makes Keycloak signing-key rotation converge immediately.
+// If that refresh fails, only an already-known key may be used, and only within
+// the bounded stale window established by the last successful fetch.
+func (verifier *KeycloakBrokerJWTVerifier) keyFor(ctx context.Context, keyID string) (*rsa.PublicKey, error) {
+	if verifier == nil {
+		return nil, errors.New("Keycloak broker verifier is not initialized")
+	}
+	for {
+		now := verifier.now().UTC()
+		verifier.cache.mu.Lock()
+		key := verifier.cache.keys[keyID]
+		if key != nil && now.Before(verifier.cache.freshUntil) {
+			verifier.cache.mu.Unlock()
+			return key, nil
+		}
+		if verifier.cache.refreshing {
+			done := verifier.cache.done
+			verifier.cache.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		// Capture a stale key before releasing the lock. The cache replacement
+		// below never mutates this map, so it remains safe to use on fetch error.
+		staleKey := key
+		staleUntil := verifier.cache.staleUntil
+		verifier.cache.refreshing = true
+		verifier.cache.done = make(chan struct{})
+		done := verifier.cache.done
+		verifier.cache.mu.Unlock()
+
+		keys, err := verifier.fetchKeys(ctx)
+		completedAt := verifier.now().UTC()
+
+		verifier.cache.mu.Lock()
+		if err == nil {
+			verifier.cache.keys = keys
+			verifier.cache.freshUntil = completedAt.Add(verifier.cacheTTL)
+			verifier.cache.staleUntil = verifier.cache.freshUntil.Add(verifier.maxStale)
+		}
+		verifier.cache.refreshing = false
+		close(done)
+		verifier.cache.done = nil
+		verifier.cache.mu.Unlock()
+
+		if err != nil {
+			if staleKey != nil && completedAt.Before(staleUntil) {
+				return staleKey, nil
+			}
+			return nil, err
+		}
+		key = keys[keyID]
+		if key == nil {
+			return nil, errors.New("Keycloak broker JWT signing key is unknown")
+		}
+		return key, nil
+	}
 }
 
 func (verifier *KeycloakBrokerJWTVerifier) fetchKeys(ctx context.Context) (map[string]*rsa.PublicKey, error) {

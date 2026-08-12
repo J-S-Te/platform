@@ -56,6 +56,34 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 	return toDomainLoginAccount(row), nil
 }
 
+// FindLoginAccountByIdentityID resolves the durable identity binding used by
+// OIDC login. It intentionally does not join password credentials: an OIDC
+// account may be credential-free while still being a valid platform account.
+func (repository *GORMRepository) FindLoginAccountByIdentityID(ctx context.Context, identityID string) (domain.LoginAccount, error) {
+	var row loginAccountProjection
+	result := repository.database.WithContext(ctx).
+		Table("iam_account AS account").
+		Select(`tenant.id AS tenant_id, tenant.name AS tenant_name, tenant.code AS tenant_code, tenant.status AS tenant_status,
+			user.id AS user_id, user.display_name AS user_name, user.status AS user_status,
+			account.id AS account_id, COALESCE(account.username, account.id) AS account_name, account.status AS account_status, account.locked_until,
+			NULL AS password_hash, '' AS hash_algorithm, NULL AS algorithm_params,
+			'' AS credential_status, NULL AS credential_expiry`).
+		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
+		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
+		Where("user.id = ? AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", identityID, domain.StatusActive, time.Now().UTC()).
+		Order("CASE WHEN account.auth_source = 'KEYCLOAK' THEN 0 ELSE 1 END").
+		Limit(1).Find(&row)
+	if result.Error != nil {
+		return domain.LoginAccount{}, fmt.Errorf("query OIDC account: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return domain.LoginAccount{}, application.ErrUnauthenticated
+	}
+	account := toDomainLoginAccount(row)
+	account.CredentialStatus = domain.StatusActive
+	return account, nil
+}
+
 // RecordSuccessfulPasswordVerification 在密码验证成功后锁定当前活动凭据并清除失败状态；
 // 锁内再次检查凭据有效期，避免校验完成到状态落库之间凭据被停用或过期。
 func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error {

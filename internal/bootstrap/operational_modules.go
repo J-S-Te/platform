@@ -18,6 +18,7 @@ import (
 	identityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	identityinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/identity/infrastructure"
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
+	keycloakauthorizationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
 	keycloakauthorizationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/infrastructure"
 	notificationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/notification/application"
 	notificationdomain "github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
@@ -142,6 +143,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		keycloakRealmIssuer(cfg.Keycloak.PublicURL, cfg.Keycloak.Realm),
 		cfg.Keycloak.Realm,
 	)
+	subsystemHandler.ConfigureKeycloakTransportPolicy(cfg.Keycloak.RequireHTTPS)
 	subsystemHandler.ConfigureDefaultIssuerAlias(cfg.SubsystemOnboarding.DefaultIssuerAlias)
 	if cfg.Keycloak.Enabled {
 		mappingStore, mappingErr := keycloakauthorizationinfrastructure.NewClientMappingStore(database)
@@ -165,6 +167,20 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 			return httptransport.OperationalModules{}, readinessErr
 		}
 		subsystemHandler.ConfigureKeycloakSwitchReadinessInspector(readinessStore)
+		cutoverLifecycleStore, lifecycleErr := keycloakauthorizationinfrastructure.NewCutoverLifecycleStore(database)
+		if lifecycleErr != nil {
+			return httptransport.OperationalModules{}, lifecycleErr
+		}
+		subsystemHandler.ConfigureKeycloakCutoverLifecycle(cutoverLifecycleStore)
+		projectionOperationsStore, operationsErr := keycloakauthorizationinfrastructure.NewProjectionOperationsStore(database)
+		if operationsErr != nil {
+			return httptransport.OperationalModules{}, operationsErr
+		}
+		projectionOperations, operationsErr := keycloakauthorizationapplication.NewOperations(projectionOperationsStore)
+		if operationsErr != nil {
+			return httptransport.OperationalModules{}, operationsErr
+		}
+		subsystemHandler.ConfigureKeycloakProjectionOperations(projectionOperations)
 	}
 	notificationHandler, err := notificationhttp.NewHandler(notificationService, logger)
 	if err != nil {
@@ -205,10 +221,15 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	}
 	personnelService.SetNotifier(notificationService)
 	personnelHandler := identityhttp.NewPersonnelChangeHandler(personnelService)
+	keycloakIntegrationHandler, err := applicationregistryhttp.NewKeycloakIntegrationHandler(subsystemHandler)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
 
 	return httptransport.OperationalModules{
 		LoginTargets:           loginTargetHandler,
 		SubsystemOnboarding:    subsystemHandler,
+		KeycloakIntegration:    keycloakIntegrationHandler,
 		SubsystemServiceRoutes: subsystemServiceRouteHandler,
 		Notifications:          notificationHandler,
 		FilesAndJobs:           fileTaskHandler,

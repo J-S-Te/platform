@@ -124,6 +124,19 @@ func TestLoadReadsKeycloakAdminClientCredentials(t *testing.T) {
 	}
 }
 
+func TestLoadReadsOptionalKeycloakHTTPSCutoverPolicy(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("KEYCLOAK_REQUIRE_HTTPS", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Keycloak.RequireHTTPS {
+		t.Fatal("Keycloak.RequireHTTPS = false, want true")
+	}
+}
+
 func TestValidateKeycloakManagementCredentials(t *testing.T) {
 	base := Config{Keycloak: KeycloakConfig{Enabled: true, AdminURL: "http://keycloak:8080", PublicURL: "http://keycloak:8080", Realm: "acme", OutageLoginPolicy: KeycloakOutagePolicyContinueExistingPlatformSessions}}
 	for name, credentials := range map[string]KeycloakConfig{

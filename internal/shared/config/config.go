@@ -57,6 +57,7 @@ type MySQLConfig struct {
 
 // AuthConfig contains the shared authentication settings used by later IAM work.
 type AuthConfig struct {
+	PublicBaseURL          string
 	JWTIssuer              string
 	JWTAudience            string
 	ApplicationJWTAudience string
@@ -67,8 +68,17 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
-	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；生产环境仍由整体配置校验约束 HTTPS。
+	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
+	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
+	// KeycloakOIDC is the platform's browser-facing OIDC client. It is used by
+	// the normal platform login flow; broker verification is deliberately not
+	// part of this runtime path.
+	KeycloakOIDCEnabled      bool
+	KeycloakOIDCIssuer       string
+	KeycloakOIDCClientID     string
+	KeycloakOIDCClientSecret string
+	KeycloakOIDCRedirectPath string
 }
 
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
@@ -102,7 +112,11 @@ type AuditConfig struct {
 // KeycloakConfig separates the container-internal admin endpoint from the
 // browser-visible issuer.  Never expose AdminPassword through an HTTP response.
 type KeycloakConfig struct {
-	Enabled                bool
+	Enabled bool
+	// RequireHTTPS gates only Keycloak cutover.  It deliberately defaults to
+	// false so existing HTTP deployments remain operable until their gateway
+	// and cookies have been migrated together.
+	RequireHTTPS           bool
 	AdminURL               string
 	PublicURL              string
 	PlatformBackchannelURL string
@@ -194,6 +208,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	keycloakRequireHTTPS, err := boolean("KEYCLOAK_REQUIRE_HTTPS", false)
+	if err != nil {
+		return Config{}, err
+	}
 	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -224,6 +242,7 @@ func Load() (Config, error) {
 			BootstrapToken:      strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
 		},
 		Auth: AuthConfig{
+			PublicBaseURL:                            publicBaseURL,
 			JWTIssuer:                                value("AUTH_JWT_ISSUER", "basic-platform"),
 			JWTAudience:                              value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
 			ApplicationJWTAudience:                   value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
@@ -235,6 +254,11 @@ func Load() (Config, error) {
 			SessionCookieSameSite:                    value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
 			SessionTTL:                               sessionTTL,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
+			KeycloakOIDCEnabled:                      keycloakEnabled && strings.EqualFold(value("KEYCLOAK_PLATFORM_OIDC_ENABLED", "false"), "true"),
+			KeycloakOIDCIssuer:                       strings.TrimRight(value("KEYCLOAK_PLATFORM_OIDC_ISSUER", ""), "/"),
+			KeycloakOIDCClientID:                     value("KEYCLOAK_PLATFORM_OIDC_CLIENT_ID", ""),
+			KeycloakOIDCClientSecret:                 value("KEYCLOAK_PLATFORM_OIDC_CLIENT_SECRET", ""),
+			KeycloakOIDCRedirectPath:                 value("KEYCLOAK_PLATFORM_OIDC_REDIRECT_PATH", "/api/v1/auth/oidc/callback"),
 		},
 		Logging: LoggingConfig{
 			Level:     value("LOG_LEVEL", "info"),
@@ -252,6 +276,7 @@ func Load() (Config, error) {
 		},
 		Keycloak: KeycloakConfig{
 			Enabled:                keycloakEnabled,
+			RequireHTTPS:           keycloakRequireHTTPS,
 			AdminURL:               strings.TrimRight(value("KEYCLOAK_ADMIN_URL", "http://keycloak:8080"), "/"),
 			PublicURL:              strings.TrimRight(value("KEYCLOAK_PUBLIC_URL", ""), "/"),
 			PlatformBackchannelURL: strings.TrimRight(value("KEYCLOAK_PLATFORM_BACKCHANNEL_URL", "http://platform-api:8080"), "/"),

@@ -22,20 +22,38 @@ type jwtSigner interface {
 // intentionally remain outside this component because they are opaque secrets managed by the OIDC
 // application service and stored only as one-way digests.
 type AuthorizationClaims struct {
-	TenantID        string
-	PersonID        string
-	PrimaryOrgID    string
-	OrganizationIDs []string
-	Roles           []string
-	Permissions     []string
-	RoleConfigHash  string
-	AuthzRevision   uint64
+	TenantID string
+	PersonID string
+	Roles    []string
 }
 
-// AuthorizationResolver resolves permissions for the OAuth client's application.
-// Implementations must not return permissions belonging to a different application.
+// AuthorizationResolver resolves the compact identity claims for the OAuth client's application.
+// Detailed permissions are served by AuthorizationContextResolver instead.
 type AuthorizationResolver interface {
 	ResolveOIDCAuthorization(context.Context, string, string, string) (AuthorizationClaims, error)
+}
+
+// DataScope is the durable scope boundary of an application role. Detailed
+// permission and scope data is served online by the authorization-context API,
+// never copied into an OIDC token.
+type DataScope struct {
+	RoleCode        string
+	ScopeType       string
+	ScopeID         string
+	EnvironmentCode string
+}
+
+type AuthorizationContext struct {
+	TenantID              string
+	PersonID              string
+	Roles                 []string
+	Permissions           []string
+	DataScopes            []DataScope
+	AuthorizationRevision uint64
+}
+
+type AuthorizationContextResolver interface {
+	ResolveOIDCAuthorizationContext(context.Context, string, string, string) (AuthorizationContext, error)
 }
 
 type Issuer struct {
@@ -107,12 +125,7 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 		Nonce:              issue.Nonce,
 		TenantID:           authorization.TenantID,
 		PersonID:           authorization.PersonID,
-		PrimaryOrgID:       authorization.PrimaryOrgID,
-		OrganizationIDs:    append([]string(nil), authorization.OrganizationIDs...),
 		Roles:              append([]string(nil), authorization.Roles...),
-		Permissions:        append([]string(nil), authorization.Permissions...),
-		RoleConfigHash:     authorization.RoleConfigHash,
-		AuthzRevision:      authorization.AuthzRevision,
 	}
 	accessToken, err := issuer.signer.IssueAccessToken(claims)
 	if err != nil {

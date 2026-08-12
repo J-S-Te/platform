@@ -12,8 +12,18 @@ import (
 	"io"
 	stdhttp "net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
+)
+
+const keycloakAdminErrorSummaryLimit = 1024
+
+var (
+	keycloakAdminSensitiveValue = regexp.MustCompile(`(?i)("?(?:client[_-]?secret|clientsecret|password|access[_-]?token|refresh[_-]?token|token|authorization|credential|api[_-]?key)"?\s*[:=]\s*)("[^"]*"|[^\s,}&]+)`)
+	keycloakAdminBearerToken    = regexp.MustCompile(`(?i)(\bauthorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/=-]+`)
+	keycloakAdminCookieValue    = regexp.MustCompile(`(?i)(\b(?:set-cookie|cookie)\s*[:=]\s*)("[^"]*"|[^\s,}&;]+(?:\s*;\s*[^\s,}&;]+)*)`)
+	keycloakAdminJWT            = regexp.MustCompile(`\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
 )
 
 type keycloakControlPlane struct {
@@ -45,19 +55,16 @@ type keycloakClientResult struct {
 // Keycloak may relay these values to relying parties, but it is not allowed to
 // become the source of truth for personnel, organisation or authorization.
 var keycloakIdentityClaimMappings = []keycloakIdentityClaimMapping{
-	{Name: "identity_id"},
+	// identity_id is the immutable platform principal. Publish it as the OIDC
+	// subject so every relying party uses one stable identity key.
+	{Name: "identity_id", ClaimName: "sub"},
 	{Name: "tenant_id"},
 	{Name: "person_id"},
-	{Name: "primary_org_id"},
-	{Name: "organization_ids", MultiValued: true},
-	{Name: "roles", MultiValued: true},
-	{Name: "permissions", MultiValued: true},
-	{Name: "role_config_hash"},
-	{Name: "authz_revision"},
 }
 
 type keycloakIdentityClaimMapping struct {
 	Name        string
+	ClaimName   string
 	MultiValued bool
 }
 
@@ -105,8 +112,8 @@ func (control *keycloakControlPlane) token(ctx context.Context) (string, error) 
 		return "", err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != stdhttp.StatusOK {
-		return "", fmt.Errorf("keycloak admin authentication returned %d", response.StatusCode)
+	if err := keycloakStatusError("keycloak admin authentication", response, stdhttp.StatusOK); err != nil {
+		return "", err
 	}
 	var payload struct {
 		AccessToken string `json:"access_token"`
@@ -140,25 +147,67 @@ func (control *keycloakControlPlane) request(ctx context.Context, token, method,
 	return control.httpClient.Do(req)
 }
 
+// keycloakStatusError produces a safe, bounded diagnostic for an Admin API
+// failure. It must be called before the response body is closed. The response
+// body is intentionally not decoded as a successful Keycloak payload when its
+// status is unexpected.
+func keycloakStatusError(operation string, response *stdhttp.Response, accepted ...int) error {
+	for _, status := range accepted {
+		if response.StatusCode == status {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s returned status %d: response=%s", operation, response.StatusCode, keycloakResponseSummary(response.Body))
+}
+
+func keycloakResponseSummary(body io.Reader) string {
+	payload, err := io.ReadAll(io.LimitReader(body, keycloakAdminErrorSummaryLimit+1))
+	if err != nil {
+		return "<unavailable>"
+	}
+	truncated := len(payload) > keycloakAdminErrorSummaryLimit
+	if truncated {
+		payload = payload[:keycloakAdminErrorSummaryLimit]
+	}
+	summary := strings.Join(strings.Fields(string(payload)), " ")
+	if summary == "" {
+		return "<empty>"
+	}
+	// Keycloak usually returns JSON, but reverse proxies and custom extensions
+	// can return plain-text HTTP headers. Redact those forms before the generic
+	// key/value matcher so a value such as "Authorization: Bearer <token>"
+	// cannot leave the token following the word "Bearer" in logs.
+	summary = keycloakAdminBearerToken.ReplaceAllString(summary, "$1<redacted>")
+	summary = keycloakAdminCookieValue.ReplaceAllString(summary, "$1<redacted>")
+	summary = keycloakAdminJWT.ReplaceAllString(summary, "<redacted>")
+	summary = keycloakAdminSensitiveValue.ReplaceAllString(summary, "$1<redacted>")
+	if truncated {
+		summary += "…"
+	}
+	return summary
+}
+
 func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token string) error {
 	response, err := control.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(control.realm), nil)
 	if err != nil {
 		return err
 	}
-	response.Body.Close()
 	if response.StatusCode == stdhttp.StatusOK {
+		response.Body.Close()
 		return nil
 	}
 	if response.StatusCode != stdhttp.StatusNotFound {
-		return fmt.Errorf("read Keycloak Realm returned %d", response.StatusCode)
+		defer response.Body.Close()
+		return keycloakStatusError("read Keycloak Realm", response, stdhttp.StatusNotFound)
 	}
+	response.Body.Close()
 	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{"realm": control.realm, "enabled": true})
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != stdhttp.StatusCreated && response.StatusCode != stdhttp.StatusConflict {
-		return fmt.Errorf("create Keycloak Realm returned %d", response.StatusCode)
+	if err := keycloakStatusError("create Keycloak Realm", response, stdhttp.StatusCreated, stdhttp.StatusConflict); err != nil {
+		return err
 	}
 	return nil
 }
@@ -173,8 +222,8 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != stdhttp.StatusOK {
-		return fmt.Errorf("read Keycloak user profile returned %d", response.StatusCode)
+	if err := keycloakStatusError("read Keycloak user profile", response, stdhttp.StatusOK); err != nil {
+		return err
 	}
 	var profile map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&profile); err != nil {
@@ -215,8 +264,8 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != stdhttp.StatusOK && response.StatusCode != stdhttp.StatusNoContent {
-		return fmt.Errorf("configure Keycloak user profile returned %d", response.StatusCode)
+	if err := keycloakStatusError("configure Keycloak user profile", response, stdhttp.StatusOK, stdhttp.StatusNoContent); err != nil {
+		return err
 	}
 	return nil
 }
@@ -237,6 +286,10 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		return err
 	}
 	exists := response.StatusCode == stdhttp.StatusOK
+	if !exists && response.StatusCode != stdhttp.StatusNotFound {
+		defer response.Body.Close()
+		return keycloakStatusError("read Keycloak broker", response, stdhttp.StatusOK, stdhttp.StatusNotFound)
+	}
 	response.Body.Close()
 	backchannel := control.platformBackchannel
 	if backchannel == "" {
@@ -255,10 +308,11 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 	if err != nil {
 		return err
 	}
-	response.Body.Close()
-	if response.StatusCode != stdhttp.StatusNoContent && response.StatusCode != stdhttp.StatusCreated {
-		return fmt.Errorf("configure Keycloak broker returned %d", response.StatusCode)
+	defer response.Body.Close()
+	if err := keycloakStatusError("configure Keycloak broker", response, stdhttp.StatusNoContent, stdhttp.StatusCreated); err != nil {
+		return err
 	}
+	response.Body.Close()
 	if err := control.ensureBrokerUserProfile(ctx, token); err != nil {
 		return err
 	}
@@ -272,8 +326,8 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 			return nil, err
 		}
 		defer response.Body.Close()
-		if response.StatusCode != stdhttp.StatusOK {
-			return nil, fmt.Errorf("read Keycloak broker mappers returned %d", response.StatusCode)
+		if err := keycloakStatusError("read Keycloak broker mappers", response, stdhttp.StatusOK); err != nil {
+			return nil, err
 		}
 		var mappers []struct {
 			ID     string            `json:"id"`
@@ -308,19 +362,22 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 			if err != nil {
 				return err
 			}
-			response.Body.Close()
-			if response.StatusCode != stdhttp.StatusNoContent && response.StatusCode != stdhttp.StatusNotFound {
-				return fmt.Errorf("delete Keycloak broker claim %s returned %d", claim.Name, response.StatusCode)
+			if err := keycloakStatusError("delete Keycloak broker claim "+claim.Name, response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
+				response.Body.Close()
+				return err
 			}
+			response.Body.Close()
 		}
 		response, err = control.request(ctx, token, method, path, mapper)
 		if err != nil {
 			return err
 		}
-		response.Body.Close()
 		if response.StatusCode == stdhttp.StatusCreated {
+			response.Body.Close()
 			continue
 		}
+		createErr := keycloakStatusError("configure Keycloak broker claim "+claim.Name, response, stdhttp.StatusCreated)
+		response.Body.Close()
 		// Keycloak 26.2 can persist an IdP mapper then return 400 while it
 		// finalizes the Admin event. Re-read and update it so the operation
 		// remains correct and safe to retry instead of exposing a false 503.
@@ -331,10 +388,10 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		existing = mapperIDs["platform-"+claim.Name]
 		mapperID = existing.ID
 		if mapperID == "" {
-			return fmt.Errorf("configure Keycloak broker claim %s returned %d", claim.Name, response.StatusCode)
+			return createErr
 		}
 		if existing.Config["syncMode"] != "INHERIT" || existing.Config["claim"] != claim.Name || existing.Config["user.attribute"] != claim.Name {
-			return fmt.Errorf("configure Keycloak broker claim %s returned %d", claim.Name, response.StatusCode)
+			return createErr
 		}
 	}
 	return nil
@@ -356,6 +413,10 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 	if err != nil {
 		return keycloakClientResult{}, err
 	}
+	if err := keycloakStatusError("read Keycloak Client", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return keycloakClientResult{}, err
+	}
 	var clients []struct {
 		ID string `json:"id"`
 	}
@@ -371,12 +432,17 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 		if err != nil {
 			return keycloakClientResult{}, err
 		}
-		response.Body.Close()
-		if response.StatusCode != stdhttp.StatusCreated {
-			return keycloakClientResult{}, fmt.Errorf("create Keycloak Client returned %d", response.StatusCode)
+		if err := keycloakStatusError("create Keycloak Client", response, stdhttp.StatusCreated); err != nil {
+			response.Body.Close()
+			return keycloakClientResult{}, err
 		}
+		response.Body.Close()
 		response, err = control.request(ctx, token, stdhttp.MethodGet, path, nil)
 		if err != nil {
+			return keycloakClientResult{}, err
+		}
+		if err := keycloakStatusError("read newly created Keycloak Client", response, stdhttp.StatusOK); err != nil {
+			response.Body.Close()
 			return keycloakClientResult{}, err
 		}
 		decodeErr = json.NewDecoder(response.Body).Decode(&clients)
@@ -394,11 +460,12 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 	if err != nil {
 		return keycloakClientResult{}, err
 	}
-	response.Body.Close()
-	if response.StatusCode != stdhttp.StatusNoContent {
-		return keycloakClientResult{}, fmt.Errorf("update Keycloak Client returned %d", response.StatusCode)
+	if err := keycloakStatusError("update Keycloak Client", response, stdhttp.StatusNoContent); err != nil {
+		response.Body.Close()
+		return keycloakClientResult{}, err
 	}
-	if err := control.ensureClaimMappers(ctx, token, internalID); err != nil {
+	response.Body.Close()
+	if err := control.ensureClaimMappers(ctx, token, internalID, clientID); err != nil {
 		return keycloakClientResult{}, err
 	}
 	response, err = control.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(control.realm)+"/clients/"+url.PathEscape(internalID)+"/client-secret", nil)
@@ -406,6 +473,9 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 		return keycloakClientResult{}, err
 	}
 	defer response.Body.Close()
+	if err := keycloakStatusError("read Keycloak Client secret", response, stdhttp.StatusOK); err != nil {
+		return keycloakClientResult{}, err
+	}
 	var secret struct {
 		Value string `json:"value"`
 	}
@@ -431,6 +501,10 @@ func (control *keycloakControlPlane) EnsureClientRoles(ctx context.Context, clie
 	if err != nil {
 		return err
 	}
+	if err := keycloakStatusError("read Keycloak Client for roles", lookup, stdhttp.StatusOK); err != nil {
+		lookup.Body.Close()
+		return err
+	}
 	var clients []struct {
 		ID string `json:"id"`
 	}
@@ -448,8 +522,8 @@ func (control *keycloakControlPlane) EnsureClientRoles(ctx context.Context, clie
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != stdhttp.StatusOK {
-		return fmt.Errorf("list Keycloak Client roles returned %d", response.StatusCode)
+	if err := keycloakStatusError("list Keycloak Client roles", response, stdhttp.StatusOK); err != nil {
+		return err
 	}
 	var existing []struct {
 		Name string `json:"name"`
@@ -473,18 +547,23 @@ func (control *keycloakControlPlane) EnsureClientRoles(ctx context.Context, clie
 		if requestErr != nil {
 			return requestErr
 		}
-		created.Body.Close()
-		if created.StatusCode != stdhttp.StatusCreated && created.StatusCode != stdhttp.StatusConflict {
-			return fmt.Errorf("create Keycloak Client role %s returned %d", code, created.StatusCode)
+		if err := keycloakStatusError("create Keycloak Client role "+code, created, stdhttp.StatusCreated, stdhttp.StatusConflict); err != nil {
+			created.Body.Close()
+			return err
 		}
+		created.Body.Close()
 	}
 	return nil
 }
 
-func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, token, clientID string) error {
+func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, token, clientID, publicClientID string) error {
 	base := "/admin/realms/" + url.PathEscape(control.realm) + "/clients/" + url.PathEscape(clientID) + "/protocol-mappers/models"
 	response, err := control.request(ctx, token, stdhttp.MethodGet, base, nil)
 	if err != nil {
+		return err
+	}
+	if err := keycloakStatusError("list Keycloak claim mappers", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
 		return err
 	}
 	var existing []struct {
@@ -512,7 +591,7 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 	}
 	for _, claim := range keycloakIdentityClaimMappings {
 		name := "platform-" + claim.Name
-		config := map[string]string{"user.attribute": claim.Name, "claim.name": claim.Name, "jsonType.label": "String", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true", "multivalued": "false"}
+		config := keycloakIdentityClaimMapperConfig(claim)
 		if claim.MultiValued {
 			config["multivalued"] = "true"
 			config["jsonType.label"] = "JSON"
@@ -525,19 +604,45 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 			if err != nil {
 				return err
 			}
-			response.Body.Close()
-			if response.StatusCode != stdhttp.StatusNoContent && response.StatusCode != stdhttp.StatusNotFound {
-				return fmt.Errorf("delete drifted Keycloak claim mapper %s returned %d", claim.Name, response.StatusCode)
+			if err := keycloakStatusError("delete drifted Keycloak claim mapper "+claim.Name, response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
+				response.Body.Close()
+				return err
 			}
+			response.Body.Close()
 		}
 		response, err = control.request(ctx, token, stdhttp.MethodPost, base, map[string]any{"name": name, "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-attribute-mapper", "config": config})
 		if err != nil {
 			return err
 		}
-		response.Body.Close()
-		if response.StatusCode != stdhttp.StatusCreated {
-			return fmt.Errorf("create Keycloak claim mapper %s returned %d", claim.Name, response.StatusCode)
+		if err := keycloakStatusError("create Keycloak claim mapper "+claim.Name, response, stdhttp.StatusCreated); err != nil {
+			response.Body.Close()
+			return err
 		}
+		response.Body.Close()
+	}
+	managedClaims := make(map[string]struct{}, len(keycloakIdentityClaimMappings))
+	for _, claim := range keycloakIdentityClaimMappings {
+		managedClaims["platform-"+claim.Name] = struct{}{}
+	}
+	// Remove only stale mappers previously owned by this control plane. This is
+	// what makes the compact-claims migration effective for existing Clients;
+	// unrelated application mappers remain untouched.
+	for name, current := range known {
+		if !strings.HasPrefix(name, "platform-") || name == "platform-token-use" {
+			continue
+		}
+		if _, keep := managedClaims[name]; keep {
+			continue
+		}
+		response, err = control.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(current.ID), nil)
+		if err != nil {
+			return err
+		}
+		if err := keycloakStatusError("delete stale Keycloak claim mapper "+name, response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
+			response.Body.Close()
+			return err
+		}
+		response.Body.Close()
 	}
 	tokenUseConfig := map[string]string{"claim.name": "token_use", "claim.value": "id_token", "claim.value.type": "String", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true"}
 	if current, exists := known["platform-token-use"]; !exists || current.ProtocolMapper != "oidc-hardcoded-claim-mapper" || !keycloakMapperConfigMatches(current.Config, tokenUseConfig) {
@@ -546,21 +651,36 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 			if err != nil {
 				return err
 			}
-			response.Body.Close()
-			if response.StatusCode != stdhttp.StatusNoContent && response.StatusCode != stdhttp.StatusNotFound {
-				return fmt.Errorf("delete drifted Keycloak token_use mapper returned %d", response.StatusCode)
+			if err := keycloakStatusError("delete drifted Keycloak token_use mapper", response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
+				response.Body.Close()
+				return err
 			}
+			response.Body.Close()
 		}
 		response, err = control.request(ctx, token, stdhttp.MethodPost, base, map[string]any{"name": "platform-token-use", "protocol": "openid-connect", "protocolMapper": "oidc-hardcoded-claim-mapper", "config": tokenUseConfig})
 		if err != nil {
 			return err
 		}
-		response.Body.Close()
-		if response.StatusCode != stdhttp.StatusCreated {
-			return fmt.Errorf("create Keycloak token_use mapper returned %d", response.StatusCode)
+		if err := keycloakStatusError("create Keycloak token_use mapper", response, stdhttp.StatusCreated); err != nil {
+			response.Body.Close()
+			return err
 		}
+		response.Body.Close()
 	}
 	return nil
+}
+
+func keycloakIdentityClaimMapperConfig(claim keycloakIdentityClaimMapping) map[string]string {
+	claimName := claim.ClaimName
+	if claimName == "" {
+		claimName = claim.Name
+	}
+	config := map[string]string{"user.attribute": claim.Name, "claim.name": claimName, "jsonType.label": "String", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true", "multivalued": "false"}
+	if claim.MultiValued {
+		config["multivalued"] = "true"
+		config["jsonType.label"] = "JSON"
+	}
+	return config
 }
 
 func keycloakMapperConfigMatches(actual, expected map[string]string) bool {

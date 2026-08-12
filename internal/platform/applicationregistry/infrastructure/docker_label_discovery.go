@@ -150,10 +150,30 @@ func subsystemDiscoveryCandidateFromDockerLabels(labels map[string]string, healt
 		status = string(application.SubsystemServiceStatusUnavailable)
 	}
 	return application.SubsystemDiscoveryCandidate{
-		ApplicationCode: applicationCode, Environment: environment, ServiceName: get("com.basic-platform.service_name"), ServiceRole: get("com.basic-platform.service_role"),
+		ApplicationCode: applicationCode, ApplicationName: firstNonEmpty(get("com.basic-platform.application_name"), get("com.basic-platform.service_name")), Environment: environment, ServiceName: get("com.basic-platform.service_name"), ServiceRole: get("com.basic-platform.service_role"),
 		Protocol: protocol, InternalHost: host, InternalPort: uint(port), HealthEndpoint: get("com.basic-platform.health_endpoint"),
-		OIDCCallbackPath: callbackPath, Version: get("com.basic-platform.version"), Status: status,
+		OIDCCallbackPath: callbackPath, OIDCCallbackSupported: parseDiscoveryBool(get("com.basic-platform.oidc_callback_supported"), callbackPath != ""), Version: get("com.basic-platform.version"), Status: status,
 	}, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseDiscoveryBool(value string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func validDiscoveryValue(value string) bool {

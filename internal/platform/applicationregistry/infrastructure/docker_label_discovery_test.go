@@ -40,3 +40,25 @@ func TestSubsystemServiceInstanceFromDockerLabelsRejectsInvalidPortAndTarget(t *
 		t.Fatal("expected invalid application code to be rejected")
 	}
 }
+
+func TestSubsystemDiscoveryCandidateIncludesGenericApplicationAndOIDCMetadata(t *testing.T) {
+	candidate, ok := subsystemDiscoveryCandidateFromDockerLabels(map[string]string{
+		"com.basic-platform.application_code":        "inventory",
+		"com.basic-platform.application_name":        "库存管理系统",
+		"com.basic-platform.environment":             "dev",
+		"com.basic-platform.service_name":            "inventory-api",
+		"com.basic-platform.service_role":            "business",
+		"com.basic-platform.internal_host":           "inventory-api",
+		"com.basic-platform.internal_port":           "8080",
+		"com.basic-platform.health_endpoint":         "/healthz",
+		"com.basic-platform.oidc_callback_path":      "/auth/callback",
+		"com.basic-platform.oidc_callback_supported": "true",
+		"com.basic-platform.version":                 "1.2.3",
+	}, "healthy")
+	if !ok {
+		t.Fatal("expected valid generic discovery candidate")
+	}
+	if candidate.ApplicationName != "库存管理系统" || !candidate.OIDCCallbackSupported || candidate.HealthEndpoint != "/healthz" || candidate.Version != "1.2.3" {
+		t.Fatalf("candidate metadata = %+v", candidate)
+	}
+}

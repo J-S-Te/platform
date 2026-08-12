@@ -17,7 +17,57 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
+
+func TestWriteKeycloakSyncFailureKeepsResponseSafeAndLogsCorrelatedCause(t *testing.T) {
+	t.Parallel()
+	const requestID = "01KZRME97X5XBWB3H1E74KZTSX"
+	const sensitiveCause = "Keycloak admin secret must-not-reach-browser"
+
+	var logs bytes.Buffer
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"https://platform.example.com", slog.New(slog.NewTextHandler(&logs, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stage := range []string{"broker", "client", "roles", "mapping", "backfill", "readiness"} {
+		stage := stage
+		t.Run(stage, func(t *testing.T) {
+			request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-keycloak/sync", nil)
+			request = request.WithContext(requestctx.WithRequestID(request.Context(), requestID))
+			response := httptest.NewRecorder()
+
+			handler.writeKeycloakSyncFailure(response, request, subsystemLifecycleRequest{ApplicationCode: "contract_management", Environment: "prod"}, stage, errors.New(sensitiveCause))
+
+			if response.Code != stdhttp.StatusServiceUnavailable {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			var body struct {
+				Code      string            `json:"code"`
+				RequestID string            `json:"request_id"`
+				Details   map[string]string `json:"details"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Code != "PLATFORM_DEPENDENCY_UNAVAILABLE" || body.RequestID != requestID || body.Details["stage"] != stage {
+				t.Fatalf("unexpected safe response: %#v", body)
+			}
+			if body.Details["detail"] == "" || body.Details["next_action"] == "" || strings.Contains(response.Body.String(), sensitiveCause) {
+				t.Fatalf("response must give safe guidance without original cause: %s", response.Body.String())
+			}
+		})
+	}
+
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "request_id="+requestID) || !strings.Contains(logOutput, sensitiveCause) || !strings.Contains(logOutput, "stage=roles") {
+		t.Fatalf("logs must retain correlated original error and stage: %s", logOutput)
+	}
+}
 
 func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.T) {
 	t.Parallel()
@@ -81,6 +131,46 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	}
 	if credential, ok := provisioner.input.ServiceCredential(application.ServiceCredentialAuditIngest); !ok || credential.PlaintextSecret != "audit-secret-must-never-reach-browser" {
 		t.Fatalf("deployment helper did not receive isolated audit integration: %#v", provisioner.input.ServiceCredentials)
+	}
+}
+
+func TestRegisterSubsystemDirectoryDoesNotProvisionOrCreateOAuthClient(t *testing.T) {
+	t.Parallel()
+	pathPrefix := "/inventory"
+	baseURL := "https://portal.example.com"
+	upstreamURL := "http://inventory-api:8080"
+	issuerAlias := application.IssuerAliasKeycloak
+	service := &stubSubsystemOnboardingService{directoryResult: application.SubsystemDirectoryRegistrationResult{
+		Application: application.Application{ID: "app-1", TenantID: "01K10A00000000000000000001", Code: "inventory", Name: "库存管理系统", ApplicationType: "web", Status: "ACTIVE"},
+		Environment: application.Environment{ID: "env-1", TenantID: "01K10A00000000000000000001", ApplicationID: "app-1", Environment: "prod", BaseURL: &baseURL, UpstreamURL: &upstreamURL, PathPrefix: &pathPrefix, IssuerAlias: &issuerAlias, Status: "ACTIVE"},
+		LoginTarget: application.LoginTargetManagementItem{ID: "target-1", TenantID: "01K10A00000000000000000001", ApplicationID: "app-1", EnvironmentID: "env-1", TargetCode: "home", Name: "库存管理系统首页", TargetURI: "/inventory/", Status: "ACTIVE"},
+		PublicURL:   "https://portal.example.com/inventory/",
+	}}
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(service, provisioner, &recordingSubsystemAccessManager{}, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.ConfigureKeycloak(true, "https://sso.example.com/realms/basic-platform", "basic-platform")
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-directory", bytes.NewBufferString(`{"application_code":"inventory","application_name":"库存管理系统","environment":"prod","public_base_url":"https://portal.example.com","upstream_url":"http://inventory-api:8080","path_prefix":"/inventory","issuer_alias":"keycloak"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"}}))
+	response := httptest.NewRecorder()
+
+	handler.RegisterSubsystemDirectory(response, request)
+
+	if response.Code != stdhttp.StatusCreated {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.preflightCalls != 0 || provisioner.provisionCalls != 0 {
+		t.Fatalf("directory registration invoked deployment: %#v", provisioner)
+	}
+	if service.directoryInput.IssuerAlias == nil || *service.directoryInput.IssuerAlias != application.IssuerAliasKeycloak {
+		t.Fatalf("issuer alias = %#v", service.directoryInput.IssuerAlias)
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "oauth_client") || strings.Contains(body, "client_secret") || !strings.Contains(body, "Keycloak Client 同步") {
+		t.Fatalf("directory response must be free of OAuth client data and guide the next step: %s", body)
 	}
 }
 
@@ -195,15 +285,23 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 }
 
 type stubSubsystemOnboardingService struct {
-	result      application.SubsystemOnboardingResult
-	input       application.SubsystemOnboardingInput
-	portalItems []application.PortalApplication
-	err         error
+	result          application.SubsystemOnboardingResult
+	directoryResult application.SubsystemDirectoryRegistrationResult
+	input           application.SubsystemOnboardingInput
+	directoryInput  application.SubsystemDirectoryRegistrationInput
+	portalItems     []application.PortalApplication
+	err             error
+	directoryErr    error
 }
 
 func (service *stubSubsystemOnboardingService) OnboardSubsystem(_ context.Context, input application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
 	service.input = input
 	return service.result, service.err
+}
+
+func (service *stubSubsystemOnboardingService) RegisterSubsystemDirectory(_ context.Context, input application.SubsystemDirectoryRegistrationInput) (application.SubsystemDirectoryRegistrationResult, error) {
+	service.directoryInput = input
+	return service.directoryResult, service.directoryErr
 }
 
 func (service *stubSubsystemOnboardingService) ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error) {
@@ -287,13 +385,15 @@ func (manager *recordingSubsystemAccessManager) AssignInitialAdministrator(_ con
 }
 
 type recordingHTTPSubsystemProvisioner struct {
-	input        application.SubsystemProvisioningInput
-	teardownCode string
-	capabilities application.SubsystemProvisioningCapabilities
-	preflightErr error
-	provisionErr error
-	updateErr    error
-	teardownErr  error
+	input          application.SubsystemProvisioningInput
+	teardownCode   string
+	capabilities   application.SubsystemProvisioningCapabilities
+	preflightCalls int
+	provisionCalls int
+	preflightErr   error
+	provisionErr   error
+	updateErr      error
+	teardownErr    error
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
@@ -301,10 +401,12 @@ func (provisioner *recordingHTTPSubsystemProvisioner) Capabilities() application
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Preflight(context.Context, application.SubsystemPreflightInput) error {
+	provisioner.preflightCalls++
 	return provisioner.preflightErr
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Provision(_ context.Context, input application.SubsystemProvisioningInput) error {
+	provisioner.provisionCalls++
 	provisioner.input = input
 	return provisioner.provisionErr
 }

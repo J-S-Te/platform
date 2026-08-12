@@ -33,6 +33,14 @@ const (
 	maxManagementPageSize     = 100
 	maxMetadataBytes          = 64 << 10
 	builtInApplicationCode    = "platform"
+
+	// IssuerAliasPlatform and IssuerAliasKeycloak are the only authentication
+	// providers an application environment may select.  This deliberately keeps
+	// the provider selection in the existing issuer_alias field: a second
+	// issuer-kind field would create two competing sources of truth during a
+	// cutover or rollback.
+	IssuerAliasPlatform = "platform"
+	IssuerAliasKeycloak = "keycloak"
 )
 
 // IdentifierGenerator supplies sortable identifiers for applications and environments.
@@ -492,7 +500,7 @@ func normalizeEnvironmentCreate(input EnvironmentCreateInput) EnvironmentCreateI
 	input.BaseURL = normalizeOptionalBaseURL(input.BaseURL)
 	input.UpstreamURL = normalizeOptionalUpstreamURL(input.UpstreamURL)
 	input.PathPrefix = normalizeOptionalPathPrefix(input.PathPrefix)
-	input.IssuerAlias = normalizeOptional(input.IssuerAlias)
+	input.IssuerAlias = normalizeIssuerAlias(input.IssuerAlias)
 	input.Status = strings.ToUpper(strings.TrimSpace(input.Status))
 	return input
 }
@@ -505,7 +513,7 @@ func normalizeEnvironmentUpdate(input EnvironmentUpdateInput) EnvironmentUpdateI
 	input.BaseURL = normalizeOptionalBaseURL(input.BaseURL)
 	input.UpstreamURL = normalizeOptionalUpstreamURL(input.UpstreamURL)
 	input.PathPrefix = normalizeOptionalPathPrefix(input.PathPrefix)
-	input.IssuerAlias = normalizeOptional(input.IssuerAlias)
+	input.IssuerAlias = normalizeIssuerAlias(input.IssuerAlias)
 	input.Status = strings.ToUpper(strings.TrimSpace(input.Status))
 	return input
 }
@@ -531,7 +539,7 @@ func validEnvironmentCreate(input EnvironmentCreateInput) bool {
 		validEnvironmentCode(input.Environment) && validOptionalBaseURL(input.BaseURL) &&
 		validOptionalUpstreamURL(input.UpstreamURL) && validOptionalPathPrefix(input.PathPrefix) &&
 		validGatewayTripleConsistent(input.BaseURL, input.UpstreamURL, input.PathPrefix) &&
-		validOptionalCode(input.IssuerAlias, 128) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
+		validIssuerAlias(input.IssuerAlias) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
 }
 
 func validEnvironmentUpdate(input EnvironmentUpdateInput) bool {
@@ -539,7 +547,7 @@ func validEnvironmentUpdate(input EnvironmentUpdateInput) bool {
 		validOptionalBaseURL(input.BaseURL) && validOptionalUpstreamURL(input.UpstreamURL) &&
 		validOptionalPathPrefix(input.PathPrefix) &&
 		validGatewayTripleConsistent(input.BaseURL, input.UpstreamURL, input.PathPrefix) &&
-		validOptionalCode(input.IssuerAlias, 128) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
+		validIssuerAlias(input.IssuerAlias) && validMetadata(input.Metadata) && validEnvironmentStatus(input.Status)
 }
 
 func validApplicationStatus(value string) bool {
@@ -805,4 +813,29 @@ func normalizeOptional(value *string) *string {
 	}
 	normalized := strings.TrimSpace(*value)
 	return &normalized
+}
+
+// normalizeIssuerAlias canonicalizes the persisted authentication provider.
+// A missing or blank value is the historic representation of Basic Platform
+// OIDC, so it is explicitly backfilled to platform rather than left nullable.
+// This makes all new writes compatible with the database invariant introduced
+// by the issuer-alias migration.
+func normalizeIssuerAlias(value *string) *string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return stringPointer(IssuerAliasPlatform)
+	}
+	normalized := strings.ToLower(strings.TrimSpace(*value))
+	return &normalized
+}
+
+func validIssuerAlias(value *string) bool {
+	if value == nil {
+		return false
+	}
+	switch *value {
+	case IssuerAliasPlatform, IssuerAliasKeycloak:
+		return true
+	default:
+		return false
+	}
 }

@@ -49,6 +49,20 @@ func TestOutboxRecoverStaleResetsOnlyExpiredRunningLocksWithoutChangingAttempts(
 	}
 }
 
+func TestOutboxDeadLetterTransitionIsConditionalAndKeepsFailureReason(t *testing.T) {
+	database := newDryRunMySQL(t)
+	statement := database.Session(&gorm.Session{DryRun: true}).Model(&authorizationOutboxRow{}).
+		Where("id = ? AND status = ?", "event-1", "RUNNING").Updates(map[string]any{
+		"status": "FAILED", "last_error_code": "KEYCLOAK_SYNC_RETRY_EXHAUSTED", "last_error_message": "unavailable",
+	}).Statement
+	sql := statement.SQL.String()
+	for _, expected := range []string{"`status`=?", "`last_error_code`=?", "`last_error_message`=?", "WHERE id = ? AND status = ?"} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("dead-letter SQL missing %q: %s", expected, sql)
+		}
+	}
+}
+
 func newDryRunMySQL(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(mysql.New(mysql.Config{DSN: "test:test@tcp(localhost:3306)/test?parseTime=true", SkipInitializeWithVersion: true}), &gorm.Config{DisableAutomaticPing: true, DryRun: true, SkipDefaultTransaction: true})

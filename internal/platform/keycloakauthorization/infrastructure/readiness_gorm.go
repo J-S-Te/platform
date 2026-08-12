@@ -55,7 +55,7 @@ func (store *SwitchReadinessStore) InspectKeycloakSwitchReadiness(ctx context.Co
 	}
 	var outstanding int64
 	if err := store.database.WithContext(ctx).Table("keycloak_authorization_outbox").
-		Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND status IN ?", strings.TrimSpace(tenantID), scope.ApplicationID, scope.EnvironmentID, []string{"PENDING", "RUNNING"}).
+		Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND status IN ?", strings.TrimSpace(tenantID), scope.ApplicationID, scope.EnvironmentID, []string{"PENDING", "RUNNING", "FAILED"}).
 		Count(&outstanding).Error; err != nil {
 		return registryhttp.KeycloakSwitchReadiness{}, fmt.Errorf("count outstanding Keycloak projections: %w", err)
 	}

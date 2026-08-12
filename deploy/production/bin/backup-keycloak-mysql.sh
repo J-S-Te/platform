@@ -22,7 +22,12 @@ fi
 command -v docker >/dev/null || { printf '%s\n' 'docker is required' >&2; exit 127; }
 command -v flock >/dev/null || { printf '%s\n' 'flock is required' >&2; exit 127; }
 command -v gzip >/dev/null || { printf '%s\n' 'gzip is required' >&2; exit 127; }
+if [[ -L "$backup_dir" || -L "$(dirname -- "$metrics_file")" ]]; then
+  printf '%s\n' 'backup and metrics directories must not be symbolic links' >&2
+  exit 2
+fi
 mkdir -p "$backup_dir" "$(dirname -- "$metrics_file")"
+chmod 700 "$backup_dir"
 
 exec 9>"$lock_file"
 if ! flock -n 9; then
@@ -34,6 +39,18 @@ compose_args=(docker compose)
 [[ -f .env ]] && compose_args+=(--env-file .env)
 [[ -f .release.env ]] && compose_args+=(--env-file .release.env)
 compose_args+=(-f compose.yaml)
+
+"${compose_args[@]}" config -q
+"${compose_args[@]}" exec -T keycloak-db sh -ec '
+  test -n "${MYSQL_DATABASE:-}" && test -n "${MYSQL_ROOT_PASSWORD:-}"
+  case "$MYSQL_DATABASE:$MYSQL_ROOT_PASSWORD" in
+    *REPLACE_WITH_*|*PENDING_*)
+      printf "%s\\n" "Keycloak database credentials still contain a deployment placeholder" >&2
+      exit 2
+      ;;
+  esac
+  mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent
+'
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 final_file="$backup_dir/keycloak-$timestamp.sql.gz"

@@ -70,6 +70,7 @@ func (error ConcurrentSessionError) Unwrap() error { return ErrConcurrentSession
 // Repository defines persistence operations required by the password and session use cases.
 type Repository interface {
 	FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error)
+	FindLoginAccountByIdentityID(ctx context.Context, identityID string) (domain.LoginAccount, error)
 	RecordSuccessfulPasswordVerification(ctx context.Context, account domain.LoginAccount, now time.Time) error
 	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error)
@@ -126,6 +127,17 @@ func NewService(repository Repository, passwords PasswordVerifier, tokens TokenM
 type LoginInput struct {
 	Account                string
 	Password               string
+	IPAddress              net.IP
+	UserAgent              string
+	ReplaceExistingSession bool
+}
+
+// OIDCLoginInput contains the already-verified stable identity returned by the
+// platform's configured OIDC provider. Token signature and issuer validation is
+// performed at the OIDC HTTP boundary before this method is called.
+type OIDCLoginInput struct {
+	IdentityID             string
+	AccountName            string
 	IPAddress              net.IP
 	UserAgent              string
 	ReplaceExistingSession bool
@@ -193,6 +205,28 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 		return SessionResult{}, fmt.Errorf("record successful password verification: %w", err)
 	}
 
+	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
+}
+
+// LoginOIDC creates the same server-side platform session as password login,
+// without consulting password state or Broker Verification. Broker evidence is
+// an onboarding/cutover gate, never a runtime prerequisite for this path.
+func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (SessionResult, error) {
+	identityID := strings.TrimSpace(input.IdentityID)
+	if identityID == "" {
+		return SessionResult{}, ErrUnauthenticated
+	}
+	account, err := service.repository.FindLoginAccountByIdentityID(ctx, identityID)
+	if err != nil {
+		if errors.Is(err, ErrUnauthenticated) {
+			return SessionResult{}, ErrUnauthenticated
+		}
+		return SessionResult{}, fmt.Errorf("find OIDC login account: %w", err)
+	}
+	if account.UserID != identityID || !isIdentityEligible(account) {
+		return SessionResult{}, ErrUnauthenticated
+	}
+	now := service.clock.Now().UTC().Truncate(time.Second)
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
 
