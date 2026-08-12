@@ -62,7 +62,7 @@ done
 
 install -d -m 700 "$deploy_dir/runtime" "$deploy_dir/backups" "$deploy_dir/backups/releases"
 initialize_runtime_file() {
-  local target="$1" template="$2"
+  local target="$1" template="$2" temporary
   if [[ ! -f "$target" ]]; then
     [[ -f "$template" ]] || { echo "缺少运行配置模板：$template" >&2; exit 1; }
     install -m 600 "$template" "$target"
@@ -72,10 +72,19 @@ initialize_runtime_file() {
     echo "拒绝符号链接运行配置：$target" >&2
     exit 1
   }
-  chmod 600 "$target" || {
-    echo "无法将运行配置权限收紧为 0600：$target" >&2
-    exit 1
-  }
+  if ! chmod 600 "$target" 2>/dev/null; then
+    # 发布 Agent 可能拥有 runtime 目录写权限，但不是历史运行文件的属主。
+    # 在同一目录创建 0600 临时文件并原子替换，避免放宽密钥权限或要求删除文件。
+    temporary="$(mktemp "$deploy_dir/runtime/.runtime-permissions.XXXXXX")" || {
+      echo "无法创建运行配置权限修复临时文件：$target；请由文件属主或 root 执行部署" >&2
+      exit 1
+    }
+    if ! install -m 600 "$target" "$temporary" 2>/dev/null || ! mv -f "$temporary" "$target"; then
+      rm -f "$temporary"
+      echo "无法将运行配置权限收紧为 0600：$target；请检查文件属主、runtime 目录写权限，或使用 root 执行部署" >&2
+      exit 1
+    fi
+  fi
   [[ "$(stat -c '%a' "$target")" == "600" ]] || {
     echo "运行配置权限无法收紧为 0600：$target" >&2
     exit 1
