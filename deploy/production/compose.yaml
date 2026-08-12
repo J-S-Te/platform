@@ -519,6 +519,7 @@ services:
     environment:
       MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
+      PRESALE_TEMPORAL_INTERNAL_MODE: ${PRESALE_TEMPORAL_INTERNAL_MODE:-true}
       TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
       TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
