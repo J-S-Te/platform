@@ -40,6 +40,7 @@ customer_worker_services=(
   customer-presale-alert-worker
   customer-presale-assignment-notification-worker
   customer-presale-progress-notification-worker
+  customer-presale-worker
 )
 
 for command_name in docker curl gzip flock awk mktemp install stat; do
@@ -306,8 +307,8 @@ rollback_runtime() {
   compose stop customer-api portal-api "${customer_worker_services[@]}" || true
 }
 
-echo "启动 CRM/Portal 数据库"
-if ! compose up -d --wait --wait-timeout 180 customer-mysql portal-mysql; then
+echo "启动 CRM/Portal 数据库与 Temporal"
+if ! compose up -d --wait --wait-timeout 180 customer-mysql portal-mysql temporal; then
   restore_release
   rm -f "$previous_release"
   echo "数据库启动失败，发布配置已恢复" >&2

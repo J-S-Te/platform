@@ -170,7 +170,12 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			_ = logFile.Close()
 			return nil, err
 		}
-		admin, err := keycloakauthorizationinfrastructure.NewKeycloakAdmin(cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, cfg.Keycloak.AdminUsername, cfg.Keycloak.AdminPassword)
+		admin, err := keycloakauthorizationinfrastructure.NewKeycloakAdminWithCredentials(cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, keycloakauthorizationinfrastructure.KeycloakAdminCredentials{
+			ServiceAccountClientID:     cfg.Keycloak.AdminClientID,
+			ServiceAccountClientSecret: cfg.Keycloak.AdminClientSecret,
+			Username:                   cfg.Keycloak.AdminUsername,
+			Password:                   cfg.Keycloak.AdminPassword,
+		})
 		if err != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()
@@ -196,6 +201,29 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		}
 		keycloakRunner.StaleLockTimeout = cfg.Worker.StaleLockTimeout
 		runners = append(runners, keycloakRunner)
+		// Keycloak does not need a custom listener plugin for the platform audit
+		// trail: the worker polls its standard user/admin event endpoints with a
+		// small idempotent overlap and maps subjects through external_subject_id.
+		// Events without a verified platform mapping are intentionally skipped.
+		auditIdentityResolver, err := keycloakauthorizationinfrastructure.NewAuditIdentityResolver(db)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+		eventCollector, err := keycloakauthorizationapplication.NewKeycloakEventAuditCollector(admin, auditIdentityResolver, service, cfg.Audit.ApplicationCode, cfg.Audit.EnvironmentCode)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+		eventAuditRunner, err := newKeycloakEventAuditRunner(eventCollector, logger, cfg.Worker.PollInterval)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+		runners = append(runners, eventAuditRunner)
 	}
 	runner := &concurrentRunner{runners: runners}
 	return &Worker{Runner: runner, Logger: logger, database: db, logFile: logFile}, nil

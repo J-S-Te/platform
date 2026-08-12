@@ -111,6 +111,50 @@ type SubsystemOnboardingWrite struct {
 	ServiceClients []SubsystemServiceClientWrite
 }
 
+// SubsystemDirectoryRegistrationInput is the non-authentication half of an
+// application integration.  It deliberately contains no OAuth client type,
+// callback URI or credential fields: those are owned by the selected identity
+// provider (for example Keycloak) and are created through its separate
+// integration workflow.
+//
+// The legacy SubsystemOnboardingInput remains available for already deployed
+// installations.  New callers should register the directory first, then use
+// the Keycloak integration APIs to create/synchronise the provider client and
+// finally apply the runtime deployment configuration.
+type SubsystemDirectoryRegistrationInput struct {
+	TenantID        string
+	OperatorID      string
+	ApplicationCode string
+	ApplicationName string
+	Description     *string
+	Environment     string
+	PublicBaseURL   string
+	UpstreamURL     string
+	PathPrefix      string
+	IssuerAlias     *string
+}
+
+// SubsystemDirectoryRegistrationWrite is the atomic persistence boundary for
+// application directory information.  OAuth clients, service credentials and
+// deployment state are intentionally absent.
+type SubsystemDirectoryRegistrationWrite struct {
+	Application   ApplicationCreateInput
+	ApplicationID string
+	Environment   EnvironmentCreateInput
+	EnvironmentID string
+	LoginTarget   LoginTargetCreateInput
+	LoginTargetID string
+}
+
+// SubsystemDirectoryRegistrationResult is safe to expose to administrators:
+// it is only the application catalogue, environment and landing target.
+type SubsystemDirectoryRegistrationResult struct {
+	Application Application
+	Environment Environment
+	LoginTarget LoginTargetManagementItem
+	PublicURL   string
+}
+
 type SubsystemServiceClientWrite struct {
 	Purpose           string
 	OAuthClient       OAuthClientCreateInput
@@ -157,6 +201,7 @@ type PortalApplication struct {
 // 仓储负责在单个数据库事务内写入接入聚合，并按租户读取有效门户登记。
 type SubsystemOnboardingRepository interface {
 	CreateSubsystem(context.Context, SubsystemOnboardingWrite, time.Time) (SubsystemOnboardingResult, error)
+	CreateSubsystemDirectory(context.Context, SubsystemDirectoryRegistrationWrite, time.Time) (SubsystemDirectoryRegistrationResult, error)
 	ListPortalApplications(context.Context, string, string, string) ([]PortalApplication, error)
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
 }
@@ -327,6 +372,65 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		}
 	}
 	result.RedirectURI = redirectURI
+	result.PublicURL = publicURL
+	return result, nil
+}
+
+// RegisterSubsystemDirectory registers only the business application, its
+// environment and an approved post-login landing target.  In particular, it
+// never creates a platform browser OAuth client.  This keeps application
+// directory/authorization administration independent from Keycloak Client
+// lifecycle while preserving the legacy all-in-one onboarding path above for
+// existing deployments.
+func (service *SubsystemOnboardingService) RegisterSubsystemDirectory(ctx context.Context, input SubsystemDirectoryRegistrationInput) (SubsystemDirectoryRegistrationResult, error) {
+	input = normalizeSubsystemDirectoryRegistrationInput(input)
+	if !validSubsystemDirectoryRegistrationInput(input) {
+		return SubsystemDirectoryRegistrationResult{}, ErrValidation
+	}
+
+	publicURL := input.PublicBaseURL + input.PathPrefix + "/"
+	now := service.clock.Now().UTC()
+	applicationID, err := service.newID(now, "application")
+	if err != nil {
+		return SubsystemDirectoryRegistrationResult{}, err
+	}
+	environmentID, err := service.newID(now, "application environment")
+	if err != nil {
+		return SubsystemDirectoryRegistrationResult{}, err
+	}
+	loginTargetID, err := service.newID(now, "application login target")
+	if err != nil {
+		return SubsystemDirectoryRegistrationResult{}, err
+	}
+
+	applicationInput := normalizeApplicationCreate(ApplicationCreateInput{
+		TenantID: input.TenantID, OperatorID: input.OperatorID, Code: input.ApplicationCode,
+		Name: input.ApplicationName, ApplicationType: "web", HomepageURL: stringPointer(publicURL),
+		Description: input.Description, Status: "ACTIVE",
+	})
+	environmentInput := normalizeEnvironmentCreate(EnvironmentCreateInput{
+		TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
+		Environment: input.Environment, BaseURL: stringPointer(input.PublicBaseURL),
+		UpstreamURL: stringPointer(input.UpstreamURL), PathPrefix: stringPointer(input.PathPrefix),
+		IssuerAlias: input.IssuerAlias, Status: "ACTIVE",
+	})
+	loginTargetInput := normalizeLoginTargetCreate(LoginTargetCreateInput{
+		TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
+		EnvironmentID: environmentID, TargetCode: "home", Name: input.ApplicationName + "首页",
+		TargetURI: input.PathPrefix + "/", Status: "ACTIVE",
+	})
+	if !validApplicationCreate(applicationInput) || !validEnvironmentCreate(environmentInput) || !validLoginTargetCreate(loginTargetInput) {
+		return SubsystemDirectoryRegistrationResult{}, ErrValidation
+	}
+
+	result, err := service.repository.CreateSubsystemDirectory(ctx, SubsystemDirectoryRegistrationWrite{
+		Application: applicationInput, ApplicationID: applicationID,
+		Environment: environmentInput, EnvironmentID: environmentID,
+		LoginTarget: loginTargetInput, LoginTargetID: loginTargetID,
+	}, now)
+	if err != nil {
+		return SubsystemDirectoryRegistrationResult{}, err
+	}
 	result.PublicURL = publicURL
 	return result, nil
 }
@@ -526,6 +630,49 @@ func normalizeSubsystemOnboardingInput(input SubsystemOnboardingInput) Subsystem
 	return input
 }
 
+func normalizeSubsystemDirectoryRegistrationInput(input SubsystemDirectoryRegistrationInput) SubsystemDirectoryRegistrationInput {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	input.ApplicationCode = strings.ToLower(strings.TrimSpace(input.ApplicationCode))
+	input.ApplicationName = strings.TrimSpace(input.ApplicationName)
+	input.Description = normalizeOptional(input.Description)
+	input.Environment = strings.ToLower(strings.TrimSpace(input.Environment))
+	if input.Environment == "" {
+		input.Environment = "prod"
+	}
+	input.PublicBaseURL = strings.TrimRight(strings.TrimSpace(input.PublicBaseURL), "/")
+	input.UpstreamURL = strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/")
+	input.PathPrefix = strings.TrimRight(strings.TrimSpace(input.PathPrefix), "/")
+	if input.PathPrefix == "" && input.ApplicationCode != "" {
+		input.PathPrefix = "/" + input.ApplicationCode
+	}
+	if input.ApplicationCode == integratedCustomerApplicationCode {
+		if input.PathPrefix == legacyCustomerPathPrefix {
+			input.PathPrefix = integratedCustomerPathPrefix
+		}
+		if input.UpstreamURL == legacyCustomerUpstreamURL {
+			input.UpstreamURL = integratedCustomerUpstreamURL
+		}
+	}
+	if input.ApplicationCode == integratedPortalApplicationCode {
+		if input.PathPrefix == "/customer_portal" {
+			input.PathPrefix = integratedPortalPathPrefix
+		}
+		if input.UpstreamURL == "http://customer-portal-api:8091" {
+			input.UpstreamURL = integratedPortalUpstreamURL
+		}
+	}
+	if input.IssuerAlias != nil {
+		alias := strings.ToLower(strings.TrimSpace(*input.IssuerAlias))
+		if alias == "" || alias == IssuerAliasPlatform || alias == "basic_platform" {
+			input.IssuerAlias = nil
+		} else {
+			input.IssuerAlias = &alias
+		}
+	}
+	return input
+}
+
 func validSubsystemOnboardingInput(input SubsystemOnboardingInput) bool {
 	baseURL, upstreamURL, pathPrefix := input.PublicBaseURL, input.UpstreamURL, input.PathPrefix
 	return len(input.TenantID) == 26 && validIdentifier(input.TenantID) &&
@@ -535,6 +682,16 @@ func validSubsystemOnboardingInput(input SubsystemOnboardingInput) bool {
 		validOptionalBaseURL(&baseURL) && validOptionalUpstreamURL(&upstreamURL) &&
 		validOptionalPathPrefix(&pathPrefix) && validGatewayTripleConsistent(&baseURL, &upstreamURL, &pathPrefix) &&
 		oneOf(input.ClientType, "public", "confidential")
+}
+
+func validSubsystemDirectoryRegistrationInput(input SubsystemDirectoryRegistrationInput) bool {
+	baseURL, upstreamURL, pathPrefix := input.PublicBaseURL, input.UpstreamURL, input.PathPrefix
+	return len(input.TenantID) == 26 && validIdentifier(input.TenantID) &&
+		len(input.OperatorID) == 26 && validIdentifier(input.OperatorID) && validCode(input.ApplicationCode, 64) &&
+		validManagementText(input.ApplicationName, 128, false) && validEnvironmentCode(input.Environment) &&
+		validOptionalBaseURL(&baseURL) && validOptionalUpstreamURL(&upstreamURL) &&
+		validOptionalPathPrefix(&pathPrefix) && validGatewayTripleConsistent(&baseURL, &upstreamURL, &pathPrefix) &&
+		(input.IssuerAlias == nil || *input.IssuerAlias == IssuerAliasKeycloak)
 }
 
 func resolvePortalTarget(baseURL, targetURI string) (string, error) {

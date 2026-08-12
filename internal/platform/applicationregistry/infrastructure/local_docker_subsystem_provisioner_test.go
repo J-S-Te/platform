@@ -164,7 +164,7 @@ func TestLocalDockerSubsystemProvisionerUsesPrivateKeycloakBackchannelForRealmIs
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := provisioner.oidcBackchannelBaseURL("https://sso.example.com/realms/basic-platform"), "http://keycloak:8080/realms/basic-platform"; got != want {
+	if got, want := provisioner.oidcBackchannelBaseURL("https://sso.example.com/realms/basic-platform"), "http://keycloak:8080"; got != want {
 		t.Fatalf("Keycloak backchannel = %q, want %q", got, want)
 	}
 	if got := provisioner.oidcBackchannelBaseURL("https://identity.example.com"); got != "" {

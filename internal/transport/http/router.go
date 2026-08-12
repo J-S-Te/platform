@@ -35,8 +35,12 @@ import (
 // OperationalModules 聚合后续扩展能力，避免组合根继续增长位置参数，也允许路由测试整体省略
 // 可选模块。字段为 nil 时只表示该能力未装配，不应注册一个会绕过依赖检查的空路由。
 type OperationalModules struct {
-	LoginTargets           *applicationregistryhttp.LoginTargetManagementHandler
-	SubsystemOnboarding    *applicationregistryhttp.SubsystemOnboardingHandler
+	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
+	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
+	// KeycloakIntegration is deliberately separate from the application
+	// directory. It owns only provider synchronization and issuer cutover; it
+	// does not expose or create browser-visible OAuth client secrets.
+	KeycloakIntegration    *applicationregistryhttp.KeycloakIntegrationHandler
 	SubsystemServiceRoutes *applicationregistryhttp.SubsystemServiceRouteHandler
 	Notifications          *notificationhttp.Handler
 	FilesAndJobs           *filetaskhttp.Handler
@@ -114,6 +118,7 @@ func NewRouter(
 		router.GET("/oauth2/jwks", adaptHandler(oidcHandler.JWKS))
 		router.GET("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
 		router.POST("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
+		router.GET("/oauth2/authorization-context", adaptHandler(oidcHandler.AuthorizationContext))
 		router.GET("/oauth2/logout", adaptHandler(oidcHandler.Logout))
 		router.POST("/oauth2/logout", middleware.RequireSameOrigin(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 	} else if applicationTokenHandler != nil {
@@ -138,6 +143,8 @@ func NewRouter(
 		authRouter := router.Group("/api/v1/auth")
 		authRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
+		authRouter.GET("/login", adaptHandler(authHandler.BeginOIDCLogin))
+		authRouter.GET("/oidc/callback", adaptHandler(authHandler.OIDCCallback))
 
 		protected := authRouter.Group("")
 		protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
@@ -159,6 +166,14 @@ func NewRouter(
 		brokerVerificationRouter := router.Group("/api/v1/keycloak")
 		brokerVerificationRouter.Use(middleware.RequireSafeWriteContentType(), middleware.KeycloakBrokerAuthentication(verifier))
 		brokerVerificationRouter.POST("/broker-login-verifications", adaptHandler(operational.SubsystemOnboarding.VerifyKeycloakBrokerLogin))
+		// The new endpoint is the Keycloak authentication-integration boundary.
+		// Keep /api/v1/keycloak/... above for an existing Keycloak broker callback
+		// client while all new callers use this explicit namespace.
+		if operational.KeycloakIntegration != nil {
+			integrationBrokerRouter := router.Group("/api/v1/keycloak-integration")
+			integrationBrokerRouter.Use(middleware.RequireSafeWriteContentType(), middleware.KeycloakBrokerAuthentication(verifier))
+			integrationBrokerRouter.POST("/broker-login-verifications", adaptHandler(operational.KeycloakIntegration.VerifyBrokerLogin))
+		}
 	}
 
 	if authHandler != nil {
@@ -225,6 +240,15 @@ func NewRouter(
 			apiRouter.GET("/subsystem-capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemCapabilities))
 			apiRouter.GET("/subsystem-discovery", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.DiscoverSubsystemCandidates))
 			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemStatus))
+			// V2 directory registration deliberately stops before any OIDC Client,
+			// credential or deployment mutation. Keycloak owns client lifecycle via
+			// the dedicated keycloak-integration endpoints.
+			apiRouter.POST("/subsystem-directory",
+				middleware.RequirePermission("platform:application:create"),
+				middleware.RequirePermission("platform:application-environment:create"),
+				middleware.RequirePermission("platform:application-login-target:create"),
+				adaptHandler(operational.SubsystemOnboarding.RegisterSubsystemDirectory),
+			)
 			apiRouter.POST("/subsystem-onboarding",
 				middleware.RequirePermission("platform:application:create"),
 				middleware.RequirePermission("platform:application-environment:create"),
@@ -276,6 +300,25 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.TeardownSubsystem),
 			)
+		}
+		if operational.KeycloakIntegration != nil {
+			// Authentication-provider operations have their own namespace. The
+			// application directory continues to own application/environment data,
+			// role catalogs and final authorization assignments only.
+			keycloakIntegrationRouter := apiRouter.Group("/keycloak-integration")
+			keycloakIntegrationRouter.GET("/capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Capabilities))
+			keycloakIntegrationRouter.GET("/status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Status))
+			// FAILED authorization projections are a high-risk cutover blocker.
+			// Reading them follows application visibility; replay additionally needs
+			// role-binding update authority because it causes platform authorization
+			// facts to be projected back into a Keycloak Client.
+			keycloakIntegrationRouter.GET("/projection-failures", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.ListProjectionFailures))
+			keycloakIntegrationRouter.GET("/projection-alerts", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.ProjectionAlerts))
+			keycloakIntegrationRouter.POST("/projection-failures/:event_id/replay", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:role-binding:update"), adaptHandler(operational.KeycloakIntegration.ReplayProjectionFailure))
+			keycloakIntegrationRouter.POST("/observation", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), adaptHandler(operational.KeycloakIntegration.StartObservation))
+			keycloakIntegrationRouter.POST("/sync", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), adaptHandler(operational.KeycloakIntegration.SyncClient))
+			keycloakIntegrationRouter.POST("/switch", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:application-login-target:update"), middleware.RequirePermission("platform:oauth-client:disable"), adaptHandler(operational.KeycloakIntegration.Switch))
+			keycloakIntegrationRouter.POST("/rollback", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:application-login-target:update"), middleware.RequirePermission("platform:oauth-client:disable"), adaptHandler(operational.KeycloakIntegration.Rollback))
 		}
 		if operational.SubsystemServiceRoutes != nil {
 			apiRouter.GET("/subsystem-service-route", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemServiceRoutes.Resolve))

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +41,37 @@ func TestSessionCookieSetAndClearUseMatchingSecurityScope(t *testing.T) {
 		clearCookie.HttpOnly != setCookie.HttpOnly || clearCookie.Secure != setCookie.Secure ||
 		clearCookie.SameSite != setCookie.SameSite || clearCookie.MaxAge != -1 {
 		t.Fatalf("clear cookie = %#v, set cookie = %#v", clearCookie, setCookie)
+	}
+}
+
+func TestBeginOIDCLoginRedirectsToKeycloakWithoutBrokerVerification(t *testing.T) {
+	handler := &Handler{
+		cookie: cookieConfig{name: "bp_session", sameSite: http.SameSiteLaxMode},
+		oidc:   oidcLoginConfig{enabled: true, issuer: "http://keycloak.test/realms/basic-platform", clientID: "platform-web", redirectPath: "/api/v1/auth/oidc/callback", stateCookie: "bp_oidc_state"},
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://platform.test/api/v1/auth/login", nil)
+	response := httptest.NewRecorder()
+
+	handler.BeginOIDCLogin(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusFound)
+	}
+	location := response.Header().Get("Location")
+	if !strings.HasPrefix(location, "http://keycloak.test/realms/basic-platform/protocol/openid-connect/auth?") {
+		t.Fatalf("location = %q", location)
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Get("client_id") != "platform-web" || parsed.Query().Get("response_type") != "code" || parsed.Query().Get("scope") != "openid profile" || parsed.Query().Get("code_challenge_method") != "S256" || parsed.Query().Get("code_challenge") == "" {
+		t.Fatalf("authorization query = %#v", parsed.Query())
+	}
+	if parsed.Query().Get("redirect_uri") != "http://platform.test/api/v1/auth/oidc/callback" {
+		t.Fatalf("redirect_uri = %q", parsed.Query().Get("redirect_uri"))
+	}
+	if response.Result().Cookies()[0].Name != "bp_oidc_state" || response.Result().Cookies()[0].Value == "" {
+		t.Fatalf("state cookie = %#v", response.Result().Cookies())
 	}
 }
 

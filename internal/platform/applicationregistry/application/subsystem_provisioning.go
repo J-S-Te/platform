@@ -72,17 +72,19 @@ type SubsystemServiceRegistry interface {
 // tenant, database, filesystem, image or credential data: discovery is an inventory operation,
 // while onboarding remains the audited control-plane write.
 type SubsystemDiscoveryCandidate struct {
-	ApplicationCode  string `json:"application_code"`
-	Environment      string `json:"environment"`
-	ServiceName      string `json:"service_name"`
-	ServiceRole      string `json:"service_role"`
-	Protocol         string `json:"protocol"`
-	InternalHost     string `json:"internal_host"`
-	InternalPort     uint   `json:"internal_port"`
-	HealthEndpoint   string `json:"health_endpoint,omitempty"`
-	OIDCCallbackPath string `json:"oidc_callback_path"`
-	Version          string `json:"version,omitempty"`
-	Status           string `json:"status"`
+	ApplicationCode       string `json:"application_code"`
+	ApplicationName       string `json:"application_name"`
+	Environment           string `json:"environment"`
+	ServiceName           string `json:"service_name"`
+	ServiceRole           string `json:"service_role"`
+	Protocol              string `json:"protocol"`
+	InternalHost          string `json:"internal_host"`
+	InternalPort          uint   `json:"internal_port"`
+	HealthEndpoint        string `json:"health_endpoint,omitempty"`
+	OIDCCallbackPath      string `json:"oidc_callback_path"`
+	OIDCCallbackSupported bool   `json:"oidc_callback_supported"`
+	Version               string `json:"version,omitempty"`
+	Status                string `json:"status"`
 }
 
 // SubsystemCandidateDiscoverer 与部署器故意分离：容器只能提供待审核候选，不能触发命令或写入；

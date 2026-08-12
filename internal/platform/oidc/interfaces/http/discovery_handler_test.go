@@ -32,14 +32,18 @@ func TestDiscoveryAdvertisesActuallyIssuedAuthorizationClaims(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	var document struct {
-		Issuer          string   `json:"issuer"`
-		ClaimsSupported []string `json:"claims_supported"`
+		Issuer                       string   `json:"issuer"`
+		AuthorizationContextEndpoint string   `json:"authorization_context_endpoint"`
+		ClaimsSupported              []string `json:"claims_supported"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
 		t.Fatal(err)
 	}
 	if document.Issuer != "https://identity.example.com" {
 		t.Fatalf("issuer=%q", document.Issuer)
+	}
+	if document.AuthorizationContextEndpoint != "https://identity.example.com/oauth2/authorization-context" {
+		t.Fatalf("authorization_context_endpoint=%q", document.AuthorizationContextEndpoint)
 	}
 	claims := make(map[string]bool, len(document.ClaimsSupported))
 	for _, claim := range document.ClaimsSupported {
@@ -49,8 +53,7 @@ func TestDiscoveryAdvertisesActuallyIssuedAuthorizationClaims(t *testing.T) {
 		claims[claim] = true
 	}
 	for _, claim := range []string{
-		"sub", "identity_id", "name", "preferred_username", "email", "tenant_id", "person_id", "primary_org_id",
-		"organization_ids", "roles", "permissions", "role_config_hash", "authz_revision",
+		"sub", "identity_id", "name", "preferred_username", "email", "tenant_id", "person_id", "roles",
 	} {
 		if !claims[claim] {
 			t.Errorf("claims_supported does not contain %q", claim)
@@ -59,6 +62,11 @@ func TestDiscoveryAdvertisesActuallyIssuedAuthorizationClaims(t *testing.T) {
 	for _, claim := range []string{"personnel_directory"} {
 		if claims[claim] {
 			t.Errorf("claims_supported must not advertise %q", claim)
+		}
+	}
+	for _, claim := range []string{"organization_ids", "permissions", "role_config_hash", "authz_revision"} {
+		if claims[claim] {
+			t.Errorf("claims_supported must not advertise detailed authorization claim %q", claim)
 		}
 	}
 }

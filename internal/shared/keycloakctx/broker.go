@@ -9,12 +9,13 @@ type brokerClaimsKey struct{}
 // BrokerClaims contains only claims needed to attest a brokered login. It is
 // populated exclusively after a Keycloak JWT has been verified.
 type BrokerClaims struct {
-	Issuer     string
-	Subject    string
-	SessionID  string
-	TenantID   string
-	IdentityID string
-	Audience   []string
+	Issuer          string
+	Subject         string
+	SessionID       string
+	TenantID        string
+	IdentityID      string
+	AuthorizedParty string
+	Audience        []string
 }
 
 func WithBrokerClaims(ctx context.Context, claims BrokerClaims) context.Context {

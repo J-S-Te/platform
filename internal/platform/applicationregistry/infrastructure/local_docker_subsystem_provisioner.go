@@ -204,6 +204,9 @@ func newLocalDockerSubsystemProvisioner(config LocalDockerSubsystemProvisionerCo
 // selected issuer is this deployment's Keycloak Realm. The public issuer is
 // still retained in OIDC_ISSUER so go-oidc validates the browser-visible iss
 // claim, while its HTTP transport reaches Keycloak without a host-network hop.
+// The backchannel value is an origin only; the OIDC client appends the discovery
+// path itself. Keeping /realms/<realm> out of this value is required by the CRM,
+// Portal and contract OIDC configuration validators.
 func (provisioner *LocalDockerSubsystemProvisioner) oidcBackchannelBaseURL(issuer string) string {
 	if provisioner == nil || provisioner.config.KeycloakPublicURL == "" ||
 		provisioner.config.KeycloakInternalURL == "" || provisioner.config.KeycloakRealm == "" {
@@ -213,7 +216,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) oidcBackchannelBaseURL(issue
 	if strings.TrimRight(strings.TrimSpace(issuer), "/") != publicIssuer {
 		return ""
 	}
-	return provisioner.config.KeycloakInternalURL + "/realms/" + provisioner.config.KeycloakRealm
+	return strings.TrimRight(strings.TrimSpace(provisioner.config.KeycloakInternalURL), "/")
 }
 
 // DiscoverSubsystemServices reports Compose containers through the existing Agent transport.
@@ -587,7 +590,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		}
 		values["OIDC_POST_LOGOUT_REDIRECT_URI"] = input.PublicURL
 		values["OIDC_ROLE_CONFIG_HASH"] = integratedCustomerRoleConfigHash
-		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(input.Issuer), "https://"))
+		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(publicOrigin), "https://"))
 		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
 		if !ok {
 			return provisioningError("customer audit publisher credential is unavailable")
@@ -602,7 +605,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 			values["OIDC_BACKCHANNEL_BASE_URL"] = keycloakBackchannel
 		}
 		values["OIDC_POST_LOGOUT_REDIRECT_URI"] = input.PublicURL
-		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(input.Issuer), "https://"))
+		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(publicOrigin), "https://"))
 		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
 		if !ok {
 			return provisioningError("project audit publisher credential is unavailable")

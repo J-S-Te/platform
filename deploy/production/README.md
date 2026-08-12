@@ -237,3 +237,47 @@ chmod 750 bin/deploy-customer-opportunity.sh
 - 生产 Nginx 配置。
 
 恢复演练要验证数据库、文件、Issuer、Client 凭据和上一镜像能共同恢复；只回退镜像不能逆转不兼容迁移。
+
+### 6.1 Keycloak 数据库逻辑备份与恢复
+
+生产包提供两项不改变网络入口、不会强制 HTTPS 的运维资产：
+
+- `bin/backup-keycloak-mysql.sh`：在线一致性逻辑备份，校验 gzip、非空文件和 SHA-256；默认不删除历史备份。
+- `bin/restore-keycloak-mysql.sh`：先做备份完整性、校验和、Compose、数据库健康与凭据占位符检查；真正导入需要显式破坏性确认，且拒绝在 Keycloak 仍运行时执行。
+
+安装时仅需收紧目录和脚本权限；不要把备份、`.env` 或 runtime Secret 提交到 Git：
+
+```bash
+cd /opt/basic-platform
+install -d -m 700 backups/keycloak monitoring/textfile
+chmod 750 bin/backup-keycloak-mysql.sh bin/restore-keycloak-mysql.sh
+chmod 600 .env .release.env
+```
+
+备份命令可以在线执行。它在 `keycloak-db` 容器内读取数据库 root 密码，因此密码不会出现在宿主机命令行、cron 参数或日志中：
+
+```bash
+cd /opt/basic-platform
+./bin/backup-keycloak-mysql.sh
+```
+
+恢复必须先在**隔离演练环境**验证。先只校验备份，不会修改数据：
+
+```bash
+cd /opt/basic-platform
+./bin/restore-keycloak-mysql.sh \
+  --backup backups/keycloak/keycloak-YYYYMMDDTHHMMSSZ.sql.gz \
+  --verify-only
+```
+
+获批的实际恢复是破坏性操作：先冻结认证变更、停止全部 Keycloak 节点，并确保已准备同一时间点的受控 Secret、入口配置和镜像 digest。脚本不会自行停止或启动容器，避免在未知拓扑中误操作；只有输入固定确认文本才会清空并导入独立 Keycloak 数据库：
+
+```bash
+cd /opt/basic-platform
+# 仅在已完成隔离演练并获得变更审批后执行：
+./bin/restore-keycloak-mysql.sh \
+  --backup backups/keycloak/keycloak-YYYYMMDDTHHMMSSZ.sql.gz \
+  --confirm RESTORE_KEYCLOAK_DATABASE
+```
+
+导入成功不代表恢复完成。恢复后使用备份匹配的受控配置启动经批准的 Keycloak 镜像，再验证数据库健康、`/health/ready`、Issuer discovery、Realm、Client、JWKS 和一次测试账号登录；同时记录实际 RTO/RPO。脚本只接受 `backups/keycloak` 目录中的 `keycloak-*.sql.gz`，默认拒绝符号链接与未停止 Keycloak 时的导入。

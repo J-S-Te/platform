@@ -270,6 +270,59 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 	return result, err
 }
 
+// CreateSubsystemDirectory persists the application catalogue portion of a
+// subsystem registration.  It deliberately does not create an OAuth client,
+// a service credential or deployment state: those belong to the authentication
+// provider integration and runtime deployment workflows respectively.
+func (repository *SubsystemOnboardingGORMRepository) CreateSubsystemDirectory(ctx context.Context, write application.SubsystemDirectoryRegistrationWrite, now time.Time) (application.SubsystemDirectoryRegistrationResult, error) {
+	var result application.SubsystemDirectoryRegistrationResult
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		management := &ManagementRepository{database: transaction}
+		createdApplication, err := management.CreateApplication(ctx, write.Application, write.ApplicationID, now)
+		if err != nil {
+			if !errors.Is(err, application.ErrConflict) {
+				return err
+			}
+			createdApplication, err = repository.findApplicationByCode(ctx, transaction, write.Application.TenantID, write.Application.Code)
+			if err != nil {
+				return err
+			}
+			if createdApplication.Status != "DRAFT" && createdApplication.Status != "ACTIVE" {
+				return application.ErrConflict
+			}
+		}
+
+		write.Environment.ApplicationID = createdApplication.ID
+		write.LoginTarget.ApplicationID = createdApplication.ID
+		existingEnvironment, findErr := repository.findEnvironmentByCode(ctx, transaction, write.Environment.TenantID, createdApplication.ID, write.Environment.Environment)
+		if findErr == nil {
+			return &application.SubsystemOnboardingConflict{
+				ApplicationCode: createdApplication.Code,
+				Environment:     existingEnvironment.Environment,
+				Status:          existingEnvironment.Status,
+			}
+		}
+		if !errors.Is(findErr, application.ErrNotFound) {
+			return findErr
+		}
+
+		createdEnvironment, err := management.CreateEnvironment(ctx, write.Environment, write.EnvironmentID, now)
+		if err != nil {
+			return err
+		}
+		loginTargets := &LoginTargetGORMRepository{database: transaction}
+		createdLoginTarget, err := loginTargets.CreateLoginTarget(ctx, write.LoginTarget, write.LoginTargetID, now)
+		if err != nil {
+			return err
+		}
+		result = application.SubsystemDirectoryRegistrationResult{
+			Application: createdApplication, Environment: createdEnvironment, LoginTarget: createdLoginTarget,
+		}
+		return nil
+	})
+	return result, err
+}
+
 // findApplicationByCode retrieves only the exact tenant-scoped application that caused a
 // duplicate create attempt. It is intentionally private to the onboarding transaction so a
 // request cannot use it to cross a tenant boundary or overwrite an existing application.

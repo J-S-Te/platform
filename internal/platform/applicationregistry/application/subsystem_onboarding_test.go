@@ -10,10 +10,12 @@ import (
 )
 
 type subsystemOnboardingRepositoryStub struct {
-	write       SubsystemOnboardingWrite
-	portalItems []PortalApplication
-	createCalls int
-	listCalls   int
+	write                SubsystemOnboardingWrite
+	directoryWrite       SubsystemDirectoryRegistrationWrite
+	portalItems          []PortalApplication
+	createCalls          int
+	directoryCreateCalls int
+	listCalls            int
 }
 
 func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.Context, write SubsystemOnboardingWrite, now time.Time) (SubsystemOnboardingResult, error) {
@@ -76,6 +78,64 @@ func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.C
 		})
 	}
 	return result, nil
+}
+
+func (repository *subsystemOnboardingRepositoryStub) CreateSubsystemDirectory(_ context.Context, write SubsystemDirectoryRegistrationWrite, now time.Time) (SubsystemDirectoryRegistrationResult, error) {
+	repository.directoryWrite = write
+	repository.directoryCreateCalls++
+	return SubsystemDirectoryRegistrationResult{
+		Application: Application{
+			ID: write.ApplicationID, TenantID: write.Application.TenantID, Code: write.Application.Code,
+			Name: write.Application.Name, ApplicationType: write.Application.ApplicationType,
+			HomepageURL: write.Application.HomepageURL, Description: write.Application.Description,
+			Status: write.Application.Status, Version: 1, CreatedAt: now, UpdatedAt: now,
+		},
+		Environment: Environment{
+			ID: write.EnvironmentID, TenantID: write.Environment.TenantID, ApplicationID: write.Environment.ApplicationID,
+			Environment: write.Environment.Environment, BaseURL: write.Environment.BaseURL,
+			UpstreamURL: write.Environment.UpstreamURL, PathPrefix: write.Environment.PathPrefix,
+			IssuerAlias: write.Environment.IssuerAlias, Status: write.Environment.Status, Version: 1,
+			CreatedAt: now, UpdatedAt: now,
+		},
+		LoginTarget: LoginTargetManagementItem{
+			ID: write.LoginTargetID, TenantID: write.LoginTarget.TenantID,
+			ApplicationID: write.LoginTarget.ApplicationID, EnvironmentID: write.LoginTarget.EnvironmentID,
+			TargetCode: write.LoginTarget.TargetCode, Name: write.LoginTarget.Name,
+			TargetURI: write.LoginTarget.TargetURI, Status: write.LoginTarget.Status, Version: 1,
+			CreatedAt: now, UpdatedAt: now,
+		},
+	}, nil
+}
+
+func TestRegisterSubsystemDirectoryDoesNotCreateOIDCOrServiceClients(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 11, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := IssuerAliasKeycloak
+	result, err := service.RegisterSubsystemDirectory(context.Background(), SubsystemDirectoryRegistrationInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: "inventory", ApplicationName: "库存管理系统", Environment: "prod",
+		PublicBaseURL: "https://portal.example.com", UpstreamURL: "http://inventory-api:8080",
+		PathPrefix: "/inventory", IssuerAlias: &alias,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.createCalls != 0 || repository.directoryCreateCalls != 1 {
+		t.Fatalf("legacy create calls=%d directory create calls=%d", repository.createCalls, repository.directoryCreateCalls)
+	}
+	write := repository.directoryWrite
+	if write.Application.Code != "inventory" || write.Environment.IssuerAlias == nil || *write.Environment.IssuerAlias != IssuerAliasKeycloak {
+		t.Fatalf("unexpected directory write: %#v", write)
+	}
+	if write.LoginTarget.TargetCode != "home" || write.LoginTarget.TargetURI != "/inventory/" {
+		t.Fatalf("unexpected login target: %#v", write.LoginTarget)
+	}
+	if result.PublicURL != "https://portal.example.com/inventory/" {
+		t.Fatalf("public url = %q", result.PublicURL)
+	}
 }
 
 func TestOnboardCustomerPortalCreatesSixIndependentLeastPrivilegeServiceClients(t *testing.T) {

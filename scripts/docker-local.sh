@@ -31,6 +31,10 @@ admin_account_name="${BASIC_PLATFORM_ADMIN_ACCOUNT_NAME:-}"
 admin_password="${BASIC_PLATFORM_ADMIN_PASSWORD:-}"
 admin_password_stdin=false
 frontend_public_origin=""
+# 用于 Compose 首次解析的本地 CRM 目录基线。customer-api 真正启动前，
+# sync_crm_authorization_catalog 会从当前镜像读取并导出实际哈希，因此这里
+# 不替代运行时目录校验；它只避免 .env 模板占位符阻断初始化流程。
+local_crm_role_config_hash="sha256:609436cbb09101c385c572ae41714202a83511b42cc675b7aa56e98d1dad536a"
 
 log() { printf '[docker-local] %s\n' "$*"; }
 fail() { printf '[docker-local] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -43,7 +47,7 @@ usage() {
   bash scripts/docker-local.sh stop
   bash scripts/docker-local.sh restart [选项]
   bash scripts/docker-local.sh ps
-  bash scripts/docker-local.sh logs [服务名...]
+  bash scripts/docker-local.sh logs [选项] [服务名...]
   bash scripts/docker-local.sh config
   bash scripts/docker-local.sh verify
   bash scripts/docker-local.sh refresh-api
@@ -68,6 +72,16 @@ up/restart 选项：
   --project-env-file PATH         项目管理系统环境文件（默认 project_management/.env.local）
   --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
+
+日志取证选项：
+  --since DURATION                仅显示指定时间范围内的日志，例如 10m、1h
+  --tail COUNT                    每个服务显示的末尾行数（或 all），例如 200
+  --no-follow                     一次性输出日志后退出（默认持续跟踪）
+
+示例：
+  bash scripts/docker-local.sh logs api
+  bash scripts/docker-local.sh logs --since 10m --tail 200 --no-follow api
+  bash scripts/docker-local.sh logs api subsystem-provisioner --since 30m --no-follow
 
 定向更新：
   refresh-api           只重建基础平台后端镜像，执行基础平台迁移，并重启 api/受控 provisioner
@@ -176,10 +190,42 @@ while (($# > 0)); do
     esac
 done
 
-if [[ "$command_name" == "logs" && $# -gt 0 ]]; then
-    log_services=("$@")
-else
-    log_services=()
+log_services=()
+log_since=""
+log_tail=""
+log_follow=true
+
+if [[ "$command_name" == "logs" ]]; then
+    while (($# > 0)); do
+        case "$1" in
+            --since)
+                (($# >= 2)) || fail "$1 缺少参数"
+                log_since="$2"
+                shift 2
+                ;;
+            --tail)
+                (($# >= 2)) || fail "$1 缺少参数"
+                log_tail="$2"
+                shift 2
+                ;;
+            --no-follow)
+                log_follow=false
+                shift
+                ;;
+            --)
+                shift
+                log_services+=("$@")
+                break
+                ;;
+            -*)
+                fail "logs 不支持的选项：$1"
+                ;;
+            *)
+                log_services+=("$1")
+                shift
+                ;;
+        esac
+    done
 fi
 
 command -v docker >/dev/null 2>&1 || fail "未找到 docker 命令"
@@ -445,6 +491,21 @@ ensure_platform_env_file() {
 
     # 仅在文件不存在时生成密钥；重复 up 绝不轮换既有数据库密码和加密密钥。
     if [[ ! -f "$env_file" ]]; then
+        # Docker 数据卷会保留 MySQL 初始化时的账号密码。若环境文件丢失但卷还在，
+        # 重新随机生成 MYSQL_PASSWORD 会让迁移和 API 永久无法登录旧库。此处明确
+        # 停止并要求恢复环境文件或走受控密码恢复，绝不在用户不知情时删除数据卷。
+        # compose.local.yaml 为本地卷指定了固定 name（使用连字符，而不是
+        # Compose 默认的下划线名称）。平台库和 Keycloak 库任意一个存在，都
+        # 说明不能安全地依据模板重新随机化 .env.local 中的数据库密码。
+        local retained_volume
+        for retained_volume in \
+            "${compose_project}-mysql-data" \
+            "${compose_project}-keycloak-mysql-data"
+        do
+            if command -v docker >/dev/null 2>&1 && docker volume inspect "$retained_volume" >/dev/null 2>&1; then
+                fail "检测到已有本地数据卷 ${retained_volume}，但环境文件缺失：${env_file}。请先恢复旧 .env.local，或按数据库密码恢复流程重置账号；不要删除数据卷。"
+            fi
+        done
         [[ -f "$platform_template_file" ]] || fail "基础平台环境模板不存在：$platform_template_file"
         cp "$platform_template_file" "$env_file"
         chmod 600 "$env_file"
@@ -485,6 +546,18 @@ ensure_platform_env_file() {
     replace_line_in_file "$env_file" KEYCLOAK_ADMIN_URL http://keycloak:8080
     replace_line_in_file "$env_file" KEYCLOAK_PUBLIC_URL http://localhost:18090
     replace_line_in_file "$env_file" KEYCLOAK_REALM basic-platform
+    # 新接入环境默认走 Keycloak；已有环境的 issuer_alias 存在于平台数据库，
+    # 不会因这里变更而被隐式切换，仍需通过应用接入页完成受控迁移。
+    replace_line_in_file "$env_file" SUBSYSTEM_DEFAULT_ISSUER_ALIAS keycloak
+
+    # OIDC_ROLE_CONFIG_HASH 是 CRM Token Claims 的目录一致性校验值。旧模板
+    # 使用占位符时在 Compose 解析前填入可信本地基线；启动 CRM 前仍会用镜像
+    # 实际目录哈希复核，目录发生变化不会被这个基线静默掩盖。
+    local role_config_hash
+    role_config_hash="$(env_value "$env_file" OIDC_ROLE_CONFIG_HASH)"
+    if [[ -z "$role_config_hash" || "$role_config_hash" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$env_file" OIDC_ROLE_CONFIG_HASH "$local_crm_role_config_hash"
+    fi
 
     local unresolved
     unresolved="$(grep -E 'REPLACE_WITH_' "$env_file" | grep -v '^#' || true)"
@@ -531,6 +604,30 @@ ensure_contract_env_file() {
         replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD "$legacy_contract_root_password"
         log "已沿用基础平台环境文件中的既有合同数据库凭据，避免已有数据卷认证失败"
     fi
+
+    # OIDC_ISSUER 是浏览器可见地址；容器自身不能通过 localhost 访问宿主机
+    # 的 8081。运行时文件没有后通道时，按 Issuer 补齐对应 Compose 内网地址。
+    # 已由应用接入流程写入的非空值绝不覆盖，避免干扰已切换的环境。
+    local oidc_issuer oidc_backchannel keycloak_public_url
+    oidc_issuer="$(env_value "$contract_env_file" OIDC_ISSUER)"
+    oidc_backchannel="$(env_value "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL)"
+    keycloak_public_url="$(env_value "$env_file" KEYCLOAK_PUBLIC_URL)"
+    if [[ -z "$oidc_backchannel" ]]; then
+        if [[ "$oidc_issuer" == "http://localhost:8081" || "$oidc_issuer" == "http://127.0.0.1:8081" ]]; then
+            replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://platform-api:8080"
+            log "已为合同管理补齐基础平台 OIDC 容器内后通道"
+        elif [[ -n "$keycloak_public_url" && "$oidc_issuer" == "${keycloak_public_url%/}/realms/"* ]]; then
+            replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
+            log "已为合同管理补齐 Keycloak OIDC 容器内后通道"
+        fi
+    elif [[ -n "$keycloak_public_url" && "$oidc_issuer" == "${keycloak_public_url%/}/realms/"* && "$oidc_backchannel" == */realms/* ]]; then
+        # OIDC_BACKCHANNEL_BASE_URL is an origin, not the public issuer.  Older
+        # local configurations accidentally stored /realms/<realm> here, which
+        # makes the contract service fail before it can start.  Keep the value
+        # private to the Compose network and repair only this known-invalid form.
+        replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
+        log "已修复合同管理 Keycloak 后通道：移除了错误的 /realms 路径"
+    fi
 }
 
 ensure_customer_env_file() {
@@ -557,6 +654,15 @@ ensure_customer_env_file() {
     local unresolved
     unresolved="$(grep -E 'REPLACE_WITH_' "$customer_env_file" | grep -v '^#' || true)"
     [[ -z "$unresolved" ]] || fail "客户与商机管理环境文件仍包含未填写占位符：$customer_env_file"
+
+    # OIDC_BACKCHANNEL_BASE_URL 只接受容器内可达的 HTTP(S) origin，不能携带
+    # /realms/<realm> 路径。修复历史本地配置，避免 CRM 在 Compose 健康检查前循环重启。
+    local oidc_backchannel
+    oidc_backchannel="$(env_value "$customer_env_file" OIDC_BACKCHANNEL_BASE_URL)"
+    if [[ "$oidc_backchannel" == */realms/* ]]; then
+        replace_line_in_file "$customer_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
+        log "已修复客户与商机管理 Keycloak 后通道：移除了错误的 /realms 路径"
+    fi
 }
 
 ensure_portal_env_file() {
@@ -686,6 +792,22 @@ compose_run() {
     compose --ansi never "$@"
 }
 
+# 旧版本的 split-runtime profile 可能留下名为 worker 的平台 Worker。
+# 当前默认编排不启用该 profile，Compose --remove-orphans 不会处理未激活
+# profile 中的服务；down 时只按 Compose 项目和服务标签清理这一类遗留容器，
+# 避免它继续占用 basic-platform-local_default 网络。
+remove_legacy_split_runtime_containers() {
+    local container_id container_ids
+    container_ids="$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${compose_project}" \
+        --filter "label=com.docker.compose.service=worker")"
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        log "移除遗留 split-runtime Worker 容器：$container_id"
+        docker rm -f "$container_id" >/dev/null
+    done <<< "$container_ids"
+}
+
 # Compose --wait 可能在冷启动尚可恢复时立即因 unhealthy 返回。这里做一次有界重试；
 # 仍失败则输出服务状态与日志，避免只留下无法定位的 dependency failed to start。
 compose_up_wait() {
@@ -702,7 +824,7 @@ compose_up_wait() {
             return 0
         fi
         if [[ "$attempt" -eq 1 ]]; then
-            log "WARN: ${description}首次健康等待未通过，输出状态并在 5 秒后继续等待"
+            log "${description}仍在冷启动，首次健康等待未完成；输出当前状态并在 5 秒后重试"
             compose_run ps "$@" >&2 || true
             sleep 5
             continue
@@ -879,6 +1001,21 @@ frontend_http_status() {
     printf '%s' "$status"
 }
 
+# 后端容器通过 Compose healthcheck 变为 healthy 后，统一 Nginx 仍可能在数秒内
+# 复用旧上游连接。启动校验对业务健康地址短暂重试，避免已成功启动的服务被一次 502
+# 误判为失败；认证/授权等语义校验仍保持单次、严格检查。
+wait_for_frontend_status() {
+    local route="$1" expected_status="$2" label="$3" attempt status
+    for attempt in $(seq 1 20); do
+        status="$(frontend_http_status "$route" 2>/dev/null || true)"
+        if [[ "$status" == "$expected_status" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    fail "${label} 返回 ${status:-无响应}，预期为 ${expected_status}"
+}
+
 # 返回第一次重定向响应中的 Location。该函数用于验证合同系统实际生成的
 # OIDC 授权地址，避免仅检查 /auth/login=302 而遗漏后续 /authorize 转发错误。
 frontend_http_location() {
@@ -919,7 +1056,7 @@ verify_gateway_routes() {
     local platform_membership_status contract_health_status contract_session_status contract_login_status
 	local customer_health_status customer_session_status portal_health_status portal_session_status
 	local project_health_status project_session_status
-    local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url
+    local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url contract_issuer
 
     log "校验统一前端 Nginx 配置"
     compose_run exec -T frontend nginx -t >/dev/null
@@ -931,10 +1068,7 @@ verify_gateway_routes() {
     [[ "$platform_membership_status" == "401" ]] || \
         fail "基础平台任职关系接口返回 ${platform_membership_status}，预期未登录状态为 401；请重新构建并启动 api 与 frontend 容器"
 
-    contract_health_status="$(frontend_http_status /contract_management/healthz)" || \
-        fail "无法访问合同管理健康检查路径"
-    [[ "$contract_health_status" == "200" ]] || \
-        fail "合同管理健康检查路径返回 ${contract_health_status}，预期为 200"
+    wait_for_frontend_status /contract_management/healthz 200 "合同管理健康检查路径"
 
     # 自检请求不携带登录 Cookie，因此 /auth/me 应返回 401。若返回 404，说明
     # /contract_management 前缀未被正确移除，部署必须立即失败。
@@ -952,27 +1086,37 @@ verify_gateway_routes() {
     # client_id、redirect_uri、state、nonce 或 PKCE 参数，此处会得到 400 并阻止部署。
     contract_authorize_url="$(frontend_http_location /contract_management/auth/login)" || \
         fail "合同管理登录入口未返回 OIDC 授权地址"
-    contract_authorize_route="$(public_url_to_route "$contract_authorize_url")" || \
-        fail "合同管理登录入口返回了无法识别的 OIDC 授权地址"
-    [[ "$contract_authorize_route" == /authorize\?* ]] || \
-        fail "合同管理登录入口未跳转到统一身份平台 /authorize"
+    contract_issuer="$(env_value "$contract_env_file" OIDC_ISSUER)"
+    case "$contract_authorize_url" in
+        */realms/*/protocol/openid-connect/auth\?*)
+            # Keycloak RP：合同 API 启动时已经通过同一环境的私网后通道完成
+            # discovery；这里仅验证浏览器被正确导向公开 Realm，而不让前端
+            # 容器错误地以 localhost 访问浏览器专用的公开地址。
+            [[ "$contract_issuer" == */realms/* ]] || \
+                fail "合同管理登录入口跳转到 Keycloak，但 OIDC_ISSUER 不是 Realm 地址"
+            ;;
+        *)
+            # 兼容尚未迁移的基础平台 OIDC 环境。
+            contract_authorize_route="$(public_url_to_route "$contract_authorize_url")" || \
+                fail "合同管理登录入口返回了无法识别的 OIDC 授权地址"
+            [[ "$contract_authorize_route" == /authorize\?* ]] || \
+                fail "合同管理登录入口未跳转到基础平台 /authorize 或 Keycloak Realm"
 
-    platform_authorize_status="$(frontend_http_status "$contract_authorize_route")" || \
-        fail "无法通过统一前端访问 OIDC 授权端点"
-    [[ "$platform_authorize_status" == "302" ]] || \
-        fail "OIDC 授权端点返回 ${platform_authorize_status}，预期未登录状态为 302；请检查 /authorize 是否完整保留查询参数"
+            platform_authorize_status="$(frontend_http_status "$contract_authorize_route")" || \
+                fail "无法通过统一前端访问 OIDC 授权端点"
+            [[ "$platform_authorize_status" == "302" ]] || \
+                fail "OIDC 授权端点返回 ${platform_authorize_status}，预期未登录状态为 302；请检查 /authorize 是否完整保留查询参数"
 
-    platform_login_url="$(frontend_http_location "$contract_authorize_route")" || \
-        fail "OIDC 授权端点未返回统一登录页地址"
-    case "$platform_login_url" in
-        /login.html\?return_to=*|http://*/login.html\?return_to=*|https://*/login.html\?return_to=*) ;;
-        *) fail "OIDC 授权端点未跳转到统一登录页" ;;
+            platform_login_url="$(frontend_http_location "$contract_authorize_route")" || \
+                fail "OIDC 授权端点未返回统一登录页地址"
+            case "$platform_login_url" in
+                /login.html\?return_to=*|http://*/login.html\?return_to=*|https://*/login.html\?return_to=*) ;;
+                *) fail "OIDC 授权端点未跳转到统一登录页" ;;
+            esac
+            ;;
     esac
 
-    customer_health_status="$(frontend_http_status /customer-opportunity/healthz)" || \
-        fail "无法访问客户与商机管理健康检查路径"
-    [[ "$customer_health_status" == "200" ]] || \
-        fail "客户与商机管理健康检查路径返回 ${customer_health_status}，预期为 200"
+    wait_for_frontend_status /customer-opportunity/healthz 200 "客户与商机管理健康检查路径"
 
 	customer_session_status="$(frontend_http_status /customer-opportunity/api/v1/auth/me)" || \
         fail "无法访问客户与商机管理登录状态接口"
@@ -982,10 +1126,7 @@ verify_gateway_routes() {
 	esac
 
 	if portal_configured; then
-		portal_health_status="$(frontend_http_status /customer-portal/healthz)" || \
-			fail "无法访问客户自助门户健康检查路径"
-		[[ "$portal_health_status" == "200" ]] || \
-			fail "客户自助门户健康检查路径返回 ${portal_health_status}，预期为 200"
+		wait_for_frontend_status /customer-portal/healthz 200 "客户自助门户健康检查路径"
 		portal_session_status="$(frontend_http_status /customer-portal/api/v1/auth/me)" || \
 			fail "无法访问客户自助门户登录状态接口"
 		[[ "$portal_session_status" == "401" ]] || \
@@ -993,10 +1134,7 @@ verify_gateway_routes() {
 	fi
 
 	if project_configured; then
-		project_health_status="$(frontend_http_status /project_management/healthz)" || \
-			fail "无法访问项目管理系统健康检查路径"
-		[[ "$project_health_status" == "200" ]] || \
-			fail "项目管理系统健康检查路径返回 ${project_health_status}，预期为 200"
+		wait_for_frontend_status /project_management/healthz 200 "项目管理系统健康检查路径"
 		project_session_status="$(frontend_http_status /project_management/api/v1/auth/me)" || \
 			fail "无法访问项目管理系统登录状态接口"
 		[[ "$project_session_status" == "401" ]] || \
@@ -1233,6 +1371,9 @@ start_presale_worker() {
 		compose_run --profile presale-worker up -d --wait customer-mysql
 		compose_run --profile presale-worker run --rm --no-deps customer-migrate
 	fi
+	# presale-worker 使用 --no-deps 启动，必须在此前显式拉起 Temporal；否则
+	# 单独执行 start-presale-worker（尤其是 --skip-migrate）时会连接失败。
+	compose_run --profile presale-worker up -d --wait temporal
 	log "启动本地售前集成 Mock（仅开发联调使用）"
 	compose_run --profile presale-worker up -d --wait presale-integration-mock
 	log "启动售前投递 Worker"
@@ -1272,7 +1413,18 @@ case "$command_name" in
         ;;
     down)
         prepare_operational_env
-        if [[ "$remove_volumes" == true ]]; then compose_run down --volumes; else compose_run down; fi
+        # 清理旧版本或已从当前 Compose 文件移除的服务容器。否则残留的
+        # profile/worker 容器会继续占用项目网络，导致 `docker compose down`
+        # 报 Resource is still in use，脚本无法完成收尾。
+        remove_legacy_split_runtime_containers
+        if [[ "$remove_volumes" == true ]]; then
+            compose_run down --volumes --remove-orphans
+        else
+            compose_run down --remove-orphans
+        fi
+        # Compose 在发现残留 endpoint 时可能已经输出过一次占用提示；容器
+        # 清理后再次尝试移除网络，让 down 最终状态与实际资源一致。
+        docker network rm "${compose_project}_default" >/dev/null 2>&1 || true
         ;;
     stop)
         prepare_operational_env
@@ -1284,7 +1436,15 @@ case "$command_name" in
         ;;
     logs)
         prepare_operational_env
-        if ((${#log_services[@]} > 0)); then compose_run logs -f "${log_services[@]}"; else compose_run logs -f; fi
+        log_args=(logs)
+        [[ -n "$log_since" ]] && log_args+=(--since "$log_since")
+        [[ -n "$log_tail" ]] && log_args+=(--tail "$log_tail")
+        [[ "$log_follow" == true ]] && log_args+=(-f)
+        if ((${#log_services[@]} > 0)); then
+            compose_run "${log_args[@]}" "${log_services[@]}"
+        else
+            compose_run "${log_args[@]}"
+        fi
         ;;
     config)
         ensure_platform_env_file
@@ -1320,6 +1480,6 @@ case "$command_name" in
 		refresh_project_backend
 		;;
 	start-presale-worker)
-		start_presale_worker
+		start_presale_worker "$@"
 		;;
 esac

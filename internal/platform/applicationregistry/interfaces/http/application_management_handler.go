@@ -119,18 +119,17 @@ type applicationResponse struct {
 }
 
 type environmentResponse struct {
-	EnvironmentID string          `json:"environment_id"`
-	ApplicationID string          `json:"application_id"`
-	Environment   string          `json:"environment"`
-	BaseURL       *string         `json:"base_url,omitempty"`
-	UpstreamURL   *string         `json:"upstream_url,omitempty"`
-	PathPrefix    *string         `json:"path_prefix,omitempty"`
-	IssuerAlias   *string         `json:"issuer_alias,omitempty"`
-	Metadata      json.RawMessage `json:"metadata,omitempty"`
-	Status        string          `json:"status"`
-	Version       uint64          `json:"version"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	EnvironmentID string    `json:"environment_id"`
+	ApplicationID string    `json:"application_id"`
+	Environment   string    `json:"environment"`
+	BaseURL       *string   `json:"base_url,omitempty"`
+	UpstreamURL   *string   `json:"upstream_url,omitempty"`
+	PathPrefix    *string   `json:"path_prefix,omitempty"`
+	IssuerAlias   *string   `json:"issuer_alias,omitempty"`
+	Status        string    `json:"status"`
+	Version       uint64    `json:"version"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type managementPageResponse[T any] struct {
@@ -500,7 +499,10 @@ func environmentToResponse(item application.Environment) environmentResponse {
 	return environmentResponse{
 		EnvironmentID: item.ID, ApplicationID: item.ApplicationID, Environment: item.Environment,
 		BaseURL: item.BaseURL, UpstreamURL: item.UpstreamURL, PathPrefix: item.PathPrefix,
-		IssuerAlias: item.IssuerAlias, Metadata: item.Metadata, Status: item.Status,
+		// Environment metadata is an internal deployment extension point. The
+		// application-directory contract deliberately never returns it: arbitrary
+		// legacy metadata cannot be proven free of runtime credentials.
+		IssuerAlias: item.IssuerAlias, Status: item.Status,
 		Version: item.Version, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 }

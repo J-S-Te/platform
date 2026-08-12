@@ -26,9 +26,9 @@ const (
 	OIDCTokenUseIDToken OIDCTokenUse = "id_token"
 )
 
-// OIDCTokenClaims 是用户 Access Token 与 ID Token 共用的完整声明集。Issuer 由管理器固定，
-// Audience 使用数组形态，Scope 按 OAuth 2.0 空格分隔格式编码。会话、jti、认证时间和授权版本
-// 均作为必需数据，保证 UserInfo、注销、撤销和权限重验不依赖客户端补传状态。
+// OIDCTokenClaims 是用户 Access Token 与 ID Token 共用的紧凑声明集。Issuer 由管理器固定，
+// Audience 使用数组形态，Scope 按 OAuth 2.0 空格分隔格式编码。详细权限和数据范围不进入令牌，
+// 由 authorization-context API 按当前数据库快照提供。
 type OIDCTokenClaims struct {
 	Issuer             string
 	Subject            string
@@ -44,12 +44,7 @@ type OIDCTokenClaims struct {
 	TokenUse           OIDCTokenUse
 	TenantID           string
 	PersonID           string
-	PrimaryOrgID       string
-	OrganizationIDs    []string
 	Roles              []string
-	Permissions        []string
-	RoleConfigHash     string
-	AuthzRevision      uint64
 }
 
 // OIDCPublicJWK 是 RFC 7517/RFC 8037 形式的 Ed25519 公钥；JWKS 只暴露验签材料，
@@ -266,12 +261,7 @@ func (manager *OIDCJWTManager) issue(claims OIDCTokenClaims, tokenUse OIDCTokenU
 		TokenUse:           claims.TokenUse,
 		TenantID:           claims.TenantID,
 		PersonID:           claims.PersonID,
-		PrimaryOrgID:       claims.PrimaryOrgID,
-		OrganizationIDs:    append([]string{}, claims.OrganizationIDs...),
 		Roles:              append([]string(nil), claims.Roles...),
-		Permissions:        append([]string(nil), claims.Permissions...),
-		RoleConfigHash:     claims.RoleConfigHash,
-		AuthzRevision:      claims.AuthzRevision,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal OIDC JWT payload: %w", err)
@@ -303,12 +293,7 @@ type oidcJWTPayload struct {
 	TokenUse           OIDCTokenUse `json:"token_use"`
 	TenantID           string       `json:"tenant_id"`
 	PersonID           string       `json:"person_id,omitempty"`
-	PrimaryOrgID       string       `json:"primary_org_id"`
-	OrganizationIDs    []string     `json:"organization_ids"`
 	Roles              []string     `json:"roles"`
-	Permissions        []string     `json:"permissions"`
-	RoleConfigHash     string       `json:"role_config_hash"`
-	AuthzRevision      uint64       `json:"authz_revision"`
 }
 
 type oidcAudience []string
@@ -369,12 +354,7 @@ func oidcClaimsFromPayload(payload oidcJWTPayload) (OIDCTokenClaims, error) {
 		TokenUse:           payload.TokenUse,
 		TenantID:           payload.TenantID,
 		PersonID:           payload.PersonID,
-		PrimaryOrgID:       payload.PrimaryOrgID,
-		OrganizationIDs:    append([]string(nil), payload.OrganizationIDs...),
 		Roles:              append([]string(nil), payload.Roles...),
-		Permissions:        append([]string(nil), payload.Permissions...),
-		RoleConfigHash:     payload.RoleConfigHash,
-		AuthzRevision:      payload.AuthzRevision,
 	}, nil
 }
 
@@ -410,9 +390,6 @@ func validateOIDCTokenClaims(claims OIDCTokenClaims, expectedIssuer string, expe
 	if err := validateOIDCScopes(claims.Scope); err != nil {
 		return err
 	}
-	if err := validateOIDCOrganizations(claims.PrimaryOrgID, claims.OrganizationIDs); err != nil {
-		return err
-	}
 	if claims.PersonID != "" && !validPMSPersonID(claims.PersonID) {
 		return errors.New("OIDC JWT contains an invalid PMS person identifier")
 	}
@@ -434,34 +411,6 @@ func validPMSPersonID(value string) bool {
 		}
 	}
 	return true
-}
-
-const maxOIDCOrganizationIDs = 100
-
-// validateOIDCOrganizations 将组织声明限制为有序唯一的直接任职集合，并要求主组织属于该集合。
-// 这里不展开组织树后代，资源范围授权必须由服务端根据可信资源归属另行计算。
-func validateOIDCOrganizations(primaryOrgID string, organizationIDs []string) error {
-	if len(organizationIDs) > maxOIDCOrganizationIDs {
-		return errors.New("OIDC JWT organization list exceeds the supported maximum")
-	}
-	primaryFound := primaryOrgID == ""
-	previous := ""
-	for index, organizationID := range organizationIDs {
-		if !validOIDCString(organizationID) || len([]byte(organizationID)) > 64 {
-			return errors.New("OIDC JWT contains an invalid organization identifier")
-		}
-		if index > 0 && organizationID <= previous {
-			return errors.New("OIDC JWT organization identifiers are not a sorted unique set")
-		}
-		if organizationID == primaryOrgID {
-			primaryFound = true
-		}
-		previous = organizationID
-	}
-	if primaryOrgID != "" && (!validOIDCString(primaryOrgID) || len([]byte(primaryOrgID)) > 64 || !primaryFound) {
-		return errors.New("OIDC JWT primary organization is not an active direct membership")
-	}
-	return nil
 }
 
 func validateOIDCScopes(scopes []string) error {

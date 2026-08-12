@@ -18,6 +18,7 @@ type queueSpy struct {
 	claimed     bool
 	completed   bool
 	retried     bool
+	failed      bool
 	recovered   bool
 	staleBefore time.Time
 	availableAt time.Time
@@ -38,6 +39,10 @@ func (queue *queueSpy) Retry(context.Context, Event, string, string, time.Time) 
 	queue.retried = true
 	return nil
 }
+func (queue *queueSpy) Fail(context.Context, Event, string, string) error {
+	queue.failed = true
+	return nil
+}
 
 type synchronizerStub struct{ err error }
 
@@ -54,6 +59,20 @@ func TestRunOnceCompletesSuccessfulProjection(t *testing.T) {
 	}
 	if !queue.completed || queue.retried {
 		t.Fatalf("queue state completed=%v retried=%v", queue.completed, queue.retried)
+	}
+}
+
+func TestRunOnceMovesExhaustedProjectionToDeadLetter(t *testing.T) {
+	queue := &queueSpy{event: Event{ID: "event-1", Attempts: 5}, claimed: true}
+	worker, err := New(queue, synchronizerStub{err: errors.New("Keycloak unavailable")}, slog.New(slog.NewTextHandler(io.Discard, nil)), "worker-1", time.Second, fixedClock{now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !queue.failed || queue.retried || queue.completed {
+		t.Fatalf("queue state failed=%v retried=%v completed=%v", queue.failed, queue.retried, queue.completed)
 	}
 }
 

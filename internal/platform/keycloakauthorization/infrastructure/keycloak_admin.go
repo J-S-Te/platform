@@ -12,7 +12,6 @@ import (
 	"io"
 	stdhttp "net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,9 +30,34 @@ type KeycloakAdmin struct {
 	httpClient                                                  *stdhttp.Client
 }
 
-// NewKeycloakAdmin constructs an Admin API adapter. Supplying a client is
-// useful both for tests and for callers that need custom transport settings.
+// KeycloakAdminCredentials explicitly supplies the credentials used for the
+// Keycloak Admin API. A complete service-account pair is preferred over the
+// legacy username/password grant, matching the control-plane credential
+// policy. Values are process-only inputs and are never returned by this
+// adapter.
+type KeycloakAdminCredentials struct {
+	ServiceAccountClientID     string
+	ServiceAccountClientSecret string
+	Username                   string
+	Password                   string
+}
+
+// NewKeycloakAdmin preserves the username/password constructor used by
+// existing callers. New projection code should use
+// NewKeycloakAdminWithCredentials so dependencies are explicit.
 func NewKeycloakAdmin(adminURL, realm, username, password string, clients ...*stdhttp.Client) (*KeycloakAdmin, error) {
+	return NewKeycloakAdminWithCredentials(adminURL, realm, KeycloakAdminCredentials{
+		Username: username,
+		Password: password,
+	}, clients...)
+}
+
+// NewKeycloakAdminWithCredentials constructs an Admin API adapter from
+// explicit credentials. It deliberately does not read process environment
+// variables, so Worker and API composition remain deterministic and support
+// credential rotation without hidden dependencies. Supplying a client is
+// useful both for tests and for callers that need custom transport settings.
+func NewKeycloakAdminWithCredentials(adminURL, realm string, credentials KeycloakAdminCredentials, clients ...*stdhttp.Client) (*KeycloakAdmin, error) {
 	if len(clients) > 1 || strings.TrimSpace(adminURL) == "" || strings.Trim(strings.TrimSpace(realm), "/") == "" {
 		return nil, errors.New("Keycloak admin configuration is invalid")
 	}
@@ -44,9 +68,15 @@ func NewKeycloakAdmin(adminURL, realm, username, password string, clients ...*st
 		}
 		client = clients[0]
 	}
-	admin := &KeycloakAdmin{adminURL: strings.TrimRight(strings.TrimSpace(adminURL), "/"), realm: strings.Trim(strings.TrimSpace(realm), "/"), username: strings.TrimSpace(username), password: password, httpClient: client}
-	admin.clientID = strings.TrimSpace(os.Getenv("KEYCLOAK_ADMIN_CLIENT_ID"))
-	admin.clientSecret = strings.TrimSpace(os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET"))
+	admin := &KeycloakAdmin{
+		adminURL:     strings.TrimRight(strings.TrimSpace(adminURL), "/"),
+		realm:        strings.Trim(strings.TrimSpace(realm), "/"),
+		username:     strings.TrimSpace(credentials.Username),
+		password:     credentials.Password,
+		clientID:     strings.TrimSpace(credentials.ServiceAccountClientID),
+		clientSecret: strings.TrimSpace(credentials.ServiceAccountClientSecret),
+		httpClient:   client,
+	}
 	if (admin.clientID == "") != (admin.clientSecret == "") {
 		return nil, errors.New("Keycloak admin client credentials must be configured as a complete pair")
 	}
@@ -54,6 +84,70 @@ func NewKeycloakAdmin(adminURL, realm, username, password string, clients ...*st
 		return nil, errors.New("Keycloak admin configuration is invalid")
 	}
 	return admin, nil
+}
+
+// ListKeycloakAuditEvents reads only the standard user LOGIN/LOGOUT stream and
+// realm admin-events stream.  It does not expose raw Keycloak JSON outside the
+// infrastructure boundary; callers receive a deliberately redacted event
+// projection that can be appended to the platform audit log.
+func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since time.Time) ([]projectionapplication.KeycloakAuditEvent, error) {
+	token, err := admin.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dateFrom := strconv.FormatInt(since.UTC().UnixMilli(), 10)
+	userEvents, err := admin.listEventPage(ctx, token, "/events?dateFrom="+url.QueryEscape(dateFrom)+"&max=1000")
+	if err != nil {
+		return nil, err
+	}
+	adminEvents, err := admin.listEventPage(ctx, token, "/admin-events?dateFrom="+url.QueryEscape(dateFrom)+"&max=1000")
+	if err != nil {
+		return nil, err
+	}
+	items := make([]projectionapplication.KeycloakAuditEvent, 0, len(userEvents)+len(adminEvents))
+	for _, event := range userEvents {
+		kind, _ := event["type"].(string)
+		if kind != "LOGIN" && kind != "LOGOUT" {
+			continue
+		}
+		items = append(items, projectionapplication.KeycloakAuditEvent{EventID: stringValue(event["id"]), Category: "LOGIN", Type: kind, SubjectID: stringValue(event["userId"]), SessionID: stringValue(event["sessionId"]), ClientID: stringValue(event["clientId"]), SourceIP: stringValue(event["ipAddress"]), OccurredAt: keycloakEventTime(event["time"])})
+	}
+	for _, event := range adminEvents {
+		details, _ := event["authDetails"].(map[string]any)
+		items = append(items, projectionapplication.KeycloakAuditEvent{EventID: stringValue(event["id"]), Category: "ADMIN", Type: "ADMIN", SubjectID: stringValue(details["userId"]), ClientID: stringValue(details["clientId"]), SourceIP: stringValue(details["ipAddress"]), ResourceType: stringValue(event["resourceType"]), ResourcePath: stringValue(event["resourcePath"]), OperationType: stringValue(event["operationType"]), OccurredAt: keycloakEventTime(event["time"])})
+	}
+	return items, nil
+}
+
+func (admin *KeycloakAdmin) listEventPage(ctx context.Context, token, suffix string) ([]map[string]any, error) {
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(admin.realm)+suffix, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusOK {
+		return nil, admin.statusError("list Keycloak audit events", response.StatusCode)
+	}
+	var items []map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode Keycloak audit events: %w", err)
+	}
+	return items, nil
+}
+
+func stringValue(value any) string { item, _ := value.(string); return strings.TrimSpace(item) }
+func keycloakEventTime(value any) time.Time {
+	switch timestamp := value.(type) {
+	case float64:
+		return time.UnixMilli(int64(timestamp)).UTC()
+	case int64:
+		return time.UnixMilli(timestamp).UTC()
+	case json.Number:
+		millis, _ := timestamp.Int64()
+		return time.UnixMilli(millis).UTC()
+	default:
+		return time.Time{}
+	}
 }
 
 func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectionapplication.Snapshot) error {

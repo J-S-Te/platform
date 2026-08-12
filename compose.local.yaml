@@ -332,7 +332,6 @@ services:
       HTTP_ADDRESS: :8081
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
-      OIDC_BACKCHANNEL_BASE_URL: ${OIDC_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
       TEMPORAL_ADDRESS: temporal:7233
       CONTRACT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
@@ -426,7 +425,6 @@ services:
       PM_HTTP_ADDR: :8082
       MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
-      OIDC_BACKCHANNEL_BASE_URL: ${OIDC_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: project-management
@@ -511,7 +509,6 @@ services:
       HTTP_ADDRESS: :8090
       MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PLATFORM_BASE_URL: http://platform-api:8080
-      OIDC_BACKCHANNEL_BASE_URL: ${OIDC_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
       # refresh-customer-api 从本次构建镜像自动读取并注入，避免角色目录哈希过期。
       OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
       MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
@@ -526,6 +523,8 @@ services:
         condition: service_healthy
       customer-migrate:
         condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
       api:
         condition: service_healthy
     expose:
@@ -582,11 +581,18 @@ services:
         required: false
     environment:
       MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
     depends_on:
       customer-mysql:
         condition: service_healthy
       customer-migrate:
         condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
     profiles: ["presale-worker"]
     restart: unless-stopped
 
@@ -646,7 +652,6 @@ services:
       PORTAL_HTTP_ADDRESS: :8091
       PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
-      PORTAL_OIDC_BACKCHANNEL_BASE_URL: ${PORTAL_OIDC_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
       PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       GIN_MODE: release
     command: ["./portal-server"]
@@ -710,8 +715,6 @@ services:
     ports:
       # 默认只监听本机；临时 LAN 模式由 scripts/lan-access.sh 显式开启。
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_HTTP_PORT:-8081}:80"
-      # 本地无端口访问入口（http://localhost/）；仅用于本机调试，不影响其他子系统 OIDC 配置。
-      - "80:80"
     depends_on:
       api:
         condition: service_healthy

@@ -400,6 +400,15 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	var externalAuthorizationVerifier oidchttp.ExternalAuthorizationTokenVerifier
+	if cfg.Keycloak.Enabled {
+		externalAuthorizationVerifier, err = newKeycloakAuthorizationVerifier(cfg.Keycloak.PublicURL, cfg.Keycloak.AdminURL, cfg.Keycloak.Realm)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("configure Keycloak authorization-context verifier: %w", err)
+		}
+	}
 	oidcCookieSameSite, err := parseSameSite(cfg.Auth.SessionCookieSameSite)
 	if err != nil {
 		_ = database.Close(db)
@@ -414,7 +423,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		SessionLogout:                 authService,
 		PostLogoutRedirectValidator:   oidcService,
 		AccessTokenSubjectResolver:    oidcAccessTokenSubjects,
+		ExternalAuthorizationVerifier: externalAuthorizationVerifier,
 		AuthorizationResolver:         oidcAuthorizationResolver,
+		AuthorizationContextResolver:  oidcAuthorizationResolver,
 		PersonnelDirectoryResolver:    oidcPersonnelDirectory,
 		SessionCookieName:             cfg.Auth.SessionCookieName,
 		SessionCookieSecure:           cfg.Auth.SessionCookieSecure,

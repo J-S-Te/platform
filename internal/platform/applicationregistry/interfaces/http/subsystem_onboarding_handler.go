@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
+	projectionapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/keycloakctx"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
 
 // readCatalogPublisherCredentials returns the long-lived catalog-publisher OAuth client
@@ -69,6 +71,7 @@ func (handler *SubsystemOnboardingHandler) resolveApplicationContextForIdentity(
 
 type subsystemOnboardingService interface {
 	OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error)
+	RegisterSubsystemDirectory(context.Context, application.SubsystemDirectoryRegistrationInput) (application.SubsystemDirectoryRegistrationResult, error)
 	ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error)
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
 }
@@ -88,6 +91,42 @@ type keycloakAuthorizationCatalog interface {
 type keycloakClientMappingStore interface {
 	SaveKeycloakClientMapping(context.Context, string, string, string, string, string) error
 	BackfillKeycloakAuthorization(context.Context, string, string, string) error
+}
+
+// keycloakClientCompatibilityResolver is an optional persistence capability used
+// during onboarding retries. It preserves a previously registered browser Client
+// ID when the environment label was later normalized (for example, an existing
+// contract_management-prod-web used by the dev deployment). The resolver is
+// tenant/application/environment scoped and never guesses by replacing prod/dev
+// strings.
+type keycloakClientCompatibilityResolver interface {
+	ResolveEffectiveKeycloakClient(context.Context, string, string, string, string) (KeycloakClientResolution, error)
+}
+
+type KeycloakClientResolution struct {
+	ClientID            string
+	CanonicalClientID   string
+	Source              string
+	LegacyCompatibility bool
+}
+
+// KeycloakClientMapping is the deliberately non-sensitive projection of one
+// environment's Realm Client.  It lets the authentication page survive a
+// refresh without asking the browser to retain a Client secret or infer state
+// from a successful sync response.
+type KeycloakClientMapping struct {
+	Realm        string     `json:"realm,omitempty"`
+	ClientID     string     `json:"client_id,omitempty"`
+	Status       string     `json:"status"`
+	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
+	Exists       bool       `json:"exists"`
+}
+
+// keycloakClientMappingInspector is intentionally optional so older test and
+// deployment adapters retain compatibility.  Absence is reported as an
+// unconfigured mapping; it never opens a cutover gate.
+type keycloakClientMappingInspector interface {
+	GetKeycloakClientMapping(context.Context, string, string, string) (KeycloakClientMapping, error)
 }
 
 // KeycloakSwitchGate is a non-sensitive, auditable cutover prerequisite.  A
@@ -124,6 +163,16 @@ type keycloakSwitchReadinessUpdater interface {
 // authenticated current-session verification endpoint.
 type keycloakBrokerLoginVerificationRecorder interface {
 	RecordBrokerLoginVerification(context.Context, KeycloakBrokerLoginVerification) error
+}
+
+// keycloakProjectionOperations keeps dead-letter management behind the
+// Keycloak authorization application service.  It is configured only in the
+// composition root and has no access to secrets, Keycloak Admin credentials or
+// arbitrary queue mutation methods.
+type keycloakProjectionOperations interface {
+	ListFailed(context.Context, string, projectionapplication.FailurePageRequest) (projectionapplication.FailurePageResult, error)
+	AlertStatus(context.Context, string) (projectionapplication.AlertStatus, error)
+	Replay(context.Context, projectionapplication.ReplayInput) (projectionapplication.ReplayResult, error)
 }
 
 type KeycloakBrokerLoginVerification struct {
@@ -173,23 +222,31 @@ type SubsystemLifecycleNotification struct {
 // catalog. The configured OIDC issuer is used only by the isolated deployment workflow and is not
 // returned to the browser together with generated credentials or infrastructure commands.
 type SubsystemOnboardingHandler struct {
-	service            subsystemOnboardingService
-	provisioner        application.SubsystemProvisioner
-	access             subsystemInitialAccessManager
-	deploymentState    application.SubsystemDeploymentStateStore
-	notifications      subsystemNotificationSink
-	oidcIssuer         string
-	keycloakIssuer     string
-	keycloakRealm      string
-	keycloakEnabled    bool
-	defaultIssuerAlias string
-	keycloakControl    *keycloakControlPlane
-	keycloakBroker     keycloakBrokerProvisioner
-	keycloakCatalog    keycloakAuthorizationCatalog
-	keycloakMappings   keycloakClientMappingStore
-	keycloakReadiness  keycloakSwitchReadinessInspector
-	logger             *slog.Logger
+	service              subsystemOnboardingService
+	provisioner          application.SubsystemProvisioner
+	access               subsystemInitialAccessManager
+	deploymentState      application.SubsystemDeploymentStateStore
+	notifications        subsystemNotificationSink
+	oidcIssuer           string
+	keycloakIssuer       string
+	keycloakRealm        string
+	keycloakEnabled      bool
+	keycloakRequireHTTPS bool
+	defaultIssuerAlias   string
+	keycloakControl      *keycloakControlPlane
+	keycloakBroker       keycloakBrokerProvisioner
+	keycloakCatalog      keycloakAuthorizationCatalog
+	keycloakMappings     keycloakClientMappingStore
+	keycloakReadiness    keycloakSwitchReadinessInspector
+	keycloakOperations   keycloakProjectionOperations
+	keycloakCutover      keycloakCutoverLifecycleStore
+	logger               *slog.Logger
 }
+
+const (
+	keycloakObservationWindow = 7 * 24 * time.Hour
+	keycloakRollbackWindow    = 7 * 24 * time.Hour
+)
 
 // ConfigureKeycloak enables Keycloak as an explicit deployment provider.  The
 // credentials remain solely between the API and the deployment Agent; this
@@ -198,6 +255,14 @@ func (handler *SubsystemOnboardingHandler) ConfigureKeycloak(enabled bool, publi
 	handler.keycloakEnabled = enabled
 	handler.keycloakIssuer = strings.TrimRight(strings.TrimSpace(publicIssuer), "/")
 	handler.keycloakRealm = strings.TrimSpace(realm)
+}
+
+// ConfigureKeycloakTransportPolicy controls whether a future cutover must use
+// HTTPS.  False is intentionally compatible with the current HTTP deployment;
+// the preflight still derives Redirect URI and Secure Cookie from the public
+// origin so the three settings cannot drift.
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloakTransportPolicy(requireHTTPS bool) {
+	handler.keycloakRequireHTTPS = requireHTTPS
 }
 
 // ConfigureDefaultIssuerAlias controls the provider used when the onboarding
@@ -229,6 +294,20 @@ func (handler *SubsystemOnboardingHandler) ConfigureKeycloakClientMappingStore(s
 // for backward compatibility; without it every Keycloak cutover stays closed.
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakSwitchReadinessInspector(inspector keycloakSwitchReadinessInspector) {
 	handler.keycloakReadiness = inspector
+}
+
+// ConfigureKeycloakProjectionOperations enables tenant-scoped inspection and
+// controlled replay of FAILED projection records. A nil value intentionally
+// leaves the operations endpoints unavailable rather than exposing a partial
+// recovery path.
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloakProjectionOperations(operations keycloakProjectionOperations) {
+	handler.keycloakOperations = operations
+}
+
+// ConfigureKeycloakCutoverLifecycle attaches the durable, per-environment
+// seven-day observation and rollback-window control plane.
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloakCutoverLifecycle(store keycloakCutoverLifecycleStore) {
+	handler.keycloakCutover = store
 }
 
 func unverifiedKeycloakSwitchReadiness() KeycloakSwitchReadiness {
@@ -279,6 +358,14 @@ func writeKeycloakSwitchBlocked(writer stdhttp.ResponseWriter, request *stdhttp.
 		"IAM_AUTH_PROVIDER_SWITCH_NOT_READY",
 		"认证提供方尚未满足切换门禁，Issuer 未下发到运行时",
 		map[string]any{"switch_gates": readiness.Gates, "next_action": readiness.NextAction},
+	))
+}
+
+func writeKeycloakObservationBlocked(writer stdhttp.ResponseWriter, request *stdhttp.Request, reason string) {
+	httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+		"IAM_AUTH_PROVIDER_SWITCH_OBSERVATION_REQUIRED",
+		"认证提供方尚未完成七天观察期，Issuer 未下发到运行时",
+		map[string]any{"reason": strings.TrimSpace(reason), "observation_window_days": 7, "next_action": "在 Keycloak 认证接入中发起观察；观察期完成后再切换。"},
 	))
 }
 
@@ -434,6 +521,20 @@ type subsystemOnboardingRequest struct {
 	IssuerAlias     string  `json:"issuer_alias"`
 }
 
+// subsystemDirectoryRegistrationRequest contains only directory and gateway
+// metadata.  OAuth client creation is intentionally excluded: for Keycloak it
+// happens through /keycloak-integration/sync after this registration succeeds.
+type subsystemDirectoryRegistrationRequest struct {
+	ApplicationCode string  `json:"application_code"`
+	ApplicationName string  `json:"application_name"`
+	Description     *string `json:"description"`
+	Environment     string  `json:"environment"`
+	PublicBaseURL   string  `json:"public_base_url"`
+	UpstreamURL     string  `json:"upstream_url"`
+	PathPrefix      string  `json:"path_prefix"`
+	IssuerAlias     string  `json:"issuer_alias"`
+}
+
 // subsystemLifecycleRequest is the shared payload for Update and Teardown. Update may also carry
 // the already-persisted public gateway fields so the Agent can reapply non-secret runtime values;
 // Teardown ignores them.
@@ -447,13 +548,16 @@ type subsystemLifecycleRequest struct {
 }
 
 type keycloakClientSyncResponse struct {
-	Alias       string               `json:"alias"`
-	Realm       string               `json:"realm"`
-	ClientID    string               `json:"client_id"`
-	ClaimsState string               `json:"claims_state"`
-	SwitchReady bool                 `json:"switch_ready"`
-	SwitchGates []KeycloakSwitchGate `json:"switch_gates"`
-	NextAction  string               `json:"next_action,omitempty"`
+	Alias               string               `json:"alias"`
+	Realm               string               `json:"realm"`
+	ClientID            string               `json:"client_id"`
+	CanonicalClientID   string               `json:"canonical_client_id,omitempty"`
+	ClientIDSource      string               `json:"client_id_source,omitempty"`
+	LegacyCompatibility bool                 `json:"legacy_compatibility,omitempty"`
+	ClaimsState         string               `json:"claims_state"`
+	SwitchReady         bool                 `json:"switch_ready"`
+	SwitchGates         []KeycloakSwitchGate `json:"switch_gates"`
+	NextAction          string               `json:"next_action,omitempty"`
 }
 
 // keycloakBrokerLoginVerificationRequest is intentionally not a generic
@@ -479,6 +583,13 @@ type subsystemOnboardingResponse struct {
 	OAuthClient   oauthClientResponse             `json:"oauth_client"`
 	Automation    subsystemAutomationResponse     `json:"automation"`
 	Authorization *subsystemAuthorizationResponse `json:"authorization,omitempty"`
+}
+
+type subsystemDirectoryRegistrationResponse struct {
+	Application applicationResponse `json:"application"`
+	Environment environmentResponse `json:"environment"`
+	LoginTarget loginTargetResponse `json:"login_target"`
+	NextAction  string              `json:"next_action"`
 }
 
 type subsystemAuthorizationResponse struct {
@@ -615,6 +726,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		upstreamURL = *result.Environment.UpstreamURL
 	}
 	provisioningClientID, provisioningClientSecret := result.OAuthClient.ClientID, result.PlaintextSecret
+	keycloakClientID := ""
 	if strings.EqualFold(effectiveIssuerAlias, "keycloak") {
 		if handler.keycloakControl == nil || handler.keycloakBroker == nil {
 			handler.writeError(writer, request, application.ErrValidation)
@@ -631,6 +743,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 			return
 		}
 		provisioningClientID, provisioningClientSecret = client.ClientID, client.ClientSecret
+		keycloakClientID = client.ClientID
 	}
 	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
 		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
@@ -665,6 +778,41 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
+	// The deployment Agent has now published the application-owned role catalog and the
+	// initial administrator binding exists.  A Keycloak-first onboarding must complete the
+	// same projection work as an existing environment's “同步 Keycloak” action before it
+	// is exposed as READY; otherwise the new Client could issue tokens without its final
+	// role/permission claims.
+	if keycloakClientID != "" {
+		if handler.keycloakCatalog == nil || handler.keycloakMappings == nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_MAPPING_UNAVAILABLE", "Keycloak 授权映射组件不可用")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		roleCodes, catalogErr := handler.keycloakCatalog.ListKeycloakRoleCodes(request.Context(), principal.Tenant.ID, result.Application.ID)
+		if catalogErr != nil || handler.keycloakControl.EnsureClientRoles(request.Context(), keycloakClientID, roleCodes) != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_ROLE_CATALOG_SYNC_FAILED", "Keycloak 角色目录同步失败")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if mappingErr := handler.keycloakMappings.SaveKeycloakClientMapping(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID, handler.keycloakRealm, keycloakClientID); mappingErr != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_CLIENT_MAPPING_FAILED", "Keycloak Client 映射保存失败")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if backfillErr := handler.keycloakMappings.BackfillKeycloakAuthorization(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID); backfillErr != nil {
+			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_AUTHORIZATION_BACKFILL_FAILED", "Keycloak 授权投影回填失败")
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if updater, ok := handler.keycloakReadiness.(keycloakSwitchReadinessUpdater); ok {
+			if readinessErr := updater.MarkKeycloakClientAndRoleCatalogSynced(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID); readinessErr != nil {
+				handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_READINESS_UPDATE_FAILED", "Keycloak 就绪状态写入失败")
+				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+				return
+			}
+		}
+	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, application.SubsystemDeploymentStatusReady, "ONBOARD", "", ""); err != nil {
 		handler.logger.Error("subsystem deployment completed but state update failed", "application_code", result.Application.Code, "environment", result.Environment.Environment, "error", err)
 		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
@@ -685,6 +833,48 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		response.Authorization = &subsystemAuthorizationResponse{InitialAdminUserID: initialAdminUserID, RoleCode: roleCode}
 	}
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "子系统已完成自动接入和部署", response)
+}
+
+// RegisterSubsystemDirectory handles POST /api/v1/subsystem-directory.
+//
+// It is the V2 registration entry point for application directory, environment
+// and login-target data.  No platform OAuth Client, Keycloak Client, service
+// credential, deployment state or initial role assignment is created here.
+// Existing all-in-one /subsystem-onboarding callers stay supported during the
+// migration, but new Keycloak integrations must use this endpoint followed by
+// the dedicated Keycloak integration API.
+func (handler *SubsystemOnboardingHandler) RegisterSubsystemDirectory(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	var payload subsystemDirectoryRegistrationRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+	effectiveIssuerAlias := handler.effectiveIssuerAlias(payload.IssuerAlias)
+	if _, err := handler.issuerForAlias(effectiveIssuerAlias); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	result, err := handler.service.RegisterSubsystemDirectory(request.Context(), application.SubsystemDirectoryRegistrationInput{
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID,
+		ApplicationCode: payload.ApplicationCode, ApplicationName: payload.ApplicationName,
+		Description: payload.Description, Environment: payload.Environment,
+		PublicBaseURL: payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL,
+		PathPrefix: payload.PathPrefix, IssuerAlias: optionalIssuerAlias(effectiveIssuerAlias),
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "应用目录与登录目标已登记；请继续在 Keycloak 认证接入中同步 Client 并配置运行时", subsystemDirectoryRegistrationResponse{
+		Application: applicationToResponse(result.Application),
+		Environment: environmentToResponse(result.Environment),
+		LoginTarget: loginTargetToResponse(result.LoginTarget),
+		NextAction:  "继续执行 Keycloak Client 同步；完成后再应用子系统运行时配置。",
+	})
 }
 
 // ListPortalApplications handles GET /api/v1/portal/applications. All authenticated users may read
@@ -878,50 +1068,63 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 		return
 	}
 	principal, _ := authctx.PrincipalFromContext(request.Context())
-	brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
-	if brokerErr != nil {
-		handler.logger.Warn("Keycloak broker synchronization preparation failed", "error", brokerErr)
-		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-		return
-	}
-	if err := handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret); err != nil {
-		handler.logger.Warn("Keycloak broker synchronization failed", "error", err)
-		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-		return
-	}
-	clientID := strings.ToLower(strings.TrimSpace(payload.ApplicationCode)) + "-" + strings.ToLower(strings.TrimSpace(payload.Environment)) + "-web"
-	redirectURI := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/") + strings.TrimRight(strings.TrimSpace(payload.PathPrefix), "/") + "/auth/callback"
-	result, err := handler.keycloakControl.EnsureClient(request.Context(), clientID, "Basic Platform "+clientID, redirectURI)
-	if err != nil {
-		handler.logger.Warn("Keycloak Client synchronization failed", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
-		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-		return
-	}
 	applicationID, environmentID, found := handler.resolveApplicationContext(writer, request, payload.ApplicationCode, payload.Environment)
 	if !found || handler.keycloakCatalog == nil || handler.keycloakMappings == nil {
 		handler.writeError(writer, request, application.ErrValidation)
 		return
 	}
+	brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
+	if brokerErr != nil {
+		handler.writeKeycloakSyncFailure(writer, request, payload, "broker", brokerErr)
+		return
+	}
+	if err := handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret); err != nil {
+		handler.writeKeycloakSyncFailure(writer, request, payload, "broker", err)
+		return
+	}
+	canonicalClientID := strings.ToLower(strings.TrimSpace(payload.ApplicationCode)) + "-" + strings.ToLower(strings.TrimSpace(payload.Environment)) + "-web"
+	resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
+	if resolver, ok := handler.keycloakMappings.(keycloakClientCompatibilityResolver); ok {
+		resolved, resolveErr := resolver.ResolveEffectiveKeycloakClient(request.Context(), principal.Tenant.ID, applicationID, environmentID, canonicalClientID)
+		if resolveErr != nil {
+			handler.writeKeycloakSyncFailure(writer, request, payload, "client", resolveErr)
+			return
+		}
+		if strings.TrimSpace(resolved.ClientID) != "" {
+			resolution = resolved
+		}
+	}
+	transport, transportErr := application.ValidateKeycloakCutoverTransport(payload.PublicBaseURL, payload.PathPrefix, handler.keycloakRequireHTTPS)
+	if transportErr != nil {
+		handler.writeError(writer, request, transportErr)
+		return
+	}
+	redirectURI := transport.RedirectURI
+	result, err := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, redirectURI)
+	if err != nil {
+		handler.writeKeycloakSyncFailure(writer, request, payload, "client", err)
+		return
+	}
 	roleCodes, err := handler.keycloakCatalog.ListKeycloakRoleCodes(request.Context(), principal.Tenant.ID, applicationID)
-	if err != nil || handler.keycloakControl.EnsureClientRoles(request.Context(), result.ClientID, roleCodes) != nil {
-		handler.logger.Warn("Keycloak Client role catalog synchronization failed", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
-		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+	if err != nil {
+		handler.writeKeycloakSyncFailure(writer, request, payload, "roles", err)
+		return
+	}
+	if err := handler.keycloakControl.EnsureClientRoles(request.Context(), result.ClientID, roleCodes); err != nil {
+		handler.writeKeycloakSyncFailure(writer, request, payload, "roles", err)
 		return
 	}
 	if err := handler.keycloakMappings.SaveKeycloakClientMapping(request.Context(), principal.Tenant.ID, applicationID, environmentID, handler.keycloakRealm, result.ClientID); err != nil {
-		handler.logger.Warn("persist Keycloak Client mapping failed", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
-		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		handler.writeKeycloakSyncFailure(writer, request, payload, "mapping", err)
 		return
 	}
 	if err := handler.keycloakMappings.BackfillKeycloakAuthorization(request.Context(), principal.Tenant.ID, applicationID, environmentID); err != nil {
-		handler.logger.Warn("backfill Keycloak authorization outbox failed", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
-		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		handler.writeKeycloakSyncFailure(writer, request, payload, "backfill", err)
 		return
 	}
 	if updater, ok := handler.keycloakReadiness.(keycloakSwitchReadinessUpdater); ok {
 		if err := updater.MarkKeycloakClientAndRoleCatalogSynced(request.Context(), principal.Tenant.ID, applicationID, environmentID); err != nil {
-			handler.logger.Warn("persist Keycloak synchronization readiness failed", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			handler.writeKeycloakSyncFailure(writer, request, payload, "readiness", err)
 			return
 		}
 	}
@@ -933,7 +1136,45 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 	if handler.keycloakReadiness != nil {
 		readiness = handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, payload.ApplicationCode, payload.Environment)
 	}
-	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak Realm Client、身份、组织、角色与权限 Claims 映射已同步；Issuer 仍被四项门禁保护", keycloakClientSyncResponse{Alias: "keycloak", Realm: handler.keycloakRealm, ClientID: result.ClientID, ClaimsState: "MAPPERS_SYNCED", SwitchReady: readiness.SwitchReady, SwitchGates: readiness.Gates, NextAction: readiness.NextAction})
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak Realm Client、身份、组织、角色与权限 Claims 映射已同步；Issuer 仍被四项门禁保护", keycloakClientSyncResponse{Alias: "keycloak", Realm: handler.keycloakRealm, ClientID: result.ClientID, CanonicalClientID: resolution.CanonicalClientID, ClientIDSource: resolution.Source, LegacyCompatibility: resolution.LegacyCompatibility, ClaimsState: "MAPPERS_SYNCED", SwitchReady: readiness.SwitchReady, SwitchGates: readiness.Gates, NextAction: readiness.NextAction})
+}
+
+// writeKeycloakSyncFailure keeps the external contract deliberately non-sensitive while
+// preserving enough stage information for an operator to select the right remediation.
+// The original error is logged only on the server and correlated with the request ID.
+func (handler *SubsystemOnboardingHandler) writeKeycloakSyncFailure(writer stdhttp.ResponseWriter, request *stdhttp.Request, payload subsystemLifecycleRequest, stage string, err error) {
+	detail, nextAction := keycloakSyncFailureGuidance(stage)
+	handler.logger.Warn("Keycloak Client synchronization failed",
+		"request_id", requestctx.RequestID(request.Context()),
+		"stage", stage,
+		"application_code", payload.ApplicationCode,
+		"environment", payload.Environment,
+		"error", err,
+	)
+	httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
+		httperror.DependencyUnavailable.Code,
+		httperror.DependencyUnavailable.Message,
+		map[string]string{"stage": stage, "detail": detail, "next_action": nextAction},
+	))
+}
+
+func keycloakSyncFailureGuidance(stage string) (detail, nextAction string) {
+	switch stage {
+	case "broker":
+		return "Keycloak Broker 同步暂时不可用。", "检查 Keycloak 管理连接和平台 Broker 配置后，在当前环境重新同步。"
+	case "client":
+		return "Keycloak Realm Client 同步暂时不可用。", "检查目标 Realm、Client 配置与回调地址后，在当前环境重新同步。"
+	case "roles":
+		return "Keycloak Client 角色目录同步暂时不可用。", "检查应用角色目录与 Keycloak Client Role 管理权限后，在当前环境重新同步。"
+	case "mapping":
+		return "Keycloak Client 映射保存暂时不可用。", "检查基础平台数据库与 Keycloak Client 映射状态后，在当前环境重新同步。"
+	case "backfill":
+		return "Keycloak 授权投影回填暂时不可用。", "检查基础平台数据库与授权投影队列后，在当前环境重新同步。"
+	case "readiness":
+		return "Keycloak 切换门禁状态保存暂时不可用。", "检查基础平台数据库与 Keycloak 就绪状态后，在当前环境重新同步。"
+	default:
+		return "Keycloak 同步暂时不可用。", "检查 Keycloak 管理连接后，在当前环境重新同步。"
+	}
 }
 
 // UpdateSubsystem handles POST /api/v1/subsystem-update. The handler assumes the caller has
@@ -941,6 +1182,24 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 // management PATCH endpoints. This endpoint only re-runs the provisioner so the running subsystem
 // picks up the new .env.local values and the portal gateway is reloaded.
 func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	handler.updateSubsystem(writer, request, "")
+}
+
+// SwitchToKeycloak is the explicit authentication-integration cutover action.
+// Its target issuer is intentionally fixed by the server so a browser cannot
+// turn a Keycloak switch request into an arbitrary provider update.
+func (handler *SubsystemOnboardingHandler) SwitchToKeycloak(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	handler.updateSubsystem(writer, request, "keycloak")
+}
+
+// RollbackToPlatform is the explicit authentication-integration rollback
+// action. It reuses the same controlled deployment workflow as legacy
+// subsystem updates while pinning the target issuer to Basic Platform.
+func (handler *SubsystemOnboardingHandler) RollbackToPlatform(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	handler.updateSubsystem(writer, request, "platform")
+}
+
+func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request, forcedIssuerAlias string) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -954,6 +1213,9 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
+	if forcedIssuerAlias != "" {
+		payload.IssuerAlias = forcedIssuerAlias
+	}
 	applicationCode := strings.TrimSpace(payload.ApplicationCode)
 	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
 	// Update never re-issues the OAuth client secret. It sends identifiers plus optional public
@@ -965,11 +1227,36 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 	// subsystem's .env.local, so both the API process and the deployment helper can pick them
 	// up without exposing the host filesystem into the API container.
 	effectiveIssuerAlias := handler.effectiveIssuerAlias(payload.IssuerAlias)
-	keycloakCutover := strings.EqualFold(effectiveIssuerAlias, "keycloak") && handler.keycloakCutoverRequired(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	// An explicit /switch request is always a cutover attempt, even if a legacy
+	// browser first updated issuer_alias optimistically.  Otherwise the generic
+	// metadata write could accidentally bypass the observation-window gate.
+	keycloakCutover := strings.EqualFold(effectiveIssuerAlias, "keycloak") && (strings.EqualFold(forcedIssuerAlias, "keycloak") || handler.keycloakCutoverRequired(request.Context(), principal.Tenant.ID, applicationCode, environment))
 	if keycloakCutover {
 		readiness := handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, applicationCode, environment)
 		if !readiness.SwitchReady {
 			writeKeycloakSwitchBlocked(writer, request, readiness)
+			return
+		}
+		if handler.keycloakCutover == nil {
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if err := handler.keycloakCutover.CanKeycloakCutover(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
+			writeKeycloakObservationBlocked(writer, request, err.Error())
+			return
+		}
+	}
+	// As with cutover, explicit rollback must not rely on a browser's previous
+	// issuer_alias update. The lifecycle store is the source of truth for the
+	// rollback deadline and rejects a platform-only environment safely.
+	keycloakRollback := strings.EqualFold(forcedIssuerAlias, "platform")
+	if keycloakRollback {
+		if handler.keycloakCutover == nil {
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		if err := handler.keycloakCutover.CanKeycloakRollback(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
+			writeKeycloakObservationBlocked(writer, request, err.Error())
 			return
 		}
 	}
@@ -1005,6 +1292,13 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		updateInput.UpstreamURL = upstreamURL
 	}
 	if keycloakCutover {
+		transport, transportErr := application.ValidateKeycloakCutoverTransport(publicBaseURL, pathPrefix, handler.keycloakRequireHTTPS)
+		if transportErr != nil {
+			handler.writeError(writer, request, transportErr)
+			return
+		}
+		updateInput.PublicURL = transport.PublicURL
+		updateInput.RedirectURI = transport.RedirectURI
 		if handler.keycloakControl == nil || handler.keycloakBroker == nil || publicBaseURL == "" || pathPrefix == "" {
 			handler.writeError(writer, request, application.ErrValidation)
 			return
@@ -1014,7 +1308,18 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 			return
 		}
-		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), applicationCode+"-"+environment+"-web", "Basic Platform "+applicationCode+" "+environment, publicBaseURL+pathPrefix+"/auth/callback")
+		canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
+		resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
+		if applicationID, environmentID, resolved := handler.resolveApplicationContext(writer, request, applicationCode, environment); resolved {
+			if compatibilityResolver, supported := handler.keycloakMappings.(keycloakClientCompatibilityResolver); supported {
+				if effective, resolveErr := compatibilityResolver.ResolveEffectiveKeycloakClient(request.Context(), principal.Tenant.ID, applicationID, environmentID, canonicalClientID); resolveErr != nil {
+					handler.logger.Warn("Keycloak Client compatibility resolution failed", "application_code", applicationCode, "environment", environment, "error", resolveErr)
+				} else if strings.TrimSpace(effective.ClientID) != "" {
+					resolution = effective
+				}
+			}
+		}
+		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
 		if clientErr != nil {
 			handler.logger.Warn("Keycloak Client synchronization before switch failed", "application_code", applicationCode, "environment", environment, "error", clientErr)
 			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
@@ -1089,6 +1394,25 @@ func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.Respon
 		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, err.Error())
 		handler.writeError(writer, request, err)
 		return
+	}
+	if keycloakCutover || keycloakRollback {
+		applicationID, environmentID, found := handler.resolveApplicationContext(writer, request, applicationCode, environment)
+		if !found {
+			handler.logger.Error("Keycloak cutover completed but lifecycle scope could not be resolved", "application_code", applicationCode, "environment", environment)
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		var lifecycleErr error
+		if keycloakCutover {
+			_, lifecycleErr = handler.keycloakCutover.ConfirmKeycloakCutover(request.Context(), principal.Tenant.ID, applicationID, environmentID, principal.User.ID, keycloakRollbackWindow)
+		} else {
+			_, lifecycleErr = handler.keycloakCutover.RecordKeycloakRollback(request.Context(), principal.Tenant.ID, applicationID, environmentID, principal.User.ID)
+		}
+		if lifecycleErr != nil {
+			handler.logger.Error("Keycloak runtime change completed but lifecycle evidence could not be recorded", "application_code", applicationCode, "environment", environment, "error", lifecycleErr)
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
 	}
 	handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, true, "")
 	writer.Header().Set("Cache-Control", "no-store, private")
@@ -1207,6 +1531,87 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 		StartedAt:       state.StartedAt,
 		CompletedAt:     state.CompletedAt,
 		UpdatedAt:       state.UpdatedAt,
+	})
+}
+
+// GetKeycloakIntegrationStatus handles GET /api/v1/keycloak-integration/status.
+// It is separate from deployment status: the response is a durable view of
+// the selected provider, its non-sensitive Client mapping and server-checked
+// cutover gates.  Runtime credentials and arbitrary environment metadata are
+// intentionally excluded.
+func (handler *SubsystemOnboardingHandler) GetKeycloakIntegrationStatus(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	applicationCode := strings.TrimSpace(request.URL.Query().Get("application_code"))
+	environment := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("environment")))
+	if applicationCode == "" || environment == "" {
+		handler.writeError(writer, request, application.ErrValidation)
+		return
+	}
+	applicationID, environmentID, err := handler.service.ResolveApplicationEnvironment(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	issuerAlias := handler.effectiveIssuerAlias("")
+	if resolver, supported := handler.service.(subsystemEnvironmentIssuerResolver); supported {
+		if persisted, resolveErr := resolver.ResolveEnvironmentIssuerAlias(request.Context(), principal.Tenant.ID, applicationCode, environment); resolveErr == nil {
+			issuerAlias = handler.effectiveIssuerAlias(persisted)
+		}
+	}
+	mapping := KeycloakClientMapping{Status: "NOT_CONFIGURED"}
+	if inspector, supported := handler.keycloakMappings.(keycloakClientMappingInspector); supported {
+		loaded, loadErr := inspector.GetKeycloakClientMapping(request.Context(), principal.Tenant.ID, applicationID, environmentID)
+		if loadErr != nil {
+			handler.logger.Warn("load Keycloak Client mapping status failed", "application_code", applicationCode, "environment", environment, "error", loadErr)
+			mapping.Status = "UNKNOWN"
+		} else {
+			mapping = loaded
+		}
+	}
+	if mapping.Realm == "" {
+		mapping.Realm = handler.keycloakRealm
+	}
+	readiness := handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	claimsState := "NOT_CONFIGURED"
+	if mapping.Exists && strings.EqualFold(mapping.Status, "SYNCED") {
+		claimsState = "MAPPERS_SYNCED"
+	} else if mapping.Status == "UNKNOWN" {
+		claimsState = "UNKNOWN"
+	}
+	cutover := KeycloakCutoverLifecycle{Status: "NOT_CONFIGURED"}
+	var timeline []KeycloakCutoverTimelineEvent
+	if handler.keycloakCutover != nil {
+		loaded, lifecycleErr := handler.keycloakCutover.GetKeycloakCutoverLifecycle(request.Context(), principal.Tenant.ID, applicationCode, environment)
+		if lifecycleErr != nil {
+			handler.logger.Warn("load Keycloak cutover lifecycle failed", "application_code", applicationCode, "environment", environment, "error", lifecycleErr)
+			cutover.Status = "UNKNOWN"
+		} else {
+			cutover = loaded
+			timeline, lifecycleErr = handler.keycloakCutover.ListKeycloakCutoverTimeline(request.Context(), principal.Tenant.ID, applicationCode, environment, 50)
+			if lifecycleErr != nil {
+				handler.logger.Warn("load Keycloak cutover timeline failed", "application_code", applicationCode, "environment", environment, "error", lifecycleErr)
+			}
+		}
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak 认证接入状态查询成功", map[string]any{
+		"application_code": applicationCode,
+		"environment":      environment,
+		"provider":         issuerAlias,
+		"realm":            mapping.Realm,
+		"client_id":        mapping.ClientID,
+		"client_state":     mapping.Status,
+		"claims_state":     claimsState,
+		"last_synced_at":   mapping.LastSyncedAt,
+		"switch_ready":     readiness.SwitchReady,
+		"switch_gates":     readiness.Gates,
+		"next_action":      readiness.NextAction,
+		"cutover":          cutover,
+		"timeline":         timeline,
 	})
 }
 

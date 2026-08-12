@@ -80,9 +80,9 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authorization, err := h.authorizationResolver.ResolveOIDCAuthorization(r.Context(), subject.TenantID, claims.ClientID, claims.Subject)
-	// 权限、角色和修订号来自当前数据库快照，而非访问令牌中可能已经过时的声明；子系统可用
-	// role_config_hash/authz_revision 使本地会话缓存失效。
-	if err != nil || authorization.TenantID != subject.TenantID || authorization.AuthzRevision == 0 || strings.TrimSpace(authorization.RoleConfigHash) == "" {
+	// UserInfo 只返回稳定身份和粗粒度角色。详细权限、数据范围和授权版本由
+	// /oauth2/authorization-context 在线获取，避免把过大的授权快照复制到令牌。
+	if err != nil || authorization.TenantID != subject.TenantID {
 		if err != nil {
 			h.logger.Warn("OIDC UserInfo current authorization resolution failed", "error", err)
 		}
@@ -93,14 +93,9 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		"sub": info.Subject,
 		// identity_id is the explicit platform alias for the canonical iam_user.id.
 		// Account IDs, person IDs and subsystem-local IDs remain business mappings.
-		"identity_id":      info.Subject,
-		"tenant_id":        authorization.TenantID,
-		"primary_org_id":   authorization.PrimaryOrgID,
-		"organization_ids": append([]string{}, authorization.OrganizationIDs...),
-		"roles":            append([]string(nil), authorization.Roles...),
-		"permissions":      append([]string(nil), authorization.Permissions...),
-		"role_config_hash": authorization.RoleConfigHash,
-		"authz_revision":   authorization.AuthzRevision,
+		"identity_id": info.Subject,
+		"tenant_id":   authorization.TenantID,
+		"roles":       append([]string(nil), authorization.Roles...),
 	}
 	if authorization.PersonID != "" {
 		payload["person_id"] = authorization.PersonID

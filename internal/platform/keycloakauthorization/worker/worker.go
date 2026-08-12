@@ -20,6 +20,7 @@ type Queue interface {
 	Claim(context.Context, string, time.Time) (Event, bool, error)
 	Complete(context.Context, Event) error
 	Retry(context.Context, Event, string, string, time.Time) error
+	Fail(context.Context, Event, string, string) error
 }
 
 // Synchronizer owns the Keycloak Admin API calls. It must create/update the
@@ -45,6 +46,11 @@ type Worker struct {
 	// StaleLockTimeout is the maximum time an event may remain RUNNING before
 	// another worker assumes its owner crashed and returns it to PENDING.
 	StaleLockTimeout time.Duration
+	// MaxAttempts bounds repeated Keycloak control-plane failures.  Once the
+	// bounded retry budget is exhausted the event becomes FAILED (dead-letter
+	// state) and continues to block an auth-provider cutover until an operator
+	// replays it through a controlled recovery path.
+	MaxAttempts uint
 }
 
 func New(queue Queue, synchronizer Synchronizer, logger *slog.Logger, workerID string, poll time.Duration, clocks ...Clock) (*Worker, error) {
@@ -58,7 +64,7 @@ func New(queue Queue, synchronizer Synchronizer, logger *slog.Logger, workerID s
 		}
 		clock = clocks[0]
 	}
-	return &Worker{queue: queue, synchronizer: synchronizer, logger: logger, workerID: strings.TrimSpace(workerID), poll: poll, clock: clock, StaleLockTimeout: 5 * time.Minute}, nil
+	return &Worker{queue: queue, synchronizer: synchronizer, logger: logger, workerID: strings.TrimSpace(workerID), poll: poll, clock: clock, StaleLockTimeout: 5 * time.Minute, MaxAttempts: 5}, nil
 }
 
 func (worker *Worker) Run(ctx context.Context) {
@@ -90,6 +96,16 @@ func (worker *Worker) RunOnce(ctx context.Context) error {
 		return err
 	}
 	if err := worker.synchronizer.SyncAuthorization(ctx, event); err != nil {
+		if worker.MaxAttempts == 0 {
+			return errors.New("Keycloak authorization worker max attempts must be positive")
+		}
+		if event.Attempts >= worker.MaxAttempts {
+			if failErr := worker.queue.Fail(ctx, event, "KEYCLOAK_SYNC_RETRY_EXHAUSTED", trimError(err)); failErr != nil {
+				return fmt.Errorf("sync Keycloak authorization: %v; dead-letter event: %w", err, failErr)
+			}
+			worker.logger.Error("Keycloak authorization projection moved to dead-letter state", "event_id", event.ID, "attempts", event.Attempts, "error", err)
+			return nil
+		}
 		retryAt := worker.clock.Now().UTC().Add(retryDelay(event.Attempts))
 		if retryErr := worker.queue.Retry(ctx, event, "KEYCLOAK_SYNC_FAILED", trimError(err), retryAt); retryErr != nil {
 			return fmt.Errorf("sync Keycloak authorization: %v; schedule retry: %w", err, retryErr)

@@ -112,7 +112,7 @@ func (queue *OutboxQueue) Complete(ctx context.Context, event projectionworker.E
 			return nil
 		}
 		var pending int64
-		if err := tx.Table("keycloak_authorization_outbox").Where("tenant_id=? AND application_id=? AND environment_id=? AND status IN ?", event.TenantID, event.ApplicationID, event.EnvironmentID, []string{"PENDING", "RUNNING"}).Count(&pending).Error; err != nil {
+		if err := tx.Table("keycloak_authorization_outbox").Where("tenant_id=? AND application_id=? AND environment_id=? AND status IN ?", event.TenantID, event.ApplicationID, event.EnvironmentID, []string{"PENDING", "RUNNING", "FAILED"}).Count(&pending).Error; err != nil {
 			return fmt.Errorf("count pending Keycloak projections: %w", err)
 		}
 		if pending == 0 {
@@ -132,6 +132,23 @@ func (queue *OutboxQueue) Retry(ctx context.Context, event projectionworker.Even
 	})
 	if result.Error != nil {
 		return fmt.Errorf("retry Keycloak authorization outbox: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("Keycloak authorization outbox is not running")
+	}
+	return nil
+}
+
+// Fail moves an exhausted projection event to durable dead-letter state.  It
+// intentionally leaves the event queryable instead of dropping it, and a
+// FAILED event blocks the per-environment Keycloak cutover gate.
+func (queue *OutboxQueue) Fail(ctx context.Context, event projectionworker.Event, code, message string) error {
+	result := queue.database.WithContext(ctx).Model(&authorizationOutboxRow{}).Where("id = ? AND status = ?", strings.TrimSpace(event.ID), "RUNNING").Updates(map[string]any{
+		"status": "FAILED", "completed_at": time.Now().UTC(), "locked_by": nil, "locked_at": nil,
+		"last_error_code": strings.TrimSpace(code), "last_error_message": strings.TrimSpace(message),
+	})
+	if result.Error != nil {
+		return fmt.Errorf("dead-letter Keycloak authorization outbox: %w", result.Error)
 	}
 	if result.RowsAffected != 1 {
 		return errors.New("Keycloak authorization outbox is not running")

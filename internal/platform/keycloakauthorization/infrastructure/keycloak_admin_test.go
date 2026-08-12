@@ -150,8 +150,9 @@ func TestKeycloakAdminReturnsTokenHTTPFailures(t *testing.T) {
 }
 
 func TestKeycloakAdminUsesServiceAccountClientCredentialsWhenConfigured(t *testing.T) {
-	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "platform-admin")
-	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "client-secret")
+	// Environment values must never influence an explicitly composed adapter.
+	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "ignored-environment-client")
+	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "ignored-environment-secret")
 	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 		if request.URL.Path != "/realms/master/protocol/openid-connect/token" {
 			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
@@ -178,12 +179,24 @@ func TestKeycloakAdminUsesServiceAccountClientCredentialsWhenConfigured(t *testi
 	}))
 	defer server.Close()
 
-	admin, err := NewKeycloakAdmin(server.URL, "acme", "", "", server.Client())
+	admin, err := NewKeycloakAdminWithCredentials(server.URL, "acme", KeycloakAdminCredentials{
+		ServiceAccountClientID:     "platform-admin",
+		ServiceAccountClientSecret: "client-secret",
+	}, server.Client())
 	if err != nil {
 		t.Fatalf("NewKeycloakAdmin: %v", err)
 	}
 	if _, err := admin.token(context.Background()); err != nil {
 		t.Fatalf("token() error = %v", err)
+	}
+}
+
+func TestNewKeycloakAdminWithCredentialsRejectsIncompleteServiceAccountPair(t *testing.T) {
+	_, err := NewKeycloakAdminWithCredentials("http://keycloak.example", "acme", KeycloakAdminCredentials{
+		ServiceAccountClientID: "platform-admin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "complete pair") {
+		t.Fatalf("NewKeycloakAdminWithCredentials error = %v", err)
 	}
 }
 
