@@ -342,6 +342,133 @@ func (control *keycloakControlPlane) brokerRepresentation(clientID, clientSecret
 	}
 }
 
+const (
+	keycloakDefaultFirstBrokerLoginFlow = "first broker login"
+	keycloakReviewProfileProviderID     = "idp-review-profile"
+	keycloakReviewProfileModeKey        = "update.profile.on.first.login"
+)
+
+// ensureBrokerReviewProfileDisabled reconciles the effective Keycloak 26
+// setting. updateProfileFirstLoginMode on the IdentityProvider representation
+// is retained for compatibility, but current Keycloak versions read the mode
+// from the Review Profile authenticator execution in the first Broker flow.
+func (control *keycloakControlPlane) ensureBrokerReviewProfileDisabled(ctx context.Context, token string) error {
+	realmPath := "/admin/realms/" + url.PathEscape(control.realm)
+	providerPath := realmPath + "/identity-provider/instances/" + url.PathEscape("basic-platform")
+	response, err := control.request(ctx, token, stdhttp.MethodGet, providerPath, nil)
+	if err != nil {
+		return err
+	}
+	if err := keycloakStatusError("read effective Keycloak Broker flow", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return err
+	}
+	var provider struct {
+		FirstBrokerLoginFlowAlias string `json:"firstBrokerLoginFlowAlias"`
+	}
+	decodeErr := json.NewDecoder(response.Body).Decode(&provider)
+	response.Body.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	flowAlias := strings.TrimSpace(provider.FirstBrokerLoginFlowAlias)
+	if flowAlias == "" {
+		response, err = control.request(ctx, token, stdhttp.MethodGet, realmPath, nil)
+		if err != nil {
+			return err
+		}
+		if err := keycloakStatusError("read Keycloak Realm Broker flow", response, stdhttp.StatusOK); err != nil {
+			response.Body.Close()
+			return err
+		}
+		var realm struct {
+			FirstBrokerLoginFlow string `json:"firstBrokerLoginFlow"`
+		}
+		decodeErr = json.NewDecoder(response.Body).Decode(&realm)
+		response.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		flowAlias = strings.TrimSpace(realm.FirstBrokerLoginFlow)
+		if flowAlias == "" {
+			flowAlias = keycloakDefaultFirstBrokerLoginFlow
+		}
+	}
+	executionsPath := realmPath + "/authentication/flows/" + url.PathEscape(flowAlias) + "/executions"
+	response, err = control.request(ctx, token, stdhttp.MethodGet, executionsPath, nil)
+	if err != nil {
+		return err
+	}
+	if err := keycloakStatusError("read Keycloak first Broker login executions", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return err
+	}
+	var executions []struct {
+		ID                   string `json:"id"`
+		ProviderID           string `json:"providerId"`
+		AuthenticationConfig string `json:"authenticationConfig"`
+	}
+	decodeErr = json.NewDecoder(response.Body).Decode(&executions)
+	response.Body.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	for _, execution := range executions {
+		if execution.ProviderID != keycloakReviewProfileProviderID || strings.TrimSpace(execution.ID) == "" {
+			continue
+		}
+		configID := strings.TrimSpace(execution.AuthenticationConfig)
+		if configID == "" {
+			payload := map[string]any{"alias": "basic-platform-review-profile", "config": map[string]string{keycloakReviewProfileModeKey: "off"}}
+			response, err = control.request(ctx, token, stdhttp.MethodPost, realmPath+"/authentication/executions/"+url.PathEscape(execution.ID)+"/config", payload)
+			if err != nil {
+				return err
+			}
+			defer response.Body.Close()
+			return keycloakStatusError("configure Keycloak Broker Review Profile", response, stdhttp.StatusCreated)
+		}
+		configPath := realmPath + "/authentication/config/" + url.PathEscape(configID)
+		response, err = control.request(ctx, token, stdhttp.MethodGet, configPath, nil)
+		if err != nil {
+			return err
+		}
+		if err := keycloakStatusError("read Keycloak Broker Review Profile config", response, stdhttp.StatusOK); err != nil {
+			response.Body.Close()
+			return err
+		}
+		var config struct {
+			ID     string            `json:"id,omitempty"`
+			Alias  string            `json:"alias"`
+			Config map[string]string `json:"config"`
+		}
+		decodeErr = json.NewDecoder(response.Body).Decode(&config)
+		response.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if config.Config[keycloakReviewProfileModeKey] == "off" {
+			return nil
+		}
+		if config.Config == nil {
+			config.Config = map[string]string{}
+		}
+		if strings.TrimSpace(config.Alias) == "" {
+			config.Alias = "basic-platform-review-profile"
+		}
+		config.ID = configID
+		config.Config[keycloakReviewProfileModeKey] = "off"
+		response, err = control.request(ctx, token, stdhttp.MethodPut, configPath, config)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		return keycloakStatusError("update Keycloak Broker Review Profile config", response, stdhttp.StatusNoContent)
+	}
+	// A custom flow without Review Profile already satisfies the no-interaction
+	// contract and needs no authenticator configuration.
+	return nil
+}
+
 // ensureBrokerUserProfile declares the attributes imported from Basic Platform.
 // Keycloak 26 validates mapper targets against the Realm user-profile schema,
 // so an Attribute Importer cannot create arbitrary attributes on first login.
@@ -460,6 +587,9 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		return err
 	}
 	response.Body.Close()
+	if err := control.ensureBrokerReviewProfileDisabled(ctx, token); err != nil {
+		return err
+	}
 	if err := control.ensureBrokerUserProfile(ctx, token); err != nil {
 		return err
 	}

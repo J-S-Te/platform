@@ -369,6 +369,7 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 	if decodeErr != nil {
 		return fmt.Errorf("decode Keycloak Broker identities: %w", decodeErr)
 	}
+	staleLink := false
 	for _, identity := range identities {
 		if identity.IdentityProvider != platformBrokerAlias {
 			continue
@@ -376,8 +377,26 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 		if identity.UserID == identityID {
 			return nil
 		}
+		staleLink = true
+		break
+	}
+	if staleLink {
+		owner, err := admin.findUserByBrokerIdentity(ctx, token, identityID)
+		if err != nil {
+			return err
+		}
+		if owner != "" && owner != user.ID {
+			return fmt.Errorf("link Keycloak Broker identity: upstream identity %q is already linked to Keycloak user %q", identityID, owner)
+		}
+		if owner == user.ID {
+			// The owner query already observes the desired result while the user's
+			// link list is stale. Do not delete a link that may have converged in a
+			// concurrent transaction.
+			return nil
+		}
 		// The provider link belongs to this platform-managed Keycloak user but
-		// points at a stale upstream subject. Repair only this managed link.
+		// points at a stale upstream subject. Repair only after proving the desired
+		// upstream identity is not owned by a different Keycloak user.
 		response, err = admin.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(platformBrokerAlias), nil)
 		if err != nil {
 			return err
@@ -387,7 +406,6 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 		if status != stdhttp.StatusNoContent && status != stdhttp.StatusNotFound {
 			return admin.statusError("remove stale Keycloak Broker identity", status)
 		}
-		break
 	}
 	payload := keycloakFederatedIdentity{IdentityProvider: platformBrokerAlias, UserID: identityID, UserName: stableUsername(identityID)}
 	response, err = admin.request(ctx, token, stdhttp.MethodPost, base+"/"+url.PathEscape(platformBrokerAlias), payload)
@@ -397,12 +415,70 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 	status := response.StatusCode
 	response.Body.Close()
 	if status == stdhttp.StatusConflict {
-		return fmt.Errorf("link Keycloak Broker identity: upstream identity %q is already linked to another Keycloak user", identityID)
+		// POST is not guaranteed to be idempotent. A concurrent projection may
+		// have created the exact same link between our GET and POST; re-read the
+		// authoritative state before classifying 409 as a real ownership conflict.
+		identities, readErr := admin.brokerIdentities(ctx, token, user.ID)
+		if readErr != nil {
+			return readErr
+		}
+		for _, identity := range identities {
+			if identity.IdentityProvider == platformBrokerAlias && identity.UserID == identityID {
+				return nil
+			}
+		}
+		owner, ownerErr := admin.findUserByBrokerIdentity(ctx, token, identityID)
+		if ownerErr != nil {
+			return ownerErr
+		}
+		if owner != "" {
+			return fmt.Errorf("link Keycloak Broker identity: upstream identity %q is already linked to Keycloak user %q", identityID, owner)
+		}
+		return fmt.Errorf("link Keycloak Broker identity: Keycloak returned conflict but no Broker link owns upstream identity %q", identityID)
 	}
 	if status != stdhttp.StatusNoContent {
 		return admin.statusError("link Keycloak Broker identity", status)
 	}
 	return nil
+}
+
+func (admin *KeycloakAdmin) brokerIdentities(ctx context.Context, token, userID string) ([]keycloakFederatedIdentity, error) {
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, "/users/"+url.PathEscape(userID)+"/federated-identity", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusOK {
+		return nil, admin.statusError("read Keycloak Broker identity", response.StatusCode)
+	}
+	var identities []keycloakFederatedIdentity
+	if err := json.NewDecoder(response.Body).Decode(&identities); err != nil {
+		return nil, fmt.Errorf("decode Keycloak Broker identities: %w", err)
+	}
+	return identities, nil
+}
+
+func (admin *KeycloakAdmin) findUserByBrokerIdentity(ctx context.Context, token, identityID string) (string, error) {
+	path := "/users?exact=true&idpAlias=" + url.QueryEscape(platformBrokerAlias) + "&idpUserId=" + url.QueryEscape(identityID)
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, path, nil)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusOK {
+		return "", admin.statusError("find Keycloak Broker identity owner", response.StatusCode)
+	}
+	var users []keycloakUser
+	if err := json.NewDecoder(response.Body).Decode(&users); err != nil {
+		return "", fmt.Errorf("decode Keycloak Broker identity owner: %w", err)
+	}
+	if len(users) > 1 {
+		return "", fmt.Errorf("multiple Keycloak users own Broker identity %q", identityID)
+	}
+	if len(users) == 1 {
+		return users[0].ID, nil
+	}
+	return "", nil
 }
 
 type keycloakGroup struct {

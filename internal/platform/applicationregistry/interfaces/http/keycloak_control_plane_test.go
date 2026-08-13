@@ -50,6 +50,39 @@ func TestBrokerRepresentationSkipsKeycloakProfileRegistration(t *testing.T) {
 	}
 }
 
+func TestEnsureBrokerReviewProfileDisabledUpdatesEffectiveFlowConfig(t *testing.T) {
+	var updated map[string]any
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/platform/identity-provider/instances/basic-platform":
+			_ = json.NewEncoder(response).Encode(map[string]string{"firstBrokerLoginFlowAlias": "custom first broker"})
+		case "GET /admin/realms/platform":
+			t.Fatal("realm fallback must not override the provider-specific Broker flow")
+		case "GET /admin/realms/platform/authentication/flows/custom first broker/executions":
+			_ = json.NewEncoder(response).Encode([]map[string]string{{"id": "review-execution", "providerId": keycloakReviewProfileProviderID, "authenticationConfig": "review-config"}})
+		case "GET /admin/realms/platform/authentication/config/review-config":
+			_ = json.NewEncoder(response).Encode(map[string]any{"id": "review-config", "alias": "review profile", "config": map[string]string{keycloakReviewProfileModeKey: "missing"}})
+		case "PUT /admin/realms/platform/authentication/config/review-config":
+			if err := json.NewDecoder(request.Body).Decode(&updated); err != nil {
+				t.Fatalf("decode Review Profile config: %v", err)
+			}
+			response.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
+	if err := control.ensureBrokerReviewProfileDisabled(context.Background(), "admin-token"); err != nil {
+		t.Fatalf("ensureBrokerReviewProfileDisabled() error = %v", err)
+	}
+	config, _ := updated["config"].(map[string]any)
+	if got := config[keycloakReviewProfileModeKey]; got != "off" {
+		t.Fatalf("effective Review Profile mode = %#v, want off", got)
+	}
+}
+
 func TestEnsureBrokerUserProfileKeepsPlatformProfileFieldsOptional(t *testing.T) {
 	var updated map[string]any
 	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {

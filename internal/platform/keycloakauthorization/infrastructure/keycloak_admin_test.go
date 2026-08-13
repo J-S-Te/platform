@@ -240,6 +240,89 @@ func TestEnsureUserPrelinksBrokerIdentityAndAllowsOptionalProfileFields(t *testi
 	}
 }
 
+func TestEnsureBrokerIdentityTreatsConcurrentSameLinkAsSuccess(t *testing.T) {
+	readCount := 0
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			readCount++
+			if readCount == 1 {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+				return
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{{IdentityProvider: platformBrokerAlias, UserID: "identity-1"}})
+		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			writer.WriteHeader(stdhttp.StatusConflict)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.ensureBrokerIdentity(context.Background(), "admin-token", keycloakUser{ID: "user-1"}, "identity-1"); err != nil {
+		t.Fatalf("ensureBrokerIdentity() concurrent idempotency error = %v", err)
+	}
+}
+
+func TestEnsureBrokerIdentityReportsConflictingOwnerAfter409(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			writer.WriteHeader(stdhttp.StatusConflict)
+		case "GET /admin/realms/acme/users":
+			if request.URL.Query().Get("idpAlias") != platformBrokerAlias || request.URL.Query().Get("idpUserId") != "identity-1" {
+				t.Fatalf("Broker owner query = %s", request.URL.RawQuery)
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "other-user"}})
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	err = admin.ensureBrokerIdentity(context.Background(), "admin-token", keycloakUser{ID: "user-1"}, "identity-1")
+	if err == nil || !strings.Contains(err.Error(), "other-user") {
+		t.Fatalf("ensureBrokerIdentity() conflict error = %v", err)
+	}
+}
+
+func TestEnsureBrokerIdentityDoesNotDeleteStaleLinkWhenTargetHasAnotherOwner(t *testing.T) {
+	mutations := 0
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{{IdentityProvider: platformBrokerAlias, UserID: "old-identity"}})
+		case "GET /admin/realms/acme/users":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "other-user"}})
+		case "DELETE /admin/realms/acme/users/user-1/federated-identity/basic-platform", "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			mutations++
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	err = admin.ensureBrokerIdentity(context.Background(), "admin-token", keycloakUser{ID: "user-1"}, "identity-1")
+	if err == nil || !strings.Contains(err.Error(), "other-user") {
+		t.Fatalf("ensureBrokerIdentity() stale ownership error = %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("stale link was mutated before ownership was proven safe: mutations=%d", mutations)
+	}
+}
+
 func TestKeycloakAdminUsesServiceAccountClientCredentialsWhenConfigured(t *testing.T) {
 	// Environment values must never influence an explicitly composed adapter.
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "ignored-environment-client")
