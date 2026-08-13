@@ -20,17 +20,25 @@ type ClientMappingStore struct{ database *gorm.DB }
 // projection contract behind a Keycloak Client mapping. Any change to the
 // stable identity attributes or projection semantics must bump this value so
 // previously completed user projections and broker evidence cannot be reused.
-// v2 forces one complete re-projection for every existing Client mapping.
-// Older mappings can be marked SYNCED while their Keycloak users were created
-// before identity_id/person_id projection was introduced; reusing that state
-// produces valid-looking OAuth clients but ID tokens rejected by every
-// subsystem's strict OIDC claims validation.
-const keycloakProjectionConfigurationVersion = "stable-identity-projection-v2"
+// v3 forces one complete re-projection for every existing Client mapping after
+// Federated Identity pre-binding became part of the projection contract. This
+// is required for users projected before Broker pre-binding was introduced;
+// otherwise a repeated Client sync can be swallowed by the legacy backfill
+// ledger and those users still enter Keycloak's first-login interaction flow.
+const keycloakProjectionConfigurationVersion = "stable-identity-projection-v3"
 
 type persistedClientMapping struct {
 	Realm             string `gorm:"column:realm"`
 	ClientID          string `gorm:"column:keycloak_client_id"`
 	ConfigurationHash string `gorm:"column:configuration_hash"`
+}
+
+type storedClientMapping struct {
+	TenantID      string `gorm:"column:tenant_id"`
+	ApplicationID string `gorm:"column:application_id"`
+	EnvironmentID string `gorm:"column:environment_id"`
+	Realm         string `gorm:"column:realm"`
+	ClientID      string `gorm:"column:keycloak_client_id"`
 }
 
 type managedClientConfiguration struct {
@@ -45,6 +53,32 @@ func NewClientMappingStore(database *gorm.DB) (*ClientMappingStore, error) {
 		return nil, errors.New("Keycloak Client mapping database must not be nil")
 	}
 	return &ClientMappingStore{database: database}, nil
+}
+
+// ReconcileStoredKeycloakClientMappings reapplies the current projection
+// contract to every active mapping at worker startup. This makes a deployment
+// that changes projection semantics self-migrating: existing users are queued
+// automatically instead of requiring an operator to click "同步 Keycloak".
+func (store *ClientMappingStore) ReconcileStoredKeycloakClientMappings(ctx context.Context) error {
+	if store == nil || store.database == nil {
+		return errors.New("Keycloak Client mapping database must not be nil")
+	}
+	var mappings []storedClientMapping
+	if err := syncedKeycloakClientMappingsQuery(store.database.WithContext(ctx)).Find(&mappings).Error; err != nil {
+		return fmt.Errorf("load synchronized Keycloak Client mappings: %w", err)
+	}
+	for _, mapping := range mappings {
+		if err := store.SaveKeycloakClientMapping(ctx, mapping.TenantID, mapping.ApplicationID, mapping.EnvironmentID, mapping.Realm, mapping.ClientID); err != nil {
+			return fmt.Errorf("reconcile Keycloak Client mapping %s/%s/%s: %w", mapping.TenantID, mapping.ApplicationID, mapping.EnvironmentID, err)
+		}
+	}
+	return nil
+}
+
+func syncedKeycloakClientMappingsQuery(database *gorm.DB) *gorm.DB {
+	return database.Table("keycloak_application_client_mapping").
+		Where("status = ?", "SYNCED").
+		Order("tenant_id ASC, application_id ASC, environment_id ASC")
 }
 
 func (store *ClientMappingStore) SaveKeycloakClientMapping(ctx context.Context, tenantID, applicationID, environmentID, realm, clientID string) error {

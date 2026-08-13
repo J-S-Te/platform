@@ -60,6 +60,17 @@ func TestConfigurationReconcileIncludesRetainedDisabledUsers(t *testing.T) {
 	}
 }
 
+func TestStoredClientMappingReconcileOnlyLoadsSynchronizedMappingsInStableOrder(t *testing.T) {
+	query := syncedKeycloakClientMappingsQuery(newDryRunMySQL(t)).Find(&[]storedClientMapping{})
+	sql := query.Statement.SQL.String()
+	if !strings.Contains(sql, "status = ?") {
+		t.Fatalf("stored mapping reconcile does not filter synchronized mappings: %s", sql)
+	}
+	if !strings.Contains(sql, "ORDER BY tenant_id ASC, application_id ASC, environment_id ASC") {
+		t.Fatalf("stored mapping reconcile order is unstable: %s", sql)
+	}
+}
+
 func TestKeycloakClientConfigurationChangeDetection(t *testing.T) {
 	currentHash := keycloakClientConfigurationHash("basic-platform", "orders-prod-web", "schema-v1")
 	current := persistedClientMapping{Realm: "basic-platform", ClientID: "orders-prod-web", ConfigurationHash: currentHash}
