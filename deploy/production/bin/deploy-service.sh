@@ -271,7 +271,7 @@ dump_subsystem_provisioner_debug() {
     echo "---- subsystem-provisioner 最近日志 ----"
     compose logs --no-color --tail 200 subsystem-provisioner || true
     echo "---- subsystem-provisioner compose ps ----"
-    compose ps --filter name=subsystem-provisioner || true
+    compose ps subsystem-provisioner || true
   else
     echo "未获取到 subsystem-provisioner 容器 ID" >&2
   fi

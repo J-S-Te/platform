@@ -30,7 +30,7 @@ func main() {
 
 	executor, err := subsystemExecutor(timeout)
 	if err != nil {
-		logger.Error("initialize subsystem provisioning executor")
+		logger.Error("initialize subsystem provisioning executor", "error", err)
 		os.Exit(1)
 	}
 
