@@ -1107,6 +1107,17 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 func keycloakAuthorizationProtocolMappers(publicClientID string) []keycloakManagedProtocolMapper {
 	return []keycloakManagedProtocolMapper{
 		{
+			// Keep the stable platform identity available under its explicit
+			// contract name as well as OIDC sub. Existing relying parties use
+			// identity_id, while sub remains the canonical OIDC subject.
+			Name:           "platform-stable-identity-id",
+			ProtocolMapper: "oidc-usermodel-attribute-mapper",
+			Config: map[string]string{
+				"user.attribute": "identity_id", "claim.name": "identity_id", "jsonType.label": "String", "multivalued": "false",
+				"id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true", "introspection.token.claim": "true",
+			},
+		},
+		{
 			Name:           "platform-token-use-id",
 			ProtocolMapper: "oidc-hardcoded-claim-mapper",
 			Config: map[string]string{

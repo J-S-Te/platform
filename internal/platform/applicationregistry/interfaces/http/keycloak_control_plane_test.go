@@ -190,12 +190,16 @@ func TestEnsureBrokerUserProfileKeepsPlatformProfileFieldsOptional(t *testing.T)
 
 func TestKeycloakAuthorizationProtocolMappersSplitTokenPurposeAndAudience(t *testing.T) {
 	mappers := keycloakAuthorizationProtocolMappers("contract_management-prod-web")
-	if len(mappers) != 3 {
-		t.Fatalf("mapper count = %d, want 3", len(mappers))
+	if len(mappers) != 4 {
+		t.Fatalf("mapper count = %d, want 4", len(mappers))
 	}
 	byName := make(map[string]keycloakManagedProtocolMapper, len(mappers))
 	for _, mapper := range mappers {
 		byName[mapper.Name] = mapper
+	}
+	stableIdentity := byName["platform-stable-identity-id"]
+	if stableIdentity.ProtocolMapper != "oidc-usermodel-attribute-mapper" || stableIdentity.Config["user.attribute"] != "identity_id" || stableIdentity.Config["claim.name"] != "identity_id" || stableIdentity.Config["id.token.claim"] != "true" {
+		t.Fatalf("stable identity mapper = %#v", stableIdentity)
 	}
 	idToken := byName["platform-token-use-id"]
 	if idToken.ProtocolMapper != "oidc-hardcoded-claim-mapper" || idToken.Config["claim.value"] != "id_token" || idToken.Config["id.token.claim"] != "true" || idToken.Config["access.token.claim"] != "false" {
@@ -279,13 +283,13 @@ func TestEnsureClaimMappersMigratesOnlyOwnedAndHistoricalAuthorizationMappers(t 
 	if deleted["id-third-party"] {
 		t.Fatal("third-party profile mapper was deleted")
 	}
-	for _, name := range []string{"platform-token-use-id", "platform-token-use-access", "platform-client-audience"} {
+	for _, name := range []string{"platform-stable-identity-id", "platform-token-use-id", "platform-token-use-access", "platform-client-audience"} {
 		if _, ok := created[name]; !ok {
 			t.Errorf("mapper %q was not created", name)
 		}
 	}
-	if len(created) != 3 {
-		t.Fatalf("created mappers = %#v, want only three authorization mappers", created)
+	if len(created) != 4 {
+		t.Fatalf("created mappers = %#v, want only four authorization mappers", created)
 	}
 }
 
