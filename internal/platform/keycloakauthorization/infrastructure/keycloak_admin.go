@@ -99,6 +99,13 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 	// locally; this avoids version-specific query routing differences.
 	userEvents, err := admin.listEventPage(ctx, token, "/events")
 	if err != nil {
+		// Event collection is supplementary. Some deployed Keycloak gateways
+		// return 404 for the event resource to an Admin API client even though
+		// the realm and token endpoints are available. Treat that variant as an
+		// empty audit window so it cannot interrupt projection or Broker flows.
+		if strings.Contains(err.Error(), "returned HTTP 404") {
+			return []projectionapplication.KeycloakAuditEvent{}, nil
+		}
 		return nil, fmt.Errorf("list Keycloak user audit events (admin_url=%q realm=%q): %w", admin.adminURL, admin.realm, err)
 	}
 	// User LOGIN/LOGOUT events are required for Broker verification. Admin
