@@ -20,7 +20,12 @@ type ClientMappingStore struct{ database *gorm.DB }
 // projection contract behind a Keycloak Client mapping. Any change to the
 // stable identity attributes or projection semantics must bump this value so
 // previously completed user projections and broker evidence cannot be reused.
-const keycloakProjectionConfigurationVersion = "stable-identity-projection-v1"
+// v2 forces one complete re-projection for every existing Client mapping.
+// Older mappings can be marked SYNCED while their Keycloak users were created
+// before identity_id/person_id projection was introduced; reusing that state
+// produces valid-looking OAuth clients but ID tokens rejected by every
+// subsystem's strict OIDC claims validation.
+const keycloakProjectionConfigurationVersion = "stable-identity-projection-v2"
 
 type persistedClientMapping struct {
 	Realm             string `gorm:"column:realm"`
