@@ -19,7 +19,10 @@ import (
 	projectionapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
 )
 
-const platformGroupsRoot = "basic-platform"
+const (
+	platformGroupsRoot  = "basic-platform"
+	platformBrokerAlias = "basic-platform"
+)
 
 // KeycloakAdmin implements the authorization projection's Keycloak Admin API
 // boundary. The supplied administrator credentials must have realm-management
@@ -171,8 +174,14 @@ func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectiona
 	if err != nil {
 		return err
 	}
-	_, err = admin.ensureUser(ctx, token, snapshot)
-	return err
+	user, err := admin.ensureUser(ctx, token, snapshot)
+	if err != nil {
+		return err
+	}
+	// Pre-link the upstream OIDC subject to the projected Keycloak user. This
+	// makes Broker login resolve the existing account directly instead of
+	// running Keycloak's just-in-time registration/profile-completion flow.
+	return admin.ensureBrokerIdentity(ctx, token, user, snapshot.IdentityID)
 }
 
 func (admin *KeycloakAdmin) EnsureOrganizationGroups(ctx context.Context, snapshot projectionapplication.Snapshot) error {
@@ -328,8 +337,72 @@ type keycloakUser struct {
 	Username   string              `json:"username"`
 	Enabled    bool                `json:"enabled"`
 	FirstName  string              `json:"firstName,omitempty"`
+	LastName   string              `json:"lastName,omitempty"`
 	Email      string              `json:"email,omitempty"`
 	Attributes map[string][]string `json:"attributes,omitempty"`
+}
+
+type keycloakFederatedIdentity struct {
+	IdentityProvider string `json:"identityProvider"`
+	UserID           string `json:"userId"`
+	UserName         string `json:"userName"`
+}
+
+func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token string, user keycloakUser, identityID string) error {
+	identityID = strings.TrimSpace(identityID)
+	if user.ID == "" || identityID == "" {
+		return errors.New("Keycloak Broker identity is invalid")
+	}
+	base := "/users/" + url.PathEscape(user.ID) + "/federated-identity"
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, base, nil)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != stdhttp.StatusOK {
+		status := response.StatusCode
+		response.Body.Close()
+		return admin.statusError("read Keycloak Broker identity", status)
+	}
+	var identities []keycloakFederatedIdentity
+	decodeErr := json.NewDecoder(response.Body).Decode(&identities)
+	response.Body.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("decode Keycloak Broker identities: %w", decodeErr)
+	}
+	for _, identity := range identities {
+		if identity.IdentityProvider != platformBrokerAlias {
+			continue
+		}
+		if identity.UserID == identityID {
+			return nil
+		}
+		// The provider link belongs to this platform-managed Keycloak user but
+		// points at a stale upstream subject. Repair only this managed link.
+		response, err = admin.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(platformBrokerAlias), nil)
+		if err != nil {
+			return err
+		}
+		status := response.StatusCode
+		response.Body.Close()
+		if status != stdhttp.StatusNoContent && status != stdhttp.StatusNotFound {
+			return admin.statusError("remove stale Keycloak Broker identity", status)
+		}
+		break
+	}
+	payload := keycloakFederatedIdentity{IdentityProvider: platformBrokerAlias, UserID: identityID, UserName: stableUsername(identityID)}
+	response, err = admin.request(ctx, token, stdhttp.MethodPost, base+"/"+url.PathEscape(platformBrokerAlias), payload)
+	if err != nil {
+		return err
+	}
+	status := response.StatusCode
+	response.Body.Close()
+	if status == stdhttp.StatusConflict {
+		return fmt.Errorf("link Keycloak Broker identity: upstream identity %q is already linked to another Keycloak user", identityID)
+	}
+	if status != stdhttp.StatusNoContent {
+		return admin.statusError("link Keycloak Broker identity", status)
+	}
+	return nil
 }
 
 type keycloakGroup struct {

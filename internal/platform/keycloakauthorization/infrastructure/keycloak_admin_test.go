@@ -188,6 +188,58 @@ func TestKeycloakAdminReturnsTokenHTTPFailures(t *testing.T) {
 	}
 }
 
+func TestEnsureUserPrelinksBrokerIdentityAndAllowsOptionalProfileFields(t *testing.T) {
+	var created map[string]any
+	var linked keycloakFederatedIdentity
+	var server *httptest.Server
+	server = httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.URL.Path == "/realms/master/protocol/openid-connect/token" {
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+			return
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+		case "POST /admin/realms/acme/users":
+			if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+				t.Fatalf("decode created user: %v", err)
+			}
+			writer.Header().Set("Location", server.URL+"/admin/realms/acme/users/user-1")
+			writer.WriteHeader(stdhttp.StatusCreated)
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			if err := json.NewDecoder(request.Body).Decode(&linked); err != nil {
+				t.Fatalf("decode Broker identity: %v", err)
+			}
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.EnsureUser(context.Background(), projectionapplication.Snapshot{IdentityID: "identity-1", DisplayName: "测试用户", UserEnabled: true}); err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if created["firstName"] != "测试用户" {
+		t.Fatalf("created firstName = %#v", created["firstName"])
+	}
+	for _, optional := range []string{"email", "lastName", "requiredActions"} {
+		if _, exists := created[optional]; exists {
+			t.Fatalf("optional Keycloak field %q must be omitted: %#v", optional, created)
+		}
+	}
+	if linked.IdentityProvider != platformBrokerAlias || linked.UserID != "identity-1" || linked.UserName != "platform-identity-1" {
+		t.Fatalf("Broker identity = %#v", linked)
+	}
+}
+
 func TestKeycloakAdminUsesServiceAccountClientCredentialsWhenConfigured(t *testing.T) {
 	// Environment values must never influence an explicitly composed adapter.
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "ignored-environment-client")
@@ -257,6 +309,8 @@ func TestKeycloakAdminDisablesUserAndRevokesOnlyManagedOrganizationGroups(t *tes
 				t.Fatalf("decode user: %v", err)
 			}
 			writer.WriteHeader(stdhttp.StatusNoContent)
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{{IdentityProvider: platformBrokerAlias, UserID: "identity-1", UserName: "platform-identity-1"}})
 		case "GET /admin/realms/acme/users/user-1/groups":
 			writeJSON(t, writer, stdhttp.StatusOK, []keycloakGroup{
 				{ID: "old-managed", Path: "/basic-platform/tenant-tenant-1/organization-old-org"},

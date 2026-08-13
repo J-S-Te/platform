@@ -243,7 +243,11 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		return keycloakStatusError("read Keycloak Realm", response, stdhttp.StatusNotFound)
 	}
 	response.Body.Close()
-	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{"realm": control.realm, "enabled": true, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds})
+	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{
+		"realm": control.realm, "enabled": true,
+		"registrationAllowed": false, "verifyEmail": false,
+		"eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds,
+	})
 	if err != nil {
 		return err
 	}
@@ -258,8 +262,10 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 	if realm == nil {
 		return false, nil
 	}
-	payload := make(map[string]any, 3)
+	payload := make(map[string]any, 5)
 	changed := false
+	payload["registrationAllowed"] = false
+	payload["verifyEmail"] = false
 	payload["eventsEnabled"] = true
 	payload["adminEventsEnabled"] = true
 	payload["eventsExpiration"] = keycloakDefaultRealmEventsExpirationSeconds
@@ -270,6 +276,12 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 		changed = true
 	}
 	if !asPositiveInt64(realm["eventsExpiration"]) {
+		changed = true
+	}
+	if current, ok := realm["registrationAllowed"].(bool); !ok || current {
+		changed = true
+	}
+	if current, ok := realm["verifyEmail"].(bool); !ok || current {
 		changed = true
 	}
 	if changed {
@@ -316,6 +328,20 @@ func asBool(value any) bool {
 	return current
 }
 
+func (control *keycloakControlPlane) brokerRepresentation(clientID, clientSecret, backchannel string) map[string]any {
+	return map[string]any{
+		"alias": "basic-platform", "displayName": "基础平台", "providerId": "oidc",
+		"enabled": true, "trustEmail": true, "storeToken": false,
+		"updateProfileFirstLoginMode": "off",
+		"config": map[string]string{
+			"clientId": clientID, "clientSecret": clientSecret, "clientAuthMethod": "client_secret_basic",
+			"authorizationUrl": control.platformIssuer + "/authorize", "tokenUrl": backchannel + "/oauth2/token",
+			"userInfoUrl": backchannel + "/oauth2/userinfo", "logoutUrl": control.platformIssuer + "/oauth2/logout",
+			"defaultScope": "openid profile",
+		},
+	}
+}
+
 // ensureBrokerUserProfile declares the attributes imported from Basic Platform.
 // Keycloak 26 validates mapper targets against the Realm user-profile schema,
 // so an Attribute Importer cannot create arbitrary attributes on first login.
@@ -334,6 +360,19 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 		return err
 	}
 	attributes, _ := profile["attributes"].([]any)
+	// Basic Platform owns profile validation. Keycloak must not turn optional
+	// platform fields into a first-login registration form.
+	for index, raw := range attributes {
+		attribute, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch attribute["name"] {
+		case "email", "firstName", "lastName":
+			delete(attribute, "required")
+			attributes[index] = attribute
+		}
+	}
 	for _, claim := range keycloakIdentityClaimMappings {
 		found := false
 		for index, raw := range attributes {
@@ -403,7 +442,11 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 	// token and userinfo calls are server-to-server and may use the backchannel;
 	// exposing an internal Docker hostname as logoutUrl makes Keycloak redirect
 	// the user's browser to an unreachable host during Broker logout.
-	payload := map[string]any{"alias": "basic-platform", "displayName": "基础平台", "providerId": "oidc", "enabled": true, "trustEmail": true, "storeToken": false, "config": map[string]string{"clientId": clientID, "clientSecret": clientSecret, "clientAuthMethod": "client_secret_basic", "authorizationUrl": control.platformIssuer + "/authorize", "tokenUrl": backchannel + "/oauth2/token", "userInfoUrl": backchannel + "/oauth2/userinfo", "logoutUrl": control.platformIssuer + "/oauth2/logout", "defaultScope": "openid profile"}}
+	// Users are provisioned and linked by the platform authorization projection
+	// before they can enter a subsystem. Never expose Keycloak's first-login
+	// profile completion form: email and split first/last names are optional in
+	// the platform and must not become an additional registration contract.
+	payload := control.brokerRepresentation(clientID, clientSecret, backchannel)
 	if exists {
 		response, err = control.request(ctx, token, stdhttp.MethodPut, base, payload)
 	} else {
