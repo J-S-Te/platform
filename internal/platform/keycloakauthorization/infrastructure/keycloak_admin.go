@@ -137,8 +137,11 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 }
 
 func (admin *KeycloakAdmin) listEventPage(ctx context.Context, token, suffix string) ([]map[string]any, error) {
+	// request already prefixes every Admin API path with
+	// /admin/realms/{realm}; passing the fully qualified path here would send
+	// /admin/realms/{realm}/admin/realms/{realm}/events and always return 404.
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, suffix, nil)
 	path := "/admin/realms/" + url.PathEscape(admin.realm) + suffix
-	response, err := admin.request(ctx, token, stdhttp.MethodGet, path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("request path %q: %w", path, err)
 	}
