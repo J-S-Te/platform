@@ -35,6 +35,99 @@ func TestKeycloakIdentityClaimMappingsKeepTokenSmallAndUseIdentityAsSubject(t *t
 	}
 }
 
+func TestBrokerRepresentationSkipsKeycloakProfileRegistration(t *testing.T) {
+	control := NewKeycloakControlPlane("http://keycloak:8080", "platform", "admin", "secret", "broker", "broker-secret", "http://platform.example", "http://platform-api:8080")
+	payload := control.brokerRepresentation("broker", "broker-secret", "http://platform-api:8080")
+	if got := payload["updateProfileFirstLoginMode"]; got != "off" {
+		t.Fatalf("updateProfileFirstLoginMode = %#v, want off", got)
+	}
+	config, ok := payload["config"].(map[string]string)
+	if !ok {
+		t.Fatalf("broker config = %#v", payload["config"])
+	}
+	if got := config["defaultScope"]; got != "openid profile" {
+		t.Fatalf("defaultScope = %q, want optional email omitted", got)
+	}
+}
+
+func TestEnsureBrokerReviewProfileDisabledUpdatesEffectiveFlowConfig(t *testing.T) {
+	var updated map[string]any
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/platform/identity-provider/instances/basic-platform":
+			_ = json.NewEncoder(response).Encode(map[string]string{"firstBrokerLoginFlowAlias": "custom first broker"})
+		case "GET /admin/realms/platform":
+			t.Fatal("realm fallback must not override the provider-specific Broker flow")
+		case "GET /admin/realms/platform/authentication/flows/custom first broker/executions":
+			_ = json.NewEncoder(response).Encode([]map[string]string{{"id": "review-execution", "providerId": keycloakReviewProfileProviderID, "authenticationConfig": "review-config"}})
+		case "GET /admin/realms/platform/authentication/config/review-config":
+			_ = json.NewEncoder(response).Encode(map[string]any{"id": "review-config", "alias": "review profile", "config": map[string]string{keycloakReviewProfileModeKey: "missing"}})
+		case "PUT /admin/realms/platform/authentication/config/review-config":
+			if err := json.NewDecoder(request.Body).Decode(&updated); err != nil {
+				t.Fatalf("decode Review Profile config: %v", err)
+			}
+			response.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
+	if err := control.ensureBrokerReviewProfileDisabled(context.Background(), "admin-token"); err != nil {
+		t.Fatalf("ensureBrokerReviewProfileDisabled() error = %v", err)
+	}
+	config, _ := updated["config"].(map[string]any)
+	if got := config[keycloakReviewProfileModeKey]; got != "off" {
+		t.Fatalf("effective Review Profile mode = %#v, want off", got)
+	}
+}
+
+func TestEnsureBrokerUserProfileKeepsPlatformProfileFieldsOptional(t *testing.T) {
+	var updated map[string]any
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.URL.Path != "/admin/realms/platform/users/profile" {
+			t.Fatalf("path = %q", request.URL.Path)
+		}
+		switch request.Method {
+		case stdhttp.MethodGet:
+			_ = json.NewEncoder(response).Encode(map[string]any{"attributes": []any{
+				map[string]any{"name": "username", "required": map[string]any{"roles": []string{"user"}}},
+				map[string]any{"name": "email", "required": map[string]any{"roles": []string{"user"}}},
+				map[string]any{"name": "firstName", "required": map[string]any{"roles": []string{"user"}}},
+				map[string]any{"name": "lastName", "required": map[string]any{"roles": []string{"user"}}},
+			}})
+		case stdhttp.MethodPut:
+			if err := json.NewDecoder(request.Body).Decode(&updated); err != nil {
+				t.Fatalf("decode profile: %v", err)
+			}
+			response.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("method = %q", request.Method)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
+	if err := control.ensureBrokerUserProfile(context.Background(), "admin-token"); err != nil {
+		t.Fatalf("ensureBrokerUserProfile() error = %v", err)
+	}
+	attributes, _ := updated["attributes"].([]any)
+	required := map[string]bool{}
+	for _, raw := range attributes {
+		attribute, _ := raw.(map[string]any)
+		_, required[attribute["name"].(string)] = attribute["required"]
+	}
+	if !required["username"] {
+		t.Fatal("username requirement must remain managed by Keycloak")
+	}
+	for _, name := range []string{"email", "firstName", "lastName"} {
+		if required[name] {
+			t.Fatalf("%s remained required", name)
+		}
+	}
+}
+
 func TestKeycloakAuthorizationProtocolMappersSplitTokenPurposeAndAudience(t *testing.T) {
 	mappers := keycloakAuthorizationProtocolMappers("contract_management-prod-web")
 	if len(mappers) != 3 {
@@ -214,7 +307,7 @@ func TestEnsureRealmCreatesRealmWithAuditEventRetention(t *testing.T) {
 			if err := json.Unmarshal(body, &payload); err != nil {
 				t.Fatalf("decode payload: %v", err)
 			}
-			expected := map[string]any{"realm": "platform", "enabled": true, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": float64(keycloakDefaultRealmEventsExpirationSeconds)}
+			expected := map[string]any{"realm": "platform", "enabled": true, "registrationAllowed": false, "verifyEmail": false, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": float64(keycloakDefaultRealmEventsExpirationSeconds)}
 			for key, value := range expected {
 				if !reflect.DeepEqual(payload[key], value) {
 					t.Fatalf("realm payload %q = %#v, want %#v", key, payload[key], value)
@@ -267,6 +360,12 @@ func TestEnsureRealmEnablesEventsAndAdminEvents(t *testing.T) {
 			}
 			if got, ok := payload["adminEventsEnabled"].(bool); !ok || !got {
 				t.Fatalf("adminEventsEnabled = %#v", payload["adminEventsEnabled"])
+			}
+			if got, ok := payload["registrationAllowed"].(bool); !ok || got {
+				t.Fatalf("registrationAllowed = %#v", payload["registrationAllowed"])
+			}
+			if got, ok := payload["verifyEmail"].(bool); !ok || got {
+				t.Fatalf("verifyEmail = %#v", payload["verifyEmail"])
 			}
 			expiration, ok := payload["eventsExpiration"].(float64)
 			if !ok || int64(expiration) != keycloakDefaultRealmEventsExpirationSeconds {

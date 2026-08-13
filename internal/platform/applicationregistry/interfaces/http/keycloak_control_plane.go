@@ -243,7 +243,11 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		return keycloakStatusError("read Keycloak Realm", response, stdhttp.StatusNotFound)
 	}
 	response.Body.Close()
-	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{"realm": control.realm, "enabled": true, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds})
+	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{
+		"realm": control.realm, "enabled": true,
+		"registrationAllowed": false, "verifyEmail": false,
+		"eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds,
+	})
 	if err != nil {
 		return err
 	}
@@ -258,8 +262,10 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 	if realm == nil {
 		return false, nil
 	}
-	payload := make(map[string]any, 3)
+	payload := make(map[string]any, 5)
 	changed := false
+	payload["registrationAllowed"] = false
+	payload["verifyEmail"] = false
 	payload["eventsEnabled"] = true
 	payload["adminEventsEnabled"] = true
 	payload["eventsExpiration"] = keycloakDefaultRealmEventsExpirationSeconds
@@ -270,6 +276,12 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 		changed = true
 	}
 	if !asPositiveInt64(realm["eventsExpiration"]) {
+		changed = true
+	}
+	if current, ok := realm["registrationAllowed"].(bool); !ok || current {
+		changed = true
+	}
+	if current, ok := realm["verifyEmail"].(bool); !ok || current {
 		changed = true
 	}
 	if changed {
@@ -316,6 +328,147 @@ func asBool(value any) bool {
 	return current
 }
 
+func (control *keycloakControlPlane) brokerRepresentation(clientID, clientSecret, backchannel string) map[string]any {
+	return map[string]any{
+		"alias": "basic-platform", "displayName": "基础平台", "providerId": "oidc",
+		"enabled": true, "trustEmail": true, "storeToken": false,
+		"updateProfileFirstLoginMode": "off",
+		"config": map[string]string{
+			"clientId": clientID, "clientSecret": clientSecret, "clientAuthMethod": "client_secret_basic",
+			"authorizationUrl": control.platformIssuer + "/authorize", "tokenUrl": backchannel + "/oauth2/token",
+			"userInfoUrl": backchannel + "/oauth2/userinfo", "logoutUrl": control.platformIssuer + "/oauth2/logout",
+			"defaultScope": "openid profile",
+		},
+	}
+}
+
+const (
+	keycloakDefaultFirstBrokerLoginFlow = "first broker login"
+	keycloakReviewProfileProviderID     = "idp-review-profile"
+	keycloakReviewProfileModeKey        = "update.profile.on.first.login"
+)
+
+// ensureBrokerReviewProfileDisabled reconciles the effective Keycloak 26
+// setting. updateProfileFirstLoginMode on the IdentityProvider representation
+// is retained for compatibility, but current Keycloak versions read the mode
+// from the Review Profile authenticator execution in the first Broker flow.
+func (control *keycloakControlPlane) ensureBrokerReviewProfileDisabled(ctx context.Context, token string) error {
+	realmPath := "/admin/realms/" + url.PathEscape(control.realm)
+	providerPath := realmPath + "/identity-provider/instances/" + url.PathEscape("basic-platform")
+	response, err := control.request(ctx, token, stdhttp.MethodGet, providerPath, nil)
+	if err != nil {
+		return err
+	}
+	if err := keycloakStatusError("read effective Keycloak Broker flow", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return err
+	}
+	var provider struct {
+		FirstBrokerLoginFlowAlias string `json:"firstBrokerLoginFlowAlias"`
+	}
+	decodeErr := json.NewDecoder(response.Body).Decode(&provider)
+	response.Body.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	flowAlias := strings.TrimSpace(provider.FirstBrokerLoginFlowAlias)
+	if flowAlias == "" {
+		response, err = control.request(ctx, token, stdhttp.MethodGet, realmPath, nil)
+		if err != nil {
+			return err
+		}
+		if err := keycloakStatusError("read Keycloak Realm Broker flow", response, stdhttp.StatusOK); err != nil {
+			response.Body.Close()
+			return err
+		}
+		var realm struct {
+			FirstBrokerLoginFlow string `json:"firstBrokerLoginFlow"`
+		}
+		decodeErr = json.NewDecoder(response.Body).Decode(&realm)
+		response.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		flowAlias = strings.TrimSpace(realm.FirstBrokerLoginFlow)
+		if flowAlias == "" {
+			flowAlias = keycloakDefaultFirstBrokerLoginFlow
+		}
+	}
+	executionsPath := realmPath + "/authentication/flows/" + url.PathEscape(flowAlias) + "/executions"
+	response, err = control.request(ctx, token, stdhttp.MethodGet, executionsPath, nil)
+	if err != nil {
+		return err
+	}
+	if err := keycloakStatusError("read Keycloak first Broker login executions", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return err
+	}
+	var executions []struct {
+		ID                   string `json:"id"`
+		ProviderID           string `json:"providerId"`
+		AuthenticationConfig string `json:"authenticationConfig"`
+	}
+	decodeErr = json.NewDecoder(response.Body).Decode(&executions)
+	response.Body.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	for _, execution := range executions {
+		if execution.ProviderID != keycloakReviewProfileProviderID || strings.TrimSpace(execution.ID) == "" {
+			continue
+		}
+		configID := strings.TrimSpace(execution.AuthenticationConfig)
+		if configID == "" {
+			payload := map[string]any{"alias": "basic-platform-review-profile", "config": map[string]string{keycloakReviewProfileModeKey: "off"}}
+			response, err = control.request(ctx, token, stdhttp.MethodPost, realmPath+"/authentication/executions/"+url.PathEscape(execution.ID)+"/config", payload)
+			if err != nil {
+				return err
+			}
+			defer response.Body.Close()
+			return keycloakStatusError("configure Keycloak Broker Review Profile", response, stdhttp.StatusCreated)
+		}
+		configPath := realmPath + "/authentication/config/" + url.PathEscape(configID)
+		response, err = control.request(ctx, token, stdhttp.MethodGet, configPath, nil)
+		if err != nil {
+			return err
+		}
+		if err := keycloakStatusError("read Keycloak Broker Review Profile config", response, stdhttp.StatusOK); err != nil {
+			response.Body.Close()
+			return err
+		}
+		var config struct {
+			ID     string            `json:"id,omitempty"`
+			Alias  string            `json:"alias"`
+			Config map[string]string `json:"config"`
+		}
+		decodeErr = json.NewDecoder(response.Body).Decode(&config)
+		response.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if config.Config[keycloakReviewProfileModeKey] == "off" {
+			return nil
+		}
+		if config.Config == nil {
+			config.Config = map[string]string{}
+		}
+		if strings.TrimSpace(config.Alias) == "" {
+			config.Alias = "basic-platform-review-profile"
+		}
+		config.ID = configID
+		config.Config[keycloakReviewProfileModeKey] = "off"
+		response, err = control.request(ctx, token, stdhttp.MethodPut, configPath, config)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		return keycloakStatusError("update Keycloak Broker Review Profile config", response, stdhttp.StatusNoContent)
+	}
+	// A custom flow without Review Profile already satisfies the no-interaction
+	// contract and needs no authenticator configuration.
+	return nil
+}
+
 // ensureBrokerUserProfile declares the attributes imported from Basic Platform.
 // Keycloak 26 validates mapper targets against the Realm user-profile schema,
 // so an Attribute Importer cannot create arbitrary attributes on first login.
@@ -334,6 +487,19 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 		return err
 	}
 	attributes, _ := profile["attributes"].([]any)
+	// Basic Platform owns profile validation. Keycloak must not turn optional
+	// platform fields into a first-login registration form.
+	for index, raw := range attributes {
+		attribute, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch attribute["name"] {
+		case "email", "firstName", "lastName":
+			delete(attribute, "required")
+			attributes[index] = attribute
+		}
+	}
 	for _, claim := range keycloakIdentityClaimMappings {
 		found := false
 		for index, raw := range attributes {
@@ -403,7 +569,11 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 	// token and userinfo calls are server-to-server and may use the backchannel;
 	// exposing an internal Docker hostname as logoutUrl makes Keycloak redirect
 	// the user's browser to an unreachable host during Broker logout.
-	payload := map[string]any{"alias": "basic-platform", "displayName": "基础平台", "providerId": "oidc", "enabled": true, "trustEmail": true, "storeToken": false, "config": map[string]string{"clientId": clientID, "clientSecret": clientSecret, "clientAuthMethod": "client_secret_basic", "authorizationUrl": control.platformIssuer + "/authorize", "tokenUrl": backchannel + "/oauth2/token", "userInfoUrl": backchannel + "/oauth2/userinfo", "logoutUrl": control.platformIssuer + "/oauth2/logout", "defaultScope": "openid profile"}}
+	// Users are provisioned and linked by the platform authorization projection
+	// before they can enter a subsystem. Never expose Keycloak's first-login
+	// profile completion form: email and split first/last names are optional in
+	// the platform and must not become an additional registration contract.
+	payload := control.brokerRepresentation(clientID, clientSecret, backchannel)
 	if exists {
 		response, err = control.request(ctx, token, stdhttp.MethodPut, base, payload)
 	} else {
@@ -417,6 +587,9 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		return err
 	}
 	response.Body.Close()
+	if err := control.ensureBrokerReviewProfileDisabled(ctx, token); err != nil {
+		return err
+	}
 	if err := control.ensureBrokerUserProfile(ctx, token); err != nil {
 		return err
 	}
