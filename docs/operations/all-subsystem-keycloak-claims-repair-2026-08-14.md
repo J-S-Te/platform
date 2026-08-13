@@ -43,6 +43,25 @@ project_management@sha256:a60433e590eda9a8468089b2d320494b452b108bcd601d810935d5
 /opt/basic-platform/backups/project-20260813T155830Z.sql.gz
 ```
 
+客户门户已基于提交 `dd80c74` 构建并发布仅替换 `portal-server` 的不可变热修复镜像，CRM 继续使用原不可变镜像：
+
+```text
+customer_and_opportunity@sha256:12ad2575978b91c504f2c4dbe61299a9ce745e475bc98f094d52787bac495bd3
+```
+
+发布前数据库备份：
+
+```text
+/opt/basic-platform/backups/customer-20260813T160717Z.sql.gz
+/opt/basic-platform/backups/portal-20260813T160717Z.sql.gz
+```
+
+三个运行配置已补齐并保持 `0600` 权限：
+
+- `runtime/customer.env`: `OIDC_IDP_HINT=basic-platform`
+- `runtime/portal.env`: `PORTAL_OIDC_IDP_HINT=basic-platform`
+- `runtime/project.env`: `OIDC_IDP_HINT=basic-platform`
+
 ## 永久代码修复
 
 ### 基础平台
@@ -70,7 +89,8 @@ project_management@sha256:a60433e590eda9a8468089b2d320494b452b108bcd601d810935d5
 
 - 客户与商机管理已通过浏览器完整跳转并进入客户列表。
 - 项目管理在补齐 Mapper并发布新镜像后，已通过浏览器完整跳转并进入系统首页。
-- 客户门户的服务器 Mapper 已修复；其本地 Claims 漏传修复需要构建并发布新镜像后完成最终浏览器验收。
+- 客户门户的新镜像健康检查通过，浏览器回调已从 `PORTAL_OIDC_INVALID_CLAIMS` 推进到 `PORTAL_IDENTITY_NOT_PROVISIONED`，证明 Keycloak Claim 与本地 Claims 传递均已生效。
+- `PORTAL_IDENTITY_NOT_PROVISIONED` 是客户数据隔离门禁，不是 Keycloak 故障：客户门户会话必须绑定一个明确的 `customer_id`。基础平台内部账号即使拥有平台管理员权限，也不能自动绑定任意客户；需通过现有客户邀请/预配流程创建 `portal_identity_links` 后才能进入客户门户。
 
 ## 后续清理
 
