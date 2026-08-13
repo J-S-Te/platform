@@ -333,6 +333,7 @@ func (control *keycloakControlPlane) brokerRepresentation(clientID, clientSecret
 		"alias": "basic-platform", "displayName": "基础平台", "providerId": "oidc",
 		"enabled": true, "trustEmail": true, "storeToken": false,
 		"updateProfileFirstLoginMode": "off",
+		"firstBrokerLoginFlowAlias":   keycloakPrelinkedBrokerFlowAlias,
 		"config": map[string]string{
 			"clientId": clientID, "clientSecret": clientSecret, "clientAuthMethod": "client_secret_basic",
 			"authorizationUrl": control.platformIssuer + "/authorize", "tokenUrl": backchannel + "/oauth2/token",
@@ -344,9 +345,128 @@ func (control *keycloakControlPlane) brokerRepresentation(clientID, clientSecret
 
 const (
 	keycloakDefaultFirstBrokerLoginFlow = "first broker login"
+	keycloakPrelinkedBrokerFlowAlias    = "basic-platform prelinked only"
+	keycloakDenyAccessProviderID        = "deny-access-authenticator"
 	keycloakReviewProfileProviderID     = "idp-review-profile"
 	keycloakReviewProfileModeKey        = "update.profile.on.first.login"
 )
+
+// ensurePrelinkedBrokerFlow creates a provider-specific, fail-closed first
+// login flow. Keycloak skips this flow for an already linked Federated
+// Identity. An unknown subject reaches the single deny execution instead of
+// entering Keycloak's JIT user/profile registration flow.
+func (control *keycloakControlPlane) ensurePrelinkedBrokerFlow(ctx context.Context, token string) error {
+	realmPath := "/admin/realms/" + url.PathEscape(control.realm)
+	flowPath := realmPath + "/authentication/flows/" + url.PathEscape(keycloakPrelinkedBrokerFlowAlias)
+	response, err := control.request(ctx, token, stdhttp.MethodGet, flowPath, nil)
+	if err != nil {
+		return err
+	}
+	status := response.StatusCode
+	response.Body.Close()
+	if status == stdhttp.StatusNotFound {
+		response, err = control.request(ctx, token, stdhttp.MethodPost, realmPath+"/authentication/flows", map[string]any{
+			"alias": keycloakPrelinkedBrokerFlowAlias, "description": "Basic Platform projected users only",
+			"providerId": "basic-flow", "topLevel": true, "builtIn": false,
+		})
+		if err != nil {
+			return err
+		}
+		status = response.StatusCode
+		response.Body.Close()
+		if status != stdhttp.StatusCreated && status != stdhttp.StatusConflict {
+			return fmt.Errorf("create prelinked-only Keycloak Broker flow returned HTTP %d", status)
+		}
+	} else if status != stdhttp.StatusOK {
+		return fmt.Errorf("read prelinked-only Keycloak Broker flow returned HTTP %d", status)
+	}
+
+	type flowExecution struct {
+		ID          string `json:"id"`
+		ProviderID  string `json:"providerId"`
+		Requirement string `json:"requirement"`
+	}
+	executionsPath := flowPath + "/executions"
+	readExecutions := func() ([]flowExecution, error) {
+		response, err := control.request(ctx, token, stdhttp.MethodGet, executionsPath, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		if err := keycloakStatusError("read prelinked-only Keycloak Broker executions", response, stdhttp.StatusOK); err != nil {
+			return nil, err
+		}
+		var executions []flowExecution
+		if err := json.NewDecoder(response.Body).Decode(&executions); err != nil {
+			return nil, err
+		}
+		return executions, nil
+	}
+	executions, err := readExecutions()
+	if err != nil {
+		return err
+	}
+	denyID := ""
+	for _, execution := range executions {
+		if execution.ProviderID == keycloakDenyAccessProviderID && denyID == "" {
+			denyID = strings.TrimSpace(execution.ID)
+			continue
+		}
+		if strings.TrimSpace(execution.ID) == "" {
+			continue
+		}
+		response, err = control.request(ctx, token, stdhttp.MethodDelete, realmPath+"/authentication/executions/"+url.PathEscape(execution.ID), nil)
+		if err != nil {
+			return err
+		}
+		status = response.StatusCode
+		response.Body.Close()
+		if status != stdhttp.StatusNoContent {
+			return fmt.Errorf("remove drifted prelinked-only Broker execution returned HTTP %d", status)
+		}
+	}
+	if denyID == "" {
+		response, err = control.request(ctx, token, stdhttp.MethodPost, flowPath+"/executions/execution", map[string]string{"provider": keycloakDenyAccessProviderID})
+		if err != nil {
+			return err
+		}
+		status = response.StatusCode
+		response.Body.Close()
+		if status != stdhttp.StatusCreated {
+			return fmt.Errorf("add deny execution to prelinked-only Broker flow returned HTTP %d", status)
+		}
+		executions, err = readExecutions()
+		if err != nil {
+			return err
+		}
+		for _, execution := range executions {
+			if execution.ProviderID == keycloakDenyAccessProviderID {
+				denyID = strings.TrimSpace(execution.ID)
+				break
+			}
+		}
+	}
+	if denyID == "" {
+		return fmt.Errorf("prelinked-only Keycloak Broker flow has no deny execution")
+	}
+	response, err = control.request(ctx, token, stdhttp.MethodPut, executionsPath, map[string]string{"id": denyID, "requirement": "REQUIRED"})
+	if err != nil {
+		return err
+	}
+	status = response.StatusCode
+	response.Body.Close()
+	if status != stdhttp.StatusNoContent {
+		return fmt.Errorf("require deny execution in prelinked-only Broker flow returned HTTP %d", status)
+	}
+	executions, err = readExecutions()
+	if err != nil {
+		return err
+	}
+	if len(executions) != 1 || executions[0].ProviderID != keycloakDenyAccessProviderID || executions[0].Requirement != "REQUIRED" {
+		return fmt.Errorf("prelinked-only Keycloak Broker flow did not converge to one required deny execution")
+	}
+	return nil
+}
 
 // ensureBrokerReviewProfileDisabled reconciles the effective Keycloak 26
 // setting. updateProfileFirstLoginMode on the IdentityProvider representation
@@ -537,6 +657,35 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 	if err := keycloakStatusError("configure Keycloak user profile", response, stdhttp.StatusOK, stdhttp.StatusNoContent); err != nil {
 		return err
 	}
+	response.Body.Close()
+	response, err = control.request(ctx, token, stdhttp.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if err := keycloakStatusError("verify Keycloak user profile", response, stdhttp.StatusOK); err != nil {
+		return err
+	}
+	var verified map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&verified); err != nil {
+		return err
+	}
+	verifiedAttributes, _ := verified["attributes"].([]any)
+	for _, raw := range verifiedAttributes {
+		attribute, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := attribute["name"].(string)
+		if name != "email" && name != "firstName" && name != "lastName" {
+			continue
+		}
+		if required, exists := attribute["required"]; exists && required != nil {
+			if encoded, _ := json.Marshal(required); string(encoded) != "{}" && string(encoded) != "[]" && string(encoded) != "false" && string(encoded) != "null" {
+				return fmt.Errorf("Keycloak user profile field %s remained required", name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -548,6 +697,9 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		return err
 	}
 	if err := control.ensureRealm(ctx, token); err != nil {
+		return err
+	}
+	if err := control.ensurePrelinkedBrokerFlow(ctx, token); err != nil {
 		return err
 	}
 	base := "/admin/realms/" + url.PathEscape(control.realm) + "/identity-provider/instances/basic-platform"
@@ -587,8 +739,27 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		return err
 	}
 	response.Body.Close()
-	if err := control.ensureBrokerReviewProfileDisabled(ctx, token); err != nil {
+	response, err = control.request(ctx, token, stdhttp.MethodGet, base, nil)
+	if err != nil {
 		return err
+	}
+	if err := keycloakStatusError("verify Keycloak broker", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return err
+	}
+	var verifiedBroker struct {
+		FirstBrokerLoginFlowAlias string `json:"firstBrokerLoginFlowAlias"`
+	}
+	decodeErr := json.NewDecoder(response.Body).Decode(&verifiedBroker)
+	response.Body.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	// Keycloak 26 can keep returning the legacy top-level profile mode as
+	// "on". The provider-specific deny-only flow is the authoritative
+	// no-registration contract.
+	if verifiedBroker.FirstBrokerLoginFlowAlias != keycloakPrelinkedBrokerFlowAlias {
+		return fmt.Errorf("Keycloak Broker policy did not converge to prelinked-only mode")
 	}
 	if err := control.ensureBrokerUserProfile(ctx, token); err != nil {
 		return err
