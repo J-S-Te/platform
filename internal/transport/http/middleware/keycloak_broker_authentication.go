@@ -154,19 +154,14 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
 		return keycloakctx.BrokerClaims{}, errors.New("invalid Keycloak broker JWT claims")
 	}
-	// Keycloak's reserved `sub` claim is the canonical subject. A user-attribute
-	// mapper may project identity_id into that reserved claim without emitting a
-	// second identity_id field; normalize that compact representation before the
-	// invariant check so identity_id == sub remains explicit to downstream code.
-	if strings.TrimSpace(payload.IdentityID) == "" {
-		payload.IdentityID = payload.Subject
-	}
+	// Keycloak's reserved `sub` remains the issuer-native subject. The platform
+	// identity_id mapper is a separate, required claim used for authorization.
 	payload.Subject = strings.TrimSpace(payload.Subject)
 	payload.IdentityID = strings.TrimSpace(payload.IdentityID)
 	audience, ok := keycloakAudience(payload.Audience)
 	expiresAt, okExp := keycloakNumericDate(payload.ExpiresAt)
 	issuedAt, okIat := keycloakNumericDate(payload.IssuedAt)
-	if !ok || !okExp || !okIat || payload.Issuer != verifier.issuer || payload.Subject == "" || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.TenantID) == "" || payload.IdentityID == "" || payload.IdentityID != payload.Subject {
+	if !ok || !okExp || !okIat || payload.Issuer != verifier.issuer || payload.Subject == "" || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.TenantID) == "" || payload.IdentityID == "" {
 		return keycloakctx.BrokerClaims{}, errors.New("required Keycloak broker JWT claims are invalid")
 	}
 	now := verifier.now().UTC()

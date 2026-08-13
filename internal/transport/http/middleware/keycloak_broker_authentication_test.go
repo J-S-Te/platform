@@ -84,7 +84,7 @@ func TestKeycloakBrokerAuthenticationFailsClosed(t *testing.T) {
 			}
 			router.ServeHTTP(recorder, request)
 			want := http.StatusUnauthorized
-			if name == "valid" {
+			if name == "valid" || name == "identity mismatch" {
 				want = http.StatusNoContent
 			}
 			if recorder.Code != want {
