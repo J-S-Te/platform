@@ -201,18 +201,22 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          remote_command='cd '"${DEPLOY_PATH}"' && \
-            if ! docker compose --env-file .env --env-file .release.env -f compose.yaml up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then \
-              echo "[ci] subsystem-provisioner start failed" >&2; \
-              docker compose --env-file .env --env-file .release.env -f compose.yaml ps subsystem-provisioner || true; \
-              subsystem_id=$(docker compose --env-file .env --env-file .release.env -f compose.yaml ps -q subsystem-provisioner); \
-              if [ -n "$subsystem_id" ]; then \
-                docker inspect "$subsystem_id" --format '{{json .State}}' || true; \
-              fi; \
-              docker compose --env-file .env --env-file .release.env -f compose.yaml logs --no-color --tail 200 subsystem-provisioner || true; \
-              exit 1; \
-            fi'
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
+          # 通过 stdin 将完整脚本交给远端 bash，避免把 heredoc/单引号/反斜杠
+          # 拼进 ssh 命令参数后被本地 shell、ssh 和远端 shell 多次解析。
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd $(printf '%q' "$DEPLOY_PATH") && bash -s" <<'REMOTE_SCRIPT'
+          set -Eeuo pipefail
+          compose=(docker compose --env-file .env --env-file .release.env -f compose.yaml)
+          if ! "${compose[@]}" up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
+            echo "[ci] subsystem-provisioner start failed" >&2
+            "${compose[@]}" ps subsystem-provisioner || true
+            subsystem_id="$("${compose[@]}" ps -q subsystem-provisioner || true)"
+            if [[ -n "$subsystem_id" ]]; then
+              docker inspect "$subsystem_id" --format '{{json .State}}' || true
+            fi
+            "${compose[@]}" logs --no-color --tail 200 subsystem-provisioner || true
+            exit 1
+          fi
+          REMOTE_SCRIPT
 
       - name: Migrate and deploy immutable platform image
         if: steps.detect.outputs.backend_changed == 'true'
