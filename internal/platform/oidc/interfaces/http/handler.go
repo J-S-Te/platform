@@ -89,10 +89,12 @@ type AccessTokenSubjectResolver interface {
 // normal platform OAuth endpoints continue to accept platform-issued access tokens.
 type ExternalAuthorizationTokenClaims struct {
 	Subject         string
+	IdentityID      string
 	TenantID        string
 	SessionID       string
 	AuthorizedParty string
 	Audience        []string
+	TokenUse        string
 }
 
 type ExternalAuthorizationTokenVerifier interface {

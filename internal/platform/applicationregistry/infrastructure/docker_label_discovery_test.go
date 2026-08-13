@@ -10,7 +10,7 @@ import (
 func TestSubsystemServiceInstanceFromDockerLabels(t *testing.T) {
 	now := time.Now().UTC()
 	service, ok := subsystemServiceInstanceFromDockerLabels(map[string]string{
-		"com.basic-platform.tenant_id": "tenant-1", "com.basic-platform.application_id": "app-1", "com.basic-platform.environment_id": "env-1",
+		"com.basic-platform.discovery":        "v1",
 		"com.basic-platform.application_code": "orders", "com.basic-platform.environment": "prod", "com.basic-platform.service_name": "api", "com.basic-platform.service_role": "business",
 		"com.basic-platform.internal_host": "orders-api", "com.basic-platform.internal_port": "8080", "com.basic-platform.protocol": "http", "com.basic-platform.path_prefix": "/orders/", "com.basic-platform.version": "1.2.3",
 	}, "healthy", now)
@@ -20,6 +20,9 @@ func TestSubsystemServiceInstanceFromDockerLabels(t *testing.T) {
 	if service.Status != application.SubsystemServiceStatusHealthy || service.InternalPort != 8080 || service.PathPrefix != "/orders" {
 		t.Fatalf("unexpected service: %+v", service)
 	}
+	if service.TenantID != "" || service.ApplicationID != "" || service.EnvironmentID != "" {
+		t.Fatalf("container labels unexpectedly supplied database identity: %+v", service)
+	}
 	if service.LastSeenAt == nil || !service.LastSeenAt.Equal(now) {
 		t.Fatalf("expected last seen timestamp %v, got %v", now, service.LastSeenAt)
 	}
@@ -27,7 +30,7 @@ func TestSubsystemServiceInstanceFromDockerLabels(t *testing.T) {
 
 func TestSubsystemServiceInstanceFromDockerLabelsRejectsInvalidPortAndTarget(t *testing.T) {
 	labels := map[string]string{
-		"com.basic-platform.tenant_id": "tenant-1", "com.basic-platform.application_id": "app-1", "com.basic-platform.environment_id": "env-1",
+		"com.basic-platform.discovery":        "v1",
 		"com.basic-platform.application_code": "orders", "com.basic-platform.environment": "prod", "com.basic-platform.service_name": "api", "com.basic-platform.service_role": "business",
 		"com.basic-platform.internal_host": "orders-api", "com.basic-platform.internal_port": "70000",
 	}
@@ -43,6 +46,7 @@ func TestSubsystemServiceInstanceFromDockerLabelsRejectsInvalidPortAndTarget(t *
 
 func TestSubsystemDiscoveryCandidateIncludesGenericApplicationAndOIDCMetadata(t *testing.T) {
 	candidate, ok := subsystemDiscoveryCandidateFromDockerLabels(map[string]string{
+		"com.basic-platform.discovery":               "v1",
 		"com.basic-platform.application_code":        "inventory",
 		"com.basic-platform.application_name":        "库存管理系统",
 		"com.basic-platform.environment":             "dev",
@@ -60,5 +64,25 @@ func TestSubsystemDiscoveryCandidateIncludesGenericApplicationAndOIDCMetadata(t 
 	}
 	if candidate.ApplicationName != "库存管理系统" || !candidate.OIDCCallbackSupported || candidate.HealthEndpoint != "/healthz" || candidate.Version != "1.2.3" {
 		t.Fatalf("candidate metadata = %+v", candidate)
+	}
+}
+
+func TestSubsystemDiscoveryRejectsMissingOptInAndUnsafePaths(t *testing.T) {
+	labels := map[string]string{
+		"com.basic-platform.application_code":   "inventory",
+		"com.basic-platform.environment":        "dev",
+		"com.basic-platform.service_name":       "inventory-api",
+		"com.basic-platform.service_role":       "business",
+		"com.basic-platform.internal_host":      "inventory-api",
+		"com.basic-platform.internal_port":      "8080",
+		"com.basic-platform.oidc_callback_path": "/auth/callback",
+	}
+	if _, ok := subsystemDiscoveryCandidateFromDockerLabels(labels, "healthy"); ok {
+		t.Fatal("candidate without discovery=v1 was accepted")
+	}
+	labels["com.basic-platform.discovery"] = "v1"
+	labels["com.basic-platform.path_prefix"] = "//attacker.example"
+	if _, ok := subsystemDiscoveryCandidateFromDockerLabels(labels, "healthy"); ok {
+		t.Fatal("candidate with unsafe path prefix was accepted")
 	}
 }

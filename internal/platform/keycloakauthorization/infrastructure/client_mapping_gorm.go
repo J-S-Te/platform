@@ -2,7 +2,10 @@ package infrastructure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,6 +16,25 @@ import (
 
 type ClientMappingStore struct{ database *gorm.DB }
 
+// keycloakProjectionConfigurationVersion identifies the platform-managed
+// projection contract behind a Keycloak Client mapping. Any change to the
+// stable identity attributes or projection semantics must bump this value so
+// previously completed user projections and broker evidence cannot be reused.
+const keycloakProjectionConfigurationVersion = "stable-identity-projection-v1"
+
+type persistedClientMapping struct {
+	Realm             string `gorm:"column:realm"`
+	ClientID          string `gorm:"column:keycloak_client_id"`
+	ConfigurationHash string `gorm:"column:configuration_hash"`
+}
+
+type managedClientConfiguration struct {
+	BaseURL              string `gorm:"column:base_url"`
+	PathPrefix           string `gorm:"column:path_prefix"`
+	CatalogHash          string `gorm:"column:catalog_hash"`
+	ClaimsRoleConfigHash string `gorm:"column:claims_role_config_hash"`
+}
+
 func NewClientMappingStore(database *gorm.DB) (*ClientMappingStore, error) {
 	if database == nil {
 		return nil, errors.New("Keycloak Client mapping database must not be nil")
@@ -21,11 +43,134 @@ func NewClientMappingStore(database *gorm.DB) (*ClientMappingStore, error) {
 }
 
 func (store *ClientMappingStore) SaveKeycloakClientMapping(ctx context.Context, tenantID, applicationID, environmentID, realm, clientID string) error {
+	if store == nil || store.database == nil {
+		return errors.New("Keycloak Client mapping database must not be nil")
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	applicationID = strings.TrimSpace(applicationID)
+	environmentID = strings.TrimSpace(environmentID)
+	realm = strings.TrimSpace(realm)
+	clientID = strings.TrimSpace(clientID)
+	if tenantID == "" || applicationID == "" || environmentID == "" || realm == "" || clientID == "" {
+		return errors.New("Keycloak Client mapping scope, realm and Client ID are required")
+	}
 	now := time.Now().UTC()
-	return store.database.WithContext(ctx).Table("keycloak_application_client_mapping").Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}, {Name: "environment_id"}},
-		DoUpdates: clause.Assignments(map[string]any{"realm": strings.TrimSpace(realm), "keycloak_client_id": strings.TrimSpace(clientID), "status": "SYNCED", "last_synced_at": now, "updated_at": now}),
-	}).Create(map[string]any{"tenant_id": strings.TrimSpace(tenantID), "application_id": strings.TrimSpace(applicationID), "environment_id": strings.TrimSpace(environmentID), "realm": strings.TrimSpace(realm), "keycloak_client_id": strings.TrimSpace(clientID), "status": "SYNCED", "last_synced_at": now, "created_at": now, "updated_at": now}).Error
+	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		managedConfiguration, err := loadManagedClientConfiguration(tx, tenantID, applicationID, environmentID)
+		if err != nil {
+			return fmt.Errorf("load platform-managed Keycloak Client configuration: %w", err)
+		}
+		configurationHash := keycloakClientConfigurationHash(
+			realm, clientID, keycloakProjectionConfigurationVersion,
+			managedConfiguration.BaseURL, managedConfiguration.PathPrefix,
+			managedConfiguration.CatalogHash, managedConfiguration.ClaimsRoleConfigHash,
+		)
+		var previous persistedClientMapping
+		err = tx.Table("keycloak_application_client_mapping").
+			Select("realm, keycloak_client_id, configuration_hash").
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND application_id = ? AND environment_id = ?", tenantID, applicationID, environmentID).
+			Take(&previous).Error
+		mappingExists := err == nil
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("load existing Keycloak Client mapping: %w", err)
+		}
+
+		if err := tx.Table("keycloak_application_client_mapping").Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}, {Name: "environment_id"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"realm": realm, "keycloak_client_id": clientID, "configuration_hash": configurationHash,
+				"status": "SYNCED", "last_synced_at": now, "updated_at": now,
+			}),
+		}).Create(map[string]any{
+			"tenant_id": tenantID, "application_id": applicationID, "environment_id": environmentID,
+			"realm": realm, "keycloak_client_id": clientID, "configuration_hash": configurationHash,
+			"status": "SYNCED", "last_synced_at": now, "created_at": now, "updated_at": now,
+		}).Error; err != nil {
+			return fmt.Errorf("save Keycloak Client mapping: %w", err)
+		}
+
+		if !keycloakClientConfigurationChanged(mappingExists, previous, realm, clientID, configurationHash) {
+			return nil
+		}
+		return invalidateKeycloakClientConfiguration(tx, tenantID, applicationID, environmentID, clientID, configurationHash, now)
+	})
+}
+
+func loadManagedClientConfiguration(database *gorm.DB, tenantID, applicationID, environmentID string) (managedClientConfiguration, error) {
+	var configuration managedClientConfiguration
+	err := database.Table("platform_application_environment AS environment").
+		Select(`COALESCE(environment.base_url, '') AS base_url,
+			COALESCE(environment.path_prefix, '') AS path_prefix,
+			COALESCE(catalog.catalog_hash, '') AS catalog_hash,
+			COALESCE(catalog.claims_role_config_hash, '') AS claims_role_config_hash`).
+		Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id = environment.tenant_id AND catalog.application_id = environment.application_id").
+		Where("environment.tenant_id = ? AND environment.application_id = ? AND environment.id = ?", tenantID, applicationID, environmentID).
+		Take(&configuration).Error
+	return configuration, err
+}
+
+func keycloakClientConfigurationHash(realm, clientID, version string, managedValues ...string) string {
+	values := []string{realm, clientID, version}
+	values = append(values, managedValues...)
+	for index := range values {
+		values[index] = strings.TrimSpace(values[index])
+	}
+	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return hex.EncodeToString(digest[:])
+}
+
+func keycloakClientConfigurationChanged(exists bool, previous persistedClientMapping, realm, clientID, configurationHash string) bool {
+	if !exists {
+		return true
+	}
+	return strings.TrimSpace(previous.Realm) != strings.TrimSpace(realm) ||
+		strings.TrimSpace(previous.ClientID) != strings.TrimSpace(clientID) ||
+		strings.TrimSpace(previous.ConfigurationHash) != strings.TrimSpace(configurationHash)
+}
+
+func invalidateKeycloakClientConfiguration(tx *gorm.DB, tenantID, applicationID, environmentID, clientID, configurationHash string, now time.Time) error {
+	readiness := map[string]any{
+		"client_ready": false, "role_catalog_synced": false, "user_projection_completed": false,
+		"broker_login_verified": false, "client_configuration_hash": configurationHash,
+		"broker_verified_configuration_hash": nil, "broker_verified_identity_id": nil,
+		"broker_verified_issuer": nil, "broker_verified_client_id": nil, "broker_verified_by_id": nil,
+		"broker_verified_session_id": nil, "broker_verified_at": nil,
+	}
+	if err := upsertReadiness(tx, tenantID, applicationID, environmentID, readiness, now); err != nil {
+		return fmt.Errorf("invalidate Keycloak switch readiness: %w", err)
+	}
+	if err := tx.Table("keycloak_authorization_reconcile_backfill").
+		Where("tenant_id = ? AND application_id = ? AND environment_id = ?", tenantID, applicationID, environmentID).
+		Delete(nil).Error; err != nil {
+		return fmt.Errorf("reset Keycloak authorization backfill ledger: %w", err)
+	}
+	if err := tx.Table("keycloak_authorization_projection").
+		Where("tenant_id = ? AND application_id = ? AND environment_id = ?", tenantID, applicationID, environmentID).
+		Updates(map[string]any{
+			"keycloak_client_id": clientID, "status": "PENDING", "last_synced_at": nil,
+			"last_error_code": nil, "last_error_message": nil, "updated_at": now,
+		}).Error; err != nil {
+		return fmt.Errorf("invalidate Keycloak authorization projections: %w", err)
+	}
+	var identityIDs []string
+	if err := allKeycloakConfigurationUsersQuery(tx, tenantID).Pluck("id", &identityIDs).Error; err != nil {
+		return fmt.Errorf("load Keycloak configuration reconcile users: %w", err)
+	}
+	for _, identityID := range identityIDs {
+		if err := enqueueInitialKeycloakReconcile(tx, tenantID, strings.TrimSpace(identityID), applicationID, environmentID, now); err != nil {
+			return fmt.Errorf("enqueue Keycloak configuration reconcile: %w", err)
+		}
+	}
+	return nil
+}
+
+func allKeycloakConfigurationUsersQuery(database *gorm.DB, tenantID string) *gorm.DB {
+	// Disabled and business-deleted identities are included so a configuration
+	// migration also disables their Keycloak account and removes stale detailed
+	// authorization attributes. ProjectionSource deliberately handles them with
+	// an empty grant snapshot.
+	return database.Table("iam_user").Where("tenant_id = ?", strings.TrimSpace(tenantID)).Order("id ASC")
 }
 
 // GetKeycloakClientMapping exposes a safe persisted mapping summary for the

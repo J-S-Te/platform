@@ -19,6 +19,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
+const productionAuthorizationContextURL = "http://platform-api:8080/oauth2/authorization-context"
+
 // ProductionComposeSubsystemProvisionerConfig 固定生产部署根、租户和 Compose 入口。
 // 可接入目标由 ProfilesDirectory 中随发布包审核的 YAML 清单提供，不再为每个新子系统
 // 增加一组环境变量，也不允许 HTTP 请求指定文件、镜像、服务或命令。
@@ -649,6 +651,8 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 		return input.CatalogPublisherClientSecret, nil
 	case "issuer_security_center_url":
 		return issuer + "/settings/security", nil
+	case "authorization_context_url":
+		return productionAuthorizationContextURL, nil
 	}
 	parts := strings.Split(source, ".")
 	if len(parts) == 3 && parts[0] == "service" {

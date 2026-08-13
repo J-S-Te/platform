@@ -43,7 +43,8 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorizationContex
 		}
 		return tokenissuer.AuthorizationContext{}, err
 	}
-	return tokenissuer.AuthorizationContext{TenantID: resolved.TenantID, PersonID: resolved.PersonID,
+	return tokenissuer.AuthorizationContext{ClientID: clientID, ApplicationCode: resolved.ApplicationCode, EnvironmentCode: resolved.EnvironmentCode,
+		TenantID: resolved.TenantID, PersonID: resolved.PersonID,
 		Roles: append([]string(nil), resolved.Roles...), Permissions: append([]string(nil), resolved.Permissions...), DataScopes: append([]tokenissuer.DataScope(nil), resolved.DataScopes...),
 		AuthorizationRevision: resolved.AuthzRevision}, nil
 }

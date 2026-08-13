@@ -23,7 +23,7 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management", "customer_and_opportunity", "customer_portal", "project_management"}) {
 		t.Fatalf("supported applications = %#v", capabilities.SupportedApplicationCodes)
 	}
-	if len(capabilities.Targets) != 5 {
+	if len(capabilities.Targets) != 4 {
 		t.Fatalf("targets = %#v", capabilities.Targets)
 	}
 
@@ -38,6 +38,9 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 		if _, err := provisioner.target(target, "prod"); err != nil {
 			t.Fatalf("reviewed target %s/prod was not routable: %v", target, err)
 		}
+	}
+	if _, err := provisioner.target("customer_and_opportunity", "dev"); err == nil {
+		t.Fatal("production profiles exposed the removed CRM dev target")
 	}
 	if _, err := provisioner.target("unreviewed_system", "prod"); err == nil {
 		t.Fatal("unreviewed target was routable")
@@ -195,6 +198,42 @@ func TestProductionSubsystemProfilesAllowReviewedTemplateWithoutManagedBindings(
 	writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
 	if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err != nil {
 		t.Fatalf("reviewed template-only runtime file was rejected: %v", err)
+	}
+}
+
+func TestProductionSubsystemProfilesAllowAuthorizationContextBinding(t *testing.T) {
+	t.Parallel()
+	root, profilesPath := productionProfilesFixture(t)
+	manifest := strings.Replace(minimalProductionProfileYAML,
+		"        OIDC_CLIENT_ID: client_id",
+		"        OIDC_CLIENT_ID: client_id\n        PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url", 1)
+	writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+	if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err != nil {
+		t.Fatalf("authorization context binding was rejected: %v", err)
+	}
+}
+
+func TestProductionSubsystemProfilesRejectCrossEnvironmentRuntimeSharing(t *testing.T) {
+	t.Parallel()
+	root, profilesPath := productionProfilesFixture(t)
+	prod := strings.Replace(minimalProductionProfileYAML, "default: true", "default: false", 1)
+	dev := strings.Replace(prod, "environment: prod", "environment: dev", 1)
+	writeProductionProfileForTest(t, profilesPath, "sample-prod.yaml", prod)
+	writeProductionProfileForTest(t, profilesPath, "sample-dev.yaml", dev)
+	if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err == nil {
+		t.Fatal("same application shared one runtime file across dev and prod")
+	}
+}
+
+func TestProductionSubsystemProfilesRejectFixedTargetMetadataMismatch(t *testing.T) {
+	t.Parallel()
+	root, profilesPath := productionProfilesFixture(t)
+	manifest := strings.Replace(minimalProductionProfileYAML,
+		`      values: {OIDC_SCOPES: "openid profile"}`,
+		`      values: {OIDC_SCOPES: "openid profile", PLATFORM_APPLICATION_CODE: sample, PLATFORM_ENVIRONMENT_CODE: dev}`, 1)
+	writeProductionProfileForTest(t, profilesPath, "sample.yaml", manifest)
+	if _, err := LoadProductionSubsystemCapabilities(root, profilesPath); err == nil {
+		t.Fatal("runtime environment metadata inconsistent with the reviewed target was accepted")
 	}
 }
 

@@ -31,10 +31,12 @@ type readinessScope struct {
 }
 
 type readinessRow struct {
-	ClientReady             bool `gorm:"column:client_ready"`
-	RoleCatalogSynced       bool `gorm:"column:role_catalog_synced"`
-	UserProjectionCompleted bool `gorm:"column:user_projection_completed"`
-	BrokerLoginVerified     bool `gorm:"column:broker_login_verified"`
+	ClientReady             bool   `gorm:"column:client_ready"`
+	RoleCatalogSynced       bool   `gorm:"column:role_catalog_synced"`
+	UserProjectionCompleted bool   `gorm:"column:user_projection_completed"`
+	BrokerLoginVerified     bool   `gorm:"column:broker_login_verified"`
+	ClientConfigurationHash string `gorm:"column:client_configuration_hash"`
+	BrokerConfigurationHash string `gorm:"column:broker_verified_configuration_hash"`
 }
 
 func (store *SwitchReadinessStore) InspectKeycloakSwitchReadiness(ctx context.Context, tenantID, applicationCode, environment string) (registryhttp.KeycloakSwitchReadiness, error) {
@@ -53,6 +55,14 @@ func (store *SwitchReadinessStore) InspectKeycloakSwitchReadiness(ctx context.Co
 	if err != nil {
 		return registryhttp.KeycloakSwitchReadiness{}, fmt.Errorf("load Keycloak switch readiness: %w", err)
 	}
+	configurationHash, err := loadKeycloakClientConfigurationHash(store.database.WithContext(ctx), strings.TrimSpace(tenantID), scope.ApplicationID, scope.EnvironmentID, false)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return blockedReadiness(), nil
+	}
+	if err != nil {
+		return registryhttp.KeycloakSwitchReadiness{}, fmt.Errorf("load Keycloak Client configuration: %w", err)
+	}
+	row = bindReadinessToConfiguration(row, configurationHash)
 	var outstanding int64
 	if err := store.database.WithContext(ctx).Table("keycloak_authorization_outbox").
 		Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND status IN ?", strings.TrimSpace(tenantID), scope.ApplicationID, scope.EnvironmentID, []string{"PENDING", "RUNNING", "FAILED"}).
@@ -68,8 +78,18 @@ func (store *SwitchReadinessStore) InspectKeycloakSwitchReadiness(ctx context.Co
 // MarkKeycloakClientAndRoleCatalogSynced is called only after both Keycloak
 // Admin operations and the local Client mapping have succeeded.
 func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogSynced(ctx context.Context, tenantID, applicationID, environmentID string) error {
-	return store.upsert(ctx, tenantID, applicationID, environmentID, map[string]any{
-		"client_ready": true, "role_catalog_synced": true,
+	tenantID, applicationID, environmentID = strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), strings.TrimSpace(environmentID)
+	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		configurationHash, err := loadKeycloakClientConfigurationHash(tx, tenantID, applicationID, environmentID, true)
+		if err != nil {
+			return fmt.Errorf("load synchronized Keycloak Client configuration: %w", err)
+		}
+		if configurationHash == "" {
+			return errors.New("synchronized Keycloak Client configuration hash is empty")
+		}
+		return upsertReadiness(tx, tenantID, applicationID, environmentID, map[string]any{
+			"client_ready": true, "role_catalog_synced": true, "client_configuration_hash": configurationHash,
+		}, time.Now().UTC())
 	})
 }
 
@@ -77,7 +97,23 @@ func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogSynced(ctx co
 // the user gate from a queued/scheduled projection.  It is available for the
 // projection coordinator once it has durably established completion.
 func (store *SwitchReadinessStore) MarkUserProjectionCompleted(ctx context.Context, tenantID, applicationID, environmentID string) error {
-	return store.upsert(ctx, tenantID, applicationID, environmentID, map[string]any{"user_projection_completed": true})
+	tenantID, applicationID, environmentID = strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), strings.TrimSpace(environmentID)
+	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		configurationHash, err := loadKeycloakClientConfigurationHash(tx, tenantID, applicationID, environmentID, true)
+		if err != nil {
+			return fmt.Errorf("load projected Keycloak Client configuration: %w", err)
+		}
+		result := tx.Table("keycloak_switch_readiness").
+			Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND client_configuration_hash = ?", tenantID, applicationID, environmentID, configurationHash).
+			Updates(map[string]any{"user_projection_completed": true, "updated_at": time.Now().UTC()})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("Keycloak user projection does not match the current Client configuration")
+		}
+		return nil
+	})
 }
 
 // RecordBrokerLoginVerification validates the persisted Client mapping before
@@ -90,17 +126,23 @@ func (store *SwitchReadinessStore) RecordBrokerLoginVerification(ctx context.Con
 	}
 	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var mapping struct {
-			ClientID string `gorm:"column:keycloak_client_id"`
+			ClientID          string `gorm:"column:keycloak_client_id"`
+			ConfigurationHash string `gorm:"column:configuration_hash"`
 		}
-		if err := tx.Table("keycloak_application_client_mapping").Select("keycloak_client_id").
+		if err := tx.Table("keycloak_application_client_mapping").Select("keycloak_client_id, configuration_hash").
 			Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND keycloak_client_id = ? AND status = ?", input.TenantID, input.ApplicationID, input.EnvironmentID, input.ClientID, "SYNCED").Take(&mapping).Error; err != nil {
 			return fmt.Errorf("verify Keycloak Client mapping: %w", err)
+		}
+		mapping.ConfigurationHash = strings.TrimSpace(mapping.ConfigurationHash)
+		if mapping.ConfigurationHash == "" {
+			return errors.New("Keycloak Client configuration hash is empty")
 		}
 		now := time.Now().UTC()
 		if err := upsertReadiness(tx, input.TenantID, input.ApplicationID, input.EnvironmentID, map[string]any{
 			"broker_login_verified": true, "broker_verified_identity_id": input.IdentityID,
 			"broker_verified_issuer": input.Issuer, "broker_verified_client_id": input.ClientID,
 			"broker_verified_by_id": input.VerifiedByID, "broker_verified_session_id": nullableString(input.SessionID), "broker_verified_at": now,
+			"broker_verified_configuration_hash": mapping.ConfigurationHash,
 		}, now); err != nil {
 			return err
 		}
@@ -111,9 +153,40 @@ func (store *SwitchReadinessStore) RecordBrokerLoginVerification(ctx context.Con
 		return tx.Table("keycloak_broker_login_verification").Create(map[string]any{
 			"id": eventID, "tenant_id": input.TenantID, "application_id": input.ApplicationID, "environment_id": input.EnvironmentID,
 			"identity_id": input.IdentityID, "issuer": input.Issuer, "keycloak_client_id": input.ClientID,
-			"verified_by_id": input.VerifiedByID, "session_id": nullableString(input.SessionID), "verified_at": now,
+			"configuration_hash": mapping.ConfigurationHash, "verified_by_id": input.VerifiedByID,
+			"session_id": nullableString(input.SessionID), "verified_at": now,
 		}).Error
 	})
+}
+
+func loadKeycloakClientConfigurationHash(database *gorm.DB, tenantID, applicationID, environmentID string, lock bool) (string, error) {
+	var row struct {
+		ConfigurationHash string `gorm:"column:configuration_hash"`
+	}
+	query := database.Table("keycloak_application_client_mapping").Select("configuration_hash").
+		Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND status = ?", tenantID, applicationID, environmentID, "SYNCED")
+	if lock {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := query.Take(&row).Error; err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(row.ConfigurationHash), nil
+}
+
+func bindReadinessToConfiguration(row readinessRow, configurationHash string) readinessRow {
+	configurationHash = strings.TrimSpace(configurationHash)
+	if configurationHash == "" || strings.TrimSpace(row.ClientConfigurationHash) != configurationHash {
+		row.ClientReady = false
+		row.RoleCatalogSynced = false
+		row.UserProjectionCompleted = false
+		row.BrokerLoginVerified = false
+		return row
+	}
+	if strings.TrimSpace(row.BrokerConfigurationHash) != configurationHash {
+		row.BrokerLoginVerified = false
+	}
+	return row
 }
 
 func (store *SwitchReadinessStore) scope(ctx context.Context, tenantID, applicationCode, environment string) (readinessScope, error) {

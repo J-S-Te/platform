@@ -40,7 +40,7 @@ func TestKeycloakBrokerJWTVerifierAcceptsOnlyBoundCurrentRealmToken(t *testing.T
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	verifier.now = func() time.Time { return now }
-	token := signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "keycloak-user", "aud": []string{"contract-prod-web"}, "exp": now.Add(time.Minute).Unix(), "iat": now.Add(-time.Minute).Unix(), "sid": "kc-session", "tenant_id": "tenant-1", "identity_id": "user-1"})
+	token := signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "user-1", "aud": []string{"contract-prod-web"}, "exp": now.Add(time.Minute).Unix(), "iat": now.Add(-time.Minute).Unix(), "sid": "kc-session", "tenant_id": "tenant-1", "identity_id": "user-1"})
 
 	claims, err := verifier.Verify(context.Background(), token)
 	if err != nil {
@@ -67,8 +67,8 @@ func TestKeycloakBrokerAuthenticationFailsClosed(t *testing.T) {
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	verifier.now = func() time.Time { return now }
-	valid := signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "identity"})
-	for name, token := range map[string]string{"missing": "", "expired": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(-time.Second).Unix(), "iat": now.Add(-time.Minute).Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "identity"}), "wrong issuer": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": "https://evil.example/realms/basic-platform", "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "identity"}), "valid": valid} {
+	valid := signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject"})
+	for name, token := range map[string]string{"missing": "", "expired": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(-time.Second).Unix(), "iat": now.Add(-time.Minute).Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject"}), "wrong issuer": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": "https://evil.example/realms/basic-platform", "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject"}), "identity mismatch": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "other-subject"}), "valid": valid} {
 		t.Run(name, func(t *testing.T) {
 			router := gin.New()
 			router.POST("/", KeycloakBrokerAuthentication(verifier), func(c *gin.Context) {
@@ -89,6 +89,67 @@ func TestKeycloakBrokerAuthenticationFailsClosed(t *testing.T) {
 			}
 			if recorder.Code != want {
 				t.Fatalf("status = %d, want %d", recorder.Code, want)
+			}
+		})
+	}
+}
+
+func TestKeycloakBrokerJWTVerifierRequiresBoundAccessTokenForAuthorizationContext(t *testing.T) {
+	privateKey := newTestKeycloakRSAKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writeKeycloakJWKS(t, writer, map[string]*rsa.PrivateKey{"current": privateKey})
+	}))
+	defer server.Close()
+
+	issuer := server.URL + "/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifier(issuer, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	verifier.now = func() time.Time { return now }
+	base := validKeycloakBrokerClaims(issuer, now)
+	base["identity_id"] = "subject"
+
+	tests := []struct {
+		name     string
+		tokenUse string
+		azp      string
+		audience any
+		wantOK   bool
+	}{
+		{name: "bound access token", tokenUse: "access_token", azp: "contract-prod-web", audience: []string{"account", "contract-prod-web"}, wantOK: true},
+		{name: "ID token", tokenUse: "id_token", azp: "contract-prod-web", audience: "contract-prod-web"},
+		{name: "missing token use", azp: "contract-prod-web", audience: "contract-prod-web"},
+		{name: "missing authorized party", tokenUse: "access_token", audience: "contract-prod-web"},
+		{name: "audience does not contain authorized party", tokenUse: "access_token", azp: "contract-prod-web", audience: []string{"account"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claims := make(map[string]any, len(base)+3)
+			for key, value := range base {
+				claims[key] = value
+			}
+			claims["aud"] = test.audience
+			if test.tokenUse != "" {
+				claims["token_use"] = test.tokenUse
+			}
+			if test.azp != "" {
+				claims["azp"] = test.azp
+			}
+			token := signedKeycloakBrokerJWT(t, privateKey, "current", claims)
+			got, verifyErr := verifier.VerifyAuthorizationAccessToken(context.Background(), token)
+			if test.wantOK {
+				if verifyErr != nil {
+					t.Fatalf("VerifyAuthorizationAccessToken() error = %v", verifyErr)
+				}
+				if got.TokenUse != "access_token" || got.AuthorizedParty != test.azp {
+					t.Fatalf("claims = %#v", got)
+				}
+				return
+			}
+			if verifyErr == nil {
+				t.Fatalf("VerifyAuthorizationAccessToken() claims = %#v, want error", got)
 			}
 		})
 	}
@@ -249,7 +310,7 @@ func newTestKeycloakRSAKey(t *testing.T) *rsa.PrivateKey {
 func validKeycloakBrokerClaims(issuer string, now time.Time) map[string]any {
 	return map[string]any{
 		"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Add(-time.Second).Unix(),
-		"sid": "sid", "tenant_id": "tenant", "identity_id": "identity",
+		"sid": "sid", "tenant_id": "tenant", "identity_id": "subject",
 	}
 }
 

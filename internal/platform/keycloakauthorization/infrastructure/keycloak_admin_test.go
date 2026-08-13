@@ -40,7 +40,14 @@ func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 			}
 			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{
 				ID: "user-1", Username: "platform-identity-1", Enabled: true,
-				Attributes: map[string][]string{"identity_id": []string{"identity-1"}, "unmanaged": []string{"keep"}},
+				Attributes: map[string][]string{
+					"identity_id": {"identity-1"}, "unmanaged": {"keep"}, "client_theme": {"dark"},
+					"roles": {"legacy-role"}, "permissions": {"legacy.read"}, "organization_ids": {"old-org"},
+					"role_config_hash": {"old-hash"}, "authz_revision": {"6"},
+					"client_orders_roles": {"legacy-role"}, "client_orders_permissions": {"legacy.read"},
+					"client_orders_organization_ids": {"old-org"}, "client_orders_authz_revision": {"6"},
+					"client_orders_role_config_hash": {"old-hash"},
+				},
 			}})
 		case "PUT /admin/realms/acme/users/user-1":
 			var user keycloakUser
@@ -85,7 +92,7 @@ func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewKeycloakAdmin: %v", err)
 	}
-	snapshot := projectionapplication.Snapshot{TenantID: "tenant-1", IdentityID: "identity-1", KeycloakClientID: "orders", UserEnabled: true, OrganizationIDs: []string{"org-1"}, Roles: []string{"manager"}, Permissions: []string{"orders:read"}, RoleConfigHash: "hash-1", AuthorizationRevision: 7}
+	snapshot := projectionapplication.Snapshot{TenantID: "tenant-1", IdentityID: "identity-1", PersonID: "person-1", PrimaryOrganizationID: "org-1", KeycloakClientID: "orders", UserEnabled: true, OrganizationIDs: []string{"org-1"}, Roles: []string{"manager"}, Permissions: []string{"orders:read"}, RoleConfigHash: "hash-1", AuthorizationRevision: 7}
 	if err := admin.EnsureOrganizationGroups(context.Background(), snapshot); err != nil {
 		t.Fatalf("EnsureOrganizationGroups: %v", err)
 	}
@@ -117,17 +124,49 @@ func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	if got := attributes["identity_id"]; len(got) != 1 || got[0] != "identity-1" {
 		t.Errorf("identity_id = %#v", got)
 	}
-	if got := attributes["client_orders_permissions"]; len(got) != 1 || got[0] != "orders:read" {
-		t.Errorf("client permission = %#v", got)
+	if got := attributes["tenant_id"]; len(got) != 1 || got[0] != "tenant-1" {
+		t.Errorf("tenant_id = %#v", got)
 	}
-	if got := attributes["client_orders_authz_revision"]; len(got) != 1 || got[0] != "7" {
-		t.Errorf("client revision = %#v", got)
+	if got := attributes["person_id"]; len(got) != 1 || got[0] != "person-1" {
+		t.Errorf("person_id = %#v", got)
+	}
+	if got := attributes["primary_org_id"]; len(got) != 1 || got[0] != "org-1" {
+		t.Errorf("primary_org_id = %#v", got)
+	}
+	for _, key := range []string{
+		"roles", "permissions", "organization_ids", "role_config_hash", "authz_revision",
+		"client_orders_roles", "client_orders_permissions", "client_orders_organization_ids",
+		"client_orders_authz_revision", "client_orders_role_config_hash",
+	} {
+		if _, exists := attributes[key]; exists {
+			t.Errorf("managed authorization attribute %q was not removed: %#v", key, attributes[key])
+		}
 	}
 	if got := attributes["unmanaged"]; len(got) != 1 || got[0] != "keep" {
 		t.Errorf("unmanaged attribute was lost: %#v", got)
 	}
+	if got := attributes["client_theme"]; len(got) != 1 || got[0] != "dark" {
+		t.Errorf("non-authorization client attribute was lost: %#v", got)
+	}
 	if !containsRequest(requests, "PUT /admin/realms/acme/users/user-1/groups/org") {
 		t.Error("organization membership request was not sent")
+	}
+}
+
+func TestManagedAuthorizationAttributeMatchingIsPrecise(t *testing.T) {
+	for _, key := range []string{
+		"permissions", "organization_ids", "role_config_hash", "authz_revision", "roles",
+		"client_orders_permissions", "client_orders_organization_ids", "client_orders_role_config_hash",
+		"client_orders_authz_revision", "client_orders_roles",
+	} {
+		if !isManagedAuthorizationAttribute(key) {
+			t.Errorf("managed attribute %q was not recognized", key)
+		}
+	}
+	for _, key := range []string{"identity_id", "tenant_id", "person_id", "primary_org_id", "client_theme", "unmanaged", "client_permissions_hint"} {
+		if isManagedAuthorizationAttribute(key) {
+			t.Errorf("unmanaged or stable attribute %q was incorrectly selected", key)
+		}
 	}
 }
 

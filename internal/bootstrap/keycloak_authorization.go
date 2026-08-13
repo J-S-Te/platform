@@ -18,13 +18,13 @@ type keycloakAuthorizationVerifier struct {
 }
 
 func (v keycloakAuthorizationVerifier) Verify(ctx context.Context, raw string) (oidchttp.ExternalAuthorizationTokenClaims, error) {
-	claims, err := v.verifier.Verify(ctx, raw)
+	claims, err := v.verifier.VerifyAuthorizationAccessToken(ctx, raw)
 	if err != nil {
 		return oidchttp.ExternalAuthorizationTokenClaims{}, err
 	}
 	return oidchttp.ExternalAuthorizationTokenClaims{
-		Subject: claims.Subject, TenantID: claims.TenantID, SessionID: claims.SessionID,
-		AuthorizedParty: claims.AuthorizedParty, Audience: append([]string(nil), claims.Audience...),
+		Subject: claims.Subject, IdentityID: claims.IdentityID, TenantID: claims.TenantID, SessionID: claims.SessionID,
+		AuthorizedParty: claims.AuthorizedParty, Audience: append([]string(nil), claims.Audience...), TokenUse: claims.TokenUse,
 	}, nil
 }
 

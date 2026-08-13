@@ -292,7 +292,8 @@ func (admin *KeycloakAdmin) assignedClientRoles(ctx context.Context, token, user
 }
 
 func (admin *KeycloakAdmin) SetClientAuthorizationAttributes(ctx context.Context, snapshot projectionapplication.Snapshot) error {
-	// 授权属性由平台快照覆盖写入，作为 token claim 的输入而非客户端提交的权限声明。
+	// Keycloak 用户属性只保留稳定身份和必要展示属性。角色通过
+	// Client Role、组织通过 Group 投影；详细权限仍以基础平台为事实源。
 	token, err := admin.token(ctx)
 	if err != nil {
 		return err
@@ -638,21 +639,45 @@ func (admin *KeycloakAdmin) statusError(operation string, status int) error {
 }
 
 func setAuthorizationAttributes(attributes map[string][]string, snapshot projectionapplication.Snapshot) {
-	attributes["identity_id"] = []string{snapshot.IdentityID}
-	attributes["tenant_id"] = []string{snapshot.TenantID}
-	attributes["person_id"] = []string{snapshot.PersonID}
-	attributes["primary_org_id"] = []string{snapshot.PrimaryOrganizationID}
-	attributes["organization_ids"] = unique(snapshot.OrganizationIDs)
-	attributes["roles"] = unique(snapshot.Roles)
-	attributes["permissions"] = unique(snapshot.Permissions)
-	attributes["role_config_hash"] = []string{snapshot.RoleConfigHash}
-	attributes["authz_revision"] = []string{strconv.FormatUint(snapshot.AuthorizationRevision, 10)}
-	prefix := "client_" + attributeSegment(snapshot.KeycloakClientID) + "_"
-	attributes[prefix+"roles"] = unique(snapshot.Roles)
-	attributes[prefix+"permissions"] = unique(snapshot.Permissions)
-	attributes[prefix+"organization_ids"] = unique(snapshot.OrganizationIDs)
-	attributes[prefix+"authz_revision"] = []string{strconv.FormatUint(snapshot.AuthorizationRevision, 10)}
-	attributes[prefix+"role_config_hash"] = []string{snapshot.RoleConfigHash}
+	removeManagedAuthorizationAttributes(attributes)
+	setStableKeycloakAttribute(attributes, "identity_id", snapshot.IdentityID)
+	setStableKeycloakAttribute(attributes, "tenant_id", snapshot.TenantID)
+	setStableKeycloakAttribute(attributes, "person_id", snapshot.PersonID)
+	setStableKeycloakAttribute(attributes, "primary_org_id", snapshot.PrimaryOrganizationID)
+}
+
+func setStableKeycloakAttribute(attributes map[string][]string, key, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		delete(attributes, key)
+		return
+	}
+	attributes[key] = []string{value}
+}
+
+func removeManagedAuthorizationAttributes(attributes map[string][]string) {
+	for key := range attributes {
+		if isManagedAuthorizationAttribute(key) {
+			delete(attributes, key)
+		}
+	}
+}
+
+func isManagedAuthorizationAttribute(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	switch key {
+	case "roles", "permissions", "organization_ids", "role_config_hash", "authz_revision":
+		return true
+	}
+	if !strings.HasPrefix(key, "client_") {
+		return false
+	}
+	for _, suffix := range []string{"_roles", "_permissions", "_organization_ids", "_role_config_hash", "_authz_revision"} {
+		if strings.HasSuffix(key, suffix) && len(key) > len("client_")+len(suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneAttributes(source map[string][]string) map[string][]string {

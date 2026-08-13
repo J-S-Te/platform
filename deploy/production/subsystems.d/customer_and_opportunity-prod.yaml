@@ -63,6 +63,7 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
         PLATFORM_OWNER_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id

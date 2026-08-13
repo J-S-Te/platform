@@ -24,6 +24,26 @@ func TestSwitchReadinessRequiresEveryGate(t *testing.T) {
 	}
 }
 
+func TestSwitchReadinessEvidenceIsBoundToCurrentConfiguration(t *testing.T) {
+	complete := readinessRow{
+		ClientReady: true, RoleCatalogSynced: true, UserProjectionCompleted: true, BrokerLoginVerified: true,
+		ClientConfigurationHash: "configuration-a", BrokerConfigurationHash: "configuration-a",
+	}
+	if got := readinessFromRow(bindReadinessToConfiguration(complete, "configuration-a")); !got.SwitchReady {
+		t.Fatalf("matching configuration should be ready: %#v", got)
+	}
+	clientChanged := bindReadinessToConfiguration(complete, "configuration-b")
+	if clientChanged.ClientReady || clientChanged.RoleCatalogSynced || clientChanged.UserProjectionCompleted || clientChanged.BrokerLoginVerified {
+		t.Fatalf("Client configuration mismatch reused readiness: %#v", clientChanged)
+	}
+	brokerChanged := complete
+	brokerChanged.BrokerConfigurationHash = "configuration-b"
+	brokerChanged = bindReadinessToConfiguration(brokerChanged, "configuration-a")
+	if !brokerChanged.ClientReady || !brokerChanged.RoleCatalogSynced || !brokerChanged.UserProjectionCompleted || brokerChanged.BrokerLoginVerified {
+		t.Fatalf("stale broker evidence was not isolated: %#v", brokerChanged)
+	}
+}
+
 func TestBrokerVerificationRequiresCompleteBoundInput(t *testing.T) {
 	store, err := NewSwitchReadinessStore(newDryRunMySQL(t))
 	if err != nil {

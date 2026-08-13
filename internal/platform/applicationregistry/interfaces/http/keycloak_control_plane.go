@@ -68,6 +68,19 @@ type keycloakIdentityClaimMapping struct {
 	MultiValued bool
 }
 
+type keycloakManagedProtocolMapper struct {
+	Name           string
+	ProtocolMapper string
+	Config         map[string]string
+}
+
+var legacyKeycloakAuthorizationClaimNames = map[string]struct{}{
+	"permissions":      {},
+	"organization_ids": {},
+	"role_config_hash": {},
+	"authz_revision":   {},
+}
+
 func newKeycloakControlPlane(adminURL, realm, username, password, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel string) *keycloakControlPlane {
 	return newKeycloakControlPlaneWithCredentials(adminURL, realm, KeycloakControlPlaneCredentials{Username: username, Password: password}, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel)
 }
@@ -589,49 +602,30 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 			Config         map[string]string
 		}{ID: mapper.ID, ProtocolMapper: mapper.ProtocolMapper, Config: mapper.Config}
 	}
+	managedMappers := make([]keycloakManagedProtocolMapper, 0, len(keycloakIdentityClaimMappings)+3)
 	for _, claim := range keycloakIdentityClaimMappings {
-		name := "platform-" + claim.Name
-		config := keycloakIdentityClaimMapperConfig(claim)
-		if claim.MultiValued {
-			config["multivalued"] = "true"
-			config["jsonType.label"] = "JSON"
-		}
-		if current, exists := known[name]; exists {
-			if current.ProtocolMapper == "oidc-usermodel-attribute-mapper" && keycloakMapperConfigMatches(current.Config, config) {
-				continue
-			}
-			response, err = control.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(current.ID), nil)
-			if err != nil {
-				return err
-			}
-			if err := keycloakStatusError("delete drifted Keycloak claim mapper "+claim.Name, response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
-				response.Body.Close()
-				return err
-			}
-			response.Body.Close()
-		}
-		response, err = control.request(ctx, token, stdhttp.MethodPost, base, map[string]any{"name": name, "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-attribute-mapper", "config": config})
-		if err != nil {
-			return err
-		}
-		if err := keycloakStatusError("create Keycloak claim mapper "+claim.Name, response, stdhttp.StatusCreated); err != nil {
-			response.Body.Close()
-			return err
-		}
-		response.Body.Close()
+		managedMappers = append(managedMappers, keycloakManagedProtocolMapper{
+			Name:           "platform-" + claim.Name,
+			ProtocolMapper: "oidc-usermodel-attribute-mapper",
+			Config:         keycloakIdentityClaimMapperConfig(claim),
+		})
 	}
-	managedClaims := make(map[string]struct{}, len(keycloakIdentityClaimMappings))
-	for _, claim := range keycloakIdentityClaimMappings {
-		managedClaims["platform-"+claim.Name] = struct{}{}
+	managedMappers = append(managedMappers, keycloakAuthorizationProtocolMappers(publicClientID)...)
+	managedNames := make(map[string]struct{}, len(managedMappers))
+	for _, mapper := range managedMappers {
+		managedNames[mapper.Name] = struct{}{}
 	}
-	// Remove only stale mappers previously owned by this control plane. This is
-	// what makes the compact-claims migration effective for existing Clients;
-	// unrelated application mappers remain untouched.
+
+	// Remove stale platform-owned mappers and exact historical detailed
+	// authorization Claims. Matching claim.name instead of fuzzy mapper names
+	// migrates manually named legacy mappers without touching third-party
+	// profile or role mappers.
 	for name, current := range known {
-		if !strings.HasPrefix(name, "platform-") || name == "platform-token-use" {
+		if _, keep := managedNames[name]; keep {
 			continue
 		}
-		if _, keep := managedClaims[name]; keep {
+		_, legacyDetailedAuthorization := legacyKeycloakAuthorizationClaimNames[strings.TrimSpace(current.Config["claim.name"])]
+		if name != "platform-token-use" && !strings.HasPrefix(name, "platform-") && !legacyDetailedAuthorization {
 			continue
 		}
 		response, err = control.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(current.ID), nil)
@@ -643,31 +637,66 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 			return err
 		}
 		response.Body.Close()
+		delete(known, name)
 	}
-	tokenUseConfig := map[string]string{"claim.name": "token_use", "claim.value": "id_token", "claim.value.type": "String", "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true"}
-	if current, exists := known["platform-token-use"]; !exists || current.ProtocolMapper != "oidc-hardcoded-claim-mapper" || !keycloakMapperConfigMatches(current.Config, tokenUseConfig) {
+
+	for _, mapper := range managedMappers {
+		current, exists := known[mapper.Name]
+		if exists && current.ProtocolMapper == mapper.ProtocolMapper && keycloakMapperConfigMatches(current.Config, mapper.Config) {
+			continue
+		}
 		if exists {
 			response, err = control.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(current.ID), nil)
 			if err != nil {
 				return err
 			}
-			if err := keycloakStatusError("delete drifted Keycloak token_use mapper", response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
+			if err := keycloakStatusError("delete drifted Keycloak mapper "+mapper.Name, response, stdhttp.StatusNoContent, stdhttp.StatusNotFound); err != nil {
 				response.Body.Close()
 				return err
 			}
 			response.Body.Close()
 		}
-		response, err = control.request(ctx, token, stdhttp.MethodPost, base, map[string]any{"name": "platform-token-use", "protocol": "openid-connect", "protocolMapper": "oidc-hardcoded-claim-mapper", "config": tokenUseConfig})
+		response, err = control.request(ctx, token, stdhttp.MethodPost, base, map[string]any{"name": mapper.Name, "protocol": "openid-connect", "protocolMapper": mapper.ProtocolMapper, "config": mapper.Config})
 		if err != nil {
 			return err
 		}
-		if err := keycloakStatusError("create Keycloak token_use mapper", response, stdhttp.StatusCreated); err != nil {
+		if err := keycloakStatusError("create Keycloak mapper "+mapper.Name, response, stdhttp.StatusCreated); err != nil {
 			response.Body.Close()
 			return err
 		}
 		response.Body.Close()
 	}
 	return nil
+}
+
+func keycloakAuthorizationProtocolMappers(publicClientID string) []keycloakManagedProtocolMapper {
+	return []keycloakManagedProtocolMapper{
+		{
+			Name:           "platform-token-use-id",
+			ProtocolMapper: "oidc-hardcoded-claim-mapper",
+			Config: map[string]string{
+				"claim.name": "token_use", "claim.value": "id_token", "claim.value.type": "String",
+				"id.token.claim": "true", "access.token.claim": "false", "userinfo.token.claim": "false",
+			},
+		},
+		{
+			Name:           "platform-token-use-access",
+			ProtocolMapper: "oidc-hardcoded-claim-mapper",
+			Config: map[string]string{
+				"claim.name": "token_use", "claim.value": "access_token", "claim.value.type": "String",
+				"id.token.claim": "false", "access.token.claim": "true", "userinfo.token.claim": "false",
+			},
+		},
+		{
+			Name:           "platform-client-audience",
+			ProtocolMapper: "oidc-audience-mapper",
+			Config: map[string]string{
+				"included.custom.audience": publicClientID,
+				"id.token.claim":           "false",
+				"access.token.claim":       "true",
+			},
+		},
+	}
 }
 
 func keycloakIdentityClaimMapperConfig(claim keycloakIdentityClaimMapping) map[string]string {

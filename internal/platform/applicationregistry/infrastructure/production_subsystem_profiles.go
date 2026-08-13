@@ -136,6 +136,10 @@ func loadProductionSubsystemProfiles(deployRoot, profilesDirectory string) ([]pr
 
 	profiles := make([]productionSubsystemProfile, 0, len(paths))
 	seenTargets := make(map[string]string, len(paths))
+	runtimeEnvironmentOwners := make(map[string]struct {
+		environment string
+		sourcePath  string
+	})
 	defaultCount := 0
 	for _, path := range paths {
 		profile, decodeErr := decodeProductionSubsystemProfile(root, path)
@@ -147,6 +151,19 @@ func loadProductionSubsystemProfiles(deployRoot, profilesDirectory string) ([]pr
 			return nil, "", fmt.Errorf("duplicate production subsystem target in %s and %s", previous, path)
 		}
 		seenTargets[key] = path
+		for _, runtimeFile := range profile.Manifest.Runtime.Files {
+			// 同一应用的 dev/prod 目标绝不能共写一个 runtime 文件。不同应用在同一
+			// 环境内可以通过审核清单共享文件（例如 Portal 为 CRM 写入映射凭据）。
+			ownerKey := profile.Manifest.Application.Code + "\x00" + runtimeFile.Path
+			if owner, exists := runtimeEnvironmentOwners[ownerKey]; exists && owner.environment != profile.Manifest.Application.Environment {
+				return nil, "", fmt.Errorf("production subsystem runtime %s is shared by %s and %s environments in %s and %s",
+					runtimeFile.Path, owner.environment, profile.Manifest.Application.Environment, owner.sourcePath, path)
+			}
+			runtimeEnvironmentOwners[ownerKey] = struct {
+				environment string
+				sourcePath  string
+			}{environment: profile.Manifest.Application.Environment, sourcePath: path}
+		}
 		if profile.Manifest.Default {
 			defaultCount++
 			if defaultCount > 1 {
@@ -274,6 +291,12 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 				return errors.New("runtime fixed value is invalid")
 			}
 		}
+		if code, exists := file.Values["PLATFORM_APPLICATION_CODE"]; exists && strings.TrimSpace(code) != app.Code {
+			return errors.New("runtime application code does not match target")
+		}
+		if environment, exists := file.Values["PLATFORM_ENVIRONMENT_CODE"]; exists && strings.ToLower(strings.TrimSpace(environment)) != app.Environment {
+			return errors.New("runtime environment code does not match target")
+		}
 		file.RequiredExistingKeys = normalizedProductionEnvironmentKeys(file.RequiredExistingKeys)
 		if file.RequiredExistingKeys == nil {
 			return errors.New("runtime required-existing key is invalid")
@@ -380,7 +403,7 @@ func validProductionBindingSource(source string) bool {
 	switch source {
 	case "issuer", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
 		"tenant_id", "application_id", "application_code", "environment", "path_prefix", "upstream_url", "cookie_secure",
-		"catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url":
+		"catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url":
 		return true
 	}
 	parts := strings.Split(source, ".")

@@ -1,8 +1,11 @@
 package oidchttp
 
 import (
+	"errors"
 	"net/http"
 	"strings"
+
+	oidcapplication "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 )
 
 // AuthorizationContext returns the current, application-scoped authorization
@@ -46,25 +49,30 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if h.externalAuthorizationVerifier != nil {
 		external, externalErr := h.externalAuthorizationVerifier.Verify(r.Context(), rawToken)
-		if externalErr != nil || strings.TrimSpace(external.Subject) == "" || strings.TrimSpace(external.TenantID) == "" || len(external.Audience) == 0 {
+		externalSubject := strings.TrimSpace(external.Subject)
+		externalIdentityID := strings.TrimSpace(external.IdentityID)
+		clientID = strings.TrimSpace(external.AuthorizedParty)
+		if externalErr != nil || externalSubject == "" || externalIdentityID != externalSubject || strings.TrimSpace(external.TenantID) == "" || external.TokenUse != "access_token" || clientID == "" || !containsExactAudience(external.Audience, clientID) {
 			h.logger.Warn("external authorization context token rejected", "error", externalErr)
 			writeContextUnauthorized(w)
 			return
 		}
-		clientID = strings.TrimSpace(external.AuthorizedParty)
-		if clientID == "" {
-			clientID = external.Audience[0]
-		}
-		subjectID, subjectTenantID = external.Subject, external.TenantID
+		subjectID, subjectTenantID = externalSubject, external.TenantID
 	} else {
 		writeContextUnauthorized(w)
 		return
 	}
 	context, err := h.authorizationContextResolver.ResolveOIDCAuthorizationContext(r.Context(), subjectTenantID, clientID, subjectID)
-	if err != nil || context.TenantID != subjectTenantID {
-		if err != nil {
-			h.logger.Warn("OIDC authorization context resolution failed", "error", err, "client_id", clientID, "subject", subjectID)
+	if err != nil {
+		h.logger.Warn("OIDC authorization context resolution failed", "error", err, "client_id", clientID, "subject", subjectID)
+		if errors.Is(err, oidcapplication.ErrAccessDenied) {
+			writeOAuthError(w, http.StatusForbidden, "access_denied", "")
+			return
 		}
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
+		return
+	}
+	if context.TenantID != subjectTenantID || strings.TrimSpace(context.ClientID) != clientID {
 		writeContextUnauthorized(w)
 		return
 	}
@@ -76,9 +84,19 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sub": subjectID, "identity_id": subjectID, "tenant_id": context.TenantID,
+		"client_id": context.ClientID, "application_code": context.ApplicationCode, "environment_code": context.EnvironmentCode,
 		"person_id": context.PersonID, "roles": roles, "permissions": permissions,
 		"data_scopes": scopes, "authorization_revision": context.AuthorizationRevision,
 	}, true)
+}
+
+func containsExactAudience(audience []string, expected string) bool {
+	for _, value := range audience {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func writeContextUnauthorized(w http.ResponseWriter) {
