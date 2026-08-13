@@ -270,7 +270,11 @@ func TestEnsureUserPrelinksBrokerIdentityAndAllowsOptionalProfileFields(t *testi
 			writer.Header().Set("Location", server.URL+"/admin/realms/acme/users/user-1")
 			writer.WriteHeader(stdhttp.StatusCreated)
 		case "GET /admin/realms/acme/users/user-1/federated-identity":
-			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+			if linked.IdentityProvider == "" {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+				return
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{linked})
 		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
 			if err := json.NewDecoder(request.Body).Decode(&linked); err != nil {
 				t.Fatalf("decode Broker identity: %v", err)

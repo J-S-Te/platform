@@ -439,7 +439,16 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 	if status != stdhttp.StatusNoContent {
 		return admin.statusError("link Keycloak Broker identity", status)
 	}
-	return nil
+	identities, err = admin.brokerIdentities(ctx, token, user.ID)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		if identity.IdentityProvider == platformBrokerAlias && identity.UserID == identityID {
+			return nil
+		}
+	}
+	return fmt.Errorf("link Keycloak Broker identity: Keycloak did not persist upstream identity %q", identityID)
 }
 
 func (admin *KeycloakAdmin) brokerIdentities(ctx context.Context, token, userID string) ([]keycloakFederatedIdentity, error) {
