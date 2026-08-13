@@ -107,6 +107,33 @@ func TestLoadReadsOAuthClientInsecureHTTPRedirectURIsSetting(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsLegacyPlatformAccessTokenAccessCompatEnabled(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("APP_HTTP_ADDR", "127.0.0.1:8080")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Auth.AllowLegacyPlatformAccessToken {
+		t.Fatal("AllowLegacyPlatformAccessToken = false, want true")
+	}
+}
+
+func TestLoadReadsLegacyPlatformAccessTokenCompatFlag(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("APP_HTTP_ADDR", "127.0.0.1:8080")
+	t.Setenv("AUTH_LEGACY_PLATFORM_ACCESS_TOKEN_ENABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Auth.AllowLegacyPlatformAccessToken {
+		t.Fatal("AllowLegacyPlatformAccessToken = true, want false")
+	}
+}
+
 func TestLoadReadsKeycloakAdminClientCredentials(t *testing.T) {
 	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "platform-admin")

@@ -524,6 +524,11 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
+		currentContent, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return provisioningError("read production subsystem runtime configuration")
+		}
+		currentValues := parseEnvironmentValues(string(currentContent))
 		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
 		if err != nil {
 			return err
@@ -535,16 +540,54 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		for key, value := range generatedValues {
 			values[key] = value
 		}
-		if strings.TrimSpace(input.PublicURL) != "" {
-			for key, source := range runtimeFile.Bindings {
-				if !isPublicRuntimeBinding(source) {
-					continue
-				}
+		for key, source := range runtimeFile.Bindings {
+			if isPublicRuntimeBinding(source) && strings.TrimSpace(input.PublicURL) != "" {
 				value, resolveErr := resolveProductionBinding(input, source)
 				if resolveErr != nil {
 					return resolveErr
 				}
 				values[key] = value
+				continue
+			}
+			switch source {
+			case "issuer", "issuer_security_center_url":
+				if input.AuthenticationRuntimeUpdate && strings.TrimSpace(input.Issuer) != "" {
+					value, resolveErr := resolveProductionBinding(input, source)
+					if resolveErr != nil {
+						return resolveErr
+					}
+					values[key] = value
+				}
+			case "client_id", "client_secret":
+				if !input.AuthenticationRuntimeUpdate {
+					continue
+				}
+				provided := input.ClientID
+				if source == "client_secret" {
+					provided = input.ClientSecret
+				}
+				if strings.TrimSpace(provided) != "" {
+					if previous := strings.TrimSpace(currentValues[key]); previous != "" && previous != provided {
+						values[key+"_ROLLBACK"] = previous
+					}
+					values[key] = provided
+				} else if !strings.Contains(strings.ToLower(input.Issuer), "/realms/") {
+					if rollbackValue := strings.TrimSpace(currentValues[key+"_ROLLBACK"]); rollbackValue != "" {
+						values[key] = rollbackValue
+					}
+				}
+			case "catalog_publisher_client_id", "catalog_publisher_client_secret":
+				value, resolveErr := resolveProductionBinding(input, source)
+				if resolveErr == nil && strings.TrimSpace(value) != "" {
+					values[key] = value
+				}
+			default:
+				if strings.HasPrefix(source, "service.") {
+					value, resolveErr := resolveProductionBinding(input, source)
+					if resolveErr == nil && strings.TrimSpace(value) != "" {
+						values[key] = value
+					}
+				}
 			}
 		}
 		updates = append(updates, runtimeEnvironmentUpdate{path: path, values: values})

@@ -400,7 +400,7 @@ onboard_usage() {
 快捷预设：
   --preset contract-management-local
       填入合同管理系统本地 Docker 默认配置：
-      contract_management / 合同管理系统 / prod /
+      contract_management / 合同管理系统 / dev /
       http://localhost:8081 / http://contract-api:8081 / /contract_management
       已显式传入的接入参数优先于预设值。
   --preset customer-portal-local
@@ -433,6 +433,7 @@ apply_preset() {
     contract-management-local|contract_management_local)
       [[ -n "$APPLICATION_CODE" ]] || APPLICATION_CODE="contract_management"
       [[ -n "$APPLICATION_NAME" ]] || APPLICATION_NAME="合同管理系统"
+      [[ "$ENVIRONMENT_EXPLICIT" == true ]] || ENVIRONMENT="dev"
       [[ -n "$PUBLIC_BASE_URL" ]] || PUBLIC_BASE_URL="http://localhost:8081"
       [[ -n "$UPSTREAM_URL" ]] || UPSTREAM_URL="http://contract-api:8081"
       [[ -n "$PATH_PREFIX" ]] || PATH_PREFIX="/contract_management"

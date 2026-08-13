@@ -41,6 +41,7 @@ customer_worker_services=(
   customer-presale-assignment-notification-worker
   customer-presale-progress-notification-worker
   customer-presale-worker
+  portal-invite-compensation-worker
 )
 relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
 
@@ -186,10 +187,43 @@ portal_runtime_ready() {
   }
 }
 
+update_runtime_value() {
+  local file="$1" key="$2" value="$3" temporary
+  temporary="$(mktemp "$deploy_dir/runtime/.runtime-update.XXXXXX")"
+  chmod 600 "$temporary"
+  if ! awk -F= -v key="$key" -v value="$value" '
+    BEGIN { found=0 }
+    $1 == key { print key "=" value; found=1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$file"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod 600 "$file" || return 1
+}
+
 previous_release="$(mktemp "$deploy_dir/.release.env.previous.XXXXXX")"
 next_release="$(mktemp "$deploy_dir/.release.env.next.XXXXXX")"
+previous_customer_runtime="$(mktemp "$deploy_dir/runtime/.customer.env.previous.XXXXXX")"
 release_updated=false
 release_committed=false
+customer_runtime_updated=false
+restore_customer_runtime() {
+  local temporary
+  [[ "$customer_runtime_updated" == true && -f "$previous_customer_runtime" ]] || return 0
+  temporary="$(mktemp "$deploy_dir/runtime/.customer.env.restore.XXXXXX")"
+  if ! install -m 600 "$previous_customer_runtime" "$temporary" || ! mv -f "$temporary" "$customer_runtime_file"; then
+    rm -f "$temporary"
+    echo "无法恢复上一版 CRM 运行配置：$customer_runtime_file" >&2
+    return 1
+  fi
+  customer_runtime_updated=false
+}
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
@@ -197,12 +231,16 @@ cleanup() {
     cp "$previous_release" "$release_file"
     chmod 600 "$release_file"
   fi
-  rm -f "$previous_release" "$next_release"
+  if [[ "$release_committed" != true ]]; then
+    restore_customer_runtime || true
+  fi
+  rm -f "$previous_release" "$next_release" "$previous_customer_runtime"
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
-chmod 600 "$previous_release" "$next_release"
+chmod 600 "$previous_release" "$next_release" "$previous_customer_runtime"
 cp "$release_file" "$previous_release"
+cp "$customer_runtime_file" "$previous_customer_runtime"
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 cp "$release_file" "$deploy_dir/backups/releases/customer-${release_id}.env"
 chmod 600 "$deploy_dir/backups/releases/customer-${release_id}.env"
@@ -224,6 +262,7 @@ chmod 600 "$release_file"
 restore_release() {
   cp "$previous_release" "$release_file"
   chmod 600 "$release_file"
+  restore_customer_runtime
   release_updated=false
 }
 
@@ -242,9 +281,9 @@ if ! docker pull "$portal_image_ref" || ! compose config --quiet; then
   exit 1
 fi
 
-# 角色/权限目录必须与实际运行的不可变 CRM 镜像完全一致。不要依赖人工维护的
-# runtime/customer.env 旧值：从本次镜像中的 authz-catalog 读取兼容哈希，并通过
-# Compose environment 覆盖传入 customer-api，随后由发布步骤同步到基础平台。
+# 角色/权限目录必须与实际运行的不可变 CRM 镜像完全一致。从本次镜像中的
+# authz-catalog 读取兼容哈希，并原子写回受管 runtime/customer.env；Compose 不再
+# 使用可能为空的全局变量覆盖该值，运行配置是唯一事实来源。
 embedded_crm_hash="$(docker run --rm --entrypoint ./authz-catalog "$crm_image_ref" print crm 2>/dev/null \
   | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
 if [[ ! "$embedded_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
@@ -252,8 +291,13 @@ if [[ ! "$embedded_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
   echo "无法从 CRM 不可变镜像读取有效授权目录哈希" >&2
   exit 1
 fi
-export OIDC_ROLE_CONFIG_HASH="$embedded_crm_hash"
-echo "使用 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
+customer_runtime_updated=true
+if ! update_runtime_value "$customer_runtime_file" OIDC_ROLE_CONFIG_HASH "$embedded_crm_hash"; then
+  restore_release
+  echo "无法更新 CRM 运行配置中的授权目录哈希" >&2
+  exit 1
+fi
+echo "已写入 CRM 镜像内嵌授权目录哈希：$embedded_crm_hash"
 
 if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready; then
   release_committed=true
@@ -298,6 +342,14 @@ wait_for_health() {
   return 1
 }
 
+echo "检查基础平台 API"
+if ! wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz"; then
+  restore_release
+  rm -f "$previous_release"
+  echo "基础平台 API 未就绪，已停止 CRM/Portal 发布；请先恢复 platform-api 后重试" >&2
+  exit 1
+fi
+
 wait_for_workers() {
   local attempt state service all_running
   for ((attempt=1; attempt<=30; attempt++)); do
@@ -312,7 +364,7 @@ wait_for_workers() {
     [[ "$all_running" == true ]] && return 0
     sleep 2
   done
-  echo "CRM Worker 运行状态检查超时" >&2
+  echo "CRM/Portal Worker 运行状态检查超时" >&2
   return 1
 }
 
@@ -383,12 +435,12 @@ if ! compose up -d --no-deps portal-api || \
   exit 1
 fi
 
-echo "切换 CRM 站内告警与通知投影 Worker"
+echo "切换 CRM Workers 与 Portal 邀请补偿 Worker"
 if ! compose up -d --no-deps "${customer_worker_services[@]}" || ! wait_for_workers; then
   compose logs --tail 100 "${customer_worker_services[@]}" >&2 || true
   rollback_runtime
   rm -f "$previous_release"
-  echo "CRM Worker 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+  echo "CRM/Portal Worker 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
   exit 1
 fi
 

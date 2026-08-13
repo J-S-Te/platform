@@ -575,7 +575,8 @@ ensure_contract_env_file() {
         replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_PASSWORD "$(random_hex 24)"
         replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD "$(random_hex 32)"
         replace_line_in_file "$contract_env_file" PLATFORM_BASE_URL "http://localhost:8081"
-        replace_line_in_file "$contract_env_file" OIDC_ISSUER "http://localhost:8081"
+        replace_line_in_file "$contract_env_file" OIDC_ISSUER "http://localhost:18090/realms/basic-platform"
+        replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
         replace_line_in_file "$contract_env_file" OIDC_REDIRECT_URI "http://localhost:8081/contract_management/auth/callback"
         replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
         replace_line_in_file "$contract_env_file" APP_PUBLIC_URL "http://localhost:8081/contract_management/dashboard"
@@ -712,7 +713,8 @@ ensure_project_env_file() {
 		replace_line_in_file "$project_env_file" MYSQL_DSN "project:${password}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
 		replace_line_in_file "$project_env_file" PLATFORM_BASE_URL "http://localhost:8081"
 		replace_line_in_file "$project_env_file" PROJECT_PLATFORM_BACKCHANNEL_BASE_URL "http://platform-api:8080"
-        replace_line_in_file "$project_env_file" OIDC_ISSUER "http://localhost:8081"
+        replace_line_in_file "$project_env_file" OIDC_ISSUER "http://localhost:18090/realms/basic-platform"
+        replace_line_in_file "$project_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
         replace_line_in_file "$project_env_file" OIDC_REDIRECT_URI "http://localhost:8081/project_management/auth/callback"
         replace_line_in_file "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
         replace_line_in_file "$project_env_file" OIDC_POST_LOGOUT_REDIRECT_URI "http://localhost:8081/project_management/logged-out"
@@ -794,6 +796,124 @@ runtime_value_configured() {
 	[[ -n "$value" && "$value" != PENDING_ONBOARDING && "$value" != REPLACE_WITH_* ]]
 }
 
+# 新环境的浏览器 OIDC 必须由 Keycloak 提供；基础平台只提供在线
+# authorization-context，不再充当子系统的 token issuer。以下校验只对已经
+# 写入浏览器 Client 的运行时文件生效，因此首次接入前仍可以先启动控制面。
+trim_trailing_slash() {
+    local value="${1:-}"
+    while [[ "$value" == */ ]]; do value="${value%/}"; done
+    printf '%s' "$value"
+}
+
+valid_http_origin() {
+    local value
+    value="$(trim_trailing_slash "${1:-}")"
+    [[ "$value" =~ ^https?://[^/@?#]+(:[0-9]{1,5})?$ ]]
+}
+
+keycloak_realm_issuer() {
+    local public_url realm
+    public_url="$(trim_trailing_slash "$(env_value "$env_file" KEYCLOAK_PUBLIC_URL)")"
+    realm="$(env_value "$env_file" KEYCLOAK_REALM)"
+    runtime_value_configured "$public_url" || fail "KEYCLOAK_PUBLIC_URL 未配置，无法校验子系统 OIDC 运行时"
+    runtime_value_configured "$realm" || fail "KEYCLOAK_REALM 未配置，无法校验子系统 OIDC 运行时"
+    valid_http_origin "$public_url" || fail "KEYCLOAK_PUBLIC_URL 必须是 HTTP(S) origin：${public_url}"
+    printf '%s/realms/%s' "$public_url" "$realm"
+}
+
+keycloak_internal_origin() {
+    local value
+    value="$(trim_trailing_slash "$(env_value "$env_file" KEYCLOAK_INTERNAL_URL)")"
+    [[ -n "$value" ]] || value="http://keycloak:8080"
+    valid_http_origin "$value" || fail "KEYCLOAK_INTERNAL_URL 必须是容器可达的 HTTP(S) origin：${value}"
+    printf '%s' "$value"
+}
+
+validate_runtime_value() {
+    local description="$1" key="$2" value="$3"
+    runtime_value_configured "$value" || fail "${description}运行时 ${key} 未配置或仍是占位符；请先在应用接入页同步 Keycloak Client"
+}
+
+# 对一份已接入的子系统运行时文件执行同一套 V2 门禁：
+# - 浏览器 issuer 必须是公开 Keycloak Realm；
+# - 后通道只能是 Compose 私网 Keycloak origin，不能携带 realm/path；
+# - redirect、client、租户、应用/环境自然键和角色目录哈希必须成组一致；
+# - online authorization-context 由 Compose 固定注入 platform-api；运行时平台
+#   地址只允许是统一入口或 Compose 私网平台 API，不能误配为 Keycloak。
+validate_keycloak_runtime() {
+    local description="$1" runtime_file="$2" application_code="$3" environment_code="$4"
+    local issuer_key="$5" backchannel_key="$6" client_key="$7" secret_key="$8" redirect_key="$9" tenant_key="${10}"
+    local platform_base_key="${11}" expected_redirect="${12}" hash_key="${13:-}"
+    local issuer backchannel client_id client_secret redirect_uri tenant_id platform_base hash_value
+    local expected_issuer expected_backchannel expected_client_id
+
+    client_id="$(env_value "$runtime_file" "$client_key")"
+    # 尚未由控制面创建 Client 的可选子系统不会启动；这里不把初始接入过程
+    # 误判为错误。只要已有 Client，就必须通过完整门禁。
+    runtime_value_configured "$client_id" || return 0
+
+    issuer="$(env_value "$runtime_file" "$issuer_key")"
+    backchannel="$(trim_trailing_slash "$(env_value "$runtime_file" "$backchannel_key")")"
+    client_secret="$(env_value "$runtime_file" "$secret_key")"
+    redirect_uri="$(env_value "$runtime_file" "$redirect_key")"
+    tenant_id="$(env_value "$runtime_file" "$tenant_key")"
+    platform_base="$(trim_trailing_slash "$(env_value "$runtime_file" "$platform_base_key")")"
+    expected_issuer="$(keycloak_realm_issuer)"
+    expected_backchannel="$(keycloak_internal_origin)"
+    expected_client_id="${application_code}-${environment_code}-web"
+
+    validate_runtime_value "$description" "$issuer_key" "$issuer"
+    validate_runtime_value "$description" "$backchannel_key" "$backchannel"
+    validate_runtime_value "$description" "$secret_key" "$client_secret"
+    validate_runtime_value "$description" "$redirect_key" "$redirect_uri"
+    validate_runtime_value "$description" "$tenant_key" "$tenant_id"
+    validate_runtime_value "$description" "$platform_base_key" "$platform_base"
+    [[ "$(trim_trailing_slash "$issuer")" == "$expected_issuer" ]] || \
+        fail "${description}运行时 ${issuer_key}=${issuer}；本地 Keycloak Realm 应为 ${expected_issuer}"
+    [[ "$backchannel" == "$expected_backchannel" ]] || \
+        fail "${description}运行时 ${backchannel_key}=${backchannel}；应为 Compose 私网地址 ${expected_backchannel}（不得包含 /realms 路径）"
+    [[ "$client_id" == "$expected_client_id" ]] || \
+        fail "${description}运行时 ${client_key}=${client_id}；本地 dev 环境要求 ${expected_client_id}"
+    [[ "$redirect_uri" == "$expected_redirect" ]] || \
+        fail "${description}运行时 ${redirect_key}=${redirect_uri}；应与统一前端入口一致：${expected_redirect}"
+    case "$platform_base" in
+        "$(trim_trailing_slash "$frontend_public_origin")"|http://platform-api:8080) ;;
+        *) fail "${description}运行时 ${platform_base_key}=${platform_base}；只能使用统一前端入口 ${frontend_public_origin} 或 Compose 私网平台地址 http://platform-api:8080，不能指向 Keycloak" ;;
+    esac
+
+    if [[ -n "$hash_key" ]]; then
+        hash_value="$(env_value "$runtime_file" "$hash_key")"
+        validate_runtime_value "$description" "$hash_key" "$hash_value"
+        [[ "$hash_value" =~ ^sha256:[a-f0-9]{64}$ ]] || \
+            fail "${description}运行时 ${hash_key} 必须为 sha256:<64位小写十六进制目录哈希>"
+    fi
+}
+
+validate_authorization_context_wiring() {
+    local expected='http://platform-api:8080/oauth2/authorization-context'
+    local standard_count portal_count
+    standard_count="$(grep -F "PLATFORM_AUTHORIZATION_CONTEXT_URL: ${expected}" "$compose_file" | wc -l | tr -d '[:space:]')"
+    portal_count="$(grep -F "PORTAL_AUTHORIZATION_CONTEXT_URL: ${expected}" "$compose_file" | wc -l | tr -d '[:space:]')"
+    [[ "$standard_count" -ge 3 && "$portal_count" -ge 1 ]] || \
+        fail "Compose 未为合同、项目、CRM、Portal 完整注入平台在线 authorization-context：${expected}"
+}
+
+validate_all_keycloak_runtimes() {
+	validate_authorization_context_wiring
+    validate_keycloak_runtime "合同管理" "$contract_env_file" contract_management dev \
+        OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
+        PLATFORM_BASE_URL "${frontend_public_origin}/contract_management/auth/callback"
+    validate_keycloak_runtime "客户与商机管理" "$customer_env_file" customer_and_opportunity dev \
+        OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
+        PLATFORM_BASE_URL "${frontend_public_origin}/customer-opportunity/auth/callback" OIDC_ROLE_CONFIG_HASH
+    validate_keycloak_runtime "客户自助门户" "$portal_env_file" customer_portal dev \
+        PORTAL_OIDC_ISSUER PORTAL_OIDC_BACKCHANNEL_BASE_URL PORTAL_OIDC_CLIENT_ID PORTAL_OIDC_CLIENT_SECRET PORTAL_OIDC_REDIRECT_URI PORTAL_OIDC_TENANT_ID \
+        PORTAL_PLATFORM_BASE_URL "${frontend_public_origin}/customer-portal/auth/callback" PORTAL_ROLE_CONFIG_HASH
+    validate_keycloak_runtime "项目管理" "$project_env_file" project_management dev \
+        OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
+        PLATFORM_BASE_URL "${frontend_public_origin}/project_management/auth/callback"
+}
+
 # 本地 Compose 的标准发现环境固定为 dev。运行时一旦完成 OIDC 接入，Client、
 # application code 和 environment code 必须指向同一自然键；缺省元数据兼容旧 Portal
 # 文件，但任何显式冲突都在启动/重建前失败，避免把 prod Client 装入 dev 容器。
@@ -806,12 +926,15 @@ validate_local_runtime_target() {
 	expected_client_id="${expected_application}-${expected_environment}-web"
 
 	runtime_value_configured "$client_id" || return 0
-	[[ -z "$application_code" || "$application_code" == "$expected_application" ]] || \
-		fail "${description}运行时 PLATFORM_APPLICATION_CODE=${application_code}，与 Compose 发现编码 ${expected_application} 不一致"
-	[[ -z "$environment_code" || "$environment_code" == "$expected_environment" ]] || \
-		fail "${description}运行时 PLATFORM_ENVIRONMENT_CODE=${environment_code}，与 Compose 发现环境 ${expected_environment} 不一致"
-	[[ "$client_id" == "$expected_client_id" ]] || \
-		fail "${description}运行时 ${client_key}=${client_id}，本地 dev 环境要求 ${expected_client_id}；请在应用接入页同步 dev Client"
+	if [[ -n "$application_code" && "$application_code" != "$expected_application" ]]; then
+		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前应用=${application_code}；Compose 发现应用=${expected_application}；请重新执行 ${expected_application}/${expected_environment} 应用接入"
+	fi
+	if [[ -n "$environment_code" && "$environment_code" != "$expected_environment" ]]; then
+		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code}；Compose 发现环境=${expected_environment}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请重新同步 ${expected_application}/${expected_environment}，不要将生产运行配置用于 docker-local.sh"
+	fi
+	if [[ "$client_id" != "$expected_client_id" ]]; then
+		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code:-未配置}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请重新同步 ${expected_application}/${expected_environment}，不要将生产 Client 用于 docker-local.sh"
+	fi
 }
 
 validate_all_local_runtime_targets() {
@@ -1200,6 +1323,7 @@ start_stack() {
 	ensure_portal_env_file
 	ensure_project_env_file
 	validate_all_local_runtime_targets
+	validate_all_keycloak_runtimes
 	if portal_configured && ! portal_compensation_configured; then
 		fail "客户自助门户已接入，但 Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
 	fi
@@ -1514,6 +1638,7 @@ case "$command_name" in
 		ensure_portal_env_file
 		ensure_project_env_file
 		validate_all_local_runtime_targets
+		validate_all_keycloak_runtimes
 		if portal_configured && ! portal_compensation_configured; then
 			fail "Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
 		fi

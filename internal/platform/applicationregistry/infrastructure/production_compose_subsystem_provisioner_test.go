@@ -203,6 +203,31 @@ func TestProductionComposeSubsystemProvisionerUpdateWritesManifestFixedValues(t 
 	}
 }
 
+func TestProductionComposeSubsystemProvisionerAuthenticationUpdateWritesAndRetainsRollbackCredential(t *testing.T) {
+	t.Parallel()
+	provisioner, _, contractPath := productionProvisionerFixture(t)
+	input := productionContractInput("http://keycloak.example.com/realms/basic-platform")
+	input.AuthenticationRuntimeUpdate = true
+	if err := provisioner.Update(context.Background(), input); err != nil {
+		t.Fatalf("authentication update: %v", err)
+	}
+	contents, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"OIDC_ISSUER=http://keycloak.example.com/realms/basic-platform",
+		"OIDC_CLIENT_ID=contract_management-prod-web",
+		"OIDC_CLIENT_SECRET=browser-secret",
+		"OIDC_CLIENT_ID_ROLLBACK=PENDING_ONBOARDING",
+		"OIDC_CLIENT_SECRET_ROLLBACK=PENDING_ONBOARDING",
+	} {
+		if !strings.Contains(string(contents), expected) {
+			t.Fatalf("authentication update did not write %q:\n%s", expected, contents)
+		}
+	}
+}
+
 func TestProductionComposeSubsystemProvisionerTestServerAllowsPlaceholderDatabaseCredentials(t *testing.T) {
 	t.Parallel()
 	provisioner, runner, _ := productionProvisionerFixtureWithPlaceholderAllowance(t, true)

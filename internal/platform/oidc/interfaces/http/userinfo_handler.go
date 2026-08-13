@@ -35,6 +35,10 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeUserInfoUnauthorized(w)
 		return
 	}
+	if !h.allowLegacyPlatformAccessToken {
+		writeUserInfoUnauthorized(w)
+		return
+	}
 	if claims.ClientID != expectedAudience || claims.Subject == "" || claims.SessionID == "" || !hasScope(claims.Scope, "openid") {
 		writeUserInfoUnauthorized(w)
 		return

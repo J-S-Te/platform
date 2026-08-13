@@ -13,6 +13,7 @@ import (
 	stdhttp "net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -73,6 +74,8 @@ type keycloakManagedProtocolMapper struct {
 	ProtocolMapper string
 	Config         map[string]string
 }
+
+const keycloakDefaultRealmEventsExpirationSeconds = int64(30 * 24 * 60 * 60)
 
 var legacyKeycloakAuthorizationClaimNames = map[string]struct{}{
 	"permissions":      {},
@@ -206,7 +209,33 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		return err
 	}
 	if response.StatusCode == stdhttp.StatusOK {
+		body, readErr := io.ReadAll(response.Body)
 		response.Body.Close()
+		if readErr != nil {
+			return readErr
+		}
+		// A compatible Admin API proxy may answer 200 without returning the
+		// Realm representation. Keep onboarding compatible; reconciliation
+		// will enforce the settings once a complete response is available.
+		if len(bytes.TrimSpace(body)) == 0 {
+			return nil
+		}
+		var realm map[string]any
+		if err := json.Unmarshal(body, &realm); err != nil {
+			return err
+		}
+		changed, updatePayload := realmEventSettingsPatch(realm)
+		if !changed {
+			return nil
+		}
+		response, err = control.request(ctx, token, stdhttp.MethodPut, "/admin/realms/"+url.PathEscape(control.realm), updatePayload)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		if err := keycloakStatusError("update Keycloak Realm", response, stdhttp.StatusNoContent); err != nil {
+			return err
+		}
 		return nil
 	}
 	if response.StatusCode != stdhttp.StatusNotFound {
@@ -214,7 +243,7 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		return keycloakStatusError("read Keycloak Realm", response, stdhttp.StatusNotFound)
 	}
 	response.Body.Close()
-	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{"realm": control.realm, "enabled": true})
+	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{"realm": control.realm, "enabled": true, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds})
 	if err != nil {
 		return err
 	}
@@ -223,6 +252,68 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		return err
 	}
 	return nil
+}
+
+func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
+	if realm == nil {
+		return false, nil
+	}
+	payload := make(map[string]any, 3)
+	changed := false
+	payload["eventsEnabled"] = true
+	payload["adminEventsEnabled"] = true
+	payload["eventsExpiration"] = keycloakDefaultRealmEventsExpirationSeconds
+	if !asBool(realm["eventsEnabled"]) {
+		changed = true
+	}
+	if !asBool(realm["adminEventsEnabled"]) {
+		changed = true
+	}
+	if !asPositiveInt64(realm["eventsExpiration"]) {
+		changed = true
+	}
+	if changed {
+		return true, payload
+	}
+	return false, nil
+}
+
+func asPositiveInt64(value any) bool {
+	switch current := value.(type) {
+	case int:
+		return current > 0
+	case int64:
+		return current > 0
+	case int32:
+		return int64(current) > 0
+	case int16:
+		return int64(current) > 0
+	case int8:
+		return int64(current) > 0
+	case float64:
+		return int64(current) > 0
+	case float32:
+		return int64(current) > 0
+	case string:
+		trimmed := strings.TrimSpace(current)
+		if trimmed == "" {
+			return false
+		}
+		parsed, err := strconv.ParseInt(trimmed, 10, 64)
+		return err == nil && parsed > 0
+	}
+	return false
+}
+
+func asBool(value any) bool {
+	if value == nil {
+		return false
+	}
+	current, ok := value.(bool)
+	if !ok {
+		return false
+	}
+	return current
 }
 
 // ensureBrokerUserProfile declares the attributes imported from Basic Platform.

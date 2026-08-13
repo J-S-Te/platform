@@ -27,7 +27,7 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx c
 	if err != nil {
 		// “未配置”和“策略拒绝”对 OIDC 都统一为 access denied，不向客户端泄露应用授权
 		// 配置是否存在；基础设施错误则保留原错误供服务端诊断。
-		if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrAccessDenied) {
+		if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrAccessDenied) {
 			return tokenissuer.AuthorizationClaims{}, oidcapplication.ErrAccessDenied
 		}
 		return tokenissuer.AuthorizationClaims{}, err
@@ -38,7 +38,7 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx c
 func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorizationContext(ctx context.Context, tenantID, clientID, userID string) (tokenissuer.AuthorizationContext, error) {
 	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
 	if err != nil {
-		if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrAccessDenied) {
+		if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrAccessDenied) {
 			return tokenissuer.AuthorizationContext{}, oidcapplication.ErrAccessDenied
 		}
 		return tokenissuer.AuthorizationContext{}, err

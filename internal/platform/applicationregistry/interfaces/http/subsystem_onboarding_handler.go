@@ -201,6 +201,16 @@ type keycloakBrokerProvisioner interface {
 	EnsureKeycloakBroker(context.Context, string) (string, string, error)
 }
 
+// subsystemServiceCredentialManager is the narrow control-plane capability used to
+// backfill newly introduced machine bindings for an already registered environment.
+// Plaintext is produced only for a newly created/rotated secret and is passed directly
+// to the isolated deployment Agent; it is never returned to the browser.
+type subsystemServiceCredentialManager interface {
+	ListOAuthClients(context.Context, string) ([]application.OAuthClientView, error)
+	CreateOAuthClient(context.Context, application.OAuthClientCreateInput) (application.OAuthClientCreateResult, error)
+	CreateOAuthClientSecret(context.Context, application.OAuthClientSecretCreateInput) (application.OAuthClientSecretResult, error)
+}
+
 // subsystemNotificationSink 发送租户内站内通知，用于把子系统接入生命周期结果通知给操作人。
 // 该接口由基础平台实现，子系统代码无需改动；nil 时处理器保持轻量测试可用。
 type subsystemNotificationSink interface {
@@ -240,6 +250,7 @@ type SubsystemOnboardingHandler struct {
 	keycloakReadiness    keycloakSwitchReadinessInspector
 	keycloakOperations   keycloakProjectionOperations
 	keycloakCutover      keycloakCutoverLifecycleStore
+	serviceCredentials   subsystemServiceCredentialManager
 	logger               *slog.Logger
 }
 
@@ -308,6 +319,12 @@ func (handler *SubsystemOnboardingHandler) ConfigureKeycloakProjectionOperations
 // seven-day observation and rollback-window control plane.
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakCutoverLifecycle(store keycloakCutoverLifecycleStore) {
 	handler.keycloakCutover = store
+}
+
+// ConfigureSubsystemServiceCredentials enables idempotent migration of new
+// purpose-bound machine credentials for environments created by an older release.
+func (handler *SubsystemOnboardingHandler) ConfigureSubsystemServiceCredentials(manager subsystemServiceCredentialManager) {
+	handler.serviceCredentials = manager
 }
 
 func unverifiedKeycloakSwitchReadiness() KeycloakSwitchReadiness {
@@ -1199,6 +1216,55 @@ func (handler *SubsystemOnboardingHandler) RollbackToPlatform(writer stdhttp.Res
 	handler.updateSubsystem(writer, request, "platform")
 }
 
+func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, operation string) ([]application.SubsystemServiceCredential, error) {
+	if handler.serviceCredentials == nil || applicationCode != "contract_management" {
+		return nil, nil
+	}
+	if strings.TrimSpace(applicationID) == "" || strings.TrimSpace(environmentID) == "" {
+		return nil, application.ErrNotFound
+	}
+	clientID := applicationCode + "-" + environment + "-owner-directory"
+	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	for _, client := range clients {
+		if client.ClientID != clientID {
+			continue
+		}
+		if !strings.EqualFold(client.Status, "ACTIVE") {
+			return nil, application.ErrConflict
+		}
+		// Normal updates preserve the already delivered secret. A retry creates an
+		// additional active version because the previous one may have been created
+		// immediately before an Agent failure and therefore never reached runtime.
+		if operation != "RETRY" {
+			return nil, nil
+		}
+		secret, secretErr := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{
+			TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID,
+		})
+		if secretErr != nil {
+			return nil, secretErr
+		}
+		return []application.SubsystemServiceCredential{{
+			Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: client, PlaintextSecret: secret.PlaintextSecret,
+		}}, nil
+	}
+	created, err := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
+		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
+		ClientID: clientID, ClientName: "合同管理系统 Owner Directory Reader", ClientType: "service",
+		TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
+		GrantTypes: []string{"client_credentials"}, Scopes: []string{"owner_directory.read"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []application.SubsystemServiceCredential{{
+		Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: created.Client, PlaintextSecret: created.PlaintextSecret,
+	}}, nil
+}
+
 func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request, forcedIssuerAlias string) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
@@ -1272,7 +1338,8 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
 		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
 		// issuer as a stable source of truth instead of having the client send it in.
-		Issuer: issuer,
+		Issuer:                      issuer,
+		AuthenticationRuntimeUpdate: keycloakCutover || keycloakRollback,
 	}
 	publicBaseURL := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/")
 	upstreamURL := strings.TrimRight(strings.TrimSpace(payload.UpstreamURL), "/")
@@ -1330,6 +1397,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	// Resolve identifiers from the deployment control plane, not the portal projection: failed
 	// and updating environments are intentionally hidden from the user-facing portal catalog.
 	var deploymentContext application.SubsystemDeploymentState
+	environmentID := ""
 	if handler.deploymentState != nil {
 		state, err := handler.deploymentState.GetSubsystemDeploymentContext(request.Context(), principal.Tenant.ID, applicationCode, environment)
 		if err != nil {
@@ -1338,8 +1406,10 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		}
 		deploymentContext = state
 		updateInput.ApplicationID = state.ApplicationID
-	} else if applicationID, _, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
+		environmentID = state.EnvironmentID
+	} else if applicationID, resolvedEnvironmentID, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
 		updateInput.ApplicationID = applicationID
+		environmentID = resolvedEnvironmentID
 	}
 	if strings.TrimSpace(updateInput.ApplicationID) == "" {
 		handler.writeError(writer, request, application.ErrNotFound)
@@ -1353,6 +1423,15 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	if strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry") {
 		operation = "RETRY"
 	}
+	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
+		request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID,
+		applicationCode, environment, principal.User.ID, operation,
+	)
+	if credentialErr != nil {
+		handler.writeError(writer, request, credentialErr)
+		return
+	}
+	updateInput.ServiceCredentials = serviceCredentials
 	retryAdminUserID := principal.User.ID
 	retryNeedsInitialAccess := false
 	if operation == "RETRY" && handler.deploymentState != nil {

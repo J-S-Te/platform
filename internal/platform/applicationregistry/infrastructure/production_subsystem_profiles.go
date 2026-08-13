@@ -456,6 +456,12 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 			application.ServiceCredentialPortalMappingDisable,
 			application.ServiceCredentialPortalInviteVerify,
 		}
+	case "contract_management":
+		return []string{
+			application.ServiceCredentialContractSummaryRead,
+			application.ServiceCredentialContractOpportunitySignedWrite,
+			application.ServiceCredentialOwnerDirectoryRead,
+		}
 	}
 	return nil
 }

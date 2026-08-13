@@ -31,6 +31,10 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	claims, err := h.jwtManager.VerifyAccessToken(rawToken, expectedAudience, h.clock.Now().UTC())
 	clientID, subjectTenantID, subjectID := "", "", ""
 	if ok && err == nil && claims.ClientID == expectedAudience && claims.Subject != "" && claims.SessionID != "" && hasScope(claims.Scope, "openid") {
+		if !h.allowLegacyPlatformAccessToken {
+			writeContextUnauthorized(w)
+			return
+		}
 		clientID, subjectID = claims.ClientID, claims.Subject
 		subject, subjectErr := h.accessTokenSubjects.ResolveAccessTokenSubject(r.Context(), claims.ClientID, claims.SessionID, claims.Subject)
 		if subjectErr != nil || strings.TrimSpace(subject.TenantID) == "" {
