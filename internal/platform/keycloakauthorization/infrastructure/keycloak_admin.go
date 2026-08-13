@@ -100,10 +100,12 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 	if err != nil {
 		return nil, err
 	}
-	adminEvents, err := admin.listEventPage(ctx, token, "/admin-events?dateFrom="+url.QueryEscape(dateFrom)+"&max=1000")
-	if err != nil {
-		return nil, err
-	}
+	// User LOGIN/LOGOUT events are required for Broker verification. Admin
+	// events are an additional audit stream and may be unavailable when the
+	// Keycloak administrator has no admin-event permission (some Keycloak
+	// deployments expose that condition as 404). Do not discard valid login
+	// evidence just because the optional admin stream is unavailable.
+	adminEvents, _ := admin.listEventPage(ctx, token, "/admin-events?dateFrom="+url.QueryEscape(dateFrom)+"&max=1000")
 	items := make([]projectionapplication.KeycloakAuditEvent, 0, len(userEvents)+len(adminEvents))
 	for _, event := range userEvents {
 		kind, _ := event["type"].(string)
