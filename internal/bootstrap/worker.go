@@ -152,6 +152,11 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			_ = logFile.Close()
 			return nil, fmt.Errorf("expand legacy Keycloak authorization outbox: %w", err)
 		}
+		if err := mappingStore.ReconcileStoredKeycloakClientMappings(context.Background()); err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("reconcile stored Keycloak Client mappings: %w", err)
+		}
 		accessService, err := applicationaccess.NewService(db, ulid.Generator{}, applicationaccess.SystemClock{})
 		if err != nil {
 			_ = database.Close(db)
