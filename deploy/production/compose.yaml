@@ -181,11 +181,16 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # 基础平台后端单容器：入口脚本同时启动 API 与后台 Worker。
+  # 基础平台 HTTP API。后台 Worker 使用下方独立的 platform-worker 服务，
+  # 避免 API 重启或入口脚本差异导致投影任务无人消费。
   platform-api:
     <<: *platform-service
     environment:
-      BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
+      # 生产编排必须覆盖旧的 .env 值，避免把 test/development 运行配置带入
+      # production 项目，进而让审计、投影门禁按错误环境运行。
+      APP_ENV: production
+      AUDIT_ENVIRONMENT_CODE: prod
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
       SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
       SUBSYSTEM_ONBOARDING_MODE: production
       SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
@@ -219,6 +224,22 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
+
+  # Worker 独立运行，避免依赖 API 入口脚本的双进程模式。在生产环境中，
+  # Keycloak 用户/角色投影、审计采集和人员异动必须有明确的容器生命周期。
+  platform-worker:
+    <<: *platform-service
+    environment:
+      APP_ENV: production
+      AUDIT_ENVIRONMENT_CODE: prod
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
+    command: ["./worker"]
+    depends_on:
+      platform-mysql:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
 
   # 生产接入 Agent 仅通过 Unix Socket 接收固定生命周期动作。平台 API 不挂载
   # Docker Socket；Agent 也没有网络端口，目标只能来自只读 subsystems.d 审核清单。

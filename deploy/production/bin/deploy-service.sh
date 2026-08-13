@@ -299,18 +299,18 @@ deploy_platform() {
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
   # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；
-  # platform-api 只在镜像 digest 变化时由 compose 自动重建，不在此强制重建，
-  # 避免每次部署都打断门户/接入操作造成 502。
+  # API 与 Worker 必须使用同一不可变镜像；Worker 独立运行，不能依赖 API
+  # 入口脚本的双进程模式，否则 Keycloak 用户投影可能没有消费者。
   if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
     echo "subsystem-provisioner 健康启动失败" >&2
     dump_subsystem_provisioner_debug
     return 1
   fi
-  compose up -d --no-deps platform-api || return
+  compose up -d --force-recreate --no-deps platform-api platform-worker || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || {
     # 兜底：新镜像首启异常时强制重建一次并再次等待，避免平台 API 停留在宕机状态。
     echo "platform-api 未通过健康检查，强制重建一次后重试" >&2
-    compose up -d --force-recreate --no-deps platform-api || return
+    compose up -d --force-recreate --no-deps platform-api platform-worker || return
     wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || return
   }
 }
@@ -376,7 +376,7 @@ rollback_runtime() {
         echo "回滚时 subsystem-provisioner 重建失败，继续尝试重建 platform-api" >&2
         dump_subsystem_provisioner_debug
       fi
-      compose up -d --no-deps platform-api
+      compose up -d --force-recreate --no-deps platform-api platform-worker
       ;;
     contract) compose up -d --no-deps contract-api ;;
     project) compose up -d --no-deps project-api ;;
