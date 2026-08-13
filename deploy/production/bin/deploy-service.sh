@@ -68,9 +68,26 @@ fi
   echo "拒绝符号链接运行配置：$contract_runtime_file" >&2
   exit 1
 }
-chmod 600 "$contract_runtime_file"
+ensure_runtime_file_mode_0600() {
+  local target="$1" temporary
+  if chmod 600 "$target" 2>/dev/null; then
+    return 0
+  fi
+
+  temporary="$(mktemp "$deploy_dir/runtime/.runtime-permissions.XXXXXX")" || {
+    echo "无法创建运行配置权限修复临时文件：$target；请由文件属主或 root 执行部署" >&2
+    exit 1
+  }
+  if ! install -m 600 "$target" "$temporary" 2>/dev/null || ! mv -f "$temporary" "$target"; then
+    rm -f "$temporary"
+    echo "无法将运行配置权限收紧为 0600：$target；请检查文件属主、runtime 目录写权限，或使用 root 执行部署" >&2
+    exit 1
+  fi
+}
+
+ensure_runtime_file_mode_0600 "$contract_runtime_file"
 [[ "$(stat -c '%a' "$contract_runtime_file")" == "600" ]] || {
-  echo "无法将运行配置权限收紧为 0600：$contract_runtime_file" >&2
+  echo "运行配置权限无法收紧为 0600：$contract_runtime_file" >&2
   exit 1
 }
 
@@ -87,9 +104,9 @@ fi
   echo "拒绝符号链接运行配置：$project_runtime_file" >&2
   exit 1
 }
-chmod 600 "$project_runtime_file"
+ensure_runtime_file_mode_0600 "$project_runtime_file"
 [[ "$(stat -c '%a' "$project_runtime_file")" == "600" ]] || {
-  echo "无法将运行配置权限收紧为 0600：$project_runtime_file" >&2
+  echo "运行配置权限无法收紧为 0600：$project_runtime_file" >&2
   exit 1
 }
 
