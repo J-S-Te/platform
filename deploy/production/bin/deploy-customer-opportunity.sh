@@ -42,6 +42,7 @@ customer_worker_services=(
   customer-presale-progress-notification-worker
   customer-presale-worker
 )
+relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
 
 for command_name in docker curl gzip flock awk mktemp install stat; do
   command -v "$command_name" >/dev/null || {
@@ -73,6 +74,19 @@ initialize_runtime_file() {
     exit 1
   }
   if ! chmod 600 "$target" 2>/dev/null; then
+    if command -v sudo >/dev/null && sudo -n chmod 600 "$target" 2>/dev/null; then
+      return 0
+    fi
+
+    if [[ "$relax_runtime_perm_check" == "true" ]]; then
+      if [[ -r "$target" ]]; then
+        echo "跳过运行配置权限收紧（仅发布前允许）：$target" >&2
+        return 0
+      fi
+      echo "无法读取运行配置文件：$target；请检查权限后重试" >&2
+      return 1
+    fi
+
     # 发布 Agent 可能拥有 runtime 目录写权限，但不是历史运行文件的属主。
     # 在同一目录创建 0600 临时文件并原子替换，避免放宽密钥权限或要求删除文件。
     temporary="$(mktemp "$deploy_dir/runtime/.runtime-permissions.XXXXXX")" || {
