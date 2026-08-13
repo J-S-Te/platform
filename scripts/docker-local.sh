@@ -577,10 +577,15 @@ ensure_contract_env_file() {
         replace_line_in_file "$contract_env_file" PLATFORM_BASE_URL "http://localhost:8081"
         replace_line_in_file "$contract_env_file" OIDC_ISSUER "http://localhost:8081"
         replace_line_in_file "$contract_env_file" OIDC_REDIRECT_URI "http://localhost:8081/contract_management/auth/callback"
+        replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
         replace_line_in_file "$contract_env_file" APP_PUBLIC_URL "http://localhost:8081/contract_management/dashboard"
         replace_line_in_file "$contract_env_file" APP_PATH_PREFIX "/contract_management"
         log "已生成合同管理环境文件：$contract_env_file"
         log "请先在基础平台完成合同管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
+    fi
+
+    if [[ -z "$(env_value "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
     fi
 
     if [[ "$strict" == true ]]; then
@@ -707,15 +712,20 @@ ensure_project_env_file() {
 		replace_line_in_file "$project_env_file" MYSQL_DSN "project:${password}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
 		replace_line_in_file "$project_env_file" PLATFORM_BASE_URL "http://localhost:8081"
 		replace_line_in_file "$project_env_file" PROJECT_PLATFORM_BACKCHANNEL_BASE_URL "http://platform-api:8080"
-		replace_line_in_file "$project_env_file" OIDC_ISSUER "http://localhost:8081"
-		replace_line_in_file "$project_env_file" OIDC_REDIRECT_URI "http://localhost:8081/project_management/auth/callback"
-		replace_line_in_file "$project_env_file" OIDC_POST_LOGOUT_REDIRECT_URI "http://localhost:8081/project_management/logged-out"
-		replace_line_in_file "$project_env_file" APP_PATH_PREFIX "/project_management"
-		replace_line_in_file "$project_env_file" OIDC_SESSION_COOKIE_SECURE "false"
-		replace_line_in_file "$project_env_file" PLATFORM_ENVIRONMENT_CODE "dev"
-		log "已生成项目管理系统环境文件：$project_env_file"
-		log "请先在基础平台完成项目管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
-	fi
+        replace_line_in_file "$project_env_file" OIDC_ISSUER "http://localhost:8081"
+        replace_line_in_file "$project_env_file" OIDC_REDIRECT_URI "http://localhost:8081/project_management/auth/callback"
+        replace_line_in_file "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
+        replace_line_in_file "$project_env_file" OIDC_POST_LOGOUT_REDIRECT_URI "http://localhost:8081/project_management/logged-out"
+        replace_line_in_file "$project_env_file" APP_PATH_PREFIX "/project_management"
+        replace_line_in_file "$project_env_file" OIDC_SESSION_COOKIE_SECURE "false"
+        replace_line_in_file "$project_env_file" PLATFORM_ENVIRONMENT_CODE "dev"
+        log "已生成项目管理系统环境文件：$project_env_file"
+        log "请先在基础平台完成项目管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
+    fi
+
+    if [[ -z "$(env_value "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
+    fi
 }
 
 project_configured() {
@@ -777,6 +787,45 @@ env_value() {
         esac
     fi
     printf '%s' "$value"
+}
+
+runtime_value_configured() {
+	local value="${1:-}"
+	[[ -n "$value" && "$value" != PENDING_ONBOARDING && "$value" != REPLACE_WITH_* ]]
+}
+
+# 本地 Compose 的标准发现环境固定为 dev。运行时一旦完成 OIDC 接入，Client、
+# application code 和 environment code 必须指向同一自然键；缺省元数据兼容旧 Portal
+# 文件，但任何显式冲突都在启动/重建前失败，避免把 prod Client 装入 dev 容器。
+validate_local_runtime_target() {
+	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5"
+	local application_code environment_code client_id expected_client_id
+	application_code="$(env_value "$runtime_file" PLATFORM_APPLICATION_CODE)"
+	environment_code="$(env_value "$runtime_file" PLATFORM_ENVIRONMENT_CODE)"
+	client_id="$(env_value "$runtime_file" "$client_key")"
+	expected_client_id="${expected_application}-${expected_environment}-web"
+
+	runtime_value_configured "$client_id" || return 0
+	[[ -z "$application_code" || "$application_code" == "$expected_application" ]] || \
+		fail "${description}运行时 PLATFORM_APPLICATION_CODE=${application_code}，与 Compose 发现编码 ${expected_application} 不一致"
+	[[ -z "$environment_code" || "$environment_code" == "$expected_environment" ]] || \
+		fail "${description}运行时 PLATFORM_ENVIRONMENT_CODE=${environment_code}，与 Compose 发现环境 ${expected_environment} 不一致"
+	[[ "$client_id" == "$expected_client_id" ]] || \
+		fail "${description}运行时 ${client_key}=${client_id}，本地 dev 环境要求 ${expected_client_id}；请在应用接入页同步 dev Client"
+}
+
+validate_all_local_runtime_targets() {
+	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management dev OIDC_CLIENT_ID
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal dev PORTAL_OIDC_CLIENT_ID
+	validate_local_runtime_target "项目管理" "$project_env_file" project_management dev OIDC_CLIENT_ID
+}
+
+portal_compensation_configured() {
+	local key
+	for key in PORTAL_PROVISION_CLIENT_ID PORTAL_PROVISION_CLIENT_SECRET PLATFORM_ROLE_ASSIGN_CLIENT_ID PLATFORM_ROLE_ASSIGN_CLIENT_SECRET; do
+		runtime_value_configured "$(env_value "$customer_env_file" "$key")" || return 1
+	done
 }
 
 disable_contract_startup_catalog_sync() {
@@ -1150,6 +1199,10 @@ start_stack() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	validate_all_local_runtime_targets
+	if portal_configured && ! portal_compensation_configured; then
+		fail "客户自助门户已接入，但 Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
+	fi
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
     prepare_gateway_config
@@ -1177,6 +1230,7 @@ start_stack() {
 		# `up --wait` 解析其 service_completed_successfully 依赖会重建一次性
 		# 容器，并可能在等待阶段引用已被 Compose 清理的旧容器 ID。
 		compose_run up -d --wait --no-deps portal-api
+		compose_run up -d --no-deps portal-invite-compensation-worker
 	else
 		log "客户自助门户尚未接入，跳过 portal-api；可在应用接入中创建 customer_portal/dev"
 	fi
@@ -1242,6 +1296,7 @@ refresh_contract_backend() {
     ensure_customer_env_file
 	ensure_project_env_file
 	ensure_portal_env_file
+	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management dev OIDC_CLIENT_ID
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
     prepare_go_backend_base_images "合同管理后端"
@@ -1267,6 +1322,7 @@ refresh_customer_backend() {
     ensure_contract_env_file false
 	ensure_customer_env_file
 	ensure_portal_env_file
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
     prepare_go_backend_base_images "客户与商机管理后端"
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
@@ -1306,6 +1362,8 @@ refresh_portal_backend() {
 	ensure_portal_env_file
 	ensure_project_env_file
 	portal_configured || fail "客户自助门户尚未完成 customer_portal/dev 应用接入，不能启动 portal-api"
+	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal dev PORTAL_OIDC_CLIENT_ID
+	portal_compensation_configured || fail "Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
 	prepare_go_backend_base_images "客户自助门户后端"
 
 	log "重新构建客户自助门户独立后端镜像"
@@ -1316,11 +1374,12 @@ refresh_portal_backend() {
 	log "启动门户数据库并执行 Portal 清单迁移"
 	compose_run up -d --wait portal-mysql
 	compose_run run --rm --no-deps portal-migrate
-	log "重建 portal-api 与统一前端"
+	log "重建 portal-api、Portal 补偿 Worker 与统一前端"
 	compose_run up -d --wait --no-deps portal-api
+	compose_run up -d --no-deps portal-invite-compensation-worker
 	compose_run up -d --wait --no-deps frontend
 	verify_gateway_routes
-	compose_run ps portal-api portal-mysql frontend
+	compose_run ps portal-api portal-invite-compensation-worker portal-mysql frontend
 }
 
 refresh_project_backend() {
@@ -1330,6 +1389,7 @@ refresh_project_backend() {
 	ensure_portal_env_file
 	ensure_project_env_file
 	project_configured || fail "项目管理系统尚未完成 project_management/dev 应用接入，不能启动 project-api"
+	validate_local_runtime_target "项目管理" "$project_env_file" project_management dev OIDC_CLIENT_ID
 	prepare_go_backend_base_images "项目管理系统后端"
 
 	log "重新构建项目管理系统独立后端镜像"
@@ -1357,6 +1417,7 @@ start_presale_worker() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
 	[[ -f "$presale_worker_env_file" ]] || \
 		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
 	[[ -s "$presale_worker_env_file" ]] || \
@@ -1446,12 +1507,16 @@ case "$command_name" in
             compose_run "${log_args[@]}"
         fi
         ;;
-    config)
+	config)
         ensure_platform_env_file
         ensure_contract_env_file true
 		ensure_customer_env_file
 		ensure_portal_env_file
 		ensure_project_env_file
+		validate_all_local_runtime_targets
+		if portal_configured && ! portal_compensation_configured; then
+			fail "Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
+		fi
         ensure_catalog_publisher_credentials_consistent
         disable_contract_startup_catalog_sync
         compose_run config --quiet

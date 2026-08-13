@@ -100,7 +100,9 @@ func subsystemServiceInstanceFromDockerLabels(labels map[string]string, health s
 	host := get("com.basic-platform.internal_host")
 	portText := get("com.basic-platform.internal_port")
 	port, err := strconv.Atoi(portText)
-	if get("com.basic-platform.tenant_id") == "" || get("com.basic-platform.application_id") == "" || get("com.basic-platform.environment_id") == "" || !validDiscoveryValue(applicationCode) || !validDiscoveryValue(environment) || get("com.basic-platform.service_name") == "" || get("com.basic-platform.service_role") == "" || host == "" || hasControl(host) || err != nil || port < 1 || port > 65535 {
+	pathPrefix := strings.TrimRight(get("com.basic-platform.path_prefix"), "/")
+	healthEndpoint := get("com.basic-platform.health_endpoint")
+	if get(dockerDiscoveryLabel) != "v1" || !validDiscoveryValue(applicationCode) || !validDiscoveryValue(environment) || get("com.basic-platform.service_name") == "" || get("com.basic-platform.service_role") == "" || host == "" || hasControl(host) || err != nil || port < 1 || port > 65535 || !validOptionalDiscoveryPath(pathPrefix) || !validOptionalDiscoveryPath(healthEndpoint) {
 		return application.SubsystemServiceInstance{}, false
 	}
 	protocol := strings.ToLower(get("com.basic-platform.protocol"))
@@ -118,9 +120,10 @@ func subsystemServiceInstanceFromDockerLabels(labels map[string]string, health s
 		status = application.SubsystemServiceStatusUnavailable
 	}
 	return application.SubsystemServiceInstance{
-		TenantID: get("com.basic-platform.tenant_id"), ApplicationID: get("com.basic-platform.application_id"), EnvironmentID: get("com.basic-platform.environment_id"),
+		// 数据库 ID 不属于容器声明。控制面在持久化前根据租户、应用编码和环境
+		// 自然键补齐边界，Compose 无需硬编码平台 ULID。
 		ApplicationCode: applicationCode, Environment: environment, ServiceName: get("com.basic-platform.service_name"), ServiceRole: get("com.basic-platform.service_role"),
-		Protocol: protocol, InternalHost: host, InternalPort: uint(port), PathPrefix: strings.TrimRight(get("com.basic-platform.path_prefix"), "/"), HealthEndpoint: get("com.basic-platform.health_endpoint"), Version: get("com.basic-platform.version"),
+		Protocol: protocol, InternalHost: host, InternalPort: uint(port), PathPrefix: pathPrefix, HealthEndpoint: healthEndpoint, Version: get("com.basic-platform.version"),
 		Status: status, LastSeenAt: &now, CreatedAt: now, UpdatedAt: now,
 	}, true
 }
@@ -132,7 +135,7 @@ func subsystemDiscoveryCandidateFromDockerLabels(labels map[string]string, healt
 	host := get("com.basic-platform.internal_host")
 	port, err := strconv.Atoi(get("com.basic-platform.internal_port"))
 	callbackPath := get("com.basic-platform.oidc_callback_path")
-	if !validDiscoveryValue(applicationCode) || !validDiscoveryValue(environment) || get("com.basic-platform.service_name") == "" || get("com.basic-platform.service_role") == "" || host == "" || hasControl(host) || err != nil || port < 1 || port > 65535 || !strings.HasPrefix(callbackPath, "/") || hasControl(callbackPath) {
+	if get(dockerDiscoveryLabel) != "v1" || !validDiscoveryValue(applicationCode) || !validDiscoveryValue(environment) || get("com.basic-platform.service_name") == "" || get("com.basic-platform.service_role") == "" || host == "" || hasControl(host) || err != nil || port < 1 || port > 65535 || !validOptionalDiscoveryPath(get("com.basic-platform.health_endpoint")) || !validOptionalDiscoveryPath(get("com.basic-platform.path_prefix")) || !validRequiredDiscoveryPath(callbackPath) {
 		return application.SubsystemDiscoveryCandidate{}, false
 	}
 	protocol := strings.ToLower(get("com.basic-platform.protocol"))
@@ -154,6 +157,14 @@ func subsystemDiscoveryCandidateFromDockerLabels(labels map[string]string, healt
 		Protocol: protocol, InternalHost: host, InternalPort: uint(port), HealthEndpoint: get("com.basic-platform.health_endpoint"),
 		OIDCCallbackPath: callbackPath, OIDCCallbackSupported: parseDiscoveryBool(get("com.basic-platform.oidc_callback_supported"), callbackPath != ""), Version: get("com.basic-platform.version"), Status: status,
 	}, true
+}
+
+func validRequiredDiscoveryPath(value string) bool {
+	return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") && !hasControl(value)
+}
+
+func validOptionalDiscoveryPath(value string) bool {
+	return value == "" || validRequiredDiscoveryPath(value)
 }
 
 func firstNonEmpty(values ...string) string {

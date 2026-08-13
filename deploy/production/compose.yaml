@@ -128,7 +128,7 @@ services:
       # 留空不会创建 bootstrap service account，保留既有 admin/password 启动方式。
       KC_BOOTSTRAP_ADMIN_CLIENT_ID: ${KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_ID:-}
       KC_BOOTSTRAP_ADMIN_CLIENT_SECRET: ${KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_SECRET:-}
-      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://47.111.20.119:18090}
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:?KEYCLOAK_PUBLIC_URL must be configured}
       KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
       KC_PROXY_HEADERS: ${KEYCLOAK_PROXY_HEADERS:-xforwarded}
       KC_HTTP_ENABLED: ${KEYCLOAK_HTTP_ENABLED:-true}
@@ -325,6 +325,7 @@ services:
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: contract_management
+      com.basic-platform.application_name: 合同管理系统
       com.basic-platform.environment: prod
       com.basic-platform.service_name: contract-api
       com.basic-platform.service_role: business
@@ -332,7 +333,9 @@ services:
       com.basic-platform.internal_port: "8081"
       com.basic-platform.protocol: http
       com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /contract_management
       com.basic-platform.oidc_callback_path: /contract_management/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
       com.basic-platform.version: ${RELEASE_VERSION:-production}
     depends_on:
       contract-mysql:
@@ -392,6 +395,7 @@ services:
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: project_management
+      com.basic-platform.application_name: 项目服务内容管理系统
       com.basic-platform.environment: prod
       com.basic-platform.service_name: project-api
       com.basic-platform.service_role: business
@@ -399,7 +403,9 @@ services:
       com.basic-platform.internal_port: "8082"
       com.basic-platform.protocol: http
       com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /project_management
       com.basic-platform.oidc_callback_path: /project_management/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
       com.basic-platform.version: ${RELEASE_VERSION:-production}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
@@ -449,6 +455,7 @@ services:
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: customer_and_opportunity
+      com.basic-platform.application_name: 客户与商机管理系统
       com.basic-platform.environment: prod
       com.basic-platform.service_name: customer-api
       com.basic-platform.service_role: business
@@ -456,7 +463,9 @@ services:
       com.basic-platform.internal_port: "8090"
       com.basic-platform.protocol: http
       com.basic-platform.health_endpoint: /customer-opportunity/healthz
+      com.basic-platform.path_prefix: /customer-opportunity
       com.basic-platform.oidc_callback_path: /customer-opportunity/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
       com.basic-platform.version: ${RELEASE_VERSION:-production}
     depends_on:
       customer-mysql:
@@ -517,7 +526,13 @@ services:
     <<: *customer-service
     command: ["./presale-worker"]
     environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
+      PRESALE_TEMPORAL_INTERNAL_MODE: ${PRESALE_TEMPORAL_INTERNAL_MODE:-true}
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
     depends_on:
       customer-mysql:
         condition: service_healthy
@@ -563,6 +578,7 @@ services:
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: customer_portal
+      com.basic-platform.application_name: 客户自助门户
       com.basic-platform.environment: prod
       com.basic-platform.service_name: portal-api
       com.basic-platform.service_role: business
@@ -570,7 +586,9 @@ services:
       com.basic-platform.internal_port: "8091"
       com.basic-platform.protocol: http
       com.basic-platform.health_endpoint: /customer-portal/healthz
+      com.basic-platform.path_prefix: /customer-portal
       com.basic-platform.oidc_callback_path: /customer-portal/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
       com.basic-platform.version: ${RELEASE_VERSION:-production}
     depends_on:
       portal-mysql:
@@ -585,6 +603,27 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
+    profiles: ["customer"]
+
+  portal-invite-compensation-worker:
+    <<: *customer-service
+    command: ["./portal-invite-compensation-worker"]
+    environment:
+      PORTAL_INVITE_COMPENSATION_MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PORTAL_INVITE_COMPENSATION_PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
+      PORTAL_INVITE_COMPENSATION_PORTAL_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_INVITE_COMPENSATION_PORTAL_SCOPE: portal.identity_mapping.provision
+      PORTAL_INVITE_COMPENSATION_PLATFORM_ROLE_ASSIGN_URL: http://platform-api:8080/api/v1/internal/application-roles
+      PORTAL_INVITE_COMPENSATION_PLATFORM_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_INVITE_COMPENSATION_PLATFORM_SCOPE: application_role.assign
+      PORTAL_INVITE_COMPENSATION_PLATFORM_APPLICATION_CODE: customer_portal
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+      portal-api:
+        condition: service_healthy
     profiles: ["customer"]
 
   frontend:

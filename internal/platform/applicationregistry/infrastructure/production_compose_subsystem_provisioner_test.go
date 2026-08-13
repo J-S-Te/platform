@@ -56,6 +56,7 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=publisher-secret",
 		"PLATFORM_AUDIT_CLIENT_ID=contract_management-prod-audit-publisher",
 		"PLATFORM_AUDIT_CLIENT_SECRET=audit-secret",
+		"PLATFORM_AUTHORIZATION_CONTEXT_URL=http://platform-api:8080/oauth2/authorization-context",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("runtime environment missing %q:\n%s", expected, contents)
@@ -113,6 +114,17 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	}
 	if !containsString(runner.calls[5].arguments, "contract-api") {
 		t.Fatalf("contract API call is not fixed: %v", runner.calls[5].arguments)
+	}
+}
+
+func TestResolveProductionAuthorizationContextBinding(t *testing.T) {
+	t.Parallel()
+	value, err := resolveProductionBinding(productionContractInput("https://platform.example.com"), "authorization_context_url")
+	if err != nil {
+		t.Fatalf("resolve authorization context binding: %v", err)
+	}
+	if value != productionAuthorizationContextURL {
+		t.Fatalf("authorization context URL = %q", value)
 	}
 }
 
@@ -489,6 +501,7 @@ runtime:
         OIDC_TENANT_ID: tenant_id
         OIDC_SESSION_COOKIE_SECURE: cookie_secure
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
 compose:

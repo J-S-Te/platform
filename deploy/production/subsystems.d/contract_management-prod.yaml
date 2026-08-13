@@ -19,6 +19,8 @@ runtime:
       template_path: subsystem-templates/contract.env.example
       compose_environment_key: CONTRACT_RUNTIME_ENV_FILE
       required_existing_keys: []
+      generated_keys:
+        - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
@@ -42,6 +44,7 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
 compose:

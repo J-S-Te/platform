@@ -49,6 +49,16 @@ type KeycloakBrokerJWTVerifier struct {
 	cache    keycloakJWKSCache
 }
 
+// KeycloakAuthorizationAccessTokenClaims is the strict, application-bound
+// token view used by the authorization-context endpoint. Broker verification
+// keeps its narrower compatibility contract, while authorization lookup must
+// additionally prove that the token is an access token whose authorized party
+// is present in the audience of the calling Client.
+type KeycloakAuthorizationAccessTokenClaims struct {
+	keycloakctx.BrokerClaims
+	TokenUse string
+}
+
 // keycloakJWKSCache coalesces concurrent refreshes without holding its mutex
 // over a network request. A completed fetch replaces the map instead of
 // mutating it, so keys returned to concurrent verifications remain immutable.
@@ -151,10 +161,12 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 	if strings.TrimSpace(payload.IdentityID) == "" {
 		payload.IdentityID = payload.Subject
 	}
+	payload.Subject = strings.TrimSpace(payload.Subject)
+	payload.IdentityID = strings.TrimSpace(payload.IdentityID)
 	audience, ok := keycloakAudience(payload.Audience)
 	expiresAt, okExp := keycloakNumericDate(payload.ExpiresAt)
 	issuedAt, okIat := keycloakNumericDate(payload.IssuedAt)
-	if !ok || !okExp || !okIat || payload.Issuer != verifier.issuer || strings.TrimSpace(payload.Subject) == "" || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.TenantID) == "" || strings.TrimSpace(payload.IdentityID) == "" {
+	if !ok || !okExp || !okIat || payload.Issuer != verifier.issuer || payload.Subject == "" || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.TenantID) == "" || payload.IdentityID == "" || payload.IdentityID != payload.Subject {
 		return keycloakctx.BrokerClaims{}, errors.New("required Keycloak broker JWT claims are invalid")
 	}
 	now := verifier.now().UTC()
@@ -168,6 +180,33 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 		}
 	}
 	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, AuthorizedParty: strings.TrimSpace(payload.AuthorizedParty), Audience: audience}, nil
+}
+
+// VerifyAuthorizationAccessToken applies the additional token-purpose and
+// Client audience checks required before a Keycloak token can select an
+// application authorization context. The signed payload is decoded again only
+// after Verify has authenticated it; no unverified value reaches the caller.
+func (verifier *KeycloakBrokerJWTVerifier) VerifyAuthorizationAccessToken(ctx context.Context, raw string) (KeycloakAuthorizationAccessTokenClaims, error) {
+	claims, err := verifier.Verify(ctx, raw)
+	if err != nil {
+		return KeycloakAuthorizationAccessTokenClaims{}, err
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return KeycloakAuthorizationAccessTokenClaims{}, errors.New("invalid Keycloak access token serialization")
+	}
+	var payload struct {
+		TokenUse string `json:"token_use"`
+	}
+	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
+		return KeycloakAuthorizationAccessTokenClaims{}, errors.New("invalid Keycloak access token claims")
+	}
+	tokenUse := strings.TrimSpace(payload.TokenUse)
+	clientID := strings.TrimSpace(claims.AuthorizedParty)
+	if tokenUse != "access_token" || clientID == "" || !keycloakAudienceContains(claims.Audience, clientID) {
+		return KeycloakAuthorizationAccessTokenClaims{}, errors.New("Keycloak access token is not bound to its authorized Client")
+	}
+	return KeycloakAuthorizationAccessTokenClaims{BrokerClaims: claims, TokenUse: tokenUse}, nil
 }
 
 // keyFor returns a validated Keycloak signing key. A cache hit is used only
@@ -337,6 +376,15 @@ func keycloakAudience(raw json.RawMessage) ([]string, bool) {
 		seen[value] = struct{}{}
 	}
 	return many, true
+}
+
+func keycloakAudienceContains(audience []string, expected string) bool {
+	for _, value := range audience {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func keycloakNumericDate(raw json.RawMessage) (time.Time, bool) {

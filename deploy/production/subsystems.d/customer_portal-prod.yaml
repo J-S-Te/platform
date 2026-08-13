@@ -53,6 +53,7 @@ runtime:
         PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PORTAL_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
     - path: runtime/customer.env
@@ -90,12 +91,16 @@ runtime:
         PORTAL_PUBLIC_URL: public_url_no_trailing_slash
         PORTAL_PROVISION_CLIENT_ID: service.portal_mapping_provision.client_id
         PORTAL_PROVISION_CLIENT_SECRET: service.portal_mapping_provision.client_secret
+        PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_ID: service.portal_mapping_provision.client_id
+        PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_SECRET: service.portal_mapping_provision.client_secret
         PORTAL_DISABLE_CLIENT_ID: service.portal_mapping_disable.client_id
         PORTAL_DISABLE_CLIENT_SECRET: service.portal_mapping_disable.client_secret
         PLATFORM_EXTERNAL_USER_CLIENT_ID: service.external_user_provision.client_id
         PLATFORM_EXTERNAL_USER_CLIENT_SECRET: service.external_user_provision.client_secret
         PLATFORM_ROLE_ASSIGN_CLIENT_ID: service.application_role_assign.client_id
         PLATFORM_ROLE_ASSIGN_CLIENT_SECRET: service.application_role_assign.client_secret
+        PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_ID: service.application_role_assign.client_id
+        PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_SECRET: service.application_role_assign.client_secret
         PLATFORM_ROLE_REVOKE_CLIENT_ID: service.application_role_revoke.client_id
         PLATFORM_ROLE_REVOKE_CLIENT_SECRET: service.application_role_revoke.client_secret
 compose:
@@ -105,6 +110,6 @@ compose:
     service: portal-mysql
     name: customer_portal
   migrate_service: portal-migrate
-  runtime_services: [customer-api, portal-api]
-  teardown_services: [portal-api]
+  runtime_services: [customer-api, portal-api, portal-invite-compensation-worker]
+  teardown_services: [portal-invite-compensation-worker, portal-api]
   release_image_keys: [CUSTOMER_CRM_IMAGE, CUSTOMER_PORTAL_IMAGE]
