@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 
+	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/interfaces/http"
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	auditinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/audit/infrastructure"
 	auditworker "github.com/J-S-Te/Basic-Platform/internal/platform/audit/worker"
@@ -141,6 +142,22 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 	}
 	runners = append(runners, personnelRunner)
 	if cfg.Keycloak.Enabled {
+		// Reconcile Keycloak on every deployment/restart. Operators must not need
+		// to click "sync" after shipping a Broker policy or profile change.
+		controlPlane := applicationregistryhttp.NewKeycloakControlPlaneWithCredentials(
+			cfg.Keycloak.AdminURL, cfg.Keycloak.Realm,
+			applicationregistryhttp.KeycloakControlPlaneCredentials{
+				ServiceAccountClientID: cfg.Keycloak.AdminClientID, ServiceAccountClientSecret: cfg.Keycloak.AdminClientSecret,
+				Username: cfg.Keycloak.AdminUsername, Password: cfg.Keycloak.AdminPassword,
+			},
+			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret,
+			cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
+		)
+		if err := controlPlane.EnsureBroker(context.Background(), cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret); err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("reconcile Keycloak Broker policy: %w", err)
+		}
 		mappingStore, err := keycloakauthorizationinfrastructure.NewClientMappingStore(db)
 		if err != nil {
 			_ = database.Close(db)

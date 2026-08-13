@@ -41,12 +41,68 @@ func TestBrokerRepresentationSkipsKeycloakProfileRegistration(t *testing.T) {
 	if got := payload["updateProfileFirstLoginMode"]; got != "off" {
 		t.Fatalf("updateProfileFirstLoginMode = %#v, want off", got)
 	}
+	if got := payload["firstBrokerLoginFlowAlias"]; got != keycloakPrelinkedBrokerFlowAlias {
+		t.Fatalf("firstBrokerLoginFlowAlias = %#v, want %q", got, keycloakPrelinkedBrokerFlowAlias)
+	}
 	config, ok := payload["config"].(map[string]string)
 	if !ok {
 		t.Fatalf("broker config = %#v", payload["config"])
 	}
 	if got := config["defaultScope"]; got != "openid profile" {
 		t.Fatalf("defaultScope = %q, want optional email omitted", got)
+	}
+}
+
+func TestEnsurePrelinkedBrokerFlowCreatesSingleRequiredDenyExecution(t *testing.T) {
+	flowCreated := false
+	denyCreated := false
+	denyRequired := false
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/platform/authentication/flows/basic-platform prelinked only":
+			if !flowCreated {
+				response.WriteHeader(stdhttp.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"alias": keycloakPrelinkedBrokerFlowAlias})
+		case "POST /admin/realms/platform/authentication/flows":
+			flowCreated = true
+			response.WriteHeader(stdhttp.StatusCreated)
+		case "GET /admin/realms/platform/authentication/flows/basic-platform prelinked only/executions":
+			if !denyCreated {
+				_ = json.NewEncoder(response).Encode([]any{})
+				return
+			}
+			requirement := "DISABLED"
+			if denyRequired {
+				requirement = "REQUIRED"
+			}
+			_ = json.NewEncoder(response).Encode([]map[string]string{{"id": "deny", "providerId": keycloakDenyAccessProviderID, "requirement": requirement}})
+		case "POST /admin/realms/platform/authentication/flows/basic-platform prelinked only/executions/execution":
+			denyCreated = true
+			response.WriteHeader(stdhttp.StatusCreated)
+		case "PUT /admin/realms/platform/authentication/flows/basic-platform prelinked only/executions":
+			var payload map[string]string
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode execution update: %v", err)
+			}
+			if payload["id"] != "deny" || payload["requirement"] != "REQUIRED" {
+				t.Fatalf("execution update = %#v", payload)
+			}
+			denyRequired = true
+			response.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
+	if err := control.ensurePrelinkedBrokerFlow(context.Background(), "admin-token"); err != nil {
+		t.Fatalf("ensurePrelinkedBrokerFlow() error = %v", err)
+	}
+	if !flowCreated || !denyCreated || !denyRequired {
+		t.Fatalf("flowCreated=%v denyCreated=%v denyRequired=%v", flowCreated, denyCreated, denyRequired)
 	}
 }
 
@@ -91,6 +147,10 @@ func TestEnsureBrokerUserProfileKeepsPlatformProfileFieldsOptional(t *testing.T)
 		}
 		switch request.Method {
 		case stdhttp.MethodGet:
+			if updated != nil {
+				_ = json.NewEncoder(response).Encode(updated)
+				return
+			}
 			_ = json.NewEncoder(response).Encode(map[string]any{"attributes": []any{
 				map[string]any{"name": "username", "required": map[string]any{"roles": []string{"user"}}},
 				map[string]any{"name": "email", "required": map[string]any{"roles": []string{"user"}}},

@@ -25,7 +25,7 @@ type ClientMappingStore struct{ database *gorm.DB }
 // is required for users projected before Broker pre-binding was introduced;
 // otherwise a repeated Client sync can be swallowed by the legacy backfill
 // ledger and those users still enter Keycloak's first-login interaction flow.
-const keycloakProjectionConfigurationVersion = "stable-identity-projection-v3"
+const keycloakProjectionConfigurationVersion = "stable-identity-projection-v4"
 
 type persistedClientMapping struct {
 	Realm             string `gorm:"column:realm"`
