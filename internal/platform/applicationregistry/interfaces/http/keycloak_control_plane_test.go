@@ -188,6 +188,107 @@ func TestKeycloakControlPlaneRetainsUsernamePasswordAuthentication(t *testing.T)
 	}
 }
 
+func TestEnsureRealmCreatesRealmWithAuditEventRetention(t *testing.T) {
+	t.Parallel()
+	createCalled := false
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.Header.Get("Authorization") != "Bearer admin-token" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		switch request.Method {
+		case stdhttp.MethodGet:
+			if request.URL.Path != "/admin/realms/platform" {
+				t.Fatalf("GET path = %q", request.URL.Path)
+			}
+			response.WriteHeader(stdhttp.StatusNotFound)
+		case stdhttp.MethodPost:
+			if request.URL.Path != "/admin/realms" {
+				t.Fatalf("POST path = %q", request.URL.Path)
+			}
+			createCalled = true
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			expected := map[string]any{"realm": "platform", "enabled": true, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": float64(keycloakDefaultRealmEventsExpirationSeconds)}
+			for key, value := range expected {
+				if !reflect.DeepEqual(payload[key], value) {
+					t.Fatalf("realm payload %q = %#v, want %#v", key, payload[key], value)
+				}
+			}
+			response.WriteHeader(stdhttp.StatusCreated)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
+	if err := control.ensureRealm(context.Background(), "admin-token"); err != nil {
+		t.Fatalf("ensureRealm() error = %v", err)
+	}
+	if !createCalled {
+		t.Fatal("realm was not created")
+	}
+}
+
+func TestEnsureRealmEnablesEventsAndAdminEvents(t *testing.T) {
+	t.Parallel()
+	gotPutPayload := false
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.Header.Get("Authorization") != "Bearer admin-token" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		switch request.Method {
+		case stdhttp.MethodGet:
+			if request.URL.Path != "/admin/realms/platform" {
+				t.Fatalf("GET path = %q", request.URL.Path)
+			}
+			existing := map[string]any{"realm": "platform", "enabled": true, "eventsEnabled": false, "adminEventsEnabled": false, "eventsExpiration": float64(0)}
+			_ = json.NewEncoder(response).Encode(existing)
+		case stdhttp.MethodPut:
+			if request.URL.Path != "/admin/realms/platform" {
+				t.Fatalf("PUT path = %q", request.URL.Path)
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			if got, ok := payload["eventsEnabled"].(bool); !ok || !got {
+				t.Fatalf("eventsEnabled = %#v", payload["eventsEnabled"])
+			}
+			if got, ok := payload["adminEventsEnabled"].(bool); !ok || !got {
+				t.Fatalf("adminEventsEnabled = %#v", payload["adminEventsEnabled"])
+			}
+			expiration, ok := payload["eventsExpiration"].(float64)
+			if !ok || int64(expiration) != keycloakDefaultRealmEventsExpirationSeconds {
+				t.Fatalf("eventsExpiration = %#v, want %d", payload["eventsExpiration"], keycloakDefaultRealmEventsExpirationSeconds)
+			}
+			gotPutPayload = true
+			response.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
+	if err := control.ensureRealm(context.Background(), "admin-token"); err != nil {
+		t.Fatalf("ensureRealm() error = %v", err)
+	}
+	if !gotPutPayload {
+		t.Fatal("realm audit payload was not updated")
+	}
+}
+
 func TestKeycloakControlPlaneTokenFailureIncludesStatusAndRedactsResponse(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {

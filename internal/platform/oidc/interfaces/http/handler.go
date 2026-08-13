@@ -126,40 +126,42 @@ func (systemClock) Now() time.Time { return time.Now().UTC() }
 // SessionLogout, LegacyClientCredentialsIssuer, and PostLogoutRedirectValidator are intentionally
 // optional: endpoints that depend on an absent adapter fail closed rather than accepting input.
 type Config struct {
-	Service                       Service
-	JWTManager                    JWTManager
-	LegacyClientCredentialsIssuer LegacyClientCredentialsIssuer
-	SessionAuthenticator          BrowserSessionAuthenticator
-	SessionLogout                 BrowserSessionLogout
-	PostLogoutRedirectValidator   PostLogoutRedirectValidator
-	AccessTokenSubjectResolver    AccessTokenSubjectResolver
-	ExternalAuthorizationVerifier ExternalAuthorizationTokenVerifier
-	AuthorizationResolver         tokenissuer.AuthorizationResolver
-	AuthorizationContextResolver  tokenissuer.AuthorizationContextResolver
-	PersonnelDirectoryResolver    PersonnelDirectoryResolver
-	SessionCookieName             string
-	SessionCookieSecure           bool
-	SessionCookieSameSite         http.SameSite
-	Clock                         Clock
-	Logger                        *slog.Logger
+	Service                        Service
+	JWTManager                     JWTManager
+	LegacyClientCredentialsIssuer  LegacyClientCredentialsIssuer
+	SessionAuthenticator           BrowserSessionAuthenticator
+	SessionLogout                  BrowserSessionLogout
+	PostLogoutRedirectValidator    PostLogoutRedirectValidator
+	AccessTokenSubjectResolver     AccessTokenSubjectResolver
+	ExternalAuthorizationVerifier  ExternalAuthorizationTokenVerifier
+	AuthorizationResolver          tokenissuer.AuthorizationResolver
+	AuthorizationContextResolver   tokenissuer.AuthorizationContextResolver
+	PersonnelDirectoryResolver     PersonnelDirectoryResolver
+	AllowLegacyPlatformAccessToken bool
+	SessionCookieName              string
+	SessionCookieSecure            bool
+	SessionCookieSameSite          http.SameSite
+	Clock                          Clock
+	Logger                         *slog.Logger
 }
 
 // Handler contains only transport policy. Durable protocol state remains in application.Service.
 type Handler struct {
-	service                       Service
-	jwtManager                    JWTManager
-	legacyIssuer                  LegacyClientCredentialsIssuer
-	sessionAuth                   BrowserSessionAuthenticator
-	sessionLogout                 BrowserSessionLogout
-	logoutRedirects               PostLogoutRedirectValidator
-	accessTokenSubjects           AccessTokenSubjectResolver
-	externalAuthorizationVerifier ExternalAuthorizationTokenVerifier
-	authorizationResolver         tokenissuer.AuthorizationResolver
-	authorizationContextResolver  tokenissuer.AuthorizationContextResolver
-	personnelDirectory            PersonnelDirectoryResolver
-	cookie                        cookieConfig
-	clock                         Clock
-	logger                        *slog.Logger
+	service                        Service
+	jwtManager                     JWTManager
+	legacyIssuer                   LegacyClientCredentialsIssuer
+	sessionAuth                    BrowserSessionAuthenticator
+	sessionLogout                  BrowserSessionLogout
+	logoutRedirects                PostLogoutRedirectValidator
+	accessTokenSubjects            AccessTokenSubjectResolver
+	externalAuthorizationVerifier  ExternalAuthorizationTokenVerifier
+	authorizationResolver          tokenissuer.AuthorizationResolver
+	authorizationContextResolver   tokenissuer.AuthorizationContextResolver
+	personnelDirectory             PersonnelDirectoryResolver
+	allowLegacyPlatformAccessToken bool
+	cookie                         cookieConfig
+	clock                          Clock
+	logger                         *slog.Logger
 }
 
 type cookieConfig struct {
@@ -192,8 +194,9 @@ func NewHandler(config Config) (*Handler, error) {
 		logoutRedirects: config.PostLogoutRedirectValidator, accessTokenSubjects: config.AccessTokenSubjectResolver,
 		externalAuthorizationVerifier: config.ExternalAuthorizationVerifier,
 		authorizationResolver:         config.AuthorizationResolver, authorizationContextResolver: config.AuthorizationContextResolver,
-		personnelDirectory: config.PersonnelDirectoryResolver,
-		cookie:             cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
-		clock:              config.Clock, logger: config.Logger,
+		personnelDirectory:             config.PersonnelDirectoryResolver,
+		allowLegacyPlatformAccessToken: config.AllowLegacyPlatformAccessToken,
+		cookie:                         cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
+		clock:                          config.Clock, logger: config.Logger,
 	}, nil
 }

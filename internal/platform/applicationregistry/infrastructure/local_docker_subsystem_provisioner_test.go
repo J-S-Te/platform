@@ -486,6 +486,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-audit-publisher"}, PlaintextSecret: "audit-secret"},
 			{Purpose: application.ServiceCredentialContractOpportunitySignedWrite, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-opportunity-intake"}, PlaintextSecret: "intake-secret"},
 			{Purpose: application.ServiceCredentialContractSummaryRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-contract-summary"}, PlaintextSecret: "summary-secret"},
+			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-owner-directory"}, PlaintextSecret: "directory-secret"},
 		},
 	}); err != nil {
 		t.Fatalf("provision integrated contract subsystem: %v", err)

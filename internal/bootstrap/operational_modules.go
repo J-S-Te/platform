@@ -145,6 +145,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	)
 	subsystemHandler.ConfigureKeycloakTransportPolicy(cfg.Keycloak.RequireHTTPS)
 	subsystemHandler.ConfigureDefaultIssuerAlias(cfg.SubsystemOnboarding.DefaultIssuerAlias)
+	subsystemHandler.ConfigureSubsystemServiceCredentials(oauthClientManagementService)
 	if cfg.Keycloak.Enabled {
 		mappingStore, mappingErr := keycloakauthorizationinfrastructure.NewClientMappingStore(database)
 		if mappingErr != nil {

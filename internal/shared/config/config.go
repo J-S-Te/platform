@@ -68,6 +68,11 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
+	// AllowLegacyPlatformAccessToken preserves the old platform access-token path
+	// used by /oauth2/authorization-context and /oauth2/userinfo after a
+	// Keycloak cutover. Set false only when old platform tokens must be
+	// explicitly removed from compatibility behavior.
+	AllowLegacyPlatformAccessToken bool
 	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
 	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
@@ -212,6 +217,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	legacyPlatformAccessTokenEnabled, err := boolean("AUTH_LEGACY_PLATFORM_ACCESS_TOKEN_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
 	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -253,6 +262,7 @@ func Load() (Config, error) {
 			SessionCookieSecure:                      cookieSecure,
 			SessionCookieSameSite:                    value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
 			SessionTTL:                               sessionTTL,
+			AllowLegacyPlatformAccessToken:           legacyPlatformAccessTokenEnabled,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
 			KeycloakOIDCEnabled:                      keycloakEnabled && strings.EqualFold(value("KEYCLOAK_PLATFORM_OIDC_ENABLED", "false"), "true"),
 			KeycloakOIDCIssuer:                       strings.TrimRight(value("KEYCLOAK_PLATFORM_OIDC_ISSUER", ""), "/"),

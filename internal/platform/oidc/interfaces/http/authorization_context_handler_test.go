@@ -2,6 +2,7 @@ package oidchttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -105,6 +106,28 @@ func TestAuthorizationContextStrictlyBindsExternalAccessToken(t *testing.T) {
 	}
 }
 
+func TestAuthorizationContextRespectsLegacyAccessTokenCompatFlag(t *testing.T) {
+	handler := &Handler{
+		jwtManager: platformAccessTokenJWTManager{
+			claims: security.OIDCTokenClaims{ClientID: "contract-prod-web", Subject: "identity-1", SessionID: "session-1", Scope: []string{"openid"}},
+		},
+		accessTokenSubjects:            accessTokenSubjectResolverStub{},
+		authorizationContextResolver:   &authorizationContextResolverStub{},
+		clock:                          authorizationContextClock{},
+		allowLegacyPlatformAccessToken: false,
+		logger:                         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	request := httptest.NewRequest(http.MethodGet, "/oauth2/authorization-context", nil)
+	request.Header.Set("Authorization", "Bearer "+jwtWithClientID("contract-prod-web"))
+	response := httptest.NewRecorder()
+
+	handler.AuthorizationContext(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusUnauthorized, response.Body.String())
+	}
+}
+
 type externalAuthorizationVerifierStub struct {
 	claims ExternalAuthorizationTokenClaims
 }
@@ -182,3 +205,23 @@ func (rejectingExternalJWTManager) VerifyIDToken(string, string, time.Time) (sec
 type authorizationContextClock struct{}
 
 func (authorizationContextClock) Now() time.Time { return time.Unix(1, 0).UTC() }
+
+func jwtWithClientID(clientID string) string {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"client_id":"` + clientID + `"}`))
+	return "eyJhbGciOiJIUzI1NiJ9." + payload + ".signature"
+}
+
+type platformAccessTokenJWTManager struct {
+	claims security.OIDCTokenClaims
+}
+
+func (m platformAccessTokenJWTManager) Issuer() string { return "https://platform.example.com" }
+func (m platformAccessTokenJWTManager) JWKS() security.OIDCJWKS {
+	return security.OIDCJWKS{}
+}
+func (m platformAccessTokenJWTManager) VerifyAccessToken(string, string, time.Time) (security.OIDCTokenClaims, error) {
+	return m.claims, nil
+}
+func (m platformAccessTokenJWTManager) VerifyIDToken(string, string, time.Time) (security.OIDCTokenClaims, error) {
+	return security.OIDCTokenClaims{}, errors.New("not an ID token")
+}

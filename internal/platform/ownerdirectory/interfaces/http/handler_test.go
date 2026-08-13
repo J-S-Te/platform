@@ -59,7 +59,7 @@ func TestHandlerPassesMachineScopeAndReturnsMinimalProjection(t *testing.T) {
 		Page: 1, PageSize: 20, Total: 1,
 	}}
 	handler := newTestHandler(t, service)
-	request := authenticatedRequest("/api/v1/internal/owner-directory?keyword=%E8%B4%9F%E8%B4%A3&page=2&page_size=10")
+	request := authenticatedRequest("/api/v1/internal/owner-directory?keyword=%E8%B4%9F%E8%B4%A3&page=2&page_size=10&role_code=sales_director&role_code=finance_director")
 	response := httptest.NewRecorder()
 
 	handler.List(response, request)
@@ -72,6 +72,9 @@ func TestHandlerPassesMachineScopeAndReturnsMinimalProjection(t *testing.T) {
 	}
 	if service.query.Keyword != "负责" || service.query.Page != 2 || service.query.PageSize != 10 {
 		t.Fatalf("query=%+v", service.query)
+	}
+	if strings.Join(service.query.RoleCodes, ",") != "sales_director,finance_director" {
+		t.Fatalf("role codes=%v", service.query.RoleCodes)
 	}
 	body := response.Body.String()
 	for _, expected := range []string{"oidc-sub-1", "负责人甲", "org-1", "华东区"} {

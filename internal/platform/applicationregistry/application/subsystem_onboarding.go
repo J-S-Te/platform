@@ -474,7 +474,7 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 			ServiceCredentialPortalInviteVerify,
 		}
 	case integratedContractApplicationCode:
-		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead}
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialOwnerDirectoryRead}
 	}
 	return nil
 }

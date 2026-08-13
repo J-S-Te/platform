@@ -43,8 +43,9 @@ x-customer-service: &customer-service
     TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
     TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
     TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
-    # 发布脚本从本次不可变 CRM 镜像自动读取，覆盖运行环境文件中的旧值。
-    OIDC_ROLE_CONFIG_HASH: ${OIDC_ROLE_CONFIG_HASH}
+    # 非回环 HTTP 仅由部署级安全开关控制；当前测试服务器默认保持可用，切换
+    # HTTPS 后把 SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION 改为 false。
+    OIDC_ALLOW_INSECURE_HTTP_SESSION: ${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-true}
     MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     ATTACHMENT_LOCAL_ENABLED: "true"
     ATTACHMENT_LOCAL_ROOT: /app/data/attachments
@@ -67,6 +68,7 @@ x-portal-service: &portal-service
     PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
     PORTAL_CRM_INVITE_TOKEN_URL: http://platform-api:8080/oauth2/token
     PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-true}
     GIN_MODE: release
   networks: [application]
   volumes:

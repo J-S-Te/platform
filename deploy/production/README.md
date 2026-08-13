@@ -201,19 +201,27 @@ CI 远端调用：
 ./bin/deploy-customer-opportunity.sh <crm-image@sha256:digest> <portal-image@sha256:digest>
 ```
 
+前端发布由 `compose.frontend.yaml` 独立解析和重建，只连接既有生产网络，不读取、创建或修改
+`runtime/contract.env`、`runtime/project.env` 等子系统密钥文件。平台生产资产必须先于依赖它的
+前端工作流同步到服务器。
+
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。首次发布 contract 或 project 且接入凭据仍为占位值时只保存不可变镜像指针，实际迁移和启动由基础平台页面接入触发。
 
 CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth Client，也不会覆盖服务器 `.env`、`.release.env` 或 `runtime/*.env`；它会更新随代码审核的 `subsystems.d` 清单。仅基础平台首次接入会更新目标清单明确列出的运行时字段，其他长期业务密钥保持不变。
 
 项目管理系统发布使用独立 `project-release` 迁移 profile，不影响既有 platform/frontend/contract 发布。首次发布 project 且 `runtime/project.env` 仍含 `PENDING_*`/`REPLACE_WITH_*` 时只安全暂存 `PROJECT_IMAGE` digest，接入完成后再由 Agent 迁移并启动 `project-api`。
 
-客户与商机发布使用独立 `customer` Compose profile，不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成一致性备份、执行两个 schema 的语句级迁移，再切换 CRM 和 Portal API 并检查健康状态。
+客户与商机发布使用独立 `customer` Compose profile，不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`，并把 CRM 镜像内嵌的授权目录哈希原子写入 `runtime/customer.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成一致性备份、执行两个 schema 的语句级迁移，再切换 CRM、Portal API、CRM Workers 和 Portal 邀请补偿 Worker，并检查健康/运行状态；失败时这些服务统一回滚。
+
+测试服务器继续使用非回环 HTTP 时，在 `.env` 设置 `SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION=true`。
+完成 HTTPS、Redirect URI 和 Secure Cookie 迁移后改为 `false`；该部署级开关会统一覆盖 CRM 与
+Portal 的 HTTP 会话例外，清单不再永久写死允许值。
 
 语句级迁移表为 `app_schema_migration_statements`。每条 SQL 在执行前记录 `RUNNING`，成功后才改为 `APPLIED`；重启发现遗留 `RUNNING` 会拒绝继续。必须人工核验对应表、列、索引、约束和必要回填后，按变更评审结果处理该检查点，禁止把 duplicate table/column/index 笼统视为成功。迁移器只自动接管空 schema；已有业务表但没有生产元数据表时拒绝发布，必须先建立经评审的生产基线。
 
 ### 安装或升级客户商机生产资产
 
-将本目录的 `compose.yaml`、完整 `subsystem-templates/`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
+将本目录的 `compose.yaml`、`compose.frontend.yaml`、完整 `subsystem-templates/`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
 
 ```bash
 cd /opt/basic-platform

@@ -60,6 +60,19 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.position_id
 					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND position.status = ?)))
 		)`, applicationID, "ACTIVE", "ACTIVE", "COMPATIBILITY", now, now, "TENANT", "ENVIRONMENT", environmentID, "USER", "ORG_UNIT", "POSITION", "ACTIVE")
+	if len(query.RoleCodes) > 0 {
+		authorized = authorized.Where(`EXISTS (
+			SELECT 1 FROM authz_role_binding AS role_binding
+			JOIN authz_role AS eligible_role ON eligible_role.id=role_binding.role_id AND eligible_role.tenant_id=role_binding.tenant_id
+			WHERE role_binding.tenant_id=user.tenant_id AND role_binding.application_id=? AND eligible_role.code IN ?
+			AND role_binding.status='ACTIVE' AND eligible_role.status='ACTIVE'
+			AND (role_binding.valid_from IS NULL OR role_binding.valid_from<=?) AND (role_binding.valid_until IS NULL OR role_binding.valid_until>?)
+			AND ((role_binding.scope_type='TENANT' AND role_binding.scope_id='') OR (role_binding.scope_type='ENVIRONMENT' AND role_binding.scope_id=?))
+			AND ((role_binding.subject_type='USER' AND role_binding.subject_id=user.id)
+			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
+			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='POSITION' AND role_binding.subject_id=membership.position_id))
+		)`, applicationID, query.RoleCodes, now, now, environmentID)
+	}
 	if query.UserID != "" {
 		authorized = authorized.Where("user.id = ?", query.UserID)
 	} else if query.Keyword != "" {
@@ -92,7 +105,7 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 	// 第二次查询重复执行相同授权约束，不能把用户的所有组织任职都返回给子系统；
 	// 每个组织必须自身通过该应用环境的角色绑定边界。
 	memberships := make([]membershipRow, 0)
-	if err := repository.db.WithContext(ctx).Table("iam_membership AS membership").
+	membershipQuery := repository.db.WithContext(ctx).Table("iam_membership AS membership").
 		Select("membership.user_id, organization.id AS organization_id, organization.name AS organization_name, membership.is_primary").
 		Joins("JOIN iam_org_unit AS organization ON organization.tenant_id = membership.tenant_id AND organization.id = membership.org_unit_id").
 		Where("membership.tenant_id = ? AND membership.user_id IN ? AND membership.status = ?", tenantID, userIDs, "ACTIVE").
@@ -110,8 +123,21 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.org_unit_id)
 				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.position_id
 					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND position.status = ?)))
-		)`, applicationID, "ACTIVE", "ACTIVE", "COMPATIBILITY", now, now, "TENANT", "ENVIRONMENT", environmentID, "USER", "ORG_UNIT", "POSITION", "ACTIVE").
-		Order("membership.is_primary DESC, organization.name ASC, organization.id ASC").Scan(&memberships).Error; err != nil {
+		)`, applicationID, "ACTIVE", "ACTIVE", "COMPATIBILITY", now, now, "TENANT", "ENVIRONMENT", environmentID, "USER", "ORG_UNIT", "POSITION", "ACTIVE")
+	if len(query.RoleCodes) > 0 {
+		membershipQuery = membershipQuery.Where(`EXISTS (
+			SELECT 1 FROM authz_role_binding AS role_binding
+			JOIN authz_role AS eligible_role ON eligible_role.id=role_binding.role_id AND eligible_role.tenant_id=role_binding.tenant_id
+			WHERE role_binding.tenant_id=membership.tenant_id AND role_binding.application_id=? AND eligible_role.code IN ?
+			AND role_binding.status='ACTIVE' AND eligible_role.status='ACTIVE'
+			AND (role_binding.valid_from IS NULL OR role_binding.valid_from<=?) AND (role_binding.valid_until IS NULL OR role_binding.valid_until>?)
+			AND ((role_binding.scope_type='TENANT' AND role_binding.scope_id='') OR (role_binding.scope_type='ENVIRONMENT' AND role_binding.scope_id=?))
+			AND ((role_binding.subject_type='USER' AND role_binding.subject_id=membership.user_id)
+			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
+			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='POSITION' AND role_binding.subject_id=membership.position_id))
+		)`, applicationID, query.RoleCodes, now, now, environmentID)
+	}
+	if err := membershipQuery.Order("membership.is_primary DESC, organization.name ASC, organization.id ASC").Scan(&memberships).Error; err != nil {
 		return domain.Page{}, err
 	}
 	for _, membership := range memberships {

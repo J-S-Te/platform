@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: []
+  allowed_service_bindings: [owner_directory_read]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -47,6 +47,8 @@ runtime:
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
+        PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
 compose:
   profiles: [release]
   dependency_services: [contract-mysql, temporal]

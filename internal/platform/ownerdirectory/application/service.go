@@ -22,10 +22,11 @@ var (
 
 // Query contains optional exact-user or display search filters.
 type Query struct {
-	Keyword  string
-	UserID   string
-	Page     int
-	PageSize int
+	Keyword   string
+	UserID    string
+	RoleCodes []string
+	Page      int
+	PageSize  int
 }
 
 // Repository reads only active, application-authorized internal users.
@@ -49,6 +50,19 @@ func (service *Service) List(ctx context.Context, principal appctx.Principal, qu
 	}
 	query.Keyword = strings.TrimSpace(query.Keyword)
 	query.UserID = strings.TrimSpace(query.UserID)
+	seenRoles := make(map[string]struct{}, len(query.RoleCodes))
+	roles := make([]string, 0, len(query.RoleCodes))
+	for _, raw := range query.RoleCodes {
+		role := strings.TrimSpace(raw)
+		if role == "" || len(role) > 128 || len(roles) >= 20 {
+			return domain.Page{}, ErrValidation
+		}
+		if _, exists := seenRoles[role]; !exists {
+			seenRoles[role] = struct{}{}
+			roles = append(roles, role)
+		}
+	}
+	query.RoleCodes = roles
 	if query.Keyword != "" && query.UserID != "" {
 		return domain.Page{}, ErrValidation
 	}

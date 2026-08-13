@@ -416,21 +416,22 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	oidcHandler, err := oidchttp.NewHandler(oidchttp.Config{
-		Service:                       oidcService,
-		JWTManager:                    oidcTokenManager,
-		LegacyClientCredentialsIssuer: applicationRegistryService,
-		SessionAuthenticator:          authService,
-		SessionLogout:                 authService,
-		PostLogoutRedirectValidator:   oidcService,
-		AccessTokenSubjectResolver:    oidcAccessTokenSubjects,
-		ExternalAuthorizationVerifier: externalAuthorizationVerifier,
-		AuthorizationResolver:         oidcAuthorizationResolver,
-		AuthorizationContextResolver:  oidcAuthorizationResolver,
-		PersonnelDirectoryResolver:    oidcPersonnelDirectory,
-		SessionCookieName:             cfg.Auth.SessionCookieName,
-		SessionCookieSecure:           cfg.Auth.SessionCookieSecure,
-		SessionCookieSameSite:         oidcCookieSameSite,
-		Logger:                        logger,
+		Service:                        oidcService,
+		JWTManager:                     oidcTokenManager,
+		LegacyClientCredentialsIssuer:  applicationRegistryService,
+		SessionAuthenticator:           authService,
+		SessionLogout:                  authService,
+		PostLogoutRedirectValidator:    oidcService,
+		AccessTokenSubjectResolver:     oidcAccessTokenSubjects,
+		ExternalAuthorizationVerifier:  externalAuthorizationVerifier,
+		AuthorizationResolver:          oidcAuthorizationResolver,
+		AuthorizationContextResolver:   oidcAuthorizationResolver,
+		PersonnelDirectoryResolver:     oidcPersonnelDirectory,
+		AllowLegacyPlatformAccessToken: cfg.Auth.AllowLegacyPlatformAccessToken,
+		SessionCookieName:              cfg.Auth.SessionCookieName,
+		SessionCookieSecure:            cfg.Auth.SessionCookieSecure,
+		SessionCookieSameSite:          oidcCookieSameSite,
+		Logger:                         logger,
 	})
 	if err != nil {
 		_ = database.Close(db)

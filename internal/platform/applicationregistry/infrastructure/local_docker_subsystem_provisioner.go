@@ -503,7 +503,14 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfiguration(input application.SubsystemProvisioningInput, environmentPath string) error {
 	values := map[string]string{}
 	backchannel := provisioner.oidcBackchannelBaseURL(input.Issuer)
+	currentContent, readErr := os.ReadFile(environmentPath)
+	if readErr != nil {
+		return provisioningError("read subsystem OIDC runtime configuration")
+	}
+	current := parseEnvironmentValues(string(currentContent))
+	issuerKey, clientIDKey, clientSecretKey := "OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"
 	if input.ApplicationCode == integratedPortalApplicationCode {
+		issuerKey, clientIDKey, clientSecretKey = "PORTAL_OIDC_ISSUER", "PORTAL_OIDC_CLIENT_ID", "PORTAL_OIDC_CLIENT_SECRET"
 		values["PORTAL_OIDC_ISSUER"] = input.Issuer
 		if backchannel != "" {
 			values["PORTAL_OIDC_BACKCHANNEL_BASE_URL"] = backchannel
@@ -516,6 +523,29 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 		}
 		if input.ApplicationCode == integratedCustomerApplicationCode {
 			values["OIDC_ROLE_CONFIG_HASH"] = integratedCustomerRoleConfigHash
+		}
+	}
+	rollbackClientIDKey, rollbackClientSecretKey, rollbackIssuerKey := clientIDKey+"_ROLLBACK", clientSecretKey+"_ROLLBACK", issuerKey+"_ROLLBACK"
+	if input.AuthenticationRuntimeUpdate && strings.TrimSpace(input.ClientID) != "" && strings.TrimSpace(input.ClientSecret) != "" {
+		if previousID, previousSecret := strings.TrimSpace(current[clientIDKey]), strings.TrimSpace(current[clientSecretKey]); previousID != "" && previousSecret != "" && previousID != input.ClientID {
+			values[rollbackClientIDKey] = previousID
+			values[rollbackClientSecretKey] = previousSecret
+			values[rollbackIssuerKey] = strings.TrimSpace(current[issuerKey])
+		}
+		values[clientIDKey] = input.ClientID
+		values[clientSecretKey] = input.ClientSecret
+	} else if input.AuthenticationRuntimeUpdate && !strings.Contains(strings.ToLower(input.Issuer), "/realms/") {
+		// A controlled rollback restores the prior platform browser credential
+		// retained in the mode-0600 runtime file. It is never sent back through API.
+		if rollbackID, rollbackSecret := strings.TrimSpace(current[rollbackClientIDKey]), strings.TrimSpace(current[rollbackClientSecretKey]); rollbackID != "" && rollbackSecret != "" {
+			values[clientIDKey] = rollbackID
+			values[clientSecretKey] = rollbackSecret
+		}
+	}
+	if input.ApplicationCode == integratedContractApplicationCode {
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
+			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
 	}
 	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {
@@ -698,6 +728,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["CONTRACT_MACHINE_TOKEN_ISSUER"] = "basic-platform"
 		values["CONTRACT_MACHINE_TOKEN_AUDIENCE"] = "basic-platform-application"
 		values["CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credentials[application.ServiceCredentialOwnerDirectoryRead].OAuthClient.ClientID
+		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credentials[application.ServiceCredentialOwnerDirectoryRead].PlaintextSecret
 		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
 		customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
 		customerValues := map[string]string{
@@ -793,6 +825,7 @@ func requiredContractServiceCredentials(input application.SubsystemProvisioningI
 		application.ServiceCredentialAuditIngest,
 		application.ServiceCredentialContractOpportunitySignedWrite,
 		application.ServiceCredentialContractSummaryRead,
+		application.ServiceCredentialOwnerDirectoryRead,
 	}
 	result := make(map[string]application.SubsystemServiceCredential, len(purposes))
 	for _, purpose := range purposes {

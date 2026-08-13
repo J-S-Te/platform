@@ -171,6 +171,9 @@ type SubsystemProvisioningInput struct {
 	Issuer          string
 	ClientID        string
 	ClientSecret    string
+	// AuthenticationRuntimeUpdate is set only by the dedicated switch/rollback
+	// endpoints. Generic rebuilds must not overwrite issuer or browser credentials.
+	AuthenticationRuntimeUpdate bool
 	// CatalogPublisherClientID and CatalogPublisherClientSecret are a separate
 	// service credential for authorization catalog synchronization.
 	CatalogPublisherClientID     string
