@@ -41,7 +41,6 @@ customer_worker_services=(
   customer-presale-assignment-notification-worker
   customer-presale-progress-notification-worker
   customer-presale-worker
-  portal-invite-compensation-worker
 )
 relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
 
@@ -187,6 +186,17 @@ portal_runtime_ready() {
   }
 }
 
+portal_compensation_worker_configured() {
+  local key
+  for key in \
+    PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_ID \
+    PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_SECRET \
+    PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_ID \
+    PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_SECRET; do
+    usable_value "$(env_value_from "$portal_runtime_file" "$key")" || return 1
+  done
+}
+
 update_runtime_value() {
   local file="$1" key="$2" value="$3" temporary
   temporary="$(mktemp "$deploy_dir/runtime/.runtime-update.XXXXXX")"
@@ -304,6 +314,13 @@ if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready;
   echo "CRM/Portal 镜像已安全暂存；运行凭据尚未完整配置，未启动数据库迁移或业务服务。"
   echo "请先在基础平台应用接入页面完成或重试对应环境；Agent 会补齐 runtime 配置，随后重新运行同一发布命令。"
   exit 0
+fi
+
+if portal_compensation_worker_configured; then
+  customer_worker_services+=(portal-invite-compensation-worker)
+  echo "Portal 邀请补偿 Worker 凭据完整，纳入本次发布"
+else
+  echo "Portal 邀请补偿 Worker 凭据未完整配置，安全跳过该 Worker；CRM/Portal API 与 CRM Workers 继续发布"
 fi
 
 backup_database() {
