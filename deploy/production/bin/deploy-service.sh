@@ -46,6 +46,7 @@ for command_name in docker curl gzip flock awk mktemp install; do
     exit 1
   }
 done
+relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
 docker compose version >/dev/null
 [[ -f "$runtime_file" ]] || { echo "缺少 $runtime_file" >&2; exit 1; }
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
@@ -74,6 +75,16 @@ ensure_runtime_file_mode_0600() {
     return 0
   fi
 
+  if [[ "$relax_runtime_perm_check" == "true" ]]; then
+    if [[ -r "$target" ]]; then
+      echo "跳过运行配置权限收紧（仅发布前端时允许）：$target" >&2
+      return 0
+    fi
+
+    echo "无法读取运行配置文件：$target；请检查权限后重试" >&2
+    return 1
+  fi
+
   temporary="$(mktemp "$deploy_dir/runtime/.runtime-permissions.XXXXXX")" || {
     echo "无法创建运行配置权限修复临时文件：$target；请由文件属主或 root 执行部署" >&2
     exit 1
@@ -86,10 +97,12 @@ ensure_runtime_file_mode_0600() {
 }
 
 ensure_runtime_file_mode_0600 "$contract_runtime_file"
-[[ "$(stat -c '%a' "$contract_runtime_file")" == "600" ]] || {
-  echo "运行配置权限无法收紧为 0600：$contract_runtime_file" >&2
-  exit 1
-}
+if [[ "$relax_runtime_perm_check" != "true" ]]; then
+  [[ "$(stat -c '%a' "$contract_runtime_file")" == "600" ]] || {
+    echo "运行配置权限无法收紧为 0600：$contract_runtime_file" >&2
+    exit 1
+  }
+fi
 
 if [[ ! -f "$project_runtime_file" ]]; then
   [[ -f "$project_runtime_template" ]] || {
@@ -105,10 +118,12 @@ fi
   exit 1
 }
 ensure_runtime_file_mode_0600 "$project_runtime_file"
-[[ "$(stat -c '%a' "$project_runtime_file")" == "600" ]] || {
-  echo "运行配置权限无法收紧为 0600：$project_runtime_file" >&2
-  exit 1
-}
+if [[ "$relax_runtime_perm_check" != "true" ]]; then
+  [[ "$(stat -c '%a' "$project_runtime_file")" == "600" ]] || {
+    echo "运行配置权限无法收紧为 0600：$project_runtime_file" >&2
+    exit 1
+  }
+fi
 
 mkdir -p "$deploy_dir/backups/releases"
 exec 9>"$deploy_dir/runtime/.deploy.lock"
@@ -247,6 +262,21 @@ wait_for_health() {
   return 1
 }
 
+dump_subsystem_provisioner_debug() {
+  local container_id
+  container_id="$(compose ps -q subsystem-provisioner 2>/dev/null || true)"
+  if [[ -n "$container_id" ]]; then
+    echo "---- subsystem-provisioner 容器状态 ----"
+    docker inspect "$container_id" --format '{{json .State}}' || true
+    echo "---- subsystem-provisioner 最近日志 ----"
+    compose logs --no-color --tail 200 subsystem-provisioner || true
+    echo "---- subsystem-provisioner compose ps ----"
+    compose ps --filter name=subsystem-provisioner || true
+  else
+    echo "未获取到 subsystem-provisioner 容器 ID" >&2
+  fi
+}
+
 backup_database() {
   local mysql_service="$1"
   local database="$2"
@@ -268,7 +298,11 @@ deploy_platform() {
   # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；
   # platform-api 只在镜像 digest 变化时由 compose 自动重建，不在此强制重建，
   # 避免每次部署都打断门户/接入操作造成 502。
-  compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
+  if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
+    echo "subsystem-provisioner 健康启动失败" >&2
+    dump_subsystem_provisioner_debug
+    return 1
+  fi
   compose up -d --no-deps platform-api || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || {
     # 兜底：新镜像首启异常时强制重建一次并再次等待，避免平台 API 停留在宕机状态。
@@ -327,7 +361,10 @@ rollback_runtime() {
   case "$service" in
     frontend) compose up -d --no-deps frontend ;;
     platform)
-      compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner || true
+      if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
+        echo "回滚时 subsystem-provisioner 重建失败，继续尝试重建 platform-api" >&2
+        dump_subsystem_provisioner_debug
+      fi
       compose up -d --no-deps platform-api
       ;;
     contract) compose up -d --no-deps contract-api ;;

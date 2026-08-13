@@ -197,7 +197,17 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          printf -v remote_command 'cd %q && docker compose --env-file .env --env-file .release.env -f compose.yaml up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner' "$DEPLOY_PATH"
+          remote_command='cd '"${DEPLOY_PATH}"' && \
+            if ! docker compose --env-file .env --env-file .release.env -f compose.yaml up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then \
+              echo "[ci] subsystem-provisioner start failed" >&2; \
+              docker compose --env-file .env --env-file .release.env -f compose.yaml ps subsystem-provisioner || true; \
+              subsystem_id=$(docker compose --env-file .env --env-file .release.env -f compose.yaml ps -q subsystem-provisioner); \
+              if [ -n "$subsystem_id" ]; then \
+                docker inspect "$subsystem_id" --format '{{json .State}}' || true; \
+              fi; \
+              docker compose --env-file .env --env-file .release.env -f compose.yaml logs --no-color --tail 200 subsystem-provisioner || true; \
+              exit 1; \
+            fi'
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
 
       - name: Migrate and deploy immutable platform image
