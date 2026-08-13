@@ -1,0 +1,15 @@
+name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+
+# 前端镜像发布使用最小清单，避免 Docker Compose 为无关服务解析或读取
+# runtime/contract.env、runtime/project.env 等受保护的子系统密钥文件。
+services:
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-18082}:80"
+    networks: [application]
+    restart: unless-stopped
+
+networks:
+  application:
+    name: basic-platform-production
