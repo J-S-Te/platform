@@ -196,6 +196,17 @@ type PortalApplication struct {
 	TargetCode    string
 	TargetURI     string
 	PublicURL     string
+	Allowed       bool
+	Projection    PortalProjectionReadiness
+}
+
+// PortalProjectionReadiness is the current principal's user-specific Keycloak
+// projection gate for one exact application environment. Portal clients must
+// use Ready/Allowed instead of inferring readiness from application visibility.
+type PortalProjectionReadiness struct {
+	Status     string
+	Ready      bool
+	NextAction string
 }
 
 // 仓储负责在单个数据库事务内写入接入聚合，并按租户读取有效门户登记。

@@ -101,26 +101,41 @@ type Clock interface {
 	Now() time.Time
 }
 
+// ExternalSessionTerminator revokes sessions held by the external identity
+// broker for one stable platform identity. Implementations must be idempotent:
+// an identity that has not been projected yet is already logged out.
+type ExternalSessionTerminator interface {
+	LogoutIdentitySessions(ctx context.Context, identityID string) error
+}
+
 // Service implements password login and server-verified cookie session operations.
 type Service struct {
-	repository    Repository
-	passwords     PasswordVerifier
-	tokens        TokenManager
-	ids           IDGenerator
-	clock         Clock
-	loginSecurity securityapplication.LoginSecurityService
-	sessionTTL    time.Duration
+	repository       Repository
+	passwords        PasswordVerifier
+	tokens           TokenManager
+	ids              IDGenerator
+	clock            Clock
+	loginSecurity    securityapplication.LoginSecurityService
+	sessionTTL       time.Duration
+	externalSessions ExternalSessionTerminator
 }
 
 // NewService validates and builds an authentication service.
-func NewService(repository Repository, passwords PasswordVerifier, tokens TokenManager, ids IDGenerator, clock Clock, loginSecurity securityapplication.LoginSecurityService, sessionTTL time.Duration) (*Service, error) {
+func NewService(repository Repository, passwords PasswordVerifier, tokens TokenManager, ids IDGenerator, clock Clock, loginSecurity securityapplication.LoginSecurityService, sessionTTL time.Duration, externalSessionTerminators ...ExternalSessionTerminator) (*Service, error) {
 	if repository == nil || passwords == nil || tokens == nil || ids == nil || clock == nil || loginSecurity == nil {
 		return nil, errors.New("identity authentication dependencies must not be nil")
+	}
+	if len(externalSessionTerminators) > 1 || (len(externalSessionTerminators) == 1 && externalSessionTerminators[0] == nil) {
+		return nil, errors.New("identity authentication accepts at most one non-nil external session terminator")
 	}
 	if sessionTTL <= 0 {
 		return nil, errors.New("identity session TTL must be greater than zero")
 	}
-	return &Service{repository: repository, passwords: passwords, tokens: tokens, ids: ids, clock: clock, loginSecurity: loginSecurity, sessionTTL: sessionTTL}, nil
+	service := &Service{repository: repository, passwords: passwords, tokens: tokens, ids: ids, clock: clock, loginSecurity: loginSecurity, sessionTTL: sessionTTL}
+	if len(externalSessionTerminators) == 1 {
+		service.externalSessions = externalSessionTerminators[0]
+	}
+	return service, nil
 }
 
 // LoginInput contains validated password-login data plus non-sensitive client metadata.
@@ -381,8 +396,16 @@ func (service *Service) Refresh(ctx context.Context, principal authctx.Principal
 // Logout 按租户账号撤销全部活动会话，而不是只撤销当前 SessionID；从任一子系统退出后，
 // 同一统一登录会话在其他入口也会立即失效，保持单点退出语义。
 func (service *Service) Logout(ctx context.Context, principal authctx.Principal) error {
-	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.Account.ID == "" {
+	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.User.ID == "" || principal.Account.ID == "" {
 		return ErrUnauthenticated
+	}
+	// Revoke the broker session first. If Keycloak is unavailable, fail closed
+	// and leave the still-valid platform session in place so the browser cannot
+	// switch to another platform account while an older Realm session survives.
+	if service.externalSessions != nil {
+		if err := service.externalSessions.LogoutIdentitySessions(ctx, principal.User.ID); err != nil {
+			return fmt.Errorf("revoke external identity sessions: %w", err)
+		}
 	}
 	if err := service.repository.RevokeAccountSessions(ctx, principal.Tenant.ID, principal.Account.ID, service.clock.Now().UTC(), "GLOBAL_LOGOUT"); err != nil {
 		return fmt.Errorf("revoke account sessions: %w", err)

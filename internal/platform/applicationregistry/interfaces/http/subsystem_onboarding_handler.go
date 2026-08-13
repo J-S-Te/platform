@@ -615,16 +615,20 @@ type subsystemAuthorizationResponse struct {
 }
 
 type portalApplicationResponse struct {
-	ApplicationID string  `json:"application_id"`
-	Code          string  `json:"code"`
-	Name          string  `json:"name"`
-	Description   *string `json:"description"`
-	EnvironmentID string  `json:"environment_id"`
-	Environment   string  `json:"environment"`
-	PathPrefix    *string `json:"path_prefix"`
-	TargetCode    string  `json:"target_code"`
-	TargetURI     string  `json:"target_uri"`
-	PublicURL     string  `json:"public_url"`
+	ApplicationID        string  `json:"application_id"`
+	Code                 string  `json:"code"`
+	Name                 string  `json:"name"`
+	Description          *string `json:"description"`
+	EnvironmentID        string  `json:"environment_id"`
+	Environment          string  `json:"environment"`
+	PathPrefix           *string `json:"path_prefix"`
+	TargetCode           string  `json:"target_code"`
+	TargetURI            string  `json:"target_uri"`
+	PublicURL            string  `json:"public_url"`
+	Allowed              bool    `json:"allowed"`
+	ProjectionStatus     string  `json:"projection_status"`
+	ProjectionReady      bool    `json:"projection_ready"`
+	ProjectionNextAction string  `json:"projection_next_action,omitempty"`
 }
 
 type subsystemDeploymentStateResponse struct {
@@ -918,6 +922,8 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 			ApplicationID: item.ApplicationID, Code: item.Code, Name: item.Name, Description: item.Description,
 			EnvironmentID: item.EnvironmentID, Environment: item.Environment, PathPrefix: item.PathPrefix,
 			TargetCode: item.TargetCode, TargetURI: item.TargetURI, PublicURL: item.PublicURL,
+			Allowed: item.Allowed, ProjectionStatus: item.Projection.Status,
+			ProjectionReady: item.Projection.Ready, ProjectionNextAction: item.Projection.NextAction,
 		})
 	}
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
