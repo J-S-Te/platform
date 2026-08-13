@@ -12,7 +12,6 @@ import (
 	"io"
 	stdhttp "net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -95,8 +94,11 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 	if err != nil {
 		return nil, err
 	}
-	dateFrom := strconv.FormatInt(since.UTC().UnixMilli(), 10)
-	userEvents, err := admin.listEventPage(ctx, token, "/events?dateFrom="+url.QueryEscape(dateFrom)+"&max=1000")
+	// Some Keycloak 26 deployments return 404 for the otherwise documented
+	// dateFrom query on the event resources, while the same resources work with
+	// max alone. Fetch a bounded page and apply the since filter locally so the
+	// Broker audit path remains compatible with both server variants.
+	userEvents, err := admin.listEventPage(ctx, token, "/events?max=1000")
 	if err != nil {
 		return nil, err
 	}
@@ -105,18 +107,26 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 	// Keycloak administrator has no admin-event permission (some Keycloak
 	// deployments expose that condition as 404). Do not discard valid login
 	// evidence just because the optional admin stream is unavailable.
-	adminEvents, _ := admin.listEventPage(ctx, token, "/admin-events?dateFrom="+url.QueryEscape(dateFrom)+"&max=1000")
+	adminEvents, _ := admin.listEventPage(ctx, token, "/admin-events?max=1000")
 	items := make([]projectionapplication.KeycloakAuditEvent, 0, len(userEvents)+len(adminEvents))
 	for _, event := range userEvents {
 		kind, _ := event["type"].(string)
 		if kind != "LOGIN" && kind != "LOGOUT" {
 			continue
 		}
-		items = append(items, projectionapplication.KeycloakAuditEvent{EventID: stringValue(event["id"]), Category: "LOGIN", Type: kind, SubjectID: stringValue(event["userId"]), SessionID: stringValue(event["sessionId"]), ClientID: stringValue(event["clientId"]), SourceIP: stringValue(event["ipAddress"]), OccurredAt: keycloakEventTime(event["time"])})
+		occurredAt := keycloakEventTime(event["time"])
+		if !occurredAt.IsZero() && occurredAt.Before(since.UTC()) {
+			continue
+		}
+		items = append(items, projectionapplication.KeycloakAuditEvent{EventID: stringValue(event["id"]), Category: "LOGIN", Type: kind, SubjectID: stringValue(event["userId"]), SessionID: stringValue(event["sessionId"]), ClientID: stringValue(event["clientId"]), SourceIP: stringValue(event["ipAddress"]), OccurredAt: occurredAt})
 	}
 	for _, event := range adminEvents {
+		occurredAt := keycloakEventTime(event["time"])
+		if !occurredAt.IsZero() && occurredAt.Before(since.UTC()) {
+			continue
+		}
 		details, _ := event["authDetails"].(map[string]any)
-		items = append(items, projectionapplication.KeycloakAuditEvent{EventID: stringValue(event["id"]), Category: "ADMIN", Type: "ADMIN", SubjectID: stringValue(details["userId"]), ClientID: stringValue(details["clientId"]), SourceIP: stringValue(details["ipAddress"]), ResourceType: stringValue(event["resourceType"]), ResourcePath: stringValue(event["resourcePath"]), OperationType: stringValue(event["operationType"]), OccurredAt: keycloakEventTime(event["time"])})
+		items = append(items, projectionapplication.KeycloakAuditEvent{EventID: stringValue(event["id"]), Category: "ADMIN", Type: "ADMIN", SubjectID: stringValue(details["userId"]), ClientID: stringValue(details["clientId"]), SourceIP: stringValue(details["ipAddress"]), ResourceType: stringValue(event["resourceType"]), ResourcePath: stringValue(event["resourcePath"]), OperationType: stringValue(event["operationType"]), OccurredAt: occurredAt})
 	}
 	return items, nil
 }
