@@ -29,13 +29,13 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	}
 	expectedAudience, ok := unverifiedJWTClientID(rawToken)
 	claims, err := h.jwtManager.VerifyAccessToken(rawToken, expectedAudience, h.clock.Now().UTC())
-	clientID, subjectTenantID, subjectID := "", "", ""
+	clientID, subjectTenantID, subjectID, tokenSubject := "", "", "", ""
 	if ok && err == nil && claims.ClientID == expectedAudience && claims.Subject != "" && claims.SessionID != "" && hasScope(claims.Scope, "openid") {
 		if !h.allowLegacyPlatformAccessToken {
 			writeContextUnauthorized(w)
 			return
 		}
-		clientID, subjectID = claims.ClientID, claims.Subject
+		clientID, subjectID, tokenSubject = claims.ClientID, claims.Subject, claims.Subject
 		subject, subjectErr := h.accessTokenSubjects.ResolveAccessTokenSubject(r.Context(), claims.ClientID, claims.SessionID, claims.Subject)
 		if subjectErr != nil || strings.TrimSpace(subject.TenantID) == "" {
 			writeContextUnauthorized(w)
@@ -56,12 +56,12 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 		externalSubject := strings.TrimSpace(external.Subject)
 		externalIdentityID := strings.TrimSpace(external.IdentityID)
 		clientID = strings.TrimSpace(external.AuthorizedParty)
-		if externalErr != nil || externalSubject == "" || externalIdentityID != externalSubject || strings.TrimSpace(external.TenantID) == "" || external.TokenUse != "access_token" || clientID == "" || !containsExactAudience(external.Audience, clientID) {
+		if externalErr != nil || externalSubject == "" || externalIdentityID == "" || strings.TrimSpace(external.TenantID) == "" || external.TokenUse != "access_token" || clientID == "" || !containsExactAudience(external.Audience, clientID) {
 			h.logger.Warn("external authorization context token rejected", "error", externalErr)
 			writeContextUnauthorized(w)
 			return
 		}
-		subjectID, subjectTenantID = externalSubject, external.TenantID
+		subjectID, subjectTenantID, tokenSubject = externalIdentityID, external.TenantID, externalSubject
 	} else {
 		writeContextUnauthorized(w)
 		return
@@ -87,7 +87,7 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 		scopes = append(scopes, map[string]string{"role_code": scope.RoleCode, "scope_type": scope.ScopeType, "scope_id": scope.ScopeID, "environment_code": scope.EnvironmentCode})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sub": subjectID, "identity_id": subjectID, "tenant_id": context.TenantID,
+		"sub": tokenSubject, "identity_id": subjectID, "tenant_id": context.TenantID,
 		"client_id": context.ClientID, "application_code": context.ApplicationCode, "environment_code": context.EnvironmentCode,
 		"person_id": context.PersonID, "roles": roles, "permissions": permissions,
 		"data_scopes": scopes, "authorization_revision": context.AuthorizationRevision,

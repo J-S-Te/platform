@@ -40,12 +40,12 @@ func TestAuthorizationContextStrictlyBindsExternalAccessToken(t *testing.T) {
 			want: http.StatusUnauthorized,
 		},
 		{
-			name: "identity mismatch rejected",
+			name: "distinct subject and identity accepted",
 			claims: ExternalAuthorizationTokenClaims{
 				Subject: "identity-1", IdentityID: "identity-2", TenantID: "tenant-1", SessionID: "session-1",
 				AuthorizedParty: "contract-prod-web", Audience: []string{"contract-prod-web"}, TokenUse: "access_token",
 			},
-			want: http.StatusUnauthorized,
+			want: http.StatusOK,
 		},
 		{
 			name: "missing authorized party rejected",
@@ -85,7 +85,11 @@ func TestAuthorizationContextStrictlyBindsExternalAccessToken(t *testing.T) {
 				t.Fatalf("status = %d, want %d; body=%s", response.Code, test.want, response.Body.String())
 			}
 			if test.want == http.StatusOK {
-				if resolver.calls != 1 || resolver.tenantID != "tenant-1" || resolver.clientID != "contract-prod-web" || resolver.subjectID != "identity-1" {
+				expectedSubject := "identity-1"
+				if test.name == "distinct subject and identity accepted" {
+					expectedSubject = "identity-2"
+				}
+				if resolver.calls != 1 || resolver.tenantID != "tenant-1" || resolver.clientID != "contract-prod-web" || resolver.subjectID != expectedSubject {
 					t.Fatalf("resolver = calls:%d tenant:%q client:%q subject:%q", resolver.calls, resolver.tenantID, resolver.clientID, resolver.subjectID)
 				}
 				var body struct {
