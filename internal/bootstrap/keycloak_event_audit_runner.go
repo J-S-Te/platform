@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	keycloakapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
@@ -16,6 +17,7 @@ type keycloakEventAuditRunner struct {
 	collector *keycloakapplication.KeycloakEventAuditCollector
 	logger    *slog.Logger
 	poll      time.Duration
+	lastWarn  time.Time
 }
 
 func newKeycloakEventAuditRunner(collector *keycloakapplication.KeycloakEventAuditCollector, logger *slog.Logger, poll time.Duration) (*keycloakEventAuditRunner, error) {
@@ -30,7 +32,18 @@ func (runner *keycloakEventAuditRunner) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if _, err := runner.collector.Collect(ctx, time.Now().UTC().Add(-5*time.Minute)); err != nil && !errors.Is(err, context.Canceled) {
-			runner.logger.Error("collect Keycloak audit events", "error", err)
+			// Audit collection is supplementary to durable authorization projection
+			// and Broker verification. A transient/variant Keycloak event endpoint
+			// must not create a hot error loop or make the worker look unhealthy.
+			now := time.Now().UTC()
+			if runner.lastWarn.IsZero() || now.Sub(runner.lastWarn) >= time.Minute {
+				runner.lastWarn = now
+				level := slog.LevelWarn
+				if !strings.Contains(err.Error(), "HTTP 404") {
+					level = slog.LevelError
+				}
+				runner.logger.Log(ctx, level, "collect Keycloak audit events deferred", "error", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
