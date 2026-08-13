@@ -62,6 +62,14 @@ customer_and_opportunity@sha256:12ad2575978b91c504f2c4dbe61299a9ce745e475bc98f09
 - `runtime/portal.env`: `PORTAL_OIDC_IDP_HINT=basic-platform`
 - `runtime/project.env`: `OIDC_IDP_HINT=basic-platform`
 
+基础平台 Worker 已发布存量 Client 对账与 Keycloak 审计路径修复镜像：
+
+```text
+platform@sha256:2089dcb5abfecb8158f74dbbec0a168747ab3202430c91933602da57df3e669e
+```
+
+同时修复了审计采集器重复拼接 `/admin/realms/{realm}` 导致的 404。发布后 Worker 日志不再出现 `collect Keycloak audit events` 错误，平台 `/readyz` 与客户门户 `/healthz` 均通过。
+
 ## 永久代码修复
 
 ### 基础平台
@@ -94,4 +102,4 @@ customer_and_opportunity@sha256:12ad2575978b91c504f2c4dbe61299a9ce745e475bc98f09
 
 ## 后续清理
 
-部署包含本次基础平台修复的新镜像并完成一次 Worker 启动对账后，应确认每个 Client 均有正式 Mapper `platform-stable-identity-id`，随后删除此次创建的 Client 专属过渡 Mapper，避免长期保留重复 Claim 来源。
+Worker 启动对账后，三个 Client 均已确认只有一个正式 Mapper `platform-stable-identity-id`；Client 专属过渡 Mapper 已删除，未再保留重复 Claim 来源。
