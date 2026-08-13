@@ -347,16 +347,57 @@ func (repository *SubsystemOnboardingGORMRepository) findEnvironmentByCode(ctx c
 }
 
 type portalApplicationRow struct {
-	ApplicationID string  `gorm:"column:application_id"`
-	Code          string  `gorm:"column:code"`
-	Name          string  `gorm:"column:name"`
-	Description   *string `gorm:"column:description"`
-	EnvironmentID string  `gorm:"column:environment_id"`
-	Environment   string  `gorm:"column:environment"`
-	BaseURL       string  `gorm:"column:base_url"`
-	PathPrefix    *string `gorm:"column:path_prefix"`
-	TargetCode    string  `gorm:"column:target_code"`
-	TargetURI     string  `gorm:"column:target_uri"`
+	ApplicationID    string  `gorm:"column:application_id"`
+	Code             string  `gorm:"column:code"`
+	Name             string  `gorm:"column:name"`
+	Description      *string `gorm:"column:description"`
+	EnvironmentID    string  `gorm:"column:environment_id"`
+	Environment      string  `gorm:"column:environment"`
+	BaseURL          string  `gorm:"column:base_url"`
+	PathPrefix       *string `gorm:"column:path_prefix"`
+	TargetCode       string  `gorm:"column:target_code"`
+	TargetURI        string  `gorm:"column:target_uri"`
+	IssuerAlias      string  `gorm:"column:issuer_alias"`
+	MappingStatus    string  `gorm:"column:mapping_status"`
+	ProjectionStatus string  `gorm:"column:projection_status"`
+	PendingCount     int64   `gorm:"column:pending_count"`
+	RunningCount     int64   `gorm:"column:running_count"`
+	FailedCount      int64   `gorm:"column:failed_count"`
+}
+
+const (
+	portalProjectionNotRequired   = "NOT_REQUIRED"
+	portalProjectionNotConfigured = "NOT_CONFIGURED"
+	portalProjectionMissing       = "MISSING"
+	portalProjectionPending       = "PENDING"
+	portalProjectionRunning       = "RUNNING"
+	portalProjectionFailed        = "FAILED"
+	portalProjectionSynced        = "SYNCED"
+)
+
+func portalProjectionReadiness(row portalApplicationRow) application.PortalProjectionReadiness {
+	if !strings.EqualFold(strings.TrimSpace(row.IssuerAlias), "keycloak") {
+		return application.PortalProjectionReadiness{Status: portalProjectionNotRequired, Ready: true}
+	}
+	if !strings.EqualFold(strings.TrimSpace(row.MappingStatus), "SYNCED") {
+		return application.PortalProjectionReadiness{Status: portalProjectionNotConfigured, NextAction: "该环境尚未完成 Keycloak Client 同步，请联系管理员完成接入。"}
+	}
+	if row.FailedCount > 0 {
+		return application.PortalProjectionReadiness{Status: portalProjectionFailed, NextAction: "账号权限同步失败，请联系管理员重试 Keycloak 投影。"}
+	}
+	if row.RunningCount > 0 || strings.EqualFold(strings.TrimSpace(row.ProjectionStatus), "SYNCING") {
+		return application.PortalProjectionReadiness{Status: portalProjectionRunning, NextAction: "账号权限正在同步，请稍后重试。"}
+	}
+	if row.PendingCount > 0 || strings.EqualFold(strings.TrimSpace(row.ProjectionStatus), portalProjectionPending) {
+		return application.PortalProjectionReadiness{Status: portalProjectionPending, NextAction: "账号权限正在等待同步，请稍后重试。"}
+	}
+	if strings.EqualFold(strings.TrimSpace(row.ProjectionStatus), portalProjectionFailed) {
+		return application.PortalProjectionReadiness{Status: portalProjectionFailed, NextAction: "账号权限同步失败，请联系管理员重试 Keycloak 投影。"}
+	}
+	if strings.EqualFold(strings.TrimSpace(row.ProjectionStatus), portalProjectionSynced) {
+		return application.PortalProjectionReadiness{Status: portalProjectionSynced, Ready: true}
+	}
+	return application.PortalProjectionReadiness{Status: portalProjectionMissing, NextAction: "账号尚未投影到 Keycloak，请联系管理员同步账号权限。"}
 }
 
 // ListPortalApplications returns one preferred active environment/target per active application.
@@ -367,10 +408,25 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 		Table("platform_application AS application").
 		Select(`application.id AS application_id, application.code, application.name, application.description,
 			environment.id AS environment_id, environment.environment, environment.base_url, environment.path_prefix,
-			target.target_code, target.target_uri`).
+			target.target_code, target.target_uri, COALESCE(environment.issuer_alias, 'platform') AS issuer_alias,
+			COALESCE(client_mapping.status, '') AS mapping_status, COALESCE(user_projection.status, '') AS projection_status,
+			COALESCE(projection_queue.pending_count, 0) AS pending_count,
+			COALESCE(projection_queue.running_count, 0) AS running_count,
+			COALESCE(projection_queue.failed_count, 0) AS failed_count`).
 		Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
 		Joins("JOIN platform_application_login_target AS target ON target.environment_id = environment.id AND target.application_id = application.id AND target.tenant_id = application.tenant_id").
 		Joins("JOIN subsystem_deployment_state AS deployment ON deployment.tenant_id = application.tenant_id AND deployment.application_id = application.id AND deployment.environment_id = environment.id AND deployment.status = ?", application.SubsystemDeploymentStatusReady).
+		Joins("LEFT JOIN keycloak_application_client_mapping AS client_mapping ON client_mapping.tenant_id = application.tenant_id AND client_mapping.application_id = application.id AND client_mapping.environment_id = environment.id").
+		Joins("LEFT JOIN keycloak_authorization_projection AS user_projection ON user_projection.tenant_id = application.tenant_id AND user_projection.identity_id = ? AND user_projection.application_id = application.id AND user_projection.environment_id = environment.id", userID).
+		Joins(`LEFT JOIN (
+			SELECT tenant_id, identity_id, application_id, environment_id,
+				SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending_count,
+				SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) AS running_count,
+				SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count
+			FROM keycloak_authorization_outbox
+			WHERE identity_id = ? AND environment_id IS NOT NULL AND status IN ('PENDING', 'RUNNING', 'FAILED')
+			GROUP BY tenant_id, identity_id, application_id, environment_id
+		) AS projection_queue ON projection_queue.tenant_id = application.tenant_id AND projection_queue.identity_id = ? AND projection_queue.application_id = application.id AND projection_queue.environment_id = environment.id`, userID, userID).
 		Where("application.tenant_id = ? AND application.status = ? AND environment.status = ? AND target.status = ?", tenantID, "ACTIVE", "ACTIVE", "ACTIVE").
 		Where(accessFilter, accessArgs...)
 	if environment != "" {
@@ -395,10 +451,12 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 			continue
 		}
 		seen[row.ApplicationID] = struct{}{}
+		projection := portalProjectionReadiness(row)
 		items = append(items, application.PortalApplication{
 			ApplicationID: row.ApplicationID, Code: row.Code, Name: row.Name, Description: row.Description,
 			EnvironmentID: row.EnvironmentID, Environment: row.Environment, PathPrefix: row.PathPrefix,
 			TargetCode: row.TargetCode, TargetURI: row.TargetURI, PublicURL: row.BaseURL,
+			Allowed: projection.Ready, Projection: projection,
 		})
 	}
 	return items, nil

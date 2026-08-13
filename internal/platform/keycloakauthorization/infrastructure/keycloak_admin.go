@@ -890,6 +890,50 @@ func attributeSegment(value string) string {
 
 var _ projectionapplication.KeycloakAdmin = (*KeycloakAdmin)(nil)
 
+// LogoutIdentitySessions revokes every Realm session owned by the projected
+// Keycloak user for a stable platform identity. Both the Broker link and the
+// managed identity_id attribute are considered so pre-link and legacy users
+// are covered. Missing users are an idempotent success.
+func (admin *KeycloakAdmin) LogoutIdentitySessions(ctx context.Context, identityID string) error {
+	identityID = strings.TrimSpace(identityID)
+	if identityID == "" {
+		return errors.New("Keycloak logout identity ID is required")
+	}
+	token, err := admin.token(ctx)
+	if err != nil {
+		return err
+	}
+	userIDs := map[string]struct{}{}
+	brokerUserID, err := admin.findUserByBrokerIdentity(ctx, token, identityID)
+	if err != nil {
+		return fmt.Errorf("find Keycloak Broker user for logout: %w", err)
+	}
+	if brokerUserID != "" {
+		userIDs[brokerUserID] = struct{}{}
+	}
+	users, err := admin.findUsersByIdentity(ctx, token, identityID)
+	if err != nil {
+		return fmt.Errorf("find projected Keycloak user for logout: %w", err)
+	}
+	for _, user := range users {
+		if strings.TrimSpace(user.ID) != "" {
+			userIDs[user.ID] = struct{}{}
+		}
+	}
+	for userID := range userIDs {
+		response, requestErr := admin.request(ctx, token, stdhttp.MethodPost, "/users/"+url.PathEscape(userID)+"/logout", nil)
+		if requestErr != nil {
+			return requestErr
+		}
+		status := response.StatusCode
+		response.Body.Close()
+		if status != stdhttp.StatusNoContent && status != stdhttp.StatusNotFound {
+			return admin.statusError("logout Keycloak user sessions", status)
+		}
+	}
+	return nil
+}
+
 // ResetPasswordAndLogout updates a federated user's Keycloak credential and revokes
 // all of that user's active sessions. It is intentionally server-side only.
 func (admin *KeycloakAdmin) ResetPasswordAndLogout(ctx context.Context, userID, password string) error {

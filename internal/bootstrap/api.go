@@ -285,8 +285,26 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
+	var keycloakAdmin *keycloakauthorizationinfrastructure.KeycloakAdmin
+	if cfg.Keycloak.Enabled {
+		keycloakAdmin, err = keycloakauthorizationinfrastructure.NewKeycloakAdminWithCredentials(cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, keycloakauthorizationinfrastructure.KeycloakAdminCredentials{
+			ServiceAccountClientID:     cfg.Keycloak.AdminClientID,
+			ServiceAccountClientSecret: cfg.Keycloak.AdminClientSecret,
+			Username:                   cfg.Keycloak.AdminUsername,
+			Password:                   cfg.Keycloak.AdminPassword,
+		})
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("create Keycloak session terminator: %w", err)
+		}
+	}
+	authServiceDependencies := []identityapplication.ExternalSessionTerminator{}
+	if keycloakAdmin != nil {
+		authServiceDependencies = append(authServiceDependencies, keycloakAdmin)
+	}
 	authService, err := identityapplication.NewService(
-		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL,
+		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL, authServiceDependencies...,
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -312,10 +330,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	var externalResetter identityapplication.ExternalPasswordResetter
-	if cfg.Keycloak.Enabled && strings.TrimSpace(cfg.Keycloak.AdminURL) != "" && strings.TrimSpace(cfg.Keycloak.Realm) != "" {
-		if admin, adminErr := keycloakauthorizationinfrastructure.NewKeycloakAdmin(cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, cfg.Keycloak.AdminUsername, cfg.Keycloak.AdminPassword); adminErr == nil {
-			externalResetter = admin
-		}
+	if keycloakAdmin != nil {
+		externalResetter = keycloakAdmin
 	}
 	accountLifecycleService, err := identityapplication.NewAccountLifecycleService(
 		repository, security.Argon2idPasswordHasher{}, security.Argon2idPasswordVerifier{}, identityapplication.CryptoPasswordGenerator{}, ulid.Generator{}, identityapplication.SystemClock{}, externalResetter,

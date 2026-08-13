@@ -153,6 +153,69 @@ func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	}
 }
 
+func TestLogoutIdentitySessionsRevokesBrokerAndProjectedUsersOnce(t *testing.T) {
+	var logoutPaths []string
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/users":
+			if request.URL.Query().Get("idpAlias") == platformBrokerAlias {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "user-1"}})
+				return
+			}
+			if request.URL.Query().Get("q") != "identity_id:identity-1" {
+				t.Errorf("unexpected user query: %s", request.URL.RawQuery)
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{
+				{ID: "user-1", Attributes: map[string][]string{"identity_id": {"identity-1"}}},
+				{ID: "legacy-user", Attributes: map[string][]string{"identity_id": {"identity-1"}}},
+			})
+		case "POST /admin/realms/acme/users/user-1/logout", "POST /admin/realms/acme/users/legacy-user/logout":
+			logoutPaths = append(logoutPaths, request.URL.Path)
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.LogoutIdentitySessions(context.Background(), "identity-1"); err != nil {
+		t.Fatalf("LogoutIdentitySessions() error = %v", err)
+	}
+	if len(logoutPaths) != 2 {
+		t.Fatalf("logout requests = %v, want two unique users", logoutPaths)
+	}
+}
+
+func TestLogoutIdentitySessionsTreatsMissingUserAsSuccess(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/users":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.LogoutIdentitySessions(context.Background(), "identity-missing"); err != nil {
+		t.Fatalf("LogoutIdentitySessions() error = %v", err)
+	}
+}
+
 func TestManagedAuthorizationAttributeMatchingIsPrecise(t *testing.T) {
 	for _, key := range []string{
 		"permissions", "organization_ids", "role_config_hash", "authz_revision", "roles",
