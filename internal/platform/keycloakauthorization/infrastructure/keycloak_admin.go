@@ -99,14 +99,17 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 	// locally; this avoids version-specific query routing differences.
 	userEvents, err := admin.listEventPage(ctx, token, "/events")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list Keycloak user audit events (admin_url=%q realm=%q): %w", admin.adminURL, admin.realm, err)
 	}
 	// User LOGIN/LOGOUT events are required for Broker verification. Admin
 	// events are an additional audit stream and may be unavailable when the
 	// Keycloak administrator has no admin-event permission (some Keycloak
 	// deployments expose that condition as 404). Do not discard valid login
 	// evidence just because the optional admin stream is unavailable.
-	adminEvents, _ := admin.listEventPage(ctx, token, "/admin-events")
+	adminEvents, adminEventsErr := admin.listEventPage(ctx, token, "/admin-events")
+	if adminEventsErr != nil {
+		adminEvents = nil
+	}
 	items := make([]projectionapplication.KeycloakAuditEvent, 0, len(userEvents)+len(adminEvents))
 	for _, event := range userEvents {
 		kind, _ := event["type"].(string)
@@ -131,13 +134,14 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 }
 
 func (admin *KeycloakAdmin) listEventPage(ctx context.Context, token, suffix string) ([]map[string]any, error) {
-	response, err := admin.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(admin.realm)+suffix, nil)
+	path := "/admin/realms/" + url.PathEscape(admin.realm) + suffix
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, path, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request path %q: %w", path, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != stdhttp.StatusOK {
-		return nil, admin.statusError("list Keycloak audit events", response.StatusCode)
+		return nil, fmt.Errorf("list Keycloak audit events path %q returned HTTP %d", path, response.StatusCode)
 	}
 	var items []map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&items); err != nil {
