@@ -58,6 +58,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	httptransport "github.com/J-S-Te/Basic-Platform/internal/transport/http"
+	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 	"gorm.io/gorm"
 )
 
@@ -330,7 +331,19 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth, auditService, cfg.Audit, loginTargetResolver)
+	var authHandlerOptions []identityhttp.IDTokenVerifierOption
+	if cfg.Auth.KeycloakOIDCEnabled && cfg.Keycloak.Enabled {
+		// P1-2：平台自身 OIDC 登录校验 ID Token（签名/issuer/aud/exp/nonce/azp）。
+		// 复用与 broker 验证同源的 JWKS 验证器，验证面不扩大。
+		idTokenVerifier, verifierErr := middleware.NewKeycloakBrokerJWTVerifier(cfg.Auth.KeycloakOIDCIssuer, nil)
+		if verifierErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("configure platform OIDC ID token verifier: %w", verifierErr)
+		}
+		authHandlerOptions = append(authHandlerOptions, identityhttp.WithIDTokenVerifier(oidcIDTokenVerifierAdapter{verifier: idTokenVerifier}))
+	}
+	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth, auditService, cfg.Audit, loginTargetResolver, authHandlerOptions...)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -719,6 +732,21 @@ func (api *API) Close() {
 			api.Logger.Error("close application log file", "error", err)
 		}
 	}
+}
+
+// oidcIDTokenVerifierAdapter 把 Keycloak broker 验证器的 ID Token 校验适配为
+// 身份 HTTP 层接口：验签通过后要求 identity_id 与 subject 一致。
+type oidcIDTokenVerifierAdapter struct{ verifier *middleware.KeycloakBrokerJWTVerifier }
+
+func (adapter oidcIDTokenVerifierAdapter) VerifyIDToken(ctx context.Context, raw, nonce, clientID string) (string, error) {
+	claims, err := adapter.verifier.VerifyIDToken(ctx, raw, nonce, clientID)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(claims.IdentityID) == "" || strings.TrimSpace(claims.Subject) == "" || claims.IdentityID != claims.Subject {
+		return "", errors.New("Keycloak ID token identity claims are invalid")
+	}
+	return claims.IdentityID, nil
 }
 
 // customerBindingResolverAdapter 把外部身份模块的绑定解析适配为 OIDC 传输层接口。

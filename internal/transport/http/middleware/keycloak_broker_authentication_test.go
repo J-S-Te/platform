@@ -155,6 +155,67 @@ func TestKeycloakBrokerJWTVerifierRequiresBoundAccessTokenForAuthorizationContex
 	}
 }
 
+func TestKeycloakBrokerJWTVerifierRequiresBoundIDTokenWithNonce(t *testing.T) {
+	privateKey := newTestKeycloakRSAKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writeKeycloakJWKS(t, writer, map[string]*rsa.PrivateKey{"current": privateKey})
+	}))
+	defer server.Close()
+
+	issuer := server.URL + "/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifier(issuer, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	verifier.now = func() time.Time { return now }
+	base := validKeycloakBrokerClaims(issuer, now)
+	base["identity_id"] = "subject"
+	base["azp"] = "platform-console-web"
+
+	tests := []struct {
+		name       string
+		tokenUse   string
+		nonce      string
+		expected   string
+		audience   any
+		wantOK     bool
+	}{
+		{name: "bound id token with nonce", tokenUse: "id_token", nonce: "nonce-1", expected: "nonce-1", audience: "platform-console-web", wantOK: true},
+		{name: "nonce mismatch", tokenUse: "id_token", nonce: "nonce-1", expected: "nonce-2", audience: "platform-console-web"},
+		{name: "missing nonce", tokenUse: "id_token", expected: "nonce-1", audience: "platform-console-web"},
+		{name: "wrong token use", tokenUse: "access_token", nonce: "nonce-1", expected: "nonce-1", audience: "platform-console-web"},
+		{name: "audience missing client", tokenUse: "id_token", nonce: "nonce-1", expected: "nonce-1", audience: []string{"account"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claims := make(map[string]any, len(base)+3)
+			for key, value := range base {
+				claims[key] = value
+			}
+			claims["aud"] = test.audience
+			claims["token_use"] = test.tokenUse
+			if test.nonce != "" {
+				claims["nonce"] = test.nonce
+			}
+			token := signedKeycloakBrokerJWT(t, privateKey, "current", claims)
+			got, verifyErr := verifier.VerifyIDToken(context.Background(), token, test.expected, "platform-console-web")
+			if test.wantOK {
+				if verifyErr != nil {
+					t.Fatalf("VerifyIDToken() error = %v", verifyErr)
+				}
+				if got.Nonce != "nonce-1" || got.IdentityID != "subject" {
+					t.Fatalf("claims = %#v", got)
+				}
+				return
+			}
+			if verifyErr == nil {
+				t.Fatalf("VerifyIDToken() claims = %#v, want error", got)
+			}
+		})
+	}
+}
+
 func TestKeycloakBrokerJWTVerifierCachesFreshJWKS(t *testing.T) {
 	privateKey := newTestKeycloakRSAKey(t)
 	var requests atomic.Int32

@@ -199,8 +199,8 @@ func (verifier *KeycloakBrokerJWTVerifier) VerifyIDToken(ctx context.Context, ra
 		return KeycloakIDTokenClaims{}, errors.New("invalid Keycloak ID token serialization")
 	}
 	var payload struct {
-		Nonce    string `json:\"nonce\"`
-		TokenUse string `json:\"token_use\"`
+		Nonce    string `json:"nonce"`
+		TokenUse string `json:"token_use"`
 	}
 	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
 		return KeycloakIDTokenClaims{}, errors.New("invalid Keycloak ID token claims")
