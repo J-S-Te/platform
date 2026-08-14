@@ -84,12 +84,19 @@ type AuthConfig struct {
 	KeycloakOIDCClientID     string
 	KeycloakOIDCClientSecret string
 	KeycloakOIDCRedirectPath string
+	// AuthzContextCustomerRefEnabled 打开后，/oauth2/authorization-context 会为命中
+	// ACTIVE 外部客户绑定的 subject 追加 customer_ref 声明。默认关闭，逐环境灰度。
+	AuthzContextCustomerRefEnabled bool
 }
 
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
 type IdentityConfig struct {
 	MobileEncryptionKey string
 	BootstrapToken      string
+	// CustomerRefEncryptionKey / CustomerRefDigestKey 保护外部客户绑定：AES-256-GCM 密文
+	// 与 HMAC-SM3 摘要。未配置时绑定写入与解析失败关闭，绝不明文降级。
+	CustomerRefEncryptionKey string
+	CustomerRefDigestKey     string
 }
 
 // LoggingConfig controls structured application logs.
@@ -221,6 +228,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	authzContextCustomerRefEnabled, err := boolean("AUTHZ_CONTEXT_CUSTOMER_REF_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -247,8 +258,10 @@ func Load() (Config, error) {
 			Params:   value("MYSQL_PARAMS", "charset=utf8mb4&parseTime=true&loc=UTC"),
 		},
 		Identity: IdentityConfig{
-			MobileEncryptionKey: value("IAM_MOBILE_ENCRYPTION_KEY", ""),
-			BootstrapToken:      strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
+			MobileEncryptionKey:      value("IAM_MOBILE_ENCRYPTION_KEY", ""),
+			BootstrapToken:           strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
+			CustomerRefEncryptionKey: value("IAM_CUSTOMER_REF_ENCRYPTION_KEY", ""),
+			CustomerRefDigestKey:     value("IAM_CUSTOMER_REF_DIGEST_KEY", ""),
 		},
 		Auth: AuthConfig{
 			PublicBaseURL:                            publicBaseURL,
@@ -263,6 +276,7 @@ func Load() (Config, error) {
 			SessionCookieSameSite:                    value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
 			SessionTTL:                               sessionTTL,
 			AllowLegacyPlatformAccessToken:           legacyPlatformAccessTokenEnabled,
+		AuthzContextCustomerRefEnabled:           authzContextCustomerRefEnabled,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
 			KeycloakOIDCEnabled:                      keycloakEnabled && strings.EqualFold(value("KEYCLOAK_PLATFORM_OIDC_ENABLED", "false"), "true"),
 			KeycloakOIDCIssuer:                       strings.TrimRight(value("KEYCLOAK_PLATFORM_OIDC_ISSUER", ""), "/"),

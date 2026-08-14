@@ -353,6 +353,141 @@ func encodeRole(value domain.RoleResult) string {
 	return value.PlatformUserID + "\x00" + value.ApplicationCode + "\x00" + value.RoleCode + "\x00" + value.Status
 }
 
+// BindCustomer 在单个事务内完成绑定写入/禁用：nonce、幂等、身份存在性、绑定 upsert、
+// 审计原子提交。同租户同客户标识的跨身份冲突由唯一键触发并映射为显式冲突。
+func (repository *GORMRepository) BindCustomer(ctx context.Context, command application.BindingCommand) (domain.BindingResult, error) {
+	operation, action, summary := "BIND", "external_customer.binding.bind", "外部客户绑定已建立"
+	if command.Status == domain.BindingDisabled {
+		operation, action, summary = "DISABLE_BIND", "external_customer.binding.disable", "外部客户绑定已禁用"
+	}
+	var response domain.BindingResult
+	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := recordNonce(tx, command.Principal.TenantID, command.NonceHash[:], command.NonceExpiresAt, command.OccurredAt); err != nil {
+			return err
+		}
+		var err error
+		response, err = replayBinding(tx, command, operation)
+		if err == nil || !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		// 绑定只允许挂在仍可用的外部身份上；DISABLED 身份不能重新建立或恢复绑定。
+		var identity identityModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND platform_user_id = ? AND status <> ?", command.Principal.TenantID, command.PlatformUserID, domain.IdentityDisabled).
+			Take(&identity).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return application.ErrNotFound
+			}
+			return err
+		}
+
+		var existing struct {
+			ID                string
+			CustomerRefDigest []byte
+			Status            string
+		}
+		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Table("iam_external_customer_binding").
+			Select("id, customer_ref_digest, status").
+			Where("tenant_id = ? AND identity_id = ? AND application_code = ?", command.Principal.TenantID, identity.ID, command.ApplicationCode).
+			Take(&existing).Error
+		if errors.Is(findErr, gorm.ErrRecordNotFound) {
+			if command.Status == domain.BindingDisabled {
+				return application.ErrNotFound
+			}
+			operator := command.Principal.OAuthClientID
+			if err := tx.Table("iam_external_customer_binding").Create(map[string]any{
+				"id": command.BindingID, "tenant_id": command.Principal.TenantID, "identity_id": identity.ID,
+				"application_code": command.ApplicationCode, "customer_ref_digest": command.CustomerRefDigest,
+				"customer_ref_cipher": command.CustomerRefCipher, "status": command.Status, "version": 1,
+				"created_at": command.OccurredAt, "created_by": operator, "updated_at": command.OccurredAt, "updated_by": operator,
+			}).Error; err != nil {
+				return mapWriteError(err)
+			}
+		} else if findErr != nil {
+			return findErr
+		} else if command.Status == domain.BindingDisabled {
+			// 禁用必须以同一客户标识定位绑定，防止只凭 platform_user_id 就冻结其他客户的映射。
+			if !application.SameDigest(existing.CustomerRefDigest, command.CustomerRefDigest) {
+				return application.ErrNotFound
+			}
+			// 禁用不刷新密文/摘要，保留绑定历史供审计与轮换对照。
+			update := tx.Table("iam_external_customer_binding").
+				Where("id = ? AND tenant_id = ? AND status = ?", existing.ID, command.Principal.TenantID, domain.BindingActive).
+				Updates(map[string]any{"status": domain.BindingDisabled, "updated_at": command.OccurredAt, "updated_by": command.Principal.OAuthClientID, "version": gorm.Expr("version + 1")})
+			if update.Error != nil {
+				return mapWriteError(update.Error)
+			}
+			if update.RowsAffected != 1 {
+				return application.ErrConflict
+			}
+		} else {
+			// 恢复绑定（禁用后重新开通）或密钥轮换后刷新密文/摘要。
+			update := tx.Table("iam_external_customer_binding").
+				Where("id = ? AND tenant_id = ? AND (status = ? OR status = ?)", existing.ID, command.Principal.TenantID, domain.BindingActive, domain.BindingDisabled).
+				Updates(map[string]any{"customer_ref_digest": command.CustomerRefDigest, "customer_ref_cipher": command.CustomerRefCipher, "status": domain.BindingActive, "updated_at": command.OccurredAt, "updated_by": command.Principal.OAuthClientID, "version": gorm.Expr("version + 1")})
+			if update.Error != nil {
+				return mapWriteError(update.Error)
+			}
+			if update.RowsAffected != 1 {
+				return application.ErrConflict
+			}
+		}
+		response = domain.BindingResult{PlatformUserID: command.PlatformUserID, ApplicationCode: command.ApplicationCode, Status: command.Status}
+		if err := createIdempotency(tx, command.Principal.TenantID, command.Principal.OAuthClientID, operation, command.IdempotencyKey, command.RequestHash[:], identity.ID, encodeBinding(response), command.OccurredAt); err != nil {
+			return err
+		}
+		return ingestAudit(ctx, tx, repository.audit, command.EventID, command.Principal, command.OccurredAt, action, command.PlatformUserID, summary, map[string]any{"application_code": command.ApplicationCode, "binding_status": command.Status})
+	})
+	return response, err
+}
+
+// ResolveCustomerBinding 只读解析 ACTIVE 绑定记录，明文解密由应用层完成。
+func (repository *GORMRepository) ResolveCustomerBinding(ctx context.Context, query application.BindingQuery) (domain.CustomerBinding, error) {
+	var row struct {
+		ApplicationCode   string
+		CustomerRefCipher []byte
+		CustomerRefDigest []byte
+		Status            string
+	}
+	statement := repository.database.WithContext(ctx).
+		Table("iam_external_customer_binding AS binding").
+		Select("binding.application_code, binding.customer_ref_cipher, binding.customer_ref_digest, binding.status").
+		Joins("JOIN iam_external_identity AS identity ON identity.id = binding.identity_id AND identity.tenant_id = binding.tenant_id").
+		Where("binding.tenant_id = ? AND identity.platform_user_id = ? AND binding.application_code = ?", query.TenantID, query.PlatformUserID, query.ApplicationCode)
+	if query.Status != "" {
+		statement = statement.Where("binding.status = ?", query.Status)
+	}
+	err := statement.Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.CustomerBinding{}, application.ErrNotFound
+	}
+	if err != nil {
+		return domain.CustomerBinding{}, fmt.Errorf("query external customer binding: %w", err)
+	}
+	return domain.CustomerBinding{
+		ApplicationCode: row.ApplicationCode, CustomerRefCipher: row.CustomerRefCipher,
+		CustomerRefDigest: row.CustomerRefDigest, Status: row.Status,
+	}, nil
+}
+
+func replayBinding(tx *gorm.DB, command application.BindingCommand, operation string) (domain.BindingResult, error) {
+	row, err := loadIdempotency(tx, command.Principal.TenantID, command.Principal.OAuthClientID, operation, command.IdempotencyKey, command.RequestHash[:])
+	if err != nil {
+		return domain.BindingResult{}, err
+	}
+	parts := strings.Split(row.ResultJSON, "\x00")
+	if len(parts) != 3 {
+		return domain.BindingResult{}, application.ErrConflict
+	}
+	return domain.BindingResult{PlatformUserID: parts[0], ApplicationCode: parts[1], Status: parts[2]}, nil
+}
+
+func encodeBinding(value domain.BindingResult) string {
+	return value.PlatformUserID + "\x00" + value.ApplicationCode + "\x00" + value.Status
+}
+
 func mapWriteError(err error) error {
 	if isDuplicate(err) {
 		return application.ErrConflict

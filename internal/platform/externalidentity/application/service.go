@@ -30,6 +30,7 @@ const (
 // Options 允许装配层覆盖门户应用码，缺省保持平台默认，保证既有行为不变。
 type Options struct {
 	PortalApplicationCode string
+	CustomerRefProtection CustomerRefProtection
 }
 
 // ServiceOption 是构造选项函数。
@@ -40,6 +41,15 @@ func WithPortalApplicationCode(code string) ServiceOption {
 	return func(options *Options) {
 		if strings.TrimSpace(code) != "" {
 			options.PortalApplicationCode = strings.TrimSpace(code)
+		}
+	}
+}
+
+// WithCustomerRefProtection 注入客户标识保护原语；缺省使用失败关闭占位实现，绑定写入与解析都会报不可用。
+func WithCustomerRefProtection(protection CustomerRefProtection) ServiceOption {
+	return func(options *Options) {
+		if protection != nil {
+			options.CustomerRefProtection = protection
 		}
 	}
 }
@@ -60,6 +70,14 @@ type IDGenerator interface {
 type MobileProtection interface {
 	Encrypt(string) ([]byte, error)
 	Digest(string) []byte
+}
+
+// CustomerRefProtection 保护 CRM 客户标识绑定：Encrypt/Decrypt 使用 AES-256-GCM（受控下发），
+// Digest 使用键控 HMAC-SM3（查重/唯一约束）。未配置密钥时实现必须失败关闭。
+type CustomerRefProtection interface {
+	Encrypt(string) ([]byte, error)
+	Decrypt([]byte) (string, error)
+	Digest(string) ([]byte, error)
 }
 
 type RequestProof struct {
@@ -84,6 +102,17 @@ type RoleInput struct {
 	PlatformUserID  string
 	ApplicationCode string
 	RoleCode        string
+}
+
+// BindInput 是 CRM 提交的客户绑定写请求。CustomerRef 为不透明客户标识，平台不理解语义。
+type BindInput struct {
+	PlatformUserID string
+	CustomerRef    string
+}
+
+// ResolvedCustomerBinding 是 authorization-context 下发前解密出的绑定结果。
+type ResolvedCustomerBinding struct {
+	CustomerRef string
 }
 
 type ProvisionCommand struct {
@@ -119,15 +148,44 @@ type RoleCommand struct {
 	OccurredAt      time.Time
 }
 
+// BindingCommand 描述一次绑定写入/禁用。Status 由应用层固定为 ACTIVE/DISABLED。
+type BindingCommand struct {
+	Principal         appctx.Principal
+	IdempotencyKey    string
+	RequestHash       [32]byte
+	NonceHash         [32]byte
+	NonceExpiresAt    time.Time
+	PlatformUserID    string
+	ApplicationCode   string
+	CustomerRefDigest []byte
+	CustomerRefCipher []byte
+	Status            string
+	BindingID         string
+	EventID           string
+	OccurredAt        time.Time
+}
+
+// BindingQuery 是 authorization-context 解析器与对账接口读取绑定记录的只读查询。
+// Status 为空时不过滤状态；ResolveCustomerBinding 固定传 ACTIVE。
+type BindingQuery struct {
+	TenantID        string
+	PlatformUserID  string
+	ApplicationCode string
+	Status          string
+}
+
 type Repository interface {
 	Provision(context.Context, ProvisionCommand) (ProvisionResult, error)
 	AssignRole(context.Context, RoleCommand) (domain.RoleResult, error)
 	RevokeRole(context.Context, RoleCommand) (domain.RoleResult, error)
+	BindCustomer(context.Context, BindingCommand) (domain.BindingResult, error)
+	ResolveCustomerBinding(context.Context, BindingQuery) (domain.CustomerBinding, error)
 }
 
 type Service struct {
 	repository            Repository
 	mobiles               MobileProtection
+	customerRefs          CustomerRefProtection
 	ids                   IDGenerator
 	clock                 Clock
 	portalApplicationCode string
@@ -141,8 +199,12 @@ func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator
 	for _, apply := range options {
 		apply(&opts)
 	}
+	customerRefs := opts.CustomerRefProtection
+	if customerRefs == nil {
+		customerRefs = unavailableCustomerRefProtection{}
+	}
 	return &Service{
-		repository: repository, mobiles: mobiles, ids: ids, clock: clock,
+		repository: repository, mobiles: mobiles, customerRefs: customerRefs, ids: ids, clock: clock,
 		portalApplicationCode: opts.PortalApplicationCode,
 	}, nil
 }
@@ -320,4 +382,123 @@ func containsControl(value string) bool {
 func SameDigest(left, right []byte) bool {
 	// 摘要比较采用常量时间，避免在机器接口冲突路径上泄漏前缀匹配信息。
 	return len(left) == sha256.Size && len(right) == sha256.Size && subtle.ConstantTimeCompare(left, right) == 1
+}
+
+// BindCustomer 建立或恢复平台身份与 CRM 客户标识的绑定；同幂等键重放返回稳定结果。
+func (service *Service) BindCustomer(ctx context.Context, principal appctx.Principal, proof RequestProof, input BindInput) (domain.BindingResult, error) {
+	return service.changeBinding(ctx, principal, proof, input, false)
+}
+
+// DisableCustomerBinding 冻结绑定而不删除历史；CRM 禁用 saga 用它与角色回收组成跨系统收敛。
+func (service *Service) DisableCustomerBinding(ctx context.Context, principal appctx.Principal, proof RequestProof, input BindInput) (domain.BindingResult, error) {
+	return service.changeBinding(ctx, principal, proof, input, true)
+}
+
+func (service *Service) changeBinding(ctx context.Context, principal appctx.Principal, proof RequestProof, input BindInput, disable bool) (domain.BindingResult, error) {
+	now, nonceHash, err := validateProof(principal, proof, service.clock.Now())
+	if err != nil {
+		return domain.BindingResult{}, err
+	}
+	input.PlatformUserID = strings.TrimSpace(input.PlatformUserID)
+	input.CustomerRef = strings.TrimSpace(input.CustomerRef)
+	if input.PlatformUserID == "" || len(input.PlatformUserID) > 128 ||
+		input.CustomerRef == "" || len(input.CustomerRef) > 64 || input.CustomerRef != strings.TrimSpace(input.CustomerRef) || containsControl(input.CustomerRef) {
+		return domain.BindingResult{}, ErrValidation
+	}
+	digest, err := service.customerRefs.Digest(customerRefDigestInput(principal.TenantID, service.portalApplicationCode, input.CustomerRef))
+	if err != nil {
+		return domain.BindingResult{}, fmt.Errorf("protect external customer binding digest: %w", ErrUnavailable)
+	}
+	var ciphertext []byte
+	if !disable {
+		ciphertext, err = service.customerRefs.Encrypt(input.CustomerRef)
+		if err != nil {
+			return domain.BindingResult{}, fmt.Errorf("protect external customer binding ciphertext: %w", ErrUnavailable)
+		}
+	}
+	bindingID, eventID, _, err := service.newIDs(now, 2)
+	if err != nil {
+		return domain.BindingResult{}, err
+	}
+	status := domain.BindingActive
+	if disable {
+		status = domain.BindingDisabled
+	}
+	return service.repository.BindCustomer(ctx, BindingCommand{
+		Principal: principal, IdempotencyKey: normalizedIdempotencyKey(proof), RequestHash: hashBindingRequest(service.portalApplicationCode, input, disable),
+		NonceHash: nonceHash, NonceExpiresAt: now.Add(nonceRetention),
+		PlatformUserID: input.PlatformUserID, ApplicationCode: service.portalApplicationCode,
+		CustomerRefDigest: digest, CustomerRefCipher: ciphertext, Status: status,
+		BindingID: bindingID, EventID: eventID, OccurredAt: now,
+	})
+}
+
+// ResolveCustomerBinding 仅供 authorization-context 解析器调用：读取 ACTIVE 绑定并在服务端
+// 解密 customer_ref。绑定缺失、被禁用或解密失败一律不向协议层泄漏明文与内部差异。
+func (service *Service) ResolveCustomerBinding(ctx context.Context, tenantID, platformUserID, applicationCode string) (ResolvedCustomerBinding, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	platformUserID = strings.TrimSpace(platformUserID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	if tenantID == "" || platformUserID == "" || applicationCode == "" || applicationCode != service.portalApplicationCode {
+		return ResolvedCustomerBinding{}, ErrNotFound
+	}
+	record, err := service.repository.ResolveCustomerBinding(ctx, BindingQuery{TenantID: tenantID, PlatformUserID: platformUserID, ApplicationCode: applicationCode, Status: domain.BindingActive})
+	if err != nil {
+		return ResolvedCustomerBinding{}, err
+	}
+	if record.Status != domain.BindingActive || len(record.CustomerRefCipher) == 0 {
+		return ResolvedCustomerBinding{}, ErrNotFound
+	}
+	plaintext, err := service.customerRefs.Decrypt(record.CustomerRefCipher)
+	if err != nil {
+		return ResolvedCustomerBinding{}, fmt.Errorf("decrypt external customer binding: %w", ErrUnavailable)
+	}
+	if plaintext == "" || plaintext != strings.TrimSpace(plaintext) || len(plaintext) > 64 || containsControl(plaintext) {
+		return ResolvedCustomerBinding{}, ErrUnavailable
+	}
+	return ResolvedCustomerBinding{CustomerRef: plaintext}, nil
+}
+
+// CustomerBindingStatus 返回绑定当前状态用于 CRM 对账，不解密 customer_ref。
+func (service *Service) CustomerBindingStatus(ctx context.Context, tenantID, platformUserID, applicationCode string) (domain.BindingResult, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	platformUserID = strings.TrimSpace(platformUserID)
+	applicationCode = strings.TrimSpace(applicationCode)
+	if tenantID == "" || platformUserID == "" || applicationCode == "" || applicationCode != service.portalApplicationCode {
+		return domain.BindingResult{}, ErrNotFound
+	}
+	record, err := service.repository.ResolveCustomerBinding(ctx, BindingQuery{TenantID: tenantID, PlatformUserID: platformUserID, ApplicationCode: applicationCode})
+	if err != nil {
+		return domain.BindingResult{}, err
+	}
+	return domain.BindingResult{PlatformUserID: platformUserID, ApplicationCode: applicationCode, Status: record.Status}, nil
+}
+
+// customerRefDigestInput 把租户/应用域与客户标识一起送入键控摘要，防止跨租户或跨应用的
+// 相同 customer_ref 产生可碰撞的摘要。
+func customerRefDigestInput(tenantID, applicationCode, customerRef string) string {
+	return "customer\x00" + tenantID + "\x00" + applicationCode + "\x00" + customerRef
+}
+
+func hashBindingRequest(applicationCode string, input BindInput, disable bool) [32]byte {
+	action := "bind"
+	if disable {
+		action = "disable"
+	}
+	return sha256.Sum256([]byte(action + "\x00" + applicationCode + "\x00" + input.PlatformUserID + "\x00" + input.CustomerRef))
+}
+
+// unavailableCustomerRefProtection 是未配置客户标识密钥时的失败关闭占位实现。
+type unavailableCustomerRefProtection struct{}
+
+func (unavailableCustomerRefProtection) Encrypt(string) ([]byte, error) {
+	return nil, errors.New("customer ref encryption is not configured")
+}
+
+func (unavailableCustomerRefProtection) Decrypt([]byte) (string, error) {
+	return "", errors.New("customer ref decryption is not configured")
+}
+
+func (unavailableCustomerRefProtection) Digest(string) ([]byte, error) {
+	return nil, errors.New("customer ref digest is not configured")
 }

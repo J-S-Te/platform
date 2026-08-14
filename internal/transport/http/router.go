@@ -503,6 +503,11 @@ func NewRouter(
 		}
 		if operational.ExternalIdentity != nil {
 			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))
+			// 外部客户绑定：CRM 机器客户端专用。scope 与子系统接入的按用途凭据一致，
+			// 浏览器会话或任何其他机器客户端都不能读写客户绑定。
+			integrationRouter.PUT("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal_mapping_provision"), adaptHandler(operational.ExternalIdentity.BindCustomer))
+			integrationRouter.POST("/internal/external-users/:platform_user_id/customer-binding/disable", middleware.RequireApplicationScope("portal_mapping_disable"), adaptHandler(operational.ExternalIdentity.DisableCustomerBinding))
+			integrationRouter.GET("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal_mapping_provision"), adaptHandler(operational.ExternalIdentity.GetCustomerBinding))
 			integrationRouter.POST("/internal/application-roles", middleware.RequireApplicationScope("application_role.assign"), adaptHandler(operational.ExternalIdentity.AssignRole))
 			integrationRouter.POST("/internal/application-roles/revoke", middleware.RequireApplicationScope("application_role.revoke"), adaptHandler(operational.ExternalIdentity.RevokeRole))
 		}
