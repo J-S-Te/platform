@@ -330,13 +330,29 @@ if [[ ! "$embedded_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
   echo "无法从 CRM 不可变镜像读取有效授权目录哈希" >&2
   exit 1
 fi
+# 最大有效角色数与内嵌授权目录是同一份编译产物的一部分。镜像里的 max_effective_roles
+# 变化时（例如从 3 放宽到 10），运行配置必须同步，否则 CRM 启动对账会因
+# OIDC_MAX_EFFECTIVE_ROLES 与内嵌策略不一致而退出，导致健康检查超时并回滚。
+embedded_crm_max_roles="$(docker run --rm --entrypoint ./authz-catalog "$crm_image_ref" print crm 2>/dev/null \
+  | awk -F= '$1 == "max_effective_roles" { print $2; exit }')"
+if [[ ! "$embedded_crm_max_roles" =~ ^[0-9]+$ ]]; then
+  restore_release
+  echo "无法从 CRM 不可变镜像读取有效最大角色数" >&2
+  exit 1
+fi
 customer_runtime_updated=true
 if ! update_runtime_value "$customer_runtime_file" OIDC_ROLE_CONFIG_HASH "$embedded_crm_hash"; then
   restore_release
   echo "无法更新 CRM 运行配置中的授权目录哈希" >&2
   exit 1
 fi
+if ! update_runtime_value "$customer_runtime_file" OIDC_MAX_EFFECTIVE_ROLES "$embedded_crm_max_roles"; then
+  restore_release
+  echo "无法更新 CRM 运行配置中的最大有效角色数" >&2
+  exit 1
+fi
 echo "已写入 CRM 镜像内嵌授权目录哈希：$embedded_crm_hash"
+echo "已写入 CRM 镜像内嵌最大有效角色数：$embedded_crm_max_roles"
 
 if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready; then
   release_committed=true

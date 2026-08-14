@@ -29,6 +29,9 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: project_management
         PLATFORM_ENVIRONMENT_CODE: prod
+        # 合同系统内部接收接口默认关闭；关闭时两者必须都为 false，否则启动配置校验失败。
+        CONTRACT_INTEGRATION_ENABLED: "false"
+        CONTRACT_INTEGRATION_REQUIRE_BEARER: "false"
       bindings:
         OIDC_ISSUER: issuer
         OIDC_CLIENT_ID: client_id
