@@ -19,24 +19,13 @@ import (
 var (
 	// 未知账号、错误密码和不可用凭据统一映射为未认证，避免攻击者根据错误差异枚举有效账号。
 	ErrUnauthenticated = errors.New("unauthenticated")
-	// 锁定错误只在已确认账号仍处于锁定窗口时使用，具体身份仅供服务端安全审计。
-	ErrAccountLocked = errors.New("account locked")
+	// 锁定窗口内的登录同样返回通用未认证（防枚举），锁定状态由安全模块承载。
 	// 并发会话冲突阻止同一登录账号在另一终端再建立一个活动浏览器会话。
 	ErrConcurrentSession = errors.New("account already has an active session")
 
 	dummyPasswordDigest   = make([]byte, 32)
 	dummyPasswordMetadata = mustDummyPasswordMetadata()
 )
-
-// AccountLockedError includes the lock expiry for the documented 423 response.
-type AccountLockedError struct {
-	LockedUntil time.Time
-	TenantID    string
-	UserID      string
-	UserName    string
-	AccountID   string
-	AccountName string
-}
 
 // ConcurrentSessionError retains trusted account identity for security audit logging while the
 // public API returns only a stable conflict code and client-safe message.
@@ -60,9 +49,6 @@ type LoginFailedError struct {
 
 func (error LoginFailedError) Error() string { return ErrUnauthenticated.Error() }
 func (error LoginFailedError) Unwrap() error { return ErrUnauthenticated }
-
-func (error AccountLockedError) Error() string { return ErrAccountLocked.Error() }
-func (error AccountLockedError) Unwrap() error { return ErrAccountLocked }
 
 func (error ConcurrentSessionError) Error() string { return ErrConcurrentSession.Error() }
 func (error ConcurrentSessionError) Unwrap() error { return ErrConcurrentSession }
@@ -309,11 +295,6 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 func concurrentSessionError(account domain.LoginAccount) ConcurrentSessionError {
 	return ConcurrentSessionError{TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
 		AccountID: account.AccountID, AccountName: account.AccountName}
-}
-
-func lockedError(account domain.LoginAccount, lockedUntil time.Time) AccountLockedError {
-	return AccountLockedError{LockedUntil: lockedUntil, TenantID: account.TenantID, UserID: account.UserID,
-		UserName: account.UserName, AccountID: account.AccountID, AccountName: account.AccountName}
 }
 
 func loginFailedError(account domain.LoginAccount) LoginFailedError {

@@ -386,7 +386,7 @@ printf '%s\n' "$PLATFORM_ADMIN_PASSWORD" | bash scripts/subsystem.sh onboard \
 
 1. 基础平台页面校验并显示配置摘要；本地脚本模式提供等价的交互校验。
 2. 以当前平台管理员会话调用 `POST /api/v1/subsystem-onboarding`。
-3. 平台原子创建 Application、Environment、LoginTarget、浏览器 OAuth Client 和独立目录发布 Client；部署 Agent 发布角色目录后再为初始管理员建立应用角色授权。采用规范 `admin` 角色的子系统分配 `admin`；内置客户与商机系统按其 `max_effective_roles=3` 策略分配 `sales_director + team_lead + technical_lead`。`customer_portal` 不把内部平台操作者设为外部客户角色，访问必须来自 CRM 邀请链路。
+3. 平台原子创建 Application、Environment、LoginTarget、浏览器 OAuth Client 和独立目录发布 Client；部署 Agent 发布角色目录后再为初始管理员建立应用角色授权。采用规范 `admin` 角色的子系统分配 `admin`；内置客户与商机系统按其 `max_effective_roles=10` 策略分配 `sales_director + team_lead + technical_lead`。`customer_portal` 不把内部平台操作者设为外部客户角色，访问必须来自 CRM 邀请链路。
 4. 平台同时写入 `PROVISIONING` 部署状态；在 Agent 成功前，门户不会展示该环境。
 5. Client Secret 只在后端内存中交给部署 Agent，不回显给浏览器或脚本。
 6. Agent 基于生产部署资产中审核过的 `subsystem-templates/*.env.example` 写出权限为 `0600` 的 `runtime/*.env`；已有内容会保留，不会因重试覆盖或轮换密钥。

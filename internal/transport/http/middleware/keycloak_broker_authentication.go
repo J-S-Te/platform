@@ -177,6 +177,49 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, AuthorizedParty: strings.TrimSpace(payload.AuthorizedParty), Audience: audience}, nil
 }
 
+// KeycloakIDTokenClaims is the strict ID-token view used by the platform's own
+// OIDC login callback. The broker verifier authenticates the signature first;
+// this layer additionally proves the token is an ID token bound to the
+// platform's OIDC client with the expected nonce.
+type KeycloakIDTokenClaims struct {
+	keycloakctx.BrokerClaims
+	Nonce string
+}
+
+// VerifyIDToken applies the additional token-purpose, nonce and Client binding
+// checks required before an ID token can complete the platform's OIDC login.
+// The signed payload is decoded again only after Verify has authenticated it.
+func (verifier *KeycloakBrokerJWTVerifier) VerifyIDToken(ctx context.Context, raw, expectedNonce, expectedClientID string) (KeycloakIDTokenClaims, error) {
+	claims, err := verifier.Verify(ctx, raw)
+	if err != nil {
+		return KeycloakIDTokenClaims{}, err
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return KeycloakIDTokenClaims{}, errors.New("invalid Keycloak ID token serialization")
+	}
+	var payload struct {
+		Nonce    string `json:\"nonce\"`
+		TokenUse string `json:\"token_use\"`
+	}
+	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
+		return KeycloakIDTokenClaims{}, errors.New("invalid Keycloak ID token claims")
+	}
+	nonce := strings.TrimSpace(payload.Nonce)
+	tokenUse := strings.TrimSpace(payload.TokenUse)
+	clientID := strings.TrimSpace(expectedClientID)
+	if tokenUse != "id_token" || clientID == "" || !keycloakAudienceContains(claims.Audience, clientID) {
+		return KeycloakIDTokenClaims{}, errors.New("Keycloak ID token is not bound to the platform OIDC client")
+	}
+	if expectedNonce == "" || nonce == "" || nonce != expectedNonce {
+		return KeycloakIDTokenClaims{}, errors.New("Keycloak ID token nonce does not match")
+	}
+	if claims.AuthorizedParty != "" && claims.AuthorizedParty != clientID {
+		return KeycloakIDTokenClaims{}, errors.New("Keycloak ID token authorized party does not match")
+	}
+	return KeycloakIDTokenClaims{BrokerClaims: claims, Nonce: nonce}, nil
+}
+
 // VerifyAuthorizationAccessToken applies the additional token-purpose and
 // Client audience checks required before a Keycloak token can select an
 // application authorization context. The signed payload is decoded again only

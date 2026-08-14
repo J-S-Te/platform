@@ -461,14 +461,8 @@ func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 		})
 		return
 	}
-	var locked application.AccountLockedError
-	if errors.As(err, &locked) {
-		handler.recordLifecycleEvent(request, locked.TenantID, auditapplication.EventInput{
-			ActorType: "USER", ActorID: locked.UserID, ActorName: locked.UserName,
-			Action: "auth.login.locked", ResourceType: "auth_account", ResourceID: locked.AccountID, ResourceName: locked.AccountName,
-			Result: "FAILURE", RiskLevel: "HIGH", Classification: "INTERNAL", Summary: "账号处于锁定状态，拒绝密码登录",
-		})
-	}
+	// 锁定窗口内的密码失败走统一 auth.login.failed 审计（防枚举），不再有独立的
+	// locked 事件分支；锁定状态由安全模块的 sec_login_attempt 与解锁接口承载。
 }
 
 // recordLogout writes a successful logout event after the current server-side session is revoked.
@@ -529,13 +523,8 @@ func (handler *Handler) clearSessionCookie(writer http.ResponseWriter) {
 }
 
 func (handler *Handler) writeApplicationError(writer http.ResponseWriter, request *http.Request, err error) {
-	var locked application.AccountLockedError
 	var concurrent application.ConcurrentSessionError
 	switch {
-	case errors.As(err, &locked):
-		apiError := httperror.AccountLocked
-		apiError.Details = map[string]time.Time{"locked_until": locked.LockedUntil.UTC()}
-		httpresponse.WriteError(writer, request, http.StatusLocked, apiError)
 	case errors.As(err, &concurrent), errors.Is(err, application.ErrConcurrentSession):
 		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.ConcurrentSession)
 	case errors.Is(err, application.ErrUnauthenticated):

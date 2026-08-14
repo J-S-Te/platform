@@ -482,6 +482,16 @@ func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCo
 	return emptyAccess(application.Code, "", roleConfigHash, revision), nil
 }
 
+// HasApplicationGrant 判断指定主体在目标应用上是否存在有效的应用授权（任何活动角色绑定）。
+// 用于子系统代理等"平台权限之外的逐应用授权"复核点；未配置/被拒绝统一返回 false。
+func (s *Service) HasApplicationGrant(ctx context.Context, tenantID, userID, applicationCode string) (bool, error) {
+	access, err := s.GetAccess(ctx, tenantID, userID, applicationCode)
+	if err != nil {
+		return false, err
+	}
+	return access.AuthorizationState == authorizationGranted, nil
+}
+
 func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applicationCode string) (Access, error) {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.UserID = strings.TrimSpace(in.UserID)

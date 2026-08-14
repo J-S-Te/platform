@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -229,20 +230,25 @@ type AuthorizationTargetView struct {
 	ApplicationName  string                        `json:"application_name"`
 	CatalogVersion   string                        `json:"catalog_version,omitempty"`
 	CatalogSyncState string                        `json:"catalog_sync_status"`
-	Roles            []AuthorizationTargetRoleView `json:"roles"`
+	// MaxEffectiveRoles is the application-owned catalog policy limit; 0 means unlimited.
+	// It is read-only and only shown so a position template operator can see the per-user
+	// role budget before saving a mapping that would otherwise be rejected by the backend.
+	MaxEffectiveRoles int                           `json:"max_effective_roles,omitempty"`
+	Roles             []AuthorizationTargetRoleView `json:"roles"`
 }
 
 type authorizationTargetRow struct {
-	ApplicationID    string `gorm:"column:application_id"`
-	ApplicationCode  string `gorm:"column:application_code"`
-	ApplicationName  string `gorm:"column:application_name"`
-	CatalogVersion   string `gorm:"column:catalog_version"`
-	CatalogSyncState string `gorm:"column:catalog_sync_status"`
-	RoleID           string `gorm:"column:role_id"`
-	RoleCode         string `gorm:"column:role_code"`
-	RoleName         string `gorm:"column:role_name"`
-	RoleType         string `gorm:"column:role_type"`
-	RoleStatus       string `gorm:"column:role_status"`
+	ApplicationID     string `gorm:"column:application_id"`
+	ApplicationCode   string `gorm:"column:application_code"`
+	ApplicationName   string `gorm:"column:application_name"`
+	CatalogVersion    string `gorm:"column:catalog_version"`
+	CatalogSyncState  string `gorm:"column:catalog_sync_status"`
+	MaxEffectiveRoles int    `gorm:"column:max_effective_roles"`
+	RoleID            string `gorm:"column:role_id"`
+	RoleCode          string `gorm:"column:role_code"`
+	RoleName          string `gorm:"column:role_name"`
+	RoleType          string `gorm:"column:role_type"`
+	RoleStatus        string `gorm:"column:role_status"`
 }
 
 type templateModel struct {
@@ -307,9 +313,10 @@ func (s *Service) ListAuthorizationTargets(ctx context.Context, tenantID string)
 	var rows []authorizationTargetRow
 	err := s.db.WithContext(ctx).
 		Table("platform_application AS application").
-		Select("application.id AS application_id, application.code AS application_code, application.name AS application_name, COALESCE(catalog.catalog_version, '') AS catalog_version, COALESCE(catalog.sync_status, '') AS catalog_sync_status, role.id AS role_id, role.code AS role_code, role.name AS role_name, role.role_type AS role_type, role.status AS role_status").
+		Select("application.id AS application_id, application.code AS application_code, application.name AS application_name, COALESCE(catalog.catalog_version, '') AS catalog_version, COALESCE(catalog.sync_status, '') AS catalog_sync_status, COALESCE(policy.max_effective_roles, 0) AS max_effective_roles, role.id AS role_id, role.code AS role_code, role.name AS role_name, role.role_type AS role_type, role.status AS role_status").
 		Joins("JOIN authz_role AS role ON role.tenant_id=application.tenant_id AND role.application_id=application.id AND role.status=?", activeStatus).
 		Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id=application.tenant_id AND catalog.application_id=application.id").
+		Joins("LEFT JOIN authz_application_authorization_policy AS policy ON policy.tenant_id=application.tenant_id AND policy.application_id=application.id").
 		Where("application.tenant_id=? AND application.status=?", tenantID, activeStatus).
 		Where("role.role_type=? OR (role.role_type=? AND catalog.sync_status=?)", roleTypePlatform, roleTypeApplication, catalogStatusSynced).
 		Order("application.code ASC, role.code ASC").
@@ -324,6 +331,10 @@ func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTarg
 	targets := make([]AuthorizationTargetView, 0)
 	indexes := make(map[string]int)
 	for _, row := range rows {
+		// 受保护控制面角色不出现在岗位模板的可选目标中。
+		if row.RoleType == roleTypePlatform && domain.IsProtectedRoleCode(row.RoleCode) {
+			continue
+		}
 		index, ok := indexes[row.ApplicationID]
 		if !ok {
 			index = len(targets)
@@ -335,7 +346,8 @@ func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTarg
 			targets = append(targets, AuthorizationTargetView{
 				ApplicationID: row.ApplicationID, ApplicationCode: row.ApplicationCode, ApplicationName: row.ApplicationName,
 				CatalogVersion: catalogVersion, CatalogSyncState: catalogSyncState,
-				Roles: make([]AuthorizationTargetRoleView, 0),
+				MaxEffectiveRoles: row.MaxEffectiveRoles,
+				Roles:             make([]AuthorizationTargetRoleView, 0),
 			})
 		}
 		if row.RoleType == roleTypePlatform {
@@ -1082,18 +1094,28 @@ func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID strin
 		return err
 	}
 	for _, item := range items {
-		var count int64
+		var role struct {
+			ID       string
+			RoleType string
+			Code     string
+		}
 		query := tx.WithContext(ctx).
 			Table("authz_role AS role").
+			Select("role.id, role.role_type, role.code").
 			Joins("JOIN platform_application AS application ON application.id=role.application_id AND application.tenant_id=role.tenant_id AND application.status=?", activeStatus).
 			Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id=role.tenant_id AND catalog.application_id=role.application_id").
 			Where("role.tenant_id=? AND role.id=? AND role.application_id=? AND role.status=?", tenantID, item.RoleID, item.ApplicationID, activeStatus).
 			Where("role.role_type=? OR (role.role_type=? AND catalog.sync_status=?)", roleTypePlatform, roleTypeApplication, catalogStatusSynced)
-		if err := query.Count(&count).Error; err != nil {
+		if err := query.Take(&role).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return validation("application role must exist, be active, assignable and belong to the selected application; subsystem catalogs must be synchronized")
+			}
 			return fmt.Errorf("validate template role: %w", err)
 		}
-		if count != 1 {
-			return validation("application role must exist, be active, assignable and belong to the selected application; subsystem catalogs must be synchronized")
+		// 控制面受保护角色（super-admin/emergency-admin/break-glass）只能由租户级超级管理员
+		// 直接绑定，禁止通过岗位授权模板委派，防止安全管理员借模板放大权限。
+		if role.RoleType == roleTypePlatform && domain.IsProtectedRoleCode(role.Code) {
+			return validation("platform control-plane roles cannot be delegated through position authorization templates")
 		}
 		if item.ScopeType == scopeEnvironment {
 			var envCount int64

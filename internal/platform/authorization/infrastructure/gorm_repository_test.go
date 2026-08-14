@@ -265,7 +265,7 @@ func TestUpdateRoleBindingRejectsDisablingRoleOutsideOperatorDelegablePermission
 func TestCreateRoleBindingKeepsProtectedRoleGuard(t *testing.T) {
 	scenario := &roleBindingRepositoryScenario{
 		roles: map[string]roleModel{
-			"role-super-admin": {ID: "role-super-admin", TenantID: "tenant-1", ApplicationID: "app-platform", Code: platformSuperAdminRoleCode, Name: "Super administrator", RoleType: "PLATFORM", BuiltIn: true, Status: domain.StatusActive},
+			"role-super-admin": {ID: "role-super-admin", TenantID: "tenant-1", ApplicationID: "app-platform", Code: domain.SuperAdminRoleCode, Name: "Super administrator", RoleType: "PLATFORM", BuiltIn: true, Status: domain.StatusActive},
 		},
 		protectedAdminCount: 0,
 	}

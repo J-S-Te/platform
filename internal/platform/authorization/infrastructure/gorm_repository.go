@@ -16,11 +16,6 @@ import (
 const (
 	platformApplicationCode = "platform"
 
-	// Protected role assignments control the platform control plane. Only an effective tenant-scoped
-	// super administrator can create, modify, or disable bindings involving these roles.
-	platformSuperAdminRoleCode     = "platform-super-admin"
-	platformEmergencyAdminRoleCode = "platform-emergency-admin"
-	platformBreakGlassRolePrefix   = "platform-break-glass-"
 )
 
 // GORMRepository persists RBAC aggregates in tables owned by SQL migrations. It deliberately does
@@ -440,7 +435,7 @@ func (r *GORMRepository) ensureProtectedRoleBindingOperator(ctx context.Context,
 		Where("binding.tenant_id = ? AND binding.application_id = ?", tenantID, role.ApplicationID).
 		Where("binding.status = ? AND (binding.valid_until IS NULL OR binding.valid_until > ?)", domain.StatusActive, now).
 		Where("binding.scope_type = ? AND binding.scope_id = ?", "TENANT", "").
-		Where("operator_role.code = ? AND operator_role.status = ?", platformSuperAdminRoleCode, domain.StatusActive).
+		Where("operator_role.code = ? AND operator_role.status = ?", domain.SuperAdminRoleCode, domain.StatusActive).
 		Where(subjectSQL, subjectArgs...).
 		Count(&total)
 	if result.Error != nil {
@@ -453,10 +448,7 @@ func (r *GORMRepository) ensureProtectedRoleBindingOperator(ctx context.Context,
 }
 
 func isProtectedRoleCode(code string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(code))
-	return normalized == platformSuperAdminRoleCode ||
-		normalized == platformEmergencyAdminRoleCode ||
-		strings.HasPrefix(normalized, platformBreakGlassRolePrefix)
+	return domain.IsProtectedRoleCode(code)
 }
 
 // validateRoleBindingReferences resolves tenant-owned subjects and scope targets before a binding

@@ -208,10 +208,7 @@ func TestLockedPasswordAccountReturnsGenericFailureAfterVerification(t *testing.
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("Login() error = %v, want generic ErrUnauthenticated", err)
 	}
-	var locked AccountLockedError
-	if errors.As(err, &locked) {
-		t.Fatal("Login() exposed AccountLockedError")
-	}
+	// 锁定窗口内的登录与错误密码统一返回通用未认证（防枚举）；锁定状态由安全模块承载。
 	if verifier.calls != 1 {
 		t.Fatalf("password verification calls = %d, want 1", verifier.calls)
 	}
