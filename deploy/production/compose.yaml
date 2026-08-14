@@ -640,6 +640,12 @@ services:
       PORTAL_INVITE_COMPENSATION_PLATFORM_TOKEN_URL: http://platform-api:8080/oauth2/token
       PORTAL_INVITE_COMPENSATION_PLATFORM_SCOPE: application_role.assign
       PORTAL_INVITE_COMPENSATION_PLATFORM_APPLICATION_CODE: customer_portal
+      PORTAL_INVITE_COMPENSATION_BINDING_ENABLED: ${PORTAL_INVITE_COMPENSATION_BINDING_ENABLED:-false}
+      PORTAL_INVITE_COMPENSATION_BINDING_BASE_URL: http://platform-api:8080/api/v1/internal/external-users
+      PORTAL_INVITE_COMPENSATION_BINDING_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_INVITE_COMPENSATION_BINDING_SCOPE: portal_mapping_provision
+      PORTAL_INVITE_COMPENSATION_BINDING_APPLICATION_CODE: customer_portal
+      PORTAL_INVITE_COMPENSATION_BINDING_DISABLE_SCOPE: portal_mapping_disable
     depends_on:
       customer-mysql:
         condition: service_healthy
