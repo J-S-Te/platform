@@ -25,8 +25,8 @@ var (
 	Unauthenticated = New("AUTH_UNAUTHENTICATED", "登录状态无效或已过期", nil)
 	// Forbidden is returned when an authenticated principal does not hold a required permission.
 	Forbidden = New("AUTH_FORBIDDEN", "没有执行此操作的权限", nil)
-	// AccountLocked is returned when a local account has an active lock window.
-	AccountLocked = New("AUTH_ACCOUNT_LOCKED", "账号已锁定，请稍后再试", nil)
+	// 锁定窗口内的登录统一返回 Unauthenticated（防枚举）；锁定状态经安全模块的
+	// 登录策略与解锁接口承载，不单设独立错误码。
 	// ConcurrentSession is returned when the same account already has an active terminal session.
 	ConcurrentSession = New("AUTH_CONCURRENT_SESSION", "该账号已有有效会话；如原页面已关闭，可选择退出原会话并重新登录", nil)
 	// Conflict is returned when a create or lifecycle transition violates an IAM invariant.

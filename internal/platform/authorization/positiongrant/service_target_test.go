@@ -45,6 +45,27 @@ func TestAuthorizationTargetViewsExposePlatformNativeRolesAsReady(t *testing.T) 
 	}
 }
 
+func TestAuthorizationTargetViewsExcludeProtectedPlatformRoles(t *testing.T) {
+	t.Parallel()
+
+	got := authorizationTargetViews([]authorizationTargetRow{
+		{
+			ApplicationID: "platform-app", ApplicationCode: "platform", ApplicationName: "基础能力平台",
+			RoleID: "role-super-admin", RoleCode: "platform-super-admin", RoleName: "平台超级管理员",
+			RoleType: roleTypePlatform, RoleStatus: activeStatus,
+		},
+		{
+			ApplicationID: "platform-app", ApplicationCode: "platform", ApplicationName: "基础能力平台",
+			RoleID: "role-security-admin", RoleCode: "platform-security-admin", RoleName: "平台安全管理员",
+			RoleType: roleTypePlatform, RoleStatus: activeStatus,
+		},
+	})
+
+	if len(got) != 1 || len(got[0].Roles) != 1 || got[0].Roles[0].RoleCode != "platform-security-admin" {
+		t.Fatalf("authorizationTargetViews() = %#v, want only the non-protected platform role", got)
+	}
+}
+
 func TestAuthorizationTargetViewsPreserveSynchronizedSubsystemCatalogMetadata(t *testing.T) {
 	t.Parallel()
 

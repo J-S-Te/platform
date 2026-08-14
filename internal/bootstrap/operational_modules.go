@@ -54,7 +54,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	subsystemServiceRouteHandler, err := applicationregistryhttp.NewSubsystemServiceRouteHandler(subsystemRepository)
+	subsystemServiceRouteHandler, err := applicationregistryhttp.NewSubsystemServiceRouteHandler(subsystemRepository, applicationAccessService)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
@@ -358,7 +358,7 @@ func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []strin
 	switch strings.TrimSpace(applicationCode) {
 	case "customer_and_opportunity":
 		// CRM 不创建绕过业务范围的“万能管理员”。三个目录角色共同覆盖运营职责，同时仍受
-		// max_effective_roles=3 和各角色数据范围约束。
+		// max_effective_roles=10 和各角色数据范围约束。
 		return []string{"sales_director", "team_lead", "technical_lead"}
 	case "customer_portal":
 		return nil

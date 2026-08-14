@@ -40,6 +40,7 @@ type Handler struct {
 	auditConfig   config.AuditConfig
 	loginTargets  applicationregistry.LoginTargetResolver
 	oidc          oidcLoginConfig
+	idTokenVerifier oidcIDTokenVerifier
 }
 
 type oidcLoginConfig struct {
@@ -50,6 +51,27 @@ type oidcLoginConfig struct {
 	redirectPath  string
 	publicBaseURL string
 	stateCookie   string
+	nonceCookie   string
+}
+
+// oidcIDTokenVerifier 校验平台自身 OIDC 登录回调收到的 ID Token（签名/issuer/aud/exp/
+// nonce/azp），并返回与 subject 一致的平台 identity_id。P1-2：补齐平台作为 RP 的
+// ID Token 校验与 nonce 绑定。
+type oidcIDTokenVerifier interface {
+	VerifyIDToken(ctx context.Context, rawToken, expectedNonce, expectedClientID string) (identityID string, err error)
+}
+
+// IDTokenVerifierOption 允许装配层注入平台 OIDC 登录的 ID Token 验证器；未注入时
+// 回调退化为 userinfo 单一声明校验（本地开发兼容路径）。
+type IDTokenVerifierOption func(*Handler)
+
+// WithIDTokenVerifier 注入 ID Token 验证器（nil 被忽略）。
+func WithIDTokenVerifier(verifier oidcIDTokenVerifier) IDTokenVerifierOption {
+	return func(handler *Handler) {
+		if verifier != nil {
+			handler.idTokenVerifier = verifier
+		}
+	}
 }
 
 type applicationService interface {
@@ -77,12 +99,9 @@ type cookieConfig struct {
 }
 
 // NewHandler creates the identity HTTP adapter. The caller validates the service during bootstrap.
-func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig, auditRecorder lifecycleAuditRecorder, auditConfig config.AuditConfig, loginTargetResolvers ...applicationregistry.LoginTargetResolver) (*Handler, error) {
+func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig, auditRecorder lifecycleAuditRecorder, auditConfig config.AuditConfig, loginTargetResolver applicationregistry.LoginTargetResolver, options ...IDTokenVerifierOption) (*Handler, error) {
 	if service == nil || logger == nil || auditRecorder == nil {
 		return nil, errors.New("identity HTTP handler dependencies must not be nil")
-	}
-	if len(loginTargetResolvers) > 1 || (len(loginTargetResolvers) == 1 && loginTargetResolvers[0] == nil) {
-		return nil, errors.New("identity HTTP handler accepts at most one non-nil login target resolver")
 	}
 	if strings.TrimSpace(auditConfig.ApplicationCode) == "" || strings.TrimSpace(auditConfig.EnvironmentCode) == "" {
 		return nil, errors.New("identity lifecycle audit configuration must not be empty")
@@ -110,12 +129,16 @@ func NewHandler(service applicationService, logger *slog.Logger, authConfig conf
 			redirectPath:  strings.TrimSpace(authConfig.KeycloakOIDCRedirectPath),
 			publicBaseURL: strings.TrimRight(strings.TrimSpace(authConfig.PublicBaseURL), "/"),
 			stateCookie:   "bp_oidc_state",
+			nonceCookie:   "bp_oidc_nonce",
 		},
 		auditRecorder: auditRecorder,
 		auditConfig:   auditConfig,
 	}
-	if len(loginTargetResolvers) == 1 {
-		handler.loginTargets = loginTargetResolvers[0]
+	if loginTargetResolver != nil {
+		handler.loginTargets = loginTargetResolver
+	}
+	for _, apply := range options {
+		apply(handler)
 	}
 	return handler, nil
 }
@@ -185,11 +208,17 @@ func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
+	nonce, err := randomOIDCState()
+	if err != nil {
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return
+	}
 	secure := handler.cookie.secure
 	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: state, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: 600})
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.nonceCookie, Value: nonce, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: 600})
 	query := url.Values{
 		"client_id": {handler.oidc.clientID}, "response_type": {"code"},
-		"scope": {"openid profile"}, "state": {state},
+		"scope": {"openid profile"}, "state": {state}, "nonce": {nonce},
 		"redirect_uri":   {handler.oidc.redirectURI(request)},
 		"code_challenge": {oidcCodeChallenge(state)}, "code_challenge_method": {"S256"},
 	}
@@ -209,23 +238,49 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
 		return
 	}
+	nonceCookie, err := request.Cookie(handler.oidc.nonceCookie)
+	if err != nil || nonceCookie.Value == "" {
+		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
+		return
+	}
 	code := strings.TrimSpace(request.URL.Query().Get("code"))
 	if code == "" {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
 	}
 	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: "", Path: "/", HttpOnly: true, Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, MaxAge: -1})
-	accessToken, err := handler.exchangeOIDCCode(request.Context(), request, code, stateCookie.Value)
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.nonceCookie, Value: "", Path: "/", HttpOnly: true, Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, MaxAge: -1})
+	accessToken, rawIDToken, err := handler.exchangeOIDCCode(request.Context(), request, code, stateCookie.Value)
 	if err != nil {
 		handler.logger.Warn("Keycloak OIDC code exchange failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
 	}
-	identityID, err := handler.fetchOIDCIdentity(request.Context(), accessToken)
+	// P1-2：验签 ID Token 并校验 nonce/aud/azp，再用 userinfo 的 identity_id 与
+	// 已验证的 sub 交叉确认；任何一步不一致都按统一认证失败处理。
+	var identityID string
+	if handler.idTokenVerifier != nil {
+		verifiedID, verifyErr := handler.idTokenVerifier.VerifyIDToken(request.Context(), rawIDToken, nonceCookie.Value, handler.oidc.clientID)
+		if verifyErr != nil {
+			handler.logger.Warn("Keycloak OIDC ID token verification failed", "error", verifyErr)
+			httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
+			return
+		}
+		identityID = verifiedID
+	}
+	userInfoID, err := handler.fetchOIDCIdentity(request.Context(), accessToken)
 	if err != nil {
 		handler.logger.Warn("Keycloak OIDC identity lookup failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
+	}
+	if identityID != "" && identityID != userInfoID {
+		handler.logger.Warn("Keycloak OIDC identity mismatch", "id_token", identityID, "userinfo", userInfoID)
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
+		return
+	}
+	if identityID == "" {
+		identityID = userInfoID
 	}
 	result, err := handler.service.LoginOIDC(request.Context(), application.OIDCLoginInput{IdentityID: identityID, IPAddress: remoteIP(request), UserAgent: request.UserAgent()})
 	if err != nil {
@@ -260,31 +315,35 @@ func (config oidcLoginConfig) redirectURI(request *http.Request) string {
 	return "http://" + request.Host + "/" + strings.TrimLeft(config.redirectPath, "/")
 }
 
-func (handler *Handler) exchangeOIDCCode(ctx context.Context, request *http.Request, code, verifier string) (string, error) {
+func (handler *Handler) exchangeOIDCCode(ctx context.Context, request *http.Request, code, verifier string) (string, string, error) {
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {handler.oidc.clientID}, "redirect_uri": {handler.oidc.redirectURI(request)}, "code_verifier": {verifier}}
 	if handler.oidc.clientSecret != "" {
 		form.Set("client_secret", handler.oidc.clientSecret)
 	}
 	tokenRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, handler.oidc.issuer+"/protocol/openid-connect/token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(tokenRequest)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("OIDC token endpoint returned %s", response.Status)
+		return "", "", fmt.Errorf("OIDC token endpoint returned %s", response.Status)
 	}
 	var payload struct {
 		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil || payload.AccessToken == "" {
-		return "", errors.New("OIDC token response has no access_token")
+		return "", "", errors.New("OIDC token response has no access_token")
 	}
-	return payload.AccessToken, nil
+	if strings.TrimSpace(payload.IDToken) == "" {
+		return "", "", errors.New("OIDC token response has no id_token")
+	}
+	return payload.AccessToken, payload.IDToken, nil
 }
 
 func (handler *Handler) fetchOIDCIdentity(ctx context.Context, accessToken string) (string, error) {
@@ -461,14 +520,8 @@ func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 		})
 		return
 	}
-	var locked application.AccountLockedError
-	if errors.As(err, &locked) {
-		handler.recordLifecycleEvent(request, locked.TenantID, auditapplication.EventInput{
-			ActorType: "USER", ActorID: locked.UserID, ActorName: locked.UserName,
-			Action: "auth.login.locked", ResourceType: "auth_account", ResourceID: locked.AccountID, ResourceName: locked.AccountName,
-			Result: "FAILURE", RiskLevel: "HIGH", Classification: "INTERNAL", Summary: "账号处于锁定状态，拒绝密码登录",
-		})
-	}
+	// 锁定窗口内的密码失败走统一 auth.login.failed 审计（防枚举），不再有独立的
+	// locked 事件分支；锁定状态由安全模块的 sec_login_attempt 与解锁接口承载。
 }
 
 // recordLogout writes a successful logout event after the current server-side session is revoked.
@@ -529,13 +582,8 @@ func (handler *Handler) clearSessionCookie(writer http.ResponseWriter) {
 }
 
 func (handler *Handler) writeApplicationError(writer http.ResponseWriter, request *http.Request, err error) {
-	var locked application.AccountLockedError
 	var concurrent application.ConcurrentSessionError
 	switch {
-	case errors.As(err, &locked):
-		apiError := httperror.AccountLocked
-		apiError.Details = map[string]time.Time{"locked_until": locked.LockedUntil.UTC()}
-		httpresponse.WriteError(writer, request, http.StatusLocked, apiError)
 	case errors.As(err, &concurrent), errors.Is(err, application.ErrConcurrentSession):
 		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.ConcurrentSession)
 	case errors.Is(err, application.ErrUnauthenticated):
