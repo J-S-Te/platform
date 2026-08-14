@@ -30,6 +30,17 @@ func TestKeycloakClientConfigurationHashBindsRealmClientAndSchema(t *testing.T) 
 	}
 }
 
+func TestKeycloakProjectionConfigurationVersionInvalidatesV4Mappings(t *testing.T) {
+	if keycloakProjectionConfigurationVersion != "stable-identity-projection-v5" {
+		t.Fatalf("projection version = %q, want v5", keycloakProjectionConfigurationVersion)
+	}
+	legacy := keycloakClientConfigurationHash("basic-platform", "orders-prod-web", "stable-identity-projection-v4")
+	current := keycloakClientConfigurationHash("basic-platform", "orders-prod-web", keycloakProjectionConfigurationVersion)
+	if current == legacy {
+		t.Fatal("v5 projection contract reused the v4 configuration hash")
+	}
+}
+
 func TestManagedClientConfigurationQueryBindsEnvironmentAndCatalog(t *testing.T) {
 	database := newDryRunMySQL(t)
 	var configuration managedClientConfiguration
@@ -57,6 +68,22 @@ func TestConfigurationReconcileIncludesRetainedDisabledUsers(t *testing.T) {
 	}
 	if strings.Contains(sql, "status = ?") || strings.Contains(sql, "deleted_at IS NULL") {
 		t.Fatalf("configuration reconcile excluded retained disabled identities: %s", sql)
+	}
+}
+
+func TestStoredClientMappingReconcileOnlyLoadsSynchronizedMappingsInStableOrder(t *testing.T) {
+	query := syncedKeycloakClientMappingsQuery(newDryRunMySQL(t)).Find(&[]StoredKeycloakClientMapping{})
+	sql := query.Statement.SQL.String()
+	if !strings.Contains(sql, "mapping.status = ?") {
+		t.Fatalf("stored mapping reconcile does not filter synchronized mappings: %s", sql)
+	}
+	for _, fragment := range []string{"JOIN platform_application AS application", "JOIN platform_application_environment AS environment", "application_name", "base_url", "path_prefix"} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("stored mapping reconcile does not load %q: %s", fragment, sql)
+		}
+	}
+	if !strings.Contains(sql, "ORDER BY mapping.tenant_id ASC, mapping.application_id ASC, mapping.environment_id ASC") {
+		t.Fatalf("stored mapping reconcile order is unstable: %s", sql)
 	}
 }
 

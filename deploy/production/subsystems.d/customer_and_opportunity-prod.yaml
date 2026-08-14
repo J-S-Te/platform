@@ -24,6 +24,7 @@ runtime:
         - SENSITIVE_HMAC_KEY_BASE64
         - PORTAL_INVITE_PEPPER_BASE64
       values:
+        OIDC_IDP_HINT: basic-platform
         DEV_AUTH_ENABLED: "false"
         OIDC_SCOPES: openid profile
         OIDC_ROLE_CONFIG_HASH: sha256:c3ef48b363a1a0cb77a4d98fe8b863e93bbbe853aaff38260bbfbc2bdf5ebf16

@@ -367,6 +367,39 @@ func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T)
 	}
 }
 
+func TestListPortalApplicationsReturnsUserProjectionGate(t *testing.T) {
+	t.Parallel()
+	service := &stubSubsystemOnboardingService{portalItems: []application.PortalApplication{{
+		ApplicationID: "app-1", EnvironmentID: "env-1", Code: "customer_and_opportunity", Name: "客户与商机管理系统",
+		Environment: "prod", TargetCode: "home", TargetURI: "/customer-opportunity/", PublicURL: "https://portal.example.com/customer-opportunity/",
+		Allowed: false, Projection: application.PortalProjectionReadiness{Status: "RUNNING", Ready: false, NextAction: "账号权限正在同步，请稍后重试。"},
+	}}}
+	handler, err := NewSubsystemOnboardingHandler(
+		service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/portal/applications", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.ListPortalApplications(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"allowed":false`, `"projection_status":"RUNNING"`, `"projection_ready":false`, `"projection_next_action":"账号权限正在同步，请稍后重试。"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("response missing %s: %s", expected, body)
+		}
+	}
+}
+
 type recordingSubsystemAccessManager struct {
 	tenantID        string
 	applicationCode string

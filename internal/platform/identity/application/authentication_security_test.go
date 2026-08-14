@@ -3,11 +3,13 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	securityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/security/application"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	sharedsecurity "github.com/J-S-Te/Basic-Platform/internal/shared/security"
 )
 
@@ -99,6 +101,78 @@ func (loginSecurityStub) RecordFailedLogin(context.Context, securityapplication.
 
 func (stub loginSecurityStub) SessionIdleTimeout(context.Context, string) (time.Duration, error) {
 	return stub.idleTimeout, nil
+}
+
+type logoutRepositorySpy struct {
+	authenticationRepositoryStub
+	calls *[]string
+}
+
+func (spy logoutRepositorySpy) RevokeAccountSessions(context.Context, string, string, time.Time, string) error {
+	*spy.calls = append(*spy.calls, "platform")
+	return nil
+}
+
+type externalSessionTerminatorSpy struct {
+	calls      *[]string
+	identityID string
+	err        error
+}
+
+func (spy *externalSessionTerminatorSpy) LogoutIdentitySessions(_ context.Context, identityID string) error {
+	*spy.calls = append(*spy.calls, "keycloak")
+	spy.identityID = identityID
+	return spy.err
+}
+
+func TestLogoutRevokesKeycloakBeforePlatformSessions(t *testing.T) {
+	calls := []string{}
+	external := &externalSessionTerminatorSpy{calls: &calls}
+	service := &Service{
+		repository:       logoutRepositorySpy{calls: &calls},
+		clock:            authenticationClockStub{now: time.Date(2026, time.August, 13, 10, 0, 0, 0, time.UTC)},
+		externalSessions: external,
+	}
+	principal := authctx.Principal{
+		SessionID: "session-1",
+		Tenant:    authctx.ReferenceName{ID: "tenant-1"},
+		User:      authctx.ReferenceName{ID: "identity-1"},
+		Account:   authctx.ReferenceName{ID: "account-1"},
+	}
+
+	if err := service.Logout(context.Background(), principal); err != nil {
+		t.Fatalf("Logout() error = %v", err)
+	}
+	if got, want := calls, []string{"keycloak", "platform"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("logout calls = %v, want %v", got, want)
+	}
+	if external.identityID != "identity-1" {
+		t.Fatalf("Keycloak identity ID = %q, want identity-1", external.identityID)
+	}
+}
+
+func TestLogoutFailsClosedWhenKeycloakRevocationFails(t *testing.T) {
+	calls := []string{}
+	external := &externalSessionTerminatorSpy{calls: &calls, err: errors.New("keycloak unavailable")}
+	service := &Service{
+		repository:       logoutRepositorySpy{calls: &calls},
+		clock:            authenticationClockStub{now: time.Now()},
+		externalSessions: external,
+	}
+	principal := authctx.Principal{
+		SessionID: "session-1",
+		Tenant:    authctx.ReferenceName{ID: "tenant-1"},
+		User:      authctx.ReferenceName{ID: "identity-1"},
+		Account:   authctx.ReferenceName{ID: "account-1"},
+	}
+
+	err := service.Logout(context.Background(), principal)
+	if err == nil || !strings.Contains(err.Error(), "revoke external identity sessions") {
+		t.Fatalf("Logout() error = %v, want external session revocation error", err)
+	}
+	if got, want := calls, []string{"keycloak"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("logout calls = %v, want %v", got, want)
+	}
 }
 
 func TestUnknownAccountConsumesPasswordVerificationWork(t *testing.T) {

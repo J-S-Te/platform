@@ -9,9 +9,45 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	projectionapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
 )
+
+func TestListKeycloakAuditEventsUsesSingleRealmPrefix(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		requests = append(requests, request.Method+" "+request.URL.Path)
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/events":
+			writeJSON(t, writer, stdhttp.StatusOK, []map[string]any{{"id": "login-1", "type": "LOGIN", "time": float64(time.Now().UnixMilli())}})
+		case "GET /admin/realms/acme/admin-events":
+			writeJSON(t, writer, stdhttp.StatusOK, []map[string]any{})
+		default:
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	events, err := admin.ListKeycloakAuditEvents(context.Background(), time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("ListKeycloakAuditEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "login-1" {
+		t.Fatalf("events = %#v", events)
+	}
+	for _, request := range requests {
+		if strings.Count(request, "/admin/realms/acme") > 1 {
+			t.Fatalf("realm prefix duplicated: %s", request)
+		}
+	}
+}
 
 func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "")
@@ -153,6 +189,69 @@ func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	}
 }
 
+func TestLogoutIdentitySessionsRevokesBrokerAndProjectedUsersOnce(t *testing.T) {
+	var logoutPaths []string
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/users":
+			if request.URL.Query().Get("idpAlias") == platformBrokerAlias {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "user-1"}})
+				return
+			}
+			if request.URL.Query().Get("q") != "identity_id:identity-1" {
+				t.Errorf("unexpected user query: %s", request.URL.RawQuery)
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{
+				{ID: "user-1", Attributes: map[string][]string{"identity_id": {"identity-1"}}},
+				{ID: "legacy-user", Attributes: map[string][]string{"identity_id": {"identity-1"}}},
+			})
+		case "POST /admin/realms/acme/users/user-1/logout", "POST /admin/realms/acme/users/legacy-user/logout":
+			logoutPaths = append(logoutPaths, request.URL.Path)
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.LogoutIdentitySessions(context.Background(), "identity-1"); err != nil {
+		t.Fatalf("LogoutIdentitySessions() error = %v", err)
+	}
+	if len(logoutPaths) != 2 {
+		t.Fatalf("logout requests = %v, want two unique users", logoutPaths)
+	}
+}
+
+func TestLogoutIdentitySessionsTreatsMissingUserAsSuccess(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/users":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.LogoutIdentitySessions(context.Background(), "identity-missing"); err != nil {
+		t.Fatalf("LogoutIdentitySessions() error = %v", err)
+	}
+}
+
 func TestManagedAuthorizationAttributeMatchingIsPrecise(t *testing.T) {
 	for _, key := range []string{
 		"permissions", "organization_ids", "role_config_hash", "authz_revision", "roles",
@@ -185,6 +284,145 @@ func TestKeycloakAdminReturnsTokenHTTPFailures(t *testing.T) {
 	err = admin.EnsureUser(context.Background(), projectionapplication.Snapshot{IdentityID: "identity-1"})
 	if err == nil || !strings.Contains(err.Error(), "request Keycloak admin token returned HTTP 401") {
 		t.Fatalf("EnsureUser error = %v", err)
+	}
+}
+
+func TestEnsureUserPrelinksBrokerIdentityAndAllowsOptionalProfileFields(t *testing.T) {
+	var created map[string]any
+	var linked keycloakFederatedIdentity
+	var server *httptest.Server
+	server = httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.URL.Path == "/realms/master/protocol/openid-connect/token" {
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+			return
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+		case "POST /admin/realms/acme/users":
+			if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+				t.Fatalf("decode created user: %v", err)
+			}
+			writer.Header().Set("Location", server.URL+"/admin/realms/acme/users/user-1")
+			writer.WriteHeader(stdhttp.StatusCreated)
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			if linked.IdentityProvider == "" {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+				return
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{linked})
+		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			if err := json.NewDecoder(request.Body).Decode(&linked); err != nil {
+				t.Fatalf("decode Broker identity: %v", err)
+			}
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.EnsureUser(context.Background(), projectionapplication.Snapshot{IdentityID: "identity-1", DisplayName: "测试用户", UserEnabled: true}); err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if created["firstName"] != "测试用户" {
+		t.Fatalf("created firstName = %#v", created["firstName"])
+	}
+	for _, optional := range []string{"email", "lastName", "requiredActions"} {
+		if _, exists := created[optional]; exists {
+			t.Fatalf("optional Keycloak field %q must be omitted: %#v", optional, created)
+		}
+	}
+	if linked.IdentityProvider != platformBrokerAlias || linked.UserID != "identity-1" || linked.UserName != "platform-identity-1" {
+		t.Fatalf("Broker identity = %#v", linked)
+	}
+}
+
+func TestEnsureBrokerIdentityTreatsConcurrentSameLinkAsSuccess(t *testing.T) {
+	readCount := 0
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			readCount++
+			if readCount == 1 {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+				return
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{{IdentityProvider: platformBrokerAlias, UserID: "identity-1"}})
+		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			writer.WriteHeader(stdhttp.StatusConflict)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.ensureBrokerIdentity(context.Background(), "admin-token", keycloakUser{ID: "user-1"}, "identity-1"); err != nil {
+		t.Fatalf("ensureBrokerIdentity() concurrent idempotency error = %v", err)
+	}
+}
+
+func TestEnsureBrokerIdentityReportsConflictingOwnerAfter409(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{})
+		case "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			writer.WriteHeader(stdhttp.StatusConflict)
+		case "GET /admin/realms/acme/users":
+			if request.URL.Query().Get("idpAlias") != platformBrokerAlias || request.URL.Query().Get("idpUserId") != "identity-1" {
+				t.Fatalf("Broker owner query = %s", request.URL.RawQuery)
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "other-user"}})
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	err = admin.ensureBrokerIdentity(context.Background(), "admin-token", keycloakUser{ID: "user-1"}, "identity-1")
+	if err == nil || !strings.Contains(err.Error(), "other-user") {
+		t.Fatalf("ensureBrokerIdentity() conflict error = %v", err)
+	}
+}
+
+func TestEnsureBrokerIdentityDoesNotDeleteStaleLinkWhenTargetHasAnotherOwner(t *testing.T) {
+	mutations := 0
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{{IdentityProvider: platformBrokerAlias, UserID: "old-identity"}})
+		case "GET /admin/realms/acme/users":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "other-user"}})
+		case "DELETE /admin/realms/acme/users/user-1/federated-identity/basic-platform", "POST /admin/realms/acme/users/user-1/federated-identity/basic-platform":
+			mutations++
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	err = admin.ensureBrokerIdentity(context.Background(), "admin-token", keycloakUser{ID: "user-1"}, "identity-1")
+	if err == nil || !strings.Contains(err.Error(), "other-user") {
+		t.Fatalf("ensureBrokerIdentity() stale ownership error = %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("stale link was mutated before ownership was proven safe: mutations=%d", mutations)
 	}
 }
 
@@ -257,6 +495,8 @@ func TestKeycloakAdminDisablesUserAndRevokesOnlyManagedOrganizationGroups(t *tes
 				t.Fatalf("decode user: %v", err)
 			}
 			writer.WriteHeader(stdhttp.StatusNoContent)
+		case "GET /admin/realms/acme/users/user-1/federated-identity":
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakFederatedIdentity{{IdentityProvider: platformBrokerAlias, UserID: "identity-1", UserName: "platform-identity-1"}})
 		case "GET /admin/realms/acme/users/user-1/groups":
 			writeJSON(t, writer, stdhttp.StatusOK, []keycloakGroup{
 				{ID: "old-managed", Path: "/basic-platform/tenant-tenant-1/organization-old-org"},

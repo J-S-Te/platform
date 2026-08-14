@@ -61,7 +61,35 @@ done
 [[ "$(stat -c '%a' "$runtime_file")" == "600" ]] || { echo "运行配置权限必须为 0600：$runtime_file" >&2; exit 1; }
 [[ "$(stat -c '%a' "$release_file")" == "600" ]] || { echo "发布配置权限必须为 0600：$release_file" >&2; exit 1; }
 
+release_permission_error() {
+  local current_user current_group owner mode
+  current_user="$(id -un 2>/dev/null || printf unknown)"
+  current_group="$(id -gn 2>/dev/null || printf unknown)"
+  owner="$(stat -c '%U:%G' "$release_file" 2>/dev/null || printf unknown)"
+  mode="$(stat -c '%a' "$release_file" 2>/dev/null || printf unknown)"
+  echo "发布配置权限不足：$release_file（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "请使用 root 执行：chown ${current_user}:${current_group} $release_file && chmod 600 $release_file" >&2
+  exit 1
+}
+
+runtime_permission_error() {
+  local target="$1" current_user current_group owner mode
+  current_user="$(id -un 2>/dev/null || printf unknown)"
+  current_group="$(id -gn 2>/dev/null || printf unknown)"
+  owner="$(stat -c '%U:%G' "$target" 2>/dev/null || printf unknown)"
+  mode="$(stat -c '%a' "$target" 2>/dev/null || printf unknown)"
+  echo "运行配置权限不足：$target（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "请使用 root 执行：chown ${current_user}:${current_group} $target && chmod 600 $target" >&2
+  exit 1
+}
+
+[[ -r "$release_file" && -w "$deploy_dir" ]] || release_permission_error
+
 install -d -m 700 "$deploy_dir/runtime" "$deploy_dir/backups" "$deploy_dir/backups/releases"
+[[ -w "$deploy_dir/backups/releases" ]] || {
+  echo "发布备份目录不可写：$deploy_dir/backups/releases；请将其属主调整为当前 CI 部署用户" >&2
+  exit 1
+}
 initialize_runtime_file() {
   local target="$1" template="$2" temporary
   if [[ ! -f "$target" ]]; then
@@ -73,6 +101,7 @@ initialize_runtime_file() {
     echo "拒绝符号链接运行配置：$target" >&2
     exit 1
   }
+  [[ -r "$target" && -w "$deploy_dir/runtime" ]] || runtime_permission_error "$target"
   if ! chmod 600 "$target" 2>/dev/null; then
     if command -v sudo >/dev/null && sudo -n chmod 600 "$target" 2>/dev/null; then
       return 0

@@ -33,3 +33,29 @@ type RoleResult struct {
 	RoleCode        string `json:"role_code"`
 	Status          string `json:"status"`
 }
+
+const (
+	// BindingActive marks an external customer binding that authorizes the
+	// subject for the bound application; BindingDisabled freezes it without
+	// deleting the durable mapping history.
+	BindingActive   = "ACTIVE"
+	BindingDisabled = "DISABLED"
+)
+
+// BindingResult is the stable, secret-free response returned by customer
+// binding operations. The plaintext customer reference is never echoed back.
+type BindingResult struct {
+	PlatformUserID  string `json:"platform_user_id"`
+	ApplicationCode string `json:"application_code"`
+	Status          string `json:"status"`
+}
+
+// CustomerBinding is the durable binding record read by the authorization
+// resolver. Only the ciphertext leaves storage; decryption happens in the
+// application service right before the protected claim is emitted.
+type CustomerBinding struct {
+	ApplicationCode   string
+	CustomerRefCipher []byte
+	CustomerRefDigest []byte
+	Status            string
+}

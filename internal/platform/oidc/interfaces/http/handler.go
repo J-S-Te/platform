@@ -138,6 +138,10 @@ type Config struct {
 	AuthorizationContextResolver   tokenissuer.AuthorizationContextResolver
 	PersonnelDirectoryResolver     PersonnelDirectoryResolver
 	AllowLegacyPlatformAccessToken bool
+	// CustomerBindingResolver 在 EmitCustomerRef 打开时向 authorization-context 响应
+	// 追加 customer_ref 声明；实现由外部客户绑定模块注入。
+	CustomerBindingResolver CustomerBindingResolver
+	EmitCustomerRef          bool
 	SessionCookieName              string
 	SessionCookieSecure            bool
 	SessionCookieSameSite          http.SameSite
@@ -159,9 +163,18 @@ type Handler struct {
 	authorizationContextResolver   tokenissuer.AuthorizationContextResolver
 	personnelDirectory             PersonnelDirectoryResolver
 	allowLegacyPlatformAccessToken bool
+	customerBindingResolver        CustomerBindingResolver
+	emitCustomerRef                bool
 	cookie                         cookieConfig
 	clock                          Clock
 	logger                         *slog.Logger
+}
+
+// CustomerBindingResolver resolves the CRM customer reference bound to a platform
+// identity inside one application. Any error means the claim is omitted from the
+// authorization-context response; consumers fail closed on its absence.
+type CustomerBindingResolver interface {
+	ResolveCustomerBinding(ctx context.Context, tenantID, platformUserID, applicationCode string) (string, error)
 }
 
 type cookieConfig struct {
@@ -196,6 +209,8 @@ func NewHandler(config Config) (*Handler, error) {
 		authorizationResolver:         config.AuthorizationResolver, authorizationContextResolver: config.AuthorizationContextResolver,
 		personnelDirectory:             config.PersonnelDirectoryResolver,
 		allowLegacyPlatformAccessToken: config.AllowLegacyPlatformAccessToken,
+		customerBindingResolver:        config.CustomerBindingResolver,
+		emitCustomerRef:                config.EmitCustomerRef && config.CustomerBindingResolver != nil,
 		cookie:                         cookieConfig{name: config.SessionCookieName, secure: config.SessionCookieSecure, sameSite: config.SessionCookieSameSite},
 		clock:                          config.Clock, logger: config.Logger,
 	}, nil

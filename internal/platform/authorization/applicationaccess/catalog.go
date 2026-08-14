@@ -452,7 +452,14 @@ func (s *Service) upsertCatalogPermission(tx *gorm.DB, tenantID, appID, operator
 	var row struct {
 		ID string `gorm:"column:id"`
 	}
-	err := tx.Table("authz_permission").Select("id").Where("tenant_id = ? AND application_id = ? AND code = ?", tenantID, appID, item.Code).Take(&row).Error
+	err := catalogPermissionByCode(tx, tenantID, appID, item.Code).Take(&row).Error
+	// Permission codes can be renamed between catalog versions. The database
+	// also enforces one permission per resource/action, so reconcile the legacy
+	// row instead of attempting an insert that can never satisfy that unique
+	// constraint.
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		err = catalogPermissionByResourceAction(tx, tenantID, appID, resourceID, item.Action).Take(&row).Error
+	}
 	values := map[string]any{"tenant_id": tenantID, "application_id": appID, "resource_id": resourceID, "code": item.Code, "action": item.Action, "name": item.Name, "risk_level": item.RiskLevel, "status": activeStatus, "version": 1, "updated_at": now, "updated_by": operatorID}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		id, e := s.ids.New(now)
@@ -473,6 +480,14 @@ func (s *Service) upsertCatalogPermission(tx *gorm.DB, tenantID, appID, operator
 		return "", err
 	}
 	return row.ID, nil
+}
+
+func catalogPermissionByCode(tx *gorm.DB, tenantID, appID, code string) *gorm.DB {
+	return tx.Table("authz_permission").Select("id").Where("tenant_id = ? AND application_id = ? AND code = ?", tenantID, appID, code)
+}
+
+func catalogPermissionByResourceAction(tx *gorm.DB, tenantID, appID, resourceID, action string) *gorm.DB {
+	return tx.Table("authz_permission").Select("id").Where("tenant_id = ? AND application_id = ? AND resource_id = ? AND action = ?", tenantID, appID, resourceID, action)
 }
 
 func (s *Service) upsertCatalogRole(tx *gorm.DB, tenantID, appID, operatorID string, now time.Time, item CatalogRoleInput) (string, error) {

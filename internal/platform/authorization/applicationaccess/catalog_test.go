@@ -3,10 +3,13 @@ package applicationaccess
 import (
 	"context"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 func TestNormalizeCatalogCanonicalizesAndHashesDeterministically(t *testing.T) {
@@ -78,6 +81,25 @@ func TestNormalizeCatalogRejectsDuplicateResourceAction(t *testing.T) {
 	})
 	if err == nil || !errorsIs(err, ErrValidation) {
 		t.Fatalf("expected validation error, got %v", err)
+	}
+}
+
+func TestCatalogPermissionRenameFallbackUsesResourceActionIdentity(t *testing.T) {
+	database, err := gorm.Open(mysql.New(mysql.Config{
+		DSN: "test:test@tcp(localhost:3306)/test?parseTime=true", SkipInitializeWithVersion: true,
+	}), &gorm.Config{DisableAutomaticPing: true, DryRun: true, SkipDefaultTransaction: true})
+	if err != nil {
+		t.Fatalf("open dry-run database: %v", err)
+	}
+	statement := catalogPermissionByResourceAction(database, "tenant-1", "app-1", "resource-1", "manage").Take(&struct{ ID string }{}).Statement
+	sql := statement.SQL.String()
+	for _, expected := range []string{"tenant_id = ?", "application_id = ?", "resource_id = ?", "action = ?"} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("rename fallback query missing %q: %s", expected, sql)
+		}
+	}
+	if len(statement.Vars) < 4 || statement.Vars[0] != "tenant-1" || statement.Vars[1] != "app-1" || statement.Vars[2] != "resource-1" || statement.Vars[3] != "manage" {
+		t.Fatalf("rename fallback query binds unexpected values: %#v", statement.Vars)
 	}
 }
 

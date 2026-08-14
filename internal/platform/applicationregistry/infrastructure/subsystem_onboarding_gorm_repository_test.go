@@ -71,3 +71,34 @@ func TestPortalApplicationAccessFilterIncludesEffectiveMembershipSubjects(t *tes
 		}
 	}
 }
+
+func TestPortalProjectionReadinessFailsClosed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		row    portalApplicationRow
+		status string
+		ready  bool
+	}{
+		{name: "platform issuer does not require projection", row: portalApplicationRow{IssuerAlias: "platform"}, status: portalProjectionNotRequired, ready: true},
+		{name: "missing client mapping", row: portalApplicationRow{IssuerAlias: "keycloak"}, status: portalProjectionNotConfigured},
+		{name: "missing user projection", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED"}, status: portalProjectionMissing},
+		{name: "pending outbox overrides synchronized projection", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED", ProjectionStatus: "SYNCED", PendingCount: 1}, status: portalProjectionPending},
+		{name: "pending retry overrides stale failed projection", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED", ProjectionStatus: "FAILED", PendingCount: 1}, status: portalProjectionPending},
+		{name: "running outbox overrides synchronized projection", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED", ProjectionStatus: "SYNCED", RunningCount: 1}, status: portalProjectionRunning},
+		{name: "failed outbox has highest priority", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED", ProjectionStatus: "SYNCED", PendingCount: 1, RunningCount: 1, FailedCount: 1}, status: portalProjectionFailed},
+		{name: "failed projection blocks without outbox", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED", ProjectionStatus: "FAILED"}, status: portalProjectionFailed},
+		{name: "synchronized projection is ready", row: portalApplicationRow{IssuerAlias: "keycloak", MappingStatus: "SYNCED", ProjectionStatus: "SYNCED"}, status: portalProjectionSynced, ready: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := portalProjectionReadiness(test.row)
+			if got.Status != test.status || got.Ready != test.ready {
+				t.Fatalf("readiness = %#v, want status=%q ready=%v", got, test.status, test.ready)
+			}
+			if !got.Ready && strings.TrimSpace(got.NextAction) == "" {
+				t.Fatalf("blocked readiness lacks next action: %#v", got)
+			}
+		})
+	}
+}

@@ -25,6 +25,9 @@ type externalIdentityService interface {
 	Provision(context.Context, appctx.Principal, application.RequestProof, application.ProvisionInput) (application.ProvisionResult, error)
 	AssignPortalRole(context.Context, appctx.Principal, application.RequestProof, application.RoleInput) (domain.RoleResult, error)
 	RevokePortalRole(context.Context, appctx.Principal, application.RequestProof, application.RoleInput) (domain.RoleResult, error)
+	BindCustomer(context.Context, appctx.Principal, application.RequestProof, application.BindInput) (domain.BindingResult, error)
+	DisableCustomerBinding(context.Context, appctx.Principal, application.RequestProof, application.BindInput) (domain.BindingResult, error)
+	CustomerBindingStatus(context.Context, string, string, string) (domain.BindingResult, error)
 }
 
 type Handler struct {
@@ -130,6 +133,63 @@ func decode(writer http.ResponseWriter, request *http.Request, target any) bool 
 		return false
 	}
 	return true
+}
+
+type bindingRequest struct {
+	CustomerRef string `json:"customer_ref"`
+}
+
+// BindCustomer 幂等写入/恢复平台身份与 CRM 客户标识的绑定；明文 customer_ref 不回显。
+func (handler *Handler) BindCustomer(writer http.ResponseWriter, request *http.Request) {
+	principal, proof, ok := requestContext(writer, request)
+	if !ok {
+		return
+	}
+	platformUserID := strings.TrimSpace(request.PathValue("platform_user_id"))
+	var payload bindingRequest
+	if !decode(writer, request, &payload) {
+		return
+	}
+	result, err := handler.service.BindCustomer(request.Context(), principal, proof, application.BindInput{PlatformUserID: platformUserID, CustomerRef: payload.CustomerRef})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "外部客户绑定已建立", result)
+}
+
+// DisableCustomerBinding 冻结绑定；CRM 禁用 saga 用它配合角色回收完成跨系统收敛。
+func (handler *Handler) DisableCustomerBinding(writer http.ResponseWriter, request *http.Request) {
+	principal, proof, ok := requestContext(writer, request)
+	if !ok {
+		return
+	}
+	platformUserID := strings.TrimSpace(request.PathValue("platform_user_id"))
+	var payload bindingRequest
+	if !decode(writer, request, &payload) {
+		return
+	}
+	result, err := handler.service.DisableCustomerBinding(request.Context(), principal, proof, application.BindInput{PlatformUserID: platformUserID, CustomerRef: payload.CustomerRef})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "外部客户绑定已禁用", result)
+}
+
+// GetCustomerBinding 返回绑定状态用于对账；不返回 customer_ref 明文或密文。
+func (handler *Handler) GetCustomerBinding(writer http.ResponseWriter, request *http.Request) {
+	principal, _, ok := requestContext(writer, request)
+	if !ok {
+		return
+	}
+	platformUserID := strings.TrimSpace(request.PathValue("platform_user_id"))
+	result, err := handler.service.CustomerBindingStatus(request.Context(), principal.TenantID, platformUserID, application.PortalApplicationCode)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "外部客户绑定已查询", result)
 }
 
 func (handler *Handler) writeError(writer http.ResponseWriter, request *http.Request, err error) {

@@ -20,17 +20,30 @@ type ClientMappingStore struct{ database *gorm.DB }
 // projection contract behind a Keycloak Client mapping. Any change to the
 // stable identity attributes or projection semantics must bump this value so
 // previously completed user projections and broker evidence cannot be reused.
-// v2 forces one complete re-projection for every existing Client mapping.
-// Older mappings can be marked SYNCED while their Keycloak users were created
-// before identity_id/person_id projection was introduced; reusing that state
-// produces valid-looking OAuth clients but ID tokens rejected by every
-// subsystem's strict OIDC claims validation.
-const keycloakProjectionConfigurationVersion = "stable-identity-projection-v2"
+// v5 forces one complete re-projection for every existing Client mapping after
+// the independent identity_id mapper and startup Admin-API reconciliation
+// became part of the projection contract. This prevents historical database
+// readiness from masking a Realm Client whose actual mappers are stale.
+const keycloakProjectionConfigurationVersion = "stable-identity-projection-v5"
 
 type persistedClientMapping struct {
 	Realm             string `gorm:"column:realm"`
 	ClientID          string `gorm:"column:keycloak_client_id"`
 	ConfigurationHash string `gorm:"column:configuration_hash"`
+}
+
+// StoredKeycloakClientMapping contains the non-secret registration data needed
+// to re-apply a Realm Client at worker startup. The persisted Client ID remains
+// authoritative so a compatibility mapping is never silently renamed.
+type StoredKeycloakClientMapping struct {
+	TenantID        string `gorm:"column:tenant_id"`
+	ApplicationID   string `gorm:"column:application_id"`
+	EnvironmentID   string `gorm:"column:environment_id"`
+	ApplicationName string `gorm:"column:application_name"`
+	BaseURL         string `gorm:"column:base_url"`
+	PathPrefix      string `gorm:"column:path_prefix"`
+	Realm           string `gorm:"column:realm"`
+	ClientID        string `gorm:"column:keycloak_client_id"`
 }
 
 type managedClientConfiguration struct {
@@ -45,6 +58,31 @@ func NewClientMappingStore(database *gorm.DB) (*ClientMappingStore, error) {
 		return nil, errors.New("Keycloak Client mapping database must not be nil")
 	}
 	return &ClientMappingStore{database: database}, nil
+}
+
+// ListStoredKeycloakClientMappings returns every synchronized mapping together
+// with the current browser transport configuration. Callers must successfully
+// reconcile the real Keycloak Client and roles before saving the mapping again.
+func (store *ClientMappingStore) ListStoredKeycloakClientMappings(ctx context.Context) ([]StoredKeycloakClientMapping, error) {
+	if store == nil || store.database == nil {
+		return nil, errors.New("Keycloak Client mapping database must not be nil")
+	}
+	var mappings []StoredKeycloakClientMapping
+	if err := syncedKeycloakClientMappingsQuery(store.database.WithContext(ctx)).Find(&mappings).Error; err != nil {
+		return nil, fmt.Errorf("load synchronized Keycloak Client mappings: %w", err)
+	}
+	return mappings, nil
+}
+
+func syncedKeycloakClientMappingsQuery(database *gorm.DB) *gorm.DB {
+	return database.Table("keycloak_application_client_mapping AS mapping").
+		Select(`mapping.tenant_id, mapping.application_id, mapping.environment_id,
+			application.name AS application_name, environment.base_url, environment.path_prefix,
+			mapping.realm, mapping.keycloak_client_id`).
+		Joins("JOIN platform_application AS application ON application.tenant_id = mapping.tenant_id AND application.id = mapping.application_id").
+		Joins("JOIN platform_application_environment AS environment ON environment.tenant_id = mapping.tenant_id AND environment.application_id = mapping.application_id AND environment.id = mapping.environment_id").
+		Where("mapping.status = ?", "SYNCED").
+		Order("mapping.tenant_id ASC, mapping.application_id ASC, mapping.environment_id ASC")
 }
 
 func (store *ClientMappingStore) SaveKeycloakClientMapping(ctx context.Context, tenantID, applicationID, environmentID, realm, clientID string) error {

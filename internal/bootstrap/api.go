@@ -142,6 +142,12 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	customerRefProtector, err := security.NewCustomerRefProtector(cfg.Identity.CustomerRefEncryptionKey, cfg.Identity.CustomerRefDigestKey)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
 	managementService, err := identityapplication.NewManagementService(
 		repository, mobileProtector, ulid.Generator{}, identityapplication.SystemClock{}, security.Argon2idPasswordHasher{},
 	)
@@ -206,6 +212,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	externalIdentityService, err := externalidentityapplication.NewService(externalIdentityRepository, mobileProtector, ulid.Generator{}, externalidentityapplication.SystemClock{},
 		externalidentityapplication.WithPortalApplicationCode(cfg.PortalApplicationCode),
+		externalidentityapplication.WithCustomerRefProtection(customerRefProtector),
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -285,8 +292,26 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
+	var keycloakAdmin *keycloakauthorizationinfrastructure.KeycloakAdmin
+	if cfg.Keycloak.Enabled {
+		keycloakAdmin, err = keycloakauthorizationinfrastructure.NewKeycloakAdminWithCredentials(cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, keycloakauthorizationinfrastructure.KeycloakAdminCredentials{
+			ServiceAccountClientID:     cfg.Keycloak.AdminClientID,
+			ServiceAccountClientSecret: cfg.Keycloak.AdminClientSecret,
+			Username:                   cfg.Keycloak.AdminUsername,
+			Password:                   cfg.Keycloak.AdminPassword,
+		})
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("create Keycloak session terminator: %w", err)
+		}
+	}
+	authServiceDependencies := []identityapplication.ExternalSessionTerminator{}
+	if keycloakAdmin != nil {
+		authServiceDependencies = append(authServiceDependencies, keycloakAdmin)
+	}
 	authService, err := identityapplication.NewService(
-		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL,
+		repository, security.Argon2idPasswordVerifier{}, tokenManager, ulid.Generator{}, identityapplication.SystemClock{}, loginSecurityService, cfg.Auth.SessionTTL, authServiceDependencies...,
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -312,10 +337,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	var externalResetter identityapplication.ExternalPasswordResetter
-	if cfg.Keycloak.Enabled && strings.TrimSpace(cfg.Keycloak.AdminURL) != "" && strings.TrimSpace(cfg.Keycloak.Realm) != "" {
-		if admin, adminErr := keycloakauthorizationinfrastructure.NewKeycloakAdmin(cfg.Keycloak.AdminURL, cfg.Keycloak.Realm, cfg.Keycloak.AdminUsername, cfg.Keycloak.AdminPassword); adminErr == nil {
-			externalResetter = admin
-		}
+	if keycloakAdmin != nil {
+		externalResetter = keycloakAdmin
 	}
 	accountLifecycleService, err := identityapplication.NewAccountLifecycleService(
 		repository, security.Argon2idPasswordHasher{}, security.Argon2idPasswordVerifier{}, identityapplication.CryptoPasswordGenerator{}, ulid.Generator{}, identityapplication.SystemClock{}, externalResetter,
@@ -426,6 +449,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		ExternalAuthorizationVerifier:  externalAuthorizationVerifier,
 		AuthorizationResolver:          oidcAuthorizationResolver,
 		AuthorizationContextResolver:   oidcAuthorizationResolver,
+		CustomerBindingResolver:        customerBindingResolverAdapter{service: externalIdentityService},
+		EmitCustomerRef:                cfg.Auth.AuthzContextCustomerRefEnabled,
 		PersonnelDirectoryResolver:     oidcPersonnelDirectory,
 		AllowLegacyPlatformAccessToken: cfg.Auth.AllowLegacyPlatformAccessToken,
 		SessionCookieName:              cfg.Auth.SessionCookieName,
@@ -694,6 +719,20 @@ func (api *API) Close() {
 			api.Logger.Error("close application log file", "error", err)
 		}
 	}
+}
+
+// customerBindingResolverAdapter 把外部身份模块的绑定解析适配为 OIDC 传输层接口。
+// 任何解析错误都按"无绑定"处理，authorization-context 省略 customer_ref 声明。
+type customerBindingResolverAdapter struct {
+	service *externalidentityapplication.Service
+}
+
+func (adapter customerBindingResolverAdapter) ResolveCustomerBinding(ctx context.Context, tenantID, platformUserID, applicationCode string) (string, error) {
+	resolved, err := adapter.service.ResolveCustomerBinding(ctx, tenantID, platformUserID, applicationCode)
+	if err != nil {
+		return "", err
+	}
+	return resolved.CustomerRef, nil
 }
 
 // parseSameSite converts the validated configuration value into Go's cookie enum for OIDC logout.

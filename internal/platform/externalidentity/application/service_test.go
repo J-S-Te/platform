@@ -13,6 +13,11 @@ import (
 type serviceRepositoryStub struct {
 	provision ProvisionCommand
 	role      RoleCommand
+	binding   BindingCommand
+	query     BindingQuery
+
+	bindingRecord domain.CustomerBinding
+	bindingErr    error
 }
 
 func (repository *serviceRepositoryStub) Provision(_ context.Context, command ProvisionCommand) (ProvisionResult, error) {
@@ -25,6 +30,17 @@ func (repository *serviceRepositoryStub) AssignRole(_ context.Context, command R
 }
 func (*serviceRepositoryStub) RevokeRole(context.Context, RoleCommand) (domain.RoleResult, error) {
 	return domain.RoleResult{}, errors.New("not used")
+}
+func (repository *serviceRepositoryStub) BindCustomer(_ context.Context, command BindingCommand) (domain.BindingResult, error) {
+	repository.binding = command
+	return domain.BindingResult{PlatformUserID: command.PlatformUserID, ApplicationCode: command.ApplicationCode, Status: command.Status}, nil
+}
+func (repository *serviceRepositoryStub) ResolveCustomerBinding(_ context.Context, query BindingQuery) (domain.CustomerBinding, error) {
+	repository.query = query
+	if repository.bindingErr != nil {
+		return domain.CustomerBinding{}, repository.bindingErr
+	}
+	return repository.bindingRecord, nil
 }
 
 type mobileStub struct{}
