@@ -26,6 +26,7 @@ runtime:
         - PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64
         - PORTAL_HMAC_KEY_BASE64
       values:
+        PORTAL_OIDC_IDP_HINT: basic-platform
         PORTAL_OIDC_SCOPES: openid profile
         PORTAL_ROLE_CONFIG_HASH: sha256:f67121b52d6d850e99d1c4520d661fb85e26512c7ee50cd83182a8dc39b368d4
         PORTAL_SESSION_COOKIE_NAME: customer_portal_session

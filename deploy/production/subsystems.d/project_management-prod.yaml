@@ -22,6 +22,7 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        OIDC_IDP_HINT: basic-platform
         OIDC_SESSION_COOKIE_NAME: project_management_session
         OIDC_SESSION_TTL: 15m
         OIDC_AUTHORIZATION_REFRESH_INTERVAL: 1m

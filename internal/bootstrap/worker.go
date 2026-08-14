@@ -169,16 +169,51 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			_ = logFile.Close()
 			return nil, fmt.Errorf("expand legacy Keycloak authorization outbox: %w", err)
 		}
-		if err := mappingStore.ReconcileStoredKeycloakClientMappings(context.Background()); err != nil {
-			_ = database.Close(db)
-			_ = logFile.Close()
-			return nil, fmt.Errorf("reconcile stored Keycloak Client mappings: %w", err)
-		}
 		accessService, err := applicationaccess.NewService(db, ulid.Generator{}, applicationaccess.SystemClock{})
 		if err != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()
 			return nil, fmt.Errorf("create Keycloak authorization access resolver: %w", err)
+		}
+		readinessStore, err := keycloakauthorizationinfrastructure.NewSwitchReadinessStore(db)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+		mappings, err := mappingStore.ListStoredKeycloakClientMappings(context.Background())
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+		reconcileDependencies := keycloakClientStartupReconcileDependencies{
+			markPending: readinessStore.MarkKeycloakClientAndRoleCatalogPending,
+			ensureClient: func(ctx context.Context, clientID, name, redirectURI string) (string, error) {
+				client, ensureErr := controlPlane.EnsureClient(ctx, clientID, name, redirectURI)
+				return client.ClientID, ensureErr
+			},
+			listRoleCodes: func(ctx context.Context, tenantID, applicationID string) ([]string, error) {
+				catalog, catalogErr := accessService.GetCatalog(ctx, tenantID, applicationID)
+				if catalogErr != nil {
+					return nil, catalogErr
+				}
+				roleCodes := make([]string, 0, len(catalog.Roles))
+				for _, role := range catalog.Roles {
+					roleCodes = append(roleCodes, role.Code)
+				}
+				return roleCodes, nil
+			},
+			ensureRoles: controlPlane.EnsureClientRoles,
+			saveMapping: mappingStore.SaveKeycloakClientMapping,
+			markSynced:  readinessStore.MarkKeycloakClientAndRoleCatalogSynced,
+		}
+		for _, mapping := range mappings {
+			if err := reconcileStoredKeycloakClient(context.Background(), mapping, cfg.Keycloak.RequireHTTPS, reconcileDependencies); err != nil {
+				_ = database.Close(db)
+				_ = logFile.Close()
+				return nil, err
+			}
 		}
 		queue, err := keycloakauthorizationinfrastructure.NewOutboxQueue(db)
 		if err != nil {

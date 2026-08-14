@@ -9,9 +9,45 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	projectionapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
 )
+
+func TestListKeycloakAuditEventsUsesSingleRealmPrefix(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		requests = append(requests, request.Method+" "+request.URL.Path)
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/events":
+			writeJSON(t, writer, stdhttp.StatusOK, []map[string]any{{"id": "login-1", "type": "LOGIN", "time": float64(time.Now().UnixMilli())}})
+		case "GET /admin/realms/acme/admin-events":
+			writeJSON(t, writer, stdhttp.StatusOK, []map[string]any{})
+		default:
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	events, err := admin.ListKeycloakAuditEvents(context.Background(), time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("ListKeycloakAuditEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "login-1" {
+		t.Fatalf("events = %#v", events)
+	}
+	for _, request := range requests {
+		if strings.Count(request, "/admin/realms/acme") > 1 {
+			t.Fatalf("realm prefix duplicated: %s", request)
+		}
+	}
+}
 
 func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "")

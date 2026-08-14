@@ -93,6 +93,17 @@ func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogSynced(ctx co
 	})
 }
 
+// MarkKeycloakClientAndRoleCatalogPending revokes the two Admin-API-backed
+// gates before a startup reconciliation. If Keycloak is unavailable or its
+// actual Client configuration is stale, the worker exits with these gates
+// blocked instead of retaining historical success evidence.
+func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogPending(ctx context.Context, tenantID, applicationID, environmentID string) error {
+	return store.upsert(ctx, tenantID, applicationID, environmentID, map[string]any{
+		"client_ready":        false,
+		"role_catalog_synced": false,
+	})
+}
+
 // MarkUserProjectionCompleted is deliberately explicit: callers must not mark
 // the user gate from a queued/scheduled projection.  It is available for the
 // projection coordinator once it has durably established completion.
