@@ -7,27 +7,27 @@ import (
 	"strings"
 	"time"
 
-	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
-	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/interfaces/http"
-	audithttp "github.com/J-S-Te/Basic-Platform/internal/platform/audit/interfaces/http"
-	applicationaccess "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/applicationaccess"
-	authorizationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/interfaces/http"
-	positiongrant "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/positiongrant"
-	configurationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/configuration/interfaces/http"
-	dictionaryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/interfaces/http"
-	externalidentityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/interfaces/http"
-	filetaskhttp "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/interfaces/http"
-	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
-	notificationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/interfaces/http"
-	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
-	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/interfaces/http"
-	securityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/security/interfaces/http"
-	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
-	settingshttp "github.com/J-S-Te/Basic-Platform/internal/platform/settings/interfaces/http"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
-	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
+	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/application"
+	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/applicationregistry/interfaces/http"
+	audithttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/audit/interfaces/http"
+	applicationaccess "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/applicationaccess"
+	authorizationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/interfaces/http"
+	positiongrant "github.com/J-S-Te/Basic-Platform/backend/internal/platform/authorization/positiongrant"
+	configurationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/configuration/interfaces/http"
+	dictionaryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/dictionary/interfaces/http"
+	externalidentityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/externalidentity/interfaces/http"
+	filetaskhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/filetask/interfaces/http"
+	identityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/identity/interfaces/http"
+	notificationhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/notification/interfaces/http"
+	oidchttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/oidc/interfaces/http"
+	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/ownerdirectory/interfaces/http"
+	securityhttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/security/interfaces/http"
+	settingsapplication "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/application"
+	settingshttp "github.com/J-S-Te/Basic-Platform/backend/internal/platform/settings/interfaces/http"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -37,17 +37,10 @@ import (
 type OperationalModules struct {
 	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
 	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
-	// KeycloakIntegration is deliberately separate from the application
-	// directory. It owns only provider synchronization and issuer cutover; it
-	// does not expose or create browser-visible OAuth client secrets.
-	KeycloakIntegration    *applicationregistryhttp.KeycloakIntegrationHandler
-	SubsystemServiceRoutes *applicationregistryhttp.SubsystemServiceRouteHandler
-	Notifications          *notificationhttp.Handler
-	FilesAndJobs           *filetaskhttp.Handler
-	ExternalIdentity       *externalidentityhttp.Handler
-	OwnerDirectory         *ownerdirectoryhttp.Handler
-	PersonnelChanges       *identityhttp.PersonnelChangeHandler
-	AuthorizationOverview  *identityhttp.AuthorizationOverviewHandler
+	Notifications       *notificationhttp.Handler
+	FilesAndJobs        *filetaskhttp.Handler
+	ExternalIdentity    *externalidentityhttp.Handler
+	OwnerDirectory      *ownerdirectoryhttp.Handler
 	// AccessApplier is the optional deployment agent used by the management-console
 	// "对外访问" apply action. Production/remote deployments leave it nil.
 	AccessApplier settingsapplication.AccessApplier
@@ -79,8 +72,6 @@ func NewRouter(
 	oidcHandler *oidchttp.Handler,
 	operational OperationalModules,
 ) *gin.Engine {
-	// 先创建裸 Gin engine，再按“公共端点 → 协议端点 → 会话端点 → 业务端点”的顺序装配。
-	// 这种顺序让每个路由组的认证边界清晰，也避免某个可选模块缺失时意外暴露半成品接口。
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
 	if err := router.SetTrustedProxies(cfg.HTTP.TrustedProxies); err != nil {
@@ -101,8 +92,6 @@ func NewRouter(
 	router.GET("/healthz", healthHandler.Liveness)
 	router.GET("/readyz", healthHandler.Readiness)
 
-	// 完整 OIDC handler 提供浏览器授权和标准协议端点；在迁移期只有机器令牌 handler 时，
-	// 仅保留 token 发行接口，避免把不完整的 OIDC 端点注册出来。
 	if oidcHandler != nil {
 		oauthRateLimit := middleware.FixedWindowRateLimit(60, time.Minute)
 		router.GET("/authorize", adaptHandler(oidcHandler.Authorize))
@@ -118,7 +107,6 @@ func NewRouter(
 		router.GET("/oauth2/jwks", adaptHandler(oidcHandler.JWKS))
 		router.GET("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
 		router.POST("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
-		router.GET("/oauth2/authorization-context", adaptHandler(oidcHandler.AuthorizationContext))
 		router.GET("/oauth2/logout", adaptHandler(oidcHandler.Logout))
 		router.POST("/oauth2/logout", middleware.RequireSameOrigin(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 	} else if applicationTokenHandler != nil {
@@ -138,13 +126,9 @@ func NewRouter(
 	}
 
 	if authHandler != nil {
-		// /api/v1/auth 是登录会话边界；登录接口只做来源/写入校验，登录后的接口再叠加
-		// Authentication 中间件。业务 API 使用下面独立的 apiRouter，避免认证策略混用。
 		authRouter := router.Group("/api/v1/auth")
 		authRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
-		authRouter.GET("/login", adaptHandler(authHandler.BeginOIDCLogin))
-		authRouter.GET("/oidc/callback", adaptHandler(authHandler.OIDCCallback))
 
 		protected := authRouter.Group("")
 		protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
@@ -154,50 +138,12 @@ func NewRouter(
 		protected.GET("/me", adaptHandler(authHandler.Me))
 	}
 
-	// This is intentionally a one-route Keycloak JWT boundary. Do not add it to
-	// the console session group: accepting a Keycloak bearer elsewhere would
-	// silently expand the platform authentication surface.
-	if operational.SubsystemOnboarding != nil && cfg.Keycloak.Enabled {
-		issuer := strings.TrimRight(cfg.Keycloak.PublicURL, "/") + "/realms/" + strings.TrimSpace(cfg.Keycloak.Realm)
-		verifier, err := middleware.NewKeycloakBrokerJWTVerifier(issuer, nil)
-		if err != nil {
-			panic("invalid Keycloak broker JWT verifier configuration: " + err.Error())
-		}
-		brokerVerificationRouter := router.Group("/api/v1/keycloak")
-		brokerVerificationRouter.Use(middleware.RequireSafeWriteContentType(), middleware.KeycloakBrokerAuthentication(verifier))
-		brokerVerificationRouter.POST("/broker-login-verifications", adaptHandler(operational.SubsystemOnboarding.VerifyKeycloakBrokerLogin))
-		// The new endpoint is the Keycloak authentication-integration boundary.
-		// Keep /api/v1/keycloak/... above for an existing Keycloak broker callback
-		// client while all new callers use this explicit namespace.
-		if operational.KeycloakIntegration != nil {
-			integrationBrokerRouter := router.Group("/api/v1/keycloak-integration")
-			integrationBrokerRouter.Use(middleware.RequireSafeWriteContentType(), middleware.KeycloakBrokerAuthentication(verifier))
-			integrationBrokerRouter.POST("/broker-login-verifications", adaptHandler(operational.KeycloakIntegration.VerifyBrokerLogin))
-		}
-	}
-
 	if authHandler != nil {
 		apiRouter := router.Group("/api/v1")
-		// 所有管理 API 共享来源、写入内容类型、会话认证和可选审计链；具体权限由各路由
-		// 在注册点声明，便于审查“哪个接口需要什么能力”。
 		apiRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
 			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger, middleware.AuditSource{ApplicationCode: cfg.Audit.ApplicationCode, EnvironmentCode: cfg.Audit.EnvironmentCode}))
-		}
-
-		if operational.AuthorizationOverview != nil {
-			apiRouter.GET("/people/:user_id/authorization-overview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.AuthorizationOverview.Get))
-		}
-
-		if operational.PersonnelChanges != nil {
-			apiRouter.GET("/personnel-changes", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.List))
-			apiRouter.POST("/personnel-changes", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Create))
-			apiRouter.POST("/personnel-changes/preview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.PreviewDraft))
-			apiRouter.POST("/personnel-changes/:change_id/transition", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Transition))
-			apiRouter.POST("/personnel-changes/:change_id/submit", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Submit))
-			apiRouter.POST("/personnel-changes/:change_id/cancel", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Cancel))
-			apiRouter.GET("/personnel-changes/:change_id/preview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.Preview))
 		}
 
 		if managementHandler != nil {
@@ -232,23 +178,12 @@ func NewRouter(
 			apiRouter.POST("/applications/:application_id/environments", middleware.RequirePermission("platform:application-environment:create"), adaptHandler(applicationManagementHandler.CreateEnvironment))
 			apiRouter.PATCH("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:update"), adaptHandler(applicationManagementHandler.UpdateEnvironment))
 			apiRouter.DELETE("/applications/:application_id/environments/:environment_id", middleware.RequirePermission("platform:application-environment:delete"), adaptHandler(applicationManagementHandler.DeleteEnvironment))
-			apiRouter.POST("/applications/:application_id/environments/:environment_id/purge", middleware.RequirePermission("platform:application-environment:delete"), adaptHandler(applicationManagementHandler.PurgeEnvironment))
 		}
 
 		if operational.SubsystemOnboarding != nil {
 			apiRouter.GET("/portal/applications", adaptHandler(operational.SubsystemOnboarding.ListPortalApplications))
 			apiRouter.GET("/subsystem-capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemCapabilities))
-			apiRouter.GET("/subsystem-discovery", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.DiscoverSubsystemCandidates))
 			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemStatus))
-			// V2 directory registration deliberately stops before any OIDC Client,
-			// credential or deployment mutation. Keycloak owns client lifecycle via
-			// the dedicated keycloak-integration endpoints.
-			apiRouter.POST("/subsystem-directory",
-				middleware.RequirePermission("platform:application:create"),
-				middleware.RequirePermission("platform:application-environment:create"),
-				middleware.RequirePermission("platform:application-login-target:create"),
-				adaptHandler(operational.SubsystemOnboarding.RegisterSubsystemDirectory),
-			)
 			apiRouter.POST("/subsystem-onboarding",
 				middleware.RequirePermission("platform:application:create"),
 				middleware.RequirePermission("platform:application-environment:create"),
@@ -270,11 +205,6 @@ func NewRouter(
 				middleware.RequirePermission("platform:application-login-target:update"),
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
-			)
-			apiRouter.POST("/subsystem-keycloak/sync",
-				middleware.RequirePermission("platform:application:update"),
-				middleware.RequirePermission("platform:application-environment:update"),
-				adaptHandler(operational.SubsystemOnboarding.SyncKeycloakClient),
 			)
 			// Retry uses the same safe reapply path as update, but records RETRY in the durable
 			// deployment state so operators can distinguish a recovery from a routine reapply.
@@ -300,29 +230,6 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.TeardownSubsystem),
 			)
-		}
-		if operational.KeycloakIntegration != nil {
-			// Authentication-provider operations have their own namespace. The
-			// application directory continues to own application/environment data,
-			// role catalogs and final authorization assignments only.
-			keycloakIntegrationRouter := apiRouter.Group("/keycloak-integration")
-			keycloakIntegrationRouter.GET("/capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Capabilities))
-			keycloakIntegrationRouter.GET("/status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Status))
-			// FAILED authorization projections are a high-risk cutover blocker.
-			// Reading them follows application visibility; replay additionally needs
-			// role-binding update authority because it causes platform authorization
-			// facts to be projected back into a Keycloak Client.
-			keycloakIntegrationRouter.GET("/projection-failures", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.ListProjectionFailures))
-			keycloakIntegrationRouter.GET("/projection-alerts", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.ProjectionAlerts))
-			keycloakIntegrationRouter.POST("/projection-failures/:event_id/replay", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:role-binding:update"), adaptHandler(operational.KeycloakIntegration.ReplayProjectionFailure))
-			keycloakIntegrationRouter.POST("/observation", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), adaptHandler(operational.KeycloakIntegration.StartObservation))
-			keycloakIntegrationRouter.POST("/sync", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), adaptHandler(operational.KeycloakIntegration.SyncClient))
-			keycloakIntegrationRouter.POST("/switch", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:application-login-target:update"), middleware.RequirePermission("platform:oauth-client:disable"), adaptHandler(operational.KeycloakIntegration.Switch))
-			keycloakIntegrationRouter.POST("/rollback", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:application-login-target:update"), middleware.RequirePermission("platform:oauth-client:disable"), adaptHandler(operational.KeycloakIntegration.Rollback))
-		}
-		if operational.SubsystemServiceRoutes != nil {
-			apiRouter.GET("/subsystem-service-route", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemServiceRoutes.Resolve))
-			apiRouter.Any("/subsystems/:application_code/*path", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemServiceRoutes.Proxy))
 		}
 
 		if operational.LoginTargets != nil {
@@ -365,8 +272,6 @@ func NewRouter(
 		}
 
 		if positionGrantHandler != nil {
-			apiRouter.GET("/role-inheritance-mappings", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListRoleInheritances))
-			apiRouter.PUT("/role-inheritance-mappings", middleware.RequirePermission("platform:role-binding:update"), adaptHandler(positionGrantHandler.ReplaceRoleInheritances))
 			apiRouter.GET("/position-authorization-targets", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListAuthorizationTargets))
 			apiRouter.GET("/position-authorization-positions", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.ListAuthorizationPositions))
 			apiRouter.GET("/position-authorization-templates", middleware.RequirePermission("platform:role-binding:read"), adaptHandler(positionGrantHandler.List))
@@ -503,11 +408,6 @@ func NewRouter(
 		}
 		if operational.ExternalIdentity != nil {
 			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))
-			// 外部客户绑定：CRM 机器客户端专用。scope 与子系统接入的按用途凭据一致，
-			// 浏览器会话或任何其他机器客户端都不能读写客户绑定。
-			integrationRouter.PUT("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal_mapping_provision"), adaptHandler(operational.ExternalIdentity.BindCustomer))
-			integrationRouter.POST("/internal/external-users/:platform_user_id/customer-binding/disable", middleware.RequireApplicationScope("portal_mapping_disable"), adaptHandler(operational.ExternalIdentity.DisableCustomerBinding))
-			integrationRouter.GET("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal_mapping_provision"), adaptHandler(operational.ExternalIdentity.GetCustomerBinding))
 			integrationRouter.POST("/internal/application-roles", middleware.RequireApplicationScope("application_role.assign"), adaptHandler(operational.ExternalIdentity.AssignRole))
 			integrationRouter.POST("/internal/application-roles/revoke", middleware.RequireApplicationScope("application_role.revoke"), adaptHandler(operational.ExternalIdentity.RevokeRole))
 		}

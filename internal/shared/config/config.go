@@ -28,14 +28,8 @@ type Config struct {
 	Worker              WorkerConfig
 	Audit               AuditConfig
 	SubsystemOnboarding SubsystemOnboardingAutomationConfig
-	// Keycloak is an optional authentication edge.  The platform remains the
-	// source of people, organisations and final permissions; this section only
-	// supplies the control-plane connection used to create Realm clients.
-	Keycloak KeycloakConfig
-	// PortalApplicationCode 是外部客户门户应用编码（B4 解耦，默认 customer_portal）。
-	PortalApplicationCode string
-	FileStorageRoot       string
-	CORSOrigins           []string
+	FileStorageRoot     string
+	CORSOrigins         []string
 }
 
 // HTTPConfig controls the API listener and public address.
@@ -57,7 +51,6 @@ type MySQLConfig struct {
 
 // AuthConfig contains the shared authentication settings used by later IAM work.
 type AuthConfig struct {
-	PublicBaseURL          string
 	JWTIssuer              string
 	JWTAudience            string
 	ApplicationJWTAudience string
@@ -68,35 +61,14 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
-	// AllowLegacyPlatformAccessToken preserves the old platform access-token path
-	// used by /oauth2/authorization-context and /oauth2/userinfo after a
-	// Keycloak cutover. Set false only when old platform tokens must be
-	// explicitly removed from compatibility behavior.
-	AllowLegacyPlatformAccessToken bool
-	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
-	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
+	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；生产环境仍由整体配置校验约束 HTTPS。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
-	// KeycloakOIDC is the platform's browser-facing OIDC client. It is used by
-	// the normal platform login flow; broker verification is deliberately not
-	// part of this runtime path.
-	KeycloakOIDCEnabled      bool
-	KeycloakOIDCIssuer       string
-	KeycloakOIDCClientID     string
-	KeycloakOIDCClientSecret string
-	KeycloakOIDCRedirectPath string
-	// AuthzContextCustomerRefEnabled 打开后，/oauth2/authorization-context 会为命中
-	// ACTIVE 外部客户绑定的 subject 追加 customer_ref 声明。默认关闭，逐环境灰度。
-	AuthzContextCustomerRefEnabled bool
 }
 
 // IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
 type IdentityConfig struct {
 	MobileEncryptionKey string
 	BootstrapToken      string
-	// CustomerRefEncryptionKey / CustomerRefDigestKey 保护外部客户绑定：AES-256-GCM 密文
-	// 与 HMAC-SM3 摘要。未配置时绑定写入与解析失败关闭，绝不明文降级。
-	CustomerRefEncryptionKey string
-	CustomerRefDigestKey     string
 }
 
 // LoggingConfig controls structured application logs.
@@ -121,60 +93,33 @@ type AuditConfig struct {
 	EnvironmentCode string
 }
 
-// KeycloakConfig separates the container-internal admin endpoint from the
-// browser-visible issuer.  Never expose AdminPassword through an HTTP response.
-type KeycloakConfig struct {
-	Enabled bool
-	// RequireHTTPS gates only Keycloak cutover.  It deliberately defaults to
-	// false so existing HTTP deployments remain operable until their gateway
-	// and cookies have been migrated together.
-	RequireHTTPS           bool
-	AdminURL               string
-	PublicURL              string
-	PlatformBackchannelURL string
-	Realm                  string
-	AdminUsername          string
-	AdminPassword          string
-	AdminClientID          string
-	AdminClientSecret      string
-	BrokerClientID         string
-	BrokerClientSecret     string
-	// OutageLoginPolicy declares the only supported degraded-mode behavior.
-	// Platform browser sessions are issued and checked locally; Keycloak never
-	// becomes an implicit fallback authentication source.
-	OutageLoginPolicy string
-}
-
-const KeycloakOutagePolicyContinueExistingPlatformSessions = "continue_existing_platform_sessions"
-
 // SubsystemOnboardingAutomationConfig 控制一键接入的受信部署 Agent。API 只连接 Unix Socket，
 // Docker Socket、宿主机文件和相邻项目目录权限必须留在隔离进程中。
 type SubsystemOnboardingAutomationConfig struct {
-	Enabled                     bool
-	Mode                        string
-	ProjectsRoot                string
-	GatewayScriptPath           string
-	GatewayIncludePath          string
-	SocketPath                  string
-	ProductionDeployRoot        string
-	ProductionRuntimeEnv        string
-	ProductionReleaseEnv        string
-	ProductionComposeFile       string
-	ProductionAllowedTenant     string
-	ProductionProfilesDirectory string
-	PlatformComposeProject      string
-	PlatformFrontendService     string
-	PlatformDockerNetwork       string
-	DockerBinary                string
-	Timeout                     time.Duration
-	// InitialAdminRolesFromManifest 控制子系统接入初始管理员角色是否由清单 initial_admin_roles
-	// 驱动；默认 false（仍走平台硬编码默认，保证既有行为不变），验证等价后开启。
-	InitialAdminRolesFromManifest bool
-	// DefaultIssuerAlias selects the authentication edge for new production
-	// subsystem onboarding when the caller does not explicitly choose one.
-	// Keep platform as the safe development default; production can select
-	// Keycloak without changing every subsystem manifest.
-	DefaultIssuerAlias string
+	Enabled                 bool
+	Mode                    string
+	ProjectsRoot            string
+	GatewayScriptPath       string
+	GatewayIncludePath      string
+	SocketPath              string
+	ProductionDeployRoot    string
+	ProductionRuntimeEnv    string
+	ProductionContractEnv   string
+	ProductionReleaseEnv    string
+	ProductionComposeFile   string
+	ProductionAllowedTenant string
+	ProductionApplicationCode string
+	ProductionApplicationName string
+	ProductionDescription     string
+	ProductionEnvironment     string
+	ProductionUpstreamURL     string
+	ProductionPathPrefix      string
+	ProductionClientType      string
+	PlatformComposeProject  string
+	PlatformFrontendService string
+	PlatformDockerNetwork   string
+	DockerBinary            string
+	Timeout                 time.Duration
 }
 
 // Load 显式设置 ENV_FILE 时只读取该文件；否则在当前目录及父目录寻找 .env，使 backend/ 下运行的
@@ -216,22 +161,6 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	keycloakEnabled, err := boolean("KEYCLOAK_MANAGEMENT_ENABLED", false)
-	if err != nil {
-		return Config{}, err
-	}
-	keycloakRequireHTTPS, err := boolean("KEYCLOAK_REQUIRE_HTTPS", false)
-	if err != nil {
-		return Config{}, err
-	}
-	legacyPlatformAccessTokenEnabled, err := boolean("AUTH_LEGACY_PLATFORM_ACCESS_TOKEN_ENABLED", true)
-	if err != nil {
-		return Config{}, err
-	}
-	authzContextCustomerRefEnabled, err := boolean("AUTHZ_CONTEXT_CUSTOMER_REF_ENABLED", false)
-	if err != nil {
-		return Config{}, err
-	}
 	subsystemAutomationTimeout, err := duration("SUBSYSTEM_ONBOARDING_TIMEOUT", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -258,13 +187,10 @@ func Load() (Config, error) {
 			Params:   value("MYSQL_PARAMS", "charset=utf8mb4&parseTime=true&loc=UTC"),
 		},
 		Identity: IdentityConfig{
-			MobileEncryptionKey:      value("IAM_MOBILE_ENCRYPTION_KEY", ""),
-			BootstrapToken:           strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
-			CustomerRefEncryptionKey: value("IAM_CUSTOMER_REF_ENCRYPTION_KEY", ""),
-			CustomerRefDigestKey:     value("IAM_CUSTOMER_REF_DIGEST_KEY", ""),
+			MobileEncryptionKey: value("IAM_MOBILE_ENCRYPTION_KEY", ""),
+			BootstrapToken:      strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
 		},
 		Auth: AuthConfig{
-			PublicBaseURL:                            publicBaseURL,
 			JWTIssuer:                                value("AUTH_JWT_ISSUER", "basic-platform"),
 			JWTAudience:                              value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
 			ApplicationJWTAudience:                   value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
@@ -275,14 +201,7 @@ func Load() (Config, error) {
 			SessionCookieSecure:                      cookieSecure,
 			SessionCookieSameSite:                    value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
 			SessionTTL:                               sessionTTL,
-			AllowLegacyPlatformAccessToken:           legacyPlatformAccessTokenEnabled,
-		AuthzContextCustomerRefEnabled:           authzContextCustomerRefEnabled,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
-			KeycloakOIDCEnabled:                      keycloakEnabled && strings.EqualFold(value("KEYCLOAK_PLATFORM_OIDC_ENABLED", "false"), "true"),
-			KeycloakOIDCIssuer:                       strings.TrimRight(value("KEYCLOAK_PLATFORM_OIDC_ISSUER", ""), "/"),
-			KeycloakOIDCClientID:                     value("KEYCLOAK_PLATFORM_OIDC_CLIENT_ID", ""),
-			KeycloakOIDCClientSecret:                 value("KEYCLOAK_PLATFORM_OIDC_CLIENT_SECRET", ""),
-			KeycloakOIDCRedirectPath:                 value("KEYCLOAK_PLATFORM_OIDC_REDIRECT_PATH", "/api/v1/auth/oidc/callback"),
 		},
 		Logging: LoggingConfig{
 			Level:     value("LOG_LEVEL", "info"),
@@ -298,45 +217,34 @@ func Load() (Config, error) {
 			ApplicationCode: value("AUDIT_APPLICATION_CODE", "platform"),
 			EnvironmentCode: value("AUDIT_ENVIRONMENT_CODE", "dev"),
 		},
-		Keycloak: KeycloakConfig{
-			Enabled:                keycloakEnabled,
-			RequireHTTPS:           keycloakRequireHTTPS,
-			AdminURL:               strings.TrimRight(value("KEYCLOAK_ADMIN_URL", "http://keycloak:8080"), "/"),
-			PublicURL:              strings.TrimRight(value("KEYCLOAK_PUBLIC_URL", ""), "/"),
-			PlatformBackchannelURL: strings.TrimRight(value("KEYCLOAK_PLATFORM_BACKCHANNEL_URL", "http://platform-api:8080"), "/"),
-			Realm:                  value("KEYCLOAK_REALM", "basic-platform"),
-			AdminUsername:          value("KEYCLOAK_ADMIN_USERNAME", ""),
-			AdminPassword:          value("KEYCLOAK_ADMIN_PASSWORD", ""),
-			AdminClientID:          value("KEYCLOAK_ADMIN_CLIENT_ID", ""),
-			AdminClientSecret:      value("KEYCLOAK_ADMIN_CLIENT_SECRET", ""),
-			BrokerClientID:         value("KEYCLOAK_PLATFORM_CLIENT_ID", ""),
-			BrokerClientSecret:     value("KEYCLOAK_PLATFORM_CLIENT_SECRET", ""),
-			OutageLoginPolicy:      strings.ToLower(value("KEYCLOAK_OUTAGE_LOGIN_POLICY", KeycloakOutagePolicyContinueExistingPlatformSessions)),
-		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
-			Enabled:                       subsystemAutomationEnabled,
-			Mode:                          strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
-			ProjectsRoot:                  value("SUBSYSTEM_PROJECTS_ROOT", ""),
-			GatewayScriptPath:             value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
-			GatewayIncludePath:            value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
-			SocketPath:                    value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
-			ProductionDeployRoot:          value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
-			ProductionRuntimeEnv:          value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
-			ProductionReleaseEnv:          value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
-			ProductionComposeFile:         value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
-			ProductionAllowedTenant:       value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
-			ProductionProfilesDirectory:   value("SUBSYSTEM_PRODUCTION_PROFILES_DIR", ""),
-			PlatformComposeProject:        value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
-			PlatformFrontendService:       value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
-			PlatformDockerNetwork:         value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
-			DockerBinary:                  value("SUBSYSTEM_DOCKER_BINARY", "docker"),
-			Timeout:                       subsystemAutomationTimeout,
-			InitialAdminRolesFromManifest: value("SUBSYSTEM_INITIAL_ADMIN_ROLES_FROM_MANIFEST", "") == "true",
-			DefaultIssuerAlias:            strings.ToLower(value("SUBSYSTEM_DEFAULT_ISSUER_ALIAS", "platform")),
+			Enabled:                 subsystemAutomationEnabled,
+			Mode:                    strings.ToLower(value("SUBSYSTEM_ONBOARDING_MODE", "local")),
+			ProjectsRoot:            value("SUBSYSTEM_PROJECTS_ROOT", ""),
+			GatewayScriptPath:       value("SUBSYSTEM_GATEWAY_SCRIPT_PATH", ""),
+			GatewayIncludePath:      value("SUBSYSTEM_GATEWAY_INCLUDE_PATH", ""),
+			SocketPath:              value("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock"),
+			ProductionDeployRoot:    value("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", ""),
+			ProductionRuntimeEnv:    value("SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH", ""),
+			ProductionContractEnv:   value("SUBSYSTEM_PRODUCTION_CONTRACT_ENV_PATH", ""),
+			ProductionReleaseEnv:    value("SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH", ""),
+			ProductionComposeFile:   value("SUBSYSTEM_PRODUCTION_COMPOSE_FILE", ""),
+			ProductionAllowedTenant: value("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""),
+			ProductionApplicationCode: value("SUBSYSTEM_PRODUCTION_APPLICATION_CODE", ""),
+			ProductionApplicationName: value("SUBSYSTEM_PRODUCTION_APPLICATION_NAME", ""),
+			ProductionDescription:     value("SUBSYSTEM_PRODUCTION_APPLICATION_DESCRIPTION", ""),
+			ProductionEnvironment:     strings.ToLower(value("SUBSYSTEM_PRODUCTION_ENVIRONMENT", "")),
+			ProductionUpstreamURL:     value("SUBSYSTEM_PRODUCTION_UPSTREAM_URL", ""),
+			ProductionPathPrefix:      value("SUBSYSTEM_PRODUCTION_PATH_PREFIX", ""),
+			ProductionClientType:      strings.ToLower(value("SUBSYSTEM_PRODUCTION_CLIENT_TYPE", "")),
+			PlatformComposeProject:  value("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
+			PlatformFrontendService: value("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
+			PlatformDockerNetwork:   value("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
+			DockerBinary:            value("SUBSYSTEM_DOCKER_BINARY", "docker"),
+			Timeout:                 subsystemAutomationTimeout,
 		},
-		FileStorageRoot:       resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
-		CORSOrigins:           commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
-		PortalApplicationCode: value("PLATFORM_PORTAL_APPLICATION_CODE", "customer_portal"),
+		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
+		CORSOrigins:     commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -346,9 +254,8 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// Validate 在创建网络监听和数据库连接前拒绝不安全配置。HTTPS 与 Secure Cookie 由部署环境
-// 显式配置：当前兼容 HTTP 网关/内网部署，不依据 APP_ENV 隐式改变协议策略；CORS 使用凭据时
-// 仍禁止通配源，部署自动化只有在所选模式所需路径完整时才允许启用。
+// Validate 在创建网络监听和数据库连接前拒绝不安全配置。生产模式额外强制 HTTPS 与 Secure Cookie；
+// CORS 使用凭据时禁止通配源；部署自动化只有在所选模式所需路径完整时才允许启用。
 func (cfg Config) Validate() error {
 	if cfg.AppName == "" {
 		return fmt.Errorf("APP_NAME must not be empty")
@@ -393,6 +300,17 @@ func (cfg Config) Validate() error {
 	if strings.EqualFold(cfg.Auth.SessionCookieSameSite, "none") && !cfg.Auth.SessionCookieSecure {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when AUTH_SESSION_COOKIE_SAME_SITE is None")
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Environment), "production") {
+		if !cfg.Auth.SessionCookieSecure {
+			return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when APP_ENV is production")
+		}
+		if !strings.EqualFold(publicBaseURL.Scheme, "https") {
+			return fmt.Errorf("APP_PUBLIC_BASE_URL must use HTTPS when APP_ENV is production")
+		}
+		if !strings.EqualFold(oidcIssuer.Scheme, "https") {
+			return fmt.Errorf("OIDC_ISSUER must use HTTPS when APP_ENV is production")
+		}
+	}
 	if cfg.Logging.Directory == "" || cfg.FileStorageRoot == "" {
 		return fmt.Errorf("LOG_DIRECTORY and FILE_STORAGE_ROOT must not be empty")
 	}
@@ -418,9 +336,10 @@ func (cfg Config) Validate() error {
 				return fmt.Errorf("local subsystem onboarding automation configuration is incomplete")
 			}
 		case "production":
-			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" ||
-				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" ||
-				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionProfilesDirectory) == "" {
+			if strings.TrimSpace(cfg.SubsystemOnboarding.ProductionDeployRoot) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionAllowedTenant) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionApplicationCode) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionApplicationName) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionEnvironment) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionUpstreamURL) == "" ||
+				strings.TrimSpace(cfg.SubsystemOnboarding.ProductionPathPrefix) == "" || strings.TrimSpace(cfg.SubsystemOnboarding.ProductionClientType) == "" {
 				return fmt.Errorf("production subsystem onboarding automation configuration is incomplete")
 			}
 		default:
@@ -438,41 +357,6 @@ func (cfg Config) Validate() error {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("APP_CORS_ALLOWED_ORIGINS contains invalid origin %q", origin)
 		}
-	}
-	switch cfg.SubsystemOnboarding.DefaultIssuerAlias {
-	case "", "platform", "basic_platform", "keycloak":
-	default:
-		return fmt.Errorf("SUBSYSTEM_DEFAULT_ISSUER_ALIAS must be platform or keycloak")
-	}
-	if strings.EqualFold(cfg.SubsystemOnboarding.DefaultIssuerAlias, "keycloak") && !cfg.Keycloak.Enabled {
-		return fmt.Errorf("SUBSYSTEM_DEFAULT_ISSUER_ALIAS=keycloak requires KEYCLOAK_MANAGEMENT_ENABLED=true")
-	}
-	if cfg.Keycloak.Enabled {
-		for key, value := range map[string]string{
-			"KEYCLOAK_ADMIN_URL":  cfg.Keycloak.AdminURL,
-			"KEYCLOAK_PUBLIC_URL": cfg.Keycloak.PublicURL,
-			"KEYCLOAK_REALM":      cfg.Keycloak.Realm,
-		} {
-			if strings.TrimSpace(value) == "" {
-				return fmt.Errorf("%s must not be empty when KEYCLOAK_MANAGEMENT_ENABLED is true", key)
-			}
-		}
-		hasClientID := strings.TrimSpace(cfg.Keycloak.AdminClientID) != ""
-		hasClientSecret := strings.TrimSpace(cfg.Keycloak.AdminClientSecret) != ""
-		hasUsername := strings.TrimSpace(cfg.Keycloak.AdminUsername) != ""
-		hasPassword := strings.TrimSpace(cfg.Keycloak.AdminPassword) != ""
-		if hasClientID != hasClientSecret || hasUsername != hasPassword || !(hasClientID && hasClientSecret) && !(hasUsername && hasPassword) {
-			return fmt.Errorf("KEYCLOAK_MANAGEMENT_ENABLED requires a complete KEYCLOAK_ADMIN_CLIENT_ID/KEYCLOAK_ADMIN_CLIENT_SECRET pair or KEYCLOAK_ADMIN_USERNAME/KEYCLOAK_ADMIN_PASSWORD pair")
-		}
-		for key, raw := range map[string]string{"KEYCLOAK_ADMIN_URL": cfg.Keycloak.AdminURL, "KEYCLOAK_PUBLIC_URL": cfg.Keycloak.PublicURL} {
-			parsed, parseErr := url.ParseRequestURI(raw)
-			if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-				return fmt.Errorf("%s must be an absolute URL without query or fragment", key)
-			}
-		}
-	}
-	if cfg.Keycloak.OutageLoginPolicy != KeycloakOutagePolicyContinueExistingPlatformSessions {
-		return fmt.Errorf("KEYCLOAK_OUTAGE_LOGIN_POLICY must be %q", KeycloakOutagePolicyContinueExistingPlatformSessions)
 	}
 	return nil
 }
