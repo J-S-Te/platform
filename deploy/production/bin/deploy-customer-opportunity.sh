@@ -72,6 +72,17 @@ release_permission_error() {
   exit 1
 }
 
+runtime_permission_error() {
+  local target="$1" current_user current_group owner mode
+  current_user="$(id -un 2>/dev/null || printf unknown)"
+  current_group="$(id -gn 2>/dev/null || printf unknown)"
+  owner="$(stat -c '%U:%G' "$target" 2>/dev/null || printf unknown)"
+  mode="$(stat -c '%a' "$target" 2>/dev/null || printf unknown)"
+  echo "运行配置权限不足：$target（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "请使用 root 执行：chown ${current_user}:${current_group} $target && chmod 600 $target" >&2
+  exit 1
+}
+
 [[ -r "$release_file" && -w "$deploy_dir" ]] || release_permission_error
 
 install -d -m 700 "$deploy_dir/runtime" "$deploy_dir/backups" "$deploy_dir/backups/releases"
@@ -90,6 +101,7 @@ initialize_runtime_file() {
     echo "拒绝符号链接运行配置：$target" >&2
     exit 1
   }
+  [[ -r "$target" && -w "$deploy_dir/runtime" ]] || runtime_permission_error "$target"
   if ! chmod 600 "$target" 2>/dev/null; then
     if command -v sudo >/dev/null && sudo -n chmod 600 "$target" 2>/dev/null; then
       return 0
