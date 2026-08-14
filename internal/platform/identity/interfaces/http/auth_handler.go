@@ -334,8 +334,8 @@ func (handler *Handler) exchangeOIDCCode(ctx context.Context, request *http.Requ
 		return "", "", fmt.Errorf("OIDC token endpoint returned %s", response.Status)
 	}
 	var payload struct {
-		AccessToken string `json:\"access_token\"`
-		IDToken     string `json:\"id_token\"`
+		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil || payload.AccessToken == "" {
 		return "", "", errors.New("OIDC token response has no access_token")
