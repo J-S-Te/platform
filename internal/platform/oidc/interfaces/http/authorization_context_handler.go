@@ -86,12 +86,23 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	for _, scope := range context.DataScopes {
 		scopes = append(scopes, map[string]string{"role_code": scope.RoleCode, "scope_type": scope.ScopeType, "scope_id": scope.ScopeID, "environment_code": scope.EnvironmentCode})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"sub": tokenSubject, "identity_id": subjectID, "tenant_id": context.TenantID,
 		"client_id": context.ClientID, "application_code": context.ApplicationCode, "environment_code": context.EnvironmentCode,
 		"person_id": context.PersonID, "roles": roles, "permissions": permissions,
 		"data_scopes": scopes, "authorization_revision": context.AuthorizationRevision,
-	}, true)
+	}
+	// customer_ref 只在开关启用且解析到 ACTIVE 绑定时出现；解析失败一律省略声明并记日志，
+	// 消费方按无绑定 fail closed，不因平台侧临时故障扩大为整个授权上下文 5xx。
+	if h.emitCustomerRef {
+		customerRef, refErr := h.customerBindingResolver.ResolveCustomerBinding(r.Context(), subjectTenantID, subjectID, context.ApplicationCode)
+		if refErr == nil && customerRef != "" && customerRef == strings.TrimSpace(customerRef) && len(customerRef) <= 64 {
+			response["customer_ref"] = customerRef
+		} else if refErr != nil {
+			h.logger.Warn("customer binding resolution failed; customer_ref claim omitted", "error", refErr, "client_id", clientID, "subject", subjectID)
+		}
+	}
+	writeJSON(w, http.StatusOK, response, true)
 }
 
 func containsExactAudience(audience []string, expected string) bool {
