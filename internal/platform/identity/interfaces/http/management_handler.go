@@ -227,9 +227,13 @@ type orgUnitResponse struct {
 	ParentID  *string `json:"parent_id,omitempty"`
 	Code      string  `json:"code"`
 	Name      string  `json:"name"`
-	SortOrder int     `json:"sort_order"`
-	Status    string  `json:"status"`
-	Version   uint64  `json:"version"`
+	// Path and depth are persisted hierarchy metadata. Returning them lets exports
+	// reproduce the authoritative organization tree even when the result is scoped.
+	Path      string `json:"path,omitempty"`
+	Depth     uint   `json:"depth"`
+	SortOrder int    `json:"sort_order"`
+	Status    string `json:"status"`
+	Version   uint64 `json:"version"`
 }
 type positionResponse struct {
 	PositionID string `json:"position_id"`
@@ -1061,7 +1065,7 @@ func toAccountResponse(value domain.Account) accountResponse {
 	return response
 }
 func toOrgUnitResponse(value domain.OrgUnit) orgUnitResponse {
-	return orgUnitResponse{OrgUnitID: value.ID, ParentID: value.ParentID, Code: value.Code, Name: value.Name, SortOrder: value.SortOrder, Status: value.Status, Version: value.Version}
+	return orgUnitResponse{OrgUnitID: value.ID, ParentID: value.ParentID, Code: value.Code, Name: value.Name, Path: value.Path, Depth: value.Depth, SortOrder: value.SortOrder, Status: value.Status, Version: value.Version}
 }
 func toPositionResponse(value domain.Position) positionResponse {
 	return positionResponse{PositionID: value.ID, OrgUnitID: value.OrgUnitID, Code: value.Code, Name: value.Name, Status: value.Status, Version: value.Version}

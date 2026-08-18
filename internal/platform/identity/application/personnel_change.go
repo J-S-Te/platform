@@ -73,7 +73,8 @@ func NewPersonnelChangeService(repo PersonnelChangeRepository, ids IDGenerator, 
 	return &PersonnelChangeService{repo: repo, ids: ids, clock: clock, handover: handover}, nil
 }
 func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeCreateInput) (PersonnelChangeRequest, error) {
-	// 创建阶段只生成草稿；提交、审批、交接和执行必须通过后续显式状态转换完成。
+	// 人员异动由具备管理权限的管理员直接配置，不再创建待审批草稿；
+	// 进入待生效后由 worker 按 effective_at 执行，避免把管理员配置误导成审批流程。
 	in.ChangeType = strings.ToUpper(strings.TrimSpace(in.ChangeType))
 	in.Reason = strings.TrimSpace(in.Reason)
 	if in.TenantID == "" || in.OperatorID == "" || in.UserID == "" || in.Reason == "" || in.EffectiveAt.IsZero() {
@@ -89,10 +90,7 @@ func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeC
 	if err != nil {
 		return PersonnelChangeRequest{}, fmt.Errorf("generate personnel change id: %w", err)
 	}
-	status := domain.PersonnelChangeDraft
-	if in.EffectiveAt.After(now) {
-		status = domain.PersonnelChangeDraft
-	}
+	status := domain.PersonnelChangeScheduled
 	return s.repo.Create(ctx, PersonnelChangeRequest{ID: id, TenantID: in.TenantID, UserID: in.UserID, SourceMembershipID: in.SourceMembershipID, TargetOrgUnitID: in.TargetOrgUnitID, TargetPositionID: in.TargetPositionID, ChangeType: in.ChangeType, Status: status, Reason: in.Reason, ApprovalReference: in.ApprovalReference, SubmittedBy: in.OperatorID, EffectiveAt: &in.EffectiveAt, Version: 1, CreatedAt: now, UpdatedAt: now})
 }
 func (s *PersonnelChangeService) List(ctx context.Context, tenant, status, changeType, keyword string) ([]PersonnelChangeRequest, error) {
