@@ -244,7 +244,16 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		if err := tx.Table("authz_authorization_catalog").Clauses(gormOnConflictCatalog()).Create(metadata).Error; err != nil {
 			return fmt.Errorf("save authorization catalog metadata: %w", err)
 		}
-		return bumpRevision(tx, tenantID, app.ID, now, "authorization catalog synchronized")
+		if err := bumpRevision(tx, tenantID, app.ID, now, "authorization catalog synchronized"); err != nil {
+			return err
+		}
+		// A catalog publish can change the permissions behind an existing role (or
+		// disable a role/permission).  The users' database bindings did not change,
+		// so identity mutation hooks cannot enqueue these projections for us.  Queue
+		// every active user for every synchronized Client in this same transaction;
+		// otherwise the first login after a catalog edit can still receive stale
+		// Keycloak claims until an unrelated user change happens.
+		return enqueueCatalogProjectionUsers(tx, s.ids, tenantID, app.ID, now)
 	}); err != nil {
 		s.recordCatalogFailure(ctx, tenantID, app, operatorID, input, err)
 		return CatalogView{}, err
@@ -260,6 +269,37 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		Metadata: map[string]any{"catalog_version": input.CatalogVersion, "checksum": input.Checksum, "source_type": input.SourceType, "source_identifier": input.SourceIdentifier, "idempotent": false},
 	})
 	return view, nil
+}
+
+// enqueueCatalogProjectionUsers turns an application catalog publish into a
+// durable projection request. Keeping this in the catalog transaction makes a
+// committed catalog revision and its Keycloak invalidation inseparable.
+func enqueueCatalogProjectionUsers(tx *gorm.DB, ids IdentifierGenerator, tenantID, applicationID string, now time.Time) error {
+	var userIDs []string
+	if err := tx.Table("iam_user").Where("tenant_id = ? AND status = ?", tenantID, activeStatus).Order("id ASC").Pluck("id", &userIDs).Error; err != nil {
+		return fmt.Errorf("load users for Keycloak catalog projection: %w", err)
+	}
+	var environmentIDs []string
+	if err := tx.Table("keycloak_application_client_mapping").Where("tenant_id = ? AND application_id = ? AND status = ?", tenantID, applicationID, "SYNCED").Order("environment_id ASC").Pluck("environment_id", &environmentIDs).Error; err != nil {
+		return fmt.Errorf("load Keycloak catalog projection targets: %w", err)
+	}
+	for _, userID := range userIDs {
+		for _, environmentID := range environmentIDs {
+			id, err := ids.New(now)
+			if err != nil {
+				return fmt.Errorf("generate Keycloak catalog projection ID: %w", err)
+			}
+			if err := tx.Table("keycloak_authorization_outbox").Create(map[string]any{
+				"id": id, "tenant_id": tenantID, "identity_id": userID,
+				"application_id": applicationID, "environment_id": environmentID,
+				"event_type": "AUTHORIZATION_CATALOG_CHANGED", "authorization_revision": 0,
+				"status": "PENDING", "available_at": now, "attempts": 0, "created_at": now,
+			}).Error; err != nil {
+				return fmt.Errorf("enqueue Keycloak catalog projection: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // recordCatalogFailure stores the latest failed synchronization attempt without replacing the

@@ -1420,7 +1420,7 @@ func applyMembershipFilter(database *gorm.DB, tenantID string, query application
 	database = database.Where("m.tenant_id = ?", tenantID)
 	if query.Keyword != "" {
 		like := "%" + query.Keyword + "%"
-		database = database.Where("u.display_name LIKE ? OR o.name LIKE ?", like, like)
+		database = database.Where("u.id LIKE ? OR u.display_name LIKE ? OR o.name LIKE ? OR p.name LIKE ?", like, like, like, like)
 	}
 	if query.Status != "" {
 		database = database.Where("m.status = ?", query.Status)
