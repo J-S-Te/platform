@@ -42,7 +42,7 @@ type PersonnelChangePermissionPreview struct {
 }
 type PersonnelChangeRepository interface {
 	Create(context.Context, PersonnelChangeRequest) (PersonnelChangeRequest, error)
-	List(context.Context, string, string) ([]PersonnelChangeRequest, error)
+	List(context.Context, string, string, string, string) ([]PersonnelChangeRequest, error)
 	Get(context.Context, string, string) (PersonnelChangeRequest, error)
 	UpdateStatus(context.Context, string, string, string, string, time.Time) (PersonnelChangeRequest, error)
 	Execute(context.Context, PersonnelChangeRequest, string, time.Time) (PersonnelChangeRequest, error)
@@ -95,8 +95,8 @@ func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeC
 	}
 	return s.repo.Create(ctx, PersonnelChangeRequest{ID: id, TenantID: in.TenantID, UserID: in.UserID, SourceMembershipID: in.SourceMembershipID, TargetOrgUnitID: in.TargetOrgUnitID, TargetPositionID: in.TargetPositionID, ChangeType: in.ChangeType, Status: status, Reason: in.Reason, ApprovalReference: in.ApprovalReference, SubmittedBy: in.OperatorID, EffectiveAt: &in.EffectiveAt, Version: 1, CreatedAt: now, UpdatedAt: now})
 }
-func (s *PersonnelChangeService) List(ctx context.Context, tenant, status string) ([]PersonnelChangeRequest, error) {
-	return s.repo.List(ctx, tenant, status)
+func (s *PersonnelChangeService) List(ctx context.Context, tenant, status, changeType, keyword string) ([]PersonnelChangeRequest, error) {
+	return s.repo.List(ctx, tenant, status, changeType, keyword)
 }
 func (s *PersonnelChangeService) Get(ctx context.Context, tenant, id string) (PersonnelChangeRequest, error) {
 	return s.repo.Get(ctx, tenant, id)

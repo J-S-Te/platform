@@ -204,6 +204,7 @@ func NewRouter(
 			apiRouter.GET("/users", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.ListUsers))
 			apiRouter.POST("/users", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUser))
 			apiRouter.POST("/employees", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateEmployee))
+			apiRouter.POST("/employees/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateEmployeesBatch))
 			apiRouter.POST("/users/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUsersBatch))
 			apiRouter.GET("/users/:user_id", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.GetUser))
 			apiRouter.PATCH("/users/:user_id", middleware.RequirePermission("platform:user:update"), adaptHandler(managementHandler.UpdateUser))

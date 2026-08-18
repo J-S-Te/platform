@@ -47,7 +47,7 @@ func (w *PersonnelChangeWorker) Run(ctx context.Context) {
 
 // ProcessDue 执行当前已到期的 SCHEDULED 请求；仓储事务保证 Execute 幂等，多副本可安全并行。
 func (w *PersonnelChangeWorker) ProcessDue(ctx context.Context) int {
-	requests, err := w.service.List(ctx, "", domain.PersonnelChangeScheduled)
+	requests, err := w.service.List(ctx, "", domain.PersonnelChangeScheduled, "", "")
 	if err != nil {
 		w.logger.Error("list due personnel changes", "error", err)
 		return 0

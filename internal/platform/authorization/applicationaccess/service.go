@@ -351,10 +351,7 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 	for _, role := range access.Roles {
 		roles = append(roles, role.Code)
 	}
-	dataScopes := make([]tokenissuer.DataScope, 0, len(access.Roles))
-	for _, role := range access.Roles {
-		dataScopes = append(dataScopes, tokenissuer.DataScope{RoleCode: role.Code, ScopeType: role.ScopeType, ScopeID: role.ScopeID, EnvironmentCode: role.EnvironmentCode})
-	}
+	dataScopes := dataScopesFromRoles(access.Roles)
 	return s.attachOrganizationClaims(ctx, TokenAuthorization{
 		ApplicationCode: client.ApplicationCode,
 		EnvironmentCode: client.EnvironmentCode,
@@ -1622,6 +1619,25 @@ func sortedUnique(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// dataScopesFromRoles 把已解析角色视图收敛为去重的数据范围。同一角色经由不同
+// 来源（直绑、岗位模板、平台角色继承）对同一主体生效时，RoleView 按来源保留
+// 多条以便管理界面追溯，但 authorization-context 只描述有效访问边界，必须按
+// (role_code, scope_type, scope_id, environment_code) 去重，否则严格校验的
+// 子系统会因重复数据范围拒绝登录。首见顺序保持稳定。
+func dataScopesFromRoles(roles []RoleView) []tokenissuer.DataScope {
+	dataScopes := make([]tokenissuer.DataScope, 0, len(roles))
+	seen := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		key := strings.Join([]string{role.Code, role.ScopeType, role.ScopeID, role.EnvironmentCode}, "\x00")
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		dataScopes = append(dataScopes, tokenissuer.DataScope{RoleCode: role.Code, ScopeType: role.ScopeType, ScopeID: role.ScopeID, EnvironmentCode: role.EnvironmentCode})
+	}
+	return dataScopes
 }
 
 func disabledOrActive(active bool) string {

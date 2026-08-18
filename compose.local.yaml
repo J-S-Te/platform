@@ -40,6 +40,13 @@ x-customer-db-env: &customer-db-env
 x-project-db-env: &project-db-env
   - ${PROJECT_RUNTIME_ENV_FILE:-../project_management/.env.local}
 
+x-data-analysis-runtime-env: &data-analysis-runtime-env
+  - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-../data_analysis/.env.local}
+  - ${DATA_ANALYSIS_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
+
+x-data-analysis-db-env: &data-analysis-db-env
+  - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-../data_analysis/.env.local}
+
 # 基础平台迁移、初始化和受控部署助手复用同一个后端镜像，但只有 api 服务拥有构建定义。
 # 这样 Compose 每次部署只构建一次基础平台后端镜像，不会把辅助任务误认为独立业务镜像。
 x-platform-backend-runtime: &platform-backend-runtime
@@ -338,6 +345,10 @@ services:
       GIN_MODE: release
       CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
       CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
+      DASHBOARD_MACHINE_ENABLED: "true"
+      DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
+      DASHBOARD_MACHINE_CLIENT_ID: data_analysis-dev-machine
+      DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
       CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -430,6 +441,10 @@ services:
       MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
+      DASHBOARD_MACHINE_ENABLED: "true"
+      DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
+      DASHBOARD_MACHINE_CLIENT_ID: data_analysis-dev-machine
+      DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: project-management
@@ -471,6 +486,158 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
+    restart: unless-stopped
+
+  # 数据看板与统计分析：独立仓库、独立镜像。dashboard-api（嵌入桥+业务 API）+
+  # 聚合库 dashboard-mysql + Metabase（内网第三方，仅经 dashboard-api 代理访问）+ 两个 Worker。
+  # 未完成 data_analysis/dev 应用接入前不纳入默认启动（data-analysis profile 控制）。
+  dashboard-mysql:
+    image: mysql:8.4
+    profiles: ["data-analysis"]
+    environment:
+      MYSQL_DATABASE: dashboard_aggregation
+      MYSQL_USER: dashboard
+      MYSQL_PASSWORD: ${DASHBOARD_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DASHBOARD_MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - dashboard_mysql_local_data:/var/lib/mysql
+      - ../data_analysis/docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  dashboard-migrate:
+    build:
+      context: ../data_analysis
+      target: local-migrate
+    profiles: ["data-analysis"]
+    env_file: *data-analysis-runtime-env
+    environment:
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+    depends_on:
+      dashboard-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  dashboard-api:
+    build:
+      context: ../data_analysis
+      target: dashboard-api
+    profiles: ["data-analysis"]
+    env_file: *data-analysis-runtime-env
+    environment:
+      LISTEN_ADDR: :8080
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      PLATFORM_BASE_URL: http://platform-api:8080
+      APP_PUBLIC_ORIGIN: http://localhost:8081
+      OIDC_ISSUER: http://localhost:18090/realms/basic-platform
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: http://localhost:8081/data_analysis/auth/callback
+      METABASE_INTERNAL_URL: http://metabase:3000
+      # Metabase 容器以根路径提供页面；代理只在浏览器侧挂载 /data_analysis 前缀。
+      METABASE_BASE_PATH: ${METABASE_BASE_PATH:-/}
+      METABASE_EMBEDDING_SECRET: ${METABASE_EMBEDDING_SECRET}
+      MB_DASHBOARD_ID_OVERVIEW: ${MB_DASHBOARD_ID_OVERVIEW:-2}
+      MB_DASHBOARD_ID_CONTRACT: ${MB_DASHBOARD_ID_CONTRACT:-2}
+      MB_DASHBOARD_ID_PROJECT: ${MB_DASHBOARD_ID_PROJECT:-3}
+      APP_PATH_PREFIX: /data_analysis
+      COOKIE_SECURE: "false"
+    depends_on:
+      dashboard-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    expose:
+      - "8080"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: data_analysis
+      com.basic-platform.application_name: 数据看板与统计分析
+      com.basic-platform.environment: dev
+      com.basic-platform.service_name: dashboard-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: dashboard-api
+      com.basic-platform.internal_port: "8080"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /data_analysis/healthz
+      com.basic-platform.path_prefix: /data_analysis
+      com.basic-platform.oidc_callback_path: /data_analysis/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${APP_VERSION:-local}
+    networks:
+      default:
+        aliases:
+          - dashboard-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/data_analysis/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  aggregation-worker:
+    build:
+      context: ../data_analysis
+      target: aggregation-worker
+    profiles: ["data-analysis"]
+    env_file: *data-analysis-runtime-env
+    environment:
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4
+      AGGREGATION_ONCE: "false"
+      MACHINE_TOKEN_URL: http://keycloak:8080/realms/basic-platform/protocol/openid-connect/token
+      MACHINE_CLIENT_ID: ${MACHINE_CLIENT_ID}
+      MACHINE_CLIENT_SECRET: ${MACHINE_CLIENT_SECRET}
+      CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
+      PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
+      OIDC_TENANT_ID: ${OIDC_TENANT_ID}
+    depends_on:
+      dashboard-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  alert-worker:
+    build:
+      context: ../data_analysis
+      target: alert-worker
+    profiles: ["data-analysis"]
+    env_file: *data-analysis-runtime-env
+    environment:
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4
+    depends_on:
+      dashboard-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase:v0.53.7
+    profiles: ["data-analysis"]
+    environment:
+      MB_DB_TYPE: mysql
+      MB_DB_DBNAME: dashboard_metabase
+      MB_DB_HOST: dashboard-mysql
+      MB_DB_PORT: "3306"
+      MB_DB_USER: dashboard
+      MB_DB_PASS: ${DASHBOARD_MYSQL_PASSWORD}
+      MB_JAVA_TIMEZONE: Asia/Shanghai
+      MB_ENABLE_ASYNC_QUERY_EXECUTION: "false"
+      # 由本地环境文件配置；嵌入代理以根路径提供 Metabase 页面。
+      MB_SITE_URL: ${METABASE_SITE_URL:-http://localhost:8081/data_analysis}
+    depends_on:
+      dashboard-mysql:
+        condition: service_healthy
+    ports:
+      - "3000:3000"  # PoC 临时：Metabase 管理界面（启用 dashboard 嵌入后移除）
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   customer-mysql:
@@ -792,6 +959,8 @@ volumes:
     name: basic-platform-local-portal-mysql-data
   project_mysql_local_data:
     name: basic-platform-local-project-mysql-data
+  dashboard_mysql_local_data:
+    name: basic-platform-local-dashboard-mysql-data
   keycloak_mysql_local_data:
     name: basic-platform-local-keycloak-mysql-data
   subsystem_provisioner_socket:

@@ -19,6 +19,9 @@ portal_env_file="${project_root}/docker/.env.portal.local"
 project_management_root="${workspace_root}/project_management"
 project_template_file="${project_management_root}/.env.example"
 project_env_file="${project_management_root}/.env.local"
+data_analysis_root="${workspace_root}/data_analysis"
+data_analysis_template_file="${data_analysis_root}/.env.example"
+data_analysis_env_file="${data_analysis_root}/.env.local"
 presale_worker_env_file="${customer_root}/.env.presale-worker"
 lan_override_file="${project_root}/docker/.env.lan"
 customer_lan_override_file="${project_root}/docker/.env.customer.lan"
@@ -70,6 +73,7 @@ up/restart 选项：
   --customer-env-file PATH        客户与商机后端环境文件（默认 platform/docker/.env.customer.local）
   --portal-env-file PATH          客户自助门户环境文件（默认 platform/docker/.env.portal.local）
   --project-env-file PATH         项目管理系统环境文件（默认 project_management/.env.local）
+  --data-analysis-env-file PATH  数据看板与统计分析环境文件（默认 data_analysis/.env.local）
   --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
 
@@ -85,11 +89,12 @@ up/restart 选项：
 
 定向更新：
   refresh-api           只重建基础平台后端镜像，执行基础平台迁移，并重启 api/受控 provisioner
-  refresh-frontend      只重建并重启统一 frontend；四个前端模块同时更新
+  refresh-frontend      只重建并重启统一 frontend；六个前端模块同时更新
   refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
   refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
   refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
   refresh-project-api   重建项目管理系统后端、执行项目迁移；仅在已完成应用接入后启动
+  refresh-data-analysis-api  重建数据看板后端（dashboard-api + 聚合 Worker）、执行聚合库迁移；仅在已完成应用接入后启动
   start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳（up 已自动执行）
 
   各定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
@@ -102,6 +107,7 @@ up/restart 选项：
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
   project-api   项目管理系统 API + Temporal Worker（完成 project_management/dev 接入后启用）
+  dashboard-api 数据看板与统计分析 API（嵌入桥）+ aggregation-worker + alert-worker + Metabase（完成 data_analysis/dev 接入后启用）
   presale-worker 售前申请审批/PMS 投递 Worker（up 默认启动）
 
 首次启动若数据库中尚未存在超级管理员，必须提供三个管理员参数，或设置：
@@ -114,7 +120,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|start-presale-worker)
+		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|refresh-data-analysis-api|start-presale-worker)
             command_name="$1"
             shift
             ;;
@@ -173,6 +179,11 @@ while (($# > 0)); do
 		--project-env-file)
 			(($# >= 2)) || fail "$1 缺少参数"
 			project_env_file="$2"
+			shift 2
+			;;
+		--data-analysis-env-file)
+			(($# >= 2)) || fail "$1 缺少参数"
+			data_analysis_env_file="$2"
 			shift 2
 			;;
 		--presale-worker-env-file)
@@ -240,6 +251,7 @@ export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_env_file"
+export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_env_file"
 export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
@@ -378,6 +390,10 @@ compose() {
     # customer_portal/dev 接入成功后，普通 up/down/stop/ps/logs/config 自动纳入
     # portal-api。首次接入前不能强行启动，因为此时浏览器 OIDC Client、租户、
     # 角色目录和六组机器凭据尚不存在；平台与 CRM 需先运行以完成受控接入。
+    data_analysis_profile_arg=""
+    if data_analysis_configured; then
+        data_analysis_profile_arg="--profile data-analysis"
+    fi
     if portal_configured && project_configured; then
         docker compose \
             --project-name "$compose_project" \
@@ -387,10 +403,12 @@ compose() {
             --env-file "$customer_env_file" \
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
+            --env-file "$data_analysis_env_file" \
             --profile portal \
             --profile project \
             --profile presale-worker \
             --profile keycloak \
+            $data_analysis_profile_arg \
             "$@"
         return
     fi
@@ -403,9 +421,11 @@ compose() {
             --env-file "$customer_env_file" \
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
+            --env-file "$data_analysis_env_file" \
             --profile portal \
             --profile presale-worker \
             --profile keycloak \
+            $data_analysis_profile_arg \
             "$@"
         return
     fi
@@ -418,9 +438,11 @@ compose() {
             --env-file "$customer_env_file" \
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
+            --env-file "$data_analysis_env_file" \
             --profile project \
             --profile presale-worker \
             --profile keycloak \
+            $data_analysis_profile_arg \
             "$@"
         return
     fi
@@ -434,6 +456,7 @@ compose() {
         --env-file "$project_env_file" \
         --profile presale-worker \
         --profile keycloak \
+        $data_analysis_profile_arg \
         "$@"
 }
 
@@ -736,6 +759,44 @@ project_configured() {
 		[[ -n "$(env_value "$project_env_file" OIDC_CLIENT_SECRET)" ]] &&
 		[[ -n "$(env_value "$project_env_file" OIDC_REDIRECT_URI)" ]] &&
 		[[ -n "$(env_value "$project_env_file" OIDC_TENANT_ID)" ]]
+}
+
+ensure_data_analysis_env_file() {
+	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成数据看板数据库密码"
+	if [[ ! -f "$data_analysis_env_file" ]]; then
+		[[ -f "$data_analysis_template_file" ]] || fail "数据看板环境模板不存在：$data_analysis_template_file"
+		cp "$data_analysis_template_file" "$data_analysis_env_file"
+		chmod 600 "$data_analysis_env_file"
+
+		local password root_password
+		password="$(random_hex 24)"
+		root_password="$(random_hex 32)"
+		replace_line_in_file "$data_analysis_env_file" DASHBOARD_MYSQL_PASSWORD "$password"
+		replace_line_in_file "$data_analysis_env_file" DASHBOARD_MYSQL_ROOT_PASSWORD "$root_password"
+		replace_line_in_file "$data_analysis_env_file" OIDC_CODEC_KEY "$(random_hex 32)"
+		replace_line_in_file "$data_analysis_env_file" METABASE_EMBEDDING_SECRET "$(random_hex 32)"
+		replace_line_in_file "$data_analysis_env_file" PLATFORM_BASE_URL "http://localhost:8081"
+		replace_line_in_file "$data_analysis_env_file" OIDC_ISSUER "http://localhost:18090/realms/basic-platform"
+		replace_line_in_file "$data_analysis_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
+		replace_line_in_file "$data_analysis_env_file" OIDC_REDIRECT_URI "http://localhost:8081/data_analysis/auth/callback"
+		replace_line_in_file "$data_analysis_env_file" APP_PATH_PREFIX "/data_analysis"
+		replace_line_in_file "$data_analysis_env_file" APP_PUBLIC_ORIGIN "http://localhost:8081"
+		replace_line_in_file "$data_analysis_env_file" COOKIE_SECURE "false"
+		log "已生成数据看板环境文件：$data_analysis_env_file"
+		log "请先在基础平台完成数据看板接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
+	fi
+
+	if [[ -z "$(env_value "$data_analysis_env_file" OIDC_CODEC_KEY)" || "$(env_value "$data_analysis_env_file" OIDC_CODEC_KEY)" == REPLACE_WITH_* ]]; then
+		replace_line_in_file "$data_analysis_env_file" OIDC_CODEC_KEY "$(random_hex 32)"
+	fi
+}
+
+data_analysis_configured() {
+	# 数据看板后端强校验 OIDC 四项接入值；缺少任何一项都视为尚未完成 data_analysis/dev 接入。
+	[[ -n "$(env_value "$data_analysis_env_file" OIDC_CLIENT_ID)" ]] &&
+		[[ -n "$(env_value "$data_analysis_env_file" OIDC_CLIENT_SECRET)" ]] &&
+		[[ -n "$(env_value "$data_analysis_env_file" OIDC_REDIRECT_URI)" ]] &&
+		[[ -n "$(env_value "$data_analysis_env_file" OIDC_TENANT_ID)" ]]
 }
 
 portal_configured() {
@@ -1069,7 +1130,7 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local build_services=(api contract-api customer-api portal-api project-api frontend presale-worker presale-integration-mock)
+    local build_services=(api contract-api customer-api portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
     if [[ "$force_build" == true ]]; then
         log "重新构建统一前端、平台/合同/CRM/门户/项目后端及售前投递 Worker 镜像"
     else
@@ -1313,6 +1374,14 @@ verify_gateway_routes() {
 			fail "项目管理系统登录状态接口返回 ${project_session_status}，预期未登录状态为 401"
 	fi
 
+	if data_analysis_configured; then
+		wait_for_frontend_status /data_analysis/healthz 200 "数据看板健康检查路径"
+		data_analysis_session_status="$(frontend_http_status /data_analysis/api/v1/auth/me)" || \
+			fail "无法访问数据看板登录状态接口"
+		[[ "$data_analysis_session_status" == "401" ]] || \
+			fail "数据看板登录状态接口返回 ${data_analysis_session_status}，预期未登录状态为 401"
+	fi
+
     log "统一网关校验通过：platform API=401，contract healthz=200，customer healthz=200"
 }
 
@@ -1322,6 +1391,7 @@ start_stack() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	ensure_data_analysis_env_file
 	validate_all_local_runtime_targets
 	validate_all_keycloak_runtimes
 	if portal_configured && ! portal_compensation_configured; then
@@ -1366,6 +1436,15 @@ start_stack() {
 	else
 		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
 	fi
+	if data_analysis_configured; then
+		log "启动已接入的数据看板后端（dashboard-api + 聚合 Worker + Metabase）"
+		# 业务 Schema 由独立迁移二进制管理；MySQL 初始化只创建 Metabase 元数据库。
+		compose_run up -d --wait dashboard-mysql
+		compose_run run --rm --no-deps dashboard-migrate
+		compose_run up -d --wait --no-deps dashboard-api aggregation-worker alert-worker metabase
+	else
+		log "数据看板尚未接入，跳过 dashboard-api；可在应用接入中创建 data_analysis/dev"
+	fi
     log "启动统一前端"
     compose_up_wait "统一前端" frontend
     verify_gateway_routes
@@ -1375,6 +1454,7 @@ start_stack() {
 	log "客户与商机管理前端：${frontend_public_origin}/customer-opportunity/"
 	if portal_configured; then log "客户自助门户：${frontend_public_origin}/customer-portal/"; fi
 	if project_configured; then log "项目管理系统：${frontend_public_origin}/project_management/"; fi
+	if data_analysis_configured; then log "数据看板与统计分析：${frontend_public_origin}/data_analysis/"; fi
 }
 
 refresh_platform_api() {
@@ -1527,6 +1607,27 @@ refresh_project_backend() {
 	compose_run ps project-api project-mysql
 }
 
+refresh_data_analysis_backend() {
+	ensure_platform_env_file
+	ensure_contract_env_file false
+	ensure_customer_env_file
+	ensure_portal_env_file
+	ensure_project_env_file
+	ensure_data_analysis_env_file
+	data_analysis_configured || fail "数据看板尚未完成 data_analysis/dev 应用接入，不能启动 dashboard-api"
+	prepare_go_backend_base_images "数据看板后端"
+
+	log "重新构建数据看板独立后端镜像"
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile data-analysis --ansi never build dashboard-migrate dashboard-api aggregation-worker alert-worker
+	log "启动数据看板 MySQL并执行版本化迁移"
+	compose_run up -d --wait dashboard-mysql
+	compose_run run --rm --no-deps dashboard-migrate
+	log "重建 dashboard-api 与 Worker；统一前端、基础平台后端和统一登录接入配置保持不变"
+	compose_run up -d --wait --no-deps dashboard-api aggregation-worker alert-worker metabase
+	verify_gateway_routes
+	compose_run ps dashboard-api aggregation-worker alert-worker dashboard-mysql
+}
+
 start_presale_worker() {
 	local skip_build=false skip_migrate=false option
 	for option in "$@"; do
@@ -1668,6 +1769,9 @@ case "$command_name" in
 		;;
 	refresh-project-api)
 		refresh_project_backend
+		;;
+	refresh-data-analysis-api)
+		refresh_data_analysis_backend
 		;;
 	start-presale-worker)
 		start_presale_worker "$@"
