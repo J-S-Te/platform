@@ -705,6 +705,11 @@ services:
         condition: service_healthy
     expose:
       - "8090"
+    # npm run dev 在宿主机上运行时不能访问 Compose 内网的 customer-api；
+    # 发布一个仅本机可访问的端口，供 Vite 代理使用。统一 frontend 容器仍
+    # 通过 Docker 服务名访问，不改变 8081 生产式本地入口。
+    ports:
+      - "127.0.0.1:${CUSTOMER_HTTP_PORT:-18083}:8090"
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: customer_and_opportunity
