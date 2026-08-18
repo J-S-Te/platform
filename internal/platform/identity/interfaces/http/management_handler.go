@@ -18,7 +18,10 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
-const maxManagementRequestBytes = 64 << 10
+// Batch employee imports contain organization, position and role metadata for up to
+// MaxBatchUserCreateItems rows. Keep a hard limit, but allow a normal 100-row CSV/JSON
+// payload to pass without silently failing at the HTTP decoder.
+const maxManagementRequestBytes = 2 << 20
 
 // ManagementHandler is the HTTP adapter for P0 IAM user, account and organization operations.
 type ManagementHandler struct {
@@ -249,6 +252,7 @@ type membershipResponse struct {
 	OrgUnit              referenceResponse `json:"org_unit"`
 	Position             referenceResponse `json:"position"`
 	MembershipType       string            `json:"membership_type"`
+	IsPrimary            bool              `json:"is_primary"`
 	EffectiveFrom        *string           `json:"effective_from,omitempty"`
 	EffectiveTo          *string           `json:"effective_to,omitempty"`
 	Status               string            `json:"status"`
@@ -450,39 +454,19 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 	items := make([]application.EmployeeCreateInput, 0, len(payload.Items))
 	hasRoles := false
 	for _, item := range payload.Items {
-		orgResult, err := handler.service.ListOrgUnits(request.Context(), principal.Tenant.ID, application.PageRequest{Page: 1, PageSize: 100, Keyword: strings.TrimSpace(item.Organization)})
+		orgID, err := resolveExactOrganization(request.Context(), handler.service, principal.Tenant.ID, item.Organization)
 		if err != nil {
 			handler.writeError(writer, request, err)
 			return
-		}
-		var orgID string
-		for _, org := range orgResult.Items {
-			if strings.TrimSpace(org.Name) == strings.TrimSpace(item.Organization) {
-				if orgID != "" {
-					handler.validation(writer, request)
-					return
-				}
-				orgID = org.ID
-			}
 		}
 		if orgID == "" {
 			handler.validation(writer, request)
 			return
 		}
-		positionResult, err := handler.service.ListPositions(request.Context(), principal.Tenant.ID, application.PageRequest{Page: 1, PageSize: 100, Keyword: strings.TrimSpace(item.Position)})
+		positionID, err := resolveExactPosition(request.Context(), handler.service, principal.Tenant.ID, orgID, item.Position)
 		if err != nil {
 			handler.writeError(writer, request, err)
 			return
-		}
-		var positionID string
-		for _, position := range positionResult.Items {
-			if position.OrgUnitID == orgID && strings.TrimSpace(position.Name) == strings.TrimSpace(item.Position) {
-				if positionID != "" {
-					handler.validation(writer, request)
-					return
-				}
-				positionID = position.ID
-			}
 		}
 		if positionID == "" {
 			handler.validation(writer, request)
@@ -509,6 +493,62 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		responses = append(responses, toUserResponse(item))
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已批量创建", userBatchCreateResponse{Items: responses, Total: len(responses)})
+}
+
+// The list endpoints are paginated. Import resolution must inspect every matching page;
+// taking only the first 100 rows made valid names disappear once a tenant grew beyond one
+// page. Exact name matching is retained so a partial keyword match can never select a wrong
+// organization or position.
+func resolveExactOrganization(ctx context.Context, service managementApplicationService, tenantID, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil
+	}
+	var found string
+	for page := 1; ; page++ {
+		result, err := service.ListOrgUnits(ctx, tenantID, application.PageRequest{Page: page, PageSize: 100, Keyword: name})
+		if err != nil {
+			return "", err
+		}
+		for _, org := range result.Items {
+			if strings.TrimSpace(org.Name) == name {
+				if found != "" && found != org.ID {
+					return "", application.ErrValidation
+				}
+				found = org.ID
+			}
+		}
+		if len(result.Items) == 0 || page*result.PageSize >= int(result.Total) || result.PageSize <= 0 {
+			break
+		}
+	}
+	return found, nil
+}
+
+func resolveExactPosition(ctx context.Context, service managementApplicationService, tenantID, orgID, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil
+	}
+	var found string
+	for page := 1; ; page++ {
+		result, err := service.ListPositions(ctx, tenantID, application.PageRequest{Page: page, PageSize: 100, Keyword: name})
+		if err != nil {
+			return "", err
+		}
+		for _, position := range result.Items {
+			if position.OrgUnitID == orgID && strings.TrimSpace(position.Name) == name {
+				if found != "" && found != position.ID {
+					return "", application.ErrValidation
+				}
+				found = position.ID
+			}
+		}
+		if len(result.Items) == 0 || page*result.PageSize >= int(result.Total) || result.PageSize <= 0 {
+			break
+		}
+	}
+	return found, nil
 }
 
 func valueOrDefault(value *string, fallback string) string {
@@ -1071,5 +1111,5 @@ func toPositionResponse(value domain.Position) positionResponse {
 	return positionResponse{PositionID: value.ID, OrgUnitID: value.OrgUnitID, Code: value.Code, Name: value.Name, Status: value.Status, Version: value.Version}
 }
 func toMembershipResponse(value domain.Membership) membershipResponse {
-	return membershipResponse{MembershipID: value.ID, User: referenceResponse{ID: value.User.ID, Name: value.User.Name}, OrgUnit: referenceResponse{ID: value.OrgUnit.ID, Name: value.OrgUnit.Name}, Position: referenceResponse{ID: value.Position.ID, Name: value.Position.Name}, MembershipType: value.MembershipType, EffectiveFrom: dateString(value.EffectiveFrom), EffectiveTo: dateString(value.EffectiveTo), Status: value.Status, InheritAuthorization: value.InheritAuthorization, Version: value.Version}
+	return membershipResponse{MembershipID: value.ID, User: referenceResponse{ID: value.User.ID, Name: value.User.Name}, OrgUnit: referenceResponse{ID: value.OrgUnit.ID, Name: value.OrgUnit.Name}, Position: referenceResponse{ID: value.Position.ID, Name: value.Position.Name}, MembershipType: value.MembershipType, IsPrimary: value.IsPrimary, EffectiveFrom: dateString(value.EffectiveFrom), EffectiveTo: dateString(value.EffectiveTo), Status: value.Status, InheritAuthorization: value.InheritAuthorization, Version: value.Version}
 }

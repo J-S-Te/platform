@@ -66,6 +66,7 @@ type TemplateRoleInput struct {
 	Status        string     `json:"status,omitempty"`
 }
 
+// Legacy role-inheritance DTOs remain internal for migration compatibility; the HTTP feature is removed.
 type RoleInheritanceInput struct {
 	SourceRoleID        string     `json:"source_role_id"`
 	TargetApplicationID string     `json:"target_application_id"`
@@ -76,7 +77,6 @@ type RoleInheritanceInput struct {
 	ValidUntil          *time.Time `json:"valid_until,omitempty"`
 	Status              string     `json:"status,omitempty"`
 }
-
 type RoleInheritanceView struct {
 	MappingID             string     `json:"mapping_id"`
 	SourceApplicationID   string     `json:"source_application_id"`
@@ -95,7 +95,6 @@ type RoleInheritanceView struct {
 	ValidUntil            *time.Time `json:"valid_until,omitempty"`
 	Status                string     `json:"status"`
 }
-
 type RoleInheritanceReplaceInput struct {
 	SourceRoleID string                 `json:"source_role_id"`
 	Mappings     []RoleInheritanceInput `json:"mappings"`
@@ -225,11 +224,11 @@ type authorizationPositionRow struct {
 // position authorization template. It must not expose application management configuration or a
 // full application authorization catalog to a role-binding operator.
 type AuthorizationTargetView struct {
-	ApplicationID    string                        `json:"application_id"`
-	ApplicationCode  string                        `json:"application_code"`
-	ApplicationName  string                        `json:"application_name"`
-	CatalogVersion   string                        `json:"catalog_version,omitempty"`
-	CatalogSyncState string                        `json:"catalog_sync_status"`
+	ApplicationID    string `json:"application_id"`
+	ApplicationCode  string `json:"application_code"`
+	ApplicationName  string `json:"application_name"`
+	CatalogVersion   string `json:"catalog_version,omitempty"`
+	CatalogSyncState string `json:"catalog_sync_status"`
 	// MaxEffectiveRoles is the application-owned catalog policy limit; 0 means unlimited.
 	// It is read-only and only shown so a position template operator can see the per-user
 	// role budget before saving a mapping that would otherwise be rejected by the backend.
@@ -268,7 +267,6 @@ type templateRoleModel struct {
 	CreatedAt, UpdatedAt                                                        time.Time
 	CreatedBy, UpdatedBy                                                        *string
 }
-
 type roleInheritanceModel struct {
 	ID, TenantID, SourceApplicationID, SourceRoleID, TargetApplicationID, TargetRoleID, ScopeType, ScopeID, Status string
 	ValidFrom, ValidUntil                                                                                          *time.Time
@@ -943,12 +941,6 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 		if err := tx.Where("tenant_id=? AND template_id=? AND status=?", tenantID, template.ID, activeStatus).Find(&items).Error; err != nil {
 			return fmt.Errorf("load active template roles: %w", err)
 		}
-		var expanded []templateRoleModel
-		expanded, err = s.expandInheritedTemplateRoles(ctx, tx, tenantID, items)
-		if err != nil {
-			return err
-		}
-		items = append(items, expanded...)
 	}
 	desired := map[string]templateRoleModel{}
 	for _, item := range items {

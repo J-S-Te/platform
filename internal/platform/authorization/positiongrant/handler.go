@@ -37,36 +37,6 @@ func (h *Handler) ListAuthorizationTargets(w http.ResponseWriter, r *http.Reques
 	writeItems(w, r, items, "操作成功")
 }
 
-func (h *Handler) ListRoleInheritances(w http.ResponseWriter, r *http.Request) {
-	principal, ok := principal(w, r)
-	if !ok {
-		return
-	}
-	items, err := h.service.ListRoleInheritances(r.Context(), principal.Tenant.ID)
-	if err != nil {
-		writeHTTPError(w, r, err)
-		return
-	}
-	writeItems(w, r, items, "操作成功")
-}
-
-func (h *Handler) ReplaceRoleInheritances(w http.ResponseWriter, r *http.Request) {
-	principal, ok := principal(w, r)
-	if !ok {
-		return
-	}
-	var payload RoleInheritanceReplaceInput
-	if !decode(w, r, &payload) {
-		return
-	}
-	items, err := h.service.ReplaceRoleInheritances(r.Context(), principal.Tenant.ID, principal.User.ID, payload)
-	if err != nil {
-		writeHTTPError(w, r, err)
-		return
-	}
-	writeItems(w, r, items, "角色继承映射已保存")
-}
-
 func (h *Handler) ListAuthorizationPositions(w http.ResponseWriter, r *http.Request) {
 	principal, ok := principal(w, r)
 	if !ok {

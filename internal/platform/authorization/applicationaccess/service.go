@@ -36,8 +36,8 @@ const (
 
 	grantOriginManual    = "MANUAL"
 	grantOriginTemplate  = "TEMPLATE"
+	grantOriginInherited = "INHERITANCE" // retained only for reading legacy audit data; no longer generated
 	grantOriginSystem    = "SYSTEM"
-	grantOriginInherited = "INHERITANCE"
 
 	applicationRoleType = "APPLICATION"
 	platformRoleType    = "PLATFORM"
@@ -1093,13 +1093,6 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 	if err != nil {
 		return Access{}, err
 	}
-	if roleType != platformRoleType {
-		inheritedPlatformRoles, inheritedErr := s.loadInheritedPlatformRoles(ctx, tenantID, applicationID, userID, environmentID, now)
-		if inheritedErr != nil {
-			return Access{}, inheritedErr
-		}
-		roles = append(roles, inheritedPlatformRoles...)
-	}
 	roleIDs, roleViews, directRoles, inheritedRoles := resolveAssignedRoles(roles, subjectTypeUser)
 	state, conflicts, permissionRoleIDs, err := s.applicationRolePolicy(ctx, tenantID, applicationID, roles, roleIDs)
 	if err != nil {
@@ -1275,7 +1268,7 @@ func sourceKindForRole(row assignedRoleRow, direct bool) string {
 	switch normalizedGrantOrigin(row.GrantOrigin) {
 	case grantOriginSystem:
 		return sourceKindSystem
-	case grantOriginTemplate, grantOriginInherited:
+	case grantOriginTemplate:
 		return sourceKindInherited
 	default:
 		if direct {

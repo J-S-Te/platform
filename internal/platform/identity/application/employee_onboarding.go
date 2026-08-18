@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
+	"github.com/mozillazg/go-pinyin"
 )
 
 // EmployeeCreateInput is the atomic onboarding command used by POST /employees.  Account and
@@ -31,6 +33,8 @@ type EmployeeBatchCreateInput struct {
 	OperatorID string
 	Items      []EmployeeCreateInput
 }
+
+const importedEmployeeDefaultPassword = "!QAZxsw@1234"
 
 // EmployeeAccountCreateInput deliberately contains only local-account fields.  The new user ID
 // is generated server-side and is never accepted from the browser.
@@ -223,6 +227,29 @@ func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, inpu
 			return nil, err
 		}
 		userWrite.RoleBindingID = bindingID
+		accountName := importedAccountName(item.DisplayName)
+		if accountName == "" {
+			return nil, ErrValidation
+		}
+		if service.hasher == nil {
+			return nil, fmt.Errorf("employee account password hasher is unavailable")
+		}
+		digest, metadata, err := service.hasher.Hash(importedEmployeeDefaultPassword)
+		if err != nil {
+			return nil, fmt.Errorf("hash employee initial password: %w", err)
+		}
+		accountID, err := service.ids.New(now)
+		if err != nil {
+			return nil, err
+		}
+		credentialID, err := service.ids.New(now)
+		if err != nil {
+			return nil, err
+		}
+		writeAccount := &EmployeeAccountCreateInput{AccountName: accountName, InitialPassword: importedEmployeeDefaultPassword}
+		if err := validateLocalAccountCreateInput(LocalAccountCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, UserID: userID, AccountName: writeAccount.AccountName, InitialPassword: writeAccount.InitialPassword}); err != nil {
+			return nil, err
+		}
 		roles, err := normalizeApplicationRoleAssignments(item.ApplicationRoles)
 		if err != nil {
 			return nil, err
@@ -246,7 +273,7 @@ func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, inpu
 		if err != nil {
 			return nil, err
 		}
-		writes = append(writes, EmployeeOnboardingWrite{User: userWrite, Membership: membership, MembershipID: membershipID, OccurredAt: now})
+		writes = append(writes, EmployeeOnboardingWrite{User: userWrite, Account: &LocalAccountCreateWrite{AccountID: accountID, CredentialID: credentialID, TenantID: input.TenantID, UserID: userID, OperatorID: input.OperatorID, AccountName: accountName, PasswordDigest: digest, AlgorithmParams: metadata, OccurredAt: now}, Membership: membership, MembershipID: membershipID, OccurredAt: now})
 	}
 	users, err := repository.CreateEmployees(ctx, writes)
 	if err != nil {
@@ -264,3 +291,30 @@ func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, inpu
 }
 
 func stringPtr(value string) *string { return &value }
+
+func importedAccountName(displayName string) string {
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		return ""
+	}
+	args := pinyin.NewArgs()
+	args.Style = pinyin.Normal
+	parts := pinyin.Pinyin(name, args)
+	var builder strings.Builder
+	for _, syllables := range parts {
+		if len(syllables) > 0 {
+			builder.WriteString(syllables[0])
+		}
+	}
+	value := strings.ToLower(builder.String())
+	if value == "" {
+		value = strings.ToLower(name)
+	}
+	var normalized strings.Builder
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || unicode.IsDigit(character) {
+			normalized.WriteRune(character)
+		}
+	}
+	return normalized.String()
+}
