@@ -220,12 +220,15 @@ func (repository *GORMRepository) CreateEmployees(ctx context.Context, writes []
 		now := time.Now().UTC()
 		changed := map[string]struct{}{platform.ID: {}}
 		for _, write := range writes {
-			if err := ensureMembershipReferences(ctx, tx, *write.Membership); err != nil {
-				return err
-			}
 			row := userModel{ID: write.User.ID, TenantID: tenantID, EmployeeNo: nullableString(write.User.EmployeeNo), DisplayName: write.User.DisplayName, Email: nullableString(write.User.Email), MobileCiphertext: nullableBytes(write.User.MobileCiphertext), MobileHash: nullableBytes(write.User.MobileHash), EmploymentStatus: "EMPLOYED", Status: write.User.Status, Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}
 			if err := tx.Create(&row).Error; err != nil {
 				return mapWriteError(err, "create employee batch user")
+			}
+			// The membership reference check joins iam_user. Insert the new user first;
+			// the surrounding transaction still rolls back the row if the organization,
+			// position or tenant relationship is invalid.
+			if err := ensureMembershipReferences(ctx, tx, *write.Membership); err != nil {
+				return fmt.Errorf("validate employee batch membership references: %w", err)
 			}
 			accountName, operatorID := write.Account.AccountName, write.Account.OperatorID
 			accountRow := accountModel{ID: write.Account.AccountID, TenantID: tenantID, UserID: &write.Account.UserID, Username: &accountName, AccountType: "HUMAN", AuthSource: "LOCAL", Status: domain.StatusActive, ValidUntil: copyTime(write.Account.ValidUntil), Version: 1, CreatedAt: now, CreatedBy: &operatorID, UpdatedAt: now, UpdatedBy: &operatorID}

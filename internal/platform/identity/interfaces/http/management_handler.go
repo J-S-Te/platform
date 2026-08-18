@@ -132,13 +132,30 @@ type userBatchCreateResponse struct {
 
 type employeeBatchCreateItemRequest struct {
 	userCreateRequest
+	LineNo int `json:"line_no,omitempty"`
+	// Organization and Position are the current canonical fields. The *_name
+	// aliases are accepted for compatibility with older import pages and CSV
+	// clients that used the more explicit names.
 	Organization     string                             `json:"organization"`
+	OrganizationName string                             `json:"organization_name"`
 	Position         string                             `json:"position"`
+	PositionName     string                             `json:"position_name"`
 	ApplicationRoles []applicationRoleAssignmentRequest `json:"application_roles,omitempty"`
 }
 
 type employeeBatchCreateRequest struct {
 	Items []employeeBatchCreateItemRequest `json:"items"`
+}
+
+type employeeBatchIssue struct {
+	Row     int    `json:"row"`
+	Field   string `json:"field"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type employeeBatchValidationDetails struct {
+	Issues []employeeBatchIssue `json:"issues"`
 }
 
 type userDeleteRequest struct {
@@ -453,23 +470,37 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 	}
 	items := make([]application.EmployeeCreateInput, 0, len(payload.Items))
 	hasRoles := false
-	for _, item := range payload.Items {
-		orgID, err := resolveExactOrganization(request.Context(), handler.service, principal.Tenant.ID, item.Organization)
+	for index, item := range payload.Items {
+		row := item.LineNo
+		if row <= 0 {
+			row = index + 1
+		}
+		organization := firstNonEmpty(item.Organization, item.OrganizationName)
+		position := firstNonEmpty(item.Position, item.PositionName)
+		orgID, err := resolveExactOrganization(request.Context(), handler.service, principal.Tenant.ID, organization)
 		if err != nil {
+			if errors.Is(err, application.ErrValidation) {
+				handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "organization", Code: "AMBIGUOUS_ORGANIZATION", Message: "组织名称匹配到多个有效组织，请改用唯一名称"})
+				return
+			}
 			handler.writeError(writer, request, err)
 			return
 		}
 		if orgID == "" {
-			handler.validation(writer, request)
+			handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "organization", Code: "ORGANIZATION_NOT_FOUND", Message: "组织不存在或已停用"})
 			return
 		}
-		positionID, err := resolveExactPosition(request.Context(), handler.service, principal.Tenant.ID, orgID, item.Position)
+		positionID, err := resolveExactPosition(request.Context(), handler.service, principal.Tenant.ID, orgID, position)
 		if err != nil {
+			if errors.Is(err, application.ErrValidation) {
+				handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "position", Code: "AMBIGUOUS_POSITION", Message: "岗位名称匹配到多个有效岗位，请改用唯一名称"})
+				return
+			}
 			handler.writeError(writer, request, err)
 			return
 		}
 		if positionID == "" {
-			handler.validation(writer, request)
+			handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "position", Code: "POSITION_NOT_FOUND", Message: "岗位不存在、已停用或不属于该组织"})
 			return
 		}
 		roles := make([]application.ApplicationRoleAssignment, 0, len(item.ApplicationRoles))
@@ -480,11 +511,24 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		items = append(items, application.EmployeeCreateInput{DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: valueOrDefault(item.Status, domain.StatusActive), Membership: &application.EmployeeMembershipCreateInput{OrgUnitID: orgID, PositionID: positionID, MembershipType: domain.MembershipPrimary}, ApplicationRoles: roles})
 	}
 	if hasRoles && !principalHasPermission(principal, "platform:role-binding:update") {
-		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.New("AUTH_FORBIDDEN", "没有执行此操作的权限", employeeBatchValidationDetails{Issues: []employeeBatchIssue{{Row: 0, Field: "application_roles", Code: "ROLE_BINDING_FORBIDDEN", Message: "导入应用角色需要 platform:role-binding:update 权限"}}}))
 		return
 	}
 	result, err := handler.service.CreateEmployeesBatch(request.Context(), application.EmployeeBatchCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, Items: items})
 	if err != nil {
+		if errors.Is(err, application.ErrValidation) {
+			handler.batchValidation(writer, request, employeeBatchIssue{Row: 0, Field: "items", Code: "BATCH_VALIDATION_FAILED", Message: "批量数据未通过服务端校验；请检查姓名、邮箱、手机号、应用角色和任职关系"})
+			return
+		}
+		if errors.Is(err, application.ErrNotFound) {
+			handler.logger.Error("employee batch reference not found", "error", err)
+			handler.batchValidation(writer, request, employeeBatchIssue{Row: 0, Field: "items", Code: "BATCH_REFERENCE_NOT_FOUND", Message: "批量导入依赖的组织、岗位、平台普通用户角色或应用角色不存在，请刷新目录后重试"})
+			return
+		}
+		if errors.Is(err, application.ErrConflict) {
+			httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("IAM_CONFLICT", "批量导入存在账号冲突", employeeBatchValidationDetails{Issues: []employeeBatchIssue{{Row: 0, Field: "display_name", Code: "ACCOUNT_CONFLICT", Message: "根据姓名生成的登录账号已存在或在本批次中重复"}}}))
+			return
+		}
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -506,7 +550,7 @@ func resolveExactOrganization(ctx context.Context, service managementApplication
 	}
 	var found string
 	for page := 1; ; page++ {
-		result, err := service.ListOrgUnits(ctx, tenantID, application.PageRequest{Page: page, PageSize: 100, Keyword: name})
+		result, err := service.ListOrgUnits(ctx, tenantID, application.PageRequest{Page: page, PageSize: 100, Keyword: name, Status: domain.StatusActive})
 		if err != nil {
 			return "", err
 		}
@@ -532,7 +576,7 @@ func resolveExactPosition(ctx context.Context, service managementApplicationServ
 	}
 	var found string
 	for page := 1; ; page++ {
-		result, err := service.ListPositions(ctx, tenantID, application.PageRequest{Page: page, PageSize: 100, Keyword: name})
+		result, err := service.ListPositions(ctx, tenantID, application.PageRequest{Page: page, PageSize: 100, Keyword: name, Status: domain.StatusActive})
 		if err != nil {
 			return "", err
 		}
@@ -549,6 +593,15 @@ func resolveExactPosition(ctx context.Context, service managementApplicationServ
 		}
 	}
 	return found, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func valueOrDefault(value *string, fallback string) string {
@@ -1025,6 +1078,14 @@ func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request
 }
 func (handler *ManagementHandler) validation(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+}
+
+func (handler *ManagementHandler) batchValidation(w http.ResponseWriter, r *http.Request, issues ...employeeBatchIssue) {
+	httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.New(
+		"PLATFORM_BATCH_VALIDATION_ERROR",
+		"批量导入参数不合法",
+		employeeBatchValidationDetails{Issues: issues},
+	))
 }
 func (handler *ManagementHandler) unauthenticated(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
