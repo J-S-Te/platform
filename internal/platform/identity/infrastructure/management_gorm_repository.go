@@ -1396,7 +1396,11 @@ func applyOrganizationFilter(database *gorm.DB, tenantID, keyword, status string
 	database = database.Where("tenant_id = ?", tenantID)
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		database = database.Where("code LIKE ? OR name LIKE ?", like, like)
+		// iam_org_unit.code / iam_position.code use ascii_bin, while imported names
+		// are commonly Chinese and arrive as utf8mb4 parameters. Convert the code
+		// expression before the OR comparison so MySQL 8 does not attempt an
+		// incompatible ascii_bin/utf8mb4 collation coercion.
+		database = database.Where("CONVERT(code USING utf8mb4) LIKE ? OR name LIKE ?", like, like)
 	}
 	if status != "" {
 		database = database.Where("status = ?", status)
@@ -1408,7 +1412,7 @@ func applyPositionFilter(database *gorm.DB, tenantID, keyword, status string) *g
 	database = database.Where("tenant_id = ?", tenantID)
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		database = database.Where("code LIKE ? OR name LIKE ?", like, like)
+		database = database.Where("CONVERT(code USING utf8mb4) LIKE ? OR name LIKE ?", like, like)
 	}
 	if status != "" {
 		database = database.Where("status = ?", status)
