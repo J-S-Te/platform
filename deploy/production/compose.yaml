@@ -46,6 +46,9 @@ x-customer-service: &customer-service
     # 非回环 HTTP 仅由部署级安全开关控制；当前测试服务器默认保持可用，切换
     # HTTPS 后把 SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION 改为 false。
     OIDC_ALLOW_INSECURE_HTTP_SESSION: ${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-true}
+    # 授权目录哈希由平台发布配置统一注入，避免重试流程中的旧 runtime 文件
+    # 覆盖当前不可变 CRM 镜像所要求的目录版本。
+    OIDC_ROLE_CONFIG_HASH: "${OIDC_ROLE_CONFIG_HASH:?OIDC_ROLE_CONFIG_HASH must be configured}"
     MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     ATTACHMENT_LOCAL_ENABLED: "true"
     ATTACHMENT_LOCAL_ROOT: /app/data/attachments
@@ -139,7 +142,9 @@ services:
       # Keycloak 26 的数据库发现协议适合共享 MySQL 的多节点部署；单节点同样可用。
       KC_CACHE_STACK: ${KEYCLOAK_CACHE_STACK:-jdbc-ping}
     ports:
-      - "127.0.0.1:${KEYCLOAK_HTTP_PORT:-18090}:8080"
+      # 默认仅本机监听；需要浏览器直连 KEYCLOAK_PUBLIC_URL 时，在 .env
+      # 显式设置 KEYCLOAK_BIND_ADDRESS=0.0.0.0，或改用网关反代到本机端口。
+      - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_HTTP_PORT:-18090}:8080"
     depends_on:
       keycloak-db:
         condition: service_healthy

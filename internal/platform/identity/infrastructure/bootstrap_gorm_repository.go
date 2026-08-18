@@ -63,13 +63,44 @@ func (repository *GORMRepository) BootstrapFirstSuperAdmin(ctx context.Context, 
 			return fmt.Errorf("get bootstrap super-admin role: %w", result.Error)
 		}
 
+		var rootOrganization orgUnitModel
+		result = transaction.Where(
+			"tenant_id = ? AND code = ? AND status = ?",
+			tenant.ID,
+			application.BootstrapRootOrganizationCode,
+			domain.StatusActive,
+		).First(&rootOrganization)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrBootstrapUnavailable
+		}
+		if result.Error != nil {
+			return fmt.Errorf("get bootstrap root organization: %w", result.Error)
+		}
+
+		var superAdminPosition positionModel
+		result = transaction.Where(
+			"tenant_id = ? AND org_unit_id = ? AND code = ? AND status = ?",
+			tenant.ID,
+			rootOrganization.ID,
+			application.BootstrapSuperAdminPositionCode,
+			domain.StatusActive,
+		).First(&superAdminPosition)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrBootstrapUnavailable
+		}
+		if result.Error != nil {
+			return fmt.Errorf("get bootstrap super-admin position: %w", result.Error)
+		}
+
 		initializedAt := write.InitializedAt.UTC()
 		userID := write.UserID
 		accountName := write.AccountName
+		primaryOrgID := rootOrganization.ID
 		if err := transaction.Create(&userModel{
 			ID:               write.UserID,
 			TenantID:         tenant.ID,
 			DisplayName:      write.DisplayName,
+			PrimaryOrgID:     &primaryOrgID,
 			EmploymentStatus: domain.StatusActive,
 			Status:           domain.StatusActive,
 			Version:          1,
@@ -106,6 +137,22 @@ func (repository *GORMRepository) BootstrapFirstSuperAdmin(ctx context.Context, 
 			UpdatedAt:         initializedAt,
 		}).Error; err != nil {
 			return mapWriteError(err, "create bootstrap password credential")
+		}
+		if err := transaction.Create(&membershipModel{
+			ID:                   write.MembershipID,
+			TenantID:             tenant.ID,
+			UserID:               write.UserID,
+			OrgUnitID:            rootOrganization.ID,
+			PositionID:           superAdminPosition.ID,
+			MembershipType:       domain.MembershipPrimary,
+			IsPrimary:            true,
+			InheritAuthorization: true,
+			Status:               domain.StatusActive,
+			Version:              1,
+			CreatedAt:            initializedAt,
+			UpdatedAt:            initializedAt,
+		}).Error; err != nil {
+			return mapWriteError(err, "create bootstrap membership")
 		}
 		if err := transaction.Create(&bootstrapRoleBindingModel{
 			ID:            write.RoleBindingID,
