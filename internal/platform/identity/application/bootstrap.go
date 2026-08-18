@@ -15,6 +15,13 @@ const (
 	BootstrapApplicationCode = "platform"
 	// BootstrapSuperAdminRoleCode is the built-in role assigned only by this initial setup.
 	BootstrapSuperAdminRoleCode = "platform-super-admin"
+	// BootstrapRootOrganizationCode is the migration-seeded organization that owns the first
+	// platform administrator's primary appointment.
+	BootstrapRootOrganizationCode = "ROOT"
+	// BootstrapSuperAdminPositionCode is the migration-seeded position used by the first
+	// platform administrator. Keeping this a code rather than a display name makes the
+	// bootstrap contract independent from localized position labels.
+	BootstrapSuperAdminPositionCode = "POS-01J00000000000000000000400"
 )
 
 var (
@@ -30,8 +37,9 @@ type PasswordHasher interface {
 	Hash(password string) (digest []byte, metadata []byte, err error)
 }
 
-// BootstrapRepository atomically creates the first local account and its platform super-admin
-// role binding. The implementation must serialize requests for the default tenant.
+// BootstrapRepository atomically creates the first local account, its primary organization
+// membership, and its platform super-admin role binding. The implementation must serialize
+// requests for the default tenant.
 type BootstrapRepository interface {
 	BootstrapFirstSuperAdmin(context.Context, BootstrapWrite) (BootstrapResult, error)
 }
@@ -50,6 +58,7 @@ type BootstrapWrite struct {
 	UserID          string
 	AccountID       string
 	CredentialID    string
+	MembershipID    string
 	RoleBindingID   string
 	DisplayName     string
 	AccountName     string
@@ -118,6 +127,10 @@ func (service *BootstrapService) InitializeFirstSuperAdmin(ctx context.Context, 
 	if err != nil {
 		return BootstrapResult{}, fmt.Errorf("generate bootstrap credential ID: %w", err)
 	}
+	membershipID, err := service.ids.New(now)
+	if err != nil {
+		return BootstrapResult{}, fmt.Errorf("generate bootstrap membership ID: %w", err)
+	}
 	roleBindingID, err := service.ids.New(now)
 	if err != nil {
 		return BootstrapResult{}, fmt.Errorf("generate bootstrap role binding ID: %w", err)
@@ -125,7 +138,7 @@ func (service *BootstrapService) InitializeFirstSuperAdmin(ctx context.Context, 
 
 	return service.repository.BootstrapFirstSuperAdmin(ctx, BootstrapWrite{
 		BootstrapID: bootstrapID, UserID: userID, AccountID: accountID, CredentialID: credentialID,
-		RoleBindingID: roleBindingID, DisplayName: strings.TrimSpace(input.DisplayName),
+		MembershipID: membershipID, RoleBindingID: roleBindingID, DisplayName: strings.TrimSpace(input.DisplayName),
 		AccountName: strings.TrimSpace(input.AccountName), PasswordDigest: digest,
 		AlgorithmParams: metadata, InitializedAt: now,
 	})
