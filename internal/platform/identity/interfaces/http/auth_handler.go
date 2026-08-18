@@ -492,7 +492,7 @@ func (handler *Handler) recordLogin(request *http.Request, result application.Se
 		summary = "用户重新验证口令并退出原会话后登录"
 	}
 	handler.recordLifecycleEvent(request, result.TenantID, auditapplication.EventInput{
-		ActorType: "USER", ActorID: result.UserID, ActorName: result.UserName, SessionID: result.SessionID,
+		ActorType: "USER", ActorID: result.UserID, ActorName: operatorDisplayName(result.UserName, result.AccountName), SessionID: result.SessionID,
 		Action: action, ResourceType: "auth_session", ResourceID: result.SessionID, ResourceName: result.AccountName,
 		Result: "SUCCESS", RiskLevel: riskLevel, Classification: "INTERNAL", Summary: summary,
 	})
@@ -505,7 +505,7 @@ func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 	var concurrent application.ConcurrentSessionError
 	if errors.As(err, &concurrent) {
 		handler.recordLifecycleEvent(request, concurrent.TenantID, auditapplication.EventInput{
-			ActorType: "USER", ActorID: concurrent.UserID, ActorName: concurrent.UserName,
+			ActorType: "USER", ActorID: concurrent.UserID, ActorName: operatorDisplayName(concurrent.UserName, concurrent.AccountName),
 			Action: "auth.login.concurrent_denied", ResourceType: "auth_account", ResourceID: concurrent.AccountID, ResourceName: concurrent.AccountName,
 			Result: "FAILURE", RiskLevel: "MEDIUM", Classification: "INTERNAL", Summary: "账号已有有效会话，拒绝其他终端并发登录",
 		})
@@ -514,7 +514,7 @@ func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 	var failed application.LoginFailedError
 	if errors.As(err, &failed) {
 		handler.recordLifecycleEvent(request, failed.TenantID, auditapplication.EventInput{
-			ActorType: "USER", ActorID: failed.UserID, ActorName: failed.UserName,
+			ActorType: "USER", ActorID: failed.UserID, ActorName: operatorDisplayName(failed.UserName, failed.AccountName),
 			Action: "auth.login.failed", ResourceType: "auth_account", ResourceID: failed.AccountID, ResourceName: failed.AccountName,
 			Result: "FAILURE", RiskLevel: "MEDIUM", Classification: "INTERNAL", Summary: "本地账号密码登录失败",
 		})
@@ -669,4 +669,12 @@ func remoteIP(request *http.Request) net.IP {
 		return net.ParseIP(host)
 	}
 	return net.ParseIP(remoteAddress)
+}
+
+// operatorDisplayName 优先返回用户显示名，为空时回退到账号名，确保审计操作人不为空。
+func operatorDisplayName(displayName, accountName string) string {
+	if name := strings.TrimSpace(displayName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(accountName)
 }

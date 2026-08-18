@@ -13,14 +13,23 @@ import (
 // membership are optional so the endpoint also supports pre-hiring a user record without
 // accidentally creating an unbound account or appointment.
 type EmployeeCreateInput struct {
-	TenantID    string
-	OperatorID  string
-	DisplayName string
-	Email       *string
-	Mobile      *string
-	Status      string
-	Account     *EmployeeAccountCreateInput
-	Membership  *EmployeeMembershipCreateInput
+	TenantID         string
+	OperatorID       string
+	DisplayName      string
+	Email            *string
+	Mobile           *string
+	Status           string
+	Account          *EmployeeAccountCreateInput
+	Membership       *EmployeeMembershipCreateInput
+	ApplicationRoles []ApplicationRoleAssignment
+}
+
+// EmployeeBatchCreateInput imports complete employee records atomically. Organization and
+// position references are resolved by the HTTP adapter from their human-readable names.
+type EmployeeBatchCreateInput struct {
+	TenantID   string
+	OperatorID string
+	Items      []EmployeeCreateInput
 }
 
 // EmployeeAccountCreateInput deliberately contains only local-account fields.  The new user ID
@@ -64,6 +73,10 @@ type EmployeeCreateResult struct {
 // implements it using one database transaction.
 type EmployeeOnboardingRepository interface {
 	CreateEmployee(context.Context, EmployeeOnboardingWrite) (domain.User, *domain.Account, *domain.Membership, error)
+}
+
+type EmployeeBatchOnboardingRepository interface {
+	CreateEmployees(context.Context, []EmployeeOnboardingWrite) ([]domain.User, error)
 }
 
 // CreateEmployee 先在应用层完成校验、密码散列和全部 ID 生成，再把用户、平台普通用户
@@ -175,3 +188,79 @@ func (service *ManagementService) CreateEmployee(ctx context.Context, input Empl
 	}
 	return EmployeeCreateResult{User: view, Account: account, Membership: membership}, nil
 }
+
+// CreateEmployeesBatch prepares every employee before entering the repository transaction. A
+// failed reference, validation, encryption or ID generation therefore prevents any partial write.
+func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, input EmployeeBatchCreateInput) ([]UserView, error) {
+	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" || len(input.Items) == 0 || len(input.Items) > MaxBatchUserCreateItems {
+		return nil, ErrValidation
+	}
+	repository, ok := service.repository.(EmployeeBatchOnboardingRepository)
+	if !ok {
+		return nil, fmt.Errorf("employee batch onboarding is not supported by this identity repository")
+	}
+	writes := make([]EmployeeOnboardingWrite, 0, len(input.Items))
+	now := service.clock.Now().UTC()
+	for _, item := range input.Items {
+		if item.Membership == nil {
+			return nil, ErrMembershipRequired
+		}
+		userInput := UserCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: item.Status, ApplicationRoles: item.ApplicationRoles}
+		if err := validateUserCreate(userInput); err != nil {
+			return nil, err
+		}
+		userID, err := service.ids.New(now)
+		if err != nil {
+			return nil, err
+		}
+		bindingID, err := service.ids.New(now)
+		if err != nil {
+			return nil, err
+		}
+		userInput.EmployeeNo = stringPtr("EMP-" + strings.ToUpper(userID))
+		userWrite, err := service.prepareUserWrite(userInput, userID)
+		if err != nil {
+			return nil, err
+		}
+		userWrite.RoleBindingID = bindingID
+		roles, err := normalizeApplicationRoleAssignments(item.ApplicationRoles)
+		if err != nil {
+			return nil, err
+		}
+		for _, role := range roles {
+			roleID, e := service.ids.New(now)
+			if e != nil {
+				return nil, e
+			}
+			userWrite.ApplicationRoleBindings = append(userWrite.ApplicationRoleBindings, ApplicationRoleBindingWrite{ID: roleID, ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName, RoleCode: role.RoleCode, RoleName: role.RoleName})
+		}
+		membership := &MembershipCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, UserID: userID, OrgUnitID: item.Membership.OrgUnitID, PositionID: item.Membership.PositionID, MembershipType: item.Membership.MembershipType, EffectiveFrom: item.Membership.EffectiveFrom, EffectiveTo: item.Membership.EffectiveTo, InheritAuthorization: item.Membership.InheritAuthorization}
+		if err := validateMembership(membership.TenantID, membership.OperatorID, membership.UserID, membership.OrgUnitID, membership.PositionID, membership.MembershipType, membership.EffectiveFrom, membership.EffectiveTo); err != nil {
+			return nil, err
+		}
+		if membership.InheritAuthorization == nil {
+			enabled := true
+			membership.InheritAuthorization = &enabled
+		}
+		membershipID, err := service.ids.New(now)
+		if err != nil {
+			return nil, err
+		}
+		writes = append(writes, EmployeeOnboardingWrite{User: userWrite, Membership: membership, MembershipID: membershipID, OccurredAt: now})
+	}
+	users, err := repository.CreateEmployees(ctx, writes)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]UserView, 0, len(users))
+	for _, user := range users {
+		view, e := service.toUserView(user)
+		if e != nil {
+			return nil, e
+		}
+		views = append(views, view)
+	}
+	return views, nil
+}
+
+func stringPtr(value string) *string { return &value }

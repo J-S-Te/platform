@@ -160,3 +160,102 @@ func (repository *GORMRepository) CreateEmployee(ctx context.Context, write appl
 	}
 	return user, account, &membership, nil
 }
+
+// CreateEmployees persists a complete employee batch in one transaction. Accounts are omitted
+// by the CSV import contract; every row must still receive a valid membership.
+func (repository *GORMRepository) CreateEmployees(ctx context.Context, writes []application.EmployeeOnboardingWrite) ([]domain.User, error) {
+	if len(writes) == 0 {
+		return nil, application.ErrValidation
+	}
+	tenantID := writes[0].User.TenantID
+	for _, write := range writes {
+		if write.User.TenantID != tenantID || write.User.ID == "" || write.User.RoleBindingID == "" || write.Membership == nil || write.MembershipID == "" {
+			return nil, application.ErrValidation
+		}
+	}
+	users := make([]domain.User, 0, len(writes))
+	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var platform bootstrapApplicationModel
+		if result := tx.Where("tenant_id = ? AND code = ? AND status = ?", tenantID, application.DefaultPlatformApplicationCode, domain.StatusActive).First(&platform); result.Error != nil {
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("resolve platform application: %w", application.ErrNotFound)
+			}
+			return result.Error
+		}
+		var baseline bootstrapRoleModel
+		if result := tx.Where("tenant_id = ? AND application_id = ? AND code = ? AND status = ?", tenantID, platform.ID, application.DefaultUserRoleCode, domain.StatusActive).First(&baseline); result.Error != nil {
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("resolve ordinary-user role: %w", application.ErrNotFound)
+			}
+			return result.Error
+		}
+		userWrites := make([]application.UserWrite, 0, len(writes))
+		for _, write := range writes {
+			userWrites = append(userWrites, write.User)
+		}
+		resolved, err := resolveImportedApplicationRoles(tx, tenantID, userWrites)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		changed := map[string]struct{}{platform.ID: {}}
+		for _, write := range writes {
+			if err := ensureMembershipReferences(ctx, tx, *write.Membership); err != nil {
+				return err
+			}
+			row := userModel{ID: write.User.ID, TenantID: tenantID, EmployeeNo: nullableString(write.User.EmployeeNo), DisplayName: write.User.DisplayName, Email: nullableString(write.User.Email), MobileCiphertext: nullableBytes(write.User.MobileCiphertext), MobileHash: nullableBytes(write.User.MobileHash), EmploymentStatus: "EMPLOYED", Status: write.User.Status, Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}
+			if err := tx.Create(&row).Error; err != nil {
+				return mapWriteError(err, "create employee batch user")
+			}
+			if err := tx.Create(&bootstrapRoleBindingModel{ID: write.User.RoleBindingID, TenantID: tenantID, ApplicationID: platform.ID, RoleID: baseline.ID, SubjectType: "USER", SubjectID: write.User.ID, ScopeType: "TENANT", Status: domain.StatusActive, GrantOrigin: "SYSTEM", Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}).Error; err != nil {
+				return mapWriteError(err, "bind employee batch ordinary-user role")
+			}
+			for _, imported := range write.User.ApplicationRoleBindings {
+				target, ok := resolved[importedApplicationRoleKey(imported)]
+				if !ok {
+					return application.ErrValidation
+				}
+				if err := tx.Create(&bootstrapRoleBindingModel{ID: imported.ID, TenantID: tenantID, ApplicationID: target.ApplicationID, RoleID: target.RoleID, SubjectType: "USER", SubjectID: write.User.ID, ScopeType: "TENANT", Status: domain.StatusActive, GrantOrigin: "MANUAL", Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}).Error; err != nil {
+					return mapWriteError(err, "bind employee batch application role")
+				}
+				changed[target.ApplicationID] = struct{}{}
+			}
+			isPrimary := write.Membership.MembershipType == domain.MembershipPrimary
+			if isPrimary {
+				if err := ensureNoOtherPrimary(ctx, tx, tenantID, write.User.ID, ""); err != nil {
+					return err
+				}
+			}
+			if err := tx.Create(&membershipModel{ID: write.MembershipID, TenantID: tenantID, UserID: write.User.ID, OrgUnitID: write.Membership.OrgUnitID, PositionID: write.Membership.PositionID, MembershipType: write.Membership.MembershipType, IsPrimary: isPrimary, InheritAuthorization: write.Membership.InheritAuthorization == nil || *write.Membership.InheritAuthorization, ValidFrom: nullableTime(write.Membership.EffectiveFrom), ValidUntil: nullableTime(write.Membership.EffectiveTo), Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}).Error; err != nil {
+				return mapWriteError(err, "create employee batch membership")
+			}
+			if isPrimary {
+				if err := tx.Model(&userModel{}).Where("id = ? AND tenant_id = ?", write.User.ID, tenantID).Updates(map[string]any{"primary_org_id": write.Membership.OrgUnitID, "updated_at": now, "updated_by": write.User.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+					return err
+				}
+			}
+			users = append(users, toDomainUser(row))
+		}
+		for appID := range changed {
+			result := tx.Model(&identityPolicyRevisionModel{}).Where("tenant_id = ? AND application_id = ?", tenantID, appID).Updates(map[string]any{"revision": gorm.Expr("revision + 1"), "changed_at": now, "change_reason": "批量导入员工并绑定角色"})
+			if result.Error != nil || result.RowsAffected == 0 {
+				if result.Error != nil {
+					return result.Error
+				}
+				return application.ErrNotFound
+			}
+		}
+		if err := advanceMembershipAuthorizationRevisions(tx, tenantID, now, "批量导入员工任职关系导致组织/岗位继承授权变化"); err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(writes))
+		for _, write := range writes {
+			ids = append(ids, write.User.ID)
+		}
+		return enqueueKeycloakIdentityEvents(tx, tenantID, ids, now, "ORGANIZATION_CHANGED")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
+}

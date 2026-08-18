@@ -96,7 +96,7 @@ func (h *PersonnelChangeHandler) List(w http.ResponseWriter, r *http.Request) {
 		httpresponse.WriteError(w, r, 401, httperror.Unauthenticated)
 		return
 	}
-	items, e := h.service.List(r.Context(), p.Tenant.ID, r.URL.Query().Get("status"))
+	items, e := h.service.List(r.Context(), p.Tenant.ID, r.URL.Query().Get("status"), r.URL.Query().Get("change_type"), r.URL.Query().Get("keyword"))
 	if e != nil {
 		httpresponse.WriteError(w, r, 500, httperror.Internal)
 		return

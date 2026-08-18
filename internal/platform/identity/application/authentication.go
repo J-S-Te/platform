@@ -445,10 +445,16 @@ func toAuthContextPrincipal(principal domain.Principal) authctx.Principal {
 	for index, role := range principal.Roles {
 		roles[index] = authctx.ReferenceName{ID: role.ID, Name: role.Name, Code: role.Code}
 	}
+	// 审计与展示依赖 User.Name（display_name）。历史/投影账号可能没有 display_name，
+	// 此时回退到 Account.Name（COALESCE(username, id) 恒有值），避免操作人/用户名落空。
+	userName := principal.User.Name
+	if strings.TrimSpace(userName) == "" {
+		userName = principal.Account.Name
+	}
 	return authctx.Principal{
 		SessionID:       principal.SessionID,
 		Tenant:          authctx.ReferenceName{ID: principal.Tenant.ID, Name: principal.Tenant.Name, Code: principal.Tenant.Code},
-		User:            authctx.ReferenceName{ID: principal.User.ID, Name: principal.User.Name, Code: principal.User.Code},
+		User:            authctx.ReferenceName{ID: principal.User.ID, Name: userName, Code: principal.User.Code},
 		Account:         authctx.ReferenceName{ID: principal.Account.ID, Name: principal.Account.Name, Code: principal.Account.Code},
 		Roles:           roles,
 		PermissionCodes: append([]string(nil), principal.PermissionCodes...),

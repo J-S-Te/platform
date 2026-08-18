@@ -60,6 +60,15 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 			if req.TargetOrgUnitID == "" || req.TargetPositionID == "" {
 				return application.ErrValidation
 			}
+			// 目标组织和岗位必须是同一租户下的有效组合，防止客户端把 A 组织与 B 组织岗位拼接后写入任职。
+			var targetPosition positionModel
+			if err := tx.Where("tenant_id = ? AND id = ? AND org_unit_id = ? AND status = ?", req.TenantID, req.TargetPositionID, req.TargetOrgUnitID, domain.StatusActive).First(&targetPosition).Error; err != nil {
+				return application.ErrValidation
+			}
+			var targetOrganization orgUnitModel
+			if err := tx.Where("tenant_id = ? AND id = ? AND status = ?", req.TenantID, req.TargetOrgUnitID, domain.StatusActive).First(&targetOrganization).Error; err != nil {
+				return application.ErrValidation
+			}
 			var source membershipModel
 			if req.ChangeType == domain.PersonnelChangeRehire {
 				source.MembershipType = "PRIMARY"
@@ -68,7 +77,7 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 			} else {
 				q := tx.Where("tenant_id = ? AND user_id = ? AND status = ?", req.TenantID, req.UserID, domain.StatusActive)
 				if req.SourceMembershipID != "" {
-					q = tx.Where("tenant_id = ? AND id = ?", req.TenantID, req.SourceMembershipID)
+					q = tx.Where("tenant_id = ? AND id = ? AND user_id = ? AND status = ?", req.TenantID, req.SourceMembershipID, req.UserID, domain.StatusActive)
 				}
 				if err := q.First(&source).Error; err != nil {
 					return err
@@ -81,6 +90,13 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 			}
 			if err := tx.Create(&membershipModel{ID: req.ID, TenantID: req.TenantID, UserID: req.UserID, OrgUnitID: req.TargetOrgUnitID, PositionID: req.TargetPositionID, MembershipType: source.MembershipType, IsPrimary: source.IsPrimary, InheritAuthorization: source.InheritAuthorization, ValidFrom: &now, Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: &operator, UpdatedAt: now, UpdatedBy: &operator}).Error; err != nil {
 				return err
+			}
+			// 主任职跨组织变更时同步用户主组织；否则新的任职记录与 OIDC primary_org_id
+			// 会分叉，下一次登录仍可能携带旧组织并导致授权目录校验失败。
+			if source.IsPrimary {
+				if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"primary_org_id": req.TargetOrgUnitID, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
+					return err
+				}
 			}
 			if req.ChangeType == domain.PersonnelChangeRehire {
 				var user userModel
@@ -200,13 +216,20 @@ func (r *PersonnelChangeGORMRepository) Create(c context.Context, v application.
 	}
 	return toPersonnel(m), nil
 }
-func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status string) (out []application.PersonnelChangeRequest, err error) {
+func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status, changeType, keyword string) (out []application.PersonnelChangeRequest, err error) {
 	q := r.db.WithContext(c)
 	if t != "" {
 		q = q.Where("tenant_id = ?", t)
 	}
 	if status != "" {
 		q = q.Where("status = ?", status)
+	}
+	if changeType != "" {
+		q = q.Where("change_type = ?", changeType)
+	}
+	if keyword != "" {
+		like := "%" + keyword + "%"
+		q = q.Where("user_id LIKE ? OR id LIKE ? OR approval_reference LIKE ?", like, like, like)
 	}
 	var ms []personnelChangeModel
 	err = q.Order("created_at DESC").Find(&ms).Error

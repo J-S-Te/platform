@@ -31,6 +31,7 @@ type managementApplicationService interface {
 	ListUsers(context.Context, string, application.PageRequest) (application.PageResult[application.UserView], error)
 	CreateUser(context.Context, application.UserCreateInput) (application.UserView, error)
 	CreateEmployee(context.Context, application.EmployeeCreateInput) (application.EmployeeCreateResult, error)
+	CreateEmployeesBatch(context.Context, application.EmployeeBatchCreateInput) ([]application.UserView, error)
 	CreateUsersBatch(context.Context, application.UserBatchCreateInput) ([]application.UserView, error)
 	GetUser(context.Context, string, string) (application.UserView, error)
 	UpdateUser(context.Context, application.UserUpdateInput) (application.UserView, error)
@@ -124,6 +125,17 @@ type employeeCreateResponse struct {
 type userBatchCreateResponse struct {
 	Items []userResponse `json:"items"`
 	Total int            `json:"total"`
+}
+
+type employeeBatchCreateItemRequest struct {
+	userCreateRequest
+	Organization     string                             `json:"organization"`
+	Position         string                             `json:"position"`
+	ApplicationRoles []applicationRoleAssignmentRequest `json:"application_roles,omitempty"`
+}
+
+type employeeBatchCreateRequest struct {
+	Items []employeeBatchCreateItemRequest `json:"items"`
 }
 
 type userDeleteRequest struct {
@@ -416,6 +428,90 @@ func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, r
 		responses = append(responses, toUserResponse(item))
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已批量创建", userBatchCreateResponse{Items: responses, Total: len(responses)})
+}
+
+// CreateEmployeesBatch resolves organization and position names in the tenant, then delegates
+// the complete employee batch to the atomic application service.
+func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		handler.unauthenticated(writer, request)
+		return
+	}
+	var payload employeeBatchCreateRequest
+	if !decodeManagementRequest(writer, request, &payload) {
+		handler.validation(writer, request)
+		return
+	}
+	items := make([]application.EmployeeCreateInput, 0, len(payload.Items))
+	hasRoles := false
+	for _, item := range payload.Items {
+		orgResult, err := handler.service.ListOrgUnits(request.Context(), principal.Tenant.ID, application.PageRequest{Page: 1, PageSize: 100, Keyword: strings.TrimSpace(item.Organization)})
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		var orgID string
+		for _, org := range orgResult.Items {
+			if strings.TrimSpace(org.Name) == strings.TrimSpace(item.Organization) {
+				if orgID != "" {
+					handler.validation(writer, request)
+					return
+				}
+				orgID = org.ID
+			}
+		}
+		if orgID == "" {
+			handler.validation(writer, request)
+			return
+		}
+		positionResult, err := handler.service.ListPositions(request.Context(), principal.Tenant.ID, application.PageRequest{Page: 1, PageSize: 100, Keyword: strings.TrimSpace(item.Position)})
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		var positionID string
+		for _, position := range positionResult.Items {
+			if position.OrgUnitID == orgID && strings.TrimSpace(position.Name) == strings.TrimSpace(item.Position) {
+				if positionID != "" {
+					handler.validation(writer, request)
+					return
+				}
+				positionID = position.ID
+			}
+		}
+		if positionID == "" {
+			handler.validation(writer, request)
+			return
+		}
+		roles := make([]application.ApplicationRoleAssignment, 0, len(item.ApplicationRoles))
+		for _, role := range item.ApplicationRoles {
+			hasRoles = true
+			roles = append(roles, application.ApplicationRoleAssignment{ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName, RoleCode: role.RoleCode, RoleName: role.RoleName})
+		}
+		items = append(items, application.EmployeeCreateInput{DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: valueOrDefault(item.Status, domain.StatusActive), Membership: &application.EmployeeMembershipCreateInput{OrgUnitID: orgID, PositionID: positionID, MembershipType: domain.MembershipPrimary}, ApplicationRoles: roles})
+	}
+	if hasRoles && !principalHasPermission(principal, "platform:role-binding:update") {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
+	result, err := handler.service.CreateEmployeesBatch(request.Context(), application.EmployeeBatchCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, Items: items})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	responses := make([]userResponse, 0, len(result))
+	for _, item := range result {
+		responses = append(responses, toUserResponse(item))
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已批量创建", userBatchCreateResponse{Items: responses, Total: len(responses)})
+}
+
+func valueOrDefault(value *string, fallback string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return fallback
+	}
+	return *value
 }
 
 func (handler *ManagementHandler) GetUser(writer http.ResponseWriter, request *http.Request) {

@@ -45,14 +45,16 @@ Host 时可以暂设为 `false`，完成入口收敛后再开启。不要把管�
 | --- | --- | --- |
 | `KEYCLOAK_DB_PASSWORD` | Keycloak 到独立 MySQL 的应用账号 | 在 MySQL 中新增/切换密码、重启 Keycloak；保留短暂回滚窗口 |
 | `KEYCLOAK_DB_ROOT_PASSWORD` | 仅数据库初始化、备份/恢复管理 | 日常不注入应用；变更后更新受控备份作业 |
-| `KEYCLOAK_ADMIN_USERNAME/PASSWORD` | 现有平台镜像调用 Admin API 的兼容凭据 | 当前必需；先在 Keycloak 创建并验证替代管理员，再更新 Secret、滚动重启平台 API，最后撤销旧密码 |
+| `KEYCLOAK_ADMIN_CLIENT_ID/SECRET` | 平台调用 Admin API 的**首选**专用 Service Account（client_credentials） | 两项同时设置才启用；平台 API/Worker 会优先使用它，不再使用管理员密码。必须授予 master 最小管理角色；轮换走 Client secret 流程 |
+| `KEYCLOAK_ADMIN_USERNAME/PASSWORD` | 平台调用 Admin API 的**兼容回退**（master/admin-cli password grant） | 仅当 `KEYCLOAK_ADMIN_CLIENT_ID/SECRET` 未同时配置时使用；建议生产环境配置 Service Account 后停止注入或轮换失效 |
 | `KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_ID/SECRET` | **只在 master realm 首次创建时**建立临时 bootstrap 管理服务账号 | 两项同时设置才启用；对已有数据库无效。完成最小权限常设服务账号/恢复路径验证后立即轮换或删除临时账号 |
 | `KEYCLOAK_PLATFORM_CLIENT_ID/SECRET` | 平台作为 Broker Client 的凭据 | 不得用作 Admin API 或 bootstrap service account；按 Client secret 轮换流程变更 |
 
-重要限制：本仓库当前平台二进制使用管理员用户名/密码获取 Keycloak Admin API 权限，尚未读取
-`KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_*` 来执行 client-credentials。因此服务账号是 Keycloak 的可选
-bootstrap/运维配置，不能删除 `KEYCLOAK_ADMIN_*` 来替代平台管理。要切换平台到 service-account
-管理，必须先随应用版本实现和验收 client-credentials，再在非生产环境演练迁移。
+平台二进制（API/Worker）的 Keycloak Admin API 调用优先使用 `KEYCLOAK_ADMIN_CLIENT_ID/SECRET`
+走 client_credentials（专用 Service Account），只有二者未同时配置时才回退到 `KEYCLOAK_ADMIN_USERNAME/PASSWORD`
+的 admin-cli password grant。`KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_*` 仅供首次创建 master realm 的
+bootstrap 流程使用，不参与平台日常管理。切换生产环境到 Service Account 前，先为服务账号授予
+master 最小管理角色并完成第 5 节验证，再滚动重启平台 API/Worker，最后轮换或停止注入管理员密码。
 
 每次轮换应记录操作者、Secret 版本、影响 Client/账号、开始/完成时间和回滚 Secret 版本。轮换后执行
 第 5 节的 discovery、token 和管理同步检查；失败时只回退凭据引用，不回滚数据库或 Realm 变更。

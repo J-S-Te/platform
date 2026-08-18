@@ -19,7 +19,7 @@ type personnelRepoStub struct {
 func (r *personnelRepoStub) Create(context.Context, application.PersonnelChangeRequest) (application.PersonnelChangeRequest, error) {
 	return application.PersonnelChangeRequest{}, nil
 }
-func (r *personnelRepoStub) List(_ context.Context, _, status string) ([]application.PersonnelChangeRequest, error) {
+func (r *personnelRepoStub) List(_ context.Context, _, status, _, _ string) ([]application.PersonnelChangeRequest, error) {
 	if status != domain.PersonnelChangeScheduled {
 		return nil, nil
 	}
