@@ -44,33 +44,33 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 		Select("DISTINCT user.id AS user_id, user.display_name AS display_name").
 		Joins("JOIN iam_membership AS membership ON membership.tenant_id = user.tenant_id AND membership.user_id = user.id").
 		Joins("JOIN iam_org_unit AS organization ON organization.tenant_id = membership.tenant_id AND organization.id = membership.org_unit_id").
-		Where("user.tenant_id = ? AND user.status = ? AND user.deleted_at IS NULL AND user.employment_status <> ?", tenantID, "ACTIVE", "EXTERNAL_CUSTOMER").
-		Where("membership.status = ? AND (membership.valid_from IS NULL OR membership.valid_from <= ?) AND (membership.valid_until IS NULL OR membership.valid_until > ?)", "ACTIVE", now, now).
-		Where("organization.status = ?", "ACTIVE").
+		Where("user.tenant_id = ? AND BINARY user.status = BINARY ? AND user.deleted_at IS NULL AND BINARY user.employment_status <> BINARY ?", tenantID, "ACTIVE", "EXTERNAL_CUSTOMER").
+		Where("BINARY membership.status = BINARY ? AND (membership.valid_from IS NULL OR membership.valid_from <= ?) AND (membership.valid_until IS NULL OR membership.valid_until > ?)", "ACTIVE", now, now).
+		Where("BINARY organization.status = BINARY ?", "ACTIVE").
 		Where(`EXISTS (
 			SELECT 1 FROM authz_role_binding AS binding
 			JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id
 			WHERE binding.tenant_id = user.tenant_id AND binding.application_id = ?
-			AND binding.status = ? AND role.status = ? AND role.role_type <> ?
+			AND BINARY binding.status = BINARY ? AND BINARY role.status = BINARY ? AND BINARY role.role_type <> BINARY ?
 			AND (binding.valid_from IS NULL OR binding.valid_from <= ?)
 			AND (binding.valid_until IS NULL OR binding.valid_until > ?)
-			AND ((binding.scope_type = ? AND binding.scope_id = '') OR (binding.scope_type = ? AND binding.scope_id = ?))
-			AND ((binding.subject_type = ? AND binding.subject_id = user.id)
-				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.org_unit_id)
-				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.position_id
-					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND position.status = ?)))
+			AND ((BINARY binding.scope_type = BINARY ? AND BINARY binding.scope_id = BINARY '') OR (BINARY binding.scope_type = BINARY ? AND BINARY binding.scope_id = BINARY ?))
+			AND ((BINARY binding.subject_type = BINARY ? AND binding.subject_id = user.id)
+				OR (membership.inherit_authorization = 1 AND BINARY binding.subject_type = BINARY ? AND binding.subject_id = membership.org_unit_id)
+				OR (membership.inherit_authorization = 1 AND BINARY binding.subject_type = BINARY ? AND binding.subject_id = membership.position_id
+					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND BINARY position.status = BINARY ?)))
 		)`, applicationID, "ACTIVE", "ACTIVE", "COMPATIBILITY", now, now, "TENANT", "ENVIRONMENT", environmentID, "USER", "ORG_UNIT", "POSITION", "ACTIVE")
 	if len(query.RoleCodes) > 0 {
 		authorized = authorized.Where(`EXISTS (
 			SELECT 1 FROM authz_role_binding AS role_binding
 			JOIN authz_role AS eligible_role ON eligible_role.id=role_binding.role_id AND eligible_role.tenant_id=role_binding.tenant_id
 			WHERE role_binding.tenant_id=user.tenant_id AND role_binding.application_id=? AND eligible_role.code IN ?
-			AND role_binding.status='ACTIVE' AND eligible_role.status='ACTIVE'
+			AND BINARY role_binding.status=BINARY 'ACTIVE' AND BINARY eligible_role.status=BINARY 'ACTIVE'
 			AND (role_binding.valid_from IS NULL OR role_binding.valid_from<=?) AND (role_binding.valid_until IS NULL OR role_binding.valid_until>?)
-			AND ((role_binding.scope_type='TENANT' AND role_binding.scope_id='') OR (role_binding.scope_type='ENVIRONMENT' AND role_binding.scope_id=?))
-			AND ((role_binding.subject_type='USER' AND role_binding.subject_id=user.id)
-			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
-			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='POSITION' AND role_binding.subject_id=membership.position_id))
+			AND ((BINARY role_binding.scope_type=BINARY 'TENANT' AND BINARY role_binding.scope_id=BINARY '') OR (BINARY role_binding.scope_type=BINARY 'ENVIRONMENT' AND BINARY role_binding.scope_id=BINARY ?))
+			AND ((BINARY role_binding.subject_type=BINARY 'USER' AND role_binding.subject_id=user.id)
+			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
+			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'POSITION' AND role_binding.subject_id=membership.position_id))
 		)`, applicationID, query.RoleCodes, now, now, environmentID)
 	}
 	if query.UserID != "" {
@@ -108,33 +108,33 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 	membershipQuery := repository.db.WithContext(ctx).Table("iam_membership AS membership").
 		Select("membership.user_id, organization.id AS organization_id, organization.name AS organization_name, membership.is_primary").
 		Joins("JOIN iam_org_unit AS organization ON organization.tenant_id = membership.tenant_id AND organization.id = membership.org_unit_id").
-		Where("membership.tenant_id = ? AND membership.user_id IN ? AND membership.status = ?", tenantID, userIDs, "ACTIVE").
+		Where("membership.tenant_id = ? AND membership.user_id IN ? AND BINARY membership.status = BINARY ?", tenantID, userIDs, "ACTIVE").
 		Where("(membership.valid_from IS NULL OR membership.valid_from <= ?) AND (membership.valid_until IS NULL OR membership.valid_until > ?)", now, now).
-		Where("organization.status = ?", "ACTIVE").
+		Where("BINARY organization.status = BINARY ?", "ACTIVE").
 		Where(`EXISTS (
 			SELECT 1 FROM authz_role_binding AS binding
 			JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id
 			WHERE binding.tenant_id = membership.tenant_id AND binding.application_id = ?
-			AND binding.status = ? AND role.status = ? AND role.role_type <> ?
+			AND BINARY binding.status = BINARY ? AND BINARY role.status = BINARY ? AND BINARY role.role_type <> BINARY ?
 			AND (binding.valid_from IS NULL OR binding.valid_from <= ?)
 			AND (binding.valid_until IS NULL OR binding.valid_until > ?)
-			AND ((binding.scope_type = ? AND binding.scope_id = '') OR (binding.scope_type = ? AND binding.scope_id = ?))
-			AND ((binding.subject_type = ? AND binding.subject_id = membership.user_id)
-				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.org_unit_id)
-				OR (membership.inherit_authorization = 1 AND binding.subject_type = ? AND binding.subject_id = membership.position_id
-					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND position.status = ?)))
+			AND ((BINARY binding.scope_type = BINARY ? AND BINARY binding.scope_id = BINARY '') OR (BINARY binding.scope_type = BINARY ? AND BINARY binding.scope_id = BINARY ?))
+			AND ((BINARY binding.subject_type = BINARY ? AND binding.subject_id = membership.user_id)
+				OR (membership.inherit_authorization = 1 AND BINARY binding.subject_type = BINARY ? AND binding.subject_id = membership.org_unit_id)
+				OR (membership.inherit_authorization = 1 AND BINARY binding.subject_type = BINARY ? AND binding.subject_id = membership.position_id
+					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND BINARY position.status = BINARY ?)))
 		)`, applicationID, "ACTIVE", "ACTIVE", "COMPATIBILITY", now, now, "TENANT", "ENVIRONMENT", environmentID, "USER", "ORG_UNIT", "POSITION", "ACTIVE")
 	if len(query.RoleCodes) > 0 {
 		membershipQuery = membershipQuery.Where(`EXISTS (
 			SELECT 1 FROM authz_role_binding AS role_binding
 			JOIN authz_role AS eligible_role ON eligible_role.id=role_binding.role_id AND eligible_role.tenant_id=role_binding.tenant_id
 			WHERE role_binding.tenant_id=membership.tenant_id AND role_binding.application_id=? AND eligible_role.code IN ?
-			AND role_binding.status='ACTIVE' AND eligible_role.status='ACTIVE'
+			AND BINARY role_binding.status=BINARY 'ACTIVE' AND BINARY eligible_role.status=BINARY 'ACTIVE'
 			AND (role_binding.valid_from IS NULL OR role_binding.valid_from<=?) AND (role_binding.valid_until IS NULL OR role_binding.valid_until>?)
-			AND ((role_binding.scope_type='TENANT' AND role_binding.scope_id='') OR (role_binding.scope_type='ENVIRONMENT' AND role_binding.scope_id=?))
-			AND ((role_binding.subject_type='USER' AND role_binding.subject_id=membership.user_id)
-			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
-			 OR (membership.inherit_authorization=1 AND role_binding.subject_type='POSITION' AND role_binding.subject_id=membership.position_id))
+			AND ((BINARY role_binding.scope_type=BINARY 'TENANT' AND BINARY role_binding.scope_id=BINARY '') OR (BINARY role_binding.scope_type=BINARY 'ENVIRONMENT' AND BINARY role_binding.scope_id=BINARY ?))
+			AND ((BINARY role_binding.subject_type=BINARY 'USER' AND role_binding.subject_id=membership.user_id)
+			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
+			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'POSITION' AND role_binding.subject_id=membership.position_id))
 		)`, applicationID, query.RoleCodes, now, now, environmentID)
 	}
 	if err := membershipQuery.Order("membership.is_primary DESC, organization.name ASC, organization.id ASC").Scan(&memberships).Error; err != nil {
