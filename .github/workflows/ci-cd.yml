@@ -96,7 +96,7 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ${{ steps.vars.outputs.image }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ steps.vars.outputs.image }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
