@@ -430,6 +430,21 @@ wait_for_workers() {
   return 1
 }
 
+verify_service_image() {
+  local service_name="$1" expected_image="$2" container_id actual_image
+  container_id="$(compose ps -q "$service_name" 2>/dev/null || true)"
+  [[ -n "$container_id" ]] || {
+    echo "未找到已启动的 $service_name 容器，无法确认镜像是否生效" >&2
+    return 1
+  }
+  actual_image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
+  [[ "$actual_image" == "$expected_image" ]] || {
+    echo "$service_name 镜像未生效：期望=$expected_image，实际=$actual_image" >&2
+    return 1
+  }
+  echo "$service_name 已运行目标不可变镜像：$expected_image"
+}
+
 rollback_runtime() {
   restore_release
   local previous_crm previous_portal
@@ -437,7 +452,7 @@ rollback_runtime() {
   previous_portal="$(env_value_from "$release_file" CUSTOMER_PORTAL_IMAGE)"
   if [[ "$previous_crm" =~ $acr_enterprise_or_new_personal || "$previous_crm" =~ $acr_legacy_personal ]] && \
      [[ "$previous_portal" =~ $acr_enterprise_or_new_personal || "$previous_portal" =~ $acr_legacy_personal ]]; then
-    compose up -d --no-deps customer-api portal-api "${customer_worker_services[@]}" || true
+    compose up -d --force-recreate --no-deps customer-api portal-api "${customer_worker_services[@]}" || true
     return
   fi
   echo "没有可验证的上一版不可变 CRM/Portal 镜像，停止新 API，等待人工恢复" >&2
@@ -470,7 +485,7 @@ if ! compose --profile customer-release run --rm portal-migrate; then
 fi
 
 echo "切换 CRM API"
-if ! compose up -d --no-deps customer-api || \
+if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 customer-api || \
    ! wait_for_health "http://127.0.0.1:$(port_value CUSTOMER_API_PORT 18083)/customer-opportunity/healthz"; then
   compose logs --tail 100 customer-api >&2 || true
   rollback_runtime
@@ -478,6 +493,11 @@ if ! compose up -d --no-deps customer-api || \
   echo "CRM 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
   exit 1
 fi
+verify_service_image customer-api "$crm_image_ref" || {
+  rollback_runtime
+  rm -f "$previous_release"
+  exit 1
+}
 echo "自动发布 CRM 授权目录（角色及有效角色数量策略）"
 if ! compose --profile customer-release run --rm --no-deps customer-api ./authz-catalog publish crm; then
   compose logs --tail 100 customer-api >&2 || true
@@ -488,7 +508,7 @@ if ! compose --profile customer-release run --rm --no-deps customer-api ./authz-
 fi
 
 echo "切换 Portal API"
-if ! compose up -d --no-deps portal-api || \
+if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 portal-api || \
    ! wait_for_health "http://127.0.0.1:$(port_value PORTAL_API_PORT 18084)/customer-portal/healthz"; then
   compose logs --tail 100 portal-api >&2 || true
   rollback_runtime
@@ -496,15 +516,29 @@ if ! compose up -d --no-deps portal-api || \
   echo "Portal 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
   exit 1
 fi
+verify_service_image portal-api "$portal_image_ref" || {
+  rollback_runtime
+  rm -f "$previous_release"
+  exit 1
+}
 
 echo "切换 CRM Workers 与 Portal 邀请补偿 Worker"
-if ! compose up -d --no-deps "${customer_worker_services[@]}" || ! wait_for_workers; then
+if ! compose up -d --force-recreate --no-deps "${customer_worker_services[@]}" || ! wait_for_workers; then
   compose logs --tail 100 "${customer_worker_services[@]}" >&2 || true
   rollback_runtime
   rm -f "$previous_release"
   echo "CRM/Portal Worker 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
   exit 1
 fi
+for worker_service in "${customer_worker_services[@]}"; do
+  worker_image="$crm_image_ref"
+  [[ "$worker_service" == "portal-invite-compensation-worker" ]] && worker_image="$portal_image_ref"
+  verify_service_image "$worker_service" "$worker_image" || {
+    rollback_runtime
+    rm -f "$previous_release"
+    exit 1
+  }
+done
 
 release_committed=true
 compose ps customer-api portal-api "${customer_worker_services[@]}" customer-mysql portal-mysql

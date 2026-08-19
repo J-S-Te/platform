@@ -48,6 +48,12 @@ jobs:
           bash -n deploy/production/bin/*.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh
+          # 每次切换不可变镜像都必须重建业务容器，并核对容器最终使用的 digest，
+          # 防止 release.env 已更新但旧容器仍在提供旧代码。
+          grep -q -- '--force-recreate' deploy/production/bin/deploy-service.sh
+          grep -q -- 'verify_service_image' deploy/production/bin/deploy-service.sh
+          grep -q -- '--force-recreate' deploy/production/bin/deploy-customer-opportunity.sh
+          grep -q -- 'verify_service_image' deploy/production/bin/deploy-customer-opportunity.sh
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' deploy/production; then
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1

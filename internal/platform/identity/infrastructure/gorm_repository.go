@@ -40,7 +40,7 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 			user.id AS user_id, user.display_name AS user_name, user.status AS user_status,
 			account.id AS account_id, COALESCE(account.username, account.id) AS account_name, account.status AS account_status, account.locked_until,
 			credential.password_hash, credential.hash_algorithm, credential.algorithm_params,
-			credential.status AS credential_status, credential.expires_at AS credential_expiry`).
+			credential.status AS credential_status, credential.expires_at AS credential_expiry, credential.must_change AS must_change_password`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
 		Joins("JOIN iam_password_credential AS credential ON credential.account_id = account.id").

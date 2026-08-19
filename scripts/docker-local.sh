@@ -60,6 +60,7 @@ usage() {
   bash scripts/docker-local.sh refresh-portal-api
   bash scripts/docker-local.sh refresh-project-api
   bash scripts/docker-local.sh start-presale-worker [--presale-worker-env-file PATH]
+  bash scripts/docker-local.sh start-presale-alert-worker
 
 up/restart 选项：
   --build                         重新构建镜像并强制重建使用新镜像的业务容器
@@ -96,6 +97,7 @@ up/restart 选项：
   refresh-project-api   重建项目管理系统后端、执行项目迁移；仅在已完成应用接入后启动
   refresh-data-analysis-api  重建数据看板后端（dashboard-api + 聚合 Worker）、执行聚合库迁移；仅在已完成应用接入后启动
   start-presale-worker  构建并启动售前投递 Worker，等待数据库出现真实新鲜心跳（up 已自动执行）
+  start-presale-alert-worker  构建并启动售前预警扫描 Worker（up 已自动执行）
 
   各定向更新都不会删除或重建 Application、Environment、LoginTarget、OAuth Client，
   因此不会影响已经完成的子系统统一登录接入。
@@ -120,7 +122,7 @@ USAGE
 remove_volumes=false
 while (($# > 0)); do
     case "$1" in
-		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|refresh-data-analysis-api|start-presale-worker)
+		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|refresh-data-analysis-api|start-presale-worker|start-presale-alert-worker)
             command_name="$1"
             shift
             ;;
@@ -1130,7 +1132,7 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local build_services=(api contract-api customer-api portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    local build_services=(api contract-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
     if [[ "$force_build" == true ]]; then
         log "重新构建统一前端、平台/合同/CRM/门户/项目后端及售前投递 Worker 镜像"
     else
@@ -1140,7 +1142,7 @@ build_images() {
     # basic-platform/backend:local；CRM、Portal 和售前 Worker 使用不同 target/镜像，不会
     # 把 crm-server、portal-server 和 Worker 运行在同一个业务容器中。
     # 限制并发既降低匿名镜像令牌抖动，也避免本地机器同时编译四个后端造成资源争抢。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile portal --profile project --profile presale-worker --ansi never build "${build_services[@]}"
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile customer --profile portal --profile project --profile presale-worker --ansi never build "${build_services[@]}"
 }
 
 prepare_gateway_config() {
@@ -1414,6 +1416,8 @@ start_stack() {
     compose_up_wait "合同管理后端" contract-api
 	log "启动客户与商机管理后端"
 	compose_up_wait "客户与商机管理后端" customer-api
+	log "启动售前预警扫描 Worker"
+	compose_run up -d --wait --no-deps customer-presale-alert-worker
 	# 售前申请提交依赖独立 Worker 的新鲜心跳。up 现在默认一并启动本地
 	# 集成 Mock 和 Worker，避免只启动 customer-api 后页面始终提示 Worker 未就绪。
 	log "启动售前投递 Worker 并确认新鲜心跳"
@@ -1530,7 +1534,7 @@ refresh_customer_backend() {
     prepare_go_backend_base_images "客户与商机管理后端"
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
-    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api
+    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api customer-presale-alert-worker
     sync_crm_authorization_catalog
     prepare_gateway_config
     log "重新构建统一前端网关，使客户与商机管理路径转发到 customer-api"
@@ -1539,7 +1543,7 @@ refresh_customer_backend() {
     compose_run up -d --wait customer-mysql
     compose_run run --rm --no-deps customer-migrate
 	log "重建 customer-api 与统一前端网关；另外两个后端和统一登录接入配置保持不变"
-	compose_run up -d --wait --no-deps customer-api
+	compose_run up -d --wait --no-deps customer-api customer-presale-alert-worker
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
 	compose_run ps customer-api customer-mysql
@@ -1685,6 +1689,21 @@ start_presale_worker() {
 	fail "售前投递 Worker 未在 20 秒内产生新鲜心跳；申请入口保持安全关闭"
 }
 
+start_presale_alert_worker() {
+	ensure_platform_env_file
+	ensure_customer_env_file
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	prepare_go_backend_base_images "售前预警扫描 Worker"
+	log "构建售前预警扫描 Worker"
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile customer --ansi never build customer-presale-alert-worker
+	log "启动客户与商机数据库并执行 CRM 清单迁移"
+	compose_run up -d --wait customer-mysql
+	compose_run run --rm --no-deps customer-migrate
+	log "启动售前预警扫描 Worker"
+	compose_run up -d --wait --no-deps customer-presale-alert-worker
+	compose_run ps customer-presale-alert-worker customer-mysql
+}
+
 prepare_operational_env() {
     ensure_platform_env_file
     ensure_contract_env_file false
@@ -1775,5 +1794,8 @@ case "$command_name" in
 		;;
 	start-presale-worker)
 		start_presale_worker "$@"
+		;;
+	start-presale-alert-worker)
+		start_presale_alert_worker "$@"
 		;;
 esac

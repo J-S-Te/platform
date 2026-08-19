@@ -738,6 +738,28 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # 售前预警扫描 Worker 与 CRM API 使用同一数据库和运行时目录；它按启用的
+  # crm_presale_alert_rules 扫描超时状态，并把结果投递到个人预警列表。
+  customer-presale-alert-worker:
+    <<: *customer-backend-runtime
+    build:
+      context: ../customer_and_opportunity
+      target: presale-alert-worker-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PRESALE_ALERT_WORKER_ID: crm-presale-alert-worker-local-1
+      PRESALE_ALERT_POLL_INTERVAL: ${PRESALE_ALERT_POLL_INTERVAL:-10m}
+      PRESALE_ALERT_LEASE_DURATION: ${PRESALE_ALERT_LEASE_DURATION:-1m}
+      PRESALE_ALERT_BATCH_SIZE: ${PRESALE_ALERT_BATCH_SIZE:-200}
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["customer"]
+    restart: unless-stopped
+
   # 商机签约事件到合同系统受理箱的常驻投递进程，复用 CRM 后端镜像中的 worker。
   contract-transfer-worker:
     <<: *customer-backend-runtime

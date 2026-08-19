@@ -1,6 +1,6 @@
 # 本地 Docker 与脚本使用说明
 
-> 更新日期：2026-08-03
+> 更新日期：2026-08-19
 
 ## 1. 推荐入口
 
@@ -17,7 +17,7 @@ bash scripts/docker-local.sh logs api subsystem-provisioner
 
 - 只在缺失时从模板创建基础平台、合同管理、客户与商机管理及客户自助门户环境文件；
 - 不要求重建已有 `.env.local`；
-- 构建一个统一前端镜像，以及基础平台、合同管理、客户与商机管理、客户自助门户四个独立后端镜像；客户自助门户完成接入前只构建镜像、不启动 `portal-api`；
+- 构建一个统一前端镜像，以及基础平台、合同管理、客户与商机管理、客户自助门户的独立 API/Worker 镜像；客户自助门户完成接入前只构建镜像、不启动 `portal-api`；
 - 执行迁移，按需初始化管理员，再分阶段启动服务；
 - 不删除已存在的 Application、Environment、LoginTarget 或 OAuth Client。
 
@@ -71,6 +71,7 @@ bash scripts/docker-local.sh refresh-api
 bash scripts/docker-local.sh refresh-frontend
 bash scripts/docker-local.sh refresh-contract-api
 bash scripts/docker-local.sh refresh-customer-api
+bash scripts/docker-local.sh start-presale-alert-worker
 bash scripts/docker-local.sh refresh-portal-api
 ```
 
@@ -79,7 +80,8 @@ bash scripts/docker-local.sh refresh-portal-api
 - `refresh-api`：迁移并重建基础平台 API/provisioner；
 - `refresh-frontend`：同时重建基础平台、合同管理、客户与商机管理和客户自助门户前端；
 - `refresh-contract-api`：合同迁移并重建合同后端。
-- `refresh-customer-api`：执行客户与商机 CRM 迁移并重建独立 customer-api；同时刷新统一前端网关配置。
+- `refresh-customer-api`：执行客户与商机 CRM 迁移并重建独立 `customer-api` 和 `customer-presale-alert-worker`；同时刷新统一前端网关配置。
+- `start-presale-alert-worker`：只构建并启动客户与商机 TS-008 售前预警 Worker，适合 Worker 单独更新或故障恢复。
 - `refresh-portal-api`：仅在 `customer_portal/dev` 已接入后执行 Portal 迁移并重建独立 `portal-api`。
 - 未接入时统一前端中的 `/customer-portal/` 静态页面已存在，但 API 健康检查会失败；这是“尚未接入”的预期状态，不应伪装为可用门户。
 
@@ -91,11 +93,12 @@ bash scripts/docker-local.sh refresh-portal-api
 | `api` | `basic-platform:local` | 基础平台 API + Worker | 不发布 |
 | `contract-api` | `contract-management/backend:local` | 合同管理 API + Temporal Worker | 不发布 |
 | `customer-api` | `customer-opportunity/backend:local` | 客户与商机管理 API，只包含 `crm-server` | 不发布 |
+| `customer-presale-alert-worker` | `customer-opportunity/backend:local` | TS-008 售前超时预警扫描和站内消息投影 | 不发布 |
 | `portal-api` | `customer-portal/backend:local` | 客户自助门户 API，只包含 `portal-server`；仅在 `customer_portal/dev` 接入后启动 | 不发布 |
 
-四个后端服务使用四个独立镜像、四个独立容器和四套运行配置，只通过 Compose 内网被统一 Nginx 访问。CRM 与 Portal 虽然从同一个 `customer_and_opportunity` 源码仓库构建，但 Dockerfile 使用 `crm-runtime`、`portal-runtime` 两个目标：CRM 镜像不包含 `portal-server`，Portal 镜像不包含 `crm-server`。二者还使用独立 MySQL、独立 OIDC Client 和独立会话。
+API 与 Worker 服务使用独立镜像目标、独立容器和对应运行配置，只通过 Compose 内网被统一 Nginx 或数据库/队列访问。CRM 与 Portal 虽然从同一个 `customer_and_opportunity` 源码仓库构建，但 Dockerfile 使用 `crm-runtime`、`portal-runtime`、`presale-alert-worker-runtime` 等目标：CRM 镜像不包含 `portal-server`，Portal 镜像不包含 `crm-server`。二者还使用独立 MySQL、独立 OIDC Client 和独立会话。
 
-`docker-local.sh up` 会始终构建上述四个后端镜像。客户门户在首次受控接入前不会创建常驻 `portal-api` 容器，因为此时 OIDC Client、租户、角色目录和最小权限机器凭据尚不存在；完成 `customer_portal/dev` 接入后，再次执行 `up` 或 `refresh-portal-api` 即会启动第四个后端容器。MySQL、Temporal、迁移任务和 provisioner 属于基础设施或一次性任务，不计为业务应用容器。
+`docker-local.sh up` 会构建客户与商机 API 及预警 Worker 镜像，并在客户 profile 启动 `customer-presale-alert-worker`。客户门户在首次受控接入前不会创建常驻 `portal-api` 容器，因为此时 OIDC Client、租户、角色目录和最小权限机器凭据尚不存在；完成 `customer_portal/dev` 接入后，再次执行 `up` 或 `refresh-portal-api` 即会启动 Portal API。MySQL、Temporal、迁移任务和 provisioner 属于基础设施或一次性任务，不计为业务应用容器。
 
 ## 7. 远程服务器运行（测试/演示）
 

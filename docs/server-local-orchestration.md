@@ -1,6 +1,6 @@
 # 在远程服务器上运行本地统一编排（测试/演示服务器）
 
-> 更新日期：2026-08-03。
+> 更新日期：2026-08-19。
 > 适用场景：一台 **测试/演示服务器**（例如阿里云 ECS `47.111.20.119`），希望像本地开发一样使用
 > `docker-local.sh` 全家桶，并让 UI 的"一键接入 / 新增接入"可用。
 > 生产环境（`platform/deploy/production/`、CI/CD 发布不可变镜像）**不要**用本文档的编排方式。
@@ -11,7 +11,7 @@
 
 ```text
 一个 frontend 容器（四个前端模块）
-api / contract-api / customer-api / portal-api 四个独立后端容器
+api / contract-api / customer-api / customer-presale-alert-worker / portal-api 独立后端与 Worker 容器
 MySQL x4、Temporal、迁移与部署 Agent
 仅 frontend 对外发布 8081，其余全部在内网
 ```
@@ -80,7 +80,7 @@ printf '%s\n' '你的管理员密码' | bash scripts/docker-local.sh up \
 
 - 从模板生成 `docker/.env.local`、`../contract_management/.env.local`、
   `docker/.env.customer.local`、`docker/.env.portal.local`（含随机密码/密钥，权限 0600）；
-- 串行拉取基础镜像、构建 1 个前端 + 4 个后端镜像；
+- 串行拉取基础镜像、构建 1 个前端及 API/Worker 镜像；
 - 执行数据库迁移、初始化第一个超级管理员、分阶段启动并做网关自检。
 
 ## 4. 配置公网/远程访问（服务器是 IP + HTTP）
@@ -203,6 +203,8 @@ bash scripts/docker-local.sh verify               # 网关自检
 bash scripts/docker-local.sh refresh-api          # 只重建平台后端
 bash scripts/docker-local.sh refresh-frontend     # 只重建统一前端
 bash scripts/docker-local.sh refresh-contract-api # 只重建合同后端
+bash scripts/docker-local.sh refresh-customer-api # 重建 CRM API 和售前预警 Worker
+bash scripts/docker-local.sh start-presale-alert-worker # 单独拉起售前预警 Worker
 ```
 
 升级（拉代码 + 重建）：
