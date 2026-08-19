@@ -44,7 +44,7 @@ customer_worker_services=(
 )
 relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
 
-for command_name in docker curl gzip flock awk mktemp install stat; do
+for command_name in docker curl gzip flock awk mktemp install stat df ln; do
   command -v "$command_name" >/dev/null || {
     echo "缺少命令：$command_name" >&2
     exit 1
@@ -253,11 +253,8 @@ release_updated=false
 release_committed=false
 customer_runtime_updated=false
 restore_customer_runtime() {
-  local temporary
   [[ "$customer_runtime_updated" == true && -f "$previous_customer_runtime" ]] || return 0
-  temporary="$(mktemp "$deploy_dir/runtime/.customer.env.restore.XXXXXX")"
-  if ! install -m 600 "$previous_customer_runtime" "$temporary" || ! mv -f "$temporary" "$customer_runtime_file"; then
-    rm -f "$temporary"
+  if ! mv -f "$previous_customer_runtime" "$customer_runtime_file"; then
     echo "无法恢复上一版 CRM 运行配置：$customer_runtime_file" >&2
     return 1
   fi
@@ -267,7 +264,7 @@ cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
   if [[ "$release_updated" == true && "$release_committed" != true && -f "$previous_release" ]]; then
-    cp "$previous_release" "$release_file"
+    mv -f "$previous_release" "$release_file"
     chmod 600 "$release_file"
   fi
   if [[ "$release_committed" != true ]]; then
@@ -278,10 +275,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 chmod 600 "$previous_release" "$next_release" "$previous_customer_runtime"
-cp "$release_file" "$previous_release"
-cp "$customer_runtime_file" "$previous_customer_runtime"
+rm -f "$previous_release" "$previous_customer_runtime"
+ln "$release_file" "$previous_release"
+ln "$customer_runtime_file" "$previous_customer_runtime"
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
-cp "$release_file" "$deploy_dir/backups/releases/customer-${release_id}.env"
+ln "$release_file" "$deploy_dir/backups/releases/customer-${release_id}.env"
 chmod 600 "$deploy_dir/backups/releases/customer-${release_id}.env"
 
 awk -F= -v crm="$crm_image_ref" -v portal="$portal_image_ref" '
@@ -299,7 +297,7 @@ mv "$next_release" "$release_file"
 chmod 600 "$release_file"
 
 restore_release() {
-  cp "$previous_release" "$release_file"
+  mv -f "$previous_release" "$release_file"
   chmod 600 "$release_file"
   restore_customer_runtime
   release_updated=false
@@ -384,6 +382,24 @@ backup_database() {
   mv "$temporary" "$output"
 }
 
+require_backup_space() {
+  local available_kib minimum_kib
+  minimum_kib="${BASIC_PLATFORM_MIN_FREE_KIB:-262144}"
+  [[ "$minimum_kib" =~ ^[0-9]+$ ]] || {
+    echo "BASIC_PLATFORM_MIN_FREE_KIB 必须是非负整数 KiB" >&2
+    return 1
+  }
+  available_kib="$(df -Pk "$deploy_dir" | awk 'NR == 2 { print $4 }')"
+  [[ "$available_kib" =~ ^[0-9]+$ ]] || {
+    echo "无法读取 $deploy_dir 的可用磁盘空间" >&2
+    return 1
+  }
+  if ((available_kib < minimum_kib)); then
+    echo "发布前磁盘空间不足：${available_kib} KiB 可用，至少需要 ${minimum_kib} KiB；请先清理 backups/releases、Docker 无用层或扩容磁盘" >&2
+    return 1
+  fi
+}
+
 port_value() {
   local key="$1" fallback="$2" value
   value="$(env_value_from "$runtime_file" "$key")"
@@ -460,6 +476,7 @@ rollback_runtime() {
 }
 
 echo "启动 CRM/Portal 数据库与 Temporal"
+require_backup_space || exit 1
 if ! compose up -d --wait --wait-timeout 180 customer-mysql portal-mysql temporal; then
   restore_release
   rm -f "$previous_release"

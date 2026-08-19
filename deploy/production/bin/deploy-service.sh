@@ -41,7 +41,7 @@ profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
 
-for command_name in docker curl gzip flock awk mktemp install stat; do
+for command_name in docker curl gzip flock awk mktemp install stat df ln; do
   command -v "$command_name" >/dev/null || {
     echo "缺少命令：$command_name" >&2
     exit 1
@@ -334,12 +334,38 @@ backup_database() {
   local mysql_service="$1"
   local database="$2"
   local output="$deploy_dir/backups/${service}-${release_id}.sql.gz"
+  local temporary
+  temporary="$(mktemp "$deploy_dir/backups/.${service}-${release_id}.XXXXXX.sql.gz")"
+  chmod 600 "$temporary"
   echo "备份数据库到 $output"
   # single-transaction 为 InnoDB 提供一致性快照，备份管道任一环节失败都会因 pipefail 中止发布。
-  compose exec -T "$mysql_service" sh -c \
+  if ! compose exec -T "$mysql_service" sh -c \
     'exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$1"' \
     _ "$database" \
-    | gzip -9 >"$output"
+    | gzip -9 >"$temporary"; then
+    rm -f "$temporary"
+    echo "数据库备份失败，已清理未完成备份文件" >&2
+    return 1
+  fi
+  mv -f "$temporary" "$output"
+}
+
+require_backup_space() {
+  local available_kib minimum_kib
+  minimum_kib="${BASIC_PLATFORM_MIN_FREE_KIB:-262144}"
+  [[ "$minimum_kib" =~ ^[0-9]+$ ]] || {
+    echo "BASIC_PLATFORM_MIN_FREE_KIB 必须是非负整数 KiB" >&2
+    return 1
+  }
+  available_kib="$(df -Pk "$deploy_dir" | awk 'NR == 2 { print $4 }')"
+  [[ "$available_kib" =~ ^[0-9]+$ ]] || {
+    echo "无法读取 $deploy_dir 的可用磁盘空间" >&2
+    return 1
+  }
+  if ((available_kib < minimum_kib)); then
+    echo "发布前磁盘空间不足：${available_kib} KiB 可用，至少需要 ${minimum_kib} KiB；请先清理 backups/releases、Docker 无用层或扩容磁盘" >&2
+    return 1
+  fi
 }
 
 deploy_platform() {
@@ -438,14 +464,16 @@ rollback_runtime() {
   esac
 }
 
+require_backup_space || exit 1
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 previous_release="$(mktemp "$deploy_dir/.release.env.previous.XXXXXX")"
 next_release="$(mktemp "$deploy_dir/.release.env.next.XXXXXX")"
 chmod 600 "$previous_release" "$next_release"
-# 临时版本文件与正式指针位于同一文件系统，mv 后不会暴露半写入的镜像 digest。
-cp "$release_file" "$previous_release"
+# 同一文件系统内使用硬链接保存旧版本指针，不额外消耗数据块；磁盘接近满时仍可原子回退。
+rm -f "$previous_release"
+ln "$release_file" "$previous_release"
 # 每次发布保留旧版本指针快照，但不复制包含运行密钥的 .env。
-cp "$release_file" "$deploy_dir/backups/releases/${release_id}.env"
+ln "$release_file" "$deploy_dir/backups/releases/${release_id}.env"
 
 awk -F= -v key="$image_key" -v value="$image_ref" '
   BEGIN { found = 0 }
@@ -464,7 +492,7 @@ chmod 600 "$release_file"
 
 echo "拉取不可变镜像：$image_ref"
 if ! docker pull "$image_ref"; then
-  cp "$previous_release" "$release_file"
+  mv -f "$previous_release" "$release_file"
   rm -f "$previous_release"
   echo "镜像拉取失败，发布配置已恢复" >&2
   exit 1
@@ -477,7 +505,7 @@ else
   compose config --quiet && compose_config_ok=true
 fi
 if [[ "$compose_config_ok" != "true" ]]; then
-  cp "$previous_release" "$release_file"
+  mv -f "$previous_release" "$release_file"
   rm -f "$previous_release"
   echo "Compose 校验失败，发布配置已恢复" >&2
   exit 1
@@ -507,7 +535,7 @@ fi
 
 echo "发布失败，恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
 # 应用镜像可回退，数据库迁移不可自动逆转；迁移必须保持前后版本兼容或由人工执行恢复方案。
-cp "$previous_release" "$release_file"
+mv -f "$previous_release" "$release_file"
 rm -f "$previous_release"
 rollback_runtime || true
 exit 1
