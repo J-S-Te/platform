@@ -67,8 +67,9 @@ type API struct {
 	Handler http.Handler
 	Logger  *slog.Logger
 
-	database *gorm.DB
-	logFile  io.Closer
+	database     *gorm.DB
+	oidcDatabase *gorm.DB
+	logFile      io.Closer
 }
 
 // NewAPI 按启动配置创建本地存储目录、结构化日志、数据库连接池与 HTTP 路由。
@@ -396,14 +397,26 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	oidcRepository, err := oidcinfrastructure.NewRepository(db)
+	// Keep the latency-sensitive broker token exchange independent from the
+	// shared management/audit pool. A burst or stuck transaction in ordinary
+	// platform traffic must not make Keycloak wait for its five-second callback
+	// deadline.
+	oidcDB, err := database.OpenMySQLWithPool(cfg.MySQL, 10, 5, 15*time.Minute, 2*time.Minute)
 	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("open OIDC database pool: %w", err)
+	}
+	oidcRepository, err := oidcinfrastructure.NewRepository(oidcDB)
+	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
 	oidcAuthorizationResolver, err := applicationaccess.NewApplicationAuthorizationResolver(applicationAccessService)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -412,6 +425,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		oidcTokenManager, ulid.Generator{}, oidcAuthorizationResolver,
 	)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -420,18 +434,21 @@ func NewAPI(cfg config.Config) (*API, error) {
 		oidcRepository, oidcIssuer, ulid.Generator{}, oidcapplication.CryptographicSecretGenerator{}, oidcapplication.SystemClock{}, 5*time.Minute,
 	)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
 	oidcAccessTokenSubjects, err := oidcaccesssubject.New(oidcRepository, oidcapplication.SystemClock{})
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
 	oidcPersonnelDirectory, err := oidcpersonneldirectory.New(db)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -447,6 +464,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	oidcCookieSameSite, err := parseSameSite(cfg.Auth.SessionCookieSameSite)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -472,6 +490,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		Logger:                         logger,
 	})
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -479,6 +498,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 
 	applicationManagementRepository, err := applicationregistryinfrastructure.NewManagementRepository(db)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -487,6 +507,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		applicationManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
 	)
 	if err != nil {
+		_ = database.Close(oidcDB)
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
@@ -615,9 +636,10 @@ func NewAPI(cfg config.Config) (*API, error) {
 		Handler: httptransport.NewRouter(
 			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
-		Logger:   logger,
-		database: db,
-		logFile:  logFile,
+		Logger:       logger,
+		database:     db,
+		oidcDatabase: oidcDB,
+		logFile:      logFile,
 	}, nil
 }
 
@@ -722,6 +744,11 @@ func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, err
 // Close 释放 API 持有的数据库连接与日志文件句柄。
 // 仅在 NewAPI 初始化完成后调用；若依赖未就绪则按空值保护直接返回。
 func (api *API) Close() {
+	if api.oidcDatabase != nil {
+		if err := database.Close(api.oidcDatabase); err != nil {
+			api.Logger.Error("close OIDC mysql database handle", "error", err)
+		}
+	}
 	if api.database != nil {
 		if err := database.Close(api.database); err != nil {
 			api.Logger.Error("close mysql database handle", "error", err)
