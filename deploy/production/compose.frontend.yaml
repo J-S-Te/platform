@@ -4,7 +4,7 @@ name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
 # runtime/contract.env、runtime/project.env 等受保护的子系统密钥文件。
 services:
   frontend:
-    image: ${FRONTEND_IMAGE}
+    image: ${FRONTEND_IMAGE:-frontend/frontend:pending}
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-18082}:80"
     networks: [application]

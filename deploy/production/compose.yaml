@@ -12,7 +12,9 @@ x-platform-service: &platform-service
   restart: unless-stopped
 
 x-contract-service: &contract-service
-  image: ${CONTRACT_IMAGE}
+  # 合同服务尚未完成首次接入时允许平台独立发布；contract-api 不会被
+  # platform 发布目标启动，真正发布合同服务时脚本会写入不可变 digest。
+  image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
   env_file:
     - ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
   # OIDC_* is deliberately owned by the per-environment runtime file.  Do not
@@ -662,7 +664,8 @@ services:
     profiles: ["customer"]
 
   frontend:
-    image: ${FRONTEND_IMAGE}
+    # 前端尚未发布时允许 platform 独立发布；frontend 发布脚本会覆盖为不可变 digest。
+    image: ${FRONTEND_IMAGE:-frontend/frontend:pending}
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-18082}:80"
     networks: [application]
