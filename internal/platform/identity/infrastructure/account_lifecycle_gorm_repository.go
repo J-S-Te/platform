@@ -29,7 +29,7 @@ func (repository *GORMRepository) CreateLocalAccount(ctx context.Context, write 
 		if err := transaction.Create(&accountModel{ID: write.AccountID, TenantID: write.TenantID, UserID: &write.UserID, Username: &accountName, AccountType: "HUMAN", AuthSource: "LOCAL", Status: domain.StatusActive, ValidUntil: copyTime(write.ValidUntil), Version: 1, CreatedAt: write.OccurredAt, CreatedBy: &operatorID, UpdatedAt: write.OccurredAt, UpdatedBy: &operatorID}).Error; err != nil {
 			return mapWriteError(err, "create local account")
 		}
-		if err := transaction.Create(&passwordCredentialModel{ID: write.CredentialID, AccountID: write.AccountID, PasswordHash: append([]byte(nil), write.PasswordDigest...), HashAlgorithm: "argon2id", AlgorithmParams: append([]byte(nil), write.AlgorithmParams...), MustChange: false, FailedAttempts: 0, Status: domain.StatusActive, PasswordChangedAt: write.OccurredAt, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}).Error; err != nil {
+		if err := transaction.Create(&passwordCredentialModel{ID: write.CredentialID, AccountID: write.AccountID, PasswordHash: append([]byte(nil), write.PasswordDigest...), HashAlgorithm: "argon2id", AlgorithmParams: append([]byte(nil), write.AlgorithmParams...), MustChange: true, FailedAttempts: 0, Status: domain.StatusActive, PasswordChangedAt: write.OccurredAt, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}).Error; err != nil {
 			return mapWriteError(err, "create local account credential")
 		}
 		account = domain.Account{ID: write.AccountID, TenantID: write.TenantID, UserID: &write.UserID, AccountName: write.AccountName, Status: domain.StatusActive, ValidUntil: copyTime(write.ValidUntil), Version: 1, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}
@@ -93,7 +93,7 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 			if !errors.Is(credentialResult.Error, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("check password credential: %w", credentialResult.Error)
 			}
-			if err := transaction.Create(&passwordCredentialModel{ID: write.CredentialID, AccountID: write.AccountID, PasswordHash: append([]byte(nil), write.PasswordDigest...), HashAlgorithm: "argon2id", AlgorithmParams: append([]byte(nil), write.AlgorithmParams...), MustChange: false, FailedAttempts: 0, Status: domain.StatusActive, PasswordChangedAt: write.OccurredAt, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}).Error; err != nil {
+			if err := transaction.Create(&passwordCredentialModel{ID: write.CredentialID, AccountID: write.AccountID, PasswordHash: append([]byte(nil), write.PasswordDigest...), HashAlgorithm: "argon2id", AlgorithmParams: append([]byte(nil), write.AlgorithmParams...), MustChange: true, FailedAttempts: 0, Status: domain.StatusActive, PasswordChangedAt: write.OccurredAt, CreatedAt: write.OccurredAt, UpdatedAt: write.OccurredAt}).Error; err != nil {
 				return mapWriteError(err, "initialize password credential")
 			}
 		} else {
@@ -106,12 +106,20 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 			if credential.Status != domain.StatusActive {
 				return application.ErrConflict
 			}
-			if err := transaction.Model(&passwordCredentialModel{}).Where("id = ?", credential.ID).Updates(map[string]any{"password_hash": append([]byte(nil), write.PasswordDigest...), "hash_algorithm": "argon2id", "algorithm_params": append([]byte(nil), write.AlgorithmParams...), "must_change": false, "failed_attempts": 0, "last_failed_at": nil, "password_changed_at": write.OccurredAt, "updated_at": write.OccurredAt}).Error; err != nil {
+			if err := transaction.Model(&passwordCredentialModel{}).Where("id = ?", credential.ID).Updates(map[string]any{"password_hash": append([]byte(nil), write.PasswordDigest...), "hash_algorithm": "argon2id", "algorithm_params": append([]byte(nil), write.AlgorithmParams...), "must_change": !initialize, "failed_attempts": 0, "last_failed_at": nil, "password_changed_at": write.OccurredAt, "updated_at": write.OccurredAt}).Error; err != nil {
 				return fmt.Errorf("reset password credential: %w", err)
 			}
 		}
 		operatorID := write.OperatorID
-		accountUpdate := transaction.Model(&accountModel{}).Where("tenant_id = ? AND id = ? AND version = ?", write.TenantID, write.AccountID, write.ExpectedVersion).Updates(map[string]any{"locked_until": nil, "updated_at": write.OccurredAt, "updated_by": &operatorID, "version": gorm.Expr("version + 1")})
+		accountFields := map[string]any{"locked_until": nil, "updated_at": write.OccurredAt, "updated_by": &operatorID, "version": gorm.Expr("version + 1")}
+		if !initialize {
+			// Password reset is also the administrative recovery path for legacy
+			// rows whose authentication lock was persisted as account status.
+			// Clear both lock representations so the new password is immediately
+			// usable after the transaction commits.
+			accountFields["status"] = domain.StatusActive
+		}
+		accountUpdate := transaction.Model(&accountModel{}).Where("tenant_id = ? AND id = ? AND version = ?", write.TenantID, write.AccountID, write.ExpectedVersion).Updates(accountFields)
 		if accountUpdate.Error != nil {
 			return fmt.Errorf("update account password version: %w", accountUpdate.Error)
 		}

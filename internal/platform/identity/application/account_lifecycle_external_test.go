@@ -68,7 +68,7 @@ func TestResetPasswordInitializesCredentialFreeExternalAccount(t *testing.T) {
 	if repository.resetCalls != 1 || repository.initializeCalls != 1 {
 		t.Fatalf("reset calls=%d initialize calls=%d", repository.resetCalls, repository.initializeCalls)
 	}
-	if repository.lastWrite.CredentialID != "credential-1" || repository.lastWrite.RevokeReason != "PASSWORD_INITIALIZED" || repository.lastWrite.ExpectedVersion != 3 {
+	if repository.lastWrite.CredentialID != "credential-1" || repository.lastWrite.RevokeReason != "ADMIN_PASSWORD_RESET" || repository.lastWrite.ExpectedVersion != 3 {
 		t.Fatalf("initialize write=%+v", repository.lastWrite)
 	}
 	if result.AccountID != "account-1" || result.TemporaryPassword != "StrongExternal!2026" {
