@@ -30,6 +30,7 @@ type persistedClientMapping struct {
 	Realm             string `gorm:"column:realm"`
 	ClientID          string `gorm:"column:keycloak_client_id"`
 	ConfigurationHash string `gorm:"column:configuration_hash"`
+	Status            string `gorm:"column:status"`
 }
 
 // StoredKeycloakClientMapping contains the non-secret registration data needed
@@ -110,7 +111,7 @@ func (store *ClientMappingStore) SaveKeycloakClientMapping(ctx context.Context, 
 		)
 		var previous persistedClientMapping
 		err = tx.Table("keycloak_application_client_mapping").
-			Select("realm, keycloak_client_id, configuration_hash").
+			Select("realm, keycloak_client_id, configuration_hash, status").
 			Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("tenant_id = ? AND application_id = ? AND environment_id = ?", tenantID, applicationID, environmentID).
 			Take(&previous).Error
@@ -133,7 +134,7 @@ func (store *ClientMappingStore) SaveKeycloakClientMapping(ctx context.Context, 
 			return fmt.Errorf("save Keycloak Client mapping: %w", err)
 		}
 
-		if !keycloakClientConfigurationChanged(mappingExists, previous, realm, clientID, configurationHash) {
+		if !shouldInvalidateKeycloakClientConfiguration(mappingExists, previous, realm, clientID, configurationHash) {
 			return nil
 		}
 		return invalidateKeycloakClientConfiguration(tx, tenantID, applicationID, environmentID, clientID, configurationHash, now)
@@ -170,6 +171,16 @@ func keycloakClientConfigurationChanged(exists bool, previous persistedClientMap
 	return strings.TrimSpace(previous.Realm) != strings.TrimSpace(realm) ||
 		strings.TrimSpace(previous.ClientID) != strings.TrimSpace(clientID) ||
 		strings.TrimSpace(previous.ConfigurationHash) != strings.TrimSpace(configurationHash)
+}
+
+func shouldInvalidateKeycloakClientConfiguration(exists bool, previous persistedClientMapping, realm, clientID, configurationHash string) bool {
+	if !exists {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(previous.Status), "SYNCED") {
+		return true
+	}
+	return keycloakClientConfigurationChanged(exists, previous, realm, clientID, configurationHash)
 }
 
 func invalidateKeycloakClientConfiguration(tx *gorm.DB, tenantID, applicationID, environmentID, clientID, configurationHash string, now time.Time) error {
