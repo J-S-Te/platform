@@ -212,7 +212,19 @@ jobs:
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd $(printf '%q' "$DEPLOY_PATH") && bash -s" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
           compose=(docker compose --env-file .env --env-file .release.env -f compose.yaml)
-          if ! "${compose[@]}" up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
+          # 资产同步类提交不一定会更新 .release.env。此时复用当前健康 Agent 的
+          # 不可变镜像，避免 Compose 把 PLATFORM_IMAGE 展开为空并阻断清单重载。
+          subsystem_id="$("${compose[@]}" ps -q subsystem-provisioner || true)"
+          [[ -n "$subsystem_id" ]] || {
+            echo "[ci] 未找到现有 subsystem-provisioner，且本次不是平台镜像发布，无法安全重建 Agent" >&2
+            exit 1
+          }
+          current_platform_image="$(docker inspect "$subsystem_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
+          [[ "$current_platform_image" =~ @sha256:[a-f0-9]{64}$ ]] || {
+            echo "[ci] 当前 subsystem-provisioner 未使用可验证的不可变平台镜像：$current_platform_image" >&2
+            exit 1
+          }
+          if ! PLATFORM_IMAGE="$current_platform_image" "${compose[@]}" up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
             echo "[ci] subsystem-provisioner start failed" >&2
             "${compose[@]}" ps subsystem-provisioner || true
             subsystem_id="$("${compose[@]}" ps -q subsystem-provisioner || true)"
