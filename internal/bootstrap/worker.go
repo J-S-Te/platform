@@ -37,6 +37,9 @@ type concurrentRunner struct {
 	runners []ProcessRunner
 }
 
+// Run 并发启动所有 Runner 并等待全部退出。
+// 并发边界：每个 Runner 各自独立 goroutine 运行；context 被所有子 goroutine 共用；
+// 如果 context 被取消，子 Runner 退场后 WaitGroup 才会释放并让进程安全退出。
 func (runner *concurrentRunner) Run(ctx context.Context) {
 	var group sync.WaitGroup
 	for _, process := range runner.runners {
@@ -61,8 +64,9 @@ type Worker struct {
 	logFile  io.Closer
 }
 
-// NewWorker 装配审计导出与留存清理任务。Worker 不执行 AutoMigrate，数据库变更只能由独立
-// migrate 命令完成，避免扩容或重启后台任务时意外竞争 DDL。
+// NewWorker 装配审计导出、留存清理、人员变更与 Keycloak 观察者等任务。
+// 参数 cfg 提供数据库与调度配置；返回 *Worker 表示可启动的完整 worker 进程依赖图。
+// Worker 不执行 AutoMigrate，数据库变更只能由独立 migrate 命令完成，避免扩容或重启后台任务时并发竞争 DDL。
 func NewWorker(cfg config.Config) (*Worker, error) {
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)

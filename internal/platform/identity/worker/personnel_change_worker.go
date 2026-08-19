@@ -20,6 +20,9 @@ type PersonnelChangeWorker struct {
 	pollInterval time.Duration
 }
 
+// NewPersonnelChangeWorker 创建人员变更 Worker，完成依赖和参数校验。
+// 参数 service/logger 必填，pollInterval 必须大于 0，workerID 为非空字符串；
+// 返回错误表示启动参数无效，返回 *PersonnelChangeWorker 后可交由并发调度器运行。
 func NewPersonnelChangeWorker(service *application.PersonnelChangeService, logger *slog.Logger, workerID string, pollInterval time.Duration) (*PersonnelChangeWorker, error) {
 	// 启动时校验依赖和轮询参数，避免无效 worker 进入常驻循环。
 	if service == nil || logger == nil {
@@ -31,6 +34,8 @@ func NewPersonnelChangeWorker(service *application.PersonnelChangeService, logge
 	return &PersonnelChangeWorker{service: service, logger: logger, workerID: strings.TrimSpace(workerID), pollInterval: pollInterval}, nil
 }
 
+// Run 按固定间隔轮询待执行的已到期人员变更并执行状态迁移。
+// 每轮先执行一次处理，随后等待 ctx 或 ticker 触发；context 取消时立刻退出循环，防止服务关闭阻塞。
 func (w *PersonnelChangeWorker) Run(ctx context.Context) {
 	// 先立即处理一次，再按固定间隔轮询；取消上下文会停止后续轮询。
 	ticker := time.NewTicker(w.pollInterval)

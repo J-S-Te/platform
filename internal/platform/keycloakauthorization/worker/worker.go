@@ -53,6 +53,9 @@ type Worker struct {
 	MaxAttempts uint
 }
 
+// New 构建 Keycloak 权限投影 worker，初始化并校验必要依赖与参数。
+// queue 与 synchronizer 为外部服务抽象，logger 和 workerID 为可观测性依赖；
+// poll 为轮询周期，clocks 允许测试桩替换时钟，超出 1 个时钟实例视为配置错误。
 func New(queue Queue, synchronizer Synchronizer, logger *slog.Logger, workerID string, poll time.Duration, clocks ...Clock) (*Worker, error) {
 	if queue == nil || synchronizer == nil || logger == nil || strings.TrimSpace(workerID) == "" || poll <= 0 || len(clocks) > 1 {
 		return nil, errors.New("Keycloak authorization worker configuration is invalid")
@@ -67,6 +70,8 @@ func New(queue Queue, synchronizer Synchronizer, logger *slog.Logger, workerID s
 	return &Worker{queue: queue, synchronizer: synchronizer, logger: logger, workerID: strings.TrimSpace(workerID), poll: poll, clock: clock, StaleLockTimeout: 5 * time.Minute, MaxAttempts: 5}, nil
 }
 
+// Run 持续轮询并处理事件，依赖 context 终止信号退出。
+// 每次循环都先执行 RunOnce，再等待 poll 周期；RunOnce 返回错误不会终止主循环，仅记录日志。
 func (worker *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(worker.poll)
 	defer ticker.Stop()
@@ -82,6 +87,8 @@ func (worker *Worker) Run(ctx context.Context) {
 	}
 }
 
+// RunOnce 执行一次“回收过期锁-领取-同步-成功/重试/死信”的完整闭环。
+// 返回 nil 表示本轮已正确结束（包含重试排队）；返回错误表示无法安全推进，例如依赖回收或领取失败。
 func (worker *Worker) RunOnce(ctx context.Context) error {
 	// 每轮先回收崩溃遗留锁，再完成一次“领取—投影—成功或退避重试”的闭环。
 	now := worker.clock.Now().UTC()
