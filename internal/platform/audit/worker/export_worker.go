@@ -34,6 +34,9 @@ type ExportWorker struct {
 	staleLockTimeout time.Duration
 }
 
+// NewExportWorker 组装一次性导出 worker 并校验配置。
+// 返回值携带 MySQL 作业队列连接、导出目录、执行实例标识、轮询周期与租约超时；
+// pollInterval 或 staleLockTimeout 小于等于 0、存储根目录空或依赖为空会返回错误。
 func NewExportWorker(service *application.Service, logger *slog.Logger, storageRoot, workerID string, pollInterval, staleLockTimeout time.Duration) (*ExportWorker, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("audit export worker dependencies must not be nil")

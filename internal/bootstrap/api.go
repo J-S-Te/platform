@@ -62,7 +62,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// API is the dependency container for the HTTP process.
+// API 是 HTTP 进程的依赖容器，保存服务路由、日志器与资源句柄。
 type API struct {
 	Handler http.Handler
 	Logger  *slog.Logger
@@ -71,9 +71,9 @@ type API struct {
 	logFile  io.Closer
 }
 
-// NewAPI creates the local storage directories, structured logger, database pool and HTTP router.
-// It deliberately does not ping MySQL during startup; /readyz reports dependency state while
-// /healthz remains available for process liveness.
+// NewAPI 按启动配置创建本地存储目录、结构化日志、数据库连接池与 HTTP 路由。
+// 参数 cfg 为完整应用配置；返回值是装配完成的 API 运行时对象；若任一依赖初始化失败则返回错误并释放已分配资源。
+// 该初始化阶段不做数据库 ping：/readyz 负责反馈依赖状态，/healthz 始终对进程活性负责。
 func NewAPI(cfg config.Config) (*API, error) {
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)
@@ -719,8 +719,8 @@ func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, err
 	return applicationaccess.PlatformCatalogBootstrapOperatorID, nil
 }
 
-// 仅 NewAPI 完整成功后才由 API 接管数据库和日志文件；此前任一装配步骤失败都在原分支
-// 立即按“数据库后开先关、日志最后关闭”的顺序释放，成功后可统一 defer Close。
+// Close 释放 API 持有的数据库连接与日志文件句柄。
+// 仅在 NewAPI 初始化完成后调用；若依赖未就绪则按空值保护直接返回。
 func (api *API) Close() {
 	if api.database != nil {
 		if err := database.Close(api.database); err != nil {
@@ -736,7 +736,9 @@ func (api *API) Close() {
 
 // oidcIDTokenVerifierAdapter 把 Keycloak broker 验证器的 ID Token 校验适配为
 // 身份 HTTP 层接口：验签通过后要求 identity_id 与 subject 一致。
-type oidcIDTokenVerifierAdapter struct{ verifier *middleware.KeycloakBrokerJWTVerifier }
+type oidcIDTokenVerifierAdapter struct {
+	verifier *middleware.KeycloakBrokerJWTVerifier
+}
 
 func (adapter oidcIDTokenVerifierAdapter) VerifyIDToken(ctx context.Context, raw, nonce, clientID string) (string, error) {
 	claims, err := adapter.verifier.VerifyIDToken(ctx, raw, nonce, clientID)
