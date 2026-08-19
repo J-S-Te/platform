@@ -18,6 +18,16 @@ import (
 // OpenMySQL 创建共享 GORM 句柄。启动阶段有意关闭自动 Ping：MySQL 暂时不可用时 API 仍能
 // 提供 /healthz 表示进程存活，而 /readyz 再用有界查询表达依赖是否就绪。
 func OpenMySQL(cfg config.MySQLConfig) (*gorm.DB, error) {
+	return OpenMySQLWithPool(cfg, 50, 20, 15*time.Minute, 2*time.Minute)
+}
+
+// OpenMySQLWithPool creates a MySQL handle with an isolated connection-pool
+// budget. Callers that protect latency-sensitive paths can use a separate
+// handle without changing the shared platform pool.
+func OpenMySQLWithPool(cfg config.MySQLConfig, maxOpen, maxIdle int, maxLifetime, maxIdleTime time.Duration) (*gorm.DB, error) {
+	if maxOpen <= 0 || maxIdle < 0 || maxIdle > maxOpen || maxLifetime <= 0 || maxIdleTime <= 0 {
+		return nil, fmt.Errorf("invalid mysql connection pool settings")
+	}
 	params, err := parseParameters(cfg.Params)
 	if err != nil {
 		return nil, err
@@ -42,15 +52,10 @@ func OpenMySQL(cfg config.MySQLConfig) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("access mysql database pool: %w", err)
 	}
-	// Keep enough headroom for the OIDC authorization-code exchange while leaving
-	// room below MySQL's server-wide connection limit for the worker and other
-	// platform processes. The previous 25-connection ceiling allowed a burst of
-	// portal, audit, and subsystem requests to make token exchange wait for a
-	// connection until Keycloak's five-second callback timeout elapsed.
-	sqlDatabase.SetMaxOpenConns(50)
-	sqlDatabase.SetMaxIdleConns(20)
-	sqlDatabase.SetConnMaxLifetime(15 * time.Minute)
-	sqlDatabase.SetConnMaxIdleTime(2 * time.Minute)
+	sqlDatabase.SetMaxOpenConns(maxOpen)
+	sqlDatabase.SetMaxIdleConns(maxIdle)
+	sqlDatabase.SetConnMaxLifetime(maxLifetime)
+	sqlDatabase.SetConnMaxIdleTime(maxIdleTime)
 
 	return database, nil
 }
