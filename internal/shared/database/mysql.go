@@ -42,10 +42,15 @@ func OpenMySQL(cfg config.MySQLConfig) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("access mysql database pool: %w", err)
 	}
-	sqlDatabase.SetMaxOpenConns(25)
-	sqlDatabase.SetMaxIdleConns(10)
-	sqlDatabase.SetConnMaxLifetime(30 * time.Minute)
-	sqlDatabase.SetConnMaxIdleTime(5 * time.Minute)
+	// Keep enough headroom for the OIDC authorization-code exchange while leaving
+	// room below MySQL's server-wide connection limit for the worker and other
+	// platform processes. The previous 25-connection ceiling allowed a burst of
+	// portal, audit, and subsystem requests to make token exchange wait for a
+	// connection until Keycloak's five-second callback timeout elapsed.
+	sqlDatabase.SetMaxOpenConns(50)
+	sqlDatabase.SetMaxIdleConns(20)
+	sqlDatabase.SetConnMaxLifetime(15 * time.Minute)
+	sqlDatabase.SetConnMaxIdleTime(2 * time.Minute)
 
 	return database, nil
 }
