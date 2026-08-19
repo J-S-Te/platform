@@ -115,6 +115,33 @@ func TestKeycloakClientConfigurationChangeDetection(t *testing.T) {
 	}
 }
 
+func TestShouldInvalidateKeycloakClientConfiguration(t *testing.T) {
+	currentHash := keycloakClientConfigurationHash("basic-platform", "orders-prod-web", "schema-v1")
+	matched := persistedClientMapping{Realm: "basic-platform", ClientID: "orders-prod-web", ConfigurationHash: currentHash, Status: "SYNCED"}
+	tests := []struct {
+		name     string
+		exists   bool
+		previous persistedClientMapping
+		realm    string
+		clientID string
+		hash     string
+		want     bool
+	}{
+		{name: "missing mapping", exists: false, previous: persistedClientMapping{}, realm: "basic-platform", clientID: "orders-prod-web", hash: currentHash, want: true},
+		{name: "already synced unchanged", exists: true, previous: matched, realm: "basic-platform", clientID: "orders-prod-web", hash: currentHash, want: false},
+		{name: "unsynced unchanged", exists: true, previous: persistedClientMapping{Realm: "basic-platform", ClientID: "orders-prod-web", ConfigurationHash: currentHash, Status: "PENDING"}, realm: "basic-platform", clientID: "orders-prod-web", hash: currentHash, want: true},
+		{name: "failed unchanged", exists: true, previous: persistedClientMapping{Realm: "basic-platform", ClientID: "orders-prod-web", ConfigurationHash: currentHash, Status: "FAILED"}, realm: "basic-platform", clientID: "orders-prod-web", hash: currentHash, want: true},
+		{name: "null status unchanged", exists: true, previous: persistedClientMapping{Realm: "basic-platform", ClientID: "orders-prod-web", ConfigurationHash: currentHash}, realm: "basic-platform", clientID: "orders-prod-web", hash: currentHash, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldInvalidateKeycloakClientConfiguration(test.exists, test.previous, test.realm, test.clientID, test.hash); got != test.want {
+				t.Fatalf("shouldInvalidate = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestSaveKeycloakClientMappingRejectsIncompleteConfiguration(t *testing.T) {
 	store, err := NewClientMappingStore(newDryRunMySQL(t))
 	if err != nil {
