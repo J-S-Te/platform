@@ -33,13 +33,13 @@ const maxLoginRequestBytes = 8 * 1024
 
 // Handler exposes the OpenAPI /auth endpoints.
 type Handler struct {
-	service       applicationService
-	logger        *slog.Logger
-	cookie        cookieConfig
-	auditRecorder lifecycleAuditRecorder
-	auditConfig   config.AuditConfig
-	loginTargets  applicationregistry.LoginTargetResolver
-	oidc          oidcLoginConfig
+	service         applicationService
+	logger          *slog.Logger
+	cookie          cookieConfig
+	auditRecorder   lifecycleAuditRecorder
+	auditConfig     config.AuditConfig
+	loginTargets    applicationregistry.LoginTargetResolver
+	oidc            oidcLoginConfig
 	idTokenVerifier oidcIDTokenVerifier
 }
 
@@ -155,8 +155,9 @@ type loginRequest struct {
 }
 
 type sessionResponse struct {
-	ExpiresAt   time.Time `json:"expires_at"`
-	RedirectURL string    `json:"redirect_url"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	RedirectURL        string    `json:"redirect_url"`
+	MustChangePassword bool      `json:"must_change_password"`
 }
 
 type principalResponse struct {
@@ -656,7 +657,7 @@ func parseSameSite(value string) (http.SameSite, error) {
 }
 
 func toSessionResponse(result application.SessionResult) sessionResponse {
-	return sessionResponse{ExpiresAt: result.ExpiresAt.UTC(), RedirectURL: result.RedirectURL}
+	return sessionResponse{ExpiresAt: result.ExpiresAt.UTC(), RedirectURL: result.RedirectURL, MustChangePassword: result.MustChangePassword}
 }
 
 func remoteIP(request *http.Request) net.IP {

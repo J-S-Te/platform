@@ -146,9 +146,10 @@ type OIDCLoginInput struct {
 
 // SessionResult is the non-sensitive API session representation plus the HttpOnly cookie value.
 type SessionResult struct {
-	ExpiresAt   time.Time
-	RedirectURL string
-	Token       string
+	ExpiresAt          time.Time
+	RedirectURL        string
+	Token              string
+	MustChangePassword bool
 
 	// Identity fields are server-side metadata for lifecycle auditing. They are deliberately not
 	// included in the HTTP response body or browser cookie.
@@ -285,7 +286,7 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 	}
 
 	return SessionResult{
-		ExpiresAt: expiresAt, RedirectURL: "/", Token: token,
+		ExpiresAt: expiresAt, RedirectURL: "/", Token: token, MustChangePassword: account.MustChangePassword,
 		SessionID: sessionID, TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
 		AccountID: account.AccountID, AccountName: account.AccountName,
 		ReplacedExistingSession: replaceExisting,

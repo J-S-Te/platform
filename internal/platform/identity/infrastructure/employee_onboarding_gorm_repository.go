@@ -231,8 +231,16 @@ func (repository *GORMRepository) CreateEmployees(ctx context.Context, writes []
 				return fmt.Errorf("validate employee batch membership references: %w", err)
 			}
 			accountName, operatorID := write.Account.AccountName, write.Account.OperatorID
-			accountRow := accountModel{ID: write.Account.AccountID, TenantID: tenantID, UserID: &write.Account.UserID, Username: &accountName, AccountType: "HUMAN", AuthSource: "LOCAL", Status: domain.StatusActive, ValidUntil: copyTime(write.Account.ValidUntil), Version: 1, CreatedAt: now, CreatedBy: &operatorID, UpdatedAt: now, UpdatedBy: &operatorID}
-			if err := tx.Create(&accountRow).Error; err != nil {
+			// Use an explicit column map here instead of relying on GORM's model-field
+			// projection. The username is the login identifier for imported users; if it
+			// is silently omitted, the credential can be created with must_change=true but
+			// the user cannot reach the login response that carries the force-change flag.
+			if err := tx.Table("iam_account").Create(map[string]any{
+				"id": write.Account.AccountID, "tenant_id": tenantID, "user_id": write.Account.UserID,
+				"username": accountName, "account_type": "HUMAN", "auth_source": "LOCAL", "status": domain.StatusActive,
+				"valid_until": copyTime(write.Account.ValidUntil), "version": uint64(1), "created_at": now,
+				"created_by": operatorID, "updated_at": now, "updated_by": operatorID,
+			}).Error; err != nil {
 				return mapWriteError(err, "create employee batch local account")
 			}
 			if err := tx.Create(&passwordCredentialModel{ID: write.Account.CredentialID, AccountID: write.Account.AccountID, PasswordHash: append([]byte(nil), write.Account.PasswordDigest...), HashAlgorithm: "argon2id", AlgorithmParams: append([]byte(nil), write.Account.AlgorithmParams...), MustChange: true, FailedAttempts: 0, Status: domain.StatusActive, PasswordChangedAt: now, CreatedAt: now, UpdatedAt: now}).Error; err != nil {

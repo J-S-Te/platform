@@ -157,22 +157,23 @@ func (membershipModel) TableName() string { return "iam_membership" }
 // Projection models are read-only result sets for joins. They do not represent aggregate domain
 // objects and are converted by explicit mapper functions below.
 type loginAccountProjection struct {
-	TenantID         string     `gorm:"column:tenant_id"`
-	TenantName       string     `gorm:"column:tenant_name"`
-	TenantCode       string     `gorm:"column:tenant_code"`
-	TenantStatus     string     `gorm:"column:tenant_status"`
-	UserID           string     `gorm:"column:user_id"`
-	UserName         string     `gorm:"column:user_name"`
-	UserStatus       string     `gorm:"column:user_status"`
-	AccountID        string     `gorm:"column:account_id"`
-	AccountName      string     `gorm:"column:account_name"`
-	AccountStatus    string     `gorm:"column:account_status"`
-	LockedUntil      *time.Time `gorm:"column:locked_until"`
-	PasswordHash     []byte     `gorm:"column:password_hash"`
-	HashAlgorithm    string     `gorm:"column:hash_algorithm"`
-	AlgorithmParams  []byte     `gorm:"column:algorithm_params"`
-	CredentialStatus string     `gorm:"column:credential_status"`
-	CredentialExpiry *time.Time `gorm:"column:credential_expiry"`
+	TenantID           string     `gorm:"column:tenant_id"`
+	TenantName         string     `gorm:"column:tenant_name"`
+	TenantCode         string     `gorm:"column:tenant_code"`
+	TenantStatus       string     `gorm:"column:tenant_status"`
+	UserID             string     `gorm:"column:user_id"`
+	UserName           string     `gorm:"column:user_name"`
+	UserStatus         string     `gorm:"column:user_status"`
+	AccountID          string     `gorm:"column:account_id"`
+	AccountName        string     `gorm:"column:account_name"`
+	AccountStatus      string     `gorm:"column:account_status"`
+	LockedUntil        *time.Time `gorm:"column:locked_until"`
+	PasswordHash       []byte     `gorm:"column:password_hash"`
+	HashAlgorithm      string     `gorm:"column:hash_algorithm"`
+	AlgorithmParams    []byte     `gorm:"column:algorithm_params"`
+	CredentialStatus   string     `gorm:"column:credential_status"`
+	CredentialExpiry   *time.Time `gorm:"column:credential_expiry"`
+	MustChangePassword bool       `gorm:"column:must_change_password"`
 }
 
 type principalProjection struct {

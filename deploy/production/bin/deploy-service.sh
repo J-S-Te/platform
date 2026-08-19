@@ -296,6 +296,25 @@ wait_for_health() {
   return 1
 }
 
+verify_service_image() {
+  local compose_kind="$1" service_name="$2" expected_image="$3" container_id actual_image
+  if [[ "$compose_kind" == "frontend" ]]; then
+    container_id="$(frontend_compose ps -q "$service_name" 2>/dev/null || true)"
+  else
+    container_id="$(compose ps -q "$service_name" 2>/dev/null || true)"
+  fi
+  [[ -n "$container_id" ]] || {
+    echo "未找到已启动的 $service_name 容器，无法确认镜像是否生效" >&2
+    return 1
+  }
+  actual_image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
+  [[ "$actual_image" == "$expected_image" ]] || {
+    echo "$service_name 镜像未生效：期望=$expected_image，实际=$actual_image" >&2
+    return 1
+  }
+  echo "$service_name 已运行目标不可变镜像：$expected_image"
+}
+
 dump_subsystem_provisioner_debug() {
   local container_id
   container_id="$(compose ps -q subsystem-provisioner 2>/dev/null || true)"
@@ -344,6 +363,8 @@ deploy_platform() {
     compose up -d --force-recreate --no-deps platform-api platform-worker || return
     wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || return
   }
+  verify_service_image compose platform-api "$image_ref" || return 1
+  verify_service_image compose platform-worker "$image_ref" || return 1
 }
 
 deploy_contract() {
@@ -362,12 +383,13 @@ deploy_contract() {
   backup_database contract-mysql contract_management || return
   # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
   compose --profile release run --rm contract-migrate || return
-  compose up -d --no-deps contract-api || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api || return
   if ! wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"; then
     echo "---- contract-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 contract-api >&2 || true
     return 1
   fi
+  verify_service_image compose contract-api "$image_ref" || return 1
 }
 
 deploy_project() {
@@ -386,22 +408,24 @@ deploy_project() {
   backup_database project-mysql project_management || return
   # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
   compose --profile project-release run --rm project-migrate || return
-  compose up -d --no-deps project-api || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 project-api || return
   if ! wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18085)/healthz"; then
     echo "---- project-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 project-api >&2 || true
     return 1
   fi
+  verify_service_image compose project-api "$image_ref" || return 1
 }
 
 deploy_frontend() {
-  frontend_compose up -d frontend || return
+  frontend_compose up -d --force-recreate --no-deps --wait --wait-timeout 120 frontend || return
   wait_for_health "http://127.0.0.1:$(port_value FRONTEND_PORT 18082)/"
+  verify_service_image frontend frontend "$image_ref"
 }
 
 rollback_runtime() {
   case "$service" in
-    frontend) frontend_compose up -d frontend ;;
+    frontend) frontend_compose up -d --force-recreate --no-deps frontend ;;
     platform)
       if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
         echo "回滚时 subsystem-provisioner 重建失败，继续尝试重建 platform-api" >&2
@@ -409,8 +433,8 @@ rollback_runtime() {
       fi
       compose up -d --force-recreate --no-deps platform-api platform-worker
       ;;
-    contract) compose up -d --no-deps contract-api ;;
-    project) compose up -d --no-deps project-api ;;
+    contract) compose up -d --force-recreate --no-deps contract-api ;;
+    project) compose up -d --force-recreate --no-deps project-api ;;
   esac
 }
 

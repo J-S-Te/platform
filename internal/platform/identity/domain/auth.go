@@ -5,22 +5,23 @@ import "time"
 
 // LoginAccount combines the identity and credential state required by a password-login use case.
 type LoginAccount struct {
-	TenantID         string
-	TenantName       string
-	TenantCode       string
-	TenantStatus     string
-	UserID           string
-	UserName         string
-	UserStatus       string
-	AccountID        string
-	AccountName      string
-	AccountStatus    string
-	LockedUntil      *time.Time
-	PasswordHash     []byte
-	HashAlgorithm    string
-	AlgorithmParams  []byte
-	CredentialStatus string
-	CredentialExpiry *time.Time
+	TenantID           string
+	TenantName         string
+	TenantCode         string
+	TenantStatus       string
+	UserID             string
+	UserName           string
+	UserStatus         string
+	AccountID          string
+	AccountName        string
+	AccountStatus      string
+	LockedUntil        *time.Time
+	PasswordHash       []byte
+	HashAlgorithm      string
+	AlgorithmParams    []byte
+	CredentialStatus   string
+	CredentialExpiry   *time.Time
+	MustChangePassword bool
 }
 
 // Session is the persisted browser-session state used to build the API response and cookie.
