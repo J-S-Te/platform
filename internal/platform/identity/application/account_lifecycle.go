@@ -288,7 +288,7 @@ func (service *AccountLifecycleService) ResetPassword(ctx context.Context, input
 		if idErr != nil {
 			return PasswordResetResult{}, fmt.Errorf("generate initialized password credential ID: %w", idErr)
 		}
-		if _, initErr := service.writeAdministratorPassword(ctx, input.TenantID, input.AccountID, input.OperatorID, input.Version, password, credentialID, "PASSWORD_INITIALIZED"); initErr != nil {
+		if _, initErr := service.writeAdministratorPassword(ctx, input.TenantID, input.AccountID, input.OperatorID, input.Version, password, credentialID, "ADMIN_PASSWORD_RESET"); initErr != nil {
 			return PasswordResetResult{}, initErr
 		}
 	}
@@ -330,7 +330,7 @@ func (service *AccountLifecycleService) writeAdministratorPassword(ctx context.C
 		return domain.Account{}, fmt.Errorf("hash password: %w", err)
 	}
 	write := PasswordWrite{CredentialID: credentialID, TenantID: strings.TrimSpace(tenantID), AccountID: strings.TrimSpace(accountID), OperatorID: strings.TrimSpace(operatorID), ExpectedVersion: version, PasswordDigest: digest, AlgorithmParams: metadata, OccurredAt: service.clock.Now().UTC(), RevokeReason: reason}
-	if reason == "PASSWORD_INITIALIZED" {
+	if credentialID != "" {
 		return service.repository.InitializePassword(ctx, write)
 	}
 	return service.repository.ResetPassword(ctx, write)
