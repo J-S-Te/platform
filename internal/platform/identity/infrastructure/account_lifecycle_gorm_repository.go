@@ -46,7 +46,7 @@ func (repository *GORMRepository) InitializePassword(ctx context.Context, write 
 	return repository.writeAdministratorPassword(ctx, write, true)
 }
 
-// ResetPassword replaces an existing local password credential without unlocking a locked account.
+// ResetPassword replaces an existing local password credential and clears any account lock.
 func (repository *GORMRepository) ResetPassword(ctx context.Context, write application.PasswordWrite) (domain.Account, error) {
 	return repository.writeAdministratorPassword(ctx, write, false)
 }
@@ -75,7 +75,8 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 			return application.ErrConflict
 		}
 		// Initializing a missing password is allowed only for active accounts. An administrator may
-		// reset a locked account to deliver a new password offline, but the reset must not unlock it.
+		// reset a locked account to deliver a new password offline; resetting also clears the lock
+		// so the newly delivered password can be used immediately.
 		if initialize && row.Status != domain.StatusActive {
 			return application.ErrConflict
 		}
@@ -110,7 +111,7 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 			}
 		}
 		operatorID := write.OperatorID
-		accountUpdate := transaction.Model(&accountModel{}).Where("tenant_id = ? AND id = ? AND version = ?", write.TenantID, write.AccountID, write.ExpectedVersion).Updates(map[string]any{"updated_at": write.OccurredAt, "updated_by": &operatorID, "version": gorm.Expr("version + 1")})
+		accountUpdate := transaction.Model(&accountModel{}).Where("tenant_id = ? AND id = ? AND version = ?", write.TenantID, write.AccountID, write.ExpectedVersion).Updates(map[string]any{"locked_until": nil, "updated_at": write.OccurredAt, "updated_by": &operatorID, "version": gorm.Expr("version + 1")})
 		if accountUpdate.Error != nil {
 			return fmt.Errorf("update account password version: %w", accountUpdate.Error)
 		}
