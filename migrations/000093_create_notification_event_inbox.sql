@@ -39,13 +39,6 @@ CREATE TABLE IF NOT EXISTS notification_event_inbox (
     CONSTRAINT fk_notification_event_inbox_tenant FOREIGN KEY (tenant_id) REFERENCES iam_tenant (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Initialise the materialised counter before the new write path starts updating it.
-INSERT INTO notification_user_stat (tenant_id, user_id, unread_count, updated_at)
-SELECT tenant_id, recipient_user_id, COUNT(*), UTC_TIMESTAMP(3)
-FROM notification_delivery
-WHERE status = 'DELIVERED' AND read_at IS NULL
-GROUP BY tenant_id, recipient_user_id;
-
 CREATE TABLE IF NOT EXISTS notification_user_stat (
     tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     user_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -55,6 +48,13 @@ CREATE TABLE IF NOT EXISTS notification_user_stat (
     CONSTRAINT fk_notification_user_stat_tenant FOREIGN KEY (tenant_id) REFERENCES iam_tenant (id) ON DELETE RESTRICT,
     CONSTRAINT fk_notification_user_stat_user FOREIGN KEY (user_id) REFERENCES iam_user (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Initialise the materialised counter before the new write path starts updating it.
+INSERT INTO notification_user_stat (tenant_id, user_id, unread_count, updated_at)
+SELECT tenant_id, recipient_user_id, COUNT(*), UTC_TIMESTAMP(3)
+FROM notification_delivery
+WHERE status = 'DELIVERED' AND read_at IS NULL
+GROUP BY tenant_id, recipient_user_id;
 
 -- The dedicated scope is intentionally separate from audit.ingest. OAuth clients are granted
 -- this scope through the existing application-management path; no browser role is implied.
