@@ -28,7 +28,7 @@ func (r *personnelRepoStub) List(_ context.Context, _, status, _, _ string) ([]a
 func (r *personnelRepoStub) Get(context.Context, string, string) (application.PersonnelChangeRequest, error) {
 	return r.request, nil
 }
-func (r *personnelRepoStub) UpdateStatus(context.Context, string, string, string, string, time.Time) (application.PersonnelChangeRequest, error) {
+func (r *personnelRepoStub) UpdateStatus(context.Context, application.PersonnelChangeRequest, string, string, time.Time) (application.PersonnelChangeRequest, error) {
 	return r.request, nil
 }
 func (r *personnelRepoStub) Execute(_ context.Context, request application.PersonnelChangeRequest, _ string, now time.Time) (application.PersonnelChangeRequest, error) {

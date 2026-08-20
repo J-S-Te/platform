@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"time"
+
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"sort"
-	"time"
 )
 
 type personnelChangeModel struct {
@@ -43,9 +44,18 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 		// same due row; locking and re-checking the status makes the second execution a
 		// no-op before it can mutate memberships or accounts.
 		var locked personnelChangeModel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ? AND status = ?", req.TenantID, req.ID, domain.PersonnelChangeScheduled).First(&locked).Error; err != nil {
-			return err
+		lockResult := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", req.TenantID, req.ID, domain.PersonnelChangeScheduled, req.Version).
+			First(&locked)
+		if errors.Is(lockResult.Error, gorm.ErrRecordNotFound) {
+			return application.ErrConflict
 		}
+		if lockResult.Error != nil {
+			return fmt.Errorf("lock personnel change for execution: %w", lockResult.Error)
+		}
+		// 后续业务变更只使用锁内重新读取的快照，防止调用方携带的陈旧字段
+		// 与数据库当前请求内容分叉。
+		req = toPersonnel(locked)
 		if req.ChangeType == domain.PersonnelChangeTermination {
 			if err := tx.Model(&membershipModel{}).Where("tenant_id = ? AND user_id = ? AND status <> ?", req.TenantID, req.UserID, domain.StatusDisabled).Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": now, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return err
@@ -84,8 +94,14 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 				}
 			}
 			if req.ChangeType != domain.PersonnelChangeRehire {
-				if err := tx.Model(&membershipModel{}).Where("tenant_id = ? AND id = ? AND version = ?", req.TenantID, source.ID, source.Version).Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": now, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
-					return err
+				sourceUpdate := tx.Model(&membershipModel{}).
+					Where("tenant_id = ? AND id = ? AND version = ?", req.TenantID, source.ID, source.Version).
+					Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": now, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")})
+				if sourceUpdate.Error != nil {
+					return sourceUpdate.Error
+				}
+				if sourceUpdate.RowsAffected != 1 {
+					return application.ErrConflict
 				}
 			}
 			if err := tx.Create(&membershipModel{ID: req.ID, TenantID: req.TenantID, UserID: req.UserID, OrgUnitID: req.TargetOrgUnitID, PositionID: req.TargetPositionID, MembershipType: source.MembershipType, IsPrimary: source.IsPrimary, InheritAuthorization: source.InheritAuthorization, ValidFrom: &now, Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: &operator, UpdatedAt: now, UpdatedBy: &operator}).Error; err != nil {
@@ -163,7 +179,16 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 		if err := enqueueKeycloakIdentityEvents(tx, req.TenantID, []string{req.UserID}, now, "PERSONNEL_CHANGE_EXECUTED"); err != nil {
 			return err
 		}
-		return tx.Model(&personnelChangeModel{}).Where("tenant_id = ? AND id = ? AND status = ?", req.TenantID, req.ID, domain.PersonnelChangeScheduled).Updates(map[string]any{"status": domain.PersonnelChangeExecuted, "executed_at": now, "updated_at": now, "version": gorm.Expr("version + 1")}).Error
+		executionUpdate := tx.Model(&personnelChangeModel{}).
+			Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", req.TenantID, req.ID, domain.PersonnelChangeScheduled, req.Version).
+			Updates(map[string]any{"status": domain.PersonnelChangeExecuted, "executed_at": now, "updated_at": now, "version": gorm.Expr("version + 1")})
+		if executionUpdate.Error != nil {
+			return executionUpdate.Error
+		}
+		if executionUpdate.RowsAffected != 1 {
+			return application.ErrConflict
+		}
+		return nil
 	})
 	if err != nil {
 		return application.PersonnelChangeRequest{}, err
@@ -243,7 +268,11 @@ func (r *PersonnelChangeGORMRepository) Get(c context.Context, t, id string) (ap
 	err := r.db.WithContext(c).Where("tenant_id = ? AND id = ?", t, id).First(&m).Error
 	return toPersonnel(m), err
 }
-func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, t, id, status, ref string, now time.Time) (application.PersonnelChangeRequest, error) {
+
+// UpdateStatus 按旧状态和版本原子推进人员异动；expected 提供租户、请求 ID、旧状态和
+// 版本，status/ref 是目标状态与审批凭据。记录已被执行、取消或由其他请求推进时返回
+// application.ErrConflict，成功时返回本次事务内读取的新快照。
+func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected application.PersonnelChangeRequest, status, ref string, now time.Time) (application.PersonnelChangeRequest, error) {
 	u := map[string]any{"status": status, "updated_at": now, "version": gorm.Expr("version + 1")}
 	if ref != "" {
 		u["approval_reference"] = ref
@@ -254,10 +283,26 @@ func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, t, id, s
 	if status == "PENDING_APPROVAL" {
 		u["approval_reference"] = ref
 	}
-	if err := r.db.WithContext(c).Model(&personnelChangeModel{}).Where("tenant_id = ? AND id = ?", t, id).Updates(u).Error; err != nil {
+	var updated personnelChangeModel
+	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&personnelChangeModel{}).
+			Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", expected.TenantID, expected.ID, expected.Status, expected.Version).
+			Updates(u)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrConflict
+		}
+		if err := tx.Where("tenant_id = ? AND id = ?", expected.TenantID, expected.ID).First(&updated).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return application.PersonnelChangeRequest{}, err
 	}
-	return r.Get(c, t, id)
+	return toPersonnel(updated), nil
 }
 
 type personnelPermissionRow struct {
