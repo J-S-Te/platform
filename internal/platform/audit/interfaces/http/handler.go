@@ -125,6 +125,17 @@ type exportResponse struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
+// ingestionValidationResponse is deliberately credential-free.  It lets an
+// audit publisher prove that the platform accepted its bearer token and source
+// binding without ever exposing a token, secret, or authorization internals.
+type ingestionValidationResponse struct {
+	Status          string `json:"status"`
+	ApplicationCode string `json:"application_code"`
+	EnvironmentCode string `json:"environment_code"`
+	ClientID        string `json:"client_id"`
+	AuditIngest     bool   `json:"audit_ingest"`
+}
+
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -195,6 +206,24 @@ func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "审计事件已接收", receipts)
+}
+
+// ValidateIngestion verifies the OAuth application principal at the same
+// boundary as ingestion. It is intentionally read-only and does not create an
+// audit receipt, so deployment probes can detect an application/environment/
+// client mismatch before an Outbox starts accumulating retries.
+func (h *Handler) ValidateIngestion(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.applicationPrincipal(w, r)
+	if !ok {
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计接入配置校验通过", ingestionValidationResponse{
+		Status:          "READY",
+		ApplicationCode: principal.ApplicationCode,
+		EnvironmentCode: principal.EnvironmentCode,
+		ClientID:        principal.ClientID,
+		AuditIngest:     principal.HasScope("audit.ingest"),
+	})
 }
 func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
