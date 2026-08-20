@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	notificationapp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/application"
 	notificationdomain "github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
-	"strings"
-	"time"
 )
 
 type PersonnelChangeRequest struct {
@@ -44,7 +45,7 @@ type PersonnelChangeRepository interface {
 	Create(context.Context, PersonnelChangeRequest) (PersonnelChangeRequest, error)
 	List(context.Context, string, string, string, string) ([]PersonnelChangeRequest, error)
 	Get(context.Context, string, string) (PersonnelChangeRequest, error)
-	UpdateStatus(context.Context, string, string, string, string, time.Time) (PersonnelChangeRequest, error)
+	UpdateStatus(context.Context, PersonnelChangeRequest, string, string, time.Time) (PersonnelChangeRequest, error)
 	Execute(context.Context, PersonnelChangeRequest, string, time.Time) (PersonnelChangeRequest, error)
 	PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error)
 }
@@ -142,7 +143,9 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 		}
 		return result, execErr
 	}
-	return s.repo.UpdateStatus(ctx, in.TenantID, in.ID, in.ToStatus, in.ApprovalReference, s.clock.Now().UTC())
+	// 仓储同时校验读取到的旧状态和版本，避免取消/审批与 worker 执行并发时
+	// 后提交的一方覆盖已经完成的终态。
+	return s.repo.UpdateStatus(ctx, cur, in.ToStatus, in.ApprovalReference, s.clock.Now().UTC())
 }
 func (s *PersonnelChangeService) Preview(ctx context.Context, tenant, id string) (map[string]any, error) {
 	// 已落库请求的权限影响由仓储计算，确保预览结果与实际授权来源一致。

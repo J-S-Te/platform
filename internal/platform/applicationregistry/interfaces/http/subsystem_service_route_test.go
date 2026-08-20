@@ -77,6 +77,14 @@ func TestProxyForwardsReadRequestsWhenGranted(t *testing.T) {
 		if request.URL.Path != "/data" {
 			t.Errorf("backend path = %q, want /data", request.URL.Path)
 		}
+		for _, name := range sensitiveSubsystemProxyRequestHeaders {
+			if value := request.Header.Get(name); value != "" {
+				t.Errorf("backend received sensitive header %s=%q", name, value)
+			}
+		}
+		if got := request.Header.Get("X-Request-ID"); got != "trace-1" {
+			t.Errorf("backend X-Request-ID = %q, want trace-1", got)
+		}
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok"))
 	}))
@@ -102,6 +110,10 @@ func TestProxyForwardsReadRequestsWhenGranted(t *testing.T) {
 	request := proxyRequest(http.MethodGet, "/api/v1/subsystems/contract_management/data?environment=dev&service_role=web")
 	request.SetPathValue("application_code", "contract_management")
 	request.SetPathValue("path", "/data")
+	for _, name := range sensitiveSubsystemProxyRequestHeaders {
+		request.Header.Set(name, "must-not-cross-trust-boundary")
+	}
+	request.Header.Set("X-Request-ID", "trace-1")
 	response := httptest.NewRecorder()
 	handler.Proxy(response, request)
 	if response.Code != http.StatusOK {

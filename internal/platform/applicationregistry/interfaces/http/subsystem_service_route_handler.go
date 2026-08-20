@@ -58,6 +58,32 @@ type subsystemServiceRouteResponse struct {
 	Status          string `json:"status"`
 }
 
+// sensitiveSubsystemProxyRequestHeaders 列出不得跨越平台与子系统信任边界的入站请求头。
+// 这些值可能承载平台会话、访问令牌、租户身份或可重放的内部调用凭据；子系统如需身份，
+// 应通过自己的认证流程获得，不能复用浏览器提交给基础平台的凭据。
+var sensitiveSubsystemProxyRequestHeaders = []string{
+	"Authorization",
+	"Proxy-Authorization",
+	"Cookie",
+	"X-Access-Token",
+	"X-Api-Key",
+	"X-Csrf-Token",
+	"X-Xsrf-Token",
+	"X-Tenant-Id",
+	"X-User-Id",
+	"X-Authenticated-User",
+	"X-Auth-Request-User",
+	"X-Auth-Request-Email",
+	"X-Auth-Request-Groups",
+	"X-Forwarded-Access-Token",
+	"X-Forwarded-User",
+	"X-Forwarded-Email",
+	"X-Forwarded-Groups",
+	"X-Forwarded-Preferred-Username",
+	"X-Integration-Timestamp",
+	"X-Integration-Nonce",
+}
+
 func (handler *SubsystemServiceRouteHandler) Resolve(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" {
@@ -153,6 +179,9 @@ func (handler *SubsystemServiceRouteHandler) Proxy(writer stdhttp.ResponseWriter
 	originalDirector := proxy.Director
 	proxy.Director = func(outgoing *stdhttp.Request) {
 		originalDirector(outgoing)
+		// NewSingleHostReverseProxy 会复制全部入站请求头；在改写路径前先清除平台侧
+		// 身份材料，防止低信任子系统取得平台 Cookie 或 Bearer 令牌后横向调用。
+		stripSensitiveSubsystemProxyRequestHeaders(outgoing.Header)
 		forwardPath := request.PathValue("path")
 		if forwardPath == "" {
 			forwardPath = "/"
@@ -168,4 +197,12 @@ func (handler *SubsystemServiceRouteHandler) Proxy(writer stdhttp.ResponseWriter
 		httpresponse.WriteError(writer, request, stdhttp.StatusBadGateway, httperror.DependencyUnavailable)
 	}
 	proxy.ServeHTTP(writer, request)
+}
+
+// stripSensitiveSubsystemProxyRequestHeaders 清除代理请求中的平台凭据和身份断言。
+// 参数 header 会原地修改；函数无返回值，未列入敏感清单的内容协商和追踪头保持不变。
+func stripSensitiveSubsystemProxyRequestHeaders(header stdhttp.Header) {
+	for _, name := range sensitiveSubsystemProxyRequestHeaders {
+		header.Del(name)
+	}
 }

@@ -740,7 +740,7 @@ services:
   # 售前预警扫描 Worker 与 CRM API 使用同一数据库和运行时目录；它按启用的
   # crm_presale_alert_rules 扫描超时状态，并把结果投递到个人预警列表。
   customer-presale-alert-worker:
-    <<: *customer-backend-runtime
+    image: customer-opportunity/presale-alert-worker:local
     build:
       context: ../customer_and_opportunity
       target: presale-alert-worker-runtime
@@ -751,6 +751,9 @@ services:
       PRESALE_ALERT_POLL_INTERVAL: ${PRESALE_ALERT_POLL_INTERVAL:-10m}
       PRESALE_ALERT_LEASE_DURATION: ${PRESALE_ALERT_LEASE_DURATION:-1m}
       PRESALE_ALERT_BATCH_SIZE: ${PRESALE_ALERT_BATCH_SIZE:-200}
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    volumes:
+      - ./data/keys:/app/data/keys:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
