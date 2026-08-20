@@ -72,7 +72,7 @@ const (
 	// This is the compatibility hash compiled into the customer authorization catalog. The
 	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
 	// deployment contract to be updated in the same reviewed release.
-	integratedCustomerRoleConfigHash = "sha256:609436cbb09101c385c572ae41714202a83511b42cc675b7aa56e98d1dad536a"
+	integratedCustomerRoleConfigHash = "sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f"
 	integratedPortalRoleConfigHash   = "sha256:f67121b52d6d850e99d1c4520d661fb85e26512c7ee50cd83182a8dc39b368d4"
 )
 

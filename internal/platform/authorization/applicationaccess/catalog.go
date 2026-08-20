@@ -292,7 +292,7 @@ func enqueueCatalogProjectionUsers(tx *gorm.DB, ids IdentifierGenerator, tenantI
 			if err := tx.Table("keycloak_authorization_outbox").Create(map[string]any{
 				"id": id, "tenant_id": tenantID, "identity_id": userID,
 				"application_id": applicationID, "environment_id": environmentID,
-				"event_type": "AUTHORIZATION_CATALOG_CHANGED", "authorization_revision": 0,
+				"event_type": "AUTHORIZATION_CHANGED", "authorization_revision": 0,
 				"status": "PENDING", "available_at": now, "attempts": 0, "created_at": now,
 			}).Error; err != nil {
 				return fmt.Errorf("enqueue Keycloak catalog projection: %w", err)

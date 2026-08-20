@@ -1558,9 +1558,11 @@ sync_crm_authorization_catalog() {
         | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
     [[ "$local_crm_hash" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "无法从本地 CRM 镜像读取有效授权目录哈希"
     export OIDC_ROLE_CONFIG_HASH="$local_crm_hash"
+    replace_line_in_file "$customer_env_file" OIDC_ROLE_CONFIG_HASH "$OIDC_ROLE_CONFIG_HASH"
+    log "已写入当前 CRM 授权目录哈希到客户与商机运行时配置：$OIDC_ROLE_CONFIG_HASH"
     log "使用本地 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
     log "启动 CRM 前发布客户与商机管理授权目录"
-    compose_run run --rm --no-deps customer-api ./authz-catalog publish crm
+    compose_run run --rm --no-deps -e OIDC_ROLE_CONFIG_HASH="$OIDC_ROLE_CONFIG_HASH" customer-api ./authz-catalog publish crm
 }
 
 refresh_portal_backend() {
