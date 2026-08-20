@@ -53,9 +53,15 @@ func (registrar keycloakBrokerRegistrar) EnsureKeycloakBroker(ctx context.Contex
 	}
 	for _, client := range clients {
 		if client.ClientID == "keycloak-broker" {
-			secret, rotateErr := registrar.oauth.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{TenantID: tenantID, OAuthClientID: client.ID, OperatorID: "system-keycloak"})
+			// Keycloak uses one current secret. Creating an additional active
+			// credential on every worker restart makes token validation walk an
+			// unbounded list of bcrypt hashes and eventually exceed Keycloak's
+			// upstream HTTP timeout. Rotate with zero overlap instead.
+			secret, rotateErr := registrar.oauth.RotateOAuthClientSecret(ctx, application.OAuthClientSecretRotateInput{
+				TenantID: tenantID, OAuthClientID: client.ID, OperatorID: "system-keycloak", OverlapSeconds: 0,
+			})
 			if rotateErr != nil {
-				return "", "", fmt.Errorf("create keycloak broker secret: %w", rotateErr)
+				return "", "", fmt.Errorf("rotate keycloak broker secret: %w", rotateErr)
 			}
 			return client.ClientID, secret.PlaintextSecret, nil
 		}
