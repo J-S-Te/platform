@@ -27,7 +27,7 @@ runtime:
         OIDC_IDP_HINT: basic-platform
         DEV_AUTH_ENABLED: "false"
         OIDC_SCOPES: openid profile
-        OIDC_ROLE_CONFIG_HASH: sha256:609436cbb09101c385c572ae41714202a83511b42cc675b7aa56e98d1dad536a
+        OIDC_ROLE_CONFIG_HASH: sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f
         OIDC_MAX_EFFECTIVE_ROLES: "10"
         OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
