@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -359,10 +360,21 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	return true
 }
 func pageQuery(r *http.Request) application.PageRequest {
-	query := application.PageRequest{Page: parseInt(r.URL.Query().Get("page"), 1), PageSize: parseInt(r.URL.Query().Get("page_size"), 20), Keyword: strings.TrimSpace(r.URL.Query().Get("keyword")), ApplicationCode: strings.TrimSpace(r.URL.Query().Get("filter[application_code]")), EnvironmentCode: strings.TrimSpace(r.URL.Query().Get("filter[environment_code]")), Action: strings.TrimSpace(r.URL.Query().Get("filter[action]")), ActionCategory: strings.TrimSpace(r.URL.Query().Get("filter[action_category]")), Result: strings.TrimSpace(r.URL.Query().Get("filter[result]")), RiskLevel: strings.TrimSpace(r.URL.Query().Get("filter[risk_level]"))}
-	query.OccurredFrom = parseTime(r.URL.Query().Get("filter[occurred_from]"))
-	query.OccurredTo = parseTime(r.URL.Query().Get("filter[occurred_to]"))
+	values := r.URL.Query()
+	query := application.PageRequest{Page: parseInt(values.Get("page"), 1), PageSize: parseInt(values.Get("page_size"), 20), Keyword: strings.TrimSpace(values.Get("keyword")), ApplicationCode: strings.TrimSpace(filterValue(values, "application_code")), EnvironmentCode: strings.TrimSpace(filterValue(values, "environment_code")), Action: strings.TrimSpace(filterValue(values, "action")), ActionCategory: strings.TrimSpace(filterValue(values, "action_category")), Result: strings.TrimSpace(filterValue(values, "result")), RiskLevel: strings.TrimSpace(filterValue(values, "risk_level"))}
+	query.OccurredFrom = parseTime(filterValue(values, "occurred_from"))
+	query.OccurredTo = parseTime(filterValue(values, "occurred_to"))
 	return query
+}
+
+// filterValue accepts the documented filter[field] syntax and the flat field
+// spelling used by older console bundles. Supporting both keeps rolling
+// frontend deployments from silently dropping a condition during cache overlap.
+func filterValue(values url.Values, name string) string {
+	if value := values.Get("filter[" + name + "]"); value != "" {
+		return value
+	}
+	return values.Get(name)
 }
 
 // applicationInput requires an explicit source binding from an application bearer token.
