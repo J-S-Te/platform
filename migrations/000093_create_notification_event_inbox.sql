@@ -4,15 +4,15 @@
 ALTER TABLE notification_message
     MODIFY COLUMN template_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NULL,
     MODIFY COLUMN template_version_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NULL,
-    ADD COLUMN source_application VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER tenant_id,
-    ADD COLUMN source_environment VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER source_application,
-    ADD COLUMN source_event_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER source_environment,
-    ADD COLUMN event_type VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER source_event_id,
-    ADD COLUMN notification_scope VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'PLATFORM' AFTER event_type,
-    ADD COLUMN priority VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'NORMAL' AFTER notification_scope,
-    ADD COLUMN occurred_at DATETIME(3) NULL AFTER idempotency_key,
-    ADD COLUMN expires_at DATETIME(3) NULL AFTER occurred_at,
-    ADD KEY idx_notification_message_source_event (tenant_id, source_application, source_environment, source_event_id);
+    ADD COLUMN IF NOT EXISTS source_application VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER tenant_id,
+    ADD COLUMN IF NOT EXISTS source_environment VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER source_application,
+    ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER source_environment,
+    ADD COLUMN IF NOT EXISTS event_type VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '' AFTER source_event_id,
+    ADD COLUMN IF NOT EXISTS notification_scope VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'PLATFORM' AFTER event_type,
+    ADD COLUMN IF NOT EXISTS priority VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'NORMAL' AFTER notification_scope,
+    ADD COLUMN IF NOT EXISTS occurred_at DATETIME(3) NULL AFTER idempotency_key,
+    ADD COLUMN IF NOT EXISTS expires_at DATETIME(3) NULL AFTER occurred_at,
+    ADD INDEX IF NOT EXISTS idx_notification_message_source_event (tenant_id, source_application, source_environment, source_event_id);
 
 CREATE TABLE IF NOT EXISTS notification_event_inbox (
     id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
