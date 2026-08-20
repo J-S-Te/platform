@@ -497,6 +497,10 @@ func NewRouter(
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
 		if auditHandler != nil {
+			// This is a credential-free preflight for a subsystem's audit publisher.
+			// It deliberately shares the exact bearer-token and audit.ingest boundary
+			// with event ingestion, while making no Keycloak or audit-data mutation.
+			integrationRouter.GET("/audit/ingest/validate", middleware.RequireApplicationScope("audit.ingest"), adaptHandler(auditHandler.ValidateIngestion))
 			integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
 			integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
 		}
