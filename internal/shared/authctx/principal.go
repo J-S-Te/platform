@@ -1,7 +1,10 @@
 // Package authctx stores authenticated principal information in request contexts.
 package authctx
 
-import "context"
+import (
+	"context"
+	"net"
+)
 
 type principalKey struct{}
 
@@ -15,7 +18,10 @@ type ReferenceName struct {
 // Principal is the server-verified identity available to protected request handlers.
 // It is populated only by authentication middleware; callers must not construct it from headers.
 type Principal struct {
-	SessionID       string          `json:"-"`
+	SessionID string `json:"-"`
+	// LoginIP is the verified client IP captured when this browser session was created.
+	// It is internal request context only and must not be returned by identity APIs.
+	LoginIP         net.IP          `json:"-"`
 	Tenant          ReferenceName   `json:"tenant"`
 	User            ReferenceName   `json:"user"`
 	Account         ReferenceName   `json:"account"`

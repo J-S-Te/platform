@@ -112,6 +112,14 @@ type CreateResult struct {
 	Suppressed  bool
 }
 
+// IngestInput is the trusted source binding plus one external notification event. The HTTP
+// adapter obtains tenant/application/environment from the verified application principal; they
+// must never be accepted as authority from the event body.
+type IngestInput struct {
+	TenantID, SourceApplication, SourceEnvironment string
+	Event                                           domain.IngestionEvent
+}
+
 // RetryResult reports a bounded retry pass. In-app delivery is a database state transition only;
 // this contract intentionally has no email, SMS or Webhook behavior.
 type RetryResult struct {
@@ -147,4 +155,12 @@ type Repository interface {
 	CountUnread(ctx context.Context, tenantID, userID string) (int64, error)
 	MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error)
 	MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
+
+	AcceptIngestion(ctx context.Context, tenantID, sourceApplication, sourceEnvironment string, event domain.IngestionEvent, receiptID string, now time.Time) (domain.IngestionReceipt, error)
+	GetIngestionReceipt(ctx context.Context, tenantID, receiptID string) (domain.IngestionReceipt, error)
+	ClaimIngestionEvents(ctx context.Context, limit int, leaseUntil, now time.Time) ([]domain.IngestionReceipt, error)
+	LoadIngestionEvent(ctx context.Context, receiptID string) (string, string, string, domain.IngestionEvent, error)
+	CompleteIngestion(ctx context.Context, receiptID, messageID string, now time.Time) error
+	RetryIngestion(ctx context.Context, receiptID, errorCode, safeMessage string, nextRetryAt, now time.Time) error
+	DeadLetterIngestion(ctx context.Context, receiptID, errorCode, safeMessage string, now time.Time) error
 }

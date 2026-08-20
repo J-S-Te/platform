@@ -29,7 +29,7 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	}
 	expectedAudience, ok := unverifiedJWTClientID(rawToken)
 	claims, err := h.jwtManager.VerifyAccessToken(rawToken, expectedAudience, h.clock.Now().UTC())
-	clientID, subjectTenantID, subjectID, tokenSubject := "", "", "", ""
+	clientID, subjectTenantID, subjectID, tokenSubject, loginIP := "", "", "", "", ""
 	if ok && err == nil && claims.ClientID == expectedAudience && claims.Subject != "" && claims.SessionID != "" && hasScope(claims.Scope, "openid") {
 		if !h.allowLegacyPlatformAccessToken {
 			writeContextUnauthorized(w)
@@ -42,6 +42,7 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		subjectTenantID = subject.TenantID
+		loginIP = subject.LoginIP
 		revoked, revokeErr := h.service.IsAccessTokenRevoked(r.Context(), subject.TenantID, rawToken)
 		if revokeErr != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
@@ -91,6 +92,9 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 		"client_id": context.ClientID, "application_code": context.ApplicationCode, "environment_code": context.EnvironmentCode,
 		"person_id": context.PersonID, "roles": roles, "permissions": permissions,
 		"data_scopes": scopes, "authorization_revision": context.AuthorizationRevision,
+	}
+	if strings.TrimSpace(loginIP) != "" {
+		response["user_login_ip"] = loginIP
 	}
 	// customer_ref 只在开关启用且解析到 ACTIVE 绑定时出现；解析失败一律省略声明并记日志，
 	// 消费方按无绑定 fail closed，不因平台侧临时故障扩大为整个授权上下文 5xx。

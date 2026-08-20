@@ -59,19 +59,27 @@ type templateVersionModel struct {
 func (templateVersionModel) TableName() string { return "notification_template_version" }
 
 type messageModel struct {
-	ID                string    `gorm:"column:id;primaryKey"`
-	TenantID          string    `gorm:"column:tenant_id"`
-	TemplateID        string    `gorm:"column:template_id"`
-	TemplateVersionID string    `gorm:"column:template_version_id"`
-	Category          string    `gorm:"column:category"`
-	Title             string    `gorm:"column:title"`
-	Content           string    `gorm:"column:content"`
-	TargetURL         string    `gorm:"column:target_url"`
-	ReferenceType     string    `gorm:"column:reference_type"`
-	ReferenceID       string    `gorm:"column:reference_id"`
-	IdempotencyKey    string    `gorm:"column:idempotency_key"`
-	CreatedAt         time.Time `gorm:"column:created_at"`
-	CreatedBy         *string   `gorm:"column:created_by"`
+	ID                string     `gorm:"column:id;primaryKey"`
+	TenantID          string     `gorm:"column:tenant_id"`
+	SourceApplication string     `gorm:"column:source_application"`
+	SourceEnvironment string     `gorm:"column:source_environment"`
+	SourceEventID     string     `gorm:"column:source_event_id"`
+	EventType         string     `gorm:"column:event_type"`
+	NotificationScope string     `gorm:"column:notification_scope"`
+	Priority          string     `gorm:"column:priority"`
+	TemplateID        *string    `gorm:"column:template_id"`
+	TemplateVersionID *string    `gorm:"column:template_version_id"`
+	Category          string     `gorm:"column:category"`
+	Title             string     `gorm:"column:title"`
+	Content           string     `gorm:"column:content"`
+	TargetURL         string     `gorm:"column:target_url"`
+	ReferenceType     string     `gorm:"column:reference_type"`
+	ReferenceID       string     `gorm:"column:reference_id"`
+	IdempotencyKey    string     `gorm:"column:idempotency_key"`
+	OccurredAt        *time.Time `gorm:"column:occurred_at"`
+	ExpiresAt         *time.Time `gorm:"column:expires_at"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	CreatedBy         *string    `gorm:"column:created_by"`
 }
 
 func (messageModel) TableName() string { return "notification_message" }
@@ -255,17 +263,29 @@ func (repository *Repository) CreateMessage(ctx context.Context, message domain.
 
 func (repository *Repository) CompleteDelivery(ctx context.Context, tenantID, deliveryID string, now time.Time) (domain.Delivery, error) {
 	// PENDING 与 PROCESSING 都可完成，以兼容首次同步投递和租约重试；其他终态不能被覆盖。
-	delivered := now
-	result := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND status IN ?", deliveryID, tenantID, []string{string(domain.DeliveryStatusPending), string(domain.DeliveryStatusProcessing)}).Updates(map[string]any{"status": string(domain.DeliveryStatusDelivered), "delivered_at": delivered, "next_retry_at": nil, "locked_until": nil, "last_error": "", "updated_at": now})
-	if result.Error != nil {
-		return domain.Delivery{}, fmt.Errorf("complete notification delivery: %w", result.Error)
-	}
-	if result.RowsAffected != 1 {
-		return domain.Delivery{}, application.ErrNotFound
-	}
 	var row deliveryModel
-	if err := repository.database.WithContext(ctx).Where("id = ? AND tenant_id = ?", deliveryID, tenantID).Take(&row).Error; err != nil {
-		return domain.Delivery{}, mapError(err)
+	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ?", deliveryID, tenantID).Take(&row).Error; err != nil {
+			return mapError(err)
+		}
+		if row.Status != string(domain.DeliveryStatusPending) && row.Status != string(domain.DeliveryStatusProcessing) {
+			return application.ErrNotFound
+		}
+		result := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND status = ?", deliveryID, tenantID, row.Status).Updates(map[string]any{"status": string(domain.DeliveryStatusDelivered), "delivered_at": now, "next_retry_at": nil, "locked_until": nil, "last_error": "", "updated_at": now})
+		if result.Error != nil {
+			return fmt.Errorf("complete notification delivery: %w", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrConflict
+		}
+		if err := incrementUnreadStat(tx, tenantID, row.RecipientUserID, 1, now); err != nil {
+			return err
+		}
+		row.Status, row.DeliveredAt, row.NextRetryAt, row.LockedUntil, row.LastError, row.UpdatedAt = string(domain.DeliveryStatusDelivered), &now, nil, nil, "", now
+		return nil
+	})
+	if err != nil {
+		return domain.Delivery{}, err
 	}
 	return deliveryToDomain(row), nil
 }
@@ -350,6 +370,18 @@ func (repository *Repository) GetInboxItem(ctx context.Context, tenantID, userID
 }
 
 func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID string) (int64, error) {
+	type statRow struct {
+		UnreadCount int64 `gorm:"column:unread_count"`
+	}
+	var stat statRow
+	err := repository.database.WithContext(ctx).Table("notification_user_stat").Where("tenant_id = ? AND user_id = ?", tenantID, userID).Take(&stat).Error
+	if err == nil {
+		return stat.UnreadCount, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, fmt.Errorf("read notification unread statistic: %w", err)
+	}
+	// Existing rows may pre-date the materialised statistic; the fallback preserves compatibility.
 	var total int64
 	if err := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", tenantID, userID, domain.DeliveryStatusDelivered).Count(&total).Error; err != nil {
 		return 0, fmt.Errorf("count unread notifications: %w", err)
@@ -357,27 +389,39 @@ func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID 
 	return total, nil
 }
 func (repository *Repository) MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error) {
-	result := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Updates(map[string]any{"read_at": now, "updated_at": now})
-	if result.Error != nil {
-		return domain.InboxItem{}, fmt.Errorf("mark notification read: %w", result.Error)
-	}
-	if result.RowsAffected == 0 {
+	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Updates(map[string]any{"read_at": now, "updated_at": now})
+		if result.Error != nil {
+			return fmt.Errorf("mark notification read: %w", result.Error)
+		}
+		if result.RowsAffected == 1 {
+			return incrementUnreadStat(tx, tenantID, userID, -1, now)
+		}
 		var count int64
-		if err := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ?", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Count(&count).Error; err != nil {
-			return domain.InboxItem{}, fmt.Errorf("check notification inbox ownership: %w", err)
+		if err := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ?", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Count(&count).Error; err != nil {
+			return fmt.Errorf("check notification inbox ownership: %w", err)
 		}
 		if count == 0 {
-			return domain.InboxItem{}, application.ErrNotFound
+			return application.ErrNotFound
 		}
+		return nil
+	})
+	if err != nil {
+		return domain.InboxItem{}, err
 	}
 	return repository.inboxItem(ctx, tenantID, userID, deliveryID)
 }
 func (repository *Repository) MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
-	result := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", tenantID, userID, domain.DeliveryStatusDelivered).Updates(map[string]any{"read_at": now, "updated_at": now})
-	if result.Error != nil {
-		return 0, fmt.Errorf("mark all notifications read: %w", result.Error)
-	}
-	return result.RowsAffected, nil
+	var affected int64
+	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", tenantID, userID, domain.DeliveryStatusDelivered).Updates(map[string]any{"read_at": now, "updated_at": now})
+		if result.Error != nil {
+			return fmt.Errorf("mark all notifications read: %w", result.Error)
+		}
+		affected = result.RowsAffected
+		return incrementUnreadStat(tx, tenantID, userID, -affected, now)
+	})
+	return affected, err
 }
 func (repository *Repository) inboxItem(ctx context.Context, tenantID, userID, deliveryID string) (domain.InboxItem, error) {
 	var row inboxRow
@@ -425,10 +469,10 @@ func templateToDomain(row templateModel) domain.Template {
 	return domain.Template{ID: row.ID, TenantID: row.TenantID, Code: row.Code, Name: row.Name, Status: domain.TemplateStatus(row.Status), CurrentVersion: row.CurrentVersion, Version: row.Version, CreatedAt: row.CreatedAt, CreatedBy: value(row.CreatedBy), UpdatedAt: row.UpdatedAt, UpdatedBy: value(row.UpdatedBy)}
 }
 func messageToModel(value domain.Message) messageModel {
-	return messageModel{ID: value.ID, TenantID: value.TenantID, TemplateID: value.TemplateID, TemplateVersionID: value.TemplateVersionID, Category: value.Category, Title: value.Title, Content: value.Content, TargetURL: value.TargetURL, ReferenceType: value.ReferenceType, ReferenceID: value.ReferenceID, IdempotencyKey: value.IdempotencyKey, CreatedAt: value.CreatedAt, CreatedBy: optional(value.CreatedBy)}
+	return messageModel{ID: value.ID, TenantID: value.TenantID, SourceApplication: value.SourceApplication, SourceEnvironment: value.SourceEnvironment, SourceEventID: value.SourceEventID, EventType: value.EventType, NotificationScope: value.NotificationScope, Priority: value.Priority, TemplateID: optional(value.TemplateID), TemplateVersionID: optional(value.TemplateVersionID), Category: value.Category, Title: value.Title, Content: value.Content, TargetURL: value.TargetURL, ReferenceType: value.ReferenceType, ReferenceID: value.ReferenceID, IdempotencyKey: value.IdempotencyKey, OccurredAt: value.OccurredAt, ExpiresAt: value.ExpiresAt, CreatedAt: value.CreatedAt, CreatedBy: optional(value.CreatedBy)}
 }
 func messageToDomain(row messageModel) domain.Message {
-	return domain.Message{ID: row.ID, TenantID: row.TenantID, TemplateID: row.TemplateID, TemplateVersionID: row.TemplateVersionID, Category: row.Category, Title: row.Title, Content: row.Content, TargetURL: row.TargetURL, ReferenceType: row.ReferenceType, ReferenceID: row.ReferenceID, IdempotencyKey: row.IdempotencyKey, CreatedAt: row.CreatedAt, CreatedBy: value(row.CreatedBy)}
+	return domain.Message{ID: row.ID, TenantID: row.TenantID, SourceApplication: row.SourceApplication, SourceEnvironment: row.SourceEnvironment, SourceEventID: row.SourceEventID, EventType: row.EventType, NotificationScope: row.NotificationScope, Priority: row.Priority, TemplateID: value(row.TemplateID), TemplateVersionID: value(row.TemplateVersionID), Category: row.Category, Title: row.Title, Content: row.Content, TargetURL: row.TargetURL, ReferenceType: row.ReferenceType, ReferenceID: row.ReferenceID, IdempotencyKey: row.IdempotencyKey, OccurredAt: row.OccurredAt, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, CreatedBy: value(row.CreatedBy)}
 }
 func deliveryToModel(value domain.Delivery) deliveryModel {
 	return deliveryModel{ID: value.ID, TenantID: value.TenantID, MessageID: value.MessageID, RecipientUserID: value.RecipientUserID, Status: string(value.Status), AttemptCount: value.AttemptCount, LastError: value.LastError, NextRetryAt: value.NextRetryAt, LockedUntil: value.LockedUntil, DeliveredAt: value.DeliveredAt, ReadAt: value.ReadAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}

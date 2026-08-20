@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,6 +76,19 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			statusCode = http.StatusOK
 		}
 		now := time.Now().UTC()
+		requestSourceIP := RequestClientIP(context.Request)
+		sourceIP := loginIP(principal.LoginIP)
+		if sourceIP == "" {
+			sourceIP = requestSourceIP
+		}
+		metadata := map[string]any{
+			"method":      context.Request.Method,
+			"path":        route,
+			"status_code": statusCode,
+		}
+		if requestSourceIP != "" && requestSourceIP != sourceIP {
+			metadata["request_source_ip"] = requestSourceIP
+		}
 		input := auditapplication.EventInput{
 			EventID:         newPlatformAuditEventID(),
 			ApplicationCode: source.ApplicationCode,
@@ -95,18 +109,24 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			RiskLevel:       auditRiskLevel(context.Request.Method, route, statusCode),
 			Classification:  "INTERNAL",
 			Summary:         auditSummary(context.Request.Method, route, statusCode),
-			Metadata: map[string]any{
-				"method":      context.Request.Method,
-				"path":        route,
-				"status_code": statusCode,
-			},
-			SourceIP:  RequestClientIP(context.Request),
-			UserAgent: context.Request.UserAgent(),
+			Metadata:        metadata,
+			SourceIP:        sourceIP,
+			UserAgent:       context.Request.UserAgent(),
 		}
 		if _, err := recorder.Ingest(context.Request.Context(), principal.Tenant.ID, input); err != nil {
 			logger.Error("write platform audit event", "error", err, "request_id", input.RequestID, "path", route)
 		}
 	}
+}
+
+// loginIP returns only a normalized IP literal from the server-verified session
+// principal. It never falls back to a request header; that remains the transport
+// middleware's responsibility.
+func loginIP(value net.IP) string {
+	if value == nil {
+		return ""
+	}
+	return value.String()
 }
 
 func shouldRecordAuditTrail(method, route string) bool {

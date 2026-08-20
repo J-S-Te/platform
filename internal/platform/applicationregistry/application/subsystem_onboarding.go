@@ -27,6 +27,7 @@ const (
 	// 审计写入客户端是所有接入环境的基线能力，只能追加审计事件；它与浏览器登录、
 	// 授权目录发布和子系统间业务调用使用不同客户端，避免任一密钥泄露后权限横向扩散。
 	ServiceCredentialAuditIngest                    = "audit_ingest"
+	ServiceCredentialNotificationIngest             = "notification_ingest"
 	ServiceCredentialExternalUserProvision          = "external_user_provision"
 	ServiceCredentialApplicationRoleAssign          = "application_role_assign"
 	ServiceCredentialApplicationRoleRevoke          = "application_role_revoke"
@@ -458,6 +459,7 @@ type integratedServicePurposeDefinition struct {
 
 var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefinition{
 	ServiceCredentialAuditIngest:                    {ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
+	ServiceCredentialNotificationIngest:             {ServiceCredentialNotificationIngest, "notification-publisher", "Notification Publisher", "notification.ingest"},
 	ServiceCredentialOwnerDirectoryRead:             {ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"},
 	ServiceCredentialExternalUserProvision:          {ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
 	ServiceCredentialApplicationRoleAssign:          {ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
@@ -474,7 +476,7 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case integratedCustomerApplicationCode:
-		return []string{ServiceCredentialOwnerDirectoryRead}
+		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case integratedPortalApplicationCode:
 		return []string{
 			ServiceCredentialExternalUserProvision,

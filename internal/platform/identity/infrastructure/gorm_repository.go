@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
@@ -240,7 +241,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	var row principalProjection
 	result := repository.database.WithContext(ctx).
 		Table("iam_session AS session").
-		Select(`session.id AS session_id, tenant.id AS tenant_id, tenant.name AS tenant_name, tenant.code AS tenant_code,
+		Select(`session.id AS session_id, session.ip_address AS login_ip_address, tenant.id AS tenant_id, tenant.name AS tenant_name, tenant.code AS tenant_code,
 			user.id AS user_id, user.display_name AS user_name, account.id AS account_id, COALESCE(account.username, account.id) AS account_name`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = session.tenant_id AND tenant.status = ?", domain.StatusActive).
 		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", domain.StatusActive, now).
@@ -288,6 +289,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	}
 	return domain.Principal{
 		SessionID:       row.SessionID,
+		LoginIP:         append(net.IP(nil), row.LoginIPAddress...),
 		Tenant:          domain.ReferenceName{ID: row.TenantID, Name: row.TenantName, Code: row.TenantCode},
 		User:            domain.ReferenceName{ID: row.UserID, Name: row.UserName},
 		Account:         domain.ReferenceName{ID: row.AccountID, Name: row.AccountName},

@@ -493,7 +493,7 @@ func NewRouter(
 
 	// Integration audit ingestion has a separate bearer-token boundary. Console user roles do
 	// not grant an external business system permission to submit audit events.
-	if applicationAuthenticator != nil && (auditHandler != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil) {
+	if applicationAuthenticator != nil && (auditHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil) {
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
 		if auditHandler != nil {
@@ -503,6 +503,12 @@ func NewRouter(
 			integrationRouter.GET("/audit/ingest/validate", middleware.RequireApplicationScope("audit.ingest"), adaptHandler(auditHandler.ValidateIngestion))
 			integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
 			integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
+		}
+		if operational.Notifications != nil {
+			// External systems only submit durable event envelopes. Delivery expansion is
+			// performed asynchronously by the worker, and this scope is distinct from audit.
+			integrationRouter.POST("/notifications/events", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.Ingest))
+			integrationRouter.POST("/notifications/events/batch", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.IngestBatch))
 		}
 		if operational.ExternalIdentity != nil {
 			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))

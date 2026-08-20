@@ -37,6 +37,21 @@ const (
 	DeliveryStatusFailed     DeliveryStatus = "FAILED"
 )
 
+// IngestionStatus is the asynchronous lifecycle of an externally submitted notification event.
+// ACCEPTED only means durable receipt; COMPLETED means the event has been projected into inbox
+// deliveries. The distinction prevents callers from treating a fast HTTP acknowledgement as a
+// user-visible delivery guarantee.
+type IngestionStatus string
+
+const (
+	IngestionStatusAccepted   IngestionStatus = "ACCEPTED"
+	IngestionStatusProcessing IngestionStatus = "PROCESSING"
+	IngestionStatusCompleted  IngestionStatus = "COMPLETED"
+	IngestionStatusRetry      IngestionStatus = "RETRY"
+	IngestionStatusDead       IngestionStatus = "DEAD"
+	IngestionStatusCancelled  IngestionStatus = "CANCELLED"
+)
+
 // VariableDefinition declares a permitted plain-text template variable. Values are escaped before
 // persistence so clients must render notification content as plain text rather than executable HTML.
 type VariableDefinition struct {
@@ -86,6 +101,12 @@ type RecipientTarget struct {
 type Message struct {
 	ID                string
 	TenantID          string
+	SourceApplication string
+	SourceEnvironment string
+	SourceEventID     string
+	EventType         string
+	NotificationScope string
+	Priority          string
 	TemplateID        string
 	TemplateVersionID string
 	Category          string
@@ -95,8 +116,31 @@ type Message struct {
 	ReferenceType     string
 	ReferenceID       string
 	IdempotencyKey    string
+	OccurredAt        *time.Time
+	ExpiresAt         *time.Time
 	CreatedAt         time.Time
 	CreatedBy         string
+}
+
+// IngestionEvent is an application-authenticated, already-rendered notification request. It is
+// intentionally limited to concrete USER targets: external systems must not use the platform as
+// a business-role resolver.
+type IngestionEvent struct {
+	EventID, EventType, NotificationScope, Priority string
+	Title, Content, TargetURL                         string
+	ReferenceType, ReferenceID, IdempotencyKey        string
+	Recipients                                        []string
+	OccurredAt                                        time.Time
+	ExpiresAt                                         *time.Time
+}
+
+// IngestionReceipt is safe for a source system to retain for retry and reconciliation.
+type IngestionReceipt struct {
+	ReceiptID, EventID, MessageID string
+	Status                       IngestionStatus
+	Duplicate                    bool
+	ErrorCode                    string
+	ReceivedAt, ProcessedAt      time.Time
 }
 
 // Delivery is one recipient's inbox item and delivery retry state.

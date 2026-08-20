@@ -4,6 +4,7 @@ package accesssubject
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -59,7 +60,15 @@ func (resolver *Resolver) ResolveAccessTokenSubject(ctx context.Context, clientI
 	if subject.TenantID != client.TenantID || subject.UserID != userID {
 		return oidchttp.AccessTokenSubject{}, errors.New("OIDC access-token subject does not match active storage")
 	}
-	return oidchttp.AccessTokenSubject{TenantID: subject.TenantID, OAuthClientID: client.ID}, nil
+	return oidchttp.AccessTokenSubject{TenantID: subject.TenantID, OAuthClientID: client.ID, LoginIP: canonicalLoginIP(subject.LoginIP.String())}, nil
+}
+
+func canonicalLoginIP(value string) string {
+	ip, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !ip.IsValid() || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return ""
+	}
+	return ip.String()
 }
 
 var _ oidchttp.AccessTokenSubjectResolver = (*Resolver)(nil)
