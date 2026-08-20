@@ -48,9 +48,9 @@ x-customer-service: &customer-service
     # 非回环 HTTP 仅由部署级安全开关控制；当前测试服务器默认保持可用，切换
     # HTTPS 后把 SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION 改为 false。
     OIDC_ALLOW_INSECURE_HTTP_SESSION: ${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-true}
-    # 授权目录哈希由平台发布配置统一注入，避免重试流程中的旧 runtime 文件
-    # 覆盖当前不可变 CRM 镜像所要求的目录版本。
-    OIDC_ROLE_CONFIG_HASH: "${OIDC_ROLE_CONFIG_HASH:?OIDC_ROLE_CONFIG_HASH must be configured}"
+    # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+    # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+    # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
     MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     ATTACHMENT_LOCAL_ENABLED: "true"
     ATTACHMENT_LOCAL_ROOT: /app/data/attachments
