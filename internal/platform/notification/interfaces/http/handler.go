@@ -6,6 +6,7 @@ import (
 	"errors"
 	app "github.com/J-S-Te/Basic-Platform/internal/platform/notification/application"
 	domain "github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
@@ -14,9 +15,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const maxRequestBytes = 128 << 10
+const maxRequestBytes = 256 << 10
 
 type Handler struct {
 	service *app.Service
@@ -65,6 +67,77 @@ type messagePayload struct {
 	ReferenceType  string            `json:"reference_type"`
 	ReferenceID    string            `json:"reference_id"`
 	IdempotencyKey string            `json:"idempotency_key"`
+}
+type ingestionEventPayload struct {
+	EventID           string     `json:"event_id"`
+	EventType         string     `json:"event_type"`
+	NotificationScope string     `json:"notification_scope"`
+	Priority          string     `json:"priority"`
+	Title             string     `json:"title"`
+	Content           string     `json:"content"`
+	TargetURL         string     `json:"target_url"`
+	ReferenceType     string     `json:"reference_type"`
+	ReferenceID       string     `json:"reference_id"`
+	IdempotencyKey    string     `json:"idempotency_key"`
+	Recipients        []string   `json:"recipient_user_ids"`
+	OccurredAt        time.Time  `json:"occurred_at"`
+	ExpiresAt         *time.Time `json:"expires_at"`
+}
+type ingestionBatchPayload struct {
+	Events []ingestionEventPayload `json:"events"`
+}
+
+// Ingest accepts a protected application event. Tenant and source always come from its bearer credential.
+func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.applicationPrincipal(w, r)
+	if !ok {
+		return
+	}
+	var payload ingestionEventPayload
+	if !decode(w, r, &payload) {
+		return
+	}
+	receipt, err := h.ingest(r, p, payload)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	status := http.StatusCreated
+	if receipt.Duplicate {
+		status = http.StatusOK
+	}
+	httpresponse.WriteSuccess(w, r, status, "站内信事件已接收", receipt)
+}
+
+// IngestBatch keeps HTTP work bounded; each event is independently idempotent.
+func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.applicationPrincipal(w, r)
+	if !ok {
+		return
+	}
+	var payload ingestionBatchPayload
+	if !decode(w, r, &payload) {
+		return
+	}
+	if len(payload.Events) == 0 || len(payload.Events) > 100 {
+		h.writeError(w, r, app.ErrValidation)
+		return
+	}
+	receipts := make([]domain.IngestionReceipt, 0, len(payload.Events))
+	for _, event := range payload.Events {
+		receipt, err := h.ingest(r, p, event)
+		if err != nil {
+			h.writeError(w, r, err)
+			return
+		}
+		receipts = append(receipts, receipt)
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "站内信事件批次已接收", map[string]any{"receipts": receipts, "accepted": len(receipts)})
+}
+
+func (h *Handler) ingest(r *http.Request, p appctx.Principal, payload ingestionEventPayload) (domain.IngestionReceipt, error) {
+	event := domain.IngestionEvent{EventID: payload.EventID, EventType: payload.EventType, NotificationScope: payload.NotificationScope, Priority: payload.Priority, Title: payload.Title, Content: payload.Content, TargetURL: payload.TargetURL, ReferenceType: payload.ReferenceType, ReferenceID: payload.ReferenceID, IdempotencyKey: payload.IdempotencyKey, Recipients: payload.Recipients, OccurredAt: payload.OccurredAt, ExpiresAt: payload.ExpiresAt}
+	return h.service.Ingest(r.Context(), app.IngestInput{TenantID: p.TenantID, SourceApplication: p.ApplicationCode, SourceEnvironment: p.EnvironmentCode, Event: event})
 }
 
 func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +316,14 @@ func (h *Handler) principal(w http.ResponseWriter, r *http.Request) (authctx.Pri
 	if !ok {
 		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
 		return authctx.Principal{}, false
+	}
+	return p, true
+}
+func (h *Handler) applicationPrincipal(w http.ResponseWriter, r *http.Request) (appctx.Principal, bool) {
+	p, ok := appctx.PrincipalFromContext(r.Context())
+	if !ok {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
+		return appctx.Principal{}, false
 	}
 	return p, true
 }

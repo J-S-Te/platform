@@ -4,6 +4,7 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -227,10 +228,11 @@ func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string
 func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.DB, sessionID string, now time.Time, lock bool) (domain.SessionSubject, error) {
 	var row struct {
 		TenantID, SessionID, AccountID, UserID string
+		LoginIP                                []byte
 		ExpiresAt                              time.Time
 	}
 	query := database.WithContext(ctx).Table("iam_session").
-		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.expires_at").
+		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
 		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
@@ -242,7 +244,7 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 	if err != nil {
 		return domain.SessionSubject{}, mapError(err)
 	}
-	return domain.SessionSubject{TenantID: row.TenantID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, ExpiresAt: row.ExpiresAt.UTC()}, nil
+	return domain.SessionSubject{TenantID: row.TenantID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, LoginIP: append(net.IP(nil), row.LoginIP...), ExpiresAt: row.ExpiresAt.UTC()}, nil
 }
 
 func (r *Repository) CreateAuthorizationCode(ctx context.Context, code domain.AuthorizationCode) error {

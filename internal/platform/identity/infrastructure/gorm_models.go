@@ -177,14 +177,15 @@ type loginAccountProjection struct {
 }
 
 type principalProjection struct {
-	SessionID   string `gorm:"column:session_id"`
-	TenantID    string `gorm:"column:tenant_id"`
-	TenantName  string `gorm:"column:tenant_name"`
-	TenantCode  string `gorm:"column:tenant_code"`
-	UserID      string `gorm:"column:user_id"`
-	UserName    string `gorm:"column:user_name"`
-	AccountID   string `gorm:"column:account_id"`
-	AccountName string `gorm:"column:account_name"`
+	SessionID      string `gorm:"column:session_id"`
+	LoginIPAddress []byte `gorm:"column:login_ip_address"`
+	TenantID       string `gorm:"column:tenant_id"`
+	TenantName     string `gorm:"column:tenant_name"`
+	TenantCode     string `gorm:"column:tenant_code"`
+	UserID         string `gorm:"column:user_id"`
+	UserName       string `gorm:"column:user_name"`
+	AccountID      string `gorm:"column:account_id"`
+	AccountName    string `gorm:"column:account_name"`
 }
 
 type roleProjection struct {

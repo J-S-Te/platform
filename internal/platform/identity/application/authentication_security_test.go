@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -284,5 +285,37 @@ func TestCreateSessionForwardsReplacementChoice(t *testing.T) {
 	}
 	if !result.ReplacedExistingSession {
 		t.Fatal("SessionResult.ReplacedExistingSession = false, want true")
+	}
+}
+
+func TestToAuthContextPrincipalPreservesSessionLoginIP(t *testing.T) {
+	loginIP := net.ParseIP("203.0.113.15").To4()
+	principal := toAuthContextPrincipal(domain.Principal{
+		SessionID: "session-1",
+		LoginIP:   loginIP,
+		Tenant:    domain.ReferenceName{ID: "tenant-1"},
+		User:      domain.ReferenceName{ID: "user-1", Name: "Alice"},
+		Account:   domain.ReferenceName{ID: "account-1", Name: "alice"},
+	})
+
+	if got := principal.LoginIP.String(); got != "203.0.113.15" {
+		t.Fatalf("LoginIP = %q, want 203.0.113.15", got)
+	}
+	loginIP[0] = 127
+	if got := principal.LoginIP.String(); got != "203.0.113.15" {
+		t.Fatalf("LoginIP aliases domain principal bytes: %q", got)
+	}
+}
+
+func TestToAuthContextPrincipalKeepsMissingSessionLoginIPEmpty(t *testing.T) {
+	principal := toAuthContextPrincipal(domain.Principal{
+		SessionID: "session-1",
+		Tenant:    domain.ReferenceName{ID: "tenant-1"},
+		User:      domain.ReferenceName{ID: "user-1", Name: "Alice"},
+		Account:   domain.ReferenceName{ID: "account-1", Name: "alice"},
+	})
+
+	if principal.LoginIP != nil {
+		t.Fatalf("LoginIP = %v, want nil for sessions created without an IP", principal.LoginIP)
 	}
 }

@@ -454,6 +454,7 @@ func toAuthContextPrincipal(principal domain.Principal) authctx.Principal {
 	}
 	return authctx.Principal{
 		SessionID:       principal.SessionID,
+		LoginIP:         append(net.IP(nil), principal.LoginIP...),
 		Tenant:          authctx.ReferenceName{ID: principal.Tenant.ID, Name: principal.Tenant.Name, Code: principal.Tenant.Code},
 		User:            authctx.ReferenceName{ID: principal.User.ID, Name: userName, Code: principal.User.Code},
 		Account:         authctx.ReferenceName{ID: principal.Account.ID, Name: principal.Account.Name, Code: principal.Account.Code},

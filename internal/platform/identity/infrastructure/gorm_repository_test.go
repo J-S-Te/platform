@@ -1,12 +1,23 @@
 package infrastructure
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 )
+
+func TestPrincipalProjectionIncludesSessionLoginIP(t *testing.T) {
+	field, ok := reflect.TypeOf(principalProjection{}).FieldByName("LoginIPAddress")
+	if !ok {
+		t.Fatal("principal projection is missing LoginIPAddress")
+	}
+	if field.Tag.Get("gorm") != "column:login_ip_address" {
+		t.Fatalf("LoginIPAddress GORM tag = %q, want column:login_ip_address", field.Tag.Get("gorm"))
+	}
+}
 
 func TestPrincipalBindingSubjectFilterIncludesAccountAndEffectiveMembership(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 8, 0, 0, 0, time.UTC)

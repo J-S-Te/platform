@@ -132,6 +132,41 @@ func TestAuthorizationContextRespectsLegacyAccessTokenCompatFlag(t *testing.T) {
 	}
 }
 
+func TestAuthorizationContextEmitsTrustedSessionLoginIP(t *testing.T) {
+	handler := &Handler{
+		service:                      authorizationContextServiceStub{},
+		jwtManager:                   platformAccessTokenJWTManager{claims: security.OIDCTokenClaims{ClientID: "contract-prod-web", Subject: "identity-1", SessionID: "session-1", Scope: []string{"openid"}}},
+		accessTokenSubjects:          legacyAccessSubjectStub{subject: AccessTokenSubject{TenantID: "tenant-1", OAuthClientID: "client-1", LoginIP: "203.0.113.9"}},
+		authorizationContextResolver: &authorizationContextResolverStub{}, clock: authorizationContextClock{},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)), allowLegacyPlatformAccessToken: true,
+	}
+	request := httptest.NewRequest(http.MethodGet, "/oauth2/authorization-context", nil)
+	request.Header.Set("Authorization", "Bearer "+jwtWithClientID("contract-prod-web"))
+	response := httptest.NewRecorder()
+	handler.AuthorizationContext(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		UserLoginIP string `json:"user_login_ip"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.UserLoginIP != "203.0.113.9" {
+		t.Fatalf("body=%s err=%v", response.Body.String(), err)
+	}
+}
+
+type legacyAccessSubjectStub struct{ subject AccessTokenSubject }
+
+func (s legacyAccessSubjectStub) ResolveAccessTokenSubject(context.Context, string, string, string) (AccessTokenSubject, error) {
+	return s.subject, nil
+}
+
+type authorizationContextServiceStub struct{ Service }
+
+func (authorizationContextServiceStub) IsAccessTokenRevoked(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
 type externalAuthorizationVerifierStub struct {
 	claims ExternalAuthorizationTokenClaims
 }

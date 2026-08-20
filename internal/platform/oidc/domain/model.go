@@ -1,7 +1,10 @@
 // Package domain 定义与 HTTP 和 JWT 编码无关的 OIDC/OAuth 运行时状态。
 package domain
 
-import "time"
+import (
+	"net"
+	"time"
+)
 
 const (
 	// ClientStatusActive is the only client status eligible for protocol processing.
@@ -62,6 +65,7 @@ type SessionSubject struct {
 	SessionID string
 	AccountID string
 	UserID    string
+	LoginIP   net.IP
 	ExpiresAt time.Time
 }
 

@@ -249,14 +249,14 @@ func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 2 {
-		t.Fatalf("fallback clients = %d, want audit + owner_directory", len(repository.write.ServiceClients))
+	if len(repository.write.ServiceClients) != 3 {
+		t.Fatalf("fallback clients = %d, want audit + owner_directory + notification", len(repository.write.ServiceClients))
 	}
 	purposes := map[string]bool{}
 	for _, item := range repository.write.ServiceClients {
 		purposes[item.Purpose] = true
 	}
-	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] {
+	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] || !purposes[ServiceCredentialNotificationIngest] {
 		t.Fatalf("fallback clients = %v", purposes)
 	}
 }
@@ -294,7 +294,7 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 2 || len(result.ServiceCredentials) != 2 {
+	if len(repository.write.ServiceClients) != 3 || len(result.ServiceCredentials) != 3 {
 		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
 	}
 	credentials := make(map[string]SubsystemServiceCredential, len(result.ServiceCredentials))
@@ -312,6 +312,10 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 	}
 	if credential.PlaintextSecret == "" {
 		t.Fatal("owner directory plaintext secret must be returned once during onboarding")
+	}
+	notificationCredential := credentials[ServiceCredentialNotificationIngest]
+	if notificationCredential.Purpose != ServiceCredentialNotificationIngest || len(notificationCredential.OAuthClient.Scopes) != 1 || notificationCredential.OAuthClient.Scopes[0] != "notification.ingest" || notificationCredential.PlaintextSecret == "" {
+		t.Fatalf("notification credential=%#v", notificationCredential)
 	}
 }
 

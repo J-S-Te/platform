@@ -23,6 +23,9 @@ import (
 	keycloakauthorizationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/application"
 	keycloakauthorizationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/infrastructure"
 	keycloakauthorizationworker "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/worker"
+	notificationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/notification/application"
+	notificationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/notification/infrastructure"
+	notificationworker "github.com/J-S-Te/Basic-Platform/internal/platform/notification/worker"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/database"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/observability"
@@ -132,6 +135,37 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 
 	// 两类任务共享数据库但使用独立租约；其中一个退出不应静默停止另一个，统一由上层 context 收敛。
 	runners := []ProcessRunner{exportRunner, retentionRunner}
+	notificationRepository, err := notificationinfrastructure.NewRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	notificationPolicy, err := notificationinfrastructure.NewInboxPolicy(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	notificationResolver, err := notificationinfrastructure.NewRecipientResolver(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	notificationService, err := notificationapplication.NewService(notificationRepository, notificationPolicy, notificationResolver, ulid.Generator{}, notificationapplication.SystemClock{})
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	notificationRunner, err := notificationworker.NewIngestionWorker(notificationService, logger, cfg.Worker.PollInterval, cfg.Worker.StaleLockTimeout)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	runners = append(runners, notificationRunner)
 	// Scheduled personnel changes share the same worker process and database lease
 	// semantics; no extra service or broker is required.
 	personnelRepo := identityinfrastructure.NewPersonnelChangeGORMRepository(db)

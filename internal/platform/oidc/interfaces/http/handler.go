@@ -76,6 +76,7 @@ type PostLogoutRedirectValidator interface {
 type AccessTokenSubject struct {
 	TenantID      string
 	OAuthClientID string
+	LoginIP       string
 }
 
 // AccessTokenSubjectResolver resolves the durable OIDC client and tenant IDs needed by
@@ -141,12 +142,12 @@ type Config struct {
 	// CustomerBindingResolver 在 EmitCustomerRef 打开时向 authorization-context 响应
 	// 追加 customer_ref 声明；实现由外部客户绑定模块注入。
 	CustomerBindingResolver CustomerBindingResolver
-	EmitCustomerRef          bool
-	SessionCookieName              string
-	SessionCookieSecure            bool
-	SessionCookieSameSite          http.SameSite
-	Clock                          Clock
-	Logger                         *slog.Logger
+	EmitCustomerRef         bool
+	SessionCookieName       string
+	SessionCookieSecure     bool
+	SessionCookieSameSite   http.SameSite
+	Clock                   Clock
+	Logger                  *slog.Logger
 }
 
 // Handler contains only transport policy. Durable protocol state remains in application.Service.

@@ -42,29 +42,34 @@ func NewHandler(service *application.Service, logger *slog.Logger, storageRoot s
 }
 
 type eventInputPayload struct {
-	EventID         string               `json:"event_id"`
-	ApplicationCode string               `json:"application_code"`
-	EnvironmentCode string               `json:"environment_code"`
-	ActorType       string               `json:"actor_type,omitempty"`
-	ActorID         string               `json:"actor_id,omitempty"`
-	ActorName       string               `json:"actor_name,omitempty"`
-	SessionID       string               `json:"session_id,omitempty"`
-	OccurredAt      time.Time            `json:"occurred_at"`
-	Action          string               `json:"action"`
-	ResourceType    string               `json:"resource_type"`
-	ResourceID      string               `json:"resource_id,omitempty"`
-	ResourceName    string               `json:"resource_name,omitempty"`
-	BusinessID      string               `json:"business_id,omitempty"`
-	RequestID       string               `json:"request_id,omitempty"`
-	TraceID         string               `json:"trace_id,omitempty"`
-	CorrelationID   string               `json:"correlation_id,omitempty"`
-	Result          string               `json:"result"`
-	ReasonCode      string               `json:"reason_code,omitempty"`
-	RiskLevel       string               `json:"risk_level,omitempty"`
-	Classification  string               `json:"classification,omitempty"`
-	Summary         string               `json:"summary,omitempty"`
-	Metadata        map[string]any       `json:"metadata,omitempty"`
-	ChangeSummary   []domain.FieldChange `json:"change_summary,omitempty"`
+	EventID         string    `json:"event_id"`
+	ApplicationCode string    `json:"application_code"`
+	EnvironmentCode string    `json:"environment_code"`
+	ActorType       string    `json:"actor_type,omitempty"`
+	ActorID         string    `json:"actor_id,omitempty"`
+	ActorName       string    `json:"actor_name,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	OccurredAt      time.Time `json:"occurred_at"`
+	Action          string    `json:"action"`
+	ResourceType    string    `json:"resource_type"`
+	ResourceID      string    `json:"resource_id,omitempty"`
+	ResourceName    string    `json:"resource_name,omitempty"`
+	BusinessID      string    `json:"business_id,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	TraceID         string    `json:"trace_id,omitempty"`
+	CorrelationID   string    `json:"correlation_id,omitempty"`
+	Result          string    `json:"result"`
+	ReasonCode      string    `json:"reason_code,omitempty"`
+	RiskLevel       string    `json:"risk_level,omitempty"`
+	Classification  string    `json:"classification,omitempty"`
+	Summary         string    `json:"summary,omitempty"`
+	// UserLoginIP is the end user's login IP as observed by the reporting
+	// application. It is optional because existing publishers only provide the
+	// delivery request IP. It must never be populated from an untrusted proxy
+	// header at this boundary.
+	UserLoginIP   string               `json:"user_login_ip,omitempty"`
+	Metadata      map[string]any       `json:"metadata,omitempty"`
+	ChangeSummary []domain.FieldChange `json:"change_summary,omitempty"`
 }
 
 type batchPayload struct {
@@ -373,7 +378,10 @@ func applicationInput(payload eventInputPayload, r *http.Request, principal appc
 		return application.EventInput{}, fmt.Errorf("%w: application token client_id is required", application.ErrValidation)
 	}
 
-	input := toInput(payload, r)
+	input, err := toInput(payload, r)
+	if err != nil {
+		return application.EventInput{}, err
+	}
 	input.ClientID = principal.ClientID
 	return input, nil
 }
@@ -411,7 +419,7 @@ func validateExternalCorrelation(ctx context.Context, payload eventInputPayload,
 	return nil
 }
 
-func toInput(payload eventInputPayload, r *http.Request) application.EventInput {
+func toInput(payload eventInputPayload, r *http.Request) (application.EventInput, error) {
 	metadata := copyMetadata(payload.Metadata)
 	// method and path can describe the audited subsystem operation. Keep supplied values and add
 	// receiver values only when the reporting application did not provide them.
@@ -421,7 +429,28 @@ func toInput(payload eventInputPayload, r *http.Request) application.EventInput 
 	if _, ok := metadata["path"]; !ok {
 		metadata["path"] = r.URL.Path
 	}
-	return application.EventInput{EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: clientIP(r), UserAgent: r.UserAgent()}
+	sourceIP, err := eventSourceIP(payload.UserLoginIP, r)
+	if err != nil {
+		return application.EventInput{}, err
+	}
+	return application.EventInput{EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: sourceIP, UserAgent: r.UserAgent()}, nil
+}
+
+// eventSourceIP preserves the historical delivery-request address when a
+// publisher has no user login IP. A supplied value is accepted only when it is
+// a canonical IP literal, so malformed values cannot silently enter audit data.
+func eventSourceIP(userLoginIP string, r *http.Request) (string, error) {
+	if userLoginIP == "" {
+		return clientIP(r), nil
+	}
+	if strings.TrimSpace(userLoginIP) != userLoginIP {
+		return "", fmt.Errorf("%w: user_login_ip must be a valid IP address", application.ErrValidation)
+	}
+	parsed := net.ParseIP(userLoginIP)
+	if parsed == nil {
+		return "", fmt.Errorf("%w: user_login_ip must be a valid IP address", application.ErrValidation)
+	}
+	return parsed.String(), nil
 }
 
 func copyMetadata(metadata map[string]any) map[string]any {

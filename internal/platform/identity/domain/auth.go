@@ -1,7 +1,10 @@
 // Package domain contains identity concepts without transport or database dependencies.
 package domain
 
-import "time"
+import (
+	"net"
+	"time"
+)
 
 // LoginAccount combines the identity and credential state required by a password-login use case.
 type LoginAccount struct {
@@ -45,6 +48,7 @@ type ReferenceName struct {
 // Principal is the authenticated server-side identity returned by session verification.
 type Principal struct {
 	SessionID       string
+	LoginIP         net.IP
 	Tenant          ReferenceName
 	User            ReferenceName
 	Account         ReferenceName

@@ -21,27 +21,30 @@ const (
 
 // Event is the safe, documented payload sent to the Basic Platform audit-ingestion endpoint.
 type Event struct {
-	EventID         string         `json:"event_id"`
-	ApplicationCode string         `json:"application_code"`
-	EnvironmentCode string         `json:"environment_code"`
-	ActorType       string         `json:"actor_type,omitempty"`
-	ActorID         string         `json:"actor_id,omitempty"`
-	ActorName       string         `json:"actor_name,omitempty"`
-	OccurredAt      time.Time      `json:"occurred_at"`
-	Action          string         `json:"action"`
-	ResourceType    string         `json:"resource_type"`
-	ResourceID      string         `json:"resource_id,omitempty"`
-	ResourceName    string         `json:"resource_name,omitempty"`
-	BusinessID      string         `json:"business_id,omitempty"`
-	RequestID       string         `json:"request_id,omitempty"`
-	TraceID         string         `json:"trace_id,omitempty"`
-	CorrelationID   string         `json:"correlation_id,omitempty"`
-	Result          string         `json:"result"`
-	ReasonCode      string         `json:"reason_code,omitempty"`
-	RiskLevel       string         `json:"risk_level,omitempty"`
-	Classification  string         `json:"classification,omitempty"`
-	Summary         string         `json:"summary,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
+	EventID         string    `json:"event_id"`
+	ApplicationCode string    `json:"application_code"`
+	EnvironmentCode string    `json:"environment_code"`
+	ActorType       string    `json:"actor_type,omitempty"`
+	ActorID         string    `json:"actor_id,omitempty"`
+	ActorName       string    `json:"actor_name,omitempty"`
+	OccurredAt      time.Time `json:"occurred_at"`
+	Action          string    `json:"action"`
+	ResourceType    string    `json:"resource_type"`
+	ResourceID      string    `json:"resource_id,omitempty"`
+	ResourceName    string    `json:"resource_name,omitempty"`
+	BusinessID      string    `json:"business_id,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	TraceID         string    `json:"trace_id,omitempty"`
+	CorrelationID   string    `json:"correlation_id,omitempty"`
+	Result          string    `json:"result"`
+	ReasonCode      string    `json:"reason_code,omitempty"`
+	RiskLevel       string    `json:"risk_level,omitempty"`
+	Classification  string    `json:"classification,omitempty"`
+	Summary         string    `json:"summary,omitempty"`
+	// UserLoginIP is the optional end-user login IP captured by the reporting
+	// application. If omitted, Basic Platform keeps using the delivery request IP.
+	UserLoginIP string         `json:"user_login_ip,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
 // OutboxRecord is the minimum MySQL row an integrated service should persist in the same GORM
