@@ -183,9 +183,6 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("verify password credential: %w", err)
 	}
-	if account.LockedUntil != nil && account.LockedUntil.After(now) {
-		return SessionResult{}, loginFailedError(account)
-	}
 	if !isLoginEligible(account, now) {
 		return SessionResult{}, loginFailedError(account)
 	}
@@ -225,10 +222,10 @@ func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (Se
 		}
 		return SessionResult{}, fmt.Errorf("find OIDC login account: %w", err)
 	}
-	if account.UserID != identityID || !isIdentityEligible(account) {
+	now := service.clock.Now().UTC().Truncate(time.Second)
+	if account.UserID != identityID || !isSessionLoginEligible(account, now) {
 		return SessionResult{}, ErrUnauthenticated
 	}
-	now := service.clock.Now().UTC().Truncate(time.Second)
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
 
@@ -408,10 +405,18 @@ func (service *Service) SessionIdleTimeout(ctx context.Context, tenantID string)
 }
 
 func isLoginEligible(account domain.LoginAccount, now time.Time) bool {
-	if !isIdentityEligible(account) || account.CredentialStatus != domain.StatusActive {
+	if !isSessionLoginEligible(account, now) || account.CredentialStatus != domain.StatusActive {
 		return false
 	}
 	return account.CredentialExpiry == nil || account.CredentialExpiry.After(now)
+}
+
+// isSessionLoginEligible contains the login requirements shared by every
+// authentication method that creates a platform session. Keep the lock check
+// here so an account locked after repeated local-password failures cannot
+// establish a new session through OIDC.
+func isSessionLoginEligible(account domain.LoginAccount, now time.Time) bool {
+	return isIdentityEligible(account) && (account.LockedUntil == nil || !account.LockedUntil.After(now))
 }
 
 func isIdentityEligible(account domain.LoginAccount) bool {

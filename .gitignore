@@ -21,6 +21,17 @@ coverage/
 !docker/.env.portal.local.example
 !docker/.env.lan.disabled
 
+# 私钥和本地凭据禁止进入版本库；公钥可以按需随代码发布。
+*.key
+*.p12
+*.pfx
+*-private.pem
+*_private.pem
+data/keys/*
+!data/keys/*-public.pem
+secrets/
+**/secrets/
+
 # Logs
 *.log
 npm-debug.log*

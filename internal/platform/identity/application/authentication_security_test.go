@@ -70,11 +70,13 @@ func (stub authenticationClockStub) Now() time.Time { return stub.now }
 type createSessionRepositorySpy struct {
 	authenticationRepositoryStub
 	createErr       error
+	createCalls     int
 	idleTimeout     time.Duration
 	replaceExisting bool
 }
 
 func (spy *createSessionRepositorySpy) CreateSession(_ context.Context, _ domain.LoginAccount, _ domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
+	spy.createCalls++
 	spy.idleTimeout = idleTimeout
 	spy.replaceExisting = replaceExisting
 	return spy.createErr
@@ -260,6 +262,30 @@ func TestLoginOIDCUsesStableIdentityWithoutPasswordVerification(t *testing.T) {
 	}
 	if result.UserID != "identity-1" || verifier.calls != 0 {
 		t.Fatalf("result=%#v password verification calls=%d", result, verifier.calls)
+	}
+}
+
+func TestLoginOIDCRejectsLockedAccountWithoutCreatingSession(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 10, 0, 0, 0, time.UTC)
+	lockedUntil := now.Add(time.Hour)
+	repository := &createSessionRepositorySpy{authenticationRepositoryStub: authenticationRepositoryStub{account: domain.LoginAccount{
+		TenantID: "tenant-1", TenantStatus: domain.StatusActive,
+		UserID: "identity-1", UserStatus: domain.StatusActive,
+		AccountID: "account-1", AccountName: "alice", AccountStatus: domain.StatusActive,
+		LockedUntil: &lockedUntil,
+	}}}
+	service := &Service{
+		repository: repository,
+		tokens:     authenticationTokenManagerStub{}, ids: authenticationIDGeneratorStub{}, clock: authenticationClockStub{now: now},
+		loginSecurity: loginSecurityStub{idleTimeout: 30 * time.Minute}, sessionTTL: 12 * time.Hour,
+	}
+
+	_, err := service.LoginOIDC(context.Background(), OIDCLoginInput{IdentityID: "identity-1"})
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("LoginOIDC() error = %v, want ErrUnauthenticated", err)
+	}
+	if repository.createCalls != 0 {
+		t.Fatalf("CreateSession() calls = %d, want 0 for a locked account", repository.createCalls)
 	}
 }
 
