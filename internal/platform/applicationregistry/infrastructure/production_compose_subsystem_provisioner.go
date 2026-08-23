@@ -437,7 +437,8 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	cancelStep()
 	if err != nil {
 		// docker compose up --wait 的原始输出通常包含实际未通过健康检查的服务。
-		// 优先返回它，避免后续汇总所有服务日志时被无关 Worker 的正常启动日志覆盖。
+		// 优先返回它，避免后续汇总所有服务日志时被无关 Worker 的正常启动日志覆盖；
+		// 只有原始输出为空时才回退到受影响服务的日志采集。
 		if detail := sanitizeProvisioningLog(string(output), redactValues); detail != "" {
 			return provisioningError("start production subsystem services: " + detail)
 		}
