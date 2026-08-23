@@ -1222,53 +1222,89 @@ func (handler *SubsystemOnboardingHandler) RollbackToPlatform(writer stdhttp.Res
 	handler.updateSubsystem(writer, request, "platform")
 }
 
+type updateServiceCredentialRequirement struct {
+	purpose    string
+	suffix     string
+	clientName string
+	scope      string
+	rotate     bool
+}
+
+func updateServiceCredentialRequirements(applicationCode string) []updateServiceCredentialRequirement {
+	switch applicationCode {
+	case "contract_management":
+		return []updateServiceCredentialRequirement{{
+			purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory",
+			clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read",
+		}}
+	case "customer_and_opportunity":
+		// Audit and notification secrets are runtime delivery credentials. Existing
+		// installations may predate notification_ingest or may contain a credential
+		// delivered for another environment, so every controlled update rotates and
+		// redelivers both values atomically with the environment file.
+		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户与商机管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
+			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "客户与商机管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
+		}
+	default:
+		return nil
+	}
+}
+
 func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, operation string) ([]application.SubsystemServiceCredential, error) {
-	if handler.serviceCredentials == nil || applicationCode != "contract_management" {
+	requirements := updateServiceCredentialRequirements(applicationCode)
+	if handler.serviceCredentials == nil || len(requirements) == 0 {
 		return nil, nil
 	}
 	if strings.TrimSpace(applicationID) == "" || strings.TrimSpace(environmentID) == "" {
 		return nil, application.ErrNotFound
 	}
-	clientID := applicationCode + "-" + environment + "-owner-directory"
 	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
+	byClientID := make(map[string]application.OAuthClientView, len(clients))
 	for _, client := range clients {
-		if client.ClientID != clientID {
+		byClientID[client.ClientID] = client
+	}
+	credentials := make([]application.SubsystemServiceCredential, 0, len(requirements))
+	for _, requirement := range requirements {
+		clientID := applicationCode + "-" + environment + "-" + requirement.suffix
+		if client, ok := byClientID[clientID]; ok {
+			if !strings.EqualFold(client.Status, "ACTIVE") {
+				return nil, application.ErrConflict
+			}
+			// A retry always creates a recoverable replacement because a prior secret
+			// may have been minted immediately before an Agent failure. Credentials
+			// marked rotate are also redelivered on normal controlled updates.
+			if operation != "RETRY" && !requirement.rotate {
+				continue
+			}
+			secret, secretErr := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{
+				TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID,
+			})
+			if secretErr != nil {
+				return nil, secretErr
+			}
+			credentials = append(credentials, application.SubsystemServiceCredential{
+				Purpose: requirement.purpose, OAuthClient: client, PlaintextSecret: secret.PlaintextSecret,
+			})
 			continue
 		}
-		if !strings.EqualFold(client.Status, "ACTIVE") {
-			return nil, application.ErrConflict
-		}
-		// Normal updates preserve the already delivered secret. A retry creates an
-		// additional active version because the previous one may have been created
-		// immediately before an Agent failure and therefore never reached runtime.
-		if operation != "RETRY" {
-			return nil, nil
-		}
-		secret, secretErr := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{
-			TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID,
+		created, createErr := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
+			TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
+			ClientID: clientID, ClientName: requirement.clientName, ClientType: "service",
+			TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
+			GrantTypes: []string{"client_credentials"}, Scopes: []string{requirement.scope},
 		})
-		if secretErr != nil {
-			return nil, secretErr
+		if createErr != nil {
+			return nil, createErr
 		}
-		return []application.SubsystemServiceCredential{{
-			Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: client, PlaintextSecret: secret.PlaintextSecret,
-		}}, nil
+		credentials = append(credentials, application.SubsystemServiceCredential{
+			Purpose: requirement.purpose, OAuthClient: created.Client, PlaintextSecret: created.PlaintextSecret,
+		})
 	}
-	created, err := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
-		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
-		ClientID: clientID, ClientName: "合同管理系统 Owner Directory Reader", ClientType: "service",
-		TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
-		GrantTypes: []string{"client_credentials"}, Scopes: []string{"owner_directory.read"},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return []application.SubsystemServiceCredential{{
-		Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: created.Client, PlaintextSecret: created.PlaintextSecret,
-	}}, nil
+	return credentials, nil
 }
 
 func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request, forcedIssuerAlias string) {

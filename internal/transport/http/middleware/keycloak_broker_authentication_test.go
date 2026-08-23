@@ -51,6 +51,42 @@ func TestKeycloakBrokerJWTVerifierAcceptsOnlyBoundCurrentRealmToken(t *testing.T
 	}
 }
 
+func TestKeycloakBrokerJWTVerifierFetchesJWKSFromBackchannelAndKeepsPublicIssuer(t *testing.T) {
+	privateKey := newTestKeycloakRSAKey(t)
+	var requestedPath string
+	backchannel := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestedPath = request.URL.Path
+		writeKeycloakJWKS(t, writer, map[string]*rsa.PrivateKey{"current": privateKey})
+	}))
+	defer backchannel.Close()
+
+	issuer := "http://localhost:18090/realms/basic-platform"
+	verifier, err := NewKeycloakBrokerJWTVerifierWithBackchannel(issuer, backchannel.URL+"/realms/basic-platform", backchannel.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	verifier.now = func() time.Time { return now }
+	token := signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{
+		"iss": issuer, "sub": "user-1", "aud": "customer_and_opportunity-dev-web",
+		"exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "session-1",
+		"tenant_id": "tenant-1", "identity_id": "user-1",
+	})
+
+	if _, err = verifier.Verify(context.Background(), token); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if requestedPath != "/realms/basic-platform/protocol/openid-connect/certs" {
+		t.Fatalf("JWKS request path = %q", requestedPath)
+	}
+}
+
+func TestKeycloakBrokerJWTVerifierRejectsInvalidBackchannelIssuer(t *testing.T) {
+	if _, err := NewKeycloakBrokerJWTVerifierWithBackchannel("https://sso.example/realms/basic-platform", "http://keycloak:8080/realms/basic-platform?target=other", nil); err == nil {
+		t.Fatal("invalid backchannel issuer was accepted")
+	}
+}
+
 func TestKeycloakBrokerAuthenticationFailsClosed(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -174,12 +210,12 @@ func TestKeycloakBrokerJWTVerifierRequiresBoundIDTokenWithNonce(t *testing.T) {
 	base["azp"] = "platform-console-web"
 
 	tests := []struct {
-		name       string
-		tokenUse   string
-		nonce      string
-		expected   string
-		audience   any
-		wantOK     bool
+		name     string
+		tokenUse string
+		nonce    string
+		expected string
+		audience any
+		wantOK   bool
 	}{
 		{name: "bound id token with nonce", tokenUse: "id_token", nonce: "nonce-1", expected: "nonce-1", audience: "platform-console-web", wantOK: true},
 		{name: "nonce mismatch", tokenUse: "id_token", nonce: "nonce-1", expected: "nonce-2", audience: "platform-console-web"},

@@ -555,6 +555,14 @@ services:
         condition: service_healthy
     profiles: ["customer"]
 
+  customer-notification-delivery-worker:
+    <<: *customer-service
+    command: ["./notification-delivery-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    profiles: ["customer"]
+
   # 售前申请投递 Worker：消费 CRM outbox，写入审批引擎/PMS，并持续写入
   # crm_worker_heartbeats。CRM API 依据该心跳决定是否受理新的售前申请。
   customer-presale-worker:

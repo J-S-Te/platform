@@ -29,15 +29,17 @@ func (resolver *AuditIdentityResolver) ResolveKeycloakAuditIdentity(ctx context.
 		TenantID string `gorm:"column:tenant_id"`
 		UserID   string `gorm:"column:user_id"`
 	}
-	err := resolver.database.WithContext(ctx).Table("iam_account AS account").
+	result := resolver.database.WithContext(ctx).Table("iam_account AS account").
 		Select("account.tenant_id, account.user_id").
 		Joins("JOIN iam_user AS user ON user.tenant_id = account.tenant_id AND user.id = account.user_id").
-		Where("account.external_subject_id = ? AND account.auth_source IN ? AND account.status = ? AND user.status = ?", subjectID, []string{"KEYCLOAK", "FEDERATED"}, "ACTIVE", "ACTIVE").Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", "", nil
+		Where("account.external_subject_id = ? AND account.auth_source IN ? AND account.status = ? AND user.status = ?", subjectID, []string{"KEYCLOAK", "FEDERATED"}, "ACTIVE", "ACTIVE").
+		Limit(1).
+		Find(&row)
+	if result.Error != nil {
+		return "", "", fmt.Errorf("resolve Keycloak audit identity: %w", result.Error)
 	}
-	if err != nil {
-		return "", "", fmt.Errorf("resolve Keycloak audit identity: %w", err)
+	if result.RowsAffected == 0 {
+		return "", "", nil
 	}
 	return strings.TrimSpace(row.TenantID), strings.TrimSpace(row.UserID), nil
 }

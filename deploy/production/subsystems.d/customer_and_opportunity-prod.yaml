@@ -3,7 +3,7 @@ default: false
 application:
   code: customer_and_opportunity
   initial_admin_roles: [sales_director, team_lead, technical_lead]
-  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write]
+  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, notification_ingest]
   name: 客户与商机管理系统
   description: 客户、商机与售前协作管理系统
   environment: prod
@@ -64,6 +64,8 @@ runtime:
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        PLATFORM_NOTIFICATION_CLIENT_ID: service.notification_ingest.client_id
+        PLATFORM_NOTIFICATION_CLIENT_SECRET: service.notification_ingest.client_secret
         PLATFORM_OWNER_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
         PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
         CONTRACT_SUMMARY_CLIENT_ID: service.contract_summary_read.client_id
@@ -77,6 +79,6 @@ compose:
     service: customer-mysql
     name: customer_opportunity
   migrate_service: customer-migrate
-  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-presale-worker]
-  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-presale-worker]
+  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
+  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
   release_image_keys: [CUSTOMER_CRM_IMAGE]

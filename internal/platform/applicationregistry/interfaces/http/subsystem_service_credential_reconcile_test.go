@@ -8,9 +8,11 @@ import (
 )
 
 type serviceCredentialManagerStub struct {
-	clients      []application.OAuthClientView
-	createdInput application.OAuthClientCreateInput
-	secretInput  application.OAuthClientSecretCreateInput
+	clients       []application.OAuthClientView
+	createdInput  application.OAuthClientCreateInput
+	secretInput   application.OAuthClientSecretCreateInput
+	createdInputs []application.OAuthClientCreateInput
+	secretInputs  []application.OAuthClientSecretCreateInput
 }
 
 func (stub *serviceCredentialManagerStub) ListOAuthClients(context.Context, string) ([]application.OAuthClientView, error) {
@@ -19,15 +21,42 @@ func (stub *serviceCredentialManagerStub) ListOAuthClients(context.Context, stri
 
 func (stub *serviceCredentialManagerStub) CreateOAuthClient(_ context.Context, input application.OAuthClientCreateInput) (application.OAuthClientCreateResult, error) {
 	stub.createdInput = input
+	stub.createdInputs = append(stub.createdInputs, input)
 	return application.OAuthClientCreateResult{
-		Client:          application.OAuthClientView{ID: "client-1", ClientID: input.ClientID, Status: "ACTIVE"},
+		Client:          application.OAuthClientView{ID: input.ClientID + "-id", ClientID: input.ClientID, Status: "ACTIVE"},
 		PlaintextSecret: "new-secret",
 	}, nil
 }
 
 func (stub *serviceCredentialManagerStub) CreateOAuthClientSecret(_ context.Context, input application.OAuthClientSecretCreateInput) (application.OAuthClientSecretResult, error) {
 	stub.secretInput = input
+	stub.secretInputs = append(stub.secretInputs, input)
 	return application.OAuthClientSecretResult{PlaintextSecret: "retry-secret"}, nil
+}
+
+func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *testing.T) {
+	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
+		ID: "audit-client-id", ClientID: "customer_and_opportunity-dev-audit-publisher", Status: "ACTIVE",
+	}}}
+	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+	credentials, err := handler.ensureUpdateServiceCredentials(
+		context.Background(), "tenant-1", "application-1", "environment-1",
+		"customer_and_opportunity", "dev", "operator-1", "UPDATE",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.secretInputs) != 1 || manager.secretInputs[0].OAuthClientID != "audit-client-id" {
+		t.Fatalf("audit credential was not rotated: %#v", manager.secretInputs)
+	}
+	if len(manager.createdInputs) != 1 || manager.createdInputs[0].ClientID != "customer_and_opportunity-dev-notification-publisher" ||
+		len(manager.createdInputs[0].Scopes) != 1 || manager.createdInputs[0].Scopes[0] != "notification.ingest" {
+		t.Fatalf("notification credential was not created: %#v", manager.createdInputs)
+	}
+	if len(credentials) != 2 || credentials[0].Purpose != application.ServiceCredentialAuditIngest ||
+		credentials[1].Purpose != application.ServiceCredentialNotificationIngest {
+		t.Fatalf("unexpected customer credentials: %#v", credentials)
+	}
 }
 
 func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testing.T) {
