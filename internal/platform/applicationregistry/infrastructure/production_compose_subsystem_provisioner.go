@@ -433,9 +433,14 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	target.stepLog("step=runtime services=%v", compose.RuntimeServices)
 	// 运行步骤同样加硬超时，避免健康检查或镜像拉取异常时长期挂起。
 	stepContext, cancelStep := context.WithTimeout(ctx, 5*time.Minute)
-	err := target.runCompose(stepContext, arguments...)
+	output, err := target.runComposeOutput(stepContext, arguments...)
 	cancelStep()
 	if err != nil {
+		// docker compose up --wait 的原始输出通常包含实际未通过健康检查的服务。
+		// 优先返回它，避免后续汇总所有服务日志时被无关 Worker 的正常启动日志覆盖。
+		if detail := sanitizeProvisioningLog(string(output), redactValues); detail != "" {
+			return provisioningError("start production subsystem services: " + detail)
+		}
 		return target.subsystemServiceFailure(ctx, "start production subsystem services", compose.RuntimeServices, redactValues)
 	}
 	return nil

@@ -372,9 +372,10 @@ func TestProductionComposeSubsystemProvisionerBindsFirstTenantAndRejectsAnotherT
 // productionFailureOutputRunner 模拟生产 Agent：固定部署步骤失败时支持 RunOutput 抓取日志，
 // 用于验证失败详情会携带目标容器日志摘要。
 type productionFailureOutputRunner struct {
-	calls  []recordingSubsystemRunnerCall
-	failUp bool
-	logs   string
+	calls    []recordingSubsystemRunnerCall
+	failUp   bool
+	upOutput string
+	logs     string
 }
 
 func (runner *productionFailureOutputRunner) record(directory string, environment []string, name string, arguments ...string) {
@@ -394,10 +395,14 @@ func (runner *productionFailureOutputRunner) Run(_ context.Context, directory st
 
 func (runner *productionFailureOutputRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
 	runner.record(directory, environment, name, arguments...)
-	if strings.Contains(strings.Join(arguments, " "), "logs") {
+	joined := strings.Join(arguments, " ")
+	if strings.Contains(joined, "logs") {
 		return []byte(runner.logs), nil
 	}
-	return nil, runner.Run(ctx, directory, environment, name, arguments...)
+	if runner.failUp && strings.Contains(joined, "up") && strings.Contains(joined, "contract-api") {
+		return []byte(runner.upOutput), errors.New("container exited before health check")
+	}
+	return nil, nil
 }
 
 // productionMigrateFailureOutputRunner 模拟迁移失败，并让 RunOutput 返回迁移容器输出。
@@ -454,6 +459,34 @@ func TestProductionComposeSubsystemProvisionerSurfacesRuntimeServiceLogsOnFailur
 	}
 	if !strings.Contains(err.Error(), "authorization catalog token returned HTTP 401") {
 		t.Fatalf("provision error does not carry container logs: %v", err)
+	}
+}
+
+func TestProductionComposeSubsystemProvisionerPrefersRuntimeComposeOutputOnFailure(t *testing.T) {
+	t.Parallel()
+	runner := &productionFailureOutputRunner{
+		failUp:   true,
+		upOutput: "customer-notification-delivery-worker: exec: \"./notification-delivery-worker\": stat ./notification-delivery-worker: no such file or directory\nCLIENT_SECRET=browser-secret",
+		logs:     "customer-presale-worker | Started Worker Namespace default",
+	}
+	provisioner, _ := productionProvisionerFixtureWithRunner(t, false, runner)
+	err := provisioner.Provision(context.Background(), productionContractInput("https://platform.example.com"))
+	if err == nil {
+		t.Fatal("provision unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "customer-notification-delivery-worker") || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("provision error does not carry compose failure output: %v", err)
+	}
+	if strings.Contains(err.Error(), "Started Worker") {
+		t.Fatalf("provision error unexpectedly fell back to unrelated service logs: %v", err)
+	}
+	if strings.Contains(err.Error(), "browser-secret") {
+		t.Fatalf("provision error leaked a secret: %v", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call.arguments, " "), "logs") {
+			t.Fatalf("provision unexpectedly collected fallback logs after compose output: %#v", call.arguments)
+		}
 	}
 }
 
