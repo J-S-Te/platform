@@ -40,6 +40,7 @@ customer_worker_services=(
   customer-presale-alert-worker
   customer-presale-assignment-notification-worker
   customer-presale-progress-notification-worker
+  customer-notification-delivery-worker
   customer-presale-worker
 )
 relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
@@ -185,6 +186,7 @@ customer_runtime_ready() {
     MACHINE_TOKEN_ISSUER MACHINE_TOKEN_AUDIENCE MACHINE_TOKEN_PUBLIC_KEY_PATH \
     PLATFORM_BASE_URL PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET \
     PLATFORM_APPLICATION_CODE PLATFORM_ENVIRONMENT_CODE PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET \
+    PLATFORM_NOTIFICATION_CLIENT_ID PLATFORM_NOTIFICATION_CLIENT_SECRET \
     SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do
     require_value "$customer_runtime_file" "$key" || return 1
   done
@@ -429,7 +431,7 @@ if ! wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/rea
 fi
 
 wait_for_workers() {
-  local attempt state service all_running
+  local attempt state service all_running container_id initial_restarts current_restarts health
   for ((attempt=1; attempt<=30; attempt++)); do
     state="$(compose ps --status running --services)"
     all_running=true
@@ -439,11 +441,47 @@ wait_for_workers() {
         *) all_running=false ;;
       esac
     done
-    [[ "$all_running" == true ]] && return 0
+    [[ "$all_running" == true ]] && break
     sleep 2
   done
-  echo "CRM/Portal Worker 运行状态检查超时" >&2
-  return 1
+  [[ "$all_running" == true ]] || {
+    echo "CRM/Portal Worker 运行状态检查超时" >&2
+    return 1
+  }
+
+  # running 只是瞬时状态。记录容器与重启计数并观察一段时间，避免凭据缺失、
+  # 启动即退出或 restart-loop 恰好落在 running 窗口时被误判为发布成功。
+  declare -A worker_containers=()
+  declare -A worker_restarts=()
+  for service in "${customer_worker_services[@]}"; do
+    container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+    [[ -n "$container_id" ]] || { echo "未找到 Worker 容器：$service" >&2; return 1; }
+    worker_containers["$service"]="$container_id"
+    initial_restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
+    [[ "$initial_restarts" =~ ^[0-9]+$ ]] || { echo "无法读取 Worker 重启计数：$service" >&2; return 1; }
+    worker_restarts["$service"]="$initial_restarts"
+  done
+
+  sleep 10
+  for service in "${customer_worker_services[@]}"; do
+    container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+    [[ "$container_id" == "${worker_containers[$service]}" ]] || {
+      echo "Worker 在稳定性观察期间被替换：$service" >&2
+      return 1
+    }
+    [[ "$(docker inspect "$container_id" --format '{{.State.Running}}' 2>/dev/null || true)" == "true" ]] || {
+      echo "Worker 在稳定性观察期间退出：$service" >&2
+      return 1
+    }
+    current_restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
+    [[ "$current_restarts" == "${worker_restarts[$service]}" ]] || {
+      echo "Worker 在稳定性观察期间发生重启：$service（${worker_restarts[$service]} -> $current_restarts）" >&2
+      return 1
+    }
+    health="$(docker inspect "$container_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+    [[ "$health" != "unhealthy" ]] || { echo "Worker 健康检查失败：$service" >&2; return 1; }
+  done
+  echo "CRM Workers 已稳定运行 10 秒且未发生重启"
 }
 
 verify_service_image() {

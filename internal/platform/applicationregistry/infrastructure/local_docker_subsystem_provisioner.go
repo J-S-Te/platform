@@ -385,6 +385,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 	if err := provisioner.updateOIDCRuntimeConfiguration(input, environmentPath); err != nil {
 		return err
 	}
+	if err := provisioner.updateServiceCredentialRuntimeConfiguration(input, environmentPath); err != nil {
+		return err
+	}
 	if strings.TrimSpace(input.PublicURL) != "" {
 		if err := provisioner.updatePublicRuntimeConfiguration(input, environmentPath); err != nil {
 			return err
@@ -414,6 +417,49 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 	// best-effort: failures are logged but do not abort the update response.
 	if err := provisioner.maybeSyncContractCatalogLocked(operationCtx, input); err != nil {
 		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] post-rebuild catalog sync skipped or failed: %v\n", err)
+	}
+	return nil
+}
+
+func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRuntimeConfiguration(input application.SubsystemProvisioningInput, environmentPath string) error {
+	values := map[string]string{}
+	switch input.ApplicationCode {
+	case integratedCustomerApplicationCode:
+		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
+		if !ok {
+			return provisioningError("customer audit publisher credential is unavailable")
+		}
+		expectedAuditClientID := input.ApplicationCode + "-" + input.Environment + "-audit-publisher"
+		if auditCredential.OAuthClient.ClientID != expectedAuditClientID {
+			return provisioningError("customer audit publisher credential does not match the target environment")
+		}
+		notificationCredential, ok := input.ServiceCredential(application.ServiceCredentialNotificationIngest)
+		if !ok {
+			return provisioningError("customer notification publisher credential is unavailable")
+		}
+		expectedNotificationClientID := input.ApplicationCode + "-" + input.Environment + "-notification-publisher"
+		if notificationCredential.OAuthClient.ClientID != expectedNotificationClientID {
+			return provisioningError("customer notification publisher credential does not match the target environment")
+		}
+		values["PLATFORM_APPLICATION_CODE"] = input.ApplicationCode
+		values["PLATFORM_ENVIRONMENT_CODE"] = input.Environment
+		values["PLATFORM_AUDIT_CLIENT_ID"] = auditCredential.OAuthClient.ClientID
+		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
+		values["PLATFORM_NOTIFICATION_CLIENT_ID"] = notificationCredential.OAuthClient.ClientID
+		values["PLATFORM_NOTIFICATION_CLIENT_SECRET"] = notificationCredential.PlaintextSecret
+	case integratedContractApplicationCode:
+		// Normal updates preserve the existing owner-directory credential. Retry
+		// supplies a replacement secret when the previous delivery may have failed.
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
+			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {
+		return provisioningError("write subsystem service credential configuration")
 	}
 	return nil
 }
@@ -625,8 +671,22 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		if !ok {
 			return provisioningError("customer audit publisher credential is unavailable")
 		}
+		expectedAuditClientID := input.ApplicationCode + "-" + input.Environment + "-audit-publisher"
+		if auditCredential.OAuthClient.ClientID != expectedAuditClientID {
+			return provisioningError("customer audit publisher credential does not match the target environment")
+		}
 		values["PLATFORM_AUDIT_CLIENT_ID"] = auditCredential.OAuthClient.ClientID
 		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
+		notificationCredential, ok := input.ServiceCredential(application.ServiceCredentialNotificationIngest)
+		if !ok {
+			return provisioningError("customer notification publisher credential is unavailable")
+		}
+		expectedNotificationClientID := input.ApplicationCode + "-" + input.Environment + "-notification-publisher"
+		if notificationCredential.OAuthClient.ClientID != expectedNotificationClientID {
+			return provisioningError("customer notification publisher credential does not match the target environment")
+		}
+		values["PLATFORM_NOTIFICATION_CLIENT_ID"] = notificationCredential.OAuthClient.ClientID
+		values["PLATFORM_NOTIFICATION_CLIENT_SECRET"] = notificationCredential.PlaintextSecret
 	}
 	if input.ApplicationCode == integratedProjectApplicationCode {
 		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"

@@ -762,6 +762,87 @@ services:
     profiles: ["customer"]
     restart: unless-stopped
 
+  # CRM 站内通知生成链路。各 Worker 复用 customer-api 构建出的 crm-runtime
+  # 镜像和同一份 dev 运行时配置，不在 Compose 中复制或硬编码任何机器密钥。
+  customer-opportunity-alert-worker:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    command: ["./opportunity-alert-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["customer"]
+    restart: unless-stopped
+
+  customer-owner-notification-worker:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      OWNER_NOTIFICATION_WORKER_ID: crm-owner-notification-local-1
+    command: ["./opportunity-owner-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["customer"]
+    restart: unless-stopped
+
+  customer-presale-assignment-notification-worker:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PRESALE_ASSIGNMENT_NOTIFICATION_WORKER_ID: crm-presale-assignment-notification-local-1
+    command: ["./presale-assignment-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["customer"]
+    restart: unless-stopped
+
+  customer-presale-progress-notification-worker:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PRESALE_PROGRESS_NOTIFICATION_WORKER_ID: crm-presale-progress-notification-local-1
+    command: ["./presale-progress-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+    profiles: ["customer"]
+    restart: unless-stopped
+
+  # 把 crm_notifications 投递到基础平台通知中心。notification.ingest 的 Client
+  # ID/Secret 只从 docker/.env.customer.local 注入，由 dev 接入流程生成。
+  customer-notification-delivery-worker:
+    <<: *customer-backend-runtime
+    env_file: *customer-runtime-env
+    environment:
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      PLATFORM_BASE_URL: http://platform-api:8080
+      NOTIFICATION_DELIVERY_WORKER_ID: crm-notification-delivery-local-1
+    command: ["./notification-delivery-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      customer-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    profiles: ["customer"]
+    restart: unless-stopped
+
   # 商机签约事件到合同系统受理箱的常驻投递进程，复用 CRM 后端镜像中的 worker。
   contract-transfer-worker:
     <<: *customer-backend-runtime

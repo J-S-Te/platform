@@ -38,6 +38,13 @@ frontend_public_origin=""
 # sync_crm_authorization_catalog 会从当前镜像读取并导出实际哈希，因此这里
 # 不替代运行时目录校验；它只避免 .env 模板占位符阻断初始化流程。
 local_crm_role_config_hash="sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f"
+customer_notification_worker_services=(
+	customer-opportunity-alert-worker
+	customer-owner-notification-worker
+	customer-presale-assignment-notification-worker
+	customer-presale-progress-notification-worker
+	customer-notification-delivery-worker
+)
 
 log() { printf '[docker-local] %s\n' "$*"; }
 fail() { printf '[docker-local] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -1000,11 +1007,39 @@ validate_local_runtime_target() {
 	fi
 }
 
+# 机器客户端也必须和本地 dev 自然键一致。仅校验 Client ID，不读取、打印或
+# 猜测 Secret；密钥只能由接入控制面写入受限权限的 env 文件。
+validate_local_service_client_target() {
+	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5" expected_suffix="$6"
+	local client_id expected_client_id
+	client_id="$(env_value "$runtime_file" "$client_key")"
+	runtime_value_configured "$client_id" || return 0
+	expected_client_id="${expected_application}-${expected_environment}-${expected_suffix}"
+	[[ "$client_id" == "$expected_client_id" ]] || \
+		fail "${description}本地运行配置错配：${client_key}=${client_id}；当前 Compose 是 ${expected_application}/${expected_environment}，必须使用 ${expected_client_id}。请通过子系统 retry/update 重新下发 dev 凭据，禁止复制 prod Secret"
+}
+
+require_local_service_client_target() {
+	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5" secret_key="$6" expected_suffix="$7"
+	local client_id secret
+	client_id="$(env_value "$runtime_file" "$client_key")"
+	secret="$(env_value "$runtime_file" "$secret_key")"
+	runtime_value_configured "$client_id" && runtime_value_configured "$secret" || \
+		fail "${description}凭据未由接入控制面完整下发；请对 ${expected_application}/${expected_environment} 执行 subsystem-retry，禁止手工复制其他环境密钥"
+	validate_local_service_client_target "$description" "$runtime_file" "$expected_application" "$expected_environment" "$client_key" "$expected_suffix"
+}
+
 validate_all_local_runtime_targets() {
 	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management dev OIDC_CLIENT_ID
 	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_customer_local_service_clients
 	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal dev PORTAL_OIDC_CLIENT_ID
 	validate_local_runtime_target "项目管理" "$project_env_file" project_management dev OIDC_CLIENT_ID
+}
+
+validate_customer_local_service_clients() {
+	require_local_service_client_target "客户与商机管理审计" "$customer_env_file" customer_and_opportunity dev PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET audit-publisher
+	require_local_service_client_target "客户与商机管理通知" "$customer_env_file" customer_and_opportunity dev PLATFORM_NOTIFICATION_CLIENT_ID PLATFORM_NOTIFICATION_CLIENT_SECRET notification-publisher
 }
 
 portal_compensation_configured() {
@@ -1069,6 +1104,23 @@ compose_up_wait() {
         compose_run logs --no-color --tail=200 "$@" >&2 || true
         return 1
     done
+}
+
+start_customer_notification_workers() {
+	local service container_id initial_restarts current_restarts
+	log "启动 CRM 通知生成与平台投递 Workers"
+	compose_run up -d --no-deps "${customer_notification_worker_services[@]}"
+	for service in "${customer_notification_worker_services[@]}"; do
+		container_id="$(compose_run ps -q "$service")"
+		[[ -n "$container_id" ]] || fail "CRM 通知 Worker 未创建：$service"
+		[[ "$(docker inspect "$container_id" --format '{{.State.Running}}')" == "true" ]] || fail "CRM 通知 Worker 未运行：$service"
+		initial_restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}')"
+		sleep 2
+		[[ "$(docker inspect "$container_id" --format '{{.State.Running}}')" == "true" ]] || fail "CRM 通知 Worker 启动后退出：$service"
+		current_restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}')"
+		[[ "$current_restarts" == "$initial_restarts" ]] || fail "CRM 通知 Worker 启动后发生重启：$service（${initial_restarts} -> ${current_restarts}）"
+	done
+	log "CRM 通知 Workers 已稳定运行且未发生重启"
 }
 
 pull_image_with_retry() {
@@ -1416,6 +1468,7 @@ start_stack() {
     compose_up_wait "合同管理后端" contract-api
 	log "启动客户与商机管理后端"
 	compose_up_wait "客户与商机管理后端" customer-api
+	start_customer_notification_workers
 	log "启动售前预警扫描 Worker"
 	compose_run up -d --wait --no-deps customer-presale-alert-worker
 	# 售前申请提交依赖独立 Worker 的新鲜心跳。up 现在默认一并启动本地
@@ -1531,6 +1584,7 @@ refresh_customer_backend() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_customer_local_service_clients
     prepare_go_backend_base_images "客户与商机管理后端"
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
@@ -1544,6 +1598,7 @@ refresh_customer_backend() {
     compose_run run --rm --no-deps customer-migrate
 	log "重建 customer-api 与统一前端网关；另外两个后端和统一登录接入配置保持不变"
 	compose_run up -d --wait --no-deps customer-api customer-presale-alert-worker
+	start_customer_notification_workers
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
 	compose_run ps customer-api customer-mysql

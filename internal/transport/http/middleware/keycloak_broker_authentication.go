@@ -72,18 +72,35 @@ type keycloakJWKSCache struct {
 }
 
 func NewKeycloakBrokerJWTVerifier(issuer string, client *http.Client) (*KeycloakBrokerJWTVerifier, error) {
+	return NewKeycloakBrokerJWTVerifierWithBackchannel(issuer, issuer, client)
+}
+
+// NewKeycloakBrokerJWTVerifierWithBackchannel keeps the browser-visible issuer
+// as the token trust boundary while fetching signing keys from a separately
+// configured container-reachable issuer URL. This is required when the public
+// Keycloak hostname resolves only from the user's browser (for example a
+// localhost port published by Docker).
+func NewKeycloakBrokerJWTVerifierWithBackchannel(issuer, backchannelIssuer string, client *http.Client) (*KeycloakBrokerJWTVerifier, error) {
 	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
-	parsed, err := url.ParseRequestURI(issuer)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if !validKeycloakIssuerURL(issuer) {
 		return nil, errors.New("Keycloak broker issuer must be an absolute URL without credentials, query or fragment")
+	}
+	backchannelIssuer = strings.TrimRight(strings.TrimSpace(backchannelIssuer), "/")
+	if !validKeycloakIssuerURL(backchannelIssuer) {
+		return nil, errors.New("Keycloak broker backchannel issuer must be an absolute URL without credentials, query or fragment")
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
 	return &KeycloakBrokerJWTVerifier{
-		issuer: issuer, jwksURL: issuer + "/protocol/openid-connect/certs", client: client, now: time.Now,
+		issuer: issuer, jwksURL: backchannelIssuer + "/protocol/openid-connect/certs", client: client, now: time.Now,
 		cacheTTL: defaultKeycloakJWKSCacheTTL, maxStale: defaultKeycloakJWKSMaxStale,
 	}, nil
+}
+
+func validKeycloakIssuerURL(value string) bool {
+	parsed, err := url.ParseRequestURI(value)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
 // KeycloakBrokerAuthentication accepts a bearer token only for the dedicated

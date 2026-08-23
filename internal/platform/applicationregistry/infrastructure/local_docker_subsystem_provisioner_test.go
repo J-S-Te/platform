@@ -543,7 +543,10 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		RedirectURI: "http://localhost:8081/customer-opportunity/auth/callback", PublicURL: "http://localhost:8081/customer-opportunity/",
 		PathPrefix: "/customer-opportunity", UpstreamURL: "http://customer-api:8090",
 		CatalogPublisherClientID: "customer_and_opportunity-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
-		ServiceCredentials: []application.SubsystemServiceCredential{{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "audit-secret"}},
+		ServiceCredentials: []application.SubsystemServiceCredential{
+			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "audit-secret"},
+			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "notification-secret"},
+		},
 	}); err != nil {
 		t.Fatalf("provision integrated customer subsystem: %v", err)
 	}
@@ -558,6 +561,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		"OIDC_CLIENT_ID=customer_and_opportunity-dev-web", "OIDC_SESSION_COOKIE_SECURE=false", "OIDC_ROLE_CONFIG_HASH=" + integratedCustomerRoleConfigHash,
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=customer_and_opportunity-dev-catalog-publisher",
 		"PLATFORM_AUDIT_CLIENT_ID=customer_and_opportunity-dev-audit-publisher",
+		"PLATFORM_NOTIFICATION_CLIENT_ID=customer_and_opportunity-dev-notification-publisher",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("shared customer environment missing %q:\n%s", expected, contents)
@@ -578,6 +582,49 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		}
 		if !containsString(call.environment, "CUSTOMER_RUNTIME_ENV_FILE="+filepath.Join(platformRoot, "docker", ".env.customer.local")) {
 			t.Fatalf("compose environment missing customer runtime file: %v", call.environment)
+		}
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditAndNotificationCredentials(t *testing.T) {
+	t.Parallel()
+	root, platformRoot, _, gatewayScript := createIntegratedProvisionerFixture(t, integratedCustomerApplicationCode)
+	environmentPath := filepath.Join(platformRoot, "docker", ".env.customer.local")
+	if err := os.WriteFile(environmentPath, []byte("PLATFORM_AUDIT_CLIENT_ID=customer_and_opportunity-prod-audit-publisher\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root, GatewayScriptPath: gatewayScript,
+		GatewayIncludePath:     filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+		ApplicationCode: integratedCustomerApplicationCode, Environment: "dev",
+		ServiceCredentials: []application.SubsystemServiceCredential{
+			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "new-audit-secret"},
+			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "new-notification-secret"},
+		},
+	}); err != nil {
+		t.Fatalf("update integrated customer subsystem: %v", err)
+	}
+	contents, err := os.ReadFile(environmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"PLATFORM_APPLICATION_CODE=customer_and_opportunity",
+		"PLATFORM_ENVIRONMENT_CODE=dev",
+		"PLATFORM_AUDIT_CLIENT_ID=customer_and_opportunity-dev-audit-publisher",
+		"PLATFORM_AUDIT_CLIENT_SECRET=new-audit-secret",
+		"PLATFORM_NOTIFICATION_CLIENT_ID=customer_and_opportunity-dev-notification-publisher",
+		"PLATFORM_NOTIFICATION_CLIENT_SECRET=new-notification-secret",
+	} {
+		if !strings.Contains(string(contents), expected) {
+			t.Fatalf("updated customer environment missing %q:\n%s", expected, contents)
 		}
 	}
 }

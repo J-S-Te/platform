@@ -158,8 +158,10 @@ func NewRouter(
 	// the console session group: accepting a Keycloak bearer elsewhere would
 	// silently expand the platform authentication surface.
 	if operational.SubsystemOnboarding != nil && cfg.Keycloak.Enabled {
-		issuer := strings.TrimRight(cfg.Keycloak.PublicURL, "/") + "/realms/" + strings.TrimSpace(cfg.Keycloak.Realm)
-		verifier, err := middleware.NewKeycloakBrokerJWTVerifier(issuer, nil)
+		realmPath := "/realms/" + strings.TrimSpace(cfg.Keycloak.Realm)
+		issuer := strings.TrimRight(cfg.Keycloak.PublicURL, "/") + realmPath
+		backchannelIssuer := strings.TrimRight(cfg.Keycloak.AdminURL, "/") + realmPath
+		verifier, err := middleware.NewKeycloakBrokerJWTVerifierWithBackchannel(issuer, backchannelIssuer, nil)
 		if err != nil {
 			panic("invalid Keycloak broker JWT verifier configuration: " + err.Error())
 		}
