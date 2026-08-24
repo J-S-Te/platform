@@ -6,25 +6,49 @@ set -Eeuo pipefail
 
 usage() {
   echo "usage: $0 {frontend|platform|contract|project} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "       $0 data-analysis <dashboard-api@sha256:...> <aggregation-worker@sha256:...> <alert-worker@sha256:...> <production-migrate@sha256:...>" >&2
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
 service="$1"
-image_ref="$2"
+if [[ "$service" == "data-analysis" ]]; then
+  [[ $# -eq 5 ]] || usage
+  data_analysis_dashboard_image="$2"
+  data_analysis_aggregation_image="$3"
+  data_analysis_alert_image="$4"
+  data_analysis_migrate_image="$5"
+  image_ref="$data_analysis_dashboard_image"
+else
+  [[ $# -eq 2 ]] || usage
+  image_ref="$2"
+fi
 case "$service" in
   frontend) image_key=FRONTEND_IMAGE ;;
   platform) image_key=PLATFORM_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
   project) image_key=PROJECT_IMAGE ;;
+  data-analysis)
+    image_key=DATA_ANALYSIS_DASHBOARD_API_IMAGE
+    data_analysis_image_keys=(DATA_ANALYSIS_DASHBOARD_API_IMAGE DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE DATA_ANALYSIS_ALERT_WORKER_IMAGE DATA_ANALYSIS_MIGRATE_IMAGE)
+    data_analysis_image_refs=("$data_analysis_dashboard_image" "$data_analysis_aggregation_image" "$data_analysis_alert_image" "$data_analysis_migrate_image")
+    ;;
   *) usage ;;
 esac
 
 acr_enterprise_or_new_personal='^[a-z0-9.-]+\.cr\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 acr_legacy_personal='^registry(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
-if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal ]]; then
-  echo "拒绝可变或格式错误的镜像引用：$image_ref" >&2
-  exit 2
+if [[ "$service" == "data-analysis" ]]; then
+  for data_analysis_image in "${data_analysis_image_refs[@]}"; do
+    if [[ ! "$data_analysis_image" =~ $acr_enterprise_or_new_personal && ! "$data_analysis_image" =~ $acr_legacy_personal ]]; then
+      echo "拒绝可变或格式错误的数据看板镜像引用：$data_analysis_image" >&2
+      exit 2
+    fi
+  done
+else
+  if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal ]]; then
+    echo "拒绝可变或格式错误的镜像引用：$image_ref" >&2
+    exit 2
+  fi
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -443,6 +467,28 @@ deploy_project() {
   verify_service_image compose project-api "$image_ref" || return 1
 }
 
+deploy_data_analysis() {
+  # data_analysis 由 API、两个常驻 Worker 和一次性迁移镜像组成，四个镜像必须
+  # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
+  compose up -d --wait --wait-timeout 240 data-analysis-mysql || return
+  backup_database data-analysis-mysql dashboard_aggregation || return
+  compose --profile data-analysis-release run --rm data-analysis-migrate || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
+    data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker || return
+  if ! wait_for_health "http://127.0.0.1:$(port_value DATA_ANALYSIS_API_PORT 18086)/data_analysis/readyz"; then
+    echo "---- data-analysis-api 最近日志 ----" >&2
+    compose logs --no-color --tail 120 data-analysis-api >&2 || true
+    return 1
+  fi
+  verify_service_image compose data-analysis-api "${data_analysis_image_refs[0]}" || return 1
+  verify_service_image compose data-analysis-aggregation-worker "${data_analysis_image_refs[1]}" || return 1
+  verify_service_image compose data-analysis-alert-worker "${data_analysis_image_refs[2]}" || return 1
+  docker image inspect "${data_analysis_image_refs[3]}" >/dev/null || {
+    echo "迁移镜像未成功拉取：${data_analysis_image_refs[3]}" >&2
+    return 1
+  }
+}
+
 deploy_frontend() {
   frontend_compose up -d --force-recreate --no-deps --wait --wait-timeout 120 frontend || return
   wait_for_health "http://127.0.0.1:$(port_value FRONTEND_PORT 18082)/"
@@ -461,6 +507,10 @@ rollback_runtime() {
       ;;
     contract) compose up -d --force-recreate --no-deps contract-api ;;
     project) compose up -d --force-recreate --no-deps project-api ;;
+    data-analysis)
+      compose up -d --force-recreate --no-deps \
+        data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker
+      ;;
   esac
 }
 
@@ -475,27 +525,60 @@ ln "$release_file" "$previous_release"
 # 每次发布保留旧版本指针快照，但不复制包含运行密钥的 .env。
 ln "$release_file" "$deploy_dir/backups/releases/${release_id}.env"
 
-awk -F= -v key="$image_key" -v value="$image_ref" '
-  BEGIN { found = 0 }
-  $1 == key {
-    print key "=" value
-    found = 1
-    next
-  }
-  { print }
-  END {
-    if (!found) print key "=" value
-  }
-' "$release_file" >"$next_release"
+if [[ "$service" == "data-analysis" ]]; then
+  awk -F= \
+    -v k1="${data_analysis_image_keys[0]}" -v v1="${data_analysis_image_refs[0]}" \
+    -v k2="${data_analysis_image_keys[1]}" -v v2="${data_analysis_image_refs[1]}" \
+    -v k3="${data_analysis_image_keys[2]}" -v v3="${data_analysis_image_refs[2]}" \
+    -v k4="${data_analysis_image_keys[3]}" -v v4="${data_analysis_image_refs[3]}" '
+      BEGIN { found1 = found2 = found3 = found4 = 0 }
+      $1 == k1 { print k1 "=" v1; found1 = 1; next }
+      $1 == k2 { print k2 "=" v2; found2 = 1; next }
+      $1 == k3 { print k3 "=" v3; found3 = 1; next }
+      $1 == k4 { print k4 "=" v4; found4 = 1; next }
+      { print }
+      END {
+        if (!found1) print k1 "=" v1
+        if (!found2) print k2 "=" v2
+        if (!found3) print k3 "=" v3
+        if (!found4) print k4 "=" v4
+      }
+    ' "$release_file" >"$next_release"
+else
+  awk -F= -v key="$image_key" -v value="$image_ref" '
+    BEGIN { found = 0 }
+    $1 == key {
+      print key "=" value
+      found = 1
+      next
+    }
+    { print }
+    END {
+      if (!found) print key "=" value
+    }
+  ' "$release_file" >"$next_release"
+fi
 mv "$next_release" "$release_file"
 chmod 600 "$release_file"
 
-echo "拉取不可变镜像：$image_ref"
-if ! docker pull "$image_ref"; then
-  mv -f "$previous_release" "$release_file"
-  rm -f "$previous_release"
-  echo "镜像拉取失败，发布配置已恢复" >&2
-  exit 1
+if [[ "$service" == "data-analysis" ]]; then
+  for data_analysis_image in "${data_analysis_image_refs[@]}"; do
+    echo "拉取不可变数据看板镜像：$data_analysis_image"
+    if ! docker pull "$data_analysis_image"; then
+      mv -f "$previous_release" "$release_file"
+      rm -f "$previous_release"
+      echo "镜像拉取失败，发布配置已恢复" >&2
+      exit 1
+    fi
+  done
+else
+  echo "拉取不可变镜像：$image_ref"
+  if ! docker pull "$image_ref"; then
+    mv -f "$previous_release" "$release_file"
+    rm -f "$previous_release"
+    echo "镜像拉取失败，发布配置已恢复" >&2
+    exit 1
+  fi
 fi
 if [[ "$service" == "frontend" ]]; then
   compose_config_ok=false
