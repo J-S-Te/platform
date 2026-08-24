@@ -59,11 +59,14 @@ contract_runtime_file="$deploy_dir/runtime/contract.env"
 contract_runtime_template="$deploy_dir/subsystem-templates/contract.env.example"
 project_runtime_file="$deploy_dir/runtime/project.env"
 project_runtime_template="$deploy_dir/subsystem-templates/project.env.example"
+data_analysis_runtime_file="$deploy_dir/runtime/data-analysis.env"
+data_analysis_runtime_template="$deploy_dir/subsystem-templates/data-analysis.env.example"
 compose_file="$deploy_dir/compose.yaml"
 frontend_compose_file="$deploy_dir/compose.frontend.yaml"
 profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
+export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_runtime_file"
 
 for command_name in docker curl gzip flock awk mktemp install stat df ln; do
   command -v "$command_name" >/dev/null || {
@@ -162,6 +165,7 @@ prepare_runtime_file() {
 case "$service" in
   contract) prepare_runtime_file "$contract_runtime_file" "$contract_runtime_template" "合同服务" ;;
   project) prepare_runtime_file "$project_runtime_file" "$project_runtime_template" "项目管理服务" ;;
+  data-analysis) prepare_runtime_file "$data_analysis_runtime_file" "$data_analysis_runtime_template" "数据看板服务" ;;
 esac
 
 install -d -m 700 "$deploy_dir/runtime"
@@ -232,6 +236,17 @@ project_env_value() {
   ' "$project_runtime_file"
 }
 
+data_analysis_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$data_analysis_runtime_file"
+}
+
 require_project_runtime_value() {
   local key="$1"
   local value
@@ -251,6 +266,29 @@ project_runtime_ready() {
     fi
   done
   [[ "$(project_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]
+}
+
+data_analysis_runtime_ready() {
+  local key value
+  for key in \
+    OIDC_CLIENT_ID \
+    OIDC_CLIENT_SECRET \
+    OIDC_TENANT_ID \
+    OIDC_CODEC_KEY \
+    PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET \
+    PLATFORM_AUDIT_CLIENT_ID \
+    PLATFORM_AUDIT_CLIENT_SECRET \
+    METABASE_EMBEDDING_SECRET; do
+    value="$(data_analysis_env_value "$key")"
+    if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+      return 1
+    fi
+  done
+  [[ "$(data_analysis_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || return 1
+  require_runtime_value DASHBOARD_MYSQL_PASSWORD || return 1
+  require_runtime_value DASHBOARD_MYSQL_ROOT_PASSWORD
 }
 
 require_runtime_value() {
@@ -606,6 +644,12 @@ if [[ "$service" == "project" ]] && ! project_runtime_ready; then
   rm -f "$previous_release"
   echo "项目管理镜像已安全暂存：$image_ref"
   echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 project_management/prod 接入。"
+  exit 0
+fi
+if [[ "$service" == "data-analysis" ]] && ! data_analysis_runtime_ready; then
+  rm -f "$previous_release"
+  echo "数据看板镜像已安全暂存：${data_analysis_image_refs[*]}"
+  echo "运行凭据尚未生成，请完成 data_analysis/prod 接入并补齐 dashboard 数据库凭据。"
   exit 0
 fi
 

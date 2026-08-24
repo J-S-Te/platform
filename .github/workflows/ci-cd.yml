@@ -38,7 +38,8 @@ jobs:
             deploy/production/subsystem-templates/contract.env.example \
             deploy/production/subsystem-templates/customer.env.example \
             deploy/production/subsystem-templates/portal.env.example \
-            deploy/production/subsystem-templates/project.env.example; do
+            deploy/production/subsystem-templates/project.env.example \
+            deploy/production/subsystem-templates/data-analysis.env.example; do
             test -f "$asset" || { echo "missing production deployment asset: $asset" >&2; exit 1; }
           done
           if find deploy/production/subsystems.d -maxdepth 1 -type f \( -name '*-dev.yaml' -o -name '*-dev.yml' \) -print -quit | grep -q .; then
