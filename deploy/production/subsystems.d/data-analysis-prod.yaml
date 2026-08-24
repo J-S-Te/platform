@@ -1,0 +1,64 @@
+version: 1
+default: false
+application:
+  code: data_analysis
+  initial_admin_roles: [dashboard_admin]
+  allowed_service_bindings: []
+  name: 数据看板与统计分析系统
+  description: 经营总览、合同项目分析、预警与指标看板
+  environment: prod
+  path_prefix: /data_analysis
+  upstream_url: http://data-analysis-api:8080
+  client_type: confidential
+runtime:
+  required_infrastructure_keys:
+    - DASHBOARD_MYSQL_PASSWORD
+    - DASHBOARD_MYSQL_ROOT_PASSWORD
+  files:
+    - path: runtime/data-analysis.env
+      template_path: subsystem-templates/data-analysis.env.example
+      compose_environment_key: DATA_ANALYSIS_RUNTIME_ENV_FILE
+      required_existing_keys: []
+      generated_keys: []
+      values:
+        OIDC_IDP_HINT: basic-platform
+        OIDC_SCOPES: openid profile
+        OIDC_SESSION_COOKIE_NAME: data_analysis_session
+        OIDC_AUTHORIZATION_REFRESH_INTERVAL: 1m
+        PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
+        PLATFORM_BASE_URL: http://platform-api:8080
+        PLATFORM_APPLICATION_CODE: data_analysis
+        PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUDIT_REQUIRED: "true"
+        AUDIT_WORKER_ID: data-analysis-dashboard-api
+        METABASE_INTERNAL_URL: http://data-analysis-metabase:3000
+        METABASE_BASE_PATH: /
+      bindings:
+        APP_PATH_PREFIX: path_prefix
+        APP_PUBLIC_ORIGIN: public_origin
+        OIDC_ISSUER: issuer
+        OIDC_CLIENT_ID: client_id
+        OIDC_CLIENT_SECRET: client_secret
+        OIDC_REDIRECT_URI: redirect_uri
+        OIDC_TENANT_ID: tenant_id
+        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
+        PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
+        PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+compose:
+  profiles: [data-analysis-release]
+  dependency_services: [data-analysis-mysql]
+  database:
+    service: data-analysis-mysql
+    name: dashboard_aggregation
+  migrate_service: data-analysis-migrate
+  runtime_services: [data-analysis-api, data-analysis-aggregation-worker, data-analysis-alert-worker]
+  teardown_services: [data-analysis-api, data-analysis-aggregation-worker, data-analysis-alert-worker]
+  release_image_keys:
+    - DATA_ANALYSIS_DASHBOARD_API_IMAGE
+    - DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE
+    - DATA_ANALYSIS_ALERT_WORKER_IMAGE
+    - DATA_ANALYSIS_MIGRATE_IMAGE
