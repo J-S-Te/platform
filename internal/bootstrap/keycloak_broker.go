@@ -7,9 +7,8 @@ import (
 	application "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
-// keycloakBrokerRegistrar keeps the platform OAuth client lifecycle inside the
-// platform control plane. Keycloak receives its secret directly in memory; the
-// secret is never serialized to the browser or an environment file.
+// keycloakBrokerRegistrar 将平台 OAuth 客户端生命周期限制在平台控制面内。
+// Keycloak 只在内存中接收密钥；密钥不会序列化到浏览器或环境文件。
 type keycloakBrokerRegistrar struct {
 	applications *application.ManagementService
 	oauth        *application.OAuthClientManagementService
@@ -53,10 +52,9 @@ func (registrar keycloakBrokerRegistrar) EnsureKeycloakBroker(ctx context.Contex
 	}
 	for _, client := range clients {
 		if client.ClientID == "keycloak-broker" {
-			// Keycloak uses one current secret. Creating an additional active
-			// credential on every worker restart makes token validation walk an
-			// unbounded list of bcrypt hashes and eventually exceed Keycloak's
-			// upstream HTTP timeout. Rotate with zero overlap instead.
+			// Keycloak 只保留一个当前密钥。每次 Worker 重启都新增活跃凭据，会让
+			// Token 校验遍历无界增长的 bcrypt 摘要列表，最终超过 Keycloak 上游
+			// HTTP 超时；因此轮换时不保留重叠有效期。
 			secret, rotateErr := registrar.oauth.RotateOAuthClientSecret(ctx, application.OAuthClientSecretRotateInput{
 				TenantID: tenantID, OAuthClientID: client.ID, OperatorID: "system-keycloak", OverlapSeconds: 0,
 			})

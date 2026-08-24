@@ -1,4 +1,4 @@
-// Package http exposes audit ingestion and read-only console APIs through the standard envelope.
+// Package http 通过统一响应信封提供审计写入和只读控制台接口。
 package http
 
 import (

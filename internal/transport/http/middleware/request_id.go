@@ -1,4 +1,4 @@
-// Package middleware contains transport-level HTTP middleware shared by all modules.
+// Package middleware 提供所有模块共用的传输层 HTTP 中间件。
 package middleware
 
 import (

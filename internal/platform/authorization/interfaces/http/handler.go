@@ -1,4 +1,4 @@
-// Package http exposes authorization management through the platform JSON envelope.
+// Package http 通过平台统一 JSON 响应信封提供授权管理接口。
 package http
 
 import (

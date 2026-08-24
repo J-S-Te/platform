@@ -1,4 +1,4 @@
-// Package infrastructure persists append-only audit events through GORM without AutoMigrate.
+// Package infrastructure 通过 GORM 持久化只追加审计事件，不使用 AutoMigrate。
 package infrastructure
 
 import (

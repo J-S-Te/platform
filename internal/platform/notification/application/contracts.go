@@ -117,7 +117,7 @@ type CreateResult struct {
 // must never be accepted as authority from the event body.
 type IngestInput struct {
 	TenantID, SourceApplication, SourceEnvironment string
-	Event                                           domain.IngestionEvent
+	Event                                          domain.IngestionEvent
 }
 
 // RetryResult reports a bounded retry pass. In-app delivery is a database state transition only;

@@ -12,9 +12,9 @@ import (
 )
 
 type customerRefStub struct {
-	encryptErr error
-	decryptErr error
-	digestErr  error
+	encryptErr  error
+	decryptErr  error
+	digestErr   error
 	digestCalls []string
 }
 

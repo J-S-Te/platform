@@ -1,4 +1,4 @@
-// Package infrastructure provides GORM-backed authorization persistence.
+// Package infrastructure 提供基于 GORM 的授权持久化实现。
 package infrastructure
 
 import "time"

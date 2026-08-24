@@ -1,4 +1,4 @@
-// Package requestctx stores transport-correlated values on request contexts.
+// Package requestctx 在请求上下文中保存与传输层关联的可信值。
 package requestctx
 
 import "context"
@@ -17,37 +17,37 @@ func RequestID(ctx context.Context) string {
 	return value
 }
 
-// WithTraceID stores a trace identifier that has already been validated by a trusted transport
-// middleware. It deliberately does not read an untrusted HTTP header itself.
+// WithTraceID 保存已由可信传输层中间件校验过的追踪号。
+// 函数不会自行读取不可信的 HTTP 请求头。
 func WithTraceID(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, traceIDKey{}, traceID)
 }
 
-// TraceID returns the trusted trace identifier associated with the current request, if one exists.
+// TraceID 返回当前请求关联的可信追踪号；不存在时返回空值。
 func TraceID(ctx context.Context) string {
 	value, _ := ctx.Value(traceIDKey{}).(string)
 	return value
 }
 
-// WithCorrelationID stores a business correlation identifier validated by trusted transport
-// middleware. The value links related operations across independently deployed applications.
+// WithCorrelationID 保存已由可信传输层中间件校验过的业务关联号。
+// 该值用于关联独立部署的多个应用中的相关操作。
 func WithCorrelationID(ctx context.Context, correlationID string) context.Context {
 	return context.WithValue(ctx, correlationIDKey{}, correlationID)
 }
 
-// CorrelationID returns the trusted cross-application business correlation identifier, if any.
+// CorrelationID 返回可信的跨应用业务关联号；不存在时返回空值。
 func CorrelationID(ctx context.Context) string {
 	value, _ := ctx.Value(correlationIDKey{}).(string)
 	return value
 }
 
-// WithClientIP stores a client address resolved by the trusted-proxy middleware. Application
-// handlers must use this value instead of reading forwarding headers themselves.
+// WithClientIP 保存可信代理中间件解析出的客户端地址。
+// 业务处理器必须使用该值，不得自行读取转发请求头。
 func WithClientIP(ctx context.Context, clientIP string) context.Context {
 	return context.WithValue(ctx, clientIPKey{}, clientIP)
 }
 
-// ClientIP returns the transport-validated client address, if one was resolved.
+// ClientIP 返回经过传输层校验的客户端地址；未解析出时返回空值。
 func ClientIP(ctx context.Context) string {
 	value, _ := ctx.Value(clientIPKey{}).(string)
 	return value

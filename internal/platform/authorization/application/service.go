@@ -1,4 +1,4 @@
-// Package application coordinates RBAC management and authorization decisions.
+// Package application 编排 RBAC 管理和授权判定。
 package application
 
 import (
@@ -24,7 +24,7 @@ var (
 	ErrValidation = errors.New("authorization validation failed")
 )
 
-// IdentifierGenerator creates stable public identifiers.
+// IdentifierGenerator 生成稳定的公开标识符。
 type IdentifierGenerator interface {
 	New(time.Time) (string, error)
 }

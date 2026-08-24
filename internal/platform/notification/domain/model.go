@@ -127,20 +127,20 @@ type Message struct {
 // a business-role resolver.
 type IngestionEvent struct {
 	EventID, EventType, NotificationScope, Priority string
-	Title, Content, TargetURL                         string
-	ReferenceType, ReferenceID, IdempotencyKey        string
-	Recipients                                        []string
-	OccurredAt                                        time.Time
-	ExpiresAt                                         *time.Time
+	Title, Content, TargetURL                       string
+	ReferenceType, ReferenceID, IdempotencyKey      string
+	Recipients                                      []string
+	OccurredAt                                      time.Time
+	ExpiresAt                                       *time.Time
 }
 
 // IngestionReceipt is safe for a source system to retain for retry and reconciliation.
 type IngestionReceipt struct {
 	ReceiptID, EventID, MessageID string
-	Status                       IngestionStatus
-	Duplicate                    bool
-	ErrorCode                    string
-	ReceivedAt, ProcessedAt      time.Time
+	Status                        IngestionStatus
+	Duplicate                     bool
+	ErrorCode                     string
+	ReceivedAt, ProcessedAt       time.Time
 }
 
 // Delivery is one recipient's inbox item and delivery retry state.

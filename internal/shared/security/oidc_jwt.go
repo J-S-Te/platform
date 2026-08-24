@@ -100,7 +100,7 @@ func LoadOIDCJWTManager(issuer, privateKeyPath, publicKeyPath string) (*OIDCJWTM
 	}, nil
 }
 
-// Issuer returns the exact issuer claim configured for this manager.
+// Issuer 返回此管理器配置的精确 issuer 声明。
 func (manager *OIDCJWTManager) Issuer() string {
 	if manager == nil {
 		return ""
@@ -116,12 +116,12 @@ func (manager *OIDCJWTManager) KeyID() string {
 	return manager.keyID
 }
 
-// IssueAccessToken signs an OAuth 2.0 access token with token_use=access_token.
+// IssueAccessToken 签发 token_use=access_token 的 OAuth 2.0 访问令牌。
 func (manager *OIDCJWTManager) IssueAccessToken(claims OIDCTokenClaims) (string, error) {
 	return manager.issue(claims, OIDCTokenUseAccessToken)
 }
 
-// IssueIDToken signs an OpenID Connect ID token with token_use=id_token.
+// IssueIDToken 签发 token_use=id_token 的 OpenID Connect 身份令牌。
 func (manager *OIDCJWTManager) IssueIDToken(claims OIDCTokenClaims) (string, error) {
 	return manager.issue(claims, OIDCTokenUseIDToken)
 }

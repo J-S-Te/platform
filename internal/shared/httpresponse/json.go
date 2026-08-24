@@ -1,4 +1,4 @@
-// Package httpresponse writes the platform's standard JSON response envelopes.
+// Package httpresponse 输出基础平台统一的 JSON 响应信封。
 package httpresponse
 
 import (
@@ -9,7 +9,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
 
-// Envelope is the standard successful API response shape.
+// Envelope 是成功 API 响应的标准结构。
 type Envelope struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
@@ -17,7 +17,7 @@ type Envelope struct {
 	Data      any    `json:"data"`
 }
 
-// ErrorEnvelope is the standard failed API response shape.
+// ErrorEnvelope 是失败 API 响应的标准结构。
 type ErrorEnvelope struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
@@ -25,7 +25,7 @@ type ErrorEnvelope struct {
 	Details   any    `json:"details,omitempty"`
 }
 
-// WriteSuccess writes a successful response using the shared envelope contract.
+// WriteSuccess 按统一响应信封契约输出成功响应。
 func WriteSuccess(w http.ResponseWriter, r *http.Request, status int, message string, data any) {
 	writeJSON(w, status, Envelope{
 		Code:      "OK",
@@ -35,8 +35,7 @@ func WriteSuccess(w http.ResponseWriter, r *http.Request, status int, message st
 	})
 }
 
-// WriteError writes a stable error response. The caller should log non-client-safe causes before
-// invoking this function.
+// WriteError 输出稳定的错误响应。调用方应在调用前记录不适合返回给客户端的底层原因。
 func WriteError(w http.ResponseWriter, r *http.Request, status int, apiError httperror.Error) {
 	writeJSON(w, status, ErrorEnvelope{
 		Code:      apiError.Code,

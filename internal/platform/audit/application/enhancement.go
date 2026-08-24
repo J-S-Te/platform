@@ -1,4 +1,4 @@
-// Package application provides controlled audit retention and dead-letter operations.
+// Package application 提供受控的审计保留和死信处理能力。
 package application
 
 import (

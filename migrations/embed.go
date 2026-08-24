@@ -1,4 +1,4 @@
-// Package migrations exposes the versioned MySQL migration files embedded in the binary.
+// Package migrations 提供嵌入二进制文件的版本化 MySQL 迁移文件。
 package migrations
 
 import "embed"
