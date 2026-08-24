@@ -610,7 +610,10 @@ if [[ "$service" == "project" ]] && ! project_runtime_ready; then
 fi
 
 echo "开始发布 $service"
-if "deploy_${service}"; then
+# 服务标识允许使用 data-analysis 这类连字符名称，但 Bash 函数名只能使用
+# 标识符字符；统一转换后再动态调用，避免执行 deploy_data-analysis 这样的外部命令。
+deploy_function="deploy_${service//-/_}"
+if "$deploy_function"; then
   rm -f "$previous_release"
   echo "$service 发布成功：$image_ref"
   exit 0
