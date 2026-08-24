@@ -20,10 +20,10 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if !capabilities.Enabled || capabilities.Mode != "production" || capabilities.DefaultApplicationCode != "contract_management" {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
-	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management", "customer_and_opportunity", "customer_portal", "project_management"}) {
+	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management"}) {
 		t.Fatalf("supported applications = %#v", capabilities.SupportedApplicationCodes)
 	}
-	if len(capabilities.Targets) != 4 {
+	if len(capabilities.Targets) != 5 {
 		t.Fatalf("targets = %#v", capabilities.Targets)
 	}
 
@@ -34,7 +34,7 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if err != nil {
 		t.Fatalf("construct profile registry: %v", err)
 	}
-	for _, target := range []string{"customer_portal", "project_management"} {
+	for _, target := range []string{"customer_portal", "data_analysis", "project_management"} {
 		if _, err := provisioner.target(target, "prod"); err != nil {
 			t.Fatalf("reviewed target %s/prod was not routable: %v", target, err)
 		}
