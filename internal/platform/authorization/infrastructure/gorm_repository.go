@@ -15,7 +15,6 @@ import (
 
 const (
 	platformApplicationCode = "platform"
-
 )
 
 // GORMRepository persists RBAC aggregates in tables owned by SQL migrations. It deliberately does

@@ -1,4 +1,4 @@
-// Package applicationaccess provides application-aware authorization for OAuth/OIDC clients.
+// Package applicationaccess 提供面向应用和 OAuth/OIDC 客户端的访问授权能力。
 //
 // The package deliberately resolves access from the OAuth client registration instead of from a
 // hard-coded subsystem name. This keeps roles and permissions isolated by application.

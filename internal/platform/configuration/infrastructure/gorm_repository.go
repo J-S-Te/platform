@@ -73,6 +73,8 @@ func (releaseItemModel) TableName() string { return "cfg_release_item" }
 // 运行时自动改表会破坏历史版本的可重放性。
 type Repository struct{ database *gorm.DB }
 
+// NewRepository 创建配置仓储。
+// database 不能为空；仓储不负责创建或修改数据库表结构。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("configuration database must not be nil")

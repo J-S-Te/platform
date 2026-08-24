@@ -1,4 +1,4 @@
-// Package httperror defines stable API errors independent of the HTTP transport implementation.
+// Package httperror 定义独立于 HTTP 传输实现的稳定 API 错误。
 package httperror
 
 // Error is a client-safe API error. Cause values belong in structured logs and must not be

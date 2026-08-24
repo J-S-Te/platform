@@ -27,17 +27,17 @@ func (resolver *customerBindingResolverStub) ResolveCustomerBinding(_ context.Co
 
 func newCustomerRefHandler(binding *customerBindingResolverStub, emit bool) *Handler {
 	return &Handler{
-		jwtManager:                    rejectingExternalJWTManager{},
-		accessTokenSubjects:           accessTokenSubjectResolverStub{},
+		jwtManager:          rejectingExternalJWTManager{},
+		accessTokenSubjects: accessTokenSubjectResolverStub{},
 		externalAuthorizationVerifier: externalAuthorizationVerifierStub{claims: ExternalAuthorizationTokenClaims{
 			Subject: "identity-1", IdentityID: "identity-1", TenantID: "tenant-1", SessionID: "session-1",
 			AuthorizedParty: "contract-prod-web", Audience: []string{"contract-prod-web"}, TokenUse: "access_token",
 		}},
 		authorizationContextResolver: &authorizationContextResolverStub{},
-		customerBindingResolver:     binding,
-		emitCustomerRef:             emit,
-		clock:                       authorizationContextClock{},
-		logger:                      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		customerBindingResolver:      binding,
+		emitCustomerRef:              emit,
+		clock:                        authorizationContextClock{},
+		logger:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -69,10 +69,10 @@ func TestAuthorizationContextEmitsCustomerRefWhenEnabled(t *testing.T) {
 
 func TestAuthorizationContextOmitsCustomerRef(t *testing.T) {
 	tests := []struct {
-		name string
-		emit bool
+		name    string
+		emit    bool
 		binding *customerBindingResolverStub
-		calls int
+		calls   int
 	}{
 		{name: "switch disabled", emit: false, binding: &customerBindingResolverStub{ref: "CRM-CUST-1"}, calls: 0},
 		{name: "resolver error", emit: true, binding: &customerBindingResolverStub{err: errors.New("no key")}, calls: 1},

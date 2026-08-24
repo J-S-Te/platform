@@ -1,4 +1,4 @@
-// Package observability provides process-level structured logging helpers.
+// Package observability 提供进程级结构化日志辅助能力。
 package observability
 
 import (

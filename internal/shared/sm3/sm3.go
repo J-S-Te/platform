@@ -1,4 +1,4 @@
-// Package sm3 implements the SM3 cryptographic hash algorithm (GM/T 0004-2012).
+// Package sm3 实现 SM3 密码学哈希算法（GM/T 0004-2012）。
 package sm3
 
 import (

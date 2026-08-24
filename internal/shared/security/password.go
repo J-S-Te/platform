@@ -18,7 +18,7 @@ const argon2idAlgorithm = "argon2id"
 // iam_password_credential 所需的参数元数据；盐不会与摘要混成不可升级的私有格式。
 type Argon2idPasswordHasher struct{}
 
-// Hash derives a password digest using a cryptographically random 16-byte salt.
+// Hash 使用密码学安全的随机 16 字节盐派生密码摘要。
 func (Argon2idPasswordHasher) Hash(password string) ([]byte, []byte, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {

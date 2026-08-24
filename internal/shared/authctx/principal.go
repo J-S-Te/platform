@@ -1,4 +1,4 @@
-// Package authctx stores authenticated principal information in request contexts.
+// Package authctx 在请求上下文中保存已认证的主体信息。
 package authctx
 
 import (
@@ -8,15 +8,15 @@ import (
 
 type principalKey struct{}
 
-// ReferenceName is the compact identity representation returned by the authentication API.
+// ReferenceName 是认证 API 返回的紧凑身份表示。
 type ReferenceName struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Code string `json:"code,omitempty"`
 }
 
-// Principal is the server-verified identity available to protected request handlers.
-// It is populated only by authentication middleware; callers must not construct it from headers.
+// Principal 是受保护请求处理器可以使用的服务端校验身份。
+// 它只能由认证中间件写入，调用方不得根据请求头自行构造。
 type Principal struct {
 	SessionID string `json:"-"`
 	// LoginIP is the verified client IP captured when this browser session was created.
@@ -29,12 +29,12 @@ type Principal struct {
 	PermissionCodes []string        `json:"permission_codes"`
 }
 
-// WithPrincipal attaches an authenticated principal to a request context.
+// WithPrincipal 将已认证主体附加到请求上下文。
 func WithPrincipal(ctx context.Context, principal Principal) context.Context {
 	return context.WithValue(ctx, principalKey{}, principal)
 }
 
-// PrincipalFromContext returns the authenticated principal and whether middleware set one.
+// PrincipalFromContext 返回已认证主体，以及中间件是否写入过主体的标记。
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	principal, ok := ctx.Value(principalKey{}).(Principal)
 	return principal, ok

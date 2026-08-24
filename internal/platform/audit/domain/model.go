@@ -1,4 +1,4 @@
-// Package domain contains audit aggregates that are safe to expose through the audit console.
+// Package domain 定义可安全通过审计控制台展示的审计聚合。
 package domain
 
 import "time"

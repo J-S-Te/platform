@@ -1,4 +1,4 @@
-// Package domain defines the authorization aggregates without infrastructure annotations.
+// Package domain 定义不带基础设施标记的授权聚合。
 package domain
 
 import "time"

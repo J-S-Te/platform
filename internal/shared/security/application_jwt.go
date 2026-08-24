@@ -52,7 +52,7 @@ type ApplicationJWTManager struct {
 	publicKey  ed25519.PublicKey
 }
 
-// LoadApplicationJWTManager loads the configured Ed25519 signing keys for application tokens.
+// LoadApplicationJWTManager 加载应用令牌使用的 Ed25519 签名密钥。
 func LoadApplicationJWTManager(issuer, audience, privateKeyPath, publicKeyPath string) (*ApplicationJWTManager, error) {
 	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(audience) == "" {
 		return nil, errors.New("application JWT issuer and audience must not be empty")
