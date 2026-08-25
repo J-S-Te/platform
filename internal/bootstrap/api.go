@@ -215,6 +215,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	externalIdentityService, err := externalidentityapplication.NewService(externalIdentityRepository, mobileProtector, ulid.Generator{}, externalidentityapplication.SystemClock{},
 		externalidentityapplication.WithPortalApplicationCode(cfg.PortalApplicationCode),
 		externalidentityapplication.WithCustomerRefProtection(customerRefProtector),
+		externalidentityapplication.WithCustomerPortalInitialPassword(cfg.Identity.CustomerPortalInitialPassword),
 	)
 	if err != nil {
 		_ = database.Close(db)

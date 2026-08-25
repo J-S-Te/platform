@@ -93,6 +93,11 @@ func (service *Service) Authorize(ctx context.Context, input AuthorizationInput)
 	if subject.TenantID != client.TenantID || !subject.ExpiresAt.After(now) {
 		return AuthorizationResult{}, ErrInvalidGrant
 	}
+	// 首次登录仍需修改初始密码的账号只能保留平台本地会话，用于完成改密；在改密完成前
+	// 不得向任何下游应用签发授权码，避免客户凭固定初始口令直接进入业务系统。
+	if subject.MustChangePassword {
+		return AuthorizationResult{}, ErrAccessDenied
+	}
 
 	codeID, err := service.ids.New(now)
 	if err != nil {
@@ -255,7 +260,7 @@ func (service *Service) validateGrantSession(ctx context.Context, tenantID, sess
 		return fmt.Errorf("resolve OAuth grant browser session: %w", err)
 	}
 	if subject.TenantID != tenantID || subject.SessionID != sessionID || subject.AccountID != accountID ||
-		subject.UserID != userID || !subject.ExpiresAt.After(now) {
+		subject.UserID != userID || !subject.ExpiresAt.After(now) || subject.MustChangePassword {
 		return ErrInvalidGrant
 	}
 	return nil

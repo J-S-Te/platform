@@ -371,7 +371,15 @@ func TestEnsureRealmCreatesRealmWithAuditEventRetention(t *testing.T) {
 			if err := json.Unmarshal(body, &payload); err != nil {
 				t.Fatalf("decode payload: %v", err)
 			}
-			expected := map[string]any{"realm": "platform", "enabled": true, "registrationAllowed": false, "verifyEmail": false, "eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": float64(keycloakDefaultRealmEventsExpirationSeconds)}
+			expected := map[string]any{
+				"realm": "platform", "enabled": true,
+				"registrationAllowed": false, "verifyEmail": false,
+				"bruteForceProtected": true, "permanentLockout": false,
+				"failureFactor": float64(keycloakRealmMaxLoginFailures), "waitIncrementSeconds": float64(keycloakRealmTemporaryLockSeconds),
+				"maxFailureWaitSeconds": float64(keycloakRealmTemporaryLockSeconds),
+				"ssoSessionIdleTimeout": float64(keycloakRealmSSOIdleTimeoutSeconds),
+				"eventsEnabled":         true, "adminEventsEnabled": true, "eventsExpiration": float64(keycloakDefaultRealmEventsExpirationSeconds),
+			}
 			for key, value := range expected {
 				if !reflect.DeepEqual(payload[key], value) {
 					t.Fatalf("realm payload %q = %#v, want %#v", key, payload[key], value)
@@ -431,6 +439,23 @@ func TestEnsureRealmEnablesEventsAndAdminEvents(t *testing.T) {
 			if got, ok := payload["verifyEmail"].(bool); !ok || got {
 				t.Fatalf("verifyEmail = %#v", payload["verifyEmail"])
 			}
+			if got, ok := payload["bruteForceProtected"].(bool); !ok || !got {
+				t.Fatalf("bruteForceProtected = %#v", payload["bruteForceProtected"])
+			}
+			if got, ok := payload["permanentLockout"].(bool); !ok || got {
+				t.Fatalf("permanentLockout = %#v", payload["permanentLockout"])
+			}
+			for key, want := range map[string]int64{
+				"failureFactor":         keycloakRealmMaxLoginFailures,
+				"waitIncrementSeconds":  keycloakRealmTemporaryLockSeconds,
+				"maxFailureWaitSeconds": keycloakRealmTemporaryLockSeconds,
+				"ssoSessionIdleTimeout": keycloakRealmSSOIdleTimeoutSeconds,
+			} {
+				got, ok := payload[key].(float64)
+				if !ok || int64(got) != want {
+					t.Fatalf("%s = %#v, want %d", key, payload[key], want)
+				}
+			}
 			expiration, ok := payload["eventsExpiration"].(float64)
 			if !ok || int64(expiration) != keycloakDefaultRealmEventsExpirationSeconds {
 				t.Fatalf("eventsExpiration = %#v, want %d", payload["eventsExpiration"], keycloakDefaultRealmEventsExpirationSeconds)
@@ -449,6 +474,38 @@ func TestEnsureRealmEnablesEventsAndAdminEvents(t *testing.T) {
 	}
 	if !gotPutPayload {
 		t.Fatal("realm audit payload was not updated")
+	}
+}
+
+func TestRealmEventSettingsPatchDetectsSecurityDriftAndConverges(t *testing.T) {
+	t.Parallel()
+	converged := map[string]any{
+		"registrationAllowed": false, "verifyEmail": false,
+		"bruteForceProtected": true, "permanentLockout": false,
+		"failureFactor":         float64(keycloakRealmMaxLoginFailures),
+		"waitIncrementSeconds":  float64(keycloakRealmTemporaryLockSeconds),
+		"maxFailureWaitSeconds": float64(keycloakRealmTemporaryLockSeconds),
+		"ssoSessionIdleTimeout": float64(keycloakRealmSSOIdleTimeoutSeconds),
+		"eventsEnabled":         true, "adminEventsEnabled": true,
+		"eventsExpiration": float64(keycloakDefaultRealmEventsExpirationSeconds),
+	}
+	if changed, payload := realmEventSettingsPatch(converged); changed || payload != nil {
+		t.Fatalf("converged Realm changed=%v payload=%#v", changed, payload)
+	}
+
+	for _, key := range []string{"failureFactor", "waitIncrementSeconds", "maxFailureWaitSeconds", "ssoSessionIdleTimeout"} {
+		drifted := make(map[string]any, len(converged))
+		for field, value := range converged {
+			drifted[field] = value
+		}
+		drifted[key] = float64(1)
+		changed, payload := realmEventSettingsPatch(drifted)
+		if !changed {
+			t.Fatalf("security drift in %s was not detected", key)
+		}
+		if payload[key] == drifted[key] {
+			t.Fatalf("security drift in %s was not corrected: %#v", key, payload[key])
+		}
 	}
 }
 

@@ -1,11 +1,48 @@
 package application
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
 )
+
+type ingestionTestRepository struct {
+	Repository
+	accepted    bool
+	receiptArgs []string
+}
+
+func (r *ingestionTestRepository) AcceptIngestion(context.Context, string, string, string, domain.IngestionEvent, string, time.Time) (domain.IngestionReceipt, error) {
+	r.accepted = true
+	return domain.IngestionReceipt{Status: domain.IngestionStatusAccepted}, nil
+}
+
+func (r *ingestionTestRepository) GetIngestionReceipt(_ context.Context, tenantID, sourceApplication, sourceEnvironment, receiptID string) (domain.IngestionReceipt, error) {
+	r.receiptArgs = []string{tenantID, sourceApplication, sourceEnvironment, receiptID}
+	return domain.IngestionReceipt{ReceiptID: receiptID, Status: domain.IngestionStatusCompleted}, nil
+}
+
+type ingestionTestPolicy struct{ enabled bool }
+
+func (p ingestionTestPolicy) InboxEnabled(context.Context, string) (bool, error) {
+	return p.enabled, nil
+}
+
+type ingestionTestResolver struct{ users []string }
+
+func (r ingestionTestResolver) ResolveRecipients(context.Context, string, []domain.RecipientTarget, time.Time) ([]string, error) {
+	return r.users, nil
+}
+
+type ingestionTestIDs struct{}
+
+func (ingestionTestIDs) New(time.Time) (string, error) { return "01H00000000000000000000001", nil }
+
+type ingestionTestClock struct{}
+
+func (ingestionTestClock) Now() time.Time { return time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC) }
 
 func TestValidateIngestInputAcceptsPlatformEvent(t *testing.T) {
 	input := validIngestInput()
@@ -26,6 +63,56 @@ func TestValidateIngestInputRejectsUnsupportedScopeAndOversizedIdempotency(t *te
 	input.Event.IdempotencyKey = "EVENT_WITH_A_VERY_LONG_IDEMPOTENCY_KEY_THAT_CANNOT_BE_STORED_WITH_THE_SOURCE_PREFIX_AND_MUST_BE_REJECTED_SAFELY"
 	if err := validateIngestInput(input); err != ErrValidation {
 		t.Fatalf("composite idempotency error = %v, want validation", err)
+	}
+}
+
+func TestIngestRejectsKnownUndeliverableAudienceBeforeAccepting(t *testing.T) {
+	repository := &ingestionTestRepository{}
+	service, err := NewService(repository, ingestionTestPolicy{enabled: true}, ingestionTestResolver{}, ingestionTestIDs{}, ingestionTestClock{})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	_, err = service.Ingest(context.Background(), validIngestInput())
+	if err != ErrNoRecipients {
+		t.Fatalf("ingest error=%v, want ErrNoRecipients", err)
+	}
+	if repository.accepted {
+		t.Fatal("known-undeliverable event must not be accepted")
+	}
+}
+
+func TestIngestRejectsDisabledInboxBeforeAccepting(t *testing.T) {
+	repository := &ingestionTestRepository{}
+	service, err := NewService(repository, ingestionTestPolicy{enabled: false}, ingestionTestResolver{users: []string{"01H00000000000000000000001"}}, ingestionTestIDs{}, ingestionTestClock{})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	_, err = service.Ingest(context.Background(), validIngestInput())
+	if err != ErrNoRecipients {
+		t.Fatalf("ingest error=%v, want ErrNoRecipients", err)
+	}
+	if repository.accepted {
+		t.Fatal("disabled inbox event must not be accepted")
+	}
+}
+
+func TestGetIngestionReceiptScopesToApplicationAndEnvironment(t *testing.T) {
+	repository := &ingestionTestRepository{}
+	service, err := NewService(repository, ingestionTestPolicy{enabled: true}, ingestionTestResolver{users: []string{"01H00000000000000000000001"}}, ingestionTestIDs{}, ingestionTestClock{})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := service.GetIngestionReceipt(context.Background(), "tenant-a", "customer_and_opportunity", "prod", "01H00000000000000000000001"); err != nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	want := []string{"tenant-a", "customer_and_opportunity", "prod", "01H00000000000000000000001"}
+	if len(repository.receiptArgs) != len(want) {
+		t.Fatalf("receipt args=%v, want=%v", repository.receiptArgs, want)
+	}
+	for i := range want {
+		if repository.receiptArgs[i] != want[i] {
+			t.Fatalf("receipt args=%v, want=%v", repository.receiptArgs, want)
+		}
 	}
 }
 

@@ -61,12 +61,13 @@ type ClientCredential struct {
 // SessionSubject is the local authenticated browser session to which an authorization code is
 // bound. The repository only returns it when tenant, session, account and user remain active.
 type SessionSubject struct {
-	TenantID  string
-	SessionID string
-	AccountID string
-	UserID    string
-	LoginIP   net.IP
-	ExpiresAt time.Time
+	TenantID           string
+	SessionID          string
+	AccountID          string
+	UserID             string
+	LoginIP            net.IP
+	ExpiresAt          time.Time
+	MustChangePassword bool
 }
 
 // AuthorizationCode 是持久化的一次性凭据。CodeHash 固定为高熵随机授权码的 SHA-256 摘要，
