@@ -25,6 +25,7 @@ runtime:
         OIDC_SCOPES: openid profile
         OIDC_SESSION_COOKIE_NAME: data_analysis_session
         OIDC_AUTHORIZATION_REFRESH_INTERVAL: 1m
+        OIDC_ROLE_CONFIG_HASH: sha256:265b9f487ff7ff2f298f9daef323d0e92883bd2086b51f0a57e6ceea3e3b9f1a
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: data_analysis
