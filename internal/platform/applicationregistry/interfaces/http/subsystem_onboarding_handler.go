@@ -1377,14 +1377,9 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	applicationCode := strings.TrimSpace(payload.ApplicationCode)
 	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
 	isRetry := requestedOperation == "RETRY" || strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry")
-	// Update never re-issues the OAuth client secret. It sends identifiers plus optional public
-	// gateway fields; the provisioner only writes the non-secret subset and preserves secrets.
-	//
-	// The catalog-publisher client is not re-issued either. The post-rebuild catalog sync (if
-	// enabled) needs the long-lived publisher credentials to authenticate against the platform.
-	// Those credentials are read from the platform operator's environment, not from the
-	// subsystem's .env.local, so both the API process and the deployment helper can pick them
-	// up without exposing the host filesystem into the API container.
+	// 普通更新不会无条件轮换浏览器 OAuth 密钥；只有认证切换或目录恢复时才会把
+	// 新密钥交给部署 Agent。授权目录发布凭据则例外：它是应用绑定的机器身份，
+	// 每次受控更新都必须重新下发，才能修复旧环境中遗留的占位值或已失效密钥。
 	effectiveIssuerAlias := handler.effectiveIssuerAlias(payload.IssuerAlias)
 	// An explicit /switch request is always a cutover attempt, even if a legacy
 	// browser first updated issuer_alias optimistically.  Otherwise the generic
@@ -1552,6 +1547,12 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	if isRetry {
 		operation = "RETRY"
 	}
+	if requiresCatalogPublisherCredential(applicationCode) && handler.serviceCredentials == nil {
+		// 授权目录发布凭据为只写密钥，缺少凭据管理器时绝不能假装更新成功并让
+		// Agent 启动一个仍使用占位值的容器。
+		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		return
+	}
 	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
 		request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID,
 		applicationCode, environment, principal.User.ID, operation,
@@ -1561,7 +1562,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		return
 	}
 	updateInput.ServiceCredentials = serviceCredentials
-	if handler.serviceCredentials != nil && (applicationCode == "settlement" || applicationCode == "data_analysis") && (operation == "ADOPT" || operation == "RETRY") {
+	if handler.serviceCredentials != nil && requiresCatalogPublisherCredential(applicationCode) {
 		publisher, publisherSecret, publisherErr := handler.ensureCatalogPublisherCredential(
 			request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID, applicationCode, environment, principal.User.ID,
 		)
@@ -1644,6 +1645,18 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		"application_code", applicationCode, "environment", environment,
 		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
 	)
+}
+
+// requiresCatalogPublisherCredential 判断子系统是否会在启动时发布自有授权目录。
+// 该机器凭据是只写数据，部署中断后不能从运行时文件反向恢复，因此每次受控生命周期操作
+// 都重新下发，避免旧环境继续使用占位值或失效密钥。
+func requiresCatalogPublisherCredential(applicationCode string) bool {
+	switch applicationCode {
+	case "settlement", "data_analysis":
+		return true
+	default:
+		return false
+	}
 }
 
 // TeardownSubsystem handles POST /api/v1/subsystem-teardown. Stops containers, removes

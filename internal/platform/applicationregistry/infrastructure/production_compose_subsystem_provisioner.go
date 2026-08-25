@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -302,10 +303,10 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
-// Update 只重用已落盘配置，不尝试从数据库恢复 OAuth 明文或隐式轮换密钥。重试/更新时
-// 仍会把清单中的固定值（values）和缺失的生成密钥写入 runtime 文件，使清单新增的固定
-// 配置（如测试服务器的非 Secure Cookie 开关）无需重新 onboarding 即可生效；绑定项需要
-// 一次性 OAuth 明文，保持只在首次 Provision 写入。
+// Update 只重用已落盘的浏览器 OAuth 配置，不尝试从数据库恢复或隐式轮换它。重试/更新时
+// 仍会把清单中的固定值、非敏感身份绑定和缺失的生成密钥写入 runtime 文件，使清单新增的
+// 配置（如测试服务器的非 Secure Cookie 开关）无需重新 onboarding 即可生效。机器凭据仅在
+// 控制面明确重新下发时覆盖，避免把浏览器密钥暴露给普通更新流程。
 func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
@@ -334,11 +335,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
-// validateRuntimeIntegrationConfiguration checks feature flags whose credentials are
-// intentionally preserved across Update/Retry. Update does not receive one-time OAuth
-// secrets, so starting Compose with an old/incomplete runtime file would only produce a
-// misleading container health-check failure. Fail before touching Docker and identify the
-// exact keys an operator must restore from the secret store.
+// validateRuntimeIntegrationConfiguration 在 Update 写入安全配置后校验全部清单绑定。
+// 常规更新会保留浏览器 OAuth 密钥，但绝不能让 Compose 使用缺失或接入占位值启动；否则
+// 配置问题只会在稍后的健康检查中表现为无法定位的 401/403。
 func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration() error {
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
@@ -347,6 +346,11 @@ func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration()
 			return provisioningError("read production subsystem runtime configuration")
 		}
 		values := parseEnvironmentValues(string(content))
+		for key := range runtimeFile.Bindings {
+			if productionEnvironmentValueMissing(values[key]) || !validEnvironmentValue(values[key]) {
+				return provisioningError("production subsystem runtime configuration is incomplete: " + key + " is missing or still an onboarding placeholder; run the controlled adoption/retry workflow")
+			}
+		}
 		if strings.EqualFold(strings.TrimSpace(values["CONTRACT_VERIFICATION_ENABLED"]), "true") {
 			for _, key := range []string{"CONTRACT_SUMMARY_URL", "CONTRACT_SUMMARY_TOKEN_URL", "CONTRACT_SUMMARY_CLIENT_ID", "CONTRACT_SUMMARY_CLIENT_SECRET"} {
 				if strings.TrimSpace(values[key]) == "" || strings.HasPrefix(values[key], "PENDING_") {
@@ -519,9 +523,9 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 	return append(prefix, arguments...), runnerEnvironment
 }
 
-// writeRuntimeFixedValues writes manifest constants, generated keys and the non-secret public
-// runtime bindings when the management page supplied a changed gateway address. Secret bindings
-// remain untouched because Update/Retry never receives or rotates one-time OAuth credentials.
+// writeRuntimeFixedValues 写入清单固定值、生成密钥和可安全更新的运行时绑定。
+// 应用身份绑定是非敏感控制面数据，每次更新都应对齐，防止手工创建的旧运行文件保留过期
+// application ID；浏览器 OAuth 密钥仅在 AuthenticationRuntimeUpdate 明确携带替换值时覆盖。
 func (target *productionComposeTarget) writeRuntimeFixedValues(input application.SubsystemProvisioningInput) error {
 	type runtimeEnvironmentUpdate struct {
 		path   string
@@ -556,6 +560,12 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 				continue
 			}
 			switch source {
+			case "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
+				value, resolveErr := resolveProductionBinding(input, source)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				values[key] = value
 			case "issuer", "issuer_security_center_url":
 				if input.AuthenticationRuntimeUpdate && strings.TrimSpace(input.Issuer) != "" {
 					value, resolveErr := resolveProductionBinding(input, source)
@@ -939,12 +949,22 @@ func productionGeneratedEnvironmentValues(path string, keys []string) (map[strin
 		if _, err := rand.Read(secret); err != nil {
 			return nil, provisioningError("generate production subsystem runtime secret")
 		}
-		generated[key] = base64.StdEncoding.EncodeToString(secret)
+		// 数据看板的 OIDC 服务以 64 位十六进制文本读取 32 字节 Cookie 编解码密钥；
+		// 其余已支持的生成密钥保持 Base64 兼容格式。
+		if key == "OIDC_CODEC_KEY" {
+			generated[key] = hex.EncodeToString(secret)
+		} else {
+			generated[key] = base64.StdEncoding.EncodeToString(secret)
+		}
 	}
 	return generated, nil
 }
 
 func validProductionGeneratedEnvironmentValue(key, value string) bool {
+	if key == "OIDC_CODEC_KEY" {
+		decoded, err := hex.DecodeString(strings.TrimSpace(value))
+		return err == nil && len(decoded) == 32
+	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
 	if err != nil {
 		return false
