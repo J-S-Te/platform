@@ -201,7 +201,7 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
   - `platform:application-login-target:create`
   - `platform:oauth-client:create`
   - `platform:role-binding:update`
-- 角色管理权限不会自动代表可以授予超级管理员；初始管理员授权仍受平台的受保护角色与可委派权限策略约束。
+- `platform-super-admin` 是租户级控制面角色。授权解析时会对已接入业务应用即时展开为该应用全部活动角色和权限，不写入业务应用的用户绑定，也不受应用的普通账号 `max_effective_roles` 限制。角色目录新增或变更后，超管在下一次授权解析时生效。客户自助门户仍必须具备明确的客户身份映射，平台超管不会被自动伪装成客户联系人。
 
 正式生产使用 `deploy/production/compose.yaml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理服务器 `subsystems.d/*.yaml` 审核清单内的精确应用/环境；当前随包提供合同管理、客户与商机管理、客户自助门户和项目管理四个 `prod` 目标。Agent 会从清单指定的审核模板初始化缺失的 `runtime/*.env`、把权限自动收紧为 `0600`、首次生成声明的业务 base64 密钥，再写入一次性 OIDC、目录发布及用途隔离的服务凭据，最后执行固定备份、迁移和 API 重建。已有合法密钥、子系统新增环境变量和清单外文件都会保留，重试或更新不会轮换。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
 
