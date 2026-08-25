@@ -969,7 +969,7 @@ func TestAdoptSubsystemCreatesManagedLifecycleForUnmanagedEnvironment(t *testing
 	}
 }
 
-func TestRetrySubsystemAdoptsDirectoryOnlyEnvironment(t *testing.T) {
+func TestRetryDataAnalysisFailsClosedWithoutRuntimeCredentialManager(t *testing.T) {
 	t.Parallel()
 	stateStore := &recordingSubsystemDeploymentStateStore{contextErr: application.ErrNotFound}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
@@ -993,16 +993,14 @@ func TestRetrySubsystemAdoptsDirectoryOnlyEnvironment(t *testing.T) {
 
 	handler.UpdateSubsystem(response, request)
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusServiceUnavailable {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if len(stateStore.transitions) != 2 ||
-		stateStore.transitions[0].status != application.SubsystemDeploymentStatusUpdating || stateStore.transitions[0].operation != "RETRY" ||
-		stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "RETRY" {
-		t.Fatalf("retry transitions = %#v, want RETRY UPDATING then READY", stateStore.transitions)
+	if len(stateStore.transitions) != 0 {
+		t.Fatalf("retry transitioned deployment without required credentials: %#v", stateStore.transitions)
 	}
-	if provisioner.input.ApplicationID != "data-analysis-app" || provisioner.input.ApplicationCode != "data_analysis" || provisioner.input.Environment != "prod" {
-		t.Fatalf("retry did not resolve directory-only application context: %#v", provisioner.input)
+	if provisioner.input.ApplicationID != "" {
+		t.Fatalf("retry invoked provisioner without required credentials: %#v", provisioner.input)
 	}
 }
 

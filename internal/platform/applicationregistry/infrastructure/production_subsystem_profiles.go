@@ -396,7 +396,7 @@ func normalizedProductionTemplatePath(value string) string {
 }
 
 func validProductionGeneratedEnvironmentKey(value string) bool {
-	return strings.HasSuffix(value, "_KEY_BASE64") || strings.HasSuffix(value, "_PEPPER_BASE64")
+	return strings.HasSuffix(value, "_KEY_BASE64") || strings.HasSuffix(value, "_PEPPER_BASE64") || value == "OIDC_CODEC_KEY"
 }
 
 func validProductionBindingSource(source string) bool {

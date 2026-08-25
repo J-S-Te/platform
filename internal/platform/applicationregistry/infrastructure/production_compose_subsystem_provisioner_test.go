@@ -183,7 +183,11 @@ func TestProductionComposeSubsystemProvisionerTeardownDoesNotRequireDatabaseCred
 func TestProductionComposeSubsystemProvisionerUpdateWritesManifestFixedValues(t *testing.T) {
 	t.Parallel()
 	provisioner, _, contractPath := productionProvisionerFixture(t)
-	if err := provisioner.Update(context.Background(), productionContractInput("https://platform.example.com")); err != nil {
+	input := productionContractInput("https://platform.example.com")
+	if err := provisioner.Provision(context.Background(), input); err != nil {
+		t.Fatalf("prepare runtime configuration: %v", err)
+	}
+	if err := provisioner.Update(context.Background(), input); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	contents, err := os.ReadFile(contractPath)
@@ -198,15 +202,33 @@ func TestProductionComposeSubsystemProvisionerUpdateWritesManifestFixedValues(t 
 			t.Fatalf("update did not write manifest fixed value %q:\n%s", expected, contents)
 		}
 	}
-	if strings.Contains(string(contents), "OIDC_CLIENT_SECRET=browser-secret") {
-		t.Fatalf("update unexpectedly wrote a binding value:\n%s", contents)
+	if !strings.Contains(string(contents), "OIDC_CLIENT_SECRET=browser-secret") {
+		t.Fatalf("update unexpectedly lost the existing browser credential:\n%s", contents)
+	}
+}
+
+func TestProductionComposeSubsystemProvisionerUpdateRejectsIncompleteRuntimeBeforeDocker(t *testing.T) {
+	t.Parallel()
+	provisioner, runner, _ := productionProvisionerFixture(t)
+	err := provisioner.Update(context.Background(), productionContractInput("https://platform.example.com"))
+	if err == nil || !strings.Contains(err.Error(), "runtime configuration is incomplete") {
+		t.Fatalf("update error = %v, want incomplete runtime configuration", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("update reached Docker with incomplete runtime configuration: %#v", runner.calls)
 	}
 }
 
 func TestProductionComposeSubsystemProvisionerAuthenticationUpdateWritesAndRetainsRollbackCredential(t *testing.T) {
 	t.Parallel()
 	provisioner, _, contractPath := productionProvisionerFixture(t)
-	input := productionContractInput("http://keycloak.example.com/realms/basic-platform")
+	input := productionContractInput("https://platform.example.com")
+	if err := provisioner.Provision(context.Background(), input); err != nil {
+		t.Fatalf("prepare runtime configuration: %v", err)
+	}
+	input.Issuer = "http://keycloak.example.com/realms/basic-platform"
+	input.ClientID = "contract_management-prod-keycloak-web"
+	input.ClientSecret = "keycloak-browser-secret"
 	input.AuthenticationRuntimeUpdate = true
 	if err := provisioner.Update(context.Background(), input); err != nil {
 		t.Fatalf("authentication update: %v", err)
@@ -217,10 +239,10 @@ func TestProductionComposeSubsystemProvisionerAuthenticationUpdateWritesAndRetai
 	}
 	for _, expected := range []string{
 		"OIDC_ISSUER=http://keycloak.example.com/realms/basic-platform",
-		"OIDC_CLIENT_ID=contract_management-prod-web",
-		"OIDC_CLIENT_SECRET=browser-secret",
-		"OIDC_CLIENT_ID_ROLLBACK=PENDING_ONBOARDING",
-		"OIDC_CLIENT_SECRET_ROLLBACK=PENDING_ONBOARDING",
+		"OIDC_CLIENT_ID=contract_management-prod-keycloak-web",
+		"OIDC_CLIENT_SECRET=keycloak-browser-secret",
+		"OIDC_CLIENT_ID_ROLLBACK=contract_management-prod-web",
+		"OIDC_CLIENT_SECRET_ROLLBACK=browser-secret",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("authentication update did not write %q:\n%s", expected, contents)

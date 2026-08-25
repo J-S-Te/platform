@@ -18,8 +18,10 @@ runtime:
     - path: runtime/data-analysis.env
       template_path: subsystem-templates/data-analysis.env.example
       compose_environment_key: DATA_ANALYSIS_RUNTIME_ENV_FILE
-      required_existing_keys: []
-      generated_keys: []
+      # Metabase 的嵌入密钥必须与 Metabase 管理端保持一致，不能由平台临时生成。
+      required_existing_keys: [METABASE_EMBEDDING_SECRET]
+      # 会话编解码密钥仅用于本系统 Cookie；首次接入生成并长期复用。
+      generated_keys: [OIDC_CODEC_KEY]
       values:
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
@@ -42,7 +44,7 @@ runtime:
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri
         OIDC_TENANT_ID: tenant_id
-        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        COOKIE_SECURE: cookie_secure
         PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
