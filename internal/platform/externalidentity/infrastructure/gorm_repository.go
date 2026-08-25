@@ -33,8 +33,8 @@ func NewGORMRepository(database *gorm.DB, audit *auditapplication.Service) (*GOR
 }
 
 type identityModel struct {
-	ID, TenantID, PlatformUserID, AccountNo, Status string
-	EmailDigest, MobileDigest                       []byte
+	ID, TenantID, PlatformUserID, AccountNo, LoginAccountID, Status string
+	EmailDigest, MobileDigest                                       []byte
 }
 
 func (identityModel) TableName() string { return "iam_external_identity" }
@@ -56,7 +56,16 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 		var err error
 		response, err = replayProvision(tx, command)
 		if err == nil {
-			return ensureExternalLoginAccount(tx, command, response.PlatformUserID, response.AccountNo)
+			var migrated bool
+			response.AccountNo, migrated, err = ensureExternalLoginAccount(tx, command, response.PlatformUserID)
+			if err != nil || !migrated {
+				return err
+			}
+			// 老幂等记录中的结果可能仍是 EXT-...。迁移成功后以当前事务读取到的
+			// 手机号账号响应，并单独记录安全审计；不改写历史幂等记录和历史审计。
+			return ingestAudit(ctx, tx, repository.audit, command.EventID, command.Principal, command.OccurredAt,
+				"external_identity.login_name_migrate", response.PlatformUserID, "外部客户存量登录账号已迁移",
+				map[string]any{"login_name_migrated": true})
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -101,6 +110,9 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 			if accountErr != nil {
 				return mapWriteError(accountErr)
 			}
+			if credentialErr := ensureExternalPasswordCredential(tx, command, accountID); credentialErr != nil {
+				return mapWriteError(credentialErr)
+			}
 			identity = identityModel{ID: command.IdentityID, TenantID: command.Principal.TenantID, PlatformUserID: command.PlatformUserID, AccountNo: command.AccountNo, EmailDigest: command.EmailDigest, MobileDigest: command.MobileDigest, Status: domain.IdentityPendingActivation}
 			if err := tx.Table(identityModel{}.TableName()).Create(map[string]any{
 				"id": identity.ID, "tenant_id": identity.TenantID, "platform_user_id": identity.PlatformUserID, "account_no": identity.AccountNo,
@@ -133,44 +145,194 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 				}
 			}
 		}
-		// 这里只预留 HUMAN/LOCAL 登录账号，不创建密码凭据。凭据初始化仍由平台管理员显式完成，
-		// 因而 CRM 和门户永远不接触密码。新身份已在插入时关联账号；该补偿只服务历史或重放身份，
-		// 避免同值 UPDATE 的零受影响行被误判为冲突。
+		loginNameMigrated := false
+		// 新身份已在插入时关联账号；该补偿服务历史身份或预置重放，并在身份、账号
+		// 同时加锁后把旧 EXT-... 登录名原地迁移为本次已校验的联系人手机号。
 		if !loginAccountCreated {
-			if err := ensureExternalLoginAccount(tx, command, identity.PlatformUserID, identity.AccountNo); err != nil {
+			var ensuredAccountNo string
+			ensuredAccountNo, loginNameMigrated, err = ensureExternalLoginAccount(tx, command, identity.PlatformUserID)
+			if err != nil {
 				return err
 			}
+			identity.AccountNo = ensuredAccountNo
 		}
 		response = application.ProvisionResult{PlatformUserID: identity.PlatformUserID, AccountNo: identity.AccountNo}
 		if err := createIdempotency(tx, command.Principal.TenantID, command.Principal.OAuthClientID, "PROVISION", command.IdempotencyKey, command.RequestHash[:], identity.ID, encodeProvision(response), command.OccurredAt); err != nil {
 			return err
 		}
-		return ingestAudit(ctx, tx, repository.audit, command.EventID, command.Principal, command.OccurredAt, "external_identity.provision", identity.PlatformUserID, "外部客户身份已预置，等待平台凭据激活", map[string]any{"account_no": identity.AccountNo, "identity_status": identity.Status})
+		return ingestAudit(ctx, tx, repository.audit, command.EventID, command.Principal, command.OccurredAt, "external_identity.provision", identity.PlatformUserID, "外部客户身份已预置，等待平台凭据激活", map[string]any{"account_no": identity.AccountNo, "identity_status": identity.Status, "login_name_migrated": loginNameMigrated})
 	})
 	return response, err
 }
 
-func ensureExternalLoginAccount(tx *gorm.DB, command application.ProvisionCommand, platformUserID, accountNo string) error {
+type externalLoginAccount struct {
+	ID, UserID, Username, AccountType, AuthSource, Status string
+}
+
+// ensureExternalLoginAccount 锁定外部身份及其已绑定账号，补偿缺失关联，并在满足
+// 严格条件时把存量 EXT-... 登录名原地迁移为联系人手机号。返回最终登录名、是否迁移和错误。
+func ensureExternalLoginAccount(tx *gorm.DB, command application.ProvisionCommand, platformUserID string) (string, bool, error) {
 	var identity identityModel
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("tenant_id = ? AND platform_user_id = ?", command.Principal.TenantID, platformUserID).
 		Take(&identity).Error; err != nil {
-		return err
+		return "", false, err
 	}
-	accountID, err := createExternalLoginAccount(tx, command, platformUserID, accountNo)
+	accountID := identity.LoginAccountID
+	if accountID == "" {
+		// 仅兼容迁移 000071 之前可能遗留的空关联。先按身份原账号创建或复用，
+		// 再以条件更新建立关联；不能直接按新手机号创建第二个客户账号。
+		var err error
+		accountID, err = createExternalLoginAccount(tx, command, platformUserID, identity.AccountNo)
+		if err != nil {
+			return "", false, err
+		}
+		update := tx.Model(&identityModel{}).
+			Where("id = ? AND tenant_id = ? AND login_account_id IS NULL", identity.ID, identity.TenantID).
+			Update("login_account_id", accountID)
+		if update.Error != nil {
+			return "", false, mapWriteError(update.Error)
+		}
+		if update.RowsAffected != 1 {
+			return "", false, application.ErrConflict
+		}
+		identity.LoginAccountID = accountID
+	}
+
+	account, err := lockExternalLoginAccount(tx, identity.TenantID, accountID)
 	if err != nil {
-		return err
+		return "", false, err
 	}
-	update := tx.Model(&identityModel{}).
-		Where("id = ? AND tenant_id = ? AND (login_account_id IS NULL OR login_account_id = ?)", identity.ID, identity.TenantID, accountID).
-		Update("login_account_id", accountID)
-	if update.Error != nil {
-		return mapWriteError(update.Error)
+	if account.UserID != platformUserID || account.AccountType != "HUMAN" || account.AuthSource != "LOCAL" || account.Status != activeStatus {
+		return "", false, application.ErrConflict
 	}
-	if update.RowsAffected != 1 {
+
+	migrated, err := migrateLegacyExternalLoginName(tx, command, &identity, account)
+	if err != nil {
+		return "", false, err
+	}
+	if err := ensureExternalPasswordCredential(tx, command, accountID); err != nil {
+		return "", false, err
+	}
+	return identity.AccountNo, migrated, nil
+}
+
+func lockExternalLoginAccount(tx *gorm.DB, tenantID, accountID string) (externalLoginAccount, error) {
+	var account externalLoginAccount
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("iam_account").
+		Select("id, user_id, username, account_type, auth_source, status").
+		Where("tenant_id = ? AND id = ?", tenantID, accountID).Take(&account).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return account, application.ErrConflict
+	}
+	return account, err
+}
+
+// migrateLegacyExternalLoginName 只迁移仍同时使用同一 EXT-... 名称的身份和关联账号。
+// 已经改名、跨账号占用、手机号占用或身份/账号漂移均失败关闭；密码凭据不在更新范围内。
+func migrateLegacyExternalLoginName(tx *gorm.DB, command application.ProvisionCommand, identity *identityModel, account externalLoginAccount) (bool, error) {
+	desired, migrate, err := decideLegacyExternalLoginNameMigration(command, *identity, account)
+	if err != nil || !migrate {
+		return false, err
+	}
+	if err := ensureExternalLoginNameAvailable(tx, identity.TenantID, identity.ID, account.ID, desired); err != nil {
+		return false, err
+	}
+
+	accountUpdate := tx.Table("iam_account").
+		Where("tenant_id = ? AND id = ? AND user_id = ? AND username = ?", identity.TenantID, account.ID, identity.PlatformUserID, account.Username).
+		Updates(map[string]any{"username": desired, "updated_at": command.OccurredAt, "updated_by": command.Principal.OAuthClientID, "version": gorm.Expr("version + 1")})
+	if accountUpdate.Error != nil {
+		return false, mapWriteError(accountUpdate.Error)
+	}
+	if accountUpdate.RowsAffected != 1 {
+		return false, application.ErrConflict
+	}
+	identityUpdate := tx.Model(&identityModel{}).
+		Where("tenant_id = ? AND id = ? AND login_account_id = ? AND account_no = ?", identity.TenantID, identity.ID, account.ID, identity.AccountNo).
+		Updates(map[string]any{"account_no": desired, "updated_at": command.OccurredAt, "updated_by": command.Principal.OAuthClientID})
+	if identityUpdate.Error != nil {
+		return false, mapWriteError(identityUpdate.Error)
+	}
+	if identityUpdate.RowsAffected != 1 {
+		return false, application.ErrConflict
+	}
+	identity.AccountNo = desired
+	return true, nil
+}
+
+// decideLegacyExternalLoginNameMigration 集中验证迁移前状态，便于在执行任何 UPDATE 前
+// 拒绝非存量账号、身份与账号名称漂移及缺少已验证手机号的请求。
+func decideLegacyExternalLoginNameMigration(command application.ProvisionCommand, identity identityModel, account externalLoginAccount) (string, bool, error) {
+	desired := strings.TrimSpace(command.AccountNo)
+	if len(command.MobileDigest) == 0 || desired == "" || isLegacyExternalLoginName(desired) {
+		if account.Username != identity.AccountNo {
+			return "", false, application.ErrConflict
+		}
+		return identity.AccountNo, false, nil
+	}
+	if identity.AccountNo == desired {
+		if account.Username != desired {
+			return "", false, application.ErrConflict
+		}
+		return desired, false, nil
+	}
+	if !isLegacyExternalLoginName(identity.AccountNo) || account.Username != identity.AccountNo || !isLegacyExternalLoginName(account.Username) {
+		return "", false, application.ErrConflict
+	}
+	return desired, true, nil
+}
+
+func ensureExternalLoginNameAvailable(tx *gorm.DB, tenantID, identityID, accountID, desired string) error {
+	var conflictingAccount struct{ ID string }
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("iam_account").Select("id").
+		Where("tenant_id = ? AND username = ? AND id <> ?", tenantID, desired, accountID).Take(&conflictingAccount).Error
+	if err == nil {
 		return application.ErrConflict
 	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	var conflictingIdentity struct{ ID string }
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table(identityModel{}.TableName()).Select("id").
+		Where("tenant_id = ? AND account_no = ? AND id <> ?", tenantID, desired, identityID).Take(&conflictingIdentity).Error
+	if err == nil {
+		return application.ErrConflict
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
 	return nil
+}
+
+func isLegacyExternalLoginName(value string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(value)), "EXT-")
+}
+
+// ensureExternalPasswordCredential 仅在显式启用客户初始口令且账号还没有凭据时创建。
+// 预置重放绝不覆盖已存在凭据，避免把客户修改后的密码重置为默认口令。
+func ensureExternalPasswordCredential(tx *gorm.DB, command application.ProvisionCommand, accountID string) error {
+	if command.CredentialID == "" {
+		return nil
+	}
+	if len(command.PasswordDigest) == 0 || len(command.PasswordParams) == 0 || accountID == "" {
+		return application.ErrConflict
+	}
+	var existing struct{ ID string }
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("iam_password_credential").
+		Select("id").Where("account_id = ?", accountID).Take(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return tx.Table("iam_password_credential").Create(map[string]any{
+		"id": command.CredentialID, "account_id": accountID,
+		"password_hash": command.PasswordDigest, "hash_algorithm": "argon2id", "algorithm_params": command.PasswordParams,
+		"must_change": true, "failed_attempts": 0, "status": activeStatus,
+		"password_changed_at": command.OccurredAt, "created_at": command.OccurredAt, "updated_at": command.OccurredAt,
+	}).Error
 }
 
 // createExternalLoginAccount 为外部客户预留唯一 ACTIVE HUMAN/LOCAL 账号，但不创建密码凭据。

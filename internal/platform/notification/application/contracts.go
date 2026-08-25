@@ -157,7 +157,7 @@ type Repository interface {
 	MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 
 	AcceptIngestion(ctx context.Context, tenantID, sourceApplication, sourceEnvironment string, event domain.IngestionEvent, receiptID string, now time.Time) (domain.IngestionReceipt, error)
-	GetIngestionReceipt(ctx context.Context, tenantID, receiptID string) (domain.IngestionReceipt, error)
+	GetIngestionReceipt(ctx context.Context, tenantID, sourceApplication, sourceEnvironment, receiptID string) (domain.IngestionReceipt, error)
 	ClaimIngestionEvents(ctx context.Context, limit int, leaseUntil, now time.Time) ([]domain.IngestionReceipt, error)
 	LoadIngestionEvent(ctx context.Context, receiptID string) (string, string, string, domain.IngestionEvent, error)
 	CompleteIngestion(ctx context.Context, receiptID, messageID string, now time.Time) error

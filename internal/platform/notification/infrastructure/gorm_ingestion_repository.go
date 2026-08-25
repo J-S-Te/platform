@@ -45,9 +45,9 @@ func (repository *Repository) AcceptIngestion(ctx context.Context, tenantID, sou
 	return ingestionToReceipt(existing, true), nil
 }
 
-func (repository *Repository) GetIngestionReceipt(ctx context.Context, tenantID, receiptID string) (domain.IngestionReceipt, error) {
+func (repository *Repository) GetIngestionReceipt(ctx context.Context, tenantID, sourceApplication, sourceEnvironment, receiptID string) (domain.IngestionReceipt, error) {
 	var row ingestionModel
-	if err := repository.database.WithContext(ctx).Where("id = ? AND tenant_id = ?", receiptID, tenantID).Take(&row).Error; err != nil {
+	if err := repository.database.WithContext(ctx).Where("id = ? AND tenant_id = ? AND source_application = ? AND source_environment = ?", receiptID, tenantID, sourceApplication, sourceEnvironment).Take(&row).Error; err != nil {
 		return domain.IngestionReceipt{}, mapError(err)
 	}
 	return ingestionToReceipt(row, false), nil

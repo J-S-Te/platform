@@ -225,6 +225,8 @@ func writeAuthorizeServiceError(w http.ResponseWriter, logger interface{ Error(s
 		writeAuthorizationError(w, http.StatusBadRequest, "invalid_scope")
 	case errors.Is(err, application.ErrInvalidClient), errors.Is(err, application.ErrUnauthorizedClient):
 		writeAuthorizationError(w, http.StatusBadRequest, "unauthorized_client")
+	case errors.Is(err, application.ErrAccessDenied):
+		writeAuthorizationError(w, http.StatusForbidden, "access_denied")
 	case errors.Is(err, application.ErrInvalidGrant):
 		// 授权未成功时回调地址尚未被证明安全，因此错误只能留在平台本域，不能重定向给请求方。
 		writeAuthorizationError(w, http.StatusBadRequest, "invalid_request")

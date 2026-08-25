@@ -74,7 +74,7 @@ const (
 	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
 	// deployment contract to be updated in the same reviewed release.
 	integratedCustomerRoleConfigHash = "sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f"
-	integratedPortalRoleConfigHash   = "sha256:f67121b52d6d850e99d1c4520d661fb85e26512c7ee50cd83182a8dc39b368d4"
+	integratedPortalRoleConfigHash   = "sha256:95f1d1283d3a251e9b9167aa291c19bf14d265105ccedfc661aca096666a37b8"
 )
 
 // LocalDockerSubsystemProvisionerConfig controls the trusted local Docker automation used by the

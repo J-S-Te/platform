@@ -24,6 +24,9 @@ type PersonnelChangeRequest struct {
 type PersonnelChangeCreateInput struct {
 	TenantID, OperatorID, UserID, SourceMembershipID, TargetOrgUnitID, TargetPositionID, ChangeType, Reason, ApprovalReference string
 	EffectiveAt                                                                                                                time.Time
+	// ApprovalRequired selects the explicit approval lifecycle. It defaults to false
+	// for backwards compatibility with existing administrator-driven scheduling callers.
+	ApprovalRequired bool
 }
 type PersonnelChangeTransitionInput struct{ TenantID, OperatorID, ID, ToStatus, ApprovalReference string }
 type PermissionRole struct {
@@ -74,8 +77,9 @@ func NewPersonnelChangeService(repo PersonnelChangeRepository, ids IDGenerator, 
 	return &PersonnelChangeService{repo: repo, ids: ids, clock: clock, handover: handover}, nil
 }
 func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeCreateInput) (PersonnelChangeRequest, error) {
-	// 人员异动由具备管理权限的管理员直接配置，不再创建待审批草稿；
-	// 进入待生效后由 worker 按 effective_at 执行，避免把管理员配置误导成审批流程。
+	// Existing callers retain the administrator-driven scheduling behavior unless
+	// they explicitly opt into the approval lifecycle. This keeps old integrations
+	// compatible while making the UI approval path start from a real draft.
 	in.ChangeType = strings.ToUpper(strings.TrimSpace(in.ChangeType))
 	in.Reason = strings.TrimSpace(in.Reason)
 	if in.TenantID == "" || in.OperatorID == "" || in.UserID == "" || in.Reason == "" || in.EffectiveAt.IsZero() {
@@ -92,6 +96,9 @@ func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeC
 		return PersonnelChangeRequest{}, fmt.Errorf("generate personnel change id: %w", err)
 	}
 	status := domain.PersonnelChangeScheduled
+	if in.ApprovalRequired {
+		status = domain.PersonnelChangeDraft
+	}
 	return s.repo.Create(ctx, PersonnelChangeRequest{ID: id, TenantID: in.TenantID, UserID: in.UserID, SourceMembershipID: in.SourceMembershipID, TargetOrgUnitID: in.TargetOrgUnitID, TargetPositionID: in.TargetPositionID, ChangeType: in.ChangeType, Status: status, Reason: in.Reason, ApprovalReference: in.ApprovalReference, SubmittedBy: in.OperatorID, EffectiveAt: &in.EffectiveAt, Version: 1, CreatedAt: now, UpdatedAt: now})
 }
 func (s *PersonnelChangeService) List(ctx context.Context, tenant, status, changeType, keyword string) ([]PersonnelChangeRequest, error) {
@@ -139,7 +146,9 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 		}
 		result, execErr := s.repo.Execute(ctx, cur, in.OperatorID, s.clock.Now().UTC())
 		if execErr == nil && s.notifier != nil {
-			s.notify(ctx, cur, in.OperatorID)
+			// Notify only after the repository has durably transitioned the request;
+			// retries or failed executions must not announce a false completion.
+			s.notify(ctx, result, in.OperatorID)
 		}
 		return result, execErr
 	}

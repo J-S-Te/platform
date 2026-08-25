@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,19 +20,42 @@ func (service *Service) Ingest(ctx context.Context, input IngestInput) (domain.I
 	if err := validateIngestInput(input); err != nil {
 		return domain.IngestionReceipt{}, err
 	}
+	// Validate the delivery audience before acknowledging the event. ACCEPTED is
+	// intentionally a durable-receipt status, but a known-disabled inbox or an
+	// audience with no active users must not be accepted and later turned into a
+	// DEAD event that the source system cannot observe.
 	now := service.clock.Now().UTC().Truncate(time.Millisecond)
+	enabled, err := service.policy.InboxEnabled(ctx, strings.TrimSpace(input.TenantID))
+	if err != nil {
+		return domain.IngestionReceipt{}, fmt.Errorf("read notification inbox policy: %w", err)
+	}
+	if !enabled {
+		return domain.IngestionReceipt{}, ErrNoRecipients
+	}
+	event := normalizeIngestionEvent(input.Event)
+	targets := make([]domain.RecipientTarget, 0, len(event.Recipients))
+	for _, userID := range event.Recipients {
+		targets = append(targets, domain.RecipientTarget{Type: domain.RecipientTypeUser, ID: userID})
+	}
+	users, err := service.resolver.ResolveRecipients(ctx, strings.TrimSpace(input.TenantID), targets, now)
+	if err != nil {
+		return domain.IngestionReceipt{}, fmt.Errorf("resolve notification recipients: %w", err)
+	}
+	if len(uniqueNonEmpty(users)) == 0 {
+		return domain.IngestionReceipt{}, ErrNoRecipients
+	}
 	receiptID, err := service.ids.New(now)
 	if err != nil {
 		return domain.IngestionReceipt{}, err
 	}
-	return service.repository.AcceptIngestion(ctx, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.SourceApplication), strings.TrimSpace(input.SourceEnvironment), normalizeIngestionEvent(input.Event), receiptID, now)
+	return service.repository.AcceptIngestion(ctx, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.SourceApplication), strings.TrimSpace(input.SourceEnvironment), event, receiptID, now)
 }
 
-func (service *Service) GetIngestionReceipt(ctx context.Context, tenantID, receiptID string) (domain.IngestionReceipt, error) {
-	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(receiptID) == "" {
+func (service *Service) GetIngestionReceipt(ctx context.Context, tenantID, sourceApplication, sourceEnvironment, receiptID string) (domain.IngestionReceipt, error) {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(sourceApplication) == "" || strings.TrimSpace(sourceEnvironment) == "" || strings.TrimSpace(receiptID) == "" {
 		return domain.IngestionReceipt{}, ErrValidation
 	}
-	return service.repository.GetIngestionReceipt(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(receiptID))
+	return service.repository.GetIngestionReceipt(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(sourceApplication), strings.TrimSpace(sourceEnvironment), strings.TrimSpace(receiptID))
 }
 
 // ProcessIngestionBatch projects accepted events to the user inbox. Callers supply the worker

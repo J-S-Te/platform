@@ -68,10 +68,10 @@ func principal() appctx.Principal {
 	return appctx.Principal{OAuthClientID: "oauth-1", ClientID: "crm-external", TenantID: "tenant-a", ApplicationID: "crm-app", ApplicationCode: "crm", EnvironmentID: "env-1", EnvironmentCode: "prod", Scopes: map[string]struct{}{"external_user.provision": {}}}
 }
 
-func TestProvisionNormalizesAndNeverCreatesCredentialInput(t *testing.T) {
+func TestProvisionUsesNormalizedMobileAsExternalCustomerLoginName(t *testing.T) {
 	now := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
 	repository := &serviceRepositoryStub{}
-	service, err := NewService(repository, mobileStub{}, &idsStub{values: []string{"identity-1", "user-1", "event-1", "account-1"}}, clockStub{now: now})
+	service, err := NewService(repository, mobileStub{}, &idsStub{values: []string{"identity-1", "user-1", "event-1", "account-1", "credential-1"}}, clockStub{now: now}, WithCustomerPortalInitialPassword("Valid!234"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,11 +79,40 @@ func TestProvisionNormalizesAndNeverCreatesCredentialInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PlatformUserID != "user-1" || repository.provision.AccountID != "account-1" || repository.provision.DisplayName != "Customer User" || *repository.provision.Email != "user@example.com" || string(repository.provision.MobileCipher) != "cipher:+8613800000000" {
+	if result.PlatformUserID != "user-1" || repository.provision.AccountID != "account-1" || repository.provision.AccountNo != "+8613800000000" || repository.provision.DisplayName != "Customer User" || *repository.provision.Email != "user@example.com" || string(repository.provision.MobileCipher) != "cipher:+8613800000000" {
 		t.Fatalf("result=%+v command=%+v", result, repository.provision)
 	}
 	if repository.provision.IdempotencyKey != "key-1" {
 		t.Fatalf("idempotency key=%q", repository.provision.IdempotencyKey)
+	}
+}
+
+func TestProvisionDerivesInitialCredentialWithoutKeepingPlaintext(t *testing.T) {
+	now := time.Date(2026, 8, 25, 8, 0, 0, 0, time.UTC)
+	repository := &serviceRepositoryStub{}
+	service, err := NewService(repository, mobileStub{}, &idsStub{values: []string{"identity-1", "user-1", "event-1", "account-1", "credential-1"}}, clockStub{now: now}, WithCustomerPortalInitialPassword("Valid!234"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Provision(context.Background(), principal(), RequestProof{IdempotencyKey: "key-1", Timestamp: now, Nonce: "nonce-1"}, ProvisionInput{DisplayName: "Customer User", Mobile: "13800138000"}); err != nil {
+		t.Fatal(err)
+	}
+	if repository.provision.CredentialID != "credential-1" || len(repository.provision.PasswordDigest) == 0 || len(repository.provision.PasswordParams) == 0 {
+		t.Fatalf("credential input = %#v", repository.provision)
+	}
+	if string(repository.provision.PasswordDigest) == "Valid!234" || string(repository.provision.PasswordParams) == "Valid!234" {
+		t.Fatal("plaintext initial password leaked into provision command")
+	}
+}
+
+func TestProvisionRejectsEmailOnlyPortalIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 25, 8, 0, 0, 0, time.UTC)
+	service, err := NewService(&serviceRepositoryStub{}, mobileStub{}, &idsStub{}, clockStub{now: now}, WithCustomerPortalInitialPassword("Valid!234"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Provision(context.Background(), principal(), RequestProof{IdempotencyKey: "key-1", Timestamp: now, Nonce: "nonce-1"}, ProvisionInput{DisplayName: "Customer User", Email: "user@example.test"}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want validation error", err)
 	}
 }
 

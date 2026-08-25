@@ -1105,7 +1105,7 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 			return Access{}, checkErr
 		}
 		if isSuperAdmin {
-			roles, err = s.expandSuperAdminApplicationRoles(ctx, tenantID, applicationID, roles)
+			roles, err = s.expandSuperAdminApplicationRoles(ctx, tenantID, applicationID, applicationCode, roles)
 			if err != nil {
 				return Access{}, err
 			}
@@ -1509,7 +1509,7 @@ func (s *Service) isPlatformSuperAdmin(ctx context.Context, tenantID, userID str
 // every active application role. It intentionally does not persist bindings: a
 // catalog update becomes effective immediately, while ordinary user assignments
 // remain auditable and unchanged.
-func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID, applicationID string, existing []assignedRoleRow) ([]assignedRoleRow, error) {
+func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID, applicationID, applicationCode string, existing []assignedRoleRow) ([]assignedRoleRow, error) {
 	var rows []assignedRoleRow
 	err := s.db.WithContext(ctx).Table("authz_role").
 		Select("id AS role_id, code, name").
@@ -1518,6 +1518,17 @@ func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID
 	if err != nil {
 		return nil, fmt.Errorf("load all application roles for platform super administrator: %w", err)
 	}
+	// 先移除历史上可能误授给内部超管的客户角色。该记录仍保留在数据库供审计和
+	// 后续清理，但不能参与当前授权投影，否则会与 portal_super_admin 形成双角色会话。
+	filteredExisting := existing[:0]
+	for _, row := range existing {
+		if applicationCode == "customer_portal" && row.Code == "portal_customer" {
+			continue
+		}
+		filteredExisting = append(filteredExisting, row)
+	}
+	existing = filteredExisting
+
 	seen := make(map[string]struct{}, len(existing)+len(rows))
 	for _, row := range existing {
 		if row.RoleID != "" {
@@ -1525,6 +1536,11 @@ func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID
 		}
 	}
 	for index := range rows {
+		// 客户门户同时存在外部客户与内部运营两类身份。平台超管继承门户权限时
+		// 只能使用内部超级管理员角色，不能被投影成任意客户身份。
+		if applicationCode == "customer_portal" && rows[index].Code == "portal_customer" {
+			continue
+		}
 		if _, ok := seen[rows[index].RoleID]; ok {
 			continue
 		}

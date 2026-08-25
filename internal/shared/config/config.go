@@ -93,6 +93,9 @@ type AuthConfig struct {
 type IdentityConfig struct {
 	MobileEncryptionKey string
 	BootstrapToken      string
+	// CustomerPortalInitialPassword 仅用于外部客户首次预置的临时口令；运行时从受控环境
+	// 注入，绝不提供源码默认值、HTTP 响应或日志输出。为空时保持旧版无凭据预置行为。
+	CustomerPortalInitialPassword string
 	// CustomerRefEncryptionKey / CustomerRefDigestKey 保护外部客户绑定：AES-256-GCM 密文
 	// 与 HMAC-SM3 摘要。未配置时绑定写入与解析失败关闭，绝不明文降级。
 	CustomerRefEncryptionKey string
@@ -258,10 +261,11 @@ func Load() (Config, error) {
 			Params:   value("MYSQL_PARAMS", "charset=utf8mb4&parseTime=true&loc=UTC"),
 		},
 		Identity: IdentityConfig{
-			MobileEncryptionKey:      value("IAM_MOBILE_ENCRYPTION_KEY", ""),
-			BootstrapToken:           strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
-			CustomerRefEncryptionKey: value("IAM_CUSTOMER_REF_ENCRYPTION_KEY", ""),
-			CustomerRefDigestKey:     value("IAM_CUSTOMER_REF_DIGEST_KEY", ""),
+			MobileEncryptionKey:           value("IAM_MOBILE_ENCRYPTION_KEY", ""),
+			BootstrapToken:                strings.TrimSpace(value("IAM_BOOTSTRAP_TOKEN", "")),
+			CustomerPortalInitialPassword: value("CUSTOMER_PORTAL_INITIAL_PASSWORD", ""),
+			CustomerRefEncryptionKey:      value("IAM_CUSTOMER_REF_ENCRYPTION_KEY", ""),
+			CustomerRefDigestKey:          value("IAM_CUSTOMER_REF_DIGEST_KEY", ""),
 		},
 		Auth: AuthConfig{
 			PublicBaseURL:                            publicBaseURL,

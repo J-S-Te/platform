@@ -75,7 +75,12 @@ type keycloakManagedProtocolMapper struct {
 	Config         map[string]string
 }
 
-const keycloakDefaultRealmEventsExpirationSeconds = int64(30 * 24 * 60 * 60)
+const (
+	keycloakDefaultRealmEventsExpirationSeconds = int64(30 * 24 * 60 * 60)
+	keycloakRealmMaxLoginFailures               = int64(5)
+	keycloakRealmTemporaryLockSeconds           = int64(15 * 60)
+	keycloakRealmSSOIdleTimeoutSeconds          = int64(30 * 60)
+)
 
 var legacyKeycloakAuthorizationClaimNames = map[string]struct{}{
 	"permissions":      {},
@@ -246,7 +251,11 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{
 		"realm": control.realm, "enabled": true,
 		"registrationAllowed": false, "verifyEmail": false,
-		"eventsEnabled": true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds,
+		"bruteForceProtected": true, "permanentLockout": false,
+		"failureFactor": keycloakRealmMaxLoginFailures, "waitIncrementSeconds": keycloakRealmTemporaryLockSeconds,
+		"maxFailureWaitSeconds": keycloakRealmTemporaryLockSeconds,
+		"ssoSessionIdleTimeout": keycloakRealmSSOIdleTimeoutSeconds,
+		"eventsEnabled":         true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds,
 	})
 	if err != nil {
 		return err
@@ -262,10 +271,18 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 	if realm == nil {
 		return false, nil
 	}
-	payload := make(map[string]any, 5)
+	payload := make(map[string]any, 12)
 	changed := false
 	payload["registrationAllowed"] = false
 	payload["verifyEmail"] = false
+	// Realm 关闭公开注册，并由 Keycloak 在认证入口统一执行失败锁定，
+	// 避免各子系统分别统计失败次数而产生可绕过的安全边界。
+	payload["bruteForceProtected"] = true
+	payload["permanentLockout"] = false
+	payload["failureFactor"] = keycloakRealmMaxLoginFailures
+	payload["waitIncrementSeconds"] = keycloakRealmTemporaryLockSeconds
+	payload["maxFailureWaitSeconds"] = keycloakRealmTemporaryLockSeconds
+	payload["ssoSessionIdleTimeout"] = keycloakRealmSSOIdleTimeoutSeconds
 	payload["eventsEnabled"] = true
 	payload["adminEventsEnabled"] = true
 	payload["eventsExpiration"] = keycloakDefaultRealmEventsExpirationSeconds
@@ -284,10 +301,51 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 	if current, ok := realm["verifyEmail"].(bool); !ok || current {
 		changed = true
 	}
+	if !asBool(realm["bruteForceProtected"]) {
+		changed = true
+	}
+	if current, ok := realm["permanentLockout"].(bool); !ok || current {
+		changed = true
+	}
+	if !asInt64Equal(realm["failureFactor"], keycloakRealmMaxLoginFailures) {
+		changed = true
+	}
+	if !asInt64Equal(realm["waitIncrementSeconds"], keycloakRealmTemporaryLockSeconds) {
+		changed = true
+	}
+	if !asInt64Equal(realm["maxFailureWaitSeconds"], keycloakRealmTemporaryLockSeconds) {
+		changed = true
+	}
+	if !asInt64Equal(realm["ssoSessionIdleTimeout"], keycloakRealmSSOIdleTimeoutSeconds) {
+		changed = true
+	}
 	if changed {
 		return true, payload
 	}
 	return false, nil
+}
+
+func asInt64Equal(value any, expected int64) bool {
+	switch current := value.(type) {
+	case int:
+		return int64(current) == expected
+	case int64:
+		return current == expected
+	case int32:
+		return int64(current) == expected
+	case int16:
+		return int64(current) == expected
+	case int8:
+		return int64(current) == expected
+	case float64:
+		return current == float64(expected)
+	case float32:
+		return current == float32(expected)
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(current), 10, 64)
+		return err == nil && parsed == expected
+	}
+	return false
 }
 
 func asPositiveInt64(value any) bool {

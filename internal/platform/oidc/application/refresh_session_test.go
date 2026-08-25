@@ -115,6 +115,47 @@ func TestAuthorizationCodeExchangeRejectsCodeWhoseBrowserSessionWasRevoked(t *te
 	}
 }
 
+func TestAuthorizeRejectsSessionThatMustChangePassword(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
+	repository := &refreshSessionRepositoryStub{
+		client: domain.Client{
+			ID: "oauth-client-1", TenantID: "tenant-1", ClientID: "customer-portal",
+			GrantTypes:   map[string]struct{}{"authorization_code": {}},
+			Scopes:       map[string]struct{}{"openid": {}},
+			RedirectURIs: map[string]struct{}{"https://portal.example.com/callback": {}},
+		},
+		subject: domain.SessionSubject{
+			TenantID: "tenant-1", SessionID: "session-1", AccountID: "account-1", UserID: "user-1",
+			ExpiresAt: now.Add(time.Hour), MustChangePassword: true,
+		},
+	}
+	service := &Service{repository: repository, clock: refreshSessionClock{now: now}}
+
+	_, err := service.Authorize(context.Background(), AuthorizationInput{
+		ClientID: "customer-portal", RedirectURI: "https://portal.example.com/callback",
+		Scopes: []string{"openid"}, SessionID: "session-1",
+	})
+	if !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("Authorize() error = %v, want ErrAccessDenied", err)
+	}
+}
+
+func TestGrantSessionRejectsAccountThatMustChangePassword(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
+	repository := &refreshSessionRepositoryStub{subject: domain.SessionSubject{
+		TenantID: "tenant-1", SessionID: "session-1", AccountID: "account-1", UserID: "user-1",
+		ExpiresAt: now.Add(time.Hour), MustChangePassword: true,
+	}}
+	service := &Service{repository: repository, clock: refreshSessionClock{now: now}}
+
+	err := service.validateGrantSession(context.Background(), "tenant-1", "session-1", "account-1", "user-1", now)
+	if !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("validateGrantSession() error = %v, want ErrInvalidGrant", err)
+	}
+}
+
 type authorizationCodeSessionRepositoryStub struct {
 	*refreshSessionRepositoryStub
 	code domain.AuthorizationCode

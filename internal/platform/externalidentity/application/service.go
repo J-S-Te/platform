@@ -16,6 +16,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 )
 
 const (
@@ -29,8 +30,9 @@ const (
 
 // Options 允许装配层覆盖门户应用码，缺省保持平台默认，保证既有行为不变。
 type Options struct {
-	PortalApplicationCode string
-	CustomerRefProtection CustomerRefProtection
+	PortalApplicationCode         string
+	CustomerRefProtection         CustomerRefProtection
+	CustomerPortalInitialPassword string
 }
 
 // ServiceOption 是构造选项函数。
@@ -51,6 +53,14 @@ func WithCustomerRefProtection(protection CustomerRefProtection) ServiceOption {
 		if protection != nil {
 			options.CustomerRefProtection = protection
 		}
+	}
+}
+
+// WithCustomerPortalInitialPassword 配置外部客户首次登录的临时口令。口令仅在服务端
+// 派生 Argon2id 凭据，绝不写入操作日志、审计事件或跨服务响应。
+func WithCustomerPortalInitialPassword(password string) ServiceOption {
+	return func(options *Options) {
+		options.CustomerPortalInitialPassword = password
 	}
 }
 
@@ -130,6 +140,9 @@ type ProvisionCommand struct {
 	PlatformUserID string
 	AccountID      string
 	AccountNo      string
+	CredentialID   string
+	PasswordDigest []byte
+	PasswordParams []byte
 	EventID        string
 	OccurredAt     time.Time
 }
@@ -189,6 +202,7 @@ type Service struct {
 	ids                   IDGenerator
 	clock                 Clock
 	portalApplicationCode string
+	initialPassword       string
 }
 
 func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator, clock Clock, options ...ServiceOption) (*Service, error) {
@@ -206,6 +220,7 @@ func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator
 	return &Service{
 		repository: repository, mobiles: mobiles, customerRefs: customerRefs, ids: ids, clock: clock,
 		portalApplicationCode: opts.PortalApplicationCode,
+		initialPassword:       opts.CustomerPortalInitialPassword,
 	}, nil
 }
 
@@ -227,8 +242,14 @@ func (service *Service) Provision(ctx context.Context, principal appctx.Principa
 	if err != nil {
 		return ProvisionResult{}, err
 	}
-	if email == nil && mobile == "" {
+	// 客户门户登录名固定使用登记联系人手机号；仅提供邮箱不能创建可用的门户账号。
+	if mobile == "" {
 		return ProvisionResult{}, ErrValidation
+	}
+	// 客户门户账号必须携带一次性初始凭据；缺少部署密钥时失败关闭，避免生成
+	// 一个永远无法完成邀请激活的半成品外部身份。
+	if service.initialPassword == "" {
+		return ProvisionResult{}, ErrUnavailable
 	}
 	// 幂等键还必须绑定规范化后的完整请求。相同键携带不同客户资料会被仓储判定为冲突。
 	requestHash := hashProvisionRequest(displayName, mobile, email)
@@ -240,13 +261,30 @@ func (service *Service) Provision(ctx context.Context, principal appctx.Principa
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("generate external login account identifier: %w", err)
 	}
-	return service.repository.Provision(ctx, ProvisionCommand{
+	command := ProvisionCommand{
 		Principal: principal, IdempotencyKey: normalizedIdempotencyKey(proof), RequestHash: requestHash,
 		NonceHash: nonceHash, NonceExpiresAt: now.Add(nonceRetention), DisplayName: displayName,
 		Email: email, EmailDigest: emailDigest, MobileCipher: mobileCipher, MobileDigest: mobileDigest,
-		IdentityID: identityID, PlatformUserID: userID, AccountID: accountID, AccountNo: "EXT-" + strings.ToUpper(userID),
+		IdentityID: identityID, PlatformUserID: userID, AccountID: accountID, AccountNo: externalAccountNo(mobile, userID),
 		EventID: eventID, OccurredAt: now,
-	})
+	}
+	credentialID, idErr := service.ids.New(now)
+	if idErr != nil {
+		return ProvisionResult{}, fmt.Errorf("generate external customer password credential identifier: %w", idErr)
+	}
+	digest, params, hashErr := (security.Argon2idPasswordHasher{}).Hash(service.initialPassword)
+	if hashErr != nil {
+		return ProvisionResult{}, fmt.Errorf("derive external customer initial password credential: %w", hashErr)
+	}
+	command.CredentialID, command.PasswordDigest, command.PasswordParams = credentialID, digest, params
+	return service.repository.Provision(ctx, command)
+}
+
+func externalAccountNo(mobile, userID string) string {
+	if mobile != "" {
+		return mobile
+	}
+	return "EXT-" + strings.ToUpper(userID)
 }
 
 func (service *Service) AssignPortalRole(ctx context.Context, principal appctx.Principal, proof RequestProof, input RoleInput) (domain.RoleResult, error) {

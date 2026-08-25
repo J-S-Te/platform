@@ -135,6 +135,21 @@ func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "站内信事件批次已接收", map[string]any{"receipts": receipts, "accepted": len(receipts)})
 }
 
+// GetIngestionReceipt exposes asynchronous processing state to the submitting system.
+// ACCEPTED is only a durable receipt; COMPLETED is the user-visible projection result.
+func (h *Handler) GetIngestionReceipt(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.applicationPrincipal(w, r)
+	if !ok {
+		return
+	}
+	receipt, err := h.service.GetIngestionReceipt(r.Context(), p.TenantID, p.ApplicationCode, p.EnvironmentCode, r.PathValue("receipt_id"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信事件状态查询成功", receipt)
+}
+
 func (h *Handler) ingest(r *http.Request, p appctx.Principal, payload ingestionEventPayload) (domain.IngestionReceipt, error) {
 	event := domain.IngestionEvent{EventID: payload.EventID, EventType: payload.EventType, NotificationScope: payload.NotificationScope, Priority: payload.Priority, Title: payload.Title, Content: payload.Content, TargetURL: payload.TargetURL, ReferenceType: payload.ReferenceType, ReferenceID: payload.ReferenceID, IdempotencyKey: payload.IdempotencyKey, Recipients: payload.Recipients, OccurredAt: payload.OccurredAt, ExpiresAt: payload.ExpiresAt}
 	return h.service.Ingest(r.Context(), app.IngestInput{TenantID: p.TenantID, SourceApplication: p.ApplicationCode, SourceEnvironment: p.EnvironmentCode, Event: event})

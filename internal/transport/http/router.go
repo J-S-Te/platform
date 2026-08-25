@@ -196,7 +196,7 @@ func NewRouter(
 			apiRouter.GET("/personnel-changes", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.List))
 			apiRouter.POST("/personnel-changes", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Create))
 			apiRouter.POST("/personnel-changes/preview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.PreviewDraft))
-			apiRouter.POST("/personnel-changes/:change_id/transition", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Transition))
+			apiRouter.POST("/personnel-changes/:change_id/transition", middleware.RequirePermission("platform:user:update"), middleware.RequirePermission("platform:approval:process"), adaptHandler(operational.PersonnelChanges.Transition))
 			apiRouter.POST("/personnel-changes/:change_id/submit", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Submit))
 			apiRouter.POST("/personnel-changes/:change_id/cancel", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Cancel))
 			apiRouter.GET("/personnel-changes/:change_id/preview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.Preview))
@@ -518,6 +518,7 @@ func NewRouter(
 			// performed asynchronously by the worker, and this scope is distinct from audit.
 			integrationRouter.POST("/notifications/events", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.Ingest))
 			integrationRouter.POST("/notifications/events/batch", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.IngestBatch))
+			integrationRouter.GET("/notifications/events/receipts/:receipt_id", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.GetIngestionReceipt))
 		}
 		if operational.ExternalIdentity != nil {
 			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))

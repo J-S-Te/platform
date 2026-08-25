@@ -230,12 +230,14 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 		TenantID, SessionID, AccountID, UserID string
 		LoginIP                                []byte
 		ExpiresAt                              time.Time
+		MustChangePassword                     bool
 	}
 	query := database.WithContext(ctx).Table("iam_session").
-		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at").
+		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at, COALESCE(iam_password_credential.must_change, FALSE) AS must_change_password").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
 		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
+		Joins("LEFT JOIN iam_password_credential ON iam_password_credential.account_id = iam_account.id AND iam_password_credential.status = ?", activeStatus).
 		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now)
 	if lock {
 		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
@@ -244,7 +246,11 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 	if err != nil {
 		return domain.SessionSubject{}, mapError(err)
 	}
-	return domain.SessionSubject{TenantID: row.TenantID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, LoginIP: append(net.IP(nil), row.LoginIP...), ExpiresAt: row.ExpiresAt.UTC()}, nil
+	return domain.SessionSubject{
+		TenantID: row.TenantID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID,
+		LoginIP: append(net.IP(nil), row.LoginIP...), ExpiresAt: row.ExpiresAt.UTC(),
+		MustChangePassword: row.MustChangePassword,
+	}, nil
 }
 
 func (r *Repository) CreateAuthorizationCode(ctx context.Context, code domain.AuthorizationCode) error {
@@ -286,7 +292,7 @@ func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command appli
 		// 刷新令牌族”的竞态窗口。
 		subject, err := r.resolveSessionSubject(ctx, tx, code.SessionID, now, true)
 		if err != nil || subject.TenantID != code.TenantID || subject.SessionID != code.SessionID ||
-			subject.AccountID != code.AccountID || subject.UserID != code.UserID {
+			subject.AccountID != code.AccountID || subject.UserID != code.UserID || subject.MustChangePassword {
 			return application.ErrAuthorizationCodeUnavailable
 		}
 		if err := tx.Table("oauth_authorization_code").Where("id = ? AND status = ? AND consumed_at IS NULL", code.ID, domain.AuthorizationCodeStatusActive).
