@@ -1089,14 +1089,39 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 	if applicationCode == PlatformApplicationCode {
 		roleType = platformRoleType
 	}
+	isSuperAdmin := false
+	var checkErr error
 	roles, err := s.loadGenericRoles(ctx, tenantID, applicationID, userID, environmentID, now, roleType)
 	if err != nil {
 		return Access{}, err
+	}
+	// 平台超级管理员是租户级控制面身份。它不应要求管理员逐个业务应用
+	// 维护一组角色，否则新接入应用或新增角色会出现“超管看得到系统但没有权限”
+	// 的窗口。这里仅在授权解析时生成只读的有效角色视图，不写入业务应用绑定，
+	// 也不改变普通用户、岗位和组织的授权模型。
+	if applicationCode != PlatformApplicationCode {
+		isSuperAdmin, checkErr = s.isPlatformSuperAdmin(ctx, tenantID, userID, now)
+		if checkErr != nil {
+			return Access{}, checkErr
+		}
+		if isSuperAdmin {
+			roles, err = s.expandSuperAdminApplicationRoles(ctx, tenantID, applicationID, roles)
+			if err != nil {
+				return Access{}, err
+			}
+		}
 	}
 	roleIDs, roleViews, directRoles, inheritedRoles := resolveAssignedRoles(roles, subjectTypeUser)
 	state, conflicts, permissionRoleIDs, err := s.applicationRolePolicy(ctx, tenantID, applicationID, roles, roleIDs)
 	if err != nil {
 		return Access{}, err
+	}
+	// 超管的有效角色集合不受目标应用 max_effective_roles 限制；该限制用于
+	// 普通业务账号的角色冲突防护，不能把控制面超管变成未授权状态。
+	if isSuperAdmin {
+		state = authorizationGranted
+		conflicts = []string{}
+		permissionRoleIDs = roleIDs
 	}
 	rolePermissions := []string{}
 	if state == authorizationGranted {
@@ -1461,6 +1486,58 @@ func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID,
 		return nil, fmt.Errorf("load application role bindings: %w", err)
 	}
 	return rows, nil
+}
+
+// isPlatformSuperAdmin deliberately checks the protected platform role directly.
+// Looking for a display name or an application role called "admin" would make the
+// cross-application elevation dependent on mutable catalog data.
+func (s *Service) isPlatformSuperAdmin(ctx context.Context, tenantID, userID string, now time.Time) (bool, error) {
+	var count int64
+	err := s.db.WithContext(ctx).Table("authz_role_binding AS binding").
+		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.status = ? AND role.role_type = ?", activeStatus, platformRoleType).
+		Joins("JOIN platform_application AS application ON application.id = role.application_id AND application.tenant_id = role.tenant_id AND application.code = ? AND application.status = ?", PlatformApplicationCode, activeStatus).
+		Where("binding.tenant_id = ? AND binding.subject_type = ? AND binding.subject_id = ? AND binding.scope_type = ? AND binding.scope_id = '' AND binding.status = ? AND role.code = ?", tenantID, subjectTypeUser, userID, scopeTypeTenant, activeStatus, BootstrapSuperAdminRoleCode).
+		Where("(binding.valid_from IS NULL OR binding.valid_from <= ?) AND (binding.valid_until IS NULL OR binding.valid_until > ?)", now, now).
+		Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("check platform super administrator role: %w", err)
+	}
+	return count > 0, nil
+}
+
+// expandSuperAdminApplicationRoles creates an in-memory effective-role view for
+// every active application role. It intentionally does not persist bindings: a
+// catalog update becomes effective immediately, while ordinary user assignments
+// remain auditable and unchanged.
+func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID, applicationID string, existing []assignedRoleRow) ([]assignedRoleRow, error) {
+	var rows []assignedRoleRow
+	err := s.db.WithContext(ctx).Table("authz_role").
+		Select("id AS role_id, code, name").
+		Where("tenant_id = ? AND application_id = ? AND role_type = ? AND status = ?", tenantID, applicationID, applicationRoleType, activeStatus).
+		Order("code ASC, id ASC").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("load all application roles for platform super administrator: %w", err)
+	}
+	seen := make(map[string]struct{}, len(existing)+len(rows))
+	for _, row := range existing {
+		if row.RoleID != "" {
+			seen[row.RoleID] = struct{}{}
+		}
+	}
+	for index := range rows {
+		if _, ok := seen[rows[index].RoleID]; ok {
+			continue
+		}
+		rows[index].ScopeType = scopeTypeTenant
+		rows[index].ScopeID = ""
+		rows[index].SubjectType = "PLATFORM_ROLE"
+		rows[index].SubjectID = BootstrapSuperAdminRoleCode
+		rows[index].SourceName = "平台超级管理员（全应用授权）"
+		rows[index].GrantOrigin = grantOriginInherited
+		existing = append(existing, rows[index])
+		seen[rows[index].RoleID] = struct{}{}
+	}
+	return existing, nil
 }
 
 func (s *Service) loadRolePermissions(ctx context.Context, tenantID, applicationID string, roleIDs []string) ([]string, error) {
