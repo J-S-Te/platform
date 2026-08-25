@@ -32,8 +32,9 @@ COPY --from=builder /out/bootstrap-admin ./bootstrap-admin
 COPY --from=builder /out/subsystem-provisioner ./subsystem-provisioner
 COPY docker-entrypoint.sh /usr/local/bin/basic-platform-entrypoint
 COPY scripts/sync-contract-catalog.sh /usr/local/bin/sync-contract-catalog.sh
+COPY scripts/sync-settlement-catalog.sh /usr/local/bin/sync-settlement-catalog.sh
 
-RUN chmod +x /usr/local/bin/basic-platform-entrypoint /usr/local/bin/sync-contract-catalog.sh
+RUN chmod +x /usr/local/bin/basic-platform-entrypoint /usr/local/bin/sync-contract-catalog.sh /usr/local/bin/sync-settlement-catalog.sh
 
 ENTRYPOINT ["/usr/local/bin/basic-platform-entrypoint"]
 CMD ["./api"]

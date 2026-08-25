@@ -22,6 +22,9 @@ project_env_file="${project_management_root}/.env.local"
 data_analysis_root="${workspace_root}/data_analysis"
 data_analysis_template_file="${data_analysis_root}/.env.example"
 data_analysis_env_file="${data_analysis_root}/.env.local"
+settlement_root="${workspace_root}/Settlement"
+settlement_template_file="${settlement_root}/.env.local.example"
+settlement_env_file="${settlement_root}/.env.local"
 presale_worker_env_file="${customer_root}/.env.presale-worker"
 lan_override_file="${project_root}/docker/.env.lan"
 customer_lan_override_file="${project_root}/docker/.env.customer.lan"
@@ -82,6 +85,7 @@ up/restart 选项：
   --portal-env-file PATH          客户自助门户环境文件（默认 platform/docker/.env.portal.local）
   --project-env-file PATH         项目管理系统环境文件（默认 project_management/.env.local）
   --data-analysis-env-file PATH  数据看板与统计分析环境文件（默认 data_analysis/.env.local）
+  --settlement-env-file PATH      结算与开票运行环境文件（默认 Settlement/.env.local）
   --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
 
@@ -110,9 +114,11 @@ up/restart 选项：
   因此不会影响已经完成的子系统统一登录接入。
 
 应用容器：
-  frontend      基础平台 + 合同管理 + 客户与商机管理 + 客户自助门户前端（宿主机仅发布 8081）
+  frontend      基础平台 + 合同管理 + 客户与商机管理 + 结算与开票 + 客户自助门户前端（宿主机仅发布 8081）
   api           基础平台 API + Worker
   contract-api  合同管理 API + Temporal Worker
+  settlement-api 结算与开票 API
+  settlement-worker 结算 Outbox 与催收 Worker
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
   project-api   项目管理系统 API + Temporal Worker（完成 project_management/dev 接入后启用）
@@ -195,6 +201,11 @@ while (($# > 0)); do
 			data_analysis_env_file="$2"
 			shift 2
 			;;
+		--settlement-env-file)
+			(($# >= 2)) || fail "$1 缺少参数"
+			settlement_env_file="$2"
+			shift 2
+			;;
 		--presale-worker-env-file)
 			(($# >= 2)) || fail "$1 缺少参数"
 			presale_worker_env_file="$2"
@@ -254,10 +265,12 @@ docker compose version >/dev/null 2>&1 || fail "当前 Docker 不支持 docker c
 [[ -d "$contract_root" ]] || fail "合同管理后端目录不存在：$contract_root"
 [[ -d "$customer_root" ]] || fail "客户与商机管理后端目录不存在：$customer_root"
 [[ -d "$project_management_root" ]] || fail "项目管理系统后端目录不存在：$project_management_root"
+[[ -d "$settlement_root" ]] || fail "结算与开票系统后端目录不存在：$settlement_root"
 
 export BASIC_PLATFORM_RUNTIME_ENV_FILE="$env_file"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_env_file"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_env_file"
+export SETTLEMENT_RUNTIME_ENV_FILE="$settlement_env_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_env_file"
 export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_env_file"
@@ -413,6 +426,7 @@ compose() {
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
             --env-file "$data_analysis_env_file" \
+            --env-file "$settlement_env_file" \
             --profile portal \
             --profile project \
             --profile presale-worker \
@@ -431,6 +445,7 @@ compose() {
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
             --env-file "$data_analysis_env_file" \
+            --env-file "$settlement_env_file" \
             --profile portal \
             --profile presale-worker \
             --profile keycloak \
@@ -448,6 +463,7 @@ compose() {
             --env-file "$portal_env_file" \
             --env-file "$project_env_file" \
             --env-file "$data_analysis_env_file" \
+            --env-file "$settlement_env_file" \
             --profile project \
             --profile presale-worker \
             --profile keycloak \
@@ -463,6 +479,7 @@ compose() {
         --env-file "$customer_env_file" \
         --env-file "$portal_env_file" \
         --env-file "$project_env_file" \
+        --env-file "$settlement_env_file" \
         --profile presale-worker \
         --profile keycloak \
         $data_analysis_profile_arg \
@@ -760,6 +777,32 @@ ensure_project_env_file() {
     if [[ -z "$(env_value "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
         replace_line_in_file "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
     fi
+}
+
+ensure_settlement_env_file() {
+	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成结算与开票数据库密码和会话密钥"
+	if [[ ! -f "$settlement_env_file" ]]; then
+		[[ -f "$settlement_template_file" ]] || fail "结算与开票环境模板不存在：$settlement_template_file"
+		cp "$settlement_template_file" "$settlement_env_file"
+		chmod 600 "$settlement_env_file"
+		local password root_password
+		password="$(random_hex 24)"
+		root_password="$(random_hex 32)"
+		replace_line_in_file "$settlement_env_file" SETTLEMENT_MYSQL_PASSWORD "$password"
+		replace_line_in_file "$settlement_env_file" SETTLEMENT_MYSQL_ROOT_PASSWORD "$root_password"
+		replace_line_in_file "$settlement_env_file" SETTLEMENT_MYSQL_DSN "settlement:${password}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC"
+		replace_line_in_file "$settlement_env_file" SETTLEMENT_PUBLIC_ORIGIN "$frontend_public_origin"
+		replace_line_in_file "$settlement_env_file" PLATFORM_BASE_URL "http://platform-api:8080"
+		replace_line_in_file "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
+		log "已生成结算与开票运行环境文件：$settlement_env_file"
+	fi
+
+	if [[ -z "$(env_value "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
+		replace_line_in_file "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
+	fi
+	local unresolved
+	unresolved="$(grep -E 'REPLACE_WITH_' "$settlement_env_file" | grep -v '^#' || true)"
+	[[ -z "$unresolved" ]] || fail "结算与开票环境文件仍包含未填写占位符：$settlement_env_file"
 }
 
 project_configured() {
@@ -1184,9 +1227,9 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local build_services=(api contract-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    local build_services=(api contract-api settlement-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
     if [[ "$force_build" == true ]]; then
-        log "重新构建统一前端、平台/合同/CRM/门户/项目后端及售前投递 Worker 镜像"
+        log "重新构建统一前端、平台/合同/结算/CRM/门户/项目后端及售前投递 Worker 镜像"
     else
         log "构建缺失或有变更的统一前端及独立后端镜像"
     fi
@@ -1217,13 +1260,15 @@ run_migrations() {
 	# 数据库先就绪、迁移再串行执行，业务 API 只能在全部 schema 成功后启动；禁止由 API 自动建表。
 	# 各数据库互相独立，不存在跨库事务；某个后续迁移失败时，已成功数据库按自身幂等迁移规则重试。
 	log "启动基础平台、合同、CRM 常驻 MySQL 与 Temporal，并等待健康检查"
-	compose_run up -d --wait mysql contract-mysql customer-mysql temporal
+	compose_run up -d --wait mysql contract-mysql customer-mysql settlement-mysql temporal
     log "执行基础平台数据库迁移"
     compose_run run --rm --no-deps migrate ./migrate
     log "执行合同管理版本化数据库迁移"
     compose_run run --rm --no-deps contract-migrate
 	log "执行客户与商机管理 CRM 清单迁移"
 	compose_run run --rm --no-deps customer-migrate
+	log "执行结算与开票版本化数据库迁移"
+	compose_run run --rm --no-deps settlement-migrate
 	if portal_configured; then
 		log "启动客户自助门户 MySQL 并执行 Portal 清单迁移"
 		compose_run up -d --wait portal-mysql
@@ -1340,7 +1385,7 @@ public_url_to_route() {
 }
 
 verify_gateway_routes() {
-    local platform_membership_status contract_health_status contract_session_status contract_login_status
+	local platform_membership_status contract_health_status contract_session_status contract_login_status settlement_session_status
 	local customer_health_status customer_session_status portal_health_status portal_session_status
 	local project_health_status project_session_status
     local contract_authorize_url contract_authorize_route platform_authorize_status platform_login_url contract_issuer
@@ -1356,6 +1401,11 @@ verify_gateway_routes() {
         fail "基础平台任职关系接口返回 ${platform_membership_status}，预期未登录状态为 401；请重新构建并启动 api 与 frontend 容器"
 
     wait_for_frontend_status /contract_management/healthz 200 "合同管理健康检查路径"
+	wait_for_frontend_status /settlement/healthz 200 "结算与开票健康检查路径"
+	settlement_session_status="$(frontend_http_status /settlement/api/v1/auth/me)" || \
+		fail "无法访问结算与开票登录状态接口"
+	[[ "$settlement_session_status" == "200" ]] || \
+		fail "本地开发结算登录状态接口返回 ${settlement_session_status}，预期为 200"
 
     # 自检请求不携带登录 Cookie，因此 /auth/me 应返回 401。若返回 404，说明
     # /contract_management 前缀未被正确移除，部署必须立即失败。
@@ -1436,7 +1486,7 @@ verify_gateway_routes() {
 			fail "数据看板登录状态接口返回 ${data_analysis_session_status}，预期未登录状态为 401"
 	fi
 
-    log "统一网关校验通过：platform API=401，contract healthz=200，customer healthz=200"
+	log "统一网关校验通过：platform API=401，contract healthz=200，settlement healthz=200，customer healthz=200"
 }
 
 start_stack() {
@@ -1446,6 +1496,7 @@ start_stack() {
 	ensure_portal_env_file
 	ensure_project_env_file
 	ensure_data_analysis_env_file
+	ensure_settlement_env_file
 	validate_all_local_runtime_targets
 	validate_all_keycloak_runtimes
 	if portal_configured && ! portal_compensation_configured; then
@@ -1463,6 +1514,9 @@ start_stack() {
     # 把下游的短暂冷启动误报为整套部署失败，同时让错误日志能够准确指向服务。
     log "启动基础平台 API 与受控子系统 provisioner"
     compose_up_wait "基础平台 API" subsystem-provisioner api
+	log "启动结算与开票 API 与后台 Worker"
+	compose_up_wait "结算与开票 API" settlement-api
+	compose_run up -d --wait --no-deps settlement-worker
     sync_crm_authorization_catalog
     log "启动合同管理后端"
     compose_up_wait "合同管理后端" contract-api
@@ -1508,6 +1562,7 @@ start_stack() {
     compose_run ps
     log "统一访问地址：${frontend_public_origin}"
     log "合同管理前端：${frontend_public_origin}/contract_management/"
+	log "结算与开票前端：${frontend_public_origin}/settlement/"
 	log "客户与商机管理前端：${frontend_public_origin}/customer-opportunity/"
 	if portal_configured; then log "客户自助门户：${frontend_public_origin}/customer-portal/"; fi
 	if project_configured; then log "项目管理系统：${frontend_public_origin}/project_management/"; fi
@@ -1554,9 +1609,10 @@ refresh_unified_frontend() {
 refresh_contract_backend() {
     ensure_platform_env_file
     ensure_contract_env_file true
-    ensure_customer_env_file
+	ensure_customer_env_file
 	ensure_project_env_file
 	ensure_portal_env_file
+	ensure_settlement_env_file
 	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management dev OIDC_CLIENT_ID
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
@@ -1583,6 +1639,7 @@ refresh_customer_backend() {
     ensure_contract_env_file false
 	ensure_customer_env_file
 	ensure_portal_env_file
+	ensure_settlement_env_file
 	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
 	validate_customer_local_service_clients
     prepare_go_backend_base_images "客户与商机管理后端"
@@ -1626,6 +1683,7 @@ refresh_portal_backend() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	ensure_settlement_env_file
 	portal_configured || fail "客户自助门户尚未完成 customer_portal/dev 应用接入，不能启动 portal-api"
 	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal dev PORTAL_OIDC_CLIENT_ID
 	portal_compensation_configured || fail "Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
@@ -1653,6 +1711,7 @@ refresh_project_backend() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	ensure_settlement_env_file
 	project_configured || fail "项目管理系统尚未完成 project_management/dev 应用接入，不能启动 project-api"
 	validate_local_runtime_target "项目管理" "$project_env_file" project_management dev OIDC_CLIENT_ID
 	prepare_go_backend_base_images "项目管理系统后端"
@@ -1675,6 +1734,7 @@ refresh_data_analysis_backend() {
 	ensure_portal_env_file
 	ensure_project_env_file
 	ensure_data_analysis_env_file
+	ensure_settlement_env_file
 	data_analysis_configured || fail "数据看板尚未完成 data_analysis/dev 应用接入，不能启动 dashboard-api"
 	prepare_go_backend_base_images "数据看板后端"
 
@@ -1703,6 +1763,7 @@ start_presale_worker() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	ensure_settlement_env_file
 	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
 	[[ -f "$presale_worker_env_file" ]] || \
 		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
@@ -1749,6 +1810,7 @@ start_presale_worker() {
 start_presale_alert_worker() {
 	ensure_platform_env_file
 	ensure_customer_env_file
+	ensure_settlement_env_file
 	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
 	prepare_go_backend_base_images "售前预警扫描 Worker"
 	log "构建售前预警扫描 Worker"
@@ -1767,6 +1829,7 @@ prepare_operational_env() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_project_env_file
+	ensure_settlement_env_file
 }
 
 case "$command_name" in
@@ -1814,6 +1877,7 @@ case "$command_name" in
 		ensure_customer_env_file
 		ensure_portal_env_file
 		ensure_project_env_file
+		ensure_settlement_env_file
 		validate_all_local_runtime_targets
 		validate_all_keycloak_runtimes
 		if portal_configured && ! portal_compensation_configured; then

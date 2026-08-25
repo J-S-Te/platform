@@ -440,6 +440,87 @@ func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *test
 	}
 }
 
+func TestLocalDockerSubsystemProvisionerAdoptsSettlementThroughUnifiedCompose(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	settlementRoot := filepath.Join(root, "Settlement")
+	contractRoot := filepath.Join(root, integratedContractApplicationCode)
+	for _, directory := range []string{filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"), contractRoot, settlementRoot} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):            "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):          "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
+		filepath.Join(contractRoot, ".env.local"):                    "CONTRACT_SETTING=keep\n",
+		filepath.Join(settlementRoot, ".env.local"):                  "SETTLEMENT_MYSQL_DSN=settlement:secret@tcp(settlement-mysql:3306)/settlement\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+
+	// This is intentionally a red test: settlement is an integrated service in
+	// platform/compose.local.yaml, not a standalone Compose project.  Adoption
+	// must preserve its existing .env.local and volume, then run only reviewed
+	// settlement services through the shared Compose project.
+	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+		ApplicationCode: "settlement", Environment: "dev",
+	}); err != nil {
+		t.Fatalf("adopt settlement through unified Compose: %v", err)
+	}
+
+	if len(runner.calls) != 4 {
+		t.Fatalf("settlement adoption calls = %d, want 4: %#v", len(runner.calls), runner.calls)
+	}
+	for _, call := range runner.calls {
+		if call.directory != platformRoot {
+			t.Fatalf("compose directory = %q, want %q", call.directory, platformRoot)
+		}
+		if !containsString(call.environment, "SETTLEMENT_RUNTIME_ENV_FILE="+filepath.Join(settlementRoot, ".env.local")) {
+			t.Fatalf("compose environment missing Settlement runtime file: %v", call.environment)
+		}
+		if !containsString(call.arguments, "--project-name") || !containsString(call.arguments, "basic-platform-local") {
+			t.Fatalf("compose call missing unified project name: %v", call.arguments)
+		}
+	}
+	if !containsString(runner.calls[0].arguments, "settlement-mysql") || !containsString(runner.calls[0].arguments, "--no-deps") {
+		t.Fatalf("first call must start only Settlement database: %v", runner.calls[0].arguments)
+	}
+	if !containsString(runner.calls[1].arguments, "settlement-migrate") || !containsString(runner.calls[1].arguments, "run") {
+		t.Fatalf("second call must run Settlement migration: %v", runner.calls[1].arguments)
+	}
+	if !containsString(runner.calls[2].arguments, "settlement-api") || !containsString(runner.calls[2].arguments, "--wait") {
+		t.Fatalf("third call must start and health-check Settlement API: %v", runner.calls[2].arguments)
+	}
+	if !containsString(runner.calls[2].arguments, "--no-build") || containsString(runner.calls[2].arguments, "--build") {
+		t.Fatalf("Settlement adoption must reuse the published image without building: %v", runner.calls[2].arguments)
+	}
+	if !containsString(runner.calls[3].arguments, "settlement-worker") || !containsString(runner.calls[3].arguments, "--no-deps") {
+		t.Fatalf("fourth call must start only Settlement worker: %v", runner.calls[3].arguments)
+	}
+	if !containsString(runner.calls[3].arguments, "--no-build") {
+		t.Fatalf("Settlement worker adoption must reuse the published image: %v", runner.calls[3].arguments)
+	}
+}
+
 func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReloadGateway(t *testing.T) {
 	t.Parallel()
 	root, err := filepath.EvalSymlinks(t.TempDir())

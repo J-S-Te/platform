@@ -1205,21 +1205,28 @@ func keycloakSyncFailureGuidance(stage string) (detail, nextAction string) {
 // management PATCH endpoints. This endpoint only re-runs the provisioner so the running subsystem
 // picks up the new .env.local values and the portal gateway is reloaded.
 func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
-	handler.updateSubsystem(writer, request, "")
+	handler.updateSubsystem(writer, request, "", "UPDATE")
+}
+
+// AdoptSubsystem brings a directory-only environment under the deployment
+// state machine. It is intentionally separate from update: callers cannot
+// accidentally treat an unmanaged runtime as already deployed.
+func (handler *SubsystemOnboardingHandler) AdoptSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	handler.updateSubsystem(writer, request, "", "ADOPT")
 }
 
 // SwitchToKeycloak is the explicit authentication-integration cutover action.
 // Its target issuer is intentionally fixed by the server so a browser cannot
 // turn a Keycloak switch request into an arbitrary provider update.
 func (handler *SubsystemOnboardingHandler) SwitchToKeycloak(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
-	handler.updateSubsystem(writer, request, "keycloak")
+	handler.updateSubsystem(writer, request, "keycloak", "UPDATE")
 }
 
 // RollbackToPlatform is the explicit authentication-integration rollback
 // action. It reuses the same controlled deployment workflow as legacy
 // subsystem updates while pinning the target issuer to Basic Platform.
 func (handler *SubsystemOnboardingHandler) RollbackToPlatform(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
-	handler.updateSubsystem(writer, request, "platform")
+	handler.updateSubsystem(writer, request, "platform", "UPDATE")
 }
 
 type updateServiceCredentialRequirement struct {
@@ -1307,7 +1314,45 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 	return credentials, nil
 }
 
-func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request, forcedIssuerAlias string) {
+// ensureCatalogPublisherCredential recovers a publish capability for a controlled
+// retry without attempting to read a stored secret. Secrets are write-only, so a
+// new version is minted exclusively for the trusted deployment Agent and never
+// returned to the browser.
+func (handler *SubsystemOnboardingHandler) ensureCatalogPublisherCredential(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID string) (application.OAuthClientView, string, error) {
+	if handler.serviceCredentials == nil {
+		return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+	}
+	clientID := applicationCode + "-" + environment + "-catalog-publisher"
+	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return application.OAuthClientView{}, "", err
+	}
+	for _, client := range clients {
+		if client.ClientID != clientID {
+			continue
+		}
+		if !strings.EqualFold(client.Status, "ACTIVE") || client.ApplicationID != applicationID || client.EnvironmentID != environmentID {
+			return application.OAuthClientView{}, "", application.ErrConflict
+		}
+		secret, secretErr := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID})
+		if secretErr != nil {
+			return application.OAuthClientView{}, "", secretErr
+		}
+		return client, secret.PlaintextSecret, nil
+	}
+	created, createErr := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
+		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
+		ClientID: clientID, ClientName: "结算与开票管理系统 Authorization Catalog Publisher", ClientType: "service",
+		TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
+		GrantTypes: []string{"client_credentials"}, Scopes: []string{"authorization.catalog.sync"},
+	})
+	if createErr != nil {
+		return application.OAuthClientView{}, "", createErr
+	}
+	return created.Client, created.PlaintextSecret, nil
+}
+
+func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request, forcedIssuerAlias, requestedOperation string) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -1326,6 +1371,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}
 	applicationCode := strings.TrimSpace(payload.ApplicationCode)
 	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
+	isRetry := requestedOperation == "RETRY" || strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry")
 	// Update never re-issues the OAuth client secret. It sends identifiers plus optional public
 	// gateway fields; the provisioner only writes the non-secret subset and preserves secrets.
 	//
@@ -1443,12 +1489,28 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	if handler.deploymentState != nil {
 		state, err := handler.deploymentState.GetSubsystemDeploymentContext(request.Context(), principal.Tenant.ID, applicationCode, environment)
 		if err != nil {
-			handler.writeError(writer, request, err)
-			return
+			// A directory-only registration has application/environment records but no
+			// deployment-state row yet.  The UI exposes the recovery action as “retry”
+			// after a failed first deployment, so treat RETRY like ADOPT at this
+			// boundary.  ResolveApplicationEnvironment still enforces that the target
+			// is a known, tenant-scoped application; unknown targets remain 404.
+			if requestedOperation != "ADOPT" && !isRetry || !errors.Is(err, application.ErrNotFound) {
+				handler.writeError(writer, request, err)
+				return
+			}
+			applicationID, resolvedEnvironmentID, resolveErr := handler.service.ResolveApplicationEnvironment(request.Context(), principal.Tenant.ID, applicationCode, environment)
+			if resolveErr != nil {
+				handler.writeError(writer, request, resolveErr)
+				return
+			}
+			deploymentContext = application.SubsystemDeploymentState{TenantID: principal.Tenant.ID, ApplicationID: applicationID, EnvironmentID: resolvedEnvironmentID, ApplicationCode: applicationCode, Environment: environment}
+			updateInput.ApplicationID = applicationID
+			environmentID = resolvedEnvironmentID
+		} else {
+			deploymentContext = state
+			updateInput.ApplicationID = state.ApplicationID
+			environmentID = state.EnvironmentID
 		}
-		deploymentContext = state
-		updateInput.ApplicationID = state.ApplicationID
-		environmentID = state.EnvironmentID
 	} else if applicationID, resolvedEnvironmentID, ok := handler.resolveApplicationContext(writer, request, applicationCode, environment); ok {
 		updateInput.ApplicationID = applicationID
 		environmentID = resolvedEnvironmentID
@@ -1461,8 +1523,11 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		updateInput.CatalogPublisherClientID = publisherID
 		updateInput.CatalogPublisherClientSecret = publisherSecret
 	}
-	operation := "UPDATE"
-	if strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry") {
+	operation := requestedOperation
+	if operation == "" {
+		operation = "UPDATE"
+	}
+	if isRetry {
 		operation = "RETRY"
 	}
 	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
@@ -1474,6 +1539,17 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		return
 	}
 	updateInput.ServiceCredentials = serviceCredentials
+	if applicationCode == "settlement" && (operation == "ADOPT" || operation == "RETRY") {
+		publisher, publisherSecret, publisherErr := handler.ensureCatalogPublisherCredential(
+			request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID, applicationCode, environment, principal.User.ID,
+		)
+		if publisherErr != nil {
+			handler.writeError(writer, request, publisherErr)
+			return
+		}
+		updateInput.CatalogPublisherClientID = publisher.ClientID
+		updateInput.CatalogPublisherClientSecret = publisherSecret
+	}
 	retryAdminUserID := principal.User.ID
 	retryNeedsInitialAccess := false
 	if operation == "RETRY" && handler.deploymentState != nil {
@@ -1633,8 +1709,25 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 	}
 	state, err := handler.deploymentState.GetSubsystemDeploymentState(request.Context(), principal.Tenant.ID, applicationCode, environment)
 	if err != nil {
-		handler.writeError(writer, request, err)
-		return
+		// A manually registered application/environment predates, or intentionally
+		// bypasses, a managed deployment record. It is still a valid control-plane
+		// resource, so the status read must not turn the whole runtime card into a
+		// 404. Resolve the registry boundary first; an unknown application remains
+		// a real 404, while a known one receives an explicit safe state.
+		if !errors.Is(err, application.ErrNotFound) {
+			handler.writeError(writer, request, err)
+			return
+		}
+		applicationID, environmentID, resolveErr := handler.service.ResolveApplicationEnvironment(request.Context(), principal.Tenant.ID, applicationCode, environment)
+		if resolveErr != nil {
+			handler.writeError(writer, request, resolveErr)
+			return
+		}
+		state = application.SubsystemDeploymentState{
+			TenantID: principal.Tenant.ID, ApplicationID: applicationID, EnvironmentID: environmentID,
+			ApplicationCode: applicationCode, Environment: environment,
+			Status: application.SubsystemDeploymentStatusUnmanaged, Operation: "NONE",
+		}
 	}
 	state = handler.recoverStaleSubsystemDeployment(request.Context(), state)
 	writer.Header().Set("Cache-Control", "no-store, private")
@@ -1783,6 +1876,9 @@ func pointerToTime(value time.Time) *time.Time {
 }
 
 func subsystemDeploymentStateNextAction(state application.SubsystemDeploymentState) string {
+	if state.Status == application.SubsystemDeploymentStatusUnmanaged {
+		return "该应用环境已登记，但尚未产生受控部署记录；请通过本地编排状态和健康检查确认服务运行。只有部署 Agent 已明确支持该应用时，才能执行受控运行时更新"
+	}
 	if state.Status != application.SubsystemDeploymentStatusFailed {
 		return ""
 	}

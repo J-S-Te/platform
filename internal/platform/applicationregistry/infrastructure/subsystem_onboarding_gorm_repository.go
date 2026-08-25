@@ -505,6 +505,28 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
+		// ADOPT is the single lifecycle operation allowed to create a state for a
+		// directory-only environment. Resolve the active tenant-scoped boundary
+		// server-side; arbitrary update/retry requests must continue to fail when
+		// their deployment record is absent.
+		if operation == "ADOPT" && status == application.SubsystemDeploymentStatusUpdating {
+			var scope struct {
+				ApplicationID string `gorm:"column:application_id"`
+				EnvironmentID string `gorm:"column:environment_id"`
+			}
+			if err := repository.database.WithContext(ctx).Table("platform_application AS application").
+				Select("application.id AS application_id, environment.id AS environment_id").
+				Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
+				Where("application.tenant_id = ? AND application.code = ? AND application.status = ? AND environment.environment = ? AND environment.status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), "ACTIVE", strings.ToLower(strings.TrimSpace(environment)), "ACTIVE").
+				Take(&scope).Error; err != nil {
+				return mapManagementError(err)
+			}
+			return repository.database.WithContext(ctx).Create(&subsystemDeploymentStateModel{
+				TenantID: strings.TrimSpace(tenantID), ApplicationID: scope.ApplicationID, EnvironmentID: scope.EnvironmentID,
+				ApplicationCode: strings.TrimSpace(applicationCode), Environment: strings.ToLower(strings.TrimSpace(environment)),
+				Status: status, Operation: operation, Generation: 1, AttemptCount: 1, StartedAt: &now, CreatedAt: now, UpdatedAt: now,
+			}).Error
+		}
 		return application.ErrNotFound
 	}
 	return nil

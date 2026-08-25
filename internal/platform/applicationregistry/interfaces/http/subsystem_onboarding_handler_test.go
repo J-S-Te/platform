@@ -892,6 +892,120 @@ func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 	}
 }
 
+func TestUpdateSubsystemDoesNotConvertUnmanagedEnvironmentIntoProvisionFailure(t *testing.T) {
+	t.Parallel()
+	// Directory registration deliberately has no deployment-state row.  Until the
+	// dedicated adoption endpoint exists, the legacy update endpoint must refuse
+	// that state before invoking the Agent or persisting PROVISION_FAILED.
+	stateStore := &recordingSubsystemDeploymentStateStore{contextErr: application.ErrNotFound}
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(`{"application_code":"settlement","environment":"dev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(stateStore.transitions) != 0 {
+		t.Fatalf("unmanaged update must not write lifecycle transitions: %#v", stateStore.transitions)
+	}
+	if provisioner.input.ApplicationCode != "" {
+		t.Fatalf("unmanaged update must not invoke the Agent: %#v", provisioner.input)
+	}
+}
+
+func TestAdoptSubsystemCreatesManagedLifecycleForUnmanagedEnvironment(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{contextErr: application.ErrNotFound}
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
+			Application: application.Application{ID: "settlement-app"},
+			Environment: application.Environment{ID: "settlement-dev"},
+		}}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	handler.serviceCredentials = &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
+		ID: "settlement-catalog-client", ApplicationID: "settlement-app", EnvironmentID: "settlement-dev",
+		ClientID: "settlement-dev-catalog-publisher", Status: "ACTIVE",
+	}}}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-adopt", bytes.NewBufferString(`{"application_code":"settlement","environment":"dev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.AdoptSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(stateStore.transitions) != 2 ||
+		stateStore.transitions[0].status != application.SubsystemDeploymentStatusUpdating || stateStore.transitions[0].operation != "ADOPT" ||
+		stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "ADOPT" {
+		t.Fatalf("adoption transitions = %#v, want ADOPT UPDATING then READY", stateStore.transitions)
+	}
+	if provisioner.input.ApplicationID != "settlement-app" || provisioner.input.ApplicationCode != "settlement" || provisioner.input.Environment != "dev" {
+		t.Fatalf("adoption did not pass the resolved deployment boundary: %#v", provisioner.input)
+	}
+	if provisioner.input.CatalogPublisherClientID != "settlement-dev-catalog-publisher" || provisioner.input.CatalogPublisherClientSecret != "retry-secret" {
+		t.Fatalf("adoption did not mint the Settlement catalog publisher credential: %#v", provisioner.input)
+	}
+}
+
+func TestRetrySubsystemAdoptsDirectoryOnlyEnvironment(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{contextErr: application.ErrNotFound}
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	service := &stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
+		Application: application.Application{ID: "data-analysis-app"},
+		Environment: application.Environment{ID: "data-analysis-prod"},
+	}}
+	access := &recordingSubsystemAccessManager{roleCode: "dashboard_admin"}
+	handler, err := NewSubsystemOnboardingHandler(
+		service, provisioner, access, "http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"data_analysis","environment":"prod"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(stateStore.transitions) != 2 ||
+		stateStore.transitions[0].status != application.SubsystemDeploymentStatusUpdating || stateStore.transitions[0].operation != "RETRY" ||
+		stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady || stateStore.transitions[1].operation != "RETRY" {
+		t.Fatalf("retry transitions = %#v, want RETRY UPDATING then READY", stateStore.transitions)
+	}
+	if provisioner.input.ApplicationID != "data-analysis-app" || provisioner.input.ApplicationCode != "data_analysis" || provisioner.input.Environment != "prod" {
+		t.Fatalf("retry did not resolve directory-only application context: %#v", provisioner.input)
+	}
+}
+
 func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
@@ -931,6 +1045,34 @@ func TestGetSubsystemStatusReturnsDurableSafeState(t *testing.T) {
 	for _, forbidden := range []string{"client_secret", "command", "filesystem", "container_id"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("status response leaked %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestGetSubsystemStatusReturnsUnmanagedStateForRegisteredEnvironmentWithoutDeployment(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{getErr: application.ErrNotFound}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-status?application_code=settlement&environment=dev", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.GetSubsystemStatus(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	for _, expected := range []string{`"application_code":"settlement"`, `"environment":"dev"`, `"status":"UNMANAGED"`, `"operation":"NONE"`, `"next_action":`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("response missing %s: %s", expected, response.Body.String())
 		}
 	}
 }
