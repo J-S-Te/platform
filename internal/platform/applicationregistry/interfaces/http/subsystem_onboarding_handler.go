@@ -1253,6 +1253,11 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户与商机管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "客户与商机管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
 		}
+	case "data_analysis":
+		return []updateServiceCredentialRequirement{{
+			purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher",
+			clientName: "数据看板与统计分析系统 Audit Publisher", scope: "audit.ingest",
+		}}
 	default:
 		return nil
 	}
@@ -1342,7 +1347,7 @@ func (handler *SubsystemOnboardingHandler) ensureCatalogPublisherCredential(ctx 
 	}
 	created, createErr := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
 		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
-		ClientID: clientID, ClientName: "结算与开票管理系统 Authorization Catalog Publisher", ClientType: "service",
+		ClientID: clientID, ClientName: applicationCode + " Authorization Catalog Publisher", ClientType: "service",
 		TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
 		GrantTypes: []string{"client_credentials"}, Scopes: []string{"authorization.catalog.sync"},
 	})
@@ -1446,6 +1451,23 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		updateInput.PathPrefix = pathPrefix
 		updateInput.UpstreamURL = upstreamURL
 	}
+	// Directory-only registration deliberately does not create runtime credentials.  A
+	// subsequent ADOPT/RETRY must therefore re-resolve the Keycloak web Client and pass its
+	// current secret to the Agent; otherwise the Agent starts the container with
+	// PENDING_ONBOARDING and the application fails with a catalog-token 401.
+	keycloakRuntimeCredentialRefresh := strings.EqualFold(effectiveIssuerAlias, "keycloak") &&
+		(requestedOperation == "ADOPT" || isRetry) && !keycloakCutover
+	if keycloakRuntimeCredentialRefresh && handler.keycloakControl != nil && strings.TrimSpace(updateInput.RedirectURI) != "" {
+		canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
+		resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
+		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
+		if clientErr != nil {
+			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+			return
+		}
+		updateInput.ClientID, updateInput.ClientSecret = client.ClientID, client.ClientSecret
+		updateInput.AuthenticationRuntimeUpdate = true
+	}
 	if keycloakCutover {
 		transport, transportErr := application.ValidateKeycloakCutoverTransport(publicBaseURL, pathPrefix, handler.keycloakRequireHTTPS)
 		if transportErr != nil {
@@ -1539,7 +1561,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		return
 	}
 	updateInput.ServiceCredentials = serviceCredentials
-	if applicationCode == "settlement" && (operation == "ADOPT" || operation == "RETRY") {
+	if handler.serviceCredentials != nil && (applicationCode == "settlement" || applicationCode == "data_analysis") && (operation == "ADOPT" || operation == "RETRY") {
 		publisher, publisherSecret, publisherErr := handler.ensureCatalogPublisherCredential(
 			request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID, applicationCode, environment, principal.User.ID,
 		)
