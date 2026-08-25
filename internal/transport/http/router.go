@@ -243,6 +243,13 @@ func NewRouter(
 			apiRouter.GET("/subsystem-capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemCapabilities))
 			apiRouter.GET("/subsystem-discovery", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.DiscoverSubsystemCandidates))
 			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemStatus))
+			apiRouter.POST("/subsystem-adoption",
+				middleware.RequirePermission("platform:application:update"),
+				middleware.RequirePermission("platform:application-environment:update"),
+				middleware.RequirePermission("platform:application-login-target:update"),
+				middleware.RequirePermission("platform:oauth-client:disable"),
+				adaptHandler(operational.SubsystemOnboarding.AdoptSubsystem),
+			)
 			// V2 directory registration deliberately stops before any OIDC Client,
 			// credential or deployment mutation. Keycloak owns client lifecycle via
 			// the dedicated keycloak-integration endpoints.

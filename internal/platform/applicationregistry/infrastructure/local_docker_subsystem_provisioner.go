@@ -65,10 +65,11 @@ func publicURLOrigin(value, pathPrefix string) (string, bool) {
 }
 
 const (
-	integratedContractApplicationCode = "contract_management"
-	integratedCustomerApplicationCode = "customer_and_opportunity"
-	integratedPortalApplicationCode   = "customer_portal"
-	integratedProjectApplicationCode  = "project_management"
+	integratedContractApplicationCode   = "contract_management"
+	integratedCustomerApplicationCode   = "customer_and_opportunity"
+	integratedPortalApplicationCode     = "customer_portal"
+	integratedProjectApplicationCode    = "project_management"
+	integratedSettlementApplicationCode = "settlement"
 	// This is the compatibility hash compiled into the customer authorization catalog. The
 	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
 	// deployment contract to be updated in the same reviewed release.
@@ -373,6 +374,18 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
+	// Settlement is compiled into the unified platform Compose topology. It must
+	// never fall through to the standalone-project branch, which could create a
+	// second database/network with the same browser route.
+	if input.ApplicationCode == integratedSettlementApplicationCode {
+		if err := provisioner.updateSettlementCatalogRuntimeConfiguration(input); err != nil {
+			return err
+		}
+		if err := provisioner.rebuildIntegratedSettlementStack(operationCtx, input); err != nil {
+			return provisioningError("rebuild settlement containers")
+		}
+		return nil
+	}
 
 	projectDirectory, err := provisioner.projectDirectory(input.ApplicationCode)
 	if err != nil {
@@ -926,6 +939,82 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedProjectStac
 	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--build", "--no-deps", "project-api")
 }
 
+// rebuildIntegratedSettlementStack keeps Settlement inside the single platform
+// Compose project. The sequence is deliberately bounded to its own database,
+// migration, API and Worker; it neither tears down shared services nor writes
+// Settlement runtime secrets. Runtime adoption must never build an image: the
+// deployment agent can be network-isolated and adoption is meant to verify the
+// already-published local image, not publish a new version.
+func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedSettlementStack(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "settlement-mysql"); err != nil {
+		return err
+	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "settlement-migrate"); err != nil {
+		return err
+	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-build", "--no-deps", "settlement-api"); err != nil {
+		return err
+	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--no-build", "--no-deps", "settlement-worker"); err != nil {
+		return err
+	}
+	return provisioner.syncSettlementCatalog(ctx, input)
+}
+
+func (provisioner *LocalDockerSubsystemProvisioner) updateSettlementCatalogRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
+	// An ordinary restart must not mint or overwrite a publisher secret. ADOPT and
+	// RETRY explicitly deliver a fresh one-time secret before arriving here.
+	if strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" {
+		return nil
+	}
+	projectDirectory, err := provisioner.projectDirectory(integratedSettlementApplicationCode)
+	if err != nil {
+		return err
+	}
+	environmentPath := filepath.Join(projectDirectory, ".env.local")
+	if err := updateSubsystemEnvironment(environmentPath, environmentPath, map[string]string{
+		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "true",
+		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": strings.TrimSpace(input.ApplicationID),
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID":      strings.TrimSpace(input.CatalogPublisherClientID),
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  input.CatalogPublisherClientSecret,
+	}); err != nil {
+		return provisioningError("write settlement catalog publisher configuration")
+	}
+	return nil
+}
+
+func (provisioner *LocalDockerSubsystemProvisioner) syncSettlementCatalog(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if strings.TrimSpace(input.ApplicationID) == "" || strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" {
+		// Normal restarts do not have a plaintext publisher credential. They must
+		// not be treated as a catalog publication attempt.
+		return nil
+	}
+	projectDirectory, err := provisioner.projectDirectory(integratedSettlementApplicationCode)
+	if err != nil {
+		return err
+	}
+	manifestPath := filepath.Join(projectDirectory, "authz", "permission-manifest.json")
+	if _, err := os.Stat(manifestPath); err != nil {
+		return provisioningError("Settlement authorization catalog manifest is unavailable")
+	}
+	runnerEnvironment := append(os.Environ(),
+		"PLATFORM_APPLICATION_ID="+input.ApplicationID,
+		// This is the control-plane API endpoint, not the OIDC issuer. The
+		// one-shot publisher joins the platform Compose network below, so it can
+		// use the stable service alias even when authentication is Keycloak.
+		"PLATFORM_BASE_URL=http://platform-api:8080",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID="+input.CatalogPublisherClientID,
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET="+input.CatalogPublisherClientSecret,
+	)
+	return provisioner.runner.Run(ctx, projectDirectory, runnerEnvironment, provisioner.config.DockerBinary,
+		"run", "--rm", "--network="+provisioner.config.PlatformDockerNetwork,
+		"-v", manifestPath+":/catalog/permission-manifest.json:ro",
+		"-e", "PLATFORM_APPLICATION_ID", "-e", "PLATFORM_BASE_URL",
+		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID", "-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET",
+		provisioner.config.CatalogSyncImage, "/usr/local/bin/sync-settlement-catalog.sh",
+	)
+}
+
 // rebuildIntegratedCustomerStack publishes the application-owned authorization catalog before
 // starting customer-api in OIDC mode. Catalog publication is a one-shot deployment operation;
 // normal API restarts therefore do not depend on a long-lived publisher credential remaining valid.
@@ -973,6 +1062,13 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 	if err != nil {
 		return err
 	}
+	settlementEnvironment := filepath.Join(workspaceRoot, "Settlement", ".env.local")
+	if info, statErr := os.Stat(settlementEnvironment); statErr != nil || info.IsDir() {
+		// Other integrated subsystem tests and legacy workspaces may not yet have
+		// Settlement. Compose still needs an env-file target while parsing its
+		// anchors, so use an empty safe file unless this is a Settlement operation.
+		settlementEnvironment = os.DevNull
+	}
 	// Integrated subsystem rebuilds must be deterministic and must not inherit a
 	// stale LAN override from the shell that started the platform API. The
 	// regular docker-local entrypoint sets these values explicitly; the
@@ -988,6 +1084,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"--env-file", customerEnvironment,
 		"--env-file", portalEnvironment,
 		"--env-file", projectEnvironment,
+		"--env-file", settlementEnvironment,
 		"-f", composeFile,
 	}
 	composeArguments = append(composeArguments, arguments...)
@@ -1021,6 +1118,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"CUSTOMER_RUNTIME_ENV_FILE="+customerEnvironment,
 		"PORTAL_RUNTIME_ENV_FILE="+portalEnvironment,
 		"PROJECT_RUNTIME_ENV_FILE="+projectEnvironment,
+		"SETTLEMENT_RUNTIME_ENV_FILE="+settlementEnvironment,
 		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
 		"SUBSYSTEM_HOST_PROJECTS_ROOT="+workspaceRoot,
 	)
@@ -1090,7 +1188,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) subsystemEnvironmentPaths(ap
 
 func isIntegratedSubsystem(applicationCode string) bool {
 	switch strings.TrimSpace(applicationCode) {
-	case integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode:
+	case integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode, integratedSettlementApplicationCode:
 		return true
 	default:
 		return false
@@ -1289,6 +1387,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) projectDirectory(application
 	directoryCode := applicationCode
 	if applicationCode == integratedPortalApplicationCode {
 		directoryCode = integratedCustomerApplicationCode
+	} else if applicationCode == integratedSettlementApplicationCode {
+		directoryCode = "Settlement"
 	}
 	candidate := filepath.Join(root, directoryCode)
 	candidate, err = filepath.EvalSymlinks(candidate)

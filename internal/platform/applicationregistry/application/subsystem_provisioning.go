@@ -20,9 +20,14 @@ const (
 	SubsystemDeploymentStatusFailed       = "PROVISION_FAILED"
 	SubsystemDeploymentStatusDraining     = "DRAINING"
 	SubsystemDeploymentStatusOffboarded   = "OFFBOARDED"
-	SubsystemServiceStatusDiscovered      = "DISCOVERED"
-	SubsystemServiceStatusHealthy         = "HEALTHY"
-	SubsystemServiceStatusUnavailable     = "UNAVAILABLE"
+	// SubsystemDeploymentStatusUnmanaged means the application/environment is
+	// registered in the control plane, but no managed deployment attempt has
+	// created a lifecycle record yet. It is deliberately not READY: operators
+	// must still verify or adopt the running service through the normal flow.
+	SubsystemDeploymentStatusUnmanaged = "UNMANAGED"
+	SubsystemServiceStatusDiscovered   = "DISCOVERED"
+	SubsystemServiceStatusHealthy      = "HEALTHY"
+	SubsystemServiceStatusUnavailable  = "UNAVAILABLE"
 )
 
 // SubsystemServiceInstance 是发现结果在控制面的轻量投影，只含路由元数据；凭据和宿主机路径

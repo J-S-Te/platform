@@ -10,6 +10,9 @@ import (
 )
 
 func TestHardcodedInitialSubsystemAdministratorRoles(t *testing.T) {
+	if got := hardcodedInitialSubsystemAdministratorRoles("settlement"); !reflect.DeepEqual(got, []string{"settlement_admin"}) {
+		t.Fatalf("settlement initial roles = %v", got)
+	}
 	if got := hardcodedInitialSubsystemAdministratorRoles("contract_management"); !reflect.DeepEqual(got, []string{"admin"}) {
 		t.Fatalf("contract initial roles = %v", got)
 	}
