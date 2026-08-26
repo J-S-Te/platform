@@ -275,7 +275,7 @@ func TestEnsureClaimMappersMigratesOnlyOwnedAndHistoricalAuthorizationMappers(t 
 	if err := control.ensureClaimMappers(context.Background(), "admin-token", "internal-client-id", "contract_management-prod-web"); err != nil {
 		t.Fatalf("ensureClaimMappers() error = %v", err)
 	}
-	for _, id := range []string{"id-old-token-use", "id-manual-permissions", "id-stale-platform"} {
+	for _, id := range []string{"id-identity_id", "id-old-token-use", "id-manual-permissions", "id-stale-platform"} {
 		if !deleted[id] {
 			t.Errorf("mapper %q was not deleted", id)
 		}
