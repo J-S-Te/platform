@@ -14,6 +14,7 @@ type keycloakClientStartupReconcileDependencies struct {
 	listRoleCodes func(context.Context, string, string) ([]string, error)
 	ensureRoles   func(context.Context, string, []string) error
 	saveMapping   func(context.Context, string, string, string, string, string) error
+	backfill      func(context.Context, string, string, string) error
 	markSynced    func(context.Context, string, string, string) error
 }
 
@@ -44,6 +45,13 @@ func reconcileStoredKeycloakClient(
 	}
 	if err := dependencies.saveMapping(ctx, mapping.TenantID, mapping.ApplicationID, mapping.EnvironmentID, mapping.Realm, clientID); err != nil {
 		return fmt.Errorf("save reconciled Keycloak Client mapping %s: %w", scope, err)
+	}
+	// 启动协调必须重复执行幂等回填：迁移、旧镜像或中断发布可能留下
+	// PENDING 投影却没有对应 outbox，回填可自动修复该孤儿状态。
+	if dependencies.backfill != nil {
+		if err := dependencies.backfill(ctx, mapping.TenantID, mapping.ApplicationID, mapping.EnvironmentID); err != nil {
+			return fmt.Errorf("backfill reconciled Keycloak authorization %s: %w", scope, err)
+		}
 	}
 	if err := dependencies.markSynced(ctx, mapping.TenantID, mapping.ApplicationID, mapping.EnvironmentID); err != nil {
 		return fmt.Errorf("mark reconciled Keycloak Client ready %s: %w", scope, err)

@@ -37,6 +37,10 @@ func TestReconcileStoredKeycloakClientVerifiesRealityBeforeMarkingReady(t *testi
 			calls = append(calls, "save")
 			return nil
 		},
+		backfill: func(context.Context, string, string, string) error {
+			calls = append(calls, "backfill")
+			return nil
+		},
 		markSynced: func(context.Context, string, string, string) error {
 			calls = append(calls, "synced")
 			return nil
@@ -52,6 +56,7 @@ func TestReconcileStoredKeycloakClientVerifiesRealityBeforeMarkingReady(t *testi
 		"catalog",
 		"roles:orders-prod-web:admin:viewer",
 		"save",
+		"backfill",
 		"synced",
 	}
 	if !reflect.DeepEqual(calls, want) {

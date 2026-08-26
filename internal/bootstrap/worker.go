@@ -304,6 +304,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			},
 			ensureRoles: controlPlane.EnsureClientRoles,
 			saveMapping: mappingStore.SaveKeycloakClientMapping,
+			backfill:    mappingStore.BackfillKeycloakAuthorization,
 			markSynced:  readinessStore.MarkKeycloakClientAndRoleCatalogSynced,
 		}
 		for _, mapping := range mappings {

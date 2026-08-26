@@ -14,6 +14,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
+	platformulid "github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -426,6 +427,12 @@ func (repository *GORMRepository) changeRole(ctx context.Context, command applic
 		if revision.RowsAffected != 1 {
 			return application.ErrUnavailable
 		}
+		// 外部客户角色不是经通用授权服务写入，因此必须在同一事务中补投影任务。
+		// 否则数据库中的 portal_customer 已生效，但 Keycloak 不会创建/更新用户，
+		// 客户首次通过邀请登录时会因 identity_id 等声明缺失而失败。
+		if err := enqueueKeycloakRoleProjection(tx, command.Principal.TenantID, command.PlatformUserID, target.ApplicationID, command.EventID, command.OccurredAt); err != nil {
+			return err
+		}
 		status := activeStatus
 		if revoke {
 			status = domain.IdentityDisabled
@@ -437,6 +444,37 @@ func (repository *GORMRepository) changeRole(ctx context.Context, command applic
 		return ingestAudit(ctx, tx, repository.audit, command.EventID, command.Principal, command.OccurredAt, action, command.PlatformUserID, summary, map[string]any{"application_code": command.ApplicationCode, "role_code": command.RoleCode, "status": status})
 	})
 	return response, err
+}
+
+// enqueueKeycloakRoleProjection 为每个已同步的 Keycloak Client 环境写入持久化投影任务。
+// 调用方已持有角色变更事务，因此外部客户角色一旦提交，就不会漏掉 Keycloak 对账。
+func enqueueKeycloakRoleProjection(tx *gorm.DB, tenantID, platformUserID, applicationID, initialEventID string, now time.Time) error {
+	var environmentIDs []string
+	if err := tx.Table("keycloak_application_client_mapping").
+		Where("tenant_id = ? AND application_id = ? AND status = ?", tenantID, applicationID, "SYNCED").
+		Order("environment_id ASC").
+		Pluck("environment_id", &environmentIDs).Error; err != nil {
+		return fmt.Errorf("load Keycloak Client mapping targets for external customer role: %w", err)
+	}
+	for index, environmentID := range environmentIDs {
+		eventID := initialEventID
+		if index > 0 {
+			var err error
+			eventID, err = platformulid.New(now)
+			if err != nil {
+				return fmt.Errorf("generate external customer Keycloak projection event ID: %w", err)
+			}
+		}
+		if err := tx.Table("keycloak_authorization_outbox").Create(map[string]any{
+			"id": eventID, "tenant_id": tenantID, "identity_id": platformUserID,
+			"application_id": applicationID, "environment_id": environmentID,
+			"event_type": "AUTHORIZATION_CHANGED", "authorization_revision": 0,
+			"status": "PENDING", "available_at": now, "attempts": 0, "created_at": now,
+		}).Error; err != nil {
+			return fmt.Errorf("enqueue external customer Keycloak authorization projection: %w", err)
+		}
+	}
+	return nil
 }
 
 func recordNonce(tx *gorm.DB, tenantID string, digest []byte, expiresAt, now any) error {
