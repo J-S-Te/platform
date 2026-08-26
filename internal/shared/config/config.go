@@ -131,17 +131,19 @@ type KeycloakConfig struct {
 	// RequireHTTPS gates only Keycloak cutover.  It deliberately defaults to
 	// false so existing HTTP deployments remain operable until their gateway
 	// and cookies have been migrated together.
-	RequireHTTPS           bool
-	AdminURL               string
-	PublicURL              string
-	PlatformBackchannelURL string
-	Realm                  string
-	AdminUsername          string
-	AdminPassword          string
-	AdminClientID          string
-	AdminClientSecret      string
-	BrokerClientID         string
-	BrokerClientSecret     string
+	RequireHTTPS                     bool
+	AdminURL                         string
+	PublicURL                        string
+	PlatformBackchannelURL           string
+	Realm                            string
+	AdminUsername                    string
+	AdminPassword                    string
+	AdminClientID                    string
+	AdminClientSecret                string
+	BrokerClientID                   string
+	BrokerClientSecret               string
+	CustomerPortalBrokerClientID     string
+	CustomerPortalBrokerClientSecret string
 	// OutageLoginPolicy declares the only supported degraded-mode behavior.
 	// Platform browser sessions are issued and checked locally; Keycloak never
 	// becomes an implicit fallback authentication source.
@@ -303,19 +305,21 @@ func Load() (Config, error) {
 			EnvironmentCode: value("AUDIT_ENVIRONMENT_CODE", "dev"),
 		},
 		Keycloak: KeycloakConfig{
-			Enabled:                keycloakEnabled,
-			RequireHTTPS:           keycloakRequireHTTPS,
-			AdminURL:               strings.TrimRight(value("KEYCLOAK_ADMIN_URL", "http://keycloak:8080"), "/"),
-			PublicURL:              strings.TrimRight(value("KEYCLOAK_PUBLIC_URL", ""), "/"),
-			PlatformBackchannelURL: strings.TrimRight(value("KEYCLOAK_PLATFORM_BACKCHANNEL_URL", "http://platform-api:8080"), "/"),
-			Realm:                  value("KEYCLOAK_REALM", "basic-platform"),
-			AdminUsername:          value("KEYCLOAK_ADMIN_USERNAME", ""),
-			AdminPassword:          value("KEYCLOAK_ADMIN_PASSWORD", ""),
-			AdminClientID:          value("KEYCLOAK_ADMIN_CLIENT_ID", ""),
-			AdminClientSecret:      value("KEYCLOAK_ADMIN_CLIENT_SECRET", ""),
-			BrokerClientID:         value("KEYCLOAK_PLATFORM_CLIENT_ID", ""),
-			BrokerClientSecret:     value("KEYCLOAK_PLATFORM_CLIENT_SECRET", ""),
-			OutageLoginPolicy:      strings.ToLower(value("KEYCLOAK_OUTAGE_LOGIN_POLICY", KeycloakOutagePolicyContinueExistingPlatformSessions)),
+			Enabled:                          keycloakEnabled,
+			RequireHTTPS:                     keycloakRequireHTTPS,
+			AdminURL:                         strings.TrimRight(value("KEYCLOAK_ADMIN_URL", "http://keycloak:8080"), "/"),
+			PublicURL:                        strings.TrimRight(value("KEYCLOAK_PUBLIC_URL", ""), "/"),
+			PlatformBackchannelURL:           strings.TrimRight(value("KEYCLOAK_PLATFORM_BACKCHANNEL_URL", "http://platform-api:8080"), "/"),
+			Realm:                            value("KEYCLOAK_REALM", "basic-platform"),
+			AdminUsername:                    value("KEYCLOAK_ADMIN_USERNAME", ""),
+			AdminPassword:                    value("KEYCLOAK_ADMIN_PASSWORD", ""),
+			AdminClientID:                    value("KEYCLOAK_ADMIN_CLIENT_ID", ""),
+			AdminClientSecret:                value("KEYCLOAK_ADMIN_CLIENT_SECRET", ""),
+			BrokerClientID:                   value("KEYCLOAK_PLATFORM_CLIENT_ID", ""),
+			BrokerClientSecret:               value("KEYCLOAK_PLATFORM_CLIENT_SECRET", ""),
+			CustomerPortalBrokerClientID:     value("KEYCLOAK_CUSTOMER_PORTAL_CLIENT_ID", ""),
+			CustomerPortalBrokerClientSecret: value("KEYCLOAK_CUSTOMER_PORTAL_CLIENT_SECRET", ""),
+			OutageLoginPolicy:                strings.ToLower(value("KEYCLOAK_OUTAGE_LOGIN_POLICY", KeycloakOutagePolicyContinueExistingPlatformSessions)),
 		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
 			Enabled:                       subsystemAutomationEnabled,

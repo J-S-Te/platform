@@ -160,7 +160,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 			},
 			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret, cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
 		))
-		subsystemHandler.ConfigureKeycloakBroker(keycloakBrokerRegistrar{applications: applicationManagementService, oauth: oauthClientManagementService, publicURL: cfg.Keycloak.PublicURL, realm: cfg.Keycloak.Realm})
+		subsystemHandler.ConfigureKeycloakBroker(keycloakBrokerRegistrar{applications: applicationManagementService, oauth: oauthClientManagementService, publicURL: cfg.Keycloak.PublicURL, realm: cfg.Keycloak.Realm, environment: keycloakBrokerEnvironment(cfg.Environment)})
 		subsystemHandler.ConfigureKeycloakAuthorizationCatalog(keycloakAuthorizationCatalogAdapter{service: applicationAccessService})
 		subsystemHandler.ConfigureKeycloakClientMappingStore(mappingStore)
 		readinessStore, readinessErr := keycloakauthorizationinfrastructure.NewSwitchReadinessStore(database)

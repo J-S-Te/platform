@@ -191,7 +191,11 @@ func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectiona
 	// Pre-link the upstream OIDC subject to the projected Keycloak user. This
 	// makes Broker login resolve the existing account directly instead of
 	// running Keycloak's just-in-time registration/profile-completion flow.
-	return admin.ensureBrokerIdentity(ctx, token, user, snapshot.IdentityID)
+	brokerAlias := platformBrokerAlias
+	if strings.EqualFold(strings.TrimSpace(snapshot.ApplicationCode), "customer_portal") {
+		brokerAlias = "basic-platform-customer"
+	}
+	return admin.ensureBrokerIdentityWithAlias(ctx, token, user, snapshot.IdentityID, brokerAlias)
 }
 
 func (admin *KeycloakAdmin) EnsureOrganizationGroups(ctx context.Context, snapshot projectionapplication.Snapshot) error {
@@ -359,6 +363,10 @@ type keycloakFederatedIdentity struct {
 }
 
 func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token string, user keycloakUser, identityID string) error {
+	return admin.ensureBrokerIdentityWithAlias(ctx, token, user, identityID, platformBrokerAlias)
+}
+
+func (admin *KeycloakAdmin) ensureBrokerIdentityWithAlias(ctx context.Context, token string, user keycloakUser, identityID, brokerAlias string) error {
 	identityID = strings.TrimSpace(identityID)
 	if user.ID == "" || identityID == "" {
 		return errors.New("Keycloak Broker identity is invalid")
@@ -381,7 +389,7 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 	}
 	staleLink := false
 	for _, identity := range identities {
-		if identity.IdentityProvider != platformBrokerAlias {
+		if identity.IdentityProvider != brokerAlias {
 			continue
 		}
 		if identity.UserID == identityID {
@@ -391,7 +399,7 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 		break
 	}
 	if staleLink {
-		owner, err := admin.findUserByBrokerIdentity(ctx, token, identityID)
+		owner, err := admin.findUserByBrokerIdentity(ctx, token, identityID, brokerAlias)
 		if err != nil {
 			return err
 		}
@@ -407,7 +415,7 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 		// The provider link belongs to this platform-managed Keycloak user but
 		// points at a stale upstream subject. Repair only after proving the desired
 		// upstream identity is not owned by a different Keycloak user.
-		response, err = admin.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(platformBrokerAlias), nil)
+		response, err = admin.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(brokerAlias), nil)
 		if err != nil {
 			return err
 		}
@@ -417,8 +425,8 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 			return admin.statusError("remove stale Keycloak Broker identity", status)
 		}
 	}
-	payload := keycloakFederatedIdentity{IdentityProvider: platformBrokerAlias, UserID: identityID, UserName: stableUsername(identityID)}
-	response, err = admin.request(ctx, token, stdhttp.MethodPost, base+"/"+url.PathEscape(platformBrokerAlias), payload)
+	payload := keycloakFederatedIdentity{IdentityProvider: brokerAlias, UserID: identityID, UserName: stableUsername(identityID)}
+	response, err = admin.request(ctx, token, stdhttp.MethodPost, base+"/"+url.PathEscape(brokerAlias), payload)
 	if err != nil {
 		return err
 	}
@@ -433,11 +441,11 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 			return readErr
 		}
 		for _, identity := range identities {
-			if identity.IdentityProvider == platformBrokerAlias && identity.UserID == identityID {
+			if identity.IdentityProvider == brokerAlias && identity.UserID == identityID {
 				return nil
 			}
 		}
-		owner, ownerErr := admin.findUserByBrokerIdentity(ctx, token, identityID)
+		owner, ownerErr := admin.findUserByBrokerIdentity(ctx, token, identityID, brokerAlias)
 		if ownerErr != nil {
 			return ownerErr
 		}
@@ -454,7 +462,7 @@ func (admin *KeycloakAdmin) ensureBrokerIdentity(ctx context.Context, token stri
 		return err
 	}
 	for _, identity := range identities {
-		if identity.IdentityProvider == platformBrokerAlias && identity.UserID == identityID {
+		if identity.IdentityProvider == brokerAlias && identity.UserID == identityID {
 			return nil
 		}
 	}
@@ -477,8 +485,8 @@ func (admin *KeycloakAdmin) brokerIdentities(ctx context.Context, token, userID 
 	return identities, nil
 }
 
-func (admin *KeycloakAdmin) findUserByBrokerIdentity(ctx context.Context, token, identityID string) (string, error) {
-	path := "/users?exact=true&idpAlias=" + url.QueryEscape(platformBrokerAlias) + "&idpUserId=" + url.QueryEscape(identityID)
+func (admin *KeycloakAdmin) findUserByBrokerIdentity(ctx context.Context, token, identityID, brokerAlias string) (string, error) {
+	path := "/users?exact=true&idpAlias=" + url.QueryEscape(brokerAlias) + "&idpUserId=" + url.QueryEscape(identityID)
 	response, err := admin.request(ctx, token, stdhttp.MethodGet, path, nil)
 	if err != nil {
 		return "", err
@@ -923,7 +931,7 @@ func (admin *KeycloakAdmin) LogoutIdentitySessions(ctx context.Context, identity
 		return err
 	}
 	userIDs := map[string]struct{}{}
-	brokerUserID, err := admin.findUserByBrokerIdentity(ctx, token, identityID)
+	brokerUserID, err := admin.findUserByBrokerIdentity(ctx, token, identityID, platformBrokerAlias)
 	if err != nil {
 		return fmt.Errorf("find Keycloak Broker user for logout: %w", err)
 	}
