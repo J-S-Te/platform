@@ -256,9 +256,11 @@ update_runtime_value() {
 previous_release="$(mktemp "$deploy_dir/.release.env.previous.XXXXXX")"
 next_release="$(mktemp "$deploy_dir/.release.env.next.XXXXXX")"
 previous_customer_runtime="$(mktemp "$deploy_dir/runtime/.customer.env.previous.XXXXXX")"
+previous_portal_runtime="$(mktemp "$deploy_dir/runtime/.portal.env.previous.XXXXXX")"
 release_updated=false
 release_committed=false
 customer_runtime_updated=false
+portal_runtime_updated=false
 restore_customer_runtime() {
   [[ "$customer_runtime_updated" == true && -f "$previous_customer_runtime" ]] || return 0
   if ! mv -f "$previous_customer_runtime" "$customer_runtime_file"; then
@@ -266,6 +268,14 @@ restore_customer_runtime() {
     return 1
   fi
   customer_runtime_updated=false
+}
+restore_portal_runtime() {
+  [[ "$portal_runtime_updated" == true && -f "$previous_portal_runtime" ]] || return 0
+  if ! mv -f "$previous_portal_runtime" "$portal_runtime_file"; then
+    echo "无法恢复上一版 Portal 运行配置：$portal_runtime_file" >&2
+    return 1
+  fi
+  portal_runtime_updated=false
 }
 cleanup() {
   local exit_code=$?
@@ -276,15 +286,17 @@ cleanup() {
   fi
   if [[ "$release_committed" != true ]]; then
     restore_customer_runtime || true
+    restore_portal_runtime || true
   fi
-  rm -f "$previous_release" "$next_release" "$previous_customer_runtime"
+  rm -f "$previous_release" "$next_release" "$previous_customer_runtime" "$previous_portal_runtime"
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
-chmod 600 "$previous_release" "$next_release" "$previous_customer_runtime"
-rm -f "$previous_release" "$previous_customer_runtime"
+chmod 600 "$previous_release" "$next_release" "$previous_customer_runtime" "$previous_portal_runtime"
+rm -f "$previous_release" "$previous_customer_runtime" "$previous_portal_runtime"
 ln "$release_file" "$previous_release"
 ln "$customer_runtime_file" "$previous_customer_runtime"
+ln "$portal_runtime_file" "$previous_portal_runtime"
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 ln "$release_file" "$deploy_dir/backups/releases/customer-${release_id}.env"
 chmod 600 "$deploy_dir/backups/releases/customer-${release_id}.env"
@@ -307,6 +319,7 @@ restore_release() {
   mv -f "$previous_release" "$release_file"
   chmod 600 "$release_file"
   restore_customer_runtime
+  restore_portal_runtime
   release_updated=false
 }
 
@@ -358,6 +371,25 @@ if ! update_runtime_value "$customer_runtime_file" OIDC_MAX_EFFECTIVE_ROLES "$em
 fi
 echo "已写入 CRM 镜像内嵌授权目录哈希：$embedded_crm_hash"
 echo "已写入 CRM 镜像内嵌最大有效角色数：$embedded_crm_max_roles"
+
+# Portal has its own embedded authorization catalog and its runtime file is
+# independent from CRM.  Keep the hash synchronized with the exact immutable
+# Portal image before health checks; otherwise portal-api exits with a catalog
+# incompatibility and the deployment rolls back after already restarting CRM.
+embedded_portal_hash="$(docker run --rm --entrypoint ./authz-catalog "$portal_image_ref" print portal 2>/dev/null \
+  | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
+if [[ ! "$embedded_portal_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+  restore_release
+  echo "无法从 Portal 不可变镜像读取有效授权目录哈希" >&2
+  exit 1
+fi
+portal_runtime_updated=true
+if ! update_runtime_value "$portal_runtime_file" PORTAL_ROLE_CONFIG_HASH "$embedded_portal_hash"; then
+  restore_release
+  echo "无法更新 Portal 运行配置中的授权目录哈希" >&2
+  exit 1
+fi
+echo "已写入 Portal 镜像内嵌授权目录哈希：$embedded_portal_hash"
 
 if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready; then
   release_committed=true
