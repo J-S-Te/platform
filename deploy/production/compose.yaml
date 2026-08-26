@@ -774,6 +774,11 @@ services:
 
   portal-invite-compensation-worker:
     <<: *customer-service
+    # The compensation worker is shipped in the portal image.  It shares the
+    # CRM runtime env/DB because it consumes CRM compensation tasks, but must
+    # not inherit the CRM image from x-customer-service; the deployment script
+    # deliberately verifies it against CUSTOMER_PORTAL_IMAGE.
+    image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
     command: ["./portal-invite-compensation-worker"]
     environment:
       PORTAL_INVITE_COMPENSATION_MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
