@@ -497,7 +497,10 @@ func validClientConfiguration(input OAuthClientCreateInput) bool {
 		return false
 	}
 	hasAuthorizationCode, hasClientCredentials := contains(input.GrantTypes, "authorization_code"), contains(input.GrantTypes, "client_credentials")
-	if hasAuthorizationCode && (!input.RequirePKCE || len(input.RedirectURIs) == 0) {
+	// 普通浏览器授权码客户端必须启用 PKCE。两个服务器托管的 Keycloak Broker
+	// 是受控例外：Keycloak Broker 当前不会向上游发出 PKCE challenge，强制开启
+	// 会导致 Broker 回调无法完成；例外同时限定客户端身份、类型和认证方式。
+	if hasAuthorizationCode && ((!input.RequirePKCE && !isServerManagedBrokerClient(input)) || len(input.RedirectURIs) == 0) {
 		return false
 	}
 	if hasClientCredentials && (input.ClientType == "public" || !oneOf(input.TokenAuthMethod, "client_secret_basic", "private_key_jwt")) {
@@ -513,6 +516,12 @@ func validClientConfiguration(input OAuthClientCreateInput) bool {
 		return false
 	}
 	return true
+}
+
+func isServerManagedBrokerClient(input OAuthClientCreateInput) bool {
+	return (input.ClientID == "keycloak-broker" || input.ClientID == "keycloak-customer-portal-broker") &&
+		input.ClientType == "confidential" && input.TokenAuthMethod == "client_secret_basic" &&
+		contains(input.GrantTypes, "authorization_code") && !contains(input.GrantTypes, "client_credentials")
 }
 
 func validGrantTypes(values []string) bool {

@@ -29,3 +29,22 @@ func TestValidRedirectURI(t *testing.T) {
 		})
 	}
 }
+
+func TestServerManagedBrokerPKCEExceptionIsNarrow(t *testing.T) {
+	base := OAuthClientCreateInput{
+		ClientID: "keycloak-broker", ClientType: "confidential", TokenAuthMethod: "client_secret_basic",
+		GrantTypes: []string{"authorization_code", "refresh_token"}, RedirectURIs: []string{"https://keycloak.example/broker"},
+	}
+	if !isServerManagedBrokerClient(base) {
+		t.Fatal("expected the dedicated platform broker to be recognized")
+	}
+	base.ClientID = "customer-web"
+	if isServerManagedBrokerClient(base) {
+		t.Fatal("ordinary browser client must not receive the broker exception")
+	}
+	base.ClientID = "keycloak-broker"
+	base.TokenAuthMethod = "none"
+	if isServerManagedBrokerClient(base) {
+		t.Fatal("broker exception must require confidential client authentication")
+	}
+}
