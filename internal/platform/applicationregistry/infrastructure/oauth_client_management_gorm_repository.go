@@ -202,6 +202,18 @@ func (repository *OAuthClientManagementRepository) GetOAuthClient(ctx context.Co
 	return view, mapOAuthClientManagementError(err)
 }
 
+// GetOAuthClientByClientID returns one safe aggregate projection using the public client_id
+// string instead of the internal aggregate ID. This avoids a full tenant scan when looking
+// up broker or well-known clients by their stable identifier.
+func (repository *OAuthClientManagementRepository) GetOAuthClientByClientID(ctx context.Context, tenantID, clientID string) (application.OAuthClientView, error) {
+	var client oauthClientManagementModel
+	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND client_id = ? AND status = ?", tenantID, clientID, "ACTIVE").Take(&client).Error; err != nil {
+		return application.OAuthClientView{}, mapOAuthClientManagementError(err)
+	}
+	view, err := oauthClientManagementView(repository.database.WithContext(ctx), tenantID, client.ID)
+	return view, mapOAuthClientManagementError(err)
+}
+
 // ReplaceOAuthClientScopes 先锁定聚合并校验版本，再整体替换 scope 子表并递增版本；
 // 管理员基于旧页面提交时不会静默覆盖另一管理员刚完成的安全收紧。
 func (repository *OAuthClientManagementRepository) ReplaceOAuthClientScopes(ctx context.Context, input application.OAuthClientScopesUpdateInput, now time.Time) (application.OAuthClientView, error) {
