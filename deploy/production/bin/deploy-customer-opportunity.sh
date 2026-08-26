@@ -224,7 +224,12 @@ portal_compensation_worker_configured() {
     PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_SECRET \
     PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_ID \
     PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_SECRET; do
-    usable_value "$(env_value_from "$portal_runtime_file" "$key")" || return 1
+    # portal-invite-compensation-worker inherits the CRM service anchor and
+    # therefore receives CUSTOMER_RUNTIME_ENV_FILE (runtime/customer.env),
+    # not PORTAL_RUNTIME_ENV_FILE.  Reading portal.env here made a complete
+    # Agent-rendered configuration look incomplete and silently skipped the
+    # worker in production.
+    usable_value "$(env_value_from "$customer_runtime_file" "$key")" || return 1
   done
 }
 
@@ -361,12 +366,14 @@ if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready;
   exit 0
 fi
 
-if portal_compensation_worker_configured; then
-  customer_worker_services+=(portal-invite-compensation-worker)
-  echo "Portal 邀请补偿 Worker 凭据完整，纳入本次发布"
-else
-  echo "Portal 邀请补偿 Worker 凭据未完整配置，安全跳过该 Worker；CRM/Portal API 与 CRM Workers 继续发布"
+if ! portal_compensation_worker_configured; then
+  restore_release
+  rm -f "$previous_release"
+  echo "Portal 邀请补偿 Worker 凭据未完整配置：请在 customer.env 对应的 customer_portal/prod 应用接入中重试，然后重新发布 CRM 与 Portal" >&2
+  exit 1
 fi
+customer_worker_services+=(portal-invite-compensation-worker)
+echo "Portal 邀请补偿 Worker 凭据完整，纳入本次发布"
 
 backup_database() {
   local mysql_service="$1" database="$2" label="$3"
