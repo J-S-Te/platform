@@ -1253,6 +1253,19 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户与商机管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "客户与商机管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
 		}
+	case "customer_portal":
+		// Portal 的服务凭据同时会被写入 portal.env 与 customer.env：门户 API
+		// 负责身份映射/邀请校验，CRM 侧的补偿 Worker 负责异步修复跨系统状态。
+		// 旧版本部署可能已经创建了这些 OAuth Client，但运行时文件没有收到
+		// 明文 Secret；受控更新必须重新签发并原子下发，不能依赖只写密钥回读。
+		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialExternalUserProvision, suffix: "external-user-provision", clientName: "客户自助门户 External User Provisioner", scope: "external_user.provision", rotate: true},
+			{purpose: application.ServiceCredentialApplicationRoleAssign, suffix: "role-assign", clientName: "客户自助门户 Application Role Assigner", scope: "application_role.assign", rotate: true},
+			{purpose: application.ServiceCredentialApplicationRoleRevoke, suffix: "role-revoke", clientName: "客户自助门户 Application Role Revoker", scope: "application_role.revoke", rotate: true},
+			{purpose: application.ServiceCredentialPortalMappingProvision, suffix: "portal-mapping-provision", clientName: "客户自助门户 Portal Identity Mapping Provisioner", scope: "portal.identity_mapping.provision", rotate: true},
+			{purpose: application.ServiceCredentialPortalMappingDisable, suffix: "portal-mapping-disable", clientName: "客户自助门户 Portal Identity Mapping Disabler", scope: "portal.identity_mapping.disable", rotate: true},
+			{purpose: application.ServiceCredentialPortalInviteVerify, suffix: "portal-invite-verify", clientName: "客户自助门户 Portal Invite Verifier", scope: "portal.invite.verify", rotate: true},
+		}
 	case "data_analysis":
 		return []updateServiceCredentialRequirement{{
 			purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher",

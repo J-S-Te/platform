@@ -94,3 +94,42 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		t.Fatalf("retry did not issue a replacement delivery secret: input=%#v credentials=%#v", manager.secretInput, credentials)
 	}
 }
+
+func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.T) {
+	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{
+		{ID: "mapping-client-id", ClientID: "customer_portal-prod-portal-mapping-provision", Status: "ACTIVE"},
+	}}
+	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+	credentials, err := handler.ensureUpdateServiceCredentials(
+		context.Background(), "tenant-1", "application-1", "environment-1",
+		"customer_portal", "prod", "operator-1", "UPDATE",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.secretInputs) != 1 || manager.secretInputs[0].OAuthClientID != "mapping-client-id" {
+		t.Fatalf("existing portal mapping credential was not redelivered: %#v", manager.secretInputs)
+	}
+	if len(manager.createdInputs) != 5 {
+		t.Fatalf("portal binding clients were not backfilled: %#v", manager.createdInputs)
+	}
+	wantPurposes := map[string]bool{
+		application.ServiceCredentialExternalUserProvision:  false,
+		application.ServiceCredentialApplicationRoleAssign:  false,
+		application.ServiceCredentialApplicationRoleRevoke:  false,
+		application.ServiceCredentialPortalMappingProvision: true,
+		application.ServiceCredentialPortalMappingDisable:   false,
+		application.ServiceCredentialPortalInviteVerify:     false,
+	}
+	for _, credential := range credentials {
+		if _, ok := wantPurposes[credential.Purpose]; !ok {
+			t.Fatalf("unexpected portal credential purpose: %#v", credential)
+		}
+		wantPurposes[credential.Purpose] = true
+	}
+	for purpose, present := range wantPurposes {
+		if !present {
+			t.Fatalf("portal credential %q was not delivered: %#v", purpose, credentials)
+		}
+	}
+}
