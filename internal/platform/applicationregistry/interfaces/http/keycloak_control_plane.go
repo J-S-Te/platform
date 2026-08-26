@@ -1097,6 +1097,13 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 	}
 	managedMappers := make([]keycloakManagedProtocolMapper, 0, len(keycloakIdentityClaimMappings)+3)
 	for _, claim := range keycloakIdentityClaimMappings {
+		// identity_id is managed by the explicit stable mapper below.  The legacy
+		// generic projection named platform-identity_id used to map this attribute
+		// to the reserved OIDC `sub` claim, which overwrote the canonical subject
+		// and made Portal reject otherwise valid authorization-code logins.
+		if claim.Name == "identity_id" {
+			continue
+		}
 		managedMappers = append(managedMappers, keycloakManagedProtocolMapper{
 			Name:           "platform-" + claim.Name,
 			ProtocolMapper: "oidc-usermodel-attribute-mapper",
