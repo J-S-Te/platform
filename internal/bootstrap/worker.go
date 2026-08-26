@@ -187,7 +187,9 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		// to click "sync" after shipping a Broker policy or profile change.
 		brokerClientID := strings.TrimSpace(cfg.Keycloak.BrokerClientID)
 		brokerClientSecret := strings.TrimSpace(cfg.Keycloak.BrokerClientSecret)
-		if brokerClientID == "" || brokerClientSecret == "" {
+		customerPortalBrokerClientID := strings.TrimSpace(cfg.Keycloak.CustomerPortalBrokerClientID)
+		customerPortalBrokerClientSecret := strings.TrimSpace(cfg.Keycloak.CustomerPortalBrokerClientSecret)
+		if brokerClientID == "" || brokerClientSecret == "" || customerPortalBrokerClientID == "" || customerPortalBrokerClientSecret == "" {
 			managementRepository, managementErr := applicationregistryinfrastructure.NewManagementRepository(db)
 			if managementErr != nil {
 				_ = database.Close(db)
@@ -223,18 +225,29 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 				_ = logFile.Close()
 				return nil, fmt.Errorf("resolve default tenant for Keycloak Broker: %w", tenantErr)
 			}
-			brokerClientID, brokerClientSecret, tenantErr = (keycloakBrokerRegistrar{
+			registrar := keycloakBrokerRegistrar{
 				applications: managementService,
 				oauth:        oauthService,
 				publicURL:    cfg.Keycloak.PublicURL,
 				realm:        cfg.Keycloak.Realm,
-			}).EnsureKeycloakBroker(context.Background(), tenantID)
+				environment:  keycloakBrokerEnvironment(cfg.Environment),
+			}
+			if brokerClientID == "" || brokerClientSecret == "" {
+				brokerClientID, brokerClientSecret, tenantErr = registrar.EnsureKeycloakBroker(context.Background(), tenantID)
+				if tenantErr != nil {
+					_ = database.Close(db)
+					_ = logFile.Close()
+					return nil, fmt.Errorf("restore Keycloak Broker credentials: %w", tenantErr)
+				}
+				logger.Info("restored Keycloak Broker credentials from platform OAuth client", "client_id", brokerClientID)
+			}
+			customerPortalBrokerClientID, customerPortalBrokerClientSecret, tenantErr = registrar.EnsureCustomerPortalBroker(context.Background(), tenantID)
 			if tenantErr != nil {
 				_ = database.Close(db)
 				_ = logFile.Close()
-				return nil, fmt.Errorf("restore Keycloak Broker credentials: %w", tenantErr)
+				return nil, fmt.Errorf("restore customer portal Broker credentials: %w", tenantErr)
 			}
-			logger.Info("restored Keycloak Broker credentials from platform OAuth client", "client_id", brokerClientID)
+			logger.Info("restored customer portal Broker credentials from platform OAuth client", "client_id", customerPortalBrokerClientID)
 		}
 		controlPlane := applicationregistryhttp.NewKeycloakControlPlaneWithCredentials(
 			cfg.Keycloak.AdminURL, cfg.Keycloak.Realm,
@@ -254,6 +267,13 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 				_ = database.Close(db)
 				_ = logFile.Close()
 				return nil, fmt.Errorf("reconcile Keycloak Broker policy: %w", err)
+			}
+		}
+		if customerPortalBrokerClientID != "" && customerPortalBrokerClientSecret != "" {
+			if err := controlPlane.EnsureCustomerPortalBroker(context.Background(), customerPortalBrokerClientID, customerPortalBrokerClientSecret); err != nil {
+				_ = database.Close(db)
+				_ = logFile.Close()
+				return nil, fmt.Errorf("reconcile customer portal Broker policy: %w", err)
 			}
 		}
 		mappingStore, err := keycloakauthorizationinfrastructure.NewClientMappingStore(db)

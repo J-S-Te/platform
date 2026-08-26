@@ -37,12 +37,15 @@ func TestKeycloakIdentityClaimMappingsKeepTokenSmallAndUseIdentityAsSubject(t *t
 
 func TestBrokerRepresentationSkipsKeycloakProfileRegistration(t *testing.T) {
 	control := NewKeycloakControlPlane("http://keycloak:8080", "platform", "admin", "secret", "broker", "broker-secret", "http://platform.example", "http://platform-api:8080")
-	payload := control.brokerRepresentation("broker", "broker-secret", "http://platform-api:8080")
+	payload := control.brokerRepresentation("basic-platform", "基础平台", "broker", "broker-secret", "http://platform-api:8080")
 	if got := payload["updateProfileFirstLoginMode"]; got != "off" {
 		t.Fatalf("updateProfileFirstLoginMode = %#v, want off", got)
 	}
 	if got := payload["firstBrokerLoginFlowAlias"]; got != keycloakPrelinkedBrokerFlowAlias {
 		t.Fatalf("firstBrokerLoginFlowAlias = %#v, want %q", got, keycloakPrelinkedBrokerFlowAlias)
+	}
+	if got := payload["alias"]; got != "basic-platform" {
+		t.Fatalf("broker alias = %#v, want basic-platform", got)
 	}
 	config, ok := payload["config"].(map[string]string)
 	if !ok {
@@ -50,6 +53,18 @@ func TestBrokerRepresentationSkipsKeycloakProfileRegistration(t *testing.T) {
 	}
 	if got := config["defaultScope"]; got != "openid profile" {
 		t.Fatalf("defaultScope = %q, want optional email omitted", got)
+	}
+}
+
+func TestCustomerPortalBrokerRepresentationUsesIsolatedAlias(t *testing.T) {
+	control := NewKeycloakControlPlane("http://keycloak:8080", "platform", "admin", "secret", "broker", "broker-secret", "http://platform.example", "http://platform-api:8080")
+	payload := control.brokerRepresentation("basic-platform-customer", "客户自助门户", "customer-broker", "customer-secret", "http://platform-api:8080")
+	if got := payload["alias"]; got != "basic-platform-customer" {
+		t.Fatalf("customer broker alias = %#v, want basic-platform-customer", got)
+	}
+	config, ok := payload["config"].(map[string]string)
+	if !ok || config["clientId"] != "customer-broker" {
+		t.Fatalf("customer broker client config = %#v", payload["config"])
 	}
 }
 
@@ -130,7 +145,7 @@ func TestEnsureBrokerReviewProfileDisabledUpdatesEffectiveFlowConfig(t *testing.
 	defer server.Close()
 
 	control := NewKeycloakControlPlane(server.URL, "platform", "", "", "", "", "", "")
-	if err := control.ensureBrokerReviewProfileDisabled(context.Background(), "admin-token"); err != nil {
+	if err := control.ensureBrokerReviewProfileDisabled(context.Background(), "admin-token", "basic-platform"); err != nil {
 		t.Fatalf("ensureBrokerReviewProfileDisabled() error = %v", err)
 	}
 	config, _ := updated["config"].(map[string]any)

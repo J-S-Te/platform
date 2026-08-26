@@ -386,9 +386,9 @@ func asBool(value any) bool {
 	return current
 }
 
-func (control *keycloakControlPlane) brokerRepresentation(clientID, clientSecret, backchannel string) map[string]any {
+func (control *keycloakControlPlane) brokerRepresentation(alias, displayName, clientID, clientSecret, backchannel string) map[string]any {
 	return map[string]any{
-		"alias": "basic-platform", "displayName": "基础平台", "providerId": "oidc",
+		"alias": alias, "displayName": displayName, "providerId": "oidc",
 		"enabled": true, "trustEmail": true, "storeToken": false,
 		"updateProfileFirstLoginMode": "off",
 		"firstBrokerLoginFlowAlias":   keycloakPrelinkedBrokerFlowAlias,
@@ -530,9 +530,9 @@ func (control *keycloakControlPlane) ensurePrelinkedBrokerFlow(ctx context.Conte
 // setting. updateProfileFirstLoginMode on the IdentityProvider representation
 // is retained for compatibility, but current Keycloak versions read the mode
 // from the Review Profile authenticator execution in the first Broker flow.
-func (control *keycloakControlPlane) ensureBrokerReviewProfileDisabled(ctx context.Context, token string) error {
+func (control *keycloakControlPlane) ensureBrokerReviewProfileDisabled(ctx context.Context, token, brokerAlias string) error {
 	realmPath := "/admin/realms/" + url.PathEscape(control.realm)
-	providerPath := realmPath + "/identity-provider/instances/" + url.PathEscape("basic-platform")
+	providerPath := realmPath + "/identity-provider/instances/" + url.PathEscape(brokerAlias)
 	response, err := control.request(ctx, token, stdhttp.MethodGet, providerPath, nil)
 	if err != nil {
 		return err
@@ -747,9 +747,21 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 	return nil
 }
 
-// EnsureBroker registers Basic Platform as the Realm's only upstream identity
-// provider and imports the authorization claims into Keycloak user attributes.
+// EnsureBroker registers an upstream Basic Platform identity provider and
+// imports the authorization claims into Keycloak user attributes. The alias is
+// intentionally explicit: internal employees and external customers use
+// different Broker clients so one application's callback cannot overwrite the
+// other's client credentials.
 func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID, clientSecret string) error {
+	return control.ensureBroker(ctx, "basic-platform", "基础平台", clientID, clientSecret)
+}
+
+// EnsureCustomerPortalBroker configures the isolated customer portal IdP.
+func (control *keycloakControlPlane) EnsureCustomerPortalBroker(ctx context.Context, clientID, clientSecret string) error {
+	return control.ensureBroker(ctx, "basic-platform-customer", "客户自助门户", clientID, clientSecret)
+}
+
+func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAlias, displayName, clientID, clientSecret string) error {
 	token, err := control.token(ctx)
 	if err != nil {
 		return err
@@ -760,7 +772,7 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 	if err := control.ensurePrelinkedBrokerFlow(ctx, token); err != nil {
 		return err
 	}
-	base := "/admin/realms/" + url.PathEscape(control.realm) + "/identity-provider/instances/basic-platform"
+	base := "/admin/realms/" + url.PathEscape(control.realm) + "/identity-provider/instances/" + url.PathEscape(brokerAlias)
 	response, err := control.request(ctx, token, stdhttp.MethodGet, base, nil)
 	if err != nil {
 		return err
@@ -783,7 +795,7 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 	// before they can enter a subsystem. Never expose Keycloak's first-login
 	// profile completion form: email and split first/last names are optional in
 	// the platform and must not become an additional registration contract.
-	payload := control.brokerRepresentation(clientID, clientSecret, backchannel)
+	payload := control.brokerRepresentation(brokerAlias, displayName, clientID, clientSecret, backchannel)
 	if exists {
 		response, err = control.request(ctx, token, stdhttp.MethodPut, base, payload)
 	} else {
@@ -818,6 +830,9 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 	// no-registration contract.
 	if verifiedBroker.FirstBrokerLoginFlowAlias != keycloakPrelinkedBrokerFlowAlias {
 		return fmt.Errorf("Keycloak Broker policy did not converge to prelinked-only mode")
+	}
+	if err := control.ensureBrokerReviewProfileDisabled(ctx, token, brokerAlias); err != nil {
+		return err
 	}
 	if err := control.ensureBrokerUserProfile(ctx, token); err != nil {
 		return err
@@ -854,8 +869,9 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		return err
 	}
 	for _, claim := range keycloakIdentityClaimMappings {
-		mapper := map[string]any{"name": "platform-" + claim.Name, "identityProviderAlias": "basic-platform", "identityProviderMapper": "oidc-user-attribute-idp-mapper", "config": map[string]string{"syncMode": "INHERIT", "claim": claim.Name, "user.attribute": claim.Name}}
-		existing := mapperIDs["platform-"+claim.Name]
+		mapper := map[string]any{"name": brokerAlias + "-" + claim.Name, "identityProviderAlias": brokerAlias, "identityProviderMapper": "oidc-user-attribute-idp-mapper", "config": map[string]string{"syncMode": "INHERIT", "claim": claim.Name, "user.attribute": claim.Name}}
+		mapperName := brokerAlias + "-" + claim.Name
+		existing := mapperIDs[mapperName]
 		mapperID := existing.ID
 		if mapperID != "" && existing.Config["syncMode"] == "INHERIT" && existing.Config["claim"] == claim.Name && existing.Config["user.attribute"] == claim.Name {
 			continue
@@ -891,7 +907,7 @@ func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID,
 		if err != nil {
 			return err
 		}
-		existing = mapperIDs["platform-"+claim.Name]
+		existing = mapperIDs[mapperName]
 		mapperID = existing.ID
 		if mapperID == "" {
 			return createErr
