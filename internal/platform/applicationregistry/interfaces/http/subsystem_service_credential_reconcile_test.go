@@ -2,10 +2,50 @@ package http
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
+
+type brokerProvisionerStub struct {
+	clientID, secret                   string
+	recoveredClientID, recoveredSecret string
+	recoverCalls                       int
+}
+
+func (stub *brokerProvisionerStub) EnsureKeycloakBroker(context.Context, string) (string, string, error) {
+	return stub.clientID, stub.secret, nil
+}
+
+func (stub *brokerProvisionerStub) RecoverKeycloakBroker(context.Context, string, string) (string, string, error) {
+	stub.recoverCalls++
+	return stub.recoveredClientID, stub.recoveredSecret, nil
+}
+
+type keycloakControlStub struct {
+	verifyErr   error
+	ensureCalls []struct{ clientID, secret string }
+}
+
+func (stub *keycloakControlStub) EnsureBroker(_ context.Context, clientID, secret string) error {
+	stub.ensureCalls = append(stub.ensureCalls, struct{ clientID, secret string }{clientID, secret})
+	return nil
+}
+
+func (stub *keycloakControlStub) VerifyBrokerExists(context.Context) error { return stub.verifyErr }
+
+func (stub *keycloakControlStub) EnsureClient(context.Context, string, string, string) (keycloakClientResult, error) {
+	return keycloakClientResult{}, nil
+}
+
+func (stub *keycloakControlStub) EnsureClientRoles(context.Context, string, []string) error {
+	return nil
+}
+
+func (stub *keycloakControlStub) DetectSubsystemKeycloakDrift(context.Context, string, string, []string) (KeycloakDriftReport, error) {
+	return KeycloakDriftReport{}, nil
+}
 
 type serviceCredentialManagerStub struct {
 	clients       []application.OAuthClientView
@@ -86,6 +126,52 @@ func TestEnsureWebOAuthClientReusesActiveBoundClient(t *testing.T) {
 	}
 	if client.ID != "web-client-id" || len(manager.createdInputs) != 0 {
 		t.Fatalf("active web client should be reused: client=%#v inputs=%#v", client, manager.createdInputs)
+	}
+}
+
+func TestReconcileKeycloakBrokerRotatesOnlyAfterConfirmedIncompleteConfiguration(t *testing.T) {
+	broker := &brokerProvisionerStub{clientID: "keycloak-broker", recoveredClientID: "keycloak-broker", recoveredSecret: "one-time-secret"}
+	control := &keycloakControlStub{verifyErr: &keycloakBrokerConfigurationError{alias: "basic-platform", missingKey: "clientSecret"}}
+	handler := &SubsystemOnboardingHandler{keycloakBroker: broker, keycloakControl: control}
+
+	if err := handler.reconcileKeycloakBroker(context.Background(), "tenant-1", "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+	if broker.recoverCalls != 1 {
+		t.Fatalf("recovery calls = %d, want 1", broker.recoverCalls)
+	}
+	if len(control.ensureCalls) != 1 || control.ensureCalls[0].clientID != "keycloak-broker" || control.ensureCalls[0].secret != "one-time-secret" {
+		t.Fatalf("recovered secret was not reconciled: %#v", control.ensureCalls)
+	}
+}
+
+func TestReconcileKeycloakBrokerRecreatesMissingIdentityProvider(t *testing.T) {
+	broker := &brokerProvisionerStub{clientID: "keycloak-broker", recoveredClientID: "keycloak-broker", recoveredSecret: "one-time-secret"}
+	control := &keycloakControlStub{verifyErr: &keycloakBrokerConfigurationError{alias: "basic-platform", missingKey: "identity-provider"}}
+	handler := &SubsystemOnboardingHandler{keycloakBroker: broker, keycloakControl: control}
+
+	if err := handler.reconcileKeycloakBroker(context.Background(), "tenant-1", "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+	if broker.recoverCalls != 1 {
+		t.Fatalf("recovery calls = %d, want 1", broker.recoverCalls)
+	}
+	if len(control.ensureCalls) != 1 || control.ensureCalls[0].clientID != "keycloak-broker" || control.ensureCalls[0].secret != "one-time-secret" {
+		t.Fatalf("missing IdP was not recreated: %#v", control.ensureCalls)
+	}
+}
+
+func TestReconcileKeycloakBrokerDoesNotRotateForTransientFailures(t *testing.T) {
+	transient := errors.New("Keycloak admin API unavailable")
+	broker := &brokerProvisionerStub{clientID: "keycloak-broker", recoveredClientID: "keycloak-broker", recoveredSecret: "must-not-be-used"}
+	control := &keycloakControlStub{verifyErr: transient}
+	handler := &SubsystemOnboardingHandler{keycloakBroker: broker, keycloakControl: control}
+
+	if err := handler.reconcileKeycloakBroker(context.Background(), "tenant-1", "operator-1"); !errors.Is(err, transient) {
+		t.Fatalf("error = %v, want transient failure", err)
+	}
+	if broker.recoverCalls != 0 || len(control.ensureCalls) != 0 {
+		t.Fatalf("transient failure must not rotate or write broker: recoveries=%d writes=%#v", broker.recoverCalls, control.ensureCalls)
 	}
 }
 

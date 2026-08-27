@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	stdhttp "net/http"
 	"net/http/httptest"
@@ -65,6 +66,33 @@ func TestCustomerPortalBrokerRepresentationUsesIsolatedAlias(t *testing.T) {
 	config, ok := payload["config"].(map[string]string)
 	if !ok || config["clientId"] != "customer-broker" {
 		t.Fatalf("customer broker client config = %#v", payload["config"])
+	}
+}
+
+func TestVerifyBrokerExistsClassifiesMissingIdentityProviderAsRecoverableDrift(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			_ = json.NewEncoder(response).Encode(map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/platform":
+			// An empty successful body exercises the compatible no-op Realm path.
+			response.WriteHeader(stdhttp.StatusOK)
+		case "GET /admin/realms/platform/identity-provider/instances/basic-platform":
+			response.WriteHeader(stdhttp.StatusNotFound)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	control := NewKeycloakControlPlane(server.URL, "platform", "admin", "secret", "", "", "", "")
+	err := control.VerifyBrokerExists(context.Background())
+	if !IsRecoverableKeycloakBrokerConfigurationError(err) {
+		t.Fatalf("missing IdP error must be recoverable configuration drift, got %v", err)
+	}
+	var configurationError *keycloakBrokerConfigurationError
+	if !errors.As(err, &configurationError) || configurationError.alias != "basic-platform" || configurationError.missingKey != "identity-provider" {
+		t.Fatalf("missing IdP error = %#v", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	stdhttp "net/http"
@@ -31,6 +32,27 @@ var (
 type keycloakControlPlane struct {
 	adminURL, realm, username, password, adminClientID, adminClientSecret, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel string
 	httpClient                                                                                                                                     *stdhttp.Client
+}
+
+// keycloakBrokerConfigurationError marks a deterministic configuration defect
+// returned by Keycloak. Callers may use it to decide whether a narrowly scoped
+// broker credential recovery is safe; transport and authorization failures must
+// never trigger a credential rotation.
+type keycloakBrokerConfigurationError struct {
+	alias      string
+	missingKey string
+}
+
+func (err *keycloakBrokerConfigurationError) Error() string {
+	return fmt.Sprintf("Keycloak IdP %s config incomplete: missing %s", err.alias, err.missingKey)
+}
+
+// IsRecoverableKeycloakBrokerConfigurationError reports whether Keycloak
+// responded with a complete, local configuration defect. It deliberately
+// excludes network, authentication and authorization failures.
+func IsRecoverableKeycloakBrokerConfigurationError(err error) bool {
+	var configurationError *keycloakBrokerConfigurationError
+	return errors.As(err, &configurationError)
 }
 
 // KeycloakControlPlaneCredentials explicitly supplies the credentials used by
@@ -790,7 +812,12 @@ func (control *keycloakControlPlane) verifyBrokerExists(ctx context.Context, bro
 	}
 	defer response.Body.Close()
 	if response.StatusCode == stdhttp.StatusNotFound {
-		return fmt.Errorf("Keycloak IdP %s does not exist", brokerAlias)
+		// The platform keeps only a hash for a healthy broker credential, so
+		// recreating a deleted IdP requires the narrowly-scoped credential
+		// recovery path. A 404 for this exact alias is deterministic Keycloak
+		// configuration drift, unlike transport, authentication, or permission
+		// failures, and is therefore safe to mark as recoverable.
+		return &keycloakBrokerConfigurationError{alias: brokerAlias, missingKey: "identity-provider"}
 	}
 	if err := keycloakStatusError("read Keycloak IdP", response, stdhttp.StatusOK); err != nil {
 		return err
@@ -804,7 +831,7 @@ func (control *keycloakControlPlane) verifyBrokerExists(ctx context.Context, bro
 	requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
 	for _, key := range requiredKeys {
 		if strings.TrimSpace(verified.Config[key]) == "" {
-			return fmt.Errorf("Keycloak IdP %s config incomplete: missing %s", brokerAlias, key)
+			return &keycloakBrokerConfigurationError{alias: brokerAlias, missingKey: key}
 		}
 	}
 	return nil
@@ -1218,7 +1245,7 @@ func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Cont
 	}
 	for _, key := range requiredKeys {
 		if strings.TrimSpace(recheck.Config[key]) == "" {
-			return fmt.Errorf("Keycloak IdP %s config still incomplete after self-heal: missing %s", brokerAlias, key)
+			return &keycloakBrokerConfigurationError{alias: brokerAlias, missingKey: key}
 		}
 	}
 	return nil

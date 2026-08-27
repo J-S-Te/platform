@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	stdhttp "net/http"
 	"os"
@@ -200,6 +201,18 @@ type subsystemInitialAccessManager interface {
 // used by Keycloak as an upstream broker. Its secret never reaches HTTP.
 type keycloakBrokerProvisioner interface {
 	EnsureKeycloakBroker(context.Context, string) (string, string, error)
+	RecoverKeycloakBroker(context.Context, string, string) (string, string, error)
+}
+
+// keycloakControlPlaneOperations contains only the Keycloak administration
+// actions used by the subsystem lifecycle. Keeping this boundary explicit
+// makes recovery behavior testable without a live Keycloak server.
+type keycloakControlPlaneOperations interface {
+	EnsureBroker(context.Context, string, string) error
+	VerifyBrokerExists(context.Context) error
+	EnsureClient(context.Context, string, string, string) (keycloakClientResult, error)
+	EnsureClientRoles(context.Context, string, []string) error
+	DetectSubsystemKeycloakDrift(context.Context, string, string, []string) (KeycloakDriftReport, error)
 }
 
 // subsystemServiceCredentialManager is the narrow control-plane capability used to
@@ -244,7 +257,7 @@ type SubsystemOnboardingHandler struct {
 	keycloakEnabled      bool
 	keycloakRequireHTTPS bool
 	defaultIssuerAlias   string
-	keycloakControl      *keycloakControlPlane
+	keycloakControl      keycloakControlPlaneOperations
 	keycloakBroker       keycloakBrokerProvisioner
 	keycloakCatalog      keycloakAuthorizationCatalog
 	keycloakMappings     keycloakClientMappingStore
@@ -285,12 +298,45 @@ func (handler *SubsystemOnboardingHandler) ConfigureDefaultIssuerAlias(alias str
 
 // ConfigureKeycloakControlPlane is called only from the composition root.  The
 // browser never receives this object or its Keycloak administrative credentials.
-func (handler *SubsystemOnboardingHandler) ConfigureKeycloakControlPlane(control *keycloakControlPlane) {
+func (handler *SubsystemOnboardingHandler) ConfigureKeycloakControlPlane(control keycloakControlPlaneOperations) {
 	handler.keycloakControl = control
 }
 
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakBroker(provisioner keycloakBrokerProvisioner) {
 	handler.keycloakBroker = provisioner
+}
+
+// reconcileKeycloakBroker keeps the Keycloak IdP and its platform OAuth client
+// consistent. Existing active credentials intentionally have no retrievable
+// plaintext, so a healthy IdP is only verified. A new secret is generated only
+// after Keycloak has deterministically reported an incomplete IdP configuration;
+// connectivity, authentication and permission errors remain fail-closed and do
+// not rotate credentials.
+func (handler *SubsystemOnboardingHandler) reconcileKeycloakBroker(ctx context.Context, tenantID, operatorID string) error {
+	brokerID, brokerSecret, err := handler.keycloakBroker.EnsureKeycloakBroker(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(brokerSecret) != "" {
+		return handler.keycloakControl.EnsureBroker(ctx, brokerID, brokerSecret)
+	}
+
+	err = handler.keycloakControl.VerifyBrokerExists(ctx)
+	if err == nil || !IsRecoverableKeycloakBrokerConfigurationError(err) {
+		return err
+	}
+
+	// The stored value is a one-way hash and cannot safely be reconstructed.
+	// Rotate through the OAuth client service, then immediately reconcile the
+	// IdP with the one-time plaintext result. No secret is logged or returned.
+	brokerID, brokerSecret, err = handler.keycloakBroker.RecoverKeycloakBroker(ctx, tenantID, operatorID)
+	if err != nil {
+		return fmt.Errorf("rotate broker credential after incomplete IdP config: %w", err)
+	}
+	if strings.TrimSpace(brokerSecret) == "" {
+		return errors.New("broker credential recovery returned an empty secret")
+	}
+	return handler.keycloakControl.EnsureBroker(ctx, brokerID, brokerSecret)
 }
 
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakAuthorizationCatalog(catalog keycloakAuthorizationCatalog) {
@@ -758,8 +804,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 			handler.writeError(writer, request, application.ErrValidation)
 			return
 		}
-		brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
-		if brokerErr != nil || handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret) != nil {
+		if err := handler.reconcileKeycloakBroker(request.Context(), principal.Tenant.ID, principal.User.ID); err != nil {
 			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 			return
 		}
@@ -1150,19 +1195,7 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 		handler.writeError(writer, request, application.ErrValidation)
 		return
 	}
-	brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
-	if brokerErr != nil {
-		handler.writeKeycloakSyncFailure(writer, request, payload, "broker", brokerErr)
-		return
-	}
-	// 已有活动凭据时 Broker 适配器会故意返回空 Secret，避免每次同步都轮换
-	// 密钥。此时只能验证 Keycloak 现有配置，不能用空值覆盖 clientSecret。
-	if strings.TrimSpace(brokerSecret) != "" {
-		if err := handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret); err != nil {
-			handler.writeKeycloakSyncFailure(writer, request, payload, "broker", err)
-			return
-		}
-	} else if err := handler.keycloakControl.VerifyBrokerExists(request.Context()); err != nil {
+	if err := handler.reconcileKeycloakBroker(request.Context(), principal.Tenant.ID, principal.User.ID); err != nil {
 		handler.writeKeycloakSyncFailure(writer, request, payload, "broker", err)
 		return
 	}
@@ -1592,8 +1625,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 			handler.writeError(writer, request, application.ErrValidation)
 			return
 		}
-		brokerID, brokerSecret, brokerErr := handler.keycloakBroker.EnsureKeycloakBroker(request.Context(), principal.Tenant.ID)
-		if brokerErr != nil || handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret) != nil {
+		if err := handler.reconcileKeycloakBroker(request.Context(), principal.Tenant.ID, principal.User.ID); err != nil {
 			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 			return
 		}
