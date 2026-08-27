@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	application "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
@@ -80,23 +81,35 @@ func (registrar keycloakBrokerRegistrar) ensureBrokerClient(ctx context.Context,
 		brokerAlias = "basic-platform-customer"
 	}
 	redirect := registrar.publicURL + "/realms/" + registrar.realm + "/broker/" + brokerAlias + "/endpoint"
-	clients, err := registrar.oauth.ListOAuthClients(ctx, tenantID)
-	if err != nil {
-		return "", "", err
-	}
-	for _, client := range clients {
-		if client.ClientID == clientID {
-			// Keycloak 只保留一个当前密钥。每次 Worker 重启都新增活跃凭据，会让
-			// Token 校验遍历无界增长的 bcrypt 摘要列表，最终超过 Keycloak 上游
-			// HTTP 超时；因此轮换时不保留重叠有效期。
-			secret, rotateErr := registrar.oauth.RotateOAuthClientSecret(ctx, application.OAuthClientSecretRotateInput{
-				TenantID: tenantID, OAuthClientID: client.ID, OperatorID: "system-keycloak", OverlapSeconds: 0,
-			})
-			if rotateErr != nil {
-				return "", "", fmt.Errorf("rotate keycloak broker secret: %w", rotateErr)
+	// Use direct client_id lookup instead of full tenant scan to avoid
+	// O(n) query on every worker restart when there are many OAuth clients.
+	existing, lookupErr := registrar.oauth.GetOAuthClientByClientID(ctx, tenantID, clientID)
+	if lookupErr == nil {
+		// Only rotate if the client has no active credentials. Previously every
+		// worker restart would rotate, accumulating bcrypt hashes in Keycloak
+		// and invalidating the IdP config mid-flight. Now we trust that an
+		// existing active credential is still valid; the Broker reconciliation
+		// in EnsureBroker will detect and repair a broken IdP config.
+		hasActiveCredential := false
+		for _, cred := range existing.Credentials {
+			if cred.Status == "ACTIVE" && cred.RevokedAt == nil {
+				hasActiveCredential = true
+				break
 			}
-			return client.ClientID, secret.PlaintextSecret, nil
 		}
+		if !hasActiveCredential {
+			secret, createErr := registrar.oauth.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{
+				TenantID: tenantID, OAuthClientID: existing.ID, OperatorID: "system-keycloak",
+			})
+			if createErr != nil {
+				return "", "", fmt.Errorf("create keycloak broker secret: %w", createErr)
+			}
+			return existing.ClientID, secret.PlaintextSecret, nil
+		}
+		return existing.ClientID, "", nil
+	}
+	if !errors.Is(lookupErr, application.ErrManagementNotFound) {
+		return "", "", fmt.Errorf("lookup keycloak broker OAuth client: %w", lookupErr)
 	}
 	created, err := registrar.oauth.CreateOAuthClient(ctx, application.OAuthClientCreateInput{TenantID: tenantID, ApplicationID: targetApplication.ID, EnvironmentID: environment.ID, OperatorID: "system-keycloak", ClientID: clientID, ClientName: clientName, ClientType: "confidential", TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 900, RefreshTokenTTLSeconds: 2592000, GrantTypes: []string{"authorization_code", "refresh_token"}, RequirePKCE: false, Scopes: []string{"openid", "profile"}, RedirectURIs: []string{redirect}})
 	if err != nil {

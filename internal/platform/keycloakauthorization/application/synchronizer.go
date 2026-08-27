@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	projectionworker "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/worker"
@@ -41,16 +42,26 @@ type ProjectionStore interface {
 	MarkFailed(context.Context, projectionworker.Event, string, string, time.Time) error
 }
 
+// FailureNotifier is an optional interface for alerting on repeated projection
+// failures. Implementations should be safe for concurrent use and must not
+// block the synchronization loop.
+type FailureNotifier interface {
+	NotifyProjectionFailure(ctx context.Context, tenantID, applicationID, identityID string, err error)
+}
+
 type Clock interface{ Now() time.Time }
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 type Synchronizer struct {
-	source Source
-	admin  KeycloakAdmin
-	store  ProjectionStore
-	clock  Clock
+	source    Source
+	admin     KeycloakAdmin
+	store     ProjectionStore
+	clock     Clock
+	notifier  FailureNotifier
+	failMu    sync.Mutex
+	failCount map[string]int
 }
 
 func NewSynchronizer(source Source, admin KeycloakAdmin, store ProjectionStore, clocks ...Clock) (*Synchronizer, error) {
@@ -64,7 +75,13 @@ func NewSynchronizer(source Source, admin KeycloakAdmin, store ProjectionStore, 
 		}
 		clock = clocks[0]
 	}
-	return &Synchronizer{source: source, admin: admin, store: store, clock: clock}, nil
+	return &Synchronizer{source: source, admin: admin, store: store, clock: clock, failCount: make(map[string]int)}, nil
+}
+
+// SetFailureNotifier attaches an optional alerting sink. Call this before
+// starting the synchronization loop.
+func (s *Synchronizer) SetFailureNotifier(notifier FailureNotifier) {
+	s.notifier = notifier
 }
 
 func (s *Synchronizer) SyncAuthorization(ctx context.Context, event projectionworker.Event) error {
@@ -90,12 +107,31 @@ func (s *Synchronizer) SyncAuthorization(ctx context.Context, event projectionwo
 	if err := s.store.MarkSynchronized(ctx, snapshot, s.clock.Now().UTC()); err != nil {
 		return fmt.Errorf("mark Keycloak authorization projection synchronized: %w", err)
 	}
+	// Reset failure counter on success; protect the map because the worker may
+	// process multiple projection events concurrently.
+	s.failMu.Lock()
+	delete(s.failCount, failureKey(event))
+	s.failMu.Unlock()
 	return nil
 }
 
 func (s *Synchronizer) fail(ctx context.Context, event projectionworker.Event, err error) error {
 	_ = s.store.MarkFailed(ctx, event, "KEYCLOAK_SYNC_FAILED", trim(err.Error(), 1000), s.clock.Now().UTC())
+	// Track consecutive failures per scope and notify only when the threshold is
+	// crossed, avoiding a notification storm while an outage persists.
+	key := failureKey(event)
+	s.failMu.Lock()
+	s.failCount[key]++
+	shouldNotify := s.failCount[key] == 3
+	s.failMu.Unlock()
+	if s.notifier != nil && shouldNotify {
+		s.notifier.NotifyProjectionFailure(ctx, event.TenantID, event.ApplicationID, event.IdentityID, err)
+	}
 	return err
+}
+
+func failureKey(event projectionworker.Event) string {
+	return event.TenantID + "/" + event.ApplicationID + "/" + event.EnvironmentID + "/" + event.IdentityID
 }
 
 func validateSnapshot(snapshot Snapshot, event projectionworker.Event) error {

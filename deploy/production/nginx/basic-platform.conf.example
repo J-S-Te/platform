@@ -145,6 +145,32 @@ server {
         proxy_pass http://127.0.0.1:18082;
     }
 
+    # 数据看板与统计分析：dashboard-api 路由原生保留 /data_analysis 前缀
+    # （同 customer-opportunity 模式，不做 rewrite）；Vue 页面由统一前端承载。
+    location = /data_analysis/healthz {
+        proxy_pass http://127.0.0.1:18086/data_analysis/healthz;
+    }
+
+    location = /data_analysis/readyz {
+        proxy_pass http://127.0.0.1:18086/data_analysis/readyz;
+    }
+
+    location /data_analysis/auth/ {
+        proxy_pass http://127.0.0.1:18086/data_analysis/auth/;
+    }
+
+    location /data_analysis/api/ {
+        proxy_pass http://127.0.0.1:18086/data_analysis/api/;
+    }
+
+    location = /data_analysis {
+        return 308 /data_analysis/;
+    }
+
+    location /data_analysis/ {
+        proxy_pass http://127.0.0.1:18082;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:18082;
     }

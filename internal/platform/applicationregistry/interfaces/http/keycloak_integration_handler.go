@@ -141,6 +141,18 @@ func (handler *KeycloakIntegrationHandler) ReplayProjectionFailure(writer stdhtt
 	handler.subsystems.ReplayKeycloakProjectionFailure(writer, request)
 }
 
+// SyncStatus returns a focused synchronization status for one subsystem
+// environment, including drift detection results. It is designed for
+// operational dashboards and automated health checks.
+func (handler *KeycloakIntegrationHandler) SyncStatus(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	handler.subsystems.GetKeycloakSyncStatus(writer, request)
+}
+
+// HealthDashboard returns the integration health of all subsystems.
+func (handler *KeycloakIntegrationHandler) HealthDashboard(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	handler.subsystems.GetSubsystemHealthDashboard(writer, request)
+}
+
 // StartObservation opens the mandatory seven-day evidence window before an
 // environment can cut over to Keycloak.
 func (handler *KeycloakIntegrationHandler) StartObservation(writer stdhttp.ResponseWriter, request *stdhttp.Request) {

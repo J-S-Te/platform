@@ -246,6 +246,35 @@ func ValidateSubsystemOnboardingInput(input SubsystemOnboardingInput) error {
 	return nil
 }
 
+// PreflightValidate extends ValidateSubsystemOnboardingInput with database-level
+// conflict checks. It verifies that the application code + environment pair is
+// available and that the path prefix does not collide with an existing registration.
+func (service *SubsystemOnboardingService) PreflightValidate(ctx context.Context, input SubsystemOnboardingInput) error {
+	input = normalizeSubsystemOnboardingInput(input)
+	if !validSubsystemOnboardingInput(input) {
+		return ErrValidation
+	}
+	// Check if the application + environment already exists.
+	_, _, err := service.repository.ResolveApplicationEnvironment(ctx, input.TenantID, input.ApplicationCode, input.Environment)
+	if err == nil {
+		return ErrSubsystemOnboardingAlreadyExists
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("preflight: check application environment: %w", err)
+	}
+	// Check path prefix collision with other applications.
+	items, listErr := service.repository.ListPortalApplications(ctx, input.TenantID, "", "")
+	if listErr != nil {
+		return fmt.Errorf("preflight: list existing applications: %w", listErr)
+	}
+	for _, item := range items {
+		if item.PathPrefix != nil && strings.EqualFold(strings.TrimSpace(*item.PathPrefix), input.PathPrefix) {
+			return fmt.Errorf("preflight: path prefix %s is already used by application %s", input.PathPrefix, item.Code)
+		}
+	}
+	return nil
+}
+
 // 接入先在内存中生成完整聚合和一次性密钥，再由仓储事务统一落库；数据库成功并不等于
 // 部署文件已经写入，后续部署失败必须由上层补偿或重试，不能把两者描述成跨系统原子操作。
 func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context, input SubsystemOnboardingInput) (SubsystemOnboardingResult, error) {

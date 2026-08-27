@@ -145,9 +145,9 @@ services:
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set}
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set}
-      # 留空不会创建 bootstrap service account，保留既有 admin/password 启动方式。
-      KC_BOOTSTRAP_ADMIN_CLIENT_ID: ${KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_ID:-}
-      KC_BOOTSTRAP_ADMIN_CLIENT_SECRET: ${KEYCLOAK_BOOTSTRAP_ADMIN_SERVICE_CLIENT_SECRET:-}
+      # 可选的 bootstrap service account 必须成对配置；空值注入会让 Keycloak 26
+      # 在启动期直接失败（client id 已设置但 secret 为空）。需要启用时把完整的
+      # KC_BOOTSTRAP_ADMIN_CLIENT_ID/SECRET 写入 keycloak 的专用 env_file。
       KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:?KEYCLOAK_PUBLIC_URL must be configured}
       KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
       KC_PROXY_HEADERS: ${KEYCLOAK_PROXY_HEADERS:-xforwarded}
@@ -533,9 +533,12 @@ services:
       AGGREGATION_ONCE: "false"
       CONTRACT_READ_DSN: ${CONTRACT_READ_DSN:-}
       CRM_READ_DSN: ${CRM_READ_DSN:-}
-      MACHINE_TOKEN_URL: ${MACHINE_TOKEN_URL:-http://keycloak:8080/realms/basic-platform/protocol/openid-connect/token}
-      CONTRACT_INTERNAL_URL: ${CONTRACT_INTERNAL_URL:-http://contract-api:8081}
-      PROJECT_INTERNAL_URL: ${PROJECT_INTERNAL_URL:-http://project-api:8082}
+      # 跨库聚合通道默认关闭：启用需要同时配置 Keycloak service account
+      # （MACHINE_CLIENT_ID/SECRET）与直连只读 DSN。空值时 worker 只执行
+      # 聚合库自身的任务，不会空转向 Keycloak 请求不存在的机器客户端。
+      MACHINE_TOKEN_URL: ${MACHINE_TOKEN_URL:-}
+      CONTRACT_INTERNAL_URL: ${CONTRACT_INTERNAL_URL:-}
+      PROJECT_INTERNAL_URL: ${PROJECT_INTERNAL_URL:-}
     depends_on:
       data-analysis-mysql:
         condition: service_healthy
@@ -567,10 +570,25 @@ services:
         condition: service_healthy
     networks: [application]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+       interval: 10s
+       timeout: 5s
+       retries: 12
+     restart: unless-stopped
+
+  # 可选 ClamAV 病毒扫描引擎。只有显式启用 --profile clamav 且在
+  # runtime/customer.env 中配置 CLAMAV_ENABLED=true 时才会被 CRM 使用；
+  # 未启用时 CRM 的附件与导入扫描保持原有失败关闭行为。
+  clamav:
+    image: clamav/clamav:1.4
+    profiles: ["clamav"]
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
     restart: unless-stopped
 
   customer-mysql:
