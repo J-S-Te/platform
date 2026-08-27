@@ -1182,6 +1182,14 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 		handler.writeKeycloakSyncFailure(writer, request, payload, "client", err)
 		return
 	}
+	// 同步 Keycloak Client 不能只更新 Keycloak。授权上下文解析依赖平台自身的
+	// platform_oauth_client 记录；旧环境如果只有 Keycloak Client，登录时会在
+	// azp 校验阶段得到 403。先确认 Keycloak 写入成功，再以同一租户、应用和
+	// 环境补齐平台 Web Client，避免失败时留下孤儿授权记录。
+	if _, err := handler.ensureWebOAuthClient(request.Context(), principal.Tenant.ID, applicationID, environmentID, principal.User.ID, result.ClientID, payload.ApplicationCode, redirectURI); err != nil {
+		handler.writeKeycloakSyncFailure(writer, request, payload, "oauth_client", err)
+		return
+	}
 	roleCodes, err := handler.keycloakCatalog.ListKeycloakRoleCodes(request.Context(), principal.Tenant.ID, applicationID)
 	if err != nil {
 		handler.writeKeycloakSyncFailure(writer, request, payload, "roles", err)
@@ -1216,6 +1224,39 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak Realm Client、身份、组织、角色与权限 Claims 映射已同步；Issuer 仍被四项门禁保护", keycloakClientSyncResponse{Alias: "keycloak", Realm: handler.keycloakRealm, ClientID: result.ClientID, CanonicalClientID: resolution.CanonicalClientID, ClientIDSource: resolution.Source, LegacyCompatibility: resolution.LegacyCompatibility, ClaimsState: "MAPPERS_SYNCED", SwitchReady: readiness.SwitchReady, SwitchGates: readiness.Gates, NextAction: readiness.NextAction})
 }
 
+// ensureWebOAuthClient 确保平台授权上下文可以解析子系统使用的浏览器 Client。
+// 已存在且绑定一致的 ACTIVE 记录直接复用；缺失记录使用授权码 + PKCE 创建。
+// 明文密钥不向上层返回，避免同步接口泄露浏览器 Client 的运行时凭据。
+func (handler *SubsystemOnboardingHandler) ensureWebOAuthClient(ctx context.Context, tenantID, applicationID, environmentID, operatorID, clientID, applicationCode, redirectURI string) (application.OAuthClientView, error) {
+	if handler.serviceCredentials == nil {
+		return application.OAuthClientView{}, application.ErrSubsystemProvisioningUnavailable
+	}
+	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return application.OAuthClientView{}, err
+	}
+	for _, client := range clients {
+		if client.ClientID != clientID {
+			continue
+		}
+		if !strings.EqualFold(client.Status, "ACTIVE") || client.ApplicationID != applicationID || client.EnvironmentID != environmentID {
+			return application.OAuthClientView{}, application.ErrConflict
+		}
+		return client, nil
+	}
+	created, err := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
+		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
+		ClientID: clientID, ClientName: applicationCode + " Web", ClientType: "confidential",
+		TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
+		RequirePKCE: true, GrantTypes: []string{"authorization_code"}, Scopes: []string{"openid", "profile"},
+		RedirectURIs: []string{redirectURI},
+	})
+	if err != nil {
+		return application.OAuthClientView{}, err
+	}
+	return created.Client, nil
+}
+
 // writeKeycloakSyncFailure keeps the external contract deliberately non-sensitive while
 // preserving enough stage information for an operator to select the right remediation.
 // The original error is logged only on the server and correlated with the request ID.
@@ -1241,6 +1282,8 @@ func keycloakSyncFailureGuidance(stage string) (detail, nextAction string) {
 		return "Keycloak Broker 同步暂时不可用。", "检查 Keycloak 管理连接和平台 Broker 配置后，在当前环境重新同步。"
 	case "client":
 		return "Keycloak Realm Client 同步暂时不可用。", "检查目标 Realm、Client 配置与回调地址后，在当前环境重新同步。"
+	case "oauth_client":
+		return "平台 Web OAuth Client 同步暂时不可用。", "检查平台 OAuth Client 接入记录与租户应用环境关联后，在当前环境重新同步。"
 	case "roles":
 		return "Keycloak Client 角色目录同步暂时不可用。", "检查应用角色目录与 Keycloak Client Role 管理权限后，在当前环境重新同步。"
 	case "mapping":
