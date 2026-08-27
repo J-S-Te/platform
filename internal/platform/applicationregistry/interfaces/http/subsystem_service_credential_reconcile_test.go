@@ -59,6 +59,36 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 	}
 }
 
+func TestEnsureWebOAuthClientCreatesMissingAuthorizationCodeClient(t *testing.T) {
+	manager := &serviceCredentialManagerStub{}
+	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+	client, err := handler.ensureWebOAuthClient(context.Background(), "tenant-1", "app-1", "env-1", "operator-1", "data_analysis-prod-web", "data_analysis", "http://dashboard.example/data_analysis/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.ClientID != "data_analysis-prod-web" || len(manager.createdInputs) != 1 {
+		t.Fatalf("unexpected created web client: client=%#v inputs=%#v", client, manager.createdInputs)
+	}
+	input := manager.createdInputs[0]
+	if input.ClientType != "confidential" || input.TokenAuthMethod != "client_secret_basic" || !input.RequirePKCE || len(input.GrantTypes) != 1 || input.GrantTypes[0] != "authorization_code" || len(input.RedirectURIs) != 1 {
+		t.Fatalf("web client must use authorization code + PKCE: %#v", input)
+	}
+}
+
+func TestEnsureWebOAuthClientReusesActiveBoundClient(t *testing.T) {
+	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
+		ID: "web-client-id", ClientID: "data_analysis-prod-web", ApplicationID: "app-1", EnvironmentID: "env-1", Status: "ACTIVE",
+	}}}
+	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+	client, err := handler.ensureWebOAuthClient(context.Background(), "tenant-1", "app-1", "env-1", "operator-1", "data_analysis-prod-web", "data_analysis", "http://dashboard.example/data_analysis/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.ID != "web-client-id" || len(manager.createdInputs) != 0 {
+		t.Fatalf("active web client should be reused: client=%#v inputs=%#v", client, manager.createdInputs)
+	}
+}
+
 func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testing.T) {
 	manager := &serviceCredentialManagerStub{}
 	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
