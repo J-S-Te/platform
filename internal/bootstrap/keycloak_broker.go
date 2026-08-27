@@ -34,6 +34,14 @@ func (registrar keycloakBrokerRegistrar) EnsureKeycloakBroker(ctx context.Contex
 	return registrar.ensureBrokerClient(ctx, tenantID, "platform", platformBrokerClientID, "Keycloak Broker")
 }
 
+// RecoverKeycloakBroker rotates the platform Broker client through the OAuth
+// control plane when Keycloak has lost its non-retrievable client secret. The
+// plaintext exists only for the immediate IdP reconciliation and is never
+// persisted or logged.
+func (registrar keycloakBrokerRegistrar) RecoverKeycloakBroker(ctx context.Context, tenantID, operatorID string) (string, string, error) {
+	return registrar.recoverBrokerClient(ctx, tenantID, operatorID, platformBrokerClientID)
+}
+
 // EnsureCustomerPortalBroker provisions a separate upstream OAuth client for
 // external customer authentication. It must not share the platform Broker
 // client: the OAuth authorization resolver derives claims from the client's
@@ -41,6 +49,23 @@ func (registrar keycloakBrokerRegistrar) EnsureKeycloakBroker(ctx context.Contex
 // closed in the other application's login flow.
 func (registrar keycloakBrokerRegistrar) EnsureCustomerPortalBroker(ctx context.Context, tenantID string) (string, string, error) {
 	return registrar.ensureBrokerClient(ctx, tenantID, "customer_portal", customerPortalBrokerClientID, "Customer Portal Keycloak Broker")
+}
+
+func (registrar keycloakBrokerRegistrar) recoverBrokerClient(ctx context.Context, tenantID, operatorID, clientID string) (string, string, error) {
+	existing, err := registrar.oauth.GetOAuthClientByClientID(ctx, tenantID, clientID)
+	if err != nil {
+		return "", "", fmt.Errorf("lookup keycloak broker OAuth client for recovery: %w", err)
+	}
+	secret, err := registrar.oauth.RotateOAuthClientSecret(ctx, application.OAuthClientSecretRotateInput{
+		TenantID: tenantID, OAuthClientID: existing.ID, OperatorID: operatorID,
+		// Keep the previous credential briefly valid until Keycloak receives the
+		// new one. This makes a transient Keycloak Admin failure non-disruptive.
+		OverlapSeconds: 300,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("rotate keycloak broker OAuth client secret: %w", err)
+	}
+	return existing.ClientID, secret.PlaintextSecret, nil
 }
 
 func (registrar keycloakBrokerRegistrar) ensureBrokerClient(ctx context.Context, tenantID, applicationCode, clientID, clientName string) (string, string, error) {
