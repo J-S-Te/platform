@@ -570,11 +570,11 @@ services:
         condition: service_healthy
     networks: [application]
     healthcheck:
-       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
-       interval: 10s
-       timeout: 5s
-       retries: 12
-     restart: unless-stopped
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
 
   # 可选 ClamAV 病毒扫描引擎。只有显式启用 --profile clamav 且在
   # runtime/customer.env 中配置 CLAMAV_ENABLED=true 时才会被 CRM 使用；
