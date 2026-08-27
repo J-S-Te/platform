@@ -1,6 +1,6 @@
 # 生产环境 CI/CD 部署
 
-> 更新日期：2026-08-04。生产目录承载 platform、frontend、contract、CRM、客户 Portal 和项目管理系统不可变镜像。
+> 更新日期：2026-08-27。生产目录承载 platform、frontend、contract、CRM、客户 Portal、项目管理和数据看板系统不可变镜像。
 
 ## 1. 服务器要求
 
@@ -24,7 +24,7 @@ Keycloak 的独立数据库、可选 bootstrap service account、HTTP/HTTPS 网�
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 
-应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前四个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*`、`CUSTOMER_MYSQL_* + PORTAL_MYSQL_*` 或 `PROJECT_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。
+应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前五个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*`、`CUSTOMER_MYSQL_* + PORTAL_MYSQL_*`、`PROJECT_MYSQL_*` 或 `DASHBOARD_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。
 
 测试服务器（一次性验证接入流程、没有历史数据）可在 `.env` 中设置 `SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=true`，Agent 将跳过数据库凭据校验，让 Compose 在首次创建空数据库时使用占位密码完成接入。该开关只应出现在测试服务器：已有持久化数据的数据库不会因为开关而自动改密，生产环境必须保持 `false`。
 
@@ -33,6 +33,7 @@ Keycloak 的独立数据库、可选 bootstrap service account、HTTP/HTTPS 网�
 - `platform` 和 `frontend` workflow 使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`。
 - `contract_management` workflow 当前推送 GHCR，并使用仓库 `GITHUB_TOKEN`；服务器必须能够拉取对应 GHCR 包。
 - `project_management` workflow 与 `platform`/`frontend` 一致使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`；服务器必须能够拉取对应 ACR 包。
+- `data_analysis` workflow 同样使用 ACR 变量，单仓库多 tag 构建 `dashboard-api`、`aggregation-worker`、`alert-worker`、`production-migrate` 四个镜像，分别写入 `.release.env` 的 `DATA_ANALYSIS_*_IMAGE` 键。
 - 远端发布统一使用 `image@sha256:digest`，不使用可变 tag 作为最终发布标识。
 
 ## 3. GitHub Environment
@@ -62,7 +63,7 @@ Keycloak 的独立数据库、可选 bootstrap service account、HTTP/HTTPS 网�
 2. 初始化首个管理员；
 3. 发布 frontend，并确认 `platform-api` 与隔离的 `subsystem-provisioner` 健康；
 4. 发布所需子系统的不可变镜像。尚未接入时，发布脚本只安全暂存 digest，不会因 OIDC 占位值启动失败；
-5. 登录基础平台，在“应用接入”中从服务器审核目标列表选择 `contract_management/prod`、`customer_and_opportunity/prod`、`customer_portal/prod` 或 `project_management/prod`；客户 Portal 依赖 CRM，必须先完成 `customer_and_opportunity/prod`；
+5. 登录基础平台，在“应用接入”中从服务器审核目标列表选择 `contract_management/prod`、`customer_and_opportunity/prod`、`customer_portal/prod`、`project_management/prod` 或 `data_analysis/prod`；客户 Portal 依赖 CRM，必须先完成 `customer_and_opportunity/prod`；数据看板的 `runtime/data-analysis.env` 需要预先配置与 Metabase 管理端一致的 `METABASE_EMBEDDING_SECRET`；
 6. 平台自动创建应用环境、浏览器 Client、catalog-publisher Client、按用途拆分的服务 Client、精确回调和适用的初始管理员授权；Agent 自动初始化对应 `runtime/*.env`、生成清单声明的长期业务密钥并写入一次性凭据，再按目标执行固定备份、迁移和 API 重建。
 
 生产接入不再要求管理员在命令行复制 OAuth Client Secret。Secret 只在平台后端内存、受限 Unix Socket 和权限为 `0600` 的服务器 `runtime/*.env` 之间流转，不返回浏览器，也不进入命令行参数或日志。生产 Agent 只允许 `subsystems.d/*.yaml` 中随发布包审核的应用/环境和固定 Compose 服务，不接受浏览器指定的文件、命令、镜像或服务名。

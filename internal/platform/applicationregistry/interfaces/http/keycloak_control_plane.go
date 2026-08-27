@@ -13,6 +13,7 @@ import (
 	stdhttp "net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -761,6 +762,254 @@ func (control *keycloakControlPlane) EnsureCustomerPortalBroker(ctx context.Cont
 	return control.ensureBroker(ctx, "basic-platform-customer", "客户自助门户", clientID, clientSecret)
 }
 
+// VerifyBrokerExists checks that the basic-platform IdP exists and has a
+// complete config. It does not modify the IdP or require a client secret.
+// Use this when the platform already has active credentials and only needs
+// to confirm the Keycloak side is healthy.
+func (control *keycloakControlPlane) VerifyBrokerExists(ctx context.Context) error {
+	return control.verifyBrokerExists(ctx, "basic-platform")
+}
+
+// VerifyCustomerPortalBrokerExists checks the customer portal IdP health.
+func (control *keycloakControlPlane) VerifyCustomerPortalBrokerExists(ctx context.Context) error {
+	return control.verifyBrokerExists(ctx, "basic-platform-customer")
+}
+
+func (control *keycloakControlPlane) verifyBrokerExists(ctx context.Context, brokerAlias string) error {
+	token, err := control.token(ctx)
+	if err != nil {
+		return err
+	}
+	if err := control.ensureRealm(ctx, token); err != nil {
+		return err
+	}
+	base := "/admin/realms/" + url.PathEscape(control.realm) + "/identity-provider/instances/" + url.PathEscape(brokerAlias)
+	response, err := control.request(ctx, token, stdhttp.MethodGet, base, nil)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == stdhttp.StatusNotFound {
+		return fmt.Errorf("Keycloak IdP %s does not exist", brokerAlias)
+	}
+	if err := keycloakStatusError("read Keycloak IdP", response, stdhttp.StatusOK); err != nil {
+		return err
+	}
+	var verified struct {
+		Config map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&verified); err != nil {
+		return fmt.Errorf("decode Keycloak IdP %s: %w", brokerAlias, err)
+	}
+	requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
+	for _, key := range requiredKeys {
+		if strings.TrimSpace(verified.Config[key]) == "" {
+			return fmt.Errorf("Keycloak IdP %s config incomplete: missing %s", brokerAlias, key)
+		}
+	}
+	return nil
+}
+
+// KeycloakDriftReport describes detected configuration differences between the
+// platform's expected state and the actual Keycloak state for one subsystem client.
+type KeycloakDriftReport struct {
+	ClientID       string   `json:"client_id"`
+	HasDrift       bool     `json:"has_drift"`
+	MissingRoles   []string `json:"missing_roles,omitempty"`
+	StaleRoles     []string `json:"stale_roles,omitempty"`
+	MissingMappers []string `json:"missing_mappers,omitempty"`
+	DriftedMappers []string `json:"drifted_mappers,omitempty"`
+	RedirectURIOK  bool     `json:"redirect_uri_ok"`
+	BrokerConfigOK bool     `json:"broker_config_ok"`
+}
+
+func brokerAliasForClient(clientID string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(clientID)), "customer_portal-") {
+		return "basic-platform-customer"
+	}
+	return "basic-platform"
+}
+
+func mapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// DetectSubsystemKeycloakDrift compares the expected Keycloak configuration for a
+// subsystem client against the actual state. It checks:
+//   - Client existence and redirect URI
+//   - Role catalog completeness
+//   - Protocol mapper presence and configuration
+//   - Broker IdP config completeness
+//
+// This method is read-only and does not modify Keycloak state. Use the result
+// to decide whether to trigger a reconciliation.
+func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Context, clientID, expectedRedirectURI string, expectedRoleCodes []string) (KeycloakDriftReport, error) {
+	report := KeycloakDriftReport{ClientID: clientID, RedirectURIOK: true, BrokerConfigOK: true}
+	token, err := control.token(ctx)
+	if err != nil {
+		return report, err
+	}
+	// Check client exists.
+	lookupPath := "/admin/realms/" + url.PathEscape(control.realm) + "/clients?clientId=" + url.QueryEscape(clientID)
+	response, err := control.request(ctx, token, stdhttp.MethodGet, lookupPath, nil)
+	if err != nil {
+		return report, err
+	}
+	if err := keycloakStatusError("read Keycloak Client for drift check", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return report, err
+	}
+	var clients []struct {
+		ID           string   `json:"id"`
+		RedirectURIs []string `json:"redirectUris"`
+	}
+	decodeErr := json.NewDecoder(response.Body).Decode(&clients)
+	response.Body.Close()
+	if decodeErr != nil {
+		return report, fmt.Errorf("decode Keycloak Client for drift check: %w", decodeErr)
+	}
+	if len(clients) == 0 {
+		report.HasDrift = true
+		return report, nil
+	}
+	internalID := clients[0].ID
+	// Check redirect URI.
+	if expectedRedirectURI != "" {
+		found := false
+		for _, uri := range clients[0].RedirectURIs {
+			if uri == expectedRedirectURI {
+				found = true
+				break
+			}
+		}
+		if !found {
+			report.RedirectURIOK = false
+			report.HasDrift = true
+		}
+	}
+	// Check roles.
+	rolePath := "/admin/realms/" + url.PathEscape(control.realm) + "/clients/" + url.PathEscape(internalID) + "/roles"
+	response, err = control.request(ctx, token, stdhttp.MethodGet, rolePath, nil)
+	if err != nil {
+		return report, err
+	}
+	if err := keycloakStatusError("read Keycloak Client roles for drift check", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return report, err
+	}
+	var existingRoles []struct {
+		Name string `json:"name"`
+	}
+	decodeRolesErr := json.NewDecoder(response.Body).Decode(&existingRoles)
+	response.Body.Close()
+	if decodeRolesErr != nil {
+		return report, fmt.Errorf("decode Keycloak Client roles for drift check: %w", decodeRolesErr)
+	}
+	existingRoleSet := make(map[string]struct{}, len(existingRoles))
+	for _, role := range existingRoles {
+		existingRoleSet[role.Name] = struct{}{}
+	}
+	for _, code := range expectedRoleCodes {
+		if _, exists := existingRoleSet[code]; !exists {
+			report.MissingRoles = append(report.MissingRoles, code)
+			report.HasDrift = true
+		}
+	}
+	expectedRoleSet := make(map[string]struct{}, len(expectedRoleCodes))
+	for _, code := range expectedRoleCodes {
+		expectedRoleSet[code] = struct{}{}
+	}
+	for name := range existingRoleSet {
+		if _, expected := expectedRoleSet[name]; !expected {
+			report.StaleRoles = append(report.StaleRoles, name)
+			report.HasDrift = true
+		}
+	}
+	sort.Strings(report.MissingRoles)
+	sort.Strings(report.StaleRoles)
+	// Compare the platform-owned protocol mappers by name and configuration;
+	// a mapper with the right name but a changed claim is still drift.
+	mapperPath := "/admin/realms/" + url.PathEscape(control.realm) + "/clients/" + url.PathEscape(internalID) + "/protocol-mappers/models"
+	response, err = control.request(ctx, token, stdhttp.MethodGet, mapperPath, nil)
+	if err != nil {
+		return report, err
+	}
+	if err := keycloakStatusError("read Keycloak Client mappers for drift check", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return report, err
+	}
+	var existingMappers []struct {
+		ID             string            `json:"id"`
+		Name           string            `json:"name"`
+		ProtocolMapper string            `json:"protocolMapper"`
+		Config         map[string]string `json:"config"`
+	}
+	decodeMappersErr := json.NewDecoder(response.Body).Decode(&existingMappers)
+	response.Body.Close()
+	if decodeMappersErr != nil {
+		return report, fmt.Errorf("decode Keycloak Client mappers for drift check: %w", decodeMappersErr)
+	}
+	actualMappers := make(map[string]struct {
+		ProtocolMapper string
+		Config         map[string]string
+	}, len(existingMappers))
+	for _, mapper := range existingMappers {
+		actualMappers[mapper.Name] = struct {
+			ProtocolMapper string
+			Config         map[string]string
+		}{mapper.ProtocolMapper, mapper.Config}
+	}
+	for _, expected := range keycloakAuthorizationProtocolMappers(clientID) {
+		actual, ok := actualMappers[expected.Name]
+		if !ok {
+			report.MissingMappers = append(report.MissingMappers, expected.Name)
+			report.HasDrift = true
+			continue
+		}
+		if actual.ProtocolMapper != expected.ProtocolMapper || !mapsEqual(actual.Config, expected.Config) {
+			report.DriftedMappers = append(report.DriftedMappers, expected.Name)
+			report.HasDrift = true
+		}
+	}
+	sort.Strings(report.MissingMappers)
+	sort.Strings(report.DriftedMappers)
+	// Check broker config.
+	brokerAlias := brokerAliasForClient(clientID)
+	response, err = control.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(control.realm)+"/identity-provider/instances/"+url.PathEscape(brokerAlias), nil)
+	if err == nil {
+		if response.StatusCode == stdhttp.StatusOK {
+			var broker struct {
+				Config map[string]string `json:"config"`
+			}
+			decodeBrokerErr := json.NewDecoder(response.Body).Decode(&broker)
+			response.Body.Close()
+			if decodeBrokerErr == nil {
+				requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
+				for _, key := range requiredKeys {
+					if strings.TrimSpace(broker.Config[key]) == "" {
+						report.BrokerConfigOK = false
+						report.HasDrift = true
+						break
+					}
+				}
+			}
+		} else {
+			response.Body.Close()
+			report.BrokerConfigOK = false
+			report.HasDrift = true
+		}
+	}
+	return report, nil
+}
+
 func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAlias, displayName, clientID, clientSecret string) error {
 	token, err := control.token(ctx)
 	if err != nil {
@@ -818,12 +1067,20 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 		return err
 	}
 	var verifiedBroker struct {
-		FirstBrokerLoginFlowAlias string `json:"firstBrokerLoginFlowAlias"`
+		FirstBrokerLoginFlowAlias string            `json:"firstBrokerLoginFlowAlias"`
+		Config                    map[string]string `json:"config"`
 	}
 	decodeErr := json.NewDecoder(response.Body).Decode(&verifiedBroker)
 	response.Body.Close()
 	if decodeErr != nil {
 		return decodeErr
+	}
+	// Self-healing: verify IdP config completeness. Keycloak can return an
+	// empty config{} after a timing race or cache miss during PUT. Re-apply
+	// the payload once; if it still fails, surface the error so the worker
+	// retries on next startup instead of silently leaving a broken IdP.
+	if err := control.ensureBrokerConfigComplete(ctx, token, base, brokerAlias, payload, verifiedBroker.Config); err != nil {
+		return err
 	}
 	// Keycloak 26 can keep returning the legacy top-level profile mode as
 	// "on". The provider-specific deny-only flow is the authoritative
@@ -914,6 +1171,54 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 		}
 		if existing.Config["syncMode"] != "INHERIT" || existing.Config["claim"] != claim.Name || existing.Config["user.attribute"] != claim.Name {
 			return createErr
+		}
+	}
+	return nil
+}
+
+// ensureBrokerConfigComplete verifies that the IdP config received from Keycloak
+// contains all required fields. If the config is empty or missing critical keys,
+// it re-applies the expected payload once. This self-heals the known Keycloak
+// race condition where a PUT returns 204 but the config remains empty {}.
+func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Context, token, base, brokerAlias string, expected map[string]any, actual map[string]string) error {
+	requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
+	complete := true
+	for _, key := range requiredKeys {
+		if strings.TrimSpace(actual[key]) == "" {
+			complete = false
+			break
+		}
+	}
+	if complete {
+		return nil
+	}
+	// Re-apply the expected configuration once.
+	response, err := control.request(ctx, token, stdhttp.MethodPut, base, expected)
+	if err != nil {
+		return fmt.Errorf("self-heal Keycloak IdP %s config: %w", brokerAlias, err)
+	}
+	response.Body.Close()
+	if response.StatusCode != stdhttp.StatusNoContent {
+		return fmt.Errorf("self-heal Keycloak IdP %s config returned HTTP %d", brokerAlias, response.StatusCode)
+	}
+	// Verify the fix took effect.
+	response, err = control.request(ctx, token, stdhttp.MethodGet, base, nil)
+	if err != nil {
+		return fmt.Errorf("verify self-healed Keycloak IdP %s config: %w", brokerAlias, err)
+	}
+	defer response.Body.Close()
+	if err := keycloakStatusError("verify self-healed Keycloak IdP config", response, stdhttp.StatusOK); err != nil {
+		return err
+	}
+	var recheck struct {
+		Config map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&recheck); err != nil {
+		return fmt.Errorf("decode self-healed Keycloak IdP %s config: %w", brokerAlias, err)
+	}
+	for _, key := range requiredKeys {
+		if strings.TrimSpace(recheck.Config[key]) == "" {
+			return fmt.Errorf("Keycloak IdP %s config still incomplete after self-heal: missing %s", brokerAlias, key)
 		}
 	}
 	return nil

@@ -318,6 +318,8 @@ func NewRouter(
 			keycloakIntegrationRouter := apiRouter.Group("/keycloak-integration")
 			keycloakIntegrationRouter.GET("/capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Capabilities))
 			keycloakIntegrationRouter.GET("/status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Status))
+			keycloakIntegrationRouter.GET("/health-dashboard", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.HealthDashboard))
+			keycloakIntegrationRouter.GET("/sync-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.SyncStatus))
 			// FAILED authorization projections are a high-risk cutover blocker.
 			// Reading them follows application visibility; replay additionally needs
 			// role-binding update authority because it causes platform authorization

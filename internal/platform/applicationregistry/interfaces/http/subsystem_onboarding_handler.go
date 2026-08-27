@@ -74,6 +74,7 @@ type subsystemOnboardingService interface {
 	RegisterSubsystemDirectory(context.Context, application.SubsystemDirectoryRegistrationInput) (application.SubsystemDirectoryRegistrationResult, error)
 	ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error)
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
+	PreflightValidate(context.Context, application.SubsystemOnboardingInput) error
 }
 
 // subsystemEnvironmentIssuerResolver is an optional capability implemented by
@@ -720,6 +721,10 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
+	if err := handler.service.PreflightValidate(request.Context(), onboardingInput); err != nil {
+		handler.writeError(writer, request, err, "preflight")
+		return
+	}
 	issuer, err := handler.issuerForAlias(effectiveIssuerAlias)
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -1001,6 +1006,55 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署能力查询成功", response)
+}
+
+// SubsystemHealthEntry describes the integration health of one subsystem environment.
+type SubsystemHealthEntry struct {
+	ApplicationCode string `json:"application_code"`
+	ApplicationName string `json:"application_name"`
+	Environment     string `json:"environment"`
+	DirectoryOK     bool   `json:"directory_ok"`
+	CredentialsOK   bool   `json:"credentials_ok"`
+	RuntimeOK       bool   `json:"runtime_ok"`
+	KeycloakOK      bool   `json:"keycloak_ok,omitempty"`
+	Status          string `json:"status"`
+	NextAction      string `json:"next_action,omitempty"`
+}
+
+// GetSubsystemHealthDashboard returns the integration health of all subsystems
+// for the current tenant. It is a read-only diagnostic endpoint.
+func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	items, err := handler.service.ListPortalApplications(request.Context(), principal.Tenant.ID, principal.User.ID, "")
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	entries := make([]SubsystemHealthEntry, 0, len(items))
+	for _, item := range items {
+		entry := SubsystemHealthEntry{
+			ApplicationCode: item.Code,
+			ApplicationName: item.Name,
+			Environment:     item.Environment,
+			DirectoryOK:     true,
+			CredentialsOK:   true,
+			RuntimeOK:       item.Projection.Ready,
+		}
+		if handler.keycloakEnabled {
+			entry.KeycloakOK = item.Projection.Ready
+		}
+		if !item.Projection.Ready {
+			entry.Status = "RUNTIME_NOT_READY"
+			entry.NextAction = "检查部署状态和 Keycloak 投影"
+		} else {
+			entry.Status = "HEALTHY"
+		}
+		entries = append(entries, entry)
+	}
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统健康状态查询成功", entries)
 }
 
 // SyncKeycloakClient creates or updates the selected subsystem's Keycloak RP
@@ -1875,6 +1929,119 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakIntegrationStatus(writer s
 		"cutover":          cutover,
 		"timeline":         timeline,
 	})
+}
+
+// KeycloakSyncStatusResponse is the focused synchronization status for one
+// subsystem environment. It includes drift detection results for operational
+// dashboards.
+type KeycloakSyncStatusResponse struct {
+	ApplicationCode string `json:"application_code"`
+	Environment     string `json:"environment"`
+	ClientID        string `json:"client_id,omitempty"`
+	ClientState     string `json:"client_state"`
+	Realm           string `json:"realm"`
+	LastSyncedAt    any    `json:"last_synced_at,omitempty"`
+	SwitchReady     bool   `json:"switch_ready"`
+	DriftAvailable  bool   `json:"drift_available"`
+	DriftError      string `json:"drift_error,omitempty"`
+	Drift           *struct {
+		HasDrift       bool     `json:"has_drift"`
+		MissingRoles   []string `json:"missing_roles,omitempty"`
+		StaleRoles     []string `json:"stale_roles,omitempty"`
+		MissingMappers []string `json:"missing_mappers,omitempty"`
+		DriftedMappers []string `json:"drifted_mappers,omitempty"`
+		RedirectURIOK  bool     `json:"redirect_uri_ok"`
+		BrokerConfigOK bool     `json:"broker_config_ok"`
+	} `json:"drift,omitempty"`
+}
+
+func (handler *SubsystemOnboardingHandler) loadKeycloakRoleCodesForDrift(ctx context.Context, tenantID, applicationID string) ([]string, error) {
+	if handler.keycloakCatalog == nil {
+		return nil, errors.New("Keycloak authorization catalog is not configured")
+	}
+	return handler.keycloakCatalog.ListKeycloakRoleCodes(ctx, tenantID, applicationID)
+}
+
+// GetKeycloakSyncStatus returns a focused synchronization status including
+// drift detection for one subsystem environment.
+func (handler *SubsystemOnboardingHandler) GetKeycloakSyncStatus(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	applicationCode := strings.TrimSpace(request.URL.Query().Get("application_code"))
+	environment := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("environment")))
+	if applicationCode == "" || environment == "" {
+		handler.writeError(writer, request, application.ErrValidation)
+		return
+	}
+	applicationID, environmentID, err := handler.service.ResolveApplicationEnvironment(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	response := KeycloakSyncStatusResponse{
+		ApplicationCode: applicationCode,
+		Environment:     environment,
+		Realm:           handler.keycloakRealm,
+	}
+	// Get client mapping.
+	if inspector, supported := handler.keycloakMappings.(keycloakClientMappingInspector); supported {
+		mapping, loadErr := inspector.GetKeycloakClientMapping(request.Context(), principal.Tenant.ID, applicationID, environmentID)
+		if loadErr != nil {
+			handler.logger.Warn("load Keycloak client mapping for sync status failed",
+				"application_code", applicationCode, "environment", environment, "error", loadErr)
+			response.DriftError = "CLIENT_MAPPING_UNAVAILABLE"
+		} else {
+			response.ClientID = mapping.ClientID
+			response.ClientState = mapping.Status
+			response.LastSyncedAt = mapping.LastSyncedAt
+		}
+	}
+	// Get readiness.
+	readiness := handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	response.SwitchReady = readiness.SwitchReady
+	// Get drift detection if control plane is available.
+	if handler.keycloakControl != nil && response.ClientID != "" {
+		roleCodes, catalogErr := handler.loadKeycloakRoleCodesForDrift(request.Context(), principal.Tenant.ID, applicationID)
+		if catalogErr != nil {
+			handler.logger.Warn("load role catalog for drift check failed",
+				"application_code", applicationCode, "environment", environment, "error", catalogErr)
+			response.DriftError = "ROLE_CATALOG_UNAVAILABLE"
+		} else {
+			// Redirect URI is derived from the environment's base URL + path prefix +
+			// /auth/callback. We pass empty here because the SyncClient endpoint does
+			// full redirect URI validation; the dashboard focuses on role/mapper drift.
+			redirectURI := ""
+			drift, driftErr := handler.keycloakControl.DetectSubsystemKeycloakDrift(request.Context(), response.ClientID, redirectURI, roleCodes)
+			if driftErr != nil {
+				handler.logger.Warn("drift detection failed",
+					"application_code", applicationCode, "environment", environment, "error", driftErr)
+				response.DriftError = "DRIFT_DETECTION_FAILED"
+			} else {
+				response.DriftAvailable = true
+				response.Drift = &struct {
+					HasDrift       bool     `json:"has_drift"`
+					MissingRoles   []string `json:"missing_roles,omitempty"`
+					StaleRoles     []string `json:"stale_roles,omitempty"`
+					MissingMappers []string `json:"missing_mappers,omitempty"`
+					DriftedMappers []string `json:"drifted_mappers,omitempty"`
+					RedirectURIOK  bool     `json:"redirect_uri_ok"`
+					BrokerConfigOK bool     `json:"broker_config_ok"`
+				}{
+					HasDrift:       drift.HasDrift,
+					MissingRoles:   drift.MissingRoles,
+					StaleRoles:     drift.StaleRoles,
+					MissingMappers: drift.MissingMappers,
+					DriftedMappers: drift.DriftedMappers,
+					RedirectURIOK:  drift.RedirectURIOK,
+					BrokerConfigOK: drift.BrokerConfigOK,
+				}
+			}
+		}
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak 同步状态查询成功", response)
 }
 
 // recoverStaleSubsystemDeployment closes the only lifecycle states that can be

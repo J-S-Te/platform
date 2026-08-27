@@ -20,6 +20,35 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
 
+type failingKeycloakAuthorizationCatalog struct {
+	err error
+}
+
+func (catalog failingKeycloakAuthorizationCatalog) ListKeycloakRoleCodes(context.Context, string, string) ([]string, error) {
+	return nil, catalog.err
+}
+
+func TestLoadKeycloakRoleCodesForDriftFailsClosedWhenCatalogUnavailable(t *testing.T) {
+	t.Parallel()
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"https://platform.example.com", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := handler.loadKeycloakRoleCodesForDrift(context.Background(), "tenant-1", "app-1"); err == nil {
+		t.Fatal("expected an error when the authorization catalog is not configured")
+	}
+
+	catalogErr := errors.New("catalog backend unavailable")
+	handler.ConfigureKeycloakAuthorizationCatalog(failingKeycloakAuthorizationCatalog{err: catalogErr})
+	if _, err := handler.loadKeycloakRoleCodesForDrift(context.Background(), "tenant-1", "app-1"); !errors.Is(err, catalogErr) {
+		t.Fatalf("catalog error = %v, want %v", err, catalogErr)
+	}
+}
+
 func TestWriteKeycloakSyncFailureKeepsResponseSafeAndLogsCorrelatedCause(t *testing.T) {
 	t.Parallel()
 	const requestID = "01KZRME97X5XBWB3H1E74KZTSX"
@@ -333,6 +362,10 @@ func (service *stubSubsystemOnboardingService) ResolveApplicationEnvironment(con
 		environmentID = "env-1"
 	}
 	return applicationID, environmentID, nil
+}
+
+func (service *stubSubsystemOnboardingService) PreflightValidate(context.Context, application.SubsystemOnboardingInput) error {
+	return nil
 }
 
 func TestListPortalApplicationsDisablesUserSpecificResponseCaching(t *testing.T) {

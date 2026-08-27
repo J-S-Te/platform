@@ -62,6 +62,7 @@ type OAuthClientManagementRepository interface {
 	CreateOAuthClient(context.Context, OAuthClientCreateInput, string, *SecretWrite, time.Time) (OAuthClientView, error)
 	ListOAuthClients(context.Context, string) ([]OAuthClientView, error)
 	GetOAuthClient(context.Context, string, string) (OAuthClientView, error)
+	GetOAuthClientByClientID(context.Context, string, string) (OAuthClientView, error)
 	ReplaceOAuthClientScopes(context.Context, OAuthClientScopesUpdateInput, time.Time) (OAuthClientView, error)
 	ReplaceOAuthClientRedirectURIs(context.Context, OAuthClientRedirectURIsUpdateInput, time.Time) (OAuthClientView, error)
 	GetOAuthClientPostLogoutRedirectURIs(context.Context, string, string) (OAuthClientPostLogoutRedirectURIsView, error)
@@ -325,6 +326,18 @@ func (service *OAuthClientManagementService) GetOAuthClient(ctx context.Context,
 		return OAuthClientView{}, ErrManagementValidation
 	}
 	return service.repository.GetOAuthClient(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(oauthClientID))
+}
+
+// GetOAuthClientByClientID returns a safe tenant-scoped client projection using the public
+// client_id string instead of the internal aggregate ID. This avoids a full tenant scan
+// when looking up broker or well-known clients by their stable identifier.
+func (service *OAuthClientManagementService) GetOAuthClientByClientID(ctx context.Context, tenantID, clientID string) (OAuthClientView, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	clientID = strings.TrimSpace(clientID)
+	if tenantID == "" || clientID == "" {
+		return OAuthClientView{}, ErrManagementValidation
+	}
+	return service.repository.GetOAuthClientByClientID(ctx, tenantID, clientID)
 }
 
 // ReplaceOAuthClientScopes replaces all allowed scopes for a client.
