@@ -1155,7 +1155,14 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 		handler.writeKeycloakSyncFailure(writer, request, payload, "broker", brokerErr)
 		return
 	}
-	if err := handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret); err != nil {
+	// 已有活动凭据时 Broker 适配器会故意返回空 Secret，避免每次同步都轮换
+	// 密钥。此时只能验证 Keycloak 现有配置，不能用空值覆盖 clientSecret。
+	if strings.TrimSpace(brokerSecret) != "" {
+		if err := handler.keycloakControl.EnsureBroker(request.Context(), brokerID, brokerSecret); err != nil {
+			handler.writeKeycloakSyncFailure(writer, request, payload, "broker", err)
+			return
+		}
+	} else if err := handler.keycloakControl.VerifyBrokerExists(request.Context()); err != nil {
 		handler.writeKeycloakSyncFailure(writer, request, payload, "broker", err)
 		return
 	}

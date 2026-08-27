@@ -2,6 +2,8 @@
 
 > 更新日期：2026-08-27。生产目录承载 platform、frontend、contract、CRM、客户 Portal、项目管理和数据看板系统不可变镜像。
 
+> 发布校验基线：平台 API 与 `subsystem-provisioner` 必须使用同一版本的 `PLATFORM_IMAGE`；平台应用授权仓储必须包含按 `client_id` 查询能力。若 CI 在 `OAuthClientManagementRepository` 报缺少 `GetOAuthClientByClientID`，说明镜像未包含最新平台提交，应先重新构建并推送不可变 digest，再发布。
+
 ## 1. 服务器要求
 
 - Linux、Docker Engine、Docker Compose v2、`curl`、`gzip`、`flock`；
