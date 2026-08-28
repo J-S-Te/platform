@@ -731,8 +731,10 @@ services:
       TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
       TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
       TEMPORAL_WORKER_DEPLOYMENT_NAME: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_DEPLOYMENT_NAME:-customer-opportunity-presale}
-      # Build ID 必须由发布流水线写入镜像摘要或不可变版本；禁止跨版本复用。
-      TEMPORAL_WORKER_BUILD_ID: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID:?CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID must be set}
+      # 客户发布脚本会根据 CRM 镜像摘要写入不可复用的 Build ID。基础平台
+      # 资产同步不会启动 customer profile，因此这里仅提供解析 Compose 所需
+      # 的占位值；任何实际 Worker 发布都必须由脚本覆盖为不可变版本标识。
+      TEMPORAL_WORKER_BUILD_ID: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID:-customer-presale-pending}
       TEMPORAL_WORKER_VERSIONING_ENABLED: "true"
       TEMPORAL_WORKER_VERSIONING_POLICY: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
       TEMPORAL_METRICS_ADDRESS: :9093
