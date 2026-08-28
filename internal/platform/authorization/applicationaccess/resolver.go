@@ -46,5 +46,8 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorizationContex
 	return tokenissuer.AuthorizationContext{ClientID: clientID, ApplicationCode: resolved.ApplicationCode, EnvironmentCode: resolved.EnvironmentCode,
 		TenantID: resolved.TenantID, PersonID: resolved.PersonID,
 		Roles: append([]string(nil), resolved.Roles...), Permissions: append([]string(nil), resolved.Permissions...), DataScopes: append([]tokenissuer.DataScope(nil), resolved.DataScopes...),
-		AuthorizationRevision: resolved.AuthzRevision}, nil
+		RoleConfigHash: resolved.RoleConfigHash, CatalogVersion: resolved.CatalogVersion,
+		CompatibleCatalogVersions:  append([]string(nil), resolved.CompatibleCatalogVersions...),
+		CompatibleRoleConfigHashes: append([]string(nil), resolved.CompatibleRoleConfigHashes...),
+		AuthorizationRevision:      resolved.AuthzRevision}, nil
 }

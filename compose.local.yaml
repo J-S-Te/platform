@@ -79,6 +79,49 @@ x-settlement-backend-runtime: &settlement-backend-runtime
   image: settlement/backend:local
 
 services:
+  file-gateway-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${FILE_GATEWAY_DB_NAME:-file_gateway}
+      MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
+      MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${FILE_GATEWAY_DB_ROOT_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_ROOT_PASSWORD}
+    volumes:
+      - file_gateway_mysql_local_data:/var/lib/mysql
+    networks: [default]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  file-gateway:
+    image: basic-platform/backend:local
+    command: ["./file-gateway"]
+    environment:
+      FILE_GATEWAY_HTTP_ADDRESS: :8086
+      FILE_GATEWAY_DATABASE_DSN: file_gateway:${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=UTC
+      FILE_GATEWAY_STORAGE_BACKEND: ${FILE_GATEWAY_STORAGE_BACKEND:-local}
+      FILE_GATEWAY_STORAGE_ROOT: /app/data/file-gateway
+      FILE_GATEWAY_TOKEN_ISSUER: ${AUTH_JWT_ISSUER:-basic-platform}
+      FILE_GATEWAY_TOKEN_AUDIENCE: ${AUTH_APPLICATION_JWT_AUDIENCE:-basic-platform-application}
+      FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      FILE_GATEWAY_RECONCILIATION_INTERVAL: ${FILE_GATEWAY_RECONCILIATION_INTERVAL:-1m}
+      FILE_GATEWAY_RECONCILIATION_STALE_AFTER: ${FILE_GATEWAY_RECONCILIATION_STALE_AFTER:-15m}
+      FILE_GATEWAY_RECONCILIATION_BATCH_SIZE: ${FILE_GATEWAY_RECONCILIATION_BATCH_SIZE:-100}
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - file_gateway_local_data:/app/data/file-gateway
+    depends_on:
+      file-gateway-mysql:
+        condition: service_healthy
+    networks: [default]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8086/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   # 独立 Keycloak 认证层，由 scripts/docker-local.sh 通过 keycloak profile 启动。
   # Keycloak 使用独立 MySQL 数据卷，绝不复用任何业务数据库。
   keycloak-db:
@@ -454,14 +497,24 @@ services:
       CRM_API_BASE_URL: http://customer-api:8090
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_WORKER_BUILD_ID: contract-worker-v1
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: contract-management
+      TEMPORAL_WORKER_VERSIONING_ENABLED: "true"
+      TEMPORAL_WORKER_VERSIONING_POLICY: PINNED
+      TEMPORAL_METRICS_ADDRESS: :9091
       CONTRACT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
       CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
       CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
       DASHBOARD_MACHINE_ENABLED: "true"
       DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
-      DASHBOARD_MACHINE_CLIENT_ID: data_analysis-dev-machine
+      DASHBOARD_MACHINE_CLIENT_ID: data_analysis-dev-contract-dashboard
       DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
+      DASHBOARD_MACHINE_ISSUER: basic-platform
+      DASHBOARD_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      DASHBOARD_MACHINE_CALLER_APPLICATION_CODE: data_analysis
+      DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE: dev
+      DASHBOARD_MACHINE_REQUIRED_SCOPE: dashboard.contract.read
       CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -476,6 +529,7 @@ services:
         condition: service_healthy
     expose:
       - "8081"
+      - "9091"
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: contract_management
@@ -556,13 +610,22 @@ services:
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       DASHBOARD_MACHINE_ENABLED: "true"
       DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
-      DASHBOARD_MACHINE_CLIENT_ID: data_analysis-dev-machine
+      DASHBOARD_MACHINE_CLIENT_ID: data_analysis-dev-project-dashboard
       DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
+      DASHBOARD_MACHINE_ISSUER: basic-platform
+      DASHBOARD_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      DASHBOARD_MACHINE_CALLER_APPLICATION_CODE: data_analysis
+      DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE: dev
+      DASHBOARD_MACHINE_REQUIRED_SCOPE: dashboard.project.read
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: project-management
       PROJECT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
+    # Dashboard 机器 Bearer 校验使用平台签发 JWT 的公钥；只读挂载平台
+    # 生成的公钥，避免 project-api 启动时因路径存在但文件缺失而退出。
+    volumes:
+      - ./data/keys:/app/data/keys:ro
     depends_on:
       project-mysql:
         condition: service_healthy
@@ -686,6 +749,8 @@ services:
       default:
         aliases:
           - dashboard-api
+          # 统一前端 Nginx 与生产编排共用 data-analysis-api 上游名；本地服务名仍保留 dashboard-api。
+          - data-analysis-api
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/data_analysis/healthz"]
       interval: 10s
@@ -703,9 +768,15 @@ services:
     environment:
       DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4
       AGGREGATION_ONCE: "false"
-      MACHINE_TOKEN_URL: http://keycloak:8080/realms/basic-platform/protocol/openid-connect/token
-      MACHINE_CLIENT_ID: ${MACHINE_CLIENT_ID}
-      MACHINE_CLIENT_SECRET: ${MACHINE_CLIENT_SECRET}
+      MACHINE_TOKEN_URL: http://api:8080/oauth2/token
+      MACHINE_TOKEN_ISSUER: basic-platform
+      MACHINE_TOKEN_AUDIENCE: basic-platform-application
+      CONTRACT_MACHINE_CLIENT_ID: ${CONTRACT_MACHINE_CLIENT_ID}
+      CONTRACT_MACHINE_CLIENT_SECRET: ${CONTRACT_MACHINE_CLIENT_SECRET}
+      CONTRACT_MACHINE_TOKEN_SCOPE: dashboard.contract.read
+      PROJECT_MACHINE_CLIENT_ID: ${PROJECT_MACHINE_CLIENT_ID}
+      PROJECT_MACHINE_CLIENT_SECRET: ${PROJECT_MACHINE_CLIENT_SECRET}
+      PROJECT_MACHINE_TOKEN_SCOPE: dashboard.project.read
       CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
       PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
       OIDC_TENANT_ID: ${OIDC_TENANT_ID}
@@ -989,6 +1060,12 @@ services:
       TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
       TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_DEPLOYMENT_NAME:-customer-opportunity-presale}
+      TEMPORAL_WORKER_BUILD_ID: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID:-presale-worker-local}
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_VERSIONING_ENABLED:-true}
+      TEMPORAL_WORKER_VERSIONING_POLICY: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
+      TEMPORAL_METRICS_ADDRESS: :9093
+    expose: ["9093"]
     depends_on:
       customer-mysql:
         condition: service_healthy
@@ -1174,6 +1251,10 @@ services:
     restart: unless-stopped
 
 volumes:
+  file_gateway_mysql_local_data:
+    name: basic-platform-local-file-gateway-mysql-data
+  file_gateway_local_data:
+    name: basic-platform-local-file-gateway-data
   mysql_local_data:
     name: basic-platform-local-mysql-data
   contract_mysql_local_data:

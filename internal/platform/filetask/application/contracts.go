@@ -14,12 +14,19 @@ import (
 // because MySQL and the local file system cannot share one distributed transaction.
 type FileRepository interface {
 	CreateWriting(context.Context, domain.File, domain.FileVersion) error
-	MarkAvailable(context.Context, string, string, uint64, []byte, time.Time) error
+	ReserveUpload(context.Context, domain.File, domain.FileVersion) (stored domain.StoredFile, created bool, err error)
+	MarkValidating(context.Context, string, string, uint64, []byte, time.Time) error
+	MarkReady(context.Context, string, string, time.Time) error
+	MarkRejected(context.Context, string, string, time.Time) error
 	MarkFailed(context.Context, string, string, time.Time) error
 	GetAvailable(context.Context, string, string) (domain.StoredFile, error)
 	ClaimExpiredUnbound(context.Context, string, time.Time) (domain.StoredFile, bool, error)
 	MarkDeleted(context.Context, string, string, time.Time) error
 	ReleaseCleanupClaim(context.Context, string, string, string, time.Time) error
+	CreateBinding(context.Context, domain.FileBinding) (domain.FileBinding, error)
+	DeactivateBinding(context.Context, string, string, string, string, time.Time) error
+	HasActiveBinding(context.Context, string, string, string, string, string) (bool, error)
+	ListRecoveryCandidates(context.Context, string, time.Time, int) ([]domain.StoredFile, error)
 }
 
 // JobRepository owns generic async_job state transitions. It must implement claims in short
@@ -29,7 +36,7 @@ type JobRepository interface {
 	ListJobs(context.Context, string, domain.PageRequest) (domain.PageResult[domain.Job], error)
 	GetJob(context.Context, string, string) (domain.Job, error)
 	ClaimJob(context.Context, string, []string, time.Time, time.Time) (domain.Job, bool, error)
-	CompleteJob(context.Context, string, string, time.Time) error
+	CompleteJob(context.Context, domain.Job, time.Time) error
 	FailJob(context.Context, domain.Job, string, string, bool, time.Time, time.Time) error
 	CancelJob(context.Context, string, string, time.Time) error
 	RetryJob(context.Context, string, string, time.Time) error
@@ -77,8 +84,21 @@ type UploadInput struct {
 // DownloadAccess carries the server-authenticated subject and its already-resolved permissions.
 // HTTP clients cannot populate it directly; the handler reads it from authctx.
 type DownloadAccess struct {
-	TenantID, UserID string
-	PermissionCodes  []string
+	TenantID, UserID            string
+	ApplicationID, ResourceType string
+	ResourceID                  string
+	PermissionCodes             []string
+	ResourceAccessVerified      bool
+}
+
+// BindingInput 创建文件到业务资源的 ACTIVE 绑定。ApplicationID 必须与文件归属一致，
+// 以免一个子系统借绑定接口接管另一个子系统的文件。
+type BindingInput struct {
+	TenantID, ApplicationID, FileID string
+	ResourceType, ResourceID        string
+	BindingType, DisplayName        string
+	SortOrder                       int
+	OperatorUserID                  string
 }
 
 // JobCreateInput creates an application-owned background task. Payload must be valid JSON and
@@ -87,6 +107,10 @@ type JobCreateInput struct {
 	TenantID, ApplicationID string
 	JobType, AggregateType  string
 	AggregateID             string
+	IdempotencyKey          string
+	RequestID, TraceID      string
+	CorrelationID           string
+	BusinessRef             string
 	Payload                 json.RawMessage
 	Priority                int
 	MaxAttempts             uint

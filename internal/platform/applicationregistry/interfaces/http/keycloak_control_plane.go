@@ -1011,27 +1011,29 @@ func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Co
 	// Check broker config.
 	brokerAlias := brokerAliasForClient(clientID)
 	response, err = control.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(control.realm)+"/identity-provider/instances/"+url.PathEscape(brokerAlias), nil)
-	if err == nil {
-		if response.StatusCode == stdhttp.StatusOK {
-			var broker struct {
-				Config map[string]string `json:"config"`
-			}
-			decodeBrokerErr := json.NewDecoder(response.Body).Decode(&broker)
-			response.Body.Close()
-			if decodeBrokerErr == nil {
-				requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
-				for _, key := range requiredKeys {
-					if strings.TrimSpace(broker.Config[key]) == "" {
-						report.BrokerConfigOK = false
-						report.HasDrift = true
-						break
-					}
-				}
-			}
-		} else {
-			response.Body.Close()
+	if err != nil {
+		// 管理 API 不可达不等同于“配置正常”。向上返回错误，让健康仪表盘明确显示
+		// DRIFT_DETECTION_FAILED，禁止用默认 BrokerConfigOK=true 制造假绿状态。
+		return report, fmt.Errorf("read Keycloak Broker for drift check: %w", err)
+	}
+	if err := keycloakStatusError("read Keycloak Broker for drift check", response, stdhttp.StatusOK); err != nil {
+		response.Body.Close()
+		return report, err
+	}
+	var broker struct {
+		Config map[string]string `json:"config"`
+	}
+	decodeBrokerErr := json.NewDecoder(response.Body).Decode(&broker)
+	response.Body.Close()
+	if decodeBrokerErr != nil {
+		return report, fmt.Errorf("decode Keycloak Broker for drift check: %w", decodeBrokerErr)
+	}
+	requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
+	for _, key := range requiredKeys {
+		if strings.TrimSpace(broker.Config[key]) == "" {
 			report.BrokerConfigOK = false
 			report.HasDrift = true
+			break
 		}
 	}
 	return report, nil

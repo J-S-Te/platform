@@ -19,6 +19,8 @@ func Recover(logger *slog.Logger) gin.HandlerFunc {
 			if recovered := recover(); recovered != nil {
 				logger.Error("panic recovered from http request",
 					"request_id", requestctx.RequestID(context.Request.Context()),
+					"trace_id", requestctx.TraceID(context.Request.Context()),
+					"correlation_id", requestctx.CorrelationID(context.Request.Context()),
 					"panic", recovered,
 					"stack", string(debug.Stack()),
 				)

@@ -26,8 +26,14 @@ x-contract-service: &contract-service
     MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: temporal:7233
+    TEMPORAL_WORKER_DEPLOYMENT_NAME: contract-management
+    TEMPORAL_WORKER_VERSIONING_ENABLED: "true"
+    TEMPORAL_WORKER_VERSIONING_POLICY: PINNED
+    TEMPORAL_METRICS_ADDRESS: :9091
     GIN_MODE: release
   networks: [application]
+  volumes:
+    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 
 x-customer-service: &customer-service
@@ -96,6 +102,8 @@ x-project-service: &project-service
     PROJECT_RUN_WORKER_WITH_API: "true"
     GIN_MODE: release
   networks: [application]
+  volumes:
+    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 
 x-data-analysis-service: &data-analysis-service
@@ -284,6 +292,12 @@ services:
       # 仅测试服务器可设为 true：跳过子系统数据库凭据校验，允许占位密码首次初始化。
       SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS: ${SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS:-false}
     command: ["./subsystem-provisioner"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=64m,mode=1770
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env:ro
@@ -369,6 +383,8 @@ services:
     command: ["./api"]
     ports:
       - "127.0.0.1:${CONTRACT_API_PORT:-18081}:8081"
+    expose:
+      - "9091"
     labels:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: contract_management
@@ -533,12 +549,8 @@ services:
       AGGREGATION_ONCE: "false"
       CONTRACT_READ_DSN: ${CONTRACT_READ_DSN:-}
       CRM_READ_DSN: ${CRM_READ_DSN:-}
-      # 跨库聚合通道默认关闭：启用需要同时配置 Keycloak service account
-      # （MACHINE_CLIENT_ID/SECRET）与直连只读 DSN。空值时 worker 只执行
-      # 聚合库自身的任务，不会空转向 Keycloak 请求不存在的机器客户端。
-      MACHINE_TOKEN_URL: ${MACHINE_TOKEN_URL:-}
-      CONTRACT_INTERNAL_URL: ${CONTRACT_INTERNAL_URL:-}
-      PROJECT_INTERNAL_URL: ${PROJECT_INTERNAL_URL:-}
+      # 机器令牌端点、两个最小权限客户端及接口 URL 均由受控 runtime 文件下发，
+      # Compose 不得用空默认值覆盖已经完成接入的环境配置。
     depends_on:
       data-analysis-mysql:
         condition: service_healthy
@@ -718,6 +730,13 @@ services:
       TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
       TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_DEPLOYMENT_NAME:-customer-opportunity-presale}
+      # Build ID 必须由发布流水线写入镜像摘要或不可变版本；禁止跨版本复用。
+      TEMPORAL_WORKER_BUILD_ID: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID:?CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID must be set}
+      TEMPORAL_WORKER_VERSIONING_ENABLED: "true"
+      TEMPORAL_WORKER_VERSIONING_POLICY: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
+      TEMPORAL_METRICS_ADDRESS: :9093
+    expose: ["9093"]
     depends_on:
       customer-mysql:
         condition: service_healthy
@@ -833,6 +852,58 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  file-gateway-mysql:
+    image: ${FILE_GATEWAY_MYSQL_IMAGE:-mysql:8.4}
+    environment:
+      MYSQL_DATABASE: ${FILE_GATEWAY_DB_NAME:-file_gateway}
+      MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
+      MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:?FILE_GATEWAY_DB_PASSWORD must be set}
+      MYSQL_ROOT_PASSWORD: ${FILE_GATEWAY_DB_ROOT_PASSWORD:?FILE_GATEWAY_DB_ROOT_PASSWORD must be set}
+    volumes:
+      - file-gateway-mysql-data:/var/lib/mysql
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  file-gateway:
+    image: ${PLATFORM_IMAGE:?PLATFORM_IMAGE must be set}
+    command: ["./file-gateway"]
+    environment:
+      FILE_GATEWAY_HTTP_ADDRESS: :8086
+      FILE_GATEWAY_DATABASE_DSN: ${FILE_GATEWAY_DATABASE_DSN:?FILE_GATEWAY_DATABASE_DSN must be set}
+      FILE_GATEWAY_STORAGE_BACKEND: ${FILE_GATEWAY_STORAGE_BACKEND:-s3}
+      FILE_GATEWAY_STORAGE_ROOT: /app/data/file-gateway
+      FILE_GATEWAY_S3_BUCKET: ${FILE_GATEWAY_S3_BUCKET:-}
+      FILE_GATEWAY_S3_PREFIX: ${FILE_GATEWAY_S3_PREFIX:-production}
+      FILE_GATEWAY_S3_ENDPOINT: ${FILE_GATEWAY_S3_ENDPOINT:-}
+      FILE_GATEWAY_S3_REGION: ${FILE_GATEWAY_S3_REGION:-cn-hangzhou}
+      FILE_GATEWAY_S3_ACCESS_KEY_ID: ${FILE_GATEWAY_S3_ACCESS_KEY_ID:-}
+      FILE_GATEWAY_S3_SECRET_ACCESS_KEY: ${FILE_GATEWAY_S3_SECRET_ACCESS_KEY:-}
+      FILE_GATEWAY_S3_SESSION_TOKEN: ${FILE_GATEWAY_S3_SESSION_TOKEN:-}
+      FILE_GATEWAY_S3_USE_PATH_STYLE: ${FILE_GATEWAY_S3_USE_PATH_STYLE:-false}
+      FILE_GATEWAY_S3_MAX_READ_BYTES: ${FILE_GATEWAY_S3_MAX_READ_BYTES:-104857600}
+      FILE_GATEWAY_RECONCILIATION_INTERVAL: ${FILE_GATEWAY_RECONCILIATION_INTERVAL:-1m}
+      FILE_GATEWAY_RECONCILIATION_STALE_AFTER: ${FILE_GATEWAY_RECONCILIATION_STALE_AFTER:-15m}
+      FILE_GATEWAY_RECONCILIATION_BATCH_SIZE: ${FILE_GATEWAY_RECONCILIATION_BATCH_SIZE:-100}
+      FILE_GATEWAY_TOKEN_ISSUER: ${AUTH_JWT_ISSUER:?AUTH_JWT_ISSUER must be set}
+      FILE_GATEWAY_TOKEN_AUDIENCE: ${AUTH_APPLICATION_JWT_AUDIENCE:?AUTH_APPLICATION_JWT_AUDIENCE must be set}
+      FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-/opt/basic-platform/data/platform/keys}:/app/data/keys:ro
+      - file-gateway-data:/app/data/file-gateway
+    depends_on:
+      file-gateway-mysql:
+        condition: service_healthy
+    networks: [application]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8086/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
 networks:
   application:
     name: basic-platform-production
@@ -847,3 +918,5 @@ volumes:
   data-analysis-mysql-data:
   subsystem-provisioner-socket:
   keycloak-mysql-data:
+  file-gateway-mysql-data:
+  file-gateway-data:

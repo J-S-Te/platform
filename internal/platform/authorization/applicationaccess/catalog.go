@@ -63,8 +63,17 @@ type CatalogView struct {
 	ErrorMessage         string                         `json:"error_message,omitempty"`
 	Policy               ApplicationAuthorizationPolicy `json:"policy"`
 	ClaimsRoleConfigHash string                         `json:"claims_role_config_hash,omitempty"`
+	CompatibleVersions   []CatalogCompatibilityVersion  `json:"compatible_versions"`
 	Permissions          []CatalogPermissionView        `json:"permissions"`
 	Roles                []CatalogRoleView              `json:"roles"`
+}
+
+// CatalogCompatibilityVersion 描述授权目录当前版本与紧邻上一版本的兼容窗口。
+// 子系统只能把这里返回的版本视为可接受版本，不能自行无限保留历史哈希。
+type CatalogCompatibilityVersion struct {
+	CatalogVersion       string `json:"catalog_version"`
+	Checksum             string `json:"checksum"`
+	ClaimsRoleConfigHash string `json:"claims_role_config_hash,omitempty"`
 }
 
 type CatalogPermissionView struct {
@@ -85,17 +94,20 @@ type CatalogRoleView struct {
 }
 
 type catalogMetadataRow struct {
-	TenantID             string     `gorm:"column:tenant_id"`
-	ApplicationID        string     `gorm:"column:application_id"`
-	CatalogVersion       string     `gorm:"column:catalog_version"`
-	CatalogHash          string     `gorm:"column:catalog_hash"`
-	ClaimsRoleConfigHash string     `gorm:"column:claims_role_config_hash"`
-	SourceType           string     `gorm:"column:source_type"`
-	SourceIdentifier     string     `gorm:"column:source_identifier"`
-	SyncStatus           string     `gorm:"column:sync_status"`
-	LastSyncedAt         *time.Time `gorm:"column:last_synced_at"`
-	LastSyncedBy         string     `gorm:"column:last_synced_by"`
-	ErrorMessage         string     `gorm:"column:error_message"`
+	TenantID                     string     `gorm:"column:tenant_id"`
+	ApplicationID                string     `gorm:"column:application_id"`
+	CatalogVersion               string     `gorm:"column:catalog_version"`
+	CatalogHash                  string     `gorm:"column:catalog_hash"`
+	ClaimsRoleConfigHash         string     `gorm:"column:claims_role_config_hash"`
+	PreviousCatalogVersion       string     `gorm:"column:previous_catalog_version"`
+	PreviousCatalogHash          string     `gorm:"column:previous_catalog_hash"`
+	PreviousClaimsRoleConfigHash string     `gorm:"column:previous_claims_role_config_hash"`
+	SourceType                   string     `gorm:"column:source_type"`
+	SourceIdentifier             string     `gorm:"column:source_identifier"`
+	SyncStatus                   string     `gorm:"column:sync_status"`
+	LastSyncedAt                 *time.Time `gorm:"column:last_synced_at"`
+	LastSyncedBy                 string     `gorm:"column:last_synced_by"`
+	ErrorMessage                 string     `gorm:"column:error_message"`
 }
 
 type catalogPermissionRow struct {
@@ -187,6 +199,14 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 目录、角色权限关系、应用策略、同步元数据和 revision 必须作为一个版本发布。
 		// 任一环节失败都会回滚，令牌签发始终只能看到上一份完整目录或新目录。
+		// 同一应用的并发发布必须先锁定目录元数据，否则两个版本都可能把同一个旧版本
+		// 记录成 N-1，导致兼容窗口与最终生效版本不一致。
+		lockedMetadata := existingMetadata
+		lockErr := tx.Table("authz_authorization_catalog").Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND application_id = ?", tenantID, app.ID).Take(&lockedMetadata).Error
+		if lockErr != nil && !errors.Is(lockErr, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("lock authorization catalog metadata: %w", lockErr)
+		}
 		permissionIDs := make(map[string]string, len(input.Permissions))
 		for _, item := range input.Permissions {
 			resourceID, err := s.upsertCatalogResource(tx, tenantID, app.ID, operatorID, now, item)
@@ -240,7 +260,19 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		if err := s.upsertCatalogPolicy(tx, tenantID, app.ID, operatorID, now, input); err != nil {
 			return err
 		}
-		metadata := map[string]any{"tenant_id": tenantID, "application_id": app.ID, "catalog_version": input.CatalogVersion, "catalog_hash": input.Checksum, "claims_role_config_hash": input.ClaimsRoleConfigHash, "source_type": input.SourceType, "source_identifier": input.SourceIdentifier, "sync_status": "SYNCED", "last_synced_at": now, "last_synced_by": operatorID, "error_message": nil, "created_at": now, "created_by": operatorID, "updated_at": now, "updated_by": operatorID}
+		previous := previousCatalogCompatibility(lockedMetadata, input)
+		metadata := map[string]any{
+			"tenant_id": tenantID, "application_id": app.ID,
+			"catalog_version": input.CatalogVersion, "catalog_hash": input.Checksum,
+			"claims_role_config_hash":          input.ClaimsRoleConfigHash,
+			"previous_catalog_version":         previous.CatalogVersion,
+			"previous_catalog_hash":            previous.Checksum,
+			"previous_claims_role_config_hash": previous.ClaimsRoleConfigHash,
+			"source_type":                      input.SourceType, "source_identifier": input.SourceIdentifier,
+			"sync_status": "SYNCED", "last_synced_at": now, "last_synced_by": operatorID,
+			"error_message": nil, "created_at": now, "created_by": operatorID,
+			"updated_at": now, "updated_by": operatorID,
+		}
 		if err := tx.Table("authz_authorization_catalog").Clauses(gormOnConflictCatalog()).Create(metadata).Error; err != nil {
 			return fmt.Errorf("save authorization catalog metadata: %w", err)
 		}
@@ -269,6 +301,24 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		Metadata: map[string]any{"catalog_version": input.CatalogVersion, "checksum": input.Checksum, "source_type": input.SourceType, "source_identifier": input.SourceIdentifier, "idempotent": false},
 	})
 	return view, nil
+}
+
+func previousCatalogCompatibility(existing catalogMetadataRow, next CatalogInput) CatalogCompatibilityVersion {
+	// 同一目录内容的重复发布不推进兼容窗口。新内容发布时，当前稳定版成为唯一 N-1；
+	// 若当前行没有完整版本与摘要，则保留原 N-1，避免一次失败记录抹掉最后可用窗口。
+	if existing.CatalogVersion != "" && existing.CatalogHash != "" &&
+		(existing.CatalogVersion != next.CatalogVersion || !strings.EqualFold(existing.CatalogHash, next.Checksum)) {
+		return CatalogCompatibilityVersion{
+			CatalogVersion:       existing.CatalogVersion,
+			Checksum:             existing.CatalogHash,
+			ClaimsRoleConfigHash: existing.ClaimsRoleConfigHash,
+		}
+	}
+	return CatalogCompatibilityVersion{
+		CatalogVersion:       existing.PreviousCatalogVersion,
+		Checksum:             existing.PreviousCatalogHash,
+		ClaimsRoleConfigHash: existing.PreviousClaimsRoleConfigHash,
+	}
 }
 
 // enqueueCatalogProjectionUsers turns an application catalog publish into a
@@ -444,7 +494,7 @@ func normalizeCatalog(input CatalogInput) (CatalogInput, string, error) {
 }
 
 func gormOnConflictCatalog() clause.OnConflict {
-	return clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}}, DoUpdates: clause.AssignmentColumns([]string{"catalog_version", "catalog_hash", "claims_role_config_hash", "source_type", "source_identifier", "sync_status", "last_synced_at", "last_synced_by", "error_message", "updated_at", "updated_by"})}
+	return clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "application_id"}}, DoUpdates: clause.AssignmentColumns([]string{"catalog_version", "catalog_hash", "claims_role_config_hash", "previous_catalog_version", "previous_catalog_hash", "previous_claims_role_config_hash", "source_type", "source_identifier", "sync_status", "last_synced_at", "last_synced_by", "error_message", "updated_at", "updated_by"})}
 }
 
 func (s *Service) findApplicationByID(ctx context.Context, tenantID, id string) (applicationRow, error) {
@@ -582,7 +632,25 @@ func (s *Service) catalogView(ctx context.Context, app applicationRow, metadata 
 		}
 		roleViews = append(roleViews, CatalogRoleView{Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, Permissions: sortedUnique(perms)})
 	}
-	return CatalogView{ApplicationID: app.ID, ApplicationCode: app.Code, CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash, ClaimsRoleConfigHash: metadata.ClaimsRoleConfigHash, SourceType: metadata.SourceType, SourceIdentifier: metadata.SourceIdentifier, SyncStatus: metadata.SyncStatus, LastSyncedAt: metadata.LastSyncedAt, LastSyncedBy: metadata.LastSyncedBy, ErrorMessage: metadata.ErrorMessage, Policy: policy, Permissions: permissionViews, Roles: roleViews}, nil
+	compatibleVersions := catalogCompatibilityVersions(metadata)
+	return CatalogView{ApplicationID: app.ID, ApplicationCode: app.Code, CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash, ClaimsRoleConfigHash: metadata.ClaimsRoleConfigHash, CompatibleVersions: compatibleVersions, SourceType: metadata.SourceType, SourceIdentifier: metadata.SourceIdentifier, SyncStatus: metadata.SyncStatus, LastSyncedAt: metadata.LastSyncedAt, LastSyncedBy: metadata.LastSyncedBy, ErrorMessage: metadata.ErrorMessage, Policy: policy, Permissions: permissionViews, Roles: roleViews}, nil
+}
+
+func catalogCompatibilityVersions(metadata catalogMetadataRow) []CatalogCompatibilityVersion {
+	versions := make([]CatalogCompatibilityVersion, 0, 2)
+	if metadata.CatalogVersion != "" && metadata.CatalogHash != "" {
+		versions = append(versions, CatalogCompatibilityVersion{
+			CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash,
+			ClaimsRoleConfigHash: metadata.ClaimsRoleConfigHash,
+		})
+	}
+	if metadata.PreviousCatalogVersion != "" && metadata.PreviousCatalogHash != "" {
+		versions = append(versions, CatalogCompatibilityVersion{
+			CatalogVersion: metadata.PreviousCatalogVersion, Checksum: metadata.PreviousCatalogHash,
+			ClaimsRoleConfigHash: metadata.PreviousClaimsRoleConfigHash,
+		})
+	}
+	return versions
 }
 
 // EnsurePlatformCatalogSynced mirrors the migration-seeded built-in platform roles and

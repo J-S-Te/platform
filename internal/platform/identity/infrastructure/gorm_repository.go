@@ -10,6 +10,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -404,6 +405,12 @@ func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, ten
 				return fmt.Errorf("revoke account OAuth refresh tokens: %w", err)
 			}
 		}
+		// Outbox 与本地会话撤销共用当前事务：只有两者都成功才提交。投递任务来源仅限
+		// 已建立 Token Family 且登记了 ACTIVE Back-Channel URI 的 RP，授权码尚未换取
+		// Token 时 RP 并不存在可注销会话，因此不能提前通知。
+		if err := repository.enqueueBackchannelLogout(transaction, tenantID, accountID, lockedSessions, revokedAt); err != nil {
+			return err
+		}
 		if err := transaction.Table("oauth_token_family").
 			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, "ACTIVE").
 			Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt, "revoke_reason": reason}).Error; err != nil {
@@ -421,6 +428,52 @@ func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, ten
 		}
 		return nil
 	})
+}
+
+type backchannelLogoutTarget struct {
+	OAuthClientID string `gorm:"column:oauth_client_id"`
+	SessionID     string `gorm:"column:session_id"`
+	UserID        string `gorm:"column:user_id"`
+}
+
+// enqueueBackchannelLogout 在调用方事务中为已登录 RP 创建持久投递任务。
+// 参数 transaction 必须是 RevokeAccountSessions 的事务句柄；返回错误时调用方必须回滚整个会话撤销。
+func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB, tenantID, accountID string, sessions []sessionModel, now time.Time) error {
+	if transaction == nil || len(sessions) == 0 {
+		return nil
+	}
+	sessionIDs := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		sessionIDs = append(sessionIDs, session.ID)
+	}
+	var targets []backchannelLogoutTarget
+	if err := transaction.Table("oauth_token_family AS family").
+		Distinct("family.oauth_client_id", "family.session_id", "family.user_id").
+		Joins("JOIN platform_oauth_client AS client ON client.id = family.oauth_client_id AND client.tenant_id = family.tenant_id AND client.status = ?", domain.StatusActive).
+		Joins("JOIN platform_oauth_backchannel_logout_uri AS uri ON uri.oauth_client_id = family.oauth_client_id").
+		Where("family.tenant_id = ? AND family.account_id = ? AND family.session_id IN ?", tenantID, accountID, sessionIDs).
+		Find(&targets).Error; err != nil {
+		return fmt.Errorf("list OIDC back-channel logout targets: %w", err)
+	}
+	for _, target := range targets {
+		id, err := ulid.New(now)
+		if err != nil {
+			return fmt.Errorf("generate back-channel logout event ID: %w", err)
+		}
+		row := map[string]any{
+			"id": id, "oauth_client_id": target.OAuthClientID, "session_id": target.SessionID,
+			"subject_id": target.UserID, "jti": id, "status": "PENDING", "attempt_count": 0,
+			"next_attempt_at": now.UTC(), "created_at": now.UTC(),
+		}
+		// 唯一键 (oauth_client_id, session_id) 保证重试撤销不会产生第二条通知；其他
+		// 数据库错误仍向上传播，不能把 Outbox 失败伪装成注销成功。
+		if err = transaction.Table("platform_oauth_backchannel_logout_outbox").
+			Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}}, DoNothing: true}).
+			Create(row).Error; err != nil {
+			return fmt.Errorf("enqueue OIDC back-channel logout: %w", err)
+		}
+	}
+	return nil
 }
 
 func (repository *GORMRepository) findRoles(ctx context.Context, tenantID, userID, accountID string, now time.Time) ([]domain.ReferenceName, error) {

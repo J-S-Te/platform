@@ -166,9 +166,25 @@ type Handler struct {
 	allowLegacyPlatformAccessToken bool
 	customerBindingResolver        CustomerBindingResolver
 	emitCustomerRef                bool
+	brokerSelfHealer               BrokerDriftSelfHealer
 	cookie                         cookieConfig
 	clock                          Clock
 	logger                         *slog.Logger
+}
+
+// BrokerDriftSelfHealer repairs a platform OAuth broker client whose secret stored in
+// Keycloak no longer matches the platform's active credential. It is invoked when the
+// token endpoint rejects a broker client's authentication, which is the earliest point
+// the platform can observe Keycloak using a stale secret. Implementations must be safe
+// for concurrent use and must rate-limit repairs to avoid a failure storm.
+type BrokerDriftSelfHealer interface {
+	HealBrokerSecretDrift(ctx context.Context, clientID string) error
+}
+
+// SetBrokerDriftSelfHealer installs the broker secret drift self-healer. A nil value keeps
+// the endpoint fail-closed on invalid broker credentials without attempting a repair.
+func (h *Handler) SetBrokerDriftSelfHealer(healer BrokerDriftSelfHealer) {
+	h.brokerSelfHealer = healer
 }
 
 // CustomerBindingResolver resolves the CRM customer reference bound to a platform

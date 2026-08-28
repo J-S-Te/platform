@@ -88,10 +88,16 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 		scopes = append(scopes, map[string]string{"role_code": scope.RoleCode, "scope_type": scope.ScopeType, "scope_id": scope.ScopeID, "environment_code": scope.EnvironmentCode})
 	}
 	response := map[string]any{
-		"sub": tokenSubject, "identity_id": subjectID, "tenant_id": context.TenantID,
+		// sub 保留 Keycloak 签发方的原生主体；subject_id 是跨业务系统唯一允许
+		// 持久化的平台注册主体。identity_id 在兼容期与 subject_id 双写。
+		"sub": tokenSubject, "subject_id": subjectID, "identity_id": subjectID, "tenant_id": context.TenantID,
 		"client_id": context.ClientID, "application_code": context.ApplicationCode, "environment_code": context.EnvironmentCode,
 		"person_id": context.PersonID, "roles": roles, "permissions": permissions,
 		"data_scopes": scopes, "authorization_revision": context.AuthorizationRevision,
+		"catalog_version":               context.CatalogVersion,
+		"compatible_catalog_versions":   append([]string(nil), context.CompatibleCatalogVersions...),
+		"role_config_hash":              context.RoleConfigHash,
+		"compatible_role_config_hashes": append([]string(nil), context.CompatibleRoleConfigHashes...),
 	}
 	if strings.TrimSpace(loginIP) != "" {
 		response["user_login_ip"] = loginIP

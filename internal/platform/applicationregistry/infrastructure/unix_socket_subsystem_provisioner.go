@@ -17,7 +17,11 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
 
-const subsystemProvisioningProtocolVersion = 1
+const (
+	subsystemProvisioningProtocolVersion  = 2
+	subsystemProvisioningMaxConnections   = 16
+	subsystemProvisioningHandshakeTimeout = 10 * time.Second
+)
 
 type subsystemProvisioningRequest struct {
 	Version     int                                     `json:"version"`
@@ -414,6 +418,7 @@ func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, exec
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
+	connectionSlots := make(chan struct{}, subsystemProvisioningMaxConnections)
 	for {
 		connection, acceptErr := listener.Accept()
 		if acceptErr != nil {
@@ -422,17 +427,30 @@ func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, exec
 			}
 			return fmt.Errorf("accept provisioning request: %w", acceptErr)
 		}
-		go handleSubsystemProvisioningConnection(ctx, connection, executor)
+		select {
+		case connectionSlots <- struct{}{}:
+			go func() {
+				defer func() { <-connectionSlots }()
+				handleSubsystemProvisioningConnection(ctx, connection, executor)
+			}()
+		default:
+			_ = connection.SetWriteDeadline(time.Now().Add(subsystemProvisioningHandshakeTimeout))
+			_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false, Message: "deployment helper is busy"})
+			_ = connection.Close()
+		}
 	}
 }
 
 func handleSubsystemProvisioningConnection(ctx context.Context, connection net.Conn, executor application.SubsystemProvisioner) {
 	defer connection.Close()
+	_ = connection.SetReadDeadline(time.Now().Add(subsystemProvisioningHandshakeTimeout))
 	var request subsystemProvisioningRequest
 	if err := json.NewDecoder(io.LimitReader(connection, 1024*1024)).Decode(&request); err != nil {
 		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false})
 		return
 	}
+	// 请求读取完成后清除握手期限；真正部署由业务 context 的硬超时控制。
+	_ = connection.SetReadDeadline(time.Time{})
 	if request.Version != subsystemProvisioningProtocolVersion {
 		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: false, Message: "deployment protocol version is unsupported"})
 		return
@@ -445,21 +463,27 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	// action 是显式白名单，网络对端不能传入任意命令、路径或参数。新增动作必须同时升级
 	// 协议结构和分派逻辑，不能退化成通用 shell 执行接口。
 	var err error
+	requiresManifestChecksum := false
+	if provider, ok := executor.(interface {
+		Capabilities() application.SubsystemProvisioningCapabilities
+	}); ok {
+		requiresManifestChecksum = provider.Capabilities().Mode == "production"
+	}
 	switch request.Action {
 	case "preflight":
-		if request.Preflight == nil {
+		if request.Preflight == nil || requiresManifestChecksum && strings.TrimSpace(request.Preflight.ManifestChecksum) == "" {
 			err = application.ErrSubsystemProvisioningUnavailable
 		} else {
 			err = executor.Preflight(operationContext, *request.Preflight)
 		}
 	case "provision":
-		if request.Input == nil {
+		if request.Input == nil || requiresManifestChecksum && strings.TrimSpace(request.Input.ManifestChecksum) == "" {
 			err = application.ErrSubsystemProvisioningUnavailable
 		} else {
 			err = executor.Provision(operationContext, *request.Input)
 		}
 	case "update":
-		if request.Input == nil {
+		if request.Input == nil || requiresManifestChecksum && strings.TrimSpace(request.Input.ManifestChecksum) == "" {
 			err = application.ErrSubsystemProvisioningUnavailable
 		} else {
 			err = executor.Update(operationContext, *request.Input)

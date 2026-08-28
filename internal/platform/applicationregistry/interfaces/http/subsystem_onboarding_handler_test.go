@@ -433,6 +433,52 @@ func TestListPortalApplicationsReturnsUserProjectionGate(t *testing.T) {
 	}
 }
 
+func TestSubsystemHealthDashboardDoesNotReportUnverifiedDependenciesAsHealthy(t *testing.T) {
+	t.Parallel()
+	service := &stubSubsystemOnboardingService{portalItems: []application.PortalApplication{{
+		ApplicationID: "app-1", Code: "data_analysis", Name: "数据看板与统计分析系统", Environment: "prod",
+		Projection: application.PortalProjectionReadiness{Status: "SUCCEEDED", Ready: true},
+	}}}
+	handler, err := NewSubsystemOnboardingHandler(
+		service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/keycloak-integration/health-dashboard", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.GetSubsystemHealthDashboard(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		`"directory_ok":true`, `"credentials_ok":false`, `"runtime_ok":true`,
+		`"keycloak_ok":false`, `"credentials_status":"UNKNOWN"`,
+		`"keycloak_status":"NOT_APPLICABLE"`, `"projection_status":"SUCCEEDED"`,
+		`"status":"VERIFICATION_REQUIRED"`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("response missing %s: %s", expected, body)
+		}
+	}
+	if strings.Contains(body, `"status":"HEALTHY"`) {
+		t.Fatalf("unverified dependencies must not be reported healthy: %s", body)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store, private" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := response.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q", got)
+	}
+}
+
 type recordingSubsystemAccessManager struct {
 	tenantID        string
 	applicationCode string

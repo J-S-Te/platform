@@ -442,6 +442,15 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			return nil, err
 		}
 		runners = append(runners, eventAuditRunner)
+		// Broker 配置漂移只在启动 reconcile 一次；运行中 IdP 配置缺失或平台侧 broker 客户端
+		// 凭据失效不会主动被发现，直到用户登录失败。周期校验可提前暴露并记录。
+		brokerHealthRunner, err := newKeycloakBrokerHealthRunner(controlPlane, db, logger, cfg.Keycloak.BrokerHealthPollInterval)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("create Keycloak broker health runner: %w", err)
+		}
+		runners = append(runners, brokerHealthRunner)
 	}
 	runner := &concurrentRunner{runners: runners}
 	return &Worker{Runner: runner, Logger: logger, database: db, logFile: logFile}, nil

@@ -38,6 +38,7 @@ import (
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
 	keycloakauthorizationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/infrastructure"
 	oidcapplication "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
+	backchannel "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/backchannel"
 	oidcinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/infrastructure"
 	oidcaccesssubject "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/accesssubject"
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
@@ -67,9 +68,11 @@ type API struct {
 	Handler http.Handler
 	Logger  *slog.Logger
 
-	database     *gorm.DB
-	oidcDatabase *gorm.DB
-	logFile      io.Closer
+	database           *gorm.DB
+	oidcDatabase       *gorm.DB
+	logFile            io.Closer
+	logoutWorkerCancel context.CancelFunc
+	logoutWorkerDone   chan struct{}
 }
 
 // NewAPI 按启动配置创建本地存储目录、结构化日志、数据库连接池与 HTTP 路由。
@@ -519,6 +522,23 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	backchannelURIRepository, err := applicationregistryinfrastructure.NewBackchannelLogoutURIRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	backchannelURIHandler := applicationregistryhttp.BackchannelLogoutURIHandler{Repository: backchannelURIRepository}
+	backchannelDispatcher := &backchannel.Dispatcher{
+		Queue: &backchannel.GORMRepository{DB: db, Lease: 30 * time.Second, MaxAttempts: 8},
+		Sender: backchannel.HTTPFormSender{
+			Signer: oidcLogoutSignerAdapter{manager: oidcTokenManager},
+			Issuer: cfg.Auth.OIDCIssuer,
+			TTL:    time.Minute,
+		},
+		BatchSize:  50,
+		RetryDelay: time.Second,
+	}
 
 	oauthClientManagementRepository, err := applicationregistryinfrastructure.NewOAuthClientManagementRepository(db)
 	if err != nil {
@@ -542,6 +562,30 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
+	}
+
+	// Broker 自愈：Keycloak 持有的 broker client secret 与平台活跃凭据漂移时（token 交换
+	// 返回 invalid_client），自动轮换平台 secret 并同步回 Keycloak IdP。仅在 Keycloak 启用
+	// 且具备管理凭据时装配；nil 时 token 端点对漂移保持失败关闭。
+	if cfg.Keycloak.Enabled {
+		tenantID, tenantErr := resolveDefaultTenantID(db)
+		if tenantErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("resolve tenant for broker self-heal: %w", tenantErr)
+		}
+		brokerControl := applicationregistryhttp.NewKeycloakControlPlaneWithCredentials(
+			cfg.Keycloak.AdminURL, cfg.Keycloak.Realm,
+			applicationregistryhttp.KeycloakControlPlaneCredentials{
+				ServiceAccountClientID:     cfg.Keycloak.AdminClientID,
+				ServiceAccountClientSecret: cfg.Keycloak.AdminClientSecret,
+				Username:                   cfg.Keycloak.AdminUsername,
+				Password:                   cfg.Keycloak.AdminPassword,
+			},
+			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret,
+			cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
+		)
+		oidcHandler.SetBrokerDriftSelfHealer(applicationregistryhttp.NewBrokerDriftSelfHealer(oauthClientManagementService, brokerControl, tenantID, logger))
 	}
 
 	configurationRepository, err := configurationinfrastructure.NewRepository(db)
@@ -632,8 +676,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	operational.ExternalIdentity = externalIdentityHandler
 	operational.OwnerDirectory = ownerDirectoryHandler
+	operational.BackchannelLogoutURI = &backchannelURIHandler
 
-	return &API{
+	api := &API{
 		Handler: httptransport.NewRouter(
 			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
@@ -641,7 +686,17 @@ func NewAPI(cfg config.Config) (*API, error) {
 		database:     db,
 		oidcDatabase: oidcDB,
 		logFile:      logFile,
-	}, nil
+	}
+	workerContext, cancelWorker := context.WithCancel(context.Background())
+	api.logoutWorkerCancel = cancelWorker
+	api.logoutWorkerDone = make(chan struct{})
+	go func() {
+		defer close(api.logoutWorkerDone)
+		if runErr := backchannelDispatcher.Run(workerContext, time.Second); runErr != nil && !errors.Is(runErr, context.Canceled) {
+			logger.Error("OIDC back-channel logout worker stopped", "error", runErr)
+		}
+	}()
+	return api, nil
 }
 
 // bootstrapPlatformCatalog ensures the platform application's own authorization catalog row
@@ -745,6 +800,16 @@ func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, err
 // Close 释放 API 持有的数据库连接与日志文件句柄。
 // 仅在 NewAPI 初始化完成后调用；若依赖未就绪则按空值保护直接返回。
 func (api *API) Close() {
+	if api.logoutWorkerCancel != nil {
+		api.logoutWorkerCancel()
+	}
+	if api.logoutWorkerDone != nil {
+		select {
+		case <-api.logoutWorkerDone:
+		case <-time.After(5 * time.Second):
+			api.Logger.Warn("OIDC back-channel logout worker did not stop before deadline")
+		}
+	}
 	if api.oidcDatabase != nil {
 		if err := database.Close(api.oidcDatabase); err != nil {
 			api.Logger.Error("close OIDC mysql database handle", "error", err)
@@ -760,6 +825,20 @@ func (api *API) Close() {
 			api.Logger.Error("close application log file", "error", err)
 		}
 	}
+}
+
+type oidcLogoutSignerAdapter struct{ manager *security.OIDCJWTManager }
+
+// IssueLogoutToken 将投递参数映射为专用 logout+jwt 声明，并严格使用调用方给定的有效期。
+func (adapter oidcLogoutSignerAdapter) IssueLogoutToken(issuer, audience, subject, session, jti string, now time.Time, ttl time.Duration) (string, error) {
+	if adapter.manager == nil || ttl <= 0 {
+		return "", errors.New("OIDC logout token signer is not configured")
+	}
+	return adapter.manager.IssueLogoutToken(security.OIDCLogoutTokenClaims{
+		Issuer: issuer, Subject: subject, Audience: []string{audience}, IssuedAt: now.UTC(),
+		ExpiresAt: now.UTC().Add(ttl), JWTID: jti, SessionID: session,
+		Events: map[string]any{security.OIDCBackchannelLogoutEvent: map[string]any{}},
+	}, ttl)
 }
 
 // oidcIDTokenVerifierAdapter 把 Keycloak broker 验证器的 ID Token 校验适配为

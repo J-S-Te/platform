@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [owner_directory_read]
+  allowed_service_bindings: [owner_directory_read, file_gateway_write]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -31,6 +31,18 @@ runtime:
         CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
         CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
         CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        DASHBOARD_MACHINE_ENABLED: "true"
+        DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
+        DASHBOARD_MACHINE_ISSUER: basic-platform
+        DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
+        DASHBOARD_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        DASHBOARD_MACHINE_CLIENT_ID: data_analysis-prod-contract-dashboard
+        DASHBOARD_MACHINE_CALLER_APPLICATION_CODE: data_analysis
+        DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE: prod
+        DASHBOARD_MACHINE_REQUIRED_SCOPE: dashboard.contract.read
+        FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
+        STAMPED_FILE_GATEWAY_MODE: dual
       bindings:
         OIDC_ISSUER: issuer
         OIDC_CLIENT_ID: client_id
@@ -49,6 +61,9 @@ runtime:
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
         PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
         PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
+        FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
   profiles: [release]
   dependency_services: [contract-mysql, temporal]

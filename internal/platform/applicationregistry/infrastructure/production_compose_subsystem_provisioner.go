@@ -316,6 +316,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if !target.matches(input.ApplicationCode, input.Environment) {
 		return provisioningError("production subsystem deployment request is invalid")
 	}
+	if input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum {
+		return provisioningError("production subsystem manifest drift detected")
+	}
 	if err := target.validateDeploymentFiles(false, true); err != nil {
 		return err
 	}
@@ -1063,7 +1066,7 @@ func parseEnvironmentValues(content string) map[string]string {
 }
 
 func (target *productionComposeTarget) validateProvisioningInput(input application.SubsystemProvisioningInput) error {
-	if !target.matches(input.ApplicationCode, input.Environment) {
+	if !target.matches(input.ApplicationCode, input.Environment) || input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum {
 		return provisioningError("production subsystem deployment request is invalid")
 	}
 	if err := target.validateTenant(input.TenantID); err != nil {
@@ -1104,7 +1107,7 @@ func (target *productionComposeTarget) validatePreflightInput(input application.
 	app := target.config.Profile.Manifest.Application
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
 	_, publicBaseValid := publicBaseOrigin(input.PublicBaseURL)
-	if mustParseURL(issuer) == nil || !target.matches(input.ApplicationCode, input.Environment) ||
+	if mustParseURL(issuer) == nil || !target.matches(input.ApplicationCode, input.Environment) || input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum ||
 		strings.ToLower(strings.TrimSpace(input.ClientType)) != app.ClientType ||
 		!publicBaseValid ||
 		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL ||

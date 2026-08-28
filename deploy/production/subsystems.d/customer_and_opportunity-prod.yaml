@@ -2,8 +2,8 @@ version: 1
 default: false
 application:
   code: customer_and_opportunity
-  initial_admin_roles: [sales_director, team_lead, technical_lead]
-  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, notification_ingest]
+  initial_admin_roles: [sales_director, team_lead, technical_director]
+  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, notification_ingest, file_gateway_write]
   name: 客户与商机管理系统
   description: 客户、商机与售前协作管理系统
   environment: prod
@@ -27,7 +27,7 @@ runtime:
         OIDC_IDP_HINT: basic-platform
         DEV_AUTH_ENABLED: "false"
         OIDC_SCOPES: openid profile
-        OIDC_ROLE_CONFIG_HASH: sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f
+        OIDC_ROLE_CONFIG_HASH: sha256:3a32171111a681dcf0188675eb41b6a068542ff603633b13e9d8ca067b7fe4c0
         OIDC_MAX_EFFECTIVE_ROLES: "10"
         OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
@@ -48,6 +48,12 @@ runtime:
         CONTRACT_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_OPPORTUNITY_INTAKE_URL: http://contract-api:8081/internal/opportunity-signed-events
         CONTRACT_SCOPE: opportunity.signed.write
+        FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
+        ATTACHMENT_FILE_GATEWAY_MODE: dual
+        ATTACHMENT_FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        ATTACHMENT_FILE_GATEWAY_TOKEN_URL: http://platform-api:8080/oauth2/token
+        ATTACHMENT_FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
         APP_PUBLIC_ORIGIN: public_origin
         APP_PATH_PREFIX: path_prefix
@@ -72,6 +78,12 @@ runtime:
         CONTRACT_SUMMARY_CLIENT_SECRET: service.contract_summary_read.client_secret
         CONTRACT_CLIENT_ID: service.contract_opportunity_signed_write.client_id
         CONTRACT_CLIENT_SECRET: service.contract_opportunity_signed_write.client_secret
+        FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
+        ATTACHMENT_FILE_GATEWAY_APPLICATION_ID: application_id
+        ATTACHMENT_FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        ATTACHMENT_FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
   profiles: [customer, customer-release]
   dependency_services: [customer-mysql]

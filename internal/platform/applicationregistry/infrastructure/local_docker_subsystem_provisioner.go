@@ -73,8 +73,8 @@ const (
 	// This is the compatibility hash compiled into the customer authorization catalog. The
 	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
 	// deployment contract to be updated in the same reviewed release.
-	integratedCustomerRoleConfigHash = "sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f"
-	integratedPortalRoleConfigHash   = "sha256:f67121b52d6d850e99d1c4520d661fb85e26512c7ee50cd83182a8dc39b368d4"
+	integratedCustomerRoleConfigHash = "sha256:3a32171111a681dcf0188675eb41b6a068542ff603633b13e9d8ca067b7fe4c0"
+	integratedPortalRoleConfigHash   = "sha256:95f1d1283d3a251e9b9167aa291c19bf14d265105ccedfc661aca096666a37b8"
 )
 
 // LocalDockerSubsystemProvisionerConfig controls the trusted local Docker automation used by the
@@ -467,6 +467,32 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
+	case "data_analysis":
+		contractCredential, ok := input.ServiceCredential(application.ServiceCredentialContractDashboardRead)
+		if !ok {
+			return provisioningError("data analysis contract dashboard credential is unavailable")
+		}
+		projectCredential, ok := input.ServiceCredential(application.ServiceCredentialProjectDashboardRead)
+		if !ok {
+			return provisioningError("data analysis project dashboard credential is unavailable")
+		}
+		expectedContractClientID := input.ApplicationCode + "-" + input.Environment + "-contract-dashboard"
+		if contractCredential.OAuthClient.ClientID != expectedContractClientID {
+			return provisioningError("data analysis contract dashboard credential does not match the target environment")
+		}
+		expectedProjectClientID := input.ApplicationCode + "-" + input.Environment + "-project-dashboard"
+		if projectCredential.OAuthClient.ClientID != expectedProjectClientID {
+			return provisioningError("data analysis project dashboard credential does not match the target environment")
+		}
+		values["MACHINE_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+		values["MACHINE_TOKEN_ISSUER"] = "basic-platform"
+		values["MACHINE_TOKEN_AUDIENCE"] = "basic-platform-application"
+		values["CONTRACT_MACHINE_CLIENT_ID"] = contractCredential.OAuthClient.ClientID
+		values["CONTRACT_MACHINE_CLIENT_SECRET"] = contractCredential.PlaintextSecret
+		values["CONTRACT_MACHINE_TOKEN_SCOPE"] = "dashboard.contract.read"
+		values["PROJECT_MACHINE_CLIENT_ID"] = projectCredential.OAuthClient.ClientID
+		values["PROJECT_MACHINE_CLIENT_SECRET"] = projectCredential.PlaintextSecret
+		values["PROJECT_MACHINE_TOKEN_SCOPE"] = "dashboard.project.read"
 	}
 	if len(values) == 0 {
 		return nil

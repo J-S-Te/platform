@@ -18,6 +18,24 @@ type subsystemOnboardingRepositoryStub struct {
 	listCalls            int
 }
 
+func (repository *subsystemOnboardingRepositoryStub) ResolveApplicationEnvironmentGateway(context.Context, string, string, string) (string, string, error) {
+	return "https://portal.example.com", "/inventory", nil
+}
+
+func TestResolveApplicationEnvironmentRedirectURIUsesPersistedGateway(t *testing.T) {
+	service, err := NewSubsystemOnboardingService(&subsystemOnboardingRepositoryStub{}, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Now()}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirectURI, err := service.ResolveApplicationEnvironmentRedirectURI(context.Background(), "tenant-1", "application-1", "environment-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redirectURI != "https://portal.example.com/inventory/auth/callback" {
+		t.Fatalf("redirect URI = %q", redirectURI)
+	}
+}
+
 func (repository *subsystemOnboardingRepositoryStub) CreateSubsystem(_ context.Context, write SubsystemOnboardingWrite, now time.Time) (SubsystemOnboardingResult, error) {
 	repository.write = write
 	repository.createCalls++

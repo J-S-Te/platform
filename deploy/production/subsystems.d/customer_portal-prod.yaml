@@ -3,7 +3,7 @@ default: false
 application:
   code: customer_portal
   initial_admin_roles: []
-  allowed_service_bindings: [external_user_provision, application_role_assign, application_role_revoke, portal_mapping_provision, portal_mapping_disable, portal_invite_verify]
+  allowed_service_bindings: [external_user_provision, application_role_assign, application_role_revoke, portal_mapping_provision, portal_mapping_disable, portal_invite_verify, file_gateway_write]
   name: 客户自助门户
   description: 面向外部客户的自助服务门户
   environment: prod
@@ -34,6 +34,8 @@ runtime:
         PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: customer_portal
         PLATFORM_ENVIRONMENT_CODE: prod
+        FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
         PORTAL_PUBLIC_ORIGIN: public_origin
         PORTAL_PATH_PREFIX: path_prefix
@@ -54,6 +56,9 @@ runtime:
         PORTAL_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
     - path: runtime/customer.env
       template_path: subsystem-templates/customer.env.example
       compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
@@ -103,11 +108,11 @@ runtime:
         PLATFORM_ROLE_REVOKE_CLIENT_SECRET: service.application_role_revoke.client_secret
 compose:
   profiles: [customer, customer-release]
-  dependency_services: [portal-mysql, customer-api]
+  dependency_services: [portal-mysql]
   database:
     service: portal-mysql
     name: customer_portal
   migrate_service: portal-migrate
-  runtime_services: [customer-api, portal-api, portal-invite-compensation-worker]
+  runtime_services: [portal-api, portal-invite-compensation-worker]
   teardown_services: [portal-invite-compensation-worker, portal-api]
   release_image_keys: [CUSTOMER_CRM_IMAGE, CUSTOMER_PORTAL_IMAGE]

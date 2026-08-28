@@ -79,6 +79,46 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 	}
 }
 
+func TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCredentials(t *testing.T) {
+	directory := t.TempDir()
+	environmentPath := filepath.Join(directory, ".env.local")
+	if err := os.WriteFile(environmentPath, []byte("MACHINE_CLIENT_ID=legacy\nMACHINE_CLIENT_SECRET=legacy-secret\n"), 0o600); err != nil {
+		t.Fatalf("write environment: %v", err)
+	}
+
+	input := application.SubsystemProvisioningInput{
+		ApplicationCode: "data_analysis",
+		Environment:     "dev",
+		ServiceCredentials: []application.SubsystemServiceCredential{
+			{Purpose: application.ServiceCredentialContractDashboardRead, OAuthClient: application.OAuthClientView{ClientID: "data_analysis-dev-contract-dashboard"}, PlaintextSecret: "contract-secret"},
+			{Purpose: application.ServiceCredentialProjectDashboardRead, OAuthClient: application.OAuthClientView{ClientID: "data_analysis-dev-project-dashboard"}, PlaintextSecret: "project-secret"},
+		},
+	}
+	provisioner := &LocalDockerSubsystemProvisioner{}
+	if err := provisioner.updateServiceCredentialRuntimeConfiguration(input, environmentPath); err != nil {
+		t.Fatalf("update data analysis credentials: %v", err)
+	}
+	content, err := os.ReadFile(environmentPath)
+	if err != nil {
+		t.Fatalf("read environment: %v", err)
+	}
+	for _, expected := range []string{
+		"MACHINE_TOKEN_URL=http://platform-api:8080/oauth2/token",
+		"MACHINE_TOKEN_ISSUER=basic-platform",
+		"MACHINE_TOKEN_AUDIENCE=basic-platform-application",
+		"CONTRACT_MACHINE_CLIENT_ID=data_analysis-dev-contract-dashboard",
+		"CONTRACT_MACHINE_CLIENT_SECRET=contract-secret",
+		"CONTRACT_MACHINE_TOKEN_SCOPE=dashboard.contract.read",
+		"PROJECT_MACHINE_CLIENT_ID=data_analysis-dev-project-dashboard",
+		"PROJECT_MACHINE_CLIENT_SECRET=project-secret",
+		"PROJECT_MACHINE_TOKEN_SCOPE=dashboard.project.read",
+	} {
+		if !strings.Contains(string(content), expected) {
+			t.Fatalf("environment missing %q:\n%s", expected, content)
+		}
+	}
+}
+
 func TestUpdateProductionSubsystemEnvironmentPreservesOwnerAndRejectsDuplicateManagedKeys(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".env")

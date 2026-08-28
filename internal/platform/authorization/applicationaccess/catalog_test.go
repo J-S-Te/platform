@@ -60,6 +60,37 @@ func TestNormalizeCatalogClaimsRoleConfigHashIsCanonicalAndValidated(t *testing.
 	}
 }
 
+func TestPreviousCatalogCompatibilityKeepsOnlyImmediatePredecessor(t *testing.T) {
+	existing := catalogMetadataRow{
+		CatalogVersion: "v9", CatalogHash: "sha256:v9", ClaimsRoleConfigHash: "role-v9",
+		PreviousCatalogVersion: "v8", PreviousCatalogHash: "sha256:v8", PreviousClaimsRoleConfigHash: "role-v8",
+	}
+	previous := previousCatalogCompatibility(existing, CatalogInput{CatalogVersion: "v10", Checksum: "sha256:v10"})
+	if previous.CatalogVersion != "v9" || previous.Checksum != "sha256:v9" || previous.ClaimsRoleConfigHash != "role-v9" {
+		t.Fatalf("previous compatibility = %#v, want v9", previous)
+	}
+
+	versions := catalogCompatibilityVersions(catalogMetadataRow{
+		CatalogVersion: "v10", CatalogHash: "sha256:v10", ClaimsRoleConfigHash: "role-v10",
+		PreviousCatalogVersion: previous.CatalogVersion, PreviousCatalogHash: previous.Checksum,
+		PreviousClaimsRoleConfigHash: previous.ClaimsRoleConfigHash,
+	})
+	if len(versions) != 2 || versions[0].CatalogVersion != "v10" || versions[1].CatalogVersion != "v9" {
+		t.Fatalf("compatibility versions = %#v, want [v10 v9]", versions)
+	}
+}
+
+func TestPreviousCatalogCompatibilityDoesNotAdvanceOnIdempotentPublish(t *testing.T) {
+	existing := catalogMetadataRow{
+		CatalogVersion: "v10", CatalogHash: "sha256:v10", ClaimsRoleConfigHash: "role-v10",
+		PreviousCatalogVersion: "v9", PreviousCatalogHash: "sha256:v9", PreviousClaimsRoleConfigHash: "role-v9",
+	}
+	previous := previousCatalogCompatibility(existing, CatalogInput{CatalogVersion: "v10", Checksum: "sha256:v10"})
+	if previous.CatalogVersion != "v9" || previous.Checksum != "sha256:v9" {
+		t.Fatalf("idempotent publish changed compatibility window: %#v", previous)
+	}
+}
+
 func TestNormalizeCatalogRejectsUnknownRolePermission(t *testing.T) {
 	_, _, err := normalizeCatalog(CatalogInput{
 		CatalogVersion: "1",

@@ -96,6 +96,15 @@ func TestProductionSubsystemProfilesRejectUnknownFieldsAndUnsafeBindings(t *test
 		"reserved platform service": func(manifest string) string {
 			return strings.Replace(manifest, "runtime_services: [sample-api]", "runtime_services: [platform-api]", 1)
 		},
+		"cross application runtime service": func(manifest string) string {
+			return strings.Replace(manifest, "runtime_services: [sample-api]", "runtime_services: [customer-api]", 1)
+		},
+		"cross application dependency service": func(manifest string) string {
+			return strings.Replace(manifest, "dependency_services: [sample-mysql]", "dependency_services: [customer-mysql]", 1)
+		},
+		"keycloak dependency service": func(manifest string) string {
+			return strings.Replace(manifest, "dependency_services: [sample-mysql]", "dependency_services: [keycloak]", 1)
+		},
 		"reserved platform image": func(manifest string) string {
 			return strings.Replace(manifest, "release_image_keys: [SAMPLE_IMAGE]", "release_image_keys: [PLATFORM_IMAGE]", 1)
 		},

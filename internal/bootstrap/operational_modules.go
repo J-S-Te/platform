@@ -24,6 +24,8 @@ import (
 	notificationdomain "github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
 	notificationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/notification/infrastructure"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/interfaces/http"
+	tenantclone "github.com/J-S-Te/Basic-Platform/internal/platform/tenantclone"
+	tenantclonehttp "github.com/J-S-Te/Basic-Platform/internal/platform/tenantclone/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	httptransport "github.com/J-S-Te/Basic-Platform/internal/transport/http"
@@ -188,15 +190,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		return httptransport.OperationalModules{}, err
 	}
 
-	localStore, err := filetaskinfrastructure.NewLocalStore(cfg.FileStorageRoot)
-	if err != nil {
-		return httptransport.OperationalModules{}, err
-	}
 	fileRepository, err := filetaskinfrastructure.NewGORMRepository(database)
-	if err != nil {
-		return httptransport.OperationalModules{}, err
-	}
-	fileService, err := filetaskapplication.NewFileService(fileRepository, localStore, ulid.Generator{}, filetaskapplication.SystemClock{}, filetaskapplication.DefaultUploadPolicy())
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
@@ -204,7 +198,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	fileTaskHandler, err := filetaskhttp.NewHandler(fileService, jobService, logger)
+	fileTaskHandler, err := filetaskhttp.NewJobHandler(jobService, logger)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
@@ -226,17 +220,25 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	tenantCloneHandler, err := tenantclonehttp.NewHandler(&tenantclone.Service{DB: database})
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
 
 	return httptransport.OperationalModules{
-		LoginTargets:           loginTargetHandler,
-		SubsystemOnboarding:    subsystemHandler,
-		KeycloakIntegration:    keycloakIntegrationHandler,
-		SubsystemServiceRoutes: subsystemServiceRouteHandler,
-		Notifications:          notificationHandler,
-		FilesAndJobs:           fileTaskHandler,
-		AccessApplier:          subsystemProvisioner,
-		PersonnelChanges:       personnelHandler,
-		AuthorizationOverview:  identityhttp.NewAuthorizationOverviewHandler(database),
+		LoginTargets:        loginTargetHandler,
+		SubsystemOnboarding: subsystemHandler,
+		KeycloakIntegration: keycloakIntegrationHandler,
+		// 组合根按职责显式注入边界；当前实现仍由旧编排适配器承载，后续可无协议变更替换为独立 Handler。
+		BrokerHandler:            subsystemHandler,
+		DeploymentStatusHandler:  subsystemHandler,
+		SubsystemServiceRoutes:   subsystemServiceRouteHandler,
+		Notifications:            notificationHandler,
+		AsyncJobs:                fileTaskHandler,
+		AccessApplier:            subsystemProvisioner,
+		PersonnelChanges:         personnelHandler,
+		AuthorizationOverview:    identityhttp.NewAuthorizationOverviewHandler(database),
+		TenantAuthorizationClone: tenantCloneHandler,
 	}, nil
 }
 

@@ -32,6 +32,26 @@ func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironme
 	return row.ApplicationID, row.EnvironmentID, nil
 }
 
+// ResolveApplicationEnvironmentGateway 读取指定租户应用环境的公开网关基址和路径前缀。
+// 环境不存在或未激活时返回数据库错误；调用方据此禁止跳过 Redirect URI 漂移检测。
+func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironmentGateway(ctx context.Context, tenantID, applicationID, environmentID string) (string, string, error) {
+	var row struct {
+		BaseURL    *string `gorm:"column:base_url"`
+		PathPrefix *string `gorm:"column:path_prefix"`
+	}
+	err := repository.database.WithContext(ctx).Table("platform_application_environment").
+		Select("base_url, path_prefix").
+		Where("tenant_id = ? AND application_id = ? AND id = ? AND status = ?", tenantID, applicationID, environmentID, "ACTIVE").
+		Take(&row).Error
+	if err != nil {
+		return "", "", err
+	}
+	if row.BaseURL == nil || row.PathPrefix == nil {
+		return "", "", application.ErrValidation
+	}
+	return *row.BaseURL, *row.PathPrefix, nil
+}
+
 // ResolveEnvironmentIssuerAlias reads the persisted provider for the exact
 // tenant/application/environment tuple. The cutover gate must distinguish a
 // first platform -> Keycloak switch from an ordinary update of an environment
@@ -66,6 +86,11 @@ type subsystemDeploymentStateModel struct {
 	Operation               string     `gorm:"column:operation"`
 	Generation              uint64     `gorm:"column:generation"`
 	AttemptCount            uint       `gorm:"column:attempt_count"`
+	DesiredManifestChecksum *string    `gorm:"column:desired_manifest_checksum"`
+	AppliedManifestChecksum *string    `gorm:"column:applied_manifest_checksum"`
+	ManifestDriftStatus     string     `gorm:"column:manifest_drift_status;default:UNKNOWN"`
+	ManifestLastAppliedAt   *time.Time `gorm:"column:manifest_last_applied_at"`
+	ManifestLastVerifiedAt  *time.Time `gorm:"column:manifest_last_verified_at"`
 	LastErrorCode           *string    `gorm:"column:last_error_code"`
 	LastError               *string    `gorm:"column:last_error_message"`
 	StartedAt               *time.Time `gorm:"column:started_at"`
@@ -242,19 +267,20 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 			})
 		}
 		if err := transaction.Create(&subsystemDeploymentStateModel{
-			TenantID:           createdApplication.TenantID,
-			ApplicationID:      createdApplication.ID,
-			EnvironmentID:      createdEnvironment.ID,
-			ApplicationCode:    createdApplication.Code,
-			Environment:        createdEnvironment.Environment,
-			InitialAdminUserID: optionalStringPointer(write.InitialAdminUserID),
-			Status:             application.SubsystemDeploymentStatusProvisioning,
-			Operation:          "ONBOARD",
-			Generation:         1,
-			AttemptCount:       1,
-			StartedAt:          timePointer(now.UTC()),
-			CreatedAt:          now.UTC(),
-			UpdatedAt:          now.UTC(),
+			TenantID:            createdApplication.TenantID,
+			ApplicationID:       createdApplication.ID,
+			EnvironmentID:       createdEnvironment.ID,
+			ApplicationCode:     createdApplication.Code,
+			Environment:         createdEnvironment.Environment,
+			InitialAdminUserID:  optionalStringPointer(write.InitialAdminUserID),
+			Status:              application.SubsystemDeploymentStatusProvisioning,
+			Operation:           "ONBOARD",
+			Generation:          1,
+			AttemptCount:        1,
+			ManifestDriftStatus: "UNKNOWN",
+			StartedAt:           timePointer(now.UTC()),
+			CreatedAt:           now.UTC(),
+			UpdatedAt:           now.UTC(),
 		}).Error; err != nil {
 			return err
 		}
@@ -524,7 +550,7 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 			return repository.database.WithContext(ctx).Create(&subsystemDeploymentStateModel{
 				TenantID: strings.TrimSpace(tenantID), ApplicationID: scope.ApplicationID, EnvironmentID: scope.EnvironmentID,
 				ApplicationCode: strings.TrimSpace(applicationCode), Environment: strings.ToLower(strings.TrimSpace(environment)),
-				Status: status, Operation: operation, Generation: 1, AttemptCount: 1, StartedAt: &now, CreatedAt: now, UpdatedAt: now,
+				Status: status, Operation: operation, Generation: 1, AttemptCount: 1, ManifestDriftStatus: "UNKNOWN", StartedAt: &now, CreatedAt: now, UpdatedAt: now,
 			}).Error
 		}
 		return application.ErrNotFound
@@ -549,9 +575,51 @@ func deploymentStateFromModel(model subsystemDeploymentStateModel) application.S
 		ApplicationCode: model.ApplicationCode, Environment: model.Environment, Status: model.Status,
 		InitialAdminUserID: modelString(model.InitialAdminUserID), InitialAccessAssignedAt: model.InitialAccessAssignedAt,
 		Operation: model.Operation, Generation: model.Generation, AttemptCount: model.AttemptCount,
+		DesiredManifestChecksum: dereferenceString(model.DesiredManifestChecksum), AppliedManifestChecksum: dereferenceString(model.AppliedManifestChecksum),
+		ManifestDriftStatus: model.ManifestDriftStatus, ManifestLastAppliedAt: model.ManifestLastAppliedAt, ManifestLastVerifiedAt: model.ManifestLastVerifiedAt,
 		LastErrorCode: dereferenceString(model.LastErrorCode), LastError: dereferenceString(model.LastError),
 		StartedAt: model.StartedAt, CompletedAt: model.CompletedAt, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
 	}
+}
+
+// SetSubsystemDesiredManifest 记录控制面本轮期望清单；与已应用值不同时立即标记 DRIFT。
+func (repository *SubsystemOnboardingGORMRepository) SetSubsystemDesiredManifest(ctx context.Context, tenantID, applicationCode, environment, checksum string, now time.Time) error {
+	checksum = strings.TrimSpace(checksum)
+	if checksum == "" {
+		return application.ErrValidation
+	}
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+		Updates(map[string]any{
+			"desired_manifest_checksum": checksum,
+			"manifest_drift_status":     gorm.Expr("CASE WHEN applied_manifest_checksum = ? THEN 'IN_SYNC' ELSE 'DRIFT' END", checksum),
+			"updated_at":                now.UTC(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrNotFound
+	}
+	return nil
+}
+
+// MarkSubsystemManifestApplied 在部署 Agent 成功且握手校验通过后记录实际应用清单。
+func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemManifestApplied(ctx context.Context, tenantID, applicationCode, environment, checksum string, now time.Time) error {
+	checksum = strings.TrimSpace(checksum)
+	if checksum == "" {
+		return application.ErrValidation
+	}
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND desired_manifest_checksum = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment)), checksum).
+		Updates(map[string]any{"applied_manifest_checksum": checksum, "manifest_drift_status": "IN_SYNC", "manifest_last_applied_at": now.UTC(), "manifest_last_verified_at": now.UTC(), "updated_at": now.UTC()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrVersionConflict
+	}
+	return nil
 }
 
 // GetSubsystemDeploymentContext resolves application/environment identifiers from control-plane

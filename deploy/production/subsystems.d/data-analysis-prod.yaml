@@ -3,7 +3,7 @@ default: false
 application:
   code: data_analysis
   initial_admin_roles: [dashboard_admin]
-  allowed_service_bindings: []
+  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, file_gateway_write]
   name: 数据看板与统计分析系统
   description: 经营总览、合同项目分析、预警与指标看板
   environment: prod
@@ -36,6 +36,16 @@ runtime:
         AUDIT_WORKER_ID: data-analysis-dashboard-api
         METABASE_INTERNAL_URL: http://data-analysis-metabase:3000
         METABASE_BASE_PATH: /
+        # 聚合 Worker 只向平台 OAuth 令牌端点申请最小 scope，不再依赖 Keycloak service account。
+        MACHINE_TOKEN_URL: http://platform-api:8080/oauth2/token
+        MACHINE_TOKEN_ISSUER: basic-platform
+        MACHINE_TOKEN_AUDIENCE: basic-platform-application
+        CONTRACT_MACHINE_TOKEN_SCOPE: dashboard.contract.read
+        PROJECT_MACHINE_TOKEN_SCOPE: dashboard.project.read
+        CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
+        PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
+        FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
         APP_PATH_PREFIX: path_prefix
         APP_PUBLIC_ORIGIN: public_origin
@@ -51,6 +61,13 @@ runtime:
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        CONTRACT_MACHINE_CLIENT_ID: service.contract_dashboard_read.client_id
+        CONTRACT_MACHINE_CLIENT_SECRET: service.contract_dashboard_read.client_secret
+        PROJECT_MACHINE_CLIENT_ID: service.project_dashboard_read.client_id
+        PROJECT_MACHINE_CLIENT_SECRET: service.project_dashboard_read.client_secret
+        FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
   profiles: [data-analysis-release]
   dependency_services: [data-analysis-mysql]

@@ -44,15 +44,19 @@ type DataScope struct {
 }
 
 type AuthorizationContext struct {
-	ClientID              string
-	ApplicationCode       string
-	EnvironmentCode       string
-	TenantID              string
-	PersonID              string
-	Roles                 []string
-	Permissions           []string
-	DataScopes            []DataScope
-	AuthorizationRevision uint64
+	ClientID                   string
+	ApplicationCode            string
+	EnvironmentCode            string
+	TenantID                   string
+	PersonID                   string
+	Roles                      []string
+	Permissions                []string
+	RoleConfigHash             string
+	CatalogVersion             string
+	CompatibleCatalogVersions  []string
+	CompatibleRoleConfigHashes []string
+	DataScopes                 []DataScope
+	AuthorizationRevision      uint64
 }
 
 type AuthorizationContextResolver interface {

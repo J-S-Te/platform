@@ -191,3 +191,15 @@ func TestValidateKeycloakManagementCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestKeycloakBrokerHealthPollInterval(t *testing.T) {
+	if got := keycloakBrokerHealthPoll("2m"); got != 2*time.Minute {
+		t.Fatalf("got %v", got)
+	}
+	if got := keycloakBrokerHealthPoll("invalid"); got != 5*time.Minute {
+		t.Fatalf("invalid should fallback, got %v", got)
+	}
+	if got := keycloakBrokerHealthPoll("0"); got != 5*time.Minute {
+		t.Fatalf("non-positive should fallback, got %v", got)
+	}
+}

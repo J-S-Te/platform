@@ -3,7 +3,7 @@ default: false
 application:
   code: project_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: []
+  allowed_service_bindings: [file_gateway_write]
   name: 项目服务内容管理系统
   description: 项目、服务项拆解与配置规则管理系统
   environment: prod
@@ -32,6 +32,17 @@ runtime:
         # 合同系统内部接收接口默认关闭；关闭时两者必须都为 false，否则启动配置校验失败。
         CONTRACT_INTEGRATION_ENABLED: "false"
         CONTRACT_INTEGRATION_REQUIRE_BEARER: "false"
+        DASHBOARD_MACHINE_ENABLED: "true"
+        DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
+        DASHBOARD_MACHINE_ISSUER: basic-platform
+        DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
+        DASHBOARD_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        DASHBOARD_MACHINE_CLIENT_ID: data_analysis-prod-project-dashboard
+        DASHBOARD_MACHINE_CALLER_APPLICATION_CODE: data_analysis
+        DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE: prod
+        DASHBOARD_MACHINE_REQUIRED_SCOPE: dashboard.project.read
+        FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
         OIDC_ISSUER: issuer
         OIDC_CLIENT_ID: client_id
@@ -47,6 +58,9 @@ runtime:
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
   profiles: [project-release]
   dependency_services: [project-mysql, temporal]

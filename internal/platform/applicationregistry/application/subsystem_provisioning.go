@@ -112,6 +112,11 @@ type SubsystemDeploymentState struct {
 	Operation               string
 	Generation              uint64
 	AttemptCount            uint
+	DesiredManifestChecksum string
+	AppliedManifestChecksum string
+	ManifestDriftStatus     string
+	ManifestLastAppliedAt   *time.Time
+	ManifestLastVerifiedAt  *time.Time
 	LastErrorCode           string
 	LastError               string
 	StartedAt               *time.Time
@@ -127,6 +132,12 @@ type SubsystemDeploymentStateStore interface {
 	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error
 	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
+}
+
+// SubsystemManifestStateStore 持久化 API/Agent 清单握手结果；旧部署适配器可不实现。
+type SubsystemManifestStateStore interface {
+	SetSubsystemDesiredManifest(context.Context, string, string, string, string, time.Time) error
+	MarkSubsystemManifestApplied(context.Context, string, string, string, string, time.Time) error
 }
 
 // SubsystemProvisioningCapabilities describes the safe deployment boundary exposed to the
@@ -160,6 +171,8 @@ type SubsystemProvisioningTarget struct {
 	UpstreamURL     string
 	PathPrefix      string
 	ClientType      string
+	// ManifestChecksum 是规范化审核清单的 SHA-256；API 与部署 Agent 不一致时必须在写文件前拒绝。
+	ManifestChecksum string
 	// InitialAdminRoles 是清单声明的接入初始管理员角色；nil 表示未声明（由平台默认决定）。
 	InitialAdminRoles []string
 	// AllowedServiceBindings 是清单声明的服务用途白名单（不含 audit_ingest 基线）；nil 表示未声明。
@@ -169,13 +182,14 @@ type SubsystemProvisioningTarget struct {
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
 // 进程内接口与受限 Unix socket 到达部署 Agent，不得写日志、返回浏览器或出现在命令行参数中。
 type SubsystemProvisioningInput struct {
-	TenantID        string
-	ApplicationID   string
-	ApplicationCode string
-	Environment     string
-	Issuer          string
-	ClientID        string
-	ClientSecret    string
+	TenantID         string
+	ApplicationID    string
+	ApplicationCode  string
+	Environment      string
+	ManifestChecksum string
+	Issuer           string
+	ClientID         string
+	ClientSecret     string
 	// AuthenticationRuntimeUpdate is set only by the dedicated switch/rollback
 	// endpoints. Generic rebuilds must not overwrite issuer or browser credentials.
 	AuthenticationRuntimeUpdate bool
@@ -207,14 +221,15 @@ func (input SubsystemProvisioningInput) ServiceCredential(purpose string) (Subsy
 // SubsystemPreflightInput 是控制面写入前交给部署 Agent 的公开参数。它不包含任何尚未
 // 生成的 Secret，因此 Agent 可以在不可恢复凭据落库前校验生产模式、租户和固定拓扑。
 type SubsystemPreflightInput struct {
-	TenantID        string
-	ApplicationCode string
-	Environment     string
-	Issuer          string
-	PublicBaseURL   string
-	UpstreamURL     string
-	PathPrefix      string
-	ClientType      string
+	TenantID         string
+	ApplicationCode  string
+	Environment      string
+	ManifestChecksum string
+	Issuer           string
+	PublicBaseURL    string
+	UpstreamURL      string
+	PathPrefix       string
+	ClientType       string
 }
 
 // SubsystemProvisioner 校验并执行运行时生命周期。数据库登记由应用服务负责，部署器只处理运行时
