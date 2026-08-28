@@ -301,14 +301,21 @@ release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 ln "$release_file" "$deploy_dir/backups/releases/customer-${release_id}.env"
 chmod 600 "$deploy_dir/backups/releases/customer-${release_id}.env"
 
-awk -F= -v crm="$crm_image_ref" -v portal="$portal_image_ref" '
-  BEGIN { crm_found=0; portal_found=0 }
+# 售前 Worker 与 CRM 使用同一不可变镜像；将摘要前缀作为本次 Temporal
+# Deployment Build ID，确保代码版本变化时不会错误复用旧 Worker 版本。
+crm_digest="${crm_image_ref##*@sha256:}"
+customer_presale_worker_build_id="customer-presale-${crm_digest:0:16}"
+
+awk -F= -v crm="$crm_image_ref" -v portal="$portal_image_ref" -v worker_build_id="$customer_presale_worker_build_id" '
+  BEGIN { crm_found=0; portal_found=0; worker_build_id_found=0 }
   $1 == "CUSTOMER_CRM_IMAGE" { print "CUSTOMER_CRM_IMAGE=" crm; crm_found=1; next }
   $1 == "CUSTOMER_PORTAL_IMAGE" { print "CUSTOMER_PORTAL_IMAGE=" portal; portal_found=1; next }
+  $1 == "CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID" { print "CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID=" worker_build_id; worker_build_id_found=1; next }
   { print }
   END {
     if (!crm_found) print "CUSTOMER_CRM_IMAGE=" crm
     if (!portal_found) print "CUSTOMER_PORTAL_IMAGE=" portal
+    if (!worker_build_id_found) print "CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID=" worker_build_id
   }
 ' "$release_file" >"$next_release"
 release_updated=true
