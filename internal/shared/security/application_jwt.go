@@ -68,6 +68,18 @@ func LoadApplicationJWTManager(issuer, audience, privateKeyPath, publicKeyPath s
 	return &ApplicationJWTManager{issuer: issuer, audience: audience, privateKey: privateKey, publicKey: publicKey}, nil
 }
 
+// LoadApplicationJWTVerifier 仅加载公钥用于独立业务进程验签；该进程不应持有平台签发私钥。
+func LoadApplicationJWTVerifier(issuer, audience, publicKeyPath string) (*ApplicationJWTManager, error) {
+	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(audience) == "" {
+		return nil, errors.New("application JWT issuer and audience must not be empty")
+	}
+	publicKey, err := loadEd25519PublicKey(publicKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	return &ApplicationJWTManager{issuer: issuer, audience: audience, publicKey: publicKey}, nil
+}
+
 // Issue 签发 client_credentials Token。NotBefore 默认为签发时刻；调用方可推迟生效，
 // 但不能构造早于 IssuedAt 的有效窗口。
 func (manager *ApplicationJWTManager) Issue(claims ApplicationTokenClaims) (string, error) {

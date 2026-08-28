@@ -144,6 +144,9 @@ type KeycloakConfig struct {
 	BrokerClientSecret               string
 	CustomerPortalBrokerClientID     string
 	CustomerPortalBrokerClientSecret string
+	// BrokerHealthPollInterval 是 Keycloak Broker 健康巡检周期；0 或负数表示禁用周期巡检，
+	// 仅保留启动时的一次 reconcile。
+	BrokerHealthPollInterval time.Duration
 	// OutageLoginPolicy declares the only supported degraded-mode behavior.
 	// Platform browser sessions are issued and checked locally; Keycloak never
 	// becomes an implicit fallback authentication source.
@@ -319,6 +322,7 @@ func Load() (Config, error) {
 			BrokerClientSecret:               value("KEYCLOAK_PLATFORM_CLIENT_SECRET", ""),
 			CustomerPortalBrokerClientID:     value("KEYCLOAK_CUSTOMER_PORTAL_CLIENT_ID", ""),
 			CustomerPortalBrokerClientSecret: value("KEYCLOAK_CUSTOMER_PORTAL_CLIENT_SECRET", ""),
+			BrokerHealthPollInterval:         keycloakBrokerHealthPoll(value("KEYCLOAK_BROKER_HEALTH_POLL_INTERVAL", "5m")),
 			OutageLoginPolicy:                strings.ToLower(value("KEYCLOAK_OUTAGE_LOGIN_POLICY", KeycloakOutagePolicyContinueExistingPlatformSessions)),
 		},
 		SubsystemOnboarding: SubsystemOnboardingAutomationConfig{
@@ -576,6 +580,16 @@ func duration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a Go duration: %w", key, err)
 	}
 	return parsed, nil
+}
+
+// keycloakBrokerHealthPoll 解析 Broker 健康巡检周期；非法值回退到默认 5 分钟，避免
+// 一个错误的周期值让 worker 无法启动。
+func keycloakBrokerHealthPoll(raw string) time.Duration {
+	parsed, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || parsed <= 0 {
+		return 5 * time.Minute
+	}
+	return parsed
 }
 
 func commaSeparated(raw string) []string {

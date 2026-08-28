@@ -21,6 +21,21 @@ type LocalStore struct {
 	realRoot string
 }
 
+// Ready 验证本地开发存储根仍存在且为目录；生产环境应优先使用 S3 适配器。
+func (store *LocalStore) Ready(_ context.Context) error {
+	if store == nil || store.realRoot == "" {
+		return errors.New("local file store is not configured")
+	}
+	info, err := os.Stat(store.realRoot)
+	if err != nil {
+		return fmt.Errorf("stat local file storage root: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("local file storage root is not a directory")
+	}
+	return nil
+}
+
 func NewLocalStore(root string) (*LocalStore, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {

@@ -7,17 +7,21 @@ import (
 )
 
 const (
-	FileStatusUploading   = "UPLOADING"
-	FileStatusAvailable   = "AVAILABLE"
-	FileStatusQuarantined = "QUARANTINED"
-	FileStatusDeleting    = "DELETING"
-	FileStatusDeleted     = "DELETED"
-	FileStatusFailed      = "FAILED"
+	FileStatusPendingUpload = "PENDING_UPLOAD"
+	FileStatusValidating    = "VALIDATING"
+	FileStatusReady         = "READY"
+	FileStatusRejected      = "REJECTED"
+	FileStatusQuarantined   = "QUARANTINED"
+	FileStatusDeleting      = "DELETING"
+	FileStatusDeleted       = "DELETED"
+	FileStatusFailed        = "FAILED"
 
-	FileVersionStatusWriting = "WRITING"
-	FileVersionStatusReady   = "AVAILABLE"
-	FileVersionStatusFailed  = "FAILED"
-	FileVersionStatusRemoved = "REMOVED"
+	FileVersionStatusPendingUpload = "PENDING_UPLOAD"
+	FileVersionStatusValidating    = "VALIDATING"
+	FileVersionStatusReady         = "READY"
+	FileVersionStatusRejected      = "REJECTED"
+	FileVersionStatusFailed        = "FAILED"
+	FileVersionStatusRemoved       = "REMOVED"
 
 	JobStatusPending   = "PENDING"
 	JobStatusRunning   = "RUNNING"
@@ -50,6 +54,7 @@ type FileVersion struct {
 	SHA256                          []byte
 	MediaType, OriginalName, Status string
 	UploaderUserID, UploadRequestID string
+	UploadRequestHash               []byte
 	CreatedAt                       time.Time
 }
 
@@ -57,6 +62,18 @@ type FileVersion struct {
 type StoredFile struct {
 	File    File
 	Version FileVersion
+}
+
+// FileBinding 将文件关联到业务子系统内的具体资源。绑定只保存稳定标识，平台不解释
+// resource_type 和 resource_id 的业务语义；子系统仍负责判断当前用户能否访问该资源。
+type FileBinding struct {
+	ID, TenantID, ApplicationID string
+	FileID, ResourceType        string
+	ResourceID, BindingType     string
+	DisplayName                 string
+	SortOrder                   int
+	Status, CreatedBy           string
+	CreatedAt                   time.Time
 }
 
 // PageRequest is the common, tenant-scoped operation query shape.
@@ -79,24 +96,35 @@ type PageResult[T any] struct {
 type Job struct {
 	ID               uint64
 	PublicID         string
+	ParentJobID      uint64
+	ParentPublicID   string
 	TenantID         string
 	ApplicationID    string
 	JobType          string
 	AggregateType    string
 	AggregateID      string
+	IdempotencyKey   string
 	Payload          json.RawMessage
+	RequestHash      []byte
+	RequestID        string
+	TraceID          string
+	CorrelationID    string
+	BusinessRef      string
 	Status           string
 	Priority         int
 	AvailableAt      time.Time
 	LockedBy         string
 	LockedAt         *time.Time
+	LastAttemptAt    *time.Time
 	Attempts         uint
+	RetryCount       uint
 	MaxAttempts      uint
 	LastErrorCode    string
 	LastErrorMessage string
 	ResultFileID     string
 	CreatedAt        time.Time
 	CompletedAt      *time.Time
+	LastSucceededAt  *time.Time
 }
 
 // CleanupResult describes the bounded local-file cleanup pass. It purposely exposes counts only,
@@ -107,4 +135,13 @@ type CleanupResult struct {
 	FailedFiles        int `json:"failed_files"`
 	RemovedTempFiles   int `json:"removed_temp_files"`
 	TempCleanupFailure int `json:"temp_cleanup_failure"`
+}
+
+// ReconcileResult 汇总一次有界文件状态对账，不暴露物理路径或内容。
+type ReconcileResult struct {
+	Inspected int `json:"inspected"`
+	Recovered int `json:"recovered"`
+	Rejected  int `json:"rejected"`
+	Failed    int `json:"failed"`
+	Conflicts int `json:"conflicts"`
 }

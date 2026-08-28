@@ -12,6 +12,7 @@ COPY internal/ ./internal/
 COPY migrations/ ./migrations/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./cmd/api \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/file-gateway ./cmd/file-gateway \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/migrate ./cmd/migrate \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
@@ -26,6 +27,7 @@ RUN apk add --no-cache bash ca-certificates curl docker-cli docker-cli-compose j
 WORKDIR /app
 
 COPY --from=builder /out/api ./api
+COPY --from=builder /out/file-gateway ./file-gateway
 COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin

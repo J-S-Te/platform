@@ -18,6 +18,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
 
 const (
@@ -28,7 +29,10 @@ const (
 type fileService interface {
 	Upload(context.Context, application.UploadInput) (domain.File, error)
 	OpenDownload(context.Context, application.DownloadAccess, string) (domain.StoredFile, io.ReadSeekCloser, error)
+	BindResource(context.Context, application.BindingInput) (domain.FileBinding, error)
+	UnbindResource(context.Context, string, string, string, string) error
 	CleanupUnboundExpired(context.Context, string, time.Time, int) (domain.CleanupResult, error)
+	ReconcileStaleUploads(context.Context, string, time.Time, int) (domain.ReconcileResult, error)
 }
 
 type jobService interface {
@@ -56,6 +60,15 @@ func NewHandler(files fileService, jobs jobService, logger *slog.Logger) (*Handl
 	return &Handler{files: files, jobs: jobs, logger: logger}, nil
 }
 
+// NewJobHandler 创建只承载平台异步任务的 HTTP 适配器。File Gateway 拆为独立进程后，
+// 平台 API 不再构造本地文件存储实现，也不能借该构造函数重新暴露旧上传路径。
+func NewJobHandler(jobs jobService, logger *slog.Logger) (*Handler, error) {
+	if jobs == nil || logger == nil {
+		return nil, errors.New("async job HTTP handler dependencies must not be nil")
+	}
+	return &Handler{jobs: jobs, logger: logger}, nil
+}
+
 type uploadResponse struct {
 	FileID         string `json:"file_id"`
 	OriginalName   string `json:"original_name"`
@@ -66,14 +79,16 @@ type uploadResponse struct {
 }
 
 type jobPayload struct {
-	ApplicationID string          `json:"application_id"`
-	JobType       string          `json:"job_type"`
-	AggregateType string          `json:"aggregate_type"`
-	AggregateID   string          `json:"aggregate_id"`
-	Payload       json.RawMessage `json:"payload"`
-	Priority      int             `json:"priority"`
-	MaxAttempts   uint            `json:"max_attempts"`
-	AvailableAt   *time.Time      `json:"available_at"`
+	ApplicationID  string          `json:"application_id"`
+	JobType        string          `json:"job_type"`
+	AggregateType  string          `json:"aggregate_type"`
+	AggregateID    string          `json:"aggregate_id"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	BusinessRef    string          `json:"business_ref"`
+	Payload        json.RawMessage `json:"payload"`
+	Priority       int             `json:"priority"`
+	MaxAttempts    uint            `json:"max_attempts"`
+	AvailableAt    *time.Time      `json:"available_at"`
 }
 
 type cleanupPayload struct {
@@ -81,6 +96,20 @@ type cleanupPayload struct {
 	// callers must not treat it as a per-file expiry setting.
 	Before   time.Time `json:"before"`
 	MaxFiles int       `json:"max_files"`
+}
+
+type bindingPayload struct {
+	ApplicationID string `json:"application_id"`
+	ResourceType  string `json:"resource_type"`
+	ResourceID    string `json:"resource_id"`
+	BindingType   string `json:"binding_type"`
+	DisplayName   string `json:"display_name"`
+	SortOrder     int    `json:"sort_order"`
+}
+
+type reconcilePayload struct {
+	Before time.Time `json:"before"`
+	Limit  int       `json:"limit"`
 }
 
 // Upload accepts one multipart file and persists it under the configured local storage root.
@@ -97,6 +126,10 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	applicationID := strings.TrimSpace(request.FormValue("application_id"))
+	if applicationID == "" || applicationID != principal.Account.ID {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
 	classification := strings.TrimSpace(request.FormValue("classification"))
 	fileContent, fileHeader, err := request.FormFile("file")
 	if err != nil {
@@ -154,6 +187,46 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 	}
 }
 
+// BindFile 将 READY 文件绑定到一个业务资源；路由权限负责限制谁能操作绑定，服务层继续
+// 校验文件与 application_id 的真实归属，不能依赖请求字段自行声明。
+func (handler *Handler) BindFile(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	var payload bindingPayload
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+	if strings.TrimSpace(payload.ApplicationID) == "" || payload.ApplicationID != principal.Account.ID {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
+	binding, err := handler.files.BindResource(request.Context(), application.BindingInput{
+		TenantID: principal.Tenant.ID, ApplicationID: payload.ApplicationID, FileID: request.PathValue("file_id"),
+		ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, BindingType: payload.BindingType,
+		DisplayName: payload.DisplayName, SortOrder: payload.SortOrder, OperatorUserID: principal.User.ID,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "文件绑定成功", binding)
+}
+
+// UnbindFile 停用指定资源绑定，保留数据库记录用于后续审计与排障。
+func (handler *Handler) UnbindFile(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	if err := handler.files.UnbindResource(request.Context(), principal.Tenant.ID, principal.Account.ID, request.PathValue("file_id"), request.PathValue("binding_id")); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "文件绑定已停用", nil)
+}
+
 // CreateJob queues an application-owned job. Only a registered worker may interpret its payload.
 func (handler *Handler) CreateJob(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
@@ -164,9 +237,17 @@ func (handler *Handler) CreateJob(writer http.ResponseWriter, request *http.Requ
 	if !decodeJSON(writer, request, &payload) {
 		return
 	}
+	headerIdempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
+	if headerIdempotencyKey != "" && strings.TrimSpace(payload.IdempotencyKey) != "" && headerIdempotencyKey != strings.TrimSpace(payload.IdempotencyKey) {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		return
+	}
 	job, err := handler.jobs.Enqueue(request.Context(), application.JobCreateInput{
 		TenantID: principal.Tenant.ID, ApplicationID: payload.ApplicationID, JobType: payload.JobType,
 		AggregateType: payload.AggregateType, AggregateID: payload.AggregateID, Payload: payload.Payload,
+		IdempotencyKey: firstNonEmpty(headerIdempotencyKey, payload.IdempotencyKey),
+		RequestID:      requestctx.RequestID(request.Context()), TraceID: requestctx.TraceID(request.Context()),
+		CorrelationID: requestctx.CorrelationID(request.Context()), BusinessRef: payload.BusinessRef,
 		Priority: payload.Priority, MaxAttempts: payload.MaxAttempts, AvailableAt: payload.AvailableAt,
 	})
 	if err != nil {
@@ -249,6 +330,24 @@ func (handler *Handler) CleanupFiles(writer http.ResponseWriter, request *http.R
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "文件清理任务执行完成", result)
 }
 
+// ReconcileFiles 对账并恢复因进程崩溃停留在上传中间态的文件。
+func (handler *Handler) ReconcileFiles(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+	var payload reconcilePayload
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+	result, err := handler.files.ReconcileStaleUploads(request.Context(), principal.Tenant.ID, payload.Before, payload.Limit)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "文件状态对账完成", result)
+}
+
 func (handler *Handler) mutateJob(writer http.ResponseWriter, request *http.Request, message string, action func(context.Context, string, string) (any, error)) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -312,13 +411,20 @@ func decodeJSON(writer http.ResponseWriter, request *http.Request, target any) b
 
 type jobResponse struct {
 	JobID            string `json:"job_id"`
+	ParentJobID      string `json:"parent_job_id,omitempty"`
 	ApplicationID    string `json:"application_id,omitempty"`
 	JobType          string `json:"job_type"`
 	AggregateType    string `json:"aggregate_type,omitempty"`
 	AggregateID      string `json:"aggregate_id,omitempty"`
+	IdempotencyKey   string `json:"idempotency_key,omitempty"`
+	RequestID        string `json:"request_id,omitempty"`
+	TraceID          string `json:"trace_id,omitempty"`
+	CorrelationID    string `json:"correlation_id,omitempty"`
+	BusinessRef      string `json:"business_ref,omitempty"`
 	Status           string `json:"status"`
 	Priority         int    `json:"priority"`
 	Attempts         uint   `json:"attempts"`
+	RetryCount       uint   `json:"retry_count"`
 	MaxAttempts      uint   `json:"max_attempts"`
 	LastErrorCode    string `json:"last_error_code,omitempty"`
 	LastErrorMessage string `json:"last_error_message,omitempty"`
@@ -326,6 +432,8 @@ type jobResponse struct {
 	AvailableAt      string `json:"available_at"`
 	CreatedAt        string `json:"created_at"`
 	CompletedAt      string `json:"completed_at,omitempty"`
+	LastAttemptAt    string `json:"last_attempt_at,omitempty"`
+	LastSucceededAt  string `json:"last_succeeded_at,omitempty"`
 }
 
 func fileToResponse(file domain.File) uploadResponse {
@@ -333,9 +441,24 @@ func fileToResponse(file domain.File) uploadResponse {
 }
 
 func jobToResponse(job domain.Job) jobResponse {
-	response := jobResponse{JobID: job.PublicID, ApplicationID: job.ApplicationID, JobType: job.JobType, AggregateType: job.AggregateType, AggregateID: job.AggregateID, Status: job.Status, Priority: job.Priority, Attempts: job.Attempts, MaxAttempts: job.MaxAttempts, LastErrorCode: job.LastErrorCode, LastErrorMessage: job.LastErrorMessage, ResultFileID: job.ResultFileID, AvailableAt: job.AvailableAt.UTC().Format(time.RFC3339Nano), CreatedAt: job.CreatedAt.UTC().Format(time.RFC3339Nano)}
+	response := jobResponse{JobID: job.PublicID, ParentJobID: job.ParentPublicID, ApplicationID: job.ApplicationID, JobType: job.JobType, AggregateType: job.AggregateType, AggregateID: job.AggregateID, IdempotencyKey: job.IdempotencyKey, RequestID: job.RequestID, TraceID: job.TraceID, CorrelationID: job.CorrelationID, BusinessRef: job.BusinessRef, Status: job.Status, Priority: job.Priority, Attempts: job.Attempts, RetryCount: job.RetryCount, MaxAttempts: job.MaxAttempts, LastErrorCode: job.LastErrorCode, LastErrorMessage: job.LastErrorMessage, ResultFileID: job.ResultFileID, AvailableAt: job.AvailableAt.UTC().Format(time.RFC3339Nano), CreatedAt: job.CreatedAt.UTC().Format(time.RFC3339Nano)}
 	if job.CompletedAt != nil {
 		response.CompletedAt = job.CompletedAt.UTC().Format(time.RFC3339Nano)
 	}
+	if job.LastAttemptAt != nil {
+		response.LastAttemptAt = job.LastAttemptAt.UTC().Format(time.RFC3339Nano)
+	}
+	if job.LastSucceededAt != nil {
+		response.LastSucceededAt = job.LastSucceededAt.UTC().Format(time.RFC3339Nano)
+	}
 	return response
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }

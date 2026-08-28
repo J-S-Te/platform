@@ -2,13 +2,20 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/filetask/domain"
+)
+
+var (
+	idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	traceIDPattern        = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // JobService 是通用任务调度控制面，负责入队、领取、失败重试、取消和人工重跑状态转换；
@@ -47,7 +54,18 @@ func (service *JobService) Enqueue(ctx context.Context, input JobCreateInput) (d
 	if priority == 0 {
 		priority = 100
 	}
-	job := domain.Job{PublicID: publicID, TenantID: strings.TrimSpace(input.TenantID), ApplicationID: strings.TrimSpace(input.ApplicationID), JobType: strings.TrimSpace(input.JobType), AggregateType: strings.TrimSpace(input.AggregateType), AggregateID: strings.TrimSpace(input.AggregateID), Payload: append(json.RawMessage(nil), input.Payload...), Status: domain.JobStatusPending, Priority: priority, AvailableAt: availableAt, MaxAttempts: maxAttempts, CreatedAt: now}
+	requestHash, err := jobRequestHash(input, priority, maxAttempts)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	job := domain.Job{
+		PublicID: publicID, TenantID: strings.TrimSpace(input.TenantID), ApplicationID: strings.TrimSpace(input.ApplicationID),
+		JobType: strings.TrimSpace(input.JobType), AggregateType: strings.TrimSpace(input.AggregateType), AggregateID: strings.TrimSpace(input.AggregateID),
+		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), Payload: append(json.RawMessage(nil), input.Payload...), RequestHash: requestHash[:],
+		RequestID: strings.TrimSpace(input.RequestID), TraceID: strings.ToLower(strings.TrimSpace(input.TraceID)),
+		CorrelationID: strings.TrimSpace(input.CorrelationID), BusinessRef: strings.TrimSpace(input.BusinessRef),
+		Status: domain.JobStatusPending, Priority: priority, AvailableAt: availableAt, MaxAttempts: maxAttempts, CreatedAt: now,
+	}
 	return service.repository.CreateJob(ctx, job)
 }
 
@@ -72,15 +90,18 @@ func (service *JobService) Claim(ctx context.Context, workerID string, allowedTy
 	return service.repository.ClaimJob(ctx, workerID, allowedTypes, service.clock.Now().UTC(), staleBefore.UTC())
 }
 
-func (service *JobService) Complete(ctx context.Context, tenantID, jobID string) error {
-	return service.repository.CompleteJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID), service.clock.Now().UTC())
+func (service *JobService) Complete(ctx context.Context, job domain.Job) error {
+	if strings.TrimSpace(job.TenantID) == "" || strings.TrimSpace(job.PublicID) == "" || strings.TrimSpace(job.LockedBy) == "" || job.Status != domain.JobStatusRunning {
+		return validation("running job tenant, job ID and worker lease are required")
+	}
+	return service.repository.CompleteJob(ctx, job, service.clock.Now().UTC())
 }
 
 // Fail 将仍可重试的任务按退避时间退回 PENDING；不可重试任务进入 DEAD，耗尽自动次数的任务
 // 进入 FAILED。后二者都必须由操作者明确 Retry 或 Rerun，避免错误任务形成无限重试风暴。
 func (service *JobService) Fail(ctx context.Context, job domain.Job, code, message string, retryable bool) error {
-	if strings.TrimSpace(job.TenantID) == "" || strings.TrimSpace(job.PublicID) == "" || job.Status != domain.JobStatusRunning {
-		return validation("running job tenant and job ID are required")
+	if strings.TrimSpace(job.TenantID) == "" || strings.TrimSpace(job.PublicID) == "" || strings.TrimSpace(job.LockedBy) == "" || job.Status != domain.JobStatusRunning {
+		return validation("running job tenant, job ID and worker lease are required")
 	}
 	code = strings.TrimSpace(code)
 	message = strings.TrimSpace(message)
@@ -102,8 +123,7 @@ func (service *JobService) Retry(ctx context.Context, tenantID, jobID string) er
 	return service.repository.RetryJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID), service.clock.Now().UTC())
 }
 
-// Rerun 新建 PENDING 任务而不改写终态记录，从而保留原任务的操作历史。现有 async_job
-// 没有 parent_job_id；若界面需要持久化展示重跑谱系，必须通过新增迁移扩展模型。
+// Rerun 新建 PENDING 任务而不改写终态记录，并通过 parent_job_id 持久化重跑谱系。
 func (service *JobService) Rerun(ctx context.Context, tenantID, jobID string) (domain.Job, error) {
 	original, err := service.repository.GetJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID))
 	if err != nil {
@@ -120,12 +140,17 @@ func (service *JobService) Rerun(ctx context.Context, tenantID, jobID string) (d
 	copy := original
 	copy.ID = 0
 	copy.PublicID = publicID
+	copy.ParentJobID = original.ID
+	copy.ParentPublicID = original.PublicID
+	copy.IdempotencyKey = ""
 	copy.Status = domain.JobStatusPending
 	copy.AvailableAt = now
 	copy.LockedBy, copy.LockedAt = "", nil
 	copy.Attempts = 0
+	copy.RetryCount = 0
+	copy.LastAttemptAt = nil
 	copy.LastErrorCode, copy.LastErrorMessage = "", ""
-	copy.ResultFileID, copy.CompletedAt = "", nil
+	copy.ResultFileID, copy.CompletedAt, copy.LastSucceededAt = "", nil, nil
 	copy.CreatedAt = now
 	return service.repository.CreateRerun(ctx, copy)
 }
@@ -146,7 +171,41 @@ func validateJobInput(input JobCreateInput) error {
 	if input.MaxAttempts > 100 {
 		return validation("max_attempts must not exceed 100")
 	}
+	if key := strings.TrimSpace(input.IdempotencyKey); key != "" && !idempotencyKeyPattern.MatchString(key) {
+		return validation("idempotency_key is invalid")
+	}
+	if value := strings.TrimSpace(input.TraceID); value != "" && !traceIDPattern.MatchString(strings.ToLower(value)) {
+		return validation("trace_id is invalid")
+	}
+	for name, value := range map[string]string{"request_id": input.RequestID, "correlation_id": input.CorrelationID, "business_ref": input.BusinessRef} {
+		value = strings.TrimSpace(value)
+		if len(value) > 128 || strings.ContainsAny(value, "\r\n\x00") {
+			return validation(name + " is invalid")
+		}
+	}
 	return nil
+}
+
+func jobRequestHash(input JobCreateInput, priority int, maxAttempts uint) ([32]byte, error) {
+	var payload any
+	if err := json.Unmarshal(input.Payload, &payload); err != nil {
+		return [32]byte{}, fmt.Errorf("%w: job payload must be valid JSON", ErrPayloadUnsafe)
+	}
+	canonical := struct {
+		ApplicationID, JobType, AggregateType, AggregateID string
+		Payload                                            any
+		Priority                                           int
+		MaxAttempts                                        uint
+		AvailableAt                                        *time.Time
+	}{
+		strings.TrimSpace(input.ApplicationID), strings.TrimSpace(input.JobType), strings.TrimSpace(input.AggregateType), strings.TrimSpace(input.AggregateID),
+		payload, priority, maxAttempts, input.AvailableAt,
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("encode async job request hash: %w", err)
+	}
+	return sha256.Sum256(encoded), nil
 }
 
 func terminalJobStatus(status string) bool {

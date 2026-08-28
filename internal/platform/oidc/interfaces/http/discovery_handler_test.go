@@ -34,6 +34,8 @@ func TestDiscoveryAdvertisesActuallyIssuedAuthorizationClaims(t *testing.T) {
 	var document struct {
 		Issuer                       string   `json:"issuer"`
 		AuthorizationContextEndpoint string   `json:"authorization_context_endpoint"`
+		BackchannelLogoutSupported   bool     `json:"backchannel_logout_supported"`
+		BackchannelSessionSupported  bool     `json:"backchannel_logout_session_supported"`
 		ClaimsSupported              []string `json:"claims_supported"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
@@ -44,6 +46,9 @@ func TestDiscoveryAdvertisesActuallyIssuedAuthorizationClaims(t *testing.T) {
 	}
 	if document.AuthorizationContextEndpoint != "https://identity.example.com/oauth2/authorization-context" {
 		t.Fatalf("authorization_context_endpoint=%q", document.AuthorizationContextEndpoint)
+	}
+	if !document.BackchannelLogoutSupported || !document.BackchannelSessionSupported {
+		t.Fatalf("back-channel logout metadata = supported:%t session:%t", document.BackchannelLogoutSupported, document.BackchannelSessionSupported)
 	}
 	claims := make(map[string]bool, len(document.ClaimsSupported))
 	for _, claim := range document.ClaimsSupported {

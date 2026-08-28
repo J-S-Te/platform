@@ -23,6 +23,8 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"jwks_uri":                                    issuer + "/oauth2/jwks",
 		"revocation_endpoint":                         issuer + "/oauth2/revoke",
 		"end_session_endpoint":                        issuer + "/oauth2/logout",
+		"backchannel_logout_supported":                true,
+		"backchannel_logout_session_supported":        true,
 		"response_types_supported":                    []string{"code"},
 		"grant_types_supported":                       []string{"authorization_code", "refresh_token", "client_credentials"},
 		"subject_types_supported":                     []string{"public"},

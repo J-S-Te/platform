@@ -31,24 +31,34 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	location := h.validatedPostLogoutRedirect(r, params)
-	h.logoutBrowserSession(r)
+	if err := h.logoutBrowserSession(r); err != nil {
+		// 已认证会话的统一撤销失败时不能继续清 Cookie 并伪装成成功退出；保留浏览器
+		// 会话可让用户重试，同时避免残留 Realm 会话在下一次登录时切回旧账号。
+		h.logger.Error("platform global logout failed", "error", err)
+		setNoStoreHeaders(w)
+		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "")
+		return
+	}
+	// 所有业务系统共用当前浏览器 Origin，但 Cookie Path 各自隔离。Clear-Site-Data
+	// 让支持该标准的浏览器同时清理各子系统 Cookie/Storage；服务端会话仍以本次
+	// 已完成的平台和 Keycloak 撤销为权威，不能依赖浏览器清理替代服务端注销。
+	w.Header().Set("Clear-Site-Data", `"cookies", "storage"`)
 	h.clearSessionCookie(w)
 	redirectToLogoutComplete(w, r, location)
 }
 
-func (h *Handler) logoutBrowserSession(r *http.Request) {
+func (h *Handler) logoutBrowserSession(r *http.Request) error {
 	if h.sessionLogout == nil {
-		return
+		return nil
 	}
 	principal, ok := h.authenticateBrowserSession(r)
 	if !ok {
-		return
+		return nil
 	}
 	if err := h.sessionLogout.Logout(r.Context(), principal); err != nil {
-		// Logout completion must be safe even after an already-expired cookie. Do not disclose
-		// session state or turn it into a redirect to an unvalidated URI.
-		h.logger.Error("platform session logout during OIDC logout failed", "error", err)
+		return err
 	}
+	return nil
 }
 
 func (h *Handler) validatedPostLogoutRedirect(r *http.Request, values url.Values) string {

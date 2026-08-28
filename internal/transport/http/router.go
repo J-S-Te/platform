@@ -24,6 +24,7 @@ import (
 	securityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/security/interfaces/http"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 	settingshttp "github.com/J-S-Te/Basic-Platform/internal/platform/settings/interfaces/http"
+	tenantclonehttp "github.com/J-S-Te/Basic-Platform/internal/platform/tenantclone/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
@@ -40,14 +41,21 @@ type OperationalModules struct {
 	// KeycloakIntegration is deliberately separate from the application
 	// directory. It owns only provider synchronization and issuer cutover; it
 	// does not expose or create browser-visible OAuth client secrets.
-	KeycloakIntegration    *applicationregistryhttp.KeycloakIntegrationHandler
-	SubsystemServiceRoutes *applicationregistryhttp.SubsystemServiceRouteHandler
-	Notifications          *notificationhttp.Handler
-	FilesAndJobs           *filetaskhttp.Handler
-	ExternalIdentity       *externalidentityhttp.Handler
-	OwnerDirectory         *ownerdirectoryhttp.Handler
-	PersonnelChanges       *identityhttp.PersonnelChangeHandler
-	AuthorizationOverview  *identityhttp.AuthorizationOverviewHandler
+	KeycloakIntegration *applicationregistryhttp.KeycloakIntegrationHandler
+	// BrokerHandler and DeploymentStatusHandler make the two read/verify
+	// boundaries explicit. During migration they may point to the legacy
+	// onboarding adapter, but the router no longer requires that concrete type.
+	BrokerHandler            applicationregistryhttp.BrokerHTTPHandler
+	DeploymentStatusHandler  applicationregistryhttp.DeploymentStatusHTTPHandler
+	SubsystemServiceRoutes   *applicationregistryhttp.SubsystemServiceRouteHandler
+	Notifications            *notificationhttp.Handler
+	AsyncJobs                *filetaskhttp.Handler
+	ExternalIdentity         *externalidentityhttp.Handler
+	OwnerDirectory           *ownerdirectoryhttp.Handler
+	BackchannelLogoutURI     *applicationregistryhttp.BackchannelLogoutURIHandler
+	PersonnelChanges         *identityhttp.PersonnelChangeHandler
+	AuthorizationOverview    *identityhttp.AuthorizationOverviewHandler
+	TenantAuthorizationClone *tenantclonehttp.Handler
 	// AccessApplier is the optional deployment agent used by the management-console
 	// "对外访问" apply action. Production/remote deployments leave it nil.
 	AccessApplier settingsapplication.AccessApplier
@@ -73,7 +81,7 @@ func NewRouter(
 	securityHandler *securityhttp.Handler,
 	applicationTokenHandler *applicationregistryhttp.Handler,
 	applicationManagementHandler *applicationregistryhttp.ManagementHandler,
-	oauthClientManagementHandler *applicationregistryhttp.OAuthClientManagementHandler,
+	oauthClientManagementHandler applicationregistryhttp.OAuthClientHTTPHandler,
 	applicationAuthenticator *applicationregistryapplication.Service,
 	auditRecorder middleware.AuditRecorder,
 	oidcHandler *oidchttp.Handler,
@@ -82,6 +90,7 @@ func NewRouter(
 	// 先创建裸 Gin engine，再按“公共端点 → 协议端点 → 会话端点 → 业务端点”的顺序装配。
 	// 这种顺序让每个路由组的认证边界清晰，也避免某个可选模块缺失时意外暴露半成品接口。
 	router := gin.New()
+	operationalMetrics := NewOperationalMetrics(database)
 	router.HandleMethodNotAllowed = true
 	if err := router.SetTrustedProxies(cfg.HTTP.TrustedProxies); err != nil {
 		panic("invalid trusted proxy configuration: " + err.Error())
@@ -91,7 +100,9 @@ func NewRouter(
 
 	router.Use(
 		middleware.RequestID(),
+		middleware.TraceCorrelation(),
 		middleware.ClientIP(),
+		operationalMetrics.Middleware(),
 		middleware.Recover(logger),
 		middleware.AccessLog(logger),
 		middleware.SecurityHeaders(),
@@ -100,6 +111,7 @@ func NewRouter(
 	healthHandler := NewHealthHandler(database, cfg.AppName)
 	router.GET("/healthz", healthHandler.Liveness)
 	router.GET("/readyz", healthHandler.Readiness)
+	router.GET("/metrics", gin.WrapH(operationalMetrics))
 
 	// 完整 OIDC handler 提供浏览器授权和标准协议端点；在迁移期只有机器令牌 handler 时，
 	// 仅保留 token 发行接口，避免把不完整的 OIDC 端点注册出来。
@@ -167,7 +179,11 @@ func NewRouter(
 		}
 		brokerVerificationRouter := router.Group("/api/v1/keycloak")
 		brokerVerificationRouter.Use(middleware.RequireSafeWriteContentType(), middleware.KeycloakBrokerAuthentication(verifier))
-		brokerVerificationRouter.POST("/broker-login-verifications", adaptHandler(operational.SubsystemOnboarding.VerifyKeycloakBrokerLogin))
+		brokerHandler := operational.BrokerHandler
+		if brokerHandler == nil {
+			brokerHandler = operational.SubsystemOnboarding
+		}
+		brokerVerificationRouter.POST("/broker-login-verifications", adaptHandler(brokerHandler.VerifyKeycloakBrokerLogin))
 		// The new endpoint is the Keycloak authentication-integration boundary.
 		// Keep /api/v1/keycloak/... above for an existing Keycloak broker callback
 		// client while all new callers use this explicit namespace.
@@ -238,11 +254,25 @@ func NewRouter(
 			apiRouter.POST("/applications/:application_id/environments/:environment_id/purge", middleware.RequirePermission("platform:application-environment:delete"), adaptHandler(applicationManagementHandler.PurgeEnvironment))
 		}
 
+		if operational.TenantAuthorizationClone != nil {
+			// 克隆会创建完整静态授权目录，调用方必须同时具备应用和角色创建权限；
+			// Handler 只允许以当前租户为模板，不能从请求中选择任意源租户。
+			apiRouter.POST("/tenants/:tenant_id/authorization-catalog-clone",
+				middleware.RequirePermission("platform:application:create"),
+				middleware.RequirePermission("platform:role:create"),
+				adaptHandler(operational.TenantAuthorizationClone.CloneAuthorizationCatalog),
+			)
+		}
+
 		if operational.SubsystemOnboarding != nil {
 			apiRouter.GET("/portal/applications", adaptHandler(operational.SubsystemOnboarding.ListPortalApplications))
 			apiRouter.GET("/subsystem-capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemCapabilities))
 			apiRouter.GET("/subsystem-discovery", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.DiscoverSubsystemCandidates))
-			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemStatus))
+			deploymentStatusHandler := operational.DeploymentStatusHandler
+			if deploymentStatusHandler == nil {
+				deploymentStatusHandler = operational.SubsystemOnboarding
+			}
+			apiRouter.GET("/subsystem-status", middleware.RequirePermission("platform:application:read"), adaptHandler(deploymentStatusHandler.GetSubsystemStatus))
 			apiRouter.POST("/subsystem-adoption",
 				middleware.RequirePermission("platform:application:update"),
 				middleware.RequirePermission("platform:application-environment:update"),
@@ -350,6 +380,11 @@ func NewRouter(
 			apiRouter.GET("/oauth-clients/:oauth_client_id", middleware.RequirePermission("platform:oauth-client:read"), adaptHandler(oauthClientManagementHandler.GetOAuthClient))
 			apiRouter.PUT("/oauth-clients/:oauth_client_id/scopes", middleware.RequirePermission("platform:oauth-client:scope-update"), adaptHandler(oauthClientManagementHandler.UpdateOAuthClientScopes))
 			apiRouter.PUT("/oauth-clients/:oauth_client_id/redirect-uris", middleware.RequirePermission("platform:oauth-client:redirect-uri-update"), adaptHandler(oauthClientManagementHandler.UpdateOAuthClientRedirectURIs))
+			if operational.BackchannelLogoutURI != nil {
+				apiRouter.GET("/oauth-clients/:oauth_client_id/backchannel-logout-uri", middleware.RequirePermission("platform:oauth-client:read"), adaptHandler(operational.BackchannelLogoutURI.Handle))
+				apiRouter.PUT("/oauth-clients/:oauth_client_id/backchannel-logout-uri", middleware.RequirePermission("platform:oauth-client:redirect-uri-update"), adaptHandler(operational.BackchannelLogoutURI.Handle))
+				apiRouter.DELETE("/oauth-clients/:oauth_client_id/backchannel-logout-uri", middleware.RequirePermission("platform:oauth-client:redirect-uri-update"), adaptHandler(operational.BackchannelLogoutURI.Handle))
+			}
 			apiRouter.GET("/oauth-clients/:oauth_client_id/post-logout-redirect-uris", middleware.RequirePermission("platform:oauth-client:read"), adaptHandler(oauthClientManagementHandler.GetOAuthClientPostLogoutRedirectURIs))
 			apiRouter.PUT("/oauth-clients/:oauth_client_id/post-logout-redirect-uris", middleware.RequirePermission("platform:oauth-client:post-logout-redirect-uri-update"), adaptHandler(oauthClientManagementHandler.UpdateOAuthClientPostLogoutRedirectURIs))
 			apiRouter.GET("/oauth-clients/:oauth_client_id/jwks", middleware.RequirePermission("platform:oauth-client:read"), adaptHandler(oauthClientManagementHandler.GetOAuthClientJWKs))
@@ -413,15 +448,14 @@ func NewRouter(
 			apiRouter.POST("/notifications/inbox/read-all", adaptHandler(operational.Notifications.MarkAllRead))
 		}
 
-		if operational.FilesAndJobs != nil {
-			apiRouter.POST("/files", middleware.RequirePermission("platform:file:upload"), adaptHandler(operational.FilesAndJobs.Upload))
-			apiRouter.GET("/files/:file_id/content", middleware.RequirePermission("platform:file:download"), adaptHandler(operational.FilesAndJobs.Download))
-			apiRouter.POST("/files/cleanup", middleware.RequirePermission("platform:file:cleanup"), adaptHandler(operational.FilesAndJobs.CleanupFiles))
-			apiRouter.POST("/async-jobs", middleware.RequirePermission("platform:async-job:create"), adaptHandler(operational.FilesAndJobs.CreateJob))
-			apiRouter.GET("/async-jobs", middleware.RequirePermission("platform:async-job:read"), adaptHandler(operational.FilesAndJobs.ListJobs))
-			apiRouter.POST("/async-jobs/:job_id/cancel", middleware.RequirePermission("platform:async-job:cancel"), adaptHandler(operational.FilesAndJobs.CancelJob))
-			apiRouter.POST("/async-jobs/:job_id/retry", middleware.RequirePermission("platform:async-job:retry"), adaptHandler(operational.FilesAndJobs.RetryJob))
-			apiRouter.POST("/async-jobs/:job_id/rerun", middleware.RequirePermission("platform:async-job:rerun"), adaptHandler(operational.FilesAndJobs.RerunJob))
+		if operational.AsyncJobs != nil {
+			// 文件读写、绑定、清理和对账只由独立 File Gateway 暴露。平台 API 保留自身
+			// async_job 运营边界，避免重新连接网关数据库或对象存储。
+			apiRouter.POST("/async-jobs", middleware.RequirePermission("platform:async-job:create"), adaptHandler(operational.AsyncJobs.CreateJob))
+			apiRouter.GET("/async-jobs", middleware.RequirePermission("platform:async-job:read"), adaptHandler(operational.AsyncJobs.ListJobs))
+			apiRouter.POST("/async-jobs/:job_id/cancel", middleware.RequirePermission("platform:async-job:cancel"), adaptHandler(operational.AsyncJobs.CancelJob))
+			apiRouter.POST("/async-jobs/:job_id/retry", middleware.RequirePermission("platform:async-job:retry"), adaptHandler(operational.AsyncJobs.RetryJob))
+			apiRouter.POST("/async-jobs/:job_id/rerun", middleware.RequirePermission("platform:async-job:rerun"), adaptHandler(operational.AsyncJobs.RerunJob))
 		}
 
 		if securityHandler != nil {

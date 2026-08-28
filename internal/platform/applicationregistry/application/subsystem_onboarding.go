@@ -37,6 +37,11 @@ const (
 	ServiceCredentialOwnerDirectoryRead             = "owner_directory_read"
 	ServiceCredentialContractOpportunitySignedWrite = "contract_opportunity_signed_write"
 	ServiceCredentialContractSummaryRead            = "contract_summary_read"
+	ServiceCredentialContractDashboardRead          = "contract_dashboard_read"
+	ServiceCredentialProjectDashboardRead           = "project_dashboard_read"
+	// ServiceCredentialFileGatewayWrite 是业务子系统上传并绑定自身文件的最小组合凭据；
+	// 下载凭据不包含在内，避免写入型 Worker 同时取得任意文件读取能力。
+	ServiceCredentialFileGatewayWrite = "file_gateway_write"
 )
 
 // 上述用途常量同时是“凭据最小权限”的协议标识：部署 Agent 按用途把不同密钥写入
@@ -498,6 +503,9 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialPortalInviteVerify:             {ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
 	ServiceCredentialContractOpportunitySignedWrite: {ServiceCredentialContractOpportunitySignedWrite, "opportunity-intake", "Opportunity Signed Intake", "opportunity.signed.write"},
 	ServiceCredentialContractSummaryRead:            {ServiceCredentialContractSummaryRead, "contract-summary", "Contract Summary Reader", "contract.summary.read"},
+	ServiceCredentialContractDashboardRead:          {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
+	ServiceCredentialProjectDashboardRead:           {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
+	ServiceCredentialFileGatewayWrite:               {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
 }
 
 // hardcodedIntegratedServicePurposes 是平台内置默认的集成服务用途（不含 audit_ingest 基线）。
@@ -553,6 +561,10 @@ func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input S
 	writes := make([]SubsystemServiceClientWrite, 0, len(definitions))
 	secrets := make(map[string]string, len(definitions))
 	for _, definition := range definitions {
+		scopes := []string{definition.scope}
+		if definition.purpose == ServiceCredentialFileGatewayWrite {
+			scopes = append(scopes, "platform:file:bind", "platform:file:download")
+		}
 		client, err := normalizeOAuthClientCreate(OAuthClientCreateInput{
 			TenantID: input.TenantID, OperatorID: input.OperatorID, ApplicationID: applicationID,
 			EnvironmentID: environmentID,
@@ -560,7 +572,7 @@ func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input S
 			ClientName:    input.ApplicationName + " " + definition.name,
 			ClientType:    "service", TokenAuthMethod: "client_secret_basic",
 			AccessTokenTTLSeconds: defaultSubsystemAccessTokenTTLSeconds, RequirePKCE: false,
-			GrantTypes: []string{"client_credentials"}, Scopes: []string{definition.scope},
+			GrantTypes: []string{"client_credentials"}, Scopes: scopes,
 		}, service.redirectURIValidationPolicy)
 		if err != nil {
 			return nil, nil, err
@@ -590,6 +602,27 @@ func (service *SubsystemOnboardingService) ResolveApplicationEnvironment(ctx con
 		return "", "", ErrValidation
 	}
 	return service.repository.ResolveApplicationEnvironment(ctx, tenantID, applicationCode, environment)
+}
+
+// ResolveApplicationEnvironmentRedirectURI 返回控制面登记的规范 OAuth 回调地址。
+// 返回值仅由租户、应用和环境范围内的持久化网关字段推导；字段缺失时失败关闭。
+func (service *SubsystemOnboardingService) ResolveApplicationEnvironmentRedirectURI(ctx context.Context, tenantID, applicationID, environmentID string) (string, error) {
+	resolver, ok := service.repository.(interface {
+		ResolveApplicationEnvironmentGateway(context.Context, string, string, string) (string, string, error)
+	})
+	if !ok {
+		return "", ErrValidation
+	}
+	baseURL, pathPrefix, err := resolver.ResolveApplicationEnvironmentGateway(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), strings.TrimSpace(environmentID))
+	if err != nil {
+		return "", err
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	pathPrefix = strings.TrimRight(strings.TrimSpace(pathPrefix), "/")
+	if baseURL == "" || pathPrefix == "" {
+		return "", ErrValidation
+	}
+	return baseURL + pathPrefix + "/auth/callback", nil
 }
 
 // 门户列表只返回当前租户、当前用户可见且能安全解析的有效应用；未指定环境时由仓储按

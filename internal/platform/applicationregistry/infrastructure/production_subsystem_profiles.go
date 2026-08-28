@@ -1,6 +1,8 @@
 package infrastructure
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +81,7 @@ type productionSubsystemDatabaseManifest struct {
 type productionSubsystemProfile struct {
 	SourcePath string
 	Manifest   productionSubsystemManifest
+	Checksum   string
 }
 
 // LoadProductionSubsystemCapabilities 只返回管理页面可见的无敏感投影。API 与特权 Agent
@@ -208,7 +211,12 @@ func decodeProductionSubsystemProfile(root, path string) (productionSubsystemPro
 	if err := normalizeAndValidateProductionSubsystemManifest(&manifest); err != nil {
 		return productionSubsystemProfile{}, fmt.Errorf("invalid production subsystem profile %s: %w", filepath.Base(path), err)
 	}
-	return productionSubsystemProfile{SourcePath: resolved, Manifest: manifest}, nil
+	canonical, err := yaml.Marshal(manifest)
+	if err != nil {
+		return productionSubsystemProfile{}, fmt.Errorf("canonicalize production subsystem profile %s: %w", filepath.Base(path), err)
+	}
+	digest := sha256.Sum256(canonical)
+	return productionSubsystemProfile{SourcePath: resolved, Manifest: manifest, Checksum: "sha256:" + hex.EncodeToString(digest[:])}, nil
 }
 
 func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsystemManifest) error {
@@ -297,6 +305,9 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		if environment, exists := file.Values["PLATFORM_ENVIRONMENT_CODE"]; exists && strings.ToLower(strings.TrimSpace(environment)) != app.Environment {
 			return errors.New("runtime environment code does not match target")
 		}
+		if err := validateProductionOIDCValues(app.Code, file.Values); err != nil {
+			return err
+		}
 		file.RequiredExistingKeys = normalizedProductionEnvironmentKeys(file.RequiredExistingKeys)
 		if file.RequiredExistingKeys == nil {
 			return errors.New("runtime required-existing key is invalid")
@@ -331,6 +342,9 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 			return errors.New("runtime file policy is empty")
 		}
 	}
+	if err := validateProductionPortalBroker(app.Code, runtime.Files); err != nil {
+		return err
+	}
 
 	compose := &manifest.Compose
 	normalizedProfiles := normalizedProductionServices(compose.Profiles)
@@ -345,20 +359,22 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	compose.RuntimeServices = normalizedRuntimeServices
 	compose.TeardownServices = normalizedTeardownServices
 	if len(compose.RuntimeServices) == 0 || len(compose.ReleaseImageKeys) == 0 ||
-		containsReservedProductionService(compose.DependencyServices) || containsReservedProductionService(compose.RuntimeServices) || containsReservedProductionService(compose.TeardownServices) {
+		!productionServicesOwnedByApplication(app.Code, compose.DependencyServices, true) ||
+		!productionServicesOwnedByApplication(app.Code, compose.RuntimeServices, false) ||
+		!productionServicesOwnedByApplication(app.Code, compose.TeardownServices, false) {
 		return errors.New("Compose service policy is invalid")
 	}
 	if len(compose.TeardownServices) == 0 {
 		compose.TeardownServices = append([]string(nil), compose.RuntimeServices...)
 	}
 	compose.MigrateService = strings.TrimSpace(compose.MigrateService)
-	if compose.MigrateService != "" && (!validProductionComposeService(compose.MigrateService) || isReservedProductionService(compose.MigrateService)) {
+	if compose.MigrateService != "" && (!validProductionComposeService(compose.MigrateService) || !productionServiceOwnedByApplication(app.Code, compose.MigrateService)) {
 		return errors.New("Compose migrate service is invalid")
 	}
 	if compose.Database != nil {
 		compose.Database.Service = strings.TrimSpace(compose.Database.Service)
 		compose.Database.Name = strings.TrimSpace(compose.Database.Name)
-		if !validProductionComposeService(compose.Database.Service) || isReservedProductionService(compose.Database.Service) || !validProductionDatabaseName(compose.Database.Name) {
+		if !validProductionComposeService(compose.Database.Service) || !productionServiceOwnedByApplication(app.Code, compose.Database.Service) || !validProductionDatabaseName(compose.Database.Name) {
 			return errors.New("Compose database policy is invalid")
 		}
 	}
@@ -503,11 +519,43 @@ func containsReservedProductionService(values []string) bool {
 
 func isReservedProductionService(value string) bool {
 	switch value {
-	case "platform-api", "platform-mysql", "platform-migrate", "frontend", "subsystem-provisioner":
+	case "platform-api", "platform-mysql", "platform-migrate", "frontend", "subsystem-provisioner", "keycloak", "keycloak-db", "temporal":
 		return true
 	default:
 		return false
 	}
+}
+
+// productionServicesOwnedByApplication 限制清单只能操作本应用命名空间内的 Compose 服务。
+// temporal 只允许作为显式共享依赖，不能成为迁移、运行或下线目标。
+func productionServicesOwnedByApplication(applicationCode string, services []string, allowSharedDependency bool) bool {
+	for _, service := range services {
+		if allowSharedDependency && service == "temporal" {
+			continue
+		}
+		if !productionServiceOwnedByApplication(applicationCode, service) {
+			return false
+		}
+	}
+	return true
+}
+
+func productionServiceOwnedByApplication(applicationCode, service string) bool {
+	if isReservedProductionService(service) {
+		return false
+	}
+	prefix := strings.ReplaceAll(strings.TrimSpace(applicationCode), "_", "-") + "-"
+	switch strings.TrimSpace(applicationCode) {
+	case "customer_and_opportunity":
+		prefix = "customer-"
+	case "customer_portal":
+		prefix = "portal-"
+	case "contract_management":
+		prefix = "contract-"
+	case "project_management":
+		prefix = "project-"
+	}
+	return strings.HasPrefix(service, prefix)
 }
 
 func productionSubsystemCapabilities(profiles []productionSubsystemProfile) application.SubsystemProvisioningCapabilities {
@@ -531,6 +579,7 @@ func productionSubsystemCapabilities(profiles []productionSubsystemProfile) appl
 		target := application.SubsystemProvisioningTarget{
 			ApplicationCode: app.Code, ApplicationName: app.Name, Description: app.Description,
 			Environment: app.Environment, UpstreamURL: app.UpstreamURL, PathPrefix: app.PathPrefix, ClientType: app.ClientType,
+			ManifestChecksum: profile.Checksum,
 		}
 		if app.InitialAdminRoles != nil {
 			target.InitialAdminRoles = append([]string(nil), (*app.InitialAdminRoles)...)
@@ -576,4 +625,52 @@ func canonicalProductionDeployRoot(value string) (string, error) {
 		return "", errors.New("production subsystem deploy root permissions are unsafe")
 	}
 	return resolved, nil
+}
+
+const (
+	brokerAliasInternal = "basic-platform"
+	brokerAliasCustomer = "basic-platform-customer"
+)
+
+// validateProductionOIDCValues enforces the broker channel contract on fixed runtime values:
+// the customer portal must use the customer broker, internal subsystems must use the internal
+// broker, and any *_IDP_HINT must resolve to a known Keycloak alias. This prevents a config
+// template from silently wiring the portal onto the internal employee broker, which fails
+// every external-customer login.
+func validateProductionOIDCValues(appCode string, values map[string]string) error {
+	appCode = strings.ToLower(strings.TrimSpace(appCode))
+	isPortal := appCode == "customer_portal"
+	for key, raw := range values {
+		if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(key)), "_idp_hint") {
+			continue
+		}
+		hint := strings.TrimSpace(raw)
+		if hint == "" {
+			continue
+		}
+		if hint != brokerAliasInternal && hint != brokerAliasCustomer {
+			return errors.New("IDP_HINT must be a known Keycloak broker alias")
+		}
+		if isPortal && hint == brokerAliasInternal {
+			return errors.New("customer_portal must use the customer broker alias")
+		}
+		if !isPortal && hint == brokerAliasCustomer {
+			return errors.New("internal subsystem must use the internal broker alias")
+		}
+	}
+	return nil
+}
+
+// validateProductionPortalBroker enforces the customer-portal broker contract across the whole
+// manifest: at least one runtime file must declare PORTAL_OIDC_IDP_HINT=basic-platform-customer.
+func validateProductionPortalBroker(appCode string, files []productionSubsystemRuntimeFileManifest) error {
+	if strings.ToLower(strings.TrimSpace(appCode)) != "customer_portal" {
+		return nil
+	}
+	for _, file := range files {
+		if hint := strings.TrimSpace(file.Values["PORTAL_OIDC_IDP_HINT"]); hint == brokerAliasCustomer {
+			return nil
+		}
+	}
+	return errors.New("customer_portal must set PORTAL_OIDC_IDP_HINT=basic-platform-customer")
 }

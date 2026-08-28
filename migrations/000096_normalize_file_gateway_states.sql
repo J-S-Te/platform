@@ -1,0 +1,18 @@
+ALTER TABLE file_version
+    MODIFY COLUMN sha256 BINARY(32) NULL;
+
+UPDATE file_object
+SET status = CASE
+    WHEN status IN ('ACTIVE', 'AVAILABLE') THEN 'READY'
+    WHEN status = 'UPLOADING' THEN 'PENDING_UPLOAD'
+    ELSE status
+END
+WHERE status IN ('ACTIVE', 'AVAILABLE', 'UPLOADING');
+
+UPDATE file_version
+SET status = CASE
+    WHEN status IN ('ACTIVE', 'AVAILABLE') THEN 'READY'
+    WHEN status = 'WRITING' THEN 'PENDING_UPLOAD'
+    ELSE status
+END
+WHERE status IN ('ACTIVE', 'AVAILABLE', 'WRITING');

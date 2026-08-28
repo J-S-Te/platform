@@ -213,17 +213,20 @@ type DeleteSubjectAccessInput struct {
 }
 
 type TokenAuthorization struct {
-	ApplicationCode string
-	EnvironmentCode string
-	TenantID        string
-	PersonID        string
-	PrimaryOrgID    string
-	OrganizationIDs []string
-	Roles           []string
-	Permissions     []string
-	RoleConfigHash  string
-	AuthzRevision   uint64
-	DataScopes      []tokenissuer.DataScope
+	ApplicationCode            string
+	EnvironmentCode            string
+	TenantID                   string
+	PersonID                   string
+	PrimaryOrgID               string
+	OrganizationIDs            []string
+	Roles                      []string
+	Permissions                []string
+	RoleConfigHash             string
+	CatalogVersion             string
+	CompatibleCatalogVersions  []string
+	CompatibleRoleConfigHashes []string
+	AuthzRevision              uint64
+	DataScopes                 []tokenissuer.DataScope
 }
 
 // KeycloakAuthorizationSnapshot is the application-scoped authorization result
@@ -352,16 +355,47 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 		roles = append(roles, role.Code)
 	}
 	dataScopes := dataScopesFromRoles(access.Roles)
+	compatibility, err := s.loadCatalogCompatibility(ctx, tenantID, client.ApplicationID, access.RoleConfigHash)
+	if err != nil {
+		return TokenAuthorization{}, err
+	}
 	return s.attachOrganizationClaims(ctx, TokenAuthorization{
-		ApplicationCode: client.ApplicationCode,
-		EnvironmentCode: client.EnvironmentCode,
-		TenantID:        tenantID,
-		Roles:           sortedUnique(roles),
-		Permissions:     append([]string(nil), access.EffectivePermissions...),
-		RoleConfigHash:  access.RoleConfigHash,
-		AuthzRevision:   access.AuthzRevision,
-		DataScopes:      dataScopes,
+		ApplicationCode:            client.ApplicationCode,
+		EnvironmentCode:            client.EnvironmentCode,
+		TenantID:                   tenantID,
+		Roles:                      sortedUnique(roles),
+		Permissions:                append([]string(nil), access.EffectivePermissions...),
+		RoleConfigHash:             access.RoleConfigHash,
+		CatalogVersion:             compatibility.CatalogVersion,
+		CompatibleCatalogVersions:  compatibility.CatalogVersions,
+		CompatibleRoleConfigHashes: compatibility.RoleConfigHashes,
+		AuthzRevision:              access.AuthzRevision,
+		DataScopes:                 dataScopes,
 	}, userID)
+}
+
+type catalogAuthorizationCompatibility struct {
+	CatalogVersion   string
+	CatalogVersions  []string
+	RoleConfigHashes []string
+}
+
+func (s *Service) loadCatalogCompatibility(ctx context.Context, tenantID, applicationID, currentRoleConfigHash string) (catalogAuthorizationCompatibility, error) {
+	var metadata catalogMetadataRow
+	err := s.db.WithContext(ctx).Table("authz_authorization_catalog").
+		Select("catalog_version, claims_role_config_hash, previous_catalog_version, previous_claims_role_config_hash").
+		Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).Take(&metadata).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return catalogAuthorizationCompatibility{RoleConfigHashes: sortedUnique([]string{currentRoleConfigHash})}, nil
+	}
+	if err != nil {
+		return catalogAuthorizationCompatibility{}, fmt.Errorf("load authorization catalog compatibility window: %w", err)
+	}
+	return catalogAuthorizationCompatibility{
+		CatalogVersion:   metadata.CatalogVersion,
+		CatalogVersions:  sortedUnique([]string{metadata.CatalogVersion, metadata.PreviousCatalogVersion}),
+		RoleConfigHashes: sortedUnique([]string{currentRoleConfigHash, metadata.PreviousClaimsRoleConfigHash}),
+	}, nil
 }
 
 const maxOIDCOrganizationIDs = 100

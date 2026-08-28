@@ -86,6 +86,10 @@ type subsystemEnvironmentIssuerResolver interface {
 	ResolveEnvironmentIssuerAlias(context.Context, string, string, string) (string, error)
 }
 
+type subsystemEnvironmentRedirectURIResolver interface {
+	ResolveApplicationEnvironmentRedirectURI(context.Context, string, string, string) (string, error)
+}
+
 type keycloakAuthorizationCatalog interface {
 	ListKeycloakRoleCodes(context.Context, string, string) ([]string, error)
 }
@@ -223,6 +227,7 @@ type subsystemServiceCredentialManager interface {
 	ListOAuthClients(context.Context, string) ([]application.OAuthClientView, error)
 	CreateOAuthClient(context.Context, application.OAuthClientCreateInput) (application.OAuthClientCreateResult, error)
 	CreateOAuthClientSecret(context.Context, application.OAuthClientSecretCreateInput) (application.OAuthClientSecretResult, error)
+	ReplaceOAuthClientScopes(context.Context, application.OAuthClientScopesUpdateInput) (application.OAuthClientView, error)
 }
 
 // subsystemNotificationSink 发送租户内站内通知，用于把子系统接入生命周期结果通知给操作人。
@@ -558,6 +563,41 @@ func (handler *SubsystemOnboardingHandler) allowedServiceBindingsForTarget(appli
 	return nil
 }
 
+func (handler *SubsystemOnboardingHandler) manifestChecksumForTarget(applicationCode, environment string) string {
+	provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider)
+	if !ok {
+		return ""
+	}
+	for _, target := range provider.Capabilities().Targets {
+		if strings.EqualFold(target.ApplicationCode, strings.TrimSpace(applicationCode)) && strings.EqualFold(target.Environment, strings.TrimSpace(environment)) {
+			return strings.TrimSpace(target.ManifestChecksum)
+		}
+	}
+	return ""
+}
+
+func (handler *SubsystemOnboardingHandler) setDesiredManifest(ctx context.Context, tenantID, applicationCode, environment, checksum string) error {
+	if strings.TrimSpace(checksum) == "" {
+		return nil
+	}
+	store, ok := handler.deploymentState.(application.SubsystemManifestStateStore)
+	if !ok {
+		return nil
+	}
+	return store.SetSubsystemDesiredManifest(ctx, tenantID, applicationCode, environment, checksum, time.Now().UTC())
+}
+
+func (handler *SubsystemOnboardingHandler) markManifestApplied(ctx context.Context, tenantID, applicationCode, environment, checksum string) error {
+	if strings.TrimSpace(checksum) == "" {
+		return nil
+	}
+	store, ok := handler.deploymentState.(application.SubsystemManifestStateStore)
+	if !ok {
+		return nil
+	}
+	return store.MarkSubsystemManifestApplied(ctx, tenantID, applicationCode, environment, checksum, time.Now().UTC())
+}
+
 // notifySubsystemLifecycle 在接入/重试/更新成功或失败时向操作人发送站内通知；通知失败只记日志，
 // 不阻断接入结果（接入本身是否成功由控制面状态决定）。
 func (handler *SubsystemOnboardingHandler) notifySubsystemLifecycle(ctx context.Context, tenantID, operatorID, applicationName, applicationCode, environment string, succeeded bool, detail string) {
@@ -679,18 +719,23 @@ type portalApplicationResponse struct {
 }
 
 type subsystemDeploymentStateResponse struct {
-	ApplicationCode string     `json:"application_code"`
-	Environment     string     `json:"environment"`
-	Status          string     `json:"status"`
-	Operation       string     `json:"operation"`
-	Generation      uint64     `json:"generation"`
-	AttemptCount    uint       `json:"attempt_count"`
-	LastErrorCode   string     `json:"last_error_code,omitempty"`
-	LastError       string     `json:"last_error,omitempty"`
-	NextAction      string     `json:"next_action,omitempty"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ApplicationCode         string     `json:"application_code"`
+	Environment             string     `json:"environment"`
+	Status                  string     `json:"status"`
+	Operation               string     `json:"operation"`
+	Generation              uint64     `json:"generation"`
+	AttemptCount            uint       `json:"attempt_count"`
+	DesiredManifestChecksum string     `json:"desired_manifest_checksum,omitempty"`
+	AppliedManifestChecksum string     `json:"applied_manifest_checksum,omitempty"`
+	ManifestDriftStatus     string     `json:"manifest_drift_status"`
+	ManifestLastAppliedAt   *time.Time `json:"manifest_last_applied_at,omitempty"`
+	ManifestLastVerifiedAt  *time.Time `json:"manifest_last_verified_at,omitempty"`
+	LastErrorCode           string     `json:"last_error_code,omitempty"`
+	LastError               string     `json:"last_error,omitempty"`
+	NextAction              string     `json:"next_action,omitempty"`
+	StartedAt               *time.Time `json:"started_at,omitempty"`
+	CompletedAt             *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 type subsystemOnboardingDefaults struct {
@@ -705,13 +750,14 @@ type subsystemOnboardingDefaults struct {
 }
 
 type subsystemProvisioningTargetResponse struct {
-	ApplicationCode string `json:"application_code"`
-	ApplicationName string `json:"application_name"`
-	Description     string `json:"description,omitempty"`
-	Environment     string `json:"environment"`
-	UpstreamURL     string `json:"upstream_url"`
-	PathPrefix      string `json:"path_prefix"`
-	ClientType      string `json:"client_type"`
+	ApplicationCode  string `json:"application_code"`
+	ApplicationName  string `json:"application_name"`
+	Description      string `json:"description,omitempty"`
+	Environment      string `json:"environment"`
+	UpstreamURL      string `json:"upstream_url"`
+	PathPrefix       string `json:"path_prefix"`
+	ClientType       string `json:"client_type"`
+	ManifestChecksum string `json:"manifest_checksum,omitempty"`
 }
 
 type subsystemProvisioningCapabilitiesResponse struct {
@@ -779,7 +825,8 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	if err := handler.provisioner.Preflight(request.Context(), application.SubsystemPreflightInput{
 		TenantID: principal.Tenant.ID, ApplicationCode: onboardingInput.ApplicationCode,
 		Environment: onboardingInput.Environment, Issuer: issuer,
-		PublicBaseURL: onboardingInput.PublicBaseURL, UpstreamURL: onboardingInput.UpstreamURL,
+		ManifestChecksum: handler.manifestChecksumForTarget(onboardingInput.ApplicationCode, onboardingInput.Environment),
+		PublicBaseURL:    onboardingInput.PublicBaseURL, UpstreamURL: onboardingInput.UpstreamURL,
 		PathPrefix: onboardingInput.PathPrefix, ClientType: onboardingInput.ClientType,
 	}); err != nil {
 		handler.writeError(writer, request, err, "preflight")
@@ -798,6 +845,11 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		upstreamURL = *result.Environment.UpstreamURL
 	}
 	provisioningClientID, provisioningClientSecret := result.OAuthClient.ClientID, result.PlaintextSecret
+	manifestChecksum := handler.manifestChecksumForTarget(result.Application.Code, result.Environment.Environment)
+	if err := handler.setDesiredManifest(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, manifestChecksum); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	keycloakClientID := ""
 	if strings.EqualFold(effectiveIssuerAlias, "keycloak") {
 		if handler.keycloakControl == nil || handler.keycloakBroker == nil {
@@ -819,7 +871,8 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
 		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
 		Environment: result.Environment.Environment, Issuer: issuer,
-		ClientID: provisioningClientID, ClientSecret: provisioningClientSecret,
+		ManifestChecksum: manifestChecksum,
+		ClientID:         provisioningClientID, ClientSecret: provisioningClientSecret,
 		CatalogPublisherClientID:     result.CatalogPublisherOAuthClient.ClientID,
 		CatalogPublisherClientSecret: result.CatalogPublisherPlaintextSecret,
 		ServiceCredentials:           result.ServiceCredentials,
@@ -828,6 +881,11 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	}); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
 		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
+		handler.writeError(writer, request, err)
+		return
+	}
+	if err := handler.markManifestApplied(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, manifestChecksum); err != nil {
+		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "MANIFEST_STATE_FAILED", "部署清单状态保存失败")
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -1005,13 +1063,14 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 	targets := make([]subsystemProvisioningTargetResponse, 0, len(capabilities.Targets))
 	for _, target := range capabilities.Targets {
 		targets = append(targets, subsystemProvisioningTargetResponse{
-			ApplicationCode: target.ApplicationCode,
-			ApplicationName: target.ApplicationName,
-			Description:     target.Description,
-			Environment:     target.Environment,
-			UpstreamURL:     target.UpstreamURL,
-			PathPrefix:      target.PathPrefix,
-			ClientType:      target.ClientType,
+			ApplicationCode:  target.ApplicationCode,
+			ApplicationName:  target.ApplicationName,
+			Description:      target.Description,
+			Environment:      target.Environment,
+			UpstreamURL:      target.UpstreamURL,
+			PathPrefix:       target.PathPrefix,
+			ClientType:       target.ClientType,
+			ManifestChecksum: target.ManifestChecksum,
 		})
 	}
 	response := subsystemProvisioningCapabilitiesResponse{
@@ -1055,15 +1114,20 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 
 // SubsystemHealthEntry describes the integration health of one subsystem environment.
 type SubsystemHealthEntry struct {
-	ApplicationCode string `json:"application_code"`
-	ApplicationName string `json:"application_name"`
-	Environment     string `json:"environment"`
-	DirectoryOK     bool   `json:"directory_ok"`
-	CredentialsOK   bool   `json:"credentials_ok"`
-	RuntimeOK       bool   `json:"runtime_ok"`
-	KeycloakOK      bool   `json:"keycloak_ok,omitempty"`
-	Status          string `json:"status"`
-	NextAction      string `json:"next_action,omitempty"`
+	ApplicationCode   string `json:"application_code"`
+	ApplicationName   string `json:"application_name"`
+	Environment       string `json:"environment"`
+	DirectoryOK       bool   `json:"directory_ok"`
+	CredentialsOK     bool   `json:"credentials_ok"`
+	RuntimeOK         bool   `json:"runtime_ok"`
+	KeycloakOK        bool   `json:"keycloak_ok"`
+	DirectoryStatus   string `json:"directory_status"`
+	CredentialsStatus string `json:"credentials_status"`
+	RuntimeStatus     string `json:"runtime_status"`
+	KeycloakStatus    string `json:"keycloak_status"`
+	ProjectionStatus  string `json:"projection_status,omitempty"`
+	Status            string `json:"status"`
+	NextAction        string `json:"next_action,omitempty"`
 }
 
 // GetSubsystemHealthDashboard returns the integration health of all subsystems
@@ -1081,24 +1145,26 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer st
 	entries := make([]SubsystemHealthEntry, 0, len(items))
 	for _, item := range items {
 		entry := SubsystemHealthEntry{
-			ApplicationCode: item.Code,
-			ApplicationName: item.Name,
-			Environment:     item.Environment,
-			DirectoryOK:     true,
-			CredentialsOK:   true,
-			RuntimeOK:       item.Projection.Ready,
+			ApplicationCode:   item.Code,
+			ApplicationName:   item.Name,
+			Environment:       item.Environment,
+			DirectoryOK:       true,
+			RuntimeOK:         true,
+			DirectoryStatus:   "READY",
+			CredentialsStatus: "UNKNOWN",
+			RuntimeStatus:     "READY",
+			KeycloakStatus:    "UNKNOWN",
+			ProjectionStatus:  strings.ToUpper(strings.TrimSpace(item.Projection.Status)),
+			Status:            "VERIFICATION_REQUIRED",
+			NextAction:        "调用当前环境同步状态接口，分别验证凭据交付和 Keycloak 控制面状态。",
 		}
-		if handler.keycloakEnabled {
-			entry.KeycloakOK = item.Projection.Ready
-		}
-		if !item.Projection.Ready {
-			entry.Status = "RUNTIME_NOT_READY"
-			entry.NextAction = "检查部署状态和 Keycloak 投影"
-		} else {
-			entry.Status = "HEALTHY"
+		if !handler.keycloakEnabled {
+			entry.KeycloakStatus = "NOT_APPLICABLE"
 		}
 		entries = append(entries, entry)
 	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统健康状态查询成功", entries)
 }
 
@@ -1375,12 +1441,16 @@ type updateServiceCredentialRequirement struct {
 }
 
 func updateServiceCredentialRequirements(applicationCode string) []updateServiceCredentialRequirement {
+	fileGateway := updateServiceCredentialRequirement{
+		purpose: application.ServiceCredentialFileGatewayWrite, suffix: "file-gateway-writer",
+		clientName: "文件网关写入器", scope: "platform:file:upload", rotate: true,
+	}
 	switch applicationCode {
 	case "contract_management":
 		return []updateServiceCredentialRequirement{{
 			purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory",
 			clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read",
-		}}
+		}, fileGateway}
 	case "customer_and_opportunity":
 		// Audit and notification secrets are runtime delivery credentials. Existing
 		// installations may predate notification_ingest or may contain a credential
@@ -1389,6 +1459,7 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 		return []updateServiceCredentialRequirement{
 			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户与商机管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "客户与商机管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
+			fileGateway,
 		}
 	case "customer_portal":
 		// Portal 的服务凭据同时会被写入 portal.env 与 customer.env：门户 API
@@ -1402,12 +1473,18 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			{purpose: application.ServiceCredentialPortalMappingProvision, suffix: "portal-mapping-provision", clientName: "客户自助门户 Portal Identity Mapping Provisioner", scope: "portal.identity_mapping.provision", rotate: true},
 			{purpose: application.ServiceCredentialPortalMappingDisable, suffix: "portal-mapping-disable", clientName: "客户自助门户 Portal Identity Mapping Disabler", scope: "portal.identity_mapping.disable", rotate: true},
 			{purpose: application.ServiceCredentialPortalInviteVerify, suffix: "portal-invite-verify", clientName: "客户自助门户 Portal Invite Verifier", scope: "portal.invite.verify", rotate: true},
+			fileGateway,
 		}
 	case "data_analysis":
-		return []updateServiceCredentialRequirement{{
-			purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher",
-			clientName: "数据看板与统计分析系统 Audit Publisher", scope: "audit.ingest",
-		}}
+		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "数据看板与统计分析系统 Audit Publisher", scope: "audit.ingest"},
+			// 合同与项目读取凭据必须分离；任一密钥泄露时不能横向读取另一业务域。
+			{purpose: application.ServiceCredentialContractDashboardRead, suffix: "contract-dashboard", clientName: "数据看板合同看板读取器", scope: "dashboard.contract.read", rotate: true},
+			{purpose: application.ServiceCredentialProjectDashboardRead, suffix: "project-dashboard", clientName: "数据看板项目看板读取器", scope: "dashboard.project.read", rotate: true},
+			fileGateway,
+		}
+	case "project_management", "settlement_and_invoicing":
+		return []updateServiceCredentialRequirement{fileGateway}
 	default:
 		return nil
 	}
@@ -1433,8 +1510,20 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 	for _, requirement := range requirements {
 		clientID := applicationCode + "-" + environment + "-" + requirement.suffix
 		if client, ok := byClientID[clientID]; ok {
-			if !strings.EqualFold(client.Status, "ACTIVE") {
+			if !strings.EqualFold(client.Status, "ACTIVE") || client.ApplicationID != applicationID || client.EnvironmentID != environmentID {
 				return nil, application.ErrConflict
+			}
+			desiredScopes := serviceCredentialScopes(requirement)
+			if !sameStringSet(client.Scopes, desiredScopes) {
+				// 历史服务凭据可能在文件下载能力引入前创建。受控更新在签发新密钥前
+				// 先整体修复 Scope，避免“密钥已下发但调用仍因旧权限 403”的半成功状态。
+				client, err = handler.serviceCredentials.ReplaceOAuthClientScopes(ctx, application.OAuthClientScopesUpdateInput{
+					TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID,
+					Scopes: desiredScopes, Version: client.Version,
+				})
+				if err != nil {
+					return nil, err
+				}
 			}
 			// A retry always creates a recoverable replacement because a prior secret
 			// may have been minted immediately before an Agent failure. Credentials
@@ -1453,11 +1542,12 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 			})
 			continue
 		}
+		scopes := serviceCredentialScopes(requirement)
 		created, createErr := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
 			TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
 			ClientID: clientID, ClientName: requirement.clientName, ClientType: "service",
 			TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
-			GrantTypes: []string{"client_credentials"}, Scopes: []string{requirement.scope},
+			GrantTypes: []string{"client_credentials"}, Scopes: scopes,
 		})
 		if createErr != nil {
 			return nil, createErr
@@ -1467,6 +1557,34 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 		})
 	}
 	return credentials, nil
+}
+
+// serviceCredentialScopes 返回指定机器凭据的完整最小权限集合。
+// 文件网关客户端需要上传、绑定及按文件 ID 回读；其他用途保持单一 Scope。
+func serviceCredentialScopes(requirement updateServiceCredentialRequirement) []string {
+	scopes := []string{requirement.scope}
+	if requirement.purpose == application.ServiceCredentialFileGatewayWrite {
+		scopes = append(scopes, "platform:file:bind", "platform:file:download")
+	}
+	return scopes
+}
+
+// sameStringSet 比较两个已授权 Scope 集合，忽略顺序但不忽略缺失或多余权限。
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]int, len(left))
+	for _, value := range left {
+		seen[value]++
+	}
+	for _, value := range right {
+		if seen[value] == 0 {
+			return false
+		}
+		seen[value]--
+	}
+	return true
 }
 
 // ensureCatalogPublisherCredential recovers a publish capability for a controlled
@@ -1570,9 +1688,10 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		return
 	}
 	updateInput := application.SubsystemProvisioningInput{
-		TenantID:        principal.Tenant.ID,
-		ApplicationCode: applicationCode,
-		Environment:     environment,
+		TenantID:         principal.Tenant.ID,
+		ApplicationCode:  applicationCode,
+		Environment:      environment,
+		ManifestChecksum: handler.manifestChecksumForTarget(applicationCode, environment),
 		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
 		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
 		// issuer as a stable source of truth instead of having the client send it in.
@@ -1734,9 +1853,18 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
+	if err := handler.setDesiredManifest(request.Context(), principal.Tenant.ID, applicationCode, environment, updateInput.ManifestChecksum); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	if err := handler.provisioner.Update(request.Context(), updateInput); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
 		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, err.Error())
+		handler.writeError(writer, request, err)
+		return
+	}
+	if err := handler.markManifestApplied(request.Context(), principal.Tenant.ID, applicationCode, environment, updateInput.ManifestChecksum); err != nil {
+		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "MANIFEST_STATE_FAILED", "部署清单状态保存失败")
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -1917,18 +2045,23 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署状态查询成功", subsystemDeploymentStateResponse{
-		ApplicationCode: state.ApplicationCode,
-		Environment:     state.Environment,
-		Status:          state.Status,
-		Operation:       state.Operation,
-		Generation:      state.Generation,
-		AttemptCount:    state.AttemptCount,
-		LastErrorCode:   state.LastErrorCode,
-		LastError:       state.LastError,
-		NextAction:      subsystemDeploymentStateNextAction(state),
-		StartedAt:       state.StartedAt,
-		CompletedAt:     state.CompletedAt,
-		UpdatedAt:       state.UpdatedAt,
+		ApplicationCode:         state.ApplicationCode,
+		Environment:             state.Environment,
+		Status:                  state.Status,
+		Operation:               state.Operation,
+		Generation:              state.Generation,
+		AttemptCount:            state.AttemptCount,
+		DesiredManifestChecksum: state.DesiredManifestChecksum,
+		AppliedManifestChecksum: state.AppliedManifestChecksum,
+		ManifestDriftStatus:     state.ManifestDriftStatus,
+		ManifestLastAppliedAt:   state.ManifestLastAppliedAt,
+		ManifestLastVerifiedAt:  state.ManifestLastVerifiedAt,
+		LastErrorCode:           state.LastErrorCode,
+		LastError:               state.LastError,
+		NextAction:              subsystemDeploymentStateNextAction(state),
+		StartedAt:               state.StartedAt,
+		CompletedAt:             state.CompletedAt,
+		UpdatedAt:               state.UpdatedAt,
 	})
 }
 
@@ -2091,10 +2224,21 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakSyncStatus(writer stdhttp.
 				"application_code", applicationCode, "environment", environment, "error", catalogErr)
 			response.DriftError = "ROLE_CATALOG_UNAVAILABLE"
 		} else {
-			// Redirect URI is derived from the environment's base URL + path prefix +
-			// /auth/callback. We pass empty here because the SyncClient endpoint does
-			// full redirect URI validation; the dashboard focuses on role/mapper drift.
-			redirectURI := ""
+			resolver, supported := handler.service.(subsystemEnvironmentRedirectURIResolver)
+			if !supported {
+				response.DriftError = "GATEWAY_CONFIGURATION_UNAVAILABLE"
+				writer.Header().Set("Cache-Control", "no-store, private")
+				httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak 同步状态查询成功", response)
+				return
+			}
+			redirectURI, redirectErr := resolver.ResolveApplicationEnvironmentRedirectURI(request.Context(), principal.Tenant.ID, applicationID, environmentID)
+			if redirectErr != nil {
+				handler.logger.Warn("resolve redirect URI for drift check failed", "application_code", applicationCode, "environment", environment, "error", redirectErr)
+				response.DriftError = "GATEWAY_CONFIGURATION_UNAVAILABLE"
+				writer.Header().Set("Cache-Control", "no-store, private")
+				httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak 同步状态查询成功", response)
+				return
+			}
 			drift, driftErr := handler.keycloakControl.DetectSubsystemKeycloakDrift(request.Context(), response.ClientID, redirectURI, roleCodes)
 			if driftErr != nil {
 				handler.logger.Warn("drift detection failed",

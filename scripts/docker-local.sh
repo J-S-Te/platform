@@ -40,7 +40,7 @@ frontend_public_origin=""
 # 用于 Compose 首次解析的本地 CRM 目录基线。customer-api 真正启动前，
 # sync_crm_authorization_catalog 会从当前镜像读取并导出实际哈希，因此这里
 # 不替代运行时目录校验；它只避免 .env 模板占位符阻断初始化流程。
-local_crm_role_config_hash="sha256:807e4520577f82966cdc8eb73ed974fa21994210e80e28517672a1d6ba049d2f"
+local_crm_role_config_hash="sha256:3a32171111a681dcf0188675eb41b6a068542ff603633b13e9d8ca067b7fe4c0"
 customer_notification_worker_services=(
 	customer-opportunity-alert-worker
 	customer-owner-notification-worker
@@ -479,6 +479,7 @@ compose() {
         --env-file "$customer_env_file" \
         --env-file "$portal_env_file" \
         --env-file "$project_env_file" \
+        --env-file "$data_analysis_env_file" \
         --env-file "$settlement_env_file" \
         --profile presale-worker \
         --profile keycloak \
@@ -849,6 +850,13 @@ data_analysis_configured() {
 		[[ -n "$(env_value "$data_analysis_env_file" OIDC_CLIENT_SECRET)" ]] &&
 		[[ -n "$(env_value "$data_analysis_env_file" OIDC_REDIRECT_URI)" ]] &&
 		[[ -n "$(env_value "$data_analysis_env_file" OIDC_TENANT_ID)" ]]
+}
+
+data_analysis_machine_credentials_configured() {
+	[[ -n "$(env_value "$data_analysis_env_file" CONTRACT_MACHINE_CLIENT_ID)" ]] &&
+		[[ -n "$(env_value "$data_analysis_env_file" CONTRACT_MACHINE_CLIENT_SECRET)" ]] &&
+		[[ -n "$(env_value "$data_analysis_env_file" PROJECT_MACHINE_CLIENT_ID)" ]] &&
+		[[ -n "$(env_value "$data_analysis_env_file" PROJECT_MACHINE_CLIENT_SECRET)" ]]
 }
 
 portal_configured() {
@@ -1531,6 +1539,7 @@ start_stack() {
 	start_presale_worker --skip-build --skip-migrate
 	if portal_configured; then
 		log "启动已接入的客户自助门户后端"
+		sync_portal_authorization_catalog
 		# portal-migrate 已在 run_migrations 中串行成功执行；再次让
 		# `up --wait` 解析其 service_completed_successfully 依赖会重建一次性
 		# 容器，并可能在等待阶段引用已被 Compose 清理的旧容器 ID。
@@ -1548,6 +1557,7 @@ start_stack() {
 		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
 	fi
 	if data_analysis_configured; then
+		data_analysis_machine_credentials_configured || fail "数据看板已接入，但缺少 CONTRACT_MACHINE_* / PROJECT_MACHINE_* 分离机器凭据；请在应用接入页重新同步 data_analysis/dev，旧 MACHINE_CLIENT_* 不能替代两组新凭据"
 		log "启动已接入的数据看板后端（dashboard-api + 聚合 Worker + Metabase）"
 		# 业务 Schema 由独立迁移二进制管理；MySQL 初始化只创建 Metabase 元数据库。
 		compose_run up -d --wait dashboard-mysql
@@ -1677,6 +1687,21 @@ sync_crm_authorization_catalog() {
     compose_run run --rm --no-deps -e OIDC_ROLE_CONFIG_HASH="$OIDC_ROLE_CONFIG_HASH" customer-api ./authz-catalog publish crm
 }
 
+# Portal 与 CRM 使用独立的授权目录和运行时哈希。Portal 镜像升级后，必须在
+# portal-api 启动前先把同一镜像内嵌的目录发布到平台，否则 Portal 会因目录
+# 哈希不一致直接退出并被 Compose 标记为 unhealthy。
+sync_portal_authorization_catalog() {
+    local local_portal_hash
+    local_portal_hash="$(compose_run run --rm --no-deps portal-api ./authz-catalog print portal \
+        | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
+    [[ "$local_portal_hash" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "无法从本地 Portal 镜像读取有效授权目录哈希"
+    export PORTAL_ROLE_CONFIG_HASH="$local_portal_hash"
+    replace_line_in_file "$portal_env_file" PORTAL_ROLE_CONFIG_HASH "$PORTAL_ROLE_CONFIG_HASH"
+    log "已写入当前 Portal 授权目录哈希到客户门户运行时配置：$PORTAL_ROLE_CONFIG_HASH"
+    log "启动 Portal 前发布客户自助门户授权目录"
+    compose_run run --rm --no-deps -e PORTAL_ROLE_CONFIG_HASH="$PORTAL_ROLE_CONFIG_HASH" portal-api ./authz-catalog publish portal
+}
+
 refresh_portal_backend() {
 	ensure_platform_env_file
 	ensure_contract_env_file false
@@ -1736,6 +1761,7 @@ refresh_data_analysis_backend() {
 	ensure_data_analysis_env_file
 	ensure_settlement_env_file
 	data_analysis_configured || fail "数据看板尚未完成 data_analysis/dev 应用接入，不能启动 dashboard-api"
+	data_analysis_machine_credentials_configured || fail "数据看板已接入，但缺少 CONTRACT_MACHINE_* / PROJECT_MACHINE_* 分离机器凭据；请在应用接入页重新同步 data_analysis/dev，旧 MACHINE_CLIENT_* 不能替代两组新凭据"
 	prepare_go_backend_base_images "数据看板后端"
 
 	log "重新构建数据看板独立后端镜像"

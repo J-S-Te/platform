@@ -1,9 +1,11 @@
 package oidchttp
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
@@ -55,6 +57,7 @@ func (h *Handler) exchangeAuthorizationCode(w http.ResponseWriter, r *http.Reque
 		Code:                 r.Form.Get("code"), RedirectURI: r.Form.Get("redirect_uri"), CodeVerifier: r.Form.Get("code_verifier"),
 	})
 	if err != nil {
+		h.healBrokerDriftOnClientFailure(r.Context(), authentication.ClientID, err)
 		h.writeOIDCTokenError(w, err)
 		return
 	}
@@ -72,10 +75,38 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 		ClientAuthentication: authentication, RefreshToken: r.Form.Get("refresh_token"),
 	})
 	if err != nil {
+		h.healBrokerDriftOnClientFailure(r.Context(), authentication.ClientID, err)
 		h.writeOIDCTokenError(w, err)
 		return
 	}
 	writeTokenResult(w, result)
+}
+
+// healBrokerDriftOnClientFailure triggers a self-heal when a broker client's token
+// exchange fails with invalid_client. This is the observable signal that Keycloak is
+// presenting a stale broker secret that the platform no longer accepts. The repair runs
+// asynchronously so the failed response is not delayed; the healer rate-limits itself.
+func (h *Handler) healBrokerDriftOnClientFailure(ctx context.Context, clientID string, err error) {
+	if h.brokerSelfHealer == nil || !errors.Is(err, application.ErrInvalidClient) || !isBrokerClientID(clientID) {
+		return
+	}
+	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	go func() {
+		defer cancel()
+		if repairErr := h.brokerSelfHealer.HealBrokerSecretDrift(repairCtx, clientID); repairErr != nil {
+			h.logger.Warn("broker secret drift self-heal failed", "client_id", clientID, "error", repairErr)
+		}
+	}()
+}
+
+// isBrokerClientID reports whether clientID is a platform-managed Keycloak broker client.
+func isBrokerClientID(clientID string) bool {
+	switch clientID {
+	case "keycloak-broker", "keycloak-customer-portal-broker":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handler) issueClientCredentials(w http.ResponseWriter, r *http.Request) {

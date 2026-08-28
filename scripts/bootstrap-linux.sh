@@ -1044,7 +1044,7 @@ MYSQL_PARAMS=charset=utf8mb4&parseTime=true&loc=UTC
 
 AUTH_JWT_ISSUER=basic-platform
 AUTH_JWT_AUDIENCE=basic-platform-console
-AUTH_APPLICATION_JWT_AUDIENCE=basic-platform-integration
+AUTH_APPLICATION_JWT_AUDIENCE=basic-platform-application
 # Optional: leave blank to use APP_PUBLIC_BASE_URL as the OIDC issuer.
 OIDC_ISSUER=
 AUTH_JWT_PRIVATE_KEY_PATH=/var/lib/basic-platform/keys/jwt-ed25519-private.pem

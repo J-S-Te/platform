@@ -93,15 +93,24 @@ func TestAuthorizationContextStrictlyBindsExternalAccessToken(t *testing.T) {
 					t.Fatalf("resolver = calls:%d tenant:%q client:%q subject:%q", resolver.calls, resolver.tenantID, resolver.clientID, resolver.subjectID)
 				}
 				var body struct {
-					ClientID        string `json:"client_id"`
-					ApplicationCode string `json:"application_code"`
-					EnvironmentCode string `json:"environment_code"`
+					SubjectID                  string   `json:"subject_id"`
+					IdentityID                 string   `json:"identity_id"`
+					ClientID                   string   `json:"client_id"`
+					ApplicationCode            string   `json:"application_code"`
+					EnvironmentCode            string   `json:"environment_code"`
+					CatalogVersion             string   `json:"catalog_version"`
+					CompatibleCatalogVersions  []string `json:"compatible_catalog_versions"`
+					RoleConfigHash             string   `json:"role_config_hash"`
+					CompatibleRoleConfigHashes []string `json:"compatible_role_config_hashes"`
 				}
 				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 					t.Fatalf("decode response: %v", err)
 				}
-				if body.ClientID != "contract-prod-web" || body.ApplicationCode != "contract_management" || body.EnvironmentCode != "prod" {
+				if body.SubjectID != expectedSubject || body.IdentityID != expectedSubject || body.ClientID != "contract-prod-web" || body.ApplicationCode != "contract_management" || body.EnvironmentCode != "prod" {
 					t.Fatalf("application binding = %#v", body)
+				}
+				if body.CatalogVersion != "v10" || len(body.CompatibleCatalogVersions) != 2 || body.CompatibleCatalogVersions[1] != "v9" || body.RoleConfigHash != "role-v10" || len(body.CompatibleRoleConfigHashes) != 2 {
+					t.Fatalf("catalog compatibility = %#v", body)
 				}
 			} else if resolver.calls != 0 {
 				t.Fatalf("resolver calls = %d, want 0", resolver.calls)
@@ -187,7 +196,13 @@ func (r *authorizationContextResolverStub) ResolveOIDCAuthorizationContext(_ con
 	if r.err != nil {
 		return tokenissuer.AuthorizationContext{}, r.err
 	}
-	return tokenissuer.AuthorizationContext{ClientID: clientID, ApplicationCode: "contract_management", EnvironmentCode: "prod", TenantID: tenantID, PersonID: "person-1", Roles: []string{"reader"}, Permissions: []string{"contract.read"}, AuthorizationRevision: 1}, nil
+	return tokenissuer.AuthorizationContext{
+		ClientID: clientID, ApplicationCode: "contract_management", EnvironmentCode: "prod", TenantID: tenantID,
+		PersonID: "person-1", Roles: []string{"reader"}, Permissions: []string{"contract.read"},
+		CatalogVersion: "v10", CompatibleCatalogVersions: []string{"v10", "v9"},
+		RoleConfigHash: "role-v10", CompatibleRoleConfigHashes: []string{"role-v10", "role-v9"},
+		AuthorizationRevision: 1,
+	}, nil
 }
 
 func TestAuthorizationContextSeparatesAccessDenialFromInfrastructureFailure(t *testing.T) {

@@ -17,10 +17,10 @@ import (
 // runtime credentials. The legacy /subsystem-* endpoints remain available for
 // existing console versions and automation clients.
 type KeycloakIntegrationHandler struct {
-	subsystems *SubsystemOnboardingHandler
+	subsystems KeycloakIntegrationUseCases
 }
 
-func NewKeycloakIntegrationHandler(subsystems *SubsystemOnboardingHandler) (*KeycloakIntegrationHandler, error) {
+func NewKeycloakIntegrationHandler(subsystems KeycloakIntegrationUseCases) (*KeycloakIntegrationHandler, error) {
 	if subsystems == nil {
 		return nil, errors.New("subsystem onboarding handler is required")
 	}
