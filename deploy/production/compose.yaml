@@ -873,7 +873,9 @@ services:
     command: ["./file-gateway"]
     environment:
       FILE_GATEWAY_HTTP_ADDRESS: :8086
-      FILE_GATEWAY_DATABASE_DSN: ${FILE_GATEWAY_DATABASE_DSN:?FILE_GATEWAY_DATABASE_DSN must be set}
+      # 默认根据同一 Compose 文件中的数据库凭据组装 DSN；如生产环境使用外部
+      # 数据库，仍可通过 FILE_GATEWAY_DATABASE_DSN 显式覆盖完整连接串。
+      FILE_GATEWAY_DATABASE_DSN: ${FILE_GATEWAY_DATABASE_DSN:-file_gateway:${FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=UTC}
       FILE_GATEWAY_STORAGE_BACKEND: ${FILE_GATEWAY_STORAGE_BACKEND:-s3}
       FILE_GATEWAY_STORAGE_ROOT: /app/data/file-gateway
       FILE_GATEWAY_S3_BUCKET: ${FILE_GATEWAY_S3_BUCKET:-}
