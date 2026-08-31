@@ -460,6 +460,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
 		values["PLATFORM_NOTIFICATION_CLIENT_ID"] = notificationCredential.OAuthClient.ClientID
 		values["PLATFORM_NOTIFICATION_CLIENT_SECRET"] = notificationCredential.PlaintextSecret
+		ownerCredential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead)
+		if !ok {
+			return provisioningError("customer owner directory credential is unavailable")
+		}
+		expectedOwnerClientID := input.ApplicationCode + "-" + input.Environment + "-owner-directory"
+		if ownerCredential.OAuthClient.ClientID != expectedOwnerClientID {
+			return provisioningError("customer owner directory credential does not match the target environment")
+		}
+		values["OWNER_DIRECTORY_ENABLED"] = "true"
+		values["PLATFORM_OWNER_DIRECTORY_URL"] = "http://platform-api:8080/api/v1/internal/owner-directory"
+		values["PLATFORM_MANAGEMENT_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+		values["PLATFORM_OWNER_DIRECTORY_SCOPE"] = "owner_directory.read"
+		values["PLATFORM_OWNER_DIRECTORY_CLIENT_ID"] = ownerCredential.OAuthClient.ClientID
+		values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
 	case integratedContractApplicationCode:
 		// Normal updates preserve the existing owner-directory credential. Retry
 		// supplies a replacement secret when the previous delivery may have failed.
@@ -726,6 +740,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		}
 		values["PLATFORM_NOTIFICATION_CLIENT_ID"] = notificationCredential.OAuthClient.ClientID
 		values["PLATFORM_NOTIFICATION_CLIENT_SECRET"] = notificationCredential.PlaintextSecret
+		ownerCredential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead)
+		if !ok {
+			return provisioningError("customer owner directory credential is unavailable")
+		}
+		expectedOwnerClientID := input.ApplicationCode + "-" + input.Environment + "-owner-directory"
+		if ownerCredential.OAuthClient.ClientID != expectedOwnerClientID {
+			return provisioningError("customer owner directory credential does not match the target environment")
+		}
+		values["OWNER_DIRECTORY_ENABLED"] = "true"
+		values["PLATFORM_OWNER_DIRECTORY_URL"] = "http://platform-api:8080/api/v1/internal/owner-directory"
+		values["PLATFORM_MANAGEMENT_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+		values["PLATFORM_OWNER_DIRECTORY_SCOPE"] = "owner_directory.read"
+		values["PLATFORM_OWNER_DIRECTORY_CLIENT_ID"] = ownerCredential.OAuthClient.ClientID
+		values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
 	}
 	if input.ApplicationCode == integratedProjectApplicationCode {
 		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
