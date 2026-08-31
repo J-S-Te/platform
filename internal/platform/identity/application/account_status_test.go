@@ -29,7 +29,7 @@ func TestListAccountsReflectsDisabledExternalAccount(t *testing.T) {
 	userID := "user-1"
 	repository := &accountListRepositoryStub{result: PageResult[domain.Account]{Items: []domain.Account{
 		{ID: "account-keycloak", UserID: &userID, AuthSource: "KEYCLOAK", Status: domain.StatusActive},
-		{ID: "account-local", AuthSource: "LOCAL", Status: domain.StatusActive},
+		{ID: "account-local", AuthSource: "LOCAL", Status: domain.StatusActive, UserID: &userID},
 	}}}
 	reader := &externalAccountStatusReaderStub{}
 	service, err := NewManagementService(repository, userCreateMobileProtectionStub{}, &sequenceIDGenerator{}, fixedClock{})
@@ -45,7 +45,7 @@ func TestListAccountsReflectsDisabledExternalAccount(t *testing.T) {
 	if result.Items[0].Status != domain.StatusDisabled {
 		t.Fatalf("external account status = %q, want DISABLED", result.Items[0].Status)
 	}
-	if result.Items[1].Status != domain.StatusActive || reader.calls != 1 {
-		t.Fatalf("local account status/calls = %q/%d, want ACTIVE/1", result.Items[1].Status, reader.calls)
+	if result.Items[1].Status != domain.StatusDisabled || reader.calls != 2 {
+		t.Fatalf("local-linked account status/calls = %q/%d, want DISABLED/2", result.Items[1].Status, reader.calls)
 	}
 }
