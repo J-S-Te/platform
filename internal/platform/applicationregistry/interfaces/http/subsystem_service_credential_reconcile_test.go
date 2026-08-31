@@ -183,11 +183,13 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
 		"customer_and_opportunity-dev-notification-publisher": {"notification.ingest"},
+		"customer_and_opportunity-dev-owner-directory":        {"owner_directory.read"},
 		"customer_and_opportunity-dev-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
 		application.ServiceCredentialAuditIngest:        "retry-secret",
 		application.ServiceCredentialNotificationIngest: "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead: "new-secret",
 		application.ServiceCredentialFileGatewayWrite:   "new-secret",
 	})
 }
