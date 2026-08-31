@@ -667,6 +667,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		ServiceCredentials: []application.SubsystemServiceCredential{
 			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "audit-secret"},
 			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "notification-secret"},
+			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "owner-directory-secret"},
 		},
 	}); err != nil {
 		t.Fatalf("provision integrated customer subsystem: %v", err)
@@ -683,6 +684,10 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=customer_and_opportunity-dev-catalog-publisher",
 		"PLATFORM_AUDIT_CLIENT_ID=customer_and_opportunity-dev-audit-publisher",
 		"PLATFORM_NOTIFICATION_CLIENT_ID=customer_and_opportunity-dev-notification-publisher",
+		"OWNER_DIRECTORY_ENABLED=true", "PLATFORM_OWNER_DIRECTORY_URL=http://platform-api:8080/api/v1/internal/owner-directory",
+		"PLATFORM_MANAGEMENT_TOKEN_URL=http://platform-api:8080/oauth2/token", "PLATFORM_OWNER_DIRECTORY_SCOPE=owner_directory.read",
+		"PLATFORM_OWNER_DIRECTORY_CLIENT_ID=customer_and_opportunity-dev-owner-directory",
+		"PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET=owner-directory-secret",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("shared customer environment missing %q:\n%s", expected, contents)
@@ -728,6 +733,7 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 		ServiceCredentials: []application.SubsystemServiceCredential{
 			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "new-audit-secret"},
 			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "new-notification-secret"},
+			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "new-owner-directory-secret"},
 		},
 	}); err != nil {
 		t.Fatalf("update integrated customer subsystem: %v", err)
@@ -742,6 +748,8 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 		"PLATFORM_AUDIT_CLIENT_ID=customer_and_opportunity-dev-audit-publisher",
 		"PLATFORM_AUDIT_CLIENT_SECRET=new-audit-secret",
 		"PLATFORM_NOTIFICATION_CLIENT_ID=customer_and_opportunity-dev-notification-publisher",
+		"PLATFORM_OWNER_DIRECTORY_CLIENT_ID=customer_and_opportunity-dev-owner-directory",
+		"PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET=new-owner-directory-secret",
 		"PLATFORM_NOTIFICATION_CLIENT_SECRET=new-notification-secret",
 	} {
 		if !strings.Contains(string(contents), expected) {
