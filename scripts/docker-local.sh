@@ -40,7 +40,7 @@ frontend_public_origin=""
 # 用于 Compose 首次解析的本地 CRM 目录基线。customer-api 真正启动前，
 # sync_crm_authorization_catalog 会从当前镜像读取并导出实际哈希，因此这里
 # 不替代运行时目录校验；它只避免 .env 模板占位符阻断初始化流程。
-local_crm_role_config_hash="sha256:3a32171111a681dcf0188675eb41b6a068542ff603633b13e9d8ca067b7fe4c0"
+local_crm_role_config_hash="sha256:77443efe31deec9ade8836e826b7240edfc377e953b9f5722e37dace011db0bb"
 customer_notification_worker_services=(
 	customer-opportunity-alert-worker
 	customer-owner-notification-worker
