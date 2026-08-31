@@ -408,7 +408,7 @@ func (service *ManagementService) ListAccounts(ctx context.Context, tenantID str
 	}
 	for index := range result.Items {
 		account := &result.Items[index]
-		if account.UserID == nil || !externalAccountSource(account.AuthSource) {
+		if account.UserID == nil {
 			continue
 		}
 		status, available, readErr := service.externalAccountStatusReader.ReadAccountStatus(ctx, tenantID, strings.TrimSpace(*account.UserID))
@@ -424,11 +424,6 @@ func (service *ManagementService) ListAccounts(ctx context.Context, tenantID str
 		}
 	}
 	return result, nil
-}
-
-func externalAccountSource(source string) bool {
-	source = strings.ToUpper(strings.TrimSpace(source))
-	return source == "KEYCLOAK" || source == "FEDERATED"
 }
 
 // UpdateAccount changes an account between ACTIVE and DISABLED with optimistic locking. LOCKED is
