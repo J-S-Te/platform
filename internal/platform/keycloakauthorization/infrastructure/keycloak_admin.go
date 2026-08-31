@@ -198,6 +198,40 @@ func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectiona
 	return admin.ensureBrokerIdentityWithAlias(ctx, token, user, snapshot.IdentityID, brokerAlias)
 }
 
+// ReadAccountStatus reads the Keycloak-managed user status for a platform
+// identity. The tenant attribute is checked before returning a result so a
+// caller cannot use this read path to match an identity from another tenant.
+// available=false means that no uniquely mapped Keycloak user exists; it is not
+// treated as an enabled state.
+func (admin *KeycloakAdmin) ReadAccountStatus(ctx context.Context, tenantID, identityID string) (status string, available bool, err error) {
+	tenantID = strings.TrimSpace(tenantID)
+	identityID = strings.TrimSpace(identityID)
+	if tenantID == "" || identityID == "" {
+		return "", false, errors.New("Keycloak account status identity is invalid")
+	}
+	token, err := admin.token(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	users, err := admin.findUsersByIdentity(ctx, token, identityID)
+	if err != nil {
+		return "", false, err
+	}
+	if len(users) == 0 {
+		return "", false, nil
+	}
+	if len(users) > 1 {
+		return "", false, fmt.Errorf("multiple Keycloak users have identity_id %q", identityID)
+	}
+	if !contains(users[0].Attributes["tenant_id"], tenantID) {
+		return "", false, fmt.Errorf("Keycloak user identity %q does not belong to tenant %q", identityID, tenantID)
+	}
+	if users[0].Enabled {
+		return "ACTIVE", true, nil
+	}
+	return "DISABLED", true, nil
+}
+
 func (admin *KeycloakAdmin) EnsureOrganizationGroups(ctx context.Context, snapshot projectionapplication.Snapshot) error {
 	// 仅管理 basic-platform/tenant-*/organization-* 命名空间，绝不触碰租户外的用户组。
 	token, err := admin.token(ctx)

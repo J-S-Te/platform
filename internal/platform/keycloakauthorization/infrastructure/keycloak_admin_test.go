@@ -49,6 +49,57 @@ func TestListKeycloakAuditEventsUsesSingleRealmPrefix(t *testing.T) {
 	}
 }
 
+func TestReadAccountStatusReturnsTenantScopedKeycloakState(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/users":
+			if request.URL.Query().Get("q") != "identity_id:identity-1" {
+				t.Errorf("identity query = %q", request.URL.Query().Get("q"))
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{
+				ID: "kc-user-1", Enabled: false,
+				Attributes: map[string][]string{"identity_id": {"identity-1"}, "tenant_id": {"tenant-1"}},
+			}})
+		default:
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	status, available, err := admin.ReadAccountStatus(context.Background(), "tenant-1", "identity-1")
+	if err != nil || !available || status != "DISABLED" {
+		t.Fatalf("ReadAccountStatus() = (%q, %t, %v), want (DISABLED, true, nil)", status, available, err)
+	}
+}
+
+func TestReadAccountStatusRejectsTenantMismatch(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.Method == "POST" {
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+			return
+		}
+		writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{
+			ID: "kc-user-1", Enabled: false,
+			Attributes: map[string][]string{"identity_id": {"identity-1"}, "tenant_id": {"tenant-2"}},
+		}})
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if _, _, err := admin.ReadAccountStatus(context.Background(), "tenant-1", "identity-1"); err == nil {
+		t.Fatal("ReadAccountStatus() error = nil, want tenant mismatch")
+	}
+}
+
 func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "")
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "")

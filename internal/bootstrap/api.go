@@ -311,6 +311,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 			_ = logFile.Close()
 			return nil, fmt.Errorf("create Keycloak session terminator: %w", err)
 		}
+		managementService.SetExternalAccountStatusReader(keycloakAdmin)
 	}
 	authServiceDependencies := []identityapplication.ExternalSessionTerminator{}
 	if keycloakAdmin != nil {

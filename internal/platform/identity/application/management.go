@@ -249,6 +249,13 @@ type ManagementRepository interface {
 	UpdateMembership(context.Context, MembershipUpdateInput) (domain.Membership, error)
 }
 
+// ExternalAccountStatusReader reads the effective status of accounts managed by
+// an external identity provider. It is optional so local-password deployments
+// do not require a Keycloak dependency.
+type ExternalAccountStatusReader interface {
+	ReadAccountStatus(context.Context, string, string) (string, bool, error)
+}
+
 // MobileProtection handles optional at-rest encryption of mobile numbers.
 type MobileProtection interface {
 	Encrypt(string) ([]byte, error)
@@ -258,11 +265,18 @@ type MobileProtection interface {
 
 // ManagementService implements user, account and organization management independent of HTTP.
 type ManagementService struct {
-	repository ManagementRepository
-	mobiles    MobileProtection
-	ids        IDGenerator
-	clock      Clock
-	hasher     PasswordHasher
+	repository                  ManagementRepository
+	mobiles                     MobileProtection
+	ids                         IDGenerator
+	clock                       Clock
+	hasher                      PasswordHasher
+	externalAccountStatusReader ExternalAccountStatusReader
+}
+
+// SetExternalAccountStatusReader attaches the optional external status mirror
+// after the platform has constructed its Keycloak administration client.
+func (service *ManagementService) SetExternalAccountStatusReader(reader ExternalAccountStatusReader) {
+	service.externalAccountStatusReader = reader
 }
 
 // NewManagementService creates the P0 IAM management service.
@@ -388,7 +402,33 @@ func (service *ManagementService) UpdateUser(ctx context.Context, input UserUpda
 
 // ListAccounts lists tenant-scoped accounts without exposing credentials or failed-attempt data.
 func (service *ManagementService) ListAccounts(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Account], error) {
-	return service.repository.ListAccounts(ctx, tenantID, normalizePageRequest(query))
+	result, err := service.repository.ListAccounts(ctx, tenantID, normalizePageRequest(query))
+	if err != nil || service.externalAccountStatusReader == nil {
+		return result, err
+	}
+	for index := range result.Items {
+		account := &result.Items[index]
+		if account.UserID == nil || !externalAccountSource(account.AuthSource) {
+			continue
+		}
+		status, available, readErr := service.externalAccountStatusReader.ReadAccountStatus(ctx, tenantID, strings.TrimSpace(*account.UserID))
+		if readErr != nil {
+			return PageResult[domain.Account]{}, fmt.Errorf("read external account status: %w", readErr)
+		}
+		if available && strings.EqualFold(strings.TrimSpace(status), domain.StatusDisabled) {
+			// An external disable is an effective access revocation. Do not
+			// silently turn an already-disabled platform account back on when the
+			// provider reports ACTIVE; platform-side administrative disables remain
+			// authoritative for re-enabling.
+			account.Status = domain.StatusDisabled
+		}
+	}
+	return result, nil
+}
+
+func externalAccountSource(source string) bool {
+	source = strings.ToUpper(strings.TrimSpace(source))
+	return source == "KEYCLOAK" || source == "FEDERATED"
 }
 
 // UpdateAccount changes an account between ACTIVE and DISABLED with optimistic locking. LOCKED is
