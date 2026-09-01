@@ -100,6 +100,39 @@ func TestReadAccountStatusRejectsTenantMismatch(t *testing.T) {
 	}
 }
 
+func TestReadAccountStatusFallsBackToStableUsernameForLegacyProjection(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		switch request.Method + " " + request.URL.Path {
+		case "POST /realms/master/protocol/openid-connect/token":
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+		case "GET /admin/realms/acme/users":
+			if request.URL.Query().Get("q") != "" {
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+				return
+			}
+			if request.URL.Query().Get("username") != "platform-identity-1" {
+				t.Errorf("stable username query = %q", request.URL.Query().Get("username"))
+			}
+			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{
+				ID: "kc-legacy", Username: "platform-identity-1", Enabled: false,
+				Attributes: map[string][]string{"tenant_id": {"tenant-1"}},
+			}})
+		default:
+			writer.WriteHeader(stdhttp.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	status, available, err := admin.ReadAccountStatus(context.Background(), "tenant-1", "identity-1")
+	if err != nil || !available || status != "DISABLED" {
+		t.Fatalf("ReadAccountStatus() = (%q, %t, %v), want (DISABLED, true, nil)", status, available, err)
+	}
+}
+
 func TestKeycloakAdminProjectsGroupsRolesAndClientAttributes(t *testing.T) {
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "")
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "")
