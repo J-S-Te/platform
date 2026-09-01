@@ -256,6 +256,13 @@ type ExternalAccountStatusReader interface {
 	ReadAccountStatus(context.Context, string, string) (string, bool, error)
 }
 
+// ExternalAccountStatusSynchronizer persists a provider-side disablement in the
+// platform aggregate. Reconciliation is deliberately one-way for ACTIVE: an
+// external ACTIVE result must never re-enable a platform-disabled account.
+type ExternalAccountStatusSynchronizer interface {
+	DisableExternalIdentity(context.Context, string, string) error
+}
+
 // MobileProtection handles optional at-rest encryption of mobile numbers.
 type MobileProtection interface {
 	Encrypt(string) ([]byte, error)
@@ -265,18 +272,25 @@ type MobileProtection interface {
 
 // ManagementService implements user, account and organization management independent of HTTP.
 type ManagementService struct {
-	repository                  ManagementRepository
-	mobiles                     MobileProtection
-	ids                         IDGenerator
-	clock                       Clock
-	hasher                      PasswordHasher
-	externalAccountStatusReader ExternalAccountStatusReader
+	repository                        ManagementRepository
+	mobiles                           MobileProtection
+	ids                               IDGenerator
+	clock                             Clock
+	hasher                            PasswordHasher
+	externalAccountStatusReader       ExternalAccountStatusReader
+	externalAccountStatusSynchronizer ExternalAccountStatusSynchronizer
 }
 
 // SetExternalAccountStatusReader attaches the optional external status mirror
 // after the platform has constructed its Keycloak administration client.
 func (service *ManagementService) SetExternalAccountStatusReader(reader ExternalAccountStatusReader) {
 	service.externalAccountStatusReader = reader
+}
+
+// SetExternalAccountStatusSynchronizer attaches the persistence-side
+// compensation used when Keycloak reports a disabled identity.
+func (service *ManagementService) SetExternalAccountStatusSynchronizer(synchronizer ExternalAccountStatusSynchronizer) {
+	service.externalAccountStatusSynchronizer = synchronizer
 }
 
 // NewManagementService creates the P0 IAM management service.
@@ -406,12 +420,14 @@ func (service *ManagementService) ListAccounts(ctx context.Context, tenantID str
 	if err != nil || service.externalAccountStatusReader == nil {
 		return result, err
 	}
+	syncedDisabledUsers := make(map[string]struct{})
 	for index := range result.Items {
 		account := &result.Items[index]
 		if account.UserID == nil {
 			continue
 		}
-		status, available, readErr := service.externalAccountStatusReader.ReadAccountStatus(ctx, tenantID, strings.TrimSpace(*account.UserID))
+		userID := strings.TrimSpace(*account.UserID)
+		status, available, readErr := service.externalAccountStatusReader.ReadAccountStatus(ctx, tenantID, userID)
 		if readErr != nil {
 			return PageResult[domain.Account]{}, fmt.Errorf("read external account status: %w", readErr)
 		}
@@ -421,6 +437,14 @@ func (service *ManagementService) ListAccounts(ctx context.Context, tenantID str
 			// provider reports ACTIVE; platform-side administrative disables remain
 			// authoritative for re-enabling.
 			account.Status = domain.StatusDisabled
+			if service.externalAccountStatusSynchronizer != nil {
+				if _, alreadySynced := syncedDisabledUsers[userID]; !alreadySynced {
+					if syncErr := service.externalAccountStatusSynchronizer.DisableExternalIdentity(ctx, tenantID, userID); syncErr != nil {
+						return PageResult[domain.Account]{}, fmt.Errorf("persist external account status: %w", syncErr)
+					}
+					syncedDisabledUsers[userID] = struct{}{}
+				}
+			}
 		}
 	}
 	return result, nil

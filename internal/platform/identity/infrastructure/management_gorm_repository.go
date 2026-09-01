@@ -558,6 +558,74 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 	return repository.getAccount(ctx, input.TenantID, input.AccountID)
 }
 
+// DisableExternalIdentity reconciles a provider-side disablement into the
+// platform aggregate. It intentionally never enables anything: platform-side
+// administrators remain the only authority that can restore access.
+func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, tenantID, userID string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	userID = strings.TrimSpace(userID)
+	if tenantID == "" || userID == "" {
+		return application.ErrValidation
+	}
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var user userModel
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", tenantID, userID).First(&user)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return application.ErrNotFound
+		}
+		if result.Error != nil {
+			return fmt.Errorf("lock externally disabled user: %w", result.Error)
+		}
+
+		var accounts []accountModel
+		result = transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND user_id = ?", tenantID, userID).Find(&accounts)
+		if result.Error != nil {
+			return fmt.Errorf("lock externally disabled user accounts: %w", result.Error)
+		}
+		now := time.Now().UTC()
+		changed := user.Status != domain.StatusDisabled
+		if changed {
+			if err := transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ?", tenantID, userID).
+				Updates(map[string]any{"status": domain.StatusDisabled, "primary_org_id": nil, "updated_at": now, "updated_by": nil, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "persist externally disabled user")
+			}
+		}
+
+		accountIDs := make([]string, 0, len(accounts))
+		for _, account := range accounts {
+			accountIDs = append(accountIDs, account.ID)
+			if account.Status == domain.StatusDisabled {
+				continue
+			}
+			changed = true
+		}
+		if len(accounts) > 0 {
+			if err := transaction.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ? AND status <> ?", tenantID, userID, domain.StatusDisabled).
+				Updates(map[string]any{"username": nil, "status": domain.StatusDisabled, "updated_at": now, "updated_by": nil, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "persist externally disabled accounts")
+			}
+			if err := transaction.Model(&passwordCredentialModel{}).Where("account_id IN ? AND status <> ?", accountIDs, domain.StatusDisabled).
+				Updates(map[string]any{"status": domain.StatusDisabled, "updated_at": now}).Error; err != nil {
+				return fmt.Errorf("disable external user credentials: %w", err)
+			}
+			if err := transaction.Model(&membershipModel{}).Where("tenant_id = ? AND user_id = ? AND status <> ?", tenantID, userID, domain.StatusDisabled).
+				Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "updated_at": now, "updated_by": nil, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				return mapWriteError(err, "disable external user memberships")
+			}
+			if err := transaction.Model(&sessionModel{}).Where("tenant_id = ? AND account_id IN ? AND status = ? AND revoked_at IS NULL", tenantID, accountIDs, domain.StatusActive).
+				Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "EXTERNAL_ACCOUNT_DISABLED"}).Error; err != nil {
+				return fmt.Errorf("revoke external user sessions: %w", err)
+			}
+		}
+		if changed {
+			return enqueueKeycloakIdentityEvents(transaction, tenantID, []string{userID}, now, "IDENTITY_CHANGED")
+		}
+		return nil
+	})
+}
+
 func (repository *GORMRepository) versionedAccountError(ctx context.Context, tenantID, accountID string) error {
 	var total int64
 	ownerClause, ownerArgs := accountOwnerVisibilityFilter()

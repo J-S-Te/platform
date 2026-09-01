@@ -218,7 +218,15 @@ func (admin *KeycloakAdmin) ReadAccountStatus(ctx context.Context, tenantID, ide
 		return "", false, err
 	}
 	if len(users) == 0 {
-		return "", false, nil
+		// Older projected users may predate the identity_id attribute. Their
+		// deterministic username remains a safe, tenant-checked association key.
+		users, err = admin.findUsersByStableUsername(ctx, token, identityID)
+		if err != nil {
+			return "", false, err
+		}
+		if len(users) == 0 {
+			return "", false, nil
+		}
 	}
 	if len(users) > 1 {
 		return "", false, fmt.Errorf("multiple Keycloak users have identity_id %q", identityID)
@@ -637,6 +645,30 @@ func (admin *KeycloakAdmin) findUsersByIdentity(ctx context.Context, token, iden
 	matched := users[:0]
 	for _, user := range users {
 		if contains(user.Attributes["identity_id"], identityID) {
+			matched = append(matched, user)
+		}
+	}
+	return matched, nil
+}
+
+func (admin *KeycloakAdmin) findUsersByStableUsername(ctx context.Context, token, identityID string) ([]keycloakUser, error) {
+	username := stableUsername(identityID)
+	path := "/users?exact=true&username=" + url.QueryEscape(username)
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusOK {
+		return nil, admin.statusError("find Keycloak user by stable username", response.StatusCode)
+	}
+	var users []keycloakUser
+	if err := json.NewDecoder(response.Body).Decode(&users); err != nil {
+		return nil, fmt.Errorf("decode Keycloak users by stable username: %w", err)
+	}
+	matched := users[:0]
+	for _, user := range users {
+		if user.Username == username {
 			matched = append(matched, user)
 		}
 	}
