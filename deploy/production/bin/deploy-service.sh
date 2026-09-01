@@ -75,6 +75,9 @@ for command_name in docker curl gzip flock awk mktemp install stat df ln; do
   }
 done
 relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
+# CI/CD 发布项目服务时必须确认运行凭据已经生成并完成真实启动。默认关闭，
+# 以保留首次接入时由平台先暂存不可变镜像的兼容行为；项目 workflow 会显式开启。
+fail_if_runtime_not_ready="${DEPLOY_FAIL_IF_RUNTIME_NOT_READY:-false}"
 docker compose version >/dev/null
 [[ -f "$runtime_file" ]] || { echo "缺少 $runtime_file" >&2; exit 1; }
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
@@ -641,6 +644,11 @@ if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
   exit 0
 fi
 if [[ "$service" == "project" ]] && ! project_runtime_ready; then
+  if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    echo "项目管理运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
+    echo "请先登录基础平台的“应用接入”页面完成 project_management/prod 接入，再重新运行 CI/CD" >&2
+    exit 1
+  fi
   rm -f "$previous_release"
   echo "项目管理镜像已安全暂存：$image_ref"
   echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 project_management/prod 接入。"
