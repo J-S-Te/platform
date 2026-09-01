@@ -296,7 +296,7 @@ services:
     cap_drop: [ALL]
     # Agent 只操作受控的 runtime/backups 挂载；需要这两个能力处理宿主机
     # deploy 用户拥有的 0600 runtime 文件，同时继续保持其余 capability 全部丢弃。
-    cap_add: [DAC_OVERRIDE, FOWNER]
+    cap_add: [DAC_OVERRIDE, FOWNER, CHOWN]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     tmpfs:
