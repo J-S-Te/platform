@@ -32,16 +32,16 @@ func TestProjectionUserQueryIncludesProfileAndDeletionState(t *testing.T) {
 	database := newDryRunMySQL(t)
 	statement := projectionUserQuery(database, projectionworker.Event{TenantID: "tenant", IdentityID: "identity"}).Find(&[]projectionUserRow{}).Statement
 	sql := statement.SQL.String()
-	for _, expected := range []string{"iam_user", "display_name", "email", "status", "deleted_at", "tenant_id = ?", "id = ?"} {
+	for _, expected := range []string{"iam_user", "iam_account", "display_name", "email", "status", "deleted_at", "valid_until", "locked_until", "tenant_id = ?", "id = ?"} {
 		if !strings.Contains(sql, expected) {
 			t.Errorf("user query missing %q: %s", expected, sql)
 		}
 	}
-	if !projectionUserEnabled(projectionUserRow{Status: "ACTIVE"}) {
-		t.Error("active, undeleted platform user was not enabled")
+	if !projectionUserEnabled(projectionUserRow{Status: "ACTIVE", HasLoginAccount: true}) {
+		t.Error("active user with an eligible account was not enabled")
 	}
 	deletedAt := time.Now()
-	if projectionUserEnabled(projectionUserRow{Status: "ACTIVE", DeletedAt: &deletedAt}) || projectionUserEnabled(projectionUserRow{Status: "DISABLED"}) {
-		t.Error("deleted or disabled platform user was enabled")
+	if projectionUserEnabled(projectionUserRow{Status: "ACTIVE", DeletedAt: &deletedAt, HasLoginAccount: true}) || projectionUserEnabled(projectionUserRow{Status: "DISABLED", HasLoginAccount: true}) || projectionUserEnabled(projectionUserRow{Status: "ACTIVE"}) {
+		t.Error("deleted, disabled, or account-ineligible platform user was enabled")
 	}
 }

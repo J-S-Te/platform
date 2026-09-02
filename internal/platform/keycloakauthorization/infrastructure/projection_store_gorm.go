@@ -35,6 +35,7 @@ func (store *ProjectionStore) MarkSynchronized(ctx context.Context, snapshot pro
 			"keycloak_client_id":     strings.TrimSpace(snapshot.KeycloakClientID),
 			"authorization_revision": snapshot.AuthorizationRevision,
 			"role_config_hash":       strings.TrimSpace(snapshot.RoleConfigHash),
+			"user_enabled":           snapshot.UserEnabled,
 			"status":                 "SYNCED",
 			"last_synced_at":         now,
 			"last_error_code":        nil,
@@ -45,7 +46,7 @@ func (store *ProjectionStore) MarkSynchronized(ctx context.Context, snapshot pro
 		"tenant_id": strings.TrimSpace(snapshot.TenantID), "identity_id": strings.TrimSpace(snapshot.IdentityID),
 		"application_id": strings.TrimSpace(snapshot.ApplicationID), "environment_id": strings.TrimSpace(snapshot.EnvironmentID), "application_code": strings.TrimSpace(snapshot.ApplicationCode),
 		"keycloak_client_id": strings.TrimSpace(snapshot.KeycloakClientID), "authorization_revision": snapshot.AuthorizationRevision,
-		"role_config_hash": strings.TrimSpace(snapshot.RoleConfigHash), "status": "SYNCED", "last_synced_at": now,
+		"role_config_hash": strings.TrimSpace(snapshot.RoleConfigHash), "user_enabled": snapshot.UserEnabled, "status": "SYNCED", "last_synced_at": now,
 		"created_at": now, "updated_at": now,
 	}).Error
 }

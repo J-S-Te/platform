@@ -30,6 +30,12 @@ type Synchronizer interface {
 	SyncAuthorization(context.Context, Event) error
 }
 
+// EligibilityReconciler detects account expiry and active lock windows, which
+// change with time and therefore do not necessarily have a write event.
+type EligibilityReconciler interface {
+	Reconcile(context.Context, time.Time) error
+}
+
 type Clock interface{ Now() time.Time }
 
 type systemClock struct{}
@@ -43,6 +49,7 @@ type Worker struct {
 	workerID     string
 	poll         time.Duration
 	clock        Clock
+	eligibility  EligibilityReconciler
 	// StaleLockTimeout is the maximum time an event may remain RUNNING before
 	// another worker assumes its owner crashed and returns it to PENDING.
 	StaleLockTimeout time.Duration
@@ -51,6 +58,10 @@ type Worker struct {
 	// state) and continues to block an auth-provider cutover until an operator
 	// replays it through a controlled recovery path.
 	MaxAttempts uint
+}
+
+func (worker *Worker) SetEligibilityReconciler(reconciler EligibilityReconciler) {
+	worker.eligibility = reconciler
 }
 
 // New 构建 Keycloak 权限投影 worker，初始化并校验必要依赖与参数。
@@ -97,6 +108,11 @@ func (worker *Worker) RunOnce(ctx context.Context) error {
 	}
 	if err := worker.queue.RecoverStale(ctx, now.Add(-worker.StaleLockTimeout), now); err != nil {
 		return fmt.Errorf("recover stale Keycloak authorization outbox: %w", err)
+	}
+	if worker.eligibility != nil {
+		if err := worker.eligibility.Reconcile(ctx, now); err != nil {
+			return fmt.Errorf("reconcile Keycloak account eligibility: %w", err)
+		}
 	}
 	event, claimed, err := worker.queue.Claim(ctx, worker.workerID, now)
 	if err != nil || !claimed {

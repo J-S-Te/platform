@@ -48,6 +48,18 @@ type synchronizerStub struct{ err error }
 
 func (sync synchronizerStub) SyncAuthorization(context.Context, Event) error { return sync.err }
 
+type eligibilityReconcilerSpy struct {
+	calls int
+	now   time.Time
+	err   error
+}
+
+func (spy *eligibilityReconcilerSpy) Reconcile(_ context.Context, now time.Time) error {
+	spy.calls++
+	spy.now = now
+	return spy.err
+}
+
 func TestRunOnceCompletesSuccessfulProjection(t *testing.T) {
 	queue := &queueSpy{event: Event{ID: "event-1"}, claimed: true}
 	worker, err := New(queue, synchronizerStub{}, slog.New(slog.NewTextHandler(io.Discard, nil)), "worker-1", time.Second, fixedClock{now: time.Now()})
@@ -123,5 +135,40 @@ func TestRunOnceDoesNotClaimWhenStaleRecoveryFails(t *testing.T) {
 	}
 	if queue.completed || queue.retried {
 		t.Fatalf("worker processed event after failed recovery: completed=%v retried=%v", queue.completed, queue.retried)
+	}
+}
+
+func TestRunOnceReconcilesTimeBasedAccountEligibilityBeforeClaiming(t *testing.T) {
+	now := time.Date(2026, 9, 2, 3, 4, 5, 0, time.UTC)
+	queue := &queueSpy{event: Event{ID: "event-1"}, claimed: true}
+	worker, err := New(queue, synchronizerStub{}, slog.New(slog.NewTextHandler(io.Discard, nil)), "worker-1", time.Second, fixedClock{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &eligibilityReconcilerSpy{}
+	worker.SetEligibilityReconciler(reconciler)
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if reconciler.calls != 1 || !reconciler.now.Equal(now) {
+		t.Fatalf("eligibility reconciler calls=%d now=%s", reconciler.calls, reconciler.now)
+	}
+	if !queue.completed {
+		t.Fatal("worker did not process the event after reconciliation")
+	}
+}
+
+func TestRunOnceDoesNotClaimWhenEligibilityReconciliationFails(t *testing.T) {
+	queue := &queueSpy{event: Event{ID: "event-1"}, claimed: true}
+	worker, err := New(queue, synchronizerStub{}, slog.New(slog.NewTextHandler(io.Discard, nil)), "worker-1", time.Second, fixedClock{now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.SetEligibilityReconciler(&eligibilityReconcilerSpy{err: errors.New("database unavailable")})
+	if err := worker.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce() error = nil")
+	}
+	if queue.completed || queue.retried || queue.failed {
+		t.Fatalf("worker processed event after failed eligibility reconciliation: completed=%v retried=%v failed=%v", queue.completed, queue.retried, queue.failed)
 	}
 }
