@@ -23,6 +23,11 @@ const (
 	customerPortalBrokerClientID = "keycloak-customer-portal-broker"
 )
 
+// errBrokerTargetNotRegistered 表示 Broker 依赖的应用或环境尚未在平台注册。
+// 平台 Broker 依赖内置的 platform 应用，缺失即属于真实故障；客户门户是按需接入的
+// 可选子系统，尚未注册时调用方应跳过而不是阻断 Worker/API 启动。
+var errBrokerTargetNotRegistered = errors.New("broker target application or environment is not registered")
+
 func keycloakBrokerEnvironment(appEnvironment string) string {
 	if appEnvironment == "production" {
 		return "prod"
@@ -81,7 +86,7 @@ func (registrar keycloakBrokerRegistrar) ensureBrokerClient(ctx context.Context,
 		}
 	}
 	if targetApplication.ID == "" {
-		return "", "", fmt.Errorf("%s application is not registered", applicationCode)
+		return "", "", fmt.Errorf("%s application is not registered: %w", applicationCode, errBrokerTargetNotRegistered)
 	}
 	envs, err := registrar.applications.ListEnvironments(ctx, tenantID, targetApplication.ID, application.PageRequest{Page: 1, PageSize: 100})
 	if err != nil {
@@ -99,7 +104,7 @@ func (registrar keycloakBrokerRegistrar) ensureBrokerClient(ctx context.Context,
 		}
 	}
 	if environment.ID == "" {
-		return "", "", fmt.Errorf("%s %s environment is not registered", applicationCode, environmentCode)
+		return "", "", fmt.Errorf("%s %s environment is not registered: %w", applicationCode, environmentCode, errBrokerTargetNotRegistered)
 	}
 	brokerAlias := "basic-platform"
 	if applicationCode == "customer_portal" {
