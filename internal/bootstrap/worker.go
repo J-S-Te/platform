@@ -3,6 +3,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -244,13 +245,23 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 				}
 				logger.Info("restored Keycloak Broker credentials from platform OAuth client", "client_id", brokerClientID)
 			}
-			customerPortalBrokerClientID, customerPortalBrokerClientSecret, tenantErr = brokerRegistrar.EnsureCustomerPortalBroker(context.Background(), tenantID)
-			if tenantErr != nil {
-				_ = database.Close(db)
-				_ = logFile.Close()
-				return nil, fmt.Errorf("restore customer portal Broker credentials: %w", tenantErr)
+			// 客户门户是按需接入的可选子系统。尚未注册 customer_portal 应用/环境时，
+			// 只跳过该 Broker 的补齐并记录警告；绝不能因此让 Worker 退出，否则同一容器
+			// 内的 API 会被 entrypoint 一并 SIGTERM，形成 api 容器反复重启。
+			if customerPortalBrokerClientID == "" || customerPortalBrokerClientSecret == "" {
+				customerPortalBrokerClientID, customerPortalBrokerClientSecret, tenantErr = brokerRegistrar.EnsureCustomerPortalBroker(context.Background(), tenantID)
+				if tenantErr != nil {
+					if !errors.Is(tenantErr, errBrokerTargetNotRegistered) {
+						_ = database.Close(db)
+						_ = logFile.Close()
+						return nil, fmt.Errorf("restore customer portal Broker credentials: %w", tenantErr)
+					}
+					logger.Warn("customer portal is not onboarded yet; skipping customer portal Broker provisioning", "error", tenantErr)
+					customerPortalBrokerClientID, customerPortalBrokerClientSecret = "", ""
+				} else {
+					logger.Info("restored customer portal Broker credentials from platform OAuth client", "client_id", customerPortalBrokerClientID)
+				}
 			}
-			logger.Info("restored customer portal Broker credentials from platform OAuth client", "client_id", customerPortalBrokerClientID)
 		}
 		controlPlane := applicationregistryhttp.NewKeycloakControlPlaneWithCredentials(
 			cfg.Keycloak.AdminURL, cfg.Keycloak.Realm,
