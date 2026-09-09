@@ -1760,11 +1760,4 @@ func dataScopesFromRoles(roles []RoleView) []tokenissuer.DataScope {
 	return dataScopes
 }
 
-func disabledOrActive(active bool) string {
-	if active {
-		return activeStatus
-	}
-	return disabledStatus
-}
-
 func validation(message string) error { return fmt.Errorf("%w: %s", ErrValidation, message) }

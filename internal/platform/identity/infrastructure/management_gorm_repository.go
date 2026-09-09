@@ -441,17 +441,6 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 	})
 }
 
-func (repository *GORMRepository) versionedUserError(ctx context.Context, tenantID, userID string) error {
-	var total int64
-	if err := repository.database.WithContext(ctx).Model(&userModel{}).Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", tenantID, userID).Count(&total).Error; err != nil {
-		return fmt.Errorf("check user after update: %w", err)
-	}
-	if total == 0 {
-		return application.ErrNotFound
-	}
-	return application.ErrVersionConflict
-}
-
 func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Account], error) {
 	database := applyAccountFilter(repository.database.WithContext(ctx).Model(&accountModel{}), tenantID, query)
 	var total int64

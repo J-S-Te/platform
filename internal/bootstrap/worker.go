@@ -418,6 +418,13 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			return nil, err
 		}
 		keycloakRunner.StaleLockTimeout = cfg.Worker.StaleLockTimeout
+		eligibilityReconciler, err := keycloakauthorizationinfrastructure.NewAccountEligibilityReconciler(db)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+		keycloakRunner.SetEligibilityReconciler(eligibilityReconciler)
 		runners = append(runners, keycloakRunner)
 		// Keycloak does not need a custom listener plugin for the platform audit
 		// trail: the worker polls its standard user/admin event endpoints with a

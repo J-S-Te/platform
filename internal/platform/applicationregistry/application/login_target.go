@@ -138,14 +138,6 @@ func isRelativeLoginTargetURI(value string) bool {
 	return true
 }
 
-// joinBaseURLAndTargetURI stitches a parent BaseURL and a portal-relative TargetURI into one
-// externally visible landing URL. Trailing slashes on the base and leading slashes on the target
-// are normalized; the path part of the base is preserved (so a BaseURL of http://h/api/v1 still
-// keeps /api/v1 in front of the target).
-func joinBaseURLAndTargetURI(baseURL, targetURI string) (string, error) {
-	return joinEnvironmentBaseURLAndTargetURI(baseURL, nil, targetURI)
-}
-
 // joinEnvironmentBaseURLAndTargetURI composes the externally visible landing URL from three
 // independently managed values: the portal BaseURL, the environment PathPrefix and the target's
 // relative path. Internal UpstreamURL values never participate in browser redirects.

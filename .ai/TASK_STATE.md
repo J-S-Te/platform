@@ -2,24 +2,33 @@
 
 ## 目标
 
-修复 Keycloak 用户已禁用但基础平台账号列表仍显示启用的问题。
+修复临时账号到期、账号处于锁定窗口时，基础平台仍显示启用且 Keycloak 未同步禁用的问题。
 
 ## 本轮完成
 
-- 基础平台账号列表按关联用户 `identity_id` 回读 Keycloak 用户 `enabled` 状态，覆盖本地密码账号对应的 Keycloak 投影用户。
-- 回读使用平台 `identity_id`，并校验 Keycloak 用户的 `tenant_id` 属性，防止跨租户误匹配；历史投影缺失 `identity_id` 属性时，以 `platform-{identityID}` 稳定用户名兜底关联。
-- Keycloak 用户已禁用时，平台账号列表返回 `DISABLED`，并在事务中持久化禁用平台用户、全部关联账号、密码凭据、任职关系及在线会话。
-- 没有关联用户的服务账号不调用 Keycloak；有用户关联的本地密码账号也必须与对应 Keycloak 投影状态一致。
-- Keycloak 查询失败会显式返回错误，不会错误显示为启用；外部 `ACTIVE` 永远不会反向重新启用平台侧已禁用账号。
-- 禁用补偿会写入 Keycloak 身份投影事件，同一页按用户幂等；增加稳定用户名兜底和补偿回归测试。
+- 账号列表按有效状态展示：本地状态为 `ACTIVE` 但已到期时显示“已失效”，锁定窗口未结束时显示“已锁定”。
+- Keycloak 授权投影仅在关联用户存在至少一个 `ACTIVE`、未到期且未锁定的登录账号时保持启用。
+- 投影表持久化最近一次 `user_enabled` 状态；Worker 每轮比对当前账户有效性与投影状态，将差异通过既有 Outbox 投递 `IDENTITY_CHANGED` 事件。
+- 临时账号自然到期、锁定开始或结束后，均能在下一个 Worker 轮询周期禁用或恢复 Keycloak；存在其他有效登录账号时不会错误禁用同一用户。
+
+## 涉及文件
+
+- `internal/platform/keycloakauthorization/infrastructure/projection_source_gorm.go`
+- `internal/platform/keycloakauthorization/infrastructure/projection_store_gorm.go`
+- `internal/platform/keycloakauthorization/infrastructure/account_eligibility_reconciler.go`
+- `internal/platform/keycloakauthorization/worker/worker.go`
+- `internal/bootstrap/worker.go`
+- `migrations/000102_add_keycloak_projection_user_enabled.sql`
+- `frontend/src/modules/platform/iam/utils/iamPresentation.js`
+- `frontend/src/modules/platform/iam/components/IamSettingsModule.vue`
 
 ## 已执行验证
 
-- 相关 Go 测试：通过。
-- 基础平台 `go test ./...`：通过。
-- 基础平台 `go vet ./...`：通过。
-- `git diff --check`：通过。
+- Keycloak 投影、Worker、身份应用和启动装配相关 Go 测试：通过。
+- 前端账号有效状态测试：通过。
+- 前端完整测试（430 项）与生产构建：通过。
+- 平台与前端的 `git diff --check`：通过。
 
 ## 部署提示
 
-需要使用包含本次代码的基础平台 API 镜像/进程重新部署；Keycloak 管理凭据和用户 `tenant_id` 属性必须已正确配置。状态回读及禁用补偿发生在账号列表请求中，首次刷新账号页面即可看到最新状态。
+先执行 `000102_add_keycloak_projection_user_enabled.sql`，再部署并重启包含 Keycloak Worker 的基础平台服务。线上现有已过期或锁定账号会在 Worker 的下一个轮询周期完成投影对账。

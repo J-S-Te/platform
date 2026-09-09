@@ -57,15 +57,3 @@ func sameValidity(left, right *time.Time) bool {
 	}
 	return left.Equal(*right)
 }
-
-func sameStringSlice(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}

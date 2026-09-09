@@ -720,10 +720,6 @@ func validName(value string, limit int) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && len(value) <= limit
 }
-func validCode(value string, limit int) bool {
-	value = strings.TrimSpace(value)
-	return value != "" && len(value) <= limit
-}
 func validStatus(value string) bool {
 	return value == domain.StatusActive || value == domain.StatusDisabled
 }

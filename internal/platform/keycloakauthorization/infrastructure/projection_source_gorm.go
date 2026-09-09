@@ -19,10 +19,11 @@ type projectionSourceRow struct {
 }
 
 type projectionUserRow struct {
-	DisplayName string     `gorm:"column:display_name"`
-	Email       *string    `gorm:"column:email"`
-	Status      string     `gorm:"column:status"`
-	DeletedAt   *time.Time `gorm:"column:deleted_at"`
+	DisplayName     string     `gorm:"column:display_name"`
+	Email           *string    `gorm:"column:email"`
+	Status          string     `gorm:"column:status"`
+	DeletedAt       *time.Time `gorm:"column:deleted_at"`
+	HasLoginAccount bool       `gorm:"column:has_login_account"`
 }
 
 type ProjectionSource struct {
@@ -89,12 +90,18 @@ func keycloakClientMappingQuery(database *gorm.DB, event projectionworker.Event)
 
 func projectionUserQuery(database *gorm.DB, event projectionworker.Event) *gorm.DB {
 	return database.Table("iam_user AS user_record").
-		Select("display_name, email, status, deleted_at").
+		Select(`display_name, email, status, deleted_at, EXISTS (
+			SELECT 1 FROM iam_account AS account
+			WHERE account.tenant_id = user_record.tenant_id AND account.user_id = user_record.id
+				AND account.status = 'ACTIVE'
+				AND (account.valid_until IS NULL OR account.valid_until > UTC_TIMESTAMP(3))
+				AND (account.locked_until IS NULL OR account.locked_until <= UTC_TIMESTAMP(3))
+		) AS has_login_account`).
 		Where("user_record.tenant_id = ? AND user_record.id = ?", event.TenantID, event.IdentityID)
 }
 
 func projectionUserEnabled(user projectionUserRow) bool {
-	return strings.EqualFold(strings.TrimSpace(user.Status), "ACTIVE") && user.DeletedAt == nil
+	return strings.EqualFold(strings.TrimSpace(user.Status), "ACTIVE") && user.DeletedAt == nil && user.HasLoginAccount
 }
 
 var _ projectionapplication.Source = (*ProjectionSource)(nil)
