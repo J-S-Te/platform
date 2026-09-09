@@ -555,6 +555,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 			"OIDC_POST_LOGOUT_REDIRECT_URI": input.PublicURL,
 			"OIDC_SESSION_COOKIE_SECURE":    secure,
 		}
+		// 服务项操作台从基础平台负责人目录选择团队负责人、项目经理和工程师。
+		// 老环境尚未下发该凭据时保持缺省（前端会提示目录不可用），不阻断接入本身。
+		if ownerCredential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
+			values["OWNER_DIRECTORY_ENABLED"] = "true"
+			values["PLATFORM_OWNER_DIRECTORY_URL"] = "http://platform-api:8080/api/v1/internal/owner-directory"
+			values["PLATFORM_OWNER_DIRECTORY_SCOPE"] = "owner_directory.read"
+			values["PLATFORM_OWNER_DIRECTORY_CLIENT_ID"] = ownerCredential.OAuthClient.ClientID
+			values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
+		}
 	default:
 		values = map[string]string{
 			"APP_PUBLIC_URL":             input.PublicURL,

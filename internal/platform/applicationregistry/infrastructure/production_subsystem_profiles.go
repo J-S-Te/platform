@@ -478,6 +478,11 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 			application.ServiceCredentialContractOpportunitySignedWrite,
 			application.ServiceCredentialOwnerDirectoryRead,
 		}
+	case "project_management":
+		// 服务项操作台需要只读负责人目录来按人员选择团队负责人/项目经理/工程师。
+		return []string{
+			application.ServiceCredentialOwnerDirectoryRead,
+		}
 	}
 	return nil
 }
