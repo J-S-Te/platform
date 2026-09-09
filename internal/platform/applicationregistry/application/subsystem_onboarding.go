@@ -21,6 +21,7 @@ const (
 	integratedPortalPathPrefix             = "/customer-portal"
 	integratedPortalUpstreamURL            = "http://portal-api:8091"
 	integratedContractApplicationCode      = "contract_management"
+	integratedProjectApplicationCode       = "project_management"
 )
 
 const (
@@ -525,6 +526,10 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 		}
 	case integratedContractApplicationCode:
 		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+	case integratedProjectApplicationCode:
+		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
+		// 负责人目录权限；不授予通知写入等其它集成能力。
+		return []string{ServiceCredentialOwnerDirectoryRead}
 	}
 	return nil
 }
