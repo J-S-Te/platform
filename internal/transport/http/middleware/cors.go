@@ -42,13 +42,3 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 		context.Next()
 	}
 }
-
-// ContainsExactOrigin 保持字符串精确匹配；协议、端口或主机任一不同都属于另一个安全来源。
-func ContainsExactOrigin(allowedOrigins []string, origin string) bool {
-	for _, allowed := range allowedOrigins {
-		if strings.TrimSpace(allowed) == origin {
-			return true
-		}
-	}
-	return false
-}

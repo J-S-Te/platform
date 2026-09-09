@@ -86,7 +86,7 @@ func (repository *GORMRepository) BootstrapFirstSuperAdmin(ctx context.Context, 
 			domain.StatusActive,
 		).First(&superAdminPosition)
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return application.ErrBootstrapUnavailable
+			return fmt.Errorf("missing active bootstrap super-admin position; verify platform migrations are current: %w", application.ErrBootstrapUnavailable)
 		}
 		if result.Error != nil {
 			return fmt.Errorf("get bootstrap super-admin position: %w", result.Error)

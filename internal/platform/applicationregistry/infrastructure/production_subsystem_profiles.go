@@ -508,15 +508,6 @@ func normalizedProductionEnvironmentKeys(values []string) []string {
 	return result
 }
 
-func containsReservedProductionService(values []string) bool {
-	for _, value := range values {
-		if isReservedProductionService(value) {
-			return true
-		}
-	}
-	return false
-}
-
 func isReservedProductionService(value string) bool {
 	switch value {
 	case "platform-api", "platform-mysql", "platform-migrate", "frontend", "subsystem-provisioner", "keycloak", "keycloak-db", "temporal":

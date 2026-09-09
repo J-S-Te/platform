@@ -1,5 +1,7 @@
 # 全部子系统 Keycloak Claims 修复记录（2026-08-14）
 
+> **历史归档**：本文保留一次 Claims 修复的事实证据，不表示当前环境仍需重复执行其中的操作。当前 Claim 映射、切换与验收以 [`../keycloak-identity-mapping.md`](../keycloak-identity-mapping.md)、[`../keycloak-v2-execution.md`](../keycloak-v2-execution.md) 和当前代码为准。
+
 ## 故障现象
 
 合同管理系统可以正常进入，但从统一门户进入其他子系统时分别出现：

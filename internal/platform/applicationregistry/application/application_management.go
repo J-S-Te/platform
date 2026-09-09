@@ -601,10 +601,6 @@ func validCode(value string, limit int) bool {
 	return true
 }
 
-func validOptionalCode(value *string, limit int) bool {
-	return value == nil || validCode(*value, limit)
-}
-
 func validOptionalIdentifier(value *string) bool {
 	return value == nil || (len(*value) == 26 && validIdentifier(*value))
 }

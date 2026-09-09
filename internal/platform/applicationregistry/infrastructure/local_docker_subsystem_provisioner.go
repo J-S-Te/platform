@@ -1399,14 +1399,6 @@ func (provisioner *LocalDockerSubsystemProvisioner) maybeSyncContractCatalogLock
 	return provisioner.runner.Run(operationCtx, "/var/run/docker.sock", runnerEnvironment, provisioner.config.DockerBinary, arguments...)
 }
 
-// logTeardownLeftovers removes the gateway entry and .env.local for a subsystem whose Compose
-// project is already gone. Called from Teardown when the compose file lookup fails; the user
-// intent is still "tear this subsystem down", so we must scrub everything that is left.
-func logTeardownLeftovers(runner subsystemCommandRunner, ctx context.Context, projectDirectory, applicationCode string) {
-	environmentPath := filepath.Join(projectDirectory, ".env.local")
-	_ = os.Remove(environmentPath)
-}
-
 func (provisioner *LocalDockerSubsystemProvisioner) frontendContainerID(ctx context.Context, directory string) (string, error) {
 	command := exec.CommandContext(ctx, provisioner.config.DockerBinary, "ps",
 		"--filter", "label=com.docker.compose.project="+provisioner.config.PlatformComposeProject,

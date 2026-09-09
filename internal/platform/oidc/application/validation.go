@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-
-	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/domain"
 )
 
 var (
@@ -129,8 +127,4 @@ func oneOf(value string, allowed ...string) bool {
 		}
 	}
 	return false
-}
-
-func tokenTypeIsKnown(value string) bool {
-	return value == domain.TokenTypeAccess || value == domain.TokenTypeRefresh
 }
