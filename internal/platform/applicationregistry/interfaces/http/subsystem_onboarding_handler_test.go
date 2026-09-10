@@ -1186,3 +1186,19 @@ func TestGetSubsystemStatusRecoversStaleProvisioningStateForRetry(t *testing.T) 
 		t.Fatalf("transitions = %#v", stateStore.transitions)
 	}
 }
+
+func TestUpdateServiceCredentialRequirementsRedeliverProjectOwnerDirectory(t *testing.T) {
+	found := false
+	for _, requirement := range updateServiceCredentialRequirements("project_management") {
+		if requirement.purpose != application.ServiceCredentialOwnerDirectoryRead {
+			continue
+		}
+		found = true
+		if requirement.suffix != "owner-directory" || requirement.scope != "owner_directory.read" || !requirement.rotate {
+			t.Fatalf("owner-directory requirement = %#v", requirement)
+		}
+	}
+	if !found {
+		t.Fatal("project_management controlled update must redeliver the owner-directory credential")
+	}
+}
