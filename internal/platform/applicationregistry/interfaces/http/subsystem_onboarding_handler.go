@@ -1486,7 +1486,15 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			{purpose: application.ServiceCredentialProjectDashboardRead, suffix: "project-dashboard", clientName: "数据看板项目看板读取器", scope: "dashboard.project.read", rotate: true},
 			fileGateway,
 		}
-	case "project_management", "settlement_and_invoicing":
+	case "project_management":
+		// 服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读负责人目录凭据。
+		// 受控更新/重试必须像首次接入一样确保该机器凭据存在并重新下发，否则运行时会
+		// 因 runtime 中仍是 PENDING_ONBOARDING 而拒绝启动。
+		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "项目管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
+			fileGateway,
+		}
+	case "settlement_and_invoicing":
 		return []updateServiceCredentialRequirement{fileGateway}
 	default:
 		return nil
