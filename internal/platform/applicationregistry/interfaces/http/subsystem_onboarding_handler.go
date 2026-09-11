@@ -1492,6 +1492,8 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 		// 因 runtime 中仍是 PENDING_ONBOARDING 而拒绝启动。
 		return []updateServiceCredentialRequirement{
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "项目管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
+			// 自动化规则命中后把站内信投递到平台统一 outbox。
+			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-ingest", clientName: "项目管理系统 站内信投递器", scope: "notification.ingest", rotate: true},
 			fileGateway,
 		}
 	case "settlement_and_invoicing":
