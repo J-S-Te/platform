@@ -13,6 +13,8 @@ import (
 const (
 	defaultPageSize = 20
 	maximumPageSize = 50
+	// maximumRoleFilters 限制一次查询的角色与来源过滤数量，目录查询是机器接口，参数不应无限增长。
+	maximumRoleFilters = 20
 )
 
 var (
@@ -20,13 +22,22 @@ var (
 	ErrUnavailable = errors.New("owner directory is unavailable")
 )
 
+// roleGrantOrigins 是 authz_role_binding.grant_origin 允许被过滤的取值：
+// TEMPLATE 由岗位授权模板生成，MANUAL 由管理员直接授予，SYSTEM 由入职/身份同步写入。
+// 未知取值一律拒绝，避免拼写错误被当成"没有过滤"而放大候选人范围。
+var roleGrantOrigins = map[string]struct{}{"TEMPLATE": {}, "MANUAL": {}, "SYSTEM": {}}
+
 // Query contains optional exact-user or display search filters.
 type Query struct {
-	Keyword   string
-	UserID    string
+	Keyword  string
+	UserID   string
+	// RoleCodes 只返回在这些应用角色上确有有效授权的用户。
 	RoleCodes []string
-	Page      int
-	PageSize  int
+	// RoleOrigins 进一步限定角色授权的来源（grant_origin）；必须与 RoleCodes 同时使用，
+	// 否则"限定来源"会退化成对整个授权集合的模糊约束。
+	RoleOrigins []string
+	Page        int
+	PageSize    int
 }
 
 // Repository reads only active, application-authorized internal users.
@@ -54,7 +65,7 @@ func (service *Service) List(ctx context.Context, principal appctx.Principal, qu
 	roles := make([]string, 0, len(query.RoleCodes))
 	for _, raw := range query.RoleCodes {
 		role := strings.TrimSpace(raw)
-		if role == "" || len(role) > 128 || len(roles) >= 20 {
+		if role == "" || len(role) > 128 || len(roles) >= maximumRoleFilters {
 			return domain.Page{}, ErrValidation
 		}
 		if _, exists := seenRoles[role]; !exists {
@@ -63,6 +74,22 @@ func (service *Service) List(ctx context.Context, principal appctx.Principal, qu
 		}
 	}
 	query.RoleCodes = roles
+	seenOrigins := make(map[string]struct{}, len(query.RoleOrigins))
+	origins := make([]string, 0, len(query.RoleOrigins))
+	for _, raw := range query.RoleOrigins {
+		origin := strings.ToUpper(strings.TrimSpace(raw))
+		if _, allowed := roleGrantOrigins[origin]; !allowed {
+			return domain.Page{}, ErrValidation
+		}
+		if _, exists := seenOrigins[origin]; !exists {
+			seenOrigins[origin] = struct{}{}
+			origins = append(origins, origin)
+		}
+	}
+	if len(origins) > 0 && len(roles) == 0 {
+		return domain.Page{}, ErrValidation
+	}
+	query.RoleOrigins = origins
 	if query.Keyword != "" && query.UserID != "" {
 		return domain.Page{}, ErrValidation
 	}

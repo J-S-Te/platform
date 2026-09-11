@@ -72,6 +72,22 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
 			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'POSITION' AND role_binding.subject_id=membership.position_id))
 		)`, applicationID, query.RoleCodes, now, now, environmentID)
+		// 授权来源过滤只在明确要求时生效：调用方用它把候选人限定为岗位授权模板产生的人，
+		// 从而排除管理员为个人直接开通的例外绑定。
+		if len(query.RoleOrigins) > 0 {
+			authorized = authorized.Where(`EXISTS (
+				SELECT 1 FROM authz_role_binding AS origin_binding
+				JOIN authz_role AS origin_role ON origin_role.id=origin_binding.role_id AND origin_role.tenant_id=origin_binding.tenant_id
+				WHERE origin_binding.tenant_id=user.tenant_id AND origin_binding.application_id=? AND origin_role.code IN ?
+				AND origin_binding.grant_origin IN ?
+				AND BINARY origin_binding.status=BINARY 'ACTIVE' AND BINARY origin_role.status=BINARY 'ACTIVE'
+				AND (origin_binding.valid_from IS NULL OR origin_binding.valid_from<=?) AND (origin_binding.valid_until IS NULL OR origin_binding.valid_until>?)
+				AND ((BINARY origin_binding.scope_type=BINARY 'TENANT' AND BINARY origin_binding.scope_id=BINARY '') OR (BINARY origin_binding.scope_type=BINARY 'ENVIRONMENT' AND BINARY origin_binding.scope_id=BINARY ?))
+				AND ((BINARY origin_binding.subject_type=BINARY 'USER' AND origin_binding.subject_id=user.id)
+				 OR (membership.inherit_authorization=1 AND BINARY origin_binding.subject_type=BINARY 'ORG_UNIT' AND origin_binding.subject_id=membership.org_unit_id)
+				 OR (membership.inherit_authorization=1 AND BINARY origin_binding.subject_type=BINARY 'POSITION' AND origin_binding.subject_id=membership.position_id))
+			)`, applicationID, query.RoleCodes, query.RoleOrigins, now, now, environmentID)
+		}
 	}
 	if query.UserID != "" {
 		authorized = authorized.Where("user.id = ?", query.UserID)
@@ -136,6 +152,20 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'ORG_UNIT' AND role_binding.subject_id=membership.org_unit_id)
 			 OR (membership.inherit_authorization=1 AND BINARY role_binding.subject_type=BINARY 'POSITION' AND role_binding.subject_id=membership.position_id))
 		)`, applicationID, query.RoleCodes, now, now, environmentID)
+		if len(query.RoleOrigins) > 0 {
+			membershipQuery = membershipQuery.Where(`EXISTS (
+				SELECT 1 FROM authz_role_binding AS origin_binding
+				JOIN authz_role AS origin_role ON origin_role.id=origin_binding.role_id AND origin_role.tenant_id=origin_binding.tenant_id
+				WHERE origin_binding.tenant_id=membership.tenant_id AND origin_binding.application_id=? AND origin_role.code IN ?
+				AND origin_binding.grant_origin IN ?
+				AND BINARY origin_binding.status=BINARY 'ACTIVE' AND BINARY origin_role.status=BINARY 'ACTIVE'
+				AND (origin_binding.valid_from IS NULL OR origin_binding.valid_from<=?) AND (origin_binding.valid_until IS NULL OR origin_binding.valid_until>?)
+				AND ((BINARY origin_binding.scope_type=BINARY 'TENANT' AND BINARY origin_binding.scope_id=BINARY '') OR (BINARY origin_binding.scope_type=BINARY 'ENVIRONMENT' AND BINARY origin_binding.scope_id=BINARY ?))
+				AND ((BINARY origin_binding.subject_type=BINARY 'USER' AND origin_binding.subject_id=membership.user_id)
+				 OR (membership.inherit_authorization=1 AND BINARY origin_binding.subject_type=BINARY 'ORG_UNIT' AND origin_binding.subject_id=membership.org_unit_id)
+				 OR (membership.inherit_authorization=1 AND BINARY origin_binding.subject_type=BINARY 'POSITION' AND origin_binding.subject_id=membership.position_id))
+			)`, applicationID, query.RoleCodes, query.RoleOrigins, now, now, environmentID)
+		}
 	}
 	if err := membershipQuery.Order("membership.is_primary DESC, organization.name ASC, organization.id ASC").Scan(&memberships).Error; err != nil {
 		return domain.Page{}, err
