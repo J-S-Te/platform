@@ -45,7 +45,8 @@ func (handler *Handler) List(writer http.ResponseWriter, request *http.Request) 
 	}
 	result, err := handler.service.List(request.Context(), principal, application.Query{
 		Keyword: request.URL.Query().Get("keyword"), UserID: request.URL.Query().Get("user_id"),
-		RoleCodes: request.URL.Query()["role_code"], Page: page, PageSize: pageSize,
+		RoleCodes: request.URL.Query()["role_code"], RoleOrigins: request.URL.Query()["role_origin"],
+		Page: page, PageSize: pageSize,
 	})
 	if err != nil {
 		if errors.Is(err, application.ErrValidation) {

@@ -59,7 +59,7 @@ func TestHandlerPassesMachineScopeAndReturnsMinimalProjection(t *testing.T) {
 		Page: 1, PageSize: 20, Total: 1,
 	}}
 	handler := newTestHandler(t, service)
-	request := authenticatedRequest("/api/v1/internal/owner-directory?keyword=%E8%B4%9F%E8%B4%A3&page=2&page_size=10&role_code=sales_director&role_code=finance_director")
+	request := authenticatedRequest("/api/v1/internal/owner-directory?keyword=%E8%B4%9F%E8%B4%A3&page=2&page_size=10&role_code=sales_director&role_code=finance_director&role_origin=TEMPLATE")
 	response := httptest.NewRecorder()
 
 	handler.List(response, request)
@@ -75,6 +75,10 @@ func TestHandlerPassesMachineScopeAndReturnsMinimalProjection(t *testing.T) {
 	}
 	if strings.Join(service.query.RoleCodes, ",") != "sales_director,finance_director" {
 		t.Fatalf("role codes=%v", service.query.RoleCodes)
+	}
+	// 角色来源过滤与角色码一起透传，供调用方排除管理员直接开通的例外绑定。
+	if strings.Join(service.query.RoleOrigins, ",") != "TEMPLATE" {
+		t.Fatalf("role origins=%v", service.query.RoleOrigins)
 	}
 	body := response.Body.String()
 	for _, expected := range []string{"oidc-sub-1", "负责人甲", "org-1", "华东区"} {
