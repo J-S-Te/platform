@@ -354,12 +354,17 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 		}
 	}
 
-	// Best-effort nginx reload. frontendContainerID may fail if the frontend stack is not
-	// running; that's fine for the caller.
+	// Nginx reload must succeed here: the gateway include entry has already been removed, so a
+	// failed reload leaves the decommissioned subsystem routable. A missing frontend stack is
+	// still tolerated because there is no running gateway to refresh.
 	if projectDirectory != "" && !isIntegratedSubsystem(applicationCode) {
 		if containerID, err := provisioner.frontendContainerID(operationCtx, projectDirectory); err == nil {
-			_ = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary, "exec", containerID, "nginx", "-t")
-			_ = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary, "exec", containerID, "nginx", "-s", "reload")
+			if err := provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary, "exec", containerID, "nginx", "-t"); err != nil {
+				return provisioningError("validate portal gateway configuration")
+			}
+			if err := provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary, "exec", containerID, "nginx", "-s", "reload"); err != nil {
+				return provisioningError("reload portal gateway")
+			}
 		}
 	}
 	return nil

@@ -12,6 +12,56 @@ import (
 // 不把命令输出、文件路径、凭据或其他基础设施细节暴露给浏览器。
 var ErrSubsystemProvisioningUnavailable = errors.New("subsystem provisioning unavailable")
 
+// ErrSubsystemDeploymentTransition 拒绝不符合状态机规则的生命周期转移。仓储层在写入前
+// 校验当前状态是否是目标状态的合法前驱，防止并发操作或误用把状态表写坏。
+var ErrSubsystemDeploymentTransition = errors.New("subsystem deployment status transition not allowed")
+
+// subsystemDeploymentTransitions 定义每个目标状态允许的前驱状态。同状态重复转移视为幂等
+// 成功，不在此表内。
+var subsystemDeploymentTransitions = map[string][]string{
+	SubsystemDeploymentStatusProvisioning: {
+		SubsystemDeploymentStatusReady, SubsystemDeploymentStatusFailed,
+		SubsystemDeploymentStatusOffboarded, SubsystemDeploymentStatusUnmanaged,
+	},
+	SubsystemDeploymentStatusUpdating: {
+		SubsystemDeploymentStatusReady, SubsystemDeploymentStatusFailed,
+		SubsystemDeploymentStatusDraining, SubsystemDeploymentStatusOffboarded,
+		SubsystemDeploymentStatusUnmanaged,
+	},
+	SubsystemDeploymentStatusVerifying: {
+		SubsystemDeploymentStatusProvisioning, SubsystemDeploymentStatusUpdating,
+	},
+	SubsystemDeploymentStatusReady: {
+		SubsystemDeploymentStatusProvisioning, SubsystemDeploymentStatusUpdating,
+		SubsystemDeploymentStatusVerifying, SubsystemDeploymentStatusDraining,
+	},
+	SubsystemDeploymentStatusFailed: {
+		SubsystemDeploymentStatusProvisioning, SubsystemDeploymentStatusUpdating,
+		SubsystemDeploymentStatusVerifying, SubsystemDeploymentStatusDraining,
+	},
+	SubsystemDeploymentStatusDraining: {
+		SubsystemDeploymentStatusReady, SubsystemDeploymentStatusFailed,
+		SubsystemDeploymentStatusUnmanaged,
+	},
+	SubsystemDeploymentStatusOffboarded: {
+		SubsystemDeploymentStatusDraining, SubsystemDeploymentStatusFailed,
+	},
+}
+
+// SubsystemDeploymentTransitionAllowed reports whether from→to is a legal lifecycle move.
+func SubsystemDeploymentTransitionAllowed(from, to string) bool {
+	allowed, ok := subsystemDeploymentTransitions[to]
+	if !ok {
+		return false
+	}
+	for _, status := range allowed {
+		if status == from {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	SubsystemDeploymentStatusProvisioning = "PROVISIONING"
 	SubsystemDeploymentStatusUpdating     = "UPDATING"
@@ -29,6 +79,20 @@ const (
 	SubsystemServiceStatusHealthy      = "HEALTHY"
 	SubsystemServiceStatusUnavailable  = "UNAVAILABLE"
 )
+
+// SubsystemHealthTarget 是一次运行时探活的目标投影：只含应用编码、环境与内部健康检查
+// URL，凭据和宿主机路径不进入该结构。
+type SubsystemHealthTarget struct {
+	ApplicationCode string
+	Environment     string
+	HealthURL       string
+}
+
+// SubsystemHealthTargetResolver 是可选能力接口：由具体仓储实现，健康看板通过类型断言
+// 使用，无需在装配层显式注入。
+type SubsystemHealthTargetResolver interface {
+	ResolveSubsystemHealthTargets(ctx context.Context, tenantID string) ([]SubsystemHealthTarget, error)
+}
 
 // SubsystemServiceInstance 是发现结果在控制面的轻量投影，只含路由元数据；凭据和宿主机路径
 // 永远不跨越发现边界，避免只读盘点意外升级为敏感信息读取。
@@ -132,6 +196,9 @@ type SubsystemDeploymentStateStore interface {
 	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error
 	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
+	// DiscardFailedSubsystemDeployment 删除一条停留在 PROVISION_FAILED 的生命周期记录，
+	// 释放 code+environment 以便重新接入。只允许终态失败记录被丢弃；任何在途状态都会被拒绝。
+	DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error
 }
 
 // SubsystemManifestStateStore 持久化 API/Agent 清单握手结果；旧部署适配器可不实现。
