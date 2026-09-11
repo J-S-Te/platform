@@ -8,6 +8,7 @@ import (
 	stdhttp "net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
@@ -1142,6 +1143,37 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer st
 		handler.writeError(writer, request, err)
 		return
 	}
+	// 真实运行时探活：从仓储解析每个激活环境的容器内健康 URL，并发探测（单目标 2 秒
+	// 超时）。仓储不支持解析（如测试桩）时退回 UNVERIFIED，而不是假报 READY。
+	healthResults := map[string]bool{}
+	if resolver, ok := handler.deploymentState.(application.SubsystemHealthTargetResolver); ok && handler.deploymentState != nil {
+		if targets, err := resolver.ResolveSubsystemHealthTargets(request.Context(), principal.Tenant.ID); err == nil {
+			var waitGroup sync.WaitGroup
+			var resultsMutex sync.Mutex
+			client := &stdhttp.Client{Timeout: 2 * time.Second}
+			for _, target := range targets {
+				waitGroup.Add(1)
+				go func(target application.SubsystemHealthTarget) {
+					defer waitGroup.Done()
+					probeRequest, err := stdhttp.NewRequest(stdhttp.MethodGet, target.HealthURL, nil)
+					if err != nil {
+						return
+					}
+					response, err := client.Do(probeRequest)
+					if err != nil {
+						return
+					}
+					defer response.Body.Close()
+					resultsMutex.Lock()
+					healthResults[target.ApplicationCode+":"+target.Environment] = response.StatusCode >= 200 && response.StatusCode < 400
+					resultsMutex.Unlock()
+				}(target)
+			}
+			waitGroup.Wait()
+		} else {
+			handler.logger.Warn("subsystem health targets unavailable", "tenant_id", principal.Tenant.ID, "error", err)
+		}
+	}
 	entries := make([]SubsystemHealthEntry, 0, len(items))
 	for _, item := range items {
 		entry := SubsystemHealthEntry{
@@ -1149,10 +1181,8 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer st
 			ApplicationName:   item.Name,
 			Environment:       item.Environment,
 			DirectoryOK:       true,
-			RuntimeOK:         true,
 			DirectoryStatus:   "READY",
 			CredentialsStatus: "UNKNOWN",
-			RuntimeStatus:     "READY",
 			KeycloakStatus:    "UNKNOWN",
 			ProjectionStatus:  strings.ToUpper(strings.TrimSpace(item.Projection.Status)),
 			Status:            "VERIFICATION_REQUIRED",
@@ -1160,6 +1190,20 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer st
 		}
 		if !handler.keycloakEnabled {
 			entry.KeycloakStatus = "NOT_APPLICABLE"
+		}
+		switch runtimeHealthy, probed := healthResults[item.Code+":"+item.Environment]; {
+		case probed && runtimeHealthy:
+			entry.RuntimeOK = true
+			entry.RuntimeStatus = "READY"
+		case probed:
+			entry.RuntimeOK = false
+			entry.RuntimeStatus = "UNAVAILABLE"
+			entry.Status = "RUNTIME_UNAVAILABLE"
+			entry.NextAction = "子系统容器健康检查失败；请查看目标容器日志，修复后点击重试。"
+		default:
+			entry.RuntimeOK = false
+			entry.RuntimeStatus = "UNVERIFIED"
+			entry.NextAction = "无法探测子系统运行时（未注册 upstream 或未部署）；请确认部署状态。"
 		}
 		entries = append(entries, entry)
 	}
@@ -1991,6 +2035,64 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 		"environment":      environment,
 	})
 	handler.logger.Warn("subsystem torn down", "path", request.URL.Path,
+		"application_code", applicationCode,
+		"environment", environment,
+		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
+	)
+}
+
+// DiscardFailedSubsystemDeployment handles POST /api/v1/subsystem-deployment-discard. It is the
+// cleanup path for a half-provisioned subsystem: the control-plane record exists, the deployment
+// failed, and operators need to release the code+environment pair for a fresh onboarding. The
+// Agent teardown runs best-effort because a failed deployment may have never created containers
+// or files; the durable lifecycle record is only deleted when it is in the terminal
+// PROVISION_FAILED state. The application/environment rows are intentionally preserved — follow
+// up with DELETE /applications and DELETE /environments to free the path prefix.
+func (handler *SubsystemOnboardingHandler) DiscardFailedSubsystemDeployment(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+	extendSubsystemDeploymentWriteDeadline(writer)
+	principal, ok := subsystemPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	var payload subsystemLifecycleRequest
+	if !decodeApplicationManagementJSON(writer, request, &payload) {
+		return
+	}
+	if err := validateLifecycleRequest(payload); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	applicationCode := strings.TrimSpace(payload.ApplicationCode)
+	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
+	state, err := handler.deploymentState.GetSubsystemDeploymentState(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	state = handler.recoverStaleSubsystemDeployment(request.Context(), state)
+	if state.Status != application.SubsystemDeploymentStatusFailed {
+		handler.writeError(writer, request, fmt.Errorf("deployment is not in a failed state: %s", state.Status))
+		return
+	}
+	// Best-effort infrastructure cleanup: a failed deployment may have stopped after the database
+	// commit, so containers, .env.local, or the gateway include may not exist at all.
+	if teardownErr := handler.provisioner.Teardown(request.Context(), principal.Tenant.ID, applicationCode, environment); teardownErr != nil {
+		handler.logger.Warn("discard teardown left infrastructure residue",
+			"application_code", applicationCode, "environment", environment, "error", teardownErr)
+	}
+	if err := handler.deploymentState.DiscardFailedSubsystemDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, time.Now().UTC()); err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store, private")
+	writer.Header().Set("Pragma", "no-cache")
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "失败部署已清理", map[string]string{
+		"status":           "discarded",
+		"application_code": applicationCode,
+		"environment":      environment,
+		"next_action":      "DELETE /applications 与 /environments 以释放路径前缀后重新接入",
+	})
+	handler.logger.Warn("failed subsystem deployment discarded", "path", request.URL.Path,
 		"application_code", applicationCode,
 		"environment", environment,
 		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,

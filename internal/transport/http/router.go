@@ -340,6 +340,17 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.TeardownSubsystem),
 			)
+			// Discard a deployment stuck in PROVISION_FAILED: best-effort infrastructure
+			// cleanup plus deletion of the durable lifecycle record so the code+environment
+			// pair can be re-onboarded. Follow up with DELETE /applications and
+			// /environments to release the path prefix.
+			apiRouter.POST("/subsystem-deployment-discard",
+				middleware.RequirePermission("platform:application:update"),
+				middleware.RequirePermission("platform:application-environment:update"),
+				middleware.RequirePermission("platform:application-login-target:update"),
+				middleware.RequirePermission("platform:oauth-client:disable"),
+				adaptHandler(operational.SubsystemOnboarding.DiscardFailedSubsystemDeployment),
+			)
 		}
 		if operational.KeycloakIntegration != nil {
 			// Authentication-provider operations have their own namespace. The

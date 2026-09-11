@@ -2,7 +2,9 @@ package infrastructure
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -524,36 +526,52 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 	if status == application.SubsystemDeploymentStatusReady || status == application.SubsystemDeploymentStatusFailed || status == application.SubsystemDeploymentStatusOffboarded {
 		updates["completed_at"] = now.UTC()
 	}
-	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
-		Where("tenant_id = ? AND application_code = ? AND environment_code = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
+	// 状态机守卫：只有在位状态是目标状态的合法前驱（或与目标相同，幂等收口）时才允许
+	// 覆写，并且要求 generation 在读取和写入之间未变化（CAS）。WHERE 同时约束 status 与
+	// generation，并发转移只有第一个能命中，避免“最后一次赢”的状态覆盖。
+	scope := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment)))
+	var current subsystemDeploymentStateModel
+	if err := scope.Session(&gorm.Session{}).Take(&current).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		// 记录缺失：ADOPT 仍允许建档，其余操作维持原有的 NotFound 语义。
+		if !(operation == "ADOPT" && status == application.SubsystemDeploymentStatusUpdating) {
+			return application.ErrNotFound
+		}
+		var adoptionScope struct {
+			ApplicationID string `gorm:"column:application_id"`
+			EnvironmentID string `gorm:"column:environment_id"`
+		}
+		if err := repository.database.WithContext(ctx).Table("platform_application AS application").
+			Select("application.id AS application_id, environment.id AS environment_id").
+			Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
+			Where("application.tenant_id = ? AND application.code = ? AND application.status = ? AND environment.environment = ? AND environment.status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), "ACTIVE", strings.ToLower(strings.TrimSpace(environment)), "ACTIVE").
+			Take(&adoptionScope).Error; err != nil {
+			return mapManagementError(err)
+		}
+		return repository.database.WithContext(ctx).Create(&subsystemDeploymentStateModel{
+			TenantID: strings.TrimSpace(tenantID), ApplicationID: adoptionScope.ApplicationID, EnvironmentID: adoptionScope.EnvironmentID,
+			ApplicationCode: strings.TrimSpace(applicationCode), Environment: strings.ToLower(strings.TrimSpace(environment)),
+			Status: status, Operation: operation, Generation: 1, AttemptCount: 1, ManifestDriftStatus: "UNKNOWN", StartedAt: &now, CreatedAt: now, UpdatedAt: now,
+		}).Error
+	}
+	if current.Status != status && !application.SubsystemDeploymentTransitionAllowed(current.Status, status) {
+		return fmt.Errorf("%w: %s -> %s", application.ErrSubsystemDeploymentTransition, current.Status, status)
+	}
+	result := scope.Session(&gorm.Session{}).
+		Where("status = ? AND generation = ?", current.Status, current.Generation).
 		Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
-		// ADOPT is the single lifecycle operation allowed to create a state for a
-		// directory-only environment. Resolve the active tenant-scoped boundary
-		// server-side; arbitrary update/retry requests must continue to fail when
-		// their deployment record is absent.
-		if operation == "ADOPT" && status == application.SubsystemDeploymentStatusUpdating {
-			var scope struct {
-				ApplicationID string `gorm:"column:application_id"`
-				EnvironmentID string `gorm:"column:environment_id"`
-			}
-			if err := repository.database.WithContext(ctx).Table("platform_application AS application").
-				Select("application.id AS application_id, environment.id AS environment_id").
-				Joins("JOIN platform_application_environment AS environment ON environment.application_id = application.id AND environment.tenant_id = application.tenant_id").
-				Where("application.tenant_id = ? AND application.code = ? AND application.status = ? AND environment.environment = ? AND environment.status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), "ACTIVE", strings.ToLower(strings.TrimSpace(environment)), "ACTIVE").
-				Take(&scope).Error; err != nil {
-				return mapManagementError(err)
-			}
-			return repository.database.WithContext(ctx).Create(&subsystemDeploymentStateModel{
-				TenantID: strings.TrimSpace(tenantID), ApplicationID: scope.ApplicationID, EnvironmentID: scope.EnvironmentID,
-				ApplicationCode: strings.TrimSpace(applicationCode), Environment: strings.ToLower(strings.TrimSpace(environment)),
-				Status: status, Operation: operation, Generation: 1, AttemptCount: 1, ManifestDriftStatus: "UNKNOWN", StartedAt: &now, CreatedAt: now, UpdatedAt: now,
-			}).Error
+		if current.Status == status {
+			// 同状态幂等：目标转移已经在并发竞争中完成，无需重写。
+			return nil
 		}
-		return application.ErrNotFound
+		return fmt.Errorf("%w: %s -> %s (concurrent update)", application.ErrSubsystemDeploymentTransition, current.Status, status)
 	}
 	return nil
 }
@@ -567,6 +585,73 @@ func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState
 		return application.SubsystemDeploymentState{}, mapManagementError(err)
 	}
 	return deploymentStateFromModel(model), nil
+}
+
+// DiscardFailedSubsystemDeployment deletes a lifecycle record that is stuck in
+// PROVISION_FAILED so the application/environment pair can be re-onboarded. The
+// delete is guarded by the failed status itself; anything in flight or healthy
+// must go through the regular retry/teardown lifecycle instead.
+func (repository *SubsystemOnboardingGORMRepository) DiscardFailedSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment string, now time.Time) error {
+	result := repository.database.WithContext(ctx).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND status = ?",
+			strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment)),
+			application.SubsystemDeploymentStatusFailed).
+		Delete(&subsystemDeploymentStateModel{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrValidation
+	}
+	return nil
+}
+
+// ResolveSubsystemHealthTargets projects every active application environment into a
+// container-network health probe URL. Upstream wins over BaseURL because the platform API
+// container can reach the compose network directly, while BaseURL is browser-facing. The
+// health path comes from the environment metadata (default /healthz).
+func (repository *SubsystemOnboardingGORMRepository) ResolveSubsystemHealthTargets(ctx context.Context, tenantID string) ([]application.SubsystemHealthTarget, error) {
+	var rows []struct {
+		Code        string  `gorm:"column:code"`
+		Environment string  `gorm:"column:environment"`
+		UpstreamURL *string `gorm:"column:upstream_url"`
+		BaseURL     *string `gorm:"column:base_url"`
+		Metadata    *string `gorm:"column:metadata"`
+	}
+	err := repository.database.WithContext(ctx).
+		Table("platform_application_environment AS environment").
+		Select("application.code AS code, environment.environment AS environment, environment.upstream_url AS upstream_url, environment.base_url AS base_url, environment.metadata AS metadata").
+		Joins("JOIN platform_application AS application ON application.id = environment.application_id AND application.tenant_id = environment.tenant_id").
+		Where("environment.tenant_id = ? AND environment.status = ? AND application.status = ?", strings.TrimSpace(tenantID), "ACTIVE", "ACTIVE").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]application.SubsystemHealthTarget, 0, len(rows))
+	for _, row := range rows {
+		origin := strings.TrimSpace(dereferenceString(row.UpstreamURL))
+		if origin == "" {
+			origin = strings.TrimSpace(dereferenceString(row.BaseURL))
+		}
+		if origin == "" {
+			continue
+		}
+		healthPath := "/healthz"
+		if row.Metadata != nil && strings.TrimSpace(*row.Metadata) != "" {
+			var metadata struct {
+				HealthPath string `json:"health_path"`
+			}
+			if json.Unmarshal([]byte(*row.Metadata), &metadata) == nil && strings.TrimSpace(metadata.HealthPath) != "" {
+				healthPath = strings.TrimSpace(metadata.HealthPath)
+			}
+		}
+		targets = append(targets, application.SubsystemHealthTarget{
+			ApplicationCode: row.Code,
+			Environment:     row.Environment,
+			HealthURL:       strings.TrimRight(origin, "/") + healthPath,
+		})
+	}
+	return targets, nil
 }
 
 func deploymentStateFromModel(model subsystemDeploymentStateModel) application.SubsystemDeploymentState {

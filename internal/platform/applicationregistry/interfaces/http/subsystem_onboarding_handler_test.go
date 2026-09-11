@@ -459,7 +459,8 @@ func TestSubsystemHealthDashboardDoesNotReportUnverifiedDependenciesAsHealthy(t 
 	}
 	body := response.Body.String()
 	for _, expected := range []string{
-		`"directory_ok":true`, `"credentials_ok":false`, `"runtime_ok":true`,
+		`"directory_ok":true`, `"credentials_ok":false`, `"runtime_ok":false`,
+		`"runtime_status":"UNVERIFIED"`,
 		`"keycloak_ok":false`, `"credentials_status":"UNKNOWN"`,
 		`"keycloak_status":"NOT_APPLICABLE"`, `"projection_status":"SUCCEEDED"`,
 		`"status":"VERIFICATION_REQUIRED"`,
@@ -849,6 +850,10 @@ func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployme
 		status: status, operation: operation, errorCode: errorCode, errorMessage: errorMessage,
 	})
 	return store.transitionErr
+}
+
+func (store *recordingSubsystemDeploymentStateStore) DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error {
+	return nil
 }
 
 func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentState(context.Context, string, string, string) (application.SubsystemDeploymentState, error) {

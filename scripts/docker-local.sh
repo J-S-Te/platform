@@ -859,6 +859,42 @@ data_analysis_machine_credentials_configured() {
 		[[ -n "$(env_value "$data_analysis_env_file" PROJECT_MACHINE_CLIENT_SECRET)" ]]
 }
 
+# data_analysis_catalog_credentials_live 判断数据看板本地配置里的授权目录同步凭据
+# 是否仍被平台接受。平台库重建后 .env.local 仍保留旧凭据，只看 env 会把"已失效"
+# 误判成"已接入"；dashboard-api 启动时才在目录同步处 401 并进入重启循环，最终以
+# unhealthy 中止整套 up。
+data_analysis_catalog_credentials_live() {
+	data_analysis_catalog_status=""
+	# 目录同步关闭时 dashboard-api 不会申请令牌，也就不存在这类启动失败。
+	[[ "$(env_value "$data_analysis_env_file" PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || return 0
+	data_analysis_catalog_status="$(platform_catalog_token_status \
+		"$(env_value "$data_analysis_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID)" \
+		"$(env_value "$data_analysis_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET)")" || data_analysis_catalog_status=""
+	[[ "$data_analysis_catalog_status" == "200" ]]
+}
+
+# data_analysis_onboarding_remediation 给出可直接执行的接入提示。
+data_analysis_onboarding_remediation() {
+	cat <<'REMEDIATION'
+
+请先在基础平台完成一次性数据看板接入，然后重新执行 up：
+
+  bash scripts/subsystem.sh onboard \
+    --application-code data_analysis \
+    --application-name 数据看板与统计分析 \
+    --environment dev \
+    --api-base-url http://localhost:8081/api/v1 \
+    --platform-origin http://localhost:8081 \
+    --public-base-url http://localhost:8081 \
+    --upstream-url http://dashboard-api:8080 \
+    --path-prefix /data_analysis \
+    --account <平台管理员账号>
+
+接入完成后按提示回填 data_analysis/.env.local 的 OIDC_* 与
+PLATFORM_AUTHORIZATION_CATALOG_* 凭据，再重新执行 up。
+REMEDIATION
+}
+
 portal_configured() {
 	# 不能只看镜像或数据库是否存在；四项接入产物齐全才允许把 Portal 纳入默认 profile 启动。
 	[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_ID)" ]] &&
@@ -1341,6 +1377,29 @@ frontend_http_status() {
     printf '%s' "$status"
 }
 
+# platform_catalog_token_status 用给定客户端凭据向平台换取一次授权目录同步令牌，
+# 返回 HTTP 状态码。该请求只换令牌、不写任何数据，可安全用作启动前探针：200 表示
+# 凭据仍被平台认可，401 表示该子系统在平台侧已不存在（典型场景是平台库被重建，
+# 而子系统 .env.local 保留了旧凭据）。沿用 frontend_http_status 的约定走容器内
+# 自带的 wget，避免要求部署主机额外安装 curl；basic 值用已强依赖的 openssl 生成。
+platform_catalog_token_status() {
+    local client_id="$1" client_secret="$2" output status basic
+
+    [[ -n "$client_id" && -n "$client_secret" ]] || return 1
+    basic="$(printf '%s:%s' "$client_id" "$client_secret" | openssl base64 -A)"
+    output="$(
+        compose_run exec -T frontend \
+            wget -S -O /dev/null \
+            --header="Authorization: Basic ${basic}" \
+            --header="Content-Type: application/x-www-form-urlencoded" \
+            --post-data="grant_type=client_credentials&scope=authorization.catalog.sync" \
+            "http://127.0.0.1/oauth2/token" 2>&1 || true
+    )"
+    status="$(printf '%s\n' "$output" | awk '$1 ~ /^HTTP\// { print $2; exit }')"
+    [[ -n "$status" ]] || return 1
+    printf '%s' "$status"
+}
+
 # 后端容器通过 Compose healthcheck 变为 healthy 后，统一 Nginx 仍可能在数秒内
 # 复用旧上游连接。启动校验对业务健康地址短暂重试，避免已成功启动的服务被一次 502
 # 误判为失败；认证/授权等语义校验仍保持单次、严格检查。
@@ -1461,16 +1520,17 @@ verify_gateway_routes() {
             ;;
     esac
 
-    wait_for_frontend_status /customer-opportunity/healthz 200 "客户与商机管理健康检查路径"
+    if [[ "${crm_catalog_ready:-true}" == true ]]; then
+        wait_for_frontend_status /customer-opportunity/healthz 200 "客户与商机管理健康检查路径"
+        customer_session_status="$(frontend_http_status /customer-opportunity/api/v1/auth/me)" || \
+            fail "无法访问客户与商机管理登录状态接口"
+        case "$customer_session_status" in
+            401|503) ;;
+            *) fail "客户与商机管理登录状态接口返回 ${customer_session_status}，预期开发认证未携带身份时为 401（或认证未配置时为 503）" ;;
+        esac
+    fi
 
-	customer_session_status="$(frontend_http_status /customer-opportunity/api/v1/auth/me)" || \
-        fail "无法访问客户与商机管理登录状态接口"
-    case "$customer_session_status" in
-        401|503) ;;
-        *) fail "客户与商机管理登录状态接口返回 ${customer_session_status}，预期开发认证未携带身份时为 401（或认证未配置时为 503）" ;;
-	esac
-
-	if portal_configured; then
+	if portal_configured && [[ "${portal_catalog_ready:-true}" == true ]]; then
 		wait_for_frontend_status /customer-portal/healthz 200 "客户自助门户健康检查路径"
 		portal_session_status="$(frontend_http_status /customer-portal/api/v1/auth/me)" || \
 			fail "无法访问客户自助门户登录状态接口"
@@ -1486,7 +1546,7 @@ verify_gateway_routes() {
 			fail "项目管理系统登录状态接口返回 ${project_session_status}，预期未登录状态为 401"
 	fi
 
-	if data_analysis_configured; then
+	if data_analysis_configured && [[ "${data_analysis_ready:-true}" == true ]]; then
 		wait_for_frontend_status /data_analysis/healthz 200 "数据看板健康检查路径"
 		data_analysis_session_status="$(frontend_http_status /data_analysis/api/v1/auth/me)" || \
 			fail "无法访问数据看板登录状态接口"
@@ -1530,26 +1590,36 @@ start_stack() {
     # 平台库一旦缺少接入记录，up 会在发布处中止而 8081 始终起不来，接入与启动互相等待。
     log "启动统一前端（先于子系统接入步骤，保证门户网关可用于首次接入）"
     compose_up_wait "统一前端" frontend
-    sync_crm_authorization_catalog
+    crm_catalog_ready=true
+    if ! sync_crm_authorization_catalog; then
+        log "跳过客户与商机管理后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
+    fi
     log "启动合同管理后端"
     compose_up_wait "合同管理后端" contract-api
-	log "启动客户与商机管理后端"
-	compose_up_wait "客户与商机管理后端" customer-api
-	start_customer_notification_workers
-	log "启动售前预警扫描 Worker"
-	compose_run up -d --wait --no-deps customer-presale-alert-worker
-	# 售前申请提交依赖独立 Worker 的新鲜心跳。up 现在默认一并启动本地
-	# 集成 Mock 和 Worker，避免只启动 customer-api 后页面始终提示 Worker 未就绪。
-	log "启动售前投递 Worker 并确认新鲜心跳"
-	start_presale_worker --skip-build --skip-migrate
+    if [[ "$crm_catalog_ready" == true ]]; then
+        log "启动客户与商机管理后端"
+        compose_up_wait "客户与商机管理后端" customer-api
+        start_customer_notification_workers
+        log "启动售前预警扫描 Worker"
+        compose_run up -d --wait --no-deps customer-presale-alert-worker
+        # 售前申请提交依赖独立 Worker 的新鲜心跳。up 现在默认一并启动本地
+        # 集成 Mock 和 Worker，避免只启动 customer-api 后页面始终提示 Worker 未就绪。
+        log "启动售前投递 Worker 并确认新鲜心跳"
+        start_presale_worker --skip-build --skip-migrate
+    fi
 	if portal_configured; then
 		log "启动已接入的客户自助门户后端"
-		sync_portal_authorization_catalog
-		# portal-migrate 已在 run_migrations 中串行成功执行；再次让
-		# `up --wait` 解析其 service_completed_successfully 依赖会重建一次性
-		# 容器，并可能在等待阶段引用已被 Compose 清理的旧容器 ID。
-		compose_run up -d --wait --no-deps portal-api
-		compose_run up -d --no-deps portal-invite-compensation-worker
+		portal_catalog_ready=true
+		if ! sync_portal_authorization_catalog; then
+			log "跳过客户自助门户后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
+		fi
+		if [[ "$portal_catalog_ready" == true ]]; then
+			# portal-migrate 已在 run_migrations 中串行成功执行；再次让
+			# `up --wait` 解析其 service_completed_successfully 依赖会重建一次性
+			# 容器，并可能在等待阶段引用已被 Compose 清理的旧容器 ID。
+			compose_run up -d --wait --no-deps portal-api
+			compose_run up -d --no-deps portal-invite-compensation-worker
+		fi
 	else
 		log "客户自助门户尚未接入，跳过 portal-api；可在应用接入中创建 customer_portal/dev"
 	fi
@@ -1563,11 +1633,21 @@ start_stack() {
 	fi
 	if data_analysis_configured; then
 		data_analysis_machine_credentials_configured || fail "数据看板已接入，但缺少 CONTRACT_MACHINE_* / PROJECT_MACHINE_* 分离机器凭据；请在应用接入页重新同步 data_analysis/dev，旧 MACHINE_CLIENT_* 不能替代两组新凭据"
-		log "启动已接入的数据看板后端（dashboard-api + 聚合 Worker + Metabase）"
-		# 业务 Schema 由独立迁移二进制管理；MySQL 初始化只创建 Metabase 元数据库。
-		compose_run up -d --wait dashboard-mysql
-		compose_run run --rm --no-deps dashboard-migrate
-		compose_run up -d --wait --no-deps dashboard-api aggregation-worker alert-worker metabase
+		data_analysis_ready=true
+		if ! data_analysis_catalog_credentials_live; then
+			# dashboard-api 在启动时会自行同步授权目录，凭据失效会 401 并进入重启
+			# 循环，令 `up --wait` 以 unhealthy 中止整套部署。这里提前探测并跳过。
+			data_analysis_ready=false
+			log "跳过数据看板后端（data_analysis 尚未接入本项目平台：授权目录同步令牌返回 ${data_analysis_catalog_status:-无响应}）"
+			data_analysis_onboarding_remediation >&2
+		fi
+		if [[ "$data_analysis_ready" == true ]]; then
+			log "启动已接入的数据看板后端（dashboard-api + 聚合 Worker + Metabase）"
+			# 业务 Schema 由独立迁移二进制管理；MySQL 初始化只创建 Metabase 元数据库。
+			compose_run up -d --wait dashboard-mysql
+			compose_run run --rm --no-deps dashboard-migrate
+			compose_run up -d --wait --no-deps dashboard-api aggregation-worker alert-worker metabase
+		fi
 	else
 		log "数据看板尚未接入，跳过 dashboard-api；可在应用接入中创建 data_analysis/dev"
 	fi
@@ -1688,8 +1768,13 @@ sync_crm_authorization_catalog() {
     log "已写入当前 CRM 授权目录哈希到客户与商机运行时配置：$OIDC_ROLE_CONFIG_HASH"
     log "使用本地 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
     log "启动 CRM 前发布客户与商机管理授权目录"
-    if ! compose_run run --rm --no-deps -e OIDC_ROLE_CONFIG_HASH="$OIDC_ROLE_CONFIG_HASH" customer-api ./authz-catalog publish crm; then
-        fail "CRM 授权目录发布失败：平台拒绝了目录发布客户端，通常是 customer_and_opportunity 尚未接入本项目平台（平台库重建后 Application/OAuth Client 会一并消失）。$(crm_onboarding_remediation)"
+    if compose_run run --rm --no-deps -e OIDC_ROLE_CONFIG_HASH="$OIDC_ROLE_CONFIG_HASH" customer-api ./authz-catalog publish crm; then
+        crm_catalog_ready=true
+    else
+        crm_catalog_ready=false
+        log "CRM 授权目录发布失败：customer_and_opportunity 尚未接入本项目平台（平台库重建后 Application/OAuth Client 会一并消失）"
+        crm_onboarding_remediation >&2
+        return 1
     fi
 }
 
@@ -1727,7 +1812,28 @@ sync_portal_authorization_catalog() {
     replace_line_in_file "$portal_env_file" PORTAL_ROLE_CONFIG_HASH "$PORTAL_ROLE_CONFIG_HASH"
     log "已写入当前 Portal 授权目录哈希到客户门户运行时配置：$PORTAL_ROLE_CONFIG_HASH"
     log "启动 Portal 前发布客户自助门户授权目录"
-    compose_run run --rm --no-deps -e PORTAL_ROLE_CONFIG_HASH="$PORTAL_ROLE_CONFIG_HASH" portal-api ./authz-catalog publish portal
+    if compose_run run --rm --no-deps -e PORTAL_ROLE_CONFIG_HASH="$PORTAL_ROLE_CONFIG_HASH" portal-api ./authz-catalog publish portal; then
+        portal_catalog_ready=true
+    else
+        portal_catalog_ready=false
+        log "Portal 授权目录发布失败：customer_portal 尚未接入本项目平台（平台库重建后 Application/OAuth Client 会一并消失）"
+        portal_onboarding_remediation >&2
+        return 1
+    fi
+}
+
+# portal_onboarding_remediation 给出可直接执行的首次接入命令，与 CRM 同理。
+portal_onboarding_remediation() {
+    cat <<'REMEDIATION'
+
+请先完成一次性客户自助门户接入，然后重新执行 up：
+
+  bash scripts/subsystem.sh onboard \
+    --preset customer-portal-local \
+    --account <平台管理员账号>
+
+门户网关 http://localhost:8081（up 会先启动统一前端）可直接执行上面的命令。
+REMEDIATION
 }
 
 refresh_portal_backend() {
