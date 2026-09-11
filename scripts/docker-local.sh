@@ -1525,6 +1525,11 @@ start_stack() {
 	log "启动结算与开票 API 与后台 Worker"
 	compose_up_wait "结算与开票 API" settlement-api
 	compose_run up -d --wait --no-deps settlement-worker
+    # 统一前端必须先于子系统接入步骤可用：subsystem.sh onboard 要经
+    # http://localhost:8081/api/v1 登录平台。若把前端排在 CRM 目录发布之后，
+    # 平台库一旦缺少接入记录，up 会在发布处中止而 8081 始终起不来，接入与启动互相等待。
+    log "启动统一前端（先于子系统接入步骤，保证门户网关可用于首次接入）"
+    compose_up_wait "统一前端" frontend
     sync_crm_authorization_catalog
     log "启动合同管理后端"
     compose_up_wait "合同管理后端" contract-api
@@ -1566,8 +1571,7 @@ start_stack() {
 	else
 		log "数据看板尚未接入，跳过 dashboard-api；可在应用接入中创建 data_analysis/dev"
 	fi
-    log "启动统一前端"
-    compose_up_wait "统一前端" frontend
+    # 统一前端已在子系统接入前启动，这里只做网关校验。
     verify_gateway_routes
     compose_run ps
     log "统一访问地址：${frontend_public_origin}"
@@ -1684,7 +1688,31 @@ sync_crm_authorization_catalog() {
     log "已写入当前 CRM 授权目录哈希到客户与商机运行时配置：$OIDC_ROLE_CONFIG_HASH"
     log "使用本地 CRM 镜像内嵌授权目录哈希：$OIDC_ROLE_CONFIG_HASH"
     log "启动 CRM 前发布客户与商机管理授权目录"
-    compose_run run --rm --no-deps -e OIDC_ROLE_CONFIG_HASH="$OIDC_ROLE_CONFIG_HASH" customer-api ./authz-catalog publish crm
+    if ! compose_run run --rm --no-deps -e OIDC_ROLE_CONFIG_HASH="$OIDC_ROLE_CONFIG_HASH" customer-api ./authz-catalog publish crm; then
+        fail "CRM 授权目录发布失败：平台拒绝了目录发布客户端，通常是 customer_and_opportunity 尚未接入本项目平台（平台库重建后 Application/OAuth Client 会一并消失）。$(crm_onboarding_remediation)"
+    fi
+}
+
+# crm_onboarding_remediation 给出可直接执行的首次接入命令：发布失败的原始输出只有
+# "platform authorization catalog token returned HTTP 401"，使用者无从判断该做什么。
+crm_onboarding_remediation() {
+    cat <<'REMEDIATION'
+
+请先完成一次性应用接入，然后重新执行 up：
+
+  bash scripts/subsystem.sh onboard \
+    --application-code customer_and_opportunity \
+    --application-name 客户与商机管理系统 \
+    --environment dev \
+    --api-base-url http://localhost:8081/api/v1 \
+    --platform-origin http://localhost:8081 \
+    --public-base-url http://localhost:8081 \
+    --upstream-url http://customer-api:8090 \
+    --path-prefix /customer-opportunity \
+    --account <平台管理员账号>
+
+门户网关 http://localhost:8081（up 会先启动统一前端）可直接执行上面的命令。
+REMEDIATION
 }
 
 # Portal 与 CRM 使用独立的授权目录和运行时哈希。Portal 镜像升级后，必须在
