@@ -664,6 +664,29 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # SLA 主动提醒扫描：周期任务与 API 分离，避免把周期性工作塞进请求路径。
+  # 目标租户由 SLA_SCAN_TENANTS 显式给出（系统侧任务不代替用户授权，必须限定范围）；
+  # 未配置平台通知凭据时只记录告警并空转，不影响其它服务。
+  sla-notifier:
+    <<: *project-backend-runtime
+    profiles: ["project"]
+    build:
+      context: ../project_management
+    env_file: *project-runtime-env
+    environment:
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      PLATFORM_BASE_URL: http://platform-api:8080
+      SLA_SCAN_INTERVAL: ${SLA_SCAN_INTERVAL:-15m}
+      SLA_SCAN_TENANTS: ${SLA_SCAN_TENANTS:-}
+    # 镜像的 ENTRYPOINT 指向 project-api，这里必须覆盖 entrypoint（command 只会成为它的参数）。
+    entrypoint: ["/usr/local/bin/sla-notifier"]
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
   # 数据看板与统计分析：独立仓库、独立镜像。dashboard-api（嵌入桥+业务 API）+
   # 聚合库 dashboard-mysql + Metabase（内网第三方，仅经 dashboard-api 代理访问）+ 两个 Worker。
   # 未完成 data_analysis/dev 应用接入前不纳入默认启动（data-analysis profile 控制）。
