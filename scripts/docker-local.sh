@@ -1540,6 +1540,9 @@ verify_gateway_routes() {
 
 	if project_configured; then
 		wait_for_frontend_status /project_management/healthz 200 "项目管理系统健康检查路径"
+		# 就绪检查单独校验：库结构落后于代码时 /readyz 返回 503 并列出待执行迁移。
+		# 只探 /healthz 会把"部署时漏跑迁移"放过去，随后任何写操作都只报 500「服务暂不可用」。
+		wait_for_frontend_status /project_management/readyz 200 "项目管理系统就绪检查（迁移已应用）"
 		project_session_status="$(frontend_http_status /project_management/api/v1/auth/me)" || \
 			fail "无法访问项目管理系统登录状态接口"
 		[[ "$project_session_status" == "401" ]] || \
