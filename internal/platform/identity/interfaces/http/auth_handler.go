@@ -180,7 +180,7 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 
 	result, err := handler.service.Login(request.Context(), application.LoginInput{
 		Account: payload.Account, Password: payload.Password, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
-		ReplaceExistingSession: payload.ReplaceExistingSession,
+		ReplaceExistingSession: payload.ReplaceExistingSession, CurrentPrincipal: handler.currentBrowserPrincipal(request),
 	})
 	if err != nil {
 		handler.recordLoginFailure(request, err)
@@ -283,7 +283,10 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	if identityID == "" {
 		identityID = userInfoID
 	}
-	result, err := handler.service.LoginOIDC(request.Context(), application.OIDCLoginInput{IdentityID: identityID, IPAddress: remoteIP(request), UserAgent: request.UserAgent()})
+	result, err := handler.service.LoginOIDC(request.Context(), application.OIDCLoginInput{
+		IdentityID: identityID, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
+		CurrentPrincipal: handler.currentBrowserPrincipal(request),
+	})
 	if err != nil {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_ACCOUNT_NOT_LINKED", "统一身份尚未绑定平台账号", nil))
 		return
@@ -475,6 +478,21 @@ func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 // Authenticate delegates token verification to the application service for HTTP middleware.
 func (handler *Handler) Authenticate(ctx context.Context, token string) (authctx.Principal, error) {
 	return handler.service.Authenticate(ctx, token)
+}
+
+// currentBrowserPrincipal resolves an existing platform cookie before a login
+// response replaces it. Invalid or expired cookies are treated as no session;
+// authentication errors must not disclose whether an old cookie was present.
+func (handler *Handler) currentBrowserPrincipal(request *http.Request) *authctx.Principal {
+	cookie, err := request.Cookie(handler.cookie.name)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return nil
+	}
+	principal, err := handler.service.Authenticate(request.Context(), cookie.Value)
+	if err != nil {
+		return nil
+	}
+	return &principal
 }
 
 // CookieName exposes the configured cookie name to the HTTP authentication middleware.

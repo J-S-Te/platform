@@ -131,6 +131,10 @@ type LoginInput struct {
 	IPAddress              net.IP
 	UserAgent              string
 	ReplaceExistingSession bool
+	// CurrentPrincipal is the already authenticated browser identity, when one
+	// exists. It is used only to make an account switch revoke the previous
+	// platform and Keycloak sessions before the new cookie is issued.
+	CurrentPrincipal *authctx.Principal
 }
 
 // OIDCLoginInput contains the already-verified stable identity returned by the
@@ -142,6 +146,7 @@ type OIDCLoginInput struct {
 	IPAddress              net.IP
 	UserAgent              string
 	ReplaceExistingSession bool
+	CurrentPrincipal       *authctx.Principal
 }
 
 // SessionResult is the non-sensitive API session representation plus the HttpOnly cookie value.
@@ -203,6 +208,9 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 		}
 		return SessionResult{}, fmt.Errorf("record successful password verification: %w", err)
 	}
+	if err := service.terminatePreviousBrowserIdentity(ctx, input.CurrentPrincipal, account.UserID); err != nil {
+		return SessionResult{}, err
+	}
 
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
@@ -226,7 +234,24 @@ func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (Se
 	if account.UserID != identityID || !isSessionLoginEligible(account, now) {
 		return SessionResult{}, ErrUnauthenticated
 	}
+	if err := service.terminatePreviousBrowserIdentity(ctx, input.CurrentPrincipal, account.UserID); err != nil {
+		return SessionResult{}, err
+	}
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
+}
+
+// terminatePreviousBrowserIdentity keeps the platform cookie and the Keycloak
+// Realm session on the same user. Without this step, logging in as B while the
+// browser still holds A's platform session leaves A authenticated in Keycloak;
+// the next brokered subsystem login then fails with different_user_authenticated.
+func (service *Service) terminatePreviousBrowserIdentity(ctx context.Context, current *authctx.Principal, nextUserID string) error {
+	if current == nil || current.User.ID == "" || current.User.ID == nextUserID {
+		return nil
+	}
+	if err := service.Logout(ctx, *current); err != nil {
+		return fmt.Errorf("terminate previous browser identity before account switch: %w", err)
+	}
+	return nil
 }
 
 func (service *Service) consumeUnknownAccountPassword(password string) {
