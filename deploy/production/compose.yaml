@@ -27,7 +27,10 @@ x-contract-service: &contract-service
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_WORKER_DEPLOYMENT_NAME: contract-management
-    TEMPORAL_WORKER_VERSIONING_ENABLED: "true"
+    # 历史合同审批由未版本化 Worker 创建。只有完成 Current 版本提升并确认
+    # UNVERSIONED 队列已排空后，才允许显式开启 Deployment Versioning；否则
+    # 旧审批会永久停在 Workflow Task Scheduled，详情与审批命令均返回 503。
+    TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
     TEMPORAL_WORKER_VERSIONING_POLICY: PINNED
     TEMPORAL_METRICS_ADDRESS: :9091
     GIN_MODE: release
@@ -381,6 +384,9 @@ services:
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
       TEMPORAL_ADDRESS: temporal:7233
+      # environment 映射不会与 x-contract-service 的同名映射递归合并，必须在
+      # 实际服务上重复声明，否则程序会退回自身默认值。
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
       CONTRACT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
     command: ["./api"]
