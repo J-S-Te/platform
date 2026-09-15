@@ -1531,13 +1531,14 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			fileGateway,
 		}
 	case "project_management":
-		// 服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读负责人目录凭据。
-		// 受控更新/重试必须像首次接入一样确保该机器凭据存在并重新下发，否则运行时会
-		// 因 runtime 中仍是 PENDING_ONBOARDING 而拒绝启动。
+		// 服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读负责人目录凭据；
+		// 人工新建项目必须通过独立机器身份读取已审批合同。受控更新/重试必须像首次
+		// 接入一样补齐并重新下发这些凭据，否则运行时会因缺少 Secret 而拒绝部署。
 		return []updateServiceCredentialRequirement{
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "项目管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
 			// 自动化规则命中后把站内信投递到平台统一 outbox。
 			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-ingest", clientName: "项目管理系统 站内信投递器", scope: "notification.ingest", rotate: true},
+			{purpose: application.ServiceCredentialContractApprovedRead, suffix: "contract-approved-reader", clientName: "项目管理系统 Approved Contract Reader", scope: "contract.approved.internal.read", rotate: true},
 			fileGateway,
 		}
 	case "settlement_and_invoicing":

@@ -245,6 +245,30 @@ func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *tes
 	})
 }
 
+func TestEnsureUpdateServiceCredentialsBackfillsProjectApprovedContractReader(t *testing.T) {
+	manager := &serviceCredentialManagerStub{}
+	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+	credentials, err := handler.ensureUpdateServiceCredentials(
+		context.Background(), "tenant-1", "application-1", "environment-1",
+		"project_management", "prod", "operator-1", "UPDATE",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"project_management-prod-owner-directory":          {"owner_directory.read"},
+		"project_management-prod-notification-ingest":      {"notification.ingest"},
+		"project_management-prod-contract-approved-reader": {"contract.approved.internal.read"},
+		"project_management-prod-file-gateway-writer":      {"platform:file:upload", "platform:file:bind", "platform:file:download"},
+	})
+	requireOnlyCredentialPurposes(t, credentials, map[string]string{
+		application.ServiceCredentialOwnerDirectoryRead:   "new-secret",
+		application.ServiceCredentialNotificationIngest:   "new-secret",
+		application.ServiceCredentialContractApprovedRead: "new-secret",
+		application.ServiceCredentialFileGatewayWrite:     "new-secret",
+	})
+}
+
 func TestEnsureWebOAuthClientCreatesMissingAuthorizationCodeClient(t *testing.T) {
 	manager := &serviceCredentialManagerStub{}
 	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
