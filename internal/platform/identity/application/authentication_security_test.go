@@ -73,13 +73,24 @@ type createSessionRepositorySpy struct {
 	createCalls     int
 	idleTimeout     time.Duration
 	replaceExisting bool
+	calls           *[]string
 }
 
 func (spy *createSessionRepositorySpy) CreateSession(_ context.Context, _ domain.LoginAccount, _ domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
+	if spy.calls != nil {
+		*spy.calls = append(*spy.calls, "create")
+	}
 	spy.createCalls++
 	spy.idleTimeout = idleTimeout
 	spy.replaceExisting = replaceExisting
 	return spy.createErr
+}
+
+func (spy *createSessionRepositorySpy) RevokeAccountSessions(context.Context, string, string, time.Time, string) error {
+	if spy.calls != nil {
+		*spy.calls = append(*spy.calls, "platform")
+	}
+	return nil
 }
 
 type authenticationTokenManagerStub struct{}
@@ -286,6 +297,70 @@ func TestLoginOIDCRejectsLockedAccountWithoutCreatingSession(t *testing.T) {
 	}
 	if repository.createCalls != 0 {
 		t.Fatalf("CreateSession() calls = %d, want 0 for a locked account", repository.createCalls)
+	}
+}
+
+func TestLoginOIDCSwitchRevokesPreviousPlatformAndKeycloakSessionsBeforeCreatingNewSession(t *testing.T) {
+	now := time.Date(2026, time.September, 15, 8, 0, 0, 0, time.UTC)
+	calls := []string{}
+	repository := &createSessionRepositorySpy{
+		authenticationRepositoryStub: authenticationRepositoryStub{account: domain.LoginAccount{
+			TenantID: "tenant-1", TenantStatus: domain.StatusActive,
+			UserID: "identity-new", UserStatus: domain.StatusActive,
+			AccountID: "account-new", AccountStatus: domain.StatusActive,
+		}},
+		calls: &calls,
+	}
+	external := &externalSessionTerminatorSpy{calls: &calls}
+	service := &Service{
+		repository: repository, externalSessions: external,
+		tokens: authenticationTokenManagerStub{}, ids: authenticationIDGeneratorStub{}, clock: authenticationClockStub{now: now},
+		loginSecurity: loginSecurityStub{idleTimeout: 30 * time.Minute}, sessionTTL: 12 * time.Hour,
+	}
+	current := authctx.Principal{
+		SessionID: "session-old", Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User: authctx.ReferenceName{ID: "identity-old"}, Account: authctx.ReferenceName{ID: "account-old"},
+	}
+
+	result, err := service.LoginOIDC(context.Background(), OIDCLoginInput{IdentityID: "identity-new", CurrentPrincipal: &current})
+	if err != nil {
+		t.Fatalf("LoginOIDC() error = %v", err)
+	}
+	if result.UserID != "identity-new" {
+		t.Fatalf("LoginOIDC() user = %q, want identity-new", result.UserID)
+	}
+	if got, want := strings.Join(calls, ","), "keycloak,platform,create"; got != want {
+		t.Fatalf("account-switch calls = %q, want %q", got, want)
+	}
+	if external.identityID != "identity-old" {
+		t.Fatalf("revoked Keycloak identity = %q, want identity-old", external.identityID)
+	}
+}
+
+func TestLoginOIDCSwitchFailsClosedBeforeCreatingSessionWhenKeycloakIsUnavailable(t *testing.T) {
+	now := time.Date(2026, time.September, 15, 8, 0, 0, 0, time.UTC)
+	repository := &createSessionRepositorySpy{authenticationRepositoryStub: authenticationRepositoryStub{account: domain.LoginAccount{
+		TenantID: "tenant-1", TenantStatus: domain.StatusActive,
+		UserID: "identity-new", UserStatus: domain.StatusActive,
+		AccountID: "account-new", AccountStatus: domain.StatusActive,
+	}}}
+	external := &externalSessionTerminatorSpy{calls: &[]string{}, err: errors.New("keycloak unavailable")}
+	service := &Service{
+		repository: repository, externalSessions: external,
+		tokens: authenticationTokenManagerStub{}, ids: authenticationIDGeneratorStub{}, clock: authenticationClockStub{now: now},
+		loginSecurity: loginSecurityStub{idleTimeout: 30 * time.Minute}, sessionTTL: 12 * time.Hour,
+	}
+	current := authctx.Principal{
+		SessionID: "session-old", Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User: authctx.ReferenceName{ID: "identity-old"}, Account: authctx.ReferenceName{ID: "account-old"},
+	}
+
+	_, err := service.LoginOIDC(context.Background(), OIDCLoginInput{IdentityID: "identity-new", CurrentPrincipal: &current})
+	if err == nil || !strings.Contains(err.Error(), "terminate previous browser identity") {
+		t.Fatalf("LoginOIDC() error = %v, want fail-closed account-switch error", err)
+	}
+	if repository.createCalls != 0 {
+		t.Fatalf("CreateSession() calls = %d, want 0", repository.createCalls)
 	}
 }
 
