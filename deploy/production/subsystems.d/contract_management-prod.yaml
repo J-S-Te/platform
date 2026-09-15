@@ -40,6 +40,15 @@ runtime:
         DASHBOARD_MACHINE_CALLER_APPLICATION_CODE: data_analysis
         DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE: prod
         DASHBOARD_MACHINE_REQUIRED_SCOPE: dashboard.contract.read
+        PROJECT_APPROVAL_MACHINE_ENABLED: "true"
+        PROJECT_APPROVAL_MACHINE_REQUIRE_BEARER: "true"
+        PROJECT_APPROVAL_MACHINE_ISSUER: basic-platform
+        PROJECT_APPROVAL_MACHINE_AUDIENCE: basic-platform-application
+        PROJECT_APPROVAL_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        PROJECT_APPROVAL_MACHINE_CLIENT_ID: project_management-prod-contract-approved-reader
+        PROJECT_APPROVAL_MACHINE_CALLER_APPLICATION_CODE: project_management
+        PROJECT_APPROVAL_MACHINE_CALLER_ENVIRONMENT_CODE: prod
+        PROJECT_APPROVAL_MACHINE_REQUIRED_SCOPE: contract.approved.internal.read
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
         STAMPED_FILE_GATEWAY_MODE: dual

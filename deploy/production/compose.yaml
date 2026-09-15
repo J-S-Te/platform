@@ -480,6 +480,24 @@ services:
       retries: 15
       start_period: 10s
 
+  # 项目 SLA 与通知 outbox 独立消费者。API 事务只负责可靠入库；该进程按幂等键重试投递。
+  project-sla-notifier:
+    <<: *project-service
+    entrypoint: ["/usr/local/bin/sla-notifier"]
+    environment:
+      PM_HTTP_ADDR: :8082
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      PLATFORM_BASE_URL: http://platform-api:8080
+      SLA_SCAN_TENANTS: ${PROJECT_SLA_SCAN_TENANTS:-}
+      NOTIFICATION_ENABLED: "true"
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
   # 数据看板聚合库与 Metabase 由平台生产 Compose 统一托管；Metabase 只在
   # application 网络内提供服务，公网入口只能经过 dashboard-api 的代理。
   data-analysis-mysql:
