@@ -1,5 +1,13 @@
 # Current Task
 
+## Focused follow-up: project workflow production integration (2026-09-14)
+
+- Registered the contract approved-state reader as a machine binding for project management.
+- Added project file upload/bind scopes and production environment wiring.
+- Added `project-sla-notifier` to production Compose and the project image build targets.
+- `go test ./...` passed with an isolated GOCACHE; production Compose config validation passed.
+- Deployment has not been performed.
+
 ## 目标
 
 修复临时账号到期、账号处于锁定窗口时，基础平台仍显示启用且 Keycloak 未同步禁用的问题。
