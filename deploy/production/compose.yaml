@@ -496,7 +496,14 @@ services:
       platform-api:
         condition: service_healthy
     healthcheck:
-      disable: true
+      # 该 Worker 不提供 HTTP 端口，但受控发布使用 `docker compose up --wait`。
+      # 用 PID 1 存活探针让 Compose 能区分“持续运行”与“启动后立即退出”，同时
+      # 避免把无健康检查的长期服务误判为部署失败。
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
 
   # 数据看板聚合库与 Metabase 由平台生产 Compose 统一托管；Metabase 只在
   # application 网络内提供服务，公网入口只能经过 dashboard-api 的代理。
