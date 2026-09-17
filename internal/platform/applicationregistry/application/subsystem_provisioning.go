@@ -193,7 +193,7 @@ type SubsystemDeploymentState struct {
 // 而不重新创建无法恢复明文的 OAuth 凭据或重复执行首次接入。
 type SubsystemDeploymentStateStore interface {
 	TransitionSubsystemDeployment(context.Context, string, string, string, string, string, string, string, time.Time) error
-	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error
+	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, string, time.Time) error
 	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
 	// DiscardFailedSubsystemDeployment 删除一条停留在 PROVISION_FAILED 的生命周期记录，

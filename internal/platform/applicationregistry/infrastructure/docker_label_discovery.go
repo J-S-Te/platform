@@ -27,7 +27,11 @@ func discoverDockerLabelCandidates(ctx context.Context, dockerBinary string) ([]
 	if dockerBinary == "" {
 		dockerBinary = "docker"
 	}
-	ids, err := runDockerDiscoveryCommand(ctx, dockerBinary, "ps", "--filter", "label="+dockerDiscoveryLabel+"=v1", "--format", "{{.ID}}")
+	// 首次接入的子系统可能只有 Compose 创建的候选容器，还不能启动：它需要
+	// 平台先签发 OIDC 与目录发布凭据。候选发现必须包含 created/exited 容器，
+	// 否则会形成“未接入不能启动、未运行不能探测”的死锁。服务实例发现仍只
+	// 使用运行中的容器，不能把未启动候选当成可路由服务。
+	ids, err := runDockerDiscoveryCommand(ctx, dockerBinary, dockerCandidateListArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("discover Docker subsystem candidates: %w", err)
 	}
@@ -47,6 +51,10 @@ func discoverDockerLabelCandidates(ctx context.Context, dockerBinary string) ([]
 		}
 	}
 	return candidates, nil
+}
+
+func dockerCandidateListArgs() []string {
+	return []string{"ps", "--all", "--filter", "label=" + dockerDiscoveryLabel + "=v1", "--format", "{{.ID}}"}
 }
 
 // discoverDockerLabelServices uses labels already attached to containers by Compose.

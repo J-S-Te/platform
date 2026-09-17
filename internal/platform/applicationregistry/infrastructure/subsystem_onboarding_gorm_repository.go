@@ -18,6 +18,19 @@ type SubsystemOnboardingGORMRepository struct {
 	database *gorm.DB
 }
 
+// ListRegisteredApplicationCodes intentionally reads the application registry rather than the
+// permission-filtered portal projection. An ACTIVE application has already completed directory
+// adoption and must not reappear in the first-time discovery queue, regardless of environment.
+func (repository *SubsystemOnboardingGORMRepository) ListRegisteredApplicationCodes(ctx context.Context, tenantID string) ([]string, error) {
+	var codes []string
+	err := repository.database.WithContext(ctx).Table("platform_application").
+		Distinct("code").
+		Where("tenant_id = ? AND status = ?", tenantID, "ACTIVE").
+		Order("code ASC").
+		Pluck("code", &codes).Error
+	return codes, err
+}
+
 func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironment(ctx context.Context, tenantID, applicationCode, environment string) (string, string, error) {
 	var row struct {
 		ApplicationID string `gorm:"column:application_id"`
@@ -729,11 +742,16 @@ func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentConte
 
 // MarkSubsystemInitialAccessAssigned records the authorization side effect independently from
 // READY. If a later state write or HTTP response fails, retry can see that access is already
-// complete and will not grant the administrator role again.
-func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment string, now time.Time) error {
+// complete and will not grant the administrator role again. Adoption creates its lifecycle row
+// before an administrator is known, so the same atomic update persists the role recipient.
+func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment, userID string, now time.Time) error {
 	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
 		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND initial_access_assigned_at IS NULL", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
-		Updates(map[string]any{"initial_access_assigned_at": now.UTC(), "updated_at": now.UTC()})
+		Updates(map[string]any{
+			"initial_admin_user_id":      strings.TrimSpace(userID),
+			"initial_access_assigned_at": now.UTC(),
+			"updated_at":                 now.UTC(),
+		})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -787,6 +805,29 @@ func portalApplicationAccessFilter(userID string) (string, []any) {
 	// 环境范围和生效时间；合同系统另要求恰好一个有效角色，避免角色冲突进入子系统。
 	return `(
 			application.code = 'platform'
+			OR EXISTS (
+				SELECT 1
+				FROM authz_role_binding AS platform_admin_binding
+				JOIN authz_role AS platform_admin_role
+					ON platform_admin_role.id = platform_admin_binding.role_id
+					AND platform_admin_role.tenant_id = platform_admin_binding.tenant_id
+					AND platform_admin_role.status = 'ACTIVE'
+					AND platform_admin_role.role_type = 'PLATFORM'
+				JOIN platform_application AS platform_admin_application
+					ON platform_admin_application.id = platform_admin_role.application_id
+					AND platform_admin_application.tenant_id = platform_admin_role.tenant_id
+					AND platform_admin_application.code = 'platform'
+					AND platform_admin_application.status = 'ACTIVE'
+				WHERE platform_admin_binding.tenant_id = application.tenant_id
+					AND platform_admin_binding.subject_type = 'USER'
+					AND platform_admin_binding.subject_id = ?
+					AND platform_admin_binding.scope_type = 'TENANT'
+					AND platform_admin_binding.scope_id = ''
+					AND platform_admin_binding.status = 'ACTIVE'
+					AND (platform_admin_binding.valid_from IS NULL OR platform_admin_binding.valid_from <= UTC_TIMESTAMP(3))
+					AND (platform_admin_binding.valid_until IS NULL OR platform_admin_binding.valid_until > UTC_TIMESTAMP(3))
+					AND platform_admin_role.code = 'platform-super-admin'
+			)
 			OR NOT EXISTS (
 				SELECT 1 FROM authz_role AS catalog_role
 				WHERE catalog_role.tenant_id = application.tenant_id
@@ -900,5 +941,5 @@ func portalApplicationAccessFilter(userID string) (string, []any) {
 					AND contract_role.status = 'ACTIVE'
 					AND contract_role.role_type <> 'COMPATIBILITY'
 			) = 1
-		)`, []any{userID, userID, userID, userID, userID}
+		)`, []any{userID, userID, userID, userID, userID, userID}
 }

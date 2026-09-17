@@ -369,6 +369,7 @@ services:
       SETTLEMENT_HTTP_ADDR: :8085
       SETTLEMENT_PUBLIC_ORIGIN: ${APP_PUBLIC_BASE_URL:-http://localhost:8081}
       PLATFORM_BASE_URL: http://platform-api:8080
+      SETTLEMENT_INVOICE_ISSUANCE_MODE: ${SETTLEMENT_INVOICE_ISSUANCE_MODE:-manual}
     depends_on:
       settlement-mysql:
         condition: service_healthy
@@ -411,6 +412,7 @@ services:
       SETTLEMENT_MYSQL_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_ENVIRONMENT_CODE: dev
+      SETTLEMENT_INVOICE_ISSUANCE_MODE: ${SETTLEMENT_INVOICE_ISSUANCE_MODE:-manual}
     depends_on:
       settlement-mysql:
         condition: service_healthy

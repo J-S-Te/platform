@@ -1210,6 +1210,14 @@ start_customer_notification_workers() {
 	log "CRM 通知 Workers 已稳定运行且未发生重启"
 }
 
+# 首次接入时 customer-api 还拿不到目录发布/OIDC 凭据，不能运行；但平台的
+# “探测子系统”需要先读到它的受控 Docker 标签。只创建不启动候选容器，
+# 接入完成后仍由正常 up/provisioner 流程执行迁移、目录发布和健康启动。
+ensure_crm_discovery_candidate() {
+	log "创建客户与商机管理探测候选（不启动业务进程）"
+	compose_run up --no-start --no-deps --no-build customer-api >/dev/null
+}
+
 pull_image_with_retry() {
     local image="$1" max_attempts="${2:-5}" attempt delay
     if docker image inspect "$image" >/dev/null 2>&1; then
@@ -1593,6 +1601,7 @@ start_stack() {
     # 平台库一旦缺少接入记录，up 会在发布处中止而 8081 始终起不来，接入与启动互相等待。
     log "启动统一前端（先于子系统接入步骤，保证门户网关可用于首次接入）"
     compose_up_wait "统一前端" frontend
+	ensure_crm_discovery_candidate
     crm_catalog_ready=true
     if ! sync_crm_authorization_catalog; then
         log "跳过客户与商机管理后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
@@ -1743,6 +1752,7 @@ refresh_customer_backend() {
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api customer-presale-alert-worker
+	ensure_crm_discovery_candidate
     sync_crm_authorization_catalog
     prepare_gateway_config
     log "重新构建统一前端网关，使客户与商机管理路径转发到 customer-api"
