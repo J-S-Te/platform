@@ -319,8 +319,10 @@ type stubSubsystemOnboardingService struct {
 	input           application.SubsystemOnboardingInput
 	directoryInput  application.SubsystemDirectoryRegistrationInput
 	portalItems     []application.PortalApplication
+	registeredCodes []string
 	err             error
 	directoryErr    error
+	registeredErr   error
 }
 
 func (service *stubSubsystemOnboardingService) OnboardSubsystem(_ context.Context, input application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error) {
@@ -350,6 +352,10 @@ func (service *stubSubsystemOnboardingService) ListPortalApplications(context.Co
 		code = "contract_management"
 	}
 	return []application.PortalApplication{{ApplicationID: applicationID, Code: code, Environment: environment}}, nil
+}
+
+func (service *stubSubsystemOnboardingService) ListRegisteredApplicationCodes(context.Context, string) ([]string, error) {
+	return service.registeredCodes, service.registeredErr
 }
 
 func (service *stubSubsystemOnboardingService) ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error) {
@@ -507,6 +513,8 @@ type recordingHTTPSubsystemProvisioner struct {
 	provisionErr   error
 	updateErr      error
 	teardownErr    error
+	candidates     []application.SubsystemDiscoveryCandidate
+	discoveryErr   error
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
@@ -532,6 +540,50 @@ func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, 
 func (provisioner *recordingHTTPSubsystemProvisioner) Teardown(_ context.Context, _ string, applicationCode, _ string) error {
 	provisioner.teardownCode = applicationCode
 	return provisioner.teardownErr
+}
+
+func (provisioner *recordingHTTPSubsystemProvisioner) DiscoverSubsystemCandidates(context.Context) ([]application.SubsystemDiscoveryCandidate, error) {
+	return provisioner.candidates, provisioner.discoveryErr
+}
+
+func TestDiscoverSubsystemCandidatesExcludesRegisteredApplicationsAcrossEnvironments(t *testing.T) {
+	t.Parallel()
+	service := &stubSubsystemOnboardingService{registeredCodes: []string{"settlement", "contract_management"}}
+	provisioner := &recordingHTTPSubsystemProvisioner{candidates: []application.SubsystemDiscoveryCandidate{
+		{ApplicationCode: "settlement", Environment: "dev", ApplicationName: "结算管理"},
+		{ApplicationCode: "CONTRACT_MANAGEMENT", Environment: "test", ApplicationName: "合同管理"},
+		{ApplicationCode: "inventory", Environment: "dev", ApplicationName: "库存管理"},
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		service, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-discovery", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.DiscoverSubsystemCandidates(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"application_code":"inventory"`) {
+		t.Fatalf("unregistered candidate missing: %s", body)
+	}
+	for _, registered := range []string{"settlement", "CONTRACT_MANAGEMENT"} {
+		if strings.Contains(body, registered) {
+			t.Fatalf("registered application %q leaked into discovery response: %s", registered, body)
+		}
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store, private" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
 }
 
 func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
@@ -839,6 +891,7 @@ type recordingSubsystemDeploymentStateStore struct {
 	transitions        []recordedDeploymentTransition
 	state              application.SubsystemDeploymentState
 	initialAccessMarks int
+	initialAccessUser  string
 	transitionErr      error
 	getErr             error
 	contextErr         error
@@ -864,8 +917,9 @@ func (store *recordingSubsystemDeploymentStateStore) GetSubsystemDeploymentConte
 	return store.state, store.contextErr
 }
 
-func (store *recordingSubsystemDeploymentStateStore) MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, time.Time) error {
+func (store *recordingSubsystemDeploymentStateStore) MarkSubsystemInitialAccessAssigned(_ context.Context, _, _, _, userID string, _ time.Time) error {
 	store.initialAccessMarks++
+	store.initialAccessUser = userID
 	return nil
 }
 
@@ -1014,11 +1068,12 @@ func TestAdoptSubsystemCreatesManagedLifecycleForUnmanagedEnvironment(t *testing
 	t.Parallel()
 	stateStore := &recordingSubsystemDeploymentStateStore{contextErr: application.ErrNotFound}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
+	access := &recordingSubsystemAccessManager{roleCode: "settlement_admin"}
 	handler, err := NewSubsystemOnboardingHandler(
 		&stubSubsystemOnboardingService{result: application.SubsystemOnboardingResult{
 			Application: application.Application{ID: "settlement-app"},
 			Environment: application.Environment{ID: "settlement-dev"},
-		}}, provisioner, &recordingSubsystemAccessManager{},
+		}}, provisioner, access,
 		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
 	)
 	if err != nil {
@@ -1050,6 +1105,12 @@ func TestAdoptSubsystemCreatesManagedLifecycleForUnmanagedEnvironment(t *testing
 	}
 	if provisioner.input.CatalogPublisherClientID != "settlement-dev-catalog-publisher" || provisioner.input.CatalogPublisherClientSecret != "retry-secret" {
 		t.Fatalf("adoption did not mint the Settlement catalog publisher credential: %#v", provisioner.input)
+	}
+	if access.applicationCode != "settlement" || access.userID != "01K10B00000000000000000001" || access.operatorID != access.userID {
+		t.Fatalf("adoption did not grant the adopting operator initial access: %#v", access)
+	}
+	if stateStore.initialAccessMarks != 1 || stateStore.initialAccessUser != access.userID {
+		t.Fatalf("adoption did not persist its initial administrator: marks=%d user=%q", stateStore.initialAccessMarks, stateStore.initialAccessUser)
 	}
 }
 

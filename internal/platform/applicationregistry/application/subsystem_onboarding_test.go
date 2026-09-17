@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -13,9 +14,11 @@ type subsystemOnboardingRepositoryStub struct {
 	write                SubsystemOnboardingWrite
 	directoryWrite       SubsystemDirectoryRegistrationWrite
 	portalItems          []PortalApplication
+	registeredCodes      []string
 	createCalls          int
 	directoryCreateCalls int
 	listCalls            int
+	registeredListCalls  int
 }
 
 func (repository *subsystemOnboardingRepositoryStub) ResolveApplicationEnvironmentGateway(context.Context, string, string, string) (string, string, error) {
@@ -342,6 +345,11 @@ func (repository *subsystemOnboardingRepositoryStub) ListPortalApplications(_ co
 	return repository.portalItems, nil
 }
 
+func (repository *subsystemOnboardingRepositoryStub) ListRegisteredApplicationCodes(_ context.Context, _ string) ([]string, error) {
+	repository.registeredListCalls++
+	return repository.registeredCodes, nil
+}
+
 func (repository *subsystemOnboardingRepositoryStub) ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error) {
 	return "app-1", "env-1", nil
 }
@@ -356,6 +364,30 @@ func (generator *sequentialManagementIDs) New(time.Time) (string, error) {
 type fixedSubsystemClock struct{ now time.Time }
 
 func (clock fixedSubsystemClock) Now() time.Time { return clock.now }
+
+func TestListRegisteredApplicationCodesNormalizesAndDeduplicatesTenantInventory(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{registeredCodes: []string{
+		" settlement ", "CONTRACT_MANAGEMENT", "settlement", "",
+	}}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Now()}, RedirectURIValidationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := service.ListRegisteredApplicationCodes(context.Background(), " tenant-1 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.registeredListCalls != 1 {
+		t.Fatalf("registered list calls = %d, want 1", repository.registeredListCalls)
+	}
+	if len(items) != 2 || items[0] != "settlement" || items[1] != "contract_management" {
+		t.Fatalf("registered codes = %#v", items)
+	}
+	if _, err := service.ListRegisteredApplicationCodes(context.Background(), "  "); !errors.Is(err, ErrValidation) {
+		t.Fatalf("empty tenant error = %v, want ErrValidation", err)
+	}
+}
 
 func TestOnboardSubsystemBuildsAtomicOIDCRegistration(t *testing.T) {
 	repository := &subsystemOnboardingRepositoryStub{}

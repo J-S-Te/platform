@@ -74,6 +74,7 @@ func (handler *SubsystemOnboardingHandler) resolveApplicationContextForIdentity(
 type subsystemOnboardingService interface {
 	OnboardSubsystem(context.Context, application.SubsystemOnboardingInput) (application.SubsystemOnboardingResult, error)
 	RegisterSubsystemDirectory(context.Context, application.SubsystemDirectoryRegistrationInput) (application.SubsystemDirectoryRegistrationResult, error)
+	ListRegisteredApplicationCodes(context.Context, string) ([]string, error)
 	ListPortalApplications(context.Context, string, string, string) ([]application.PortalApplication, error)
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
 	PreflightValidate(context.Context, application.SubsystemOnboardingInput) error
@@ -511,7 +512,9 @@ func NewSubsystemOnboardingHandlerWithNotifications(service subsystemOnboardingS
 }
 
 // DiscoverSubsystemCandidates exposes only opt-in Docker label metadata for containers that are
-// not yet registered in the caller's tenant.  It never runs a deployment command and therefore
+// not yet registered in the caller's tenant. Registration is matched by application identity,
+// not by the candidate's environment and not by the current user's portal visibility. It never
+// runs a deployment command and therefore
 // can be granted with application read permission independently of onboarding permission.
 func (handler *SubsystemOnboardingHandler) DiscoverSubsystemCandidates(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
@@ -528,18 +531,18 @@ func (handler *SubsystemOnboardingHandler) DiscoverSubsystemCandidates(writer st
 		handler.writeError(writer, request, err)
 		return
 	}
-	registered, err := handler.service.ListPortalApplications(request.Context(), principal.Tenant.ID, principal.User.ID, "")
+	registered, err := handler.service.ListRegisteredApplicationCodes(request.Context(), principal.Tenant.ID)
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
 	existing := make(map[string]struct{}, len(registered))
-	for _, item := range registered {
-		existing[strings.ToLower(strings.TrimSpace(item.Code))+"/"+strings.ToLower(strings.TrimSpace(item.Environment))] = struct{}{}
+	for _, code := range registered {
+		existing[strings.ToLower(strings.TrimSpace(code))] = struct{}{}
 	}
 	result := make([]application.SubsystemDiscoveryCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		key := strings.ToLower(strings.TrimSpace(candidate.ApplicationCode)) + "/" + strings.ToLower(strings.TrimSpace(candidate.Environment))
+		key := strings.ToLower(strings.TrimSpace(candidate.ApplicationCode))
 		if _, found := existing[key]; !found {
 			result = append(result, candidate)
 		}
@@ -902,7 +905,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
-	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment); err != nil {
+	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, initialAdminUserID); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
 		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
 		handler.writeError(writer, request, err)
@@ -1541,8 +1544,16 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			{purpose: application.ServiceCredentialContractApprovedRead, suffix: "contract-approved-reader", clientName: "项目管理系统 Approved Contract Reader", scope: "contract.approved.internal.read", rotate: true},
 			fileGateway,
 		}
-	case "settlement_and_invoicing":
-		return []updateServiceCredentialRequirement{fileGateway}
+	case "settlement", "settlement_and_invoicing":
+		// Settlement 的实际应用编码是 settlement。保留旧编码仅用于历史环境
+		// 兼容；更新和重试必须补发运行时真实使用的审计、通知、人员目录及
+		// 文件网关凭据，不能因为编码漂移静默返回空凭据集合。
+		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "结算与开票管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
+			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "结算与开票管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
+			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "结算与开票管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
+			fileGateway,
+		}
 	default:
 		return nil
 	}
@@ -1899,13 +1910,13 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		updateInput.CatalogPublisherClientID = publisher.ClientID
 		updateInput.CatalogPublisherClientSecret = publisherSecret
 	}
-	retryAdminUserID := principal.User.ID
-	retryNeedsInitialAccess := false
+	initialAccessUserID := principal.User.ID
+	needsInitialAccess := operation == "ADOPT"
 	if operation == "RETRY" && handler.deploymentState != nil {
 		if storedAdminUserID := strings.TrimSpace(deploymentContext.InitialAdminUserID); storedAdminUserID != "" {
-			retryAdminUserID = storedAdminUserID
+			initialAccessUserID = storedAdminUserID
 		}
-		retryNeedsInitialAccess = deploymentContext.InitialAccessAssignedAt == nil
+		needsInitialAccess = deploymentContext.InitialAccessAssignedAt == nil
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusUpdating, operation, "", ""); err != nil {
 		handler.writeError(writer, request, err)
@@ -1926,19 +1937,20 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
-	if operation == "RETRY" && retryNeedsInitialAccess {
+	if needsInitialAccess {
 		// A first-time deployment can fail after credentials are created but before the role
-		// catalog and initial administrator are ready. Retry therefore reapplies the conventional
-		// administrator role to the current operator after the Agent succeeds. UpdateAccess is
-		// idempotent for an already assigned role and never requires recovering an OAuth secret.
+		// catalog and initial administrator are ready. Directory-only adoption likewise starts
+		// without an initial administrator. Both paths assign the conventional role only after
+		// the Agent has published the application-owned catalog. UpdateAccess is idempotent for
+		// an already assigned role and never requires recovering an OAuth secret.
 		if _, err := handler.access.AssignInitialAdministrator(
-			request.Context(), principal.Tenant.ID, applicationCode, retryAdminUserID, principal.User.ID,
+			request.Context(), principal.Tenant.ID, applicationCode, initialAccessUserID, principal.User.ID,
 		); err != nil {
 			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
 			handler.writeError(writer, request, err)
 			return
 		}
-		if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
+		if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, applicationCode, environment, initialAccessUserID); err != nil {
 			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
 			handler.writeError(writer, request, err)
 			return
@@ -2452,11 +2464,11 @@ func (handler *SubsystemOnboardingHandler) transitionDeployment(ctx context.Cont
 	return handler.deploymentState.TransitionSubsystemDeployment(ctx, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage, time.Now().UTC())
 }
 
-func (handler *SubsystemOnboardingHandler) markInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment string) error {
+func (handler *SubsystemOnboardingHandler) markInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment, userID string) error {
 	if handler.deploymentState == nil {
 		return nil
 	}
-	return handler.deploymentState.MarkSubsystemInitialAccessAssigned(ctx, tenantID, applicationCode, environment, time.Now().UTC())
+	return handler.deploymentState.MarkSubsystemInitialAccessAssigned(ctx, tenantID, applicationCode, environment, userID, time.Now().UTC())
 }
 
 func (handler *SubsystemOnboardingHandler) markDeploymentFailed(ctx context.Context, tenantID, applicationCode, environment, operation, errorCode, errorMessage string) {

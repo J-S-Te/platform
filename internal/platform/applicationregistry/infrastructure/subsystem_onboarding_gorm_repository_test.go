@@ -36,6 +36,9 @@ func TestPortalApplicationAccessFilterIncludesEffectiveMembershipSubjects(t *tes
 	clause, args := portalApplicationAccessFilter("user-1")
 
 	for _, fragment := range []string{
+		"platform_admin_role.code = 'platform-super-admin'",
+		"platform_admin_binding.subject_type = 'USER'",
+		"platform_admin_binding.scope_type = 'TENANT'",
 		"access_assignment.subject_type = 'USER'",
 		"access_assignment.subject_type IN ('ORG_UNIT', 'POSITION')",
 		"FROM iam_membership AS membership",
@@ -62,8 +65,8 @@ func TestPortalApplicationAccessFilterIncludesEffectiveMembershipSubjects(t *tes
 		}
 	}
 
-	if len(args) != 5 {
-		t.Fatalf("argument count = %d, want 5", len(args))
+	if len(args) != 6 {
+		t.Fatalf("argument count = %d, want 6", len(args))
 	}
 	for index, argument := range args {
 		if argument != "user-1" {

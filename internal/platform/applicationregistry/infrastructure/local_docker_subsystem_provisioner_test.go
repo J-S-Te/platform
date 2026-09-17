@@ -561,6 +561,151 @@ func TestLocalDockerSubsystemProvisionerAdoptsSettlementThroughUnifiedCompose(t 
 	}
 }
 
+func TestLocalDockerSubsystemProvisionerPublishesSettlementCatalogBeforeRuntime(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	settlementRoot := filepath.Join(root, "Settlement")
+	contractRoot := filepath.Join(root, integratedContractApplicationCode)
+	for _, directory := range []string{
+		filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"),
+		filepath.Join(settlementRoot, "authz"), contractRoot,
+	} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	manifestPath := filepath.Join(settlementRoot, "authz", "permission-manifest.json")
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):            "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):          "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
+		filepath.Join(contractRoot, ".env.local"):                    "CONTRACT_SETTING=keep\n",
+		filepath.Join(settlementRoot, ".env.local"):                  "SETTLEMENT_MYSQL_DSN=settlement:secret@tcp(settlement-mysql:3306)/settlement\n",
+		manifestPath: `{"catalog_version":"2","claims_role_config_hash":"settlement-v2-invoice-read","permissions":[{"code":"settlement.invoice.read","name":"查看开票申请与发票","action":"read","resource_code":"invoice"}],"roles":[{"code":"settlement_reviewer","name":"结算复核员","permissions":["settlement.invoice.read"]}]}`,
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		PlatformComposeProject: "basic-platform-local", PlatformDockerNetwork: "basic-platform-local_default",
+		CatalogSyncImage: "basic-platform/backend:local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+	input := application.SubsystemProvisioningInput{
+		ApplicationID: "settlement-app", ApplicationCode: "settlement", Environment: "dev",
+		CatalogPublisherClientID: "settlement-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
+	}
+	if err := provisioner.Update(context.Background(), input); err != nil {
+		t.Fatalf("update Settlement with catalog v2: %v", err)
+	}
+	if len(runner.calls) != 5 {
+		t.Fatalf("Settlement update calls = %d, want 5: %#v", len(runner.calls), runner.calls)
+	}
+	publish := runner.calls[2]
+	if publish.directory != settlementRoot || publish.binary != "docker" {
+		t.Fatalf("catalog publish execution boundary = %#v", publish)
+	}
+	for _, expected := range []string{
+		"run", "--rm", "--network=basic-platform-local_default",
+		manifestPath + ":/catalog/permission-manifest.json:ro",
+		"basic-platform/backend:local", "/usr/local/bin/sync-settlement-catalog.sh",
+	} {
+		if !containsString(publish.arguments, expected) {
+			t.Fatalf("catalog publish call missing %q: %v", expected, publish.arguments)
+		}
+	}
+	for _, expected := range []string{
+		"PLATFORM_APPLICATION_ID=settlement-app",
+		"PLATFORM_BASE_URL=http://platform-api:8080",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=settlement-dev-catalog-publisher",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=publisher-secret",
+	} {
+		if !containsString(publish.environment, expected) {
+			t.Fatalf("catalog publisher environment missing %q", expected)
+		}
+	}
+	if !containsString(runner.calls[3].arguments, "settlement-api") || !containsString(runner.calls[4].arguments, "settlement-worker") {
+		t.Fatalf("Settlement runtime did not start after catalog publication: %#v", runner.calls)
+	}
+}
+
+func TestLocalDockerSubsystemProvisionerDoesNotStartSettlementRuntimeWhenCatalogPublishFails(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	settlementRoot := filepath.Join(root, "Settlement")
+	contractRoot := filepath.Join(root, integratedContractApplicationCode)
+	for _, directory := range []string{
+		filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"),
+		filepath.Join(settlementRoot, "authz"), contractRoot,
+	} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	manifestPath := filepath.Join(settlementRoot, "authz", "permission-manifest.json")
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):            "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):          "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
+		filepath.Join(contractRoot, ".env.local"):                    "CONTRACT_SETTING=keep\n",
+		filepath.Join(settlementRoot, ".env.local"):                  "SETTLEMENT_SETTING=keep\n",
+		manifestPath: `{"catalog_version":"2"}`,
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	publishArguments := []string{
+		"docker", "run", "--rm", "--network=basic-platform-local_default",
+		"-v", manifestPath + ":/catalog/permission-manifest.json:ro",
+		"-e", "PLATFORM_APPLICATION_ID", "-e", "PLATFORM_BASE_URL",
+		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID", "-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET",
+		"basic-platform/backend:local", "/usr/local/bin/sync-settlement-catalog.sh",
+	}
+	runner := &recordingSubsystemRunner{errors: map[string]error{strings.Join(publishArguments, " "): errors.New("catalog rejected")}}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		PlatformComposeProject: "basic-platform-local", PlatformDockerNetwork: "basic-platform-local_default",
+		CatalogSyncImage: "basic-platform/backend:local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+	err = provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+		ApplicationID: "settlement-app", ApplicationCode: "settlement", Environment: "dev",
+		CatalogPublisherClientID: "settlement-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
+	})
+	if err == nil {
+		t.Fatal("catalog publication failure was ignored")
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls after failed catalog publication = %d, want 3: %#v", len(runner.calls), runner.calls)
+	}
+	for _, call := range runner.calls {
+		if containsString(call.arguments, "settlement-api") || containsString(call.arguments, "settlement-worker") {
+			t.Fatalf("Settlement runtime started despite failed catalog publication: %#v", call)
+		}
+	}
+}
+
 func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReloadGateway(t *testing.T) {
 	t.Parallel()
 	root, err := filepath.EvalSymlinks(t.TempDir())

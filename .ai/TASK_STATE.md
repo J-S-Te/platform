@@ -1,5 +1,27 @@
 # Current Task
 
+## Focused follow-up: subsystem discovery excludes adopted applications (2026-09-17)
+
+- Fixed subsystem discovery to compare Docker candidates against the tenant's active application registry instead of the current user's permission-filtered portal list.
+- Registration identity is the normalized application code. Once an application is active in any environment, Docker candidates for that application no longer appear as unregistered merely because their environment label differs.
+- Inactive/draft registrations remain discoverable so an incomplete adoption can still be retried through the normal onboarding path.
+- Added service and HTTP regression coverage for normalization, deduplication, cross-environment filtering and case-insensitive matching.
+- Focused application-registry tests, full `go test ./...`, `go build ./...`, `go vet ./...`, and `git diff --check` pass. The local API/provisioner image was rebuilt and both services are healthy; browser verification is blocked only by the expected session invalidation caused by the API restart.
+
+## Focused follow-up: settlement portal card visibility (2026-09-16)
+
+- Fixed portal application visibility so a directly assigned, active tenant-scoped `platform-super-admin` receives the same cross-application visibility already provided by the effective-authorization service.
+- Fixed directory-only subsystem adoption so the adopting operator receives the application-owned initial administrator role after the deployment agent publishes the catalog; the recipient and completion time are persisted atomically for idempotent retry.
+- Local runtime verification passed: the portal displays the settlement card and opens `/settlement/dashboard`; the settlement dashboard loads successfully.
+- Focused application-registry/bootstrap tests and the full `go test ./...` regression pass; `git diff --check` passes. Changes are local/uncommitted; the local API image was rebuilt for browser verification.
+
+## Focused follow-up: position-template duplicate inspection (2026-09-16)
+
+- Added a one-click duplicate check to “将模板应用到岗位”. It analyzes all selected templates, not only the current page, and reports the repeated application role, scope and source templates.
+- Duplicate identity is application + role + scope; a duplicate is reported only when effective periods overlap. Disabled roles, disjoint periods and different environment scopes do not produce false positives.
+- Template or position selection changes invalidate the prior result. The check is read-only and never deletes templates or mutates assignments.
+- Focused tests pass 7/7; the full frontend suite passes 518/518 and the production build passes. Changes are local/uncommitted and not deployed.
+
 ## Focused follow-up: project workflow production integration (2026-09-14)
 
 - Registered the contract approved-state reader as a machine binding for project management.

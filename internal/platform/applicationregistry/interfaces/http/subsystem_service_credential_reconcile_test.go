@@ -194,17 +194,17 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 	})
 }
 
-func TestEnsureUpdateServiceCredentialsRepairsExistingFileGatewayScopes(t *testing.T) {
+func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *testing.T) {
 	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
 		ID: "file-client-id", ApplicationID: "application-1", EnvironmentID: "environment-1",
-		ClientID: "settlement_and_invoicing-prod-file-gateway-writer", Status: "ACTIVE", Version: 7,
+		ClientID: "settlement-prod-file-gateway-writer", Status: "ACTIVE", Version: 7,
 		Scopes: []string{"platform:file:upload", "platform:file:bind"},
 	}}}
 	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
 
 	credentials, err := handler.ensureUpdateServiceCredentials(
 		context.Background(), "tenant-1", "application-1", "environment-1",
-		"settlement_and_invoicing", "prod", "operator-1", "UPDATE",
+		"settlement", "prod", "operator-1", "UPDATE",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -215,9 +215,20 @@ func TestEnsureUpdateServiceCredentialsRepairsExistingFileGatewayScopes(t *testi
 	if got := manager.scopeInputs[0]; got.Version != 7 || !reflect.DeepEqual(got.Scopes, []string{"platform:file:upload", "platform:file:bind", "platform:file:download"}) {
 		t.Fatalf("scope repair = %#v", got)
 	}
-	if len(manager.secretInputs) != 1 || len(credentials) != 1 || credentials[0].OAuthClient.Scopes[2] != "platform:file:download" {
+	if len(manager.secretInputs) != 1 {
 		t.Fatalf("repaired credential was not rotated and delivered: inputs=%#v credentials=%#v", manager.secretInputs, credentials)
 	}
+	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"settlement-prod-audit-publisher":        {"audit.ingest"},
+		"settlement-prod-notification-publisher": {"notification.ingest"},
+		"settlement-prod-owner-directory":        {"owner_directory.read"},
+	})
+	requireOnlyCredentialPurposes(t, credentials, map[string]string{
+		application.ServiceCredentialAuditIngest:        "new-secret",
+		application.ServiceCredentialNotificationIngest: "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead: "new-secret",
+		application.ServiceCredentialFileGatewayWrite:   "retry-secret",
+	})
 }
 
 func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *testing.T) {

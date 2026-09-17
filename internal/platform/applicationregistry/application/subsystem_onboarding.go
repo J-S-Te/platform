@@ -221,8 +221,39 @@ type PortalProjectionReadiness struct {
 type SubsystemOnboardingRepository interface {
 	CreateSubsystem(context.Context, SubsystemOnboardingWrite, time.Time) (SubsystemOnboardingResult, error)
 	CreateSubsystemDirectory(context.Context, SubsystemDirectoryRegistrationWrite, time.Time) (SubsystemDirectoryRegistrationResult, error)
+	ListRegisteredApplicationCodes(context.Context, string) ([]string, error)
 	ListPortalApplications(context.Context, string, string, string) ([]PortalApplication, error)
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
+}
+
+// ListRegisteredApplicationCodes returns the tenant's active application identities without
+// applying user portal visibility or choosing one environment. Discovery is an administrative
+// inventory operation: an application already adopted in any environment must not be offered as
+// a new subsystem merely because the current operator lacks its business role or Docker reports a
+// different environment label.
+func (service *SubsystemOnboardingService) ListRegisteredApplicationCodes(ctx context.Context, tenantID string) ([]string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, ErrValidation
+	}
+	items, err := service.repository.ListRegisteredApplicationCodes(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		code := strings.ToLower(strings.TrimSpace(item))
+		if code == "" {
+			continue
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		result = append(result, code)
+	}
+	return result, nil
 }
 
 // 服务把应用、环境、门户入口、浏览器客户端及用途隔离的机器客户端编排成一次接入。

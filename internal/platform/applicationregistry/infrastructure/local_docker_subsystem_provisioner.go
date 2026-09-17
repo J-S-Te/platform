@@ -1020,13 +1020,22 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedSettlementS
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "settlement-migrate"); err != nil {
 		return err
 	}
+	// Publish the application-owned catalog before replacing either runtime process.
+	// The platform retains the immediately previous catalog/hash as a compatibility
+	// window, so publishing vN first keeps the old vN-1 process authorized while also
+	// ensuring the new process never starts against an incompatible platform catalog.
+	// A failed publication therefore leaves the existing API/Worker untouched instead
+	// of exposing a partially upgraded subsystem that rejects every authorization context.
+	if err := provisioner.syncSettlementCatalog(ctx, input); err != nil {
+		return err
+	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-build", "--no-deps", "settlement-api"); err != nil {
 		return err
 	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--no-build", "--no-deps", "settlement-worker"); err != nil {
 		return err
 	}
-	return provisioner.syncSettlementCatalog(ctx, input)
+	return nil
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) updateSettlementCatalogRuntimeConfiguration(input application.SubsystemProvisioningInput) error {

@@ -1,11 +1,19 @@
 package infrastructure
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
+
+func TestDockerCandidateDiscoveryIncludesCreatedAndExitedContainers(t *testing.T) {
+	args := dockerCandidateListArgs()
+	if !slices.Contains(args, "--all") {
+		t.Fatalf("candidate discovery args = %v, want --all so first-time created containers remain discoverable", args)
+	}
+}
 
 func TestSubsystemServiceInstanceFromDockerLabels(t *testing.T) {
 	now := time.Now().UTC()
