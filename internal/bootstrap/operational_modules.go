@@ -366,7 +366,7 @@ func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []strin
 	case "customer_and_opportunity":
 		// CRM 不创建绕过业务范围的“万能管理员”。三个目录角色共同覆盖运营职责，同时仍受
 		// max_effective_roles=10 和各角色数据范围约束。
-		return []string{"sales_director", "team_lead", "technical_lead"}
+		return []string{"sales_director", "team_lead", "technical_director"}
 	case "customer_portal":
 		return nil
 	}

@@ -1,5 +1,23 @@
 # Current Task
 
+## Focused follow-up: viewport-adaptive subsystem portal cards (2026-09-17)
+
+- The desktop subsystem portal now uses the remaining `100dvh` workspace instead of a fixed 248px card minimum. One through nine visible applications map to 1×1, 2×1, 3×1, 2×2, 3×2, 4×2 or 3×3 grids with spacious/standard/compact density.
+- More than nine applications use stable nine-item pagination instead of shrinking labels below the readable/clickable threshold. When authorization changes reduce the catalog, the current page is clamped automatically.
+- Desktop height <=820px uses a compact header/title/card treatment. Tablet/mobile keep readable card sizes and intentionally restore normal vertical scrolling instead of clipping content.
+- Added pure layout/pagination helpers and regressions for every supported card count, page bounds, viewport sizing, low-height mode and mobile fallback.
+- Verification completed: 10 focused portal/layout tests pass; the full frontend suite passes 533/533; production build and diff checks pass. The unified frontend image/container was rebuilt and became healthy. The refresh script's final aggregate check still exits on the pre-existing unavailable Customer Portal route (HTTP 502), after the frontend container had already been successfully replaced.
+- Browser reached the rebuilt local frontend but redirected to login because no authenticated platform session was available; protected portal visual inspection was therefore not claimed.
+
+## Focused follow-up: local CRM deployment recovery (2026-09-17)
+
+- Fixed controlled retry/adoption so CRM and customer portal always receive a freshly minted authorization-catalog publisher credential; ordinary restarts still preserve existing one-time secrets.
+- Retry now atomically updates the catalog application ID, publisher client ID and publisher secret in the mode-0600 runtime environment, preventing stale application identities from returning OAuth 401.
+- Updated the integrated CRM role-configuration hash to the current embedded catalog and replaced the retired `technical_lead` bootstrap role with `technical_director`.
+- Added regression coverage for startup catalog publishers and customer/portal credential redelivery.
+- Local end-to-end retry passed: the environment is `READY`, the CRM route returns `{"status":"ok"}`, and platform API, provisioner, CRM API and CRM MySQL are healthy.
+- Platform `go test ./...`, `go build ./...`, `go vet ./...` and `git diff --check` pass.
+
 ## Portal display theme follow-up (2026-09-17)
 
 - Converted the subsystem portal into a full-page dark presentation dashboard while retaining a complete light palette.

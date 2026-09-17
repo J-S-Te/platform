@@ -73,7 +73,7 @@ const (
 	// This is the compatibility hash compiled into the customer authorization catalog. The
 	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
 	// deployment contract to be updated in the same reviewed release.
-	integratedCustomerRoleConfigHash = "sha256:77443efe31deec9ade8836e826b7240edfc377e953b9f5722e37dace011db0bb"
+	integratedCustomerRoleConfigHash = "sha256:3121000b3a3242b3005ca9a79e71a47893b270cb58fddc770dcc163db04d7524"
 	integratedPortalRoleConfigHash   = "sha256:95f1d1283d3a251e9b9167aa291c19bf14d265105ccedfc661aca096666a37b8"
 )
 
@@ -659,6 +659,24 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 		if credential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
+		}
+	}
+	// RETRY/ADOPT rotate the one-time catalog publisher credential before rebuilding.
+	// Keep ordinary restarts non-destructive, but when a fresh credential is delivered it
+	// must replace the complete catalog identity atomically. Otherwise a recreated application
+	// can retain the old application ID/secret and every pre-start catalog publication fails 401.
+	if strings.TrimSpace(input.ApplicationID) != "" &&
+		strings.TrimSpace(input.CatalogPublisherClientID) != "" &&
+		strings.TrimSpace(input.CatalogPublisherClientSecret) != "" {
+		if input.ApplicationCode == integratedPortalApplicationCode {
+			values["PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID"] = strings.TrimSpace(input.ApplicationID)
+			values["PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID"] = strings.TrimSpace(input.CatalogPublisherClientID)
+			values["PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET"] = input.CatalogPublisherClientSecret
+		} else {
+			values["PLATFORM_APPLICATION_ID"] = strings.TrimSpace(input.ApplicationID)
+			values["PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"] = strings.TrimSpace(input.ApplicationID)
+			values["PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"] = strings.TrimSpace(input.CatalogPublisherClientID)
+			values["PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"] = input.CatalogPublisherClientSecret
 		}
 	}
 	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {

@@ -1268,3 +1268,22 @@ func TestUpdateServiceCredentialRequirementsRedeliverProjectOwnerDirectory(t *te
 		t.Fatal("project_management controlled update must redeliver the owner-directory credential")
 	}
 }
+
+func TestCatalogPublisherCredentialRequiredForStartupCatalogPublishers(t *testing.T) {
+	t.Parallel()
+	for _, applicationCode := range []string{
+		"customer_and_opportunity",
+		"customer_portal",
+		"settlement",
+		"data_analysis",
+	} {
+		if !requiresCatalogPublisherCredential(applicationCode) {
+			t.Errorf("%s must receive a fresh catalog publisher credential during controlled lifecycle operations", applicationCode)
+		}
+	}
+	for _, applicationCode := range []string{"platform", "contract_management", "project_management"} {
+		if requiresCatalogPublisherCredential(applicationCode) {
+			t.Errorf("%s does not publish its catalog during controlled startup", applicationCode)
+		}
+	}
+}

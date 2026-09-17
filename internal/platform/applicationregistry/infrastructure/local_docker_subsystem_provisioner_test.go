@@ -119,6 +119,85 @@ func TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCred
 	}
 }
 
+func TestUpdateOIDCRuntimeConfigurationRedeliversCatalogPublisherIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		applicationCode string
+		initial         string
+		expected        []string
+	}{
+		{
+			name:            "customer",
+			applicationCode: integratedCustomerApplicationCode,
+			initial: strings.Join([]string{
+				"PLATFORM_APPLICATION_ID=old-app",
+				"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID=old-app",
+				"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=old-client",
+				"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=old-secret",
+				"OIDC_CLIENT_ID=browser-client",
+				"OIDC_CLIENT_SECRET=browser-secret",
+			}, "\n") + "\n",
+			expected: []string{
+				"PLATFORM_APPLICATION_ID=current-app",
+				"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID=current-app",
+				"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=current-publisher",
+				"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=current-secret",
+				"OIDC_CLIENT_ID=browser-client",
+				"OIDC_CLIENT_SECRET=browser-secret",
+			},
+		},
+		{
+			name:            "portal",
+			applicationCode: integratedPortalApplicationCode,
+			initial: strings.Join([]string{
+				"PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID=old-app",
+				"PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID=old-client",
+				"PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET=old-secret",
+				"PORTAL_OIDC_CLIENT_ID=browser-client",
+				"PORTAL_OIDC_CLIENT_SECRET=browser-secret",
+			}, "\n") + "\n",
+			expected: []string{
+				"PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID=current-app",
+				"PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID=current-publisher",
+				"PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET=current-secret",
+				"PORTAL_OIDC_CLIENT_ID=browser-client",
+				"PORTAL_OIDC_CLIENT_SECRET=browser-secret",
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			environmentPath := filepath.Join(t.TempDir(), ".env.local")
+			if err := os.WriteFile(environmentPath, []byte(test.initial), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			provisioner := &LocalDockerSubsystemProvisioner{}
+			if err := provisioner.updateOIDCRuntimeConfiguration(application.SubsystemProvisioningInput{
+				ApplicationID:                "current-app",
+				ApplicationCode:              test.applicationCode,
+				Issuer:                       "http://localhost:8081",
+				CatalogPublisherClientID:     "current-publisher",
+				CatalogPublisherClientSecret: "current-secret",
+				AuthenticationRuntimeUpdate:  false,
+			}, environmentPath); err != nil {
+				t.Fatalf("update OIDC runtime configuration: %v", err)
+			}
+			content, err := os.ReadFile(environmentPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, expected := range test.expected {
+				if !strings.Contains(string(content), expected) {
+					t.Fatalf("updated environment missing %q:\n%s", expected, content)
+				}
+			}
+		})
+	}
+}
+
 func TestUpdateProductionSubsystemEnvironmentPreservesOwnerAndRejectsDuplicateManagedKeys(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".env")
