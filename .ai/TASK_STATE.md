@@ -1,5 +1,26 @@
 # Current Task
 
+## Portal display theme follow-up (2026-09-17)
+
+- Converted the subsystem portal into a full-page dark presentation dashboard while retaining a complete light palette.
+- Added accessible light/dark/system theme controls in the portal header. The explicit selection is persisted under `basic-platform.portal-theme`; first use defaults to dark and system mode reacts to live OS changes.
+- Canvas particle colors, cards, header, user popover, status messages and responsive layouts now resolve through portal-scoped semantic theme variables.
+- Added source-contract coverage for theme persistence, system media-query handling and dark/light CSS scopes. Focused tests and the production build pass.
+
+## Focused follow-up: optimized portal motion restored (2026-09-17)
+
+- Restored low-contrast Canvas particles, grid glow layers, bounded card 3D pointer tilt and staggered card entry on top of the light administrative portal.
+- Particle count is capped at 48, device pixel ratio at 1.5, drawing is frame-scheduled and pauses while the page is hidden. Card tilt is limited to roughly ±3 degrees and only runs for fine hover pointers.
+- Entry delay is 45ms per card and capped after the eighth card. `prefers-reduced-motion` disables Canvas, tilt, transitions and entry animation.
+- Focused portal tests pass 6/6, the full frontend suite passes 531/531, production build and `git diff --check` pass. Changes remain local/uncommitted.
+
+## Focused follow-up: platform frontend visual unification (2026-09-17)
+
+- Unified platform design tokens in the globally imported platform stylesheet; console and IAM styles now consume semantic aliases.
+- Simplified login and password-change brand panels to a solid dark layout, and rebuilt the subsystem portal as a light administrative workspace without particles, glow layers, 3D pointer effects or glass blur.
+- Normalized platform typography and radii, removed generic `transition: all`, reduced `!important` usage to reduced-motion overrides, and consolidated duplicate console backdrop/search definitions.
+- Added source-level UI contract tests. Focused UI tests, the full 531-test frontend suite, production build and `git diff --check` pass. The local frontend container was rebuilt and is healthy; login-page visual verification passed at desktop and narrow viewport. Changes are local/uncommitted.
+
 ## Focused follow-up: subsystem discovery excludes adopted applications (2026-09-17)
 
 - Fixed subsystem discovery to compare Docker candidates against the tenant's active application registry instead of the current user's permission-filtered portal list.
