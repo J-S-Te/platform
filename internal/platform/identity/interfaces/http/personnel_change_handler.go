@@ -29,7 +29,6 @@ type personnelCreatePayload struct {
 	Reason             string    `json:"reason"`
 	ApprovalReference  string    `json:"approval_reference"`
 	ApprovalNo         string    `json:"approval_no"`
-	ApprovalRequired   bool      `json:"approval_required"`
 	EffectiveAt        time.Time `json:"effective_at"`
 	EffectiveDate      string    `json:"effective_date"`
 }
@@ -60,12 +59,21 @@ func (h *PersonnelChangeHandler) Create(w http.ResponseWriter, r *http.Request) 
 	if x.EffectiveAt.IsZero() && x.EffectiveDate != "" {
 		x.EffectiveAt, _ = time.Parse("2006-01-02", x.EffectiveDate)
 	}
-	v, e := h.service.Create(r.Context(), application.PersonnelChangeCreateInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, UserID: x.UserID, SourceMembershipID: x.SourceMembershipID, TargetOrgUnitID: x.TargetOrgUnitID, TargetPositionID: x.TargetPositionID, ChangeType: x.ChangeType, Reason: x.Reason, ApprovalReference: x.ApprovalReference, EffectiveAt: x.EffectiveAt, ApprovalRequired: x.ApprovalRequired})
+	v, e := h.service.Create(r.Context(), application.PersonnelChangeCreateInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, UserID: x.UserID, SourceMembershipID: x.SourceMembershipID, TargetOrgUnitID: x.TargetOrgUnitID, TargetPositionID: x.TargetPositionID, ChangeType: x.ChangeType, Reason: x.Reason, ApprovalReference: x.ApprovalReference, EffectiveAt: x.EffectiveAt, DirectScheduleAuthorized: principalHasRole(p, "platform-super-admin")})
 	if e != nil {
 		httpresponse.WriteError(w, r, 422, httperror.Validation)
 		return
 	}
 	httpresponse.WriteSuccess(w, r, 201, "操作成功", v)
+}
+
+func principalHasRole(principal authctx.Principal, expected string) bool {
+	for _, role := range principal.Roles {
+		if strings.EqualFold(strings.TrimSpace(role.Code), expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *PersonnelChangeHandler) PreviewDraft(w http.ResponseWriter, r *http.Request) {

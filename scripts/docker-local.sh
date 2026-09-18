@@ -32,6 +32,7 @@ lan_placeholder_file="${project_root}/docker/.env.lan.disabled"
 compose_project="basic-platform-local"
 command_name="up"
 force_build=false
+subsystem_environment="${LOCAL_SUBSYSTEM_ENVIRONMENT:-dev}"
 admin_display_name="${BASIC_PLATFORM_ADMIN_DISPLAY_NAME:-}"
 admin_account_name="${BASIC_PLATFORM_ADMIN_ACCOUNT_NAME:-}"
 admin_password="${BASIC_PLATFORM_ADMIN_PASSWORD:-}"
@@ -86,6 +87,7 @@ up/restart 选项：
   --project-env-file PATH         项目管理系统环境文件（默认 project_management/.env.local）
   --data-analysis-env-file PATH  数据看板与统计分析环境文件（默认 data_analysis/.env.local）
   --settlement-env-file PATH      结算与开票运行环境文件（默认 Settlement/.env.local）
+  --subsystem-environment ENV     本地子系统注册环境：dev/test/staging/prod（默认 dev）
   --presale-worker-env-file PATH  售前投递 Worker 环境文件（默认 customer_and_opportunity/.env.presale-worker）
   -h, --help                      显示帮助
 
@@ -171,6 +173,11 @@ while (($# > 0)); do
             admin_password_stdin=true
             shift
             ;;
+        --subsystem-environment)
+            (($# >= 2)) || fail "$1 缺少参数"
+            subsystem_environment="${2,,}"
+            shift 2
+            ;;
         --env-file)
             (($# >= 2)) || fail "$1 缺少参数"
             env_file="$2"
@@ -220,6 +227,11 @@ while (($# > 0)); do
             ;;
     esac
 done
+
+case "$subsystem_environment" in
+	dev|test|staging|prod) ;;
+	*) fail "--subsystem-environment 只能是 dev、test、staging 或 prod" ;;
+esac
 
 log_services=()
 log_since=""
@@ -277,6 +289,7 @@ export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_env_file"
 export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
+export LOCAL_SUBSYSTEM_ENVIRONMENT="$subsystem_environment"
 
 validate_local_automation_paths() {
     [[ -d "$BASIC_PLATFORM_HOST_PROJECT_ROOT" ]] || \
@@ -1030,7 +1043,7 @@ validate_keycloak_runtime() {
     [[ "$backchannel" == "$expected_backchannel" ]] || \
         fail "${description}运行时 ${backchannel_key}=${backchannel}；应为 Compose 私网地址 ${expected_backchannel}（不得包含 /realms 路径）"
     [[ "$client_id" == "$expected_client_id" ]] || \
-        fail "${description}运行时 ${client_key}=${client_id}；本地 dev 环境要求 ${expected_client_id}"
+        fail "${description}运行时 ${client_key}=${client_id}；本地 ${environment_code} 环境要求 ${expected_client_id}"
     [[ "$redirect_uri" == "$expected_redirect" ]] || \
         fail "${description}运行时 ${redirect_key}=${redirect_uri}；应与统一前端入口一致：${expected_redirect}"
     case "$platform_base" in
@@ -1046,6 +1059,37 @@ validate_keycloak_runtime() {
     fi
 }
 
+# 每个本地子系统可以独立绑定 dev/test/staging/prod。优先使用运行时显式环境，
+# 旧 Portal 配置没有该字段时从规范 Client ID 推导，最后才使用命令行默认值。
+runtime_target_environment() {
+	local runtime_file="$1" application_code="$2" client_key="$3"
+	local environment_code client_id client_prefix client_suffix
+	environment_code="$(env_value "$runtime_file" PLATFORM_ENVIRONMENT_CODE)"
+	case "$environment_code" in
+		dev|test|staging|prod) printf '%s' "$environment_code"; return ;;
+	esac
+	client_id="$(env_value "$runtime_file" "$client_key")"
+	client_prefix="${application_code}-"
+	client_suffix="-web"
+	if [[ "$client_id" == "${client_prefix}"*"${client_suffix}" ]]; then
+		environment_code="${client_id#"$client_prefix"}"
+		environment_code="${environment_code%"$client_suffix"}"
+		case "$environment_code" in
+			dev|test|staging|prod) printf '%s' "$environment_code"; return ;;
+		esac
+	fi
+	printf '%s' "$subsystem_environment"
+}
+
+sync_local_subsystem_environment_exports() {
+	export CONTRACT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)"
+	export CUSTOMER_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)"
+	export PORTAL_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)"
+	export PROJECT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)"
+	export DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$data_analysis_env_file" data_analysis OIDC_CLIENT_ID)"
+	export SETTLEMENT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$settlement_env_file" settlement OIDC_CLIENT_ID)"
+}
+
 validate_authorization_context_wiring() {
     local expected='http://platform-api:8080/oauth2/authorization-context'
     local standard_count portal_count
@@ -1057,21 +1101,21 @@ validate_authorization_context_wiring() {
 
 validate_all_keycloak_runtimes() {
 	validate_authorization_context_wiring
-    validate_keycloak_runtime "合同管理" "$contract_env_file" contract_management dev \
+    validate_keycloak_runtime "合同管理" "$contract_env_file" contract_management "$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)" \
         OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
         PLATFORM_BASE_URL "${frontend_public_origin}/contract_management/auth/callback"
-    validate_keycloak_runtime "客户与商机管理" "$customer_env_file" customer_and_opportunity dev \
+    validate_keycloak_runtime "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" \
         OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
         PLATFORM_BASE_URL "${frontend_public_origin}/customer-opportunity/auth/callback" OIDC_ROLE_CONFIG_HASH
-    validate_keycloak_runtime "客户自助门户" "$portal_env_file" customer_portal dev \
+    validate_keycloak_runtime "客户自助门户" "$portal_env_file" customer_portal "$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)" \
         PORTAL_OIDC_ISSUER PORTAL_OIDC_BACKCHANNEL_BASE_URL PORTAL_OIDC_CLIENT_ID PORTAL_OIDC_CLIENT_SECRET PORTAL_OIDC_REDIRECT_URI PORTAL_OIDC_TENANT_ID \
         PORTAL_PLATFORM_BASE_URL "${frontend_public_origin}/customer-portal/auth/callback" PORTAL_ROLE_CONFIG_HASH
-    validate_keycloak_runtime "项目管理" "$project_env_file" project_management dev \
+    validate_keycloak_runtime "项目管理" "$project_env_file" project_management "$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)" \
         OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
         PLATFORM_BASE_URL "${frontend_public_origin}/project_management/auth/callback"
 }
 
-# 本地 Compose 的标准发现环境固定为 dev。运行时一旦完成 OIDC 接入，Client、
+# 本地 Compose 的发现环境由 --subsystem-environment 显式选择。运行时一旦完成 OIDC 接入，Client、
 # application code 和 environment code 必须指向同一自然键；缺省元数据兼容旧 Portal
 # 文件，但任何显式冲突都在启动/重建前失败，避免把 prod Client 装入 dev 容器。
 validate_local_runtime_target() {
@@ -1087,14 +1131,14 @@ validate_local_runtime_target() {
 		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前应用=${application_code}；Compose 发现应用=${expected_application}；请重新执行 ${expected_application}/${expected_environment} 应用接入"
 	fi
 	if [[ -n "$environment_code" && "$environment_code" != "$expected_environment" ]]; then
-		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code}；Compose 发现环境=${expected_environment}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请重新同步 ${expected_application}/${expected_environment}，不要将生产运行配置用于 docker-local.sh"
+		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code}；Compose 目标环境=${expected_environment}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请使用 --subsystem-environment ${environment_code}，或重新同步 ${expected_application}/${expected_environment}"
 	fi
 	if [[ "$client_id" != "$expected_client_id" ]]; then
-		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code:-未配置}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请重新同步 ${expected_application}/${expected_environment}，不要将生产 Client 用于 docker-local.sh"
+		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code:-未配置}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请重新同步 ${expected_application}/${expected_environment}，禁止跨环境复用 Client"
 	fi
 }
 
-# 机器客户端也必须和本地 dev 自然键一致。仅校验 Client ID，不读取、打印或
+# 机器客户端也必须和本地目标环境自然键一致。仅校验 Client ID，不读取、打印或
 # 猜测 Secret；密钥只能由接入控制面写入受限权限的 env 文件。
 validate_local_service_client_target() {
 	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5" expected_suffix="$6"
@@ -1103,7 +1147,7 @@ validate_local_service_client_target() {
 	runtime_value_configured "$client_id" || return 0
 	expected_client_id="${expected_application}-${expected_environment}-${expected_suffix}"
 	[[ "$client_id" == "$expected_client_id" ]] || \
-		fail "${description}本地运行配置错配：${client_key}=${client_id}；当前 Compose 是 ${expected_application}/${expected_environment}，必须使用 ${expected_client_id}。请通过子系统 retry/update 重新下发 dev 凭据，禁止复制 prod Secret"
+		fail "${description}本地运行配置错配：${client_key}=${client_id}；当前 Compose 是 ${expected_application}/${expected_environment}，必须使用 ${expected_client_id}。请通过子系统 retry/update 重新下发对应环境凭据，禁止跨环境复制 Secret"
 }
 
 require_local_service_client_target() {
@@ -1117,16 +1161,18 @@ require_local_service_client_target() {
 }
 
 validate_all_local_runtime_targets() {
-	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management dev OIDC_CLIENT_ID
-	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management "$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" OIDC_CLIENT_ID
 	validate_customer_local_service_clients
-	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal dev PORTAL_OIDC_CLIENT_ID
-	validate_local_runtime_target "项目管理" "$project_env_file" project_management dev OIDC_CLIENT_ID
+	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal "$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)" PORTAL_OIDC_CLIENT_ID
+	validate_local_runtime_target "项目管理" "$project_env_file" project_management "$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
 }
 
 validate_customer_local_service_clients() {
-	require_local_service_client_target "客户与商机管理审计" "$customer_env_file" customer_and_opportunity dev PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET audit-publisher
-	require_local_service_client_target "客户与商机管理通知" "$customer_env_file" customer_and_opportunity dev PLATFORM_NOTIFICATION_CLIENT_ID PLATFORM_NOTIFICATION_CLIENT_SECRET notification-publisher
+	local customer_environment
+	customer_environment="$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)"
+	require_local_service_client_target "客户与商机管理审计" "$customer_env_file" customer_and_opportunity "$customer_environment" PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET audit-publisher
+	require_local_service_client_target "客户与商机管理通知" "$customer_env_file" customer_and_opportunity "$customer_environment" PLATFORM_NOTIFICATION_CLIENT_ID PLATFORM_NOTIFICATION_CLIENT_SECRET notification-publisher
 }
 
 portal_compensation_configured() {
@@ -1146,6 +1192,7 @@ disable_contract_startup_catalog_sync() {
 }
 
 compose_run() {
+	sync_local_subsystem_environment_exports
     compose --ansi never "$@"
 }
 
@@ -1719,7 +1766,7 @@ refresh_contract_backend() {
 	ensure_project_env_file
 	ensure_portal_env_file
 	ensure_settlement_env_file
-	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management dev OIDC_CLIENT_ID
+	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management "$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
     prepare_go_backend_base_images "合同管理后端"
@@ -1746,7 +1793,7 @@ refresh_customer_backend() {
 	ensure_customer_env_file
 	ensure_portal_env_file
 	ensure_settlement_env_file
-	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" OIDC_CLIENT_ID
 	validate_customer_local_service_clients
     prepare_go_backend_base_images "客户与商机管理后端"
 
@@ -1857,7 +1904,7 @@ refresh_portal_backend() {
 	ensure_project_env_file
 	ensure_settlement_env_file
 	portal_configured || fail "客户自助门户尚未完成 customer_portal/dev 应用接入，不能启动 portal-api"
-	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal dev PORTAL_OIDC_CLIENT_ID
+	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal "$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)" PORTAL_OIDC_CLIENT_ID
 	portal_compensation_configured || fail "Portal 补偿 Worker 的映射/角色分配机器凭据不完整；请在应用接入页重试 customer_portal/dev"
 	prepare_go_backend_base_images "客户自助门户后端"
 
@@ -1885,7 +1932,7 @@ refresh_project_backend() {
 	ensure_project_env_file
 	ensure_settlement_env_file
 	project_configured || fail "项目管理系统尚未完成 project_management/dev 应用接入，不能启动 project-api"
-	validate_local_runtime_target "项目管理" "$project_env_file" project_management dev OIDC_CLIENT_ID
+	validate_local_runtime_target "项目管理" "$project_env_file" project_management "$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
 	prepare_go_backend_base_images "项目管理系统后端"
 
 	log "重新构建项目管理系统独立后端镜像"
@@ -1937,7 +1984,7 @@ start_presale_worker() {
 	ensure_portal_env_file
 	ensure_project_env_file
 	ensure_settlement_env_file
-	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" OIDC_CLIENT_ID
 	[[ -f "$presale_worker_env_file" ]] || \
 		fail "售前投递 Worker 环境文件不存在：${presale_worker_env_file}；请从 customer_and_opportunity/.env.presale-worker.example 复制并填写实际环境值"
 	[[ -s "$presale_worker_env_file" ]] || \
@@ -1984,7 +2031,7 @@ start_presale_alert_worker() {
 	ensure_platform_env_file
 	ensure_customer_env_file
 	ensure_settlement_env_file
-	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity dev OIDC_CLIENT_ID
+	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" OIDC_CLIENT_ID
 	prepare_go_backend_base_images "售前预警扫描 Worker"
 	log "构建售前预警扫描 Worker"
 	COMPOSE_PARALLEL_LIMIT=1 compose --profile customer --ansi never build customer-presale-alert-worker

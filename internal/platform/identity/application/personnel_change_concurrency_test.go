@@ -70,6 +70,9 @@ func (repository *personnelChangeCASRepository) Execute(_ context.Context, expec
 func (repository *personnelChangeCASRepository) PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error) {
 	return PersonnelChangePermissionPreview{}, nil
 }
+func (repository *personnelChangeCASRepository) ValidateCreate(context.Context, PersonnelChangeCreateInput) error {
+	return nil
+}
 
 type personnelChangeConcurrencyIDGenerator struct{}
 

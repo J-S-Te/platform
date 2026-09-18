@@ -1190,11 +1190,22 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"PORTAL_LAN_OVERRIDE_ENV_FILE":         {},
 		"PROJECT_LAN_OVERRIDE_ENV_FILE":        {},
 	}
+	subsystemEnvironmentKeys := map[string]struct{}{
+		"CONTRACT_SUBSYSTEM_ENVIRONMENT":      {},
+		"CUSTOMER_SUBSYSTEM_ENVIRONMENT":      {},
+		"PORTAL_SUBSYSTEM_ENVIRONMENT":        {},
+		"PROJECT_SUBSYSTEM_ENVIRONMENT":       {},
+		"DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT": {},
+		"SETTLEMENT_SUBSYSTEM_ENVIRONMENT":    {},
+	}
 	runnerEnvironment := make([]string, 0, len(os.Environ())+12)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok {
 			if _, isLANOverride := lanOverrideKeys[key]; isLANOverride {
+				continue
+			}
+			if _, isSubsystemEnvironment := subsystemEnvironmentKeys[key]; isSubsystemEnvironment {
 				continue
 			}
 		}
@@ -1217,7 +1228,55 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
 		"SUBSYSTEM_HOST_PROJECTS_ROOT="+workspaceRoot,
 	)
+	// Provision writes the selected environment into the runtime file before it invokes
+	// Compose. Re-read those files for every operation so a first-time dev/test/staging/prod
+	// onboarding receives the matching discovery label without restarting the provisioner.
+	runtimeEnvironments := []struct {
+		key, path, applicationCode, clientKey string
+	}{
+		{"CONTRACT_SUBSYSTEM_ENVIRONMENT", contractEnvironment, integratedContractApplicationCode, "OIDC_CLIENT_ID"},
+		{"CUSTOMER_SUBSYSTEM_ENVIRONMENT", customerEnvironment, integratedCustomerApplicationCode, "OIDC_CLIENT_ID"},
+		{"PORTAL_SUBSYSTEM_ENVIRONMENT", portalEnvironment, integratedPortalApplicationCode, "PORTAL_OIDC_CLIENT_ID"},
+		{"PROJECT_SUBSYSTEM_ENVIRONMENT", projectEnvironment, integratedProjectApplicationCode, "OIDC_CLIENT_ID"},
+		{"DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT", filepath.Join(workspaceRoot, "data_analysis", ".env.local"), "data_analysis", "OIDC_CLIENT_ID"},
+		{"SETTLEMENT_SUBSYSTEM_ENVIRONMENT", settlementEnvironment, "settlement", "OIDC_CLIENT_ID"},
+	}
+	for _, target := range runtimeEnvironments {
+		environment := localRuntimeEnvironment(target.path, target.applicationCode, target.clientKey)
+		if environment == "" {
+			environment = "dev"
+		}
+		runnerEnvironment = append(runnerEnvironment, target.key+"="+environment)
+	}
 	return provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+}
+
+func localRuntimeEnvironment(path, applicationCode, clientKey string) string {
+	values, err := readEnvironmentValues(path)
+	if err != nil {
+		return ""
+	}
+	if environment := strings.ToLower(strings.TrimSpace(values["PLATFORM_ENVIRONMENT_CODE"])); validLocalRuntimeEnvironment(environment) {
+		return environment
+	}
+	clientID := strings.TrimSpace(values[clientKey])
+	prefix, suffix := strings.TrimSpace(applicationCode)+"-", "-web"
+	if strings.HasPrefix(clientID, prefix) && strings.HasSuffix(clientID, suffix) {
+		environment := strings.TrimSuffix(strings.TrimPrefix(clientID, prefix), suffix)
+		if validLocalRuntimeEnvironment(environment) {
+			return environment
+		}
+	}
+	return ""
+}
+
+func validLocalRuntimeEnvironment(value string) bool {
+	switch value {
+	case "dev", "test", "staging", "prod":
+		return true
+	default:
+		return false
+	}
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfiguration() (string, string, string, string, string, string, string, string, error) {

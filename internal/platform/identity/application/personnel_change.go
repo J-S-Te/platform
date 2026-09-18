@@ -24,9 +24,9 @@ type PersonnelChangeRequest struct {
 type PersonnelChangeCreateInput struct {
 	TenantID, OperatorID, UserID, SourceMembershipID, TargetOrgUnitID, TargetPositionID, ChangeType, Reason, ApprovalReference string
 	EffectiveAt                                                                                                                time.Time
-	// ApprovalRequired selects the explicit approval lifecycle. It defaults to false
-	// for backwards compatibility with existing administrator-driven scheduling callers.
-	ApprovalRequired bool
+	// DirectScheduleAuthorized is derived exclusively from the authenticated server-side
+	// principal. Browser payloads must never decide whether approval can be bypassed.
+	DirectScheduleAuthorized bool
 }
 type PersonnelChangeTransitionInput struct{ TenantID, OperatorID, ID, ToStatus, ApprovalReference string }
 type PermissionRole struct {
@@ -51,6 +51,7 @@ type PersonnelChangeRepository interface {
 	UpdateStatus(context.Context, PersonnelChangeRequest, string, string, time.Time) (PersonnelChangeRequest, error)
 	Execute(context.Context, PersonnelChangeRequest, string, time.Time) (PersonnelChangeRequest, error)
 	PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error)
+	ValidateCreate(context.Context, PersonnelChangeCreateInput) error
 }
 type PersonnelChangeService struct {
 	repo     PersonnelChangeRepository
@@ -77,10 +78,11 @@ func NewPersonnelChangeService(repo PersonnelChangeRepository, ids IDGenerator, 
 	return &PersonnelChangeService{repo: repo, ids: ids, clock: clock, handover: handover}, nil
 }
 func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeCreateInput) (PersonnelChangeRequest, error) {
-	// Existing callers retain the administrator-driven scheduling behavior unless
-	// they explicitly opt into the approval lifecycle. This keeps old integrations
-	// compatible while making the UI approval path start from a real draft.
 	in.ChangeType = strings.ToUpper(strings.TrimSpace(in.ChangeType))
+	in.UserID = strings.TrimSpace(in.UserID)
+	in.SourceMembershipID = strings.TrimSpace(in.SourceMembershipID)
+	in.TargetOrgUnitID = strings.TrimSpace(in.TargetOrgUnitID)
+	in.TargetPositionID = strings.TrimSpace(in.TargetPositionID)
 	in.Reason = strings.TrimSpace(in.Reason)
 	if in.TenantID == "" || in.OperatorID == "" || in.UserID == "" || in.Reason == "" || in.EffectiveAt.IsZero() {
 		return PersonnelChangeRequest{}, ErrValidation
@@ -90,16 +92,45 @@ func (s *PersonnelChangeService) Create(ctx context.Context, in PersonnelChangeC
 	default:
 		return PersonnelChangeRequest{}, ErrValidation
 	}
+	if requiresSourceMembership(in.ChangeType) && in.SourceMembershipID == "" {
+		return PersonnelChangeRequest{}, fmt.Errorf("source membership is required: %w", ErrValidation)
+	}
+	if requiresTargetAssignment(in.ChangeType) && (in.TargetOrgUnitID == "" || in.TargetPositionID == "") {
+		return PersonnelChangeRequest{}, fmt.Errorf("target organization and position are required: %w", ErrValidation)
+	}
+	if err := s.repo.ValidateCreate(ctx, in); err != nil {
+		return PersonnelChangeRequest{}, fmt.Errorf("validate personnel change: %w", err)
+	}
 	now := s.clock.Now().UTC()
 	id, err := s.ids.New(now)
 	if err != nil {
 		return PersonnelChangeRequest{}, fmt.Errorf("generate personnel change id: %w", err)
 	}
-	status := domain.PersonnelChangeScheduled
-	if in.ApprovalRequired {
-		status = domain.PersonnelChangeDraft
+	status := domain.PersonnelChangeDraft
+	// Only a server-authorized super administrator may directly schedule a
+	// non-termination change. Termination always traverses approval and handover.
+	if in.DirectScheduleAuthorized && in.ChangeType != domain.PersonnelChangeTermination {
+		status = domain.PersonnelChangeScheduled
 	}
 	return s.repo.Create(ctx, PersonnelChangeRequest{ID: id, TenantID: in.TenantID, UserID: in.UserID, SourceMembershipID: in.SourceMembershipID, TargetOrgUnitID: in.TargetOrgUnitID, TargetPositionID: in.TargetPositionID, ChangeType: in.ChangeType, Status: status, Reason: in.Reason, ApprovalReference: in.ApprovalReference, SubmittedBy: in.OperatorID, EffectiveAt: &in.EffectiveAt, Version: 1, CreatedAt: now, UpdatedAt: now})
+}
+
+func requiresSourceMembership(changeType string) bool {
+	switch changeType {
+	case domain.PersonnelChangePromotion, domain.PersonnelChangeDemotion, domain.PersonnelChangeTransfer, domain.PersonnelChangeTermination:
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresTargetAssignment(changeType string) bool {
+	switch changeType {
+	case domain.PersonnelChangePromotion, domain.PersonnelChangeDemotion, domain.PersonnelChangeTransfer, domain.PersonnelChangeRehire:
+		return true
+	default:
+		return false
+	}
 }
 func (s *PersonnelChangeService) List(ctx context.Context, tenant, status, changeType, keyword string) ([]PersonnelChangeRequest, error) {
 	return s.repo.List(ctx, tenant, status, changeType, keyword)
@@ -117,6 +148,12 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 	}
 	if !domain.CanTransitionPersonnelChange(cur.Status, in.ToStatus) {
 		return PersonnelChangeRequest{}, ErrConflict
+	}
+	if cur.ChangeType == domain.PersonnelChangeTermination && cur.Status == domain.PersonnelChangePendingApproval && in.ToStatus == domain.PersonnelChangeScheduled {
+		return PersonnelChangeRequest{}, fmt.Errorf("termination must enter handover before scheduling: %w", ErrConflict)
+	}
+	if cur.Status == domain.PersonnelChangePendingApproval && (in.ToStatus == domain.PersonnelChangePendingHandover || in.ToStatus == domain.PersonnelChangeScheduled) && strings.TrimSpace(in.ApprovalReference) == "" {
+		return PersonnelChangeRequest{}, fmt.Errorf("approval reference is required: %w", ErrValidation)
 	}
 	// 审批凭据与离职交接是显式安全闸门；交接系统未接入时，凭据仍是责任已转移并检查过的持久证据。
 	if in.ToStatus == domain.PersonnelChangeScheduled {

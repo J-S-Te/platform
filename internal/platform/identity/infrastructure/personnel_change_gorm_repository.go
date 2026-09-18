@@ -63,7 +63,7 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 			if err := tx.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusDisabled, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return err
 			}
-			if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusDisabled, "primary_org_id": nil, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusDisabled, "employment_status": "TERMINATED", "primary_org_id": nil, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return err
 			}
 		} else {
@@ -171,7 +171,7 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 				if err := tx.Model(&sessionModel{}).Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", req.TenantID, account.ID, domain.StatusActive).Updates(map[string]any{"revoked_at": now, "revoke_reason": "PERSONNEL_REHIRE", "status": "REVOKED"}).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusActive, "employment_status": "ACTIVE", "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusActive, "employment_status": "EMPLOYED", "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 					return err
 				}
 			}
@@ -207,6 +207,43 @@ type PersonnelChangeGORMRepository struct{ db *gorm.DB }
 
 func NewPersonnelChangeGORMRepository(db *gorm.DB) *PersonnelChangeGORMRepository {
 	return &PersonnelChangeGORMRepository{db: db}
+}
+
+// ValidateCreate moves all identity and assignment checks ahead of persistence.
+// Execute repeats the critical checks as a defense against changes between scheduling and execution.
+func (r *PersonnelChangeGORMRepository) ValidateCreate(c context.Context, in application.PersonnelChangeCreateInput) error {
+	var user userModel
+	if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", in.TenantID, in.UserID).First(&user).Error; err != nil {
+		return application.ErrValidation
+	}
+	if in.ChangeType == domain.PersonnelChangeRehire {
+		if user.Status != domain.StatusDisabled {
+			return fmt.Errorf("rehire requires a disabled user: %w", application.ErrValidation)
+		}
+	} else if user.Status != domain.StatusActive {
+		return fmt.Errorf("personnel change requires an active user: %w", application.ErrValidation)
+	}
+	if in.SourceMembershipID != "" {
+		var membership membershipModel
+		if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND user_id = ? AND status = ?", in.TenantID, in.SourceMembershipID, in.UserID, domain.StatusActive).First(&membership).Error; err != nil {
+			return fmt.Errorf("source membership is not active for the selected user: %w", application.ErrValidation)
+		}
+	}
+	if requiresCreateTarget(in.ChangeType) {
+		var position positionModel
+		if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND org_unit_id = ? AND status = ?", in.TenantID, in.TargetPositionID, in.TargetOrgUnitID, domain.StatusActive).First(&position).Error; err != nil {
+			return fmt.Errorf("target position is not active in the selected organization: %w", application.ErrValidation)
+		}
+		var organization orgUnitModel
+		if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND status = ?", in.TenantID, in.TargetOrgUnitID, domain.StatusActive).First(&organization).Error; err != nil {
+			return fmt.Errorf("target organization is not active: %w", application.ErrValidation)
+		}
+	}
+	return nil
+}
+
+func requiresCreateTarget(changeType string) bool {
+	return changeType != domain.PersonnelChangeTermination
 }
 func toPersonnel(m personnelChangeModel) application.PersonnelChangeRequest {
 	return application.PersonnelChangeRequest{ID: m.ID, TenantID: m.TenantID, UserID: m.UserID, SourceMembershipID: deref(m.SourceMembershipID), TargetOrgUnitID: deref(m.TargetOrgUnitID), TargetPositionID: deref(m.TargetPositionID), ChangeType: m.ChangeType, Status: m.Status, Reason: m.Reason, ApprovalReference: deref(m.ApprovalReference), SubmittedBy: m.SubmittedBy, ApprovedBy: deref(m.ApprovedBy), EffectiveAt: &m.EffectiveAt, ApprovedAt: m.ApprovedAt, ExecutedAt: m.ExecutedAt, Version: m.Version, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}

@@ -268,6 +268,13 @@ services:
   subsystem-provisioner:
     <<: *platform-backend-runtime
     environment:
+      LOCAL_SUBSYSTEM_ENVIRONMENT: ${LOCAL_SUBSYSTEM_ENVIRONMENT:-dev}
+      CONTRACT_SUBSYSTEM_ENVIRONMENT: ${CONTRACT_SUBSYSTEM_ENVIRONMENT:-dev}
+      CUSTOMER_SUBSYSTEM_ENVIRONMENT: ${CUSTOMER_SUBSYSTEM_ENVIRONMENT:-dev}
+      PORTAL_SUBSYSTEM_ENVIRONMENT: ${PORTAL_SUBSYSTEM_ENVIRONMENT:-dev}
+      PROJECT_SUBSYSTEM_ENVIRONMENT: ${PROJECT_SUBSYSTEM_ENVIRONMENT:-dev}
+      DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT: ${DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT:-dev}
+      SETTLEMENT_SUBSYSTEM_ENVIRONMENT: ${SETTLEMENT_SUBSYSTEM_ENVIRONMENT:-dev}
       SUBSYSTEM_PROJECTS_ROOT: ${SUBSYSTEM_HOST_PROJECTS_ROOT}
       SUBSYSTEM_GATEWAY_SCRIPT_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/scripts/portal-gateway.sh
       SUBSYSTEM_GATEWAY_INCLUDE_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/docker/portal-apps-locations.conf
@@ -382,7 +389,7 @@ services:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: settlement
       com.basic-platform.application_name: 结算与开票管理系统
-      com.basic-platform.environment: dev
+      com.basic-platform.environment: ${SETTLEMENT_SUBSYSTEM_ENVIRONMENT:-dev}
       com.basic-platform.service_name: settlement-api
       com.basic-platform.service_role: business
       com.basic-platform.internal_host: settlement-api
@@ -536,7 +543,7 @@ services:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: contract_management
       com.basic-platform.application_name: 合同管理系统
-      com.basic-platform.environment: dev
+      com.basic-platform.environment: ${CONTRACT_SUBSYSTEM_ENVIRONMENT:-dev}
       com.basic-platform.service_name: contract-api
       com.basic-platform.service_role: business
       com.basic-platform.internal_host: contract-api
@@ -643,7 +650,7 @@ services:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: project_management
       com.basic-platform.application_name: 项目服务内容管理系统
-      com.basic-platform.environment: dev
+      com.basic-platform.environment: ${PROJECT_SUBSYSTEM_ENVIRONMENT:-dev}
       com.basic-platform.service_name: project-api
       com.basic-platform.service_role: business
       com.basic-platform.internal_host: project-api
@@ -759,7 +766,7 @@ services:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: data_analysis
       com.basic-platform.application_name: 数据看板与统计分析
-      com.basic-platform.environment: dev
+      com.basic-platform.environment: ${DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT:-dev}
       com.basic-platform.service_name: dashboard-api
       com.basic-platform.service_role: business
       com.basic-platform.internal_host: dashboard-api
@@ -922,7 +929,7 @@ services:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: customer_and_opportunity
       com.basic-platform.application_name: 客户与商机管理系统
-      com.basic-platform.environment: dev
+      com.basic-platform.environment: ${CUSTOMER_SUBSYSTEM_ENVIRONMENT:-dev}
       com.basic-platform.service_name: customer-api
       com.basic-platform.service_role: business
       com.basic-platform.internal_host: customer-api
@@ -1178,7 +1185,7 @@ services:
       com.basic-platform.discovery: "v1"
       com.basic-platform.application_code: customer_portal
       com.basic-platform.application_name: 客户自助门户
-      com.basic-platform.environment: dev
+      com.basic-platform.environment: ${PORTAL_SUBSYSTEM_ENVIRONMENT:-dev}
       com.basic-platform.service_name: portal-api
       com.basic-platform.service_role: business
       com.basic-platform.internal_host: portal-api
