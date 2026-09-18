@@ -40,6 +40,9 @@ func (r *personnelRepoStub) Execute(_ context.Context, request application.Perso
 func (r *personnelRepoStub) PreviewPermissions(context.Context, application.PersonnelChangeRequest) (application.PersonnelChangePermissionPreview, error) {
 	return application.PersonnelChangePermissionPreview{}, nil
 }
+func (r *personnelRepoStub) ValidateCreate(context.Context, application.PersonnelChangeCreateInput) error {
+	return nil
+}
 
 type personnelIDStub struct{}
 

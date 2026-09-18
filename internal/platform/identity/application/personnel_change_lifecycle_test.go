@@ -11,7 +11,8 @@ import (
 )
 
 type personnelChangeCreateRepository struct {
-	created PersonnelChangeRequest
+	created       PersonnelChangeRequest
+	validationErr error
 }
 
 func (r *personnelChangeCreateRepository) Create(_ context.Context, request PersonnelChangeRequest) (PersonnelChangeRequest, error) {
@@ -33,6 +34,9 @@ func (r *personnelChangeCreateRepository) Execute(context.Context, PersonnelChan
 func (r *personnelChangeCreateRepository) PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error) {
 	return PersonnelChangePermissionPreview{}, nil
 }
+func (r *personnelChangeCreateRepository) ValidateCreate(context.Context, PersonnelChangeCreateInput) error {
+	return r.validationErr
+}
 
 type personnelChangeLifecycleIDGenerator struct{}
 
@@ -53,15 +57,68 @@ func newPersonnelChangeForCreateTest(t *testing.T, repository *personnelChangeCr
 	return service
 }
 
-func personnelChangeCreateInput(approvalRequired bool) PersonnelChangeCreateInput {
+func personnelChangeCreateInput(directScheduleAuthorized bool) PersonnelChangeCreateInput {
 	return PersonnelChangeCreateInput{
 		TenantID: "tenant-1", OperatorID: "operator-1", UserID: "user-1",
+		SourceMembershipID: "membership-1", TargetOrgUnitID: "org-1", TargetPositionID: "position-1",
 		ChangeType: domain.PersonnelChangeTransfer, Reason: "业务调整",
-		EffectiveAt: time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC), ApprovalRequired: approvalRequired,
+		EffectiveAt: time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC), DirectScheduleAuthorized: directScheduleAuthorized,
 	}
 }
 
-func TestPersonnelChangeCreateKeepsLegacyDirectScheduleByDefault(t *testing.T) {
+func TestPersonnelChangeCreateValidatesFieldsByChangeType(t *testing.T) {
+	tests := []struct {
+		name    string
+		change  string
+		mutate  func(*PersonnelChangeCreateInput)
+		wantErr bool
+	}{
+		{name: "transfer requires source membership", change: domain.PersonnelChangeTransfer, mutate: func(in *PersonnelChangeCreateInput) { in.SourceMembershipID = "" }, wantErr: true},
+		{name: "promotion requires target assignment", change: domain.PersonnelChangePromotion, mutate: func(in *PersonnelChangeCreateInput) { in.TargetPositionID = "" }, wantErr: true},
+		{name: "rehire requires target assignment", change: domain.PersonnelChangeRehire, mutate: func(in *PersonnelChangeCreateInput) {
+			in.SourceMembershipID = ""
+			in.TargetOrgUnitID = ""
+			in.TargetPositionID = ""
+		}, wantErr: true},
+		{name: "termination requires source membership", change: domain.PersonnelChangeTermination, mutate: func(in *PersonnelChangeCreateInput) {
+			in.SourceMembershipID = ""
+			in.TargetOrgUnitID = ""
+			in.TargetPositionID = ""
+		}, wantErr: true},
+		{name: "termination does not require target assignment", change: domain.PersonnelChangeTermination, mutate: func(in *PersonnelChangeCreateInput) {
+			in.TargetOrgUnitID = ""
+			in.TargetPositionID = ""
+		}, wantErr: false},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			repository := &personnelChangeCreateRepository{}
+			service := newPersonnelChangeForCreateTest(t, repository)
+			input := personnelChangeCreateInput(false)
+			input.ChangeType = test.change
+			test.mutate(&input)
+			_, err := service.Create(context.Background(), input)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Create(%s) error = %v, wantErr=%v", test.change, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestPersonnelChangeCreateRejectsRepositoryIdentityValidation(t *testing.T) {
+	repository := &personnelChangeCreateRepository{validationErr: ErrValidation}
+	service := newPersonnelChangeForCreateTest(t, repository)
+	_, err := service.Create(context.Background(), personnelChangeCreateInput(false))
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error=%v, want ErrValidation", err)
+	}
+	if repository.created.ID != "" {
+		t.Fatal("invalid request must not be persisted")
+	}
+}
+
+func TestPersonnelChangeCreateStartsDraftForRegularAdministrator(t *testing.T) {
 	repository := &personnelChangeCreateRepository{}
 	service := newPersonnelChangeForCreateTest(t, repository)
 
@@ -69,12 +126,12 @@ func TestPersonnelChangeCreateKeepsLegacyDirectScheduleByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Status != domain.PersonnelChangeScheduled || repository.created.Status != domain.PersonnelChangeScheduled {
-		t.Fatalf("status=%q repository status=%q, want SCHEDULED", created.Status, repository.created.Status)
+	if created.Status != domain.PersonnelChangeDraft || repository.created.Status != domain.PersonnelChangeDraft {
+		t.Fatalf("status=%q repository status=%q, want DRAFT", created.Status, repository.created.Status)
 	}
 }
 
-func TestPersonnelChangeCreateApprovalRequiredStartsDraft(t *testing.T) {
+func TestPersonnelChangeCreateAllowsSuperAdminToScheduleNonTermination(t *testing.T) {
 	repository := &personnelChangeCreateRepository{}
 	service := newPersonnelChangeForCreateTest(t, repository)
 
@@ -82,11 +139,62 @@ func TestPersonnelChangeCreateApprovalRequiredStartsDraft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Status != domain.PersonnelChangeDraft || repository.created.Status != domain.PersonnelChangeDraft {
-		t.Fatalf("status=%q repository status=%q, want DRAFT", created.Status, repository.created.Status)
+	if created.Status != domain.PersonnelChangeScheduled || repository.created.Status != domain.PersonnelChangeScheduled {
+		t.Fatalf("status=%q repository status=%q, want SCHEDULED", created.Status, repository.created.Status)
 	}
-	if !domain.CanTransitionPersonnelChange(created.Status, domain.PersonnelChangePendingApproval) {
-		t.Fatal("approval-required draft must be submit-able")
+	if domain.CanTransitionPersonnelChange(created.Status, domain.PersonnelChangePendingApproval) {
+		t.Fatal("directly scheduled request must not be submitted for approval")
+	}
+}
+
+func TestPersonnelChangeCreateTerminationAlwaysStartsDraft(t *testing.T) {
+	repository := &personnelChangeCreateRepository{}
+	service := newPersonnelChangeForCreateTest(t, repository)
+	input := personnelChangeCreateInput(true)
+	input.ChangeType = domain.PersonnelChangeTermination
+	input.TargetOrgUnitID = ""
+	input.TargetPositionID = ""
+	created, err := service.Create(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != domain.PersonnelChangeDraft {
+		t.Fatalf("status=%q, want DRAFT", created.Status)
+	}
+}
+
+func TestPersonnelChangeTerminationCannotSkipHandoverAfterApproval(t *testing.T) {
+	repository := &personnelChangeExecutionRepository{request: PersonnelChangeRequest{
+		ID: "change-termination", TenantID: "tenant-1", UserID: "user-1",
+		ChangeType: domain.PersonnelChangeTermination, Status: domain.PersonnelChangePendingApproval,
+	}}
+	service, err := NewPersonnelChangeService(repository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Transition(context.Background(), PersonnelChangeTransitionInput{
+		TenantID: "tenant-1", OperatorID: "approver-1", ID: "change-termination",
+		ToStatus: domain.PersonnelChangeScheduled, ApprovalReference: "HANDOVER-1001",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error=%v, want ErrConflict", err)
+	}
+}
+
+func TestPersonnelChangeApprovalRequiresPersistentReference(t *testing.T) {
+	repository := &personnelChangeExecutionRepository{request: PersonnelChangeRequest{
+		ID: "change-transfer", TenantID: "tenant-1", UserID: "user-1",
+		ChangeType: domain.PersonnelChangeTransfer, Status: domain.PersonnelChangePendingApproval,
+	}}
+	service, err := NewPersonnelChangeService(repository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Transition(context.Background(), PersonnelChangeTransitionInput{
+		TenantID: "tenant-1", OperatorID: "approver-1", ID: "change-transfer", ToStatus: domain.PersonnelChangeScheduled,
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error=%v, want ErrValidation", err)
 	}
 }
 
@@ -118,6 +226,9 @@ func (r *personnelChangeExecutionRepository) Execute(_ context.Context, request 
 }
 func (r *personnelChangeExecutionRepository) PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error) {
 	return PersonnelChangePermissionPreview{}, nil
+}
+func (r *personnelChangeExecutionRepository) ValidateCreate(context.Context, PersonnelChangeCreateInput) error {
+	return nil
 }
 
 type personnelChangeNotifier struct {

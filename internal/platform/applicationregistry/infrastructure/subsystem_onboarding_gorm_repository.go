@@ -42,6 +42,9 @@ func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironme
 		Where("application.tenant_id = ? AND application.code = ? AND application.status = ? AND environment.environment = ? AND environment.status = ?", tenantID, applicationCode, "ACTIVE", environment, "ACTIVE").
 		Take(&row).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", application.ErrNotFound
+		}
 		return "", "", err
 	}
 	return row.ApplicationID, row.EnvironmentID, nil

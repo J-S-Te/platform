@@ -19,6 +19,9 @@ type subsystemOnboardingRepositoryStub struct {
 	directoryCreateCalls int
 	listCalls            int
 	registeredListCalls  int
+	resolveApplicationID string
+	resolveEnvironmentID string
+	resolveErr           error
 }
 
 func (repository *subsystemOnboardingRepositoryStub) ResolveApplicationEnvironmentGateway(context.Context, string, string, string) (string, string, error) {
@@ -351,7 +354,36 @@ func (repository *subsystemOnboardingRepositoryStub) ListRegisteredApplicationCo
 }
 
 func (repository *subsystemOnboardingRepositoryStub) ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error) {
-	return "app-1", "env-1", nil
+	applicationID := repository.resolveApplicationID
+	if applicationID == "" {
+		applicationID = "app-1"
+	}
+	environmentID := repository.resolveEnvironmentID
+	if environmentID == "" {
+		environmentID = "env-1"
+	}
+	return applicationID, environmentID, repository.resolveErr
+}
+
+func TestPreflightValidateAllowsMissingEnvironment(t *testing.T) {
+	repository := &subsystemOnboardingRepositoryStub{resolveErr: ErrNotFound}
+	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Now()}, RedirectURIValidationPolicy{AllowInsecureHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input := SubsystemOnboardingInput{
+		TenantID: "01K10A00000000000000000001", OperatorID: "01K10B00000000000000000001",
+		ApplicationCode: "customer_and_opportunity", ApplicationName: "客户与商机管理系统",
+		Environment: "dev", PublicBaseURL: "http://localhost:8081",
+		UpstreamURL: "http://customer-api:8090", PathPrefix: "/customer-opportunity", ClientType: "confidential",
+	}
+	if err := service.PreflightValidate(context.Background(), input); err != nil {
+		t.Fatalf("missing environment must be available for onboarding: %v", err)
+	}
+	if repository.listCalls != 1 {
+		t.Fatalf("portal collision check calls = %d, want 1", repository.listCalls)
+	}
 }
 
 type sequentialManagementIDs struct{ next int }

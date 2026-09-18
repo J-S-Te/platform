@@ -1,5 +1,20 @@
 # Current Task
 
+## Focused follow-up: personnel-change validation and approval/handover policy (2026-09-18)
+
+- Personnel-change creation now validates the selected user, active source membership ownership, and active target organization/position combination before persistence; execution retains the same checks as a second safety boundary.
+- Termination requires an active source membership and always starts as a draft, including for platform super administrators. It must pass approval, enter handover, provide a `HANDOVER-*` reference, and pass the handover checker before scheduling.
+- Regular administrators create drafts and submit them for approval. Only a server-verified `platform-super-admin` role may directly schedule non-termination changes; browser payloads can no longer choose whether approval is required.
+- Rehire accepts no source membership, requires an active target assignment, and only accepts a disabled user. Termination records `TERMINATED`; successful rehire restores `EMPLOYED`.
+- The frontend now includes disabled users for rehire selection, exposes submit/approval/handover actions, records approval or handover references in a controlled auto-closing dialog, and documents the real workflow.
+
+## Focused follow-up: personnel change form validation (2026-09-18)
+
+- Unified personnel-change field rules across Vue and backend validation: promotion/demotion/transfer require source membership plus target organization and position; rehire requires target organization and position; termination does not require a target assignment.
+- The form now shows conditional required markers and guidance instead of marking optional termination/rehire fields as mandatory.
+- Added backend lifecycle regression coverage for each change-type validation branch.
+- Platform identity tests and frontend `npm test` (540 tests) plus `npm run build` pass.
+
 ## Focused follow-up: viewport-adaptive subsystem portal cards (2026-09-17)
 
 - The desktop subsystem portal now uses the remaining `100dvh` workspace instead of a fixed 248px card minimum. One through nine visible applications map to 1×1, 2×1, 3×1, 2×2, 3×2, 4×2 or 3×3 grids with spacious/standard/compact density.

@@ -870,6 +870,26 @@ func TestLocalDockerSubsystemProvisionerPreflightIntegratedCustomerDoesNotRequir
 	}
 }
 
+func TestLocalRuntimeEnvironmentSupportsProductionAndLegacyPortalFiles(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	customerPath := filepath.Join(directory, "customer.env")
+	if err := os.WriteFile(customerPath, []byte("PLATFORM_ENVIRONMENT_CODE=prod\nOIDC_CLIENT_ID=customer_and_opportunity-prod-web\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := localRuntimeEnvironment(customerPath, integratedCustomerApplicationCode, "OIDC_CLIENT_ID"); got != "prod" {
+		t.Fatalf("customer environment = %q, want prod", got)
+	}
+
+	portalPath := filepath.Join(directory, "portal.env")
+	if err := os.WriteFile(portalPath, []byte("PORTAL_OIDC_CLIENT_ID=customer_portal-staging-web\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := localRuntimeEnvironment(portalPath, integratedPortalApplicationCode, "PORTAL_OIDC_CLIENT_ID"); got != "staging" {
+		t.Fatalf("legacy portal environment = %q, want staging", got)
+	}
+}
+
 func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedEnvPublishesCatalogAndSkipsGateway(t *testing.T) {
 	t.Parallel()
 	root, platformRoot, _, gatewayScript := createIntegratedProvisionerFixture(t, integratedCustomerApplicationCode)
