@@ -1,5 +1,11 @@
 # Current Task
 
+## Focused follow-up: personnel change modal actions (2026-09-18)
+
+- Fixed the personnel-change create modal so its form body is the only scrolling region; the cancel and save action bar remains visible within the modal at all viewport heights.
+- Added a source-contract regression assertion for the flex layout, constrained body and non-scrolling action bar.
+- Frontend `npm test` passes 540 tests and `npm run build` passes; the build retains the existing large-chunk warning only.
+
 ## Focused follow-up: personnel-change validation and approval/handover policy (2026-09-18)
 
 - Personnel-change creation now validates the selected user, active source membership ownership, and active target organization/position combination before persistence; execution retains the same checks as a second safety boundary.
