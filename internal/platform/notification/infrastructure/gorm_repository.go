@@ -351,6 +351,9 @@ func (repository *Repository) ListDeliveries(ctx context.Context, tenantID strin
 
 func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID string, page application.PageRequest) (application.PageResult[domain.InboxItem], error) {
 	base := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ?", tenantID, userID, domain.DeliveryStatusDelivered)
+	if page.UnreadOnly {
+		base = base.Where("d.read_at IS NULL")
+	}
 	var total int64
 	if err := base.Count(&total).Error; err != nil {
 		return application.PageResult[domain.InboxItem]{}, fmt.Errorf("count notification inbox: %w", err)
