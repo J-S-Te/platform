@@ -44,8 +44,9 @@ type NotificationCreator interface {
 
 // PageRequest is a bounded inbox/template list query.
 type PageRequest struct {
-	Page     int
-	PageSize int
+	Page       int
+	PageSize   int
+	UnreadOnly bool
 }
 
 // PageResult is the common paginated result returned by notification queries.

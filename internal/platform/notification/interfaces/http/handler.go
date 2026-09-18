@@ -240,7 +240,16 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out, e := h.service.ListInbox(r.Context(), p.Tenant.ID, p.User.ID, pagination(r))
+	page := pagination(r)
+	if raw := strings.TrimSpace(r.URL.Query().Get("unread_only")); raw != "" {
+		unreadOnly, e := strconv.ParseBool(raw)
+		if e != nil {
+			h.writeError(w, r, app.ErrValidation)
+			return
+		}
+		page.UnreadOnly = unreadOnly
+	}
+	out, e := h.service.ListInbox(r.Context(), p.Tenant.ID, p.User.ID, page)
 	if e != nil {
 		h.writeError(w, r, e)
 		return
