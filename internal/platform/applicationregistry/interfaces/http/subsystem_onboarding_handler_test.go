@@ -1269,6 +1269,22 @@ func TestUpdateServiceCredentialRequirementsRedeliverProjectOwnerDirectory(t *te
 	}
 }
 
+func TestUpdateServiceCredentialRequirementsRedeliverContractCRMReference(t *testing.T) {
+	found := false
+	for _, requirement := range updateServiceCredentialRequirements("contract_management") {
+		if requirement.purpose != application.ServiceCredentialCRMContractReferenceRead {
+			continue
+		}
+		found = true
+		if requirement.suffix != "crm-contract-reference" || requirement.scope != "customer.contract_reference.read" || !requirement.rotate {
+			t.Fatalf("crm-contract-reference requirement = %#v", requirement)
+		}
+	}
+	if !found {
+		t.Fatal("contract_management controlled update must redeliver the CRM contract reference credential")
+	}
+}
+
 func TestCatalogPublisherCredentialRequiredForStartupCatalogPublishers(t *testing.T) {
 	t.Parallel()
 	for _, applicationCode := range []string{
