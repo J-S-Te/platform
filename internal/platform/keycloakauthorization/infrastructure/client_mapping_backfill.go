@@ -34,7 +34,7 @@ func (store *ClientMappingStore) BackfillKeycloakAuthorization(ctx context.Conte
 	now := time.Now().UTC()
 	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var identityIDs []string
-		if err := activeKeycloakBackfillUsersQuery(tx, tenantID).Pluck("id", &identityIDs).Error; err != nil {
+		if err := activeKeycloakBackfillUsersQuery(tx, tenantID, applicationID, now).Pluck("user_record.id", &identityIDs).Error; err != nil {
 			return fmt.Errorf("load active Keycloak backfill users: %w", err)
 		}
 		for _, identityID := range identityIDs {
@@ -72,8 +72,41 @@ func (store *ClientMappingStore) ExpandLegacyKeycloakAuthorizationOutbox(ctx con
 	})
 }
 
-func activeKeycloakBackfillUsersQuery(database *gorm.DB, tenantID string) *gorm.DB {
-	return database.Table("iam_user").Where("tenant_id = ? AND status = ?", strings.TrimSpace(tenantID), "ACTIVE").Order("id ASC")
+func activeKeycloakBackfillUsersQuery(database *gorm.DB, tenantID, applicationID string, now time.Time) *gorm.DB {
+	// Most applications may project every active platform account so Keycloak can
+	// centrally disable a formerly authorized account. Customer Portal is a
+	// deliberately separate external identity boundary: its broker must only see
+	// accounts that actually have portal access. In particular, the platform
+	// super administrator is allowed to manage the portal registration but must
+	// never be turned into a customer merely because a portal client is onboarded.
+	return database.Table("iam_user AS user_record").
+		Joins("JOIN platform_application AS application ON application.tenant_id = user_record.tenant_id AND application.id = ?", strings.TrimSpace(applicationID)).
+		Where("user_record.tenant_id = ? AND user_record.status = ?", strings.TrimSpace(tenantID), "ACTIVE").
+		Where(`application.code <> 'customer_portal'
+			OR EXISTS (
+				SELECT 1
+				FROM authz_role_binding AS binding
+				JOIN authz_role AS role
+					ON role.tenant_id = binding.tenant_id AND role.id = binding.role_id
+				WHERE binding.tenant_id = user_record.tenant_id
+					AND binding.application_id = application.id
+					AND binding.subject_type = 'USER' AND binding.subject_id = user_record.id
+					AND binding.status = 'ACTIVE'
+					AND (binding.valid_from IS NULL OR binding.valid_from <= ?)
+					AND (binding.valid_until IS NULL OR binding.valid_until > ?)
+					AND role.status = 'ACTIVE' AND role.role_type <> 'COMPATIBILITY'
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM authz_user_permission AS permission_binding
+				JOIN authz_permission AS permission
+					ON permission.tenant_id = permission_binding.tenant_id AND permission.id = permission_binding.permission_id
+				WHERE permission_binding.tenant_id = user_record.tenant_id
+					AND permission_binding.application_id = application.id
+					AND permission_binding.user_id = user_record.id
+					AND permission.status = 'ACTIVE'
+			)`, now.UTC(), now.UTC()).
+		Order("user_record.id ASC")
 }
 
 func synchronizedKeycloakBackfillTargetsQuery(database *gorm.DB, tenantID, applicationID string) *gorm.DB {
