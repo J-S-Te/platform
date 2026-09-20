@@ -363,6 +363,11 @@ func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []strin
 		// the legacy generic "admin" role would grant nothing and must not make a
 		// successfully deployed runtime appear ready.
 		return []string{"settlement_admin"}
+	case "data_analysis":
+		// Data analysis owns a business-specific administrator role. Its production
+		// provisioning manifest declares the same role; retain this fallback while
+		// manifest-driven initial access remains opt-in.
+		return []string{"dashboard_admin"}
 	case "customer_and_opportunity":
 		// CRM 不创建绕过业务范围的“万能管理员”。三个目录角色共同覆盖运营职责，同时仍受
 		// max_effective_roles=10 和各角色数据范围约束。

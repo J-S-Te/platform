@@ -13,6 +13,9 @@ func TestHardcodedInitialSubsystemAdministratorRoles(t *testing.T) {
 	if got := hardcodedInitialSubsystemAdministratorRoles("settlement"); !reflect.DeepEqual(got, []string{"settlement_admin"}) {
 		t.Fatalf("settlement initial roles = %v", got)
 	}
+	if got := hardcodedInitialSubsystemAdministratorRoles("data_analysis"); !reflect.DeepEqual(got, []string{"dashboard_admin"}) {
+		t.Fatalf("data analysis initial roles = %v", got)
+	}
 	if got := hardcodedInitialSubsystemAdministratorRoles("contract_management"); !reflect.DeepEqual(got, []string{"admin"}) {
 		t.Fatalf("contract initial roles = %v", got)
 	}
@@ -34,6 +37,7 @@ func TestInitialAdminRolesManifestDrivenMatchesHardcodedDefaults(t *testing.T) {
 	capabilities := applicationregistryapplication.SubsystemProvisioningCapabilities{
 		Targets: []applicationregistryapplication.SubsystemProvisioningTarget{
 			{ApplicationCode: "contract_management", InitialAdminRoles: []string{"admin"}},
+			{ApplicationCode: "data_analysis", InitialAdminRoles: []string{"dashboard_admin"}},
 			{ApplicationCode: "customer_and_opportunity", InitialAdminRoles: []string{"sales_director", "team_lead", "technical_director"}},
 			{ApplicationCode: "customer_portal", InitialAdminRoles: []string{}},
 			// project_management 故意不声明：应回退硬编码默认 ["admin"]。
@@ -65,7 +69,7 @@ func TestInitialAdminRolesManifestDrivenMatchesHardcodedDefaults(t *testing.T) {
 	}
 	// 开关关闭：一律回退硬编码默认。
 	manager.fromManifest = false
-	for _, code := range []string{"contract_management", "customer_and_opportunity", "customer_portal", "project_management"} {
+	for _, code := range []string{"contract_management", "data_analysis", "customer_and_opportunity", "customer_portal", "project_management"} {
 		got := manager.initialAdministratorRoles(code)
 		want := hardcodedInitialSubsystemAdministratorRoles(code)
 		if !equalStringSlices(got, want) {

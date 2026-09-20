@@ -677,7 +677,32 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 			values["PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"] = strings.TrimSpace(input.ApplicationID)
 			values["PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"] = strings.TrimSpace(input.CatalogPublisherClientID)
 			values["PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"] = input.CatalogPublisherClientSecret
+			if input.ApplicationCode == "data_analysis" {
+				// dashboard-api publishes its own catalog during startup. This must be
+				// enabled before the first process launch so initial administrator
+				// assignment can resolve dashboard_admin from the same application.
+				values["PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED"] = "true"
+			}
 		}
+	}
+	if strings.TrimSpace(input.TenantID) != "" {
+		values["OIDC_TENANT_ID"] = strings.TrimSpace(input.TenantID)
+	}
+	if strings.TrimSpace(input.ApplicationID) != "" {
+		values["PLATFORM_APPLICATION_ID"] = strings.TrimSpace(input.ApplicationID)
+	}
+	if strings.TrimSpace(input.ApplicationCode) != "" {
+		values["PLATFORM_APPLICATION_CODE"] = strings.TrimSpace(input.ApplicationCode)
+	}
+	if strings.TrimSpace(input.Environment) != "" {
+		values["PLATFORM_ENVIRONMENT_CODE"] = strings.TrimSpace(input.Environment)
+	}
+	if input.ApplicationCode == "data_analysis" {
+		// The browser reaches the OIDC issuer through the public origin, while the
+		// container must publish its authorization catalog through the private
+		// Compose network. Reusing the public issuer here makes localhost resolve
+		// to dashboard-api itself and prevents the process from starting.
+		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
 	}
 	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {
 		return provisioningError("write subsystem OIDC runtime configuration")
@@ -734,6 +759,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  input.CatalogPublisherClientSecret,
 		"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID": input.ApplicationID,
 		"PLATFORM_DOCKER_NETWORK":                       provisioner.config.PlatformDockerNetwork,
+	}
+	if input.ApplicationCode == "data_analysis" {
+		// data_analysis synchronizes the embedded catalog before dashboard-api
+		// begins serving requests; it cannot use the generic local no-sync default.
+		values["PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED"] = "true"
+		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
 	}
 	// 这里构造的 map 是密钥进入运行时文件的唯一通道。后续写文件使用受限权限，命令行
 	// 只传 env-file 路径，避免 secret 出现在进程列表或部署日志中。

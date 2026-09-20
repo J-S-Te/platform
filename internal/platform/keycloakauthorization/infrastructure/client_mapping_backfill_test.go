@@ -4,13 +4,14 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"gorm.io/gorm/clause"
 )
 
 func TestKeycloakBackfillQueriesOnlyActiveUsersAndSynchronizedTargets(t *testing.T) {
 	database := newDryRunMySQL(t)
-	users := activeKeycloakBackfillUsersQuery(database, "tenant-1").Find(&[]struct{}{})
+	users := activeKeycloakBackfillUsersQuery(database, "tenant-1", "application-1", time.Now().UTC()).Find(&[]struct{}{})
 	targets := synchronizedKeycloakBackfillTargetsQuery(database, "tenant-1", "application-1").Find(&[]struct{}{})
 	for name, statement := range map[string]string{"users": users.Statement.SQL.String(), "targets": targets.Statement.SQL.String()} {
 		if !strings.Contains(statement, "status = ?") || !strings.Contains(statement, "ORDER BY") {
@@ -19,6 +20,21 @@ func TestKeycloakBackfillQueriesOnlyActiveUsersAndSynchronizedTargets(t *testing
 	}
 	if !containsBackfillVariable(users.Statement.Vars, "ACTIVE") || !containsBackfillVariable(targets.Statement.Vars, "SYNCED") {
 		t.Fatalf("backfill must select only active users and synchronized mappings: users=%#v targets=%#v", users.Statement.Vars, targets.Statement.Vars)
+	}
+}
+
+func TestKeycloakBackfillExcludesUnentitledInternalUsersFromCustomerPortal(t *testing.T) {
+	database := newDryRunMySQL(t)
+	result := activeKeycloakBackfillUsersQuery(database, "tenant-1", "application-1", time.Now().UTC()).Find(&[]struct{}{})
+	sql := result.Statement.SQL.String()
+	for _, fragment := range []string{
+		"JOIN platform_application AS application", "application.code <> 'customer_portal'",
+		"authz_role_binding AS binding", "binding.subject_type = 'USER'",
+		"authz_user_permission AS permission_binding", "role.role_type <> 'COMPATIBILITY'",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("customer portal eligibility query missing %q: %s", fragment, sql)
+		}
 	}
 }
 

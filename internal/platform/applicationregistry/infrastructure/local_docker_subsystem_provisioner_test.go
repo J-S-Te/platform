@@ -148,6 +148,19 @@ func TestUpdateOIDCRuntimeConfigurationRedeliversCatalogPublisherIdentity(t *tes
 			},
 		},
 		{
+			name:            "data analysis",
+			applicationCode: "data_analysis",
+			initial:         "OIDC_CLIENT_ID=browser-client\nOIDC_CLIENT_SECRET=browser-secret\n",
+			expected: []string{
+				"PLATFORM_APPLICATION_ID=current-app",
+				"PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID=current-app",
+				"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID=current-publisher",
+				"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=current-secret",
+				"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED=true",
+				"PLATFORM_BASE_URL=http://platform-api:8080",
+			},
+		},
+		{
 			name:            "portal",
 			applicationCode: integratedPortalApplicationCode,
 			initial: strings.Join([]string{
@@ -178,6 +191,8 @@ func TestUpdateOIDCRuntimeConfigurationRedeliversCatalogPublisherIdentity(t *tes
 			if err := provisioner.updateOIDCRuntimeConfiguration(application.SubsystemProvisioningInput{
 				ApplicationID:                "current-app",
 				ApplicationCode:              test.applicationCode,
+				TenantID:                     "tenant-1",
+				Environment:                  "prod",
 				Issuer:                       "http://localhost:8081",
 				CatalogPublisherClientID:     "current-publisher",
 				CatalogPublisherClientSecret: "current-secret",
@@ -192,6 +207,16 @@ func TestUpdateOIDCRuntimeConfigurationRedeliversCatalogPublisherIdentity(t *tes
 			for _, expected := range test.expected {
 				if !strings.Contains(string(content), expected) {
 					t.Fatalf("updated environment missing %q:\n%s", expected, content)
+				}
+			}
+			for _, expected := range []string{
+				"OIDC_TENANT_ID=tenant-1",
+				"PLATFORM_APPLICATION_ID=current-app",
+				"PLATFORM_APPLICATION_CODE=" + test.applicationCode,
+				"PLATFORM_ENVIRONMENT_CODE=prod",
+			} {
+				if !strings.Contains(string(content), expected) {
+					t.Fatalf("runtime identity missing %q:\n%s", expected, content)
 				}
 			}
 		})
