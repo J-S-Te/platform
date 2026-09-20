@@ -39,9 +39,16 @@ runtime:
         CONTRACT_APPROVAL_VALIDATION_ENABLED: "true"
         CONTRACT_APPROVAL_VALIDATION_URL: http://contract-api:8081/internal/v1/project/approved-contracts
         CONTRACT_APPROVAL_VALIDATION_SCOPE: contract.approved.internal.read
-        # 合同系统内部接收接口默认关闭；关闭时两者必须都为 false，否则启动配置校验失败。
-        CONTRACT_INTEGRATION_ENABLED: "false"
-        CONTRACT_INTEGRATION_REQUIRE_BEARER: "false"
+        # 合同生效投递与检测类别目录共用一个独立、最小权限的机器身份。
+        CONTRACT_INTEGRATION_ENABLED: "true"
+        CONTRACT_INTEGRATION_REQUIRE_BEARER: "true"
+        CONTRACT_INTEGRATION_CLIENT_ID: contract_management-prod-project-integration
+        CONTRACT_INTEGRATION_AUDIENCE: basic-platform-application
+        CONTRACT_INTEGRATION_ISSUER: basic-platform
+        CONTRACT_INTEGRATION_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        CONTRACT_INTEGRATION_CALLER_APPLICATION_CODE: contract_management
+        CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE: prod
+        CONTRACT_INTEGRATION_REQUIRED_SCOPE: project.contract.import
         DASHBOARD_MACHINE_ENABLED: "true"
         DASHBOARD_MACHINE_REQUIRE_BEARER: "true"
         DASHBOARD_MACHINE_ISSUER: basic-platform

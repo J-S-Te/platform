@@ -494,6 +494,14 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["CRM_REFERENCE_CLIENT_SECRET"] = credential.PlaintextSecret
 			values["CRM_REFERENCE_SCOPE"] = "customer.contract_reference.read"
 		}
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialProjectContractImport); ok {
+			values["PROJECT_INTEGRATION_ENABLED"] = "true"
+			values["PROJECT_API_BASE_URL"] = "http://project-api:8082"
+			values["PROJECT_INTEGRATION_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["PROJECT_INTEGRATION_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["PROJECT_INTEGRATION_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["PROJECT_INTEGRATION_AUDIENCE"] = "basic-platform-application"
+		}
 	case "data_analysis":
 		contractCredential, ok := input.ServiceCredential(application.ServiceCredentialContractDashboardRead)
 		if !ok {
@@ -563,10 +571,19 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 		}
 	case integratedProjectApplicationCode:
 		values = map[string]string{
-			"APP_PATH_PREFIX":               input.PathPrefix,
-			"OIDC_REDIRECT_URI":             input.RedirectURI,
-			"OIDC_POST_LOGOUT_REDIRECT_URI": input.PublicURL,
-			"OIDC_SESSION_COOKIE_SECURE":    secure,
+			"APP_PATH_PREFIX":                              input.PathPrefix,
+			"OIDC_REDIRECT_URI":                            input.RedirectURI,
+			"OIDC_POST_LOGOUT_REDIRECT_URI":                input.PublicURL,
+			"OIDC_SESSION_COOKIE_SECURE":                   secure,
+			"CONTRACT_INTEGRATION_ENABLED":                 "true",
+			"CONTRACT_INTEGRATION_REQUIRE_BEARER":          "true",
+			"CONTRACT_INTEGRATION_CLIENT_ID":               integratedContractApplicationCode + "-" + input.Environment + "-project-integration",
+			"CONTRACT_INTEGRATION_AUDIENCE":                "basic-platform-application",
+			"CONTRACT_INTEGRATION_ISSUER":                  "basic-platform",
+			"CONTRACT_INTEGRATION_PUBLIC_KEY_PATH":         "/app/data/keys/jwt-ed25519-public.pem",
+			"CONTRACT_INTEGRATION_CALLER_APPLICATION_CODE": "contract_management",
+			"CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE": input.Environment,
+			"CONTRACT_INTEGRATION_REQUIRED_SCOPE":          "project.contract.import",
 		}
 		// 服务项操作台从基础平台负责人目录选择团队负责人、项目经理和工程师。
 		// 老环境尚未下发该凭据时保持缺省（前端会提示目录不可用），不阻断接入本身。
@@ -834,6 +851,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		}
 		values["OIDC_POST_LOGOUT_REDIRECT_URI"] = input.PublicURL
 		values["OIDC_SESSION_COOKIE_SECURE"] = booleanEnvironmentValue(strings.HasPrefix(strings.ToLower(publicOrigin), "https://"))
+		values["CONTRACT_INTEGRATION_ENABLED"] = "true"
+		values["CONTRACT_INTEGRATION_REQUIRE_BEARER"] = "true"
+		values["CONTRACT_INTEGRATION_CLIENT_ID"] = integratedContractApplicationCode + "-" + input.Environment + "-project-integration"
+		values["CONTRACT_INTEGRATION_AUDIENCE"] = "basic-platform-application"
+		values["CONTRACT_INTEGRATION_ISSUER"] = "basic-platform"
+		values["CONTRACT_INTEGRATION_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CONTRACT_INTEGRATION_CALLER_APPLICATION_CODE"] = "contract_management"
+		values["CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE"] = input.Environment
+		values["CONTRACT_INTEGRATION_REQUIRED_SCOPE"] = "project.contract.import"
 		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
 		if !ok {
 			return provisioningError("project audit publisher credential is unavailable")
@@ -934,6 +960,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["CRM_REFERENCE_CLIENT_ID"] = credentials[application.ServiceCredentialCRMContractReferenceRead].OAuthClient.ClientID
 		values["CRM_REFERENCE_CLIENT_SECRET"] = credentials[application.ServiceCredentialCRMContractReferenceRead].PlaintextSecret
 		values["CRM_REFERENCE_SCOPE"] = "customer.contract_reference.read"
+		values["PROJECT_INTEGRATION_ENABLED"] = "true"
+		values["PROJECT_API_BASE_URL"] = "http://project-api:8082"
+		values["PROJECT_INTEGRATION_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+		values["PROJECT_INTEGRATION_CLIENT_ID"] = credentials[application.ServiceCredentialProjectContractImport].OAuthClient.ClientID
+		values["PROJECT_INTEGRATION_CLIENT_SECRET"] = credentials[application.ServiceCredentialProjectContractImport].PlaintextSecret
+		values["PROJECT_INTEGRATION_AUDIENCE"] = "basic-platform-application"
 		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
 		customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
 		customerValues := map[string]string{
@@ -1031,6 +1063,7 @@ func requiredContractServiceCredentials(input application.SubsystemProvisioningI
 		application.ServiceCredentialContractSummaryRead,
 		application.ServiceCredentialOwnerDirectoryRead,
 		application.ServiceCredentialCRMContractReferenceRead,
+		application.ServiceCredentialProjectContractImport,
 	}
 	result := make(map[string]application.SubsystemServiceCredential, len(purposes))
 	for _, purpose := range purposes {

@@ -1494,10 +1494,11 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 	}
 	switch applicationCode {
 	case "contract_management":
-		return []updateServiceCredentialRequirement{{
-			purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory",
-			clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read",
-		}, fileGateway}
+		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read"},
+			{purpose: application.ServiceCredentialProjectContractImport, suffix: "project-integration", clientName: "合同管理系统 Project Contract Importer", scope: "project.contract.import", rotate: true},
+			fileGateway,
+		}
 	case "customer_and_opportunity":
 		// Audit and notification secrets are runtime delivery credentials. Existing
 		// installations may predate notification_ingest or may contain a credential

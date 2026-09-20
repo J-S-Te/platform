@@ -368,11 +368,13 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
 		"contract_management-prod-owner-directory":     {"owner_directory.read"},
+		"contract_management-prod-project-integration": {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer": {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialOwnerDirectoryRead: "new-secret",
-		application.ServiceCredentialFileGatewayWrite:   "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead:    "new-secret",
+		application.ServiceCredentialProjectContractImport: "new-secret",
+		application.ServiceCredentialFileGatewayWrite:      "new-secret",
 	})
 }
 
@@ -394,11 +396,13 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		t.Fatalf("retry did not issue a replacement delivery secret: input=%#v credentials=%#v", manager.secretInput, credentials)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"contract_management-prod-project-integration": {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer": {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialOwnerDirectoryRead: "retry-secret",
-		application.ServiceCredentialFileGatewayWrite:   "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead:    "retry-secret",
+		application.ServiceCredentialProjectContractImport: "new-secret",
+		application.ServiceCredentialFileGatewayWrite:      "new-secret",
 	})
 }
 
