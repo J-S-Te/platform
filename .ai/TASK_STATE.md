@@ -1,5 +1,18 @@
 # Current Task
 
+## Focused follow-up: customer portal card registration (2026-09-18)
+
+- Registered and adopted the missing `customer_portal/dev` runtime through the application-registry UI with the existing local public route `/customer-portal` and internal upstream `portal-api:8091`.
+- The deployment state reached `READY / ADOPT` and `portal-api` became healthy. The unified portal now visibly renders the 客户门户自助系统 card.
+- The current internal platform administrator intentionally remains in the `权限同步中` state: customer portal roles are external-customer roles and must be created through the CRM invitation flow, rather than being granted to the onboarding operator or a platform administrator. This preserves customer-data isolation.
+
+## Focused follow-up: data-analysis OIDC authorization-context binding (2026-09-18)
+
+- Fixed the standalone data-analysis runtime so the dashboard API receives the exact tenant, application ID, application code and environment code selected by the application registry on both first provision and controlled runtime update.
+- The dashboard Compose service now forwards the complete catalog publisher identity and enables its startup catalog publication. This ensures `dashboard_admin` and related roles are published before an initial administrator is assigned.
+- Browser-facing OIDC remains configured with the public issuer, while the dashboard container now uses `http://platform-api:8080` only for platform catalog publication. This prevents the container-local `localhost` resolution that previously stopped the dashboard API and avoids authorization-context client/application/environment mismatch.
+- Verification: focused application-registry infrastructure Go tests pass; `docker compose --env-file .env.local -f compose.yaml config --quiet` passes (existing optional audit publisher variables are unset); platform API and dashboard API are healthy. A live authenticated portal-card regression opened the data-analysis tab and reached the 经营总览 page without `AUTH_TOKEN_EXCHANGE_FAILED`.
+
 ## Focused follow-up: personnel change modal actions (2026-09-18)
 
 - Fixed the personnel-change create modal so its form body is the only scrolling region; the cancel and save action bar remains visible within the modal at all viewport heights.

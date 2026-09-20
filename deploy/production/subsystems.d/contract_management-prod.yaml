@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [owner_directory_read, file_gateway_write]
+  allowed_service_bindings: [owner_directory_read, file_gateway_write, crm_contract_reference_read]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -52,6 +52,10 @@ runtime:
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
         STAMPED_FILE_GATEWAY_MODE: dual
+        CRM_REFERENCE_ENABLED: "true"
+        CRM_REFERENCE_BASE_URL: http://customer-api:8090
+        CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CRM_REFERENCE_SCOPE: customer.contract_reference.read
       bindings:
         OIDC_ISSUER: issuer
         OIDC_CLIENT_ID: client_id
@@ -73,6 +77,8 @@ runtime:
         FILE_GATEWAY_APPLICATION_ID: application_id
         FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
+        CRM_REFERENCE_CLIENT_ID: service.crm_contract_reference_read.client_id
+        CRM_REFERENCE_CLIENT_SECRET: service.crm_contract_reference_read.client_secret
 compose:
   profiles: [release]
   dependency_services: [contract-mysql, temporal]

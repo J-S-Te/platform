@@ -486,6 +486,14 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialCRMContractReferenceRead); ok {
+			values["CRM_REFERENCE_ENABLED"] = "true"
+			values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090"
+			values["CRM_REFERENCE_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["CRM_REFERENCE_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["CRM_REFERENCE_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["CRM_REFERENCE_SCOPE"] = "customer.contract_reference.read"
+		}
 	case "data_analysis":
 		contractCredential, ok := input.ServiceCredential(application.ServiceCredentialContractDashboardRead)
 		if !ok {
@@ -920,6 +928,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
 		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credentials[application.ServiceCredentialOwnerDirectoryRead].OAuthClient.ClientID
 		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credentials[application.ServiceCredentialOwnerDirectoryRead].PlaintextSecret
+		values["CRM_REFERENCE_ENABLED"] = "true"
+		values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090"
+		values["CRM_REFERENCE_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+		values["CRM_REFERENCE_CLIENT_ID"] = credentials[application.ServiceCredentialCRMContractReferenceRead].OAuthClient.ClientID
+		values["CRM_REFERENCE_CLIENT_SECRET"] = credentials[application.ServiceCredentialCRMContractReferenceRead].PlaintextSecret
+		values["CRM_REFERENCE_SCOPE"] = "customer.contract_reference.read"
 		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
 		customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
 		customerValues := map[string]string{
@@ -1016,6 +1030,7 @@ func requiredContractServiceCredentials(input application.SubsystemProvisioningI
 		application.ServiceCredentialContractOpportunitySignedWrite,
 		application.ServiceCredentialContractSummaryRead,
 		application.ServiceCredentialOwnerDirectoryRead,
+		application.ServiceCredentialCRMContractReferenceRead,
 	}
 	result := make(map[string]application.SubsystemServiceCredential, len(purposes))
 	for _, purpose := range purposes {
