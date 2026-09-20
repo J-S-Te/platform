@@ -622,7 +622,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 func isPublicRuntimeBinding(source string) bool {
 	switch source {
 	case "public_origin", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash",
-		"path_prefix", "upstream_url", "cookie_secure", "issuer_security_center_url":
+		"path_prefix", "upstream_url", "cookie_secure", "allow_insecure_http_origin", "issuer_security_center_url":
 		return true
 	default:
 		return false
@@ -707,6 +707,13 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 		}
 		parsed := mustParseURL(publicOrigin)
 		return booleanEnvironmentValue(parsed != nil && strings.EqualFold(parsed.Scheme, "https")), nil
+	case "allow_insecure_http_origin":
+		publicOrigin, publicOriginErr := publicOriginFromURL(input.PublicURL)
+		if publicOriginErr != nil {
+			return "", provisioningError("production subsystem public URL is invalid")
+		}
+		parsed := mustParseURL(publicOrigin)
+		return booleanEnvironmentValue(parsed != nil && strings.EqualFold(parsed.Scheme, "http")), nil
 	case "catalog_publisher_client_id":
 		return input.CatalogPublisherClientID, nil
 	case "catalog_publisher_client_secret":

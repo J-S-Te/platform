@@ -43,6 +43,7 @@ runtime:
         OIDC_TENANT_ID: tenant_id
         OIDC_SESSION_COOKIE_SECURE: cookie_secure
         SETTLEMENT_PUBLIC_ORIGIN: public_origin
+        SETTLEMENT_ALLOW_INSECURE_HTTP_ORIGIN: allow_insecure_http_origin
         PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
