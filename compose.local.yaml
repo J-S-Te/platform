@@ -504,6 +504,8 @@ services:
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
       CRM_API_BASE_URL: http://customer-api:8090
+      CRM_REFERENCE_BASE_URL: http://customer-api:8090
+      CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_WORKER_BUILD_ID: contract-worker-v1

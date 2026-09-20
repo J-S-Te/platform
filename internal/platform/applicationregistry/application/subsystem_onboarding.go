@@ -38,6 +38,7 @@ const (
 	ServiceCredentialOwnerDirectoryRead             = "owner_directory_read"
 	ServiceCredentialContractOpportunitySignedWrite = "contract_opportunity_signed_write"
 	ServiceCredentialContractSummaryRead            = "contract_summary_read"
+	ServiceCredentialCRMContractReferenceRead       = "crm_contract_reference_read"
 	ServiceCredentialContractDashboardRead          = "contract_dashboard_read"
 	ServiceCredentialProjectDashboardRead           = "project_dashboard_read"
 	ServiceCredentialContractApprovedRead           = "contract_approved_read"
@@ -536,6 +537,7 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialPortalInviteVerify:             {ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
 	ServiceCredentialContractOpportunitySignedWrite: {ServiceCredentialContractOpportunitySignedWrite, "opportunity-intake", "Opportunity Signed Intake", "opportunity.signed.write"},
 	ServiceCredentialContractSummaryRead:            {ServiceCredentialContractSummaryRead, "contract-summary", "Contract Summary Reader", "contract.summary.read"},
+	ServiceCredentialCRMContractReferenceRead:       {ServiceCredentialCRMContractReferenceRead, "crm-contract-reference", "CRM Contract Reference Reader", "customer.contract_reference.read"},
 	ServiceCredentialContractDashboardRead:          {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
 	ServiceCredentialProjectDashboardRead:           {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
 	ServiceCredentialContractApprovedRead:           {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
@@ -558,7 +560,7 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 			ServiceCredentialPortalInviteVerify,
 		}
 	case integratedContractApplicationCode:
-		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case integratedProjectApplicationCode:
 		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
 		// 负责人目录权限；不授予通知写入等其它集成能力。
