@@ -91,8 +91,8 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 
 	// Preflight performs Docker and Compose validation. Provision then performs exactly the
 	// dependency, migration and contract API operations; no browser value becomes an argument.
-	if len(runner.calls) != 6 {
-		t.Fatalf("runner calls = %d, want 6: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 7 {
+		t.Fatalf("runner calls = %d, want 7: %#v", len(runner.calls), runner.calls)
 	}
 	for _, call := range runner.calls {
 		joined := strings.Join(call.arguments, " ")
@@ -114,6 +114,9 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	}
 	if !containsString(runner.calls[5].arguments, "contract-api") {
 		t.Fatalf("contract API call is not fixed: %v", runner.calls[5].arguments)
+	}
+	if !containsString(runner.calls[6].arguments, "contract-catalog-sync") {
+		t.Fatalf("catalog sync call is not fixed: %v", runner.calls[6].arguments)
 	}
 }
 
@@ -608,6 +611,7 @@ compose:
   dependency_services: [contract-mysql, temporal]
   database: {service: contract-mysql, name: contract_management}
   migrate_service: contract-migrate
+  catalog_sync_service: contract-catalog-sync
   runtime_services: [contract-api]
   teardown_services: [contract-api]
   release_image_keys: [CONTRACT_IMAGE]

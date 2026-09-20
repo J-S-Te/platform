@@ -451,6 +451,17 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		}
 		return target.subsystemServiceFailure(ctx, "start production subsystem services", compose.RuntimeServices, redactValues)
 	}
+	if compose.CatalogSyncService != "" {
+		target.stepLog("step=catalog-sync service=%s", compose.CatalogSyncService)
+		output, syncErr := target.runComposeOutput(ctx, "run", "--rm", "--no-deps", compose.CatalogSyncService)
+		if syncErr != nil {
+			detail := sanitizeProvisioningLog(string(output), redactValues)
+			if detail == "" {
+				return provisioningError("synchronize production subsystem authorization catalog")
+			}
+			return provisioningError("synchronize production subsystem authorization catalog: " + detail)
+		}
+	}
 	return nil
 }
 

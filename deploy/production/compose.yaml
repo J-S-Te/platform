@@ -557,6 +557,15 @@ services:
         condition: service_healthy
     restart: "no"
 
+  settlement-catalog-sync:
+    <<: *settlement-service
+    entrypoint: ["/usr/local/bin/settlement-catalog-sync"]
+    profiles: ["settlement-release"]
+    depends_on:
+      platform-api:
+        condition: service_healthy
+    restart: "no"
+
   settlement-api:
     <<: *settlement-service
     depends_on:
