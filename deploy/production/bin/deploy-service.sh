@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
 
 usage() {
-  echo "usage: $0 {frontend|platform|contract|project} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "usage: $0 {frontend|platform|contract|project|settlement} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
   echo "       $0 data-analysis <dashboard-api@sha256:...> <aggregation-worker@sha256:...> <alert-worker@sha256:...> <production-migrate@sha256:...>" >&2
   exit 2
 }
@@ -27,6 +27,7 @@ case "$service" in
   platform) image_key=PLATFORM_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
   project) image_key=PROJECT_IMAGE ;;
+  settlement) image_key=SETTLEMENT_IMAGE ;;
   data-analysis)
     image_key=DATA_ANALYSIS_DASHBOARD_API_IMAGE
     data_analysis_image_keys=(DATA_ANALYSIS_DASHBOARD_API_IMAGE DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE DATA_ANALYSIS_ALERT_WORKER_IMAGE DATA_ANALYSIS_MIGRATE_IMAGE)
@@ -59,6 +60,8 @@ contract_runtime_file="$deploy_dir/runtime/contract.env"
 contract_runtime_template="$deploy_dir/subsystem-templates/contract.env.example"
 project_runtime_file="$deploy_dir/runtime/project.env"
 project_runtime_template="$deploy_dir/subsystem-templates/project.env.example"
+settlement_runtime_file="$deploy_dir/runtime/settlement.env"
+settlement_runtime_template="$deploy_dir/subsystem-templates/settlement.env.example"
 data_analysis_runtime_file="$deploy_dir/runtime/data-analysis.env"
 data_analysis_runtime_template="$deploy_dir/subsystem-templates/data-analysis.env.example"
 compose_file="$deploy_dir/compose.yaml"
@@ -66,6 +69,7 @@ frontend_compose_file="$deploy_dir/compose.frontend.yaml"
 profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
+export SETTLEMENT_RUNTIME_ENV_FILE="$settlement_runtime_file"
 export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_runtime_file"
 
 for command_name in docker curl gzip flock awk mktemp install stat df ln; do
@@ -168,6 +172,7 @@ prepare_runtime_file() {
 case "$service" in
   contract) prepare_runtime_file "$contract_runtime_file" "$contract_runtime_template" "合同服务" ;;
   project) prepare_runtime_file "$project_runtime_file" "$project_runtime_template" "项目管理服务" ;;
+  settlement) prepare_runtime_file "$settlement_runtime_file" "$settlement_runtime_template" "结算服务" ;;
   data-analysis) prepare_runtime_file "$data_analysis_runtime_file" "$data_analysis_runtime_template" "数据看板服务" ;;
 esac
 
@@ -239,6 +244,17 @@ project_env_value() {
   ' "$project_runtime_file"
 }
 
+settlement_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$settlement_runtime_file"
+}
+
 data_analysis_env_value() {
   local key="$1"
   awk -F= -v key="$key" '
@@ -269,6 +285,26 @@ project_runtime_ready() {
     fi
   done
   [[ "$(project_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]
+}
+
+settlement_runtime_ready() {
+  local key value
+  for key in \
+    OIDC_CLIENT_ID \
+    OIDC_CLIENT_SECRET \
+    OIDC_TENANT_ID \
+    OIDC_SESSION_ENCRYPTION_KEY_BASE64 \
+    PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET; do
+    value="$(settlement_env_value "$key")"
+    if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+      return 1
+    fi
+  done
+  [[ "$(settlement_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || return 1
+  require_runtime_value SETTLEMENT_MYSQL_PASSWORD || return 1
+  require_runtime_value SETTLEMENT_MYSQL_ROOT_PASSWORD
 }
 
 data_analysis_runtime_ready() {
@@ -508,6 +544,39 @@ deploy_project() {
   verify_service_image compose project-api "$image_ref" || return 1
 }
 
+deploy_settlement() {
+  # Settlement 的浏览器会话和权限目录必须先由平台接入流程写入 runtime 文件；
+  # 不能用空 Client 启动后再让 API 以 401 循环重试。
+  for key in \
+    OIDC_CLIENT_ID \
+    OIDC_CLIENT_SECRET \
+    OIDC_TENANT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET; do
+    value="$(settlement_env_value "$key")"
+    if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+      echo "结算运行配置缺失或仍为占位值：$key" >&2
+      return 1
+    fi
+  done
+  [[ "$(settlement_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || {
+    echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
+    return 1
+  }
+  compose up -d --wait --wait-timeout 240 settlement-mysql || return
+  backup_database settlement-mysql settlement || return
+  compose --profile settlement-release run --rm settlement-migrate || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 settlement-api settlement-worker || return
+  if ! wait_for_health "http://127.0.0.1:$(port_value SETTLEMENT_API_PORT 18087)/healthz"; then
+    echo "---- settlement-api 最近日志 ----" >&2
+    compose logs --no-color --tail 120 settlement-api settlement-worker >&2 || true
+    return 1
+  fi
+  verify_service_image compose settlement-api "$image_ref" || return 1
+  verify_service_image compose settlement-worker "$image_ref" || return 1
+}
+
 deploy_data_analysis() {
   # data_analysis 由 API、两个常驻 Worker 和一次性迁移镜像组成，四个镜像必须
   # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
@@ -548,6 +617,7 @@ rollback_runtime() {
       ;;
     contract) compose up -d --force-recreate --no-deps contract-api ;;
     project) compose up -d --force-recreate --no-deps project-api ;;
+    settlement) compose up -d --force-recreate --no-deps settlement-api settlement-worker ;;
     data-analysis)
       compose up -d --force-recreate --no-deps \
         data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker
@@ -652,6 +722,17 @@ if [[ "$service" == "project" ]] && ! project_runtime_ready; then
   rm -f "$previous_release"
   echo "项目管理镜像已安全暂存：$image_ref"
   echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 project_management/prod 接入。"
+  exit 0
+fi
+if [[ "$service" == "settlement" ]] && ! settlement_runtime_ready; then
+  if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    echo "结算运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
+    echo "请先登录基础平台的“应用接入”页面完成 settlement/prod 接入，再重新运行 CI/CD" >&2
+    exit 1
+  fi
+  rm -f "$previous_release"
+  echo "结算镜像已安全暂存：$image_ref"
+  echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 settlement/prod 接入。"
   exit 0
 fi
 if [[ "$service" == "data-analysis" ]] && ! data_analysis_runtime_ready; then
