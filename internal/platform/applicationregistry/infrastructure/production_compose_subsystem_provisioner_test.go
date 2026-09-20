@@ -128,6 +128,25 @@ func TestResolveProductionAuthorizationContextBinding(t *testing.T) {
 	}
 }
 
+func TestResolveProductionInsecureHTTPOriginBinding(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		origin string
+		want   string
+	}{
+		{origin: "http://47.111.20.119:8081", want: "true"},
+		{origin: "https://platform.example.com", want: "false"},
+	} {
+		value, err := resolveProductionBinding(productionContractInput(test.origin), "allow_insecure_http_origin")
+		if err != nil {
+			t.Fatalf("resolve insecure HTTP origin binding for %s: %v", test.origin, err)
+		}
+		if value != test.want {
+			t.Fatalf("insecure HTTP origin binding for %s = %q, want %q", test.origin, value, test.want)
+		}
+	}
+}
+
 func TestProductionComposeSubsystemProvisionerPreflightAllowsInfrastructurePlaceholders(t *testing.T) {
 	t.Parallel()
 	provisioner, runner, _ := productionProvisionerFixture(t)

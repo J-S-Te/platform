@@ -419,7 +419,7 @@ func validProductionBindingSource(source string) bool {
 	switch source {
 	case "issuer", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
 		"tenant_id", "application_id", "application_code", "environment", "path_prefix", "upstream_url", "cookie_secure",
-		"catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url":
+		"allow_insecure_http_origin", "catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url":
 		return true
 	}
 	parts := strings.Split(source, ".")
