@@ -857,6 +857,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 			{Purpose: application.ServiceCredentialContractOpportunitySignedWrite, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-opportunity-intake"}, PlaintextSecret: "intake-secret"},
 			{Purpose: application.ServiceCredentialContractSummaryRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-contract-summary"}, PlaintextSecret: "summary-secret"},
 			{Purpose: application.ServiceCredentialCRMContractReferenceRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-crm-contract-reference"}, PlaintextSecret: "crm-reference-secret"},
+			{Purpose: application.ServiceCredentialProjectContractImport, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-project-integration"}, PlaintextSecret: "project-integration-secret"},
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-owner-directory"}, PlaintextSecret: "directory-secret"},
 		},
 	}); err != nil {

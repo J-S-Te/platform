@@ -42,6 +42,7 @@ const (
 	ServiceCredentialContractDashboardRead          = "contract_dashboard_read"
 	ServiceCredentialProjectDashboardRead           = "project_dashboard_read"
 	ServiceCredentialContractApprovedRead           = "contract_approved_read"
+	ServiceCredentialProjectContractImport          = "project_contract_import"
 	// ServiceCredentialFileGatewayWrite 是业务子系统上传并绑定自身文件的最小组合凭据；
 	// 下载凭据不包含在内，避免写入型 Worker 同时取得任意文件读取能力。
 	ServiceCredentialFileGatewayWrite = "file_gateway_write"
@@ -541,6 +542,7 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialContractDashboardRead:          {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
 	ServiceCredentialProjectDashboardRead:           {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
 	ServiceCredentialContractApprovedRead:           {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
+	ServiceCredentialProjectContractImport:          {ServiceCredentialProjectContractImport, "project-integration", "Project Contract Importer", "project.contract.import"},
 	ServiceCredentialFileGatewayWrite:               {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
 }
 
@@ -560,7 +562,7 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 			ServiceCredentialPortalInviteVerify,
 		}
 	case integratedContractApplicationCode:
-		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case integratedProjectApplicationCode:
 		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
 		// 负责人目录权限；不授予通知写入等其它集成能力。

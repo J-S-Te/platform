@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [owner_directory_read, file_gateway_write, crm_contract_reference_read]
+  allowed_service_bindings: [owner_directory_read, file_gateway_write, crm_contract_reference_read, project_contract_import]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -56,6 +56,10 @@ runtime:
         CRM_REFERENCE_BASE_URL: http://customer-api:8090
         CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_REFERENCE_SCOPE: customer.contract_reference.read
+        PROJECT_INTEGRATION_ENABLED: "true"
+        PROJECT_API_BASE_URL: http://project-api:8082
+        PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
+        PROJECT_INTEGRATION_AUDIENCE: basic-platform-application
       bindings:
         OIDC_ISSUER: issuer
         OIDC_CLIENT_ID: client_id
@@ -79,6 +83,8 @@ runtime:
         FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
         CRM_REFERENCE_CLIENT_ID: service.crm_contract_reference_read.client_id
         CRM_REFERENCE_CLIENT_SECRET: service.crm_contract_reference_read.client_secret
+        PROJECT_INTEGRATION_CLIENT_ID: service.project_contract_import.client_id
+        PROJECT_INTEGRATION_CLIENT_SECRET: service.project_contract_import.client_secret
 compose:
   profiles: [release]
   dependency_services: [contract-mysql, temporal]
