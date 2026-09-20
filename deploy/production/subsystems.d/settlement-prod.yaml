@@ -55,6 +55,7 @@ compose:
     service: settlement-mysql
     name: settlement
   migrate_service: settlement-migrate
+  catalog_sync_service: settlement-catalog-sync
   runtime_services: [settlement-api, settlement-worker]
   teardown_services: [settlement-api, settlement-worker]
   release_image_keys: [SETTLEMENT_IMAGE]

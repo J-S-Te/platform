@@ -68,6 +68,7 @@ type productionSubsystemComposeManifest struct {
 	DependencyServices []string                             `yaml:"dependency_services"`
 	Database           *productionSubsystemDatabaseManifest `yaml:"database"`
 	MigrateService     string                               `yaml:"migrate_service"`
+	CatalogSyncService string                               `yaml:"catalog_sync_service"`
 	RuntimeServices    []string                             `yaml:"runtime_services"`
 	TeardownServices   []string                             `yaml:"teardown_services"`
 	ReleaseImageKeys   []string                             `yaml:"release_image_keys"`
@@ -370,6 +371,10 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	compose.MigrateService = strings.TrimSpace(compose.MigrateService)
 	if compose.MigrateService != "" && (!validProductionComposeService(compose.MigrateService) || !productionServiceOwnedByApplication(app.Code, compose.MigrateService)) {
 		return errors.New("Compose migrate service is invalid")
+	}
+	compose.CatalogSyncService = strings.TrimSpace(compose.CatalogSyncService)
+	if compose.CatalogSyncService != "" && (!validProductionComposeService(compose.CatalogSyncService) || !productionServiceOwnedByApplication(app.Code, compose.CatalogSyncService)) {
+		return errors.New("Compose catalog sync service is invalid")
 	}
 	if compose.Database != nil {
 		compose.Database.Service = strings.TrimSpace(compose.Database.Service)

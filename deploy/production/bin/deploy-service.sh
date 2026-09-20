@@ -573,6 +573,7 @@ deploy_settlement() {
     compose logs --no-color --tail 120 settlement-api settlement-worker >&2 || true
     return 1
   fi
+  compose --profile settlement-release run --rm --no-deps settlement-catalog-sync || return
   verify_service_image compose settlement-api "$image_ref" || return 1
   verify_service_image compose settlement-worker "$image_ref" || return 1
 }
@@ -746,7 +747,14 @@ echo "开始发布 $service"
 # 服务标识允许使用 data-analysis 这类连字符名称，但 Bash 函数名只能使用
 # 标识符字符；统一转换后再动态调用，避免执行 deploy_data-analysis 这样的外部命令。
 deploy_function="deploy_${service//-/_}"
-if "$deploy_function"; then
+refresh_subsystem_provisioner_release_mount() {
+  [[ "$service" != "platform" ]] || return 0
+  [[ -n "$(compose ps -q subsystem-provisioner 2>/dev/null || true)" ]] || return 0
+  echo "刷新 subsystem-provisioner 的不可变镜像指针挂载"
+  compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner
+}
+
+if "$deploy_function" && refresh_subsystem_provisioner_release_mount; then
   rm -f "$previous_release"
   echo "$service 发布成功：$image_ref"
   exit 0
