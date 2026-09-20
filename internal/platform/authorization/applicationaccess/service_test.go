@@ -471,6 +471,30 @@ func TestApplicationPublishedClaimsRoleConfigHashIsOpaqueToThePlatform(t *testin
 	}
 }
 
+func TestCatalogCompatibilityUsesApplicationPublishedClaimsHash(t *testing.T) {
+	compatibility := catalogCompatibilityFromMetadata(catalogMetadataRow{
+		CatalogVersion:               "2",
+		ClaimsRoleConfigHash:         "settlement-v2-invoice-read",
+		PreviousCatalogVersion:       "1",
+		PreviousClaimsRoleConfigHash: "settlement-v1",
+	}, "platform-derived-role-mapping")
+
+	if compatibility.RoleConfigHash != "settlement-v2-invoice-read" {
+		t.Fatalf("current role config hash = %q, want application-published hash", compatibility.RoleConfigHash)
+	}
+	assertStrings(t, compatibility.CatalogVersions, []string{"1", "2"})
+	assertStrings(t, compatibility.RoleConfigHashes, []string{"settlement-v1", "settlement-v2-invoice-read"})
+}
+
+func TestCatalogCompatibilityFallsBackForLegacyCatalogWithoutClaimsHash(t *testing.T) {
+	compatibility := catalogCompatibilityFromMetadata(catalogMetadataRow{CatalogVersion: "legacy"}, "platform-derived-role-mapping")
+
+	if compatibility.RoleConfigHash != "platform-derived-role-mapping" {
+		t.Fatalf("legacy role config hash = %q, want platform-derived fallback", compatibility.RoleConfigHash)
+	}
+	assertStrings(t, compatibility.RoleConfigHashes, []string{"platform-derived-role-mapping"})
+}
+
 func TestRoleConfigHashReflectsSynchronizedRolePermissionMappings(t *testing.T) {
 	base := []catalogRow{
 		{RoleCode: "sales_v2", PermissionCode: "contract.read", Effect: "ALLOW"},

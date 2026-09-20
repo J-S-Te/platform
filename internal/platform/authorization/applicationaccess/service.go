@@ -365,7 +365,7 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 		TenantID:                   tenantID,
 		Roles:                      sortedUnique(roles),
 		Permissions:                append([]string(nil), access.EffectivePermissions...),
-		RoleConfigHash:             access.RoleConfigHash,
+		RoleConfigHash:             compatibility.RoleConfigHash,
 		CatalogVersion:             compatibility.CatalogVersion,
 		CompatibleCatalogVersions:  compatibility.CatalogVersions,
 		CompatibleRoleConfigHashes: compatibility.RoleConfigHashes,
@@ -376,6 +376,7 @@ func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, client
 
 type catalogAuthorizationCompatibility struct {
 	CatalogVersion   string
+	RoleConfigHash   string
 	CatalogVersions  []string
 	RoleConfigHashes []string
 }
@@ -386,16 +387,31 @@ func (s *Service) loadCatalogCompatibility(ctx context.Context, tenantID, applic
 		Select("catalog_version, claims_role_config_hash, previous_catalog_version, previous_claims_role_config_hash").
 		Where("tenant_id = ? AND application_id = ?", tenantID, applicationID).Take(&metadata).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return catalogAuthorizationCompatibility{RoleConfigHashes: sortedUnique([]string{currentRoleConfigHash})}, nil
+		return catalogAuthorizationCompatibility{
+			RoleConfigHash:   currentRoleConfigHash,
+			RoleConfigHashes: sortedUnique([]string{currentRoleConfigHash}),
+		}, nil
 	}
 	if err != nil {
 		return catalogAuthorizationCompatibility{}, fmt.Errorf("load authorization catalog compatibility window: %w", err)
 	}
+	return catalogCompatibilityFromMetadata(metadata, currentRoleConfigHash), nil
+}
+
+func catalogCompatibilityFromMetadata(metadata catalogMetadataRow, fallbackRoleConfigHash string) catalogAuthorizationCompatibility {
+	currentRoleConfigHash := strings.TrimSpace(metadata.ClaimsRoleConfigHash)
+	if currentRoleConfigHash == "" {
+		// Older application catalogs may not publish a claims hash. Keep those
+		// applications compatible with the platform-derived role mapping hash,
+		// while catalogs that do publish one remain authoritative for consumers.
+		currentRoleConfigHash = strings.TrimSpace(fallbackRoleConfigHash)
+	}
 	return catalogAuthorizationCompatibility{
 		CatalogVersion:   metadata.CatalogVersion,
+		RoleConfigHash:   currentRoleConfigHash,
 		CatalogVersions:  sortedUnique([]string{metadata.CatalogVersion, metadata.PreviousCatalogVersion}),
 		RoleConfigHashes: sortedUnique([]string{currentRoleConfigHash, metadata.PreviousClaimsRoleConfigHash}),
-	}, nil
+	}
 }
 
 const maxOIDCOrganizationIDs = 100
