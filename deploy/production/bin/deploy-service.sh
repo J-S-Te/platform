@@ -367,6 +367,22 @@ contract_runtime_ready() {
       return 1
     fi
   done
+  if [[ "$(contract_env_value CRM_REFERENCE_ENABLED)" == "true" ]]; then
+    for key in CRM_REFERENCE_BASE_URL CRM_REFERENCE_TOKEN_URL CRM_REFERENCE_CLIENT_ID CRM_REFERENCE_CLIENT_SECRET; do
+      value="$(contract_env_value "$key")"
+      if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+        return 1
+      fi
+    done
+  fi
+  if [[ "$(contract_env_value PROJECT_INTEGRATION_ENABLED)" == "true" ]]; then
+    for key in PROJECT_API_BASE_URL PROJECT_INTEGRATION_TOKEN_URL PROJECT_INTEGRATION_CLIENT_ID PROJECT_INTEGRATION_CLIENT_SECRET; do
+      value="$(contract_env_value "$key")"
+      if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
+        return 1
+      fi
+    done
+  fi
   [[ "$(contract_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]
 }
 
@@ -502,6 +518,18 @@ deploy_contract() {
   require_contract_runtime_value PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID || return
   require_contract_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID || return
   require_contract_runtime_value PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET || return
+  if [[ "$(contract_env_value CRM_REFERENCE_ENABLED)" == "true" ]]; then
+    require_contract_runtime_value CRM_REFERENCE_BASE_URL || return
+    require_contract_runtime_value CRM_REFERENCE_TOKEN_URL || return
+    require_contract_runtime_value CRM_REFERENCE_CLIENT_ID || return
+    require_contract_runtime_value CRM_REFERENCE_CLIENT_SECRET || return
+  fi
+  if [[ "$(contract_env_value PROJECT_INTEGRATION_ENABLED)" == "true" ]]; then
+    require_contract_runtime_value PROJECT_API_BASE_URL || return
+    require_contract_runtime_value PROJECT_INTEGRATION_TOKEN_URL || return
+    require_contract_runtime_value PROJECT_INTEGRATION_CLIENT_ID || return
+    require_contract_runtime_value PROJECT_INTEGRATION_CLIENT_SECRET || return
+  fi
   if [[ "$(contract_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" != "true" ]]; then
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1
@@ -510,7 +538,11 @@ deploy_contract() {
   backup_database contract-mysql contract_management || return
   # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
   compose --profile release run --rm contract-migrate || return
-  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api || return
+  if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api; then
+    echo "---- contract-api 启动失败日志 ----" >&2
+    compose logs --no-color --tail 120 contract-api >&2 || true
+    return 1
+  fi
   if ! wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"; then
     echo "---- contract-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 contract-api >&2 || true
@@ -709,6 +741,11 @@ fi
 # 首次上线时子系统镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
 # 子系统 API，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
 if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
+  if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    echo "合同管理运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
+    echo "请先在基础平台重新发布 contract_management/prod，补齐 CRM 与项目集成机器凭据后再运行 CI/CD" >&2
+    exit 1
+  fi
   rm -f "$previous_release"
   echo "合同镜像已安全暂存：$image_ref"
   echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 contract_management/prod 接入。"

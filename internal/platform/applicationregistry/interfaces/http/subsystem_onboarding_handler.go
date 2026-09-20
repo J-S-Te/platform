@@ -1496,6 +1496,9 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 	case "contract_management":
 		return []updateServiceCredentialRequirement{
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read"},
+			// 外部合同创建会同步校验 CRM 客户和商机。历史环境可能早于该集成能力，
+			// 受控更新必须创建或轮换凭据并把明文 Secret 重新下发到运行文件。
+			{purpose: application.ServiceCredentialCRMContractReferenceRead, suffix: "crm-contract-reference", clientName: "合同管理系统 CRM Contract Reference Reader", scope: "customer.contract_reference.read", rotate: true},
 			{purpose: application.ServiceCredentialProjectContractImport, suffix: "project-integration", clientName: "合同管理系统 Project Contract Importer", scope: "project.contract.import", rotate: true},
 			fileGateway,
 		}
