@@ -109,6 +109,22 @@ x-project-service: &project-service
     - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 
+x-settlement-service: &settlement-service
+  # API、Worker 和 migration 使用同一不可变 Settlement 镜像，只通过 entrypoint
+  # 区分进程，避免发布时把可变本地构建镜像带入生产环境。
+  image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
+  env_file:
+    - ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+  environment:
+    SETTLEMENT_HTTP_ADDR: :8085
+    SETTLEMENT_MYSQL_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD:-PENDING_SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
+    SETTLEMENT_DEVELOPMENT_AUTH: "false"
+    PLATFORM_BASE_URL: http://platform-api:8080
+    PLATFORM_ENVIRONMENT_CODE: prod
+    GIN_MODE: release
+  networks: [application]
+  restart: unless-stopped
+
 x-data-analysis-service: &data-analysis-service
   image: ${DATA_ANALYSIS_DASHBOARD_API_IMAGE:-data-analysis/dashboard-api:pending}
   env_file:
@@ -505,6 +521,84 @@ services:
       # 该 Worker 不提供 HTTP 端口，但受控发布使用 `docker compose up --wait`。
       # 用 PID 1 存活探针让 Compose 能区分“持续运行”与“启动后立即退出”，同时
       # 避免把无健康检查的长期服务误判为部署失败。
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  # 结算与开票服务拥有独立数据库；发布顺序固定为数据库健康、迁移、API、Worker。
+  settlement-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: settlement
+      MYSQL_USER: settlement
+      MYSQL_PASSWORD: ${SETTLEMENT_MYSQL_PASSWORD:-PENDING_SETTLEMENT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${SETTLEMENT_MYSQL_ROOT_PASSWORD:-PENDING_SETTLEMENT_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - settlement-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  settlement-migrate:
+    <<: *settlement-service
+    entrypoint: ["/usr/local/bin/settlement-migrate"]
+    profiles: ["settlement-release"]
+    depends_on:
+      settlement-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  settlement-api:
+    <<: *settlement-service
+    depends_on:
+      settlement-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SETTLEMENT_API_PORT:-18087}:8085"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: settlement
+      com.basic-platform.application_name: 结算与开票管理系统
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: settlement-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: settlement-api
+      com.basic-platform.internal_port: "8085"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /settlement
+      com.basic-platform.oidc_callback_path: /settlement/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8085/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  settlement-worker:
+    <<: *settlement-service
+    entrypoint: ["/usr/local/bin/settlement-worker"]
+    depends_on:
+      settlement-mysql:
+        condition: service_healthy
+      settlement-api:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 10s
       timeout: 3s
@@ -938,6 +1032,7 @@ volumes:
   customer-attachment-data:
   portal-mysql-data:
   project-mysql-data:
+  settlement-mysql-data:
   data-analysis-mysql-data:
   subsystem-provisioner-socket:
   keycloak-mysql-data:

@@ -1,0 +1,59 @@
+version: 1
+default: false
+application:
+  code: settlement
+  initial_admin_roles: [settlement_admin]
+  allowed_service_bindings: []
+  name: 结算与开票管理系统
+  description: 应收、回款核销、开票与催收管理系统
+  environment: prod
+  path_prefix: /settlement
+  upstream_url: http://settlement-api:8085
+  client_type: confidential
+runtime:
+  required_infrastructure_keys:
+    - SETTLEMENT_MYSQL_PASSWORD
+    - SETTLEMENT_MYSQL_ROOT_PASSWORD
+  files:
+    - path: runtime/settlement.env
+      template_path: subsystem-templates/settlement.env.example
+      compose_environment_key: SETTLEMENT_RUNTIME_ENV_FILE
+      required_existing_keys: []
+      generated_keys:
+        - OIDC_SESSION_ENCRYPTION_KEY_BASE64
+      values:
+        OIDC_IDP_HINT: basic-platform
+        OIDC_SESSION_COOKIE_NAME: settlement_session
+        OIDC_SESSION_IDLE_TTL: 30m
+        OIDC_SESSION_ABSOLUTE_TTL: 8h
+        SETTLEMENT_DEVELOPMENT_AUTH: "false"
+        SETTLEMENT_INTEGRATION_ENABLED: "false"
+        SETTLEMENT_OUTBOX_BATCH_SIZE: "50"
+        SETTLEMENT_INVOICE_ISSUANCE_MODE: manual
+        SETTLEMENT_CRM_CREDIT_SYNC_ENABLED: "false"
+        SETTLEMENT_FILE_GATEWAY_MODE: disabled
+        PLATFORM_BASE_URL: http://platform-api:8080
+        PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
+      bindings:
+        OIDC_ISSUER: issuer
+        OIDC_CLIENT_ID: client_id
+        OIDC_CLIENT_SECRET: client_secret
+        OIDC_REDIRECT_URI: redirect_uri
+        OIDC_TENANT_ID: tenant_id
+        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        SETTLEMENT_PUBLIC_ORIGIN: public_origin
+        PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+        PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
+compose:
+  profiles: [settlement-release]
+  dependency_services: [settlement-mysql]
+  database:
+    service: settlement-mysql
+    name: settlement
+  migrate_service: settlement-migrate
+  runtime_services: [settlement-api, settlement-worker]
+  teardown_services: [settlement-api, settlement-worker]
+  release_image_keys: [SETTLEMENT_IMAGE]
