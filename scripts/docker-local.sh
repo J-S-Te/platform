@@ -124,7 +124,7 @@ up/restart 选项：
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
   project-api   项目管理系统 API + Temporal Worker（完成 project_management/dev 接入后启用）
-  dashboard-api 数据看板与统计分析 API（嵌入桥）+ aggregation-worker + alert-worker + Metabase（完成 data_analysis/dev 接入后启用）
+  dashboard-api 数据看板与统计分析 API（嵌入桥）+ aggregation-worker + alert-worker + Metabase（未接入时先创建探测候选容器）
   presale-worker 售前申请审批/PMS 投递 Worker（up 默认启动）
 
 首次启动若数据库中尚未存在超级管理员，必须提供三个管理员参数，或设置：
@@ -1265,6 +1265,16 @@ ensure_crm_discovery_candidate() {
 	compose_run up --no-start --no-deps --no-build customer-api >/dev/null
 }
 
+# 数据看板首次接入前同样必须先进入平台“子系统探测”列表。其容器标签已经声明
+# application_code / environment / callback 等非敏感元数据，但 dashboard-api 的进程
+# 还依赖平台签发的 OIDC、机器 Client 和授权目录凭据，不能在接入前启动后进入重启循环。
+# `up --no-start` 会创建带标签的 Docker 容器而不运行进程；探测器使用 `docker ps --all`
+# 可读取 created 容器，接入完成后普通 up 会复用并正常启动它。
+ensure_data_analysis_discovery_candidate() {
+	log "创建数据看板探测候选（不启动业务进程）"
+	compose_run up --no-start --no-deps --no-build dashboard-api >/dev/null
+}
+
 pull_image_with_retry() {
     local image="$1" max_attempts="${2:-5}" attempt delay
     if docker image inspect "$image" >/dev/null 2>&1; then
@@ -1648,7 +1658,8 @@ start_stack() {
     # 平台库一旦缺少接入记录，up 会在发布处中止而 8081 始终起不来，接入与启动互相等待。
     log "启动统一前端（先于子系统接入步骤，保证门户网关可用于首次接入）"
     compose_up_wait "统一前端" frontend
-	ensure_crm_discovery_candidate
+    ensure_crm_discovery_candidate
+    ensure_data_analysis_discovery_candidate
     crm_catalog_ready=true
     if ! sync_crm_authorization_catalog; then
         log "跳过客户与商机管理后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
