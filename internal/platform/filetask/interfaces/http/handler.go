@@ -226,16 +226,27 @@ func (handler *Handler) BindFile(writer http.ResponseWriter, request *http.Reque
 		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 		return
 	}
+	// Machine clients do not have a platform user subject. Use the already
+	// authenticated application ID as the non-secret audit actor, matching the
+	// v2 upload-session binding path without trusting a browser-supplied value.
+	operator := bindingOperator(principal)
 	binding, err := handler.files.BindResource(request.Context(), application.BindingInput{
 		TenantID: principal.Tenant.ID, ApplicationID: payload.ApplicationID, FileID: request.PathValue("file_id"),
 		ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, BindingType: payload.BindingType,
-		DisplayName: payload.DisplayName, SortOrder: payload.SortOrder, OperatorUserID: principal.User.ID,
+		DisplayName: payload.DisplayName, SortOrder: payload.SortOrder, OperatorUserID: operator,
 	})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "文件绑定成功", binding)
+}
+
+func bindingOperator(principal authctx.Principal) string {
+	if userID := strings.TrimSpace(principal.User.ID); userID != "" {
+		return userID
+	}
+	return strings.TrimSpace(principal.Account.ID)
 }
 
 // UnbindFile 停用指定资源绑定，保留数据库记录用于后续审计与排障。
