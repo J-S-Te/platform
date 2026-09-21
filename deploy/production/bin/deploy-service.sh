@@ -450,9 +450,10 @@ dump_subsystem_provisioner_debug() {
 backup_database() {
   local mysql_service="$1"
   local database="$2"
-  local output="$deploy_dir/backups/${service}-${release_id}.sql.gz"
+  local backup_name="${3:-$service}"
+  local output="$deploy_dir/backups/${backup_name}-${release_id}.sql.gz"
   local temporary
-  temporary="$(mktemp "$deploy_dir/backups/.${service}-${release_id}.XXXXXX.sql.gz")"
+  temporary="$(mktemp "$deploy_dir/backups/.${backup_name}-${release_id}.XXXXXX.sql.gz")"
   chmod 600 "$temporary"
   echo "备份数据库到 $output"
   # single-transaction 为 InnoDB 提供一致性快照，备份管道任一环节失败都会因 pipefail 中止发布。
@@ -503,7 +504,7 @@ deploy_platform() {
   backup_database platform-mysql basic_platform || return
   compose --profile release run --rm platform-migrate ./migrate || return
 	compose up -d --wait --wait-timeout 180 file-gateway-mysql || return
-	backup_database file-gateway-mysql "$file_gateway_db_name" || return
+	backup_database file-gateway-mysql "$file_gateway_db_name" file-gateway || return
 	compose up -d --force-recreate --wait --wait-timeout 180 file-gateway || return
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
