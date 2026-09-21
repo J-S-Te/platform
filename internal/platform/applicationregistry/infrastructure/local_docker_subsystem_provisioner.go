@@ -1087,7 +1087,16 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractSta
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "contract-migrate"); err != nil {
 		return err
 	}
-	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--build", "--no-deps", "contract-api")
+	// Build first, publish the catalog from that exact image, and only then replace
+	// the API. This prevents a new binary from serving with an older N/N-1 catalog
+	// window and turning every OIDC callback into local_authorization 401.
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "contract-api"); err != nil {
+		return err
+	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "contract-api", "./authz-catalog", "publish"); err != nil {
+		return err
+	}
+	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "contract-api")
 }
 
 // rebuildIntegratedProjectStack 让 project_management 保持在工作区唯一的本地

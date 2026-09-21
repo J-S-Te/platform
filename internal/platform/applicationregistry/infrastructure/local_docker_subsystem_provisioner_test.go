@@ -540,8 +540,8 @@ func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *test
 		t.Fatalf("update integrated contract subsystem: %v", err)
 	}
 
-	if len(runner.calls) != 3 {
-		t.Fatalf("integrated contract update calls = %d, want 3: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 5 {
+		t.Fatalf("integrated contract update calls = %d, want 5: %#v", len(runner.calls), runner.calls)
 	}
 	for _, call := range runner.calls {
 		if call.directory != platformRoot {
@@ -579,8 +579,14 @@ func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *test
 	if !containsString(runner.calls[1].arguments, "contract-migrate") {
 		t.Fatalf("second call must run integrated migrations: %v", runner.calls[1].arguments)
 	}
-	if !containsString(runner.calls[2].arguments, "contract-api") || !containsString(runner.calls[2].arguments, "--build") {
-		t.Fatalf("third call must rebuild integrated contract API: %v", runner.calls[2].arguments)
+	if !containsString(runner.calls[2].arguments, "build") || !containsString(runner.calls[2].arguments, "contract-api") {
+		t.Fatalf("third call must build integrated contract API: %v", runner.calls[2].arguments)
+	}
+	if !containsString(runner.calls[3].arguments, "./authz-catalog") || !containsString(runner.calls[3].arguments, "publish") {
+		t.Fatalf("fourth call must publish the embedded contract catalog: %v", runner.calls[3].arguments)
+	}
+	if !containsString(runner.calls[4].arguments, "contract-api") || containsString(runner.calls[4].arguments, "--build") {
+		t.Fatalf("fifth call must start the already validated contract API image: %v", runner.calls[4].arguments)
 	}
 }
 
@@ -864,8 +870,8 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 		t.Fatalf("provision integrated contract subsystem: %v", err)
 	}
 
-	if len(runner.calls) != 3 {
-		t.Fatalf("integrated contract provision calls = %d, want 3 unified Compose calls: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 5 {
+		t.Fatalf("integrated contract provision calls = %d, want 5 unified Compose calls: %#v", len(runner.calls), runner.calls)
 	}
 	for _, call := range runner.calls {
 		if call.binary == "/bin/bash" || containsString(call.arguments, "nginx") {
