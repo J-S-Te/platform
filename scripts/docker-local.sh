@@ -1664,6 +1664,8 @@ start_stack() {
     if ! sync_crm_authorization_catalog; then
         log "跳过客户与商机管理后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
     fi
+    log "启动合同管理后端前发布当前镜像内嵌授权目录"
+    sync_contract_authorization_catalog
     log "启动合同管理后端"
     compose_up_wait "合同管理后端" contract-api
     if [[ "$crm_catalog_ready" == true ]]; then
@@ -1792,6 +1794,8 @@ refresh_contract_backend() {
     log "启动合同数据库与 Temporal，并执行合同管理数据库迁移"
     compose_run up -d --wait contract-mysql temporal
     compose_run run --rm --no-deps contract-migrate
+	log "发布当前合同镜像内嵌的授权目录"
+	sync_contract_authorization_catalog
     log "重建 contract-api 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
     compose_run up -d --wait --no-deps contract-api
     verify_gateway_routes
@@ -1847,6 +1851,12 @@ sync_crm_authorization_catalog() {
         crm_onboarding_remediation >&2
         return 1
     fi
+}
+
+# 合同 API 的本地启动同步被有意关闭，目录只能由受控部署步骤发布。必须使用
+# 即将启动的同一镜像内嵌清单，避免平台目录仍停留在旧版本而新 API 拒绝登录。
+sync_contract_authorization_catalog() {
+	compose_run run --rm --no-deps contract-api ./authz-catalog publish
 }
 
 # crm_onboarding_remediation 给出可直接执行的首次接入命令：发布失败的原始输出只有
