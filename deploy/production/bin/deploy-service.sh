@@ -492,10 +492,16 @@ deploy_platform() {
 	file_gateway_root="${file_gateway_root:-/opt/basic-platform/data/file-gateway}"
 	file_gateway_db_name="$(env_value FILE_GATEWAY_DB_NAME)"
 	file_gateway_db_name="${file_gateway_db_name:-file_gateway}"
-	if ! install -d -m 750 "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine" 2>/dev/null; then
-		echo "无法创建文件网关目录：$file_gateway_root；请先由 root 创建并授权给部署账号" >&2
-		return 1
-	fi
+	for directory in "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine"; do
+		if [[ -L "$directory" ]]; then
+			echo "拒绝符号链接文件网关目录：$directory" >&2
+			return 1
+		fi
+		if [[ ! -d "$directory" ]] && ! install -d -m 750 "$directory" 2>/dev/null; then
+			echo "无法创建文件网关目录：$directory；请先由 root 创建并授权给部署账号" >&2
+			return 1
+		fi
+	done
 	# CI 部署账号无权对已正确归属 10001:10001 的目录再次执行 chown；仅在
 	# 实际属主不符合时请求一次 root 初始化，保证后续不可变镜像发布可重复执行。
 	for directory in "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine"; do
