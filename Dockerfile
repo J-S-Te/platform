@@ -17,6 +17,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./c
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/migrate ./cmd/migrate \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/provision-iam-import-client ./cmd/provision-iam-import-client \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/subsystem-provisioner ./cmd/subsystem-provisioner
 
 # API 运行容器不挂载 Docker Socket；同一镜像中的部署助手由独立服务运行。
@@ -35,6 +36,7 @@ COPY --from=builder /out/file-inventory ./file-inventory
 COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin
+COPY --from=builder /out/provision-iam-import-client ./provision-iam-import-client
 COPY --from=builder /out/subsystem-provisioner ./subsystem-provisioner
 COPY docker-entrypoint.sh /usr/local/bin/basic-platform-entrypoint
 COPY scripts/sync-contract-catalog.sh /usr/local/bin/sync-contract-catalog.sh
