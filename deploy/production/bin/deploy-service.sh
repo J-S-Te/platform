@@ -725,8 +725,13 @@ else
     }
   ' "$release_file" >"$next_release"
 fi
+# deploy-service may be invoked by root during incident recovery. Preserve the
+# deploy account ownership of .release.env so later CI deployments can update it.
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown --reference="$release_file" "$next_release"
+fi
+chmod 600 "$next_release"
 mv "$next_release" "$release_file"
-chmod 600 "$release_file"
 
 if [[ "$service" == "data-analysis" ]]; then
   for data_analysis_image in "${data_analysis_image_refs[@]}"; do
