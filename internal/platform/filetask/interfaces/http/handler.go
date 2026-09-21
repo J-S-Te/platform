@@ -131,6 +131,23 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	classification := strings.TrimSpace(request.FormValue("classification"))
+	purpose := strings.TrimSpace(request.FormValue("purpose"))
+	namespace := ""
+	policyVersion, retentionClass := "", ""
+	var retentionUntil *time.Time
+	if purpose != "" {
+		selected, exists := uploadPolicies[purpose]
+		if !exists || !validPurposeApplication(principal.Account.Code, selected.Namespace) {
+			httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+			return
+		}
+		namespace, purpose = selected.Namespace, selected.Purpose
+		policyVersion, retentionClass = v2PolicyVersion, "LONG_TERM"
+		if selected.Temporary {
+			value := time.Now().UTC().Add(24 * time.Hour)
+			retentionUntil, retentionClass = &value, "TEMPORARY"
+		}
+	}
 	fileContent, fileHeader, err := request.FormFile("file")
 	if err != nil {
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
@@ -139,14 +156,20 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 	defer fileContent.Close()
 
 	file, err := handler.files.Upload(request.Context(), application.UploadInput{
-		TenantID:          principal.Tenant.ID,
-		ApplicationID:     applicationID,
-		OwnerUserID:       principal.User.ID,
-		OriginalName:      fileHeader.Filename,
-		DeclaredMediaType: fileHeader.Header.Get("Content-Type"),
-		Classification:    classification,
-		RequestID:         request.Header.Get("X-Request-ID"),
-		Content:           fileContent,
+		TenantID:              principal.Tenant.ID,
+		ApplicationID:         applicationID,
+		OwnerUserID:           principal.User.ID,
+		Namespace:             namespace,
+		Purpose:               purpose,
+		PolicyVersion:         policyVersion,
+		RetentionClass:        retentionClass,
+		RetentionUntil:        retentionUntil,
+		AuthenticatedClientID: principal.SessionID,
+		OriginalName:          fileHeader.Filename,
+		DeclaredMediaType:     fileHeader.Header.Get("Content-Type"),
+		Classification:        classification,
+		RequestID:             request.Header.Get("X-Request-ID"),
+		Content:               fileContent,
 	})
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -167,6 +190,7 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 	stored, stream, err := handler.files.OpenDownload(request.Context(), application.DownloadAccess{
 		TenantID:        principal.Tenant.ID,
 		UserID:          principal.User.ID,
+		ApplicationID:   principal.Account.ID,
 		PermissionCodes: principal.PermissionCodes,
 	}, fileID)
 	if err != nil {

@@ -26,6 +26,7 @@ type FileRepository interface {
 	CreateBinding(context.Context, domain.FileBinding) (domain.FileBinding, error)
 	DeactivateBinding(context.Context, string, string, string, string, time.Time) error
 	HasActiveBinding(context.Context, string, string, string, string, string) (bool, error)
+	HasAnyActiveBinding(context.Context, string, string, string) (bool, error)
 	ListRecoveryCandidates(context.Context, string, time.Time, int) ([]domain.StoredFile, error)
 }
 
@@ -52,6 +53,16 @@ type LocalStore interface {
 	CleanupTemporary(time.Time) (int, error)
 }
 
+// StagedLocalStore keeps untrusted bytes outside the formal namespace until validation succeeds.
+// Stage identifiers are opaque implementation values and must never be persisted or returned to clients.
+type StagedLocalStore interface {
+	Stage(context.Context, io.Reader, int64) (stageID string, size uint64, sha256 []byte, err error)
+	OpenStaged(string) (io.ReadSeekCloser, error)
+	PublishStaged(string, string) error
+	QuarantineStaged(string) error
+	RemoveStaged(string) error
+}
+
 // IDGenerator gives the application layer monotonic public identifiers without coupling it to a
 // database implementation.
 type IDGenerator interface {
@@ -75,10 +86,16 @@ type UploadPolicy struct {
 
 // UploadInput is request-local binary input. Content is consumed exactly once and is never logged.
 type UploadInput struct {
-	TenantID, ApplicationID, OwnerUserID string
-	OriginalName, DeclaredMediaType      string
-	Classification, RequestID            string
-	Content                              io.Reader
+	TenantID, ApplicationID, OwnerUserID      string
+	Namespace, Purpose, AuthenticatedClientID string
+	PolicyVersion, RetentionClass             string
+	RetentionUntil                            *time.Time
+	OriginalName, DeclaredMediaType           string
+	Classification, RequestID                 string
+	PreallocatedFileID, PreallocatedVersionID string
+	ExpectedSize                              uint64
+	ExpectedSHA256                            []byte
+	Content                                   io.Reader
 }
 
 // DownloadAccess carries the server-authenticated subject and its already-resolved permissions.

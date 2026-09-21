@@ -3,7 +3,7 @@ default: false
 application:
   code: settlement
   initial_admin_roles: [settlement_admin]
-  allowed_service_bindings: []
+  allowed_service_bindings: [file_gateway_write]
   name: 结算与开票管理系统
   description: 应收、回款核销、开票与催收管理系统
   environment: prod
@@ -31,7 +31,10 @@ runtime:
         SETTLEMENT_OUTBOX_BATCH_SIZE: "50"
         SETTLEMENT_INVOICE_ISSUANCE_MODE: manual
         SETTLEMENT_CRM_CREDIT_SYNC_ENABLED: "false"
-        SETTLEMENT_FILE_GATEWAY_MODE: disabled
+        SETTLEMENT_FILE_GATEWAY_MODE: required
+        FILE_GATEWAY_URL: http://file-gateway:8086
+        FILE_GATEWAY_TOKEN_URL: http://platform-api:8080/oauth2/token
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
         PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
@@ -48,6 +51,9 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
         PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
+        SETTLEMENT_FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
   profiles: [settlement-release]
   dependency_services: [settlement-mysql]

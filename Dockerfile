@@ -13,6 +13,7 @@ COPY migrations/ ./migrations/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./cmd/api \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/file-gateway ./cmd/file-gateway \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/file-inventory ./cmd/file-inventory \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/migrate ./cmd/migrate \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
@@ -22,12 +23,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./c
 # 部署助手需要 Docker CLI/Compose 与 bash 来执行经过白名单约束的本地编排和网关脚本。
 FROM alpine:3.21
 
-RUN apk add --no-cache bash ca-certificates curl docker-cli docker-cli-compose jq openssl tzdata util-linux wget
+RUN apk add --no-cache bash ca-certificates curl docker-cli docker-cli-compose jq openssl su-exec tzdata util-linux wget \
+    && addgroup -S -g 10001 filegateway \
+    && adduser -S -D -H -u 10001 -G filegateway filegateway
 
 WORKDIR /app
 
 COPY --from=builder /out/api ./api
 COPY --from=builder /out/file-gateway ./file-gateway
+COPY --from=builder /out/file-inventory ./file-inventory
 COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin

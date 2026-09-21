@@ -35,7 +35,14 @@ type Config struct {
 	// PortalApplicationCode 是外部客户门户应用编码（B4 解耦，默认 customer_portal）。
 	PortalApplicationCode string
 	FileStorageRoot       string
+	IAMImportFileGateway  FileGatewayClientConfig
 	CORSOrigins           []string
+}
+
+// FileGatewayClientConfig is the platform API's least-privilege machine client used only for
+// server-authorized IAM CSV imports. The browser never receives these credentials.
+type FileGatewayClientConfig struct {
+	BaseURL, TokenURL, ClientID, ClientSecret, Scope string
 }
 
 // HTTPConfig controls the API listener and public address.
@@ -346,7 +353,12 @@ func Load() (Config, error) {
 			InitialAdminRolesFromManifest: value("SUBSYSTEM_INITIAL_ADMIN_ROLES_FROM_MANIFEST", "") == "true",
 			DefaultIssuerAlias:            strings.ToLower(value("SUBSYSTEM_DEFAULT_ISSUER_ALIAS", "platform")),
 		},
-		FileStorageRoot:       resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
+		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
+		IAMImportFileGateway: FileGatewayClientConfig{
+			BaseURL: value("IAM_IMPORT_FILE_GATEWAY_BASE_URL", ""), TokenURL: value("IAM_IMPORT_FILE_GATEWAY_TOKEN_URL", ""),
+			ClientID: value("IAM_IMPORT_FILE_GATEWAY_CLIENT_ID", ""), ClientSecret: value("IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET", ""),
+			Scope: value("IAM_IMPORT_FILE_GATEWAY_SCOPE", "platform:file:upload platform:file:bind"),
+		},
 		CORSOrigins:           commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 		PortalApplicationCode: value("PLATFORM_PORTAL_APPLICATION_CODE", "customer_portal"),
 	}
@@ -407,6 +419,15 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Logging.Directory == "" || cfg.FileStorageRoot == "" {
 		return fmt.Errorf("LOG_DIRECTORY and FILE_STORAGE_ROOT must not be empty")
+	}
+	configuredGatewayFields := 0
+	for _, field := range []string{cfg.IAMImportFileGateway.BaseURL, cfg.IAMImportFileGateway.TokenURL, cfg.IAMImportFileGateway.ClientID, cfg.IAMImportFileGateway.ClientSecret} {
+		if strings.TrimSpace(field) != "" {
+			configuredGatewayFields++
+		}
+	}
+	if configuredGatewayFields != 0 && configuredGatewayFields != 4 {
+		return fmt.Errorf("IAM import file gateway requires base URL, token URL, client ID and client secret together")
 	}
 	if strings.TrimSpace(cfg.Worker.ID) == "" || cfg.Worker.PollInterval <= 0 || cfg.Worker.StaleLockTimeout <= 0 {
 		return fmt.Errorf("async worker configuration is invalid")

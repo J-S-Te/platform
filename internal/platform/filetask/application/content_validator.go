@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"image"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"unicode/utf8"
 )
 
 func calculateStoredIntegrity(content io.ReadSeeker) (uint64, []byte, error) {
@@ -72,10 +74,66 @@ func validateStoredContent(mediaType string, content io.ReadSeeker) error {
 		if err := validatePDFEnvelope(content); err != nil {
 			return err
 		}
-	case "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+	case "application/zip", "application/ofd", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation":
 		if err := validateZIPStructure(mediaType, content); err != nil {
 			return err
 		}
+	case "application/xml", "text/xml":
+		data, err := io.ReadAll(io.LimitReader(content, defaultUploadMaxBytes+1))
+		if err != nil || int64(len(data)) > defaultUploadMaxBytes || len(data) == 0 {
+			return errors.New("XML size is invalid")
+		}
+		lower := bytes.ToLower(data)
+		if bytes.Contains(lower, []byte("<!doctype")) || bytes.Contains(lower, []byte("<!entity")) {
+			return errors.New("XML contains a disallowed DTD or entity declaration")
+		}
+	case "text/csv":
+		if err := validateCSV(content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const (
+	maxCSVRows      = 100_000
+	maxCSVColumns   = 256
+	maxCSVCellBytes = 1 << 20
+)
+
+func validateCSV(content io.ReadSeeker) error {
+	data, err := io.ReadAll(io.LimitReader(content, defaultUploadMaxBytes+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > defaultUploadMaxBytes {
+		return errors.New("CSV size is invalid")
+	}
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+	if !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
+		return errors.New("CSV must be valid UTF-8 text")
+	}
+	reader := csv.NewReader(bytes.NewReader(data))
+	reader.FieldsPerRecord = -1
+	reader.ReuseRecord = true
+	rows := 0
+	for {
+		record, readErr := reader.Read()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return errors.New("CSV structure is invalid")
+		}
+		rows++
+		if rows > maxCSVRows || len(record) == 0 || len(record) > maxCSVColumns {
+			return errors.New("CSV row or column count exceeds the configured limit")
+		}
+		for _, cell := range record {
+			if len(cell) > maxCSVCellBytes {
+				return errors.New("CSV cell exceeds the configured limit")
+			}
+		}
+	}
+	if rows == 0 {
+		return errors.New("CSV has no records")
 	}
 	return nil
 }
@@ -149,6 +207,9 @@ func validateZIPReader(mediaType string, data []byte, depth int, budget *zipVali
 			return errors.New("ZIP expanded size exceeds the configured limit")
 		}
 		lowerName := strings.ToLower(name)
+		if unsafeArchiveMember(lowerName) {
+			return errors.New("ZIP contains a macro, script or executable member")
+		}
 		if strings.HasSuffix(lowerName, ".xml") || strings.HasSuffix(lowerName, ".rels") {
 			lowerXML := bytes.ToLower(entryData)
 			if bytes.Contains(lowerXML, []byte("<!doctype")) || bytes.Contains(lowerXML, []byte("<!entity")) {
@@ -170,7 +231,24 @@ func validateZIPReader(mediaType string, data []byte, depth int, budget *zipVali
 			return errors.New("Office package is missing root relationships")
 		}
 	}
+	if mediaType == "application/ofd" {
+		if _, ok := entries["OFD.xml"]; !ok {
+			return errors.New("OFD package is missing OFD.xml")
+		}
+	}
 	return nil
+}
+
+func unsafeArchiveMember(lowerName string) bool {
+	if strings.Contains(lowerName, "/vbaProject.bin") || strings.HasSuffix(lowerName, "vbaproject.bin") || strings.Contains(lowerName, "/activex/") || strings.Contains(lowerName, "/embeddings/") {
+		return true
+	}
+	for _, extension := range []string{".exe", ".dll", ".com", ".msi", ".js", ".jse", ".vbs", ".vbe", ".ps1", ".bat", ".cmd", ".sh"} {
+		if strings.HasSuffix(lowerName, extension) {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyStoredIntegrity 在下载前复核不可变版本的长度与摘要，防止磁盘篡改内容被直接流出。

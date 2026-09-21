@@ -35,7 +35,7 @@ runtime:
         PLATFORM_APPLICATION_CODE: customer_portal
         PLATFORM_ENVIRONMENT_CODE: prod
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
-        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:download
       bindings:
         PORTAL_PUBLIC_ORIGIN: public_origin
         PORTAL_PATH_PREFIX: path_prefix

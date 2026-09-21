@@ -173,6 +173,19 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	if strings.TrimSpace(cfg.IAMImportFileGateway.BaseURL) != "" {
+		gateway, gatewayErr := infrastructure.NewEmployeeImportFileGateway(
+			cfg.IAMImportFileGateway.BaseURL, cfg.IAMImportFileGateway.TokenURL,
+			cfg.IAMImportFileGateway.ClientID, cfg.IAMImportFileGateway.ClientSecret,
+			cfg.IAMImportFileGateway.Scope, &http.Client{Timeout: 30 * time.Second},
+		)
+		if gatewayErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, gatewayErr
+		}
+		managementHandler.ConfigureEmployeeImportGateway(gateway)
+	}
 
 	authorizationRepository, err := authorizationinfrastructure.NewGORMRepository(db)
 	if err != nil {

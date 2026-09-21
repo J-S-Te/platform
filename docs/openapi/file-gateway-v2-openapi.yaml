@@ -1,0 +1,222 @@
+openapi: 3.1.0
+info:
+  title: Basic Platform File Gateway API
+  version: 2.0.0
+  description: Unified local-directory file upload, validation, binding and download gateway.
+servers:
+  - url: /file-gateway
+paths:
+  /api/v2/upload-sessions:
+    post:
+      summary: Create an upload session and pending business binding
+      security: [{ machineBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUploadSession' }
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionEnvelope' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/upload-sessions/{upload_id}/tickets:
+    parameters: [{ $ref: '#/components/parameters/UploadID' }]
+    post:
+      summary: Issue a one-time upload ticket
+      security: [{ machineBearer: [] }]
+      responses:
+        '201':
+          description: One-time ticket issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/UploadTicket' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v2/upload-sessions/{upload_id}/content:
+    parameters: [{ $ref: '#/components/parameters/UploadID' }]
+    put:
+      summary: Stream content with a one-time ticket
+      security: [{ uploadTicket: [] }]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '201':
+          description: File validated, published and bound
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v2/upload-sessions/{upload_id}/complete:
+    parameters: [{ $ref: '#/components/parameters/UploadID' }]
+    post:
+      summary: Read the synchronous upload completion result
+      security: [{ machineBearer: [] }]
+      responses:
+        '200':
+          description: Current session status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionEnvelope' }
+  /api/v2/upload-sessions/{upload_id}:
+    parameters: [{ $ref: '#/components/parameters/UploadID' }]
+    get:
+      summary: Get an upload session
+      security: [{ machineBearer: [] }]
+      responses:
+        '200':
+          description: Current session status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionEnvelope' }
+  /api/v2/files/{file_id}:
+    parameters: [{ $ref: '#/components/parameters/FileID' }]
+    get:
+      summary: Get safe file metadata
+      security: [{ machineBearer: [] }]
+      responses:
+        '200':
+          description: Safe metadata without storage paths
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionEnvelope' }
+  /api/v2/files/{file_id}/download-tickets:
+    parameters: [{ $ref: '#/components/parameters/FileID' }]
+    post:
+      summary: Issue a one-time download ticket after business ACL verification
+      security: [{ machineBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resource_type, resource_id]
+              properties:
+                resource_type: { type: string, maxLength: 64 }
+                resource_id: { type: string, maxLength: 128 }
+      responses:
+        '201':
+          description: Download ticket issued
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v2/files/{file_id}/content:
+    parameters: [{ $ref: '#/components/parameters/FileID' }]
+    get:
+      summary: Stream an immutable READY file
+      security: [{ downloadTicket: [] }]
+      responses:
+        '200':
+          description: Binary attachment with no-store and nosniff headers
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v2/files/{file_id}/bindings/{binding_id}:
+    parameters:
+      - { $ref: '#/components/parameters/FileID' }
+      - name: binding_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Deactivate an active business binding
+      security: [{ machineBearer: [] }]
+      responses:
+        '204': { description: Binding deactivated }
+        '403': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    machineBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    uploadTicket:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Use `UploadTicket <opaque-ticket>`.
+    downloadTicket:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Use `DownloadTicket <opaque-ticket>`.
+  parameters:
+    UploadID:
+      name: upload_id
+      in: path
+      required: true
+      schema: { type: string, minLength: 26, maxLength: 26 }
+    FileID:
+      name: file_id
+      in: path
+      required: true
+      schema: { type: string, minLength: 26, maxLength: 26 }
+  schemas:
+    CreateUploadSession:
+      type: object
+      additionalProperties: false
+      required: [purpose, original_name, media_type, size_bytes, sha256, resource_type, resource_id, binding_type, idempotency_key]
+      properties:
+        purpose: { type: string, description: Versioned server policy key }
+        original_name: { type: string, maxLength: 512 }
+        media_type: { type: string, maxLength: 255 }
+        size_bytes: { type: integer, minimum: 1, maximum: 20971520 }
+        sha256: { type: string, pattern: '^[0-9A-Fa-f]{64}$' }
+        classification: { type: string, enum: [PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED] }
+        actor_user_id: { type: string }
+        resource_type: { type: string, maxLength: 64 }
+        resource_id: { type: string, maxLength: 128 }
+        binding_type: { type: string, maxLength: 64 }
+        display_name: { type: string, maxLength: 512 }
+        idempotency_key: { type: string, maxLength: 128 }
+    Session:
+      type: object
+      required: [upload_id, file_id, mode, upload_url, purpose, status, created_at]
+      properties:
+        upload_id: { type: string }
+        file_id: { type: string }
+        mode: { type: string, enum: [PROXY, DIRECT_GATEWAY] }
+        upload_url: { type: string }
+        purpose: { type: string }
+        status: { type: string, enum: [CREATED, UPLOADING, VALIDATING, READY, REJECTED, FAILED, EXPIRED, DELETED] }
+        original_name: { type: string }
+        media_type: { type: string }
+        size_bytes: { type: integer }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        failure_code: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+    SessionEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/Session' }
+    UploadTicket:
+      type: object
+      required: [upload_id, file_id, mode, upload_url, ticket, expires_at]
+      properties:
+        upload_id: { type: string }
+        file_id: { type: string }
+        mode: { type: string, enum: [PROXY, DIRECT_GATEWAY] }
+        upload_url: { type: string }
+        ticket: { type: string, writeOnly: true }
+        expires_at: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+  responses:
+    Error:
+      description: Stable security-safe error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
