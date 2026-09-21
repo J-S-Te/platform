@@ -37,7 +37,9 @@ db_password="$(env_value FILE_GATEWAY_DB_ROOT_PASSWORD)"
 
 # 临时上传可在恢复后由会话对账清理，不进入长期备份。
 tar --create --gzip --file "$work/files.tar.gz" --directory "$storage_root" --exclude='./temporary' .
-sha256sum "$work/database.sql.gz" "$work/files.tar.gz" >"$work/SHA256SUMS"
+# Store stable relative names. The staging directory is atomically renamed at
+# the end of the backup, so absolute staging paths would become unverifiable.
+(cd -- "$work" && sha256sum database.sql.gz files.tar.gz >SHA256SUMS)
 printf 'created_at=%s\nstorage_root=%s\ndatabase=%s\n' "$stamp" "$storage_root" "$db_name" >"$work/MANIFEST"
 mv "$work" "$backup_root/$stamp"
 trap - EXIT
