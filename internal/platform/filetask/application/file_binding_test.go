@@ -63,6 +63,9 @@ func (stub *bindingRepositoryStub) DeactivateBinding(context.Context, string, st
 func (stub *bindingRepositoryStub) HasActiveBinding(context.Context, string, string, string, string, string) (bool, error) {
 	return stub.bound, nil
 }
+func (stub *bindingRepositoryStub) HasAnyActiveBinding(context.Context, string, string, string) (bool, error) {
+	return stub.bound, nil
+}
 func (stub *bindingRepositoryStub) ListRecoveryCandidates(context.Context, string, time.Time, int) ([]domain.StoredFile, error) {
 	return stub.recoveryCandidates, nil
 }

@@ -15,6 +15,7 @@ const (
 	FileStatusDeleting      = "DELETING"
 	FileStatusDeleted       = "DELETED"
 	FileStatusFailed        = "FAILED"
+	FileStatusExpired       = "EXPIRED"
 
 	FileVersionStatusPendingUpload = "PENDING_UPLOAD"
 	FileVersionStatusValidating    = "VALIDATING"
@@ -34,15 +35,19 @@ const (
 // File contains the logical metadata for a locally stored file. Its storage path is deliberately
 // absent: API callers must never receive the server-side relative path.
 type File struct {
-	ID, TenantID, ApplicationID string
-	OriginalName, FileExtension string
-	MediaType, Classification   string
-	OwnerUserID                 string
-	CurrentVersionNo            uint
-	CurrentVersionID            string
-	Status                      string
-	Version                     uint64
-	CreatedAt, UpdatedAt        time.Time
+	ID, TenantID, ApplicationID       string
+	Namespace, Purpose, PolicyVersion string
+	AuthenticatedClientID             string
+	RetentionClass                    string
+	RetentionUntil                    *time.Time
+	OriginalName, FileExtension       string
+	MediaType, Classification         string
+	OwnerUserID                       string
+	CurrentVersionNo                  uint
+	CurrentVersionID                  string
+	Status                            string
+	Version                           uint64
+	CreatedAt, UpdatedAt              time.Time
 }
 
 // FileVersion is one immutable binary version. StorageRelativePath is internal-only and must not
@@ -56,6 +61,7 @@ type FileVersion struct {
 	UploaderUserID, UploadRequestID string
 	UploadRequestHash               []byte
 	CreatedAt                       time.Time
+	ValidatedAt                     *time.Time
 }
 
 // StoredFile joins a file and its current binary version for secure download and cleanup work.

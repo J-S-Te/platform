@@ -53,22 +53,12 @@ func run() error {
 		return err
 	}
 	var store fileapp.LocalStore
-	switch storageBackend {
-	case "local":
-		store, err = fileinfra.NewLocalStore(root)
-	case "s3":
-		storageContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		store, err = fileinfra.NewS3ObjectStore(storageContext, fileinfra.S3ObjectStoreOptions{
-			Bucket: os.Getenv("FILE_GATEWAY_S3_BUCKET"), Prefix: os.Getenv("FILE_GATEWAY_S3_PREFIX"),
-			Endpoint: os.Getenv("FILE_GATEWAY_S3_ENDPOINT"), Region: getenv("FILE_GATEWAY_S3_REGION", "us-east-1"),
-			AccessKeyID: os.Getenv("FILE_GATEWAY_S3_ACCESS_KEY_ID"), SecretAccessKey: os.Getenv("FILE_GATEWAY_S3_SECRET_ACCESS_KEY"),
-			SessionToken: os.Getenv("FILE_GATEWAY_S3_SESSION_TOKEN"), UsePathStyle: boolEnv("FILE_GATEWAY_S3_USE_PATH_STYLE", false),
-			MaxReadBytes: int64(intEnv("FILE_GATEWAY_S3_MAX_READ_BYTES", 100<<20)),
-		})
-	default:
+	var localStore *fileinfra.LocalStore
+	if storageBackend != "local" {
 		return fmt.Errorf("unsupported FILE_GATEWAY_STORAGE_BACKEND %q", storageBackend)
 	}
+	localStore, err = fileinfra.NewLocalStoreWithCapacityLimit(root, os.Getenv("FILE_GATEWAY_TEMP_ROOT"), os.Getenv("FILE_GATEWAY_QUARANTINE_ROOT"), uint64(intEnv("FILE_GATEWAY_CAPACITY_REJECT_PERCENT", 90)))
+	store = localStore
 	if err != nil {
 		return fmt.Errorf("configure %s file storage: %w", storageBackend, err)
 	}
@@ -103,6 +93,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	idGenerator := ulid.Generator{}
+	v2Handler, err := filehttp.NewUploadV2Handler(database, files, idGenerator.New)
+	if err != nil {
+		return err
+	}
 	verifier, err := security.LoadApplicationJWTVerifier(issuer, audience, publicKey)
 	if err != nil {
 		return err
@@ -114,7 +109,10 @@ func run() error {
 		return err
 	}
 	go runner.Run(ctx)
-	server := &http.Server{Addr: address, Handler: routes(handler, tokenMiddleware{verifier}, ready), ReadHeaderTimeout: 10 * time.Second}
+	if localStore != nil {
+		go monitorLocalCapacity(ctx, localStore, slog.Default())
+	}
+	server := &http.Server{Addr: address, Handler: routes(handler, v2Handler, tokenMiddleware{verifier}, ready, database, localStore), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -128,7 +126,29 @@ func run() error {
 	return err
 }
 
-func routes(handler *filehttp.Handler, middleware tokenMiddleware, ready func(context.Context) error) http.Handler {
+func monitorLocalCapacity(ctx context.Context, store interface{ UsagePercent() (uint64, error) }, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		usage, err := store.UsagePercent()
+		if err != nil {
+			logger.Error("file gateway capacity check failed", "error", err)
+		} else if usage >= 90 {
+			logger.Error("file gateway storage critical", "used_percent", usage)
+		} else if usage >= 80 {
+			logger.Warn("file gateway storage high", "used_percent", usage)
+		} else if usage >= 70 {
+			logger.Warn("file gateway storage warning", "used_percent", usage)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, middleware tokenMiddleware, ready func(context.Context) error, database *gorm.DB, capacity interface{ UsagePercent() (uint64, error) }) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /readyz", func(writer http.ResponseWriter, request *http.Request) {
@@ -140,12 +160,45 @@ func routes(handler *filehttp.Handler, middleware tokenMiddleware, ready func(co
 		}
 		writer.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("GET /metrics", func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		writer.Header().Set("Cache-Control", "no-store")
+		used := uint64(0)
+		collectionError := 0
+		if capacity == nil {
+			collectionError = 1
+		} else if value, usageErr := capacity.UsagePercent(); usageErr != nil {
+			collectionError = 1
+		} else {
+			used = value
+		}
+		fmt.Fprintf(writer, "# TYPE file_gateway_storage_used_percent gauge\nfile_gateway_storage_used_percent %d\n", used)
+		fmt.Fprintln(writer, "# TYPE file_gateway_storage_warning_threshold_percent gauge\nfile_gateway_storage_warning_threshold_percent 70")
+		fmt.Fprintln(writer, "# TYPE file_gateway_storage_high_threshold_percent gauge\nfile_gateway_storage_high_threshold_percent 80")
+		fmt.Fprintf(writer, "# TYPE file_gateway_metric_collection_errors gauge\nfile_gateway_metric_collection_errors %d\n", collectionError)
+		if database != nil {
+			if sqlDB, dbErr := database.DB(); dbErr == nil {
+				stats := sqlDB.Stats()
+				fmt.Fprintf(writer, "# TYPE file_gateway_database_open_connections gauge\nfile_gateway_database_open_connections %d\n", stats.OpenConnections)
+				fmt.Fprintf(writer, "# TYPE file_gateway_database_in_use_connections gauge\nfile_gateway_database_in_use_connections %d\n", stats.InUse)
+			}
+		}
+	})
 	mux.Handle("POST /api/v1/files", middleware.wrap(http.HandlerFunc(handler.Upload), "platform:file:upload"))
 	mux.Handle("GET /api/v1/files/{file_id}/content", middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download"))
 	mux.Handle("POST /api/v1/files/{file_id}/bindings", middleware.wrap(http.HandlerFunc(handler.BindFile), "platform:file:bind"))
 	mux.Handle("DELETE /api/v1/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(handler.UnbindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/cleanup", middleware.wrap(http.HandlerFunc(handler.CleanupFiles), "platform:file:cleanup"))
 	mux.Handle("POST /api/v1/files/reconcile", middleware.wrap(http.HandlerFunc(handler.ReconcileFiles), "platform:file:cleanup"))
+	mux.Handle("POST /api/v2/upload-sessions", middleware.wrap(http.HandlerFunc(v2.CreateSession), "platform:file:upload"))
+	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/tickets", middleware.wrap(http.HandlerFunc(v2.IssueUploadTicket), "platform:file:upload"))
+	mux.HandleFunc("PUT /api/v2/upload-sessions/{upload_id}/content", v2.UploadContent)
+	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/complete", middleware.wrap(http.HandlerFunc(v2.Complete), "platform:file:upload"))
+	mux.Handle("GET /api/v2/upload-sessions/{upload_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:upload"))
+	mux.Handle("GET /api/v2/files/{file_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:download"))
+	mux.Handle("POST /api/v2/files/{file_id}/download-tickets", middleware.wrap(http.HandlerFunc(v2.IssueDownloadTicket), "platform:file:download"))
+	mux.HandleFunc("GET /api/v2/files/{file_id}/content", v2.DownloadContent)
+	mux.Handle("DELETE /api/v2/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(v2.UnbindFile), "platform:file:bind"))
 	return mux
 }
 
@@ -173,16 +226,4 @@ func intEnv(key string, fallback int) int {
 		return value
 	}
 	return fallback
-}
-
-func boolEnv(key string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
 }

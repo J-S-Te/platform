@@ -71,10 +71,13 @@ func DefaultUploadPolicy() UploadPolicy {
 			"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   {},
 			"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         {},
 			"application/vnd.openxmlformats-officedocument.presentationml.presentation": {},
-			"image/jpeg": {},
-			"image/png":  {},
-			"text/plain": {},
-			"text/csv":   {},
+			"image/jpeg":      {},
+			"image/png":       {},
+			"text/plain":      {},
+			"text/csv":        {},
+			"application/xml": {},
+			"text/xml":        {},
+			"application/ofd": {},
 		},
 	}
 }
@@ -99,30 +102,54 @@ func (service *FileService) Upload(ctx context.Context, input UploadInput) (doma
 	if err != nil {
 		return domain.File{}, err
 	}
-	// 在创建元数据前计算完整请求摘要，确保重试时能区分同一请求与同一 request_id 的不同内容。
-	contentBytes, err := io.ReadAll(io.LimitReader(content, service.policy.MaxBytes+1))
-	if err != nil || int64(len(contentBytes)) > service.policy.MaxBytes {
-		return domain.File{}, validation("upload exceeds configured maximum size")
+	// v1 上传为了兼容原幂等会话，仍需在预留会话前计算完整请求摘要。
+	// v2 会话已在独立表中以元数据和一次性票据完成幂等仲裁，因此使用
+	// 预分配 ID 时直接流式落盘，避免大文件全量进入内存。
+	var requestHash [sha256.Size]byte
+	preallocated := strings.TrimSpace(input.PreallocatedFileID) != "" || strings.TrimSpace(input.PreallocatedVersionID) != ""
+	if preallocated {
+		if strings.TrimSpace(input.PreallocatedFileID) == "" || strings.TrimSpace(input.PreallocatedVersionID) == "" {
+			return domain.File{}, validation("preallocated file and version IDs must be supplied together")
+		}
+	} else {
+		contentBytes, readErr := io.ReadAll(io.LimitReader(content, service.policy.MaxBytes+1))
+		if readErr != nil || int64(len(contentBytes)) > service.policy.MaxBytes {
+			return domain.File{}, validation("upload exceeds configured maximum size")
+		}
+		content = bytes.NewReader(contentBytes)
+		requestHash = uploadRequestHash(input, mediaType, contentBytes)
 	}
-	content = bytes.NewReader(contentBytes)
-	requestHash := uploadRequestHash(input, mediaType, contentBytes)
 	now := service.clock.Now().UTC()
-	fileID, err := service.ids.New(now)
-	if err != nil {
-		return domain.File{}, fmt.Errorf("generate file ID: %w", err)
-	}
-	versionID, err := service.ids.New(now.Add(time.Millisecond))
-	if err != nil {
-		return domain.File{}, fmt.Errorf("generate file version ID: %w", err)
+	fileID, versionID := strings.TrimSpace(input.PreallocatedFileID), strings.TrimSpace(input.PreallocatedVersionID)
+	if !preallocated {
+		fileID, err = service.ids.New(now)
+		if err != nil {
+			return domain.File{}, fmt.Errorf("generate file ID: %w", err)
+		}
+		versionID, err = service.ids.New(now.Add(time.Millisecond))
+		if err != nil {
+			return domain.File{}, fmt.Errorf("generate file version ID: %w", err)
+		}
 	}
 
 	classification := strings.ToUpper(strings.TrimSpace(input.Classification))
 	if classification == "" {
 		classification = "INTERNAL"
 	}
-	relativePath := storageRelativePath(input.TenantID, input.ApplicationID, now, fileID, versionID)
+	relativePath := storageRelativePath(input.Namespace, input.Purpose, input.TenantID, input.ApplicationID, now, fileID, versionID)
+	policyVersion := strings.TrimSpace(input.PolicyVersion)
+	if policyVersion == "" {
+		policyVersion = "v1"
+	}
+	retentionClass := strings.ToUpper(strings.TrimSpace(input.RetentionClass))
+	if retentionClass == "" {
+		retentionClass = "LONG_TERM"
+	}
 	file := domain.File{
 		ID: fileID, TenantID: strings.TrimSpace(input.TenantID), ApplicationID: strings.TrimSpace(input.ApplicationID),
+		Namespace: strings.TrimSpace(input.Namespace), Purpose: strings.TrimSpace(input.Purpose), PolicyVersion: policyVersion,
+		AuthenticatedClientID: strings.TrimSpace(input.AuthenticatedClientID),
+		RetentionClass:        retentionClass, RetentionUntil: input.RetentionUntil,
 		OriginalName: name, FileExtension: extension, MediaType: mediaType, Classification: classification,
 		OwnerUserID: strings.TrimSpace(input.OwnerUserID), CurrentVersionNo: 1, CurrentVersionID: versionID,
 		Status: domain.FileStatusPendingUpload, Version: 1, CreatedAt: now, UpdatedAt: now,
@@ -133,7 +160,11 @@ func (service *FileService) Upload(ctx context.Context, input UploadInput) (doma
 		UploadRequestID: strings.TrimSpace(input.RequestID), Status: domain.FileVersionStatusPendingUpload, CreatedAt: now,
 		UploadRequestHash: requestHash[:],
 	}
-	if strings.TrimSpace(input.RequestID) != "" {
+	if preallocated {
+		if err := service.repository.CreateWriting(ctx, file, version); err != nil {
+			return domain.File{}, err
+		}
+	} else if strings.TrimSpace(input.RequestID) != "" {
 		existing, created, reserveErr := service.repository.ReserveUpload(ctx, file, version)
 		if reserveErr != nil {
 			return domain.File{}, reserveErr
@@ -145,17 +176,44 @@ func (service *FileService) Upload(ctx context.Context, input UploadInput) (doma
 		return domain.File{}, err
 	}
 
-	size, digest, err := service.store.WriteAtomically(ctx, relativePath, content, service.policy.MaxBytes)
+	stagedStore, usesStaging := service.store.(StagedLocalStore)
+	stageID := ""
+	var size uint64
+	var digest []byte
+	if usesStaging {
+		stageID, size, digest, err = stagedStore.Stage(ctx, content, service.policy.MaxBytes)
+	} else {
+		size, digest, err = service.store.WriteAtomically(ctx, relativePath, content, service.policy.MaxBytes)
+	}
 	if err != nil {
 		_ = service.repository.MarkFailed(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
 		return domain.File{}, fmt.Errorf("%w: write upload: %v", ErrStorage, err)
 	}
+	if input.ExpectedSize > 0 && size != input.ExpectedSize || len(input.ExpectedSHA256) > 0 && (len(input.ExpectedSHA256) != sha256.Size || !bytes.Equal(digest, input.ExpectedSHA256)) {
+		if usesStaging {
+			_ = stagedStore.RemoveStaged(stageID)
+		} else {
+			_ = service.store.Remove(relativePath)
+		}
+		_ = service.repository.MarkFailed(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
+		return domain.File{}, validation("uploaded content does not match the declared size or SHA-256")
+	}
 	if err := service.repository.MarkValidating(ctx, file.TenantID, file.ID, size, digest, service.clock.Now().UTC()); err != nil {
-		_ = service.store.Remove(relativePath)
+		if usesStaging {
+			_ = stagedStore.RemoveStaged(stageID)
+		} else {
+			_ = service.store.Remove(relativePath)
+		}
 		_ = service.repository.MarkFailed(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
 		return domain.File{}, err
 	}
-	stored, openErr := service.store.OpenVerified(relativePath)
+	var stored io.ReadSeekCloser
+	var openErr error
+	if usesStaging {
+		stored, openErr = stagedStore.OpenStaged(stageID)
+	} else {
+		stored, openErr = service.store.OpenVerified(relativePath)
+	}
 	if openErr != nil {
 		_ = service.repository.MarkFailed(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
 		return domain.File{}, fmt.Errorf("%w: open uploaded file for validation: %v", ErrStorage, openErr)
@@ -163,13 +221,29 @@ func (service *FileService) Upload(ctx context.Context, input UploadInput) (doma
 	validationErr := validateStoredContent(mediaType, stored)
 	closeErr := stored.Close()
 	if validationErr != nil {
-		_ = service.store.Remove(relativePath)
+		if usesStaging {
+			_ = stagedStore.QuarantineStaged(stageID)
+		} else if quarantine, ok := service.store.(interface{ Quarantine(string) error }); ok {
+			_ = quarantine.Quarantine(relativePath)
+		} else {
+			_ = service.store.Remove(relativePath)
+		}
 		_ = service.repository.MarkRejected(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
 		return domain.File{}, validation(validationErr.Error())
 	}
 	if closeErr != nil {
+		if usesStaging {
+			_ = stagedStore.RemoveStaged(stageID)
+		}
 		_ = service.repository.MarkFailed(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
 		return domain.File{}, fmt.Errorf("%w: close uploaded file after validation: %v", ErrStorage, closeErr)
+	}
+	if usesStaging {
+		if err := stagedStore.PublishStaged(stageID, relativePath); err != nil {
+			_ = stagedStore.RemoveStaged(stageID)
+			_ = service.repository.MarkFailed(ctx, file.TenantID, file.ID, service.clock.Now().UTC())
+			return domain.File{}, fmt.Errorf("%w: publish validated upload: %v", ErrStorage, err)
+		}
 	}
 	if err := service.repository.MarkReady(ctx, file.TenantID, file.ID, service.clock.Now().UTC()); err != nil {
 		_ = service.store.Remove(relativePath)
@@ -211,7 +285,8 @@ func (service *FileService) OpenDownload(ctx context.Context, access DownloadAcc
 	if err != nil {
 		return domain.StoredFile{}, nil, err
 	}
-	if stored.File.OwnerUserID != access.UserID {
+	ownerMatch := strings.TrimSpace(stored.File.OwnerUserID) != "" && strings.TrimSpace(access.UserID) != "" && stored.File.OwnerUserID == access.UserID
+	if !ownerMatch {
 		if !hasPermission(access.PermissionCodes, "platform:file:download") {
 			return domain.StoredFile{}, nil, ErrForbidden
 		}
@@ -220,15 +295,33 @@ func (service *FileService) OpenDownload(ctx context.Context, access DownloadAcc
 		resourceID := strings.TrimSpace(access.ResourceID)
 		// ResourceAccessVerified 只能由进程内的受信子系统适配器在完成业务 ACL 校验后设置；
 		// 浏览器查询参数不能生成该证明，否则知道资源标识即可伪造授权。
-		if !access.ResourceAccessVerified || applicationID == "" || resourceType == "" || resourceID == "" || applicationID != stored.File.ApplicationID {
+		if applicationID == "" || applicationID != stored.File.ApplicationID {
 			return domain.StoredFile{}, nil, ErrForbidden
 		}
-		bound, bindErr := service.repository.HasActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID, resourceType, resourceID)
-		if bindErr != nil {
-			return domain.StoredFile{}, nil, bindErr
-		}
-		if !bound {
-			return domain.StoredFile{}, nil, ErrForbidden
+		// 旧 v1 机器下载请求不携带业务资源标识。兼容期仅允许该应用读取
+		// 自己已存在 ACTIVE 绑定的文件，绝不再把空 owner 视为授权证明。
+		if !access.ResourceAccessVerified {
+			if strings.TrimSpace(access.UserID) != "" {
+				return domain.StoredFile{}, nil, ErrForbidden
+			}
+			bound, bindErr := service.repository.HasAnyActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID)
+			if bindErr != nil {
+				return domain.StoredFile{}, nil, bindErr
+			}
+			if !bound {
+				return domain.StoredFile{}, nil, ErrForbidden
+			}
+		} else {
+			if resourceType == "" || resourceID == "" {
+				return domain.StoredFile{}, nil, ErrForbidden
+			}
+			bound, bindErr := service.repository.HasActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID, resourceType, resourceID)
+			if bindErr != nil {
+				return domain.StoredFile{}, nil, bindErr
+			}
+			if !bound {
+				return domain.StoredFile{}, nil, ErrForbidden
+			}
 		}
 	}
 	handle, err := service.store.OpenVerified(stored.Version.StorageRelativePath)
@@ -418,6 +511,20 @@ func (service *FileService) resolveMediaType(declared, extension string, header 
 	if extension == "csv" && detected == "text/plain" && declaredCanonical == "text/csv" {
 		detected = "text/csv"
 	}
+	// ZIP 容器的具体业务类型无法仅从前 512 字节判断；只有声明类型和扩展名
+	// 同时匹配时才收窄为 OOXML/OFD，后续结构校验会再确认必需成员。
+	containerTypes := map[string]string{
+		"docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"ofd":  "application/ofd",
+	}
+	if expected := containerTypes[extension]; detected == "application/zip" && expected != "" && declaredCanonical == expected {
+		detected, extensionMediaType = expected, expected
+	}
+	if extension == "xml" && detected == "text/plain" && (declaredCanonical == "application/xml" || declaredCanonical == "text/xml") {
+		detected, extensionMediaType = declaredCanonical, declaredCanonical
+	}
 	if declaredCanonical != "" && detected != "application/octet-stream" && declaredCanonical != detected {
 		return "", validation("declared media type does not match file content")
 	}
@@ -440,6 +547,22 @@ func validateUploadInput(input UploadInput) error {
 	}
 	if !validStorageSegment(tenantID) || !validStorageSegment(applicationID) {
 		return validation("tenant_id or application_id contains an unsafe storage path segment")
+	}
+	if value := strings.TrimSpace(input.Namespace); value != "" && !validStorageSegment(value) {
+		return validation("file namespace contains an unsafe storage path segment")
+	}
+	if value := strings.TrimSpace(input.Purpose); value != "" && !validStorageSegment(value) {
+		return validation("file purpose contains an unsafe storage path segment")
+	}
+	if value := strings.TrimSpace(input.PolicyVersion); len(value) > 32 || value != "" && !validStorageSegment(value) {
+		return validation("file policy version is invalid")
+	}
+	retentionClass := strings.ToUpper(strings.TrimSpace(input.RetentionClass))
+	if retentionClass != "" && retentionClass != "LONG_TERM" && retentionClass != "TEMPORARY" {
+		return validation("file retention class is invalid")
+	}
+	if retentionClass == "TEMPORARY" && input.RetentionUntil == nil {
+		return validation("temporary file retention deadline is required")
 	}
 	classification := strings.ToUpper(strings.TrimSpace(input.Classification))
 	if classification != "" {
@@ -464,8 +587,13 @@ func validStorageSegment(value string) bool {
 	return true
 }
 
-func storageRelativePath(tenantID, applicationID string, now time.Time, fileID, versionID string) string {
-	return filepath.ToSlash(filepath.Join(strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), fmt.Sprintf("%04d", now.Year()), fmt.Sprintf("%02d", int(now.Month())), fileID, versionID+".bin"))
+func storageRelativePath(namespace, purpose, tenantID, applicationID string, now time.Time, fileID, versionID string) string {
+	namespace = strings.TrimSpace(namespace)
+	purpose = strings.TrimSpace(purpose)
+	if namespace == "" || purpose == "" {
+		return filepath.ToSlash(filepath.Join(strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), fmt.Sprintf("%04d", now.Year()), fmt.Sprintf("%02d", int(now.Month())), fileID, versionID+".bin"))
+	}
+	return filepath.ToSlash(filepath.Join(namespace, purpose, strings.TrimSpace(tenantID), fmt.Sprintf("%04d", now.Year()), fmt.Sprintf("%02d", int(now.Month())), fileID, versionID, "content"))
 }
 
 func safeOriginalName(value string) (string, string) {

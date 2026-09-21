@@ -27,6 +27,9 @@ func NewGORMRepository(database *gorm.DB) (*Repository, error) {
 
 type fileObjectModel struct {
 	ID, TenantID, ApplicationID, OriginalName, MediaType, Classification, Status string
+	Namespace, Purpose, PolicyVersion, AuthenticatedClientID                     string
+	RetentionClass                                                               string
+	RetentionUntil                                                               *time.Time
 	FileExtension                                                                *string
 	OwnerUserID, OwnerOrgID, CurrentVersionID                                    *string
 	CurrentVersionNo                                                             uint
@@ -45,6 +48,7 @@ type fileVersionModel struct {
 	UploaderUserID, UploadRequestID                                  *string
 	UploadRequestHash                                                []byte
 	CreatedAt                                                        time.Time
+	ValidatedAt                                                      *time.Time
 }
 
 func (fileVersionModel) TableName() string { return "file_version" }
@@ -106,7 +110,7 @@ func (repository *Repository) CreateWriting(ctx context.Context, file domain.Fil
 		if strings.TrimSpace(file.TenantID) == "" || strings.TrimSpace(file.ApplicationID) == "" {
 			return application.ErrForbidden
 		}
-		fileModel := fileObjectModel{ID: file.ID, TenantID: file.TenantID, ApplicationID: file.ApplicationID, OriginalName: file.OriginalName, FileExtension: optional(file.FileExtension), MediaType: file.MediaType, Classification: file.Classification, OwnerUserID: optional(file.OwnerUserID), CurrentVersionNo: file.CurrentVersionNo, CurrentVersionID: optional(file.CurrentVersionID), Status: file.Status, Version: file.Version, CreatedAt: file.CreatedAt.UTC(), UpdatedAt: file.UpdatedAt.UTC(), CreatedBy: optional(file.OwnerUserID), UpdatedBy: optional(file.OwnerUserID)}
+		fileModel := fileObjectModel{ID: file.ID, TenantID: file.TenantID, ApplicationID: file.ApplicationID, Namespace: file.Namespace, Purpose: file.Purpose, PolicyVersion: file.PolicyVersion, AuthenticatedClientID: file.AuthenticatedClientID, RetentionClass: file.RetentionClass, RetentionUntil: file.RetentionUntil, OriginalName: file.OriginalName, FileExtension: optional(file.FileExtension), MediaType: file.MediaType, Classification: file.Classification, OwnerUserID: optional(file.OwnerUserID), CurrentVersionNo: file.CurrentVersionNo, CurrentVersionID: optional(file.CurrentVersionID), Status: file.Status, Version: file.Version, CreatedAt: file.CreatedAt.UTC(), UpdatedAt: file.UpdatedAt.UTC(), CreatedBy: optional(file.OwnerUserID), UpdatedBy: optional(file.OwnerUserID)}
 		if err := transaction.Create(&fileModel).Error; err != nil {
 			return mapError(err)
 		}
@@ -143,7 +147,7 @@ func (repository *Repository) ReserveUpload(ctx context.Context, file domain.Fil
 		if err := transaction.Create(&session).Error; err != nil {
 			return err
 		}
-		fileModel := fileObjectModel{ID: file.ID, TenantID: file.TenantID, ApplicationID: file.ApplicationID, OriginalName: file.OriginalName, FileExtension: optional(file.FileExtension), MediaType: file.MediaType, Classification: file.Classification, OwnerUserID: optional(file.OwnerUserID), CurrentVersionNo: file.CurrentVersionNo, CurrentVersionID: optional(file.CurrentVersionID), Status: file.Status, Version: file.Version, CreatedAt: now, UpdatedAt: file.UpdatedAt.UTC(), CreatedBy: optional(file.OwnerUserID), UpdatedBy: optional(file.OwnerUserID)}
+		fileModel := fileObjectModel{ID: file.ID, TenantID: file.TenantID, ApplicationID: file.ApplicationID, Namespace: file.Namespace, Purpose: file.Purpose, PolicyVersion: file.PolicyVersion, AuthenticatedClientID: file.AuthenticatedClientID, RetentionClass: file.RetentionClass, RetentionUntil: file.RetentionUntil, OriginalName: file.OriginalName, FileExtension: optional(file.FileExtension), MediaType: file.MediaType, Classification: file.Classification, OwnerUserID: optional(file.OwnerUserID), CurrentVersionNo: file.CurrentVersionNo, CurrentVersionID: optional(file.CurrentVersionID), Status: file.Status, Version: file.Version, CreatedAt: now, UpdatedAt: file.UpdatedAt.UTC(), CreatedBy: optional(file.OwnerUserID), UpdatedBy: optional(file.OwnerUserID)}
 		if err := transaction.Create(&fileModel).Error; err != nil {
 			return err
 		}
@@ -249,7 +253,11 @@ func (repository *Repository) transitionValidationState(ctx context.Context, ten
 		if object.CurrentVersionID == nil {
 			return application.ErrConflict
 		}
-		versionResult := transaction.Model(&fileVersionModel{}).Where("id = ? AND file_id = ? AND status = ?", *object.CurrentVersionID, fileID, domain.FileVersionStatusValidating).Update("status", versionStatus)
+		updates := map[string]any{"status": versionStatus}
+		if versionStatus == domain.FileVersionStatusReady {
+			updates["validated_at"] = updatedAt.UTC()
+		}
+		versionResult := transaction.Model(&fileVersionModel{}).Where("id = ? AND file_id = ? AND status = ?", *object.CurrentVersionID, fileID, domain.FileVersionStatusValidating).Updates(updates)
 		if versionResult.Error != nil || versionResult.RowsAffected != 1 {
 			if versionResult.Error != nil {
 				return mapError(versionResult.Error)
@@ -357,6 +365,14 @@ func (repository *Repository) DeactivateBinding(ctx context.Context, tenantID, a
 func (repository *Repository) HasActiveBinding(ctx context.Context, tenantID, fileID, applicationID, resourceType, resourceID string) (bool, error) {
 	var count int64
 	err := repository.database.WithContext(ctx).Model(&fileBindingModel{}).Where("tenant_id = ? AND file_id = ? AND application_id = ? AND resource_type = ? AND resource_id = ? AND status = ?", tenantID, fileID, applicationID, resourceType, resourceID, "ACTIVE").Count(&count).Error
+	return count > 0, mapError(err)
+}
+
+// HasAnyActiveBinding 只用于 v1 机器下载的滚动兼容。它仍严格限制租户、文件和应用，
+// 防止无 owner 的机器上传文件因空值相等而被任意下载。
+func (repository *Repository) HasAnyActiveBinding(ctx context.Context, tenantID, fileID, applicationID string) (bool, error) {
+	var count int64
+	err := repository.database.WithContext(ctx).Model(&fileBindingModel{}).Where("tenant_id = ? AND file_id = ? AND application_id = ? AND status = ?", tenantID, fileID, applicationID, "ACTIVE").Count(&count).Error
 	return count > 0, mapError(err)
 }
 
@@ -626,11 +642,11 @@ func (repository *Repository) CreateRerun(ctx context.Context, job domain.Job) (
 }
 
 func toFile(model fileObjectModel) domain.File {
-	return domain.File{ID: model.ID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, OriginalName: model.OriginalName, FileExtension: dereference(model.FileExtension), MediaType: model.MediaType, Classification: model.Classification, OwnerUserID: dereference(model.OwnerUserID), CurrentVersionNo: model.CurrentVersionNo, CurrentVersionID: dereference(model.CurrentVersionID), Status: model.Status, Version: model.Version, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt}
+	return domain.File{ID: model.ID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, Namespace: model.Namespace, Purpose: model.Purpose, PolicyVersion: model.PolicyVersion, AuthenticatedClientID: model.AuthenticatedClientID, RetentionClass: model.RetentionClass, RetentionUntil: model.RetentionUntil, OriginalName: model.OriginalName, FileExtension: dereference(model.FileExtension), MediaType: model.MediaType, Classification: model.Classification, OwnerUserID: dereference(model.OwnerUserID), CurrentVersionNo: model.CurrentVersionNo, CurrentVersionID: dereference(model.CurrentVersionID), Status: model.Status, Version: model.Version, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt}
 }
 
 func toVersion(model fileVersionModel) domain.FileVersion {
-	return domain.FileVersion{ID: model.ID, FileID: model.FileID, VersionNo: model.VersionNo, StorageRelativePath: model.StorageRelativePath, SizeBytes: model.SizeBytes, SHA256: append([]byte(nil), model.SHA256...), MediaType: model.MediaType, OriginalName: model.OriginalName, UploaderUserID: dereference(model.UploaderUserID), UploadRequestID: dereference(model.UploadRequestID), UploadRequestHash: append([]byte(nil), model.UploadRequestHash...), Status: model.Status, CreatedAt: model.CreatedAt}
+	return domain.FileVersion{ID: model.ID, FileID: model.FileID, VersionNo: model.VersionNo, StorageRelativePath: model.StorageRelativePath, SizeBytes: model.SizeBytes, SHA256: append([]byte(nil), model.SHA256...), MediaType: model.MediaType, OriginalName: model.OriginalName, UploaderUserID: dereference(model.UploaderUserID), UploadRequestID: dereference(model.UploadRequestID), UploadRequestHash: append([]byte(nil), model.UploadRequestHash...), Status: model.Status, CreatedAt: model.CreatedAt, ValidatedAt: model.ValidatedAt}
 }
 
 func toBinding(model fileBindingModel) domain.FileBinding {

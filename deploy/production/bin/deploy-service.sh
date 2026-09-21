@@ -486,9 +486,25 @@ require_backup_space() {
 }
 
 deploy_platform() {
+	local file_gateway_root file_gateway_db_name
+	file_gateway_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
+	file_gateway_root="${file_gateway_root:-/opt/basic-platform/data/file-gateway}"
+	file_gateway_db_name="$(env_value FILE_GATEWAY_DB_NAME)"
+	file_gateway_db_name="${file_gateway_db_name:-file_gateway}"
+	if ! install -d -m 750 "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine" 2>/dev/null; then
+		echo "无法创建文件网关目录：$file_gateway_root；请先由 root 创建并授权给部署账号" >&2
+		return 1
+	fi
+	if ! chown 10001:10001 "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine" 2>/dev/null; then
+		echo "无法把文件网关目录授权给专用 UID/GID 10001：$file_gateway_root；请使用 root 执行一次 chown -R 10001:10001" >&2
+		return 1
+	fi
   compose up -d --wait --wait-timeout 180 platform-mysql || return
   backup_database platform-mysql basic_platform || return
   compose --profile release run --rm platform-migrate ./migrate || return
+	compose up -d --wait --wait-timeout 180 file-gateway-mysql || return
+	backup_database file-gateway-mysql "$file_gateway_db_name" || return
+	compose up -d --force-recreate --wait --wait-timeout 180 file-gateway || return
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
   # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；

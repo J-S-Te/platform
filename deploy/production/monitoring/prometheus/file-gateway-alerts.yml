@@ -1,0 +1,47 @@
+groups:
+  - name: file-gateway-production
+    rules:
+      - alert: FileGatewayUnavailable
+        expr: up{job="file-gateway"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: File Gateway is unavailable
+          runbook: platform/docs/operations/file-gateway-local-storage.md
+
+      - alert: FileGatewayStorageWarning
+        expr: file_gateway_storage_used_percent >= 70 and file_gateway_storage_used_percent < 80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: File Gateway storage usage is above 70 percent
+          runbook: platform/docs/operations/file-gateway-local-storage.md
+
+      - alert: FileGatewayStorageHigh
+        expr: file_gateway_storage_used_percent >= 80 and file_gateway_storage_used_percent < 90
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: File Gateway storage usage is above 80 percent
+          runbook: platform/docs/operations/file-gateway-local-storage.md
+
+      - alert: FileGatewayStorageRejected
+        expr: file_gateway_storage_used_percent >= 90
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: File Gateway storage has reached the upload rejection threshold
+          runbook: platform/docs/operations/file-gateway-local-storage.md
+
+      - alert: FileGatewayMetricCollectionFailed
+        expr: file_gateway_metric_collection_errors > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: File Gateway cannot collect filesystem capacity metrics
+          runbook: platform/docs/operations/file-gateway-local-storage.md

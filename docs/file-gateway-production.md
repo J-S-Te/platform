@@ -2,7 +2,7 @@
 
 ## 进程与数据边界
 
-`file-gateway` 是独立进程，使用独立 MySQL Schema 和独立对象存储 Bucket。基础平台 API
+`file-gateway` 是独立进程，使用独立 MySQL Schema 和宿主机持久化目录。基础平台 API
 不再注册文件上传、下载、绑定、清理或对账路由，也不连接 File Gateway 数据库；平台只负责
 签发受限应用令牌和交付 `file_gateway_write` 凭据。
 
@@ -12,40 +12,43 @@
 
 ## 上传状态与幂等
 
-上传以 `(tenant_id, application_id, request_id)` 为唯一会话，完整请求哈希覆盖租户、应用、
-用户、文件名、MIME、密级和完整内容。预约 Session、创建文件和首个版本在同一 MySQL 事务
-中完成：
+v2 上传以 `(tenant_id, application_id, idempotency_key)` 为唯一会话，预登记大小、SHA-256、
+用途和业务绑定。浏览器只拿一次性票据，文件内容始终先流式写入 `temporary`，通过静态校验后
+才原子移动到正式目录：
 
 ```text
-PENDING_UPLOAD -> VALIDATING -> READY
-                         |----> REJECTED
-             任意基础设施失败 -> FAILED
+CREATED -> UPLOADING -> VALIDATING -> READY
+                              |----> REJECTED
+                  任意基础设施失败 -> FAILED
 ```
 
 相同请求只有 `READY` 可以返回原文件；不同哈希以及仍在写入、失败或拒绝的 Session 均返回
 冲突，由受控对账或新的业务请求号恢复，不能伪装上传成功。
 
-## 对象存储
+## 本地目录存储
 
-生产使用 AWS SDK for Go v2 S3 协议，支持 AWS S3、兼容 S3 的阿里云 OSS Endpoint 和
-MinIO。凭据为空时使用 SDK 默认凭据链；静态凭据只能通过运行时环境注入，不能写入 Git。
+生产使用 `/opt/basic-platform/data/file-gateway` 宿主机目录，仅 File Gateway 容器挂载。
+容器内网关进程以专用 UID/GID `10001` 运行，目录和文件权限分别为 `0750`、`0640`。
+业务子系统只保存 `file_id` 和摘要，不接触物理路径。正式文件按
+`namespace/purpose/tenant/year/month/file/version/content` 分层；半成品和被拒绝文件分别进入
+`temporary` 和 `quarantine`。不使用 OSS、S3 或 MinIO。
 
 必填配置：
 
 - `FILE_GATEWAY_DATABASE_DSN`
 - `FILE_GATEWAY_DB_PASSWORD` / `FILE_GATEWAY_DB_ROOT_PASSWORD`
-- `FILE_GATEWAY_STORAGE_BACKEND=s3`
-- `FILE_GATEWAY_S3_BUCKET`
-- `FILE_GATEWAY_S3_REGION`
+- `FILE_GATEWAY_STORAGE_BACKEND=local`
+- `FILE_GATEWAY_STORAGE_ROOT=/app/data/file-gateway`
+- `FILE_GATEWAY_TEMP_ROOT=/app/data/file-gateway/temporary`
+- `FILE_GATEWAY_QUARANTINE_ROOT=/app/data/file-gateway/quarantine`
+- `FILE_GATEWAY_CAPACITY_REJECT_PERCENT=90`
 - `FILE_GATEWAY_TOKEN_ISSUER`
 - `FILE_GATEWAY_TOKEN_AUDIENCE`
 - `FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH`
 
-兼容服务可配置 `FILE_GATEWAY_S3_ENDPOINT` 和 `FILE_GATEWAY_S3_USE_PATH_STYLE`。生产健康检查
-使用 `/readyz`，会同时探测 MySQL 和 Bucket；`/livez` 仅表示进程存活。
-
-Bucket 生命周期规则应清理未完成的临时对象，并根据合规要求启用版本化、服务端加密、访问
-日志和保留策略。网关不会执行无界 ListObjects 扫描。
+生产健康检查使用 `/readyz`，会同时探测 MySQL 和存储目录；`/livez` 仅表示进程存活。
+文件目录与 File Gateway MySQL 必须使用同一批次标识备份，恢复后执行对账。
+网关按 70%、80%、90% 记录分级容量日志；达到拒绝阈值后停止新上传，但 READY 文件读取仍可用。
 
 ## Reconciliation Worker
 
@@ -67,9 +70,8 @@ go test -race ./internal/platform/filetask/...
 docker compose -f compose.local.yaml config --quiet
 ```
 
-真实 MySQL 并发验证通过 `FILE_GATEWAY_TEST_DSN` 启用；真实 S3 兼容服务验证通过
-`FILE_GATEWAY_S3_INTEGRATION_*` 启用。测试 DSN 必须指向可清空的专用数据库，集成测试
-Bucket 也必须与生产 Bucket 隔离。
+真实 MySQL 并发验证通过 `FILE_GATEWAY_TEST_DSN` 启用。测试 DSN 必须指向可清空的专用数据库，
+文件测试使用独立临时目录。
 
 生产切换顺序：先发布独立数据库与网关，确认 `/readyz`；再为子系统交付网关凭据并使用双写；
 完成历史文件回填与抽样校验后切换为必需模式，最后删除子系统旧 BLOB/本地文件写路径。

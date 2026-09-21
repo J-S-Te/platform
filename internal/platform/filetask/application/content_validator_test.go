@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -119,5 +120,29 @@ func TestValidateStoredContentRejectsDeeplyNestedZIP(t *testing.T) {
 	}
 	if err := validateStoredContent("application/zip", bytes.NewReader(nested)); err == nil {
 		t.Fatal("ZIP nesting beyond configured depth accepted")
+	}
+}
+
+func TestValidateStoredContentChecksCSVEncodingAndBounds(t *testing.T) {
+	t.Parallel()
+	if err := validateStoredContent("text/csv", bytes.NewReader([]byte("name,code\n张三,A01\n"))); err != nil {
+		t.Fatalf("valid UTF-8 CSV rejected: %v", err)
+	}
+	if err := validateStoredContent("text/csv", bytes.NewReader([]byte{0xff, 0xfe, 0x00})); err == nil {
+		t.Fatal("invalid CSV encoding accepted")
+	}
+	wide := strings.Repeat("x,", maxCSVColumns) + "x\n"
+	if err := validateStoredContent("text/csv", bytes.NewReader([]byte(wide))); err == nil {
+		t.Fatal("CSV with too many columns accepted")
+	}
+}
+
+func TestValidateStoredContentRejectsMacroAndExecutableArchiveMembers(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"word/vbaProject.bin", "word/embeddings/payload.bin", "scripts/run.js", "payload.exe"} {
+		content := makeZIP(t, map[string]string{"[Content_Types].xml": "types", "_rels/.rels": "rels", name: "payload"})
+		if err := validateStoredContent("application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes.NewReader(content)); err == nil {
+			t.Fatalf("unsafe archive member %q accepted", name)
+		}
 	}
 }

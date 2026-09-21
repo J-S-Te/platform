@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -28,6 +30,11 @@ type ManagementHandler struct {
 	service         managementApplicationService
 	logger          *slog.Logger
 	scopeAuthorizer managementscope.Authorizer
+	importGateway   employeeImportGateway
+}
+
+type employeeImportGateway interface {
+	StoreCSV(context.Context, string, string, string, []byte) error
 }
 
 type managementApplicationService interface {
@@ -51,6 +58,12 @@ type managementApplicationService interface {
 	ListMemberships(context.Context, string, application.PageRequest) (application.PageResult[domain.Membership], error)
 	CreateMembership(context.Context, application.MembershipCreateInput) (domain.Membership, error)
 	UpdateMembership(context.Context, application.MembershipUpdateInput) (domain.Membership, error)
+}
+
+// ConfigureEmployeeImportGateway enables fail-closed CSV persistence and validation. Production
+// must configure this dependency before exposing the multipart import path.
+func (handler *ManagementHandler) ConfigureEmployeeImportGateway(gateway employeeImportGateway) {
+	handler.importGateway = gateway
 }
 
 // NewManagementHandler constructs an IAM management HTTP adapter.
@@ -464,7 +477,43 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		return
 	}
 	var payload employeeBatchCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
+	if strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "multipart/form-data") {
+		request.Body = http.MaxBytesReader(writer, request.Body, maxManagementRequestBytes+(128<<10))
+		if err := request.ParseMultipartForm(maxManagementRequestBytes + (128 << 10)); err != nil {
+			handler.validation(writer, request)
+			return
+		}
+		file, header, err := request.FormFile("file")
+		if err != nil || handler.importGateway == nil {
+			httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New("IAM_IMPORT_GATEWAY_UNAVAILABLE", "人员导入文件网关暂时不可用", nil))
+			return
+		}
+		defer file.Close()
+		content, err := io.ReadAll(io.LimitReader(file, maxManagementRequestBytes+1))
+		if err != nil || len(content) == 0 || len(content) > maxManagementRequestBytes || !strings.HasSuffix(strings.ToLower(header.Filename), ".csv") {
+			handler.validation(writer, request)
+			return
+		}
+		var selection employeeCSVSelection
+		if err = json.Unmarshal([]byte(request.FormValue("payload")), &selection); err != nil {
+			handler.validation(writer, request)
+			return
+		}
+		requestID := strings.TrimSpace(request.Header.Get("X-Request-ID"))
+		if requestID == "" {
+			requestID = fmt.Sprintf("iam-import-%d", time.Now().UTC().UnixNano())
+		}
+		if err = handler.importGateway.StoreCSV(request.Context(), requestID, principal.Tenant.ID, principal.User.ID, content); err != nil {
+			handler.logger.Error("employee import file gateway failed", "request_id", requestID, "error", err)
+			httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New("IAM_IMPORT_GATEWAY_UNAVAILABLE", "人员导入文件校验或存储失败，请稍后重试", nil))
+			return
+		}
+		payload, err = parseEmployeeCSV(content, selection.SelectedLines)
+		if err != nil {
+			handler.validation(writer, request)
+			return
+		}
+	} else if !decodeManagementRequest(writer, request, &payload) {
 		handler.validation(writer, request)
 		return
 	}
