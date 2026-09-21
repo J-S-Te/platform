@@ -163,14 +163,14 @@ type Delivery struct {
 // InboxItem is the recipient-safe inbox projection. Linked targets require authorization again
 // when a client navigates to them.
 type InboxItem struct {
-	DeliveryID    string
-	MessageID     string
-	Category      string
-	Title         string
-	Content       string
-	TargetURL     string
-	ReferenceType string
-	ReferenceID   string
-	DeliveredAt   time.Time
-	ReadAt        *time.Time
+	DeliveryID    string     `json:"delivery_id"`
+	MessageID     string     `json:"message_id"`
+	Category      string     `json:"category"`
+	Title         string     `json:"title"`
+	Content       string     `json:"content"`
+	TargetURL     string     `json:"target_url"`
+	ReferenceType string     `json:"reference_type"`
+	ReferenceID   string     `json:"reference_id"`
+	DeliveredAt   time.Time  `json:"delivered_at"`
+	ReadAt        *time.Time `json:"read_at"`
 }

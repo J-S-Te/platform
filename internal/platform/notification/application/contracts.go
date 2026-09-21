@@ -51,10 +51,10 @@ type PageRequest struct {
 
 // PageResult is the common paginated result returned by notification queries.
 type PageResult[T any] struct {
-	Items    []T
-	Page     int
-	PageSize int
-	Total    int64
+	Items    []T   `json:"items"`
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
+	Total    int64 `json:"total"`
 }
 
 // CreateTemplateInput creates an enabled or disabled template with its first immutable version.
