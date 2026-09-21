@@ -1022,7 +1022,9 @@ services:
       FILE_GATEWAY_TOKEN_AUDIENCE: ${AUTH_APPLICATION_JWT_AUDIENCE:?AUTH_APPLICATION_JWT_AUDIENCE must be set}
       FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     volumes:
-      - ${PLATFORM_KEYS_DIR:-/opt/basic-platform/data/platform/keys}:/app/data/keys:ro
+      # 仅挂载公开验签密钥文件。宿主机 keys 目录为 0700，直接挂载目录会让
+      # 非 root 的 filegateway 账号无法穿越目录并读取其中的 0644 公钥。
+      - ${PLATFORM_KEYS_DIR:-/opt/basic-platform/data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
       - ${FILE_GATEWAY_HOST_ROOT:-/opt/basic-platform/data/file-gateway}:/app/data/file-gateway
     depends_on:
       file-gateway-mysql:
