@@ -496,10 +496,14 @@ deploy_platform() {
 		echo "无法创建文件网关目录：$file_gateway_root；请先由 root 创建并授权给部署账号" >&2
 		return 1
 	fi
-	if ! chown 10001:10001 "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine" 2>/dev/null; then
-		echo "无法把文件网关目录授权给专用 UID/GID 10001：$file_gateway_root；请使用 root 执行一次 chown -R 10001:10001" >&2
-		return 1
-	fi
+	# CI 部署账号无权对已正确归属 10001:10001 的目录再次执行 chown；仅在
+	# 实际属主不符合时请求一次 root 初始化，保证后续不可变镜像发布可重复执行。
+	for directory in "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine"; do
+		if [[ "$(stat -c '%u:%g' "$directory")" != "10001:10001" ]] && ! chown 10001:10001 "$directory" 2>/dev/null; then
+			echo "无法把文件网关目录授权给专用 UID/GID 10001：$directory；请使用 root 执行一次 chown -R 10001:10001" >&2
+			return 1
+		fi
+	done
   compose up -d --wait --wait-timeout 180 platform-mysql || return
   backup_database platform-mysql basic_platform || return
   compose --profile release run --rm platform-migrate ./migrate || return
