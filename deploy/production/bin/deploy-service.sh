@@ -492,24 +492,20 @@ deploy_platform() {
 	file_gateway_root="${file_gateway_root:-/opt/basic-platform/data/file-gateway}"
 	file_gateway_db_name="$(env_value FILE_GATEWAY_DB_NAME)"
 	file_gateway_db_name="${file_gateway_db_name:-file_gateway}"
-	for directory in "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine"; do
-		if [[ -L "$directory" ]]; then
-			echo "拒绝符号链接文件网关目录：$directory" >&2
-			return 1
-		fi
-		if [[ ! -d "$directory" ]] && ! install -d -m 750 "$directory" 2>/dev/null; then
-			echo "无法创建文件网关目录：$directory；请先由 root 创建并授权给部署账号" >&2
-			return 1
-		fi
-	done
-	# CI 部署账号无权对已正确归属 10001:10001 的目录再次执行 chown；仅在
-	# 实际属主不符合时请求一次 root 初始化，保证后续不可变镜像发布可重复执行。
-	for directory in "$file_gateway_root" "$file_gateway_root/temporary" "$file_gateway_root/quarantine"; do
-		if [[ "$(stat -c '%u:%g' "$directory")" != "10001:10001" ]] && ! chown 10001:10001 "$directory" 2>/dev/null; then
-			echo "无法把文件网关目录授权给专用 UID/GID 10001：$directory；请使用 root 执行一次 chown -R 10001:10001" >&2
-			return 1
-		fi
-	done
+	if [[ -L "$file_gateway_root" ]]; then
+		echo "拒绝符号链接文件网关目录：$file_gateway_root" >&2
+		return 1
+	fi
+	if [[ ! -d "$file_gateway_root" ]]; then
+		echo "缺少文件网关持久化目录：$file_gateway_root；请使用 root 创建 temporary、quarantine 并执行 chown -R 10001:10001" >&2
+		return 1
+	fi
+	# 根目录为 0750 且归属专用 UID 后，普通 CI 账号不能继续穿越并 stat 子目录。
+	# 子目录由容器 root 入口幂等创建和收紧，发布端只校验不可替换的挂载根边界。
+	if [[ "$(stat -c '%u:%g' "$file_gateway_root")" != "10001:10001" ]]; then
+		echo "文件网关目录属主不正确：$file_gateway_root；请使用 root 执行 chown -R 10001:10001" >&2
+		return 1
+	fi
   compose up -d --wait --wait-timeout 180 platform-mysql || return
   backup_database platform-mysql basic_platform || return
   compose --profile release run --rm platform-migrate ./migrate || return
