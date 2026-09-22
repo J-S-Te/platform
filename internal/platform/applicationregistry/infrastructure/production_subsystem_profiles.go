@@ -467,6 +467,7 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 			application.ServiceCredentialOwnerDirectoryRead,
 			application.ServiceCredentialContractSummaryRead,
 			application.ServiceCredentialContractOpportunitySignedWrite,
+			application.ServiceCredentialContractOpportunitySignedCountRead,
 		}
 	case "customer_portal":
 		return []string{

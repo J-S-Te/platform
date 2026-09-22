@@ -419,12 +419,41 @@ configure_access_mode() {
 
 configure_access_mode
 
+# 本地默认 HTTP 拓扑必须保持向后兼容：PUBLIC_HTTPS_ENABLED 未配置或为 false
+# 时继续使用 localhost:8081 / localhost:18090，并且绝不读取证书路径。只有显式
+# 开启 HTTPS 时，才使用与生产发布相同的证书预检与配置派生逻辑。
+public_https_enabled="$(awk -F= '$1 == "PUBLIC_HTTPS_ENABLED" {print substr($0, index($0, "=") + 1); exit}' "$env_file" 2>/dev/null || true)"
+public_https_enabled="${public_https_enabled:-false}"
+public_transport_state="$(awk -F= '$1 == "PUBLIC_TRANSPORT_STATE" {print substr($0, index($0, "=") + 1); exit}' "$env_file" 2>/dev/null || true)"
+[[ "$public_https_enabled" == "true" || "$public_https_enabled" == "false" ]] || \
+    fail "PUBLIC_HTTPS_ENABLED 只能是 true 或 false"
+if [[ "$public_https_enabled" == "true" || "$public_transport_state" == "DISABLING_HTTPS" ]]; then
+    public_transport_helper="${project_root}/deploy/production/bin/public-transport.sh"
+    [[ -r "$public_transport_helper" ]] || fail "公开传输配置助手不存在：$public_transport_helper"
+    # shellcheck source=../deploy/production/bin/public-transport.sh
+    source "$public_transport_helper"
+    public_transport_prepare "$project_root" "$env_file" "${project_root}/compose.https.yaml" "${project_root}/compose.drain.yaml" || exit 1
+    frontend_public_origin="$PUBLIC_PLATFORM_ORIGIN"
+    if [[ "$public_transport_state" == "DISABLING_HTTPS" ]]; then
+        log "HTTPS→HTTP 会话排空中：HTTP 公开地址 ${PUBLIC_PLATFORM_ORIGIN}，443 暂时保留"
+    else
+        log "HTTPS 统一访问地址：${PUBLIC_PLATFORM_ORIGIN}（SSO：${PUBLIC_SSO_ORIGIN}）"
+    fi
+else
+    export PUBLIC_HTTPS_ENABLED=false
+    export PUBLIC_TRANSPORT_COMPOSE_FILE=""
+fi
+
 compose() {
     # macOS 自带 Bash 3.2 在 `set -u` 下展开空数组会报 unbound variable，
     # 因此不使用可选数组，而是按是否接入 Portal 显式分支。
     # customer_portal/dev 接入成功后，普通 up/down/stop/ps/logs/config 自动纳入
     # portal-api。首次接入前不能强行启动，因为此时浏览器 OIDC Client、租户、
     # 角色目录和六组机器凭据尚不存在；平台与 CRM 需先运行以完成受控接入。
+    local compose_files=(--file "$compose_file")
+    if [[ -n "${PUBLIC_TRANSPORT_COMPOSE_FILE:-}" ]]; then
+        compose_files+=(--file "$PUBLIC_TRANSPORT_COMPOSE_FILE")
+    fi
     data_analysis_profile_arg=""
     if data_analysis_configured; then
         data_analysis_profile_arg="--profile data-analysis"
@@ -432,7 +461,7 @@ compose() {
     if portal_configured && project_configured; then
         docker compose \
             --project-name "$compose_project" \
-            --file "$compose_file" \
+            "${compose_files[@]}" \
             --env-file "$env_file" \
             --env-file "$contract_env_file" \
             --env-file "$customer_env_file" \
@@ -451,7 +480,7 @@ compose() {
     if portal_configured; then
         docker compose \
             --project-name "$compose_project" \
-            --file "$compose_file" \
+            "${compose_files[@]}" \
             --env-file "$env_file" \
             --env-file "$contract_env_file" \
             --env-file "$customer_env_file" \
@@ -469,7 +498,7 @@ compose() {
     if project_configured; then
         docker compose \
             --project-name "$compose_project" \
-            --file "$compose_file" \
+            "${compose_files[@]}" \
             --env-file "$env_file" \
             --env-file "$contract_env_file" \
             --env-file "$customer_env_file" \
@@ -486,7 +515,7 @@ compose() {
     fi
     docker compose \
         --project-name "$compose_project" \
-        --file "$compose_file" \
+        "${compose_files[@]}" \
         --env-file "$env_file" \
         --env-file "$contract_env_file" \
         --env-file "$customer_env_file" \
@@ -983,6 +1012,10 @@ valid_http_origin() {
 
 keycloak_realm_issuer() {
     local public_url realm
+    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" == "true" ]]; then
+        printf '%s' "$PUBLIC_KEYCLOAK_ISSUER"
+        return 0
+    fi
     public_url="$(trim_trailing_slash "$(env_value "$env_file" KEYCLOAK_PUBLIC_URL)")"
     realm="$(env_value "$env_file" KEYCLOAK_REALM)"
     runtime_value_configured "$public_url" || fail "KEYCLOAK_PUBLIC_URL 未配置，无法校验子系统 OIDC 运行时"
@@ -1038,18 +1071,24 @@ validate_keycloak_runtime() {
     validate_runtime_value "$description" "$redirect_key" "$redirect_uri"
     validate_runtime_value "$description" "$tenant_key" "$tenant_id"
     validate_runtime_value "$description" "$platform_base_key" "$platform_base"
-    [[ "$(trim_trailing_slash "$issuer")" == "$expected_issuer" ]] || \
-        fail "${description}运行时 ${issuer_key}=${issuer}；本地 Keycloak Realm 应为 ${expected_issuer}"
+    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" != "true" ]]; then
+        [[ "$(trim_trailing_slash "$issuer")" == "$expected_issuer" ]] || \
+            fail "${description}运行时 ${issuer_key}=${issuer}；本地 Keycloak Realm 应为 ${expected_issuer}"
+    fi
     [[ "$backchannel" == "$expected_backchannel" ]] || \
         fail "${description}运行时 ${backchannel_key}=${backchannel}；应为 Compose 私网地址 ${expected_backchannel}（不得包含 /realms 路径）"
     [[ "$client_id" == "$expected_client_id" ]] || \
         fail "${description}运行时 ${client_key}=${client_id}；本地 ${environment_code} 环境要求 ${expected_client_id}"
-    [[ "$redirect_uri" == "$expected_redirect" ]] || \
-        fail "${description}运行时 ${redirect_key}=${redirect_uri}；应与统一前端入口一致：${expected_redirect}"
-    case "$platform_base" in
-        "$(trim_trailing_slash "$frontend_public_origin")"|http://platform-api:8080) ;;
-        *) fail "${description}运行时 ${platform_base_key}=${platform_base}；只能使用统一前端入口 ${frontend_public_origin} 或 Compose 私网平台地址 http://platform-api:8080，不能指向 Keycloak" ;;
-    esac
+    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" != "true" ]]; then
+        [[ "$redirect_uri" == "$expected_redirect" ]] || \
+            fail "${description}运行时 ${redirect_key}=${redirect_uri}；应与统一前端入口一致：${expected_redirect}"
+    fi
+    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" != "true" ]]; then
+        case "$platform_base" in
+            "$(trim_trailing_slash "$frontend_public_origin")"|http://platform-api:8080) ;;
+            *) fail "${description}运行时 ${platform_base_key}=${platform_base}；只能使用统一前端入口 ${frontend_public_origin} 或 Compose 私网平台地址 http://platform-api:8080，不能指向 Keycloak" ;;
+        esac
+    fi
 
     if [[ -n "$hash_key" ]]; then
         hash_value="$(env_value "$runtime_file" "$hash_key")"

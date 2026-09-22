@@ -15,27 +15,29 @@ type tenantModel struct {
 func (tenantModel) TableName() string { return "iam_tenant" }
 
 type userModel struct {
-	ID               string     `gorm:"column:id;primaryKey"`
-	TenantID         string     `gorm:"column:tenant_id"`
-	EmployeeNo       *string    `gorm:"column:employee_no"`
-	PMSPersonID      *string    `gorm:"column:pms_person_id"`
-	DisplayName      string     `gorm:"column:display_name"`
-	LegalName        *string    `gorm:"column:legal_name"`
-	Email            *string    `gorm:"column:email"`
-	MobileCiphertext []byte     `gorm:"column:mobile_ciphertext"`
-	MobileHash       []byte     `gorm:"column:mobile_hash"`
-	AvatarFileID     *string    `gorm:"column:avatar_file_id"`
-	PrimaryOrgID     *string    `gorm:"column:primary_org_id"`
-	ManagerUserID    *string    `gorm:"column:manager_user_id"`
-	EmploymentStatus string     `gorm:"column:employment_status"`
-	Status           string     `gorm:"column:status"`
-	DeletedAt        *time.Time `gorm:"column:deleted_at"`
-	DeletedBy        *string    `gorm:"column:deleted_by"`
-	Version          uint64     `gorm:"column:version"`
-	CreatedAt        time.Time  `gorm:"column:created_at"`
-	CreatedBy        *string    `gorm:"column:created_by"`
-	UpdatedAt        time.Time  `gorm:"column:updated_at"`
-	UpdatedBy        *string    `gorm:"column:updated_by"`
+	ID                string     `gorm:"column:id;primaryKey"`
+	TenantID          string     `gorm:"column:tenant_id"`
+	EmployeeNo        *string    `gorm:"column:employee_no"`
+	PMSPersonID       *string    `gorm:"column:pms_person_id"`
+	DisplayName       string     `gorm:"column:display_name"`
+	LegalName         *string    `gorm:"column:legal_name"`
+	Email             *string    `gorm:"column:email"`
+	MobileCiphertext  []byte     `gorm:"column:mobile_ciphertext"`
+	MobileHash        []byte     `gorm:"column:mobile_hash"`
+	AvatarFileID      *string    `gorm:"column:avatar_file_id"`
+	PrimaryOrgID      *string    `gorm:"column:primary_org_id"`
+	ManagerUserID     *string    `gorm:"column:manager_user_id"`
+	EmploymentStatus  string     `gorm:"column:employment_status"`
+	Status            string     `gorm:"column:status"`
+	ValidUntil        *time.Time `gorm:"column:valid_until"`
+	ExpiryProcessedAt *time.Time `gorm:"column:expiry_processed_at"`
+	DeletedAt         *time.Time `gorm:"column:deleted_at"`
+	DeletedBy         *string    `gorm:"column:deleted_by"`
+	Version           uint64     `gorm:"column:version"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	CreatedBy         *string    `gorm:"column:created_by"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at"`
+	UpdatedBy         *string    `gorm:"column:updated_by"`
 }
 
 func (userModel) TableName() string { return "iam_user" }
@@ -52,6 +54,7 @@ type accountModel struct {
 	LockedUntil         *time.Time `gorm:"column:locked_until"`
 	LastLoginAt         *time.Time `gorm:"column:last_login_at"`
 	ValidUntil          *time.Time `gorm:"column:valid_until"`
+	ExpiryProcessedAt   *time.Time `gorm:"column:expiry_processed_at"`
 	Status              string     `gorm:"column:status"`
 	Version             uint64     `gorm:"column:version"`
 	CreatedAt           time.Time  `gorm:"column:created_at"`

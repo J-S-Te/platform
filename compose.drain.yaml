@@ -1,0 +1,16 @@
+name: ${COMPOSE_PROJECT_NAME:-basic-platform-local}
+
+services:
+  frontend:
+    environment:
+      PUBLIC_HTTPS_ENABLED: "false"
+      PUBLIC_TRANSPORT_STATE: "DISABLING_HTTPS"
+      PUBLIC_PLATFORM_HOST: ${PUBLIC_PLATFORM_HOST:?PUBLIC_PLATFORM_HOST must be set}
+      PUBLIC_SSO_HOST: ${PUBLIC_SSO_HOST:?PUBLIC_SSO_HOST must be set}
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${PUBLIC_TLS_CERTIFICATE_RESOLVED:?platform certificate must remain readable during drain}:/run/tls/platform.crt:ro
+      - ${PUBLIC_TLS_PRIVATE_KEY_RESOLVED:?platform private key must remain readable during drain}:/run/tls/platform.key:ro
+      - ${SSO_TLS_CERTIFICATE_RESOLVED:?SSO certificate must remain readable during drain}:/run/tls/sso.crt:ro
+      - ${SSO_TLS_PRIVATE_KEY_RESOLVED:?SSO private key must remain readable during drain}:/run/tls/sso.key:ro

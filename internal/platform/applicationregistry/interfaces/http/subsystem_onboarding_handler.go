@@ -1513,6 +1513,7 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 			// 客户管理负责人/组织选择依赖平台 Owner Directory；更新流程必须像首次接入一样
 			// 确保该机器凭据存在并重新下发，否则运行时会因缺少凭据直接拒绝启动。
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "客户与商机管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
+			{purpose: application.ServiceCredentialContractOpportunitySignedCountRead, suffix: "contract-signed-count", clientName: "客户与商机管理系统 Contract Opportunity Signed Count Reader", scope: "contract.opportunity_signed_count.read", rotate: true},
 			fileGateway,
 		}
 	case "customer_portal":

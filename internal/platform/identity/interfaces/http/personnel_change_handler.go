@@ -2,6 +2,7 @@ package identityhttp
 
 import (
 	"encoding/json"
+	"errors"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -36,6 +37,9 @@ type personnelTransitionPayload struct {
 	ToStatus          string `json:"to_status"`
 	ApprovalReference string `json:"approval_reference"`
 }
+type personnelHandoverCompletePayload struct {
+	TargetUserID string `json:"target_user_id"`
+}
 
 func (h *PersonnelChangeHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// 先从认证上下文取得租户和操作人，避免客户端伪造归属或审计身份。
@@ -61,7 +65,7 @@ func (h *PersonnelChangeHandler) Create(w http.ResponseWriter, r *http.Request) 
 	}
 	v, e := h.service.Create(r.Context(), application.PersonnelChangeCreateInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, UserID: x.UserID, SourceMembershipID: x.SourceMembershipID, TargetOrgUnitID: x.TargetOrgUnitID, TargetPositionID: x.TargetPositionID, ChangeType: x.ChangeType, Reason: x.Reason, ApprovalReference: x.ApprovalReference, EffectiveAt: x.EffectiveAt, DirectScheduleAuthorized: principalHasRole(p, "platform-super-admin")})
 	if e != nil {
-		httpresponse.WriteError(w, r, 422, httperror.Validation)
+		writePersonnelChangeError(w, r, e)
 		return
 	}
 	httpresponse.WriteSuccess(w, r, 201, "操作成功", v)
@@ -126,7 +130,7 @@ func (h *PersonnelChangeHandler) Transition(w http.ResponseWriter, r *http.Reque
 	}
 	v, e := h.service.Transition(r.Context(), application.PersonnelChangeTransitionInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, ID: r.PathValue("change_id"), ToStatus: x.ToStatus, ApprovalReference: x.ApprovalReference})
 	if e != nil {
-		httpresponse.WriteError(w, r, 409, httperror.Conflict)
+		writePersonnelChangeError(w, r, e)
 		return
 	}
 	httpresponse.WriteSuccess(w, r, 200, "操作成功", v)
@@ -153,6 +157,39 @@ func (h *PersonnelChangeHandler) Submit(w http.ResponseWriter, r *http.Request) 
 func (h *PersonnelChangeHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	h.transitionFixed(w, r, "CANCELLED")
 }
+
+func (h *PersonnelChangeHandler) ListHandoverItems(w http.ResponseWriter, r *http.Request) {
+	p, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	items, err := h.service.ListHandoverItems(r.Context(), p.Tenant.ID, r.PathValue("change_id"))
+	if err != nil {
+		writePersonnelChangeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "交接项加载成功", map[string]any{"items": items, "total": len(items)})
+}
+
+func (h *PersonnelChangeHandler) CompleteHandoverItem(w http.ResponseWriter, r *http.Request) {
+	p, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	var payload personnelHandoverCompletePayload
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&payload) != nil || strings.TrimSpace(payload.TargetUserID) == "" {
+		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+		return
+	}
+	item, err := h.service.CompleteHandoverItem(r.Context(), p.Tenant.ID, r.PathValue("change_id"), r.PathValue("item_id"), payload.TargetUserID, p.User.ID)
+	if err != nil {
+		writePersonnelChangeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "责任交接完成", item)
+}
 func (h *PersonnelChangeHandler) transitionFixed(w http.ResponseWriter, r *http.Request, status string) {
 	p, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -161,8 +198,21 @@ func (h *PersonnelChangeHandler) transitionFixed(w http.ResponseWriter, r *http.
 	}
 	v, e := h.service.Transition(r.Context(), application.PersonnelChangeTransitionInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, ID: r.PathValue("change_id"), ToStatus: status})
 	if e != nil {
-		httpresponse.WriteError(w, r, 409, httperror.Conflict)
+		writePersonnelChangeError(w, r, e)
 		return
 	}
 	httpresponse.WriteSuccess(w, r, 200, "操作成功", v)
+}
+
+func writePersonnelChangeError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, application.ErrValidation):
+		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+	case errors.Is(err, application.ErrConflict):
+		httpresponse.WriteError(w, r, http.StatusConflict, httperror.Conflict)
+	case errors.Is(err, application.ErrNotFound):
+		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
+	default:
+		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
+	}
 }

@@ -1,6 +1,6 @@
 # 生产环境 CI/CD 部署
 
-> 更新日期：2026-08-27。生产目录承载 platform、frontend、contract、CRM、客户 Portal、项目管理和数据看板系统不可变镜像。
+> 更新日期：2026-09-21。生产目录承载 platform、frontend、contract、CRM、客户 Portal、项目管理、数据看板和结算系统不可变镜像。
 
 > 发布校验基线：平台 API 与 `subsystem-provisioner` 必须使用同一版本的 `PLATFORM_IMAGE`；平台应用授权仓储必须包含按 `client_id` 查询能力。若 CI 在 `OAuthClientManagementRepository` 报缺少 `GetOAuthClientByClientID`，说明镜像未包含最新平台提交，应先重新构建并推送不可变 digest，再发布。
 
@@ -8,7 +8,7 @@
 
 - Linux、Docker Engine、Docker Compose v2、`curl`、`gzip`、`flock`；
 - 低权限发布用户可访问 Docker，并拥有部署目录；
-- 推荐 Nginx/负载均衡终止 HTTPS，只开放 SSH、80、443；
+- Docker 统一前端网关终止 HTTP/HTTPS，只开放 SSH、80、443；MySQL、Temporal、Keycloak 管理端口和内部 API 不对公网发布；
 - 部署目录默认 `/opt/basic-platform`。
 
 ```bash
@@ -22,7 +22,49 @@ chmod 600 .env .release.env
 
 替换 `.env` 中所有基础设施占位值；`.release.env` 的镜像 digest 由 CI/CD 发布自动更新。`runtime/*.env` 不要求管理员手工创建：首次接入时，Agent 会从审核清单指定的 `*.env.example` 初始化缺失文件、自动收紧为 `0600`，写入 OIDC/授权目录/用途 Client，并为清单声明的业务密钥生成一次性 32 字节随机 base64 值。已有合法密钥、未知环境变量、注释及清单外文件都会保留，重试或更新不会轮换。部署人员也可以提前通过 Secret 管理系统写入合法密钥，Agent 会继续复用。首次镜像发布在接入凭据未补齐时只安全暂存 digest，不启动数据库迁移或 API。不要提交运行环境文件、私钥或备份。
 
-Keycloak 的独立数据库、可选 bootstrap service account、HTTP/HTTPS 网关策略、轮换、备份恢复、HA、监控告警和灾备演练遵循 [Keycloak 生产运维 Runbook](../../docs/keycloak-production-operations.md)。该 Runbook 不强制 HTTPS：是否使用 TLS 由入口网关和 `KEYCLOAK_PUBLIC_URL` 决定。
+Keycloak 的独立数据库、可选 bootstrap service account、备份恢复、HA、监控告警和灾备演练遵循 [Keycloak 生产运维 Runbook](../../docs/keycloak-production-operations.md)。公网 HTTP/HTTPS 模式统一由下述配置开关决定，不再手工维护宿主机 Nginx 或分别修改各子系统回调地址。
+
+### 1.1 HTTP/HTTPS 快速切换
+
+缺省和显式 `false` 都使用 HTTP，且不会读取、校验或挂载任何证书：
+
+```dotenv
+PUBLIC_HTTPS_ENABLED=false
+PUBLIC_PLATFORM_HOST=platform.example.com
+PUBLIC_SSO_HOST=sso.example.com
+PUBLIC_HTTP_PORT=80
+PUBLIC_HTTPS_PORT=443
+PUBLIC_HTTPS_DRAIN_GRACE=5m
+PUBLIC_TLS_CERTIFICATE_PATH=
+PUBLIC_TLS_PRIVATE_KEY_PATH=
+SSO_TLS_CERTIFICATE_PATH=
+SSO_TLS_PRIVATE_KEY_PATH=
+```
+
+启用 HTTPS 时，将 `PUBLIC_HTTPS_ENABLED` 改为 `true`，填写平台证书链和私钥路径。若 SSO 两项留空，SSO 复用平台证书，因此平台证书的 SAN 必须同时覆盖两个域名；也可以为 SSO 填写独立证书链和私钥。路径支持 Certbot 的符号链接，发布前会解析到可读常规文件，并校验证书链可解析、有效期、SAN 与私钥匹配。预检失败不会执行 Docker 变更。
+
+```bash
+cd /opt/basic-platform
+./bin/public-transport.sh check
+./bin/apply-public-transport.sh
+```
+
+`apply-public-transport.sh` 是唯一的模式切换入口。它通过 migration 106 提供的数据库状态机持久化 `HTTP → ENABLING_HTTPS → HTTPS → DISABLING_HTTPS`，以数据库行锁防止并发执行，并可在脚本、容器或服务器重启后从原阶段继续。每次转换只记录模式、Origin、证书指纹/有效期、阶段、失败摘要和回滚结果，不记录证书正文、私钥、Token 或 Client Secret。
+
+协调器先在同一数据库事务中为已有平台 OAuth Client 增加目标登录/退出回调，并记录受影响的 Application Environment、应用主页与 Keycloak Client；随后把 Keycloak Client 临时设置为新旧双回调。网关和业务运行配置健康后，协调器再事务性切换 Environment/主页地址、移除旧 OAuth 回调，并把 Keycloak 收敛到目标单回调。失败可回滚准备阶段，外部控制面成功前不会留下半套最终配置。
+
+HTTPS 降级不会立即卸载证书。状态进入 `DISABLING_HTTPS` 后，`compose.drain.yaml` 让 80/443 同时服务，业务服务改用 HTTP 与非 Secure Cookie，从 HTTPS 请求换发的 Cookie 可继续用于 HTTP；同时 `iam_session`、`oauth_token_family`、`oauth_refresh_token` 的绝对到期时间会被统一截断到“当前时间 + `AUTH_SESSION_TTL` + `PUBLIC_HTTPS_DRAIN_GRACE`”。截止时间前最终提交会被数据库协调器拒绝。截止后再次执行同一命令即可完成回调切换、停止 443 并卸载证书。证书路径在 `DISABLING_HTTPS` 结束前必须保持可读。
+
+统一发布入口会按有效模式自动组合 `compose.yaml`、`compose.frontend.yaml`、`compose.https.yaml` 或内部排空覆盖层，并派生平台/SSO Origin、Realm Issuer、运行时 OAuth 回调、CORS、Secure Cookie 与各子系统公开地址。Docker 内部 OIDC 后通道始终使用 `http://keycloak:8080`，不因公网 TLS 改变。迁移 106 和包含 `public-transport-coordinator` 的 Platform 镜像必须先发布，再执行首次模式切换。
+
+证书续期后只需执行以下命令重新校验证书并重建网关，不重启业务 API：
+
+```bash
+cd /opt/basic-platform
+./bin/reload-public-certificate.sh
+```
+
+本地开发同样支持该开关，配置位于 `platform/docker/.env.local`；默认仍保持 `http://localhost:8081`，只有显式启用 HTTPS 才加载 `platform/compose.https.yaml`。排空状态由协调器提供，`PUBLIC_TRANSPORT_STATE` 是内部恢复字段，不能作为日常开关手工长期保留。
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 

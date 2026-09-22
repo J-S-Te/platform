@@ -42,7 +42,7 @@ func (repository *personnelChangeCASRepository) Get(context.Context, string, str
 	return snapshot, nil
 }
 
-func (repository *personnelChangeCASRepository) UpdateStatus(_ context.Context, expected PersonnelChangeRequest, status, _ string, now time.Time) (PersonnelChangeRequest, error) {
+func (repository *personnelChangeCASRepository) UpdateStatus(_ context.Context, expected PersonnelChangeRequest, status, _, _ string, now time.Time) (PersonnelChangeRequest, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	if repository.request.Status != expected.Status || repository.request.Version != expected.Version {

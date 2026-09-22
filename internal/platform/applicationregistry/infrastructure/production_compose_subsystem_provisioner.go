@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -531,6 +532,9 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 	}
 	runnerEnvironment := append([]string{}, os.Environ()...)
 	runnerEnvironment = append(runnerEnvironment, "BASIC_PLATFORM_RUNTIME_ENV_FILE="+target.config.RuntimeEnvPath)
+	if transportEnvironment, err := productionPublicTransportEnvironment(target.config.RuntimeEnvPath); err == nil {
+		runnerEnvironment = append(runnerEnvironment, transportEnvironment...)
+	}
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
 		runnerEnvironment = append(runnerEnvironment, runtimeFile.ComposeEnvironmentKey+"="+filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path)))
 	}
@@ -779,6 +783,9 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 	}
 	if info, statErr := os.Stat(target.config.RuntimeEnvPath); statErr != nil || info.Mode().Perm()&0o077 != 0 {
 		return provisioningError("production infrastructure environment permissions must be 0600")
+	}
+	if _, err := productionPublicTransportEnvironment(target.config.RuntimeEnvPath); err != nil {
+		return provisioningError("production public transport configuration is invalid")
 	}
 	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
 		path := filepath.Join(root, filepath.FromSlash(runtimeFile.Path))
@@ -1081,6 +1088,79 @@ func parseEnvironmentValues(content string) map[string]string {
 		}
 	}
 	return values
+}
+
+// productionPublicTransportEnvironment derives every public protocol-sensitive Compose value
+// from one switch. Existing deployments without PUBLIC_PLATFORM_HOST remain untouched, while a
+// managed deployment cannot accidentally mix HTTPS cookies with HTTP callbacks.
+func productionPublicTransportEnvironment(path string) ([]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	values := parseEnvironmentValues(string(content))
+	platformHost := strings.TrimSpace(values["PUBLIC_PLATFORM_HOST"])
+	if platformHost == "" {
+		return nil, nil
+	}
+	ssoHost := strings.TrimSpace(values["PUBLIC_SSO_HOST"])
+	if !validPublicTransportHost(platformHost) || !validPublicTransportHost(ssoHost) {
+		return nil, errors.New("public transport host is invalid")
+	}
+	enabledValue := strings.TrimSpace(values["PUBLIC_HTTPS_ENABLED"])
+	if enabledValue == "" {
+		enabledValue = "false"
+	}
+	if enabledValue != "true" && enabledValue != "false" {
+		return nil, errors.New("public HTTPS switch is invalid")
+	}
+	enabled := enabledValue == "true"
+	scheme, defaultPort := "http", 80
+	if enabled {
+		scheme, defaultPort = "https", 443
+	}
+	portKey := "PUBLIC_HTTP_PORT"
+	if enabled {
+		portKey = "PUBLIC_HTTPS_PORT"
+	}
+	port := defaultPort
+	if raw := strings.TrimSpace(values[portKey]); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 65535 {
+			return nil, errors.New("public transport port is invalid")
+		}
+		port = parsed
+	}
+	origin := func(host string) string {
+		if port == defaultPort {
+			return scheme + "://" + host
+		}
+		return scheme + "://" + host + ":" + strconv.Itoa(port)
+	}
+	platformOrigin, ssoOrigin := origin(platformHost), origin(ssoHost)
+	realm := strings.TrimSpace(values["KEYCLOAK_REALM"])
+	if realm == "" {
+		realm = "basic-platform"
+	}
+	secure, insecure := "false", "true"
+	if enabled {
+		secure, insecure = "true", "false"
+	}
+	return []string{
+		"PUBLIC_HTTPS_ENABLED=" + enabledValue,
+		"PUBLIC_PLATFORM_HOST=" + platformHost,
+		"PUBLIC_SSO_HOST=" + ssoHost,
+		"PUBLIC_PLATFORM_ORIGIN=" + platformOrigin,
+		"PUBLIC_SSO_ORIGIN=" + ssoOrigin,
+		"PUBLIC_KEYCLOAK_ISSUER=" + ssoOrigin + "/realms/" + realm,
+		"PUBLIC_TRANSPORT_COOKIE_SECURE=" + secure,
+		"PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=" + insecure,
+		"PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=" + secure,
+	}, nil
+}
+
+func validPublicTransportHost(value string) bool {
+	return value != "" && !strings.ContainsAny(value, "/?#\\\r\n\x00 \t") && !strings.Contains(value, "://")
 }
 
 func (target *productionComposeTarget) validateProvisioningInput(input application.SubsystemProvisioningInput) error {

@@ -167,6 +167,22 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		return nil, err
 	}
 	runners = append(runners, notificationRunner)
+	identityRepository, err := identityinfrastructure.NewGORMRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create identity repository for expiry worker: %w", err)
+	}
+	expiryRunner, err := identityworker.NewExpiryWorker(
+		identityinfrastructure.NewExpiryGORMRepository(db), identityRepository, service, notificationService,
+		logger, cfg.Audit.ApplicationCode, cfg.Audit.EnvironmentCode, cfg.Worker.PollInterval,
+	)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create identity expiry worker: %w", err)
+	}
+	runners = append(runners, expiryRunner)
 	// Scheduled personnel changes share the same worker process and database lease
 	// semantics; no extra service or broker is required.
 	personnelRepo := identityinfrastructure.NewPersonnelChangeGORMRepository(db)
@@ -176,6 +192,9 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		_ = logFile.Close()
 		return nil, fmt.Errorf("create personnel change service: %w", err)
 	}
+	// 到期异动由 Worker 真正执行，因此完成通知也必须注入 Worker 使用的服务实例；
+	// 只给 HTTP 组合根注入会导致自动执行成功却没有任何人员异动通知。
+	personnelService.SetNotifier(notificationService)
 	personnelRunner, err := identityworker.NewPersonnelChangeWorker(personnelService, logger, cfg.Worker.ID+"-personnel", cfg.Worker.PollInterval)
 	if err != nil {
 		_ = database.Close(db)

@@ -277,6 +277,8 @@ func normalizePage(query PageRequest) PageRequest {
 }
 
 func normalizeNamespace(input NamespaceCreateInput) NamespaceCreateInput {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
 	input.ApplicationCode = strings.TrimSpace(input.ApplicationCode)
 	input.Code = strings.TrimSpace(input.Code)
 	input.Name = strings.TrimSpace(input.Name)

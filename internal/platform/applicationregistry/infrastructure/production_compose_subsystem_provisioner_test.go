@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,82 @@ func TestProductionComposeSubsystemProvisionerRejectsTargetsMissingFromReviewedP
 	input.Environment = "dev"
 	if err := provisioner.Provision(context.Background(), input); err == nil {
 		t.Fatal("production provision accepted a non-prod environment")
+	}
+}
+
+func TestProductionPublicTransportDefaultsToHTTPAndDerivesAllBindings(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		"PUBLIC_PLATFORM_HOST=platform.example.com",
+		"PUBLIC_SSO_HOST=sso.example.com",
+		"KEYCLOAK_REALM=company",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := productionPublicTransportEnvironment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, "\n")
+	for _, expected := range []string{
+		"PUBLIC_HTTPS_ENABLED=false",
+		"PUBLIC_PLATFORM_ORIGIN=http://platform.example.com",
+		"PUBLIC_SSO_ORIGIN=http://sso.example.com",
+		"PUBLIC_KEYCLOAK_ISSUER=http://sso.example.com/realms/company",
+		"PUBLIC_TRANSPORT_COOKIE_SECURE=false",
+		"PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("derived environment %q does not contain %q", joined, expected)
+		}
+	}
+}
+
+func TestProductionPublicTransportDerivesHTTPSWithCustomPort(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		"PUBLIC_HTTPS_ENABLED=true",
+		"PUBLIC_PLATFORM_HOST=platform.example.com",
+		"PUBLIC_SSO_HOST=sso.example.com",
+		"PUBLIC_HTTPS_PORT=8443",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := productionPublicTransportEnvironment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, "\n")
+	for _, expected := range []string{
+		"PUBLIC_PLATFORM_ORIGIN=https://platform.example.com:8443",
+		"PUBLIC_KEYCLOAK_ISSUER=https://sso.example.com:8443/realms/basic-platform",
+		"PUBLIC_TRANSPORT_COOKIE_SECURE=true",
+		"PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=true",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("derived environment %q does not contain %q", joined, expected)
+		}
+	}
+}
+
+func TestProductionPublicTransportRejectsInvalidSwitchHostAndPort(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		"PUBLIC_HTTPS_ENABLED=yes\nPUBLIC_PLATFORM_HOST=platform.example.com\nPUBLIC_SSO_HOST=sso.example.com\n",
+		"PUBLIC_PLATFORM_HOST=https://platform.example.com\nPUBLIC_SSO_HOST=sso.example.com\n",
+		"PUBLIC_PLATFORM_HOST=platform.example.com\nPUBLIC_SSO_HOST=sso.example.com/path\n",
+		"PUBLIC_PLATFORM_HOST=platform.example.com\nPUBLIC_SSO_HOST=sso.example.com\nPUBLIC_HTTP_PORT=70000\n",
+	}
+	for index, contents := range tests {
+		path := filepath.Join(t.TempDir(), fmt.Sprintf("invalid-%d.env", index))
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := productionPublicTransportEnvironment(path); err == nil {
+			t.Fatalf("invalid public transport configuration %d was accepted", index)
+		}
 	}
 }
 

@@ -21,6 +21,7 @@ type EmployeeCreateInput struct {
 	Email            *string
 	Mobile           *string
 	Status           string
+	ValidUntil       *time.Time
 	Account          *EmployeeAccountCreateInput
 	Membership       *EmployeeMembershipCreateInput
 	ApplicationRoles []ApplicationRoleAssignment
@@ -97,8 +98,9 @@ func (service *ManagementService) CreateEmployee(ctx context.Context, input Empl
 	userInput := UserCreateInput{
 		TenantID: input.TenantID, OperatorID: input.OperatorID, DisplayName: input.DisplayName,
 		Email: input.Email, Mobile: input.Mobile, Status: input.Status,
+		ValidUntil: input.ValidUntil,
 	}
-	if err := validateUserCreate(userInput); err != nil {
+	if err := validateUserCreate(userInput, service.clock.Now()); err != nil {
 		return EmployeeCreateResult{}, err
 	}
 
@@ -210,7 +212,7 @@ func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, inpu
 			return nil, ErrMembershipRequired
 		}
 		userInput := UserCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: item.Status, ApplicationRoles: item.ApplicationRoles}
-		if err := validateUserCreate(userInput); err != nil {
+		if err := validateUserCreate(userInput, service.clock.Now()); err != nil {
 			return nil, err
 		}
 		userID, err := service.ids.New(now)

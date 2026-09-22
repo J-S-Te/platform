@@ -14,6 +14,10 @@ type ingestionTestRepository struct {
 	receiptArgs []string
 }
 
+func (r *ingestionTestRepository) CreateTemplate(_ context.Context, template domain.Template, version domain.TemplateVersion) (domain.Template, domain.TemplateVersion, error) {
+	return template, version, nil
+}
+
 func (r *ingestionTestRepository) AcceptIngestion(context.Context, string, string, string, domain.IngestionEvent, string, time.Time) (domain.IngestionReceipt, error) {
 	r.accepted = true
 	return domain.IngestionReceipt{Status: domain.IngestionStatusAccepted}, nil
@@ -113,6 +117,20 @@ func TestGetIngestionReceiptScopesToApplicationAndEnvironment(t *testing.T) {
 		if repository.receiptArgs[i] != want[i] {
 			t.Fatalf("receipt args=%v, want=%v", repository.receiptArgs, want)
 		}
+	}
+}
+
+func TestCreateTemplatePersistsPublishedFirstVersion(t *testing.T) {
+	service, err := NewService(&ingestionTestRepository{}, ingestionTestPolicy{enabled: true}, ingestionTestResolver{}, ingestionTestIDs{}, ingestionTestClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	template, version, err := service.CreateTemplate(context.Background(), CreateTemplateInput{TenantID: "tenant", OperatorID: "user", Code: "PROJECT_DELAYED", Name: "项目延期", Status: domain.TemplateStatusActive, TitleTemplate: "项目 {{project}} 延期", BodyTemplate: "项目 {{project}} 已延期", Variables: []domain.VariableDefinition{{Name: "project", Required: true, MaxLength: 64}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if template.CurrentVersion != 1 || version.Status != domain.TemplateVersionPublished {
+		t.Fatalf("template=%+v version=%+v", template, version)
 	}
 }
 

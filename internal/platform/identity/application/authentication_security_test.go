@@ -37,8 +37,8 @@ func (authenticationRepositoryStub) FindPrincipalBySession(context.Context, stri
 func (authenticationRepositoryStub) RecordSessionInteraction(context.Context, string, time.Time, time.Duration) error {
 	return nil
 }
-func (authenticationRepositoryStub) RefreshSession(context.Context, string, time.Time, time.Time) error {
-	return nil
+func (authenticationRepositoryStub) RefreshSession(_ context.Context, _ string, now time.Time) (time.Time, error) {
+	return now.Add(8 * time.Hour), nil
 }
 func (authenticationRepositoryStub) RevokeSession(context.Context, string, time.Time, string) error {
 	return nil
@@ -101,6 +101,47 @@ func (authenticationTokenManagerStub) Issue(sharedsecurity.TokenClaims) (string,
 
 func (authenticationTokenManagerStub) Verify(string, time.Time) (sharedsecurity.TokenClaims, error) {
 	return sharedsecurity.TokenClaims{}, nil
+}
+
+type refreshRepositorySpy struct {
+	authenticationRepositoryStub
+	expiresAt time.Time
+}
+
+func (spy refreshRepositorySpy) RefreshSession(context.Context, string, time.Time) (time.Time, error) {
+	return spy.expiresAt, nil
+}
+
+type tokenClaimsSpy struct{ claims sharedsecurity.TokenClaims }
+
+func (spy *tokenClaimsSpy) Issue(claims sharedsecurity.TokenClaims) (string, error) {
+	spy.claims = claims
+	return "refreshed-token", nil
+}
+
+func (*tokenClaimsSpy) Verify(string, time.Time) (sharedsecurity.TokenClaims, error) {
+	return sharedsecurity.TokenClaims{}, nil
+}
+
+func TestRefreshPreservesOriginalAbsoluteSessionExpiry(t *testing.T) {
+	now := time.Date(2026, time.September, 21, 8, 0, 0, 0, time.UTC)
+	originalExpiry := now.Add(17 * time.Minute)
+	tokens := &tokenClaimsSpy{}
+	service, err := NewService(
+		refreshRepositorySpy{expiresAt: originalExpiry}, &passwordVerifierSpy{}, tokens,
+		authenticationIDGeneratorStub{}, authenticationClockStub{now: now}, loginSecurityStub{idleTimeout: time.Hour}, 8*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	principal := authctx.Principal{SessionID: "session-1", Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"}, Account: authctx.ReferenceName{ID: "account-1"}}
+	result, err := service.Refresh(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if !result.ExpiresAt.Equal(originalExpiry) || !tokens.claims.ExpiresAt.Equal(originalExpiry) {
+		t.Fatalf("refresh expiry = %v / claims %v, want immutable %v", result.ExpiresAt, tokens.claims.ExpiresAt, originalExpiry)
+	}
 }
 
 type authenticationIDGeneratorStub struct{}

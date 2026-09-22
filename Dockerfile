@@ -16,6 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./c
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/file-inventory ./cmd/file-inventory \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/migrate ./cmd/migrate \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/public-transport-coordinator ./cmd/public-transport-coordinator \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/provision-iam-import-client ./cmd/provision-iam-import-client \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/subsystem-provisioner ./cmd/subsystem-provisioner
@@ -35,6 +36,7 @@ COPY --from=builder /out/file-gateway ./file-gateway
 COPY --from=builder /out/file-inventory ./file-inventory
 COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
+COPY --from=builder /out/public-transport-coordinator ./public-transport-coordinator
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin
 COPY --from=builder /out/provision-iam-import-client ./provision-iam-import-client
 COPY --from=builder /out/subsystem-provisioner ./subsystem-provisioner

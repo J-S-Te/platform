@@ -13,13 +13,33 @@ import (
 )
 
 type PersonnelChangeRequest struct {
-	// 请求同时承载业务变更、审批凭据和执行时间；临时密码只允许出现在即时返聘响应中。
-	ID, TenantID, UserID, SourceMembershipID, TargetOrgUnitID, TargetPositionID, ChangeType, Status, Reason, ApprovalReference, SubmittedBy, ApprovedBy string
-	EffectiveAt, ApprovedAt, ExecutedAt                                                                                                                 *time.Time
-	Version                                                                                                                                             uint64
-	// TemporaryPassword 仅在即时返聘执行响应中填充，不落库、不记录日志，也不由列表或详情接口返回。
-	TemporaryPassword    string `json:"temporary_password,omitempty"`
-	CreatedAt, UpdatedAt time.Time
+	// 请求同时承载业务变更、审批凭据和执行时间；复职沿用既有凭据并强制下次改密。
+	ID                 string     `json:"id"`
+	TenantID           string     `json:"tenant_id"`
+	UserID             string     `json:"user_id"`
+	UserDisplayName    string     `json:"user_display_name,omitempty"`
+	SourceMembershipID string     `json:"source_membership_id,omitempty"`
+	SourceOrganization string     `json:"source_organization_name,omitempty"`
+	SourcePosition     string     `json:"source_position_name,omitempty"`
+	TargetOrgUnitID    string     `json:"target_org_unit_id,omitempty"`
+	TargetOrganization string     `json:"target_organization_name,omitempty"`
+	TargetPositionID   string     `json:"target_position_id,omitempty"`
+	TargetPosition     string     `json:"target_position_name,omitempty"`
+	ChangeType         string     `json:"change_type"`
+	Status             string     `json:"status"`
+	Reason             string     `json:"reason"`
+	ApprovalReference  string     `json:"approval_reference,omitempty"`
+	HandoverReference  string     `json:"handover_reference,omitempty"`
+	RejectionReason    string     `json:"rejection_reason,omitempty"`
+	SubmittedBy        string     `json:"submitted_by"`
+	ApprovedBy         string     `json:"approved_by,omitempty"`
+	EffectiveAt        *time.Time `json:"effective_at"`
+	ApprovedAt         *time.Time `json:"approved_at,omitempty"`
+	ExecutedAt         *time.Time `json:"executed_at,omitempty"`
+	CancelledAt        *time.Time `json:"cancelled_at,omitempty"`
+	Version            uint64     `json:"version"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 type PersonnelChangeCreateInput struct {
 	TenantID, OperatorID, UserID, SourceMembershipID, TargetOrgUnitID, TargetPositionID, ChangeType, Reason, ApprovalReference string
@@ -48,7 +68,7 @@ type PersonnelChangeRepository interface {
 	Create(context.Context, PersonnelChangeRequest) (PersonnelChangeRequest, error)
 	List(context.Context, string, string, string, string) ([]PersonnelChangeRequest, error)
 	Get(context.Context, string, string) (PersonnelChangeRequest, error)
-	UpdateStatus(context.Context, PersonnelChangeRequest, string, string, time.Time) (PersonnelChangeRequest, error)
+	UpdateStatus(context.Context, PersonnelChangeRequest, string, string, string, time.Time) (PersonnelChangeRequest, error)
 	Execute(context.Context, PersonnelChangeRequest, string, time.Time) (PersonnelChangeRequest, error)
 	PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error)
 	ValidateCreate(context.Context, PersonnelChangeCreateInput) error
@@ -138,6 +158,29 @@ func (s *PersonnelChangeService) List(ctx context.Context, tenant, status, chang
 func (s *PersonnelChangeService) Get(ctx context.Context, tenant, id string) (PersonnelChangeRequest, error) {
 	return s.repo.Get(ctx, tenant, id)
 }
+
+func (s *PersonnelChangeService) ListHandoverItems(ctx context.Context, tenant, requestID string) ([]HandoverItem, error) {
+	manager, ok := s.handover.(HandoverManager)
+	if !ok || strings.TrimSpace(tenant) == "" || strings.TrimSpace(requestID) == "" {
+		return nil, ErrValidation
+	}
+	return manager.List(ctx, tenant, requestID)
+}
+
+func (s *PersonnelChangeService) CompleteHandoverItem(ctx context.Context, tenant, requestID, itemID, targetUserID, operator string) (HandoverItem, error) {
+	manager, ok := s.handover.(HandoverManager)
+	if !ok || strings.TrimSpace(tenant) == "" || strings.TrimSpace(requestID) == "" || strings.TrimSpace(itemID) == "" || strings.TrimSpace(targetUserID) == "" || strings.TrimSpace(operator) == "" {
+		return HandoverItem{}, ErrValidation
+	}
+	request, err := s.repo.Get(ctx, tenant, requestID)
+	if err != nil {
+		return HandoverItem{}, err
+	}
+	if request.ChangeType != domain.PersonnelChangeTermination || request.Status != domain.PersonnelChangePendingHandover {
+		return HandoverItem{}, ErrConflict
+	}
+	return manager.Complete(ctx, tenant, requestID, itemID, targetUserID, operator)
+}
 func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelChangeTransitionInput) (PersonnelChangeRequest, error) {
 	if in.TenantID == "" || in.OperatorID == "" || in.ID == "" || in.ToStatus == "" {
 		return PersonnelChangeRequest{}, ErrValidation
@@ -154,6 +197,9 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 	}
 	if cur.Status == domain.PersonnelChangePendingApproval && (in.ToStatus == domain.PersonnelChangePendingHandover || in.ToStatus == domain.PersonnelChangeScheduled) && strings.TrimSpace(in.ApprovalReference) == "" {
 		return PersonnelChangeRequest{}, fmt.Errorf("approval reference is required: %w", ErrValidation)
+	}
+	if cur.Status == domain.PersonnelChangePendingApproval && in.ToStatus == domain.PersonnelChangeRejected && strings.TrimSpace(in.ApprovalReference) == "" {
+		return PersonnelChangeRequest{}, fmt.Errorf("rejection reason is required: %w", ErrValidation)
 	}
 	// 审批凭据与离职交接是显式安全闸门；交接系统未接入时，凭据仍是责任已转移并检查过的持久证据。
 	if in.ToStatus == domain.PersonnelChangeScheduled {
@@ -191,7 +237,7 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 	}
 	// 仓储同时校验读取到的旧状态和版本，避免取消/审批与 worker 执行并发时
 	// 后提交的一方覆盖已经完成的终态。
-	return s.repo.UpdateStatus(ctx, cur, in.ToStatus, in.ApprovalReference, s.clock.Now().UTC())
+	return s.repo.UpdateStatus(ctx, cur, in.ToStatus, in.ApprovalReference, in.OperatorID, s.clock.Now().UTC())
 }
 func (s *PersonnelChangeService) Preview(ctx context.Context, tenant, id string) (map[string]any, error) {
 	// 已落库请求的权限影响由仓储计算，确保预览结果与实际授权来源一致。

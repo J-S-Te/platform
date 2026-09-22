@@ -25,7 +25,7 @@ func (r *personnelChangeCreateRepository) List(context.Context, string, string, 
 func (r *personnelChangeCreateRepository) Get(context.Context, string, string) (PersonnelChangeRequest, error) {
 	return PersonnelChangeRequest{}, ErrConflict
 }
-func (r *personnelChangeCreateRepository) UpdateStatus(context.Context, PersonnelChangeRequest, string, string, time.Time) (PersonnelChangeRequest, error) {
+func (r *personnelChangeCreateRepository) UpdateStatus(context.Context, PersonnelChangeRequest, string, string, string, time.Time) (PersonnelChangeRequest, error) {
 	return PersonnelChangeRequest{}, ErrConflict
 }
 func (r *personnelChangeCreateRepository) Execute(context.Context, PersonnelChangeRequest, string, time.Time) (PersonnelChangeRequest, error) {
@@ -212,7 +212,7 @@ func (r *personnelChangeExecutionRepository) List(context.Context, string, strin
 func (r *personnelChangeExecutionRepository) Get(context.Context, string, string) (PersonnelChangeRequest, error) {
 	return r.request, nil
 }
-func (r *personnelChangeExecutionRepository) UpdateStatus(context.Context, PersonnelChangeRequest, string, string, time.Time) (PersonnelChangeRequest, error) {
+func (r *personnelChangeExecutionRepository) UpdateStatus(context.Context, PersonnelChangeRequest, string, string, string, time.Time) (PersonnelChangeRequest, error) {
 	return PersonnelChangeRequest{}, errors.New("unexpected status update")
 }
 func (r *personnelChangeExecutionRepository) Execute(_ context.Context, request PersonnelChangeRequest, _ string, now time.Time) (PersonnelChangeRequest, error) {

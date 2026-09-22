@@ -26,6 +26,7 @@ type User struct {
 	Email            *string
 	MobileCiphertext []byte
 	Status           string
+	ValidUntil       *time.Time
 	Version          uint64
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

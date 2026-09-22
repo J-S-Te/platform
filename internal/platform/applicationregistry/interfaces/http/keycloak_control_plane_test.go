@@ -149,6 +149,22 @@ func TestEnsurePrelinkedBrokerFlowCreatesSingleRequiredDenyExecution(t *testing.
 	}
 }
 
+func TestCanonicalRedirectURIsDeduplicatesAndSortsCutoverCallbacks(t *testing.T) {
+	got := canonicalRedirectURIs([]string{
+		" https://platform.example.com/app/auth/callback ",
+		"http://platform.example.com/app/auth/callback",
+		"https://platform.example.com/app/auth/callback",
+		"",
+	})
+	want := []string{
+		"http://platform.example.com/app/auth/callback",
+		"https://platform.example.com/app/auth/callback",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("redirect URIs = %#v, want %#v", got, want)
+	}
+}
+
 func TestEnsureBrokerReviewProfileDisabledUpdatesEffectiveFlowConfig(t *testing.T) {
 	var updated map[string]any
 	server := httptest.NewServer(stdhttp.HandlerFunc(func(response stdhttp.ResponseWriter, request *stdhttp.Request) {
