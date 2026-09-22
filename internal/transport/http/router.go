@@ -216,6 +216,8 @@ func NewRouter(
 			apiRouter.POST("/personnel-changes/:change_id/submit", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Submit))
 			apiRouter.POST("/personnel-changes/:change_id/cancel", middleware.RequirePermission("platform:user:update"), adaptHandler(operational.PersonnelChanges.Cancel))
 			apiRouter.GET("/personnel-changes/:change_id/preview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.Preview))
+			apiRouter.GET("/personnel-changes/:change_id/handover-items", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.ListHandoverItems))
+			apiRouter.POST("/personnel-changes/:change_id/handover-items/:item_id/complete", middleware.RequirePermission("platform:user:update"), middleware.RequirePermission("platform:approval:process"), adaptHandler(operational.PersonnelChanges.CompleteHandoverItem))
 		}
 
 		if managementHandler != nil {

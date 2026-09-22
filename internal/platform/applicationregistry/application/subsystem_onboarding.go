@@ -27,22 +27,23 @@ const (
 const (
 	// 审计写入客户端是所有接入环境的基线能力，只能追加审计事件；它与浏览器登录、
 	// 授权目录发布和子系统间业务调用使用不同客户端，避免任一密钥泄露后权限横向扩散。
-	ServiceCredentialAuditIngest                    = "audit_ingest"
-	ServiceCredentialNotificationIngest             = "notification_ingest"
-	ServiceCredentialExternalUserProvision          = "external_user_provision"
-	ServiceCredentialApplicationRoleAssign          = "application_role_assign"
-	ServiceCredentialApplicationRoleRevoke          = "application_role_revoke"
-	ServiceCredentialPortalMappingProvision         = "portal_mapping_provision"
-	ServiceCredentialPortalMappingDisable           = "portal_mapping_disable"
-	ServiceCredentialPortalInviteVerify             = "portal_invite_verify"
-	ServiceCredentialOwnerDirectoryRead             = "owner_directory_read"
-	ServiceCredentialContractOpportunitySignedWrite = "contract_opportunity_signed_write"
-	ServiceCredentialContractSummaryRead            = "contract_summary_read"
-	ServiceCredentialCRMContractReferenceRead       = "crm_contract_reference_read"
-	ServiceCredentialContractDashboardRead          = "contract_dashboard_read"
-	ServiceCredentialProjectDashboardRead           = "project_dashboard_read"
-	ServiceCredentialContractApprovedRead           = "contract_approved_read"
-	ServiceCredentialProjectContractImport          = "project_contract_import"
+	ServiceCredentialAuditIngest                        = "audit_ingest"
+	ServiceCredentialNotificationIngest                 = "notification_ingest"
+	ServiceCredentialExternalUserProvision              = "external_user_provision"
+	ServiceCredentialApplicationRoleAssign              = "application_role_assign"
+	ServiceCredentialApplicationRoleRevoke              = "application_role_revoke"
+	ServiceCredentialPortalMappingProvision             = "portal_mapping_provision"
+	ServiceCredentialPortalMappingDisable               = "portal_mapping_disable"
+	ServiceCredentialPortalInviteVerify                 = "portal_invite_verify"
+	ServiceCredentialOwnerDirectoryRead                 = "owner_directory_read"
+	ServiceCredentialContractOpportunitySignedWrite     = "contract_opportunity_signed_write"
+	ServiceCredentialContractSummaryRead                = "contract_summary_read"
+	ServiceCredentialContractOpportunitySignedCountRead = "contract_opportunity_signed_count_read"
+	ServiceCredentialCRMContractReferenceRead           = "crm_contract_reference_read"
+	ServiceCredentialContractDashboardRead              = "contract_dashboard_read"
+	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
+	ServiceCredentialContractApprovedRead               = "contract_approved_read"
+	ServiceCredentialProjectContractImport              = "project_contract_import"
 	// ServiceCredentialFileGatewayWrite 是业务子系统上传并绑定自身文件的最小组合凭据；
 	// 下载凭据不包含在内，避免写入型 Worker 同时取得任意文件读取能力。
 	ServiceCredentialFileGatewayWrite = "file_gateway_write"
@@ -527,23 +528,24 @@ type integratedServicePurposeDefinition struct {
 }
 
 var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefinition{
-	ServiceCredentialAuditIngest:                    {ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
-	ServiceCredentialNotificationIngest:             {ServiceCredentialNotificationIngest, "notification-publisher", "Notification Publisher", "notification.ingest"},
-	ServiceCredentialOwnerDirectoryRead:             {ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"},
-	ServiceCredentialExternalUserProvision:          {ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
-	ServiceCredentialApplicationRoleAssign:          {ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
-	ServiceCredentialApplicationRoleRevoke:          {ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
-	ServiceCredentialPortalMappingProvision:         {ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
-	ServiceCredentialPortalMappingDisable:           {ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
-	ServiceCredentialPortalInviteVerify:             {ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
-	ServiceCredentialContractOpportunitySignedWrite: {ServiceCredentialContractOpportunitySignedWrite, "opportunity-intake", "Opportunity Signed Intake", "opportunity.signed.write"},
-	ServiceCredentialContractSummaryRead:            {ServiceCredentialContractSummaryRead, "contract-summary", "Contract Summary Reader", "contract.summary.read"},
-	ServiceCredentialCRMContractReferenceRead:       {ServiceCredentialCRMContractReferenceRead, "crm-contract-reference", "CRM Contract Reference Reader", "customer.contract_reference.read"},
-	ServiceCredentialContractDashboardRead:          {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
-	ServiceCredentialProjectDashboardRead:           {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
-	ServiceCredentialContractApprovedRead:           {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
-	ServiceCredentialProjectContractImport:          {ServiceCredentialProjectContractImport, "project-integration", "Project Contract Importer", "project.contract.import"},
-	ServiceCredentialFileGatewayWrite:               {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
+	ServiceCredentialAuditIngest:                        {ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
+	ServiceCredentialNotificationIngest:                 {ServiceCredentialNotificationIngest, "notification-publisher", "Notification Publisher", "notification.ingest"},
+	ServiceCredentialOwnerDirectoryRead:                 {ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"},
+	ServiceCredentialExternalUserProvision:              {ServiceCredentialExternalUserProvision, "external-user-provision", "External User Provisioner", "external_user.provision"},
+	ServiceCredentialApplicationRoleAssign:              {ServiceCredentialApplicationRoleAssign, "role-assign", "Application Role Assigner", "application_role.assign"},
+	ServiceCredentialApplicationRoleRevoke:              {ServiceCredentialApplicationRoleRevoke, "role-revoke", "Application Role Revoker", "application_role.revoke"},
+	ServiceCredentialPortalMappingProvision:             {ServiceCredentialPortalMappingProvision, "portal-mapping-provision", "Portal Identity Mapping Provisioner", "portal.identity_mapping.provision"},
+	ServiceCredentialPortalMappingDisable:               {ServiceCredentialPortalMappingDisable, "portal-mapping-disable", "Portal Identity Mapping Disabler", "portal.identity_mapping.disable"},
+	ServiceCredentialPortalInviteVerify:                 {ServiceCredentialPortalInviteVerify, "portal-invite-verify", "Portal Invite Verifier", "portal.invite.verify"},
+	ServiceCredentialContractOpportunitySignedWrite:     {ServiceCredentialContractOpportunitySignedWrite, "opportunity-intake", "Opportunity Signed Intake", "opportunity.signed.write"},
+	ServiceCredentialContractSummaryRead:                {ServiceCredentialContractSummaryRead, "contract-summary", "Contract Summary Reader", "contract.summary.read"},
+	ServiceCredentialContractOpportunitySignedCountRead: {ServiceCredentialContractOpportunitySignedCountRead, "contract-signed-count", "Contract Opportunity Signed Count Reader", "contract.opportunity_signed_count.read"},
+	ServiceCredentialCRMContractReferenceRead:           {ServiceCredentialCRMContractReferenceRead, "crm-contract-reference", "CRM Contract Reference Reader", "customer.contract_reference.read"},
+	ServiceCredentialContractDashboardRead:              {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
+	ServiceCredentialProjectDashboardRead:               {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
+	ServiceCredentialContractApprovedRead:               {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
+	ServiceCredentialProjectContractImport:              {ServiceCredentialProjectContractImport, "project-integration", "Project Contract Importer", "project.contract.import"},
+	ServiceCredentialFileGatewayWrite:                   {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
 }
 
 // hardcodedIntegratedServicePurposes 是平台内置默认的集成服务用途（不含 audit_ingest 基线）。
@@ -551,7 +553,7 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case integratedCustomerApplicationCode:
-		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialContractOpportunitySignedCountRead}
 	case integratedPortalApplicationCode:
 		return []string{
 			ServiceCredentialExternalUserProvision,

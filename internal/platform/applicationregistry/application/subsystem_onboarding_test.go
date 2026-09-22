@@ -259,7 +259,7 @@ func TestOnboardSubsystemServiceBindingsFromManifestDriveClientCreation(t *testi
 }
 
 func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testing.T) {
-	// 未声明 allowed_service_bindings 时回退平台硬编码默认：customer 只创建 owner_directory + 审计。
+	// 未声明 allowed_service_bindings 时回退平台硬编码默认。
 	repository := &subsystemOnboardingRepositoryStub{}
 	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
 	if err != nil {
@@ -273,14 +273,14 @@ func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 3 {
-		t.Fatalf("fallback clients = %d, want audit + owner_directory + notification", len(repository.write.ServiceClients))
+	if len(repository.write.ServiceClients) != 4 {
+		t.Fatalf("fallback clients = %d, want audit + owner_directory + notification + signed count", len(repository.write.ServiceClients))
 	}
 	purposes := map[string]bool{}
 	for _, item := range repository.write.ServiceClients {
 		purposes[item.Purpose] = true
 	}
-	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] || !purposes[ServiceCredentialNotificationIngest] {
+	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] || !purposes[ServiceCredentialNotificationIngest] || !purposes[ServiceCredentialContractOpportunitySignedCountRead] {
 		t.Fatalf("fallback clients = %v", purposes)
 	}
 }
@@ -318,7 +318,7 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 3 || len(result.ServiceCredentials) != 3 {
+	if len(repository.write.ServiceClients) != 4 || len(result.ServiceCredentials) != 4 {
 		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
 	}
 	credentials := make(map[string]SubsystemServiceCredential, len(result.ServiceCredentials))
@@ -338,6 +338,10 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 		t.Fatal("owner directory plaintext secret must be returned once during onboarding")
 	}
 	notificationCredential := credentials[ServiceCredentialNotificationIngest]
+	signedCountCredential := credentials[ServiceCredentialContractOpportunitySignedCountRead]
+	if len(signedCountCredential.OAuthClient.Scopes) != 1 || signedCountCredential.OAuthClient.Scopes[0] != "contract.opportunity_signed_count.read" || signedCountCredential.PlaintextSecret == "" {
+		t.Fatalf("signed count credential=%#v", signedCountCredential)
+	}
 	if notificationCredential.Purpose != ServiceCredentialNotificationIngest || len(notificationCredential.OAuthClient.Scopes) != 1 || notificationCredential.OAuthClient.Scopes[0] != "notification.ingest" || notificationCredential.PlaintextSecret == "" {
 		t.Fatalf("notification credential=%#v", notificationCredential)
 	}

@@ -143,11 +143,14 @@ func (service *Service) GetNotificationSettings(ctx context.Context, tenantID st
 	return settings, err
 }
 
-// UpdateNotificationSettings validates and saves only in-app and email channel preferences.
+// UpdateNotificationSettings validates and saves the channels that are actually available.
+// Email delivery is deliberately rejected until an email provider and delivery worker are
+// configured. Persisting an enabled switch without a sender would create a false operational
+// signal and silently lose business notifications.
 func (service *Service) UpdateNotificationSettings(ctx context.Context, input NotificationSettingsUpdateInput) (domain.NotificationSettings, error) {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
-	if input.TenantID == "" || input.OperatorID == "" || input.Version == 0 || !validReminderFrequency(input.ReminderFrequency) {
+	if input.TenantID == "" || input.OperatorID == "" || input.Version == 0 || input.EmailEnabled || !validReminderFrequency(input.ReminderFrequency) {
 		return domain.NotificationSettings{}, ErrValidation
 	}
 	settingsID, err := service.ids.New(service.clock.Now().UTC())
@@ -162,7 +165,7 @@ func defaultPlatformSettings(tenantID string) domain.PlatformSettings {
 }
 
 func defaultNotificationSettings(tenantID string) domain.NotificationSettings {
-	return domain.NotificationSettings{TenantID: tenantID, InboxEnabled: true, EmailEnabled: true, ReminderFrequency: domain.ReminderFrequencyDaily, Version: 1}
+	return domain.NotificationSettings{TenantID: tenantID, InboxEnabled: true, EmailEnabled: false, ReminderFrequency: domain.ReminderFrequencyDaily, Version: 1}
 }
 
 func normalizePlatformSettings(input PlatformSettingsUpdateInput) PlatformSettingsUpdateInput {

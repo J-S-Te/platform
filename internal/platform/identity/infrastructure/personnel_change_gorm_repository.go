@@ -5,12 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -26,19 +25,46 @@ type personnelChangeModel struct {
 	Status               string     `gorm:"column:status"`
 	Reason               string     `gorm:"column:reason"`
 	ApprovalReference    *string    `gorm:"column:approval_reference"`
+	HandoverReference    *string    `gorm:"column:handover_reference"`
+	RejectionReason      *string    `gorm:"column:rejection_reason"`
 	EffectiveAt          time.Time  `gorm:"column:effective_at"`
 	SubmittedBy          string     `gorm:"column:submitted_by"`
 	ApprovedBy           *string    `gorm:"column:approved_by"`
 	ApprovedAt           *time.Time `gorm:"column:approved_at"`
 	ExecutedAt           *time.Time `gorm:"column:executed_at"`
+	CancelledAt          *time.Time `gorm:"column:cancelled_at"`
+	UserDisplayName      string     `gorm:"column:user_display_name;->"`
+	SourceOrganization   string     `gorm:"column:source_organization_name;->"`
+	SourcePosition       string     `gorm:"column:source_position_name;->"`
+	TargetOrganization   string     `gorm:"column:target_organization_name;->"`
+	TargetPosition       string     `gorm:"column:target_position_name;->"`
 	Version              uint64     `gorm:"column:version"`
 	CreatedAt, UpdatedAt time.Time
 }
 
+type personnelChangeTransitionModel struct {
+	ID             uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	TenantID       string    `gorm:"column:tenant_id"`
+	RequestID      string    `gorm:"column:request_id"`
+	FromStatus     string    `gorm:"column:from_status"`
+	ToStatus       string    `gorm:"column:to_status"`
+	OperatorID     string    `gorm:"column:operator_id"`
+	ReferenceValue *string   `gorm:"column:reference_value"`
+	CreatedAt      time.Time `gorm:"column:created_at"`
+}
+
+func (personnelChangeTransitionModel) TableName() string { return "iam_personnel_change_transition" }
+
+type personnelHandoverItemModel struct {
+	ID, TenantID, RequestID, SystemCode, ResourceType, ResourceID, CurrentOwnerID, Status string
+	CreatedAt, UpdatedAt                                                                  time.Time
+}
+
+func (personnelHandoverItemModel) TableName() string { return "iam_personnel_handover_item" }
+
 // Execute applies an approved change atomically. Position changes close the old
 // appointment and create a new one; termination disables all user access.
 func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req application.PersonnelChangeRequest, operator string, now time.Time) (application.PersonnelChangeRequest, error) {
-	var temporaryPassword string
 	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
 		// Serialize execution for the request. Multiple worker replicas may observe the
 		// same due row; locking and re-checking the status makes the second execution a
@@ -57,6 +83,19 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 		// 与数据库当前请求内容分叉。
 		req = toPersonnel(locked)
 		if req.ChangeType == domain.PersonnelChangeTermination {
+			var accountIDs []string
+			if err := tx.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ?", req.TenantID, req.UserID).Pluck("id", &accountIDs).Error; err != nil {
+				return fmt.Errorf("list accounts before personnel termination: %w", err)
+			}
+			identityRepository := &GORMRepository{database: tx}
+			for _, accountID := range accountIDs {
+				// Revoke platform sessions, authorization codes, refresh families and
+				// enqueue RP back-channel logout before disabling the account. Accounts
+				// without an active session are a valid termination case.
+				if err := identityRepository.RevokeAccountSessions(c, req.TenantID, accountID, now, "PERSONNEL_TERMINATION"); err != nil && !errors.Is(err, application.ErrUnauthenticated) {
+					return fmt.Errorf("revoke account sessions during personnel termination: %w", err)
+				}
+			}
 			if err := tx.Model(&membershipModel{}).Where("tenant_id = ? AND user_id = ? AND status <> ?", req.TenantID, req.UserID, domain.StatusDisabled).Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": now, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return err
 			}
@@ -115,63 +154,30 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 				}
 			}
 			if req.ChangeType == domain.PersonnelChangeRehire {
-				var user userModel
-				if err := tx.Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).First(&user).Error; err != nil {
-					return err
-				}
 				var account accountModel
 				accountResult := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND user_id = ? AND account_type = ? AND auth_source = ?", req.TenantID, req.UserID, "HUMAN", "LOCAL").Order("created_at DESC").First(&account)
-				if accountResult.Error != nil && !errors.Is(accountResult.Error, gorm.ErrRecordNotFound) {
-					return accountResult.Error
-				}
 				if errors.Is(accountResult.Error, gorm.ErrRecordNotFound) {
-					accountID, err := (ulid.Generator{}).New(now)
-					if err != nil {
-						return err
-					}
-					account = accountModel{ID: accountID, TenantID: req.TenantID, UserID: &req.UserID, AccountType: "HUMAN", AuthSource: "LOCAL", Status: domain.StatusActive, Version: 1, CreatedAt: now, CreatedBy: &operator, UpdatedAt: now, UpdatedBy: &operator}
-				}
-				temporaryPassword, _ = (application.CryptoPasswordGenerator{}).Generate()
-				if temporaryPassword == "" {
-					return fmt.Errorf("generate rehire temporary password")
-				}
-				digest, metadata, err := (security.Argon2idPasswordHasher{}).Hash(temporaryPassword)
-				if err != nil {
-					return fmt.Errorf("hash rehire temporary password: %w", err)
-				}
-				accountName := req.UserID
-				if user.EmployeeNo != nil && *user.EmployeeNo != "" {
-					accountName = *user.EmployeeNo
-				}
-				if account.Username == nil || *account.Username == "" {
-					account.Username = &accountName
+					return fmt.Errorf("rehire requires an existing local account: %w", application.ErrValidation)
 				}
 				if accountResult.Error != nil {
-					if err := tx.Create(&account).Error; err != nil {
-						return err
-					}
-				} else if err := tx.Model(&accountModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, account.ID).Updates(map[string]any{"status": domain.StatusActive, "username": account.Username, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
+					return accountResult.Error
+				}
+				if err := tx.Model(&accountModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, account.ID).Updates(map[string]any{"status": domain.StatusActive, "locked_until": nil, "valid_until": nil, "expiry_processed_at": nil, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 					return err
 				}
 				var credential passwordCredentialModel
-				credentialResult := tx.Where("account_id = ?", account.ID).First(&credential)
+				credentialResult := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("account_id = ?", account.ID).First(&credential)
 				if errors.Is(credentialResult.Error, gorm.ErrRecordNotFound) {
-					credentialID, err := (ulid.Generator{}).New(now)
-					if err != nil {
-						return err
-					}
-					if err := tx.Create(&passwordCredentialModel{ID: credentialID, AccountID: account.ID, PasswordHash: digest, HashAlgorithm: "argon2id", AlgorithmParams: metadata, MustChange: true, Status: domain.StatusActive, PasswordChangedAt: now, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
-						return err
-					}
+					return fmt.Errorf("rehire requires an initialized local credential: %w", application.ErrValidation)
 				} else if credentialResult.Error != nil {
 					return credentialResult.Error
-				} else if err := tx.Model(&passwordCredentialModel{}).Where("id = ?", credential.ID).Updates(map[string]any{"password_hash": digest, "algorithm_params": metadata, "must_change": true, "failed_attempts": 0, "last_failed_at": nil, "status": domain.StatusActive, "password_changed_at": now, "updated_at": now}).Error; err != nil {
+				} else if err := tx.Model(&passwordCredentialModel{}).Where("id = ?", credential.ID).Updates(map[string]any{"must_change": true, "failed_attempts": 0, "last_failed_at": nil, "status": domain.StatusActive, "updated_at": now}).Error; err != nil {
 					return err
 				}
 				if err := tx.Model(&sessionModel{}).Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", req.TenantID, account.ID, domain.StatusActive).Updates(map[string]any{"revoked_at": now, "revoke_reason": "PERSONNEL_REHIRE", "status": "REVOKED"}).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusActive, "employment_status": "EMPLOYED", "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				if err := tx.Model(&userModel{}).Where("tenant_id = ? AND id = ?", req.TenantID, req.UserID).Updates(map[string]any{"status": domain.StatusActive, "employment_status": "EMPLOYED", "valid_until": nil, "expiry_processed_at": nil, "updated_at": now, "updated_by": operator, "version": gorm.Expr("version + 1")}).Error; err != nil {
 					return err
 				}
 			}
@@ -188,6 +194,9 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 		if executionUpdate.RowsAffected != 1 {
 			return application.ErrConflict
 		}
+		if err := tx.Create(&personnelChangeTransitionModel{TenantID: req.TenantID, RequestID: req.ID, FromStatus: domain.PersonnelChangeScheduled, ToStatus: domain.PersonnelChangeExecuted, OperatorID: operator, CreatedAt: now}).Error; err != nil {
+			return fmt.Errorf("record personnel change execution: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
@@ -197,7 +206,6 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 	if err != nil {
 		return application.PersonnelChangeRequest{}, err
 	}
-	result.TemporaryPassword = temporaryPassword
 	return result, nil
 }
 
@@ -220,12 +228,22 @@ func (r *PersonnelChangeGORMRepository) ValidateCreate(c context.Context, in app
 		if user.Status != domain.StatusDisabled {
 			return fmt.Errorf("rehire requires a disabled user: %w", application.ErrValidation)
 		}
+		var initializedAccounts int64
+		if err := r.db.WithContext(c).Table("iam_account AS account").
+			Joins("JOIN iam_password_credential AS credential ON credential.account_id = account.id AND credential.status = ?", domain.StatusActive).
+			Where("account.tenant_id = ? AND account.user_id = ? AND account.account_type = ? AND account.auth_source = ?", in.TenantID, in.UserID, "HUMAN", "LOCAL").
+			Count(&initializedAccounts).Error; err != nil {
+			return fmt.Errorf("check rehire account: %w", err)
+		}
+		if initializedAccounts == 0 {
+			return fmt.Errorf("rehire requires an initialized local account: %w", application.ErrValidation)
+		}
 	} else if user.Status != domain.StatusActive {
 		return fmt.Errorf("personnel change requires an active user: %w", application.ErrValidation)
 	}
+	var sourceMembership membershipModel
 	if in.SourceMembershipID != "" {
-		var membership membershipModel
-		if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND user_id = ? AND status = ?", in.TenantID, in.SourceMembershipID, in.UserID, domain.StatusActive).First(&membership).Error; err != nil {
+		if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND user_id = ? AND status = ?", in.TenantID, in.SourceMembershipID, in.UserID, domain.StatusActive).First(&sourceMembership).Error; err != nil {
 			return fmt.Errorf("source membership is not active for the selected user: %w", application.ErrValidation)
 		}
 	}
@@ -238,6 +256,18 @@ func (r *PersonnelChangeGORMRepository) ValidateCreate(c context.Context, in app
 		if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND status = ?", in.TenantID, in.TargetOrgUnitID, domain.StatusActive).First(&organization).Error; err != nil {
 			return fmt.Errorf("target organization is not active: %w", application.ErrValidation)
 		}
+		if in.ChangeType != domain.PersonnelChangeRehire && sourceMembership.ID != "" && sourceMembership.OrgUnitID == in.TargetOrgUnitID && sourceMembership.PositionID == in.TargetPositionID {
+			return fmt.Errorf("target assignment must differ from the source assignment: %w", application.ErrValidation)
+		}
+	}
+	var activeRequests int64
+	if err := r.db.WithContext(c).Model(&personnelChangeModel{}).
+		Where("tenant_id = ? AND user_id = ? AND status IN ?", in.TenantID, in.UserID, []string{domain.PersonnelChangeDraft, domain.PersonnelChangePendingApproval, domain.PersonnelChangePendingHandover, domain.PersonnelChangeScheduled}).
+		Count(&activeRequests).Error; err != nil {
+		return fmt.Errorf("check active personnel changes: %w", err)
+	}
+	if activeRequests > 0 {
+		return fmt.Errorf("the selected user already has an active personnel change: %w", application.ErrConflict)
 	}
 	return nil
 }
@@ -246,7 +276,7 @@ func requiresCreateTarget(changeType string) bool {
 	return changeType != domain.PersonnelChangeTermination
 }
 func toPersonnel(m personnelChangeModel) application.PersonnelChangeRequest {
-	return application.PersonnelChangeRequest{ID: m.ID, TenantID: m.TenantID, UserID: m.UserID, SourceMembershipID: deref(m.SourceMembershipID), TargetOrgUnitID: deref(m.TargetOrgUnitID), TargetPositionID: deref(m.TargetPositionID), ChangeType: m.ChangeType, Status: m.Status, Reason: m.Reason, ApprovalReference: deref(m.ApprovalReference), SubmittedBy: m.SubmittedBy, ApprovedBy: deref(m.ApprovedBy), EffectiveAt: &m.EffectiveAt, ApprovedAt: m.ApprovedAt, ExecutedAt: m.ExecutedAt, Version: m.Version, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
+	return application.PersonnelChangeRequest{ID: m.ID, TenantID: m.TenantID, UserID: m.UserID, UserDisplayName: m.UserDisplayName, SourceMembershipID: deref(m.SourceMembershipID), SourceOrganization: m.SourceOrganization, SourcePosition: m.SourcePosition, TargetOrgUnitID: deref(m.TargetOrgUnitID), TargetOrganization: m.TargetOrganization, TargetPositionID: deref(m.TargetPositionID), TargetPosition: m.TargetPosition, ChangeType: m.ChangeType, Status: m.Status, Reason: m.Reason, ApprovalReference: deref(m.ApprovalReference), HandoverReference: deref(m.HandoverReference), RejectionReason: deref(m.RejectionReason), SubmittedBy: m.SubmittedBy, ApprovedBy: deref(m.ApprovedBy), EffectiveAt: &m.EffectiveAt, ApprovedAt: m.ApprovedAt, ExecutedAt: m.ExecutedAt, CancelledAt: m.CancelledAt, Version: m.Version, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
 }
 func deref(s *string) string {
 	if s == nil {
@@ -273,28 +303,44 @@ func (r *PersonnelChangeGORMRepository) Create(c context.Context, v application.
 		m.ApprovalReference = &x
 	}
 
-	if err := r.db.WithContext(c).Create(&m).Error; err != nil {
+	if err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&m).Error; err != nil {
+			return err
+		}
+		return tx.Create(&personnelChangeTransitionModel{TenantID: v.TenantID, RequestID: v.ID, FromStatus: "", ToStatus: v.Status, OperatorID: v.SubmittedBy, CreatedAt: v.CreatedAt}).Error
+	}); err != nil {
 		return application.PersonnelChangeRequest{}, err
 	}
 	return toPersonnel(m), nil
 }
 func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status, changeType, keyword string) (out []application.PersonnelChangeRequest, err error) {
-	q := r.db.WithContext(c)
+	q := r.db.WithContext(c).Table("iam_personnel_change_request AS pcr").
+		Select(`pcr.*, user.display_name AS user_display_name,
+			COALESCE(source_org.name, '') AS source_organization_name,
+			COALESCE(source_position.name, '') AS source_position_name,
+			COALESCE(target_org.name, '') AS target_organization_name,
+			COALESCE(target_position.name, '') AS target_position_name`).
+		Joins("JOIN iam_user AS user ON user.tenant_id = pcr.tenant_id AND user.id = pcr.user_id").
+		Joins("LEFT JOIN iam_membership AS source_membership ON source_membership.tenant_id = pcr.tenant_id AND source_membership.id = pcr.source_membership_id").
+		Joins("LEFT JOIN iam_org_unit AS source_org ON source_org.tenant_id = pcr.tenant_id AND source_org.id = source_membership.org_unit_id").
+		Joins("LEFT JOIN iam_position AS source_position ON source_position.tenant_id = pcr.tenant_id AND source_position.id = source_membership.position_id").
+		Joins("LEFT JOIN iam_org_unit AS target_org ON target_org.tenant_id = pcr.tenant_id AND target_org.id = pcr.target_org_unit_id").
+		Joins("LEFT JOIN iam_position AS target_position ON target_position.tenant_id = pcr.tenant_id AND target_position.id = pcr.target_position_id")
 	if t != "" {
-		q = q.Where("tenant_id = ?", t)
+		q = q.Where("pcr.tenant_id = ?", t)
 	}
 	if status != "" {
-		q = q.Where("status = ?", status)
+		q = q.Where("pcr.status = ?", status)
 	}
 	if changeType != "" {
-		q = q.Where("change_type = ?", changeType)
+		q = q.Where("pcr.change_type = ?", changeType)
 	}
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		q = q.Where("user_id LIKE ? OR id LIKE ? OR approval_reference LIKE ?", like, like, like)
+		q = q.Where("pcr.user_id LIKE ? OR pcr.id LIKE ? OR pcr.approval_reference LIKE ? OR user.display_name LIKE ?", like, like, like, like)
 	}
 	var ms []personnelChangeModel
-	err = q.Order("created_at DESC").Find(&ms).Error
+	err = q.Order("pcr.created_at DESC").Scan(&ms).Error
 	for _, m := range ms {
 		out = append(out, toPersonnel(m))
 	}
@@ -303,22 +349,33 @@ func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status, chang
 func (r *PersonnelChangeGORMRepository) Get(c context.Context, t, id string) (application.PersonnelChangeRequest, error) {
 	var m personnelChangeModel
 	err := r.db.WithContext(c).Where("tenant_id = ? AND id = ?", t, id).First(&m).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return application.PersonnelChangeRequest{}, application.ErrNotFound
+	}
 	return toPersonnel(m), err
 }
 
 // UpdateStatus 按旧状态和版本原子推进人员异动；expected 提供租户、请求 ID、旧状态和
 // 版本，status/ref 是目标状态与审批凭据。记录已被执行、取消或由其他请求推进时返回
 // application.ErrConflict，成功时返回本次事务内读取的新快照。
-func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected application.PersonnelChangeRequest, status, ref string, now time.Time) (application.PersonnelChangeRequest, error) {
+func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected application.PersonnelChangeRequest, status, ref, operator string, now time.Time) (application.PersonnelChangeRequest, error) {
 	u := map[string]any{"status": status, "updated_at": now, "version": gorm.Expr("version + 1")}
-	if ref != "" {
-		u["approval_reference"] = ref
-	}
 	if status == "EXECUTED" {
 		u["executed_at"] = now
 	}
-	if status == "PENDING_APPROVAL" {
+	if expected.Status == domain.PersonnelChangePendingApproval && (status == domain.PersonnelChangePendingHandover || status == domain.PersonnelChangeScheduled) {
 		u["approval_reference"] = ref
+		u["approved_by"] = operator
+		u["approved_at"] = now
+	}
+	if expected.Status == domain.PersonnelChangePendingApproval && status == domain.PersonnelChangeRejected {
+		u["rejection_reason"] = ref
+	}
+	if expected.Status == domain.PersonnelChangePendingHandover && status == domain.PersonnelChangeScheduled {
+		u["handover_reference"] = ref
+	}
+	if status == domain.PersonnelChangeCancelled {
+		u["cancelled_at"] = now
 	}
 	var updated personnelChangeModel
 	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
@@ -330,6 +387,21 @@ func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected
 		}
 		if result.RowsAffected != 1 {
 			return application.ErrConflict
+		}
+		if expected.ChangeType == domain.PersonnelChangeTermination && expected.Status == domain.PersonnelChangePendingApproval && status == domain.PersonnelChangePendingHandover {
+			// Every termination gets a mandatory durable responsibility item. Subsystem
+			// adapters may add more items under the existing unique business key.
+			item := personnelHandoverItemModel{ID: expected.ID, TenantID: expected.TenantID, RequestID: expected.ID, SystemCode: "platform", ResourceType: "PERSONNEL_RESPONSIBILITY", ResourceID: expected.UserID, CurrentOwnerID: expected.UserID, Status: "PENDING", CreatedAt: now, UpdatedAt: now}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&item).Error; err != nil {
+				return fmt.Errorf("create mandatory personnel handover item: %w", err)
+			}
+		}
+		var reference *string
+		if trimmed := strings.TrimSpace(ref); trimmed != "" {
+			reference = &trimmed
+		}
+		if err := tx.Create(&personnelChangeTransitionModel{TenantID: expected.TenantID, RequestID: expected.ID, FromStatus: expected.Status, ToStatus: status, OperatorID: operator, ReferenceValue: reference, CreatedAt: now}).Error; err != nil {
+			return fmt.Errorf("record personnel change transition: %w", err)
 		}
 		if err := tx.Where("tenant_id = ? AND id = ?", expected.TenantID, expected.ID).First(&updated).Error; err != nil {
 			return err

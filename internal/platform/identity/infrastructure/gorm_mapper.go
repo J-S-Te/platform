@@ -16,6 +16,7 @@ func toDomainUser(model userModel) domain.User {
 		Email:            copyString(model.Email),
 		MobileCiphertext: append([]byte(nil), model.MobileCiphertext...),
 		Status:           model.Status,
+		ValidUntil:       copyTime(model.ValidUntil),
 		Version:          model.Version,
 		CreatedAt:        model.CreatedAt.UTC(),
 		UpdatedAt:        model.UpdatedAt.UTC(),

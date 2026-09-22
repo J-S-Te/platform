@@ -5,8 +5,12 @@ name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
 services:
   frontend:
     image: ${FRONTEND_IMAGE:-frontend/frontend:pending}
+    environment:
+      PUBLIC_HTTPS_ENABLED: "false"
+      PUBLIC_PLATFORM_HOST: ${PUBLIC_PLATFORM_HOST:-localhost}
+      PUBLIC_SSO_HOST: ${PUBLIC_SSO_HOST:-sso.localhost}
     ports:
-      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-18082}:80"
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTP_PORT:-${FRONTEND_PORT:-18082}}:80"
     networks: [application]
     restart: unless-stopped
 

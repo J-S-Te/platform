@@ -99,7 +99,7 @@ func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []appl
 				ID: write.ID, TenantID: write.TenantID, EmployeeNo: nullableString(write.EmployeeNo),
 				DisplayName: write.DisplayName, Email: nullableString(write.Email),
 				MobileCiphertext: nullableBytes(write.MobileCiphertext), MobileHash: nullableBytes(write.MobileHash),
-				EmploymentStatus: "EMPLOYED", Status: write.Status, Version: 1,
+				EmploymentStatus: "EMPLOYED", Status: write.Status, ValidUntil: nullableTime(write.ValidUntil), Version: 1,
 				CreatedAt: now, CreatedBy: nullableString(&write.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.OperatorID),
 			}
 			if err := transaction.Create(&row).Error; err != nil {
@@ -336,6 +336,10 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 		if input.Status != nil {
 			updates["status"] = *input.Status
 		}
+		if input.UpdateValidity {
+			updates["valid_until"] = nullableTime(input.ValidUntil)
+			updates["expiry_processed_at"] = nil
+		}
 		if input.UpdateMobile {
 			updates["mobile_ciphertext"] = nullableBytes(mobileCiphertext)
 			updates["mobile_hash"] = nullableBytes(mobileHash)
@@ -509,14 +513,17 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 		}
 
 		now := time.Now().UTC()
+		updates := map[string]any{
+			"status": input.Status, "updated_at": now, "updated_by": input.OperatorID,
+			"version": gorm.Expr("version + 1"),
+		}
+		if input.UpdateValidity {
+			updates["valid_until"] = nullableTime(input.ValidUntil)
+			updates["expiry_processed_at"] = nil
+		}
 		result = transaction.Model(&accountModel{}).
 			Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.AccountID, input.Version).
-			Updates(map[string]any{
-				"status":     input.Status,
-				"updated_at": now,
-				"updated_by": input.OperatorID,
-				"version":    gorm.Expr("version + 1"),
-			})
+			Updates(updates)
 		if result.Error != nil {
 			return mapWriteError(result.Error, "update account")
 		}
@@ -526,7 +533,8 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 
 		// 重新启用账号不是恢复会话：从 ACTIVE 进入任一非活动状态时撤销旧会话，之后
 		// 即使重新启用也必须重新认证。这里保留泛化的非 ACTIVE 判断，供后续锁定生命周期复用。
-		if existing.Status == domain.StatusActive && input.Status != domain.StatusActive {
+		validityNowExpired := input.UpdateValidity && input.ValidUntil != nil && !input.ValidUntil.After(now)
+		if existing.Status == domain.StatusActive && (input.Status != domain.StatusActive || validityNowExpired) {
 			result = transaction.Model(&sessionModel{}).
 				Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, domain.StatusActive).
 				Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "ACCOUNT_STATUS_CHANGED"})

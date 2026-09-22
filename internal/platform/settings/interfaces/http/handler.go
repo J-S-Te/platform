@@ -141,7 +141,8 @@ func (handler *Handler) UpdatePlatformSettings(writer http.ResponseWriter, reque
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "平台基础设置已保存", platformSettingsToResponse(settings))
 }
 
-// GetNotificationSettings returns settings for only the supported inbox and email channels.
+// GetNotificationSettings returns notification preferences. email_enabled is retained for
+// wire compatibility but remains false while the platform has no email delivery worker.
 func (handler *Handler) GetNotificationSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -157,7 +158,8 @@ func (handler *Handler) GetNotificationSettings(writer http.ResponseWriter, requ
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "通知设置查询成功", notificationSettingsToResponse(settings))
 }
 
-// UpdateNotificationSettings saves tenant-level inbox/email preferences and reminder frequency.
+// UpdateNotificationSettings saves tenant-level inbox preferences and reminder frequency.
+// The application service rejects email_enabled=true until email delivery is implemented.
 func (handler *Handler) UpdateNotificationSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {

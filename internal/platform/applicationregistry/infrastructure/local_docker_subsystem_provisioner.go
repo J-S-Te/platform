@@ -479,6 +479,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		values["PLATFORM_OWNER_DIRECTORY_SCOPE"] = "owner_directory.read"
 		values["PLATFORM_OWNER_DIRECTORY_CLIENT_ID"] = ownerCredential.OAuthClient.ClientID
 		values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
+		signedCountCredential, ok := input.ServiceCredential(application.ServiceCredentialContractOpportunitySignedCountRead)
+		if !ok {
+			return provisioningError("customer contract signed count credential is unavailable")
+		}
+		expectedSignedCountClientID := input.ApplicationCode + "-" + input.Environment + "-contract-signed-count"
+		if signedCountCredential.OAuthClient.ClientID != expectedSignedCountClientID {
+			return provisioningError("customer contract signed count credential does not match the target environment")
+		}
+		values["CONTRACT_SIGNED_COUNT_ENABLED"] = "true"
+		values["CONTRACT_SIGNED_COUNT_URL"] = "http://contract-api:8081/contract_management/internal/opportunity-contract-counts/query"
+		values["CONTRACT_SIGNED_COUNT_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+		values["CONTRACT_SIGNED_COUNT_CLIENT_ID"] = signedCountCredential.OAuthClient.ClientID
+		values["CONTRACT_SIGNED_COUNT_CLIENT_SECRET"] = signedCountCredential.PlaintextSecret
+		values["CONTRACT_SIGNED_COUNT_SCOPE"] = "contract.opportunity_signed_count.read"
 	case integratedContractApplicationCode:
 		// Normal updates preserve the existing owner-directory credential. Retry
 		// supplies a replacement secret when the previous delivery may have failed.
@@ -952,6 +966,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["CONTRACT_MACHINE_TOKEN_ISSUER"] = "basic-platform"
 		values["CONTRACT_MACHINE_TOKEN_AUDIENCE"] = "basic-platform-application"
 		values["CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CRM_SIGNED_COUNT_MACHINE_ENABLED"] = "true"
+		values["CRM_SIGNED_COUNT_MACHINE_REQUIRE_BEARER"] = "true"
+		values["CRM_SIGNED_COUNT_MACHINE_ISSUER"] = "basic-platform"
+		values["CRM_SIGNED_COUNT_MACHINE_AUDIENCE"] = "basic-platform-application"
+		values["CRM_SIGNED_COUNT_MACHINE_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CRM_SIGNED_COUNT_MACHINE_CLIENT_ID"] = integratedCustomerApplicationCode + "-" + input.Environment + "-contract-signed-count"
+		values["CRM_SIGNED_COUNT_MACHINE_CALLER_APPLICATION_CODE"] = integratedCustomerApplicationCode
+		values["CRM_SIGNED_COUNT_MACHINE_CALLER_ENVIRONMENT_CODE"] = input.Environment
+		values["CRM_SIGNED_COUNT_MACHINE_REQUIRED_SCOPE"] = "contract.opportunity_signed_count.read"
 		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credentials[application.ServiceCredentialOwnerDirectoryRead].OAuthClient.ClientID
 		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credentials[application.ServiceCredentialOwnerDirectoryRead].PlaintextSecret
 		values["CRM_REFERENCE_ENABLED"] = "true"

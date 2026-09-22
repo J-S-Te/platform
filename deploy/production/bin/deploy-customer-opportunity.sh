@@ -31,6 +31,7 @@ portal_runtime_file="$deploy_dir/runtime/portal.env"
 customer_runtime_template="$deploy_dir/subsystem-templates/customer.env.example"
 portal_runtime_template="$deploy_dir/subsystem-templates/portal.env.example"
 compose_file="$deploy_dir/compose.yaml"
+transport_helper="$deploy_dir/bin/public-transport.sh"
 profiles_dir="$deploy_dir/subsystems.d"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_runtime_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_runtime_file"
@@ -52,9 +53,13 @@ for command_name in docker curl gzip flock awk mktemp install stat df ln; do
   }
 done
 docker compose version >/dev/null
-for required_file in "$runtime_file" "$release_file" "$compose_file"; do
+for required_file in "$runtime_file" "$release_file" "$compose_file" "$transport_helper"; do
   [[ -f "$required_file" ]] || { echo "缺少 $required_file" >&2; exit 1; }
 done
+
+# shellcheck source=public-transport.sh
+source "$transport_helper"
+public_transport_prepare "$deploy_dir"
 [[ -f "$profiles_dir/customer_and_opportunity-prod.yaml" && -f "$profiles_dir/customer_portal-prod.yaml" ]] || {
   echo "缺少 CRM/Portal 生产接入审核清单，请先发布最新 platform 生产资产" >&2
   exit 1
@@ -139,15 +144,17 @@ initialize_runtime_file "$portal_runtime_file" "$portal_runtime_template"
 
 exec 9>"$deploy_dir/runtime/.deploy.lock"
 flock -w 900 9 || { echo "等待其他发布任务超时" >&2; exit 1; }
+public_transport_prepare "$deploy_dir"
 
 compose() {
-  docker compose \
+  local command=(docker compose \
     --project-directory "$deploy_dir" \
     --file "$compose_file" \
     --env-file "$runtime_file" \
     --env-file "$release_file" \
-    --profile customer \
-    "$@"
+    --profile customer)
+  public_transport_compose_args command
+  "${command[@]}" "$@"
 }
 
 env_value_from() {

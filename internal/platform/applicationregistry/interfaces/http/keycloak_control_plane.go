@@ -1257,6 +1257,19 @@ func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Cont
 // the existing subsystems. Attribute import from the upstream platform IdP is
 // configured separately before this method is allowed to switch production.
 func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID, name, redirectURI string) (keycloakClientResult, error) {
+	return control.EnsureClientRedirectURIs(ctx, clientID, name, []string{redirectURI})
+}
+
+// EnsureClientRedirectURIs atomically replaces the complete platform-managed
+// callback set for one Realm Client. Transport cutovers use two callbacks while
+// traffic drains, then call it again with the single target callback. The
+// method never reads or mutates unrelated Client secrets beyond the existing
+// secret retrieval required by subsystem onboarding.
+func (control *keycloakControlPlane) EnsureClientRedirectURIs(ctx context.Context, clientID, name string, redirectURIs []string) (keycloakClientResult, error) {
+	redirectURIs = canonicalRedirectURIs(redirectURIs)
+	if len(redirectURIs) == 0 {
+		return keycloakClientResult{}, errors.New("at least one Keycloak redirect URI is required")
+	}
 	token, err := control.token(ctx)
 	if err != nil {
 		return keycloakClientResult{}, err
@@ -1281,7 +1294,7 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 	if decodeErr != nil {
 		return keycloakClientResult{}, decodeErr
 	}
-	payload := map[string]any{"clientId": clientID, "name": name, "enabled": true, "protocol": "openid-connect", "publicClient": false, "standardFlowEnabled": true, "directAccessGrantsEnabled": false, "redirectUris": []string{redirectURI}, "webOrigins": []string{"+"}}
+	payload := map[string]any{"clientId": clientID, "name": name, "enabled": true, "protocol": "openid-connect", "publicClient": false, "standardFlowEnabled": true, "directAccessGrantsEnabled": false, "redirectUris": redirectURIs, "webOrigins": []string{"+"}}
 	internalID := ""
 	if len(clients) == 0 {
 		response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms/"+url.PathEscape(control.realm)+"/clients", payload)
@@ -1342,6 +1355,24 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 		return keycloakClientResult{}, fmt.Errorf("Keycloak Client secret is empty")
 	}
 	return keycloakClientResult{ClientID: clientID, ClientSecret: secret.Value}, nil
+}
+
+func canonicalRedirectURIs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // EnsureClientRoles mirrors the platform-published role catalog into the

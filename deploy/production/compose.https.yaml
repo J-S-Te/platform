@@ -1,0 +1,17 @@
+name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+
+# 仅在 PUBLIC_HTTPS_ENABLED=true 且证书预检通过后加载。解析后的证书路径来自
+# public-transport.sh，避免 Compose 在缺省 HTTP 模式下接触或要求证书文件。
+services:
+  frontend:
+    environment:
+      PUBLIC_HTTPS_ENABLED: "true"
+      PUBLIC_PLATFORM_HOST: ${PUBLIC_PLATFORM_HOST:?PUBLIC_PLATFORM_HOST must be set}
+      PUBLIC_SSO_HOST: ${PUBLIC_SSO_HOST:?PUBLIC_SSO_HOST must be set}
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${PUBLIC_TLS_CERTIFICATE_RESOLVED:?platform certificate must be validated}:/run/tls/platform.crt:ro
+      - ${PUBLIC_TLS_PRIVATE_KEY_RESOLVED:?platform private key must be validated}:/run/tls/platform.key:ro
+      - ${SSO_TLS_CERTIFICATE_RESOLVED:?SSO certificate must be validated}:/run/tls/sso.crt:ro
+      - ${SSO_TLS_PRIVATE_KEY_RESOLVED:?SSO private key must be validated}:/run/tls/sso.key:ro

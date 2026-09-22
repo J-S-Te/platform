@@ -61,7 +61,7 @@ type Repository interface {
 	CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error
 	FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error)
 	RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error
-	RefreshSession(ctx context.Context, sessionID string, refreshedAt, expiresAt time.Time) error
+	RefreshSession(ctx context.Context, sessionID string, refreshedAt time.Time) (time.Time, error)
 	RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time, reason string) error
 	RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error
 }
@@ -380,12 +380,15 @@ func (service *Service) Refresh(ctx context.Context, principal authctx.Principal
 		return SessionResult{}, ErrUnauthenticated
 	}
 	now := service.clock.Now().UTC().Truncate(time.Second)
-	expiresAt := now.Add(service.sessionTTL).UTC().Truncate(time.Second)
-	if err := service.repository.RefreshSession(ctx, principal.SessionID, now, expiresAt); err != nil {
+	expiresAt, err := service.repository.RefreshSession(ctx, principal.SessionID, now)
+	if err != nil {
 		if errors.Is(err, ErrUnauthenticated) {
 			return SessionResult{}, ErrUnauthenticated
 		}
 		return SessionResult{}, fmt.Errorf("refresh active session: %w", err)
+	}
+	if !expiresAt.After(now) {
+		return SessionResult{}, ErrUnauthenticated
 	}
 	token, err := service.tokens.Issue(security.TokenClaims{
 		SessionID: principal.SessionID, UserID: principal.User.ID, TenantID: principal.Tenant.ID,

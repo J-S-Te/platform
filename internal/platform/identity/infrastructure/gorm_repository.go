@@ -44,7 +44,7 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 			credential.password_hash, credential.hash_algorithm, credential.algorithm_params,
 			credential.status AS credential_status, credential.expires_at AS credential_expiry, credential.must_change AS must_change_password`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
-		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
+		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id AND (user.valid_until IS NULL OR user.valid_until > ?)", time.Now().UTC()).
 		Joins("JOIN iam_password_credential AS credential ON credential.account_id = account.id").
 		Where("account.username = ? AND account.auth_source = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", accountName, "LOCAL", time.Now().UTC()).
 		Limit(1).
@@ -71,7 +71,7 @@ func (repository *GORMRepository) FindLoginAccountByIdentityID(ctx context.Conte
 			NULL AS password_hash, '' AS hash_algorithm, NULL AS algorithm_params,
 			'' AS credential_status, NULL AS credential_expiry`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = account.tenant_id").
-		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").
+		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id AND (user.valid_until IS NULL OR user.valid_until > ?)", time.Now().UTC()).
 		Where("user.id = ? AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", identityID, domain.StatusActive, time.Now().UTC()).
 		Order("CASE WHEN account.auth_source = 'KEYCLOAK' THEN 0 ELSE 1 END").
 		Limit(1).Find(&row)
@@ -130,7 +130,7 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 		idleCutoff := now.Add(-idleTimeout)
 		activeUser := transaction.Model(&userModel{}).
 			Select("1").
-			Where("id = iam_account.user_id AND tenant_id = iam_account.tenant_id AND status = ?", domain.StatusActive)
+			Where("id = iam_account.user_id AND tenant_id = iam_account.tenant_id AND status = ? AND (valid_until IS NULL OR valid_until > ?)", domain.StatusActive, now)
 		activeTenant := transaction.Model(&tenantModel{}).
 			Select("1").
 			Where("id = iam_account.tenant_id AND status = ?", domain.StatusActive)
@@ -246,7 +246,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 			user.id AS user_id, user.display_name AS user_name, account.id AS account_id, COALESCE(account.username, account.id) AS account_name`).
 		Joins("JOIN iam_tenant AS tenant ON tenant.id = session.tenant_id AND tenant.status = ?", domain.StatusActive).
 		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", domain.StatusActive, now).
-		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = session.tenant_id AND user.status = ?", domain.StatusActive).
+		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = session.tenant_id AND user.status = ? AND (user.valid_until IS NULL OR user.valid_until > ?)", domain.StatusActive, now).
 		Where("session.id = ? AND session.status = ?", sessionID, domain.StatusActive).
 		Where("session.revoked_at IS NULL AND session.expires_at > ? AND session.last_interactive_at > ?", now, idleCutoff).
 		Limit(1).
@@ -299,21 +299,32 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	}, nil
 }
 
-// RefreshSession extends an existing active session after middleware has checked its JWT and
-// current account state.
-func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID string, refreshedAt, expiresAt time.Time) error {
+// RefreshSession keeps the immutable login-time expiry and only records current activity.
+// Returning the persisted deadline lets the caller issue a replacement cookie/JWT that can
+// never outlive the original login session.
+func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID string, refreshedAt time.Time) (time.Time, error) {
+	var session sessionModel
+	lookup := repository.database.WithContext(ctx).
+		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?", sessionID, domain.StatusActive, refreshedAt.UTC()).
+		Take(&session)
+	if lookup.Error != nil {
+		if errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
+			return time.Time{}, application.ErrUnauthenticated
+		}
+		return time.Time{}, fmt.Errorf("read fixed session expiry: %w", lookup.Error)
+	}
 	result := repository.database.WithContext(ctx).
 		Model(&sessionModel{}).
 		Where("id = ? AND status = ?", sessionID, domain.StatusActive).
 		Where("revoked_at IS NULL AND expires_at > ?", refreshedAt.UTC()).
-		Updates(map[string]any{"last_seen_at": refreshedAt.UTC(), "expires_at": expiresAt.UTC()})
+		Update("last_seen_at", refreshedAt.UTC())
 	if result.Error != nil {
-		return fmt.Errorf("update session expiry: %w", result.Error)
+		return time.Time{}, fmt.Errorf("refresh fixed session activity: %w", result.Error)
 	}
 	if result.RowsAffected != 1 {
-		return application.ErrUnauthenticated
+		return time.Time{}, application.ErrUnauthenticated
 	}
-	return nil
+	return session.ExpiresAt.UTC(), nil
 }
 
 // RecordSessionInteraction records a browser event that was explicitly initiated by the user.

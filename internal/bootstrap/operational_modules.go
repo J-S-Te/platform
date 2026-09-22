@@ -208,8 +208,8 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	// 人员异动服务与通知、交接检查在组合根统一装配；HTTP handler 和后台 worker 随后共享
-	// 同一个 service，保证状态机校验不会因入口不同而产生分叉。
+	// HTTP 入口在组合根装配通知与交接检查；独立 Worker 进程会装配同一仓储和状态机，
+	// 并单独注入通知服务，避免进程边界造成执行完成通知丢失。
 	personnelService, err := identityapplication.NewPersonnelChangeService(personnelRepo, ulid.Generator{}, identityapplication.SystemClock{}, personnelHandoverChecker)
 	if err != nil {
 		return httptransport.OperationalModules{}, err

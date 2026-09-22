@@ -66,6 +66,7 @@ data_analysis_runtime_file="$deploy_dir/runtime/data-analysis.env"
 data_analysis_runtime_template="$deploy_dir/subsystem-templates/data-analysis.env.example"
 compose_file="$deploy_dir/compose.yaml"
 frontend_compose_file="$deploy_dir/compose.frontend.yaml"
+transport_helper="$deploy_dir/bin/public-transport.sh"
 profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
@@ -86,8 +87,13 @@ docker compose version >/dev/null
 [[ -f "$runtime_file" ]] || { echo "缺少 $runtime_file" >&2; exit 1; }
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
 [[ -f "$compose_file" ]] || { echo "缺少 $compose_file" >&2; exit 1; }
+[[ -f "$transport_helper" ]] || { echo "缺少 $transport_helper" >&2; exit 1; }
 [[ -d "$profiles_dir" ]] || { echo "缺少生产子系统审核清单目录：$profiles_dir" >&2; exit 1; }
 compgen -G "$profiles_dir/*.yaml" >/dev/null || { echo "生产子系统审核清单目录中没有 YAML 文件" >&2; exit 1; }
+
+# shellcheck source=public-transport.sh
+source "$transport_helper"
+public_transport_prepare "$deploy_dir"
 
 release_permission_error() {
   local current_user current_group owner mode
@@ -188,14 +194,19 @@ flock -w 900 9 || {
   echo "等待其他发布任务超时" >&2
   exit 1
 }
+# The transport coordinator persists its transition state in the runtime file
+# while holding this same lock. Re-read it after waiting so a service-only
+# deployment cannot accidentally drop the drain overlay with stale variables.
+public_transport_prepare "$deploy_dir"
 
 compose() {
-  docker compose \
+  local command=(docker compose \
     --project-directory "$deploy_dir" \
     --file "$compose_file" \
     --env-file "$runtime_file" \
-    --env-file "$release_file" \
-    "$@"
+    --env-file "$release_file")
+  public_transport_compose_args command
+  "${command[@]}" "$@"
 }
 
 frontend_compose() {
@@ -203,12 +214,13 @@ frontend_compose() {
     echo "缺少前端独立发布清单：$frontend_compose_file" >&2
     return 1
   }
-  docker compose \
+  local command=(docker compose \
     --project-directory "$deploy_dir" \
     --file "$frontend_compose_file" \
     --env-file "$runtime_file" \
-    --env-file "$release_file" \
-    "$@"
+    --env-file "$release_file")
+  public_transport_compose_args command
+  "${command[@]}" "$@"
 }
 
 env_value() {
@@ -657,7 +669,7 @@ deploy_data_analysis() {
 
 deploy_frontend() {
   frontend_compose up -d --force-recreate --no-deps --wait --wait-timeout 120 frontend || return
-  wait_for_health "http://127.0.0.1:$(port_value FRONTEND_PORT 18082)/"
+  wait_for_health "http://127.0.0.1:${PUBLIC_HTTP_PORT}/"
   verify_service_image frontend frontend "$image_ref"
 }
 

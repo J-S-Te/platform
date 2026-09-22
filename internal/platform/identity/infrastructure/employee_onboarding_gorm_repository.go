@@ -55,7 +55,7 @@ func (repository *GORMRepository) CreateEmployee(ctx context.Context, write appl
 			ID: write.User.ID, TenantID: write.User.TenantID, EmployeeNo: nullableString(write.User.EmployeeNo),
 			DisplayName: write.User.DisplayName, Email: nullableString(write.User.Email),
 			MobileCiphertext: nullableBytes(write.User.MobileCiphertext), MobileHash: nullableBytes(write.User.MobileHash),
-			EmploymentStatus: "EMPLOYED", Status: write.User.Status, Version: 1,
+			EmploymentStatus: "EMPLOYED", Status: write.User.Status, ValidUntil: nullableTime(write.User.ValidUntil), Version: 1,
 			CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID),
 		}
 		if err := transaction.Create(&row).Error; err != nil {
@@ -220,7 +220,7 @@ func (repository *GORMRepository) CreateEmployees(ctx context.Context, writes []
 		now := time.Now().UTC()
 		changed := map[string]struct{}{platform.ID: {}}
 		for _, write := range writes {
-			row := userModel{ID: write.User.ID, TenantID: tenantID, EmployeeNo: nullableString(write.User.EmployeeNo), DisplayName: write.User.DisplayName, Email: nullableString(write.User.Email), MobileCiphertext: nullableBytes(write.User.MobileCiphertext), MobileHash: nullableBytes(write.User.MobileHash), EmploymentStatus: "EMPLOYED", Status: write.User.Status, Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}
+			row := userModel{ID: write.User.ID, TenantID: tenantID, EmployeeNo: nullableString(write.User.EmployeeNo), DisplayName: write.User.DisplayName, Email: nullableString(write.User.Email), MobileCiphertext: nullableBytes(write.User.MobileCiphertext), MobileHash: nullableBytes(write.User.MobileHash), EmploymentStatus: "EMPLOYED", Status: write.User.Status, ValidUntil: nullableTime(write.User.ValidUntil), Version: 1, CreatedAt: now, CreatedBy: nullableString(&write.User.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&write.User.OperatorID)}
 			if err := tx.Create(&row).Error; err != nil {
 				return mapWriteError(err, "create employee batch user")
 			}

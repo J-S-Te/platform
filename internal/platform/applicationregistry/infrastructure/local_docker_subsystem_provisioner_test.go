@@ -945,6 +945,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "audit-secret"},
 			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "notification-secret"},
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "owner-directory-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "signed-count-secret"},
 		},
 	}); err != nil {
 		t.Fatalf("provision integrated customer subsystem: %v", err)
@@ -1011,6 +1012,7 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "new-audit-secret"},
 			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "new-notification-secret"},
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "new-owner-directory-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "new-signed-count-secret"},
 		},
 	}); err != nil {
 		t.Fatalf("update integrated customer subsystem: %v", err)
@@ -1028,6 +1030,9 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 		"PLATFORM_OWNER_DIRECTORY_CLIENT_ID=customer_and_opportunity-dev-owner-directory",
 		"PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET=new-owner-directory-secret",
 		"PLATFORM_NOTIFICATION_CLIENT_SECRET=new-notification-secret",
+		"CONTRACT_SIGNED_COUNT_ENABLED=true",
+		"CONTRACT_SIGNED_COUNT_CLIENT_ID=customer_and_opportunity-dev-contract-signed-count",
+		"CONTRACT_SIGNED_COUNT_CLIENT_SECRET=new-signed-count-secret",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("updated customer environment missing %q:\n%s", expected, contents)

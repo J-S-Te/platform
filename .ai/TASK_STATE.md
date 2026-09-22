@@ -1,5 +1,14 @@
 # Current Task
 
+## Focused follow-up: personnel lifecycle completion (2026-09-21)
+
+- Completed real execution for promotion, demotion, transfer, termination and rehire with server-side identity, membership and target-assignment validation.
+- Termination now creates a mandatory durable handover item after approval, requires an active recipient, fails closed on missing/incomplete snapshots, records completion operator/time, revokes active Platform/OIDC sessions and disables memberships/accounts/user atomically.
+- Rehire restores the existing local account and credential, forces password change, clears lock/expiry state and creates the new active assignment; no undeliverable temporary password is generated.
+- Added immutable transition history and persisted approval, rejection, cancellation and handover references. Worker executions now use the shared notification service.
+- Frontend now exposes submit, approve, reject, cancel and responsibility-recipient handover actions under backend-equivalent permission gates.
+- Verification: full Platform Go tests/build, frontend 564/564 tests and production build, focused regressions, diff checks, and isolated MySQL 8.4 migrations 1–108 plus replay all pass. No deployed business data was mutated.
+
 ## Focused follow-up: customer portal card registration (2026-09-18)
 
 - Registered and adopted the missing `customer_portal/dev` runtime through the application-registry UI with the existing local public route `/customer-portal` and internal upstream `portal-api:8091`.

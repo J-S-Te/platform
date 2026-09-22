@@ -1,15 +1,21 @@
 package application
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // HandoverItem 是子系统适配器发现的一项责任；平台只保存交接控制记录，业务数据仍由各子系统负责。
 type HandoverItem struct {
-	System         string `json:"system"`
-	ResourceType   string `json:"resource_type"`
-	ResourceID     string `json:"resource_id"`
-	CurrentOwnerID string `json:"current_owner_id"`
-	TargetOwnerID  string `json:"target_owner_id"`
-	Status         string `json:"status"`
+	ID             string     `json:"id"`
+	System         string     `json:"system"`
+	ResourceType   string     `json:"resource_type"`
+	ResourceID     string     `json:"resource_id"`
+	CurrentOwnerID string     `json:"current_owner_id"`
+	TargetOwnerID  string     `json:"target_owner_id"`
+	Status         string     `json:"status"`
+	CompletedBy    string     `json:"completed_by,omitempty"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }
 
 type HandoverReport struct {
@@ -20,4 +26,12 @@ type HandoverReport struct {
 // HandoverChecker 保持为窄适配边界：子系统发布责任快照，人员变更服务不直接访问子系统数据库。
 type HandoverChecker interface {
 	Check(context.Context, PersonnelChangeRequest) (HandoverReport, error)
+}
+
+// HandoverManager exposes the platform-owned handover control plane. A
+// termination cannot be scheduled until every durable item is completed.
+type HandoverManager interface {
+	HandoverChecker
+	List(context.Context, string, string) ([]HandoverItem, error)
+	Complete(context.Context, string, string, string, string, string) (HandoverItem, error)
 }

@@ -61,6 +61,7 @@ type UserView struct {
 	Email        *string
 	MobileMasked *string
 	Status       string
+	ValidUntil   *time.Time
 	Version      uint64
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -75,6 +76,7 @@ type UserCreateInput struct {
 	Email       *string
 	Mobile      *string
 	Status      string
+	ValidUntil  *time.Time
 	// ApplicationRoles contains optional application-owned role assignments imported together
 	// with the user. The repository resolves these codes against synchronized ACTIVE catalogs and
 	// persists all users/bindings atomically; callers can never submit role IDs directly.
@@ -109,26 +111,30 @@ type UserDeleteInput struct {
 // UserUpdateInput contains patchable user fields. Nil optional pointers mean no change; an empty
 // pointed-to value explicitly clears optional text fields.
 type UserUpdateInput struct {
-	TenantID     string
-	OperatorID   string
-	UserID       string
-	DisplayName  string
-	EmployeeNo   *string
-	PMSPersonID  *string
-	Email        *string
-	Mobile       *string
-	Status       *string
-	Version      uint64
-	UpdateMobile bool
+	TenantID       string
+	OperatorID     string
+	UserID         string
+	DisplayName    string
+	EmployeeNo     *string
+	PMSPersonID    *string
+	Email          *string
+	Mobile         *string
+	Status         *string
+	ValidUntil     *time.Time
+	UpdateValidity bool
+	Version        uint64
+	UpdateMobile   bool
 }
 
 // AccountUpdateInput contains the only account update fields exposed by the P0 contract.
 type AccountUpdateInput struct {
-	TenantID   string
-	OperatorID string
-	AccountID  string
-	Status     string
-	Version    uint64
+	TenantID       string
+	OperatorID     string
+	AccountID      string
+	Status         string
+	ValidUntil     *time.Time
+	UpdateValidity bool
+	Version        uint64
 }
 
 // OrgUnitCreateInput contains writable P0 organization fields. Code and OrgType are
@@ -396,7 +402,7 @@ func (service *ManagementService) GetUser(ctx context.Context, tenantID, userID 
 
 // UpdateUser applies a versioned user update.
 func (service *ManagementService) UpdateUser(ctx context.Context, input UserUpdateInput) (UserView, error) {
-	if err := validateUserUpdate(input); err != nil {
+	if err := validateUserUpdate(input, service.clock.Now()); err != nil {
 		return UserView{}, err
 	}
 	var ciphertext, digest []byte
@@ -455,6 +461,9 @@ func (service *ManagementService) ListAccounts(ctx context.Context, tenantID str
 func (service *ManagementService) UpdateAccount(ctx context.Context, input AccountUpdateInput) (domain.Account, error) {
 	if input.TenantID == "" || input.OperatorID == "" || input.AccountID == "" || input.Version == 0 ||
 		(input.Status != domain.StatusActive && input.Status != domain.StatusDisabled) {
+		return domain.Account{}, ErrValidation
+	}
+	if input.UpdateValidity && input.ValidUntil != nil && !input.ValidUntil.After(service.clock.Now().UTC()) {
 		return domain.Account{}, ErrValidation
 	}
 	return service.repository.UpdateAccount(ctx, input)
@@ -619,7 +628,7 @@ func (service *ManagementService) protectMobile(mobile *string) ([]byte, []byte,
 }
 
 func (service *ManagementService) toUserView(user domain.User) (UserView, error) {
-	view := UserView{ID: user.ID, DisplayName: user.DisplayName, EmployeeNo: user.EmployeeNo, PMSPersonID: user.PMSPersonID, Email: user.Email, Status: user.Status, Version: user.Version, CreatedAt: user.CreatedAt.UTC(), UpdatedAt: user.UpdatedAt.UTC()}
+	view := UserView{ID: user.ID, DisplayName: user.DisplayName, EmployeeNo: user.EmployeeNo, PMSPersonID: user.PMSPersonID, Email: user.Email, Status: user.Status, ValidUntil: user.ValidUntil, Version: user.Version, CreatedAt: user.CreatedAt.UTC(), UpdatedAt: user.UpdatedAt.UTC()}
 	if len(user.MobileCiphertext) == 0 {
 		return view, nil
 	}
@@ -647,7 +656,7 @@ func normalizePageRequest(query PageRequest) PageRequest {
 	return query
 }
 
-func validateUserCreate(input UserCreateInput) error {
+func validateUserCreate(input UserCreateInput, now time.Time) error {
 	if input.TenantID == "" || input.OperatorID == "" || !validName(input.DisplayName, 100) || !validStatus(input.Status) {
 		return ErrValidation
 	}
@@ -658,6 +667,9 @@ func validateUserCreate(input UserCreateInput) error {
 		return ErrValidation
 	}
 	if input.Mobile != nil && len(strings.TrimSpace(*input.Mobile)) > 32 {
+		return ErrValidation
+	}
+	if input.ValidUntil != nil && !input.ValidUntil.After(now.UTC()) {
 		return ErrValidation
 	}
 	return nil
@@ -679,7 +691,7 @@ func validOptionalPersonID(value string) bool {
 	return true
 }
 
-func validateUserUpdate(input UserUpdateInput) error {
+func validateUserUpdate(input UserUpdateInput, now time.Time) error {
 	if input.TenantID == "" || input.OperatorID == "" || input.UserID == "" || input.Version == 0 || !validName(input.DisplayName, 100) {
 		return ErrValidation
 	}
@@ -696,6 +708,9 @@ func validateUserUpdate(input UserUpdateInput) error {
 		return ErrValidation
 	}
 	if input.UpdateMobile && input.Mobile != nil && len(strings.TrimSpace(*input.Mobile)) > 32 {
+		return ErrValidation
+	}
+	if input.UpdateValidity && input.ValidUntil != nil && !input.ValidUntil.After(now.UTC()) {
 		return ErrValidation
 	}
 	return nil

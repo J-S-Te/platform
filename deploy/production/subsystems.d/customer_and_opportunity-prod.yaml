@@ -3,7 +3,7 @@ default: false
 application:
   code: customer_and_opportunity
   initial_admin_roles: [sales_director, team_lead, technical_director]
-  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, notification_ingest, file_gateway_write]
+  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, contract_opportunity_signed_count_read, notification_ingest, file_gateway_write]
   name: 客户与商机管理系统
   description: 客户、商机与售前协作管理系统
   environment: prod
@@ -48,6 +48,10 @@ runtime:
         CONTRACT_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_OPPORTUNITY_INTAKE_URL: http://contract-api:8081/internal/opportunity-signed-events
         CONTRACT_SCOPE: opportunity.signed.write
+        CONTRACT_SIGNED_COUNT_ENABLED: "true"
+        CONTRACT_SIGNED_COUNT_URL: http://contract-api:8081/contract_management/internal/opportunity-contract-counts/query
+        CONTRACT_SIGNED_COUNT_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_SIGNED_COUNT_SCOPE: contract.opportunity_signed_count.read
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
         ATTACHMENT_FILE_GATEWAY_MODE: dual
@@ -78,6 +82,8 @@ runtime:
         CONTRACT_SUMMARY_CLIENT_SECRET: service.contract_summary_read.client_secret
         CONTRACT_CLIENT_ID: service.contract_opportunity_signed_write.client_id
         CONTRACT_CLIENT_SECRET: service.contract_opportunity_signed_write.client_secret
+        CONTRACT_SIGNED_COUNT_CLIENT_ID: service.contract_opportunity_signed_count_read.client_id
+        CONTRACT_SIGNED_COUNT_CLIENT_SECRET: service.contract_opportunity_signed_count_read.client_secret
         FILE_GATEWAY_APPLICATION_ID: application_id
         FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
