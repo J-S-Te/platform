@@ -20,8 +20,10 @@ write_config() {
     printf 'PUBLIC_TRANSPORT_STATE=%s\n' "$state"
     printf 'PUBLIC_PLATFORM_HOST=platform.example.com\n'
     printf 'PUBLIC_SSO_HOST=sso.example.com\n'
-    printf 'PUBLIC_HTTP_PORT=80\n'
+    printf 'PUBLIC_HTTP_PORT=8081\n'
     printf 'PUBLIC_HTTPS_PORT=443\n'
+    printf 'PUBLIC_SSO_HTTP_PORT=18090\n'
+    printf 'PUBLIC_SSO_HTTPS_PORT=8443\n'
     printf 'PUBLIC_TLS_CERTIFICATE_PATH=%s\n' "$certificate"
     printf 'PUBLIC_TLS_PRIVATE_KEY_PATH=%s\n' "$private_key"
     printf 'SSO_TLS_CERTIFICATE_PATH=\n'
@@ -32,7 +34,8 @@ write_config() {
 
 write_config false /definitely/not/readable.crt /definitely/not/readable.key
 public_transport_prepare "$test_root" "${test_root}/runtime.env" "$compose_file" "$drain_compose_file"
-[[ "$PUBLIC_PLATFORM_ORIGIN" == "http://platform.example.com" ]]
+[[ "$PUBLIC_PLATFORM_ORIGIN" == "http://platform.example.com:8081" ]]
+[[ "$PUBLIC_SSO_ORIGIN" == "http://sso.example.com:18090" ]]
 [[ "$PUBLIC_TRANSPORT_COOKIE_SECURE" == "false" ]]
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -43,14 +46,15 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
 write_config true tls.crt tls.key
 public_transport_prepare "$test_root" "${test_root}/runtime.env" "$compose_file" "$drain_compose_file"
 [[ "$PUBLIC_PLATFORM_ORIGIN" == "https://platform.example.com" ]]
-[[ "$PUBLIC_SSO_ORIGIN" == "https://sso.example.com" ]]
-[[ "$PUBLIC_KEYCLOAK_ISSUER" == "https://sso.example.com/realms/basic-platform" ]]
+[[ "$PUBLIC_SSO_ORIGIN" == "https://sso.example.com:8443" ]]
+[[ "$PUBLIC_KEYCLOAK_ISSUER" == "https://sso.example.com:8443/realms/basic-platform" ]]
 [[ "$PUBLIC_TRANSPORT_COOKIE_SECURE" == "true" ]]
 [[ "$PUBLIC_TLS_CERTIFICATE_RESOLVED" == "${test_root}/tls.crt" ]]
 
 write_config false tls.crt tls.key DISABLING_HTTPS
 public_transport_prepare "$test_root" "${test_root}/runtime.env" "$compose_file" "$drain_compose_file"
-[[ "$PUBLIC_PLATFORM_ORIGIN" == "http://platform.example.com" ]]
+[[ "$PUBLIC_PLATFORM_ORIGIN" == "http://platform.example.com:8081" ]]
+[[ "$PUBLIC_SSO_ORIGIN" == "http://sso.example.com:18090" ]]
 [[ "$PUBLIC_TRANSPORT_COOKIE_SECURE" == "false" ]]
 [[ "$PUBLIC_TRANSPORT_COMPOSE_FILE" == "$drain_compose_file" ]]
 [[ "$PUBLIC_TLS_CERTIFICATE_RESOLVED" == "${test_root}/tls.crt" ]]

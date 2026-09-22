@@ -40,6 +40,7 @@ func TestProductionPublicTransportDefaultsToHTTPAndDerivesAllBindings(t *testing
 	if err := os.WriteFile(path, []byte(strings.Join([]string{
 		"PUBLIC_PLATFORM_HOST=platform.example.com",
 		"PUBLIC_SSO_HOST=sso.example.com",
+		"PUBLIC_SSO_HTTP_PORT=18090",
 		"KEYCLOAK_REALM=company",
 	}, "\n")), 0o600); err != nil {
 		t.Fatal(err)
@@ -51,9 +52,9 @@ func TestProductionPublicTransportDefaultsToHTTPAndDerivesAllBindings(t *testing
 	joined := strings.Join(got, "\n")
 	for _, expected := range []string{
 		"PUBLIC_HTTPS_ENABLED=false",
-		"PUBLIC_PLATFORM_ORIGIN=http://platform.example.com",
-		"PUBLIC_SSO_ORIGIN=http://sso.example.com",
-		"PUBLIC_KEYCLOAK_ISSUER=http://sso.example.com/realms/company",
+		"PUBLIC_PLATFORM_ORIGIN=http://platform.example.com:8081",
+		"PUBLIC_SSO_ORIGIN=http://sso.example.com:18090",
+		"PUBLIC_KEYCLOAK_ISSUER=http://sso.example.com:18090/realms/company",
 		"PUBLIC_TRANSPORT_COOKIE_SECURE=false",
 		"PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true",
 	} {
@@ -98,6 +99,7 @@ func TestProductionPublicTransportRejectsInvalidSwitchHostAndPort(t *testing.T) 
 		"PUBLIC_PLATFORM_HOST=https://platform.example.com\nPUBLIC_SSO_HOST=sso.example.com\n",
 		"PUBLIC_PLATFORM_HOST=platform.example.com\nPUBLIC_SSO_HOST=sso.example.com/path\n",
 		"PUBLIC_PLATFORM_HOST=platform.example.com\nPUBLIC_SSO_HOST=sso.example.com\nPUBLIC_HTTP_PORT=70000\n",
+		"PUBLIC_PLATFORM_HOST=platform.example.com\nPUBLIC_SSO_HOST=sso.example.com\nPUBLIC_SSO_HTTP_PORT=70000\n",
 	}
 	for index, contents := range tests {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("invalid-%d.env", index))

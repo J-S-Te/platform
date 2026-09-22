@@ -49,12 +49,12 @@ current_container_mode() {
 }
 
 origin_for_mode() {
-  local mode="$1" host="$2" port
+  local mode="$1" host="$2" http_port="$3" https_port="$4" port
   if [[ "$mode" == "HTTPS" ]]; then
-    port="${PUBLIC_HTTPS_PORT:-443}"
+    port="$https_port"
     public_transport_origin https "$host" "$port"
   else
-    port="${PUBLIC_HTTP_PORT:-80}"
+    port="$http_port"
     public_transport_origin http "$host" "$port"
   fi
 }
@@ -71,8 +71,8 @@ target_sso_origin="$PUBLIC_SSO_ORIGIN"
 status_json="$(coordinator status 2>/dev/null || true)"
 if [[ -z "$status_json" ]]; then
   current_mode="$(current_container_mode)"
-  current_platform_origin="$(origin_for_mode "$current_mode" "$PUBLIC_PLATFORM_HOST")"
-  current_sso_origin="$(origin_for_mode "$current_mode" "$PUBLIC_SSO_HOST")"
+  current_platform_origin="$(origin_for_mode "$current_mode" "$PUBLIC_PLATFORM_HOST" "$PUBLIC_HTTP_PORT" "$PUBLIC_HTTPS_PORT")"
+  current_sso_origin="$(origin_for_mode "$current_mode" "$PUBLIC_SSO_HOST" "$PUBLIC_SSO_HTTP_PORT" "$PUBLIC_SSO_HTTPS_PORT")"
   status_json="$(coordinator init --mode "$current_mode" --platform-origin "$current_platform_origin" --sso-origin "$current_sso_origin")"
 fi
 

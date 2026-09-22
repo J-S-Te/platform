@@ -32,14 +32,18 @@ Keycloak 的独立数据库、可选 bootstrap service account、备份恢复、
 PUBLIC_HTTPS_ENABLED=false
 PUBLIC_PLATFORM_HOST=platform.example.com
 PUBLIC_SSO_HOST=sso.example.com
-PUBLIC_HTTP_PORT=80
+PUBLIC_HTTP_PORT=8081
 PUBLIC_HTTPS_PORT=443
+PUBLIC_SSO_HTTP_PORT=18090
+PUBLIC_SSO_HTTPS_PORT=443
 PUBLIC_HTTPS_DRAIN_GRACE=5m
 PUBLIC_TLS_CERTIFICATE_PATH=
 PUBLIC_TLS_PRIVATE_KEY_PATH=
 SSO_TLS_CERTIFICATE_PATH=
 SSO_TLS_PRIVATE_KEY_PATH=
 ```
+
+`PUBLIC_SSO_HTTP_PORT` 和 `PUBLIC_SSO_HTTPS_PORT` 允许 Keycloak 与平台入口使用不同端口；留空时分别继承平台的 HTTP/HTTPS 端口。IP 直连部署应显式配置，例如平台使用 `8081`、Keycloak 使用 `18090`，避免 OIDC Issuer 被错误改写为平台端口。
 
 启用 HTTPS 时，将 `PUBLIC_HTTPS_ENABLED` 改为 `true`，填写平台证书链和私钥路径。若 SSO 两项留空，SSO 复用平台证书，因此平台证书的 SAN 必须同时覆盖两个域名；也可以为 SSO 填写独立证书链和私钥。路径支持 Certbot 的符号链接，发布前会解析到可读常规文件，并校验证书链可解析、有效期、SAN 与私钥匹配。预检失败不会执行 Docker 变更。
 

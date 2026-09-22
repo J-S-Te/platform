@@ -1115,29 +1115,40 @@ func productionPublicTransportEnvironment(path string) ([]string, error) {
 		return nil, errors.New("public HTTPS switch is invalid")
 	}
 	enabled := enabledValue == "true"
-	scheme, defaultPort := "http", 80
+	scheme, defaultPort, platformFallbackPort := "http", 80, 8081
 	if enabled {
-		scheme, defaultPort = "https", 443
+		scheme, defaultPort, platformFallbackPort = "https", 443, 443
 	}
-	portKey := "PUBLIC_HTTP_PORT"
+	platformPortKey, ssoPortKey := "PUBLIC_HTTP_PORT", "PUBLIC_SSO_HTTP_PORT"
 	if enabled {
-		portKey = "PUBLIC_HTTPS_PORT"
+		platformPortKey, ssoPortKey = "PUBLIC_HTTPS_PORT", "PUBLIC_SSO_HTTPS_PORT"
 	}
-	port := defaultPort
-	if raw := strings.TrimSpace(values[portKey]); raw != "" {
+	parsePort := func(raw string, fallback int) (int, error) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return fallback, nil
+		}
 		parsed, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || parsed < 1 || parsed > 65535 {
-			return nil, errors.New("public transport port is invalid")
+			return 0, errors.New("public transport port is invalid")
 		}
-		port = parsed
+		return parsed, nil
 	}
-	origin := func(host string) string {
+	platformPort, err := parsePort(values[platformPortKey], platformFallbackPort)
+	if err != nil {
+		return nil, err
+	}
+	ssoPort, err := parsePort(values[ssoPortKey], platformPort)
+	if err != nil {
+		return nil, err
+	}
+	origin := func(host string, port int) string {
 		if port == defaultPort {
 			return scheme + "://" + host
 		}
 		return scheme + "://" + host + ":" + strconv.Itoa(port)
 	}
-	platformOrigin, ssoOrigin := origin(platformHost), origin(ssoHost)
+	platformOrigin, ssoOrigin := origin(platformHost, platformPort), origin(ssoHost, ssoPort)
 	realm := strings.TrimSpace(values["KEYCLOAK_REALM"])
 	if realm == "" {
 		realm = "basic-platform"
