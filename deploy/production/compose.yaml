@@ -1170,12 +1170,10 @@ services:
 networks:
   application:
     name: basic-platform-production
-    # 固定子网使网关地址（172.31.255.1）与 frontend 固定地址可被 APP_TRUSTED_PROXIES
-    # 精确信任（SEC-N6）。升级迁移：既有环境需先 compose down 移除旧网络再 up 重建，
-    # Docker 不允许对已存在网络原地修改子网。
-    ipam:
-      config:
-        - subnet: 172.31.255.0/24
+    # 多个独立发布脚本和历史子系统共同使用该网络。将其作为部署基础设施管理，
+    # 禁止任一单服务 `compose up` 因网络配置漂移而尝试删除共享网络并中断整套系统。
+    # 新环境由部署脚本按 172.31.255.0/24 创建；既有环境保持原网络，待维护窗口迁移。
+    external: true
   # Agent 控制通道专用内网（SEC-F3）：仅包含 subsystem-provisioner 与
   # docker-socket-proxy，internal=true 无网关/外网出口，业务容器均不在该网络中。
   docker-control:

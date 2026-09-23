@@ -17,3 +17,6 @@ services:
 networks:
   application:
     name: basic-platform-production
+    # 前端和后端由不同 CI 流程独立发布，共享网络必须由部署脚本统一管理。
+    # external 可防止前端单服务发布删除仍被后端和子系统使用的网络。
+    external: true

@@ -39,7 +39,7 @@ func main() {
 	socketPath := envOrDefault("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock")
 	logger.Info("subsystem provisioning helper started")
 	if err := infrastructure.RunSubsystemProvisioningServer(ctx, socketPath, executor); err != nil {
-		logger.Error("subsystem provisioning helper stopped unexpectedly")
+		logger.Error("subsystem provisioning helper stopped unexpectedly", "error", err)
 		os.Exit(1)
 	}
 }
