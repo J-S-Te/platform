@@ -55,6 +55,11 @@ jobs:
           grep -q -- 'verify_service_image' deploy/production/bin/deploy-service.sh
           grep -q -- '--force-recreate' deploy/production/bin/deploy-customer-opportunity.sh
           grep -q -- 'verify_service_image' deploy/production/bin/deploy-customer-opportunity.sh
+          # application 网络被多个独立 CI/子系统长期共享，任何单服务发布都不得
+          # 取得其删除权；否则网络配置漂移会先停数据库再因 active endpoints 失败。
+          grep -A8 '^  application:' deploy/production/compose.yaml | grep -q 'external: true'
+          grep -A8 '^  application:' deploy/production/compose.frontend.yaml | grep -q 'external: true'
+          grep -q 'ensure_application_network' deploy/production/bin/deploy-service.sh
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' deploy/production; then
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1

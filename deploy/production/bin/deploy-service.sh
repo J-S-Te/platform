@@ -95,6 +95,23 @@ compgen -G "$profiles_dir/*.yaml" >/dev/null || { echo "生产子系统审核清
 source "$transport_helper"
 public_transport_prepare "$deploy_dir"
 
+ensure_application_network() {
+  local network_name="basic-platform-production"
+  if docker network inspect "$network_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "创建生产共享网络：$network_name"
+  docker network create \
+    --driver bridge \
+    --subnet 172.31.255.0/24 \
+    --gateway 172.31.255.1 \
+    "$network_name" >/dev/null || docker network inspect "$network_name" >/dev/null
+}
+
+# application 是合同、项目、CRM、门户等多个独立发布流程共同使用的长生命周期网络。
+# 必须在 Compose 解析 external 网络前创建；已存在时绝不重建，避免单服务发布导致
+# Docker 尝试删除仍有 active endpoints 的共享网络。
 release_permission_error() {
   local current_user current_group owner mode
   current_user="$(id -un 2>/dev/null || printf unknown)"
@@ -289,6 +306,7 @@ flock -w 900 9 || {
 # while holding this same lock. Re-read it after waiting so a service-only
 # deployment cannot accidentally drop the drain overlay with stale variables.
 public_transport_prepare "$deploy_dir"
+ensure_application_network
 
 compose() {
   local command=(docker compose \
@@ -770,6 +788,9 @@ rollback_runtime() {
   case "$service" in
     frontend) frontend_compose up -d --force-recreate --no-deps frontend ;;
     platform)
+      # 失败可能发生在基础设施启动阶段；先确保平台数据库恢复，再启动 Agent，
+      # 最后恢复 API/Worker。回滚不得让 API 在数据库仍停止时进入重启循环。
+      compose up -d --wait --wait-timeout 180 --no-deps platform-mysql || true
       if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
         echo "回滚时 subsystem-provisioner 重建失败，继续尝试重建 platform-api" >&2
         dump_subsystem_provisioner_debug

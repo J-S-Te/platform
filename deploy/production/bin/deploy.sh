@@ -99,7 +99,20 @@ require_initialized() {
   [[ "$(stat -c '%a' "$runtime_file")" == 600 && "$(stat -c '%a' "$release_file")" == 600 ]] || die "配置文件权限必须为 0600"
 }
 
+ensure_application_network() {
+  local network_name="basic-platform-production"
+  if docker network inspect "$network_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  docker network create \
+    --driver bridge \
+    --subnet 172.31.255.0/24 \
+    --gateway 172.31.255.1 \
+    "$network_name" >/dev/null || docker network inspect "$network_name" >/dev/null
+}
+
 compose() {
+  ensure_application_network
   public_transport_prepare "$deploy_dir" "$runtime_file"
   local args=(--project-directory "$deploy_dir" --file "$compose_file")
   public_transport_compose_args args
@@ -107,6 +120,7 @@ compose() {
 }
 
 compose_monitoring() {
+  ensure_application_network
   public_transport_prepare "$deploy_dir" "$runtime_file"
   local args=(--project-directory "$deploy_dir" --file "$compose_file" --file "$deploy_dir/compose.observability.yaml")
   public_transport_compose_args args
