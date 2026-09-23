@@ -552,6 +552,9 @@ bash scripts/subsystem.sh offboard \
 | `IAM_CONFLICT` | Client ID、路径或资源唯一性冲突，核对现有记录 |
 | `PLATFORM_DEPENDENCY_UNAVAILABLE` | 查看 `api`、`subsystem-provisioner`、Docker、项目目录和 Socket |
 | `status=PROVISION_FAILED` | 生产在页面读取 `next_action`，修复后点击“重试”；本地/排障可使用 `subsystem.sh status/retry`，不要重复 onboard |
+| `IAM_PLATFORM_RUNTIME_NOT_MANAGED` | 基础平台应用自身是控制面根节点，不由子系统部署 Agent 更新/重试/接管/下线；平台升级请在服务器部署目录按发布流程执行 |
+| `IAM_SUBSYSTEM_TARGET_NOT_IN_PRODUCTION_MANIFEST` | 该应用环境不在服务器审核清单内，或 API 与 Agent 的部署模式不一致；同步最新 `subsystems.d` 并确认 `platform-api`、`subsystem-provisioner` 都使用 `SUBSYSTEM_ONBOARDING_MODE=production` 后一同重启 |
+| 页面提示 `subsystem provisioning unavailable: subsystem provisioning unavailable` | 旧版 Agent 用哨兵错误原文兜底，缺少可执行原因；把 `platform-api` 与 `subsystem-provisioner` 升级到同一版本后可直接看到具体拒绝原因 |
 | `subsystem project ... unavailable` | 应用编码与目录名不一致，或缺 Compose/`.env.example` |
 | Compose 启动失败 | 在子系统目录用生成的 `.env.local` 单独执行 `docker compose config` 和 `up` 排查 |
 | `nginx -t` 失败 | 检查 path prefix、Upstream、include；不要绕过验证直接 reload |

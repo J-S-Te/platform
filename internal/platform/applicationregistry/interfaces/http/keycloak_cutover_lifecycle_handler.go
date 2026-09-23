@@ -42,7 +42,8 @@ func (handler *SubsystemOnboardingHandler) StartKeycloakObservation(writer stdht
 	lifecycle, err := handler.keycloakCutover.StartKeycloakObservation(request.Context(), principal.Tenant.ID, applicationID, environmentID, principal.User.ID, keycloakObservationWindow)
 	if err != nil {
 		handler.logger.Warn("start Keycloak observation rejected", "application_code", payload.ApplicationCode, "environment", payload.Environment, "error", err)
-		writeKeycloakObservationBlocked(writer, request, err.Error())
+		// 安全（SEC-B3）：cause 已在上一行进结构化日志，这里只回传稳定错误码。
+		writeKeycloakObservationBlocked(writer, request, keycloakObservationReasonCode(err))
 		return
 	}
 	writer.Header().Set("Cache-Control", "no-store, private")

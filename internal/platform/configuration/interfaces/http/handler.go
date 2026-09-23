@@ -16,6 +16,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 )
 
 const maxRequestBytes = 64 << 10
@@ -133,6 +134,8 @@ func (h *Handler) CreateNamespace(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	// 安全审查 SEC-D5：体寻址创建没有路径 *_id，登记被创建对象 id 供审计中间件落 ResourceID。
+	middleware.MarkCreatedResource(r, result.ID)
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "配置命名空间已创建", namespaceToResponse(result))
 }
 func (h *Handler) ListItems(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +168,8 @@ func (h *Handler) CreateItem(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	// 安全审查 SEC-D5：登记被创建配置项 id 供审计中间件落 ResourceID。
+	middleware.MarkCreatedResource(r, result.ID)
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "配置项已创建", itemToResponse(result))
 }
 func (h *Handler) UpdateItem(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +206,8 @@ func (h *Handler) CreateRelease(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+	// 安全审查 SEC-D5：登记被创建发布记录 id 供审计中间件落 ResourceID。
+	middleware.MarkCreatedResource(r, result.ID)
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "配置版本已发布", releaseToResponse(result))
 }
 func (h *Handler) GetRelease(w http.ResponseWriter, r *http.Request) {

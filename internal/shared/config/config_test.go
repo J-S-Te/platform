@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,9 +81,11 @@ func TestValidateRejectsInvalidTrustedProxy(t *testing.T) {
 func TestValidateAllowsExplicitHTTPDeploymentInProduction(t *testing.T) {
 	cfg := Config{
 		Environment: "production", AppName: "basic-platform",
-		HTTP:    HTTPConfig{Addr: ":8080", PublicBaseURL: "http://platform.internal:8080"},
-		MySQL:   MySQLConfig{Host: "127.0.0.1", Port: 3306, Database: "basic_platform", Username: "basic_platform"},
-		Auth:    AuthConfig{JWTIssuer: "basic-platform", JWTAudience: "console", ApplicationJWTAudience: "application", OIDCIssuer: "http://platform.internal:8080", SessionCookieName: "bp_session", SessionCookieSameSite: "Lax", SessionTTL: 8 * time.Hour},
+		HTTP:  HTTPConfig{Addr: ":8080", PublicBaseURL: "http://platform.internal:8080"},
+		MySQL: MySQLConfig{Host: "127.0.0.1", Port: 3306, Database: "basic_platform", Username: "basic_platform"},
+		// SEC-B2：production 允许 HTTP 传输（网关终止 TLS 的内网部署），但会话 Cookie
+		// 必须保持 Secure——不安全 Cookie 由下方专门测试断言拒绝。
+		Auth:    AuthConfig{JWTIssuer: "basic-platform", JWTAudience: "console", ApplicationJWTAudience: "application", OIDCIssuer: "http://platform.internal:8080", SessionCookieName: "bp_session", SessionCookieSameSite: "Lax", SessionCookieSecure: true, SessionTTL: 8 * time.Hour},
 		Logging: LoggingConfig{Directory: "/tmp/logs"}, FileStorageRoot: "/tmp/uploads",
 		Worker:      WorkerConfig{ID: "worker", PollInterval: time.Second, StaleLockTimeout: time.Minute},
 		Audit:       AuditConfig{ApplicationCode: "platform", EnvironmentCode: "prod"},
@@ -189,6 +192,54 @@ func TestValidateKeycloakManagementCredentials(t *testing.T) {
 				t.Fatalf("Validate() error = %v", err)
 			}
 		})
+	}
+}
+
+// SEC-B2：会话 Cookie Secure 默认打开；production 显式 false 拒绝启动；非生产显式 false 放行。
+func TestLoadDefaultsSessionCookieSecureToTrue(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("APP_HTTP_ADDR", "127.0.0.1:8080")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Auth.SessionCookieSecure {
+		t.Fatal("SessionCookieSecure = false, want default true (SEC-B2)")
+	}
+}
+
+func productionInsecureCookieConfig(environment string) Config {
+	return Config{
+		Environment: environment, AppName: "basic-platform",
+		HTTP:    HTTPConfig{Addr: ":8080", PublicBaseURL: "http://platform.internal:8080"},
+		MySQL:   MySQLConfig{Host: "127.0.0.1", Port: 3306, Database: "basic_platform", Username: "basic_platform"},
+		Auth:    AuthConfig{JWTIssuer: "basic-platform", JWTAudience: "console", ApplicationJWTAudience: "application", OIDCIssuer: "http://platform.internal:8080", SessionCookieName: "bp_session", SessionCookieSameSite: "Lax", SessionCookieSecure: false, SessionTTL: 8 * time.Hour},
+		Logging: LoggingConfig{Directory: "/tmp/logs"}, FileStorageRoot: "/tmp/uploads",
+		Worker:      WorkerConfig{ID: "worker", PollInterval: time.Second, StaleLockTimeout: time.Minute},
+		Audit:       AuditConfig{ApplicationCode: "platform", EnvironmentCode: "prod"},
+		Keycloak:    KeycloakConfig{OutageLoginPolicy: KeycloakOutagePolicyContinueExistingPlatformSessions},
+		CORSOrigins: []string{"http://platform.internal:8080"},
+	}
+}
+
+func TestValidateRejectsInsecureSessionCookieInProduction(t *testing.T) {
+	cfg := productionInsecureCookieConfig("production")
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want AUTH_SESSION_COOKIE_SECURE=false rejected in production")
+	}
+	if !strings.Contains(err.Error(), "AUTH_SESSION_COOKIE_SECURE") {
+		t.Fatalf("Validate() error = %v, want mention AUTH_SESSION_COOKIE_SECURE", err)
+	}
+}
+
+func TestValidateAllowsExplicitInsecureSessionCookieOutsideProduction(t *testing.T) {
+	cfg := productionInsecureCookieConfig("development")
+	cfg.Audit.EnvironmentCode = "dev"
+	cfg.CORSOrigins = []string{"http://localhost:5173"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want explicit insecure cookie allowed outside production", err)
 	}
 }
 

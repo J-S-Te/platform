@@ -293,29 +293,37 @@ func (service *FileService) OpenDownload(ctx context.Context, access DownloadAcc
 		applicationID := strings.TrimSpace(access.ApplicationID)
 		resourceType := strings.TrimSpace(access.ResourceType)
 		resourceID := strings.TrimSpace(access.ResourceID)
-		// ResourceAccessVerified 只能由进程内的受信子系统适配器在完成业务 ACL 校验后设置；
-		// 浏览器查询参数不能生成该证明，否则知道资源标识即可伪造授权。
+		// ResourceAccessVerified 只能由进程内的受信子系统适配器在完成业务 ACL 校验后设置。
+		// 安全（SEC-D9）：HTTP 边界（上传/下载票据）不再设置该标志，浏览器用户也不能凭
+		// 请求体声明的资源标识自证——否则知道资源标识即可伪造授权。
 		if applicationID == "" || applicationID != stored.File.ApplicationID {
 			return domain.StoredFile{}, nil, ErrForbidden
 		}
-		// 旧 v1 机器下载请求不携带业务资源标识。兼容期仅允许该应用读取
-		// 自己已存在 ACTIVE 绑定的文件，绝不再把空 owner 视为授权证明。
-		if !access.ResourceAccessVerified {
-			if strings.TrimSpace(access.UserID) != "" {
-				return domain.StoredFile{}, nil, ErrForbidden
-			}
-			bound, bindErr := service.repository.HasAnyActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID)
+		if !access.ResourceAccessVerified && strings.TrimSpace(access.UserID) != "" {
+			return domain.StoredFile{}, nil, ErrForbidden
+		}
+		switch {
+		case resourceType != "" && resourceID != "":
+			// 只信绑定证明：无论声明来自 HTTP 边界还是受信适配器，都必须存在
+			// (租户, 文件, 应用, 业务资源) 的 ACTIVE 具体绑定；
+			// “该文件存在任意绑定”不足以放行，防止只知道 file_id 就跨资源下载。
+			bound, bindErr := service.repository.HasActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID, resourceType, resourceID)
 			if bindErr != nil {
 				return domain.StoredFile{}, nil, bindErr
 			}
 			if !bound {
 				return domain.StoredFile{}, nil, ErrForbidden
 			}
-		} else {
-			if resourceType == "" || resourceID == "" {
-				return domain.StoredFile{}, nil, ErrForbidden
-			}
-			bound, bindErr := service.repository.HasActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID, resourceType, resourceID)
+		case resourceType != "" || resourceID != "":
+			// 资源标识只给出一半：拒绝半声明绕过。
+			return domain.StoredFile{}, nil, ErrForbidden
+		case access.ResourceAccessVerified:
+			// 受信适配器同样必须携带完整资源标识，绑定证明不可省略（保持既有语义）。
+			return domain.StoredFile{}, nil, ErrForbidden
+		default:
+			// 旧 v1 机器下载请求不携带业务资源标识。兼容期仅允许该应用读取
+			// 自己已存在 ACTIVE 绑定的文件，绝不再把空 owner 视为授权证明。
+			bound, bindErr := service.repository.HasAnyActiveBinding(ctx, stored.File.TenantID, stored.File.ID, applicationID)
 			if bindErr != nil {
 				return domain.StoredFile{}, nil, bindErr
 			}

@@ -50,6 +50,25 @@ func publicBaseOrigin(value string) (string, bool) {
 	return parsed.Scheme + "://" + parsed.Host, true
 }
 
+// normalizeAccessPublicOrigin 校验并归一化 apply-access 的 PublicOrigin。空值表示恢复本机访问；
+// 非空值必须通过 validEnvironmentValue（拒绝 \r\n\x00）且是不含 path/query/fragment/userinfo 的
+// 纯 http(s) origin。安全（SEC-F1）：该值会以 "KEY=origin" 逐行写入 .env.lan 并被 Compose 注入
+// 多个容器，任何换行或畸形 scheme 都会换行注入任意环境变量（如 DEV_AUTH_ENABLED、OIDC_ISSUER）。
+func normalizeAccessPublicOrigin(value string) (string, error) {
+	origin := strings.TrimSpace(value)
+	if origin == "" {
+		return "", nil
+	}
+	if !validEnvironmentValue(origin) {
+		return "", provisioningError("public origin contains disallowed control characters")
+	}
+	normalized, ok := publicBaseOrigin(origin)
+	if !ok {
+		return "", provisioningError("public origin must be an http(s) origin without path, query or credentials")
+	}
+	return normalized, nil
+}
+
 // publicURLOrigin 要求已生成 URL 精确匹配审核目标路径，同时允许管理员提供实际 origin；查询串、
 // 片段和用户信息一律拒绝，防止配置被解释成另一种地址。
 func publicURLOrigin(value, pathPrefix string) (string, bool) {
@@ -89,10 +108,10 @@ type LocalDockerSubsystemProvisionerConfig struct {
 	PlatformDockerNetwork   string
 	DockerBinary            string
 	Timeout                 time.Duration
-	// CatalogSync configures the post-onboarding authorization catalog sync hook. When non-empty
-	// the provisioner runs the contract_management catalog sync image after the subsystem Compose
-	// stack is up, so the platform's authorization catalog reflects the subsystem's role and
-	// permission declarations without any in-band code change in the subsystem itself.
+	// CatalogSync configures the post-onboarding authorization catalog sync hook. When enabled
+	// the provisioner runs the reviewed contract_management catalog sync script on the Agent host
+	// after the subsystem Compose stack is up, so the platform's authorization catalog reflects
+	// the subsystem's role and permission declarations without any in-band code change.
 	CatalogSyncEnabled        bool
 	CatalogSyncImage          string
 	CatalogSyncMysqlContainer string
@@ -695,6 +714,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 		}
 	}
 	if input.ApplicationCode == integratedContractApplicationCode {
+		// SEC-D7b：Rebuild 写入路径同样补齐签署人手机号列加密密钥；已有合法键保留，不轮换。
+		if err := ensureContractSigningPhoneEnvironmentValue(environmentPath, values); err != nil {
+			return err
+		}
 		if credential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
@@ -962,6 +985,11 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		credentials, credentialErr := requiredContractServiceCredentials(input)
 		if credentialErr != nil {
 			return credentialErr
+		}
+		// SEC-D7b：contract env 可能由模板 .env.example 首次生成（占位行/空值），Agent 必须在
+		// 写入时补齐列加密密钥，否则 provisioner 重写后 /readyz 失败关闭；已有合法键保留。
+		if err := ensureContractSigningPhoneEnvironmentValue(environmentPath, values); err != nil {
+			return err
 		}
 		values["CONTRACT_MACHINE_TOKEN_ISSUER"] = "basic-platform"
 		values["CONTRACT_MACHINE_TOKEN_AUDIENCE"] = "basic-platform-application"
@@ -1561,8 +1589,9 @@ func readEnvironmentValues(path string) (map[string]string, error) {
 // platform's MySQL, mints a catalog-publisher access token, and PUTs the manifest back to the
 // platform's /authorization-catalog endpoint using the subsystem's own service credential.
 //
-// The helper is launched as a one-shot `docker run --rm --network=host` from the provisioner
-// (which has no internal network of its own). Failure to sync is non-fatal: the operator can
+// The helper now runs directly on the Agent host through bash (SEC-F2): the previous one-shot
+// `docker run --rm --network=host -v /var/run/docker.sock` handed a root-equivalent Docker socket
+// plus plaintext secrets to an ephemeral container. Failure to sync is non-fatal: the operator can
 // always re-run the script out of band, and the regular handbook flow remains usable.
 func (provisioner *LocalDockerSubsystemProvisioner) maybeSyncContractCatalogLocked(operationCtx context.Context, input application.SubsystemProvisioningInput) error {
 	if !provisioner.config.CatalogSyncEnabled {
@@ -1575,27 +1604,18 @@ func (provisioner *LocalDockerSubsystemProvisioner) maybeSyncContractCatalogLock
 	if strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" {
 		return fmt.Errorf("catalog publisher client credentials are missing for application %s", input.ApplicationCode)
 	}
-	if strings.TrimSpace(provisioner.config.CatalogSyncImage) == "" ||
-		strings.TrimSpace(provisioner.config.CatalogSyncMysqlContainer) == "" ||
+	if strings.TrimSpace(provisioner.config.CatalogSyncMysqlContainer) == "" ||
 		strings.TrimSpace(provisioner.config.CatalogSyncMysqlUser) == "" ||
 		strings.TrimSpace(provisioner.config.CatalogSyncMysqlPassword) == "" {
-		return fmt.Errorf("catalog sync image / MySQL coordinates are not fully configured")
+		return fmt.Errorf("catalog sync MySQL coordinates are not fully configured")
 	}
-	arguments := []string{
-		"run", "--rm", "--network=host",
-		"-v", "/var/run/docker.sock:/var/run/docker.sock",
-		// `-e NAME` forwards the runner environment without placing secret values in
-		// docker's argv (and therefore /proc/<pid>/cmdline / command audit logs).
-		"-e", "PLATFORM_APPLICATION_ID",
-		"-e", "PLATFORM_BASE_URL",
-		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID",
-		"-e", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET",
-		"-e", "PLATFORM_MYSQL_CONTAINER",
-		"-e", "PLATFORM_MYSQL_USER",
-		"-e", "PLATFORM_MYSQL_PASSWORD",
-		"-e", "PLATFORM_MYSQL_DATABASE",
-		provisioner.config.CatalogSyncImage,
-		"/usr/local/bin/sync-contract-catalog.sh",
+	// 安全（SEC-F2）：不再以 docker run --rm --network=host -v /var/run/docker.sock 运行 helper——
+	// docker.sock 等价宿主机 root，与 host 网络和注入的明文密钥组合后，helper 容器被攻破即失陷
+	// 宿主机。改为由 Agent 自身执行受审脚本：无容器、无挂载、无 host 网络，密钥只进入 Agent
+	// 子进程环境，既不进入任何容器，也不出现在命令行参数里（MySQL 访问由脚本按需自行发起）。
+	scriptPath := filepath.Join(filepath.Dir(provisioner.config.GatewayScriptPath), "sync-contract-catalog.sh")
+	if info, statErr := os.Stat(scriptPath); statErr != nil || info.IsDir() {
+		return fmt.Errorf("catalog sync script is unavailable")
 	}
 	runnerEnvironment := append(os.Environ(),
 		"PLATFORM_APPLICATION_ID="+input.ApplicationID,
@@ -1607,7 +1627,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) maybeSyncContractCatalogLock
 		"PLATFORM_MYSQL_PASSWORD="+provisioner.config.CatalogSyncMysqlPassword,
 		"PLATFORM_MYSQL_DATABASE="+provisioner.config.CatalogSyncMysqlDatabase,
 	)
-	return provisioner.runner.Run(operationCtx, "/var/run/docker.sock", runnerEnvironment, provisioner.config.DockerBinary, arguments...)
+	return provisioner.runner.Run(operationCtx, filepath.Dir(scriptPath), runnerEnvironment, "/bin/bash", scriptPath)
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) frontendContainerID(ctx context.Context, directory string) (string, error) {
@@ -1681,6 +1701,25 @@ func locateEnvironmentSource(projectDirectory string) (string, error) {
 		}
 	}
 	return "", os.ErrNotExist
+}
+
+// ensureContractSigningPhoneEnvironmentValue（SEC-D7b）确保合同签署人手机号列加密密钥
+// （SIGNING_PHONE_ENCRYPTION_KEY_BASE64，AES-GCM 32 字节 Base64）包含在本次写入的 values 中：
+// contract env 可能由模板 .env.example 首次生成（占位/空值），缺配时 contract /readyz 与
+// 寄送写入失败关闭。已有合法键绝不覆盖——轮换会导致既有密文无法解密，需另行数据迁移。
+func ensureContractSigningPhoneEnvironmentValue(environmentPath string, values map[string]string) error {
+	const key = "SIGNING_PHONE_ENCRYPTION_KEY_BASE64"
+	if current, err := readEnvironmentValues(environmentPath); err == nil {
+		if decoded, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(current[key])); decodeErr == nil && len(decoded) == 32 {
+			return nil
+		}
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return provisioningError("generate contract signing phone encryption key")
+	}
+	values[key] = base64.StdEncoding.EncodeToString(secret)
+	return nil
 }
 
 func updateSubsystemEnvironment(sourcePath, destinationPath string, replacements map[string]string) error {
@@ -1915,8 +1954,16 @@ func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Cont
 		return provisioningError("access placeholder environment file is unavailable")
 	}
 
-	origin := strings.TrimSpace(input.PublicOrigin)
-	port := accessHTTPPort(origin)
+	// 安全（SEC-F1）：origin 会以 "KEY=origin" 逐行写入 .env.lan 并注入容器环境，使用前必须
+	// 拒绝 CR/LF/NUL 换行注入、非 http(s) scheme 以及携带 path/query/fragment/userinfo 的值。
+	origin, err := normalizeAccessPublicOrigin(input.PublicOrigin)
+	if err != nil {
+		return err
+	}
+	port, err := accessHTTPPort(origin)
+	if err != nil {
+		return err
+	}
 	if origin == "" {
 		_ = os.Remove(overrideFile)
 		_ = os.Remove(customerOverrideFile)
@@ -1986,6 +2033,20 @@ func writeAccessOverrideFiles(overrideFile, customerOverrideFile, origin string,
 }
 
 func writeAccessOverrideFile(path, description, content string) error {
+	// 安全（SEC-F1）：content 会被 Compose 当作 KEY=value 环境文件加载，落盘前逐行强制环境值
+	// 校验——拒绝 \r/\x00 等控制字符并要求每行都是合法 KEY=value，防止换行注入覆盖其他容器
+	// 环境（如 DEV_AUTH_ENABLED、OIDC_ISSUER）；换行只允许作为行分隔符出现。
+	for _, line := range strings.Split(content, "\n") {
+		if line == "" {
+			continue
+		}
+		if !validEnvironmentValue(line) {
+			return provisioningError("write " + description + ": environment line contains control characters")
+		}
+		if key, _, found := strings.Cut(line, "="); !found || !validEnvironmentKey(key) {
+			return provisioningError("write " + description + ": environment line must be KEY=value")
+		}
+	}
 	payload := "# 由平台「对外访问」配置自动生成；执行恢复本机访问会删除本文件。\n# 仅用于临时访问，不要提交到版本库。\n" + content
 	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
 		return provisioningError("write " + description + ": " + err.Error())
@@ -1993,10 +2054,21 @@ func writeAccessOverrideFile(path, description, content string) error {
 	return os.Chmod(path, 0o600)
 }
 
-func accessHTTPPort(origin string) string {
-	parsed, err := url.Parse(strings.TrimSpace(origin))
-	if err != nil || parsed.Port() == "" {
-		return "8081"
+// accessHTTPPort 提取 origin 的显式端口。安全（SEC-F1）：URL 解析或 scheme 校验失败必须返回
+// 错误而不是静默回退默认端口，避免非法 origin 被当作合法配置继续写入运行时环境。
+func accessHTTPPort(origin string) (string, error) {
+	if origin == "" {
+		// 空 origin 表示恢复本机访问，沿用固定默认端口。
+		return "8081", nil
 	}
-	return parsed.Port()
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		// 不把 url.Parse 的错误文本带回上层：它可能携带原始输入，避免日志二次注入。
+		return "", provisioningError("public origin is not a valid http(s) origin")
+	}
+	if parsed.Port() == "" {
+		return "8081", nil
+	}
+	return parsed.Port(), nil
 }

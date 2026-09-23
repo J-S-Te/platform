@@ -29,7 +29,7 @@ type applicationModel struct{ ID, Code, Name, Status string }
 
 func (applicationModel) TableName() string { return "platform_application" }
 
-type environmentModel struct{ ID, ApplicationID, Environment, Status string }
+type environmentModel struct{ ID, TenantID, ApplicationID, Environment, Status string }
 
 func (environmentModel) TableName() string { return "platform_application_environment" }
 
@@ -107,12 +107,16 @@ func (r *Repository) ListNamespaces(ctx context.Context, tenantID string, query 
 }
 func (r *Repository) CreateNamespace(ctx context.Context, input application.NamespaceCreateInput, id string, now time.Time) (domain.Namespace, error) {
 	// 应用和环境归属始终从平台注册表反查；当前配置控制面只允许为 ACTIVE 的 dev 环境建命名空间。
+	// 安全（SEC-D2）：platform_application 只在 (tenant_id,code) 上唯一，跨租户同码应用真实存在。
+	// 查询必须携带调用方租户过滤，否则租户 A 可把 cfg_namespace 绑到租户 B 的同码应用：
+	// 既造成跨租户完整性破坏与存在性探测，残留的 FK RESTRICT 行还会阻塞租户 B 删除环境。
 	var app applicationModel
-	if err := r.database.WithContext(ctx).Where("code = ? AND status = ?", input.ApplicationCode, "ACTIVE").Take(&app).Error; err != nil {
+	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND code = ? AND status = ?", input.TenantID, input.ApplicationCode, "ACTIVE").Take(&app).Error; err != nil {
 		return domain.Namespace{}, r.mapError(err)
 	}
+	// 环境同样按租户复核，防止应用行与环境行在异常数据下跨越租户边界。
 	var environment environmentModel
-	if err := r.database.WithContext(ctx).Where("application_id = ? AND environment = ? AND status = ?", app.ID, "dev", "ACTIVE").Take(&environment).Error; err != nil {
+	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND application_id = ? AND environment = ? AND status = ?", input.TenantID, app.ID, "dev", "ACTIVE").Take(&environment).Error; err != nil {
 		return domain.Namespace{}, r.mapError(err)
 	}
 	model := namespaceModel{ID: id, TenantID: input.TenantID, ApplicationID: app.ID, EnvironmentID: environment.ID, Name: input.Code, DisplayName: input.Name, Description: input.Description, Status: "ACTIVE", Version: 1, CreatedAt: now.UTC(), UpdatedAt: now.UTC(), CreatedBy: pointer(input.OperatorID), UpdatedBy: pointer(input.OperatorID)}

@@ -232,10 +232,13 @@ func (repository *ManagementRepository) DeleteEnvironment(ctx context.Context, i
 			return application.ErrVersionConflict
 		}
 
+		// 安全（SEC-D2）：前置检查不按调用方租户过滤——cfg_namespace / audit_ingestion_receipt
+		// 都有指向 environment 的 FK RESTRICT，历史跨租户残留行同样会阻塞删除；只数本租户行
+		// 会把友好拒绝变成数据库层的原始 FK 错误，因此这里按 application_id+environment_id 全量统计。
 		for _, retainedTable := range []string{"cfg_namespace", "audit_ingestion_receipt"} {
 			var count int64
 			if err := transaction.Table(retainedTable).
-				Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+				Where("application_id = ? AND environment_id = ?", input.ApplicationID, input.EnvironmentID).
 				Count(&count).Error; err != nil {
 				return err
 			}

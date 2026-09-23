@@ -27,6 +27,38 @@ func RequireSameOrigin(issuer string) gin.HandlerFunc {
 	}
 }
 
+// RequireSameOriginNavigation 保护 Cookie 认证的 GET 登出等状态变更型导航（安全审查 SEC-B10）：
+// 顶层 GET 导航不携带 Origin，不能复用 RequireSameOrigin（会拒绝全部合法同站 GET），但浏览器
+// 必发 Sec-Fetch-Site。校验规则：携带 Origin 时必须与 issuer 同源；否则携带 Sec-Fetch-Site 时
+// 只允许 same-origin/none（cross-site/同站子域一律拒绝）；两者皆缺失视为非浏览器客户端
+// （curl/健康探测——不存在会被非自愿携带的浏览器 Cookie 上下文）放行。残留边界：不发送
+// Fetch Metadata 的远古浏览器无法与 curl 区分，属已评估残留，由 SameSite Cookie 兜底。
+func RequireSameOriginNavigation(issuer string) gin.HandlerFunc {
+	allowedOrigin := issuerOrigin(issuer)
+
+	return func(context *gin.Context) {
+		if originHeader := strings.TrimSpace(context.GetHeader("Origin")); originHeader != "" {
+			if allowedOrigin == "" || normalizedOrigin(originHeader) != allowedOrigin {
+				context.Abort()
+				httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
+				return
+			}
+			context.Next()
+			return
+		}
+		switch site := strings.ToLower(strings.TrimSpace(context.GetHeader("Sec-Fetch-Site"))); site {
+		case "":
+			// 无 Fetch Metadata 且无 Origin：非浏览器客户端，无非自愿 Cookie 携带面。
+			context.Next()
+		case "same-origin", "none":
+			context.Next()
+		default:
+			context.Abort()
+			httpresponse.WriteError(context.Writer, context.Request, http.StatusForbidden, httperror.Forbidden)
+		}
+	}
+}
+
 // RequireAllowedOriginForUnsafeMethods 对 Cookie 写接口执行 CSRF 防护。所有不安全方法必须携带
 // 明确允许的 Origin；Origin 被代理剥离或缺失时也拒绝。非浏览器自动化应走 Bearer/服务账号边界。
 func RequireAllowedOriginForUnsafeMethods(origins ...string) gin.HandlerFunc {

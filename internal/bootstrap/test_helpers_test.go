@@ -1,8 +1,8 @@
 package bootstrap
 
 import (
-	"log/slog"
 	"io"
+	"log/slog"
 )
 
 func testLogger() *slog.Logger {

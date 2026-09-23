@@ -45,6 +45,13 @@ func (handler *Handler) CloneAuthorizationCatalog(writer http.ResponseWriter, re
 		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.Error{Code: "TENANT_CLONE_INVALID_REQUEST", Message: "目标租户和 Idempotency-Key 不能为空"})
 		return
 	}
+	// 安全（SEC-D1）：向调用方租户之外的目标租户写入属于跨租户权威操作，
+	// 必须显式持有平台级跨租户权限；否则任何租户管理员拿到他人租户 ULID
+	// 即可注入应用/角色/权限、污染未开通租户并以唯一约束阻塞受害者接入。
+	if targetTenantID != strings.TrimSpace(principal.Tenant.ID) && !holdsPermission(principal, tenantclone.PermissionCrossTenantClone) {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Error{Code: "TENANT_CLONE_CROSS_TENANT_FORBIDDEN", Message: "不允许向其他租户执行授权目录克隆"})
+		return
+	}
 
 	result, err := handler.service.Clone(request.Context(), tenantclone.Input{
 		SourceTenantID: principal.Tenant.ID,
@@ -57,6 +64,16 @@ func (handler *Handler) CloneAuthorizationCatalog(writer http.ResponseWriter, re
 		return
 	}
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "新租户授权目录克隆完成", result)
+}
+
+// holdsPermission 只认服务端会话加载的权限码，请求头或前端可见性不能增加权限。
+func holdsPermission(principal authctx.Principal, code string) bool {
+	for _, held := range principal.PermissionCodes {
+		if held == code {
+			return true
+		}
+	}
+	return false
 }
 
 func (handler *Handler) writeError(writer http.ResponseWriter, request *http.Request, err error) {

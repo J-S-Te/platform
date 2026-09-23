@@ -29,6 +29,50 @@ public_transport_valid_port() {
   [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
 }
 
+public_transport_is_ip() {
+  local value="$1" part tail compact count=0
+  if [[ "$value" == \[*\] ]]; then
+    value="${value#[}"; value="${value%]}"
+    [[ "$value" == *:* ]] || return 1
+  elif [[ "$value" == *\[* || "$value" == *\]* ]]; then
+    return 1
+  fi
+  if [[ "$value" == *:* ]]; then
+    [[ "$value" != :* || "$value" == ::* ]] && [[ "$value" != *: || "$value" == *:: ]] || return 1
+    if [[ "$value" == *.* ]]; then
+      tail="${value##*:}"
+      public_transport_is_ip "$tail" || return 1
+      value="${value%:*}:0:0"
+    fi
+    [[ "$value" =~ ^[0-9A-Fa-f:]+$ && "$value" != *:::* ]] || return 1
+    compact="${value/::/}"
+    [[ "$compact" != *::* ]] || return 1
+    tail="$value"
+    while [[ "$tail" == *:* ]]; do
+      part="${tail%%:*}"; tail="${tail#*:}"
+      [[ -z "$part" || ${#part} -le 4 ]] || return 1
+      [[ -z "$part" ]] || count=$((count + 1))
+    done
+    [[ ${#tail} -le 4 ]] || return 1
+    [[ -z "$tail" ]] || count=$((count + 1))
+    if [[ "$value" == *::* ]]; then
+      (( count < 8 ))
+    else
+      [[ "$value" != :* && "$value" != *: ]] && (( count == 8 ))
+    fi
+  else
+    [[ "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    tail="$value"
+    while :; do
+      part="${tail%%.*}"
+      [[ "$part" == 0 || "$part" != 0* ]] || return 1
+      (( 10#$part <= 255 )) || return 1
+      [[ "$tail" == *.* ]] || break
+      tail="${tail#*.}"
+    done
+  fi
+}
+
 public_transport_origin() {
   local scheme="$1" host="$2" port="$3" default_port
   [[ "$scheme" == "https" ]] && default_port=443 || default_port=80
@@ -80,7 +124,7 @@ public_transport_validate_pair() {
 
 public_transport_prepare() {
   local deploy_dir="$1" runtime_file="${2:-$1/.env}" https_compose_file="${3:-$1/compose.https.yaml}" drain_compose_file="${4:-$1/compose.drain.yaml}"
-  local enabled transition_state tls_required platform_host sso_host http_port https_port
+  local enabled transition_state tls_required platform_host sso_host http_port https_port sso_http_port sso_https_port
   local platform_certificate platform_private_key sso_certificate sso_private_key
 
   [[ -f "$runtime_file" ]] || public_transport_fail "缺少 ${runtime_file}" || return 1
@@ -110,10 +154,16 @@ public_transport_prepare() {
 
   http_port="$(public_transport_env_value "$runtime_file" PUBLIC_HTTP_PORT)"
   https_port="$(public_transport_env_value "$runtime_file" PUBLIC_HTTPS_PORT)"
-  http_port="${http_port:-80}"
+  http_port="${http_port:-8081}"
   https_port="${https_port:-443}"
+  sso_http_port="$(public_transport_env_value "$runtime_file" PUBLIC_SSO_HTTP_PORT)"
+  sso_https_port="$(public_transport_env_value "$runtime_file" PUBLIC_SSO_HTTPS_PORT)"
+  sso_http_port="${sso_http_port:-$http_port}"
+  sso_https_port="${sso_https_port:-$https_port}"
   public_transport_valid_port "$http_port" || public_transport_fail "PUBLIC_HTTP_PORT 无效" || return 1
   public_transport_valid_port "$https_port" || public_transport_fail "PUBLIC_HTTPS_PORT 无效" || return 1
+  public_transport_valid_port "$sso_http_port" || public_transport_fail "PUBLIC_SSO_HTTP_PORT 无效" || return 1
+  public_transport_valid_port "$sso_https_port" || public_transport_fail "PUBLIC_SSO_HTTPS_PORT 无效" || return 1
 
   export PUBLIC_HTTPS_ENABLED="$enabled"
   export PUBLIC_TRANSPORT_STATE="$transition_state"
@@ -121,6 +171,8 @@ public_transport_prepare() {
   export PUBLIC_SSO_HOST="$sso_host"
   export PUBLIC_HTTP_PORT="$http_port"
   export PUBLIC_HTTPS_PORT="$https_port"
+  export PUBLIC_SSO_HTTP_PORT="$sso_http_port"
+  export PUBLIC_SSO_HTTPS_PORT="$sso_https_port"
 
   PUBLIC_TRANSPORT_COMPOSE_FILE=""
   if [[ "$tls_required" == "true" ]]; then
@@ -167,6 +219,7 @@ public_transport_prepare() {
   if [[ "$enabled" == "true" ]]; then
     PUBLIC_TRANSPORT_SCHEME=https
     PUBLIC_TRANSPORT_PORT="$https_port"
+    PUBLIC_SSO_TRANSPORT_PORT="$sso_https_port"
     export PUBLIC_TRANSPORT_COOKIE_SECURE=true
     export PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=false
     export PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=true
@@ -177,6 +230,7 @@ public_transport_prepare() {
     fi
     PUBLIC_TRANSPORT_SCHEME=http
     PUBLIC_TRANSPORT_PORT="$http_port"
+    PUBLIC_SSO_TRANSPORT_PORT="$sso_http_port"
     export PUBLIC_TRANSPORT_COOKIE_SECURE=false
     export PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true
     export PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=false
@@ -184,7 +238,7 @@ public_transport_prepare() {
 
   export PUBLIC_TRANSPORT_COMPOSE_FILE
   export PUBLIC_PLATFORM_ORIGIN="$(public_transport_origin "$PUBLIC_TRANSPORT_SCHEME" "$platform_host" "$PUBLIC_TRANSPORT_PORT")"
-  export PUBLIC_SSO_ORIGIN="$(public_transport_origin "$PUBLIC_TRANSPORT_SCHEME" "$sso_host" "$PUBLIC_TRANSPORT_PORT")"
+  export PUBLIC_SSO_ORIGIN="$(public_transport_origin "$PUBLIC_TRANSPORT_SCHEME" "$sso_host" "$PUBLIC_SSO_TRANSPORT_PORT")"
   local realm
   realm="$(public_transport_env_value "$runtime_file" KEYCLOAK_REALM)"
   realm="${realm:-basic-platform}"

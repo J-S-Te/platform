@@ -689,6 +689,10 @@ func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *test
 			errMessage: "subsystem provisioning unavailable: production subsystem target is not allowed",
 			want:       "subsystems.d",
 		},
+		"missing approved manifest checksum": {
+			errMessage: "subsystem provisioning unavailable: production subsystem update requires an approved manifest checksum for the selected target",
+			want:       "SUBSYSTEM_ONBOARDING_MODE=production",
+		},
 		"dependent runtime credentials": {
 			errMessage: "subsystem provisioning unavailable: production subsystem runtime secrets are incomplete",
 			want:       "前置子系统",
@@ -711,6 +715,14 @@ func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *test
 		},
 		"CRM image not published": {
 			errMessage: "subsystem provisioning unavailable: production subsystem image must use an immutable digest",
+			want:       ".release.env",
+		},
+		"immutable digest skipped prepare": {
+			errMessage: "subsystem provisioning unavailable: production subsystem image must use an immutable digest: CONTRACT_IMAGE=registry.example.com/contract:pending",
+			want:       "deploy.sh prepare",
+		},
+		"release environment unreadable": {
+			errMessage: "subsystem provisioning unavailable: production release environment is unavailable",
 			want:       ".release.env",
 		},
 		"database dependency failed": {
@@ -1302,4 +1314,96 @@ func TestCatalogPublisherCredentialRequiredForStartupCatalogPublishers(t *testin
 			t.Errorf("%s does not publish its catalog during controlled startup", applicationCode)
 		}
 	}
+}
+
+func TestUpdateSubsystemRejectsBuiltInPlatformRuntime(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := lifecycletestRequest(t, "/api/v1/subsystem-update", `{"application_code":"platform","environment":"prod"}`)
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusConflict || !strings.Contains(response.Body.String(), "IAM_PLATFORM_RUNTIME_NOT_MANAGED") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.input.ApplicationCode != "" {
+		t.Fatalf("built-in platform runtime must not reach the deployment agent: %#v", provisioner.input)
+	}
+}
+
+func TestUpdateSubsystemRejectsProductionTargetWithoutApprovedManifest(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{capabilities: application.SubsystemProvisioningCapabilities{
+		Enabled:                   true,
+		Mode:                      "production",
+		SupportedApplicationCodes: []string{"contract_management"},
+		SupportedEnvironments:     []string{"prod"},
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := lifecycletestRequest(t, "/api/v1/subsystem-update", `{"application_code":"contract_management","environment":"prod"}`)
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "IAM_SUBSYSTEM_TARGET_NOT_IN_PRODUCTION_MANIFEST") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.input.ApplicationCode != "" {
+		t.Fatalf("target without an approved manifest must not reach the deployment agent: %#v", provisioner.input)
+	}
+}
+
+func TestUpdateSubsystemAllowsReviewedProductionTarget(t *testing.T) {
+	t.Parallel()
+	provisioner := &recordingHTTPSubsystemProvisioner{capabilities: application.SubsystemProvisioningCapabilities{
+		Enabled:                   true,
+		Mode:                      "production",
+		SupportedApplicationCodes: []string{"contract_management"},
+		SupportedEnvironments:     []string{"prod"},
+		Targets: []application.SubsystemProvisioningTarget{{
+			ApplicationCode: "contract_management", Environment: "prod", ManifestChecksum: "sha256:approved",
+		}},
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := lifecycletestRequest(t, "/api/v1/subsystem-update", `{"application_code":"contract_management","environment":"prod"}`)
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if provisioner.input.ManifestChecksum != "sha256:approved" {
+		t.Fatalf("reviewed target lost its manifest checksum: %#v", provisioner.input)
+	}
+}
+
+func lifecycletestRequest(t *testing.T, path, body string) *stdhttp.Request {
+	t.Helper()
+	request := httptest.NewRequest(stdhttp.MethodPost, path, bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	return request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
 }

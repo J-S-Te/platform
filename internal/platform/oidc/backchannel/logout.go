@@ -90,14 +90,20 @@ type Dispatcher struct {
 
 // Run 持续处理持久队列；退出时尊重 context，未完成消息留给下一实例接管。
 func (d *Dispatcher) Run(ctx context.Context, interval time.Duration) error {
-	if interval <= 0 { interval = time.Second }
+	if interval <= 0 {
+		interval = time.Second
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		if _, err := d.RunOnce(ctx, time.Now().UTC()); err != nil && ctx.Err() == nil {
 			// 错误已经由队列保留为可重试状态；继续轮询避免单次 RP 故障拖垮 Worker。
 		}
-		select { case <-ctx.Done(): return ctx.Err(); case <-ticker.C: }
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 

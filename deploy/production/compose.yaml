@@ -1,5 +1,11 @@
 name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
 
+# ⚠️ 上线顺序（SEC-N10d，部署必读）：本文件已删除全部11处 *_MYSQL_DSN 明文 environment，
+# DSN 改由 deploy-*.sh 写入的 0600 runtime env_file 注入（7键 parity：contract/customer/
+# project 的 MYSQL_DSN、PORTAL_MYSQL_DSN、SETTLEMENT_MYSQL_DSN、DASHBOARD_MYSQL_DSN、
+# PORTAL_INVITE_COMPENSATION_MYSQL_DSN）。任何已部署环境必须先用更新后的部署脚本对各子系统
+# 重新执行一次 prepare/deploy（触发脚本写入 runtime/*.env），然后才能用本 compose up/recreate；# 顺序颠倒会导致 DSN 缺失、服务起不来。本仓库仅改源码，禁止对运行中的容器栈执行操作。
+
 x-platform-service: &platform-service
   image: ${PLATFORM_IMAGE}
   env_file:
@@ -26,10 +32,11 @@ x-contract-service: &contract-service
     OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+    # 传输安全默认 fail-closed（SEC-N2）：生产默认发 Secure Cookie；HTTP 过渡环境
+    # 需显式设 PUBLIC_TRANSPORT_COOKIE_SECURE=false 回滚，HTTPS overlay 不受影响。
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
     HTTP_ADDRESS: :8081
-    MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_WORKER_DEPLOYMENT_NAME: contract-management
@@ -58,17 +65,17 @@ x-customer-service: &customer-service
     OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     HTTP_ADDRESS: :8090
-    MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
     TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
     TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
     TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
-    # 非回环 HTTP 仅由部署级安全开关控制；当前测试服务器默认保持可用，切换
-    # HTTPS 后把 SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION 改为 false。
-    OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-true}}
+    # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+    # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+    # 完成 HTTPS 迁移后必须收回。
+    OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
     # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
     # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
     # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
@@ -93,14 +100,14 @@ x-portal-service: &portal-service
     PORTAL_OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
     PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
-    PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+    PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     PORTAL_HTTP_ADDRESS: :8091
-    PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD:-PENDING_PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
     PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
     PORTAL_CRM_INVITE_TOKEN_URL: http://platform-api:8080/oauth2/token
     PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
-    PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-true}}
+    # SEC-N2 fail-closed：与 CRM 同一开关，默认不放行非 Secure 的门户会话。
+    PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
     GIN_MODE: release
   networks: [application]
   volumes:
@@ -118,9 +125,8 @@ x-project-service: &project-service
     OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     PM_HTTP_ADDR: :8082
-    MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
@@ -144,9 +150,8 @@ x-settlement-service: &settlement-service
     OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     SETTLEMENT_HTTP_ADDR: :8085
-    SETTLEMENT_MYSQL_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD:-PENDING_SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
     SETTLEMENT_DEVELOPMENT_AUTH: "false"
     PLATFORM_BASE_URL: http://platform-api:8080
     PLATFORM_ENVIRONMENT_CODE: prod
@@ -160,11 +165,10 @@ x-data-analysis-service: &data-analysis-service
     - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
   environment:
     APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+    COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
     OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
-    DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
     PLATFORM_BASE_URL: http://platform-api:8080
     APP_PATH_PREFIX: /data_analysis
     GIN_MODE: release
@@ -189,7 +193,8 @@ services:
       - ./backups/keycloak:/backups
     networks: [application]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      # 安全审查 SEC-F5b：密码经 MYSQL_PWD 环境变量传递，禁止出现在 argv（每 5 秒被 ps 读取）。
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -246,7 +251,7 @@ services:
       - platform-mysql-data:/var/lib/mysql
     networks: [application]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -272,15 +277,30 @@ services:
       APP_ENV: production
       APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
-      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-false}}
-      AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS:-true}}
+      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
+      # 传输安全默认 fail-closed（SEC-N2）：Secure Cookie 与 Keycloak HTTPS 必需默认开启，
+      # 任意 HTTP 回调 URI 默认拒绝。回滚方式（仅限已评估的 HTTP 过渡环境，在 .env 显式设置）：
+      #   PUBLIC_TRANSPORT_COOKIE_SECURE=false、PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=false、
+      #   PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true。
+      # compose.https.yaml overlay 加载时由 public-transport.sh 统一给出上述 PUBLIC_TRANSPORT_* 值，覆盖能力保持不变。
+      AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS:-false}}
       OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:-${OIDC_ISSUER:-http://localhost:8081}}
       KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
-      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-false}}
-      # 入口 Nginx 位于 Docker application 网络中；不显式信任该网段时，
-      # Gin 会把反代容器的 172.* 地址当作客户端地址，审计记录就会显示容器 IP。
-      # 仅 API 绑定宿主机回环端口，外部流量仍必须经过受控 Nginx。
-      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.16.0.0/12}
+      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
+      # 信任来源收敛为精确网关地址（SEC-N6，与生产 .env.example 保持一致）：
+      # 宿主机入口 Nginx 经 127.0.0.1 发布端口进入时对端是网桥网关 172.31.255.1，
+      # frontend 反代容器对端是其固定地址 172.31.255.250；应用网段其余容器一律不可信，
+      # 其携带的 X-Forwarded-For 会被忽略，防止任意容器伪造 XFF 污染审计/绕过限流。
+      # 确认方法：docker network inspect basic-platform-production --format '{{(index .IPAM.Config 0).Gateway}}'。
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32}
+      # 出网策略注入（task-50 SEC-B5；键名以 Go EgressPolicyFromEnv 逐字核对）：
+      # 本进程反代/健康探针的上游全部是 compose 私网容器名（实测 upstream_url：
+      # contract-api:8081 / project-api:8082 / settlement-api:8085 / customer-api:8090 /
+      # dashboard-api:8080 / portal-api:8091，平台自身两行为 NULL，无任何回环上游）；
+      # 生产网段 172.31.255.0/24 属 RFC1918 私网——不注入本键则下轮部署探针/反代全断
+      # （策略默认 fail-closed）。PLATFORM_EGRESS_ALLOW_LOOPBACK 不注入（保持默认拒绝），
+      # 若将来出现 127.0.0.1 上游需显式设 true；169.254/链路本地元数据恒拒，不受开关影响。
+      PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
       AUDIT_ENVIRONMENT_CODE: prod
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
       SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
@@ -335,12 +355,17 @@ services:
       APP_ENV: production
       APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
-      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-false}}
+      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
       OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:-${OIDC_ISSUER:-http://localhost:8081}}
       KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
-      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-false}}
+      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
       AUDIT_ENVIRONMENT_CODE: prod
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
+      # 出网策略（task-50 SEC-B5）：与 platform-api 同源注入——上游全为 compose 私网
+      # 容器名（实测清单见 platform-api 注释），私网族必须显式放行否则部署即断；
+      # PLATFORM_EGRESS_ALLOW_LOOPBACK 不注入（无回环上游，保持默认拒绝，按需显式开）；
+      # 169.254/链路本地元数据恒拒，不受任何开关影响。
+      PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
     command: ["./worker"]
     depends_on:
       platform-mysql:
@@ -350,11 +375,43 @@ services:
     restart: unless-stopped
 
   # 生产接入 Agent 仅通过 Unix Socket 接收固定生命周期动作。平台 API 不挂载
-  # Docker Socket；Agent 也没有网络端口，目标只能来自只读 subsystems.d 审核清单。
+  # Docker Socket；Agent 也不再直接挂载 docker.sock，只经下方白名单代理访问受限
+  # Docker API，目标只能来自只读 subsystems.d 审核清单。
+  #
+  # Docker Socket 白名单代理（安全审查 SEC-F3）：Agent 以 DOCKER_HOST 访问本服务，
+  # 代理在专有 internal 网络内以只读方式持有唯一 docker.sock 挂载；环境变量即
+  # verb/object ACL 白名单。诚实说明：compose up 语义上仍接近宿主机高权限，白名单
+  # 的价值在于把 socket 移出 Agent 容器、并默认关闭 swarm/secrets/configs/system/
+  # plugins/commit/auth 等全部无关 API；真正约束动作面仍依赖 subsystems.d 清单审核。
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      LOG_LEVEL: warn
+      POST: "1"        # compose up/down/run 需要非 GET 方法
+      CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
+      EXEC: "1"        # docker exec（frontend nginx -t、nginx -s reload）
+      IMAGES: "1"      # 镜像拉取与检查
+      NETWORKS: "1"    # compose 网络创建/连接/删除
+      VOLUMES: "1"     # compose 卷管理
+      INFO: "1"        # docker/compose 握手
+      # 未列出者保持镜像默认关闭：BUILD、AUTH、COMMIT、CONFIGS、DISTRIBUTION、GRPC、
+      # NODES、PLUGINS、SECRETS、SERVICES、SESSION、SWARM、SYSTEM、TASKS。
+      # 若受审清单确需镜像构建，再显式打开 BUILD 并记录审批理由。
+    volumes:
+      # 只读挂载宿主机 socket：代理仅经该连接转发受限 HTTP 请求，不改写 socket 文件；
+      # 该挂载是全 compose 中唯一的 docker.sock 入口，且不发布任何宿主机端口。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-control]
+    restart: unless-stopped
+
   subsystem-provisioner:
     image: ${PLATFORM_IMAGE}
     environment:
       SUBSYSTEM_ONBOARDING_MODE: production
+      # 安全审查 SEC-F3：docker CLI/Compose 统一经白名单代理访问 Docker API，
+      # 本容器不再挂载 /var/run/docker.sock。HOME 指向可写 tmpfs（根文件系统只读）。
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      HOME: /tmp
       SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
       SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}
       SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
@@ -368,17 +425,28 @@ services:
       # 仅测试服务器可设为 true：跳过子系统数据库凭据校验，允许占位密码首次初始化。
       SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS: ${SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS:-false}
     command: ["./subsystem-provisioner"]
+    # 安全审查 SEC-F3：以非 root 运行（默认复用镜像内置的 filegateway uid10001）。
+    # 若宿主机部署脚本要求 runtime 文件属主为部署用户，可在 .env 显式设置
+    # SUBSYSTEM_PROVISIONER_USER=<uid>:<gid>（stat -c %u:%g /opt/basic-platform 确认）。
+    user: "${SUBSYSTEM_PROVISIONER_USER:-10001:10001}"
     read_only: true
     cap_drop: [ALL]
-    # Agent 只操作受控的 runtime/backups 挂载；需要这两个能力处理宿主机
-    # deploy 用户拥有的 0600 runtime 文件，同时继续保持其余 capability 全部丢弃。
+    # 非 root 下保留的三个能力均为宿主机文件协作所必需，其余 capability 全部丢弃：
+    # DAC_OVERRIDE/FOWNER —— 读写宿主机 deploy 用户属有的 0600 runtime 文件与
+    #   socket 卷目录（卷目录属 root，非 root 无此能力无法创建 provisioner.sock）；
+    # CHOWN —— 重写受管文件时把临时文件属主还原为原文件 uid/gid（Go 侧 os.Chown 依赖）。
+    # 配合 no-new-privileges、只读根文件系统与 docker.sock 移除（仅经白名单代理），
+    # Agent 被攻破时不再具备 root 进程能力面，也不再直接持有 Docker Socket。
     cap_add: [DAC_OVERRIDE, FOWNER, CHOWN]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     tmpfs:
       - /tmp:size=64m,mode=1770
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # docker.sock 不再挂入本容器（SEC-F3）：Docker 访问统一走 docker-socket-proxy 白名单。
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:ro
@@ -388,7 +456,9 @@ services:
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups
       - subsystem-provisioner-socket:/run/basic-platform-provisioner
-    network_mode: none
+    # 原 network_mode:none 的隔离由专有 internal 网络（docker-control）继承：
+    # 仅白名单代理可达，无网关与外网出口；平台与业务容器均不在该网络中。
+    networks: [docker-control]
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/basic-platform-provisioner/provisioner.sock"]
       interval: 2s
@@ -411,7 +481,7 @@ services:
       - ./backups:/backups
     networks: [application]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucontract -p\"$${MYSQL_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -ucontract --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -457,10 +527,9 @@ services:
       OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
-      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-false}
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
       APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
       HTTP_ADDRESS: :8081
-      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
       TEMPORAL_ADDRESS: temporal:7233
       # environment 映射不会与 x-contract-service 的同名映射递归合并，必须在
@@ -571,7 +640,6 @@ services:
     entrypoint: ["/usr/local/bin/sla-notifier"]
     environment:
       PM_HTTP_ADDR: :8082
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
       SLA_SCAN_TENANTS: ${PROJECT_SLA_SCAN_TENANTS:-}
       NOTIFICATION_ENABLED: "true"
@@ -745,7 +813,6 @@ services:
     <<: *data-analysis-service
     image: ${DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE:-data-analysis/aggregation-worker:pending}
     environment:
-      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       AGGREGATION_ONCE: "false"
       CONTRACT_READ_DSN: ${CONTRACT_READ_DSN:-}
       CRM_READ_DSN: ${CRM_READ_DSN:-}
@@ -908,7 +975,6 @@ services:
     <<: *customer-service
     command: ["./presale-worker"]
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
       PRESALE_TEMPORAL_INTERNAL_MODE: ${PRESALE_TEMPORAL_INTERNAL_MODE:-true}
       TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
@@ -1005,7 +1071,6 @@ services:
     image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
     command: ["./portal-invite-compensation-worker"]
     environment:
-      PORTAL_INVITE_COMPENSATION_MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PORTAL_INVITE_COMPENSATION_PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
       PORTAL_INVITE_COMPENSATION_PORTAL_TOKEN_URL: http://platform-api:8080/oauth2/token
       PORTAL_INVITE_COMPENSATION_PORTAL_SCOPE: portal.identity_mapping.provision
@@ -1037,7 +1102,11 @@ services:
       PUBLIC_SSO_HOST: ${PUBLIC_SSO_HOST:-sso.localhost}
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTP_PORT:-${FRONTEND_PORT:-18082}}:80"
-    networks: [application]
+    # 固定地址（子网高位，避开自动分配顺序）供 APP_TRUSTED_PROXIES 精确信任：
+    # frontend nginx 是转发 X-Forwarded-For 到 platform-api 的唯一容器来源（SEC-N6）。
+    networks:
+      application:
+        ipv4_address: 172.31.255.250
     depends_on:
       platform-api:
         condition: service_healthy
@@ -1054,13 +1123,18 @@ services:
       - file-gateway-mysql-data:/var/lib/mysql
     networks: [application]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
 
   file-gateway:
     image: ${PLATFORM_IMAGE:?PLATFORM_IMAGE must be set}
+    # SEC-N10d：补 env_file——file-gateway 与平台服务同源读取 0600 运行环境文件，
+    # 使部署脚本注入的 FILE_GATEWAY_* 配置直达容器（environment 显式键仍优先生效）。
+    # 上线顺序遵循文件头部说明：先 prepare/deploy 再 up。
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
     command: ["./file-gateway"]
     environment:
       FILE_GATEWAY_HTTP_ADDRESS: :8086
@@ -1096,6 +1170,16 @@ services:
 networks:
   application:
     name: basic-platform-production
+    # 固定子网使网关地址（172.31.255.1）与 frontend 固定地址可被 APP_TRUSTED_PROXIES
+    # 精确信任（SEC-N6）。升级迁移：既有环境需先 compose down 移除旧网络再 up 重建，
+    # Docker 不允许对已存在网络原地修改子网。
+    ipam:
+      config:
+        - subnet: 172.31.255.0/24
+  # Agent 控制通道专用内网（SEC-F3）：仅包含 subsystem-provisioner 与
+  # docker-socket-proxy，internal=true 无网关/外网出口，业务容器均不在该网络中。
+  docker-control:
+    internal: true
 
 volumes:
   platform-mysql-data:

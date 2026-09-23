@@ -96,6 +96,61 @@ install -d -m 700 "$deploy_dir/runtime" "$deploy_dir/backups" "$deploy_dir/backu
   echo "发布备份目录不可写：$deploy_dir/backups/releases；请将其属主调整为当前 CI 部署用户" >&2
   exit 1
 }
+
+# SEC-N10b：数据库 DSN 以文件注入方式写入 CRM/Portal 的 env_file（runtime/*.env，0600），
+# 不再依赖 compose environment 的明文插值供给。组装值与 compose 原插值逐字节一致
+# （含 :- 默认值语义），密码只出现在本进程环境与目标文件中，不进入任何命令行参数。
+dsn_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$runtime_file"
+}
+
+write_runtime_dsn_value() {
+  local file="$1" key="$2" value="$3" temporary
+  [[ "$value" != *$'\n'* ]] || {
+    echo "拒绝为 $key 写入包含换行的 DSN" >&2
+    return 1
+  }
+  temporary="$(mktemp "$deploy_dir/runtime/.runtime-dsn.XXXXXX")"
+  chmod 600 "$temporary"
+  # 经 awk 的 ENVIRON 传值，避免 awk -v 做反斜杠转义，保证与 compose 插值逐字节一致。
+  if ! DSN_WRITE_KEY="$key" DSN_WRITE_VALUE="$value" awk -F= '
+    BEGIN {
+      key = ENVIRON["DSN_WRITE_KEY"]
+      value = ENVIRON["DSN_WRITE_VALUE"]
+      found = 0
+    }
+    $0 !~ /^[[:space:]]*#/ && $1 == key { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$file"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod 600 "$file"
+}
+
+write_runtime_dsns() {
+  local customer_dsn portal_dsn password
+  password="$(dsn_env_value CUSTOMER_MYSQL_PASSWORD)"
+  customer_dsn="customer:${password:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true"
+  write_runtime_dsn_value "$customer_runtime_file" MYSQL_DSN "$customer_dsn"
+  # portal 邀请补偿 Worker 合并 x-customer-service，读取的 env_file 是 customer.env（SEC-N10b）。
+  write_runtime_dsn_value "$customer_runtime_file" PORTAL_INVITE_COMPENSATION_MYSQL_DSN "$customer_dsn"
+  password="$(dsn_env_value PORTAL_MYSQL_PASSWORD)"
+  portal_dsn="portal:${password:-PENDING_PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true"
+  write_runtime_dsn_value "$portal_runtime_file" PORTAL_MYSQL_DSN "$portal_dsn"
+}
 initialize_runtime_file() {
   local target="$1" template="$2" temporary
   if [[ ! -f "$target" ]]; then
@@ -141,6 +196,8 @@ initialize_runtime_file() {
 }
 initialize_runtime_file "$customer_runtime_file" "$customer_runtime_template"
 initialize_runtime_file "$portal_runtime_file" "$portal_runtime_template"
+# 文件注入 DSN 必须在任何 compose up 之前完成（SEC-N10b）；失败由 set -Eeuo pipefail 中止发布。
+write_runtime_dsns
 
 exec 9>"$deploy_dir/runtime/.deploy.lock"
 flock -w 900 9 || { echo "等待其他发布任务超时" >&2; exit 1; }
@@ -428,8 +485,10 @@ backup_database() {
   temporary="$(mktemp "$deploy_dir/backups/.${label}-${release_id}.XXXXXX.sql.gz")"
   chmod 600 "$temporary"
   echo "备份数据库到 $output"
+  # 安全（SEC-F5c）：root 密码只经容器内 MYSQL_PWD 环境变量传给 mysqldump，
+  # 不再以 -p 加明文密码的方式拼进 argv，避免密码出现在 /proc/*/cmdline。
   if ! compose exec -T "$mysql_service" sh -c \
-    'exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$1"' \
+    'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump --single-transaction --routines --triggers -uroot "$1"' \
     _ "$database" | gzip -9 >"$temporary"; then
     rm -f "$temporary"
     return 1

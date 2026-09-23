@@ -13,3 +13,5 @@
 基础平台前端遵循 UniLab UI Kit。全局设计变量的唯一事实源是 `frontend/src/modules/platform/shared/styles/main.css` 的 `:root`；控制台、IAM、门户和设置页面只维护语义别名，不复制基础颜色、字号、圆角或阴影值。登录页使用纯色深色品牌区；子系统门户使用整页展示型大屏，首次默认深色，并支持浅色、深色、跟随系统三态切换和浏览器本地持久化。门户允许低对比度 Canvas 粒子、网格柔光、受限卡片 3D 跟随和短时错峰入场，但必须限制粒子数量和延迟上限、按绘制帧节流、页面不可见时暂停，并遵循 `prefers-reduced-motion` 与精细指针能力；Canvas 配色需要随最终解析主题同步变化。
 
 人员异动以 `iam_personnel_change_request` 为业务事实源，状态只能按领域状态机推进并使用版本号进行并发保护。晋升、降职和调岗真实关闭原任职并建立目标任职；离职必须经过审批和持久化责任交接，所有 `iam_personnel_handover_item` 完成后才能排期，执行时撤销会话并禁用任职、账号和用户；复职恢复既有本地账号、强制下次改密并建立新任职。每次状态推进写入 `iam_personnel_change_transition`，不得以页面状态或自由文本替代审批与交接证据。
+
+生产公开传输由 `deploy/production/bin/public-transport.sh` 统一派生。平台入口与 Keycloak SSO 可以使用不同端口：`PUBLIC_HTTP_PORT` / `PUBLIC_HTTPS_PORT` 控制平台入口，`PUBLIC_SSO_HTTP_PORT` / `PUBLIC_SSO_HTTPS_PORT` 控制 SSO Origin；SSO 端口留空时才继承对应平台端口。所有子系统的 `OIDC_ISSUER` 必须由真实 SSO Origin 派生并与 Keycloak discovery 返回的 issuer 完全一致，不能按平台入口端口推断。

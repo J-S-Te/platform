@@ -15,6 +15,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 )
 
 const oauthClientManagementRequestBodyLimit = 1 << 20
@@ -104,6 +105,10 @@ func (handler *OAuthClientManagementHandler) CreateOAuthClient(writer stdhttp.Re
 		handler.writeOAuthClientManagementError(writer, request, err)
 		return
 	}
+
+	// 安全审查 SEC-D5：体寻址的创建操作没有路径 *_id，登记被创建对象 id 供审计中间件
+	// 写入事件 ResourceID/metadata.resource_id；失败路径不登记，避免空键或错配。
+	middleware.MarkCreatedResource(request, result.Client.ID)
 
 	response := oauthClientCreateResponse{OAuthClient: toOAuthClientResponse(result.Client)}
 	if result.PlaintextSecret != "" {

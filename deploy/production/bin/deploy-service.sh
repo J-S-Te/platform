@@ -173,13 +173,104 @@ prepare_runtime_file() {
   fi
 }
 
+# SEC-N10b：数据库 DSN 以文件注入方式写入本服务的 env_file（runtime/*.env，0600），
+# 不再依赖 compose environment 的明文插值供给。组装值与 compose 原插值逐字节一致
+# （含 :- 默认值语义），密码只出现在本进程环境与目标文件中，不进入任何命令行参数。
+dsn_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$runtime_file"
+}
+
+write_runtime_dsn_value() {
+  local file="$1" key="$2" value="$3" temporary
+  [[ "$value" != *$'\n'* ]] || {
+    echo "拒绝为 $key 写入包含换行的 DSN" >&2
+    return 1
+  }
+  temporary="$(mktemp "$deploy_dir/runtime/.runtime-dsn.XXXXXX")"
+  chmod 600 "$temporary"
+  # 经 awk 的 ENVIRON 传值，避免 awk -v 做反斜杠转义，保证与 compose 插值逐字节一致。
+  if ! DSN_WRITE_KEY="$key" DSN_WRITE_VALUE="$value" awk -F= '
+    BEGIN {
+      key = ENVIRON["DSN_WRITE_KEY"]
+      value = ENVIRON["DSN_WRITE_VALUE"]
+      found = 0
+    }
+    $0 !~ /^[[:space:]]*#/ && $1 == key { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$file"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod 600 "$file"
+}
+
+write_service_runtime_dsns() {
+  local target_name="$1" target key password dsn
+  case "$target_name" in
+    contract)
+      target="$contract_runtime_file"
+      key="MYSQL_DSN"
+      password="$(dsn_env_value CONTRACT_MYSQL_PASSWORD)"
+      dsn="contract:${password}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      ;;
+    project)
+      target="$project_runtime_file"
+      key="MYSQL_DSN"
+      password="$(dsn_env_value PROJECT_MYSQL_PASSWORD)"
+      dsn="project:${password:-PENDING_PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      ;;
+    settlement)
+      target="$settlement_runtime_file"
+      key="SETTLEMENT_MYSQL_DSN"
+      password="$(dsn_env_value SETTLEMENT_MYSQL_PASSWORD)"
+      dsn="settlement:${password:-PENDING_SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC"
+      ;;
+    data-analysis)
+      target="$data_analysis_runtime_file"
+      key="DASHBOARD_MYSQL_DSN"
+      password="$(dsn_env_value DASHBOARD_MYSQL_PASSWORD)"
+      dsn="dashboard:${password:-PENDING_DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  write_runtime_dsn_value "$target" "$key" "$dsn"
+}
+
 # 只准备本次真正发布的子系统配置。frontend/platform 发布不得创建、改属主或
 # 改权限 contract/project runtime，避免无关发布被历史 root-owned 密钥文件阻断。
+# DSN 必须在任何 compose up 之前写入；本 case 是对应服务发布入口的最早阶段，
+# 写入失败由 set -Eeuo pipefail 中止发布（SEC-N10b）。
 case "$service" in
-  contract) prepare_runtime_file "$contract_runtime_file" "$contract_runtime_template" "合同服务" ;;
-  project) prepare_runtime_file "$project_runtime_file" "$project_runtime_template" "项目管理服务" ;;
-  settlement) prepare_runtime_file "$settlement_runtime_file" "$settlement_runtime_template" "结算服务" ;;
-  data-analysis) prepare_runtime_file "$data_analysis_runtime_file" "$data_analysis_runtime_template" "数据看板服务" ;;
+  contract)
+    prepare_runtime_file "$contract_runtime_file" "$contract_runtime_template" "合同服务"
+    write_service_runtime_dsns contract
+    ;;
+  project)
+    prepare_runtime_file "$project_runtime_file" "$project_runtime_template" "项目管理服务"
+    write_service_runtime_dsns project
+    ;;
+  settlement)
+    prepare_runtime_file "$settlement_runtime_file" "$settlement_runtime_template" "结算服务"
+    write_service_runtime_dsns settlement
+    ;;
+  data-analysis)
+    prepare_runtime_file "$data_analysis_runtime_file" "$data_analysis_runtime_template" "数据看板服务"
+    write_service_runtime_dsns data-analysis
+    ;;
 esac
 
 install -d -m 700 "$deploy_dir/runtime"
@@ -469,8 +560,10 @@ backup_database() {
   chmod 600 "$temporary"
   echo "备份数据库到 $output"
   # single-transaction 为 InnoDB 提供一致性快照，备份管道任一环节失败都会因 pipefail 中止发布。
+  # 安全（SEC-F5c）：root 密码只经容器内 MYSQL_PWD 环境变量传给 mysqldump，
+  # 不再以 -p 加明文密码的方式拼进 argv，避免密码出现在 /proc/*/cmdline。
   if ! compose exec -T "$mysql_service" sh -c \
-    'exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$1"' \
+    'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump --single-transaction --routines --triggers -uroot "$1"' \
     _ "$database" \
     | gzip -9 >"$temporary"; then
     rm -f "$temporary"

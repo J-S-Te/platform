@@ -50,6 +50,10 @@ type HTTPConfig struct {
 	Addr           string
 	PublicBaseURL  string
 	TrustedProxies []string
+	// MetricsAccessToken 保护 /metrics（SEC-B4）：设置后抓取端必须携带
+	// Authorization: Bearer <token>；未设置时仅放行回环对端（本机抓取），
+	// 远程 Prometheus 抓取必须在部署环境配置本令牌。运行时不提供源码默认值。
+	MetricsAccessToken string
 }
 
 // MySQLConfig contains the connection inputs used to build a MySQL DSN.
@@ -205,7 +209,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	cookieSecure, err := boolean("AUTH_SESSION_COOKIE_SECURE", false)
+	// 安全默认 true（SEC-B2）：会话 JWT 与 OIDC state/nonce cookie 默认要求 Secure，
+	// 防止会话明文传输被劫持。本地 HTTP 开发显式 AUTH_SESSION_COOKIE_SECURE=false 放行；
+	// APP_ENV=production 下显式 false 会在 Validate 中拒绝启动（fail-closed）。
+	cookieSecure, err := boolean("AUTH_SESSION_COOKIE_SECURE", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -260,9 +267,10 @@ func Load() (Config, error) {
 		AppName:     value("APP_NAME", "basic-platform"),
 		Timezone:    value("APP_TIMEZONE", "Asia/Shanghai"),
 		HTTP: HTTPConfig{
-			Addr:           value("APP_HTTP_ADDR", ":8080"),
-			PublicBaseURL:  publicBaseURL,
-			TrustedProxies: commaSeparated(value("APP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")),
+			Addr:               value("APP_HTTP_ADDR", ":8080"),
+			PublicBaseURL:      publicBaseURL,
+			TrustedProxies:     commaSeparated(value("APP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")),
+			MetricsAccessToken: value("METRICS_ACCESS_TOKEN", ""),
 		},
 		MySQL: MySQLConfig{
 			Host:     value("MYSQL_HOST", "127.0.0.1"),
@@ -370,9 +378,11 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// Validate 在创建网络监听和数据库连接前拒绝不安全配置。HTTPS 与 Secure Cookie 由部署环境
-// 显式配置：当前兼容 HTTP 网关/内网部署，不依据 APP_ENV 隐式改变协议策略；CORS 使用凭据时
-// 仍禁止通配源，部署自动化只有在所选模式所需路径完整时才允许启用。
+// Validate 在创建网络监听和数据库连接前拒绝不安全配置。传输层（Public BaseURL 的 scheme）
+// 仍由部署环境显式配置，兼容 HTTP 网关/内网部署；但会话 Cookie Secure 是会话劫持的直接
+// 防线：production 环境拒绝 AUTH_SESSION_COOKIE_SECURE=false（SEC-B2 fail-closed），
+// 非生产环境可通过显式环境变量放行本地 HTTP 开发。CORS 使用凭据时仍禁止通配源，
+// 部署自动化只有在所选模式所需路径完整时才允许启用。
 func (cfg Config) Validate() error {
 	if cfg.AppName == "" {
 		return fmt.Errorf("APP_NAME must not be empty")
@@ -416,6 +426,12 @@ func (cfg Config) Validate() error {
 	}
 	if strings.EqualFold(cfg.Auth.SessionCookieSameSite, "none") && !cfg.Auth.SessionCookieSecure {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when AUTH_SESSION_COOKIE_SAME_SITE is None")
+	}
+	// SEC-B2：production 拒绝不安全会话 Cookie（fail-closed）。指引：HTTPS 部署保持
+	// AUTH_SESSION_COOKIE_SECURE=true（新默认值）；仅本地/过渡 HTTP 的非生产环境
+	// 才允许显式设 false；生产环境请迁移到 HTTPS，或为纯 HTTP 过渡实例调整 APP_ENV。
+	if strings.EqualFold(cfg.Environment, "production") && !cfg.Auth.SessionCookieSecure {
+		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE=false is rejected when APP_ENV=production: keep AUTH_SESSION_COOKIE_SECURE=true behind HTTPS, or set a non-production APP_ENV for HTTP-only development")
 	}
 	if cfg.Logging.Directory == "" || cfg.FileStorageRoot == "" {
 		return fmt.Errorf("LOG_DIRECTORY and FILE_STORAGE_ROOT must not be empty")

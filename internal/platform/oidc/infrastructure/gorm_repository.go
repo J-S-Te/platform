@@ -371,7 +371,10 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, command application
 		}).Error; err != nil {
 			return err
 		}
-		return tx.Table("oauth_token_family").Where("id = ?").Update("expires_at", command.Refresh.ExpiresAt.UTC()).Error
+		// 安全（SEC-D3）：占位符必须绑定 family.ID——此前 Where("id = ?") 漏传参数，
+		// 生成 SQL 的占位符与绑定变量个数不匹配，MySQL 执行期直接拒绝，导致每次
+		// grant_type=refresh_token 轮换都在此回滚、refresh token grant 整体不可用。
+		return tx.Table("oauth_token_family").Where("id = ?", family.ID).Update("expires_at", command.Refresh.ExpiresAt.UTC()).Error
 	})
 	if err != nil {
 		return domain.TokenGrant{}, err
