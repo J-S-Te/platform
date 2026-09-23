@@ -169,6 +169,14 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 		ID: "audit-client-id", ApplicationID: "application-1", EnvironmentID: "environment-1",
 		ClientID: "customer_and_opportunity-dev-audit-publisher", Status: "ACTIVE", Version: 1,
 		Scopes: []string{"audit.ingest"},
+	}, {
+		ID: "contract-opportunity-client-id", ApplicationID: "application-1", EnvironmentID: "environment-1",
+		ClientID: "customer_and_opportunity-dev-opportunity-intake", Status: "ACTIVE", Version: 4,
+		Scopes: []string{"opportunity.signed.write"},
+	}, {
+		ID: "contract-summary-client-id", ApplicationID: "application-1", EnvironmentID: "environment-1",
+		ClientID: "customer_and_opportunity-dev-contract-summary", Status: "ACTIVE", Version: 2,
+		Scopes: []string{"contract.summary.read"},
 	}}}
 	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
 	credentials, err := handler.ensureUpdateServiceCredentials(
@@ -178,8 +186,15 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(manager.secretInputs) != 1 || manager.secretInputs[0].OAuthClientID != "audit-client-id" {
-		t.Fatalf("audit credential was not rotated: %#v", manager.secretInputs)
+	if len(manager.secretInputs) != 3 {
+		t.Fatalf("existing delivery credentials were not rotated: %#v", manager.secretInputs)
+	}
+	rotated := map[string]bool{}
+	for _, input := range manager.secretInputs {
+		rotated[input.OAuthClientID] = true
+	}
+	if !rotated["audit-client-id"] || !rotated["contract-opportunity-client-id"] || !rotated["contract-summary-client-id"] {
+		t.Fatalf("CRM runtime credentials must all be rotated: %#v", manager.secretInputs)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
 		"customer_and_opportunity-dev-notification-publisher": {"notification.ingest"},
@@ -189,11 +204,29 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
 		application.ServiceCredentialAuditIngest:                        "retry-secret",
+		application.ServiceCredentialContractOpportunitySignedWrite:     "retry-secret",
+		application.ServiceCredentialContractSummaryRead:                "retry-secret",
 		application.ServiceCredentialNotificationIngest:                 "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:                 "new-secret",
 		application.ServiceCredentialContractOpportunitySignedCountRead: "new-secret",
 		application.ServiceCredentialFileGatewayWrite:                   "new-secret",
 	})
+}
+
+func TestEnsureUpdateServiceCredentialsRecreatesMissingCustomerSignedOpportunityWriter(t *testing.T) {
+	manager := &serviceCredentialManagerStub{}
+	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+	credentials, err := handler.ensureUpdateServiceCredentials(
+		context.Background(), "tenant-1", "application-1", "environment-1",
+		"customer_and_opportunity", "prod", "operator-1", "RETRY",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireCreatedClient(t, manager.createdInputs, "customer_and_opportunity-prod-opportunity-intake", []string{"opportunity.signed.write"})
+	requireCreatedClient(t, manager.createdInputs, "customer_and_opportunity-prod-contract-summary", []string{"contract.summary.read"})
+	requireDeliveredCredential(t, credentials, application.ServiceCredentialContractOpportunitySignedWrite, "new-secret")
+	requireDeliveredCredential(t, credentials, application.ServiceCredentialContractSummaryRead, "new-secret")
 }
 
 func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *testing.T) {

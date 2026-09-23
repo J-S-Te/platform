@@ -8,6 +8,10 @@ valid_ip() { public_transport_is_ip "$1"; }
 configuration_prompt() {
   local label="$1" default="$2" value
   read -r -p "$label${default:+ [$default]}：" value || die "未收到配置输入；请在交互终端运行 configure"
+  # 兼容从 Windows 或聊天窗口粘贴时带入的 CRLF 和地址两侧空白。
+  value="${value//$'\r'/}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "${value:-$default}"
 }
 
@@ -147,7 +151,7 @@ configure() (
     if [[ "$first" == true ]]; then mode=ip; host=''; frontend_port=8081; platform_port=18080; keycloak_port=18090; fi
     if [[ "$mode" == ip ]]; then
       host="$(configuration_prompt '服务器 IP' "$host")"
-      valid_ip "$host" || die '请输入有效的 IPv4 或 IPv6 地址'
+      valid_ip "$host" || die "请输入有效的 IPv4 或 IPv6 地址（收到：$(printf '%q' "$host")）"
       host="${host#[}"; host="${host%]}"
       platform_port="$(configuration_prompt '基础平台 API 端口' "${platform_port:-18080}")"
       frontend_port="$(configuration_prompt '统一前端 HTTP 端口' "${frontend_port:-8081}")"

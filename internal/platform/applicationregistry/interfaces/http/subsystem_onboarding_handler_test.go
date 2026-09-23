@@ -753,6 +753,27 @@ func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *test
 	}
 }
 
+func TestSubsystemProvisioningNextActionDiagnosesContractClientSecretDeliveryGap(t *testing.T) {
+	t.Parallel()
+	message := "subsystem provisioning unavailable: production subsystem runtime configuration is incomplete: " +
+		"CONTRACT_CLIENT_SECRET is missing or still an onboarding placeholder; run the controlled adoption/retry workflow"
+	nextAction := subsystemProvisioningNextAction(errors.New(message))
+	for _, want := range []string{
+		"service.contract_opportunity_signed_write",
+		"受控重试下发修复",
+		"重新部署 platform",
+		"原环境点击“重试”",
+		"不要手工写入 runtime",
+	} {
+		if !strings.Contains(nextAction, want) {
+			t.Errorf("next action = %q, want substring %q", nextAction, want)
+		}
+	}
+	if strings.Contains(nextAction, "用途机器 Client 尚未在平台控制面创建") {
+		t.Fatalf("known credential-delivery gap was misdiagnosed as a missing control-plane Client: %q", nextAction)
+	}
+}
+
 func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	t.Parallel()
 	provisioner := &recordingHTTPSubsystemProvisioner{}
