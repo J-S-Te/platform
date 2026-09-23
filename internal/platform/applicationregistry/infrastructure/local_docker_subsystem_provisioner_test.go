@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
+	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 )
 
 func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t *testing.T) {
@@ -1254,6 +1255,275 @@ func TestLocalDockerSubsystemProvisionerTeardownWithoutProjectDirStillRemovesGat
 	})
 	if gatewayCall.arguments[2] != "missing_subsystem" {
 		t.Fatalf("gateway remove code = %q, want missing_subsystem", gatewayCall.arguments[2])
+	}
+}
+
+func TestNormalizeAccessPublicOriginRejectsEnvironmentInjection(t *testing.T) {
+	t.Parallel()
+	// SEC-F1：这些 payload 试图通过 .env.lan 的 "KEY=origin" 行换行注入其他容器环境。
+	for _, payload := range []string{
+		"https://portal.example.com\nDEV_AUTH_ENABLED=true",
+		"https://portal.example.com\r\nOIDC_ISSUER=http://evil.example.com",
+		"https://portal.example.com\x00PLATFORM_MYSQL_PASSWORD=stolen",
+		"javascript:alert(1)",
+		"ftp://portal.example.com",
+		"portal.example.com",
+		"http://user:pass@portal.example.com",
+		"https://portal.example.com/sub/path",
+		"https://portal.example.com?next=evil",
+		"https://portal.example.com#fragment",
+	} {
+		if got, err := normalizeAccessPublicOrigin(payload); err == nil || got != "" {
+			t.Fatalf("injection payload %q was accepted: origin=%q err=%v", payload, got, err)
+		}
+	}
+	for value, want := range map[string]string{
+		"":                                "",
+		"  https://portal.example.com  ":  "https://portal.example.com",
+		"http://portal.example.com:9090/": "http://portal.example.com:9090",
+	} {
+		got, err := normalizeAccessPublicOrigin(value)
+		if err != nil || got != want {
+			t.Fatalf("normalizeAccessPublicOrigin(%q) = %q, %v; want %q", value, got, err, want)
+		}
+	}
+}
+
+func TestWriteAccessOverrideFileRejectsUnsafeEnvironmentLines(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".env.lan")
+	if err := writeAccessOverrideFile(path, "docker/.env.lan", "APP_PUBLIC_BASE_URL=https://a.example.com\rEVIL=1\n"); err == nil {
+		t.Fatal("carriage-return environment line was accepted")
+	}
+	if err := writeAccessOverrideFile(path, "docker/.env.lan", "APP_PUBLIC_BASE_URL=https://a.example.com\x00EVIL=1\n"); err == nil {
+		t.Fatal("NUL environment line was accepted")
+	}
+	if err := writeAccessOverrideFile(path, "docker/.env.lan", "not-an-assignment\n"); err == nil {
+		t.Fatal("non KEY=value environment line was accepted")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected content still created the file: err=%v", err)
+	}
+	if err := writeAccessOverrideFile(path, "docker/.env.lan", "APP_PUBLIC_BASE_URL=https://a.example.com\n"); err != nil {
+		t.Fatalf("valid environment content rejected: %v", err)
+	}
+}
+
+func TestAccessHTTPPortHandlesOriginParsing(t *testing.T) {
+	t.Parallel()
+	// SEC-F1：解析失败必须返回错误，而不是静默回退 8081。
+	if _, err := accessHTTPPort("http://[::1"); err == nil {
+		t.Fatal("unparsable origin was accepted")
+	}
+	if _, err := accessHTTPPort("not a url"); err == nil {
+		t.Fatal("origin without scheme/host was accepted")
+	}
+	if port, err := accessHTTPPort(""); err != nil || port != "8081" {
+		t.Fatalf("empty origin port = %q, %v", port, err)
+	}
+	if port, err := accessHTTPPort("https://portal.example.com"); err != nil || port != "8081" {
+		t.Fatalf("default origin port = %q, %v", port, err)
+	}
+	if port, err := accessHTTPPort("https://portal.example.com:9443"); err != nil || port != "9443" {
+		t.Fatalf("explicit origin port = %q, %v", port, err)
+	}
+}
+
+func TestApplyAccessValidatesPublicOriginBeforeWritingEnvironment(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	contractRoot := filepath.Join(root, integratedContractApplicationCode)
+	for _, directory := range []string{
+		filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"), contractRoot,
+	} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):            "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):          "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.lan.disabled"):   "# placeholder\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
+		filepath.Join(contractRoot, ".env.local"):                    "CONTRACT_SETTING=keep\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+
+	overrideFile := filepath.Join(platformRoot, "docker", ".env.lan")
+	// SEC-F1：换行注入 payload 必须在写文件与执行 compose 之前被整体拒绝。
+	if err := provisioner.ApplyAccess(context.Background(), settingsapplication.AccessApplyInput{
+		PublicOrigin: "https://portal.example.com\nDEV_AUTH_ENABLED=false",
+	}); err == nil {
+		t.Fatal("newline injection public origin was accepted")
+	}
+	if _, statErr := os.Stat(overrideFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf(".env.lan written despite rejected origin: err=%v", statErr)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("compose ran despite rejected origin: %#v", runner.calls)
+	}
+	for _, payload := range []string{
+		"https://portal.example.com\x00EVIL=1",
+		"ftp://portal.example.com",
+		"http://portal.example.com/admin",
+	} {
+		if err := provisioner.ApplyAccess(context.Background(), settingsapplication.AccessApplyInput{PublicOrigin: payload}); err == nil {
+			t.Fatalf("unsafe public origin %q was accepted", payload)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("compose ran despite rejected origins: %#v", runner.calls)
+	}
+
+	// 合法 origin：写出 .env.lan，并把解析出的端口交给 Compose。
+	if err := provisioner.ApplyAccess(context.Background(), settingsapplication.AccessApplyInput{
+		PublicOrigin: " http://portal.example.com:9090 ",
+	}); err != nil {
+		t.Fatalf("apply valid public origin: %v", err)
+	}
+	content, err := os.ReadFile(overrideFile)
+	if err != nil {
+		t.Fatalf("read .env.lan: %v", err)
+	}
+	for _, expected := range []string{
+		"APP_PUBLIC_BASE_URL=http://portal.example.com:9090\n",
+		"OIDC_ISSUER=http://portal.example.com:9090\n",
+	} {
+		if !strings.Contains(string(content), expected) {
+			t.Fatalf(".env.lan missing %q:\n%s", expected, content)
+		}
+	}
+	if statInfo, statErr := os.Stat(overrideFile); statErr != nil {
+		t.Fatalf("stat .env.lan: %v", statErr)
+	} else if statInfo.Mode().Perm() != 0o600 {
+		t.Fatalf(".env.lan permissions = %v", statInfo.Mode().Perm())
+	}
+	accessCall := runner.calls[len(runner.calls)-1]
+	if !containsString(accessCall.environment, "FRONTEND_HTTP_PORT=9090") ||
+		!containsString(accessCall.environment, "FRONTEND_BIND_ADDRESS=0.0.0.0") {
+		t.Fatalf("access compose environment missing bind/port: %v", accessCall.environment)
+	}
+
+	// 空 origin 恢复本机访问：删除 .env.lan 并回到 127.0.0.1。
+	if err := provisioner.ApplyAccess(context.Background(), settingsapplication.AccessApplyInput{}); err != nil {
+		t.Fatalf("restore local access: %v", err)
+	}
+	if _, err := os.Stat(overrideFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(".env.lan still exists after restore: err=%v", err)
+	}
+	accessCall = runner.calls[len(runner.calls)-1]
+	if !containsString(accessCall.environment, "FRONTEND_BIND_ADDRESS=127.0.0.1") {
+		t.Fatalf("restore did not bind loopback: %v", accessCall.environment)
+	}
+}
+
+func TestContractCatalogSyncRunsAgentSideWithoutDockerSocketOrHostNetwork(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	platformRoot := filepath.Join(root, "platform")
+	project := filepath.Join(root, integratedContractApplicationCode)
+	for _, directory := range []string{
+		filepath.Join(platformRoot, "scripts"), filepath.Join(platformRoot, "docker"), project,
+	} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("create directory %s: %v", directory, err)
+		}
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(platformRoot, "compose.local.yaml"):                  "services: {}\n",
+		filepath.Join(platformRoot, "docker", ".env.local"):                "PLATFORM_SETTING=keep\n",
+		filepath.Join(platformRoot, "docker", ".env.customer.local"):       "CUSTOMER_SETTING=keep\n",
+		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):        "#!/bin/sh\n",
+		filepath.Join(platformRoot, "scripts", "sync-contract-catalog.sh"): "#!/usr/bin/env bash\n",
+		filepath.Join(project, "docker-compose.yml"):                       "services: {}\n",
+		filepath.Join(project, ".env.local"):                               "OIDC_CLIENT_ID=contract_management-prod-web\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	runner := &recordingSubsystemRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
+		Enabled: true, ProjectsRoot: root,
+		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
+		PlatformComposeProject: "basic-platform-local", Timeout: 30 * time.Second,
+		CatalogSyncEnabled:        true,
+		CatalogSyncImage:          "basic-platform/backend:local",
+		CatalogSyncTargetAppCode:  integratedContractApplicationCode,
+		CatalogSyncMysqlContainer: "basic-platform-local-mysql-1",
+		CatalogSyncMysqlUser:      "basic_platform",
+		CatalogSyncMysqlPassword:  "mysql-secret",
+		CatalogSyncMysqlDatabase:  "basic_platform",
+	}, runner)
+	if err != nil {
+		t.Fatalf("construct provisioner: %v", err)
+	}
+	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+		TenantID: "tenant-1", ApplicationID: "01KZ42MPYY9168FKFPBXVTX677",
+		ApplicationCode: integratedContractApplicationCode, Environment: "prod",
+		Issuer:                       "http://localhost:8081",
+		CatalogPublisherClientID:     "contract-dev-catalog-publisher",
+		CatalogPublisherClientSecret: "publisher-secret",
+	}); err != nil {
+		t.Fatalf("update contract subsystem: %v", err)
+	}
+
+	// SEC-F2：所有命令都不得挂载 docker.sock 或共享 host 网络。
+	for _, call := range runner.calls {
+		joined := strings.Join(append([]string{call.binary}, call.arguments...), " ")
+		for _, forbidden := range []string{"docker.sock", "--network=host"} {
+			if strings.Contains(joined, forbidden) {
+				t.Fatalf("command contains %q: %s", forbidden, joined)
+			}
+		}
+	}
+	if len(runner.calls) != 6 {
+		t.Fatalf("contract update calls = %d, want 6: %#v", len(runner.calls), runner.calls)
+	}
+	sync := runner.calls[len(runner.calls)-1]
+	scriptPath := filepath.Join(platformRoot, "scripts", "sync-contract-catalog.sh")
+	if sync.binary != "/bin/bash" || len(sync.arguments) != 1 || sync.arguments[0] != scriptPath {
+		t.Fatalf("catalog sync must run the reviewed script agent-side: %#v", sync)
+	}
+	if sync.directory != filepath.Dir(scriptPath) {
+		t.Fatalf("catalog sync directory = %q", sync.directory)
+	}
+	// 密钥只允许出现在子进程环境，不得进入 argv。
+	joinedArguments := strings.Join(sync.arguments, " ")
+	for _, secret := range []string{"mysql-secret", "publisher-secret"} {
+		if strings.Contains(joinedArguments, secret) {
+			t.Fatalf("secret %q appeared in catalog sync argv: %s", secret, joinedArguments)
+		}
+	}
+	for _, expected := range []string{
+		"PLATFORM_MYSQL_PASSWORD=mysql-secret",
+		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET=publisher-secret",
+		"PLATFORM_BASE_URL=http://localhost:8081",
+		"PLATFORM_MYSQL_CONTAINER=basic-platform-local-mysql-1",
+	} {
+		if !containsString(sync.environment, expected) {
+			t.Fatalf("catalog sync environment missing %q", expected)
+		}
 	}
 }
 

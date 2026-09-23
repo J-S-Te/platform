@@ -29,13 +29,16 @@ type subsystemAccessChecker interface {
 type SubsystemServiceRouteHandler struct {
 	reader     subsystemServiceRouteReader
 	authorizer subsystemAccessChecker
+	// egress 是反向代理出网策略（SEC-B5），与健康探针共用同一校验函数；
+	// 构造时从环境变量加载（默认拒绝元数据/回环/私网）。
+	egress *application.EgressPolicy
 }
 
 func NewSubsystemServiceRouteHandler(reader subsystemServiceRouteReader, authorizers ...subsystemAccessChecker) (*SubsystemServiceRouteHandler, error) {
 	if reader == nil {
 		return nil, application.ErrValidation
 	}
-	handler := &SubsystemServiceRouteHandler{reader: reader}
+	handler := &SubsystemServiceRouteHandler{reader: reader, egress: application.EgressPolicyFromEnv()}
 	if len(authorizers) > 1 {
 		return nil, application.ErrValidation
 	}
@@ -170,12 +173,24 @@ func (handler *SubsystemServiceRouteHandler) Proxy(writer stdhttp.ResponseWriter
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.DependencyUnavailable)
 		return
 	}
+	// 安全（SEC-B5）：反代与健康探针共用同一出网策略——link-local/云元数据永不放行，
+	// 回环与私网需 PLATFORM_EGRESS_ALLOW_LOOPBACK/PLATFORM_EGRESS_ALLOW_PRIVATE 显式允许。
+	// 入口先做 URL 层校验，下面的 Transport 再对解析出的 IP 在建连前复验（防 DNS 重绑定）。
+	egress := handler.egress
+	if egress == nil {
+		egress = application.EgressPolicyFromEnv()
+	}
+	if err := egress.ValidateURL(upstream); err != nil {
+		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.DependencyUnavailable)
+		return
+	}
 	target, err := url.Parse(upstream)
 	if err != nil {
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.DependencyUnavailable)
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = &stdhttp.Transport{DialContext: egress.DialContext}
 	originalDirector := proxy.Director
 	proxy.Director = func(outgoing *stdhttp.Request) {
 		originalDirector(outgoing)

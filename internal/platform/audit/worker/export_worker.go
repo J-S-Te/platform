@@ -146,7 +146,14 @@ func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (
 		return domain.ExportFile{}, "", fmt.Errorf("write audit export header: %w", err)
 	}
 	for _, event := range events {
-		if err := writer.Write([]string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary, event.RequestID, event.TraceID, event.CorrelationID, event.Method, event.Path, event.ClientIP, event.UserAgent}); err != nil {
+		row := []string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary, event.RequestID, event.TraceID, event.CorrelationID, event.Method, event.Path, event.ClientIP, event.UserAgent}
+		// 安全审查 SEC-B6：所有数据单元格统一做公式注入转义——攻击者可控字段
+		// （User-Agent/资源名/路径等）若以 = + - @ 或前导 tab/CR 开头，审计员用
+		// Excel/WPS 打开导出文件时会被解释为公式并可能执行。
+		for index := range row {
+			row[index] = escapeCSVFormulaCell(row[index])
+		}
+		if err := writer.Write(row); err != nil {
 			return domain.ExportFile{}, "", fmt.Errorf("write audit export row: %w", err)
 		}
 	}
@@ -170,6 +177,26 @@ func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (
 	}
 	completed = true
 	return domain.ExportFile{FileID: fileID, VersionID: versionID, StorageRelativePath: filepath.ToSlash(relativePath), OriginalName: "audit-export-" + work.JobID + ".csv", MediaType: exportMediaType, SizeBytes: uint64(info.Size()), SHA256: hash.Sum(nil), CreatedAt: now}, absolutePath, nil
+}
+
+// escapeCSVFormulaCell 对公式注入载荷加前导单引号（OWASP CSV Injection 防御）：
+// 以 =、+、-、@ 开头，或前导含 tab/CR（表格软件会先剥掉这些控制字符再判定公式）的
+// 单元格一律加 ' 前缀，使其按字面文本渲染；普通值原样返回，不改变既有导出内容。
+func escapeCSVFormulaCell(value string) string {
+	if value == "" {
+		return value
+	}
+	trimmed := strings.TrimLeft(value, "\t\r")
+	if trimmed != value {
+		// 前导 tab/CR 本身就是公式解析绕过面，按同样方式转义。
+		return "'" + value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@':
+		return "'" + value
+	default:
+		return value
+	}
 }
 
 func safeStoragePath(root, relativePath string) (string, error) {

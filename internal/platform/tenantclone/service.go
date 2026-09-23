@@ -17,6 +17,12 @@ var (
 	ErrNotFound   = errors.New("tenant authorization clone tenant not found")
 )
 
+// PermissionCrossTenantClone 是「向调用方租户之外的目标租户写入授权目录」所需的
+// 平台级跨租户权威（SEC-D1）。克隆会整树注入应用/资源/权限/角色，任何租户管理员
+// 拿到他人租户 ULID 都不应能执行；未持有该权限的跨租户目标一律 403。
+// 权限定义见 migrations/000109_seed_cross_tenant_clone_permission.sql，默认不授予任何角色。
+const PermissionCrossTenantClone = "platform:tenant:authorization-catalog-clone"
+
 // Input 描述一次授权目录克隆；目标租户必须已由租户生命周期流程创建。
 type Input struct{ SourceTenantID, TargetTenantID, IdempotencyKey, OperatorID string }
 

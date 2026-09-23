@@ -101,7 +101,9 @@ echo "$LOG_PREFIX step 1: got access_token (length=${#ACCESS_TOKEN})" >&2
 # 2) 从 platform DB 读出该应用的 resources / permissions / roles
 #    用 docker exec（容器内 mysql 客户端），密码从 env 传入，ps 不可见。
 run_mysql() {
-  docker exec -i -e "MYSQL_PWD=$MYSQL_PASSWORD" "$MYSQL_CONTAINER" \
+  # 安全（SEC-F6）：MYSQL_PWD 按名转发（-e 后不带值，取自本进程环境），
+  # 口令值不再出现在 docker CLI 的 argv（/proc/*/cmdline），与本文件上方注释一致。
+  MYSQL_PWD="$MYSQL_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -u"$MYSQL_USER" --default-character-set=utf8mb4 -N -B \
     "$DB_NAME" -e "$1" 2>/dev/null
 }

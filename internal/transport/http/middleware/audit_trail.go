@@ -51,6 +51,11 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 	}
 
 	return func(context *gin.Context) {
+		// 安全审查 SEC-D5：执行业务链前挂载可变目标 id 槽位，创建类处理器在成功后
+		// 通过 MarkCreatedResource 登记对象 id，链路结束时统一采集进审计事件。
+		if context.Request != nil {
+			context.Request = context.Request.WithContext(AttachAuditResourceTarget(context.Request.Context()))
+		}
 		// 必须先执行后续链，才能采集最终路由模板、HTTP 状态和授权拒绝结果。
 		context.Next()
 
@@ -89,6 +94,13 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		if requestSourceIP != "" && requestSourceIP != sourceIP {
 			metadata["request_source_ip"] = requestSourceIP
 		}
+		// 安全审查 SEC-D5：优先采用业务处理器登记的目标对象 id（体寻址创建没有路径
+		// *_id），同时落入 metadata，满足审计“操作者+目标”的可检索要求。
+		resourceID := auditResourceID(context)
+		if handlerResourceID := AuditResourceIDFromRequest(context.Request); handlerResourceID != "" {
+			resourceID = handlerResourceID
+			metadata["resource_id"] = handlerResourceID
+		}
 		input := auditapplication.EventInput{
 			EventID:         newPlatformAuditEventID(),
 			ApplicationCode: source.ApplicationCode,
@@ -102,7 +114,7 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			SessionID:       principal.SessionID,
 			Action:          context.Request.Method + " " + route,
 			ResourceType:    auditResourceType(route),
-			ResourceID:      auditResourceID(context),
+			ResourceID:      resourceID,
 			RequestID:       requestctx.RequestID(context.Request.Context()),
 			TraceID:         requestctx.TraceID(context.Request.Context()),
 			Result:          auditResult(statusCode),
@@ -133,17 +145,11 @@ func shouldRecordAuditTrail(method, route string) bool {
 	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch") {
 		return false
 	}
-	// 用户应用授权等操作在持久化成功后会写更完整的业务审计，这里避免成功事件重复；
-	// 被拒绝的尝试仍由通用轨迹保留，确保攻击和误操作可见。
-	if strings.HasPrefix(route, "/api/v1/users/") && strings.Contains(route, "/applications/:application_code/access") && (method == http.MethodPut || method == http.MethodDelete) {
-		return false
-	}
-	if strings.HasPrefix(route, "/api/v1/authorization-subjects/") && strings.Contains(route, "/applications/:application_code/access") && method == http.MethodDelete {
-		return false
-	}
-	if strings.Contains(route, "/authorization-catalog") && method == http.MethodPut {
-		return false
-	}
+	// 安全审查 SEC-D4a：通用轨迹不再对任何写操作做成功抑制。此前用户应用授权、
+	// 授权主体撤销、授权目录发布在成功时只依赖业务审计事件——业务审计摄取一旦失败，
+	// 该操作在任何地方都没有记录。现在通用轨迹始终落库（业务审计失败时由它兜底，
+	// 测试见 TestAuditTrailRecordsGenericEventForBusinessAuditRoute）；业务审计成功时
+	// 额外产生一条更完整的事件，消费方按 EventCategory/EventType 区分，宁可重复不可丢失。
 	if strings.HasPrefix(route, "/api/v1/audit/") {
 		return true
 	}

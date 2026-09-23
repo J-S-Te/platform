@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
@@ -24,16 +25,19 @@ const (
 )
 
 type subsystemProvisioningRequest struct {
-	Version     int                                     `json:"version"`
-	Action      string                                  `json:"action"`
-	RequestID   string                                  `json:"request_id,omitempty"`
-	Code        string                                  `json:"code,omitempty"`
-	TenantID    string                                  `json:"tenant_id,omitempty"`
-	Environment string                                  `json:"environment,omitempty"`
-	Preflight   *application.SubsystemPreflightInput    `json:"preflight,omitempty"`
-	Input       *application.SubsystemProvisioningInput `json:"input,omitempty"`
-	Access      *subsystemAccessApplyPayload            `json:"access,omitempty"`
-	Discovery   *subsystemServiceDiscoveryRequest       `json:"discovery,omitempty"`
+	Version     int    `json:"version"`
+	Action      string `json:"action"`
+	RequestID   string `json:"request_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	// ManifestChecksum 供 teardown 在生产模式满足与 preflight/provision/update 相同的
+	// 已批准清单门槛；客户端按 code→environment 从服务端下发的目标投影解析后填入。
+	ManifestChecksum string                                  `json:"manifest_checksum,omitempty"`
+	Preflight        *application.SubsystemPreflightInput    `json:"preflight,omitempty"`
+	Input            *application.SubsystemProvisioningInput `json:"input,omitempty"`
+	Access           *subsystemAccessApplyPayload            `json:"access,omitempty"`
+	Discovery        *subsystemServiceDiscoveryRequest       `json:"discovery,omitempty"`
 }
 
 type subsystemServiceDiscoveryRequest struct {
@@ -260,12 +264,26 @@ func (provisioner *UnixSocketSubsystemProvisioner) Teardown(ctx context.Context,
 		return provisioningError("automatic subsystem deployment is disabled")
 	}
 	return provisioner.exchange(ctx, subsystemProvisioningRequest{
-		Version:     subsystemProvisioningProtocolVersion,
-		Action:      "teardown",
-		TenantID:    strings.TrimSpace(tenantID),
-		Code:        strings.TrimSpace(applicationCode),
-		Environment: strings.TrimSpace(environment),
+		Version:          subsystemProvisioningProtocolVersion,
+		Action:           "teardown",
+		TenantID:         strings.TrimSpace(tenantID),
+		Code:             strings.TrimSpace(applicationCode),
+		Environment:      strings.TrimSpace(environment),
+		ManifestChecksum: provisioner.manifestChecksumFor(applicationCode, environment),
 	})
+}
+
+// manifestChecksumFor 按 code→environment 从服务端下发的目标投影解析已批准清单校验和，写法与
+// 控制面 handler.manifestChecksumForTarget 一致；生产模式 teardown 依赖它通过 Agent 的清单门槛。
+func (provisioner *UnixSocketSubsystemProvisioner) manifestChecksumFor(applicationCode, environment string) string {
+	code := strings.TrimSpace(applicationCode)
+	targetEnvironment := strings.TrimSpace(environment)
+	for _, target := range provisioner.capabilities.Targets {
+		if strings.EqualFold(target.ApplicationCode, code) && strings.EqualFold(target.Environment, targetEnvironment) {
+			return strings.TrimSpace(target.ManifestChecksum)
+		}
+	}
+	return ""
 }
 
 // Discover asks the isolated Agent for services declared by the current runtime.
@@ -315,19 +333,40 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 		return provisioningError("read deployment response")
 	}
 	if !reply.Success {
-		message := strings.TrimSpace(reply.Message)
-		if message == "" {
-			message = "deployment helper rejected the request"
-		}
-		detail := strings.TrimSpace(reply.Detail)
-		if detail == "" {
-			return provisioningError(message)
-		}
-		// 优先携带 Agent 返回的脱敏详情，让平台页面直接看到目标容器日志的失败原因；
-		// Message 保持短单行以兼容 next_action 的稳定匹配。
-		return provisioningError(message + ": " + detail)
+		return provisioningRejectionError(reply.Message, reply.Detail)
 	}
 	return nil
+}
+
+// provisioningRejectionError 把 Agent 的单行摘要与详情合并成一个错误。Agent 为兼容
+// next_action 匹配会同时返回摘要和详情，短错误时两者完全相同；这里必须先判重再拼接，
+// 否则页面会出现 "原因: 原因: 原因" 这类无法阅读的重复文本。
+func provisioningRejectionError(message, detail string) error {
+	message = strings.TrimSpace(message)
+	detail = strings.TrimSpace(detail)
+	var reason string
+	switch {
+	case message == "" && detail == "":
+		return provisioningError("deployment helper rejected the request")
+	case detail == "":
+		reason = message
+	case message == "":
+		reason = detail
+	// 摘要可能是详情折叠换行后的截断版本，也可能详情只是摘要的一部分；任一情况都保留
+	// 信息量更大的一方，避免丢失多行日志细节。
+	case message == detail, strings.Contains(detail, message):
+		reason = detail
+	case strings.Contains(message, detail):
+		reason = message
+	default:
+		reason = message + ": " + detail
+	}
+	// Agent 内部的兜底拒绝会把哨兵错误原文当作 message 和 detail 返回。此时再包装一次
+	// 只会得到 "unavailable: unavailable"，因此直接返回哨兵本身。
+	if reason == application.ErrSubsystemProvisioningUnavailable.Error() {
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	return provisioningError(reason)
 }
 
 func (provisioner *UnixSocketSubsystemProvisioner) exchangeDiscovery(ctx context.Context, discovery subsystemServiceDiscoveryRequest) ([]application.SubsystemServiceInstance, error) {
@@ -390,6 +429,12 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchangeCandidateDiscovery(ct
 
 // RunSubsystemProvisioningServer 提供窄化的 Unix-socket 协议，监听端点应只属于隔离 Helper，
 // 不发布网络端口；协议解析、请求号和错误摘要都在边界处脱敏，避免内部细节回流 API。
+//
+// SEC-F4 降级说明：对端身份校验（SO_PEERCRED UID/GID 白名单，如
+// SUBSYSTEM_PROVISIONING_ALLOWED_UIDS 环境变量）暂未实现——SO_PEERCRED 是 Linux 专属接口，
+// 需要按平台拆分带 build tag 的新文件，超出本次修复的 write scope（仅限本文件与 *_test.go）。
+// 当前防护依赖 0750 目录 + 0660 socket 权限与生产清单门槛；后续建议新增 peercred_linux.go /
+// peercred_stub.go，在 Accept 后按白名单校验对端 UID/GID，不支持的平台回退权限 + 每请求 HMAC。
 func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, executor application.SubsystemProvisioner) error {
 	if executor == nil || strings.TrimSpace(socketPath) == "" {
 		return errors.New("subsystem provisioning server dependencies are required")
@@ -398,10 +443,20 @@ func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, exec
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o750); err != nil {
 		return fmt.Errorf("create provisioning socket directory: %w", err)
 	}
+	// 安全（SEC-F4）：MkdirAll 只在新建目录时应用 0750，对已存在目录必须再主动 Chmod 收紧，
+	// 否则历史遗留的宽松目录会让任意本机用户枚举并连接部署 socket。
+	if err := os.Chmod(filepath.Dir(socketPath), 0o750); err != nil {
+		return fmt.Errorf("tighten provisioning socket directory permissions: %w", err)
+	}
 	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale provisioning socket: %w", err)
 	}
+	// 安全（SEC-F4）：unix socket 文件按 0777&^umask 创建，Listen 与随后的 Chmod 0660 之间存在
+	// 宽松权限窗口；listen 期间临时把进程 umask 收紧到 077，让文件出生即为 0700，再立刻收紧到
+	// 0660。umask 是进程级状态，只在 Agent 启动监听的瞬间切换，且只会让并发创建的文件更严格。
+	previousUmask := syscall.Umask(0o077)
 	listener, err := net.Listen("unix", socketPath)
+	syscall.Umask(previousUmask)
 	if err != nil {
 		return fmt.Errorf("listen on provisioning socket: %w", err)
 	}
@@ -471,45 +526,68 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	}
 	switch request.Action {
 	case "preflight":
-		if request.Preflight == nil || requiresManifestChecksum && strings.TrimSpace(request.Preflight.ManifestChecksum) == "" {
-			err = application.ErrSubsystemProvisioningUnavailable
+		if request.Preflight == nil {
+			err = provisioningError("preflight request payload is incomplete")
+		} else if requiresManifestChecksum && strings.TrimSpace(request.Preflight.ManifestChecksum) == "" {
+			err = provisioningError("production subsystem preflight requires an approved manifest checksum for the selected target")
 		} else {
 			err = executor.Preflight(operationContext, *request.Preflight)
 		}
 	case "provision":
-		if request.Input == nil || requiresManifestChecksum && strings.TrimSpace(request.Input.ManifestChecksum) == "" {
-			err = application.ErrSubsystemProvisioningUnavailable
+		if request.Input == nil {
+			err = provisioningError("provision request payload is incomplete")
+		} else if requiresManifestChecksum && strings.TrimSpace(request.Input.ManifestChecksum) == "" {
+			err = provisioningError("production subsystem provision requires an approved manifest checksum for the selected target")
 		} else {
 			err = executor.Provision(operationContext, *request.Input)
 		}
 	case "update":
-		if request.Input == nil || requiresManifestChecksum && strings.TrimSpace(request.Input.ManifestChecksum) == "" {
-			err = application.ErrSubsystemProvisioningUnavailable
+		if request.Input == nil {
+			err = provisioningError("update request payload is incomplete")
+		} else if requiresManifestChecksum && strings.TrimSpace(request.Input.ManifestChecksum) == "" {
+			err = provisioningError("production subsystem update requires an approved manifest checksum for the selected target")
 		} else {
 			err = executor.Update(operationContext, *request.Input)
 		}
 	case "teardown":
-		err = executor.Teardown(operationContext, request.TenantID, request.Code, request.Environment)
+		// 安全（SEC-F4）：生产模式的 preflight/provision/update 都要求已批准清单校验和，
+		// teardown 必须走同一门槛，否则可绕过清单审批直接下线生产子系统。
+		if requiresManifestChecksum && strings.TrimSpace(request.ManifestChecksum) == "" {
+			err = provisioningError("production subsystem teardown requires an approved manifest checksum for the selected target")
+		} else {
+			err = executor.Teardown(operationContext, request.TenantID, request.Code, request.Environment)
+		}
 	case "apply-access":
 		if request.Access == nil {
-			err = application.ErrSubsystemProvisioningUnavailable
+			err = provisioningError("access configuration payload is incomplete")
 			break
 		}
 		applier, ok := executor.(interface {
 			ApplyAccess(context.Context, settingsapplication.AccessApplyInput) error
 		})
 		if !ok {
-			err = application.ErrSubsystemProvisioningUnavailable
+			err = provisioningError("deployment helper does not support applying public access configuration")
+			break
+		}
+		// 安全（SEC-F1）：socket 对端可直接设置 PublicOrigin；转发前先做与 ApplyAccess 内一致的
+		// origin 校验，拒绝换行/NUL 注入与非 http(s)、带 path 的值，避免 .env.lan 换行注入。
+		publicOrigin, originErr := normalizeAccessPublicOrigin(request.Access.PublicOrigin)
+		if originErr != nil {
+			err = originErr
 			break
 		}
 		err = applier.ApplyAccess(operationContext, settingsapplication.AccessApplyInput{
-			PublicOrigin:              request.Access.PublicOrigin,
+			PublicOrigin:              publicOrigin,
 			AllowInsecureHTTPRedirect: request.Access.AllowInsecureHTTPRedirect,
 		})
 	case "discover":
 		discoverer, ok := executor.(subsystemServiceDiscovery)
-		if request.Discovery == nil || !ok {
-			err = application.ErrSubsystemProvisioningUnavailable
+		if request.Discovery == nil {
+			err = provisioningError("service discovery payload is incomplete")
+			break
+		}
+		if !ok {
+			err = provisioningError("deployment helper does not support service discovery")
 			break
 		}
 		services, discoverErr := discoverer.DiscoverSubsystemServices(operationContext, request.Discovery.ApplicationCode, request.Discovery.Environment)
@@ -522,7 +600,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	case "discover-candidates":
 		discoverer, ok := executor.(subsystemCandidateDiscovery)
 		if !ok {
-			err = application.ErrSubsystemProvisioningUnavailable
+			err = provisioningError("deployment helper does not support candidate discovery")
 			break
 		}
 		candidates, discoverErr := discoverer.DiscoverSubsystemCandidates(operationContext)
@@ -533,7 +611,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			return
 		}
 	default:
-		err = application.ErrSubsystemProvisioningUnavailable
+		err = provisioningError("deployment action is not supported")
 	}
 	reply := subsystemProvisioningReply{Success: err == nil}
 	if err != nil {

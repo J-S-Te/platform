@@ -32,7 +32,9 @@ db_name="$(env_value FILE_GATEWAY_DB_NAME)"; db_name="${db_name:-file_gateway}"
 db_password="$(env_value FILE_GATEWAY_DB_ROOT_PASSWORD)"
 [[ -n "$db_password" ]] || { echo "缺少 FILE_GATEWAY_DB_ROOT_PASSWORD" >&2; exit 1; }
 
-"${compose[@]}" exec -T -e MYSQL_PWD="$db_password" file-gateway-mysql \
+# 安全（SEC-F6）：密码只在宿主进程环境里按名转发给容器（-e MYSQL_PWD 不带值），
+# 不再以 -e "MYSQL_PWD=<口令>" 形式进入 docker/compose 的 argv（/proc/*/cmdline）。
+MYSQL_PWD="$db_password" "${compose[@]}" exec -T -e MYSQL_PWD file-gateway-mysql \
   mysqldump --single-transaction --routines --triggers -uroot "$db_name" | gzip -9 >"$work/database.sql.gz"
 
 # 临时上传可在恢复后由会话对账清理，不进入长期备份。

@@ -49,7 +49,9 @@ compose_args+=(-f compose.yaml)
       exit 2
       ;;
   esac
-  mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent
+  # 安全（SEC-F5c）：密码经容器内 MYSQL_PWD 传入 mysqladmin，不再进入进程 argv。
+  export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"
+  mysqladmin ping -h 127.0.0.1 -uroot --silent
 '
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"

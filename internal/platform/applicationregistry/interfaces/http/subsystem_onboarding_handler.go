@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	stdhttp "net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -273,6 +274,8 @@ type SubsystemOnboardingHandler struct {
 	keycloakCutover      keycloakCutoverLifecycleStore
 	serviceCredentials   subsystemServiceCredentialManager
 	logger               *slog.Logger
+	// egress 是健康探针出网策略（SEC-B5），与反向代理共用 application.EgressPolicy。
+	egress *application.EgressPolicy
 }
 
 const (
@@ -432,12 +435,36 @@ func writeKeycloakSwitchBlocked(writer stdhttp.ResponseWriter, request *stdhttp.
 	))
 }
 
-func writeKeycloakObservationBlocked(writer stdhttp.ResponseWriter, request *stdhttp.Request, reason string) {
+// writeKeycloakObservationBlocked 以稳定错误码回应观察期门禁失败。安全（SEC-B3）：
+// 底层错误原文（可能含表名、SQL state、文件路径）只允许进入结构化日志，HTTP details
+// 仅暴露稳定 reason_code 与本地化提示，遵守 httperror 的客户端安全契约。
+func writeKeycloakObservationBlocked(writer stdhttp.ResponseWriter, request *stdhttp.Request, reasonCode string) {
 	httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
 		"IAM_AUTH_PROVIDER_SWITCH_OBSERVATION_REQUIRED",
 		"认证提供方尚未完成七天观察期，Issuer 未下发到运行时",
-		map[string]any{"reason": strings.TrimSpace(reason), "observation_window_days": 7, "next_action": "在 Keycloak 认证接入中发起观察；观察期完成后再切换。"},
+		map[string]any{"reason_code": reasonCode, "observation_window_days": 7, "next_action": "在 Keycloak 认证接入中发起观察；观察期完成后再切换。"},
 	))
+}
+
+// keycloakObservationReasonCode 把观察期门禁错误归类为稳定代码；错误原文不出本函数。
+func keycloakObservationReasonCode(err error) string {
+	if err == nil {
+		return "OBSERVATION_STATE_UNKNOWN"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "window has not completed"):
+		return "OBSERVATION_WINDOW_NOT_COMPLETED"
+	case strings.Contains(message, "has not started"):
+		return "OBSERVATION_NOT_STARTED"
+	case strings.Contains(message, "already exists"):
+		return "OBSERVATION_ALREADY_EXISTS"
+	case strings.Contains(message, "duration must be positive"):
+		return "OBSERVATION_INVALID_DURATION"
+	default:
+		// 其余原因可能是底层 DB/GORM 错误的包装（SEC-B3），绝不透出原文。
+		return "OBSERVATION_STATE_UNAVAILABLE"
+	}
 }
 
 func (handler *SubsystemOnboardingHandler) keycloakCutoverRequired(ctx context.Context, tenantID, applicationCode, environment string) bool {
@@ -508,6 +535,7 @@ func NewSubsystemOnboardingHandlerWithNotifications(service subsystemOnboardingS
 		service: service, provisioner: provisioner, access: access, deploymentState: deploymentState,
 		notifications: notifications,
 		oidcIssuer:    strings.TrimRight(strings.TrimSpace(oidcIssuer), "/"), logger: logger,
+		egress: application.EgressPolicyFromEnv(),
 	}, nil
 }
 
@@ -608,6 +636,9 @@ func (handler *SubsystemOnboardingHandler) notifySubsystemLifecycle(ctx context.
 	if handler.notifications == nil || strings.TrimSpace(operatorID) == "" {
 		return
 	}
+	// 安全（SEC-B9）：入库前最后一道防线——即使调用方误传错误原文，含 SQL 关键词
+	// 或文件路径的通知详情也只保留稳定错误码（或占位符），完整 cause 只进结构化日志。
+	detail = sanitizeLifecycleNotificationDetail(detail)
 	if err := handler.notifications.SendSubsystemLifecycle(ctx, SubsystemLifecycleNotification{
 		TenantID: tenantID, OperatorID: operatorID, ApplicationName: applicationName,
 		ApplicationCode: applicationCode, Environment: environment, Succeeded: succeeded, Detail: detail,
@@ -884,7 +915,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		PathPrefix: pathPrefix, UpstreamURL: upstreamURL,
 	}); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -901,13 +932,13 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	)
 	if err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
 		handler.writeError(writer, request, err)
 		return
 	}
 	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, initialAdminUserID); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -948,7 +979,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, application.SubsystemDeploymentStatusReady, "ONBOARD", "", ""); err != nil {
 		handler.logger.Error("subsystem deployment completed but state update failed", "application_code", result.Application.Code, "environment", result.Environment.Environment, "error", err)
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, err.Error())
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -1153,8 +1184,20 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer st
 		if targets, err := resolver.ResolveSubsystemHealthTargets(request.Context(), principal.Tenant.ID); err == nil {
 			var waitGroup sync.WaitGroup
 			var resultsMutex sync.Mutex
-			client := &stdhttp.Client{Timeout: 2 * time.Second}
+			// 安全（SEC-B5）：探针与反向代理共用同一出网策略——先做 URL 层校验，
+			// 客户端 Transport 再在建连前对解析出的 IP 复验；被拒绝的目标直接跳过，
+			// 看板保持非 READY，绝不触达云元数据或未授权的回环/私网地址。
+			egress := handler.egress
+			if egress == nil {
+				egress = application.EgressPolicyFromEnv()
+			}
+			client := egress.NewEgressHTTPClient(2 * time.Second)
 			for _, target := range targets {
+				if err := egress.ValidateURL(target.HealthURL); err != nil {
+					handler.logger.Warn("subsystem health probe blocked by egress policy",
+						"application_code", target.ApplicationCode, "environment", target.Environment, "error", err)
+					continue
+				}
 				waitGroup.Add(1)
 				go func(target application.SubsystemHealthTarget) {
 					defer waitGroup.Done()
@@ -1718,6 +1761,14 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}
 	applicationCode := strings.TrimSpace(payload.ApplicationCode)
 	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
+	// 基础平台应用自身是登录与授权控制面根节点，其运行时由平台发布流程管理，不属于
+	// subsystems.d 审核清单。若把它的环境交给子系统部署 Agent，生产模式会因为缺少清单
+	// 校验和而失败，并在页面上留下误导性的“依赖服务不可用”。这里在写入任何生命周期
+	// 状态之前明确拒绝，与应用的退役/环境删除保护保持一致。
+	if isBuiltInPlatformApplication(applicationCode) {
+		writeBuiltInPlatformRuntimeBlocked(writer, request, applicationCode, environment)
+		return
+	}
 	isRetry := requestedOperation == "RETRY" || strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry")
 	// 普通更新不会无条件轮换浏览器 OAuth 密钥；只有认证切换或目录恢复时才会把
 	// 新密钥交给部署 Agent。授权目录发布凭据则例外：它是应用绑定的机器身份，
@@ -1738,7 +1789,9 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 			return
 		}
 		if err := handler.keycloakCutover.CanKeycloakCutover(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
-			writeKeycloakObservationBlocked(writer, request, err.Error())
+			// 安全（SEC-B3）：cause 只进结构化日志，HTTP details 用稳定错误码。
+			handler.logger.Warn("Keycloak cutover blocked by observation gate", "application_code", applicationCode, "environment", environment, "error", err)
+			writeKeycloakObservationBlocked(writer, request, keycloakObservationReasonCode(err))
 			return
 		}
 	}
@@ -1752,7 +1805,9 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 			return
 		}
 		if err := handler.keycloakCutover.CanKeycloakRollback(request.Context(), principal.Tenant.ID, applicationCode, environment); err != nil {
-			writeKeycloakObservationBlocked(writer, request, err.Error())
+			// 安全（SEC-B3）：cause 只进结构化日志，HTTP details 用稳定错误码。
+			handler.logger.Warn("Keycloak rollback blocked by observation gate", "application_code", applicationCode, "environment", environment, "error", err)
+			writeKeycloakObservationBlocked(writer, request, keycloakObservationReasonCode(err))
 			return
 		}
 	}
@@ -1788,6 +1843,17 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		updateInput.RedirectURI = publicBaseURL + pathPrefix + "/auth/callback"
 		updateInput.PathPrefix = pathPrefix
 		updateInput.UpstreamURL = upstreamURL
+	}
+	// 生产模式下 Agent 只接受随发布包审核的清单目标，并要求请求携带清单校验和。API 侧
+	// 若解析不到目标（清单缺失，或 platform-api 与 subsystem-provisioner 的部署模式
+	// 不一致），继续调用 Agent 只会得到无信息的拒绝并污染部署状态。这里先给出可执行的
+	// 诊断，避免用户看到重复的 "subsystem provisioning unavailable"。
+	if capabilityProvider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
+		if strings.EqualFold(strings.TrimSpace(capabilityProvider.Capabilities().Mode), "production") &&
+			strings.TrimSpace(updateInput.ManifestChecksum) == "" {
+			writeProductionManifestTargetMissing(writer, request, applicationCode, environment)
+			return
+		}
 	}
 	// Directory-only registration deliberately does not create runtime credentials.  A
 	// subsequent ADOPT/RETRY must therefore re-resolve the Keycloak web Client and pass its
@@ -1933,7 +1999,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}
 	if err := handler.provisioner.Update(request.Context(), updateInput); err != nil {
 		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, err.Error())
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, subsystemLifecycleFailureDetail(err))
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -1963,7 +2029,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusReady, operation, "", ""); err != nil {
 		handler.logger.Error("subsystem update completed but state update failed", "application_code", applicationCode, "environment", environment, "error", err)
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, err.Error())
+		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, subsystemLifecycleFailureDetail(err))
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -2031,6 +2097,12 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 	}
 	applicationCode := strings.TrimSpace(payload.ApplicationCode)
 	environment := strings.ToLower(strings.TrimSpace(payload.Environment))
+	// 基础平台自身的运行时不由子系统部署 Agent 管理；与更新路径一致，在清理任何
+	// 运行时资源或写入生命周期状态之前拒绝，避免误停平台自身服务。
+	if isBuiltInPlatformApplication(applicationCode) {
+		writeBuiltInPlatformRuntimeBlocked(writer, request, applicationCode, environment)
+		return
+	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusDraining, "TEARDOWN", "", ""); err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -2492,6 +2564,52 @@ func validateLifecycleRequest(payload subsystemLifecycleRequest) error {
 	return nil
 }
 
+// isBuiltInPlatformApplication reports whether the (application) target is the platform's own
+// control-plane application. The value mirrors application.builtInApplicationCode, which is
+// intentionally unexported; the HTTP boundary keeps its own copy so the runtime lifecycle
+// guard cannot drift with a rename elsewhere.
+func isBuiltInPlatformApplication(applicationCode string) bool {
+	switch strings.ToLower(strings.TrimSpace(applicationCode)) {
+	case "platform", "basic_platform":
+		return true
+	default:
+		return false
+	}
+}
+
+// writeBuiltInPlatformRuntimeBlocked rejects runtime lifecycle operations against the platform
+// application itself. The platform runtime is deployed by the platform release pipeline, never by
+// the subsystem deployment Agent, so exposing the action only produces an opaque Agent failure.
+func writeBuiltInPlatformRuntimeBlocked(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) {
+	httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+		"IAM_PLATFORM_RUNTIME_NOT_MANAGED",
+		"基础平台应用由平台发布流程管理，不能通过子系统部署 Agent 更新、重试、接管或下线运行时",
+		map[string]string{
+			"application_code": applicationCode,
+			"environment":      environment,
+			"next_action": "基础平台自身的升级请在服务器部署目录按发布流程执行；" +
+				"子系统运行时的部署操作只适用于 subsystems.d 审核清单内的应用环境",
+		},
+	))
+}
+
+// writeProductionManifestTargetMissing rejects a production runtime operation whose target has no
+// approved manifest checksum. This happens when the API cannot find the application/environment
+// in subsystems.d, or when platform-api and subsystem-provisioner disagree about the deployment
+// mode. Failing here keeps the lifecycle state untouched and gives the operator a concrete fix.
+func writeProductionManifestTargetMissing(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) {
+	httpresponse.WriteError(writer, request, stdhttp.StatusUnprocessableEntity, httperror.New(
+		"IAM_SUBSYSTEM_TARGET_NOT_IN_PRODUCTION_MANIFEST",
+		"服务器审核清单中没有该应用环境的受控部署目标，无法自动更新运行时",
+		map[string]string{
+			"application_code": applicationCode,
+			"environment":      environment,
+			"next_action": "请确认 platform-api 与 subsystem-provisioner 都使用同一组已审核的 subsystems.d 清单和 SUBSYSTEM_ONBOARDING_MODE=production，" +
+				"并同步重启两个服务；若该应用环境确实不在清单内，请先通过代码评审发布对应清单",
+		},
+	))
+}
+
 func subsystemPrincipal(writer stdhttp.ResponseWriter, request *stdhttp.Request) (authctx.Principal, bool) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" || strings.TrimSpace(principal.User.ID) == "" {
@@ -2533,12 +2651,14 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 		if strings.Contains(strings.ToLower(err.Error()), "disabled") {
 			message = "当前部署未启用受控部署 Agent，无法在平台内完成一键接入"
 		}
+		// 安全（SEC-B3）：details 只暴露稳定错误码与本地化指引，Agent/DB 错误原文
+		// （表名、SQL state、路径）只进上面的结构化日志，不再附在响应里。
 		httpresponse.WriteError(writer, request, stdhttp.StatusServiceUnavailable, httperror.New(
 			httperror.DependencyUnavailable.Code,
 			message,
 			map[string]string{
 				"next_action": subsystemProvisioningNextAction(err, provisioningStages...),
-				"detail":      subsystemProvisioningDetail(err),
+				"error_code":  subsystemProvisioningErrorCode(err),
 			},
 		))
 	default:
@@ -2547,15 +2667,106 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 	}
 }
 
-// subsystemProvisioningDetail 把脱敏后的 Agent 错误原文附到响应里，让页面直接显示目标 API
-// 未能启动的具体日志原因；错误文本已被 Agent 侧去除明文凭据并限制长度。
-func subsystemProvisioningDetail(err error) string {
-	const limit = 4000
-	message := strings.TrimSpace(err.Error())
+var (
+	// internalErrorDetailPattern 匹配 SQL/ORM 关键词与 MySQL 错误号；命中即认为文本
+	// 属于内部实现细节（SEC-B3/B9），不允许进入 HTTP details 或收件箱通知。
+	internalErrorDetailPattern = regexp.MustCompile(`(?i)\b(select|insert|update|delete|where|from|join|table|database|schema|column|mysql|gorm|sqlstate|syntax|constraint|duplicate|foreign key|error\s*1\d{3})\b`)
+	// errorPathPattern 匹配至少两段的文件系统路径（含 Windows 盘符）。
+	errorPathPattern = regexp.MustCompile(`(?:[A-Za-z]:)?(?:/[\w.\-]+){2,}`)
+	// stableDetailCodePattern 判断冒号前的前缀是否是稳定错误码。
+	stableDetailCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{3,}$`)
+)
+
+// subsystemProvisioningErrorCode 把 Agent/部署错误归类为稳定错误码（SEC-B3）。
+// 分类键与 subsystemProvisioningNextAction 的诊断键保持一致；错误原文只在本函数
+// 内部用于匹配，绝不离开函数。
+func subsystemProvisioningErrorCode(err error) string {
+	if err == nil {
+		return "PROVISIONING_FAILED"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "disabled"):
+		return "PROVISIONING_AGENT_DISABLED"
+	case strings.Contains(message, "deployment helper is unavailable"), strings.Contains(message, "read deployment response"), strings.Contains(message, "send deployment request"), strings.Contains(message, "docker service"):
+		return "PROVISIONING_AGENT_UNREACHABLE"
+	case strings.Contains(message, "target is not allowed"), strings.Contains(message, "tenant is not allowed"):
+		return "PROVISIONING_TARGET_NOT_ALLOWED"
+	case strings.Contains(message, "requires an approved manifest checksum"):
+		return "PROVISIONING_MANIFEST_CHECKSUM_REQUIRED"
+	case strings.Contains(message, "preflight values are inconsistent"), strings.Contains(message, "integration values are inconsistent"), strings.Contains(message, "deployment request is invalid"):
+		return "PROVISIONING_REQUEST_MISMATCH"
+	case strings.Contains(message, "secrets are incomplete"), strings.Contains(message, "credentials are incomplete"), strings.Contains(message, "credential is incomplete"), strings.Contains(message, "generated runtime secret is invalid"), strings.Contains(message, "contract_summary"):
+		return "PROVISIONING_CREDENTIALS_INCOMPLETE"
+	case strings.Contains(message, "immutable digest"):
+		return "PROVISIONING_IMAGE_NOT_RELEASED"
+	case strings.Contains(message, "production deployment lock is unavailable"):
+		return "PROVISIONING_DEPLOYMENT_LOCK_BUSY"
+	case strings.Contains(message, "migrate production subsystem database"):
+		return "PROVISIONING_MIGRATION_FAILED"
+	case strings.Contains(message, "backup production subsystem database"), strings.Contains(message, "prepare production subsystem backup"):
+		return "PROVISIONING_BACKUP_FAILED"
+	case strings.Contains(message, "start production subsystem dependencies"), strings.Contains(message, "start production subsystem services"), strings.Contains(message, "start subsystem containers"), strings.Contains(message, "rebuild subsystem containers"), strings.Contains(message, "release environment is unavailable"), strings.Contains(message, "production environment is unavailable"):
+		return "PROVISIONING_RUNTIME_UNHEALTHY"
+	case strings.Contains(message, "unavailable"):
+		return "PROVISIONING_DEPENDENCY_UNAVAILABLE"
+	default:
+		return "PROVISIONING_FAILED"
+	}
+}
+
+// subsystemLifecycleFailureDetail 生成站内通知用的失败摘要：稳定错误码 + 脱敏短摘要。
+// 安全（SEC-B9）：含 SQL 关键词的原文整体丢弃，文件路径替换为占位符并截断；
+// 完整 cause 只允许出现在结构化日志里。
+func subsystemLifecycleFailureDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	code := subsystemProvisioningErrorCode(err)
+	summary := redactInternalText(err.Error())
+	if summary == "" {
+		return code
+	}
+	return code + ": " + summary
+}
+
+// redactInternalText 剥离内部细节：SQL 关键词命中时返回空串（不保留任何原文），
+// 文件路径替换为 [internal]，压缩空白并限制长度。
+func redactInternalText(raw string) string {
+	message := strings.TrimSpace(raw)
+	if message == "" {
+		return ""
+	}
+	if internalErrorDetailPattern.MatchString(message) {
+		return ""
+	}
+	message = errorPathPattern.ReplaceAllString(message, "[internal]")
+	message = strings.Join(strings.Fields(message), " ")
+	const limit = 200
 	if len(message) > limit {
-		message = message[:limit] + "...(truncated)"
+		message = message[:limit] + "..."
 	}
 	return message
+}
+
+// sanitizeLifecycleNotificationDetail 是通知入库前的最后一道防线：即使调用方误传
+// 错误原文，含 SQL 关键词或文件路径的详情也只保留稳定错误码（或占位符）并限制长度。
+func sanitizeLifecycleNotificationDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return ""
+	}
+	if internalErrorDetailPattern.MatchString(detail) || errorPathPattern.MatchString(detail) {
+		if code, _, ok := strings.Cut(detail, ":"); ok && stableDetailCodePattern.MatchString(strings.TrimSpace(code)) {
+			return strings.TrimSpace(code)
+		}
+		return "[内部错误已脱敏]"
+	}
+	const limit = 300
+	if len(detail) > limit {
+		return detail[:limit] + "..."
+	}
+	return detail
 }
 
 func subsystemProvisioningNextAction(err error, stages ...string) string {
@@ -2568,6 +2779,8 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 		diagnosis = "平台 API 无法连接生产部署 Agent；请检查 subsystem-provisioner 状态和启动日志，并确认 Agent 与 platform-api 使用同一版本"
 	case strings.Contains(message, "target is not allowed"):
 		diagnosis = "该应用/环境未被当前 Agent 的审核清单允许，或 Agent 仍运行旧版本；请同步最新 subsystems.d 清单并同时重建 platform-api、subsystem-provisioner"
+	case strings.Contains(message, "requires an approved manifest checksum"):
+		diagnosis = "该应用/环境不在服务器 subsystems.d 审核清单中，或 platform-api 与 subsystem-provisioner 的部署模式不一致；请同步清单并确认两个服务都使用 SUBSYSTEM_ONBOARDING_MODE=production 后一同重启"
 	case strings.Contains(message, "tenant is not allowed"):
 		diagnosis = "当前租户不是该服务器绑定的生产租户；请核对 SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID，禁止用其他租户覆盖现有实例"
 	case strings.Contains(message, "preflight values are inconsistent"), strings.Contains(message, "integration values are inconsistent"), strings.Contains(message, "deployment request is invalid"):
@@ -2584,8 +2797,10 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 		diagnosis = "Agent 无法从随发布包审核的模板初始化 runtime；请确认最新 *.env.example 已部署且 runtime 目录可写，Agent 会自动创建文件并收紧为 0600"
 	case strings.Contains(message, "production environment is unavailable"):
 		diagnosis = "目标子系统 runtime 尚不可用；新版 Agent 会从审核模板自动初始化，请确认 platform-api、subsystem-provisioner 和生产部署资产版本一致"
-	case strings.Contains(message, "release environment is unavailable"), strings.Contains(message, "immutable digest"):
-		diagnosis = "目标子系统尚未发布有效的不可变镜像 digest；请先完成该子系统镜像发布并确认 .release.env 可读"
+	case strings.Contains(message, "release environment is unavailable"):
+		diagnosis = "目标子系统的 .release.env 不可读或缺失；请确认部署目录的 .release.env 存在且权限为 0600"
+	case strings.Contains(message, "immutable digest"):
+		diagnosis = "该子系统镜像尚未发布到服务器：.release.env 中对应镜像仍是占位值。请在部署目录依次执行 ./bin/deploy.sh import packages/<组件>-*.tar.gz 与 ./bin/deploy.sh prepare <子系统>（import 只登记摘要，把不可变 digest 写入 .release.env 的是 prepare），再在当前环境点击“重试”"
 	case strings.Contains(message, "initial administrator role"):
 		diagnosis = "目标运行时已启动，但权限目录中缺少可用的初始角色；请检查目标 API 的目录同步日志"
 	case strings.Contains(message, "production deployment file"), strings.Contains(message, "production deployment directory"), strings.Contains(message, "production compose configuration"):

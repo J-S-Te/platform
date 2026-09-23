@@ -90,7 +90,7 @@ services:
       - file_gateway_mysql_local_data:/var/lib/mysql
     networks: [default]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -130,12 +130,16 @@ services:
     environment:
       MYSQL_DATABASE: ${KEYCLOAK_DB_NAME:-keycloak}
       MYSQL_USER: ${KEYCLOAK_DB_USER:-keycloak}
-      MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-REPLACE_WITH_LOCAL_KEYCLOAK_DB_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD:-REPLACE_WITH_LOCAL_KEYCLOAK_DB_ROOT_PASSWORD}
+      # 必填（:?）：scripts/docker-local.sh 会把模板 REPLACE_WITH_* 替换为随机口令，
+      # 并校验 env 文件无残留 REPLACE_WITH_；未走脚本或仍为占位符时 compose 直接失败，
+      # 不再以文档化占位口令启动（与生产 H5 同做法）。
+      MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set (run scripts/docker-local.sh)}
+      MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD:?KEYCLOAK_DB_ROOT_PASSWORD must be set (run scripts/docker-local.sh)}
     volumes:
       - keycloak_mysql_local_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      # 安全审查：密码经 MYSQL_PWD 传递，禁止出现在 argv（每 5 秒被 ps 读取）。
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -150,9 +154,9 @@ services:
       KC_DB: mysql
       KC_DB_URL: jdbc:mysql://keycloak-db:3306/${KEYCLOAK_DB_NAME:-keycloak}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
-      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-REPLACE_WITH_LOCAL_KEYCLOAK_DB_PASSWORD}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set (run scripts/docker-local.sh)}
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-REPLACE_WITH_LOCAL_KEYCLOAK_ADMIN_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set (run scripts/docker-local.sh)}
       KC_HTTP_ENABLED: "true"
       # Discovery must retain the browser-visible issuer even when Go services
       # access Keycloak through its private Compose-network endpoint.
@@ -184,7 +188,7 @@ services:
     volumes:
       - mysql_local_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -225,6 +229,12 @@ services:
     env_file: *platform-runtime-env
     environment:
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
+      # 出网策略注入（task-50 SEC-B5；键名以 Go EgressPolicyFromEnv 逐字核对）：
+      # 本进程反代/健康探针的上游为 compose 私网容器名（本地默认网段属 RFC1918 私网），
+      # 策略默认 fail-closed，不注入则下轮部署探针/反代全断。PLATFORM_EGRESS_ALLOW_LOOPBACK
+      # 不注入（保持默认拒绝；若将来出现 127.0.0.1 上游需显式设 true）；
+      # 169.254/链路本地元数据地址恒拒，不受任何开关影响。
+      PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
       SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
       SUBSYSTEM_PROJECTS_ROOT: ${SUBSYSTEM_HOST_PROJECTS_ROOT}
       SUBSYSTEM_GATEWAY_SCRIPT_PATH: ${BASIC_PLATFORM_HOST_PROJECT_ROOT}/scripts/portal-gateway.sh
@@ -235,9 +245,9 @@ services:
       SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
-      # catalog-publisher 长期凭据，供 subsystem-update 触发的 post-rebuild sync 使用。
-      CONTRACT_CATALOG_PUBLISHER_CLIENT_ID: ${CONTRACT_CATALOG_PUBLISHER_CLIENT_ID}
-      CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET: ${CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET}
+      # catalog-publisher 长期凭据（SEC-N10）：Compose 不再插值，改由 env_file
+      # （docker/.env.local，docker-local.sh 接入时写入）注入容器环境，避免在
+      # compose 解析结果与进程环境中二次出现明文插值。
     command: ["./api"]
     volumes:
       - ./data/keys:/app/data/keys:ro
@@ -263,8 +273,31 @@ services:
           - platform-api
     restart: unless-stopped
 
-  # 隔离部署助手不承载业务接口。它是唯一挂载 Docker Socket 和子系统父目录的容器，
-  # 仅通过共享 Unix Socket 接收基础平台 API 发出的严格白名单动作。
+  # Docker Socket 白名单代理（安全审查 SEC-F3）：本地 Agent 经专有 internal 网络访问
+  # 受限 Docker API；docker.sock 只读挂载仅存在于本代理，Agent 容器不再持有 socket。
+  # 本地白名单比生产多开 BUILD：本地接入流程使用 docker compose up --build / compose build。
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      LOG_LEVEL: warn
+      POST: "1"        # compose up/down/run 需要非 GET 方法
+      CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
+      EXEC: "1"        # docker exec（frontend nginx -t、nginx -s reload）
+      IMAGES: "1"      # 镜像拉取与检查
+      NETWORKS: "1"    # compose 网络创建/连接/删除
+      VOLUMES: "1"     # compose 卷管理
+      INFO: "1"        # docker/compose 握手
+      BUILD: "1"       # 本地开发接入需要 compose build/up --build（生产保持关闭）
+      # 未列出者保持镜像默认关闭：AUTH、COMMIT、CONFIGS、DISTRIBUTION、GRPC、NODES、
+      # PLUGINS、SECRETS、SERVICES、SESSION、SWARM、SYSTEM、TASKS。
+    volumes:
+      # 只读挂载宿主机 socket：全编排中唯一的 docker.sock 入口，不发布宿主机端口。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-control]
+    restart: unless-stopped
+
+  # 隔离部署助手不承载业务接口。它不再挂载 Docker Socket（只经上方白名单代理访问），
+  # 仅挂载子系统父目录，并通过共享 Unix Socket 接收基础平台 API 的严格白名单动作。
   subsystem-provisioner:
     <<: *platform-backend-runtime
     environment:
@@ -299,12 +332,31 @@ services:
       SUBSYSTEM_KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}
       SUBSYSTEM_KEYCLOAK_INTERNAL_URL: ${KEYCLOAK_INTERNAL_URL:-http://keycloak:8080}
       SUBSYSTEM_KEYCLOAK_REALM: ${KEYCLOAK_REALM:-basic-platform}
+      # 安全审查 SEC-F3：docker CLI/Compose 经白名单代理访问 Docker API；
+      # HOME 指向可写 tmpfs（根文件系统只读时 docker CLI 仍可工作）。
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      HOME: /tmp
     command: ["./subsystem-provisioner"]
+    # 本地加固块（SEC-N4，与生产 compose 同款）：只读根文件系统、能力全丢弃后
+    # 仅保留宿主机项目树文件协作必需的三个文件能力、禁止提权、进程数上限与可写 /tmp。
+    # 降级说明（阻碍见任务 description）：本地保持 root 运行——开发者主机 uid/文件属主
+    # 不可预知，非 root 映射需逐机配置；以白名单代理 + 能力收敛替代非 root 隔离。
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE, FOWNER, CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=64m,mode=1770
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # docker.sock 不再挂入本容器（SEC-F3）：Docker 访问统一走 docker-socket-proxy 白名单。
       - ${SUBSYSTEM_HOST_PROJECTS_ROOT}:${SUBSYSTEM_HOST_PROJECTS_ROOT}
       - subsystem_provisioner_socket:/run/basic-platform-provisioner
-    network_mode: none
+    # 原 network_mode:none 的隔离由专有 internal 网络继承：仅白名单代理可达，无外网出口。
+    networks: [docker-control]
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/basic-platform-provisioner/provisioner.sock"]
       interval: 2s
@@ -372,7 +424,7 @@ services:
       context: ../Settlement
     env_file: *settlement-runtime-env
     environment:
-      SETTLEMENT_MYSQL_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
+      # SETTLEMENT_MYSQL_DSN 由 env_file（Settlement/.env.local，docker-local.sh 生成）注入（SEC-N10）。
       SETTLEMENT_HTTP_ADDR: :8085
       SETTLEMENT_PUBLIC_ORIGIN: ${APP_PUBLIC_BASE_URL:-http://localhost:8081}
       PLATFORM_BASE_URL: http://platform-api:8080
@@ -416,7 +468,7 @@ services:
     env_file: *settlement-runtime-env
     entrypoint: ["/usr/local/bin/settlement-worker"]
     environment:
-      SETTLEMENT_MYSQL_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
+      # SETTLEMENT_MYSQL_DSN 由 env_file 注入（SEC-N10）。
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_ENVIRONMENT_CODE: dev
       SETTLEMENT_INVOICE_ISSUANCE_MODE: ${SETTLEMENT_INVOICE_ISSUANCE_MODE:-manual}
@@ -850,7 +902,7 @@ services:
       dashboard-mysql:
         condition: service_healthy
     ports:
-      - "3000:3000"  # PoC 临时：Metabase 管理界面（启用 dashboard 嵌入后移除）
+      - "127.0.0.1:3000:3000"  # PoC 临时：Metabase 管理界面（启用 dashboard 嵌入后移除）；仅本机监听，LAN 不可达 setup/admin（SEC-N5）
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
       interval: 10s
@@ -883,8 +935,7 @@ services:
   customer-migrate:
     <<: *customer-backend-runtime
     env_file: *customer-db-env
-    environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    # MYSQL_DSN 由 env_file（docker/.env.customer.local）注入，Compose 不再明文拼接（SEC-N10）。
     depends_on:
       customer-mysql:
         condition: service_healthy
@@ -900,7 +951,7 @@ services:
     env_file: *customer-runtime-env
     environment:
       HTTP_ADDRESS: :8090
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      # MYSQL_DSN 由 env_file（docker/.env.customer.local）注入（SEC-N10）。
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       # refresh-customer-api 从本次构建镜像自动读取并注入，避免角色目录哈希过期。
@@ -963,7 +1014,6 @@ services:
       target: presale-alert-worker-runtime
     env_file: *customer-runtime-env
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PRESALE_ALERT_WORKER_ID: crm-presale-alert-worker-local-1
       PRESALE_ALERT_POLL_INTERVAL: ${PRESALE_ALERT_POLL_INTERVAL:-10m}
       PRESALE_ALERT_LEASE_DURATION: ${PRESALE_ALERT_LEASE_DURATION:-1m}
@@ -984,8 +1034,6 @@ services:
   customer-opportunity-alert-worker:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
-    environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
     command: ["./opportunity-alert-worker"]
     depends_on:
       customer-mysql:
@@ -999,7 +1047,6 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       OWNER_NOTIFICATION_WORKER_ID: crm-owner-notification-local-1
     command: ["./opportunity-owner-notification-worker"]
     depends_on:
@@ -1014,7 +1061,6 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PRESALE_ASSIGNMENT_NOTIFICATION_WORKER_ID: crm-presale-assignment-notification-local-1
     command: ["./presale-assignment-notification-worker"]
     depends_on:
@@ -1029,7 +1075,6 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PRESALE_PROGRESS_NOTIFICATION_WORKER_ID: crm-presale-progress-notification-local-1
     command: ["./presale-progress-notification-worker"]
     depends_on:
@@ -1046,7 +1091,6 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
       PLATFORM_BASE_URL: http://platform-api:8080
       NOTIFICATION_DELIVERY_WORKER_ID: crm-notification-delivery-local-1
     command: ["./notification-delivery-worker"]
@@ -1064,8 +1108,7 @@ services:
   contract-transfer-worker:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
-    environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    # MYSQL_DSN 由 env_file（docker/.env.customer.local）注入（SEC-N10）。
     command: ["./contract-transfer-worker"]
     depends_on:
       customer-mysql:
@@ -1147,8 +1190,7 @@ services:
   portal-migrate:
     <<: *portal-backend-runtime
     env_file: *portal-runtime-env
-    environment:
-      PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+    # PORTAL_MYSQL_DSN 由 env_file（docker/.env.portal.local）注入（SEC-N10）。
     depends_on:
       portal-mysql:
         condition: service_healthy
@@ -1164,7 +1206,7 @@ services:
     env_file: *portal-runtime-env
     environment:
       PORTAL_HTTP_ADDRESS: :8091
-      PORTAL_MYSQL_DSN: portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      # PORTAL_MYSQL_DSN 由 env_file（docker/.env.portal.local）注入（SEC-N10）。
       PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
       PORTAL_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
@@ -1275,6 +1317,11 @@ services:
     ports:
       # 默认只监听本机；临时 LAN 模式由 scripts/lan-access.sh 显式开启。
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_HTTP_PORT:-8081}:80"
+    # 固定地址（子网高位，避开自动分配顺序）供 APP_TRUSTED_PROXIES 精确信任：
+    # frontend nginx 是转发 X-Forwarded-For 到 platform-api 的唯一容器来源（SEC-N6）。
+    networks:
+      default:
+        ipv4_address: 172.31.255.250
     depends_on:
       api:
         condition: service_healthy
@@ -1309,3 +1356,15 @@ volumes:
     name: basic-platform-local-keycloak-mysql-data
   subsystem_provisioner_socket:
     name: basic-platform-local-provisioner-socket
+
+networks:
+  default:
+    # 固定子网使网关 172.31.255.1 与 frontend 固定地址可被 APP_TRUSTED_PROXIES
+    # 精确信任（SEC-N6）。迁移：既有环境先 compose down 移除旧网络再 up 重建，
+    # Docker 不允许对已存在网络原地修改子网。
+    ipam:
+      config:
+        - subnet: 172.31.255.0/24
+  # Agent 控制通道专用内网（SEC-F3）：仅 Agent 与白名单代理，internal 无外网出口。
+  docker-control:
+    internal: true

@@ -18,6 +18,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 )
 
 // Batch employee imports contain organization, position and role metadata for up to
@@ -345,7 +346,11 @@ func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request
 		handler.writeError(writer, request, err)
 		return
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已创建", toUserResponse(result))
+	response := toUserResponse(result)
+	// 安全审查 SEC-D5：创建类 body寻址操作没有路径 id，登记目标对象 id 供审计
+	// 中间件写入 ResourceID 与 metadata（否则审计只有操作者+路由，无法定位目标）。
+	middleware.MarkCreatedResource(request, response.UserID)
+	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已创建", response)
 }
 
 // 员工入职会在一个应用事务内创建用户、平台基线角色以及可选账号和首个任职。HTTP 层
@@ -412,6 +417,8 @@ func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, req
 		membership := toMembershipResponse(*result.Membership)
 		response.Membership = &membership
 	}
+	// SEC-D5：登记被创建的用户对象 id 供审计中间件采集。
+	middleware.MarkCreatedResource(request, response.User.UserID)
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "员工已创建", response)
 }
 
@@ -819,7 +826,10 @@ func (handler *ManagementHandler) CreateOrgUnit(writer http.ResponseWriter, requ
 		handler.writeError(writer, request, err)
 		return
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "组织单元已创建", toOrgUnitResponse(result))
+	// SEC-D5：登记新建组织单元 id 供审计中间件采集。
+	orgUnit := toOrgUnitResponse(result)
+	middleware.MarkCreatedResource(request, orgUnit.OrgUnitID)
+	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "组织单元已创建", orgUnit)
 }
 
 func (handler *ManagementHandler) UpdateOrgUnit(writer http.ResponseWriter, request *http.Request) {
@@ -934,7 +944,10 @@ func (handler *ManagementHandler) CreatePosition(writer http.ResponseWriter, req
 		handler.writeError(writer, request, err)
 		return
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "岗位已创建", toPositionResponse(result))
+	// SEC-D5：登记新建岗位 id 供审计中间件采集。
+	position := toPositionResponse(result)
+	middleware.MarkCreatedResource(request, position.PositionID)
+	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "岗位已创建", position)
 }
 
 func (handler *ManagementHandler) DeletePosition(writer http.ResponseWriter, request *http.Request) {
@@ -1044,7 +1057,10 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 			handler.writeError(writer, request, err)
 			return
 		}
-		httpresponse.WriteSuccess(writer, request, http.StatusCreated, "任职已创建", toMembershipResponse(result))
+		// SEC-D5：登记新建任职 id 供审计中间件采集。
+		membership := toMembershipResponse(result)
+		middleware.MarkCreatedResource(request, membership.MembershipID)
+		httpresponse.WriteSuccess(writer, request, http.StatusCreated, "任职已创建", membership)
 		return
 	}
 	result, err := handler.service.UpdateMembership(request.Context(), application.MembershipUpdateInput{MembershipCreateInput: input, MembershipID: request.PathValue("membership_id"), Status: payload.Status, Version: payload.Version})

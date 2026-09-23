@@ -815,12 +815,20 @@ remove_expired_releases() {
   local release_path index
   local -a release_paths=()
 
-  while IFS= read -r release_path; do
+  # 安全（SEC-F7）：发布路径可能包含空格，旧写法（find 输出“时间戳+空格+路径”再由 awk 截第 2 列）
+  # 会截断路径后直接 rm -rf（root）；改用 NUL 分隔（%T@\t%p\0）+ sort -z -rn + read -d '' 完整读取。
+  while IFS= read -r -d '' release_path; do
+    release_path="${release_path#*$'\t'}"
     [[ "$release_path" == "$current_target" ]] && continue
     release_paths+=("$release_path")
-  done < <(find "$releases_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | awk '{print $2}')
+  done < <(find "$releases_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%p\0' | sort -z -rn)
 
   for ((index = KEEP_RELEASES - 1; index < ${#release_paths[@]}; index++)); do
+    # 安全断言（SEC-F7）：待删路径必须是 releases_dir 下的路径，否则中止清理，防止误删。
+    [[ "${release_paths[$index]}" == "$releases_dir/"* ]] || {
+      log "ERROR" "后端发布清理中止：待删路径不在 ${releases_dir} 之下：${release_paths[$index]}"
+      return 1
+    }
     CURRENT_STEP="清理过期后端发布版本"
     run_cmd rm -rf -- "${release_paths[$index]}"
   done

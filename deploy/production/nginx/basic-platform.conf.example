@@ -1,6 +1,8 @@
 server {
     listen 80;
     server_name platform.example.com;
+    # 不向客户端暴露 nginx 版本号（安全基线）。
+    server_tokens off;
     return 301 https://$host$request_uri;
 }
 
@@ -10,6 +12,17 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/platform.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/platform.example.com/privkey.pem;
+
+    # 隐藏 nginx 版本号；响应头安全基线（本 server 无 location 级 add_header，
+    # server 级声明对所有代理响应生效）：禁止被第三方页面嵌入、拒绝 MIME 嗅探、
+    # 不泄露来源 URL；CSP frame-ancestors 与 X-Frame-Options 双保险覆盖旧浏览器。
+    server_tokens off;
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    # 通用 50x 错误页：不回显上游/代理错误细节，只返回统一占位页。
+    error_page 500 502 503 504 505 /50x.html;
 
     client_max_body_size 25m;
     proxy_http_version 1.1;
@@ -173,5 +186,11 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:18082;
+    }
+
+    # 通用错误页根路径；50x.html 放置于 nginx 静态目录（示例见下方注释）。
+    location = /50x.html {
+        root /usr/share/nginx/html;
+        internal;
     }
 }

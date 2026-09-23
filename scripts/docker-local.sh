@@ -671,6 +671,8 @@ ensure_contract_env_file() {
         replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
         replace_line_in_file "$contract_env_file" OIDC_REDIRECT_URI "http://localhost:8081/contract_management/auth/callback"
         replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
+        # SEC-D7b：签署人手机号列加密密钥（Base64 32 字节）与 session 键一样在首次生成时写入。
+        replace_line_in_file "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64 "$(random_key)"
         replace_line_in_file "$contract_env_file" APP_PUBLIC_URL "http://localhost:8081/contract_management/dashboard"
         replace_line_in_file "$contract_env_file" APP_PATH_PREFIX "/contract_management"
         log "已生成合同管理环境文件：$contract_env_file"
@@ -679,6 +681,12 @@ ensure_contract_env_file() {
 
     if [[ -z "$(env_value "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
         replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
+    fi
+
+    # SEC-D7b：签署人手机号列加密密钥必填（AES-GCM，Base64 32 字节）；既有 env 文件缺失或
+    # 占位时补齐，否则 contract /readyz 失败关闭、寄送写入被拒绝。幂等：已有合法键不覆盖。
+    if [[ -z "$(env_value "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64)" || "$(env_value "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
+        replace_line_in_file "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64 "$(random_key)"
     fi
 
     if [[ "$strict" == true ]]; then

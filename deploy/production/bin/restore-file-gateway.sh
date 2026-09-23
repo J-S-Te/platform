@@ -66,7 +66,8 @@ if [[ -e "$storage_root" ]]; then
 fi
 mv -- "$stage" "$storage_root"
 stage=""
-if ! gzip --decompress --stdout "$backup_dir/database.sql.gz" | "${compose[@]}" exec -T -e MYSQL_PWD="$db_password" file-gateway-mysql mysql -uroot "$db_name"; then
+# 安全（SEC-F6）：MYSQL_PWD 按名转发（-e 后不带值，取自本进程环境），口令值不进入 docker/compose argv。
+if ! gzip --decompress --stdout "$backup_dir/database.sql.gz" | MYSQL_PWD="$db_password" "${compose[@]}" exec -T -e MYSQL_PWD file-gateway-mysql mysql -uroot "$db_name"; then
   failed="$parent_dir/.file-gateway-failed-restore-$(date -u +%Y%m%dT%H%M%SZ)"
   mv -- "$storage_root" "$failed"
   [[ -d "$rollback" ]] && mv -- "$rollback" "$storage_root"

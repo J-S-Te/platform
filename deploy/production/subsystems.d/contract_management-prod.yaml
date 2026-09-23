@@ -21,6 +21,7 @@ runtime:
       required_existing_keys: []
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
+        - SIGNING_PHONE_ENCRYPTION_KEY_BASE64
       values:
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile

@@ -358,7 +358,14 @@ func (h *UploadV2Handler) IssueDownloadTicket(w http.ResponseWriter, r *http.Req
 	if !v2Decode(w, r, &input) {
 		return
 	}
-	access := application.DownloadAccess{TenantID: p.Tenant.ID, ApplicationID: p.Account.ID, ResourceType: strings.TrimSpace(input.ResourceType), ResourceID: strings.TrimSpace(input.ResourceID), PermissionCodes: p.PermissionCodes, ResourceAccessVerified: true}
+	// 安全（SEC-D9）：HTTP 边界不再自证 ResourceAccessVerified——该标志只属于进程内
+	// 受信子适配器；票据必须携带完整业务资源标识，服务端只依据数据库中的具体绑定证明放行。
+	resourceType, resourceID := strings.TrimSpace(input.ResourceType), strings.TrimSpace(input.ResourceID)
+	if resourceType == "" || resourceID == "" {
+		v2Error(w, http.StatusBadRequest, "FILE_REQUEST_INVALID", "请求必须携带完整 resource_type 与 resource_id")
+		return
+	}
+	access := application.DownloadAccess{TenantID: p.Tenant.ID, ApplicationID: p.Account.ID, ResourceType: resourceType, ResourceID: resourceID, PermissionCodes: p.PermissionCodes}
 	stored, stream, err := h.files.OpenDownload(r.Context(), access, r.PathValue("file_id"))
 	if err != nil {
 		v2Error(w, http.StatusForbidden, "FILE_DOWNLOAD_FORBIDDEN", "文件不存在或当前资源无权访问")
@@ -403,7 +410,9 @@ func (h *UploadV2Handler) DownloadContent(w http.ResponseWriter, r *http.Request
 		v2Error(w, http.StatusForbidden, "FILE_DOWNLOAD_TICKET_INVALID", "下载票据无效、过期或已使用")
 		return
 	}
-	access := application.DownloadAccess{TenantID: ticket.TenantID, ApplicationID: ticket.ApplicationID, ResourceType: ticket.ResourceType, ResourceID: ticket.ResourceID, PermissionCodes: []string{"platform:file:download"}, ResourceAccessVerified: true}
+	// 安全（SEC-D9）：兑换路径同样不自证 ResourceAccessVerified；资源标识取自服务端
+	// 签发的票据，校验仍由服务端的具体绑定证明完成。
+	access := application.DownloadAccess{TenantID: ticket.TenantID, ApplicationID: ticket.ApplicationID, ResourceType: ticket.ResourceType, ResourceID: ticket.ResourceID, PermissionCodes: []string{"platform:file:download"}}
 	stored, stream, err := h.files.OpenDownload(r.Context(), access, ticket.FileID)
 	if err != nil {
 		h.auditDirect(r.Context(), ticket.TenantID, ticket.ApplicationID, ticket.FileID, "", "download-ticket", "DOWNLOAD_COMPLETED", "FAILED", r.Header.Get("X-Request-ID"))

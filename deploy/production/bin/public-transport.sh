@@ -29,6 +29,50 @@ public_transport_valid_port() {
   [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
 }
 
+public_transport_is_ip() {
+  local value="$1" part tail compact count=0
+  if [[ "$value" == \[*\] ]]; then
+    value="${value#[}"; value="${value%]}"
+    [[ "$value" == *:* ]] || return 1
+  elif [[ "$value" == *\[* || "$value" == *\]* ]]; then
+    return 1
+  fi
+  if [[ "$value" == *:* ]]; then
+    [[ "$value" != :* || "$value" == ::* ]] && [[ "$value" != *: || "$value" == *:: ]] || return 1
+    if [[ "$value" == *.* ]]; then
+      tail="${value##*:}"
+      public_transport_is_ip "$tail" || return 1
+      value="${value%:*}:0:0"
+    fi
+    [[ "$value" =~ ^[0-9A-Fa-f:]+$ && "$value" != *:::* ]] || return 1
+    compact="${value/::/}"
+    [[ "$compact" != *::* ]] || return 1
+    tail="$value"
+    while [[ "$tail" == *:* ]]; do
+      part="${tail%%:*}"; tail="${tail#*:}"
+      [[ -z "$part" || ${#part} -le 4 ]] || return 1
+      [[ -z "$part" ]] || count=$((count + 1))
+    done
+    [[ ${#tail} -le 4 ]] || return 1
+    [[ -z "$tail" ]] || count=$((count + 1))
+    if [[ "$value" == *::* ]]; then
+      (( count < 8 ))
+    else
+      [[ "$value" != :* && "$value" != *: ]] && (( count == 8 ))
+    fi
+  else
+    [[ "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    tail="$value"
+    while :; do
+      part="${tail%%.*}"
+      [[ "$part" == 0 || "$part" != 0* ]] || return 1
+      (( 10#$part <= 255 )) || return 1
+      [[ "$tail" == *.* ]] || break
+      tail="${tail#*.}"
+    done
+  fi
+}
+
 public_transport_origin() {
   local scheme="$1" host="$2" port="$3" default_port
   [[ "$scheme" == "https" ]] && default_port=443 || default_port=80

@@ -74,6 +74,9 @@ func TestSubsystemServiceRouteHandlerProxiesDiscoveredRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 安全（SEC-B5）：回环目标默认被出网策略拒绝；本用例显式配置允许后才能代理成功，
+	// 同一机制在部署侧对应 PLATFORM_EGRESS_ALLOW_LOOPBACK=true。
+	handler.egress = application.NewEgressPolicy(true, false)
 	request := httptest.NewRequest("GET", "/api/v1/subsystems/orders/health?environment=prod&service_role=business&source=portal", nil)
 	request.SetPathValue("application_code", "orders")
 	request.SetPathValue("path", "/health")

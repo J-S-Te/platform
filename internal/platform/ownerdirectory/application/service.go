@@ -29,8 +29,8 @@ var roleGrantOrigins = map[string]struct{}{"TEMPLATE": {}, "MANUAL": {}, "SYSTEM
 
 // Query contains optional exact-user or display search filters.
 type Query struct {
-	Keyword  string
-	UserID   string
+	Keyword string
+	UserID  string
 	// RoleCodes 只返回在这些应用角色上确有有效授权的用户。
 	RoleCodes []string
 	// RoleOrigins 进一步限定角色授权的来源（grant_origin）；必须与 RoleCodes 同时使用，

@@ -111,7 +111,9 @@ func NewRouter(
 	healthHandler := NewHealthHandler(database, cfg.AppName)
 	router.GET("/healthz", healthHandler.Liveness)
 	router.GET("/readyz", healthHandler.Readiness)
-	router.GET("/metrics", gin.WrapH(operationalMetrics))
+	// 安全审查 SEC-B4：/metrics 暴露队列积压、授权失败计数与连接池状态——
+	// 未认证者不得读取，廉价抓取也不能再放大 DB 负载（计数另有10s TTL 缓存）。
+	router.GET("/metrics", middleware.RequireMetricsAccess(cfg.HTTP.MetricsAccessToken), gin.WrapH(operationalMetrics))
 
 	// 完整 OIDC handler 提供浏览器授权和标准协议端点；在迁移期只有机器令牌 handler 时，
 	// 仅保留 token 发行接口，避免把不完整的 OIDC 端点注册出来。
@@ -131,7 +133,9 @@ func NewRouter(
 		router.GET("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
 		router.POST("/oauth2/userinfo", adaptHandler(oidcHandler.UserInfo))
 		router.GET("/oauth2/authorization-context", adaptHandler(oidcHandler.AuthorizationContext))
-		router.GET("/oauth2/logout", adaptHandler(oidcHandler.Logout))
+		// 安全审查 SEC-B10：Lax Cookie 在顶层 GET 也会被发送——GET 登出可被跨站顶层导航
+		// 强制触发（骚扰/反取证降级），必须校验导航来源；POST 维持严格 Origin 校验。
+		router.GET("/oauth2/logout", middleware.RequireSameOriginNavigation(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 		router.POST("/oauth2/logout", middleware.RequireSameOrigin(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 	} else if applicationTokenHandler != nil {
 		// Retain the existing machine-to-machine endpoint for deployments that have not yet
@@ -154,7 +158,10 @@ func NewRouter(
 		// Authentication 中间件。业务 API 使用下面独立的 apiRouter，避免认证策略混用。
 		authRouter := router.Group("/api/v1/auth")
 		authRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
-		authRouter.POST("/login", middleware.FixedWindowRateLimit(30, time.Minute), adaptHandler(authHandler.Login))
+		// 安全审查 SEC-B7：登录改双桶限流——账号维度30/min先限（换 IP 不豁免）、
+		// IP 维度120/min兜底（随机换号撞库有界），消灭原“全客户端共用一个30/min IP 桶、
+		// 单攻击者可触发全员锁定”的问题。多副本与反代配置要求见 platform/docs/rate-limiting.md。
+		authRouter.POST("/login", middleware.LoginRateLimit("account", 30, 120, time.Minute), adaptHandler(authHandler.Login))
 		authRouter.GET("/login", adaptHandler(authHandler.BeginOIDCLogin))
 		authRouter.GET("/oidc/callback", adaptHandler(authHandler.OIDCCallback))
 
@@ -231,16 +238,19 @@ func NewRouter(
 			apiRouter.DELETE("/users/:user_id", middleware.RequirePermission("platform:user:delete"), adaptHandler(managementHandler.DeleteUser))
 			apiRouter.GET("/accounts", middleware.RequirePermission("platform:account:read"), adaptHandler(managementHandler.ListAccounts))
 			apiRouter.PATCH("/accounts/:account_id", middleware.RequirePermission("platform:account:update"), adaptHandler(managementHandler.UpdateAccount))
-			apiRouter.GET("/org-units", adaptHandler(managementHandler.ListOrgUnits))
-			apiRouter.POST("/org-units", adaptHandler(managementHandler.CreateOrgUnit))
-			apiRouter.PATCH("/org-units/:org_unit_id", adaptHandler(managementHandler.UpdateOrgUnit))
-			apiRouter.DELETE("/org-units/:org_unit_id", adaptHandler(managementHandler.DeleteOrgUnit))
-			apiRouter.GET("/positions", adaptHandler(managementHandler.ListPositions))
-			apiRouter.POST("/positions", adaptHandler(managementHandler.CreatePosition))
-			apiRouter.DELETE("/positions/:position_id", adaptHandler(managementHandler.DeletePosition))
-			apiRouter.GET("/memberships", adaptHandler(managementHandler.ListMemberships))
-			apiRouter.POST("/memberships", adaptHandler(managementHandler.CreateMembership))
-			apiRouter.PATCH("/memberships/:membership_id", adaptHandler(managementHandler.UpdateMembership))
+			// 安全审查 SEC-B8：组织/岗位/任职10条路由在注册点显式声明路由级权限
+			// （与相邻路由同风格、与 handler 内 requireManagementScope 同一权限码，
+			// 属纵深防御——未来重构 handler 不会静默丢失授权）。
+			apiRouter.GET("/org-units", middleware.RequirePermission("platform:organization:read"), adaptHandler(managementHandler.ListOrgUnits))
+			apiRouter.POST("/org-units", middleware.RequirePermission("platform:organization:create"), adaptHandler(managementHandler.CreateOrgUnit))
+			apiRouter.PATCH("/org-units/:org_unit_id", middleware.RequirePermission("platform:organization:update"), adaptHandler(managementHandler.UpdateOrgUnit))
+			apiRouter.DELETE("/org-units/:org_unit_id", middleware.RequirePermission("platform:organization:delete"), adaptHandler(managementHandler.DeleteOrgUnit))
+			apiRouter.GET("/positions", middleware.RequirePermission("platform:position:read"), adaptHandler(managementHandler.ListPositions))
+			apiRouter.POST("/positions", middleware.RequirePermission("platform:position:create"), adaptHandler(managementHandler.CreatePosition))
+			apiRouter.DELETE("/positions/:position_id", middleware.RequirePermission("platform:position:delete"), adaptHandler(managementHandler.DeletePosition))
+			apiRouter.GET("/memberships", middleware.RequirePermission("platform:membership:read"), adaptHandler(managementHandler.ListMemberships))
+			apiRouter.POST("/memberships", middleware.RequirePermission("platform:membership:create"), adaptHandler(managementHandler.CreateMembership))
+			apiRouter.PATCH("/memberships/:membership_id", middleware.RequirePermission("platform:membership:update"), adaptHandler(managementHandler.UpdateMembership))
 		}
 
 		if applicationManagementHandler != nil {

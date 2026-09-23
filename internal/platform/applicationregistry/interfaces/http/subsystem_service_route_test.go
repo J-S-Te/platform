@@ -107,6 +107,9 @@ func TestProxyForwardsReadRequestsWhenGranted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 安全（SEC-B5）：回环后端默认被出网策略拒绝；本用例显式配置允许后才能转发，
+	// 对应部署侧 PLATFORM_EGRESS_ALLOW_LOOPBACK=true。
+	handler.egress = application.NewEgressPolicy(true, false)
 	request := proxyRequest(http.MethodGet, "/api/v1/subsystems/contract_management/data?environment=dev&service_role=web")
 	request.SetPathValue("application_code", "contract_management")
 	request.SetPathValue("path", "/data")

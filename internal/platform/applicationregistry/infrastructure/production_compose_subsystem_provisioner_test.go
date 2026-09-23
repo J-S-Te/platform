@@ -185,8 +185,16 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	if !containsString(runner.calls[2].arguments, "contract-mysql") || !containsString(runner.calls[2].arguments, "temporal") {
 		t.Fatalf("dependency call is not fixed: %v", runner.calls[2].arguments)
 	}
-	if !strings.Contains(strings.Join(runner.calls[3].arguments, " "), "mysqldump") {
+	backupCommand := strings.Join(runner.calls[3].arguments, " ")
+	if !strings.Contains(backupCommand, "mysqldump") {
 		t.Fatalf("backup call is not fixed: %v", runner.calls[3].arguments)
+	}
+	// SEC-F5a：root 密码不得以 -p"$MYSQL_ROOT_PASSWORD" 形式展开进 argv，必须走 MYSQL_PWD。
+	if strings.Contains(backupCommand, "-p\"$MYSQL_ROOT_PASSWORD\"") || strings.Contains(backupCommand, "-p$MYSQL_ROOT_PASSWORD") {
+		t.Fatalf("mysqldump password must not expand into argv: %s", backupCommand)
+	}
+	if !strings.Contains(backupCommand, "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\"") {
+		t.Fatalf("mysqldump must receive credentials via MYSQL_PWD: %s", backupCommand)
 	}
 	if !containsString(runner.calls[4].arguments, "contract-migrate") {
 		t.Fatalf("migration call is not fixed: %v", runner.calls[4].arguments)
@@ -733,5 +741,43 @@ func productionContractInput(origin string) application.SubsystemProvisioningInp
 			OAuthClient:     application.OAuthClientView{ClientID: "contract_management-prod-audit-publisher"},
 			PlaintextSecret: "audit-secret",
 		}},
+	}
+}
+
+func TestValidateProductionReleaseImageNamesMissingDigestAndFixCommands(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, ".release.env")
+
+	writeRelease := func(content string) {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write release env: %v", err)
+		}
+	}
+
+	for name, content := range map[string]string{
+		"unset digest":     "CONTRACT_IMAGE=registry.example.com/contract-management/contract:pending\n",
+		"mutable tag":      "CONTRACT_IMAGE=registry.example.com/contract-management/contract:20260922\n",
+		"malformed digest": "CONTRACT_IMAGE=registry.example.com/contract-management/contract@sha256:nothex\n",
+	} {
+		content := content
+		t.Run(name, func(t *testing.T) {
+			writeRelease(content)
+			err := validateProductionReleaseImage(path, "CONTRACT_IMAGE")
+			if !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
+				t.Fatalf("error = %v", err)
+			}
+			message := err.Error()
+			for _, expected := range []string{"CONTRACT_IMAGE", "deploy.sh import", "deploy.sh prepare"} {
+				if !strings.Contains(message, expected) {
+					t.Fatalf("immutable digest error missing %q: %s", expected, message)
+				}
+			}
+		})
+	}
+
+	writeRelease("CONTRACT_IMAGE=registry.example.com/contract-management/contract@sha256:" + strings.Repeat("a", 64) + "\n")
+	if err := validateProductionReleaseImage(path, "CONTRACT_IMAGE"); err != nil {
+		t.Fatalf("valid immutable digest rejected: %v", err)
 	}
 }

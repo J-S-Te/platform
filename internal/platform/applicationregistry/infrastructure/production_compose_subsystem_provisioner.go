@@ -418,8 +418,11 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		if err := os.MkdirAll(filepath.Join(target.config.DeployRoot, "backups"), 0o750); err != nil {
 			return provisioningError("prepare production subsystem backup")
 		}
+		// 安全（SEC-F5a）：root 密码只能通过 MYSQL_PWD 环境变量传给 mysqldump。不能写成
+		// -p"$MYSQL_ROOT_PASSWORD"——shell 会把它展开成 -p<明文> 进入 mysqldump 的
+		// /proc/<pid>/cmdline，任何本机用户与进程审计日志都能读到。
 		if err := target.runCompose(ctx, "exec", "-T", compose.Database.Service, "sh", "-c",
-			`set -eu; umask 077; exec mysqldump --single-transaction --routines --triggers -uroot -p"$MYSQL_ROOT_PASSWORD" "$2" > "/backups/$1"`,
+			`set -eu; umask 077; MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump --single-transaction --routines --triggers -uroot "$2" > "/backups/$1"`,
 			"_", backupName, compose.Database.Name); err != nil {
 			return provisioningError("backup production subsystem database")
 		}
@@ -1031,14 +1034,28 @@ func validateProductionReleaseImage(path, key string) error {
 	marker := "@sha256:"
 	index := strings.LastIndex(value, marker)
 	if index <= 0 || len(value[index+len(marker):]) != 64 {
-		return provisioningError("production subsystem image must use an immutable digest")
+		return provisioningError(immutableDigestError(key, value))
 	}
 	for _, character := range value[index+len(marker):] {
 		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return provisioningError("production subsystem image must use an immutable digest")
+			return provisioningError(immutableDigestError(key, value))
 		}
 	}
 	return nil
+}
+
+// immutableDigestError 点名缺失的 .release.env 键、当前值和补齐命令。现场最常见的漏步是
+// 只执行了 deploy.sh import（只把摘要登记到 manifests/）就跳到平台页面采用或重试，而把
+// 不可变 digest 写入 .release.env 的是 deploy.sh prepare。只说 “must use an immutable
+// digest” 会让部署人员无从下手。
+func immutableDigestError(key, value string) string {
+	if strings.TrimSpace(value) == "" {
+		value = "(unset)"
+	}
+	return "production subsystem image must use an immutable digest: " + key + "=" + value +
+		". 请在部署目录依次执行 ./bin/deploy.sh import packages/<组件>-*.tar.gz 与 " +
+		"./bin/deploy.sh prepare <子系统>（import 只登记摘要，prepare 才写入 .release.env），" +
+		"再回到当前环境点击“重试”。"
 }
 
 // productionProvisioningSecrets 收集本次一次性交付的明文凭据，供容器日志脱敏使用；

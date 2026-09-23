@@ -71,7 +71,7 @@ usage() {
 
 环境变量：
   PORTAL_GATEWAY_NGINX_INCLUDE     include 文件绝对路径
-  PORTAL_GATEWAY_NGINX_RELOAD_CMD  自定义 reload 命令（设置后优先使用）
+  PORTAL_GATEWAY_NGINX_RELOAD_CMD  已废弃：安全策略（SEC-F10）不再执行环境变量命令串，设置后仅告警并忽略
   PORTAL_GATEWAY_COMPOSE_FILE       frontend 所在 Compose 文件；未设置时自动探测
   PORTAL_GATEWAY_API_BASE_URL      sync 认证适配层的平台 API 入口
   PORTAL_GATEWAY_API_TOKEN         认证适配层接受的 Bearer token
@@ -402,10 +402,12 @@ resolve_compose_file() {
 }
 
 do_reload() {
+  # 安全（SEC-F10）：不再执行来自环境变量的命令串。本脚本可能由持有 docker.sock 的
+  # Agent 容器以 os.Environ() 启动，对 NGINX_RELOAD_CMD 执行 bash -c 等于把特权命令执行交给
+  # 环境变量注入者，并绕过内置路径的 nginx -t 校验；现统一走内置 reload 路径，
+  # nginx -t 校验是 reload 的必经步骤。
   if [[ -n "$NGINX_RELOAD_CMD" ]]; then
-    log "INFO" "触发自定义 nginx reload: ${NGINX_RELOAD_CMD}"
-    bash -c "$NGINX_RELOAD_CMD"
-    return
+    log "WARN" "已忽略 NGINX_RELOAD_CMD 环境变量钩子（安全策略禁止执行环境变量命令串），改用内置 reload 路径"
   fi
 
   local compose_file
