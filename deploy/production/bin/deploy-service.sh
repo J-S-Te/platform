@@ -568,6 +568,22 @@ dump_subsystem_provisioner_debug() {
   fi
 }
 
+dump_file_gateway_debug() {
+  local container_id
+  container_id="$(compose ps -q file-gateway 2>/dev/null || true)"
+  if [[ -n "$container_id" ]]; then
+    echo "---- file-gateway 容器状态 ----"
+    docker inspect "$container_id" --format '{{json .State}}' || true
+    echo "---- file-gateway 最近日志 ----"
+    compose logs --no-color --tail 200 file-gateway || true
+    echo "---- file-gateway compose ps ----"
+    compose ps file-gateway || true
+  else
+    echo "未获取到 file-gateway 容器 ID" >&2
+    compose ps file-gateway || true
+  fi
+}
+
 backup_database() {
   local mysql_service="$1"
   local database="$2"
@@ -634,7 +650,11 @@ deploy_platform() {
   compose --profile release run --rm platform-migrate ./migrate || return
 	compose up -d --wait --wait-timeout 180 file-gateway-mysql || return
 	backup_database file-gateway-mysql "$file_gateway_db_name" file-gateway || return
-	compose up -d --force-recreate --wait --wait-timeout 180 file-gateway || return
+	if ! compose up -d --force-recreate --wait --wait-timeout 180 file-gateway; then
+		echo "file-gateway 健康启动失败" >&2
+		dump_file_gateway_debug
+		return 1
+	fi
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
   # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；

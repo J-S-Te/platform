@@ -34,6 +34,7 @@ usage() {
 
 部署主流程（按此顺序）：
   configure                     一次性运行配置：IP、端口、管理员、时区、防火墙
+  install                       扫描 packages/ 并自动部署基础平台/前端、准备已提供的子系统包
   import <镜像包路径>           导入镜像包，校验摘要并登记不可变 digest
   deploy platform               发布基础平台（含数据库迁移与首个管理员初始化）
   deploy frontend               发布统一前端
@@ -64,6 +65,111 @@ usage() {
 
 help                          显示本帮助
 EOF
+}
+
+discover_package() {
+  local component="$1" pattern
+  case "$component" in
+    common) pattern='common-infrastructure-linux-amd64.tar.gz' ;;
+    platform) pattern='platform-backend-*-linux-amd64.tar.gz' ;;
+    frontend) pattern='frontend-*-linux-amd64.tar.gz' ;;
+    customer-opportunity) pattern='customer-opportunity-backend-*-linux-amd64.tar.gz' ;;
+    customer-portal) pattern='customer-portal-backend-*-linux-amd64.tar.gz' ;;
+    contract) pattern='contract-backend-*-linux-amd64.tar.gz' ;;
+    project) pattern='project-backend-*-linux-amd64.tar.gz' ;;
+    settlement) pattern='settlement-backend-*-linux-amd64.tar.gz' ;;
+    data-analysis) pattern='data-analysis-backend-*-linux-amd64.tar.gz' ;;
+    *) die "不支持自动发现的组件：$component" ;;
+  esac
+  local -a matches=()
+  shopt -s nullglob
+  matches=("$package_dir"/$pattern)
+  shopt -u nullglob
+  if ((${#matches[@]} > 1)); then
+    printf '错误：packages/ 中发现多个 %s 镜像包，无法安全选择：%s\n' "$component" "${matches[*]}" >&2
+    return 2
+  fi
+  ((${#matches[@]} == 1)) || return 1
+  [[ -e "${matches[0]}" ]] || return 1
+  [[ ! -L "${matches[0]}" ]] || {
+    printf '错误：%s 镜像包不能是符号链接：%s\n' "$component" "${matches[0]}" >&2
+    return 2
+  }
+  [[ -f "${matches[0]}" ]] || {
+    printf '错误：%s 镜像包必须是普通文件：%s\n' "$component" "${matches[0]}" >&2
+    return 2
+  }
+  printf '%s\n' "${matches[0]}"
+}
+
+package_index() {
+  case "$1" in
+    common) printf '0' ;;
+    platform) printf '1' ;;
+    frontend) printf '2' ;;
+    customer-opportunity) printf '3' ;;
+    customer-portal) printf '4' ;;
+    contract) printf '5' ;;
+    project) printf '6' ;;
+    settlement) printf '7' ;;
+    data-analysis) printf '8' ;;
+    *) return 1 ;;
+  esac
+}
+
+auto_install_packages() {
+  require_initialized
+  local component archive index
+  local -a packages=()
+  local -a ordered=(common platform frontend customer-opportunity customer-portal contract project settlement data-analysis)
+
+  printf '扫描镜像包目录：%s\n' "$package_dir"
+  # 先解析全部包名并检查歧义，避免平台启动后才发现包版本冲突。
+  for component in "${ordered[@]}"; do
+    if archive="$(discover_package "$component")"; then
+      index="$(package_index "$component")"
+      packages[$index]="$archive"
+      printf '  已发现 %-20s %s\n' "$component" "$(basename -- "$archive")"
+    else
+      case "$?" in
+        2) die "镜像包发现存在歧义或文件类型不安全：$component" ;;
+        *)
+          if [[ "$component" == common || "$component" == platform || "$component" == frontend ]]; then
+            die "缺少基础组件镜像包：${component}；请先将对应 tar.gz 放入 ${package_dir}"
+          fi
+          printf '  未提供 %-20s（跳过）\n' "$component"
+          ;;
+      esac
+    fi
+  done
+
+  printf '\n阶段 A：导入公共基础设施和基础平台镜像\n'
+  import_package "${packages[0]}"
+  import_package "${packages[1]}"
+  printf '\n阶段 B：启动并检查基础平台\n'
+  deploy_component platform
+  if ! verify; then
+    printf '自动安装暂停于基础平台验收；已完成的迁移和服务会保留。修复问题后执行：sudo ./bin/deploy.sh verify\n' >&2
+    return 1
+  fi
+
+  printf '\n阶段 C：导入并启动统一前端\n'
+  import_package "${packages[2]}"
+  deploy_component frontend
+  if ! verify; then
+    printf '自动安装暂停于前端验收；基础平台保持运行。修复问题后执行：sudo ./bin/deploy.sh verify\n' >&2
+    return 1
+  fi
+
+  printf '\n阶段 D：导入并准备已提供的业务子系统镜像\n'
+  for component in customer-opportunity customer-portal contract project settlement data-analysis; do
+    index="$(package_index "$component")"
+    [[ -n "${packages[$index]:-}" ]] || continue
+    import_package "${packages[$index]}"
+    prepare_subsystem "$component" || return 1
+  done
+  printf '\n自动安装阶段完成：基础平台和前端已部署；子系统包已登记并准备候选。\n'
+  printf '子系统服务不会自动启动；请在平台页面逐个受控采用 prod，再按 status -> continue -> verify 完成验收。\n'
 }
 
 env_get() {
@@ -965,7 +1071,7 @@ restore_menu() {
 
 menu() {
   while true; do
-    printf '\n统一身份认证平台离线部署\n1. 初始化部署配置\n2. 导入镜像包\n3. 部署基础平台\n4. 部署统一前端\n5. 准备子系统供平台探测\n6. 完成已接入子系统部署\n7. 升级已部署模块\n8. 查看容器状态\n9. 查看模块日志\n10. 执行健康检查\n11. 备份\n12. 恢复\n13. 环境自检（doctor，只读）\n0. 退出\n'
+    printf '\n统一身份认证平台离线部署\n1. 初始化部署配置\n2. 导入镜像包\n3. 部署基础平台\n4. 部署统一前端\n5. 准备子系统供平台探测\n6. 完成已接入子系统部署\n7. 升级已部署模块\n8. 查看容器状态\n9. 查看模块日志\n10. 执行健康检查\n11. 备份\n12. 恢复\n13. 环境自检（doctor，只读）\n14. 自动安装 packages/ 中的镜像包\n0. 退出\n'
     read -r -p '请选择操作：' choice
     case "$choice" in
       1) configure ;;
@@ -981,6 +1087,7 @@ menu() {
       11) backup_all ;;
       12) restore_menu ;;
       13) read -r -p '子系统参数（直接回车检查全部）：' name; doctor "$name" || true ;;
+      14) auto_install_packages ;;
       0) return ;;
       *) echo '选择无效，请重新输入' >&2 ;;
     esac
@@ -992,6 +1099,7 @@ command="${1:-menu}"
 case "$command" in
   menu) menu ;;
   configure) shift; configure "$@" ;;
+  install) auto_install_packages ;;
   import) import_package "${2:-}" ;;
   deploy) deploy_component "${2:-}" ;;
   prepare) prepare_subsystem "${2:-}" ;;

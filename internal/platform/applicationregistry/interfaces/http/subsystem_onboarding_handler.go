@@ -1553,6 +1553,11 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 		return []updateServiceCredentialRequirement{
 			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户与商机管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "客户与商机管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
+			{purpose: application.ServiceCredentialContractSummaryRead, suffix: "contract-summary", clientName: "客户与商机管理系统 Contract Summary Reader", scope: "contract.summary.read", rotate: true},
+			// CRM 的已签约商机写入接口必须使用独立的 opportunity.signed.write
+			// 服务 Client。首次接入按清单创建；受控重试也必须轮换/重建并把明文 Secret
+			// 重新交付给 Agent，否则历史部分失败环境会持续缺少 CONTRACT_CLIENT_SECRET。
+			{purpose: application.ServiceCredentialContractOpportunitySignedWrite, suffix: "opportunity-intake", clientName: "客户与商机管理系统 Contract Opportunity Signed Writer", scope: "opportunity.signed.write", rotate: true},
 			// 客户管理负责人/组织选择依赖平台 Owner Directory；更新流程必须像首次接入一样
 			// 确保该机器凭据存在并重新下发，否则运行时会因缺少凭据直接拒绝启动。
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "客户与商机管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
@@ -2807,6 +2812,8 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 		diagnosis = "服务器生产部署资产缺失、路径不规范或 Compose 校验失败；请重新发布平台生产部署资产并确认 Agent 健康"
 	case strings.Contains(message, "contract_summary_client_id"), strings.Contains(message, "contract_summary_client_secret"), strings.Contains(message, "contract_summary_url"):
 		diagnosis = "合同摘要校验已开启但运行时凭据不完整；重试不会从平台数据库恢复 OAuth 明文，请先同步包含合同摘要服务绑定的生产接入资产，或关闭合同校验后在当前环境重试"
+	case strings.Contains(message, "contract_client_secret"):
+		diagnosis = "客户与商机系统的合同签约用途凭据未写入 runtime；该键来自 service.contract_opportunity_signed_write。请先将基础平台更新到包含该用途受控重试下发修复的版本并重新部署 platform，再在原环境点击“重试”；不要手工写入 runtime 或重复创建应用环境"
 	case strings.Contains(message, "runtime environment") || strings.Contains(message, "runtime configuration"):
 		diagnosis = "Agent 无法安全更新目标运行配置；请确认 runtime 目录可写且文件不是符号链接，普通权限过宽会由 Agent 自动收紧为 0600"
 	case strings.Contains(message, "start production subsystem dependencies"):
