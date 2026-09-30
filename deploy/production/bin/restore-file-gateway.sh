@@ -129,7 +129,7 @@ env_value() {
   awk -F= -v key="$1" '$0 !~ /^[[:space:]]*#/ && $1 == key { sub(/^[^=]*=/, ""); print; exit }' "$runtime_file"
 }
 storage_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
-storage_root="${storage_root:-/opt/unified-identity-platform/data/file-gateway}"
+storage_root="${storage_root:-$deploy_dir/data/file-gateway}"
 [[ "$storage_root" == /* && "$storage_root" != / && ! -L "$storage_root" ]] || { echo "存储根目录不安全：$storage_root" >&2; exit 1; }
 
 # Keep the unified deployment lock from final backup revalidation through DB

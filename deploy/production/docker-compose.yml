@@ -243,7 +243,7 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.5.0
+    image: ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     environment:
       # HAProxy 3.4 rejects the abbreviation "warn"; the accepted level name
       # is "warning".  A bad value otherwise leaves the container restarting
@@ -403,7 +403,7 @@ services:
       # 仅挂载公开验签密钥文件。宿主机 keys 目录为 0700，直接挂载目录会让
       # 非 root 的 filegateway 账号无法穿越目录并读取其中的 0644 公钥。
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
-      - ${FILE_GATEWAY_HOST_ROOT:-/opt/unified-identity-platform/data/file-gateway}:/app/data/file-gateway
+      - ${FILE_GATEWAY_HOST_ROOT:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/data/file-gateway}:/app/data/file-gateway
     depends_on:
       file-gateway-mysql:
         condition: service_healthy

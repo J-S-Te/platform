@@ -13,7 +13,7 @@
 # CI can install into a non-default root. Compose's bind-mount sources and both
 # control-plane processes must resolve that same root before any reload attempt.
 prepare_ci_deploy_root() (
-  local runtime temporary configured profiles
+  local runtime temporary configured profiles gateway
   [[ "${deploy_dir:-}" == /* && "$deploy_dir" != / ]] || { echo '无效 CI 部署根目录' >&2; return 1; }
   runtime="$deploy_dir/.env"
   [[ -f "$runtime" && ! -L "$runtime" ]] || { echo 'CI 部署需要普通文件形式的 .env' >&2; return 1; }
@@ -29,26 +29,34 @@ prepare_ci_deploy_root() (
   profiles="$(awk -F= '$1=="SUBSYSTEM_PRODUCTION_PROFILES_DIR" {count++; value=substr($0,index($0,"=")+1)} END {if(count>1)exit 1; print value}' "$runtime")" || {
     echo '重复的 SUBSYSTEM_PRODUCTION_PROFILES_DIR 配置' >&2; return 1;
   }
+  gateway="$(awk -F= '$1=="FILE_GATEWAY_HOST_ROOT" {count++; value=substr($0,index($0,"=")+1)} END {if(count>1)exit 1; print value}' "$runtime")" || {
+    echo '重复的 FILE_GATEWAY_HOST_ROOT 配置' >&2; return 1;
+  }
   [[ -z "$configured" || "$configured" == "$deploy_dir" ]] || {
     echo 'SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致；拒绝更改明确配置' >&2; return 1;
   }
   [[ -z "$profiles" || "$profiles" == "$deploy_dir/subsystems.d" ]] || {
     echo 'SUBSYSTEM_PRODUCTION_PROFILES_DIR 与 CI 安装清单目录不一致' >&2; return 1;
   }
-  [[ -z "$configured" ]] || return 0
+  [[ -z "$configured" || -z "$gateway" ]] || return 0
   temporary="$(mktemp "$deploy_dir/.env.ci-root.XXXXXX")" || return 1
   trap 'rm -f -- "$temporary"' EXIT
-  CI_DEPLOY_ROOT="$deploy_dir" awk -F= '
-    $1=="SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {next}
+  CI_DEPLOY_ROOT="$deploy_dir" CI_ROOT_MISSING="$([[ -z "$configured" ]] && echo true || echo false)" \
+    CI_GATEWAY_MISSING="$([[ -z "$gateway" ]] && echo true || echo false)" awk -F= '
+    $1=="SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" && ENVIRON["CI_ROOT_MISSING"]=="true" {next}
+    $1=="FILE_GATEWAY_HOST_ROOT" && ENVIRON["CI_GATEWAY_MISSING"]=="true" {next}
     {print}
-    END {print "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=" ENVIRON["CI_DEPLOY_ROOT"]}
+    END {
+      if (ENVIRON["CI_ROOT_MISSING"]=="true") print "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=" ENVIRON["CI_DEPLOY_ROOT"]
+      if (ENVIRON["CI_GATEWAY_MISSING"]=="true") print "FILE_GATEWAY_HOST_ROOT=" ENVIRON["CI_DEPLOY_ROOT"] "/data/file-gateway"
+    }
   ' "$runtime" >"$temporary" || return 1
   if [[ "$(id -u)" == 0 ]]; then
     chown --reference="$runtime" "$temporary" || return 1
   fi
   chmod 600 "$temporary" || return 1
   mv -f -- "$temporary" "$runtime" || return 1
-  echo '已将 CI 部署根目录绑定到平台与 Agent 的 Compose 配置'
+  echo '已补齐 CI 部署根目录及文件网关缺省路径；显式存储路径保持不变'
 )
 
 control_plane_reload_marker_path() {

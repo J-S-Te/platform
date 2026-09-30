@@ -700,7 +700,7 @@ require_backup_space() {
 deploy_platform() {
 	local file_gateway_root file_gateway_db_name file_gateway_container file_gateway_health
 	file_gateway_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
-	file_gateway_root="${file_gateway_root:-/opt/unified-identity-platform/data/file-gateway}"
+	file_gateway_root="${file_gateway_root:-$deploy_dir/data/file-gateway}"
 	file_gateway_db_name="$(env_value FILE_GATEWAY_DB_NAME)"
 	file_gateway_db_name="${file_gateway_db_name:-file_gateway}"
 	if [[ -L "$file_gateway_root" ]]; then

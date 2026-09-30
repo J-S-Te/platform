@@ -402,7 +402,7 @@ destroy_environment() {
   done
 
   gateway_root="$(awk -F= '$1=="FILE_GATEWAY_HOST_ROOT" {sub(/^[^=]*=/, ""); print; exit}' "$runtime_file")"
-  gateway_root="${gateway_root:-/opt/unified-identity-platform/data/file-gateway}"
+  gateway_root="${gateway_root:-$deploy_dir/data/file-gateway}"
   gateway_backup_root="$(awk -F= '$1=="FILE_GATEWAY_BACKUP_ROOT" {sub(/^[^=]*=/, ""); print; exit}' "$runtime_file")"
   gateway_backup_root="${gateway_backup_root:-$deploy_dir/backups/file-gateway}"
   if [[ -d "$gateway_root" ]]; then
