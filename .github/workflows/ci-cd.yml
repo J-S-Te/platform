@@ -48,6 +48,8 @@ jobs:
           fi
           bash -n deploy/production/bin/*.sh
           python3 deploy/production/tests/test-compose-blocks.py
+          python3 deploy/production/tests/test-ci-assets-sync.py
+          python3 deploy/production/tests/test-deploy-service-preflight.py
           bash deploy/production/tests/test-key-init.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh
@@ -137,7 +139,7 @@ jobs:
       - name: Detect backend image changes
         # 只有会改变平台镜像内容的文件（backend 非测试源码、Dockerfile、go 模块、
         # CI 工作流）变化才需要部署新镜像并重启 platform-api；纯清单/文档/部署脚本
-        # 变更只同步资产并重启 Agent 重载清单，避免每次 push 都打断门户与接入操作。
+        # 变更同步资产后成对重载控制面，复用当前镜像。
         id: detect
         shell: bash
         run: |
@@ -168,12 +170,18 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          # 直接把部署包流式传给远端 tar，避免在远端 /tmp 再落一份完整压缩包。
-          printf -v install_command 'deploy_path=%q; install -d -m 750 "$deploy_path" && install -d -m 700 "$deploy_path/runtime" && exec 9>"$deploy_path/runtime/.deploy.lock" && flock -w 900 9 && tar -xzf - -C "$deploy_path" && if test -d "$deploy_path/subsystems.d"; then find "$deploy_path/subsystems.d" -maxdepth 1 -type f \( -name "*-dev.yaml" -o -name "*-dev.yml" \) -delete; fi && chmod 750 "$deploy_path/bin/deploy-service.sh" "$deploy_path/bin/deploy-customer-opportunity.sh" && if test ! -f "$deploy_path/runtime/contract.env"; then install -m 600 "$deploy_path/subsystem-templates/contract.env.example" "$deploy_path/runtime/contract.env"; fi && if test ! -f "$deploy_path/runtime/customer.env"; then install -m 600 "$deploy_path/subsystem-templates/customer.env.example" "$deploy_path/runtime/customer.env"; fi && if test ! -f "$deploy_path/runtime/portal.env"; then install -m 600 "$deploy_path/subsystem-templates/portal.env.example" "$deploy_path/runtime/portal.env"; fi && if test ! -f "$deploy_path/runtime/project.env"; then install -m 600 "$deploy_path/subsystem-templates/project.env.example" "$deploy_path/runtime/project.env"; fi && if test ! -f "$deploy_path/runtime/data-analysis.env"; then install -m 600 "$deploy_path/subsystem-templates/data-analysis.env.example" "$deploy_path/runtime/data-analysis.env"; fi && if test -f "$deploy_path/.env"; then configured_path=$(awk -F= '\''$1 == "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {print substr($0, index($0,"=")+1); exit}'\'' "$deploy_path/.env"); test -z "$configured_path" || test "$configured_path" = "$deploy_path" || { echo "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致" >&2; exit 1; }; fi' "$DEPLOY_PATH"
-          # 保留服务器自行注释的部署范围，新模板交付为 .dist 待合并。
-          tar --transform='s#^\./docker-compose.yml$#./docker-compose.yml.dist#' -C deploy/production -czf - . | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$install_command"
-          printf -v compose_install 'cd %q && if test ! -f docker-compose.yml; then install -m 640 docker-compose.yml.dist docker-compose.yml; fi' "$DEPLOY_PATH"
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$compose_install"
+          # 使用与离线交付相同的校验、事务安装及重载门禁，保留服务器的模块选择。
+          asset_work_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$asset_work_dir"' EXIT
+          tar -C deploy/production -czf "$asset_work_dir/deployment-assets.tar.gz" \
+            bin subsystems.d subsystem-templates mysql-init nginx monitoring tests \
+            docker-compose.yml .env.example .release.env.example .gitignore \
+            ACCEPTANCE_CHECKLIST.md README.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md \
+            DEPLOYMENT_COMPATIBILITY.md BACKUP_RECOVERY.md
+          (cd "$asset_work_dir" && sha256sum deployment-assets.tar.gz > deployment-assets.tar.gz.sha256)
+          cp deploy/production/bin/install-assets.sh "$asset_work_dir/install-assets.sh"
+          printf -v install_command 'deploy_path=%q; set -Eeuo pipefail; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"; if test -f "$deploy_path/.env"; then configured_path=$(awk -F= '\''$1 == "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {print substr($0, index($0,"=")+1); exit}'\'' "$deploy_path/.env"); test -z "$configured_path" || test "$configured_path" = "$deploy_path" || { echo "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致" >&2; exit 1; }; fi' "$DEPLOY_PATH"
+          tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
       - name: Apply test-server placeholder database credentials switch
         # 当前部署环境为测试服务器（environment: test）。每次部署都会把占位凭据
         # 开关写入服务器 .env 并重建 Agent，让测试接入不再被数据库密码阻塞。
@@ -203,10 +211,8 @@ jobs:
           printf -v remote_command 'cd %q && if grep -q "^SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=" .env; then sed -i "s/^SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=.*/SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=%q/" .env; else echo "SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=%q" >> .env; fi && chmod 600 .env && echo "placeholder switch applied"' "$DEPLOY_PATH" "$SWITCH_VALUE" "$SWITCH_VALUE"
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
 
-      - name: Restart agent to reload manifests
-        # 纯清单/配置变更时只重建 Agent 重载 subsystems.d，不触碰 platform-api，
-        # 避免接入和门户访问被部署打断。后端镜像变更时由 deploy-service.sh 一并重建。
-        if: steps.detect.outputs.backend_changed != 'true'
+      - name: Reload paired subsystem control plane
+        # 安装器写入门禁；资产及运行配置同步后成对重载 API 与 Agent，再发布镜像。
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -215,6 +221,7 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          FILE_GATEWAY_IMAGE_REF: ${{ needs.image.outputs.file_gateway_image_ref }}
         run: |
           set -Eeuo pipefail
           : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
@@ -229,31 +236,14 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           # 通过 stdin 将完整脚本交给远端 bash，避免把 heredoc/单引号/反斜杠
           # 拼进 ssh 命令参数后被本地 shell、ssh 和远端 shell 多次解析。
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd $(printf '%q' "$DEPLOY_PATH") && bash -s" <<'REMOTE_SCRIPT'
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd $(printf '%q' "$DEPLOY_PATH") && bash -s -- $(printf '%q' "$FILE_GATEWAY_IMAGE_REF")" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
-          compose=(docker compose --env-file .env --env-file .release.env -f docker-compose.yml)
-          # 资产同步类提交不一定会更新 .release.env。此时复用当前健康 Agent 的
-          # 不可变镜像，避免 Compose 把 PLATFORM_IMAGE 展开为空并阻断清单重载。
-          subsystem_id="$("${compose[@]}" ps -q subsystem-provisioner || true)"
-          [[ -n "$subsystem_id" ]] || {
-            echo "[ci] 未找到现有 subsystem-provisioner，且本次不是平台镜像发布，无法安全重建 Agent" >&2
-            exit 1
-          }
-          current_platform_image="$(docker inspect "$subsystem_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
-          [[ "$current_platform_image" =~ @sha256:[a-f0-9]{64}$ ]] || {
-            echo "[ci] 当前 subsystem-provisioner 未使用可验证的不可变平台镜像：$current_platform_image" >&2
-            exit 1
-          }
-          if ! PLATFORM_IMAGE="$current_platform_image" "${compose[@]}" up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
-            echo "[ci] subsystem-provisioner start failed" >&2
-            "${compose[@]}" ps subsystem-provisioner || true
-            subsystem_id="$("${compose[@]}" ps -q subsystem-provisioner || true)"
-            if [[ -n "$subsystem_id" ]]; then
-              docker inspect "$subsystem_id" --format '{{json .State}}' || true
-            fi
-            "${compose[@]}" logs --no-color --tail 200 subsystem-provisioner || true
-            exit 1
-          fi
+          # Legacy release.env may not contain the separate File Gateway image.
+          # Use the validated candidate only to parse Compose for paired reload.
+          # Keep PLATFORM_IMAGE unchanged until migrations run in deploy-service.
+          [[ "${1:-}" =~ @sha256:[a-f0-9]{64}$ ]] || { echo 'invalid File Gateway candidate digest' >&2; exit 1; }
+          export FILE_GATEWAY_IMAGE="$1"
+          ./bin/deploy.sh reload-control-plane
           REMOTE_SCRIPT
 
       - name: Migrate and deploy immutable platform image

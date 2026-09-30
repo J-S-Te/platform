@@ -111,8 +111,21 @@ source "$transport_helper"
 source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
 source "$script_dir/compose-scope.sh"
-scope_require "$service" || exit 1
-scope_report
+# Compose expands all required image variables even for config --services. Use
+# the validated candidate references only while checking scope, before committing
+# release pointers; keep the parent environment unchanged for rollback.
+(
+  export "$image_key=$image_ref"
+  if [[ "$service" == platform ]]; then
+    export "$file_gateway_image_key=$file_gateway_image_ref"
+  elif [[ "$service" == data-analysis ]]; then
+    for index in "${!data_analysis_image_keys[@]}"; do
+      export "${data_analysis_image_keys[$index]}=${data_analysis_image_refs[$index]}"
+    done
+  fi
+  scope_require "$service" || exit 1
+  scope_report
+) || exit 1
 
 # 部署资产替换后必须先成对重载控制面（install-assets.sh 会写 runtime/.control-plane-reload-required）。
 # 这里在解析与网络创建之前失败，避免重建出与前一侧清单不一致的容器。
@@ -340,6 +353,20 @@ compose() {
 
 frontend_compose() {
   compose "$@"
+}
+
+ensure_temporal_application_network() {
+  local container attached
+  container="$(compose ps -a -q temporal)" || return
+  [[ -n "$container" ]] || return 0
+  attached="$(docker inspect "$container" --format '{{if index .NetworkSettings.Networks "basic-platform-production"}}attached{{end}}')" || return
+  [[ "$attached" != attached ]] || return 0
+  echo 'Temporal 未连接生产共享网络；保留持久化数据并重建网络连接'
+  # Existing drifted containers may no longer resolve contract-mysql. Restore
+  # the shared database first, then recreate only Temporal rather than routinely
+  # restarting the workflow server on every business-service release.
+  compose up -d --wait --wait-timeout 240 contract-mysql || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 240 temporal
 }
 
 env_value() {
@@ -686,6 +713,7 @@ deploy_platform() {
   compose up -d --wait --wait-timeout 180 platform-mysql keycloak-db contract-mysql || return
   backup_database platform-mysql basic_platform || return
   compose run --rm --no-deps platform-migrate ./migrate || return
+  ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout 180 keycloak temporal || return
 	compose up -d --wait --wait-timeout 180 file-gateway-mysql || return
 	backup_database file-gateway-mysql "$file_gateway_db_name" file-gateway || return
@@ -751,6 +779,7 @@ deploy_contract() {
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1
   fi
+  ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
@@ -780,6 +809,7 @@ deploy_project() {
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1
   fi
+  ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout 240 project-mysql temporal || return
   backup_database project-mysql project_management || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
@@ -868,6 +898,39 @@ release_image_value() {
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$release_file"
 }
 
+restore_legacy_file_gateway_pointer() {
+  local container image temporary project
+  [[ "$service" == platform ]] || return 0
+  [[ -z "$(release_image_value FILE_GATEWAY_IMAGE)" ]] || return 0
+  project="$(scope_project)" || return
+  container="$(docker ps -a -q --filter "label=com.docker.compose.project=$project" \
+    --filter 'label=com.docker.compose.service=file-gateway')" || return
+  [[ -n "$container" ]] || return 0
+  [[ "$container" != *$'\n'* ]] || {
+    echo '发现多个 File Gateway 容器，无法确定旧镜像用于回滚' >&2
+    return 1
+  }
+  image="$(docker inspect "$container" --format '{{.Config.Image}}')" || return
+  if [[ ! "$image" =~ $acr_enterprise_or_new_personal && ! "$image" =~ $acr_legacy_personal && ! "$image" =~ $offline_local_registry ]]; then
+    echo '旧 File Gateway 缺少可验证的不可变镜像；请先恢复 FILE_GATEWAY_IMAGE 后重试发布' >&2
+    return 1
+  fi
+  # Recover the actual running image before taking the rollback snapshot. A new
+  # candidate must never masquerade as the previous File Gateway version.
+  temporary="$(mktemp "$deploy_dir/.release.env.gateway-recovery.XXXXXX")" || return
+  if ! awk -F= -v value="$image" '$1 != "FILE_GATEWAY_IMAGE" {print} END {print "FILE_GATEWAY_IMAGE=" value}' \
+    "$release_file" >"$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if [[ "$(id -u)" == 0 ]]; then
+    chown --reference="$release_file" "$temporary" || { rm -f -- "$temporary"; return 1; }
+  fi
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$release_file" || { rm -f -- "$temporary"; return 1; }
+  echo '已从既有 File Gateway 容器恢复不可变版本指针，后续发布可按原镜像回滚'
+}
+
 rollback_runtime() {
   local -a restored_images=()
   local restored_image_key restored_image
@@ -940,6 +1003,7 @@ rollback_runtime() {
 }
 
 require_backup_space || exit 1
+restore_legacy_file_gateway_pointer || exit 1
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 previous_release="$(mktemp "$deploy_dir/.release.env.previous.XXXXXX")"
 next_release="$(mktemp "$deploy_dir/.release.env.next.XXXXXX")"
