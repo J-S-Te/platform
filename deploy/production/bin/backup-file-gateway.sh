@@ -37,7 +37,7 @@ env_value() {
 }
 
 storage_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
-storage_root="${storage_root:-/opt/unified-identity-platform/data/file-gateway}"
+storage_root="${storage_root:-$deploy_dir/data/file-gateway}"
 [[ "$storage_root" == /* && "$storage_root" != / && -d "$storage_root" && ! -L "$storage_root" ]] || {
   echo "文件网关存储目录不存在或不安全：$storage_root" >&2
   exit 1

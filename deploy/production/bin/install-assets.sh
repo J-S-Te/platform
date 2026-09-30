@@ -195,11 +195,13 @@ fi
 
 stage="$(mktemp -d "$target/.assets-install.XXXXXX")"
 transaction_stage=''
+compose_update=''
 cleanup() {
   local status=$?
   trap - EXIT
   rm -rf -- "$stage"
   [[ -z "$transaction_stage" ]] || rm -rf -- "$transaction_stage"
+  [[ -z "$compose_update" ]] || rm -f -- "$compose_update"
   if ((status != 0)) && [[ -d "$transaction" ]]; then
     echo "部署资产安装未完成；已阻止后续部署。请执行：$0 --recover $target" >&2
   fi
@@ -209,6 +211,30 @@ trap cleanup EXIT
 tar -xzf "$archive" --no-same-owner --no-same-permissions -C "$stage"
 [[ -f "$stage/docker-compose.yml" && -f "$stage/bin/deploy.sh" ]] || { echo '资产缺少统一编排或部署入口' >&2; exit 1; }
 bash -n "$stage/bin/deploy.sh"
+
+# Preserve operator-selected services. Only the known managed Docker Hub proxy
+# reference changes registry; version, proxy ACLs and every other YAML line stay.
+if [[ -f "$target/docker-compose.yml" ]]; then
+  [[ ! -L "$target/docker-compose.yml" ]] || { echo '统一编排不能是符号链接' >&2; exit 1; }
+  compose_update="$(mktemp "$target/.compose-managed-image.XXXXXX")"
+  cp -p -- "$target/docker-compose.yml" "$compose_update"
+  awk '
+    /^  docker-socket-proxy:[[:space:]]*(#.*)?$/ {proxy=1; print; next}
+    /^  [^[:space:]#]/ {proxy=0}
+    proxy && /^    image:[[:space:]]/ {
+      image=$2
+      gsub(/["\047]/, "", image)
+      if (image=="tecnativa/docker-socket-proxy:v0.5.0" || image=="docker.io/tecnativa/docker-socket-proxy:v0.5.0")
+        sub(/(docker[.]io\/)?tecnativa\/docker-socket-proxy:v0[.]5[.]0/,
+            "ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459")
+    }
+    {print}
+  ' "$target/docker-compose.yml" >"$compose_update"
+  if cmp -s -- "$target/docker-compose.yml" "$compose_update"; then
+    rm -f -- "$compose_update"
+    compose_update=''
+  fi
+fi
 
 backup="$(mktemp -d "$target/backups/install-assets.XXXXXX")"
 transaction_stage="$(mktemp -d "$target/runtime/.assets-install-transaction.prepare.XXXXXX")"
@@ -220,6 +246,11 @@ if [[ "$pending_platform_upgrade" == true ]]; then
   cp -p -- "$reload_marker" "$transaction_stage/previous-reload-marker"
 fi
 printf 'prepared\n' > "$transaction_stage/state"
+if [[ -n "$compose_update" ]]; then
+  printf 'docker-compose.yml\n' >> "$transaction_stage/touched"
+  printf 'docker-compose.yml\n' >> "$transaction_stage/existing"
+  cp -a -- "$target/docker-compose.yml" "$backup/docker-compose.yml"
+fi
 
 shopt -s dotglob nullglob
 for source in "$stage"/*; do
@@ -258,6 +289,12 @@ for source in "$stage"/*; do
     mv -f -- "$file_temporary" "$target/$destination_name"
   fi
 done
+
+if [[ -n "$compose_update" ]]; then
+  mv -f -- "$compose_update" "$target/docker-compose.yml"
+  compose_update=''
+  echo '已定向更新受管 Docker Socket Proxy 为同版官方 GHCR 不可变镜像'
+fi
 
 # 非 root 容器需能遍历其只读 bind mount；只调整非敏感部署资产。
 for name in subsystems.d subsystem-templates mysql-init nginx monitoring; do

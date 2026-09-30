@@ -51,6 +51,7 @@ jobs:
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 deploy/production/tests/test-platform-coordinated-upgrade.py
+          python3 deploy/production/tests/test-managed-deployment-defaults.py
           bash deploy/production/tests/test-key-init.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh

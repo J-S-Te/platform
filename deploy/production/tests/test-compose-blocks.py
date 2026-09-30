@@ -38,6 +38,8 @@ def main():
             "PLATFORM_KEYS_DIR": str(root / "custom-keys"),
             "PLATFORM_IMAGE": "test/platform:fixture", "FRONTEND_IMAGE": "test/frontend:fixture",
             "FILE_GATEWAY_IMAGE": "test/gateway:fixture",
+            "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT": str(root / "custom-deploy"),
+            "FILE_GATEWAY_HOST_ROOT": "",
             "KEYCLOAK_DB_PASSWORD": "fixture-not-a-secret", "KEYCLOAK_DB_ROOT_PASSWORD": "fixture-not-a-secret",
             "KEYCLOAK_ADMIN_PASSWORD": "fixture-not-a-secret", "KEYCLOAK_PUBLIC_URL": "http://localhost:18090",
             "FILE_GATEWAY_DB_PASSWORD": "fixture-not-a-secret", "FILE_GATEWAY_DB_ROOT_PASSWORD": "fixture-not-a-secret",
@@ -69,9 +71,13 @@ def main():
                 assert init["volumes"][0]["source"] == "subsystem-provisioner-socket"
                 assert init["environment"]["SOCKET_OWNER"] == "0:10001"
                 proxy = services["docker-socket-proxy"]
+                assert proxy["image"] == "ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
                 assert proxy["environment"]["LOG_LEVEL"] == "warning"
                 assert proxy["healthcheck"]["test"] == ["CMD", "haproxy", "-c", "-f", "/tmp/haproxy.cfg"]
                 provisioner = services["subsystem-provisioner"]
+                gateway = services["file-gateway"]
+                gateway_storage = next(v for v in gateway["volumes"] if v["target"] == "/app/data/file-gateway")
+                assert gateway_storage["source"] == str(root / "custom-deploy/data/file-gateway")
                 assert provisioner["user"] == "0:10001"
                 assert provisioner["depends_on"]["docker-socket-proxy"]["condition"] == "service_healthy"
                 assert set(provisioner["cap_add"]) == {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
@@ -92,6 +98,14 @@ def main():
                         assert dependency in services, dependency
                 assert "profiles" not in json.dumps(services)
                 checked += 1
+        env["FILE_GATEWAY_HOST_ROOT"] = str(root / "company-custom-files")
+        explicit = subprocess.run(["docker", "compose", "--project-directory", directory,
+                                   "--env-file", str(runtime), "-f", str(candidate), "config", "--format", "json"],
+                                  env=env, capture_output=True, text=True)
+        assert explicit.returncode == 0, explicit.stderr
+        gateway = json.loads(explicit.stdout)["services"]["file-gateway"]
+        gateway_storage = next(v for v in gateway["volumes"] if v["target"] == "/app/data/file-gateway")
+        assert gateway_storage["source"] == str(root / "company-custom-files")
     print(f"PASS: {checked} subsystem combinations; missing optional runtime files; shared Temporal DB and names preserved")
 
 
