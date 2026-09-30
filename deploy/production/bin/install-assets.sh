@@ -219,8 +219,14 @@ if [[ -f "$target/docker-compose.yml" ]]; then
   compose_update="$(mktemp "$target/.compose-managed-image.XXXXXX")"
   cp -p -- "$target/docker-compose.yml" "$compose_update"
   awk '
-    /^  docker-socket-proxy:[[:space:]]*(#.*)?$/ {proxy=1; print; next}
-    /^  [^[:space:]#]/ {proxy=0}
+    /^  docker-socket-proxy:[[:space:]]*(#.*)?$/ {proxy=1; frontend=0; print; next}
+    /^  frontend:[[:space:]]*(#.*)?$/ {frontend=1; proxy=0; print; next}
+    /^  [^[:space:]#]/ {proxy=0; frontend=0}
+    frontend && /^        ipv4_address:[[:space:]]/ {
+      address=$2
+      gsub(/["\047]/, "", address)
+      if (address=="172.31.255.250") sub(/172[.]31[.]255[.]250/, "${FRONTEND_IPV4_ADDRESS:-172.31.255.250}")
+    }
     proxy && /^    image:[[:space:]]/ {
       image=$2
       gsub(/["\047]/, "", image)
@@ -293,7 +299,7 @@ done
 if [[ -n "$compose_update" ]]; then
   mv -f -- "$compose_update" "$target/docker-compose.yml"
   compose_update=''
-  echo '已定向更新受管 Docker Socket Proxy 为同版官方 GHCR 不可变镜像'
+  echo '已定向更新受管代理镜像及前端网络插值，保留模块裁剪和自定义配置'
 fi
 
 # 非 root 容器需能遍历其只读 bind mount；只调整非敏感部署资产。

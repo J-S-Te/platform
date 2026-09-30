@@ -41,6 +41,7 @@ with tempfile.TemporaryDirectory(prefix='ci-assets-sync-') as directory:
         shutil.copyfile(production / name, source / name)
     shutil.copyfile(production / 'bin/install-assets.sh', source / 'bin/install-assets.sh')
     shutil.copyfile(production / 'bin/provisioner-config-refresh.sh', source / 'bin/provisioner-config-refresh.sh')
+    shutil.copyfile(production / 'bin/frontend-network.py', source / 'bin/frontend-network.py')
     # Transport must exclude old overlays and acceptance evidence rejected by the installer.
     (source / 'compose.yaml').write_text('legacy overlay must not ship\n')
     (source / 'acceptance').mkdir()
@@ -59,6 +60,7 @@ echo paired-reload >> "$TEST_RELOAD_LOG"
     executable(tools / 'docker', '''#!/bin/sh
 case "$1" in
   info) exit 0 ;;
+  network) [ "$2" = ls ] && exit 0 ;;
   ps) echo running-control-plane; exit 0 ;;
 esac
 exit 1

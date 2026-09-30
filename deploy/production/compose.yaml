@@ -288,8 +288,8 @@ services:
       KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
       KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
       # 信任来源收敛为精确网关地址（SEC-N6，与生产 .env.example 保持一致）：
-      # 宿主机入口 Nginx 经 127.0.0.1 发布端口进入时对端是网桥网关 172.31.255.1，
-      # frontend 反代容器对端是其固定地址 172.31.255.250；应用网段其余容器一律不可信，
+      # 新环境默认网关为 172.31.255.1、frontend 为 172.31.255.250；既有网络由 CI
+      # 按真实网关与 FRONTEND_IPV4_ADDRESS 收敛为 /32。应用网段其余容器一律不可信，
       # 其携带的 X-Forwarded-For 会被忽略，防止任意容器伪造 XFF 污染审计/绕过限流。
       # 确认方法：docker network inspect basic-platform-production --format '{{(index .IPAM.Config 0).Gateway}}'。
       APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32}
@@ -1103,11 +1103,11 @@ services:
       PUBLIC_SSO_HOST: ${PUBLIC_FRONTEND_SSO_HOST:-${PUBLIC_SSO_HOST:-sso.localhost}}
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTP_PORT:-${FRONTEND_PORT:-18082}}:80"
-    # 固定地址（子网高位，避开自动分配顺序）供 APP_TRUSTED_PROXIES 精确信任：
+    # 固化地址供 APP_TRUSTED_PROXIES 精确信任；既有网络不迁移，保留原前端地址：
     # frontend nginx 是转发 X-Forwarded-For 到 platform-api 的唯一容器来源（SEC-N6）。
     networks:
       application:
-        ipv4_address: 172.31.255.250
+        ipv4_address: ${FRONTEND_IPV4_ADDRESS:-172.31.255.250}
     depends_on:
       platform-api:
         condition: service_healthy
