@@ -95,7 +95,9 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
                HOME=str(fixture / 'home'), DEPLOY_HOST='fixture', DEPLOY_USER='fixture',
                DEPLOY_SSH_KEY='fixture-key', DEPLOY_KNOWN_HOSTS='fixture-known-host',
                DEPLOY_PATH=str(host), TEST_RELOAD_LOG=str(fixture / 'reload.log'),
-               FILE_GATEWAY_IMAGE_REF='registry.example/platform@sha256:' + 'a' * 64)
+               FILE_GATEWAY_IMAGE_REF='registry.example/platform@sha256:' + 'a' * 64,
+               IMAGE_REF='registry.example/platform@sha256:' + 'b' * 64,
+               BACKEND_CHANGED='false')
 
     def execute(name, extra=None, succeeds=True):
         process = subprocess.run(['bash', '-c', run_step(name)], cwd=source.parents[1],
@@ -126,6 +128,17 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     # gate, then installs this archive and creates its new reload requirement.
     execute(sync)
     assert marker.is_file()
+    execute(reload)
+    # Legacy binary rejects the new manifest schema. An actual platform-image
+    # release must retain the pending marker rather than trying that old reload.
+    execute(sync)
+    execute(reload, {'FAIL_RELOAD': 'true'}, succeeds=False)
+    before_upgrade = (fixture / 'reload.log').read_text()
+    execute(sync, {'BACKEND_CHANGED': 'true', 'FAIL_RELOAD': 'true'})
+    assert marker.is_file()
+    assert (fixture / 'reload.log').read_text() == before_upgrade
+    # Ordinary installation is still rejected with this pending requirement.
+    execute(sync, {'FAIL_RELOAD': 'true'}, succeeds=False)
     execute(reload)
     failure = execute(sync, {'TAMPER_ARCHIVE': 'true'}, succeeds=False)
     assert 'SHA256' in failure.stderr, failure.stdout + failure.stderr

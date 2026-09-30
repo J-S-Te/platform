@@ -62,7 +62,7 @@ control_plane_reload_marker_path() {
 # 的入口都必须拒绝：只重建一侧会让 platform-api 与 subsystem-provisioner 使用不同的生产
 # 清单集合，受控采用/更新会被 manifest drift 保护正确拒绝，现场表现为"重试也没用"。
 require_control_plane_reload_clearance() {
-  local marker
+  local marker upgrade_image
   marker="$(control_plane_reload_marker_path)" || return 1
   if [[ -L "$marker" ]]; then
     echo "错误：控制面重载标记不能是符号链接：$marker" >&2
@@ -73,6 +73,14 @@ require_control_plane_reload_clearance() {
     return 1
   fi
   [[ -f "$marker" ]] || return 0
+  if [[ "${1:-}" == platform-upgrade && "${DEPLOY_PLATFORM_CONTROL_PLANE_UPGRADE:-false}" == true ]]; then
+    upgrade_image="$(awk -F= '$1=="PLATFORM_UPGRADE_IMAGE" {print substr($0,index($0,"=")+1); exit}' "$marker")" || return 1
+    [[ -z "$upgrade_image" || "$upgrade_image" == "${image_ref:-}" ]] || {
+      echo '平台发布镜像与待完成部署资产绑定的不可变镜像不一致' >&2; return 1;
+    }
+    echo '控制面重载门禁保留；仅允许平台发布执行迁移后升级并验证两侧控制面'
+    return 0
+  fi
   echo '错误：部署资产已更新，但 subsystem-provisioner 与 platform-api 尚未成对重载。' >&2
   echo '为避免平台与 Agent 使用不同的生产清单，本次操作已拒绝。' >&2
   echo "请先执行：${deploy_dir}/bin/deploy.sh reload-control-plane" >&2
@@ -234,7 +242,12 @@ refresh_subsystem_provisioner_config() {
 # the provisioner is already serving the new set. The caller-held deployment
 # lock prevents a concurrent Agent operation from crossing this reload window.
 refresh_subsystem_control_plane_config() {
-  local provisioner platform_api health
+  local provisioner platform_api health marker
+  marker="$(control_plane_reload_marker_path)" || return 1
+  if [[ -f "$marker" ]] && grep -q '^PLATFORM_UPGRADE_IMAGE=' "$marker"; then
+    echo '待完成资产要求受控平台镜像升级；普通重载不能替代数据库迁移和新镜像验证' >&2
+    return 1
+  fi
   command -v sha256sum >/dev/null || {
     echo '缺少命令：sha256sum，无法验证控制面配置一致性' >&2
     return 1

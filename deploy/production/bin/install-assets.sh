@@ -10,6 +10,9 @@ usage() {
 
 --recover 会使用未完成事务创建的本地备份恢复安装前的部署资产；不会修改运行配置、
 数据库卷或备份内容。恢复完成前 deploy.sh 会拒绝继续运行。
+
+仅受控平台镜像发布可设置 ASSETS_PLATFORM_UPGRADE_IMAGE=<不可变 digest> 继续
+未完成的资产升级；门禁会绑定该镜像，并保留到平台迁移和新 API/Agent 验证完成。
 EOF
 }
 
@@ -71,6 +74,9 @@ write_control_plane_reload_marker() {
     printf 'ASSETS_ARCHIVE_SHA256=%s\n' "$actual"
     printf 'INSTALLED_AT_UTC=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'REASON=deployment_assets_changed_while_control_plane_running\n'
+    if [[ -n "${ASSETS_PLATFORM_UPGRADE_IMAGE:-}" ]]; then
+      printf 'PLATFORM_UPGRADE_IMAGE=%s\n' "$ASSETS_PLATFORM_UPGRADE_IMAGE"
+    fi
   } >"$temporary"
   chmod 600 "$temporary"
   mv -f -- "$temporary" "$marker"
@@ -103,7 +109,12 @@ recover_install() {
       cp -a -- "$backup/$name" "$target/$name"
     fi
   done < "$transaction/touched"
-  if [[ -f "$target/runtime/.control-plane-reload-required" && -f "$transaction/archive-sha256" ]]; then
+  if [[ -e "$transaction/previous-reload-marker" || -L "$transaction/previous-reload-marker" ]]; then
+    [[ -f "$transaction/previous-reload-marker" && ! -L "$transaction/previous-reload-marker" && ! -L "$target/runtime/.control-plane-reload-required" ]] || {
+      echo '恢复事务中的重载标记不是安全普通文件' >&2; exit 1;
+    }
+    cp -p -- "$transaction/previous-reload-marker" "$target/runtime/.control-plane-reload-required"
+  elif [[ -f "$target/runtime/.control-plane-reload-required" && -f "$transaction/archive-sha256" ]]; then
     transaction_digest="$(awk 'NR == 1 {print $1}' "$transaction/archive-sha256")"
     marker_digest="$(awk -F= '$1 == "ASSETS_ARCHIVE_SHA256" {print $2}' "$target/runtime/.control-plane-reload-required")"
     if [[ -n "$transaction_digest" && "$marker_digest" == "$transaction_digest" ]]; then
@@ -125,6 +136,10 @@ fi
 archive="$1"
 target="${2:-/opt/unified-identity-platform}"
 validate_target
+if [[ -n "${ASSETS_PLATFORM_UPGRADE_IMAGE:-}" && ! "$ASSETS_PLATFORM_UPGRADE_IMAGE" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+  echo '受控平台升级必须提供不可变镜像 digest' >&2
+  exit 2
+fi
 archive="$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")"
 [[ -f "$archive" && ! -L "$archive" && -f "$archive.sha256" && ! -L "$archive.sha256" ]] || {
   echo '缺少普通文件形式的资产包或 SHA256 伴随文件' >&2; exit 1;
@@ -157,11 +172,18 @@ transaction="$target/runtime/.assets-install-transaction"
   exit 1
 }
 reload_marker="$target/runtime/.control-plane-reload-required"
-[[ ! -e "$reload_marker" && ! -L "$reload_marker" ]] || {
-  echo "检测到上一次部署资产更新尚未完成控制面成对重载：$reload_marker" >&2
-  echo "请先执行：$target/bin/deploy.sh reload-control-plane" >&2
-  exit 1
-}
+pending_platform_upgrade=false
+if [[ -e "$reload_marker" || -L "$reload_marker" ]]; then
+  [[ -f "$reload_marker" && ! -L "$reload_marker" ]] || { echo '重载标记必须为普通文件' >&2; exit 1; }
+  if [[ "${ASSETS_PLATFORM_UPGRADE_IMAGE:-}" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+    pending_platform_upgrade=true
+    echo '受控平台镜像升级继续安装；保留门禁直到迁移和新控制面验证完成'
+  else
+    echo "检测到上一次部署资产更新尚未完成控制面成对重载：$reload_marker" >&2
+    echo "请先执行：$target/bin/deploy.sh reload-control-plane，或执行受控平台镜像升级" >&2
+    exit 1
+  fi
+fi
 
 control_plane_running=false
 if control_plane_is_running; then
@@ -194,6 +216,9 @@ transaction_stage="$(mktemp -d "$target/runtime/.assets-install-transaction.prep
 : > "$transaction_stage/existing"
 printf '%s\n' "$backup" > "$transaction_stage/backup"
 printf '%s\n' "$actual" > "$transaction_stage/archive-sha256"
+if [[ "$pending_platform_upgrade" == true ]]; then
+  cp -p -- "$reload_marker" "$transaction_stage/previous-reload-marker"
+fi
 printf 'prepared\n' > "$transaction_stage/state"
 
 shopt -s dotglob nullglob
@@ -242,7 +267,7 @@ for name in subsystems.d subsystem-templates mysql-init nginx monitoring; do
   fi
 done
 chmod 750 "$target/bin/"*.sh
-if [[ "$control_plane_running" == true ]]; then
+if [[ "$control_plane_running" == true || "$pending_platform_upgrade" == true ]]; then
   write_control_plane_reload_marker
 fi
 printf 'committed\n' > "$transaction/state"
@@ -253,9 +278,13 @@ echo "旧资产备份：$backup"
 if [[ -f "$target/docker-compose.yml.dist" ]]; then
   echo '保留了当前 docker-compose.yml 的模块裁剪；新模板在 docker-compose.yml.dist，请合并需要的编排更新。'
 fi
-if [[ "$control_plane_running" == true ]]; then
+if [[ "$control_plane_running" == true || "$pending_platform_upgrade" == true ]]; then
   echo "检测到运行中的控制面；已写入强制重载标记：$reload_marker"
-  echo "必须先执行：$target/bin/deploy.sh reload-control-plane"
+  if [[ -n "${ASSETS_PLATFORM_UPGRADE_IMAGE:-}" ]]; then
+    echo '必须继续执行受控平台镜像发布：先完成迁移，再验证新 Agent/API 后清除门禁'
+  else
+    echo "必须先执行：$target/bin/deploy.sh reload-control-plane"
+  fi
   echo '重载成功前，deploy.sh 会拒绝导入、准备、更新和继续部署。'
 else
   echo '未启动容器。首次安装先 configure，再使用 deploy.sh start；旧环境先核对配置与镜像版本。'
