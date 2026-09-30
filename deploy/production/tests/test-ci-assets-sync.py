@@ -40,6 +40,7 @@ with tempfile.TemporaryDirectory(prefix='ci-assets-sync-') as directory:
     for name in files:
         shutil.copyfile(production / name, source / name)
     shutil.copyfile(production / 'bin/install-assets.sh', source / 'bin/install-assets.sh')
+    shutil.copyfile(production / 'bin/provisioner-config-refresh.sh', source / 'bin/provisioner-config-refresh.sh')
     # Transport must exclude old overlays and acceptance evidence rejected by the installer.
     (source / 'compose.yaml').write_text('legacy overlay must not ship\n')
     (source / 'acceptance').mkdir()
@@ -111,6 +112,7 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     assert not (host / 'subsystems.d/stale.yaml').exists()
     assert (host / 'subsystems.d/new.yaml').exists()
     assert (runtime / 'customer.env').read_text() == 'PRIVATE_FIXTURE=keep\n'
+    assert ('SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=' + str(host) + '\n') in (host / '.env').read_text()
     assert marker.is_file()
     execute(reload)
     assert not marker.exists()
@@ -118,10 +120,22 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     execute(sync)
     execute(reload, {'FAIL_RELOAD': 'true'}, succeeds=False)
     assert marker.is_file(), 'failed reload must retain deployment gate'
-    execute(sync, succeeds=False)
+    execute(sync, {'FAIL_RELOAD': 'true'}, succeeds=False)
+    assert marker.is_file()
+    # A retry first reloads the previously installed assets and consumes the old
+    # gate, then installs this archive and creates its new reload requirement.
+    execute(sync)
+    assert marker.is_file()
     execute(reload)
     failure = execute(sync, {'TAMPER_ARCHIVE': 'true'}, succeeds=False)
     assert 'SHA256' in failure.stderr, failure.stdout + failure.stderr
+    assert not marker.exists()
+    configured_env = (host / '.env').read_text()
+    (host / '.env').write_text(configured_env.replace(str(host), '/wrong/deployment'))
+    execute(sync, succeeds=False)
+    assert not marker.exists()
+    (host / '.env').write_text(configured_env + 'SUBSYSTEM_PRODUCTION_PROFILES_DIR=/wrong/profiles\n')
+    execute(sync, succeeds=False)
     assert not marker.exists()
 
 print('CI asset transport, transaction install, module selection and reload gates: PASS')

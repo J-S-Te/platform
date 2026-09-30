@@ -10,6 +10,47 @@
 # helpers deliberately do not acquire the lock themselves: deploy.sh,
 # deploy-service.sh and start-enabled.sh protect the surrounding transaction.
 
+# CI can install into a non-default root. Compose's bind-mount sources and both
+# control-plane processes must resolve that same root before any reload attempt.
+prepare_ci_deploy_root() (
+  local runtime temporary configured profiles
+  [[ "${deploy_dir:-}" == /* && "$deploy_dir" != / ]] || { echo '无效 CI 部署根目录' >&2; return 1; }
+  runtime="$deploy_dir/.env"
+  [[ -f "$runtime" && ! -L "$runtime" ]] || { echo 'CI 部署需要普通文件形式的 .env' >&2; return 1; }
+  [[ ! -L "$deploy_dir/runtime" && ! -L "$deploy_dir/runtime/.deploy.lock" ]] || {
+    echo 'CI 部署锁目录不能是符号链接' >&2; return 1;
+  }
+  install -d -m 700 "$deploy_dir/runtime"
+  exec 8>"$deploy_dir/runtime/.deploy.lock"
+  flock -w 900 8 || return 1
+  configured="$(awk -F= '$1=="SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {count++; value=substr($0,index($0,"=")+1)} END {if(count>1)exit 1; print value}' "$runtime")" || {
+    echo '重复的 SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 配置' >&2; return 1;
+  }
+  profiles="$(awk -F= '$1=="SUBSYSTEM_PRODUCTION_PROFILES_DIR" {count++; value=substr($0,index($0,"=")+1)} END {if(count>1)exit 1; print value}' "$runtime")" || {
+    echo '重复的 SUBSYSTEM_PRODUCTION_PROFILES_DIR 配置' >&2; return 1;
+  }
+  [[ -z "$configured" || "$configured" == "$deploy_dir" ]] || {
+    echo 'SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致；拒绝更改明确配置' >&2; return 1;
+  }
+  [[ -z "$profiles" || "$profiles" == "$deploy_dir/subsystems.d" ]] || {
+    echo 'SUBSYSTEM_PRODUCTION_PROFILES_DIR 与 CI 安装清单目录不一致' >&2; return 1;
+  }
+  [[ -z "$configured" ]] || return 0
+  temporary="$(mktemp "$deploy_dir/.env.ci-root.XXXXXX")" || return 1
+  trap 'rm -f -- "$temporary"' EXIT
+  CI_DEPLOY_ROOT="$deploy_dir" awk -F= '
+    $1=="SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {next}
+    {print}
+    END {print "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=" ENVIRON["CI_DEPLOY_ROOT"]}
+  ' "$runtime" >"$temporary" || return 1
+  if [[ "$(id -u)" == 0 ]]; then
+    chown --reference="$runtime" "$temporary" || return 1
+  fi
+  chmod 600 "$temporary" || return 1
+  mv -f -- "$temporary" "$runtime" || return 1
+  echo '已将 CI 部署根目录绑定到平台与 Agent 的 Compose 配置'
+)
+
 control_plane_reload_marker_path() {
   local root="${deploy_dir:-}"
   [[ -n "$root" ]] || { echo '错误：缺少部署目录，无法检查控制面重载门禁' >&2; return 1; }

@@ -158,6 +158,7 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          FILE_GATEWAY_IMAGE_REF: ${{ needs.image.outputs.file_gateway_image_ref }}
         run: |
           set -Eeuo pipefail
           : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
@@ -180,8 +181,9 @@ jobs:
             DEPLOYMENT_COMPATIBILITY.md BACKUP_RECOVERY.md
           (cd "$asset_work_dir" && sha256sum deployment-assets.tar.gz > deployment-assets.tar.gz.sha256)
           cp deploy/production/bin/install-assets.sh "$asset_work_dir/install-assets.sh"
-          printf -v install_command 'deploy_path=%q; set -Eeuo pipefail; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"; if test -f "$deploy_path/.env"; then configured_path=$(awk -F= '\''$1 == "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {print substr($0, index($0,"=")+1); exit}'\'' "$deploy_path/.env"); test -z "$configured_path" || test "$configured_path" = "$deploy_path" || { echo "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致" >&2; exit 1; }; fi' "$DEPLOY_PATH"
-          tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
+          cp deploy/production/bin/provisioner-config-refresh.sh "$asset_work_dir/provisioner-config-refresh.sh"
+          printf -v install_command 'deploy_path=%q; gateway_image=%q; set -Eeuo pipefail; [[ "$gateway_image" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; source "$work_dir/provisioner-config-refresh.sh"; deploy_dir="$deploy_path"; prepare_ci_deploy_root; if test -e "$deploy_path/runtime/.control-plane-reload-required" || test -L "$deploy_path/runtime/.control-plane-reload-required"; then (cd "$deploy_path" && FILE_GATEWAY_IMAGE="$gateway_image" ./bin/deploy.sh reload-control-plane); fi; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"' "$DEPLOY_PATH" "$FILE_GATEWAY_IMAGE_REF"
+          tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh provisioner-config-refresh.sh | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
       - name: Apply test-server placeholder database credentials switch
         # 当前部署环境为测试服务器（environment: test）。每次部署都会把占位凭据
         # 开关写入服务器 .env 并重建 Agent，让测试接入不再被数据库密码阻塞。
