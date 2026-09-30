@@ -9,7 +9,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 deploy_dir="$(cd -- "$script_dir/.." && pwd)"
 runtime_file="${BASIC_PLATFORM_RUNTIME_ENV_FILE:-$deploy_dir/.env}"
 release_file="${BASIC_PLATFORM_RELEASE_ENV_FILE:-$deploy_dir/.release.env}"
-compose_file="$deploy_dir/compose.yaml"
+compose_file="$deploy_dir/docker-compose.yml"
 
 install -d -m 700 "$deploy_dir/runtime"
 exec 9>"$deploy_dir/runtime/.deploy.lock"
@@ -25,6 +25,19 @@ base_compose() {
 
 coordinator() {
   base_compose run --rm --no-deps platform-api ./public-transport-coordinator "$@"
+}
+
+running_enabled_services() {
+  local enabled running service
+  # Use the portable service-only query. Some supported Compose releases reject
+  # environment-resolution flags, while older releases cannot validate bind
+  # mounts that retain literal default-expression colons under no-interpolate.
+  enabled="$(base_compose config --services)" || return 1
+  running="$(base_compose ps --services --status running)" || return 1
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    if grep -Fxq -- "$service" <<<"$enabled"; then printf '%s\n' "$service"; fi
+  done <<<"$running"
 }
 
 persist_transport_state() {
@@ -61,7 +74,7 @@ origin_for_mode() {
 
 # Target preflight is performed first. HTTP does not inspect certificate paths.
 unset PUBLIC_TRANSPORT_STATE
-public_transport_prepare "$deploy_dir" "$runtime_file" "$deploy_dir/compose.https.yaml" "$deploy_dir/compose.drain.yaml"
+public_transport_prepare "$deploy_dir" "$runtime_file"
 configured_transition_state="$PUBLIC_TRANSPORT_STATE"
 desired_mode=HTTP
 [[ "$PUBLIC_HTTPS_ENABLED" == "true" ]] && desired_mode=HTTPS
@@ -91,10 +104,11 @@ if [[ "$state" == "HTTP" || "$state" == "HTTPS" ]]; then
     persist_transport_state ""
     if [[ -n "$configured_transition_state" ]]; then
       unset PUBLIC_TRANSPORT_STATE
-      public_transport_prepare "$deploy_dir" "$runtime_file" "$deploy_dir/compose.https.yaml" "$deploy_dir/compose.drain.yaml"
+      public_transport_prepare "$deploy_dir" "$runtime_file"
       stable_command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
       public_transport_compose_args stable_command
-      "${stable_command[@]}" up -d frontend
+      public_transport_install_certificates
+      "${stable_command[@]}" up -d --no-deps --wait --wait-timeout 120 frontend
     fi
     echo "公开传输已经稳定：${state}"
     exit 0
@@ -123,18 +137,19 @@ if [[ "$state" == "ENABLING_HTTPS" || "$state" == "DISABLING_HTTPS" ]]; then
   persist_transport_state "$state"
 fi
 
-# Re-derive Compose overlays from the persisted state. During downgrade this
+# Re-derive gateway environment from the persisted state. During downgrade this
 # validates and mounts the still-required certificate even though the target
 # PUBLIC_HTTPS_ENABLED value is false.
 export PUBLIC_TRANSPORT_STATE="$state"
-public_transport_prepare "$deploy_dir" "$runtime_file" "$deploy_dir/compose.https.yaml" "$deploy_dir/compose.drain.yaml"
+public_transport_prepare "$deploy_dir" "$runtime_file"
 command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
 public_transport_compose_args command
+public_transport_install_certificates
 if [[ "$state" == "ENABLING_HTTPS" ]]; then
   # Bring up TLS first while the old HTTP-configured API/Worker keep running.
   # Starting target-configured workers before the database commit would make
   # their HTTPS transport gate reject the still-HTTP Environment records.
-  "${command[@]}" up -d --wait frontend
+  "${command[@]}" up -d --no-deps --wait --wait-timeout 120 frontend
   "${command[@]}" exec -T frontend nginx -t
 else
   # Downgrade services must issue non-Secure replacement cookies throughout
@@ -145,13 +160,13 @@ else
   drain_targets=(frontend)
   while IFS= read -r running_service; do
     case "$running_service" in
-      platform-api|contract-api|customer-api|portal-api|project-api|settlement-api|dashboard-api|keycloak)
+      platform-api|contract-api|customer-api|portal-api|project-api|settlement-api|data-analysis-api|keycloak)
         drain_targets+=("$running_service")
         ;;
     esac
-  done < <("${command[@]}" ps --services --status running)
+  done <<<"$(running_enabled_services)"
   mapfile -t drain_targets < <(printf '%s\n' "${drain_targets[@]}" | awk '!seen[$0]++')
-  "${command[@]}" up -d "${drain_targets[@]}"
+  "${command[@]}" up -d --no-deps --wait --wait-timeout 120 "${drain_targets[@]}"
 fi
 
 if [[ "$state" == "DISABLING_HTTPS" ]]; then
@@ -168,10 +183,15 @@ fi
 coordinator commit --transition-id "$transition_id"
 persist_transport_state ""
 
-# Final stable-mode recreation removes the temporary dual-protocol overlay.
+# Switch only running, enabled services; never start an unadopted subsystem.
 unset PUBLIC_TRANSPORT_STATE
-public_transport_prepare "$deploy_dir" "$runtime_file" "$deploy_dir/compose.https.yaml" "$deploy_dir/compose.drain.yaml"
+public_transport_prepare "$deploy_dir" "$runtime_file"
 final_command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
 public_transport_compose_args final_command
-"${final_command[@]}" up -d
+public_transport_install_certificates
+running_services="$(running_enabled_services)"
+mapfile -t final_targets < <(printf '%s\n' "$running_services" | sed '/^$/d')
+if ((${#final_targets[@]})); then
+  "${final_command[@]}" up -d --no-deps --wait --wait-timeout 120 "${final_targets[@]}"
+fi
 echo "公开传输切换完成：${desired_mode}"

@@ -386,7 +386,8 @@ services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0
     environment:
-      LOG_LEVEL: warn
+      # HAProxy 3.4.x（v0.5.0 浮动标签新构建）不再接受 'warn' 日志级别；'warning' 新旧通用。
+      LOG_LEVEL: warning
       POST: "1"        # compose up/down/run 需要非 GET 方法
       CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
       EXEC: "1"        # docker exec（frontend nginx -t、nginx -s reload）
@@ -1099,7 +1100,7 @@ services:
     environment:
       PUBLIC_HTTPS_ENABLED: "false"
       PUBLIC_PLATFORM_HOST: ${PUBLIC_PLATFORM_HOST:-localhost}
-      PUBLIC_SSO_HOST: ${PUBLIC_SSO_HOST:-sso.localhost}
+      PUBLIC_SSO_HOST: ${PUBLIC_FRONTEND_SSO_HOST:-${PUBLIC_SSO_HOST:-sso.localhost}}
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTP_PORT:-${FRONTEND_PORT:-18082}}:80"
     # 固定地址（子网高位，避开自动分配顺序）供 APP_TRUSTED_PROXIES 精确信任：
@@ -1129,13 +1130,12 @@ services:
       retries: 30
 
   file-gateway:
-    image: ${PLATFORM_IMAGE:?PLATFORM_IMAGE must be set}
+    image: ${FILE_GATEWAY_IMAGE:?FILE_GATEWAY_IMAGE must be set}
     # SEC-N10d：补 env_file——file-gateway 与平台服务同源读取 0600 运行环境文件，
     # 使部署脚本注入的 FILE_GATEWAY_* 配置直达容器（environment 显式键仍优先生效）。
     # 上线顺序遵循文件头部说明：先 prepare/deploy 再 up。
     env_file:
       - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
-    command: ["./file-gateway"]
     environment:
       FILE_GATEWAY_HTTP_ADDRESS: :8086
       # 默认根据同一 Compose 文件中的数据库凭据组装 DSN；如生产环境使用外部

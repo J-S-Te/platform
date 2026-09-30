@@ -47,6 +47,8 @@ jobs:
             exit 1
           fi
           bash -n deploy/production/bin/*.sh
+          python3 deploy/production/tests/test-compose-blocks.py
+          bash deploy/production/tests/test-key-init.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh
           # 每次切换不可变镜像都必须重建业务容器，并核对容器最终使用的 digest，
@@ -55,11 +57,6 @@ jobs:
           grep -q -- 'verify_service_image' deploy/production/bin/deploy-service.sh
           grep -q -- '--force-recreate' deploy/production/bin/deploy-customer-opportunity.sh
           grep -q -- 'verify_service_image' deploy/production/bin/deploy-customer-opportunity.sh
-          # application 网络被多个独立 CI/子系统长期共享，任何单服务发布都不得
-          # 取得其删除权；否则网络配置漂移会先停数据库再因 active endpoints 失败。
-          grep -A8 '^  application:' deploy/production/compose.yaml | grep -q 'external: true'
-          grep -A8 '^  application:' deploy/production/compose.frontend.yaml | grep -q 'external: true'
-          grep -q 'ensure_application_network' deploy/production/bin/deploy-service.sh
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' deploy/production; then
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1
@@ -71,6 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_ref: ${{ steps.result.outputs.image_ref }}
+      file_gateway_image_ref: ${{ steps.result.outputs.file_gateway_image_ref }}
     steps:
       - uses: actions/checkout@v4
       - id: vars
@@ -107,9 +105,24 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
+      - id: file_gateway_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: file-gateway-runtime
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.vars.outputs.image }}:file-gateway-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: type=gha,scope=file-gateway
+          cache-to: type=gha,mode=max,scope=file-gateway
+          provenance: true
+          sbom: true
       - id: result
         shell: bash
-        run: echo "image_ref=${{ steps.vars.outputs.deploy_image }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "image_ref=${{ steps.vars.outputs.deploy_image }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          echo "file_gateway_image_ref=${{ steps.vars.outputs.deploy_image }}@${{ steps.file_gateway_build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   deploy:
     # main 分支构建镜像成功后必须部署；部署凭据缺失时应直接失败，不能静默跳过。
@@ -129,7 +142,7 @@ jobs:
         shell: bash
         run: |
           changed="$(git diff --name-only HEAD^ HEAD || true)"
-          if grep -E '^\.github/workflows/ci-cd\.yml$' <<<"$changed" >/dev/null             || { grep -E '^(cmd|internal|migrations)/|^(Dockerfile|go\.mod|go\.sum|docker-entrypoint\.sh)$|^scripts/sync-contract-catalog\.sh$' <<<"$changed" | grep -vE '_test\.go$' | grep -q .; }; then
+          if grep -E '^\.github/workflows/ci-cd\.yml$' <<<"$changed" >/dev/null             || { grep -E '^(cmd|internal|migrations)/|^(Dockerfile|go\.mod|go\.sum|docker-entrypoint\.sh)$|^scripts/' <<<"$changed" | grep -vE '_test\.go$' | grep -q .; }; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
@@ -150,14 +163,17 @@ jobs:
           : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
           : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
           DEPLOY_PORT="${DEPLOY_PORT:-22}"
-          DEPLOY_PATH="${DEPLOY_PATH:-/opt/basic-platform}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           # 直接把部署包流式传给远端 tar，避免在远端 /tmp 再落一份完整压缩包。
           printf -v install_command 'deploy_path=%q; install -d -m 750 "$deploy_path" && install -d -m 700 "$deploy_path/runtime" && exec 9>"$deploy_path/runtime/.deploy.lock" && flock -w 900 9 && tar -xzf - -C "$deploy_path" && if test -d "$deploy_path/subsystems.d"; then find "$deploy_path/subsystems.d" -maxdepth 1 -type f \( -name "*-dev.yaml" -o -name "*-dev.yml" \) -delete; fi && chmod 750 "$deploy_path/bin/deploy-service.sh" "$deploy_path/bin/deploy-customer-opportunity.sh" && if test ! -f "$deploy_path/runtime/contract.env"; then install -m 600 "$deploy_path/subsystem-templates/contract.env.example" "$deploy_path/runtime/contract.env"; fi && if test ! -f "$deploy_path/runtime/customer.env"; then install -m 600 "$deploy_path/subsystem-templates/customer.env.example" "$deploy_path/runtime/customer.env"; fi && if test ! -f "$deploy_path/runtime/portal.env"; then install -m 600 "$deploy_path/subsystem-templates/portal.env.example" "$deploy_path/runtime/portal.env"; fi && if test ! -f "$deploy_path/runtime/project.env"; then install -m 600 "$deploy_path/subsystem-templates/project.env.example" "$deploy_path/runtime/project.env"; fi && if test ! -f "$deploy_path/runtime/data-analysis.env"; then install -m 600 "$deploy_path/subsystem-templates/data-analysis.env.example" "$deploy_path/runtime/data-analysis.env"; fi && if test -f "$deploy_path/.env"; then configured_path=$(awk -F= '\''$1 == "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT" {print substr($0, index($0,"=")+1); exit}'\'' "$deploy_path/.env"); test -z "$configured_path" || test "$configured_path" = "$deploy_path" || { echo "SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT 与 DEPLOY_PATH 不一致" >&2; exit 1; }; fi' "$DEPLOY_PATH"
-          tar -C deploy/production -czf - . | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$install_command"
+          # 保留服务器自行注释的部署范围，新模板交付为 .dist 待合并。
+          tar --transform='s#^\./docker-compose.yml$#./docker-compose.yml.dist#' -C deploy/production -czf - . | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$install_command"
+          printf -v compose_install 'cd %q && if test ! -f docker-compose.yml; then install -m 640 docker-compose.yml.dist docker-compose.yml; fi' "$DEPLOY_PATH"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$compose_install"
       - name: Apply test-server placeholder database credentials switch
         # 当前部署环境为测试服务器（environment: test）。每次部署都会把占位凭据
         # 开关写入服务器 .env 并重建 Agent，让测试接入不再被数据库密码阻塞。
@@ -179,7 +195,7 @@ jobs:
           : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
           : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
           DEPLOY_PORT="${DEPLOY_PORT:-22}"
-          DEPLOY_PATH="${DEPLOY_PATH:-/opt/basic-platform}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
@@ -206,7 +222,7 @@ jobs:
           : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
           : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
           DEPLOY_PORT="${DEPLOY_PORT:-22}"
-          DEPLOY_PATH="${DEPLOY_PATH:-/opt/basic-platform}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
@@ -215,7 +231,7 @@ jobs:
           # 拼进 ssh 命令参数后被本地 shell、ssh 和远端 shell 多次解析。
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd $(printf '%q' "$DEPLOY_PATH") && bash -s" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
-          compose=(docker compose --env-file .env --env-file .release.env -f compose.yaml)
+          compose=(docker compose --env-file .env --env-file .release.env -f docker-compose.yml)
           # 资产同步类提交不一定会更新 .release.env。此时复用当前健康 Agent 的
           # 不可变镜像，避免 Compose 把 PLATFORM_IMAGE 展开为空并阻断清单重载。
           subsystem_id="$("${compose[@]}" ps -q subsystem-provisioner || true)"
@@ -251,6 +267,7 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           IMAGE_REF: ${{ needs.image.outputs.image_ref }}
+          FILE_GATEWAY_IMAGE_REF: ${{ needs.image.outputs.file_gateway_image_ref }}
         run: |
           set -Eeuo pipefail
           : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
@@ -258,10 +275,10 @@ jobs:
           : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
           : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
           DEPLOY_PORT="${DEPLOY_PORT:-22}"
-          DEPLOY_PATH="${DEPLOY_PATH:-/opt/basic-platform}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          printf -v remote_command 'cd %q && ./bin/deploy-service.sh platform %q' "$DEPLOY_PATH" "$IMAGE_REF"
+          printf -v remote_command 'cd %q && ./bin/deploy-service.sh platform %q %q' "$DEPLOY_PATH" "$IMAGE_REF" "$FILE_GATEWAY_IMAGE_REF"
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"

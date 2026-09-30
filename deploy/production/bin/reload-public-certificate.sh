@@ -5,7 +5,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 deploy_dir="$(cd -- "$script_dir/.." && pwd)"
 runtime_file="$deploy_dir/.env"
 release_file="$deploy_dir/.release.env"
-frontend_compose_file="$deploy_dir/compose.frontend.yaml"
+frontend_compose_file="$deploy_dir/docker-compose.yml"
 
 # shellcheck source=public-transport.sh
 source "$script_dir/public-transport.sh"
@@ -25,6 +25,7 @@ command=(docker compose
   --env-file "$runtime_file"
   --env-file "$release_file")
 public_transport_compose_args command
+public_transport_install_certificates
 
 # 重新创建单个网关容器，让 Certbot 更新后的符号链接目标以新的只读 bind mount
 # 进入容器。业务 API、Worker、数据库和 Keycloak 均不重启。

@@ -1,4 +1,5 @@
 **
+!Dockerfile
 !cmd/
 !cmd/**
 !internal/
@@ -10,3 +11,16 @@
 !docker-entrypoint.sh
 !scripts/
 !scripts/sync-contract-catalog.sh
+!scripts/sync-settlement-catalog.sh
+!scripts/sync-project-catalog.sh
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.jks
+**/*.bak
+**/*.backup
+**/*.dump
+**/dump*.sql
+**/.DS_Store

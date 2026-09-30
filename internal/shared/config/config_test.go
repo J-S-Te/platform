@@ -223,14 +223,24 @@ func productionInsecureCookieConfig(environment string) Config {
 	}
 }
 
-func TestValidateRejectsInsecureSessionCookieInProduction(t *testing.T) {
+func TestValidateRejectsInsecureSessionCookieInProductionOverHTTPS(t *testing.T) {
 	cfg := productionInsecureCookieConfig("production")
+	cfg.HTTP.PublicBaseURL = "https://platform.internal"
+	cfg.Auth.OIDCIssuer = "https://platform.internal"
+	cfg.CORSOrigins = []string{"https://platform.internal"}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("Validate() error = nil, want AUTH_SESSION_COOKIE_SECURE=false rejected in production")
 	}
 	if !strings.Contains(err.Error(), "AUTH_SESSION_COOKIE_SECURE") {
 		t.Fatalf("Validate() error = %v, want mention AUTH_SESSION_COOKIE_SECURE", err)
+	}
+}
+
+func TestValidateAllowsInsecureSessionCookieForExplicitHTTPProduction(t *testing.T) {
+	cfg := productionInsecureCookieConfig("production")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want explicit http:// production origin to allow an insecure cookie", err)
 	}
 }
 

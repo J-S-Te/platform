@@ -89,12 +89,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	handler, err := filehttp.NewHandler(files, jobs, slog.Default())
+	handler, err := filehttp.NewHandler(files, jobs, slog.Default(), database)
 	if err != nil {
 		return err
 	}
 	idGenerator := ulid.Generator{}
-	v2Handler, err := filehttp.NewUploadV2Handler(database, files, idGenerator.New)
+	v2Handler, err := filehttp.NewUploadV2Handler(database, files, idGenerator.New, slog.Default())
 	if err != nil {
 		return err
 	}

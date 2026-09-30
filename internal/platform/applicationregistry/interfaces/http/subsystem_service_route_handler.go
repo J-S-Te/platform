@@ -101,6 +101,20 @@ func (handler *SubsystemServiceRouteHandler) Resolve(writer stdhttp.ResponseWrit
 		httpresponse.WriteError(writer, request, stdhttp.StatusBadRequest, httperror.Validation)
 		return
 	}
+	// 逐应用授权复核（AUD-2026-012）：Resolve 与 Proxy 暴露同样的内网 UpstreamURL/端口，
+	// 仅有平台目录读权限（platform:application:read）不能枚举任意子系统的内网地址，
+	// 必须与 Proxy 采用同一应用授权边界。
+	if handler.authorizer != nil {
+		granted, grantErr := handler.authorizer.HasApplicationGrant(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode)
+		if grantErr != nil {
+			httpresponse.WriteError(writer, request, stdhttp.StatusInternalServerError, httperror.Internal)
+			return
+		}
+		if !granted {
+			httpresponse.WriteError(writer, request, stdhttp.StatusForbidden, httperror.Forbidden)
+			return
+		}
+	}
 	instances, err := handler.reader.ListSubsystemServiceInstances(request.Context(), principal.Tenant.ID, applicationCode, environment)
 	if err != nil {
 		httpresponse.WriteError(writer, request, stdhttp.StatusInternalServerError, httperror.Internal)
@@ -211,6 +225,15 @@ func (handler *SubsystemServiceRouteHandler) Proxy(writer stdhttp.ResponseWriter
 	proxy.ErrorHandler = func(stdhttp.ResponseWriter, *stdhttp.Request, error) {
 		httpresponse.WriteError(writer, request, stdhttp.StatusBadGateway, httperror.DependencyUnavailable)
 	}
+	// 安全审查 AUD-2026-011：剥离上游响应中的 Set-Cookie 与 hop-by-hop 头。被接管的
+	// 子系统可借 Set-Cookie 对平台源做 cookie tossing（覆盖/追加平台会话 Cookie）；
+	// Connection 及其指名的连接级头、Keep-Alive/Transfer-Encoding/Upgrade/Proxy-* 属
+	// hop-by-hop 头（RFC 9110 §7.6.1），必须逐跳终结而不能端到端透传。其余响应头
+	// （Content-Type、缓存与业务自定义头等）原样保留。
+	proxy.ModifyResponse = func(outgoing *stdhttp.Response) error {
+		stripSubsystemProxyResponseHeaders(outgoing.Header)
+		return nil
+	}
 	proxy.ServeHTTP(writer, request)
 }
 
@@ -218,6 +241,31 @@ func (handler *SubsystemServiceRouteHandler) Proxy(writer stdhttp.ResponseWriter
 // 参数 header 会原地修改；函数无返回值，未列入敏感清单的内容协商和追踪头保持不变。
 func stripSensitiveSubsystemProxyRequestHeaders(header stdhttp.Header) {
 	for _, name := range sensitiveSubsystemProxyRequestHeaders {
+		header.Del(name)
+	}
+}
+
+// subsystemProxyStrippedResponseHeaders 列出不得从上游子系统透传给平台客户端的响应头。
+var subsystemProxyStrippedResponseHeaders = []string{
+	"Set-Cookie",
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authentication-Info",
+	"Proxy-Authorization",
+	"Proxy-Connection",
+	"Proxy-Features",
+	"Proxy-Instruction",
+	"TE",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// stripSubsystemProxyResponseHeaders 原地删除上游响应中的 Set-Cookie 与 hop-by-hop 头，
+// 未列入清单的头保持不变。
+func stripSubsystemProxyResponseHeaders(header stdhttp.Header) {
+	for _, name := range subsystemProxyStrippedResponseHeaders {
 		header.Del(name)
 	}
 }

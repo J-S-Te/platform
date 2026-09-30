@@ -102,6 +102,30 @@ func TestUnixSocketSubsystemProvisionerDisabled(t *testing.T) {
 	}
 }
 
+func TestDisabledProductionProvisionerDoesNotAdvertiseUnverifiedTargets(t *testing.T) {
+	t.Parallel()
+	client, err := NewUnixSocketSubsystemProvisioner(false, "", time.Second, application.SubsystemProvisioningCapabilities{
+		Enabled: false, Mode: "production",
+		SupportedApplicationCodes: []string{"contract_management"},
+		SupportedEnvironments:     []string{"prod"},
+		Targets: []application.SubsystemProvisioningTarget{{
+			ApplicationCode: "contract_management", Environment: "prod",
+		}},
+		DefaultApplicationCode: "contract_management",
+		DefaultEnvironment:     "prod",
+	})
+	if err != nil {
+		t.Fatalf("construct disabled production client: %v", err)
+	}
+	capabilities, err := client.AvailableCapabilities(context.Background())
+	if err != nil {
+		t.Fatalf("available capabilities: %v", err)
+	}
+	if capabilities.Mode != "production" || capabilities.Enabled || len(capabilities.Targets) != 0 || len(capabilities.SupportedApplicationCodes) != 0 || capabilities.DefaultApplicationCode != "" {
+		t.Fatalf("disabled production capabilities = %#v", capabilities)
+	}
+}
+
 func TestNormalizedProvisioningRequestIDRejectsLogInjection(t *testing.T) {
 	t.Parallel()
 	if got := normalizedProvisioningRequestID(" 01kz42mpyy9168fkfpbxvtx677 "); got != "01KZ42MPYY9168FKFPBXVTX677" {
@@ -137,6 +161,46 @@ func TestUnixSocketSubsystemProvisionerReportsProductionCapabilities(t *testing.
 	}
 	if capabilities.DefaultApplicationCode != "billing_management" || capabilities.DefaultEnvironment != "dev" || capabilities.DefaultPathPrefix != "/billing" {
 		t.Fatalf("normalized defaults = %#v", capabilities)
+	}
+}
+
+func TestUnixSocketSubsystemProvisionerReadsLiveAvailableCapabilities(t *testing.T) {
+	t.Parallel()
+	socketDirectory, err := os.MkdirTemp("/tmp", "bp-provisioner-capabilities-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socketPath := filepath.Join(socketDirectory, "provisioner.sock")
+	executor := &recordingSubsystemProvisioner{availableCapabilities: application.SubsystemProvisioningCapabilities{
+		Enabled: true, Mode: "production",
+		SupportedApplicationCodes: []string{"customer_and_opportunity"},
+		SupportedEnvironments:     []string{"prod"},
+		Targets: []application.SubsystemProvisioningTarget{{
+			ApplicationCode: "customer_and_opportunity", Environment: "prod",
+		}},
+	}}
+	serverContext, cancelServer := context.WithCancel(context.Background())
+	t.Cleanup(cancelServer)
+	go func() { _ = RunSubsystemProvisioningServer(serverContext, socketPath, executor) }()
+	waitForProvisioningSocket(t, socketPath)
+	client, err := NewUnixSocketSubsystemProvisioner(true, socketPath, 2*time.Second, application.SubsystemProvisioningCapabilities{
+		Enabled: true, Mode: "production",
+		SupportedApplicationCodes: []string{"contract_management", "customer_and_opportunity"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	capabilities, err := client.AvailableCapabilities(context.Background())
+	if err != nil {
+		t.Fatalf("read live capabilities: %v", err)
+	}
+	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"customer_and_opportunity"}) {
+		t.Fatalf("live capabilities = %#v", capabilities)
+	}
+	if static := client.Capabilities().SupportedApplicationCodes; !reflect.DeepEqual(static, []string{"contract_management", "customer_and_opportunity"}) {
+		t.Fatalf("static security policy was mutated: %#v", static)
 	}
 }
 
@@ -230,11 +294,17 @@ type recordingSubsystemProvisioner struct {
 	// production manifest-checksum guard without starting a real production executor.
 	mode string
 	// accessOrigin records the origin forwarded by the server for SEC-F1 injection tests.
-	accessOrigin string
+	accessOrigin             string
+	availableCapabilities    application.SubsystemProvisioningCapabilities
+	availableCapabilitiesErr error
 }
 
 func (provisioner *recordingSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
 	return application.SubsystemProvisioningCapabilities{Mode: provisioner.mode}
+}
+
+func (provisioner *recordingSubsystemProvisioner) AvailableCapabilities(context.Context) (application.SubsystemProvisioningCapabilities, error) {
+	return provisioner.availableCapabilities, provisioner.availableCapabilitiesErr
 }
 
 func (provisioner *recordingSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {

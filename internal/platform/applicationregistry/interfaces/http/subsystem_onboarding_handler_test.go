@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	stdhttp "net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -123,7 +124,6 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	if err != nil {
 		t.Fatalf("construct handler: %v", err)
 	}
-
 	requestBody := `{"application_code":"contract_management","application_name":"合同管理系统","environment":"dev","public_base_url":"http://localhost:8081","upstream_url":"http://contract-api:8081","path_prefix":"/contract_management","client_type":"confidential"}`
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-onboarding", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
@@ -305,7 +305,7 @@ func TestOnboardSubsystemProvisioningFailureReturnsActionableSafeDetail(t *testi
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"}}))
 	response := httptest.NewRecorder()
 	handler.OnboardSubsystem(response, request)
-	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "compose.yaml") || strings.Contains(response.Body.String(), "/Users/") {
+	if response.Code != stdhttp.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "docker-compose.yml") || strings.Contains(response.Body.String(), "/Users/") {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
 	if !strings.Contains(response.Body.String(), "尚未创建应用环境") || strings.Contains(response.Body.String(), "点击“重试”") {
@@ -512,9 +512,20 @@ type recordingHTTPSubsystemProvisioner struct {
 	preflightErr   error
 	provisionErr   error
 	updateErr      error
+	update         func(context.Context) error
 	teardownErr    error
 	candidates     []application.SubsystemDiscoveryCandidate
 	discoveryErr   error
+}
+
+type liveCapabilityHTTPSubsystemProvisioner struct {
+	*recordingHTTPSubsystemProvisioner
+	available    application.SubsystemProvisioningCapabilities
+	availableErr error
+}
+
+func (provisioner *liveCapabilityHTTPSubsystemProvisioner) AvailableCapabilities(context.Context) (application.SubsystemProvisioningCapabilities, error) {
+	return provisioner.available, provisioner.availableErr
 }
 
 func (provisioner *recordingHTTPSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
@@ -532,8 +543,11 @@ func (provisioner *recordingHTTPSubsystemProvisioner) Provision(_ context.Contex
 	return provisioner.provisionErr
 }
 
-func (provisioner *recordingHTTPSubsystemProvisioner) Update(_ context.Context, input application.SubsystemProvisioningInput) error {
+func (provisioner *recordingHTTPSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	provisioner.input = input
+	if provisioner.update != nil {
+		return provisioner.update(ctx)
+	}
 	return provisioner.updateErr
 }
 
@@ -675,6 +689,59 @@ func TestGetSubsystemCapabilitiesReturnsSafeProductionPolicy(t *testing.T) {
 	}
 }
 
+func TestGetSubsystemCapabilitiesUsesLivePreparedTargets(t *testing.T) {
+	t.Parallel()
+	static := application.SubsystemProvisioningCapabilities{
+		Enabled: true, Mode: "production",
+		SupportedApplicationCodes: []string{"contract_management", "customer_and_opportunity"},
+	}
+	available := application.SubsystemProvisioningCapabilities{
+		Enabled: true, Mode: "production",
+		SupportedApplicationCodes: []string{"customer_and_opportunity"},
+		SupportedEnvironments:     []string{"prod"},
+		Targets: []application.SubsystemProvisioningTarget{{
+			ApplicationCode: "customer_and_opportunity", ApplicationName: "客户与商机管理系统", Environment: "prod",
+		}},
+	}
+	provisioner := &liveCapabilityHTTPSubsystemProvisioner{
+		recordingHTTPSubsystemProvisioner: &recordingHTTPSubsystemProvisioner{capabilities: static},
+		available:                         available,
+	}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"https://portal.example.com/", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-capabilities", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"},
+		User:   authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.GetSubsystemCapabilities(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			SupportedApplicationCodes []string `json:"supported_application_codes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !reflect.DeepEqual(envelope.Data.SupportedApplicationCodes, []string{"customer_and_opportunity"}) {
+		t.Fatalf("available codes = %#v", envelope.Data.SupportedApplicationCodes)
+	}
+	if strings.Contains(response.Body.String(), "contract_management") {
+		t.Fatalf("unprepared contract target leaked into response: %s", response.Body.String())
+	}
+}
+
 func TestSubsystemProvisioningNextActionCoversProductionManifestFailures(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct {
@@ -783,6 +850,7 @@ func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct handler: %v", err)
 	}
+	handler.serviceCredentials = &serviceCredentialManagerStub{}
 	requestBody := `{"application_code":"contract_management","environment":"prod"}`
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(requestBody))
 	request.Header.Set("Content-Type", "application/json")
@@ -799,10 +867,11 @@ func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	if provisioner.input.ApplicationCode != "contract_management" || provisioner.input.Environment != "prod" {
 		t.Fatalf("update input = %#v, want minimal {contract_management, prod}", provisioner.input)
 	}
-	// Update MUST NOT carry the OAuth secret forward: a re-run of .env.local would need the
-	// bcrypt-hashed plaintext, which the service has not retained.
-	if provisioner.input.ClientSecret != "" || provisioner.input.CatalogPublisherClientSecret != "" {
-		t.Fatalf("update must not carry client secrets: %#v", provisioner.input)
+	// The browser OAuth secret is never recoverable or replayed. The catalog
+	// publisher is a machine credential and controlled updates intentionally mint
+	// a fresh delivery secret because the production runtime cannot start without it.
+	if provisioner.input.ClientSecret != "" || provisioner.input.CatalogPublisherClientSecret != "new-secret" {
+		t.Fatalf("update used unexpected client secrets: %#v", provisioner.input)
 	}
 }
 
@@ -922,6 +991,7 @@ type recordedDeploymentTransition struct {
 
 type recordingSubsystemDeploymentStateStore struct {
 	transitions        []recordedDeploymentTransition
+	transitionCtxErrs  []error
 	state              application.SubsystemDeploymentState
 	initialAccessMarks int
 	initialAccessUser  string
@@ -930,11 +1000,12 @@ type recordingSubsystemDeploymentStateStore struct {
 	contextErr         error
 }
 
-func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(_ context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
+func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
 	store.transitions = append(store.transitions, recordedDeploymentTransition{
 		tenantID: tenantID, applicationCode: applicationCode, environment: environment,
 		status: status, operation: operation, errorCode: errorCode, errorMessage: errorMessage,
 	})
+	store.transitionCtxErrs = append(store.transitionCtxErrs, ctx.Err())
 	return store.transitionErr
 }
 
@@ -1000,11 +1071,49 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	}
 }
 
+func TestUpdateSubsystemCompletesPendingInitialAccess(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
+		ApplicationID: "app-1", EnvironmentID: "env-1", InitialAdminUserID: "01K10B00000000000000000001",
+	}}
+	access := &recordingSubsystemAccessManager{roleCode: "portal_super_admin"}
+	provisioner := &recordingHTTPSubsystemProvisioner{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, access,
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	handler.serviceCredentials = &serviceCredentialManagerStub{}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(`{"application_code":"customer_portal","environment":"prod"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10E00000000000000000001"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if access.applicationCode != "customer_portal" || access.userID != "01K10B00000000000000000001" || access.operatorID != "01K10E00000000000000000001" {
+		t.Fatalf("pending initial access was not assigned to the stored administrator: %#v", access)
+	}
+	if stateStore.initialAccessMarks != 1 || stateStore.initialAccessUser != "01K10B00000000000000000001" {
+		t.Fatalf("initial access completion was not persisted: marks=%d user=%q", stateStore.initialAccessMarks, stateStore.initialAccessUser)
+	}
+	if len(stateStore.transitions) != 2 || stateStore.transitions[0].operation != "UPDATE" || stateStore.transitions[1].status != application.SubsystemDeploymentStatusReady {
+		t.Fatalf("transitions = %#v, want UPDATE -> READY", stateStore.transitions)
+	}
+}
+
 func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T) {
 	t.Parallel()
 	assignedAt := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
 	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{
-		ApplicationID: "app-1", InitialAdminUserID: "01K10D00000000000000000001", InitialAccessAssignedAt: &assignedAt,
+		ApplicationID: "app-1", EnvironmentID: "env-1", InitialAdminUserID: "01K10D00000000000000000001", InitialAccessAssignedAt: &assignedAt,
 	}}
 	access := &recordingSubsystemAccessManager{roleCode: "admin"}
 	handler, err := NewSubsystemOnboardingHandler(
@@ -1014,6 +1123,7 @@ func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T)
 	if err != nil {
 		t.Fatalf("construct handler: %v", err)
 	}
+	handler.serviceCredentials = &serviceCredentialManagerStub{}
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-retry", bytes.NewBufferString(`{"application_code":"contract_management","environment":"prod"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
@@ -1051,15 +1161,80 @@ func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 
 	handler.UpdateSubsystem(response, request)
 
-	if response.Code != stdhttp.StatusServiceUnavailable {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
 	if len(stateStore.transitions) != 2 || stateStore.transitions[1].status != application.SubsystemDeploymentStatusFailed {
 		t.Fatalf("transitions = %#v", stateStore.transitions)
 	}
 	failed := stateStore.transitions[1]
 	if failed.errorCode != "DEPLOYMENT_AGENT_FAILED" || failed.errorMessage != "部署 Agent 执行失败" {
 		t.Fatalf("unsafe or unexpected failure summary = %#v", failed)
+	}
+}
+
+func TestUpdateSubsystemPersistsFailureAfterRequestContextCanceled(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", InitialAdminUserID: "01K10B00000000000000000001"}}
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	provisioner := &recordingHTTPSubsystemProvisioner{update: func(context.Context) error {
+		cancelRequest()
+		return context.Canceled
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/subsystem-update", bytes.NewBufferString(`{"application_code":"customer_management","environment":"dev"}`))
+	request.Header.Set("Content-Type", "application/json")
+	requestCtx = authctx.WithPrincipal(requestCtx, authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "01K10A00000000000000000001"}, User: authctx.ReferenceName{ID: "01K10B00000000000000000001"},
+	})
+	request = request.WithContext(requestCtx)
+	response := httptest.NewRecorder()
+
+	handler.UpdateSubsystem(response, request)
+
+	if requestCtx.Err() != context.Canceled {
+		t.Fatalf("request context error = %v, want canceled", requestCtx.Err())
+	}
+	if len(stateStore.transitions) != 2 || stateStore.transitions[1].status != application.SubsystemDeploymentStatusFailed {
+		t.Fatalf("transitions = %#v", stateStore.transitions)
+	}
+	if len(stateStore.transitionCtxErrs) != 2 || stateStore.transitionCtxErrs[1] != nil {
+		t.Fatalf("failure transition contexts = %#v, want a live detached context", stateStore.transitionCtxErrs)
+	}
+}
+
+func TestRecoverStaleSubsystemDeploymentPersistsFailureWithCanceledContext(t *testing.T) {
+	t.Parallel()
+	stateStore := &recordingSubsystemDeploymentStateStore{}
+	handler, err := NewSubsystemOnboardingHandler(
+		&stubSubsystemOnboardingService{}, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)), stateStore,
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now().UTC().Add(-subsystemDeploymentStaleAfter - time.Minute)
+	state := application.SubsystemDeploymentState{
+		TenantID: "tenant-1", ApplicationCode: "data_analysis", Environment: "prod",
+		Status: application.SubsystemDeploymentStatusUpdating, Operation: "UPDATE", StartedAt: &startedAt,
+	}
+
+	recovered := handler.recoverStaleSubsystemDeployment(ctx, state)
+
+	if recovered.Status != application.SubsystemDeploymentStatusFailed {
+		t.Fatalf("recovered status = %q, want failed", recovered.Status)
+	}
+	if len(stateStore.transitions) != 1 || stateStore.transitions[0].status != application.SubsystemDeploymentStatusFailed {
+		t.Fatalf("transitions = %#v", stateStore.transitions)
+	}
+	if len(stateStore.transitionCtxErrs) != 1 || stateStore.transitionCtxErrs[0] != nil {
+		t.Fatalf("recovery transition contexts = %#v, want a live detached context", stateStore.transitionCtxErrs)
 	}
 }
 
@@ -1318,19 +1493,37 @@ func TestUpdateServiceCredentialRequirementsRedeliverContractCRMReference(t *tes
 	}
 }
 
+func TestUpdateServiceCredentialRequirementsRedeliverPortalAuditPublisher(t *testing.T) {
+	found := false
+	for _, requirement := range updateServiceCredentialRequirements("customer_portal") {
+		if requirement.purpose != application.ServiceCredentialAuditIngest {
+			continue
+		}
+		found = true
+		if requirement.suffix != "audit-publisher" || requirement.scope != "audit.ingest" || !requirement.rotate {
+			t.Fatalf("portal audit requirement = %#v", requirement)
+		}
+	}
+	if !found {
+		t.Fatal("customer_portal controlled adoption must redeliver the audit publisher credential")
+	}
+}
+
 func TestCatalogPublisherCredentialRequiredForStartupCatalogPublishers(t *testing.T) {
 	t.Parallel()
 	for _, applicationCode := range []string{
+		"contract_management",
 		"customer_and_opportunity",
 		"customer_portal",
-		"settlement",
 		"data_analysis",
+		"project_management",
+		"settlement",
 	} {
 		if !requiresCatalogPublisherCredential(applicationCode) {
 			t.Errorf("%s must receive a fresh catalog publisher credential during controlled lifecycle operations", applicationCode)
 		}
 	}
-	for _, applicationCode := range []string{"platform", "contract_management", "project_management"} {
+	for _, applicationCode := range []string{"platform"} {
 		if requiresCatalogPublisherCredential(applicationCode) {
 			t.Errorf("%s does not publish its catalog during controlled startup", applicationCode)
 		}
@@ -1406,6 +1599,7 @@ func TestUpdateSubsystemAllowsReviewedProductionTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct handler: %v", err)
 	}
+	handler.serviceCredentials = &serviceCredentialManagerStub{}
 	request := lifecycletestRequest(t, "/api/v1/subsystem-update", `{"application_code":"contract_management","environment":"prod"}`)
 	response := httptest.NewRecorder()
 

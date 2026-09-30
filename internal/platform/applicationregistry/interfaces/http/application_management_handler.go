@@ -422,7 +422,7 @@ func (handler *ManagementHandler) PurgeEnvironment(writer http.ResponseWriter, r
 		handler.writeError(writer, request, err)
 		return
 	}
-	handler.logger.Warn("application environment permanently purged", "tenant_id", principal.Tenant.ID, "application_id", removed.ApplicationID, "environment_id", removed.ID, "operator_id", principal.User.ID)
+	handler.logger.Warn("application environment permanently purged", "tenant_id", principal.Tenant.ID, "application_id", removed.ApplicationID, "environment_id", removed.ID, "operator_id", principal.User.ID, "retention_approval_id", strings.TrimSpace(payload.RetentionApprovalID))
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境及关联数据已永久清理", environmentToResponse(removed))
 }
 
@@ -444,6 +444,10 @@ func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request
 	case errors.Is(err, application.ErrEnvironmentDeletionBlocked):
 		handler.logger.Warn("application environment deletion blocked by retained records", "path", request.URL.Path, "error", err)
 		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("IAM_ENVIRONMENT_DELETE_BLOCKED", "环境仍有关联配置或审计记录，已拒绝删除", nil))
+	case errors.Is(err, application.ErrEnvironmentNotOffboarded):
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("IAM_ENVIRONMENT_NOT_OFFBOARDED", "环境尚未由部署平台确认退役，请先执行“退役并保留记录”后再永久清理", nil))
+	case errors.Is(err, application.ErrEnvironmentRetentionApprovalInvalid):
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New("IAM_ENVIRONMENT_RETENTION_APPROVAL_INVALID", "审批编号不是该应用已完成的审计保留清理任务，未执行永久清理", nil))
 	case errors.Is(err, application.ErrConflict):
 		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.Conflict)
 	case errors.Is(err, application.ErrVersionConflict):

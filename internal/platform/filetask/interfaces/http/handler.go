@@ -19,12 +19,21 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
+	"gorm.io/gorm"
 )
 
 const (
 	maxJSONRequestBytes   = 320 * 1024
 	maxUploadRequestBytes = 21 << 20 // Default policy (20 MiB) plus multipart overhead.
+	// v1MaxConcurrentFileOps 是 v1 上传/下载的每实例并发上限（AUD-2026-025）。v1 路径经
+	// ParseMultipartForm 缓冲整个请求体、服务层再整段读入校验（最坏约两份 20MiB 缓冲），
+	// 与 v2 会话路径按申报大小流式落盘不同，故 v2 不加该信号量。上限取常量以约束单实例
+	// 最坏内存占用；限流在鉴权之后执行，未认证请求不占用名额。
+	v1MaxConcurrentFileOps = 4
 )
+
+// fileGatewayBusy 是 v1 文件操作并发超限时的稳定错误（503），沿用平台统一错误信封。
+var fileGatewayBusy = httperror.New("FILE_GATEWAY_BUSY", "文件网关繁忙，请稍后重试", nil)
 
 type fileService interface {
 	Upload(context.Context, application.UploadInput) (domain.File, error)
@@ -47,17 +56,19 @@ type jobService interface {
 // middleware remain bootstrap responsibilities; download authorization is additionally enforced
 // in the application service so an owner cannot be bypassed by a route misconfiguration.
 type Handler struct {
-	files  fileService
-	jobs   jobService
-	logger *slog.Logger
+	files   fileService
+	jobs    jobService
+	logger  *slog.Logger
+	auditDB *gorm.DB // 为空仅出现在 NewJobHandler 构造的只承载异步任务的 Handler，不挂载 v1 文件路由。
+	fileOps chan struct{}
 }
 
 // NewHandler validates module dependencies.
-func NewHandler(files fileService, jobs jobService, logger *slog.Logger) (*Handler, error) {
+func NewHandler(files fileService, jobs jobService, logger *slog.Logger, auditDB *gorm.DB) (*Handler, error) {
 	if files == nil || jobs == nil || logger == nil {
 		return nil, errors.New("filetask HTTP handler dependencies must not be nil")
 	}
-	return &Handler{files: files, jobs: jobs, logger: logger}, nil
+	return &Handler{files: files, jobs: jobs, logger: logger, auditDB: auditDB, fileOps: make(chan struct{}, v1MaxConcurrentFileOps)}, nil
 }
 
 // NewJobHandler 创建只承载平台异步任务的 HTTP 适配器。File Gateway 拆为独立进程后，
@@ -66,7 +77,7 @@ func NewJobHandler(jobs jobService, logger *slog.Logger) (*Handler, error) {
 	if jobs == nil || logger == nil {
 		return nil, errors.New("async job HTTP handler dependencies must not be nil")
 	}
-	return &Handler{jobs: jobs, logger: logger}, nil
+	return &Handler{jobs: jobs, logger: logger, fileOps: make(chan struct{}, v1MaxConcurrentFileOps)}, nil
 }
 
 type uploadResponse struct {
@@ -119,6 +130,10 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 	if !ok {
 		return
 	}
+	if !handler.limitConcurrentFileOps(writer, request) {
+		return
+	}
+	defer handler.releaseFileOp()
 
 	request.Body = http.MaxBytesReader(writer, request.Body, maxUploadRequestBytes)
 	if err := request.ParseMultipartForm(maxUploadRequestBytes); err != nil {
@@ -172,10 +187,12 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		Content:               fileContent,
 	})
 	if err != nil {
+		// v1 上传失败同样留访问审计（AUD-2026-022），与 v2 会话路径的 UPLOAD_COMPLETED/FAILED 对齐。
+		handler.auditFileAccess(request.Context(), principal.Tenant.ID, applicationID, "", principal.User.ID, principal.SessionID, "UPLOAD_COMPLETED", "FAILED", request.Header.Get("X-Request-ID"))
 		handler.writeError(writer, request, err)
 		return
 	}
-
+	handler.auditFileAccess(request.Context(), principal.Tenant.ID, applicationID, file.ID, principal.User.ID, principal.SessionID, "UPLOAD_COMPLETED", "SUCCESS", request.Header.Get("X-Request-ID"))
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "文件上传成功", fileToResponse(file))
 }
 
@@ -186,6 +203,11 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 	if !ok {
 		return
 	}
+	if !handler.limitConcurrentFileOps(writer, request) {
+		return
+	}
+	defer handler.releaseFileOp()
+
 	fileID := strings.TrimSpace(request.PathValue("file_id"))
 	stored, stream, err := handler.files.OpenDownload(request.Context(), application.DownloadAccess{
 		TenantID:        principal.Tenant.ID,
@@ -194,6 +216,7 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 		PermissionCodes: principal.PermissionCodes,
 	}, fileID)
 	if err != nil {
+		handler.auditFileAccess(request.Context(), principal.Tenant.ID, principal.Account.ID, fileID, principal.User.ID, principal.SessionID, "DOWNLOAD_COMPLETED", "FAILED", request.Header.Get("X-Request-ID"))
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -207,8 +230,11 @@ func (handler *Handler) Download(writer http.ResponseWriter, request *http.Reque
 		writer.Header().Set("Content-Length", strconv.FormatUint(stored.Version.SizeBytes, 10))
 	}
 	if _, err := io.Copy(writer, stream); err != nil {
+		handler.auditFileAccess(request.Context(), principal.Tenant.ID, principal.Account.ID, stored.File.ID, principal.User.ID, principal.SessionID, "DOWNLOAD_COMPLETED", "FAILED", request.Header.Get("X-Request-ID"))
 		handler.logger.Warn("file download stream interrupted", "file_id", stored.File.ID, "error", err)
+		return
 	}
+	handler.auditFileAccess(request.Context(), principal.Tenant.ID, principal.Account.ID, stored.File.ID, principal.User.ID, principal.SessionID, "DOWNLOAD_COMPLETED", "SUCCESS", request.Header.Get("X-Request-ID"))
 }
 
 // BindFile 将 READY 文件绑定到一个业务资源；路由权限负责限制谁能操作绑定，服务层继续
@@ -408,6 +434,36 @@ func (handler *Handler) principal(writer http.ResponseWriter, request *http.Requ
 		return authctx.Principal{}, false
 	}
 	return principal, true
+}
+
+// limitConcurrentFileOps 为 v1 上传/下载获取每实例并发名额（AUD-2026-025，见
+// v1MaxConcurrentFileOps 注释）。名额已满时写出 503 并返回 false，调用方直接返回。
+func (handler *Handler) limitConcurrentFileOps(writer http.ResponseWriter, request *http.Request) bool {
+	select {
+	case handler.fileOps <- struct{}{}:
+		return true
+	default:
+		handler.logger.Warn("file gateway v1 concurrency limit reached", "path", request.URL.Path)
+		httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, fileGatewayBusy)
+		return false
+	}
+}
+
+func (handler *Handler) releaseFileOp() { <-handler.fileOps }
+
+// auditFileAccess 为仍在路由表中的 v1 上传/下载补齐网关访问审计（AUD-2026-022），复用
+// v2 的 accessAudit 写入路径与事件类型（UPLOAD_COMPLETED/DOWNLOAD_COMPLETED）。写入
+// 失败仅记结构化日志，不阻断主流程。
+func (handler *Handler) auditFileAccess(ctx context.Context, tenantID, applicationID, fileID, actorUserID, authenticatedClientID, action, result, requestID string) {
+	if handler.auditDB == nil {
+		// 只承载异步任务的 Handler（NewJobHandler）不挂载 v1 文件路由，无审计库可写。
+		return
+	}
+	writeFileAccessAudit(ctx, handler.auditDB, handler.logger, accessAudit{
+		TenantID: tenantID, ApplicationID: applicationID, FileID: fileID,
+		ActorUserID: optionalString(actorUserID), AuthenticatedClientID: authenticatedClientID,
+		Action: action, Result: result, RequestID: optionalString(requestID), CreatedAt: time.Now().UTC(),
+	})
 }
 
 func (handler *Handler) writeError(writer http.ResponseWriter, request *http.Request, err error) {

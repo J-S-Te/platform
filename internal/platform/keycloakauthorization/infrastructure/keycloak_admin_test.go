@@ -427,6 +427,103 @@ func TestEnsureUserPrelinksBrokerIdentityAndAllowsOptionalProfileFields(t *testi
 	}
 }
 
+func TestEnsureUserReusesPortalBrokerLinkedAccountForMatchingTenant(t *testing.T) {
+	var updated keycloakUser
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.URL.Path == "/realms/master/protocol/openid-connect/token" {
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+			return
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users":
+			switch request.URL.Query().Get("q") {
+			case "identity_id:identity-1":
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+			case "":
+				if request.URL.Query().Get("idpAlias") != "basic-platform-customer" || request.URL.Query().Get("idpUserId") != "identity-1" {
+					t.Fatalf("Broker owner query = %s", request.URL.RawQuery)
+				}
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "broker-user"}})
+			default:
+				t.Fatalf("unexpected Keycloak user query: %s", request.URL.RawQuery)
+			}
+		case "GET /admin/realms/acme/users/broker-user":
+			writeJSON(t, writer, stdhttp.StatusOK, keycloakUser{
+				ID: "broker-user", Username: "portal-user", Enabled: true,
+				Attributes: map[string][]string{"tenant_id": {"tenant-1"}},
+			})
+		case "PUT /admin/realms/acme/users/broker-user":
+			if err := json.NewDecoder(request.Body).Decode(&updated); err != nil {
+				t.Fatalf("decode updated Broker user: %v", err)
+			}
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	if err := admin.EnsureUser(context.Background(), projectionapplication.Snapshot{
+		TenantID: "tenant-1", IdentityID: "identity-1", ApplicationCode: "customer_portal", DisplayName: "客户用户", UserEnabled: true,
+	}); err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if updated.ID != "broker-user" || updated.Attributes["identity_id"][0] != "identity-1" || updated.Attributes["tenant_id"][0] != "tenant-1" {
+		t.Fatalf("existing Broker-linked account was not safely projected: %#v", updated)
+	}
+}
+
+func TestEnsureUserRejectsPortalBrokerLinkedAccountFromAnotherTenant(t *testing.T) {
+	mutations := 0
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.URL.Path == "/realms/master/protocol/openid-connect/token" {
+			writeJSON(t, writer, stdhttp.StatusOK, map[string]string{"access_token": "admin-token"})
+			return
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "GET /admin/realms/acme/users":
+			switch request.URL.Query().Get("q") {
+			case "identity_id:identity-1":
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{})
+			case "":
+				if request.URL.Query().Get("idpAlias") != "basic-platform-customer" || request.URL.Query().Get("idpUserId") != "identity-1" {
+					t.Fatalf("Broker owner query = %s", request.URL.RawQuery)
+				}
+				writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "broker-user"}})
+			default:
+				t.Fatalf("unexpected Keycloak user query: %s", request.URL.RawQuery)
+			}
+		case "GET /admin/realms/acme/users/broker-user":
+			writeJSON(t, writer, stdhttp.StatusOK, keycloakUser{
+				ID: "broker-user", Username: "portal-user",
+				Attributes: map[string][]string{"tenant_id": {"other-tenant"}},
+			})
+		case "PUT /admin/realms/acme/users/broker-user", "POST /admin/realms/acme/users":
+			mutations++
+			writer.WriteHeader(stdhttp.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+	admin, err := NewKeycloakAdmin(server.URL, "acme", "admin", "secret", server.Client())
+	if err != nil {
+		t.Fatalf("NewKeycloakAdmin: %v", err)
+	}
+	err = admin.EnsureUser(context.Background(), projectionapplication.Snapshot{
+		TenantID: "tenant-1", IdentityID: "identity-1", ApplicationCode: "customer_portal", UserEnabled: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "another platform identity or tenant") {
+		t.Fatalf("EnsureUser error = %v, want a tenant ownership conflict", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("conflicting Broker account was mutated: %d writes", mutations)
+	}
+}
+
 func TestEnsureBrokerIdentityTreatsConcurrentSameLinkAsSuccess(t *testing.T) {
 	readCount := 0
 	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
@@ -574,6 +671,8 @@ func TestKeycloakAdminDisablesUserAndRevokesOnlyManagedOrganizationGroups(t *tes
 		switch request.Method + " " + request.URL.Path {
 		case "GET /admin/realms/acme/users":
 			writeJSON(t, writer, stdhttp.StatusOK, []keycloakUser{{ID: "user-1", Attributes: map[string][]string{"identity_id": {"identity-1"}}}})
+		case "GET /admin/realms/acme/users/user-1":
+			writeJSON(t, writer, stdhttp.StatusOK, keycloakUser{ID: "user-1", Username: "platform-identity-1", Enabled: true, Attributes: map[string][]string{"identity_id": {"identity-1"}, "tenant_id": {"tenant-1"}}})
 		case "PUT /admin/realms/acme/users/user-1":
 			if err := json.NewDecoder(request.Body).Decode(&updated); err != nil {
 				t.Fatalf("decode user: %v", err)

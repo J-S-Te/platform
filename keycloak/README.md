@@ -61,7 +61,7 @@ Keycloak 运行层只负责认证基础设施；应用编码、环境、登录�
 
 ```bash
 docker compose --file compose.local.yaml --profile keycloak config --services
-docker compose --file deploy/production/compose.yaml config --services
+docker compose --file deploy/production/docker-compose.yml config --services
 ```
 
 生产输出默认应包含 `keycloak-db` 和 `keycloak`；本地仍需启用 `keycloak` profile。

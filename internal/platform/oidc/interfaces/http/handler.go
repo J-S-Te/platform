@@ -127,17 +127,21 @@ func (systemClock) Now() time.Time { return time.Now().UTC() }
 // SessionLogout, LegacyClientCredentialsIssuer, and PostLogoutRedirectValidator are intentionally
 // optional: endpoints that depend on an absent adapter fail closed rather than accepting input.
 type Config struct {
-	Service                        Service
-	JWTManager                     JWTManager
-	LegacyClientCredentialsIssuer  LegacyClientCredentialsIssuer
-	SessionAuthenticator           BrowserSessionAuthenticator
-	SessionLogout                  BrowserSessionLogout
-	PostLogoutRedirectValidator    PostLogoutRedirectValidator
-	AccessTokenSubjectResolver     AccessTokenSubjectResolver
-	ExternalAuthorizationVerifier  ExternalAuthorizationTokenVerifier
-	AuthorizationResolver          tokenissuer.AuthorizationResolver
-	AuthorizationContextResolver   tokenissuer.AuthorizationContextResolver
-	PersonnelDirectoryResolver     PersonnelDirectoryResolver
+	Service                       Service
+	JWTManager                    JWTManager
+	LegacyClientCredentialsIssuer LegacyClientCredentialsIssuer
+	SessionAuthenticator          BrowserSessionAuthenticator
+	SessionLogout                 BrowserSessionLogout
+	PostLogoutRedirectValidator   PostLogoutRedirectValidator
+	AccessTokenSubjectResolver    AccessTokenSubjectResolver
+	ExternalAuthorizationVerifier ExternalAuthorizationTokenVerifier
+	AuthorizationResolver         tokenissuer.AuthorizationResolver
+	AuthorizationContextResolver  tokenissuer.AuthorizationContextResolver
+	PersonnelDirectoryResolver    PersonnelDirectoryResolver
+	// AllowLegacyPlatformAccessToken only controls whether authorization-context
+	// accepts a platform-issued access token after the Keycloak cutover. The
+	// standard UserInfo endpoint must continue accepting tokens issued by this
+	// authorization server because the Keycloak Broker consumes it.
 	AllowLegacyPlatformAccessToken bool
 	// CustomerBindingResolver 在 EmitCustomerRef 打开时向 authorization-context 响应
 	// 追加 customer_ref 声明；实现由外部客户绑定模块注入。

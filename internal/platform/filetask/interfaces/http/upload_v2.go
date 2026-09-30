@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -41,17 +42,18 @@ type uploadV2FileService interface {
 // UploadV2Handler 承载新上传会话。业务应用仍先校验资源 ACL，文件网关只接受
 // 已验签的应用机器身份，并把租户和应用绑定到会话。
 type UploadV2Handler struct {
-	db    *gorm.DB
-	files uploadV2FileService
-	now   func() time.Time
-	newID func(time.Time) (string, error)
+	db     *gorm.DB
+	files  uploadV2FileService
+	logger *slog.Logger
+	now    func() time.Time
+	newID  func(time.Time) (string, error)
 }
 
-func NewUploadV2Handler(db *gorm.DB, files uploadV2FileService, newID func(time.Time) (string, error)) (*UploadV2Handler, error) {
-	if db == nil || files == nil || newID == nil {
+func NewUploadV2Handler(db *gorm.DB, files uploadV2FileService, newID func(time.Time) (string, error), logger *slog.Logger) (*UploadV2Handler, error) {
+	if db == nil || files == nil || newID == nil || logger == nil {
 		return nil, errors.New("v2 upload dependencies are required")
 	}
-	return &UploadV2Handler{db: db, files: files, now: func() time.Time { return time.Now().UTC() }, newID: newID}, nil
+	return &UploadV2Handler{db: db, files: files, logger: logger, now: func() time.Time { return time.Now().UTC() }, newID: newID}, nil
 }
 
 type uploadPolicy struct {
@@ -281,6 +283,15 @@ func (h *UploadV2Handler) UploadContent(w http.ResponseWriter, r *http.Request) 
 		return nil
 	})
 	if err != nil {
+		// 无效上传票据尝试（AUD-2026-021）：票据是 PUT content 路径唯一凭据（无 Bearer
+		// 主体），必须落 FAILED 访问审计后再返回既有错误码。会话已命中时记录其真实租户/
+		// 应用/文件身份；会话未命中（伪造 upload_id）时仅记尝试本身，占位客户端标识
+		// "upload-ticket" 与成功路径的票据行为一致。
+		if session.ID != "" {
+			h.auditDirect(r.Context(), session.TenantID, session.ApplicationID, session.FileID, deref(session.ActorUserID), session.AuthenticatedClientID, "UPLOAD_TICKET_REJECTED", "FAILED", r.Header.Get("X-Request-ID"))
+		} else {
+			h.auditDirect(r.Context(), "", "", "", "", "upload-ticket", "UPLOAD_TICKET_REJECTED", "FAILED", r.Header.Get("X-Request-ID"))
+		}
 		v2Error(w, http.StatusForbidden, "FILE_TICKET_INVALID", "上传票据无效、过期或已使用")
 		return
 	}
@@ -407,6 +418,9 @@ func (h *UploadV2Handler) DownloadContent(w http.ResponseWriter, r *http.Request
 		return tx.Model(&downloadTicket{}).Where("id = ? AND used_at IS NULL", ticket.ID).Update("used_at", now).Error
 	})
 	if err != nil {
+		// 无效下载票据/兑换尝试（AUD-2026-021）：票据查询未命中时无从得知租户与应用，
+		// 以路径中的 file_id 与占位客户端标识记录 FAILED 审计后再返回既有错误码。
+		h.auditDirect(r.Context(), "", "", r.PathValue("file_id"), "", "download-ticket", "DOWNLOAD_TICKET_REJECTED", "FAILED", r.Header.Get("X-Request-ID"))
 		v2Error(w, http.StatusForbidden, "FILE_DOWNLOAD_TICKET_INVALID", "下载票据无效、过期或已使用")
 		return
 	}
@@ -470,8 +484,12 @@ func (h *UploadV2Handler) validation(ctx context.Context, session uploadV2Sessio
 func (h *UploadV2Handler) audit(ctx context.Context, s uploadV2Session, action, result, requestID string) {
 	h.auditDirect(ctx, s.TenantID, s.ApplicationID, s.FileID, deref(s.ActorUserID), s.AuthenticatedClientID, action, result, requestID)
 }
+
+// auditDirect 落网关访问审计。写入失败不阻断主流程，但不能被空白标识符静默丢弃
+// （AUD-2026-021，SEC-D4a 口径）：writeFileAccessAudit 输出带可告警字段的结构化
+// error 日志，供运维检测并回填。
 func (h *UploadV2Handler) auditDirect(ctx context.Context, tenantID, applicationID, fileID, actorUserID, authenticatedClientID, action, result, requestID string) {
-	_ = h.db.WithContext(ctx).Create(&accessAudit{TenantID: tenantID, ApplicationID: applicationID, FileID: fileID, ActorUserID: optionalString(actorUserID), AuthenticatedClientID: authenticatedClientID, Action: action, Result: result, RequestID: optionalString(requestID), CreatedAt: h.now()}).Error
+	writeFileAccessAudit(ctx, h.db, h.logger, accessAudit{TenantID: tenantID, ApplicationID: applicationID, FileID: fileID, ActorUserID: optionalString(actorUserID), AuthenticatedClientID: authenticatedClientID, Action: action, Result: result, RequestID: optionalString(requestID), CreatedAt: h.now()})
 }
 func sessionResponse(s uploadV2Session) map[string]any {
 	return map[string]any{

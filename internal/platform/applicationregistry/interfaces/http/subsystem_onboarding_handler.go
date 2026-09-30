@@ -194,6 +194,10 @@ type subsystemProvisioningCapabilityProvider interface {
 	Capabilities() application.SubsystemProvisioningCapabilities
 }
 
+type subsystemAvailableCapabilityProvider interface {
+	AvailableCapabilities(context.Context) (application.SubsystemProvisioningCapabilities, error)
+}
+
 type subsystemCandidateDiscoverer interface {
 	DiscoverSubsystemCandidates(context.Context) ([]application.SubsystemDiscoveryCandidate, error)
 }
@@ -1084,6 +1088,14 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
 		capabilities = provider.Capabilities()
 	}
+	if provider, ok := handler.provisioner.(subsystemAvailableCapabilityProvider); ok {
+		available, err := provider.AvailableCapabilities(request.Context())
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		capabilities = available
+	}
 	defaultEnvironment := strings.TrimSpace(capabilities.DefaultEnvironment)
 	if defaultEnvironment == "" && len(capabilities.SupportedEnvironments) > 0 {
 		defaultEnvironment = capabilities.SupportedEnvironments[0]
@@ -1538,6 +1550,7 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 	switch applicationCode {
 	case "contract_management":
 		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "合同管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read"},
 			// 外部合同创建会同步校验 CRM 客户和商机。历史环境可能早于该集成能力，
 			// 受控更新必须创建或轮换凭据并把明文 Secret 重新下发到运行文件。
@@ -1570,6 +1583,11 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 		// 旧版本部署可能已经创建了这些 OAuth Client，但运行时文件没有收到
 		// 明文 Secret；受控更新必须重新签发并原子下发，不能依赖只写密钥回读。
 		return []updateServiceCredentialRequirement{
+			// Portal API publishes audit events during startup/runtime. Directory-only
+			// adoption must create and redeliver this credential just like first-time
+			// onboarding; otherwise the production manifest fails closed before any
+			// portal container can start.
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户自助门户 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialExternalUserProvision, suffix: "external-user-provision", clientName: "客户自助门户 External User Provisioner", scope: "external_user.provision", rotate: true},
 			{purpose: application.ServiceCredentialApplicationRoleAssign, suffix: "role-assign", clientName: "客户自助门户 Application Role Assigner", scope: "application_role.assign", rotate: true},
 			{purpose: application.ServiceCredentialApplicationRoleRevoke, suffix: "role-revoke", clientName: "客户自助门户 Application Role Revoker", scope: "application_role.revoke", rotate: true},
@@ -1580,7 +1598,7 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 		}
 	case "data_analysis":
 		return []updateServiceCredentialRequirement{
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "数据看板与统计分析系统 Audit Publisher", scope: "audit.ingest"},
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "数据看板与统计分析系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			// 合同与项目读取凭据必须分离；任一密钥泄露时不能横向读取另一业务域。
 			{purpose: application.ServiceCredentialContractDashboardRead, suffix: "contract-dashboard", clientName: "数据看板合同看板读取器", scope: "dashboard.contract.read", rotate: true},
 			{purpose: application.ServiceCredentialProjectDashboardRead, suffix: "project-dashboard", clientName: "数据看板项目看板读取器", scope: "dashboard.project.read", rotate: true},
@@ -1591,6 +1609,7 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 		// 人工新建项目必须通过独立机器身份读取已审批合同。受控更新/重试必须像首次
 		// 接入一样补齐并重新下发这些凭据，否则运行时会因缺少 Secret 而拒绝部署。
 		return []updateServiceCredentialRequirement{
+			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "项目管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "项目管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
 			// 自动化规则命中后把站内信投递到平台统一 outbox。
 			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-ingest", clientName: "项目管理系统 站内信投递器", scope: "notification.ingest", rotate: true},
@@ -1988,10 +2007,14 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}
 	initialAccessUserID := principal.User.ID
 	needsInitialAccess := operation == "ADOPT"
-	if operation == "RETRY" && handler.deploymentState != nil {
+	if handler.deploymentState != nil && operation != "ADOPT" {
 		if storedAdminUserID := strings.TrimSpace(deploymentContext.InitialAdminUserID); storedAdminUserID != "" {
 			initialAccessUserID = storedAdminUserID
 		}
+		// UPDATE 与 RETRY 都是受控部署操作。升级迁移可以把历史上被错误标记为
+		// “已分配”的初始访问重置为待补偿；无论用户从页面选择更新还是重试，均应在
+		// Agent 发布最新角色目录后幂等补发一次。非空 marker 仍保持“不主动恢复已撤销
+		// 权限”的既有语义。
 		needsInitialAccess = deploymentContext.InitialAccessAssignedAt == nil
 	}
 	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusUpdating, operation, "", ""); err != nil {
@@ -2075,7 +2098,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 // 都重新下发，避免旧环境继续使用占位值或失效密钥。
 func requiresCatalogPublisherCredential(applicationCode string) bool {
 	switch applicationCode {
-	case "customer_and_opportunity", "customer_portal", "settlement", "data_analysis":
+	case "contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "settlement":
 		return true
 	default:
 		return false
@@ -2195,6 +2218,12 @@ func (handler *SubsystemOnboardingHandler) DiscardFailedSubsystemDeployment(writ
 }
 
 const subsystemDeploymentHTTPTimeout = 16 * time.Minute
+
+// Failure-state writes must survive a disconnected browser or a reverse proxy
+// timeout. Keep them bounded so a degraded database cannot hold the request
+// handler indefinitely while still allowing the deployment lifecycle to reach
+// a terminal state.
+const subsystemDeploymentFailureWriteTimeout = 10 * time.Second
 
 // A deployment state is written before the long-running Agent call. If the API
 // process is terminated during that call, the state must not remain in a
@@ -2492,11 +2521,9 @@ func (handler *SubsystemOnboardingHandler) recoverStaleSubsystemDeployment(ctx c
 	if operation == "" {
 		operation = "ONBOARD"
 	}
-	if err := handler.deploymentState.TransitionSubsystemDeployment(
+	if err := handler.transitionDeploymentFailure(
 		ctx, state.TenantID, state.ApplicationCode, state.Environment,
-		application.SubsystemDeploymentStatusFailed, operation,
-		"DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试",
-		time.Now().UTC(),
+		operation, "DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试",
 	); err != nil {
 		handler.logger.Warn("stale subsystem deployment could not be recovered",
 			"application_code", state.ApplicationCode, "environment", state.Environment, "error", err)
@@ -2554,9 +2581,18 @@ func (handler *SubsystemOnboardingHandler) markInitialAccessAssigned(ctx context
 }
 
 func (handler *SubsystemOnboardingHandler) markDeploymentFailed(ctx context.Context, tenantID, applicationCode, environment, operation, errorCode, errorMessage string) {
-	if err := handler.transitionDeployment(ctx, tenantID, applicationCode, environment, application.SubsystemDeploymentStatusFailed, operation, errorCode, errorMessage); err != nil {
+	if err := handler.transitionDeploymentFailure(ctx, tenantID, applicationCode, environment, operation, errorCode, errorMessage); err != nil {
 		handler.logger.Error("failed to persist subsystem deployment failure", "application_code", applicationCode, "environment", environment, "error", err)
 	}
+}
+
+func (handler *SubsystemOnboardingHandler) transitionDeploymentFailure(ctx context.Context, tenantID, applicationCode, environment, operation, errorCode, errorMessage string) error {
+	if handler.deploymentState == nil {
+		return nil
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subsystemDeploymentFailureWriteTimeout)
+	defer cancel()
+	return handler.transitionDeployment(writeCtx, tenantID, applicationCode, environment, application.SubsystemDeploymentStatusFailed, operation, errorCode, errorMessage)
 }
 
 func validateLifecycleRequest(payload subsystemLifecycleRequest) error {
@@ -2831,7 +2867,7 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 	case strings.Contains(message, "service credential is incomplete"), strings.Contains(message, "integration credential is incomplete"):
 		diagnosis = "服务器审核清单引用的用途凭据尚未由平台控制面创建或交付；请同步最新平台镜像与清单，并确认 Agent 与 platform-api 版本一致"
 	case strings.Contains(message, "compose file"):
-		diagnosis = "部署 Agent 未找到生产 compose.yaml；请重新发布完整 platform/deploy/production 资产，并同时重建 platform-api、subsystem-provisioner"
+		diagnosis = "部署 Agent 未找到生产 docker-compose.yml；请重新发布完整 platform/deploy/production 资产，并同时重建 platform-api、subsystem-provisioner"
 	case strings.Contains(message, "environment template"):
 		diagnosis = "部署 Agent 未找到目标运行配置模板；请重新发布完整生产部署资产并确认 runtime/*.env 已初始化"
 	case strings.Contains(message, "docker service"):

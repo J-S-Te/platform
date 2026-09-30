@@ -5,6 +5,15 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=public-transport.sh
 source "${script_dir}/public-transport.sh"
 
+if grep -Fq -- '--no-env-resolution' "${script_dir}/apply-public-transport.sh"; then
+  echo "apply-public-transport.sh uses an unsupported Docker Compose flag" >&2
+  exit 1
+fi
+grep -Fq 'enabled="$(base_compose config --services)"' "${script_dir}/apply-public-transport.sh" || {
+  echo "apply-public-transport.sh must use the portable service-only Compose query" >&2
+  exit 1
+}
+
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/public-transport-test.XXXXXX")"
 trap 'rm -r -- "$test_root"' EXIT
 
@@ -56,7 +65,13 @@ public_transport_prepare "$test_root" "${test_root}/runtime.env" "$compose_file"
 [[ "$PUBLIC_PLATFORM_ORIGIN" == "http://platform.example.com:8081" ]]
 [[ "$PUBLIC_SSO_ORIGIN" == "http://sso.example.com:18090" ]]
 [[ "$PUBLIC_TRANSPORT_COOKIE_SECURE" == "false" ]]
-[[ "$PUBLIC_TRANSPORT_COMPOSE_FILE" == "$drain_compose_file" ]]
+[[ -z "$PUBLIC_TRANSPORT_COMPOSE_FILE" ]]
+public_transport_install_certificates "$test_root"
+cmp "$test_root/tls.crt" "$PUBLIC_TLS_MANAGED_DIR/platform.crt"
+cmp "$test_root/tls.key" "$PUBLIC_TLS_MANAGED_DIR/platform.key"
+transport_args=(--file "$test_root/docker-compose.yml")
+public_transport_compose_args transport_args
+[[ "${#transport_args[@]}" == 2 ]]
 [[ "$PUBLIC_TLS_CERTIFICATE_RESOLVED" == "${test_root}/tls.crt" ]]
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \

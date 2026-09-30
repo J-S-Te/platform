@@ -192,6 +192,10 @@ configure() (
     env_set "$runtime_file" FRONTEND_PORT "$frontend_port"
     env_set "$runtime_file" PLATFORM_API_PORT "$platform_port"
     env_set "$runtime_file" KEYCLOAK_HTTP_PORT "$keycloak_port"
+    # Compose 子系统由容器内 Agent 启动。显式持久化 SSO 公网端口，避免 Agent
+    # 在 PUBLIC_SSO_HTTP_PORT 为空时错误回退到前端端口，生成与 Keycloak
+    # discovery 元数据不一致的 issuer。
+    env_set "$runtime_file" PUBLIC_SSO_HTTP_PORT "$keycloak_port"
   fi
   public_transport_prepare "$deploy_dir" "$runtime_file" || die '公开传输配置校验失败'
   if [[ "$PUBLIC_HTTPS_ENABLED" == true || "$PUBLIC_TRANSPORT_STATE" == DISABLING_HTTPS ]]; then
@@ -218,15 +222,27 @@ configure() (
   env_set_generated "$runtime_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
   env_set_generated "$runtime_file" CUSTOMER_PORTAL_INITIAL_PASSWORD "$(random_hex 24)"
   mkdir "$staging/runtime"
+  local configured_services module
+  configured_services="$(docker compose --project-directory "$deploy_dir" --file "$deploy_dir/docker-compose.yml" --env-file "$runtime_file" --env-file "$staging/.release.env" config --services)" || die '统一 Compose 无法解析'
   for runtime_name in contract customer portal project settlement data-analysis; do
+    case "$runtime_name" in customer) module=customer-api ;; portal) module=portal-api ;; *) module="$runtime_name-api" ;; esac
+    grep -Fxq "$module" <<< "$configured_services" || continue
     [[ ! -L "$deploy_dir/runtime/$runtime_name.env" ]] || die "拒绝符号链接运行配置：$runtime_name"
     if [[ -f "$deploy_dir/runtime/$runtime_name.env" ]]; then install -m 600 "$deploy_dir/runtime/$runtime_name.env" "$staging/runtime/$runtime_name.env"; else install -m 600 "$deploy_dir/subsystem-templates/$runtime_name.env.example" "$staging/runtime/$runtime_name.env"; fi
   done
-  for runtime_name in contract project settlement; do env_set_generated "$staging/runtime/$runtime_name.env" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_b64)"; done
-  for key in SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do env_set_generated "$staging/runtime/customer.env" "$key" "$(random_b64)"; done
-  for key in PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_HMAC_KEY_BASE64; do env_set_generated "$staging/runtime/portal.env" "$key" "$(random_b64)"; done
-  env_set_generated "$staging/runtime/data-analysis.env" OIDC_CODEC_KEY "$(random_hex 32)"
-  env_set_generated "$staging/runtime/data-analysis.env" METABASE_EMBEDDING_SECRET "$(random_hex 32)"
+  for runtime_name in contract project settlement; do
+    [[ ! -f "$staging/runtime/$runtime_name.env" ]] || env_set_generated "$staging/runtime/$runtime_name.env" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_b64)"
+  done
+  if [[ -f "$staging/runtime/customer.env" ]]; then
+    for key in SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do env_set_generated "$staging/runtime/customer.env" "$key" "$(random_b64)"; done
+  fi
+  if [[ -f "$staging/runtime/portal.env" ]]; then
+    for key in PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_HMAC_KEY_BASE64; do env_set_generated "$staging/runtime/portal.env" "$key" "$(random_b64)"; done
+  fi
+  if [[ -f "$staging/runtime/data-analysis.env" ]]; then
+    env_set_generated "$staging/runtime/data-analysis.env" OIDC_CODEC_KEY "$(random_hex 32)"
+    env_set_generated "$staging/runtime/data-analysis.env" METABASE_EMBEDDING_SECRET "$(random_hex 32)"
+  fi
   keys_dir="$(env_get "$runtime_file" PLATFORM_KEYS_DIR)"; keys_dir="${keys_dir:-./data/platform/keys}"
   keys_dir="${keys_dir#./}"
   [[ "$keys_dir" == /* ]] || keys_dir="$deploy_dir/$keys_dir"
@@ -267,7 +283,9 @@ configure() (
   if [[ ! -f "$public" ]]; then install -m 644 "$derived" "$public"; fi
   chmod 600 "$private"; chmod 644 "$public"
   configure_firewall "$runtime_file"
-  for runtime_name in contract customer portal project settlement data-analysis; do mv -f "$staging/runtime/$runtime_name.env" "$deploy_dir/runtime/$runtime_name.env"; done
+  for runtime_name in contract customer portal project settlement data-analysis; do
+    [[ ! -f "$staging/runtime/$runtime_name.env" ]] || mv -f "$staging/runtime/$runtime_name.env" "$deploy_dir/runtime/$runtime_name.env"
+  done
   if [[ ! -f "$release_file" ]]; then mv "$staging/.release.env" "$release_file"; fi
   chmod 600 "$release_file"
   mv -f "$runtime_file" "$actual_runtime"

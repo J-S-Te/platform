@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# 单模块入口不依赖另一模块的镜像或 runtime；旧双 digest 调用保留兼容。
+if [[ "${1:-}" == customer-opportunity || "${1:-}" == customer-portal ]]; then
+  [[ $# == 2 ]] || { echo '用法：deploy-customer-opportunity.sh <customer-opportunity|customer-portal> <image@sha256:digest>' >&2; exit 2; }
+  selected_component="$1"; selected_image="$2"
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/deploy.sh"
+  publish_registered_customer "$selected_component" "$selected_image"
+  exit
+fi
+
 usage() {
   echo "usage: $0 <crm-image@sha256:digest> <portal-image@sha256:digest>" >&2
   exit 2
@@ -11,8 +20,9 @@ crm_image_ref="$1"
 portal_image_ref="$2"
 acr_enterprise_or_new_personal='^[a-z0-9.-]+\.cr\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 acr_legacy_personal='^registry(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
+offline_local_registry='^127\.0\.0\.1:[0-9]+/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 for image_ref in "$crm_image_ref" "$portal_image_ref"; do
-  if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal ]]; then
+  if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal && ! "$image_ref" =~ $offline_local_registry ]]; then
     echo "拒绝可变或格式错误的镜像引用：$image_ref" >&2
     exit 2
   fi
@@ -30,8 +40,9 @@ customer_runtime_file="$deploy_dir/runtime/customer.env"
 portal_runtime_file="$deploy_dir/runtime/portal.env"
 customer_runtime_template="$deploy_dir/subsystem-templates/customer.env.example"
 portal_runtime_template="$deploy_dir/subsystem-templates/portal.env.example"
-compose_file="$deploy_dir/compose.yaml"
+compose_file="$deploy_dir/docker-compose.yml"
 transport_helper="$deploy_dir/bin/public-transport.sh"
+provisioner_refresh_helper="$deploy_dir/bin/provisioner-config-refresh.sh"
 profiles_dir="$deploy_dir/subsystems.d"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_runtime_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_runtime_file"
@@ -53,13 +64,28 @@ for command_name in docker curl gzip flock awk mktemp install stat df ln; do
   }
 done
 docker compose version >/dev/null
-for required_file in "$runtime_file" "$release_file" "$compose_file" "$transport_helper"; do
+for required_file in "$runtime_file" "$release_file" "$compose_file" "$transport_helper" "$provisioner_refresh_helper"; do
   [[ -f "$required_file" ]] || { echo "缺少 $required_file" >&2; exit 1; }
 done
 
 # shellcheck source=public-transport.sh
 source "$transport_helper"
+# shellcheck source=provisioner-config-refresh.sh
+source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
+source "$script_dir/compose-scope.sh"
+scope_services >/dev/null || exit 1
+if ! scope_enabled customer-opportunity || ! scope_enabled customer-portal; then
+  if scope_enabled customer-opportunity; then
+    "$0" customer-opportunity "$crm_image_ref"
+  elif scope_enabled customer-portal; then
+    "$0" customer-portal "$portal_image_ref"
+  else
+    echo '此系统未启用：CRM 与客户门户均已从 docker-compose.yml 注释。' >&2
+    exit 1
+  fi
+  exit
+fi
 [[ -f "$profiles_dir/customer_and_opportunity-prod.yaml" && -f "$profiles_dir/customer_portal-prod.yaml" ]] || {
   echo "缺少 CRM/Portal 生产接入审核清单，请先发布最新 platform 生产资产" >&2
   exit 1
@@ -73,7 +99,7 @@ release_permission_error() {
   current_group="$(id -gn 2>/dev/null || printf unknown)"
   owner="$(stat -c '%U:%G' "$release_file" 2>/dev/null || printf unknown)"
   mode="$(stat -c '%a' "$release_file" 2>/dev/null || printf unknown)"
-  echo "发布配置权限不足：$release_file（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "发布配置权限不足：${release_file}（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
   echo "请使用 root 执行：chown ${current_user}:${current_group} $release_file && chmod 600 $release_file" >&2
   exit 1
 }
@@ -84,7 +110,7 @@ runtime_permission_error() {
   current_group="$(id -gn 2>/dev/null || printf unknown)"
   owner="$(stat -c '%U:%G' "$target" 2>/dev/null || printf unknown)"
   mode="$(stat -c '%a' "$target" 2>/dev/null || printf unknown)"
-  echo "运行配置权限不足：$target（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "运行配置权限不足：${target}（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
   echo "请使用 root 执行：chown ${current_user}:${current_group} $target && chmod 600 $target" >&2
   exit 1
 }
@@ -156,7 +182,7 @@ initialize_runtime_file() {
   if [[ ! -f "$target" ]]; then
     [[ -f "$template" ]] || { echo "缺少运行配置模板：$template" >&2; exit 1; }
     install -m 600 "$template" "$target"
-    echo "已初始化 $target；基础平台应用接入会由 Agent 自动补齐受管字段和声明的业务密钥"
+    echo "已初始化 ${target}；基础平台应用接入会由 Agent 自动补齐受管字段和声明的业务密钥"
   fi
   [[ ! -L "$target" ]] || {
     echo "拒绝符号链接运行配置：$target" >&2
@@ -173,19 +199,19 @@ initialize_runtime_file() {
         echo "跳过运行配置权限收紧（仅发布前允许）：$target" >&2
         return 0
       fi
-      echo "无法读取运行配置文件：$target；请检查权限后重试" >&2
+      echo "无法读取运行配置文件：${target}；请检查权限后重试" >&2
       return 1
     fi
 
     # 发布 Agent 可能拥有 runtime 目录写权限，但不是历史运行文件的属主。
     # 在同一目录创建 0600 临时文件并原子替换，避免放宽密钥权限或要求删除文件。
     temporary="$(mktemp "$deploy_dir/runtime/.runtime-permissions.XXXXXX")" || {
-      echo "无法创建运行配置权限修复临时文件：$target；请由文件属主或 root 执行部署" >&2
+      echo "无法创建运行配置权限修复临时文件：${target}；请由文件属主或 root 执行部署" >&2
       exit 1
     }
     if ! install -m 600 "$target" "$temporary" 2>/dev/null || ! mv -f "$temporary" "$target"; then
       rm -f "$temporary"
-      echo "无法将运行配置权限收紧为 0600：$target；请检查文件属主、runtime 目录写权限，或使用 root 执行部署" >&2
+      echo "无法将运行配置权限收紧为 0600：${target}；请检查文件属主、runtime 目录写权限，或使用 root 执行部署" >&2
       exit 1
     fi
   fi
@@ -194,22 +220,23 @@ initialize_runtime_file() {
     exit 1
   }
 }
+exec 9>"$deploy_dir/runtime/.deploy.lock"
+flock -w 900 9 || { echo "等待其他发布任务超时" >&2; exit 1; }
+public_transport_prepare "$deploy_dir"
+
+# runtime 初始化、DSN 写入与后续的 .release.env 指针提交必须处于同一把
+# 发布锁内，否则 Agent 采用与人工发布并发时会生成混合版本的运行配置。
 initialize_runtime_file "$customer_runtime_file" "$customer_runtime_template"
 initialize_runtime_file "$portal_runtime_file" "$portal_runtime_template"
 # 文件注入 DSN 必须在任何 compose up 之前完成（SEC-N10b）；失败由 set -Eeuo pipefail 中止发布。
 write_runtime_dsns
-
-exec 9>"$deploy_dir/runtime/.deploy.lock"
-flock -w 900 9 || { echo "等待其他发布任务超时" >&2; exit 1; }
-public_transport_prepare "$deploy_dir"
 
 compose() {
   local command=(docker compose \
     --project-directory "$deploy_dir" \
     --file "$compose_file" \
     --env-file "$runtime_file" \
-    --env-file "$release_file" \
-    --profile customer)
+    --env-file "$release_file")
   public_transport_compose_args command
   "${command[@]}" "$@"
 }
@@ -341,14 +368,38 @@ restore_portal_runtime() {
   fi
   portal_runtime_updated=false
 }
+restore_release() {
+  local restore_failed=false should_refresh=false
+  if [[ "$release_updated" == true ]]; then
+    should_refresh=true
+    if [[ -f "$previous_release" ]]; then
+      if ! mv -f "$previous_release" "$release_file" || ! chmod 600 "$release_file"; then
+        echo "无法恢复上一版发布配置：$release_file" >&2
+        restore_failed=true
+      fi
+    else
+      echo "上一版发布配置快照缺失：$previous_release" >&2
+      restore_failed=true
+    fi
+    release_updated=false
+  fi
+  restore_customer_runtime || restore_failed=true
+  restore_portal_runtime || restore_failed=true
+
+  # .release.env 是 Agent 的单文件 bind mount。即使回滚文件成功，原容器仍会
+  # 指向旧 inode；因此失败恢复也必须重建 Agent 并核对宿主机/容器摘要。
+  if [[ "$should_refresh" == true ]] && ! refresh_subsystem_provisioner_config; then
+    echo "严重：上一版发布配置恢复后，subsystem-provisioner 刷新或一致性校验失败" >&2
+    restore_failed=true
+  fi
+  [[ "$restore_failed" == false ]]
+}
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
   if [[ "$release_updated" == true && "$release_committed" != true && -f "$previous_release" ]]; then
-    mv -f "$previous_release" "$release_file"
-    chmod 600 "$release_file"
-  fi
-  if [[ "$release_committed" != true ]]; then
+    restore_release || true
+  elif [[ "$release_committed" != true ]]; then
     restore_customer_runtime || true
     restore_portal_runtime || true
   fi
@@ -385,14 +436,11 @@ awk -F= -v crm="$crm_image_ref" -v portal="$portal_image_ref" -v worker_build_id
 release_updated=true
 mv "$next_release" "$release_file"
 chmod 600 "$release_file"
-
-restore_release() {
-  mv -f "$previous_release" "$release_file"
-  chmod 600 "$release_file"
-  restore_customer_runtime
-  restore_portal_runtime
-  release_updated=false
-}
+if ! refresh_subsystem_provisioner_config; then
+  echo "subsystem-provisioner 未能加载新发布配置，拒绝继续发布" >&2
+  restore_release || true
+  exit 1
+fi
 
 echo "拉取 CRM 不可变镜像：$crm_image_ref"
 if ! docker pull "$crm_image_ref"; then
@@ -469,14 +517,12 @@ if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready;
   exit 0
 fi
 
-if ! portal_compensation_worker_configured; then
-  restore_release
-  rm -f "$previous_release"
-  echo "Portal 邀请补偿 Worker 凭据未完整配置：请在 customer.env 对应的 customer_portal/prod 应用接入中重试，然后重新发布 CRM 与 Portal" >&2
-  exit 1
+if portal_compensation_worker_configured; then
+  customer_worker_services+=(portal-invite-compensation-worker)
+  echo "Portal 邀请补偿 Worker 凭据完整，纳入本次发布"
+else
+  echo "门户邀请补偿不可用：跳过补偿 Worker，请在平台完成跨系统凭据交付。" >&2
 fi
-customer_worker_services+=(portal-invite-compensation-worker)
-echo "Portal 邀请补偿 Worker 凭据完整，纳入本次发布"
 
 backup_database() {
   local mysql_service="$1" database="$2" label="$3"
@@ -587,7 +633,7 @@ wait_for_workers() {
     }
     current_restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
     [[ "$current_restarts" == "${worker_restarts[$service]}" ]] || {
-      echo "Worker 在稳定性观察期间发生重启：$service（${worker_restarts[$service]} -> $current_restarts）" >&2
+      echo "Worker 在稳定性观察期间发生重启：${service}（${worker_restarts[$service]} -> ${current_restarts}）" >&2
       return 1
     }
     health="$(docker inspect "$container_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
@@ -605,7 +651,7 @@ verify_service_image() {
   }
   actual_image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
   [[ "$actual_image" == "$expected_image" ]] || {
-    echo "$service_name 镜像未生效：期望=$expected_image，实际=$actual_image" >&2
+    echo "$service_name 镜像未生效：期望=${expected_image}，实际=$actual_image" >&2
     return 1
   }
   echo "$service_name 已运行目标不可变镜像：$expected_image"
@@ -616,8 +662,8 @@ rollback_runtime() {
   local previous_crm previous_portal
   previous_crm="$(env_value_from "$release_file" CUSTOMER_CRM_IMAGE)"
   previous_portal="$(env_value_from "$release_file" CUSTOMER_PORTAL_IMAGE)"
-  if [[ "$previous_crm" =~ $acr_enterprise_or_new_personal || "$previous_crm" =~ $acr_legacy_personal ]] && \
-     [[ "$previous_portal" =~ $acr_enterprise_or_new_personal || "$previous_portal" =~ $acr_legacy_personal ]]; then
+  if [[ "$previous_crm" =~ $acr_enterprise_or_new_personal || "$previous_crm" =~ $acr_legacy_personal || "$previous_crm" =~ $offline_local_registry ]] && \
+     [[ "$previous_portal" =~ $acr_enterprise_or_new_personal || "$previous_portal" =~ $acr_legacy_personal || "$previous_portal" =~ $offline_local_registry ]]; then
     compose up -d --force-recreate --no-deps customer-api portal-api "${customer_worker_services[@]}" || true
     return
   fi
@@ -637,14 +683,14 @@ backup_database customer-mysql customer_opportunity customer
 backup_database portal-mysql customer_portal portal
 
 echo "执行 CRM 语句级生产迁移"
-if ! compose --profile customer-release run --rm customer-migrate; then
+if ! compose run --no-deps customer-migrate; then
   restore_release
   rm -f "$previous_release"
   echo "CRM 迁移失败；数据库不会自动反向回滚，请按 RUNNING 检查点进行人工核验" >&2
   exit 1
 fi
 echo "执行 Portal 语句级生产迁移"
-if ! compose --profile customer-release run --rm portal-migrate; then
+if ! compose run --no-deps portal-migrate; then
   restore_release
   rm -f "$previous_release"
   echo "Portal 迁移失败；数据库不会自动反向回滚，请按 RUNNING 检查点进行人工核验" >&2
@@ -666,7 +712,7 @@ verify_service_image customer-api "$crm_image_ref" || {
   exit 1
 }
 echo "自动发布 CRM 授权目录（角色及有效角色数量策略）"
-if ! compose --profile customer-release run --rm --no-deps customer-api ./authz-catalog publish crm; then
+if ! compose run --rm --no-deps customer-api ./authz-catalog publish crm; then
   compose logs --tail 100 customer-api >&2 || true
   rollback_runtime
   rm -f "$previous_release"

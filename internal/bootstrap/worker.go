@@ -211,7 +211,9 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		customerPortalBrokerClientSecret := strings.TrimSpace(cfg.Keycloak.CustomerPortalBrokerClientSecret)
 		var brokerRegistrar keycloakBrokerRegistrar
 		var brokerTenantID string
-		if brokerClientID == "" || brokerClientSecret == "" || customerPortalBrokerClientID == "" || customerPortalBrokerClientSecret == "" {
+		// The periodic portal Broker reconciler also needs the registrar when all
+		// credentials are already configured, so initialize its repositories every time.
+		{
 			managementRepository, managementErr := applicationregistryinfrastructure.NewManagementRepository(db)
 			if managementErr != nil {
 				_ = database.Close(db)
@@ -479,9 +481,12 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			return nil, err
 		}
 		runners = append(runners, eventAuditRunner)
-		// Broker 配置漂移只在启动 reconcile 一次；运行中 IdP 配置缺失或平台侧 broker 客户端
-		// 凭据失效不会主动被发现，直到用户登录失败。周期校验可提前暴露并记录。
-		brokerHealthRunner, err := newKeycloakBrokerHealthRunner(controlPlane, db, logger, cfg.Keycloak.BrokerHealthPollInterval)
+		// 客户门户可能在 Worker 启动后才接入；周期 reconcile 会补齐其 Broker，
+		// 同时继续执行平台 Broker 的健康检查。
+		portalBrokerReconciler := customerPortalBrokerReconciler{
+			registrar: brokerRegistrar, control: controlPlane, tenantID: brokerTenantID,
+		}
+		brokerHealthRunner, err := newKeycloakBrokerHealthRunner(controlPlane, db, logger, cfg.Keycloak.BrokerHealthPollInterval, portalBrokerReconciler)
 		if err != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()

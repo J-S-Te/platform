@@ -5,13 +5,26 @@ FROM golang:1.26.4-alpine AS builder
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
+ARG GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct
+ARG GOSUMDB=sum.golang.google.cn
+ENV GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB}
+RUN set -eu; \
+    for attempt in 1 2 3 4 5; do \
+      if go mod download && go mod verify; then exit 0; fi; \
+      echo "go module download failed (attempt ${attempt}/5)" >&2; \
+      sleep $((attempt * 2)); \
+    done; \
+    exit 1
 
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY migrations/ ./migrations/
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./cmd/api \
+# 镜像是离线交付的唯一数据库迁移载体。在生成任何可执行文件前校验
+# 迁移连续性、已发布迁移 checksum 与历史种子退役规则，防止错误发布包进入服务器。
+RUN CGO_ENABLED=0 go test ./migrations \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./cmd/api \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/file-gateway ./cmd/file-gateway \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/file-inventory ./cmd/file-inventory \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker \
@@ -20,6 +33,20 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/api ./c
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/provision-iam-import-client ./cmd/provision-iam-import-client \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/subsystem-provisioner ./cmd/subsystem-provisioner
+
+# File Gateway has an independent storage identity and is deployed as its own
+# least-privilege image in both local Compose and production. Keep this target
+# built from the same source and toolchain as the Platform image.
+FROM alpine:3.21 AS file-gateway-runtime
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S -g 10001 filegateway \
+    && adduser -S -D -H -u 10001 -G filegateway filegateway \
+    && install -d -o filegateway -g filegateway -m 0750 /app/data/file-gateway
+WORKDIR /app
+COPY --from=builder /out/file-gateway ./file-gateway
+USER filegateway
+EXPOSE 8086
+ENTRYPOINT ["./file-gateway"]
 
 # API 运行容器不挂载 Docker Socket；同一镜像中的部署助手由独立服务运行。
 # 部署助手需要 Docker CLI/Compose 与 bash 来执行经过白名单约束的本地编排和网关脚本。

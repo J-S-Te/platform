@@ -27,7 +27,7 @@ CREATED -> UPLOADING -> VALIDATING -> READY
 
 ## 本地目录存储
 
-生产使用 `/opt/basic-platform/data/file-gateway` 宿主机目录，仅 File Gateway 容器挂载。
+生产使用 `/opt/unified-identity-platform/data/file-gateway` 宿主机目录，仅 File Gateway 容器挂载。
 容器内网关进程以专用 UID/GID `10001` 运行，目录和文件权限分别为 `0750`、`0640`。
 业务子系统只保存 `file_id` 和摘要，不接触物理路径。正式文件按
 `namespace/purpose/tenant/year/month/file/version/content` 分层；半成品和被拒绝文件分别进入

@@ -75,7 +75,7 @@ usage() {
   --skip-database-init  不创建本地数据库和应用账号
   --skip-migration      不执行数据库迁移
   --skip-project-deps   不执行 go mod download 和 npm ci
-  --deploy-root PATH    发布根目录，默认 .deploy；生产建议 /opt/basic-platform
+  --deploy-root PATH    发布根目录，默认 .deploy；生产建议 /opt/unified-identity-platform
   --release-id ID       指定发布版本号；仅允许字母、数字、点、下划线和短横线
   --keep-releases N     成功发布后最多保留 N 个历史版本（默认 5，至少 1）
   --restart-services    切换版本后启用并重启 basic-platform-api 与 basic-platform-worker
@@ -99,10 +99,10 @@ usage() {
   bash scripts/bootstrap-linux.sh --bootstrap --yes
   bash scripts/bootstrap-linux.sh --bootstrap --yes --skip-mysql-server --skip-database-init
   bash scripts/bootstrap-linux.sh --deploy --env-file /etc/basic-platform/basic-platform.env \
-    --deploy-root /opt/basic-platform --restart-services --yes
+    --deploy-root /opt/unified-identity-platform --restart-services --yes
   bash scripts/bootstrap-linux.sh --stop --yes
   bash scripts/bootstrap-linux.sh --uninstall --yes --purge-database \
-    --env-file /etc/basic-platform/basic-platform.env --deploy-root /opt/basic-platform \
+    --env-file /etc/basic-platform/basic-platform.env --deploy-root /opt/unified-identity-platform \
     --nginx-site /etc/nginx/conf.d/basic-platform.conf --remove-system-user basic-platform
 USAGE
 }

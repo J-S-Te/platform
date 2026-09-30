@@ -289,3 +289,23 @@ func TestDeleteApplicationRejectsStaleVersion(t *testing.T) {
 		t.Fatalf("stale version must not update, got %d calls", repository.updateCalls)
 	}
 }
+
+func TestPurgeEnvironmentRequiresApplicationRetiredFirst(t *testing.T) {
+	repository := &applicationDeleteRepositoryStub{
+		current:     contractApplicationForDelete(),
+		environment: Environment{ID: "01K1ENV000000000000000001", Environment: "prod", Version: 1},
+	}
+	service := newApplicationDeleteService(t, repository)
+	_, err := service.PurgeEnvironment(context.Background(), EnvironmentPurgeInput{
+		TenantID: "tenant-1", OperatorID: "operator-1", ApplicationID: repository.current.ID,
+		EnvironmentID: "01K1ENV000000000000000001", ConfirmationCode: "PURGE/contract-management/prod",
+		RetentionApprovalID: "01KRETENTIONTASK0000000000", RetentionConfirmed: true,
+		OffboardedConfirmed: true, Version: 1,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("PurgeEnvironment(active application) error = %v, want ErrConflict", err)
+	}
+	if repository.deleteEnvironmentCalls != 0 || repository.updateCalls != 0 {
+		t.Fatalf("purge mutated application data before retirement: %+v", repository)
+	}
+}

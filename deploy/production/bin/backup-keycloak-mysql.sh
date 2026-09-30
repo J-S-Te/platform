@@ -38,7 +38,7 @@ fi
 compose_args=(docker compose)
 [[ -f .env ]] && compose_args+=(--env-file .env)
 [[ -f .release.env ]] && compose_args+=(--env-file .release.env)
-compose_args+=(-f compose.yaml)
+compose_args+=(-f docker-compose.yml)
 
 "${compose_args[@]}" config -q
 "${compose_args[@]}" exec -T keycloak-db sh -ec '

@@ -5,7 +5,8 @@ set -Eeuo pipefail
 # 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
 
 usage() {
-  echo "usage: $0 {frontend|platform|contract|project|settlement} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "usage: $0 {frontend|contract|project|settlement} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "       $0 platform <platform-image@sha256:...> <file-gateway-image@sha256:...>" >&2
   echo "       $0 data-analysis <dashboard-api@sha256:...> <aggregation-worker@sha256:...> <alert-worker@sha256:...> <production-migrate@sha256:...>" >&2
   exit 2
 }
@@ -18,13 +19,17 @@ if [[ "$service" == "data-analysis" ]]; then
   data_analysis_alert_image="$4"
   data_analysis_migrate_image="$5"
   image_ref="$data_analysis_dashboard_image"
+elif [[ "$service" == "platform" ]]; then
+  [[ $# -eq 3 ]] || usage
+  image_ref="$2"
+  file_gateway_image_ref="$3"
 else
   [[ $# -eq 2 ]] || usage
   image_ref="$2"
 fi
 case "$service" in
   frontend) image_key=FRONTEND_IMAGE ;;
-  platform) image_key=PLATFORM_IMAGE ;;
+  platform) image_key=PLATFORM_IMAGE; file_gateway_image_key=FILE_GATEWAY_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
   project) image_key=PROJECT_IMAGE ;;
   settlement) image_key=SETTLEMENT_IMAGE ;;
@@ -38,15 +43,23 @@ esac
 
 acr_enterprise_or_new_personal='^[a-z0-9.-]+\.cr\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 acr_legacy_personal='^registry(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
+offline_local_registry='^127\.0\.0\.1:[0-9]+/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 if [[ "$service" == "data-analysis" ]]; then
   for data_analysis_image in "${data_analysis_image_refs[@]}"; do
-    if [[ ! "$data_analysis_image" =~ $acr_enterprise_or_new_personal && ! "$data_analysis_image" =~ $acr_legacy_personal ]]; then
+    if [[ ! "$data_analysis_image" =~ $acr_enterprise_or_new_personal && ! "$data_analysis_image" =~ $acr_legacy_personal && ! "$data_analysis_image" =~ $offline_local_registry ]]; then
       echo "拒绝可变或格式错误的数据看板镜像引用：$data_analysis_image" >&2
       exit 2
     fi
   done
+elif [[ "$service" == "platform" ]]; then
+  for platform_image in "$image_ref" "$file_gateway_image_ref"; do
+    if [[ ! "$platform_image" =~ $acr_enterprise_or_new_personal && ! "$platform_image" =~ $acr_legacy_personal && ! "$platform_image" =~ $offline_local_registry ]]; then
+      echo "拒绝可变或格式错误的平台/File Gateway 镜像引用：$platform_image" >&2
+      exit 2
+    fi
+  done
 else
-  if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal ]]; then
+  if [[ ! "$image_ref" =~ $acr_enterprise_or_new_personal && ! "$image_ref" =~ $acr_legacy_personal && ! "$image_ref" =~ $offline_local_registry ]]; then
     echo "拒绝可变或格式错误的镜像引用：$image_ref" >&2
     exit 2
   fi
@@ -64,9 +77,9 @@ settlement_runtime_file="$deploy_dir/runtime/settlement.env"
 settlement_runtime_template="$deploy_dir/subsystem-templates/settlement.env.example"
 data_analysis_runtime_file="$deploy_dir/runtime/data-analysis.env"
 data_analysis_runtime_template="$deploy_dir/subsystem-templates/data-analysis.env.example"
-compose_file="$deploy_dir/compose.yaml"
-frontend_compose_file="$deploy_dir/compose.frontend.yaml"
+compose_file="$deploy_dir/docker-compose.yml"
 transport_helper="$deploy_dir/bin/public-transport.sh"
+provisioner_refresh_helper="$deploy_dir/bin/provisioner-config-refresh.sh"
 profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
@@ -88,12 +101,22 @@ docker compose version >/dev/null
 [[ -f "$release_file" ]] || { echo "缺少 $release_file" >&2; exit 1; }
 [[ -f "$compose_file" ]] || { echo "缺少 $compose_file" >&2; exit 1; }
 [[ -f "$transport_helper" ]] || { echo "缺少 $transport_helper" >&2; exit 1; }
+[[ -f "$provisioner_refresh_helper" ]] || { echo "缺少 $provisioner_refresh_helper" >&2; exit 1; }
 [[ -d "$profiles_dir" ]] || { echo "缺少生产子系统审核清单目录：$profiles_dir" >&2; exit 1; }
 compgen -G "$profiles_dir/*.yaml" >/dev/null || { echo "生产子系统审核清单目录中没有 YAML 文件" >&2; exit 1; }
 
 # shellcheck source=public-transport.sh
 source "$transport_helper"
+# shellcheck source=provisioner-config-refresh.sh
+source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
+source "$script_dir/compose-scope.sh"
+scope_require "$service" || exit 1
+scope_report
+
+# 部署资产替换后必须先成对重载控制面（install-assets.sh 会写 runtime/.control-plane-reload-required）。
+# 这里在解析与网络创建之前失败，避免重建出与前一侧清单不一致的容器。
+require_control_plane_reload_clearance || exit 1
 
 ensure_application_network() {
   local network_name="basic-platform-production"
@@ -118,7 +141,7 @@ release_permission_error() {
   current_group="$(id -gn 2>/dev/null || printf unknown)"
   owner="$(stat -c '%U:%G' "$release_file" 2>/dev/null || printf unknown)"
   mode="$(stat -c '%a' "$release_file" 2>/dev/null || printf unknown)"
-  echo "发布配置权限不足：$release_file（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "发布配置权限不足：${release_file}（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
   echo "请使用 root 执行：chown ${current_user}:${current_group} $release_file && chmod 600 $release_file" >&2
   exit 1
 }
@@ -129,7 +152,7 @@ runtime_permission_error() {
   current_group="$(id -gn 2>/dev/null || printf unknown)"
   owner="$(stat -c '%U:%G' "$target" 2>/dev/null || printf unknown)"
   mode="$(stat -c '%a' "$target" 2>/dev/null || printf unknown)"
-  echo "运行配置权限不足：$target（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
+  echo "运行配置权限不足：${target}（当前用户=${current_user}:${current_group}，文件属主=${owner}，权限=${mode}）" >&2
   echo "请使用 root 执行：chown ${current_user}:${current_group} $target && chmod 600 $target" >&2
   exit 1
 }
@@ -151,17 +174,17 @@ ensure_runtime_file_mode_0600() {
       return 0
     fi
 
-    echo "无法读取运行配置文件：$target；请检查权限后重试" >&2
+    echo "无法读取运行配置文件：${target}；请检查权限后重试" >&2
     return 1
   fi
 
   temporary="$(mktemp "$deploy_dir/runtime/.runtime-permissions.XXXXXX")" || {
-    echo "无法创建运行配置权限修复临时文件：$target；请由文件属主或 root 执行部署" >&2
+    echo "无法创建运行配置权限修复临时文件：${target}；请由文件属主或 root 执行部署" >&2
     exit 1
   }
   if ! install -m 600 "$target" "$temporary" 2>/dev/null || ! mv -f "$temporary" "$target"; then
     rm -f "$temporary"
-    echo "无法将运行配置权限收紧为 0600：$target；请检查文件属主、runtime 目录写权限，或使用 root 执行部署" >&2
+    echo "无法将运行配置权限收紧为 0600：${target}；请检查文件属主、runtime 目录写权限，或使用 root 执行部署" >&2
     exit 1
   fi
 }
@@ -171,11 +194,11 @@ prepare_runtime_file() {
   install -d -m 700 "$deploy_dir/runtime"
   if [[ ! -f "$target" ]]; then
     [[ -f "$template" ]] || {
-      echo "缺少 $target，且没有可用于初始化的 $template" >&2
+      echo "缺少 ${target}，且没有可用于初始化的 $template" >&2
       exit 1
     }
     install -m 600 "$template" "$target"
-    echo "已初始化 $target；${label}接入前仍需由平台写入运行凭据"
+    echo "已初始化 ${target}；${label}接入前仍需由平台写入运行凭据"
   fi
   [[ ! -L "$target" ]] || {
     echo "拒绝符号链接运行配置：$target" >&2
@@ -267,10 +290,20 @@ write_service_runtime_dsns() {
   write_runtime_dsn_value "$target" "$key" "$dsn"
 }
 
-# 只准备本次真正发布的子系统配置。frontend/platform 发布不得创建、改属主或
-# 改权限 contract/project runtime，避免无关发布被历史 root-owned 密钥文件阻断。
-# DSN 必须在任何 compose up 之前写入；本 case 是对应服务发布入口的最早阶段，
-# 写入失败由 set -Eeuo pipefail 中止发布（SEC-N10b）。
+install -d -m 700 "$deploy_dir/runtime"
+mkdir -p "$deploy_dir/backups/releases"
+[[ -w "$deploy_dir/backups/releases" ]] || {
+  echo "发布备份目录不可写：$deploy_dir/backups/releases；请将其属主调整为当前 CI 部署用户" >&2
+  exit 1
+}
+exec 9>"$deploy_dir/runtime/.deploy.lock"
+# 锁覆盖“备份—迁移—切镜像—健康检查—回退”完整窗口，防止并发发布互相覆盖 .release.env。
+flock -w 900 9 || {
+  echo "等待其他发布任务超时" >&2
+  exit 1
+}
+# 运行配置读取、DSN 原子改写和后续 .release.env 提交必须位于同一个锁窗口。
+# 否则等待锁期间 Agent 可能刚下发新凭据，发布脚本却用锁外读取的旧文件覆盖它。
 case "$service" in
   contract)
     prepare_runtime_file "$contract_runtime_file" "$contract_runtime_template" "合同服务"
@@ -289,19 +322,6 @@ case "$service" in
     write_service_runtime_dsns data-analysis
     ;;
 esac
-
-install -d -m 700 "$deploy_dir/runtime"
-mkdir -p "$deploy_dir/backups/releases"
-[[ -w "$deploy_dir/backups/releases" ]] || {
-  echo "发布备份目录不可写：$deploy_dir/backups/releases；请将其属主调整为当前 CI 部署用户" >&2
-  exit 1
-}
-exec 9>"$deploy_dir/runtime/.deploy.lock"
-# 锁覆盖“备份—迁移—切镜像—健康检查—回退”完整窗口，防止并发发布互相覆盖 .release.env。
-flock -w 900 9 || {
-  echo "等待其他发布任务超时" >&2
-  exit 1
-}
 # The transport coordinator persists its transition state in the runtime file
 # while holding this same lock. Re-read it after waiting so a service-only
 # deployment cannot accidentally drop the drain overlay with stale variables.
@@ -319,17 +339,7 @@ compose() {
 }
 
 frontend_compose() {
-  [[ -f "$frontend_compose_file" ]] || {
-    echo "缺少前端独立发布清单：$frontend_compose_file" >&2
-    return 1
-  }
-  local command=(docker compose \
-    --project-directory "$deploy_dir" \
-    --file "$frontend_compose_file" \
-    --env-file "$runtime_file" \
-    --env-file "$release_file")
-  public_transport_compose_args command
-  "${command[@]}" "$@"
+  compose "$@"
 }
 
 env_value() {
@@ -547,10 +557,37 @@ verify_service_image() {
   }
   actual_image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
   [[ "$actual_image" == "$expected_image" ]] || {
-    echo "$service_name 镜像未生效：期望=$expected_image，实际=$actual_image" >&2
+    echo "$service_name 镜像未生效：期望=${expected_image}，实际=$actual_image" >&2
     return 1
   }
   echo "$service_name 已运行目标不可变镜像：$expected_image"
+}
+
+verify_service_stable() {
+  local service_name="$1" window="${2:-${DEPLOY_STABILITY_WINDOW_SECONDS:-10}}"
+  local container_id before after
+  [[ "$window" =~ ^[0-9]+$ ]] || {
+    echo "稳定性观察时长必须是非负整数秒：$window" >&2
+    return 1
+  }
+  container_id="$(compose ps -q "$service_name" 2>/dev/null || true)"
+  [[ -n "$container_id" ]] || {
+    echo "未找到 $service_name 容器，无法执行稳定性门禁" >&2
+    return 1
+  }
+  before="$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' "$container_id" 2>/dev/null || true)"
+  [[ "$before" =~ ^running\ healthy\ ([0-9]+)$ ]] || {
+    echo "$service_name 未达到 running/healthy：${before:-missing}" >&2
+    return 1
+  }
+  ((window == 0)) || sleep "$window"
+  after="$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' "$container_id" 2>/dev/null || true)"
+  [[ "$after" == "$before" ]] || {
+    echo "$service_name 在 ${window}s 稳定性窗口内状态或重启次数发生变化：before=[$before] after=[${after:-missing}]" >&2
+    compose logs --no-color --tail 120 "$service_name" >&2 || true
+    return 1
+  }
+  echo "${service_name} 已通过 ${window}s 存活/健康稳定性门禁（${after}）"
 }
 
 dump_subsystem_provisioner_debug() {
@@ -626,9 +663,9 @@ require_backup_space() {
 }
 
 deploy_platform() {
-	local file_gateway_root file_gateway_db_name
+	local file_gateway_root file_gateway_db_name file_gateway_container file_gateway_health
 	file_gateway_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
-	file_gateway_root="${file_gateway_root:-/opt/basic-platform/data/file-gateway}"
+	file_gateway_root="${file_gateway_root:-/opt/unified-identity-platform/data/file-gateway}"
 	file_gateway_db_name="$(env_value FILE_GATEWAY_DB_NAME)"
 	file_gateway_db_name="${file_gateway_db_name:-file_gateway}"
 	if [[ -L "$file_gateway_root" ]]; then
@@ -636,18 +673,20 @@ deploy_platform() {
 		return 1
 	fi
 	if [[ ! -d "$file_gateway_root" ]]; then
-		echo "缺少文件网关持久化目录：$file_gateway_root；请使用 root 创建 temporary、quarantine 并执行 chown -R 10001:10001" >&2
+		echo "缺少文件网关持久化目录：${file_gateway_root}；请使用 root 创建 temporary、quarantine 并执行 chown -R 10001:10001" >&2
 		return 1
 	fi
 	# 根目录为 0750 且归属专用 UID 后，普通 CI 账号不能继续穿越并 stat 子目录。
 	# 子目录由容器 root 入口幂等创建和收紧，发布端只校验不可替换的挂载根边界。
 	if [[ "$(stat -c '%u:%g' "$file_gateway_root")" != "10001:10001" ]]; then
-		echo "文件网关目录属主不正确：$file_gateway_root；请使用 root 执行 chown -R 10001:10001" >&2
+		echo "文件网关目录属主不正确：${file_gateway_root}；请使用 root 执行 chown -R 10001:10001" >&2
 		return 1
 	fi
-  compose up -d --wait --wait-timeout 180 platform-mysql || return
+  compose run --rm --no-deps platform-key-init || return
+  compose up -d --wait --wait-timeout 180 platform-mysql keycloak-db contract-mysql || return
   backup_database platform-mysql basic_platform || return
-  compose --profile release run --rm platform-migrate ./migrate || return
+  compose run --rm --no-deps platform-migrate ./migrate || return
+  compose up -d --wait --wait-timeout 180 keycloak temporal || return
 	compose up -d --wait --wait-timeout 180 file-gateway-mysql || return
 	backup_database file-gateway-mysql "$file_gateway_db_name" file-gateway || return
 	if ! compose up -d --force-recreate --wait --wait-timeout 180 file-gateway; then
@@ -655,25 +694,37 @@ deploy_platform() {
 		dump_file_gateway_debug
 		return 1
 	fi
+	file_gateway_container="$(compose ps -q file-gateway)"
+	file_gateway_health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$file_gateway_container")"
+	if [[ "$file_gateway_health" != healthy ]]; then
+		echo 'File Gateway 未通过 /readyz 健康检查；拒绝继续启动平台 API' >&2
+		dump_file_gateway_debug
+		return 1
+	fi
+  verify_service_image compose file-gateway "$file_gateway_image_ref" || return 1
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
   # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；
   # API 与 Worker 必须使用同一不可变镜像；Worker 独立运行，不能依赖 API
   # 入口脚本的双进程模式，否则 Keycloak 用户投影可能没有消费者。
+  compose run --rm --no-deps subsystem-provisioner-socket-init || return
+  compose up -d --wait --wait-timeout 60 docker-socket-proxy || return
   if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
     echo "subsystem-provisioner 健康启动失败" >&2
     dump_subsystem_provisioner_debug
     return 1
   fi
-  compose up -d --force-recreate --no-deps platform-api platform-worker || return
+  verify_subsystem_provisioner_config_consistency "$(compose ps -q subsystem-provisioner)" || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 platform-api platform-worker || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || {
     # 兜底：新镜像首启异常时强制重建一次并再次等待，避免平台 API 停留在宕机状态。
     echo "platform-api 未通过健康检查，强制重建一次后重试" >&2
-    compose up -d --force-recreate --no-deps platform-api platform-worker || return
+    compose up -d --force-recreate --no-deps --wait --wait-timeout 120 platform-api platform-worker || return
     wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || return
   }
   verify_service_image compose platform-api "$image_ref" || return 1
   verify_service_image compose platform-worker "$image_ref" || return 1
+  verify_service_stable platform-worker || return 1
 }
 
 deploy_contract() {
@@ -702,8 +753,8 @@ deploy_contract() {
   fi
   compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
   backup_database contract-mysql contract_management || return
-  # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
-  compose --profile release run --rm contract-migrate || return
+  # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
+  compose run --rm --no-deps contract-migrate || return
   if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api; then
     echo "---- contract-api 启动失败日志 ----" >&2
     compose logs --no-color --tail 120 contract-api >&2 || true
@@ -731,15 +782,16 @@ deploy_project() {
   fi
   compose up -d --wait --wait-timeout 240 project-mysql temporal || return
   backup_database project-mysql project_management || return
-  # 迁移命令由 compose.yaml 固定；非零退出会在替换 API 镜像前终止发布。
-  compose --profile project-release run --rm project-migrate || return
-  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 project-api || return
+  # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
+  compose run --rm --no-deps project-migrate || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 project-api project-sla-notifier || return
   if ! wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18085)/healthz"; then
     echo "---- project-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 project-api >&2 || true
     return 1
   fi
   verify_service_image compose project-api "$image_ref" || return 1
+  verify_service_image compose project-sla-notifier "$image_ref" || return 1
 }
 
 deploy_settlement() {
@@ -764,14 +816,14 @@ deploy_settlement() {
   }
   compose up -d --wait --wait-timeout 240 settlement-mysql || return
   backup_database settlement-mysql settlement || return
-  compose --profile settlement-release run --rm settlement-migrate || return
+  compose run --rm --no-deps settlement-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 settlement-api settlement-worker || return
   if ! wait_for_health "http://127.0.0.1:$(port_value SETTLEMENT_API_PORT 18087)/healthz"; then
     echo "---- settlement-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 settlement-api settlement-worker >&2 || true
     return 1
   fi
-  compose --profile settlement-release run --rm --no-deps settlement-catalog-sync || return
+  compose run --rm --no-deps settlement-catalog-sync || return
   verify_service_image compose settlement-api "$image_ref" || return 1
   verify_service_image compose settlement-worker "$image_ref" || return 1
 }
@@ -781,9 +833,10 @@ deploy_data_analysis() {
   # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
   compose up -d --wait --wait-timeout 240 data-analysis-mysql || return
   backup_database data-analysis-mysql dashboard_aggregation || return
-  compose --profile data-analysis-release run --rm data-analysis-migrate || return
+  compose run --rm --no-deps data-analysis-metabase-init || return
+  compose run --rm --no-deps data-analysis-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
-    data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker || return
+    data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || return
   if ! wait_for_health "http://127.0.0.1:$(port_value DATA_ANALYSIS_API_PORT 18086)/data_analysis/readyz"; then
     echo "---- data-analysis-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 data-analysis-api >&2 || true
@@ -799,26 +852,85 @@ deploy_data_analysis() {
 }
 
 deploy_frontend() {
+  public_transport_install_certificates "$deploy_dir" || return
   frontend_compose up -d --force-recreate --no-deps --wait --wait-timeout 120 frontend || return
-  wait_for_health "http://127.0.0.1:${PUBLIC_HTTP_PORT}/"
-  verify_service_image frontend frontend "$image_ref"
+  wait_for_health "http://127.0.0.1:${PUBLIC_HTTP_PORT}/" || return 1
+  verify_service_image frontend frontend "$image_ref" || return 1
+}
+
+rollback_ref_is_immutable() {
+  local ref="$1"
+  [[ "$ref" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]
+}
+
+release_image_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$release_file"
 }
 
 rollback_runtime() {
+  local -a restored_images=()
+  local restored_image_key restored_image
+  case "$service" in
+    frontend) restored_images+=("$(release_image_value FRONTEND_IMAGE)") ;;
+    platform)
+      restored_images+=("$(release_image_value PLATFORM_IMAGE)")
+      restored_images+=("$(release_image_value FILE_GATEWAY_IMAGE)")
+      ;;
+    contract) restored_images+=("$(release_image_value CONTRACT_IMAGE)") ;;
+    project) restored_images+=("$(release_image_value PROJECT_IMAGE)") ;;
+    settlement) restored_images+=("$(release_image_value SETTLEMENT_IMAGE)") ;;
+    data-analysis)
+      for restored_image_key in \
+        DATA_ANALYSIS_DASHBOARD_API_IMAGE \
+        DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE \
+        DATA_ANALYSIS_ALERT_WORKER_IMAGE; do
+        restored_images+=("$(release_image_value "$restored_image_key")")
+      done
+      ;;
+  esac
+  for restored_image in "${restored_images[@]}"; do
+    if ! rollback_ref_is_immutable "$restored_image"; then
+      echo "上一发布配置没有可回滚的不可变镜像（${restored_image:-空值}）；这是首次安装或旧配置占位值，保留已健康的基础设施并跳过运行态回滚" >&2
+      return 0
+    fi
+  done
+
   case "$service" in
     frontend) frontend_compose up -d --force-recreate --no-deps frontend ;;
     platform)
+      local restored_platform_image restored_gateway_image provisioner_container
+      restored_platform_image="${restored_images[0]}"
+      restored_gateway_image="${restored_images[1]}"
+      compose run --rm --no-deps subsystem-provisioner-socket-init || return
+      compose up -d --wait --wait-timeout 60 docker-socket-proxy || return
       # 失败可能发生在基础设施启动阶段；先确保平台数据库恢复，再启动 Agent，
       # 最后恢复 API/Worker。回滚不得让 API 在数据库仍停止时进入重启循环。
       compose up -d --wait --wait-timeout 180 --no-deps platform-mysql || true
+      compose up -d --force-recreate --wait --wait-timeout 180 --no-deps file-gateway || return 1
       if ! compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner; then
         echo "回滚时 subsystem-provisioner 重建失败，继续尝试重建 platform-api" >&2
         dump_subsystem_provisioner_debug
+        return 1
       fi
-      compose up -d --force-recreate --no-deps platform-api platform-worker
+      provisioner_container="$(compose ps -q subsystem-provisioner)"
+      verify_subsystem_provisioner_config_consistency "$provisioner_container" || return 1
+      compose up -d --force-recreate --no-deps --wait --wait-timeout 120 platform-api platform-worker || return 1
+      wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || return 1
+      verify_service_image compose file-gateway "$restored_gateway_image" || return 1
+      verify_service_image compose platform-api "$restored_platform_image" || return 1
+      verify_service_image compose platform-worker "$restored_platform_image" || return 1
+      verify_service_stable platform-worker || return 1
       ;;
     contract) compose up -d --force-recreate --no-deps contract-api ;;
-    project) compose up -d --force-recreate --no-deps project-api ;;
+    project)
+      local restored_project_image
+      restored_project_image="${restored_images[0]}"
+      compose up -d --force-recreate --no-deps --wait --wait-timeout 120 project-api project-sla-notifier || return 1
+      wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18085)/healthz" || return 1
+      verify_service_image compose project-api "$restored_project_image" || return 1
+      verify_service_image compose project-sla-notifier "$restored_project_image" || return 1
+      ;;
     settlement) compose up -d --force-recreate --no-deps settlement-api settlement-worker ;;
     data-analysis)
       compose up -d --force-recreate --no-deps \
@@ -857,6 +969,14 @@ if [[ "$service" == "data-analysis" ]]; then
         if (!found4) print k4 "=" v4
       }
     ' "$release_file" >"$next_release"
+elif [[ "$service" == "platform" ]]; then
+  awk -F= -v k1="$image_key" -v v1="$image_ref" -v k2="$file_gateway_image_key" -v v2="$file_gateway_image_ref" '
+    BEGIN { found1 = found2 = 0 }
+    $1 == k1 { print k1 "=" v1; found1 = 1; next }
+    $1 == k2 { print k2 "=" v2; found2 = 1; next }
+    { print }
+    END { if (!found1) print k1 "=" v1; if (!found2) print k2 "=" v2 }
+  ' "$release_file" >"$next_release"
 else
   awk -F= -v key="$image_key" -v value="$image_ref" '
     BEGIN { found = 0 }
@@ -889,6 +1009,16 @@ if [[ "$service" == "data-analysis" ]]; then
       exit 1
     fi
   done
+elif [[ "$service" == "platform" ]]; then
+  for platform_image in "$image_ref" "$file_gateway_image_ref"; do
+    echo "拉取不可变平台镜像：$platform_image"
+    if ! docker pull "$platform_image"; then
+      mv -f "$previous_release" "$release_file"
+      rm -f "$previous_release"
+      echo "镜像拉取失败，发布配置已恢复" >&2
+      exit 1
+    fi
+  done
 else
   echo "拉取不可变镜像：$image_ref"
   if ! docker pull "$image_ref"; then
@@ -912,10 +1042,21 @@ if [[ "$compose_config_ok" != "true" ]]; then
   exit 1
 fi
 
+# .release.env 是 Agent 的单文件 bind mount。原子提交后必须重建容器并比较
+# 宿主/容器内摘要；仅 docker restart 不会重新绑定已经被替换的 inode。
+if [[ "$service" != platform ]] && ! refresh_subsystem_provisioner_config; then
+  mv -f "$previous_release" "$release_file"
+  refresh_subsystem_provisioner_config || true
+  echo 'Agent 配置刷新失败，发布配置已恢复' >&2
+  exit 1
+fi
+
 # 首次上线时子系统镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
 # 子系统 API，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
 if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
   if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    mv -f "$previous_release" "$release_file"
+    refresh_subsystem_provisioner_config || true
     echo "合同管理运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
     echo "请先在基础平台重新发布 contract_management/prod，补齐 CRM 与项目集成机器凭据后再运行 CI/CD" >&2
     exit 1
@@ -927,6 +1068,8 @@ if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
 fi
 if [[ "$service" == "project" ]] && ! project_runtime_ready; then
   if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    mv -f "$previous_release" "$release_file"
+    refresh_subsystem_provisioner_config || true
     echo "项目管理运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
     echo "请先登录基础平台的“应用接入”页面完成 project_management/prod 接入，再重新运行 CI/CD" >&2
     exit 1
@@ -938,6 +1081,8 @@ if [[ "$service" == "project" ]] && ! project_runtime_ready; then
 fi
 if [[ "$service" == "settlement" ]] && ! settlement_runtime_ready; then
   if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    mv -f "$previous_release" "$release_file"
+    refresh_subsystem_provisioner_config || true
     echo "结算运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
     echo "请先登录基础平台的“应用接入”页面完成 settlement/prod 接入，再重新运行 CI/CD" >&2
     exit 1
@@ -958,14 +1103,7 @@ echo "开始发布 $service"
 # 服务标识允许使用 data-analysis 这类连字符名称，但 Bash 函数名只能使用
 # 标识符字符；统一转换后再动态调用，避免执行 deploy_data-analysis 这样的外部命令。
 deploy_function="deploy_${service//-/_}"
-refresh_subsystem_provisioner_release_mount() {
-  [[ "$service" != "platform" ]] || return 0
-  [[ -n "$(compose ps -q subsystem-provisioner 2>/dev/null || true)" ]] || return 0
-  echo "刷新 subsystem-provisioner 的不可变镜像指针挂载"
-  compose up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner
-}
-
-if "$deploy_function" && refresh_subsystem_provisioner_release_mount; then
+if "$deploy_function"; then
   rm -f "$previous_release"
   echo "$service 发布成功：$image_ref"
   exit 0
@@ -975,5 +1113,9 @@ echo "发布失败，恢复上一镜像；已执行的数据库迁移不会反�
 # 应用镜像可回退，数据库迁移不可自动逆转；迁移必须保持前后版本兼容或由人工执行恢复方案。
 mv -f "$previous_release" "$release_file"
 rm -f "$previous_release"
+if [[ "$service" != platform ]]; then
+  refresh_subsystem_provisioner_config || \
+    echo '警告：发布回滚后 Agent 配置一致性核验失败，请暂停接入操作并人工处理' >&2
+fi
 rollback_runtime || true
 exit 1

@@ -290,6 +290,28 @@ func (repository *ManagementRepository) PurgeEnvironment(ctx context.Context, in
 		if removed.Version != input.Version {
 			return application.ErrVersionConflict
 		}
+		var deploymentStatus string
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Table("subsystem_deployment_state").Select("status").
+			Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).
+			Take(&deploymentStatus).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return application.ErrEnvironmentNotOffboarded
+			}
+			return err
+		}
+		if deploymentStatus != application.SubsystemDeploymentStatusOffboarded {
+			return application.ErrEnvironmentNotOffboarded
+		}
+		var completedRetentionTasks int64
+		if err := transaction.Table("audit_retention_task").
+			Where("task_id = ? AND tenant_id = ? AND application_id = ? AND mode = 'PURGE' AND status = 'COMPLETED'", input.RetentionApprovalID, input.TenantID, input.ApplicationID).
+			Count(&completedRetentionTasks).Error; err != nil {
+			return err
+		}
+		if completedRetentionTasks != 1 {
+			return application.ErrEnvironmentRetentionApprovalInvalid
+		}
 		var clientIDs []string
 		if err := transaction.Model(&oauthClientManagementModel{}).
 			Where("tenant_id = ? AND application_id = ? AND environment_id = ?", input.TenantID, input.ApplicationID, input.EnvironmentID).

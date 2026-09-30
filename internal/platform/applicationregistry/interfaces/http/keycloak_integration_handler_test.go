@@ -88,7 +88,7 @@ func TestKeycloakIntegrationRollbackPinsPlatformIssuer(t *testing.T) {
 	t.Parallel()
 	provisioner := &recordingHTTPSubsystemProvisioner{}
 	stateStore := &keycloakIssuerStateStore{
-		recordingSubsystemDeploymentStateStore: recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1"}},
+		recordingSubsystemDeploymentStateStore: recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", EnvironmentID: "env-1"}},
 		issuerAlias:                            "keycloak",
 	}
 	subsystems, err := NewSubsystemOnboardingHandler(
@@ -104,6 +104,7 @@ func TestKeycloakIntegrationRollbackPinsPlatformIssuer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	subsystems.serviceCredentials = &serviceCredentialManagerStub{}
 	subsystems.ConfigureKeycloakCutoverLifecycle(keycloakRollbackLifecycleStub{})
 	integration, err := NewKeycloakIntegrationHandler(subsystems)
 	if err != nil {

@@ -22,8 +22,8 @@ func TestHardcodedInitialSubsystemAdministratorRoles(t *testing.T) {
 	if got := hardcodedInitialSubsystemAdministratorRoles("customer_and_opportunity"); !reflect.DeepEqual(got, []string{"sales_director", "team_lead", "technical_director"}) {
 		t.Fatalf("customer initial roles = %v", got)
 	}
-	if got := hardcodedInitialSubsystemAdministratorRoles("customer_portal"); len(got) != 0 {
-		t.Fatalf("portal must not grant the internal onboarding operator a customer role: %v", got)
+	if got := hardcodedInitialSubsystemAdministratorRoles("customer_portal"); !reflect.DeepEqual(got, []string{"portal_super_admin"}) {
+		t.Fatalf("portal must grant only the internal operator role: %v", got)
 	}
 	if got := hardcodedInitialSubsystemAdministratorRoles("project_management"); !reflect.DeepEqual(got, []string{"admin"}) {
 		t.Fatalf("project initial roles = %v", got)
@@ -39,7 +39,7 @@ func TestInitialAdminRolesManifestDrivenMatchesHardcodedDefaults(t *testing.T) {
 			{ApplicationCode: "contract_management", InitialAdminRoles: []string{"admin"}},
 			{ApplicationCode: "data_analysis", InitialAdminRoles: []string{"dashboard_admin"}},
 			{ApplicationCode: "customer_and_opportunity", InitialAdminRoles: []string{"sales_director", "team_lead", "technical_director"}},
-			{ApplicationCode: "customer_portal", InitialAdminRoles: []string{}},
+			{ApplicationCode: "customer_portal", InitialAdminRoles: []string{"portal_super_admin"}},
 			// project_management 故意不声明：应回退硬编码默认 ["admin"]。
 			{ApplicationCode: "project_management"},
 		},

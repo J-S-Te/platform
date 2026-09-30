@@ -31,6 +31,15 @@ type fakeBrokerCredentialChecker struct {
 	err   error
 }
 
+type fakeCustomerPortalBrokerReconciler struct {
+	registered bool
+	err        error
+}
+
+func (f fakeCustomerPortalBrokerReconciler) Reconcile(context.Context) (bool, error) {
+	return f.registered, f.err
+}
+
 func (f *fakeBrokerCredentialChecker) HasActiveCredential(context.Context, string) error {
 	atomic.AddInt32(&f.calls, 1)
 	return f.err
@@ -67,5 +76,37 @@ func TestKeycloakBrokerHealthRunnerChecksNoPanicOnErrors(t *testing.T) {
 	runner := &keycloakBrokerHealthRunner{verifier: verifier, checker: checker, logger: testLogger(), poll: time.Minute}
 	for i := 0; i < 3; i++ {
 		runner.check(context.Background()) // 不应 panic，且限流日志
+	}
+}
+
+func TestKeycloakBrokerHealthRunnerSkipsOptionalPortalBeforeOnboarding(t *testing.T) {
+	verifier := &fakeBrokerHealthVerifier{}
+	checker := &fakeBrokerCredentialChecker{}
+	runner := &keycloakBrokerHealthRunner{
+		verifier: verifier, checker: checker, portalReconciler: fakeCustomerPortalBrokerReconciler{},
+		logger: testLogger(), poll: time.Minute,
+	}
+	runner.check(context.Background())
+	if got := atomic.LoadInt32(&checker.calls); got != 1 {
+		t.Fatalf("credential checks = %d, want only the required platform Broker", got)
+	}
+	if got := atomic.LoadInt32(&verifier.customerCalls); got != 0 {
+		t.Fatalf("customer portal verification calls = %d, want 0 before onboarding", got)
+	}
+}
+
+func TestKeycloakBrokerHealthRunnerChecksPortalAfterReconciliation(t *testing.T) {
+	verifier := &fakeBrokerHealthVerifier{}
+	checker := &fakeBrokerCredentialChecker{}
+	runner := &keycloakBrokerHealthRunner{
+		verifier: verifier, checker: checker, portalReconciler: fakeCustomerPortalBrokerReconciler{registered: true},
+		logger: testLogger(), poll: time.Minute,
+	}
+	runner.check(context.Background())
+	if got := atomic.LoadInt32(&checker.calls); got != 2 {
+		t.Fatalf("credential checks = %d, want both Brokers", got)
+	}
+	if got := atomic.LoadInt32(&verifier.customerCalls); got != 1 {
+		t.Fatalf("customer portal verification calls = %d, want 1", got)
 	}
 }

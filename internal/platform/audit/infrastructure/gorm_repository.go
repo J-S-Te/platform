@@ -290,7 +290,22 @@ func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.
 	}
 	return toEvent(record.Event, record.ApplicationCode, record.ApplicationName, record.EnvironmentCode), nil
 }
+
+// maxActiveAuditExportJobsPerTenant 是每租户活跃（PENDING/RUNNING）审计导出任务上限
+// （AUD-2026-013）：导出任务无配额时可被高频创建刷爆导出 worker 与磁盘（每任务最多
+// maxAuditExportEvents 行 CSV）。上限刻意取小常量，任务完成（SUCCEEDED/FAILED）后即
+// 释放配额，可再次创建；超限调用方收到 409 冲突（application.ErrConflict）。
+const maxActiveAuditExportJobsPerTenant = 3
+
 func (r *Repository) CreateExportJob(ctx context.Context, tenantID, operatorID string, query application.PageRequest, publicID string, now time.Time) (domain.ExportJob, error) {
+	// AUD-2026-013：先按租户统计活跃导出任务，超出上限直接拒绝，不再排队。
+	var activeJobs int64
+	if err := r.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ? AND job_type = ? AND status IN ?", tenantID, "AUDIT_EXPORT", []string{"PENDING", "RUNNING"}).Count(&activeJobs).Error; err != nil {
+		return domain.ExportJob{}, err
+	}
+	if activeJobs >= maxActiveAuditExportJobsPerTenant {
+		return domain.ExportJob{}, fmt.Errorf("%w: tenant already has %d active audit export jobs (limit %d)", application.ErrConflict, activeJobs, maxActiveAuditExportJobsPerTenant)
+	}
 	// 导出条件和操作者固化进任务快照，Worker 不再读取浏览器请求上下文；任务归属平台
 	// 应用仅用于文件元数据关联，所有后续读取仍必须携带租户 ID。
 	var platformApplication applicationModel

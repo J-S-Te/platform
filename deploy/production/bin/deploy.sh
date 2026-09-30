@@ -2,7 +2,7 @@
 # =============================================================================
 # 统一离线部署入口（部署目录内使用）
 #
-#   运行位置：部署目录，即本文件所在 bin/ 的上一级同时存在 compose.yaml、
+#   运行位置：部署目录，即本文件所在 bin/ 的上一级同时存在 docker-compose.yml、
 #             .env、.release.env、subsystems.d/ 的目录（默认 /opt/unified-identity-platform）。
 #   前置条件：已解压 deployment-assets-*.tar.gz，并至少执行过一次 configure。
 #   完整流程：见同目录 OFFLINE_DEPLOYMENT.md；子命令总览执行 ./bin/deploy.sh help。
@@ -19,7 +19,18 @@ release_file="$deploy_dir/.release.env"
 manifest_dir="$deploy_dir/manifests"
 package_dir="$deploy_dir/packages"
 registry_address="${UIP_OFFLINE_REGISTRY:-127.0.0.1:5000}"
-compose_file="$deploy_dir/compose.yaml"
+compose_file="$deploy_dir/docker-compose.yml"
+profiles_dir="$deploy_dir/subsystems.d"
+asset_install_transaction="$deploy_dir/runtime/.assets-install-transaction"
+control_plane_reload_marker="$deploy_dir/runtime/.control-plane-reload-required"
+if [[ -e "$asset_install_transaction" || -L "$asset_install_transaction" ]]; then
+  printf '错误：检测到未完成的部署资产安装事务：%s\n' "$asset_install_transaction" >&2
+  printf '拒绝在脚本/清单可能混合的状态下继续部署。请使用同一交付包中的 install-assets.sh --recover %s 恢复后重试。\n' "$deploy_dir" >&2
+  exit 1
+fi
+source "$script_dir/compose-scope.sh"
+source "$script_dir/start-enabled.sh"
+source "$script_dir/offline-package-metadata.sh"
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "缺少所需命令：$1"; }
@@ -38,6 +49,9 @@ usage() {
   import <镜像包路径>           导入镜像包，校验摘要并登记不可变 digest
   deploy platform               发布基础平台（含数据库迁移与首个管理员初始化）
   deploy frontend               发布统一前端
+  start                         分阶段启动公共平台及 YAML 内已接入子系统
+  resume <子系统>               恢复单个已接入子系统：依赖健康等待、备份、迁移与启动
+  disable <子系统>              显式停止单系统，保留数据卷与密钥
   status [子系统]               查看容器状态；带子系统时显示阶段与唯一下一步
   verify [子系统]               健康检查；带子系统时对该子系统做部署验收
   logs <应用编码>               查看该应用的全部容器日志
@@ -51,6 +65,8 @@ usage() {
   doctor [子系统]               只读环境自检：配置权限、镜像包摘要、导入记录与
                                 .release.env 一致性、Agent 绑定、runtime 占位凭据；
                                 带子系统时显示当前阶段与下一步
+  reload-control-plane          部署资产变更后成对重建 Agent 与 platform-api，并校验
+                                subsystems.d 集合摘要、单文件挂载、Socket 与健康状态
   backup                        对所有运行中的 MySQL 做逻辑备份并校验摘要
   restore --service <服务> --backup <文件> --verify-only
   restore --service <服务> --backup <文件> --confirm RESTORE_MYSQL_SERVICE
@@ -119,6 +135,8 @@ package_index() {
 
 auto_install_packages() {
   require_initialized
+  scope_services >/dev/null || die '统一 Compose 无法解析'
+  scope_report
   local component archive index
   local -a packages=()
   local -a ordered=(common platform frontend customer-opportunity customer-portal contract project settlement data-analysis)
@@ -126,6 +144,7 @@ auto_install_packages() {
   printf '扫描镜像包目录：%s\n' "$package_dir"
   # 先解析全部包名并检查歧义，避免平台启动后才发现包版本冲突。
   for component in "${ordered[@]}"; do
+    scope_enabled "$component" || { printf '  %s 未启用，跳过镜像包检查。\n' "$component"; continue; }
     if archive="$(discover_package "$component")"; then
       index="$(package_index "$component")"
       packages[$index]="$archive"
@@ -148,7 +167,7 @@ auto_install_packages() {
   import_package "${packages[1]}"
   printf '\n阶段 B：启动并检查基础平台\n'
   deploy_component platform
-  if ! verify; then
+  if ! wait_for_required_service_health platform-api platform-worker file-gateway keycloak temporal; then
     printf '自动安装暂停于基础平台验收；已完成的迁移和服务会保留。修复问题后执行：sudo ./bin/deploy.sh verify\n' >&2
     return 1
   fi
@@ -226,14 +245,10 @@ compose() {
 }
 
 compose_monitoring() {
-  ensure_application_network
-  public_transport_prepare "$deploy_dir" "$runtime_file"
-  local args=(--project-directory "$deploy_dir" --file "$compose_file" --file "$deploy_dir/compose.observability.yaml")
-  public_transport_compose_args args
-  docker compose "${args[@]}" --env-file "$runtime_file" --env-file "$release_file" "$@"
+  compose "$@"
 }
 
-# 本脚本必须与同一资产包中的 compose.yaml、offline-configure.sh、public-transport.sh
+# 本脚本必须与同一资产包中的 docker-compose.yml、offline-configure.sh、public-transport.sh
 # 放在一起才能运行。交付目录顶层的 server_up.sh 只是本脚本的中文副本，单独执行会在这里
 # 被拦截并给出可操作的提示，而不是抛出难以理解的 source 错误。
 # 这里只列 source 阶段真正依赖的文件；deploy-service.sh 仅 deploy/upgrade 需要，故意
@@ -242,7 +257,7 @@ missing_siblings=()
 for sibling in offline-configure.sh public-transport.sh; do
   [[ -f "$script_dir/$sibling" ]] || missing_siblings+=("$script_dir/$sibling")
 done
-[[ -f "$deploy_dir/compose.yaml" ]] || missing_siblings+=("$deploy_dir/compose.yaml")
+[[ -f "$deploy_dir/docker-compose.yml" ]] || missing_siblings+=("$deploy_dir/docker-compose.yml")
 if ((${#missing_siblings[@]} > 0)); then
   printf '错误：当前脚本不在完整的部署目录中，缺少以下文件：\n' >&2
   printf '  %s\n' "${missing_siblings[@]}" >&2
@@ -255,13 +270,54 @@ fi
 # shellcheck source=offline-configure.sh
 source "$script_dir/offline-configure.sh"
 
+ensure_registry_bridge() {
+  # Docker metadata is authoritative; never assume docker0 or 172.17.0.0/16.
+  [[ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' uip-offline-registry)" == bridge ]] || return 0
+  local metadata bridge subnet gateway prefix addresses link routes
+  need ip; need jq
+  metadata="$(docker network inspect bridge)" || die '无法读取离线仓库 bridge 配置'
+  bridge="$(jq -er '.[0].Options["com.docker.network.bridge.name"]' <<<"$metadata")" || die 'Docker bridge 接口未配置'
+  subnet="$(jq -er '[.[0].IPAM.Config[] | select(.Subnet | contains(":" ) | not)] | if length == 1 then .[0].Subnet else error("ambiguous IPv4 subnet") end' <<<"$metadata")" || die 'Docker bridge IPv4 网段不唯一'
+  gateway="$(jq -er --arg subnet "$subnet" '.[0].IPAM.Config[] | select(.Subnet == $subnet) | .Gateway' <<<"$metadata")" || die 'Docker bridge IPv4 网关缺失'
+  [[ "$bridge" =~ ^[a-zA-Z0-9_.-]+$ && "$subnet" =~ ^[0-9.]+/[0-9]+$ && "$gateway" =~ ^[0-9.]+$ ]] || die 'Docker bridge 配置格式异常'
+  prefix="${subnet##*/}"
+  link="$(ip -d -j link show dev "$bridge")" || die "Docker bridge 接口不存在：$bridge"
+  jq -e 'length == 1 and .[0].linkinfo.info_kind == "bridge"' <<<"$link" >/dev/null || die "拒绝修改非 bridge 接口：$bridge"
+  addresses="$(ip -4 -j addr show dev "$bridge")" || die "无法读取桥地址：$bridge"
+  if ! jq -e --arg gateway "$gateway" --argjson prefix "$prefix" 'any(.[].addr_info[]?; .local == $gateway and .prefixlen == $prefix)' <<<"$addresses" >/dev/null; then
+    jq -e '[.[].addr_info[]? | select(.family == "inet")] | length == 0' <<<"$addresses" >/dev/null || die "桥 $bridge 已有其他 IPv4 地址，拒绝覆盖；请核对 Docker 与宿主网络配置"
+    [[ "$EUID" -eq 0 ]] || die "桥 $bridge 缺少 $gateway/$prefix，需要 root 恢复后重试"
+    printf '恢复 Docker bridge 缺失地址：%s → %s/%s\n' "$bridge" "$gateway" "$prefix"
+    ip address add "$gateway/$prefix" dev "$bridge" || die '恢复 Docker bridge 地址失败'
+  fi
+  if ! jq -e '.[0].flags | index("UP") != null' <<<"$link" >/dev/null; then
+    ip link set dev "$bridge" up || die '启动 Docker bridge 接口失败'
+  fi
+  routes="$(ip -4 -j route show exact "$subnet")" || die '无法读取 Docker bridge 路由'
+  if ! jq -e --arg bridge "$bridge" --arg gateway "$gateway" 'any(.[]; .dev == $bridge and .prefsrc == $gateway and (.gateway == null))' <<<"$routes" >/dev/null; then
+    [[ "$(jq 'length' <<<"$routes")" == 0 ]] || die "Docker 网段 $subnet 存在冲突路由，拒绝覆盖"
+    ip route add "$subnet" dev "$bridge" src "$gateway" || die '恢复 Docker bridge 路由失败'
+  fi
+}
+
 ensure_registry() {
+  need curl
   docker image inspect registry:2.8.3 >/dev/null 2>&1 || die "请先导入公共基础设施镜像包"
   if ! docker container inspect uip-offline-registry >/dev/null 2>&1; then
     docker run -d --name uip-offline-registry --restart unless-stopped -p 127.0.0.1:5000:5000 -v uip-offline-registry-data:/var/lib/registry registry:2.8.3 >/dev/null
   elif [[ "$(docker inspect -f '{{.State.Running}}' uip-offline-registry)" != true ]]; then
     docker start uip-offline-registry >/dev/null
   fi
+  ensure_registry_bridge
+  local attempt
+  for attempt in {1..15}; do
+    if curl --noproxy '*' --fail --silent --connect-timeout 2 --max-time 3 "http://$registry_address/v2/" >/dev/null; then
+      printf '离线镜像仓库可达性检查通过：http://%s/v2/\n' "$registry_address"
+      return 0
+    fi
+    sleep 1
+  done
+  die "离线镜像仓库不可达：http://$registry_address/v2/；已停止镜像推送，请检查 Docker bridge、防火墙及仓库日志"
 }
 
 manifest_value() {
@@ -269,9 +325,80 @@ manifest_value() {
   awk -F= -v key="$key" '$1 == key && $0 ~ /^[A-Z_]+=[A-Za-z0-9.,_:\/-]+$/ {sub(/^[^=]*=/, ""); print; exit}' "$file"
 }
 
+verify_archive_sidecar() {
+  local archive="${1:?archive required}" sidecar="${2:-$1.sha256}" expected actual
+  [[ -f "$sidecar" && ! -L "$sidecar" ]] || die "镜像包校验文件缺失或不是普通文件：$sidecar"
+  expected="$(awk -v name="$(basename -- "$archive")" '
+    NF != 2 || NR != 1 || length($1) != 64 || tolower($1) ~ /[^0-9a-f]/ || $2 != name {bad=1}
+    {digest=tolower($1)}
+    END {if (bad || NR != 1) exit 1; print digest}
+  ' "$sidecar")" || die "镜像包校验文件必须只包含当前包的一个规范摘要：$sidecar"
+  actual="$(sha256sum "$archive" | awk '{print tolower($1)}')"
+  [[ "$actual" == "$expected" ]] || die "镜像包 SHA256 校验失败：$archive"
+  printf '%s\n' "$actual"
+}
+
+# Docker with the containerd image store may expose an image-index digest from
+# `docker image inspect .Id`, while format-2 packages deliberately record the
+# linux/amd64 image config digest contained in images.tar.  A raw `.Id`
+# mismatch is therefore not sufficient to reject an otherwise correctly
+# loaded package.  Re-export the exact loaded tag under a private temporary
+# alias and resolve its config blob with the same strict archive parser used by
+# the builder.  This still rejects a tag bound to different image content; it
+# does not weaken the package digest or platform checks.
+verify_loaded_image_config_digest() (
+  local tag="${1:?image tag required}" expected="${2:?expected config digest required}"
+  local work_dir="${3:?work directory required}" sequence="${4:?sequence required}"
+  local alias image_tar manifest_file manifest_member actual
+  alias="uip-import-verify/${sequence}:local"
+  image_tar="$work_dir/loaded-${sequence}.tar"
+  manifest_file="$work_dir/loaded-${sequence}-manifest.json"
+
+  cleanup_loaded_image_verification() {
+    local status=$?
+    trap - EXIT
+    docker image rm "$alias" >/dev/null 2>&1 || true
+    rm -f -- "$image_tar" "$manifest_file"
+    exit "$status"
+  }
+  trap cleanup_loaded_image_verification EXIT
+
+  docker tag "$tag" "$alias" >/dev/null || return 1
+  docker image save --output "$image_tar" "$alias" >/dev/null || return 1
+  if manifest_member="$(offline_archive_member "$image_tar" manifest.json 2>/dev/null)"; then
+    tar -xOf "$image_tar" "$manifest_member" > "$manifest_file" || return 1
+  elif tar -tf "$image_tar" | awk '$0 == "manifest.json" || $0 == "./manifest.json" {found++} END {exit found ? 0 : 1}'; then
+    return 1
+  else
+    : > "$manifest_file"
+  fi
+  actual="$(offline_saved_image_config_id "$image_tar" "$manifest_file" "$alias")" || return 1
+  [[ "$actual" == "$expected" ]]
+)
+
+# Do not use /tmp for package extraction and image re-export.  On hardened
+# hosts /tmp is commonly a small tmpfs (the acceptance host has 1.7 GiB), while
+# the verified common images.tar plus one temporary docker-save archive can
+# require several GiB at the same time.  Keep import scratch data on the
+# deployment filesystem, which is already covered by the installer space
+# budget.  Operators may select another dedicated filesystem explicitly.
+prepare_import_temp_root() {
+  local temp_root="${UIP_IMPORT_TMPDIR:-$deploy_dir/runtime/import-tmp}"
+  [[ ! -L "$temp_root" ]] || die "镜像导入临时目录不能是符号链接：$temp_root"
+  if [[ -e "$temp_root" && ! -d "$temp_root" ]]; then
+    die "镜像导入临时路径不是目录：$temp_root"
+  fi
+  mkdir -p -- "$temp_root" || die "无法创建镜像导入临时目录：$temp_root"
+  chmod 700 "$temp_root" || die "无法收紧镜像导入临时目录权限：$temp_root"
+  printf '%s\n' "$temp_root"
+}
+
 import_package() (
-  local archive="${1:?package path required}" temporary manifest component version platform images image_ids expected_images tag local_name pushed digest record index actual_id expected_digest
-  need docker; need tar; need gzip; need sha256sum; need awk; need curl
+  local archive="${1:?package path required}" temporary import_temp_root manifest component version platform images image_ids expected_images tag local_name pushed digest record index actual_id expected_digest
+  local record_temporary='' pointer_temporary=''
+  local -a data_analysis_keys=(DATA_ANALYSIS_DASHBOARD_API_IMAGE DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE DATA_ANALYSIS_ALERT_WORKER_IMAGE DATA_ANALYSIS_MIGRATE_IMAGE)
+  local -a data_analysis_image_refs=()
+  need docker; need tar; need gzip; need sha256sum; need awk; need curl; need jq
   # 分开判断三种情况：交付目录 iso/ 下的包不会自动进入部署目录的 packages/，
   # 这是现场最常见的漏步；旧写法用 -f 把“文件不存在”误报成“是符号链接”。
   [[ ! -L "$archive" ]] || die "镜像包不能是符号链接：$archive"
@@ -301,9 +428,10 @@ import_package() (
   sha256sum $(basename -- "$archive") > $(basename -- "$archive").sha256"
     fi
   fi
-  (cd "$(dirname -- "$archive")" && sha256sum -c "$(basename -- "$archive.sha256")")
-  temporary="$(mktemp -d "${TMPDIR:-/tmp}/uip-import.XXXXXX")"
-  trap 'rm -r -- "$temporary"' EXIT
+  verify_archive_sidecar "$archive" "$archive.sha256" >/dev/null
+  import_temp_root="$(prepare_import_temp_root)"
+  temporary="$(mktemp -d "$import_temp_root/uip-import.XXXXXX")" || die "无法创建镜像导入临时工作目录：$import_temp_root"
+  trap 'rm -r -- "$temporary"; [[ -z "$record_temporary" ]] || rm -f -- "$record_temporary"; [[ -z "$pointer_temporary" ]] || rm -f -- "$pointer_temporary"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   local listing details
@@ -327,10 +455,14 @@ import_package() (
   manifest="$temporary/package.env"
   component="$(manifest_value "$manifest" COMPONENT)"; version="$(manifest_value "$manifest" VERSION)"
   platform="$(manifest_value "$manifest" PLATFORM)"; images="$(manifest_value "$manifest" IMAGES)"
-  image_ids="$(manifest_value "$manifest" IMAGE_IDS)"
+  # Format 2 records Docker save config digests. IMAGE_IDS remains accepted for
+  # packages emitted by the short-lived format-1 builder.
+  image_ids="$(manifest_value "$manifest" IMAGE_CONFIG_DIGESTS)"
+  image_ids="${image_ids:-$(manifest_value "$manifest" IMAGE_IDS)}"
   [[ -n "$component" && -n "$version" && "$platform" == linux/amd64 && -n "$images" && -n "$image_ids" ]] || die "镜像包元数据不正确"
+  [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || die "镜像包版本格式不安全：$version"
   case "$component" in
-    common) expected_images='mysql:8.4,quay.io/keycloak/keycloak:26.2,temporalio/auto-setup:1.29.7,metabase/metabase:v0.53.7,prom/prometheus:v3.5.0,prom/node-exporter:v1.9.1,registry:2.8.3' ;;
+    common) expected_images="mysql:8.4,quay.io/keycloak/keycloak:26.2,temporalio/auto-setup:1.29.7,metabase/metabase:v0.53.7,prom/prometheus:v3.5.0,prom/node-exporter:v1.9.1,registry:2.8.3,tecnativa/docker-socket-proxy:v0.5.0,uip-package/file-gateway:$version" ;;
     platform) expected_images="uip-package/platform-backend:$version" ;;
     frontend) expected_images="uip-package/frontend:$version" ;;
     customer-opportunity) expected_images="uip-package/customer-opportunity-backend:$version" ;;
@@ -338,7 +470,7 @@ import_package() (
     contract) expected_images="uip-package/contract-backend:$version" ;;
     project) expected_images="uip-package/project-backend:$version" ;;
     settlement) expected_images="uip-package/settlement-backend:$version" ;;
-    data-analysis) expected_images="uip-package/data-analysis-backend:$version" ;;
+    data-analysis) expected_images="uip-package/data-analysis-dashboard-api:$version,uip-package/data-analysis-aggregation-worker:$version,uip-package/data-analysis-alert-worker:$version,uip-package/data-analysis-production-migrate:$version" ;;
     *) die "镜像包组件未登记：$component" ;;
   esac
   [[ "$images" == "$expected_images" ]] || die "镜像名称与登记组件 $component 不匹配"
@@ -354,23 +486,70 @@ import_package() (
     tag="${image_tags[$index]}"
     [[ "$(docker image inspect "$tag" --format '{{.Architecture}}/{{.Os}}')" == amd64/linux ]] || die "镜像平台不是 linux/amd64：$tag"
     actual_id="$(docker image inspect "$tag" --format '{{.Id}}')"
-    [[ "$actual_id" == "${expected_ids[$index]}" ]] || die "导入后的镜像 ID 与清单不一致：$tag"
+    if [[ "$actual_id" != "${expected_ids[$index]}" ]]; then
+      verify_loaded_image_config_digest "$tag" "${expected_ids[$index]}" "$temporary" "${component}-${index}" || {
+        die "导入后的镜像配置摘要与清单不一致：${tag}（Docker 报告 ID：${actual_id}，清单 config digest：${expected_ids[$index]}）"
+      }
+      printf 'Docker 报告的镜像 ID 不是 config digest，已通过重新导出的归档校验：%s\n' "$tag"
+    fi
   done
   if [[ "$component" != common ]]; then
     ensure_registry
-    [[ "${#image_tags[@]}" -eq 1 ]] || die "每个应用镜像包必须且只能包含一个镜像"
-    tag="${image_tags[0]}"; local_name="$registry_address/uip/${component}:${version}"
-    docker tag "$tag" "$local_name"
-    docker push "$local_name" >/dev/null
-    pushed="$(docker image inspect "$local_name" --format '{{index .RepoDigests 0}}')"
-    [[ "$pushed" == "$registry_address/"*"@sha256:"* ]] || die "本地镜像仓库没有返回不可变摘要"
-    digest="${pushed#*@sha256:}"
+    if [[ "$component" == data-analysis ]]; then
+      [[ "${#image_tags[@]}" -eq 4 ]] || die "数据看板镜像包必须包含 API、聚合 Worker、告警 Worker 和迁移器四个镜像"
+      for index in "${!image_tags[@]}"; do
+        tag="${image_tags[$index]}"
+        local_name="$registry_address/uip/${tag##*/}"
+        docker tag "$tag" "$local_name"
+        docker push "$local_name" >/dev/null
+        pushed="$(docker image inspect "$local_name" --format '{{index .RepoDigests 0}}')"
+        [[ "$pushed" == "$registry_address/"*"@sha256:"* ]] || die "本地镜像仓库没有返回不可变摘要：$local_name"
+        data_analysis_image_refs+=("$pushed")
+      done
+      pushed="${data_analysis_image_refs[0]}"
+      digest="${pushed#*@sha256:}"
+    else
+      [[ "${#image_tags[@]}" -eq 1 ]] || die "每个普通应用镜像包必须且只能包含一个镜像"
+      tag="${image_tags[0]}"; local_name="$registry_address/uip/${component}:${version}"
+      docker tag "$tag" "$local_name"
+      docker push "$local_name" >/dev/null
+      pushed="$(docker image inspect "$local_name" --format '{{index .RepoDigests 0}}')"
+      [[ "$pushed" == "$registry_address/"*"@sha256:"* ]] || die "本地镜像仓库没有返回不可变摘要"
+      digest="${pushed#*@sha256:}"
+    fi
   else
+    ensure_registry
+    local gateway_tag="uip-package/file-gateway:$version" gateway_local pushed_gateway
+    gateway_local="$registry_address/uip/file-gateway:$version"
+    docker tag "$gateway_tag" "$gateway_local"
+    docker push "$gateway_local" >/dev/null
+    pushed_gateway="$(docker image inspect "$gateway_local" --format '{{index .RepoDigests 0}}')"
+    [[ "$pushed_gateway" == "$registry_address/"*"@sha256:"* ]] || die '本地镜像仓库没有返回 File Gateway 不可变摘要'
     pushed="$images"; digest="-"
   fi
+  local pointer
   record="$manifest_dir/${component}-${version}.imported"
-  printf 'COMPONENT=%s\nVERSION=%s\nIMAGE_REF=%s\nSOURCE_IMAGE_IDS=%s\nIMAGE_DIGEST=%s\nPACKAGE_SHA256=%s\n' "$component" "$version" "$pushed" "$image_ids" "$digest" "$(sha256sum "$archive" | awk '{print $1}')" > "$record"
-  chmod 600 "$record"
+  record_temporary="$(mktemp "$manifest_dir/.${component}-${version}.imported.XXXXXX")"
+  {
+    printf 'COMPONENT=%s\nVERSION=%s\nIMAGE_REF=%s\nSOURCE_IMAGE_IDS=%s\nIMAGE_DIGEST=%s\nPACKAGE_SHA256=%s\n' "$component" "$version" "$pushed" "$image_ids" "$digest" "$(sha256sum "$archive" | awk '{print $1}')"
+    if [[ "$component" == common ]]; then
+      printf 'FILE_GATEWAY_IMAGE_REF=%s\n' "$pushed_gateway"
+    fi
+    if [[ "$component" == data-analysis ]]; then
+      for index in "${!data_analysis_keys[@]}"; do
+        printf '%s=%s\n' "${data_analysis_keys[$index]}" "${data_analysis_image_refs[$index]}"
+      done
+    fi
+  } > "$record_temporary"
+  chmod 600 "$record_temporary"
+  mv -f -- "$record_temporary" "$record"
+  record_temporary=''
+  pointer="$manifest_dir/${component}.latest"
+  pointer_temporary="$(mktemp "$manifest_dir/.${component}.latest.XXXXXX")"
+  printf '%s\n' "$(basename -- "$record")" > "$pointer_temporary"
+  chmod 600 "$pointer_temporary"
+  mv -f -- "$pointer_temporary" "$pointer"
+  pointer_temporary=''
   printf '已导入组件：%s，版本：%s\n' "$component" "$version"
   # 把“下一步”写在成功输出里，避免 import 之后直接跳到平台页面而漏掉 prepare。
   case "$component" in
@@ -387,31 +566,84 @@ import_package() (
 )
 
 latest_record() {
-  local component="$1" record
-  record="$(find "$manifest_dir" -maxdepth 1 -type f -name "${component}-*.imported" -print | sort | tail -n 1)"
-  [[ -n "$record" ]] || die "没有找到已导入的 $component 镜像包；请先执行：$0 import packages/${component}-*-linux-amd64.tar.gz"
-  printf '%s\n' "$record"
+  local component="$1" record pointer selected='' selected_mtime='' mtime name
+  local -a records=()
+  pointer="$manifest_dir/${component}.latest"
+  if [[ -e "$pointer" || -L "$pointer" ]]; then
+    [[ -f "$pointer" && ! -L "$pointer" ]] || die "最新导入指针不是普通文件：$pointer"
+    name="$(awk 'NF == 1 && NR == 1 {value=$1; next} {bad=1} END {if (bad || NR != 1) exit 1; print value}' "$pointer")" ||
+      die "最新导入指针格式无效：$pointer"
+    [[ "$name" == "$component"-*.imported && "$name" != */* ]] || die "最新导入指针包含非法记录名：$pointer"
+    record="$manifest_dir/$name"
+    [[ -f "$record" && ! -L "$record" ]] || die "最新导入指针指向的记录不存在或不安全：${record}；请重新 import 目标版本"
+    [[ "$(env_get "$record" COMPONENT)" == "$component" ]] || die "最新导入指针与记录组件不一致：$record"
+    printf '%s\n' "$record"
+    return 0
+  fi
+
+  # Backward compatibility for installations created before *.latest existed:
+  # select by import-record modification time, never by version-string ordering.
+  # Equal timestamps are ambiguous and therefore rejected until an explicit
+  # re-import writes the pointer.
+  shopt -s nullglob
+  records=("$manifest_dir"/"$component"-*.imported)
+  shopt -u nullglob
+  for record in "${records[@]}"; do
+    [[ -f "$record" && ! -L "$record" ]] || continue
+    if mtime="$(stat -c '%Y' "$record" 2>/dev/null)"; then :; else mtime="$(stat -f '%m' "$record")"; fi
+    if [[ -z "$selected" || "$mtime" -gt "$selected_mtime" ]]; then
+      selected="$record"
+      selected_mtime="$mtime"
+    elif [[ "$mtime" -eq "$selected_mtime" ]]; then
+      die "$component 存在多个同时间的旧导入记录，无法判断最后导入版本；请重新 import 需要使用的包"
+    fi
+  done
+  [[ -n "$selected" ]] || die "没有找到已导入的 $component 镜像包；请先执行：$0 import packages/${component}-*-linux-amd64.tar.gz"
+  printf '%s\n' "$selected"
 }
 
 latest_image() {
   env_get "$(latest_record "$1")" IMAGE_REF
 }
 
+imported_file_gateway_image() {
+  local record ref
+  record="$(latest_record common)"
+  ref="$(env_get "$record" FILE_GATEWAY_IMAGE_REF)"
+  [[ "$ref" =~ ^127\.0\.0\.1:[0-9]+/uip/file-gateway@sha256:[a-f0-9]{64}$ ]] || die '公共基础设施包缺少 File Gateway 不可变镜像摘要；请重新导入新版公共基础设施包'
+  printf '%s\n' "$ref"
+}
+
+stage_data_analysis_images() {
+  local record="${1:?import record required}" key image
+  local -a keys=(DATA_ANALYSIS_DASHBOARD_API_IMAGE DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE DATA_ANALYSIS_ALERT_WORKER_IMAGE DATA_ANALYSIS_MIGRATE_IMAGE)
+  for key in "${keys[@]}"; do
+    image="$(env_get "$record" "$key")"
+    [[ "$image" =~ ^127\.0\.0\.1:[0-9]+/uip/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || die "离线数据看板导入记录缺少不可变镜像：${key}；请重新导入完整的数据看板镜像包"
+    env_set "$release_file" "$key" "$image"
+  done
+  env_set "$release_file" DATA_ANALYSIS_IMAGE "$(env_get "$record" IMAGE_REF)"
+}
+
 deploy_component() {
-  local component="${1:?component required}" image bootstrap_password bootstrap_display bootstrap_account
+  local component="${1:?component required}" image file_gateway_image bootstrap_password bootstrap_display bootstrap_account
   require_initialized
+  scope_require "$component" || return
   image="$(latest_image "$component")"
   case "$component" in
     platform)
-      "$script_dir/deploy-service.sh" platform "$image"
+      file_gateway_image="$(imported_file_gateway_image)"
+      # deploy-service owns the deployment lock and commits both image pointers
+      # in one .release.env transaction. Do not mutate the gateway pointer here.
+      "$script_dir/deploy-service.sh" platform "$image" "$file_gateway_image"
       bootstrap_password="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_PASSWORD)"
       bootstrap_display="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME)"
       bootstrap_account="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME)"
       [[ -n "$bootstrap_password" && -n "$bootstrap_display" && -n "$bootstrap_account" ]] || die "首个平台管理员配置不完整"
-      printf '%s\n' "$bootstrap_password" | compose --profile release run -T --rm platform-migrate ./bootstrap-admin \
+      printf '%s\n' "$bootstrap_password" | compose run -T --rm platform-migrate ./bootstrap-admin \
         --display-name "$bootstrap_display" --account-name "$bootstrap_account" --password-stdin
       echo '基础平台管理员已初始化或已经存在；受保护的初始凭据仍保存在权限为 0600 的运行时配置文件中，请首次登录后及时修改。'
-      if [[ "$(env_get "$runtime_file" OFFLINE_MONITORING_ENABLED)" == true ]]; then
+      if scope_services | grep -Fxq prometheus; then
         compose_monitoring up -d prometheus keycloak-backup-metrics
       fi
       ;;
@@ -424,22 +656,50 @@ deploy_component() {
 # 宿主机 inode 变化，而容器仍绑定旧 inode，会一直读到替换前的占位镜像值 —— 表现为平台页面
 # 反复报 “production subsystem image must use an immutable digest”，即使宿主机文件已经正确。
 # 写完 .release.env 后必须让 Agent 重新绑定，否则 prepare/upgrade 的成果对 Agent 不可见。
+# 如果 platform-api 已经运行，还必须成对重载：API 与 Agent 都在启动时缓存生产清单，
+# 只重建一侧会触发 manifest drift 保护，导致受控采用/更新被正确拒绝。
 refresh_subsystem_provisioner() {
-  local container
-  container="$(docker ps -q --filter 'label=com.docker.compose.service=subsystem-provisioner' 2>/dev/null || true)"
-  if [[ -z "$container" ]]; then
-    container="$(docker ps -q --filter 'name=uip-subsystem-provisioner' 2>/dev/null || true)"
+  refresh_subsystem_control_plane_config ||
+    die '子系统控制面未能成对重载或验证当前发布配置；已拒绝继续发布'
+}
+
+reload_control_plane() {
+  require_initialized
+  need flock
+  [[ ! -L "$deploy_dir/runtime/.deploy.lock" ]] || die '部署锁不能是符号链接'
+  if [[ -L "$control_plane_reload_marker" ]]; then
+    die "控制面重载标记不能是符号链接：$control_plane_reload_marker"
   fi
-  [[ -n "$container" ]] || return 0
-  docker restart "$container" >/dev/null 2>&1 ||
-    die '子系统部署 Agent 重启失败；请手动执行 docker restart uip-subsystem-provisioner 后重试'
-  printf '已重启 subsystem-provisioner，使其重新绑定更新后的 .release.env\n'
+  if [[ -e "$control_plane_reload_marker" && ! -f "$control_plane_reload_marker" ]]; then
+    die "控制面重载标记不是普通文件：$control_plane_reload_marker"
+  fi
+  exec 7>"$deploy_dir/runtime/.deploy.lock"
+  flock -w 60 7 || die '平台 Agent 或其他发布任务正在运行；请等待其结束后重试控制面重载'
+  if ! refresh_subsystem_control_plane_config; then
+    printf '错误：子系统控制面成对重载或一致性验证失败。重载标记已保留；修复后重新执行：%s reload-control-plane\n' "$0" >&2
+    flock -u 7
+    exec 7>&-
+    return 1
+  fi
+  if [[ -f "$control_plane_reload_marker" ]]; then
+    rm -f -- "$control_plane_reload_marker" || {
+      printf '错误：控制面已验证，但无法移除重载标记：%s\n' "$control_plane_reload_marker" >&2
+      flock -u 7
+      exec 7>&-
+      return 1
+    }
+  fi
+  printf '子系统控制面重载完成：Agent 与 platform-api 使用同一生产清单集合。\n'
+  flock -u 7
+  exec 7>&-
 }
 
 stage_upgrade() {
-  local component="${1:?component required}" image key
+  local component="${1:?component required}" image key record
   require_initialized
-  image="$(latest_image "$component")"
+  scope_require "$component" || return
+  record="$(latest_record "$component")"
+  image="$(env_get "$record" IMAGE_REF)"
   case "$component" in
     platform|frontend) deploy_component "$component"; return ;;
     customer-opportunity) key=CUSTOMER_CRM_IMAGE ;;
@@ -450,14 +710,17 @@ stage_upgrade() {
     data-analysis) key=DATA_ANALYSIS_IMAGE ;;
     *) die "不支持的组件：$component" ;;
   esac
+  need flock
+  [[ ! -L "$deploy_dir/runtime/.deploy.lock" ]] || die '部署锁不能是符号链接'
+  exec 7>"$deploy_dir/runtime/.deploy.lock"
+  flock -w 60 7 || die '平台 Agent 或其他发布任务正在运行；请等待其结束后重试升级'
   env_set "$release_file" "$key" "$image"
   if [[ "$component" == data-analysis ]]; then
-    env_set "$release_file" DATA_ANALYSIS_DASHBOARD_API_IMAGE "$image"
-    env_set "$release_file" DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE "$image"
-    env_set "$release_file" DATA_ANALYSIS_ALERT_WORKER_IMAGE "$image"
-    env_set "$release_file" DATA_ANALYSIS_MIGRATE_IMAGE "$image"
+    stage_data_analysis_images "$record"
   fi
   refresh_subsystem_provisioner
+  flock -u 7
+  exec 7>&-
   printf '组件 %s 的升级镜像已暂存：%s\n' "$component" "$image"
   echo '请打开基础平台的应用页面执行受控更新或重试；平台会依次完成升级前备份、数据库迁移和健康检查。'
 }
@@ -479,12 +742,14 @@ subsystem_metadata() {
 prepare_subsystem() {
   local component="${1:?component required}" image version phase profile
   require_initialized
+  scope_require "$component" || return
   subsystem_metadata "$component"
   need flock
   [[ ! -L "$deploy_dir/runtime/.deploy.lock" ]] || die '部署锁不能是符号链接'
   exec 7>"$deploy_dir/runtime/.deploy.lock"
   flock -w 5 7 || die '平台 Agent 或其他发布任务正在运行；请等待其结束后执行 status'
   profile="$deploy_dir/subsystems.d/${subsystem_app_code}-prod.yaml"
+  [[ "$component" != data-analysis ]] || profile="$deploy_dir/subsystems.d/data-analysis-prod.yaml"
   [[ -f "$profile" && ! -L "$profile" ]] || die "生产环境发布配置缺失或不是普通文件：$profile"
   phase="$(subsystem_phase "$component")"
   case "$phase" in
@@ -505,17 +770,16 @@ prepare_subsystem() {
       return 0
       ;;
     INVALID_CANDIDATE)
-      die "发现标签不匹配的候选容器 $subsystem_candidate；请人工核对，脚本不会覆盖"
+      die "发现标签不匹配的候选容器 ${subsystem_candidate}；请人工核对，脚本不会覆盖"
       ;;
   esac
-  image="$(latest_image "$component")"
-  version="$(env_get "$(latest_record "$component")" VERSION)"
+  local record
+  record="$(latest_record "$component")"
+  image="$(env_get "$record" IMAGE_REF)"
+  version="$(env_get "$record" VERSION)"
   env_set "$release_file" "$subsystem_key" "$image"
   if [[ "$component" == data-analysis ]]; then
-    env_set "$release_file" DATA_ANALYSIS_DASHBOARD_API_IMAGE "$image"
-    env_set "$release_file" DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE "$image"
-    env_set "$release_file" DATA_ANALYSIS_ALERT_WORKER_IMAGE "$image"
-    env_set "$release_file" DATA_ANALYSIS_MIGRATE_IMAGE "$image"
+    stage_data_analysis_images "$record"
   fi
   refresh_subsystem_provisioner
   docker create --name "$subsystem_candidate" --network none --entrypoint /bin/sh \
@@ -657,6 +921,7 @@ subsystem_status() {
 continue_subsystem() {
   local component="${1:?component required}" phase container health
   require_initialized
+  scope_require "$component" || return
   subsystem_metadata "$component"
   need flock
   [[ ! -L "$deploy_dir/runtime/.deploy.lock" ]] || die '部署锁不能是符号链接'
@@ -736,7 +1001,7 @@ doctor_check_config_files() {
       continue
     fi
     if [[ ! -e "$file" ]]; then
-      doctor_fail "$label 不存在：$file；请先执行：$0 configure"
+      doctor_fail "$label 不存在：${file}；请先执行：$0 configure"
       continue
     fi
     if [[ ! -f "$file" ]]; then
@@ -770,13 +1035,13 @@ doctor_check_packages() {
       continue
     fi
     if [[ ! -f "$sidecar" ]]; then
-      doctor_fail "缺少校验伴随文件：$sidecar；请执行：(cd $(dirname -- "$archive") && sha256sum $base > $base.sha256)"
+      doctor_fail "缺少校验伴随文件：${sidecar}；请执行：(cd $(dirname -- "$archive") && sha256sum $base > $base.sha256)"
       continue
     fi
-    if (cd "$(dirname -- "$archive")" && sha256sum -c "$(basename -- "$sidecar")" >/dev/null 2>&1); then
+    if (verify_archive_sidecar "$archive" "$sidecar" >/dev/null 2>&1); then
       doctor_ok "$base 摘要校验通过"
     else
-      doctor_fail "$base 摘要校验失败；文件可能传输损坏，请重新复制该包及其 .sha256 后重试"
+      doctor_fail "$base 摘要或伴随文件绑定失败；请重新复制当前包及与其同名的 .sha256 后重试"
     fi
   done
 }
@@ -789,7 +1054,7 @@ doctor_check_manifests() {
   if ((${#records[@]} == 0)); then
     doctor_warn "未在 $manifest_dir 找到 *.imported；尚未导入任何镜像包"
   fi
-  local record component image_ref key release_value
+  local record component image_ref key release_value expected_ref expected_field
   for record in "${records[@]}"; do
     component="$(env_get "$record" COMPONENT)"
     image_ref="$(env_get "$record" IMAGE_REF)"
@@ -802,7 +1067,7 @@ doctor_check_manifests() {
       continue
     fi
     if [[ ! "$image_ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
-      doctor_fail "$(basename -- "$record") 的 IMAGE_REF 不是不可变 @sha256: 引用：$image_ref；请重新 import 对应镜像包"
+      doctor_fail "$(basename -- "$record") 的 IMAGE_REF 不是不可变 @sha256: 引用：${image_ref}；请重新 import 对应镜像包"
       continue
     fi
     if [[ ! -f "$release_file" ]]; then
@@ -817,6 +1082,23 @@ doctor_check_manifests() {
     fi
     local key_checked=false key_placeholder=false
     for key in "${keys[@]}"; do
+      expected_field=IMAGE_REF
+      expected_ref="$image_ref"
+      # data-analysis 是一个包内包含四个生产镜像的复合组件。兼容键
+      # DATA_ANALYSIS_IMAGE 仍指向 dashboard API，其余键必须逐项核对
+      # 导入记录中的同名字段，不能拿通用 IMAGE_REF 误判 Worker/Migrate。
+      if [[ "$component" == data-analysis && "$key" != DATA_ANALYSIS_IMAGE ]]; then
+        expected_field="$key"
+        expected_ref="$(env_get "$record" "$expected_field")"
+        if [[ -z "$expected_ref" ]]; then
+          doctor_fail "$(basename -- "$record") 缺少 ${expected_field}；请重新 import 对应镜像包"
+          continue
+        fi
+        if [[ ! "$expected_ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
+          doctor_fail "$(basename -- "$record") 的 $expected_field 不是不可变 @sha256: 引用：${expected_ref}；请重新 import 对应镜像包"
+          continue
+        fi
+      fi
       release_value="$(env_get "$release_file" "$key")"
       if [[ -z "$release_value" ]]; then
         doctor_fail "$key 在 .release.env 中未设置；请重新执行 prepare/deploy 使其写入不可变 digest"
@@ -826,8 +1108,8 @@ doctor_check_manifests() {
         key_placeholder=true
         continue
       fi
-      if [[ "$release_value" != "$image_ref" ]]; then
-        doctor_fail "$key 与 $(basename -- "$record") 的 IMAGE_REF 不一致：$release_value != $image_ref；请重新 prepare/升级使两者一致"
+      if [[ "$release_value" != "$expected_ref" ]]; then
+        doctor_fail "$key 与 $(basename -- "$record") 的 $expected_field 不一致：$release_value != ${expected_ref}；请重新 prepare/升级使两者一致"
       else
         key_checked=true
       fi
@@ -836,10 +1118,10 @@ doctor_check_manifests() {
       if [[ "$component" == platform || "$component" == frontend ]]; then
         doctor_warn "$component 已 import，但 ${keys[*]} 仍是占位值；下一步：$0 deploy $component"
       else
-        doctor_warn "$component 已 import，但 ${keys[*]} 仍是占位值；下一步：$0 prepare $component（import 只登记 manifests/，写入 .release.env 的是 prepare）"
+        doctor_warn "$component 已 import，但 ${keys[*]} 仍是占位值；下一步：$0 prepare ${component}（import 只登记 manifests/，写入 .release.env 的是 prepare）"
       fi
     elif [[ "$key_checked" == true ]]; then
-      doctor_ok "$component：${keys[*]} 已登记不可变 digest，与导入记录一致"
+      doctor_ok "${component}：${keys[*]} 已登记不可变 digest，与导入记录一致"
     fi
   done
 
@@ -906,13 +1188,13 @@ doctor_check_provisioner_binding() {
     local started_at host_mtime
     started_at="$(docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null || true)"
     host_mtime="$(stat -c '%y' "$release_file" 2>/dev/null || true)"
-    doctor_warn "无法读取容器 $name 内的 $path（镜像可能缺少 cat/sha256sum）；容器启动时间=${started_at:-未知}，宿主机 .release.env 修改时间=${host_mtime:-未知}。若宿主机文件在容器启动后被替换过，请执行：docker restart $name"
+    doctor_warn "无法读取容器 $name 内的 ${path}（镜像可能缺少 cat/sha256sum）；容器启动时间=${started_at:-未知}，宿主机 .release.env 修改时间=${host_mtime:-未知}。若宿主机文件在容器启动后被替换过，请执行：docker restart $name"
     return 0
   fi
   if [[ "$container_digest" == "$host_digest" ]]; then
     doctor_ok "容器 $name 内读取到的 .release.env 与宿主机内容一致"
   else
-    doctor_fail "容器 $name 仍绑定旧的 .release.env（内容摘要不一致）：宿主机=$host_digest 容器内=$container_digest；这是 .release.env 被原子替换后 inode 变化导致的，请执行：docker restart $name"
+    doctor_fail "容器 $name 仍绑定旧的 .release.env（内容摘要不一致）：宿主机=$host_digest 容器内=${container_digest}；这是 .release.env 被原子替换后 inode 变化导致的，请执行：docker restart $name"
   fi
 }
 
@@ -956,7 +1238,7 @@ doctor_check_subsystem() {
   case "$component" in
     customer-opportunity|customer-portal|contract|project|settlement|data-analysis) ;;
     *)
-      doctor_fail "不支持的子系统：$component（可用：contract | project | settlement | data-analysis | customer-opportunity | customer-portal）"
+      doctor_fail "不支持的子系统：${component}（可用：contract | project | settlement | data-analysis | customer-opportunity | customer-portal）"
       return 0
       ;;
   esac
@@ -975,7 +1257,7 @@ doctor_check_subsystem() {
       doctor_fail "无法读取 $component 的部署阶段；请确认 Docker 可用且已执行 $0 configure"
       ;;
     *)
-      doctor_ok "$component 当前阶段：$phase（生产目标：$subsystem_app_code/prod）"
+      doctor_ok "$component 当前阶段：${phase}（生产目标：$subsystem_app_code/prod）"
       print_subsystem_next_action "$component" "$phase"
       ;;
   esac
@@ -1010,6 +1292,7 @@ doctor() {
 }
 
 status() {
+  scope_report || return
   if [[ -n "${1:-}" ]]; then
     subsystem_status "$1"
     return
@@ -1021,25 +1304,190 @@ status() {
   done | sed 's#^/##'
 }
 
+wait_for_required_service_health() {
+  local timeout="${UIP_HEALTH_WAIT_SECONDS:-180}" deadline service container state health restarts pending
+  [[ "$timeout" =~ ^[0-9]+$ ]] && ((timeout >= 1 && timeout <= 3600)) || { printf '健康等待时间必须是 1 到 3600 之间的整数秒\n' >&2; return 1; }
+  deadline=$((SECONDS + timeout))
+  while :; do
+    pending=''
+    for service in "$@"; do
+      container="$(compose ps -q "$service")" || return
+      if [[ -z "$container" ]]; then pending+=" $service"; continue; fi
+      state="$(docker inspect "$container" --format '{{.State.Status}}')" || return
+      health="$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')" || return
+      [[ "$state" == running && "$health" == healthy ]] || pending+=" $service"
+    done
+    if [[ -z "$pending" ]]; then
+      for service in "$@"; do
+        container="$(compose ps -q "$service")" || return
+        state="$(docker inspect "$container" --format '{{.State.Status}}')" || return
+        health="$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')" || return
+        restarts="$(docker inspect "$container" --format '{{.RestartCount}}')" || return
+        [[ "$state" == running && "$health" == healthy ]] || {
+          printf '核心服务在生成验收证据前状态发生变化：service=%s status=%s health=%s\n' \
+            "$service" "${state:-unknown}" "${health:-unknown}" >&2
+          return 1
+        }
+        [[ "$restarts" =~ ^[0-9]+$ ]] || {
+          printf '无法读取核心服务 %s 的 RestartCount\n' "$service" >&2
+          return 1
+        }
+        printf '[验收证据] service=%s container=%s status=running health=healthy restarts=%s\n' \
+          "$service" "$container" "$restarts"
+      done
+      printf '必要服务均已健康。\n'
+      return 0
+    fi
+    if ((SECONDS >= deadline)); then
+      printf '等待必要服务健康超过 %s 秒：%s\n' "$timeout" "$pending" >&2
+      for service in "$@"; do compose logs --tail 80 "$service" >&2 || true; done
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+verify_current_services() {
+  local stability_seconds="${UIP_VERIFY_STABILITY_SECONDS:-10}"
+  local service container state health restarts current_container current_state current_health current_restarts index
+  local -a stable_services=()
+  local -a stable_containers=()
+  local -a stable_restarts=()
+
+  [[ "$stability_seconds" =~ ^[0-9]+$ ]] && ((stability_seconds >= 1 && stability_seconds <= 60)) || {
+    printf '无探针 Worker 稳定观察时间必须是 1 到 60 之间的整数秒\n' >&2
+    return 1
+  }
+
+  for service in "$@"; do
+    container="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [[ -z "$container" ]]; then
+      printf '[验收失败] service=%s container=missing；必需长期服务未运行\n' "$service" >&2
+      return 1
+    fi
+    state="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)"
+    health="$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+    restarts="$(docker inspect "$container" --format '{{.RestartCount}}' 2>/dev/null || true)"
+    if [[ "$state" != running ]]; then
+      printf '[验收失败] service=%s container=%s status=%s health=%s restarts=%s\n' \
+        "$service" "$container" "${state:-unknown}" "${health:-unknown}" "${restarts:-unknown}" >&2
+      return 1
+    fi
+    [[ "$restarts" =~ ^[0-9]+$ ]] || {
+      printf '[验收失败] service=%s container=%s 无法读取 RestartCount\n' "$service" "$container" >&2
+      return 1
+    }
+    case "$health" in
+      healthy)
+        printf '[验收证据] service=%s container=%s status=running health=healthy restarts=%s\n' \
+          "$service" "$container" "$restarts"
+        ;;
+      none)
+        stable_services+=("$service")
+        stable_containers+=("$container")
+        stable_restarts+=("$restarts")
+        ;;
+      *)
+        printf '[验收失败] service=%s container=%s status=running health=%s restarts=%s\n' \
+          "$service" "$container" "${health:-unknown}" "$restarts" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if ((${#stable_services[@]} > 0)); then
+    printf '观察 %d 个无 healthcheck 的长期 Worker %s 秒，校验容器不替换且 RestartCount 不增加。\n' \
+      "${#stable_services[@]}" "$stability_seconds"
+    sleep "$stability_seconds"
+    for ((index=0; index<${#stable_services[@]}; index++)); do
+      service="${stable_services[$index]}"
+      current_container="$(compose ps -q "$service" 2>/dev/null || true)"
+      current_state="$(docker inspect "$current_container" --format '{{.State.Status}}' 2>/dev/null || true)"
+      current_health="$(docker inspect "$current_container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+      current_restarts="$(docker inspect "$current_container" --format '{{.RestartCount}}' 2>/dev/null || true)"
+      if [[ "$current_container" != "${stable_containers[$index]}" || "$current_state" != running || "$current_health" != none || \
+            "$current_restarts" != "${stable_restarts[$index]}" ]]; then
+        printf '[验收失败] service=%s container=%s->%s status=%s health=%s restarts=%s->%s stability=%ss\n' \
+          "$service" "${stable_containers[$index]}" "${current_container:-missing}" "${current_state:-unknown}" \
+          "${current_health:-unknown}" "${stable_restarts[$index]}" "${current_restarts:-unknown}" "$stability_seconds" >&2
+        return 1
+      fi
+      printf '[验收证据] service=%s container=%s status=running health=none restarts=%s stability=%ss\n' \
+        "$service" "$current_container" "$current_restarts" "$stability_seconds"
+    done
+  fi
+}
+
+verify_subsystem_current_health() {
+  local component="$1" flag
+  local -a services=()
+  subsystem_metadata "$component"
+  runtime_ready "$subsystem_runtime" || {
+    printf '错误：%s 当前 runtime 配置不完整，不能使用历史 VERIFIED 结果通过验收。\n' "$component" >&2
+    return 1
+  }
+  if docker container inspect "$subsystem_candidate" >/dev/null 2>&1; then
+    printf '错误：%s 仍存在未完成采用的候选容器 %s。\n' "$component" "$subsystem_candidate" >&2
+    return 1
+  fi
+
+  # 只列出长期服务；migrate/init/catalog-sync 是受控一次性任务，不能按常驻容器验收。
+  case "$component" in
+    contract)
+      services=(contract-mysql contract-api)
+      [[ "$(env_get "$subsystem_runtime" CRM_REFERENCE_ENABLED)" != true ]] || services+=(customer-api)
+      [[ "$(env_get "$subsystem_runtime" PROJECT_INTEGRATION_ENABLED)" != true ]] || services+=(project-api)
+      ;;
+    project) services=(project-mysql project-api project-sla-notifier) ;;
+    customer-opportunity)
+      services=(customer-mysql customer-api \
+        customer-opportunity-alert-worker customer-owner-notification-worker \
+        customer-presale-alert-worker customer-presale-assignment-notification-worker \
+        customer-presale-progress-notification-worker customer-notification-delivery-worker \
+        customer-presale-worker)
+      for flag in CONTRACT_VERIFICATION_ENABLED; do
+        [[ "$(env_get "$subsystem_runtime" "$flag")" != true ]] || services+=(contract-api)
+      done
+      ;;
+    customer-portal)
+      services=(portal-mysql portal-api)
+      if portal_compensation_ready; then
+        services+=(portal-invite-compensation-worker customer-mysql customer-api)
+        printf '[验收证据] Portal 邀请补偿凭据已启用，纳入补偿 Worker 及 CRM 跨系统依赖。\n'
+      else
+        printf '[验收证据] Portal 邀请补偿未满足既有启用条件，不要求补偿 Worker 常驻。\n'
+      fi
+      ;;
+    settlement) services=(settlement-mysql settlement-api settlement-worker) ;;
+    data-analysis)
+      services=(data-analysis-mysql data-analysis-api data-analysis-aggregation-worker \
+        data-analysis-alert-worker data-analysis-metabase contract-api project-api)
+      ;;
+    *) die "不支持的子系统：$component" ;;
+  esac
+  verify_current_services "${services[@]}"
+}
+
 verify() {
   require_initialized
-  local component="${1:-}" phase
+  local component="${1:-}"
+  [[ -z "$component" ]] || scope_require "$component" || return
+  wait_for_required_service_health \
+    platform-api platform-worker file-gateway keycloak temporal subsystem-provisioner frontend || return
   compose ps
   local api_port
   api_port="$(env_get "$runtime_file" PLATFORM_API_PORT)"; api_port="${api_port:-18080}"
   curl --fail --silent --show-error --connect-timeout 5 --max-time 20 "http://127.0.0.1:$api_port/readyz" >/dev/null
   curl --fail --silent --show-error --connect-timeout 5 --max-time 20 "$PUBLIC_PLATFORM_ORIGIN/healthz" >/dev/null
   curl --fail --silent --show-error --connect-timeout 5 --max-time 20 "$PUBLIC_KEYCLOAK_ISSUER/.well-known/openid-configuration" >/dev/null
+  compose exec -T platform-api wget -qO- http://file-gateway:8086/readyz >/dev/null || die 'platform-api 容器无法访问 http://file-gateway:8086/readyz'
+  gateway_proxy_status="$(curl --silent --show-error --connect-timeout 5 --max-time 20 --output /dev/null --write-out '%{http_code}' "$PUBLIC_PLATFORM_ORIGIN/file-gateway/api/v2/upload-sessions")"
+  [[ "$gateway_proxy_status" == 405 || "$gateway_proxy_status" == 401 ]] || die "File Gateway 代理未到达受保护 API（HTTP ${gateway_proxy_status}）"
+  echo 'File Gateway 代理到达受保护 API；匿名请求被正确拒绝。'
   echo '基础平台核心服务健康检查已通过；不代表任何业务子系统已部署，也不代表外部客户端/安全组已验证。'
   if [[ -n "$component" ]]; then
-    subsystem_metadata "$component"
-    phase="$(subsystem_phase "$component")"
-    [[ "$phase" == VERIFIED ]] || {
-      printf '错误：%s 尚未完成，当前阶段：%s。\n' "$component" "$phase" >&2
-      print_subsystem_next_action "$component" "$phase" >&2
-      return 1
-    }
-    printf '%s/prod 子系统部署验收已通过。\n' "$subsystem_app_code"
+    verify_subsystem_current_health "$component" || return
+    printf '%s/prod 子系统当前数据库、API、Worker 与跨系统依赖验收已通过。\n' "$subsystem_app_code"
   else
     echo '如需验收业务子系统，请执行：deploy.sh verify <component>。'
   fi
@@ -1059,6 +1507,15 @@ backup_all() {
   "$script_dir/backup-all.sh"
 }
 
+disable_component() (
+  require_initialized
+  need flock
+  [[ ! -L "$deploy_dir/runtime/.deploy.lock" ]] || die '部署锁不能是符号链接'
+  exec 7>"$deploy_dir/runtime/.deploy.lock"
+  flock -w 30 7 || die '平台接入或其他发布正在进行，请稍后停用'
+  scope_disable "${1:?请指定子系统}"
+)
+
 restore_menu() {
   local service backup answer
   read -r -p 'MySQL 服务名称：' service
@@ -1071,7 +1528,7 @@ restore_menu() {
 
 menu() {
   while true; do
-    printf '\n统一身份认证平台离线部署\n1. 初始化部署配置\n2. 导入镜像包\n3. 部署基础平台\n4. 部署统一前端\n5. 准备子系统供平台探测\n6. 完成已接入子系统部署\n7. 升级已部署模块\n8. 查看容器状态\n9. 查看模块日志\n10. 执行健康检查\n11. 备份\n12. 恢复\n13. 环境自检（doctor，只读）\n14. 自动安装 packages/ 中的镜像包\n0. 退出\n'
+    printf '\n统一身份认证平台离线部署\n1. 初始化部署配置\n2. 导入镜像包\n3. 部署基础平台\n4. 部署统一前端\n5. 准备子系统供平台探测\n6. 完成已接入子系统部署\n7. 升级已部署模块\n8. 查看容器状态\n9. 查看模块日志\n10. 执行健康检查\n11. 备份\n12. 恢复\n13. 环境自检（doctor，只读）\n14. 自动安装 packages/ 中的镜像包\n15. 成对重载子系统控制面\n0. 退出\n'
     read -r -p '请选择操作：' choice
     case "$choice" in
       1) configure ;;
@@ -1088,6 +1545,7 @@ menu() {
       12) restore_menu ;;
       13) read -r -p '子系统参数（直接回车检查全部）：' name; doctor "$name" || true ;;
       14) auto_install_packages ;;
+      15) reload_control_plane ;;
       0) return ;;
       *) echo '选择无效，请重新输入' >&2 ;;
     esac
@@ -1096,15 +1554,29 @@ menu() {
 
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 command="${1:-menu}"
+if [[ -e "$control_plane_reload_marker" || -L "$control_plane_reload_marker" ]]; then
+  case "$command" in
+    reload-control-plane|doctor|status|logs|help|--help|-h) ;;
+    *)
+      die "检测到部署资产已更新但子系统控制面尚未成对重载：$control_plane_reload_marker
+为防止 platform-api 与 subsystem-provisioner 使用不同清单摘要，当前仅允许只读诊断。
+请先执行：$0 reload-control-plane"
+      ;;
+  esac
+fi
 case "$command" in
   menu) menu ;;
   configure) shift; configure "$@" ;;
   install) auto_install_packages ;;
+  start) start_enabled ;;
+  resume) require_initialized; start_registered "${2:?请指定子系统}" ;;
+  disable) disable_component "${2:?请指定子系统}" ;;
   import) import_package "${2:-}" ;;
   deploy) deploy_component "${2:-}" ;;
   prepare) prepare_subsystem "${2:-}" ;;
   continue) continue_subsystem "${2:-}" ;;
   upgrade) stage_upgrade "${2:-}" ;;
+  reload-control-plane) reload_control_plane ;;
   doctor) doctor "${2:-}" ;;
   status) status "${2:-}" ;;
   logs) logs "${2:-}" ;;
@@ -1112,5 +1584,5 @@ case "$command" in
   backup) backup_all ;;
   restore) shift; "$script_dir/restore-mysql.sh" "$@" ;;
   help|--help|-h) usage ;;
-  *) die "未知命令：$command（执行 $0 help 查看可用子命令）" ;;
+  *) die "未知命令：${command}（执行 $0 help 查看可用子命令）" ;;
 esac

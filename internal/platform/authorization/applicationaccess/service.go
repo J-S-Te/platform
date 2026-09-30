@@ -1568,11 +1568,12 @@ func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID
 	if err != nil {
 		return nil, fmt.Errorf("load all application roles for platform super administrator: %w", err)
 	}
-	// 先移除历史上可能误授给内部超管的客户角色。该记录仍保留在数据库供审计和
-	// 后续清理，但不能参与当前授权投影，否则会与 portal_super_admin 形成双角色会话。
+	// 客户门户的浏览器会话要求恰好一个角色。内部平台超管无论数据库是否残留客户
+	// 角色，或未来目录是否新增其他业务角色，都只能投影为 portal_super_admin。
+	// 原始绑定仍留在数据库供审计和受控清理，不参与本次只读有效权限计算。
 	filteredExisting := existing[:0]
 	for _, row := range existing {
-		if applicationCode == "customer_portal" && row.Code == "portal_customer" {
+		if !includeRoleInSuperAdminProjection(applicationCode, row.Code) {
 			continue
 		}
 		filteredExisting = append(filteredExisting, row)
@@ -1586,9 +1587,7 @@ func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID
 		}
 	}
 	for index := range rows {
-		// 客户门户同时存在外部客户与内部运营两类身份。平台超管继承门户权限时
-		// 只能使用内部超级管理员角色，不能被投影成任意客户身份。
-		if applicationCode == "customer_portal" && rows[index].Code == "portal_customer" {
+		if !includeRoleInSuperAdminProjection(applicationCode, rows[index].Code) {
 			continue
 		}
 		if _, ok := seen[rows[index].RoleID]; ok {
@@ -1604,6 +1603,13 @@ func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID
 		seen[rows[index].RoleID] = struct{}{}
 	}
 	return existing, nil
+}
+
+func includeRoleInSuperAdminProjection(applicationCode, roleCode string) bool {
+	if applicationCode == "customer_portal" {
+		return roleCode == "portal_super_admin"
+	}
+	return true
 }
 
 func (s *Service) loadRolePermissions(ctx context.Context, tenantID, applicationID string, roleIDs []string) ([]string, error) {

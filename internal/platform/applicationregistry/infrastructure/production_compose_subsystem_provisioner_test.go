@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,35 @@ func TestProductionPublicTransportDefaultsToHTTPAndDerivesAllBindings(t *testing
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("derived environment %q does not contain %q", joined, expected)
+		}
+	}
+}
+
+func TestProductionPublicTransportUsesLegacyKeycloakPortForIPMode(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		"PUBLIC_ACCESS_MODE=ip",
+		"PUBLIC_PLATFORM_HOST=192.0.2.20",
+		"PUBLIC_SSO_HOST=192.0.2.20",
+		"PUBLIC_HTTP_PORT=80",
+		"KEYCLOAK_HTTP_PORT=18090",
+		"KEYCLOAK_REALM=basic-platform",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := productionPublicTransportEnvironment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, "\n")
+	for _, expected := range []string{
+		"PUBLIC_PLATFORM_ORIGIN=http://192.0.2.20",
+		"PUBLIC_SSO_ORIGIN=http://192.0.2.20:18090",
+		"PUBLIC_KEYCLOAK_ISSUER=http://192.0.2.20:18090/realms/basic-platform",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("derived legacy IP environment %q does not contain %q", joined, expected)
 		}
 	}
 }
@@ -170,8 +200,8 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 
 	// Preflight performs Docker and Compose validation. Provision then performs exactly the
 	// dependency, migration and contract API operations; no browser value becomes an argument.
-	if len(runner.calls) != 7 {
-		t.Fatalf("runner calls = %d, want 7: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 8 {
+		t.Fatalf("runner calls = %d, want 8: %#v", len(runner.calls), runner.calls)
 	}
 	for _, call := range runner.calls {
 		joined := strings.Join(call.arguments, " ")
@@ -199,11 +229,17 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 	if !containsString(runner.calls[4].arguments, "contract-migrate") {
 		t.Fatalf("migration call is not fixed: %v", runner.calls[4].arguments)
 	}
-	if !containsString(runner.calls[5].arguments, "contract-api") {
-		t.Fatalf("contract API call is not fixed: %v", runner.calls[5].arguments)
+	if containsString(runner.calls[4].arguments, "--rm") || !containsString(runner.calls[4].arguments, "--name") {
+		t.Fatalf("migration container must be named and retained on failure: %v", runner.calls[4].arguments)
 	}
-	if !containsString(runner.calls[6].arguments, "contract-catalog-sync") {
-		t.Fatalf("catalog sync call is not fixed: %v", runner.calls[6].arguments)
+	if !containsString(runner.calls[5].arguments, "container") || !containsString(runner.calls[5].arguments, "rm") {
+		t.Fatalf("successful migration container was not cleaned precisely: %v", runner.calls[5].arguments)
+	}
+	if !containsString(runner.calls[6].arguments, "contract-api") {
+		t.Fatalf("contract API call is not fixed: %v", runner.calls[6].arguments)
+	}
+	if !containsString(runner.calls[7].arguments, "contract-catalog-sync") {
+		t.Fatalf("catalog sync call is not fixed: %v", runner.calls[7].arguments)
 	}
 }
 
@@ -224,7 +260,7 @@ func TestResolveProductionInsecureHTTPOriginBinding(t *testing.T) {
 		origin string
 		want   string
 	}{
-		{origin: "http://47.111.20.119:8081", want: "true"},
+		{origin: "http://203.0.113.10:8081", want: "true"},
 		{origin: "https://platform.example.com", want: "false"},
 	} {
 		value, err := resolveProductionBinding(productionContractInput(test.origin), "allow_insecure_http_origin")
@@ -422,12 +458,8 @@ func TestProductionComposeSubsystemProvisionerInitializesMissingRuntimeFromRevie
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("initialized runtime mode = %o", info.Mode().Perm())
 	}
-	auxiliaryContents, err := os.ReadFile(auxiliaryRuntimePath)
-	if err != nil {
-		t.Fatalf("read supporting runtime initialized from another reviewed profile: %v", err)
-	}
-	if string(auxiliaryContents) != "AUXILIARY_SETTING=preserved\n" {
-		t.Fatalf("supporting runtime contents = %q", auxiliaryContents)
+	if _, err := os.Stat(auxiliaryRuntimePath); !os.IsNotExist(err) {
+		t.Fatalf("unrelated subsystem runtime must not be initialized: %v", err)
 	}
 }
 
@@ -542,6 +574,35 @@ type productionMigrateFailureOutputRunner struct {
 	logs  string
 }
 
+// productionInitializationFailureOutputRunner 模拟初始化 one-shot 失败，验证失败容器
+// 保留且后续迁移、运行服务不会继续执行。
+type productionInitializationFailureOutputRunner struct {
+	calls []recordingSubsystemRunnerCall
+	logs  string
+}
+
+func (runner *productionInitializationFailureOutputRunner) record(directory string, environment []string, name string, arguments ...string) {
+	runner.calls = append(runner.calls, recordingSubsystemRunnerCall{
+		directory: directory, environment: environment, binary: name, arguments: append([]string(nil), arguments...),
+	})
+}
+
+func (runner *productionInitializationFailureOutputRunner) Run(_ context.Context, directory string, environment []string, name string, arguments ...string) error {
+	runner.record(directory, environment, name, arguments...)
+	if containsString(arguments, "contract-database-init") {
+		return errors.New("initialization exited non-zero")
+	}
+	return nil
+}
+
+func (runner *productionInitializationFailureOutputRunner) RunOutput(_ context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
+	runner.record(directory, environment, name, arguments...)
+	if containsString(arguments, "contract-database-init") {
+		return []byte(runner.logs), errors.New("initialization exited non-zero")
+	}
+	return nil, nil
+}
+
 func (runner *productionMigrateFailureOutputRunner) record(directory string, environment []string, name string, arguments ...string) {
 	runner.calls = append(runner.calls, recordingSubsystemRunnerCall{
 		directory: directory, environment: environment, binary: name, arguments: append([]string(nil), arguments...),
@@ -574,6 +635,17 @@ func TestProductionComposeSubsystemProvisionerSurfacesMigrateLogsOnFailure(t *te
 	}
 	if !strings.Contains(err.Error(), "OIDC_CLIENT_SECRET is required") {
 		t.Fatalf("migrate error does not carry container output: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed container retained as uip-contract-management-migrate-") {
+		t.Fatalf("migrate error does not identify retained diagnostic container: %v", err)
+	}
+	for _, call := range runner.calls {
+		if containsString(call.arguments, "--rm") && containsString(call.arguments, "contract-migrate") {
+			t.Fatalf("failed migration container would be removed automatically: %v", call.arguments)
+		}
+		if len(call.arguments) >= 2 && call.arguments[0] == "container" && call.arguments[1] == "rm" {
+			t.Fatalf("failed migration container was removed: %v", call.arguments)
+		}
 	}
 }
 
@@ -711,11 +783,208 @@ compose:
 		ReleaseEnvPath: releasePath, ComposeFile: composePath, ComposeProject: "basic-platform-production",
 		AllowedTenantID: "tenant-1", DockerBinary: "docker", Timeout: time.Minute,
 		AllowPlaceholderDatabaseCredentials: allowPlaceholderDatabaseCredentials,
-	}, runner)
+	}, &productionScopeFixtureRunner{wrapped: runner, services: "contract-api\ncontract-mysql\ntemporal\ncontract-migrate\ncontract-catalog-sync\n"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return provisioner, contractPath
+}
+
+// Existing command-order tests record deployment effects separately from the
+// read-only scope query. Scope rejection is exercised explicitly below.
+type productionScopeFixtureRunner struct {
+	wrapped    subsystemCommandRunner
+	services   string
+	scopeCalls int
+	scopeError error
+}
+
+func (r *productionScopeFixtureRunner) Run(ctx context.Context, directory string, environment []string, name string, args ...string) error {
+	return r.wrapped.Run(ctx, directory, environment, name, args...)
+}
+
+func (r *productionScopeFixtureRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, args ...string) ([]byte, error) {
+	if containsString(args, "--services") {
+		r.scopeCalls++
+		if containsString(args, "--no-env-resolution") || containsString(args, "--no-interpolate") || containsString(args, "--profile") {
+			return nil, errors.New("scope query must use portable interpolation and avoid profiles")
+		}
+		return []byte(r.services), r.scopeError
+	}
+	if output, ok := r.wrapped.(interface {
+		RunOutput(context.Context, string, []string, string, ...string) ([]byte, error)
+	}); ok {
+		return output.RunOutput(ctx, directory, environment, name, args...)
+	}
+	return nil, r.wrapped.Run(ctx, directory, environment, name, args...)
+}
+
+func TestProductionComposeDisabledSubsystemHasNoDeploymentSideEffects(t *testing.T) {
+	for _, operation := range []string{"preflight", "provision", "update"} {
+		t.Run(operation, func(t *testing.T) {
+			p, runner, runtimePath := productionProvisionerFixture(t)
+			target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+			scope := target.runner.(*productionScopeFixtureRunner)
+			scope.services = "platform-api\ncontract-mysql\ntemporal\n"
+			if err := os.Remove(runtimePath); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch operation {
+			case "preflight":
+				err = p.Preflight(context.Background(), productionPreflightInput("https://platform.example.com", testProductionApplicationCode))
+			case "provision":
+				err = p.Provision(context.Background(), productionContractInput("https://platform.example.com"))
+			case "update":
+				err = p.Update(context.Background(), productionContractInput("https://platform.example.com"))
+			}
+			if err == nil || !strings.Contains(err.Error(), "此系统未启用") {
+				t.Fatalf("got %v", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("disabled subsystem ran commands: %#v", runner.calls)
+			}
+			if _, err := os.Stat(runtimePath); !os.IsNotExist(err) {
+				t.Fatalf("disabled subsystem wrote runtime: %v", err)
+			}
+		})
+	}
+}
+
+func TestProductionComposeScopeResolutionFailsClosed(t *testing.T) {
+	p, runner, _ := productionProvisionerFixture(t)
+	target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+	target.runner.(*productionScopeFixtureRunner).scopeError = errors.New("invalid YAML")
+	if err := p.Provision(context.Background(), productionContractInput("https://platform.example.com")); err == nil {
+		t.Fatal("invalid scope accepted")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("invalid scope started deployment")
+	}
+}
+
+func TestProductionComposeConditionalWorkerRequiresEnabledOnboardedDependency(t *testing.T) {
+	for _, state := range []string{"disabled", "pending", "ready"} {
+		t.Run(state, func(t *testing.T) {
+			p, _, _ := productionProvisionerFixture(t)
+			target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+			target.config.Profile.Manifest.Runtime.Files = append(target.config.Profile.Manifest.Runtime.Files, productionSubsystemRuntimeFileManifest{
+				Path: "runtime/customer.env", WhenService: "customer-api", ComposeEnvironmentKey: "CUSTOMER_RUNTIME_ENV_FILE", RequiredExistingKeys: []string{"OIDC_CLIENT_SECRET"},
+			})
+			target.config.Profile.Manifest.Compose.RuntimeServices = append(target.config.Profile.Manifest.Compose.RuntimeServices, "portal-invite-compensation-worker")
+			target.config.Profile.Manifest.Compose.ConditionalRuntimeServices = map[string]string{"portal-invite-compensation-worker": "runtime/customer.env"}
+			scope := target.runner.(*productionScopeFixtureRunner)
+			scope.services += "portal-invite-compensation-worker\n"
+			if state != "disabled" {
+				scope.services += "customer-api\n"
+				value := "PENDING_ONBOARDING"
+				if state == "ready" {
+					value = "test-credential"
+				}
+				if err := os.WriteFile(filepath.Join(target.config.DeployRoot, "runtime/customer.env"), []byte("OIDC_CLIENT_SECRET="+value+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := target.validateEnabledServices(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got := containsString(target.selectedRuntimeServices(), "portal-invite-compensation-worker")
+			if got != (state == "ready") {
+				t.Fatalf("worker included=%v for dependency %s", got, state)
+			}
+			if !containsString(target.selectedRuntimeServices(), "contract-api") {
+				t.Fatal("primary runtime service excluded")
+			}
+		})
+	}
+}
+
+func TestProductionComposeCommandDoesNotEnableLegacyProfiles(t *testing.T) {
+	p, _, _ := productionProvisionerFixture(t)
+	target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+	args, _ := target.composeCommand("config", "--services")
+	if containsString(args, "--profile") {
+		t.Fatalf("profiles must not override YAML membership: %v", args)
+	}
+}
+
+func TestProductionComposeInitializationPrecedesMigrationAndBlocksOnFailure(t *testing.T) {
+	t.Run("success is cleaned precisely", func(t *testing.T) {
+		p, runner, _ := productionProvisionerFixture(t)
+		target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+		target.config.Profile.Manifest.Compose.InitializationServices = []string{"contract-database-init"}
+		target.runner.(*productionScopeFixtureRunner).services += "contract-database-init\n"
+		err := p.Provision(context.Background(), productionContractInput("https://platform.example.com"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		initIndex, cleanupIndex, migrationIndex, runtimeIndex := -1, -1, -1, -1
+		initializationContainer := ""
+		for index, call := range runner.calls {
+			if containsString(call.arguments, "contract-database-init") {
+				initIndex = index
+				if containsString(call.arguments, "--rm") || !containsString(call.arguments, "--name") {
+					t.Fatalf("initialization container must be named and retained on failure: %v", call.arguments)
+				}
+				for argumentIndex, argument := range call.arguments {
+					if argument == "--name" && argumentIndex+1 < len(call.arguments) {
+						initializationContainer = call.arguments[argumentIndex+1]
+					}
+				}
+			}
+			if len(call.arguments) >= 3 && call.arguments[0] == "container" && call.arguments[1] == "rm" && call.arguments[2] == initializationContainer {
+				cleanupIndex = index
+			}
+			if containsString(call.arguments, "contract-migrate") {
+				migrationIndex = index
+			}
+			if containsString(call.arguments, "contract-api") {
+				runtimeIndex = index
+			}
+		}
+		if initIndex < 0 {
+			t.Fatal("initialization never executed")
+		}
+		if initializationContainer == "" || !strings.HasPrefix(initializationContainer, "uip-contract-management-init-contract-database-init-") {
+			t.Fatalf("unexpected initialization container name %q", initializationContainer)
+		}
+		if !(initIndex < cleanupIndex && cleanupIndex < migrationIndex && migrationIndex < runtimeIndex) {
+			t.Fatalf("wrong order: init=%d cleanup=%d migrate=%d runtime=%d", initIndex, cleanupIndex, migrationIndex, runtimeIndex)
+		}
+	})
+
+	t.Run("failure is retained and blocks later steps", func(t *testing.T) {
+		runner := &productionInitializationFailureOutputRunner{logs: "database initialization failed"}
+		p, _ := productionProvisionerFixtureWithRunner(t, false, runner)
+		target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+		target.config.Profile.Manifest.Compose.InitializationServices = []string{"contract-database-init"}
+		target.runner.(*productionScopeFixtureRunner).services += "contract-database-init\n"
+
+		err := p.Provision(context.Background(), productionContractInput("https://platform.example.com"))
+		if err == nil || !strings.Contains(err.Error(), "failed container retained as uip-contract-management-init-contract-database-init-") {
+			t.Fatalf("initialization failure did not identify retained container: %v", err)
+		}
+		for _, call := range runner.calls {
+			if containsString(call.arguments, "contract-migrate") || containsString(call.arguments, "contract-api") {
+				t.Fatalf("failed initialization allowed later deployment step: %v", call.arguments)
+			}
+			if len(call.arguments) >= 2 && call.arguments[0] == "container" && call.arguments[1] == "rm" {
+				t.Fatalf("failed initialization container was removed: %v", call.arguments)
+			}
+		}
+	})
+}
+
+func TestProductionComposeMissingInitializerRejectsScope(t *testing.T) {
+	p, runner, _ := productionProvisionerFixture(t)
+	target, _ := p.target(testProductionApplicationCode, testProductionEnvironment)
+	target.config.Profile.Manifest.Compose.InitializationServices = []string{"contract-database-init"}
+	if err := p.Provision(context.Background(), productionContractInput("https://platform.example.com")); err == nil || !strings.Contains(err.Error(), "contract-database-init") {
+		t.Fatalf("missing initializer accepted: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("missing initializer permitted deployment effects")
+	}
 }
 
 func productionPreflightInput(origin, applicationCode string) application.SubsystemPreflightInput {
@@ -779,5 +1048,69 @@ func TestValidateProductionReleaseImageNamesMissingDigestAndFixCommands(t *testi
 	writeRelease("CONTRACT_IMAGE=registry.example.com/contract-management/contract@sha256:" + strings.Repeat("a", 64) + "\n")
 	if err := validateProductionReleaseImage(path, "CONTRACT_IMAGE"); err != nil {
 		t.Fatalf("valid immutable digest rejected: %v", err)
+	}
+}
+
+func TestProductionComposeAvailableCapabilitiesFollowPreparedReleaseImages(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	releasePath := filepath.Join(directory, ".release.env")
+	profiles := []productionSubsystemProfile{
+		{
+			Checksum: "sha256:customer",
+			Manifest: productionSubsystemManifest{
+				Application: productionSubsystemApplicationManifest{
+					Code: "customer_and_opportunity", Name: "客户与商机管理系统", Environment: "prod",
+				},
+				Compose: productionSubsystemComposeManifest{ReleaseImageKeys: []string{"CUSTOMER_CRM_IMAGE"}},
+			},
+		},
+		{
+			Checksum: "sha256:contract",
+			Manifest: productionSubsystemManifest{
+				Application: productionSubsystemApplicationManifest{
+					Code: "contract_management", Name: "合同管理系统", Environment: "prod",
+				},
+				Compose: productionSubsystemComposeManifest{ReleaseImageKeys: []string{"CONTRACT_IMAGE", "CONTRACT_MIGRATE_IMAGE"}},
+			},
+		},
+	}
+	provisioner := &ProductionComposeSubsystemProvisioner{
+		enabled: true, profiles: profiles, releaseEnvPath: releasePath,
+	}
+	digest := "registry.local/uip/customer@sha256:" + strings.Repeat("a", 64)
+	if err := os.WriteFile(releasePath, []byte(
+		"CUSTOMER_CRM_IMAGE="+digest+"\n"+
+			"CONTRACT_IMAGE=registry.local/uip/contract:pending\n"+
+			"CONTRACT_MIGRATE_IMAGE=registry.local/uip/contract-migrate@sha256:"+strings.Repeat("b", 64)+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("write release env: %v", err)
+	}
+
+	capabilities, err := provisioner.AvailableCapabilities(context.Background())
+	if err != nil {
+		t.Fatalf("available capabilities: %v", err)
+	}
+	if !capabilities.Enabled || !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"customer_and_opportunity"}) {
+		t.Fatalf("available application codes = %#v", capabilities.SupportedApplicationCodes)
+	}
+	if len(capabilities.Targets) != 1 || capabilities.Targets[0].ApplicationCode != "customer_and_opportunity" {
+		t.Fatalf("available targets = %#v", capabilities.Targets)
+	}
+
+	contractDigest := "registry.local/uip/contract@sha256:" + strings.Repeat("c", 64)
+	if err := os.WriteFile(releasePath, []byte(
+		"CUSTOMER_CRM_IMAGE="+digest+"\n"+
+			"CONTRACT_IMAGE="+contractDigest+"\n"+
+			"CONTRACT_MIGRATE_IMAGE=registry.local/uip/contract-migrate@sha256:"+strings.Repeat("b", 64)+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("update release env: %v", err)
+	}
+	capabilities, err = provisioner.AvailableCapabilities(context.Background())
+	if err != nil {
+		t.Fatalf("updated available capabilities: %v", err)
+	}
+	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"customer_and_opportunity", "contract_management"}) {
+		t.Fatalf("updated available application codes = %#v", capabilities.SupportedApplicationCodes)
 	}
 }

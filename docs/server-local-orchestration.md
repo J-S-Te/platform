@@ -1,7 +1,7 @@
 # 在远程服务器上运行本地统一编排（测试/演示服务器）
 
 > 更新日期：2026-08-19。
-> 适用场景：一台 **测试/演示服务器**（例如阿里云 ECS `47.111.20.119`），希望像本地开发一样使用
+> 适用场景：一台 **测试/演示服务器**（例如阿里云 ECS `203.0.113.10`），希望像本地开发一样使用
 > `docker-local.sh` 全家桶，并让 UI 的"一键接入 / 新增接入"可用。
 > 生产环境（`platform/deploy/production/`、CI/CD 发布不可变镜像）**不要**用本文档的编排方式。
 
@@ -86,14 +86,14 @@ printf '%s\n' '你的管理员密码' | bash scripts/docker-local.sh up \
 ## 4. 配置公网/远程访问（服务器是 IP + HTTP）
 
 默认 `docker-local.sh` 把公开地址写成 `http://localhost:8081`，且前端只绑定 `127.0.0.1`。
-要让外部用 `http://47.111.20.119:8081` 访问，启用"局域网覆盖"模式（对公网 IP 同样适用）：
+要让外部用 `http://203.0.113.10:8081` 访问，启用"局域网覆盖"模式（对公网 IP 同样适用）：
 
 ```bash
 # 1) 允许 OAuth HTTP 回调（公网 IP 非回环，默认被平台拒绝）
 sed -i 's/^AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=.*/AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true/' docker/.env.local
 
 # 2) 把公开地址切到服务器 IP，前端绑定 0.0.0.0
-bash scripts/lan-access.sh enable --address 47.111.20.119 --port 8081
+bash scripts/lan-access.sh enable --address 203.0.113.10 --port 8081
 
 # 3) 重建 API（让上面两步的配置生效）并重新拉起
 bash scripts/docker-local.sh up
@@ -110,10 +110,10 @@ bash scripts/docker-local.sh up
 cd /opt/workspace/Unified_Identity_Authentication_Platform/platform
 bash scripts/docker-local.sh verify          # 网关自检
 bash scripts/docker-local.sh ps             # 看所有容器
-curl -I http://47.111.20.119:8081/          # 外部可访问
+curl -I http://203.0.113.10:8081/          # 外部可访问
 ```
 
-浏览器打开 `http://47.111.20.119:8081/` → 用平台管理员登录 →
+浏览器打开 `http://203.0.113.10:8081/` → 用平台管理员登录 →
 **应用接入 → 合同管理系统 → 新增接入环境**（或直接"新增接入"）即可一键接入，和本地行为一致。
 
 服务器 shell 里想用脚本接入时，用回环地址（脚本只允许 HTTPS 或回环 HTTP）：
@@ -122,7 +122,7 @@ curl -I http://47.111.20.119:8081/          # 外部可访问
 bash scripts/subsystem.sh onboard \
   --preset contract-management-local \
   --api-base-url http://127.0.0.1:8081/api/v1 \
-  --platform-origin http://47.111.20.119:8081 \
+  --platform-origin http://203.0.113.10:8081 \
   --account admins
 ```
 

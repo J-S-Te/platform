@@ -17,7 +17,7 @@ BOOTSTRAP_SCRIPT="${PROJECT_ROOT}/scripts/bootstrap-linux.sh"
 API_SERVICE="${BASIC_PLATFORM_API_SERVICE:-basic-platform-api.service}"
 WORKER_SERVICE="${BASIC_PLATFORM_WORKER_SERVICE:-basic-platform-worker.service}"
 RUN_USER="${BASIC_PLATFORM_RUN_USER:-basic-platform}"
-DEPLOY_ROOT="${BASIC_PLATFORM_DEPLOY_ROOT:-/opt/basic-platform}"
+DEPLOY_ROOT="${BASIC_PLATFORM_DEPLOY_ROOT:-/opt/unified-identity-platform}"
 ENV_FILE="${ENV_FILE:-/etc/basic-platform/basic-platform.env}"
 BACKUP_DIR="${BASIC_PLATFORM_BACKUP_DIR:-/var/backups/basic-platform}"
 HEALTH_URL="${BASIC_PLATFORM_HEALTH_URL:-http://127.0.0.1:8080}"
@@ -55,7 +55,7 @@ usage() {
 
 通用选项：
   --env-file PATH         环境文件，默认 /etc/basic-platform/basic-platform.env
-  --deploy-root PATH      发布根目录，默认 /opt/basic-platform
+  --deploy-root PATH      发布根目录，默认 /opt/unified-identity-platform
   --backup-dir PATH       备份目录，默认 /var/backups/basic-platform
   --health-url URL        本机 API 地址，默认 http://127.0.0.1:8080
   --lines N               logs 命令显示的日志行数，默认 100

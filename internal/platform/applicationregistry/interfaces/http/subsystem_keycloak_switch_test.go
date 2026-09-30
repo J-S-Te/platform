@@ -128,7 +128,7 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 		test := test
 		t.Run(name, func(t *testing.T) {
 			stateStore := &keycloakIssuerStateStore{
-				recordingSubsystemDeploymentStateStore: recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1"}},
+				recordingSubsystemDeploymentStateStore: recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", EnvironmentID: "env-1"}},
 				issuerAlias:                            test.issuerAlias,
 			}
 			provisioner := &recordingHTTPSubsystemProvisioner{}
@@ -139,6 +139,7 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			handler.serviceCredentials = &serviceCredentialManagerStub{}
 			readiness := &recordingKeycloakReadiness{}
 			handler.ConfigureKeycloak(true, "https://sso.example.com", "basic-platform")
 			handler.ConfigureKeycloakSwitchReadinessInspector(readiness)

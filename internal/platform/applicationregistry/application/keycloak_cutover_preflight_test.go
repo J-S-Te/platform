@@ -3,11 +3,11 @@ package application
 import "testing"
 
 func TestValidateKeycloakCutoverTransportKeepsHTTPCompatibleUntilPolicyEnabled(t *testing.T) {
-	transport, err := ValidateKeycloakCutoverTransport("http://47.111.20.119:8081", "/customer-portal", false)
+	transport, err := ValidateKeycloakCutoverTransport("http://203.0.113.10:8081", "/customer-portal", false)
 	if err != nil {
 		t.Fatalf("ValidateKeycloakCutoverTransport() error = %v", err)
 	}
-	if transport.RedirectURI != "http://47.111.20.119:8081/customer-portal/auth/callback" || transport.PublicURL != "http://47.111.20.119:8081/customer-portal/" || transport.CookieSecure {
+	if transport.RedirectURI != "http://203.0.113.10:8081/customer-portal/auth/callback" || transport.PublicURL != "http://203.0.113.10:8081/customer-portal/" || transport.CookieSecure {
 		t.Fatalf("unexpected HTTP transport: %#v", transport)
 	}
 }

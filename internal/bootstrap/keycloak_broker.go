@@ -47,6 +47,12 @@ func (registrar keycloakBrokerRegistrar) RecoverKeycloakBroker(ctx context.Conte
 	return registrar.recoverBrokerClient(ctx, tenantID, operatorID, platformBrokerClientID)
 }
 
+// RecoverCustomerPortalBroker repairs a missing portal Broker IdP using its
+// platform-side OAuth client credential, rotating only after classified drift.
+func (registrar keycloakBrokerRegistrar) RecoverCustomerPortalBroker(ctx context.Context, tenantID, operatorID string) (string, string, error) {
+	return registrar.recoverBrokerClient(ctx, tenantID, operatorID, customerPortalBrokerClientID)
+}
+
 // EnsureCustomerPortalBroker provisions a separate upstream OAuth client for
 // external customer authentication. It must not share the platform Broker
 // client: the OAuth authorization resolver derives claims from the client's
