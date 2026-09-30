@@ -10,6 +10,45 @@
 # helpers deliberately do not acquire the lock themselves: deploy.sh,
 # deploy-service.sh and start-enabled.sh protect the surrounding transaction.
 
+prepare_managed_public_proxy_image() {
+  local image expected config endpoint status
+  expected='ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459'
+  image="$(compose config --images docker-socket-proxy)" || return 1
+  [[ -n "$image" ]] || { echo '未解析到 Docker Socket Proxy 镜像，拒绝继续' >&2; return 1; }
+  [[ "$image" == "$expected" ]] || return 0
+  docker image inspect "$image" >/dev/null 2>&1 && return 0
+  # Public GHCR pulls must not inherit a stale personal registry credential.
+  # Resolve the original endpoint before changing CLI config so the anonymous
+  # pull populates the same daemon cache used by Compose and ACR deployments.
+  if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+    endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$DOCKER_CONTEXT")" || return 1
+  else
+    endpoint="${DOCKER_HOST:-}"
+  fi
+  if [[ -z "$endpoint" ]]; then
+    endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" || return 1
+  fi
+  [[ "$endpoint" == unix://* ]] || {
+    echo '受管公共代理的匿名预拉取仅支持本机 Unix Docker endpoint；拒绝丢失远端 TLS context 配置' >&2
+    return 1
+  }
+  config="$(mktemp -d "${TMPDIR:-/tmp}/uip-public-proxy-auth.XXXXXX")" || return 1
+  chmod 700 "$config" || { rm -rf -- "$config"; return 1; }
+  if ! printf '{"auths":{}}\n' >"$config/config.json"; then
+    rm -rf -- "$config"
+    return 1
+  fi
+  chmod 600 "$config/config.json" || { rm -rf -- "$config"; return 1; }
+  echo '匿名预拉取固定版本的受管公共 Docker Socket Proxy 镜像'
+  status=0
+  DOCKER_CONTEXT= docker --config "$config" --host "$endpoint" pull "$image" || status=$?
+  rm -rf -- "$config" || return 1
+  ((status == 0)) || { echo '公共代理镜像预拉取失败；拒绝继续重建控制面' >&2; return "$status"; }
+  docker image inspect "$image" >/dev/null 2>&1 || {
+    echo '公共代理镜像拉取后未出现在当前 Docker daemon 缓存' >&2; return 1;
+  }
+}
+
 # CI can install into a non-default root. Compose's bind-mount sources and both
 # control-plane processes must resolve that same root before any reload attempt.
 prepare_ci_deploy_root() (
@@ -276,6 +315,8 @@ refresh_subsystem_control_plane_config() {
     echo '检测到子系统控制面只有一个服务在运行；本次重载将修复并成对重建两个服务'
     echo "  platform-api=${platform_api:-missing} subsystem-provisioner=${provisioner:-missing}"
   fi
+
+  prepare_managed_public_proxy_image || return 1
 
   if [[ -n "$platform_api" ]]; then
     echo '暂停 platform-api，防止清单切换窗口接受旧摘要的接入请求'

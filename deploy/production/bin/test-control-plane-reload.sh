@@ -69,6 +69,11 @@ docker() {
 
 compose() {
   printf '%s\n' "$*" >>"$calls"
+  # Custom proxy references retain their normal authenticated pull behavior;
+  # the pinned public-image branch has a separate executable Docker-argv test.
+  if [[ "$*" == 'config --images docker-socket-proxy' ]]; then
+    printf 'operator.example/custom-proxy:approved\n'
+  fi
   if [[ "$1" == ps && "$2" == -q ]]; then
     case "$3" in
       subsystem-provisioner) printf 'new-agent\n' ;;
@@ -81,6 +86,7 @@ refresh_subsystem_control_plane_config >"$test_root/reload.out"
 expected_order="$test_root/expected-order"
 cat >"$expected_order" <<'EOF'
 config --quiet
+config --images docker-socket-proxy
 stop --timeout 60 platform-api
 run --rm --no-deps subsystem-provisioner-socket-init
 up -d --force-recreate --wait --wait-timeout 60 --no-deps subsystem-provisioner

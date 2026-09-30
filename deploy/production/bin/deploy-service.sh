@@ -699,6 +699,7 @@ require_backup_space() {
 
 deploy_platform() {
 	local file_gateway_root file_gateway_db_name file_gateway_container file_gateway_health
+  prepare_managed_public_proxy_image || return 1
 	file_gateway_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
 	file_gateway_root="${file_gateway_root:-$deploy_dir/data/file-gateway}"
 	file_gateway_db_name="$(env_value FILE_GATEWAY_DB_NAME)"
@@ -982,6 +983,7 @@ rollback_runtime() {
     frontend) frontend_compose up -d --force-recreate --no-deps frontend ;;
     platform)
       local restored_platform_image restored_gateway_image provisioner_container
+      prepare_managed_public_proxy_image || return 1
       restored_platform_image="${restored_images[0]}"
       restored_gateway_image="${restored_images[1]}"
       compose run --rm --no-deps subsystem-provisioner-socket-init || return
