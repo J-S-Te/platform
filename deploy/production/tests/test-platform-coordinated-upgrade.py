@@ -34,6 +34,7 @@ stat() { echo 10001:10001; }
 port_value() { echo 18080; }
 backup_database() { log backup; }
 ensure_temporal_application_network() { :; }
+prepare_managed_public_proxy_image() { log proxy-prefetch; [[ "$FAIL_PHASE" != proxy ]]; }
 wait_for_health() { log api-health; }
 dump_subsystem_provisioner_debug() { :; }
 dump_file_gateway_debug() { :; }
@@ -114,12 +115,14 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
     run({'MARKER_IMAGE': image})
     calls, old = run({'PLATFORM_IMAGE': 'old-image'}, succeeds=False)
     assert 'legacy Agent: unknown fields' in old.stderr and 'api' not in calls
-    for phase in ('migrate', 'agent', 'api', 'profiles', 'digest', 'stability'):
+    for phase in ('proxy', 'migrate', 'agent', 'api', 'profiles', 'digest', 'stability'):
         calls, _ = run({'FAIL_PHASE': phase}, succeeds=False)
         if phase in ('migrate', 'agent'):
             assert 'api' not in calls
         if phase == 'migrate':
             assert 'agent' not in calls and 'stop-old-api' not in calls
+        if phase == 'proxy':
+            assert 'migrate' not in calls and 'stop-old-api' not in calls
     # This is the same persisted marker left by the failed legacy-binary attempt.
     run()
 
