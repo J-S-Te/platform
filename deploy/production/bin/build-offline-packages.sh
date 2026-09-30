@@ -641,12 +641,9 @@ publish_bootstrap_installer() (
     exit "$status"
   }
   trap cleanup_bootstrap EXIT
-  # Keep the repository's public installer and packaged installer identical.
-  cmp -s "$workspace_root/platform/scripts/install-assets.sh" "$script_dir/install-assets.sh" || {
-    echo 'platform/scripts/install-assets.sh 与生产安装器不一致，请同步后重新打包' >&2
-    exit 1
-  }
-  install -m 755 "$workspace_root/platform/scripts/install-assets.sh" "$staged_installer"
+  # Publish the same canonical installer that ships inside the assets package.
+  # The old platform/scripts copy no longer exists in the unified deployment tree.
+  install -m 755 "$script_dir/install-assets.sh" "$staged_installer"
   bash -n "$staged_installer"
   installer_digest="$(sha256sum "$staged_installer" | awk '{print tolower($1)}')"
   printf '%s  %s\n' "$installer_digest" "$(basename -- "$installer")" > "$staged_sidecar"
