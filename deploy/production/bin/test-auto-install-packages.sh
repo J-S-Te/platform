@@ -4,11 +4,13 @@ source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/auto-install-packages-test.XXXXXX")"
 trap 'rm -r -- "$test_root"' EXIT
 mkdir -p "$test_root/deploy/bin" "$test_root/deploy/packages" "$test_root/deploy/manifests"
-cp "$source_dir/bin/deploy.sh" "$source_dir/bin/offline-configure.sh" "$source_dir/bin/public-transport.sh" "$test_root/deploy/bin/"
-cp "$source_dir/compose.yaml" "$test_root/deploy/"
+cp "$source_dir/bin/deploy.sh" "$source_dir/bin/compose-scope.sh" "$source_dir/bin/start-enabled.sh" "$source_dir/bin/provisioner-config-refresh.sh" "$source_dir/bin/offline-configure.sh" "$source_dir/bin/offline-package-metadata.sh" "$source_dir/bin/public-transport.sh" "$test_root/deploy/bin/"
+cp "$source_dir/docker-compose.yml" "$test_root/deploy/"
 touch "$test_root/deploy/.env" "$test_root/deploy/.release.env"
 chmod 600 "$test_root/deploy/.env" "$test_root/deploy/.release.env"
 source "$test_root/deploy/bin/deploy.sh"
+scope_services() { printf '%s\n' platform-api frontend customer-api portal-api contract-api project-api settlement-api data-analysis-api; }
+scope_report() { :; }
 deploy_dir="$test_root/deploy"
 package_dir="$deploy_dir/packages"
 events="$test_root/events"
@@ -23,6 +25,7 @@ import_package() { printf 'import:%s\n' "$(basename -- "$1")" >> "$events"; }
 prepare_subsystem() { printf 'prepare:%s\n' "$1" >> "$events"; }
 deploy_component() { printf 'deploy:%s\n' "$1" >> "$events"; }
 verify() { printf 'verify\n' >> "$events"; }
+wait_for_required_service_health() { printf 'verify\n' >> "$events"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 if (auto_install_packages) >"$test_root/missing.log" 2>&1; then fail 'missing core packages accepted'; fi
@@ -68,4 +71,11 @@ fi
 if (auto_install_packages) >"$test_root/duplicate.log" 2>&1; then fail 'ambiguous platform packages accepted'; fi
 grep -q '发现多个 platform 镜像包' "$test_root/duplicate.log" || fail 'ambiguous package error absent'
 [[ ! -s "$events" ]] || fail 'performed operations before rejecting ambiguous packages'
+rm "$package_dir/platform-backend-v2-linux-amd64.tar.gz"
+scope_services() { printf '%s\n' platform-api frontend; }
+: > "$events"
+auto_install_packages > "$test_root/core-only.log"
+if grep -Eq 'contract|customer-opportunity' "$events"; then
+  fail 'commented subsystem package was imported or prepared'
+fi
 echo 'automatic package discovery and staged install tests passed'

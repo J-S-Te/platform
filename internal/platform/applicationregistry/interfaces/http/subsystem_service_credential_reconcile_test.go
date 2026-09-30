@@ -302,12 +302,14 @@ func TestEnsureUpdateServiceCredentialsBackfillsProjectApprovedContractReader(t 
 		t.Fatal(err)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"project_management-prod-audit-publisher":          {"audit.ingest"},
 		"project_management-prod-owner-directory":          {"owner_directory.read"},
 		"project_management-prod-notification-ingest":      {"notification.ingest"},
 		"project_management-prod-contract-approved-reader": {"contract.approved.internal.read"},
 		"project_management-prod-file-gateway-writer":      {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
+		application.ServiceCredentialAuditIngest:          "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:   "new-secret",
 		application.ServiceCredentialNotificationIngest:   "new-secret",
 		application.ServiceCredentialContractApprovedRead: "new-secret",
@@ -402,12 +404,14 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 		t.Fatal(err)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"contract_management-prod-audit-publisher":        {"audit.ingest"},
 		"contract_management-prod-owner-directory":        {"owner_directory.read"},
 		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
 		"contract_management-prod-project-integration":    {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
+		application.ServiceCredentialAuditIngest:              "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:       "new-secret",
 		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
 		application.ServiceCredentialProjectContractImport:    "new-secret",
@@ -433,11 +437,13 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		t.Fatalf("retry did not issue a replacement delivery secret: input=%#v credentials=%#v", manager.secretInput, credentials)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"contract_management-prod-audit-publisher":        {"audit.ingest"},
 		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
 		"contract_management-prod-project-integration":    {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
+		application.ServiceCredentialAuditIngest:              "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:       "retry-secret",
 		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
 		application.ServiceCredentialProjectContractImport:    "new-secret",
@@ -463,6 +469,7 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.
 		t.Fatalf("existing portal mapping credential was not redelivered: %#v", manager.secretInputs)
 	}
 	wantPurposes := map[string]bool{
+		application.ServiceCredentialAuditIngest:            false,
 		application.ServiceCredentialExternalUserProvision:  false,
 		application.ServiceCredentialApplicationRoleAssign:  false,
 		application.ServiceCredentialApplicationRoleRevoke:  false,
@@ -472,6 +479,7 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.
 		application.ServiceCredentialFileGatewayWrite:       false,
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"customer_portal-prod-audit-publisher":         {"audit.ingest"},
 		"customer_portal-prod-external-user-provision": {"external_user.provision"},
 		"customer_portal-prod-role-assign":             {"application_role.assign"},
 		"customer_portal-prod-role-revoke":             {"application_role.revoke"},

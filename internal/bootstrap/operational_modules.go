@@ -325,8 +325,8 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 		return "", errors.New("application authorization service is unavailable")
 	}
 	roleCodes := manager.initialAdministratorRoles(applicationCode)
-	// customer_portal 面向外部客户：执行接入的内部管理员不能自动获得客户角色或门户入口，
-	// 外部客户身份和数据范围必须由 CRM 邀请流程逐个建立。
+	// customer_portal 的接入操作人只会获得独立的 portal_super_admin 内部运营角色；
+	// 外部客户身份和 portal_customer 数据范围仍必须由 CRM 邀请流程逐个建立。
 	if len(roleCodes) == 0 {
 		return "", nil
 	}
@@ -373,7 +373,9 @@ func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []strin
 		// max_effective_roles=10 和各角色数据范围约束。
 		return []string{"sales_director", "team_lead", "technical_director"}
 	case "customer_portal":
-		return nil
+		// 门户客户角色与内部运营角色严格分离。初始接入人只能获得内部角色，不能被
+		// 投影成任意客户身份；Portal 服务端还会强制该角色使用全局数据范围。
+		return []string{"portal_super_admin"}
 	}
 	return []string{"admin"}
 }

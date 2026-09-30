@@ -6,6 +6,12 @@
 
 Keycloak Broker 从基础平台 OIDC UserInfo 导入以下属性，并在 Keycloak Realm Client 的 ID Token、Access Token 与 UserInfo 中原样输出：
 
+`/oauth2/userinfo` 是基础平台作为上游 OIDC 授权服务器时的标准端点，Keycloak
+Broker 会在授权码换取 Token 后调用它。
+`AUTH_LEGACY_PLATFORM_ACCESS_TOKEN_ENABLED=false` 只关闭旧平台 Token 直接访问
+`/oauth2/authorization-context` 的兼容路径，不得关闭 UserInfo，否则所有通过
+`basic-platform` Identity Provider 登录的子系统都会在 Broker 回调阶段失败。
+
 | 基础平台声明 | Keycloak 用户属性 / Token Claim | 含义 |
 | --- | --- | --- |
 | `identity_id` | `identity_id` | 企业内唯一数字身份 ID（`iam_user.id`） |

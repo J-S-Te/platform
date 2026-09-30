@@ -55,10 +55,11 @@ type subsystemProvisioningReply struct {
 	Success bool `json:"success"`
 	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
 	// 单独放 Detail，避免被安全过滤整段吞掉。
-	Message    string                                    `json:"message,omitempty"`
-	Detail     string                                    `json:"detail,omitempty"`
-	Services   []application.SubsystemServiceInstance    `json:"services,omitempty"`
-	Candidates []application.SubsystemDiscoveryCandidate `json:"candidates,omitempty"`
+	Message      string                                         `json:"message,omitempty"`
+	Detail       string                                         `json:"detail,omitempty"`
+	Services     []application.SubsystemServiceInstance         `json:"services,omitempty"`
+	Candidates   []application.SubsystemDiscoveryCandidate      `json:"candidates,omitempty"`
+	Capabilities *application.SubsystemProvisioningCapabilities `json:"capabilities,omitempty"`
 }
 
 type subsystemServiceDiscovery interface {
@@ -67,6 +68,10 @@ type subsystemServiceDiscovery interface {
 
 type subsystemCandidateDiscovery interface {
 	DiscoverSubsystemCandidates(context.Context) ([]application.SubsystemDiscoveryCandidate, error)
+}
+
+type subsystemAvailableCapabilityProvider interface {
+	AvailableCapabilities(context.Context) (application.SubsystemProvisioningCapabilities, error)
 }
 
 // UnixSocketSubsystemProvisioner 是无特权 API 侧客户端，只能通过 Unix socket 请求固定动作；
@@ -138,6 +143,57 @@ func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.Su
 	capabilities.SupportedEnvironments = append([]string(nil), capabilities.SupportedEnvironments...)
 	capabilities.Targets = append([]application.SubsystemProvisioningTarget(nil), capabilities.Targets...)
 	return capabilities
+}
+
+// AvailableCapabilities asks the privileged Agent for the current non-sensitive availability
+// projection. It is deliberately separate from Capabilities: static policy is still used for
+// security checks, while live availability follows prepare/remove operations without exposing
+// .release.env or its other values to the API container.
+func (provisioner *UnixSocketSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
+	if !provisioner.enabled {
+		capabilities := provisioner.Capabilities()
+		if capabilities.Mode == "production" {
+			capabilities.SupportedApplicationCodes = nil
+			capabilities.SupportedEnvironments = nil
+			capabilities.Targets = nil
+			capabilities.DefaultApplicationCode = ""
+			capabilities.DefaultApplicationName = ""
+			capabilities.DefaultDescription = ""
+			capabilities.DefaultEnvironment = ""
+			capabilities.DefaultUpstreamURL = ""
+			capabilities.DefaultPathPrefix = ""
+			capabilities.DefaultClientType = ""
+		}
+		return capabilities, nil
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, provisioner.timeout)
+	defer cancel()
+	connection, err := dialProvisioningSocket(operationCtx, provisioner.socketPath)
+	if err != nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("deployment helper is unavailable")
+	}
+	defer connection.Close()
+	if deadline, ok := operationCtx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	request := subsystemProvisioningRequest{
+		Version:   subsystemProvisioningProtocolVersion,
+		Action:    "capabilities",
+		RequestID: normalizedProvisioningRequestID(requestctx.RequestID(ctx)),
+	}
+	if err := json.NewEncoder(connection).Encode(request); err != nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("send capabilities request")
+	}
+	var reply subsystemProvisioningReply
+	if err := json.NewDecoder(io.LimitReader(connection, 256*1024)).Decode(&reply); err != nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("read capabilities response")
+	}
+	if !reply.Success || reply.Capabilities == nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningRejectionError(reply.Message, reply.Detail)
+	}
+	capabilities := normalizeSubsystemProvisioningCapabilities(*reply.Capabilities)
+	capabilities.Enabled = reply.Capabilities.Enabled
+	return capabilities, nil
 }
 
 func normalizeSubsystemProvisioningCapabilities(capabilities application.SubsystemProvisioningCapabilities) application.SubsystemProvisioningCapabilities {
@@ -525,6 +581,19 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		requiresManifestChecksum = provider.Capabilities().Mode == "production"
 	}
 	switch request.Action {
+	case "capabilities":
+		provider, ok := executor.(subsystemAvailableCapabilityProvider)
+		if !ok {
+			err = provisioningError("deployment helper does not support live capabilities")
+			break
+		}
+		capabilities, capabilityErr := provider.AvailableCapabilities(operationContext)
+		if capabilityErr != nil {
+			err = capabilityErr
+		} else {
+			_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, Capabilities: &capabilities})
+			return
+		}
 	case "preflight":
 		if request.Preflight == nil {
 			err = provisioningError("preflight request payload is incomplete")

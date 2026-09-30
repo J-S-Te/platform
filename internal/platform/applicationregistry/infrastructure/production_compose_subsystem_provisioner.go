@@ -46,10 +46,12 @@ type ProductionComposeSubsystemProvisionerConfig struct {
 // ProductionComposeSubsystemProvisioner 是按 application_code/environment 分派的生产
 // 执行器。所有目标都来自本地审核清单；未知目标在访问 Docker 或运行时文件前即被拒绝。
 type ProductionComposeSubsystemProvisioner struct {
-	enabled      bool
-	targets      map[string]*productionComposeTarget
-	capabilities application.SubsystemProvisioningCapabilities
-	dockerBinary string
+	enabled        bool
+	targets        map[string]*productionComposeTarget
+	capabilities   application.SubsystemProvisioningCapabilities
+	profiles       []productionSubsystemProfile
+	releaseEnvPath string
+	dockerBinary   string
 }
 
 type productionComposeTargetConfig struct {
@@ -67,9 +69,10 @@ type productionComposeTargetConfig struct {
 }
 
 type productionComposeTarget struct {
-	config productionComposeTargetConfig
-	runner subsystemCommandRunner
-	mutex  sync.Mutex
+	config          productionComposeTargetConfig
+	runner          subsystemCommandRunner
+	mutex           sync.Mutex
+	enabledServices map[string]bool
 }
 
 // NewProductionComposeSubsystemProvisioner 在 Agent 启动时一次加载审核清单；清单错误直接阻止
@@ -93,7 +96,7 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	}
 	config.RuntimeEnvPath = productionConfigPath(root, config.RuntimeEnvPath, ".env")
 	config.ReleaseEnvPath = productionConfigPath(root, config.ReleaseEnvPath, ".release.env")
-	config.ComposeFile = productionConfigPath(root, config.ComposeFile, "compose.yaml")
+	config.ComposeFile = productionConfigPath(root, config.ComposeFile, "docker-compose.yml")
 	config.ComposeProject = strings.TrimSpace(config.ComposeProject)
 	if config.ComposeProject == "" {
 		config.ComposeProject = "basic-platform-production"
@@ -121,10 +124,12 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 		return nil, err
 	}
 	provisioner := &ProductionComposeSubsystemProvisioner{
-		enabled:      config.Enabled,
-		targets:      make(map[string]*productionComposeTarget, len(profiles)),
-		capabilities: productionSubsystemCapabilities(profiles),
-		dockerBinary: config.DockerBinary,
+		enabled:        config.Enabled,
+		targets:        make(map[string]*productionComposeTarget, len(profiles)),
+		capabilities:   productionSubsystemCapabilities(profiles),
+		profiles:       append([]productionSubsystemProfile(nil), profiles...),
+		releaseEnvPath: config.ReleaseEnvPath,
+		dockerBinary:   config.DockerBinary,
 	}
 	provisioner.capabilities.Enabled = config.Enabled
 	for _, profile := range profiles {
@@ -192,14 +197,48 @@ func productionRuntimeBootstrapFiles(profiles []productionSubsystemProfile) ([]p
 	return files, nil
 }
 
-// Capabilities 返回防御性副本，供测试和未来的 Agent 诊断使用。API 侧独立加载同一清单，
-// 不通过 Unix Socket获取宿主机路径或其他敏感配置。
+// Capabilities 返回完整审核白名单的防御性副本，供 Agent 强制执行部署边界。API 使用同一
+// 静态投影校验生命周期请求，但管理页面的实时可见目标通过 AvailableCapabilities 获取。
 func (provisioner *ProductionComposeSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
 	capabilities := provisioner.capabilities
 	capabilities.SupportedApplicationCodes = append([]string(nil), capabilities.SupportedApplicationCodes...)
 	capabilities.SupportedEnvironments = append([]string(nil), capabilities.SupportedEnvironments...)
 	capabilities.Targets = append([]application.SubsystemProvisioningTarget(nil), capabilities.Targets...)
 	return capabilities
+}
+
+// AvailableCapabilities returns only targets whose complete image set has already been prepared
+// into .release.env as immutable digests. The full Capabilities policy remains the authoritative
+// allow-list, while this narrower projection prevents an optional subsystem that was not shipped
+// in the current delivery from appearing as installable in the control plane.
+func (provisioner *ProductionComposeSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
+	if provisioner == nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("production subsystem deployment is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return application.SubsystemProvisioningCapabilities{}, err
+	}
+	content, err := os.ReadFile(provisioner.releaseEnvPath)
+	if err != nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("production release environment is unavailable")
+	}
+	values := parseEnvironmentValues(string(content))
+	availableProfiles := make([]productionSubsystemProfile, 0, len(provisioner.profiles))
+	for _, profile := range provisioner.profiles {
+		available := len(profile.Manifest.Compose.ReleaseImageKeys) > 0
+		for _, key := range profile.Manifest.Compose.ReleaseImageKeys {
+			if !isImmutableProductionImageReference(values[key]) {
+				available = false
+				break
+			}
+		}
+		if available {
+			availableProfiles = append(availableProfiles, profile)
+		}
+	}
+	capabilities := productionSubsystemCapabilities(availableProfiles)
+	capabilities.Enabled = provisioner.enabled
+	return capabilities, nil
 }
 
 func (provisioner *ProductionComposeSubsystemProvisioner) target(applicationCode, environment string) (*productionComposeTarget, error) {
@@ -259,10 +298,15 @@ func (provisioner *ProductionComposeSubsystemProvisioner) DiscoverSubsystemServi
 // Preflight 在创建不可恢复的 OAuth 明文前验证租户、目标、文件权限、不可变镜像和 Compose
 // 配置；请求只能选择审核目标，不能把文件、镜像、服务或命令注入 Agent。
 func (target *productionComposeTarget) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
 	if err := target.validateTenant(input.TenantID); err != nil {
 		return err
 	}
 	if err := target.validatePreflightInput(input); err != nil {
+		return err
+	}
+	if err := target.validateEnabledServices(ctx); err != nil {
 		return err
 	}
 	// 预检只验证部署文件本身及清单声明的运行文件结构。基础设施密钥可能仍
@@ -298,6 +342,15 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	}
 	defer releaseProvisioningFileLock(lock)
 
+	if err := target.validateEnabledServices(operationContext); err != nil {
+		return err
+	}
+	if err := target.validateProvisioningInput(input); err != nil {
+		return err
+	}
+	if err := target.validateDeploymentFiles(true, true); err != nil {
+		return err
+	}
 	if err := target.writeRuntimeConfiguration(input); err != nil {
 		return err
 	}
@@ -320,6 +373,16 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum {
 		return provisioningError("production subsystem manifest drift detected")
 	}
+	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
+	defer cancel()
+	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
+	if err != nil {
+		return provisioningError("production deployment lock is unavailable")
+	}
+	defer releaseProvisioningFileLock(lock)
+	if err := target.validateEnabledServices(ctx); err != nil {
+		return err
+	}
 	if err := target.validateDeploymentFiles(false, true); err != nil {
 		return err
 	}
@@ -329,13 +392,6 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.validateRuntimeIntegrationConfiguration(); err != nil {
 		return err
 	}
-	operationContext, cancel := context.WithTimeout(ctx, target.config.Timeout)
-	defer cancel()
-	lock, err := acquireProvisioningFileLock(operationContext, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
-	if err != nil {
-		return provisioningError("production deployment lock is unavailable")
-	}
-	defer releaseProvisioningFileLock(lock)
 	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
@@ -343,7 +399,7 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 // 常规更新会保留浏览器 OAuth 密钥，但绝不能让 Compose 使用缺失或接入占位值启动；否则
 // 配置问题只会在稍后的健康检查中表现为无法定位的 401/403。
 func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration() error {
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -394,9 +450,15 @@ func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID st
 }
 
 func (target *productionComposeTarget) deployLocked(ctx context.Context, redactValues ...string) error {
+	// Re-read after acquiring the deployment lock: a queued request must respect
+	// a subsystem block removed since its initial preflight.
+	if err := target.validateEnabledServices(ctx); err != nil {
+		return err
+	}
 	// 部署按依赖、备份、迁移、服务启动顺序推进；中途失败只返回脱敏错误并保留备份，
 	// 不自动删除已写入的运行配置或数据库状态，后续重试/人工恢复可从同一现场继续判断。
 	compose := target.config.Profile.Manifest.Compose
+	compose.RuntimeServices = target.selectedRuntimeServices()
 	if len(compose.DependencyServices) > 0 {
 		// Dependency startup must be isolated from the shared platform services.
 		// Without --no-deps, Compose can recreate platform-api and the Agent,
@@ -427,16 +489,38 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 			return provisioningError("backup production subsystem database")
 		}
 	}
-	if compose.MigrateService != "" {
-		target.stepLog("step=migrate service=%s", compose.MigrateService)
-		// 迁移是 run --rm 一次性容器，失败后无法再取日志；因此在失败时直接捕获
-		// 本次迁移输出，脱敏后附到错误里让页面显示真实原因。
-		if output, err := target.runComposeOutput(ctx, "run", "--rm", "--no-deps", compose.MigrateService); err != nil {
+	for _, service := range compose.InitializationServices {
+		target.stepLog("step=initialize service=%s", service)
+		// 初始化与迁移使用相同的诊断策略：每次运行分配唯一名称，失败时保留容器和
+		// 退出码，成功时只精确删除本次容器。不能使用 --rm，否则失败现场也会丢失；
+		// 也不能依赖 Compose 的随机名称，否则成功初始化会持续积累 orphan 容器。
+		initializationContainer := productionInitializationContainerName(target.config.Profile.Manifest.Application.Code, service)
+		if output, err := target.runComposeOutput(ctx, "run", "--name", initializationContainer, "--no-deps", service); err != nil {
 			detail := sanitizeProvisioningLog(string(output), redactValues)
 			if detail == "" {
-				return provisioningError("migrate production subsystem database")
+				return provisioningError("initialize production subsystem database: " + service + "; failed container retained as " + initializationContainer)
 			}
-			return provisioningError("migrate production subsystem database: " + detail)
+			return provisioningError("initialize production subsystem database: " + service + ": " + detail + "; failed container retained as " + initializationContainer)
+		}
+		if err := target.runner.Run(ctx, target.config.DeployRoot, os.Environ(), target.config.DockerBinary, "container", "rm", initializationContainer); err != nil {
+			target.stepLog("step=initialize-cleanup warning=failed container=%s", initializationContainer)
+		}
+	}
+	if compose.MigrateService != "" {
+		target.stepLog("step=migrate service=%s", compose.MigrateService)
+		// 给迁移容器分配唯一名称且不使用 --rm：失败时容器和退出码必须保留，
+		// 运维才能在页面错误摘要之外继续用 docker ps -a / docker logs 诊断。
+		// 成功时只精确删除本次容器，不会误删先前保留的失败现场。
+		migrationContainer := productionMigrationContainerName(target.config.Profile.Manifest.Application.Code)
+		if output, err := target.runComposeOutput(ctx, "run", "--name", migrationContainer, "--no-deps", compose.MigrateService); err != nil {
+			detail := sanitizeProvisioningLog(string(output), redactValues)
+			if detail == "" {
+				return provisioningError("migrate production subsystem database; failed container retained as " + migrationContainer)
+			}
+			return provisioningError("migrate production subsystem database: " + detail + "; failed container retained as " + migrationContainer)
+		}
+		if err := target.runner.Run(ctx, target.config.DeployRoot, os.Environ(), target.config.DockerBinary, "container", "rm", migrationContainer); err != nil {
+			target.stepLog("step=migrate-cleanup warning=failed container=%s", migrationContainer)
 		}
 	}
 	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
@@ -467,6 +551,40 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		}
 	}
 	return nil
+}
+
+func productionMigrationContainerName(applicationCode string) string {
+	return productionOneShotContainerName(applicationCode, "migrate")
+}
+
+func productionInitializationContainerName(applicationCode, service string) string {
+	return productionOneShotContainerName(applicationCode, "init-"+service)
+}
+
+func productionOneShotContainerName(applicationCode, phase string) string {
+	sanitizeComponent := func(value, fallback string, limit int) string {
+		var name strings.Builder
+		for _, character := range strings.ToLower(strings.TrimSpace(value)) {
+			switch {
+			case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+				name.WriteRune(character)
+			default:
+				name.WriteByte('-')
+			}
+			if name.Len() >= limit {
+				break
+			}
+		}
+		component := strings.Trim(name.String(), "-")
+		if component == "" {
+			return fallback
+		}
+		return component
+	}
+
+	application := sanitizeComponent(applicationCode, "subsystem", 40)
+	operation := sanitizeComponent(phase, "task", 56)
+	return fmt.Sprintf("uip-%s-%s-%d", application, operation, time.Now().UTC().UnixNano())
 }
 
 // stepLog 把固定部署步骤写入 Agent 标准错误（容器日志），用于定位长耗时或卡住的步骤。
@@ -530,18 +648,83 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 		"--env-file", target.config.ReleaseEnvPath,
 		"--file", target.config.ComposeFile,
 	}
-	for _, profile := range target.config.Profile.Manifest.Compose.Profiles {
-		prefix = append(prefix, "--profile", profile)
-	}
 	runnerEnvironment := append([]string{}, os.Environ()...)
 	runnerEnvironment = append(runnerEnvironment, "BASIC_PLATFORM_RUNTIME_ENV_FILE="+target.config.RuntimeEnvPath)
 	if transportEnvironment, err := productionPublicTransportEnvironment(target.config.RuntimeEnvPath); err == nil {
 		runnerEnvironment = append(runnerEnvironment, transportEnvironment...)
 	}
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		runnerEnvironment = append(runnerEnvironment, runtimeFile.ComposeEnvironmentKey+"="+filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path)))
 	}
 	return append(prefix, arguments...), runnerEnvironment
+}
+
+// YAML service membership is the only deployment enablement switch. Resolve
+// the reviewed Compose file with the already configured .env/.release.env and
+// print service names only; image/secret values are validated for this target
+// after membership is established. Do not add --no-interpolate or
+// --no-env-resolution here: older Compose releases either reject the latter or
+// validate bind-mount expressions containing literal ${...:-...} colons.
+func (target *productionComposeTarget) validateEnabledServices(ctx context.Context) error {
+	checkContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	output, err := target.runComposeOutput(checkContext, "config", "--services")
+	if err != nil {
+		return provisioningError("production Compose service scope could not be resolved")
+	}
+	services := make(map[string]bool)
+	for _, service := range strings.Fields(string(output)) {
+		services[service] = true
+	}
+	target.enabledServices = services
+	compose := target.config.Profile.Manifest.Compose
+	required := append([]string{}, compose.RuntimeServices...)
+	required = append(required, compose.DependencyServices...)
+	required = append(required, compose.InitializationServices...)
+	required = append(required, compose.MigrateService, compose.CatalogSyncService)
+	if compose.Database != nil {
+		required = append(required, compose.Database.Service)
+	}
+	for _, service := range required {
+		if service != "" && !services[service] {
+			return provisioningError("此系统未启用或服务块不完整: " + target.config.Profile.Manifest.Application.Code + " (missing " + service + ")")
+		}
+	}
+	return nil
+}
+
+func (target *productionComposeTarget) selectedRuntimeFiles() []productionSubsystemRuntimeFileManifest {
+	var files []productionSubsystemRuntimeFileManifest
+	for _, file := range target.config.Profile.Manifest.Runtime.Files {
+		if file.WhenService != "" {
+			if !target.enabledServices[file.WhenService] {
+				continue
+			}
+			// Cross-system credentials can only be delivered after that system's
+			// own onboarding; a missing dependency disables its integration worker.
+			if err := validateProductionRequiredEnvironmentKeys(filepath.Join(target.config.DeployRoot, file.Path), file.RequiredExistingKeys, "dependency runtime incomplete"); err != nil {
+				continue
+			}
+		}
+		files = append(files, file)
+	}
+	return files
+}
+
+func (target *productionComposeTarget) selectedRuntimeServices() []string {
+	files := make(map[string]bool)
+	for _, file := range target.selectedRuntimeFiles() {
+		files[file.Path] = true
+	}
+	var services []string
+	for _, service := range target.config.Profile.Manifest.Compose.RuntimeServices {
+		if path := target.config.Profile.Manifest.Compose.ConditionalRuntimeServices[service]; path != "" && !files[path] {
+			target.stepLog("dependency unavailable; skipped service=%s runtime=%s", service, path)
+			continue
+		}
+		services = append(services, service)
+	}
+	return services
 }
 
 // writeRuntimeFixedValues 写入清单固定值、生成密钥和可安全更新的运行时绑定。
@@ -553,7 +736,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		values map[string]string
 	}
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		currentContent, readErr := os.ReadFile(path)
 		if readErr != nil {
@@ -653,7 +836,7 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 		values map[string]string
 	}
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
 		if err != nil {
@@ -764,10 +947,7 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 	}
 	// runtime 文件属于 Agent 的受控输出：首次接入可从随发布包审核的模板初始化，
 	// 已有文件只收紧权限且绝不整体覆盖。清单之外的文件和环境变量不会参与校验。
-	runtimeFilesToPrepare := target.config.Profile.Manifest.Runtime.Files
-	if requireWritableEnvironment {
-		runtimeFilesToPrepare = target.config.RuntimeBootstrapFiles
-	}
+	runtimeFilesToPrepare := target.selectedRuntimeFiles()
 	for _, runtimeFile := range runtimeFilesToPrepare {
 		if err := ensureProductionRuntimeFile(root, runtimeFile, requireWritableEnvironment); err != nil {
 			return err
@@ -790,7 +970,7 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 	if _, err := productionPublicTransportEnvironment(target.config.RuntimeEnvPath); err != nil {
 		return provisioningError("production public transport configuration is invalid")
 	}
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		path := filepath.Join(root, filepath.FromSlash(runtimeFile.Path))
 		if err := validateProductionRequiredEnvironmentKeys(path, runtimeFile.RequiredExistingKeys, "production subsystem runtime secrets are incomplete"); err != nil {
 			return err
@@ -1031,17 +1211,25 @@ func validateProductionReleaseImage(path, key string) error {
 		return provisioningError("production release environment is unavailable")
 	}
 	value := strings.TrimSpace(parseEnvironmentValues(string(content))[key])
+	if !isImmutableProductionImageReference(value) {
+		return provisioningError(immutableDigestError(key, value))
+	}
+	return nil
+}
+
+func isImmutableProductionImageReference(value string) bool {
+	value = strings.TrimSpace(value)
 	marker := "@sha256:"
 	index := strings.LastIndex(value, marker)
 	if index <= 0 || len(value[index+len(marker):]) != 64 {
-		return provisioningError(immutableDigestError(key, value))
+		return false
 	}
 	for _, character := range value[index+len(marker):] {
 		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return provisioningError(immutableDigestError(key, value))
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
 // immutableDigestError 点名缺失的 .release.env 键、当前值和补齐命令。现场最常见的漏步是
@@ -1155,7 +1343,19 @@ func productionPublicTransportEnvironment(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	ssoPort, err := parsePort(values[ssoPortKey], platformPort)
+	// Legacy IP-mode installations configured KEYCLOAK_HTTP_PORT before
+	// PUBLIC_SSO_HTTP_PORT became a persisted setting. The Agent must derive the
+	// same issuer as public-transport.sh or Docker Compose will start a subsystem
+	// with an issuer that cannot match Keycloak discovery metadata.
+	ssoFallbackPort := platformPort
+	if !enabled && strings.EqualFold(strings.TrimSpace(values["PUBLIC_ACCESS_MODE"]), "ip") {
+		keycloakPort, keycloakPortErr := parsePort(values["KEYCLOAK_HTTP_PORT"], 18090)
+		if keycloakPortErr != nil {
+			return nil, keycloakPortErr
+		}
+		ssoFallbackPort = keycloakPort
+	}
+	ssoPort, err := parsePort(values[ssoPortKey], ssoFallbackPort)
 	if err != nil {
 		return nil, err
 	}
@@ -1210,7 +1410,7 @@ func (target *productionComposeTarget) validateProvisioningInput(input applicati
 		return provisioningError("production subsystem integration values are inconsistent")
 	}
 	// 先解析所有映射，确保缺少任一用途凭据时不会先写入部分运行时文件。
-	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		for _, source := range runtimeFile.Bindings {
 			value, err := resolveProductionBinding(input, source)
 			if err != nil || !validEnvironmentValue(value) {
@@ -1218,7 +1418,7 @@ func (target *productionComposeTarget) validateProvisioningInput(input applicati
 			}
 		}
 	}
-	return target.validateDeploymentFiles(true, true)
+	return nil
 }
 
 func (target *productionComposeTarget) validateTenant(tenantID string) error {

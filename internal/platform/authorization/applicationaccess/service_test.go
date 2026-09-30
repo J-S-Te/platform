@@ -543,6 +543,23 @@ func TestApplicationAccessAllowsApplicationOwnedRole(t *testing.T) {
 	}
 }
 
+func TestPortalSuperAdminProjectionAllowsOnlyTheInternalPortalRole(t *testing.T) {
+	for _, test := range []struct {
+		applicationCode string
+		roleCode        string
+		want            bool
+	}{
+		{applicationCode: "customer_portal", roleCode: "portal_super_admin", want: true},
+		{applicationCode: "customer_portal", roleCode: "portal_customer", want: false},
+		{applicationCode: "customer_portal", roleCode: "future_portal_operator", want: false},
+		{applicationCode: "contract_management", roleCode: "admin", want: true},
+	} {
+		if got := includeRoleInSuperAdminProjection(test.applicationCode, test.roleCode); got != test.want {
+			t.Fatalf("includeRoleInSuperAdminProjection(%q, %q) = %t, want %t", test.applicationCode, test.roleCode, got, test.want)
+		}
+	}
+}
+
 func TestAccessAuditChangesReportsSecurityRelevantBeforeAndAfter(t *testing.T) {
 	before := Access{
 		Roles:                []RoleView{{Code: "sales"}},

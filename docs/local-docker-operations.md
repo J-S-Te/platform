@@ -50,7 +50,7 @@ printf '%s\n' "$ADMIN_PASSWORD" | bash scripts/docker-local.sh up \
 
 所有实际 Secret 文件必须保持 `0600`，禁止提交。
 
-当前只保留两套 Docker 配置边界：本地/测试使用根目录 `compose.local.yaml`，生产使用 `deploy/production/compose.yaml`。旧的根目录 `compose.yaml`、`docker/.env` 和 `prepare-docker-env.sh` 已删除，禁止重新引入第三套并行配置。仓库根 `.env` 只允许由开发者从 `.env.example` 本地创建，不得提交。
+当前只保留两套 Docker 配置边界：本地/测试使用根目录 `compose.local.yaml`，生产使用 `deploy/production/docker-compose.yml`。旧的根目录 `compose.yaml`、`docker/.env` 和 `prepare-docker-env.sh` 已删除，禁止重新引入第三套并行配置。仓库根 `.env` 只允许由开发者从 `.env.example` 本地创建，不得提交。
 
 ## 4. 局域网访问
 

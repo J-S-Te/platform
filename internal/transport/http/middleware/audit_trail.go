@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,12 +16,18 @@ import (
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	auditdomain "github.com/J-S-Te/Basic-Platform/internal/platform/audit/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 	"github.com/gin-gonic/gin"
 )
 
 const defaultPlatformAuditApplicationCode = "platform"
 const defaultPlatformAuditEnvironmentCode = "dev"
+
+// maxPlatformAuditBufferedResponseBytes 是必开模式下单请求响应缓冲上限：超过即降级为
+// 旧行为（write-through）并告警，避免异常大的响应长期占用内存。
+const maxPlatformAuditBufferedResponseBytes = 64 << 10
 
 // AuditSource identifies the configured application environment for server-generated events.
 type AuditSource struct {
@@ -56,6 +63,24 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		if context.Request != nil {
 			context.Request = context.Request.WithContext(AttachAuditResourceTarget(context.Request.Context()))
 		}
+		origWriter := context.Writer
+		var buffered *platformAuditBuffer
+		// 审计必开模式（AUD-2026-005）：对“将被记录审计事件”的请求先把响应缓冲在内存里，
+		// Ingest 失败时丢弃业务响应并返回 503，保证“审计写不进去 ⇒ 客户端拿不到成功”。
+		// 只改变满足记录条件的请求；/readyz 等只读路由与非必开模式行为完全不变。
+		if platformAuditRequired() && recorder != nil && context.Request != nil {
+			pendingRoute := context.FullPath()
+			if pendingRoute == "" {
+				pendingRoute = context.Request.URL.Path
+			}
+			if pendingPrincipal, ok := authctx.PrincipalFromContext(context.Request.Context()); ok && strings.TrimSpace(pendingPrincipal.Tenant.ID) != "" && shouldRecordAuditTrail(context.Request.Method, pendingRoute) {
+				buffered = newPlatformAuditBuffer(origWriter, maxPlatformAuditBufferedResponseBytes, logger)
+				context.Writer = buffered
+			}
+		}
+		// handler panic 展平时先恢复真实 writer，外层 gin.Recovery 才能把 500 写出去；
+		// 缓冲中的半成品响应被直接丢弃，不会被当成成功提交。
+		defer func() { context.Writer = origWriter }()
 		// 必须先执行后续链，才能采集最终路由模板、HTTP 状态和授权拒绝结果。
 		context.Next()
 
@@ -127,8 +152,30 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		}
 		if _, err := recorder.Ingest(context.Request.Context(), principal.Tenant.ID, input); err != nil {
 			logger.Error("write platform audit event", "error", err, "request_id", input.RequestID, "path", route)
+			if buffered != nil && !buffered.overflowed {
+				// 必开模式（AUD-2026-005/SEC-D4b）：审计事件写入失败必须拒绝请求，
+				// 丢弃缓冲的业务响应并返回 503，错误码与子系统保持一致。
+				context.Writer = origWriter
+				httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_WRITE_REJECTED", "审计记录写入失败，操作未被确认", nil))
+			}
+			return
+		}
+		if buffered != nil && !buffered.overflowed {
+			buffered.flushTo(origWriter)
 		}
 	}
+}
+
+// platformAuditRequired 判定是否处于审计必开模式：PLATFORM_AUDIT_REQUIRED 显式设置优先，
+// 否则 APP_ENV=production 默认必开。平台配置键为 APP_ENV（internal/shared/config 的
+// Environment），与子系统 data_analysis/contract/PM 的 SEC-D4b 判定保持同一语义。
+func platformAuditRequired() bool {
+	raw := strings.TrimSpace(os.Getenv("PLATFORM_AUDIT_REQUIRED"))
+	if raw != "" {
+		required, err := strconv.ParseBool(raw)
+		return err == nil && required
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
 }
 
 // loginIP returns only a normalized IP literal from the server-verified session

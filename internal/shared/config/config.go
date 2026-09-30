@@ -80,9 +80,9 @@ type AuthConfig struct {
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
 	// AllowLegacyPlatformAccessToken preserves the old platform access-token path
-	// used by /oauth2/authorization-context and /oauth2/userinfo after a
-	// Keycloak cutover. Set false only when old platform tokens must be
-	// explicitly removed from compatibility behavior.
+	// used by /oauth2/authorization-context after a Keycloak cutover. It does not
+	// disable the authorization server's standard /oauth2/userinfo endpoint,
+	// which remains required by the Keycloak Broker.
 	AllowLegacyPlatformAccessToken bool
 	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
 	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
@@ -380,8 +380,9 @@ func Load() (Config, error) {
 
 // Validate 在创建网络监听和数据库连接前拒绝不安全配置。传输层（Public BaseURL 的 scheme）
 // 仍由部署环境显式配置，兼容 HTTP 网关/内网部署；但会话 Cookie Secure 是会话劫持的直接
-// 防线：production 环境拒绝 AUTH_SESSION_COOKIE_SECURE=false（SEC-B2 fail-closed），
-// 非生产环境可通过显式环境变量放行本地 HTTP 开发。CORS 使用凭据时仍禁止通配源，
+// 防线：production 环境默认拒绝 AUTH_SESSION_COOKIE_SECURE=false（SEC-B2 fail-closed），
+// 仅当 APP_PUBLIC_BASE_URL 明确为 http:// 的隔离网络 HTTP 部署才放行；非生产环境可通过
+// 显式环境变量放行本地 HTTP 开发。CORS 使用凭据时仍禁止通配源，
 // 部署自动化只有在所选模式所需路径完整时才允许启用。
 func (cfg Config) Validate() error {
 	if cfg.AppName == "" {
@@ -427,11 +428,13 @@ func (cfg Config) Validate() error {
 	if strings.EqualFold(cfg.Auth.SessionCookieSameSite, "none") && !cfg.Auth.SessionCookieSecure {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE must be true when AUTH_SESSION_COOKIE_SAME_SITE is None")
 	}
-	// SEC-B2：production 拒绝不安全会话 Cookie（fail-closed）。指引：HTTPS 部署保持
-	// AUTH_SESSION_COOKIE_SECURE=true（新默认值）；仅本地/过渡 HTTP 的非生产环境
-	// 才允许显式设 false；生产环境请迁移到 HTTPS，或为纯 HTTP 过渡实例调整 APP_ENV。
-	if strings.EqualFold(cfg.Environment, "production") && !cfg.Auth.SessionCookieSecure {
-		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE=false is rejected when APP_ENV=production: keep AUTH_SESSION_COOKIE_SECURE=true behind HTTPS, or set a non-production APP_ENV for HTTP-only development")
+	// SEC-B2：production 默认拒绝不安全会话 Cookie（fail-closed）。唯一例外是
+	// APP_PUBLIC_BASE_URL 明确声明为 http:// 的隔离网络 HTTP 部署：浏览器不会在
+	// 非 HTTPS 源发送 Secure Cookie，该场景必须显式关闭 Secure；启用 HTTPS 后
+	// public-transport 受控切换会写回 true。
+	if strings.EqualFold(cfg.Environment, "production") && !cfg.Auth.SessionCookieSecure &&
+		!strings.EqualFold(publicBaseURL.Scheme, "http") {
+		return fmt.Errorf("AUTH_SESSION_COOKIE_SECURE=false is rejected when APP_ENV=production unless APP_PUBLIC_BASE_URL is an explicit http:// origin (isolated HTTP deployment): keep AUTH_SESSION_COOKIE_SECURE=true behind HTTPS, or set APP_PUBLIC_BASE_URL to the http:// origin")
 	}
 	if cfg.Logging.Directory == "" || cfg.FileStorageRoot == "" {
 		return fmt.Errorf("LOG_DIRECTORY and FILE_STORAGE_ROOT must not be empty")

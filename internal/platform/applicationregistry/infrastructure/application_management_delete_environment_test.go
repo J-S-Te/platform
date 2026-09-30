@@ -91,12 +91,66 @@ func TestDeleteEnvironmentProceedsWithoutAnyResidue(t *testing.T) {
 	}
 }
 
+func TestPurgeEnvironmentRequiresPersistedOffboardedDeploymentState(t *testing.T) {
+	for _, status := range []string{"", "READY", "DRAINING", "PROVISION_FAILED"} {
+		t.Run(status, func(t *testing.T) {
+			script := &deleteEnvScript{}
+			repository := newDeleteEnvRepositoryWithState(t, script, true, status)
+			_, err := repository.PurgeEnvironment(context.Background(), application.EnvironmentPurgeInput{
+				TenantID: deleteEnvTestTenant, ApplicationID: deleteEnvTestApp, EnvironmentID: deleteEnvTestEnv,
+				Version: deleteEnvTestVer,
+			})
+			if !errors.Is(err, application.ErrEnvironmentNotOffboarded) {
+				t.Fatalf("PurgeEnvironment(status=%q) error = %v, want ErrEnvironmentNotOffboarded", status, err)
+			}
+			if script.hasPrefix("delete") {
+				t.Fatalf("purge deleted records before verifying OFFBOARDED: %v", script.queries)
+			}
+		})
+	}
+}
+
+func TestPurgeEnvironmentDeletesOnlyAfterPersistedOffboardedState(t *testing.T) {
+	script := &deleteEnvScript{}
+	repository := newDeleteEnvRepositoryWithState(t, script, true, application.SubsystemDeploymentStatusOffboarded)
+	removed, err := repository.PurgeEnvironment(context.Background(), application.EnvironmentPurgeInput{
+		TenantID: deleteEnvTestTenant, ApplicationID: deleteEnvTestApp, EnvironmentID: deleteEnvTestEnv,
+		Version: deleteEnvTestVer, RetentionApprovalID: "01KRETENTIONTASK0000000000",
+	})
+	if err != nil {
+		t.Fatalf("PurgeEnvironment(OFFBOARDED) error = %v; queries=%v", err, script.queries)
+	}
+	if removed.ID != deleteEnvTestEnv {
+		t.Fatalf("purged environment = %+v, want %s", removed, deleteEnvTestEnv)
+	}
+	if !script.hasPrefix("delete") {
+		t.Fatalf("OFFBOARDED environment was not purged: %v", script.queries)
+	}
+}
+
+func TestPurgeEnvironmentRequiresCompletedScopedRetentionTask(t *testing.T) {
+	script := &deleteEnvScript{}
+	repository := newDeleteEnvRepositoryWithPurgeState(t, script, true, application.SubsystemDeploymentStatusOffboarded, false)
+	_, err := repository.PurgeEnvironment(context.Background(), application.EnvironmentPurgeInput{
+		TenantID: deleteEnvTestTenant, ApplicationID: deleteEnvTestApp, EnvironmentID: deleteEnvTestEnv,
+		Version: deleteEnvTestVer, RetentionApprovalID: "not-a-completed-task",
+	})
+	if !errors.Is(err, application.ErrEnvironmentRetentionApprovalInvalid) {
+		t.Fatalf("PurgeEnvironment(invalid retention task) error = %v, want ErrEnvironmentRetentionApprovalInvalid", err)
+	}
+	if script.hasPrefix("delete") {
+		t.Fatalf("purge deleted records before validating the retention task: %v", script.queries)
+	}
+}
+
 var deleteEnvScriptDriverCounter uint64
 
 // residueFree 控制 cfg_namespace/audit_ingestion_receipt 的 count 返回值。
 type deleteEnvScriptDriver struct {
-	script      *deleteEnvScript
-	residueFree bool
+	script           *deleteEnvScript
+	residueFree      bool
+	deploymentStatus string
+	retentionValid   bool
 }
 
 func newDeleteEnvRepositoryTest(t *testing.T, script *deleteEnvScript) *ManagementRepository {
@@ -105,9 +159,17 @@ func newDeleteEnvRepositoryTest(t *testing.T, script *deleteEnvScript) *Manageme
 }
 
 func newDeleteEnvRepositoryWithResidue(t *testing.T, script *deleteEnvScript, residueFree bool) *ManagementRepository {
+	return newDeleteEnvRepositoryWithState(t, script, residueFree, "")
+}
+
+func newDeleteEnvRepositoryWithState(t *testing.T, script *deleteEnvScript, residueFree bool, deploymentStatus string) *ManagementRepository {
+	return newDeleteEnvRepositoryWithPurgeState(t, script, residueFree, deploymentStatus, true)
+}
+
+func newDeleteEnvRepositoryWithPurgeState(t *testing.T, script *deleteEnvScript, residueFree bool, deploymentStatus string, retentionValid bool) *ManagementRepository {
 	t.Helper()
 	driverName := fmt.Sprintf("env-delete-test-%d", atomic.AddUint64(&deleteEnvScriptDriverCounter, 1))
-	sql.Register(driverName, &deleteEnvScriptDriver{script: script, residueFree: residueFree})
+	sql.Register(driverName, &deleteEnvScriptDriver{script: script, residueFree: residueFree, deploymentStatus: deploymentStatus, retentionValid: retentionValid})
 	sqlDatabase, err := sql.Open(driverName, "")
 	if err != nil {
 		t.Fatalf("open env delete test database: %v", err)
@@ -183,6 +245,16 @@ func (connection *deleteEnvConn) QueryContext(_ context.Context, query string, _
 			columns: []string{"id", "tenant_id", "application_id", "environment", "status", "version"},
 			values:  [][]driver.Value{{deleteEnvTestEnv, deleteEnvTestTenant, deleteEnvTestApp, "prod", "ACTIVE", int64(deleteEnvTestVer)}},
 		}, nil
+	case strings.Contains(lower, "subsystem_deployment_state"):
+		if connection.driver.deploymentStatus == "" {
+			return &deleteEnvRows{columns: []string{"status"}}, nil
+		}
+		return &deleteEnvRows{columns: []string{"status"}, values: [][]driver.Value{{connection.driver.deploymentStatus}}}, nil
+	case strings.Contains(lower, "audit_retention_task"):
+		if !connection.driver.retentionValid {
+			return &deleteEnvRows{columns: []string{"count"}, values: [][]driver.Value{{int64(0)}}}, nil
+		}
+		return &deleteEnvRows{columns: []string{"count"}, values: [][]driver.Value{{int64(1)}}}, nil
 	default:
 		// 其余查询（oauth client pluck 等）一律返回空结果集。
 		return &deleteEnvRows{columns: []string{"id"}}, nil

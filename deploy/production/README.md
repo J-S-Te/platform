@@ -1,3 +1,31 @@
+# 统一生产编排与裁剪
+
+> 构建、复制、空白机安装、配置、分阶段部署、子系统接入和故障处理的唯一详细操作手册是
+> [OFFLINE_RUNBOOK.md](OFFLINE_RUNBOOK.md)。本文件保留架构、生产编排和 CI/CD 参考，不应作为另一套离线执行流程。
+> 服务器验收逐项记录使用 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md)。
+
+生产只使用 `docker-compose.yml`。公共平台必选；七个可选块以 `# BEGIN SUBSYSTEM: contract|project|customer|portal|settlement|data-analysis|monitoring` 和对应 END 标记划分。整块注释即可排除该系统，无需修改 profiles 或额外启用列表。部署脚本和平台 Agent 都以 Compose 解析出的服务为准，拒绝发布被注释模块。运行配置缺失不阻止解析，但接入完成前不能启动业务容器。
+
+```bash
+docker compose --env-file .env --env-file .release.env -f docker-compose.yml config --services
+sudo ./bin/deploy.sh start
+sudo ./bin/deploy.sh resume customer-opportunity
+sudo ./bin/deploy.sh disable contract
+docker ps -a
+```
+
+修复、移除与清理入口在 `bin/lifecycle.sh`（**不由 `deploy.sh` 转发**），用 `sudo bash ./bin/lifecycle.sh help` 查看；离线部署的逐步清单见 [OFFLINE_RUNBOOK.md](OFFLINE_RUNBOOK.md)。
+
+`start` 分阶段启动平台密钥初始化、公共数据库、迁移、Keycloak、Temporal、File Gateway、Docker socket proxy、部署 Agent、平台与前端，再处理已接入且保留的业务系统。`resume` 恢复单系统并执行备份、迁移、目录同步和有界健康等待；首次接入仍由基础平台完成。`disable` 只停止指定模块容器，保留卷和密钥；注释本身不会停止旧容器，状态检查会列出差异。
+
+`contract-mysql` 保留原名和卷，已移到公共区供 Temporal 使用；停用合同不停止该共享数据库。门户邀请补偿依赖 CRM，CRM 未启用或未接入时跳过此 Worker，门户主体仍可启动。
+
+HTTP、HTTPS 和会话排空统一由同一 frontend 服务及 `runtime/public-tls/` 受管目录处理，不再加载生产 frontend/HTTPS/drain/observability 覆盖文件。升级资产使用 `bin/install-assets.sh`，保留当前 `docker-compose.yml`，将新模板写到 `.dist` 供合并；不要覆盖用户的注释范围。
+
+注释系统只能保证其他服务可启动，不能保证依赖业务完整：合同缺失影响 CRM 合同交接；项目缺失影响合同交接和门户项目查询；CRM 缺失影响权威数据查询和门户补偿；结算缺失影响开票；门户缺失影响客户自助入口；看板缺失影响统计分析。缺失上游由动态 DNS 网关返回不可用状态，异步任务保持原有重试策略。
+
+CRM/门户独立发布使用 `bin/deploy-customer-opportunity.sh customer-opportunity <digest>` 或 `customer-portal <digest>`；旧双 digest 入口仅用于两块都启用的兼容联合发布。
+
 # 生产环境 CI/CD 部署
 
 > 更新日期：2026-09-21。生产目录承载 platform、frontend、contract、CRM、客户 Portal、项目管理、数据看板和结算系统不可变镜像。
@@ -6,14 +34,15 @@
 
 ## 1. 服务器要求
 
-- Linux、Docker Engine、Docker Compose v2、`curl`、`gzip`、`flock`；
+- Linux、Docker Engine、Docker Compose v2、Bash 4.3+、GNU coreutils、OpenSSL、`curl`、`gzip`、`tar`、`flock`；
+- `iproute2`（提供 `ss`）与 `tzdata`；
 - 低权限发布用户可访问 Docker，并拥有部署目录；
 - Docker 统一前端网关终止 HTTP/HTTPS，只开放 SSH、80、443；MySQL、Temporal、Keycloak 管理端口和内部 API 不对公网发布；
-- 部署目录默认 `/opt/basic-platform`。
+- 部署目录默认 `/opt/unified-identity-platform`。
 
 ```bash
-sudo install -d -o deploy -g deploy -m 750 /opt/basic-platform
-cd /opt/basic-platform
+sudo install -d -o deploy -g deploy -m 750 /opt/unified-identity-platform
+cd /opt/unified-identity-platform
 cp .env.example .env
 cp .release.env.example .release.env
 install -d -m 700 runtime
@@ -26,7 +55,7 @@ Keycloak 的独立数据库、可选 bootstrap service account、备份恢复、
 
 ### 1.1 HTTP/HTTPS 快速切换
 
-缺省和显式 `false` 都使用 HTTP，且不会读取、校验或挂载任何证书：
+编排层缺省（未设置 `PUBLIC_HTTPS_ENABLED`）和显式 `false` 都使用 HTTP，且不会读取、校验或挂载任何证书。注意：本目录 `.env.example` 出于 fail-closed 考虑把模板值写成 `true`，直接复制模板后必须填写真实证书，否则预检失败；只有明确选择 HTTP 时才改为 `false`：
 
 ```dotenv
 PUBLIC_HTTPS_ENABLED=false
@@ -48,7 +77,7 @@ SSO_TLS_PRIVATE_KEY_PATH=
 启用 HTTPS 时，将 `PUBLIC_HTTPS_ENABLED` 改为 `true`，填写平台证书链和私钥路径。若 SSO 两项留空，SSO 复用平台证书，因此平台证书的 SAN 必须同时覆盖两个域名；也可以为 SSO 填写独立证书链和私钥。路径支持 Certbot 的符号链接，发布前会解析到可读常规文件，并校验证书链可解析、有效期、SAN 与私钥匹配。预检失败不会执行 Docker 变更。
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 ./bin/public-transport.sh check
 ./bin/apply-public-transport.sh
 ```
@@ -57,14 +86,14 @@ cd /opt/basic-platform
 
 协调器先在同一数据库事务中为已有平台 OAuth Client 增加目标登录/退出回调，并记录受影响的 Application Environment、应用主页与 Keycloak Client；随后把 Keycloak Client 临时设置为新旧双回调。网关和业务运行配置健康后，协调器再事务性切换 Environment/主页地址、移除旧 OAuth 回调，并把 Keycloak 收敛到目标单回调。失败可回滚准备阶段，外部控制面成功前不会留下半套最终配置。
 
-HTTPS 降级不会立即卸载证书。状态进入 `DISABLING_HTTPS` 后，`compose.drain.yaml` 让 80/443 同时服务，业务服务改用 HTTP 与非 Secure Cookie，从 HTTPS 请求换发的 Cookie 可继续用于 HTTP；同时 `iam_session`、`oauth_token_family`、`oauth_refresh_token` 的绝对到期时间会被统一截断到“当前时间 + `AUTH_SESSION_TTL` + `PUBLIC_HTTPS_DRAIN_GRACE`”。截止时间前最终提交会被数据库协调器拒绝。截止后再次执行同一命令即可完成回调切换、停止 443 并卸载证书。证书路径在 `DISABLING_HTTPS` 结束前必须保持可读。
+HTTPS 降级不会立即卸载证书。状态进入 `DISABLING_HTTPS` 后，统一 frontend 配置让 80/443 同时服务，业务服务改用 HTTP 与非 Secure Cookie，从 HTTPS 请求换发的 Cookie 可继续用于 HTTP；同时 `iam_session`、`oauth_token_family`、`oauth_refresh_token` 的绝对到期时间会被统一截断到“当前时间 + `AUTH_SESSION_TTL` + `PUBLIC_HTTPS_DRAIN_GRACE`”。截止时间前最终提交会被数据库协调器拒绝。截止后再次执行同一命令即可完成回调切换、停止 443 监听并保留受管证书供后续启用。证书路径在 `DISABLING_HTTPS` 结束前必须保持可读。
 
-统一发布入口会按有效模式自动组合 `compose.yaml`、`compose.frontend.yaml`、`compose.https.yaml` 或内部排空覆盖层，并派生平台/SSO Origin、Realm Issuer、运行时 OAuth 回调、CORS、Secure Cookie 与各子系统公开地址。Docker 内部 OIDC 后通道始终使用 `http://keycloak:8080`，不因公网 TLS 改变。迁移 106 和包含 `public-transport-coordinator` 的 Platform 镜像必须先发布，再执行首次模式切换。
+统一发布入口仅使用 `docker-compose.yml`，从传输配置派生 Origin、Issuer、回调和 Cookie 设置；HTTPS/排空由同一 frontend 服务与受管证书目录实现。
 
 证书续期后只需执行以下命令重新校验证书并重建网关，不重启业务 API：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 ./bin/reload-public-certificate.sh
 ```
 
@@ -79,7 +108,7 @@ cd /opt/basic-platform
 ## 2. 镜像仓库
 
 - `platform` 和 `frontend` workflow 使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`。
-- `contract_management` workflow 当前推送 GHCR，并使用仓库 `GITHUB_TOKEN`；服务器必须能够拉取对应 GHCR 包。
+- `contract_management` workflow 与 `platform`/`frontend` 一致使用 ACR 变量（`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`）及 `ACR_USERNAME`/`ACR_PASSWORD` 凭据；服务器必须能够拉取对应 ACR 包。
 - `project_management` workflow 与 `platform`/`frontend` 一致使用 ACR 变量：`ACR_PUSH_REGISTRY`、`ACR_PULL_REGISTRY`、`ACR_NAMESPACE`、`ACR_REPOSITORY`，凭据为 `ACR_USERNAME`、`ACR_PASSWORD`；服务器必须能够拉取对应 ACR 包。
 - `data_analysis` workflow 同样使用 ACR 变量，单仓库多 tag 构建 `dashboard-api`、`aggregation-worker`、`alert-worker`、`production-migrate` 四个镜像，分别写入 `.release.env` 的 `DATA_ANALYSIS_*_IMAGE` 键。
 - 远端发布统一使用 `image@sha256:digest`，不使用可变 tag 作为最终发布标识。
@@ -99,9 +128,9 @@ cd /opt/basic-platform
 
 ### Variables
 
-- `DEPLOY_PATH`（可选，默认 `/opt/basic-platform`）
+- `DEPLOY_PATH`（可选，默认 `/opt/unified-identity-platform`）
 - platform/frontend 仓库需要对应 ACR variables
-- customer_and_opportunity 仓库可设置 `CUSTOMER_DEPLOY_SCRIPT`（默认 `/opt/basic-platform/bin/deploy-customer-opportunity.sh`）
+- customer_and_opportunity 仓库可设置 `CUSTOMER_DEPLOY_SCRIPT`（默认 `/opt/unified-identity-platform/bin/deploy-customer-opportunity.sh`）
 
 `DEPLOY_KNOWN_HOSTS` 必须在可信网络核对服务器指纹后生成。变量缺失时 deploy 任务会失败，不会跳过发布。
 
@@ -129,7 +158,7 @@ PLATFORM_AUDIT_CLIENT_ID
 PLATFORM_AUDIT_CLIENT_SECRET
 ```
 
-`SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT` 必须填写当前生产部署目录的规范绝对路径，默认 `/opt/basic-platform`。`SUBSYSTEM_PRODUCTION_PROFILES_DIR` 默认 `/opt/basic-platform/subsystems.d`，必须位于部署根内、不能是符号链接，目录和清单不能组/全局可写。`SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID` 默认对应迁移内置租户，标准单租户部署不需要额外配置。平台镜像更新后会同时重建 `platform-api` 和 `subsystem-provisioner`，二者分别只读同一清单并通过共享 Unix Socket 通信；只有 Agent 挂载 Docker Socket。
+`SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT` 必须填写当前生产部署目录的规范绝对路径，默认 `/opt/unified-identity-platform`。`SUBSYSTEM_PRODUCTION_PROFILES_DIR` 默认 `/opt/unified-identity-platform/subsystems.d`，必须位于部署根内、不能是符号链接，目录和清单不能组/全局可写。`SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID` 默认对应迁移内置租户，标准单租户部署不需要额外配置。平台镜像更新后会同时重建 `platform-api` 和 `subsystem-provisioner`，二者分别只读同一清单并通过共享 Unix Socket 通信；只有 Agent 挂载 Docker Socket。
 
 ### 4.1 新增生产子系统目标（部署人员）
 
@@ -137,7 +166,7 @@ PLATFORM_AUDIT_CLIENT_SECRET
 
 - 应用编码、环境、固定 PathPrefix/UpstreamURL 和客户端类型；
 - 部署根 `runtime/` 下的环境文件、受控初始化模板、可首次生成的 base64 密钥，以及平台输入到明确环境变量的绑定；
-- 固定 Compose profile、依赖、数据库备份目标、迁移服务、运行服务和下线服务；
+- 固定依赖、数据库备份目标、迁移服务、运行服务和下线服务（实际服务必须存在于统一编排）；
 - `.release.env` 中必须为 `image@sha256:digest` 的镜像键。
 
 清单不能声明 shell 命令、脚本、任意宿主机绝对路径，也不能选择 `platform-api`、`platform-mysql`、`frontend`、`subsystem-provisioner`、`PLATFORM_IMAGE` 或 `FRONTEND_IMAGE`。未知 YAML 字段、重复应用/环境、未知凭据来源、路径逃逸、符号链接和不安全权限都会使平台或 Agent 启动失败。当前随包审核目标见 [`subsystems.d/`](./subsystems.d/)；发布清单后管理页面会自动出现新选项，无需逐台服务器手工维护应用白名单。
@@ -180,7 +209,6 @@ runtime:
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
 compose:
-  profiles: [billing, billing-release]
   dependency_services: [billing-mysql]
   database: {service: billing-mysql, name: billing}
   migrate_service: billing-migrate
@@ -202,11 +230,11 @@ Agent 采用“只管理声明键”的兼容策略：子系统以后新增环�
 `PLATFORM_DEPENDENCY_UNAVAILABLE` 只是平台对外的安全错误码，不代表一定是 CRM API 本身故障。先在服务器检查 Agent、目标依赖和目标 API：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 docker compose --env-file .env --env-file .release.env \
-  -f compose.yaml ps subsystem-provisioner customer-mysql customer-api customer-migrate
+  -f docker-compose.yml ps subsystem-provisioner customer-mysql customer-api customer-migrate
 docker compose --env-file .env --env-file .release.env \
-  -f compose.yaml logs --tail 200 subsystem-provisioner customer-mysql customer-api customer-migrate
+  -f docker-compose.yml logs --tail 200 subsystem-provisioner customer-mysql customer-api customer-migrate
 ```
 
 重点核对：
@@ -221,10 +249,10 @@ docker compose --env-file .env --env-file .release.env \
 管理员初始化：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 read -rsp "管理员密码: " ADMIN_PASSWORD
 printf '%s\n' "$ADMIN_PASSWORD" | docker compose \
-  --env-file .env --env-file .release.env --profile release \
+  --env-file .env --env-file .release.env \
   run -T --rm platform-migrate ./bootstrap-admin \
   --display-name "平台管理员" --account-name admin --password-stdin
 unset ADMIN_PASSWORD
@@ -243,24 +271,23 @@ https://<正式域名>/contract_management/auth/callback
 CI 远端调用：
 
 ```bash
-./bin/deploy-service.sh platform <image@sha256:digest>
+./bin/deploy-service.sh platform <platform-image@sha256:digest> <file-gateway-image@sha256:digest>
 ./bin/deploy-service.sh frontend <image@sha256:digest>
 ./bin/deploy-service.sh contract <image@sha256:digest>
 ./bin/deploy-service.sh project <image@sha256:digest>
 ./bin/deploy-customer-opportunity.sh <crm-image@sha256:digest> <portal-image@sha256:digest>
 ```
 
-前端发布由 `compose.frontend.yaml` 独立解析和重建，只连接既有生产网络，不读取、创建或修改
-`runtime/contract.env`、`runtime/project.env` 等子系统密钥文件。平台生产资产必须先于依赖它的
+前端发布使用统一 `docker-compose.yml`，仅重建 frontend 服务。
 前端工作流同步到服务器。
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。首次发布 contract 或 project 且接入凭据仍为占位值时只保存不可变镜像指针，实际迁移和启动由基础平台页面接入触发。
 
 CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth Client，也不会覆盖服务器 `.env`、`.release.env` 或 `runtime/*.env`；它会更新随代码审核的 `subsystems.d` 清单。仅基础平台首次接入会更新目标清单明确列出的运行时字段，其他长期业务密钥保持不变。
 
-项目管理系统发布使用独立 `project-release` 迁移 profile，不影响既有 platform/frontend/contract 发布。首次发布 project 且 `runtime/project.env` 仍含 `PENDING_*`/`REPLACE_WITH_*` 时只安全暂存 `PROJECT_IMAGE` digest，接入完成后再由 Agent 迁移并启动 `project-api`。
+项目管理系统发布显式运行 project-migrate，不影响既有 platform/frontend/contract 发布。首次发布 project 且 `runtime/project.env` 仍含 `PENDING_*`/`REPLACE_WITH_*` 时只安全暂存 `PROJECT_IMAGE` digest，接入完成后再由 Agent 迁移并启动 `project-api`。
 
-客户与商机发布使用独立 `customer` Compose profile，不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`，并把 CRM 镜像内嵌的授权目录哈希原子写入 `runtime/customer.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成一致性备份、执行两个 schema 的语句级迁移，再切换 CRM、Portal API、CRM Workers 和 Portal 邀请补偿 Worker，并检查健康/运行状态；失败时这些服务统一回滚。
+客户与商机旧双 digest 入口用于联合发布，独立发布采用本文顶部单模块命令；不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`，并把 CRM 镜像内嵌的授权目录哈希原子写入 `runtime/customer.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成一致性备份、执行两个 schema 的语句级迁移，再切换 CRM、Portal API、CRM Workers 和 Portal 邀请补偿 Worker，并检查健康/运行状态；失败时这些服务统一回滚。
 
 测试服务器继续使用非回环 HTTP 时，在 `.env` 设置 `SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION=true`。
 完成 HTTPS、Redirect URI 和 Secure Cookie 迁移后改为 `false`；该部署级开关会统一覆盖 CRM 与
@@ -270,10 +297,10 @@ Portal 的 HTTP 会话例外，清单不再永久写死允许值。
 
 ### 安装或升级客户商机生产资产
 
-将本目录的 `compose.yaml`、`compose.frontend.yaml`、完整 `subsystem-templates/`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
+将本目录的 `docker-compose.yml`、完整 `subsystem-templates/`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 install -d -m 700 runtime backups backups/releases
 chmod 600 .env .release.env
 chmod 750 bin/deploy-customer-opportunity.sh
@@ -282,6 +309,8 @@ chmod 750 bin/deploy-customer-opportunity.sh
 随后从基础平台“应用接入”页面执行首次接入；Agent 会初始化缺失的 runtime 文件。已有运行配置禁止用模板覆盖，Agent 只更新清单管理键并保留新增字段。更新 Nginx 后先执行 `nginx -t`，再 reload。GitHub `test` Environment 的 `CUSTOMER_DEPLOY_SCRIPT` 必须与实际安装绝对路径一致。
 
 ## 6. 恢复和备份
+
+完整生产灾备、统一部署锁、File Gateway 一致性快照、恢复 UID/GID、加密归档、只校验及空目录重建演练的操作步骤见 [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md)。灾备入口为 `bin/backup-all.sh`；它不仅备份数据库，还保存受限或加密的运行配置、平台签名密钥、受管 TLS 和不可变镜像版本清单。
 
 必须备份：
 
@@ -293,7 +322,7 @@ chmod 750 bin/deploy-customer-opportunity.sh
 - `runtime/customer.env` 与 `runtime/portal.env` 的安全副本；
 - 生产 Nginx 配置。
 
-恢复演练要验证数据库、文件、Issuer、Client 凭据和上一镜像能共同恢复；只回退镜像不能逆转不兼容迁移。
+恢复演练要验证数据库、文件、Issuer、Client 凭据和上一镜像能共同恢复；只回退镜像不能逆转不兼容迁移。通用 MySQL 恢复会在统一部署锁内检查全部实际运行写入者；恢复 `contract-mysql` 还需要独立 Temporal 维护确认，文件网关数据库禁止脱离对象文件单独恢复。
 
 ### 6.1 Keycloak 数据库逻辑备份与恢复
 
@@ -305,7 +334,7 @@ chmod 750 bin/deploy-customer-opportunity.sh
 安装时仅需收紧目录和脚本权限；不要把备份、`.env` 或 runtime Secret 提交到 Git：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 install -d -m 700 backups/keycloak monitoring/textfile
 chmod 750 bin/backup-keycloak-mysql.sh bin/restore-keycloak-mysql.sh
 chmod 600 .env .release.env
@@ -314,14 +343,14 @@ chmod 600 .env .release.env
 备份命令可以在线执行。它在 `keycloak-db` 容器内读取数据库 root 密码，因此密码不会出现在宿主机命令行、cron 参数或日志中：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 ./bin/backup-keycloak-mysql.sh
 ```
 
 恢复必须先在**隔离演练环境**验证。先只校验备份，不会修改数据：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 ./bin/restore-keycloak-mysql.sh \
   --backup backups/keycloak/keycloak-YYYYMMDDTHHMMSSZ.sql.gz \
   --verify-only
@@ -330,7 +359,7 @@ cd /opt/basic-platform
 获批的实际恢复是破坏性操作：先冻结认证变更、停止全部 Keycloak 节点，并确保已准备同一时间点的受控 Secret、入口配置和镜像 digest。脚本不会自行停止或启动容器，避免在未知拓扑中误操作；只有输入固定确认文本才会清空并导入独立 Keycloak 数据库：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 # 仅在已完成隔离演练并获得变更审批后执行：
 ./bin/restore-keycloak-mysql.sh \
   --backup backups/keycloak/keycloak-YYYYMMDDTHHMMSSZ.sql.gz \

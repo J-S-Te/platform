@@ -47,6 +47,41 @@ func TestOrgPositionMembershipRoutesDeclareRouteLevelPermissions(t *testing.T) {
 	}
 }
 
+// 安全审查 AUD-2026-010 路由表守卫：GET /login 与 GET /oidc/callback 每次调用都会
+// 触发对身份源的出站协议动作（授权重定向 / token 交换 + userinfo + DB 查询），必须在
+// 注册点声明 IP 固定窗口限流（60/min，与 /oauth2/token 同一中间件）。任何人删除/漏加
+// 限流都会在此测试失败，强制重新评估出站放大面。
+func TestOutboundAuthFlowRoutesStayBehindIPRateLimit(t *testing.T) {
+	source, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	routes := []struct{ method, path string }{
+		{method: "GET", path: "/login"},
+		{method: "GET", path: "/oidc/callback"},
+	}
+	content := string(source)
+	// 限流器必须仍是 /oauth2/token 同款 IP 固定窗口（60/min）。
+	if !strings.Contains(content, "authFlowRateLimit := middleware.FixedWindowRateLimit(60, time.Minute)") {
+		t.Fatal("authFlowRateLimit must be defined as middleware.FixedWindowRateLimit(60, time.Minute)")
+	}
+	for _, route := range routes {
+		matched := false
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "authRouter."+route.method+"(\""+route.path+"\",") {
+				matched = true
+				if !strings.Contains(line, "authFlowRateLimit") {
+					t.Fatalf("route %s %s is missing the authFlowRateLimit IP rate limiter: %s", route.method, route.path, trimmed)
+				}
+			}
+		}
+		if !matched {
+			t.Fatalf("route %s %s not found in router.go", route.method, route.path)
+		}
+	}
+}
+
 // 安全审查 SEC-X5（task-33 平台侧重定义）：逐路由核对结论——所有依赖会话 Cookie 的
 // 不安全方法路由都必须留在带 Origin/Sec-Fetch-Site 校验的分组或显式守卫之后。本守卫
 // 锁定各分组中间件与两个 logout 守卫，防止未来重构把路由移出受保护分组或删除分组

@@ -23,6 +23,7 @@ runtime:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
         - SIGNING_PHONE_ENCRYPTION_KEY_BASE64
       values:
+        MYSQL_DSN: 'contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
         OIDC_SESSION_COOKIE_NAME: contract_management_session
@@ -96,7 +97,6 @@ runtime:
         PROJECT_INTEGRATION_CLIENT_ID: service.project_contract_import.client_id
         PROJECT_INTEGRATION_CLIENT_SECRET: service.project_contract_import.client_secret
 compose:
-  profiles: [release]
   dependency_services: [contract-mysql, temporal]
   database:
     service: contract-mysql

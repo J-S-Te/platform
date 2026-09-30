@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -107,7 +108,7 @@ func newTicketTestHandler(t *testing.T, script *ticketScript, files *recordingV2
 	if err != nil {
 		t.Fatalf("open ticket GORM database: %v", err)
 	}
-	handler, err := NewUploadV2Handler(database, files, func(time.Time) (string, error) { return "01K10C00000000000000000TI1", nil })
+	handler, err := NewUploadV2Handler(database, files, func(time.Time) (string, error) { return "01K10C00000000000000000TI1", nil }, slog.Default())
 	if err != nil {
 		t.Fatalf("NewUploadV2Handler: %v", err)
 	}

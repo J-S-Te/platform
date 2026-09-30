@@ -24,10 +24,12 @@ runtime:
         - SENSITIVE_HMAC_KEY_BASE64
         - PORTAL_INVITE_PEPPER_BASE64
       values:
+        MYSQL_DSN: 'customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true'
+        PORTAL_INVITE_COMPENSATION_MYSQL_DSN: 'customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true'
         OIDC_IDP_HINT: basic-platform
         DEV_AUTH_ENABLED: "false"
         OIDC_SCOPES: openid profile
-        OIDC_ROLE_CONFIG_HASH: sha256:3121000b3a3242b3005ca9a79e71a47893b270cb58fddc770dcc163db04d7524
+        OIDC_ROLE_CONFIG_HASH: sha256:1c1d94091fdfd3f5665d04215b91089434a737b0f43e9f1a9901755af97f621a
         OIDC_MAX_EFFECTIVE_ROLES: "10"
         OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
@@ -91,7 +93,6 @@ runtime:
         ATTACHMENT_FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         ATTACHMENT_FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
-  profiles: [customer, customer-release]
   dependency_services: [customer-mysql]
   database:
     service: customer-mysql

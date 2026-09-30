@@ -15,3 +15,5 @@
 人员异动以 `iam_personnel_change_request` 为业务事实源，状态只能按领域状态机推进并使用版本号进行并发保护。晋升、降职和调岗真实关闭原任职并建立目标任职；离职必须经过审批和持久化责任交接，所有 `iam_personnel_handover_item` 完成后才能排期，执行时撤销会话并禁用任职、账号和用户；复职恢复既有本地账号、强制下次改密并建立新任职。每次状态推进写入 `iam_personnel_change_transition`，不得以页面状态或自由文本替代审批与交接证据。
 
 生产公开传输由 `deploy/production/bin/public-transport.sh` 统一派生。平台入口与 Keycloak SSO 可以使用不同端口：`PUBLIC_HTTP_PORT` / `PUBLIC_HTTPS_PORT` 控制平台入口，`PUBLIC_SSO_HTTP_PORT` / `PUBLIC_SSO_HTTPS_PORT` 控制 SSO Origin；SSO 端口留空时才继承对应平台端口。所有子系统的 `OIDC_ISSUER` 必须由真实 SSO Origin 派生并与 Keycloak discovery 返回的 issuer 完全一致，不能按平台入口端口推断。
+
+部署兼容约束：CI/CD 与离线安装共用生产 Compose、`deploy-service.sh`、迁移及 readiness 流程；两者仅以不可变镜像的交付/导入方式区分。File Gateway 是独立运行镜像和独立发布摘要，禁止离线部署或 CI/CD 将其折叠进平台 API 镜像。跨系统发布 target 对齐检查见 `deploy/production/bin/test-deployment-parity.sh`，详细契约见 `deploy/production/DEPLOYMENT_COMPATIBILITY.md`。

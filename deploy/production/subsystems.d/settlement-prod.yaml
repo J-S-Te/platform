@@ -22,6 +22,7 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        SETTLEMENT_MYSQL_DSN: 'settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC'
         OIDC_IDP_HINT: basic-platform
         OIDC_SESSION_COOKIE_NAME: settlement_session
         OIDC_SESSION_IDLE_TTL: 30m
@@ -55,7 +56,6 @@ runtime:
         FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
-  profiles: [settlement-release]
   dependency_services: [settlement-mysql]
   database:
     service: settlement-mysql

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -54,6 +55,7 @@ type productionSubsystemRuntimeManifest struct {
 }
 
 type productionSubsystemRuntimeFileManifest struct {
+	WhenService           string            `yaml:"when_service"`
 	Path                  string            `yaml:"path"`
 	TemplatePath          string            `yaml:"template_path"`
 	ComposeEnvironmentKey string            `yaml:"compose_environment_key"`
@@ -64,14 +66,16 @@ type productionSubsystemRuntimeFileManifest struct {
 }
 
 type productionSubsystemComposeManifest struct {
-	Profiles           []string                             `yaml:"profiles"`
-	DependencyServices []string                             `yaml:"dependency_services"`
-	Database           *productionSubsystemDatabaseManifest `yaml:"database"`
-	MigrateService     string                               `yaml:"migrate_service"`
-	CatalogSyncService string                               `yaml:"catalog_sync_service"`
-	RuntimeServices    []string                             `yaml:"runtime_services"`
-	TeardownServices   []string                             `yaml:"teardown_services"`
-	ReleaseImageKeys   []string                             `yaml:"release_image_keys"`
+	InitializationServices     []string                             `yaml:"initialization_services"`
+	ConditionalRuntimeServices map[string]string                    `yaml:"conditional_runtime_services"`
+	Profiles                   []string                             `yaml:"profiles"`
+	DependencyServices         []string                             `yaml:"dependency_services"`
+	Database                   *productionSubsystemDatabaseManifest `yaml:"database"`
+	MigrateService             string                               `yaml:"migrate_service"`
+	CatalogSyncService         string                               `yaml:"catalog_sync_service"`
+	RuntimeServices            []string                             `yaml:"runtime_services"`
+	TeardownServices           []string                             `yaml:"teardown_services"`
+	ReleaseImageKeys           []string                             `yaml:"release_image_keys"`
 }
 
 type productionSubsystemDatabaseManifest struct {
@@ -272,6 +276,9 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		file.Path = filepath.ToSlash(filepath.Clean(strings.TrimSpace(file.Path)))
 		file.TemplatePath = normalizedProductionTemplatePath(file.TemplatePath)
 		file.ComposeEnvironmentKey = strings.TrimSpace(file.ComposeEnvironmentKey)
+		if file.WhenService != "" && !validProductionComposeService(file.WhenService) {
+			return errors.New("conditional runtime service is invalid")
+		}
 		if file.Path == "." || filepath.IsAbs(file.Path) || file.Path == "runtime" || !strings.HasPrefix(file.Path, "runtime/") ||
 			strings.Contains(file.Path, "../") || !validEnvironmentKey(file.ComposeEnvironmentKey) || file.TemplatePath == "." {
 			return errors.New("runtime file path or Compose environment key is invalid")
@@ -350,17 +357,34 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	compose := &manifest.Compose
 	normalizedProfiles := normalizedProductionServices(compose.Profiles)
 	normalizedDependencies := normalizedProductionServices(compose.DependencyServices)
+	normalizedInitializers := normalizedProductionServices(compose.InitializationServices)
 	normalizedRuntimeServices := normalizedProductionServices(compose.RuntimeServices)
 	normalizedTeardownServices := normalizedProductionServices(compose.TeardownServices)
-	if normalizedProfiles == nil || normalizedDependencies == nil || normalizedRuntimeServices == nil || normalizedTeardownServices == nil {
+	if normalizedProfiles == nil || normalizedDependencies == nil || normalizedInitializers == nil || normalizedRuntimeServices == nil || normalizedTeardownServices == nil {
 		return errors.New("Compose profile or service name is invalid")
 	}
 	compose.Profiles = normalizedProfiles
 	compose.DependencyServices = normalizedDependencies
+	compose.InitializationServices = normalizedInitializers
 	compose.RuntimeServices = normalizedRuntimeServices
 	compose.TeardownServices = normalizedTeardownServices
+	for service, runtimePath := range compose.ConditionalRuntimeServices {
+		if !slices.Contains(compose.RuntimeServices, service) {
+			return errors.New("conditional service must belong to runtime services")
+		}
+		found := false
+		for _, file := range runtime.Files {
+			if file.Path == runtimePath && file.WhenService != "" {
+				found = true
+			}
+		}
+		if !found {
+			return errors.New("conditional service requires a conditional runtime file")
+		}
+	}
 	if len(compose.RuntimeServices) == 0 || len(compose.ReleaseImageKeys) == 0 ||
 		!productionServicesOwnedByApplication(app.Code, compose.DependencyServices, true) ||
+		!productionServicesOwnedByApplication(app.Code, compose.InitializationServices, false) ||
 		!productionServicesOwnedByApplication(app.Code, compose.RuntimeServices, false) ||
 		!productionServicesOwnedByApplication(app.Code, compose.TeardownServices, false) {
 		return errors.New("Compose service policy is invalid")

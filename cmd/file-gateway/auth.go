@@ -20,6 +20,12 @@ func (middleware tokenMiddleware) wrap(next http.Handler, permission string) htt
 			writer.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		// 已知限制（AUD-2026-026，本轮不修——需平台侧新增客户端状态查询端点，属跨服务设计
+		// 变更）：此处只做 EdDSA 验签与 scope 断言，不回查客户端登记的禁用状态，被禁用客户端
+		// 在令牌有效期内仍可通过网关上传/下载。internal/shared/security/application_jwt.go 中
+		// ApplicationTokenClaims 的既有警告（“认证器仍会回查当前客户端登记；禁用客户端或收回
+		// scope 不能仅依赖 Token 到期”）同样适用于本网关。后续方向：平台提供带短 TTL 缓存的
+		// 客户端状态查询端点，网关验签后回查并对已禁用客户端 fail-closed。
 		claims, err := middleware.verifier.Verify(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")), time.Now().UTC())
 		if err != nil || !hasScope(claims.Scopes, permission) {
 			writer.WriteHeader(http.StatusForbidden)

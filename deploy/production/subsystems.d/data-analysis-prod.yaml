@@ -3,7 +3,7 @@ default: false
 application:
   code: data_analysis
   initial_admin_roles: [dashboard_admin]
-  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read]
+  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, file_gateway_write]
   name: 数据看板与统计分析系统
   description: 经营总览、合同项目分析、预警与指标看板
   environment: prod
@@ -23,6 +23,7 @@ runtime:
       # 会话编解码密钥仅用于本系统 Cookie；首次接入生成并长期复用。
       generated_keys: [OIDC_CODEC_KEY]
       values:
+        DASHBOARD_MYSQL_DSN: 'dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
         OIDC_SESSION_COOKIE_NAME: data_analysis_session
@@ -63,15 +64,18 @@ runtime:
         CONTRACT_MACHINE_CLIENT_SECRET: service.contract_dashboard_read.client_secret
         PROJECT_MACHINE_CLIENT_ID: service.project_dashboard_read.client_id
         PROJECT_MACHINE_CLIENT_SECRET: service.project_dashboard_read.client_secret
+        FILE_GATEWAY_APPLICATION_ID: application_id
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
-  profiles: [data-analysis-release]
   dependency_services: [data-analysis-mysql]
+  initialization_services: [data-analysis-metabase-init]
   database:
     service: data-analysis-mysql
     name: dashboard_aggregation
   migrate_service: data-analysis-migrate
-  runtime_services: [data-analysis-api, data-analysis-aggregation-worker, data-analysis-alert-worker]
-  teardown_services: [data-analysis-api, data-analysis-aggregation-worker, data-analysis-alert-worker]
+  runtime_services: [data-analysis-metabase, data-analysis-api, data-analysis-aggregation-worker, data-analysis-alert-worker]
+  teardown_services: [data-analysis-metabase, data-analysis-api, data-analysis-aggregation-worker, data-analysis-alert-worker]
   release_image_keys:
     - DATA_ANALYSIS_DASHBOARD_API_IMAGE
     - DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE

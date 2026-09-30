@@ -1,6 +1,6 @@
 # Keycloak 生产运维 Runbook
 
-> 适用范围：`deploy/production/compose.yaml` 中的 Keycloak 26.x 与独立 `keycloak-db`。
+> 适用范围：`deploy/production/docker-compose.yml` 中的 Keycloak 26.x 与独立 `keycloak-db`。
 > 本文不要求 HTTPS。公开协议由网关策略和 `KEYCLOAK_PUBLIC_URL` 决定；容器可继续通过 HTTP
 > 接收本机或网关流量。
 
@@ -10,7 +10,7 @@ Keycloak 数据库与业务 MySQL 分离：只能使用 `keycloak-mysql-data` �
 Realm 数据写入 `platform-mysql`。创建宿主机备份目录并限制访问：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 install -d -m 700 backups/keycloak
 chmod 600 .env .release.env
 docker compose --env-file .env --env-file .release.env -f compose.yaml config -q
@@ -73,7 +73,7 @@ master 最小管理角色并完成第 5 节验证，再滚动重启平台 API/Wo
 脚本不会停止服务，默认**不会删除任何历史备份**，也不会把密码带到宿主机的 cron 环境或命令行。
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 install -d -m 700 backups/keycloak monitoring/textfile
 chmod 750 bin/backup-keycloak-mysql.sh
 bin/backup-keycloak-mysql.sh
@@ -84,11 +84,11 @@ bin/backup-keycloak-mysql.sh
 14 天的已完成 `.sql.gz` 及其校验文件。定时任务以部署用户安装，示例为每天 02:17 UTC：
 
 ```cron
-17 2 * * * cd /opt/basic-platform && /usr/bin/flock -n /opt/basic-platform/backups/keycloak/.cron.lock ./bin/backup-keycloak-mysql.sh >> /var/log/basic-platform/keycloak-backup.log 2>&1
+17 2 * * * cd /opt/unified-identity-platform && /usr/bin/flock -n /opt/unified-identity-platform/backups/keycloak/.cron.lock ./bin/backup-keycloak-mysql.sh >> /var/log/basic-platform/keycloak-backup.log 2>&1
 ```
 
 如使用 systemd，创建等价的 `Type=oneshot` service 和 `OnCalendar=*-*-* 02:17:00 UTC` timer，service 的
-`WorkingDirectory=/opt/basic-platform`、`User=deploy`，执行同一脚本。无论 cron 或 timer，都应在备份后复制
+`WorkingDirectory=/opt/unified-identity-platform`、`User=deploy`，执行同一脚本。无论 cron 或 timer，都应在备份后复制
 加密副本至不同故障域；只看到任务退出成功不足以证明可恢复。
 
 恢复只能在隔离演练环境先做。冻结写入并记录目标 RTO/RPO，停止所有 Keycloak 节点后：创建全新独立
@@ -102,18 +102,18 @@ Compose 使用 Keycloak 管理端口 9000 的 TCP 健康检查；健康和指标
 监控 Agent 应从 Docker 网络或受限本机路径抓取 `/health/ready`、`/health/live` 和 `/metrics`，不得由
 公网网关转发这些端点。数据库就绪检查依赖 metrics，故保持 `KEYCLOAK_METRICS_ENABLED=true`。
 
-仓库提供默认关闭的 Prometheus 示例：
+统一编排的监控块提供 Prometheus 和 Node Exporter，可按整块注释裁剪：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 install -d -m 750 monitoring/textfile
 docker compose --env-file .env --env-file .release.env \
-  -f compose.yaml -f compose.observability.yaml up -d prometheus keycloak-backup-metrics
+  -f docker-compose.yml up -d --no-deps prometheus node-exporter
 docker compose --env-file .env --env-file .release.env \
-  -f compose.yaml -f compose.observability.yaml config -q
+  -f docker-compose.yml config -q
 ```
 
-`compose.observability.yaml` 不发布 Prometheus、exporter、9000 或 MySQL 端口；需要查看 UI 时，由受控
+统一编排的监控块不发布 Prometheus、exporter、9000 或 MySQL 端口；需要查看 UI 时，由受控
 运维网络另行提供反向代理或临时 SSH 隧道。`monitoring/prometheus/` 含 Keycloak `/metrics` 抓取和三个最低
 规则：指标不可达、已验证备份过期、备份成功指标从未出现。告警路由（Alertmanager、PagerDuty 等）由运行环境
 补充，示例不伪造外部通知已配置。
@@ -136,7 +136,7 @@ docker compose --env-file .env --env-file .release.env \
 每次发布、入口或凭据变更后执行：
 
 ```bash
-cd /opt/basic-platform
+cd /opt/unified-identity-platform
 docker compose --env-file .env --env-file .release.env -f compose.yaml ps keycloak-db keycloak
 docker compose --env-file .env --env-file .release.env -f compose.yaml logs --tail 100 keycloak
 curl -fsS "${KEYCLOAK_PUBLIC_URL}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration" >/dev/null
@@ -152,27 +152,14 @@ Secret、Keycloak 容器的顺序定位；禁止为“恢复登录”临时开�
 
 ## 6. HA 与灾备演练
 
-当前 Compose 定义是一节点 Keycloak，具有重启恢复能力但不具备实例级高可用。HA 覆盖层
-`deploy/production/compose.ha.keycloak.yaml` **默认不会加载**；它会禁用本地 `keycloak-db`，移除宿主机
-端口映射，并将 Keycloak 扩为至少两个副本。启用前必须已经具备：外部共享/高可用 MySQL、可到达每个副本的
-外部负载均衡（含会话策略和健康检查）、以及节点间集群通信网络。仅执行 `--scale` 或复用单机 MySQL 不构成 HA。
-
-```bash
-cd /opt/basic-platform
-# 这三个值只从受控 Secret/运行环境提供，不写入仓库。
-export KEYCLOAK_HA_DB_URL='jdbc:mysql://keycloak-mysql-ha.example.internal:3306/keycloak?useSSL=true&serverTimezone=UTC'
-export KEYCLOAK_HA_DB_USER='keycloak'
-read -rsp 'External Keycloak DB password: ' KEYCLOAK_HA_DB_PASSWORD; export KEYCLOAK_HA_DB_PASSWORD; echo
-docker compose --env-file .env --env-file .release.env \
-  -f compose.yaml -f compose.ha.keycloak.yaml --profile keycloak-ha config -q
-docker compose --env-file .env --env-file .release.env \
-  -f compose.yaml -f compose.ha.keycloak.yaml --profile keycloak-ha up -d keycloak
-unset KEYCLOAK_HA_DB_PASSWORD
-```
+当前统一编排提供单节点 Keycloak，具有重启恢复能力但不具备实例级高可用。
+生产不再维护 HA 覆盖文件。需要 HA 时，应在同一 `docker-compose.yml` 中审核修改 Keycloak 的
+数据库连接、端口和副本配置，并准备外部高可用 MySQL、负载均衡（含会话策略和健康检查）及集群通信网络。
+仅执行 `--scale` 或复用单机 MySQL 不构成 HA，不能自动替代已有数据库或删除原数据卷。
 
 负载均衡器需在受控网络上代理副本的 8080，并从同一受控网络检查 9000 的 `/health/ready`；不要向公网转发
 管理端口。`KEYCLOAK_PUBLIC_URL` 可以是 `http://`（仅本机/可信内网）或 `https://`（通常由 LB 终止 TLS），
-HA 覆盖层不强制 HTTPS。先在预生产验证节点加入/退出、会话行为、负载均衡粘性和网络分区告警，再扩大规模。
+先在预生产验证节点加入/退出、会话行为、负载均衡粘性和网络分区告警，再扩大规模。
 数据库本身也必须具备与 RPO 相符的复制/故障转移。
 
 每季度至少一次、每次重大版本/Realm 变更后额外一次灾备演练：

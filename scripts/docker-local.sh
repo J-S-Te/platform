@@ -592,7 +592,8 @@ ensure_platform_env_file() {
         local retained_volume
         for retained_volume in \
             "${compose_project}-mysql-data" \
-            "${compose_project}-keycloak-mysql-data"
+            "${compose_project}-keycloak-mysql-data" \
+            "${compose_project}-file-gateway-mysql-data"
         do
             if command -v docker >/dev/null 2>&1 && docker volume inspect "$retained_volume" >/dev/null 2>&1; then
                 fail "检测到已有本地数据卷 ${retained_volume}，但环境文件缺失：${env_file}。请先恢复旧 .env.local，或按数据库密码恢复流程重置账号；不要删除数据卷。"
@@ -631,6 +632,20 @@ ensure_platform_env_file() {
     fi
     if [[ -z "$keycloak_admin_username" || "$keycloak_admin_username" == REPLACE_WITH_* ]]; then
         replace_line_in_file "$env_file" KEYCLOAK_ADMIN_USERNAME admin
+    fi
+    local gateway_db_password gateway_db_root_password
+    gateway_db_password="$(env_value "$env_file" FILE_GATEWAY_DB_PASSWORD)"
+    gateway_db_root_password="$(env_value "$env_file" FILE_GATEWAY_DB_ROOT_PASSWORD)"
+    if [[ -z "$gateway_db_password" || "$gateway_db_password" == REPLACE_WITH_* || -z "$gateway_db_root_password" || "$gateway_db_root_password" == REPLACE_WITH_* ]]; then
+        if docker volume inspect "${compose_project}-file-gateway-mysql-data" >/dev/null 2>&1; then
+            fail "检测到已有 File Gateway MySQL 数据卷，但运行配置缺少数据库凭据：${env_file}。请恢复原凭据；不要删除数据卷或自动轮换密码。"
+        fi
+        if [[ -z "$gateway_db_password" || "$gateway_db_password" == REPLACE_WITH_* ]]; then
+            replace_line_in_file "$env_file" FILE_GATEWAY_DB_PASSWORD "$(random_hex 24)"
+        fi
+        if [[ -z "$gateway_db_root_password" || "$gateway_db_root_password" == REPLACE_WITH_* ]]; then
+            replace_line_in_file "$env_file" FILE_GATEWAY_DB_ROOT_PASSWORD "$(random_hex 32)"
+        fi
     fi
     # The management page performs Realm/Client initialization through the
     # platform API.  These are non-secret local routing defaults.
@@ -1287,6 +1302,13 @@ compose_up_wait() {
     done
 }
 
+verify_local_file_gateway() {
+    if ! compose_run exec -T api wget -qO- http://file-gateway:8086/readyz >/dev/null; then
+        fail "统一文件网关未通过容器网络 readiness 检查"
+    fi
+    log "统一文件网关容器网络 readiness 检查通过"
+}
+
 start_customer_notification_workers() {
 	local service container_id initial_restarts current_restarts
 	log "启动 CRM 通知生成与平台投递 Workers"
@@ -1383,7 +1405,7 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local build_services=(api contract-api settlement-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    local build_services=(api file-gateway contract-api settlement-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
     if [[ "$force_build" == true ]]; then
         log "重新构建统一前端、平台/合同/结算/CRM/门户/项目后端及售前投递 Worker 镜像"
     else
@@ -1416,7 +1438,7 @@ run_migrations() {
 	# 数据库先就绪、迁移再串行执行，业务 API 只能在全部 schema 成功后启动；禁止由 API 自动建表。
 	# 各数据库互相独立，不存在跨库事务；某个后续迁移失败时，已成功数据库按自身幂等迁移规则重试。
 	log "启动基础平台、合同、CRM 常驻 MySQL 与 Temporal，并等待健康检查"
-	compose_run up -d --wait mysql contract-mysql customer-mysql settlement-mysql temporal
+	compose_run up -d --wait mysql file-gateway-mysql contract-mysql customer-mysql settlement-mysql temporal
     log "执行基础平台数据库迁移"
     compose_run run --rm --no-deps migrate ./migrate
     log "执行合同管理版本化数据库迁移"
@@ -1693,10 +1715,13 @@ start_stack() {
     bootstrap_admin_if_needed
     log "启动独立 Keycloak 认证容器与 MySQL"
     compose_up_wait "Keycloak" keycloak-db keycloak
+    log "启动统一文件网关"
+    compose_up_wait "统一文件网关" file-gateway
     # 分阶段启动，避免四个 API 和 frontend 在同一次 Compose wait 中
     # 把下游的短暂冷启动误报为整套部署失败，同时让错误日志能够准确指向服务。
     log "启动基础平台 API 与受控子系统 provisioner"
     compose_up_wait "基础平台 API" subsystem-provisioner api
+    verify_local_file_gateway
 	log "启动结算与开票 API 与后台 Worker"
 	compose_up_wait "结算与开票 API" settlement-api
 	compose_run up -d --wait --no-deps settlement-worker

@@ -2,12 +2,16 @@
 # 仅平台 API 在首次启动时负责生成 Ed25519 JWT 密钥；其他服务只读取共享密钥。
 set -eu
 
-if [ "${1:-}" = "./api" ]; then
+if [ "${1:-}" = "./api" ] || [ "${1:-}" = "init-keys" ] || [ "${1:-}" = "./init-keys" ]; then
     private_key_path="${AUTH_JWT_PRIVATE_KEY_PATH:-}"
     public_key_path="${AUTH_JWT_PUBLIC_KEY_PATH:-}"
 
     if [ -n "$private_key_path" ] && [ -n "$public_key_path" ]; then
         if [ ! -f "$private_key_path" ]; then
+            if [ -e "$public_key_path" ]; then
+                echo 'JWT private key is missing but public key exists; restore the private key instead of rotating identity' >&2
+                exit 1
+            fi
             mkdir -p "$(dirname "$private_key_path")" "$(dirname "$public_key_path")"
             umask 077
             openssl genpkey -algorithm ED25519 -out "$private_key_path"
@@ -15,7 +19,19 @@ if [ "${1:-}" = "./api" ]; then
         elif [ ! -f "$public_key_path" ]; then
             openssl pkey -in "$private_key_path" -pubout -out "$public_key_path"
         fi
+        actual_public="$(openssl pkey -in "$private_key_path" -pubout)"
+        stored_public="$(openssl pkey -pubin -in "$public_key_path" -pubout)"
+        [ "$actual_public" = "$stored_public" ] || { echo 'JWT key pair does not match' >&2; exit 1; }
+        chmod 600 "$private_key_path"
+        chmod 644 "$public_key_path"
+    elif [ "${1:-}" != "./api" ]; then
+        echo 'JWT private and public key paths are required for key initialization' >&2
+        exit 1
     fi
+fi
+
+if [ "${1:-}" = "init-keys" ] || [ "${1:-}" = "./init-keys" ]; then
+    exit 0
 fi
 
 run_api_with_worker() {

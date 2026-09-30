@@ -20,13 +20,27 @@ public_transport_fail() {
 }
 
 public_transport_valid_host() {
-  local value="$1"
-  [[ -n "$value" && "$value" != *://* && "$value" != */* && "$value" != *\?* && "$value" != *\#* && "$value" != *[[:space:]]* ]]
+	local value="$1" label
+	if [[ "$value" == *:* || "$value" == \[* ]]; then
+		public_transport_is_ip "$value"
+		return
+	fi
+	[[ ${#value} -le 253 && "$value" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || return 1
+	if [[ "$value" =~ ^[0-9.]+$ ]]; then
+		public_transport_is_ip "$value"
+		return
+	fi
+	while :; do
+		label="${value%%.*}"
+		[[ ${#label} -ge 1 && ${#label} -le 63 && "$label" != -* && "$label" != *- ]] || return 1
+		[[ "$value" == *.* ]] || break
+		value="${value#*.}"
+	done
 }
 
 public_transport_valid_port() {
-  local value="$1"
-  [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
+	local value="$1"
+	[[ "$value" =~ ^[0-9]{1,5}$ ]] && (( 10#$value >= 1 && 10#$value <= 65535 ))
 }
 
 public_transport_is_ip() {
@@ -74,8 +88,11 @@ public_transport_is_ip() {
 }
 
 public_transport_origin() {
-  local scheme="$1" host="$2" port="$3" default_port
-  [[ "$scheme" == "https" ]] && default_port=443 || default_port=80
+	local scheme="$1" host="$2" port="$3" default_port
+	if [[ "$host" == *:* && "$host" != \[*\] ]]; then host="[$host]"; fi
+	public_transport_valid_port "$port" || return 1
+	port=$((10#$port))
+	[[ "$scheme" == "https" ]] && default_port=443 || default_port=80
   if [[ "$port" == "$default_port" ]]; then
     printf '%s://%s' "$scheme" "$host"
   else
@@ -89,8 +106,9 @@ public_transport_real_file() {
     path="${base_dir}/${path}"
   fi
   [[ -n "$path" && -r "$path" ]] || return 1
-  if command -v realpath >/dev/null 2>&1; then
-    resolved="$(realpath -- "$path" 2>/dev/null)" || return 1
+	if command -v realpath >/dev/null 2>&1; then
+		# BusyBox realpath 不支持 --；相对路径已先转换为绝对路径。
+		resolved="$(realpath "$path" 2>/dev/null)" || return 1
   else
     resolved="$(readlink -f -- "$path" 2>/dev/null)" || return 1
   fi
@@ -123,8 +141,8 @@ public_transport_validate_pair() {
 }
 
 public_transport_prepare() {
-  local deploy_dir="$1" runtime_file="${2:-$1/.env}" https_compose_file="${3:-$1/compose.https.yaml}" drain_compose_file="${4:-$1/compose.drain.yaml}"
-  local enabled transition_state tls_required platform_host sso_host http_port https_port sso_http_port sso_https_port
+  local deploy_dir="$1" runtime_file="${2:-$1/.env}"
+	local enabled transition_state tls_required platform_host sso_host http_port https_port sso_http_port sso_https_port access_mode keycloak_port
   local platform_certificate platform_private_key sso_certificate sso_private_key
 
   [[ -f "$runtime_file" ]] || public_transport_fail "缺少 ${runtime_file}" || return 1
@@ -149,8 +167,31 @@ public_transport_prepare() {
   sso_host="${sso_host:-localhost}"
   public_transport_valid_host "$platform_host" \
     || public_transport_fail "PUBLIC_PLATFORM_HOST 必须是不含协议和路径的主机名" || return 1
-  public_transport_valid_host "$sso_host" \
-    || public_transport_fail "PUBLIC_SSO_HOST 必须是不含协议和路径的主机名" || return 1
+	public_transport_valid_host "$sso_host" \
+		|| public_transport_fail "PUBLIC_SSO_HOST 必须是不含协议和路径的主机名" || return 1
+	access_mode="$(public_transport_env_value "$runtime_file" PUBLIC_ACCESS_MODE)"
+	if [[ -z "$access_mode" ]]; then
+		if [[ "$platform_host" == "$sso_host" ]] && public_transport_is_ip "$platform_host"; then
+			access_mode=ip
+		else
+			access_mode=domain
+		fi
+	fi
+	case "$access_mode" in
+		ip)
+			public_transport_is_ip "$platform_host" && public_transport_is_ip "$sso_host" \
+				|| public_transport_fail "IP 模式必须配置有效 IPv4 或 IPv6 地址" || return 1
+			[[ "$tls_required" == false ]] \
+				|| public_transport_fail "IP 模式暂不支持 HTTPS；请配置域名和证书" || return 1
+			export PUBLIC_FRONTEND_SSO_HOST=sso.invalid
+			;;
+		domain)
+			[[ "$platform_host" != "$sso_host" ]] \
+				|| public_transport_fail "域名模式要求 PUBLIC_PLATFORM_HOST 与 PUBLIC_SSO_HOST 不同" || return 1
+			export PUBLIC_FRONTEND_SSO_HOST="$sso_host"
+			;;
+		*) public_transport_fail "PUBLIC_ACCESS_MODE 只能是 ip 或 domain" || return 1 ;;
+	esac
 
   http_port="$(public_transport_env_value "$runtime_file" PUBLIC_HTTP_PORT)"
   https_port="$(public_transport_env_value "$runtime_file" PUBLIC_HTTPS_PORT)"
@@ -158,13 +199,25 @@ public_transport_prepare() {
   https_port="${https_port:-443}"
   sso_http_port="$(public_transport_env_value "$runtime_file" PUBLIC_SSO_HTTP_PORT)"
   sso_https_port="$(public_transport_env_value "$runtime_file" PUBLIC_SSO_HTTPS_PORT)"
-  sso_http_port="${sso_http_port:-$http_port}"
-  sso_https_port="${sso_https_port:-$https_port}"
-  public_transport_valid_port "$http_port" || public_transport_fail "PUBLIC_HTTP_PORT 无效" || return 1
+	sso_http_port="${sso_http_port:-$http_port}"
+	sso_https_port="${sso_https_port:-$https_port}"
+	if [[ "$access_mode" == ip ]]; then
+		keycloak_port="$(public_transport_env_value "$runtime_file" KEYCLOAK_HTTP_PORT)"
+		sso_http_port="${keycloak_port:-18090}"
+	fi
+	public_transport_valid_port "$http_port" || public_transport_fail "PUBLIC_HTTP_PORT 无效" || return 1
   public_transport_valid_port "$https_port" || public_transport_fail "PUBLIC_HTTPS_PORT 无效" || return 1
-  public_transport_valid_port "$sso_http_port" || public_transport_fail "PUBLIC_SSO_HTTP_PORT 无效" || return 1
-  public_transport_valid_port "$sso_https_port" || public_transport_fail "PUBLIC_SSO_HTTPS_PORT 无效" || return 1
+	public_transport_valid_port "$sso_http_port" || public_transport_fail "PUBLIC_SSO_HTTP_PORT 无效" || return 1
+	public_transport_valid_port "$sso_https_port" || public_transport_fail "PUBLIC_SSO_HTTPS_PORT 无效" || return 1
+	http_port=$((10#$http_port))
+	https_port=$((10#$https_port))
+	sso_http_port=$((10#$sso_http_port))
+	sso_https_port=$((10#$sso_https_port))
+	if [[ "$access_mode" == ip ]]; then
+		[[ "$sso_http_port" != "$http_port" ]] || public_transport_fail "IP 模式平台与 SSO 端口不能相同" || return 1
+	fi
 
+	export PUBLIC_ACCESS_MODE="$access_mode"
   export PUBLIC_HTTPS_ENABLED="$enabled"
   export PUBLIC_TRANSPORT_STATE="$transition_state"
   export PUBLIC_PLATFORM_HOST="$platform_host"
@@ -175,6 +228,7 @@ public_transport_prepare() {
   export PUBLIC_SSO_HTTPS_PORT="$sso_https_port"
 
   PUBLIC_TRANSPORT_COMPOSE_FILE=""
+  export PUBLIC_TLS_MANAGED_DIR="$deploy_dir/runtime/public-tls"
   if [[ "$tls_required" == "true" ]]; then
     command -v openssl >/dev/null || public_transport_fail "HTTPS 模式需要 openssl" || return 1
     platform_certificate="$(public_transport_env_value "$runtime_file" PUBLIC_TLS_CERTIFICATE_PATH)"
@@ -207,13 +261,6 @@ public_transport_prepare() {
     export PUBLIC_TLS_PRIVATE_KEY_RESOLVED="$platform_private_key"
     export SSO_TLS_CERTIFICATE_RESOLVED="$sso_certificate"
     export SSO_TLS_PRIVATE_KEY_RESOLVED="$sso_private_key"
-    if [[ "$transition_state" == "DISABLING_HTTPS" ]]; then
-      [[ -f "$drain_compose_file" ]] || public_transport_fail "缺少排空 Compose 覆盖文件 ${drain_compose_file}" || return 1
-      PUBLIC_TRANSPORT_COMPOSE_FILE="$drain_compose_file"
-    else
-      [[ -f "$https_compose_file" ]] || public_transport_fail "缺少 HTTPS Compose 覆盖文件 ${https_compose_file}" || return 1
-      PUBLIC_TRANSPORT_COMPOSE_FILE="$https_compose_file"
-    fi
   fi
 
   if [[ "$enabled" == "true" ]]; then
@@ -246,10 +293,29 @@ public_transport_prepare() {
 }
 
 public_transport_compose_args() {
-  local -n target="$1"
-  if [[ -n "${PUBLIC_TRANSPORT_COMPOSE_FILE:-}" ]]; then
-    target+=(--file "$PUBLIC_TRANSPORT_COMPOSE_FILE")
-  fi
+  # 保留调用接口；协议通过环境变量与受管证书目录驱动同一个服务。
+  :
+}
+
+public_transport_install_certificates() {
+  local name source_file temporary
+  [[ -n "${PUBLIC_TLS_MANAGED_DIR:-}" && ! -L "$PUBLIC_TLS_MANAGED_DIR" ]] || public_transport_fail '证书目录无效或为符号链接' || return 1
+  install -d -m 700 "$PUBLIC_TLS_MANAGED_DIR" || return 1
+  [[ "${PUBLIC_HTTPS_ENABLED:-false}" == true || "${PUBLIC_TRANSPORT_STATE:-}" == DISABLING_HTTPS ]] || return 0
+  for name in platform.crt platform.key sso.crt sso.key; do
+    case "$name" in
+      platform.crt) source_file="$PUBLIC_TLS_CERTIFICATE_RESOLVED" ;;
+      platform.key) source_file="$PUBLIC_TLS_PRIVATE_KEY_RESOLVED" ;;
+      sso.crt) source_file="$SSO_TLS_CERTIFICATE_RESOLVED" ;;
+      sso.key) source_file="$SSO_TLS_PRIVATE_KEY_RESOLVED" ;;
+    esac
+    temporary="$(mktemp "$PUBLIC_TLS_MANAGED_DIR/.certificate.XXXXXX")" || return 1
+    if ! install -m 600 "$source_file" "$temporary" || ! mv -f -- "$temporary" "$PUBLIC_TLS_MANAGED_DIR/$name"; then
+      rm -f -- "$temporary"
+      public_transport_fail "无法更新受管证书：$name"
+      return 1
+    fi
+  done
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -162,8 +162,13 @@ func NewRouter(
 		// IP 维度120/min兜底（随机换号撞库有界），消灭原“全客户端共用一个30/min IP 桶、
 		// 单攻击者可触发全员锁定”的问题。多副本与反代配置要求见 platform/docs/rate-limiting.md。
 		authRouter.POST("/login", middleware.LoginRateLimit("account", 30, 120, time.Minute), adaptHandler(authHandler.Login))
-		authRouter.GET("/login", adaptHandler(authHandler.BeginOIDCLogin))
-		authRouter.GET("/oidc/callback", adaptHandler(authHandler.OIDCCallback))
+		// 安全审查 AUD-2026-010：GET /login 与 GET /oidc/callback 每次都会触发对身份源的
+		// 出站协议动作（授权重定向 / token 交换 + userinfo + DB 查询），复用 /oauth2/token 的
+		// IP 固定窗口限流（60/min）约束出站放大面。与 protocolRouter 共享同一限流器实例，
+		// 使登录跳转与回调共用一个 IP 配额。
+		authFlowRateLimit := middleware.FixedWindowRateLimit(60, time.Minute)
+		authRouter.GET("/login", authFlowRateLimit, adaptHandler(authHandler.BeginOIDCLogin))
+		authRouter.GET("/oidc/callback", authFlowRateLimit, adaptHandler(authHandler.OIDCCallback))
 
 		protected := authRouter.Group("")
 		protected.Use(middleware.Authentication(authHandler, authHandler.CookieName()))

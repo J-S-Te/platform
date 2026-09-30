@@ -96,8 +96,11 @@ services:
       retries: 20
 
   file-gateway:
-    image: basic-platform/backend:local
-    command: ["./file-gateway"]
+    image: basic-platform/file-gateway:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: file-gateway-runtime
     environment:
       FILE_GATEWAY_HTTP_ADDRESS: :8086
       FILE_GATEWAY_DATABASE_DSN: file_gateway:${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=UTC
@@ -250,11 +253,15 @@ services:
       # compose 解析结果与进程环境中二次出现明文插值。
     command: ["./api"]
     volumes:
-      - ./data/keys:/app/data/keys:ro
+      # api 是唯一以完整平台入口脚本启动的服务：入口脚本启动时需对密钥执行
+      # chmod 600/644（与生产 compose 的可写挂载语义一致），因此这里不能 :ro。
+      - ./data/keys:/app/data/keys
       - ./data/logs:/app/data/logs
       - ./data/uploads:/app/data/uploads
       - subsystem_provisioner_socket:/run/basic-platform-provisioner
     depends_on:
+      file-gateway:
+        condition: service_healthy
       mysql:
         condition: service_healthy
       migrate:
@@ -279,7 +286,9 @@ services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0
     environment:
-      LOG_LEVEL: warn
+      # tecnativa/docker-socket-proxy 浮动标签现随 HAProxy 3.4.x 构建，'warn' 已不是
+      # 合法日志级别（parse fatal → 代理崩溃循环）；'warning' 新旧 haproxy 通用。
+      LOG_LEVEL: warning
       POST: "1"        # compose up/down/run 需要非 GET 方法
       CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
       EXEC: "1"        # docker exec（frontend nginx -t、nginx -s reload）
@@ -316,6 +325,11 @@ services:
       SUBSYSTEM_PLATFORM_FRONTEND_SERVICE: frontend
       SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
       SUBSYSTEM_DOCKER_BINARY: docker
+      # 构建驱动（可选）：provisioner 触发的 compose build 默认自举独立 buildkit
+      # 容器，该容器不继承 Docker Desktop 的守护进程代理配置——宿主走系统代理
+      # （fake-IP DNS）时其元数据解析会失败。设为 desktop-linux 让构建跑在守护
+      # 进程内置 buildkit（复用守护进程代理设置）。直连环境留空即可。
+      BUILDX_BUILDER: ${PROVISIONER_BUILDX_BUILDER:-}
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
       # 部署助手在子系统容器起来后，自动调 sync-contract-catalog.sh 把子系统
       # 角色/权限目录推给平台；仅对 contract_management 触发。
@@ -555,7 +569,10 @@ services:
       HTTP_ADDRESS: :8081
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
-      CRM_API_BASE_URL: http://customer-api:8090
+      # 该静态 Token 回写路径已被 AUD-2026-018 fail-closed 校验接管：设了 BaseURL
+      # 就必须提供 CRM_API_TOKEN。本地默认置空＝集成关闭（跨系统链路实际走
+      # 平台机器令牌），需要联调时经 CONTRACT_CRM_API_BASE_URL/TOKEN 显式开启。
+      CRM_API_BASE_URL: ${CONTRACT_CRM_API_BASE_URL:-}
       CRM_REFERENCE_BASE_URL: http://customer-api:8090
       CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
@@ -1323,6 +1340,8 @@ services:
       default:
         ipv4_address: 172.31.255.250
     depends_on:
+      file-gateway:
+        condition: service_healthy
       api:
         condition: service_healthy
       contract-api:

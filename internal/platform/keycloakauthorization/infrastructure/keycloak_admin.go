@@ -184,10 +184,6 @@ func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectiona
 	if err != nil {
 		return err
 	}
-	user, err := admin.ensureUser(ctx, token, snapshot)
-	if err != nil {
-		return err
-	}
 	// Pre-link the upstream OIDC subject to the projected Keycloak user. This
 	// makes Broker login resolve the existing account directly instead of
 	// running Keycloak's just-in-time registration/profile-completion flow.
@@ -195,7 +191,52 @@ func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectiona
 	if strings.EqualFold(strings.TrimSpace(snapshot.ApplicationCode), "customer_portal") {
 		brokerAlias = "basic-platform-customer"
 	}
+	// A previous Broker login can create the Keycloak user before the platform
+	// projection arrives. Reuse that account only when the exact upstream subject
+	// owns the link and the account is not already attributed to another platform
+	// identity or tenant. This avoids both duplicate Keycloak accounts and unsafe
+	// cross-tenant account merging.
+	ownerID, err := admin.findUserByBrokerIdentity(ctx, token, snapshot.IdentityID, brokerAlias)
+	if err != nil {
+		return err
+	}
+	if ownerID != "" {
+		users, findErr := admin.findUsersByIdentity(ctx, token, snapshot.IdentityID)
+		if findErr != nil {
+			return findErr
+		}
+		if len(users) > 1 || (len(users) == 1 && users[0].ID != ownerID) {
+			return fmt.Errorf("Keycloak Broker identity %q conflicts with the platform identity projection", snapshot.IdentityID)
+		}
+		user, readErr := admin.readUser(ctx, token, ownerID)
+		if readErr != nil {
+			return readErr
+		}
+		if !compatibleBrokerUser(user, snapshot) {
+			return fmt.Errorf("Keycloak Broker identity %q is linked to a user owned by another platform identity or tenant", snapshot.IdentityID)
+		}
+		user.Enabled = snapshot.UserEnabled
+		user.FirstName = strings.TrimSpace(snapshot.DisplayName)
+		user.Email = strings.TrimSpace(snapshot.Email)
+		user.Attributes = cloneAttributes(user.Attributes)
+		setAuthorizationAttributes(user.Attributes, snapshot)
+		return admin.updateUser(ctx, token, user)
+	}
+	user, err := admin.ensureUser(ctx, token, snapshot)
+	if err != nil {
+		return err
+	}
 	return admin.ensureBrokerIdentityWithAlias(ctx, token, user, snapshot.IdentityID, brokerAlias)
+}
+
+func compatibleBrokerUser(user keycloakUser, snapshot projectionapplication.Snapshot) bool {
+	if identityID := strings.TrimSpace(strings.Join(user.Attributes["identity_id"], "")); identityID != "" && identityID != strings.TrimSpace(snapshot.IdentityID) {
+		return false
+	}
+	if tenantID := strings.TrimSpace(strings.Join(user.Attributes["tenant_id"], "")); tenantID != "" && tenantID != strings.TrimSpace(snapshot.TenantID) {
+		return false
+	}
+	return true
 }
 
 // ReadAccountStatus reads the Keycloak-managed user status for a platform
@@ -689,6 +730,25 @@ func (admin *KeycloakAdmin) updateUser(ctx context.Context, token string, user k
 		return admin.statusError("update Keycloak user", status)
 	}
 	return nil
+}
+
+func (admin *KeycloakAdmin) readUser(ctx context.Context, token, userID string) (keycloakUser, error) {
+	response, err := admin.request(ctx, token, stdhttp.MethodGet, "/users/"+url.PathEscape(strings.TrimSpace(userID)), nil)
+	if err != nil {
+		return keycloakUser{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusOK {
+		return keycloakUser{}, admin.statusError("read Keycloak Broker user", response.StatusCode)
+	}
+	var user keycloakUser
+	if err := json.NewDecoder(response.Body).Decode(&user); err != nil {
+		return keycloakUser{}, fmt.Errorf("decode Keycloak Broker user: %w", err)
+	}
+	if strings.TrimSpace(user.ID) == "" || user.ID != userID {
+		return keycloakUser{}, errors.New("Keycloak Broker user identity is invalid")
+	}
+	return user, nil
 }
 
 func (admin *KeycloakAdmin) ensureOrganizationGroup(ctx context.Context, token, tenantID, organizationID string) (string, error) {

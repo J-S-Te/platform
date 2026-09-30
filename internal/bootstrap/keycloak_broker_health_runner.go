@@ -27,6 +27,10 @@ type brokerCredentialChecker interface {
 	HasActiveCredential(ctx context.Context, clientID string) error
 }
 
+type customerPortalBrokerHealthReconciler interface {
+	Reconcile(context.Context) (registered bool, err error)
+}
+
 // gormBrokerCredentialChecker is the database-backed credential checker.
 type gormBrokerCredentialChecker struct{ db *gorm.DB }
 
@@ -52,20 +56,25 @@ func (c gormBrokerCredentialChecker) HasActiveCredential(ctx context.Context, cl
 // otherwise surface only when a user logs in. Detected problems are logged and recorded
 // without a hot error loop.
 type keycloakBrokerHealthRunner struct {
-	verifier brokerHealthVerifier
-	checker  brokerCredentialChecker
-	logger   *slog.Logger
-	poll     time.Duration
-	lastWarn time.Time
+	verifier         brokerHealthVerifier
+	checker          brokerCredentialChecker
+	portalReconciler customerPortalBrokerHealthReconciler
+	logger           *slog.Logger
+	poll             time.Duration
+	lastWarn         time.Time
 }
 
-func newKeycloakBrokerHealthRunner(verifier brokerHealthVerifier, db *gorm.DB, logger *slog.Logger, poll time.Duration) (*keycloakBrokerHealthRunner, error) {
-	if verifier == nil || db == nil || logger == nil || poll <= 0 {
+func newKeycloakBrokerHealthRunner(verifier brokerHealthVerifier, db *gorm.DB, logger *slog.Logger, poll time.Duration, portalReconcilers ...customerPortalBrokerHealthReconciler) (*keycloakBrokerHealthRunner, error) {
+	if verifier == nil || db == nil || logger == nil || poll <= 0 || len(portalReconcilers) > 1 {
 		return nil, errors.New("Keycloak broker health runner configuration is invalid")
 	}
-	return &keycloakBrokerHealthRunner{
+	runner := &keycloakBrokerHealthRunner{
 		verifier: verifier, checker: gormBrokerCredentialChecker{db: db}, logger: logger, poll: poll,
-	}, nil
+	}
+	if len(portalReconcilers) == 1 {
+		runner.portalReconciler = portalReconcilers[0]
+	}
+	return runner, nil
 }
 
 // Run verifies both brokers on an interval. Failures are rate-limited to one log line per
@@ -92,8 +101,23 @@ func (runner *keycloakBrokerHealthRunner) check(ctx context.Context) {
 		runner.lastWarn = now
 		runner.logger.Log(ctx, level, msg, "detail", detail)
 	}
+	// 客户门户是可选子系统；Worker 启动后才接入时由 reconciler 创建 Broker。
+	portalReady := true
+	if runner.portalReconciler != nil {
+		registered, err := runner.portalReconciler.Reconcile(ctx)
+		if err != nil {
+			warn(slog.LevelError, "Keycloak customer portal Broker reconciliation failed", err.Error())
+			portalReady = false
+		} else {
+			portalReady = registered
+		}
+	}
+	clientIDs := []string{brokerClientIDKeycloak}
+	if portalReady {
+		clientIDs = append(clientIDs, brokerClientIDCustomerPortal)
+	}
 	// 平台侧：broker client 必须有活跃凭据，否则 Keycloak 无法完成令牌交换。
-	for _, clientID := range []string{brokerClientIDKeycloak, brokerClientIDCustomerPortal} {
+	for _, clientID := range clientIDs {
 		if err := runner.checker.HasActiveCredential(ctx, clientID); err != nil {
 			warn(slog.LevelError, "Keycloak broker client has no active credential",
 				"client_id="+clientID+" error="+err.Error())
@@ -103,7 +127,9 @@ func (runner *keycloakBrokerHealthRunner) check(ctx context.Context) {
 	if err := runner.verifier.VerifyBrokerExists(ctx); err != nil {
 		warn(slog.LevelError, "Keycloak broker IdP is incomplete", "detail="+err.Error())
 	}
-	if err := runner.verifier.VerifyCustomerPortalBrokerExists(ctx); err != nil {
-		warn(slog.LevelError, "Keycloak customer broker IdP is incomplete", "detail="+err.Error())
+	if portalReady {
+		if err := runner.verifier.VerifyCustomerPortalBrokerExists(ctx); err != nil {
+			warn(slog.LevelError, "Keycloak customer broker IdP is incomplete", "detail="+err.Error())
+		}
 	}
 }

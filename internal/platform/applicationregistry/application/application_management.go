@@ -26,6 +26,12 @@ var (
 	// ErrEnvironmentDeletionBlocked means an environment still has configuration or audit evidence
 	// that must be retained instead of being deleted.
 	ErrEnvironmentDeletionBlocked = errors.New("application environment deletion blocked by retained records")
+	// ErrEnvironmentNotOffboarded prevents irreversible cleanup until the deployment control plane
+	// has recorded successful runtime teardown for this exact tenant/application/environment.
+	ErrEnvironmentNotOffboarded = errors.New("application environment is not offboarded")
+	// ErrEnvironmentRetentionApprovalInvalid requires a completed platform audit-retention purge
+	// task scoped to this exact tenant and application before deleting its audit receipt records.
+	ErrEnvironmentRetentionApprovalInvalid = errors.New("application environment retention approval is invalid")
 )
 
 const (
@@ -431,6 +437,9 @@ func (service *ManagementService) PurgeEnvironment(ctx context.Context, input En
 	app, err := service.repository.GetApplication(ctx, input.TenantID, input.ApplicationID)
 	if err != nil {
 		return Environment{}, err
+	}
+	if app.Status != "RETIRED" {
+		return Environment{}, ErrConflict
 	}
 	environment, err := service.repository.GetEnvironment(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
 	if err != nil {

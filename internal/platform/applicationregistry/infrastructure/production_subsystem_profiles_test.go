@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
 func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) {
@@ -25,6 +27,19 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	}
 	if len(capabilities.Targets) != 6 {
 		t.Fatalf("targets = %#v", capabilities.Targets)
+	}
+	portalRolesVerified := false
+	for _, target := range capabilities.Targets {
+		if target.ApplicationCode != "customer_portal" {
+			continue
+		}
+		if !reflect.DeepEqual(target.InitialAdminRoles, []string{"portal_super_admin"}) {
+			t.Fatalf("customer portal initial administrator roles = %#v, want [portal_super_admin]", target.InitialAdminRoles)
+		}
+		portalRolesVerified = true
+	}
+	if !portalRolesVerified {
+		t.Fatal("customer portal production target is missing")
 	}
 
 	provisioner, err := newProductionComposeSubsystemProvisioner(ProductionComposeSubsystemProvisionerConfig{
@@ -45,6 +60,129 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if _, err := provisioner.target("unreviewed_system", "prod"); err == nil {
 		t.Fatal("unreviewed target was routable")
 	}
+}
+
+func TestProductionSubsystemProfilesProvidePortableDatabaseDSNs(t *testing.T) {
+	t.Parallel()
+	root := platformModuleRoot(t)
+	profiles, _, err := loadProductionSubsystemProfiles(
+		filepath.Join(root, "deploy", "production"),
+		filepath.Join(root, "deploy", "production", "subsystems.d"),
+	)
+	if err != nil {
+		t.Fatalf("load repository profiles: %v", err)
+	}
+	expected := map[string]map[string]string{
+		"contract_management": {
+			"MYSQL_DSN": "contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+		},
+		"customer_and_opportunity": {
+			"MYSQL_DSN":                            "customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+			"PORTAL_INVITE_COMPENSATION_MYSQL_DSN": "customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+		},
+		"customer_portal": {
+			"PORTAL_MYSQL_DSN": "portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+		},
+		"data_analysis": {
+			"DASHBOARD_MYSQL_DSN": "dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+		},
+		"project_management": {
+			"MYSQL_DSN": "project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+		},
+		"settlement": {
+			"SETTLEMENT_MYSQL_DSN": "settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC",
+		},
+	}
+	for _, profile := range profiles {
+		applicationCode := profile.Manifest.Application.Code
+		wanted, ok := expected[applicationCode]
+		if !ok {
+			continue
+		}
+		actual := make(map[string]string)
+		for _, runtimeFile := range profile.Manifest.Runtime.Files {
+			for key := range wanted {
+				if value, exists := runtimeFile.Values[key]; exists {
+					actual[key] = value
+				}
+			}
+		}
+		if !reflect.DeepEqual(actual, wanted) {
+			t.Fatalf("%s database DSNs = %#v, want %#v", applicationCode, actual, wanted)
+		}
+		delete(expected, applicationCode)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("repository profiles missing database DSN policies: %#v", expected)
+	}
+}
+
+func TestProductionDataAnalysisProfileDeliversFileGatewayCredentials(t *testing.T) {
+	t.Parallel()
+	root := platformModuleRoot(t)
+	profiles, _, err := loadProductionSubsystemProfiles(
+		filepath.Join(root, "deploy", "production"),
+		filepath.Join(root, "deploy", "production", "subsystems.d"),
+	)
+	if err != nil {
+		t.Fatalf("load repository profiles: %v", err)
+	}
+
+	for _, profile := range profiles {
+		if profile.Manifest.Application.Code != "data_analysis" {
+			continue
+		}
+		if profile.Manifest.Application.AllowedServiceBindings == nil ||
+			!stringSliceContains(*profile.Manifest.Application.AllowedServiceBindings, application.ServiceCredentialFileGatewayWrite) {
+			t.Fatal("data_analysis production profile does not allow file_gateway_write")
+		}
+		if len(profile.Manifest.Runtime.Files) != 1 {
+			t.Fatalf("data_analysis runtime files = %d, want 1", len(profile.Manifest.Runtime.Files))
+		}
+		bindings := profile.Manifest.Runtime.Files[0].Bindings
+		for key, source := range map[string]string{
+			"FILE_GATEWAY_APPLICATION_ID": "application_id",
+			"FILE_GATEWAY_CLIENT_ID":      "service.file_gateway_write.client_id",
+			"FILE_GATEWAY_CLIENT_SECRET":  "service.file_gateway_write.client_secret",
+		} {
+			if bindings[key] != source {
+				t.Fatalf("data_analysis binding %s = %q, want %q", key, bindings[key], source)
+			}
+		}
+		return
+	}
+	t.Fatal("data_analysis production profile is missing")
+}
+
+func TestProductionCustomerCatalogHashMatchesIntegratedRuntime(t *testing.T) {
+	t.Parallel()
+	const embeddedCRMHash = "sha256:1c1d94091fdfd3f5665d04215b91089434a737b0f43e9f1a9901755af97f621a"
+	if integratedCustomerRoleConfigHash != embeddedCRMHash {
+		t.Fatalf("integrated CRM role hash = %s, want %s", integratedCustomerRoleConfigHash, embeddedCRMHash)
+	}
+	root := platformModuleRoot(t)
+	profiles, _, err := loadProductionSubsystemProfiles(
+		filepath.Join(root, "deploy", "production"),
+		filepath.Join(root, "deploy", "production", "subsystems.d"),
+	)
+	if err != nil {
+		t.Fatalf("load repository profiles: %v", err)
+	}
+	for _, profile := range profiles {
+		if profile.Manifest.Application.Code != "customer_and_opportunity" {
+			continue
+		}
+		for _, runtimeFile := range profile.Manifest.Runtime.Files {
+			if hash, ok := runtimeFile.Values["OIDC_ROLE_CONFIG_HASH"]; ok {
+				if hash != embeddedCRMHash {
+					t.Fatalf("production CRM role hash = %s, want %s", hash, embeddedCRMHash)
+				}
+				return
+			}
+		}
+		t.Fatal("production CRM role hash is missing")
+	}
+	t.Fatal("production CRM profile is missing")
 }
 
 func platformModuleRoot(t *testing.T) string {

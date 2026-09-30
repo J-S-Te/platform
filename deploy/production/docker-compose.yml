@@ -1,0 +1,2116 @@
+name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+
+# 生产唯一编排入口。仅使用 bin 中的受控启动/发布脚本启动，以执行接入与迁移门禁。
+# 可选子系统：将 BEGIN SUBSYSTEM 到 END SUBSYSTEM 之间的所有行整体注释。
+# YAML 中保留表示允许部署，未完成平台接入的业务服务不会被启动脚本启动。
+# 禁止全栈 up/down 或 --remove-orphans；单服务发布与停用由受控脚本执行。
+# 公共 contract-mysql 承载既有 Temporal 数据，合同块关闭时必须保留。
+# HTTPS 与会话排空使用相同 frontend 服务，证书由脚本写入 runtime/public-tls。
+# 未使用卷声明保留可保证重新启用时复用数据，不会创建运行容器。
+services:
+
+  # BEGIN SUBSYSTEM: common — 公共基础设施与平台（必选） 开始
+  keycloak-db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${KEYCLOAK_DB_NAME:-keycloak}
+      MYSQL_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      # H5 修复：Keycloak 凭据改为必填（:?），漏配时 compose 直接失败，不再以文档化占位口令启动。
+      MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set}
+      MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD:?KEYCLOAK_DB_ROOT_PASSWORD must be set}
+    volumes:
+      - keycloak-mysql-data:/var/lib/mysql
+      # 宿主机目录须为 0700；仅存放加密后的、访问受控的逻辑备份。
+      - ./backups/keycloak:/backups
+    networks: [application]
+    healthcheck:
+      # 安全审查 SEC-F5b：密码经 MYSQL_PWD 环境变量传递，禁止出现在 argv（每 5 秒被 ps 读取）。
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  platform-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - platform-mysql-data:/var/lib/mysql
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  contract-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: contract_management
+      MYSQL_USER: contract
+      MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - contract-mysql-data:/var/lib/mysql
+      - ./mysql-init/contract-databases.sql:/docker-entrypoint-initdb.d/010_contract_databases.sql:ro
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -ucontract --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  file-gateway-mysql:
+    image: ${FILE_GATEWAY_MYSQL_IMAGE:-mysql:8.4}
+    environment:
+      MYSQL_DATABASE: ${FILE_GATEWAY_DB_NAME:-file_gateway}
+      MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
+      MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:?FILE_GATEWAY_DB_PASSWORD must be set}
+      MYSQL_ROOT_PASSWORD: ${FILE_GATEWAY_DB_ROOT_PASSWORD:?FILE_GATEWAY_DB_ROOT_PASSWORD must be set}
+    volumes:
+      - file-gateway-mysql-data:/var/lib/mysql
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  platform-key-init:
+    image: ${PLATFORM_IMAGE}
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
+    command: ["./init-keys"]
+    environment:
+      AUTH_JWT_PRIVATE_KEY_PATH: /app/data/keys/jwt-ed25519-private.pem
+      AUTH_JWT_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
+    network_mode: none
+    restart: "no"
+
+  platform-migrate:
+    image: ${PLATFORM_IMAGE}
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
+      - ./data/platform/logs:/app/data/logs
+      - ./data/platform/uploads:/app/data/uploads
+    command: ["./migrate"]
+    depends_on:
+      platform-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  # 基础平台 HTTP API。后台 Worker 使用下方独立的 platform-worker 服务，
+  # 避免 API 重启或入口脚本差异导致投影任务无人消费。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start", "--health-enabled=true", "--metrics-enabled=${KEYCLOAK_METRICS_ENABLED:-true}"]
+    environment:
+      KC_DB: mysql
+      KC_DB_URL: jdbc:mysql://keycloak-db:3306/${KEYCLOAK_DB_NAME:-keycloak}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set}
+      # 可选的 bootstrap service account 必须成对配置；空值注入会让 Keycloak 26
+      # 在启动期直接失败（client id 已设置但 secret 为空）。需要启用时把完整的
+      # KC_BOOTSTRAP_ADMIN_CLIENT_ID/SECRET 写入 keycloak 的专用 env_file。
+      KC_HOSTNAME: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:?KEYCLOAK_PUBLIC_URL must be configured}}
+      KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
+      KC_PROXY_HEADERS: ${KEYCLOAK_PROXY_HEADERS:-xforwarded}
+      KC_HTTP_ENABLED: ${KEYCLOAK_HTTP_ENABLED:-true}
+      KC_HTTP_PORT: 8080
+      # Keycloak 26 的数据库发现协议适合共享 MySQL 的多节点部署；单节点同样可用。
+      KC_CACHE_STACK: ${KEYCLOAK_CACHE_STACK:-jdbc-ping}
+    ports:
+      # 默认仅本机监听；需要浏览器直连 KEYCLOAK_PUBLIC_URL 时，在 .env
+      # 显式设置 KEYCLOAK_BIND_ADDRESS=0.0.0.0，或改用网关反代到本机端口。
+      - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_HTTP_PORT:-18090}:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    networks:
+      application:
+        aliases: [keycloak]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/9000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    environment:
+      DB: mysql8
+      DB_PORT: 3306
+      MYSQL_SEEDS: contract-mysql
+      MYSQL_USER: contract
+      MYSQL_PWD: ${CONTRACT_MYSQL_PASSWORD}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    networks: [application]
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      # HAProxy 3.4 rejects the abbreviation "warn"; the accepted level name
+      # is "warning".  A bad value otherwise leaves the container restarting
+      # while Compose may already start the dependent Agent.
+      LOG_LEVEL: warning
+      POST: "1"        # compose up/down/run 需要非 GET 方法
+      CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
+      EXEC: "1"        # docker exec（frontend nginx -t、nginx -s reload）
+      IMAGES: "1"      # 镜像拉取与检查
+      NETWORKS: "1"    # compose 网络创建/连接/删除
+      VOLUMES: "1"     # compose 卷管理
+      INFO: "1"        # docker/compose 握手
+      # 未列出者保持镜像默认关闭：BUILD、AUTH、COMMIT、CONFIGS、DISTRIBUTION、GRPC、
+      # NODES、PLUGINS、SECRETS、SERVICES、SESSION、SWARM、SYSTEM、TASKS。
+      # 若受审清单确需镜像构建，再显式打开 BUILD 并记录审批理由。
+    volumes:
+      # 只读挂载宿主机 socket：代理仅经该连接转发受限 HTTP 请求，不改写 socket 文件；
+      # 该挂载是全 compose 中唯一的 docker.sock 入口，且不发布任何宿主机端口。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-control]
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/tmp/haproxy.cfg"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # 命名卷首次创建归 root；只初始化本卷的目录属主，不访问业务数据或密钥。
+  subsystem-provisioner-socket-init:
+    image: ${PLATFORM_IMAGE}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - 'chown "$$SOCKET_OWNER" /run/basic-platform-provisioner && chmod 0770 /run/basic-platform-provisioner'
+    environment:
+      SOCKET_OWNER: ${SUBSYSTEM_PROVISIONER_USER:-0:10001}
+    volumes:
+      - subsystem-provisioner-socket:/run/basic-platform-provisioner
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: "0.25"
+    restart: "no"
+
+  subsystem-provisioner:
+    image: ${PLATFORM_IMAGE}
+    environment:
+      SUBSYSTEM_ONBOARDING_MODE: production
+      # 安全审查 SEC-F3：docker CLI/Compose 统一经白名单代理访问 Docker API，
+      # 本容器不再挂载 /var/run/docker.sock。HOME 指向可写 tmpfs（根文件系统只读）。
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      HOME: /tmp
+      SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
+      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}
+      SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}
+      SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env
+      SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env
+      SUBSYSTEM_PRODUCTION_COMPOSE_FILE: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml
+      SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+      SUBSYSTEM_DOCKER_BINARY: docker
+      SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # 仅测试服务器可设为 true：跳过子系统数据库凭据校验，允许占位密码首次初始化。
+      SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS: ${SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS:-false}
+    command: ["./subsystem-provisioner"]
+    # Docker 对非 root 用户不会把 cap_add 提升为 effective capability；实机上
+    # uid10001 的 CapEff=0，因而无法读取严格 0600 的 .env/.release.env，也无法
+    # 原子维护 runtime 文件。这里使用 uid0 + 业务共享 gid10001，但仍先 drop ALL，
+    # 只恢复下面三个文件协作能力。它没有 SETUID/SYS_ADMIN/NET_ADMIN 等能力，且
+    # no-new-privileges、只读根文件系统与 Docker API 白名单边界继续生效。
+    # gid10001 使 Agent 创建的 0660 Unix Socket 可由同镜像的非 root API 访问。
+    user: "${SUBSYSTEM_PROVISIONER_USER:-0:10001}"
+    read_only: true
+    cap_drop: [ALL]
+    # 保留的三个能力均为宿主机文件协作所必需，其余 capability 全部丢弃：
+    # DAC_OVERRIDE/FOWNER —— 读写宿主机 deploy 用户属有的 0600 runtime 文件与
+    #   socket 卷目录（卷目录属 root，非 root 无此能力无法创建 provisioner.sock）；
+    # CHOWN —— 重写受管文件时把临时文件属主还原为原文件 uid/gid（Go 侧 os.Chown 依赖）。
+    # 配合 no-new-privileges、只读根文件系统与 docker.sock 移除（仅经白名单代理），
+    # Agent 被攻破时不再具备 root 进程能力面，也不再直接持有 Docker Socket。
+    cap_add: [DAC_OVERRIDE, FOWNER, CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=64m,mode=1770
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
+    volumes:
+      # docker.sock 不再挂入本容器（SEC-F3）：Docker 访问统一走 docker-socket-proxy 白名单。
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml:ro
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystem-templates:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystem-templates:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/mysql-init:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/mysql-init:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/backups:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/backups
+      - subsystem-provisioner-socket:/run/basic-platform-provisioner
+    # 原 network_mode:none 的隔离由专有 internal 网络（docker-control）继承：
+    # 仅白名单代理可达，无网关与外网出口；平台与业务容器均不在该网络中。
+    networks: [docker-control]
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/basic-platform-provisioner/provisioner.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  file-gateway:
+    image: ${FILE_GATEWAY_IMAGE:?FILE_GATEWAY_IMAGE must be set}
+    # SEC-N10d：补 env_file——file-gateway 与平台服务同源读取 0600 运行环境文件，
+    # 使部署脚本注入的 FILE_GATEWAY_* 配置直达容器（environment 显式键仍优先生效）。
+    # 上线顺序遵循文件头部说明：先 prepare/deploy 再 up。
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
+    environment:
+      FILE_GATEWAY_HTTP_ADDRESS: :8086
+      # 默认根据同一 Compose 文件中的数据库凭据组装 DSN；如生产环境使用外部
+      # 数据库，仍可通过 FILE_GATEWAY_DATABASE_DSN 显式覆盖完整连接串。
+      FILE_GATEWAY_DATABASE_DSN: ${FILE_GATEWAY_DATABASE_DSN:-file_gateway:${FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=UTC}
+      FILE_GATEWAY_STORAGE_BACKEND: local
+      FILE_GATEWAY_STORAGE_ROOT: /app/data/file-gateway
+      FILE_GATEWAY_TEMP_ROOT: /app/data/file-gateway/temporary
+      FILE_GATEWAY_QUARANTINE_ROOT: /app/data/file-gateway/quarantine
+      FILE_GATEWAY_CAPACITY_REJECT_PERCENT: ${FILE_GATEWAY_CAPACITY_REJECT_PERCENT:-90}
+      FILE_GATEWAY_RECONCILIATION_INTERVAL: ${FILE_GATEWAY_RECONCILIATION_INTERVAL:-1m}
+      FILE_GATEWAY_RECONCILIATION_STALE_AFTER: ${FILE_GATEWAY_RECONCILIATION_STALE_AFTER:-15m}
+      FILE_GATEWAY_RECONCILIATION_BATCH_SIZE: ${FILE_GATEWAY_RECONCILIATION_BATCH_SIZE:-100}
+      FILE_GATEWAY_TOKEN_ISSUER: ${AUTH_JWT_ISSUER:?AUTH_JWT_ISSUER must be set}
+      FILE_GATEWAY_TOKEN_AUDIENCE: ${AUTH_APPLICATION_JWT_AUDIENCE:?AUTH_APPLICATION_JWT_AUDIENCE must be set}
+      FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    volumes:
+      # 仅挂载公开验签密钥文件。宿主机 keys 目录为 0700，直接挂载目录会让
+      # 非 root 的 filegateway 账号无法穿越目录并读取其中的 0644 公钥。
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+      - ${FILE_GATEWAY_HOST_ROOT:-/opt/unified-identity-platform/data/file-gateway}:/app/data/file-gateway
+    depends_on:
+      file-gateway-mysql:
+        condition: service_healthy
+    networks: [application]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8086/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  platform-api:
+    image: ${PLATFORM_IMAGE}
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
+    networks: [application]
+    restart: unless-stopped
+    environment:
+      # 生产编排必须覆盖旧的 .env 值，避免把 test/development 运行配置带入
+      # production 项目，进而让审计、投影门禁按错误环境运行。
+      APP_ENV: production
+      APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
+      APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
+      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
+      # 传输安全默认 fail-closed（SEC-N2）：Secure Cookie 与 Keycloak HTTPS 必需默认开启，
+      # 任意 HTTP 回调 URI 默认拒绝。回滚方式（仅限已评估的 HTTP 过渡环境，在 .env 显式设置）：
+      #   PUBLIC_TRANSPORT_COOKIE_SECURE=false、PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=false、
+      #   PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true。
+      # public-transport.sh 按传输状态统一给出上述 PUBLIC_TRANSPORT_* 值。
+      AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS:-false}}
+      OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:-${OIDC_ISSUER:-http://localhost:8081}}
+      KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
+      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
+      # 信任来源收敛为精确网关地址（SEC-N6，与生产 .env.example 保持一致）：
+      # 宿主机入口 Nginx 经 127.0.0.1 发布端口进入时对端是网桥网关 172.31.255.1，
+      # frontend 反代容器对端是其固定地址 172.31.255.250；应用网段其余容器一律不可信，
+      # 其携带的 X-Forwarded-For 会被忽略，防止任意容器伪造 XFF 污染审计/绕过限流。
+      # 确认方法：docker network inspect basic-platform-production --format '{{(index .IPAM.Config 0).Gateway}}'。
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32}
+      # 出网策略注入（task-50 SEC-B5；键名以 Go EgressPolicyFromEnv 逐字核对）：
+      # 本进程反代/健康探针的上游全部是 compose 私网容器名（实测 upstream_url：
+      # contract-api:8081 / project-api:8082 / settlement-api:8085 / customer-api:8090 /
+      # dashboard-api:8080 / portal-api:8091，平台自身两行为 NULL，无任何回环上游）；
+      # 生产网段 172.31.255.0/24 属 RFC1918 私网——不注入本键则下轮部署探针/反代全断
+      # （策略默认 fail-closed）。PLATFORM_EGRESS_ALLOW_LOOPBACK 不注入（保持默认拒绝），
+      # 若将来出现 127.0.0.1 上游需显式设 true；169.254/链路本地元数据恒拒，不受开关影响。
+      PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
+      AUDIT_ENVIRONMENT_CODE: prod
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
+      SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
+      SUBSYSTEM_ONBOARDING_MODE: production
+      SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
+      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}
+      SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}
+      SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+      SUBSYSTEM_DOCKER_BINARY: docker
+      SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # 四项配置必须成组提供。未完成专用机器客户端初始化前保持全部为空，
+      # 避免仅有地址却没有凭据导致平台 API 在启动校验阶段退出。
+      IAM_IMPORT_FILE_GATEWAY_BASE_URL: ${IAM_IMPORT_FILE_GATEWAY_BASE_URL:-}
+      IAM_IMPORT_FILE_GATEWAY_TOKEN_URL: ${IAM_IMPORT_FILE_GATEWAY_TOKEN_URL:-}
+      IAM_IMPORT_FILE_GATEWAY_CLIENT_ID: ${IAM_IMPORT_FILE_GATEWAY_CLIENT_ID:-}
+      IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET: ${IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET:-}
+      IAM_IMPORT_FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
+    command: ["./api"]
+    ports:
+      - "127.0.0.1:${PLATFORM_API_PORT:-18080}:8080"
+    depends_on:
+      platform-mysql:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+      file-gateway:
+        condition: service_healthy
+
+      subsystem-provisioner:
+        condition: service_healthy
+
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
+      - ./data/platform/logs:/app/data/logs
+      - ./data/platform/uploads:/app/data/uploads
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
+      - subsystem-provisioner-socket:/run/basic-platform-provisioner
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # Worker 独立运行，避免依赖 API 入口脚本的双进程模式。在生产环境中，
+  # Keycloak 用户/角色投影、审计采集和人员异动必须有明确的容器生命周期。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  platform-worker:
+    image: ${PLATFORM_IMAGE}
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
+      - ./data/platform/logs:/app/data/logs
+      - ./data/platform/uploads:/app/data/uploads
+    environment:
+      APP_ENV: production
+      APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
+      APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
+      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
+      OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:-${OIDC_ISSUER:-http://localhost:8081}}
+      KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
+      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
+      AUDIT_ENVIRONMENT_CODE: prod
+      BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
+      # 出网策略（task-50 SEC-B5）：与 platform-api 同源注入——上游全为 compose 私网
+      # 容器名（实测清单见 platform-api 注释），私网族必须显式放行否则部署即断；
+      # PLATFORM_EGRESS_ALLOW_LOOPBACK 不注入（无回环上游，保持默认拒绝，按需显式开）；
+      # 169.254/链路本地元数据恒拒，不受任何开关影响。
+      PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
+    command: ["./worker"]
+    depends_on:
+      platform-mysql:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+    # Worker 不提供 HTTP 端口；以 PID 1 的真实可执行文件作为容器内存活探针。
+    # 发布脚本还会观察 RestartCount 稳定窗口，避免“刚启动即崩溃重启”被判成功。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
+
+  # 生产接入 Agent 仅通过 Unix Socket 接收固定生命周期动作。平台 API 不挂载
+  # Docker Socket；Agent 也不再直接挂载 docker.sock，只经下方白名单代理访问受限
+  # Docker API，目标只能来自只读 subsystems.d 审核清单。
+  #
+  # Docker Socket 白名单代理（安全审查 SEC-F3）：Agent 以 DOCKER_HOST 访问本服务，
+  # 代理在专有 internal 网络内以只读方式持有唯一 docker.sock 挂载；环境变量即
+  # verb/object ACL 白名单。诚实说明：compose up 语义上仍接近宿主机高权限，白名单
+  # 的价值在于把 socket 移出 Agent 容器、并默认关闭 swarm/secrets/configs/system/
+  # plugins/commit/auth 等全部无关 API；真正约束动作面仍依赖 subsystems.d 清单审核。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  frontend:
+    # 前端尚未发布时允许 platform 独立发布；frontend 发布脚本会覆盖为不可变 digest。
+    image: ${FRONTEND_IMAGE:-frontend/frontend:pending}
+    environment:
+      PUBLIC_HTTPS_ENABLED: ${PUBLIC_HTTPS_ENABLED:-false}
+      PUBLIC_TRANSPORT_STATE: ${PUBLIC_TRANSPORT_STATE:-HTTP}
+      PUBLIC_PLATFORM_HOST: ${PUBLIC_PLATFORM_HOST:-localhost}
+      PUBLIC_SSO_HOST: ${PUBLIC_FRONTEND_SSO_HOST:-${PUBLIC_SSO_HOST:-sso.localhost}}
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTP_PORT:-${FRONTEND_PORT:-18082}}:80"
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${PUBLIC_TLS_MANAGED_DIR:-./runtime/public-tls}:/run/tls:ro
+    healthcheck:
+      # 内部前端监听在 HTTP、HTTPS 和排空模式均存在，避免健康探针被 TLS 重定向。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8088/"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    # 固定地址（子网高位，避开自动分配顺序）供 APP_TRUSTED_PROXIES 精确信任：
+    # frontend nginx 是转发 X-Forwarded-For 到 platform-api 的唯一容器来源（SEC-N6）。
+    networks:
+      application:
+        ipv4_address: 172.31.255.250
+    depends_on:
+      platform-api:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: common — 公共基础设施与平台（必选） 结束
+
+  # BEGIN SUBSYSTEM: contract — 合同管理 开始
+  contract-migrate:
+    image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
+    env_file:
+      - path: ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
+        required: false
+    # OIDC_* is deliberately owned by the per-environment runtime file.  Do not
+    # add a compose-level default here: that would overwrite an environment that
+    # has not migrated to Keycloak and make all contract environments share one
+    # authentication provider.
+    environment:
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
+      # 传输安全默认 fail-closed（SEC-N2）：生产默认发 Secure Cookie；HTTP 过渡环境
+      # 需显式设 PUBLIC_TRANSPORT_COOKIE_SECURE=false 回滚，HTTPS overlay 不受影响。
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
+      HTTP_ADDRESS: :8081
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: contract-management
+      # 历史合同审批由未版本化 Worker 创建。只有完成 Current 版本提升并确认
+      # UNVERSIONED 队列已排空后，才允许显式开启 Deployment Versioning；否则
+      # 旧审批会永久停在 Workflow Task Scheduled，详情与审批命令均返回 503。
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
+      TEMPORAL_WORKER_VERSIONING_POLICY: PINNED
+      TEMPORAL_METRICS_ADDRESS: :9091
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    command: ["./migrate"]
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  # 合同管理后端单容器：入口脚本同时启动 API 与 Temporal Worker。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  contract-api:
+    image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
+    env_file:
+      - path: ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
+        required: false
+    # OIDC_* is deliberately owned by the per-environment runtime file.  Do not
+    # add a compose-level default here: that would overwrite an environment that
+    # has not migrated to Keycloak and make all contract environments share one
+    # authentication provider.
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    environment:
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
+      HTTP_ADDRESS: :8081
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      # environment 映射不会与 x-contract-service 的同名映射递归合并，必须在
+      # 实际服务上重复声明，否则程序会退回自身默认值。
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
+      CONTRACT_RUN_WORKER_WITH_API: "true"
+      GIN_MODE: release
+    command: ["./api"]
+    ports:
+      - "127.0.0.1:${CONTRACT_API_PORT:-18081}:8081"
+    expose:
+      - "9091"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: contract_management
+      com.basic-platform.application_name: 合同管理系统
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: contract-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: contract-api
+      com.basic-platform.internal_port: "8081"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /contract_management
+      com.basic-platform.oidc_callback_path: /contract_management/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # 项目管理系统后端单容器：入口脚本同时启动 API 与 Temporal Worker。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: contract — 合同管理 结束
+
+  # BEGIN SUBSYSTEM: project — 项目管理 开始
+  project-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: project_management
+      MYSQL_USER: project
+      MYSQL_PASSWORD: ${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${PROJECT_MYSQL_ROOT_PASSWORD:-PENDING_PROJECT_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - project-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  project-migrate:
+    image: ${PROJECT_IMAGE:-project-management/project:pending}
+    env_file:
+      - path: ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
+        required: false
+    # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
+    # per environment preserves both the platform-OIDC compatibility path and
+    # the Keycloak migration path.
+    environment:
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      PM_HTTP_ADDR: :8082
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: project-management
+      PROJECT_RUN_WORKER_WITH_API: "true"
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    entrypoint: ["/usr/local/bin/project-migrate"]
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  project-api:
+    image: ${PROJECT_IMAGE:-project-management/project:pending}
+    env_file:
+      - path: ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
+        required: false
+    # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
+    # per environment preserves both the platform-OIDC compatibility path and
+    # the Keycloak migration path.
+    environment:
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      PM_HTTP_ADDR: :8082
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: project-management
+      PROJECT_RUN_WORKER_WITH_API: "true"
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PROJECT_API_PORT:-18085}:8082"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: project_management
+      com.basic-platform.application_name: 项目服务内容管理系统
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: project-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: project-api
+      com.basic-platform.internal_port: "8082"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /project_management
+      com.basic-platform.oidc_callback_path: /project_management/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # 项目 SLA 与通知 outbox 独立消费者。API 事务只负责可靠入库；该进程按幂等键重试投递。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  project-sla-notifier:
+    image: ${PROJECT_IMAGE:-project-management/project:pending}
+    env_file:
+      - path: ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
+        required: false
+    # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
+    # per environment preserves both the platform-OIDC compatibility path and
+    # the Keycloak migration path.
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/sla-notifier"]
+    environment:
+      PM_HTTP_ADDR: :8082
+      PLATFORM_BASE_URL: http://platform-api:8080
+      SLA_SCAN_TENANTS: ${PROJECT_SLA_SCAN_TENANTS:-}
+      NOTIFICATION_ENABLED: "true"
+    depends_on:
+      project-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      # 该 Worker 不提供 HTTP 端口，但受控发布使用 `docker compose up --wait`。
+      # 用 PID 1 存活探针让 Compose 能区分“持续运行”与“启动后立即退出”，同时
+      # 避免把无健康检查的长期服务误判为部署失败。
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  # 结算与开票服务拥有独立数据库；发布顺序固定为数据库健康、迁移、API、Worker。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: project — 项目管理 结束
+
+  # BEGIN SUBSYSTEM: customer — CRM 开始
+  customer-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: customer_opportunity
+      MYSQL_USER: customer
+      MYSQL_PASSWORD: ${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CUSTOMER_MYSQL_ROOT_PASSWORD:-PENDING_CUSTOMER_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - customer-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-migrate:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    command: ["./production-migrate", "--schema", "crm"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-api:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    restart: unless-stopped
+    command: ["./crm-server"]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+      - customer-attachment-data:/app/data/attachments
+    ports:
+      - "127.0.0.1:${CUSTOMER_API_PORT:-18083}:8090"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: customer_and_opportunity
+      com.basic-platform.application_name: 客户与商机管理系统
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: customer-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: customer-api
+      com.basic-platform.internal_port: "8090"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /customer-opportunity/healthz
+      com.basic-platform.path_prefix: /customer-opportunity
+      com.basic-platform.oidc_callback_path: /customer-opportunity/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8090/customer-opportunity/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-opportunity-alert-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./opportunity-alert-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-owner-notification-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./opportunity-owner-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-presale-alert-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./presale-alert-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-presale-assignment-notification-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./presale-assignment-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-presale-progress-notification-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./presale-progress-notification-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-notification-delivery-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      HTTP_ADDRESS: :8090
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      # 传输安全 fail-closed（SEC-N2）：默认不允许非回环 HTTP 会话。仅限已评估的
+      # 内网 HTTP 过渡环境显式设 PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true 临时回滚，
+      # 完成 HTTPS 迁移后必须收回。
+      OIDC_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # OIDC_ROLE_CONFIG_HASH 只允许由该 CRM 环境的 runtime/customer.env 提供。
+      # 发布脚本会先从不可变镜像读取内嵌目录哈希并原子写回该文件；不能再用
+      # Compose 的全局变量覆盖它，否则角色目录变更后会出现“镜像与运行配置”漂移。
+      MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      ATTACHMENT_LOCAL_ENABLED: "true"
+      ATTACHMENT_LOCAL_ROOT: /app/data/attachments
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./notification-delivery-worker"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+
+  # 售前申请投递 Worker：消费 CRM outbox，写入审批引擎/PMS，并持续写入
+  # crm_worker_heartbeats。CRM API 依据该心跳决定是否受理新的售前申请。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  customer-presale-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./presale-worker"]
+    environment:
+      PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
+      PRESALE_TEMPORAL_INTERNAL_MODE: ${PRESALE_TEMPORAL_INTERNAL_MODE:-true}
+      TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${CUSTOMER_TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${CUSTOMER_TEMPORAL_TASK_QUEUE:-customer-opportunity-presale}
+      TEMPORAL_TLS: ${CUSTOMER_TEMPORAL_TLS:-false}
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_DEPLOYMENT_NAME:-customer-opportunity-presale}
+      # 客户发布脚本会根据 CRM 镜像摘要写入不可复用的 Build ID。基础平台
+      # 资产同步不会启动 customer profile，因此这里仅提供解析 Compose 所需
+      # 的占位值；任何实际 Worker 发布都必须由脚本覆盖为不可变版本标识。
+      TEMPORAL_WORKER_BUILD_ID: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID:-customer-presale-pending}
+      TEMPORAL_WORKER_VERSIONING_ENABLED: "true"
+      TEMPORAL_WORKER_VERSIONING_POLICY: ${CUSTOMER_PRESALE_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
+      TEMPORAL_METRICS_ADDRESS: :9093
+    expose: ["9093"]
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: customer — CRM 结束
+
+  # BEGIN SUBSYSTEM: portal — 客户门户 开始
+  portal-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: customer_portal
+      MYSQL_USER: portal
+      MYSQL_PASSWORD: ${PORTAL_MYSQL_PASSWORD:-PENDING_PORTAL_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${PORTAL_MYSQL_ROOT_PASSWORD:-PENDING_PORTAL_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - portal-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  portal-migrate:
+    image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
+    env_file:
+      - path: ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
+        required: false
+    # PORTAL_OIDC_* stays in runtime/portal.env.  It is independently switched
+    # by the authentication control plane and must not inherit global values.
+    environment:
+      PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
+      PORTAL_OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
+      PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      PORTAL_HTTP_ADDRESS: :8091
+      PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+      PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
+      PORTAL_CRM_INVITE_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      # SEC-N2 fail-closed：与 CRM 同一开关，默认不放行非 Secure 的门户会话。
+      PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    command: ["./production-migrate", "--schema", "portal"]
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  portal-api:
+    image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
+    env_file:
+      - path: ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
+        required: false
+    # PORTAL_OIDC_* stays in runtime/portal.env.  It is independently switched
+    # by the authentication control plane and must not inherit global values.
+    environment:
+      PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
+      PORTAL_OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
+      PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      PORTAL_HTTP_ADDRESS: :8091
+      PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
+      PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
+      PORTAL_CRM_INVITE_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      # SEC-N2 fail-closed：与 CRM 同一开关，默认不放行非 Secure 的门户会话。
+      PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    command: ["./portal-server"]
+    ports:
+      - "127.0.0.1:${PORTAL_API_PORT:-18084}:8091"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: customer_portal
+      com.basic-platform.application_name: 客户自助门户
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: portal-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: portal-api
+      com.basic-platform.internal_port: "8091"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /customer-portal/healthz
+      com.basic-platform.path_prefix: /customer-portal
+      com.basic-platform.oidc_callback_path: /customer-portal/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8091/customer-portal/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  portal-invite-compensation-worker:
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+    # OIDC_* is deliberately owned by runtime/customer.env for this exact
+    # application/environment.  Compose must not provide a global Keycloak
+    # default because existing environments may still use the platform issuer.
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    # CRM 未启用或未接入时，启动脚本跳过此消费者并提示邀请补偿不可用。
+    # The compensation worker is shipped in the portal image.  It shares the
+    # CRM runtime env/DB because it consumes CRM compensation tasks, but must
+    # not inherit the CRM image from x-customer-service; the deployment script
+    # deliberately verifies it against CUSTOMER_PORTAL_IMAGE.
+    image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
+    command: ["./portal-invite-compensation-worker"]
+    environment:
+      PORTAL_INVITE_COMPENSATION_PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
+      PORTAL_INVITE_COMPENSATION_PORTAL_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_INVITE_COMPENSATION_PORTAL_SCOPE: portal.identity_mapping.provision
+      PORTAL_INVITE_COMPENSATION_PLATFORM_ROLE_ASSIGN_URL: http://platform-api:8080/api/v1/internal/application-roles
+      PORTAL_INVITE_COMPENSATION_PLATFORM_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_INVITE_COMPENSATION_PLATFORM_SCOPE: application_role.assign
+      PORTAL_INVITE_COMPENSATION_PLATFORM_APPLICATION_CODE: customer_portal
+      PORTAL_INVITE_COMPENSATION_BINDING_ENABLED: ${PORTAL_INVITE_COMPENSATION_BINDING_ENABLED:-false}
+      PORTAL_INVITE_COMPENSATION_BINDING_BASE_URL: http://platform-api:8080/api/v1/internal/external-users
+      PORTAL_INVITE_COMPENSATION_BINDING_TOKEN_URL: http://platform-api:8080/oauth2/token
+      PORTAL_INVITE_COMPENSATION_BINDING_SCOPE: portal_mapping_provision
+      PORTAL_INVITE_COMPENSATION_BINDING_APPLICATION_CODE: customer_portal
+      PORTAL_INVITE_COMPENSATION_BINDING_DISABLE_SCOPE: portal_mapping_disable
+    depends_on:
+      platform-api:
+        condition: service_healthy
+      portal-api:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: portal — 客户门户 结束
+
+  # BEGIN SUBSYSTEM: settlement — 结算与开票 开始
+  settlement-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: settlement
+      MYSQL_USER: settlement
+      MYSQL_PASSWORD: ${SETTLEMENT_MYSQL_PASSWORD:-PENDING_SETTLEMENT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${SETTLEMENT_MYSQL_ROOT_PASSWORD:-PENDING_SETTLEMENT_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - settlement-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  settlement-migrate:
+    image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
+    env_file:
+      - path: ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+        required: false
+    environment:
+      SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      SETTLEMENT_HTTP_ADDR: :8085
+      SETTLEMENT_DEVELOPMENT_AUTH: "false"
+      PLATFORM_BASE_URL: http://platform-api:8080
+      PLATFORM_ENVIRONMENT_CODE: prod
+      GIN_MODE: release
+    networks: [application]
+    entrypoint: ["/usr/local/bin/settlement-migrate"]
+    depends_on:
+      settlement-mysql:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  settlement-catalog-sync:
+    image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
+    env_file:
+      - path: ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+        required: false
+    environment:
+      SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      SETTLEMENT_HTTP_ADDR: :8085
+      SETTLEMENT_DEVELOPMENT_AUTH: "false"
+      PLATFORM_BASE_URL: http://platform-api:8080
+      PLATFORM_ENVIRONMENT_CODE: prod
+      GIN_MODE: release
+    networks: [application]
+    entrypoint: ["/usr/local/bin/settlement-catalog-sync"]
+    depends_on:
+      platform-api:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  settlement-api:
+    image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
+    env_file:
+      - path: ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+        required: false
+    environment:
+      SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      SETTLEMENT_HTTP_ADDR: :8085
+      SETTLEMENT_DEVELOPMENT_AUTH: "false"
+      PLATFORM_BASE_URL: http://platform-api:8080
+      PLATFORM_ENVIRONMENT_CODE: prod
+      GIN_MODE: release
+    networks: [application]
+    restart: unless-stopped
+    depends_on:
+      settlement-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SETTLEMENT_API_PORT:-18087}:8085"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: settlement
+      com.basic-platform.application_name: 结算与开票管理系统
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: settlement-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: settlement-api
+      com.basic-platform.internal_port: "8085"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /settlement
+      com.basic-platform.oidc_callback_path: /settlement/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8085/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  settlement-worker:
+    image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
+    env_file:
+      - path: ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+        required: false
+    environment:
+      SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      SETTLEMENT_HTTP_ADDR: :8085
+      SETTLEMENT_DEVELOPMENT_AUTH: "false"
+      PLATFORM_BASE_URL: http://platform-api:8080
+      PLATFORM_ENVIRONMENT_CODE: prod
+      GIN_MODE: release
+    networks: [application]
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/settlement-worker"]
+    depends_on:
+      settlement-mysql:
+        condition: service_healthy
+      settlement-api:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  # 数据看板聚合库与 Metabase 由平台生产 Compose 统一托管；Metabase 只在
+  # application 网络内提供服务，公网入口只能经过 dashboard-api 的代理。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: settlement — 结算与开票 结束
+
+  # BEGIN SUBSYSTEM: data-analysis — 数据看板与统计分析 开始
+  data-analysis-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: dashboard_aggregation
+      MYSQL_USER: dashboard
+      MYSQL_PASSWORD: ${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DASHBOARD_MYSQL_ROOT_PASSWORD:-PENDING_DASHBOARD_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - data-analysis-mysql-data:/var/lib/mysql
+      - ./mysql-init/data-analysis-metabase.sql:/docker-entrypoint-initdb.d/020_metabase.sql:ro
+      - ./backups:/backups
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # 既有数据库卷不会再次执行 entrypoint-initdb.d；每次受控发布先幂等补齐 Metabase 库。
+  data-analysis-metabase-init:
+    image: mysql:8.4
+    environment:
+      MYSQL_PWD: ${DASHBOARD_MYSQL_ROOT_PASSWORD:-PENDING_DASHBOARD_MYSQL_ROOT_PASSWORD}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mysql --protocol=TCP -h data-analysis-mysql -uroot < /run/init/metabase.sql"]
+    volumes:
+      - ./mysql-init/data-analysis-metabase.sql:/run/init/metabase.sql:ro
+    networks: [application]
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+    restart: "no"
+    pids_limit: 64
+    cpus: "0.5"
+    mem_limit: 256m
+
+  data-analysis-migrate:
+    env_file:
+      - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      PLATFORM_BASE_URL: http://platform-api:8080
+      APP_PATH_PREFIX: /data_analysis
+      GIN_MODE: release
+    networks: [application]
+    image: ${DATA_ANALYSIS_MIGRATE_IMAGE:-data-analysis/production-migrate:pending}
+    entrypoint: ["/app/production-migrate"]
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  data-analysis-api:
+    env_file:
+      - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      PLATFORM_BASE_URL: http://platform-api:8080
+      APP_PATH_PREFIX: /data_analysis
+      GIN_MODE: release
+    networks: [application]
+    restart: unless-stopped
+    image: ${DATA_ANALYSIS_DASHBOARD_API_IMAGE:-data-analysis/dashboard-api:pending}
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${DATA_ANALYSIS_API_PORT:-18086}:8080"
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: data_analysis
+      com.basic-platform.application_name: 数据看板与统计分析系统
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: data-analysis-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: data-analysis-api
+      com.basic-platform.internal_port: "8080"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /data_analysis/healthz
+      com.basic-platform.path_prefix: /data_analysis
+      com.basic-platform.oidc_callback_path: /data_analysis/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/data_analysis/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  data-analysis-aggregation-worker:
+    env_file:
+      - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+    networks: [application]
+    restart: unless-stopped
+    image: ${DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE:-data-analysis/aggregation-worker:pending}
+    environment:
+      AGGREGATION_ONCE: "false"
+      CONTRACT_READ_DSN: ${CONTRACT_READ_DSN:-}
+      CRM_READ_DSN: ${CRM_READ_DSN:-}
+      # 机器令牌端点、两个最小权限客户端及接口 URL 均由受控 runtime 文件下发，
+      # Compose 不得用空默认值覆盖已经完成接入的环境配置。
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+      data-analysis-api:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  data-analysis-alert-worker:
+    env_file:
+      - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
+      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      PLATFORM_BASE_URL: http://platform-api:8080
+      APP_PATH_PREFIX: /data_analysis
+      GIN_MODE: release
+    networks: [application]
+    restart: unless-stopped
+    image: ${DATA_ANALYSIS_ALERT_WORKER_IMAGE:-data-analysis/alert-worker:pending}
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+      data-analysis-api:
+        condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  data-analysis-metabase:
+    image: metabase/metabase:v0.53.7
+    environment:
+      MB_DB_TYPE: mysql
+      MB_DB_DBNAME: dashboard_metabase
+      MB_DB_HOST: data-analysis-mysql
+      MB_DB_PORT: "3306"
+      MB_DB_USER: dashboard
+      MB_DB_PASS: ${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}
+      MB_JAVA_TIMEZONE: Asia/Shanghai
+      MB_SITE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${DATA_ANALYSIS_PUBLIC_ORIGIN:-http://localhost:8081}}/data_analysis
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # END SUBSYSTEM: data-analysis — 数据看板与统计分析 结束
+
+  # BEGIN SUBSYSTEM: monitoring — 监控（可选）开始
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/keycloak-alerts.yml:/etc/prometheus/keycloak-alerts.yml:ro
+      - ./monitoring/prometheus/file-gateway-alerts.yml:/etc/prometheus/file-gateway-alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks: [application]
+    restart: unless-stopped
+    stop_grace_period: 60s
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  keycloak-backup-metrics:
+    image: prom/node-exporter:v1.9.1
+    command:
+      - --collector.disable-defaults
+      - --collector.textfile
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - ./monitoring/textfile:/textfile:ro
+    networks: [application]
+    restart: unless-stopped
+    stop_grace_period: 60s
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9100/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  # END SUBSYSTEM: monitoring — 监控（可选）结束
+
+networks:
+  application:
+    name: basic-platform-production
+    # 多个独立发布脚本和历史子系统共同使用该网络。将其作为部署基础设施管理，
+    # 禁止任一单服务 `compose up` 因网络配置漂移而尝试删除共享网络并中断整套系统。
+    # 新环境由部署脚本按 172.31.255.0/24 创建；既有环境保持原网络，待维护窗口迁移。
+    external: true
+  # Agent 控制通道专用内网（SEC-F3）：仅包含 subsystem-provisioner 与
+  # docker-socket-proxy，internal=true 无网关/外网出口，业务容器均不在该网络中。
+  docker-control:
+    internal: true
+
+volumes:
+  prometheus-data:
+  platform-mysql-data:
+  contract-mysql-data:
+  customer-mysql-data:
+  customer-attachment-data:
+  portal-mysql-data:
+  project-mysql-data:
+  settlement-mysql-data:
+  data-analysis-mysql-data:
+  subsystem-provisioner-socket:
+  keycloak-mysql-data:
+  file-gateway-mysql-data:

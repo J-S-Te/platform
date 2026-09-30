@@ -15,7 +15,7 @@ BACKEND_ROOT="${PROJECT_ROOT}/backend"
 
 MODE="deploy"
 ENV_FILE="${BASIC_PLATFORM_ENV_FILE:-/etc/basic-platform/basic-platform.env}"
-DEPLOY_ROOT="${BASIC_PLATFORM_DEPLOY_ROOT:-/opt/basic-platform}"
+DEPLOY_ROOT="${BASIC_PLATFORM_DEPLOY_ROOT:-/opt/unified-identity-platform}"
 RUNTIME_USER="${BASIC_PLATFORM_RUNTIME_USER:-basic-platform}"
 RUNTIME_GROUP="${BASIC_PLATFORM_RUNTIME_GROUP:-basic-platform}"
 RELEASE_ID=""
@@ -56,7 +56,7 @@ usage() {
 
 选项：
   --env-file PATH          运行环境文件；默认 /etc/basic-platform/basic-platform.env
-  --deploy-root PATH       后端发布根目录；默认 /opt/basic-platform
+  --deploy-root PATH       后端发布根目录；默认 /opt/unified-identity-platform
   --release-id ID          指定发布版本号（字母、数字、点、下划线、短横线）
   --keep-releases N        保留最近 N 个后端发布版本，默认 5，至少为 1
   --with-worker            同时创建、启动 Worker 服务
@@ -82,7 +82,7 @@ usage() {
   sudo bash scripts/backend-only-linux.sh \
     --deploy --yes \
     --env-file /etc/basic-platform/basic-platform.env \
-    --deploy-root /opt/basic-platform
+    --deploy-root /opt/unified-identity-platform
 
   # 部署 API 和异步 Worker
   sudo bash scripts/backend-only-linux.sh --deploy --with-worker --yes
