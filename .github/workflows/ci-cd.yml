@@ -50,6 +50,7 @@ jobs:
           python3 deploy/production/tests/test-compose-blocks.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
+          python3 deploy/production/tests/test-platform-coordinated-upgrade.py
           bash deploy/production/tests/test-key-init.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh
@@ -159,6 +160,8 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           FILE_GATEWAY_IMAGE_REF: ${{ needs.image.outputs.file_gateway_image_ref }}
+          IMAGE_REF: ${{ needs.image.outputs.image_ref }}
+          BACKEND_CHANGED: ${{ steps.detect.outputs.backend_changed }}
         run: |
           set -Eeuo pipefail
           : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
@@ -182,7 +185,7 @@ jobs:
           (cd "$asset_work_dir" && sha256sum deployment-assets.tar.gz > deployment-assets.tar.gz.sha256)
           cp deploy/production/bin/install-assets.sh "$asset_work_dir/install-assets.sh"
           cp deploy/production/bin/provisioner-config-refresh.sh "$asset_work_dir/provisioner-config-refresh.sh"
-          printf -v install_command 'deploy_path=%q; gateway_image=%q; set -Eeuo pipefail; [[ "$gateway_image" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; source "$work_dir/provisioner-config-refresh.sh"; deploy_dir="$deploy_path"; prepare_ci_deploy_root; if test -e "$deploy_path/runtime/.control-plane-reload-required" || test -L "$deploy_path/runtime/.control-plane-reload-required"; then (cd "$deploy_path" && FILE_GATEWAY_IMAGE="$gateway_image" ./bin/deploy.sh reload-control-plane); fi; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"' "$DEPLOY_PATH" "$FILE_GATEWAY_IMAGE_REF"
+          printf -v install_command 'deploy_path=%q; gateway_image=%q; platform_image=%q; backend_changed=%q; set -Eeuo pipefail; [[ "$gateway_image" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; source "$work_dir/provisioner-config-refresh.sh"; deploy_dir="$deploy_path"; prepare_ci_deploy_root; if [[ "$backend_changed" != true ]] && { test -e "$deploy_path/runtime/.control-plane-reload-required" || test -L "$deploy_path/runtime/.control-plane-reload-required"; }; then (cd "$deploy_path" && FILE_GATEWAY_IMAGE="$gateway_image" ./bin/deploy.sh reload-control-plane); fi; if [[ "$backend_changed" == true ]]; then [[ "$platform_image" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || exit 1; export ASSETS_PLATFORM_UPGRADE_IMAGE="$platform_image"; fi; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"' "$DEPLOY_PATH" "$FILE_GATEWAY_IMAGE_REF" "$IMAGE_REF" "$BACKEND_CHANGED"
           tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh provisioner-config-refresh.sh | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
       - name: Apply test-server placeholder database credentials switch
         # 当前部署环境为测试服务器（environment: test）。每次部署都会把占位凭据
@@ -214,7 +217,8 @@ jobs:
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
 
       - name: Reload paired subsystem control plane
-        # 安装器写入门禁；资产及运行配置同步后成对重载 API 与 Agent，再发布镜像。
+        if: steps.detect.outputs.backend_changed != 'true'
+        # 纯资产使用已有镜像重载；平台镜像发布先迁移，再升级并验证新 API/Agent。
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -272,5 +276,5 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          printf -v remote_command 'cd %q && ./bin/deploy-service.sh platform %q %q' "$DEPLOY_PATH" "$IMAGE_REF" "$FILE_GATEWAY_IMAGE_REF"
+          printf -v remote_command 'cd %q && DEPLOY_PLATFORM_CONTROL_PLANE_UPGRADE=true ./bin/deploy-service.sh platform %q %q' "$DEPLOY_PATH" "$IMAGE_REF" "$FILE_GATEWAY_IMAGE_REF"
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"

@@ -129,7 +129,14 @@ source "$script_dir/compose-scope.sh"
 
 # 部署资产替换后必须先成对重载控制面（install-assets.sh 会写 runtime/.control-plane-reload-required）。
 # 这里在解析与网络创建之前失败，避免重建出与前一侧清单不一致的容器。
-require_control_plane_reload_clearance || exit 1
+require_service_control_plane_clearance() {
+  if [[ "$service" == platform ]]; then
+    require_control_plane_reload_clearance platform-upgrade
+  else
+    require_control_plane_reload_clearance
+  fi
+}
+require_service_control_plane_clearance || exit 1
 
 ensure_application_network() {
   local network_name="basic-platform-production"
@@ -315,6 +322,7 @@ flock -w 900 9 || {
   echo "等待其他发布任务超时" >&2
   exit 1
 }
+require_service_control_plane_clearance || exit 1
 # 运行配置读取、DSN 原子改写和后续 .release.env 提交必须位于同一个锁窗口。
 # 否则等待锁期间 Agent 可能刚下发新凭据，发布脚本却用锁外读取的旧文件覆盖它。
 case "$service" in
@@ -730,6 +738,9 @@ deploy_platform() {
 		return 1
 	fi
   verify_service_image compose file-gateway "$file_gateway_image_ref" || return 1
+  # Migrations have completed. Stop the old API before changing the Agent so
+  # no admission request can cross between different manifest/parser versions.
+  compose stop --timeout 60 platform-api || return 1
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
   # Agent 需要强制重建以重载 subsystems.d 清单（无 HTTP 流量，秒级恢复）；
@@ -743,6 +754,7 @@ deploy_platform() {
     return 1
   fi
   verify_subsystem_provisioner_config_consistency "$(compose ps -q subsystem-provisioner)" || return
+  verify_service_image compose subsystem-provisioner "$image_ref" || return 1
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 platform-api platform-worker || return
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || {
     # 兜底：新镜像首启异常时强制重建一次并再次等待，避免平台 API 停留在宕机状态。
@@ -753,6 +765,13 @@ deploy_platform() {
   verify_service_image compose platform-api "$image_ref" || return 1
   verify_service_image compose platform-worker "$image_ref" || return 1
   verify_service_stable platform-worker || return 1
+  verify_subsystem_control_plane_profiles "$(compose ps -q subsystem-provisioner)" \
+    "$(compose ps -q platform-api)" || return 1
+  # The marker remains throughout migration, Agent/API replacement and health
+  # checks. Only this verified pair can release the pending-assets deployment gate.
+  if [[ -f "$deploy_dir/runtime/.control-plane-reload-required" ]]; then
+    rm -f -- "$deploy_dir/runtime/.control-plane-reload-required" || return 1
+  fi
 }
 
 deploy_contract() {
