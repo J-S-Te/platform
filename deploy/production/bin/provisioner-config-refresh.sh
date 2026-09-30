@@ -77,7 +77,6 @@ prepare_ci_deploy_root() (
   [[ -z "$profiles" || "$profiles" == "$deploy_dir/subsystems.d" ]] || {
     echo 'SUBSYSTEM_PRODUCTION_PROFILES_DIR 与 CI 安装清单目录不一致' >&2; return 1;
   }
-  [[ -z "$configured" || -z "$gateway" ]] || return 0
   temporary="$(mktemp "$deploy_dir/.env.ci-root.XXXXXX")" || return 1
   trap 'rm -f -- "$temporary"' EXIT
   CI_DEPLOY_ROOT="$deploy_dir" CI_ROOT_MISSING="$([[ -z "$configured" ]] && echo true || echo false)" \
@@ -90,12 +89,14 @@ prepare_ci_deploy_root() (
       if (ENVIRON["CI_GATEWAY_MISSING"]=="true") print "FILE_GATEWAY_HOST_ROOT=" ENVIRON["CI_DEPLOY_ROOT"] "/data/file-gateway"
     }
   ' "$runtime" >"$temporary" || return 1
+  python3 "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/frontend-network.py" prepare "$temporary" || return 1
+  cmp -s -- "$runtime" "$temporary" && return 0
   if [[ "$(id -u)" == 0 ]]; then
     chown --reference="$runtime" "$temporary" || return 1
   fi
   chmod 600 "$temporary" || return 1
   mv -f -- "$temporary" "$runtime" || return 1
-  echo '已补齐 CI 部署根目录及文件网关缺省路径；显式存储路径保持不变'
+  echo '已校验并补齐 CI 部署路径及前端精确代理地址；显式存储路径保持不变'
 )
 
 control_plane_reload_marker_path() {

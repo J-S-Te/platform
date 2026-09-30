@@ -52,6 +52,7 @@ jobs:
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 deploy/production/tests/test-platform-coordinated-upgrade.py
           python3 deploy/production/tests/test-managed-deployment-defaults.py
+          python3 deploy/production/tests/test-frontend-network.py
           python3 deploy/production/tests/test-public-proxy-prefetch.py
           bash deploy/production/tests/test-key-init.sh
           test -x deploy/production/bin/deploy-service.sh
@@ -187,8 +188,9 @@ jobs:
           (cd "$asset_work_dir" && sha256sum deployment-assets.tar.gz > deployment-assets.tar.gz.sha256)
           cp deploy/production/bin/install-assets.sh "$asset_work_dir/install-assets.sh"
           cp deploy/production/bin/provisioner-config-refresh.sh "$asset_work_dir/provisioner-config-refresh.sh"
+          cp deploy/production/bin/frontend-network.py "$asset_work_dir/frontend-network.py"
           printf -v install_command 'deploy_path=%q; gateway_image=%q; platform_image=%q; backend_changed=%q; set -Eeuo pipefail; [[ "$gateway_image" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; source "$work_dir/provisioner-config-refresh.sh"; deploy_dir="$deploy_path"; prepare_ci_deploy_root; if [[ "$backend_changed" != true ]] && { test -e "$deploy_path/runtime/.control-plane-reload-required" || test -L "$deploy_path/runtime/.control-plane-reload-required"; }; then (cd "$deploy_path" && FILE_GATEWAY_IMAGE="$gateway_image" ./bin/deploy.sh reload-control-plane); fi; if [[ "$backend_changed" == true ]]; then [[ "$platform_image" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || exit 1; export ASSETS_PLATFORM_UPGRADE_IMAGE="$platform_image"; fi; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"' "$DEPLOY_PATH" "$FILE_GATEWAY_IMAGE_REF" "$IMAGE_REF" "$BACKEND_CHANGED"
-          tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh provisioner-config-refresh.sh | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
+          tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh provisioner-config-refresh.sh frontend-network.py | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
       - name: Apply test-server placeholder database credentials switch
         # 当前部署环境为测试服务器（environment: test）。每次部署都会把占位凭据
         # 开关写入服务器 .env 并重建 Agent，让测试接入不再被数据库密码阻塞。

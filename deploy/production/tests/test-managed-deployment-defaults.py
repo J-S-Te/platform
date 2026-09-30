@@ -38,13 +38,14 @@ with tempfile.TemporaryDirectory(prefix='managed-deployment-defaults-') as direc
 
     root_line = 'SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=' + str(target) + '\n'
     gateway_line = 'FILE_GATEWAY_HOST_ROOT=' + str(target / 'data/file-gateway') + '\n'
+    network_lines = 'FRONTEND_IPV4_ADDRESS=172.31.255.250\nAPP_TRUSTED_PROXIES=127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32\n'
     base = '# existing configuration\nPRIVATE_FIXTURE=unchanged\n'
-    assert prepare(base) == base + root_line + gateway_line
-    assert prepare(base + root_line) == base + root_line + gateway_line
-    assert prepare(base + root_line + 'FILE_GATEWAY_HOST_ROOT=\n') == base + root_line + gateway_line
+    assert prepare(base) == base + root_line + gateway_line + network_lines
+    assert prepare(base + root_line) == base + root_line + gateway_line + network_lines
+    assert prepare(base + root_line + 'FILE_GATEWAY_HOST_ROOT=\n') == base + root_line + gateway_line + network_lines
     custom = 'FILE_GATEWAY_HOST_ROOT=/mnt/company-files\n'
-    assert prepare(base + root_line + custom) == base + root_line + custom
-    assert prepare(base + custom) == base + custom + root_line
+    assert prepare(base + root_line + custom) == base + root_line + custom + network_lines
+    assert prepare(base + custom) == base + custom + root_line + network_lines
     prepare(base + 'FILE_GATEWAY_HOST_ROOT=\nFILE_GATEWAY_HOST_ROOT=/mnt/custom\n', succeeds=False)
 
     source = fixture / 'assets'
@@ -99,5 +100,32 @@ with tempfile.TemporaryDirectory(prefix='managed-deployment-defaults-') as direc
             'tecnativa/docker-socket-proxy:v0.4.1')
     install('disabled', LEGACY, LEGACY, commented=True)
     install('already-pinned', PROXY, PROXY)
+
+    for name, address, disabled in [('legacy-frontend', '172.31.255.250', False),
+                                     ('custom-frontend', '172.18.0.42', False),
+                                     ('disabled-frontend', '172.31.255.250', True)]:
+        host = fixture / name
+        host.mkdir()
+        block = ('  frontend:\n    networks:\n      application:\n'
+                 '        ipv4_address: ' + address + ' # stable endpoint\n')
+        suffix = ('  docker-socket-proxy:\n    image: custom/image\n    networks:\n'
+                  '      application:\n        ipv4_address: 172.31.255.250 # unrelated custom scalar\n')
+        selected = 'services:\n' + ''.join(('# ' if disabled else '') + line for line in block.splitlines(True)) + suffix
+        (host / 'docker-compose.yml').write_text(selected)
+        process = subprocess.run(['bash', str(installer), str(archive), str(host)],
+                                 env=env, capture_output=True, text=True)
+        assert process.returncode == 0, process.stdout + process.stderr
+        expected = selected if disabled or address != '172.31.255.250' else selected.replace(address, '${FRONTEND_IPV4_ADDRESS:-172.31.255.250}', 1)
+        assert (host / 'docker-compose.yml').read_text() == expected
+        if expected != selected:
+            backup = next((host / 'backups').glob('install-assets.*'))
+            assert (backup / 'docker-compose.yml').read_text() == selected
+            transaction = host / 'runtime/.assets-install-transaction'
+            transaction.mkdir()
+            (transaction / 'backup').write_text(str(backup) + '\n')
+            (transaction / 'touched').write_text('docker-compose.yml\n')
+            (transaction / 'existing').write_text('docker-compose.yml\n')
+            subprocess.run(['bash', str(installer), '--recover', str(host)], env=env, check=True, capture_output=True)
+            assert (host / 'docker-compose.yml').read_text() == selected
 
 print('Deployment-root defaults, custom file storage, targeted pinned proxy update and recovery: PASS')
