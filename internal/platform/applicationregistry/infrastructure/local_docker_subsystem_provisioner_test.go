@@ -410,8 +410,10 @@ func TestLocalDockerSubsystemProvisionerUpdateRebuildsStandaloneSubsystemWithout
 	if !containsString(upCall.arguments, "up") {
 		t.Fatalf("compose up missing up subcommand: %v", upCall.arguments)
 	}
-	if !containsString(upCall.arguments, "--build") {
-		t.Fatalf("compose up missing --build: %v", upCall.arguments)
+	// 离线优先：首个 compose up 使用 --no-build 直接复用预置镜像；镜像缺失时编排
+	// 会回退到 --build（由 fallback 用例单独覆盖）。
+	if !containsString(upCall.arguments, "--no-build") {
+		t.Fatalf("compose up missing --no-build: %v", upCall.arguments)
 	}
 	if !containsString(upCall.arguments, "-d") {
 		t.Fatalf("compose up missing -d: %v", upCall.arguments)

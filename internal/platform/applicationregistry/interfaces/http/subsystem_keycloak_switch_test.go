@@ -118,10 +118,10 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 			issuerAlias: "platform", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusConflict, wantGated: true,
 		},
 		"same issuer update bypasses switch gates": {
-			issuerAlias: "keycloak", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusOK,
+			issuerAlias: "keycloak", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusAccepted,
 		},
 		"same issuer retry bypasses switch gates": {
-			issuerAlias: "keycloak", path: "/api/v1/subsystem-retry", wantStatus: stdhttp.StatusOK,
+			issuerAlias: "keycloak", path: "/api/v1/subsystem-retry", wantStatus: stdhttp.StatusAccepted,
 		},
 	}
 	for name, test := range tests {
@@ -151,6 +151,9 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 			response := httptest.NewRecorder()
 
 			handler.UpdateSubsystem(response, request)
+			if test.wantStatus == stdhttp.StatusAccepted {
+				handler.waitForDeploymentJobs()
+			}
 
 			if response.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %s", response.Code, test.wantStatus, response.Body.String())

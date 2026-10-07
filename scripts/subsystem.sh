@@ -727,6 +727,47 @@ onboard_run_interactive_wizard() {
   done
 }
 
+# print_deployment_failed_summary 打印后台部署失败的真实错误与下一步指引，
+# 不再伪装成 HTTP 503（避免误导操作者去查无关的依赖可用性）。
+print_deployment_failed_summary() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        envelope = json.load(handle)
+except Exception:
+    print("后台部署失败，且未能读取最终状态；请用 status 子命令查询。")
+    sys.exit(0)
+data = envelope.get("data") or {}
+print("后台部署失败：")
+print(f"  应用/环境：{data.get('application_code', '-')} / {data.get('environment', '-')}")
+print(f"  状态：{data.get('status', '-')}")
+print(f"  错误码：{data.get('last_error_code', '-')}")
+print(f"  错误说明：{data.get('last_error') or data.get('last_error_message') or '-'}")
+next_action = data.get('next_action') or ''
+if next_action:
+    print(f"  下一步：{next_action}")
+print("  修复后使用 retry 子命令重试。")
+PY
+}
+
+# onboard_print_accepted_and_final 打印受理回执与后台终态摘要（异步接入路径）。
+onboard_print_accepted_and_final() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    envelope = json.load(handle)
+data = envelope.get("data") or {}
+print("子系统接入完成（后台编排终态）：")
+print(f"  应用/环境：{data.get('application_code', '-')} / {data.get('environment', '-')}")
+print(f"  状态：{data.get('status', '-')}")
+print(f"  追踪号：{envelope.get('request_id') or '-'}")
+print("  提示：OAuth Client Secret 不回显；由受控 provisioner 写入子系统运行配置。")
+PY
+}
+
 onboard_print_success() {
   python3 - "$1" <<'PY'
 import json
@@ -879,6 +920,15 @@ cmd_onboard() {
     exit 1
   }
 
+  if [[ "$status" == "202" ]]; then
+    log "INFO" "接入请求已受理，部署正在后台执行；等待终态（DEPLOY_WAIT_TIMEOUT 可调，默认 900s）"
+    if wait_for_deployment_completion "$APPLICATION_CODE" "$ENVIRONMENT" "$RESPONSE_FILE"; then
+      onboard_print_accepted_and_final "$RESPONSE_FILE"
+      exit 0
+    fi
+    print_deployment_failed_summary "${RESPONSE_FILE}.final"
+    exit 1
+  fi
   if [[ "$status" != "201" ]]; then
     print_api_error "$status" "$RESPONSE_FILE" "/subsystem-onboarding"
     exit 1
@@ -968,6 +1018,44 @@ update_confirm() {
       return 1
       ;;
   esac
+}
+
+# wait_for_deployment_completion 等待后台部署编排进入终态。平台异步化后（202 受理），
+# 部署在服务端脱离请求执行；这里轮询 subsystem-status 直到 READY/OFFBOARDED（成功）或
+# PROVISION_FAILED（失败，详情见 status 子命令）。DEPLOY_WAIT_TIMEOUT 可覆盖默认 900 秒。
+wait_for_deployment_completion() {
+  local application_code="$1" environment="$2" output_file="$3"
+  local deadline=$(( SECONDS + ${DEPLOY_WAIT_TIMEOUT:-900} ))
+  local state="" code=""
+  while (( SECONDS < deadline )); do
+    sleep 5
+    code="$(http_request GET "/subsystem-status?application_code=${application_code}&environment=${environment}" "" "$output_file" 30)" || {
+      diagnose_connection_failure "/subsystem-status"
+      return 2
+    }
+    if [[ "$code" != "200" ]]; then
+      print_api_error "$code" "$output_file" "/subsystem-status"
+      return 2
+    fi
+    state="$(python3 -c 'import json,sys
+try:
+    print((json.load(sys.stdin).get("data") or {}).get("status", ""))
+except Exception:
+    print("")' < "$output_file" 2>/dev/null)"
+    log "INFO" "部署状态：${state:-unknown}"
+    case "$state" in
+      READY|OFFBOARDED)
+        cp "$output_file" "${output_file}.final" 2>/dev/null || true
+        return 0
+        ;;
+      PROVISION_FAILED)
+        cp "$output_file" "${output_file}.final" 2>/dev/null || true
+        return 1
+        ;;
+    esac
+  done
+  log "ERROR" "等待部署完成超时（${DEPLOY_WAIT_TIMEOUT:-900}s）；部署仍在后台执行，可稍后用 status 子命令继续查询"
+  return 2
 }
 
 update_print_success() {
@@ -1153,6 +1241,15 @@ cmd_update() {
     exit 1
   }
 
+  if [[ "$status" == "202" ]]; then
+    log "INFO" "部署请求已受理，正在后台执行；等待终态（DEPLOY_WAIT_TIMEOUT 可调，默认 900s）"
+    if wait_for_deployment_completion "$APPLICATION_CODE" "$ENVIRONMENT" "$RESPONSE_FILE"; then
+      update_print_success "$RESPONSE_FILE"
+      exit 0
+    fi
+    print_deployment_failed_summary "${RESPONSE_FILE}.final"
+    exit 1
+  fi
   if [[ "$status" != "200" ]]; then
     print_api_error "$status" "$RESPONSE_FILE" "$endpoint"
     exit 1

@@ -280,6 +280,11 @@ type SubsystemOnboardingHandler struct {
 	logger               *slog.Logger
 	// egress 是健康探针出网策略（SEC-B5），与反向代理共用 application.EgressPolicy。
 	egress *application.EgressPolicy
+	// deploymentJobs 跟踪在途的后台部署编排；waitForDeploymentJobs 供测试确定性收口。
+	deploymentJobs sync.WaitGroup
+	// deploymentTimeout 覆盖后台编排窗口；零值用 subsystemDeploymentAsyncTimeout。测试注入
+	// 短窗口时必须走该字段（包级变量会被并行测试读成数据竞争）。
+	deploymentTimeout time.Duration
 }
 
 const (
@@ -907,7 +912,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		provisioningClientID, provisioningClientSecret = client.ClientID, client.ClientSecret
 		keycloakClientID = client.ClientID
 	}
-	if err := handler.provisioner.Provision(request.Context(), application.SubsystemProvisioningInput{
+	provisioningInput := application.SubsystemProvisioningInput{
 		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
 		Environment: result.Environment.Environment, Issuer: issuer,
 		ManifestChecksum: manifestChecksum,
@@ -917,90 +922,33 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		ServiceCredentials:           result.ServiceCredentials,
 		RedirectURI:                  result.RedirectURI, PublicURL: result.PublicURL,
 		PathPrefix: pathPrefix, UpstreamURL: upstreamURL,
-	}); err != nil {
-		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
-		handler.writeError(writer, request, err)
-		return
 	}
-	if err := handler.markManifestApplied(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, manifestChecksum); err != nil {
-		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "MANIFEST_STATE_FAILED", "部署清单状态保存失败")
-		handler.writeError(writer, request, err)
-		return
-	}
-	// The application-owned role catalog is published by the deployment Agent. Assigning the
-	// conventional admin role before Provision meant every new subsystem silently skipped its
-	// initial administrator because the role did not exist yet.
-	roleCode, err := handler.access.AssignInitialAdministrator(
-		request.Context(), principal.Tenant.ID, result.Application.Code, initialAdminUserID, principal.User.ID,
-	)
-	if err != nil {
-		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
-		handler.writeError(writer, request, err)
-		return
-	}
-	if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, initialAdminUserID); err != nil {
-		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
-		handler.writeError(writer, request, err)
-		return
-	}
-	// The deployment Agent has now published the application-owned role catalog and the
-	// initial administrator binding exists.  A Keycloak-first onboarding must complete the
-	// same projection work as an existing environment's “同步 Keycloak” action before it
-	// is exposed as READY; otherwise the new Client could issue tokens without its final
-	// role/permission claims.
-	if keycloakClientID != "" {
-		if handler.keycloakCatalog == nil || handler.keycloakMappings == nil {
-			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_MAPPING_UNAVAILABLE", "Keycloak 授权映射组件不可用")
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		roleCodes, catalogErr := handler.keycloakCatalog.ListKeycloakRoleCodes(request.Context(), principal.Tenant.ID, result.Application.ID)
-		if catalogErr != nil || handler.keycloakControl.EnsureClientRoles(request.Context(), keycloakClientID, roleCodes) != nil {
-			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_ROLE_CATALOG_SYNC_FAILED", "Keycloak 角色目录同步失败")
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		if mappingErr := handler.keycloakMappings.SaveKeycloakClientMapping(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID, handler.keycloakRealm, keycloakClientID); mappingErr != nil {
-			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_CLIENT_MAPPING_FAILED", "Keycloak Client 映射保存失败")
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		if backfillErr := handler.keycloakMappings.BackfillKeycloakAuthorization(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID); backfillErr != nil {
-			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_AUTHORIZATION_BACKFILL_FAILED", "Keycloak 授权投影回填失败")
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		if updater, ok := handler.keycloakReadiness.(keycloakSwitchReadinessUpdater); ok {
-			if readinessErr := updater.MarkKeycloakClientAndRoleCatalogSynced(request.Context(), principal.Tenant.ID, result.Application.ID, result.Environment.ID); readinessErr != nil {
-				handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, "ONBOARD", "KEYCLOAK_READINESS_UPDATE_FAILED", "Keycloak 就绪状态写入失败")
-				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-				return
-			}
-		}
-	}
-	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, result.Application.Code, result.Environment.Environment, application.SubsystemDeploymentStatusReady, "ONBOARD", "", ""); err != nil {
-		handler.logger.Error("subsystem deployment completed but state update failed", "application_code", result.Application.Code, "environment", result.Environment.Environment, "error", err)
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, false, subsystemLifecycleFailureDetail(err))
-		handler.writeError(writer, request, err)
-		return
-	}
-	handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, result.Application.Name, result.Application.Code, result.Environment.Environment, true, "")
+	handler.startSubsystemDeploymentJob(request, subsystemDeploymentJob{
+		Operation:          "ONBOARD",
+		TenantID:           principal.Tenant.ID,
+		OperatorUserID:     principal.User.ID,
+		ApplicationCode:    result.Application.Code,
+		ApplicationName:    result.Application.Name,
+		ApplicationID:      result.Application.ID,
+		EnvironmentID:      result.Environment.ID,
+		Environment:        result.Environment.Environment,
+		Input:              provisioningInput,
+		InitialAdminUserID: initialAdminUserID,
+		KeycloakClientID:   keycloakClientID,
+		ManifestChecksum:   manifestChecksum,
+	})
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
-	response := subsystemOnboardingResponse{
-		Application: applicationToResponse(result.Application),
-		Environment: environmentToResponse(result.Environment),
-		LoginTarget: loginTargetToResponse(result.LoginTarget),
-		OAuthClient: toOAuthClientResponse(result.OAuthClient),
-		Automation:  subsystemAutomationResponse{Status: "completed", PublicURL: result.PublicURL},
-	}
-	if roleCode != "" {
-		response.Authorization = &subsystemAuthorizationResponse{InitialAdminUserID: initialAdminUserID, RoleCode: roleCode}
-	}
-	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "子系统已完成自动接入和部署", response)
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusAccepted, "接入请求已受理，部署正在后台执行；请轮询部署状态", map[string]string{
+		"status":           application.SubsystemDeploymentStatusUpdating,
+		"operation":        "ONBOARD",
+		"application_code": result.Application.Code,
+		"environment":      result.Environment.Environment,
+	})
+	handler.logger.Info("subsystem onboarding accepted", "path", request.URL.Path,
+		"application_code", result.Application.Code, "environment", result.Environment.Environment,
+		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
+	)
 }
 
 // RegisterSubsystemDirectory handles POST /api/v1/subsystem-directory.
@@ -1964,6 +1912,24 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		updateInput.ApplicationID = applicationID
 		environmentID = resolvedEnvironmentID
 	}
+	if handler.deploymentState != nil && (deploymentContext.Status == application.SubsystemDeploymentStatusProvisioning ||
+		deploymentContext.Status == application.SubsystemDeploymentStatusUpdating ||
+		deploymentContext.Status == application.SubsystemDeploymentStatusVerifying) {
+		if staleSubsystemDeployment(deploymentContext, time.Now().UTC()) {
+			// 过期的在途状态先按既有语义收口为失败，让本次受控操作可以继续。
+			deploymentContext = handler.recoverStaleSubsystemDeployment(request.Context(), deploymentContext)
+		}
+		if deploymentContext.Status == application.SubsystemDeploymentStatusProvisioning ||
+			deploymentContext.Status == application.SubsystemDeploymentStatusUpdating ||
+			deploymentContext.Status == application.SubsystemDeploymentStatusVerifying {
+			// 真正的在途部署：拒绝并发编排，而不是让两个部署互相覆盖状态机。
+			httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+				"SUBSYSTEM_DEPLOYMENT_IN_PROGRESS",
+				"该应用环境的部署正在进行中；请等待完成或稍后刷新状态",
+				map[string]string{"application_code": applicationCode, "environment": environment}))
+			return
+		}
+	}
 	if strings.TrimSpace(updateInput.ApplicationID) == "" {
 		handler.writeError(writer, request, application.ErrNotFound)
 		return
@@ -1983,6 +1949,29 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		// 授权目录发布凭据为只写密钥，缺少凭据管理器时绝不能假装更新成功并让
 		// Agent 启动一个仍使用占位值的容器。
 		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+		return
+	}
+	// 无变化跳过：纯“更新运行时”重放（未携带任何网关字段变更、未切换认证方），且期望
+	// 清单与已应用清单一致、环境本就 READY 时，受控部署等价于对同一清单再跑一次
+	// compose build——既浪费数分钟构建窗口，也让离线/受限网络环境因构建出网失败而无法
+	// 完成本应成功的操作。直接确认现状并保持 READY；需要强制重建时使用 RETRY（全量）。
+	if operation == "UPDATE" && !keycloakCutover && !keycloakRollback &&
+		strings.TrimSpace(publicBaseURL) == "" && strings.TrimSpace(upstreamURL) == "" && strings.TrimSpace(pathPrefix) == "" &&
+		deploymentContext.Status == application.SubsystemDeploymentStatusReady &&
+		deploymentContext.DesiredManifestChecksum != "" &&
+		deploymentContext.DesiredManifestChecksum == deploymentContext.AppliedManifestChecksum &&
+		deploymentContext.DesiredManifestChecksum == updateInput.ManifestChecksum {
+		handler.logger.Info("subsystem update skipped: deployment manifest unchanged",
+			"application_code", applicationCode, "environment", environment,
+			"manifest_checksum", updateInput.ManifestChecksum)
+		writer.Header().Set("Cache-Control", "no-store, private")
+		writer.Header().Set("Pragma", "no-cache")
+		httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "部署清单无变化，运行时保持现状", map[string]string{
+			"status":           application.SubsystemDeploymentStatusReady,
+			"operation":        operation,
+			"application_code": applicationCode,
+			"environment":      environment,
+		})
 		return
 	}
 	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
@@ -2025,70 +2014,49 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
-	if err := handler.provisioner.Update(request.Context(), updateInput); err != nil {
-		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败")
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, subsystemLifecycleFailureDetail(err))
-		handler.writeError(writer, request, err)
-		return
+	jobApplicationID := deploymentContext.ApplicationID
+	if jobApplicationID == "" {
+		jobApplicationID = updateInput.ApplicationID
 	}
-	if err := handler.markManifestApplied(request.Context(), principal.Tenant.ID, applicationCode, environment, updateInput.ManifestChecksum); err != nil {
-		handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "MANIFEST_STATE_FAILED", "部署清单状态保存失败")
-		handler.writeError(writer, request, err)
-		return
+	jobEnvironmentID := deploymentContext.EnvironmentID
+	if jobEnvironmentID == "" {
+		jobEnvironmentID = environmentID
 	}
-	if needsInitialAccess {
-		// A first-time deployment can fail after credentials are created but before the role
-		// catalog and initial administrator are ready. Directory-only adoption likewise starts
-		// without an initial administrator. Both paths assign the conventional role only after
-		// the Agent has published the application-owned catalog. UpdateAccess is idempotent for
-		// an already assigned role and never requires recovering an OAuth secret.
-		if _, err := handler.access.AssignInitialAdministrator(
-			request.Context(), principal.Tenant.ID, applicationCode, initialAccessUserID, principal.User.ID,
-		); err != nil {
-			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败")
-			handler.writeError(writer, request, err)
-			return
-		}
-		if err := handler.markInitialAccessAssigned(request.Context(), principal.Tenant.ID, applicationCode, environment, initialAccessUserID); err != nil {
-			handler.markDeploymentFailed(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败")
-			handler.writeError(writer, request, err)
-			return
+	if isRetry && handler.keycloakBroker != nil {
+		// 重试通常紧随一次失败的部署：SSO 末端的 broker 凭据可能仍处缺口（自愈巡检
+		// 有周期）。这里尽力补齐一次；失败仅告警——broker 缺口不阻断部署本身，只影响
+		// 部署完成后的首次统一登录。
+		if err := handler.reconcileKeycloakBroker(request.Context(), principal.Tenant.ID, principal.User.ID); err != nil {
+			handler.logger.Warn("retry could not reconcile Keycloak broker credential",
+				"application_code", applicationCode, "environment", environment, "error", err)
 		}
 	}
-	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusReady, operation, "", ""); err != nil {
-		handler.logger.Error("subsystem update completed but state update failed", "application_code", applicationCode, "environment", environment, "error", err)
-		handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, false, subsystemLifecycleFailureDetail(err))
-		handler.writeError(writer, request, err)
-		return
-	}
-	if keycloakCutover || keycloakRollback {
-		applicationID, environmentID, found := handler.resolveApplicationContext(writer, request, applicationCode, environment)
-		if !found {
-			handler.logger.Error("Keycloak cutover completed but lifecycle scope could not be resolved", "application_code", applicationCode, "environment", environment)
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		var lifecycleErr error
-		if keycloakCutover {
-			_, lifecycleErr = handler.keycloakCutover.ConfirmKeycloakCutover(request.Context(), principal.Tenant.ID, applicationID, environmentID, principal.User.ID, keycloakRollbackWindow)
-		} else {
-			_, lifecycleErr = handler.keycloakCutover.RecordKeycloakRollback(request.Context(), principal.Tenant.ID, applicationID, environmentID, principal.User.ID)
-		}
-		if lifecycleErr != nil {
-			handler.logger.Error("Keycloak runtime change completed but lifecycle evidence could not be recorded", "application_code", applicationCode, "environment", environment, "error", lifecycleErr)
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-	}
-	handler.notifySubsystemLifecycle(request.Context(), principal.Tenant.ID, principal.User.ID, applicationCode, applicationCode, environment, true, "")
+	handler.startSubsystemDeploymentJob(request, subsystemDeploymentJob{
+		Operation:          operation,
+		TenantID:           principal.Tenant.ID,
+		OperatorUserID:     principal.User.ID,
+		ApplicationCode:    applicationCode,
+		ApplicationName:    applicationCode,
+		ApplicationID:      jobApplicationID,
+		EnvironmentID:      jobEnvironmentID,
+		Environment:        environment,
+		Input:              updateInput,
+		InitialAdminUserID: initialAccessUserID,
+		NeedsInitialAccess: needsInitialAccess,
+		KeycloakCutover:    keycloakCutover,
+		KeycloakRollback:   keycloakRollback,
+		ManifestChecksum:   updateInput.ManifestChecksum,
+	})
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
-	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统已重新部署", subsystemAutomationResponse{
-		Status:    "reapplied",
-		PublicURL: "",
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusAccepted, "部署已受理，正在后台执行；状态请查询 subsystem-status", map[string]string{
+		"status":           application.SubsystemDeploymentStatusUpdating,
+		"operation":        operation,
+		"application_code": applicationCode,
+		"environment":      environment,
 	})
-	handler.logger.Info("subsystem re-provisioned", "path", request.URL.Path,
-		"application_code", applicationCode, "environment", environment,
+	handler.logger.Info("subsystem deployment accepted", "path", request.URL.Path,
+		"application_code", applicationCode, "environment", environment, "operation", operation,
 		"actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
 	)
 }
@@ -2231,7 +2199,7 @@ const subsystemDeploymentFailureWriteTimeout = 10 * time.Second
 // failed attempt. Keep this slightly above the synchronous request timeout so
 // a genuinely slow but still live deployment is not interrupted by a status
 // poll.
-const subsystemDeploymentStaleAfter = 20 * time.Minute
+const subsystemDeploymentStaleAfter = application.SubsystemDeploymentStaleAfter
 
 // extendSubsystemDeploymentWriteDeadline keeps the synchronous control-plane request alive for
 // the Agent's bounded 15-minute deployment window. ResponseController unwraps Gin's writer to the
@@ -2638,6 +2606,194 @@ func writeBuiltInPlatformRuntimeBlocked(writer stdhttp.ResponseWriter, request *
 // approved manifest checksum. This happens when the API cannot find the application/environment
 // in subsystems.d, or when platform-api and subsystem-provisioner disagree about the deployment
 // mode. Failing here keeps the lifecycle state untouched and gives the operator a concrete fix.
+// subsystemDeploymentJob 携带一次已受理的部署编排脱离 HTTP 请求执行。所有持久标识都在
+// 请求返回前捕获完成；后台步骤绝不读取 request 作用域的状态。
+type subsystemDeploymentJob struct {
+	Operation          string
+	TenantID           string
+	OperatorUserID     string
+	ApplicationCode    string
+	ApplicationName    string
+	ApplicationID      string
+	EnvironmentID      string
+	Environment        string
+	Input              application.SubsystemProvisioningInput
+	InitialAdminUserID string
+	NeedsInitialAccess bool
+	KeycloakClientID   string
+	KeycloakCutover    bool
+	KeycloakRollback   bool
+	ManifestChecksum   string
+}
+
+// subsystemDeploymentAsyncTimeout 约束一次脱离请求的部署编排，与 Agent 自身 16 分钟部署
+// 窗口对齐：终态由本编排关闭，而不是落到 20 分钟的 stale 恢复路径（后者只兜进程死亡）。
+const subsystemDeploymentAsyncTimeout = 16 * time.Minute
+
+// startSubsystemDeploymentJob 在与 HTTP 请求解除关联的上下文上运行已受理的部署。客户端
+// 断连、浏览器刷新或 CLI 超时因此不再能杀死进行中的 Agent，也不会把生命周期留在
+// UPDATING；后台内的失败收口用 closeFailedDeployment（再二次脱离上下文），专供编排
+// 超时后仍能把状态落进 PROVISION_FAILED。
+func (handler *SubsystemOnboardingHandler) startSubsystemDeploymentJob(request *stdhttp.Request, job subsystemDeploymentJob) {
+	timeout := handler.deploymentTimeout
+	if timeout <= 0 {
+		timeout = subsystemDeploymentAsyncTimeout
+	}
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), timeout)
+	handler.deploymentJobs.Add(1)
+	go func() {
+		defer handler.deploymentJobs.Done()
+		defer cancel()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				handler.logger.Error("subsystem deployment job panicked",
+					"application_code", job.ApplicationCode, "environment", job.Environment, "panic", recovered)
+				handler.markDeploymentFailureDetached(job, "DEPLOYMENT_JOB_PANICKED", "部署编排异常终止；请修复后点击重试")
+			}
+		}()
+		if runErr := handler.runSubsystemDeploymentCompletion(bgCtx, job); runErr != nil {
+			handler.logger.Error("subsystem deployment job finished with error",
+				"application_code", job.ApplicationCode, "environment", job.Environment,
+				"operation", job.Operation, "error", runErr)
+		}
+	}()
+}
+
+// runSubsystemDeploymentCompletion 执行长耗时的 Agent 调用与全部持久终态写。每个失败分支
+// 都自行把生命周期收口（脱离 ctx），编排超时也只会落在 PROVISION_FAILED，绝不冻结在
+// UPDATING。
+func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx context.Context, job subsystemDeploymentJob) error {
+	if job.Operation == "ONBOARD" {
+		if err := handler.provisioner.Provision(ctx, job.Input); err != nil {
+			handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败", err, true)
+			return err
+		}
+		if err := handler.markManifestApplied(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.ManifestChecksum); err != nil {
+			handler.closeFailedDeployment(ctx, job, "MANIFEST_STATE_FAILED", "部署清单状态保存失败", err, true)
+			return err
+		}
+		if _, err := handler.access.AssignInitialAdministrator(ctx, job.TenantID, job.ApplicationCode, job.InitialAdminUserID, job.OperatorUserID); err != nil {
+			handler.closeFailedDeployment(ctx, job, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败", err, true)
+			return err
+		}
+		if err := handler.markInitialAccessAssigned(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.InitialAdminUserID); err != nil {
+			handler.closeFailedDeployment(ctx, job, "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败", err, true)
+			return err
+		}
+		if err := handler.completeOnboardKeycloakProjection(ctx, job); err != nil {
+			return err
+		}
+		if err := handler.transitionDeployment(ctx, job.TenantID, job.ApplicationCode, job.Environment, application.SubsystemDeploymentStatusReady, job.Operation, "", ""); err != nil {
+			// 编排本身已完成而终态写失败：必须收口为失败，不能把状态机冻结在 UPDATING。
+			handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_STATE_FAILED", "部署完成但状态写入失败", err, true)
+			return err
+		}
+		handler.notifySubsystemLifecycle(ctx, job.TenantID, job.OperatorUserID, job.ApplicationName, job.ApplicationCode, job.Environment, true, "")
+		return nil
+	}
+	if err := handler.provisioner.Update(ctx, job.Input); err != nil {
+		handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败", err, true)
+		return err
+	}
+	if err := handler.markManifestApplied(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.ManifestChecksum); err != nil {
+		handler.closeFailedDeployment(ctx, job, "MANIFEST_STATE_FAILED", "部署清单状态保存失败", err, false)
+		return err
+	}
+	if job.NeedsInitialAccess {
+		if _, err := handler.access.AssignInitialAdministrator(ctx, job.TenantID, job.ApplicationCode, job.InitialAdminUserID, job.OperatorUserID); err != nil {
+			handler.closeFailedDeployment(ctx, job, "INITIAL_ACCESS_ASSIGNMENT_FAILED", "初始管理员授权失败", err, false)
+			return err
+		}
+		if err := handler.markInitialAccessAssigned(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.InitialAdminUserID); err != nil {
+			handler.closeFailedDeployment(ctx, job, "INITIAL_ACCESS_STATE_FAILED", "初始管理员授权状态保存失败", err, false)
+			return err
+		}
+	}
+	if err := handler.transitionDeployment(ctx, job.TenantID, job.ApplicationCode, job.Environment, application.SubsystemDeploymentStatusReady, job.Operation, "", ""); err != nil {
+		handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_STATE_FAILED", "部署完成但状态写入失败", err, true)
+		return err
+	}
+	if job.KeycloakCutover || job.KeycloakRollback {
+		var lifecycleErr error
+		if job.KeycloakCutover {
+			_, lifecycleErr = handler.keycloakCutover.ConfirmKeycloakCutover(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID, job.OperatorUserID, keycloakRollbackWindow)
+		} else {
+			_, lifecycleErr = handler.keycloakCutover.RecordKeycloakRollback(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID, job.OperatorUserID)
+		}
+		if lifecycleErr != nil {
+			handler.logger.Error("Keycloak runtime change completed but lifecycle evidence could not be recorded",
+				"application_code", job.ApplicationCode, "environment", job.Environment, "error", lifecycleErr)
+			handler.closeFailedDeployment(ctx, job, "KEYCLOAK_LIFECYCLE_RECORD_FAILED", "Keycloak 切换证据记录失败", lifecycleErr, true)
+			return lifecycleErr
+		}
+	}
+	handler.notifySubsystemLifecycle(ctx, job.TenantID, job.OperatorUserID, job.ApplicationName, job.ApplicationCode, job.Environment, true, "")
+	return nil
+}
+
+// completeOnboardKeycloakProjection 完成 Keycloak 优先接入的角色目录投影与就绪标记；
+// 任一步失败都把生命周期收口为对应错误码（与同步时代的错误码一一对应）。
+func (handler *SubsystemOnboardingHandler) completeOnboardKeycloakProjection(ctx context.Context, job subsystemDeploymentJob) error {
+	if job.KeycloakClientID == "" {
+		return nil
+	}
+	if handler.keycloakCatalog == nil || handler.keycloakMappings == nil {
+		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_MAPPING_UNAVAILABLE", "Keycloak 授权映射组件不可用", nil, false)
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	roleCodes, catalogErr := handler.keycloakCatalog.ListKeycloakRoleCodes(ctx, job.TenantID, job.ApplicationID)
+	if catalogErr != nil || handler.keycloakControl.EnsureClientRoles(ctx, job.KeycloakClientID, roleCodes) != nil {
+		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_ROLE_CATALOG_SYNC_FAILED", "Keycloak 角色目录同步失败", catalogErr, false)
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	if mappingErr := handler.keycloakMappings.SaveKeycloakClientMapping(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID, handler.keycloakRealm, job.KeycloakClientID); mappingErr != nil {
+		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_CLIENT_MAPPING_FAILED", "Keycloak Client 映射保存失败", mappingErr, false)
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	if backfillErr := handler.keycloakMappings.BackfillKeycloakAuthorization(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID); backfillErr != nil {
+		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_AUTHORIZATION_BACKFILL_FAILED", "Keycloak 授权投影回填失败", backfillErr, false)
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	if updater, ok := handler.keycloakReadiness.(keycloakSwitchReadinessUpdater); ok {
+		if readinessErr := updater.MarkKeycloakClientAndRoleCatalogSynced(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID); readinessErr != nil {
+			handler.closeFailedDeployment(ctx, job, "KEYCLOAK_READINESS_UPDATE_FAILED", "Keycloak 就绪状态写入失败", readinessErr, false)
+			return application.ErrSubsystemProvisioningUnavailable
+		}
+	}
+	return nil
+}
+
+// closeFailedDeployment 用独立超时的上下文把失败收口进生命周期状态机：即使编排 ctx 已因
+// 超时取消，状态机也必须落在 PROVISION_FAILED。通知沿用原始 ctx 尽力而为。
+func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Context, job subsystemDeploymentJob, errorCode, errorMessage string, cause error, notify bool) {
+	writeCtx, cancel := context.WithTimeout(context.Background(), subsystemDeploymentFailureWriteTimeout)
+	defer cancel()
+	if err := handler.transitionDeploymentFailure(writeCtx, job.TenantID, job.ApplicationCode, job.Environment, job.Operation, errorCode, errorMessage); err != nil {
+		handler.logger.Error("failed to persist subsystem deployment failure",
+			"application_code", job.ApplicationCode, "environment", job.Environment, "error", err)
+	}
+	if notify {
+		handler.notifySubsystemLifecycle(ctx, job.TenantID, job.OperatorUserID, job.ApplicationName, job.ApplicationCode, job.Environment, false, subsystemLifecycleFailureDetail(cause))
+	}
+}
+
+// waitForDeploymentBlocks until every accepted background deployment finishes. Tests in this
+// package use it to make the async orchestration deterministic.
+func (handler *SubsystemOnboardingHandler) waitForDeploymentJobs() {
+	handler.deploymentJobs.Wait()
+}
+
+// markDeploymentFailureDetached 是 panic 兜底专用的失败收口：完全脱离任何可能已取消的
+// 上下文。
+func (handler *SubsystemOnboardingHandler) markDeploymentFailureDetached(job subsystemDeploymentJob, errorCode, errorMessage string) {
+	writeCtx, cancel := context.WithTimeout(context.Background(), subsystemDeploymentFailureWriteTimeout)
+	defer cancel()
+	if err := handler.transitionDeploymentFailure(writeCtx, job.TenantID, job.ApplicationCode, job.Environment, job.Operation, errorCode, errorMessage); err != nil {
+		handler.logger.Error("failed to persist subsystem deployment failure after panic",
+			"application_code", job.ApplicationCode, "environment", job.Environment, "error", err)
+	}
+}
+
 func writeProductionManifestTargetMissing(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) {
 	httpresponse.WriteError(writer, request, stdhttp.StatusUnprocessableEntity, httperror.New(
 		"IAM_SUBSYSTEM_TARGET_NOT_IN_PRODUCTION_MANIFEST",

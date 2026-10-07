@@ -444,7 +444,13 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 			return provisioningError("subsystem Compose file is unavailable")
 		}
 		rebuildErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
-			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
+			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--no-build")
+		if rebuildErr != nil {
+			// 镜像缺失才回退到构建（需联网解析基础镜像元数据）；镜像已预置时 --no-build
+			// 直接用本地镜像创建容器，离线环境也能完成接入。
+			rebuildErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
+				"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
+		}
 	}
 	if rebuildErr != nil {
 		return provisioningError("rebuild subsystem containers")
@@ -801,7 +807,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		return provisioningError("subsystem public URL is invalid")
 	}
 	values := map[string]string{
-		"PLATFORM_BASE_URL":         input.Issuer,
+		// PLATFORM_BASE_URL 是子系统回调平台控制面的私网地址；写成 OIDC issuer
+		// （Keycloak realm URL）会让合同后端把认证指到 Keycloak 而不是平台，
+		// 并被 docker-local 的运行时校验拒绝。
+		"PLATFORM_BASE_URL":         "http://platform-api:8080",
 		"OIDC_ISSUER":               input.Issuer,
 		"OIDC_CLIENT_ID":            input.ClientID,
 		"OIDC_CLIENT_SECRET":        input.ClientSecret,
@@ -1064,7 +1073,11 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		startErr = provisioner.rebuildIntegratedProjectStack(operationCtx)
 	default:
 		startErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
-			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
+			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--no-build")
+		if startErr != nil {
+			startErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
+				"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
+		}
 	}
 	if startErr != nil {
 		return provisioningError("start subsystem containers")
@@ -1131,6 +1144,27 @@ func requiredContractServiceCredentials(input application.SubsystemProvisioningI
 // Compose topology. The unified frontend already routes to basic-platform-local/contract-api;
 // starting the subsystem's standalone Compose file as well would create a second contract-api
 // network alias backed by a different MySQL volume and make requests non-deterministic.
+// localImageExists 通过 Docker API 检查镜像是否已在本机。离线/受限网络环境下
+// compose build 的基础镜像元数据解析必然失败；只要镜像已经预置（离线交付包、retag、
+// 预构建），就用现成镜像完成部署而不是让整个接入失败。
+func (provisioner *LocalDockerSubsystemProvisioner) localImageExists(ctx context.Context, imageRef string) bool {
+	return provisioner.runner.Run(ctx, provisioner.config.GatewayScriptPath, os.Environ(), provisioner.config.DockerBinary,
+		"image", "inspect", imageRef) == nil
+}
+
+// buildServiceWithLocalFallback 尽力构建服务镜像：构建失败但本地已有该镜像时降级为
+// 使用现成镜像（告警继续）；镜像也不存在时才返回错误。
+func (provisioner *LocalDockerSubsystemProvisioner) buildServiceWithLocalFallback(ctx context.Context, service, imageRef string) error {
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", service); err != nil {
+		if provisioner.localImageExists(ctx, imageRef) {
+			fmt.Fprintf(os.Stderr, "[subsystem-provisioner] %s build failed; falling back to pre-provisioned image %s: %v\n", service, imageRef, err)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractStack(ctx context.Context) error {
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "contract-mysql", "temporal"); err != nil {
 		return err
@@ -1141,7 +1175,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractSta
 	// Build first, publish the catalog from that exact image, and only then replace
 	// the API. This prevents a new binary from serving with an older N/N-1 catalog
 	// window and turning every OIDC callback into local_authorization 401.
-	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "contract-api"); err != nil {
+	if err := provisioner.buildServiceWithLocalFallback(ctx, "contract-api", "contract-management/backend:local"); err != nil {
 		return err
 	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "contract-api", "./authz-catalog", "publish"); err != nil {
@@ -1161,7 +1195,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedProjectStac
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "project-migrate"); err != nil {
 		return err
 	}
-	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--build", "--no-deps", "project-api")
+	if err := provisioner.buildServiceWithLocalFallback(ctx, "project-api", "project-management/backend:local"); err != nil {
+		return err
+	}
+	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "project-api")
 }
 
 // rebuildIntegratedSettlementStack keeps Settlement inside the single platform
@@ -1256,7 +1293,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedCustomerSta
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "customer-mysql"); err != nil {
 		return err
 	}
-	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "customer-api"); err != nil {
+	if err := provisioner.buildServiceWithLocalFallback(ctx, "customer-api", "customer-opportunity/backend:local"); err != nil {
 		return err
 	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "customer-migrate"); err != nil {
@@ -1276,7 +1313,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedPortalStack
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "portal-mysql"); err != nil {
 		return err
 	}
-	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "portal-api"); err != nil {
+	if err := provisioner.buildServiceWithLocalFallback(ctx, "portal-api", "customer-portal/backend:local"); err != nil {
 		return err
 	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "portal-migrate"); err != nil {

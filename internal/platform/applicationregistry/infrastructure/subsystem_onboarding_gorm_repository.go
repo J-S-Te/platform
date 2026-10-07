@@ -684,6 +684,37 @@ func deploymentStateFromModel(model subsystemDeploymentStateModel) application.S
 }
 
 // SetSubsystemDesiredManifest 记录控制面本轮期望清单；与已应用值不同时立即标记 DRIFT。
+// ListInFlightSubsystemDeployments 返回仍处于非终态（PROVISIONING/UPDATING/VERIFYING/
+// DRAINING）的部署状态行，供后台看护任务识别编排已死、无人收口的记录。只投影状态机
+// 需要的字段来源行本身；不暴露部署命令输出或凭据。
+func (repository *SubsystemOnboardingGORMRepository) ListInFlightSubsystemDeployments(ctx context.Context) ([]application.SubsystemDeploymentState, error) {
+	var rows []subsystemDeploymentStateModel
+	if err := repository.database.WithContext(ctx).
+		Where("status IN ?", []string{
+			application.SubsystemDeploymentStatusProvisioning,
+			application.SubsystemDeploymentStatusUpdating,
+			application.SubsystemDeploymentStatusVerifying,
+			application.SubsystemDeploymentStatusDraining,
+		}).
+		Order("started_at ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	states := make([]application.SubsystemDeploymentState, 0, len(rows))
+	for _, row := range rows {
+		states = append(states, application.SubsystemDeploymentState{
+			TenantID: row.TenantID, ApplicationID: row.ApplicationID, EnvironmentID: row.EnvironmentID,
+			ApplicationCode: row.ApplicationCode, Environment: row.Environment,
+			Status: row.Status, Operation: row.Operation, Generation: row.Generation,
+			AttemptCount: row.AttemptCount, StartedAt: row.StartedAt, CompletedAt: row.CompletedAt,
+			DesiredManifestChecksum: dereferenceString(row.DesiredManifestChecksum),
+			AppliedManifestChecksum: dereferenceString(row.AppliedManifestChecksum),
+			LastErrorCode:           dereferenceString(row.LastErrorCode), LastError: dereferenceString(row.LastError),
+		})
+	}
+	return states, nil
+}
+
 func (repository *SubsystemOnboardingGORMRepository) SetSubsystemDesiredManifest(ctx context.Context, tenantID, applicationCode, environment, checksum string, now time.Time) error {
 	checksum = strings.TrimSpace(checksum)
 	if checksum == "" {
