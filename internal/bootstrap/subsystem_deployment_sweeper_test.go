@@ -24,6 +24,20 @@ func (store *sweepFakeStore) TransitionSubsystemDeployment(_ context.Context, _,
 	return nil
 }
 
+func (store *sweepFakeStore) ClaimSubsystemDeployment(context.Context, string, string, string, string, time.Time) (uint64, error) {
+	return 0, nil
+}
+func (store *sweepFakeStore) CompleteSubsystemDeployment(context.Context, string, string, string, uint64, string, string, string, string, time.Time) error {
+	return nil
+}
+func (store *sweepFakeStore) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
+	operation := state.Operation
+	if operation == "" {
+		operation = "ONBOARD"
+	}
+	return true, store.TransitionSubsystemDeployment(ctx, state.TenantID, state.ApplicationCode, state.Environment, application.SubsystemDeploymentStatusFailed, operation, "DEPLOYMENT_INTERRUPTED", "", now)
+}
+
 func (store *sweepFakeStore) DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error {
 	return nil
 }

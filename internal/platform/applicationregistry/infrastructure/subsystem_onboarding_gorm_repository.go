@@ -10,6 +10,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // SubsystemOnboardingGORMRepository coordinates the multi-table onboarding transaction and the
@@ -590,6 +591,59 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 		return fmt.Errorf("%w: %s -> %s (concurrent update)", application.ErrSubsystemDeploymentTransition, current.Status, status)
 	}
 	return nil
+}
+
+// Claim takes the row lock before issuing credentials. A same-state transition is
+// not a claim: otherwise two requests that observed READY could both deploy.
+func (repository *SubsystemOnboardingGORMRepository) ClaimSubsystemDeployment(ctx context.Context, tenantID, code, environment, operation string, now time.Time) (generation uint64, err error) {
+	err = repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row subsystemDeploymentStateModel
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND application_code = ? AND environment_code = ?", tenantID, code, environment).Take(&row).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil && (row.Status == application.SubsystemDeploymentStatusProvisioning || row.Status == application.SubsystemDeploymentStatusUpdating || row.Status == application.SubsystemDeploymentStatusVerifying || row.Status == application.SubsystemDeploymentStatusDraining) {
+			return application.ErrSubsystemDeploymentTransition
+		}
+		repo := &SubsystemOnboardingGORMRepository{database: tx}
+		if err := repo.TransitionSubsystemDeployment(ctx, tenantID, code, environment, application.SubsystemDeploymentStatusUpdating, operation, "", "", now); err != nil {
+			return err
+		}
+		state, err := repo.GetSubsystemDeploymentState(ctx, tenantID, code, environment)
+		generation = state.Generation
+		return err
+	})
+	return
+}
+
+// Terminal writes are owned by the claimed attempt, not whichever attempt is
+// current when an old background job eventually returns.
+func (repository *SubsystemOnboardingGORMRepository) CompleteSubsystemDeployment(ctx context.Context, tenantID, code, environment string, generation uint64, status, operation, errorCode, message string, now time.Time) error {
+	return repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row subsystemDeploymentStateModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND application_code = ? AND environment_code = ?", tenantID, code, environment).Take(&row).Error; err != nil {
+			return mapManagementError(err)
+		}
+		if row.Generation != generation {
+			return application.ErrSubsystemDeploymentTransition
+		}
+		return (&SubsystemOnboardingGORMRepository{database: tx}).TransitionSubsystemDeployment(ctx, tenantID, code, environment, status, operation, errorCode, message, now)
+	})
+}
+
+// Recovery compares the enumerated snapshot in the UPDATE itself; re-reading
+// and CASing a newer generation would incorrectly close a newly started retry.
+func (repository *SubsystemOnboardingGORMRepository) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
+	if state.StartedAt == nil || !state.StartedAt.Before(cutoff) {
+		return false, nil
+	}
+	if state.Status != application.SubsystemDeploymentStatusProvisioning && state.Status != application.SubsystemDeploymentStatusUpdating && state.Status != application.SubsystemDeploymentStatusVerifying && state.Status != application.SubsystemDeploymentStatusDraining {
+		return false, nil
+	}
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND generation = ? AND status = ? AND started_at = ? AND started_at < ?", state.TenantID, state.ApplicationCode, state.Environment, state.Generation, state.Status, state.StartedAt.UTC(), cutoff.UTC()).
+		Updates(map[string]any{"status": application.SubsystemDeploymentStatusFailed, "last_error_code": "DEPLOYMENT_INTERRUPTED", "last_error_message": "部署请求中断，请点击重试", "completed_at": now.UTC(), "updated_at": now.UTC()})
+	return result.RowsAffected == 1, result.Error
 }
 
 // GetSubsystemDeploymentState returns only tenant-scoped lifecycle metadata.

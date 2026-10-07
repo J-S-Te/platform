@@ -1010,6 +1010,16 @@ func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployme
 	return store.transitionErr
 }
 
+func (store *recordingSubsystemDeploymentStateStore) ClaimSubsystemDeployment(ctx context.Context, tenant, code, env, op string, now time.Time) (uint64, error) {
+	return store.state.Generation, store.TransitionSubsystemDeployment(ctx, tenant, code, env, application.SubsystemDeploymentStatusUpdating, op, "", "", now)
+}
+func (store *recordingSubsystemDeploymentStateStore) CompleteSubsystemDeployment(ctx context.Context, tenant, code, env string, generation uint64, status, op, errCode, message string, now time.Time) error {
+	return store.TransitionSubsystemDeployment(ctx, tenant, code, env, status, op, errCode, message, now)
+}
+func (store *recordingSubsystemDeploymentStateStore) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
+	return true, store.TransitionSubsystemDeployment(ctx, state.TenantID, state.ApplicationCode, state.Environment, application.SubsystemDeploymentStatusFailed, state.Operation, "DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试", now)
+}
+
 func (store *recordingSubsystemDeploymentStateStore) DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error {
 	return nil
 }

@@ -882,6 +882,15 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		return
 	}
 	pathPrefix, upstreamURL := "", ""
+	// Onboard atomically creates generation 1. Keep that ownership token even
+	// when the request is canceled before the following state read can finish.
+	generation := uint64(1)
+	accepted := false
+	defer func() {
+		if !accepted {
+			handler.markDeploymentFailureDetached(subsystemDeploymentJob{TenantID: principal.Tenant.ID, ApplicationCode: result.Application.Code, Environment: result.Environment.Environment, Operation: "ONBOARD", Generation: generation}, "DEPLOYMENT_PREPARATION_FAILED", "部署准备失败，请点击重试")
+		}
+	}()
 	if result.Environment.PathPrefix != nil {
 		pathPrefix = *result.Environment.PathPrefix
 	}
@@ -925,6 +934,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	}
 	handler.startSubsystemDeploymentJob(request, subsystemDeploymentJob{
 		Operation:          "ONBOARD",
+		Generation:         generation,
 		TenantID:           principal.Tenant.ID,
 		OperatorUserID:     principal.User.ID,
 		ApplicationCode:    result.Application.Code,
@@ -937,6 +947,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		KeycloakClientID:   keycloakClientID,
 		ManifestChecksum:   manifestChecksum,
 	})
+	accepted = true
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusAccepted, "接入请求已受理，部署正在后台执行；请轮询部署状态", map[string]string{
@@ -1833,51 +1844,54 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	// PENDING_ONBOARDING and the application fails with a catalog-token 401.
 	keycloakRuntimeCredentialRefresh := strings.EqualFold(effectiveIssuerAlias, "keycloak") &&
 		(requestedOperation == "ADOPT" || isRetry) && !keycloakCutover
-	if keycloakRuntimeCredentialRefresh && handler.keycloakControl != nil && strings.TrimSpace(updateInput.RedirectURI) != "" {
-		canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
-		resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
-		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
-		if clientErr != nil {
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
+	ensureKeycloakCredentials := func() bool {
+		if keycloakRuntimeCredentialRefresh && handler.keycloakControl != nil && strings.TrimSpace(updateInput.RedirectURI) != "" {
+			canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
+			resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
+			client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
+			if clientErr != nil {
+				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+				return false
+			}
+			updateInput.ClientID, updateInput.ClientSecret = client.ClientID, client.ClientSecret
+			updateInput.AuthenticationRuntimeUpdate = true
 		}
-		updateInput.ClientID, updateInput.ClientSecret = client.ClientID, client.ClientSecret
-		updateInput.AuthenticationRuntimeUpdate = true
-	}
-	if keycloakCutover {
-		transport, transportErr := application.ValidateKeycloakCutoverTransport(publicBaseURL, pathPrefix, handler.keycloakRequireHTTPS)
-		if transportErr != nil {
-			handler.writeError(writer, request, transportErr)
-			return
-		}
-		updateInput.PublicURL = transport.PublicURL
-		updateInput.RedirectURI = transport.RedirectURI
-		if handler.keycloakControl == nil || handler.keycloakBroker == nil || publicBaseURL == "" || pathPrefix == "" {
-			handler.writeError(writer, request, application.ErrValidation)
-			return
-		}
-		if err := handler.reconcileKeycloakBroker(request.Context(), principal.Tenant.ID, principal.User.ID); err != nil {
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
-		resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
-		if applicationID, environmentID, resolved := handler.resolveApplicationContext(writer, request, applicationCode, environment); resolved {
-			if compatibilityResolver, supported := handler.keycloakMappings.(keycloakClientCompatibilityResolver); supported {
-				if effective, resolveErr := compatibilityResolver.ResolveEffectiveKeycloakClient(request.Context(), principal.Tenant.ID, applicationID, environmentID, canonicalClientID); resolveErr != nil {
-					handler.logger.Warn("Keycloak Client compatibility resolution failed", "application_code", applicationCode, "environment", environment, "error", resolveErr)
-				} else if strings.TrimSpace(effective.ClientID) != "" {
-					resolution = effective
+		if keycloakCutover {
+			transport, transportErr := application.ValidateKeycloakCutoverTransport(publicBaseURL, pathPrefix, handler.keycloakRequireHTTPS)
+			if transportErr != nil {
+				handler.writeError(writer, request, transportErr)
+				return false
+			}
+			updateInput.PublicURL = transport.PublicURL
+			updateInput.RedirectURI = transport.RedirectURI
+			if handler.keycloakControl == nil || handler.keycloakBroker == nil || publicBaseURL == "" || pathPrefix == "" {
+				handler.writeError(writer, request, application.ErrValidation)
+				return false
+			}
+			if err := handler.reconcileKeycloakBroker(request.Context(), principal.Tenant.ID, principal.User.ID); err != nil {
+				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+				return false
+			}
+			canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
+			resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
+			if applicationID, environmentID, resolved := handler.resolveApplicationContext(writer, request, applicationCode, environment); resolved {
+				if compatibilityResolver, supported := handler.keycloakMappings.(keycloakClientCompatibilityResolver); supported {
+					if effective, resolveErr := compatibilityResolver.ResolveEffectiveKeycloakClient(request.Context(), principal.Tenant.ID, applicationID, environmentID, canonicalClientID); resolveErr != nil {
+						handler.logger.Warn("Keycloak Client compatibility resolution failed", "application_code", applicationCode, "environment", environment, "error", resolveErr)
+					} else if strings.TrimSpace(effective.ClientID) != "" {
+						resolution = effective
+					}
 				}
 			}
+			client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
+			if clientErr != nil {
+				handler.logger.Warn("Keycloak Client synchronization before switch failed", "application_code", applicationCode, "environment", environment, "error", clientErr)
+				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+				return false
+			}
+			updateInput.ClientID, updateInput.ClientSecret = client.ClientID, client.ClientSecret
 		}
-		client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
-		if clientErr != nil {
-			handler.logger.Warn("Keycloak Client synchronization before switch failed", "application_code", applicationCode, "environment", environment, "error", clientErr)
-			handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
-			return
-		}
-		updateInput.ClientID, updateInput.ClientSecret = client.ClientID, client.ClientSecret
+		return true
 	}
 	// Resolve identifiers from the deployment control plane, not the portal projection: failed
 	// and updating environments are intentionally hidden from the user-facing portal catalog.
@@ -1974,6 +1988,28 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		})
 		return
 	}
+	generation := uint64(0)
+	if handler.deploymentState != nil {
+		var claimErr error
+		generation, claimErr = handler.deploymentState.ClaimSubsystemDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, operation, time.Now().UTC())
+		if claimErr != nil {
+			if errors.Is(claimErr, application.ErrSubsystemDeploymentTransition) {
+				httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New("SUBSYSTEM_DEPLOYMENT_IN_PROGRESS", "该应用环境的部署正在进行中", nil))
+			} else {
+				handler.writeError(writer, request, claimErr)
+			}
+			return
+		}
+	}
+	accepted := false
+	defer func() {
+		if !accepted {
+			handler.markDeploymentFailureDetached(subsystemDeploymentJob{TenantID: principal.Tenant.ID, ApplicationCode: applicationCode, Environment: environment, Operation: operation, Generation: generation}, "DEPLOYMENT_PREPARATION_FAILED", "部署准备失败，请点击重试")
+		}
+	}()
+	if !ensureKeycloakCredentials() {
+		return
+	}
 	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
 		request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID,
 		applicationCode, environment, principal.User.ID, operation,
@@ -2006,10 +2042,6 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		// 权限”的既有语义。
 		needsInitialAccess = deploymentContext.InitialAccessAssignedAt == nil
 	}
-	if err := handler.transitionDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, application.SubsystemDeploymentStatusUpdating, operation, "", ""); err != nil {
-		handler.writeError(writer, request, err)
-		return
-	}
 	if err := handler.setDesiredManifest(request.Context(), principal.Tenant.ID, applicationCode, environment, updateInput.ManifestChecksum); err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -2033,6 +2065,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}
 	handler.startSubsystemDeploymentJob(request, subsystemDeploymentJob{
 		Operation:          operation,
+		Generation:         generation,
 		TenantID:           principal.Tenant.ID,
 		OperatorUserID:     principal.User.ID,
 		ApplicationCode:    applicationCode,
@@ -2047,6 +2080,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		KeycloakRollback:   keycloakRollback,
 		ManifestChecksum:   updateInput.ManifestChecksum,
 	})
+	accepted = true
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusAccepted, "部署已受理，正在后台执行；状态请查询 subsystem-status", map[string]string{
@@ -2485,16 +2519,19 @@ func (handler *SubsystemOnboardingHandler) recoverStaleSubsystemDeployment(ctx c
 	if !staleSubsystemDeployment(state, time.Now().UTC()) {
 		return state
 	}
-	operation := strings.TrimSpace(state.Operation)
-	if operation == "" {
-		operation = "ONBOARD"
-	}
-	if err := handler.transitionDeploymentFailure(
-		ctx, state.TenantID, state.ApplicationCode, state.Environment,
-		operation, "DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试",
-	); err != nil {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subsystemDeploymentFailureWriteTimeout)
+	defer cancel()
+	recovered, err := handler.deploymentState.RecoverStaleSubsystemDeployment(writeCtx, state, time.Now().UTC().Add(-subsystemDeploymentStaleAfter), time.Now().UTC())
+	if err != nil {
 		handler.logger.Warn("stale subsystem deployment could not be recovered",
 			"application_code", state.ApplicationCode, "environment", state.Environment, "error", err)
+		return state
+	}
+	if !recovered {
+		current, getErr := handler.deploymentState.GetSubsystemDeploymentState(ctx, state.TenantID, state.ApplicationCode, state.Environment)
+		if getErr == nil {
+			return current
+		}
 		return state
 	}
 	state.Status = application.SubsystemDeploymentStatusFailed
@@ -2609,6 +2646,7 @@ func writeBuiltInPlatformRuntimeBlocked(writer stdhttp.ResponseWriter, request *
 // subsystemDeploymentJob 携带一次已受理的部署编排脱离 HTTP 请求执行。所有持久标识都在
 // 请求返回前捕获完成；后台步骤绝不读取 request 作用域的状态。
 type subsystemDeploymentJob struct {
+	Generation         uint64
 	Operation          string
 	TenantID           string
 	OperatorUserID     string
@@ -2683,7 +2721,7 @@ func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx 
 		if err := handler.completeOnboardKeycloakProjection(ctx, job); err != nil {
 			return err
 		}
-		if err := handler.transitionDeployment(ctx, job.TenantID, job.ApplicationCode, job.Environment, application.SubsystemDeploymentStatusReady, job.Operation, "", ""); err != nil {
+		if err := handler.completeDeployment(ctx, job, application.SubsystemDeploymentStatusReady, "", ""); err != nil {
 			// 编排本身已完成而终态写失败：必须收口为失败，不能把状态机冻结在 UPDATING。
 			handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_STATE_FAILED", "部署完成但状态写入失败", err, true)
 			return err
@@ -2709,10 +2747,6 @@ func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx 
 			return err
 		}
 	}
-	if err := handler.transitionDeployment(ctx, job.TenantID, job.ApplicationCode, job.Environment, application.SubsystemDeploymentStatusReady, job.Operation, "", ""); err != nil {
-		handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_STATE_FAILED", "部署完成但状态写入失败", err, true)
-		return err
-	}
 	if job.KeycloakCutover || job.KeycloakRollback {
 		var lifecycleErr error
 		if job.KeycloakCutover {
@@ -2726,6 +2760,10 @@ func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx 
 			handler.closeFailedDeployment(ctx, job, "KEYCLOAK_LIFECYCLE_RECORD_FAILED", "Keycloak 切换证据记录失败", lifecycleErr, true)
 			return lifecycleErr
 		}
+	}
+	if err := handler.completeDeployment(ctx, job, application.SubsystemDeploymentStatusReady, "", ""); err != nil {
+		handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_STATE_FAILED", "部署完成但状态写入失败", err, true)
+		return err
 	}
 	handler.notifySubsystemLifecycle(ctx, job.TenantID, job.OperatorUserID, job.ApplicationName, job.ApplicationCode, job.Environment, true, "")
 	return nil
@@ -2768,7 +2806,7 @@ func (handler *SubsystemOnboardingHandler) completeOnboardKeycloakProjection(ctx
 func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Context, job subsystemDeploymentJob, errorCode, errorMessage string, cause error, notify bool) {
 	writeCtx, cancel := context.WithTimeout(context.Background(), subsystemDeploymentFailureWriteTimeout)
 	defer cancel()
-	if err := handler.transitionDeploymentFailure(writeCtx, job.TenantID, job.ApplicationCode, job.Environment, job.Operation, errorCode, errorMessage); err != nil {
+	if err := handler.completeDeployment(writeCtx, job, application.SubsystemDeploymentStatusFailed, errorCode, errorMessage); err != nil {
 		handler.logger.Error("failed to persist subsystem deployment failure",
 			"application_code", job.ApplicationCode, "environment", job.Environment, "error", err)
 	}
@@ -2788,10 +2826,17 @@ func (handler *SubsystemOnboardingHandler) waitForDeploymentJobs() {
 func (handler *SubsystemOnboardingHandler) markDeploymentFailureDetached(job subsystemDeploymentJob, errorCode, errorMessage string) {
 	writeCtx, cancel := context.WithTimeout(context.Background(), subsystemDeploymentFailureWriteTimeout)
 	defer cancel()
-	if err := handler.transitionDeploymentFailure(writeCtx, job.TenantID, job.ApplicationCode, job.Environment, job.Operation, errorCode, errorMessage); err != nil {
+	if err := handler.completeDeployment(writeCtx, job, application.SubsystemDeploymentStatusFailed, errorCode, errorMessage); err != nil {
 		handler.logger.Error("failed to persist subsystem deployment failure after panic",
 			"application_code", job.ApplicationCode, "environment", job.Environment, "error", err)
 	}
+}
+
+func (handler *SubsystemOnboardingHandler) completeDeployment(ctx context.Context, job subsystemDeploymentJob, status, code, message string) error {
+	if handler.deploymentState == nil {
+		return nil
+	}
+	return handler.deploymentState.CompleteSubsystemDeployment(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.Generation, status, job.Operation, code, message, time.Now().UTC())
 }
 
 func writeProductionManifestTargetMissing(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) {

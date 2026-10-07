@@ -59,19 +59,16 @@ func (runner *subsystemDeploymentSweeper) sweep(ctx context.Context) {
 		if state.StartedAt == nil || now.Sub(state.StartedAt.UTC()) <= runner.staleAfter {
 			continue
 		}
-		operation := state.Operation
-		if operation == "" {
-			operation = "ONBOARD"
-		}
-		// 独立超时：单行写失败不影响其余行的清扫，也不被共享 ctx 的取消波及。
+		// 单行写限制时间；Worker 停止时仍遵守进程取消信号。
 		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := runner.store.TransitionSubsystemDeployment(writeCtx, state.TenantID, state.ApplicationCode, state.Environment,
-			application.SubsystemDeploymentStatusFailed, operation,
-			"DEPLOYMENT_INTERRUPTED", "部署请求中断，已由看护任务收口；请点击重试", now)
+		recovered, err := runner.store.RecoverStaleSubsystemDeployment(writeCtx, state, now.Add(-runner.staleAfter), now)
 		cancel()
 		if err != nil {
 			runner.logger.Warn("stale subsystem deployment could not be recovered",
 				"application_code", state.ApplicationCode, "environment", state.Environment, "error", err)
+			continue
+		}
+		if !recovered {
 			continue
 		}
 		runner.logger.Warn("stale subsystem deployment recovered by sweeper",

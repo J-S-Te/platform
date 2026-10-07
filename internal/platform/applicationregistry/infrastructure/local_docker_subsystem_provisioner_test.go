@@ -335,6 +335,33 @@ type recordingSubsystemRunner struct {
 	errors map[string]error
 }
 
+type failingBuildRunner struct{ recordingSubsystemRunner }
+
+func (runner *failingBuildRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) error {
+	_ = runner.recordingSubsystemRunner.Run(ctx, dir, env, name, args...)
+	if containsString(args, "build") {
+		return errors.New("compiler rejected source")
+	}
+	// Even if Docker image inspect would succeed, it cannot authorize fallback.
+	return nil
+}
+func TestIntegratedBuildFailureNeverFallsBackToExistingMutableImage(t *testing.T) {
+	root, platformRoot, _, gatewayScript := createIntegratedProvisionerFixture(t, integratedCustomerApplicationCode)
+	runner := &failingBuildRunner{}
+	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{Enabled: true, ProjectsRoot: root, GatewayScriptPath: gatewayScript, GatewayIncludePath: filepath.Join(platformRoot, "docker", "portal-apps-locations.conf"), PlatformComposeProject: "basic-platform-local", Timeout: time.Second}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.rebuildIntegratedCustomerStack(context.Background()); err == nil {
+		t.Fatal("failed build reported successful deployment")
+	}
+	for _, call := range runner.calls {
+		if containsString(call.arguments, "inspect") || containsString(call.arguments, "publish") || containsString(call.arguments, "customer-migrate") {
+			t.Fatalf("build failure continued: %v", call.arguments)
+		}
+	}
+}
+
 func (runner *recordingSubsystemRunner) Run(_ context.Context, directory string, environment []string, name string, arguments ...string) error {
 	runner.calls = append(runner.calls, recordingSubsystemRunnerCall{
 		directory: directory, environment: environment, binary: name, arguments: append([]string(nil), arguments...),
@@ -410,10 +437,8 @@ func TestLocalDockerSubsystemProvisionerUpdateRebuildsStandaloneSubsystemWithout
 	if !containsString(upCall.arguments, "up") {
 		t.Fatalf("compose up missing up subcommand: %v", upCall.arguments)
 	}
-	// 离线优先：首个 compose up 使用 --no-build 直接复用预置镜像；镜像缺失时编排
-	// 会回退到 --build（由 fallback 用例单独覆盖）。
-	if !containsString(upCall.arguments, "--no-build") {
-		t.Fatalf("compose up missing --no-build: %v", upCall.arguments)
+	if !containsString(upCall.arguments, "--build") {
+		t.Fatalf("compose up missing --build: %v", upCall.arguments)
 	}
 	if !containsString(upCall.arguments, "-d") {
 		t.Fatalf("compose up missing -d: %v", upCall.arguments)

@@ -3,17 +3,122 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	authctx "github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 )
+
+type racingClaimStore struct {
+	*recordingSubsystemDeploymentStateStore
+	mu          sync.Mutex
+	readers     int
+	readBarrier chan struct{}
+	claimed     bool
+}
+
+func (store *racingClaimStore) GetSubsystemDeploymentContext(context.Context, string, string, string) (application.SubsystemDeploymentState, error) {
+	store.mu.Lock()
+	store.readers++
+	if store.readers == 2 {
+		close(store.readBarrier)
+	}
+	store.mu.Unlock()
+	<-store.readBarrier // both requests have observed the same READY snapshot
+	return store.state, nil
+}
+func (store *racingClaimStore) ClaimSubsystemDeployment(ctx context.Context, tenant, code, env, op string, now time.Time) (uint64, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.claimed {
+		return 0, application.ErrSubsystemDeploymentTransition
+	}
+	store.claimed = true
+	return 7, store.TransitionSubsystemDeployment(ctx, tenant, code, env, application.SubsystemDeploymentStatusUpdating, op, "", "", now)
+}
+func TestSimultaneousUpdatesIssueCredentialsOnlyForClaimWinner(t *testing.T) {
+	base := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", EnvironmentID: "env-1", Status: application.SubsystemDeploymentStatusReady}}
+	store := &racingClaimStore{recordingSubsystemDeploymentStateStore: base, readBarrier: make(chan struct{})}
+	handler := asyncDeploymentTestHandler(t, base, &recordingHTTPSubsystemProvisioner{})
+	handler.deploymentState = store
+	credentials := &serviceCredentialManagerStub{}
+	handler.serviceCredentials = credentials
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			response := httptest.NewRecorder()
+			handler.UpdateSubsystem(response, asyncDeploymentRequest(t, `{"application_code":"contract_management","environment":"prod"}`))
+			responses <- response
+		}()
+	}
+	accepted, conflicted := 0, 0
+	for i := 0; i < 2; i++ {
+		response := <-responses
+		if response.Code == stdhttp.StatusAccepted {
+			accepted++
+		} else if response.Code == stdhttp.StatusConflict {
+			conflicted++
+		} else {
+			t.Fatalf("unexpected response %d %s", response.Code, response.Body.String())
+		}
+	}
+	handler.waitForDeploymentJobs()
+	if accepted != 1 || conflicted != 1 {
+		t.Fatalf("accepted %d, conflicted %d", accepted, conflicted)
+	}
+	seen := map[string]bool{}
+	for _, input := range credentials.createdInputs {
+		if seen[input.ClientID] {
+			t.Fatalf("duplicate credentials issued for %s", input.ClientID)
+		}
+		seen[input.ClientID] = true
+	}
+	if len(seen) == 0 {
+		t.Fatal("winning claim did not issue required credentials")
+	}
+}
+
+type preparationFailStore struct {
+	*recordingSubsystemDeploymentStateStore
+	cancel context.CancelFunc
+}
+
+func (store *preparationFailStore) SetSubsystemDesiredManifest(context.Context, string, string, string, string, time.Time) error {
+	store.cancel()
+	return errors.New("manifest write failed")
+}
+func (store *preparationFailStore) MarkSubsystemManifestApplied(context.Context, string, string, string, string, time.Time) error {
+	return nil
+}
+func TestPreparationFailureClosesClaimAfterRequestCancellation(t *testing.T) {
+	base := &recordingSubsystemDeploymentStateStore{state: application.SubsystemDeploymentState{ApplicationID: "app-1", EnvironmentID: "env-1", Status: application.SubsystemDeploymentStatusReady}}
+	provisioner := &recordingHTTPSubsystemProvisioner{capabilities: application.SubsystemProvisioningCapabilities{Targets: []application.SubsystemProvisioningTarget{{ApplicationCode: "contract_management", Environment: "prod", ManifestChecksum: "changed"}}}}
+	handler := asyncDeploymentTestHandler(t, base, provisioner)
+	response := httptest.NewRecorder()
+	request := asyncDeploymentRequest(t, `{"application_code":"contract_management","environment":"prod"}`)
+	// Preserve the principal while allowing the failing store to cancel the request.
+	requestCtx, requestCancel := context.WithCancel(request.Context())
+	defer requestCancel()
+	handler.deploymentState = &preparationFailStore{base, requestCancel}
+	handler.UpdateSubsystem(response, request.WithContext(requestCtx))
+	if len(base.transitions) != 2 || base.transitions[1].errorCode != "DEPLOYMENT_PREPARATION_FAILED" {
+		t.Fatalf("claim was not closed: %#v", base.transitions)
+	}
+	if base.transitionCtxErrs[1] != nil {
+		t.Fatal("failure closure inherited canceled request")
+	}
+	if provisioner.input.ApplicationCode != "" {
+		t.Fatal("unaccepted preparation started a job")
+	}
+}
 
 func asyncDeploymentTestHandler(t *testing.T, stateStore *recordingSubsystemDeploymentStateStore, provisioner *recordingHTTPSubsystemProvisioner) *SubsystemOnboardingHandler {
 	t.Helper()

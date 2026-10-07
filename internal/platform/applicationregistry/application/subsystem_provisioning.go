@@ -195,6 +195,9 @@ type SubsystemDeploymentState struct {
 // SubsystemDeploymentStateStore 将生命周期状态与耗时部署 Agent 解耦，使失败后可以仅重试部署，
 // 而不重新创建无法恢复明文的 OAuth 凭据或重复执行首次接入。
 type SubsystemDeploymentStateStore interface {
+	ClaimSubsystemDeployment(context.Context, string, string, string, string, time.Time) (uint64, error)
+	CompleteSubsystemDeployment(context.Context, string, string, string, uint64, string, string, string, string, time.Time) error
+	RecoverStaleSubsystemDeployment(context.Context, SubsystemDeploymentState, time.Time, time.Time) (bool, error)
 	TransitionSubsystemDeployment(context.Context, string, string, string, string, string, string, string, time.Time) error
 	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, string, time.Time) error
 	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
