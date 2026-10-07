@@ -30,6 +30,9 @@ var subsystemDeploymentTransitions = map[string][]string{
 	},
 	SubsystemDeploymentStatusVerifying: {
 		SubsystemDeploymentStatusProvisioning, SubsystemDeploymentStatusUpdating,
+		// 看护任务需要能把僵死的 VERIFYING 收口为失败；卡在校验态的记录没有任何
+		// 活动编排可以继续推进它，只允许转回部署态会让看护永远无法恢复。
+		SubsystemDeploymentStatusFailed,
 	},
 	SubsystemDeploymentStatusReady: {
 		SubsystemDeploymentStatusProvisioning, SubsystemDeploymentStatusUpdating,
@@ -192,6 +195,9 @@ type SubsystemDeploymentState struct {
 // SubsystemDeploymentStateStore 将生命周期状态与耗时部署 Agent 解耦，使失败后可以仅重试部署，
 // 而不重新创建无法恢复明文的 OAuth 凭据或重复执行首次接入。
 type SubsystemDeploymentStateStore interface {
+	ClaimSubsystemDeployment(context.Context, string, string, string, string, time.Time) (uint64, error)
+	CompleteSubsystemDeployment(context.Context, string, string, string, uint64, string, string, string, string, time.Time) error
+	RecoverStaleSubsystemDeployment(context.Context, SubsystemDeploymentState, time.Time, time.Time) (bool, error)
 	TransitionSubsystemDeployment(context.Context, string, string, string, string, string, string, string, time.Time) error
 	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, string, time.Time) error
 	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
@@ -199,6 +205,16 @@ type SubsystemDeploymentStateStore interface {
 	// DiscardFailedSubsystemDeployment 删除一条停留在 PROVISION_FAILED 的生命周期记录，
 	// 释放 code+environment 以便重新接入。只允许终态失败记录被丢弃；任何在途状态都会被拒绝。
 	DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error
+}
+
+// SubsystemDeploymentStaleAfter 是在途部署状态被判定为“编排已死”的阈值。HTTP 层的
+// stale 恢复与后台看护任务必须共用同一数值，避免两边对同一行状态得出不同结论。
+const SubsystemDeploymentStaleAfter = 20 * time.Minute
+
+// SubsystemDeploymentInFlightLister 供后台看护任务枚举仍在途的部署状态；是可选能力，
+// 旧的内存/测试存储不必实现。
+type SubsystemDeploymentInFlightLister interface {
+	ListInFlightSubsystemDeployments(ctx context.Context) ([]SubsystemDeploymentState, error)
 }
 
 // SubsystemManifestStateStore 持久化 API/Agent 清单握手结果；旧部署适配器可不实现。

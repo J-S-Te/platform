@@ -118,8 +118,9 @@ func TestKeycloakIntegrationRollbackPinsPlatformIssuer(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	integration.Rollback(response, request)
+	subsystems.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if provisioner.input.Issuer != "https://platform.example.com" {

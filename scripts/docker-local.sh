@@ -1399,6 +1399,13 @@ prepare_frontend_base_images() {
 }
 
 build_images() {
+    # SKIP_IMAGE_PREPARATION=1：完全离线/受限网络环境的逃生舱。调用方保证 :local 镜像
+    # 已预置（离线交付包加载、镜像 retag 或预构建），此时跳过基础镜像拉取与 compose
+    # build，直接进入编排启动。默认行为不变。
+    if [[ "${SKIP_IMAGE_PREPARATION:-}" == "1" ]]; then
+        log "SKIP_IMAGE_PREPARATION=1：使用预置镜像，跳过基础镜像拉取与镜像构建"
+        return 0
+    fi
     # Compose/BuildKit 会并发解析多个 Docker Hub 基础镜像。网络或代理不稳定时，
     # 任意一次匿名令牌请求超时都会让整个构建立即失败。先串行拉取缺失镜像并
     # 对每个镜像重试，使普通的 `up --build` 在全新环境中也具备容错能力。

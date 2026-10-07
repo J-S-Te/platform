@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +16,23 @@ import (
 	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
+
+func TestProvisioningCancellationWatcherStopsWhenOperationReturns(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	operationCtx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	done := watchProvisioningCancellation(operationCtx, left)
+	cancel() // the RPC's deferred cancellation, even with a Background parent
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher leaked after operation cancellation")
+	}
+	if _, err := left.Write([]byte("x")); err == nil {
+		t.Fatal("canceled socket remains writable")
+	}
+}
 
 func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testing.T) {
 	t.Parallel()

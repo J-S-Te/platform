@@ -176,6 +176,7 @@ func (provisioner *UnixSocketSubsystemProvisioner) AvailableCapabilities(ctx con
 	if deadline, ok := operationCtx.Deadline(); ok {
 		_ = connection.SetDeadline(deadline)
 	}
+	watchProvisioningCancellation(operationCtx, connection)
 	request := subsystemProvisioningRequest{
 		Version:   subsystemProvisioningProtocolVersion,
 		Action:    "capabilities",
@@ -194,6 +195,19 @@ func (provisioner *UnixSocketSubsystemProvisioner) AvailableCapabilities(ctx con
 	capabilities := normalizeSubsystemProvisioningCapabilities(*reply.Capabilities)
 	capabilities.Enabled = reply.Capabilities.Enabled
 	return capabilities, nil
+}
+
+// watchProvisioningCancellation 让阻塞的 socket 往返在调用方 ctx 取消时立刻失败。协议的
+// Read/Write 只认固定 deadline；没有这个看护，管理请求断连（浏览器刷新、CLI 超时、进程
+// 退出）会让 handler 在 Decode 上阻塞满整个部署窗口。
+func watchProvisioningCancellation(ctx context.Context, connection net.Conn) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-ctx.Done()
+		_ = connection.SetDeadline(time.Now())
+	}()
+	return done
 }
 
 func normalizeSubsystemProvisioningCapabilities(capabilities application.SubsystemProvisioningCapabilities) application.SubsystemProvisioningCapabilities {
@@ -381,6 +395,7 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 	if deadline, ok := operationCtx.Deadline(); ok {
 		_ = connection.SetDeadline(deadline)
 	}
+	watchProvisioningCancellation(operationCtx, connection)
 	if err := json.NewEncoder(connection).Encode(request); err != nil {
 		return provisioningError("send deployment request")
 	}
@@ -436,6 +451,7 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchangeDiscovery(ctx context
 	if deadline, ok := operationCtx.Deadline(); ok {
 		_ = connection.SetDeadline(deadline)
 	}
+	watchProvisioningCancellation(operationCtx, connection)
 	request := subsystemProvisioningRequest{Version: subsystemProvisioningProtocolVersion, Action: "discover", Discovery: &discovery}
 	if err := json.NewEncoder(connection).Encode(request); err != nil {
 		return nil, provisioningError("send discovery request")
@@ -465,6 +481,7 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchangeCandidateDiscovery(ct
 	if deadline, ok := operationCtx.Deadline(); ok {
 		_ = connection.SetDeadline(deadline)
 	}
+	watchProvisioningCancellation(operationCtx, connection)
 	request := subsystemProvisioningRequest{Version: subsystemProvisioningProtocolVersion, Action: "discover-candidates", RequestID: normalizedProvisioningRequestID(requestctx.RequestID(ctx))}
 	if err := json.NewEncoder(connection).Encode(request); err != nil {
 		return nil, provisioningError("send discovery request")

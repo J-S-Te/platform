@@ -134,7 +134,8 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 	response := httptest.NewRecorder()
 
 	handler.OnboardSubsystem(response, request)
-	if response.Code != stdhttp.StatusCreated {
+	handler.waitForDeploymentJobs()
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
@@ -143,11 +144,9 @@ func TestOnboardSubsystemDoesNotReturnSecretOrDeploymentInstructions(t *testing.
 			t.Fatalf("response leaked %q: %s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, `"automation"`) || !strings.Contains(body, `"status":"completed"`) {
-		t.Fatalf("response missing safe automation status: %s", body)
-	}
-	if !strings.Contains(body, `"authorization"`) || !strings.Contains(body, `"initial_admin_user_id":"01K10B00000000000000000001"`) || !strings.Contains(body, `"role_code":"admin"`) {
-		t.Fatalf("response missing explicit initial administrator assignment: %s", body)
+	// 异步化后受理响应只携带最小契约字段；完整授权结果改由部署状态查询暴露。
+	if !strings.Contains(body, `"status":"UPDATING"`) || !strings.Contains(body, `"operation":"ONBOARD"`) {
+		t.Fatalf("accepted response missing async contract fields: %s", body)
 	}
 	if access.userID != "01K10B00000000000000000001" || access.operatorID != "01K10B00000000000000000001" || access.applicationCode != "contract_management" {
 		t.Fatalf("unexpected access assignment: %#v", access)
@@ -235,8 +234,9 @@ func TestOnboardSubsystemPersistsSelectedAdministratorForRetry(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	handler.OnboardSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusCreated {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if service.input.InitialAdminUserID != "01K10D00000000000000000001" || access.userID != service.input.InitialAdminUserID {
@@ -861,7 +861,8 @@ func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
-	if response.Code != stdhttp.StatusOK {
+	handler.waitForDeploymentJobs()
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if provisioner.input.ApplicationCode != "contract_management" || provisioner.input.Environment != "prod" {
@@ -1009,6 +1010,16 @@ func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployme
 	return store.transitionErr
 }
 
+func (store *recordingSubsystemDeploymentStateStore) ClaimSubsystemDeployment(ctx context.Context, tenant, code, env, op string, now time.Time) (uint64, error) {
+	return store.state.Generation, store.TransitionSubsystemDeployment(ctx, tenant, code, env, application.SubsystemDeploymentStatusUpdating, op, "", "", now)
+}
+func (store *recordingSubsystemDeploymentStateStore) CompleteSubsystemDeployment(ctx context.Context, tenant, code, env string, generation uint64, status, op, errCode, message string, now time.Time) error {
+	return store.TransitionSubsystemDeployment(ctx, tenant, code, env, status, op, errCode, message, now)
+}
+func (store *recordingSubsystemDeploymentStateStore) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
+	return true, store.TransitionSubsystemDeployment(ctx, state.TenantID, state.ApplicationCode, state.Environment, application.SubsystemDeploymentStatusFailed, state.Operation, "DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试", now)
+}
+
 func (store *recordingSubsystemDeploymentStateStore) DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error {
 	return nil
 }
@@ -1047,8 +1058,9 @@ func TestRetrySubsystemPersistsLifecycleWithoutRepeatingOnboarding(t *testing.T)
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if len(stateStore.transitions) != 2 {
@@ -1094,8 +1106,9 @@ func TestUpdateSubsystemCompletesPendingInitialAccess(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if access.applicationCode != "customer_portal" || access.userID != "01K10B00000000000000000001" || access.operatorID != "01K10E00000000000000000001" {
@@ -1132,8 +1145,9 @@ func TestRetrySubsystemDoesNotRestoreAlreadyCompletedInitialAccess(t *testing.T)
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if access.userID != "" || stateStore.initialAccessMarks != 0 {
@@ -1160,6 +1174,7 @@ func TestUpdateSubsystemFailurePersistsSafeFailureSummary(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
 	if len(stateStore.transitions) != 2 || stateStore.transitions[1].status != application.SubsystemDeploymentStatusFailed {
 		t.Fatalf("transitions = %#v", stateStore.transitions)
@@ -1195,6 +1210,7 @@ func TestUpdateSubsystemPersistsFailureAfterRequestContextCanceled(t *testing.T)
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
 	if requestCtx.Err() != context.Canceled {
 		t.Fatalf("request context error = %v, want canceled", requestCtx.Err())
@@ -1299,8 +1315,9 @@ func TestAdoptSubsystemCreatesManagedLifecycleForUnmanagedEnvironment(t *testing
 	response := httptest.NewRecorder()
 
 	handler.AdoptSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if len(stateStore.transitions) != 2 ||
@@ -1604,8 +1621,9 @@ func TestUpdateSubsystemAllowsReviewedProductionTarget(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	handler.UpdateSubsystem(response, request)
+	handler.waitForDeploymentJobs()
 
-	if response.Code != stdhttp.StatusOK {
+	if response.Code != stdhttp.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if provisioner.input.ManifestChecksum != "sha256:approved" {

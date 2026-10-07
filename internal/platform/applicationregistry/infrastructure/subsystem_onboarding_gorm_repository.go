@@ -10,6 +10,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // SubsystemOnboardingGORMRepository coordinates the multi-table onboarding transaction and the
@@ -592,6 +593,59 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 	return nil
 }
 
+// Claim takes the row lock before issuing credentials. A same-state transition is
+// not a claim: otherwise two requests that observed READY could both deploy.
+func (repository *SubsystemOnboardingGORMRepository) ClaimSubsystemDeployment(ctx context.Context, tenantID, code, environment, operation string, now time.Time) (generation uint64, err error) {
+	err = repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row subsystemDeploymentStateModel
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND application_code = ? AND environment_code = ?", tenantID, code, environment).Take(&row).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil && (row.Status == application.SubsystemDeploymentStatusProvisioning || row.Status == application.SubsystemDeploymentStatusUpdating || row.Status == application.SubsystemDeploymentStatusVerifying || row.Status == application.SubsystemDeploymentStatusDraining) {
+			return application.ErrSubsystemDeploymentTransition
+		}
+		repo := &SubsystemOnboardingGORMRepository{database: tx}
+		if err := repo.TransitionSubsystemDeployment(ctx, tenantID, code, environment, application.SubsystemDeploymentStatusUpdating, operation, "", "", now); err != nil {
+			return err
+		}
+		state, err := repo.GetSubsystemDeploymentState(ctx, tenantID, code, environment)
+		generation = state.Generation
+		return err
+	})
+	return
+}
+
+// Terminal writes are owned by the claimed attempt, not whichever attempt is
+// current when an old background job eventually returns.
+func (repository *SubsystemOnboardingGORMRepository) CompleteSubsystemDeployment(ctx context.Context, tenantID, code, environment string, generation uint64, status, operation, errorCode, message string, now time.Time) error {
+	return repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row subsystemDeploymentStateModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND application_code = ? AND environment_code = ?", tenantID, code, environment).Take(&row).Error; err != nil {
+			return mapManagementError(err)
+		}
+		if row.Generation != generation {
+			return application.ErrSubsystemDeploymentTransition
+		}
+		return (&SubsystemOnboardingGORMRepository{database: tx}).TransitionSubsystemDeployment(ctx, tenantID, code, environment, status, operation, errorCode, message, now)
+	})
+}
+
+// Recovery compares the enumerated snapshot in the UPDATE itself; re-reading
+// and CASing a newer generation would incorrectly close a newly started retry.
+func (repository *SubsystemOnboardingGORMRepository) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
+	if state.StartedAt == nil || !state.StartedAt.Before(cutoff) {
+		return false, nil
+	}
+	if state.Status != application.SubsystemDeploymentStatusProvisioning && state.Status != application.SubsystemDeploymentStatusUpdating && state.Status != application.SubsystemDeploymentStatusVerifying && state.Status != application.SubsystemDeploymentStatusDraining {
+		return false, nil
+	}
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND generation = ? AND status = ? AND started_at = ? AND started_at < ?", state.TenantID, state.ApplicationCode, state.Environment, state.Generation, state.Status, state.StartedAt.UTC(), cutoff.UTC()).
+		Updates(map[string]any{"status": application.SubsystemDeploymentStatusFailed, "last_error_code": "DEPLOYMENT_INTERRUPTED", "last_error_message": "部署请求中断，请点击重试", "completed_at": now.UTC(), "updated_at": now.UTC()})
+	return result.RowsAffected == 1, result.Error
+}
+
 // GetSubsystemDeploymentState returns only tenant-scoped lifecycle metadata.
 func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState(ctx context.Context, tenantID, applicationCode, environment string) (application.SubsystemDeploymentState, error) {
 	var model subsystemDeploymentStateModel
@@ -684,6 +738,37 @@ func deploymentStateFromModel(model subsystemDeploymentStateModel) application.S
 }
 
 // SetSubsystemDesiredManifest 记录控制面本轮期望清单；与已应用值不同时立即标记 DRIFT。
+// ListInFlightSubsystemDeployments 返回仍处于非终态（PROVISIONING/UPDATING/VERIFYING/
+// DRAINING）的部署状态行，供后台看护任务识别编排已死、无人收口的记录。只投影状态机
+// 需要的字段来源行本身；不暴露部署命令输出或凭据。
+func (repository *SubsystemOnboardingGORMRepository) ListInFlightSubsystemDeployments(ctx context.Context) ([]application.SubsystemDeploymentState, error) {
+	var rows []subsystemDeploymentStateModel
+	if err := repository.database.WithContext(ctx).
+		Where("status IN ?", []string{
+			application.SubsystemDeploymentStatusProvisioning,
+			application.SubsystemDeploymentStatusUpdating,
+			application.SubsystemDeploymentStatusVerifying,
+			application.SubsystemDeploymentStatusDraining,
+		}).
+		Order("started_at ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	states := make([]application.SubsystemDeploymentState, 0, len(rows))
+	for _, row := range rows {
+		states = append(states, application.SubsystemDeploymentState{
+			TenantID: row.TenantID, ApplicationID: row.ApplicationID, EnvironmentID: row.EnvironmentID,
+			ApplicationCode: row.ApplicationCode, Environment: row.Environment,
+			Status: row.Status, Operation: row.Operation, Generation: row.Generation,
+			AttemptCount: row.AttemptCount, StartedAt: row.StartedAt, CompletedAt: row.CompletedAt,
+			DesiredManifestChecksum: dereferenceString(row.DesiredManifestChecksum),
+			AppliedManifestChecksum: dereferenceString(row.AppliedManifestChecksum),
+			LastErrorCode:           dereferenceString(row.LastErrorCode), LastError: dereferenceString(row.LastError),
+		})
+	}
+	return states, nil
+}
+
 func (repository *SubsystemOnboardingGORMRepository) SetSubsystemDesiredManifest(ctx context.Context, tenantID, applicationCode, environment, checksum string, now time.Time) error {
 	checksum = strings.TrimSpace(checksum)
 	if checksum == "" {

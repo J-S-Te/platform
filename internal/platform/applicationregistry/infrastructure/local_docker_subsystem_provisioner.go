@@ -801,7 +801,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		return provisioningError("subsystem public URL is invalid")
 	}
 	values := map[string]string{
-		"PLATFORM_BASE_URL":         input.Issuer,
+		// PLATFORM_BASE_URL 是子系统回调平台控制面的私网地址；写成 OIDC issuer
+		// （Keycloak realm URL）会让合同后端把认证指到 Keycloak 而不是平台，
+		// 并被 docker-local 的运行时校验拒绝。
+		"PLATFORM_BASE_URL":         "http://platform-api:8080",
 		"OIDC_ISSUER":               input.Issuer,
 		"OIDC_CLIENT_ID":            input.ClientID,
 		"OIDC_CLIENT_SECRET":        input.ClientSecret,
@@ -1161,7 +1164,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedProjectStac
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "project-migrate"); err != nil {
 		return err
 	}
-	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--build", "--no-deps", "project-api")
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "project-api"); err != nil {
+		return err
+	}
+	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "project-api")
 }
 
 // rebuildIntegratedSettlementStack keeps Settlement inside the single platform

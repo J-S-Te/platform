@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/infrastructure"
@@ -493,6 +494,21 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			return nil, fmt.Errorf("create Keycloak broker health runner: %w", err)
 		}
 		runners = append(runners, brokerHealthRunner)
+	}
+	// 子系统部署状态看护：把进程死亡遗留的“更新中/接入中”状态定时收口为失败，
+	// 让操作者始终可以重试（P1：不再依赖有人打开管理页触发恢复）。
+	deploymentSweepStore, err := applicationregistryinfrastructure.NewSubsystemOnboardingGORMRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create subsystem deployment sweep store: %w", err)
+	}
+	if sweeper, err := newSubsystemDeploymentSweeper(deploymentSweepStore, logger, time.Minute, applicationregistryapplication.SubsystemDeploymentStaleAfter); err == nil {
+		runners = append(runners, sweeper)
+	} else {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create subsystem deployment sweeper: %w", err)
 	}
 	runner := &concurrentRunner{runners: runners}
 	return &Worker{Runner: runner, Logger: logger, database: db, logFile: logFile}, nil
