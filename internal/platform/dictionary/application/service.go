@@ -104,15 +104,32 @@ type ItemUpdateInput struct {
 	Version      uint64
 }
 
+// DictionaryDeleteInput removes one dictionary together with every item it owns.
+type DictionaryDeleteInput struct {
+	TenantID     string
+	DictionaryID string
+	OperatorID   string
+}
+
+// ItemDeleteInput removes one item under a tenant-owned dictionary.
+type ItemDeleteInput struct {
+	TenantID     string
+	DictionaryID string
+	ItemID       string
+	OperatorID   string
+}
+
 // Repository persists dictionaries and their items.
 type Repository interface {
 	ListDictionaries(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Dictionary], error)
 	CreateDictionary(ctx context.Context, input DictionaryCreateInput, dictionaryID string, now time.Time) (domain.Dictionary, error)
 	GetDictionary(ctx context.Context, tenantID, dictionaryID string) (domain.Dictionary, error)
 	UpdateDictionary(ctx context.Context, input DictionaryUpdateInput, now time.Time) (domain.Dictionary, error)
+	DeleteDictionary(ctx context.Context, input DictionaryDeleteInput) (int64, error)
 	ListItems(ctx context.Context, tenantID, dictionaryID string, query PageRequest, activeOnly bool) (PageResult[domain.Item], error)
 	CreateItem(ctx context.Context, input ItemCreateInput, itemID string, now time.Time) (domain.Item, error)
 	UpdateItem(ctx context.Context, input ItemUpdateInput, now time.Time) (domain.Item, error)
+	DeleteItem(ctx context.Context, input ItemDeleteInput) error
 	GetDictionaryByCode(ctx context.Context, tenantID, code string) (domain.Dictionary, error)
 }
 
@@ -217,6 +234,33 @@ func (service *Service) UpdateItem(ctx context.Context, input ItemUpdateInput) (
 	}
 
 	return service.repository.UpdateItem(ctx, input, service.clock.Now().UTC())
+}
+
+// DeleteDictionary removes one tenant-owned dictionary and all of its items in a single
+// transaction, returning the number of items removed with it. The operation is physical
+// and irreversible; disabling is the reversible alternative for values already in use.
+func (service *Service) DeleteDictionary(ctx context.Context, input DictionaryDeleteInput) (int64, error) {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.DictionaryID = strings.TrimSpace(input.DictionaryID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	if input.TenantID == "" || input.DictionaryID == "" || input.OperatorID == "" {
+		return 0, ErrValidation
+	}
+
+	return service.repository.DeleteDictionary(ctx, input)
+}
+
+// DeleteItem removes one item whose parent dictionary belongs to the current tenant.
+func (service *Service) DeleteItem(ctx context.Context, input ItemDeleteInput) error {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.DictionaryID = strings.TrimSpace(input.DictionaryID)
+	input.ItemID = strings.TrimSpace(input.ItemID)
+	input.OperatorID = strings.TrimSpace(input.OperatorID)
+	if input.TenantID == "" || input.DictionaryID == "" || input.ItemID == "" || input.OperatorID == "" {
+		return ErrValidation
+	}
+
+	return service.repository.DeleteItem(ctx, input)
 }
 
 // ListActiveItemsByCode returns only active items for an active dictionary. It is suitable for

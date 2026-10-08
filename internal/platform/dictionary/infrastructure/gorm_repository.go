@@ -393,6 +393,77 @@ func (repository *Repository) UpdateItem(
 	return updated, nil
 }
 
+// DeleteDictionary locks the tenant-owned dictionary row, then removes its items and the
+// dictionary itself in one transaction. The FK from dict_item is ON DELETE RESTRICT, so
+// items must go first; the lock serializes the cascade against concurrent item writes.
+func (repository *Repository) DeleteDictionary(
+	ctx context.Context,
+	input dictionaryapplication.DictionaryDeleteInput,
+) (int64, error) {
+	var deletedItems int64
+	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var row dictionaryModel
+		err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND tenant_id = ?", input.DictionaryID, input.TenantID).
+			Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return dictionaryapplication.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("lock dictionary: %w", err)
+		}
+
+		result := transaction.
+			Where("tenant_id = ? AND dictionary_id = ?", input.TenantID, input.DictionaryID).
+			Delete(&itemModel{})
+		if result.Error != nil {
+			return fmt.Errorf("delete dictionary items: %w", result.Error)
+		}
+		deletedItems = result.RowsAffected
+
+		if err := transaction.
+			Where("id = ? AND tenant_id = ?", input.DictionaryID, input.TenantID).
+			Delete(&dictionaryModel{}).Error; err != nil {
+			return fmt.Errorf("delete dictionary: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return deletedItems, nil
+}
+
+// DeleteItem locks the item under its tenant and dictionary boundaries before removing it,
+// so a guessed global item ID cannot cross tenants or dictionaries.
+func (repository *Repository) DeleteItem(
+	ctx context.Context,
+	input dictionaryapplication.ItemDeleteInput,
+) error {
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var row itemModel
+		err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND dictionary_id = ? AND tenant_id = ?", input.ItemID, input.DictionaryID, input.TenantID).
+			Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return dictionaryapplication.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("lock dictionary item: %w", err)
+		}
+
+		if err := transaction.
+			Where("id = ? AND dictionary_id = ? AND tenant_id = ?", row.ID, input.DictionaryID, input.TenantID).
+			Delete(&itemModel{}).Error; err != nil {
+			return fmt.Errorf("delete dictionary item: %w", err)
+		}
+
+		return nil
+	})
+}
+
 func (repository *Repository) ensureDictionaryExists(ctx context.Context, tenantID, dictionaryID string) error {
 	var count int64
 	if err := repository.database.WithContext(ctx).

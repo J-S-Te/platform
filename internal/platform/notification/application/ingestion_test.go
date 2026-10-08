@@ -28,10 +28,17 @@ func (r *ingestionTestRepository) GetIngestionReceipt(_ context.Context, tenantI
 	return domain.IngestionReceipt{ReceiptID: receiptID, Status: domain.IngestionStatusCompleted}, nil
 }
 
-type ingestionTestPolicy struct{ enabled bool }
+type ingestionTestPolicy struct {
+	enabled  bool
+	remindAt time.Time
+}
 
-func (p ingestionTestPolicy) InboxEnabled(context.Context, string) (bool, error) {
-	return p.enabled, nil
+func (p ingestionTestPolicy) DeliveryVisibility(_ context.Context, _ string, now time.Time) (bool, time.Time, error) {
+	remindAt := p.remindAt
+	if remindAt.IsZero() {
+		remindAt = now
+	}
+	return p.enabled, remindAt, nil
 }
 
 type ingestionTestResolver struct{ users []string }

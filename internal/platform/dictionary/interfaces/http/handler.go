@@ -29,6 +29,8 @@ type service interface {
 	ListItems(ctx context.Context, tenantID, dictionaryID string, query dictionaryapplication.PageRequest) (dictionaryapplication.PageResult[dictionarydomain.Item], error)
 	CreateItem(ctx context.Context, input dictionaryapplication.ItemCreateInput) (dictionarydomain.Item, error)
 	UpdateItem(ctx context.Context, input dictionaryapplication.ItemUpdateInput) (dictionarydomain.Item, error)
+	DeleteDictionary(ctx context.Context, input dictionaryapplication.DictionaryDeleteInput) (int64, error)
+	DeleteItem(ctx context.Context, input dictionaryapplication.ItemDeleteInput) error
 	ListActiveItemsByCode(ctx context.Context, tenantID, code string, query dictionaryapplication.PageRequest) (dictionaryapplication.PageResult[dictionarydomain.Item], error)
 }
 
@@ -249,6 +251,47 @@ func (handler *Handler) UpdateItem(writer http.ResponseWriter, request *http.Req
 	}
 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "字典项已更新", itemToResponse(result))
+}
+
+// DeleteDictionary removes a dictionary together with every item it owns.
+func (handler *Handler) DeleteDictionary(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+
+	deletedItems, err := handler.service.DeleteDictionary(request.Context(), dictionaryapplication.DictionaryDeleteInput{
+		TenantID: principal.Tenant.ID, DictionaryID: request.PathValue("dictionary_id"), OperatorID: principal.User.ID,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "业务字典已删除", map[string]any{
+		"dictionary_id": request.PathValue("dictionary_id"), "deleted_item_count": deletedItems,
+	})
+}
+
+// DeleteItem removes one item under a tenant-owned dictionary.
+func (handler *Handler) DeleteItem(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.principal(writer, request)
+	if !ok {
+		return
+	}
+
+	err := handler.service.DeleteItem(request.Context(), dictionaryapplication.ItemDeleteInput{
+		TenantID: principal.Tenant.ID, DictionaryID: request.PathValue("dictionary_id"),
+		ItemID: request.PathValue("item_id"), OperatorID: principal.User.ID,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
+
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "字典项已删除", map[string]any{
+		"dictionary_id": request.PathValue("dictionary_id"), "item_id": request.PathValue("item_id"),
+	})
 }
 
 // ListActiveItemsByCode returns active values for business read-only selection controls.

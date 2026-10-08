@@ -150,7 +150,7 @@ func (service *Service) GetNotificationSettings(ctx context.Context, tenantID st
 func (service *Service) UpdateNotificationSettings(ctx context.Context, input NotificationSettingsUpdateInput) (domain.NotificationSettings, error) {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
-	if input.TenantID == "" || input.OperatorID == "" || input.Version == 0 || input.EmailEnabled || !validReminderFrequency(input.ReminderFrequency) {
+	if input.TenantID == "" || input.OperatorID == "" || input.Version == 0 || input.EmailEnabled || !input.ReminderFrequency.Valid() {
 		return domain.NotificationSettings{}, ErrValidation
 	}
 	settingsID, err := service.ids.New(service.clock.Now().UTC())
@@ -165,7 +165,7 @@ func defaultPlatformSettings(tenantID string) domain.PlatformSettings {
 }
 
 func defaultNotificationSettings(tenantID string) domain.NotificationSettings {
-	return domain.NotificationSettings{TenantID: tenantID, InboxEnabled: true, EmailEnabled: false, ReminderFrequency: domain.ReminderFrequencyDaily, Version: 1}
+	return domain.NotificationSettings{TenantID: tenantID, InboxEnabled: true, EmailEnabled: false, ReminderFrequency: domain.ReminderFrequencyImmediate, Version: 1}
 }
 
 func normalizePlatformSettings(input PlatformSettingsUpdateInput) PlatformSettingsUpdateInput {
@@ -183,15 +183,6 @@ func validPlatformSettings(input PlatformSettingsUpdateInput) bool {
 		input.OrganizationName != "" && len(input.OrganizationName) <= 128 &&
 		input.OrganizationAlias != "" && len(input.OrganizationAlias) <= 64 &&
 		input.Timezone != "" && len(input.Timezone) <= 64 && len(input.Qualification) <= 500
-}
-
-func validReminderFrequency(value domain.ReminderFrequency) bool {
-	switch value {
-	case domain.ReminderFrequencyDaily, domain.ReminderFrequencyEveryFourHours, domain.ReminderFrequencyOnce:
-		return true
-	default:
-		return false
-	}
 }
 
 // GetAccessSettings returns saved access settings or the local-only default.

@@ -517,12 +517,17 @@ func NewRouter(
 		if dictionaryHandler != nil {
 			apiRouter.GET("/dictionaries", middleware.RequirePermission("platform:dictionary:read"), adaptHandler(dictionaryHandler.ListDictionaries))
 			apiRouter.POST("/dictionaries", middleware.RequirePermission("platform:dictionary:create"), adaptHandler(dictionaryHandler.CreateDictionary))
-			apiRouter.GET("/dictionaries/code/:dictionary_code/items", middleware.RequirePermission("platform:dictionary:read"), adaptHandler(dictionaryHandler.ListActiveItemsByCode))
+			// 业务表单的运行时选择接口：认证由上方 apiRouter 组级中间件兜底，不再要求
+			// dictionary:read——业务用户通常没有字典管理权限。租户隔离基于会话主体，
+			// 且服务层只返回启用字典的启用项，不暴露停用值与管理元数据。
+			apiRouter.GET("/dictionaries/code/:dictionary_code/items", adaptHandler(dictionaryHandler.ListActiveItemsByCode))
 			apiRouter.GET("/dictionaries/:dictionary_id", middleware.RequirePermission("platform:dictionary:read"), adaptHandler(dictionaryHandler.GetDictionary))
 			apiRouter.PATCH("/dictionaries/:dictionary_id", middleware.RequirePermission("platform:dictionary:update"), adaptHandler(dictionaryHandler.UpdateDictionary))
 			apiRouter.GET("/dictionaries/:dictionary_id/items", middleware.RequirePermission("platform:dictionary-item:read"), adaptHandler(dictionaryHandler.ListItems))
 			apiRouter.POST("/dictionaries/:dictionary_id/items", middleware.RequirePermission("platform:dictionary-item:create"), adaptHandler(dictionaryHandler.CreateItem))
 			apiRouter.PATCH("/dictionaries/:dictionary_id/items/:item_id", middleware.RequirePermission("platform:dictionary-item:update"), adaptHandler(dictionaryHandler.UpdateItem))
+			apiRouter.DELETE("/dictionaries/:dictionary_id", middleware.RequirePermission("platform:dictionary:delete"), adaptHandler(dictionaryHandler.DeleteDictionary))
+			apiRouter.DELETE("/dictionaries/:dictionary_id/items/:item_id", middleware.RequirePermission("platform:dictionary-item:delete"), adaptHandler(dictionaryHandler.DeleteItem))
 		}
 
 		if authorizationHandler != nil {

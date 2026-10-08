@@ -33,14 +33,14 @@ const (
 // Service exposes the notification application's tenant-scoped use cases.
 type Service struct {
 	repository Repository
-	policy     InboxPolicy
+	policy     DeliveryVisibilityPolicy
 	resolver   RecipientResolver
 	ids        IdentifierGenerator
 	clock      Clock
 }
 
 // NewService validates and constructs the notification application service.
-func NewService(repository Repository, policy InboxPolicy, resolver RecipientResolver, ids IdentifierGenerator, clock Clock) (*Service, error) {
+func NewService(repository Repository, policy DeliveryVisibilityPolicy, resolver RecipientResolver, ids IdentifierGenerator, clock Clock) (*Service, error) {
 	if repository == nil || policy == nil || resolver == nil || ids == nil || clock == nil {
 		return nil, errors.New("notification service dependencies must not be nil")
 	}
@@ -107,15 +107,15 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (CreateRe
 		return CreateResult{}, err
 	}
 	input.TenantID = strings.TrimSpace(input.TenantID)
-	enabled, err := service.policy.InboxEnabled(ctx, input.TenantID)
+	now := service.clock.Now().UTC()
+	enabled, remindAt, err := service.policy.DeliveryVisibility(ctx, input.TenantID, now)
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("read inbox policy: %w", err)
+		return CreateResult{}, fmt.Errorf("read delivery visibility: %w", err)
 	}
 	if !enabled {
+		// NEVER 或站内信关闭：创建被抑制，不产生消息与投递记录。
 		return CreateResult{Suppressed: true}, nil
 	}
-
-	now := service.clock.Now().UTC()
 	template, templateVersion, err := service.repository.GetActiveTemplateByCode(ctx, input.TenantID, normalizeCode(input.TemplateCode))
 	if err != nil {
 		return CreateResult{}, err
@@ -148,7 +148,7 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (CreateRe
 		if idErr != nil {
 			return CreateResult{}, fmt.Errorf("generate notification delivery ID: %w", idErr)
 		}
-		deliveries = append(deliveries, domain.Delivery{ID: deliveryID, TenantID: input.TenantID, MessageID: messageID, RecipientUserID: userID, Status: domain.DeliveryStatusPending, CreatedAt: now, UpdatedAt: now})
+		deliveries = append(deliveries, domain.Delivery{ID: deliveryID, TenantID: input.TenantID, MessageID: messageID, RecipientUserID: userID, Status: domain.DeliveryStatusPending, RemindAt: &remindAt, CreatedAt: now, UpdatedAt: now})
 	}
 	created, err := service.repository.CreateMessage(ctx, message, deliveries)
 	if err != nil {
@@ -213,7 +213,7 @@ func (service *Service) ListInbox(ctx context.Context, tenantID, userID string, 
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
 		return PageResult[domain.InboxItem]{}, ErrValidation
 	}
-	return service.repository.ListInbox(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), normalizePage(page))
+	return service.repository.ListInbox(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), normalizePage(page), service.clock.Now().UTC())
 }
 
 // GetInboxItem reads exactly one delivered inbox item owned by the authenticated user.
@@ -221,7 +221,7 @@ func (service *Service) GetInboxItem(ctx context.Context, tenantID, userID, deli
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(deliveryID) == "" {
 		return domain.InboxItem{}, ErrValidation
 	}
-	return service.repository.GetInboxItem(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(deliveryID))
+	return service.repository.GetInboxItem(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(deliveryID), service.clock.Now().UTC())
 }
 
 // CountUnread returns the authenticated recipient's delivered unread item count.
@@ -229,7 +229,7 @@ func (service *Service) CountUnread(ctx context.Context, tenantID, userID string
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
 		return 0, ErrValidation
 	}
-	return service.repository.CountUnread(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID))
+	return service.repository.CountUnread(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), service.clock.Now().UTC())
 }
 
 // MarkRead 只更新当前收件人拥有且已投递的记录；重复已读操作保持幂等，不泄露其他用户的投递 ID。

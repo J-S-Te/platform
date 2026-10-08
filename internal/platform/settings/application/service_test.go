@@ -49,3 +49,34 @@ func TestNotificationSettingsRejectEmailUntilDeliveryWorkerExists(t *testing.T) 
 		t.Fatalf("error=%v, want validation", err)
 	}
 }
+
+// 新词表四档全部可保存；退役词表（EVERY_FOUR_HOURS/ONCE）必须被拒绝。
+func TestNotificationSettingsAcceptsNewReminderVocabulary(t *testing.T) {
+	service, _ := NewService(&settingsTestRepository{}, settingsTestID{}, settingsTestClock{})
+	for _, frequency := range []domain.ReminderFrequency{
+		domain.ReminderFrequencyImmediate, domain.ReminderFrequencyDaily,
+		domain.ReminderFrequencyWeekly, domain.ReminderFrequencyNever,
+	} {
+		if _, err := service.UpdateNotificationSettings(context.Background(), NotificationSettingsUpdateInput{TenantID: "tenant", OperatorID: "user", InboxEnabled: true, ReminderFrequency: frequency, Version: 1}); err != nil {
+			t.Fatalf("frequency %q rejected: %v", frequency, err)
+		}
+	}
+}
+func TestNotificationSettingsRejectsRetiredReminderVocabulary(t *testing.T) {
+	service, _ := NewService(&settingsTestRepository{}, settingsTestID{}, settingsTestClock{})
+	for _, frequency := range []domain.ReminderFrequency{"EVERY_FOUR_HOURS", "ONCE", "HOURLY", ""} {
+		if _, err := service.UpdateNotificationSettings(context.Background(), NotificationSettingsUpdateInput{TenantID: "tenant", OperatorID: "user", InboxEnabled: true, ReminderFrequency: frequency, Version: 1}); !errors.Is(err, ErrValidation) {
+			t.Fatalf("frequency %q error=%v, want validation", frequency, err)
+		}
+	}
+}
+func TestNotificationDefaultsUseImmediateReminder(t *testing.T) {
+	service, _ := NewService(&settingsTestRepository{getErr: ErrNotFound}, settingsTestID{}, settingsTestClock{})
+	got, err := service.GetNotificationSettings(context.Background(), "tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReminderFrequency != domain.ReminderFrequencyImmediate {
+		t.Fatalf("default reminder = %q, want IMMEDIATE（保持未设置租户的现状行为）", got.ReminderFrequency)
+	}
+}

@@ -45,3 +45,59 @@ func TestUpdateDictionaryRequiresOptimisticVersion(t *testing.T) {
 		t.Fatalf("error=%v, want validation", err)
 	}
 }
+
+type deleteTestRepository struct {
+	Repository
+	dictionaryInput DictionaryDeleteInput
+	itemInput       ItemDeleteInput
+	deletedItems    int64
+}
+
+func (r *deleteTestRepository) DeleteDictionary(_ context.Context, input DictionaryDeleteInput) (int64, error) {
+	r.dictionaryInput = input
+	return r.deletedItems, nil
+}
+
+func (r *deleteTestRepository) DeleteItem(_ context.Context, input ItemDeleteInput) error {
+	r.itemInput = input
+	return nil
+}
+
+func TestDeleteDictionaryRequiresFullContext(t *testing.T) {
+	repo := &deleteTestRepository{}
+	service, _ := NewService(repo, dictionaryTestID{}, dictionaryTestClock{})
+	if _, err := service.DeleteDictionary(context.Background(), DictionaryDeleteInput{TenantID: "tenant", DictionaryID: "dict"}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("error=%v, want validation", err)
+	}
+
+	if _, err := service.DeleteDictionary(context.Background(), DictionaryDeleteInput{TenantID: " tenant ", DictionaryID: " dict ", OperatorID: " user "}); err != nil {
+		t.Fatal(err)
+	}
+	if repo.dictionaryInput.TenantID != "tenant" || repo.dictionaryInput.DictionaryID != "dict" || repo.dictionaryInput.OperatorID != "user" {
+		t.Fatalf("input=%+v", repo.dictionaryInput)
+	}
+}
+
+func TestDeleteDictionaryPropagatesCascadeCount(t *testing.T) {
+	repo := &deleteTestRepository{deletedItems: 3}
+	service, _ := NewService(repo, dictionaryTestID{}, dictionaryTestClock{})
+	deleted, err := service.DeleteDictionary(context.Background(), DictionaryDeleteInput{TenantID: "tenant", DictionaryID: "dict", OperatorID: "user"})
+	if err != nil || deleted != 3 {
+		t.Fatalf("deleted=%d error=%v", deleted, err)
+	}
+}
+
+func TestDeleteItemRequiresFullContext(t *testing.T) {
+	repo := &deleteTestRepository{}
+	service, _ := NewService(repo, dictionaryTestID{}, dictionaryTestClock{})
+	if err := service.DeleteItem(context.Background(), ItemDeleteInput{TenantID: "tenant", DictionaryID: "dict", OperatorID: "user"}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("error=%v, want validation", err)
+	}
+
+	if err := service.DeleteItem(context.Background(), ItemDeleteInput{TenantID: "tenant", DictionaryID: "dict", ItemID: " item ", OperatorID: "user"}); err != nil {
+		t.Fatal(err)
+	}
+	if repo.itemInput.ItemID != "item" || repo.itemInput.TenantID != "tenant" || repo.itemInput.DictionaryID != "dict" {
+		t.Fatalf("input=%+v", repo.itemInput)
+	}
+}

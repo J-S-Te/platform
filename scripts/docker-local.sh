@@ -1358,6 +1358,22 @@ ensure_data_analysis_discovery_candidate() {
 	compose_run up --no-start --no-deps --no-build dashboard-api >/dev/null
 }
 
+collect_dockerfile_base_images() {
+    # 动态收集各子系统 Dockerfile 的 FROM 基础镜像，替代手工清单：基础镜像升级后
+    # 手工清单必然漂移（合同子系统升到 golang:1.27.1 而清单仍是 1.26.4，重建时
+    # 现场拉取遇上 Docker Hub 不可达即部署失败）。多阶段引用（FROM runtime-base）
+    # 与 scratch 不含 .:/ 分隔符，据此过滤，只保留真实镜像引用。
+    local dockerfile
+    local images=()
+    local line
+    while IFS= read -r dockerfile; do
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && images+=("$line")
+        done < <(grep -E "^FROM " "$dockerfile" | awk '{print $2}' | grep -E '[.:/]' || true)
+    done < <(find "$workspace_root" -maxdepth 3 -name "Dockerfile" -type f 2>/dev/null)
+    printf '%s\n' "${images[@]}" | sort -u
+}
+
 pull_image_with_retry() {
     local image="$1" max_attempts="${2:-5}" attempt delay
     if docker image inspect "$image" >/dev/null 2>&1; then
@@ -1378,15 +1394,12 @@ pull_image_with_retry() {
 
 prepare_base_images() {
     local image
-    local images=(
-        "golang:1.26.4-alpine"
-        "alpine:3.21"
-        "node:22-alpine"
-        "nginx:1.27-alpine"
-        "mysql:8.4"
-        "quay.io/keycloak/keycloak:26.2"
-        "temporalio/auto-setup:1.29.7"
-    )
+    local images=()
+    while IFS= read -r image; do
+        [[ -n "$image" ]] && images+=("$image")
+    done < <(collect_dockerfile_base_images)
+    # 编排在 compose image: 字段直接引用、不经任何 Dockerfile 构建的基础镜像。
+    images+=("mysql:8.4" "quay.io/keycloak/keycloak:26.2" "temporalio/auto-setup:1.29.7")
     log "检查并串行准备基础镜像"
     for image in "${images[@]}"; do pull_image_with_retry "$image"; done
 }
@@ -1394,22 +1407,24 @@ prepare_base_images() {
 prepare_go_backend_base_images() {
     local target_name="${1:-Go 后端}"
     local image
-    local images=(
-        "golang:1.26.4-alpine"
-        "alpine:3.21"
-    )
     log "检查并串行准备${target_name}所需基础镜像"
-    for image in "${images[@]}"; do pull_image_with_retry "$image"; done
+    while IFS= read -r image; do
+        [[ -n "$image" ]] || continue
+        case "$image" in
+            golang:*|alpine:*) pull_image_with_retry "$image" ;;
+        esac
+    done < <(collect_dockerfile_base_images)
 }
 
 prepare_frontend_base_images() {
     local image
-    local images=(
-        "node:22-alpine"
-        "nginx:1.27-alpine"
-    )
     log "检查并串行准备统一前端所需基础镜像"
-    for image in "${images[@]}"; do pull_image_with_retry "$image"; done
+    while IFS= read -r image; do
+        [[ -n "$image" ]] || continue
+        case "$image" in
+            node:*|nginx:*) pull_image_with_retry "$image" ;;
+        esac
+    done < <(collect_dockerfile_base_images)
 }
 
 build_images() {
