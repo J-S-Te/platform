@@ -36,6 +36,8 @@ type personnelCreatePayload struct {
 type personnelTransitionPayload struct {
 	ToStatus          string `json:"to_status"`
 	ApprovalReference string `json:"approval_reference"`
+	// Immediate 表示对已排期请求跳过生效时间闸门立即执行；合法性由应用服务校验。
+	Immediate bool `json:"immediate"`
 }
 type personnelHandoverCompletePayload struct {
 	TargetUserID string `json:"target_user_id"`
@@ -128,7 +130,7 @@ func (h *PersonnelChangeHandler) Transition(w http.ResponseWriter, r *http.Reque
 		httpresponse.WriteError(w, r, 422, httperror.Validation)
 		return
 	}
-	v, e := h.service.Transition(r.Context(), application.PersonnelChangeTransitionInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, ID: r.PathValue("change_id"), ToStatus: x.ToStatus, ApprovalReference: x.ApprovalReference})
+	v, e := h.service.Transition(r.Context(), application.PersonnelChangeTransitionInput{TenantID: p.Tenant.ID, OperatorID: p.User.ID, ID: r.PathValue("change_id"), ToStatus: x.ToStatus, ApprovalReference: x.ApprovalReference, Immediate: x.Immediate})
 	if e != nil {
 		writePersonnelChangeError(w, r, e)
 		return

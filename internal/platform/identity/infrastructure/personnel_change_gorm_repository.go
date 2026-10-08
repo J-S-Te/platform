@@ -182,7 +182,9 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 				}
 			}
 		}
-		if err := enqueueKeycloakIdentityEvents(tx, req.TenantID, []string{req.UserID}, now, "PERSONNEL_CHANGE_EXECUTED"); err != nil {
+		// 事件类型必须落在 keycloak_authorization_outbox 的检查约束内；异动执行
+		// 变更的是就业状态、主组织与账号状态，按身份变化事件驱动下游投影刷新。
+		if err := enqueueKeycloakIdentityEvents(tx, req.TenantID, []string{req.UserID}, now, "IDENTITY_CHANGED"); err != nil {
 			return err
 		}
 		executionUpdate := tx.Model(&personnelChangeModel{}).

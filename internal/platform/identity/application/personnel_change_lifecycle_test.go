@@ -280,3 +280,47 @@ func TestPersonnelChangeDoesNotNotifyWhenExecutionFails(t *testing.T) {
 		t.Fatalf("notification count=%d, want 0 after failed execution", len(notifier.created))
 	}
 }
+
+func TestPersonnelChangeImmediateExecutionSkipsEffectiveTimeGate(t *testing.T) {
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	// 生效时间在未来：常规执行必须被时间闸门拒绝，立即执行应放行到仓储。
+	effectiveAt := now.Add(24 * time.Hour)
+	repository := &personnelChangeExecutionRepository{request: PersonnelChangeRequest{ID: "change-1", TenantID: "tenant-1", UserID: "user-1", TargetOrgUnitID: "org-1", ChangeType: domain.PersonnelChangeTransfer, Reason: "业务调整", Status: domain.PersonnelChangeScheduled, EffectiveAt: &effectiveAt}}
+	notifier := &personnelChangeNotifier{}
+	service, err := NewPersonnelChangeService(repository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetNotifier(notifier)
+
+	if _, err := service.Transition(context.Background(), PersonnelChangeTransitionInput{TenantID: "tenant-1", OperatorID: "operator-1", ID: "change-1", ToStatus: domain.PersonnelChangeExecuted}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("scheduled execution before effective time err=%v, want ErrConflict", err)
+	}
+	result, err := service.Transition(context.Background(), PersonnelChangeTransitionInput{TenantID: "tenant-1", OperatorID: "operator-1", ID: "change-1", ToStatus: domain.PersonnelChangeExecuted, Immediate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != domain.PersonnelChangeExecuted || result.ExecutedAt == nil {
+		t.Fatalf("result=%+v, want executed with executed_at", result)
+	}
+	if len(notifier.created) != 1 {
+		t.Fatalf("notification count=%d, want 1 after immediate execution", len(notifier.created))
+	}
+}
+
+func TestPersonnelChangeImmediateFlagRejectedForNonExecutedStatus(t *testing.T) {
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	effectiveAt := now.Add(-time.Minute)
+	repository := &personnelChangeExecutionRepository{request: PersonnelChangeRequest{ID: "change-1", TenantID: "tenant-1", UserID: "user-1", ChangeType: domain.PersonnelChangeTransfer, Reason: "业务调整", Status: domain.PersonnelChangeScheduled, EffectiveAt: &effectiveAt}}
+	service, err := NewPersonnelChangeService(repository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.Transition(context.Background(), PersonnelChangeTransitionInput{TenantID: "tenant-1", OperatorID: "operator-1", ID: "change-1", ToStatus: domain.PersonnelChangePendingApproval, ApprovalReference: "APPROVAL-1", Immediate: true}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("immediate on non-executed status err=%v, want ErrValidation", err)
+	}
+	if _, err := service.Transition(context.Background(), PersonnelChangeTransitionInput{TenantID: "tenant-1", OperatorID: "operator-1", ID: "change-1", ToStatus: domain.PersonnelChangeCancelled, Immediate: true}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("immediate on cancel err=%v, want ErrValidation", err)
+	}
+}
