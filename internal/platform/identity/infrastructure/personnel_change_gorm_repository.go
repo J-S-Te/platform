@@ -184,6 +184,22 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 		}
 		// 事件类型必须落在 keycloak_authorization_outbox 的检查约束内；异动执行
 		// 变更的是就业状态、主组织与账号状态，按身份变化事件驱动下游投影刷新。
+		// 晋升/降职/调岗立即改变有效权限与主组织：撤销被调整人的活跃平台会话并经
+		// RP back-channel logout 通知下游销毁 SSO 会话，防止旧身份 token 在过期前
+		// 继续访问已变更的授权。无活跃会话（未登录）时撤销返回 ErrUnauthenticated，
+		// 属正常情况；重新登录由会话实时投影与 outbox 同步保证拿到新任职。
+		if req.ChangeType == domain.PersonnelChangePromotion || req.ChangeType == domain.PersonnelChangeDemotion || req.ChangeType == domain.PersonnelChangeTransfer {
+			var reassignmentAccountIDs []string
+			if err := tx.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ?", req.TenantID, req.UserID).Pluck("id", &reassignmentAccountIDs).Error; err != nil {
+				return fmt.Errorf("list accounts before personnel reassignment: %w", err)
+			}
+			identityRepository := &GORMRepository{database: tx}
+			for _, accountID := range reassignmentAccountIDs {
+				if err := identityRepository.RevokeAccountSessions(c, req.TenantID, accountID, now, "PERSONNEL_TRANSFER"); err != nil && !errors.Is(err, application.ErrUnauthenticated) {
+					return fmt.Errorf("revoke account sessions during personnel reassignment: %w", err)
+				}
+			}
+		}
 		if err := enqueueKeycloakIdentityEvents(tx, req.TenantID, []string{req.UserID}, now, "IDENTITY_CHANGED"); err != nil {
 			return err
 		}
