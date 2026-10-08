@@ -324,3 +324,104 @@ func TestPersonnelChangeImmediateFlagRejectedForNonExecutedStatus(t *testing.T) 
 		t.Fatalf("immediate on cancel err=%v, want ErrValidation", err)
 	}
 }
+
+type stubHandoverChecker struct{ ready bool }
+
+func (s stubHandoverChecker) Check(context.Context, PersonnelChangeRequest) (HandoverReport, error) {
+	return HandoverReport{Ready: s.ready}, nil
+}
+
+// personnelChangeTransitionRepository 支持 UpdateStatus 路径的桩，用于交接排期测试。
+type personnelChangeTransitionRepository struct {
+	request PersonnelChangeRequest
+	err     error
+}
+
+func (r *personnelChangeTransitionRepository) Create(context.Context, PersonnelChangeRequest) (PersonnelChangeRequest, error) {
+	return PersonnelChangeRequest{}, errors.New("unexpected create")
+}
+func (r *personnelChangeTransitionRepository) List(context.Context, string, string, string, string) ([]PersonnelChangeRequest, error) {
+	return nil, nil
+}
+func (r *personnelChangeTransitionRepository) Get(context.Context, string, string) (PersonnelChangeRequest, error) {
+	return r.request, nil
+}
+func (r *personnelChangeTransitionRepository) UpdateStatus(_ context.Context, expected PersonnelChangeRequest, status, ref, _ string, now time.Time) (PersonnelChangeRequest, error) {
+	if r.err != nil {
+		return PersonnelChangeRequest{}, r.err
+	}
+	r.request = expected
+	r.request.Status = status
+	if status == domain.PersonnelChangeScheduled {
+		r.request.HandoverReference = ref
+	}
+	r.request.UpdatedAt = now
+	return r.request, nil
+}
+func (r *personnelChangeTransitionRepository) Execute(context.Context, PersonnelChangeRequest, string, time.Time) (PersonnelChangeRequest, error) {
+	return PersonnelChangeRequest{}, errors.New("unexpected execute")
+}
+func (r *personnelChangeTransitionRepository) PreviewPermissions(context.Context, PersonnelChangeRequest) (PersonnelChangePermissionPreview, error) {
+	return PersonnelChangePermissionPreview{}, nil
+}
+func (r *personnelChangeTransitionRepository) ValidateCreate(context.Context, PersonnelChangeCreateInput) error {
+	return nil
+}
+
+func TestTerminationHandoverSchedulingGeneratesReferenceWhenOmitted(t *testing.T) {
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	repository := &personnelChangeTransitionRepository{request: PersonnelChangeRequest{
+		ID: "change-termination", TenantID: "tenant-1", UserID: "user-1",
+		ChangeType: domain.PersonnelChangeTermination, Status: domain.PersonnelChangePendingHandover,
+	}}
+	service, err := NewPersonnelChangeService(repository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: now}, stubHandoverChecker{ready: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.Transition(context.Background(), PersonnelChangeTransitionInput{
+		TenantID: "tenant-1", OperatorID: "approver-1", ID: "change-termination", ToStatus: domain.PersonnelChangeScheduled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HandoverReference != "HANDOVER-20260825-nation" {
+		t.Fatalf("handover_reference=%q, want server-generated HANDOVER-20260825-nation", result.HandoverReference)
+	}
+	if result.Status != domain.PersonnelChangeScheduled {
+		t.Fatalf("status=%q, want SCHEDULED", result.Status)
+	}
+}
+
+func TestTerminationHandoverSchedulingStillRejectsForeignReferenceAndIncompleteHandover(t *testing.T) {
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	newRepository := func() *personnelChangeTransitionRepository {
+		return &personnelChangeTransitionRepository{request: PersonnelChangeRequest{
+			ID: "change-termination", TenantID: "tenant-1", UserID: "user-1",
+			ChangeType: domain.PersonnelChangeTermination, Status: domain.PersonnelChangePendingHandover,
+		}}
+	}
+
+	foreignRepository := newRepository()
+	foreignService, err := NewPersonnelChangeService(foreignRepository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: now}, stubHandoverChecker{ready: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := foreignService.Transition(context.Background(), PersonnelChangeTransitionInput{
+		TenantID: "tenant-1", OperatorID: "approver-1", ID: "change-termination",
+		ToStatus: domain.PersonnelChangeScheduled, ApprovalReference: "APPROVAL-9001",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("error=%v, want ErrConflict for non-HANDOVER reference", err)
+	}
+
+	incompleteRepository := newRepository()
+	incompleteService, err := NewPersonnelChangeService(incompleteRepository, personnelChangeLifecycleIDGenerator{}, personnelChangeLifecycleClock{now: now}, stubHandoverChecker{ready: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := incompleteService.Transition(context.Background(), PersonnelChangeTransitionInput{
+		TenantID: "tenant-1", OperatorID: "approver-1", ID: "change-termination", ToStatus: domain.PersonnelChangeScheduled,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("error=%v, want ErrConflict when handover incomplete", err)
+	}
+}
