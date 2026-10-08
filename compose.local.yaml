@@ -582,7 +582,9 @@ services:
       # 本地 Temporal 服务器不支持 Worker Deployment/Versioning API；开启会导致
       # workflow task 无人认领、审批单无法落库。生产需要时经环境变量显式打开。
       TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
-      TEMPORAL_WORKER_VERSIONING_POLICY: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_POLICY:-UNSPECIFIED}
+      # 合同服务对 policy 做无条件校验（只认 PINNED/AUTO_UPGRADE），默认 UNSPECIFIED
+      # 会让容器在配置阶段退出；即使版本化关闭也必须给合法值。
+      TEMPORAL_WORKER_VERSIONING_POLICY: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
       TEMPORAL_METRICS_ADDRESS: :9091
       CONTRACT_RUN_WORKER_WITH_API: "true"
       GIN_MODE: release
