@@ -149,6 +149,17 @@ func requiresSourceMembership(changeType string) bool {
 	}
 }
 
+// GenerateHandoverReference 生成服务端权威的交接凭据编号（HANDOVER-日期-请求尾号）。
+// 编号只承担审计索引职责；责任转移的实质证据是交接项的接收人/操作者/时间记录与
+// 不可变状态轨迹，因此编号由系统生成而不是让操作者手工编造。
+func GenerateHandoverReference(now time.Time, requestID string) string {
+	suffix := strings.TrimSpace(requestID)
+	if len(suffix) > 6 {
+		suffix = suffix[len(suffix)-6:]
+	}
+	return fmt.Sprintf("HANDOVER-%s-%s", now.Format("20060102"), suffix)
+}
+
 func requiresTargetAssignment(changeType string) bool {
 	switch changeType {
 	case domain.PersonnelChangePromotion, domain.PersonnelChangeDemotion, domain.PersonnelChangeTransfer, domain.PersonnelChangeRehire:
@@ -213,11 +224,17 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 	}
 	// 审批凭据与离职交接是显式安全闸门；交接系统未接入时，凭据仍是责任已转移并检查过的持久证据。
 	if in.ToStatus == domain.PersonnelChangeScheduled {
-		if strings.TrimSpace(in.ApprovalReference) == "" {
+		// 离职交接排期：凭据编号只是审计索引，责任转移的证据是交接项记录与不可变
+		// 状态轨迹，因此空凭据由服务端权威生成（前端不再要求手工编造编号）；调用方
+		// 显式传入的外部交接编号仍然接受，但必须保持 HANDOVER- 前缀。
+		if cur.ChangeType == domain.PersonnelChangeTermination && cur.Status == domain.PersonnelChangePendingHandover {
+			if strings.TrimSpace(in.ApprovalReference) == "" {
+				in.ApprovalReference = GenerateHandoverReference(s.clock.Now().UTC(), cur.ID)
+			} else if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(in.ApprovalReference)), "HANDOVER-") {
+				return PersonnelChangeRequest{}, fmt.Errorf("termination requires a HANDOVER-* reference: %w", ErrConflict)
+			}
+		} else if strings.TrimSpace(in.ApprovalReference) == "" {
 			return PersonnelChangeRequest{}, fmt.Errorf("approval reference is required: %w", ErrValidation)
-		}
-		if cur.ChangeType == domain.PersonnelChangeTermination && !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(in.ApprovalReference)), "HANDOVER-") {
-			return PersonnelChangeRequest{}, fmt.Errorf("termination requires a HANDOVER-* reference: %w", ErrConflict)
 		}
 		if cur.ChangeType == domain.PersonnelChangeTermination {
 			if s.handover == nil {
