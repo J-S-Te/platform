@@ -330,6 +330,11 @@ services:
       # （fake-IP DNS）时其元数据解析会失败。设为 desktop-linux 让构建跑在守护
       # 进程内置 buildkit（复用守护进程代理设置）。直连环境留空即可。
       BUILDX_BUILDER: ${PROVISIONER_BUILDX_BUILDER:-}
+      # 本地助手只有 internal 控制网络，BuildKit 客户端无法向 Docker Hub 申请
+      # 匿名令牌。默认由 Docker daemon 执行实际构建，沿用宿主代理/DNS；不复用
+      # 旧镜像、不开放助手外网。具备 BuildKit 出网条件时显式设为 1。
+      # daemon legacy builder 是兼容路径；未来 daemon 移除它时须显式升级构建拓扑。
+      DOCKER_BUILDKIT: ${PROVISIONER_DOCKER_BUILDKIT:-0}
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
       # 部署助手在子系统容器起来后，自动调 sync-contract-catalog.sh 把子系统
       # 角色/权限目录推给平台；仅对 contract_management 触发。

@@ -21,6 +21,19 @@ bash scripts/docker-local.sh logs api subsystem-provisioner
 - 执行迁移，按需初始化管理员，再分阶段启动服务；
 - 不删除已存在的 Application、Environment、LoginTarget 或 OAuth Client。
 
+### 子系统重试构建与网络隔离
+
+本地 `subsystem-provisioner` 仍只连接 internal 控制网络，经白名单 Socket Proxy
+访问 Docker，不直接挂载 docker.sock、不为修复构建而开放外网。默认
+`PROVISIONER_DOCKER_BUILDKIT=0` 让 Docker daemon 执行实际镜像构建，使用宿主
+Docker 的 DNS/代理；避免隔离助手侧 BuildKit 令牌提供器访问 `auth.docker.io`
+失败。宿主启动脚本及生产 CI 的构建方式不变。
+
+若已配置受控 BuildKit 网络，可显式设为 `1`。daemon legacy builder 是本地
+兼容路径，不是永久替代方案：Docker 未来移除它时，需要升级受控构建拓扑。
+失败时禁止使用旧镜像假装完成更新。修改该值或 Compose 默认值后只需重建
+部署助手，再对原应用环境点击“重试”，无需撤销接入、重建业务库或轮换密钥。
+
 ## 2. 首次管理员
 
 人工运行时直接交互输入。CI 推荐：
