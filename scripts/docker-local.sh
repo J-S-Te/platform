@@ -675,6 +675,20 @@ ensure_contract_env_file() {
     local strict="${1:-false}"
     command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成合同数据库密码"
 
+    # Compose names this volume explicitly. A missing file never implies a new DB.
+    local volume_inventory persistent_key persistent_value
+    volume_inventory="$(docker volume ls --format '{{.Name}}')" || fail "无法确认合同保留数据卷；拒绝生成新凭据"
+    if grep -Fxq 'basic-platform-local-contract-mysql-data' <<< "$volume_inventory"; then
+        [[ -f "$contract_env_file" ]] || fail "合同数据卷已存在但配置丢失；请恢复原配置，不要重置数据库或加密密钥"
+        for persistent_key in CONTRACT_MYSQL_PASSWORD CONTRACT_MYSQL_ROOT_PASSWORD OIDC_SESSION_ENCRYPTION_KEY_BASE64 SIGNING_PHONE_ENCRYPTION_KEY_BASE64; do
+            persistent_value="$(env_value "$contract_env_file" "$persistent_key")"
+            [[ -n "$persistent_value" && "$persistent_value" != REPLACE_WITH_* ]] || fail "合同保留数据的持久化配置缺失：${persistent_key}；请恢复原配置"
+            if [[ "$persistent_key" == *_BASE64 ]]; then
+                [[ "$(printf '%s' "$persistent_value" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] || fail "合同保留数据的加密密钥无效：${persistent_key}；请恢复原配置"
+            fi
+        done
+    fi
+
     if [[ ! -f "$contract_env_file" ]]; then
         [[ -f "$contract_template_file" ]] || fail "合同管理环境模板不存在：$contract_template_file"
         cp "$contract_template_file" "$contract_env_file"
