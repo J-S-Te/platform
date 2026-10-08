@@ -48,7 +48,12 @@ type PersonnelChangeCreateInput struct {
 	// principal. Browser payloads must never decide whether approval can be bypassed.
 	DirectScheduleAuthorized bool
 }
-type PersonnelChangeTransitionInput struct{ TenantID, OperatorID, ID, ToStatus, ApprovalReference string }
+type PersonnelChangeTransitionInput struct {
+	TenantID, OperatorID, ID, ToStatus, ApprovalReference string
+	// Immediate 允许对已排期请求跳过生效时间闸门立即执行；仅对 EXECUTED 转移有意义，
+	// 审批/交接闸门与仓储幂等锁定不受影响。
+	Immediate bool
+}
 type PermissionRole struct {
 	ApplicationID   string `json:"application_id"`
 	ApplicationCode string `json:"application_code"`
@@ -185,6 +190,11 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 	if in.TenantID == "" || in.OperatorID == "" || in.ID == "" || in.ToStatus == "" {
 		return PersonnelChangeRequest{}, ErrValidation
 	}
+	// 立即执行仅对 EXECUTED 转移有意义；其他转移携带 immediate 一律拒绝，
+	// 防止调用方把它当作跳过审批或交接阶段的开关。
+	if in.Immediate && in.ToStatus != domain.PersonnelChangeExecuted {
+		return PersonnelChangeRequest{}, fmt.Errorf("immediate execution only applies to EXECUTED: %w", ErrValidation)
+	}
 	cur, err := s.repo.Get(ctx, in.TenantID, in.ID)
 	if err != nil {
 		return PersonnelChangeRequest{}, err
@@ -223,8 +233,10 @@ func (s *PersonnelChangeService) Transition(ctx context.Context, in PersonnelCha
 		}
 	}
 	if in.ToStatus == domain.PersonnelChangeExecuted {
-		// 执行只接受已到生效时间的请求，防止提前变更身份与权限。
-		if cur.EffectiveAt == nil || cur.EffectiveAt.After(s.clock.Now().UTC()) {
+		// 立即执行只豁免生效时间闸门（审批与离职交接闸门在排期前已通过）；
+		// 其余状态转移不接受 immediate 语义，避免调用方误以为可以跳过阶段。
+		// 执行只接受已到生效时间的请求（立即执行除外），防止提前变更身份与权限。
+		if !in.Immediate && (cur.EffectiveAt == nil || cur.EffectiveAt.After(s.clock.Now().UTC())) {
 			return PersonnelChangeRequest{}, fmt.Errorf("personnel change is not yet effective: %w", ErrConflict)
 		}
 		result, execErr := s.repo.Execute(ctx, cur, in.OperatorID, s.clock.Now().UTC())
