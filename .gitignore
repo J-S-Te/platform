@@ -8,6 +8,7 @@ dist/
 coverage/
 .vite/
 *.tsbuildinfo
+__pycache__/
 
 # 实际环境文件一律忽略；只保留仓库根开发模板和当前 compose.local.yaml 所需模板。
 .env

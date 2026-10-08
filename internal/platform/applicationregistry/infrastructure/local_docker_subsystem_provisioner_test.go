@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"syscall"
@@ -546,7 +547,7 @@ func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *test
 		filepath.Join(platformRoot, "docker", ".env.customer.local"): "CUSTOMER_SETTING=keep\n",
 		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):  "#!/bin/sh\n",
 		filepath.Join(project, "docker-compose.yml"):                 "services: {}\n",
-		filepath.Join(project, ".env.local"):                         "OIDC_CLIENT_ID=contract_management-prod-web\n",
+		filepath.Join(project, ".env.local"):                         "OIDC_CLIENT_ID=contract_management-prod-web\n" + retainedContractRuntimeFixture(),
 	} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatalf("write %s: %v", path, err)
@@ -568,6 +569,9 @@ func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *test
 		t.Fatalf("update integrated contract subsystem: %v", err)
 	}
 
+	assertRetainedContractVolumeInspection(t, runner.calls[0])
+	// The first command is the read-only retained-volume guard, not a Compose mutation.
+	runner.calls = runner.calls[1:]
 	if len(runner.calls) != 5 {
 		t.Fatalf("integrated contract update calls = %d, want 5: %#v", len(runner.calls), runner.calls)
 	}
@@ -870,7 +874,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 		}
 	}
 
-	runner := &recordingSubsystemRunner{}
+	runner := &firstInstallContractRunner{}
 	provisioner, err := newLocalDockerSubsystemProvisioner(LocalDockerSubsystemProvisionerConfig{
 		Enabled: true, ProjectsRoot: root,
 		GatewayScriptPath:      filepath.Join(platformRoot, "scripts", "portal-gateway.sh"),
@@ -898,6 +902,14 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 		t.Fatalf("provision integrated contract subsystem: %v", err)
 	}
 
+	if len(runner.calls) < 2 {
+		t.Fatal("first-install guard did not inspect and inventory volumes")
+	}
+	assertRetainedContractVolumeInspection(t, runner.calls[0])
+	if !reflect.DeepEqual(runner.calls[1].arguments, []string{"volume", "ls", "--filter", "name=basic-platform-local-contract-mysql-data", "--format", "{{.Name}}"}) {
+		t.Fatalf("first install did not confirm volume absence: %v", runner.calls[1].arguments)
+	}
+	runner.calls = runner.calls[2:]
 	if len(runner.calls) != 5 {
 		t.Fatalf("integrated contract provision calls = %d, want 5 unified Compose calls: %#v", len(runner.calls), runner.calls)
 	}
@@ -1483,7 +1495,7 @@ func TestContractCatalogSyncRunsAgentSideWithoutDockerSocketOrHostNetwork(t *tes
 		filepath.Join(platformRoot, "scripts", "portal-gateway.sh"):        "#!/bin/sh\n",
 		filepath.Join(platformRoot, "scripts", "sync-contract-catalog.sh"): "#!/usr/bin/env bash\n",
 		filepath.Join(project, "docker-compose.yml"):                       "services: {}\n",
-		filepath.Join(project, ".env.local"):                               "OIDC_CLIENT_ID=contract_management-prod-web\n",
+		filepath.Join(project, ".env.local"):                               "OIDC_CLIENT_ID=contract_management-prod-web\n" + retainedContractRuntimeFixture(),
 	} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatalf("write %s: %v", path, err)
@@ -1524,8 +1536,9 @@ func TestContractCatalogSyncRunsAgentSideWithoutDockerSocketOrHostNetwork(t *tes
 			}
 		}
 	}
-	if len(runner.calls) != 6 {
-		t.Fatalf("contract update calls = %d, want 6: %#v", len(runner.calls), runner.calls)
+	assertRetainedContractVolumeInspection(t, runner.calls[0])
+	if len(runner.calls) != 7 {
+		t.Fatalf("contract update calls = %d, want 7 including guard: %#v", len(runner.calls), runner.calls)
 	}
 	sync := runner.calls[len(runner.calls)-1]
 	scriptPath := filepath.Join(platformRoot, "scripts", "sync-contract-catalog.sh")

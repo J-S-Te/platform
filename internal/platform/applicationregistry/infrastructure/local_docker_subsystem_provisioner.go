@@ -419,6 +419,11 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 	if err != nil {
 		return provisioningError("subsystem environment template is unavailable")
 	}
+	if input.ApplicationCode == integratedContractApplicationCode {
+		if err := provisioner.validateRetainedContractRuntime(operationCtx, environmentPath); err != nil {
+			return err
+		}
+	}
 	if err := provisioner.updateOIDCRuntimeConfiguration(input, environmentPath); err != nil {
 		return err
 	}
@@ -795,6 +800,11 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 	environmentSource, environmentPath, err := provisioner.subsystemEnvironmentPaths(input.ApplicationCode, projectDirectory)
 	if err != nil {
 		return provisioningError("subsystem environment template is unavailable")
+	}
+	if input.ApplicationCode == integratedContractApplicationCode {
+		if err := provisioner.validateRetainedContractRuntime(operationCtx, environmentPath); err != nil {
+			return err
+		}
 	}
 	publicOrigin, publicOriginErr := publicOriginFromURL(input.PublicURL)
 	if publicOriginErr != nil {
