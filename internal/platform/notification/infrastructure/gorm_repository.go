@@ -95,6 +95,7 @@ type deliveryModel struct {
 	NextRetryAt     *time.Time `gorm:"column:next_retry_at"`
 	LockedUntil     *time.Time `gorm:"column:locked_until"`
 	DeliveredAt     *time.Time `gorm:"column:delivered_at"`
+	RemindAt        *time.Time `gorm:"column:remind_at"`
 	ReadAt          *time.Time `gorm:"column:read_at"`
 	CreatedAt       time.Time  `gorm:"column:created_at"`
 	UpdatedAt       time.Time  `gorm:"column:updated_at"`
@@ -278,9 +279,6 @@ func (repository *Repository) CompleteDelivery(ctx context.Context, tenantID, de
 		if result.RowsAffected != 1 {
 			return application.ErrConflict
 		}
-		if err := incrementUnreadStat(tx, tenantID, row.RecipientUserID, 1, now); err != nil {
-			return err
-		}
 		row.Status, row.DeliveredAt, row.NextRetryAt, row.LockedUntil, row.LastError, row.UpdatedAt = string(domain.DeliveryStatusDelivered), &now, nil, nil, "", now
 		return nil
 	})
@@ -349,8 +347,8 @@ func (repository *Repository) ListDeliveries(ctx context.Context, tenantID strin
 	return application.PageResult[domain.Delivery]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
-func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID string, page application.PageRequest) (application.PageResult[domain.InboxItem], error) {
-	base := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ?", tenantID, userID, domain.DeliveryStatusDelivered)
+func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID string, page application.PageRequest, now time.Time) (application.PageResult[domain.InboxItem], error) {
+	base := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ? AND (d.remind_at IS NULL OR d.remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now)
 	if page.UnreadOnly {
 		base = base.Where("d.read_at IS NULL")
 	}
@@ -368,67 +366,58 @@ func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID st
 	}
 	return application.PageResult[domain.InboxItem]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
-func (repository *Repository) GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string) (domain.InboxItem, error) {
-	return repository.inboxItem(ctx, tenantID, userID, deliveryID)
+func (repository *Repository) GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error) {
+	return repository.inboxItem(ctx, tenantID, userID, deliveryID, now)
 }
 
-func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID string) (int64, error) {
-	type statRow struct {
-		UnreadCount int64 `gorm:"column:unread_count"`
-	}
-	var stat statRow
-	err := repository.database.WithContext(ctx).Table("notification_user_stat").Where("tenant_id = ? AND user_id = ?", tenantID, userID).Take(&stat).Error
-	if err == nil {
-		return stat.UnreadCount, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, fmt.Errorf("read notification unread statistic: %w", err)
-	}
-	// Existing rows may pre-date the materialised statistic; the fallback preserves compatibility.
+func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
+	// 未读口径必须与收件箱可见性一致：remind_at 未到点的投递对收件人不存在。
+	// notification_user_stat 物化计数在延迟可见（DAILY/WEEKLY）下无法增量维护，
+	// 已随迁移 000113 退役，这里直接按 delivery 计数（索引覆盖，量级为个人收件箱）。
 	var total int64
-	if err := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", tenantID, userID, domain.DeliveryStatusDelivered).Count(&total).Error; err != nil {
+	err := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now).Count(&total).Error
+	if err != nil {
 		return 0, fmt.Errorf("count unread notifications: %w", err)
 	}
 	return total, nil
 }
 func (repository *Repository) MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Updates(map[string]any{"read_at": now, "updated_at": now})
+		result := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered, now).Updates(map[string]any{"read_at": now, "updated_at": now})
 		if result.Error != nil {
 			return fmt.Errorf("mark notification read: %w", result.Error)
 		}
-		if result.RowsAffected == 1 {
-			return incrementUnreadStat(tx, tenantID, userID, -1, now)
-		}
-		var count int64
-		if err := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ?", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Count(&count).Error; err != nil {
-			return fmt.Errorf("check notification inbox ownership: %w", err)
-		}
-		if count == 0 {
-			return application.ErrNotFound
+		if result.RowsAffected != 1 {
+			var count int64
+			if err := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ?", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Count(&count).Error; err != nil {
+				return fmt.Errorf("check notification inbox ownership: %w", err)
+			}
+			if count == 0 {
+				return application.ErrNotFound
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return domain.InboxItem{}, err
 	}
-	return repository.inboxItem(ctx, tenantID, userID, deliveryID)
+	return repository.inboxItem(ctx, tenantID, userID, deliveryID, now)
 }
 func (repository *Repository) MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
 	var affected int64
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL", tenantID, userID, domain.DeliveryStatusDelivered).Updates(map[string]any{"read_at": now, "updated_at": now})
+		result := tx.Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now).Updates(map[string]any{"read_at": now, "updated_at": now})
 		if result.Error != nil {
 			return fmt.Errorf("mark all notifications read: %w", result.Error)
 		}
 		affected = result.RowsAffected
-		return incrementUnreadStat(tx, tenantID, userID, -affected, now)
+		return nil
 	})
 	return affected, err
 }
-func (repository *Repository) inboxItem(ctx context.Context, tenantID, userID, deliveryID string) (domain.InboxItem, error) {
+func (repository *Repository) inboxItem(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error) {
 	var row inboxRow
-	err := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.id = ? AND d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ?", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered).Select("d.id AS delivery_id,d.message_id,m.category,m.title,m.content,m.target_url,m.reference_type,m.reference_id,d.delivered_at,d.read_at").Scan(&row).Error
+	err := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.id = ? AND d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ? AND (d.remind_at IS NULL OR d.remind_at <= ?)", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered, now).Select("d.id AS delivery_id,d.message_id,m.category,m.title,m.content,m.target_url,m.reference_type,m.reference_id,d.delivered_at,d.read_at").Scan(&row).Error
 	if err != nil {
 		return domain.InboxItem{}, fmt.Errorf("get notification inbox item: %w", err)
 	}
@@ -478,10 +467,10 @@ func messageToDomain(row messageModel) domain.Message {
 	return domain.Message{ID: row.ID, TenantID: row.TenantID, SourceApplication: row.SourceApplication, SourceEnvironment: row.SourceEnvironment, SourceEventID: row.SourceEventID, EventType: row.EventType, NotificationScope: row.NotificationScope, Priority: row.Priority, TemplateID: value(row.TemplateID), TemplateVersionID: value(row.TemplateVersionID), Category: row.Category, Title: row.Title, Content: row.Content, TargetURL: row.TargetURL, ReferenceType: row.ReferenceType, ReferenceID: row.ReferenceID, IdempotencyKey: row.IdempotencyKey, OccurredAt: row.OccurredAt, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, CreatedBy: value(row.CreatedBy)}
 }
 func deliveryToModel(value domain.Delivery) deliveryModel {
-	return deliveryModel{ID: value.ID, TenantID: value.TenantID, MessageID: value.MessageID, RecipientUserID: value.RecipientUserID, Status: string(value.Status), AttemptCount: value.AttemptCount, LastError: value.LastError, NextRetryAt: value.NextRetryAt, LockedUntil: value.LockedUntil, DeliveredAt: value.DeliveredAt, ReadAt: value.ReadAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	return deliveryModel{ID: value.ID, TenantID: value.TenantID, MessageID: value.MessageID, RecipientUserID: value.RecipientUserID, Status: string(value.Status), AttemptCount: value.AttemptCount, LastError: value.LastError, NextRetryAt: value.NextRetryAt, LockedUntil: value.LockedUntil, DeliveredAt: value.DeliveredAt, ReadAt: value.ReadAt, RemindAt: value.RemindAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 func deliveryToDomain(row deliveryModel) domain.Delivery {
-	return domain.Delivery{ID: row.ID, TenantID: row.TenantID, MessageID: row.MessageID, RecipientUserID: row.RecipientUserID, Status: domain.DeliveryStatus(row.Status), AttemptCount: row.AttemptCount, LastError: row.LastError, NextRetryAt: row.NextRetryAt, LockedUntil: row.LockedUntil, DeliveredAt: row.DeliveredAt, ReadAt: row.ReadAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	return domain.Delivery{ID: row.ID, TenantID: row.TenantID, MessageID: row.MessageID, RecipientUserID: row.RecipientUserID, Status: domain.DeliveryStatus(row.Status), AttemptCount: row.AttemptCount, LastError: row.LastError, NextRetryAt: row.NextRetryAt, LockedUntil: row.LockedUntil, DeliveredAt: row.DeliveredAt, ReadAt: row.ReadAt, RemindAt: row.RemindAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 func inboxToDomain(row inboxRow) domain.InboxItem {
 	return domain.InboxItem{DeliveryID: row.DeliveryID, MessageID: row.MessageID, Category: row.Category, Title: row.Title, Content: row.Content, TargetURL: row.TargetURL, ReferenceType: row.ReferenceType, ReferenceID: row.ReferenceID, DeliveredAt: row.DeliveredAt, ReadAt: row.ReadAt}

@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,23 +23,58 @@ func NewInboxPolicy(database *gorm.DB) (*InboxPolicy, error) {
 	return &InboxPolicy{database: database}, nil
 }
 
-type inboxSettingRow struct {
-	InboxEnabled bool `gorm:"column:inbox_enabled"`
+type notificationSettingRow struct {
+	InboxEnabled      bool   `gorm:"column:inbox_enabled"`
+	ReminderFrequency string `gorm:"column:reminder_frequency"`
 }
 
-func (inboxSettingRow) TableName() string { return "notification_setting" }
-
-// InboxEnabled 在租户尚未保存设置时按既有读模型默认为开启；数据库故障不能伪装成默认值。
-func (policy *InboxPolicy) InboxEnabled(ctx context.Context, tenantID string) (bool, error) {
-	var row inboxSettingRow
+// DeliveryVisibility 解析租户通知创建时的可见性计划：站内信是否启用，以及新投递何时
+// 对收件人可见。行不存在（租户从未保存设置）按 IMMEDIATE 处理，保持现状行为；
+// 数据库故障不能伪装成默认值。
+func (policy *InboxPolicy) DeliveryVisibility(ctx context.Context, tenantID string, now time.Time) (bool, time.Time, error) {
+	var row notificationSettingRow
 	err := policy.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error
-	if err == nil {
-		return row.InboxEnabled, nil
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, now, fmt.Errorf("read notification delivery visibility: %w", err)
 	}
-	if err == gorm.ErrRecordNotFound {
-		return true, nil
+	if err != nil || !row.InboxEnabled {
+		return false, now, nil
 	}
-	return false, fmt.Errorf("read notification inbox policy: %w", err)
+	switch strings.ToUpper(strings.TrimSpace(row.ReminderFrequency)) {
+	case "NEVER":
+		return false, now, nil
+	case "DAILY":
+		return true, nextDailyReleasePoint(now), nil
+	case "WEEKLY":
+		return true, nextWeeklyReleasePoint(now), nil
+	default:
+		// IMMEDIATE 与历史/未知值：立即可见。
+		return true, now, nil
+	}
+}
+
+// notificationReleaseZone 是通知释放点使用的时区：北京时间（UTC+8）。Asia/Shanghai 无
+// 夏令时，固定偏移即可精确表达；这是全平台确认的统一业务时区，不引入按租户配置。
+var notificationReleaseZone = time.FixedZone("Asia/Shanghai", 8*60*60)
+
+// nextDailyReleasePoint 返回下一个每日释放点（北京时间 09:00）。DAILY 语义是“到点集中
+// 可见”而非“24 小时延迟”：同一日内多次创建都在同一释放点浮现，形成每日汇总效果。
+func nextDailyReleasePoint(now time.Time) time.Time {
+	local := now.In(notificationReleaseZone)
+	next := time.Date(local.Year(), local.Month(), local.Day(), 9, 0, 0, 0, notificationReleaseZone)
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
+}
+
+// nextWeeklyReleasePoint 返回下一个每周释放点（北京时间周一 09:00）。
+func nextWeeklyReleasePoint(now time.Time) time.Time {
+	next := nextDailyReleasePoint(now)
+	for next.In(notificationReleaseZone).Weekday() != time.Monday {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 // RecipientResolver 只解析当前租户的有效用户。角色和组织在这里仅用于选择通知受众，

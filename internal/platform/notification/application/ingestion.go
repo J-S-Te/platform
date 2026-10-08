@@ -25,9 +25,9 @@ func (service *Service) Ingest(ctx context.Context, input IngestInput) (domain.I
 	// audience with no active users must not be accepted and later turned into a
 	// DEAD event that the source system cannot observe.
 	now := service.clock.Now().UTC().Truncate(time.Millisecond)
-	enabled, err := service.policy.InboxEnabled(ctx, strings.TrimSpace(input.TenantID))
+	enabled, _, err := service.policy.DeliveryVisibility(ctx, strings.TrimSpace(input.TenantID), now)
 	if err != nil {
-		return domain.IngestionReceipt{}, fmt.Errorf("read notification inbox policy: %w", err)
+		return domain.IngestionReceipt{}, fmt.Errorf("read delivery visibility: %w", err)
 	}
 	if !enabled {
 		return domain.IngestionReceipt{}, ErrNoRecipients
@@ -92,7 +92,7 @@ func (service *Service) ProcessIngestionBatch(ctx context.Context, limit int, le
 }
 
 func (service *Service) projectIngestionEvent(ctx context.Context, tenantID, sourceApplication, sourceEnvironment string, event domain.IngestionEvent, now time.Time) (string, error) {
-	enabled, err := service.policy.InboxEnabled(ctx, tenantID)
+	enabled, _, err := service.policy.DeliveryVisibility(ctx, tenantID, now)
 	if err != nil {
 		return "", err
 	}

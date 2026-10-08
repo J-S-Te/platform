@@ -24,10 +24,12 @@ type SystemClock struct{}
 // Now returns the current UTC wall-clock time.
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
-// InboxPolicy is the deliberately small contract used to read the existing tenant notification
-// setting. The notification module does not own, duplicate or import the settings aggregate.
-type InboxPolicy interface {
-	InboxEnabled(ctx context.Context, tenantID string) (bool, error)
+// DeliveryVisibilityPolicy is the deliberately small contract used to read the tenant
+// notification setting at creation time. The notification module does not own, duplicate or
+// import the settings aggregate: the adapter returns the decision (inbox enabled) and the
+// moment the new delivery becomes visible to its recipients.
+type DeliveryVisibilityPolicy interface {
+	DeliveryVisibility(ctx context.Context, tenantID string, now time.Time) (enabled bool, remindAt time.Time, err error)
 }
 
 // RecipientResolver resolves business audience targets to active user IDs. Implementations must
@@ -151,9 +153,9 @@ type Repository interface {
 	ClaimFailedDeliveries(ctx context.Context, tenantID string, limit int, leaseUntil, now time.Time) ([]domain.Delivery, error)
 	ListDeliveries(ctx context.Context, tenantID string, status domain.DeliveryStatus, page PageRequest) (PageResult[domain.Delivery], error)
 
-	ListInbox(ctx context.Context, tenantID, userID string, page PageRequest) (PageResult[domain.InboxItem], error)
-	GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string) (domain.InboxItem, error)
-	CountUnread(ctx context.Context, tenantID, userID string) (int64, error)
+	ListInbox(ctx context.Context, tenantID, userID string, page PageRequest, now time.Time) (PageResult[domain.InboxItem], error)
+	GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error)
+	CountUnread(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 	MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error)
 	MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 

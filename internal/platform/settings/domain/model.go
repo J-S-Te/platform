@@ -19,10 +19,26 @@ type PlatformSettings struct {
 type ReminderFrequency string
 
 const (
-	ReminderFrequencyDaily          ReminderFrequency = "DAILY"
-	ReminderFrequencyEveryFourHours ReminderFrequency = "EVERY_FOUR_HOURS"
-	ReminderFrequencyOnce           ReminderFrequency = "ONCE"
+	// ReminderFrequencyImmediate 创建即可见（保持未设置租户的现状行为，也是默认值）。
+	ReminderFrequencyImmediate ReminderFrequency = "IMMEDIATE"
+	// ReminderFrequencyDaily 投递延迟到下一个每日释放点（09:00 UTC）可见。
+	ReminderFrequencyDaily ReminderFrequency = "DAILY"
+	// ReminderFrequencyWeekly 投递延迟到下一个每周释放点（周一 09:00 UTC）可见。
+	ReminderFrequencyWeekly ReminderFrequency = "WEEKLY"
+	// ReminderFrequencyNever 不进入站内信（通知创建被抑制）。
+	ReminderFrequencyNever ReminderFrequency = "NEVER"
 )
+
+// Valid 报告该提醒频率是否在当前支持词表内。旧词表 EVERY_FOUR_HOURS/ONCE 从未具备
+// 投递语义，已随迁移 000113 退役并归一化为 IMMEDIATE。
+func (frequency ReminderFrequency) Valid() bool {
+	switch frequency {
+	case ReminderFrequencyImmediate, ReminderFrequencyDaily, ReminderFrequencyWeekly, ReminderFrequencyNever:
+		return true
+	default:
+		return false
+	}
+}
 
 // AccessSettings configures the public origin and OAuth HTTP callback policy of the local
 // unified orchestration. Empty PublicOrigin means local-only (127.0.0.1 / localhost).

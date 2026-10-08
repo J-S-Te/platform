@@ -156,8 +156,11 @@ type Delivery struct {
 	LockedUntil     *time.Time
 	DeliveredAt     *time.Time
 	ReadAt          *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// RemindAt 是收件人可见时间：NULL/过去表示立即可见；未来值表示按租户提醒频率
+	// 延迟浮现（DAILY/WEEKLY 汇总语义）。站内信查询与未读计数都以它过滤。
+	RemindAt  *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // InboxItem is the recipient-safe inbox projection. Linked targets require authorization again
