@@ -171,4 +171,42 @@ grep -Fq '/app/worker' <<<"$worker_block" || fail 'platform worker healthcheck d
 grep -Fq 'verify_service_stable platform-worker' "$deploy_service" || fail 'platform worker has no release stability gate'
 pass 'platform worker health and restart stability are release gates'
 
+# 9. A narrow Compose health window that fails the data-analysis dependency wait
+# must fall back to waiting for the running API container instead of rolling back.
+eval "$(extract_function deploy_data_analysis "$deploy_service")"
+eval "$(extract_function wait_container_healthy "$deploy_service")"
+compose() {
+  printf 'compose %s\n' "$*" >>"$compose_calls"
+  case "$*" in
+    *"data-analysis-mysql"*) return 0 ;;
+    *"metabase-init"*) return 0 ;;
+    *"data-analysis-migrate"*) return 0 ;;
+    *"--force-recreate --no-deps --wait --wait-timeout 120 data-analysis-api"* ) return 1 ;;
+    *"data-analysis-aggregation-worker"* ) return 0 ;;
+    *) return 0 ;;
+  esac
+}
+backup_database() { return 0; }
+wait_for_health() { return 0; }
+verify_service_image() { return 0; }
+docker() { :; }
+image() { :; }
+data_analysis_image_refs=('ref-api' 'ref-aggregation' 'ref-alert' 'ref-migrate')
+compose_calls="$(mktemp)"
+: >"$compose_calls"
+wait_container_healthy() {
+  printf 'fallback-wait %s\n' "$1" >>"$compose_calls"
+  return 0
+}
+if deploy_data_analysis; then
+  grep -Fq 'fallback-wait data-analysis-api' "$compose_calls" ||
+    fail 'dependency-wait failure did not fall back to waiting for the API container'
+  grep -Fq 'compose up -d --no-deps --wait --wait-timeout 120 data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase' "$compose_calls" ||
+    fail 'workers were not relaunched after the fallback health wait'
+  pass 'data-analysis dependency-wait failure falls back to container health wait'
+else
+  fail 'data-analysis deployment rolled back despite the fallback health wait succeeding'
+fi
+rm -f "$compose_calls"
+
 printf 'Release reliability regression tests passed\n'
