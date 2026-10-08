@@ -579,6 +579,29 @@ wait_for_health() {
   return 1
 }
 
+# wait_container_healthy 等待运行中容器转回 healthy。Docker healthcheck 持续执行，
+# unhealthy 不是终态；服务器编排里部分服务的健康窗口较窄，compose 依赖等待可能
+# 在应用尚未完成启动时就误判失败，此时用本函数兜底等待而不是立即回滚。
+wait_container_healthy() {
+  local service_name="$1"
+  local attempts="${2:-60}" container health
+  echo "兜底等待容器转 healthy：$service_name"
+  for ((i = 1; i <= attempts; i++)); do
+    container="$(compose ps -q "$service_name" 2>/dev/null || true)"
+    if [[ -n "$container" ]]; then
+      health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || true)"
+      if [[ "$health" == "healthy" ]]; then
+        echo "$service_name 已转 healthy"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "$service_name 在兜底等待窗口内未达到 healthy" >&2
+  compose logs --no-color --tail 120 "$service_name" >&2 || true
+  return 1
+}
+
 verify_service_image() {
   local compose_kind="$1" service_name="$2" expected_image="$3" container_id actual_image
   if [[ "$compose_kind" == "frontend" ]]; then
@@ -886,7 +909,14 @@ deploy_data_analysis() {
   compose run --rm --no-deps data-analysis-metabase-init || return
   compose run --rm --no-deps data-analysis-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
-    data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || return
+    data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || {
+    # 服务器编排中 data-analysis-api 的健康窗口较窄；新版本启动超过该窗口时
+    # compose 依赖等待会先行失败，但容器仍在运行且 Docker healthcheck 持续执行。
+    # 先兜底等待 API 转 healthy 再补拉依赖它的 Worker，不立即回滚。
+    wait_container_healthy data-analysis-api || return
+    compose up -d --no-deps --wait --wait-timeout 120 \
+      data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || return
+  }
   if ! wait_for_health "http://127.0.0.1:$(port_value DATA_ANALYSIS_API_PORT 18086)/data_analysis/readyz"; then
     echo "---- data-analysis-api 最近日志 ----" >&2
     compose logs --no-color --tail 120 data-analysis-api >&2 || true
