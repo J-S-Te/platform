@@ -901,6 +901,27 @@ deploy_settlement() {
   verify_service_image compose settlement-worker "$image_ref" || return 1
 }
 
+# update_runtime_value 原子更新受管 runtime env 中的单个键；不存在时追加。
+update_runtime_value() {
+  local file="$1" key="$2" value="$3" temporary
+  temporary="$(mktemp "$deploy_dir/runtime/.runtime-update.XXXXXX")"
+  chmod 600 "$temporary"
+  if ! awk -F= -v key="$key" -v value="$value" '
+    BEGIN { found=0 }
+    $1 == key { print key "=" value; found=1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$file"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod 600 "$file" || return 1
+}
+
 deploy_data_analysis() {
   # data_analysis 由 API、两个常驻 Worker 和一次性迁移镜像组成，四个镜像必须
   # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
@@ -908,6 +929,17 @@ deploy_data_analysis() {
   backup_database data-analysis-mysql dashboard_aggregation || return
   compose run --rm --no-deps data-analysis-metabase-init || return
   compose run --rm --no-deps data-analysis-migrate || return
+  # 角色配置哈希必须与实际运行的不可变镜像一致：从迁移镜像内嵌的 authz-catalog
+  # 读取哈希并原子写回受管 runtime/data-analysis.env；否则新镜像启动会因
+  # OIDC 角色配置与内嵌授权目录不一致而 fail-closed，健康检查超时并回滚。
+  embedded_data_analysis_hash="$(docker run --rm --entrypoint /app/authz-catalog "${data_analysis_image_refs[3]}" print data_analysis 2>/dev/null \
+    | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
+  if [[ ! "$embedded_data_analysis_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    echo "无法从数据看板不可变镜像读取有效授权目录哈希" >&2
+    return 1
+  fi
+  update_runtime_value "$data_analysis_runtime_file" OIDC_ROLE_CONFIG_HASH "$embedded_data_analysis_hash" || return 1
+  echo "已写入数据看板镜像内嵌授权目录哈希：$embedded_data_analysis_hash"
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
     data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || {
     # 服务器编排中 data-analysis-api 的健康窗口较窄；新版本启动超过该窗口时

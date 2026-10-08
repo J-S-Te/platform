@@ -189,9 +189,18 @@ compose() {
 backup_database() { return 0; }
 wait_for_health() { return 0; }
 verify_service_image() { return 0; }
-docker() { :; }
-image() { :; }
+docker() {
+  case "$*" in
+    *"--entrypoint /app/authz-catalog"* )
+      printf 'application=data_analysis\nclaims_role_config_hash=sha256:%064d\nmax_effective_roles=8\n' 0 ;;
+    * ) : ;;
+  esac
+}
 data_analysis_image_refs=('ref-api' 'ref-aggregation' 'ref-alert' 'ref-migrate')
+data_analysis_runtime_file="$test_root/runtime/data-analysis.env"
+mkdir -p "$test_root/runtime"
+printf 'OIDC_ROLE_CONFIG_HASH=sha256:%064d\n' 0 >"$data_analysis_runtime_file"
+update_runtime_value() { :; }
 compose_calls="$(mktemp)"
 : >"$compose_calls"
 wait_container_healthy() {
