@@ -28,16 +28,23 @@ type notificationSettingRow struct {
 	ReminderFrequency string `gorm:"column:reminder_frequency"`
 }
 
+func (notificationSettingRow) TableName() string { return "notification_setting" }
+
 // DeliveryVisibility 解析租户通知创建时的可见性计划：站内信是否启用，以及新投递何时
 // 对收件人可见。行不存在（租户从未保存设置）按 IMMEDIATE 处理，保持现状行为；
 // 数据库故障不能伪装成默认值。
 func (policy *InboxPolicy) DeliveryVisibility(ctx context.Context, tenantID string, now time.Time) (bool, time.Time, error) {
 	var row notificationSettingRow
 	err := policy.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Match settings.application's unsaved tenant defaults: inbox enabled,
+		// immediate delivery. An explicitly saved disabled row is not a default.
+		return true, now, nil
+	}
+	if err != nil {
 		return false, now, fmt.Errorf("read notification delivery visibility: %w", err)
 	}
-	if err != nil || !row.InboxEnabled {
+	if !row.InboxEnabled {
 		return false, now, nil
 	}
 	switch strings.ToUpper(strings.TrimSpace(row.ReminderFrequency)) {

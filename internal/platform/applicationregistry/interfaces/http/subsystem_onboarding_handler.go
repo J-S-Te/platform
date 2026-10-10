@@ -258,26 +258,28 @@ type SubsystemLifecycleNotification struct {
 // catalog. The configured OIDC issuer is used only by the isolated deployment workflow and is not
 // returned to the browser together with generated credentials or infrastructure commands.
 type SubsystemOnboardingHandler struct {
-	service              subsystemOnboardingService
-	provisioner          application.SubsystemProvisioner
-	access               subsystemInitialAccessManager
-	deploymentState      application.SubsystemDeploymentStateStore
-	notifications        subsystemNotificationSink
-	oidcIssuer           string
-	keycloakIssuer       string
-	keycloakRealm        string
-	keycloakEnabled      bool
-	keycloakRequireHTTPS bool
-	defaultIssuerAlias   string
-	keycloakControl      keycloakControlPlaneOperations
-	keycloakBroker       keycloakBrokerProvisioner
-	keycloakCatalog      keycloakAuthorizationCatalog
-	keycloakMappings     keycloakClientMappingStore
-	keycloakReadiness    keycloakSwitchReadinessInspector
-	keycloakOperations   keycloakProjectionOperations
-	keycloakCutover      keycloakCutoverLifecycleStore
-	serviceCredentials   subsystemServiceCredentialManager
-	logger               *slog.Logger
+	service                subsystemOnboardingService
+	provisioner            application.SubsystemProvisioner
+	access                 subsystemInitialAccessManager
+	deploymentState        application.SubsystemDeploymentStateStore
+	notifications          subsystemNotificationSink
+	oidcIssuer             string
+	keycloakIssuer         string
+	keycloakRealm          string
+	keycloakEnabled        bool
+	keycloakRequireHTTPS   bool
+	defaultIssuerAlias     string
+	keycloakControl        keycloakControlPlaneOperations
+	keycloakBroker         keycloakBrokerProvisioner
+	keycloakCatalog        keycloakAuthorizationCatalog
+	keycloakMappings       keycloakClientMappingStore
+	keycloakReadiness      keycloakSwitchReadinessInspector
+	keycloakOperations     keycloakProjectionOperations
+	keycloakCutover        keycloakCutoverLifecycleStore
+	serviceCredentials     subsystemServiceCredentialManager
+	runtimeLicenses        *application.RuntimeLicenseEnrollmentService
+	runtimeLicenseSettings func(context.Context) (application.RuntimeLicenseSettings, error)
+	logger                 *slog.Logger
 	// egress 是健康探针出网策略（SEC-B5），与反向代理共用 application.EgressPolicy。
 	egress *application.EgressPolicy
 	// deploymentJobs 跟踪在途的后台部署编排；waitForDeploymentJobs 供测试确定性收口。
@@ -391,6 +393,15 @@ func (handler *SubsystemOnboardingHandler) ConfigureKeycloakCutoverLifecycle(sto
 // purpose-bound machine credentials for environments created by an older release.
 func (handler *SubsystemOnboardingHandler) ConfigureSubsystemServiceCredentials(manager subsystemServiceCredentialManager) {
 	handler.serviceCredentials = manager
+}
+
+// Only the composition root may enable commercial enrollment. Normal HTTP
+// requests cannot provide component approvals or select another credentials source.
+func (handler *SubsystemOnboardingHandler) ConfigureRuntimeLicenseEnrollment(service *application.RuntimeLicenseEnrollmentService) {
+	handler.runtimeLicenses = service
+}
+func (handler *SubsystemOnboardingHandler) ConfigureRuntimeLicenseSettings(provider func(context.Context) (application.RuntimeLicenseSettings, error)) {
+	handler.runtimeLicenseSettings = provider
 }
 
 func unverifiedKeycloakSwitchReadiness() KeycloakSwitchReadiness {
@@ -518,7 +529,52 @@ func (handler *SubsystemOnboardingHandler) effectiveIssuerAlias(alias string) st
 	if alias == "" {
 		alias = handler.defaultIssuerAlias
 	}
+	if alias == "" || alias == "basic_platform" {
+		alias = "platform"
+	}
 	return alias
+}
+
+// Existing environments retain their durable provider on ordinary rebuilds.
+// Provider changes belong to the dedicated, gated switch/rollback operations.
+func (handler *SubsystemOnboardingHandler) deploymentIssuerAlias(ctx context.Context, tenant, app, env, requested, forced string) (string, error) {
+	if forced != "" {
+		alias := handler.effectiveIssuerAlias(forced)
+		if _, err := handler.issuerForAlias(alias); err != nil {
+			return "", err
+		}
+		return alias, nil
+	}
+	for _, candidate := range []any{handler.service, handler.deploymentState} {
+		resolver, ok := candidate.(subsystemEnvironmentIssuerResolver)
+		if !ok {
+			continue
+		}
+		persisted, err := resolver.ResolveEnvironmentIssuerAlias(ctx, tenant, app, env)
+		if err != nil {
+			return "", err
+		}
+		alias := strings.ToLower(strings.TrimSpace(persisted))
+		// Legacy persisted NULL/empty denotes the platform issuer, not the
+		// current onboarding default (which may have changed to Keycloak).
+		if alias == "" || alias == "basic_platform" {
+			alias = "platform"
+		}
+		if _, err = handler.issuerForAlias(alias); err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(requested) != "" && handler.effectiveIssuerAlias(requested) != alias {
+			return "", application.ErrValidation
+		}
+		return alias, nil
+	}
+	// Lightweight legacy compositions have no durable resolver. Production
+	// supplies one; keep its existing cutover gates for legacy callers.
+	alias := handler.effectiveIssuerAlias(requested)
+	if _, err := handler.issuerForAlias(alias); err != nil {
+		return "", err
+	}
+	return alias, nil
 }
 
 // NewSubsystemOnboardingHandler constructs the subsystem onboarding HTTP adapter. The optional
@@ -924,8 +980,9 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	provisioningInput := application.SubsystemProvisioningInput{
 		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
 		Environment: result.Environment.Environment, Issuer: issuer,
-		ManifestChecksum: manifestChecksum,
-		ClientID:         provisioningClientID, ClientSecret: provisioningClientSecret,
+		AuthenticationProvider: effectiveIssuerAlias,
+		ManifestChecksum:       manifestChecksum,
+		ClientID:               provisioningClientID, ClientSecret: provisioningClientSecret,
 		CatalogPublisherClientID:     result.CatalogPublisherOAuthClient.ClientID,
 		CatalogPublisherClientSecret: result.CatalogPublisherPlaintextSecret,
 		ServiceCredentials:           result.ServiceCredentials,
@@ -1510,6 +1567,9 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 	case "contract_management":
 		return []updateServiceCredentialRequirement{
 			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "合同管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
+			// 通知 Secret 只写不可回读。普通更新也重新交付，修复历史运行文件缺键，
+			// 不轮换浏览器凭据或给通知客户端附加业务写权限。
+			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "合同管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
 			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read"},
 			// 外部合同创建会同步校验 CRM 客户和商机。历史环境可能早于该集成能力，
 			// 受控更新必须创建或轮换凭据并把明文 Secret 重新下发到运行文件。
@@ -1613,6 +1673,10 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 			if !strings.EqualFold(client.Status, "ACTIVE") || client.ApplicationID != applicationID || client.EnvironmentID != environmentID {
 				return nil, application.ErrConflict
 			}
+			if applicationCode == "contract_management" && requirement.purpose == application.ServiceCredentialNotificationIngest &&
+				(client.TenantID != tenantID || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || !sameStringSet(client.GrantTypes, []string{"client_credentials"})) {
+				return nil, application.ErrConflict
+			}
 			desiredScopes := serviceCredentialScopes(requirement)
 			if !sameStringSet(client.Scopes, desiredScopes) {
 				// 历史服务凭据可能在文件下载能力引入前创建。受控更新在签发新密钥前
@@ -1625,10 +1689,10 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 					return nil, err
 				}
 			}
-			// A retry always creates a recoverable replacement because a prior secret
+			// Adoption and retry create a recoverable replacement because a prior secret
 			// may have been minted immediately before an Agent failure. Credentials
 			// marked rotate are also redelivered on normal controlled updates.
-			if operation != "RETRY" && !requirement.rotate {
+			if operation != "RETRY" && operation != "ADOPT" && !requirement.rotate {
 				continue
 			}
 			secret, secretErr := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{
@@ -1657,6 +1721,60 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 		})
 	}
 	return credentials, nil
+}
+
+// Initial platform browser secrets are write-only. Only the trusted first
+// adoption/retry path may mint a new version for the existing bound client.
+func (handler *SubsystemOnboardingHandler) ensureInitialPlatformBrowserCredential(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, redirectURI string) (application.OAuthClientView, string, error) {
+	if handler.serviceCredentials == nil || applicationID == "" || environmentID == "" {
+		return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+	}
+	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return application.OAuthClientView{}, "", err
+	}
+	canonical := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
+	for _, client := range clients {
+		if client.ClientID != canonical {
+			continue
+		}
+		if client.ApplicationID != applicationID || client.EnvironmentID != environmentID || !strings.EqualFold(client.Status, "ACTIVE") || client.ClientType != "confidential" || client.TokenAuthMethod != "client_secret_basic" || !containsExactString(client.GrantTypes, "authorization_code") || !client.RequirePKCE || !containsExactString(client.RedirectURIs, redirectURI) {
+			return application.OAuthClientView{}, "", application.ErrConflict
+		}
+		secret, err := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID})
+		if err != nil {
+			return application.OAuthClientView{}, "", err
+		}
+		if strings.TrimSpace(secret.PlaintextSecret) == "" {
+			return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+		}
+		return client, secret.PlaintextSecret, nil
+	}
+	if strings.TrimSpace(redirectURI) == "" {
+		return application.OAuthClientView{}, "", application.ErrValidation
+	}
+	created, err := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
+		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
+		ClientID: canonical, ClientName: applicationCode + " Web", ClientType: "confidential", TokenAuthMethod: "client_secret_basic",
+		AccessTokenTTLSeconds: 15 * 60, RefreshTokenTTLSeconds: 30 * 24 * 60 * 60,
+		RequirePKCE: true, GrantTypes: []string{"authorization_code", "refresh_token"}, Scopes: []string{"openid", "profile"}, RedirectURIs: []string{redirectURI},
+	})
+	if err != nil {
+		return application.OAuthClientView{}, "", err
+	}
+	if strings.TrimSpace(created.PlaintextSecret) == "" {
+		return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+	}
+	return created.Client, created.PlaintextSecret, nil
+}
+
+func containsExactString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // serviceCredentialScopes 返回指定机器凭据的完整最小权限集合。
@@ -1756,7 +1874,11 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	// 普通更新不会无条件轮换浏览器 OAuth 密钥；只有认证切换或目录恢复时才会把
 	// 新密钥交给部署 Agent。授权目录发布凭据则例外：它是应用绑定的机器身份，
 	// 每次受控更新都必须重新下发，才能修复旧环境中遗留的占位值或已失效密钥。
-	effectiveIssuerAlias := handler.effectiveIssuerAlias(payload.IssuerAlias)
+	effectiveIssuerAlias, aliasErr := handler.deploymentIssuerAlias(request.Context(), principal.Tenant.ID, applicationCode, environment, payload.IssuerAlias, forcedIssuerAlias)
+	if aliasErr != nil {
+		handler.writeError(writer, request, aliasErr)
+		return
+	}
 	// An explicit /switch request is always a cutover attempt, even if a legacy
 	// browser first updated issuer_alias optimistically.  Otherwise the generic
 	// metadata write could accidentally bypass the observation-window gate.
@@ -1808,6 +1930,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
 		// issuer as a stable source of truth instead of having the client send it in.
 		Issuer:                      issuer,
+		AuthenticationProvider:      effectiveIssuerAlias,
 		AuthenticationRuntimeUpdate: keycloakCutover || keycloakRollback,
 	}
 	publicBaseURL := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/")
@@ -1959,6 +2082,10 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	if isRetry {
 		operation = "RETRY"
 	}
+	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
+		updateInput.InitialRuntimeProvisioning = handler.deploymentState != nil && strings.EqualFold(provider.Capabilities().Mode, "production") &&
+			(operation == "ADOPT" || (operation == "RETRY" && deploymentContext.Status == application.SubsystemDeploymentStatusFailed)) && deploymentContext.AppliedManifestChecksum == "" && deploymentContext.ManifestLastAppliedAt == nil
+	}
 	if requiresCatalogPublisherCredential(applicationCode) && handler.serviceCredentials == nil {
 		// 授权目录发布凭据为只写密钥，缺少凭据管理器时绝不能假装更新成功并让
 		// Agent 启动一个仍使用占位值的容器。
@@ -2009,6 +2136,15 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	}()
 	if !ensureKeycloakCredentials() {
 		return
+	}
+	if updateInput.InitialRuntimeProvisioning && !strings.EqualFold(effectiveIssuerAlias, "keycloak") {
+		client, secret, err := handler.ensureInitialPlatformBrowserCredential(request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID, applicationCode, environment, principal.User.ID, updateInput.RedirectURI)
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		updateInput.ClientID, updateInput.ClientSecret = client.ClientID, secret
+		updateInput.AuthenticationRuntimeUpdate = true
 	}
 	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
 		request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID,
@@ -2701,6 +2837,26 @@ func (handler *SubsystemOnboardingHandler) startSubsystemDeploymentJob(request *
 // 都自行把生命周期收口（脱离 ctx），编排超时也只会落在 PROVISION_FAILED，绝不冻结在
 // UPDATING。
 func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx context.Context, job subsystemDeploymentJob) error {
+	if handler.runtimeLicenses != nil {
+		if handler.runtimeLicenseSettings == nil {
+			handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_BINDING_FAILED", "授权实例绑定读取未配置", application.ErrValidation, false)
+			return application.ErrValidation
+		}
+		settings, settingsErr := handler.runtimeLicenseSettings(ctx)
+		if settingsErr != nil && !errors.Is(settingsErr, application.ErrRuntimeLicenseNotInitialized) {
+			handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_BINDING_FAILED", "授权实例绑定读取失败", settingsErr, false)
+			return settingsErr
+		}
+		if settingsErr == nil {
+			job.Input.RuntimeLicenseSettings = settings
+			credentials, err := handler.runtimeLicenses.Prepare(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID, job.ApplicationCode, job.Environment, job.OperatorUserID)
+			if err != nil {
+				handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_ENROLLMENT_FAILED", "授权运行组件登记失败；请检查批准发布清单后重试", err, false)
+				return err
+			}
+			job.Input.RuntimeLicenseCredentials = credentials
+		}
+	}
 	if job.Operation == "ONBOARD" {
 		if err := handler.provisioner.Provision(ctx, job.Input); err != nil {
 			handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败", err, true)

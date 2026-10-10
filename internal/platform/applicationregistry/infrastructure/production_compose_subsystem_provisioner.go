@@ -65,6 +65,7 @@ type productionComposeTargetConfig struct {
 	Timeout                             time.Duration
 	Profile                             productionSubsystemProfile
 	RuntimeBootstrapFiles               []productionSubsystemRuntimeFileManifest
+	RuntimeConsumers                    map[string][]string
 	AllowPlaceholderDatabaseCredentials bool
 }
 
@@ -138,6 +139,7 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 			ComposeFile: config.ComposeFile, AllowedTenantID: config.AllowedTenantID,
 			ComposeProject: config.ComposeProject, DockerBinary: config.DockerBinary,
 			Timeout: config.Timeout, Profile: profile, RuntimeBootstrapFiles: runtimeBootstrapFiles,
+			RuntimeConsumers:                    productionRuntimeConsumers(profiles),
 			AllowPlaceholderDatabaseCredentials: config.AllowPlaceholderDatabaseCredentials,
 		}, runner: runner}
 		key := productionSubsystemTargetKey(profile.Manifest.Application.Code, profile.Manifest.Application.Environment)
@@ -354,7 +356,13 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.writeRuntimeConfiguration(input); err != nil {
 		return err
 	}
-	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
+	if err := target.writeRuntimeLicenseCredentials(input); err != nil {
+		return err
+	}
+	if err := target.retireRuntimeLicenseContainers(operationContext, input); err != nil {
+		return err
+	}
+	return target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
 // Update 只重用已落盘的浏览器 OAuth 配置，不尝试从数据库恢复或隐式轮换它。重试/更新时
@@ -362,6 +370,11 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 // 配置（如测试服务器的非 Secure Cookie 开关）无需重新 onboarding 即可生效。机器凭据仅在
 // 控制面明确重新下发时覆盖，避免把浏览器密钥暴露给普通更新流程。
 func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if input.InitialRuntimeProvisioning {
+		// The trusted control plane supplied fresh, complete initial credentials;
+		// Provision performs full validation before creating any runtime file.
+		return target.Provision(ctx, input)
+	}
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
 	if err := target.validateTenant(input.TenantID); err != nil {
@@ -389,10 +402,16 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.writeRuntimeFixedValues(input); err != nil {
 		return err
 	}
+	if err := target.writeRuntimeLicenseCredentials(input); err != nil {
+		return err
+	}
 	if err := target.validateRuntimeIntegrationConfiguration(); err != nil {
 		return err
 	}
-	return target.deployLocked(operationContext, productionProvisioningSecrets(input)...)
+	if err := target.retireRuntimeLicenseContainers(operationContext, input); err != nil {
+		return err
+	}
+	return target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...)
 }
 
 // validateRuntimeIntegrationConfiguration 在 Update 写入安全配置后校验全部清单绑定。
@@ -523,6 +542,9 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 			target.stepLog("step=migrate-cleanup warning=failed container=%s", migrationContainer)
 		}
 	}
+	if err := target.refreshDataAnalysisCatalogHash(ctx); err != nil {
+		return err
+	}
 	arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--force-recreate", "--no-deps"}
 	arguments = append(arguments, compose.RuntimeServices...)
 	target.stepLog("step=runtime services=%v", compose.RuntimeServices)
@@ -551,6 +573,79 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		}
 	}
 	return nil
+}
+
+// The immutable migration image embeds the same reviewed catalog used by the BI
+// API. Read it before starting business processes: a profile's static hash can
+// drift as permissions change, and post-start catalog publication is too late.
+func (target *productionComposeTarget) refreshDataAnalysisCatalogHash(ctx context.Context) error {
+	manifest := target.config.Profile.Manifest
+	if manifest.Application.Code != "data_analysis" || manifest.Application.Environment != "prod" {
+		return nil
+	}
+	if manifest.Compose.MigrateService == "" {
+		return provisioningError("data-analysis catalog hash requires the reviewed migration service")
+	}
+	var runtimeFile *productionSubsystemRuntimeFileManifest
+	for _, file := range target.selectedRuntimeFiles() {
+		if file.Path == "runtime/data-analysis.env" {
+			if runtimeFile != nil {
+				return provisioningError("data-analysis catalog runtime policy is ambiguous")
+			}
+			copy := file
+			runtimeFile = &copy
+		}
+	}
+	if runtimeFile == nil {
+		return provisioningError("data-analysis catalog runtime policy is unavailable")
+	}
+	if err := ensureProductionRuntimeFile(target.config.DeployRoot, *runtimeFile, false); err != nil {
+		return err
+	}
+	target.stepLog("step=catalog-hash service=%s", manifest.Compose.MigrateService)
+	stepContext, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	output, err := target.runComposeOutput(stepContext, "run", "--rm", "--no-deps", "--entrypoint", "/app/authz-catalog", manifest.Compose.MigrateService, "print", "data_analysis")
+	if err != nil {
+		// Never return arbitrary command output, which may contain runtime secrets.
+		return provisioningError("read data-analysis migration image authorization catalog hash")
+	}
+	hash, err := parseDataAnalysisCatalogHash(output)
+	if err != nil {
+		return provisioningError("data-analysis migration image authorization catalog hash is invalid")
+	}
+	path := filepath.Join(target.config.DeployRoot, runtimeFile.Path)
+	if err := updateProductionSubsystemEnvironment(path, map[string]string{"OIDC_ROLE_CONFIG_HASH": hash}); err != nil {
+		return provisioningError("write data-analysis image authorization catalog hash")
+	}
+	return nil
+}
+
+func parseDataAnalysisCatalogHash(output []byte) (string, error) {
+	if len(output) > 64*1024 {
+		return "", errors.New("catalog output too large")
+	}
+	var hash string
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		key, value, found := strings.Cut(strings.TrimSpace(scanner.Text()), "=")
+		if !found || strings.TrimSpace(key) != "claims_role_config_hash" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if hash != "" || !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+			return "", errors.New("catalog hash missing, duplicate or invalid")
+		}
+		encoded := strings.TrimPrefix(value, "sha256:")
+		if strings.Trim(encoded, "0123456789abcdef") != "" {
+			return "", errors.New("catalog hash is not lowercase hexadecimal")
+		}
+		hash = value
+	}
+	if scanner.Err() != nil || hash == "" {
+		return "", errors.New("catalog hash output unavailable")
+	}
+	return hash, nil
 }
 
 func productionMigrationContainerName(applicationCode string) string {
@@ -735,14 +830,24 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		path   string
 		values map[string]string
 	}
+	files := target.selectedRuntimeFiles()
+	managedAuthentication, err := validateProductionAuthenticationProvider(input, files)
+	if err != nil {
+		return err
+	}
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
-	for _, runtimeFile := range target.selectedRuntimeFiles() {
+	for _, runtimeFile := range files {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		currentContent, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return provisioningError("read production subsystem runtime configuration")
 		}
 		currentValues := parseEnvironmentValues(string(currentContent))
+		if managedAuthentication {
+			if err := validateProductionAuthenticationUpdate(input, runtimeFile.Bindings, currentValues); err != nil {
+				return err
+			}
+		}
 		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
 		if err != nil {
 			return err
@@ -770,8 +875,8 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					return resolveErr
 				}
 				values[key] = value
-			case "issuer", "issuer_security_center_url":
-				if input.AuthenticationRuntimeUpdate && strings.TrimSpace(input.Issuer) != "" {
+			case "issuer", "issuer_security_center_url", "oidc_backchannel_base_url":
+				if (managedAuthentication || input.AuthenticationRuntimeUpdate) && strings.TrimSpace(input.Issuer) != "" {
 					value, resolveErr := resolveProductionBinding(input, source)
 					if resolveErr != nil {
 						return resolveErr
@@ -791,7 +896,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 						values[key+"_ROLLBACK"] = previous
 					}
 					values[key] = provided
-				} else if !strings.Contains(strings.ToLower(input.Issuer), "/realms/") {
+				} else if input.AuthenticationProvider == "platform" {
 					if rollbackValue := strings.TrimSpace(currentValues[key+"_ROLLBACK"]); rollbackValue != "" {
 						values[key] = rollbackValue
 					}
@@ -835,8 +940,12 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 		path   string
 		values map[string]string
 	}
+	files := target.selectedRuntimeFiles()
+	if _, err := validateProductionAuthenticationProvider(input, files); err != nil {
+		return err
+	}
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
-	for _, runtimeFile := range target.selectedRuntimeFiles() {
+	for _, runtimeFile := range files {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
 		if err != nil {
@@ -869,6 +978,15 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
 	switch source {
+	case "oidc_backchannel_base_url":
+		switch input.AuthenticationProvider {
+		case "platform":
+			return "http://platform-api:8080", nil
+		case "keycloak":
+			return "http://keycloak:8080", nil
+		default:
+			return "", provisioningError("production subsystem authentication provider is invalid")
+		}
 	case "issuer":
 		return issuer, nil
 	case "public_origin":
@@ -938,6 +1056,59 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 		}
 	}
 	return "", provisioningError("production subsystem runtime binding is unsupported")
+}
+
+// Only reviewed profiles declaring a managed backchannel participate in this
+// strict authentication batch. The provider comes from persisted control-plane
+// state, never from a browser URL or an issuer-path heuristic.
+func validateProductionAuthenticationProvider(input application.SubsystemProvisioningInput, files []productionSubsystemRuntimeFileManifest) (bool, error) {
+	for _, file := range files {
+		for _, source := range file.Bindings {
+			if source == "oidc_backchannel_base_url" {
+				if _, err := resolveProductionBinding(input, source); err != nil {
+					return false, err
+				}
+				if strings.TrimSpace(input.Issuer) == "" {
+					return false, provisioningError("production subsystem authentication issuer is unavailable")
+				}
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func validateProductionAuthenticationUpdate(input application.SubsystemProvisioningInput, bindings map[string]string, current map[string]string) error {
+	if !input.AuthenticationRuntimeUpdate {
+		return nil
+	}
+	var clientKey, secretKey string
+	for key, source := range bindings {
+		switch source {
+		case "client_id":
+			clientKey = key
+		case "client_secret":
+			secretKey = key
+		}
+	}
+	if clientKey == "" && secretKey == "" {
+		return nil
+	}
+	if clientKey == "" || secretKey == "" {
+		return provisioningError("production subsystem authentication credential policy is incomplete")
+	}
+	clientProvided := strings.TrimSpace(input.ClientID) != ""
+	secretProvided := strings.TrimSpace(input.ClientSecret) != ""
+	if clientProvided != secretProvided {
+		return provisioningError("production subsystem authentication credential batch is incomplete")
+	}
+	if clientProvided {
+		return nil
+	}
+	if input.AuthenticationProvider != "platform" || productionEnvironmentValueMissing(current[clientKey+"_ROLLBACK"]) || productionEnvironmentValueMissing(current[secretKey+"_ROLLBACK"]) {
+		return provisioningError("production subsystem authentication rollback credential batch is unavailable")
+	}
+	return nil
 }
 
 func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEnvironment, validateInfrastructureSecrets bool) error {
@@ -1258,6 +1429,11 @@ func productionProvisioningSecrets(input application.SubsystemProvisioningInput)
 	for _, credential := range input.ServiceCredentials {
 		if credential.PlaintextSecret != "" {
 			values = append(values, credential.PlaintextSecret)
+		}
+	}
+	for _, credential := range input.RuntimeLicenseCredentials {
+		if credential.ClientSecret != "" {
+			values = append(values, credential.ClientSecret)
 		}
 	}
 	return values

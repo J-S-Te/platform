@@ -46,6 +46,8 @@ usage() {
 部署主流程（按此顺序）：
   configure                     一次性运行配置：IP、端口、管理员、时区、防火墙
   install                       扫描 packages/ 并自动部署基础平台/前端、准备已提供的子系统包
+                                带客户许可证及批准清单时继续受控接入并等待授权确认
+  license-renew <许可证路径>   导入同实例安全续期并等待组件确认，不重打业务镜像
   import <镜像包路径>           导入镜像包，校验摘要并登记不可变 digest
   deploy platform               发布基础平台（含数据库迁移与首个管理员初始化）
   deploy frontend               发布统一前端
@@ -180,6 +182,14 @@ auto_install_packages() {
     return 1
   fi
 
+  # Only the platform maintenance command can establish a signed installation
+  # identity. Plain env values must never choose or reset a customer instance.
+  if [[ -e "$deploy_dir/license-installation.json" || -L "$deploy_dir/license-installation.json" ]]; then
+    prepare_license_installation || return 1
+  elif [[ -e "$deploy_dir/license" || -L "$deploy_dir/license" ]]; then
+    install_delivery_license import || return 1
+  fi
+
   printf '\n阶段 D：导入并准备已提供的业务子系统镜像\n'
   for component in customer-opportunity customer-portal contract project settlement data-analysis; do
     index="$(package_index "$component")"
@@ -187,8 +197,78 @@ auto_install_packages() {
     import_package "${packages[$index]}"
     prepare_subsystem "$component" || return 1
   done
+  if [[ -f "$deploy_dir/license-installation.json" ]]; then
+    # Only the immutable pre-upgrade baseline selects migration targets; new
+    # packages and purchased systems cannot manufacture grandfathering.
+    compose run -T --rm --no-deps platform-api ./license-install migrate || return 1
+    printf '\n存量迁移确认完成；过渡资格不等于正式授权，新增未授权系统未开放业务。\n'
+  fi
+  if [[ -e "$deploy_dir/license" || -L "$deploy_dir/license" ]]; then
+    install_delivery_license activate || return 1
+    printf '\n交付授权已生效：全部必需业务执行组件已确认。\n'
+    return 0
+  fi
+  if [[ -f "$deploy_dir/license-installation.json" ]]; then
+    printf '\n四场景安装准备完成：基础平台和前端可用，存量系统已按冻结基线完成迁移确认。\n'
+    printf '新增未授权系统不会开放业务；请在授权管理中导入有效许可证并完成组件激活确认。\n'
+    return 0
+  fi
   printf '\n自动安装阶段完成：基础平台和前端已部署；子系统包已登记并准备候选。\n'
   printf '子系统服务不会自动启动；请在平台页面逐个受控采用 prod，再按 status -> continue -> verify 完成验收。\n'
+}
+
+prepare_license_installation() {
+  local plan="$deploy_dir/license-installation.json" scenario customer
+  [[ -f "$plan" && ! -L "$plan" ]] || die '安装场景配置必须是普通文件'
+  [[ "$(wc -c < "$plan" | tr -d ' ')" -le 4096 ]] || die '安装场景配置超限'
+  jq -e -s 'length == 1 and (.[0] | .version == 1 and (.scenario == "fresh" or .scenario == "migrate" or .scenario == "platform-only" or .scenario == "expand") and (.customer_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")) and (keys | sort == ["customer_id","scenario","version"]))' "$plan" >/dev/null || die '安装场景配置无效'
+  scenario="$(jq -er '.scenario' "$plan")"
+  customer="$(jq -er '.customer_id' "$plan")"
+  local -a command=(run -T --rm --no-deps)
+  if [[ -e "$deploy_dir/license" || -L "$deploy_dir/license" ]]; then
+    [[ -d "$deploy_dir/license" && ! -L "$deploy_dir/license" && -f "$deploy_dir/license/commercial-license.jws" && ! -L "$deploy_dir/license/commercial-license.jws" ]] || die '交付许可证不是安全普通文件'
+    command+=(-v "$deploy_dir/license:/delivery-license:ro")
+  fi
+  command+=(platform-api ./license-install prepare --scenario "$scenario" --customer "$customer")
+  [[ ! -d "$deploy_dir/license" ]] || command+=(--file /delivery-license/commercial-license.jws)
+  # Platform control can be upgraded first. No business import/update starts
+  # until the trusted Agent has frozen the still-running old installation.
+  compose "${command[@]}" || { printf '升级前基线冻结失败，禁止更新业务镜像；现有业务保持运行。\n' >&2; return 1; }
+}
+
+install_delivery_license() {
+  local action="${1:?授权操作必填}"
+  case "$action" in import|activate) ;; *) die '不支持的交付授权操作' ;; esac
+  [[ -d "$deploy_dir/license" && ! -L "$deploy_dir/license" && -f "$deploy_dir/license/commercial-license.jws" && ! -L "$deploy_dir/license/commercial-license.jws" ]] || die '交付许可证必须是安全常规文件'
+  if ! compose run -T --rm --no-deps -v "$deploy_dir/license:/delivery-license:ro" platform-api \
+    ./license-install "$action" --file /delivery-license/commercial-license.jws; then
+    printf '自动授权暂停（%s）；已完成的安装状态保留。排查明确错误后重试 install，不会重新起算期限。\n' "$action" >&2
+    return 1
+  fi
+}
+
+renew_delivery_license() {
+  local source="${1:?必须提供已签署续期许可证路径}" source_dir source_name staged
+  require_initialized
+  [[ -f "$source" && ! -L "$source" ]] || die '续期许可证必须是常规文件'
+  source_dir="$(cd -- "$(dirname -- "$source")" && pwd)"
+  source_name="$(basename -- "$source")"
+  [[ "$source_name" != *:* && "$source_dir" != *:* ]] || die '续期路径不能包含挂载分隔符'
+  [[ -d "$deploy_dir/license" && ! -L "$deploy_dir/license" ]] || die '只能续期已交付授权安装'
+  # A separate lock avoids holding the Agent deployment lock while activating.
+  [[ ! -L "$deploy_dir/runtime/.license-import.lock" ]] || die '授权锁不能是符号链接'
+  (
+    exec 8>"$deploy_dir/runtime/.license-import.lock"
+    flock -w 5 8 || die '另一个授权操作正在执行'
+    staged="$(mktemp "$deploy_dir/license/.renewal.XXXXXX")"
+    trap 'rm -f -- "$staged"' EXIT
+    install -m 600 -- "$source_dir/$source_name" "$staged"
+    compose run -T --rm --no-deps -v "$deploy_dir/license:/delivery-license:ro" platform-api \
+      ./license-install import --file "/delivery-license/$(basename -- "$staged")" || exit 1
+    [[ ! -L "$deploy_dir/license/commercial-license.jws" ]] || die '现有许可证不能是符号链接'
+    mv -f -- "$staged" "$deploy_dir/license/commercial-license.jws"
+  ) || return 1
+  install_delivery_license activate
 }
 
 env_get() {
@@ -1568,6 +1648,7 @@ case "$command" in
   menu) menu ;;
   configure) shift; configure "$@" ;;
   install) auto_install_packages ;;
+  license-renew) renew_delivery_license "${2:-}" ;;
   start) start_enabled ;;
   resume) require_initialized; start_registered "${2:?请指定子系统}" ;;
   disable) disable_component "${2:?请指定子系统}" ;;

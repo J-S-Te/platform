@@ -332,22 +332,22 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
 
-	// 集成子系统与平台共用 Compose 项目，因此只能停止自己的 API 服务，不能执行 down；
+	// 集成子系统与平台共用 Compose 项目，因此只能停止自己的运行组件，不能执行 down；
 	// 独立子系统则拥有完整栈和 .env.local，可按项目整体清理。
 	// Standalone Compose stacks and their .env.local live under the subsystem project directory.
 	// The integrated contract, customer and Portal APIs share the platform Compose project, so teardown
-	// only stops their API service and deliberately preserves database/key material in the shared
+	// only stops their runtime components and deliberately preserves database/key material in the shared
 	// runtime environment files.
 	projectDirectory, projectErr := provisioner.projectDirectory(applicationCode)
 	if projectErr == nil {
 		if isIntegratedSubsystem(applicationCode) {
-			service := "contract-api"
+			services := []string{"contract-api", "contract-worker"}
 			if applicationCode == integratedCustomerApplicationCode {
-				service = "customer-api"
+				services = []string{"customer-api"}
 			} else if applicationCode == integratedPortalApplicationCode {
-				service = "portal-api"
+				services = []string{"portal-api"}
 			}
-			if runErr := provisioner.runIntegratedPlatformCompose(operationCtx, "stop", service); runErr != nil {
+			if runErr := provisioner.runIntegratedPlatformCompose(operationCtx, append([]string{"stop"}, services...)...); runErr != nil {
 				return provisioningError("stop subsystem containers")
 			}
 		} else {
@@ -518,15 +518,21 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		values["CONTRACT_SIGNED_COUNT_CLIENT_SECRET"] = signedCountCredential.PlaintextSecret
 		values["CONTRACT_SIGNED_COUNT_SCOPE"] = "contract.opportunity_signed_count.read"
 	case integratedContractApplicationCode:
+		if err := contractNotificationRuntimeValues(input, values, false); err != nil {
+			return err
+		}
 		// Normal updates preserve the existing owner-directory credential. Retry
 		// supplies a replacement secret when the previous delivery may have failed.
+		// CRM mounts machine routes under its application prefix. Ordinary updates
+		// repair this managed address without rotating the existing credentials.
+		values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090/customer-opportunity"
 		if credential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
 		if credential, ok := input.ServiceCredential(application.ServiceCredentialCRMContractReferenceRead); ok {
 			values["CRM_REFERENCE_ENABLED"] = "true"
-			values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090"
+			values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090/customer-opportunity"
 			values["CRM_REFERENCE_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
 			values["CRM_REFERENCE_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["CRM_REFERENCE_CLIENT_SECRET"] = credential.PlaintextSecret
@@ -720,6 +726,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 	}
 	if input.ApplicationCode == integratedContractApplicationCode {
 		// SEC-D7b：Rebuild 写入路径同样补齐签署人手机号列加密密钥；已有合法键保留，不轮换。
+		if err := contractNotificationRuntimeValues(input, values, false); err != nil {
+			return err
+		}
 		if err := ensureContractSigningPhoneEnvironmentValue(environmentPath, values); err != nil {
 			return err
 		}
@@ -999,6 +1008,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		if credentialErr != nil {
 			return credentialErr
 		}
+		if err := contractNotificationRuntimeValues(input, values, true); err != nil {
+			return err
+		}
 		// SEC-D7b：contract env 可能由模板 .env.example 首次生成（占位行/空值），Agent 必须在
 		// 写入时补齐列加密密钥，否则 provisioner 重写后 /readyz 失败关闭；已有合法键保留。
 		if err := ensureContractSigningPhoneEnvironmentValue(environmentPath, values); err != nil {
@@ -1019,7 +1031,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credentials[application.ServiceCredentialOwnerDirectoryRead].OAuthClient.ClientID
 		values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credentials[application.ServiceCredentialOwnerDirectoryRead].PlaintextSecret
 		values["CRM_REFERENCE_ENABLED"] = "true"
-		values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090"
+		values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090/customer-opportunity"
 		values["CRM_REFERENCE_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
 		values["CRM_REFERENCE_CLIENT_ID"] = credentials[application.ServiceCredentialCRMContractReferenceRead].OAuthClient.ClientID
 		values["CRM_REFERENCE_CLIENT_SECRET"] = credentials[application.ServiceCredentialCRMContractReferenceRead].PlaintextSecret
@@ -1123,6 +1135,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 func requiredContractServiceCredentials(input application.SubsystemProvisioningInput) (map[string]application.SubsystemServiceCredential, error) {
 	purposes := []string{
 		application.ServiceCredentialAuditIngest,
+		application.ServiceCredentialNotificationIngest,
 		application.ServiceCredentialContractOpportunitySignedWrite,
 		application.ServiceCredentialContractSummaryRead,
 		application.ServiceCredentialOwnerDirectoryRead,
@@ -1140,6 +1153,37 @@ func requiredContractServiceCredentials(input application.SubsystemProvisioningI
 	return result, nil
 }
 
+// Only the contract notification publisher can populate these runtime keys.
+// Missing input on a non-credential restart preserves the existing runtime;
+// controlled updates explicitly redeliver its write-only secret.
+func contractNotificationRuntimeValues(input application.SubsystemProvisioningInput, values map[string]string, required bool) error {
+	credential, ok := input.ServiceCredential(application.ServiceCredentialNotificationIngest)
+	if !ok {
+		for _, candidate := range input.ServiceCredentials {
+			if candidate.Purpose == application.ServiceCredentialNotificationIngest {
+				return provisioningError("contract notification publisher credential is incomplete")
+			}
+		}
+		if required {
+			return provisioningError("contract notification publisher credential is unavailable")
+		}
+		return nil
+	}
+	client := credential.OAuthClient
+	// Environment IDs are checked by the control-plane credential reconciler;
+	// its deployment DTO carries only the target environment code.
+	if input.TenantID == "" || input.ApplicationID == "" || client.EnvironmentID == "" ||
+		client.TenantID != input.TenantID || client.ApplicationID != input.ApplicationID ||
+		client.ClientID != input.ApplicationCode+"-"+input.Environment+"-notification-publisher" || client.Status != "ACTIVE" ||
+		client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" ||
+		len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" || len(client.Scopes) != 1 || client.Scopes[0] != "notification.ingest" {
+		return provisioningError("contract notification publisher credential does not match the target environment or purpose")
+	}
+	values["PLATFORM_NOTIFICATION_CLIENT_ID"] = client.ClientID
+	values["PLATFORM_NOTIFICATION_CLIENT_SECRET"] = credential.PlaintextSecret
+	return nil
+}
+
 // rebuildIntegratedContractStack 让 contract_management 保持在工作区唯一的本地
 // Compose topology. The unified frontend already routes to basic-platform-local/contract-api;
 // starting the subsystem's standalone Compose file as well would create a second contract-api
@@ -1154,13 +1198,13 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractSta
 	// Build first, publish the catalog from that exact image, and only then replace
 	// the API. This prevents a new binary from serving with an older N/N-1 catalog
 	// window and turning every OIDC callback into local_authorization 401.
-	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "contract-api"); err != nil {
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "contract-api", "contract-worker"); err != nil {
 		return err
 	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "contract-api", "./authz-catalog", "publish"); err != nil {
 		return err
 	}
-	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "contract-api")
+	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "contract-api", "contract-worker")
 }
 
 // rebuildIntegratedProjectStack 让 project_management 保持在工作区唯一的本地
@@ -1986,7 +2030,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Cont
 		return provisioner.runAccessCompose(ctx, platformRoot, workspaceRoot, composeFile,
 			platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment,
 			placeholderFile, placeholderFile, "127.0.0.1", port,
-			"up", "-d", "--no-deps", "--wait", "api", "contract-api", "customer-api", "frontend")
+			"up", "-d", "--no-deps", "--wait", "api", "contract-api", "contract-worker", "customer-api", "frontend")
 	}
 
 	if err := writeAccessOverrideFiles(overrideFile, customerOverrideFile, origin, input.AllowInsecureHTTPRedirect); err != nil {
@@ -1995,7 +2039,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Cont
 	return provisioner.runAccessCompose(ctx, platformRoot, workspaceRoot, composeFile,
 		platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment,
 		overrideFile, customerOverrideFile, "0.0.0.0", port,
-		"up", "-d", "--no-deps", "--wait", "api", "contract-api", "customer-api", "frontend")
+		"up", "-d", "--no-deps", "--wait", "api", "contract-api", "contract-worker", "customer-api", "frontend")
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) runAccessCompose(ctx context.Context, platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment, lanOverride, customerOverride, bindAddress, port string, arguments ...string) error {

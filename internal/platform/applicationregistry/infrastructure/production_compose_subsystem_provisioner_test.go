@@ -15,6 +15,255 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
+func TestResolveProductionOIDCBackchannelUsesTrustedProviderOnly(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct{ provider, want string }{
+		{"platform", "http://platform-api:8080"}, {"keycloak", "http://keycloak:8080"},
+	} {
+		// Deliberately misleading issuer paths must never choose the backchannel.
+		for _, issuer := range []string{"https://browser.example/realms/fake", "https://public.example", "http://untrusted:8080"} {
+			value, err := resolveProductionBinding(application.SubsystemProvisioningInput{AuthenticationProvider: test.provider, Issuer: issuer}, "oidc_backchannel_base_url")
+			if err != nil || value != test.want {
+				t.Fatalf("provider %s resolved %q: %v", test.provider, value, err)
+			}
+		}
+	}
+	for _, provider := range []string{"", "unknown", "http://keycloak:8080", "Platform", " keycloak"} {
+		if _, err := resolveProductionBinding(application.SubsystemProvisioningInput{AuthenticationProvider: provider}, "oidc_backchannel_base_url"); err == nil {
+			t.Fatalf("untrusted provider %q accepted", provider)
+		}
+	}
+}
+
+func TestProductionAuthenticationBackchannelFullSwitchRollbackAndOrdinaryUpdate(t *testing.T) {
+	t.Parallel()
+	provisioner, _, path := productionProvisionerFixture(t)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.config.Profile.Manifest.Runtime.Files[0].Bindings["OIDC_BACKCHANNEL_BASE_URL"] = "oidc_backchannel_base_url"
+	input := productionContractInput("https://platform.example.com")
+	input.AuthenticationProvider = "platform"
+	if err := target.writeRuntimeConfiguration(input); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntime := func(issuer, backchannel, client, secret string) {
+		t.Helper()
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		values := parseEnvironmentValues(string(contents))
+		for key, expected := range map[string]string{"OIDC_ISSUER": issuer, "OIDC_BACKCHANNEL_BASE_URL": backchannel, "OIDC_CLIENT_ID": client, "OIDC_CLIENT_SECRET": secret} {
+			if values[key] != expected {
+				t.Fatalf("authentication batch mismatch for %s", key)
+			}
+		}
+	}
+	assertRuntime(input.Issuer, "http://platform-api:8080", input.ClientID, input.ClientSecret)
+	input.AuthenticationProvider, input.Issuer = "keycloak", "https://sso.example/realms/basic-platform"
+	input.ClientID, input.ClientSecret, input.AuthenticationRuntimeUpdate = "keycloak-client", "keycloak-secret", true
+	if err := target.writeRuntimeFixedValues(input); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntime(input.Issuer, "http://keycloak:8080", "keycloak-client", "keycloak-secret")
+	input.AuthenticationRuntimeUpdate = false
+	input.ClientID, input.ClientSecret = "ignored-client", "ignored-secret"
+	input.Issuer = "https://sso-updated.example/realms/basic-platform"
+	if err := target.writeRuntimeFixedValues(input); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntime(input.Issuer, "http://keycloak:8080", "keycloak-client", "keycloak-secret")
+	input.AuthenticationProvider, input.Issuer = "platform", "https://platform.example.com"
+	input.AuthenticationRuntimeUpdate, input.ClientID, input.ClientSecret = true, "", ""
+	if err := target.writeRuntimeFixedValues(input); err != nil {
+		t.Fatal(err)
+	}
+	original := productionContractInput("https://platform.example.com")
+	assertRuntime(input.Issuer, "http://platform-api:8080", original.ClientID, original.ClientSecret)
+}
+
+func TestProductionManagedAuthenticationRejectsUnknownAndIncompleteBatchWithoutWrite(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, provider, issuer, client, secret string
+		auth                                   bool
+	}{
+		{"unknown fixed", "unknown", "https://platform.example.com", "", "", false},
+		{"missing fixed", "", "https://platform.example.com", "", "", false},
+		{"missing issuer", "platform", "", "", "", false},
+		{"partial switch", "keycloak", "https://sso.example/realms/basic-platform", "new-client", "", true},
+		{"missing switch credential", "keycloak", "https://sso.example/realms/basic-platform", "", "", true},
+		{"unavailable rollback", "platform", "https://platform.example.com", "", "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provisioner, _, path := productionProvisionerFixture(t)
+			target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.config.Profile.Manifest.Runtime.Files[0].Bindings["OIDC_BACKCHANNEL_BASE_URL"] = "oidc_backchannel_base_url"
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := productionContractInput("https://platform.example.com")
+			input.AuthenticationProvider, input.Issuer, input.ClientID, input.ClientSecret, input.AuthenticationRuntimeUpdate = test.provider, test.issuer, test.client, test.secret, test.auth
+			if err := target.writeRuntimeFixedValues(input); err == nil {
+				t.Fatal("invalid fixed authentication accepted")
+			}
+			if test.provider == "unknown" || test.provider == "" || test.issuer == "" {
+				if err := target.writeRuntimeConfiguration(input); err == nil {
+					t.Fatal("invalid full authentication accepted")
+				}
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != string(before) {
+				t.Fatal("invalid batch changed runtime")
+			}
+		})
+	}
+}
+
+type dataAnalysisCatalogFixtureRunner struct {
+	recordingSubsystemRunner
+	output       []byte
+	catalogError error
+}
+
+func (runner *dataAnalysisCatalogFixtureRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
+	if containsString(arguments, "--services") {
+		return []byte("data-analysis-mysql\ndata-analysis-metabase-init\ndata-analysis-migrate\ndata-analysis-metabase\ndata-analysis-api\ndata-analysis-aggregation-worker\ndata-analysis-alert-worker\n"), nil
+	}
+	if err := runner.Run(ctx, directory, environment, name, arguments...); err != nil {
+		return nil, err
+	}
+	if containsString(arguments, "/app/authz-catalog") {
+		return runner.output, runner.catalogError
+	}
+	return nil, nil
+}
+
+func TestProductionDataAnalysisCatalogHashBeforeRuntime(t *testing.T) {
+	hash := "sha256:" + strings.Repeat("b", 64)
+	for _, test := range []struct {
+		name      string
+		output    string
+		err       error
+		wantError bool
+	}{
+		{"valid", "application=data_analysis\nclaims_role_config_hash=" + hash + "\nmax_effective_roles=10\n", nil, false},
+		{"missing", "application=data_analysis\n", nil, true},
+		{"invalid", "claims_role_config_hash=sha256:not-a-hash\n", nil, true},
+		{"duplicate", "claims_role_config_hash=" + hash + "\nclaims_role_config_hash=" + hash + "\n", nil, true},
+		{"command failed", "secret-from-command", errors.New("secret-from-command"), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(root, "runtime"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runtimePath := filepath.Join(root, "runtime", "data-analysis.env")
+			original := "OIDC_ROLE_CONFIG_HASH=sha256:old\nUNMANAGED=preserved\n"
+			if err := os.WriteFile(runtimePath, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".env"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			module := platformModuleRoot(t)
+			profiles, _, err := loadProductionSubsystemProfiles(filepath.Join(module, "deploy", "production"), filepath.Join(module, "deploy", "production", "subsystems.d"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var profile productionSubsystemProfile
+			for _, candidate := range profiles {
+				if candidate.Manifest.Application.Code == "data_analysis" {
+					profile = candidate
+				}
+			}
+			runner := &dataAnalysisCatalogFixtureRunner{output: []byte(test.output), catalogError: test.err}
+			target := &productionComposeTarget{config: productionComposeTargetConfig{
+				DeployRoot: root, RuntimeEnvPath: filepath.Join(root, ".env"), ReleaseEnvPath: filepath.Join(root, ".release.env"),
+				ComposeFile: filepath.Join(root, "docker-compose.yml"), ComposeProject: "reviewed-test", DockerBinary: "docker", Profile: profile,
+			}, runner: runner}
+			err = target.deployLocked(context.Background())
+			if (err != nil) != test.wantError {
+				t.Fatalf("deploy error = %v, wantError %v", err, test.wantError)
+			}
+			if err != nil && strings.Contains(err.Error(), "secret-from-command") {
+				t.Fatal("command output secret leaked")
+			}
+			contents, err := os.ReadFile(runtimePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			migration, catalog, runtime := -1, -1, -1
+			for index, call := range runner.calls {
+				if containsString(call.arguments, "/app/authz-catalog") {
+					catalog = index
+					for _, value := range []string{"run", "--rm", "--no-deps", "--entrypoint", "data-analysis-migrate", "print", "data_analysis"} {
+						if !containsString(call.arguments, value) {
+							t.Fatalf("missing fixed catalog argument %s", value)
+						}
+					}
+				} else if containsString(call.arguments, "data-analysis-migrate") && containsString(call.arguments, "--name") {
+					migration = index
+				} else if containsString(call.arguments, "--force-recreate") {
+					runtime = index
+				}
+			}
+			if migration < 0 || catalog <= migration {
+				t.Fatalf("catalog must follow successful migration: %d/%d", migration, catalog)
+			}
+			if test.wantError {
+				if runtime != -1 || string(contents) != original {
+					t.Fatal("failed catalog inspection started business or changed runtime")
+				}
+			} else {
+				if runtime <= catalog || !strings.Contains(string(contents), "OIDC_ROLE_CONFIG_HASH="+hash) || !strings.Contains(string(contents), "UNMANAGED=preserved") {
+					t.Fatal("authoritative hash not written before runtime start")
+				}
+				if info, err := os.Stat(runtimePath); err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatal("runtime permissions changed")
+				}
+			}
+		})
+	}
+}
+
+func TestProductionDataAnalysisCatalogHashDoesNotAffectOtherTargets(t *testing.T) {
+	for _, applicationCode := range []string{"contract_management", "project_management", "customer_and_opportunity", "customer_portal", "settlement"} {
+		target := &productionComposeTarget{runner: &dataAnalysisCatalogFixtureRunner{}}
+		target.config.Profile.Manifest.Application.Code = applicationCode
+		target.config.Profile.Manifest.Application.Environment = "prod"
+		if err := target.refreshDataAnalysisCatalogHash(context.Background()); err != nil {
+			t.Fatalf("%s: %v", applicationCode, err)
+		}
+		if len(target.runner.(*dataAnalysisCatalogFixtureRunner).calls) != 0 {
+			t.Fatal("unrelated image inspected")
+		}
+	}
+}
+
+func TestParseDataAnalysisCatalogHashRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+	for _, output := range []string{
+		"", "claims_role_config_hash=sha256:" + strings.Repeat("A", 64),
+		"claims_role_config_hash=sha256:" + strings.Repeat("a", 63),
+		"claims_role_config_hash=sha256:" + strings.Repeat("g", 64),
+		strings.Repeat("x", 64*1024+1),
+	} {
+		if _, err := parseDataAnalysisCatalogHash([]byte(output)); err == nil {
+			t.Fatal("malformed catalog output accepted")
+		}
+	}
+}
+
 const (
 	testProductionApplicationCode = "contract_management"
 	testProductionEnvironment     = "prod"
@@ -361,6 +610,40 @@ func TestProductionComposeSubsystemProvisionerUpdateRejectsIncompleteRuntimeBefo
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("update reached Docker with incomplete runtime configuration: %#v", runner.calls)
+	}
+}
+
+func TestProductionInitialAdoptionCreatesRuntimeOnlyWithCompleteCredentials(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		provisioner, runner, path := productionProvisionerFixture(t)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		input := productionContractInput("https://platform.example.com")
+		input.InitialRuntimeProvisioning = true
+		if !complete {
+			input.ClientSecret = ""
+		}
+		err := provisioner.Update(context.Background(), input)
+		if (err == nil) != complete {
+			t.Fatalf("initial adoption credential validation: %v", err)
+		}
+		if !complete {
+			if len(runner.calls) != 0 {
+				t.Fatal("incomplete initial request reached Docker")
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("incomplete initial request created runtime")
+			}
+			continue
+		}
+		if err := provisioner.Update(context.Background(), input); err != nil {
+			t.Fatal("initial retry is not idempotent", err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(raw), "OIDC_CLIENT_SECRET=browser-secret") {
+			t.Fatal("initial browser credential not delivered")
+		}
 	}
 }
 

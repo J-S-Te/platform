@@ -3,7 +3,7 @@ set -euo pipefail
 
 # 临时局域网访问开关。
 # 仅适用于 compose.local.yaml；不修改 compose.yaml 和常规 .env.local 文件。
-# enable 会重建 api、contract-api、customer-api、frontend，使公开地址和 OIDC 回调全部切换为 LAN 地址。
+# enable 会重建 api、contract-api、contract-worker、customer-api、frontend，使公开地址和 OIDC 回调全部切换为 LAN 地址。
 # disable 会删除临时覆盖文件并将 frontend 重新绑定到 127.0.0.1。
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,8 +181,8 @@ case "$command_name" in
         public_origin="http://${address}:${port}"
         write_override "$public_origin"
         log "正在发布临时局域网地址：${public_origin}"
-        log '将重建 api、contract-api、customer-api、frontend；数据库、角色、用户和生产 compose 配置不会被修改。'
-        compose_with_lan up -d --wait --force-recreate api contract-api customer-api frontend
+        log '将重建 api、contract-api、contract-worker、customer-api、frontend；数据库、角色、用户和生产 compose 配置不会被修改。'
+        compose_with_lan up -d --wait --force-recreate api contract-api contract-worker customer-api frontend
         log "已启用。局域网访问地址：${public_origin}"
         log "合同管理地址：${public_origin}/contract_management/"
         log "客户与商机管理地址：${public_origin}/customer-opportunity/"
@@ -191,7 +191,7 @@ case "$command_name" in
     disable)
         rm -f "$override_file" "$customer_override_file"
         log '正在关闭临时局域网访问并恢复仅本机监听…'
-        compose_local_only up -d --wait --force-recreate api contract-api customer-api frontend
+        compose_local_only up -d --wait --force-recreate api contract-api contract-worker customer-api frontend
         log "已关闭。仅可通过 http://127.0.0.1:${port} 访问。"
         ;;
     status)

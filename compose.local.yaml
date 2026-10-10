@@ -101,6 +101,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: file-gateway-runtime
+      additional_contexts:
+        license_core: ../license-core
     environment:
       FILE_GATEWAY_HTTP_ADDRESS: :8086
       FILE_GATEWAY_DATABASE_DSN: file_gateway:${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=UTC
@@ -229,6 +231,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        license_core: ../license-core
     env_file: *platform-runtime-env
     environment:
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
@@ -564,13 +568,17 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # 合同管理后端容器：API 与 Temporal Worker 运行在同一容器中。
+  # Independent API/Worker processes; separate commercial runtime identities.
   contract-api:
     <<: *contract-backend-runtime
     build:
       context: ../contract_management
-    env_file: *contract-runtime-env
-    environment:
+    env_file:
+      - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
+      - ${CONTRACT_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
+      - path: runtime/license-contract-api.env
+        required: false
+    environment: &contract-process-env
       HTTP_ADDRESS: :8081
       MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       PLATFORM_BASE_URL: http://platform-api:8080
@@ -578,7 +586,7 @@ services:
       # 就必须提供 CRM_API_TOKEN。本地默认置空＝集成关闭（跨系统链路实际走
       # 平台机器令牌），需要联调时经 CONTRACT_CRM_API_BASE_URL/TOKEN 显式开启。
       CRM_API_BASE_URL: ${CONTRACT_CRM_API_BASE_URL:-}
-      CRM_REFERENCE_BASE_URL: http://customer-api:8090
+      CRM_REFERENCE_BASE_URL: http://customer-api:8090/customer-opportunity
       CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       TEMPORAL_ADDRESS: temporal:7233
@@ -591,7 +599,8 @@ services:
       # 会让容器在配置阶段退出；即使版本化关闭也必须给合法值。
       TEMPORAL_WORKER_VERSIONING_POLICY: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
       TEMPORAL_METRICS_ADDRESS: :9091
-      CONTRACT_RUN_WORKER_WITH_API: "true"
+      CONTRACT_PROCESS_MODE: split
+      CONTRACT_RUN_WORKER_WITH_API: "false"
       GIN_MODE: release
       CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
       CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
@@ -607,6 +616,7 @@ services:
       CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
     volumes:
       - ./data/keys:/app/data/keys:ro
+      - license-state-contract-api:/var/lib/commercial-license
     depends_on:
       contract-mysql:
         condition: service_healthy
@@ -640,6 +650,38 @@ services:
           - contract-api
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  contract-worker:
+    <<: *contract-backend-runtime
+    build:
+      context: ../contract_management
+    env_file:
+      - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
+      - ${CONTRACT_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
+      - path: runtime/license-contract-worker.env
+        required: false
+    environment: *contract-process-env
+    command: ["./worker"]
+    stop_grace_period: 60s
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - license-state-contract-worker:/var/lib/commercial-license
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+      contract-migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9091/readyz"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -1360,6 +1402,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  license-state-contract-api:
+  license-state-contract-worker:
   file_gateway_mysql_local_data:
     name: basic-platform-local-file-gateway-mysql-data
   file_gateway_local_data:

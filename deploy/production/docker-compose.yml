@@ -350,6 +350,7 @@ services:
       # docker.sock 不再挂入本容器（SEC-F3）：Docker 访问统一走 docker-socket-proxy 白名单。
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime-approvals:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime-approvals:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env:ro
       - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml:ro
       - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
@@ -433,6 +434,9 @@ services:
       # 生产编排必须覆盖旧的 .env 值，避免把 test/development 运行配置带入
       # production 项目，进而让审计、投影门禁按错误环境运行。
       APP_ENV: production
+      LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
+      LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      LICENSE_RUNTIME_STATE_DIRECTORY: /var/lib/commercial-license
       APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
       AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
@@ -627,8 +631,6 @@ services:
     # has not migrated to Keycloak and make all contract environments share one
     # authentication provider.
     environment:
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
       # 传输安全默认 fail-closed（SEC-N2）：生产默认发 Secure Cookie；HTTP 过渡环境
@@ -671,17 +673,18 @@ services:
     env_file:
       - path: ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
         required: false
+      - path: runtime/license-contract-api.env
+        required: false
     # OIDC_* is deliberately owned by the per-environment runtime file.  Do not
     # add a compose-level default here: that would overwrite an environment that
     # has not migrated to Keycloak and make all contract environments share one
     # authentication provider.
     networks: [application]
     volumes:
+      - license-state-contract-api:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     environment:
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -692,7 +695,8 @@ services:
       # environment 映射不会与 x-contract-service 的同名映射递归合并，必须在
       # 实际服务上重复声明，否则程序会退回自身默认值。
       TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
-      CONTRACT_RUN_WORKER_WITH_API: "true"
+      CONTRACT_PROCESS_MODE: split
+      CONTRACT_RUN_WORKER_WITH_API: "false"
       GIN_MODE: release
     command: ["./api"]
     ports:
@@ -729,6 +733,50 @@ services:
       start_period: 10s
 
   # 项目管理系统后端单容器：入口脚本同时启动 API 与 Temporal Worker。
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  # API and Worker deliberately use separate runtime identities and state.
+  contract-worker:
+    image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
+    env_file:
+      - path: ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
+        required: false
+      - path: runtime/license-contract-worker.env
+        required: false
+    networks: [application]
+    volumes:
+      - license-state-contract-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    restart: unless-stopped
+    environment:
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
+      CONTRACT_PROCESS_MODE: split
+      CONTRACT_RUN_WORKER_WITH_API: "false"
+      GIN_MODE: release
+    command: ["./worker"]
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9091/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -780,8 +828,6 @@ services:
     # per environment preserves both the platform-OIDC compatibility path and
     # the Keycloak migration path.
     environment:
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -815,12 +861,12 @@ services:
     env_file:
       - path: ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
         required: false
+      - path: runtime/license-project-api.env
+        required: false
     # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
     # per environment preserves both the platform-OIDC compatibility path and
     # the Keycloak migration path.
     environment:
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -833,6 +879,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-project-api:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     depends_on:
@@ -882,11 +929,14 @@ services:
     env_file:
       - path: ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
         required: false
+      - path: runtime/license-project-sla-notifier.env
+        required: false
     # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
     # per environment preserves both the platform-OIDC compatibility path and
     # the Keycloak migration path.
     networks: [application]
     volumes:
+      - license-state-project-sla-notifier:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     entrypoint: ["/usr/local/bin/sla-notifier"]
@@ -963,8 +1013,6 @@ services:
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1008,13 +1056,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-api.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1039,6 +1087,7 @@ services:
     restart: unless-stopped
     command: ["./crm-server"]
     volumes:
+      - license-state-customer-api:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
       - customer-attachment-data:/app/data/attachments
     ports:
@@ -1084,13 +1133,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-opportunity-alert-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1113,6 +1162,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-customer-opportunity-alert-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./opportunity-alert-worker"]
@@ -1134,13 +1184,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-owner-notification-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1163,6 +1213,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-customer-owner-notification-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./opportunity-owner-notification-worker"]
@@ -1184,13 +1235,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-presale-alert-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1213,6 +1264,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-customer-presale-alert-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./presale-alert-worker"]
@@ -1234,13 +1286,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-presale-assignment-notification-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1263,6 +1315,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-customer-presale-assignment-notification-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./presale-assignment-notification-worker"]
@@ -1284,13 +1337,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-presale-progress-notification-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1313,6 +1366,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-customer-presale-progress-notification-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./presale-progress-notification-worker"]
@@ -1334,13 +1388,13 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-notification-delivery-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1363,6 +1417,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-customer-notification-delivery-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./notification-delivery-worker"]
@@ -1387,11 +1442,14 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-customer-presale-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     networks: [application]
     volumes:
+      - license-state-customer-presale-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./presale-worker"]
@@ -1468,8 +1526,6 @@ services:
     environment:
       PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
-      PORTAL_OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
       PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
       PORTAL_HTTP_ADDRESS: :8091
@@ -1503,13 +1559,13 @@ services:
     env_file:
       - path: ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
         required: false
+      - path: runtime/license-portal-api.env
+        required: false
     # PORTAL_OIDC_* stays in runtime/portal.env.  It is independently switched
     # by the authentication control plane and must not inherit global values.
     environment:
       PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
-      PORTAL_OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
       PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
       PORTAL_HTTP_ADDRESS: :8091
@@ -1522,6 +1578,7 @@ services:
       GIN_MODE: release
     networks: [application]
     volumes:
+      - license-state-portal-api:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./portal-server"]
@@ -1567,11 +1624,14 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: runtime/license-portal-invite-compensation-worker.env
+        required: false
     # OIDC_* is deliberately owned by runtime/customer.env for this exact
     # application/environment.  Compose must not provide a global Keycloak
     # default because existing environments may still use the platform issuer.
     networks: [application]
     volumes:
+      - license-state-portal-invite-compensation-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     # CRM 未启用或未接入时，启动脚本跳过此消费者并提示邀请补偿不可用。
@@ -1649,8 +1709,6 @@ services:
         required: false
     environment:
       SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1682,8 +1740,6 @@ services:
         required: false
     environment:
       SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1709,14 +1765,17 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   settlement-api:
+    volumes:
+      - license-state-settlement-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
     env_file:
       - path: ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
         required: false
+      - path: runtime/license-settlement-api.env
+        required: false
     environment:
       SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1766,14 +1825,17 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   settlement-worker:
+    volumes:
+      - license-state-settlement-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     image: ${SETTLEMENT_IMAGE:-settlement/settlement:pending}
     env_file:
       - path: ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
         required: false
+      - path: runtime/license-settlement-worker.env
+        required: false
     environment:
       SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -1869,8 +1931,6 @@ services:
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
@@ -1893,14 +1953,17 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   data-analysis-api:
+    volumes:
+      - license-state-data-analysis-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     env_file:
       - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+      - path: runtime/license-data-analysis-api.env
         required: false
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
@@ -1947,8 +2010,13 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   data-analysis-aggregation-worker:
+    volumes:
+      - license-state-data-analysis-aggregation-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     env_file:
       - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+      - path: runtime/license-data-analysis-aggregation-worker.env
         required: false
     networks: [application]
     restart: unless-stopped
@@ -1975,14 +2043,17 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   data-analysis-alert-worker:
+    volumes:
+      - license-state-data-analysis-alert-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     env_file:
       - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+      - path: runtime/license-data-analysis-alert-worker.env
         required: false
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
@@ -2007,6 +2078,21 @@ services:
 
   data-analysis-metabase:
     image: metabase/metabase:v0.53.7
+    env_file:
+      - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+    # Use the same persisted signing secret as the BI API, never a second key.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        secret="$${METABASE_EMBEDDING_SECRET:-}"
+        case "$$secret" in
+          ''|*[!0-9a-fA-F]*) echo 'Metabase embedding secret is missing or invalid' >&2; exit 1 ;;
+        esac
+        [ "$${#secret}" -eq 64 ] || { echo 'Metabase embedding secret must be 64 hexadecimal characters' >&2; exit 1; }
+        export MB_EMBEDDING_SECRET_KEY="$$secret"
+        export MB_ENABLE_EMBEDDING_STATIC=true
+        exec /app/run_metabase.sh
     environment:
       MB_DB_TYPE: mysql
       MB_DB_DBNAME: dashboard_metabase
@@ -2102,6 +2188,25 @@ networks:
     internal: true
 
 volumes:
+  license-state-contract-api:
+  license-state-contract-worker:
+  license-state-project-api:
+  license-state-project-sla-notifier:
+  license-state-customer-api:
+  license-state-customer-opportunity-alert-worker:
+  license-state-customer-owner-notification-worker:
+  license-state-customer-presale-alert-worker:
+  license-state-customer-presale-assignment-notification-worker:
+  license-state-customer-presale-progress-notification-worker:
+  license-state-customer-notification-delivery-worker:
+  license-state-customer-presale-worker:
+  license-state-portal-api:
+  license-state-portal-invite-compensation-worker:
+  license-state-settlement-api:
+  license-state-settlement-worker:
+  license-state-data-analysis-api:
+  license-state-data-analysis-aggregation-worker:
+  license-state-data-analysis-alert-worker:
   prometheus-data:
   platform-mysql-data:
   contract-mysql-data:

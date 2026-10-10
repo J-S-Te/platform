@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
+	licenseevidence "github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
@@ -52,14 +53,17 @@ type subsystemAccessApplyPayload struct {
 }
 
 type subsystemProvisioningReply struct {
-	Success bool `json:"success"`
+	RuntimeLicenseLifecycle *application.RuntimeLicenseReleaseApproval `json:"runtime_license_lifecycle,omitempty"`
+	RuntimeLicenseApproval  []application.RuntimeLicenseApproval       `json:"runtime_license_approval,omitempty"`
+	Success                 bool                                       `json:"success"`
 	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
 	// 单独放 Detail，避免被安全过滤整段吞掉。
-	Message      string                                         `json:"message,omitempty"`
-	Detail       string                                         `json:"detail,omitempty"`
-	Services     []application.SubsystemServiceInstance         `json:"services,omitempty"`
-	Candidates   []application.SubsystemDiscoveryCandidate      `json:"candidates,omitempty"`
-	Capabilities *application.SubsystemProvisioningCapabilities `json:"capabilities,omitempty"`
+	Message         string                                         `json:"message,omitempty"`
+	Detail          string                                         `json:"detail,omitempty"`
+	Services        []application.SubsystemServiceInstance         `json:"services,omitempty"`
+	Candidates      []application.SubsystemDiscoveryCandidate      `json:"candidates,omitempty"`
+	Capabilities    *application.SubsystemProvisioningCapabilities `json:"capabilities,omitempty"`
+	LicenseEvidence *licenseevidence.Report                        `json:"license_evidence,omitempty"`
 }
 
 type subsystemServiceDiscovery interface {
@@ -598,6 +602,71 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		requiresManifestChecksum = provider.Capabilities().Mode == "production"
 	}
 	switch request.Action {
+	case "LICENSE_RUNTIME_LIFECYCLE_APPROVAL":
+		provider, ok := executor.(runtimeLicenseLifecycleProvider)
+		if !ok || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" || request.TenantID != "" {
+			err = provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: approved lifecycle action unavailable")
+			break
+		}
+		approval, approvalErr := provider.ApprovedRuntimeLicenseLifecycle(operationContext, request.Code, request.Environment)
+		if approvalErr != nil {
+			err = approvalErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RuntimeLicenseLifecycle: &approval})
+		return
+	case "LICENSE_RUNTIME_APPROVAL":
+		provider, ok := executor.(runtimeLicenseApprovalProvider)
+		if !ok || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" || request.TenantID != "" {
+			err = provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: approved release action unavailable")
+			break
+		}
+		items, approvalErr := provider.ApprovedRuntimeLicenseComponents(operationContext, request.Code, request.Environment)
+		if approvalErr != nil {
+			err = approvalErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RuntimeLicenseApproval: items})
+		return
+	case "LICENSE_MIGRATION_INSTALLATION_EVIDENCE":
+		provider, ok := executor.(migrationInstallationEvidenceProvider)
+		if !ok || request.Code != "" || request.Environment != "" || request.TenantID != "" || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" {
+			err = provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: migration boundary action unavailable")
+			break
+		}
+		report, evidenceErr := provider.CollectMigrationInstallationEvidence(operationContext)
+		if evidenceErr != nil {
+			err = evidenceErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, LicenseEvidence: &report})
+		return
+	case "LICENSE_INSTALLATION_EVIDENCE":
+		provider, ok := executor.(installationLicenseEvidenceProvider)
+		if !ok || request.Code != "" || request.Environment != "" || request.TenantID != "" || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" {
+			err = provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: installation boundary action unavailable")
+			break
+		}
+		report, evidenceErr := provider.CollectInstallationLicenseEvidence(operationContext)
+		if evidenceErr != nil {
+			err = evidenceErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, LicenseEvidence: &report})
+		return
+	case "LICENSE_EVIDENCE":
+		provider, ok := executor.(licenseEvidenceProvider)
+		if !ok || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" || request.TenantID != "" {
+			err = provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: approved evidence action is unavailable")
+			break
+		}
+		report, evidenceErr := provider.CollectLicenseEvidence(operationContext, request.Code, request.Environment)
+		if evidenceErr != nil {
+			err = evidenceErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, LicenseEvidence: &report})
+		return
 	case "capabilities":
 		provider, ok := executor.(subsystemAvailableCapabilityProvider)
 		if !ok {

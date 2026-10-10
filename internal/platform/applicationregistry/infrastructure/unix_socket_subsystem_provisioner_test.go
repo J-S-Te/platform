@@ -64,7 +64,8 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 		t.Fatalf("executor request id = %q, want %q", got, requestID)
 	}
 	input := application.SubsystemProvisioningInput{
-		TenantID: "tenant-1", ApplicationCode: "contract_management", Environment: "dev",
+		AuthenticationProvider: "platform",
+		TenantID:               "tenant-1", ApplicationCode: "contract_management", Environment: "dev",
 		Issuer: "http://localhost:8081", ClientID: "contract_management-dev-web",
 		ClientSecret: "one-time-secret", RedirectURI: "http://localhost:8081/contract_management/auth/callback",
 		PublicURL: "http://localhost:8081/contract_management/", PathPrefix: "/contract_management",
@@ -83,11 +84,13 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 	}
 
 	if err := client.Update(context.Background(), application.SubsystemProvisioningInput{
-		ApplicationCode: "contract_management", Environment: "dev",
+		AuthenticationProvider: "keycloak",
+		ApplicationCode:        "contract_management", Environment: "dev",
+		InitialRuntimeProvisioning: true,
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if got := executor.updateInputSnapshot(); got.ApplicationCode != "contract_management" || got.Environment != "dev" {
+	if got := executor.updateInputSnapshot(); got.ApplicationCode != "contract_management" || got.Environment != "dev" || !got.InitialRuntimeProvisioning || got.AuthenticationProvider != "keycloak" {
 		t.Fatalf("update input = %#v", got)
 	}
 

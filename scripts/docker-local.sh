@@ -104,7 +104,7 @@ up/restart 选项：
 定向更新：
   refresh-api           只重建基础平台后端镜像，执行基础平台迁移，并重启 api/受控 provisioner
   refresh-frontend      只重建并重启统一 frontend；六个前端模块同时更新
-  refresh-contract-api  只重建合同管理后端镜像，执行合同迁移，并重启 contract-api
+  refresh-contract-api  重建合同管理后端镜像，执行合同迁移，并重启独立 API 与 Worker
   refresh-customer-api  重建客户与商机管理后端、执行 CRM 迁移，并刷新统一前端网关
   refresh-portal-api    重建客户自助门户后端、执行 Portal 迁移；仅在已完成应用接入后启动
   refresh-project-api   重建项目管理系统后端、执行项目迁移；仅在已完成应用接入后启动
@@ -118,7 +118,8 @@ up/restart 选项：
 应用容器：
   frontend      基础平台 + 合同管理 + 客户与商机管理 + 结算与开票 + 客户自助门户前端（宿主机仅发布 8081）
   api           基础平台 API + Worker
-  contract-api  合同管理 API + Temporal Worker
+  contract-api     合同管理 API
+  contract-worker  独立合同 Temporal Worker
   settlement-api 结算与开票 API
   settlement-worker 结算 Outbox 与催收 Worker
   customer-api  客户与商机管理 API
@@ -1441,7 +1442,7 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local build_services=(api file-gateway contract-api settlement-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    local build_services=(api file-gateway contract-api contract-worker settlement-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
     if [[ "$force_build" == true ]]; then
         log "重新构建统一前端、平台/合同/结算/CRM/门户/项目后端及售前投递 Worker 镜像"
     else
@@ -1775,7 +1776,7 @@ start_stack() {
     log "启动合同管理后端前发布当前镜像内嵌授权目录"
     sync_contract_authorization_catalog
     log "启动合同管理后端"
-    compose_up_wait "合同管理后端" contract-api
+    compose_up_wait "合同管理 API 与 Worker" contract-api contract-worker
     if [[ "$crm_catalog_ready" == true ]]; then
         log "启动客户与商机管理后端"
         compose_up_wait "客户与商机管理后端" customer-api
@@ -1898,16 +1899,16 @@ refresh_contract_backend() {
     compose_run up -d --wait --force-recreate --no-deps subsystem-provisioner api
 
     log "重新构建合同管理后端镜像（不构建 frontend 或基础平台 api）"
-    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build contract-api
+    COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build contract-api contract-worker
     log "启动合同数据库与 Temporal，并执行合同管理数据库迁移"
     compose_run up -d --wait contract-mysql temporal
     compose_run run --rm --no-deps contract-migrate
 	log "发布当前合同镜像内嵌的授权目录"
 	sync_contract_authorization_catalog
-    log "重建 contract-api 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
-    compose_run up -d --wait --no-deps contract-api
+    log "重建 contract-api 与 contract-worker 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
+    compose_run up -d --wait --no-deps contract-api contract-worker
     verify_gateway_routes
-    compose_run ps contract-api contract-mysql temporal
+    compose_run ps contract-api contract-worker contract-mysql temporal
 }
 
 refresh_customer_backend() {

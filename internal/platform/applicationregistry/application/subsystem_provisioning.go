@@ -271,11 +271,18 @@ type SubsystemProvisioningInput struct {
 	Environment      string
 	ManifestChecksum string
 	Issuer           string
-	ClientID         string
-	ClientSecret     string
+	// AuthenticationProvider is resolved by the control plane from the durable
+	// environment binding, never from an Agent profile or browser-only hint.
+	AuthenticationProvider string
+	ClientID               string
+	ClientSecret           string
 	// AuthenticationRuntimeUpdate is set only by the dedicated switch/rollback
 	// endpoints. Generic rebuilds must not overwrite issuer or browser credentials.
 	AuthenticationRuntimeUpdate bool
+	// InitialRuntimeProvisioning is derived by the control plane only for a
+	// reviewed adoption/retry whose first publication has never completed.
+	// It is not a browser lifecycle request field.
+	InitialRuntimeProvisioning bool
 	// CatalogPublisherClientID and CatalogPublisherClientSecret are a separate
 	// service credential for authorization catalog synchronization.
 	CatalogPublisherClientID     string
@@ -284,10 +291,13 @@ type SubsystemProvisioningInput struct {
 	// They are delivered only to the isolated deployment Agent and written to mode-0600 runtime
 	// environment files; the browser response and operational logs never receive them.
 	ServiceCredentials []SubsystemServiceCredential
-	RedirectURI        string
-	PublicURL          string
-	PathPrefix         string
-	UpstreamURL        string
+	// Component credentials are isolated from application-wide env files.
+	RuntimeLicenseCredentials []RuntimeLicenseCredential
+	RuntimeLicenseSettings    RuntimeLicenseSettings
+	RedirectURI               string
+	PublicURL                 string
+	PathPrefix                string
+	UpstreamURL               string
 }
 
 // ServiceCredential 按业务用途取凭据，而不是按切片位置取值。这样新增集成能力时不会

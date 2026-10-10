@@ -28,8 +28,6 @@ x-contract-service: &contract-service
   # has not migrated to Keycloak and make all contract environments share one
   # authentication provider.
   environment:
-    OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-    OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
     # 传输安全默认 fail-closed（SEC-N2）：生产默认发 Secure Cookie；HTTP 过渡环境
@@ -61,8 +59,6 @@ x-customer-service: &customer-service
   # default because existing environments may still use the platform issuer.
   environment:
     APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-    OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
     OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -97,8 +93,6 @@ x-portal-service: &portal-service
   environment:
     PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
     PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
-    PORTAL_OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-    PORTAL_OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
     PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
     PORTAL_HTTP_ADDRESS: :8091
@@ -121,8 +115,6 @@ x-project-service: &project-service
   # per environment preserves both the platform-OIDC compatibility path and
   # the Keycloak migration path.
   environment:
-    OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-    OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
     OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -146,8 +138,6 @@ x-settlement-service: &settlement-service
     - ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
   environment:
     SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-    OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
     OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
     OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -166,8 +156,6 @@ x-data-analysis-service: &data-analysis-service
   environment:
     APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
     COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-    OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-    OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
     OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
     PLATFORM_BASE_URL: http://platform-api:8080
     APP_PATH_PREFIX: /data_analysis
@@ -520,12 +508,17 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # 合同管理后端单容器：入口脚本同时启动 API 与 Temporal Worker。
+  # Contract API and Worker are independent processes and license consumers.
   contract-api:
     <<: *contract-service
+    env_file:
+      - ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
+      - path: runtime/license-contract-api.env
+        required: false
+    volumes:
+      - license-state-contract-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     environment:
-      OIDC_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:-${SUBSYSTEM_OIDC_ISSUER:-http://localhost:18090/realms/basic-platform}}
-      OIDC_BACKCHANNEL_BASE_URL: http://keycloak:8080
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
@@ -536,7 +529,8 @@ services:
       # environment 映射不会与 x-contract-service 的同名映射递归合并，必须在
       # 实际服务上重复声明，否则程序会退回自身默认值。
       TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
-      CONTRACT_RUN_WORKER_WITH_API: "true"
+      CONTRACT_PROCESS_MODE: split
+      CONTRACT_RUN_WORKER_WITH_API: "false"
       GIN_MODE: release
     command: ["./api"]
     ports:
@@ -567,6 +561,38 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  contract-worker:
+    <<: *contract-service
+    env_file:
+      - ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
+      - path: runtime/license-contract-worker.env
+        required: false
+    volumes:
+      - license-state-contract-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    environment:
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
+      CONTRACT_PROCESS_MODE: split
+      CONTRACT_RUN_WORKER_WITH_API: "false"
+      GIN_MODE: release
+    command: ["./worker"]
+    stop_grace_period: 60s
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9091/readyz"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -836,6 +862,21 @@ services:
 
   data-analysis-metabase:
     image: metabase/metabase:v0.53.7
+    env_file:
+      - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+        required: false
+    # Use the same persisted signing secret as the BI API, never a second key.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        secret="$${METABASE_EMBEDDING_SECRET:-}"
+        case "$$secret" in
+          ''|*[!0-9a-fA-F]*) echo 'Metabase embedding secret is missing or invalid' >&2; exit 1 ;;
+        esac
+        [ "$${#secret}" -eq 64 ] || { echo 'Metabase embedding secret must be 64 hexadecimal characters' >&2; exit 1; }
+        export MB_EMBEDDING_SECRET_KEY="$$secret"
+        export MB_ENABLE_EMBEDDING_STATIC=true
+        exec /app/run_metabase.sh
     environment:
       MB_DB_TYPE: mysql
       MB_DB_DBNAME: dashboard_metabase
@@ -1180,6 +1221,8 @@ networks:
     internal: true
 
 volumes:
+  license-state-contract-api:
+  license-state-contract-worker:
   platform-mysql-data:
   contract-mysql-data:
   customer-mysql-data:

@@ -64,6 +64,7 @@ runtime:
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
         OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri

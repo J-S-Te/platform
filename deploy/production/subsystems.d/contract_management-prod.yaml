@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [owner_directory_read, file_gateway_write, crm_contract_reference_read, project_contract_import]
+  allowed_service_bindings: [owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, project_contract_import]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -64,7 +64,7 @@ runtime:
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
         STAMPED_FILE_GATEWAY_MODE: dual
         CRM_REFERENCE_ENABLED: "true"
-        CRM_REFERENCE_BASE_URL: http://customer-api:8090
+        CRM_REFERENCE_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_REFERENCE_SCOPE: customer.contract_reference.read
         PROJECT_INTEGRATION_ENABLED: "true"
@@ -73,6 +73,7 @@ runtime:
         PROJECT_INTEGRATION_AUDIENCE: basic-platform-application
       bindings:
         OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri
@@ -87,6 +88,8 @@ runtime:
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        PLATFORM_NOTIFICATION_CLIENT_ID: service.notification_ingest.client_id
+        PLATFORM_NOTIFICATION_CLIENT_SECRET: service.notification_ingest.client_secret
         PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
         PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
         FILE_GATEWAY_APPLICATION_ID: application_id
@@ -102,6 +105,6 @@ compose:
     service: contract-mysql
     name: contract_management
   migrate_service: contract-migrate
-  runtime_services: [contract-api]
-  teardown_services: [contract-api]
+  runtime_services: [contract-api, contract-worker]
+  teardown_services: [contract-api, contract-worker]
   release_image_keys: [CONTRACT_IMAGE]

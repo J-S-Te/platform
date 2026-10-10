@@ -1,5 +1,9 @@
 # Basic Platform Context
 
+授权执行协调模块 `internal/platform/license/coordination` 与迁移117：独立服务Client、稳定签名快照、全组件Ready/ACK和单调激活状态。机器分发使用独立license.runtime scope；管理读/激活保留用户权限与同源保护。APP_ENV商业部署环境与OAuth应用环境独立绑定，不把production/prod当同一值。实际业务仓库的凭据交付、登记和操作门禁尚未接入，不得据此宣称全系统已强制执行。
+
+商业授权管理入口 `internal/platform/license`，迁移 116 保存部署身份、原始签名许可证、导入事件与已消费恢复凭据。信任公钥编译于 trust 包，不接受许可证或运行配置更换公钥。许可证预览不写业务数据，提交使用行锁/预期版本和显式缩减/替换确认；待生效许可证整份切换。管理页面当前明确标记运行时 NOT_CONNECTED，业务限制与迁移资格/分发/激活仍未接入，不能据此关闭业务 API 或整个 Worker。平台身份与权限链路不受商业期限限制。
+
 基础平台负责租户、身份、登录账号、组织岗位、授权和 Keycloak 接入。`iam_user` 与 `iam_account` 是平台身份事实源；Keycloak 是外部身份与授权投影目标。Keycloak 管理客户端位于 `internal/platform/keycloakauthorization/infrastructure`，身份管理应用位于 `internal/platform/identity/application`。
 
 关键约束：所有查询按租户隔离；关联平台用户的账号会在 Keycloak 管理状态可用时核对外部用户状态；Keycloak 禁用状态会以单向、幂等补偿方式持久化为平台用户及关联账号的 `DISABLED`，外部 `ACTIVE` 不得反向启用平台禁用状态；临时账号到期和临时锁定属于基于时间的有效性，Keycloak 授权投影必须以至少一个有效登录账号为准，并通过 Worker 周期性对账入队，不能依赖账号写事件；Keycloak 凭据不得进入日志或响应。

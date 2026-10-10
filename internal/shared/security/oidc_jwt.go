@@ -249,6 +249,7 @@ func (manager *OIDCJWTManager) issue(claims OIDCTokenClaims, tokenUse OIDCTokenU
 	payload, err := json.Marshal(oidcJWTPayload{
 		Issuer:             claims.Issuer,
 		Subject:            claims.Subject,
+		IdentityID:         claims.Subject,
 		Audience:           oidcAudience(claims.Audience),
 		IssuedAt:           claims.IssuedAt.Unix(),
 		ExpiresAt:          claims.ExpiresAt.Unix(),
@@ -281,6 +282,7 @@ type oidcJWTHeader struct {
 type oidcJWTPayload struct {
 	Issuer             string       `json:"iss"`
 	Subject            string       `json:"sub"`
+	IdentityID         string       `json:"identity_id,omitempty"`
 	Audience           oidcAudience `json:"aud"`
 	IssuedAt           int64        `json:"iat"`
 	ExpiresAt          int64        `json:"exp"`
@@ -335,6 +337,12 @@ func decodeOIDCJWTJSON(encoded string, destination any) error {
 }
 
 func oidcClaimsFromPayload(payload oidcJWTPayload) (OIDCTokenClaims, error) {
+	// Platform sub is the canonical iam_user.id. Emit its documented alias for
+	// subsystem clients, while accepting previously issued tokens without it.
+	// A conflicting alias must never introduce a second authorization subject.
+	if payload.IdentityID != "" && payload.IdentityID != payload.Subject {
+		return OIDCTokenClaims{}, errors.New("OIDC JWT identity_id does not match subject")
+	}
 	scope := strings.Fields(payload.Scope)
 	if strings.Join(scope, " ") != payload.Scope {
 		return OIDCTokenClaims{}, errors.New("OIDC JWT scope claim is not canonical")

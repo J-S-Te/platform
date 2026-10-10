@@ -67,8 +67,9 @@ func (itemModel) TableName() string {
 }
 
 type dictionaryProjection struct {
-	dictionaryModel
-	ItemCount int64 `gorm:"column:item_count"`
+	// GORM only scans exported fields, including embedded model fields.
+	Dictionary dictionaryModel `gorm:"embedded"`
+	ItemCount  int64           `gorm:"column:item_count"`
 }
 
 // ListDictionaries lists tenant dictionaries with their aggregate item counts.
@@ -107,7 +108,7 @@ func (repository *Repository) ListDictionaries(
 
 	items := make([]dictionarydomain.Dictionary, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, dictionaryToDomain(row.dictionaryModel, row.ItemCount))
+		items = append(items, dictionaryToDomain(row.Dictionary, row.ItemCount))
 	}
 
 	return dictionaryapplication.PageResult[dictionarydomain.Dictionary]{
@@ -167,7 +168,7 @@ func (repository *Repository) GetDictionary(
 		return dictionarydomain.Dictionary{}, fmt.Errorf("get dictionary: %w", err)
 	}
 
-	return dictionaryToDomain(row.dictionaryModel, row.ItemCount), nil
+	return dictionaryToDomain(row.Dictionary, row.ItemCount), nil
 }
 
 // UpdateDictionary 先按租户锁定目标行，再核对版本；锁负责串行化并发提交，Version 负责识别

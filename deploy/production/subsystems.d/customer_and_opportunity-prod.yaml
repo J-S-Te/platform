@@ -14,8 +14,13 @@ runtime:
   required_infrastructure_keys:
     - CUSTOMER_MYSQL_PASSWORD
     - CUSTOMER_MYSQL_ROOT_PASSWORD
+    # Temporal uses the shared workflow database even when contract business is not purchased.
+    - CONTRACT_MYSQL_PASSWORD
+    - CONTRACT_MYSQL_ROOT_PASSWORD
   files:
     - path: runtime/customer.env
+      # Reload-only consumers; not commercial component registration.
+      consumers: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
       template_path: subsystem-templates/customer.env.example
       compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
       required_existing_keys: []
@@ -64,6 +69,7 @@ runtime:
         APP_PUBLIC_ORIGIN: public_origin
         APP_PATH_PREFIX: path_prefix
         OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri
@@ -93,7 +99,8 @@ runtime:
         ATTACHMENT_FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         ATTACHMENT_FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
-  dependency_services: [customer-mysql]
+  # Provisioning intentionally uses --no-deps; list the complete workflow infrastructure explicitly.
+  dependency_services: [customer-mysql, contract-mysql, temporal]
   database:
     service: customer-mysql
     name: customer_opportunity

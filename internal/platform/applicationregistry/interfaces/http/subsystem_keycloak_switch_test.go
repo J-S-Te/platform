@@ -113,15 +113,22 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 		path        string
 		wantStatus  int
 		wantGated   bool
+		omitAlias   bool
 	}{
-		"first switch is blocked without all four gates": {
-			issuerAlias: "platform", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusConflict, wantGated: true,
+		"generic update cannot replace the persisted provider": {
+			issuerAlias: "platform", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusUnprocessableEntity,
 		},
 		"same issuer update bypasses switch gates": {
 			issuerAlias: "keycloak", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusAccepted,
 		},
 		"same issuer retry bypasses switch gates": {
 			issuerAlias: "keycloak", path: "/api/v1/subsystem-retry", wantStatus: stdhttp.StatusAccepted,
+		},
+		"update omission preserves persisted Keycloak": {
+			issuerAlias: "keycloak", path: "/api/v1/subsystem-update", wantStatus: stdhttp.StatusAccepted, omitAlias: true,
+		},
+		"retry omission preserves persisted Keycloak": {
+			issuerAlias: "keycloak", path: "/api/v1/subsystem-retry", wantStatus: stdhttp.StatusAccepted, omitAlias: true,
 		},
 	}
 	for name, test := range tests {
@@ -143,7 +150,11 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 			readiness := &recordingKeycloakReadiness{}
 			handler.ConfigureKeycloak(true, "https://sso.example.com", "basic-platform")
 			handler.ConfigureKeycloakSwitchReadinessInspector(readiness)
-			request := httptest.NewRequest(stdhttp.MethodPost, test.path, strings.NewReader(`{"application_code":"contract_management","environment":"prod","issuer_alias":"keycloak"}`))
+			body := `{"application_code":"contract_management","environment":"prod","issuer_alias":"keycloak"}`
+			if test.omitAlias {
+				body = `{"application_code":"contract_management","environment":"prod"}`
+			}
+			request := httptest.NewRequest(stdhttp.MethodPost, test.path, strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
 			request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
 				Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
@@ -161,7 +172,7 @@ func TestUpdateSubsystemOnlyGatesKeycloakIssuerCutovers(t *testing.T) {
 			if gotGated := readiness.inspectCalls > 0; gotGated != test.wantGated {
 				t.Fatalf("switch readiness inspected = %v, want %v", gotGated, test.wantGated)
 			}
-			if !test.wantGated && (provisioner.input.Issuer != "https://sso.example.com" || provisioner.input.ClientSecret != "") {
+			if test.wantStatus == stdhttp.StatusAccepted && (provisioner.input.AuthenticationProvider != "keycloak" || provisioner.input.Issuer != "https://sso.example.com" || provisioner.input.ClientSecret != "") {
 				t.Fatalf("same-issuer update must reuse runtime credentials: %#v", provisioner.input)
 			}
 		})
@@ -172,6 +183,52 @@ type recordingKeycloakReadiness struct {
 	verification KeycloakBrokerLoginVerification
 	called       bool
 	inspectCalls int
+}
+
+type failedIssuerStateStore struct {
+	recordingSubsystemDeploymentStateStore
+}
+
+func (*failedIssuerStateStore) ResolveEnvironmentIssuerAlias(context.Context, string, string, string) (string, error) {
+	return "", application.ErrSubsystemProvisioningUnavailable
+}
+
+func TestDeploymentProviderUsesDurableBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name, persisted, requested, forced, want string
+		failed, reject                           bool
+	}{
+		{name: "platform canonical", persisted: "basic_platform", want: "platform"},
+		{name: "durable empty does not inherit changed default", want: "platform"},
+		{name: "keycloak survives default platform", persisted: "keycloak", want: "keycloak"},
+		{name: "canonical equivalent request", persisted: "platform", requested: "basic_platform", want: "platform"},
+		{name: "no generic rollback", persisted: "keycloak", requested: "platform", reject: true},
+		{name: "no generic cutover", persisted: "platform", requested: "keycloak", reject: true},
+		{name: "invalid durable provider", persisted: "unknown", reject: true},
+		{name: "invalid requested provider", persisted: "platform", requested: "unknown", reject: true},
+		{name: "lookup failure cannot fall back", failed: true, reject: true},
+		{name: "dedicated switch target passes to existing gates", persisted: "platform", forced: "keycloak", want: "keycloak"},
+		{name: "dedicated rollback target passes to existing gates", persisted: "keycloak", forced: "platform", want: "platform"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &SubsystemOnboardingHandler{oidcIssuer: "https://platform.example.com", defaultIssuerAlias: "keycloak", keycloakEnabled: true, keycloakIssuer: "https://sso.example.com", keycloakRealm: "realm"}
+			if tc.failed {
+				h.deploymentState = &failedIssuerStateStore{}
+			} else {
+				h.deploymentState = &keycloakIssuerStateStore{issuerAlias: tc.persisted}
+			}
+			got, err := h.deploymentIssuerAlias(context.Background(), "tenant", "app", "prod", tc.requested, tc.forced)
+			if tc.reject {
+				if err == nil {
+					t.Fatal("invalid provider binding accepted")
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("provider=%q err=%v want=%q", got, err, tc.want)
+			}
+		})
+	}
 }
 
 func (readiness *recordingKeycloakReadiness) InspectKeycloakSwitchReadiness(context.Context, string, string, string) (KeycloakSwitchReadiness, error) {

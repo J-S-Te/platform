@@ -49,6 +49,7 @@ runtime:
         APP_PATH_PREFIX: path_prefix
         APP_PUBLIC_ORIGIN: public_origin
         OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri

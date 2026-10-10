@@ -34,6 +34,9 @@ tar -czf "$fixture/assets.tar.gz" -C "$fixture/source" .
 (cd "$fixture" && sha256sum assets.tar.gz > assets.tar.gz.sha256)
 bash "$installer" "$fixture/assets.tar.gz" "$fixture/target"
 cmp "$fixture/source/docker-compose.yml" "$fixture/target/docker-compose.yml"
+[[ -d "$fixture/target/runtime-approvals" && ! -L "$fixture/target/runtime-approvals" ]]
+[[ -z "$(find "$fixture/target/runtime-approvals" -mindepth 1 -print -quit)" ]] || { echo 'installer fabricated an approval' >&2; exit 1; }
+[[ "$(stat -c '%a' "$fixture/target/runtime-approvals" 2>/dev/null || stat -f '%Lp' "$fixture/target/runtime-approvals")" == 700 ]]
 [[ "$(find "$fixture/target/subsystems.d" -type d -perm 755 | wc -l | tr -d ' ')" == 1 ]]
 [[ "$(find "$fixture/target/subsystems.d" -type f -perm 644 | wc -l | tr -d ' ')" == 1 ]]
 printf '# operator module selection\nservices: {}\n' > "$fixture/target/docker-compose.yml"
@@ -44,6 +47,78 @@ bash "$installer" "$fixture/assets.tar.gz" "$fixture/target"
 cmp "$fixture/selected.yml" "$fixture/target/docker-compose.yml"
 cmp "$fixture/source/docker-compose.yml" "$fixture/target/docker-compose.yml.dist"
 cmp "$fixture/env.expected" "$fixture/target/.env"
+
+# License delivery is explicit and isolated from mutable runtime secrets.
+mkdir -p "$fixture/source/license"
+printf 'signed-license-transport-fixture\n' > "$fixture/source/license/commercial-license.jws"
+printf '{"version":1,"scenario":"fresh","customer_id":"fixture-customer"}\n' > "$fixture/source/license-installation.json"
+printf '{"version":1,"installation_boundary":true,"services":[]}\n' > "$fixture/source/license-migration-evidence.json"
+tar -czf "$fixture/licensed.tar.gz" -C "$fixture/source" .
+(cd "$fixture" && sha256sum licensed.tar.gz > licensed.tar.gz.sha256)
+bash "$installer" "$fixture/licensed.tar.gz" "$fixture/licensed-target"
+cmp "$fixture/source/license/commercial-license.jws" "$fixture/licensed-target/license/commercial-license.jws"
+cmp "$fixture/source/license-installation.json" "$fixture/licensed-target/license-installation.json"
+cmp "$fixture/source/license-migration-evidence.json" "$fixture/licensed-target/license-migration-evidence.json"
+cmp "$fixture/source/license-migration-evidence.json" "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json"
+[[ "$(stat -c '%a' "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json" 2>/dev/null || stat -f '%Lp' "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json")" == 600 ]]
+bash "$installer" "$fixture/licensed.tar.gz" "$fixture/licensed-target"
+
+# Generic asset overlays cannot replace a different canonical approval.
+cp "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json" "$fixture/approval.expected"
+printf '{"version":1,"installation_boundary":true,"services":[],"project":"changed-fixture"}\n' > "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json"
+if bash "$installer" "$fixture/licensed.tar.gz" "$fixture/licensed-target" >/dev/null 2>&1; then
+  echo 'installer overwrote a different canonical approval' >&2; exit 1
+fi
+grep -q '"project":"changed-fixture"' "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json"
+cp "$fixture/approval.expected" "$fixture/licensed-target/runtime-approvals/license-migration-evidence.json"
+printf 'private-runtime\n' > "$fixture/licensed-target/runtime-approvals/.secret.env"
+if bash "$installer" "$fixture/licensed.tar.gz" "$fixture/licensed-target" >/dev/null 2>&1; then
+  echo 'installer accepted an unknown hidden file in approvals' >&2; exit 1
+fi
+rm "$fixture/licensed-target/runtime-approvals/.secret.env"
+mkdir -p "$fixture/symlink-target" "$fixture/outside-approvals"
+ln -s "$fixture/outside-approvals" "$fixture/symlink-target/runtime-approvals"
+if bash "$installer" "$fixture/licensed.tar.gz" "$fixture/symlink-target" >/dev/null 2>&1; then
+  echo 'installer followed an approvals directory symlink' >&2; exit 1
+fi
+[[ -z "$(find "$fixture/outside-approvals" -mindepth 1 -print -quit)" ]]
+
+# Add exactly one read-only mount to an old operator-selected Agent.
+operator="$fixture/operator-target"
+bash "$installer" "$fixture/assets.tar.gz" "$operator"
+cat > "$operator/docker-compose.yml" <<'EOF'
+# custom deployment selection
+services:
+  subsystem-provisioner:
+    image: operator-approved-image
+    volumes:
+      - ./runtime:/app/operator-runtime
+    networks: [application]
+  preserved-custom-service:
+    image: untouched-custom-image
+EOF
+bash "$installer" "$fixture/assets.tar.gz" "$operator"
+[[ "$(grep -c 'runtime-approvals.*runtime-approvals:ro' "$operator/docker-compose.yml")" == 1 ]]
+grep -q 'untouched-custom-image' "$operator/docker-compose.yml"
+grep -q './runtime:/app/operator-runtime' "$operator/docker-compose.yml"
+cp "$operator/docker-compose.yml" "$fixture/operator.expected"
+bash "$installer" "$fixture/assets.tar.gz" "$operator"
+cmp "$fixture/operator.expected" "$operator/docker-compose.yml"
+printf 'other-customer\n' > "$fixture/source/license/commercial-license.jws"
+tar -czf "$fixture/other-license.tar.gz" -C "$fixture/source" .
+(cd "$fixture" && sha256sum other-license.tar.gz > other-license.tar.gz.sha256)
+if bash "$installer" "$fixture/other-license.tar.gz" "$fixture/licensed-target" >/dev/null 2>&1; then
+  echo 'asset update replaced existing license identity' >&2; exit 1
+fi
+grep -q '^signed-license-transport-fixture$' "$fixture/licensed-target/license/commercial-license.jws"
+printf 'never-ship-private-key\n' > "$fixture/source/license/vendor-private.pem"
+tar -czf "$fixture/license-secret.tar.gz" -C "$fixture/source" .
+(cd "$fixture" && sha256sum license-secret.tar.gz > license-secret.tar.gz.sha256)
+if bash "$installer" "$fixture/license-secret.tar.gz" "$fixture/secret-target" >/dev/null 2>&1; then
+  echo 'license directory allowed private key' >&2; exit 1
+fi
+rm "$fixture/source/license/commercial-license.jws" "$fixture/source/license/vendor-private.pem"
+rmdir "$fixture/source/license"
 
 # Replacing assets while either control-plane process is running must leave a
 # durable fail-closed marker. A subsequent overlay is rejected until the paired

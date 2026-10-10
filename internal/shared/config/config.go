@@ -37,6 +37,13 @@ type Config struct {
 	FileStorageRoot       string
 	IAMImportFileGateway  FileGatewayClientConfig
 	CORSOrigins           []string
+	CommercialRuntime     CommercialRuntimeConfig
+}
+
+type CommercialRuntimeConfig struct {
+	PlatformBaseURL       string
+	PlatformPublicKeyPath string
+	StateDirectory        string
 }
 
 // FileGatewayClientConfig is the platform API's least-privilege machine client used only for
@@ -266,6 +273,11 @@ func Load() (Config, error) {
 		Environment: value("APP_ENV", "development"),
 		AppName:     value("APP_NAME", "basic-platform"),
 		Timezone:    value("APP_TIMEZONE", "Asia/Shanghai"),
+		CommercialRuntime: CommercialRuntimeConfig{
+			PlatformBaseURL:       value("LICENSE_RUNTIME_PLATFORM_BASE_URL", publicBaseURL),
+			PlatformPublicKeyPath: value("LICENSE_RUNTIME_PUBLIC_KEY_PATH", "/app/data/keys/jwt-ed25519-public.pem"),
+			StateDirectory:        value("LICENSE_RUNTIME_STATE_DIRECTORY", "/var/lib/commercial-license"),
+		},
 		HTTP: HTTPConfig{
 			Addr:               value("APP_HTTP_ADDR", ":8080"),
 			PublicBaseURL:      publicBaseURL,

@@ -55,6 +55,9 @@ type productionSubsystemRuntimeManifest struct {
 }
 
 type productionSubsystemRuntimeFileManifest struct {
+	// Consumers are reload-only process ownership, never license coverage or
+	// installation scope. Each declaration belongs to this profile's application.
+	Consumers             []string          `yaml:"consumers"`
 	WhenService           string            `yaml:"when_service"`
 	Path                  string            `yaml:"path"`
 	TemplatePath          string            `yaml:"template_path"`
@@ -368,6 +371,19 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	compose.InitializationServices = normalizedInitializers
 	compose.RuntimeServices = normalizedRuntimeServices
 	compose.TeardownServices = normalizedTeardownServices
+	for index := range runtime.Files {
+		file := &runtime.Files[index]
+		normalized := normalizedProductionServices(file.Consumers)
+		if len(file.Consumers) > 0 && normalized == nil {
+			return errors.New("runtime consumer policy is invalid")
+		}
+		for _, service := range normalized {
+			if !slices.Contains(compose.RuntimeServices, service) || !productionServiceOwnedByApplication(app.Code, service) {
+				return errors.New("runtime consumer must be an application-owned runtime service")
+			}
+		}
+		file.Consumers = normalized
+	}
 	for service, runtimePath := range compose.ConditionalRuntimeServices {
 		if !slices.Contains(compose.RuntimeServices, service) {
 			return errors.New("conditional service must belong to runtime services")
@@ -446,7 +462,7 @@ func validProductionGeneratedEnvironmentKey(value string) bool {
 
 func validProductionBindingSource(source string) bool {
 	switch source {
-	case "issuer", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
+	case "issuer", "oidc_backchannel_base_url", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
 		"tenant_id", "application_id", "application_code", "environment", "path_prefix", "upstream_url", "cookie_secure",
 		"allow_insecure_http_origin", "catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url":
 		return true
@@ -504,6 +520,7 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 		}
 	case "contract_management":
 		return []string{
+			application.ServiceCredentialNotificationIngest,
 			application.ServiceCredentialContractSummaryRead,
 			application.ServiceCredentialContractOpportunitySignedWrite,
 			application.ServiceCredentialCRMContractReferenceRead,
@@ -557,9 +574,13 @@ func isReservedProductionService(value string) bool {
 
 // productionServicesOwnedByApplication 限制清单只能操作本应用命名空间内的 Compose 服务。
 // temporal 只允许作为显式共享依赖，不能成为迁移、运行或下线目标。
+// CRM 售前 Worker 也使用其数据库，但不得获得合同业务服务的操作权限。
 func productionServicesOwnedByApplication(applicationCode string, services []string, allowSharedDependency bool) bool {
 	for _, service := range services {
 		if allowSharedDependency && service == "temporal" {
+			continue
+		}
+		if allowSharedDependency && applicationCode == "customer_and_opportunity" && service == "contract-mysql" {
 			continue
 		}
 		if !productionServiceOwnedByApplication(applicationCode, service) {

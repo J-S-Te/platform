@@ -116,8 +116,10 @@ fi
 grep -Fxq -- '--build-arg' "$fixture/build-args"
 grep -Fxq 'GOPROXY=https://go.example.invalid|direct' "$fixture/build-args"
 grep -Fxq 'GOSUMDB=sum.example.invalid' "$fixture/build-args"
+grep -Fxq 'APP_VERSION=pure-oci-test' "$fixture/build-args"
 
 PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" \
+  OFFLINE_GOPROXY='https://go.example.invalid|direct' OFFLINE_GOSUMDB='sum.example.invalid' \
   OFFLINE_NPM_CONFIG_REGISTRY='https://npm.example.invalid' \
   bash "$builder" --component frontend --version pure-oci-test --output "$fixture/output"
 grep -Fxq 'NPM_CONFIG_REGISTRY=https://npm.example.invalid' "$fixture/build-args"
@@ -141,4 +143,169 @@ if find "$fixture" -type f \( -name '.build-info.*' -o -name '.build-info-check.
   exit 1
 fi
 
-echo 'offline package builder pure OCI, dependency mirror and bounded pull retry tests passed'
+# Only the trusted verifier process is replaced in this shell integration
+# fixture. Its cryptographic behavior is covered by license-package Go tests;
+# this checks transport, preflight ordering and per-customer output isolation.
+cat > "$fixture/tools/go" <<'STUB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$PWD" == */platform && "$*" == 'run ./cmd/license-package verify --file '* ]] || exit 1
+[[ "${STUB_LICENSE_VERIFY_OK:-false}" == true ]] || {
+  echo 'fixture trusted verifier rejected the license' >&2
+  exit 1
+}
+file="${5:?missing file}"
+[[ -f "$file" && "$file" == /* ]] || exit 1
+jq -cn --arg digest "$(sha256sum "$file" | awk '{print $1}')" --arg environment "${STUB_LICENSE_ENVIRONMENT:-production}" \
+  '{customer_id:"fixture-customer",instance_id:"fixture-instance",environment:$environment,applications:["contract_management"],digest:$digest}'
+STUB
+chmod +x "$fixture/tools/go"
+printf 'fixture.customer-a.signature\n' > "$fixture/customer-a.jws"
+printf 'fixture.customer-b.signature\n' > "$fixture/customer-b.jws"
+mkdir "$fixture/approvals"
+printf '{"version":1,"fixture_transport_only":true}\n' > "$fixture/approvals/license-evidence.json"
+printf '{"version":1,"application":"contract_management","environment":"prod","fixture_transport_only":true}\n' > "$fixture/approvals/runtime-license-contract_management-prod.json"
+printf '{"candidate":true,"operator":"fixture-only"}\n' > "$fixture/approvals/approval-review.json"
+printf 'DO-NOT-SHIP-FIXTURE-PRIVATE-KEY\n' > "$fixture/approvals/vendor-private.pem"
+printf '{"unknown":true}\n' > "$fixture/approvals/unknown.json"
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version unapproved --output "$fixture/unapproved-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" \
+  >"$fixture/unapproved.log" 2>&1; then
+  echo 'builder implicitly approved a candidate runtime bundle' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/unapproved-output" ]]
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version missing-approval --output "$fixture/missing-approval-output" \
+  --license-file "$fixture/customer-a.jws" >"$fixture/missing-approval.log" 2>&1; then
+  echo 'builder accepted an automatic license delivery without runtime approvals' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/missing-approval-output" ]]
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true STUB_LICENSE_ENVIRONMENT=prod \
+  bash "$builder" --component assets --version wrong-environment --output "$fixture/wrong-environment-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+  >"$fixture/wrong-environment.log" 2>&1; then
+  echo 'builder confused installation environment prod with production' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/wrong-environment-output" ]]
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" \
+  bash "$builder" --component assets --version invalid-license --output "$fixture/invalid-license-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+  >"$fixture/invalid-license.log" 2>&1; then
+  echo 'builder accepted a rejected license' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/invalid-license-output" ]] || {
+  echo 'license preflight modified the output directory before verification' >&2
+  exit 1
+}
+grep -q '未修改输出目录' "$fixture/invalid-license.log"
+ln -s "$fixture/customer-a.jws" "$fixture/license-link.jws"
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version symlink-license --output "$fixture/symlink-output" \
+  --license-file "$fixture/license-link.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+  >"$fixture/symlink-license.log" 2>&1; then
+  echo 'builder accepted a symbolic license file' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/symlink-output" ]]
+
+PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version licensed-test --output "$fixture/licensed-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved
+licensed_package="$fixture/licensed-output/deployment-assets-licensed-test.tar.gz"
+tar -xOf "$licensed_package" ./license/commercial-license.jws > "$fixture/packaged-license.jws"
+cmp "$fixture/customer-a.jws" "$fixture/packaged-license.jws"
+grep -Fxq "LICENSE_SHA256=$(sha256sum "$fixture/customer-a.jws" | awk '{print $1}')" "$fixture/licensed-output/BUILD_INFO.txt"
+grep -Eq '^RUNTIME_APPROVAL_SHA256=[a-f0-9]{64}$' "$fixture/licensed-output/BUILD_INFO.txt"
+tar -xOf "$licensed_package" ./license-evidence.json > "$fixture/packaged-evidence.json"
+cmp "$fixture/approvals/license-evidence.json" "$fixture/packaged-evidence.json"
+tar -xOf "$licensed_package" ./runtime-license-contract_management-prod.json > "$fixture/packaged-runtime.json"
+cmp "$fixture/approvals/runtime-license-contract_management-prod.json" "$fixture/packaged-runtime.json"
+if tar -tzf "$licensed_package" | grep -Eq '(unknown\.json|approval-review\.json|vendor-private\.pem)$'; then
+  echo 'builder shipped an unreviewed file, internal review record or private key' >&2
+  exit 1
+fi
+licensed_digest="$(sha256sum "$licensed_package" | awk '{print $1}')"
+PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version licensed-test --output "$fixture/licensed-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved
+[[ "$(sha256sum "$licensed_package" | awk '{print $1}')" == "$licensed_digest" ]]
+for changed_license in customer-b omitted; do
+  license_args=()
+  [[ "$changed_license" == omitted ]] || license_args=(--license-file "$fixture/customer-b.jws")
+  if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+    bash "$builder" --component assets --version licensed-test --output "$fixture/licensed-output" \
+    --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+    ${license_args[@]+"${license_args[@]}"} >"$fixture/$changed_license-license.log" 2>&1; then
+    echo 'builder reused a customer release with changed or omitted license' >&2
+    exit 1
+  fi
+  grep -q '拒绝混合构建' "$fixture/$changed_license-license.log"
+  [[ "$(sha256sum "$licensed_package" | awk '{print $1}')" == "$licensed_digest" ]]
+done
+cp "$fixture/approvals/license-evidence.json" "$fixture/original-evidence.json"
+printf '{"version":1,"fixture_transport_only":"changed"}\n' > "$fixture/approvals/license-evidence.json"
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version licensed-test --output "$fixture/licensed-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+  >"$fixture/changed-approval.log" 2>&1; then
+  echo 'builder reused different runtime approval bytes in the same customer release' >&2
+  exit 1
+fi
+grep -q '拒绝混合构建' "$fixture/changed-approval.log"
+[[ "$(sha256sum "$licensed_package" | awk '{print $1}')" == "$licensed_digest" ]]
+mv "$fixture/original-evidence.json" "$fixture/approvals/license-evidence.json"
+mv "$fixture/approvals/runtime-license-contract_management-prod.json" "$fixture/runtime-approval.json"
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version incomplete-approval --output "$fixture/incomplete-approval-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+  >"$fixture/incomplete-approval.log" 2>&1; then
+  echo 'builder accepted a license without its fixed runtime approval document' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/incomplete-approval-output" ]]
+mv "$fixture/runtime-approval.json" "$fixture/approvals/runtime-license-contract_management-prod.json"
+printf '[]\n' > "$fixture/approvals/license-evidence.json"
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version malformed-approval --output "$fixture/malformed-approval-output" \
+  --license-file "$fixture/customer-a.jws" --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved \
+  >"$fixture/malformed-approval.log" 2>&1; then
+  echo 'builder accepted an approval that is not one JSON object' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/malformed-approval-output" ]]
+if tar -tzf "$licensed_package" | grep -Eq '\.(pem|key)$'; then
+  echo 'customer licensed asset package unexpectedly includes a key' >&2
+  exit 1
+fi
+PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" \
+  bash "$builder" --component assets --version unlicensed-test --output "$fixture/unlicensed-output"
+if tar -tzf "$fixture/unlicensed-output/deployment-assets-unlicensed-test.tar.gz" | grep -q './license/'; then
+  echo 'legacy packaging unexpectedly inherited a customer license' >&2
+  exit 1
+fi
+printf '{"version":1,"fixture_transport_only":true}\n' > "$fixture/approvals/license-evidence.json"
+printf '{"version":1,"project":"fixture-old-installation","installation_boundary":true,"services":[],"excluded_services":[]}\n' > "$fixture/approvals/license-migration-evidence.json"
+for scenario in fresh migrate platform-only expand; do
+  PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" \
+    bash "$builder" --component assets --version "scenario-$scenario" --output "$fixture/scenario-$scenario" \
+    --installation-scenario "$scenario" --customer-id fixture-customer \
+    --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved
+  tar -xOf "$fixture/scenario-$scenario/deployment-assets-scenario-$scenario.tar.gz" ./license-installation.json | \
+    jq -e --arg scenario "$scenario" '.version == 1 and .scenario == $scenario and .customer_id == "fixture-customer"' >/dev/null
+  tar -xOf "$fixture/scenario-$scenario/deployment-assets-scenario-$scenario.tar.gz" ./license-migration-evidence.json > "$fixture/old-evidence.json"
+  cmp "$fixture/approvals/license-migration-evidence.json" "$fixture/old-evidence.json"
+  grep -Eq '^INSTALLATION_PLAN_SHA256=[a-f0-9]{64}$' "$fixture/scenario-$scenario/BUILD_INFO.txt"
+done
+if PATH="$fixture/tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_LICENSE_VERIFY_OK=true \
+  bash "$builder" --component assets --version bad-customer --output "$fixture/bad-customer" \
+  --installation-scenario fresh --customer-id another-customer --license-file "$fixture/customer-a.jws" \
+  --runtime-approval-dir "$fixture/approvals" --runtime-approval-approved > "$fixture/customer-mismatch.log" 2>&1; then
+  echo 'scenario customer mismatch accepted' >&2; exit 1
+fi
+[[ ! -e "$fixture/bad-customer" ]]
+echo 'offline package builder OCI, dependencies, retry and per-customer license transport tests passed'

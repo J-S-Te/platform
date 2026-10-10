@@ -367,3 +367,13 @@ cd /opt/unified-identity-platform
 ```
 
 导入成功不代表恢复完成。恢复后使用备份匹配的受控配置启动经批准的 Keycloak 镜像，再验证数据库健康、`/health/ready`、Issuer discovery、Realm、Client、JWKS 和一次测试账号登录；同时记录实际 RTO/RPO。脚本只接受 `backups/keycloak` 目录中的 `keycloak-*.sql.gz`，默认拒绝符号链接与未停止 Keycloak 时的导入。
+
+## 商业授权组件更新
+
+先运行平台真实迁移至 118，再发布支持受控生命周期的 API 和 Agent。镜像或覆盖摘要变化由审核后的固定 `runtime-license-<app>-<env>.json` 驱动；普通用户及 runtime Token 不能提交组件删除清单。平台接入重试会核对完整批准集合、生成新机器身份、版本锁定替换并保留审计，旧机器身份立即失去协调接口权限。替换不恢复存量迁移资格，全部有效成员需重新确认。
+
+合同使用 `contract-api` 与 `contract-worker` 两服务，同镜像但分别配置 `runtime/license-contract-api.env`、`runtime/license-contract-worker.env` 和独立持久卷。新 profile 两者均为必需运行单元；不能只批准 API 或让 Worker 复用 API 的 Secret。默认 split 禁止内嵌 Worker，迁移和 Temporal 健康检查先于两组件启动，Worker `/readyz` 端口不对公网发布。退役不删除数据库、授权状态卷或业务文件。
+
+审核清单可提供 `release_generation`（回滚或恢复旧逻辑服务必须使用新的批准代次）与 `retire_service_ids`（明确允许的旧成员）。清单未声明的成员不能退役；启用中的必需/条件组件不能退役。此流程的协议和隔离数据库测试不代替全栈安装验收。
+
+API 与 Agent 应同步升级：每组件交付需携带完整审核摘要，Agent 在写凭据和停止进程前严格复核组件、必需成员、退役名单及代次，缺失摘要或审核文件漂移都会拒绝。状态文件名绑定实例、环境、机器身份和镜像/覆盖摘要，新身份不能继承旧迁移缓存；同身份 Secret 轮转保留持久状态。退役只停止经完整容器 ID 和项目/服务标签复核的本应用进程，不删除容器、状态卷或业务数据；跨应用及基础设施名单被拒绝。

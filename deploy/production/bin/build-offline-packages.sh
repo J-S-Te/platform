@@ -23,6 +23,25 @@ version="${OFFLINE_RELEASE_VERSION:-$(date -u +%Y%m%dT%H%M%SZ)}"
 output_root="${OFFLINE_OUTPUT_DIR:-$workspace_root/.artifacts/offline/$version}"
 output_explicit=false
 component="all"
+license_file=''
+license_snapshot=''
+license_digest=''
+runtime_approval_dir=''
+runtime_approval_approved=false
+runtime_approval_digest=''
+installation_scenario=''
+installation_customer=''
+installation_digest=''
+runtime_approval_files=(
+  license-evidence.json
+  license-migration-evidence.json
+  runtime-license-contract_management-prod.json
+  runtime-license-customer_and_opportunity-prod.json
+  runtime-license-customer_portal-prod.json
+  runtime-license-project_management-prod.json
+  runtime-license-settlement-prod.json
+  runtime-license-data_analysis-prod.json
+)
 build_goproxy="${OFFLINE_GOPROXY:-https://goproxy.cn|https://proxy.golang.org|direct}"
 build_gosumdb="${OFFLINE_GOSUMDB:-sum.golang.google.cn}"
 build_npm_registry="${OFFLINE_NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}"
@@ -32,6 +51,8 @@ pull_retry_delay="${OFFLINE_PULL_RETRY_DELAY_SECONDS:-5}"
 usage() {
   cat <<'EOF'
 用法：build-offline-packages.sh [--component 组件名|all] [--version 版本] [--output 输出目录]
+  [--license-file 客户许可证.jws --runtime-approval-dir 批准目录 --runtime-approval-approved]
+  [--installation-scenario fresh|migrate|platform-only|expand --customer-id 客户标识]
 
 可用组件：
   common                公共基础设施（含独立文件上传网关镜像）
@@ -49,6 +70,15 @@ usage() {
 
 说明：--component 默认为 all。指定单个组件时只构建该组件（assets 只生成部署资产）；
 每次运行都会基于输出目录中现有的 *.tar.gz 重写总校验文件 SHA256SUMS。
+--license-file 使用平台内置厂商公钥验证签名，随 assets/all 部署资产交付。
+增量构建同一客户版本时每次传入同一许可证；不同客户或续签请使用新输出目录。
+许可证采用固定起止日期，部署或重启不重新计算授权期限。厂商私钥不得放入部署包。
+客户许可证必须同时提供已人工审核的运行组件批准目录及 --runtime-approval-approved。
+该开关表示厂商已完成审核，不会将工具生成的候选文件自动改写为批准结果。
+仅交付固定 prod 运行批准 JSON 和 license-evidence.json，未知文件与私钥不打包。
+四场景交付需明确指定 --installation-scenario，禁止按包数量猜测存量。
+--customer-id 可从签名许可证读取；无许可证时必须填写，并提供已批准目录。
+批准目录的 license-migration-evidence.json 描述升级前实际旧镜像，而非目标镜像。
 
 可选环境变量（只用于构建依赖下载，不写入 package.env）：
   OFFLINE_GOPROXY                   Go module 代理链
@@ -64,6 +94,11 @@ while (($#)); do
     --component) component="${2:?缺少组件名称}"; shift 2 ;;
     --version) version="${2:?缺少版本号}"; shift 2 ;;
     --output) output_root="${2:?缺少输出目录}"; output_explicit=true; shift 2 ;;
+    --license-file) license_file="${2:?缺少许可证文件}"; shift 2 ;;
+    --runtime-approval-dir) runtime_approval_dir="${2:?缺少批准目录}"; shift 2 ;;
+    --runtime-approval-approved) runtime_approval_approved=true; shift ;;
+    --installation-scenario) installation_scenario="${2:?缺少安装场景}"; shift 2 ;;
+    --customer-id) installation_customer="${2:?缺少客户标识}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -74,6 +109,9 @@ if [[ "$output_explicit" == false && -z "${OFFLINE_OUTPUT_DIR:-}" ]]; then
 fi
 
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "版本号格式不正确" >&2; exit 2; }
+case "$installation_scenario" in ''|fresh|migrate|platform-only|expand) ;; *) echo '安装场景无效' >&2; exit 2 ;; esac
+[[ -n "$installation_scenario" || -z "$installation_customer" ]] || { echo '--customer-id 必须与安装场景同时提供' >&2; exit 2; }
+[[ -z "$installation_scenario" || -n "$runtime_approval_dir" ]] || { echo '四场景安装必须提供已批准目录' >&2; exit 2; }
 case "$component" in common|platform|frontend|customer-opportunity|customer-portal|contract|project|settlement|data-analysis|host-deps|assets|all) ;; *) usage >&2; exit 2 ;; esac
 for build_setting in "$build_goproxy" "$build_gosumdb" "$build_npm_registry"; do
   [[ -n "$build_setting" && "$build_setting" != *$'\n'* && "$build_setting" != *$'\r'* ]] || {
@@ -112,6 +150,113 @@ if ((${#missing_inputs[@]} > 0)); then
   exit 1
 fi
 
+if [[ -n "$license_file" && -z "$runtime_approval_dir" ]]; then
+  echo '客户授权安装包必须提供 --runtime-approval-dir 和 --runtime-approval-approved' >&2
+  exit 2
+fi
+if [[ "$runtime_approval_approved" == true && -z "$runtime_approval_dir" ]] ||
+   [[ -n "$runtime_approval_dir" && "$runtime_approval_approved" != true ]]; then
+  echo '运行批准目录必须同时指定 --runtime-approval-dir 和 --runtime-approval-approved；候选不自动批准' >&2
+  exit 2
+fi
+if [[ -n "$license_file" || -n "$runtime_approval_dir" || -n "$installation_scenario" ]]; then
+  for command_name in jq sha256sum install mktemp; do
+    command -v "$command_name" >/dev/null || { echo "缺少所需命令：$command_name" >&2; exit 1; }
+  done
+  license_stage="$(mktemp -d "${TMPDIR:-/tmp}/offline-license-input.XXXXXX")"
+  trap 'rm -rf -- "$license_stage"' EXIT
+fi
+if [[ -n "$license_file" ]]; then
+  [[ -f "$license_file" && ! -L "$license_file" ]] || {
+    echo '客户许可证必须是非符号链接的普通文件' >&2
+    exit 2
+  }
+  command -v go >/dev/null || { echo '验签客户许可证需要 Go 构建平台可信验证器' >&2; exit 1; }
+  # Snapshot before verification, outside the output directory: a rejected
+  # license must not mutate published artifacts, and later source replacement
+  # must not change the verified customer license copied into this release.
+  license_snapshot="$license_stage/commercial-license.jws"
+  install -m 600 -- "$license_file" "$license_snapshot"
+  if ! license_metadata="$(cd "$workspace_root/platform" && GOWORK=off go run ./cmd/license-package verify --file "$license_snapshot")"; then
+    echo '客户许可证可信校验失败；未修改输出目录' >&2
+    exit 1
+  fi
+  license_digest="$(printf '%s' "$license_metadata" | jq -er '.digest | select(test("^[a-f0-9]{64}$"))')" || {
+    echo '可信验证器未返回有效许可证摘要' >&2
+    exit 1
+  }
+  [[ "$(sha256sum "$license_snapshot" | awk '{print tolower($1)}')" == "$license_digest" ]] || {
+    echo '可信验证器摘要与许可证文件不一致' >&2
+    exit 1
+  }
+  if [[ -n "$installation_scenario" ]]; then
+    signed_customer="$(printf '%s' "$license_metadata" | jq -er '.customer_id')"
+    [[ -z "$installation_customer" || "$installation_customer" == "$signed_customer" ]] || { echo '客户与签名许可证不匹配' >&2; exit 2; }
+    installation_customer="$signed_customer"
+  fi
+fi
+
+if [[ -n "$installation_scenario" ]]; then
+  [[ "$installation_customer" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]] || { echo '无许可证的安装需有效 --customer-id' >&2; exit 2; }
+  jq -n --arg scenario "$installation_scenario" --arg customer "$installation_customer" '{version:1,scenario:$scenario,customer_id:$customer}' > "$license_stage/license-installation.json"
+  installation_digest="$(sha256sum "$license_stage/license-installation.json" | awk '{print tolower($1)}')"
+fi
+
+if [[ -n "$runtime_approval_dir" ]]; then
+  [[ -d "$runtime_approval_dir" && ! -L "$runtime_approval_dir" ]] || {
+    echo '运行批准目录必须是非符号链接目录' >&2; exit 2;
+  }
+  mkdir -p -- "$license_stage/approvals"
+  runtime_approval_count=0
+  for approval_name in "${runtime_approval_files[@]}" approval-review.json; do
+    approval_input="$runtime_approval_dir/$approval_name"
+    if [[ ! -e "$approval_input" && ! -L "$approval_input" ]]; then
+      [[ "$approval_name" != license-evidence.json ]] || {
+        echo '运行批准目录缺少 license-evidence.json' >&2; exit 2;
+      }
+      continue
+    fi
+    [[ -f "$approval_input" && ! -L "$approval_input" ]] || {
+      echo "运行批准文件不是安全普通文件：$approval_name" >&2; exit 2;
+    }
+    [[ "$(wc -c < "$approval_input" | tr -d ' ')" -le 2097152 ]] || {
+      echo "运行批准文件超过 2MiB：$approval_name" >&2; exit 2;
+    }
+    install -m 600 -- "$approval_input" "$license_stage/approvals/$approval_name"
+    # Packaging only transports reviewed JSON. The isolated Agent performs
+    # authoritative profile/image/coverage validation; never guess or repair it.
+    jq -e -s 'length == 1 and (.[0] | type == "object")' "$license_stage/approvals/$approval_name" >/dev/null || {
+      echo "运行批准文件必须是单个 JSON 对象：$approval_name" >&2; exit 2;
+    }
+    if [[ "$approval_name" == runtime-license-* ]]; then
+      approval_app="${approval_name#runtime-license-}"
+      approval_app="${approval_app%-prod.json}"
+      jq -e --arg app "$approval_app" '.application == $app and .environment == "prod"' "$license_stage/approvals/$approval_name" >/dev/null || {
+        echo "运行批准文件的系统或应用环境与固定文件名不符：$approval_name" >&2; exit 2;
+      }
+      runtime_approval_count=$((runtime_approval_count + 1))
+    fi
+  done
+  ((runtime_approval_count > 0)) || [[ -n "$installation_scenario" ]] || { echo '运行批准目录没有任何受支持的 prod 组件批准文件' >&2; exit 2; }
+  [[ -z "$installation_scenario" || -f "$license_stage/approvals/license-migration-evidence.json" ]] || { echo '四场景交付缺少升级前安装边界批准 license-migration-evidence.json' >&2; exit 2; }
+  if [[ -n "$license_file" ]]; then
+    printf '%s' "$license_metadata" | jq -e '.environment == "production"' >/dev/null || {
+      echo '生产部署资产只接受 production 安装环境许可证（应用环境为 prod）' >&2; exit 2;
+    }
+    while IFS= read -r approval_app; do
+      case "$approval_app" in contract_management|customer_and_opportunity|customer_portal|project_management|settlement|data_analysis) ;; *) echo '许可证包含不支持的运行批准系统' >&2; exit 2 ;; esac
+      [[ -f "$license_stage/approvals/runtime-license-${approval_app}-prod.json" ]] || {
+        echo "许可证系统缺少对应运行批准：$approval_app" >&2; exit 2;
+      }
+    done < <(printf '%s' "$license_metadata" | jq -er '.applications[]')
+  fi
+  runtime_approval_digest="$(
+    for approval_name in "${runtime_approval_files[@]}" approval-review.json; do
+      [[ ! -f "$license_stage/approvals/$approval_name" ]] || printf '%s  %s\n' "$(sha256sum "$license_stage/approvals/$approval_name" | awk '{print tolower($1)}')" "$approval_name"
+    done | sha256sum | awk '{print tolower($1)}'
+  )"
+fi
+
 for command_name in docker gzip tar sha256sum mktemp jq; do command -v "$command_name" >/dev/null || { echo "缺少所需命令：$command_name" >&2; exit 1; }; done
 docker buildx version >/dev/null
 source "$script_dir/offline-package-metadata.sh"
@@ -138,6 +283,14 @@ source_input_fingerprint() (
     printf '%s\0' Settlement/Dockerfile Settlement/.dockerignore Settlement/go.mod Settlement/go.sum
     find data_analysis/cmd data_analysis/internal data_analysis/migrations -type f -print0
     printf '%s\0' data_analysis/Dockerfile data_analysis/.dockerignore data_analysis/go.mod data_analysis/go.sum
+    # Reviewed, distributable licensing sources are Docker build inputs too.
+    # Never fingerprint credentials or vendor signing tools from the workspace.
+    for component in platform customer_and_opportunity contract_management project_management Settlement data_analysis; do
+      if [[ -d "$component/third_party/license-core" ]]; then
+        find "$component/third_party/license-core" -type f -print0
+        printf '%s\0' "$component/scripts/license-core-sync.sh" "$component/scripts/license-core.sha256"
+      fi
+    done
     find platform/deploy/production -type f \
       ! -path '*/runtime/*' ! -path '*/backups/*' ! -path '*/packages/*' ! -path '*/manifests/*' \
       ! -name '.env' ! -name '.release.env' ! -name '*.pem' ! -name '*.key' \
@@ -157,6 +310,9 @@ render_build_info() {
   printf 'RELEASE_VERSION=%s\n' "$version"
   printf 'TARGET_PLATFORM=%s\n' "$platform"
   printf 'SOURCE_INPUT_SHA256=%s\n' "$source_fingerprint"
+  [[ -z "$license_digest" ]] || printf 'LICENSE_SHA256=%s\n' "$license_digest"
+  [[ -z "$runtime_approval_digest" ]] || printf 'RUNTIME_APPROVAL_SHA256=%s\n' "$runtime_approval_digest"
+  [[ -z "$installation_digest" ]] || printf 'INSTALLATION_PLAN_SHA256=%s\n' "$installation_digest"
   printf 'DOCKER_CLIENT_VERSION=%s\n' "$docker_client"
   printf 'DOCKER_SERVER_VERSION=%s\n' "$docker_server"
   printf 'BUILDX_VERSION=%s\n' "${buildx_version:-unavailable}"
@@ -429,7 +585,7 @@ build_image() {
   if [[ "$dockerfile" == "$workspace_root/frontend/Dockerfile" ]]; then
     args+=(--build-arg "NPM_CONFIG_REGISTRY=$build_npm_registry")
   else
-    args+=(--build-arg "GOPROXY=$build_goproxy" --build-arg "GOSUMDB=$build_gosumdb")
+    args+=(--build-arg "GOPROXY=$build_goproxy" --build-arg "GOSUMDB=$build_gosumdb" --build-arg "APP_VERSION=$version")
   fi
   [[ -z "$target" ]] || args+=(--target "$target")
   args+=("$context")
@@ -614,6 +770,18 @@ package_assets() (
     mkdir -p -- "$(dirname -- "$destination")"
     cp -p -- "$deploy_dir/$relative" "$destination"
   done
+  if [[ -n "$license_snapshot" ]]; then
+    mkdir -p -- "$assets_stage/license"
+    install -m 600 -- "$license_snapshot" "$assets_stage/license/commercial-license.jws"
+  fi
+  if [[ -n "$installation_digest" ]]; then
+    install -m 600 -- "$license_stage/license-installation.json" "$assets_stage/license-installation.json"
+  fi
+  if [[ -n "$runtime_approval_digest" ]]; then
+    for approval_name in "${runtime_approval_files[@]}"; do
+      [[ ! -f "$license_stage/approvals/$approval_name" ]] || install -m 600 -- "$license_stage/approvals/$approval_name" "$assets_stage/$approval_name"
+    done
+  fi
   COPYFILE_DISABLE=1 tar --no-xattrs -C "$assets_stage" -czf "$assets_temporary" .
   gzip -t "$assets_temporary"
   assets_digest="$(sha256sum "$assets_temporary" | awk '{print tolower($1)}')"

@@ -3,6 +3,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,12 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/infrastructure"
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
 	keycloakauthorizationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/keycloakauthorization/infrastructure"
+	licenseapplication "github.com/J-S-Te/Basic-Platform/internal/platform/license/application"
+	licensecoordination "github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
+	licensedomain "github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
+	licenseinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/license/infrastructure"
+	licensehttp "github.com/J-S-Te/Basic-Platform/internal/platform/license/interfaces/http"
+	licensetrust "github.com/J-S-Te/Basic-Platform/internal/platform/license/trust"
 	oidcapplication "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 	backchannel "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/backchannel"
 	oidcinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/infrastructure"
@@ -60,6 +67,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	httptransport "github.com/J-S-Te/Basic-Platform/internal/transport/http"
 	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
+	licenseruntime "github.com/J-S-Te/license-core/runtime"
 	"gorm.io/gorm"
 )
 
@@ -67,6 +75,7 @@ import (
 type API struct {
 	Handler http.Handler
 	Logger  *slog.Logger
+	OfflineDelivery *OfflineDeliveryRunner
 
 	database           *gorm.DB
 	oidcDatabase       *gorm.DB
@@ -692,8 +701,87 @@ func NewAPI(cfg config.Config) (*API, error) {
 	operational.ExternalIdentity = externalIdentityHandler
 	operational.OwnerDirectory = ownerDirectoryHandler
 	operational.BackchannelLogoutURI = &backchannelURIHandler
+	licenseRepository, err := licenseinfrastructure.NewRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	licenseService, err := licenseapplication.NewService(licenseRepository, licensetrust.Keys(), time.Now)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	operational.Licenses, err = licensehttp.NewHandler(licenseService, cfg.Environment)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	licenseCoordinatorOptions := []licensecoordination.Option{licensecoordination.WithApplicationEnvironment(cfg.Audit.EnvironmentCode)}
+	if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseLifecycleApprovalSource); ok {
+		verifier, verifierErr := applicationregistryapplication.NewRuntimeLicenseLifecycleVerifier(source)
+		if verifierErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, verifierErr
+		}
+		licenseCoordinatorOptions = append(licenseCoordinatorOptions, licensecoordination.WithLifecycleApprovalVerifier(verifier))
+	}
+	licenseCoordinator, err := licensecoordination.NewService(db, licenseService, licensetrust.Keys(), licenseSnapshotSigner{applicationTokenManager, licensetrust.Keys()}, time.Now, licenseCoordinatorOptions...)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	operational.RuntimeLicenses, err = licensehttp.NewRuntimeHandler(licenseCoordinator)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	if source, ok := operational.AccessApplier.(licensehttp.EvidenceSource); ok {
+		operational.RuntimeLicenses.ConfigureEvidence(source, cfg.Audit.EnvironmentCode)
+	}
+	if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseApprovalSource); ok && operational.SubsystemOnboarding != nil {
+		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentService(source, oauthClientManagementService, licenseCoordinator)
+		if enrollErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, enrollErr
+		}
+		operational.SubsystemOnboarding.ConfigureRuntimeLicenseEnrollment(enrollment)
+		operational.SubsystemOnboarding.ConfigureRuntimeLicenseSettings(func(ctx context.Context) (applicationregistryapplication.RuntimeLicenseSettings, error) {
+			state, readErr := licenseService.Read(ctx)
+			if errors.Is(readErr, licensedomain.ErrNotInitialized) {
+				return applicationregistryapplication.RuntimeLicenseSettings{}, applicationregistryapplication.ErrRuntimeLicenseNotInitialized
+			}
+			if readErr != nil {
+				return applicationregistryapplication.RuntimeLicenseSettings{}, readErr
+			}
+			return applicationregistryapplication.RuntimeLicenseSettings{InstanceID: state.InstanceID, Environment: state.Environment, PlatformBaseURL: cfg.CommercialRuntime.PlatformBaseURL, PlatformPublicKeyPath: cfg.CommercialRuntime.PlatformPublicKeyPath, StateDirectory: cfg.CommercialRuntime.StateDirectory, AllowHTTP: strings.HasPrefix(cfg.CommercialRuntime.PlatformBaseURL, "http://")}, nil
+		})
+	}
 
+	var offlineDelivery *OfflineDeliveryRunner
+	if cfg.Environment == "production" && cfg.Audit.EnvironmentCode == "prod" {
+		offlineDelivery, err = NewOfflineDeliveryRunner(repository, licenseService, licenseCoordinator, operational.SubsystemOnboarding, cfg)
+		if err == nil {
+			if source, ok := operational.AccessApplier.(offlineInstallationSource); ok {
+				err = offlineDelivery.ConfigureInstallation(source, licenseCoordinator, licenseService)
+			} else {
+				err = errors.New("offline installation evidence source is unavailable")
+			}
+		}
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+	}
 	api := &API{
+		OfflineDelivery: offlineDelivery,
 		Handler: httptransport.NewRouter(
 			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
@@ -843,6 +931,18 @@ func (api *API) Close() {
 }
 
 type oidcLogoutSignerAdapter struct{ manager *security.OIDCJWTManager }
+
+type licenseSnapshotSigner struct {
+	manager    *security.ApplicationJWTManager
+	vendorKeys map[string]ed25519.PublicKey
+}
+
+func (s licenseSnapshotSigner) Sign(snapshot licenseruntime.PlatformSnapshot) (string, error) {
+	return s.manager.Sign(snapshot)
+}
+func (s licenseSnapshotSigner) Verify(raw string, binding licenseruntime.Binding) (licenseruntime.PlatformSnapshot, error) {
+	return s.manager.VerifyLicenseSnapshot(raw, binding, s.vendorKeys)
+}
 
 // IssueLogoutToken 将投递参数映射为专用 logout+jwt 声明，并严格使用调用方给定的有效期。
 func (adapter oidcLogoutSignerAdapter) IssueLogoutToken(issuer, audience, subject, session, jti string, now time.Time, ttl time.Duration) (string, error) {

@@ -18,6 +18,7 @@ import (
 	externalidentityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/interfaces/http"
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
+	licensehttp "github.com/J-S-Te/Basic-Platform/internal/platform/license/interfaces/http"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/interfaces/http"
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/interfaces/http"
@@ -36,6 +37,8 @@ import (
 // OperationalModules 聚合后续扩展能力，避免组合根继续增长位置参数，也允许路由测试整体省略
 // 可选模块。字段为 nil 时只表示该能力未装配，不应注册一个会绕过依赖检查的空路由。
 type OperationalModules struct {
+	Licenses            *licensehttp.Handler
+	RuntimeLicenses     *licensehttp.RuntimeHandler
 	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
 	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
 	// KeycloakIntegration is deliberately separate from the application
@@ -214,6 +217,22 @@ func NewRouter(
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
 			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger, middleware.AuditSource{ApplicationCode: cfg.Audit.ApplicationCode, EnvironmentCode: cfg.Audit.EnvironmentCode}))
+		}
+		if operational.RuntimeLicenses != nil {
+			apiRouter.GET("/licenses/installation-evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.InstallationEvidence))
+			apiRouter.GET("/licenses/enforcement/:application", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Status))
+			apiRouter.GET("/licenses/enforcement/:application/evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Evidence))
+			apiRouter.POST("/licenses/enforcement/:application/activation", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.RuntimeLicenses.BeginActivation))
+		}
+		if operational.Licenses != nil {
+			licenses := apiRouter.Group("/licenses")
+			licenses.GET("/status", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Status))
+			licenses.GET("/request", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Request))
+			licenses.GET("/events", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Events))
+			licenses.POST("/initialize", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.Licenses.Initialize))
+			licenses.POST("/imports/preview", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.Licenses.Preview))
+			licenses.POST("/imports/commit", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.Licenses.Commit))
+			licenses.POST("/clock-recoveries", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.Licenses.RestoreClock))
 		}
 
 		if operational.AuthorizationOverview != nil {
@@ -569,6 +588,13 @@ func NewRouter(
 		catalogRouter.PUT("/applications/:application_id/authorization-catalog", adaptHandler(applicationAccessHandler.SyncCatalog))
 	}
 
+	if applicationAuthenticator != nil && operational.RuntimeLicenses != nil {
+		runtimeRouter := router.Group("/api/v1/internal/licenses/runtime")
+		runtimeRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator), middleware.RequireApplicationScope("license.runtime"), middleware.RequireSafeWriteContentType())
+		runtimeRouter.POST("/:service_id/ready", adaptHandler(operational.RuntimeLicenses.Ready))
+		runtimeRouter.GET("/:service_id/snapshot", adaptHandler(operational.RuntimeLicenses.Snapshot))
+		runtimeRouter.POST("/:service_id/ack", adaptHandler(operational.RuntimeLicenses.Ack))
+	}
 	// Integration audit ingestion has a separate bearer-token boundary. Console user roles do
 	// not grant an external business system permission to submit audit events.
 	if applicationAuthenticator != nil && (auditHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil) {

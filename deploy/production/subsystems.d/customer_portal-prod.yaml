@@ -41,6 +41,7 @@ runtime:
         PORTAL_PUBLIC_ORIGIN: public_origin
         PORTAL_PATH_PREFIX: path_prefix
         PORTAL_OIDC_ISSUER: issuer
+        PORTAL_OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         PORTAL_OIDC_CLIENT_ID: client_id
         PORTAL_OIDC_CLIENT_SECRET: client_secret
         PORTAL_OIDC_REDIRECT_URI: redirect_uri
@@ -61,6 +62,7 @@ runtime:
         FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
     - path: runtime/customer.env
+      consumers: [portal-invite-compensation-worker]
       when_service: customer-api
       template_path: subsystem-templates/customer.env.example
       compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
