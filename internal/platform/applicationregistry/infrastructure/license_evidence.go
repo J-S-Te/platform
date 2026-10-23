@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	licenseevidence "github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
@@ -17,8 +16,8 @@ type licenseEvidenceProvider interface {
 	CollectLicenseEvidence(context.Context, string, string) (licenseevidence.Report, error)
 }
 
-// CollectLicenseEvidence is a fixed read-only Agent operation, not a discovery
-// fallback. Only selectors are sent; approved Docker/image metadata stays local.
+// CollectLicenseEvidence 通过部署 Agent 采集指定应用/环境的许可证证据，属于固定只读操作
+// 而非发现回退路径。仅发送应用与环境选择器，Docker/镜像元数据始终留在主机本地，不出 Agent 边界。
 func (p *UnixSocketSubsystemProvisioner) CollectLicenseEvidence(ctx context.Context, app, environment string) (licenseevidence.Report, error) {
 	if !p.enabled {
 		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: deployment agent disabled")
@@ -46,10 +45,6 @@ func (p *UnixSocketSubsystemProvisioner) CollectLicenseEvidence(ctx context.Cont
 	return *reply.LicenseEvidence, nil
 }
 
-func (p *LocalDockerSubsystemProvisioner) CollectLicenseEvidence(context.Context, string, string) (licenseevidence.Report, error) {
-	return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: local deployments have no approved immutable release inventory")
-}
-
 type licenseEvidenceApproval struct {
 	Infrastructure       []licenseevidence.Infrastructure `json:"infrastructure,omitempty"`
 	InstallationBoundary bool                             `json:"installation_boundary"`
@@ -59,6 +54,9 @@ type licenseEvidenceApproval struct {
 	Services             []licenseevidence.Service        `json:"services"`
 }
 
+// CollectLicenseEvidence 基于已批准的 license-evidence.json 审批文件采集生产 Compose 目标的
+// 许可证证据。目标未在批准清单中或审批文件缺失/校验失败时，一律以 LICENSE_EVIDENCE_UNSUPPORTED
+// 失败关闭，不做任何现场推断或降级采集。
 func (p *ProductionComposeSubsystemProvisioner) CollectLicenseEvidence(ctx context.Context, app, environment string) (licenseevidence.Report, error) {
 	if !p.enabled {
 		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: agent disabled")
@@ -115,8 +113,9 @@ func loadLicenseEvidenceApproval(path, project string, profile productionSubsyst
 	if decoder.Decode(&approval) != nil || decoder.Decode(new(any)) != io.EOF || approval.Version != 1 || approval.Project != project {
 		return unsupported()
 	}
-	// Conditional units are required to belong to runtime_services by profile
-	// validation. Approval is a set union, never duplicate component IDs.
+	// 运行时发布声明保持完整，但安装证据描述实际选定的执行集合。固定清单的条件消费者
+	// 可能缺席；每个非条件消费者仍是必需的。后续安装采集会检查项目内每个容器，
+	// 因此真实运行的条件进程无法靠从本证据中省略而隐藏。
 	expectedSet := map[string]bool{}
 	consumers, err := runtimeLicenseConsumerServices(profile)
 	if err != nil {
@@ -128,27 +127,23 @@ func loadLicenseEvidenceApproval(path, project string, profile productionSubsyst
 	for service := range profile.Manifest.Compose.ConditionalRuntimeServices {
 		expectedSet[service] = true
 	}
-	expected := make([]string, 0, len(expectedSet))
-	for service := range expectedSet {
-		expected = append(expected, service)
-	}
-	sort.Strings(expected)
 	services := []licenseevidence.Service{}
+	actual := map[string]bool{}
 	for _, s := range approval.Services {
 		if s.Application == profile.Manifest.Application.Code && s.Environment == profile.Manifest.Application.Environment {
+			if !expectedSet[s.Name] || actual[s.Name] {
+				return unsupported()
+			}
+			actual[s.Name] = true
 			services = append(services, s)
 		}
 	}
-	actual := make([]string, len(services))
-	for i, s := range services {
-		actual[i] = s.Name
-	}
-	sort.Strings(actual)
-	if len(actual) != len(expected) || len(actual) == 0 {
+	if len(actual) == 0 {
 		return unsupported()
 	}
-	for i := range actual {
-		if actual[i] != expected[i] {
+	for service := range expectedSet {
+		_, conditional := profile.Manifest.Compose.ConditionalRuntimeServices[service]
+		if !conditional && !actual[service] {
 			return unsupported()
 		}
 	}

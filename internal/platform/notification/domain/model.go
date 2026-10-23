@@ -1,66 +1,81 @@
-// Package domain defines tenant-isolated in-app notification aggregates.
+// Package domain 定义租户隔离的站内信通知聚合。
 package domain
 
 import "time"
 
-// TemplateStatus controls whether the current published version may be used to create messages.
+// TemplateStatus 控制模板当前发布版本能否用于创建消息。
 type TemplateStatus string
 
 const (
-	TemplateStatusActive   TemplateStatus = "ACTIVE"
+	// TemplateStatusActive 放行当前发布版本创建消息。
+	TemplateStatusActive TemplateStatus = "ACTIVE"
+	// TemplateStatusDisabled 冻结创建入口但不删除既有消息。
 	TemplateStatusDisabled TemplateStatus = "DISABLED"
 )
 
-// TemplateVersionStatus describes the immutable lifecycle of a template version.
+// TemplateVersionStatus 描述模板版本的不可变生命周期。
 type TemplateVersionStatus string
 
 const (
+	// TemplateVersionPublished 标记已发布的不可变版本；同一模板同时只有一个发布版本。
 	TemplateVersionPublished TemplateVersionStatus = "PUBLISHED"
 )
 
-// RecipientType declares how an intended notification audience is resolved.
+// RecipientType 声明预期通知受众的解析方式。
 type RecipientType string
 
 const (
-	RecipientTypeUser         RecipientType = "USER"
-	RecipientTypeRole         RecipientType = "ROLE"
+	// RecipientTypeUser 按用户 ID 投递。
+	RecipientTypeUser RecipientType = "USER"
+	// RecipientTypeRole 按应用角色展开为用户集合投递。
+	RecipientTypeRole RecipientType = "ROLE"
+	// RecipientTypeOrganization 按组织展开为成员集合投递。
 	RecipientTypeOrganization RecipientType = "ORGANIZATION"
 )
 
-// DeliveryStatus records the in-app inbox delivery lifecycle.
+// DeliveryStatus 记录站内信投递的生命周期。
 type DeliveryStatus string
 
 const (
-	DeliveryStatusPending    DeliveryStatus = "PENDING"
+	// DeliveryStatusPending 已创建待投递。
+	DeliveryStatusPending DeliveryStatus = "PENDING"
+	// DeliveryStatusProcessing 已被 worker 认领处理中。
 	DeliveryStatusProcessing DeliveryStatus = "PROCESSING"
-	DeliveryStatusDelivered  DeliveryStatus = "DELIVERED"
-	DeliveryStatusFailed     DeliveryStatus = "FAILED"
+	// DeliveryStatusDelivered 已写入收件人收件箱。
+	DeliveryStatusDelivered DeliveryStatus = "DELIVERED"
+	// DeliveryStatusFailed 表示投递失败；持久化的 next_retry_at 到期后允许后台或人工重试。
+	DeliveryStatusFailed DeliveryStatus = "FAILED"
 )
 
-// IngestionStatus is the asynchronous lifecycle of an externally submitted notification event.
-// ACCEPTED only means durable receipt; COMPLETED means the event has been projected into inbox
-// deliveries. The distinction prevents callers from treating a fast HTTP acknowledgement as a
-// user-visible delivery guarantee.
+// IngestionStatus 是外部提交通知事件的异步生命周期。ACCEPTED 只表示已持久化接收；
+// COMPLETED 才表示事件已展开为站内信投递。区分二者防止调用方把快速的 HTTP 确认
+// 误认为对用户可见的投递保证。
 type IngestionStatus string
 
 const (
-	IngestionStatusAccepted   IngestionStatus = "ACCEPTED"
+	// IngestionStatusAccepted 已持久化接收，尚未处理。
+	IngestionStatusAccepted IngestionStatus = "ACCEPTED"
+	// IngestionStatusProcessing 已被 worker 认领。
 	IngestionStatusProcessing IngestionStatus = "PROCESSING"
-	IngestionStatusCompleted  IngestionStatus = "COMPLETED"
-	IngestionStatusRetry      IngestionStatus = "RETRY"
-	IngestionStatusDead       IngestionStatus = "DEAD"
-	IngestionStatusCancelled  IngestionStatus = "CANCELLED"
+	// IngestionStatusCompleted 事件已展开为站内信投递。
+	IngestionStatusCompleted IngestionStatus = "COMPLETED"
+	// IngestionStatusRetry 处理失败待重试。
+	IngestionStatusRetry IngestionStatus = "RETRY"
+	// IngestionStatusDead 重试耗尽的终态。
+	IngestionStatusDead IngestionStatus = "DEAD"
+	// IngestionStatusCancelled 上游显式取消。
+	IngestionStatusCancelled IngestionStatus = "CANCELLED"
 )
 
-// VariableDefinition declares a permitted plain-text template variable. Values are escaped before
-// persistence so clients must render notification content as plain text rather than executable HTML.
+// VariableDefinition 声明允许的纯文本模板变量。变量值在持久化前转义，
+// 客户端必须把通知内容当纯文本渲染，而不是可执行 HTML。
 type VariableDefinition struct {
 	Name      string `json:"name"`
 	Required  bool   `json:"required"`
 	MaxLength int    `json:"max_length"`
 }
 
-// Template is the mutable template aggregate. Its published versions remain immutable.
+// Template 是可变的模板聚合；其已发布版本保持不可变。
 type Template struct {
 	ID             string
 	TenantID       string
@@ -75,7 +90,7 @@ type Template struct {
 	UpdatedBy      string
 }
 
-// TemplateVersion holds one immutable, published rendering definition.
+// TemplateVersion 保存一份不可变的已发布渲染定义。
 type TemplateVersion struct {
 	ID            string
 	TemplateID    string
@@ -90,14 +105,14 @@ type TemplateVersion struct {
 	CreatedBy     string
 }
 
-// RecipientTarget is a business-facing audience reference. It is resolved to active users before
-// a notification is persisted; notification records never grant access to their linked resource.
+// RecipientTarget 是面向业务的受众引用。它在通知持久化前被解析为在册用户；
+// 通知记录本身绝不授予其关联资源的访问权。
 type RecipientTarget struct {
 	Type RecipientType
 	ID   string
 }
 
-// Message is the rendered business notification shared by one or more user deliveries.
+// Message 是渲染后的业务通知，可被多个用户投递共享。
 type Message struct {
 	ID                string
 	TenantID          string
@@ -122,9 +137,8 @@ type Message struct {
 	CreatedBy         string
 }
 
-// IngestionEvent is an application-authenticated, already-rendered notification request. It is
-// intentionally limited to concrete USER targets: external systems must not use the platform as
-// a business-role resolver.
+// IngestionEvent 是经应用认证、已渲染完成的通知请求。它有意只接受具体的 USER
+// 目标：外部系统不得把平台当作业务角色解析器使用。
 type IngestionEvent struct {
 	EventID, EventType, NotificationScope, Priority string
 	Title, Content, TargetURL                       string
@@ -134,7 +148,7 @@ type IngestionEvent struct {
 	ExpiresAt                                       *time.Time
 }
 
-// IngestionReceipt is safe for a source system to retain for retry and reconciliation.
+// IngestionReceipt 可被来源系统安全保留，用于重试与对账。
 type IngestionReceipt struct {
 	ReceiptID, EventID, MessageID string
 	Status                        IngestionStatus
@@ -143,7 +157,7 @@ type IngestionReceipt struct {
 	ReceivedAt, ProcessedAt       time.Time
 }
 
-// Delivery is one recipient's inbox item and delivery retry state.
+// Delivery 是单个收件人的站内信条目及其投递重试状态。
 type Delivery struct {
 	ID              string
 	TenantID        string
@@ -163,8 +177,7 @@ type Delivery struct {
 	UpdatedAt time.Time
 }
 
-// InboxItem is the recipient-safe inbox projection. Linked targets require authorization again
-// when a client navigates to them.
+// InboxItem 是对收件人安全的站内信投影；客户端跳转关联目标时须重新授权。
 type InboxItem struct {
 	DeliveryID    string     `json:"delivery_id"`
 	MessageID     string     `json:"message_id"`

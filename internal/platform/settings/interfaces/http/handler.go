@@ -1,4 +1,4 @@
-// Package settingshttp adapts typed platform settings use cases to HTTP.
+// Package settingshttp 把强类型的平台设置用例适配到 HTTP。
 package settingshttp
 
 import (
@@ -30,16 +30,15 @@ type service interface {
 	ApplyAccessSettings(ctx context.Context, tenantID string, applier settingsapplication.AccessApplier) (settingsdomain.AccessSettings, error)
 }
 
-// Handler provides authenticated tenant-scoped settings endpoints.
+// Handler 提供已认证、租户隔离的设置端点。
 type Handler struct {
 	service service
 	applier settingsapplication.AccessApplier
 	logger  *slog.Logger
 }
 
-// NewHandler validates dependencies and creates the settings HTTP adapter. The applier is
-// optional: the public-access apply endpoint returns a clear error when no deployment agent
-// (production/remote deployment) is wired.
+// NewHandler 校验依赖并创建设置 HTTP 适配器。applier 可选：未接入部署执行器
+// （生产/远程部署）时，对外访问应用端点会返回明确错误。
 func NewHandler(service service, applier settingsapplication.AccessApplier, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("settings HTTP handler dependencies must not be nil")
@@ -96,7 +95,7 @@ type accessSettingsResponse struct {
 	UpdatedAt                 string `json:"updated_at,omitempty"`
 }
 
-// GetPlatformSettings returns the tenant's typed management-console settings.
+// GetPlatformSettings 返回租户的强类型管理控制台设置。
 func (handler *Handler) GetPlatformSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -112,7 +111,7 @@ func (handler *Handler) GetPlatformSettings(writer http.ResponseWriter, request 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "平台基础设置查询成功", platformSettingsToResponse(settings))
 }
 
-// UpdatePlatformSettings replaces typed management-console settings using optimistic locking.
+// UpdatePlatformSettings 在乐观锁下替换强类型管理控制台设置。
 func (handler *Handler) UpdatePlatformSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -141,8 +140,8 @@ func (handler *Handler) UpdatePlatformSettings(writer http.ResponseWriter, reque
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "平台基础设置已保存", platformSettingsToResponse(settings))
 }
 
-// GetNotificationSettings returns notification preferences. email_enabled is retained for
-// wire compatibility but remains false while the platform has no email delivery worker.
+// GetNotificationSettings 返回通知偏好。email_enabled 仅为线上协议兼容保留，
+// 平台没有邮件投递 worker 期间恒为 false。
 func (handler *Handler) GetNotificationSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -158,8 +157,8 @@ func (handler *Handler) GetNotificationSettings(writer http.ResponseWriter, requ
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "通知设置查询成功", notificationSettingsToResponse(settings))
 }
 
-// UpdateNotificationSettings saves tenant-level inbox preferences and reminder frequency.
-// The application service rejects email_enabled=true until email delivery is implemented.
+// UpdateNotificationSettings 保存租户级站内信偏好与提醒频率。邮件投递实现之前，
+// 应用层拒绝 email_enabled=true。
 func (handler *Handler) UpdateNotificationSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -260,7 +259,7 @@ func notificationSettingsToResponse(settings settingsdomain.NotificationSettings
 	return response
 }
 
-// GetAccessSettings returns the tenant's public-access configuration.
+// GetAccessSettings 返回租户的对外访问配置。
 func (handler *Handler) GetAccessSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -274,7 +273,7 @@ func (handler *Handler) GetAccessSettings(writer http.ResponseWriter, request *h
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "对外访问配置查询成功", accessSettingsToResponse(settings))
 }
 
-// UpdateAccessSettings replaces the tenant's public-access configuration using optimistic locking.
+// UpdateAccessSettings 在乐观锁下替换租户的对外访问配置。
 func (handler *Handler) UpdateAccessSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -298,7 +297,7 @@ func (handler *Handler) UpdateAccessSettings(writer http.ResponseWriter, request
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "对外访问配置已保存", accessSettingsToResponse(settings))
 }
 
-// ApplyAccessSettings applies the saved public-access configuration through the deployment agent.
+// ApplyAccessSettings 通过部署执行器应用已保存的对外访问配置。
 func (handler *Handler) ApplyAccessSettings(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {

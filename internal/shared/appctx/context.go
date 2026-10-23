@@ -1,4 +1,4 @@
-// Package appctx stores the authenticated application principal in request contexts.
+// Package appctx 在请求上下文中保存已认证的应用主体。
 package appctx
 
 import (
@@ -8,8 +8,8 @@ import (
 
 type contextKey struct{}
 
-// Principal identifies an OAuth client that is allowed to call a platform integration API.
-// It intentionally contains no client secret, bearer token or other credential material.
+// Principal 标识被允许调用平台集成 API 的 OAuth client。
+// 有意不包含 client secret、bearer token 或任何其他凭据材料。
 type Principal struct {
 	OAuthClientID   string
 	ClientID        string
@@ -21,9 +21,8 @@ type Principal struct {
 	Scopes          map[string]struct{}
 }
 
-// Valid reports whether the principal has the complete, non-empty application binding required
-// for integration requests. It is intentionally checked at the transport boundary so a faulty
-// authenticator cannot turn an incomplete token into a trusted principal.
+// Valid 报告主体是否具备集成请求所需的完整非空应用绑定。该检查有意放在传输边界：
+// 有缺陷的认证器不能把不完整令牌转换成可信主体。
 func (p Principal) Valid() bool {
 	for _, value := range []string{
 		p.OAuthClientID,
@@ -49,7 +48,7 @@ func (p Principal) Valid() bool {
 	return true
 }
 
-// HasScope reports whether the client token contains the requested scope.
+// HasScope 报告客户端令牌是否包含请求的 scope。
 func (p Principal) HasScope(scope string) bool {
 	if scope == "" || strings.TrimSpace(scope) != scope {
 		return false
@@ -58,13 +57,13 @@ func (p Principal) HasScope(scope string) bool {
 	return ok
 }
 
-// WithPrincipal attaches an immutable snapshot of an application principal to a context.
+// WithPrincipal 将应用主体的不可变快照附加到上下文。
 func WithPrincipal(ctx context.Context, principal Principal) context.Context {
 	return context.WithValue(ctx, contextKey{}, clonePrincipal(principal))
 }
 
-// PrincipalFromContext retrieves an authenticated application principal. The returned scope map
-// is a copy so downstream handlers cannot mutate the value retained by the request context.
+// PrincipalFromContext 取出已认证的应用主体。返回的 scope map 是副本，
+// 下游处理器无法篡改请求上下文保留的原值。
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	principal, ok := ctx.Value(contextKey{}).(Principal)
 	if !ok || !principal.Valid() {

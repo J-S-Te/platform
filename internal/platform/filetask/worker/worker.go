@@ -16,11 +16,16 @@ type TenantSource interface {
 
 // Runner 是独立于 HTTP 进程的有界对账 Worker。
 type Runner struct {
-	files                *application.FileService
-	tenants              TenantSource
-	interval, staleAfter time.Duration
-	limit                int
-	logger               *slog.Logger
+	files                              *application.FileService
+	tenants                            TenantSource
+	interval, staleAfter               time.Duration
+	limit                              int
+	logger                             *slog.Logger
+	cleanupEnabled                     bool
+	cleanupInterval, cleanupMinimumAge time.Duration
+	cleanupLimit                       int
+	nextCleanup                        time.Time
+	now                                func() time.Time
 }
 
 // NewRunner 创建对账 Worker，所有时间和批量参数均显式限制，避免异常配置形成无限扫描。
@@ -28,7 +33,18 @@ func NewRunner(files *application.FileService, tenants TenantSource, interval, s
 	if files == nil || tenants == nil || interval <= 0 || staleAfter <= 0 || limit < 1 || limit > 500 || logger == nil {
 		return nil, application.ErrValidation
 	}
-	return &Runner{files: files, tenants: tenants, interval: interval, staleAfter: staleAfter, limit: limit, logger: logger}, nil
+	return &Runner{files: files, tenants: tenants, interval: interval, staleAfter: staleAfter, limit: limit, logger: logger,
+		cleanupEnabled: true, cleanupInterval: time.Hour, cleanupMinimumAge: 24 * time.Hour, cleanupLimit: 100, now: time.Now}, nil
+}
+
+// ConfigureCleanup 仅用于启动阶段。仓储仍独立要求
+// TEMPORARY 保留期已到且无活动绑定；仅文件年龄不足以授权删除。
+func (runner *Runner) ConfigureCleanup(enabled bool, interval, minimumAge time.Duration, limit int) error {
+	if interval < time.Minute || minimumAge < runner.staleAfter || limit < 1 || limit > 500 {
+		return application.ErrValidation
+	}
+	runner.cleanupEnabled, runner.cleanupInterval, runner.cleanupMinimumAge, runner.cleanupLimit = enabled, interval, minimumAge, limit
+	return nil
 }
 
 // Run 按固定周期执行有界对账；每轮都传递 context，收到停机信号后不再启动新租户扫描。
@@ -52,13 +68,35 @@ func (runner *Runner) runOnce(ctx context.Context) {
 		runner.logger.Error("file gateway reconciliation tenant listing failed", "error", err)
 		return
 	}
-	cutoff := time.Now().UTC().Add(-runner.staleAfter)
+	now := runner.now().UTC()
+	cutoff := now.Add(-runner.staleAfter)
+	cleanupDue := runner.cleanupEnabled && !now.Before(runner.nextCleanup)
+	cleanupFailed := false
 	for _, tenantID := range tenantIDs {
+		if ctx.Err() != nil {
+			return
+		}
 		result, err := runner.files.ReconcileStaleUploads(ctx, tenantID, cutoff, runner.limit)
 		if err != nil {
 			runner.logger.Error("file gateway reconciliation failed", "tenant_id", tenantID, "error", err)
-			continue
+		} else {
+			runner.logger.Info("file gateway reconciliation completed", "tenant_id", tenantID, "inspected", result.Inspected, "recovered", result.Recovered, "rejected", result.Rejected, "failed", result.Failed)
 		}
-		runner.logger.Info("file gateway reconciliation completed", "tenant_id", tenantID, "inspected", result.Inspected, "recovered", result.Recovered, "rejected", result.Rejected, "failed", result.Failed)
+		if cleanupDue && ctx.Err() == nil {
+			cleaned, err := runner.files.CleanupUnboundExpired(ctx, tenantID, now.Add(-runner.cleanupMinimumAge), runner.cleanupLimit)
+			if err != nil || cleaned.FailedFiles > 0 || cleaned.TempCleanupFailure > 0 {
+				cleanupFailed = true
+				runner.logger.Error("file gateway temporary cleanup failed", "tenant_id", tenantID, "error", err, "failed", cleaned.FailedFiles)
+			} else {
+				runner.logger.Info("file gateway temporary cleanup completed", "tenant_id", tenantID, "claimed", cleaned.ClaimedFiles, "deleted", cleaned.DeletedFiles, "temporary_fragments", cleaned.RemovedTempFiles)
+			}
+		}
+	}
+	if cleanupDue {
+		delay := runner.cleanupInterval
+		if cleanupFailed {
+			delay = runner.interval
+		}
+		runner.nextCleanup = now.Add(delay)
 	}
 }

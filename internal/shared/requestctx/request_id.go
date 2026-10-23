@@ -8,10 +8,12 @@ type traceIDKey struct{}
 type correlationIDKey struct{}
 type clientIPKey struct{}
 
+// WithRequestID 保存由传输层生成的请求 ID，供日志关联与响应头回显使用。
 func WithRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, requestIDKey{}, requestID)
 }
 
+// RequestID 返回当前请求的请求 ID；不存在时返回空值。
 func RequestID(ctx context.Context) string {
 	value, _ := ctx.Value(requestIDKey{}).(string)
 	return value

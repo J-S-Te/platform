@@ -58,7 +58,12 @@ func TestListAccountsReflectsDisabledExternalAccount(t *testing.T) {
 	if result.Items[0].Status != domain.StatusDisabled {
 		t.Fatalf("external account status = %q, want DISABLED", result.Items[0].Status)
 	}
-	if result.Items[1].Status != domain.StatusDisabled || reader.calls != 2 || synchronizer.calls != 1 || synchronizer.userIDs[0] != userID {
+	if result.Items[1].Status != domain.StatusDisabled || reader.calls != 2 {
 		t.Fatalf("local-linked account status/calls = %q/%d, want DISABLED/2", result.Items[1].Status, reader.calls)
+	}
+	// 读取账号列表是只读操作：外置停用只反映在返回值里，不能写回业务状态。
+	// 允许 GET 触发停用会让只读权限升级为"停用用户、账号、凭据、任职和会话"。
+	if synchronizer.calls != 0 {
+		t.Fatalf("synchronizer calls = %d, want 0（只读列表不得写业务状态）", synchronizer.calls)
 	}
 }

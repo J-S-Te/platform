@@ -13,11 +13,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// CutoverLifecycleStore persists the explicit observation/cutover/rollback
-// state.  It is deliberately fail-closed: absent state means NOT_STARTED and
-// a caller cannot infer that a prior synchronous Keycloak operation was safe.
+// CutoverLifecycleStore 持久化显式的观察/切换/回滚状态。它刻意 fail-closed：
+// 状态缺失即 NOT_STARTED，调用方不能由此推断此前某次同步 Keycloak 操作是安全的。
 type CutoverLifecycleStore struct{ database *gorm.DB }
 
+// NewCutoverLifecycleStore 构造切换生命周期存储；database 为空时返回错误。
 func NewCutoverLifecycleStore(database *gorm.DB) (*CutoverLifecycleStore, error) {
 	if database == nil {
 		return nil, errors.New("Keycloak cutover lifecycle database must not be nil")
@@ -39,6 +39,8 @@ type cutoverLifecycleRow struct {
 	RolledBackAt         *time.Time `gorm:"column:rolled_back_at"`
 }
 
+// GetKeycloakCutoverLifecycle 读取指定应用环境的切换生命周期状态；
+// 无记录时返回 NOT_STARTED。
 func (store *CutoverLifecycleStore) GetKeycloakCutoverLifecycle(ctx context.Context, tenantID, applicationCode, environment string) (registryhttp.KeycloakCutoverLifecycle, error) {
 	scope, err := store.scope(ctx, tenantID, applicationCode, environment)
 	if err != nil {
@@ -57,6 +59,8 @@ func (store *CutoverLifecycleStore) GetKeycloakCutoverLifecycle(ctx context.Cont
 	return toCutoverLifecycle(row), nil
 }
 
+// ListKeycloakCutoverTimeline 返回该环境最近的生命周期事件（按时间倒序），
+// limit 越界时回落为默认 50 条。
 func (store *CutoverLifecycleStore) ListKeycloakCutoverTimeline(ctx context.Context, tenantID, applicationCode, environment string, limit int) ([]registryhttp.KeycloakCutoverTimelineEvent, error) {
 	scope, err := store.scope(ctx, tenantID, applicationCode, environment)
 	if err != nil {
@@ -89,6 +93,7 @@ func (store *CutoverLifecycleStore) ListKeycloakCutoverTimeline(ctx context.Cont
 	return items, nil
 }
 
+// StartKeycloakObservation 开启指定时长的观察期；已有观察期或已切换时拒绝重复开启。
 func (store *CutoverLifecycleStore) StartKeycloakObservation(ctx context.Context, tenantID, applicationID, environmentID, actorID string, duration time.Duration) (registryhttp.KeycloakCutoverLifecycle, error) {
 	if duration <= 0 {
 		return registryhttp.KeycloakCutoverLifecycle{}, errors.New("Keycloak observation duration must be positive")
@@ -102,10 +107,9 @@ func (store *CutoverLifecycleStore) StartKeycloakObservation(ctx context.Context
 	})
 }
 
-// CanKeycloakCutover is the fail-closed preflight used before the deployment
-// Agent changes an issuer.  Confirmation is deliberately recorded only after
-// that Agent reports success, so a failed deployment cannot look switched in
-// the durable history.
+// CanKeycloakCutover 是部署 Agent 变更 issuer 前使用的 fail-closed 预检。
+// 确认状态刻意只在 Agent 报告成功后写入，使失败的部署在持久历史中
+// 不可能伪装成已切换。
 func (store *CutoverLifecycleStore) CanKeycloakCutover(ctx context.Context, tenantID, applicationCode, environment string) error {
 	lifecycle, err := store.GetKeycloakCutoverLifecycle(ctx, tenantID, applicationCode, environment)
 	if err != nil {
@@ -120,6 +124,8 @@ func (store *CutoverLifecycleStore) CanKeycloakCutover(ctx context.Context, tena
 	return nil
 }
 
+// CanKeycloakRollback 在回滚窗口内且状态为 SWITCHED 时放行；窗口过期或未切换
+// 一律拒绝，使回滚只能发生在受控期限内。
 func (store *CutoverLifecycleStore) CanKeycloakRollback(ctx context.Context, tenantID, applicationCode, environment string) error {
 	lifecycle, err := store.GetKeycloakCutoverLifecycle(ctx, tenantID, applicationCode, environment)
 	if err != nil {
@@ -134,6 +140,8 @@ func (store *CutoverLifecycleStore) CanKeycloakRollback(ctx context.Context, ten
 	return nil
 }
 
+// ConfirmKeycloakCutover 在观察期结束后把状态推进为 SWITCHED，并启动指定时长的
+// 回滚窗口；观察期未完成或已切换时拒绝。
 func (store *CutoverLifecycleStore) ConfirmKeycloakCutover(ctx context.Context, tenantID, applicationID, environmentID, actorID string, rollbackWindow time.Duration) (registryhttp.KeycloakCutoverLifecycle, error) {
 	if rollbackWindow <= 0 {
 		return registryhttp.KeycloakCutoverLifecycle{}, errors.New("Keycloak rollback window must be positive")
@@ -153,6 +161,7 @@ func (store *CutoverLifecycleStore) ConfirmKeycloakCutover(ctx context.Context, 
 	})
 }
 
+// RecordKeycloakRollback 把 SWITCHED 状态回退为 ROLLED_BACK；仅限回滚窗口内执行。
 func (store *CutoverLifecycleStore) RecordKeycloakRollback(ctx context.Context, tenantID, applicationID, environmentID, actorID string) (registryhttp.KeycloakCutoverLifecycle, error) {
 	return store.transition(ctx, tenantID, applicationID, environmentID, actorID, "ROLLBACK_COMPLETED", "已回滚到基础平台 OIDC", func(now time.Time, current cutoverLifecycleRow, exists bool) (cutoverLifecycleRow, error) {
 		if !exists || current.Status != "SWITCHED" {
@@ -225,9 +234,8 @@ func (store *CutoverLifecycleStore) scope(ctx context.Context, tenantID, applica
 
 func toCutoverLifecycle(row cutoverLifecycleRow) registryhttp.KeycloakCutoverLifecycle {
 	status := clean(row.Status)
-	// Reaching the deadline is a deterministic, durable fact.  The read model
-	// exposes READY_TO_SWITCH immediately so an operator does not need a timer
-	// process or a page refresh side effect before the guarded switch request.
+	// 到达截止时间是确定性的持久事实。读模型立即暴露 READY_TO_SWITCH，
+	// 运维无需等待定时任务或刷新页面即可发起受保护的切换请求。
 	if status == "OBSERVING" && row.ObservationEndsAt != nil && !time.Now().UTC().Before(row.ObservationEndsAt.UTC()) {
 		status = "READY_TO_SWITCH"
 	}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise release preflight and conditional Temporal network repair in isolation."""
+"""隔离验证发布预检及按条件修复 Temporal 网络的逻辑。"""
 import os
 from pathlib import Path
 import re
@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='deploy-service-preflight-') as director
     (target / 'subsystems.d/fixture.yaml').write_text('fixture\n')
     (target / 'docker-compose.yml').write_text('services: {}\n')
     (target / '.env').write_text('COMPOSE_PROJECT_NAME=fixture\n')
-    # Existing deployments predate the separate File Gateway target and pointer.
+    # 已有部署早于独立 File Gateway 构建目标及镜像指针的引入。
     release = target / '.release.env'
     release.write_text('PLATFORM_IMAGE=old-pointer\n')
     original = release.read_bytes()
@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='deploy-service-preflight-') as director
   [[ ! -f "$deploy_dir/runtime/.control-plane-reload-required" ]]
 }
 ''')
-    # Run the actual script through its preflight, stopping before network mutation.
+    # 执行真实脚本完成预检，在任何网络变更之前停止。
     executable(target / 'bin/deploy-service.sh', SCRIPT.split('ensure_application_network() {')[0]
                + '\n[[ -z "${FILE_GATEWAY_IMAGE:-}" ]]\necho preflight-complete\n')
     tools = fixture / 'tools'

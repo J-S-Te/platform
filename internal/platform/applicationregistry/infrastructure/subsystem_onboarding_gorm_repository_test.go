@@ -56,17 +56,25 @@ func TestPortalApplicationAccessFilterIncludesEffectiveMembershipSubjects(t *tes
 		"access_assignment.scope_type = 'TENANT'",
 		"access_assignment.scope_type = 'ENVIRONMENT'",
 		"assigned_role.status = 'ACTIVE'",
-		"application.code <> 'contract_management'",
-		"COUNT(DISTINCT contract_role.code)",
-		") = 1",
+		"assigned_role.role_type = 'APPLICATION'",
+		"COUNT(DISTINCT assigned_role.id)",
+		"LEFT JOIN authz_application_authorization_policy AS access_policy",
+		"COALESCE(MAX(access_policy.max_effective_roles), 0) = 0",
+		"COUNT(DISTINCT assigned_role.id) <= MAX(access_policy.max_effective_roles)",
 	} {
 		if !strings.Contains(clause, fragment) {
 			t.Errorf("portal access filter is missing %q", fragment)
 		}
 	}
 
-	if len(args) != 6 {
-		t.Fatalf("argument count = %d, want 6", len(args))
+	for _, obsolete := range []string{"contract_management", "authz_user_permission", "catalog_role"} {
+		if strings.Contains(clause, obsolete) {
+			t.Errorf("portal access filter retains obsolete fallback %q", obsolete)
+		}
+	}
+
+	if len(args) != 3 {
+		t.Fatalf("argument count = %d, want 3", len(args))
 	}
 	for index, argument := range args {
 		if argument != "user-1" {

@@ -11,7 +11,16 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-BACKEND_ROOT="${PROJECT_ROOT}/backend"
+# 后端模块根目录。本仓库的 Go module 就是 platform/ 自身（go.mod 与 cmd/* 直接位于该
+# 目录）；只有打包布局把后端复制到 <root>/backend 时才使用该子目录。硬编码 backend/
+# 会让所有 go.mod / cmd 入口检查失败，脚本在部署前就直接退出。
+if [[ -f "${PROJECT_ROOT}/go.mod" ]]; then
+  BACKEND_ROOT="${PROJECT_ROOT}"
+elif [[ -f "${PROJECT_ROOT}/backend/go.mod" ]]; then
+  BACKEND_ROOT="${PROJECT_ROOT}/backend"
+else
+  BACKEND_ROOT="${PROJECT_ROOT}"
+fi
 
 MODE="deploy"
 ENV_FILE="${BASIC_PLATFORM_ENV_FILE:-/etc/basic-platform/basic-platform.env}"
@@ -288,8 +297,7 @@ is_local_mysql_host() {
 }
 
 valid_mysql_account_host() {
-  # MySQL account host values support host names, IPv4/IPv6 literals and the % wildcard.
-  # Quotes, whitespace and path-like characters are rejected before interpolating into SQL.
+  # MySQL 账号主机值支持主机名、IPv4 和 IPv6 字面量及 % 通配符；拼接 SQL 前拒绝引号、空白及路径类字符。
   [[ "$1" =~ ^[A-Za-z0-9._:%-]+$ ]]
 }
 
@@ -388,10 +396,8 @@ initialize_database() {
   {
     printf 'CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n' "$database"
     for account_host in "${account_hosts[@]}"; do
-      # Do not issue ALTER USER here. Re-deploying must not rotate an existing
-      # application credential or overwrite a password managed by the database owner.
-      # A pre-existing account whose password differs from MYSQL_PASSWORD will fail the
-      # connection probe below and requires an explicit operator/DBA correction.
+      # 这里不得执行 ALTER USER。重新部署不能轮换现有应用凭据或覆盖数据库所有者管理的密码。若已有账号密码与 MYSQL_PASSWORD 不同，
+      # 下方连接探测会失败，须由操作人或 DBA 显式修正。
       printf "CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '%s';\n" "$username" "$account_host" "$password"
       printf "GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%s';\n" "$database" "$username" "$account_host"
     done
@@ -744,10 +750,13 @@ run_bootstrap_admin_status() {
   if [[ "$DRY_RUN" == true ]]; then
     return 3
   fi
-  if runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" --status >>"$LOG_FILE" 2>&1; then
+  # 必须在命令之后立即读取 $?：if/fi 之后的 $? 是复合命令的退出状态（没有 else 分支时为 0），
+  # 会把"尚未初始化"的 3 和真实错误都变成 0，调用方据此跳过首个管理员创建。
+  local status=0
+  runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" --status >>"$LOG_FILE" 2>&1 || status=$?
+  if [[ "$status" -eq 0 ]]; then
     return 0
   fi
-  local status=$?
   [[ "$status" -eq 3 ]] && return 3
   log "ERROR" "无法检查首个超级管理员初始化状态。请先确认迁移已成功执行且运行用户可读取环境文件。"
   return "$status"

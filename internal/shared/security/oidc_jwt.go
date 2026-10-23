@@ -19,10 +19,9 @@ import (
 type OIDCTokenUse string
 
 const (
-	// OIDCTokenUseAccessToken identifies an OAuth 2.0 access token issued for an
-	// authenticated end user.
+	// OIDCTokenUseAccessToken 标识为已认证终端用户签发的 OAuth 2.0 访问令牌。
 	OIDCTokenUseAccessToken OIDCTokenUse = "access_token"
-	// OIDCTokenUseIDToken identifies an OpenID Connect ID token.
+	// OIDCTokenUseIDToken 标识 OpenID Connect ID 令牌。
 	OIDCTokenUseIDToken OIDCTokenUse = "id_token"
 )
 
@@ -58,7 +57,7 @@ type OIDCPublicJWK struct {
 	KeyID     string `json:"kid"`
 }
 
-// OIDCJWKS is the JSON Web Key Set document served by an OIDC JWKS endpoint.
+// OIDCJWKS 是 OIDC JWKS 端点对外提供的 JSON Web Key Set 文档。
 type OIDCJWKS struct {
 	Keys []OIDCPublicJWK `json:"keys"`
 }
@@ -108,7 +107,7 @@ func (manager *OIDCJWTManager) Issuer() string {
 	return manager.issuer
 }
 
-// KeyID returns the deterministic key ID included in JWT headers and public JWKs.
+// KeyID 返回写入 JWT 头与公开 JWK 的确定性密钥 ID（公钥摘要派生）。
 func (manager *OIDCJWTManager) KeyID() string {
 	if manager == nil {
 		return ""
@@ -126,12 +125,12 @@ func (manager *OIDCJWTManager) IssueIDToken(claims OIDCTokenClaims) (string, err
 	return manager.issue(claims, OIDCTokenUseIDToken)
 }
 
-// VerifyAccessToken validates an access token for one expected audience at now.
+// VerifyAccessToken 在指定时刻按单一期望 audience 校验访问令牌。
 func (manager *OIDCJWTManager) VerifyAccessToken(token, expectedAudience string, now time.Time) (OIDCTokenClaims, error) {
 	return manager.Verify(token, expectedAudience, OIDCTokenUseAccessToken, now)
 }
 
-// VerifyIDToken validates an ID token for one expected audience at now.
+// VerifyIDToken 在指定时刻按单一期望 audience 校验 ID 令牌。
 func (manager *OIDCJWTManager) VerifyIDToken(token, expectedAudience string, now time.Time) (OIDCTokenClaims, error) {
 	return manager.Verify(token, expectedAudience, OIDCTokenUseIDToken, now)
 }
@@ -199,7 +198,7 @@ func (manager *OIDCJWTManager) Verify(token, expectedAudience string, expectedTo
 	return claims, nil
 }
 
-// PublicJWK returns the manager's RFC 8037 OKP/Ed25519 public JWK.
+// PublicJWK 返回本管理器的 RFC 8037 OKP/Ed25519 公钥 JWK。
 func (manager *OIDCJWTManager) PublicJWK() OIDCPublicJWK {
 	if manager == nil {
 		return OIDCPublicJWK{}
@@ -214,7 +213,7 @@ func (manager *OIDCJWTManager) PublicJWK() OIDCPublicJWK {
 	}
 }
 
-// JWKS returns a one-key JSON Web Key Set suitable for an OIDC JWKS endpoint.
+// JWKS 返回仅含本管理器单把公钥的 Key Set，直接适配 OIDC JWKS 端点。
 func (manager *OIDCJWTManager) JWKS() OIDCJWKS {
 	return OIDCJWKS{Keys: []OIDCPublicJWK{manager.PublicJWK()}}
 }
@@ -337,9 +336,8 @@ func decodeOIDCJWTJSON(encoded string, destination any) error {
 }
 
 func oidcClaimsFromPayload(payload oidcJWTPayload) (OIDCTokenClaims, error) {
-	// Platform sub is the canonical iam_user.id. Emit its documented alias for
-	// subsystem clients, while accepting previously issued tokens without it.
-	// A conflicting alias must never introduce a second authorization subject.
+	// Platform sub 即权威的 iam_user.id。为子系统客户端补发文档化的 identity_id 别名，
+	// 同时接受尚未携带该别名的存量令牌；别名与 sub 冲突时绝不引入第二个授权主体。
 	if payload.IdentityID != "" && payload.IdentityID != payload.Subject {
 		return OIDCTokenClaims{}, errors.New("OIDC JWT identity_id does not match subject")
 	}

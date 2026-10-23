@@ -16,8 +16,8 @@ func TestProjectionOperationsFailedQueryIsTenantScopedAndOnlyReadsDeadLetters(t 
 	}
 	statement := store.failedQuery(context.Background(), "tenant-1", projectionapplication.FailurePageRequest{ApplicationCode: "crm", Environment: "prod"}).Statement
 	sql := statement.SQL.String()
-	// GORM builds a statement only after a terminal operation; use Find on the
-	// same query to verify the complete generated shape.
+	// GORM 仅在终结操作后构造语句；对同一查询使用 Find
+	// 来验证完整的生成结构。
 	statement = store.failedQuery(context.Background(), "tenant-1", projectionapplication.FailurePageRequest{ApplicationCode: "crm", Environment: "prod"}).Find(&[]failedProjectionRow{}).Statement
 	sql = statement.SQL.String()
 	for _, expected := range []string{"keycloak_authorization_outbox AS outbox", "platform_application AS application", "platform_application_environment AS environment", "outbox.tenant_id = ?", "outbox.status = ?", "application.code = ?", "environment.environment = ?"} {

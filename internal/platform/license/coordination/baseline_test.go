@@ -64,7 +64,7 @@ func TestBaselineFourScenariosAndBoundaries(t *testing.T) {
 			t.Fatal("unsafe baseline accepted", r)
 		}
 	}
-	// Old image evidence legitimately has neither version nor protocol labels.
+	// 旧镜像证据缺少版本和协议标签属于正常情况。
 	s := &Service{now: func() time.Time { return now }, applicationEnvironment: "prod"}
 	r := baselineFixture(now, true)
 	raw, err := baselineJSON(r)
@@ -120,7 +120,7 @@ func TestBaselineCollectionTimestampSQLPrecision(t *testing.T) {
 	}
 }
 
-// This uses a separate database from every production and other fixture DB.
+// 此处使用的数据库与所有生产库及其他夹具库均相互独立。
 func TestMySQLInstallationBaseline(t *testing.T) {
 	dsn := os.Getenv("LICENSE_BASELINE_TEST_DSN")
 	if dsn == "" {

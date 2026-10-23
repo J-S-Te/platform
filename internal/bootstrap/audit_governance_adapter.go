@@ -15,6 +15,8 @@ type governanceAuditAdapter struct {
 	config  config.AuditConfig
 }
 
+// RecordGovernanceAudit 把治理留存记录写入平台审计管线；应用/环境编码缺省时
+// 使用平台自身配置。
 func (adapter *governanceAuditAdapter) RecordGovernanceAudit(ctx context.Context, record auditapplication.AuditRecord) error {
 	applicationCode := strings.TrimSpace(record.ApplicationCode)
 	if applicationCode == "" {

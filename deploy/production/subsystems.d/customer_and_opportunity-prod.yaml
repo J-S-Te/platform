@@ -14,13 +14,13 @@ runtime:
   required_infrastructure_keys:
     - CUSTOMER_MYSQL_PASSWORD
     - CUSTOMER_MYSQL_ROOT_PASSWORD
-    # Temporal uses the shared workflow database even when contract business is not purchased.
+    # 即使未购买合同业务，Temporal 仍使用共享工作流数据库。
     - CONTRACT_MYSQL_PASSWORD
     - CONTRACT_MYSQL_ROOT_PASSWORD
   files:
     - path: runtime/customer.env
-      # Reload-only consumers; not commercial component registration.
-      consumers: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
+      # 仅供重载的消费者，不属于商业组件注册。
+      consumers: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-contract-transfer-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
       template_path: subsystem-templates/customer.env.example
       compose_environment_key: CUSTOMER_RUNTIME_ENV_FILE
       required_existing_keys: []
@@ -99,12 +99,12 @@ runtime:
         ATTACHMENT_FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
         ATTACHMENT_FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
-  # Provisioning intentionally uses --no-deps; list the complete workflow infrastructure explicitly.
+  # 配置过程刻意使用 --no-deps，必须显式列出完整工作流基础设施。
   dependency_services: [customer-mysql, contract-mysql, temporal]
   database:
     service: customer-mysql
     name: customer_opportunity
   migrate_service: customer-migrate
-  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
-  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
+  runtime_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-contract-transfer-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
+  teardown_services: [customer-api, customer-opportunity-alert-worker, customer-owner-notification-worker, customer-contract-transfer-worker, customer-presale-alert-worker, customer-presale-assignment-notification-worker, customer-presale-progress-notification-worker, customer-notification-delivery-worker, customer-presale-worker]
   release_image_keys: [CUSTOMER_CRM_IMAGE]

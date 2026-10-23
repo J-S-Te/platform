@@ -22,6 +22,9 @@ x-portal-runtime-env: &portal-runtime-env
   - ${PORTAL_RUNTIME_ENV_FILE:-./docker/.env.portal.local}
   - ${PORTAL_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
 
+x-portal-report-worker-runtime-env: &portal-report-worker-runtime-env
+  - ${PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE:-/dev/null}
+
 x-project-runtime-env: &project-runtime-env
   - ${PROJECT_RUNTIME_ENV_FILE:-../project_management/.env.local}
   - ${PROJECT_LAN_OVERRIDE_ENV_FILE:-./docker/.env.lan.disabled}
@@ -82,6 +85,7 @@ services:
   file-gateway-mysql:
     image: mysql:8.4
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: ${FILE_GATEWAY_DB_NAME:-file_gateway}
       MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
       MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}
@@ -98,14 +102,17 @@ services:
   file-gateway:
     image: basic-platform/file-gateway:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: .
       dockerfile: Dockerfile
       target: file-gateway-runtime
       additional_contexts:
         license_core: ../license-core
     environment:
+      TZ: Asia/Shanghai
       FILE_GATEWAY_HTTP_ADDRESS: :8086
-      FILE_GATEWAY_DATABASE_DSN: file_gateway:${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=UTC
+      FILE_GATEWAY_DATABASE_DSN: file_gateway:${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}@tcp(file-gateway-mysql:3306)/${FILE_GATEWAY_DB_NAME:-file_gateway}?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai
       FILE_GATEWAY_STORAGE_BACKEND: ${FILE_GATEWAY_STORAGE_BACKEND:-local}
       FILE_GATEWAY_STORAGE_ROOT: /app/data/file-gateway
       FILE_GATEWAY_TOKEN_ISSUER: ${AUTH_JWT_ISSUER:-basic-platform}
@@ -114,6 +121,10 @@ services:
       FILE_GATEWAY_RECONCILIATION_INTERVAL: ${FILE_GATEWAY_RECONCILIATION_INTERVAL:-1m}
       FILE_GATEWAY_RECONCILIATION_STALE_AFTER: ${FILE_GATEWAY_RECONCILIATION_STALE_AFTER:-15m}
       FILE_GATEWAY_RECONCILIATION_BATCH_SIZE: ${FILE_GATEWAY_RECONCILIATION_BATCH_SIZE:-100}
+      FILE_GATEWAY_CLEANUP_ENABLED: ${FILE_GATEWAY_CLEANUP_ENABLED:-true}
+      FILE_GATEWAY_CLEANUP_INTERVAL: ${FILE_GATEWAY_CLEANUP_INTERVAL:-1h}
+      FILE_GATEWAY_CLEANUP_MINIMUM_AGE: ${FILE_GATEWAY_CLEANUP_MINIMUM_AGE:-24h}
+      FILE_GATEWAY_CLEANUP_BATCH_SIZE: ${FILE_GATEWAY_CLEANUP_BATCH_SIZE:-100}
     volumes:
       - ./data/keys:/app/data/keys:ro
       - file_gateway_local_data:/app/data/file-gateway
@@ -133,6 +144,7 @@ services:
     image: mysql:8.4
     profiles: ["keycloak"]
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: ${KEYCLOAK_DB_NAME:-keycloak}
       MYSQL_USER: ${KEYCLOAK_DB_USER:-keycloak}
       # 必填（:?）：scripts/docker-local.sh 会把模板 REPLACE_WITH_* 替换为随机口令，
@@ -156,6 +168,7 @@ services:
     profiles: ["keycloak"]
     command: ["start-dev", "--http-port=8080", "--health-enabled=true"]
     environment:
+      TZ: Asia/Shanghai
       KC_DB: mysql
       KC_DB_URL: jdbc:mysql://keycloak-db:3306/${KEYCLOAK_DB_NAME:-keycloak}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
@@ -163,8 +176,7 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set (run scripts/docker-local.sh)}
       KC_HTTP_ENABLED: "true"
-      # Discovery must retain the browser-visible issuer even when Go services
-      # access Keycloak through its private Compose-network endpoint.
+      # 即使 Go 服务通过 Compose 私有网络端点访问 Keycloak，发现文档也必须保留浏览器可见签发者。
       KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}
       KC_HOSTNAME_STRICT: "false"
       KC_PROXY_HEADERS: xforwarded
@@ -229,13 +241,19 @@ services:
   api:
     <<: *platform-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: .
       dockerfile: Dockerfile
       additional_contexts:
         license_core: ../license-core
     env_file: *platform-runtime-env
     environment:
+      TZ: Asia/Shanghai
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "true"
+      LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
+      LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      LICENSE_RUNTIME_STATE_DIRECTORY: /var/lib/commercial-license
       # 出网策略注入（task-50 SEC-B5；键名以 Go EgressPolicyFromEnv 逐字核对）：
       # 本进程反代/健康探针的上游为 compose 私网容器名（本地默认网段属 RFC1918 私网），
       # 策略默认 fail-closed，不注入则下轮部署探针/反代全断。PLATFORM_EGRESS_ALLOW_LOOPBACK
@@ -290,6 +308,7 @@ services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0
     environment:
+      TZ: Asia/Shanghai
       # tecnativa/docker-socket-proxy 浮动标签现随 HAProxy 3.4.x 构建，'warn' 已不是
       # 合法日志级别（parse fatal → 代理崩溃循环）；'warning' 新旧 haproxy 通用。
       LOG_LEVEL: warning
@@ -314,6 +333,7 @@ services:
   subsystem-provisioner:
     <<: *platform-backend-runtime
     environment:
+      TZ: Asia/Shanghai
       LOCAL_SUBSYSTEM_ENVIRONMENT: ${LOCAL_SUBSYSTEM_ENVIRONMENT:-dev}
       CONTRACT_SUBSYSTEM_ENVIRONMENT: ${CONTRACT_SUBSYSTEM_ENVIRONMENT:-dev}
       CUSTOMER_SUBSYSTEM_ENVIRONMENT: ${CUSTOMER_SUBSYSTEM_ENVIRONMENT:-dev}
@@ -349,9 +369,8 @@ services:
       SUBSYSTEM_CATALOG_SYNC_MYSQL_PASSWORD: ${SUBSYSTEM_CATALOG_SYNC_MYSQL_PASSWORD:-${MYSQL_PASSWORD}}
       SUBSYSTEM_CATALOG_SYNC_MYSQL_DATABASE: ${SUBSYSTEM_CATALOG_SYNC_MYSQL_DATABASE:-basic_platform}
       SUBSYSTEM_CATALOG_SYNC_TARGET_APP_CODE: ${SUBSYSTEM_CATALOG_SYNC_TARGET_APP_CODE:-contract_management}
-      # The Agent writes this only for a Keycloak-selected subsystem. It keeps
-      # the public issuer in OIDC_ISSUER and routes go-oidc's backchannel calls
-      # to the private endpoint, so issuer validation remains standards-compliant.
+      # Agent 仅为选择 Keycloak 的子系统写入此项。OIDC_ISSUER 保留公共签发者，go-oidc 后通道调用路由至私有端点，
+      # 以保持签发者验证符合标准。
       SUBSYSTEM_KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}
       SUBSYSTEM_KEYCLOAK_INTERNAL_URL: ${KEYCLOAK_INTERNAL_URL:-http://keycloak:8080}
       SUBSYSTEM_KEYCLOAK_REALM: ${KEYCLOAK_REALM:-basic-platform}
@@ -381,9 +400,10 @@ services:
     # 原 network_mode:none 的隔离由专有 internal 网络继承：仅白名单代理可达，无外网出口。
     networks: [docker-control]
     healthcheck:
-      test: ["CMD-SHELL", "test -S /run/basic-platform-provisioner/provisioner.sock"]
+      # Socket 存在不等于具备部署能力；代理缺失/拒绝/Daemon 故障必须不健康。
+      test: ["CMD-SHELL", "test -S /run/basic-platform-provisioner/provisioner.sock && exec docker info >/dev/null"]
       interval: 2s
-      timeout: 2s
+      timeout: 3s
       retries: 15
       start_period: 2s
     restart: unless-stopped
@@ -404,12 +424,12 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Settlement keeps an isolated schema and credential pair, while sharing the
-  # platform Compose network so the unified frontend resolves settlement-api.
+  # 结算使用隔离 schema 和凭据对，同时共享平台 Compose 网络，使统一前端可解析 settlement-api。
   settlement-mysql:
     image: mysql:8.4
     env_file: *settlement-db-env
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: settlement
       MYSQL_USER: settlement
       MYSQL_PASSWORD: ${SETTLEMENT_MYSQL_PASSWORD}
@@ -433,6 +453,8 @@ services:
   settlement-migrate:
     <<: *settlement-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../Settlement
     env_file: *settlement-db-env
     entrypoint: ["/usr/local/bin/settlement-migrate"]
@@ -444,9 +466,12 @@ services:
   settlement-api:
     <<: *settlement-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../Settlement
     env_file: *settlement-runtime-env
     environment:
+      TZ: Asia/Shanghai
       # SETTLEMENT_MYSQL_DSN 由 env_file（Settlement/.env.local，docker-local.sh 生成）注入（SEC-N10）。
       SETTLEMENT_HTTP_ADDR: :8085
       SETTLEMENT_PUBLIC_ORIGIN: ${APP_PUBLIC_BASE_URL:-http://localhost:8081}
@@ -491,6 +516,7 @@ services:
     env_file: *settlement-runtime-env
     entrypoint: ["/usr/local/bin/settlement-worker"]
     environment:
+      TZ: Asia/Shanghai
       # SETTLEMENT_MYSQL_DSN 由 env_file 注入（SEC-N10）。
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_ENVIRONMENT_CODE: dev
@@ -512,6 +538,7 @@ services:
   contract-mysql:
     image: mysql:8.4
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: contract_management
       MYSQL_USER: contract
       MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
@@ -540,7 +567,8 @@ services:
     <<: *contract-backend-runtime
     env_file: *contract-db-env
     environment:
-      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      TZ: Asia/Shanghai
+      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
     depends_on:
       contract-mysql:
         condition: service_healthy
@@ -553,6 +581,7 @@ services:
       contract-mysql:
         condition: service_healthy
     environment:
+      TZ: Asia/Shanghai
       DB: mysql8
       DB_PORT: 3306
       MYSQL_SEEDS: contract-mysql
@@ -568,10 +597,12 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # Independent API/Worker processes; separate commercial runtime identities.
+  # API 和 Worker 为独立进程，使用独立商业运行身份。
   contract-api:
     <<: *contract-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../contract_management
     env_file:
       - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
@@ -579,8 +610,9 @@ services:
       - path: runtime/license-contract-api.env
         required: false
     environment: &contract-process-env
+      TZ: Asia/Shanghai
       HTTP_ADDRESS: :8081
-      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      MYSQL_DSN: contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       # 该静态 Token 回写路径已被 AUD-2026-018 fail-closed 校验接管：设了 BaseURL
       # 就必须提供 CRM_API_TOKEN。本地默认置空＝集成关闭（跨系统链路实际走
@@ -659,6 +691,8 @@ services:
   contract-worker:
     <<: *contract-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../contract_management
     env_file:
       - ${CONTRACT_RUNTIME_ENV_FILE:-../contract_management/.env.local}
@@ -692,6 +726,7 @@ services:
     image: mysql:8.4
     profiles: ["project"]
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: project_management
       MYSQL_USER: project
       MYSQL_PASSWORD: ${PROJECT_MYSQL_PASSWORD}
@@ -720,23 +755,27 @@ services:
     profiles: ["project"]
     env_file: *project-db-env
     environment:
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      TZ: Asia/Shanghai
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
     entrypoint: ["/usr/local/bin/project-migrate"]
     depends_on:
       project-mysql:
         condition: service_healthy
     restart: "no"
 
-  # 项目管理系统后端容器：API 与 Temporal Worker 运行在同一容器中。
+  # 项目管理系统后端：project-api 与 sla-notifier 分别运行 API 和后台 Runtime。
   project-api:
     <<: *project-backend-runtime
     profiles: ["project"]
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../project_management
     env_file: *project-runtime-env
     environment:
+      TZ: Asia/Shanghai
       PM_HTTP_ADDR: :8082
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       DASHBOARD_MACHINE_ENABLED: "true"
@@ -751,7 +790,8 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: project-management
-      PROJECT_RUN_WORKER_WITH_API: "true"
+      PROJECT_RUN_WORKER_WITH_API: "false"
+      PROJECT_BACKGROUND_BUILD_ID: ${PROJECT_BACKGROUND_BUILD_ID:-}
       GIN_MODE: release
     # Dashboard 机器 Bearer 校验使用平台签发 JWT 的公钥；只读挂载平台
     # 生成的公钥，避免 project-api 启动时因路径存在但文件缺失而退出。
@@ -795,27 +835,39 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # SLA 主动提醒扫描：周期任务与 API 分离，避免把周期性工作塞进请求路径。
-  # 目标租户由 SLA_SCAN_TENANTS 显式给出（系统侧任务不代替用户授权，必须限定范围）；
-  # 未配置平台通知凭据时只记录告警并空转，不影响其它服务。
+  # 统一后台进程：SLA、派生事件和通知由受控 Runtime 调度。
   sla-notifier:
     <<: *project-backend-runtime
     profiles: ["project"]
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../project_management
     env_file: *project-runtime-env
     environment:
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      TZ: Asia/Shanghai
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       SLA_SCAN_INTERVAL: ${SLA_SCAN_INTERVAL:-15m}
-      SLA_SCAN_TENANTS: ${SLA_SCAN_TENANTS:-}
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      PROJECT_BACKGROUND_BUILD_ID: ${PROJECT_BACKGROUND_BUILD_ID:-}
     # 镜像的 ENTRYPOINT 指向 project-api，这里必须覆盖 entrypoint（command 只会成为它的参数）。
     entrypoint: ["/usr/local/bin/sla-notifier"]
     depends_on:
+      temporal:
+        condition: service_healthy
       project-mysql:
         condition: service_healthy
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$${PROJECT_BACKGROUND_HEALTH_ADDRESS:-127.0.0.1:9093}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    stop_grace_period: 420s
     restart: unless-stopped
 
   # 数据看板与统计分析：独立仓库、独立镜像。dashboard-api（嵌入桥+业务 API）+
@@ -825,6 +877,7 @@ services:
     image: mysql:8.4
     profiles: ["data-analysis"]
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: dashboard_aggregation
       MYSQL_USER: dashboard
       MYSQL_PASSWORD: ${DASHBOARD_MYSQL_PASSWORD}
@@ -842,27 +895,35 @@ services:
       retries: 30
 
   dashboard-migrate:
+    image: data-analysis/local-migrate:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../data_analysis
       target: local-migrate
     profiles: ["data-analysis"]
     env_file: *data-analysis-runtime-env
     environment:
-      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      TZ: Asia/Shanghai
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
     depends_on:
       dashboard-mysql:
         condition: service_healthy
     restart: "no"
 
   dashboard-api:
+    image: data-analysis/dashboard-api:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../data_analysis
       target: dashboard-api
     profiles: ["data-analysis"]
     env_file: *data-analysis-runtime-env
     environment:
+      TZ: Asia/Shanghai
       LISTEN_ADDR: :8080
-      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PUBLIC_ORIGIN: http://localhost:8081
       OIDC_ISSUER: http://localhost:18090/realms/basic-platform
@@ -914,13 +975,17 @@ services:
     restart: unless-stopped
 
   aggregation-worker:
+    image: data-analysis/aggregation-worker:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../data_analysis
       target: aggregation-worker
     profiles: ["data-analysis"]
     env_file: *data-analysis-runtime-env
     environment:
-      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4
+      TZ: Asia/Shanghai
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai
       AGGREGATION_ONCE: "false"
       MACHINE_TOKEN_URL: http://api:8080/oauth2/token
       MACHINE_TOKEN_ISSUER: basic-platform
@@ -933,6 +998,11 @@ services:
       PROJECT_MACHINE_TOKEN_SCOPE: dashboard.project.read
       CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
       PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
+      PROJECT_PROJECTION_URL: http://project-api:8082/internal/v1/dashboard/projects/snapshot
+      PROJECT_PROJECTION_HTTP_TIMEOUT: ${PROJECT_PROJECTION_HTTP_TIMEOUT:-35s}
+      # 可选只读 DSN：项目仅用于报告快照，项目维表使用上面的完整投影API。
+      PROJECT_READ_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      SETTLEMENT_READ_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
       OIDC_TENANT_ID: ${OIDC_TENANT_ID}
     depends_on:
       dashboard-migrate:
@@ -940,13 +1010,17 @@ services:
     restart: unless-stopped
 
   alert-worker:
+    image: data-analysis/alert-worker:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../data_analysis
       target: alert-worker
     profiles: ["data-analysis"]
     env_file: *data-analysis-runtime-env
     environment:
-      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4
+      TZ: Asia/Shanghai
+      DASHBOARD_MYSQL_DSN: dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(dashboard-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai
     depends_on:
       dashboard-migrate:
         condition: service_completed_successfully
@@ -956,6 +1030,7 @@ services:
     image: metabase/metabase:v0.53.7
     profiles: ["data-analysis"]
     environment:
+      TZ: Asia/Shanghai
       MB_DB_TYPE: mysql
       MB_DB_DBNAME: dashboard_metabase
       MB_DB_HOST: dashboard-mysql
@@ -981,6 +1056,7 @@ services:
   customer-mysql:
     image: mysql:8.4
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: customer_opportunity
       MYSQL_USER: customer
       MYSQL_PASSWORD: ${CUSTOMER_MYSQL_PASSWORD}
@@ -1014,10 +1090,13 @@ services:
   customer-api:
     <<: *customer-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../customer_and_opportunity
       target: crm-runtime
     env_file: *customer-runtime-env
     environment:
+      TZ: Asia/Shanghai
       HTTP_ADDRESS: :8090
       # MYSQL_DSN 由 env_file（docker/.env.customer.local）注入（SEC-N10）。
       PLATFORM_BASE_URL: http://platform-api:8080
@@ -1078,10 +1157,13 @@ services:
   customer-presale-alert-worker:
     image: customer-opportunity/presale-alert-worker:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../customer_and_opportunity
       target: presale-alert-worker-runtime
     env_file: *customer-runtime-env
     environment:
+      TZ: Asia/Shanghai
       PRESALE_ALERT_WORKER_ID: crm-presale-alert-worker-local-1
       PRESALE_ALERT_POLL_INTERVAL: ${PRESALE_ALERT_POLL_INTERVAL:-10m}
       PRESALE_ALERT_LEASE_DURATION: ${PRESALE_ALERT_LEASE_DURATION:-1m}
@@ -1115,6 +1197,7 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
+      TZ: Asia/Shanghai
       OWNER_NOTIFICATION_WORKER_ID: crm-owner-notification-local-1
     command: ["./opportunity-owner-notification-worker"]
     depends_on:
@@ -1129,6 +1212,7 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
+      TZ: Asia/Shanghai
       PRESALE_ASSIGNMENT_NOTIFICATION_WORKER_ID: crm-presale-assignment-notification-local-1
     command: ["./presale-assignment-notification-worker"]
     depends_on:
@@ -1143,6 +1227,7 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
+      TZ: Asia/Shanghai
       PRESALE_PROGRESS_NOTIFICATION_WORKER_ID: crm-presale-progress-notification-local-1
     command: ["./presale-progress-notification-worker"]
     depends_on:
@@ -1159,6 +1244,7 @@ services:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
+      TZ: Asia/Shanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       NOTIFICATION_DELIVERY_WORKER_ID: crm-notification-delivery-local-1
     command: ["./notification-delivery-worker"]
@@ -1192,13 +1278,16 @@ services:
   presale-worker:
     image: customer-opportunity/presale-worker:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../customer_and_opportunity
       target: presale-worker-runtime
     env_file:
       - path: ${PRESALE_WORKER_ENV_FILE:-../customer_and_opportunity/.env.presale-worker}
         required: false
     environment:
-      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      TZ: Asia/Shanghai
+      MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai&multiStatements=true
       PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
       PRESALE_TEMPORAL_INTERNAL_MODE: ${PRESALE_TEMPORAL_INTERNAL_MODE:-true}
       TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
@@ -1226,6 +1315,8 @@ services:
   presale-integration-mock:
     image: customer-opportunity/presale-integration-mock:local
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../customer_and_opportunity
       target: presale-integration-mock-runtime
     ports:
@@ -1238,6 +1329,7 @@ services:
   portal-mysql:
     image: mysql:8.4
     environment:
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: customer_portal
       MYSQL_USER: portal
       MYSQL_PASSWORD: ${PORTAL_MYSQL_PASSWORD}
@@ -1269,10 +1361,13 @@ services:
   portal-api:
     <<: *portal-backend-runtime
     build:
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
       context: ../customer_and_opportunity
       target: portal-runtime
     env_file: *portal-runtime-env
     environment:
+      TZ: Asia/Shanghai
       PORTAL_HTTP_ADDRESS: :8091
       # PORTAL_MYSQL_DSN 由 env_file（docker/.env.portal.local）注入（SEC-N10）。
       PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
@@ -1282,6 +1377,8 @@ services:
     command: ["./portal-server"]
     volumes:
       - ./data/keys:/app/data/keys:ro
+      - portal_report_local_data:/app/data/portal-reports
+      - ../customer_and_opportunity/assets/fonts:/app/assets/fonts:ro
     depends_on:
       portal-mysql:
         condition: service_healthy
@@ -1321,13 +1418,30 @@ services:
     profiles: ["portal"]
     restart: unless-stopped
 
+  portal-report-worker:
+    <<: *portal-backend-runtime
+    env_file: *portal-report-worker-runtime-env
+    command: ["./portal-report-worker"]
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - portal_report_local_data:/app/data/portal-reports
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+      portal-migrate:
+        condition: service_completed_successfully
+    profiles: ["portal"]
+    restart: unless-stopped
+
   # Portal 邀请 Saga 的常驻补偿进程。只复用 CRM 运行镜像与 customer runtime，
   # 不在平台仓库复制 Portal 业务逻辑；接入流程写入的最小机器凭据通过变量映射交付。
   portal-invite-compensation-worker:
     <<: *customer-backend-runtime
     env_file: *customer-runtime-env
     environment:
-      PORTAL_INVITE_COMPENSATION_MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true
+      TZ: Asia/Shanghai
+      PORTAL_INVITE_COMPENSATION_MYSQL_DSN: customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai&multiStatements=true
       PORTAL_INVITE_COMPENSATION_PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
       PORTAL_INVITE_COMPENSATION_PORTAL_TOKEN_URL: http://api:8080/oauth2/token
       PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_ID: ${PORTAL_PROVISION_CLIENT_ID:-}
@@ -1416,6 +1530,8 @@ volumes:
     name: basic-platform-local-customer-mysql-data
   customer_attachment_local_data:
     name: basic-platform-local-customer-attachment-data
+  portal_report_local_data:
+    name: basic-platform-local-portal-reports
   portal_mysql_local_data:
     name: basic-platform-local-portal-mysql-data
   project_mysql_local_data:

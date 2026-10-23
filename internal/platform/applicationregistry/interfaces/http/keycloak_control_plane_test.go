@@ -75,7 +75,7 @@ func TestVerifyBrokerExistsClassifiesMissingIdentityProviderAsRecoverableDrift(t
 		case "POST /realms/master/protocol/openid-connect/token":
 			_ = json.NewEncoder(response).Encode(map[string]string{"access_token": "admin-token"})
 		case "GET /admin/realms/platform":
-			// An empty successful body exercises the compatible no-op Realm path.
+			// 成功响应的空正文用于覆盖兼容的 Realm 无操作路径。
 			response.WriteHeader(stdhttp.StatusOK)
 		case "GET /admin/realms/platform/identity-provider/instances/basic-platform":
 			response.WriteHeader(stdhttp.StatusNotFound)

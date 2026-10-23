@@ -15,12 +15,12 @@ import (
 
 const loginAttemptFailure = "FAILURE"
 
-// GORMRepository implements security application persistence against MySQL through GORM.
+// GORMRepository 基于 GORM 与 MySQL 实现 security 应用层持久化契约。
 type GORMRepository struct {
 	database *gorm.DB
 }
 
-// NewGORMRepository validates the database dependency and returns a security repository.
+// NewGORMRepository 校验数据库依赖非空后构造安全仓储，缺失依赖时失败关闭。
 func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	if database == nil {
 		return nil, errors.New("security GORM database must not be nil")
@@ -28,7 +28,7 @@ func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	return &GORMRepository{database: database}, nil
 }
 
-// GetLoginPolicy reads a tenant policy without fabricating a default at the persistence layer.
+// GetLoginPolicy 读取租户策略；持久层不虚构默认值，“未持久化”与真实数据严格区分。
 func (repository *GORMRepository) GetLoginPolicy(ctx context.Context, tenantID string) (securitydomain.LoginPolicy, error) {
 	var row loginPolicyModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error; err != nil {
@@ -169,7 +169,7 @@ func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input s
 	return result, nil
 }
 
-// ListLockedAccounts returns accounts whose lock window has not expired.
+// ListLockedAccounts 返回锁定窗口尚未过期的账号，附带仍生效的失败计数与最近失败时间。
 func (repository *GORMRepository) ListLockedAccounts(ctx context.Context, tenantID string, query securityapplication.PageRequest, now time.Time) (securityapplication.PageResult[securitydomain.LockedAccount], error) {
 	base := repository.database.WithContext(ctx).Table("iam_account AS account").
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = account.tenant_id").

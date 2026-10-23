@@ -1,4 +1,4 @@
-// Package application coordinates platform and notification settings use cases.
+// Package application 协调平台设置与通知设置用例。
 package application
 
 import (
@@ -13,33 +13,33 @@ import (
 )
 
 var (
-	// ErrNotFound indicates the repository has no persisted settings row.
+	// ErrNotFound 表示仓储中没有已持久化的设置行。
 	ErrNotFound = errors.New("settings not found")
-	// ErrConflict indicates a uniqueness or lifecycle conflict.
+	// ErrConflict 表示唯一性或生命周期冲突。
 	ErrConflict = errors.New("settings conflict")
-	// ErrVersionConflict indicates an optimistic-lock version is stale.
+	// ErrVersionConflict 表示乐观锁版本已过期。
 	ErrVersionConflict = errors.New("settings version conflict")
-	// ErrValidation indicates invalid application input.
+	// ErrValidation 表示应用层输入非法。
 	ErrValidation = errors.New("invalid settings input")
 )
 
-// IdentifierGenerator supplies sortable aggregate identifiers.
+// IdentifierGenerator 提供可排序的聚合标识符。
 type IdentifierGenerator interface {
 	New(at time.Time) (string, error)
 }
 
-// Clock supplies the current time for deterministic tests.
+// Clock 为确定性测试提供当前时间。
 type Clock interface {
 	Now() time.Time
 }
 
-// SystemClock is the production clock.
+// SystemClock 是生产环境时钟。
 type SystemClock struct{}
 
-// Now returns the current wall-clock time.
+// Now 返回当前墙钟时间。
 func (SystemClock) Now() time.Time { return time.Now() }
 
-// PlatformSettingsUpdateInput replaces the typed platform settings for one tenant.
+// PlatformSettingsUpdateInput 整体替换单个租户的强类型平台设置。
 type PlatformSettingsUpdateInput struct {
 	TenantID          string
 	OperatorID        string
@@ -50,7 +50,7 @@ type PlatformSettingsUpdateInput struct {
 	Version           uint64
 }
 
-// AccessSettingsUpdateInput replaces the typed public-access settings for one tenant.
+// AccessSettingsUpdateInput 整体替换单个租户的强类型对外访问设置。
 type AccessSettingsUpdateInput struct {
 	TenantID                  string
 	OperatorID                string
@@ -59,19 +59,18 @@ type AccessSettingsUpdateInput struct {
 	Version                   uint64
 }
 
-// AccessApplyInput carries the neutral runtime values the deployment agent needs to apply.
+// AccessApplyInput 携带部署执行器应用配置所需的中立运行时值。
 type AccessApplyInput struct {
 	PublicOrigin              string
 	AllowInsecureHTTPRedirect bool
 }
 
-// AccessApplier applies the access configuration to the local unified orchestration
-// (writes override environment files and recreates affected containers).
+// AccessApplier 把对外访问配置应用到本地统一编排（改写覆盖环境文件并重建受影响容器）。
 type AccessApplier interface {
 	ApplyAccess(context.Context, AccessApplyInput) error
 }
 
-// NotificationSettingsUpdateInput replaces the typed notification settings for one tenant.
+// NotificationSettingsUpdateInput 整体替换单个租户的强类型通知设置。
 type NotificationSettingsUpdateInput struct {
 	TenantID          string
 	OperatorID        string
@@ -81,7 +80,7 @@ type NotificationSettingsUpdateInput struct {
 	Version           uint64
 }
 
-// Repository persists settings aggregates.
+// Repository 持久化设置聚合。
 type Repository interface {
 	GetPlatformSettings(ctx context.Context, tenantID string) (domain.PlatformSettings, error)
 	SavePlatformSettings(ctx context.Context, input PlatformSettingsUpdateInput, settingsID string, now time.Time) (domain.PlatformSettings, error)
@@ -91,14 +90,14 @@ type Repository interface {
 	SaveAccessSettings(ctx context.Context, input AccessSettingsUpdateInput, settingsID string, now time.Time) (domain.AccessSettings, error)
 }
 
-// Service exposes settings application use cases.
+// Service 暴露设置应用用例。
 type Service struct {
 	repository Repository
 	ids        IdentifierGenerator
 	clock      Clock
 }
 
-// NewService validates and constructs the settings application service.
+// NewService 校验依赖并构建设置应用服务；任一依赖为 nil 即拒绝启动。
 func NewService(repository Repository, ids IdentifierGenerator, clock Clock) (*Service, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("settings service dependencies must not be nil")
@@ -106,7 +105,7 @@ func NewService(repository Repository, ids IdentifierGenerator, clock Clock) (*S
 	return &Service{repository: repository, ids: ids, clock: clock}, nil
 }
 
-// GetPlatformSettings returns saved settings or safe documented defaults before first customization.
+// GetPlatformSettings 返回已保存设置；租户首次自定义前返回有文档依据的安全默认值。
 func (service *Service) GetPlatformSettings(ctx context.Context, tenantID string) (domain.PlatformSettings, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return domain.PlatformSettings{}, ErrValidation
@@ -118,7 +117,7 @@ func (service *Service) GetPlatformSettings(ctx context.Context, tenantID string
 	return settings, err
 }
 
-// UpdatePlatformSettings validates and saves one tenant's platform settings.
+// UpdatePlatformSettings 校验并保存单个租户的平台设置。
 func (service *Service) UpdatePlatformSettings(ctx context.Context, input PlatformSettingsUpdateInput) (domain.PlatformSettings, error) {
 	input = normalizePlatformSettings(input)
 	if !validPlatformSettings(input) {
@@ -131,7 +130,7 @@ func (service *Service) UpdatePlatformSettings(ctx context.Context, input Platfo
 	return service.repository.SavePlatformSettings(ctx, input, settingsID, service.clock.Now().UTC())
 }
 
-// GetNotificationSettings returns saved notification settings or documented defaults.
+// GetNotificationSettings 返回已保存的通知设置或文档化的默认值。
 func (service *Service) GetNotificationSettings(ctx context.Context, tenantID string) (domain.NotificationSettings, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return domain.NotificationSettings{}, ErrValidation
@@ -143,10 +142,9 @@ func (service *Service) GetNotificationSettings(ctx context.Context, tenantID st
 	return settings, err
 }
 
-// UpdateNotificationSettings validates and saves the channels that are actually available.
-// Email delivery is deliberately rejected until an email provider and delivery worker are
-// configured. Persisting an enabled switch without a sender would create a false operational
-// signal and silently lose business notifications.
+// UpdateNotificationSettings 校验并保存实际可用的通知渠道。在邮件提供方与投递 worker
+// 就绪前有意拒绝启用邮件投递：持久化一个没有发送方的启用开关会制造虚假运营信号，
+// 并让业务通知无声丢失。
 func (service *Service) UpdateNotificationSettings(ctx context.Context, input NotificationSettingsUpdateInput) (domain.NotificationSettings, error) {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
@@ -185,7 +183,7 @@ func validPlatformSettings(input PlatformSettingsUpdateInput) bool {
 		input.Timezone != "" && len(input.Timezone) <= 64 && len(input.Qualification) <= 500
 }
 
-// GetAccessSettings returns saved access settings or the local-only default.
+// GetAccessSettings 返回已保存的对外访问设置；未保存时返回仅本机默认值。
 func (service *Service) GetAccessSettings(ctx context.Context, tenantID string) (domain.AccessSettings, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return domain.AccessSettings{}, ErrValidation
@@ -197,7 +195,7 @@ func (service *Service) GetAccessSettings(ctx context.Context, tenantID string) 
 	return settings, err
 }
 
-// UpdateAccessSettings validates and saves one tenant's public-access settings.
+// UpdateAccessSettings 校验并保存单个租户的对外访问设置。
 func (service *Service) UpdateAccessSettings(ctx context.Context, input AccessSettingsUpdateInput) (domain.AccessSettings, error) {
 	input = normalizeAccessSettings(input)
 	if !validAccessSettings(input) {
@@ -249,6 +247,9 @@ func validAccessSettings(input AccessSettingsUpdateInput) bool {
 	}
 	if input.PublicOrigin == "" {
 		return true
+	}
+	if len(input.PublicOrigin) > 512 {
+		return false
 	}
 	parsed, err := url.Parse(input.PublicOrigin)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil ||

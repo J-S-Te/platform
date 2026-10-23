@@ -24,7 +24,7 @@ func TestContractReferenceUpdateRepairsPrefixWithoutRotatingCredentials(t *testi
 	}
 	p := &LocalDockerSubsystemProvisioner{}
 	for i := 0; i < 2; i++ {
-		if err := p.updateServiceCredentialRuntimeConfiguration(application.SubsystemProvisioningInput{ApplicationCode: integratedContractApplicationCode}, path); err != nil {
+		if err := p.updateServiceCredentialRuntimeConfiguration(p1FixtureProvisioningInput(application.SubsystemProvisioningInput{ApplicationCode: integratedContractApplicationCode}), path); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -111,14 +111,14 @@ func TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCred
 		t.Fatalf("write environment: %v", err)
 	}
 
-	input := application.SubsystemProvisioningInput{
+	input := p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationCode: "data_analysis",
 		Environment:     "dev",
 		ServiceCredentials: []application.SubsystemServiceCredential{
 			{Purpose: application.ServiceCredentialContractDashboardRead, OAuthClient: application.OAuthClientView{ClientID: "data_analysis-dev-contract-dashboard"}, PlaintextSecret: "contract-secret"},
 			{Purpose: application.ServiceCredentialProjectDashboardRead, OAuthClient: application.OAuthClientView{ClientID: "data_analysis-dev-project-dashboard"}, PlaintextSecret: "project-secret"},
 		},
-	}
+	})
 	provisioner := &LocalDockerSubsystemProvisioner{}
 	if err := provisioner.updateServiceCredentialRuntimeConfiguration(input, environmentPath); err != nil {
 		t.Fatalf("update data analysis credentials: %v", err)
@@ -213,7 +213,7 @@ func TestUpdateOIDCRuntimeConfigurationRedeliversCatalogPublisherIdentity(t *tes
 				t.Fatal(err)
 			}
 			provisioner := &LocalDockerSubsystemProvisioner{}
-			if err := provisioner.updateOIDCRuntimeConfiguration(application.SubsystemProvisioningInput{
+			if err := provisioner.updateOIDCRuntimeConfiguration(p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 				ApplicationID:                "current-app",
 				ApplicationCode:              test.applicationCode,
 				TenantID:                     "tenant-1",
@@ -222,7 +222,7 @@ func TestUpdateOIDCRuntimeConfigurationRedeliversCatalogPublisherIdentity(t *tes
 				CatalogPublisherClientID:     "current-publisher",
 				CatalogPublisherClientSecret: "current-secret",
 				AuthenticationRuntimeUpdate:  false,
-			}, environmentPath); err != nil {
+			}), environmentPath); err != nil {
 				t.Fatalf("update OIDC runtime configuration: %v", err)
 			}
 			content, err := os.ReadFile(environmentPath)
@@ -366,7 +366,7 @@ func (runner *failingBuildRunner) Run(ctx context.Context, dir string, env []str
 	if containsString(args, "build") {
 		return errors.New("compiler rejected source")
 	}
-	// Even if Docker image inspect would succeed, it cannot authorize fallback.
+	// 即使 Docker 镜像检查能够成功，也不能据此允许回退。
 	return nil
 }
 func TestIntegratedBuildFailureNeverFallsBackToExistingMutableImage(t *testing.T) {
@@ -442,10 +442,10 @@ func TestLocalDockerSubsystemProvisionerUpdateRebuildsStandaloneSubsystemWithout
 		t.Fatalf("construct provisioner: %v", err)
 	}
 
-	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Update(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationCode: "customer_management",
 		Environment:     "prod",
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
@@ -586,14 +586,14 @@ func TestLocalDockerSubsystemProvisionerUpdateUsesUnifiedContractCompose(t *test
 	if err != nil {
 		t.Fatalf("construct provisioner: %v", err)
 	}
-	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Update(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationCode: "contract_management", Environment: "prod",
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("update integrated contract subsystem: %v", err)
 	}
 
 	assertRetainedContractVolumeInspection(t, runner.calls[0])
-	// The first command is the read-only retained-volume guard, not a Compose mutation.
+	// 第一条命令是只读的保留卷保护检查，不会变更 Compose。
 	runner.calls = runner.calls[1:]
 	if len(runner.calls) != 5 {
 		t.Fatalf("integrated contract update calls = %d, want 5: %#v", len(runner.calls), runner.calls)
@@ -695,13 +695,13 @@ func TestLocalDockerSubsystemProvisionerAdoptsSettlementThroughUnifiedCompose(t 
 		t.Fatalf("construct provisioner: %v", err)
 	}
 
-	// This is intentionally a red test: settlement is an integrated service in
-	// platform/compose.local.yaml, not a standalone Compose project.  Adoption
-	// must preserve its existing .env.local and volume, then run only reviewed
-	// settlement services through the shared Compose project.
-	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+	// 此用例刻意作为失败基线：结算服务集成在
+	// platform/compose.local.yaml 中，并非独立 Compose 项目。接管时
+	// 必须保留现有 .env.local 和数据卷，之后仅通过共享 Compose 项目
+	// 运行已审核的结算服务。
+	if err := provisioner.Update(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationCode: "settlement", Environment: "dev",
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("adopt settlement through unified Compose: %v", err)
 	}
 
@@ -781,10 +781,10 @@ func TestLocalDockerSubsystemProvisionerPublishesSettlementCatalogBeforeRuntime(
 	if err != nil {
 		t.Fatalf("construct provisioner: %v", err)
 	}
-	input := application.SubsystemProvisioningInput{
+	input := p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationID: "settlement-app", ApplicationCode: "settlement", Environment: "dev",
 		CatalogPublisherClientID: "settlement-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
-	}
+	})
 	if err := provisioner.Update(context.Background(), input); err != nil {
 		t.Fatalf("update Settlement with catalog v2: %v", err)
 	}
@@ -867,10 +867,10 @@ func TestLocalDockerSubsystemProvisionerDoesNotStartSettlementRuntimeWhenCatalog
 	if err != nil {
 		t.Fatalf("construct provisioner: %v", err)
 	}
-	err = provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+	err = provisioner.Update(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationID: "settlement-app", ApplicationCode: "settlement", Environment: "dev",
 		CatalogPublisherClientID: "settlement-dev-catalog-publisher", CatalogPublisherClientSecret: "publisher-secret",
-	})
+	}))
 	if err == nil {
 		t.Fatal("catalog publication failure was ignored")
 	}
@@ -920,7 +920,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 	if err != nil {
 		t.Fatalf("construct provisioner: %v", err)
 	}
-	if err := provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Provision(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: "contract_management", Environment: "prod",
 		Issuer: "http://localhost:8081", ClientID: "contract_management-prod-web", ClientSecret: "browser-secret",
 		RedirectURI: "http://localhost:8081/contract_management/auth/callback", PublicURL: "http://localhost:8081/contract_management/",
@@ -935,7 +935,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 			{Purpose: application.ServiceCredentialProjectContractImport, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-project-integration"}, PlaintextSecret: "project-integration-secret"},
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "contract_management-prod-owner-directory"}, PlaintextSecret: "directory-secret"},
 		},
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("provision integrated contract subsystem: %v", err)
 	}
 
@@ -1001,9 +1001,9 @@ func TestLocalRuntimeEnvironmentSupportsProductionAndLegacyPortalFiles(t *testin
 }
 
 func contractNotificationTestInput() application.SubsystemProvisioningInput {
-	return application.SubsystemProvisioningInput{TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: "contract_management", Environment: "prod",
+	return p1FixtureProvisioningInput(application.SubsystemProvisioningInput{TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: "contract_management", Environment: "prod",
 		ServiceCredentials: []application.SubsystemServiceCredential{{Purpose: application.ServiceCredentialNotificationIngest,
-			OAuthClient: application.OAuthClientView{TenantID: "tenant-1", ApplicationID: "app-1", EnvironmentID: "env-1", ClientID: "contract_management-prod-notification-publisher", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"notification.ingest"}}, PlaintextSecret: "owned-notification-test-secret"}}}
+			OAuthClient: application.OAuthClientView{TenantID: "tenant-1", ApplicationID: "app-1", EnvironmentID: "env-1", ClientID: "contract_management-prod-notification-publisher", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"notification.ingest"}}, PlaintextSecret: "owned-notification-test-secret"}}})
 }
 
 func TestContractNotificationRuntimeRecoversEmptyKeysAndPreservesOtherSecrets(t *testing.T) {
@@ -1084,7 +1084,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Provision(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		TenantID: "tenant-1", ApplicationID: "app-1", ApplicationCode: integratedCustomerApplicationCode, Environment: "dev",
 		Issuer: "http://localhost:8081", ClientID: "customer_and_opportunity-dev-web", ClientSecret: "browser-secret",
 		RedirectURI: "http://localhost:8081/customer-opportunity/auth/callback", PublicURL: "http://localhost:8081/customer-opportunity/",
@@ -1096,7 +1096,7 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "owner-directory-secret"},
 			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "signed-count-secret"},
 		},
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("provision integrated customer subsystem: %v", err)
 	}
 
@@ -1155,7 +1155,7 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Update(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		ApplicationCode: integratedCustomerApplicationCode, Environment: "dev",
 		ServiceCredentials: []application.SubsystemServiceCredential{
 			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "new-audit-secret"},
@@ -1163,7 +1163,7 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "new-owner-directory-secret"},
 			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "new-signed-count-secret"},
 		},
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("update integrated customer subsystem: %v", err)
 	}
 	contents, err := os.ReadFile(environmentPath)
@@ -1202,14 +1202,14 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedPortalWritesIsolatedR
 		t.Fatal(err)
 	}
 	credentials := portalServiceCredentialsForTest()
-	if err := provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Provision(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		TenantID: "tenant-1", ApplicationID: "portal-app-1", ApplicationCode: integratedPortalApplicationCode, Environment: "dev",
 		Issuer: "http://localhost:8081", ClientID: "customer_portal-dev-web", ClientSecret: "portal-browser-secret",
 		RedirectURI: "http://localhost:8081/customer-portal/auth/callback", PublicURL: "http://localhost:8081/customer-portal/",
 		PathPrefix: "/customer-portal", UpstreamURL: "http://portal-api:8091",
 		CatalogPublisherClientID: "customer_portal-dev-catalog-publisher", CatalogPublisherClientSecret: "portal-publisher-secret",
 		ServiceCredentials: credentials,
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("provision integrated Portal subsystem: %v", err)
 	}
 
@@ -1255,8 +1255,8 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedPortalWritesIsolatedR
 			t.Fatalf("CRM environment missing %q:\n%s", expected, customerBytes)
 		}
 	}
-	if len(runner.calls) != 6 {
-		t.Fatalf("integrated Portal provision calls = %d, want 6: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 7 {
+		t.Fatalf("integrated Portal provision calls = %d, want 7", len(runner.calls))
 	}
 	publishCall := runner.firstCallMatching(t, func(call recordingSubsystemRunnerCall) bool {
 		return containsString(call.arguments, "./authz-catalog") && containsString(call.arguments, "publish")
@@ -1286,12 +1286,12 @@ func TestLocalDockerSubsystemProvisionerPortalRequiresEveryPurposeBoundCredentia
 	}
 	credentials := portalServiceCredentialsForTest()
 	credentials = credentials[:len(credentials)-1]
-	err = provisioner.Provision(context.Background(), application.SubsystemProvisioningInput{
+	err = provisioner.Provision(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		TenantID: "tenant-1", ApplicationID: "portal-app-1", ApplicationCode: integratedPortalApplicationCode, Environment: "dev",
 		Issuer: "http://localhost:8081", ClientID: "customer_portal-dev-web", ClientSecret: "browser-secret",
 		RedirectURI: "http://localhost:8081/customer-portal/auth/callback", PublicURL: "http://localhost:8081/customer-portal/",
 		PathPrefix: "/customer-portal", UpstreamURL: "http://portal-api:8091", ServiceCredentials: credentials,
-	})
+	}))
 	if !errors.Is(err, application.ErrSubsystemProvisioningUnavailable) {
 		t.Fatalf("missing service credential error = %v", err)
 	}
@@ -1306,12 +1306,14 @@ func portalServiceCredentialsForTest() []application.SubsystemServiceCredential 
 		{application.ServiceCredentialPortalMappingProvision, "portal-mapping-provision"},
 		{application.ServiceCredentialPortalMappingDisable, "portal-mapping-disable"},
 		{application.ServiceCredentialPortalInviteVerify, "portal-invite-verify"},
+		{application.ServiceCredentialPortalReportFileRead, "portal-report-source"},
+		{application.ServiceCredentialPortalReportDownloadIdentityRead, "portal-report-identity"},
 	}
 	result := make([]application.SubsystemServiceCredential, 0, len(definitions))
 	for _, definition := range definitions {
 		result = append(result, application.SubsystemServiceCredential{
 			Purpose:         definition.purpose,
-			OAuthClient:     application.OAuthClientView{ClientID: "customer_portal-dev-" + definition.suffix},
+			OAuthClient:     application.OAuthClientView{ID: "client-" + definition.suffix, TenantID: "tenant-1", ApplicationID: "portal-app-1", EnvironmentID: "env-1", ClientID: "customer_portal-dev-" + definition.suffix, Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{p1FixtureScope(definition.purpose)}},
 			PlaintextSecret: "secret-" + definition.suffix,
 		})
 	}
@@ -1626,13 +1628,13 @@ func TestContractCatalogSyncRunsAgentSideWithoutDockerSocketOrHostNetwork(t *tes
 	if err != nil {
 		t.Fatalf("construct provisioner: %v", err)
 	}
-	if err := provisioner.Update(context.Background(), application.SubsystemProvisioningInput{
+	if err := provisioner.Update(context.Background(), p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
 		TenantID: "tenant-1", ApplicationID: "01KZ42MPYY9168FKFPBXVTX677",
 		ApplicationCode: integratedContractApplicationCode, Environment: "prod",
 		Issuer:                       "http://localhost:8081",
 		CatalogPublisherClientID:     "contract-dev-catalog-publisher",
 		CatalogPublisherClientSecret: "publisher-secret",
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("update contract subsystem: %v", err)
 	}
 
@@ -1683,4 +1685,32 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func p1FixtureScope(purpose string) string {
+	switch purpose {
+	case application.ServiceCredentialPortalReportFileRead:
+		return "platform:file:portal_report"
+	case application.ServiceCredentialPortalReportDownloadIdentityRead:
+		return "portal.report.download_identity.read"
+	}
+	return "unused-existing-fixture"
+}
+func p1FixtureProvisioningInput(input application.SubsystemProvisioningInput) application.SubsystemProvisioningInput {
+	if input.TenantID == "" {
+		input.TenantID = "tenant-1"
+	}
+	if input.ApplicationID == "" {
+		input.ApplicationID = "app-1"
+	}
+	if input.EnvironmentID == "" {
+		input.EnvironmentID = "env-1"
+	}
+	if input.ApplicationCode == "contract_management" {
+		input.ServiceCredentials = append(input.ServiceCredentials, application.SubsystemServiceCredential{Purpose: application.ServiceCredentialSettlementContractIngest, PlaintextSecret: "settlement-source-test-secret", OAuthClient: application.OAuthClientView{ID: "contract-source-client", TenantID: input.TenantID, ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID, ClientID: "contract_management-" + input.Environment + "-settlement-integration", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"settlement.contract.ingest"}}})
+	}
+	if input.ApplicationCode == "settlement" {
+		input.RelatedServiceClients = []application.RelatedSubsystemServiceClient{{ApplicationCode: "contract_management", ApplicationID: "contract-app-1", Environment: input.Environment, EnvironmentID: "contract-env-1", Purpose: application.ServiceCredentialSettlementContractIngest, Client: application.OAuthClientView{ID: "contract-source-client", TenantID: input.TenantID, ApplicationID: "contract-app-1", EnvironmentID: "contract-env-1", ClientID: "contract_management-" + input.Environment + "-settlement-integration", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"settlement.contract.ingest"}}}}
+	}
+	return input
 }

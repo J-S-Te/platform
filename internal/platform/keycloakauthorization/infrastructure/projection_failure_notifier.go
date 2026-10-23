@@ -11,17 +11,15 @@ import (
 	notificationdomain "github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
 )
 
-// ProjectionFailureNotifier sends in-app notifications when Keycloak authorization
-// projections fail repeatedly. It implements the FailureNotifier interface from
-// the keycloakauthorization/application package.
+// ProjectionFailureNotifier 在 Keycloak 授权投影反复失败时发送站内通知。
+// 它实现 keycloakauthorization/application 包的 FailureNotifier 接口。
 type ProjectionFailureNotifier struct {
 	notificationService *notificationapplication.Service
 	logger              *slog.Logger
 }
 
-// NewProjectionFailureNotifier constructs a notifier that sends alerts through
-// the existing notification service. The logger is used for diagnostic output
-// when notification delivery itself fails.
+// NewProjectionFailureNotifier 构造经既有通知服务发送告警的通知器。
+// logger 仅用于通知发送自身失败时的诊断输出。
 func NewProjectionFailureNotifier(notificationService *notificationapplication.Service, logger *slog.Logger) (*ProjectionFailureNotifier, error) {
 	if notificationService == nil {
 		return nil, fmt.Errorf("projection failure notifier requires a notification service")
@@ -32,10 +30,8 @@ func NewProjectionFailureNotifier(notificationService *notificationapplication.S
 	return &ProjectionFailureNotifier{notificationService: notificationService, logger: logger}, nil
 }
 
-// NotifyProjectionFailure sends a tenant-scoped in-app notification to the
-// tenant's administrator about repeated Keycloak projection failures. It uses
-// the keycloak.projection.failed template code; if the template does not exist
-// in the tenant, the notification is silently skipped.
+// NotifyProjectionFailure 就重复的 Keycloak 投影失败向租户管理员发送租户内站内
+// 通知。使用 keycloak.projection.failed 模板编码；租户内不存在该模板时静默跳过。
 func (notifier *ProjectionFailureNotifier) NotifyProjectionFailure(ctx context.Context, tenantID, applicationID, identityID string, err error) {
 	if notifier == nil || notifier.notificationService == nil {
 		return
@@ -46,8 +42,7 @@ func (notifier *ProjectionFailureNotifier) NotifyProjectionFailure(ctx context.C
 	}
 	idempotency := fmt.Sprintf("keycloak.projection.failure.%s.%s.%d", applicationID, identityID, time.Now().UTC().UnixNano()/int64(time.Minute))
 	templateCode := "keycloak.projection.failed"
-	// Send to the identity user if available, otherwise skip.
-	// The notification service requires at least one recipient.
+	// 有身份用户才发送，否则跳过：通知服务要求至少一个接收人。
 	identityID = strings.TrimSpace(identityID)
 	if identityID == "" {
 		return

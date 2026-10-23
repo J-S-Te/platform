@@ -4,10 +4,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +59,7 @@ func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner,
 			GatewayScriptPath:         os.Getenv("SUBSYSTEM_GATEWAY_SCRIPT_PATH"),
 			GatewayIncludePath:        os.Getenv("SUBSYSTEM_GATEWAY_INCLUDE_PATH"),
 			PlatformComposeProject:    envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-local"),
+			PlatformComposeFile:       envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_FILE", "compose.local.yaml"),
 			PlatformFrontendService:   envOrDefault("SUBSYSTEM_PLATFORM_FRONTEND_SERVICE", "frontend"),
 			PlatformDockerNetwork:     envOrDefault("SUBSYSTEM_PLATFORM_DOCKER_NETWORK", "basic-platform-local_default"),
 			DockerBinary:              envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"),
@@ -71,6 +76,14 @@ func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner,
 			KeycloakRealm:             envOrDefault("SUBSYSTEM_KEYCLOAK_REALM", "basic-platform"),
 		})
 	case "production":
+		releaseIntegrityCheck, err := releaseIntegrityCheckFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		runtimeProjection, err := runtimeProjectionCheckFromEnv()
+		if err != nil {
+			return nil, err
+		}
 		return infrastructure.NewProductionComposeSubsystemProvisioner(infrastructure.ProductionComposeSubsystemProvisionerConfig{
 			Enabled:           true,
 			DeployRoot:        os.Getenv("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT"),
@@ -88,6 +101,8 @@ func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner,
 				strings.TrimSpace(os.Getenv("SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS")),
 				"true",
 			),
+			ReleaseIntegrityCheck:  releaseIntegrityCheck,
+			RuntimeProjectionCheck: runtimeProjection,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported SUBSYSTEM_ONBOARDING_MODE")
@@ -99,4 +114,150 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// releaseIntegrityCheckFromEnv 返回可选的、受锁保护的写入前
+// 检查。仅在 SUBSYSTEM_RELEASE_INTEGRITY_REQUIRED=true 时启用。
+// 启用后，验证器和信任目录必须已通过
+// 独立可信通道安装；Agent 绝不从
+// 候选部署或交付介质读取信任材料。
+func releaseIntegrityCheckFromEnv() (func(context.Context, string, string) error, error) {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("SUBSYSTEM_RELEASE_INTEGRITY_REQUIRED")), "true") {
+		return nil, nil
+	}
+	verifier := filepath.Clean(envOrDefault("SUBSYSTEM_RELEASE_VERIFIER", "/usr/local/bin/release-verifier"))
+	trustDir := filepath.Clean(envOrDefault("SUBSYSTEM_RELEASE_TRUST_DIR", "/etc/unified-identity-platform/release-trust"))
+	expectedDigest := strings.TrimSpace(os.Getenv("SUBSYSTEM_RELEASE_EXPECTED_DIGEST"))
+	if expectedDigest != "" && !validReleaseDigest(expectedDigest) {
+		return nil, fmt.Errorf("SUBSYSTEM_RELEASE_EXPECTED_DIGEST must be sha256:<64 lowercase hex>")
+	}
+	if !filepath.IsAbs(verifier) || !filepath.IsAbs(trustDir) {
+		return nil, fmt.Errorf("release verifier and trust directory must be absolute paths")
+	}
+	info, err := os.Lstat(verifier)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+		return nil, fmt.Errorf("trusted release verifier is unavailable")
+	}
+	trustInfo, err := os.Lstat(trustDir)
+	if err != nil || !trustInfo.IsDir() || trustInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("trusted release trust directory is unavailable")
+	}
+	return func(ctx context.Context, root, requestedDigest string) error {
+		boundDigest := strings.TrimSpace(requestedDigest)
+		if boundDigest == "" {
+			boundDigest = expectedDigest
+		}
+		if boundDigest != "" && !validReleaseDigest(boundDigest) {
+			return fmt.Errorf("requested release digest is malformed")
+		}
+		commandArgs := []string{"check-installed", "--target", root, "--trust-dir", trustDir, "--output", "json"}
+		if boundDigest != "" {
+			commandArgs = append(commandArgs, "--expected-release-digest", boundDigest)
+		}
+		command := exec.CommandContext(ctx, verifier, commandArgs...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("release integrity verifier failed")
+		}
+		var result struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil || result.Status != "INSTALLED_MANIFEST_VERIFIED" {
+			return fmt.Errorf("release integrity verifier did not return INSTALLED_MANIFEST_VERIFIED")
+		}
+		return nil
+	}, nil
+}
+
+func validReleaseDigest(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, char := range value[len("sha256:"):] {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+var composeProjectPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+// runtimeProjectionCheckFromEnv 验证所配置 Compose 项目中
+// 所有运行容器使用的镜像配置摘要均包含在已签名的
+// 发布清单内。此检查不验证服务副本或 Compose
+// 插值；这些内容仍须单独验收。
+func runtimeProjectionCheckFromEnv() (func(context.Context) error, error) {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("SUBSYSTEM_RELEASE_INTEGRITY_REQUIRED")), "true") {
+		return nil, nil
+	}
+	root := filepath.Clean(strings.TrimSpace(os.Getenv("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT")))
+	if !filepath.IsAbs(root) {
+		return nil, fmt.Errorf("SUBSYSTEM_PRODUCTION_DEPLOY_ROOT must be absolute for runtime projection")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("release deployment root is unavailable for runtime projection")
+	}
+	project := strings.TrimSpace(envOrDefault("SUBSYSTEM_PLATFORM_COMPOSE_PROJECT", "basic-platform-production"))
+	if !composeProjectPattern.MatchString(project) {
+		return nil, fmt.Errorf("Compose project name is invalid for runtime projection")
+	}
+	docker := strings.TrimSpace(envOrDefault("SUBSYSTEM_DOCKER_BINARY", "docker"))
+	if docker == "" || strings.ContainsAny(docker, "/\\\r\n\x00") {
+		return nil, fmt.Errorf("Docker binary must be a command name for runtime projection")
+	}
+	manifestPath := filepath.Join(root, "runtime", "release-integrity", "release-manifest.json")
+	manifestInfo, err := os.Lstat(manifestPath)
+	if err != nil || !manifestInfo.Mode().IsRegular() || manifestInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("signed release manifest is unavailable for runtime projection")
+	}
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("signed release manifest is unreadable for runtime projection")
+	}
+	var manifest struct {
+		Images []struct {
+			ConfigDigest string `json:"config_digest"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return nil, fmt.Errorf("signed release manifest is invalid for runtime projection")
+	}
+	allowed := make(map[string]bool, len(manifest.Images))
+	for _, image := range manifest.Images {
+		digest := strings.TrimSpace(image.ConfigDigest)
+		if digest == "" {
+			return nil, fmt.Errorf("signed release manifest has an image without config digest")
+		}
+		allowed[digest] = true
+	}
+	if len(allowed) == 0 {
+		return nil, fmt.Errorf("signed release manifest has no images for runtime projection")
+	}
+	return func(ctx context.Context) error {
+		output, err := exec.CommandContext(ctx, docker, "ps", "-q", "--filter", "label=com.docker.compose.project="+project).Output()
+		if err != nil {
+			return fmt.Errorf("cannot list running Compose containers")
+		}
+		ids := strings.Fields(string(output))
+		if len(ids) == 0 {
+			return nil
+		}
+		args := append([]string{"inspect", "--format", "{{.Image}}"}, ids...)
+		output, err = exec.CommandContext(ctx, docker, args...).Output()
+		if err != nil {
+			return fmt.Errorf("cannot inspect running Compose images")
+		}
+		images := strings.Fields(string(output))
+		if len(images) != len(ids) {
+			return fmt.Errorf("running Compose image inventory is incomplete")
+		}
+		for _, image := range images {
+			if !allowed[strings.TrimSpace(image)] {
+				return fmt.Errorf("running Compose image is outside the signed release")
+			}
+		}
+		return nil
+	}, nil
 }

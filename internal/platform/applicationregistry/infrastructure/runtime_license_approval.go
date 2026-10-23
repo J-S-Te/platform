@@ -22,6 +22,8 @@ type runtimeLicenseLifecycleProvider interface {
 	ApprovedRuntimeLicenseLifecycle(context.Context, string, string) (application.RuntimeLicenseReleaseApproval, error)
 }
 
+// ApprovedRuntimeLicenseLifecycle 汇总生产目标的运行时批准生命周期。组件选择与批准元数据
+// 必须逐项来自同一份不可变受审发布文件，读取期间发布被替换即报错；目标不在批准清单时失败关闭。
 func (p *ProductionComposeSubsystemProvisioner) ApprovedRuntimeLicenseLifecycle(ctx context.Context, app, env string) (application.RuntimeLicenseReleaseApproval, error) {
 	items, err := p.ApprovedRuntimeLicenseComponents(ctx, app, env)
 	if err != nil {
@@ -39,7 +41,7 @@ func (p *ProductionComposeSubsystemProvisioner) ApprovedRuntimeLicenseLifecycle(
 		if err != nil {
 			return application.RuntimeLicenseReleaseApproval{}, err
 		}
-		// Selection and metadata must come from the same immutable reviewed release.
+		// 选择结果与元数据必须来自同一份不可变受审发布。
 		byID := map[string]application.RuntimeLicenseApproval{}
 		for _, item := range release.Components {
 			byID[item.ServiceID] = item
@@ -56,6 +58,8 @@ func (p *ProductionComposeSubsystemProvisioner) ApprovedRuntimeLicenseLifecycle(
 	return application.RuntimeLicenseReleaseApproval{}, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: target not approved")
 }
 
+// ApprovedRuntimeLicenseLifecycle 经部署 Agent socket 获取运行时批准生命周期。响应组件必须
+// 通过应用层校验，否则按批准不匹配失败，不允许透传未验证的批准内容。
 func (p *UnixSocketSubsystemProvisioner) ApprovedRuntimeLicenseLifecycle(ctx context.Context, app, env string) (application.RuntimeLicenseReleaseApproval, error) {
 	if !p.enabled {
 		return application.RuntimeLicenseReleaseApproval{}, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: deployment agent disabled")
@@ -69,25 +73,27 @@ func (p *UnixSocketSubsystemProvisioner) ApprovedRuntimeLicenseLifecycle(ctx con
 	defer conn.Close()
 	deadline, _ := ctx.Deadline()
 	if err = conn.SetDeadline(deadline); err != nil {
-		return application.RuntimeLicenseReleaseApproval{}, err
+		return application.RuntimeLicenseReleaseApproval{}, application.ErrRuntimeLicenseApprovalUnavailable
 	}
 	watchProvisioningCancellation(ctx, conn)
 	if json.NewEncoder(conn).Encode(subsystemProvisioningRequest{Version: subsystemProvisioningProtocolVersion, Action: "LICENSE_RUNTIME_LIFECYCLE_APPROVAL", Code: app, Environment: env}) != nil {
 		return application.RuntimeLicenseReleaseApproval{}, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: request failed")
 	}
 	var reply subsystemProvisioningReply
-	if json.NewDecoder(io.LimitReader(conn, 65536)).Decode(&reply) != nil || !reply.Success || reply.RuntimeLicenseLifecycle == nil || application.ValidateRuntimeLicenseApprovals(reply.RuntimeLicenseLifecycle.Components) != nil {
-		return application.RuntimeLicenseReleaseApproval{}, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: response invalid")
+	if json.NewDecoder(io.LimitReader(conn, 65536)).Decode(&reply) != nil {
+		return application.RuntimeLicenseReleaseApproval{}, application.ErrRuntimeLicenseApprovalUnavailable
+	}
+	if !reply.Success {
+		return application.RuntimeLicenseReleaseApproval{}, runtimeApprovalReplyError(reply.ErrorCode)
+	}
+	if reply.RuntimeLicenseLifecycle == nil || application.ValidateRuntimeLicenseApprovals(reply.RuntimeLicenseLifecycle.Components) != nil {
+		return application.RuntimeLicenseReleaseApproval{}, application.ErrRuntimeLicenseApprovalMismatch
 	}
 	return *reply.RuntimeLicenseLifecycle, nil
 }
 
 type runtimeLicenseApprovalProvider interface {
 	ApprovedRuntimeLicenseComponents(context.Context, string, string) ([]application.RuntimeLicenseApproval, error)
-}
-
-func (p *LocalDockerSubsystemProvisioner) ApprovedRuntimeLicenseComponents(context.Context, string, string) ([]application.RuntimeLicenseApproval, error) {
-	return nil, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: local deployment has no reviewed immutable release")
 }
 
 type runtimeLicenseRelease struct {
@@ -99,14 +105,16 @@ type runtimeLicenseRelease struct {
 	ReleaseGeneration string                               `json:"release_generation,omitempty"`
 }
 
+// ApprovedRuntimeLicenseComponents 返回生产目标当前选中的已批准运行时组件。只读路径刻意
+// 复制 target 以免改动并发部署缓存的服务选择；批准清单与已选服务求交后必须非空，否则按
+// 批准不可用失败。
 func (p *ProductionComposeSubsystemProvisioner) ApprovedRuntimeLicenseComponents(ctx context.Context, app, env string) ([]application.RuntimeLicenseApproval, error) {
 	if !p.enabled {
 		return nil, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: deployment agent disabled")
 	}
 	for _, target := range p.targets {
 		if target.config.Profile.Manifest.Application.Code == app && target.config.Profile.Manifest.Application.Environment == env {
-			// Read-only approval must not mutate a concurrent deployment's selected
-			// service cache. Its selection is recomputed again under the deploy lock.
+			// 只读批准不得改动并发部署已选服务的缓存；其选择会在部署锁下重新计算。
 			target = &productionComposeTarget{config: target.config, runner: target.runner}
 			if err := target.validateEnabledServices(ctx); err != nil {
 				return nil, err
@@ -168,8 +176,8 @@ func loadRuntimeLicenseReleaseDocument(path string, profile productionSubsystemP
 	if d.Decode(&release) != nil || d.Decode(new(any)) != io.EOF || release.Version != 1 || release.Application != profile.Manifest.Application.Code || release.Environment != profile.Manifest.Application.Environment || application.ValidateRuntimeLicenseApprovals(release.Components) != nil {
 		return failure()
 	}
-	// Conditional units are required to belong to runtime_services by profile
-	// validation. Approval is a set union, never duplicate component IDs.
+	// 清单校验已强制条件单元必须属于 runtime_services。批准是集合并集，
+	// 组件 ID 绝不重复。
 	expectedSet := map[string]bool{}
 	consumers, err := runtimeLicenseConsumerServices(profile)
 	if err != nil {
@@ -216,6 +224,9 @@ func loadRuntimeLicenseReleaseDocument(path string, profile productionSubsystemP
 	}
 	return release, nil
 }
+
+// ApprovedRuntimeLicenseComponents 经部署 Agent socket 获取已批准运行时组件。Agent 不可达、
+// 响应损坏或组件校验失败都按批准不可用失败关闭，不做本地推断。
 func (p *UnixSocketSubsystemProvisioner) ApprovedRuntimeLicenseComponents(ctx context.Context, app, env string) ([]application.RuntimeLicenseApproval, error) {
 	if !p.enabled {
 		return nil, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: deployment agent disabled")
@@ -228,14 +239,33 @@ func (p *UnixSocketSubsystemProvisioner) ApprovedRuntimeLicenseComponents(ctx co
 	}
 	defer conn.Close()
 	deadline, _ := ctx.Deadline()
-	_ = conn.SetDeadline(deadline)
+	if err = conn.SetDeadline(deadline); err != nil {
+		return nil, application.ErrRuntimeLicenseApprovalUnavailable
+	}
 	watchProvisioningCancellation(ctx, conn)
 	if json.NewEncoder(conn).Encode(subsystemProvisioningRequest{Version: subsystemProvisioningProtocolVersion, Action: "LICENSE_RUNTIME_APPROVAL", Code: app, Environment: env}) != nil {
 		return nil, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: request failed")
 	}
 	var reply subsystemProvisioningReply
-	if json.NewDecoder(io.LimitReader(conn, 65536)).Decode(&reply) != nil || !reply.Success || application.ValidateRuntimeLicenseApprovals(reply.RuntimeLicenseApproval) != nil {
-		return nil, provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: response invalid")
+	if json.NewDecoder(io.LimitReader(conn, 65536)).Decode(&reply) != nil {
+		return nil, application.ErrRuntimeLicenseApprovalUnavailable
+	}
+	if !reply.Success {
+		return nil, runtimeApprovalReplyError(reply.ErrorCode)
+	}
+	if application.ValidateRuntimeLicenseApprovals(reply.RuntimeLicenseApproval) != nil {
+		return nil, application.ErrRuntimeLicenseApprovalMismatch
 	}
 	return reply.RuntimeLicenseApproval, nil
+}
+
+// socket 对端可能更旧或返回任意文本。只有白名单错误码能成为公开诊断；
+// Message 与 Detail 绝不跨越该边界。
+func runtimeApprovalReplyError(code string) error {
+	for _, known := range []error{application.ErrRuntimeLicenseDockerUnavailable, application.ErrRuntimeLicenseApprovalMismatch, application.ErrRuntimeLicenseApprovalUnavailable, application.ErrRuntimeLicenseStartupFailed} {
+		if code == application.RuntimeLicenseApprovalErrorCode(known) {
+			return known
+		}
+	}
+	return application.ErrRuntimeLicenseApprovalUnavailable
 }

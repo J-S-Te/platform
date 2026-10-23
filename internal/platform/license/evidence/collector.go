@@ -1,5 +1,5 @@
-// Package evidence collects bounded, read-only deployment facts on the isolated
-// deployment Agent. A complete report is not itself migration authorization.
+// Package evidence 在隔离的部署 Agent 上采集有界、只读的部署事实。
+// 报告完整本身不构成迁移授权。
 package evidence
 
 import (
@@ -18,14 +18,14 @@ var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 var digest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var containerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-// Runner must honor cancellation and limit output before allocation. Do not
-// adapt an unbounded CombinedOutput runner or return stderr in public reports.
+// Runner 必须尊重取消信号并在分配内存前限制输出上限。禁止适配无界的 CombinedOutput
+// 实现，也禁止把 stderr 原文带进对外报告。
 type Runner interface {
 	RunOutput(context.Context, int, string, ...string) ([]byte, error)
 }
 
-// Service is operator-approved release metadata, never browser-supplied labels.
-// ImageDigest is Docker's immutable image config ID, not a mutable image tag.
+// Service 是运维审批过的发布元数据，绝不是浏览器提交的标签。
+// ImageDigest 是 Docker 不可变的镜像 config ID，不是可变的镜像 tag。
 type Service struct {
 	Application string `json:"application"`
 	Environment string `json:"environment"`
@@ -36,6 +36,7 @@ type Service struct {
 	Replicas    int    `json:"replicas"`
 }
 
+// Config 是运维审批过的采集清单：项目名、服务与基础设施列表及超时。
 type Config struct {
 	Project        string
 	Services       []Service
@@ -43,6 +44,7 @@ type Config struct {
 	Timeout        time.Duration
 }
 
+// Fact 是单个容器的只读部署事实。
 type Fact struct {
 	Application string    `json:"application"`
 	Environment string    `json:"environment"`
@@ -56,6 +58,7 @@ type Fact struct {
 	Problems    []string  `json:"problems"`
 }
 
+// Report 是一次采集的完整结果，Complete=false 表示存在缺口，不能作为授权依据。
 type Report struct {
 	BoundarySupported   bool      `json:"boundary_supported"`
 	Scope               string    `json:"scope"`
@@ -67,12 +70,14 @@ type Report struct {
 	Problems            []string  `json:"problems"`
 }
 
+// Collector 按审批清单执行只读采集。
 type Collector struct {
 	runner    Runner
 	config    Config
 	migration bool
 }
 
+// NewCollector 校验审批清单并构造标准采集器。
 func NewCollector(runner Runner, config Config) (*Collector, error) {
 	return newCollector(runner, config, false)
 }
@@ -106,11 +111,11 @@ func newCollector(runner Runner, config Config, migration bool) (*Collector, err
 	return &Collector{runner: runner, config: config, migration: migration}, nil
 }
 
-// Projections deliberately exclude environment variables and arbitrary labels.
+// 投影刻意排除环境变量与任意标签，只保留授权事实所需的最小字段。
 const containerFormat = `{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},"started_at":{{json .State.StartedAt}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}}}`
 const imageFormat = `{"id":{{json .Id}},"version":{{json (index .Config.Labels "org.opencontainers.image.version")}},"protocol":{{json (index .Config.Labels "com.basic-platform.license.protocol")}}}`
-// Some genuine pre-license images omit the entire Labels map, rather than
-// only its keys. Read it defensively only in the approved migration collector.
+// 真实的授权前镜像可能整个缺失 Labels map，而不仅是缺某个键。
+// 只有经过审批的迁移采集器允许防御式读取它。
 const migrationImageFormat = `{"id":{{json .Id}},"version":{{with index .Config "Labels"}}{{json (index . "org.opencontainers.image.version")}}{{else}}null{{end}},"protocol":{{with index .Config "Labels"}}{{json (index . "com.basic-platform.license.protocol")}}{{else}}null{{end}}}`
 
 type containerProjection struct {

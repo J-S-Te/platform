@@ -33,6 +33,9 @@ contains "$production_dockerfile" 'AS file-gateway-runtime' 'dedicated file gate
 contains "$offline_builder" 'uip-package/file-gateway:$version' 'file gateway included in common infrastructure package'
 contains "$production_cli" 'FILE_GATEWAY_IMAGE_REF' 'common import records file gateway digest'
 contains "$production_runner" 'File Gateway 未通过 /readyz 健康检查；拒绝继续启动平台 API' 'production API startup gate'
+contains "$production_runner" 'provision_iam_import_client || return 1' 'platform IAM import client provisioning gate'
+contains "$production_runner" 'platform-migrate ./provision-iam-import-client' 'platform IAM import client provisioner invocation'
+contains "$production_dockerfile" 'provision-iam-import-client' 'platform IAM import client provisioner image binary'
 contains "$production_cli" 'platform-api 容器无法访问 http://file-gateway:8086/readyz' 'production Docker-network verification'
 contains "$production_cli" 'File Gateway 代理到达受保护 API' 'production frontend proxy verification'
 

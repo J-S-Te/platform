@@ -1,5 +1,5 @@
-// Package trust holds vendor keys baked into the reviewed customer release.
-// Neither an imported license nor mutable runtime settings may add trusted keys.
+// Package trust 保存编译进经过评审的客户发布物中的厂商公钥。
+// 导入的许可证和可变的运行时设置都无权新增受信密钥。
 package trust
 
 import (
@@ -8,15 +8,14 @@ import (
 	"encoding/pem"
 )
 
-// Vendor public key supplied by the owner. kid matches the issuer tool default.
+// 厂商公钥，由授权所有方提供。kid 与签发工具默认值一致。
 // SPKI SHA256: fcb4c05eea187300eb2c27c23fc1cab2b446a266038fda3c997fbe4d2ba365bd.
 const vendorPublicKey = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAaKc7dKpa6IPeM3+dRf9fai2jD8LvwKssmm68Up++un8=
 -----END PUBLIC KEY-----`
 
-// Keys returns a defensive copy. The vendor public key must be reviewed and
-// changed through reviewed code, never through mutable runtime configuration.
-// No test signing key is trusted.
+// Keys 返回防御性副本。厂商公钥必须通过代码评审变更，绝不通过可变的运行时配置调整。
+// 不信任任何测试签名密钥。
 func Keys() map[string]ed25519.PublicKey {
 	block, _ := pem.Decode([]byte(vendorPublicKey))
 	if block == nil {

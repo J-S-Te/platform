@@ -26,11 +26,14 @@ type projectionUserRow struct {
 	HasLoginAccount bool       `gorm:"column:has_login_account"`
 }
 
+// ProjectionSource 从平台数据库读取投影事件对应的授权快照，供 Synchronizer
+// 写入 Keycloak；Client 映射是权威输入，投影表本身只是输出状态。
 type ProjectionSource struct {
 	database *gorm.DB
 	access   *applicationaccess.Service
 }
 
+// NewProjectionSource 构造投影读取器；database 或 access 为空时返回错误。
 func NewProjectionSource(database *gorm.DB, access *applicationaccess.Service) (*ProjectionSource, error) {
 	if database == nil || access == nil {
 		return nil, fmt.Errorf("Keycloak projection source dependencies must not be nil")
@@ -38,9 +41,12 @@ func NewProjectionSource(database *gorm.DB, access *applicationaccess.Service) (
 	return &ProjectionSource{database: database, access: access}, nil
 }
 
+// LoadAuthorizationProjection 加载事件对应的快照：先以已同步的 Client 映射定位
+// 环境/Client，再读用户；停用与业务删除的用户刻意投影为空授权（仅置 disabled），
+// 活动用户则复用与 OIDC 令牌相同口径的有效授权计算。
 func (source *ProjectionSource) LoadAuthorizationProjection(ctx context.Context, event projectionworker.Event) (projectionapplication.Snapshot, error) {
-	// The projection table is output state, so it must never be required before
-	// the first synchronization. Client mappings are the authoritative input.
+	// 投影表是输出状态，因此在首次同步之前绝不能成为前置依赖。
+	// Client 映射才是权威输入。
 	var row projectionSourceRow
 	err := keycloakClientMappingQuery(source.database.WithContext(ctx), event).Take(&row).Error
 	if err != nil {
@@ -55,13 +61,12 @@ func (source *ProjectionSource) LoadAuthorizationProjection(ctx context.Context,
 	if user.Email != nil {
 		base.Email = strings.TrimSpace(*user.Email)
 	}
-	// Disabled and business-deleted users are deliberately projected with no
-	// authorization grants. applicationaccess only resolves claims for active
-	// users, while this projection must still disable the existing Keycloak user.
+	// 停用与业务删除的用户被刻意投影为无任何授权授予。applicationaccess 只为
+	// 活动用户解析 claims，但本投影仍需把既有 Keycloak 用户置为 disabled。
 	if !enabled {
 		return base, nil
 	}
-	authorization, err := source.access.ResolveKeycloakAuthorizationSnapshot(ctx, event.TenantID, event.IdentityID, event.ApplicationID)
+	authorization, err := source.access.ResolveKeycloakAuthorizationSnapshot(ctx, event.TenantID, event.IdentityID, event.ApplicationID, event.EnvironmentID)
 	if err != nil {
 		return projectionapplication.Snapshot{}, err
 	}
@@ -88,6 +93,12 @@ func keycloakClientMappingQuery(database *gorm.DB, event projectionworker.Event)
 		Order("environment_id ASC")
 }
 
+// projectionUserQuery 只按业务状态判断是否投影为启用。
+//
+// 临时锁定（account.locked_until 在未来）是密码失败策略的瞬态结果，不是业务停用。
+// 曾经把锁定当成“没有可用账号”，于是锁定期间 Keycloak 用户被投影为 disabled；管理员
+// 只要读取一次账号列表，这个 disabled 又会被反向写回平台，永久停用用户、凭据和任职，
+// 锁定到期后无法自动恢复。临时锁定与业务停用必须在投影里分开处理。
 func projectionUserQuery(database *gorm.DB, event projectionworker.Event) *gorm.DB {
 	return database.Table("iam_user AS user_record").
 		Select(`display_name, email, status, deleted_at, EXISTS (
@@ -95,7 +106,6 @@ func projectionUserQuery(database *gorm.DB, event projectionworker.Event) *gorm.
 			WHERE account.tenant_id = user_record.tenant_id AND account.user_id = user_record.id
 				AND account.status = 'ACTIVE'
 				AND (account.valid_until IS NULL OR account.valid_until > UTC_TIMESTAMP(3))
-				AND (account.locked_until IS NULL OR account.locked_until <= UTC_TIMESTAMP(3))
 		) AS has_login_account`).
 		Where("user_record.tenant_id = ? AND user_record.id = ?", event.TenantID, event.IdentityID)
 }

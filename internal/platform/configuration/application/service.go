@@ -1,4 +1,4 @@
-// Package application coordinates configuration namespace, draft, and release use cases.
+// Package application 编排配置命名空间、草稿与发布的用例，统一执行输入校验与生命周期规则。
 package application
 
 import (
@@ -13,35 +13,35 @@ import (
 )
 
 var (
-	// ErrNotFound indicates that the requested configuration resource is not visible to the tenant.
+	// ErrNotFound 表示请求的配置资源在租户范围内不可见，不区分“不存在”与“无权”。
 	ErrNotFound = errors.New("configuration resource not found")
-	// ErrConflict indicates that a unique configuration resource already exists.
+	// ErrConflict 表示同名的配置资源已存在。
 	ErrConflict = errors.New("configuration resource conflict")
-	// ErrVersionConflict indicates that a draft has changed since the caller read it.
+	// ErrVersionConflict 表示草稿自调用方读取后已被他人修改，需重新读取后再提交。
 	ErrVersionConflict = errors.New("configuration version conflict")
-	// ErrValidation indicates that request data cannot be stored safely.
+	// ErrValidation 表示请求数据无法被安全存储，未触达存储层。
 	ErrValidation = errors.New("configuration validation failed")
 )
 
-// IdentifierGenerator provides ULID-compatible identifiers without coupling the service to infrastructure.
+// IdentifierGenerator 提供 ULID 兼容的标识符生成能力，使服务不与具体基础设施耦合。
 type IdentifierGenerator interface {
 	New(time.Time) (string, error)
 }
 
-// Clock makes creation timestamps deterministic in tests.
+// Clock 抽象时间源，便于在测试中获得确定性的创建时间戳。
 type Clock interface {
 	Now() time.Time
 }
 
-// SystemClock is the production UTC clock.
+// SystemClock 是生产环境使用的 UTC 时钟实现。
 type SystemClock struct{}
 
-// Now returns the current UTC time.
+// Now 返回当前 UTC 时间，所有创建时间戳一律以 UTC 落库。
 func (SystemClock) Now() time.Time {
 	return time.Now().UTC()
 }
 
-// PageRequest contains supported list filters and paging information.
+// PageRequest 承载列表查询支持的分页与过滤条件。
 type PageRequest struct {
 	Page        int
 	PageSize    int
@@ -49,7 +49,7 @@ type PageRequest struct {
 	NamespaceID string
 }
 
-// PageResult wraps a tenant-scoped paginated result set.
+// PageResult 封装租户范围内的分页结果集。
 type PageResult[T any] struct {
 	Items    []T
 	Page     int
@@ -57,7 +57,7 @@ type PageResult[T any] struct {
 	Total    int64
 }
 
-// NamespaceCreateInput is the data needed to create an application configuration namespace.
+// NamespaceCreateInput 是创建应用配置命名空间所需的输入数据。
 type NamespaceCreateInput struct {
 	TenantID        string
 	OperatorID      string
@@ -67,7 +67,7 @@ type NamespaceCreateInput struct {
 	Description     string
 }
 
-// ItemCreateInput is the data needed to create a draft configuration item.
+// ItemCreateInput 是创建配置草稿项所需的输入数据。
 type ItemCreateInput struct {
 	TenantID    string
 	OperatorID  string
@@ -78,7 +78,7 @@ type ItemCreateInput struct {
 	Secret      bool
 }
 
-// ItemUpdateInput is the data needed to replace one draft configuration item.
+// ItemUpdateInput 是整体替换一个配置草稿项所需的输入数据，Version 用于乐观锁。
 type ItemUpdateInput struct {
 	TenantID    string
 	OperatorID  string
@@ -91,7 +91,7 @@ type ItemUpdateInput struct {
 	Version     uint64
 }
 
-// ReleaseCreateInput describes an immutable release snapshot selected from draft item versions.
+// ReleaseCreateInput 描述从草稿项版本中选取的不可变发布快照。
 type ReleaseCreateInput struct {
 	TenantID     string
 	OperatorID   string
@@ -100,7 +100,7 @@ type ReleaseCreateInput struct {
 	ItemVersions []domain.VersionedItem
 }
 
-// Repository persists configuration aggregates. Implementations must always enforce tenant scope.
+// Repository 持久化配置聚合。实现必须始终强制租户范围过滤，不得依赖调用方传参保证数据边界。
 type Repository interface {
 	ListNamespaces(context.Context, string, PageRequest) (PageResult[domain.Namespace], error)
 	CreateNamespace(context.Context, NamespaceCreateInput, string, time.Time) (domain.Namespace, error)
@@ -112,14 +112,14 @@ type Repository interface {
 	GetPublished(context.Context, string, string, string) (domain.PublishedConfig, error)
 }
 
-// Service applies configuration lifecycle rules before handing data to a repository.
+// Service 在数据交给仓储前统一执行配置生命周期规则与输入规范化。
 type Service struct {
 	repository Repository
 	ids        IdentifierGenerator
 	clock      Clock
 }
 
-// NewService constructs a configuration application service.
+// NewService 构造配置应用服务；任一依赖为 nil 时失败关闭。
 func NewService(repository Repository, ids IdentifierGenerator, clock Clock) (*Service, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("configuration service dependencies must not be nil")
@@ -132,7 +132,7 @@ func NewService(repository Repository, ids IdentifierGenerator, clock Clock) (*S
 	}, nil
 }
 
-// ListNamespaces returns configuration namespaces visible to one tenant.
+// ListNamespaces 返回对指定租户可见的配置命名空间。
 func (s *Service) ListNamespaces(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Namespace], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.Namespace]{}, ErrValidation
@@ -148,7 +148,9 @@ func (s *Service) CreateNamespace(ctx context.Context, input NamespaceCreateInpu
 		strings.TrimSpace(input.OperatorID) == "" ||
 		!validCode(input.ApplicationCode) ||
 		!validCode(input.Code) ||
-		strings.TrimSpace(input.Name) == "" {
+		strings.TrimSpace(input.Name) == "" ||
+		len([]rune(strings.TrimSpace(input.Name))) > 128 ||
+		len([]rune(strings.TrimSpace(input.Description))) > 1000 {
 		return domain.Namespace{}, ErrValidation
 	}
 
@@ -161,7 +163,7 @@ func (s *Service) CreateNamespace(ctx context.Context, input NamespaceCreateInpu
 	return s.repository.CreateNamespace(ctx, normalizeNamespace(input), id, now)
 }
 
-// ListItems returns draft configuration items visible to one tenant.
+// ListItems 返回对指定租户可见的配置草稿项。
 func (s *Service) ListItems(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Item], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.Item]{}, ErrValidation
@@ -189,7 +191,7 @@ func (s *Service) CreateItem(ctx context.Context, input ItemCreateInput) (domain
 	return s.repository.CreateItem(ctx, normalizeCreateItem(input), id, now)
 }
 
-// UpdateItem replaces an editable draft item when its optimistic-lock version still matches.
+// UpdateItem 在乐观锁版本仍然匹配时整体替换可编辑草稿项，版本不匹配时返回冲突。
 func (s *Service) UpdateItem(ctx context.Context, input ItemUpdateInput) (domain.Item, error) {
 	if strings.TrimSpace(input.TenantID) == "" ||
 		strings.TrimSpace(input.OperatorID) == "" ||
@@ -215,6 +217,9 @@ func (s *Service) CreateRelease(ctx context.Context, input ReleaseCreateInput) (
 		return domain.Release{}, ErrValidation
 	}
 
+	if len([]rune(strings.TrimSpace(input.Comment))) > 1000 {
+		return domain.Release{}, ErrValidation
+	}
 	seen := make(map[string]struct{}, len(input.ItemVersions))
 	for _, item := range input.ItemVersions {
 		itemID := strings.TrimSpace(item.ItemID)
@@ -237,7 +242,7 @@ func (s *Service) CreateRelease(ctx context.Context, input ReleaseCreateInput) (
 	return s.repository.CreateRelease(ctx, input, id, now)
 }
 
-// GetRelease returns a published release visible to the tenant.
+// GetRelease 返回对租户可见的已发布版本快照。
 func (s *Service) GetRelease(ctx context.Context, tenantID, releaseID string) (domain.Release, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(releaseID) == "" {
 		return domain.Release{}, ErrValidation
@@ -246,7 +251,8 @@ func (s *Service) GetRelease(ctx context.Context, tenantID, releaseID string) (d
 	return s.repository.GetRelease(ctx, tenantID, strings.TrimSpace(releaseID))
 }
 
-// GetPublished returns the current published release values for runtime consumption.
+// GetPublished 返回当前已发布版本的配置值，供运行时消费方拉取；仅暴露发布态数据，
+// 草稿永远不出现在该接口结果中。
 func (s *Service) GetPublished(ctx context.Context, tenantID, applicationCode, namespaceCode string) (domain.PublishedConfig, error) {
 	if strings.TrimSpace(tenantID) == "" || !validCode(applicationCode) || !validCode(namespaceCode) {
 		return domain.PublishedConfig{}, ErrValidation
@@ -324,7 +330,8 @@ func validateItem(namespaceID, key, valueType string, value any, secret bool) er
 
 	switch strings.ToUpper(strings.TrimSpace(valueType)) {
 	case "STRING":
-		if _, ok := value.(string); !ok {
+		text, ok := value.(string)
+		if !ok || len([]rune(text)) > 20000 {
 			return ErrValidation
 		}
 	case "NUMBER":
@@ -336,7 +343,8 @@ func validateItem(namespaceID, key, valueType string, value any, secret bool) er
 			return ErrValidation
 		}
 	case "JSON":
-		if _, err := json.Marshal(value); err != nil {
+		encoded, err := json.Marshal(value)
+		if err != nil || len(encoded) > 20000 {
 			return ErrValidation
 		}
 	default:

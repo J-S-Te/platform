@@ -22,6 +22,16 @@ type bindingServiceStub struct {
 	disableInput application.BindInput
 	statusResult domain.BindingResult
 	statusErr    error
+	// portalApplicationCode 模拟实例配置；默认回落到包级默认值。
+	portalApplicationCode string
+	statusApplicationCode string
+}
+
+func (stub *bindingServiceStub) PortalApplicationCode() string {
+	if stub.portalApplicationCode != "" {
+		return stub.portalApplicationCode
+	}
+	return application.PortalApplicationCode
 }
 
 func (*bindingServiceStub) Provision(context.Context, appctx.Principal, application.RequestProof, application.ProvisionInput) (application.ProvisionResult, error) {
@@ -41,7 +51,9 @@ func (stub *bindingServiceStub) DisableCustomerBinding(_ context.Context, _ appc
 	stub.disableInput = input
 	return domain.BindingResult{PlatformUserID: input.PlatformUserID, ApplicationCode: application.PortalApplicationCode, Status: domain.BindingDisabled}, nil
 }
-func (stub *bindingServiceStub) CustomerBindingStatus(context.Context, string, string, string) (domain.BindingResult, error) {
+func (stub *bindingServiceStub) CustomerBindingStatus(_ context.Context, _ string, _ string, applicationCode string) (domain.BindingResult, error) {
+	// 记录查询使用的应用码：读取必须与服务实例配置一致，不能硬编码默认门户编码。
+	stub.statusApplicationCode = applicationCode
 	return stub.statusResult, stub.statusErr
 }
 
@@ -152,5 +164,33 @@ func TestBindingHandlerRejectsInvalidProof(t *testing.T) {
 
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", response.Code)
+	}
+}
+
+// 自定义门户应用码时，写入用实例配置值；读取曾经硬编码 customer_portal，
+// 导致刚写入的绑定查不到（对账 404 / 状态永远未绑定）。
+func TestGetCustomerBindingUsesConfiguredPortalApplicationCode(t *testing.T) {
+	stub := &bindingServiceStub{portalApplicationCode: "custom_portal", statusResult: domain.BindingResult{Status: domain.BindingActive}}
+	handler := newBindingHandler(stub)
+	request := newBindingHTTPRequest(http.MethodGet, "/external-identities/users/user-1/customer-binding", "")
+	recorder := httptest.NewRecorder()
+
+	handler.GetCustomerBinding(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if stub.statusApplicationCode != "custom_portal" {
+		t.Fatalf("查询应用码 = %q, want custom_portal", stub.statusApplicationCode)
+	}
+}
+
+func TestGetCustomerBindingFallsBackToDefaultPortalApplicationCode(t *testing.T) {
+	stub := &bindingServiceStub{}
+	handler := newBindingHandler(stub)
+	handler.GetCustomerBinding(httptest.NewRecorder(), newBindingHTTPRequest(http.MethodGet, "/external-identities/users/user-1/customer-binding", ""))
+
+	if stub.statusApplicationCode != application.PortalApplicationCode {
+		t.Fatalf("查询应用码 = %q, want %q", stub.statusApplicationCode, application.PortalApplicationCode)
 	}
 }

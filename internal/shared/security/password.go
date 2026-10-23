@@ -27,8 +27,8 @@ func (Argon2idPasswordHasher) Hash(password string) ([]byte, []byte, error) {
 	return HashPassword(password, DefaultArgon2idParams(salt))
 }
 
-// Argon2idParams records the exact parameters needed to verify a password credential. The
-// password digest is stored separately in iam_password_credential.password_hash.
+// Argon2idParams 记录校验密码凭据所需的精确参数集。密码摘要本体单独存放于
+// iam_password_credential.password_hash，本结构只持久化派生参数。
 type Argon2idParams struct {
 	Version     int    `json:"version"`
 	MemoryKiB   uint32 `json:"memory_kib"`
@@ -115,10 +115,10 @@ func validateArgon2idParams(params Argon2idParams) error {
 	return nil
 }
 
-// Argon2idPasswordVerifier adapts VerifyPassword to the identity application dependency.
+// Argon2idPasswordVerifier 将 VerifyPassword 适配为身份数据所需的应用层依赖。
 type Argon2idPasswordVerifier struct{}
 
-// Verify checks a stored Argon2id credential.
+// Verify 校验一条已存储的 Argon2id 凭据。
 func (Argon2idPasswordVerifier) Verify(password, algorithm string, digest, metadata []byte) (bool, error) {
 	return VerifyPassword(password, algorithm, digest, metadata)
 }

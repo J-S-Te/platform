@@ -1,9 +1,9 @@
-// Package domain defines tenant-scoped platform and notification settings.
+// Package domain 定义租户范围内的平台与通知设置。
 package domain
 
 import "time"
 
-// PlatformSettings contains the platform identity values displayed by the management console.
+// PlatformSettings 承载管理控制台展示的平台身份值。
 type PlatformSettings struct {
 	ID                string
 	TenantID          string
@@ -15,7 +15,7 @@ type PlatformSettings struct {
 	UpdatedAt         time.Time
 }
 
-// ReminderFrequency identifies how frequently eligible reminders are aggregated.
+// ReminderFrequency 标识符合条件的提醒按什么频率聚合。
 type ReminderFrequency string
 
 const (
@@ -40,8 +40,8 @@ func (frequency ReminderFrequency) Valid() bool {
 	}
 }
 
-// AccessSettings configures the public origin and OAuth HTTP callback policy of the local
-// unified orchestration. Empty PublicOrigin means local-only (127.0.0.1 / localhost).
+// AccessSettings 配置本地统一编排的对外源地址与 OAuth HTTP 回调策略。
+// PublicOrigin 为空表示仅本机可用（127.0.0.1 / localhost）。
 type AccessSettings struct {
 	ID                        string
 	TenantID                  string
@@ -51,13 +51,13 @@ type AccessSettings struct {
 	UpdatedAt                 time.Time
 }
 
-// IsPublic reports whether the configuration exposes the unified frontend beyond loopback.
+// IsPublic 报告该配置是否把统一前端暴露到回环地址之外。
 func (settings AccessSettings) IsPublic() bool {
 	return settings.PublicOrigin != ""
 }
 
-// NotificationSettings configures the notification channels currently supported by the platform.
-// Message delivery, SMTP configuration, SMS, webhook and templates are intentionally out of scope.
+// NotificationSettings 配置平台当前支持的通知渠道。消息投递、SMTP 配置、短信、
+// webhook 与模板有意不在本聚合范围内。
 type NotificationSettings struct {
 	ID                string
 	TenantID          string

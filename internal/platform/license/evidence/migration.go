@@ -1,8 +1,7 @@
 package evidence
 
-// MigrationInstallationCollector proves only the reviewed pre-upgrade runtime
-// boundary. An immutable image match remains mandatory; missing release labels
-// are permitted only in this explicitly selected migration operation.
+// MigrationInstallationCollector 只证明评审过的升级前运行时边界。镜像摘要不可变匹配
+// 仍然强制；缺失发行标签仅在这个被显式选择的迁移操作中允许。
 type MigrationInstallationCollector struct {
 	*InstallationCollector
 }

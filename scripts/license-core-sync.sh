@@ -1,11 +1,11 @@
 #!/bin/sh
-# Only the standard-library consumer core is distributable to platform builds.
+# 只有基于标准库的消费者核心可随平台构建分发。
 set -eu
 platform_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mirror="$platform_root/third_party/license-core"
 manifest="$platform_root/scripts/license-core.sha256"
-files='clock.go diff.go go.mod license.go recovery.go runtime/lock_unix.go runtime/snapshot.go runtime/state.go'
-production_files='clock.go diff.go license.go recovery.go runtime/lock_unix.go runtime/snapshot.go runtime/state.go'
+files='catalog/catalog.go clock.go diff.go go.mod license.go recovery.go runtime/lock_unix.go runtime/snapshot.go runtime/state.go'
+production_files='catalog/catalog.go clock.go diff.go license.go recovery.go runtime/lock_unix.go runtime/snapshot.go runtime/state.go'
 digest() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1
   else shasum -a 256 "$1" | cut -d ' ' -f 1; fi
@@ -21,13 +21,11 @@ verify() {
   while read -r hash name; do
     [ "$(digest "$directory/$name")" = "$hash" ] || { echo "license core digest mismatch: $directory/$name" >&2; exit 1; }
   done < "$manifest"
-  [ "$(wc -l < "$manifest" | tr -d ' ')" = 8 ] || { echo 'invalid license core manifest' >&2; exit 1; }
+  [ "$(wc -l < "$manifest" | tr -d ' ')" = 9 ] || { echo 'invalid license core manifest' >&2; exit 1; }
 }
 verify_source_list() {
   [ -z "$(find "$source_root" -type l -print)" ] || { echo 'license core authority symlinks rejected' >&2; exit 1; }
-  # coverage is development-only; syncclient/consumer are business runtime
-  # adapters not imported by platform. None is shipped by this platform build.
-  # Adding a new distributable package still requires reviewing this allowlist.
+  # coverage 仅供开发；syncclient 和 consumer 是平台不导入的业务运行适配器，均不随此平台构建交付。新增可分发包仍须审核此白名单。
   actual=$(cd "$source_root" && find . -type f -name '*.go' ! -name '*_test.go' ! -path './coverage/*' ! -path './syncclient/*' ! -path './consumer/*' | sed 's|^./||' | sort)
   expected=$(printf '%s\n' $production_files | sort)
   [ "$actual" = "$expected" ] || { echo 'review the recursive license core source allowlist before syncing' >&2; exit 1; }
@@ -37,7 +35,7 @@ source_root=${2:-$platform_root/../license-core}
 case "$mode" in
   --sync)
     [ -d "$source_root" ] || { echo "license core source missing: $source_root" >&2; exit 1; }
-    # A new production source requires an explicit allowlist review.
+    # 新增生产源文件必须显式审核白名单。
     verify_source_list
     mkdir -p "$mirror"
     for file in $files; do mkdir -p "$mirror/$(dirname "$file")"; cp "$source_root/$file" "$mirror/$file"; done

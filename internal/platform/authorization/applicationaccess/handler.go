@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	authapplication "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -16,8 +17,11 @@ import (
 
 const maxAccessRequestBytes = 32 << 10
 
+// Handler 提供应用访问授权与授权目录同步的 HTTP 入口。
+// 所有操作以会话主体所属租户为边界；授权目录写操作仅接受已验证的应用 Bearer 凭据。
 type Handler struct{ service *Service }
 
+// NewHandler 构造 HTTP 适配器；service 为空时返回错误。
 func NewHandler(service *Service) (*Handler, error) {
 	if service == nil {
 		return nil, errors.New("application authorization HTTP handler service must not be nil")
@@ -39,6 +43,8 @@ type updatePayload struct {
 	CustomPermissions *[]string      `json:"custom_permissions"`
 }
 
+// GetAccess 返回某用户在指定应用上的有效授权视图（含直绑、继承与有效权限）。
+// 未配置授权时返回空视图而非 404，便于管理界面直接编辑。
 func (h *Handler) GetAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -53,6 +59,8 @@ func (h *Handler) GetAccess(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", access)
 }
 
+// UpdateAccess 替换用户的"人工直绑"应用角色。部分更新语义：未提供 roles 时
+// 不修改角色；提供 custom_permissions 会被拒绝，权限只能来自应用目录的角色映射。
 func (h *Handler) UpdateAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -80,6 +88,8 @@ func (h *Handler) UpdateAccess(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "应用权限已更新", access)
 }
 
+// GetSubjectAccess 返回组织单元或岗位上的直接应用角色绑定。与 GetAccess 不同，
+// 本接口不展开成员关系——被查询的主体本身就是授权管理对象。
 func (h *Handler) GetSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -97,6 +107,8 @@ func (h *Handler) GetSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", access)
 }
 
+// UpdateSubjectAccess 兼容保留：标准人事授权已改由岗位授权模板物化，本入口
+// 恒定拒绝手写组织/岗位绑定（原因见 Service.UpdateSubjectAccess）。
 func (h *Handler) UpdateSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -128,6 +140,8 @@ func (h *Handler) UpdateSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "主体应用权限已更新", access)
 }
 
+// DeleteSubjectAccess 仅停用所选组织/岗位的直接应用角色绑定，并对受影响的
+// 成员触发 Keycloak 授权重投影。
 func (h *Handler) DeleteSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -149,6 +163,7 @@ func (h *Handler) DeleteSubjectAccess(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// DeleteAccess 逻辑撤销用户在指定应用上的全部人工授权；继承角色不受影响。
 func (h *Handler) DeleteAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -167,6 +182,9 @@ func (h *Handler) DeleteAccess(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// payloadRoles 归一化角色提交载荷：roles 数组优先；单 role_code 视为应用级直绑。
+// 载荷同时携带 custom_permissions 时故意返回空角色（不报错），让请求因不支持
+// 的字段被拒绝，而不是被误报为"清空全部角色"。
 func payloadRoles(payload updatePayload) ([]RoleInput, bool, error) {
 	if payload.Roles != nil {
 		roles := make([]RoleInput, 0, len(*payload.Roles))
@@ -179,9 +197,8 @@ func payloadRoles(payload updatePayload) ([]RoleInput, bool, error) {
 		return []RoleInput{{RoleCode: payload.RoleCode, ScopeType: "APPLICATION"}}, true, nil
 	}
 	if payload.CustomPermissions != nil {
-		// The service rejects direct permission updates. Preserve roles here so
-		// the request is rejected for its unsupported field rather than being
-		// misreported as an empty role replacement.
+		// 服务层拒绝直接权限更新。此处刻意保持"有角色载荷"的返回值，
+		// 让请求因不支持的字段被拒绝，而不是被误报为"清空全部角色"。
 		return nil, false, nil
 	}
 	return nil, false, validation("roles is required")
@@ -221,10 +238,9 @@ func decodePayload(w http.ResponseWriter, r *http.Request, target any) bool {
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrValidation):
-		// Validation messages are deliberately limited to static, client-safe contract
-		// explanations (for example, an unavailable role or invalid scope). Returning the
-		// detail lets the IAM UI distinguish a stale catalog from a malformed selection while
-		// keeping infrastructure errors and credentials out of the response.
+		// 校验消息刻意限定为静态、对客户端安全的契约解释（如角色不可用、scope 非法）。
+		// 返回 detail 可让 IAM 前端区分"目录已过期"与"选择非法"，
+		// 同时保证基础设施错误与凭据不外泄到响应中。
 		detail := strings.TrimSpace(strings.TrimPrefix(err.Error(), ErrValidation.Error()+": "))
 		apiError := httperror.Validation
 		if detail != "" {
@@ -233,13 +249,14 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, apiError)
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrNotConfigured):
 		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
-	case errors.Is(err, ErrAccessDenied):
+	case errors.Is(err, ErrAccessDenied), errors.Is(err, authapplication.ErrForbidden):
 		httpresponse.WriteError(w, r, http.StatusForbidden, httperror.Forbidden)
 	default:
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 	}
 }
 
+// GetCatalog 返回指定应用最近一次同步的授权目录与平台侧同步状态。
 func (h *Handler) GetCatalog(w http.ResponseWriter, r *http.Request) {
 	applicationID := strings.TrimSpace(r.PathValue("application_id"))
 	tenantID, _, err := h.catalogPrincipal(r, applicationID, "authorization.catalog.read", "platform:application:read")
@@ -255,6 +272,8 @@ func (h *Handler) GetCatalog(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", catalog)
 }
 
+// SyncCatalog 校验并原子替换应用自有的授权目录。目录来源以已验证的应用 Bearer
+// 为准；请求体中的来源声明仅作兼容解码，入库前被覆盖（见方法内的行内说明）。
 func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	applicationID := strings.TrimSpace(r.PathValue("application_id"))
 	principal, err := catalogSyncApplicationPrincipal(r, applicationID)
@@ -266,13 +285,12 @@ func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	if !decodePayload(w, r, &payload) {
 		return
 	}
-	// The catalog owner is established from the verified application bearer token.
-	// Never trust caller-provided provenance fields: they are accepted only for
-	// backwards-compatible request decoding and are overwritten before persistence.
+	// 目录归属以已验证的应用 Bearer token 为准。绝不信任调用方提供的来源字段：
+	// 这些字段仅为向后兼容的请求解码而保留，入库前一律被覆盖。
 	payload.SourceType, payload.SourceIdentifier = catalogSourceFromApplicationPrincipal(principal)
-	// Persist the operator as the OAuth client's platform-side primary key (a 26-char ULID) so it
-	// fits the CHAR(26) created_by/updated_by columns without truncation. The human-readable
-	// client_id is preserved separately in the catalog's source_identifier column.
+	// 操作者持久化为 OAuth client 的平台侧主键（26 位 ULID），确保能完整放入
+	// CHAR(26) 的 created_by/updated_by 列而不被截断；人类可读的 client_id
+	// 另存于目录的 source_identifier 列。
 	catalog, err := h.service.SyncCatalog(r.Context(), principal.TenantID, applicationID, principal.OAuthClientID, payload)
 	if err != nil {
 		writeError(w, r, err)
@@ -281,10 +299,10 @@ func (h *Handler) SyncCatalog(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "应用授权目录已同步", catalog)
 }
 
-// catalogSyncApplicationPrincipal authorizes writes to an authorization catalog. Catalogs are
-// application-owned declarations, so a platform console principal (including an administrator or
-// application owner) is deliberately never sufficient. The application bearer must be bound to
-// the target application and explicitly carry authorization.catalog.sync.
+// catalogSyncApplicationPrincipal 校验目录写入权限。授权目录是应用自有的声明，
+// 因此平台控制台身份（包括管理员或应用属主）刻意永远不足以完成写入；
+// 必须由绑定到目标应用、且显式携带 authorization.catalog.sync scope 的
+// 应用 Bearer 才能同步。
 func catalogSyncApplicationPrincipal(r *http.Request, applicationID string) (appctx.Principal, error) {
 	principal, ok := appctx.PrincipalFromContext(r.Context())
 	if !ok || principal.ApplicationID != applicationID || !principal.HasScope("authorization.catalog.sync") {
@@ -297,8 +315,9 @@ func catalogSourceFromApplicationPrincipal(principal appctx.Principal) (sourceTy
 	return "APPLICATION", "oauth_client:" + principal.OAuthClientID
 }
 
-// catalogPrincipal authorizes read access for either a platform console user or the OAuth
-// application that owns the catalog. Writes use catalogSyncApplicationPrincipal instead.
+// catalogPrincipal 授权目录读取：平台控制台用户（具备指定权限或为应用属主）
+// 与持有该目录的 OAuth 应用（携带指定 scope）二选一。写入走
+// catalogSyncApplicationPrincipal，不接受控制台身份。
 func (h *Handler) catalogPrincipal(r *http.Request, applicationID, applicationScope, consolePermission string) (tenantID, operatorID string, err error) {
 	if principal, ok := authctx.PrincipalFromContext(r.Context()); ok {
 		if hasPermission(principal, consolePermission) {

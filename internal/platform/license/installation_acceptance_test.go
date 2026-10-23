@@ -1,9 +1,9 @@
 package license_test
 
-// This is a protocol integration test: real MySQL, loopback HTTP transport,
-// production coordinator/handlers and production durable FileRuntime. It is NOT
-// a Docker installation or an OAuth token issuance acceptance test. Trust and
-// authenticated machine principals are test-only fixtures, never release keys.
+// 这是协议集成测试：使用真实 MySQL、回环 HTTP 传输、
+// 生产协调器和处理器，以及生产持久化 FileRuntime。
+// 不代表 Docker 安装或 OAuth 令牌签发验收。信任材料和
+// 经认证的机器主体仅为测试夹具，绝非发布密钥。
 import (
 	"bytes"
 	"context"
@@ -60,8 +60,8 @@ func acceptanceComponents() []coordination.ServiceSpec {
 		{"project_management", []string{"project-api", "project-sla-notifier"}},
 		{"settlement", []string{"settlement-api", "settlement-worker"}},
 		{"data_analysis", []string{"data-analysis-api", "data-analysis-aggregation-worker", "data-analysis-alert-worker"}},
-		{"customer_and_opportunity", []string{"customer-api", "customer-opportunity-alert-worker", "customer-owner-notification-worker", "customer-presale-alert-worker", "customer-presale-assignment-notification-worker", "customer-presale-progress-notification-worker", "customer-notification-delivery-worker", "customer-presale-worker"}},
-		{"customer_portal", []string{"portal-api", "portal-invite-compensation-worker"}},
+		{"customer_and_opportunity", []string{"customer-api", "customer-opportunity-alert-worker", "customer-owner-notification-worker", "customer-contract-transfer-worker", "customer-presale-alert-worker", "customer-presale-assignment-notification-worker", "customer-presale-progress-notification-worker", "customer-notification-delivery-worker", "customer-presale-worker"}},
+		{"customer_portal", []string{"portal-api", "portal-report-worker", "portal-invite-compensation-worker"}},
 	}
 	var specs []coordination.ServiceSpec
 	for _, g := range groups {
@@ -72,14 +72,22 @@ func acceptanceComponents() []coordination.ServiceSpec {
 	return specs
 }
 
-// A new production execution component must expand this explicit protocol
-// denominator rather than passing unnoticed under an old fixture inventory.
+// 新增生产执行组件必须扩展此明确的协议
+// 分母，不能沿用旧夹具清单而被遗漏。
 func TestInstallationComponentProfileParity(t *testing.T) {
 	profiles := []string{"contract_management-prod.yaml", "project_management-prod.yaml", "settlement-prod.yaml", "data-analysis-prod.yaml", "customer_and_opportunity-prod.yaml", "customer_portal-prod.yaml"}
 	expected := map[string]string{}
-	for _, spec := range acceptanceComponents() {
+	specs := acceptanceComponents()
+	if len(specs) != 21 {
+		t.Fatal("installation protocol requires all 21 independent production consumers")
+	}
+	for _, spec := range specs {
+		if expected[spec.ServiceID] != "" || spec.ServiceID == "data-analysis-metabase" {
+			t.Fatal("duplicate or infrastructure consumer in protocol denominator")
+		}
 		expected[spec.ServiceID] = spec.Application
 	}
+	metabase := 0
 	for _, name := range profiles {
 		raw, err := os.ReadFile(filepath.Join("../../../deploy/production/subsystems.d", name))
 		if err != nil {
@@ -97,9 +105,13 @@ func TestInstallationComponentProfileParity(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, service := range p.Compose.Services {
-			// Metabase has no commercial code/credential. Access is enforced by
-			// the licensed BI signing and resource proxy execution components.
+			// Metabase 不含商业授权代码或凭据；访问控制由
+			// 已获授权的 BI 签名及资源代理执行组件落实。
 			if service == "data-analysis-metabase" {
+				if p.Application.Code != "data_analysis" {
+					t.Fatal("Metabase infrastructure cannot be reassigned to a different application")
+				}
+				metabase++
 				continue
 			}
 			if expected[service] != p.Application.Code {
@@ -108,7 +120,7 @@ func TestInstallationComponentProfileParity(t *testing.T) {
 			delete(expected, service)
 		}
 	}
-	if len(expected) != 0 {
+	if len(expected) != 0 || metabase != 1 {
 		t.Fatalf("protocol fixtures do not match production profiles: %v", expected)
 	}
 }
@@ -143,8 +155,8 @@ func TestIsolatedInstallationProtocolScenarios(t *testing.T) {
 	if _, err = migration.Run(ctx, db, migrations.Files); err != nil {
 		t.Fatal(err)
 	}
-	// The whole database belongs to this test run; no external/business database
-	// is accepted above. Delete only the licensing rows used by these scenarios.
+	// 整个数据库专属于本次测试；上方拒绝外部或业务数据库。
+	// 仅删除这些场景使用的许可证行。
 	reset := func() {
 		t.Helper()
 		for _, model := range []any{&coordination.LifecycleEvent{}, &coordination.RetiredClient{}, &coordination.Member{}, &coordination.Application{}, &coordination.Inventory{}, &domain.ClockRecovery{}, &domain.Event{}, &domain.Deployment{}, &domain.Artifact{}} {
@@ -191,8 +203,8 @@ func TestIsolatedInstallationProtocolScenarios(t *testing.T) {
 				t.Fatal(e)
 			}
 			if scenario.freeze {
-				// Synthetic facts exercise the trusted inventory transaction contract
-				// only; they do not count as observed Docker evidence.
+				// 合成事实只验证可信清单的事务契约，
+				// 不计作实际观察到的 Docker 证据。
 				report := evidence.Report{Scope: "INSTALLATION", BoundarySupported: true, Project: "isolated-protocol", CollectedAt: now, Complete: true, Facts: []evidence.Fact{}}
 				for _, spec := range all[:scenario.legacy] {
 					report.Facts = append(report.Facts, evidence.Fact{Application: spec.Application, Environment: spec.Environment, Service: spec.ServiceID, ContainerID: strings.Repeat("c", 64), ImageDigest: spec.ImageDigest, Version: "isolated-v1", Protocol: "1", Running: true, StartedAt: now.Add(-time.Hour)})
@@ -209,7 +221,7 @@ func TestIsolatedInstallationProtocolScenarios(t *testing.T) {
 					t.Fatal(e)
 				}
 			}
-			// Idempotent registration must not reset qualification or identity.
+			// 幂等注册不得重置资格或身份。
 			for _, spec := range all {
 				if e = coordinator.Register(ctx, spec); e != nil {
 					t.Fatal(e)
@@ -369,8 +381,8 @@ func TestIsolatedInstallationProtocolScenarios(t *testing.T) {
 					t.Fatalf("%s activation state %v %v", app, status.State, e)
 				}
 			}
-			// Apply ENFORCED revision before disconnect. No server contact can
-			// extend the vendor's absolute expiry after this point.
+			// 断连前应用 ENFORCED 版本。此后任何服务器联系都不能
+			// 延长供应商设置的绝对到期时间。
 			for _, spec := range all {
 				var snapshot coordination.SnapshotOutput
 				if e = json.Unmarshal(request(spec, "snapshot", nil, 200), &snapshot); e != nil {

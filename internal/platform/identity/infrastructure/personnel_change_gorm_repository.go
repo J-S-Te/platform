@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	"gorm.io/gorm"
@@ -42,6 +43,34 @@ type personnelChangeModel struct {
 	CreatedAt, UpdatedAt time.Time
 }
 
+// personnelApprovalExceptionOutboxModel 是超管例外审批的本地审计 outbox。它和审批状态在
+// 同一事务写入；投递状态与重试进度独立更新，不反向影响已提交的审批结果。
+type personnelApprovalExceptionOutboxModel struct {
+	ID                string     `gorm:"column:id;primaryKey"`
+	TenantID          string     `gorm:"column:tenant_id"`
+	RequestID         string     `gorm:"column:request_id"`
+	OperatorID        string     `gorm:"column:operator_id"`
+	SubmittedBy       string     `gorm:"column:submitted_by"`
+	SubjectUserID     string     `gorm:"column:subject_user_id"`
+	ToStatus          string     `gorm:"column:to_status"`
+	RuleHit           string     `gorm:"column:rule_hit"`
+	ExceptionReason   string     `gorm:"column:exception_reason"`
+	ApprovalReference string     `gorm:"column:approval_reference"`
+	OccurredAt        time.Time  `gorm:"column:occurred_at"`
+	Status            string     `gorm:"column:status"`
+	Attempts          uint       `gorm:"column:attempts"`
+	NextAttemptAt     time.Time  `gorm:"column:next_attempt_at"`
+	LastError         *string    `gorm:"column:last_error"`
+	DeliveredAt       *time.Time `gorm:"column:delivered_at"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// TableName 指定 GORM 行映射的超管例外审计 outbox 表名。
+func (personnelApprovalExceptionOutboxModel) TableName() string {
+	return "iam_personnel_approval_exception_outbox"
+}
+
 type personnelChangeTransitionModel struct {
 	ID             uint64    `gorm:"column:id;primaryKey;autoIncrement"`
 	TenantID       string    `gorm:"column:tenant_id"`
@@ -53,6 +82,7 @@ type personnelChangeTransitionModel struct {
 	CreatedAt      time.Time `gorm:"column:created_at"`
 }
 
+// TableName 指定 GORM 行映射的异动轨迹表名。
 func (personnelChangeTransitionModel) TableName() string { return "iam_personnel_change_transition" }
 
 type personnelHandoverItemModel struct {
@@ -60,15 +90,14 @@ type personnelHandoverItemModel struct {
 	CreatedAt, UpdatedAt                                                                  time.Time
 }
 
+// TableName 指定 GORM 行映射的交接责任项表名。
 func (personnelHandoverItemModel) TableName() string { return "iam_personnel_handover_item" }
 
-// Execute applies an approved change atomically. Position changes close the old
-// appointment and create a new one; termination disables all user access.
+// Execute 原子应用一个已批准的异动。调岗关闭旧任职并创建新任职；离职停用用户全部访问。
 func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req application.PersonnelChangeRequest, operator string, now time.Time) (application.PersonnelChangeRequest, error) {
 	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
-		// Serialize execution for the request. Multiple worker replicas may observe the
-		// same due row; locking and re-checking the status makes the second execution a
-		// no-op before it can mutate memberships or accounts.
+		// 串行化该请求的执行。多个 worker 副本可能观察到同一到期行；先加锁再复核状态，
+		// 让第二个执行在改动任职或账号之前变成 no-op。
 		var locked personnelChangeModel
 		lockResult := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", req.TenantID, req.ID, domain.PersonnelChangeScheduled, req.Version).
@@ -82,6 +111,13 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 		// 后续业务变更只使用锁内重新读取的快照，防止调用方携带的陈旧字段
 		// 与数据库当前请求内容分叉。
 		req = toPersonnel(locked)
+		identity, initialized, err := bootstrapadmin.Resolve(c, tx, req.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && identity.ProtectsUser(req.UserID) {
+			return bootstrapadmin.ErrProtected
+		}
 		if req.ChangeType == domain.PersonnelChangeTermination {
 			var accountIDs []string
 			if err := tx.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ?", req.TenantID, req.UserID).Pluck("id", &accountIDs).Error; err != nil {
@@ -89,9 +125,8 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 			}
 			identityRepository := &GORMRepository{database: tx}
 			for _, accountID := range accountIDs {
-				// Revoke platform sessions, authorization codes, refresh families and
-				// enqueue RP back-channel logout before disabling the account. Accounts
-				// without an active session are a valid termination case.
+				// 在停用账号之前，吊销平台会话、授权码、刷新令牌族并入队 RP Back-Channel
+				// 注销。没有活跃会话的账号是合法的离职场景。
 				if err := identityRepository.RevokeAccountSessions(c, req.TenantID, accountID, now, "PERSONNEL_TERMINATION"); err != nil && !errors.Is(err, application.ErrUnauthenticated) {
 					return fmt.Errorf("revoke account sessions during personnel termination: %w", err)
 				}
@@ -131,6 +166,14 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 				if err := q.First(&source).Error; err != nil {
 					return err
 				}
+			}
+			authority := req.ApprovedBy
+			if authority == "" {
+				authority = req.SubmittedBy
+			}
+			desired := membershipModel{UserID: req.UserID, OrgUnitID: req.TargetOrgUnitID, PositionID: req.TargetPositionID, Status: domain.StatusActive, InheritAuthorization: source.InheritAuthorization, ValidFrom: &now}
+			if err := validateMembershipDelegation(c, tx, req.TenantID, authority, desired, &source, now); err != nil {
+				return err
 			}
 			if req.ChangeType != domain.PersonnelChangeRehire {
 				sourceUpdate := tx.Model(&membershipModel{}).
@@ -220,24 +263,37 @@ func (r *PersonnelChangeGORMRepository) Execute(c context.Context, req applicati
 	if err != nil {
 		return application.PersonnelChangeRequest{}, err
 	}
-	result, err := r.Get(c, req.TenantID, req.ID)
-	if err != nil {
-		return application.PersonnelChangeRequest{}, err
-	}
-	return result, nil
+	// 事务成功后直接返回锁内快照。提交后的查询可能因断连失败，不能把已提交的
+	// EXECUTED 伪报为失败，也不能因此阻止远端冻结的异步完成补偿。
+	req.Status = domain.PersonnelChangeExecuted
+	req.ExecutedAt = &now
+	req.UpdatedAt = now
+	req.Version++
+	return req, nil
 }
 
+// TableName 指定 GORM 行映射的异动请求表名。
 func (personnelChangeModel) TableName() string { return "iam_personnel_change_request" }
 
+// PersonnelChangeGORMRepository 以 GORM 持久化人员异动请求、状态轨迹与交接责任项，
+// 全部写入都带租户条件并配合版本乐观锁。
 type PersonnelChangeGORMRepository struct{ db *gorm.DB }
 
+// NewPersonnelChangeGORMRepository 构造异动仓储。
 func NewPersonnelChangeGORMRepository(db *gorm.DB) *PersonnelChangeGORMRepository {
 	return &PersonnelChangeGORMRepository{db: db}
 }
 
-// ValidateCreate moves all identity and assignment checks ahead of persistence.
-// Execute repeats the critical checks as a defense against changes between scheduling and execution.
+// ValidateCreate 把全部身份与目标任职检查提前到持久化之前。Execute 会重复关键检查，
+// 防御排期到执行之间发生的变化。
 func (r *PersonnelChangeGORMRepository) ValidateCreate(c context.Context, in application.PersonnelChangeCreateInput) error {
+	identity, initialized, err := bootstrapadmin.Resolve(c, r.db, in.TenantID)
+	if err != nil {
+		return err
+	}
+	if initialized && identity.ProtectsUser(in.UserID) {
+		return bootstrapadmin.ErrProtected
+	}
 	var user userModel
 	if err := r.db.WithContext(c).Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", in.TenantID, in.UserID).First(&user).Error; err != nil {
 		return application.ErrValidation
@@ -302,6 +358,9 @@ func deref(s *string) string {
 	}
 	return *s
 }
+
+// Create 在同一事务写入异动请求和首条状态轨迹（FromStatus 为空），保证任何可见请求都有
+// 完整的轨迹起点，审计上不存在无来源的状态。
 func (r *PersonnelChangeGORMRepository) Create(c context.Context, v application.PersonnelChangeRequest) (application.PersonnelChangeRequest, error) {
 	m := personnelChangeModel{ID: v.ID, TenantID: v.TenantID, UserID: v.UserID, ChangeType: v.ChangeType, Status: v.Status, Reason: v.Reason, EffectiveAt: *v.EffectiveAt, SubmittedBy: v.SubmittedBy, Version: v.Version, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
 	if v.SourceMembershipID != "" {
@@ -331,6 +390,9 @@ func (r *PersonnelChangeGORMRepository) Create(c context.Context, v application.
 	}
 	return toPersonnel(m), nil
 }
+
+// List 联表补齐人员与来源/目标组织岗位展示名，过滤条件全部参数化并保持租户条件；
+// 结果按创建时间倒序。
 func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status, changeType, keyword string) (out []application.PersonnelChangeRequest, err error) {
 	q := r.db.WithContext(c).Table("iam_personnel_change_request AS pcr").
 		Select(`pcr.*, user.display_name AS user_display_name,
@@ -364,6 +426,8 @@ func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status, chang
 	}
 	return
 }
+
+// Get 按租户与请求 ID 读取异动请求；未命中统一映射为 application.ErrNotFound。
 func (r *PersonnelChangeGORMRepository) Get(c context.Context, t, id string) (application.PersonnelChangeRequest, error) {
 	var m personnelChangeModel
 	err := r.db.WithContext(c).Where("tenant_id = ? AND id = ?", t, id).First(&m).Error
@@ -377,6 +441,28 @@ func (r *PersonnelChangeGORMRepository) Get(c context.Context, t, id string) (ap
 // 版本，status/ref 是目标状态与审批凭据。记录已被执行、取消或由其他请求推进时返回
 // application.ErrConflict，成功时返回本次事务内读取的新快照。
 func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected application.PersonnelChangeRequest, status, ref, operator string, now time.Time) (application.PersonnelChangeRequest, error) {
+	return r.updateStatus(c, expected, status, ref, operator, now, nil)
+}
+
+// UpdateStatusWithApprovalException 在 UpdateStatus 的同一事务内写入超管例外审计 outbox。
+// 状态更新、状态轨迹与 outbox 要么全部提交，要么全部回滚；事务外再访问审计端，
+// 避免出现"审批已提交但没有例外原因/审计事实"的缺口。
+func (r *PersonnelChangeGORMRepository) UpdateStatusWithApprovalException(c context.Context, expected application.PersonnelChangeRequest, status, ref, operator string, now time.Time, exception application.PersonnelChangeAuditEvent) (application.PersonnelChangeRequest, error) {
+	if err := validateApprovalException(expected, exception); err != nil {
+		return application.PersonnelChangeRequest{}, err
+	}
+	return r.updateStatus(c, expected, status, ref, operator, now, &exception)
+}
+
+func validateApprovalException(expected application.PersonnelChangeRequest, exception application.PersonnelChangeAuditEvent) error {
+	if strings.TrimSpace(exception.EventID) == "" || exception.RequestID != expected.ID || exception.TenantID != expected.TenantID ||
+		strings.TrimSpace(exception.Reason) == "" || strings.TrimSpace(exception.RuleHit) == "" || exception.OccurredAt.IsZero() {
+		return fmt.Errorf("approval exception audit event is incomplete: %w", application.ErrValidation)
+	}
+	return nil
+}
+
+func (r *PersonnelChangeGORMRepository) updateStatus(c context.Context, expected application.PersonnelChangeRequest, status, ref, operator string, now time.Time, exception *application.PersonnelChangeAuditEvent) (application.PersonnelChangeRequest, error) {
 	u := map[string]any{"status": status, "updated_at": now, "version": gorm.Expr("version + 1")}
 	if status == "EXECUTED" {
 		u["executed_at"] = now
@@ -407,8 +493,8 @@ func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected
 			return application.ErrConflict
 		}
 		if expected.ChangeType == domain.PersonnelChangeTermination && expected.Status == domain.PersonnelChangePendingApproval && status == domain.PersonnelChangePendingHandover {
-			// Every termination gets a mandatory durable responsibility item. Subsystem
-			// adapters may add more items under the existing unique business key.
+			// 每个离职都会得到一条强制的持久责任项；子系统适配器可在既有唯一业务键下追加
+			// 更多项。
 			item := personnelHandoverItemModel{ID: expected.ID, TenantID: expected.TenantID, RequestID: expected.ID, SystemCode: "platform", ResourceType: "PERSONNEL_RESPONSIBILITY", ResourceID: expected.UserID, CurrentOwnerID: expected.UserID, Status: "PENDING", CreatedAt: now, UpdatedAt: now}
 			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&item).Error; err != nil {
 				return fmt.Errorf("create mandatory personnel handover item: %w", err)
@@ -421,6 +507,20 @@ func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected
 		if err := tx.Create(&personnelChangeTransitionModel{TenantID: expected.TenantID, RequestID: expected.ID, FromStatus: expected.Status, ToStatus: status, OperatorID: operator, ReferenceValue: reference, CreatedAt: now}).Error; err != nil {
 			return fmt.Errorf("record personnel change transition: %w", err)
 		}
+		if exception != nil {
+			// outbox 写入放在状态更新和轨迹之后：任何一步失败都会回滚整笔事务，
+			// 不会留下"状态已提交、例外原因或审计事实缺失"的部分结果。
+			if err := tx.Create(&personnelApprovalExceptionOutboxModel{
+				ID: exception.EventID, TenantID: expected.TenantID, RequestID: expected.ID,
+				OperatorID: exception.OperatorID, SubmittedBy: exception.SubmittedBy, SubjectUserID: exception.SubjectUserID,
+				ToStatus: exception.ToStatus, RuleHit: exception.RuleHit, ExceptionReason: exception.Reason,
+				ApprovalReference: exception.ApprovalReference, OccurredAt: exception.OccurredAt,
+				Status: application.ApprovalExceptionOutboxPending, Attempts: 0, NextAttemptAt: now,
+				CreatedAt: now, UpdatedAt: now,
+			}).Error; err != nil {
+				return fmt.Errorf("persist approval exception audit outbox: %w", err)
+			}
+		}
 		if err := tx.Where("tenant_id = ? AND id = ?", expected.TenantID, expected.ID).First(&updated).Error; err != nil {
 			return err
 		}
@@ -430,6 +530,90 @@ func (r *PersonnelChangeGORMRepository) UpdateStatus(c context.Context, expected
 		return application.PersonnelChangeRequest{}, err
 	}
 	return toPersonnel(updated), nil
+}
+
+// 编译期确认仓储满足服务所需的"状态 + outbox 同事务"端口。
+var _ application.PersonnelChangeApprovalExceptionStore = (*PersonnelChangeGORMRepository)(nil)
+
+// PendingApprovalExceptions 返回到达重试时间的待投递例外审计事件；读取顺序稳定，
+// 让多轮投递可预期地推进，不做内存扫描全表。
+func (r *PersonnelChangeGORMRepository) PendingApprovalExceptions(c context.Context, now time.Time, limit int) ([]application.ApprovalExceptionOutboxEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	var rows []personnelApprovalExceptionOutboxModel
+	if err := r.db.WithContext(c).
+		Where("status = ? AND next_attempt_at <= ?", application.ApprovalExceptionOutboxPending, now.UTC()).
+		Order("next_attempt_at, occurred_at").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]application.ApprovalExceptionOutboxEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, application.ApprovalExceptionOutboxEntry{Event: row.toAuditEvent(), Attempts: int(row.Attempts)})
+	}
+	return entries, nil
+}
+
+// MarkApprovalExceptionDelivered 把已成功投递的事件标记为完成。重复标记是幂等的：
+// 事件已送达时返回成功，避免 dispatcher 因并发或重放把正常结果当成错误。
+func (r *PersonnelChangeGORMRepository) MarkApprovalExceptionDelivered(c context.Context, tenantID, eventID string, now time.Time) error {
+	result := r.db.WithContext(c).Model(&personnelApprovalExceptionOutboxModel{}).
+		Where("tenant_id = ? AND id = ? AND status = ?", tenantID, eventID, application.ApprovalExceptionOutboxPending).
+		Updates(map[string]any{"status": application.ApprovalExceptionOutboxDelivered, "delivered_at": now, "last_error": nil, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return requireApprovalExceptionOutboxRow(r.db.WithContext(c), tenantID, eventID)
+	}
+	return nil
+}
+
+// MarkApprovalExceptionRetry 记录一次投递失败和下次可尝试时间，事件保持待投递。
+// 不删除 outbox 行，也不改变审批状态，失败必须能被下一轮 worker 重试。
+func (r *PersonnelChangeGORMRepository) MarkApprovalExceptionRetry(c context.Context, tenantID, eventID string, attempts int, nextAttemptAt time.Time, lastError string, now time.Time) error {
+	if attempts < 1 {
+		return fmt.Errorf("approval exception attempts must be positive: %w", application.ErrValidation)
+	}
+	lastError = strings.TrimSpace(lastError)
+	if runes := []rune(lastError); len(runes) > 500 {
+		lastError = string(runes[:500])
+	}
+	result := r.db.WithContext(c).Model(&personnelApprovalExceptionOutboxModel{}).
+		Where("tenant_id = ? AND id = ? AND status = ?", tenantID, eventID, application.ApprovalExceptionOutboxPending).
+		Updates(map[string]any{"attempts": attempts, "next_attempt_at": nextAttemptAt.UTC(), "last_error": lastError, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return requireApprovalExceptionOutboxRow(r.db.WithContext(c), tenantID, eventID)
+	}
+	return nil
+}
+
+// requireApprovalExceptionOutboxRow 把"行不存在"统一映射为 application.ErrNotFound；
+// 行存在（可能已被并发标记完成）视为幂等成功。
+func requireApprovalExceptionOutboxRow(database *gorm.DB, tenantID, eventID string) error {
+	var count int64
+	if err := database.Model(&personnelApprovalExceptionOutboxModel{}).Where("tenant_id = ? AND id = ?", tenantID, eventID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return application.ErrNotFound
+	}
+	return nil
+}
+
+func (row personnelApprovalExceptionOutboxModel) toAuditEvent() application.PersonnelChangeAuditEvent {
+	return application.PersonnelChangeAuditEvent{
+		EventID: row.ID, TenantID: row.TenantID, OperatorID: row.OperatorID, RequestID: row.RequestID,
+		ToStatus: row.ToStatus, SubmittedBy: row.SubmittedBy, SubjectUserID: row.SubjectUserID,
+		Reason: row.ExceptionReason, RuleHit: row.RuleHit, ApprovalReference: row.ApprovalReference,
+		OccurredAt: row.OccurredAt,
+	}
 }
 
 type personnelPermissionRow struct {
@@ -443,9 +627,8 @@ type personnelPermissionRow struct {
 	ScopeID         string `gorm:"column:scope_id"`
 }
 
-// PreviewPermissions compares the role bindings inherited by the source and target
-// positions. Direct user bindings are included in both sets, since a position change
-// must not be presented as removing a manually granted role.
+// PreviewPermissions 比较源岗位与目标岗位继承的角色绑定。直接用户绑定同时出现在两个
+// 集合中：调岗绝不能被展示为移除了手工授予的角色。
 func (r *PersonnelChangeGORMRepository) PreviewPermissions(c context.Context, request application.PersonnelChangeRequest) (application.PersonnelChangePermissionPreview, error) {
 	now := time.Now().UTC()
 	sourceMembership := request.SourceMembershipID
@@ -496,8 +679,8 @@ func permissionRoleKey(role application.PermissionRole) string {
 }
 
 func (r *PersonnelChangeGORMRepository) queryPermissionRoles(c context.Context, tenant, userID, sourceMembershipID, targetPositionID string, now time.Time) ([]application.PermissionRole, error) {
-	// POSITION bindings are materialized by the position-grant service. Restricting
-	// them to active assignments/validity keeps the preview identical to runtime auth.
+	// POSITION 绑定由岗位授予服务物化。把它们限制在活跃任职/有效期内，保证预览结果与
+	// 运行时授权一致。
 	query := `
 SELECT DISTINCT app.id AS application_id, app.code AS application_code, app.name AS application_name,
        role.id AS role_id, role.code AS role_code, role.name AS role_name,

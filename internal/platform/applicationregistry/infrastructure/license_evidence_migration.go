@@ -12,14 +12,15 @@ import (
 	licenseevidence "github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
 )
 
-// The migration inventory is separate from the target release inventory so
-// installing a newer release cannot silently replace the approved old images.
+// 迁移清单与目标发布清单相互独立，安装新版本因此无法静默替换已批准的旧镜像。
 const migrationLicenseEvidenceApprovalFile = "license-migration-evidence.json"
 
 type migrationInstallationEvidenceProvider interface {
 	CollectMigrationInstallationEvidence(context.Context) (licenseevidence.Report, error)
 }
 
+// CollectMigrationInstallationEvidence 通过部署 Agent 采集迁移前旧安装的许可证证据。响应必须
+// 声明 scope 为 MIGRATION_INSTALLATION，否则按不可用失败，防止以现行安装证据替代迁移前基线。
 func (p *UnixSocketSubsystemProvisioner) CollectMigrationInstallationEvidence(ctx context.Context) (licenseevidence.Report, error) {
 	if !p.enabled {
 		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: agent disabled")
@@ -50,10 +51,15 @@ func (p *UnixSocketSubsystemProvisioner) CollectMigrationInstallationEvidence(ct
 	return *reply.LicenseEvidence, nil
 }
 
+// CollectMigrationInstallationEvidence 固定拒绝本地 Docker 迁移：本地部署没有经批准的迁移
+// 边界审批，返回 LICENSE_EVIDENCE_UNSUPPORTED，不伪造迁移前证据。
 func (p *LocalDockerSubsystemProvisioner) CollectMigrationInstallationEvidence(context.Context) (licenseevidence.Report, error) {
 	return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: local migration approval missing")
 }
 
+// CollectMigrationInstallationEvidence 基于独立的 license-migration-evidence.json 审批采集迁移前
+// 旧安装的证据。全部目标必须属于同一 deploy 根目录与 Compose 项目，边界混杂即失败关闭；审批文件
+// 逐项对照受审清单与迁移配置复核，缺审批或不完整时不执行任何采集。
 func (p *ProductionComposeSubsystemProvisioner) CollectMigrationInstallationEvidence(ctx context.Context) (licenseevidence.Report, error) {
 	if !p.enabled || len(p.targets) == 0 {
 		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: migration boundary not approved")
@@ -108,8 +114,8 @@ func loadMigrationInstallationEvidenceApproval(path, project string, profiles []
 	if d.Decode(&a) != nil || d.Decode(new(any)) != io.EOF || a.Version != 1 || a.Project != project || !a.InstallationBoundary {
 		return fail()
 	}
-	// An excluded unit must be named as infrastructure/init in the reviewed
-	// deployment profile. Merely claiming to be infrastructure is insufficient.
+	// 被排除的单元必须在受审部署清单中命名为 infrastructure/init；
+	// 仅自称基础设施不足以豁免。
 	nonbusiness := reviewedPlatformLicenseEvidenceInfrastructure()
 	business := map[string]bool{}
 	known := map[string]productionSubsystemProfile{}
@@ -173,8 +179,8 @@ func loadMigrationInstallationEvidenceApproval(path, project string, profiles []
 	return config, nil
 }
 
-// Legacy releases may contain fewer components than the target release, but
-// every selected service must still belong to this approved app/environment.
+// 旧版发布可能比目标发布少一些组件，但每个选定的服务仍必须属于这个已批准的
+// 应用/环境。
 func validateMigrationProfileApproval(a licenseEvidenceApproval, p productionSubsystemProfile) (bool, error) {
 	known := map[string]bool{}
 	for _, name := range p.Manifest.Compose.RuntimeServices {

@@ -17,8 +17,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// This driver executes the production repository's SQL against a single locked
-// row. It rejects unguarded recovery/claim SQL rather than emulating the service.
+// 此驱动针对单个已锁定行执行生产仓储的 SQL。
+// 它拒绝缺少保护条件的恢复或认领 SQL，不模拟服务逻辑。
 type attemptDriver struct {
 	mu         sync.Mutex
 	generation int64
@@ -89,7 +89,7 @@ func (c *attemptConn) ExecContext(_ context.Context, q string, args []driver.Nam
 	}
 	where := parts[1]
 	if strings.Contains(where, "started_at < ?") {
-		// Recovery SQL must preserve the enumerated attempt, status, and timestamp.
+		// 恢复 SQL 必须保留枚举出的尝试标识、状态和时间戳。
 		if !strings.Contains(where, "generation = ? AND status = ? AND started_at = ?") {
 			return nil, errors.New("recovery lacks snapshot predicates")
 		}

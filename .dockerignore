@@ -22,6 +22,8 @@
 !third_party/license-core/diff.go
 !third_party/license-core/license.go
 !third_party/license-core/recovery.go
+!third_party/license-core/catalog/
+!third_party/license-core/catalog/catalog.go
 !third_party/license-core/runtime/
 !third_party/license-core/runtime/lock_unix.go
 !third_party/license-core/runtime/snapshot.go

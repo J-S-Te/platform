@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the real platform release function with a legacy schema-rejecting Agent."""
+"""使用会拒绝旧版模式的 Agent 验证实际平台发布函数。"""
 import os
 from pathlib import Path
 import re
@@ -32,7 +32,12 @@ env_value() {
 }
 stat() { echo 10001:10001; }
 port_value() { echo 18080; }
-backup_database() { log backup; }
+backup_database() { log backup; [[ "$FAIL_PHASE" != backup ]]; }
+# 新助手定义在 deploy_platform 之外，必须与 backup_database 一样在夹具中打桩，
+# 否则抽取出来的函数体找不到它们（真实部署脚本里它们是同文件全局函数）。
+require_mysql_ready() { :; }
+diagnose_mysql_container() { :; }
+backup_database_if_initialized() { backup_database "$@"; }
 ensure_temporal_application_network() { :; }
 prepare_managed_public_proxy_image() { log proxy-prefetch; [[ "$FAIL_PHASE" != proxy ]]; }
 wait_for_health() { log api-health; }
@@ -115,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
     run({'MARKER_IMAGE': image})
     calls, old = run({'PLATFORM_IMAGE': 'old-image'}, succeeds=False)
     assert 'legacy Agent: unknown fields' in old.stderr and 'api' not in calls
-    for phase in ('proxy', 'migrate', 'agent', 'api', 'profiles', 'digest', 'stability'):
+    for phase in ('backup', 'proxy', 'migrate', 'agent', 'api', 'profiles', 'digest', 'stability'):
         calls, _ = run({'FAIL_PHASE': phase}, succeeds=False)
         if phase in ('migrate', 'agent'):
             assert 'api' not in calls
@@ -123,11 +128,13 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
             assert 'agent' not in calls and 'stop-old-api' not in calls
         if phase == 'proxy':
             assert 'migrate' not in calls and 'stop-old-api' not in calls
-    # This is the same persisted marker left by the failed legacy-binary attempt.
+        if phase == 'backup':
+            assert 'migrate' not in calls and 'stop-old-api' not in calls
+            assert 'agent' not in calls and 'api' not in calls
+    # 这是旧二进制尝试失败后留下的同一持久化标记。
     run()
 
-    # Real transaction installer: only an explicit immutable platform-image
-    # upgrade can replace assets while retaining a pending control-plane gate.
+    # 使用真实事务安装器：只有显式升级不可变的平台镜像，才能在保留待处理控制面门禁的同时替换资产。
     source = fixture / 'assets'
     (source / 'bin').mkdir(parents=True)
     (source / 'docker-compose.yml').write_text('services: {}\n')
@@ -163,8 +170,7 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
     assert 'PLATFORM_UPGRADE_IMAGE=' + image in marker.read_text()
     install(succeeds=False)
 
-    # An interrupted controlled install restores its preexisting gate rather than
-    # clearing the old requirement when recovering the asset transaction.
+    # 受控安装中断后，资产事务恢复必须还原原有门禁，不能清除旧的待处理要求。
     transaction = fixture / 'runtime/.assets-install-transaction'
     transaction.mkdir()
     backup = fixture / 'backups/install-assets.previous'
@@ -187,4 +193,62 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
     assert '普通重载不能替代' in normal_reload.stderr
     assert marker.is_file()
 
-print('Coordinated platform migration, candidate Agent/API ordering and durable marker: PASS')
+# 执行真实 CLI 校验和发布事务，仅模拟 Docker 拉取。代理键必须与平台镜像对一并提交和恢复。
+CLI_PREFIX = SCRIPT.split('script_dir="$(cd --', 1)[0]
+TX_START = SCRIPT.index('require_backup_space || exit 1\n')
+TX_END = SCRIPT.index('if [[ "$service" == "frontend" ]]; then\n  compose_config_ok=', TX_START)
+TRANSACTION = SCRIPT[TX_START:TX_END]
+TRANSACTION_HARNESS = r'''
+deploy_dir="$TEST_ROOT"
+release_file="$deploy_dir/.release.env"
+mkdir -p "$deploy_dir/backups/releases"
+require_backup_space() { :; }
+restore_legacy_file_gateway_pointer() { :; }
+id() { echo 1000; }
+docker() {
+  [[ "$1" == pull ]] || return 91
+  printf '%s\n' "$2" >> "$TEST_LOG"
+  grep -Fxq "PLATFORM_IMAGE=$CANDIDATE_PLATFORM" "$release_file" || return 92
+  grep -Fxq "FILE_GATEWAY_IMAGE=$CANDIDATE_GATEWAY" "$release_file" || return 93
+  grep -Fxq "DOCKER_SOCKET_PROXY_IMAGE=$EXPECTED_PROXY" "$release_file" || return 94
+  [[ "$2" != "${FAIL_PULL:-}" ]]
+}
+'''
+
+with tempfile.TemporaryDirectory(prefix='platform-release-transaction-') as directory:
+    base = Path(directory)
+    platform = '127.0.0.1:5000/uip/platform@sha256:' + 'a' * 64
+    gateway = '127.0.0.1:5000/uip/gateway@sha256:' + 'b' * 64
+    proxy = '127.0.0.1:5000/uip/proxy@sha256:' + 'c' * 64
+    old_proxy = '127.0.0.1:5000/uip/proxy@sha256:' + 'd' * 64
+    old_release = 'PLATFORM_IMAGE=old-platform\nFILE_GATEWAY_IMAGE=old-gateway\nDOCKER_SOCKET_PROXY_IMAGE=' + old_proxy + '\n'
+
+    def transaction(name, arguments, expected_proxy, fail_pull='', success=True):
+        fixture = base / name
+        fixture.mkdir()
+        release = fixture / '.release.env'
+        release.write_text(old_release)
+        log = fixture / 'pulls'
+        env = dict(os.environ, TEST_ROOT=str(fixture), TEST_LOG=str(log),
+                   CANDIDATE_PLATFORM=platform, CANDIDATE_GATEWAY=gateway,
+                   EXPECTED_PROXY=expected_proxy, FAIL_PULL=fail_pull)
+        process = subprocess.run(['bash', '-Eeuo', 'pipefail', '-c',
+                                  CLI_PREFIX + '\n' + TRANSACTION_HARNESS + '\n' + TRANSACTION,
+                                  'fixture-release', *arguments], env=env, capture_output=True, text=True)
+        assert (process.returncode == 0) == success, process.stdout + process.stderr
+        if success:
+            assert 'PLATFORM_IMAGE=' + platform + '\n' in release.read_text()
+            assert 'FILE_GATEWAY_IMAGE=' + gateway + '\n' in release.read_text()
+            assert 'DOCKER_SOCKET_PROXY_IMAGE=' + expected_proxy + '\n' in release.read_text()
+            assert list((fixture / 'backups/releases').glob('*.env'))[0].read_text() == old_release
+        else:
+            assert release.read_text() == old_release, 'failed pull must restore every release pointer'
+        return log.read_text().splitlines() if log.exists() else []
+
+    assert transaction('with-proxy', ['platform', platform, gateway, proxy], proxy) == [platform, gateway, proxy]
+    assert transaction('legacy-pair', ['platform', platform, gateway], old_proxy) == [platform, gateway]
+    for phase, reference in [('platform', platform), ('gateway', gateway), ('proxy', proxy)]:
+        transaction('failed-' + phase, ['platform', platform, gateway, proxy], proxy, reference, success=False)
+    assert transaction('invalid-proxy', ['platform', platform, gateway, 'proxy:latest'], old_proxy, success=False) == []
+
+print('Coordinated platform migration, durable marker and atomic platform/gateway/proxy release: PASS')

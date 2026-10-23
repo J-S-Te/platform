@@ -19,8 +19,8 @@ type ReferenceName struct {
 // 它只能由认证中间件写入，调用方不得根据请求头自行构造。
 type Principal struct {
 	SessionID string `json:"-"`
-	// LoginIP is the verified client IP captured when this browser session was created.
-	// It is internal request context only and must not be returned by identity APIs.
+	// LoginIP 是创建该浏览器会话时捕获的已验证客户端 IP。仅限内部请求上下文使用，
+	// 身份类 API 不得把它返回给前端。
 	LoginIP         net.IP          `json:"-"`
 	Tenant          ReferenceName   `json:"tenant"`
 	User            ReferenceName   `json:"user"`

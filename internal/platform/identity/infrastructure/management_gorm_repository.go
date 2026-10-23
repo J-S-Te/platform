@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
@@ -15,12 +16,17 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// ListUsers reads tenant-scoped users and leaves mobile masking to the application layer.
+// ListUsers 读取租户范围内的用户；手机号掩码交给应用层处理。
 func (repository *GORMRepository) ListUsers(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.User], error) {
 	// IAM 用户就是任职关系中的人员主档案；没有任何任职记录的历史/外部孤儿用户
 	// 不进入用户模块，避免用户列表与人员列表出现两套事实来源。
+	identity, initialized, err := bootstrapadmin.Resolve(ctx, repository.database, tenantID)
+	if err != nil {
+		return application.PageResult[domain.User]{}, err
+	}
 	database := applyUserFilter(repository.database.WithContext(ctx).Model(&userModel{}).
 		Where("EXISTS (SELECT 1 FROM iam_membership AS membership WHERE membership.tenant_id = iam_user.tenant_id AND membership.user_id = iam_user.id)"), tenantID, query)
+	database = excludeBootstrapUser(database, identity, initialized)
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
 		return application.PageResult[domain.User]{}, fmt.Errorf("count users: %w", err)
@@ -37,8 +43,7 @@ func (repository *GORMRepository) ListUsers(ctx context.Context, tenantID string
 	return application.PageResult[domain.User]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// CreateUser preserves the single-user repository contract while delegating to the same atomic
-// user-and-role-binding transaction used by batch creation.
+// CreateUser 保持单用户仓储契约，内部复用与批量创建相同的“用户 + 角色绑定”原子事务。
 func (repository *GORMRepository) CreateUser(ctx context.Context, write application.UserWrite) (domain.User, error) {
 	users, err := repository.CreateUsers(ctx, []application.UserWrite{write})
 	if err != nil {
@@ -47,9 +52,8 @@ func (repository *GORMRepository) CreateUser(ctx context.Context, write applicat
 	return users[0], nil
 }
 
-// CreateUsers persists users, ordinary-user role bindings, and the authorization policy revision
-// in one transaction. A missing platform application or baseline role is treated as deployment
-// seed corruption instead of silently creating users without their required role.
+// CreateUsers 在一个事务内持久化用户、普通用户角色绑定与授权策略修订。缺少平台应用或
+// 基线角色按部署种子损坏处理并整批失败，而不是静默创建没有必需角色的用户。
 func (repository *GORMRepository) CreateUsers(ctx context.Context, writes []application.UserWrite) ([]domain.User, error) {
 	if len(writes) == 0 {
 		return nil, application.ErrValidation
@@ -169,9 +173,9 @@ type importedApplicationRole struct {
 	RoleID        string
 }
 
-// resolveImportedApplicationRoles validates all CSV roles before the first user is written. It
-// accepts either stable codes (backwards compatibility) or exact human-readable names. Ambiguous
-// names fail closed. Only ACTIVE application-owned catalog roles are assignable.
+// resolveImportedApplicationRoles 在写入第一个用户之前校验全部 CSV 角色。接受稳定编码
+// （向后兼容）或精确的人类可读名称；名称有歧义时失败关闭。只有 ACTIVE 的应用自有目录
+// 角色可被分配。
 func resolveImportedApplicationRoles(transaction *gorm.DB, tenantID string, writes []application.UserWrite) (map[string]importedApplicationRole, error) {
 	requested := make(map[string]application.ApplicationRoleBindingWrite)
 	for _, write := range writes {
@@ -282,6 +286,14 @@ func resolveImportedApplicationRoles(transaction *gorm.DB, tenantID string, writ
 			}
 		}
 	}
+	for _, write := range writes {
+		for _, request := range write.ApplicationRoleBindings {
+			role := resolved[importedApplicationRoleKey(request)]
+			if err := verifyIdentityRoleDelegation(transaction.Statement.Context, transaction, tenantID, write.OperatorID, role.ApplicationID, role.RoleID, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return resolved, nil
 }
 
@@ -289,7 +301,7 @@ func importedApplicationRoleKey(role application.ApplicationRoleBindingWrite) st
 	return role.ApplicationCode + "\x00" + role.ApplicationName + "\x00" + role.RoleCode + "\x00" + role.RoleName
 }
 
-// GetUser retrieves exactly one tenant-scoped user.
+// GetUser 精确检索一个租户范围内的用户；逻辑删除的用户不返回。
 func (repository *GORMRepository) GetUser(ctx context.Context, tenantID, userID string) (domain.User, error) {
 	var row userModel
 	result := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", tenantID, userID).First(&row)
@@ -302,7 +314,7 @@ func (repository *GORMRepository) GetUser(ctx context.Context, tenantID, userID 
 	return toDomainUser(row), nil
 }
 
-// UpdateUser applies an optimistic-lock update with an explicit persistence-field whitelist.
+// UpdateUser 以乐观锁执行更新，持久化字段使用显式白名单。
 func (repository *GORMRepository) UpdateUser(ctx context.Context, input application.UserUpdateInput, mobileCiphertext, mobileHash []byte) (domain.User, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var existing userModel
@@ -313,6 +325,13 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 		}
 		if result.Error != nil {
 			return fmt.Errorf("lock user for update: %w", result.Error)
+		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, input.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && bootstrapadmin.UserUpdateViolation(identity, input.UserID, input.Status, input.UpdateValidity, input.ValidUntil) {
+			return bootstrapadmin.ErrProtected
 		}
 		if existing.Version != input.Version {
 			return application.ErrVersionConflict
@@ -385,10 +404,9 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 	return repository.GetUser(ctx, input.TenantID, input.UserID)
 }
 
-// DeleteUser performs a tenant-scoped business deletion. The user, account and membership rows are
-// retained as disabled records for audit and foreign-key integrity, but associated login accounts
-// and appointments are removed from normal management views. Existing sessions are revoked in the
-// same transaction so the deleted user loses access immediately.
+// DeleteUser 执行租户范围内的业务删除。用户、账号与任职行保留为停用记录以维持审计与
+// 外键完整性，但关联登录账号与任职从常规管理视图消失；既有会话在同一事务内吊销，
+// 被删用户立即失去访问。
 func (repository *GORMRepository) DeleteUser(ctx context.Context, input application.UserDeleteInput) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var user userModel
@@ -399,6 +417,13 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 		}
 		if result.Error != nil {
 			return fmt.Errorf("lock user for deletion: %w", result.Error)
+		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, input.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && identity.ProtectsUser(input.UserID) {
+			return bootstrapadmin.ErrProtected
 		}
 		if user.Version != input.Version {
 			return application.ErrVersionConflict
@@ -445,8 +470,14 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 	})
 }
 
+// ListAccounts 列出租户范围内的账号（含密码初始化标记与关联用户名回填）。
 func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Account], error) {
+	identity, initialized, err := bootstrapadmin.Resolve(ctx, repository.database, tenantID)
+	if err != nil {
+		return application.PageResult[domain.Account]{}, err
+	}
 	database := applyAccountFilter(repository.database.WithContext(ctx).Model(&accountModel{}), tenantID, query)
+	database = excludeBootstrapAccount(database, identity, initialized)
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
 		return application.PageResult[domain.Account]{}, fmt.Errorf("count accounts: %w", err)
@@ -492,11 +523,10 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 	return application.PageResult[domain.Account]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// UpdateAccount changes an account status with its session invalidation in the same transaction.
+// UpdateAccount 变更账号状态并在同一事务内使其会话失效。
 //
-// A disabled account must never regain access by simply being re-enabled while an old session is
-// still inside its expiry window. The row lock makes the status transition and revocation atomic:
-// if either write fails, neither becomes visible.
+// 旧会话仍在有效期内时，被停用账号绝不能靠简单重新启用恢复访问。行锁使状态转移与
+// 会话吊销原子化：任一写入失败，两者都不生效。
 func (repository *GORMRepository) UpdateAccount(ctx context.Context, input application.AccountUpdateInput) (domain.Account, error) {
 	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -510,6 +540,13 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 		}
 		if result.Error != nil {
 			return fmt.Errorf("lock account before update: %w", result.Error)
+		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, input.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && bootstrapadmin.AccountUpdateViolation(identity, input.AccountID, input.Status, input.UpdateValidity, input.ValidUntil) {
+			return bootstrapadmin.ErrProtected
 		}
 
 		now := time.Now().UTC()
@@ -555,9 +592,8 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 	return repository.getAccount(ctx, input.TenantID, input.AccountID)
 }
 
-// DisableExternalIdentity reconciles a provider-side disablement into the
-// platform aggregate. It intentionally never enables anything: platform-side
-// administrators remain the only authority that can restore access.
+// DisableExternalIdentity 把提供方侧的停用结果对账进平台聚合。它有意永不启用任何东西：
+// 平台侧管理员是恢复访问的唯一权威。
 func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, tenantID, userID string) error {
 	tenantID = strings.TrimSpace(tenantID)
 	userID = strings.TrimSpace(userID)
@@ -573,6 +609,13 @@ func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, t
 		}
 		if result.Error != nil {
 			return fmt.Errorf("lock externally disabled user: %w", result.Error)
+		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, tenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && identity.ProtectsUser(userID) {
+			return bootstrapadmin.ErrProtected
 		}
 
 		var accounts []accountModel
@@ -658,6 +701,7 @@ func (repository *GORMRepository) getAccount(ctx context.Context, tenantID, acco
 	return toAccountWithFallbackName(row), nil
 }
 
+// ListOrgUnits 列出租户范围内的组织单元，按物化路径与排序字段排序。
 func (repository *GORMRepository) ListOrgUnits(ctx context.Context, tenantID, keyword, status string, query application.PageRequest) (application.PageResult[domain.OrgUnit], error) {
 	database := applyOrganizationFilter(repository.database.WithContext(ctx).Model(&orgUnitModel{}), tenantID, keyword, status)
 	database = applyManagementAuthorizationScope(database, query, "id", "id")
@@ -677,6 +721,7 @@ func (repository *GORMRepository) ListOrgUnits(ctx context.Context, tenantID, ke
 	return application.PageResult[domain.OrgUnit]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// CreateOrgUnit 在事务内派生物化路径并创建组织节点；父节点缺失或停用时返回 ErrNotFound。
 func (repository *GORMRepository) CreateOrgUnit(ctx context.Context, orgUnit domain.OrgUnit, operatorID string) (domain.OrgUnit, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		// path 采用包含自身 ID 的物化路径，既支持稳定的子树前缀查询，也使移动节点时能
@@ -841,6 +886,19 @@ func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input appli
 		if existing.Status != domain.StatusActive {
 			return application.ErrConflict
 		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, input.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized {
+			protected, err := organizationSubtreeHoldsProtectedIdentity(ctx, transaction, input.TenantID, identity.UserID, existing.Path)
+			if err != nil {
+				return err
+			}
+			if protected {
+				return bootstrapadmin.ErrProtected
+			}
+		}
 
 		now := time.Now().UTC()
 		organizationIDs := transaction.Model(&orgUnitModel{}).Select("id").
@@ -908,10 +966,9 @@ func (repository *GORMRepository) DeleteOrgUnit(ctx context.Context, input appli
 	})
 }
 
-// disableOrganizationRoleBindings closes every role binding owned by an organization in the
-// deleted subtree. The rows remain available for audit, while the subject type predicate keeps
-// user and position bindings outside this subject-lifecycle cleanup operation. This cleanup is
-// intentionally broader than the management UI, which permits revoking MANUAL bindings only.
+// disableOrganizationRoleBindings 关闭被删子树中组织持有的全部角色绑定。行保留供审计；
+// subject_type 谓词把用户与岗位绑定排除在本主体生命周期清理之外。该清理有意比管理界面
+// （只允许吊销 MANUAL 绑定）更宽。
 func disableOrganizationRoleBindings(transaction *gorm.DB, tenantID string, organizationIDs *gorm.DB, operatorID string, now time.Time) error {
 	result := buildDisableOrganizationRoleBindings(transaction, tenantID, organizationIDs, operatorID, now)
 	if result.Error != nil {
@@ -931,6 +988,7 @@ func buildDisableOrganizationRoleBindings(transaction *gorm.DB, tenantID string,
 		})
 }
 
+// ListPositions 列出租户范围内的岗位，并按调用方的数据范围授权过滤。
 func (repository *GORMRepository) ListPositions(ctx context.Context, tenantID, keyword, status string, query application.PageRequest) (application.PageResult[domain.Position], error) {
 	database := applyPositionFilter(repository.database.WithContext(ctx).Model(&positionModel{}), tenantID, keyword, status)
 	database = applyManagementAuthorizationScope(database, query, "id", "org_unit_id")
@@ -950,6 +1008,7 @@ func (repository *GORMRepository) ListPositions(ctx context.Context, tenantID, k
 	return application.PageResult[domain.Position]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// CreatePosition 创建岗位；所属组织必须存在且处于 ACTIVE 状态，否则返回 ErrNotFound。
 func (repository *GORMRepository) CreatePosition(ctx context.Context, position domain.Position, operatorID string) (domain.Position, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var total int64
@@ -983,9 +1042,8 @@ func (repository *GORMRepository) CreatePosition(ctx context.Context, position d
 	return position, nil
 }
 
-// DeletePosition logically deletes one position and disables every active membership that points
-// to it. The transaction also clears affected users' primary organization shortcut and advances
-// inherited-authorization revisions so refreshed subsystem claims stop carrying the position role.
+// DeletePosition 逻辑删除一个岗位并停用指向它的全部活跃任职。事务同时清空受影响用户的
+// 主组织快捷引用，并推进继承授权修订号，使刷新后的子系统声明不再携带该岗位角色。
 func (repository *GORMRepository) DeletePosition(ctx context.Context, input application.PositionDeleteInput) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var existing positionModel
@@ -1003,6 +1061,19 @@ func (repository *GORMRepository) DeletePosition(ctx context.Context, input appl
 		}
 		if existing.Status != domain.StatusActive {
 			return application.ErrConflict
+		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, input.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized {
+			protected, err := positionHoldsProtectedIdentity(ctx, transaction, input.TenantID, identity.UserID, input.PositionID)
+			if err != nil {
+				return err
+			}
+			if protected {
+				return bootstrapadmin.ErrProtected
+			}
 		}
 
 		now := time.Now().UTC()
@@ -1061,9 +1132,8 @@ func (repository *GORMRepository) DeletePosition(ctx context.Context, input appl
 	})
 }
 
-// disablePositionAuthorizationArtifacts closes every active authorization edge owned by a
-// position before that position is disabled. Keeping the rows as DISABLED preserves audit and
-// optimistic-lock history while preventing stale template assignments from appearing active.
+// disablePositionAuthorizationArtifacts 在岗位停用前关闭其持有的全部活跃授权边。行保留为
+// DISABLED 以维持审计与乐观锁历史，同时防止过期模板分配继续表现为生效。
 func disablePositionAuthorizationArtifacts(transaction *gorm.DB, tenantID string, positionIDs *gorm.DB, operatorID string, now time.Time) error {
 	assignmentResult := buildDisablePositionAuthorizationTemplateAssignments(transaction, tenantID, positionIDs, operatorID, now)
 	if assignmentResult.Error != nil {
@@ -1099,8 +1169,15 @@ func buildDisablePositionRoleBindings(transaction *gorm.DB, tenantID string, pos
 		})
 }
 
+// ListMemberships 列出租户范围内的任职关系（联表带出用户/组织/岗位名称），并按调用方
+// 数据范围授权过滤。
 func (repository *GORMRepository) ListMemberships(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Membership], error) {
+	identity, initialized, err := bootstrapadmin.Resolve(ctx, repository.database, tenantID)
+	if err != nil {
+		return application.PageResult[domain.Membership]{}, err
+	}
 	database := applyMembershipFilter(repository.membershipQuery(ctx), tenantID, query)
+	database = excludeBootstrapMembership(database, identity, initialized)
 	database = applyManagementAuthorizationScope(database, query, "m.id", "m.org_unit_id")
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
@@ -1118,6 +1195,8 @@ func (repository *GORMRepository) ListMemberships(ctx context.Context, tenantID 
 	return application.PageResult[domain.Membership]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// CreateMembership 创建任职关系；主任职唯一性、用户/组织/岗位同租户校验与主组织快捷
+// 引用写入在同一事务内完成。
 func (repository *GORMRepository) CreateMembership(ctx context.Context, input application.MembershipCreateInput, id string) (domain.Membership, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		// 服务端以联表校验用户、组织、岗位同租户且岗位确属该组织，不能信任前端提交的
@@ -1136,6 +1215,9 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 			}
 		}
 		now := time.Now().UTC()
+		if err := validateMembershipDelegation(ctx, transaction, input.TenantID, input.OperatorID, membershipForDelegation(input, domain.StatusActive), nil, now); err != nil {
+			return err
+		}
 		if err := transaction.Create(&membershipModel{
 			ID:                   id,
 			TenantID:             input.TenantID,
@@ -1181,6 +1263,8 @@ func (repository *GORMRepository) CreateMembership(ctx context.Context, input ap
 	return repository.getMembership(ctx, input.TenantID, id)
 }
 
+// UpdateMembership 以乐观锁更新任职关系；组织/岗位/主次变化按人员异动处理——结束旧任职
+// 并创建新任职，返回新任职 ID。
 func (repository *GORMRepository) UpdateMembership(ctx context.Context, input application.MembershipUpdateInput) (domain.Membership, error) {
 	resultID := input.MembershipID
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -1193,6 +1277,18 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 		}
 		if result.Error != nil {
 			return fmt.Errorf("get membership before update: %w", result.Error)
+		}
+		// 乐观锁必须在任何写入之前校验：人员异动分支（换组织 / 岗位 / 主次）曾经直接用
+		// 数据库里的当前版本更新，完全忽略请求版本，旧页面可以覆盖后来发生的变更。
+		if existing.Version != input.Version {
+			return application.ErrVersionConflict
+		}
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, transaction, input.TenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && membershipUpdateViolates(identity, existing, input) {
+			return bootstrapadmin.ErrProtected
 		}
 		if err := ensureMembershipReferences(ctx, transaction, input.MembershipCreateInput); err != nil {
 			return err
@@ -1213,6 +1309,13 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 		}
 
 		now := time.Now().UTC()
+		desired := membershipForDelegation(input.MembershipCreateInput, status)
+		if input.InheritAuthorization == nil {
+			desired.InheritAuthorization = existing.InheritAuthorization
+		}
+		if err := validateMembershipDelegation(ctx, transaction, input.TenantID, input.OperatorID, desired, &existing, now); err != nil {
+			return err
+		}
 		// 岗位、组织或主次任职发生变化属于人员异动，绝不能覆盖历史任职。
 		// 结束旧任职并创建新任职，使晋升、降职和调岗的授权来源可审计。
 		if existing.OrgUnitID != input.OrgUnitID || existing.PositionID != input.PositionID || existing.MembershipType != input.MembershipType {
@@ -1220,7 +1323,7 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 			if idErr != nil {
 				return fmt.Errorf("generate personnel change membership id: %w", idErr)
 			}
-			if err := transaction.Model(&membershipModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, existing.ID, existing.Version).Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": nullableTime(input.EffectiveFrom), "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			if err := transaction.Model(&membershipModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, existing.ID, input.Version).Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "valid_until": nullableTime(input.EffectiveFrom), "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return mapWriteError(err, "close prior membership")
 			}
 			primary := input.MembershipType == domain.MembershipPrimary && *input.Status == domain.StatusActive
@@ -1229,7 +1332,7 @@ func (repository *GORMRepository) UpdateMembership(ctx context.Context, input ap
 					return err
 				}
 			}
-			if err := transaction.Create(&membershipModel{ID: newID, TenantID: input.TenantID, UserID: input.UserID, OrgUnitID: input.OrgUnitID, PositionID: input.PositionID, MembershipType: input.MembershipType, IsPrimary: primary, InheritAuthorization: input.InheritAuthorization == nil || *input.InheritAuthorization, ValidFrom: nullableTime(input.EffectiveFrom), ValidUntil: nullableTime(input.EffectiveTo), Status: *input.Status, Version: 1, CreatedAt: now, CreatedBy: nullableString(&input.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&input.OperatorID)}).Error; err != nil {
+			if err := transaction.Create(&membershipModel{ID: newID, TenantID: input.TenantID, UserID: input.UserID, OrgUnitID: input.OrgUnitID, PositionID: input.PositionID, MembershipType: input.MembershipType, IsPrimary: primary, InheritAuthorization: desired.InheritAuthorization, ValidFrom: nullableTime(input.EffectiveFrom), ValidUntil: nullableTime(input.EffectiveTo), Status: *input.Status, Version: 1, CreatedAt: now, CreatedBy: nullableString(&input.OperatorID), UpdatedAt: now, UpdatedBy: nullableString(&input.OperatorID)}).Error; err != nil {
 				return mapWriteError(err, "create changed membership")
 			}
 			if primary {
@@ -1389,9 +1492,8 @@ func ensureNoOtherPrimary(ctx context.Context, database *gorm.DB, tenantID, user
 	return nil
 }
 
-// lockMembershipUsers serializes all primary-membership changes for the affected users.
-// IDs are locked in deterministic order so moving an appointment between users cannot
-// deadlock with another concurrent move in the opposite direction.
+// lockMembershipUsers 串行化受影响用户的全部主任职变更。ID 按确定性顺序加锁，使两个
+// 方向相反的并发任职转移不会死锁。
 func lockMembershipUsers(ctx context.Context, database *gorm.DB, tenantID string, userIDs ...string) error {
 	ids := make([]string, 0, len(userIDs))
 	seen := make(map[string]struct{}, len(userIDs))
@@ -1425,7 +1527,10 @@ func applyUserFilter(database *gorm.DB, tenantID string, query application.PageR
 	database = database.Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
 	if query.Keyword != "" {
 		like := "%" + query.Keyword + "%"
-		database = database.Where("display_name LIKE ? OR employee_no LIKE ? OR email LIKE ?", like, like, like)
+		// employee_no/email 等列可能是 ascii_bin；中文关键字直接比较会在 MySQL 8
+		// 报"conversion ... impossible for parameter"。与组织/岗位筛选一致，先把代码列
+		// 转成 utf8mb4 再比较，不改变匹配语义。
+		database = database.Where("display_name LIKE ? OR CONVERT(employee_no USING utf8mb4) LIKE ? OR email LIKE ?", like, like, like)
 	}
 	if query.Status != "" {
 		database = database.Where("status = ?", query.Status)
@@ -1445,9 +1550,9 @@ func applyAccountFilter(database *gorm.DB, tenantID string, query application.Pa
 	return database
 }
 
-// accountOwnerVisibilityFilter hides login accounts whose owning user has been business-deleted.
-// Disabled but non-deleted users remain manageable. Service accounts without a user_id remain
-// visible. Account rows stay in the database so security and audit references keep integrity.
+// accountOwnerVisibilityFilter 隐藏属主用户已被业务删除的登录账号。停用但未删除的用户
+// 仍可管理；没有 user_id 的服务账号保持可见。账号行留在数据库中，安全与审计引用保持
+// 完整。
 func accountOwnerVisibilityFilter() (string, []any) {
 	return `(iam_account.user_id IS NULL OR EXISTS (
 		SELECT 1 FROM iam_user AS linked_user
@@ -1461,10 +1566,9 @@ func applyOrganizationFilter(database *gorm.DB, tenantID, keyword, status string
 	database = database.Where("tenant_id = ?", tenantID)
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		// iam_org_unit.code / iam_position.code use ascii_bin, while imported names
-		// are commonly Chinese and arrive as utf8mb4 parameters. Convert the code
-		// expression before the OR comparison so MySQL 8 does not attempt an
-		// incompatible ascii_bin/utf8mb4 collation coercion.
+		// iam_org_unit.code / iam_position.code 使用 ascii_bin，而导入名称常见中文、以
+		// utf8mb4 参数到达。先转换 code 表达式再做 OR 比较，避免 MySQL 8 尝试不兼容的
+		// ascii_bin/utf8mb4 排序规则强转。
 		database = database.Where("CONVERT(code USING utf8mb4) LIKE ? OR name LIKE ?", like, like)
 	}
 	if status != "" {
@@ -1529,6 +1633,102 @@ func toAccountWithFallbackName(model accountModel) domain.Account {
 	return account
 }
 
+// excludeBootstrapUser 在计数与分页之前把部署初始化的管理员从所有管理列表中隐藏，
+// 保证总数、搜索与导出的一致性。
+func excludeBootstrapUser(database *gorm.DB, identity bootstrapadmin.Identity, initialized bool) *gorm.DB {
+	if !initialized {
+		return database
+	}
+	return database.Where("iam_user.id <> ?", identity.UserID)
+}
+
+// excludeBootstrapAccount 隐藏部署登录账号以及仍与受保护用户关联的账号。账号行保留在
+// 数据库中，认证与审计完整性不受影响。
+func excludeBootstrapAccount(database *gorm.DB, identity bootstrapadmin.Identity, initialized bool) *gorm.DB {
+	if !initialized {
+		return database
+	}
+	return database.
+		Where("iam_account.id <> ?", identity.AccountID).
+		Where("(iam_account.user_id IS NULL OR iam_account.user_id <> ?)", identity.UserID)
+}
+
+// excludeBootstrapMembership 把受保护用户的任职关系从任职模块中隐藏。
+func excludeBootstrapMembership(database *gorm.DB, identity bootstrapadmin.Identity, initialized bool) *gorm.DB {
+	if !initialized {
+		return database
+	}
+	return database.Where("m.user_id <> ?", identity.UserID)
+}
+
+// membershipUpdateViolates 阻止会把受保护用户任职停用、过期、转移或改派的人员异动式
+// 编辑；无害的元数据更新保持放行。
+func membershipUpdateViolates(identity bootstrapadmin.Identity, existing membershipModel, input application.MembershipUpdateInput) bool {
+	if !identity.ProtectsUser(existing.UserID) && !identity.ProtectsUser(input.UserID) {
+		return false
+	}
+	if strings.TrimSpace(input.UserID) != existing.UserID {
+		return true
+	}
+	if input.Status != nil && *input.Status != domain.StatusActive {
+		return true
+	}
+	if input.EffectiveTo != nil {
+		return true
+	}
+	return input.OrgUnitID != existing.OrgUnitID ||
+		input.PositionID != existing.PositionID ||
+		input.MembershipType != existing.MembershipType
+}
+
+// organizationSubtreeHoldsProtectedIdentity 报告删除该子树是否会级联影响受保护管理员的
+// 活跃任职或主组织快捷引用。
+func organizationSubtreeHoldsProtectedIdentity(ctx context.Context, database *gorm.DB, tenantID, userID, path string) (bool, error) {
+	var membershipCount int64
+	err := protectedMembershipInOrganizationSubtreeQuery(database.WithContext(ctx), tenantID, userID, path).Count(&membershipCount).Error
+	if err != nil {
+		return false, fmt.Errorf("check protected membership in organization subtree: %w", err)
+	}
+	if membershipCount > 0 {
+		return true, nil
+	}
+	var primaryCount int64
+	err = protectedPrimaryOrganizationInSubtreeQuery(database.WithContext(ctx), tenantID, userID, path).Count(&primaryCount).Error
+	if err != nil {
+		return false, fmt.Errorf("check protected primary organization in subtree: %w", err)
+	}
+	return primaryCount > 0, nil
+}
+
+func protectedMembershipInOrganizationSubtreeQuery(database *gorm.DB, tenantID, userID, path string) *gorm.DB {
+	return database.Table("iam_membership AS membership").
+		Joins("JOIN iam_org_unit AS organization ON organization.id = membership.org_unit_id AND organization.tenant_id = membership.tenant_id").
+		Where("membership.tenant_id = ? AND membership.user_id = ? AND membership.status = ?", tenantID, userID, domain.StatusActive).
+		Where("organization.tenant_id = ? AND organization.path LIKE ?", tenantID, path+"%")
+}
+
+func protectedPrimaryOrganizationInSubtreeQuery(database *gorm.DB, tenantID, userID, path string) *gorm.DB {
+	return database.Table("iam_user AS user").
+		Joins("JOIN iam_org_unit AS organization ON organization.id = user.primary_org_id AND organization.tenant_id = user.tenant_id").
+		Where("user.tenant_id = ? AND user.id = ? AND user.deleted_at IS NULL", tenantID, userID).
+		Where("organization.path LIKE ?", path+"%")
+}
+
+// positionHoldsProtectedIdentity 报告删除该岗位是否会停用受保护管理员的活跃任职。
+func positionHoldsProtectedIdentity(ctx context.Context, database *gorm.DB, tenantID, userID, positionID string) (bool, error) {
+	var count int64
+	err := positionMembershipQuery(database.WithContext(ctx), tenantID, userID, positionID).Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("check protected membership on position: %w", err)
+	}
+	return count > 0, nil
+}
+
+func positionMembershipQuery(database *gorm.DB, tenantID, userID, positionID string) *gorm.DB {
+	return database.Table("iam_membership").
+		Where("tenant_id = ? AND user_id = ? AND position_id = ? AND status = ?", tenantID, userID, positionID, domain.StatusActive)
+}
+
 func mapWriteError(err error, operation string) error {
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return application.ErrConflict
@@ -1536,4 +1736,4 @@ func mapWriteError(err error, operation string) error {
 	return fmt.Errorf("%s: %w", operation, err)
 }
 
-// keep strings imported through this compile-time check while application filters stay explicit.
+// 在应用层筛选保持显式的同时，借助该编译期检查保留 strings 导入。

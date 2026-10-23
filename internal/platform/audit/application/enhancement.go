@@ -60,6 +60,7 @@ type RetentionService struct {
 	recorder   GovernanceAuditRecorder
 }
 
+// NewRetentionService 构造归档/清理服务；任一依赖为 nil 时失败关闭。
 func NewRetentionService(repository RetentionRepository, writer ArchiveWriter, ids IdentifierGenerator, clock Clock, recorder GovernanceAuditRecorder) (*RetentionService, error) {
 	if repository == nil || writer == nil || ids == nil || clock == nil || recorder == nil {
 		return nil, errors.New("audit retention service dependencies must not be nil")
@@ -96,7 +97,7 @@ type RetentionTaskPageRequest struct {
 	ApplicationID, Mode, Status string
 }
 
-// List returns task state without exposing archive file contents.
+// List 返回任务状态，不暴露归档文件内容。
 func (service *RetentionService) List(ctx context.Context, tenantID string, query RetentionTaskPageRequest) (PageResult[domain.RetentionTask], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.RetentionTask]{}, validation("tenant_id is required")
@@ -108,6 +109,8 @@ func (service *RetentionService) List(ctx context.Context, tenantID string, quer
 	return service.repository.ListRetentionTasks(ctx, strings.TrimSpace(tenantID), query)
 }
 
+// RunOnce 领取并执行一个到期任务（归档或清理）。workerID 必须在实例生命周期内稳定，
+// 仓储据此区分正常持有与超时接管。
 func (service *RetentionService) RunOnce(ctx context.Context, workerID string, staleBefore time.Time) (bool, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -245,6 +248,7 @@ type DeadLetterInput struct {
 	Event                                                               EventInput
 }
 
+// DeadLetterPageRequest 是死信列表查询的分页与过滤参数。
 type DeadLetterPageRequest struct {
 	Page, PageSize          int
 	ApplicationCode, Status string
@@ -260,12 +264,12 @@ type DeadLetterRepository interface {
 	DeadLetterStatus(context.Context, string, string) (domain.DeadLetterStatus, error)
 }
 
-// EventIngestor is intentionally compatible with the current audit application Service.
+// EventIngestor 有意与当前审计应用 Service 保持接口兼容。
 type EventIngestor interface {
 	Ingest(context.Context, string, EventInput) (domain.Receipt, error)
 }
 
-// DeadLetterService provides operations pages with tenant-isolated list/status/replay contracts.
+// DeadLetterService 为运营页面提供租户隔离的列表/状态/重放契约。
 type DeadLetterService struct {
 	repository DeadLetterRepository
 	ingestor   EventIngestor
@@ -274,6 +278,7 @@ type DeadLetterService struct {
 	recorder   GovernanceAuditRecorder
 }
 
+// NewDeadLetterService 构造死信服务；任一依赖为 nil 时失败关闭。
 func NewDeadLetterService(repository DeadLetterRepository, ingestor EventIngestor, ids IdentifierGenerator, clock Clock, recorder GovernanceAuditRecorder) (*DeadLetterService, error) {
 	if repository == nil || ingestor == nil || ids == nil || clock == nil || recorder == nil {
 		return nil, errors.New("audit dead-letter service dependencies must not be nil")
@@ -281,6 +286,7 @@ func NewDeadLetterService(repository DeadLetterRepository, ingestor EventIngesto
 	return &DeadLetterService{repository: repository, ingestor: ingestor, ids: ids, clock: clock, recorder: recorder}, nil
 }
 
+// RecordFailure 校验原事件并把脱敏载荷存为 PENDING 死信，供运营重放或忽略。
 func (service *DeadLetterService) RecordFailure(ctx context.Context, input DeadLetterInput) (domain.DeadLetter, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.ApplicationCode) == "" || strings.TrimSpace(input.ErrorCode) == "" {
 		return domain.DeadLetter{}, validation("tenant_id, application_code and error_code are required")
@@ -300,8 +306,8 @@ func (service *DeadLetterService) RecordFailure(ctx context.Context, input DeadL
 	return service.repository.CreateDeadLetter(ctx, domain.DeadLetter{DeadLetterID: id, TenantID: strings.TrimSpace(input.TenantID), ApplicationCode: strings.TrimSpace(input.ApplicationCode), EnvironmentCode: strings.TrimSpace(input.EnvironmentCode), EventID: input.Event.EventID, Status: domain.DeadLetterPending, Payload: payload, LastErrorCode: []byte(strings.TrimSpace(input.ErrorCode)), LastErrorMessage: []byte(trim(input.ErrorMessage, 1000)), Attempts: 1, CreatedAt: now, UpdatedAt: now})
 }
 
-// Get returns controlled dead-letter metadata for an operator. The returned model is converted by
-// the HTTP adapter, which intentionally omits Payload and LastErrorMessage.
+// Get 返回受控的死信元数据给运营者。返回模型由 HTTP 适配器转换，
+// 适配器有意省略 Payload 与 LastErrorMessage。
 func (service *DeadLetterService) Get(ctx context.Context, tenantID, deadLetterID string) (domain.DeadLetter, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(deadLetterID) == "" {
 		return domain.DeadLetter{}, validation("tenant_id and dead_letter_id are required")
@@ -309,6 +315,7 @@ func (service *DeadLetterService) Get(ctx context.Context, tenantID, deadLetterI
 	return service.repository.GetDeadLetter(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(deadLetterID))
 }
 
+// List 分页返回租户内死信列表；载荷与错误消息原文不进入列表结果。
 func (service *DeadLetterService) List(ctx context.Context, tenantID string, query DeadLetterPageRequest) (PageResult[domain.DeadLetter], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.DeadLetter]{}, validation("tenant_id is required")
@@ -317,6 +324,7 @@ func (service *DeadLetterService) List(ctx context.Context, tenantID string, que
 	return service.repository.ListDeadLetters(ctx, strings.TrimSpace(tenantID), query)
 }
 
+// Status 返回租户（可含应用过滤）的死信积压统计。
 func (service *DeadLetterService) Status(ctx context.Context, tenantID, applicationCode string) (domain.DeadLetterStatus, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return domain.DeadLetterStatus{}, validation("tenant_id is required")
@@ -386,8 +394,8 @@ func trim(value string, limit int) string {
 	return value
 }
 
-// IngestionReceiptPageRequest limits receipt queries to a tenant and optional verified delivery
-// dimensions. Receipt bodies do not contain audit-event payloads.
+// IngestionReceiptPageRequest 把回执查询限定在租户与可选的已验证投递维度内。
+// 回执正文不包含审计事件 payload。
 type IngestionReceiptPageRequest struct {
 	Page, PageSize                                      int
 	ApplicationCode, EnvironmentCode, Status, RequestID string
@@ -395,14 +403,15 @@ type IngestionReceiptPageRequest struct {
 	ReceivedFrom, ReceivedTo                            *time.Time
 }
 
-// IngestionReceiptRepository reads receiver-side batch delivery acknowledgements.
+// IngestionReceiptRepository 读取接收侧的批量投递确认。
 type IngestionReceiptRepository interface {
 	ListIngestionReceipts(context.Context, string, IngestionReceiptPageRequest) (PageResult[domain.IngestionReceipt], error)
 }
 
-// IngestionReceiptService provides tenant-isolated operational acknowledgement queries.
+// IngestionReceiptService 提供租户隔离的运营确认查询。
 type IngestionReceiptService struct{ repository IngestionReceiptRepository }
 
+// NewIngestionReceiptService 构造接收回执查询服务；仓储缺失时失败关闭。
 func NewIngestionReceiptService(repository IngestionReceiptRepository) (*IngestionReceiptService, error) {
 	if repository == nil {
 		return nil, errors.New("audit ingestion receipt service repository must not be nil")
@@ -410,6 +419,7 @@ func NewIngestionReceiptService(repository IngestionReceiptRepository) (*Ingesti
 	return &IngestionReceiptService{repository: repository}, nil
 }
 
+// List 分页返回租户内批量投递接收回执，时间窗起止顺序非法时拒绝。
 func (service *IngestionReceiptService) List(ctx context.Context, tenantID string, query IngestionReceiptPageRequest) (PageResult[domain.IngestionReceipt], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.IngestionReceipt]{}, validation("tenant_id is required")

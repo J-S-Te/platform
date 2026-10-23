@@ -385,14 +385,28 @@ func (service *FileService) UnbindResource(ctx context.Context, tenantID, applic
 
 // CleanupUnboundExpired 只清理早于截止时间、无业务绑定且状态为 READY 的文件。
 // 现有表没有逐文件过期时间，所以截止点来自外部策略；若要支持每个文件独立过期，必须新增迁移。
+// maxCleanupBatch 限制单次清理的领取条数，避免无界占用磁盘 I/O 与事务时间。
+const maxCleanupBatch = 500
+
+// CleanupUnboundExpired 执行一次有界清理：只处理"临时类 + 保留期已到 + 创建早于截止点 +
+// 无活动绑定"的文件。长期文件、保留期为空/未到期与绑定文件保持字节不变。
 func (service *FileService) CleanupUnboundExpired(ctx context.Context, tenantID string, cutoff time.Time, maxFiles int) (domain.CleanupResult, error) {
 	tenantID = strings.TrimSpace(tenantID)
+	now := service.clock.Now().UTC()
 	if tenantID == "" || cutoff.IsZero() || maxFiles <= 0 {
 		return domain.CleanupResult{}, validation("tenant_id, cleanup cutoff and max_files are required")
 	}
+	if maxFiles > maxCleanupBatch {
+		return domain.CleanupResult{}, validation("max_files must be between 1 and 500")
+	}
+	// 截止点不得晚于当前时间，否则等于把"尚未到期"的时间窗口交给调用方随意放大。
+	if cutoff.UTC().After(now) {
+		return domain.CleanupResult{}, validation("cleanup cutoff must not be later than now")
+	}
 	result := domain.CleanupResult{}
+	var releaseErr error
 	for range maxFiles {
-		stored, claimed, err := service.repository.ClaimExpiredUnbound(ctx, tenantID, cutoff.UTC())
+		stored, claimed, err := service.repository.ClaimExpiredUnbound(ctx, tenantID, cutoff.UTC(), now)
 		if err != nil {
 			return result, err
 		}
@@ -402,23 +416,108 @@ func (service *FileService) CleanupUnboundExpired(ctx context.Context, tenantID 
 		result.ClaimedFiles++
 		if err := service.store.Remove(stored.Version.StorageRelativePath); err != nil {
 			result.FailedFiles++
-			_ = service.repository.ReleaseCleanupClaim(ctx, stored.File.TenantID, stored.File.ID, stored.File.Status, service.clock.Now().UTC())
+			// 磁盘删除失败必须按领取版本安全释放；释放失败意味着文件卡在 DELETING，必须显式报告。
+			if releaseFailure := service.repository.ReleaseCleanupClaim(ctx, stored.File.TenantID, stored.File.ID, stored.File.Status, stored.File.Version, service.clock.Now().UTC()); releaseFailure != nil {
+				releaseErr = errors.Join(releaseErr, fmt.Errorf("release cleanup claim %s: %w", stored.File.ID, releaseFailure))
+			}
 			continue
 		}
-		if err := service.repository.MarkDeleted(ctx, stored.File.TenantID, stored.File.ID, service.clock.Now().UTC()); err != nil {
+		if err := service.repository.MarkDeleted(ctx, stored.File.TenantID, stored.File.ID, stored.File.Version, service.clock.Now().UTC()); err != nil {
 			// 二进制已删除但数据库推进失败时不能恢复文件；记录失败计数，DELETING 元数据需由后续对账修复。
 			result.FailedFiles++
 			continue
 		}
 		result.DeletedFiles++
 	}
+	// 受控对账：处理此前遗留在 DELETING 的记录（检查保留策略、物理文件与数据库状态后逐条处理）。
+	reconciled, reconcileErr := service.ReconcileStaleDeletions(ctx, tenantID, cutoff, maxFiles)
+	result.ReconciledFiles += reconciled.ReconciledFiles
+	result.DeletedFiles += reconciled.DeletedFiles
+	result.FailedFiles += reconciled.FailedFiles
+	releaseErr = errors.Join(releaseErr, reconcileErr)
+
 	removed, err := service.store.CleanupTemporary(cutoff.UTC())
 	if err != nil {
 		result.TempCleanupFailure = 1
-		return result, err
+		return result, errors.Join(releaseErr, err)
 	}
 	result.RemovedTempFiles = removed
+	if releaseErr != nil {
+		return result, releaseErr
+	}
 	return result, nil
+}
+
+// ReconcileStaleDeletions 对停留在 DELETING 的遗留记录做受控对账，不批量重置：
+//   - 物理文件已不存在（磁盘已删、数据库未推进）→ 只能推进为 DELETED，绝不恢复成可下载；
+//   - 物理文件仍在且仍满足"临时类 + 保留期已到"→ 删除并推进为 DELETED；
+//   - 物理文件仍在但已不满足清理条件（历史误领取）→ 按版本安全释放回可下载状态，字节不变；
+//   - 无法判定（存储读取失败、版本冲突）→ 保留 DELETING 并计入失败，等待下一次对账。
+func (service *FileService) ReconcileStaleDeletions(ctx context.Context, tenantID string, cutoff time.Time, limit int) (domain.CleanupResult, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	now := service.clock.Now().UTC()
+	if tenantID == "" || cutoff.IsZero() || limit <= 0 {
+		return domain.CleanupResult{}, validation("tenant_id, reconciliation cutoff and limit are required")
+	}
+	if limit > maxCleanupBatch {
+		return domain.CleanupResult{}, validation("reconciliation limit must be between 1 and 500")
+	}
+	if cutoff.UTC().After(now) {
+		return domain.CleanupResult{}, validation("reconciliation cutoff must not be later than now")
+	}
+	result := domain.CleanupResult{}
+	stale, err := service.repository.ListStaleDeleting(ctx, tenantID, cutoff.UTC(), limit)
+	if err != nil {
+		return result, err
+	}
+	var reconcileErr error
+	for _, stored := range stale {
+		exists, inspectErr := service.store.Exists(stored.Version.StorageRelativePath)
+		if inspectErr != nil {
+			result.FailedFiles++
+			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("inspect stale deletion %s: %w", stored.File.ID, inspectErr))
+			continue
+		}
+		if !exists {
+			if finalizeErr := service.repository.MarkDeleted(ctx, stored.File.TenantID, stored.File.ID, stored.File.Version, service.clock.Now().UTC()); finalizeErr != nil {
+				result.FailedFiles++
+				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("finalize stale deletion %s: %w", stored.File.ID, finalizeErr))
+				continue
+			}
+			result.ReconciledFiles++
+			result.DeletedFiles++
+			continue
+		}
+		if !cleanableRetention(stored.File, now) {
+			if releaseFailure := service.repository.ReleaseCleanupClaim(ctx, stored.File.TenantID, stored.File.ID, stored.File.Status, stored.File.Version, service.clock.Now().UTC()); releaseFailure != nil {
+				result.FailedFiles++
+				reconcileErr = errors.Join(reconcileErr, fmt.Errorf("release stale deletion %s: %w", stored.File.ID, releaseFailure))
+				continue
+			}
+			result.ReconciledFiles++
+			continue
+		}
+		if removeErr := service.store.Remove(stored.Version.StorageRelativePath); removeErr != nil {
+			result.FailedFiles++
+			continue
+		}
+		if finalizeErr := service.repository.MarkDeleted(ctx, stored.File.TenantID, stored.File.ID, stored.File.Version, service.clock.Now().UTC()); finalizeErr != nil {
+			result.FailedFiles++
+			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("finalize stale deletion %s: %w", stored.File.ID, finalizeErr))
+			continue
+		}
+		result.ReconciledFiles++
+		result.DeletedFiles++
+	}
+	return result, reconcileErr
+}
+
+// cleanableRetention 判断文件当前是否满足通用清理的保留条件（临时类且保留期已到）。
+func cleanableRetention(file domain.File, now time.Time) bool {
+	if file.RetentionClass != domain.RetentionClassTemporary || file.RetentionUntil == nil {
+		return false
+	}
+	return !file.RetentionUntil.After(now)
 }
 
 // ReconcileStaleUploads 恢复早于截止时间且停留在 PENDING_UPLOAD/VALIDATING 的文件。
@@ -440,8 +539,12 @@ func (service *FileService) ReconcileStaleUploads(ctx context.Context, tenantID 
 		}
 		stream, openErr := service.store.OpenVerified(candidate.Version.StorageRelativePath)
 		if openErr != nil {
-			if markErr := service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, service.clock.Now().UTC()); markErr != nil && !errors.Is(markErr, ErrConflict) {
+			now := service.clock.Now().UTC()
+			if markErr := service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, now); markErr != nil && !errors.Is(markErr, ErrConflict) {
 				return result, markErr
+			}
+			if sessionErr := service.finalizeRecoveredUploadSession(ctx, tenantID, candidate.File.ID, "FAILED", now); sessionErr != nil {
+				return result, sessionErr
 			}
 			result.Failed++
 			continue
@@ -451,7 +554,11 @@ func (service *FileService) ReconcileStaleUploads(ctx context.Context, tenantID 
 			size, digest, integrityErr := calculateStoredIntegrity(stream)
 			if integrityErr != nil {
 				_ = stream.Close()
-				_ = service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, service.clock.Now().UTC())
+				now := service.clock.Now().UTC()
+				_ = service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, now)
+				if sessionErr := service.finalizeRecoveredUploadSession(ctx, tenantID, candidate.File.ID, "FAILED", now); sessionErr != nil {
+					return result, sessionErr
+				}
 				result.Failed++
 				continue
 			}
@@ -465,7 +572,11 @@ func (service *FileService) ReconcileStaleUploads(ctx context.Context, tenantID 
 			}
 		} else if integrityErr := verifyStoredIntegrity(stream, candidate.Version.SizeBytes, candidate.Version.SHA256); integrityErr != nil {
 			_ = stream.Close()
-			_ = service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, service.clock.Now().UTC())
+			now := service.clock.Now().UTC()
+			_ = service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, now)
+			if sessionErr := service.finalizeRecoveredUploadSession(ctx, tenantID, candidate.File.ID, "FAILED", now); sessionErr != nil {
+				return result, sessionErr
+			}
 			result.Failed++
 			continue
 		}
@@ -474,14 +585,22 @@ func (service *FileService) ReconcileStaleUploads(ctx context.Context, tenantID 
 		closeErr := stream.Close()
 		if validationErr != nil {
 			_ = service.store.Remove(candidate.Version.StorageRelativePath)
-			if markErr := service.repository.MarkRejected(ctx, tenantID, candidate.File.ID, service.clock.Now().UTC()); markErr != nil && !errors.Is(markErr, ErrConflict) && !errors.Is(markErr, ErrNotFound) {
+			now := service.clock.Now().UTC()
+			if markErr := service.repository.MarkRejected(ctx, tenantID, candidate.File.ID, now); markErr != nil && !errors.Is(markErr, ErrConflict) && !errors.Is(markErr, ErrNotFound) {
 				return result, markErr
+			}
+			if sessionErr := service.finalizeRecoveredUploadSession(ctx, tenantID, candidate.File.ID, "REJECTED", now); sessionErr != nil {
+				return result, sessionErr
 			}
 			result.Rejected++
 			continue
 		}
 		if closeErr != nil {
-			_ = service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, service.clock.Now().UTC())
+			now := service.clock.Now().UTC()
+			_ = service.repository.MarkFailed(ctx, tenantID, candidate.File.ID, now)
+			if sessionErr := service.finalizeRecoveredUploadSession(ctx, tenantID, candidate.File.ID, "FAILED", now); sessionErr != nil {
+				return result, sessionErr
+			}
 			result.Failed++
 			continue
 		}
@@ -492,9 +611,52 @@ func (service *FileService) ReconcileStaleUploads(ctx context.Context, tenantID 
 			}
 			return result, transitionErr
 		}
+		// 文件就绪不等于上传完成：必须把关联的上传会话一起收敛并补做业务绑定，
+		// 否则客户端会永久停在 UPLOADING，文件也永远不会绑定到业务对象。
+		if sessionErr := service.finalizeRecoveredUploadSession(ctx, tenantID, candidate.File.ID, "READY", service.clock.Now().UTC()); sessionErr != nil {
+			return result, sessionErr
+		}
 		result.Recovered++
 	}
 	return result, nil
+}
+
+// finalizeRecoveredUploadSession 收敛与恢复文件关联的上传会话。
+//
+// outcome 取值：
+//   - "READY"    → 补做资源绑定，然后会话置 READY；绑定失败会话置 FAILED(BINDING_FAILED)
+//   - "REJECTED" → 会话置 REJECTED(STATIC_VALIDATION_FAILED)
+//   - "FAILED"   → 会话置 FAILED(RECOVERY_FAILED)
+//
+// 会话已由 HTTP 路径或其他实例终结时保持幂等；找不到会话（V1 上传或已清理）时不做任何事。
+func (service *FileService) finalizeRecoveredUploadSession(ctx context.Context, tenantID, fileID, outcome string, now time.Time) error {
+	session, found, err := service.repository.PendingUploadSession(ctx, tenantID, fileID)
+	if err != nil || !found {
+		return err
+	}
+	switch outcome {
+	case "READY":
+		operator := strings.TrimSpace(session.ActorUserID)
+		if operator == "" {
+			operator = session.ApplicationID
+		}
+		displayName := strings.TrimSpace(session.DisplayName)
+		if displayName == "" {
+			displayName = session.OriginalName
+		}
+		if _, bindErr := service.BindResource(ctx, BindingInput{
+			TenantID: session.TenantID, ApplicationID: session.ApplicationID, FileID: session.FileID,
+			ResourceType: session.ResourceType, ResourceID: session.ResourceID, BindingType: session.BindingType,
+			DisplayName: displayName, OperatorUserID: operator,
+		}); bindErr != nil {
+			return service.repository.MarkUploadSession(ctx, tenantID, session.SessionID, "FAILED", "BINDING_FAILED", now)
+		}
+		return service.repository.MarkUploadSession(ctx, tenantID, session.SessionID, "READY", "", now)
+	case "REJECTED":
+		return service.repository.MarkUploadSession(ctx, tenantID, session.SessionID, "REJECTED", "STATIC_VALIDATION_FAILED", now)
+	default:
+		return service.repository.MarkUploadSession(ctx, tenantID, session.SessionID, "FAILED", "RECOVERY_FAILED", now)
+	}
 }
 
 func (service *FileService) resolveMediaType(declared, extension string, header []byte) (string, error) {
@@ -686,7 +848,7 @@ func hasPermission(values []string, wanted string) bool {
 
 func validation(message string) error { return fmt.Errorf("%w: %s", ErrValidation, message) }
 
-// StableAllowedMediaTypes returns the policy list in deterministic order for management UIs.
+// StableAllowedMediaTypes 以确定顺序返回策略白名单，供管理端展示。
 func (service *FileService) StableAllowedMediaTypes() []string {
 	result := make([]string, 0, len(service.policy.AllowedMediaTypes))
 	for mediaType := range service.policy.AllowedMediaTypes {
@@ -696,7 +858,7 @@ func (service *FileService) StableAllowedMediaTypes() []string {
 	return result
 }
 
-// VerifyDigest is small but intentionally exported for worker-side integrity checks after restore.
+// VerifyDigest 体量小但有意导出：worker 在恢复后需要用它做完整性校验。
 func VerifyDigest(reader io.Reader, expected []byte) (bool, error) {
 	hash := sha256.New()
 	if _, err := io.Copy(hash, reader); err != nil {

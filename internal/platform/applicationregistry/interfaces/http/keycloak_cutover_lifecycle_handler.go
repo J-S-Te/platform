@@ -8,10 +8,9 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
-// StartKeycloakObservation opens the required seven-day, per-environment
-// observation window.  It is deliberately not implicit in Client sync: the
-// operator must first see all server-verified projection and Broker-login
-// gates, then explicitly begin the measurable migration period.
+// StartKeycloakObservation 开启每个环境必需的七天观察窗口。刻意不随客户端同步
+// 隐式启动：操作者必须先看到全部服务端校验的投影与 Broker 登录门禁，
+// 再显式开始这段可度量的迁移观察期，保证窗口起点的证据可审计。
 func (handler *SubsystemOnboardingHandler) StartKeycloakObservation(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {

@@ -18,7 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// This test writes only to an explicitly supplied, empty disposable database.
+// 此测试只写入显式提供的空临时数据库。
 func TestBootstrapAfterFullMigrationChainOnMySQL(t *testing.T) {
 	dsn := os.Getenv("PLATFORM_BOOTSTRAP_TEST_DSN")
 	if dsn == "" {
@@ -44,7 +44,7 @@ func TestBootstrapAfterFullMigrationChainOnMySQL(t *testing.T) {
 	defer cancel()
 	db = db.WithContext(ctx)
 
-	// Reproduce the old complete migration chain, not a hand-built approximation.
+	// 复现历史完整迁移链，不使用手工构造的近似版本。
 	historical := fstest.MapFS{}
 	items, err := migrations.Files.ReadDir(".")
 	if err != nil {
@@ -117,7 +117,7 @@ func TestBootstrapAfterFullMigrationChainOnMySQL(t *testing.T) {
 	}
 	assertBootstrapCount(t, db, "iam_user", 1)
 
-	// Even manual SQL replay must preserve an initialized administrator's decision.
+	// 即使手工重放 SQL，也必须保留已初始化管理员的决定。
 	if err := db.Exec("UPDATE iam_position SET status = 'DISABLED' WHERE id = ?", "01J00000000000000000000400").Error; err != nil {
 		t.Fatal(err)
 	}

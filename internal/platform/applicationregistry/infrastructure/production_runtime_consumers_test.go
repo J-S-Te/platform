@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -247,18 +248,27 @@ func TestReviewedCRMPortalConsumerIndexPreservesCommercialCoverage(t *testing.T)
 		t.Fatal(err)
 	}
 	index := productionRuntimeConsumers(profiles)
-	if len(index["runtime/customer.env"]) != 9 {
-		t.Fatalf("shared CRM runtime needs 8 CRM and 1 Portal consumer: %v", index["runtime/customer.env"])
+	crmConsumers := []string{"customer-api", "customer-opportunity-alert-worker", "customer-owner-notification-worker", "customer-contract-transfer-worker", "customer-presale-alert-worker", "customer-presale-assignment-notification-worker", "customer-presale-progress-notification-worker", "customer-notification-delivery-worker", "customer-presale-worker"}
+	wantShared := append(append([]string(nil), crmConsumers...), "portal-invite-compensation-worker")
+	slices.Sort(crmConsumers)
+	slices.Sort(wantShared)
+	if !slices.Equal(index["runtime/customer.env"], wantShared) {
+		t.Fatalf("shared CRM runtime needs exactly 9 CRM and 1 Portal consumer: %v", index["runtime/customer.env"])
 	}
 	for _, profile := range profiles {
 		switch profile.Manifest.Application.Code {
 		case "customer_portal":
-			if len(profile.Manifest.Compose.RuntimeServices) != 2 {
-				t.Fatal("portal commercial component coverage expanded")
+			wantPortal := []string{"portal-api", "portal-invite-compensation-worker", "portal-report-worker"}
+			actual := append([]string(nil), profile.Manifest.Compose.RuntimeServices...)
+			slices.Sort(actual)
+			if !slices.Equal(actual, wantPortal) {
+				t.Fatal("portal commercial coverage must retain its exact three independent consumers")
 			}
 		case "customer_and_opportunity":
-			if len(profile.Manifest.Compose.RuntimeServices) != 8 {
-				t.Fatal("CRM commercial component coverage expanded")
+			actual := append([]string(nil), profile.Manifest.Compose.RuntimeServices...)
+			slices.Sort(actual)
+			if !slices.Equal(actual, crmConsumers) {
+				t.Fatal("CRM commercial coverage must include transfer without absorbing Portal ownership")
 			}
 		}
 	}

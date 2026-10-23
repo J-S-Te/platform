@@ -37,7 +37,7 @@ type routeAuthorizerStub struct {
 	err     error
 }
 
-func (stub routeAuthorizerStub) HasApplicationGrant(context.Context, string, string, string) (bool, error) {
+func (stub routeAuthorizerStub) HasApplicationEnvironmentGrant(context.Context, string, string, string, string) (bool, error) {
 	return stub.granted, stub.err
 }
 

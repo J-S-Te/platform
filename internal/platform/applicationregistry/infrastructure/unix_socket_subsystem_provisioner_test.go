@@ -23,7 +23,7 @@ func TestProvisioningCancellationWatcherStopsWhenOperationReturns(t *testing.T) 
 	defer right.Close()
 	operationCtx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	done := watchProvisioningCancellation(operationCtx, left)
-	cancel() // the RPC's deferred cancellation, even with a Background parent
+	cancel() // 即使父上下文为 Background，RPC 延迟执行的取消操作仍须生效。
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -81,6 +81,25 @@ func TestUnixSocketSubsystemProvisionerExchangesOnlySupportedOperations(t *testi
 	}
 	if !reflect.DeepEqual(received, input) {
 		t.Fatalf("provision input = %#v, want %#v", received, input)
+	}
+
+	expectedDigest := "sha256:" + strings.Repeat("e", 64)
+	if err := client.ConfigureReleaseIntegrity(true, "not-a-digest"); err == nil {
+		t.Fatal("malformed expected release digest was accepted")
+	}
+	if err := client.ConfigureReleaseIntegrity(true, ""); err == nil {
+		t.Fatal("required release integrity without a digest was accepted")
+	}
+	if err := client.ConfigureReleaseIntegrity(true, expectedDigest); err != nil {
+		t.Fatalf("configure release integrity: %v", err)
+	}
+	secondInput := input
+	if err := client.Provision(context.Background(), secondInput); err != nil {
+		t.Fatalf("provision with expected digest: %v", err)
+	}
+	_, received = executor.snapshot()
+	if received.ReleaseDigest != expectedDigest {
+		t.Fatalf("provisioned release digest = %q, want %q", received.ReleaseDigest, expectedDigest)
 	}
 
 	if err := client.Update(context.Background(), application.SubsystemProvisioningInput{
@@ -311,10 +330,10 @@ type recordingSubsystemProvisioner struct {
 	teardownEnv  string
 	updateInput  application.SubsystemProvisioningInput
 	preflightErr error
-	// mode mirrors the privileged Agent's deployment mode so tests can exercise the
-	// production manifest-checksum guard without starting a real production executor.
+	// mode 对应特权 Agent 的部署模式，使测试能够在不启动
+	// 真实生产执行器的情况下验证生产清单校验和保护。
 	mode string
-	// accessOrigin records the origin forwarded by the server for SEC-F1 injection tests.
+	// accessOrigin 记录服务端转发的来源，用于 SEC-F1 注入测试。
 	accessOrigin             string
 	availableCapabilities    application.SubsystemProvisioningCapabilities
 	availableCapabilitiesErr error
@@ -433,9 +452,9 @@ func TestUnixSocketSubsystemProvisionerReportsActionableProductionManifestReject
 		t.Fatal(err)
 	}
 
-	// Production Agent requires an approved manifest checksum; an empty checksum must be
-	// rejected with a concrete reason instead of the bare sentinel that used to render as
-	// "subsystem provisioning unavailable: subsystem provisioning unavailable: ...".
+	// 生产 Agent 要求已批准的清单校验和；空校验和必须
+	// 返回明确原因，避免只返回哨兵错误而形成重复的
+	// “子系统配置不可用”嵌套提示。
 	err = client.Update(context.Background(), application.SubsystemProvisioningInput{
 		ApplicationCode: "platform", Environment: "prod",
 	})
@@ -452,7 +471,7 @@ func TestUnixSocketSubsystemProvisionerReportsActionableProductionManifestReject
 		t.Fatalf("production executor must not run without a manifest checksum: %#v", got)
 	}
 
-	// A request that does carry the checksum still reaches the executor.
+	// 携带校验和的请求仍会到达执行器。
 	if err := client.Update(context.Background(), application.SubsystemProvisioningInput{
 		ApplicationCode: "contract_management", Environment: "prod", ManifestChecksum: "sha256:approved",
 	}); err != nil {

@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	// Size is the size of an SM3 checksum in bytes.
+	// Size 是 SM3 校验和的字节长度。
 	Size = 32
-	// BlockSize is the block size of SM3 in bytes.
+	// BlockSize 是 SM3 的分组字节长度。
 	BlockSize = 64
 )
 
@@ -26,14 +26,14 @@ type digest struct {
 	len uint64
 }
 
-// New returns a new SM3 hash.Hash.
+// New 返回一个新的 SM3 hash.Hash。
 func New() hash.Hash {
 	d := new(digest)
 	d.Reset()
 	return d
 }
 
-// Sum returns the SM3 checksum of data.
+// Sum 返回 data 的 SM3 校验和。
 func Sum(data []byte) [Size]byte {
 	d := new(digest)
 	d.Reset()

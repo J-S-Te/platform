@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build a release-bound Ubuntu/amd64 offline APT repository for the host tools
-# required before deployment assets or image packages can be consumed.
+# 构建绑定发布的 Ubuntu/amd64 离线 APT 仓库，提供使用部署资产或镜像包之前所需的宿主机工具。
 set -Eeuo pipefail
 
 usage() {
@@ -34,8 +33,7 @@ for command_name in apt-cache apt-get dpkg dpkg-deb gzip install mktemp sha256su
   }
 done
 
-# /etc/os-release is owned by the operating system and is the authoritative
-# compatibility boundary for the APT repository emitted here.
+# /etc/os-release 由操作系统管理，是此处输出的 APT 仓库兼容性判断的权威依据。
 # shellcheck disable=SC1091
 source /etc/os-release
 os_id="${ID:-}"
@@ -55,13 +53,10 @@ architecture="$(dpkg --print-architecture)"
   exit 1
 }
 
-# Include every package that provides a command used by configure, import,
-# lifecycle, backup and recovery paths. The six explicitly requested packages
-# remain first-class requirements; the remainder prevents the next missing
-# host command from surfacing after jq is installed.
+# 包含配置、导入、生命周期、备份和恢复路径中每条命令对应的软件包。明确要求的六个包仍是基本需求；其余包用于避免安装 jq 后才遇到下一个宿主机命令缺失。
 requested_packages=(
   jq curl ca-certificates tar gzip coreutils
-  bash diffutils findutils gawk grep iproute2 openssl sed util-linux
+  bash diffutils findutils gawk grep iproute2 openssl sed util-linux tzdata python3
 )
 
 for package in "${requested_packages[@]}"; do
@@ -142,10 +137,7 @@ gzip -n -9 -c "$stage/Packages" > "$stage/Packages.gz"
 )
 
 archive="$output_root/host-dependencies-${os_id}-${os_version_id}-${os_codename}-${version}-linux-amd64.tar.gz"
-# apt-get stamps downloaded .deb files with the download time. Normalize every
-# archive header so rebuilding an unchanged repository produces identical
-# bytes; a same-version conflict then means package content actually changed,
-# not merely that the build ran at a different time.
+# apt-get 会给下载的 .deb 写入下载时间。规范化每个归档头，使相同仓库重建时产生相同字节；这样同版本冲突就表示包内容实际变化，而非仅构建时间不同。
 COPYFILE_DISABLE=1 LC_ALL=C tar \
   --format=gnu \
   --sort=name \

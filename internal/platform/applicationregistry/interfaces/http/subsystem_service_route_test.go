@@ -23,7 +23,7 @@ func (stub routeReaderGrantStub) ListSubsystemServiceInstances(context.Context, 
 
 type accessCheckerStub struct{ granted bool }
 
-func (stub accessCheckerStub) HasApplicationGrant(context.Context, string, string, string) (bool, error) {
+func (stub accessCheckerStub) HasApplicationEnvironmentGrant(context.Context, string, string, string, string) (bool, error) {
 	return stub.granted, nil
 }
 

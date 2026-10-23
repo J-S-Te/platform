@@ -26,6 +26,7 @@ type JobService struct {
 	clock      Clock
 }
 
+// NewJobService 构造任务调度服务；任一依赖为 nil 时失败关闭。
 func NewJobService(repository JobRepository, ids IDGenerator, clock Clock) (*JobService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("job service dependencies must not be nil")
@@ -33,6 +34,7 @@ func NewJobService(repository JobRepository, ids IDGenerator, clock Clock) (*Job
 	return &JobService{repository: repository, ids: ids, clock: clock}, nil
 }
 
+// Enqueue 校验输入并计算请求哈希后创建 PENDING 任务；幂等键命中时由仓储返回原任务。
 func (service *JobService) Enqueue(ctx context.Context, input JobCreateInput) (domain.Job, error) {
 	if err := validateJobInput(input); err != nil {
 		return domain.Job{}, err
@@ -69,6 +71,7 @@ func (service *JobService) Enqueue(ctx context.Context, input JobCreateInput) (d
 	return service.repository.CreateJob(ctx, job)
 }
 
+// List 分页返回租户内任务列表。
 func (service *JobService) List(ctx context.Context, tenantID string, query domain.PageRequest) (domain.PageResult[domain.Job], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return domain.PageResult[domain.Job]{}, validation("tenant_id is required")
@@ -77,6 +80,7 @@ func (service *JobService) List(ctx context.Context, tenantID string, query doma
 	return service.repository.ListJobs(ctx, strings.TrimSpace(tenantID), query)
 }
 
+// Claim 由 worker 认领一个到期可执行且类型在白名单内的任务，租约与陈旧判定由仓储保证。
 func (service *JobService) Claim(ctx context.Context, workerID string, allowedTypes []string, staleBefore time.Time) (domain.Job, bool, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" || len(allowedTypes) == 0 {
@@ -90,6 +94,7 @@ func (service *JobService) Claim(ctx context.Context, workerID string, allowedTy
 	return service.repository.ClaimJob(ctx, workerID, allowedTypes, service.clock.Now().UTC(), staleBefore.UTC())
 }
 
+// Complete 只允许持有租约的 worker 把 RUNNING 任务置为 SUCCEEDED。
 func (service *JobService) Complete(ctx context.Context, job domain.Job) error {
 	if strings.TrimSpace(job.TenantID) == "" || strings.TrimSpace(job.PublicID) == "" || strings.TrimSpace(job.LockedBy) == "" || job.Status != domain.JobStatusRunning {
 		return validation("running job tenant, job ID and worker lease are required")
@@ -115,10 +120,12 @@ func (service *JobService) Fail(ctx context.Context, job domain.Job, code, messa
 	return service.repository.FailJob(ctx, job, code, message, retryable, now.Add(backoff(job.Attempts)), now)
 }
 
+// Cancel 把尚未进入终态的任务置为 CANCELLED；对 RUNNING 任务是否可取消由仓储裁定。
 func (service *JobService) Cancel(ctx context.Context, tenantID, jobID string) error {
 	return service.repository.CancelJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID), service.clock.Now().UTC())
 }
 
+// Retry 是操作者对 FAILED/DEAD 任务的显式重试入口，不改变既有失败记录。
 func (service *JobService) Retry(ctx context.Context, tenantID, jobID string) error {
 	return service.repository.RetryJob(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(jobID), service.clock.Now().UTC())
 }
@@ -170,6 +177,12 @@ func validateJobInput(input JobCreateInput) error {
 	}
 	if input.MaxAttempts > 100 {
 		return validation("max_attempts must not exceed 100")
+	}
+	if len(strings.TrimSpace(input.ApplicationID)) > 128 ||
+		len(strings.TrimSpace(input.AggregateType)) > 64 ||
+		len(strings.TrimSpace(input.AggregateID)) > 128 ||
+		len(strings.TrimSpace(input.IdempotencyKey)) > 128 {
+		return validation("application/aggregate/idempotency identifiers are too long")
 	}
 	if key := strings.TrimSpace(input.IdempotencyKey); key != "" && !idempotencyKeyPattern.MatchString(key) {
 		return validation("idempotency_key is invalid")

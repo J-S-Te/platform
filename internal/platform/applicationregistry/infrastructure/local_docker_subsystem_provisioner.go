@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,29 +90,28 @@ const (
 	integratedPortalApplicationCode     = "customer_portal"
 	integratedProjectApplicationCode    = "project_management"
 	integratedSettlementApplicationCode = "settlement"
-	// This is the compatibility hash compiled into the customer authorization catalog. The
-	// customer's catalog tests deliberately fail when its role mapping changes, forcing this
-	// deployment contract to be updated in the same reviewed release.
+	// 该哈希是客户授权目录的部署契约：customer_and_opportunity 的目录测试在角色映射变化时
+	// 会故意失败，强制本值与应用内嵌目录在同一评审发布中同步更新。
 	integratedCustomerRoleConfigHash = "sha256:1c1d94091fdfd3f5665d04215b91089434a737b0f43e9f1a9901755af97f621a"
 	integratedPortalRoleConfigHash   = "sha256:95f1d1283d3a251e9b9167aa291c19bf14d265105ccedfc661aca096666a37b8"
 )
 
-// LocalDockerSubsystemProvisionerConfig controls the trusted local Docker automation used by the
-// one-click onboarding endpoint. Paths are operator configuration, never browser input.
+// LocalDockerSubsystemProvisionerConfig 配置一键接入端点使用的受信本机 Docker 自动化。
+// 各路径属于运维配置而非浏览器输入，接入请求永远不能直接提供这些路径。
 type LocalDockerSubsystemProvisionerConfig struct {
 	Enabled                 bool
 	ProjectsRoot            string
 	GatewayScriptPath       string
 	GatewayIncludePath      string
 	PlatformComposeProject  string
+	PlatformComposeFile     string
 	PlatformFrontendService string
 	PlatformDockerNetwork   string
 	DockerBinary            string
 	Timeout                 time.Duration
-	// CatalogSync configures the post-onboarding authorization catalog sync hook. When enabled
-	// the provisioner runs the reviewed contract_management catalog sync script on the Agent host
-	// after the subsystem Compose stack is up, so the platform's authorization catalog reflects
-	// the subsystem's role and permission declarations without any in-band code change.
+	// CatalogSync 配置接入完成后的授权目录同步钩子。启用后，provisioner 会在子系统 Compose
+	// 栈起来之后于 Agent 主机运行经过评审的 contract_management 目录同步脚本，使平台的授权
+	// 目录反映子系统的角色与权限声明，且不需要子系统进程内做任何带内同步。
 	CatalogSyncEnabled        bool
 	CatalogSyncImage          string
 	CatalogSyncMysqlContainer string
@@ -119,10 +119,9 @@ type LocalDockerSubsystemProvisionerConfig struct {
 	CatalogSyncMysqlPassword  string
 	CatalogSyncMysqlDatabase  string
 	CatalogSyncTargetAppCode  string
-	// Keycloak endpoints are supplied to the isolated deployment Agent rather
-	// than derived from a browser request. PublicURL is the browser-visible
-	// Keycloak base URL, while InternalURL is the Compose-network endpoint used
-	// by Go OIDC clients for discovery, JWKS, UserInfo and token exchange.
+	// Keycloak 端点由运维提供给隔离部署 Agent，不能从浏览器请求推导。PublicURL 是浏览器可见
+	// 的 Keycloak 基地址；InternalURL 是 Compose 网络内端点，供 Go OIDC 客户端完成发现、JWKS、
+	// UserInfo 与令牌交换。
 	KeycloakPublicURL   string
 	KeycloakInternalURL string
 	KeycloakRealm       string
@@ -134,6 +133,8 @@ type subsystemCommandRunner interface {
 
 type execSubsystemCommandRunner struct{}
 
+// Run 执行外部命令并丢弃合并输出，仅向调用方返回错误；失败输出由 RunOutput 统一截断后写入
+// Agent 标准错误，避免敏感参数进入返回值。
 func (execSubsystemCommandRunner) Run(ctx context.Context, directory string, environment []string, name string, arguments ...string) error {
 	_, err := execSubsystemCommandRunner{}.RunOutput(ctx, directory, environment, name, arguments...)
 	return err
@@ -144,9 +145,9 @@ func (execSubsystemCommandRunner) Run(ctx context.Context, directory string, env
 // 让平台页面直接看到而不是只显示通用的健康检查提示。输出仍先截断再写入 Agent 标准错误。
 func (execSubsystemCommandRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, arguments...)
-	// `directory` is treated as a hint: command.Dir only accepts real directories, so the
-	// caller may pass a unix socket path (e.g. /var/run/docker.sock) for documentation. Fall
-	// back to "/" so exec.Command's chdir probe never reports ENOTDIR on a non-directory.
+	// `directory` 只是提示值：command.Dir 只接受真实目录，因此调用方可能传入 unix socket 路径
+	// （如 /var/run/docker.sock）用于语义说明。此时回退到 "/"，避免 exec.Command 的 chdir 探测
+	// 在非目录上误报 ENOTDIR。
 	if info, err := os.Stat(directory); err == nil && info.IsDir() {
 		command.Dir = directory
 	} else {
@@ -155,10 +156,9 @@ func (execSubsystemCommandRunner) RunOutput(ctx context.Context, directory strin
 	command.Env = environment
 	output, err := command.CombinedOutput()
 	if err != nil {
-		// Surface a truncated excerpt of the failed command's output to stderr so operators
-		// can diagnose provisioning failures. Do not return command arguments or output
-		// verbatim: either may contain implementation details. The OAuth secret is never
-		// supplied as an argument, but this rule keeps future changes safe.
+		// 把失败命令输出的截断摘要写到标准错误，供运维诊断部署失败。不得原样返回命令参数或
+		// 输出：两者都可能包含实现细节。OAuth secret 从不作为命令行参数传入，但该规则也为
+		// 后续改动兜底。
 		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] %s %v failed: %v\noutput: %s\n",
 			name, truncateArgs(arguments), err, truncateOutput(output))
 	}
@@ -192,7 +192,8 @@ type LocalDockerSubsystemProvisioner struct {
 	mutex  sync.Mutex
 }
 
-// NewLocalDockerSubsystemProvisioner constructs the local deployment automation adapter.
+// NewLocalDockerSubsystemProvisioner 构造本机部署自动化适配器；配置不完整时返回错误，
+// 不会启动任何容器或改写任何文件。
 func NewLocalDockerSubsystemProvisioner(config LocalDockerSubsystemProvisionerConfig) (*LocalDockerSubsystemProvisioner, error) {
 	return newLocalDockerSubsystemProvisioner(config, execSubsystemCommandRunner{})
 }
@@ -220,13 +221,10 @@ func newLocalDockerSubsystemProvisioner(config LocalDockerSubsystemProvisionerCo
 	return &LocalDockerSubsystemProvisioner{config: config, runner: runner}, nil
 }
 
-// oidcBackchannelBaseURL returns the private Compose endpoint only when the
-// selected issuer is this deployment's Keycloak Realm. The public issuer is
-// still retained in OIDC_ISSUER so go-oidc validates the browser-visible iss
-// claim, while its HTTP transport reaches Keycloak without a host-network hop.
-// The backchannel value is an origin only; the OIDC client appends the discovery
-// path itself. Keeping /realms/<realm> out of this value is required by the CRM,
-// Portal and contract OIDC configuration validators.
+// oidcBackchannelBaseURL 仅当所选 issuer 是本部署的 Keycloak Realm 时返回 Compose 私网端点。
+// OIDC_ISSUER 仍保留公开 issuer，让 go-oidc 校验浏览器可见的 iss 声明，而其 HTTP 传输走私网
+// 访问 Keycloak，避免绕行宿主网络。返回值只是 origin（发现路径由 OIDC 客户端自行拼接）；
+// 其中不得包含 /realms/<realm>，这是 CRM、Portal 和 contract OIDC 配置校验器的硬性要求。
 func (provisioner *LocalDockerSubsystemProvisioner) oidcBackchannelBaseURL(issuer string) string {
 	if provisioner == nil || provisioner.config.KeycloakPublicURL == "" ||
 		provisioner.config.KeycloakInternalURL == "" || provisioner.config.KeycloakRealm == "" {
@@ -239,8 +237,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) oidcBackchannelBaseURL(issue
 	return strings.TrimRight(strings.TrimSpace(provisioner.config.KeycloakInternalURL), "/")
 }
 
-// DiscoverSubsystemServices reports Compose containers through the existing Agent transport.
-// Discovery is read-only and does not rewrite .env, Compose, or gateway files.
+// DiscoverSubsystemServices 通过既有 Agent 传输报告 Compose 容器。发现是只读操作，
+// 不改写 .env、Compose 或网关文件。
 func (provisioner *LocalDockerSubsystemProvisioner) DiscoverSubsystemServices(ctx context.Context, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
 	if provisioner == nil || !provisioner.config.Enabled {
 		return nil, provisioningError("automatic subsystem deployment is disabled")
@@ -248,8 +246,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) DiscoverSubsystemServices(ct
 	return discoverDockerLabelServices(ctx, provisioner.config.DockerBinary, applicationCode, environment)
 }
 
-// DiscoverSubsystemCandidates returns only label-declared, unregistered service metadata.  The
-// result cannot write files or start containers and is safe to expose to the audited onboarding UI.
+// DiscoverSubsystemCandidates 只返回 label 声明且尚未登记的服务元数据。结果不能写文件或
+// 启动容器，因此可以安全暴露给经过审计的接入页面。
 func (provisioner *LocalDockerSubsystemProvisioner) DiscoverSubsystemCandidates(ctx context.Context) ([]application.SubsystemDiscoveryCandidate, error) {
 	if provisioner == nil || !provisioner.config.Enabled {
 		return nil, provisioningError("automatic subsystem deployment is disabled")
@@ -303,12 +301,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) Provision(ctx context.Contex
 	return provisioner.applyLocked(ctx, input)
 }
 
-// Update rebuilds the running subsystem containers without touching .env.local or the portal
-// gateway. The use case is "subsystem code changed, redeploy"; for BaseURL/UpstreamURL/secret
-// changes the caller is expected to PATCH the environment and OAuth client first via the regular
-// management endpoints, then run a separate update flow. Keeping Update side-effect free on the
-// integration layer avoids the problem of the bcrypt-hashed client secret not being recoverable
-// for a re-issued .env.local.
+// Update 重建运行中的子系统容器，但不改动 .env.local 与门户网关。适用场景是“子系统代码
+// 变更后重新部署”；BaseURL/UpstreamURL/secret 变更应先通过常规管理端点 PATCH 环境与
+// OAuth 客户端，再单独执行更新流程。让 Update 在集成层保持无副作用，是为了规避 bcrypt
+// 哈希后的客户端 secret 无法还原、进而无法重新签发 .env.local 的问题。
 func (provisioner *LocalDockerSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
@@ -317,7 +313,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) Update(ctx context.Context, 
 
 // Teardown 停止 Compose、删除生成的 .env.local、移除门户网关片段并 reload nginx；它不删除
 // 控制面记录，HTTP 层随后负责 DELETE，因此清理失败可单独重试，不会误报数据库已回滚。
-func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context, _ /* tenant */ string, applicationCode, _ /* environment */ string) error {
+func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context, _ /* 租户 */ string, applicationCode, environment string) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
 
@@ -334,22 +330,34 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 
 	// 集成子系统与平台共用 Compose 项目，因此只能停止自己的运行组件，不能执行 down；
 	// 独立子系统则拥有完整栈和 .env.local，可按项目整体清理。
-	// Standalone Compose stacks and their .env.local live under the subsystem project directory.
-	// The integrated contract, customer and Portal APIs share the platform Compose project, so teardown
-	// only stops their runtime components and deliberately preserves database/key material in the shared
-	// runtime environment files.
+		// 独立子系统的 Compose 栈和 .env.local 位于其项目目录内；集成的 contract、customer 和
+		// Portal API 与平台共用 Compose 项目，因此 teardown 只停止其运行组件，并有意保留共享
+		// 运行环境文件中的数据库/密钥材料。
 	projectDirectory, projectErr := provisioner.projectDirectory(applicationCode)
 	if projectErr == nil {
-		if isIntegratedSubsystem(applicationCode) {
+		localApproval := filepath.Join(provisioner.localPlatformRoot(), "runtime-approvals", "local-"+applicationCode+"-dev.json")
+		_, localApprovalErr := os.Lstat(localApproval)
+		if isIntegratedSubsystem(applicationCode) || (localApprovalErr == nil && len(localLicenseServices[applicationCode]) > 0) {
 			services := []string{"contract-api", "contract-worker"}
 			if applicationCode == integratedCustomerApplicationCode {
 				services = []string{"customer-api"}
 			} else if applicationCode == integratedPortalApplicationCode {
-				services = []string{"portal-api"}
+				services = []string{"portal-api", "portal-report-worker"}
 			}
+			if applicationCode == integratedProjectApplicationCode {services=[]string{"project-api","sla-notifier"}}
+			if localApprovalErr == nil && len(localLicenseServices[applicationCode]) > 0 {
+				services = append([]string(nil), localLicenseServices[applicationCode]...)
+			}
+            var background *localProjectBackground
+            if applicationCode==integratedProjectApplicationCode {
+                var err error
+                background,err=provisioner.projectBackgroundTarget(operationCtx);if err!=nil{return err}
+                if err:=prepareProjectBackground(operationCtx,background,true);err!=nil{return err}
+            }
 			if runErr := provisioner.runIntegratedPlatformCompose(operationCtx, append([]string{"stop"}, services...)...); runErr != nil {
 				return provisioningError("stop subsystem containers")
 			}
+            if background!=nil {if err:=markProjectBackgroundStopped(background);err!=nil{return err}}
 		} else {
 			if composeFile, composeErr := locateComposeFile(projectDirectory); composeErr == nil {
 				runErr := provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
@@ -373,9 +381,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 		}
 	}
 
-	// Nginx reload must succeed here: the gateway include entry has already been removed, so a
-	// failed reload leaves the decommissioned subsystem routable. A missing frontend stack is
-	// still tolerated because there is no running gateway to refresh.
+	// 此处 nginx reload 必须成功：网关 include 条目已被移除，reload 失败会让已下线子系统仍然
+	// 可路由。前端栈缺失仍被容忍，因为此时没有运行中的网关可刷新。
 	if projectDirectory != "" && !isIntegratedSubsystem(applicationCode) {
 		if containerID, err := provisioner.frontendContainerID(operationCtx, projectDirectory); err == nil {
 			if err := provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary, "exec", containerID, "nginx", "-t"); err != nil {
@@ -389,24 +396,44 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 	return nil
 }
 
-// rebuildLocked rebuilds the subsystem Compose stack without modifying the gateway. When the
-// management page supplies the current gateway fields, it also updates the non-secret public
-// runtime values while preserving the one-time credentials already on disk.
+// rebuildLocked 重建子系统 Compose 栈且不改网关。管理页同时提供当前网关字段时，也会更新
+// 非密钥的公开运行时值，同时保留磁盘上已有的一次性凭据。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if err := provisioner.deliverLocalRuntimeLicense(ctx, input); err != nil {
+		return err
+	}
+
 	if !provisioner.config.Enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
-	// Settlement is compiled into the unified platform Compose topology. It must
-	// never fall through to the standalone-project branch, which could create a
-	// second database/network with the same browser route.
+	// Settlement 编译进统一的平台 Compose 拓扑，绝不能落入独立项目分支——那会在同一浏览器
+	// 路由下创建第二套数据库/网络。
 	if input.ApplicationCode == integratedSettlementApplicationCode {
+		directory, err := provisioner.projectDirectory(integratedSettlementApplicationCode)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(directory, ".env.local")
+		values := map[string]string{}
+		if err := provisioner.p1LocalRuntimeValues(input, path, values, false); err != nil {
+			return err
+		}
+		if err := updateSubsystemEnvironment(path, path, values); err != nil {
+			return provisioningError("write Settlement source binding")
+		}
 		if err := provisioner.updateSettlementCatalogRuntimeConfiguration(input); err != nil {
 			return err
 		}
-		if err := provisioner.rebuildIntegratedSettlementStack(operationCtx, input); err != nil {
-			return provisioningError("rebuild settlement containers")
+		var deploymentErr error
+		if len(input.RuntimeLicenseCredentials) > 0 {
+			deploymentErr = provisioner.deployLicensedLocalStack(operationCtx, input)
+		} else {
+			deploymentErr = provisioner.rebuildIntegratedSettlementStack(operationCtx, input)
+		}
+		if err := deploymentErr; err != nil {
+			return localRuntimeDeploymentError(err, "rebuild settlement containers")
 		}
 		return nil
 	}
@@ -436,13 +463,17 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 		}
 	}
 	var rebuildErr error
-	switch input.ApplicationCode {
-	case integratedContractApplicationCode:
+	switch {
+	case len(input.RuntimeLicenseCredentials) > 0:
+		rebuildErr = provisioner.deployLicensedLocalStack(operationCtx, input)
+	case input.ApplicationCode == integratedContractApplicationCode:
 		rebuildErr = provisioner.rebuildIntegratedContractStack(operationCtx)
-	case integratedCustomerApplicationCode:
+	case input.ApplicationCode == integratedCustomerApplicationCode:
 		rebuildErr = provisioner.rebuildIntegratedCustomerStack(operationCtx)
-	case integratedPortalApplicationCode:
+	case input.ApplicationCode == integratedPortalApplicationCode:
 		rebuildErr = provisioner.rebuildIntegratedPortalStack(operationCtx)
+	case input.ApplicationCode == integratedProjectApplicationCode:
+		rebuildErr = provisioner.rebuildIntegratedProjectStack(operationCtx)
 	default:
 		composeFile, locateErr := locateComposeFile(projectDirectory)
 		if locateErr != nil {
@@ -452,11 +483,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
 	}
 	if rebuildErr != nil {
-		return provisioningError("rebuild subsystem containers")
+		return localRuntimeDeploymentError(rebuildErr, "rebuild subsystem containers")
 	}
-	// Re-publish the authorization catalog after a controlled rebuild so a subsystem restart
-	// that changed its own role/permission set is reflected in the platform. The sync is
-	// best-effort: failures are logged but do not abort the update response.
+	// 受控重建后重新发布授权目录，使子系统重启期间发生的角色/权限集合变化反映到平台侧。
+	// 同步是尽力而为：失败只记日志，不会中止更新响应。
 	if err := provisioner.maybeSyncContractCatalogLocked(operationCtx, input); err != nil {
 		fmt.Fprintf(os.Stderr, "[subsystem-provisioner] post-rebuild catalog sync skipped or failed: %v\n", err)
 	}
@@ -521,10 +551,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		if err := contractNotificationRuntimeValues(input, values, false); err != nil {
 			return err
 		}
-		// Normal updates preserve the existing owner-directory credential. Retry
-		// supplies a replacement secret when the previous delivery may have failed.
-		// CRM mounts machine routes under its application prefix. Ordinary updates
-		// repair this managed address without rotating the existing credentials.
+		// 常规更新保留既有 owner-directory 凭据；重试（RETRY）会在上次投递可能失败时补充新
+		// secret。CRM 把机器路由挂在自己的应用前缀下，普通更新即修复这一托管地址，不轮换
+		// 现有凭据。
 		values["CRM_REFERENCE_BASE_URL"] = "http://customer-api:8090/customer-opportunity"
 		if credential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID"] = credential.OAuthClient.ClientID
@@ -572,6 +601,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		values["PROJECT_MACHINE_CLIENT_ID"] = projectCredential.OAuthClient.ClientID
 		values["PROJECT_MACHINE_CLIENT_SECRET"] = projectCredential.PlaintextSecret
 		values["PROJECT_MACHINE_TOKEN_SCOPE"] = "dashboard.project.read"
+	}
+	if err := provisioner.p1LocalRuntimeValues(input, environmentPath, values, false); err != nil {
+		return err
 	}
 	if len(values) == 0 {
 		return nil
@@ -629,6 +661,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 			"CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE": input.Environment,
 			"CONTRACT_INTEGRATION_REQUIRED_SCOPE":          "project.contract.import",
 		}
+		if err := projectNotificationRuntimeValues(input, values); err != nil {
+			return err
+		}
 		// 服务项操作台从基础平台负责人目录选择团队负责人、项目经理和工程师。
 		// 老环境尚未下发该凭据时保持缺省（前端会提示目录不可用），不阻断接入本身。
 		if ownerCredential, ok := input.ServiceCredential(application.ServiceCredentialOwnerDirectoryRead); ok {
@@ -646,9 +681,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 			"OIDC_SESSION_COOKIE_SECURE": secure,
 		}
 	}
-	// A lifecycle update must also re-apply the selected identity provider. The
-	// control-plane update endpoint intentionally preserves client secrets, so
-	// only the issuer and backchannel are refreshed here.
+	// 生命周期更新必须同时重放所选身份提供方。控制面的更新端点有意保留客户端 secret，
+	// 因此这里只刷新 issuer 与 backchannel。
 	backchannel := provisioner.oidcBackchannelBaseURL(input.Issuer)
 	if input.ApplicationCode == integratedPortalApplicationCode {
 		values["PORTAL_OIDC_ISSUER"] = input.Issuer
@@ -717,8 +751,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 		values[clientIDKey] = input.ClientID
 		values[clientSecretKey] = input.ClientSecret
 	} else if input.AuthenticationRuntimeUpdate && !strings.Contains(strings.ToLower(input.Issuer), "/realms/") {
-		// A controlled rollback restores the prior platform browser credential
-		// retained in the mode-0600 runtime file. It is never sent back through API.
+		// 受控回滚恢复保留在 mode-0600 运行时文件中的上一个平台浏览器凭据；它绝不通过 API
+		// 回传。
 		if rollbackID, rollbackSecret := strings.TrimSpace(current[rollbackClientIDKey]), strings.TrimSpace(current[rollbackClientSecretKey]); rollbackID != "" && rollbackSecret != "" {
 			values[clientIDKey] = rollbackID
 			values[clientSecretKey] = rollbackSecret
@@ -737,10 +771,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 			values["PLATFORM_PERSONNEL_DIRECTORY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
 	}
-	// RETRY/ADOPT rotate the one-time catalog publisher credential before rebuilding.
-	// Keep ordinary restarts non-destructive, but when a fresh credential is delivered it
-	// must replace the complete catalog identity atomically. Otherwise a recreated application
-	// can retain the old application ID/secret and every pre-start catalog publication fails 401.
+	// RETRY/ADOPT 会在重建前轮换一次性目录发布凭据。普通重启必须保持非破坏性；但一旦投递
+	// 了新凭据，就必须原子替换完整目录身份，否则重建出来的应用可能沿旧 application
+	// ID/secret，导致每次启动前的目录发布全部 401。
 	if strings.TrimSpace(input.ApplicationID) != "" &&
 		strings.TrimSpace(input.CatalogPublisherClientID) != "" &&
 		strings.TrimSpace(input.CatalogPublisherClientSecret) != "" {
@@ -754,9 +787,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 			values["PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"] = strings.TrimSpace(input.CatalogPublisherClientID)
 			values["PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"] = input.CatalogPublisherClientSecret
 			if input.ApplicationCode == "data_analysis" {
-				// dashboard-api publishes its own catalog during startup. This must be
-				// enabled before the first process launch so initial administrator
-				// assignment can resolve dashboard_admin from the same application.
+				// dashboard-api 在启动期间自行发布目录；该开关必须在进程首次启动前打开，
+				// 使初始管理员分配能从同一 application 解析 dashboard_admin。
 				values["PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED"] = "true"
 			}
 		}
@@ -774,10 +806,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 		values["PLATFORM_ENVIRONMENT_CODE"] = strings.TrimSpace(input.Environment)
 	}
 	if input.ApplicationCode == "data_analysis" {
-		// The browser reaches the OIDC issuer through the public origin, while the
-		// container must publish its authorization catalog through the private
-		// Compose network. Reusing the public issuer here makes localhost resolve
-		// to dashboard-api itself and prevents the process from starting.
+		// 浏览器经公开 origin 访问 OIDC issuer，而容器必须经 Compose 私网发布其授权目录。
+		// 这里若复用公开 issuer，localhost 会解析到 dashboard-api 自身，进程无法启动。
 		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
 	}
 	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {
@@ -789,6 +819,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 // applyLocked 包含 Provision 的实际写入与启动流程，调用方必须先持有互斥锁；环境文件采用
 // 临时文件加原子替换，Compose 或网关失败时保留现场，便于诊断和安全重试。
 func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if err := provisioner.deliverLocalRuntimeLicense(ctx, input); err != nil {
+		return err
+	}
+
 	if !provisioner.config.Enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
 	}
@@ -800,7 +834,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		return err
 	}
 	composeFile := ""
-	if !isIntegratedSubsystem(input.ApplicationCode) {
+	if !isIntegratedSubsystem(input.ApplicationCode) && len(input.RuntimeLicenseCredentials) == 0 {
 		composeFile, err = locateComposeFile(projectDirectory)
 		if err != nil {
 			return provisioningError("subsystem Compose file is unavailable")
@@ -835,9 +869,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		"PLATFORM_APPLICATION_ID":   input.ApplicationID,
 		"PLATFORM_APPLICATION_CODE": input.ApplicationCode,
 		"PLATFORM_ENVIRONMENT_CODE": input.Environment,
-		// Local onboarding publishes the catalog through the isolated provisioner after the
-		// subsystem starts. Do not couple contract-api availability to this control-plane
-		// operation; keep the isolated credential only for explicit reconciliation.
+		// 本地接入在子系统启动后由隔离 provisioner 发布目录，不要把 contract-api 的可用性与
+		// 该控制面操作耦合；隔离凭据只留给显式的对账流程使用。
 		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED":   "false",
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID":      input.CatalogPublisherClientID,
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET":  input.CatalogPublisherClientSecret,
@@ -845,18 +878,17 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		"PLATFORM_DOCKER_NETWORK":                       provisioner.config.PlatformDockerNetwork,
 	}
 	if input.ApplicationCode == "data_analysis" {
-		// data_analysis synchronizes the embedded catalog before dashboard-api
-		// begins serving requests; it cannot use the generic local no-sync default.
+		// data_analysis 在 dashboard-api 开始服务前同步其内嵌目录，不能套用本地默认的
+		// 不同步开关。
 		values["PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED"] = "true"
 		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
 	}
 	// 这里构造的 map 是密钥进入运行时文件的唯一通道。后续写文件使用受限权限，命令行
 	// 只传 env-file 路径，避免 secret 出现在进程列表或部署日志中。
 	if input.ApplicationCode == integratedCustomerApplicationCode {
-		// customer-api is compiled into the unified local topology. OIDC still uses the public
-		// issuer, while discovery/token calls are routed over the private Compose alias. The
-		// compatibility hash is derived from the application's embedded catalog at startup so a
-		// catalog-only release cannot drift from a platform-side hard-coded value.
+		// customer-api 编译进统一本地拓扑：OIDC 仍使用公开 issuer，但发现/令牌请求经 Compose
+		// 私网别名路由。兼容哈希在启动时由应用内嵌目录推导，保证仅目录的发布不会与平台侧
+		// 硬编码值漂移。
 		values["APP_PUBLIC_ORIGIN"] = publicOrigin
 		values["DEV_AUTH_ENABLED"] = "false"
 		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
@@ -903,6 +935,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
 	}
 	if input.ApplicationCode == integratedProjectApplicationCode {
+		if err := projectNotificationRuntimeValues(input, values); err != nil {
+			return err
+		}
 		values["PLATFORM_BASE_URL"] = "http://platform-api:8080"
 		values["OIDC_BACKCHANNEL_BASE_URL"] = "http://platform-api:8080"
 		if keycloakBackchannel := provisioner.oidcBackchannelBaseURL(input.Issuer); keycloakBackchannel != "" {
@@ -1061,6 +1096,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 			return provisioningError("write CRM contract integration configuration")
 		}
 	}
+	if err := provisioner.p1LocalRuntimeValues(input, environmentPath, values, true); err != nil {
+		return err
+	}
 	if err := updateSubsystemEnvironment(environmentSource, environmentPath, values); err != nil {
 		return provisioningError("write subsystem environment file")
 	}
@@ -1075,31 +1113,32 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		}
 	}
 
-	// The generated file is always .env.local, which is the documented subsystem Compose
-	// convention. --env-file also makes the same values available during Compose interpolation.
+	// 生成的文件始终是 .env.local，这是子系统 Compose 的既定约定；--env-file 同时让这些值
+	// 参与 Compose 插值。
 	var startErr error
-	switch input.ApplicationCode {
-	case integratedContractApplicationCode:
+	switch {
+	case len(input.RuntimeLicenseCredentials) > 0:
+		startErr = provisioner.deployLicensedLocalStack(operationCtx, input)
+	case input.ApplicationCode == integratedContractApplicationCode:
 		startErr = provisioner.rebuildIntegratedContractStack(operationCtx)
-	case integratedCustomerApplicationCode:
+	case input.ApplicationCode == integratedCustomerApplicationCode:
 		startErr = provisioner.rebuildIntegratedCustomerStack(operationCtx)
-	case integratedPortalApplicationCode:
+	case input.ApplicationCode == integratedPortalApplicationCode:
 		startErr = provisioner.rebuildIntegratedPortalStack(operationCtx)
-	case integratedProjectApplicationCode:
+	case input.ApplicationCode == integratedProjectApplicationCode:
 		startErr = provisioner.rebuildIntegratedProjectStack(operationCtx)
 	default:
 		startErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
 			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
 	}
 	if startErr != nil {
-		return provisioningError("start subsystem containers")
+		return localRuntimeDeploymentError(startErr, "start subsystem containers")
 	}
 
-	// contract_management is compiled into the unified frontend and its API routes are already
-	// part of nginx/default.conf. Reloading that same Nginx while it is proxying this onboarding
-	// request can close the client-side upstream connection just before the successful 201 response.
-	// Only independently deployed subsystems need a generated whole-site proxy entry.
-	if !isIntegratedSubsystem(input.ApplicationCode) {
+	// contract_management 编译进统一前端，其 API 路由已在 nginx/default.conf 中；若在 nginx
+	// 正在代理本次接入请求时 reload 同一实例，可能在成功返回 201 之前断开客户端上游连接。
+	// 只有独立部署的子系统才需要生成整站代理条目。
+	if !isIntegratedSubsystem(input.ApplicationCode) && len(input.RuntimeLicenseCredentials) == 0 {
 		gatewayEnvironment := append(os.Environ(), "PORTAL_GATEWAY_NGINX_INCLUDE="+provisioner.config.GatewayIncludePath)
 		if err := provisioner.runner.Run(operationCtx, filepath.Dir(provisioner.config.GatewayScriptPath), gatewayEnvironment,
 			"/bin/bash", provisioner.config.GatewayScriptPath, "add", input.ApplicationCode, input.PathPrefix, input.UpstreamURL); err != nil {
@@ -1118,14 +1157,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		}
 	}
 
-	// Post-onboarding authorization catalog sync. The hook only fires for the configured target
-	// application code (contract_management today) and only when the operator has supplied the
-	// required image + database coordinates. The script is best-effort: failures are logged but
-	// do not block the onboarding response, so a missing publisher client in the seed data
-	// cannot strand a new subsystem in an unrecoverable state.
+	// 接入后的授权目录同步。钩子只对配置的目标应用（当前为 contract_management）触发，且
+	// 仅在运维提供了所需的镜像 + 数据库坐标时执行。脚本是尽力而为：失败只记日志、不阻塞
+	// 接入响应，避免种子数据缺少发布客户端时把新子系统卡在无法恢复的状态。
 	if err := provisioner.maybeSyncContractCatalogLocked(operationCtx, input); err != nil {
 		if provisioner.config.ProjectsRoot == "" {
-			// logger is intentionally not available in the runner; surface via stderr fallback.
+			// runner 内有意不持有 logger；此处降级为标准错误输出。
 			fmt.Fprintf(os.Stderr, "[subsystem-provisioner] contract catalog sync skipped or failed: %v\n", err)
 		}
 	}
@@ -1153,9 +1190,9 @@ func requiredContractServiceCredentials(input application.SubsystemProvisioningI
 	return result, nil
 }
 
-// Only the contract notification publisher can populate these runtime keys.
-// Missing input on a non-credential restart preserves the existing runtime;
-// controlled updates explicitly redeliver its write-only secret.
+// contractNotificationRuntimeValues 写入合同通知发布方的运行时键，只有合同通知发布方凭据
+// 可以填充这些键。非凭据重启缺少输入时保留既有运行时值；受控更新会显式重新投递其只写
+// 密钥。
 func contractNotificationRuntimeValues(input application.SubsystemProvisioningInput, values map[string]string, required bool) error {
 	credential, ok := input.ServiceCredential(application.ServiceCredentialNotificationIngest)
 	if !ok {
@@ -1170,8 +1207,7 @@ func contractNotificationRuntimeValues(input application.SubsystemProvisioningIn
 		return nil
 	}
 	client := credential.OAuthClient
-	// Environment IDs are checked by the control-plane credential reconciler;
-	// its deployment DTO carries only the target environment code.
+	// 环境 ID 由控制面凭据对账器校验；其部署 DTO 只携带目标环境编码。
 	if input.TenantID == "" || input.ApplicationID == "" || client.EnvironmentID == "" ||
 		client.TenantID != input.TenantID || client.ApplicationID != input.ApplicationID ||
 		client.ClientID != input.ApplicationCode+"-"+input.Environment+"-notification-publisher" || client.Status != "ACTIVE" ||
@@ -1184,10 +1220,9 @@ func contractNotificationRuntimeValues(input application.SubsystemProvisioningIn
 	return nil
 }
 
-// rebuildIntegratedContractStack 让 contract_management 保持在工作区唯一的本地
-// Compose topology. The unified frontend already routes to basic-platform-local/contract-api;
-// starting the subsystem's standalone Compose file as well would create a second contract-api
-// network alias backed by a different MySQL volume and make requests non-deterministic.
+// rebuildIntegratedContractStack 让 contract_management 保持在工作区唯一的本地 Compose
+// 拓扑中。统一前端已经路由到 basic-platform-local/contract-api；若再启动子系统的独立
+// Compose 文件，会创建第二个由不同 MySQL 卷支撑的 contract-api 网络别名，请求结果不确定。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractStack(ctx context.Context) error {
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "contract-mysql", "temporal"); err != nil {
 		return err
@@ -1195,9 +1230,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractSta
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "contract-migrate"); err != nil {
 		return err
 	}
-	// Build first, publish the catalog from that exact image, and only then replace
-	// the API. This prevents a new binary from serving with an older N/N-1 catalog
-	// window and turning every OIDC callback into local_authorization 401.
+	// 先构建镜像，从该确切镜像发布目录，最后才替换 API。避免新二进制带着旧的 N/N-1 目录
+	// 窗口对外服务，把所有 OIDC 回调变成 local_authorization 401。
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "contract-api", "contract-worker"); err != nil {
 		return err
 	}
@@ -1207,29 +1241,40 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedContractSta
 	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "contract-api", "contract-worker")
 }
 
-// rebuildIntegratedProjectStack 让 project_management 保持在工作区唯一的本地
-// Compose topology. The unified frontend already routes to basic-platform-local/project-api;
-// starting the subsystem's standalone Compose file as well would create a second project-api
-// network alias backed by a different MySQL volume and make requests non-deterministic.
+// rebuildIntegratedProjectStack 让 project_management 保持在工作区唯一的本地 Compose
+// 拓扑中。统一前端已经路由到 basic-platform-local/project-api；若再启动子系统的独立
+// Compose 文件，会创建第二个由不同 MySQL 卷支撑的 project-api 网络别名，请求结果不确定。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedProjectStack(ctx context.Context) error {
-	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "project-mysql"); err != nil {
+	// Building only prepares a candidate; it never replaces a running consumer.
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "project-api", "sla-notifier"); err != nil {
+		return err
+	}
+	background, err := provisioner.projectBackgroundTarget(ctx)
+	if err != nil {
+		return err
+	}
+	if err := background.preflight(ctx); err != nil {
+		return err
+	}
+	if err := prepareProjectBackground(ctx, background); err != nil {
+		return err
+	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "project-mysql", "temporal"); err != nil {
 		return err
 	}
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "project-migrate"); err != nil {
 		return err
 	}
-	if err := provisioner.runIntegratedPlatformCompose(ctx, "build", "project-api"); err != nil {
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "project-api", "sla-notifier"); err != nil {
 		return err
 	}
-	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "project-api")
+	return activateProjectBackground(ctx, background)
 }
 
-// rebuildIntegratedSettlementStack keeps Settlement inside the single platform
-// Compose project. The sequence is deliberately bounded to its own database,
-// migration, API and Worker; it neither tears down shared services nor writes
-// Settlement runtime secrets. Runtime adoption must never build an image: the
-// deployment agent can be network-isolated and adoption is meant to verify the
-// already-published local image, not publish a new version.
+// rebuildIntegratedSettlementStack 把 Settlement 保持在唯一的平台 Compose 项目内。步骤有意
+// 限定在其自身的数据库、迁移、API 与 Worker，不拆除共享服务，也不写 Settlement 运行时
+// 密钥。运行时收编（ADOPT）绝不构建镜像：部署 Agent 可能处于网络隔离状态，收编的目的
+// 是验证已发布的本地镜像，而不是发布新版本。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedSettlementStack(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "settlement-mysql"); err != nil {
 		return err
@@ -1237,12 +1282,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedSettlementS
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "run", "--rm", "--no-deps", "settlement-migrate"); err != nil {
 		return err
 	}
-	// Publish the application-owned catalog before replacing either runtime process.
-	// The platform retains the immediately previous catalog/hash as a compatibility
-	// window, so publishing vN first keeps the old vN-1 process authorized while also
-	// ensuring the new process never starts against an incompatible platform catalog.
-	// A failed publication therefore leaves the existing API/Worker untouched instead
-	// of exposing a partially upgraded subsystem that rejects every authorization context.
+	// 在替换任一运行进程之前发布应用自有的目录。平台会保留紧邻上一版目录/哈希作为兼容
+	// 窗口，因此先发布 vN 既让旧的 vN-1 进程保持授权，也确保新进程不会在不兼容的平台目录
+	// 上启动。发布失败时既有 API/Worker 原样保留，避免暴露一个拒绝所有授权上下文的半升级
+	// 子系统。
 	if err := provisioner.syncSettlementCatalog(ctx, input); err != nil {
 		return err
 	}
@@ -1256,8 +1299,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedSettlementS
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) updateSettlementCatalogRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
-	// An ordinary restart must not mint or overwrite a publisher secret. ADOPT and
-	// RETRY explicitly deliver a fresh one-time secret before arriving here.
+	// 普通重启不得铸造或覆盖发布者 secret；ADOPT 与 RETRY 在到达此处前已显式投递新的一次性
+	// 密钥。
 	if strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" {
 		return nil
 	}
@@ -1279,8 +1322,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateSettlementCatalogRunti
 
 func (provisioner *LocalDockerSubsystemProvisioner) syncSettlementCatalog(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if strings.TrimSpace(input.ApplicationID) == "" || strings.TrimSpace(input.CatalogPublisherClientID) == "" || strings.TrimSpace(input.CatalogPublisherClientSecret) == "" {
-		// Normal restarts do not have a plaintext publisher credential. They must
-		// not be treated as a catalog publication attempt.
+		// 普通重启没有明文发布者凭据，不能被当作目录发布尝试。
 		return nil
 	}
 	projectDirectory, err := provisioner.projectDirectory(integratedSettlementApplicationCode)
@@ -1293,9 +1335,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) syncSettlementCatalog(ctx co
 	}
 	runnerEnvironment := append(os.Environ(),
 		"PLATFORM_APPLICATION_ID="+input.ApplicationID,
-		// This is the control-plane API endpoint, not the OIDC issuer. The
-		// one-shot publisher joins the platform Compose network below, so it can
-		// use the stable service alias even when authentication is Keycloak.
+		// 这是控制面 API 端点而非 OIDC issuer。一次性发布容器在下方加入平台 Compose 网络，
+		// 因此即便认证方是 Keycloak，也能使用稳定的服务别名。
 		"PLATFORM_BASE_URL=http://platform-api:8080",
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID="+input.CatalogPublisherClientID,
 		"PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET="+input.CatalogPublisherClientSecret,
@@ -1309,9 +1350,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) syncSettlementCatalog(ctx co
 	)
 }
 
-// rebuildIntegratedCustomerStack publishes the application-owned authorization catalog before
-// starting customer-api in OIDC mode. Catalog publication is a one-shot deployment operation;
-// normal API restarts therefore do not depend on a long-lived publisher credential remaining valid.
+// rebuildIntegratedCustomerStack 在以 OIDC 模式启动 customer-api 之前发布应用自有的授权
+// 目录。目录发布是一次性部署操作，普通 API 重启因此不依赖长期有效的发布者凭据。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedCustomerStack(ctx context.Context) error {
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "customer-mysql"); err != nil {
 		return err
@@ -1328,10 +1368,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedCustomerSta
 	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "customer-api")
 }
 
-// rebuildIntegratedPortalStack uses an isolated Portal database and process while reusing the
-// customer repository's immutable backend image. The catalog is published before the Portal is
-// started, then customer-api is recreated so invitation endpoints receive the generated,
-// least-privilege machine credentials.
+// rebuildIntegratedPortalStack 复用 customer 仓库的不可变后端镜像，同时使用独立的 Portal
+// 数据库与进程。目录在 Portal 启动前发布，随后重建 customer-api，让邀请端点拿到生成的
+// 最小权限机器凭据。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedPortalStack(ctx context.Context) error {
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "portal-mysql"); err != nil {
 		return err
@@ -1348,28 +1387,41 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildIntegratedPortalStack
 	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--no-deps", "portal-api"); err != nil {
 		return err
 	}
+	if err := provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--no-deps", "portal-report-worker"); err != nil {
+		return err
+	}
 	return provisioner.runIntegratedPlatformCompose(ctx, "up", "-d", "--wait", "--force-recreate", "--no-deps", "customer-api")
 }
 
 func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose(ctx context.Context, arguments ...string) error {
+	_, err := provisioner.executeIntegratedPlatformCompose(ctx, false, arguments...)
+	return err
+}
+
+func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformComposeOutput(ctx context.Context, arguments ...string) ([]byte, error) {
+	return provisioner.executeIntegratedPlatformCompose(ctx, true, arguments...)
+}
+
+func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCompose(ctx context.Context, capture bool, arguments ...string) ([]byte, error) {
 	platformRoot, workspaceRoot, composeFile, platformEnvironment, contractEnvironment, customerEnvironment, portalEnvironment, projectEnvironment, err := provisioner.integratedComposeConfiguration()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	settlementEnvironment := filepath.Join(workspaceRoot, "Settlement", ".env.local")
 	if info, statErr := os.Stat(settlementEnvironment); statErr != nil || info.IsDir() {
-		// Other integrated subsystem tests and legacy workspaces may not yet have
-		// Settlement. Compose still needs an env-file target while parsing its
-		// anchors, so use an empty safe file unless this is a Settlement operation.
+		// 其他集成子系统测试与旧工作区可能还没有 Settlement。Compose 解析 anchor 时仍需要
+		// 一个 env-file 目标，因此非 Settlement 操作一律使用空的安全文件。
 		settlementEnvironment = os.DevNull
 	}
-	// Integrated subsystem rebuilds must be deterministic and must not inherit a
-	// stale LAN override from the shell that started the platform API. The
-	// regular docker-local entrypoint sets these values explicitly; the
-	// provisioner runs Compose from inside the API container and therefore has
-	// to do the same. Otherwise Compose can resolve an old, absent
-	// platform/docker/.env.lan and leave contract-api in Created state.
+	// 集成子系统重建必须确定性执行，不得继承启动平台 API 的 shell 中残留的 LAN 覆盖值。
+	// 常规 docker-local 入口会显式设置这些值；provisioner 从 API 容器内部运行 Compose，必须
+	// 做同样的事。否则 Compose 可能解析到旧的或缺失的 platform/docker/.env.lan，把
+	// contract-api 卡在 Created 状态。
 	lanPlaceholder := filepath.Join(platformRoot, "docker", ".env.lan.disabled")
+	analysisEnvironment := filepath.Join(workspaceRoot, "data_analysis", ".env.local")
+	if info, err := os.Stat(analysisEnvironment); err != nil || info.IsDir() {
+		analysisEnvironment = os.DevNull
+	}
 	composeArguments := []string{
 		"compose", "--project-name", provisioner.config.PlatformComposeProject,
 		"--project-directory", platformRoot,
@@ -1379,7 +1431,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"--env-file", portalEnvironment,
 		"--env-file", projectEnvironment,
 		"--env-file", settlementEnvironment,
+		"--env-file", analysisEnvironment,
 		"-f", composeFile,
+	}
+	if !slices.Contains(arguments, "build") {
+		if override, err := provisioner.localRuntimeOverride(); err != nil {
+			return nil, err
+		} else if override != "" {
+			composeArguments = append(composeArguments, "-f", override)
+		}
 	}
 	composeArguments = append(composeArguments, arguments...)
 	lanOverrideKeys := map[string]struct{}{
@@ -1397,7 +1457,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT": {},
 		"SETTLEMENT_SUBSYSTEM_ENVIRONMENT":    {},
 	}
+	workerEnvironment := filepath.Join(filepath.Dir(portalEnvironment), ".env.portal-report-worker.local")
+	if info, err := os.Stat(workerEnvironment); err != nil || info.IsDir() {
+		workerEnvironment = os.DevNull
+	}
 	runnerEnvironment := make([]string, 0, len(os.Environ())+12)
+	runnerEnvironment = append(runnerEnvironment, "PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE="+workerEnvironment)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok {
@@ -1424,12 +1489,13 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		"PORTAL_RUNTIME_ENV_FILE="+portalEnvironment,
 		"PROJECT_RUNTIME_ENV_FILE="+projectEnvironment,
 		"SETTLEMENT_RUNTIME_ENV_FILE="+settlementEnvironment,
+		"DATA_ANALYSIS_RUNTIME_ENV_FILE="+analysisEnvironment,
+		"PRESALE_WORKER_ENV_FILE="+filepath.Join(workspaceRoot, "customer_and_opportunity", ".env.presale-worker"),
 		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
 		"SUBSYSTEM_HOST_PROJECTS_ROOT="+workspaceRoot,
 	)
-	// Provision writes the selected environment into the runtime file before it invokes
-	// Compose. Re-read those files for every operation so a first-time dev/test/staging/prod
-	// onboarding receives the matching discovery label without restarting the provisioner.
+	// Provision 在调用 Compose 之前把所选环境写入运行时文件。每次操作都重新读取这些文件，
+	// 让首次 dev/test/staging/prod 接入无需重启 provisioner 就能拿到匹配的发现 label。
 	runtimeEnvironments := []struct {
 		key, path, applicationCode, clientKey string
 	}{
@@ -1447,7 +1513,23 @@ func (provisioner *LocalDockerSubsystemProvisioner) runIntegratedPlatformCompose
 		}
 		runnerEnvironment = append(runnerEnvironment, target.key+"="+environment)
 	}
-	return provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+	if !slices.Contains(arguments, "build") && (slices.Contains(arguments, "project-api") || slices.Contains(arguments, "sla-notifier") || slices.Contains(arguments, "project-migrate")) {
+		image, err := provisioner.localProjectBackgroundImage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		runnerEnvironment = append(runnerEnvironment, "PROJECT_BACKGROUND_BUILD_ID=project-background-sha256-"+strings.TrimPrefix(image, "sha256:"))
+	}
+	if capture {
+		runner, ok := provisioner.runner.(interface {
+			RunOutput(context.Context, string, []string, string, ...string) ([]byte, error)
+		})
+		if !ok {
+			return nil, errors.New("local Compose inspection output unavailable")
+		}
+		return runner.RunOutput(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+	}
+	return nil, provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
 }
 
 func localRuntimeEnvironment(path, applicationCode, clientKey string) string {
@@ -1481,7 +1563,7 @@ func validLocalRuntimeEnvironment(value string) bool {
 func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfiguration() (string, string, string, string, string, string, string, string, error) {
 	platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
 	workspaceRoot := filepath.Dir(platformRoot)
-	composeFile := filepath.Join(platformRoot, "compose.local.yaml")
+	composeFile := provisioner.localComposeFile()
 	platformEnvironment := filepath.Join(platformRoot, "docker", ".env.local")
 	contractEnvironment := filepath.Join(workspaceRoot, integratedContractApplicationCode, ".env.local")
 	customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
@@ -1492,15 +1574,14 @@ func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfigurati
 			return "", "", "", "", "", "", "", "", provisioningError("integrated subsystem Compose configuration is unavailable")
 		}
 	}
-	// Existing local installations predate customer_portal. Other integrated subsystems must
-	// remain operable without forcing an immediate new environment file. Portal preflight checks
-	// its own template separately, and Provision writes .env.portal.local before Compose is run.
+	// 既有本地安装早于 customer_portal。其他集成子系统必须保持可用，不能强迫立即生成新的
+	// 环境文件。Portal preflight 单独检查自身模板，且 Provision 会在运行 Compose 之前写好
+	// .env.portal.local。
 	if info, err := os.Stat(portalEnvironment); err != nil || info.IsDir() {
 		portalEnvironment = os.DevNull
 	}
-	// Existing local installations predate project_management. The project environment file is
-	// written by Provision before the integrated stack is started; treat a missing file the same
-	// as Portal so pre-existing workspaces keep working until the first onboarding.
+	// 既有本地安装早于 project_management。项目环境文件由 Provision 在启动集成栈之前写入；
+	// 缺失文件按 Portal 同样处理，让既有工作区在首次接入前保持可用。
 	if info, err := os.Stat(projectEnvironment); err != nil || info.IsDir() {
 		projectEnvironment = os.DevNull
 	}
@@ -1576,10 +1657,9 @@ func booleanEnvironmentValue(value bool) string {
 	return "false"
 }
 
-// portalRuntimeSecrets preserves already generated local material and fills every secret on the
-// first Agent-driven onboarding. The DSN is always rebuilt from the same generated database
-// password, avoiding a template placeholder or a second unrelated random value in the connection
-// string. Browser and machine OAuth credentials are intentionally handled by the caller instead.
+// portalRuntimeSecrets 保留已生成的本地材料，并在首次 Agent 驱动接入时补齐全部 secret。
+// DSN 始终由同一个生成的数据库密码重建，避免连接串中出现模板占位符或第二个不相关的随机
+// 值。浏览器与机器 OAuth 凭据有意交由调用方处理。
 func portalRuntimeSecrets(sourcePath string) (map[string]string, error) {
 	values, err := readEnvironmentValues(sourcePath)
 	if err != nil {
@@ -1598,7 +1678,7 @@ func portalRuntimeSecrets(sourcePath string) (map[string]string, error) {
 		"PORTAL_MYSQL_ROOT_PASSWORD": rootPassword,
 		"PORTAL_MYSQL_DSN":           "portal:" + databasePassword + "@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
 	}
-	for _, key := range []string{"PORTAL_ENCRYPTION_KEY_BASE64", "PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64", "PORTAL_HMAC_KEY_BASE64"} {
+	for _, key := range []string{"PORTAL_ENCRYPTION_KEY_BASE64", "PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64", "PORTAL_REPORT_CONTENT_KEY_BASE64", "PORTAL_HMAC_KEY_BASE64"} {
 		value := strings.TrimSpace(values[key])
 		if value == "" || strings.HasPrefix(value, "REPLACE_WITH_") {
 			buffer := make([]byte, 32)
@@ -1644,15 +1724,14 @@ func readEnvironmentValues(path string) (map[string]string, error) {
 	return result, nil
 }
 
-// maybeSyncContractCatalogLocked runs the platform's catalog sync helper image for the configured
-// target subsystem. The helper pulls the application-owned role/permission manifest out of the
-// platform's MySQL, mints a catalog-publisher access token, and PUTs the manifest back to the
-// platform's /authorization-catalog endpoint using the subsystem's own service credential.
+// maybeSyncContractCatalogLocked 为配置的目标子系统运行平台的目录同步辅助镜像。helper 从
+// 平台 MySQL 取出应用自有的角色/权限清单，铸造目录发布者访问令牌，再用子系统自身的服务
+// 凭据把清单 PUT 回平台的 /authorization-catalog 端点。
 //
-// The helper now runs directly on the Agent host through bash (SEC-F2): the previous one-shot
-// `docker run --rm --network=host -v /var/run/docker.sock` handed a root-equivalent Docker socket
-// plus plaintext secrets to an ephemeral container. Failure to sync is non-fatal: the operator can
-// always re-run the script out of band, and the regular handbook flow remains usable.
+// helper 现在经 bash 直接运行在 Agent 主机上（SEC-F2）：此前的一次性
+// `docker run --rm --network=host -v /var/run/docker.sock` 会把等价 root 的 Docker socket
+// 连同明文 secret 交给临时容器。同步失败不是致命错误：运维可以在带外重跑脚本，常规手册
+// 流程仍然可用。
 func (provisioner *LocalDockerSubsystemProvisioner) maybeSyncContractCatalogLocked(operationCtx context.Context, input application.SubsystemProvisioningInput) error {
 	if !provisioner.config.CatalogSyncEnabled {
 		return nil
@@ -1994,10 +2073,30 @@ func provisioningError(message string) error {
 	return fmt.Errorf("%w: %s", application.ErrSubsystemProvisioningUnavailable, message)
 }
 
-// ApplyAccess rewrites the local override environment files and recreates the affected
-// containers so the unified frontend, OIDC issuer and subsystem callbacks use the configured
-// public origin. An empty PublicOrigin restores local-only access (127.0.0.1). This mirrors
-// scripts/lan-access.sh but is driven by the platform management console through the socket.
+// localReleaseCredentialError 用于“已批准本地发行缺少组件凭据”。它同时暴露两个哨兵：
+// ErrSubsystemProvisioningUnavailable 维持既有错误处理路径，ErrRuntimeLicenseNotInitialized
+// 让上层把失败归类为 LICENSE_NOT_INITIALIZED，向用户给出可执行的许可证指引。
+type localReleaseCredentialError struct{ message string }
+
+// Error 返回构造时固化的描述文本。
+func (e localReleaseCredentialError) Error() string { return e.message }
+
+// Unwrap 同时暴露两个哨兵：errors.Is 据此既能匹配既有部署不可用路径，也能把失败归类为
+// LICENSE_NOT_INITIALIZED，两条处理链都不需要解析错误文本。
+func (e localReleaseCredentialError) Unwrap() []error {
+	return []error{application.ErrSubsystemProvisioningUnavailable, application.ErrRuntimeLicenseNotInitialized}
+}
+
+func localRuntimeDeploymentError(err error, fallback string) error {
+	if application.RuntimeLicenseApprovalErrorCode(err) != "" {
+		return application.RuntimeLicenseApprovalFailure(err)
+	}
+	return provisioningError(fallback)
+}
+
+// ApplyAccess 重写本机覆盖环境文件并重建受影响容器，使统一前端、OIDC issuer 和子系统回调
+// 使用配置的公开 origin；空的 PublicOrigin 恢复仅本机访问（127.0.0.1）。行为对齐
+// scripts/lan-access.sh，但由平台管理控制台经 socket 驱动。
 func (provisioner *LocalDockerSubsystemProvisioner) ApplyAccess(ctx context.Context, input settingsapplication.AccessApplyInput) error {
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()

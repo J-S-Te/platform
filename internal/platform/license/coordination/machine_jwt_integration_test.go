@@ -105,8 +105,8 @@ func machineTokenService(t *testing.T, now time.Time) (*registry.Service, *machi
 	return svc, repo, manager
 }
 
-// This native test uses the actual issuance and current-registration authentication,
-// not a fabricated Principal. SQL integration below then passes it to the real handler.
+// 此原生测试使用实际签发流程和当前注册认证，
+// 不伪造 Principal；下方 SQL 集成再将其交给真实处理器。
 func TestRuntimeMachineJWTSeparatesDatabaseAndExternalIdentity(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	svc, repo, manager := machineTokenService(t, now)
@@ -176,12 +176,12 @@ func TestMySQLRealMachineJWTToRuntimeHandler(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	// Every dedicated SQL test bootstraps its own schema, including fresh DSNs;
-	// Go test ordering must not provide an implicit migration dependency.
+	// 每个专用 SQL 测试都应自行初始化 schema，包括全新的 DSN；
+	// 不能通过 Go 测试顺序隐式依赖其他测试执行迁移。
 	if _, err = migration.Run(context.Background(), db, migrations.Files); err != nil {
 		t.Fatal(err)
 	}
-	// Fixture changes are rolled back, including ready_at; no shared license identity is replaced.
+	// 夹具变更包括 ready_at 均会回滚，不替换任何共享许可证身份。
 	tx := db.Begin()
 	if tx.Error != nil {
 		t.Fatal(tx.Error)

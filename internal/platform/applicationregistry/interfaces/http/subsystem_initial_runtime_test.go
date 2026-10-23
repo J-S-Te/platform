@@ -159,8 +159,8 @@ func TestAdoptionRedeliversEveryExistingServiceCredential(t *testing.T) {
 			requirements := updateServiceCredentialRequirements("contract_management")
 			manager := &serviceCredentialManagerStub{}
 			for _, requirement := range requirements {
-				manager.clients = append(manager.clients, application.OAuthClientView{ID: requirement.suffix,
-					ClientID: "contract_management-prod-" + requirement.suffix, ApplicationID: "app", EnvironmentID: "env",
+				manager.clients = append(manager.clients, application.OAuthClientView{ID: requirement.Suffix,
+					ClientID: "contract_management-prod-" + requirement.Suffix, ApplicationID: "app", EnvironmentID: "env",
 					TenantID: "tenant", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"},
 					Status: "ACTIVE", Scopes: serviceCredentialScopes(requirement)})
 			}
@@ -173,8 +173,11 @@ func TestAdoptionRedeliversEveryExistingServiceCredential(t *testing.T) {
 				t.Fatal("initial adoption/retry lost a required service credential")
 			}
 			for _, credential := range credentials {
-				if credential.PlaintextSecret == "" {
+				if credential.PlaintextSecret == "" && !(operation == "UPDATE" && p1ServicePurpose(credential.Purpose)) {
 					t.Fatal("service credential not delivered")
+				}
+				if operation == "UPDATE" && p1ServicePurpose(credential.Purpose) && credential.PlaintextSecret != "" {
+					t.Fatal("ordinary UPDATE rotated new purpose secret")
 				}
 				if operation == "UPDATE" && credential.Purpose == application.ServiceCredentialOwnerDirectoryRead {
 					t.Fatal("ordinary update rotated the nonrotating owner directory credential")

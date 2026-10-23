@@ -26,7 +26,7 @@ type Service struct {
 	authorizationCodeTTL time.Duration
 }
 
-// NewService validates dependencies and creates an OIDC/OAuth application service.
+// NewService 校验依赖并构造 OIDC/OAuth 应用服务；授权码 TTL 必须落在 (0, 10m] 区间。
 func NewService(repository Repository, issuer TokenIssuer, ids IDGenerator, secrets SecretGenerator, clock Clock, authorizationCodeTTL time.Duration) (*Service, error) {
 	if repository == nil || issuer == nil || ids == nil || secrets == nil || clock == nil {
 		return nil, errors.New("OIDC/OAuth service dependencies must not be nil")
@@ -40,8 +40,8 @@ func NewService(repository Repository, issuer TokenIssuer, ids IDGenerator, secr
 	}, nil
 }
 
-// IsRegisteredRedirectURI reports whether redirectURI exactly matches an active client's registered URI.
-// It intentionally fails closed for missing or disabled clients and never performs prefix matching.
+// IsRegisteredRedirectURI 判断 redirectURI 是否与活动客户端的注册 URI 完全一致。
+// 客户端缺失或停用时刻意 fail-closed，且绝不执行前缀匹配。
 func (service *Service) IsRegisteredRedirectURI(ctx context.Context, clientID, redirectURI string) (bool, error) {
 	clientID, redirectURI = strings.TrimSpace(clientID), strings.TrimSpace(redirectURI)
 	if clientID == "" || redirectURI == "" {
@@ -266,9 +266,8 @@ func (service *Service) validateGrantSession(ctx context.Context, tenantID, sess
 	return nil
 }
 
-// Revoke persists a token revocation. Refresh-token revocation invalidates the complete family;
-// unknown tokens still return success in accordance with RFC 7009 and are stored as access-token
-// digests only when the caller explicitly identifies them as access tokens.
+// Revoke 持久化一次令牌撤销。refresh token 撤销会使其整个令牌族失效；未知令牌
+// 按 RFC 7009 仍返回成功，且仅在调用方明确标识为 access token 时才记录其摘要。
 func (service *Service) Revoke(ctx context.Context, input RevokeTokenInput) error {
 	input = normalizeRevokeInput(input)
 	if input.ClientID == "" || input.Token == "" || !oneOf(input.TokenType, domain.TokenTypeAccess, domain.TokenTypeRefresh) || !validProtocolText(input.Reason, 128) {
@@ -297,8 +296,8 @@ func (service *Service) Revoke(ctx context.Context, input RevokeTokenInput) erro
 	return nil
 }
 
-// IsAccessTokenRevoked hashes an opaque bearer value locally and reads the tenant-scoped durable
-// revocation record. Callers should invoke it after signature and claim validation.
+// IsAccessTokenRevoked 在本地哈希不透明 bearer 值后读取租户范围的持久化撤销记录。
+// 调用方应在签名与声明校验之后调用本方法。
 func (service *Service) IsAccessTokenRevoked(ctx context.Context, tenantID, rawAccessToken string) (bool, error) {
 	tenantID, rawAccessToken = strings.TrimSpace(tenantID), strings.TrimSpace(rawAccessToken)
 	if tenantID == "" || rawAccessToken == "" {

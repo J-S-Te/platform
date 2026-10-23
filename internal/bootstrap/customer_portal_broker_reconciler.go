@@ -18,14 +18,16 @@ type customerPortalBrokerControl interface {
 	VerifyCustomerPortalBrokerExists(context.Context) error
 }
 
-// customerPortalBrokerReconciler provisions the optional portal Broker when
-// its application/environment is registered, including after worker startup.
+// customerPortalBrokerReconciler 在门户应用/环境完成注册后（包括 worker 启动后）
+// 开通可选的门户 Broker。
 type customerPortalBrokerReconciler struct {
 	registrar customerPortalBrokerClientRegistrar
 	control   customerPortalBrokerControl
 	tenantID  string
 }
 
+// Reconcile 确保门户 Broker OAuth client 与 IdP 配置就绪。目标应用/环境尚未注册时
+// 返回 false（下次再试）；其余错误包装后上抛，由调度方决定重试。
 func (reconciler customerPortalBrokerReconciler) Reconcile(ctx context.Context) (bool, error) {
 	clientID, clientSecret, err := reconciler.registrar.EnsureCustomerPortalBroker(ctx, reconciler.tenantID)
 	if errors.Is(err, errBrokerTargetNotRegistered) {
@@ -49,8 +51,8 @@ func (reconciler customerPortalBrokerReconciler) Reconcile(ctx context.Context) 
 		return true, fmt.Errorf("verify customer portal Broker IdP: %w", err)
 	}
 
-	// OAuth client secrets are stored hashed; rotate only for classified Keycloak
-	// configuration drift, never for transient network or service failures.
+	// OAuth client secret 以哈希存储；只对已定性的 Keycloak 配置漂移轮换，
+	// 绝不因瞬时网络或服务故障轮换。
 	clientID, clientSecret, err = reconciler.registrar.RecoverCustomerPortalBroker(ctx, reconciler.tenantID, "system-keycloak")
 	if err != nil {
 		return true, fmt.Errorf("recover customer portal Broker OAuth credential: %w", err)

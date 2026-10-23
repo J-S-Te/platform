@@ -11,8 +11,8 @@ import (
 	licenseevidence "github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
 )
 
-// Opt-in interop checks use the real CLI artifact and immutable Docker image
-// mapping, not a hand-built success fixture. It never starts or enrolls services.
+// 显式启用的互操作检查使用真实 CLI 产物和不可变 Docker 镜像
+// 映射，不使用手工构造的成功夹具；不会启动或接入服务。
 func TestRuntimeApprovalCandidateInteroperability(t *testing.T) {
 	dir := os.Getenv("LICENSE_APPROVAL_CANDIDATE_DIR")
 	if dir == "" {
@@ -46,7 +46,7 @@ func TestRuntimeApprovalCandidateInteroperability(t *testing.T) {
 		}
 		count += len(items)
 	}
-	if len(profiles) != 6 || count != 19 || len(config.Services) != 19 || len(config.Infrastructure) != 1 || config.Infrastructure[0].Name != "data-analysis-metabase" {
+	if len(profiles) != 6 || count != 21 || len(config.Services) != 21 || len(config.Infrastructure) != 1 || config.Infrastructure[0].Name != "data-analysis-metabase" {
 		t.Fatal("real tool/platform boundary mismatch")
 	}
 }

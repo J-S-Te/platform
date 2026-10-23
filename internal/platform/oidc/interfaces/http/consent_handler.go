@@ -9,9 +9,9 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 )
 
-// Consent exposes the durable user-consent decision for the authenticated browser session.
-// Bootstrap may publish it at GET /oauth2/consent for a consent screen. It never returns a prior
-// approval as a grant token; the authorization flow remains responsible for issuing codes.
+// Consent 暴露已认证浏览器会话的持久用户同意决定。bootstrap 可将其发布在
+// GET /oauth2/consent 供同意页使用。它绝不把既有授权当作签发凭据返回；
+// 授权码仍由授权流程负责签发。
 func (h *Handler) Consent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -40,9 +40,8 @@ func (h *Handler) Consent(w http.ResponseWriter, r *http.Request) {
 	}, true)
 }
 
-// GrantConsent records a user approval for exactly the requested registered scope set. Bootstrap
-// may publish it at POST /oauth2/consent/grant after its CSRF-protected consent UI has confirmed
-// the user's action.
+// GrantConsent 记录用户对请求的已登记 scope 集合的精确授权。bootstrap 可在其
+// CSRF 保护的同意 UI 确认用户操作后，将本端点发布于 POST /oauth2/consent/grant。
 func (h *Handler) GrantConsent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -71,8 +70,8 @@ func (h *Handler) GrantConsent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNoContent, nil, true)
 }
 
-// RevokeConsent removes all stored approvals for one client and authenticated user. Publishing it
-// at DELETE /oauth2/consent makes withdrawal independent from ordinary authorization redirects.
+// RevokeConsent 移除一个客户端与已认证用户之间的全部已存储授权。发布在
+// DELETE /oauth2/consent 使撤回独立于普通授权重定向。
 func (h *Handler) RevokeConsent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		w.Header().Set("Allow", http.MethodDelete)

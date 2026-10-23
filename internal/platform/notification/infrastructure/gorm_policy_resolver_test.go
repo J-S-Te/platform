@@ -16,9 +16,9 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// Exercise GORM's real SQL generation and scanning without a database/network.
-// Query-only connector fails all preparation/transaction paths rather than
-// providing a fake successful write capability.
+// 在不使用数据库或网络的情况下，验证 GORM 的真实 SQL 生成和扫描。
+// 只读查询连接器拒绝所有预处理和事务路径，
+// 不提供虚假的写入成功能力。
 type policyQuery struct {
 	tenant       string
 	rows         [][]driver.Value

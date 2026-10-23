@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate every optional-subsystem combination without starting containers."""
+"""验证所有可选子系统组合，不启动容器。"""
 import itertools
 import json
 import os
@@ -40,7 +40,7 @@ def main():
         runtime = root / ".env"
         runtime.write_text("")
         env = {k: v for k, v in os.environ.items() if not re.match(r"^(COMPOSE_|PUBLIC_|.*_IMAGE$|.*_RUNTIME_ENV_FILE$)", k)}
-        # No optional runtime files or optional images exist in this fixture.
+        # 此夹具不存在可选运行文件或可选镜像。
         env.update({
             "BASIC_PLATFORM_RUNTIME_ENV_FILE": str(runtime),
             "PLATFORM_KEYS_DIR": str(root / "custom-keys"),
@@ -73,8 +73,7 @@ def main():
                 assert services["temporal"]["environment"]["MYSQL_SEEDS"] == "contract-mysql"
                 assert services["contract-mysql"]["volumes"][0]["source"] == "contract-mysql-data"
                 if "customer" not in disabled:
-                    # All dependency targets must remain available for CRM-only purchases;
-                    # --no-deps deliberately cannot start omitted infrastructure implicitly.
+                    # 仅购买 CRM 时全部依赖目标仍须可用；--no-deps 刻意不会隐式启动被省略的基础设施。
                     assert set(crm_dependencies) <= set(services)
                     for dependency in crm_dependencies:
                         assert set(services[dependency].get("depends_on", {})) <= set(crm_dependencies)

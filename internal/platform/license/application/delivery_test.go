@@ -93,7 +93,7 @@ func TestDeliveryPendingAndExistingIdentity(t *testing.T) {
 	if _, err = f.s.ImportDelivery(context.Background(), f.sign(t, 1, n), "production", testActor); !errors.Is(err, core.ErrDenied) {
 		t.Fatalf("identity override: %v", err)
 	}
-	// An ordinary server-generated identity is never replaced by package identity.
+	// 普通服务端生成的身份绝不能被交付包身份替换。
 	f = setup(t)
 	f.instance = "packaged-instance"
 	if _, err = f.s.ImportDelivery(context.Background(), f.sign(t, 1, n), "production", testActor); !errors.Is(err, core.ErrDenied) {

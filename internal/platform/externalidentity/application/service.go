@@ -1,6 +1,5 @@
-// Package application implements machine-only external customer provisioning and Portal role
-// convergence. It may reserve a credential-free local login account, but never creates, receives,
-// generates, or returns password or other credential material.
+// Package application 实现仅限机器调用的外部客户供给与 Portal 角色收敛。允许预留
+// 无凭据的本地登录账号，但绝不创建、接收、生成或返回密码及其他凭据材料。
 package application
 
 import (
@@ -23,9 +22,10 @@ const (
 	// 机器接口只能收敛到客户门户的低权限客户角色；应用码和角色码不是调用方可自由选择的委派入口。
 	// PortalApplicationCode 是平台默认门户应用码，B4 解耦后可通过 Options 覆盖。
 	PortalApplicationCode = "customer_portal"
-	PortalCustomerRole    = "portal_customer"
-	maxClockSkew          = 5 * time.Minute
-	nonceRetention        = 10 * time.Minute
+	// PortalCustomerRole 是机器接口唯一允许收敛到的客户门户角色。
+	PortalCustomerRole = "portal_customer"
+	maxClockSkew       = 5 * time.Minute
+	nonceRetention     = 10 * time.Minute
 )
 
 // Options 允许装配层覆盖门户应用码，缺省保持平台默认，保证既有行为不变。
@@ -65,18 +65,27 @@ func WithCustomerPortalInitialPassword(password string) ServiceOption {
 }
 
 var (
-	ErrValidation  = errors.New("external identity validation failed")
-	ErrConflict    = errors.New("external identity conflict")
-	ErrNotFound    = errors.New("external identity not found")
-	ErrReplay      = errors.New("external identity integration replay detected")
+	// ErrValidation 表示调用方可自行修正的输入错误。
+	ErrValidation = errors.New("external identity validation failed")
+	// ErrConflict 表示唯一性或生命周期状态冲突。
+	ErrConflict = errors.New("external identity conflict")
+	// ErrNotFound 表示目标身份或绑定不存在。
+	ErrNotFound = errors.New("external identity not found")
+	// ErrReplay 表示检测到 nonce 或幂等键重放，请求被拒绝。
+	ErrReplay = errors.New("external identity integration replay detected")
+	// ErrUnavailable 表示加密等依赖未配置，操作失败关闭。
 	ErrUnavailable = errors.New("external identity dependency unavailable")
 )
 
+// Clock 抽象时间源，使防重放时间窗可测试。
 type Clock interface{ Now() time.Time }
+
+// IDGenerator 生成身份与事件标识。
 type IDGenerator interface {
 	New(time.Time) (string, error)
 }
 
+// MobileProtection 提供手机号加密与摘要能力，明文手机号绝不落库。
 type MobileProtection interface {
 	Encrypt(string) ([]byte, error)
 	Digest(string) []byte
@@ -90,24 +99,28 @@ type CustomerRefProtection interface {
 	Digest(string) ([]byte, error)
 }
 
+// RequestProof 是机器请求的防重放证明：幂等键保证业务重试返回原结果；
+// 时间戳与 nonce 阻断截获请求在时间窗内外被再次利用。
 type RequestProof struct {
-	// 幂等键保证业务重试返回原结果；时间戳和 nonce 则阻断截获请求在时间窗内外被再次利用。
 	IdempotencyKey string
 	Timestamp      time.Time
 	Nonce          string
 }
 
+// ProvisionInput 携带创建外部客户身份所需的最小资料。
 type ProvisionInput struct {
 	DisplayName string
 	Mobile      string
 	Email       string
 }
 
+// ProvisionResult 是不含秘密的供给结果，仅暴露平台用户 ID 与账号编号。
 type ProvisionResult struct {
 	PlatformUserID string `json:"platform_user_id"`
 	AccountNo      string `json:"account_no"`
 }
 
+// RoleInput 携带 Portal 角色收敛请求的目标用户、应用与角色。
 type RoleInput struct {
 	PlatformUserID  string
 	ApplicationCode string
@@ -125,6 +138,8 @@ type ResolvedCustomerBinding struct {
 	CustomerRef string
 }
 
+// ProvisionCommand 是应用层准备好的完整供给命令：全部加密、摘要与校验都已完成，
+// 仓储只负责在事务内落库。
 type ProvisionCommand struct {
 	Principal      appctx.Principal
 	IdempotencyKey string
@@ -147,6 +162,7 @@ type ProvisionCommand struct {
 	OccurredAt     time.Time
 }
 
+// RoleCommand 是应用层校验后的角色收敛命令，包含防重放要素与事件标识。
 type RoleCommand struct {
 	Principal       appctx.Principal
 	IdempotencyKey  string
@@ -187,6 +203,7 @@ type BindingQuery struct {
 	Status          string
 }
 
+// Repository 持久化外部身份供给、角色收敛与客户绑定；实现必须在事务内完成事件写入。
 type Repository interface {
 	Provision(context.Context, ProvisionCommand) (ProvisionResult, error)
 	AssignRole(context.Context, RoleCommand) (domain.RoleResult, error)
@@ -195,6 +212,7 @@ type Repository interface {
 	ResolveCustomerBinding(context.Context, BindingQuery) (domain.CustomerBinding, error)
 }
 
+// Service 是外部身份应用服务：统一执行主体校验、防重放与加解密边界。
 type Service struct {
 	repository            Repository
 	mobiles               MobileProtection
@@ -205,6 +223,8 @@ type Service struct {
 	initialPassword       string
 }
 
+// NewService 构造外部身份服务；核心依赖缺失时失败关闭，客户标识保护缺省采用
+// 不可用占位实现，绑定操作会显式报 ErrUnavailable。
 func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator, clock Clock, options ...ServiceOption) (*Service, error) {
 	if repository == nil || mobiles == nil || ids == nil || clock == nil {
 		return nil, errors.New("external identity service dependencies must not be nil")
@@ -224,6 +244,19 @@ func NewService(repository Repository, mobiles MobileProtection, ids IDGenerator
 	}, nil
 }
 
+// PortalApplicationCode 返回本实例实际使用的客户门户应用码。
+//
+// 绑定写入用的是实例配置值，读取也必须用同一个值：自定义门户编码时用包级默认值
+// 查询会查不到刚写入的绑定（对账接口 404 / 绑定状态永远为未绑定）。
+func (service *Service) PortalApplicationCode() string {
+	if code := strings.TrimSpace(service.portalApplicationCode); code != "" {
+		return code
+	}
+	return PortalApplicationCode
+}
+
+// Provision 校验机器主体与防重放证明后创建外部客户身份：预留无凭据本地账号、
+// 派生一次性初始化口令凭据并落 PENDING_ACTIVATION 身份行。
 func (service *Service) Provision(ctx context.Context, principal appctx.Principal, proof RequestProof, input ProvisionInput) (ProvisionResult, error) {
 	// 先验证机器主体与防重放证明，再处理个人信息；验证失败时不执行加密、摘要或写库。
 	now, nonceHash, err := validateProof(principal, proof, service.clock.Now())
@@ -287,10 +320,13 @@ func externalAccountNo(mobile, userID string) string {
 	return "EXT-" + strings.ToUpper(userID)
 }
 
+// AssignPortalRole 把目标用户收敛到客户门户的低权限客户角色；
+// 角色码与应用码由服务端固定，不接受调用方指定。
 func (service *Service) AssignPortalRole(ctx context.Context, principal appctx.Principal, proof RequestProof, input RoleInput) (domain.RoleResult, error) {
 	return service.role(ctx, principal, proof, input, false)
 }
 
+// RevokePortalRole 撤销客户门户角色绑定；幂等键命中时返回既有结果。
 func (service *Service) RevokePortalRole(ctx context.Context, principal appctx.Principal, proof RequestProof, input RoleInput) (domain.RoleResult, error) {
 	return service.role(ctx, principal, proof, input, true)
 }
@@ -417,6 +453,7 @@ func containsControl(value string) bool {
 	return false
 }
 
+// SameDigest 以常量时间比较两个 SHA-256 摘要是否相等。
 func SameDigest(left, right []byte) bool {
 	// 摘要比较采用常量时间，避免在机器接口冲突路径上泄漏前缀匹配信息。
 	return len(left) == sha256.Size && len(right) == sha256.Size && subtle.ConstantTimeCompare(left, right) == 1

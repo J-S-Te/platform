@@ -1,4 +1,4 @@
-// Package filetaskhttp adapts file storage and async task use cases to the platform HTTP envelope.
+// Package filetaskhttp 把文件存储与异步任务用例适配到平台 HTTP 响应封装。
 package filetaskhttp
 
 import (
@@ -24,7 +24,7 @@ import (
 
 const (
 	maxJSONRequestBytes   = 320 * 1024
-	maxUploadRequestBytes = 21 << 20 // Default policy (20 MiB) plus multipart overhead.
+	maxUploadRequestBytes = 21 << 20 // 默认策略 20MiB 加 multipart 编码开销。
 	// v1MaxConcurrentFileOps 是 v1 上传/下载的每实例并发上限（AUD-2026-025）。v1 路径经
 	// ParseMultipartForm 缓冲整个请求体、服务层再整段读入校验（最坏约两份 20MiB 缓冲），
 	// 与 v2 会话路径按申报大小流式落盘不同，故 v2 不加该信号量。上限取常量以约束单实例
@@ -52,9 +52,8 @@ type jobService interface {
 	Rerun(context.Context, string, string) (domain.Job, error)
 }
 
-// Handler provides tenant-scoped, authenticated operations. Route registration and permission
-// middleware remain bootstrap responsibilities; download authorization is additionally enforced
-// in the application service so an owner cannot be bypassed by a route misconfiguration.
+// Handler 提供租户隔离的已认证操作。路由注册与权限中间件仍由装配根负责；
+// 下载授权在应用服务中再加一道，避免路由配置错误绕过属主校验。
 type Handler struct {
 	files   fileService
 	jobs    jobService
@@ -63,7 +62,7 @@ type Handler struct {
 	fileOps chan struct{}
 }
 
-// NewHandler validates module dependencies.
+// NewHandler 校验模块依赖。
 func NewHandler(files fileService, jobs jobService, logger *slog.Logger, auditDB *gorm.DB) (*Handler, error) {
 	if files == nil || jobs == nil || logger == nil {
 		return nil, errors.New("filetask HTTP handler dependencies must not be nil")
@@ -103,8 +102,8 @@ type jobPayload struct {
 }
 
 type cleanupPayload struct {
-	// Before is a policy-supplied UTC cutoff. The current schema has no file_object.expires_at;
-	// callers must not treat it as a per-file expiry setting.
+	// Before 是策略层提供的 UTC 截止点。当前模式没有 file_object.expires_at；
+	// 调用方不得把它当作逐文件过期设置。
 	Before   time.Time `json:"before"`
 	MaxFiles int       `json:"max_files"`
 }
@@ -123,8 +122,8 @@ type reconcilePayload struct {
 	Limit  int       `json:"limit"`
 }
 
-// Upload accepts one multipart file and persists it under the configured local storage root.
-// Expected fields: application_id, classification (optional), and file.
+// Upload 接收一个 multipart 文件并持久化到配置的本地存储根下。
+// 期望字段：application_id、classification（可选）和 file。
 func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -196,8 +195,8 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "文件上传成功", fileToResponse(file))
 }
 
-// Download verifies tenant and owner/permission access before the binary is opened. It never
-// returns the storage path, checksum, or a raw OS error to the caller.
+// Download 在打开二进制前校验租户与属主/权限访问。绝不向调用方返回存储路径、
+// 校验和或原始 OS 错误。
 func (handler *Handler) Download(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -252,9 +251,8 @@ func (handler *Handler) BindFile(writer http.ResponseWriter, request *http.Reque
 		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 		return
 	}
-	// Machine clients do not have a platform user subject. Use the already
-	// authenticated application ID as the non-secret audit actor, matching the
-	// v2 upload-session binding path without trusting a browser-supplied value.
+	// 机器客户端没有平台用户主体。使用已认证的应用 ID 作为非敏感审计操作者，
+	// 与 v2 上传会话绑定路径保持一致，不信任浏览器提供的值。
 	operator := bindingOperator(principal)
 	binding, err := handler.files.BindResource(request.Context(), application.BindingInput{
 		TenantID: principal.Tenant.ID, ApplicationID: payload.ApplicationID, FileID: request.PathValue("file_id"),
@@ -288,7 +286,7 @@ func (handler *Handler) UnbindFile(writer http.ResponseWriter, request *http.Req
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "文件绑定已停用", nil)
 }
 
-// CreateJob queues an application-owned job. Only a registered worker may interpret its payload.
+// CreateJob 排队一个应用自有任务。只有注册的 worker 才能解析其 payload。
 func (handler *Handler) CreateJob(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -318,8 +316,8 @@ func (handler *Handler) CreateJob(writer http.ResponseWriter, request *http.Requ
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "异步任务已创建", jobToResponse(job))
 }
 
-// ListJobs returns bounded operational fields. Payload is intentionally omitted because it can
-// carry business data and workers, rather than operations users, own its interpretation.
+// ListJobs 返回有界的运营字段。有意省略 payload：它可能携带业务数据，且解释权
+// 属于 worker 而非运营用户。
 func (handler *Handler) ListJobs(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -345,23 +343,23 @@ func (handler *Handler) ListJobs(writer http.ResponseWriter, request *http.Reque
 	})
 }
 
-// CancelJob stops a queued or terminal task. Running-task cooperative cancellation needs the
-// future cancellation-state migration described in the module document.
+// CancelJob 停止排队中或已终结的任务。运行中任务的协作取消需要模块文档所述的
+// 取消状态迁移（尚未落地）。
 func (handler *Handler) CancelJob(writer http.ResponseWriter, request *http.Request) {
 	handler.mutateJob(writer, request, "异步任务已取消", func(ctx context.Context, tenantID, jobID string) (any, error) {
 		return nil, handler.jobs.Cancel(ctx, tenantID, jobID)
 	})
 }
 
-// RetryJob returns a FAILED or DEAD job to the queue with attempts reset.
+// RetryJob 把 FAILED 或 DEAD 任务放回队列并重置尝试次数。
 func (handler *Handler) RetryJob(writer http.ResponseWriter, request *http.Request) {
 	handler.mutateJob(writer, request, "异步任务已重试", func(ctx context.Context, tenantID, jobID string) (any, error) {
 		return nil, handler.jobs.Retry(ctx, tenantID, jobID)
 	})
 }
 
-// RerunJob creates a new job from a terminal source job and therefore preserves the source
-// record. The current table does not retain a durable rerun-parent link.
+// RerunJob 从已终结的源任务创建新任务，因此保留源记录。当前表没有持久的
+// rerun 父子链接。
 func (handler *Handler) RerunJob(writer http.ResponseWriter, request *http.Request) {
 	handler.mutateJob(writer, request, "异步任务已重新创建", func(ctx context.Context, tenantID, jobID string) (any, error) {
 		job, err := handler.jobs.Rerun(ctx, tenantID, jobID)
@@ -372,8 +370,8 @@ func (handler *Handler) RerunJob(writer http.ResponseWriter, request *http.Reque
 	})
 }
 
-// CleanupFiles executes one bounded cleanup pass. It is intended for an administrator-triggered
-// operation or a future scheduled worker, not for arbitrary end-user requests.
+// CleanupFiles 执行一次有界清理。面向管理员触发的操作或未来的定时 worker，
+// 不面向任意终端用户请求。
 func (handler *Handler) CleanupFiles(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {

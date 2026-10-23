@@ -145,8 +145,8 @@ func TestOfflinePrepareSignedIdentityAndCustomerGuard(t *testing.T) {
 	if _, err := r.Prepare(context.Background(), "fresh", "foreign", raw); err == nil || l.calls != 0 {
 		t.Fatal("customer mismatch mutated identity")
 	}
-	// Import spy models the verified service's persisted identity result; cryptographic
-	// verification/atomic persistence is covered by the real delivery service tests.
+	// 导入替身模拟已验证服务持久化后的身份结果；加密
+	// 校验和原子持久化由真实交付服务测试覆盖。
 	l.onImport = func() { s.state = l.result.State }
 	if _, err := r.Prepare(context.Background(), "fresh", "customer", raw); err != nil {
 		t.Fatal(err)

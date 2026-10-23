@@ -54,9 +54,8 @@ type offlineOnboarding interface {
 	GetSubsystemStatus(http.ResponseWriter, *http.Request)
 }
 
-// OfflineDeliveryRunner is reachable only through the host-root maintenance CLI.
-// It reuses controlled deployment handlers and durable coordinator state; it
-// neither invents components nor acknowledges them on the customer's behalf.
+// OfflineDeliveryRunner 只能经宿主机根目录的维护 CLI 触达。它复用受控部署
+// handler 与持久化协调器状态；既不虚构组件，也不代替客户确认（ACK）。
 type OfflineDeliveryRunner struct {
 	identity            offlinePrincipalResolver
 	licenses            offlineLicenseImporter
@@ -69,6 +68,7 @@ type OfflineDeliveryRunner struct {
 	initializer         offlineInstallationInitializer
 }
 
+// ConfigureInstallation 注入安装事实采集、基线冻结与初始化依赖；任一为空返回错误。
 func (r *OfflineDeliveryRunner) ConfigureInstallation(source offlineInstallationSource, lifecycle offlineInstallationLifecycle, initializer offlineInstallationInitializer) error {
 	if source == nil || lifecycle == nil || initializer == nil {
 		return errors.New("installation preparation dependencies are required")
@@ -77,8 +77,8 @@ func (r *OfflineDeliveryRunner) ConfigureInstallation(source offlineInstallation
 	return nil
 }
 
-// Prepare freezes observed installation facts before controlled enrollment.
-// Existing identities and baselines are reused so retries cannot widen legacy eligibility.
+// Prepare 在受控注册（enrollment）之前冻结已观察到的安装事实。
+// 复用既有身份与基线，使重试不可能扩大遗留系统的授权范围。
 func (r *OfflineDeliveryRunner) Prepare(ctx context.Context, scenario, customer, raw string) (coordination.InstallationBaseline, error) {
 	var empty coordination.InstallationBaseline
 	if scenario != "fresh" && scenario != "migrate" && scenario != "platform-only" && scenario != "expand" {
@@ -96,8 +96,8 @@ func (r *OfflineDeliveryRunner) Prepare(ctx context.Context, scenario, customer,
 	importedIdentity := false
 	if errors.Is(err, domain.ErrNotInitialized) {
 		if raw != "" {
-			// This projection is only an early customer mismatch guard. ImportDelivery
-			// still performs the trusted signature verification before any write.
+			// 该投影只是客户不匹配的早期防线。任何写入之前，ImportDelivery
+			// 仍会执行可信的签名验证。
 			parts := strings.Split(raw, ".")
 			if len(parts) != 3 {
 				return empty, errors.New("invalid signed installation identity")
@@ -150,6 +150,8 @@ func (r *OfflineDeliveryRunner) Prepare(ctx context.Context, scenario, customer,
 	return r.lifecycle.PrepareInstallation(ctx, scenario, report, actor)
 }
 
+// NewOfflineDeliveryRunner 构造离线交付执行器；依赖缺失、非 production/prod 环境
+// 或公网来源配置不完整时返回错误。
 func NewOfflineDeliveryRunner(i offlinePrincipalResolver, l offlineLicenseImporter, c offlineCoordinator, o offlineOnboarding, cfg config.Config) (*OfflineDeliveryRunner, error) {
 	if i == nil || l == nil || c == nil || o == nil {
 		return nil, errors.New("offline delivery dependencies are required")
@@ -192,6 +194,7 @@ func (r *OfflineDeliveryRunner) principal(ctx context.Context) (authctx.Principa
 	return p, nil
 }
 
+// Import 导入一份签名许可证交付包；导入前先校验离线引导管理员主体与权限。
 func (r *OfflineDeliveryRunner) Import(ctx context.Context, raw string) (license.DeliveryImportResult, error) {
 	p, err := r.principal(ctx)
 	if err != nil {
@@ -200,13 +203,14 @@ func (r *OfflineDeliveryRunner) Import(ctx context.Context, raw string) (license
 	return r.licenses.ImportDelivery(ctx, raw, r.environment, domain.Actor{TenantID: p.Tenant.ID, UserID: p.User.ID})
 }
 
+// OfflineActivationResult 是一次激活动作的结果：整体状态与本次确认的应用清单。
 type OfflineActivationResult struct {
 	Status       string   `json:"status"`
 	Applications []string `json:"applications"`
 }
 
-// MigrateExisting deploys only the independently frozen legacy set. It never
-// starts enforcement without a license or grants legacy eligibility to new apps.
+// MigrateExisting 只部署独立冻结的遗留集合。绝不在无许可证的情况下启动
+// 强制执行，也绝不向新应用授予遗留授权资格。
 func (r *OfflineDeliveryRunner) MigrateExisting(ctx context.Context) (OfflineActivationResult, error) {
 	out := OfflineActivationResult{Status: "INCOMPLETE", Applications: []string{}}
 	if r.lifecycle == nil || r.initializer == nil {
@@ -251,8 +255,8 @@ func (r *OfflineDeliveryRunner) MigrateExisting(ctx context.Context) (OfflineAct
 			return out, err
 		}
 	}
-	// Check the entire set together so replacement during another app's update
-	// cannot make an earlier readiness/ACK confirmation stale.
+	// 整个集合一起检查，避免其他应用更新期间的替换使更早的 readiness/ACK
+	// 确认过期失效。
 	for {
 		if err = ctx.Err(); err != nil {
 			return out, err
@@ -292,8 +296,8 @@ func (r *OfflineDeliveryRunner) MigrateExisting(ctx context.Context) (OfflineAct
 	}
 }
 
-// Activate is safely resumable: registry provisioning and enforcement ACKs are
-// persisted by their existing services, rather than an in-memory progress file.
+// Activate 可安全断点续跑：registry 开通与执行 ACK 由既有服务持久化，
+// 而不是依赖内存中的进度文件。
 func (r *OfflineDeliveryRunner) Activate(ctx context.Context, raw string) (OfflineActivationResult, error) {
 	out := OfflineActivationResult{Status: "INCOMPLETE"}
 	imported, err := r.Import(ctx, raw)
@@ -361,8 +365,8 @@ func (r *OfflineDeliveryRunner) Activate(ctx context.Context, raw string) (Offli
 	if len(out.Applications) != len(applications) || len(applications) == 0 {
 		return out, errors.New("offline enforcement confirmation incomplete")
 	}
-	// Recheck the entire signed set after the last application is deployed.
-	// A concurrent component replacement may invalidate an earlier confirmation.
+	// 最后一个应用部署完成后，重新检查整个签名集合。
+	// 并发的组件替换可能使更早的确认失效。
 	for {
 		if err := ctx.Err(); err != nil {
 			return out, err
@@ -402,9 +406,8 @@ func (r *OfflineDeliveryRunner) Activate(ctx context.Context, raw string) (Offli
 	return out, nil
 }
 
-// Portal's conditional invitation worker consumes CRM's controlled runtime
-// binding. Resolve that purchased dependency before collecting Portal members;
-// never add an unpurchased application or mutate the signed license payload.
+// Portal 的条件邀请 worker 依赖 CRM 的受控运行时绑定。收集 Portal 成员之前
+// 必须先解析这项已购买的依赖；绝不添加未购买的应用，也不改动签名的许可证载荷。
 func offlineDeploymentOrder(signed []core.Application) []core.Application {
 	ordered := append([]core.Application(nil), signed...)
 	crm, portal := -1, -1
@@ -460,7 +463,7 @@ func (r *OfflineDeliveryRunner) ensureDeployment(ctx context.Context, p authctx.
 			return e
 		}
 	case registry.SubsystemDeploymentStatusProvisioning, registry.SubsystemDeploymentStatusUpdating:
-		// Another controlled attempt is active; wait, do not rotate credentials.
+		// 另一个受控尝试正在进行；等待即可，不轮换凭据。
 	default:
 		return fmt.Errorf("application %s cannot resume deployment state %s", app, deployment)
 	}
@@ -529,7 +532,7 @@ func (r *OfflineDeliveryRunner) invoke(ctx context.Context, p authctx.Principal,
 	return envelope.Data, w.Code, nil
 }
 
-// These routes match the reviewed production manifests, not caller input.
+// 这些路由与已评审的生产清单一致，不来自调用方输入。
 var offlineTargets = map[string]struct{ name, upstream, prefix string }{
 	"contract_management":      {"合同管理系统", "http://contract-api:8081", "/contract_management"},
 	"customer_and_opportunity": {"客户与商机管理系统", "http://customer-api:8090", "/customer-opportunity"},

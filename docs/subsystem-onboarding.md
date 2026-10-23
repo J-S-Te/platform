@@ -1,8 +1,8 @@
 # 子系统开发与统一身份接入手册
 
-> 更新日期：2026-09-04
+> 源码核验日期：2026-10-22；第1—3节说明开发协议边界，第4节起区分单步目录API、遗留组合API与当前统一向导。仅静态核对，不代表部署验收通过。
 > 适用对象：子系统开发人员、联调人员、平台管理员和部署人员。
-> 推荐入口：基础平台“应用接入”页面。生产环境的首次接入、重试、运行时更新和下线均从页面完成；`scripts/subsystem.sh` 仅保留给本地自动化、无人值守和故障排查。
+> 推荐入口：基础平台“应用接入 → 统一接入向导”（第 10 节），按服务端检查和持久操作分阶段推进。旧“新增接入”仅登记目录（第 4 节）；认证、部署、商业授权及业务验收仍须分别核对。`scripts/subsystem.sh connect` 使用同组统一操作 API，旧 onboard/update/retry 保留兼容。
 
 > **当前控制面边界**：新接入优先采用“应用目录登记 → Keycloak 集成/投影 → 运行时部署”的分层流程。兼容的 `/subsystem-onboarding` 路径仍存在于已部署环境，但不应成为新增应用的默认集成方式；目录、身份提供方 Client 和部署状态必须分别可审计。
 
@@ -14,13 +14,13 @@
 
 | 场景 | 正确操作 |
 | --- | --- |
-| 首次创建一个不存在的应用环境 | 基础平台“应用接入 → 新增接入” |
+| 首次创建一个不存在的应用环境 | 优先“应用接入 → 统一接入向导”；单步新增接入只登记目录 |
 | 更新代码、镜像、前后端模块或业务迁移 | 使用子系统自己的 CI/CD，不执行 onboard/offboard |
 | 生产环境只需按现有配置重建子系统 | 基础平台页面“更新运行时” |
 | 本地环境只需重建现有子系统容器 | `subsystem.sh update`，或子系统自己的部署命令 |
-| 首次接入或重建因 Agent 故障失败 | 页面查看部署状态并点击“重试”；不要重复新增接入 |
+| 受控组合部署/重建因 Agent 故障失败 | 页面查看部署状态及权限后恢复；目录登记本身不调用 Agent，不重复新增 |
 | 修改 BaseURL、Upstream、PathPrefix 或 OAuth 回调 | 先走受控管理 API，并同步子系统运行配置；不要撤销重建 |
-| 环境永久下线 | 完成数据、会话和恢复预案后在页面确认“下线并删除控制面记录” |
+| 环境退役/删除 | 按第 8 节分别停运行时、保留记录、删除或完成保留期后清理 |
 
 收到 HTTP `409 IAM_SUBSYSTEM_ALREADY_ONBOARDED` 表示现有接入受到保护，没有被覆盖。不要为了日常发布先下线再重新接入。
 
@@ -52,7 +52,7 @@ Compose、维护门户网关并执行必要的部署后动作。API 不直接挂
 | --- | --- | --- |
 | 平台管理 API | 接入脚本向平台登录和写控制面数据 | `http://localhost:8081/api/v1` |
 | Public BaseURL | 用户浏览器访问统一门户的 origin | `http://localhost:8081` |
-| UpstreamURL | 门户网关在 Docker/内网中访问子系统 | `http://customer-api:8080` |
+| UpstreamURL | 门户网关在 Docker/内网中访问子系统 | CRM示例 `http://customer-api:8090`，各应用按清单 |
 
 容器中的 `localhost` 只表示当前容器。不要将 `http://localhost:8080` 作为另一个容器的 Upstream。
 
@@ -190,378 +190,154 @@ BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=192.168.3.11
 
 推荐仍让脚本通过 `http://127.0.0.1:8081/api/v1` 调用平台 API，同时把 `--public-base-url` 和 `--platform-origin` 配成局域网地址。这样不需要打开非回环管理 API HTTP 例外，局域网 OAuth 回调仍正常工作。
 
-## 4. 首次接入
-
-### 4.1 前置条件
-
-- 平台 API、MySQL、迁移和 `subsystem-provisioner` 正常。
-- Docker daemon 可用，项目目录、Compose 和 `.env.example` 已准备好。
-- 网关 include 文件可写，frontend 容器可唯一定位。
-- 执行账号至少具有：
-  - `platform:application:create`
-  - `platform:application-environment:create`
-  - `platform:application-login-target:create`
-  - `platform:oauth-client:create`
-  - `platform:role-binding:update`
-- `platform-super-admin` 是租户级控制面角色。授权解析时会对已接入业务应用即时展开为该应用全部活动角色和权限，不写入业务应用的用户绑定，也不受应用的普通账号 `max_effective_roles` 限制。角色目录新增或变更后，超管在下一次授权解析时生效。客户自助门户仍必须具备明确的客户身份映射，平台超管不会被自动伪装成客户联系人。
-
-正式生产使用 `deploy/production/docker-compose.yml` 时同样从基础平台页面接入。生产编排中的隔离 Agent 只处理服务器 `subsystems.d/*.yaml` 审核清单内的精确应用/环境；当前随包提供合同管理、客户与商机管理、客户自助门户和项目管理四个 `prod` 目标。Agent 会从清单指定的审核模板初始化缺失的 `runtime/*.env`、把权限自动收紧为 `0600`、首次生成声明的业务 base64 密钥，再写入一次性 OIDC、目录发布及用途隔离的服务凭据，最后执行固定备份、迁移和 API 重建。已有合法密钥、子系统新增环境变量和清单外文件都会保留，重试或更新不会轮换。管理员不需要在命令行配置或复制 Secret；平台 API 本身仍不挂载 Docker Socket。
-
-新增生产子系统时，由部署人员在平台生产资产中提交并评审一个清单，同时准备 Compose 服务、运行时模板和不可变镜像键；发布后管理页面自动显示该目标。
-
-`project_management/prod` 对应项目服务内容管理系统：PathPrefix `/project_management`、Upstream `http://project-api:8082`、迁移服务 `project-migrate`，需要 `PROJECT_MYSQL_PASSWORD` / `PROJECT_MYSQL_ROOT_PASSWORD` 基础设施凭据；接入后初始管理员按平台默认授予该应用 `admin` 角色。该目标已随包审核登记在 `subsystems.d/project_management-prod.yaml`，管理页面选择目标后自动填充固定参数。无需在每台服务器手工添加应用白名单，也不需要修改 Agent Go 代码。以后新增普通文件或环境变量不会被 Agent 拒绝；只有需要 Agent 创建/注入的新 runtime 文件或平台凭据才加入清单。清单不支持命令、脚本或任意宿主机路径，平台 API 的能力列表只是 UI 提示，特权 Agent 会独立重新加载并校验同一只读清单。详细格式和安全边界见 [`deploy/production/README.md`](../deploy/production/README.md#41-新增生产子系统目标部署人员)。
-
-接入 API 可指定 `initial_admin_user_id`；当前生产管理页面默认使用当前平台操作者。平台将该选择持久化到部署状态：如果首次部署在初始授权前失败，页面“重试”仍向原选择用户授权，而不是改授给点击重试的人；初始授权完成后，普通更新或重试不会恢复管理员后来主动移除的角色。`customer_portal` 等按外部邀请预配身份的受控应用可不建立内部初始管理员。
-
-镜像仓库凭据、平台密钥、数据库、Docker/Compose、生产部署目录和隔离 Agent 是一次性基础设施初始化，由部署人员或 CI/CD 完成。完成后，日常平台管理员只使用“应用接入”页面进行首次接入、查看状态、按页面“下一步操作”排障、重试、更新和下线，不登录服务器，也不手工复制 OAuth Client ID/Secret。
-
-仅限测试服务器：若没有历史数据且只想验证接入流程，可在服务器 `.env` 中设置 `SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=true`，Agent 会跳过子系统数据库凭据校验，让 Compose 在首次创建空数据库时使用占位密码完成接入。生产环境必须保持 `false`；已有持久化数据的数据库不会被该开关自动改密。
-
-### 4.2 本地脚本参数（生产页面不需要输入这些命令）
-
-| 参数 | 说明 |
-| --- | --- |
-| `--application-code` | 唯一应用编码，同时用于项目目录定位 |
-| `--application-name` | 门户展示名 |
-| `--environment` | `dev/test/staging/prod`，默认 `prod` |
-| `--public-base-url` | 浏览器看到的 origin，不带业务路径 |
-| `--upstream-url` | 网关可达的内部 HTTP(S) 地址 |
-| `--path-prefix` | 非根绝对路径，默认 `/<application-code>` |
-| `--client-type` | `confidential` 或 `public` |
-| `--initial-admin-user-id` | 可选；不传则使用当前平台操作者 |
-| `--description` | 应用说明 |
-| `--api-base-url` | 平台管理 API 根地址 |
-| `--platform-origin` | Cookie 写请求 Origin，应在平台 CORS/同源策略允许范围内 |
-
-### 4.3 合同管理本地快速路径
-
-当前合同管理本地环境统一使用 `dev`。如果数据库中已经存在
-`contract_management/dev`，不要再次接入，日常更新直接执行：
-
-```bash
-bash scripts/docker-local.sh refresh-contract-api
-bash scripts/docker-local.sh refresh-frontend
-```
-
-只有首次环境不存在时才执行：
-
-```bash
-bash scripts/subsystem.sh onboard \
-  --preset contract-management-local \
-  --environment dev \
-  --api-base-url http://localhost:8081/api/v1 \
-  --platform-origin http://localhost:8081 \
-  --account admins \
-  --dry-run --yes
-```
-
-确认摘要中是以下值后，去掉 `--dry-run`：
-
-```text
-Application    contract_management
-Environment    dev
-Public URL     http://localhost:8081/contract_management/
-OAuth Client   contract_management-dev-web
-Redirect URI   http://localhost:8081/contract_management/auth/callback
-Upstream       http://contract-api:8081
-```
-
-### 4.4 客户自助门户本地快速路径
-
-先确认平台、CRM 和受控部署 Agent 正常：
-
-```bash
-bash scripts/docker-local.sh ps
-bash scripts/docker-local.sh logs api subsystem-provisioner customer-api
-```
-
-仅当平台中不存在 `customer_portal/dev` 时执行 dry-run：
-
-```bash
-bash scripts/subsystem.sh onboard \
-  --preset customer-portal-local \
-  --api-base-url http://localhost:8081/api/v1 \
-  --platform-origin http://localhost:8081 \
-  --account admins \
-  --dry-run --yes
-```
-
-摘要必须是：
-
-```text
-Application    customer_portal
-Environment    dev
-Public URL     http://localhost:8081/customer-portal/
-OAuth Client   customer_portal-dev-web
-Redirect URI   http://localhost:8081/customer-portal/auth/callback
-Upstream       http://portal-api:8091
-初始管理员     不授予内部管理员；由 CRM 邀请流程开通外部客户
-```
-
-确认后去掉 `--dry-run --yes` 正式执行。Agent 额外创建六个独立服务 Client，每个只能持有一个精确 scope：
-
-| 用途 | Scope |
-| --- | --- |
-| 基础平台外部用户预置 | `external_user.provision` |
-| 分配 Portal 角色 | `application_role.assign` |
-| 回收 Portal 角色 | `application_role.revoke` |
-| 创建 Portal 身份映射 | `portal.identity_mapping.provision` |
-| 禁用 Portal 身份映射 | `portal.identity_mapping.disable` |
-| Portal 校验 CRM 邀请 | `portal.invite.verify` |
-
-这些 Client Secret 只交给 Agent，分别写入 Portal/CRM 运行配置，不回显到管理页面，不复用浏览器或目录发布凭据。接入成功后：
-
-1. CRM 有权管理员打开客户详情的“门户访问”，选择唯一登记联系人并生成邀请；
-2. 平台原子预置外部用户、无密码登录账号，并分配 `customer_portal/portal_customer`；
-3. Portal 建立 `OIDC sub ↔ customer/contact` 映射；CRM 返回登录账号和一次性激活链接；
-4. 平台管理员在“系统设置 → 登录账号”查找该账号，点击“初始化密码”；临时密码仅显示一次；
-5. 通过受控渠道把登录账号、临时密码和邀请链接交付联系人；CRM/Portal 永不保存明文密码；
-6. 客户打开邀请链接，经基础平台 OIDC 登录后消费邀请并进入 Portal。
-
-平台 migration `000071` 还会为升级前已预置的外部身份补齐登录账号，并通过 `(tenant_id, login_account_id)` 外键和唯一键固定“一个外部身份对应一个平台账号”。该迁移不会生成密码凭据；密码初始化仍必须由有权平台管理员显式执行。
-
-> 当前本地容器运行到平台/CRM 健康并不代表 Portal 已接入。只有应用接入成功、部署状态为 `READY` 且 `/customer-portal/healthz` 返回 200，才表示 Portal 可用。若浏览器会话已过期，先登录基础平台再执行接入；不要绕过管理权限直接向数据库写 Application 或 OAuth Secret。
-
-已有 `customer_portal/dev` 不要重新 onboard，日常更新执行：
-
-```bash
-bash scripts/docker-local.sh refresh-portal-api
-bash scripts/docker-local.sh refresh-frontend
-```
-
-### 4.5 通用新子系统先 dry-run
-
-```bash
-cd /path/to/Unified_Identity_Authentication_Platform/platform
-
-bash scripts/subsystem.sh onboard \
-  --application-code customer_management \
-  --application-name '客户管理系统' \
-  --environment dev \
-  --public-base-url http://localhost:8081 \
-  --upstream-url http://customer-api:8080 \
-  --path-prefix /customer_management \
-  --client-type confidential \
-  --api-base-url http://localhost:8081/api/v1 \
-  --platform-origin http://localhost:8081 \
-  --dry-run --yes
-```
-
-dry-run 不登录、不调用 API、不写 `.env.local`、不启动容器、不改网关。
-
-### 4.6 正式执行
-
-```bash
-bash scripts/subsystem.sh onboard \
-  --application-code customer_management \
-  --application-name '客户管理系统' \
-  --environment dev \
-  --public-base-url http://localhost:8081 \
-  --upstream-url http://customer-api:8080 \
-  --path-prefix /customer_management \
-  --client-type confidential \
-  --api-base-url http://localhost:8081/api/v1 \
-  --platform-origin http://localhost:8081 \
-  --account admins
-```
-
-交互方式不会回显密码。CI 使用 stdin：
-
-```bash
-printf '%s\n' "$PLATFORM_ADMIN_PASSWORD" | bash scripts/subsystem.sh onboard \
-  --password-stdin --yes \
-  --account admins \
-  --application-code customer_management \
-  --application-name '客户管理系统' \
-  --environment dev \
-  --public-base-url http://localhost:8081 \
-  --upstream-url http://customer-api:8080 \
-  --path-prefix /customer_management \
-  --client-type confidential \
-  --api-base-url http://localhost:8081/api/v1 \
-  --platform-origin http://localhost:8081
-```
-
-不要把密码写到命令行。也可用 `--cookie-file` 复制已有会话，但文件必须来自同一平台且未过期。
-
-### 4.7 接入期间发生什么
-
-1. 基础平台页面校验并显示配置摘要；本地脚本模式提供等价的交互校验。
-2. 以当前平台管理员会话调用 `POST /api/v1/subsystem-onboarding`。
-3. 平台原子创建 Application、Environment、LoginTarget、浏览器 OAuth Client 和独立目录发布 Client；部署 Agent 发布角色目录后再为初始管理员建立应用角色授权。采用规范 `admin` 角色的子系统分配 `admin`；内置客户与商机系统按其 `max_effective_roles=10` 策略分配 `sales_director + team_lead + technical_lead`。`customer_portal` 不把内部平台操作者设为外部客户角色，访问必须来自 CRM 邀请链路。
-4. 平台同时写入 `PROVISIONING` 部署状态；在 Agent 成功前，门户不会展示该环境。
-5. Client Secret 只在后端内存中交给部署 Agent，不回显给浏览器或脚本。
-6. Agent 基于生产部署资产中审核过的 `subsystem-templates/*.env.example` 写出权限为 `0600` 的 `runtime/*.env`；已有内容会保留，不会因重试覆盖或轮换密钥。
-7. 执行子系统 Compose `up -d --build`。
-8. 更新门户网关、执行 `nginx -t` 并 reload。
-9. 同步目标子系统授权目录。对需要内部初始管理员的受控应用，目录缺失会使初始授权无法完成，部署记录进入 `PROVISION_FAILED`；修复 Agent、发布凭据或子系统目录后，应在原记录上点击“重试”，不能重复新增接入。按外部邀请预配身份且无需内部管理员的应用可按自身策略处理目录发布结果。
-10. 成功后状态切换为 `READY`；失败时记录为 `PROVISION_FAILED`。
-11. 页面继续使用当前平台会话；本地脚本会注销自己创建的临时平台会话。
-
-若 Agent 阶段失败，控制面记录会保留，这是为了避免重新签发 OAuth Client 和丢失仅交付一次的
-Secret。生产环境不要重复新增接入：在环境卡片读取脱敏错误与“下一步操作”，修复所指向的一次性基础设施问题后点击“重试”。`subsystem-status` 返回的 `next_action` 与页面提示一致，不包含可执行命令或 Secret。
-
-以下命令只用于本地开发或服务器故障排查，不是生产日常管理员流程：
-
-```bash
-bash scripts/subsystem.sh status \
-  --application-code customer_management \
-  --environment dev \
-  --account admins
-
-bash scripts/docker-local.sh logs api subsystem-provisioner
-
-bash scripts/subsystem.sh retry \
-  --application-code customer_management \
-  --environment dev \
-  --account admins
-```
-
-`retry` 只重新执行现有环境的部署 Agent 流程，不重新创建 Application、Environment、登录目标或
-OAuth Client。每次重试都会增加 `generation` 和 `attempt_count`，便于审计和排障。首次授权未完成时，重试沿用接入时保存的初始管理员；已完成时不会重复授予或恢复后来被主动移除的角色。
-
-## 5. 接入后验收清单
-
-```bash
-bash scripts/docker-local.sh ps
-bash scripts/docker-local.sh logs api subsystem-provisioner
-bash scripts/portal-gateway.sh list
-bash scripts/subsystem.sh status \
-  --application-code customer_management \
-  --environment dev \
-  --account admins
-```
-
-逐项确认：
-
-- `.env.local` 权限为 `0600`，并已填充 OIDC Client、Tenant、Application 和路径；
-- 子系统容器 healthy，能从 frontend 所在网络访问 Upstream；
-- discovery 的 issuer 与 `OIDC_ISSUER` 完全一致；
-- 未登录访问触发登录，回调后返回原业务页；
-- 篡改/重放 state、错误 nonce、错误 issuer/audience 均被拒绝；
-- 无授权用户收到 403，而不是仅靠前端隐藏菜单；
-- 登出后子系统会话失效；
-- 日志中没有 Client Secret、Cookie、授权码、Access Token 或完整 ID Token；
-- 路径前缀下的静态资源、API、重定向和刷新均正常。
-
-`contract_management` 已集成到统一前端，不登记整站反代，因此不应出现在 `portal-gateway.sh list` 中。
-
-## 6. 日常更新与配置变更
-
-### 6.1 代码/镜像更新
-
-不执行 onboard/offboard。使用子系统 CI/CD，或者：
-
-```bash
-bash scripts/subsystem.sh update \
-  --application-code customer_management \
-  --environment dev \
-  --account admins
-```
-
-`update` 只按现有 `.env.local` 重建 Compose；不会重写该文件，也不会修改平台 DB 或重新签发 OAuth Secret。
-执行期间部署状态为 `UPDATING`，门户暂时隐藏该环境；成功后恢复为 `READY`。失败后使用 `status`
-查看安全错误摘要，修复 Docker、网络、Compose 或 Agent 配置后使用 `retry`，不要重新 onboard。
-
-### 6.2 修改 BaseURL、Upstream、PathPrefix 或回调
-
-这是一个多资源受控变更，至少涉及：
-
-1. `PATCH /api/v1/applications/{application_id}/environments/{environment_id}`；
-2. `PATCH .../login-targets/{login_target_id}`；
-3. `PUT /api/v1/oauth-clients/{oauth_client_id}/redirect-uris`；
-4. 必要时更新 post-logout redirect URI；
-5. 安全地同步子系统 `.env.local` 中的公开 URL、路径和回调；
-6. 重建子系统并验证网关。
-
-这些接口使用乐观锁 `version`。必须先 GET 当前记录再提交新版本；发生 `IAM_VERSION_CONFLICT` 时重新读取，不要覆盖他人的变更。浏览器 OAuth Secret 不会因普通 URL 变更重新回显，不能删除 `.env.local` 后期待平台恢复明文 Secret。
-
-## 7. 网关工具与并发锁
-
-`portal-gateway.sh` 是底层工具，不创建平台控制面数据。正常新增子系统必须走 onboard。
-
-```bash
-bash scripts/portal-gateway.sh list
-bash scripts/portal-gateway.sh add <code> <path-prefix> <upstream-url>
-bash scripts/portal-gateway.sh remove <code>
-bash scripts/portal-gateway.sh reload
-```
-
-`add/remove/list/sync/apply` 使用跨进程锁：
-
-- Linux 优先使用 util-linux `flock`；
-- 没有 `flock` 时使用原子目录锁；
-- 默认锁文件为 `<include>.lock`，等待 60 秒；
-- 可通过 `PORTAL_GATEWAY_LOCK_FILE`、`PORTAL_GATEWAY_LOCK_TIMEOUT` 调整。
-
-不要删除一个正在使用的 `.lock` 或 `.lock.d`，也不要让多个主机通过不支持可靠文件锁的共享文件系统并发维护同一 include。
-
-## 8. 授权目录同步
-
-`sync-contract-catalog.sh` 只接受受保护的 `PLATFORM_*` 环境变量，不再接受命令行位置参数。它需要 `curl`、`jq`、Docker CLI，以及目标 MySQL 容器中的 mysql 客户端。
-
-手工补偿示例（不要开启 shell tracing）：
-
-```bash
-set +x
-export PLATFORM_APPLICATION_ID='<26位大写ULID>'
-export PLATFORM_BASE_URL='http://127.0.0.1:8081'
-export PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID='<publisher-client-id>'
-export PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET='<secret>'
-export PLATFORM_MYSQL_CONTAINER='basic-platform-local-mysql-1'
-export PLATFORM_MYSQL_USER='basic_platform'
-export PLATFORM_MYSQL_PASSWORD='<password>'
-export PLATFORM_MYSQL_DATABASE='basic_platform'
-bash scripts/sync-contract-catalog.sh
-unset PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET PLATFORM_MYSQL_PASSWORD
-```
-
-凭据和 Bearer Token 通过进程环境与权限为 `0600` 的临时 curl 配置传递，不放入 argv。不要把这些变量写进公共 CI 输出或普通日志。
-
-## 9. 永久下线
-
-默认 offboard 是深清理：先停止容器、删除 `.env.local`、移除网关并 reload，再删除 Environment 控制面记录。
-
-```bash
-bash scripts/subsystem.sh offboard \
-  --application-code customer_management \
-  --environment prod \
-  --confirm customer_management/prod \
-  --account admins
-```
-
-安全边界：
-
-- 不允许删除 `dev` 或平台自身环境；
-- 不提供 `--force`；配置命名空间或审计回执仍存在时平台会拒绝；
-- `--delete-application` 仅在最后一个环境删除后使用；
-- `--shallow` 只用于应急修复，会保留容器、`.env.local` 和网关，容易制造漂移；
-- 下线不会删除子系统业务数据库和备份，必须另走数据保留流程。
-
-深清理分两阶段，当前不是跨 Docker/文件系统/数据库的全局事务。若运行时清理成功、DB 删除失败，会形成“平台记录仍在但服务已停止”的半状态。执行前应备份 `.env.local`、记录网关配置和 Environment version；失败后不要重新 onboard，应先恢复运行时或完成剩余删除。
-
-## 10. 故障排查
+## 4. 保留的目录登记页面
+
+### 4.1 角色、条件与步骤
+
+当前“应用接入 → 新增接入”使用 `POST /api/v1/subsystem-directory`，需要：
+
+- `platform:application:create`
+- `platform:application-environment:create`
+- `platform:application-login-target:create`
+
+管理员选择服务器公开的应用/环境目标，填写/确认应用名、公开 BaseURL、内部 Upstream、路径前缀及 issuer alias。前端只提交目录参数；不能把页面初始管理员选择、Client 类型或自动部署当作当前行为。服务端事务创建活动的应用、环境和 home 登录目标，返回下一步动作。
+
+该路径不调用部署 Agent、不创建 OAuth Client/Secret、不做初始管理员授权，也不创建组合部署的完整状态；可能显示 UNMANAGED。成功判断为重新查询到正确目录，不是子系统已上线。已存在目录不能重复新建，应沿用现有 ID/version。
+
+### 4.2 登记后的认证和运行时
+
+按 next_action 同步 Keycloak Client/角色、完成用户投影和真实 Broker 登录，观察后再切换；缺 Keycloak 管理配置、数据库/Worker/Agent 时不能靠登记消除依赖。
+
+四门禁为 Client、角色目录、用户投影、Broker 登录；观察期 7 天，成功切换后的回滚窗口也是 7 天。当前 updateSubsystem 对 Keycloak 准备仍要求四项与观察期条件，页面仅三项的“准备”提示不能承诺可执行。细则和缺口见[Keycloak 映射与切换](keycloak-identity-mapping.md)。
+
+运行时 Agent 在 production 模式只处理审核清单中的精确应用/环境、文件及 Compose 服务。API 权限不是任意主机命令授权；平台 API 不因登记应用就取得 Docker 权限。首次基础设施/镜像/数据库/密钥/Agent 初始化由部署方完成，本次未执行任何初始化或发布。
+
+## 5. 遗留组合 onboard：区别于目录登记与统一向导
+
+`POST /api/v1/subsystem-onboarding` 仍保留，除目录创建权限还需要 `platform:oauth-client:create`、`platform:role-binding:update`。CLI `scripts/subsystem.sh onboard` 属于此组合路径，不等价于 subsystem-directory。
+
+该接口先做 Agent 预检，事务创建应用/环境/目标及独立 OAuth Client，持久化原初始管理员选择和部署状态，再启动后台部署。HTTP 返回 202、UPDATING/ONBOARD 等受理信息；不是旧文档描述的同步完成和完整资源响应。旧 CLI 对响应字段及状态的兼容性必须在目标版本核验，本次没有运行 CLI。
+
+初始授权仅适用于该组合流程：首次未完成时重试保留原操作者/指定人，不改授点击重试的人；已完成授权不会因日常更新自动恢复后来撤销的角色。客户门户等外部邀请应用不由内部管理员选择自动获得客户映射。
+
+Secret 在后端/Agent 受控通道交付，不回显浏览器；失败保留控制面记录，读取脱敏原因和 next_action 后恢复，不重复 onboard。后台最终 READY/PROVISION_FAILED 才表示该轮结果，READY 仍需业务登录和权限验收。
+
+生产与本地 Agent 不同：生产基于审核 manifest 的备份/迁移/服务重建；本地存在集成 Compose 和独立子系统路径，不统一描述成所有场景 `up -d --build`。本地参数、dry-run 与命令使用交部署/开发人员参见[本地 Docker 操作](local-docker-operations.md)，不要在公共终端复制真实凭据。
+
+## 6. 授权目录与投影验收
+
+应用主动发布自己的版本化目录，平台展示/分配只读镜像。合同现在优先由内嵌 manifest 发布程序同步，不以从平台数据库读取的遗留 `sync-contract-catalog.sh` 为事实源。相同版本/checksum 重发不推进修订；有效变更在事务里更新目录/策略/修订并排队投影。
+
+管理员核对目录 SYNCED、来源、版本及稳定编码，再检查岗位/人员最终授权。机器 publisher、浏览器登录 Client、审计等服务 Client 按用途分离，不复用 Secret。
+
+见[目录发布说明](../../sharedDocs/05_能力模块/应用授权目录同步说明.md)。未完成 outbox、投影依赖失败或 Broker 门禁缺失时，不能以平台保存成功宣称目标系统权限已生效。
+
+## 7. 日常更新、失败与恢复
+
+业务代码/镜像发布不重复新增目录。环境配置更新、运行时更新/重试使用原应用/环境及 version，查 generation、attempt_count、operation、status 和 next_action。version 冲突刷新后再提交；不重复签发身份，不绕过审核清单。
+
+Keycloak 环境携带完整当前网关参数进行受控更新时，会按该租户/应用/环境的有效 Client 映射重新读取现有 RP 密钥并下发运行时，修复密钥漂移；这不是轮换 Keycloak 密钥，明文也不会返回浏览器。没有网关参数的旧版纯重建/清单无变化请求仍保留原配置。出现授权码兑换 `unauthorized_client` 时，管理员可在原环境执行“更新运行时”，等待最终就绪后从门户重新发起登录，不刷新已消费的旧 callback URL。
+
+登录回调 302 和 `/api/v1/auth/me` 200 只证明身份会话已建立。业务 API 若返回 `COMMERCIAL_LICENSE_DENIED`，需另核对本实例的有效签名许可证及运行确认；不能当作角色缺失而扩权，也不得关闭商业授权门禁。
+
+非平台根应用的受控更新可调用 Agent；平台自身是控制面根节点，不通过子系统更新/下线按钮操作。Agent/数据库/网关失败按 request_id 定位；202 只受理、必须轮询/刷新最终状态。不得把未部署依赖归为“页面已全部可用”，也不在日志保留 Secret。
+
+验收建议（本次未执行）：
+
+- 公开目标、回调、内部 Upstream 三类地址各自正确；
+- 目标环境部署 READY、健康检查通过；
+- 真正完成 OIDC/Broker 登录、授权上下文及典型业务接口验证；
+- 切换、重试后未意外恢复已撤销角色；
+- Worker 与投影完成状态可核对，目录外权限失败关闭。
+
+## 8. 退役、停运行时、删除和保留期清理
+
+这四类操作不是同一个“永久下线”。
+
+### 8.1 退役应用与保留环境
+
+应用退役要求应用编码确认和 version，逻辑改为 RETIRED，保留环境、Client、登录目标和审计；不停止运行时。平台自身禁止退役。
+
+页面“退役并保留记录”调用环境 teardown，先进入 DRAINING，Agent 成功后 OFFBOARDED，失败保留故障状态。production 实现只 compose stop 审核服务，不删除 runtime/*.env、不移除网关、不删业务库/卷。local 集成模式停止对应服务并保留配置；local 独立模式可能 down、删除 .env.local 并移除网关，不可泛化到生产。
+
+### 8.2 删除环境与半状态
+
+页面删除先 teardown 再删除控制面，使用精确 `application-code/environment`、最新 version。非 dev、非平台才允许环境删除。仓储存在 cfg_namespace 或 audit_ingestion_receipt 引用时阻断；不是所有引用都自动清除。
+
+删除成功清理该环境派生平台 OAuth Client/登录目标及环境记录，不删除业务数据库/备份。运行时与数据库无全局事务，Agent 成功而 DB 拒绝时可能“服务已停、目录还在”；先读状态/引用，按恢复计划重新启用或完成合规清理，不能重新 onboard 覆盖。
+
+### 8.3 清理退役记录的硬条件
+
+管理员先通过审计保留期流程完成合法 PURGE，而不是手工伪造任务 ID。页面清理需要：
+
+- 应用 RETIRED、环境持久化状态 OFFBOARDED；
+- 非 dev/非平台；
+- 最新 version 和精确 `PURGE/application-code/environment`；
+- 保留期完成、已下线两项显式确认；
+- 对应同租户、同应用的 `audit_retention_task`，mode=PURGE 且 status=COMPLETED。
+
+仓储锁定部署状态并核查完成任务；不存在、未完成、其他租户/应用或非 PURGE 均不能靠输入框绕过。成功清理环境的 Client、登录目标、服务实例/部署状态、配置发布/命名空间和审计回执等控制面关联，不在这个接口直接删除 audit_event，也不销毁子系统业务数据库、磁盘持久化文件或备份。保留期任务本身的范围须交审计负责人核实。
+
+## 9. 故障判断
 
 | 现象 | 处理 |
 | --- | --- |
-| `AUTH_CONCURRENT_SESSION` | 先从原终端退出；确认要抢占时才用 `--replace-existing-session` |
-| 非回环平台 API 必须使用 HTTPS | 改走 `127.0.0.1`/HTTPS；可信局域网才配置 HTTP 开关和精确白名单 |
-| 登录接口 403 | `--platform-origin` 未被同源/CORS 策略允许，或账号被拒绝 |
-| 接入接口 403 | 操作者缺少应用、环境、登录目标、OAuth Client 创建权限，或初始角色不可委派 |
-| `IAM_SUBSYSTEM_ALREADY_ONBOARDED` | 环境已存在；停止重复接入，日常发布走 update/CI |
-| `IAM_CONFLICT` | Client ID、路径或资源唯一性冲突，核对现有记录 |
-| `PLATFORM_DEPENDENCY_UNAVAILABLE` | 查看 `api`、`subsystem-provisioner`、Docker、项目目录和 Socket |
-| `status=PROVISION_FAILED` | 生产在页面读取 `next_action`，修复后点击“重试”；本地/排障可使用 `subsystem.sh status/retry`，不要重复 onboard |
-| `IAM_PLATFORM_RUNTIME_NOT_MANAGED` | 基础平台应用自身是控制面根节点，不由子系统部署 Agent 更新/重试/接管/下线；平台升级请在服务器部署目录按发布流程执行 |
-| `IAM_SUBSYSTEM_TARGET_NOT_IN_PRODUCTION_MANIFEST` | 该应用环境不在服务器审核清单内，或 API 与 Agent 的部署模式不一致；同步最新 `subsystems.d` 并确认 `platform-api`、`subsystem-provisioner` 都使用 `SUBSYSTEM_ONBOARDING_MODE=production` 后一同重启 |
-| 页面提示 `subsystem provisioning unavailable: subsystem provisioning unavailable` | 旧版 Agent 用哨兵错误原文兜底，缺少可执行原因；把 `platform-api` 与 `subsystem-provisioner` 升级到同一版本后可直接看到具体拒绝原因 |
-| `subsystem project ... unavailable` | 应用编码与目录名不一致，或缺 Compose/`.env.example` |
-| Compose 启动失败 | 在子系统目录用生成的 `.env.local` 单独执行 `docker compose config` 和 `up` 排查 |
-| `nginx -t` 失败 | 检查 path prefix、Upstream、include；不要绕过验证直接 reload |
-| 等待网关锁超时 | 查找并发 CI/provisioner；确认没有活跃进程后再处理遗留目录锁 |
-| OAuth `redirect_uri` 不匹配 | 浏览器请求值、平台登记值和子系统配置必须逐字符一致 |
-| 登录后循环跳转 | 检查 Cookie Secure/SameSite、代理头、issuer、路径前缀和回调会话持久化 |
-| 目录同步失败 | 查看 provisioner stderr；核对 publisher、MySQL 坐标、应用 ULID、curl/jq |
-| offboard 后 DB 删除失败 | 按第 9 节恢复运行时或完成剩余删除，禁止重新 onboard 覆盖 |
+| 登记成功但没有服务/凭据 | 目录登记不是部署；按认证集成与运行时下一步处理 |
+| 403 | 查对应目录/更新/切换权限和机器应用边界，不复用其他 Client |
+| 409/version 冲突 | 刷新目录及状态后重试，不并发反复操作 |
+| 202 | 仅受理，读取最终状态并做业务登录验收 |
+| Keycloak 门禁或观察阻断 | 核对当前 Client hash、outbox、真实 Broker 证据和时间窗；不伪造通过 |
+| PROVISION_FAILED | 修复审核清单/基础设施/凭据发布/Agent 依赖，沿原记录恢复 |
+| teardown 成功、环境删除失败 | 核实配置/审计回执阻断和实际运行时，按半状态计划恢复 |
+| PURGE 被拒绝 | 核实应用/环境终态、确认码、version 和同租户同应用已完成 PURGE 任务 |
 
-保留平台响应中的 `request_id`，用它关联 API、审计和 provisioner 日志。
+源码依据及原陈述纠正见[平台核验记录](../../.ai/modules/operation-docs-platform-20261013.md)。本次没有运行发布、停止、迁移、清理、登录或外部接口。
+
+## 10. 统一接入向导（六个子系统共用入口）
+
+本节描述统一入口的**设计与当前落地边界**；旧路径（`subsystem-directory`、组合 `subsystem-onboarding`、CLI `onboard/update/retry`）保留不变，见第 4、5、7 节。
+
+### 10.1 接口与职责
+
+| 接口 | 方法 | 作用 |
+|---|---|---|
+| `/api/v1/subsystem-access/preview` | POST | **只读**条件检查：返回服务端判定的动作、起始阶段、缺项（含下一步）、所需权限、主体缺少的权限、变更摘要与 `preview_version` |
+| `/api/v1/subsystem-access/operations` | POST | 确认执行：返回 `202` 与持久化操作 ID；**必须携带 `preview_version`**，事实变化返回 `409` 并要求重新预览 |
+| `/api/v1/subsystem-access/operations/:id` | GET | 查询操作：状态、当前阶段与**分项阶段结果**（阶段·状态·尝试次数·证据引用） |
+| `/api/v1/subsystem-access/operations?application_code=&environment=` | GET | 按目标定位最近一次操作（页面刷新、CLI 重连） |
+| `/api/v1/subsystem-access/operations/:id/resume` | POST | 条件补齐后继续：服务端**重新检查**事实，满足才放回可执行 |
+
+动作由服务端判定（`ONBOARD` 首次接入 / `ADOPT` 接管运行时 / `UPDATE` 受控更新 / `RETRY` 重试失败部署 / `NONE` 已一致仅展示），**页面与 CLI 都不选择动作**。
+
+### 10.2 状态、等待与并发
+
+- 状态：`PENDING → RUNNING → SUCCEEDED / FAILED / WAITING`；
+- **等待处理**（`WAITING`）：缺运行批准、缺许可证、缺镜像或认证观察期未结束时进入等待，**保留"同目标唯一执行中操作"的槽位**，补齐后 `resume`；
+- **同目标互斥**：同一租户 + 应用 + 环境同时只允许一个执行中操作（数据库唯一约束兜底）；
+- **幂等**：相同幂等键 + 相同内容返回原操作；相同键、不同内容被拒；
+- **租约**：执行者持租约推进；租约过期可被接管；**过期执行者不能覆盖新结果**；
+- **结果未知**：阶段执行结果未知时不重复执行外部副作用，先核对证据/状态再决定。
+
+### 10.3 权限
+
+路由级只要求 `platform:application:read`；**动作级权限由处理器按服务端判定的动作校验**，缺一项即拒：
+
+- 首次接入：`platform:application:create`、`platform:application-environment:create`、`platform:application-login-target:create`、`platform:oauth-client:create`、`platform:role-binding:update`；
+- 接管 / 更新 / 恢复：`platform:application:update`、`platform:application-environment:update`、`platform:application-login-target:update`、`platform:oauth-client:disable`。
+
+跨租户读取或恢复一律按"不存在"处理。
+
+### 10.4 页面与 CLI
+
+- 页面：「应用接入」页签内的**统一接入向导**（选择系统与环境 → 检查条件 → 确认操作 → 自动执行 → 查看结果／继续恢复）+ 进度组件（阶段结果分项、仍需处理条件与下一步）；旧接入模块同页保留；
+- CLI：`scripts/subsystem.sh connect --application-code CODE --environment ENV`（`--resume <操作ID>` 继续、`--no-watch` 不轮询、`-y` 非交互）；CLI 与页面使用**同一组接口**，同一操作 ID、阶段与错误码；密码只经 `--password-stdin` 或受控 Cookie 文件，不作为命令行参数。
+
+### 10.5 当前落地边界（务必据实理解）
+
+1. **前置条件**：需先应用迁移 `000122`（操作/阶段表）。未应用时上述接口不可用，页面与 CLI 会返回错误；
+2. **阶段执行器**：条件检查（CHECK）与目录登记（DIRECTORY）接既有服务；首次接入的认证（AUTH）由既有原子流程承担；
+   受控更新（ADOPT/UPDATE/RETRY）的认证与部署**代码已实现**（观察期门禁 → 服务凭据含范围修复与轮换 → 浏览器凭据重建 → 更新装配 → Agent 更新），
+   并有用例覆盖；**既有客户端缺失时仍由既有受控更新入口承担**（统一入口会明确失败并提示），且真实运行尚未验证（需先应用迁移 000122）；
+3. **Worker**：持久执行器已接入平台 Worker 启停（`cfg.SubsystemOnboarding.Enabled` 为真时随 Worker 进程运行，周期领取并推进阶段）；
+4. **就绪事实**：运行批准与商业授权为真实来源；镜像与认证观察期读取器未接线时，该项以**"未验证"**提示返回（既不当作就绪，也不当作缺失）；
+5. **未完成业务验收前**，任何"业务可用"结论都不成立：结果区只做分项展示，不显示"业务可用"字样。

@@ -53,7 +53,7 @@ type deadLetterModel struct {
 
 func (deadLetterModel) TableName() string { return "audit_dead_letter" }
 
-// CreateRetentionTask inserts a task record only; worker execution is coordinated by row locks.
+// CreateRetentionTask 只插入任务记录；worker 执行由行锁协调。
 func (r *Repository) CreateRetentionTask(ctx context.Context, task domain.RetentionTask) (domain.RetentionTask, error) {
 	model := retentionTaskModel{TaskID: task.TaskID, TenantID: task.TenantID, ApplicationID: task.ApplicationID, RequestedBy: task.RequestedBy, Mode: task.Mode, Status: task.Status, ArchiveID: task.ArchiveID, CutoffAt: task.CutoffAt, CreatedAt: task.CreatedAt}
 	if err := r.database.WithContext(ctx).Create(&model).Error; err != nil {
@@ -62,6 +62,7 @@ func (r *Repository) CreateRetentionTask(ctx context.Context, task domain.Retent
 	return task, nil
 }
 
+// ClaimRetentionTask 以 SKIP LOCKED 认领一个 PENDING 或租约过期的 RUNNING 任务并写入执行者。
 func (r *Repository) ClaimRetentionTask(ctx context.Context, workerID string, now, staleBefore time.Time) (domain.RetentionTask, bool, error) {
 	var model retentionTaskModel
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -83,7 +84,7 @@ func (r *Repository) ClaimRetentionTask(ctx context.Context, workerID string, no
 	return toRetentionTask(model), true, nil
 }
 
-// CountRetentionEvents checks the exact immutable source set before one archive file is written.
+// CountRetentionEvents 在写入一个归档文件前核对精确且不可变的来源集合。
 func (r *Repository) CountRetentionEvents(ctx context.Context, task domain.RetentionTask) (uint64, error) {
 	var total int64
 	err := r.database.WithContext(ctx).Table("audit_event").
@@ -98,7 +99,7 @@ func (r *Repository) CountRetentionEvents(ctx context.Context, task domain.Reten
 	return uint64(total), nil
 }
 
-// SetRetentionTaskCandidateCount records the verified source-set size while the task is running.
+// SetRetentionTaskCandidateCount 在任务运行期间记录已核实的来源集合大小。
 func (r *Repository) SetRetentionTaskCandidateCount(ctx context.Context, taskID string, candidateCount uint64) error {
 	result := r.database.WithContext(ctx).Model(&retentionTaskModel{}).
 		Where("task_id = ? AND status = ?", taskID, domain.RetentionTaskRunning).
@@ -112,6 +113,7 @@ func (r *Repository) SetRetentionTaskCandidateCount(ctx context.Context, taskID 
 	return nil
 }
 
+// ListRetentionEvents 按任务截止时间读取截点前的在线审计事件，顺序稳定以保证归档可复现。
 func (r *Repository) ListRetentionEvents(ctx context.Context, task domain.RetentionTask, limit int) ([]domain.Event, error) {
 	if limit < 1 {
 		return nil, application.ErrValidation
@@ -128,16 +130,22 @@ func (r *Repository) ListRetentionEvents(ctx context.Context, task domain.Retent
 	}
 	events := make([]domain.Event, 0, len(rows))
 	for _, row := range rows {
-		events = append(events, toEvent(row.eventModel, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
+		events = append(events, toEvent(row.Event, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
 	}
 	return events, nil
 }
 
+// retentionEventRow 显式命名嵌入字段并使用 gorm:"embedded"。
+//
+// 匿名嵌入未导出类型时 GORM/database/sql 无法写入该类型的字段（reflect 不允许设置
+// 通过未导出嵌入字段提升出来的字段），归档出来的事件会只剩应用与环境元数据，
+// 事件本身的字段全部为空。
 type retentionEventRow struct {
-	eventModel
+	Event                                             eventModel `gorm:"embedded"`
 	ApplicationCode, ApplicationName, EnvironmentCode string
 }
 
+// CreateArchive 在单事务写入归档元数据与事件清单，清单是后续 PURGE 的唯一依据。
 func (r *Repository) CreateArchive(ctx context.Context, archive domain.Archive, items []domain.ArchiveItem) error {
 	return r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		model := archiveModel{ArchiveID: archive.ArchiveID, TenantID: archive.TenantID, ApplicationID: archive.ApplicationID, StorageRelativePath: archive.StorageRelativePath, MediaType: archive.MediaType, SHA256: append([]byte(nil), archive.SHA256...), EventCount: archive.EventCount, OccurredFrom: archive.OccurredFrom, OccurredTo: archive.OccurredTo, CreatedAt: archive.CreatedAt}
@@ -155,6 +163,7 @@ func (r *Repository) CreateArchive(ctx context.Context, archive domain.Archive, 
 	})
 }
 
+// ArchiveByID 返回租户内归档元数据；PURGE 前必须先取得该清单。
 func (r *Repository) ArchiveByID(ctx context.Context, tenantID, archiveID string) (domain.Archive, error) {
 	var model archiveModel
 	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND archive_id = ?", tenantID, archiveID).Take(&model).Error; err != nil {
@@ -163,9 +172,9 @@ func (r *Repository) ArchiveByID(ctx context.Context, tenantID, archiveID string
 	return toArchive(model), nil
 }
 
-// PurgeArchivedEvents is intentionally only reachable through RetentionService. It deletes an
-// event only when an audit_archive_item record exists for this tenant-owned archive and returns
-// the number of archive-manifest items marked processed (not merely rows physically deleted).
+// PurgeArchivedEvents 有意只能经 RetentionService 调用。仅当该租户所有的归档存在
+// audit_archive_item 记录时才删除事件，并返回被标记为已处理的归档清单条目数
+// （而不是单纯的物理删除行数）。
 func (r *Repository) PurgeArchivedEvents(ctx context.Context, tenantID, archiveID string, limit int) (uint64, error) {
 	if limit < 1 {
 		return 0, application.ErrValidation
@@ -197,12 +206,14 @@ func (r *Repository) PurgeArchivedEvents(ctx context.Context, tenantID, archiveI
 	return purged, err
 }
 
+// CompleteRetentionTask 把 RUNNING 任务置为完成；回写绑定租约持有者，迟到的旧执行者被拒绝。
 func (r *Repository) CompleteRetentionTask(ctx context.Context, task domain.RetentionTask, processed uint64, completedAt time.Time) error {
 	updates := map[string]any{"status": domain.RetentionTaskCompleted, "processed_count": processed, "completed_at": completedAt, "failure_code": nil, "failure_message": nil}
 	if task.Mode == domain.RetentionTaskArchive && strings.TrimSpace(task.ArchiveID) != "" {
 		updates["archive_id"] = task.ArchiveID
 	}
-	result := r.database.WithContext(ctx).Model(&retentionTaskModel{}).Where("task_id = ? AND status = ?", task.TaskID, domain.RetentionTaskRunning).Updates(updates)
+	// 与租约持有者绑定：租约过期被接管后，旧执行者的迟到完结不能覆盖新执行者。
+	result := r.database.WithContext(ctx).Model(&retentionTaskModel{}).Where("task_id = ? AND status = ? AND worker_id = ?", task.TaskID, domain.RetentionTaskRunning, task.WorkerID).Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -212,8 +223,9 @@ func (r *Repository) CompleteRetentionTask(ctx context.Context, task domain.Rete
 	return nil
 }
 
+// FailRetentionTask 记录失败码与安全消息并把任务置为 FAILED；同样绑定租约持有者。
 func (r *Repository) FailRetentionTask(ctx context.Context, task domain.RetentionTask, code, message string, now time.Time) error {
-	result := r.database.WithContext(ctx).Model(&retentionTaskModel{}).Where("task_id = ? AND status = ?", task.TaskID, domain.RetentionTaskRunning).Updates(map[string]any{"status": domain.RetentionTaskFailed, "failure_code": nullable(code), "failure_message": nullable(message), "completed_at": now})
+	result := r.database.WithContext(ctx).Model(&retentionTaskModel{}).Where("task_id = ? AND status = ? AND worker_id = ?", task.TaskID, domain.RetentionTaskRunning, task.WorkerID).Updates(map[string]any{"status": domain.RetentionTaskFailed, "failure_code": nullable(code), "failure_message": nullable(message), "completed_at": now})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -223,7 +235,7 @@ func (r *Repository) FailRetentionTask(ctx context.Context, task domain.Retentio
 	return nil
 }
 
-// ListRetentionTasks exposes task history to a tenant-scoped operations console.
+// ListRetentionTasks 向租户隔离的运营控制台暴露任务历史。
 func (r *Repository) ListRetentionTasks(ctx context.Context, tenantID string, query application.RetentionTaskPageRequest) (application.PageResult[domain.RetentionTask], error) {
 	db := r.database.WithContext(ctx).Model(&retentionTaskModel{}).Where("tenant_id = ?", tenantID)
 	if query.ApplicationID != "" {
@@ -250,6 +262,7 @@ func (r *Repository) ListRetentionTasks(ctx context.Context, tenantID string, qu
 	return application.PageResult[domain.RetentionTask]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// CreateDeadLetter 持久化脱敏后的死信载荷，初始状态为 PENDING。
 func (r *Repository) CreateDeadLetter(ctx context.Context, letter domain.DeadLetter) (domain.DeadLetter, error) {
 	model := deadLetterModel{DeadLetterID: letter.DeadLetterID, TenantID: letter.TenantID, ApplicationCode: letter.ApplicationCode, EnvironmentCode: letter.EnvironmentCode, EventID: letter.EventID, Status: letter.Status, Payload: append([]byte(nil), letter.Payload...), LastErrorCode: []byte(letter.LastErrorCode), LastErrorMessage: []byte(letter.LastErrorMessage), Attempts: letter.Attempts, CreatedAt: letter.CreatedAt, UpdatedAt: letter.UpdatedAt}
 	if err := r.database.WithContext(ctx).Create(&model).Error; err != nil {
@@ -258,6 +271,7 @@ func (r *Repository) CreateDeadLetter(ctx context.Context, letter domain.DeadLet
 	return letter, nil
 }
 
+// GetDeadLetter 返回租户内单条死信（含脱敏载荷），供受控重放使用。
 func (r *Repository) GetDeadLetter(ctx context.Context, tenantID, deadLetterID string) (domain.DeadLetter, error) {
 	var model deadLetterModel
 	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND dead_letter_id = ?", tenantID, deadLetterID).Take(&model).Error; err != nil {
@@ -266,6 +280,7 @@ func (r *Repository) GetDeadLetter(ctx context.Context, tenantID, deadLetterID s
 	return toDeadLetter(model), nil
 }
 
+// ListDeadLetters 分页返回租户内死信，可按应用与状态过滤。
 func (r *Repository) ListDeadLetters(ctx context.Context, tenantID string, query application.DeadLetterPageRequest) (application.PageResult[domain.DeadLetter], error) {
 	db := r.database.WithContext(ctx).Model(&deadLetterModel{}).Where("tenant_id = ?", tenantID)
 	if query.ApplicationCode != "" {
@@ -289,6 +304,7 @@ func (r *Repository) ListDeadLetters(ctx context.Context, tenantID string, query
 	return application.PageResult[domain.DeadLetter]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// MarkDeadLetterReplayed 只允许把 PENDING 死信置为 REPLAYED 终态并递增尝试次数。
 func (r *Repository) MarkDeadLetterReplayed(ctx context.Context, tenantID, deadLetterID string, replayedAt time.Time) error {
 	result := r.database.WithContext(ctx).Model(&deadLetterModel{}).Where("tenant_id = ? AND dead_letter_id = ? AND status = ?", tenantID, deadLetterID, domain.DeadLetterPending).Updates(map[string]any{"status": domain.DeadLetterReplayed, "attempts": gorm.Expr("attempts + ?", 1), "replayed_at": replayedAt, "updated_at": replayedAt})
 	if result.Error != nil {
@@ -300,8 +316,8 @@ func (r *Repository) MarkDeadLetterReplayed(ctx context.Context, tenantID, deadL
 	return nil
 }
 
-// MarkDeadLetterReplayFailed keeps a pending message eligible for a later controlled replay while
-// recording the latest safe failure summary and incrementing its attempt count atomically.
+// MarkDeadLetterReplayFailed 在记录最新安全失败摘要并原子递增尝试次数的同时，
+// 保持该待处理消息仍可被后续受控重放领取。
 func (r *Repository) MarkDeadLetterReplayFailed(ctx context.Context, tenantID, deadLetterID, errorCode, errorMessage string, attemptedAt time.Time) error {
 	result := r.database.WithContext(ctx).Model(&deadLetterModel{}).
 		Where("tenant_id = ? AND dead_letter_id = ? AND status = ?", tenantID, deadLetterID, domain.DeadLetterPending).
@@ -328,6 +344,7 @@ func trimAuditFailureMessage(value string) string {
 	return value
 }
 
+// DeadLetterStatus 按状态统计租户（可含应用过滤）的死信数量。
 func (r *Repository) DeadLetterStatus(ctx context.Context, tenantID, applicationCode string) (domain.DeadLetterStatus, error) {
 	type row struct {
 		Status string
@@ -366,13 +383,16 @@ func (r *Repository) DeadLetterStatus(ctx context.Context, tenantID, application
 	return status, nil
 }
 
-// ListIngestionReceipts returns batch delivery acknowledgements. It deliberately joins only
-// application metadata; individual event payloads are not part of this operations endpoint.
+// ingestionReceiptRow 与 retentionEventRow 一样显式命名嵌入字段：匿名嵌入未导出模型时
+// database/sql 无法写回提升出来的字段，接收回执会只剩应用与环境元数据。
+type ingestionReceiptRow struct {
+	Receipt                                           ingestionReceiptModel `gorm:"embedded"`
+	ApplicationCode, ApplicationName, EnvironmentCode string
+}
+
+// ListIngestionReceipts 返回批量投递确认。有意只关联应用元数据；单条事件 payload
+// 不属于这个运营端点的返回范围。
 func (r *Repository) ListIngestionReceipts(ctx context.Context, tenantID string, query application.IngestionReceiptPageRequest) (application.PageResult[domain.IngestionReceipt], error) {
-	type row struct {
-		ingestionReceiptModel
-		ApplicationCode, ApplicationName, EnvironmentCode string
-	}
 	db := r.database.WithContext(ctx).Table("audit_ingestion_receipt").
 		Joins("JOIN platform_application app ON app.id = audit_ingestion_receipt.application_id").
 		Joins("JOIN platform_application_environment env ON env.id = audit_ingestion_receipt.environment_id").
@@ -402,13 +422,13 @@ func (r *Repository) ListIngestionReceipts(ctx context.Context, tenantID string,
 	if err := db.Count(&total).Error; err != nil {
 		return application.PageResult[domain.IngestionReceipt]{}, err
 	}
-	var rows []row
+	var rows []ingestionReceiptRow
 	if err := db.Select("audit_ingestion_receipt.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Order("audit_ingestion_receipt.received_at DESC, audit_ingestion_receipt.id DESC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).Scan(&rows).Error; err != nil {
 		return application.PageResult[domain.IngestionReceipt]{}, err
 	}
 	items := make([]domain.IngestionReceipt, 0, len(rows))
 	for _, item := range rows {
-		items = append(items, toIngestionReceipt(item.ingestionReceiptModel, item.ApplicationCode, item.ApplicationName, item.EnvironmentCode))
+		items = append(items, toIngestionReceipt(item.Receipt, item.ApplicationCode, item.ApplicationName, item.EnvironmentCode))
 	}
 	return application.PageResult[domain.IngestionReceipt]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
@@ -418,7 +438,7 @@ func toIngestionReceipt(model ingestionReceiptModel, applicationCode, applicatio
 }
 
 func toRetentionTask(model retentionTaskModel) domain.RetentionTask {
-	return domain.RetentionTask{TaskID: model.TaskID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, RequestedBy: model.RequestedBy, Mode: model.Mode, Status: model.Status, ArchiveID: model.ArchiveID, CutoffAt: model.CutoffAt, CandidateCount: model.CandidateCount, ProcessedCount: model.ProcessedCount, FailureCode: dereference(model.FailureCode), FailureMessage: dereference(model.FailureMessage), CreatedAt: model.CreatedAt, StartedAt: dereferenceTime(model.StartedAt), CompletedAt: dereferenceTime(model.CompletedAt)}
+	return domain.RetentionTask{TaskID: model.TaskID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, RequestedBy: model.RequestedBy, Mode: model.Mode, Status: model.Status, ArchiveID: model.ArchiveID, CutoffAt: model.CutoffAt, CandidateCount: model.CandidateCount, ProcessedCount: model.ProcessedCount, FailureCode: dereference(model.FailureCode), FailureMessage: dereference(model.FailureMessage), CreatedAt: model.CreatedAt, StartedAt: dereferenceTime(model.StartedAt), CompletedAt: dereferenceTime(model.CompletedAt), WorkerID: model.WorkerID}
 }
 func toArchive(model archiveModel) domain.Archive {
 	return domain.Archive{ArchiveID: model.ArchiveID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, StorageRelativePath: model.StorageRelativePath, MediaType: model.MediaType, SHA256: append([]byte(nil), model.SHA256...), EventCount: model.EventCount, OccurredFrom: model.OccurredFrom, OccurredTo: model.OccurredTo, CreatedAt: model.CreatedAt}
@@ -446,7 +466,7 @@ func dereferenceTime(value *time.Time) time.Time {
 	return *value
 }
 
-// MarshalDeadLetterForDiagnostics is retained for controlled operational tooling only.
+// MarshalDeadLetterForDiagnostics 仅供受控运维工具保留使用。
 func MarshalDeadLetterForDiagnostics(letter domain.DeadLetter) string {
 	payload, _ := json.Marshal(map[string]any{"dead_letter_id": letter.DeadLetterID, "status": letter.Status, "event_id": letter.EventID})
 	return fmt.Sprintf("%s", payload)

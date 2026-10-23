@@ -1,4 +1,4 @@
-// Package infrastructure provides GORM persistence for tenant settings.
+// Package infrastructure 为租户设置提供 GORM 持久化。
 package infrastructure
 
 import (
@@ -14,12 +14,12 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Repository persists settings in MySQL through GORM.
+// Repository 通过 GORM 在 MySQL 中持久化设置。
 type Repository struct {
 	database *gorm.DB
 }
 
-// NewRepository constructs a settings repository.
+// NewRepository 构建设置仓储。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("settings database must not be nil")
@@ -72,7 +72,7 @@ type accessSettingsModel struct {
 
 func (accessSettingsModel) TableName() string { return "settings_access" }
 
-// GetPlatformSettings retrieves exactly one tenant settings aggregate.
+// GetPlatformSettings 精确读取单个租户的平台设置聚合。
 func (repository *Repository) GetPlatformSettings(ctx context.Context, tenantID string) (domain.PlatformSettings, error) {
 	var row platformSettingsModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error; err != nil {
@@ -84,7 +84,7 @@ func (repository *Repository) GetPlatformSettings(ctx context.Context, tenantID 
 	return platformSettingsToDomain(row), nil
 }
 
-// SavePlatformSettings creates the initial tenant row or replaces it under optimistic locking.
+// SavePlatformSettings 创建租户初始行，或在乐观锁下整体替换既有行。
 func (repository *Repository) SavePlatformSettings(ctx context.Context, input application.PlatformSettingsUpdateInput, settingsID string, now time.Time) (domain.PlatformSettings, error) {
 	var saved domain.PlatformSettings
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -131,7 +131,7 @@ func (repository *Repository) SavePlatformSettings(ctx context.Context, input ap
 	return saved, nil
 }
 
-// GetNotificationSettings retrieves exactly one tenant notification settings aggregate.
+// GetNotificationSettings 精确读取单个租户的通知设置聚合。
 func (repository *Repository) GetNotificationSettings(ctx context.Context, tenantID string) (domain.NotificationSettings, error) {
 	var row notificationSettingsModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error; err != nil {
@@ -143,7 +143,7 @@ func (repository *Repository) GetNotificationSettings(ctx context.Context, tenan
 	return notificationSettingsToDomain(row), nil
 }
 
-// SaveNotificationSettings creates the initial tenant row or replaces it under optimistic locking.
+// SaveNotificationSettings 创建租户初始行，或在乐观锁下整体替换既有行。
 func (repository *Repository) SaveNotificationSettings(ctx context.Context, input application.NotificationSettingsUpdateInput, settingsID string, now time.Time) (domain.NotificationSettings, error) {
 	var saved domain.NotificationSettings
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -189,7 +189,7 @@ func (repository *Repository) SaveNotificationSettings(ctx context.Context, inpu
 	return saved, nil
 }
 
-// GetAccessSettings retrieves exactly one tenant access settings aggregate.
+// GetAccessSettings 精确读取单个租户的对外访问设置聚合。
 func (repository *Repository) GetAccessSettings(ctx context.Context, tenantID string) (domain.AccessSettings, error) {
 	var row accessSettingsModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error; err != nil {

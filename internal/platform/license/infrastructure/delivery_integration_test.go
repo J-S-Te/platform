@@ -77,7 +77,7 @@ func TestDeliveryMySQLAtomicImportRestartRenewalRace(t *testing.T) {
 			}
 		}
 	})
-	// Fail after identity and artifact writes: real MySQL must roll back all rows.
+	// 在身份和产物写入后触发失败：真实 MySQL 必须回滚全部行。
 	const callback = "test:delivery_audit_failure"
 	if err := db.Callback().Create().Before("gorm:create").Register(callback, func(tx *gorm.DB) {
 		if event, ok := tx.Statement.Dest.(*domain.Event); ok && event.Kind == "DELIVERY_IMPORTED_CURRENT" {

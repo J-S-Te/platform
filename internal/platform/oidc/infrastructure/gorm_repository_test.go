@@ -9,9 +9,9 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// TestOAuthClientIDColumnMappings protects acronym-heavy OAuth fields from GORM's default
-// conversion to the nonexistent o_auth_client_id column. The database schema consistently uses
-// oauth_client_id for authorization codes, token families, refresh tokens, revocations, and PAR.
+// TestOAuthClientIDColumnMappings 保护含大量缩写的 OAuth 字段，防止 GORM 默认
+// 转换为不存在的 o_auth_client_id 列。数据库 schema 在授权码、令牌家族、
+// 刷新令牌、撤销和 PAR 中统一使用 oauth_client_id。
 func TestOAuthClientIDColumnMappings(t *testing.T) {
 	t.Parallel()
 

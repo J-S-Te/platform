@@ -16,6 +16,8 @@ type installationLicenseEvidenceProvider interface {
 	CollectInstallationLicenseEvidence(context.Context) (licenseevidence.Report, error)
 }
 
+// CollectInstallationLicenseEvidence 通过部署 Agent 采集整机安装边界的许可证证据。响应必须
+// 声明 scope 为 INSTALLATION，否则按不可用失败，防止用应用级证据冒充安装级边界。
 func (p *UnixSocketSubsystemProvisioner) CollectInstallationLicenseEvidence(ctx context.Context) (licenseevidence.Report, error) {
 	if !p.enabled {
 		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: agent disabled")
@@ -45,10 +47,16 @@ func (p *UnixSocketSubsystemProvisioner) CollectInstallationLicenseEvidence(ctx 
 	}
 	return *reply.LicenseEvidence, nil
 }
+
+// CollectInstallationLicenseEvidence 固定拒绝本地 Docker 安装：本地部署未建立需要审计的
+// 安装边界，返回 LICENSE_EVIDENCE_UNSUPPORTED 而不是伪造一份空证据。
 func (p *LocalDockerSubsystemProvisioner) CollectInstallationLicenseEvidence(context.Context) (licenseevidence.Report, error) {
 	return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: local installation approval missing")
 }
 
+// CollectInstallationLicenseEvidence 采集生产 Compose 安装边界的许可证证据。全部目标必须落在
+// 同一 deploy 根目录与 Compose 项目内，否则视为混合边界并失败关闭；审批文件中的服务、基础设施
+// 与排除项会逐项对照受审清单复核，缺审批或审批不完整时不采集。
 func (p *ProductionComposeSubsystemProvisioner) CollectInstallationLicenseEvidence(ctx context.Context) (licenseevidence.Report, error) {
 	if !p.enabled || len(p.targets) == 0 {
 		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: installation boundary not approved")
@@ -104,8 +112,8 @@ func loadInstallationLicenseEvidenceApproval(path, project string, profiles []pr
 	if d.Decode(&a) != nil || d.Decode(new(any)) != io.EOF || a.Version != 1 || a.Project != project || !a.InstallationBoundary {
 		return fail()
 	}
-	// An excluded unit must be named as infrastructure/init in the reviewed
-	// deployment profile. Merely claiming to be infrastructure is insufficient.
+	// 被排除的单元必须在受审部署清单中命名为 infrastructure/init；
+	// 仅自称基础设施不足以豁免。
 	nonbusiness := reviewedPlatformLicenseEvidenceInfrastructure()
 	business := map[string]bool{}
 	known := map[string]productionSubsystemProfile{}
@@ -169,10 +177,10 @@ func loadInstallationLicenseEvidenceApproval(path, project string, profiles []pr
 	return config, nil
 }
 
-// Reviewed against deploy/production/docker-compose.yml: platform control/identity,
-// shared file infrastructure and the static gateway are outside business tiers.
-// This is an allowlist for explicit operator approval, not an automatic exclusion
-// and not a label-derived exemption. Business profile runtime membership wins.
+// 对照 deploy/production/docker-compose.yml 审核得出：平台控制/身份、共享文件基础设施、
+// 静态网关与两个监控服务都在业务层之外。
+// 这是需要运维显式批准的白名单，不是自动排除，也不是基于 label 的豁免；
+// 业务清单的运行时归属优先。
 func reviewedPlatformLicenseEvidenceInfrastructure() map[string]bool {
 	return map[string]bool{
 		"keycloak-db": true, "keycloak": true,
@@ -181,5 +189,6 @@ func reviewedPlatformLicenseEvidenceInfrastructure() map[string]bool {
 		"docker-socket-proxy": true, "subsystem-provisioner": true,
 		"platform-key-init": true, "subsystem-provisioner-socket-init": true,
 		"frontend": true, "file-gateway-mysql": true, "file-gateway": true,
+		"prometheus": true, "keycloak-backup-metrics": true,
 	}
 }

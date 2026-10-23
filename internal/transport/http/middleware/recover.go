@@ -11,8 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Recover converts unexpected panics into the standard API error response and logs the stack
-// trace. It must remain outside business handlers so a single request cannot stop the process.
+// Recover 把意外 panic 转换为标准 API 错误响应并记录调用栈。必须保持在业务处理器
+// 之外装配，保证单个请求的异常不会拖垮整个进程。
 func Recover(logger *slog.Logger) gin.HandlerFunc {
 	return func(context *gin.Context) {
 		defer func() {

@@ -40,8 +40,8 @@ func NewRuntimeHandler(service runtimeCoordinator) (*RuntimeHandler, error) {
 	return &RuntimeHandler{service: service}, nil
 }
 
-// ConfigureEvidence attaches the already constrained deployment Agent, never a
-// browser-provided collector configuration or Docker socket.
+// ConfigureEvidence 挂接已经过约束的部署 Agent 证据来源；绝不接受浏览器提供的采集器
+// 配置或 Docker socket。
 func (h *RuntimeHandler) ConfigureEvidence(source EvidenceSource, environment string) {
 	h.evidence = source
 	h.environment = environment
@@ -56,8 +56,7 @@ func (h *RuntimeHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := h.evidence.CollectLicenseEvidence(r.Context(), applicationPath(r), h.environment)
 	if err != nil {
-		// Agent errors can include host paths. Public diagnostics deliberately
-		// retain a fixed code rather than exposing the command/error text.
+		// Agent 错误文本可能包含宿主机路径。对外诊断刻意只保留固定错误码，不回显命令或错误原文。
 		httpresponse.WriteError(w, r, 503, httperror.New("LICENSE_EVIDENCE_UNAVAILABLE", "部署证据未获批准或无法完整采集，请检查 Agent 的批准发行清单", nil))
 		return
 	}
@@ -108,8 +107,8 @@ func machine(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// Route tails are fixed by registration. The coordinator rechecks the service
-// ID against the authenticated OAuth client, application and environment.
+// 路由尾段由注册时的固定模式决定，这里只做解析。协调器会把服务 ID 与已认证的
+// OAuth client、应用和环境重新核对，不能只信路径。
 func runtimeServiceID(r *http.Request) string {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) != 7 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "internal" || parts[3] != "licenses" || parts[4] != "runtime" {

@@ -19,9 +19,8 @@ const (
 	dockerEnvironmentLabel = "com.basic-platform.environment"
 )
 
-// discoverDockerLabelCandidates inventories self-declared services before platform
-// registration.  Unlike discoverDockerLabelServices it must not require platform-generated
-// tenant/application/environment IDs, otherwise first-time discovery would be impossible.
+// discoverDockerLabelCandidates 在平台登记之前盘点自声明的服务。与 discoverDockerLabelServices
+// 不同，它不能要求平台生成的租户/应用/环境 ID，否则首次发现无法进行。
 func discoverDockerLabelCandidates(ctx context.Context, dockerBinary string) ([]application.SubsystemDiscoveryCandidate, error) {
 	dockerBinary = strings.TrimSpace(dockerBinary)
 	if dockerBinary == "" {
@@ -57,9 +56,8 @@ func dockerCandidateListArgs() []string {
 	return []string{"ps", "--all", "--filter", "label=" + dockerDiscoveryLabel + "=v1", "--format", "{{.ID}}"}
 }
 
-// discoverDockerLabelServices uses labels already attached to containers by Compose.
-// It deliberately uses only the Docker CLI that the existing Agent already depends on;
-// there is no registry, daemon configuration, or host-file mutation involved.
+// discoverDockerLabelServices 使用 Compose 已附加到容器上的 label。它有意只使用既有 Agent
+// 已依赖的 Docker CLI；不涉及任何 registry、守护进程配置或宿主文件改动。
 func discoverDockerLabelServices(ctx context.Context, dockerBinary, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
 	applicationCode = strings.ToLower(strings.TrimSpace(applicationCode))
 	environment = strings.ToLower(strings.TrimSpace(environment))

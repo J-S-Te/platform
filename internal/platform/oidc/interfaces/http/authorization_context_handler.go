@@ -8,10 +8,8 @@ import (
 	oidcapplication "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 )
 
-// AuthorizationContext returns the current, application-scoped authorization
-// snapshot. It is intentionally online and short-cacheable: permissions and
-// data scopes are not copied into OIDC tokens, so revocations do not wait for
-// token expiry or require a large JWT.
+// AuthorizationContext 返回当前、应用范围的授权快照。它刻意在线且只可短缓存：
+// 权限与数据范围不复制进 OIDC token，撤销因此不必等待令牌过期，也无需超大 JWT。
 func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)

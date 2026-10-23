@@ -34,6 +34,11 @@ type rotateScript struct {
 	mismatches   []rotateStatement
 	authorizedAt time.Time
 	now          time.Time
+	// consumed 为 true 时，投影查询返回一个已消费（已换出后继）的刷新令牌，
+	// 用于验证重放分支。
+	consumed  bool
+	commits   int
+	rollbacks int
 }
 
 func (script *rotateScript) record(query string, args int) {
@@ -126,7 +131,7 @@ var rotateScriptDriverCounter uint64
 
 type rotateScriptDriver struct{ script *rotateScript }
 type rotateScriptConn struct{ script *rotateScript }
-type rotateScriptTx struct{}
+type rotateScriptTx struct{ script *rotateScript }
 
 type rotateScriptResult int64
 
@@ -152,12 +157,14 @@ func (connection *rotateScriptConn) Prepare(string) (driver.Stmt, error) {
 
 func (*rotateScriptConn) Close() error { return nil }
 
-func (*rotateScriptConn) Begin() (driver.Tx, error) { return rotateScriptTx{}, nil }
-func (*rotateScriptConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
-	return rotateScriptTx{}, nil
+func (connection *rotateScriptConn) Begin() (driver.Tx, error) {
+	return rotateScriptTx{script: connection.script}, nil
 }
-func (rotateScriptTx) Commit() error   { return nil }
-func (rotateScriptTx) Rollback() error { return nil }
+func (connection *rotateScriptConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return rotateScriptTx{script: connection.script}, nil
+}
+func (tx rotateScriptTx) Commit() error   { tx.script.commits++; return nil }
+func (tx rotateScriptTx) Rollback() error { tx.script.rollbacks++; return nil }
 
 func (connection *rotateScriptConn) ExecContext(_ context.Context, query string, values []driver.NamedValue) (driver.Result, error) {
 	connection.script.record(query, len(values))
@@ -170,6 +177,12 @@ func (connection *rotateScriptConn) QueryContext(_ context.Context, query string
 	switch {
 	case strings.Contains(query, "SELECT oauth_refresh_token.id"):
 		// refreshByHash 的投影查询（带 FOR UPDATE 行锁）。
+		status := driver.Value(domain.RefreshTokenStatusActive)
+		var usedAt driver.Value
+		if script.consumed {
+			status = domain.RefreshTokenStatusConsumed
+			usedAt = script.now.Add(-time.Minute)
+		}
 		return &rotateScriptRows{
 			columns: []string{
 				"id", "tenant_id", "oauth_client_id", "token_family_id", "parent_refresh_token_id",
@@ -179,7 +192,7 @@ func (connection *rotateScriptConn) QueryContext(_ context.Context, query string
 			},
 			values: [][]driver.Value{{
 				"refresh-1", "tenant-1", "client-1", "family-1", nil,
-				make([]byte, 32), script.now.Add(-time.Hour), script.now.Add(time.Hour), nil, nil, "", domain.RefreshTokenStatusActive,
+				make([]byte, 32), script.now.Add(-time.Hour), script.now.Add(time.Hour), usedAt, nil, "", status,
 				"session-1", "account-1", "user-1", "openid profile", script.authorizedAt,
 				script.now.Add(2 * time.Hour), nil, domain.TokenFamilyStatusActive,
 			}},
@@ -215,4 +228,68 @@ func (rows *rotateScriptRows) Next(destination []driver.Value) error {
 	copy(destination, rows.values[rows.index])
 	rows.index++
 	return nil
+}
+
+// 重放检测必须在事务内撤销令牌族，并且这次撤销要真正提交。
+// 如果从事务回调直接返回重放错误，GORM 会回滚整族撤销，接口虽然返回失败，
+// 但被换出的后继令牌和令牌族仍然有效。
+func TestRotateRefreshTokenCommitsFamilyRevocationOnReplay(t *testing.T) {
+	now := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	script := &rotateScript{authorizedAt: now.Add(-24 * time.Hour), now: now, consumed: true}
+	repository := newRotateRepositoryTest(t, script)
+
+	var tokenHash [32]byte
+	copy(tokenHash[:], "replayed-refresh-token-digest-32")
+
+	_, err := repository.RotateRefreshToken(context.Background(), application.RotateRefreshTokenCommand{
+		TokenHash: tokenHash,
+		ClientID:  "client-1",
+		Refresh: application.NewRefreshToken{
+			ID:                   "refresh-2",
+			ParentRefreshTokenID: "refresh-1",
+			TokenHash:            [32]byte{4, 5, 6},
+			TenantID:             "tenant-1",
+			OAuthClientID:        "client-1",
+			SessionID:            "session-1",
+			AccountID:            "account-1",
+			UserID:               "user-1",
+			Scopes:               []string{"openid", "profile"},
+			AuthorizedAt:         script.authorizedAt,
+			IssuedAt:             now,
+			ExpiresAt:            now.Add(30 * 24 * time.Hour),
+		},
+	}, now)
+	if !errors.Is(err, application.ErrRefreshTokenReplay) {
+		t.Fatalf("err = %v, want ErrRefreshTokenReplay", err)
+	}
+
+	// 撤销必须已发出：族被置为 revoked，族内刷新令牌被撤销。
+	revokedFamily := false
+	revokedTokens := false
+	for _, entry := range script.statements {
+		if !strings.HasPrefix(strings.TrimSpace(entry.query), "UPDATE") {
+			continue
+		}
+		if strings.Contains(entry.query, "oauth_token_family") && strings.Contains(entry.query, "revoked_at") {
+			revokedFamily = true
+		}
+		if strings.Contains(entry.query, "oauth_refresh_token") && strings.Contains(entry.query, "revoked_at") {
+			revokedTokens = true
+		}
+	}
+	if !revokedFamily || !revokedTokens {
+		t.Fatalf("重放未撤销整个令牌族: family=%v tokens=%v statements=%+v", revokedFamily, revokedTokens, script.statements)
+	}
+
+	// 核心断言：撤销在提交的事务里，而不是被回滚。
+	if script.commits != 1 || script.rollbacks != 0 {
+		t.Fatalf("commits=%d rollbacks=%d, want 1/0", script.commits, script.rollbacks)
+	}
+
+	// 重放不能插入新的后继刷新令牌。
+	for _, entry := range script.statements {
+		if strings.HasPrefix(strings.TrimSpace(entry.query), "INSERT") && strings.Contains(entry.query, "oauth_refresh_token") {
+			t.Fatalf("重放路径插入了新的刷新令牌: %s", entry.query)
+		}
+	}
 }

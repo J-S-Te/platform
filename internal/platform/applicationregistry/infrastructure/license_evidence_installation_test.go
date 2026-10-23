@@ -42,8 +42,8 @@ func TestInstallationApprovalRequiresExplicitBoundaryAndProfileExclusions(t *tes
 	if _, err := loadInstallationLicenseEvidenceApproval(path, "production", []productionSubsystemProfile{p}); err != nil {
 		t.Fatalf("reviewed core boundary rejected: %v", err)
 	}
-	// A dependency declaration cannot hide a business worker, even when its name
-	// also appears in the platform core list.
+	// 依赖声明不得隐藏业务 worker，即使其名称
+	// 也出现在平台核心组件列表中。
 	p.Manifest.Compose.RuntimeServices = []string{"platform-worker"}
 	if _, err := loadInstallationLicenseEvidenceApproval(path, "production", []productionSubsystemProfile{p}); err == nil {
 		t.Fatal("runtime worker hidden by infrastructure exclusion")
@@ -72,13 +72,13 @@ func TestReviewedCoreLicenseBoundaryExistsInControlledProductionCompose(t *testi
 	}
 }
 
-func TestReviewedInitializationExclusionsRemainExplicitAndNonbusiness(t *testing.T) {
+func TestReviewedInitializationAndMonitoringExclusionsRemainExplicitAndNonbusiness(t *testing.T) {
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "license-evidence.json")
-	for _, name := range []string{"platform-key-init", "subsystem-provisioner-socket-init", "arbitrary-init", "bootstrap", "data-analysis-metabase"} {
+	for _, name := range []string{"platform-key-init", "subsystem-provisioner-socket-init", "prometheus", "keycloak-backup-metrics", "arbitrary-init", "bootstrap", "data-analysis-metabase", "prometheus-worker", "custom-monitoring"} {
 		t.Run(name, func(t *testing.T) {
 			a := licenseEvidenceApproval{Version: 1, Project: "production", InstallationBoundary: true, ExcludedServices: []string{name}}
 			b, err := json.Marshal(a)
@@ -88,10 +88,11 @@ func TestReviewedInitializationExclusionsRemainExplicitAndNonbusiness(t *testing
 			if err := os.WriteFile(path, b, 0600); err != nil {
 				t.Fatal(err)
 			}
-			_, err = loadInstallationLicenseEvidenceApproval(path, "production", nil)
-			approved := name == "platform-key-init" || name == "subsystem-provisioner-socket-init"
-			if (err == nil) != approved {
-				t.Fatalf("unexpected exclusion approval: %v", err)
+			approved := name == "platform-key-init" || name == "subsystem-provisioner-socket-init" || name == "prometheus" || name == "keycloak-backup-metrics"
+			_, installationErr := loadInstallationLicenseEvidenceApproval(path, "production", nil)
+			_, migrationErr := loadMigrationInstallationEvidenceApproval(path, "production", nil)
+			if (installationErr == nil) != approved || (migrationErr == nil) != approved {
+				t.Fatalf("unexpected exclusion approval: installation=%v migration=%v", installationErr, migrationErr)
 			}
 			if !approved {
 				return
@@ -105,6 +106,9 @@ func TestReviewedInitializationExclusionsRemainExplicitAndNonbusiness(t *testing
 				}
 				if _, err := loadInstallationLicenseEvidenceApproval(path, "production", []productionSubsystemProfile{p}); err == nil {
 					t.Fatal("business membership hidden by init exclusion")
+				}
+				if _, err := loadMigrationInstallationEvidenceApproval(path, "production", []productionSubsystemProfile{p}); err == nil {
+					t.Fatal("migration business membership hidden by infrastructure exclusion")
 				}
 			}
 		})

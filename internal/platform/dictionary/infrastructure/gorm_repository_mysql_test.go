@@ -16,7 +16,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// This test requires an empty disposable schema, never a business database.
+// 此测试要求空的临时 schema，绝不能使用业务数据库。
 func TestDictionaryAggregateReadbackOnIsolatedMySQL(t *testing.T) {
 	dsn := os.Getenv("PLATFORM_DICTIONARY_TEST_DSN")
 	if dsn == "" {

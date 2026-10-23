@@ -30,7 +30,7 @@ ip() {
 }
 curl() { [[ "$scenario" != unavailable ]]; }
 sleep() { :; }
-# A test-only root predicate lets non-root development hosts exercise repair.
+# 仅供测试的 root 判定使非 root 开发主机也能验证修复流程。
 eval "$(declare -f ensure_registry_bridge | sed 's/\$EUID/0/g')"
 scenario=healthy
 ensure_registry

@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// This opt-in acceptance test exercises actual Docker projections and isolated
-// containers. It is evidence collection coverage, not a full business install.
+// 此显式启用的验收测试使用实际 Docker 投影和隔离
+// 容器，覆盖证据采集流程，不代表完整业务安装。
 func TestMigrationDockerInstallationEvidence(t *testing.T) {
 	if os.Getenv("LICENSE_MIGRATION_DOCKER_TEST") != "1" {
 		t.Skip("set LICENSE_MIGRATION_DOCKER_TEST=1 for isolated actual Docker evidence")
@@ -39,7 +39,7 @@ func TestMigrationDockerInstallationEvidence(t *testing.T) {
 	if image == "" {
 		t.Fatal("explicit Docker test requires cached alpine:3.21 or alpine:3.20; no image is downloaded")
 	}
-	// Some legacy images omit Config.Labels itself, not only the protocol key.
+	// 部分旧镜像缺少整个 Config.Labels，而不仅是协议键。
 	const labelsProjection = `{"id":{{json .Id}},"version":{{with index .Config "Labels"}}{{json (index . "org.opencontainers.image.version")}}{{else}}null{{end}},"protocol":{{with index .Config "Labels"}}{{json (index . "com.basic-platform.license.protocol")}}{{else}}null{{end}}}`
 	b, err := command("image", "inspect", "--format", labelsProjection, image)
 	var actual imageProjection

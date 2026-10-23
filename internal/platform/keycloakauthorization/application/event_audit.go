@@ -10,26 +10,29 @@ import (
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 )
 
-// KeycloakAuditEvent is the deliberately small, credential-free projection of
-// a Keycloak user or admin event.  The raw Admin API response is never written
-// to the platform audit store because it can contain credential-adjacent data.
+// KeycloakAuditEvent 是 Keycloak 用户/管理员事件的刻意精简投影，不含任何凭据。
+// Admin API 原始响应绝不写入平台审计存储——其中可能包含凭据相邻数据。
 type KeycloakAuditEvent struct {
 	EventID, Category, Type, SubjectID, SessionID, ClientID, SourceIP string
 	ResourceType, ResourcePath, OperationType                         string
 	OccurredAt                                                        time.Time
 }
 
+// KeycloakAuditEventSource 提供 Keycloak Admin API 的事件拉取入口；实现方负责把
+// 原始响应裁剪为 KeycloakAuditEvent，凭据相邻字段不得进入平台审计存储。
 type KeycloakAuditEventSource interface {
 	ListKeycloakAuditEvents(context.Context, time.Time) ([]KeycloakAuditEvent, error)
 }
 
+// KeycloakAuditIdentityResolver 把 Keycloak 主体 ID 映射回租户与平台用户；
+// 无法唯一映射时返回空租户，由采集方跳过该事件。
 type KeycloakAuditIdentityResolver interface {
 	ResolveKeycloakAuditIdentity(context.Context, string) (tenantID, userID string, err error)
 }
 
-// KeycloakEventAuditCollector maps login/logout/admin evidence into the
-// existing append-only platform audit service. It relies on audit EventID
-// deduplication, so each polling cycle can safely include an overlap window.
+// KeycloakEventAuditCollector 把登录/登出/管理员事件证据映射进既有的平台审计
+// 服务（只追加写入）。它依赖审计 EventID 去重，因此每个轮询周期可以安全地
+// 包含一段重叠时间窗。
 type KeycloakEventAuditCollector struct {
 	source      KeycloakAuditEventSource
 	identities  KeycloakAuditIdentityResolver
@@ -38,6 +41,8 @@ type KeycloakEventAuditCollector struct {
 	environment string
 }
 
+// NewKeycloakEventAuditCollector 构造事件采集器；任一依赖为空或应用/环境编码
+// 缺失时返回错误。
 func NewKeycloakEventAuditCollector(source KeycloakAuditEventSource, identities KeycloakAuditIdentityResolver, audit *auditapplication.Service, applicationCode, environmentCode string) (*KeycloakEventAuditCollector, error) {
 	if source == nil || identities == nil || audit == nil || strings.TrimSpace(applicationCode) == "" || strings.TrimSpace(environmentCode) == "" {
 		return nil, errors.New("Keycloak audit collector dependencies are invalid")
@@ -45,9 +50,8 @@ func NewKeycloakEventAuditCollector(source KeycloakAuditEventSource, identities 
 	return &KeycloakEventAuditCollector{source: source, identities: identities, audit: audit, application: strings.TrimSpace(applicationCode), environment: strings.TrimSpace(environmentCode)}, nil
 }
 
-// Collect performs one idempotent polling pass. Unknown/deleted Keycloak
-// subjects are deliberately skipped: assigning such events to an arbitrary
-// tenant would be worse than a visible warning and a controlled mapping repair.
+// Collect 执行一次幂等的轮询采集。未知/已删除的 Keycloak 主体被刻意跳过：
+// 把这类事件强行归入任意租户，比给出可见告警并做受控映射修复更糟。
 func (collector *KeycloakEventAuditCollector) Collect(ctx context.Context, since time.Time) (int, error) {
 	events, err := collector.source.ListKeycloakAuditEvents(ctx, since.UTC())
 	if err != nil {
@@ -69,7 +73,7 @@ func (collector *KeycloakEventAuditCollector) Collect(ctx context.Context, since
 			EventID: "keycloak:" + strings.TrimSpace(event.EventID), ApplicationCode: collector.application, EnvironmentCode: collector.environment,
 			ActorType: keycloakAuditActorType(event.Category), ActorID: userID, SessionID: strings.TrimSpace(event.SessionID), ClientID: strings.TrimSpace(event.ClientID),
 			OccurredAt: event.OccurredAt.UTC(), Action: keycloakAuditAction(event), ResourceType: keycloakAuditResourceType(event), ResourceID: strings.TrimSpace(event.ResourcePath),
-			Result: "SUCCESS", RiskLevel: keycloakAuditRisk(event), Classification: "INTERNAL", EventCategory: "KEYCLOAK", EventType: strings.TrimSpace(event.Type),
+			Result: keycloakAuditResult(event), RiskLevel: keycloakAuditRisk(event), Classification: "INTERNAL", EventCategory: "KEYCLOAK", EventType: strings.TrimSpace(event.Type),
 			Summary: keycloakAuditSummary(event), Metadata: keycloakAuditMetadata(event), SourceIP: strings.TrimSpace(event.SourceIP),
 		}
 		if _, err := collector.audit.Ingest(ctx, tenantID, input); err != nil {
@@ -80,12 +84,27 @@ func (collector *KeycloakEventAuditCollector) Collect(ctx context.Context, since
 	return accepted, nil
 }
 
+// supportedKeycloakAuditEvent 接受登录成功、登录失败、退出与管理员事件。
+//
+// 批次 3：此前只采 LOGIN/LOGOUT，登录失败（LOGIN_ERROR）完全不入审计——
+// 恰恰是安全排查最需要的一类事件。
 func supportedKeycloakAuditEvent(event KeycloakAuditEvent) bool {
 	category, kind := strings.ToUpper(strings.TrimSpace(event.Category)), strings.ToUpper(strings.TrimSpace(event.Type))
 	if category == "ADMIN" {
 		return strings.TrimSpace(event.SubjectID) != ""
 	}
-	return category == "LOGIN" && (kind == "LOGIN" || kind == "LOGOUT") && strings.TrimSpace(event.SubjectID) != ""
+	if category != "LOGIN" {
+		return false
+	}
+	return kind == "LOGIN" || kind == "LOGOUT" || kind == "LOGIN_ERROR"
+}
+
+// keycloakAuditResult 把 Keycloak 事件类型映射为审计结果。
+func keycloakAuditResult(event KeycloakAuditEvent) string {
+	if strings.EqualFold(strings.TrimSpace(event.Type), "LOGIN_ERROR") {
+		return "FAILURE"
+	}
+	return "SUCCESS"
 }
 
 func keycloakAuditActorType(category string) string {
@@ -116,12 +135,19 @@ func keycloakAuditRisk(event KeycloakAuditEvent) string {
 	if strings.EqualFold(strings.TrimSpace(event.Category), "ADMIN") {
 		return "HIGH"
 	}
+	// 登录失败按高风险记录：它是撞库/密码喷洒排查的主要线索。
+	if strings.EqualFold(strings.TrimSpace(event.Type), "LOGIN_ERROR") {
+		return "HIGH"
+	}
 	return "MEDIUM"
 }
 
 func keycloakAuditSummary(event KeycloakAuditEvent) string {
 	if strings.EqualFold(strings.TrimSpace(event.Category), "ADMIN") {
 		return "Keycloak 管理员事件：" + strings.ToUpper(strings.TrimSpace(event.OperationType))
+	}
+	if strings.EqualFold(strings.TrimSpace(event.Type), "LOGIN_ERROR") {
+		return "Keycloak 登录失败：" + strings.ToUpper(strings.TrimSpace(event.Type))
 	}
 	return "Keycloak 用户会话事件：" + strings.ToUpper(strings.TrimSpace(event.Type))
 }

@@ -1,9 +1,9 @@
-// Package domain defines configuration aggregates independent of the HTTP and database layers.
+// Package domain 定义独立于 HTTP 与数据库层的配置聚合模型。
 package domain
 
 import "time"
 
-// Reference identifies a configuration-related resource in API responses.
+// Reference 在 API 响应中标识一个配置相关资源。
 type Reference struct {
 	ID   string
 	Code string
@@ -34,7 +34,7 @@ type Item struct {
 	UpdatedAt time.Time
 }
 
-// VersionedItem selects one specific draft version for a release snapshot.
+// VersionedItem 为发布快照选定某个草稿项的特定版本。
 type VersionedItem struct {
 	ItemID  string
 	Version uint64
@@ -51,7 +51,7 @@ type Release struct {
 	PublishedAt *time.Time
 }
 
-// PublishedConfig is the safe runtime representation of a published namespace.
+// PublishedConfig 是已发布命名空间的运行时安全表示，只包含快照值而不含草稿或密钥。
 type PublishedConfig struct {
 	ApplicationCode string
 	NamespaceCode   string

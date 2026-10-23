@@ -1,4 +1,4 @@
-// Package http exposes the machine-only owner directory endpoint.
+// Package http 暴露仅限机器主体调用的负责人目录端点。
 package http
 
 import (
@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
@@ -19,11 +20,13 @@ type directoryService interface {
 	List(context.Context, appctx.Principal, application.Query) (domain.Page, error)
 }
 
+// Handler 暴露负责人目录查询端点；身份与范围取自已认证机器令牌。
 type Handler struct {
 	service directoryService
 	logger  *slog.Logger
 }
 
+// NewHandler 构造目录 HTTP 处理器；任一依赖为 nil 时失败关闭。
 func NewHandler(service directoryService, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("owner directory handler dependencies must not be nil")
@@ -31,6 +34,7 @@ func NewHandler(service directoryService, logger *slog.Logger) (*Handler, error)
 	return &Handler{service: service, logger: logger}, nil
 }
 
+// List 返回符合过滤条件的可选负责人分页；只支持机器主体调用。
 func (handler *Handler) List(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := appctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -51,6 +55,11 @@ func (handler *Handler) List(writer http.ResponseWriter, request *http.Request) 
 	if err != nil {
 		if errors.Is(err, application.ErrValidation) {
 			httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+			return
+		}
+		if errors.Is(err, bootstrapadmin.ErrConfiguration) {
+			handler.logger.Error("bootstrap administrator configuration is invalid", "error", err)
+			httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.BootstrapAdminConfiguration)
 			return
 		}
 		handler.logger.Error("owner directory request failed", "error", err)

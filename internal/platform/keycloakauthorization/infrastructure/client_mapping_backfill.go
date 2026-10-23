@@ -20,9 +20,8 @@ type keycloakBackfillLegacyScope struct {
 	TenantID, ApplicationID string
 }
 
-// BackfillKeycloakAuthorization creates the initial FULL_RECONCILE work only
-// after a mapping has been persisted.  All writes, including the idempotency
-// ledger, share one transaction so an interrupted request can safely retry.
+// BackfillKeycloakAuthorization 仅在映射持久化之后才创建初始 FULL_RECONCILE 工作。
+// 全部写入（包括幂等台账）共用一个事务，中断的请求可以安全重试。
 func (store *ClientMappingStore) BackfillKeycloakAuthorization(ctx context.Context, tenantID, applicationID, environmentID string) error {
 	if store == nil || store.database == nil {
 		return errors.New("Keycloak authorization backfill database must not be nil")
@@ -46,13 +45,12 @@ func (store *ClientMappingStore) BackfillKeycloakAuthorization(ctx context.Conte
 	})
 }
 
-// ExpandLegacyKeycloakAuthorizationOutbox expands every pending or running
-// pre-environment outbox event into one event per synchronized Client mapping.
-// It is safe to invoke at worker startup and on every worker loop: the
-// expansion ledger makes each source-event/environment pair idempotent.
+// ExpandLegacyKeycloakAuthorizationOutbox 把每条 pending/running 的前环境期
+// outbox 事件展开为每条已同步 Client mapping 一个事件。可在 worker 启动时和每轮
+// 循环中安全调用：展开台账使每个"源事件/环境"对保持幂等。
 //
-// Legacy events without a synchronized mapping deliberately remain pending or
-// running. A later invocation will expand them once a Client mapping exists.
+// 没有已同步映射的遗留事件刻意保持 pending/running，待 Client mapping 出现后的
+// 下一次调用再展开。
 func (store *ClientMappingStore) ExpandLegacyKeycloakAuthorizationOutbox(ctx context.Context) error {
 	if store == nil || store.database == nil {
 		return errors.New("Keycloak authorization legacy expansion database must not be nil")
@@ -73,12 +71,10 @@ func (store *ClientMappingStore) ExpandLegacyKeycloakAuthorizationOutbox(ctx con
 }
 
 func activeKeycloakBackfillUsersQuery(database *gorm.DB, tenantID, applicationID string, now time.Time) *gorm.DB {
-	// Most applications may project every active platform account so Keycloak can
-	// centrally disable a formerly authorized account. Customer Portal is a
-	// deliberately separate external identity boundary: its broker must only see
-	// accounts that actually have portal access. In particular, the platform
-	// super administrator is allowed to manage the portal registration but must
-	// never be turned into a customer merely because a portal client is onboarded.
+	// 大多数应用可以投影全部活动平台账号，使 Keycloak 能集中停用已失去授权的
+	// 账号。Customer Portal 刻意是独立的外部身份边界：其 broker 只能看到真正
+	// 拥有门户访问权的账号。特别地，平台超级管理员可以管理门户注册，但绝不能
+	// 仅因为门户 client 完成接入就被变成客户。
 	return database.Table("iam_user AS user_record").
 		Joins("JOIN platform_application AS application ON application.tenant_id = user_record.tenant_id AND application.id = ?", strings.TrimSpace(applicationID)).
 		Where("user_record.tenant_id = ? AND user_record.status = ?", strings.TrimSpace(tenantID), "ACTIVE").
@@ -177,8 +173,8 @@ func expandLegacyKeycloakOutbox(tx *gorm.DB, tenantID, applicationID string, now
 				}
 			}
 		}
-		// Once every currently synchronized target has a durable child event, the
-		// NULL-environment source must no longer be claimed and retried forever.
+		// 一旦当前全部已同步目标都拥有持久化的子事件，NULL 环境的源事件就
+		// 不能再被无休止地领取和重试。
 		if err := tx.Table("keycloak_authorization_outbox").Where("id = ? AND environment_id IS NULL AND status IN ?", legacy.ID, []string{"PENDING", "RUNNING"}).Updates(map[string]any{
 			"status": "SUCCEEDED", "completed_at": now, "locked_by": nil, "locked_at": nil,
 		}).Error; err != nil {
@@ -189,9 +185,8 @@ func expandLegacyKeycloakOutbox(tx *gorm.DB, tenantID, applicationID string, now
 }
 
 func insertKeycloakBackfillLedger(tx *gorm.DB, table string, values map[string]any) (bool, error) {
-	// MySQL rejects an empty ON DUPLICATE KEY UPDATE clause. Keep the insert
-	// idempotent with a valid no-op assignment instead of relying on GORM's
-	// dialect-specific DoNothing rendering.
+	// MySQL 拒绝空的 ON DUPLICATE KEY UPDATE 子句。用合法的 no-op 赋值保持插入
+	// 幂等，而不是依赖 GORM 方言相关的 DoNothing 渲染。
 	result := tx.Table(table).Clauses(clause.OnConflict{
 		DoUpdates: clause.Assignments(map[string]any{"created_at": gorm.Expr("created_at")}),
 	}).Create(values)

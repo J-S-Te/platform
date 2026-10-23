@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 )
 
-// deadLetterPayload keeps the input schema versioned so future replay does not depend on a raw
-// HTTP body. Metadata and changes have already passed audit redaction before persistence.
+// deadLetterPayload 让输入模式带版本号，使未来重放不依赖原始 HTTP 报文。
+// Metadata 与 changes 在持久化前都已通过审计脱敏。
 type deadLetterPayload struct {
 	Version int        `json:"version"`
 	Event   EventInput `json:"event"`

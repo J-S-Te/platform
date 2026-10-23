@@ -1,4 +1,4 @@
-// Package bootstrap wires infrastructure dependencies into runnable processes.
+// Package bootstrap 把基础设施依赖装配为可运行的进程。
 package bootstrap
 
 import (
@@ -73,8 +73,8 @@ import (
 
 // API 是 HTTP 进程的依赖容器，保存服务路由、日志器与资源句柄。
 type API struct {
-	Handler http.Handler
-	Logger  *slog.Logger
+	Handler         http.Handler
+	Logger          *slog.Logger
 	OfflineDelivery *OfflineDeliveryRunner
 
 	database           *gorm.DB
@@ -425,10 +425,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	// Keep the latency-sensitive broker token exchange independent from the
-	// shared management/audit pool. A burst or stuck transaction in ordinary
-	// platform traffic must not make Keycloak wait for its five-second callback
-	// deadline.
+	// 延迟敏感的 broker token 交换与共享的管理/审计连接池隔离。普通平台流量的
+	// 突发或卡住的事务，绝不能拖累 Keycloak 等待其五秒回调 deadline。
 	oidcDB, err := database.OpenMySQLWithPool(cfg.MySQL, 10, 5, 15*time.Minute, 2*time.Minute)
 	if err != nil {
 		_ = database.Close(db)
@@ -684,7 +682,16 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService, applicationManagementService, oauthClientManagementService)
+	personnelChangeAudit := &personnelChangeAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
+	// 授权协调服务在下方才构造；交接 inventory 通过延迟解析读取端，未就绪时按不可达阻断。
+	var handoverLicenseReader handoverLicenseStatusReader
+	personnelHandover, err := buildHandoverCoordinator(cfg, db, applicationManagementService, lazyHandoverLicenseReader{resolve: func() handoverLicenseStatusReader { return handoverLicenseReader }})
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService, applicationManagementService, oauthClientManagementService, personnelChangeAudit, personnelHandover)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -719,7 +726,10 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	licenseCoordinatorOptions := []licensecoordination.Option{licensecoordination.WithApplicationEnvironment(cfg.Audit.EnvironmentCode)}
+	licenseCoordinatorOptions := []licensecoordination.Option{
+		licensecoordination.WithApplicationEnvironment(cfg.Audit.EnvironmentCode),
+		licensecoordination.WithBuiltinComponentSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{}),
+	}
 	if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseLifecycleApprovalSource); ok {
 		verifier, verifierErr := applicationregistryapplication.NewRuntimeLicenseLifecycleVerifier(source)
 		if verifierErr != nil {
@@ -730,6 +740,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		licenseCoordinatorOptions = append(licenseCoordinatorOptions, licensecoordination.WithLifecycleApprovalVerifier(verifier))
 	}
 	licenseCoordinator, err := licensecoordination.NewService(db, licenseService, licensetrust.Keys(), licenseSnapshotSigner{applicationTokenManager, licensetrust.Keys()}, time.Now, licenseCoordinatorOptions...)
+	// 授权协调服务就绪后交接 inventory 即可读取真实授权状态。
+	handoverLicenseReader = licenseCoordinator
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -744,8 +756,17 @@ func NewAPI(cfg config.Config) (*API, error) {
 	if source, ok := operational.AccessApplier.(licensehttp.EvidenceSource); ok {
 		operational.RuntimeLicenses.ConfigureEvidence(source, cfg.Audit.EnvironmentCode)
 	}
-	if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseApprovalSource); ok && operational.SubsystemOnboarding != nil {
-		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentService(source, oauthClientManagementService, licenseCoordinator)
+	if operational.SubsystemOnboarding != nil {
+		var approvalSource applicationregistryapplication.RuntimeLicenseApprovalSource
+		if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseApprovalSource); ok {
+			approvalSource = source
+		}
+		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentServiceWithCatalog(
+			approvalSource,
+			applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{},
+			oauthClientManagementService,
+			licenseCoordinator,
+		)
 		if enrollErr != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()
@@ -802,12 +823,10 @@ func NewAPI(cfg config.Config) (*API, error) {
 	return api, nil
 }
 
-// bootstrapPlatformCatalog ensures the platform application's own authorization catalog row
-// reflects the migration-seeded built-in roles and permissions. Subsystem-owned catalogs
-// (e.g. contract_management) are published by their catalog-publisher OAuth client and are
-// intentionally not touched here. The platform has no such client for itself; without this
-// bootstrap the UI blocks role assignment with "目录同步: 未同步" even though the
-// built-in data is already in the database.
+// bootstrapPlatformCatalog 确保平台应用自身的授权目录行反映迁移种子的内置角色与
+// 权限。子系统自有目录（如 contract_management）由其 catalog-publisher OAuth client
+// 发布，刻意不在此处触碰。平台自身没有这样的 client；若没有这条 bootstrap，即使
+// 内置数据已在数据库中，UI 也会以"目录同步: 未同步"阻止角色分配。
 func bootstrapPlatformCatalog(
 	svc *applicationaccess.Service,
 	db *gorm.DB,
@@ -842,8 +861,8 @@ func bootstrapPlatformCatalog(
 	return nil
 }
 
-// resolveDefaultTenantID looks up the migration-seeded "default" tenant. The bootstrap path
-// must not hard-code the tenant ULID; future multi-tenant installs will share the same code.
+// resolveDefaultTenantID 查找迁移种子的 "default" 租户。bootstrap 路径绝不
+// 硬编码租户 ULID，使未来多租户安装能复用同一代码。
 func resolveDefaultTenantID(db *gorm.DB) (string, error) {
 	var tenantID string
 	err := db.WithContext(context.Background()).
@@ -860,14 +879,13 @@ func resolveDefaultTenantID(db *gorm.DB) (string, error) {
 	return tenantID, nil
 }
 
-// resolvePlatformCatalogOperatorID prefers the first super administrator's user id so the
-// audit history aligns with whoever initially set the platform up. If bootstrap has not yet
-// happened, a stable system identity is used so the catalog row still has a valid 26-char
-// last_synced_by reference until the first admin takes over.
+// resolvePlatformCatalogOperatorID 优先取首位超级管理员的用户 ID，使审计历史与
+// 最初搭建平台的人对齐。若 bootstrap 尚未执行，则使用稳定的系统身份，让目录行
+// 在首位管理员接管前仍有合法的 26 位 last_synced_by 引用。
 func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, error) {
-	// application code "platform" + role code "platform-super-admin" are migration-seeded by
-	// 000011_seed_platform_defaults.sql; look them up dynamically so this bootstrap tolerates
-	// future schema renames.
+	// application code "platform" 与 role code "platform-super-admin" 由
+	// 000011_seed_platform_defaults.sql 迁移种子写入；此处动态查找，
+	// 使 bootstrap 能容忍未来的 schema 重命名。
 	var platformAppID string
 	if err := db.WithContext(context.Background()).
 		Table("platform_application").
@@ -894,9 +912,9 @@ func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, err
 	if strings.TrimSpace(adminUserID) != "" {
 		return adminUserID, nil
 	}
-	// Pre-bootstrap: use a stable system identity until the first admin takes over. The
-	// 26-char placeholder is a valid Crockford Base32 ULID with a non-overlapping "PLATFSY"
-	// suffix so it can never collide with a real user id.
+	// Pre-bootstrap 阶段：在首位管理员接管前使用稳定的系统身份。26 位占位符是
+	// 合法的 Crockford Base32 ULID，且带不重叠的 "PLATFSY" 后缀，
+	// 绝不会与真实用户 ID 冲突。
 	return applicationaccess.PlatformCatalogBootstrapOperatorID, nil
 }
 
@@ -937,9 +955,12 @@ type licenseSnapshotSigner struct {
 	vendorKeys map[string]ed25519.PublicKey
 }
 
+// Sign 用平台受管签名身份对许可快照签名。
 func (s licenseSnapshotSigner) Sign(snapshot licenseruntime.PlatformSnapshot) (string, error) {
 	return s.manager.Sign(snapshot)
 }
+
+// Verify 用厂商公钥验签并解析许可快照，绑定校验交由底层 JWT 管理器完成。
 func (s licenseSnapshotSigner) Verify(raw string, binding licenseruntime.Binding) (licenseruntime.PlatformSnapshot, error) {
 	return s.manager.VerifyLicenseSnapshot(raw, binding, s.vendorKeys)
 }
@@ -957,20 +978,27 @@ func (adapter oidcLogoutSignerAdapter) IssueLogoutToken(issuer, audience, subjec
 }
 
 // oidcIDTokenVerifierAdapter 把 Keycloak broker 验证器的 ID Token 校验适配为
-// 身份 HTTP 层接口：验签通过后要求 identity_id 与 subject 一致。
+// 身份 HTTP 层接口：验签通过后要求 identity_id 与 sub 都存在，并以平台身份 identity_id
+// 作为登录主体。
+//
+// 不能要求两个声明相等：Keycloak 的 sub 是 Keycloak 内部用户 ID，平台身份保存在
+// identity_id 用户属性里，投影按 identity_id 对齐用户，Keycloak 用户 ID 只作为外部
+// 资源句柄（见 keycloakauthorization 的 keycloak_admin.go）。常规部署下二者本来就不同。
 type oidcIDTokenVerifierAdapter struct {
 	verifier *middleware.KeycloakBrokerJWTVerifier
 }
 
+// VerifyIDToken 验签上游 ID Token 并返回平台身份 identity_id 作为登录主体。
 func (adapter oidcIDTokenVerifierAdapter) VerifyIDToken(ctx context.Context, raw, nonce, clientID string) (string, error) {
 	claims, err := adapter.verifier.VerifyIDToken(ctx, raw, nonce, clientID)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(claims.IdentityID) == "" || strings.TrimSpace(claims.Subject) == "" || claims.IdentityID != claims.Subject {
+	identityID := strings.TrimSpace(claims.IdentityID)
+	if identityID == "" || strings.TrimSpace(claims.Subject) == "" {
 		return "", errors.New("Keycloak ID token identity claims are invalid")
 	}
-	return claims.IdentityID, nil
+	return identityID, nil
 }
 
 // customerBindingResolverAdapter 把外部身份模块的绑定解析适配为 OIDC 传输层接口。
@@ -979,6 +1007,7 @@ type customerBindingResolverAdapter struct {
 	service *externalidentityapplication.Service
 }
 
+// ResolveCustomerBinding 解析平台身份在指定应用内绑定的 CRM 客户引用。
 func (adapter customerBindingResolverAdapter) ResolveCustomerBinding(ctx context.Context, tenantID, platformUserID, applicationCode string) (string, error) {
 	resolved, err := adapter.service.ResolveCustomerBinding(ctx, tenantID, platformUserID, applicationCode)
 	if err != nil {
@@ -987,7 +1016,7 @@ func (adapter customerBindingResolverAdapter) ResolveCustomerBinding(ctx context
 	return resolved.CustomerRef, nil
 }
 
-// parseSameSite converts the validated configuration value into Go's cookie enum for OIDC logout.
+// parseSameSite 把已校验的配置值转换为 Go 的 cookie 枚举，供 OIDC logout 使用。
 func parseSameSite(value string) (http.SameSite, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "lax":

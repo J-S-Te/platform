@@ -1,5 +1,4 @@
-# Optional isolated BI listener. For production use an independent HTTPS edge
-# on a distinct registrable domain. Do not expose port 8082 as a business API.
+# 可选的隔离 BI 监听器。生产应在独立可注册域名上使用独立 HTTPS 边缘入口，不能将 8082 端口作为业务 API 暴露。
 services:
   frontend:
     environment:

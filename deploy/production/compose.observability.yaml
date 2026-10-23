@@ -1,6 +1,4 @@
-# Optional observability overlay. It is inactive unless explicitly supplied.
-# Prometheus and node-exporter remain on the internal application network; no
-# monitoring port is published to the host by this example.
+# 可选的可观测性覆盖配置，只有显式指定才会启用。Prometheus 和 node-exporter 保留在内部应用网络，本示例不向宿主机发布监控端口。
 services:
   prometheus:
     image: prom/prometheus:v3.5.0

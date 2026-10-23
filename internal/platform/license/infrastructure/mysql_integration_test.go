@@ -22,8 +22,8 @@ import (
 	"time"
 )
 
-// Only an explicitly supplied disposable local license test database is eligible.
-// No application DSN/config/environment fallback is permitted.
+// 只允许显式提供、可丢弃的本地许可证测试数据库。
+// 禁止回退到应用 DSN、配置或环境变量。
 func isolatedDatabase(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := os.Getenv("LICENSE_TEST_DSN")
@@ -58,21 +58,31 @@ func TestLicenseMySQLMigrationAndLifecycle(t *testing.T) {
 	db := isolatedDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	// 期望值必须来自嵌入的迁移目录本身：写死数字会在每次新增迁移后过期，
+	// 让"全部注册版本都已应用"这一真正的不变量变成假失败。
+	registered, e := migration.Load(migrations.Files)
+	if e != nil {
+		t.Fatal("load registered migrations:", e)
+	}
+	wantMigrations := int64(len(registered))
+	if wantMigrations == 0 {
+		t.Fatal("no registered migrations found")
+	}
 	applied, e := migration.Run(ctx, db, migrations.Files)
 	if e != nil {
 		t.Fatal("full migration:", e)
 	}
-	if len(applied) != 117 && len(applied) != 0 {
-		t.Fatalf("expected complete initial migration or an already migrated disposable database: applied=%d want117/0", len(applied))
+	if int64(len(applied)) != wantMigrations && len(applied) != 0 {
+		t.Fatalf("expected complete initial migration or an already migrated disposable database: applied=%d want%d/0", len(applied), wantMigrations)
 	}
-	t.Logf("initial migration applied=%d; expecting all 117 registered versions", len(applied))
+	t.Logf("initial migration applied=%d; expecting all %d registered versions", len(applied), wantMigrations)
 	again, e := migration.Run(ctx, db, migrations.Files)
 	if e != nil || len(again) != 0 {
 		t.Fatalf("migration replay %d %v", len(again), e)
 	}
 	var migrationsCount int64
-	if e = db.Table("platform_schema_migration").Count(&migrationsCount).Error; e != nil || migrationsCount != 117 {
-		t.Fatalf("registered migrations %d %v", migrationsCount, e)
+	if e = db.Table("platform_schema_migration").Count(&migrationsCount).Error; e != nil || migrationsCount != wantMigrations {
+		t.Fatalf("registered migrations %d want %d %v", migrationsCount, wantMigrations, e)
 	}
 	var versions []uint64
 	if e = db.Table("platform_schema_migration").Order("version ASC").Pluck("version", &versions).Error; e != nil {
@@ -105,7 +115,7 @@ func TestLicenseMySQLMigrationAndLifecycle(t *testing.T) {
 	digests := []string{}
 	recoveryID := "license-test-recovery-1"
 	t.Cleanup(func() {
-		// Delete only this lifecycle's explicit rows; migration seed data remains.
+		// 仅删除本生命周期明确创建的行，保留迁移种子数据。
 		if e := db.Where("id = ?", recoveryID).Delete(&domain.ClockRecovery{}).Error; e != nil {
 			t.Error(e)
 		}

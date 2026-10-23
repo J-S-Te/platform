@@ -1,4 +1,4 @@
-// Package application validates machine-principal directory queries.
+// Package application 校验机器主体的负责人目录查询。
 package application
 
 import (
@@ -18,7 +18,9 @@ const (
 )
 
 var (
-	ErrValidation  = errors.New("owner directory query is invalid")
+	// ErrValidation 表示目录查询参数非法。
+	ErrValidation = errors.New("owner directory query is invalid")
+	// ErrUnavailable 表示目录数据源不可用，查询失败关闭。
 	ErrUnavailable = errors.New("owner directory is unavailable")
 )
 
@@ -27,7 +29,7 @@ var (
 // 未知取值一律拒绝，避免拼写错误被当成"没有过滤"而放大候选人范围。
 var roleGrantOrigins = map[string]struct{}{"TEMPLATE": {}, "MANUAL": {}, "SYSTEM": {}}
 
-// Query contains optional exact-user or display search filters.
+// Query 承载可选的精确用户或显示名搜索过滤条件。
 type Query struct {
 	Keyword string
 	UserID  string
@@ -40,13 +42,15 @@ type Query struct {
 	PageSize    int
 }
 
-// Repository reads only active, application-authorized internal users.
+// Repository 只读取有效且对调用方应用授权的内部用户。
 type Repository interface {
 	List(context.Context, string, string, string, Query) (domain.Page, error)
 }
 
+// Service 是负责人目录应用服务，只暴露经验证的查询入口。
 type Service struct{ repository Repository }
 
+// NewService 构造目录服务；仓储缺失时失败关闭。
 func NewService(repository Repository) (*Service, error) {
 	if repository == nil {
 		return nil, errors.New("owner directory repository must not be nil")
@@ -54,7 +58,7 @@ func NewService(repository Repository) (*Service, error) {
 	return &Service{repository: repository}, nil
 }
 
-// List derives tenant and application scope exclusively from the authenticated machine token.
+// List 的租户与应用范围只来自已认证机器令牌，查询参数不能指定或扩大数据边界。
 func (service *Service) List(ctx context.Context, principal appctx.Principal, query Query) (domain.Page, error) {
 	if !principal.Valid() {
 		return domain.Page{}, ErrValidation

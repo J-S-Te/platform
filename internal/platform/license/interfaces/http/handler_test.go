@@ -2,6 +2,7 @@ package licensehttp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
@@ -9,13 +10,15 @@ import (
 	core "github.com/J-S-Te/license-core"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
-// Handler tests use the real application service, with an isolated storage
-// contract fixture. Real SQL transactions are exercised by the MySQL test.
+// 处理器测试使用真实应用服务和隔离存储
+// 契约夹具；真实 SQL 事务由 MySQL 测试覆盖。
 type handlerRepository struct {
 	d      *domain.Deployment
 	events []domain.Event
@@ -72,7 +75,7 @@ func invoke(fn http.HandlerFunc, r *http.Request) *httptest.ResponseRecorder {
 }
 func TestLicenseHTTPAuthenticationAndPermissions(t *testing.T) {
 	h, repo := handlerFixture(t)
-	for name, fn := range map[string]http.HandlerFunc{"status": h.Status, "request": h.Request, "events": h.Events, "initialize": h.Initialize, "preview": h.Preview, "commit": h.Commit, "recovery": h.RestoreClock} {
+	for name, fn := range map[string]http.HandlerFunc{"status": h.Status, "artifact": h.Artifact, "request": h.Request, "events": h.Events, "initialize": h.Initialize, "preview": h.Preview, "commit": h.Commit, "recovery": h.RestoreClock} {
 		t.Run(name, func(t *testing.T) {
 			r := requestWith("{}", "")
 			r.Header.Set("X-User-ID", "admin")
@@ -148,4 +151,61 @@ func TestLicenseHTTPEmptyTrustReadAndPagination(t *testing.T) {
 	if w := invoke(h.Events, requestWith("", "platform:license:read")); w.Code != 200 {
 		t.Fatalf("events %d %s", w.Code, w.Body.String())
 	}
+}
+
+// 确定性失败（版本不递增、实例绑定不匹配）必须与瞬时的状态冲突区分开，各自给出错误码与文案。
+func TestLicenseHTTPDistinguishesDeterministicFailuresFromConflicts(t *testing.T) {
+	cases := []struct {
+		sentinel error
+		code     string
+		message  string
+	}{
+		{domain.ErrVersionNotIncreasing, "LICENSE_VERSION_NOT_INCREASING", "更高版本"},
+		{domain.ErrBindingMismatch, "LICENSE_BINDING_MISMATCH", "已绑定"},
+		{domain.ErrConflict, "LICENSE_VERSION_CONFLICT", "重新预览"},
+	}
+	for _, c := range cases {
+		w := httptest.NewRecorder()
+		writeError(w, requestWith("", "platform:license:manage"), c.sentinel)
+		if w.Code != 409 || !strings.Contains(w.Body.String(), c.code) || !strings.Contains(w.Body.String(), c.message) {
+			t.Fatalf("%v -> %d %s", c.sentinel, w.Code, w.Body.String())
+		}
+	}
+}
+
+// 前端 userError.js 的 safeUserMessage 会丢弃含技术细节的文案，尤其是大写带下划线的 token。
+// 文案一旦被丢弃，409 会降级成“请刷新页面”，等于本次修复失效，因此这里做回归保护。
+func TestLicenseHTTPMessagesSurviveTheFrontendFilter(t *testing.T) {
+	technical := regexp.MustCompile("[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+	for _, sentinel := range []error{domain.ErrVersionNotIncreasing, domain.ErrBindingMismatch, domain.ErrConflict} {
+		w := httptest.NewRecorder()
+		writeError(w, requestWith("", "platform:license:manage"), sentinel)
+		var envelope struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if e := json.Unmarshal(w.Body.Bytes(), &envelope); e != nil {
+			t.Fatal(e)
+		}
+		if !hasHan(envelope.Message) || len([]rune(envelope.Message)) > 400 || technical.MatchString(envelope.Message) {
+			t.Fatalf("frontend would discard the message for %s: %q", envelope.Code, envelope.Message)
+		}
+	}
+}
+
+// 未初始化时导出必须失败关闭，不能返回空产物让调用方误判。
+func TestLicenseHTTPArtifactRequiresInitializedDeployment(t *testing.T) {
+	h, _ := handlerFixture(t)
+	if w := invoke(h.Artifact, requestWith("", "platform:license:read")); w.Code != 409 || !strings.Contains(w.Body.String(), "LICENSE_NOT_INITIALIZED") {
+		t.Fatalf("uninitialized artifact export %d %s", w.Code, w.Body.String())
+	}
+}
+
+func hasHan(value string) bool {
+	for _, r := range value {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }

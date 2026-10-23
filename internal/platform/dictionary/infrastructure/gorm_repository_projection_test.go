@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// Guard both aggregate read paths against silently dropping the model fields.
+// 保护两条聚合读取路径，防止静默丢失模型字段。
 func TestDictionaryProjectionMapsDictionaryAndAggregateColumns(t *testing.T) {
 	parsed, err := schema.Parse(&dictionaryProjection{}, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {

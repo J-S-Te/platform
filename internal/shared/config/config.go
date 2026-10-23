@@ -28,9 +28,8 @@ type Config struct {
 	Worker              WorkerConfig
 	Audit               AuditConfig
 	SubsystemOnboarding SubsystemOnboardingAutomationConfig
-	// Keycloak is an optional authentication edge.  The platform remains the
-	// source of people, organisations and final permissions; this section only
-	// supplies the control-plane connection used to create Realm clients.
+	// Keycloak 是可选的认证边缘。平台始终是人员、组织与最终权限的唯一来源；
+	// 本节只提供用于创建 Realm client 的控制面连接。
 	Keycloak KeycloakConfig
 	// PortalApplicationCode 是外部客户门户应用编码（B4 解耦，默认 customer_portal）。
 	PortalApplicationCode string
@@ -38,21 +37,35 @@ type Config struct {
 	IAMImportFileGateway  FileGatewayClientConfig
 	CORSOrigins           []string
 	CommercialRuntime     CommercialRuntimeConfig
+	// Handover 配置离职交接的跨系统机器协议连接；未启用时不注入编排器，保持既有交接闸门。
+	Handover HandoverConfig
 }
 
+// HandoverConfig 描述离职交接的机器协议接入参数。
+type HandoverConfig struct {
+	Enabled      bool
+	Environment  string
+	MachineToken string
+	// SystemURLs 是"系统编码 → 内网基址"映射；只允许 http(s) 绝对地址且不得内嵌凭据。
+	SystemURLs map[string]string
+	Timeout    time.Duration
+}
+
+// CommercialRuntimeConfig 聚合商业授权运行时（license runtime）的接入要素：
+// 平台对外基址、平台 JWT 公钥路径与授权状态目录。
 type CommercialRuntimeConfig struct {
 	PlatformBaseURL       string
 	PlatformPublicKeyPath string
 	StateDirectory        string
 }
 
-// FileGatewayClientConfig is the platform API's least-privilege machine client used only for
-// server-authorized IAM CSV imports. The browser never receives these credentials.
+// FileGatewayClientConfig 是平台 API 的最小权限机器客户端，仅用于服务端授权的
+// IAM CSV 导入；这组凭据绝不下发给浏览器。
 type FileGatewayClientConfig struct {
 	BaseURL, TokenURL, ClientID, ClientSecret, Scope string
 }
 
-// HTTPConfig controls the API listener and public address.
+// HTTPConfig 控制 API 监听地址与对外公布的基地址。
 type HTTPConfig struct {
 	Addr           string
 	PublicBaseURL  string
@@ -63,7 +76,7 @@ type HTTPConfig struct {
 	MetricsAccessToken string
 }
 
-// MySQLConfig contains the connection inputs used to build a MySQL DSN.
+// MySQLConfig 聚合拼装 MySQL DSN 所需的连接要素。
 type MySQLConfig struct {
 	Host     string
 	Port     int
@@ -73,7 +86,7 @@ type MySQLConfig struct {
 	Params   string
 }
 
-// AuthConfig contains the shared authentication settings used by later IAM work.
+// AuthConfig 聚合后续 IAM 能力共用的认证设置。
 type AuthConfig struct {
 	PublicBaseURL          string
 	JWTIssuer              string
@@ -86,17 +99,15 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
-	// AllowLegacyPlatformAccessToken preserves the old platform access-token path
-	// used by /oauth2/authorization-context after a Keycloak cutover. It does not
-	// disable the authorization server's standard /oauth2/userinfo endpoint,
-	// which remains required by the Keycloak Broker.
+	// AllowLegacyPlatformAccessToken 在 Keycloak 切换后继续保留
+	// /oauth2/authorization-context 使用的旧平台访问令牌路径。它不关闭授权服务器
+	// 标准的 /oauth2/userinfo 端点——Keycloak Broker 仍依赖该端点。
 	AllowLegacyPlatformAccessToken bool
 	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
 	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
-	// KeycloakOIDC is the platform's browser-facing OIDC client. It is used by
-	// the normal platform login flow; broker verification is deliberately not
-	// part of this runtime path.
+	// KeycloakOIDC 是平台浏览器侧的 OIDC client，服务于平台正常登录流程；
+	// broker 校验有意不进入该运行时路径。
 	KeycloakOIDCEnabled      bool
 	KeycloakOIDCIssuer       string
 	KeycloakOIDCClientID     string
@@ -107,7 +118,7 @@ type AuthConfig struct {
 	AuthzContextCustomerRefEnabled bool
 }
 
-// IdentityConfig controls encryption of IAM-sensitive fields and protected identity flows.
+// IdentityConfig 控制 IAM 敏感字段加密与受保护的身份数据流。
 type IdentityConfig struct {
 	MobileEncryptionKey string
 	BootstrapToken      string
@@ -120,35 +131,33 @@ type IdentityConfig struct {
 	CustomerRefDigestKey     string
 }
 
-// LoggingConfig controls structured application logs.
+// LoggingConfig 控制结构化应用日志。
 type LoggingConfig struct {
 	Level     string
 	Format    string
 	Directory string
 }
 
-// WorkerConfig controls polling for MySQL-backed asynchronous jobs.
+// WorkerConfig 控制 MySQL 异步任务的轮询参数。
 type WorkerConfig struct {
 	ID               string
 	PollInterval     time.Duration
 	StaleLockTimeout time.Duration
 }
 
-// AuditConfig identifies the platform application and environment used for server-generated
-// lifecycle audit events. The referenced values must exist in application_registry and
-// application_environment.
+// AuditConfig 标识服务端生成生命周期审计事件时使用的平台应用与环境。
+// 引用的编码必须已存在于 application_registry 与 application_environment 表中。
 type AuditConfig struct {
 	ApplicationCode string
 	EnvironmentCode string
 }
 
-// KeycloakConfig separates the container-internal admin endpoint from the
-// browser-visible issuer.  Never expose AdminPassword through an HTTP response.
+// KeycloakConfig 区分容器内部管理端点与浏览器可见的 issuer。
+// AdminPassword 绝不能经 HTTP 响应返回。
 type KeycloakConfig struct {
 	Enabled bool
-	// RequireHTTPS gates only Keycloak cutover.  It deliberately defaults to
-	// false so existing HTTP deployments remain operable until their gateway
-	// and cookies have been migrated together.
+	// RequireHTTPS 只门禁 Keycloak 切换，有意默认 false：既有 HTTP 部署在网关与
+	// Cookie 一并迁移完成前必须保持可运行。
 	RequireHTTPS                     bool
 	AdminURL                         string
 	PublicURL                        string
@@ -165,12 +174,14 @@ type KeycloakConfig struct {
 	// BrokerHealthPollInterval 是 Keycloak Broker 健康巡检周期；0 或负数表示禁用周期巡检，
 	// 仅保留启动时的一次 reconcile。
 	BrokerHealthPollInterval time.Duration
-	// OutageLoginPolicy declares the only supported degraded-mode behavior.
-	// Platform browser sessions are issued and checked locally; Keycloak never
-	// becomes an implicit fallback authentication source.
+	// OutageLoginPolicy 声明唯一支持的降级行为：平台浏览器会话在本地签发与校验，
+	// Keycloak 故障时绝不 implicit 充当兜底认证源。
 	OutageLoginPolicy string
 }
 
+// KeycloakOutagePolicyContinueExistingPlatformSessions 是 OutageLoginPolicy 唯一合法取值：
+// Keycloak 故障期间已登录的平台浏览器会话继续本地校验，但绝不把 Keycloak 降级
+// 当作新的认证来源。
 const KeycloakOutagePolicyContinueExistingPlatformSessions = "continue_existing_platform_sessions"
 
 // SubsystemOnboardingAutomationConfig 控制一键接入的受信部署 Agent。API 只连接 Unix Socket，
@@ -196,10 +207,9 @@ type SubsystemOnboardingAutomationConfig struct {
 	// InitialAdminRolesFromManifest 控制子系统接入初始管理员角色是否由清单 initial_admin_roles
 	// 驱动；默认 false（仍走平台硬编码默认，保证既有行为不变），验证等价后开启。
 	InitialAdminRolesFromManifest bool
-	// DefaultIssuerAlias selects the authentication edge for new production
-	// subsystem onboarding when the caller does not explicitly choose one.
-	// Keep platform as the safe development default; production can select
-	// Keycloak without changing every subsystem manifest.
+	// DefaultIssuerAlias 为调用方未显式选择时的生产子系统接入指定默认认证边缘。
+	// 保留 platform 作为安全的开发默认值；生产环境可选择 keycloak，而无需逐个
+	// 修改子系统清单。
 	DefaultIssuerAlias string
 }
 
@@ -212,6 +222,15 @@ func Load() (Config, error) {
 	}
 
 	mysqlPort, err := integer("MYSQL_PORT", 3306)
+	if err != nil {
+		return Config{}, err
+	}
+
+	handoverEnabled, err := boolean("HANDOVER_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	handoverTimeout, err := duration("HANDOVER_TIMEOUT", 10*time.Second)
 	if err != nil {
 		return Config{}, err
 	}
@@ -381,6 +400,13 @@ func Load() (Config, error) {
 		},
 		CORSOrigins:           commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 		PortalApplicationCode: value("PLATFORM_PORTAL_APPLICATION_CODE", "customer_portal"),
+		Handover: HandoverConfig{
+			Enabled:      handoverEnabled,
+			Environment:  value("HANDOVER_ENVIRONMENT", "prod"),
+			MachineToken: value("HANDOVER_MACHINE_TOKEN", ""),
+			SystemURLs:   handoverSystemURLs(value("HANDOVER_SYSTEM_URLS", "")),
+			Timeout:      handoverTimeout,
+		},
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -388,6 +414,21 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// handoverSystemURLs 解析 HANDOVER_SYSTEM_URLS，例如 "contract=https://contract.internal,crm=https://crm.internal"。
+// 缺少 '=' 或编码为空的条目被忽略；地址合法性由 Validate 统一 fail-closed 检查。
+func handoverSystemURLs(raw string) map[string]string {
+	systems := map[string]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		code, target, found := strings.Cut(strings.TrimSpace(entry), "=")
+		code, target = strings.ToLower(strings.TrimSpace(code)), strings.TrimSpace(target)
+		if !found || code == "" || target == "" {
+			continue
+		}
+		systems[code] = target
+	}
+	return systems
 }
 
 // Validate 在创建网络监听和数据库连接前拒绝不安全配置。传输层（Public BaseURL 的 scheme）
@@ -399,6 +440,20 @@ func Load() (Config, error) {
 func (cfg Config) Validate() error {
 	if cfg.AppName == "" {
 		return fmt.Errorf("APP_NAME must not be empty")
+	}
+	if cfg.Handover.Enabled {
+		if strings.TrimSpace(cfg.Handover.MachineToken) == "" {
+			return fmt.Errorf("HANDOVER_MACHINE_TOKEN is required when HANDOVER_ENABLED=true")
+		}
+		if len(cfg.Handover.SystemURLs) == 0 {
+			return fmt.Errorf("HANDOVER_SYSTEM_URLS must list at least one subsystem when HANDOVER_ENABLED=true")
+		}
+		for system, target := range cfg.Handover.SystemURLs {
+			parsed, err := url.ParseRequestURI(target)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return fmt.Errorf("HANDOVER_SYSTEM_URLS entry %q must be an absolute http(s) URL without credentials, query or fragment", system)
+			}
+		}
 	}
 	if cfg.HTTP.Addr == "" {
 		return fmt.Errorf("APP_HTTP_ADDR must not be empty")
@@ -597,8 +652,8 @@ func value(key, fallback string) string {
 	return fallback
 }
 
-// valueOrDefault returns fallback when the variable is unset or intentionally blank.
-// It is used for optional settings whose safe default is derived from another setting.
+// valueOrDefault 在变量未设置或显式留空时返回 fallback；用于安全默认值
+// 需要派生自另一个配置项的可选设置。
 func valueOrDefault(key, fallback string) string {
 	value := value(key, "")
 	if value == "" {

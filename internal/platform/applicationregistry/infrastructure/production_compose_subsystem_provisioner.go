@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,15 @@ type ProductionComposeSubsystemProvisionerConfig struct {
 	// 数据库凭据校验，允许 Compose 在首次创建空数据库时使用占位密码完成接入。
 	// 生产环境必须保持 false，避免已有持久化数据库因密码未初始化而不可控。
 	AllowPlaceholderDatabaseCredentials bool
+	// ReleaseIntegrityCheck 是可选且受锁保护的写入前检查。
+	// 它接收部署根目录，必须返回错误以阻止任何运行时
+	// 配置、凭据、备份、迁移或服务变更。钩子为 nil 时
+	// 保留原有行为。
+	ReleaseIntegrityCheck func(context.Context, string, string) error
+	// RuntimeProjectionCheck 验证运行中的 Compose 项目不包含
+	// 已签名发布镜像集合之外的镜像。它在签名清单检查后
+	// 及部署后各执行一次；为 nil 时保留原有行为。
+	RuntimeProjectionCheck func(context.Context) error
 }
 
 // ProductionComposeSubsystemProvisioner 是按 application_code/environment 分派的生产
@@ -67,6 +77,8 @@ type productionComposeTargetConfig struct {
 	RuntimeBootstrapFiles               []productionSubsystemRuntimeFileManifest
 	RuntimeConsumers                    map[string][]string
 	AllowPlaceholderDatabaseCredentials bool
+	ReleaseIntegrityCheck               func(context.Context, string, string) error
+	RuntimeProjectionCheck              func(context.Context) error
 }
 
 type productionComposeTarget struct {
@@ -133,6 +145,7 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 		dockerBinary:   config.DockerBinary,
 	}
 	provisioner.capabilities.Enabled = config.Enabled
+	provisioner.capabilities.ReleaseIntegrity = releaseIntegrityCapability(config.ReleaseIntegrityCheck)
 	for _, profile := range profiles {
 		target := &productionComposeTarget{config: productionComposeTargetConfig{
 			DeployRoot: root, RuntimeEnvPath: config.RuntimeEnvPath, ReleaseEnvPath: config.ReleaseEnvPath,
@@ -141,6 +154,8 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 			Timeout: config.Timeout, Profile: profile, RuntimeBootstrapFiles: runtimeBootstrapFiles,
 			RuntimeConsumers:                    productionRuntimeConsumers(profiles),
 			AllowPlaceholderDatabaseCredentials: config.AllowPlaceholderDatabaseCredentials,
+			ReleaseIntegrityCheck:               config.ReleaseIntegrityCheck,
+			RuntimeProjectionCheck:              config.RuntimeProjectionCheck,
 		}, runner: runner}
 		key := productionSubsystemTargetKey(profile.Manifest.Application.Code, profile.Manifest.Application.Environment)
 		provisioner.targets[key] = target
@@ -148,9 +163,15 @@ func newProductionComposeSubsystemProvisioner(config ProductionComposeSubsystemP
 	return provisioner, nil
 }
 
-// DiscoverSubsystemCandidates reads only opt-in Docker labels.  It does not relax the reviewed
-// production deployment manifest: administrators can inspect candidates, while provisioning
-// remains restricted to approved targets until a generic runtime profile is introduced.
+func releaseIntegrityCapability(check func(context.Context, string, string) error) string {
+	if check == nil {
+		return ""
+	}
+	return "release-integrity-v1"
+}
+
+// DiscoverSubsystemCandidates 只读取主动声明（opt-in）的 Docker label。它不放松经过审核的
+// 生产部署清单：管理员可以检视候选，但在引入通用运行时清单之前，部署仍仅限已批准目标。
 func (provisioner *ProductionComposeSubsystemProvisioner) DiscoverSubsystemCandidates(ctx context.Context) ([]application.SubsystemDiscoveryCandidate, error) {
 	if provisioner == nil || !provisioner.enabled {
 		return nil, provisioningError("production subsystem deployment is disabled")
@@ -209,10 +230,9 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Capabilities() applica
 	return capabilities
 }
 
-// AvailableCapabilities returns only targets whose complete image set has already been prepared
-// into .release.env as immutable digests. The full Capabilities policy remains the authoritative
-// allow-list, while this narrower projection prevents an optional subsystem that was not shipped
-// in the current delivery from appearing as installable in the control plane.
+// AvailableCapabilities 只返回镜像集已完整准备进 .release.env（不可变 digest）的目标。
+// 完整的 Capabilities 策略仍是权威白名单；这一更窄的投影防止本次交付未携带的可选子系统
+// 在控制面里显示为可安装。
 func (provisioner *ProductionComposeSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
 	if provisioner == nil {
 		return application.SubsystemProvisioningCapabilities{}, provisioningError("production subsystem deployment is unavailable")
@@ -254,6 +274,8 @@ func (provisioner *ProductionComposeSubsystemProvisioner) target(applicationCode
 	return target, nil
 }
 
+// Preflight 先校验应用/环境是否在已批准目标白名单内，再转发给对应目标执行部署前置检查；
+// 白名单外或部署未启用的请求直接失败，不会触碰任何运行文件。
 func (provisioner *ProductionComposeSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
 	target, err := provisioner.target(input.ApplicationCode, input.Environment)
 	if err != nil {
@@ -262,6 +284,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Preflight(ctx context.
 	return target.Preflight(ctx, input)
 }
 
+// Provision 先校验目标白名单，再把接入请求转发给对应目标执行；白名单外的请求按不可用失败。
 func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	target, err := provisioner.target(input.ApplicationCode, input.Environment)
 	if err != nil {
@@ -270,6 +293,8 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Provision(ctx context.
 	return target.Provision(ctx, input)
 }
 
+// Update 先校验目标白名单，再把受控更新请求转发给对应目标执行；不允许请求把更新引向
+// 未审核的部署目标。
 func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	target, err := provisioner.target(input.ApplicationCode, input.Environment)
 	if err != nil {
@@ -278,6 +303,7 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Update(ctx context.Con
 	return target.Update(ctx, input)
 }
 
+// Teardown 先校验目标白名单，再把拆除请求转发给对应目标按租户边界执行清理。
 func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.Context, tenantID, applicationCode, environment string) error {
 	target, err := provisioner.target(applicationCode, environment)
 	if err != nil {
@@ -286,9 +312,8 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Teardown(ctx context.C
 	return target.Teardown(ctx, tenantID)
 }
 
-// DiscoverSubsystemServices reads service labels from the reviewed production target's Docker
-// project. The target allow-list remains authoritative; the request cannot select arbitrary Docker
-// objects or alter any server-side runtime file.
+// DiscoverSubsystemServices 从已审核生产目标的 Docker 项目读取服务 label。目标白名单保持
+// 权威：请求不能选择任意 Docker 对象，也不能改动任何服务端运行文件。
 func (provisioner *ProductionComposeSubsystemProvisioner) DiscoverSubsystemServices(ctx context.Context, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
 	target, err := provisioner.target(applicationCode, environment)
 	if err != nil {
@@ -353,6 +378,12 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.validateDeploymentFiles(true, true); err != nil {
 		return err
 	}
+	if err := target.checkReleaseIntegrity(operationContext, input.ReleaseDigest); err != nil {
+		return err
+	}
+	if err := target.checkRuntimeProjection(operationContext); err != nil {
+		return err
+	}
 	if err := target.writeRuntimeConfiguration(input); err != nil {
 		return err
 	}
@@ -362,7 +393,20 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.retireRuntimeLicenseContainers(operationContext, input); err != nil {
 		return err
 	}
-	return target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...)
+	if err := target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...); err != nil {
+		return err
+	}
+	return target.checkRuntimeProjection(operationContext)
+}
+
+func (target *productionComposeTarget) checkReleaseIntegrity(ctx context.Context, expected string) error {
+	if target.config.ReleaseIntegrityCheck == nil {
+		return nil
+	}
+	if err := target.config.ReleaseIntegrityCheck(ctx, target.config.DeployRoot, expected); err != nil {
+		return provisioningError("release integrity verification failed")
+	}
+	return nil
 }
 
 // Update 只重用已落盘的浏览器 OAuth 配置，不尝试从数据库恢复或隐式轮换它。重试/更新时
@@ -371,8 +415,8 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 // 控制面明确重新下发时覆盖，避免把浏览器密钥暴露给普通更新流程。
 func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if input.InitialRuntimeProvisioning {
-		// The trusted control plane supplied fresh, complete initial credentials;
-		// Provision performs full validation before creating any runtime file.
+		// 受信控制面已提供完整的一次性初始凭据；Provision 会在创建任何运行文件前完成
+		// 全量校验。
 		return target.Provision(ctx, input)
 	}
 	target.mutex.Lock()
@@ -399,6 +443,12 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.validateDeploymentFiles(false, true); err != nil {
 		return err
 	}
+	if err := target.checkReleaseIntegrity(operationContext, input.ReleaseDigest); err != nil {
+		return err
+	}
+	if err := target.checkRuntimeProjection(operationContext); err != nil {
+		return err
+	}
 	if err := target.writeRuntimeFixedValues(input); err != nil {
 		return err
 	}
@@ -411,7 +461,20 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.retireRuntimeLicenseContainers(operationContext, input); err != nil {
 		return err
 	}
-	return target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...)
+	if err := target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...); err != nil {
+		return err
+	}
+	return target.checkRuntimeProjection(operationContext)
+}
+
+func (target *productionComposeTarget) checkRuntimeProjection(ctx context.Context) error {
+	if target.config.RuntimeProjectionCheck == nil {
+		return nil
+	}
+	if err := target.config.RuntimeProjectionCheck(ctx); err != nil {
+		return provisioningError("runtime release projection verification failed")
+	}
+	return nil
 }
 
 // validateRuntimeIntegrationConfiguration 在 Update 写入安全配置后校验全部清单绑定。
@@ -460,17 +523,32 @@ func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID st
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
+	if target.config.Profile.Manifest.Application.Code == "project_management" {
+		if !slices.Contains(target.config.Profile.Manifest.Compose.TeardownServices, "project-sla-notifier") {
+			return provisioningError("project background is absent from controlled teardown services")
+		}
+		if err := target.preflightProjectBackground(); err != nil {
+			return err
+		}
+		if err := prepareProjectBackground(operationContext, target, true); err != nil {
+			return provisioningError("pause/drain project background before stopping services; operation retained")
+		}
+	}
 	arguments := []string{"stop"}
 	arguments = append(arguments, target.config.Profile.Manifest.Compose.TeardownServices...)
 	if err := target.runCompose(operationContext, arguments...); err != nil {
 		return provisioningError("stop production subsystem services")
 	}
+	if target.config.Profile.Manifest.Application.Code == "project_management" {
+		if err := markProjectBackgroundStopped(target); err != nil {
+			return provisioningError("persist controlled project background stop proof")
+		}
+	}
 	return nil
 }
 
 func (target *productionComposeTarget) deployLocked(ctx context.Context, redactValues ...string) error {
-	// Re-read after acquiring the deployment lock: a queued request must respect
-	// a subsystem block removed since its initial preflight.
+	// 取得部署锁后重读服务开关：排队等待的请求必须尊重预检之后被移除的子系统封锁。
 	if err := target.validateEnabledServices(ctx); err != nil {
 		return err
 	}
@@ -479,9 +557,8 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	compose := target.config.Profile.Manifest.Compose
 	compose.RuntimeServices = target.selectedRuntimeServices()
 	if len(compose.DependencyServices) > 0 {
-		// Dependency startup must be isolated from the shared platform services.
-		// Without --no-deps, Compose can recreate platform-api and the Agent,
-		// briefly turning every browser request into a 502 during a subsystem switch.
+		// 依赖启动必须与共享平台服务隔离。缺少 --no-deps 时 Compose 可能连带重建
+		// platform-api 和 Agent，在子系统切换期间让所有浏览器请求短暂 502。
 		arguments := []string{"up", "-d", "--wait", "--wait-timeout", "240", "--no-deps"}
 		arguments = append(arguments, compose.DependencyServices...)
 		target.stepLog("step=dependencies services=%v", compose.DependencyServices)
@@ -496,17 +573,24 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	if compose.Database != nil {
 		target.stepLog("step=backup database=%s", compose.Database.Name)
 		backupName := target.config.Profile.Manifest.Application.Code + "-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
-		if err := os.MkdirAll(filepath.Join(target.config.DeployRoot, "backups"), 0o750); err != nil {
+		backupRoot := filepath.Join(target.config.DeployRoot, "backups")
+		if err := os.MkdirAll(backupRoot, 0o750); err != nil {
 			return provisioningError("prepare production subsystem backup")
 		}
-		// 安全（SEC-F5a）：root 密码只能通过 MYSQL_PWD 环境变量传给 mysqldump。不能写成
-		// -p"$MYSQL_ROOT_PASSWORD"——shell 会把它展开成 -p<明文> 进入 mysqldump 的
-		// /proc/<pid>/cmdline，任何本机用户与进程审计日志都能读到。
+		if info, err := os.Lstat(backupRoot); err != nil || !info.IsDir() {
+			return provisioningError("production subsystem backup directory is unsafe")
+		}
+		// 整个数据库容器都备份：合同库还承载 Temporal，BI 库还承载 Metabase。
+		// SQL 和摘要一起原子发布；校验失败不留下看似完整的最终恢复点。
 		if err := target.runCompose(ctx, "exec", "-T", compose.Database.Service, "sh", "-c",
-			`set -eu; umask 077; MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump --single-transaction --routines --triggers -uroot "$2" > "/backups/$1"`,
-			"_", backupName, compose.Database.Name); err != nil {
+			productionDatabaseBackupCommand,
+			"_", backupName, "/backups"); err != nil {
 			return provisioningError("backup production subsystem database")
 		}
+		target.stepLog("step=backup-complete recovery_directory=%s.backup", backupName)
+	}
+	if err := target.prepareProjectBackground(ctx); err != nil {
+		return provisioningError("pause/drain project background before migration; operation retained")
 	}
 	for _, service := range compose.InitializationServices {
 		target.stepLog("step=initialize service=%s", service)
@@ -572,12 +656,34 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 			return provisioningError("synchronize production subsystem authorization catalog: " + detail)
 		}
 	}
+	if err := target.activateProjectBackground(ctx); err != nil {
+		return provisioningError("project background routing/execution remains pending; preserve candidate and operation")
+	}
 	return nil
 }
 
-// The immutable migration image embeds the same reviewed catalog used by the BI
-// API. Read it before starting business processes: a profile's static hash can
-// drift as permissions change, and post-start catalog publication is too late.
+// 每个完成的备份目录包含明文 SQL 转储与 SHA256SUMS。它是该 MySQL 容器的 InnoDB 快照，
+// 既不是跨服务原子备份，也不代表可以在写入仍在进行时执行恢复。凭据绝不进入 argv；
+// 命令失败或收到信号时 trap 清理残留文件。
+const productionDatabaseBackupCommand = `set -eu
+umask 077
+if test ! -d "$2" || test -L "$2"; then exit 1; fi
+completed="$2/$1.backup"
+if test -e "$completed" || test -L "$completed"; then exit 1; fi
+temporary=$(mktemp -d "$2/.$1.XXXXXX")
+cleanup() { if test -n "$temporary"; then rm -rf -- "$temporary"; fi; }
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
+MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump --single-transaction --routines --triggers --events --all-databases -uroot > "$temporary/$1"
+test -s "$temporary/$1"
+(cd "$temporary" && sha256sum "$1" > SHA256SUMS && sha256sum -c SHA256SUMS >/dev/null)
+if test -e "$completed" || test -L "$completed"; then exit 1; fi
+mv -- "$temporary" "$completed"
+temporary=""
+`
+
+// 不可变的迁移镜像内嵌了与 BI API 相同的审核目录。必须在业务进程启动前读取它：
+// 清单的静态哈希会随权限变化漂移，启动后再发布目录就太晚了。
 func (target *productionComposeTarget) refreshDataAnalysisCatalogHash(ctx context.Context) error {
 	manifest := target.config.Profile.Manifest
 	if manifest.Application.Code != "data_analysis" || manifest.Application.Environment != "prod" {
@@ -607,7 +713,7 @@ func (target *productionComposeTarget) refreshDataAnalysisCatalogHash(ctx contex
 	defer cancel()
 	output, err := target.runComposeOutput(stepContext, "run", "--rm", "--no-deps", "--entrypoint", "/app/authz-catalog", manifest.Compose.MigrateService, "print", "data_analysis")
 	if err != nil {
-		// Never return arbitrary command output, which may contain runtime secrets.
+		// 绝不原样返回命令输出——其中可能包含运行时秘密。
 		return provisioningError("read data-analysis migration image authorization catalog hash")
 	}
 	hash, err := parseDataAnalysisCatalogHash(output)
@@ -743,6 +849,11 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 		"--env-file", target.config.ReleaseEnvPath,
 		"--file", target.config.ComposeFile,
 	}
+	// 显示时区覆盖层位于既有共享 runtime 挂载内；受控更新不能丢失它。
+	timezonePath := filepath.Join(target.config.DeployRoot, "runtime", "compose.timezone.yaml")
+	if info, err := os.Lstat(timezonePath); err == nil && info.Mode().IsRegular() {
+		prefix = append(prefix, "--file", timezonePath)
+	}
 	runnerEnvironment := append([]string{}, os.Environ()...)
 	runnerEnvironment = append(runnerEnvironment, "BASIC_PLATFORM_RUNTIME_ENV_FILE="+target.config.RuntimeEnvPath)
 	if transportEnvironment, err := productionPublicTransportEnvironment(target.config.RuntimeEnvPath); err == nil {
@@ -754,12 +865,10 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 	return append(prefix, arguments...), runnerEnvironment
 }
 
-// YAML service membership is the only deployment enablement switch. Resolve
-// the reviewed Compose file with the already configured .env/.release.env and
-// print service names only; image/secret values are validated for this target
-// after membership is established. Do not add --no-interpolate or
-// --no-env-resolution here: older Compose releases either reject the latter or
-// validate bind-mount expressions containing literal ${...:-...} colons.
+// YAML 中的服务归属是唯一的部署启用开关。用已配置的 .env/.release.env 解析受审 Compose
+// 文件，只打印服务名；镜像/secret 值在服务归属确定后再针对本目标校验。不要在此加
+// --no-interpolate 或 --no-env-resolution：旧版 Compose 要么拒绝后者，要么无法校验含
+// 字面 ${...:-...} 冒号的 bind-mount 表达式。
 func (target *productionComposeTarget) validateEnabledServices(ctx context.Context) error {
 	checkContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -795,8 +904,7 @@ func (target *productionComposeTarget) selectedRuntimeFiles() []productionSubsys
 			if !target.enabledServices[file.WhenService] {
 				continue
 			}
-			// Cross-system credentials can only be delivered after that system's
-			// own onboarding; a missing dependency disables its integration worker.
+			// 跨系统凭据只能在该系统自身完成接入后交付；依赖缺失时停用对应的集成 Worker。
 			if err := validateProductionRequiredEnvironmentKeys(filepath.Join(target.config.DeployRoot, file.Path), file.RequiredExistingKeys, "dependency runtime incomplete"); err != nil {
 				continue
 			}
@@ -826,16 +934,14 @@ func (target *productionComposeTarget) selectedRuntimeServices() []string {
 // 应用身份绑定是非敏感控制面数据，每次更新都应对齐，防止手工创建的旧运行文件保留过期
 // application ID；浏览器 OAuth 密钥仅在 AuthenticationRuntimeUpdate 明确携带替换值时覆盖。
 func (target *productionComposeTarget) writeRuntimeFixedValues(input application.SubsystemProvisioningInput) error {
-	type runtimeEnvironmentUpdate struct {
-		path   string
-		values map[string]string
-	}
+
 	files := target.selectedRuntimeFiles()
 	managedAuthentication, err := validateProductionAuthenticationProvider(input, files)
 	if err != nil {
 		return err
 	}
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
+	staged := map[string]map[string]string{}
 	for _, runtimeFile := range files {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		currentContent, readErr := os.ReadFile(path)
@@ -907,6 +1013,39 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					values[key] = value
 				}
 			default:
+				if strings.HasPrefix(source, "related_service.") {
+					value, err := resolveProductionBinding(input, source)
+					if err != nil {
+						return err
+					}
+					values[key] = value
+					continue
+				}
+				if isP1ProductionServiceBinding(source) {
+					value, err := resolveProductionBinding(input, source)
+					if err != nil {
+						return err
+					}
+					if value == "" {
+						idSource := strings.TrimSuffix(source, ".client_secret") + ".client_id"
+						idValue, err := resolveProductionBinding(input, idSource)
+						if err != nil {
+							return err
+						}
+						matchedID := false
+						for existingKey, binding := range runtimeFile.Bindings {
+							if binding == idSource && currentValues[existingKey] == idValue {
+								matchedID = true
+							}
+						}
+						if !strings.HasSuffix(source, ".client_secret") || !usableProductionCredential(currentValues[key]) || !matchedID {
+							return provisioningError("new service credential delivery requires controlled RETRY")
+						}
+					} else {
+						values[key] = value
+					}
+					continue
+				}
 				if strings.HasPrefix(source, "service.") {
 					value, resolveErr := resolveProductionBinding(input, source)
 					if resolveErr == nil && strings.TrimSpace(value) != "" {
@@ -915,14 +1054,20 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 				}
 			}
 		}
+		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
+			return err
+		}
+		effective, err := readEnvironmentValues(path)
+		if err != nil {
+			return provisioningError("read runtime inheritance source")
+		}
+		for key, value := range values {
+			effective[key] = value
+		}
+		staged[runtimeFile.Path] = effective
 		updates = append(updates, runtimeEnvironmentUpdate{path: path, values: values})
 	}
-	for _, update := range updates {
-		if err := updateProductionSubsystemEnvironment(update.path, update.values); err != nil {
-			return provisioningError("write production subsystem runtime configuration")
-		}
-	}
-	return nil
+	return updateProductionRuntimeGroup(updates)
 }
 
 func isPublicRuntimeBinding(source string) bool {
@@ -936,15 +1081,13 @@ func isPublicRuntimeBinding(source string) bool {
 }
 
 func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
-	type runtimeEnvironmentUpdate struct {
-		path   string
-		values map[string]string
-	}
+
 	files := target.selectedRuntimeFiles()
 	if _, err := validateProductionAuthenticationProvider(input, files); err != nil {
 		return err
 	}
 	updates := make([]runtimeEnvironmentUpdate, 0, len(target.config.Profile.Manifest.Runtime.Files))
+	staged := map[string]map[string]string{}
 	for _, runtimeFile := range files {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
 		generatedValues, err := productionGeneratedEnvironmentValues(path, runtimeFile.GeneratedKeys)
@@ -963,19 +1106,61 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 			if resolveErr != nil {
 				return resolveErr
 			}
+			if isP1ProductionServiceBinding(source) && strings.HasSuffix(source, ".client_secret") && !usableProductionCredential(value) {
+				return provisioningError("new service credential delivery requires controlled RETRY")
+			}
 			values[key] = value
 		}
+		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
+			return err
+		}
+		effective, err := readEnvironmentValues(path)
+		if err != nil {
+			return provisioningError("read runtime inheritance source")
+		}
+		for key, value := range values {
+			effective[key] = value
+		}
+		staged[runtimeFile.Path] = effective
 		updates = append(updates, runtimeEnvironmentUpdate{path: path, values: values})
 	}
-	for _, update := range updates {
-		if err := updateProductionSubsystemEnvironment(update.path, update.values); err != nil {
-			return provisioningError("write production subsystem runtime configuration")
-		}
-	}
-	return nil
+	return updateProductionRuntimeGroup(updates)
 }
 
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
+	if strings.HasPrefix(source, "related_service.contract_management.settlement_contract_ingest.") {
+		if input.ApplicationCode != "settlement" {
+			return "", provisioningError("related service binding does not match receiver")
+		}
+		var found *application.RelatedSubsystemServiceClient
+		for index := range input.RelatedServiceClients {
+			r := &input.RelatedServiceClients[index]
+			if r.ApplicationCode == "contract_management" && r.Purpose == application.ServiceCredentialSettlementContractIngest {
+				if found != nil {
+					return "", provisioningError("related service binding is ambiguous")
+				}
+				found = r
+			}
+		}
+		if found == nil {
+			return "", provisioningError("contract integration dependency requires controlled source onboarding/update in the same tenant and environment")
+		}
+		c := found.Client
+		if found.Environment != input.Environment || c.TenantID != input.TenantID || c.ApplicationID != found.ApplicationID || c.EnvironmentID != found.EnvironmentID || c.ID == "" || c.ClientID == "" || c.Status != "ACTIVE" || c.ClientType != "service" || c.TokenAuthMethod != "client_secret_basic" || len(c.GrantTypes) != 1 || c.GrantTypes[0] != "client_credentials" || len(c.Scopes) != 1 || c.Scopes[0] != "settlement.contract.ingest" {
+			return "", provisioningError("related contract credential binding mismatch")
+		}
+		switch strings.TrimPrefix(source, "related_service.contract_management.settlement_contract_ingest.") {
+		case "client_id":
+			return c.ClientID, nil
+		case "oauth_client_id":
+			return c.ID, nil
+		case "application_id":
+			return found.ApplicationID, nil
+		case "environment_id":
+			return found.EnvironmentID, nil
+		}
+		return "", provisioningError("unsupported related credential field")
+	}
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
 	switch source {
 	case "oidc_backchannel_base_url":
@@ -1045,8 +1230,16 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 	parts := strings.Split(source, ".")
 	if len(parts) == 3 && parts[0] == "service" {
 		credential, ok := input.ServiceCredential(parts[1])
+		if isP1ProductionServiceBinding(source) {
+			credential, ok = input.RegisteredServiceCredential(parts[1])
+		}
 		if !ok {
 			return "", provisioningError("production subsystem service credential is incomplete")
+		}
+		if isP1ProductionServiceBinding(source) {
+			if err := validateP1ServiceCredential(input, parts[1], credential.OAuthClient); err != nil {
+				return "", err
+			}
 		}
 		switch parts[2] {
 		case "client_id":
@@ -1058,9 +1251,8 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 	return "", provisioningError("production subsystem runtime binding is unsupported")
 }
 
-// Only reviewed profiles declaring a managed backchannel participate in this
-// strict authentication batch. The provider comes from persisted control-plane
-// state, never from a browser URL or an issuer-path heuristic.
+// 只有声明了受管 backchannel 的受审清单才参与这轮严格的认证批次。身份提供方来自持久化的
+// 控制面状态，绝不来自浏览器 URL 或 issuer 路径启发式。
 func validateProductionAuthenticationProvider(input application.SubsystemProvisioningInput, files []productionSubsystemRuntimeFileManifest) (bool, error) {
 	for _, file := range files {
 		for _, source := range file.Bindings {
@@ -1125,6 +1317,12 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 		}
 	}
 	paths := []string{target.config.RuntimeEnvPath, target.config.ReleaseEnvPath, target.config.ComposeFile}
+	timezonePath := filepath.Join(root, "runtime", "compose.timezone.yaml")
+	if _, err := os.Lstat(timezonePath); err == nil {
+		paths = append(paths, timezonePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return provisioningError("timezone override is unavailable")
+	}
 	for _, path := range paths {
 		resolved, resolveErr := filepath.EvalSymlinks(path)
 		if resolveErr != nil || resolved != filepath.Clean(path) || !pathWithinRoot(root, resolved) {
@@ -1471,9 +1669,9 @@ func parseEnvironmentValues(content string) map[string]string {
 	return values
 }
 
-// productionPublicTransportEnvironment derives every public protocol-sensitive Compose value
-// from one switch. Existing deployments without PUBLIC_PLATFORM_HOST remain untouched, while a
-// managed deployment cannot accidentally mix HTTPS cookies with HTTP callbacks.
+// productionPublicTransportEnvironment 由单一开关推导全部对公开协议敏感的 Compose 值。
+// 没有 PUBLIC_PLATFORM_HOST 的既有部署保持原样；受管部署则不会意外把 HTTPS Cookie 与
+// HTTP 回调混用。
 func productionPublicTransportEnvironment(path string) ([]string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -1519,10 +1717,9 @@ func productionPublicTransportEnvironment(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Legacy IP-mode installations configured KEYCLOAK_HTTP_PORT before
-	// PUBLIC_SSO_HTTP_PORT became a persisted setting. The Agent must derive the
-	// same issuer as public-transport.sh or Docker Compose will start a subsystem
-	// with an issuer that cannot match Keycloak discovery metadata.
+	// 早期 IP 模式安装在 PUBLIC_SSO_HTTP_PORT 成为持久化配置之前使用 KEYCLOAK_HTTP_PORT。
+	// Agent 必须推导出与 public-transport.sh 相同的 issuer，否则 Compose 启动的子系统会带
+	// 一个与 Keycloak 发现元数据无法匹配的 issuer。
 	ssoFallbackPort := platformPort
 	if !enabled && strings.EqualFold(strings.TrimSpace(values["PUBLIC_ACCESS_MODE"]), "ip") {
 		keycloakPort, keycloakPortErr := parsePort(values["KEYCLOAK_HTTP_PORT"], 18090)
@@ -1579,7 +1776,7 @@ func (target *productionComposeTarget) validateProvisioningInput(input applicati
 	publicOrigin, publicURLValid := publicURLOrigin(input.PublicURL, app.PathPrefix)
 	expectedPublicURL := publicOrigin + app.PathPrefix + "/"
 	expectedRedirectURI := publicOrigin + app.PathPrefix + "/auth/callback"
-	if mustParseURL(issuer) == nil || strings.TrimSpace(input.ApplicationID) == "" || strings.TrimSpace(input.ClientID) == "" ||
+	if mustParseIssuerURL(issuer) == nil || strings.TrimSpace(input.ApplicationID) == "" || strings.TrimSpace(input.ClientID) == "" ||
 		strings.TrimSpace(input.ClientSecret) == "" || strings.TrimSpace(input.CatalogPublisherClientID) == "" ||
 		strings.TrimSpace(input.CatalogPublisherClientSecret) == "" || input.PathPrefix != app.PathPrefix ||
 		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL || !publicURLValid || input.PublicURL != expectedPublicURL || input.RedirectURI != expectedRedirectURI {
@@ -1609,7 +1806,7 @@ func (target *productionComposeTarget) validatePreflightInput(input application.
 	app := target.config.Profile.Manifest.Application
 	issuer := strings.TrimRight(strings.TrimSpace(input.Issuer), "/")
 	_, publicBaseValid := publicBaseOrigin(input.PublicBaseURL)
-	if mustParseURL(issuer) == nil || !target.matches(input.ApplicationCode, input.Environment) || input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum ||
+	if mustParseIssuerURL(issuer) == nil || !target.matches(input.ApplicationCode, input.Environment) || input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum ||
 		strings.ToLower(strings.TrimSpace(input.ClientType)) != app.ClientType ||
 		!publicBaseValid ||
 		strings.TrimRight(strings.TrimSpace(input.UpstreamURL), "/") != app.UpstreamURL ||
@@ -1683,6 +1880,23 @@ func validProductionReleaseImageKey(value string) bool {
 		return false
 	}
 	return true
+}
+
+// mustParseIssuerURL 校验 OIDC issuer。
+//
+// 与只允许 origin 的网关地址不同，issuer 允许携带路径：Keycloak 的正常形态是
+// https://<host>/realms/<realm>，而平台自身 issuer 是无路径的 https://<host>。
+// 用 mustParseURL 校验 issuer 会把带 realm 路径的正常首次接入判为非法；
+// 这里只拒绝凭据、查询串、片段和非 http(s) scheme。
+func mustParseIssuerURL(value string) *url.URL {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil
+	}
+	return parsed
 }
 
 func mustParseURL(value string) *url.URL {

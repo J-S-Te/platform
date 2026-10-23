@@ -9,8 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AccessLog records one structured event per completed HTTP request without logging credentials
-// or request bodies.
+// AccessLog 为每个完成的 HTTP 请求记录一条结构化日志；凭据与请求体绝不入日志，
+// 防止敏感信息经访问日志泄露。
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(context *gin.Context) {
 		startedAt := time.Now()

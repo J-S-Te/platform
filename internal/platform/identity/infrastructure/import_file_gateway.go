@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// EmployeeImportFileGateway stores the original CSV before any IAM mutation. Credentials stay in
-// the platform API process and are never returned to the browser.
+// EmployeeImportFileGateway 在任何 IAM 变更之前保存原始 CSV。凭据只留在平台 API 进程内，
+// 绝不回传浏览器。
 type EmployeeImportFileGateway struct {
 	baseURL, tokenURL, clientID, clientSecret, scope string
 	httpClient                                       *http.Client
@@ -26,6 +26,8 @@ type EmployeeImportFileGateway struct {
 	expiresAt                                        time.Time
 }
 
+// NewEmployeeImportFileGateway 构造文件网关客户端。BaseURL/tokenURL 必须是 HTTP(S) 且不携带
+// userinfo 的 URL，client credentials 必填；缺失或非法即拒绝，避免凭据流向非预期端点。
 func NewEmployeeImportFileGateway(baseURL, tokenURL, clientID, clientSecret, scope string, client *http.Client) (*EmployeeImportFileGateway, error) {
 	baseURL, tokenURL = strings.TrimRight(strings.TrimSpace(baseURL), "/"), strings.TrimSpace(tokenURL)
 	for _, raw := range []string{baseURL, tokenURL} {
@@ -43,6 +45,8 @@ func NewEmployeeImportFileGateway(baseURL, tokenURL, clientID, clientSecret, sco
 	return &EmployeeImportFileGateway{baseURL: baseURL, tokenURL: tokenURL, clientID: clientID, clientSecret: clientSecret, scope: strings.TrimSpace(scope), httpClient: client}, nil
 }
 
+// StoreCSV 把导入 CSV 原样存入文件网关并标记为 CONFIDENTIAL。内容非空且不超过 2 MiB、
+// 请求 ID 与租户必填；以 requestID 作幂等键，重试不会产生重复归档文件。
 func (gateway *EmployeeImportFileGateway) StoreCSV(ctx context.Context, requestID, tenantID, actorUserID string, content []byte) error {
 	if len(content) == 0 || len(content) > 2<<20 || strings.TrimSpace(requestID) == "" || strings.TrimSpace(tenantID) == "" {
 		return errors.New("invalid IAM import file")

@@ -10,8 +10,7 @@ import (
 	"strings"
 )
 
-// The index is derived exclusively from reviewed profiles. It intentionally
-// does not alter selectedRuntimeServices, license approval, or teardown scope.
+// 该索引仅由受审清单推导；它有意不改变 selectedRuntimeServices、许可批准或下线范围。
 func productionRuntimeConsumers(profiles []productionSubsystemProfile) map[string][]string {
 	index := make(map[string][]string)
 	for _, profile := range profiles {
@@ -42,8 +41,8 @@ func (target *productionComposeTarget) refreshRuntimeConsumers(ctx context.Conte
 		current[service] = true
 	}
 	candidates := make(map[string]bool)
-	// Refresh selected shared paths on retry as well, even if the file now has
-	// identical bytes: a prior failure may have left a process on the old secret.
+	// 重试时同样刷新已选共享路径，即使文件字节已相同：此前一次失败可能让某个进程
+	// 仍拿着旧秘密。
 	for _, file := range target.selectedRuntimeFiles() {
 		for _, service := range target.config.RuntimeConsumers[file.Path] {
 			if !current[service] && target.enabledServices[service] {
@@ -79,13 +78,13 @@ func (target *productionComposeTarget) refreshRuntimeConsumers(ctx context.Conte
 		}
 		ids := strings.Fields(string(listed))
 		if len(ids) == 0 {
-			continue // Never install or restart a stopped/unonboarded subsystem.
+			continue // 绝不安装或重启已停止或尚未接入的子系统。
 		}
 		if len(ids) != 1 || !runtimeRetirementContainerID.MatchString(ids[0]) {
 			return provisioningError("runtime consumer container ownership is ambiguous")
 		}
-		// Do not inspect Config.Env: it contains secrets. Only immutable identity,
-		// running state and Compose ownership labels are needed for the reload.
+		// 不要检查 Config.Env：其中含秘密。重载只需要不可变身份、运行状态与 Compose
+		// 归属 label。
 		format := `{{json .Id}} {{json .Image}} {{json .State.Running}} {{json .Config.Labels}}`
 		inspected, err := outputRunner.RunOutput(ctx, target.config.DeployRoot, nil, target.config.DockerBinary,
 			"container", "inspect", "--format", format, ids[0])
@@ -107,8 +106,8 @@ func (target *productionComposeTarget) refreshRuntimeConsumers(ctx context.Conte
 	if len(images) == 0 {
 		return nil
 	}
-	// Pin every cross-application consumer to its actual running image. This
-	// reload must never adopt a new release or modify license component coverage.
+	// 把每个跨应用消费者钉在其实际运行镜像上。该重载绝不能收编新发布版本，
+	// 也不能修改许可组件覆盖范围。
 	content, err := json.Marshal(map[string]any{"services": images})
 	if err != nil {
 		return provisioningError("runtime consumer refresh override failed")

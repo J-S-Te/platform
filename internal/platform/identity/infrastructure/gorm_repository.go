@@ -1,4 +1,4 @@
-// Package infrastructure provides GORM-backed identity repositories.
+// Package infrastructure 提供基于 GORM 的身份仓储。
 package infrastructure
 
 import (
@@ -17,13 +17,13 @@ import (
 
 const consoleApplicationCode = "platform"
 
-// GORMRepository persists identity credentials, organization data and browser-session state in the
-// migration-owned platform schema. It does not use GORM schema migration APIs.
+// GORMRepository 在迁移所管的平台 schema 中持久化身份凭据、组织数据与浏览器会话状态；
+// 它不使用 GORM 的 schema 迁移 API。
 type GORMRepository struct {
 	database *gorm.DB
 }
 
-// NewGORMRepository creates an identity repository using the application's shared GORM handle.
+// NewGORMRepository 使用应用共享的 GORM 句柄构造身份仓储；句柄为 nil 时返回错误。
 func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	if database == nil {
 		return nil, errors.New("identity GORM database must not be nil")
@@ -31,9 +31,8 @@ func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	return &GORMRepository{database: database}, nil
 }
 
-// FindLoginAccount returns a local account and password credential for a supplied username. It
-// deliberately does not filter account status because the application layer distinguishes an active
-// lock window from generic authentication failures without exposing other account state.
+// FindLoginAccount 按用户名返回本地账号与密码凭据。它有意不过滤账号状态：应用层需要
+// 区分“锁定窗口内”与“通用认证失败”，且不能借此暴露其他账号状态。
 func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error) {
 	var row loginAccountProjection
 	result := repository.database.WithContext(ctx).
@@ -58,9 +57,8 @@ func (repository *GORMRepository) FindLoginAccount(ctx context.Context, accountN
 	return toDomainLoginAccount(row), nil
 }
 
-// FindLoginAccountByIdentityID resolves the durable identity binding used by
-// OIDC login. It intentionally does not join password credentials: an OIDC
-// account may be credential-free while still being a valid platform account.
+// FindLoginAccountByIdentityID 解析 OIDC 登录使用的持久身份绑定。它有意不联接密码凭据：
+// OIDC 账号可以没有本地凭据而仍是有效的平台账号。
 func (repository *GORMRepository) FindLoginAccountByIdentityID(ctx context.Context, identityID string) (domain.LoginAccount, error) {
 	var row loginAccountProjection
 	result := repository.database.WithContext(ctx).
@@ -92,9 +90,12 @@ func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx conte
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		verifiedAt := now.UTC()
 		var credential passwordCredentialModel
+		// 必须锁定"刚刚被验证过的那条凭据"：只按账号锁定活动凭据时，管理员在密码校验完成
+		// 与会话创建之间重置密码，这里会锁定新凭据并顺利通过，旧密码的登录请求随即拿到会话。
 		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Select("id").
 			Where("account_id = ? AND status = ?", account.AccountID, domain.StatusActive).
+			Where("password_hash = ?", account.PasswordHash).
 			Where("expires_at IS NULL OR expires_at > ?", verifiedAt).
 			Limit(1).
 			Find(&credential)
@@ -136,15 +137,23 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 			Where("id = iam_account.tenant_id AND status = ?", domain.StatusActive)
 
 		var persistedAccount accountModel
-		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+		accountQuery := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Select("id").
 			Where("id = ? AND tenant_id = ? AND user_id = ? AND status = ?", account.AccountID, account.TenantID, account.UserID, domain.StatusActive).
 			Where("locked_until IS NULL OR locked_until <= ?", now).
 			Where("valid_until IS NULL OR valid_until > ?", now).
 			Where("EXISTS (?)", activeUser).
-			Where("EXISTS (?)", activeTenant).
-			Limit(1).
-			Find(&persistedAccount)
+			Where("EXISTS (?)", activeTenant)
+		if len(account.PasswordHash) > 0 {
+			// 会话必须绑定"刚刚验证过的密码"：校验完成到落库之间管理员重置密码时，
+			// 旧密码请求不能凭借已过期的验证结果建立新会话。OIDC 登录没有本地密码，
+			// 由 IdP 保证身份新鲜度，因此空哈希不追加该条件。
+			verifiedCredential := transaction.Model(&passwordCredentialModel{}).
+				Select("1").
+				Where("account_id = iam_account.id AND status = ? AND password_hash = ?", domain.StatusActive, account.PasswordHash)
+			accountQuery = accountQuery.Where("EXISTS (?)", verifiedCredential)
+		}
+		result := accountQuery.Limit(1).Find(&persistedAccount)
 		if result.Error != nil {
 			return fmt.Errorf("lock account for successful login: %w", result.Error)
 		}
@@ -264,9 +273,8 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		return domain.Principal{}, fmt.Errorf("touch authenticated session: %w", touch.Error)
 	}
 	if touch.RowsAffected == 0 {
-		// MySQL reports zero changed rows when concurrent browser requests write the same
-		// DATETIME(3) value. Re-check instead of treating that harmless no-op as a logout;
-		// the extra read still rejects a session revoked concurrently with this request.
+		// MySQL 在并发浏览器请求写入相同 DATETIME(3) 值时报零变更行。这里复核而不是把无害
+		// 的 no-op 当作登出；多出的读操作仍能拒绝与本请求并发被吊销的会话。
 		var activeSession sessionModel
 		check := repository.database.WithContext(ctx).
 			Select("id").
@@ -299,9 +307,8 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	}, nil
 }
 
-// RefreshSession keeps the immutable login-time expiry and only records current activity.
-// Returning the persisted deadline lets the caller issue a replacement cookie/JWT that can
-// never outlive the original login session.
+// RefreshSession 保持登录时确定的不可变到期时间，只记录当前活动。返回持久化的到期时间，
+// 让调用方签发的替换 Cookie/JWT 永远不会超出原始登录会话的生命周期。
 func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID string, refreshedAt time.Time) (time.Time, error) {
 	var session sessionModel
 	lookup := repository.database.WithContext(ctx).
@@ -327,9 +334,8 @@ func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID 
 	return session.ExpiresAt.UTC(), nil
 }
 
-// RecordSessionInteraction records a browser event that was explicitly initiated by the user.
-// Ordinary authenticated requests must not call this method: they only update last_seen_at in
-// FindPrincipalBySession so background polling cannot keep an idle session alive.
+// RecordSessionInteraction 只记录用户显式发起的浏览器事件。普通已认证请求不得调用本方法：
+// 它们只在 FindPrincipalBySession 中更新 last_seen_at，使后台轮询无法为空闲会话续命。
 func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error {
 	if idleTimeout <= 0 {
 		return application.ErrUnauthenticated
@@ -348,8 +354,8 @@ func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, 
 		return nil
 	}
 
-	// A concurrent activity ping may write the same DATETIME(3) value. Verify that the session
-	// remains usable before deciding whether a zero-row update is an actual expiry/revocation.
+	// 并发的活动 ping 可能写入相同的 DATETIME(3) 值。在把零行更新判定为真正过期/吊销之前，
+	// 先复核会话是否仍可用。
 	var activeSession sessionModel
 	check := repository.database.WithContext(ctx).
 		Select("id").
@@ -364,7 +370,7 @@ func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, 
 	return nil
 }
 
-// RevokeSession marks the active current session as revoked. The API never deletes session rows.
+// RevokeSession 把当前活跃会话标记为已吊销。API 从不删除会话行。
 func (repository *GORMRepository) RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time, reason string) error {
 	result := repository.database.WithContext(ctx).
 		Model(&sessionModel{}).
@@ -380,15 +386,13 @@ func (repository *GORMRepository) RevokeSession(ctx context.Context, sessionID s
 	return nil
 }
 
-// RevokeAccountSessions invalidates all active SSO sessions and every OIDC refresh-token family
-// derived from them for one tenant account. It is used both for explicit global logout and for
-// inactivity expiry discovered in any child system.
+// RevokeAccountSessions 使一个租户账号的全部活跃 SSO 会话及由其派生的每个 OIDC 刷新
+// 令牌族失效。它同时服务于显式全局登出，以及任一子系统发现的不活跃过期。
 func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		revokedAt = revokedAt.UTC()
-		// Lock every active browser session for this account. Authorization-code consumption locks
-		// the same session row before creating a refresh family, so logout and code exchange are
-		// serialized and neither can recreate an old user's grant after revocation.
+		// 锁定该账号的全部活跃浏览器会话。授权码消费在创建刷新令牌族之前锁定同一会话行，
+		// 因此登出与码交换被串行化，二者都不可能在吊销后重建旧用户的授权。
 		var lockedSessions []sessionModel
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Select("id").Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, domain.StatusActive).
@@ -401,8 +405,8 @@ func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, ten
 		if len(lockedSessions) == 0 {
 			return application.ErrUnauthenticated
 		}
-		// Revoke OAuth refresh-token families first while the session IDs are still available. This
-		// prevents an RP from refreshing an old user's ID/access token after global logout.
+		// 趁会话 ID 仍可用，先吊销 OAuth 刷新令牌族，防止 RP 在全局登出后为旧用户刷新
+		// ID/访问令牌。
 		var activeFamilyIDs []string
 		if err := transaction.Table("oauth_token_family").
 			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, "ACTIVE").
@@ -541,9 +545,9 @@ func (repository *GORMRepository) findPermissionCodes(ctx context.Context, tenan
 	return permissions, nil
 }
 
-// principalBindingSubjectFilter mirrors authorization checks when constructing the principal
-// consumed by route middleware. It keeps USER, ACCOUNT, ORG_UNIT and POSITION bindings in one
-// authorization model rather than making organization-derived roles display-only.
+// principalBindingSubjectFilter 在构造路由中间件消费的主体时，与授权检查保持同一模型。
+// 它把 USER、ACCOUNT、ORG_UNIT 和 POSITION 绑定放进同一授权模型，而不是让组织派生角色
+// 仅作展示。
 func principalBindingSubjectFilter(userID, accountID string, now time.Time) (string, []any) {
 	return `(
 		(binding.subject_type = ? AND binding.subject_id = ?)

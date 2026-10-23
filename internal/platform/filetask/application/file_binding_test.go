@@ -19,6 +19,20 @@ type bindingRepositoryStub struct {
 	recoveryCandidates []domain.StoredFile
 	validatingCount    int
 	readyCount         int
+	// 上传会话恢复用例：与待对账文件关联的 UPLOADING 会话及其收敛记录。
+	pendingSession      *domain.UploadSessionRecovery
+	sessionTransitions  []string
+	sessionFailureCodes []string
+	bindingErr          error
+	// 受控对账用例使用：待对账的遗留 DELETING 记录与写入调用记录。
+	stale       []domain.StoredFile
+	deleted     []string
+	released    []string
+	finalizeErr error
+}
+
+func (stub *bindingRepositoryStub) ListStaleDeleting(context.Context, string, time.Time, int) ([]domain.StoredFile, error) {
+	return stub.stale, nil
 }
 
 func (stub *bindingRepositoryStub) CreateWriting(context.Context, domain.File, domain.FileVersion) error {
@@ -44,16 +58,24 @@ func (stub *bindingRepositoryStub) MarkFailed(context.Context, string, string, t
 func (stub *bindingRepositoryStub) GetAvailable(context.Context, string, string) (domain.StoredFile, error) {
 	return stub.stored, nil
 }
-func (stub *bindingRepositoryStub) ClaimExpiredUnbound(context.Context, string, time.Time) (domain.StoredFile, bool, error) {
+func (stub *bindingRepositoryStub) ClaimExpiredUnbound(context.Context, string, time.Time, time.Time) (domain.StoredFile, bool, error) {
 	return domain.StoredFile{}, false, nil
 }
-func (stub *bindingRepositoryStub) MarkDeleted(context.Context, string, string, time.Time) error {
+func (stub *bindingRepositoryStub) MarkDeleted(_ context.Context, _ string, fileID string, _ uint64, _ time.Time) error {
+	if stub.finalizeErr != nil {
+		return stub.finalizeErr
+	}
+	stub.deleted = append(stub.deleted, fileID)
 	return nil
 }
-func (stub *bindingRepositoryStub) ReleaseCleanupClaim(context.Context, string, string, string, time.Time) error {
+func (stub *bindingRepositoryStub) ReleaseCleanupClaim(_ context.Context, _ string, fileID, _ string, _ uint64, _ time.Time) error {
+	stub.released = append(stub.released, fileID)
 	return nil
 }
 func (stub *bindingRepositoryStub) CreateBinding(_ context.Context, binding domain.FileBinding) (domain.FileBinding, error) {
+	if stub.bindingErr != nil {
+		return domain.FileBinding{}, stub.bindingErr
+	}
 	stub.created = binding
 	return binding, nil
 }
@@ -69,8 +91,25 @@ func (stub *bindingRepositoryStub) HasAnyActiveBinding(context.Context, string, 
 func (stub *bindingRepositoryStub) ListRecoveryCandidates(context.Context, string, time.Time, int) ([]domain.StoredFile, error) {
 	return stub.recoveryCandidates, nil
 }
+func (stub *bindingRepositoryStub) PendingUploadSession(context.Context, string, string) (domain.UploadSessionRecovery, bool, error) {
+	if stub.pendingSession == nil {
+		return domain.UploadSessionRecovery{}, false, nil
+	}
+	return *stub.pendingSession, true, nil
+}
+func (stub *bindingRepositoryStub) MarkUploadSession(_ context.Context, _, _ string, status, failureCode string, _ time.Time) error {
+	stub.sessionTransitions = append(stub.sessionTransitions, status)
+	stub.sessionFailureCodes = append(stub.sessionFailureCodes, failureCode)
+	return nil
+}
 
-type bindingStoreStub struct{ content []byte }
+type bindingStoreStub struct {
+	content []byte
+	// missingBytes 模拟"磁盘已删、数据库未推进"的遗留 DELETING。
+	missingBytes bool
+}
+
+func (stub bindingStoreStub) Exists(string) (bool, error) { return !stub.missingBytes, nil }
 
 func (bindingStoreStub) WriteAtomically(context.Context, string, io.Reader, int64) (uint64, []byte, error) {
 	return 0, nil, errors.New("not implemented")
@@ -161,4 +200,109 @@ func TestReconcileStalePendingUploadContinuesFromDurableFile(t *testing.T) {
 	if result.Recovered != 1 || repository.validatingCount != 1 || repository.readyCount != 1 {
 		t.Fatalf("pending file not recovered: result=%#v validating=%d ready=%d", result, repository.validatingCount, repository.readyCount)
 	}
+}
+
+// V2 上传把文件对象与上传会话分别落库。对账恢复只把文件推进到 READY 时，会话会永久停在
+// UPLOADING（客户端轮询不到结果），业务绑定也不会发生。以下用例锁定"文件与会话一起收敛"。
+
+func newRecoverableUploadFile() domain.StoredFile {
+	return domain.StoredFile{
+		File:    domain.File{ID: "file-1", TenantID: "tenant-1", Status: domain.FileStatusPendingUpload},
+		Version: domain.FileVersion{StorageRelativePath: "tenant/file.bin", MediaType: "text/plain", Status: domain.FileVersionStatusPendingUpload},
+	}
+}
+
+func newPendingUploadSession() *domain.UploadSessionRecovery {
+	return &domain.UploadSessionRecovery{
+		SessionID: "session-1", TenantID: "tenant-1", ApplicationID: "app-1", ActorUserID: "user-1",
+		FileID: "file-1", ResourceType: "REPORT", ResourceID: "report-1", BindingType: "ATTACHMENT",
+		DisplayName: "季度报告", OriginalName: "report.txt",
+	}
+}
+
+func TestReconcileStaleUploadFinalizesSessionAndBinding(t *testing.T) {
+	t.Parallel()
+	repository := &bindingRepositoryStub{
+		recoveryCandidates: []domain.StoredFile{newRecoverableUploadFile()},
+		pendingSession:     newPendingUploadSession(),
+	}
+	service := newBindingTestService(t, repository, []byte("recovered content"))
+
+	result, err := service.ReconcileStaleUploads(context.Background(), "tenant-1", time.Now().UTC().Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Recovered != 1 {
+		t.Fatalf("recovered = %d, want 1", result.Recovered)
+	}
+	if len(repository.sessionTransitions) != 1 || repository.sessionTransitions[0] != "READY" {
+		t.Fatalf("上传会话未被收敛到 READY：%#v", repository.sessionTransitions)
+	}
+	if repository.created.FileID != "file-1" || repository.created.ResourceID != "report-1" ||
+		repository.created.BindingType != "ATTACHMENT" || repository.created.CreatedBy != "user-1" {
+		t.Fatalf("恢复后未按会话元数据补做绑定：%#v", repository.created)
+	}
+}
+
+func TestReconcileStaleUploadMarksSessionFailedWhenBindingFails(t *testing.T) {
+	t.Parallel()
+	repository := &bindingRepositoryStub{
+		recoveryCandidates: []domain.StoredFile{newRecoverableUploadFile()},
+		pendingSession:     newPendingUploadSession(),
+		bindingErr:         errors.New("binding store unavailable"),
+	}
+	service := newBindingTestService(t, repository, []byte("recovered content"))
+
+	if _, err := service.ReconcileStaleUploads(context.Background(), "tenant-1", time.Now().UTC().Add(-time.Minute), 10); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.sessionTransitions) != 1 || repository.sessionTransitions[0] != "FAILED" ||
+		repository.sessionFailureCodes[0] != "BINDING_FAILED" {
+		t.Fatalf("绑定失败时应把会话置为 FAILED(BINDING_FAILED)：%#v %#v", repository.sessionTransitions, repository.sessionFailureCodes)
+	}
+}
+
+func TestReconcileStaleUploadMarksSessionFailedWhenStorageMissing(t *testing.T) {
+	t.Parallel()
+	repository := &bindingRepositoryStub{
+		recoveryCandidates: []domain.StoredFile{newRecoverableUploadFile()},
+		pendingSession:     newPendingUploadSession(),
+	}
+	service, err := NewFileService(repository, failingOpenStore{}, fixedIDGenerator{id: "binding-1"}, fixedClock{value: time.Now().UTC()}, DefaultUploadPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.ReconcileStaleUploads(context.Background(), "tenant-1", time.Now().UTC().Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("failed = %d, want 1", result.Failed)
+	}
+	if len(repository.sessionTransitions) != 1 || repository.sessionTransitions[0] != "FAILED" ||
+		repository.sessionFailureCodes[0] != "RECOVERY_FAILED" {
+		t.Fatalf("存储不可用时会话应置为 FAILED(RECOVERY_FAILED)：%#v %#v", repository.sessionTransitions, repository.sessionFailureCodes)
+	}
+}
+
+// 没有关联会话（V1 上传、会话已清理）时对账必须保持原有行为。
+func TestReconcileStaleUploadWithoutSessionKeepsPreviousBehaviour(t *testing.T) {
+	t.Parallel()
+	repository := &bindingRepositoryStub{recoveryCandidates: []domain.StoredFile{newRecoverableUploadFile()}}
+	service := newBindingTestService(t, repository, []byte("recovered content"))
+
+	result, err := service.ReconcileStaleUploads(context.Background(), "tenant-1", time.Now().UTC().Add(-time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Recovered != 1 || repository.readyCount != 1 || len(repository.sessionTransitions) != 0 {
+		t.Fatalf("无会话时不应触碰会话：result=%#v ready=%d transitions=%#v", result, repository.readyCount, repository.sessionTransitions)
+	}
+}
+
+type failingOpenStore struct{ bindingStoreStub }
+
+func (failingOpenStore) OpenVerified(string) (io.ReadSeekCloser, error) {
+	return nil, errors.New("object missing")
 }

@@ -5,20 +5,19 @@ import (
 	"strings"
 )
 
-// KeycloakCutoverTransport is the browser-facing part of a Keycloak runtime
-// switch.  It intentionally contains no Client credential: the deployment
-// Agent derives the same values while writing its protected runtime file.
+// KeycloakCutoverTransport 是 Keycloak 运行时切换中面向浏览器的传输参数。
+// 刻意不含客户端凭据：部署 Agent 写受保护运行时文件时会独立推导相同取值，
+// 浏览器面与凭据面分离可缩小凭据暴露面。
 type KeycloakCutoverTransport struct {
 	PublicURL    string
 	RedirectURI  string
 	CookieSecure bool
 }
 
-// ValidateKeycloakCutoverTransport keeps the three browser transport settings
-// together.  HTTP remains a supported deployment mode while RequireHTTPS is
-// false, which preserves current trusted-network deployments.  Enabling the
-// policy later makes HTTPS and a secure session cookie mandatory before an
-// environment can move to the Keycloak issuer.
+// ValidateKeycloakCutoverTransport 把三项浏览器传输参数作为整体校验，
+// 派生 PublicURL 与 /auth/callback 回调地址。RequireHTTPS 为 false 时仍允许
+// HTTP 部署，以兼容既有可信内网环境；策略一旦启用，HTTPS 与安全会话 Cookie
+// 即成为环境切到 Keycloak Issuer 的硬性前置条件。
 func ValidateKeycloakCutoverTransport(publicBaseURL, pathPrefix string, requireHTTPS bool) (KeycloakCutoverTransport, error) {
 	base := strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")
 	path := strings.TrimRight(strings.TrimSpace(pathPrefix), "/")

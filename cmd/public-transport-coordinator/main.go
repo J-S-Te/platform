@@ -1,6 +1,5 @@
-// Command public-transport-coordinator advances the durable transport Saga.
-// It emits only transport metadata; credentials, certificate content and
-// Keycloak Client secrets are never printed.
+// Command public-transport-coordinator 推进持久化的传输 Saga。只输出传输元数据；
+// 凭据、证书内容与 Keycloak Client secret 一律不打印。
 package main
 
 import (

@@ -28,8 +28,8 @@ func TestMySQLManagedRefreshRepairBoundaries(t *testing.T) {
 		t.Fatal("open dedicated test database")
 	}
 	defer db.Close()
-	// Bounded projection exercises the actual migration SQL and binary identifier
-	// comparisons. Full schema application is additionally tested by the installer.
+	// 有界投影验证真实迁移 SQL 及二进制标识符
+	// 比较；安装器另行测试完整 schema 应用。
 	for _, ddl := range []string{
 		`CREATE TABLE platform_application (id VARCHAR(26) COLLATE ascii_bin PRIMARY KEY,tenant_id VARCHAR(26) COLLATE ascii_bin,code VARCHAR(64) COLLATE ascii_bin)`,
 		`CREATE TABLE platform_application_environment (id VARCHAR(26) COLLATE ascii_bin PRIMARY KEY,tenant_id VARCHAR(26) COLLATE ascii_bin,application_id VARCHAR(26) COLLATE ascii_bin,environment VARCHAR(32) COLLATE ascii_bin,issuer_alias VARCHAR(128))`,

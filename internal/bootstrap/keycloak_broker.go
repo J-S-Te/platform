@@ -35,29 +35,27 @@ func keycloakBrokerEnvironment(appEnvironment string) string {
 	return "dev"
 }
 
+// EnsureKeycloakBroker 确保平台 Broker OAuth client 存在并返回其凭据。
 func (registrar keycloakBrokerRegistrar) EnsureKeycloakBroker(ctx context.Context, tenantID string) (string, string, error) {
 	return registrar.ensureBrokerClient(ctx, tenantID, "platform", platformBrokerClientID, "Keycloak Broker")
 }
 
-// RecoverKeycloakBroker rotates the platform Broker client through the OAuth
-// control plane when Keycloak has lost its non-retrievable client secret. The
-// plaintext exists only for the immediate IdP reconciliation and is never
-// persisted or logged.
+// RecoverKeycloakBroker 在 Keycloak 丢失不可取回的 client secret 时，经 OAuth
+// 控制面轮换平台 Broker client。明文仅用于紧随其后的 IdP 对账，
+// 绝不持久化或写日志。
 func (registrar keycloakBrokerRegistrar) RecoverKeycloakBroker(ctx context.Context, tenantID, operatorID string) (string, string, error) {
 	return registrar.recoverBrokerClient(ctx, tenantID, operatorID, platformBrokerClientID)
 }
 
-// RecoverCustomerPortalBroker repairs a missing portal Broker IdP using its
-// platform-side OAuth client credential, rotating only after classified drift.
+// RecoverCustomerPortalBroker 用其平台侧 OAuth client 凭据修复缺失的门户
+// Broker IdP，仅在定性漂移后才轮换。
 func (registrar keycloakBrokerRegistrar) RecoverCustomerPortalBroker(ctx context.Context, tenantID, operatorID string) (string, string, error) {
 	return registrar.recoverBrokerClient(ctx, tenantID, operatorID, customerPortalBrokerClientID)
 }
 
-// EnsureCustomerPortalBroker provisions a separate upstream OAuth client for
-// external customer authentication. It must not share the platform Broker
-// client: the OAuth authorization resolver derives claims from the client's
-// application, so sharing it would make either employees or customers fail
-// closed in the other application's login flow.
+// EnsureCustomerPortalBroker 为外部客户认证开通独立的上游 OAuth client。
+// 它绝不能与平台 Broker client 共用：OAuth 授权解析器依据 client 所属应用推导
+// claims，共用会让员工或客户在对方应用的登录流程中 fail-closed。
 func (registrar keycloakBrokerRegistrar) EnsureCustomerPortalBroker(ctx context.Context, tenantID string) (string, string, error) {
 	return registrar.ensureBrokerClient(ctx, tenantID, "customer_portal", customerPortalBrokerClientID, "Customer Portal Keycloak Broker")
 }
@@ -69,8 +67,8 @@ func (registrar keycloakBrokerRegistrar) recoverBrokerClient(ctx context.Context
 	}
 	secret, err := registrar.oauth.RotateOAuthClientSecret(ctx, application.OAuthClientSecretRotateInput{
 		TenantID: tenantID, OAuthClientID: existing.ID, OperatorID: operatorID,
-		// Keep the previous credential briefly valid until Keycloak receives the
-		// new one. This makes a transient Keycloak Admin failure non-disruptive.
+		// 让旧凭据短暂保持有效，直到 Keycloak 收到新凭据。
+		// 这使 Keycloak Admin 的瞬时失败不具破坏性。
 		OverlapSeconds: 300,
 	})
 	if err != nil {
@@ -117,15 +115,14 @@ func (registrar keycloakBrokerRegistrar) ensureBrokerClient(ctx context.Context,
 		brokerAlias = "basic-platform-customer"
 	}
 	redirect := registrar.publicURL + "/realms/" + registrar.realm + "/broker/" + brokerAlias + "/endpoint"
-	// Use direct client_id lookup instead of full tenant scan to avoid
-	// O(n) query on every worker restart when there are many OAuth clients.
+	// 用 client_id 直接查找代替全租户扫描，避免 OAuth client 很多时
+	// 每次 worker 重启都产生 O(n) 查询。
 	existing, lookupErr := registrar.oauth.GetOAuthClientByClientID(ctx, tenantID, clientID)
 	if lookupErr == nil {
-		// Only rotate if the client has no active credentials. Previously every
-		// worker restart would rotate, accumulating bcrypt hashes in Keycloak
-		// and invalidating the IdP config mid-flight. Now we trust that an
-		// existing active credential is still valid; the Broker reconciliation
-		// in EnsureBroker will detect and repair a broken IdP config.
+		// 仅当 client 没有活动凭据时才轮换。此前每次 worker 重启都会轮换，
+		// 在 Keycloak 中累积 bcrypt 哈希，并在中途使 IdP 配置失效。现在信任
+		// 既有活动凭据仍有效；EnsureBroker 中的 Broker 对账会检测并修复
+		// 损坏的 IdP 配置。
 		hasActiveCredential := false
 		for _, cred := range existing.Credentials {
 			if cred.Status == "ACTIVE" && cred.RevokedAt == nil {

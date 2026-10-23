@@ -1,5 +1,7 @@
 # Keycloak 全量接入 V2：执行基线
 
+> 源码校准：2026-10-13。这是按应用环境执行的认证切换手册，不代表当前服务器已完成全量切流。业务操作与故障恢复同时参照[平台手册](../../sharedDocs/10_操作手册/基础能力平台操作手册.md)。
+
 本文把《全量子系统 Keycloak 接入—详细实施方案 V2》落实为本仓库的执行约束。
 它不是一次性全量切换说明；所有认证切流都必须按应用、环境分别完成并可回滚。
 
@@ -73,11 +75,17 @@ POST /api/v1/keycloak-integration/projection-failures/{event_id}/replay
 
 重放必须同时满足：事件仍为 `FAILED`、操作者具有应用/环境/角色绑定更新权限、`confirmation` 与事件 ID 完全一致，并填写至少 6 个字符的处置原因。重放只做一次原子 `FAILED -> PENDING`，不会新建重复投影任务；Worker 成功后才重新放开用户投影门禁。
 
+实际原因长度校验为去除首尾空白后的 6～500 **字节**（Go `len`），不是中文字符计数。重放只重新排队，不表示投影已经成功；失败原因未修复时仍会再次进入 FAILED。
+
+## 源码执行链
+
+平台 Router 的认证接入权限 → `keycloak_integration_handler.go` / `keycloak_cutover_lifecycle_handler.go` → readiness 查询及 GORM cutover 状态持久化；投影恢复由 `keycloakauthorization/application/operations.go` 校验输入，`infrastructure/projection_operations_gorm.go` 原子重排队，`worker/worker.go` 领取并调用 Synchronizer。这些位于 [`internal/platform`](../internal/platform)，启动依赖由 [`bootstrap`](../internal/bootstrap)装配。不能仅因为看到 switch/replay 函数名就认定当前环境符合切换门禁。
+
 ## Keycloak 事件审计
 
-Worker 使用 Keycloak Admin API 的标准 `/events` 与 `/admin-events` 接口拉取登录、登出和管理员事件。读取使用短时间重叠窗口，基础平台按 `keycloak:<event_id>` 去重，因此重启和轮询重复不会造成重复审计。
+Worker 使用 Keycloak Admin API 的标准 `/events` 与 `/admin-events` 接口拉取登录、登出和管理员事件。采集使用迁移 `000124` 的 Realm 持久游标：首次回看 5 分钟，后续从已保存水位减 1 分钟重叠区开始，采集失败不推进水位；连续失败达到 3 次按 ERROR 告警（每分钟最多一次）。基础平台按 `keycloak:<event_id>` 去重，避免重启和重叠轮询重复。
 
-事件只会在 `iam_account.external_subject_id` 能映射到活动平台账号时写入相应租户的 `audit_event`；无法确定租户的事件会安全跳过，而不是错误归属。Keycloak Admin Service Account 必须被授予该 Realm 最小的 `view-events`、`view-realm` 权限；现有的 Client/用户管理权限保持不变。
+LOGIN/LOGOUT 及 LOGIN_ERROR 均可摄取，LOGIN_ERROR 映射为 FAILURE/HIGH。事件仅在具有非空 event ID，且 `iam_account.external_subject_id` 能映射到活动平台账号时写入相应租户的 `audit_event`；无法确定租户的事件会安全跳过，而不是错误归属。Keycloak Admin Service Account 必须被授予该 Realm 最小的 `view-events`、`view-realm` 权限；现有的 Client/用户管理权限保持不变。
 
 ## 切换顺序
 

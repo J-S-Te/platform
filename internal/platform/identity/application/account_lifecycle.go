@@ -14,6 +14,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 )
 
+// ErrExternalIdentityUnavailable 表示外部身份提供方的密码重置/登出暂时不可用；调用方应
+// 视为可重试失败，而不是账号不存在。
 var ErrExternalIdentityUnavailable = errors.New("external identity password reset unavailable")
 
 const (
@@ -26,16 +28,16 @@ const (
 
 var accountNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-// PasswordGenerator creates a one-time strong password for an administrator to deliver offline.
+// PasswordGenerator 为管理员生成一次性强密码，供线下交付。
 type PasswordGenerator interface {
 	Generate() (string, error)
 }
 
-// CryptoPasswordGenerator uses crypto/rand and always produces a value accepted by
-// validateStrongPassword. Generated passwords are never persisted or logged by this package.
+// CryptoPasswordGenerator 使用 crypto/rand，产出值始终通过 validateStrongPassword。
+// 本包绝不持久化或记录生成的密码。
 type CryptoPasswordGenerator struct{}
 
-// Generate creates a 24-character password with upper/lowercase letters, digits and symbols.
+// Generate 创建 24 位密码，包含大小写字母、数字与符号；字符集刻意排除了易混淆字符。
 func (CryptoPasswordGenerator) Generate() (string, error) {
 	const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
 	const lower = "abcdefghijkmnopqrstuvwxyz"
@@ -78,8 +80,8 @@ func randomCharacter(characters string) (byte, error) {
 	return characters[index.Int64()], nil
 }
 
-// LocalPasswordCredential contains the minimum secret-bearing data required to verify a current
-// password. It must remain inside the application and infrastructure layers.
+// LocalPasswordCredential 携带校验现有密码所需的最小含秘密数据；必须留在应用层与基础设施
+// 层内，不向传输层外泄。
 type LocalPasswordCredential struct {
 	TenantID         string
 	AccountID        string
@@ -90,7 +92,7 @@ type LocalPasswordCredential struct {
 	AlgorithmParams  []byte
 }
 
-// LocalAccountCreateInput is the public use-case input for a normal local human account.
+// LocalAccountCreateInput 是普通本地人类账号的公共用例输入。
 type LocalAccountCreateInput struct {
 	TenantID        string
 	OperatorID      string
@@ -100,7 +102,7 @@ type LocalAccountCreateInput struct {
 	ValidUntil      *time.Time
 }
 
-// PasswordInitializeInput initializes a missing local password credential exactly once.
+// PasswordInitializeInput 为缺失的本地密码凭据做一次性初始化；已有凭据时失败。
 type PasswordInitializeInput struct {
 	TenantID   string
 	OperatorID string
@@ -109,8 +111,7 @@ type PasswordInitializeInput struct {
 	Version    uint64
 }
 
-// PasswordResetInput requests a server-generated password that is returned only to the
-// administrator's current HTTP response for offline delivery.
+// PasswordResetInput 请求服务端生成密码，明文只在管理员当前 HTTP 响应中返回、供线下交付。
 type PasswordResetInput struct {
 	TenantID   string
 	OperatorID string
@@ -118,7 +119,7 @@ type PasswordResetInput struct {
 	Version    uint64
 }
 
-// PasswordChangeInput changes the authenticated account's own local password.
+// PasswordChangeInput 变更已认证账号自身的本地密码。
 type PasswordChangeInput struct {
 	TenantID        string
 	AccountID       string
@@ -127,8 +128,8 @@ type PasswordChangeInput struct {
 	NewPassword     string
 }
 
-// LocalAccountCreateWrite is a secret-safe persistence command. It deliberately holds only a
-// password digest and its verification metadata, never a plaintext password.
+// LocalAccountCreateWrite 是不含秘密的持久化命令；有意只携带密码摘要与校验元数据，
+// 绝不携带明文密码。
 type LocalAccountCreateWrite struct {
 	AccountID       string
 	CredentialID    string
@@ -142,7 +143,7 @@ type LocalAccountCreateWrite struct {
 	ValidUntil      *time.Time
 }
 
-// PasswordWrite updates a local credential and revokes active browser sessions atomically.
+// PasswordWrite 原子更新本地凭据并吊销活跃浏览器会话。
 type PasswordWrite struct {
 	CredentialID    string
 	TenantID        string
@@ -156,16 +157,21 @@ type PasswordWrite struct {
 	RevokeReason    string
 }
 
-// AccountLifecycleRepository owns the transaction boundaries for local-account and credential
-// mutations. Implementations must not store or log plaintext passwords.
+// AccountLifecycleRepository 持有本地账号与凭据变更的事务边界。实现不得存储或记录
+// 明文密码。
 type AccountIdentity struct{ AuthSource, ExternalSubjectID string }
+
+// ExternalPasswordResetter 在外部身份提供方侧重置密码并登出该身份的全部会话。
 type ExternalPasswordResetter interface {
 	ResetPasswordAndLogout(context.Context, string, string) error
 }
+
+// AccountIdentityRepository 查询账号的认证来源与外部主体标识。
 type AccountIdentityRepository interface {
 	FindAccountIdentity(context.Context, string, string) (AccountIdentity, error)
 }
 
+// AccountLifecycleRepository 定义本地账号与密码生命周期所需的持久化操作。
 type AccountLifecycleRepository interface {
 	CreateLocalAccount(context.Context, LocalAccountCreateWrite) (domain.Account, error)
 	InitializePassword(context.Context, PasswordWrite) (domain.Account, error)
@@ -174,14 +180,14 @@ type AccountLifecycleRepository interface {
 	ChangeOwnPassword(context.Context, PasswordWrite) error
 }
 
-// PasswordResetResult contains the one-time plaintext generated for an administrator. Callers
-// must render it only in the immediate response and never persist, log or audit it.
+// PasswordResetResult 携带为管理员生成的一次性明文密码。调用方只能在紧随的响应中渲染，
+// 绝不能持久化、记录或写入审计。
 type PasswordResetResult struct {
 	AccountID         string
 	TemporaryPassword string
 }
 
-// AccountLifecycleService implements normal local account provisioning and password lifecycle.
+// AccountLifecycleService 实现常规本地账号开通与密码生命周期。
 type AccountLifecycleService struct {
 	repository        AccountLifecycleRepository
 	hasher            PasswordHasher
@@ -192,7 +198,8 @@ type AccountLifecycleService struct {
 	externalResetter  ExternalPasswordResetter
 }
 
-// NewAccountLifecycleService constructs the account lifecycle service.
+// NewAccountLifecycleService 构造账号生命周期服务；任一必需依赖为 nil 或外部重置器多于
+// 一个时返回错误。
 func NewAccountLifecycleService(repository AccountLifecycleRepository, hasher PasswordHasher, verifier PasswordVerifier, passwordGenerator PasswordGenerator, ids IDGenerator, clock Clock, resetters ...ExternalPasswordResetter) (*AccountLifecycleService, error) {
 	if repository == nil || hasher == nil || verifier == nil || passwordGenerator == nil || ids == nil || clock == nil {
 		return nil, errors.New("account lifecycle service dependencies must not be nil")
@@ -207,7 +214,7 @@ func NewAccountLifecycleService(repository AccountLifecycleRepository, hasher Pa
 	return &AccountLifecycleService{repository: repository, hasher: hasher, verifier: verifier, passwordGenerator: passwordGenerator, ids: ids, clock: clock, externalResetter: resetter}, nil
 }
 
-// CreateLocalAccount creates an active HUMAN/LOCAL account and an Argon2id credential atomically.
+// CreateLocalAccount 原子创建 ACTIVE 的 HUMAN/LOCAL 账号与 Argon2id 凭据。
 func (service *AccountLifecycleService) CreateLocalAccount(ctx context.Context, input LocalAccountCreateInput) (domain.Account, error) {
 	if err := validateLocalAccountCreateInput(input); err != nil {
 		return domain.Account{}, err
@@ -233,7 +240,7 @@ func (service *AccountLifecycleService) CreateLocalAccount(ctx context.Context, 
 	})
 }
 
-// InitializePassword sets a strong local password only when no credential exists for the account.
+// InitializePassword 仅在该账号尚无凭据时设置强本地密码。
 func (service *AccountLifecycleService) InitializePassword(ctx context.Context, input PasswordInitializeInput) (domain.Account, error) {
 	if err := validatePasswordInitializeInput(input); err != nil {
 		return domain.Account{}, err
@@ -377,8 +384,8 @@ func validAccountName(value string) bool {
 	return len(value) >= accountNameMinLength && len(value) <= accountNameMaxLength && accountNamePattern.MatchString(value)
 }
 
-// validateStrongPassword enforces the shared account-password policy: 8–128 runes, no Unicode
-// whitespace, and at least one uppercase letter, lowercase letter, digit and symbol.
+// validateStrongPassword 执行共享的账号密码策略：8–128 个字符、不含 Unicode 空白，且至少
+// 各含一个大写字母、小写字母、数字和符号。
 func validateStrongPassword(password string) error {
 	length := len([]rune(password))
 	if length < passwordMinRunes || length > passwordMaxRunes {

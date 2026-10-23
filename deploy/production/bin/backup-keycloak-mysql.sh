@@ -1,14 +1,48 @@
 #!/usr/bin/env bash
-# Online logical backup for the production Keycloak MySQL database.
-# It deliberately never stops containers, deletes a backup by default, or reads
-# secrets into the host shell. Run from cron/systemd with the deploy user's access
-# to Docker.
+# 生产 Keycloak MySQL 数据库的在线逻辑备份。刻意不停止容器、不默认删除备份，也不将密钥读取到宿主机 Shell。
+# 由具备 Docker 访问权限的部署用户通过 cron 或 systemd 运行。
 set -Eeuo pipefail
 umask 077
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 deploy_dir="$(CDPATH= cd -- "$script_dir/.." && pwd)"
 cd "$deploy_dir"
+
+extract_binlog_position() {
+  local dump="$1" line source_file source_pos
+  line="$(gzip -dc -- "$dump" 2>/dev/null | head -n 40 | grep -m1 '^-- CHANGE REPLICATION SOURCE TO ' || true)"
+  [[ -n "$line" ]] || return 1
+  source_file="$(printf '%s\n' "$line" | grep -o "SOURCE_LOG_FILE='[^']*'" | cut -d"'" -f2)"
+  source_pos="$(printf '%s\n' "$line" | grep -o 'SOURCE_LOG_POS=[0-9][0-9]*' | cut -d= -f2)"
+  [[ -n "$source_file" && -n "$source_pos" ]] || return 1
+  printf '%s\t%s\n' "$source_file" "$source_pos"
+}
+
+write_binlog_position() {
+  local log_bin="$1" dump="$2" destination="$3" position source_file source_pos
+  printf 'FORMAT=1\nCAPTURED_AT=%s\nLOG_BIN=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$log_bin" >"$destination"
+  if [[ "$log_bin" == 1 ]]; then
+    position="$(extract_binlog_position "$dump")" || {
+      rm -f -- "$destination"
+      return 1
+    }
+    source_file="${position%%$'\t'*}"
+    source_pos="${position#*$'\t'}"
+    printf 'SOURCE_LOG_FILE=%s\nSOURCE_LOG_POS=%s\n' "$source_file" "$source_pos" >>"$destination"
+  fi
+  chmod 0600 "$destination"
+}
+
+write_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$file" > "$file.sha256"
+  else
+    shasum -a 256 "$file" > "$file.sha256"
+  fi
+  chmod 600 "$file.sha256"
+}
 
 backup_dir="${KEYCLOAK_BACKUP_DIR:-$deploy_dir/backups/keycloak}"
 metrics_file="${KEYCLOAK_BACKUP_PROM_FILE:-$deploy_dir/monitoring/textfile/keycloak_backup.prom}"
@@ -54,37 +88,52 @@ compose_args+=(-f docker-compose.yml)
   mysqladmin ping -h 127.0.0.1 -uroot --silent
 '
 
+log_bin="$("${compose_args[@]}" exec -T keycloak-db sh -ec '
+  test -n "${MYSQL_ROOT_PASSWORD:-}"
+  exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -Nse "SELECT @@log_bin"
+')" || { printf '%s\n' 'cannot determine Keycloak MySQL binlog state' >&2; exit 1; }
+log_bin="${log_bin//[[:space:]]/}"
+case "$log_bin" in
+  0|1) ;;
+  *) printf 'unexpected Keycloak MySQL binlog state: %s\n' "$log_bin" >&2; exit 1 ;;
+esac
+
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 final_file="$backup_dir/keycloak-$timestamp.sql.gz"
 temporary_file="$final_file.partial"
-cleanup() { rm -f -- "$temporary_file"; }
+position_file="$final_file.binlog-position"
+cleanup() { rm -f -- "$temporary_file" "$position_file" "$position_file.sha256"; }
 trap cleanup EXIT
 
-# MYSQL_ROOT_PASSWORD and MYSQL_DATABASE are resolved inside the database
-# container. This avoids exposing a database password in cron, process lists,
-# or a host-side environment variable.
+dump_args=(--single-transaction --routines --events --triggers --add-drop-table)
+if [[ "$log_bin" == 1 ]]; then
+  dump_args=(--source-data=2 "${dump_args[@]}")
+fi
+
+# MYSQL_ROOT_PASSWORD 和 MYSQL_DATABASE 在数据库容器内解析，避免密码暴露于 cron、进程列表或宿主机环境变量。
 "${compose_args[@]}" exec -T keycloak-db sh -ec '
   test -n "${MYSQL_DATABASE:-}" && test -n "${MYSQL_ROOT_PASSWORD:-}"
-  exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump \
-    --single-transaction --routines --events --triggers --add-drop-table \
-    -uroot "$MYSQL_DATABASE"
-' | gzip -c > "$temporary_file"
+  exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump "$@" -uroot "$MYSQL_DATABASE"
+' _ "${dump_args[@]}" | gzip -c > "$temporary_file"
 
 gzip -t "$temporary_file"
 [[ -s "$temporary_file" ]] || { printf '%s\n' 'backup output is empty' >&2; exit 1; }
+write_binlog_position "$log_bin" "$temporary_file" "$position_file" || {
+  printf '%s\n' 'binlog position is missing from the Keycloak dump' >&2
+  exit 1
+}
 mv -- "$temporary_file" "$final_file"
 
-if command -v sha256sum >/dev/null; then
-  sha256sum "$final_file" > "$final_file.sha256"
-else
-  shasum -a 256 "$final_file" > "$final_file.sha256"
-fi
+write_sha256 "$final_file"
+write_sha256 "$position_file"
 
-# Retention is opt-in. A positive value only removes completed backup pairs
-# older than that many whole days, never the current file or partial files.
+# 保留期清理需显式启用；正值仅删除早于指定完整天数的已完成备份对，绝不删除当前或部分文件。
 if (( retention_days > 0 )); then
-  find "$backup_dir" -maxdepth 1 -type f \( -name 'keycloak-*.sql.gz' -o -name 'keycloak-*.sql.gz.sha256' \) \
-    -mtime "+$retention_days" -print -delete
+  find "$backup_dir" -maxdepth 1 -type f \( \
+    -name 'keycloak-*.sql.gz' -o -name 'keycloak-*.sql.gz.sha256' \
+    -o -name 'keycloak-*.sql.gz.binlog-position' \
+    -o -name 'keycloak-*.sql.gz.binlog-position.sha256' \
+  \) -mtime "+$retention_days" -print -delete
 fi
 
 metric_tmp="$metrics_file.tmp.$$"

@@ -13,15 +13,13 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// SubsystemOnboardingGORMRepository coordinates the multi-table onboarding transaction and the
-// active portal catalog query.
+// SubsystemOnboardingGORMRepository 编排接入涉及的多表事务以及门户目录查询。
 type SubsystemOnboardingGORMRepository struct {
 	database *gorm.DB
 }
 
-// ListRegisteredApplicationCodes intentionally reads the application registry rather than the
-// permission-filtered portal projection. An ACTIVE application has already completed directory
-// adoption and must not reappear in the first-time discovery queue, regardless of environment.
+// ListRegisteredApplicationCodes 有意读取应用登记表而非权限过滤后的门户投影。ACTIVE 应用
+// 已完成目录收编，无论环境如何都不得再出现在首次发现队列中。
 func (repository *SubsystemOnboardingGORMRepository) ListRegisteredApplicationCodes(ctx context.Context, tenantID string) ([]string, error) {
 	var codes []string
 	err := repository.database.WithContext(ctx).Table("platform_application").
@@ -32,6 +30,8 @@ func (repository *SubsystemOnboardingGORMRepository) ListRegisteredApplicationCo
 	return codes, err
 }
 
+// ResolveApplicationEnvironment 把租户/应用编码/环境名解析为内部 ID。应用与环境必须同时
+// ACTIVE，任何一环未命中统一返回 application.ErrNotFound，不泄露具体缺失层级。
 func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironment(ctx context.Context, tenantID, applicationCode, environment string) (string, string, error) {
 	var row struct {
 		ApplicationID string `gorm:"column:application_id"`
@@ -71,10 +71,8 @@ func (repository *SubsystemOnboardingGORMRepository) ResolveApplicationEnvironme
 	return *row.BaseURL, *row.PathPrefix, nil
 }
 
-// ResolveEnvironmentIssuerAlias reads the persisted provider for the exact
-// tenant/application/environment tuple. The cutover gate must distinguish a
-// first platform -> Keycloak switch from an ordinary update of an environment
-// that is already running on Keycloak.
+// ResolveEnvironmentIssuerAlias 读取该租户/应用/环境三元组持久化的身份提供方。切换门禁
+// 必须据此区分“首次从平台切到 Keycloak”与“对已运行在 Keycloak 上的环境做普通更新”。
 func (repository *SubsystemOnboardingGORMRepository) ResolveEnvironmentIssuerAlias(ctx context.Context, tenantID, applicationCode, environment string) (string, error) {
 	var row struct {
 		IssuerAlias *string `gorm:"column:issuer_alias"`
@@ -138,8 +136,11 @@ type subsystemServiceInstanceModel struct {
 	UpdatedAt       time.Time  `gorm:"column:updated_at"`
 }
 
+// TableName 指定 GORM 行映射的服务实例表名。
 func (subsystemServiceInstanceModel) TableName() string { return "subsystem_service_instance" }
 
+// UpsertSubsystemServiceInstance 以租户/环境/服务名/角色为键写入或刷新服务实例快照，
+// 在事务中先查后写，避免并发上报产生重复行。
 func (repository *SubsystemOnboardingGORMRepository) UpsertSubsystemServiceInstance(ctx context.Context, value application.SubsystemServiceInstance) error {
 	now := value.UpdatedAt
 	if now.IsZero() {
@@ -167,6 +168,8 @@ func (repository *SubsystemOnboardingGORMRepository) UpsertSubsystemServiceInsta
 	})
 }
 
+// ListSubsystemServiceInstances 按租户边界列出服务实例快照，应用/环境过滤为可选条件，
+// 结果按应用、环境、服务名、角色稳定排序。
 func (repository *SubsystemOnboardingGORMRepository) ListSubsystemServiceInstances(ctx context.Context, tenantID, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
 	query := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID)
 	if applicationCode != "" {
@@ -186,6 +189,8 @@ func (repository *SubsystemOnboardingGORMRepository) ListSubsystemServiceInstanc
 	return result, nil
 }
 
+// MarkUnavailableSubsystemServiceInstances 把心跳早于截止时间的实例批量标记为不可用；
+// last_seen_at 为空的行同样视为失联，防止永不心跳的记录长期占据可用状态。
 func (repository *SubsystemOnboardingGORMRepository) MarkUnavailableSubsystemServiceInstances(ctx context.Context, before, now time.Time) error {
 	return repository.database.WithContext(ctx).Model(&subsystemServiceInstanceModel{}).
 		Where("last_seen_at IS NULL OR last_seen_at < ?", before).
@@ -196,9 +201,10 @@ func subsystemServiceInstanceFromModel(row subsystemServiceInstanceModel) applic
 	return application.SubsystemServiceInstance{TenantID: row.TenantID, ApplicationID: row.ApplicationID, EnvironmentID: row.EnvironmentID, ApplicationCode: row.ApplicationCode, Environment: row.Environment, ServiceName: row.ServiceName, ServiceRole: row.ServiceRole, Protocol: row.Protocol, InternalHost: row.InternalHost, InternalPort: row.InternalPort, PathPrefix: row.PathPrefix, HealthEndpoint: row.HealthEndpoint, Version: row.Version, Status: row.Status, LastSeenAt: row.LastSeenAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 
+// TableName 指定 GORM 行映射的部署状态表名。
 func (subsystemDeploymentStateModel) TableName() string { return "subsystem_deployment_state" }
 
-// NewSubsystemOnboardingGORMRepository constructs the onboarding repository.
+// NewSubsystemOnboardingGORMRepository 构造接入仓储；数据库句柄为 nil 时返回错误。
 func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardingGORMRepository, error) {
 	if database == nil {
 		return nil, errors.New("subsystem onboarding database must not be nil")
@@ -206,9 +212,8 @@ func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardi
 	return &SubsystemOnboardingGORMRepository{database: database}, nil
 }
 
-// CreateSubsystem persists all control-plane resources atomically. A previously registered
-// application with the same tenant-scoped code is reused only to add a new environment; existing
-// environments, login targets and OAuth clients are never overwritten by this create-only flow.
+// CreateSubsystem 原子持久化全部控制面资源。同租户同编码的已登记应用只允许复用来追加
+// 新环境；既有环境、登录目标与 OAuth 客户端绝不会被该只创建流程覆盖。
 func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context.Context, write application.SubsystemOnboardingWrite, now time.Time) (application.SubsystemOnboardingResult, error) {
 	var result application.SubsystemOnboardingResult
 	// 应用、环境、登录目标、浏览器客户端、目录发布客户端和初始部署状态必须同成同败。
@@ -229,8 +234,8 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 			}
 		}
 
-		// The application might have been reused, so always bind every child write to
-		// the canonical persisted application ID rather than the generated candidate ID.
+		// 应用可能被复用，因此所有子资源写入必须绑定持久化后的权威应用 ID，而不是生成的
+		// 候选 ID。
 		write.Environment.ApplicationID = createdApplication.ID
 		write.LoginTarget.ApplicationID = createdApplication.ID
 		write.OAuthClient.ApplicationID = createdApplication.ID
@@ -239,10 +244,9 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 			write.ServiceClients[index].OAuthClient.ApplicationID = createdApplication.ID
 		}
 
-		// Onboarding is intentionally create-only: an existing environment can already
-		// own a LoginTarget and OAuth client whose secret cannot be recovered safely.
-		// Detect it before any child write and return an actionable conflict instead of
-		// a generic duplicate-key response.
+		// 接入有意设计为只创建：已存在的环境可能已拥有无法安全找回的 LoginTarget 与 OAuth
+		// 客户端 secret。必须在任何子资源写入前检出冲突，返回可操作的冲突错误而不是通用的
+		// 重复键响应。
 		existingEnvironment, findErr := repository.findEnvironmentByCode(ctx, transaction, write.Environment.TenantID, createdApplication.ID, write.Environment.Environment)
 		if findErr == nil {
 			return &application.SubsystemOnboardingConflict{
@@ -315,10 +319,8 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 	return result, err
 }
 
-// CreateSubsystemDirectory persists the application catalogue portion of a
-// subsystem registration.  It deliberately does not create an OAuth client,
-// a service credential or deployment state: those belong to the authentication
-// provider integration and runtime deployment workflows respectively.
+// CreateSubsystemDirectory 只持久化子系统登记中的目录部分。它有意不创建 OAuth 客户端、
+// 服务凭据或部署状态：三者分别属于认证提供方集成与运行时部署工作流。
 func (repository *SubsystemOnboardingGORMRepository) CreateSubsystemDirectory(ctx context.Context, write application.SubsystemDirectoryRegistrationWrite, now time.Time) (application.SubsystemDirectoryRegistrationResult, error) {
 	var result application.SubsystemDirectoryRegistrationResult
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -368,9 +370,8 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystemDirectory(ct
 	return result, err
 }
 
-// findApplicationByCode retrieves only the exact tenant-scoped application that caused a
-// duplicate create attempt. It is intentionally private to the onboarding transaction so a
-// request cannot use it to cross a tenant boundary or overwrite an existing application.
+// findApplicationByCode 只在创建冲突时检索导致重复的确切租户内应用。它有意保持私有、
+// 仅限接入事务使用，请求不能借它跨租户边界或覆盖既有应用。
 func (repository *SubsystemOnboardingGORMRepository) findApplicationByCode(ctx context.Context, database *gorm.DB, tenantID, code string) (application.Application, error) {
 	var model managementApplicationModel
 	if err := database.WithContext(ctx).Where("tenant_id = ? AND code = ?", tenantID, code).Take(&model).Error; err != nil {
@@ -379,8 +380,8 @@ func (repository *SubsystemOnboardingGORMRepository) findApplicationByCode(ctx c
 	return toApplication(model), nil
 }
 
-// findEnvironmentByCode looks up an existing tenant/application environment for the create-only
-// conflict check. Its caller must already have resolved the application in the same transaction.
+// findEnvironmentByCode 为只创建冲突检查查询既有租户内环境；调用方必须已在同一事务内
+// 解析出应用。
 func (repository *SubsystemOnboardingGORMRepository) findEnvironmentByCode(ctx context.Context, database *gorm.DB, tenantID, applicationID, environment string) (application.Environment, error) {
 	var model managementEnvironmentModel
 	if err := database.WithContext(ctx).
@@ -445,8 +446,8 @@ func portalProjectionReadiness(row portalApplicationRow) application.PortalProje
 	return application.PortalProjectionReadiness{Status: portalProjectionMissing, NextAction: "账号尚未投影到 Keycloak，请联系管理员同步账号权限。"}
 }
 
-// ListPortalApplications returns one preferred active environment/target per active application.
-// Preference order without an explicit environment is prod, staging, test, dev, then lexical.
+// ListPortalApplications 为每个活跃应用返回一个首选的活跃环境/目标。未显式指定环境时的
+// 偏好顺序为 prod、staging、test、dev，其余按字典序。
 func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx context.Context, tenantID, userID, environment string) ([]application.PortalApplication, error) {
 	accessFilter, accessArgs := portalApplicationAccessFilter(userID)
 	query := repository.database.WithContext(ctx).
@@ -507,9 +508,8 @@ func (repository *SubsystemOnboardingGORMRepository) ListPortalApplications(ctx 
 	return items, nil
 }
 
-// TransitionSubsystemDeployment records a lifecycle transition using the registered application
-// and environment codes. Error details are operator-safe and deliberately truncated before they
-// enter the database; credentials and command output never belong in this table.
+// TransitionSubsystemDeployment 用登记的应用/环境编码记录一次生命周期转移。错误详情对
+// 运维安全，入库前被有意截断；凭据与命令输出绝不能进入该表。
 func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, now time.Time) error {
 	status = strings.TrimSpace(status)
 	operation = strings.TrimSpace(operation)
@@ -531,8 +531,8 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 	if status == application.SubsystemDeploymentStatusProvisioning || status == application.SubsystemDeploymentStatusUpdating || status == application.SubsystemDeploymentStatusVerifying || status == application.SubsystemDeploymentStatusDraining {
 		// 非终态开始新的尝试并清空完成时间；终态只收口当前尝试。状态接口因此可以区分
 		// “上次失败”与“本次仍在执行”，而无需暴露部署命令输出。
-		// A generation identifies one lifecycle attempt; terminal transitions keep the same
-		// generation so status polling can distinguish retries from completion updates.
+		// generation 标识一次生命周期尝试；终态转移保持同一 generation，状态轮询因此能
+		// 区分“重试”与“同一尝试的收口更新”。
 		if status != application.SubsystemDeploymentStatusProvisioning {
 			updates["generation"] = gorm.Expr("generation + 1")
 		}
@@ -593,8 +593,8 @@ func (repository *SubsystemOnboardingGORMRepository) TransitionSubsystemDeployme
 	return nil
 }
 
-// Claim takes the row lock before issuing credentials. A same-state transition is
-// not a claim: otherwise two requests that observed READY could both deploy.
+// ClaimSubsystemDeployment 在签发凭据前取行锁。同状态转移不算抢占：否则两个都观察到
+// READY 的请求可能同时部署。
 func (repository *SubsystemOnboardingGORMRepository) ClaimSubsystemDeployment(ctx context.Context, tenantID, code, environment, operation string, now time.Time) (generation uint64, err error) {
 	err = repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row subsystemDeploymentStateModel
@@ -602,7 +602,7 @@ func (repository *SubsystemOnboardingGORMRepository) ClaimSubsystemDeployment(ct
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		if err == nil && (row.Status == application.SubsystemDeploymentStatusProvisioning || row.Status == application.SubsystemDeploymentStatusUpdating || row.Status == application.SubsystemDeploymentStatusVerifying || row.Status == application.SubsystemDeploymentStatusDraining) {
+		if err == nil && (row.Status == application.SubsystemDeploymentStatusProvisioning || row.Status == application.SubsystemDeploymentStatusUpdating || row.Status == application.SubsystemDeploymentStatusVerifying || row.Status == application.SubsystemDeploymentStatusDraining || row.Status == application.SubsystemDeploymentStatusDiscarding) {
 			return application.ErrSubsystemDeploymentTransition
 		}
 		repo := &SubsystemOnboardingGORMRepository{database: tx}
@@ -616,8 +616,8 @@ func (repository *SubsystemOnboardingGORMRepository) ClaimSubsystemDeployment(ct
 	return
 }
 
-// Terminal writes are owned by the claimed attempt, not whichever attempt is
-// current when an old background job eventually returns.
+// CompleteSubsystemDeployment 的终态写入由抢占成功的尝试持有；过期的后台任务晚归时，
+// 不得以“当前记录状态”覆盖他人的结果。
 func (repository *SubsystemOnboardingGORMRepository) CompleteSubsystemDeployment(ctx context.Context, tenantID, code, environment string, generation uint64, status, operation, errorCode, message string, now time.Time) error {
 	return repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row subsystemDeploymentStateModel
@@ -631,22 +631,28 @@ func (repository *SubsystemOnboardingGORMRepository) CompleteSubsystemDeployment
 	})
 }
 
-// Recovery compares the enumerated snapshot in the UPDATE itself; re-reading
-// and CASing a newer generation would incorrectly close a newly started retry.
+// RecoverStaleSubsystemDeployment 在 UPDATE 本身内比较枚举的快照；若改为重读再做基于新
+// generation 的 CAS，会错误地收口一个刚启动的重试。
 func (repository *SubsystemOnboardingGORMRepository) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
 	if state.StartedAt == nil || !state.StartedAt.Before(cutoff) {
 		return false, nil
 	}
-	if state.Status != application.SubsystemDeploymentStatusProvisioning && state.Status != application.SubsystemDeploymentStatusUpdating && state.Status != application.SubsystemDeploymentStatusVerifying && state.Status != application.SubsystemDeploymentStatusDraining {
+	if state.Status != application.SubsystemDeploymentStatusProvisioning && state.Status != application.SubsystemDeploymentStatusUpdating && state.Status != application.SubsystemDeploymentStatusVerifying && state.Status != application.SubsystemDeploymentStatusDraining && state.Status != application.SubsystemDeploymentStatusDiscarding {
 		return false, nil
+	}
+	// 丢弃进程在占用之后崩溃时，记录会停在 DISCARDING 且没有任何编排会继续推进它。
+	// 看护把它收口回失败，运维即可重新发起丢弃或重试部署；错误码区分两者，便于排查。
+	errorCode, errorMessage := "DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试"
+	if state.Status == application.SubsystemDeploymentStatusDiscarding {
+		errorCode, errorMessage = "DISCARD_INTERRUPTED", "失败部署清理中断，可重新发起清理或重试部署"
 	}
 	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
 		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND generation = ? AND status = ? AND started_at = ? AND started_at < ?", state.TenantID, state.ApplicationCode, state.Environment, state.Generation, state.Status, state.StartedAt.UTC(), cutoff.UTC()).
-		Updates(map[string]any{"status": application.SubsystemDeploymentStatusFailed, "last_error_code": "DEPLOYMENT_INTERRUPTED", "last_error_message": "部署请求中断，请点击重试", "completed_at": now.UTC(), "updated_at": now.UTC()})
+		Updates(map[string]any{"status": application.SubsystemDeploymentStatusFailed, "last_error_code": errorCode, "last_error_message": errorMessage, "completed_at": now.UTC(), "updated_at": now.UTC()})
 	return result.RowsAffected == 1, result.Error
 }
 
-// GetSubsystemDeploymentState returns only tenant-scoped lifecycle metadata.
+// GetSubsystemDeploymentState 只返回租户范围内的生命周期元数据。
 func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState(ctx context.Context, tenantID, applicationCode, environment string) (application.SubsystemDeploymentState, error) {
 	var model subsystemDeploymentStateModel
 	if err := repository.database.WithContext(ctx).
@@ -657,15 +663,41 @@ func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentState
 	return deploymentStateFromModel(model), nil
 }
 
-// DiscardFailedSubsystemDeployment deletes a lifecycle record that is stuck in
-// PROVISION_FAILED so the application/environment pair can be re-onboarded. The
-// delete is guarded by the failed status itself; anything in flight or healthy
-// must go through the regular retry/teardown lifecycle instead.
-func (repository *SubsystemOnboardingGORMRepository) DiscardFailedSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment string, now time.Time) error {
-	result := repository.database.WithContext(ctx).
-		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND status = ?",
+// ClaimFailedSubsystemDeploymentForDiscard 原子占用一条失败部署记录用于丢弃。
+//
+// 丢弃流程必须先占用再销毁基础设施。旧实现先 Teardown、再按 status=FAILED 删除记录：
+// 并发的「重试」把记录推进为 UPDATING 后，删除会被正确拒绝，但 Teardown 已经拆掉了重试
+// 刚部署起来的环境。占用要求 status=PROVISION_FAILED 且 generation 与调用方读取时一致
+// （CAS），只有抢占成功的调用方才能继续 Teardown；重试在 DISCARDING 期间无法接管。
+func (repository *SubsystemOnboardingGORMRepository) ClaimFailedSubsystemDeploymentForDiscard(ctx context.Context, tenantID, applicationCode, environment string, expectedGeneration uint64, now time.Time) (bool, error) {
+	// 占用时刷新 started_at 并清空 completed_at：看护任务据此判定"丢弃是否已经中断"，
+	// 否则继承上一次失败尝试的旧 started_at 会让刚占用的记录立刻被当成僵死状态。
+	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND status = ? AND generation = ?",
 			strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment)),
-			application.SubsystemDeploymentStatusFailed).
+			application.SubsystemDeploymentStatusFailed, expectedGeneration).
+		Updates(map[string]any{
+			"status":       application.SubsystemDeploymentStatusDiscarding,
+			"generation":   gorm.Expr("generation + 1"),
+			"started_at":   now.UTC(),
+			"completed_at": nil,
+			"updated_at":   now.UTC(),
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// DiscardClaimedSubsystemDeployment 删除已占用的失败记录。
+//
+// 只匹配 DISCARDING + 占用时的 generation：占用后不会有其他写入能推进该记录（重试在
+// DISCARDING 期间被拒绝），因此删除失败说明记录已被看护任务收口或人工处理，按冲突返回。
+func (repository *SubsystemOnboardingGORMRepository) DiscardClaimedSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment string, claimedGeneration uint64) error {
+	result := repository.database.WithContext(ctx).
+		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND status = ? AND generation = ?",
+			strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment)),
+			application.SubsystemDeploymentStatusDiscarding, claimedGeneration).
 		Delete(&subsystemDeploymentStateModel{})
 	if result.Error != nil {
 		return result.Error
@@ -676,10 +708,9 @@ func (repository *SubsystemOnboardingGORMRepository) DiscardFailedSubsystemDeplo
 	return nil
 }
 
-// ResolveSubsystemHealthTargets projects every active application environment into a
-// container-network health probe URL. Upstream wins over BaseURL because the platform API
-// container can reach the compose network directly, while BaseURL is browser-facing. The
-// health path comes from the environment metadata (default /healthz).
+// ResolveSubsystemHealthTargets 把每个活跃应用环境投影为容器网络内的健康探测 URL。
+// Upstream 优先于 BaseURL：平台 API 容器可直接访问 Compose 网络，而 BaseURL 是面向浏览器的。
+// 健康路径来自环境元数据（默认 /healthz）。
 func (repository *SubsystemOnboardingGORMRepository) ResolveSubsystemHealthTargets(ctx context.Context, tenantID string) ([]application.SubsystemHealthTarget, error) {
 	var rows []struct {
 		Code        string  `gorm:"column:code"`
@@ -737,7 +768,6 @@ func deploymentStateFromModel(model subsystemDeploymentStateModel) application.S
 	}
 }
 
-// SetSubsystemDesiredManifest 记录控制面本轮期望清单；与已应用值不同时立即标记 DRIFT。
 // ListInFlightSubsystemDeployments 返回仍处于非终态（PROVISIONING/UPDATING/VERIFYING/
 // DRAINING）的部署状态行，供后台看护任务识别编排已死、无人收口的记录。只投影状态机
 // 需要的字段来源行本身；不暴露部署命令输出或凭据。
@@ -749,6 +779,9 @@ func (repository *SubsystemOnboardingGORMRepository) ListInFlightSubsystemDeploy
 			application.SubsystemDeploymentStatusUpdating,
 			application.SubsystemDeploymentStatusVerifying,
 			application.SubsystemDeploymentStatusDraining,
+			// 丢弃占用态也属于"有编排正在进行"：进程崩溃后必须由看护收口回失败态，
+			// 否则记录会永远占用 code+environment，既不能丢弃也不能重试。
+			application.SubsystemDeploymentStatusDiscarding,
 		}).
 		Order("started_at ASC").
 		Find(&rows).Error; err != nil {
@@ -769,6 +802,8 @@ func (repository *SubsystemOnboardingGORMRepository) ListInFlightSubsystemDeploy
 	return states, nil
 }
 
+// SetSubsystemDesiredManifest 记录控制面本轮期望清单校验和；与已应用值不同时立即标记
+// DRIFT，使部署前的漂移可被观测。记录不存在时返回 ErrNotFound。
 func (repository *SubsystemOnboardingGORMRepository) SetSubsystemDesiredManifest(ctx context.Context, tenantID, applicationCode, environment, checksum string, now time.Time) error {
 	checksum = strings.TrimSpace(checksum)
 	if checksum == "" {
@@ -808,9 +843,8 @@ func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemManifestApplie
 	return nil
 }
 
-// GetSubsystemDeploymentContext resolves application/environment identifiers from control-plane
-// registration regardless of deployment status. Retry cannot use the portal projection because
-// PROVISION_FAILED environments are intentionally hidden there.
+// GetSubsystemDeploymentContext 直接从控制面登记解析应用/环境标识，不依赖部署状态。
+// 重试不能走门户投影：PROVISION_FAILED 环境被有意隐藏在那里。
 func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentContext(ctx context.Context, tenantID, applicationCode, environment string) (application.SubsystemDeploymentState, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	applicationCode = strings.TrimSpace(applicationCode)
@@ -828,10 +862,9 @@ func (repository *SubsystemOnboardingGORMRepository) GetSubsystemDeploymentConte
 	return deploymentStateFromModel(model), nil
 }
 
-// MarkSubsystemInitialAccessAssigned records the authorization side effect independently from
-// READY. If a later state write or HTTP response fails, retry can see that access is already
-// complete and will not grant the administrator role again. Adoption creates its lifecycle row
-// before an administrator is known, so the same atomic update persists the role recipient.
+// MarkSubsystemInitialAccessAssigned 独立于 READY 记录授权侧的生效结果。若后续状态写入
+// 或 HTTP 响应失败，重试可以看到访问已分配完成，不会再次授予管理员角色。收编（ADOPT）在
+// 管理员未知前就创建生命周期行，因此同一原子更新会同时写入角色接收人。
 func (repository *SubsystemOnboardingGORMRepository) MarkSubsystemInitialAccessAssigned(ctx context.Context, tenantID, applicationCode, environment, userID string, now time.Time) error {
 	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
 		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND initial_access_assigned_at IS NULL", strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))).
@@ -883,14 +916,11 @@ func optionalStringPointer(value string) *string {
 	return &value
 }
 
-// portalApplicationAccessFilter keeps portal visibility aligned with the effective authorization
-// subject model. In addition to a direct USER binding, an active membership can contribute the
-// role bound to its active organization or position. The role binding is still constrained to the
-// tenant or the environment row currently being considered by the outer portal query.
+// portalApplicationAccessFilter 与有效应用授权使用相同的角色来源与目录策略：
+// 当前 USER 或活跃任职继承的 APPLICATION 角色按 ID 去重，并遵守应用配置的
+// max_effective_roles（缺省或零表示不限）。租户超级管理员可直接进入业务应用，
+// 不要求额外物理绑定；旧直授权限或空角色目录不能单独构成有效应用授权。
 func portalApplicationAccessFilter(userID string) (string, []any) {
-	// 可见性由数据库中的有效授权事实决定，而不是前端缓存：直接用户绑定、开启继承的
-	// 在职组织/岗位绑定或用户直授权限均可贡献访问。所有路径都同时约束租户、应用、
-	// 环境范围和生效时间；合同系统另要求恰好一个有效角色，避免角色冲突进入子系统。
 	return `(
 			application.code = 'platform'
 			OR EXISTS (
@@ -916,16 +946,12 @@ func portalApplicationAccessFilter(userID string) (string, []any) {
 					AND (platform_admin_binding.valid_until IS NULL OR platform_admin_binding.valid_until > UTC_TIMESTAMP(3))
 					AND platform_admin_role.code = 'platform-super-admin'
 			)
-			OR NOT EXISTS (
-				SELECT 1 FROM authz_role AS catalog_role
-				WHERE catalog_role.tenant_id = application.tenant_id
-					AND catalog_role.application_id = application.id
-					AND catalog_role.status = 'ACTIVE'
-					AND catalog_role.role_type <> 'COMPATIBILITY'
-			)
 			OR EXISTS (
-				SELECT 1 FROM authz_role_binding AS access_assignment
+				SELECT COUNT(DISTINCT assigned_role.id) FROM authz_role_binding AS access_assignment
 				JOIN authz_role AS assigned_role ON assigned_role.id = access_assignment.role_id
+				LEFT JOIN authz_application_authorization_policy AS access_policy
+					ON access_policy.tenant_id = application.tenant_id
+					AND access_policy.application_id = application.id
 				WHERE access_assignment.tenant_id = application.tenant_id
 					AND access_assignment.application_id = application.id
 					AND (
@@ -967,67 +993,10 @@ func portalApplicationAccessFilter(userID string) (string, []any) {
 					AND assigned_role.tenant_id = application.tenant_id
 					AND assigned_role.application_id = application.id
 					AND assigned_role.status = 'ACTIVE'
-					AND assigned_role.role_type <> 'COMPATIBILITY'
+					AND assigned_role.role_type = 'APPLICATION'
+				HAVING COUNT(DISTINCT assigned_role.id) > 0
+					AND (COALESCE(MAX(access_policy.max_effective_roles), 0) = 0
+						OR COUNT(DISTINCT assigned_role.id) <= MAX(access_policy.max_effective_roles))
 			)
-			OR EXISTS (
-				SELECT 1 FROM authz_user_permission AS direct_permission
-				JOIN authz_permission AS assigned_permission ON assigned_permission.id = direct_permission.permission_id
-				WHERE direct_permission.tenant_id = application.tenant_id
-					AND direct_permission.application_id = application.id
-					AND direct_permission.user_id = ?
-					AND assigned_permission.tenant_id = application.tenant_id
-					AND assigned_permission.application_id = application.id
-					AND assigned_permission.status = 'ACTIVE'
-			)
-		)
-		AND (
-			application.code <> 'contract_management'
-			OR (
-				SELECT COUNT(DISTINCT contract_role.code)
-				FROM authz_role_binding AS contract_assignment
-				JOIN authz_role AS contract_role ON contract_role.id = contract_assignment.role_id
-				WHERE contract_assignment.tenant_id = application.tenant_id
-					AND contract_assignment.application_id = application.id
-					AND (
-						(contract_assignment.subject_type = 'USER' AND contract_assignment.subject_id = ?)
-						OR (
-							contract_assignment.subject_type IN ('ORG_UNIT', 'POSITION')
-							AND EXISTS (
-								SELECT 1
-								FROM iam_membership AS contract_membership
-								JOIN iam_org_unit AS contract_organization
-									ON contract_organization.id = contract_membership.org_unit_id
-									AND contract_organization.tenant_id = contract_membership.tenant_id
-									AND contract_organization.status = 'ACTIVE'
-								JOIN iam_position AS contract_position
-									ON contract_position.id = contract_membership.position_id
-									AND contract_position.tenant_id = contract_membership.tenant_id
-									AND contract_position.org_unit_id = contract_membership.org_unit_id
-									AND contract_position.status = 'ACTIVE'
-								WHERE contract_membership.tenant_id = contract_assignment.tenant_id
-									AND contract_membership.user_id = ?
-									AND contract_membership.status = 'ACTIVE'
-									AND contract_membership.inherit_authorization = 1
-									AND (contract_membership.valid_from IS NULL OR contract_membership.valid_from <= UTC_TIMESTAMP(3))
-									AND (contract_membership.valid_until IS NULL OR contract_membership.valid_until > UTC_TIMESTAMP(3))
-									AND (
-										(contract_assignment.subject_type = 'ORG_UNIT' AND contract_assignment.subject_id = contract_membership.org_unit_id)
-										OR (contract_assignment.subject_type = 'POSITION' AND contract_assignment.subject_id = contract_membership.position_id)
-									)
-							)
-						)
-					)
-					AND contract_assignment.status = 'ACTIVE'
-					AND (contract_assignment.valid_from IS NULL OR contract_assignment.valid_from <= UTC_TIMESTAMP(3))
-					AND (contract_assignment.valid_until IS NULL OR contract_assignment.valid_until > UTC_TIMESTAMP(3))
-					AND (
-						(contract_assignment.scope_type = 'TENANT' AND contract_assignment.scope_id = '')
-						OR (contract_assignment.scope_type = 'ENVIRONMENT' AND contract_assignment.scope_id = environment.id)
-					)
-					AND contract_role.tenant_id = application.tenant_id
-					AND contract_role.application_id = application.id
-					AND contract_role.status = 'ACTIVE'
-					AND contract_role.role_type <> 'COMPATIBILITY'
-			) = 1
-		)`, []any{userID, userID, userID, userID, userID, userID}
+		)`, []any{userID, userID, userID}
 }

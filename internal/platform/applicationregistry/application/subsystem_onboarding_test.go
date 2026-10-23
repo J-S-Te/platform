@@ -178,13 +178,15 @@ func TestOnboardCustomerPortalCreatesSixIndependentLeastPrivilegeServiceClients(
 		t.Fatal(err)
 	}
 	expectedScopes := map[string]string{
-		ServiceCredentialAuditIngest:            "audit.ingest",
-		ServiceCredentialExternalUserProvision:  "external_user.provision",
-		ServiceCredentialApplicationRoleAssign:  "application_role.assign",
-		ServiceCredentialApplicationRoleRevoke:  "application_role.revoke",
-		ServiceCredentialPortalMappingProvision: "portal.identity_mapping.provision",
-		ServiceCredentialPortalMappingDisable:   "portal.identity_mapping.disable",
-		ServiceCredentialPortalInviteVerify:     "portal.invite.verify",
+		ServiceCredentialAuditIngest:                      "audit.ingest",
+		ServiceCredentialExternalUserProvision:            "external_user.provision",
+		ServiceCredentialApplicationRoleAssign:            "application_role.assign",
+		ServiceCredentialApplicationRoleRevoke:            "application_role.revoke",
+		ServiceCredentialPortalMappingProvision:           "portal.identity_mapping.provision",
+		ServiceCredentialPortalMappingDisable:             "portal.identity_mapping.disable",
+		ServiceCredentialPortalInviteVerify:               "portal.invite.verify",
+		ServiceCredentialPortalReportFileRead:             "platform:file:portal_report",
+		ServiceCredentialPortalReportDownloadIdentityRead: "portal.report.download_identity.read",
 	}
 	if len(repository.write.ServiceClients) != len(expectedScopes) || len(result.ServiceCredentials) != len(expectedScopes) {
 		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))

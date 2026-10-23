@@ -13,8 +13,8 @@ const (
 	defaultLoginTargetFallback = "/"
 )
 
-// LoginTargetManagementItem is the tenant-scoped control-plane representation of one approved
-// post-login landing target. It deliberately does not include any OAuth redirect URI data.
+// LoginTargetManagementItem 是单个已批准登录后落地目标的租户范围控制面表示。
+// 刻意不包含任何 OAuth redirect_uri 数据，防止控制面与授权回调白名单混用。
 type LoginTargetManagementItem struct {
 	ID            string
 	TenantID      string
@@ -29,9 +29,8 @@ type LoginTargetManagementItem struct {
 	UpdatedAt     time.Time
 }
 
-// LoginTargetCreateInput defines the only mutable fields accepted when an administrator registers
-// a new approved post-login target. The application and environment boundary is supplied by the
-// protected route and must be verified by the repository before the row is inserted.
+// LoginTargetCreateInput 定义管理员登记新落地目标时唯一可变的字段集合。
+// 应用/环境边界由受保护路由提供，仓储必须在插入前再次核验，不能信任入参自洽。
 type LoginTargetCreateInput struct {
 	TenantID      string
 	OperatorID    string
@@ -43,8 +42,8 @@ type LoginTargetCreateInput struct {
 	Status        string
 }
 
-// LoginTargetUpdateInput modifies a registered target with optimistic locking. TargetCode is
-// immutable because callers may depend on it as a stable login request contract.
+// LoginTargetUpdateInput 以乐观锁修改已登记目标。TargetCode 不可变：
+// 调用方把它当作稳定的登录请求契约，变更会静默改写既有跳转入口。
 type LoginTargetUpdateInput struct {
 	TenantID      string
 	OperatorID    string
@@ -57,8 +56,8 @@ type LoginTargetUpdateInput struct {
 	Version       uint64
 }
 
-// LoginTargetManagementRepository persists management operations and verifies the complete
-// tenant/application/environment boundary. It must never infer an environment from a URI.
+// LoginTargetManagementRepository 持久化管理操作并核验完整的租户/应用/环境边界；
+// 绝不允许从 URI 反推环境归属，否则跨租户探测会以合法身份通过。
 type LoginTargetManagementRepository interface {
 	EnsureLoginTargetBoundary(context.Context, string, string, string) error
 	ListLoginTargets(context.Context, string, string, string, PageRequest) (PageResult[LoginTargetManagementItem], error)
@@ -75,7 +74,8 @@ type LoginTargetManagementService struct {
 	clock      Clock
 }
 
-// NewLoginTargetManagementService constructs login-target management use cases.
+// NewLoginTargetManagementService 构造登录目标管理用例；任一依赖缺失即拒绝构造，
+// 管理面不允许降级为无审计时钟或无 ID 生成的半可用服务。
 func NewLoginTargetManagementService(repository LoginTargetManagementRepository, ids IdentifierGenerator, clock Clock) (*LoginTargetManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("application login target management dependencies must not be nil")
@@ -83,8 +83,8 @@ func NewLoginTargetManagementService(repository LoginTargetManagementRepository,
 	return &LoginTargetManagementService{repository: repository, ids: ids, clock: clock}, nil
 }
 
-// ListLoginTargets lists targets only after the requested parent boundary has been verified. This
-// prevents a valid tenant from probing arbitrary application or environment identifiers.
+// ListLoginTargets 在核验父级边界之后才列出目标，防止合法租户借列表接口
+// 探测任意 application/environment 标识符的存在性。
 func (service *LoginTargetManagementService) ListLoginTargets(ctx context.Context, tenantID, applicationID, environmentID string, query PageRequest) (PageResult[LoginTargetManagementItem], error) {
 	tenantID, applicationID, environmentID = normalizeLoginTargetBoundary(tenantID, applicationID, environmentID)
 	query = normalizePageRequest(query)
@@ -97,7 +97,8 @@ func (service *LoginTargetManagementService) ListLoginTargets(ctx context.Contex
 	return service.repository.ListLoginTargets(ctx, tenantID, applicationID, environmentID, query)
 }
 
-// CreateLoginTarget registers one exact, administrator-approved external landing URI.
+// CreateLoginTarget 登记一个精确的、经管理员批准的外部落地 URI；
+// URI 合法性与边界校验失败一律返回 ErrValidation，不做部分创建。
 func (service *LoginTargetManagementService) CreateLoginTarget(ctx context.Context, input LoginTargetCreateInput) (LoginTargetManagementItem, error) {
 	input = normalizeLoginTargetCreate(input)
 	if !validLoginTargetCreate(input) {
@@ -115,7 +116,8 @@ func (service *LoginTargetManagementService) CreateLoginTarget(ctx context.Conte
 	return service.repository.CreateLoginTarget(ctx, input, identifier, now)
 }
 
-// GetLoginTarget returns one target within the exact tenant/application/environment boundary.
+// GetLoginTarget 在精确的租户/应用/环境边界内返回单个目标；
+// 边界或标识符非法按 ErrValidation 拒绝，不泄露存在性信息。
 func (service *LoginTargetManagementService) GetLoginTarget(ctx context.Context, tenantID, applicationID, environmentID, loginTargetID string) (LoginTargetManagementItem, error) {
 	tenantID, applicationID, environmentID = normalizeLoginTargetBoundary(tenantID, applicationID, environmentID)
 	loginTargetID = strings.TrimSpace(loginTargetID)
@@ -125,7 +127,8 @@ func (service *LoginTargetManagementService) GetLoginTarget(ctx context.Context,
 	return service.repository.GetLoginTarget(ctx, tenantID, applicationID, environmentID, loginTargetID)
 }
 
-// UpdateLoginTarget performs a versioned update without changing its stable target code.
+// UpdateLoginTarget 执行带版本号的乐观锁更新，且不改变稳定的目标编码；
+// 版本冲突由仓储返回，调用方不得静默重试覆盖他人修改。
 func (service *LoginTargetManagementService) UpdateLoginTarget(ctx context.Context, input LoginTargetUpdateInput) (LoginTargetManagementItem, error) {
 	input = normalizeLoginTargetUpdate(input)
 	if !validLoginTargetUpdate(input) {
@@ -134,19 +137,18 @@ func (service *LoginTargetManagementService) UpdateLoginTarget(ctx context.Conte
 	return service.repository.UpdateLoginTarget(ctx, input, service.clock.Now().UTC())
 }
 
-// LoginTargetRedirectDecision gives the shared login flow a safe redirect result. If no target was
-// requested, the existing platform-local fallback is retained. If an approved target is requested
-// but cannot be resolved, callers must fail the login transition rather than redirect to a
-// caller-supplied or environment-default URI.
+// LoginTargetRedirectDecision 向共享登录流程给出安全的重定向结论：
+// 未请求目标时保留平台本域回退；已请求但解析失败时调用方必须中断登录迁移，
+// 而不是改跳调用方提供或环境默认的 URI。
 type LoginTargetRedirectDecision struct {
 	Location       string
 	TargetResolved bool
 }
 
-// ResolvePostLoginRedirect resolves a requested target only from registry-controlled data. The
-// fallback is accepted only as a platform-local relative path; external, protocol-relative and
-// malformed values collapse to "/". A target-resolution failure is returned to the caller so it
-// can stop the login completion and present a stable platform error page.
+// ResolvePostLoginRedirect 只从注册数据管控的内容解析请求目标。回退值仅接受
+// 平台本域相对路径；外部地址、协议相对地址与畸形值一律折叠为 "/"。
+// 目标解析失败会原样返回错误，由调用方终止登录完成流程并展示稳定的平台错误页，
+// 绝不静默降级为跳转默认地址。
 func (service *LoginTargetService) ResolvePostLoginRedirect(ctx context.Context, input *LoginTargetResolveInput, platformFallback string) (LoginTargetRedirectDecision, error) {
 	fallback := SafePlatformLoginFallback(platformFallback)
 	if input == nil {

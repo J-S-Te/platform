@@ -6,14 +6,17 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/verify-readiness-test.XXXXXX")"
 trap 'rm -r -- "$test_root"' EXIT
 mkdir -p "$test_root/deploy/bin" "$test_root/deploy/manifests" "$test_root/deploy/packages"
 mkdir -p "$test_root/checks"
-cp "$source_dir/bin/deploy.sh" "$source_dir/bin/compose-scope.sh" "$source_dir/bin/start-enabled.sh" "$source_dir/bin/provisioner-config-refresh.sh" "$source_dir/bin/offline-configure.sh" "$source_dir/bin/offline-package-metadata.sh" "$source_dir/bin/public-transport.sh" "$test_root/deploy/bin/"
+cp "$source_dir/bin/deploy.sh" "$source_dir/bin/compose-scope.sh" "$source_dir/bin/subsystem-runtime.py" "$source_dir/bin/start-enabled.sh" "$source_dir/bin/provisioner-config-refresh.sh" "$source_dir/bin/offline-configure.sh" "$source_dir/bin/offline-package-metadata.sh" "$source_dir/bin/public-transport.sh" "$test_root/deploy/bin/"
 cp "$source_dir/docker-compose.yml" "$test_root/deploy/"
+cp -R "$source_dir/subsystems.d" "$test_root/deploy/"
 : > "$test_root/deploy/.env"
 : > "$test_root/deploy/.release.env"
 chmod 600 "$test_root/deploy/.env" "$test_root/deploy/.release.env"
 source "$test_root/deploy/bin/deploy.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+fixture_image_id="sha256:$(printf '%064d' 1)"
+fixture_config="$(printf '{"services":{"project-api":{"image":"registry.invalid/fixture@%s"},"project-sla-notifier":{"image":"registry.invalid/fixture@%s"},"project-mysql":{"image":"registry.invalid/fixture@%s"},"customer-presale-worker":{"image":"registry.invalid/fixture@%s"}}}' "$fixture_image_id" "$fixture_image_id" "$fixture_image_id" "$fixture_image_id")"
 compose() {
   case "${1:-}" in
     ps)
@@ -66,11 +69,10 @@ for core_service in platform-api platform-worker file-gateway keycloak temporal 
   grep -Fq "$core_service" <<<"$verify_body" || fail "core verify gate omits $core_service"
 done
 
-# A historical phase result is only workflow metadata. Current project database,
-# API and notifier state must be inspected again, and a degraded notifier must
-# fail verification even when the old phase helper reports VERIFIED.
+# 历史阶段结果仅是工作流元数据。必须重新检查当前项目数据库、API 和通知器状态；即使旧阶段辅助函数报告 VERIFIED，通知器退化也必须验证失败。
 require_initialized() { return 0; }
 scope_require() { return 0; }
+scope_services() { printf '%s\n' project-api project-sla-notifier project-mysql; }
 runtime_ready() { return 0; }
 subsystem_phase() { printf 'VERIFIED\n'; }
 wait_for_required_service_health() { return 0; }
@@ -84,6 +86,7 @@ PUBLIC_PLATFORM_ORIGIN='http://platform.test'
 PUBLIC_KEYCLOAK_ISSUER='http://keycloak.test/realms/basic-platform'
 compose() {
   case "${1:-}" in
+    config) printf '%s\n' "$fixture_config" ;;
     ps)
       if [[ "${2:-}" == -q ]]; then printf 'container-%s\n' "$3"; else printf 'mock compose status\n'; fi
       ;;
@@ -93,6 +96,7 @@ compose() {
 }
 docker() {
   if [[ "${1:-}" == container && "${2:-}" == inspect ]]; then return 1; fi
+  if [[ "${1:-}" == image && "${2:-}" == inspect ]]; then printf '%s\n' "$fixture_image_id"; return 0; fi
   [[ "${1:-}" == inspect ]] || return 0
   local service="${2#container-}" format="${4:-}"
   if [[ "$format" == *'.State.Status'* ]]; then
@@ -101,6 +105,8 @@ docker() {
     [[ "$service" == project-sla-notifier ]] && printf 'unhealthy\n' || printf 'healthy\n'
   elif [[ "$format" == *'.RestartCount'* ]]; then
     printf '2\n'
+  elif [[ "$format" == *'.Image'* ]]; then
+    printf '%s\n' "$fixture_image_id"
   fi
 }
 curl() {
@@ -118,15 +124,16 @@ grep -Fq 'service=project-sla-notifier' "$test_root/degraded-project.log" ||
 grep -Fq 'status=exited' "$test_root/degraded-project.log" ||
   fail 'degraded project worker status evidence absent'
 
-# Long-running workers without a healthcheck need a bounded stability sample;
-# merely observing a momentary running state is insufficient.
+# 没有健康检查的长期运行 worker 需要有界稳定性采样，仅观察到瞬时运行状态不足以判定成功。
 restart_counter="$test_root/restart-counter"
 : >"$restart_counter"
 compose() {
+  if [[ "${1:-}" == config ]]; then printf '%s\n' "$fixture_config"; return 0; fi
   [[ "${1:-}" == ps && "${2:-}" == -q ]] || return 0
   printf 'container-%s\n' "$3"
 }
 docker() {
+  if [[ "${1:-}" == image && "${2:-}" == inspect ]]; then printf '%s\n' "$fixture_image_id"; return 0; fi
   [[ "${1:-}" == inspect ]] || return 0
   local format="${4:-}" count
   if [[ "$format" == *'.State.Status'* ]]; then
@@ -137,6 +144,8 @@ docker() {
     count="$(wc -l <"$restart_counter" | tr -d ' ')"
     printf 'sample\n' >>"$restart_counter"
     printf '%s\n' "$count"
+  elif [[ "$format" == *'.Image'* ]]; then
+    printf '%s\n' "$fixture_image_id"
   fi
 }
 UIP_VERIFY_STABILITY_SECONDS=1

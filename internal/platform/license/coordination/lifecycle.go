@@ -14,14 +14,16 @@ import (
 	"gorm.io/gorm"
 )
 
-// Approval is returned only by the trusted release inventory reader. Required
-// members and explicit retirement permission must never be supplied by a runtime
-// token or copied from a browser's proposed component list.
+// LifecycleApproval 只能由受信任的发布清单读取器返回。必需成员与显式退役许可
+// 绝不能来自运行时令牌，也不能照抄浏览器提交的候选组件清单。
 type LifecycleApproval struct {
 	Specs              []ServiceSpec
 	RequiredServiceIDs []string
 	RetireServiceIDs   []string
 }
+
+// LifecycleInput 是一次运行时生命周期对账请求的入参；ExpectedRevision 提供
+// 乐观并发控制，ReleaseDigest 标识目标发布。
 type LifecycleInput struct {
 	Application      string
 	Environment      string
@@ -29,10 +31,13 @@ type LifecycleInput struct {
 	OperationID      string
 	ReleaseDigest    string
 }
+
+// LifecycleApprovalVerifier 校验生命周期请求并返回经审计批准的成员变更。
 type LifecycleApprovalVerifier interface {
 	VerifyRuntimeLifecycle(context.Context, LifecycleInput) (LifecycleApproval, error)
 }
 
+// WithLifecycleApprovalVerifier 注入生命周期审批验证器；v 为空时构造失败。
 func WithLifecycleApprovalVerifier(v LifecycleApprovalVerifier) Option {
 	return func(s *Service) error {
 		if v == nil {
@@ -43,6 +48,8 @@ func WithLifecycleApprovalVerifier(v LifecycleApprovalVerifier) Option {
 	}
 }
 
+// LifecycleEvent 记录一次已完成的生命周期对账；以 OperationID 幂等，重复提交
+// 同一请求摘要直接成功。
 type LifecycleEvent struct {
 	OperationID   string `gorm:"primaryKey;size:128"`
 	Application   string
@@ -56,14 +63,17 @@ type LifecycleEvent struct {
 	CreatedAt     time.Time
 }
 
+// TableName 绑定 GORM 模型到 license_runtime_lifecycle_event 表。
 func (LifecycleEvent) TableName() string { return "license_runtime_lifecycle_event" }
 
+// RetiredClient 永久记录已退役的 OAuth client 身份，防止其被任何后续注册复用。
 type RetiredClient struct {
 	OAuthClientID string `gorm:"primaryKey;column:oauth_client_id;size:128"`
 	ServiceID     string
 	RetiredAt     time.Time
 }
 
+// TableName 绑定 GORM 模型到 license_runtime_retired_client 表。
 func (RetiredClient) TableName() string { return "license_runtime_retired_client" }
 
 func canonicalApproval(in LifecycleInput, approval LifecycleApproval) (LifecycleApproval, error) {
@@ -71,6 +81,9 @@ func canonicalApproval(in LifecycleInput, approval LifecycleApproval) (Lifecycle
 		return approval, ErrInvalid
 	}
 	approval.Specs = append([]ServiceSpec(nil), approval.Specs...)
+	for index := range approval.Specs {
+		approval.Specs[index] = normalizeSpecRegistration(approval.Specs[index])
+	}
 	approval.RequiredServiceIDs = append([]string(nil), approval.RequiredServiceIDs...)
 	approval.RetireServiceIDs = append([]string(nil), approval.RetireServiceIDs...)
 	specs, clients := map[string]bool{}, map[string]bool{}
@@ -100,16 +113,20 @@ func canonicalApproval(in LifecycleInput, approval LifecycleApproval) (Lifecycle
 	return approval, nil
 }
 func memberSpec(m Member) ServiceSpec {
-	return ServiceSpec{m.Application, m.Environment, m.ServiceID, m.OAuthClientID, m.CoverageDigest, m.ImageDigest}
+	return ServiceSpec{
+		Application: m.Application, Environment: m.Environment, ServiceID: m.ServiceID, OAuthClientID: m.OAuthClientID,
+		RegistrationProtocol: normalizeSpecRegistration(ServiceSpec{RegistrationProtocol: m.RegistrationProtocol}).RegistrationProtocol,
+		CatalogVersion:       m.CatalogVersion, CredentialGeneration: m.CredentialGeneration,
+		CoverageDigest: m.CoverageDigest, ImageDigest: m.ImageDigest,
+	}
 }
 func validRetirementOwner(in LifecycleInput, m Member, requireTombstone bool) bool {
 	return m.Application == in.Application && m.Environment == in.Environment && (!requireTombstone || m.RetiredAt != nil)
 }
 
-// ReconcileComponents is an internal controlled-release operation, not a user
-// or machine endpoint. It atomically replaces the complete approved membership.
-// An activated application never returns to migration compatibility during a
-// rolling deployment. New clients cannot inherit the previous client's ACK.
+// ReconcileComponents 是内部受控发布操作，不是用户或机器端点。它原子替换整份
+// 已批准的成员清单。已激活的应用在滚动部署期间绝不回到迁移兼容；新 client
+// 绝不继承前一个 client 的 ACK。
 func (s *Service) ReconcileComponents(ctx context.Context, in LifecycleInput, actor domain.Actor) error {
 	if s.lifecycleApproval == nil || !identifier.MatchString(actor.TenantID) || !identifier.MatchString(actor.UserID) {
 		return ErrForbidden
@@ -174,9 +191,8 @@ func (s *Service) ReconcileComponents(ctx context.Context, in LifecycleInput, ac
 		}
 		for _, id := range approved.RetireServiceIDs {
 			retire[id] = true
-			// Retirement permission is application-local, including idempotent
-			// tombstones. A release must not name an unrelated or invented service
-			// which the deployment Agent could otherwise stop outside this app.
+			// 退役许可仅限本应用范围，包括幂等的墓碑操作。发布绝不能指名无关或
+			// 臆造的服务，否则部署 Agent 可能据此停用本应用之外的进程。
 			if member, present := current[id]; present {
 				if !validRetirementOwner(in, member, false) {
 					return ErrForbidden
@@ -252,19 +268,19 @@ func (s *Service) ReconcileComponents(ctx context.Context, in LifecycleInput, ac
 				if memberSpec(old) == spec {
 					continue
 				}
-				if err = tx.Model(&old).Updates(map[string]any{"oauth_client_id": spec.OAuthClientID, "coverage_digest": spec.CoverageDigest, "image_digest": spec.ImageDigest, "ready_at": nil}).Error; err != nil {
+				if err = tx.Model(&old).Updates(map[string]any{"oauth_client_id": spec.OAuthClientID, "registration_protocol": spec.RegistrationProtocol, "catalog_version": spec.CatalogVersion, "credential_generation": spec.CredentialGeneration, "coverage_digest": spec.CoverageDigest, "image_digest": spec.ImageDigest, "ready_at": nil}).Error; err != nil {
 					return err
 				}
 			} else {
-				// Only this explicit approved release can restore a logical service.
-				// Its old OAuth identity remains permanently retired.
+				// 只有这份显式批准的发布才能恢复一个逻辑服务；其旧 OAuth 身份
+				// 保持永久退役。
 				var retired Member
 				lookup := tx.First(&retired, "service_id = ?", spec.ServiceID).Error
 				if lookup == nil {
 					if retired.RetiredAt == nil || retired.Application != spec.Application || retired.Environment != spec.Environment || retired.OAuthClientID == spec.OAuthClientID {
 						return ErrConflict
 					}
-					if err = tx.Model(&retired).Updates(map[string]any{"retired_at": nil, "oauth_client_id": spec.OAuthClientID, "coverage_digest": spec.CoverageDigest, "image_digest": spec.ImageDigest, "ready_at": nil, "ack_at": nil, "ack_revision": 0, "issued_revision": 0, "issued_digest": "", "raw_jws": ""}).Error; err != nil {
+					if err = tx.Model(&retired).Updates(map[string]any{"retired_at": nil, "oauth_client_id": spec.OAuthClientID, "registration_protocol": spec.RegistrationProtocol, "catalog_version": spec.CatalogVersion, "credential_generation": spec.CredentialGeneration, "coverage_digest": spec.CoverageDigest, "image_digest": spec.ImageDigest, "ready_at": nil, "ack_at": nil, "ack_revision": 0, "issued_revision": 0, "issued_digest": "", "raw_jws": ""}).Error; err != nil {
 						return err
 					}
 					continue
@@ -279,18 +295,16 @@ func (s *Service) ReconcileComponents(ctx context.Context, in LifecycleInput, ac
 				if count != 0 {
 					return ErrConflict
 				}
-				if err = tx.Create(&Member{ServiceID: spec.ServiceID, Application: spec.Application, Environment: spec.Environment, OAuthClientID: spec.OAuthClientID, CoverageDigest: spec.CoverageDigest, ImageDigest: spec.ImageDigest, CreatedAt: now}).Error; err != nil {
+				if err = tx.Create(&Member{ServiceID: spec.ServiceID, Application: spec.Application, Environment: spec.Environment, OAuthClientID: spec.OAuthClientID, RegistrationProtocol: spec.RegistrationProtocol, CatalogVersion: spec.CatalogVersion, CredentialGeneration: spec.CredentialGeneration, CoverageDigest: spec.CoverageDigest, ImageDigest: spec.ImageDigest, CreatedAt: now}).Error; err != nil {
 					return err
 				}
 			}
 		}
-		// Enforcement is a monotonic execution policy, not the release readiness
-		// indicator. Existing consumers persist ENFORCED and correctly reject an
-		// APPLYING snapshot as a rollback. Keep the policy while invalidating every
-		// current-release ACK below; deployment completion must still require fresh
-		// READY/ACK from the entire approved membership, including unchanged images.
-		// Only the original pending migration can retain its frozen qualification.
-		// APPLYING/ENFORCED never regain compatibility during replacement.
+		// 强制执行是单调策略，不是发布就绪指示器。既有消费方会持久化 ENFORCED
+		// 并正确把 APPLYING 快照判为回滚。保持该策略的同时，下文撤销当前发布的
+		// 全部 ACK；部署完成仍要求整份已批准成员（含未变化的镜像）给出新鲜
+		// READY/ACK。只有最初的待激活迁移能保留其冻结资格；APPLYING/ENFORCED
+		// 在替换期间绝不恢复兼容。
 		if app.State != runtime.Pending {
 			app.MigrationEligible = false
 		}

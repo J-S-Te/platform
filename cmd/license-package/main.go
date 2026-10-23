@@ -1,4 +1,4 @@
-// license-package verifies delivery licenses against the release's compiled vendor trust.
+// license-package 使用发布物中编译进去的厂商信任密钥核验交付许可证。
 package main
 
 import (

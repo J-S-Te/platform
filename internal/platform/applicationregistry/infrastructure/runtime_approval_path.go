@@ -6,8 +6,7 @@ import (
 	"path/filepath"
 )
 
-// A mounted approval directory is authoritative even when empty. Falling back
-// from a missing or invalid new approval could revive an obsolete release.
+// 挂载的批准目录即使为空也是权威的。从缺失或非法的新批准回退可能复活已废弃的发布。
 func productionRuntimeApprovalPath(root, name string) (string, error) {
 	allowed := map[string]bool{
 		"license-evidence.json": true, "license-migration-evidence.json": true,

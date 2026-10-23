@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, project_contract_import]
+  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, project_contract_import]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -23,6 +23,10 @@ runtime:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
         - SIGNING_PHONE_ENCRYPTION_KEY_BASE64
       values:
+        SETTLEMENT_INTEGRATION_OUTBOUND_ENABLED: "true"
+        SETTLEMENT_API_BASE_URL: http://settlement-api:8085
+        SETTLEMENT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
+        SETTLEMENT_INTEGRATION_AUDIENCE: basic-platform-application
         MYSQL_DSN: 'contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
@@ -72,6 +76,8 @@ runtime:
         PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         PROJECT_INTEGRATION_AUDIENCE: basic-platform-application
       bindings:
+        SETTLEMENT_INTEGRATION_CLIENT_ID: service.settlement_contract_ingest.client_id
+        SETTLEMENT_INTEGRATION_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id

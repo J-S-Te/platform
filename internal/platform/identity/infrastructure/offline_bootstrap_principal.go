@@ -11,9 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// OfflineBootstrapPrincipal resolves only the persisted first administrator.
-// It is for a host-root maintenance process, never an HTTP authentication path.
-// No session, token, password reset or synthetic role is created.
+// OfflineBootstrapPrincipal 只解析持久化的首位管理员。它服务于宿主机 root 维护进程，
+// 绝不是 HTTP 认证路径；不创建会话、令牌、密码重置或合成角色。
 func (repository *GORMRepository) OfflineBootstrapPrincipal(ctx context.Context, now time.Time) (authctx.Principal, error) {
 	var row principalProjection
 	result := offlineBootstrapProjectionQuery(repository.database.WithContext(ctx), now).Find(&row)

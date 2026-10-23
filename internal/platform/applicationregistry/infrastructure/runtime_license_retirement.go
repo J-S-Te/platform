@@ -16,8 +16,7 @@ func runtimeLicenseRetirementPrefix(app string) string {
 	return map[string]string{"contract_management": "contract-", "project_management": "project-", "customer_and_opportunity": "customer-", "customer_portal": "portal-", "settlement": "settlement-", "data_analysis": "data-analysis-"}[app]
 }
 
-// Retiring a registration cannot invalidate a signed snapshot already cached
-// offline. Stop the precise old processes before admitting the replacement.
+// 注销登记无法使已缓存到线下的签名快照失效；必须先精确停止旧进程，再收编替代进程。
 func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if len(input.RuntimeLicenseCredentials) == 0 {
 		return nil
@@ -43,8 +42,8 @@ func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx contex
 		return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: container inspection unavailable")
 	}
 	forbidden := reviewedPlatformLicenseEvidenceInfrastructure()
-	// Reviewed install/init/observability units are never business retirements,
-	// including infrastructure belonging to a different subsystem in this project.
+	// 经审核的 install/init/可观测性单元绝不属于业务退役对象，包括本项目内属于其他
+	// 子系统的基础设施。
 	for _, id := range []string{"temporal", "temporal-ui", "platform-key-init", "subsystem-provisioner-socket-init", "prometheus", "keycloak-backup-metrics", "contract-mysql", "contract-migrate", "project-mysql", "project-migrate", "customer-mysql", "customer-migrate", "portal-mysql", "portal-migrate", "settlement-mysql", "settlement-migrate", "settlement-catalog-sync", "data-analysis-mysql", "data-analysis-migrate", "data-analysis-metabase-init", "data-analysis-metabase"} {
 		forbidden[id] = true
 	}
@@ -77,8 +76,7 @@ func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx contex
 			if !runtimeRetirementContainerID.MatchString(id) || seen[id] {
 				return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: invalid container inventory")
 			}
-			// Inspect only the ownership fields, never the container environment
-			// which may contain credentials from the previous release.
+			// 只检查归属字段，绝不检查容器环境——其中可能含有上一版发布的凭据。
 			inspect, err := outputRunner.RunOutput(ctx, target.config.DeployRoot, nil, target.config.DockerBinary, "container", "inspect", "--format", `{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}}}}`, id)
 			if err != nil {
 				return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: container inspection failed")
@@ -96,8 +94,8 @@ func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx contex
 			ids = append(ids, id)
 		}
 	}
-	// Revalidate the fixed Agent-owned approval before the first destructive
-	// process action. Do not stop a prefix, a service name, or an uninspected ID.
+	// 在第一个破坏性进程操作之前重新校验 Agent 固有的已批准快照；
+	// 不允许按前缀、服务名或未检视的 ID 停止进程。
 	current, err := loadRuntimeLicenseReleaseDocument(path, target.config.Profile)
 	if err != nil || !reflect.DeepEqual(release, current) {
 		return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: release changed during inspection")

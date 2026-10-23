@@ -1,4 +1,4 @@
-// Package ulid generates ULID-compatible identifiers without a database sequence.
+// Package ulid 生成 ULID 兼容的标识符，不依赖数据库序列。
 package ulid
 
 import (
@@ -9,9 +9,8 @@ import (
 
 const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
-// New returns a 26-character Crockford Base32 ULID using the supplied time and cryptographic
-// randomness. The timestamp portion is UTC milliseconds so generated identifiers remain
-// approximately time ordered.
+// New 基于给定时间与密码学随机源返回 26 位 Crockford Base32 ULID。
+// 时间部分取 UTC 毫秒，使生成的标识符近似按时间有序。
 func New(now time.Time) (string, error) {
 	milliseconds := now.UTC().UnixMilli()
 	if milliseconds < 0 || milliseconds > 0xFFFFFFFFFFFF {
@@ -34,7 +33,7 @@ func New(now time.Time) (string, error) {
 		var value byte
 		for bit := 0; bit < 5; bit++ {
 			value <<= 1
-			sourceBit := index*5 + bit - 2 // ULID's first Base32 character has two leading zero bits.
+			sourceBit := index*5 + bit - 2 // ULID 的首个 Base32 字符前导两位恒为 0。
 			if sourceBit < 0 || sourceBit >= len(raw)*8 {
 				continue
 			}
@@ -47,10 +46,10 @@ func New(now time.Time) (string, error) {
 	return string(encoded[:]), nil
 }
 
-// Generator adapts New to application dependencies that require an identifier generator.
+// Generator 将 New 适配为需要标识符生成器的应用依赖。
 type Generator struct{}
 
-// New generates a ULID using the supplied timestamp.
+// New 按给定时间戳生成 ULID。
 func (Generator) New(now time.Time) (string, error) {
 	return New(now)
 }

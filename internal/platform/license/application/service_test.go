@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// This transactional test store exercises the application contract without
-// contacting production databases. Production persistence is exclusively GORM.
+// 此事务测试存储在不连接生产数据库的情况下验证
+// 应用契约；生产持久化仅使用 GORM。
 type memoryRepo struct {
 	mu         sync.Mutex
 	d          *domain.Deployment
@@ -135,7 +135,7 @@ func TestInitializationAndRequest(t *testing.T) {
 		t.Fatalf("idempotent initialization: %+v %v", st, e)
 	}
 	_, e = f.s.Initialize(ctx, InitializeInput{"other", "production"}, testActor)
-	if !errors.Is(e, domain.ErrConflict) {
+	if !errors.Is(e, domain.ErrBindingMismatch) {
 		t.Fatal(e)
 	}
 	f.repo.d.ClockBlocked = true
@@ -161,7 +161,7 @@ func TestPendingWholeReplacementAndVersionConcurrency(t *testing.T) {
 	if e != nil || len(st.Current.Applications) != 1 || st.Current.Applications[0].Code != "contract_management" {
 		t.Fatalf("early replacement: %+v %v", st, e)
 	}
-	if _, e = f.s.Preview(ctx, f.sign(t, 2, n)); !errors.Is(e, domain.ErrConflict) {
+	if _, e = f.s.Preview(ctx, f.sign(t, 2, n)); !errors.Is(e, domain.ErrVersionNotIncreasing) {
 		t.Fatalf("pending version downgraded: %v", e)
 	}
 	third := f.input(t, f.sign(t, 3, n+3600))
@@ -256,7 +256,7 @@ func TestClockLatchAndAtomicRecovery(t *testing.T) {
 	if len(f.repo.recoveries) != 1 {
 		t.Fatal("non atomic consume")
 	}
-	// A compromised wall clock cannot authorize an anchor that is still ahead.
+	// 受损的系统时钟不能授权仍处于未来的时间锚点。
 	r.ID = "recover-2"
 	r.AnchorAt = start + 400
 	r.ExpiresAt = start + 900
@@ -286,8 +286,32 @@ func TestEmptyTrustAndConcurrentCommit(t *testing.T) {
 		go func() { _, e := f.s.Commit(context.Background(), in, testActor); results <- e }()
 	}
 	a, b := <-results, <-results
-	if !((a == nil && errors.Is(b, domain.ErrConflict)) || (b == nil && errors.Is(a, domain.ErrConflict))) {
+	// 不变式：并发的同一份提交只有一个成功，另一个必须报出确定性的失败（不能两个都成功，也不能静默）。
+	// 版本校验先于修订号校验，所以重复导入同一版本报“版本不递增”，而不是瞬时的修订号冲突；
+	// 修订号冲突路径由 TestDeterministicFailuresAreNotReportedAsConflicts 单独覆盖。
+	if !((a == nil && errors.Is(b, domain.ErrVersionNotIncreasing)) || (b == nil && errors.Is(a, domain.ErrVersionNotIncreasing))) {
 		t.Fatalf("concurrent commit: %v %v", a, b)
+	}
+}
+
+// 版本不递增与实例绑定不匹配都是确定性失败：刷新与重试都不会改变结果，不能与瞬时的 CAS 冲突混用同一个错误。
+func TestDeterministicFailuresAreNotReportedAsConflicts(t *testing.T) {
+	if errors.Is(domain.ErrVersionNotIncreasing, domain.ErrConflict) || errors.Is(domain.ErrBindingMismatch, domain.ErrConflict) {
+		t.Fatal("deterministic license failures must not alias the transient conflict")
+	}
+	f := setup(t)
+	ctx := context.Background()
+	n := f.now.Unix()
+	if _, e := f.s.Commit(ctx, f.input(t, f.sign(t, 1, n)), testActor); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := f.s.Preview(ctx, f.sign(t, 1, n)); !errors.Is(e, domain.ErrVersionNotIncreasing) {
+		t.Fatalf("same version preview: %v", e)
+	}
+	stale := f.input(t, f.sign(t, 2, n))
+	stale.ExpectedRevision--
+	if _, e := f.s.Commit(ctx, stale, testActor); !errors.Is(e, domain.ErrConflict) {
+		t.Fatalf("stale revision commit must stay transient: %v", e)
 	}
 }
 func TestWriteActorRequiredAndValidated(t *testing.T) {
@@ -308,5 +332,37 @@ func TestWriteActorRequiredAndValidated(t *testing.T) {
 	}
 	if *f.repo.d != before || len(f.repo.events) != 1 || len(f.repo.artifacts) != 0 {
 		t.Fatal("rejected actor changed persistent state")
+	}
+}
+
+// 许可证文件丢失时，厂商只能由上一版许可证推导版本号，平台必须能受控导出已持久化的原始产物。
+func TestExportReturnsPersistedArtifacts(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	raw := f.sign(t, 1, f.now.Unix())
+	if _, e := f.s.Commit(ctx, f.input(t, raw), testActor); e != nil {
+		t.Fatal(e)
+	}
+	export, e := f.s.Export(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if export.InstanceID != f.instance || export.Environment != "production" || export.HighestVersion != 1 {
+		t.Fatalf("export binding: %+v", export)
+	}
+	if export.Current == nil || export.Current.RawJWS != raw || export.Current.Version != 1 || export.Current.Digest == "" || export.Pending != nil {
+		t.Fatalf("export artifacts: %+v", export)
+	}
+	// 导出的摘要必须与当前生效摘要一致，否则会把错误的“上一版”交给续签。
+	if st, e := f.s.Read(ctx); e != nil || export.Current.Digest != st.CurrentDigest {
+		t.Fatalf("export digest mismatch: %+v %v", export, e)
+	}
+	// 未初始化实例不得返回空产物，避免调用方误判为“没有可导出的许可证”。
+	bare, e := NewService(newMemory(), nil, func() time.Time { return f.now })
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := bare.Export(ctx); !errors.Is(e, domain.ErrNotInitialized) {
+		t.Fatalf("uninitialized export: %v", e)
 	}
 }

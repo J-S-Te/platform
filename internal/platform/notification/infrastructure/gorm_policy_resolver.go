@@ -15,7 +15,7 @@ import (
 // InboxPolicy 读取租户站内信开关，但不让 notification 依赖 settings 的内部模型。
 type InboxPolicy struct{ database *gorm.DB }
 
-// NewInboxPolicy constructs the settings read adapter used by notification creation.
+// NewInboxPolicy 构造通知创建使用的设置读取适配器。
 func NewInboxPolicy(database *gorm.DB) (*InboxPolicy, error) {
 	if database == nil {
 		return nil, fmt.Errorf("notification policy database must not be nil")
@@ -37,8 +37,8 @@ func (policy *InboxPolicy) DeliveryVisibility(ctx context.Context, tenantID stri
 	var row notificationSettingRow
 	err := policy.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// Match settings.application's unsaved tenant defaults: inbox enabled,
-		// immediate delivery. An explicitly saved disabled row is not a default.
+		// 与 settings.application 的未保存租户默认值保持一致：站内信启用、立即可见。
+		// 显式保存的停用行不属于默认值。
 		return true, now, nil
 	}
 	if err != nil {
@@ -88,7 +88,7 @@ func nextWeeklyReleasePoint(now time.Time) time.Time {
 // 绝不产生角色绑定或业务权限。
 type RecipientResolver struct{ database *gorm.DB }
 
-// NewRecipientResolver constructs the GORM tenant audience resolver.
+// NewRecipientResolver 构造基于 GORM 的租户受众解析器。
 func NewRecipientResolver(database *gorm.DB) (*RecipientResolver, error) {
 	if database == nil {
 		return nil, fmt.Errorf("notification recipient resolver database must not be nil")
@@ -100,7 +100,7 @@ type recipientUserRow struct {
 	ID string `gorm:"column:id"`
 }
 
-// ResolveRecipients resolves USER, ORGANIZATION and ROLE targets to enabled tenant users.
+// ResolveRecipients 把 USER、ORGANIZATION 与 ROLE 目标解析为当前租户的在册用户。
 func (resolver *RecipientResolver) ResolveRecipients(ctx context.Context, tenantID string, targets []domain.RecipientTarget, at time.Time) ([]string, error) {
 	users := make(map[string]struct{})
 	for _, target := range targets {

@@ -29,8 +29,8 @@ func validateBaselineReport(scenario string, report evidence.Report, environment
 	containers := map[string]bool{}
 	services := map[string]evidence.Fact{}
 	for _, f := range report.Facts {
-		// Legacy images need no license/version labels. Immutable identity and
-		// the trusted complete project scan establish pre-upgrade presence.
+		// 遗留镜像不需要 license/version 标签。不可变身份加可信的完整项目扫描
+		// 共同确立升级前的存在事实。
 		if !validApplication(f.Application) || !identifier.MatchString(f.Environment) || f.Environment != environment || !identifier.MatchString(f.Service) || !f.Running || len(f.Problems) != 0 || !containerPattern.MatchString(f.ContainerID) || containers[f.ContainerID] || !digestPattern.MatchString(f.ImageDigest) || f.StartedAt.IsZero() || f.StartedAt.After(report.CollectedAt) {
 			return ErrNotReady
 		}
@@ -74,9 +74,9 @@ func (s *Service) baselineReport(b InstallationBaseline, d *domain.Deployment) (
 	return report, nil
 }
 
-// MySQL DATETIME(3) rounds by default, while TIME_TRUNCATE_FRACTIONAL deployments
-// truncate. Accept only those exact projections (or the pre-insert timestamp),
-// never a broad tolerance that could conceal a changed audit timestamp.
+// MySQL DATETIME(3) 默认四舍五入，而 TIME_TRUNCATE_FRACTIONAL 部署会截断。
+// 只接受这两种精确投影（或插入前的时间戳），绝不放宽到可能掩盖审计时间戳
+// 被篡改的宽裕区间。
 func baselineCollectionTimeMatches(evidenceTime, storedTime time.Time) bool {
 	return storedTime.Equal(evidenceTime) || storedTime.Equal(evidenceTime.Round(time.Millisecond)) || storedTime.Equal(evidenceTime.Truncate(time.Millisecond))
 }
@@ -88,9 +88,8 @@ func (s *Service) environment(d *domain.Deployment) string {
 	return d.Environment
 }
 
-// PrepareInstallation is a trusted host deployment operation, called before
-// replacing any runtime image. Once frozen, retries return the original facts;
-// even an expand invocation cannot add newly installed applications to them.
+// PrepareInstallation 是可信的宿主机部署操作，在任何运行时镜像被替换前调用。
+// 一旦冻结，重试返回原始事实；即使是 expand 调用也不能把新装应用加入其中。
 func (s *Service) PrepareInstallation(ctx context.Context, scenario string, report evidence.Report, actor domain.Actor) (InstallationBaseline, error) {
 	var out InstallationBaseline
 	if !validInstallationScenario(scenario) || !identifier.MatchString(actor.TenantID) || !identifier.MatchString(actor.UserID) {
@@ -145,6 +144,8 @@ func (s *Service) PrepareInstallation(ctx context.Context, scenario string, repo
 	return out, nil
 }
 
+// ReadInstallationBaseline 读取冻结的安装基线，并复核其证据与当前部署实例一致；
+// 基线缺失或不匹配时返回 ErrNotReady/相应错误。
 func (s *Service) ReadInstallationBaseline(ctx context.Context) (InstallationBaseline, error) {
 	var out InstallationBaseline
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

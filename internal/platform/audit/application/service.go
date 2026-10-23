@@ -17,24 +17,37 @@ var (
 	correlationIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 	traceIDPattern               = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-	ErrNotFound   = errors.New("audit resource not found")
-	ErrConflict   = errors.New("audit resource conflict")
+	// ErrNotFound 表示租户范围内不存在目标审计事件或导出任务。
+	ErrNotFound = errors.New("audit resource not found")
+	// ErrConflict 表示状态机不允许的转换或唯一键冲突。
+	ErrConflict = errors.New("audit resource conflict")
+	// ErrValidation 表示调用方可自行修正的输入错误。
 	ErrValidation = errors.New("audit validation failed")
 )
 
+// IdentifierGenerator 生成审计事件与导出任务的稳定公开标识。
 type IdentifierGenerator interface {
 	New(time.Time) (string, error)
 }
+
+// Clock 抽象时间源，使接收时间与导出调度可测试。
 type Clock interface{ Now() time.Time }
+
+// SystemClock 是生产环境的 UTC 时钟。
 type SystemClock struct{}
 
+// Now 返回当前 UTC 时间。
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
+// PageRequest 是审计事件列表查询的分页与过滤参数。
 type PageRequest struct {
 	Page, PageSize                                                                       int
 	Keyword, ApplicationCode, EnvironmentCode, Action, ActionCategory, Result, RiskLevel string
-	OccurredFrom, OccurredTo                                                             *time.Time
+	// 批次 3：按操作地址、对象与链路 ID 精确检索，便于从一条审计追到整条链路。
+	ClientIP, ResourceID, RequestID string
+	OccurredFrom, OccurredTo        *time.Time
 }
+// PageResult 是审计查询的单页结果。
 type PageResult[T any] struct {
 	Items    []T   `json:"items"`
 	Page     int   `json:"page"`
@@ -42,6 +55,7 @@ type PageResult[T any] struct {
 	Total    int64 `json:"total"`
 }
 
+// EventInput 是单个审计事件的完整输入，包含主体、动作、资源、链路与来源协议字段。
 type EventInput struct {
 	EventID, ApplicationCode, EnvironmentCode, ActorType, ActorID, ActorName, SessionID, ClientID string
 	OccurredAt                                                                                    time.Time
@@ -50,6 +64,9 @@ type EventInput struct {
 	Metadata                                                                                      map[string]any
 	Changes                                                                                       []domain.FieldChange
 	SourceIP, UserAgent, EventCategory, EventType                                                 string
+	// 统一审计来源协议字段。SourceIP 是旧协议兼容列（历史行为：user_login_ip，缺省为投递地址），
+	// 新发布方应提供 LoginIP/ClientIP/IPSource；IngestPeerIP 只由平台摄取端写入。
+	LoginIP, ClientIP, IngestPeerIP, IPSource string
 }
 
 // BatchDeliveryInput 描述一次传输批次。这里的关联标识属于“子系统到平台接收端”的投递链路；
@@ -60,11 +77,26 @@ type BatchDeliveryInput struct {
 	SourceIP, UserAgent                        string
 }
 
+// IngestionHealth 是平台侧审计摄取健康度（批次 3）。
+//
+// 口径说明：各子系统的审计 Outbox 位于各自数据库，平台无法读取，因此这里统计的是
+// "平台已接收的事件"——近期接收量、来源未采集数与最近接收时间，用于发现采集/上报停摆。
+type IngestionHealth struct {
+	TotalEvents        int64      `json:"total_events"`
+	RecentEvents       int64      `json:"recent_events"`
+	UnknownProvenance  int64      `json:"unknown_provenance"`
+	LastReceivedAt     *time.Time `json:"last_received_at,omitempty"`
+	OldestUnknownAt    *time.Time `json:"oldest_unknown_at,omitempty"`
+}
+
+// Repository 持久化审计事件、摄取健康度与导出任务；实现必须强制租户范围并保证
+// 事件只追加、不更新。
 type Repository interface {
 	Ingest(context.Context, string, EventInput, time.Time) (domain.Receipt, error)
 	IngestBatch(context.Context, string, BatchDeliveryInput, []EventInput, time.Time) ([]domain.Receipt, error)
 	List(context.Context, string, PageRequest) (PageResult[domain.Event], error)
 	Get(context.Context, string, string) (domain.Event, error)
+	IngestionHealth(context.Context, string, time.Time) (IngestionHealth, error)
 	CreateExportJob(context.Context, string, string, PageRequest, string, time.Time) (domain.ExportJob, error)
 	GetExportJob(context.Context, string, string) (domain.ExportJob, error)
 	ClaimExportJob(context.Context, string, time.Time, time.Time) (domain.ExportWork, bool, error)
@@ -74,18 +106,22 @@ type Repository interface {
 	GetExportFile(context.Context, string, string) (domain.ExportFile, error)
 }
 
+// Service 是审计应用服务：统一执行输入校验、链路补全与租户范围约束。
 type Service struct {
 	repository Repository
 	ids        IdentifierGenerator
 	clock      Clock
 }
 
+// NewService 构造审计服务；任一依赖为 nil 时失败关闭。
 func NewService(repository Repository, ids IdentifierGenerator, clock Clock) (*Service, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("audit service dependencies must not be nil")
 	}
 	return &Service{repository: repository, ids: ids, clock: clock}, nil
 }
+
+// Ingest 校验并补全链路字段后持久化单个审计事件；事件只追加，不更新。
 func (s *Service) Ingest(ctx context.Context, tenantID string, input EventInput) (domain.Receipt, error) {
 	input = completeCorrelation(ctx, input)
 	if err := validateInput(tenantID, input); err != nil {
@@ -117,6 +153,7 @@ func (s *Service) IngestBatch(ctx context.Context, tenantID string, delivery Bat
 	}
 	return s.repository.IngestBatch(ctx, tenantID, normalizeBatchDelivery(delivery), normalized, s.clock.Now())
 }
+// List 分页返回租户内审计事件，过滤条件先规范化再校验。
 func (s *Service) List(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Event], error) {
 	query = normalizePage(query)
 	if err := validatePage(query); err != nil {
@@ -124,12 +161,14 @@ func (s *Service) List(ctx context.Context, tenantID string, query PageRequest) 
 	}
 	return s.repository.List(ctx, tenantID, query)
 }
+// Get 返回租户内单个审计事件详情。
 func (s *Service) Get(ctx context.Context, tenantID, eventID string) (domain.Event, error) {
 	if strings.TrimSpace(eventID) == "" {
 		return domain.Event{}, validation("event_id is required")
 	}
 	return s.repository.Get(ctx, tenantID, strings.TrimSpace(eventID))
 }
+// CreateExportJob 以规范化后的查询快照创建异步导出任务。
 func (s *Service) CreateExportJob(ctx context.Context, tenantID, operatorID string, query PageRequest) (domain.ExportJob, error) {
 	if strings.TrimSpace(operatorID) == "" {
 		return domain.ExportJob{}, validation("operator is required")
@@ -144,6 +183,7 @@ func (s *Service) CreateExportJob(ctx context.Context, tenantID, operatorID stri
 	}
 	return s.repository.CreateExportJob(ctx, tenantID, operatorID, query, id, s.clock.Now())
 }
+// GetExportJob 返回导出任务状态与产物元数据。
 func (s *Service) GetExportJob(ctx context.Context, tenantID, jobID string) (domain.ExportJob, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return domain.ExportJob{}, validation("job_id is required")
@@ -320,10 +360,12 @@ func (s *Service) ListExportEvents(ctx context.Context, tenantID string, query d
 	return s.repository.ListExportEvents(ctx, tenantID, query)
 }
 
+// CompleteExportJob 由导出 worker 记录任务完成与产物元数据。
 func (s *Service) CompleteExportJob(ctx context.Context, work domain.ExportWork, file domain.ExportFile) error {
 	return s.repository.CompleteExportJob(ctx, work, file, s.clock.Now())
 }
 
+// FailExportJob 由导出 worker 记录失败码与安全消息，并按退避时间安排重试。
 func (s *Service) FailExportJob(ctx context.Context, work domain.ExportWork, code, message string, retryAt time.Time) error {
 	return s.repository.FailExportJob(ctx, work, strings.TrimSpace(code), strings.TrimSpace(message), retryAt.UTC(), s.clock.Now())
 }
@@ -335,4 +377,12 @@ func (s *Service) GetExportFile(ctx context.Context, tenantID, jobID string) (do
 		return domain.ExportFile{}, validation("job_id is required")
 	}
 	return s.repository.GetExportFile(ctx, tenantID, strings.TrimSpace(jobID))
+}
+
+// IngestionHealth 返回平台侧审计摄取健康度；recentAfter 之前的窗口由调用方决定。
+func (service *Service) IngestionHealth(ctx context.Context, tenantID string, recentAfter time.Time) (IngestionHealth, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return IngestionHealth{}, ErrValidation
+	}
+	return service.repository.IngestionHealth(ctx, tenantID, recentAfter)
 }

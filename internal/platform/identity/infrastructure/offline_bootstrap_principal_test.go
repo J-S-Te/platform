@@ -10,7 +10,7 @@ import (
 )
 
 func TestOfflineBootstrapProjectionUsesPersistedActiveBinding(t *testing.T) {
-	// DryRun and disabled initialization/ping guarantee no database is contacted.
+	// DryRun 加上禁用初始化和 ping，确保不会连接数据库。
 	db, err := gorm.Open(mysql.New(mysql.Config{DSN: "unused:unused@tcp(127.0.0.1:1)/unused", SkipInitializeWithVersion: true}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
 	if err != nil {
 		t.Fatal(err)

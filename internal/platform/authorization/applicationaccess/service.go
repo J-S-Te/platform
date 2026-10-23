@@ -1,8 +1,3 @@
-// Package applicationaccess 提供面向应用和 OAuth/OIDC 客户端的访问授权能力。
-//
-// The package deliberately resolves access from the OAuth client registration instead of from a
-// hard-coded subsystem name. This keeps roles and permissions isolated by application.
-// Application-owned catalog policies determine any maximum effective-role constraint.
 package applicationaccess
 
 import (
@@ -16,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/tokenissuer"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -36,7 +32,7 @@ const (
 
 	grantOriginManual    = "MANUAL"
 	grantOriginTemplate  = "TEMPLATE"
-	grantOriginInherited = "INHERITANCE" // retained only for reading legacy audit data; no longer generated
+	grantOriginInherited = "INHERITANCE" // 仅用于读取历史审计数据；新绑定不再生成该来源
 	grantOriginSystem    = "SYSTEM"
 
 	applicationRoleType = "APPLICATION"
@@ -46,53 +42,62 @@ const (
 	sourceKindInherited = "INHERITED"
 	sourceKindSystem    = "SYSTEM"
 
-	// PlatformApplicationCode is the migration-seeded built-in application that owns the
-	// platform's own roles and permissions. The catalog mirror is normally published by a
-	// subsystem's catalog-publisher OAuth client; the platform does not have such a client for
-	// itself, so the API bootstrap mirrors the migration-seeded role/permission data into the
-	// application-owned catalog row instead.
+	// PlatformApplicationCode 是迁移种子内置应用，承载平台自身的角色与权限。
+	// 目录镜像通常由子系统的 catalog-publisher OAuth client 发布；平台自身没有
+	// 这样的 client，因此由 API bootstrap 把迁移种子的角色/权限数据镜像到
+	// 应用自有的目录行。
 	PlatformApplicationCode = "platform"
-	// PlatformCatalogVersion is the stable catalog_version assigned to the bootstrap mirror.
-	// Drift detection relies on the catalog_hash; the version is intentionally fixed so the
-	// platform can re-acknowledge its built-in data without the UI inferring "new version" on
-	// every API restart.
+	// PlatformCatalogVersion 是 bootstrap 镜像固定的 catalog_version。漂移检测
+	// 依赖 catalog_hash；版本刻意固定，使平台可以反复确认内置数据，而 UI 不会
+	// 在每次 API 重启时误判为"新版本"。
 	PlatformCatalogVersion = "v1-platform-builtin"
-	// PlatformCatalogSourceType is the source_type used when the API mirror publishes the
-	// built-in data. Subsystem catalogs use "APPLICATION"; the platform mirror is its own thing
-	// and is not an externally published manifest.
+	// PlatformCatalogSourceType 是 API 镜像发布内置数据时使用的 source_type。
+	// 子系统目录用 "APPLICATION"；平台镜像自成一类，不是外部发布的清单。
 	PlatformCatalogSourceType = "BUILTIN"
-	// PlatformCatalogSourceIdentifier is the source_identifier paired with
-	// PlatformCatalogSourceType. It is purely descriptive for the audit history.
+	// PlatformCatalogSourceIdentifier 是与 PlatformCatalogSourceType 配对的
+	// source_identifier，仅供审计历史描述使用。
 	PlatformCatalogSourceIdentifier = "platform:bootstrap"
-	// BootstrapSuperAdminRoleCode is the built-in role assigned only by the controlled first
-	// super administrator flow. It mirrors identityapplication.BootstrapSuperAdminRoleCode so
-	// the platform catalog bootstrap can locate the first admin without importing the
-	// identity application package (which would create an import cycle).
+	// BootstrapSuperAdminRoleCode 是仅由受控的首位超级管理员流程授予的内置角色。
+	// 它镜像 identityapplication.BootstrapSuperAdminRoleCode，使平台目录 bootstrap
+	// 无需导入 identity application 包（否则会造成 import cycle）即可定位首位管理员。
 	BootstrapSuperAdminRoleCode = "platform-super-admin"
-	// PlatformCatalogBootstrapOperatorID is a 26-char Crockford Base32 placeholder used as the
-	// last_synced_by for the platform catalog when no first super administrator has been
-	// created yet. The "PLATFSY" suffix makes the placeholder easy to spot in audit history
-	// and impossible to confuse with a real ULID-encoded user id.
+	// PlatformCatalogBootstrapOperatorID 是 26 位 Crockford Base32 占位符，在首位
+	// 超级管理员尚未创建时充当平台目录的 last_synced_by。"PLATFSY" 后缀让该占位符
+	// 在审计历史中一眼可辨，绝不会与真实 ULID 编码的用户 ID 混淆。
 	PlatformCatalogBootstrapOperatorID = "01J0000000000000PLATFSY000"
 )
 
 var (
-	ErrNotFound      = errors.New("application authorization resource not found")
+	// ErrNotFound 表示目标资源在当前租户内不存在。
+	ErrNotFound = errors.New("application authorization resource not found")
+	// ErrNotConfigured 表示主体尚未配置该应用的任何授权。这是合法业务状态而非故障，
+	// 查询方通常以携带当前目录哈希的空授权视图呈现，写入方视为主体无可撤销内容。
 	ErrNotConfigured = errors.New("user application access is not configured")
-	ErrValidation    = errors.New("application authorization validation failed")
-	ErrAccessDenied  = errors.New("user is not authorized for application")
+	// ErrValidation 表示请求输入不满足业务约束；错误消息携带可安全展示给管理界面的
+	// 静态原因（如角色不可用、作用域非法），不含基础设施细节。
+	ErrValidation = errors.New("application authorization validation failed")
+	// ErrAccessDenied 表示主体未被授权访问目标应用（有效授权状态非 GRANTED）。
+	ErrAccessDenied = errors.New("user is not authorized for application")
 )
 
+// IdentifierGenerator 生成全局唯一、按时间可排序的记录标识（通常为 ULID），
+// 用于新建角色绑定等持久化行的主键。
 type IdentifierGenerator interface {
 	New(time.Time) (string, error)
 }
 
+// Clock 提供当前时间；测试可注入确定性时钟使授权有效期断言可复现。
 type Clock interface{ Now() time.Time }
 
+// SystemClock 是生产环境时钟，统一返回 UTC 时间。
 type SystemClock struct{}
 
+// Now 返回当前 UTC 时间。
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
+// Service 实现应用访问授权与授权目录的查询、变更和令牌授权解析。
+// 所有查询以租号为边界；授权变更与 revision 推进、Keycloak 投影入队必须在
+// 同一数据库事务内提交，保证子系统可靠感知授权变化。
 type Service struct {
 	db    *gorm.DB
 	ids   IdentifierGenerator
@@ -100,9 +105,8 @@ type Service struct {
 	audit AuditRecorder
 }
 
-// NewService keeps the audit recorder optional for callers that do not install the platform audit
-// pipeline. The variadic form preserves the existing three-argument construction contract while
-// allowing bootstrap to provide one recorder.
+// NewService 允许审计记录器缺省，使未安装平台审计管线的调用方也能构造服务。
+// 可变参数形式在保持既有三参数构造契约的同时，让 bootstrap 可以注入一个记录器。
 func NewService(db *gorm.DB, ids IdentifierGenerator, clock Clock, audit ...AuditRecorder) (*Service, error) {
 	if db == nil || ids == nil || clock == nil {
 		return nil, errors.New("application authorization service dependencies must not be nil")
@@ -117,6 +121,9 @@ func NewService(db *gorm.DB, ids IdentifierGenerator, clock Clock, audit ...Audi
 	return &Service{db: db, ids: ids, clock: clock, audit: recorder}, nil
 }
 
+// RoleView 是一条应用角色的展示视图。同一角色可经用户直绑、组织/岗位模板、
+// 平台角色继承等多个来源同时生效：视图按来源保留多条以便管理界面追溯，
+// 有效角色数与权限集合则按角色 ID 去重。
 type RoleView struct {
 	Code            string     `json:"code"`
 	Name            string     `json:"name"`
@@ -130,9 +137,8 @@ type RoleView struct {
 	SourceName      string     `json:"source_name"`
 	Direct          bool       `json:"direct"`
 
-	// GrantOrigin is the durable provenance of the binding. It is intentionally
-	// separate from SourceType: SourceType says which subject owns the binding,
-	// while GrantOrigin says how the binding was granted.
+	// GrantOrigin 是绑定的持久化来源标记。它与 SourceType 刻意分离：
+	// SourceType 描述绑定挂在哪个主体上，GrantOrigin 描述绑定是如何被授予的。
 	GrantOrigin  string `json:"grant_origin"`
 	OriginID     string `json:"origin_id"`
 	OriginItemID string `json:"origin_item_id"`
@@ -146,6 +152,9 @@ type RoleView struct {
 	PositionName string `json:"position_name,omitempty"`
 }
 
+// RoleInput 是写入侧的角色提交项。调用方只提交稳定角色编码与作用域；
+// 平台负责解析为当前目录中的活动角色，禁止用数据库 ID 绕过目录所有权
+// 与受保护角色策略。
 type RoleInput struct {
 	RoleCode        string     `json:"role_code"`
 	ScopeType       string     `json:"scope_type"`
@@ -154,18 +163,21 @@ type RoleInput struct {
 	ValidUntil      *time.Time `json:"valid_until,omitempty"`
 }
 
+// Access 是应用授权的完整视图：按来源分组的角色、有效权限、授权状态与目录
+// 兼容性元数据。AuthorizationState 取 GRANTED/CONFLICT/UNAUTHORIZED；
+// CONFLICT 表示超出应用目录声明的最大有效角色数，此时有效权限为空（fail-closed），
+// 冲突角色编码随 Conflicts 返回供管理界面解释。
 type Access struct {
 	ApplicationCode string     `json:"application_code"`
 	EnvironmentCode string     `json:"environment_code,omitempty"`
 	Roles           []RoleView `json:"roles"`
 	DirectRoles     []RoleView `json:"direct_roles"`
 	InheritedRoles  []RoleView `json:"inherited_roles"`
-	// ManualRoles contains only direct, manually managed user grants. It is
-	// provided so management screens can edit manual access without replacing
-	// template-inherited or system-provisioned bindings.
+	// ManualRoles 在 GetAccess 管理响应中包含未到期的人工 USER 分配（含未来生效）。
+	// 它不是有效权限来源；Roles/DirectRoles/EffectivePermissions 仍仅取当前有效项。
 	ManualRoles []RoleView `json:"manual_roles"`
-	// Role is retained for clients of the old SYS-004 access endpoint.  New clients should use
-	// Roles, which can contain more than one application role.
+	// Role 仅为旧 SYS-004 访问端点的客户端保留。新客户端应使用 Roles，
+	// 后者可承载多个应用角色。
 	Role                 RoleView `json:"role"`
 	RolePermissions      []string `json:"role_permissions"`
 	CustomPermissions    []string `json:"custom_permissions"`
@@ -176,6 +188,9 @@ type Access struct {
 	Conflicts            []string `json:"conflicts"`
 }
 
+// UpdateAccessInput 是用户应用授权的更新入参。RolesProvided 区分"未提供 roles
+// （不修改角色）"与"显式空数组（撤销全部人工直绑）"；CustomPermissionsProvided
+// 恒走拒绝路径——权限只能来自应用目录的角色映射，仅为兼容解码保留。
 type UpdateAccessInput struct {
 	TenantID                  string
 	UserID                    string
@@ -187,6 +202,7 @@ type UpdateAccessInput struct {
 	CustomPermissionsProvided bool
 }
 
+// DeleteAccessInput 撤销用户在指定应用上的全部人工授权。
 type DeleteAccessInput struct {
 	TenantID     string
 	UserID       string
@@ -194,6 +210,7 @@ type DeleteAccessInput struct {
 	OperatorName string
 }
 
+// UpdateSubjectAccessInput 兼容保留的历史组织/岗位写入口入参；当前恒被写策略拒绝。
 type UpdateSubjectAccessInput struct {
 	TenantID      string
 	SubjectType   string
@@ -204,6 +221,7 @@ type UpdateSubjectAccessInput struct {
 	RolesProvided bool
 }
 
+// DeleteSubjectAccessInput 停用单个组织/岗位的直接应用角色绑定。
 type DeleteSubjectAccessInput struct {
 	TenantID     string
 	SubjectType  string
@@ -212,6 +230,9 @@ type DeleteSubjectAccessInput struct {
 	OperatorName string
 }
 
+// TokenAuthorization 是写入平台 OIDC 令牌声明的应用授权快照：角色、有效权限、
+// 组织 claims、目录兼容窗口（CatalogVersion/RoleConfigHash 及兼容列表）与修订号。
+// 子系统以目录哈希和修订号识别授权变化或权限撤销，避免长期复用已失效的权限集合。
 type TokenAuthorization struct {
 	ApplicationCode            string
 	EnvironmentCode            string
@@ -229,9 +250,8 @@ type TokenAuthorization struct {
 	DataScopes                 []tokenissuer.DataScope
 }
 
-// KeycloakAuthorizationSnapshot is the application-scoped authorization result
-// consumed by the Keycloak projection worker. It intentionally reuses the same
-// effective-access calculation as platform-issued OIDC tokens.
+// KeycloakAuthorizationSnapshot 是供 Keycloak 投影 worker 消费的应用级授权结果。
+// 它刻意复用与平台签发 OIDC token 完全相同的有效授权计算，保证两条下发路径口径一致。
 type KeycloakAuthorizationSnapshot struct {
 	TenantID, IdentityID, ApplicationID, ApplicationCode string
 	PersonID, PrimaryOrgID, RoleConfigHash               string
@@ -239,20 +259,46 @@ type KeycloakAuthorizationSnapshot struct {
 	AuthzRevision                                        uint64
 }
 
-func (s *Service) ResolveKeycloakAuthorizationSnapshot(ctx context.Context, tenantID, identityID, applicationID string) (KeycloakAuthorizationSnapshot, error) {
+// ResolveKeycloakAuthorizationSnapshot 解析要写入某一个 Keycloak Client 的有效授权。
+//
+// environmentID 必须是本次投影事件对应的环境：Keycloak Client 是环境级资源，只有
+// 租户级绑定和该环境的环境级绑定可以进入它。曾经不传环境，等于把同应用所有环境的
+// 绑定写进当前 Client——仅授予 dev 的角色会出现在 prod Client 里；平台在线
+// authorization-context 仍有环境校验，但无法纠正已经投出的 Keycloak Client Role。
+func (s *Service) ResolveKeycloakAuthorizationSnapshot(ctx context.Context, tenantID, identityID, applicationID, environmentID string) (KeycloakAuthorizationSnapshot, error) {
+	environmentID = strings.TrimSpace(environmentID)
+	if environmentID == "" {
+		return KeycloakAuthorizationSnapshot{}, validation("environment_id is required for a Keycloak authorization snapshot")
+	}
 	application, err := s.findApplicationByID(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(applicationID))
 	if err != nil {
 		return KeycloakAuthorizationSnapshot{}, err
 	}
-	access, err := s.getAccessByApplication(ctx, tenantID, identityID, application.ID, application.Code, "", "")
-	if err != nil && !errors.Is(err, ErrNotConfigured) {
+	access, err := s.getAccessByApplication(ctx, tenantID, identityID, application.ID, application.Code, environmentID, "")
+	if errors.Is(err, ErrNotConfigured) {
+		roleConfigHash, hashErr := s.loadRoleConfigHash(ctx, tenantID, application.ID)
+		if hashErr != nil {
+			return KeycloakAuthorizationSnapshot{}, hashErr
+		}
+		revision, revisionErr := s.loadRevision(ctx, tenantID, application.ID)
+		if revisionErr != nil {
+			return KeycloakAuthorizationSnapshot{}, revisionErr
+		}
+		access = emptyAccess(application.Code, "", roleConfigHash, revision)
+	} else if err != nil {
 		return KeycloakAuthorizationSnapshot{}, err
 	}
 	roles := make([]string, 0, len(access.Roles))
-	for _, role := range access.Roles {
-		roles = append(roles, role.Code)
+	permissions := []string{}
+	// 被拒绝或冲突的授权必须投影空集合，对账时才会撤销旧的 Keycloak 角色；
+	// 管理侧角色视图不是有效授权，不能进入投影。
+	if access.AuthorizationState == authorizationGranted {
+		for _, role := range access.Roles {
+			roles = append(roles, role.Code)
+		}
+		permissions = append(permissions, access.EffectivePermissions...)
 	}
-	authorization, err := s.attachOrganizationClaims(ctx, TokenAuthorization{TenantID: tenantID, Roles: sortedUnique(roles), Permissions: append([]string(nil), access.EffectivePermissions...), RoleConfigHash: access.RoleConfigHash, AuthzRevision: access.AuthzRevision}, identityID)
+	authorization, err := s.attachOrganizationClaims(ctx, TokenAuthorization{TenantID: tenantID, Roles: sortedUnique(roles), Permissions: permissions, RoleConfigHash: access.RoleConfigHash, AuthzRevision: access.AuthzRevision}, identityID)
 	if err != nil {
 		return KeycloakAuthorizationSnapshot{}, err
 	}
@@ -274,6 +320,7 @@ type applicationRow struct {
 	Code     string `gorm:"column:code"`
 }
 
+// TableName 绑定 GORM 模型到 platform_application 表。
 func (applicationRow) TableName() string { return "platform_application" }
 
 type roleRow struct {
@@ -336,6 +383,10 @@ type catalogRow struct {
 	Effect           string `gorm:"column:effect"`
 }
 
+// ResolveOIDCAuthorization 在 OIDC 登录时把 OAuth Client 解析回目标应用与环境，
+// 基于当前数据库授权快照计算用户的有效角色、权限与组织 claims；有效授权状态非
+// GRANTED 一律返回 ErrAccessDenied。目录哈希与兼容窗口随令牌下发，子系统据此
+// 识别目录变化或权限撤销，避免长期复用已失效的权限集合。
 func (s *Service) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (TokenAuthorization, error) {
 	client, err := s.findClientApplication(ctx, tenantID, clientID)
 	if err != nil {
@@ -401,9 +452,8 @@ func (s *Service) loadCatalogCompatibility(ctx context.Context, tenantID, applic
 func catalogCompatibilityFromMetadata(metadata catalogMetadataRow, fallbackRoleConfigHash string) catalogAuthorizationCompatibility {
 	currentRoleConfigHash := strings.TrimSpace(metadata.ClaimsRoleConfigHash)
 	if currentRoleConfigHash == "" {
-		// Older application catalogs may not publish a claims hash. Keep those
-		// applications compatible with the platform-derived role mapping hash,
-		// while catalogs that do publish one remain authoritative for consumers.
+		// 较早的应用目录可能未发布 claims 哈希。让这些应用继续兼容平台推导的
+		// 角色映射哈希；已发布哈希的目录则以其为消费方的权威值。
 		currentRoleConfigHash = strings.TrimSpace(fallbackRoleConfigHash)
 	}
 	return catalogAuthorizationCompatibility{
@@ -421,9 +471,8 @@ type organizationClaimRow struct {
 	IsPrimary      bool   `gorm:"column:is_primary"`
 }
 
-// attachOrganizationClaims resolves only the user's current direct memberships. It deliberately
-// does not expand organization descendants: downstream systems receive the exact active
-// membership set maintained by the platform.
+// attachOrganizationClaims 只解析用户当前的直接组织成员关系，刻意不展开组织
+// 后代节点：下游系统收到的就是平台维护的精确有效成员集合，不做任何放大。
 func (s *Service) attachOrganizationClaims(ctx context.Context, authorization TokenAuthorization, userID string) (TokenAuthorization, error) {
 	now := s.clock.Now().UTC()
 	rows := make([]organizationClaimRow, 0)
@@ -446,9 +495,8 @@ func (s *Service) attachOrganizationClaims(ctx context.Context, authorization To
 	return authorization, nil
 }
 
-// resolvePMSPersonID returns only the explicit tenant-scoped binding on an active platform user.
-// An absent binding is a valid empty claim and must never be replaced by userID, employee_no, or
-// any login identifier.
+// resolvePMSPersonID 只返回在职平台用户上显式配置的租户内人员绑定。
+// 绑定缺失是合法的空 claim，绝不允许回退为 userID、employee_no 或任何登录标识符。
 func (s *Service) resolvePMSPersonID(ctx context.Context, tenantID, userID string) (string, error) {
 	var row struct {
 		PMSPersonID *string `gorm:"column:pms_person_id"`
@@ -509,28 +557,44 @@ func organizationClaimsFromRows(rows []organizationClaimRow) (string, []string, 
 	return primaryOrgID, organizationIDs, nil
 }
 
+// GetAccess 返回用户在指定应用上的有效授权与完整可编辑人工分配。用户未配置任何授权时返回携带
+// 当前目录哈希与 revision 的空视图（UNAUTHORIZED）而非 ErrNotConfigured，便于
+// 管理界面直接编辑而无需区分"无授权"与"查询失败"。
 func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCode string) (Access, error) {
 	application, err := s.findApplication(ctx, tenantID, applicationCode)
 	if err != nil {
 		return Access{}, err
 	}
 	access, err := s.getAccessByApplication(ctx, tenantID, userID, application.ID, application.Code, "", "")
-	if !errors.Is(err, ErrNotConfigured) {
-		return access, err
+	if err != nil {
+		if !errors.Is(err, ErrNotConfigured) {
+			return Access{}, err
+		}
+		roleConfigHash, hashErr := s.loadRoleConfigHash(ctx, tenantID, application.ID)
+		if hashErr != nil {
+			return Access{}, hashErr
+		}
+		revision, revisionErr := s.loadRevision(ctx, tenantID, application.ID)
+		if revisionErr != nil {
+			return Access{}, revisionErr
+		}
+		access = emptyAccess(application.Code, "", roleConfigHash, revision)
 	}
-	roleConfigHash, hashErr := s.loadRoleConfigHash(ctx, tenantID, application.ID)
-	if hashErr != nil {
-		return Access{}, hashErr
+	roleType := applicationRoleType
+	if application.Code == PlatformApplicationCode {
+		roleType = platformRoleType
 	}
-	revision, revisionErr := s.loadRevision(ctx, tenantID, application.ID)
-	if revisionErr != nil {
-		return Access{}, revisionErr
+	manualRows, err := s.loadManagedManualRoles(ctx, tenantID, application.ID, userID, roleType, s.clock.Now().UTC())
+	if err != nil {
+		return Access{}, err
 	}
-	return emptyAccess(application.Code, "", roleConfigHash, revision), nil
+	_, manualViews, _, _ := resolveAssignedRoles(manualRows, subjectTypeUser)
+	access.ManualRoles = filterManualRoles(manualViews)
+	return access, nil
 }
 
 // HasApplicationGrant 判断指定主体在目标应用上是否存在有效的应用授权（任何活动角色绑定）。
-// 用于子系统代理等"平台权限之外的逐应用授权"复核点；未配置/被拒绝统一返回 false。
+// 这是跨环境聚合查询；环境敏感入口必须使用 HasApplicationEnvironmentGrant。
 func (s *Service) HasApplicationGrant(ctx context.Context, tenantID, userID, applicationCode string) (bool, error) {
 	access, err := s.GetAccess(ctx, tenantID, userID, applicationCode)
 	if err != nil {
@@ -539,6 +603,48 @@ func (s *Service) HasApplicationGrant(ctx context.Context, tenantID, userID, app
 	return access.AuthorizationState == authorizationGranted, nil
 }
 
+// HasApplicationEnvironmentGrant 判断用户在某个活动环境上的有效授权。与管理侧
+// 聚合查询不同，空环境或未知环境绝不能被解释为对该应用所有环境的访问。
+func (s *Service) HasApplicationEnvironmentGrant(ctx context.Context, tenantID, userID, applicationCode, environmentCode string) (bool, error) {
+	tenantID, userID = strings.TrimSpace(tenantID), strings.TrimSpace(userID)
+	applicationCode, environmentCode = strings.TrimSpace(applicationCode), strings.TrimSpace(environmentCode)
+	if tenantID == "" || userID == "" || applicationCode == "" || environmentCode == "" {
+		return false, validation("tenant_id, user_id, application_code and environment are required")
+	}
+	application, err := s.findApplication(ctx, tenantID, applicationCode)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var environment struct{ ID string }
+	err = s.db.WithContext(ctx).Table("platform_application_environment").Select("id").
+		Where("tenant_id = ? AND application_id = ? AND environment = ? AND status = ?", tenantID, application.ID, environmentCode, activeStatus).
+		Take(&environment).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load application grant environment: %w", err)
+	}
+	if strings.TrimSpace(environment.ID) == "" {
+		return false, nil
+	}
+	access, err := s.getAccessByApplication(ctx, tenantID, userID, application.ID, application.Code, environment.ID, environmentCode)
+	if errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrAccessDenied) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return access.AuthorizationState == authorizationGranted, nil
+}
+
+// UpdateAccess 以集合对账方式替换用户的 MANUAL 直绑：保留未变化绑定的 ID 与审计链，
+// 停用本次不再需要的绑定；模板与系统来源不受本次编辑影响。变更与 revision 推进、
+// Keycloak 投影入队同事务提交，并记录 HIGH 风险审计（含变更前后差异）。
+// 部分更新语义：未提供 roles 时不修改角色；提供 custom_permissions 恒被拒绝。
 func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applicationCode string) (Access, error) {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.UserID = strings.TrimSpace(in.UserID)
@@ -611,6 +717,10 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	})
 	return access, nil
 }
+
+// DeleteAccess 逻辑撤销用户在指定应用上的全部人工授权：停用 MANUAL 直绑并清理
+// 历史自定义权限，不触碰岗位模板等可追溯来源；若用户仍有继承角色，有效视图如实
+// 保留。无变更时同样返回成功，仍记录审计以便追溯操作者。
 func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applicationCode string) error {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.UserID = strings.TrimSpace(in.UserID)
@@ -674,9 +784,8 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	return nil
 }
 
-// enqueueKeycloakAuthorizationOutbox is deliberately invoked inside the same
-// transaction as a direct user authorization mutation. A committed role change
-// can therefore never be silently omitted from the Keycloak projection queue.
+// enqueueKeycloakAuthorizationOutbox 刻意与直接的用户授权变更放在同一事务内调用。
+// 因此已提交的角色变更绝不会被悄悄漏出 Keycloak 投影队列。
 func (s *Service) enqueueKeycloakAuthorizationOutbox(tx *gorm.DB, tenantID, userID, applicationID string, now time.Time, eventType string) error {
 	var environmentIDs []string
 	if err := tx.Table("keycloak_application_client_mapping").
@@ -700,9 +809,8 @@ func (s *Service) enqueueKeycloakAuthorizationOutbox(tx *gorm.DB, tenantID, user
 	return nil
 }
 
-// enqueueSubjectUsers fans a legacy organization or position binding change out to the users
-// whose current effective authorization includes that subject. It shares the revocation
-// transaction, preserving the worker's normal PENDING retry behavior.
+// enqueueSubjectUsers 把一次历史遗留的组织/岗位绑定变更扇出到当前有效授权包含该
+// 主体的所有用户。它与撤销操作共用同一事务，保持 worker 原有的 PENDING 重试语义。
 func (s *Service) enqueueSubjectUsers(tx *gorm.DB, tenantID, subjectType, subjectID, applicationID string, now time.Time) error {
 	var userIDs []string
 	query := tx.Table("iam_membership AS membership").
@@ -728,9 +836,8 @@ func (s *Service) enqueueSubjectUsers(tx *gorm.DB, tenantID, subjectType, subjec
 	return nil
 }
 
-// GetSubjectAccess returns bindings assigned directly to an organization unit or position.
-// Unlike GetAccess, it never expands memberships because the requested subject is the managed
-// authorization principal itself.
+// GetSubjectAccess 返回直接分配给组织单元或岗位的绑定。与 GetAccess 不同，
+// 它从不展开成员关系：被查询的主体本身就是被管理的授权主体。
 func (s *Service) GetSubjectAccess(ctx context.Context, tenantID, subjectType, subjectID, applicationCode string) (Access, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	subjectID = strings.TrimSpace(subjectID)
@@ -764,11 +871,9 @@ func (s *Service) GetSubjectAccess(ctx context.Context, tenantID, subjectType, s
 	return emptyAccess(application.Code, "", roleConfigHash, revision), nil
 }
 
-// UpdateSubjectAccess is retained as a compatibility boundary for callers of the historical
-// organization/position write endpoint. Standard personnel authorization is now materialized
-// exclusively by position authorization templates, so this method always rejects manual writes.
-// Existing MANUAL bindings remain visible through GetSubjectAccess and can be cleaned up through
-// DeleteSubjectAccess.
+// UpdateSubjectAccess 作为历史组织/岗位写端点调用方的兼容边界保留。标准人员授权
+// 现在完全由岗位授权模板物化，因此本方法恒拒绝人工写入。存量 MANUAL 绑定仍可经
+// GetSubjectAccess 查看，并可通过 DeleteSubjectAccess 清理。
 func (s *Service) UpdateSubjectAccess(ctx context.Context, in UpdateSubjectAccessInput, applicationCode string) (Access, error) {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.SubjectID = strings.TrimSpace(in.SubjectID)
@@ -784,7 +889,7 @@ func (s *Service) UpdateSubjectAccess(ctx context.Context, in UpdateSubjectAcces
 	return Access{}, validateSubjectAccessWritePolicy(subjectType)
 }
 
-// DeleteSubjectAccess disables only the selected organization or position's direct bindings.
+// DeleteSubjectAccess 仅停用所选组织/岗位自身的直接绑定，不影响其成员用户。
 func (s *Service) DeleteSubjectAccess(ctx context.Context, in DeleteSubjectAccessInput, applicationCode string) error {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.SubjectID = strings.TrimSpace(in.SubjectID)
@@ -837,9 +942,8 @@ func (s *Service) DeleteSubjectAccess(ctx context.Context, in DeleteSubjectAcces
 	return nil
 }
 
-// IsApplicationOwner reports whether the authenticated user owns the application.
-// Application owners may synchronize their own authorization catalog without receiving
-// broad platform administration permissions.
+// IsApplicationOwner 报告认证用户是否为该应用的属主。应用属主可以同步自己应用的
+// 授权目录，但不会因此获得任何平台级管理权限。
 func (s *Service) IsApplicationOwner(ctx context.Context, tenantID, applicationID, userID string) (bool, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(applicationID) == "" || strings.TrimSpace(userID) == "" {
 		return false, validation("tenant_id, application_id and user_id are required")
@@ -862,10 +966,9 @@ func normalizeManagedSubjectType(subjectType string) (string, error) {
 	return subjectType, nil
 }
 
-// validateSubjectAccessWritePolicy prevents the generic application-access endpoint from
-// becoming a second standard-authorization mechanism. Organization and position bindings that
-// predate position templates are migration residue: administrators may inspect and revoke them,
-// but only the positiongrant materializer may create TEMPLATE-origin POSITION bindings.
+// validateSubjectAccessWritePolicy 防止通用应用访问端点演化为第二套标准授权机制。
+// 早于岗位模板的组织/岗位绑定属迁移残留：管理员可以查看和撤销，但只有 positiongrant
+// 物化器可以创建 TEMPLATE 来源的 POSITION 绑定。
 func validateSubjectAccessWritePolicy(subjectType string) error {
 	switch subjectType {
 	case subjectTypeOrgUnit, subjectTypePosition:
@@ -901,10 +1004,9 @@ func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, application
 	resolved := make([]resolvedBinding, 0, len(roles))
 	for _, role := range roles {
 		var roleRecord roleRow
-		// Application access is an application-owned boundary. Platform control-plane roles
-		// must only be managed by the generic, protected role-binding API. Keeping the role
-		// type predicate here prevents a platform-super-admin assignment from being smuggled
-		// through an application access update.
+		// 应用访问是应用自有的边界。平台控制面角色只能由通用且受保护的角色绑定
+		// API 管理。在此保留 role_type 谓词，可防止 platform-super-admin 授予
+		// 借应用授权更新被夹带写入。
 		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type = ?", tenantID, applicationID, activeStatus, role.RoleCode, applicationRoleType).Take(&roleRecord).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, validation("one or more application roles do not exist or are disabled")
@@ -939,10 +1041,9 @@ func ensureApplicationAccessRole(role roleRow) error {
 	return nil
 }
 
-// validateDirectRoleLimit rejects a role set that the target application can never
-// authorize. This protects management writes from persisting an immediately
-// conflicting direct assignment. Cross-source conflicts remain fail-closed at
-// authorization resolution because they depend on effective memberships.
+// validateDirectRoleLimit 拒绝目标应用永远无法授权的角色集合，防止管理写入
+// 持久化一条立即冲突的直接分配。跨来源冲突依赖有效成员关系，仍留待授权
+// 解析时 fail-closed。
 func (s *Service) validateDirectRoleLimit(ctx context.Context, tenantID, applicationID string, resolved []resolvedBinding) error {
 	policy, err := s.ResolveApplicationAuthorizationPolicy(ctx, tenantID, applicationID)
 	if err != nil {
@@ -962,15 +1063,15 @@ func validateMaximumRoleCount(maximum int, roleIDs []string) error {
 	return validation("the selected roles exceed the application's maximum effective role count")
 }
 
-// replaceManualUserRoleBindings owns only MANUAL USER grants. Keeping USER fixed inside this
-// persistence helper makes it impossible for a future caller to accidentally use it for ACCOUNT,
-// ORG_UNIT or POSITION bindings; TEMPLATE and SYSTEM rows are excluded by the query predicate.
+// replaceManualUserRoleBindings 只负责 MANUAL USER 授予。把 USER 固定在本持久化
+// 辅助函数内部，使未来的调用方不可能误将其用于 ACCOUNT、ORG_UNIT 或 POSITION
+// 绑定；TEMPLATE 与 SYSTEM 行由查询谓词排除在外。
 func (s *Service) replaceManualUserRoleBindings(tx *gorm.DB, tenantID, applicationID, userID, operatorID string, resolved []resolvedBinding, now time.Time) (bool, error) {
 	// 采用集合对账而非“全删全建”：保留未变化绑定的 ID 和审计链，恢复历史同源
 	// 绑定时递增版本；只将本次不再需要的 MANUAL 绑定置为 DISABLED。
 	var existing []bindingRow
 	directClause, directArgs := manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID)
-	if err := tx.Table("authz_role_binding AS rb").Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", applicationRoleType).Find(&existing).Error; err != nil {
+	if err := tx.Table("authz_role_binding AS rb").Clauses(clause.Locking{Strength: "UPDATE"}).Select("rb.id, rb.role_id, rb.scope_type, rb.scope_id, rb.valid_from, rb.valid_until, rb.status, rb.version").Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").Where(directClause, directArgs...).Where("r.role_type = ?", applicationRoleType).Find(&existing).Error; err != nil {
 		return false, fmt.Errorf("load existing application role bindings: %w", err)
 	}
 	key := func(roleID, scopeType, scopeID string) string { return roleID + "\x00" + scopeType + "\x00" + scopeID }
@@ -981,6 +1082,27 @@ func (s *Service) replaceManualUserRoleBindings(tx *gorm.DB, tenantID, applicati
 	desired := make(map[string]resolvedBinding, len(resolved))
 	for _, item := range resolved {
 		desired[key(item.roleID, item.scopeType, item.scopeID)] = item
+	}
+	// 在本事务任何写入之前验证全部新增/扩大项，不能先给操作者自己授权再据此
+	// 通过后续角色的委派检查。不变、缩短与撤销仍允许，避免失去业务权限后无法收权。
+	for _, item := range resolved {
+		contained := false
+		for _, old := range existing {
+			scopeCovered := (old.ScopeType == item.scopeType && old.ScopeID == item.scopeID) ||
+				(old.ScopeType == scopeTypeTenant && old.ScopeID == "" && item.scopeType == scopeTypeEnvironment)
+			if old.RoleID == item.roleID && old.Status == activeStatus && scopeCovered &&
+				(old.ValidFrom == nil || (item.role.ValidFrom != nil && !item.role.ValidFrom.Before(*old.ValidFrom))) &&
+				(old.ValidUntil == nil || (item.role.ValidUntil != nil && !item.role.ValidUntil.After(*old.ValidUntil))) {
+				contained = true
+				break
+			}
+		}
+		if contained {
+			continue
+		}
+		if err := delegation.VerifyRolePermissions(tx.Statement.Context, tx, tenantID, operatorID, applicationID, item.roleID); err != nil {
+			return false, fmt.Errorf("verify application role delegation: %w", err)
+		}
 	}
 	changed := false
 	for _, binding := range existing {
@@ -1207,9 +1329,8 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 	return access, nil
 }
 
-// applicationRolePolicy applies the target application's catalog-declared
-// effective-role limit. The platform never derives this rule from an
-// application code, a role name, or a permission code.
+// applicationRolePolicy 应用目标应用目录声明的最大有效角色数限制。
+// 该规则绝不从应用编码、角色名称或权限编码推导。
 func (s *Service) applicationRolePolicy(ctx context.Context, tenantID, applicationID string, rows []assignedRoleRow, roleIDs []string) (string, []string, []string, error) {
 	policy, err := s.ResolveApplicationAuthorizationPolicy(ctx, tenantID, applicationID)
 	if err != nil {
@@ -1219,10 +1340,9 @@ func (s *Service) applicationRolePolicy(ctx context.Context, tenantID, applicati
 	return state, conflicts, permittedRoleIDs, nil
 }
 
-// applyApplicationRolePolicy is intentionally side-effect free so the limit
-// semantics remain independently testable. Rows are used only to provide a
-// stable, administrator-readable conflict list; role IDs determine effective
-// cardinality because they are the actual assigned role records.
+// applyApplicationRolePolicy 刻意保持无副作用，使角色数上限语义可独立测试。
+// rows 仅用于生成稳定、管理员可读的冲突列表；有效角色数以角色 ID 为准，
+// 因为它们才是实际被授予的角色记录。
 func applyApplicationRolePolicy(policy ApplicationAuthorizationPolicy, rows []assignedRoleRow, roleIDs []string) (string, []string, []string) {
 	distinctRoleIDs := sortedUnique(roleIDs)
 	if len(distinctRoleIDs) == 0 {
@@ -1256,9 +1376,8 @@ func applyApplicationRolePolicy(policy ApplicationAuthorizationPolicy, rows []as
 	return authorizationConflict, sortedUnique(conflicts), []string{}
 }
 
-// validateCustomPermissionsUpdate enforces the platform boundary: applications
-// publish their role-permission catalog, while the platform assigns roles only.
-// Historical authz_user_permission rows are never read for authorization.
+// validateCustomPermissionsUpdate 强制平台边界：应用发布角色-权限目录，
+// 平台只负责授予角色。历史 authz_user_permission 行永不参与授权判定。
 func validateCustomPermissionsUpdate(customPermissionsProvided bool) error {
 	if customPermissionsProvided {
 		return validation("custom_permissions are not supported; assign an application role instead")
@@ -1266,9 +1385,8 @@ func validateCustomPermissionsUpdate(customPermissionsProvided bool) error {
 	return nil
 }
 
-// effectivePermissionsForApplication derives every effective permission from the
-// synchronized application role catalog. A conflict fails closed and an
-// unconfigured user cannot receive permissions from historical direct grants.
+// effectivePermissionsForApplication 从已同步的应用角色目录推导全部有效权限。
+// 冲突状态一律 fail-closed；未配置授权的用户不可能经历史直绑获得任何权限。
 func effectivePermissionsForApplication(state string, rolePermissions []string) ([]string, error) {
 	if state == authorizationConflict {
 		return []string{}, nil
@@ -1301,10 +1419,8 @@ func resolveAssignedRoles(rows []assignedRoleRow, directSubjectType string) ([]s
 	seenBindings := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
 		roleIDs = append(roleIDs, row.RoleID)
-		// Provenance is part of a displayed binding. A manual and a template binding can
-		// legitimately grant the same role from the same position and must remain
-		// separately traceable, even though the effective role count is de-duplicated by
-		// role ID below.
+		// 来源标记是展示绑定的一部分。人工绑定与模板绑定可以合法地从同一岗位
+		// 授予同一角色，必须保持各自可追溯；有效角色数在下文按角色 ID 去重。
 		bindingKey := row.RoleID + "\x00" + row.SubjectType + "\x00" + row.SubjectID + "\x00" + row.ScopeType + "\x00" + row.ScopeID + "\x00" + normalizedGrantOrigin(row.GrantOrigin) + "\x00" + row.OriginID + "\x00" + row.OriginItemID
 		if _, exists := seenBindings[bindingKey]; exists {
 			continue
@@ -1403,8 +1519,8 @@ func applicationAccessSubjectFilter(userID string, now time.Time) (string, []any
 
 func applicationAccessScopeFilter(environmentID string) (string, []any) {
 	if strings.TrimSpace(environmentID) == "" {
-		// Management reads return all environment-specific bindings so administrators can see
-		// the complete assignment set. OIDC always supplies an environment ID.
+		// 管理侧读取返回全部环境级绑定，让管理员看到完整分配集合；
+		// OIDC 链路则必定携带环境 ID。
 		return "((rb.scope_type = ? AND rb.scope_id = ?) OR rb.scope_type = ?)", []any{scopeTypeTenant, "", scopeTypeEnvironment}
 	}
 	return "((rb.scope_type = ? AND rb.scope_id = ?) OR (rb.scope_type = ? AND rb.scope_id = ?))", []any{scopeTypeTenant, "", scopeTypeEnvironment, environmentID}
@@ -1419,8 +1535,8 @@ func manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID st
 	return clause + " AND rb.grant_origin = ?", append(args, grantOriginManual)
 }
 
-// directApplicationRoleBindingFilter is retained for callers/tests that need the subject-only
-// predicate. Mutation code uses the manual variant so template/system bindings are protected.
+// directApplicationRoleBindingFilter 仅为需要"仅按主体过滤"谓词的调用方/测试保留。
+// 变更代码一律使用 manual 变体，使模板/系统绑定处于写保护之下。
 func directApplicationRoleBindingFilter(tenantID, applicationID, userID string) (string, []any) {
 	return subjectRoleBindingFilter(tenantID, applicationID, subjectTypeUser, userID)
 }
@@ -1459,9 +1575,9 @@ func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID,
 	return rows, nil
 }
 
-// loadInheritedPlatformRoles resolves direct USER bindings to platform roles through the same
-// explicit inheritance mappings used by position templates. The result is query-only: target
-// subsystem bindings are not copied to the user, and provenance remains the source platform role.
+// loadInheritedPlatformRoles 经与岗位模板相同的显式继承映射，把用户对平台角色的
+// 直接 USER 绑定解析到目标应用角色。结果只读：目标子系统绑定不会被复制给用户，
+// 来源标记仍是源平台角色。
 func (s *Service) loadInheritedPlatformRoles(ctx context.Context, tenantID, targetApplicationID, userID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
 	type inheritedRow struct {
 		RoleID, Code, Name, ScopeType, ScopeID, EnvironmentCode string
@@ -1503,6 +1619,26 @@ func (s *Service) loadInheritedPlatformRoles(ctx context.Context, tenantID, targ
 	return result, nil
 }
 
+// loadManagedManualRoles 是管理集合，不参与有效角色/权限计算。未来分配必须可见，
+// 否则管理界面以有效视图提交完整集合时，会把尚未生效的分配置为 DISABLED。
+func (s *Service) loadManagedManualRoles(ctx context.Context, tenantID, applicationID, userID, roleType string, now time.Time) ([]assignedRoleRow, error) {
+	var rows []assignedRoleRow
+	filter, args := manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID)
+	scopeFilter, scopeArgs := applicationAccessScopeFilter("")
+	err := s.db.WithContext(ctx).Table("authz_role_binding AS rb").
+		Select("r.id AS role_id, r.code, r.name, rb.scope_type, rb.scope_id, e.environment AS environment_code, rb.valid_from, rb.valid_until, rb.subject_type, rb.subject_id, rb.grant_origin, rb.origin_id, rb.origin_item_id, COALESCE(u.display_name, '') AS source_name").
+		Joins("JOIN authz_role AS r ON r.id=rb.role_id AND r.tenant_id=rb.tenant_id AND r.application_id=rb.application_id AND r.status=? AND r.role_type=?", activeStatus, roleType).
+		Joins("LEFT JOIN platform_application_environment AS e ON e.id=rb.scope_id AND e.application_id=rb.application_id AND e.tenant_id=rb.tenant_id").
+		Joins("LEFT JOIN iam_user AS u ON u.id=rb.subject_id AND u.tenant_id=rb.tenant_id").
+		Where(filter, args...).Where("rb.status=?", activeStatus).
+		Where("rb.valid_until IS NULL OR rb.valid_until > ?", now).
+		Where(scopeFilter, scopeArgs...).Order("r.code ASC, rb.scope_type ASC, rb.scope_id ASC").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("load editable manual application assignments: %w", err)
+	}
+	return rows, nil
+}
+
 func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID, userID, environmentID string, now time.Time, roleType string) ([]assignedRoleRow, error) {
 	// 用户直绑、组织绑定和岗位绑定在查询时合并；组织/岗位来源仅对当前有效且允许
 	// 继承授权的任职生效，因此任职调整无需等待重新登录。
@@ -1538,9 +1674,8 @@ func (s *Service) loadGenericRoles(ctx context.Context, tenantID, applicationID,
 	return rows, nil
 }
 
-// isPlatformSuperAdmin deliberately checks the protected platform role directly.
-// Looking for a display name or an application role called "admin" would make the
-// cross-application elevation dependent on mutable catalog data.
+// isPlatformSuperAdmin 刻意直接检查受保护的平台角色。若改为查找显示名或名为
+// "admin" 的应用角色，跨应用提权将取决于可变的目录数据。
 func (s *Service) isPlatformSuperAdmin(ctx context.Context, tenantID, userID string, now time.Time) (bool, error) {
 	var count int64
 	err := s.db.WithContext(ctx).Table("authz_role_binding AS binding").
@@ -1555,10 +1690,8 @@ func (s *Service) isPlatformSuperAdmin(ctx context.Context, tenantID, userID str
 	return count > 0, nil
 }
 
-// expandSuperAdminApplicationRoles creates an in-memory effective-role view for
-// every active application role. It intentionally does not persist bindings: a
-// catalog update becomes effective immediately, while ordinary user assignments
-// remain auditable and unchanged.
+// expandSuperAdminApplicationRoles 为每个活动应用角色构建内存态有效角色视图，
+// 刻意不持久化任何绑定：目录更新即刻生效，普通用户授予保持可审计且不变。
 func (s *Service) expandSuperAdminApplicationRoles(ctx context.Context, tenantID, applicationID, applicationCode string, existing []assignedRoleRow) ([]assignedRoleRow, error) {
 	var rows []assignedRoleRow
 	err := s.db.WithContext(ctx).Table("authz_role").
@@ -1627,9 +1760,8 @@ func (s *Service) loadRolePermissions(ctx context.Context, tenantID, application
 }
 
 func (s *Service) loadRoleConfigHash(ctx context.Context, tenantID, applicationID string) (string, error) {
-	// A subsystem may publish an opaque configuration hash for its own Claims
-	// compatibility contract. The base platform deliberately does not inspect or
-	// recompute that value from business role/permission semantics.
+	// 子系统可为其自身的 Claims 兼容契约发布不透明配置哈希。基础平台刻意不检查、
+	// 也不从业务角色/权限语义重算该值。
 	var metadata catalogMetadataRow
 	err := s.db.WithContext(ctx).Table("authz_authorization_catalog").
 		Select("claims_role_config_hash").
@@ -1642,8 +1774,8 @@ func (s *Service) loadRoleConfigHash(ctx context.Context, tenantID, applicationI
 		return "", fmt.Errorf("load application claims role configuration hash: %w", err)
 	}
 
-	// Catalogs that do not publish an application-specific Claims hash retain a
-	// generic, deterministic mirror hash. This is a fallback, not a per-app rule.
+	// 未发布应用级 Claims 哈希的目录保留一个通用的确定性镜像哈希。
+	// 这是兜底值，不是按应用定制的规则。
 	var rows []catalogRow
 	err = s.db.WithContext(ctx).Table("authz_role AS r").Select("r.code AS role_code, p.code AS permission_code, rp.effect").
 		Joins("LEFT JOIN authz_role_permission AS rp ON rp.role_id = r.id").
@@ -1656,10 +1788,9 @@ func (s *Service) loadRoleConfigHash(ctx context.Context, tenantID, applicationI
 	return roleConfigHash(rows), nil
 }
 
-// roleConfigHash is the generic catalog version carried in tokens when the
-// application did not publish an explicit Claims compatibility hash. It hashes
-// synchronized role-permission mappings only: role names, source type and
-// built-in flags are presentation/provenance metadata, not authorization policy.
+// roleConfigHash 是应用未发布显式 Claims 兼容哈希时随令牌下发的通用目录版本。
+// 它只对已同步的角色-权限映射做哈希：角色名、来源类型与内置标记属于展示/
+// 来源元数据，不参与授权策略。
 func roleConfigHash(rows []catalogRow) string {
 	parts := make([]string, 0, len(rows))
 	for _, row := range rows {

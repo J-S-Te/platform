@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Discovery serves the provider metadata required by OpenID Connect relying parties.
+// Discovery 提供 OpenID Connect relying party 所需的提供方元数据。
 func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -43,7 +43,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 	}, false)
 }
 
-// JWKS serves only the OIDC manager's public signing material.
+// JWKS 仅提供 OIDC 管理器的公开签名材料。
 func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)

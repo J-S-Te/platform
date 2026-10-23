@@ -100,6 +100,7 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   file-gateway-mysql:
+    restart: unless-stopped
     image: ${FILE_GATEWAY_MYSQL_IMAGE:-mysql:8.4}
     environment:
       MYSQL_DATABASE: ${FILE_GATEWAY_DB_NAME:-file_gateway}
@@ -243,11 +244,11 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   docker-socket-proxy:
-    image: ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459}
+    pull_policy: never
     environment:
-      # HAProxy 3.4 rejects the abbreviation "warn"; the accepted level name
-      # is "warning".  A bad value otherwise leaves the container restarting
-      # while Compose may already start the dependent Agent.
+      # HAProxy 3.4 拒绝缩写“warn”，接受的级别名称为“warning”。错误值会导致容器持续重启，
+      # 而 Compose 可能已经启动依赖它的 Agent。
       LOG_LEVEL: warning
       POST: "1"        # compose up/down/run 需要非 GET 方法
       CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
@@ -378,6 +379,7 @@ services:
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
   file-gateway:
+    restart: unless-stopped
     image: ${FILE_GATEWAY_IMAGE:?FILE_GATEWAY_IMAGE must be set}
     # SEC-N10d：补 env_file——file-gateway 与平台服务同源读取 0600 运行环境文件，
     # 使部署脚本注入的 FILE_GATEWAY_* 配置直达容器（environment 显式键仍优先生效）。
@@ -397,6 +399,10 @@ services:
       FILE_GATEWAY_RECONCILIATION_INTERVAL: ${FILE_GATEWAY_RECONCILIATION_INTERVAL:-1m}
       FILE_GATEWAY_RECONCILIATION_STALE_AFTER: ${FILE_GATEWAY_RECONCILIATION_STALE_AFTER:-15m}
       FILE_GATEWAY_RECONCILIATION_BATCH_SIZE: ${FILE_GATEWAY_RECONCILIATION_BATCH_SIZE:-100}
+      FILE_GATEWAY_CLEANUP_ENABLED: ${FILE_GATEWAY_CLEANUP_ENABLED:-true}
+      FILE_GATEWAY_CLEANUP_INTERVAL: ${FILE_GATEWAY_CLEANUP_INTERVAL:-1h}
+      FILE_GATEWAY_CLEANUP_MINIMUM_AGE: ${FILE_GATEWAY_CLEANUP_MINIMUM_AGE:-24h}
+      FILE_GATEWAY_CLEANUP_BATCH_SIZE: ${FILE_GATEWAY_CLEANUP_BATCH_SIZE:-100}
       FILE_GATEWAY_TOKEN_ISSUER: ${AUTH_JWT_ISSUER:?AUTH_JWT_ISSUER must be set}
       FILE_GATEWAY_TOKEN_AUDIENCE: ${AUTH_APPLICATION_JWT_AUDIENCE:?AUTH_APPLICATION_JWT_AUDIENCE must be set}
       FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
@@ -626,10 +632,8 @@ services:
     env_file:
       - path: ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
         required: false
-    # OIDC_* is deliberately owned by the per-environment runtime file.  Do not
-    # add a compose-level default here: that would overwrite an environment that
-    # has not migrated to Keycloak and make all contract environments share one
-    # authentication provider.
+    # OIDC_* 刻意由各环境的运行配置文件管理。不要在 Compose 层添加默认值，否则会覆盖尚未迁移到 Keycloak 的环境，
+    # 并让所有合同环境共用同一认证提供方。
     environment:
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
@@ -675,10 +679,8 @@ services:
         required: false
       - path: runtime/license-contract-api.env
         required: false
-    # OIDC_* is deliberately owned by the per-environment runtime file.  Do not
-    # add a compose-level default here: that would overwrite an environment that
-    # has not migrated to Keycloak and make all contract environments share one
-    # authentication provider.
+    # OIDC_* 刻意由各环境的运行配置文件管理。不要在 Compose 层添加默认值，否则会覆盖尚未迁移到 Keycloak 的环境，
+    # 并让所有合同环境共用同一认证提供方。
     networks: [application]
     volumes:
       - license-state-contract-api:/var/lib/commercial-license
@@ -743,7 +745,7 @@ services:
     cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
-  # API and Worker deliberately use separate runtime identities and state.
+  # API 与 Worker 刻意使用独立的运行时身份和状态。
   contract-worker:
     image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
     env_file:
@@ -824,9 +826,7 @@ services:
     env_file:
       - path: ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
         required: false
-    # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
-    # per environment preserves both the platform-OIDC compatibility path and
-    # the Keycloak migration path.
+    # OIDC_* 只从 runtime/project.env 读取。按环境维护配置，以同时保留平台 OIDC 兼容路径和 Keycloak 迁移路径。
     environment:
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
@@ -836,7 +836,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: project-management
-      PROJECT_RUN_WORKER_WITH_API: "true"
+      PROJECT_RUN_WORKER_WITH_API: "false"
       GIN_MODE: release
     networks: [application]
     volumes:
@@ -863,9 +863,7 @@ services:
         required: false
       - path: runtime/license-project-api.env
         required: false
-    # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
-    # per environment preserves both the platform-OIDC compatibility path and
-    # the Keycloak migration path.
+    # OIDC_* 只从 runtime/project.env 读取。按环境维护配置，以同时保留平台 OIDC 兼容路径和 Keycloak 迁移路径。
     environment:
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
@@ -875,7 +873,8 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: project-management
-      PROJECT_RUN_WORKER_WITH_API: "true"
+      PROJECT_RUN_WORKER_WITH_API: "false"
+      PROJECT_BACKGROUND_BUILD_ID: ${PROJECT_BACKGROUND_BUILD_ID:-}
       GIN_MODE: release
     networks: [application]
     volumes:
@@ -931,9 +930,7 @@ services:
         required: false
       - path: runtime/license-project-sla-notifier.env
         required: false
-    # OIDC_* is intentionally read only from runtime/project.env.  Keeping it
-    # per environment preserves both the platform-OIDC compatibility path and
-    # the Keycloak migration path.
+    # OIDC_* 只从 runtime/project.env 读取。按环境维护配置，以同时保留平台 OIDC 兼容路径和 Keycloak 迁移路径。
     networks: [application]
     volumes:
       - license-state-project-sla-notifier:/var/lib/commercial-license
@@ -943,25 +940,27 @@ services:
     environment:
       PM_HTTP_ADDR: :8082
       PLATFORM_BASE_URL: http://platform-api:8080
-      SLA_SCAN_TENANTS: ${PROJECT_SLA_SCAN_TENANTS:-}
       NOTIFICATION_ENABLED: "true"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      PROJECT_BACKGROUND_BUILD_ID: ${PROJECT_BACKGROUND_BUILD_ID:-}
     depends_on:
       project-mysql:
+        condition: service_healthy
+      temporal:
         condition: service_healthy
       platform-api:
         condition: service_healthy
     healthcheck:
-      # 该 Worker 不提供 HTTP 端口，但受控发布使用 `docker compose up --wait`。
-      # 用 PID 1 存活探针让 Compose 能区分“持续运行”与“启动后立即退出”，同时
-      # 避免把无健康检查的长期服务误判为部署失败。
-      test: ["CMD-SHELL", "kill -0 1"]
+      # bootstrap允许未提升/许可暂停；受控完成还须单独verify routing/execution。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$${PROJECT_BACKGROUND_HEALTH_ADDRESS:-127.0.0.1:9093}/healthz"]
       interval: 10s
       timeout: 3s
       retries: 6
       start_period: 5s
 
   # 结算与开票服务拥有独立数据库；发布顺序固定为数据库健康、迁移、API、Worker。
-    stop_grace_period: 60s
+    stop_grace_period: 420s
     logging:
       driver: json-file
       options:
@@ -1008,9 +1007,8 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1058,9 +1056,8 @@ services:
         required: false
       - path: runtime/license-customer-api.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1135,9 +1132,8 @@ services:
         required: false
       - path: runtime/license-customer-opportunity-alert-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1186,9 +1182,8 @@ services:
         required: false
       - path: runtime/license-customer-owner-notification-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1230,6 +1225,47 @@ services:
     cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
+  customer-contract-transfer-worker:
+    image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
+    env_file:
+      - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+        required: false
+      - path: runtime/license-customer-contract-transfer-worker.env
+        required: false
+    command: ["./contract-transfer-worker"]
+    environment:
+      PLATFORM_BASE_URL: http://platform-api:8080
+    networks: [application]
+    volumes:
+      - license-state-customer-contract-transfer-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    depends_on:
+      customer-mysql:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    labels:
+      com.basic-platform.application_code: customer_and_opportunity
+      com.basic-platform.environment: prod
+      com.basic-platform.service_name: customer-contract-transfer-worker
+      com.basic-platform.service_role: worker
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/contract-transfer-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
   customer-presale-alert-worker:
     image: ${CUSTOMER_CRM_IMAGE:-customer-opportunity/crm:pending}
     env_file:
@@ -1237,9 +1273,8 @@ services:
         required: false
       - path: runtime/license-customer-presale-alert-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1288,9 +1323,8 @@ services:
         required: false
       - path: runtime/license-customer-presale-assignment-notification-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1339,9 +1373,8 @@ services:
         required: false
       - path: runtime/license-customer-presale-progress-notification-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1390,9 +1423,8 @@ services:
         required: false
       - path: runtime/license-customer-notification-delivery-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     environment:
       APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
@@ -1444,9 +1476,8 @@ services:
         required: false
       - path: runtime/license-customer-presale-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     networks: [application]
     volumes:
       - license-state-customer-presale-worker:/var/lib/commercial-license
@@ -1521,8 +1552,7 @@ services:
     env_file:
       - path: ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
         required: false
-    # PORTAL_OIDC_* stays in runtime/portal.env.  It is independently switched
-    # by the authentication control plane and must not inherit global values.
+    # PORTAL_OIDC_* 保留在 runtime/portal.env，由认证控制面独立切换，不得继承全局值。
     environment:
       PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
@@ -1561,8 +1591,7 @@ services:
         required: false
       - path: runtime/license-portal-api.env
         required: false
-    # PORTAL_OIDC_* stays in runtime/portal.env.  It is independently switched
-    # by the authentication control plane and must not inherit global values.
+    # PORTAL_OIDC_* 保留在 runtime/portal.env，由认证控制面独立切换，不得继承全局值。
     environment:
       PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
       PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
@@ -1579,6 +1608,7 @@ services:
     networks: [application]
     volumes:
       - license-state-portal-api:/var/lib/commercial-license
+      - portal-reports-data:/app/data/portal-reports
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     command: ["./portal-server"]
@@ -1626,19 +1656,16 @@ services:
         required: false
       - path: runtime/license-portal-invite-compensation-worker.env
         required: false
-    # OIDC_* is deliberately owned by runtime/customer.env for this exact
-    # application/environment.  Compose must not provide a global Keycloak
-    # default because existing environments may still use the platform issuer.
+    # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
+    # 因为已有环境仍可能使用平台签发者。
     networks: [application]
     volumes:
       - license-state-portal-invite-compensation-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     restart: unless-stopped
     # CRM 未启用或未接入时，启动脚本跳过此消费者并提示邀请补偿不可用。
-    # The compensation worker is shipped in the portal image.  It shares the
-    # CRM runtime env/DB because it consumes CRM compensation tasks, but must
-    # not inherit the CRM image from x-customer-service; the deployment script
-    # deliberately verifies it against CUSTOMER_PORTAL_IMAGE.
+    # 补偿 worker 随门户镜像交付。它消费 CRM 补偿任务，因此共享 CRM 运行配置和数据库，
+    # 但不得从 x-customer-service 继承 CRM 镜像；部署脚本会明确对照 CUSTOMER_PORTAL_IMAGE 验证。
     image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
     command: ["./portal-invite-compensation-worker"]
     environment:
@@ -1660,6 +1687,37 @@ services:
         condition: service_healthy
       portal-api:
         condition: service_healthy
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
+  portal-report-worker:
+    image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
+    command: ["./portal-report-worker"]
+    env_file:
+      - path: ${PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE:-runtime/portal-report-worker.env}
+        required: false
+      - path: runtime/license-portal-report-worker.env
+        required: false
+    volumes:
+      - license-state-portal-report-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+      - portal-reports-data:/app/data/portal-reports
+    networks: [application]
+    depends_on:
+      portal-mysql:
+        condition: service_healthy
+      file-gateway:
+        condition: service_healthy
+      platform-api:
+        condition: service_healthy
+    restart: unless-stopped
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -2081,7 +2139,7 @@ services:
     env_file:
       - path: ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
         required: false
-    # Use the same persisted signing secret as the BI API, never a second key.
+    # 使用与 BI API 相同的持久化签名密钥，绝不另用第二把密钥。
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -2195,12 +2253,14 @@ volumes:
   license-state-customer-api:
   license-state-customer-opportunity-alert-worker:
   license-state-customer-owner-notification-worker:
+  license-state-customer-contract-transfer-worker:
   license-state-customer-presale-alert-worker:
   license-state-customer-presale-assignment-notification-worker:
   license-state-customer-presale-progress-notification-worker:
   license-state-customer-notification-delivery-worker:
   license-state-customer-presale-worker:
   license-state-portal-api:
+  license-state-portal-report-worker:
   license-state-portal-invite-compensation-worker:
   license-state-settlement-api:
   license-state-settlement-worker:
@@ -2213,6 +2273,7 @@ volumes:
   customer-mysql-data:
   customer-attachment-data:
   portal-mysql-data:
+  portal-reports-data:
   project-mysql-data:
   settlement-mysql-data:
   data-analysis-mysql-data:

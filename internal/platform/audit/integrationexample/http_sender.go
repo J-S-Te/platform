@@ -12,20 +12,20 @@ import (
 	"strings"
 )
 
-// TokenSource resolves the short-lived application Bearer token at send time. Its returned value
-// must only be placed in the Authorization header and must never be persisted in an outbox row.
+// TokenSource 在发送时刻解析短时效的应用 Bearer token。返回值只能放进 Authorization 头，
+// 绝不能持久化到 outbox 行。
 type TokenSource interface {
 	Token(context.Context) (string, error)
 }
 
-// HTTPSender calls Basic Platform's application-authenticated batch ingestion endpoint.
+// HTTPSender 调用基础平台的应用认证批量摄取端点。
 type HTTPSender struct {
 	baseURL     *url.URL
 	httpClient  *http.Client
 	tokenSource TokenSource
 }
 
-// NewHTTPSender validates the configured platform base URL and dependencies.
+// NewHTTPSender 校验配置的平台基地址与依赖。
 func NewHTTPSender(baseURL string, httpClient *http.Client, tokenSource TokenSource) (*HTTPSender, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || httpClient == nil || tokenSource == nil {
@@ -34,8 +34,8 @@ func NewHTTPSender(baseURL string, httpClient *http.Client, tokenSource TokenSou
 	return &HTTPSender{baseURL: parsed, httpClient: httpClient, tokenSource: tokenSource}, nil
 }
 
-// Send posts no more than 100 events and returns the platform's batch receipts. Only stable error
-// descriptions are returned so callers do not accidentally log response bodies containing details.
+// Send 提交至多 100 条事件并返回平台批量回执。只返回稳定的错误描述，
+// 防止调用方把包含细节的响应体误写进日志。
 func (sender *HTTPSender) Send(ctx context.Context, events []Event) ([]Receipt, error) {
 	if len(events) == 0 || len(events) > maxBatchSize {
 		return nil, errors.New("audit event batch must contain 1 to 100 items")

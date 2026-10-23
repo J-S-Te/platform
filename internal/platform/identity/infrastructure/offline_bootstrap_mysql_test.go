@@ -36,8 +36,8 @@ func TestOfflineBootstrapPrincipalMySQL(t *testing.T) {
 	defer sqlDB.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// All first-admin creation and negative mutations stay in this transaction;
-	// rollback restores the migration-only installation for other acceptance work.
+	// 所有首个管理员创建及反向变更均在此事务内完成；
+	// 回滚后恢复为仅完成迁移的安装状态，供其他验收使用。
 	tx := db.WithContext(ctx).Begin()
 	if tx.Error != nil {
 		t.Fatal(tx.Error)

@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"time"
@@ -11,9 +12,8 @@ import (
 	"github.com/mozillazg/go-pinyin"
 )
 
-// EmployeeCreateInput is the atomic onboarding command used by POST /employees.  Account and
-// membership are optional so the endpoint also supports pre-hiring a user record without
-// accidentally creating an unbound account or appointment.
+// EmployeeCreateInput 是 POST /employees 使用的原子入职命令。账号与任职可选，使该端点
+// 也支持只预建用户档案，而不会意外创建无绑定的账号或任职。
 type EmployeeCreateInput struct {
 	TenantID         string
 	OperatorID       string
@@ -27,26 +27,54 @@ type EmployeeCreateInput struct {
 	ApplicationRoles []ApplicationRoleAssignment
 }
 
-// EmployeeBatchCreateInput imports complete employee records atomically. Organization and
-// position references are resolved by the HTTP adapter from their human-readable names.
+// EmployeeBatchCreateInput 原子导入完整员工记录。组织与岗位引用由 HTTP 适配层从人类可读
+// 名称解析。
 type EmployeeBatchCreateInput struct {
 	TenantID   string
 	OperatorID string
 	Items      []EmployeeCreateInput
 }
 
-const importedEmployeeDefaultPassword = "!QAZxsw@1234"
+// importedEmployeeInitialPassword 为批量导入的每个账号生成独立随机初始密码。
+// 之前的共享常量默认密码会随源码/文档扩散，可被用于抢占尚未首次登录的账号；
+// 每账号独立随机值仅通过导入响应返回给执行导入的管理员分发，且必须改密后可用。
+func importedEmployeeInitialPassword() (string, error) {
+	const capitals = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+	const letters = "abcdefghijkmnpqrstuvwxyz"
+	const digits = "23456789"
+	const symbols = "!@#$%^&*"
+	const mixed = capitals + letters + digits + symbols
+	entropy := make([]byte, 32)
+	if _, err := rand.Read(entropy); err != nil {
+		return "", fmt.Errorf("generate imported employee password entropy: %w", err)
+	}
+	password := []byte{
+		capitals[int(entropy[0])%len(capitals)],
+		letters[int(entropy[1])%len(letters)],
+		digits[int(entropy[2])%len(digits)],
+		symbols[int(entropy[3])%len(symbols)],
+	}
+	for _, value := range entropy[4:16] {
+		password = append(password, mixed[int(value)%len(mixed)])
+	}
+	// Fisher-Yates 洗牌，避免四类保证字符停留在固定位置。
+	for index := len(password) - 1; index > 0; index-- {
+		swap := int(entropy[16+index]) % (index + 1)
+		password[index], password[swap] = password[swap], password[index]
+	}
+	return string(password), nil
+}
 
-// EmployeeAccountCreateInput deliberately contains only local-account fields.  The new user ID
-// is generated server-side and is never accepted from the browser.
+// EmployeeAccountCreateInput 有意只包含本地账号字段。新用户 ID 由服务端生成，
+// 绝不接受来自浏览器。
 type EmployeeAccountCreateInput struct {
 	AccountName     string
 	InitialPassword string
 	ValidUntil      *time.Time
 }
 
-// EmployeeMembershipCreateInput describes the optional first appointment.  It is intentionally
-// separate from a user record because a user can later have multiple appointments.
+// EmployeeMembershipCreateInput 描述可选的首次任职。它与用户记录有意分离，因为一个用户
+// 之后可以有多条任职。
 type EmployeeMembershipCreateInput struct {
 	OrgUnitID            string
 	PositionID           string
@@ -56,8 +84,8 @@ type EmployeeMembershipCreateInput struct {
 	InheritAuthorization *bool
 }
 
-// EmployeeOnboardingWrite contains prevalidated, secret-safe persistence values.  Password
-// plaintext is hashed before this object crosses the repository boundary.
+// EmployeeOnboardingWrite 携带预校验、不含秘密的持久化值。密码明文在该对象跨越仓储边界
+// 之前已经散列。
 type EmployeeOnboardingWrite struct {
 	User         UserWrite
 	Account      *LocalAccountCreateWrite
@@ -66,20 +94,20 @@ type EmployeeOnboardingWrite struct {
 	OccurredAt   time.Time
 }
 
-// EmployeeCreateResult is the client-safe result of a successful all-or-nothing onboarding.
+// EmployeeCreateResult 是全有或全无入职成功后的客户端安全结果。
 type EmployeeCreateResult struct {
 	User       UserView
 	Account    *domain.Account
 	Membership *domain.Membership
 }
 
-// EmployeeOnboardingRepository is optional on ManagementRepository to preserve existing
-// management test doubles and the legacy POST /users contract.  Production GORM storage
-// implements it using one database transaction.
+// EmployeeOnboardingRepository 在 ManagementRepository 上是可选的，以保留既有管理测试替身
+// 与旧 POST /users 契约；生产 GORM 存储用一个数据库事务实现它。
 type EmployeeOnboardingRepository interface {
 	CreateEmployee(context.Context, EmployeeOnboardingWrite) (domain.User, *domain.Account, *domain.Membership, error)
 }
 
+// EmployeeBatchOnboardingRepository 在一个数据库事务内批量入职员工。
 type EmployeeBatchOnboardingRepository interface {
 	CreateEmployees(context.Context, []EmployeeOnboardingWrite) ([]domain.User, error)
 }
@@ -195,77 +223,95 @@ func (service *ManagementService) CreateEmployee(ctx context.Context, input Empl
 	return EmployeeCreateResult{User: view, Account: account, Membership: membership}, nil
 }
 
-// CreateEmployeesBatch prepares every employee before entering the repository transaction. A
-// failed reference, validation, encryption or ID generation therefore prevents any partial write.
-func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, input EmployeeBatchCreateInput) ([]UserView, error) {
+// EmployeeInitialCredential 是批量导入时为账号生成的随机初始密码。仅出现在导入响应中
+// 供管理员分发；不落日志、不落库明文，账号首登必须改密。
+type EmployeeInitialCredential struct {
+	AccountName     string `json:"account_name"`
+	InitialPassword string `json:"initial_password"`
+}
+
+// EmployeeBatchCreateResult 同时返回导入的用户视图与每账号随机初始凭据。
+type EmployeeBatchCreateResult struct {
+	Users              []UserView                  `json:"users"`
+	InitialCredentials []EmployeeInitialCredential `json:"initial_credentials,omitempty"`
+}
+
+// CreateEmployeesBatch 在进入仓储事务之前完成每个员工的全部准备。引用、校验、加密或 ID
+// 生成任一失败都会阻止任何部分写入。
+func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, input EmployeeBatchCreateInput) (EmployeeBatchCreateResult, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" || len(input.Items) == 0 || len(input.Items) > MaxBatchUserCreateItems {
-		return nil, ErrValidation
+		return EmployeeBatchCreateResult{}, ErrValidation
 	}
 	repository, ok := service.repository.(EmployeeBatchOnboardingRepository)
 	if !ok {
-		return nil, fmt.Errorf("employee batch onboarding is not supported by this identity repository")
+		return EmployeeBatchCreateResult{}, fmt.Errorf("employee batch onboarding is not supported by this identity repository")
 	}
 	writes := make([]EmployeeOnboardingWrite, 0, len(input.Items))
+	initialCredentials := make([]EmployeeInitialCredential, 0, len(input.Items))
 	now := service.clock.Now().UTC()
 	for _, item := range input.Items {
 		if item.Membership == nil {
-			return nil, ErrMembershipRequired
+			return EmployeeBatchCreateResult{}, ErrMembershipRequired
 		}
 		userInput := UserCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: item.Status, ApplicationRoles: item.ApplicationRoles}
 		if err := validateUserCreate(userInput, service.clock.Now()); err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		userID, err := service.ids.New(now)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		bindingID, err := service.ids.New(now)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		userInput.EmployeeNo = stringPtr("EMP-" + strings.ToUpper(userID))
 		userWrite, err := service.prepareUserWrite(userInput, userID)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		userWrite.RoleBindingID = bindingID
 		accountName := importedAccountName(item.DisplayName)
 		if accountName == "" {
-			return nil, ErrValidation
+			return EmployeeBatchCreateResult{}, ErrValidation
 		}
 		if service.hasher == nil {
-			return nil, fmt.Errorf("employee account password hasher is unavailable")
+			return EmployeeBatchCreateResult{}, fmt.Errorf("employee account password hasher is unavailable")
 		}
-		digest, metadata, err := service.hasher.Hash(importedEmployeeDefaultPassword)
+		initialPassword, err := importedEmployeeInitialPassword()
 		if err != nil {
-			return nil, fmt.Errorf("hash employee initial password: %w", err)
+			return EmployeeBatchCreateResult{}, err
+		}
+		digest, metadata, err := service.hasher.Hash(initialPassword)
+		if err != nil {
+			return EmployeeBatchCreateResult{}, fmt.Errorf("hash employee initial password: %w", err)
 		}
 		accountID, err := service.ids.New(now)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		credentialID, err := service.ids.New(now)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
-		writeAccount := &EmployeeAccountCreateInput{AccountName: accountName, InitialPassword: importedEmployeeDefaultPassword}
+		writeAccount := &EmployeeAccountCreateInput{AccountName: accountName, InitialPassword: initialPassword}
 		if err := validateLocalAccountCreateInput(LocalAccountCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, UserID: userID, AccountName: writeAccount.AccountName, InitialPassword: writeAccount.InitialPassword}); err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		roles, err := normalizeApplicationRoleAssignments(item.ApplicationRoles)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		for _, role := range roles {
 			roleID, e := service.ids.New(now)
 			if e != nil {
-				return nil, e
+				return EmployeeBatchCreateResult{}, e
 			}
 			userWrite.ApplicationRoleBindings = append(userWrite.ApplicationRoleBindings, ApplicationRoleBindingWrite{ID: roleID, ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName, RoleCode: role.RoleCode, RoleName: role.RoleName})
 		}
 		membership := &MembershipCreateInput{TenantID: input.TenantID, OperatorID: input.OperatorID, UserID: userID, OrgUnitID: item.Membership.OrgUnitID, PositionID: item.Membership.PositionID, MembershipType: item.Membership.MembershipType, EffectiveFrom: item.Membership.EffectiveFrom, EffectiveTo: item.Membership.EffectiveTo, InheritAuthorization: item.Membership.InheritAuthorization}
 		if err := validateMembership(membership.TenantID, membership.OperatorID, membership.UserID, membership.OrgUnitID, membership.PositionID, membership.MembershipType, membership.EffectiveFrom, membership.EffectiveTo); err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		if membership.InheritAuthorization == nil {
 			enabled := true
@@ -273,23 +319,24 @@ func (service *ManagementService) CreateEmployeesBatch(ctx context.Context, inpu
 		}
 		membershipID, err := service.ids.New(now)
 		if err != nil {
-			return nil, err
+			return EmployeeBatchCreateResult{}, err
 		}
 		writes = append(writes, EmployeeOnboardingWrite{User: userWrite, Account: &LocalAccountCreateWrite{AccountID: accountID, CredentialID: credentialID, TenantID: input.TenantID, UserID: userID, OperatorID: input.OperatorID, AccountName: accountName, PasswordDigest: digest, AlgorithmParams: metadata, OccurredAt: now}, Membership: membership, MembershipID: membershipID, OccurredAt: now})
+		initialCredentials = append(initialCredentials, EmployeeInitialCredential{AccountName: accountName, InitialPassword: initialPassword})
 	}
 	users, err := repository.CreateEmployees(ctx, writes)
 	if err != nil {
-		return nil, err
+		return EmployeeBatchCreateResult{}, err
 	}
 	views := make([]UserView, 0, len(users))
 	for _, user := range users {
 		view, e := service.toUserView(user)
 		if e != nil {
-			return nil, e
+			return EmployeeBatchCreateResult{}, e
 		}
 		views = append(views, view)
 	}
-	return views, nil
+	return EmployeeBatchCreateResult{Users: views, InitialCredentials: initialCredentials}, nil
 }
 
 func stringPtr(value string) *string { return &value }

@@ -22,13 +22,16 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        CONTRACT_INTEGRATION_AUDIENCE: basic-platform-application
+        PLATFORM_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        PLATFORM_MACHINE_TOKEN_ISSUER: basic-platform
         SETTLEMENT_MYSQL_DSN: 'settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC'
         OIDC_IDP_HINT: basic-platform
         OIDC_SESSION_COOKIE_NAME: settlement_session
         OIDC_SESSION_IDLE_TTL: 30m
         OIDC_SESSION_ABSOLUTE_TTL: 8h
         SETTLEMENT_DEVELOPMENT_AUTH: "false"
-        SETTLEMENT_INTEGRATION_ENABLED: "false"
+        SETTLEMENT_INTEGRATION_ENABLED: "true"
         SETTLEMENT_OUTBOX_BATCH_SIZE: "50"
         SETTLEMENT_INVOICE_ISSUANCE_MODE: manual
         SETTLEMENT_CRM_CREDIT_SYNC_ENABLED: "false"
@@ -40,6 +43,10 @@ runtime:
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
       bindings:
+        CONTRACT_INTEGRATION_CLIENT_ID: related_service.contract_management.settlement_contract_ingest.client_id
+        CONTRACT_INTEGRATION_OAUTH_CLIENT_ID: related_service.contract_management.settlement_contract_ingest.oauth_client_id
+        CONTRACT_INTEGRATION_APPLICATION_ID: related_service.contract_management.settlement_contract_ingest.application_id
+        CONTRACT_INTEGRATION_ENVIRONMENT_ID: related_service.contract_management.settlement_contract_ingest.environment_id
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id

@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
-	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"gorm.io/gorm"
 )
 
@@ -17,10 +18,11 @@ const (
 	platformApplicationCode = "platform"
 )
 
-// GORMRepository persists RBAC aggregates in tables owned by SQL migrations. It deliberately does
-// not call AutoMigrate so schema history remains explicit and reviewable.
+// GORMRepository 将 RBAC 聚合持久化到 SQL 迁移拥有的表中。有意不调用 AutoMigrate，
+// 使模式演进历史保持显式、可审查。
 type GORMRepository struct{ database *gorm.DB }
 
+// NewGORMRepository 校验数据库依赖非空后构造授权仓储，缺失依赖时失败关闭。
 func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	if database == nil {
 		return nil, errors.New("authorization GORM database must not be nil")
@@ -28,6 +30,7 @@ func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
 	return &GORMRepository{database: database}, nil
 }
 
+// ListResources 分页返回租户内资源，支持关键字与状态过滤。
 func (r *GORMRepository) ListResources(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.Resource], error) {
 	query := r.database.WithContext(ctx).Table("authz_resource AS resource").Joins("JOIN platform_application AS application ON application.id = resource.application_id").Where("resource.tenant_id = ?", tenantID)
 	if page.Keyword != "" {
@@ -52,6 +55,7 @@ func (r *GORMRepository) ListResources(ctx context.Context, tenantID string, pag
 	return application.PageResult[domain.Resource]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
+// CreateResource 校验应用有效且目录可写后创建资源。
 func (r *GORMRepository) CreateResource(ctx context.Context, tenantID, operatorID string, resource domain.Resource) (domain.Resource, error) {
 	app, err := r.activeApplication(ctx, tenantID, resource.ApplicationCode)
 	if err != nil {
@@ -70,6 +74,7 @@ func (r *GORMRepository) CreateResource(ctx context.Context, tenantID, operatorI
 	return resource, nil
 }
 
+// ListPermissions 分页返回租户内权限点，附带所属资源信息。
 func (r *GORMRepository) ListPermissions(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.Permission], error) {
 	query := r.database.WithContext(ctx).Table("authz_permission AS permission").Joins("JOIN authz_resource AS resource ON resource.id = permission.resource_id").Where("permission.tenant_id = ?", tenantID)
 	if page.Keyword != "" {
@@ -94,6 +99,7 @@ func (r *GORMRepository) ListPermissions(ctx context.Context, tenantID string, p
 	return application.PageResult[domain.Permission]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
+// CreatePermission 要求资源有效且应用目录可写后才创建权限点。
 func (r *GORMRepository) CreatePermission(ctx context.Context, tenantID, operatorID string, permission domain.Permission) (domain.Permission, error) {
 	var resource resourceModel
 	result := r.database.WithContext(ctx).Where("id = ? AND tenant_id = ? AND status = ?", permission.Resource.ID, tenantID, domain.StatusActive).First(&resource)
@@ -114,22 +120,31 @@ func (r *GORMRepository) CreatePermission(ctx context.Context, tenantID, operato
 	return permission, nil
 }
 
-func (r *GORMRepository) ListRoles(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.Role], error) {
-	query := r.database.WithContext(ctx).Model(&roleModel{}).
+// roleListQuery 构造平台角色列表查询（供列表与定向回归共用）。
+//
+// 关键字、状态和排序必须带 authz_role 限定：本查询 JOIN 了 platform_application，
+// 两张表都有 code/name/status/created_at，未限定列名会被 MySQL 判为 ambiguous。
+func roleListQuery(database *gorm.DB, tenantID string, page application.PageRequest) *gorm.DB {
+	query := database.Model(&roleModel{}).
 		Joins("JOIN platform_application AS application ON application.id = authz_role.application_id AND application.tenant_id = authz_role.tenant_id").
 		Where("authz_role.tenant_id = ? AND application.code = ?", tenantID, platformApplicationCode)
 	if page.Keyword != "" {
-		query = query.Where("code LIKE ? OR name LIKE ?", like(page.Keyword), like(page.Keyword))
+		query = query.Where("authz_role.code LIKE ? OR authz_role.name LIKE ?", like(page.Keyword), like(page.Keyword))
 	}
 	if page.Status != "" {
-		query = query.Where("status = ?", page.Status)
+		query = query.Where("authz_role.status = ?", page.Status)
 	}
+	return query
+}
+
+func (r *GORMRepository) ListRoles(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.Role], error) {
+	query := roleListQuery(r.database.WithContext(ctx), tenantID, page)
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return application.PageResult[domain.Role]{}, fmt.Errorf("count roles: %w", err)
 	}
 	var rows []roleModel
-	if err := query.Order("created_at DESC").Offset((page.Page - 1) * page.PageSize).Limit(page.PageSize).Find(&rows).Error; err != nil {
+	if err := query.Order("authz_role.created_at DESC").Offset((page.Page - 1) * page.PageSize).Limit(page.PageSize).Find(&rows).Error; err != nil {
 		return application.PageResult[domain.Role]{}, fmt.Errorf("list roles: %w", err)
 	}
 	items := make([]domain.Role, 0, len(rows))
@@ -143,6 +158,8 @@ func (r *GORMRepository) ListRoles(ctx context.Context, tenantID string, page ap
 	return application.PageResult[domain.Role]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
+// CreateRole 在单事务内校验权限存在性与操作者可委派集合后创建自定义角色，
+// 并推进应用 revision 触发下游投影刷新。
 func (r *GORMRepository) CreateRole(ctx context.Context, tenantID, operatorID, operatorAccountID string, role domain.Role, permissionIDs []string) (domain.Role, error) {
 	returnRole := domain.Role{}
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -179,6 +196,7 @@ func (r *GORMRepository) CreateRole(ctx context.Context, tenantID, operatorID, o
 	})
 	return returnRole, err
 }
+// GetRole 返回角色及其权限集合；不存在时返回未找到。
 func (r *GORMRepository) GetRole(ctx context.Context, tenantID, roleID string) (domain.Role, error) {
 	var model roleModel
 	result := r.database.WithContext(ctx).Where("id = ? AND tenant_id = ?", roleID, tenantID).First(&model)
@@ -187,6 +205,9 @@ func (r *GORMRepository) GetRole(ctx context.Context, tenantID, roleID string) (
 	}
 	return r.roleWithPermissions(ctx, model)
 }
+
+// UpdateRole 在乐观锁与可编辑性校验后整体替换角色属性与权限集合；
+// 扩权风险通过按本次提交集合重算可委派校验来阻断。
 func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID, operatorAccountID string, role domain.Role, permissionIDs []string) (domain.Role, error) {
 	var output domain.Role
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -237,9 +258,8 @@ func (r *GORMRepository) UpdateRole(ctx context.Context, tenantID, operatorID, o
 	return output, err
 }
 
-// ensureRoleEditable preserves the ownership boundary for roles. Built-in platform roles
-// and application-defined roles are not mutable through the generic role-management API.
-// Application roles must be changed by the owning subsystem through its catalog sync flow.
+// ensureRoleEditable 维持角色的归属边界：内置平台角色与应用自定义角色都不能经
+// 通用角色管理 API 修改；应用角色必须由归属子系统通过目录同步流程变更。
 func ensureRoleEditable(role roleModel) error {
 	if role.BuiltIn || strings.EqualFold(strings.TrimSpace(role.RoleType), "APPLICATION") {
 		return application.ErrConflict
@@ -247,9 +267,8 @@ func ensureRoleEditable(role roleModel) error {
 	return nil
 }
 
-// ensureApplicationRoleBindingManaged keeps application-owned catalog roles on
-// the application-access path, where grant provenance and effective-role limits
-// are enforced. Generic RBAC binding APIs remain available for platform roles.
+// ensureApplicationRoleBindingManaged 使应用目录角色只能走应用授权入口——那里强制
+// 授予来源与有效角色上限。通用 RBAC 绑定入口仅保留给平台角色。
 func ensureApplicationRoleBindingManaged(role roleModel) error {
 	if strings.EqualFold(strings.TrimSpace(role.RoleType), "APPLICATION") {
 		return application.ErrConflict
@@ -257,9 +276,9 @@ func ensureApplicationRoleBindingManaged(role roleModel) error {
 	return nil
 }
 
-// catalogMirrorReadOnly treats a successfully synchronized catalog as application
-// owned. A retained version/hash also keeps it read-only after a later failed
-// resync; a sync failure must not reopen the directory for console mutations.
+// catalogMirrorReadOnly 把一次成功同步过的目录视为应用所有。保留的 version/hash
+// 也会让后续一次失败的重新同步之后目录仍保持只读：同步失败绝不能重新打开目录
+// 给控制台改写。
 func catalogMirrorReadOnly(syncStatus, catalogVersion, catalogHash string) bool {
 	return strings.EqualFold(strings.TrimSpace(syncStatus), "SYNCED") ||
 		strings.TrimSpace(catalogVersion) != "" || strings.TrimSpace(catalogHash) != ""
@@ -286,6 +305,7 @@ func (r *GORMRepository) ensureApplicationCatalogWritable(ctx context.Context, t
 	return nil
 }
 
+// ListRoleBindings 分页返回租户内平台角色绑定，支持关键字与状态过滤。
 func (r *GORMRepository) ListRoleBindings(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.RoleBinding], error) {
 	query := r.database.WithContext(ctx).Table("authz_role_binding AS binding").
 		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id").
@@ -312,6 +332,8 @@ func (r *GORMRepository) ListRoleBindings(ctx context.Context, tenantID string, 
 	}
 	return application.PageResult[domain.RoleBinding]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
+// CreateRoleBinding 在单事务内完成受保护角色操作者校验、可委派权限校验与主体/作用域
+// 引用校验后创建 MANUAL 来源绑定，并推进应用 revision。
 func (r *GORMRepository) CreateRoleBinding(ctx context.Context, tenantID, operatorID string, binding domain.RoleBinding) (domain.RoleBinding, error) {
 	var output domain.RoleBinding
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -352,6 +374,8 @@ func (r *GORMRepository) CreateRoleBinding(ctx context.Context, tenantID, operat
 	})
 	return output, err
 }
+// UpdateRoleBinding 在乐观锁保护下更新 MANUAL 绑定；模板/系统来源只能由所属流程
+// 维护，替换角色时新旧角色都要通过受保护角色与可委派校验。
 func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operatorID string, binding domain.RoleBinding) (domain.RoleBinding, error) {
 	var output domain.RoleBinding
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -362,6 +386,12 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 		}
 		if existing.Version != binding.Version {
 			return application.ErrVersionConflict
+		}
+		// 来源由持久化记录决定，模板/系统绑定只能由所属流程维护；超管也不能
+		// 经通用入口改写其主体、角色或有效范围。空来源沿用历史人工绑定兼容约定。
+		origin := strings.ToUpper(strings.TrimSpace(existing.GrantOrigin))
+		if origin != "" && origin != "MANUAL" {
+			return application.ErrConflict
 		}
 		var role roleModel
 		result = tx.Where("id = ? AND tenant_id = ? AND application_id = ?", binding.Role.ID, tenantID, existing.ApplicationID).First(&role)
@@ -397,6 +427,22 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 		if err := validateRoleBindingReferences(tx, tenantID, binding); err != nil {
 			return err
 		}
+		// 部署初始化的超级管理员绑定即使调用者就是该管理员本身也不可更新本行：
+		// 不能撤销、替换、收窄或使其过期。该检查放在常规授权与可委派门禁之后、
+		// 第一次写入之前。
+		identity, initialized, err := bootstrapadmin.Resolve(ctx, tx, tenantID)
+		if err != nil {
+			return err
+		}
+		if initialized && existing.SubjectType == "USER" && existing.SubjectID == identity.UserID {
+			bootstrap, err := isBootstrapSuperAdminRole(tx, tenantID, existing.RoleID)
+			if err != nil {
+				return err
+			}
+			if bootstrap {
+				return bootstrapadmin.ErrProtected
+			}
+		}
 		now := time.Now().UTC()
 		scopeID := ""
 		if binding.ScopeID != nil {
@@ -418,16 +464,16 @@ func (r *GORMRepository) UpdateRoleBinding(ctx context.Context, tenantID, operat
 	return output, err
 }
 
-// ensureProtectedRoleBindingOperator restricts control-plane roles to a tenant-scoped super
-// administrator. A role binding is security-critical: without this check a security administrator
-// could bind the super-admin role to itself or another ordinary account.
+// ensureProtectedRoleBindingOperator 把控制面角色限定给租户级超级管理员。角色绑定
+// 属安全关键操作：缺少该检查时，安全管理员可以把超级管理员角色绑给自己或其他
+// 普通账号。
 func (r *GORMRepository) ensureProtectedRoleBindingOperator(ctx context.Context, tx *gorm.DB, tenantID, operatorID string, role roleModel) error {
 	if !isProtectedRoleCode(role.Code) {
 		return nil
 	}
 
 	now := time.Now().UTC()
-	subjectSQL, subjectArgs := roleBindingSubjectFilter(operatorID, operatorAccountIDFromContext(ctx, tenantID, operatorID), now)
+	subjectSQL, subjectArgs := roleBindingSubjectFilter(operatorID, delegation.OperatorAccountIDFromContext(ctx, tenantID, operatorID), now)
 	var total int64
 	result := tx.Table("authz_role_binding AS binding").
 		Joins("JOIN authz_role AS operator_role ON operator_role.id = binding.role_id").
@@ -450,9 +496,23 @@ func isProtectedRoleCode(code string) bool {
 	return domain.IsProtectedRoleCode(code)
 }
 
-// validateRoleBindingReferences resolves tenant-owned subjects and scope targets before a binding
-// is written. Scope IDs come from the request, so accepting a non-existent or cross-tenant ID would
-// make later authorization ambiguous and could widen access when data is repaired or reused.
+// isBootstrapSuperAdminRole 判断该角色是否为内置平台超级管理员角色。只有 platform
+// 应用可以定义它；其他应用的同名角色绝不能让普通绑定伪装成初始化权威。
+func isBootstrapSuperAdminRole(tx *gorm.DB, tenantID, roleID string) (bool, error) {
+	var count int64
+	err := tx.Table("authz_role AS role").
+		Joins("JOIN platform_application AS application ON application.id = role.application_id AND application.tenant_id = role.tenant_id").
+		Where("role.id = ? AND role.tenant_id = ? AND role.code = ? AND application.code = ?", roleID, tenantID, domain.SuperAdminRoleCode, platformApplicationCode).
+		Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("check bootstrap super-administrator role: %w", err)
+	}
+	return count > 0, nil
+}
+
+// validateRoleBindingReferences 在写入绑定前解析租户所属的主体与作用域目标。
+// 作用域 ID 来自请求：接受不存在或跨租户的 ID 会让后续授权判定出现歧义，
+// 在数据修复或复用时可能放大访问。
 func validateRoleBindingReferences(tx *gorm.DB, tenantID string, binding domain.RoleBinding) error {
 	var subjectTable string
 	switch binding.SubjectType {
@@ -481,8 +541,8 @@ func validateRoleBindingReferences(tx *gorm.DB, tenantID string, binding domain.
 	case "ORG_UNIT":
 		return requireTenantResource(tx, "iam_org_unit", tenantID, scopeID)
 	case "RESOURCE":
-		// Platform IAM resource scopes currently target concrete organization, position, or
-		// membership identifiers. Resolve them server-side and fail closed for unknown IDs.
+		// 平台 IAM 资源作用域目前指向具体的组织、岗位或任职 ID。服务端逐一解析，
+		// 未知 ID 一律失败关闭。
 		for _, table := range []string{"iam_org_unit", "iam_position", "iam_membership"} {
 			var count int64
 			if err := tx.Table(table).Where("tenant_id = ? AND id = ?", tenantID, scopeID).Count(&count).Error; err != nil {
@@ -512,6 +572,8 @@ func requireTenantResource(tx *gorm.DB, table, tenantID, resourceID string) erro
 	return nil
 }
 
+// Check 基于租户当前策略 revision 判定权限；上下文只消费上层从可信资源归属
+// 解析出的值，未匹配时默认拒绝（DENY_NO_MATCH）。
 func (r *GORMRepository) Check(ctx context.Context, input application.CheckInput) (domain.Decision, error) {
 	var app applicationModel
 	result := r.database.WithContext(ctx).Where("tenant_id = ? AND code = ? AND status = ?", input.TenantID, platformApplicationCode, domain.StatusActive).First(&app)
@@ -563,63 +625,16 @@ func (r *GORMRepository) activeApplicationTx(tx *gorm.DB, tenantID, code string)
 	return app, nil
 }
 
-// verifyDelegableRolePermissions applies the same delegation boundary used when creating or
-// updating a custom role to every role-binding mutation. Managing bindings is not itself authority
-// to grant all permissions contained by an existing role.
+// verifyDelegableRolePermissions 把创建/更新自定义角色时的可委派边界同样应用到每次
+// 绑定变更：管理绑定本身不等于有权授予既有角色包含的全部权限。
 func (r *GORMRepository) verifyDelegableRolePermissions(ctx context.Context, tx *gorm.DB, tenantID, operatorID string, role roleModel) error {
-	var permissionIDs []string
-	result := tx.Table("authz_role_permission AS role_permission").
-		Distinct("role_permission.permission_id").
-		Joins("JOIN authz_permission AS permission ON permission.id = role_permission.permission_id AND permission.tenant_id = ? AND permission.application_id = ? AND permission.status = ?", tenantID, role.ApplicationID, domain.StatusActive).
-		Where("role_permission.role_id = ? AND role_permission.effect = ?", role.ID, "ALLOW").
-		Pluck("role_permission.permission_id", &permissionIDs)
-	if result.Error != nil {
-		return fmt.Errorf("load role permissions for delegation: %w", result.Error)
-	}
-	return r.verifyDelegablePermissions(tx, tenantID, operatorID, operatorAccountIDFromContext(ctx, tenantID, operatorID), role.ApplicationID, permissionIDs)
+	return delegation.VerifyRolePermissions(ctx, tx, tenantID, operatorID, role.ApplicationID, role.ID)
 }
 
-// operatorAccountIDFromContext uses only the principal installed by authentication middleware.
-// Direct repository callers without an authenticated principal remain limited to user and inherited
-// organization/position grants rather than trusting a caller-supplied account identifier.
-func operatorAccountIDFromContext(ctx context.Context, tenantID, operatorID string) string {
-	principal, ok := authctx.PrincipalFromContext(ctx)
-	if !ok || principal.Tenant.ID != tenantID || principal.User.ID != operatorID {
-		return ""
-	}
-	return strings.TrimSpace(principal.Account.ID)
-}
-
-// verifyDelegablePermissions ensures a custom role cannot become a privilege-escalation
-// mechanism. The selected permissions must all be effective for the current authenticated
-// operator at tenant scope; having role-management permissions alone is not enough.
+// verifyDelegablePermissions 防止自定义角色沦为提权机制：所选权限必须全部是当前
+// 已认证操作者在租户范围内的有效权限；仅有角色管理权限不够。
 func (r *GORMRepository) verifyDelegablePermissions(tx *gorm.DB, tenantID, operatorID, operatorAccountID, applicationID string, permissionIDs []string) error {
-	if len(permissionIDs) == 0 {
-		return nil
-	}
-
-	now := time.Now().UTC()
-	subjectSQL, subjectArgs := roleBindingSubjectFilter(operatorID, operatorAccountID, now)
-	var total int64
-	result := tx.Table("authz_role_binding AS binding").
-		Distinct("permission.id").
-		Joins("JOIN authz_role AS role ON role.id = binding.role_id AND role.tenant_id = binding.tenant_id AND role.application_id = binding.application_id AND role.status = ?", domain.StatusActive).
-		Joins("JOIN authz_role_permission AS role_permission ON role_permission.role_id = role.id AND role_permission.effect = ?", "ALLOW").
-		Joins("JOIN authz_permission AS permission ON permission.id = role_permission.permission_id AND permission.tenant_id = binding.tenant_id AND permission.application_id = binding.application_id AND permission.status = ?", domain.StatusActive).
-		Where("binding.tenant_id = ? AND binding.application_id = ? AND binding.status = ?", tenantID, applicationID, domain.StatusActive).
-		Where("binding.scope_type = ? AND binding.scope_id = ?", "TENANT", "").
-		Where("binding.valid_from IS NULL OR binding.valid_from <= ?", now).
-		Where("binding.valid_until IS NULL OR binding.valid_until > ?", now).
-		Where("permission.id IN ?", permissionIDs).
-		Where(subjectSQL, subjectArgs...).
-		Count(&total)
-	if result.Error != nil {
-		return fmt.Errorf("verify delegable permissions: %w", result.Error)
-	}
-	if total != int64(len(permissionIDs)) {
-		return application.ErrForbidden
-	}
-	return nil
+	return delegation.VerifyPermissions(context.Background(), tx, tenantID, operatorID, operatorAccountID, applicationID, permissionIDs)
 }
 
 func (r *GORMRepository) verifyPermissions(tx *gorm.DB, tenantID, applicationID string, ids []string) error {
@@ -663,9 +678,8 @@ func (r *GORMRepository) roleWithPermissionsTx(tx *gorm.DB, role roleModel) (dom
 	return domain.Role{ID: role.ID, ApplicationID: role.ApplicationID, Code: role.Code, Name: role.Name, RoleType: role.RoleType, Description: role.Description, Status: role.Status, BuiltIn: role.BuiltIn, Permissions: permissions, Version: role.Version}, nil
 }
 
-// activeRolePermissionReferences mirrors the permission-status requirement in authorization
-// checks. It is used by impact previews so the displayed permissions are exactly those that can
-// currently be granted by the proposed role binding.
+// activeRolePermissionReferences 与授权检查保持一致的权限状态要求：影响预览展示的
+// 必须恰好是拟议绑定当前实际能授予的权限。
 func activeRolePermissionReferences(tx *gorm.DB, roleID string) ([]domain.Reference, error) {
 	return rolePermissionReferences(tx, roleID, true)
 }
@@ -700,48 +714,10 @@ func (r *GORMRepository) bumpRevision(tx *gorm.DB, tenantID, applicationID strin
 	return nil
 }
 
-// roleBindingSubjectFilter resolves effective role subjects. Organization and position bindings
-// apply only while the requesting user has an active, currently effective membership in the
-// corresponding active organization unit or position.
+// roleBindingSubjectFilter 通过共享的 delegation 包解析有效绑定主体，
+// 使绑定评估与可委派校验永远不会分叉。
 func roleBindingSubjectFilter(userID, accountID string, now time.Time) (string, []any) {
-	// 组织/岗位角色不会被提前摊平成会话权限：每次决策都要求存在当前有效任职，且
-	// 任职明确允许继承授权。停用组织、岗位或任职后，下一次请求立即失去该来源。
-	return `(
-		(binding.subject_type = ? AND binding.subject_id = ?)
-		OR (binding.subject_type = ? AND binding.subject_id = ?)
-		OR (
-			binding.subject_type IN (?, ?)
-			AND EXISTS (
-				SELECT 1
-				FROM iam_membership AS membership
-				JOIN iam_org_unit AS organization
-					ON organization.id = membership.org_unit_id
-					AND organization.tenant_id = membership.tenant_id
-					AND organization.status = ?
-				JOIN iam_position AS position
-					ON position.id = membership.position_id
-					AND position.tenant_id = membership.tenant_id
-					AND position.status = ?
-				WHERE membership.tenant_id = binding.tenant_id
-					AND membership.user_id = ?
-					AND membership.status = ?
-					AND membership.inherit_authorization = 1
-					AND (membership.valid_from IS NULL OR membership.valid_from <= ?)
-					AND (membership.valid_until IS NULL OR membership.valid_until > ?)
-					AND (
-						(binding.subject_type = ? AND membership.org_unit_id = binding.subject_id)
-						OR (binding.subject_type = ? AND membership.position_id = binding.subject_id)
-					)
-			)
-		)
-	)`, []any{
-			"USER", userID,
-			"ACCOUNT", accountID,
-			"ORG_UNIT", "POSITION",
-			domain.StatusActive, domain.StatusActive,
-			userID, domain.StatusActive, now, now,
-			"ORG_UNIT", "POSITION",
-		}
+	return delegation.SubjectFilter(userID, accountID, now)
 }
 
 func scopeFilter(input application.CheckInput) (string, []any) {
@@ -810,8 +786,8 @@ func bindingProjectionToDomain(row bindingProjection) domain.RoleBinding {
 	return domain.RoleBinding{ID: row.ID, Role: domain.Reference{ID: row.RoleID, Code: row.RoleCode, Name: row.RoleName}, GrantOrigin: row.GrantOrigin, SubjectType: row.SubjectType, Subject: domain.Reference{ID: row.SubjectID, Name: row.SubjectID}, ScopeType: row.ScopeType, ScopeID: scopeID, Status: row.Status, ExpiresAt: row.ValidUntil, Version: row.Version}
 }
 
-// previewAccountProjection is intentionally local to authorization because it only supports the
-// administrative explanation API; identity aggregates remain owned by the identity module.
+// previewAccountProjection 有意留在 authorization 包内：它只服务于管理端解释 API，
+// 身份聚合的所有权仍归 identity 模块。
 type previewAccountProjection struct {
 	UserID        string     `gorm:"column:user_id"`
 	UserName      string     `gorm:"column:user_name"`
@@ -848,9 +824,8 @@ type previewReferenceProjection struct {
 	Code string `gorm:"column:code"`
 }
 
-// PreviewEffectiveAccess lists the current active role-binding paths using the exact subject
-// predicate used by Check. It deliberately returns scope metadata instead of producing a boolean
-// authorization result: callers still need a concrete resource and organization context to decide.
+// PreviewEffectiveAccess 使用与 Check 完全相同的主体谓词列出当前有效的角色绑定路径。
+// 有意返回作用域元数据而非布尔授权结论：调用方仍需结合具体资源与组织上下文自行判定。
 func (r *GORMRepository) PreviewEffectiveAccess(ctx context.Context, tenantID, userID, accountID string, now time.Time) (domain.EffectiveAccessPreview, error) {
 	var account previewAccountProjection
 	result := r.database.WithContext(ctx).
@@ -962,8 +937,8 @@ func (r *GORMRepository) PreviewEffectiveAccess(ctx context.Context, tenantID, u
 	return preview, nil
 }
 
-// PreviewRoleBindingImpact reports active users that would immediately inherit a proposed binding.
-// The returned user list is deliberately capped while TotalAffectedUsers remains an exact count.
+// PreviewRoleBindingImpact 报告将立即继承拟议绑定的在册用户。用户列表有意封顶，
+// TotalAffectedUsers 保持精确计数，两者配合兼顾响应体大小与影响面准确性。
 func (r *GORMRepository) PreviewRoleBindingImpact(ctx context.Context, input application.RoleBindingImpactInput, now time.Time) (domain.RoleBindingImpactPreview, error) {
 	app, err := r.activeApplication(ctx, input.TenantID, platformApplicationCode)
 	if err != nil {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install a verified, OS-bound local APT repository without network access.
+# 离线安装已验证且绑定操作系统的本地 APT 仓库。
 set -Eeuo pipefail
 
 usage() {
@@ -123,7 +123,7 @@ DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
 
 required_commands=(
   jq curl update-ca-certificates tar gzip sha256sum realpath
-  bash cmp find awk grep ss openssl sed flock
+  bash cmp find awk grep ss openssl sed flock python3
 )
 for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null 2>&1 || {
@@ -132,5 +132,9 @@ for command_name in "${required_commands[@]}"; do
   }
 done
 
+[[ -r /usr/share/zoneinfo/Asia/Shanghai ]] || {
+  echo '宿主依赖安装后仍缺少北京时间数据；请重建含 tzdata 的离线依赖包' >&2
+  exit 1
+}
 echo "宿主依赖安装完成：$package_os_id $package_os_version $package_codename $package_architecture"
 printf '已验证命令：%s\n' "${required_commands[*]}"

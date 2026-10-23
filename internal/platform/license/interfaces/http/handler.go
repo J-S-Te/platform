@@ -65,6 +65,10 @@ func writeError(w http.ResponseWriter, r *http.Request, e error) {
 	switch {
 	case errors.Is(e, domain.ErrNotInitialized):
 		code, status, message = "LICENSE_NOT_INITIALIZED", 409, "请先初始化部署实例"
+	case errors.Is(e, domain.ErrBindingMismatch):
+		code, status, message = "LICENSE_BINDING_MISMATCH", 409, "该部署实例已绑定其他客户或环境，不能在此环境初始化"
+	case errors.Is(e, domain.ErrVersionNotIncreasing):
+		code, status, message = "LICENSE_VERSION_NOT_INCREASING", 409, "该许可证版本不高于当前已生效版本，无需重复导入；如需变更请让厂商签发更高版本"
 	case errors.Is(e, domain.ErrConflict):
 		code, status, message = "LICENSE_VERSION_CONFLICT", 409, "授权状态已变化或版本过旧，请重新预览"
 	case errors.Is(e, domain.ErrConfirmation):
@@ -127,6 +131,20 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	httpresponse.WriteSuccess(w, r, 200, "商业授权状态查询成功", map[string]any{"initialized": initialized, "deployment": st, "systems": items, "server_time": now.Format(time.RFC3339), "configured_environment": h.environment, "runtime_enforcement": "NOT_CONNECTED"})
+}
+
+// Artifact 导出已持久化许可证产物。厂商续签只能由上一版许可证推导版本号
+// （version = 上一版 + 1），因此原始文件丢失时必须以库中保留的最高版本作为续签基准。
+func (h *Handler) Artifact(w http.ResponseWriter, r *http.Request) {
+	if _, ok := principal(w, r, false); !ok {
+		return
+	}
+	export, e := h.service.Export(r.Context())
+	if e != nil {
+		writeError(w, r, e)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, 200, "许可证产物查询成功", export)
 }
 func (h *Handler) Initialize(w http.ResponseWriter, r *http.Request) {
 	actor, ok := principal(w, r, true)

@@ -14,8 +14,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
-// Opt-in execution boundary test: actual Docker stop through the production
-// runner/retirement method. Alpine fixtures are not business installation proof.
+// 显式启用的执行边界测试：通过生产运行器和退役方法
+// 实际执行 Docker 停止操作。Alpine 夹具不构成业务安装证明。
 func TestRuntimeLicenseRetirementDockerIsolation(t *testing.T) {
 	if os.Getenv("LICENSE_RETIREMENT_DOCKER_E2E") != "1" {
 		t.Skip("explicit isolated Docker retirement opt-in required")
@@ -156,8 +156,8 @@ func TestRuntimeLicenseRetirementDockerIsolation(t *testing.T) {
 	if afterTarget.State.Running || !afterSentinel.State.Running {
 		t.Fatal("retirement stopped wrong Docker project or failed to stop approved old component")
 	}
-	// Repetition may stop an already-stopped exact old container, but must never
-	// grow into another project's identically named service.
+	// 重复执行可以停止已停止的指定旧容器，但绝不能
+	// 扩展到其他项目中同名的服务。
 	if err = target.retireRuntimeLicenseContainers(ctx, input); err != nil {
 		t.Fatal("retirement retry failed")
 	}

@@ -17,8 +17,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// Repository 映射 audit_event、async_job、file_object 等既有表；结构演进只由
+// 编号 SQL 迁移维护，不启用 AutoMigrate。
 type Repository struct{ database *gorm.DB }
 
+// NewRepository 校验数据库依赖非空后构造审计仓储，缺失依赖时失败关闭。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("audit database must not be nil")
@@ -45,6 +48,8 @@ type eventModel struct {
 	Action, ResourceType                                                                       string
 	ResourceID, ResourceNameSnapshot, BusinessID, RequestID, TraceID, CorrelationID, UserAgent *string
 	SourceIP                                                                                   []byte
+	LoginIP, ClientIP, IngestPeerIP                                                            []byte
+	IPSource                                                                                   string `gorm:"column:ip_source"`
 	Result                                                                                     string
 	ReasonCode                                                                                 *string
 	RiskLevel, Classification                                                                  string
@@ -55,9 +60,8 @@ type eventModel struct {
 
 func (eventModel) TableName() string { return "audit_event" }
 
-// eventQueryRow is the flattened scan target used by audit list, detail and export queries.
-// Event must be an exported field: GORM ignores unexported embedded fields while parsing a
-// destination schema, which would otherwise leave every audit_event column at its Go zero value.
+// eventQueryRow 是审计列表、详情与导出查询共用的扁平扫描目标。Event 必须是导出字段：
+// GORM 解析目标模式时忽略未导出的嵌入字段，否则 audit_event 全部列都会保持 Go 零值。
 type eventQueryRow struct {
 	Event           eventModel `gorm:"embedded"`
 	ApplicationCode string     `gorm:"column:application_code"`
@@ -74,9 +78,8 @@ type dedupModel struct {
 
 func (dedupModel) TableName() string { return "audit_event_dedup" }
 
-// ingestionReceiptModel stores transport-level metadata for one batch Outbox delivery. It is
-// intentionally separate from audit_event so the delivery correlation triplet cannot replace an
-// individual event's original operation correlation fields.
+// ingestionReceiptModel 保存一次批量 Outbox 投递的传输层元数据。有意与 audit_event
+// 分离：投递关联三元组绝不能顶替单条事件原有的操作级关联字段。
 type ingestionReceiptModel struct {
 	ID                                               uint64 `gorm:"column:id"`
 	TenantID, ApplicationID, EnvironmentID, ClientID string
@@ -136,6 +139,8 @@ type exportPayload struct {
 
 func (asyncJobModel) TableName() string { return "async_job" }
 
+// Ingest 在单事务内解析启用中的来源应用、写入事件与去重行，返回首次/重复回执；
+// 事件只追加，幂等由 (tenant, application, environment, event_id) 保证。
 func (r *Repository) Ingest(ctx context.Context, tenantID string, input application.EventInput, now time.Time) (domain.Receipt, error) {
 	// 来源应用和环境必须在同一租户内保持启用；解析来源、写事件和写去重行放在同一事务，
 	// 避免出现事件已保存但重试仍被当作首次提交的窗口。
@@ -232,7 +237,7 @@ func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environ
 		return domain.Receipt{}, fmt.Errorf("marshal audit payload: %w", err)
 	}
 	hash := sha256.Sum256(payload)
-	event := eventModel{OccurredMonth: uint(input.OccurredAt.UTC().Year()*100 + int(input.OccurredAt.UTC().Month())), EventID: input.EventID, TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, EventCategory: input.EventCategory, EventType: input.EventType, OccurredAt: input.OccurredAt.UTC(), ReceivedAt: now.UTC(), ActorType: input.ActorType, ActorID: optional(input.ActorID), ActorNameSnapshot: optional(input.ActorName), SessionID: optional(input.SessionID), ClientID: optional(input.ClientID), Action: input.Action, ResourceType: input.ResourceType, ResourceID: optional(input.ResourceID), ResourceNameSnapshot: optional(input.ResourceName), BusinessID: optional(input.BusinessID), RequestID: optional(input.RequestID), TraceID: optionalTraceID(input.TraceID), CorrelationID: optional(input.CorrelationID), SourceIP: optionalIP(input.SourceIP), UserAgent: optional(input.UserAgent), Result: input.Result, ReasonCode: optional(input.ReasonCode), RiskLevel: input.RiskLevel, Classification: input.Classification, Summary: optional(input.Summary), Metadata: metadata, Changes: changes, PayloadHash: hash[:]}
+	event := eventModel{OccurredMonth: uint(input.OccurredAt.UTC().Year()*100 + int(input.OccurredAt.UTC().Month())), EventID: input.EventID, TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, EventCategory: input.EventCategory, EventType: input.EventType, OccurredAt: input.OccurredAt.UTC(), ReceivedAt: now.UTC(), ActorType: input.ActorType, ActorID: optional(input.ActorID), ActorNameSnapshot: optional(input.ActorName), SessionID: optional(input.SessionID), ClientID: optional(input.ClientID), Action: input.Action, ResourceType: input.ResourceType, ResourceID: optional(input.ResourceID), ResourceNameSnapshot: optional(input.ResourceName), BusinessID: optional(input.BusinessID), RequestID: optional(input.RequestID), TraceID: optionalTraceID(input.TraceID), CorrelationID: optional(input.CorrelationID), SourceIP: optionalIP(input.SourceIP), LoginIP: optionalIP(input.LoginIP), ClientIP: optionalIP(input.ClientIP), IngestPeerIP: optionalIP(input.IngestPeerIP), IPSource: normalizeIPSource(input.IPSource), UserAgent: optional(input.UserAgent), Result: input.Result, ReasonCode: optional(input.ReasonCode), RiskLevel: input.RiskLevel, Classification: input.Classification, Summary: optional(input.Summary), Metadata: metadata, Changes: changes, PayloadHash: hash[:]}
 	if err := tx.Create(&event).Error; err != nil {
 		return domain.Receipt{}, err
 	}
@@ -266,6 +271,7 @@ func newIngestionReceiptModel(tenantID string, app applicationModel, env environ
 	}
 }
 
+// List 分页返回租户内审计事件，按发生时间倒序。
 func (r *Repository) List(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Event], error) {
 	db := r.eventQuery(ctx, tenantID, query)
 	var total int64
@@ -282,6 +288,7 @@ func (r *Repository) List(ctx context.Context, tenantID string, query applicatio
 	}
 	return application.PageResult[domain.Event]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
+// Get 返回租户内单个审计事件详情。
 func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.Event, error) {
 	var record eventQueryRow
 	err := r.database.WithContext(ctx).Table("audit_event").Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Where("audit_event.tenant_id = ? AND audit_event.event_id = ?", tenantID, eventID).Order("audit_event.occurred_at DESC, audit_event.id DESC").Take(&record).Error
@@ -297,6 +304,7 @@ func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.
 // 释放配额，可再次创建；超限调用方收到 409 冲突（application.ErrConflict）。
 const maxActiveAuditExportJobsPerTenant = 3
 
+// CreateExportJob 在每租户活跃导出任务配额内创建 AUDIT_EXPORT 任务；超限返回冲突。
 func (r *Repository) CreateExportJob(ctx context.Context, tenantID, operatorID string, query application.PageRequest, publicID string, now time.Time) (domain.ExportJob, error) {
 	// AUD-2026-013：先按租户统计活跃导出任务，超出上限直接拒绝，不再排队。
 	var activeJobs int64
@@ -322,6 +330,7 @@ func (r *Repository) CreateExportJob(ctx context.Context, tenantID, operatorID s
 	}
 	return domain.ExportJob{JobID: publicID, Status: "PENDING", CreatedAt: now.UTC()}, nil
 }
+// GetExportJob 返回导出任务状态；成功任务附带受控下载地址。
 func (r *Repository) GetExportJob(ctx context.Context, tenantID, jobID string) (domain.ExportJob, error) {
 	var job asyncJobModel
 	if err := r.database.WithContext(ctx).Where("tenant_id = ? AND public_id = ? AND job_type = ?", tenantID, jobID, "AUDIT_EXPORT").Take(&job).Error; err != nil {
@@ -363,7 +372,7 @@ func (r *Repository) ClaimExportJob(ctx context.Context, workerID string, now, s
 		if err := tx.Model(&asyncJobModel{}).Where("id = ? AND status = ?", job.ID, "PENDING").Updates(map[string]any{"status": "RUNNING", "locked_by": workerID, "locked_at": now.UTC(), "attempts": gorm.Expr("attempts + 1")}).Error; err != nil {
 			return err
 		}
-		result = domain.ExportWork{JobID: *job.PublicID, TenantID: job.TenantID, ApplicationID: *job.ApplicationID, OperatorID: payload.OperatorID, Query: payload.Query, Attempts: job.Attempts + 1, MaxAttempts: job.MaxAttempts}
+		result = domain.ExportWork{JobID: *job.PublicID, TenantID: job.TenantID, ApplicationID: *job.ApplicationID, OperatorID: payload.OperatorID, Query: payload.Query, Attempts: job.Attempts + 1, MaxAttempts: job.MaxAttempts, LockedBy: workerID}
 		return nil
 	})
 	if err != nil {
@@ -374,6 +383,7 @@ func (r *Repository) ClaimExportJob(ctx context.Context, workerID string, now, s
 
 const maxAuditExportEvents = 10000
 
+// ListExportEvents 按导出快照的过滤条件读取事件，供 worker 生成 CSV。
 func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery) ([]domain.Event, error) {
 	db := r.eventQuery(ctx, tenantID, pageRequest(query))
 	var rows []eventQueryRow
@@ -390,6 +400,8 @@ func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, quer
 	return items, nil
 }
 
+// CompleteExportJob 在单事务发布导出文件对象、首个版本并置任务为 SUCCEEDED；
+// 回写绑定租约持有者，迟到 worker 不能覆盖。
 func (r *Repository) CompleteExportJob(ctx context.Context, work domain.ExportWork, file domain.ExportFile, completedAt time.Time) error {
 	// 文件对象、首个版本和任务成功状态在同一数据库事务发布；只有仍处于 RUNNING 的任务
 	// 能完成，迟到 Worker 不能覆盖已经重试或终结的任务元数据。
@@ -403,7 +415,8 @@ func (r *Repository) CompleteExportJob(ctx context.Context, work domain.ExportWo
 			return err
 		}
 		updates := map[string]any{"status": "SUCCEEDED", "result_file_id": file.FileID, "completed_at": completedAt.UTC(), "locked_by": nil, "locked_at": nil, "last_error_code": nil, "last_error_message": nil}
-		result := tx.Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND job_type = ? AND status = ?", work.TenantID, work.JobID, "AUDIT_EXPORT", "RUNNING").Updates(updates)
+		// 必须同时校验租约持有者：租约过期被接管后，原 Worker 的迟到回写会覆盖接管者结果。
+		result := tx.Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND job_type = ? AND status = ? AND locked_by = ?", work.TenantID, work.JobID, "AUDIT_EXPORT", "RUNNING", work.LockedBy).Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -414,9 +427,11 @@ func (r *Repository) CompleteExportJob(ctx context.Context, work domain.ExportWo
 	})
 }
 
+// FailExportJob 按尝试次数把失败任务终结为 FAILED 或按退避时间重新排队；
+// 限定 RUNNING 与租约持有者，防止迟到回写覆盖接管者。
 func (r *Repository) FailExportJob(ctx context.Context, work domain.ExportWork, code, message string, retryAt, now time.Time) error {
 	// 达到最大尝试次数后终结任务，否则清除租约并按退避时间重新排队；限定 RUNNING 状态
-	// 可避免迟到失败回写把后来已成功的任务重新置为待处理。
+	// 与租约持有者可避免迟到失败回写覆盖接管者或后来已成功的任务。
 	updates := map[string]any{"last_error_code": optional(code), "last_error_message": optional(message), "locked_by": nil, "locked_at": nil}
 	if work.Attempts >= work.MaxAttempts {
 		updates["status"] = "FAILED"
@@ -425,9 +440,10 @@ func (r *Repository) FailExportJob(ctx context.Context, work domain.ExportWork, 
 		updates["status"] = "PENDING"
 		updates["available_at"] = retryAt.UTC()
 	}
-	return r.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND status = ?", work.TenantID, work.JobID, "RUNNING").Updates(updates).Error
+	return r.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND status = ? AND locked_by = ?", work.TenantID, work.JobID, "RUNNING", work.LockedBy).Updates(updates).Error
 }
 
+// GetExportFile 返回已完成导出任务的文件元数据；物理路径仅限服务端内部使用。
 func (r *Repository) GetExportFile(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
 	type row struct {
 		FileID, StorageRelativePath, OriginalName, MediaType string
@@ -451,8 +467,8 @@ func pageRequest(query domain.ExportQuery) application.PageRequest {
 func (r *Repository) eventQuery(ctx context.Context, tenantID string, query application.PageRequest) *gorm.DB {
 	db := r.database.WithContext(ctx).Table("audit_event").Where("audit_event.tenant_id = ?", tenantID)
 	if query.Keyword != "" {
-		// Search every administrator-visible correlation dimension promised by the console. ASCII
-		// columns are converted before comparison so Chinese input cannot trigger MySQL collation errors.
+		// 覆盖控制台承诺给管理员的每一个可见关联维度。ASCII 列在比较前先做编码转换，
+		// 避免中文输入触发 MySQL 排序规则错误。
 		pattern := "%" + query.Keyword + "%"
 		db = db.Where(`(
 			CONVERT(audit_event.action USING utf8mb4) LIKE ? OR
@@ -482,6 +498,25 @@ func (r *Repository) eventQuery(ctx context.Context, tenantID string, query appl
 	if query.Result != "" {
 		db = db.Where("audit_event.result = ?", query.Result)
 	}
+	// 批次 3 查询维度：操作地址、对象、链路 ID 精确检索；client_ip 为空时回退历史列 source_ip。
+	if query.ClientIP != "" {
+		if parsed := net.ParseIP(strings.TrimSpace(query.ClientIP)); parsed != nil {
+			value := parsed.To4()
+			if value == nil {
+				value = parsed.To16()
+			}
+			db = db.Where("(audit_event.client_ip = ? OR (audit_event.client_ip IS NULL AND audit_event.source_ip = ?))", value, value)
+		} else {
+			// 非法地址直接返回空结果，而不是让 MySQL 比较失败变成 500。
+			db = db.Where("1 = 0")
+		}
+	}
+	if query.ResourceID != "" {
+		db = db.Where("audit_event.resource_id = ?", query.ResourceID)
+	}
+	if query.RequestID != "" {
+		db = db.Where("audit_event.request_id = ?", query.RequestID)
+	}
 	if query.RiskLevel != "" {
 		db = db.Where("audit_event.risk_level = ?", query.RiskLevel)
 	}
@@ -494,8 +529,8 @@ func (r *Repository) eventQuery(ctx context.Context, tenantID string, query appl
 	return db
 }
 
-// actionCategoryPredicate converts the UI's stable operation category into predicates over the
-// machine-readable action and HTTP metadata. Values are never interpolated into SQL.
+// actionCategoryPredicate 把界面稳定的操作类别转换为对机器可读 action 与 HTTP 元数据的
+// 谓词。值绝不拼接进 SQL。
 func actionCategoryPredicate(category string) (string, []any) {
 	const (
 		action = "LOWER(CONVERT(audit_event.action USING utf8mb4))"
@@ -545,7 +580,7 @@ func (r *Repository) mapError(err error) error {
 func toEvent(model eventModel, appCode, appName, environmentCode string) domain.Event {
 	var changes []domain.FieldChange
 	_ = json.Unmarshal(model.Changes, &changes)
-	return domain.Event{ID: fmt.Sprint(model.ID), EventID: model.EventID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, ApplicationCode: appCode, ApplicationName: appName, EnvironmentID: model.EnvironmentID, EnvironmentCode: environmentCode, OccurredAt: model.OccurredAt, OperatorDisplayName: value(model.ActorNameSnapshot), ActionType: model.EventType, Action: model.Action, Result: model.Result, ResourceType: model.ResourceType, ResourceID: value(model.ResourceID), ResourceName: value(model.ResourceNameSnapshot), Method: valueFromMetadata(model.Metadata, "method"), Path: valueFromMetadata(model.Metadata, "path"), ClientIP: ipString(model.SourceIP), UserAgent: value(model.UserAgent), RequestID: value(model.RequestID), TraceID: value(model.TraceID), CorrelationID: value(model.CorrelationID), StatusCode: intFromMetadata(model.Metadata, "status_code"), RiskLevel: model.RiskLevel, Detail: value(model.ReasonCode), Summary: value(model.Summary), ChangeSummary: changes}
+	return domain.Event{ID: fmt.Sprint(model.ID), EventID: model.EventID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, ApplicationCode: appCode, ApplicationName: appName, EnvironmentID: model.EnvironmentID, EnvironmentCode: environmentCode, OccurredAt: model.OccurredAt, OperatorDisplayName: value(model.ActorNameSnapshot), ActionType: model.EventType, Action: model.Action, Result: model.Result, ResourceType: model.ResourceType, ResourceID: value(model.ResourceID), ResourceName: value(model.ResourceNameSnapshot), Method: valueFromMetadata(model.Metadata, "method"), Path: valueFromMetadata(model.Metadata, "path"), ClientIP: auditClientIP(model), LoginIP: ipString(model.LoginIP), IngestPeerIP: ipString(model.IngestPeerIP), IPSource: normalizeIPSource(model.IPSource), UserAgent: value(model.UserAgent), RequestID: value(model.RequestID), TraceID: value(model.TraceID), CorrelationID: value(model.CorrelationID), StatusCode: intFromMetadata(model.Metadata, "status_code"), RiskLevel: model.RiskLevel, Detail: value(model.ReasonCode), Summary: value(model.Summary), ChangeSummary: changes}
 }
 func optional(value string) *string {
 	value = strings.TrimSpace(value)
@@ -562,7 +597,34 @@ func optionalTraceID(value string) *string {
 	return &value
 }
 
-// optionalIP converts a textual client address to the binary form required by audit_event.source_ip.
+// optionalIP 把文本形式的客户端地址转换为 audit_event.source_ip 需要的二进制形式。
+// auditClientIP 返回操作地址：新行读 client_ip；历史行（没有新列）继续用 source_ip，
+// 避免旧数据在界面上一夜之间变成空值。
+func auditClientIP(model eventModel) string {
+	if ip := ipString(model.ClientIP); ip != "" {
+		return ip
+	}
+	return ipString(model.SourceIP)
+}
+
+// normalizeIPSource 收敛来源标记，未知取值一律记为 UNKNOWN，避免自由文本进入审计口径。
+func normalizeIPSource(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "", "UNKNOWN":
+		return "UNKNOWN"
+	case "DIRECT":
+		return "DIRECT"
+	case "TRUSTED_PROXY":
+		return "TRUSTED_PROXY"
+	case "LEGACY_PROTOCOL":
+		return "LEGACY_PROTOCOL"
+	case "LEGACY_RECORD":
+		return "LEGACY_RECORD"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 func optionalIP(value string) []byte {
 	parsed := net.ParseIP(strings.TrimSpace(value))
 	if parsed == nil {
@@ -616,7 +678,7 @@ func redactChanges(changes []domain.FieldChange) []domain.FieldChange {
 	return redacted
 }
 
-// redactMetadata removes credential material recursively before metadata reaches append-only storage.
+// redactMetadata 在元数据进入只追加存储前递归移除凭据材料。
 func redactMetadata(metadata map[string]any) map[string]any {
 	if len(metadata) == 0 {
 		return nil
@@ -649,4 +711,37 @@ func redactMetadataValue(value any) any {
 func sensitiveField(field string) bool {
 	field = strings.ToLower(field)
 	return strings.Contains(field, "password") || strings.Contains(field, "token") || strings.Contains(field, "secret") || strings.Contains(field, "cookie")
+}
+
+// IngestionHealth 统计平台侧已接收的审计事件（批次 3）。
+//
+// 各子系统的 Outbox 在各自数据库内，平台无法读取；这里统计"平台收到的量"，
+// 用于发现上报停摆：近期接收量掉零、来源未采集数上升、最后接收时间过旧。
+func (r *Repository) IngestionHealth(ctx context.Context, tenantID string, recentAfter time.Time) (application.IngestionHealth, error) {
+	var health application.IngestionHealth
+	if err := r.database.WithContext(ctx).Model(&eventModel{}).
+		Where("tenant_id = ?", tenantID).Count(&health.TotalEvents).Error; err != nil {
+		return application.IngestionHealth{}, err
+	}
+	if err := r.database.WithContext(ctx).Model(&eventModel{}).
+		Where("tenant_id = ? AND received_at >= ?", tenantID, recentAfter.UTC()).Count(&health.RecentEvents).Error; err != nil {
+		return application.IngestionHealth{}, err
+	}
+	if err := r.database.WithContext(ctx).Model(&eventModel{}).
+		Where("tenant_id = ? AND ip_source = ?", tenantID, "UNKNOWN").Count(&health.UnknownProvenance).Error; err != nil {
+		return application.IngestionHealth{}, err
+	}
+	var bounds struct {
+		LastReceived  *time.Time `gorm:"column:last_received"`
+		OldestUnknown *time.Time `gorm:"column:oldest_unknown"`
+	}
+	// 单条聚合查询避免多次全表扫描；COALESCE 保证没有数据时返回 NULL 而不是报错。
+	if err := r.database.WithContext(ctx).Model(&eventModel{}).
+		Select("MAX(CASE WHEN received_at IS NOT NULL THEN received_at END) AS last_received, MIN(CASE WHEN ip_source = 'UNKNOWN' THEN received_at END) AS oldest_unknown").
+		Where("tenant_id = ?", tenantID).Scan(&bounds).Error; err != nil {
+		return application.IngestionHealth{}, err
+	}
+	health.LastReceivedAt = bounds.LastReceived
+	health.OldestUnknownAt = bounds.OldestUnknown
+	return health, nil
 }

@@ -130,7 +130,7 @@ func TestHealBrokerSecretDriftRateLimited(t *testing.T) {
 	healer := newBrokerDriftSelfHealerNoExport(oauth, control)
 
 	_ = healer.HealBrokerSecretDrift(context.Background(), "keycloak-broker")
-	_ = healer.HealBrokerSecretDrift(context.Background(), "keycloak-broker") // within TTL, should be skipped
+	_ = healer.HealBrokerSecretDrift(context.Background(), "keycloak-broker") // 仍在 TTL 内，应跳过。
 	if atomic.LoadInt32(&oauth.rotateCalls) != 1 {
 		t.Fatalf("expected rate limit to allow only 1 rotate, got %d", oauth.rotateCalls)
 	}

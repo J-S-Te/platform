@@ -1,5 +1,5 @@
-// license-install is an explicit host-root maintenance process, not an HTTP
-// endpoint. It never prints signing keys, service credentials or raw licenses.
+// license-install 是显式的宿主 root 维护进程，不是 HTTP 端点。
+// 它绝不打印签名密钥、服务凭据或许可证原文。
 package main
 
 import (
@@ -46,13 +46,14 @@ func readLicense(path string) (string, error) {
 }
 
 func run(args []string) error {
-	if len(args) == 0 || (args[0] != "import" && args[0] != "activate" && args[0] != "prepare" && args[0] != "migrate") {
-		return errors.New("用法：license-install prepare --scenario fresh|migrate|platform-only|expand --customer ID [--file PATH]；migrate [--timeout 15m]；import|activate --file PATH")
+	if len(args) == 0 || (args[0] != "import" && args[0] != "activate" && args[0] != "prepare" && args[0] != "migrate" && args[0] != "verify-deployment" && args[0] != "verify-enforcement") {
+		return errors.New("用法：license-install prepare --scenario fresh|migrate|platform-only|expand --customer ID [--file PATH]；migrate [--timeout 15m]；import|activate --file PATH；verify-deployment --application CODE；verify-enforcement")
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	file := fs.String("file", "", "受控只读签名许可证路径")
 	scenario := fs.String("scenario", "", "安装场景")
 	customer := fs.String("customer", "", "安装客户标识")
+	application := fs.String("application", "", "核验已完成的受控部署（只读）")
 	timeout := fs.Duration("timeout", 15*time.Minute, "全部组件执行确认等待时间")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -69,6 +70,16 @@ func run(args []string) error {
 	}
 	if args[0] == "migrate" && *file != "" {
 		return errors.New("migrate 使用已冻结基线；许可证请先执行 import")
+	}
+	if args[0] == "verify-enforcement" && (*file != "" || *application != "") {
+		return errors.New("verify-enforcement 仅核验当前完整购买集合，不接受 --file 或 --application")
+	}
+	if args[0] == "verify-deployment" {
+		if *application == "" || *file != "" {
+			return errors.New("verify-deployment 必须提供 --application，不能导入许可证")
+		}
+	} else if *application != "" {
+		return errors.New("--application 仅适用于 verify-deployment")
 	}
 	if os.Geteuid() != 0 {
 		return errors.New("离线授权维护命令仅允许部署管理员以root运行")
@@ -98,6 +109,20 @@ func run(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	if args[0] == "verify-enforcement" {
+		out, err := api.OfflineDelivery.VerifyEnforcement(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("当前商业授权及运行确认尚未通过：%w", err)
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	if args[0] == "verify-deployment" {
+		out, err := api.OfflineDelivery.VerifyDeployment(ctx, *application)
+		if err != nil {
+			return fmt.Errorf("受控部署尚未完成：%w", err)
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
 	if args[0] == "prepare" {
 		out, err := api.OfflineDelivery.Prepare(ctx, *scenario, *customer, raw)
 		if err != nil {

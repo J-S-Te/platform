@@ -6,11 +6,12 @@ restore_mysql="$script_dir/restore-mysql.sh"
 backup_gateway="$script_dir/backup-file-gateway.sh"
 restore_gateway="$script_dir/restore-file-gateway.sh"
 backup_all="$script_dir/backup-all.sh"
+backup_keycloak="$script_dir/backup-keycloak-mysql.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 
-for script in "$restore_mysql" "$backup_gateway" "$restore_gateway" "$backup_all"; do
+for script in "$restore_mysql" "$backup_gateway" "$restore_gateway" "$backup_all" "$backup_keycloak"; do
   bash -n "$script"
 done
 
@@ -19,11 +20,10 @@ contains "$backup_all" '--deployment-lock-fd' 'backup-all cannot inherit an alre
 contains "$backup_all" 'inherited deployment lock is not held by this task' 'backup-all does not verify an inherited deployment lock'
 contains "$backup_all" '--deployment-lock-fd "$deploy_lock_fd"' 'backup-all does not forward the held lock to the gateway snapshot'
 
-# Static security contract: these assertions intentionally enumerate the
-# maintenance boundaries so removing one writer or secret class breaks CI.
+# 静态安全契约：这些断言刻意枚举维护边界，确保移除任一写入者或密钥类别都会导致 CI 失败。
 contains "$restore_mysql" 'runtime/.deploy.lock' 'MySQL restore does not use unified deployment lock'
 contains "$restore_mysql" 'docker ps -q' 'MySQL restore does not enumerate actual running containers'
-for writer in platform-worker subsystem-provisioner temporal project-sla-notifier customer-presale-worker portal-invite-compensation-worker settlement-worker settlement-catalog-sync data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase; do
+for writer in platform-worker subsystem-provisioner temporal contract-worker project-sla-notifier customer-presale-worker customer-contract-transfer-worker portal-invite-compensation-worker settlement-worker settlement-catalog-sync data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase; do
   contains "$restore_mysql" "$writer" "MySQL restore writer map is missing $writer"
 done
 contains "$restore_mysql" 'RESTORE_SHARED_TEMPORAL_DATABASE' 'contract/Temporal shared database lacks independent confirmation'
@@ -54,8 +54,109 @@ contains "$backup_all" 'database container is stopped:' 'system backup silently 
 contains "$backup_all" '--verify-only' 'system disaster backup lacks verify-only mode'
 contains "$backup_all" '--rebuild-drill' 'system disaster backup lacks rebuild drill mode'
 
-# Dynamic regression: a Temporal container orphaned from current YAML must
-# still stop a contract-mysql restore. The Docker stub never exposes secrets.
+# binlog 位点：两个备份入口都必须请求快照一致的位点，并落盘 sidecar。
+for backup_script in "$backup_all" "$backup_keycloak"; do
+  contains "$backup_script" '--source-data=2' "$(basename -- "$backup_script") does not request binlog coordinates"
+  contains "$backup_script" '--single-transaction' "$(basename -- "$backup_script") lost single-transaction"
+  contains "$backup_script" 'SELECT @@log_bin' "$(basename -- "$backup_script") does not check binlog state"
+  contains "$backup_script" 'binlog-position' "$(basename -- "$backup_script") does not persist binlog coordinates"
+done
+contains "$backup_all" 'BINLOG_POSITIONS=required' 'system backup does not require binlog position sidecars'
+contains "$backup_keycloak" 'keycloak-*.sql.gz.binlog-position' 'Keycloak retention does not include position sidecars'
+
+# 从脚本正文取出解析函数执行，防止测试复制一份实现。
+(
+  set -Eeuo pipefail
+  position_fixture="$(mktemp -d "${TMPDIR:-/tmp}/binlog-position-test.XXXXXX")"
+  trap 'rm -rf -- "$position_fixture"' EXIT
+  for source_script in "$backup_all" "$backup_keycloak"; do
+    function_text="$(sed -n '/^extract_binlog_position() {$/,/^}$/p' "$source_script")"
+    [[ -n "$function_text" ]] || { echo "FAIL: missing extract_binlog_position in $source_script" >&2; exit 1; }
+    (
+      eval "$function_text"
+      {
+        printf '%s\n' '-- MySQL dump fixture'
+        printf '%s\n' "-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='binlog.000069', SOURCE_LOG_POS=436217060;"
+        printf '%s\n' 'CREATE TABLE t (id INT);'
+      } | gzip -9 >"$position_fixture/dump.sql.gz"
+      printf '%s\n' '-- no coordinates here' | gzip -9 >"$position_fixture/missing.sql.gz"
+      result="$(extract_binlog_position "$position_fixture/dump.sql.gz")"
+      [[ "$result" == $'binlog.000069\t436217060' ]] || { echo 'FAIL: parsed binlog position mismatch' >&2; exit 1; }
+      if extract_binlog_position "$position_fixture/missing.sql.gz" >/dev/null; then
+        echo 'FAIL: backup without coordinates was accepted' >&2
+        exit 1
+      fi
+      write_function="$(sed -n '/^write_binlog_position() {$/,/^}$/p' "$source_script")"
+      [[ -n "$write_function" ]] || { echo "FAIL: missing write_binlog_position in $source_script" >&2; exit 1; }
+      eval "$write_function"
+      write_binlog_position 0 "$position_fixture/missing.sql.gz" "$position_fixture/off.position" || {
+        echo 'FAIL: binlog-off sidecar was not written' >&2
+        exit 1
+      }
+      grep -Fq 'LOG_BIN=0' "$position_fixture/off.position" || { echo 'FAIL: binlog-off sidecar state mismatch' >&2; exit 1; }
+      if grep -Fq 'SOURCE_LOG_FILE=' "$position_fixture/off.position"; then
+        echo 'FAIL: binlog-off sidecar contains coordinates' >&2
+        exit 1
+      fi
+      if write_binlog_position 1 "$position_fixture/missing.sql.gz" "$position_fixture/fail.position"; then
+        echo 'FAIL: missing binlog coordinates were accepted' >&2
+        exit 1
+      fi
+      [[ ! -e "$position_fixture/fail.position" ]] || { echo 'FAIL: failed sidecar was left behind' >&2; exit 1; }
+    ) || { echo "FAIL: binlog position parser failed for $source_script" >&2; exit 1; }
+  done
+)
+
+# Keycloak 端到端：假 docker 输出带位点注释的转储，验证 sidecar 与两份校验和。
+(
+  set -Eeuo pipefail
+  keycloak_fixture="$(mktemp -d "${TMPDIR:-/tmp}/keycloak-backup-test.XXXXXX")"
+  trap 'rm -rf -- "$keycloak_fixture"' EXIT
+  install -d "$keycloak_fixture/deploy/bin" "$keycloak_fixture/stub"
+  install -m 750 "$backup_keycloak" "$keycloak_fixture/deploy/bin/backup-keycloak-mysql.sh"
+  : >"$keycloak_fixture/deploy/.env"
+  : >"$keycloak_fixture/deploy/.release.env"
+  printf '%s\n' 'services: {}' >"$keycloak_fixture/deploy/docker-compose.yml"
+
+  cat >"$keycloak_fixture/stub/docker" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+[[ "$1" == compose ]] || exit 97
+case "$*" in
+  *' config -q'*) exit 0 ;;
+  *'mysqladmin ping'*) exit 0 ;;
+  *'SELECT @@log_bin'*) printf '1\n' ;;
+  *mysqldump*)
+    printf '%s\n' '-- MySQL dump fixture'
+    printf '%s\n' "-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='binlog.000069', SOURCE_LOG_POS=436217060;"
+    printf '%s\n' 'CREATE TABLE t (id INT);'
+    ;;
+  *) exit 98 ;;
+esac
+EOF
+  cat >"$keycloak_fixture/stub/flock" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 750 "$keycloak_fixture/stub/docker" "$keycloak_fixture/stub/flock"
+
+  PATH="$keycloak_fixture/stub:$PATH" \
+    KEYCLOAK_BACKUP_DIR="$keycloak_fixture/backups" \
+    KEYCLOAK_BACKUP_PROM_FILE="$keycloak_fixture/keycloak_backup.prom" \
+    "$keycloak_fixture/deploy/bin/backup-keycloak-mysql.sh" >"$keycloak_fixture/run.out" 2>&1 || {
+      sed -n '1,80p' "$keycloak_fixture/run.out" >&2
+      exit 1
+    }
+
+  sql_file="$(find "$keycloak_fixture/backups" -type f -name 'keycloak-*.sql.gz' -print -quit)"
+  position_file="$sql_file.binlog-position"
+  [[ -n "$sql_file" && -s "$position_file" ]] || { echo 'FAIL: Keycloak backup did not write a position sidecar' >&2; exit 1; }
+  grep -Fq 'SOURCE_LOG_FILE=binlog.000069' "$position_file" || { echo 'FAIL: sidecar log file mismatch' >&2; exit 1; }
+  grep -Fq 'SOURCE_LOG_POS=436217060' "$position_file" || { echo 'FAIL: sidecar position mismatch' >&2; exit 1; }
+  [[ -s "$sql_file.sha256" && -s "$position_file.sha256" ]] || { echo 'FAIL: Keycloak checksums are incomplete' >&2; exit 1; }
+)
+
+# 动态回归：当前 YAML 中已不存在的 Temporal 容器仍须阻止 contract-mysql 恢复，Docker 替身绝不暴露密钥。
 fixture="$(/bin/realpath "$(mktemp -d "${TMPDIR:-/tmp}/restore-writer-test.XXXXXX")")"
 cleanup() { rm -rf -- "$fixture"; }
 trap cleanup EXIT
@@ -92,7 +193,7 @@ case "$1" in
       *State.Running*) printf '%s\n' true ;;
       *com.docker.compose.project*) printf '%s\n' basic-platform-production ;;
       *com.docker.compose.service*)
-        [[ "$object" == orphan-temporal-container ]] && printf '%s\n' temporal || printf '%s\n' contract-mysql
+        [[ "$object" == orphan-temporal-container ]] && printf '%s\n' "${QA_RESTORE_WRITER:-temporal}" || printf '%s\n' contract-mysql
         ;;
       *Config.Env*) printf '%s\n' 'TEMPORAL_ADDRESS=temporal:7233' ;;
       *'.Name'*) printf '%s\n' /orphan-temporal ;;
@@ -116,6 +217,22 @@ if ! grep -Fq 'orphan-temporal [service=temporal]' "$fixture/writer.out"; then
 fi
 contains "$fixture/writer.out" 'Containers removed from the current YAML are intentionally included.' 'restore did not explain pruned-container gate'
 
+# 即使 inspect 响应不含 DSN，固定的生产 worker 仍是已知写入者，必须在发送任何 SQL 前阻止恢复。
+printf '%s\n' 'customer backup' | gzip -c >"$fixture/deploy/backups/system/20260926T000000Z/customer-mysql.sql.gz"
+(cd "$fixture/deploy/backups/system/20260926T000000Z" && sha256sum contract-mysql.sql.gz customer-mysql.sql.gz >SHA256SUMS)
+for pair in contract-mysql:contract-worker customer-mysql:customer-contract-transfer-worker; do
+  database="${pair%%:*}"; writer="${pair#*:}"
+  if QA_RESTORE_WRITER="$writer" PATH="$fixture/stub:$PATH" "$fixture/deploy/bin/restore-mysql.sh" \
+      --service "$database" \
+      --backup "$fixture/deploy/backups/system/20260926T000000Z/$database.sql.gz" \
+      --confirm RESTORE_MYSQL_SERVICE \
+      --confirm-temporal-maintenance RESTORE_SHARED_TEMPORAL_DATABASE \
+      >"$fixture/$writer.out" 2>&1; then
+    fail "restore accepted a running $writer"
+  fi
+  contains "$fixture/$writer.out" "[service=$writer]" "restore did not identify $writer"
+done
+
 if PATH="$fixture/stub:$PATH" "$fixture/deploy/bin/restore-mysql.sh" \
     --service contract-mysql \
     --backup "$fixture/deploy/backups/system/20260926T000000Z/contract-mysql.sql.gz" \
@@ -124,8 +241,7 @@ if PATH="$fixture/stub:$PATH" "$fixture/deploy/bin/restore-mysql.sh" \
 fi
 contains "$fixture/temporal-confirm.out" 'RESTORE_SHARED_TEMPORAL_DATABASE' 'missing Temporal confirmation did not fail closed'
 
-# GNU/Linux runs the archive-level dynamic tests. macOS lacks the production
-# GNU tar/find/flock semantics and is covered by syntax/static + writer tests.
+# GNU/Linux 执行归档级动态测试；macOS 缺少生产 GNU tar、find、flock 语义，改由语法、静态检查及写入者测试覆盖。
 if [[ "$(uname -s)" == Linux || "${UIP_FORCE_ARCHIVE_TESTS:-false}" == true ]]; then
   batch="$fixture/disaster-batch"
   state="$fixture/state/recovery-state"
@@ -200,7 +316,7 @@ EOF
   fi
   contains "$fixture/missing-key.out" 'requires --encryption-key-file' 'missing encryption key failure was not explicit'
 
-  # Archive traversal through a symlink is rejected even with valid SHA files.
+  # 即使 SHA 文件有效，也拒绝通过符号链接进行归档路径穿越。
   bad="$fixture/bad-gateway"
   install -d "$bad" "$fixture/bad-tree"
   ln -s /etc/passwd "$fixture/bad-tree/escape"

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLocalStoreStagesBeforeAtomicPublish(t *testing.T) {
@@ -124,3 +125,57 @@ func TestLocalStoreValidatesCapacityRejectionThreshold(t *testing.T) {
 		t.Fatalf("usage=%d err=%v", usage, err)
 	}
 }
+
+// TestLocalStoreCleanupTemporaryOnlyRemovesUploadFragments 锁定边界：通用清理只删除
+// 临时目录内的 .uploading/.part- 上传碎片；正式命名空间文件、其它名称临时文件与
+// 符号链接必须保持字节不变（不跟随、不误删）。
+func TestLocalStoreCleanupTemporaryOnlyRemovesUploadFragments(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewLocalStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile := func(path string, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stageFragment := filepath.Join(store.temporaryRoot, "01STAGE000000000000000001.uploading")
+	partFragment := filepath.Join(store.temporaryRoot, "blob.part-7")
+	keepTemp := filepath.Join(store.temporaryRoot, "keep.txt")
+	formal := filepath.Join(root, "namespace", "report.bin")
+	writeFile(stageFragment, "stage")
+	writeFile(partFragment, "part")
+	writeFile(keepTemp, "keep")
+	writeFile(formal, "formal-bytes")
+	link := filepath.Join(store.temporaryRoot, "linked.uploading")
+	if err := os.Symlink(formal, link); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := store.CleanupTemporary(time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want exactly the two upload fragments", removed)
+	}
+	for _, path := range []string{stageFragment, partFragment} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("fragment %s still exists: %v", filepath.Base(path), err)
+		}
+	}
+	if content, err := os.ReadFile(keepTemp); err != nil || string(content) != "keep" {
+		t.Fatalf("non-fragment temp file changed: %q err=%v", content, err)
+	}
+	if content, err := os.ReadFile(formal); err != nil || string(content) != "formal-bytes" {
+		t.Fatalf("formal file changed: %q err=%v", content, err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("symlink entry must be left untouched: %v", err)
+	}
+}
+

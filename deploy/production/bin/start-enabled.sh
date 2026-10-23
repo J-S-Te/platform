@@ -3,6 +3,7 @@
 start_enabled_helper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=provisioner-config-refresh.sh
 source "$start_enabled_helper_dir/provisioner-config-refresh.sh"
+source "$start_enabled_helper_dir/project-background.sh"
 unset start_enabled_helper_dir
 
 portal_compensation_ready() {
@@ -10,6 +11,15 @@ portal_compensation_ready() {
   scope_enabled customer-opportunity && runtime_ready "$deploy_dir/runtime/customer.env" false || return 1
   for key in PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_ID PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_SECRET PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_ID PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_SECRET; do
     value="$(env_get "$deploy_dir/runtime/customer.env" "$key")"
+    [[ -n "$value" && "$value" != PENDING_* && "$value" != REPLACE_WITH_* ]] || return 1
+  done
+}
+
+portal_report_worker_ready() {
+  local file="${PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE:-$deploy_dir/runtime/portal-report-worker.env}" key value
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  for key in PORTAL_REPORT_WORKER_MYSQL_DSN PORTAL_OIDC_TENANT_ID PORTAL_REPORT_STORE_ROOT PORTAL_REPORT_CONTENT_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_REPORT_SOURCE_BASE_URL PORTAL_REPORT_SOURCE_TOKEN_URL PORTAL_REPORT_SOURCE_CLIENT_ID PORTAL_REPORT_SOURCE_CLIENT_SECRET; do
+    value="$(env_get "$file" "$key")"
     [[ -n "$value" && "$value" != PENDING_* && "$value" != REPLACE_WITH_* ]] || return 1
   done
 }
@@ -35,14 +45,15 @@ publish_registered_customer() (
     [[ "$max_roles" =~ ^[0-9]+$ ]] || die '无法读取 CRM 最大角色数'
   fi
   install -d -m 700 "$deploy_dir/backups/releases"
+  "$script_dir/backup-all.sh" --deployment-lock-fd 7 || return
   snapshot="$(mktemp -d "$deploy_dir/backups/releases/customer-single.XXXXXX")"
   install -m 600 "$release_file" "$snapshot/release.env"
   install -m 600 "$subsystem_runtime" "$snapshot/runtime.env"
   env_set "$release_file" "$subsystem_key" "$image"
   env_set "$subsystem_runtime" "$key" "$catalog_hash"
   if [[ "$component" == customer-opportunity ]]; then
-    build_id="${image##*@sha256:}"
-    env_set "$release_file" CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID "customer-presale-${build_id:0:16}"
+    build_id="$(customer_presale_build_id "$image")" || return
+    env_set "$release_file" CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID "$build_id"
     env_set "$subsystem_runtime" OIDC_MAX_EFFECTIVE_ROLES "$max_roles"
   fi
   if ! refresh_subsystem_provisioner_config; then
@@ -63,7 +74,7 @@ publish_registered_customer() (
 )
 
 start_registered() (
-  local component="$1" service database migration current_id configured services item
+  local component="$1" service database migration current_id configured services item selected
   scope_require "$component" || return
   subsystem_metadata "$component"
   require_control_plane_reload_clearance || return 1
@@ -73,6 +84,9 @@ start_registered() (
     refresh_subsystem_provisioner_config || return 1
   fi
   runtime_ready "$subsystem_runtime" || return
+  if [[ "$component" == customer-portal ]]; then
+    portal_report_worker_ready || die '门户报告 Worker 配置缺失；请在平台完成受控更新后重试'
+  fi
   [[ "$component" != data-analysis ]] || subsystem_key=DATA_ANALYSIS_DASHBOARD_API_IMAGE
   configured="$(env_get "$release_file" "$subsystem_key")"
   [[ "$configured" =~ @sha256:[a-f0-9]{64}$ ]] || die "$component 尚未登记不可变镜像"
@@ -80,6 +94,13 @@ start_registered() (
   docker container inspect "$subsystem_candidate" >/dev/null 2>&1 && die "$component 有平台接入候选，请先在平台完成接入和 continue"
   current_id="$(docker ps -aq --filter "label=com.docker.compose.project=$(scope_project)" --filter "label=com.docker.compose.service=$subsystem_service")"
   [[ -n "$current_id" ]] || die "$component 尚无平台创建的业务容器，请先在平台接入"
+  selected="$(scope_runtime_services "$component")" || return
+  local -a applications=()
+  while read -r service; do
+    [[ -n "$service" ]] || continue
+    applications+=("$service")
+  done <<< "$selected"
+  ((${#applications[@]} > 0)) || die '生产清单未选择任何长期运行组件'
   case "$component" in
     customer-opportunity) database=customer-mysql; migration=customer-migrate ;;
     customer-portal) database=portal-mysql; migration=portal-migrate ;;
@@ -89,25 +110,13 @@ start_registered() (
     contract|project|customer-opportunity) compose up -d --wait --wait-timeout 240 temporal || return ;;
   esac
   compose up -d --no-deps --wait --wait-timeout 240 "$database" || return
-  "$script_dir/backup-all.sh" || return
+  "$script_dir/backup-all.sh" --deployment-lock-fd 7 || return
+  [[ "$component" != project ]] || project_background_prepare || return
   if [[ "$component" == data-analysis ]]; then
     compose run --no-deps data-analysis-metabase-init || return
   fi
   # 失败的一次性容器保留，docker ps -a / docker logs 可直接排查。
   compose run --no-deps "$migration" || return
-  services="$(scope_services)" || return
-  local -a applications=()
-  while read -r service; do
-    grep -Fxq "$service" <<< "$services" || continue
-    case "$service" in *-mysql|*-migrate|*-catalog-sync|*-init) continue ;; esac
-    if [[ "$service" == portal-invite-compensation-worker ]]; then
-      if ! portal_compensation_ready; then
-        printf '门户邀请补偿不可用：CRM 未启用或未完成接入；跳过补偿 Worker。\n' >&2
-        continue
-      fi
-    fi
-    applications+=("$service")
-  done < <(scope_owned_services "$component")
   case "$component" in
     contract) compose run --no-deps contract-api ./authz-catalog publish || return ;;
     customer-opportunity) compose run --no-deps customer-api ./authz-catalog publish crm || return ;;
@@ -115,6 +124,8 @@ start_registered() (
     settlement) compose run --no-deps settlement-catalog-sync || return ;;
   esac
   compose up -d --no-deps --wait --wait-timeout 180 "${applications[@]}" || return
+  [[ "$component" != project ]] || project_background_activate || return
+  verify_current_services "${applications[@]}" || return
   printf '%s 已完成迁移和健康启动。\n' "$component"
 )
 

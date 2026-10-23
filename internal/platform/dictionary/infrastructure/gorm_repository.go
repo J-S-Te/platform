@@ -1,4 +1,5 @@
-// Package infrastructure provides GORM persistence for business dictionaries.
+// Package infrastructure 通过 GORM 提供业务字典的持久化实现。
+// 所有查询强制租户边界；写操作在事务内完成并核验父字典归属。
 package infrastructure
 
 import (
@@ -14,12 +15,12 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Repository persists dictionaries and dictionary items through GORM.
+// Repository 基于 GORM 持久化字典与字典项，实现 application.Repository 接口。
 type Repository struct {
 	database *gorm.DB
 }
 
-// NewRepository constructs a dictionary repository.
+// NewRepository 构造字典仓储；数据库句柄为 nil 时返回错误。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("dictionary database must not be nil")
@@ -67,12 +68,13 @@ func (itemModel) TableName() string {
 }
 
 type dictionaryProjection struct {
-	// GORM only scans exported fields, including embedded model fields.
+	// GORM 只扫描导出字段，包括嵌入模型中的字段。
 	Dictionary dictionaryModel `gorm:"embedded"`
 	ItemCount  int64           `gorm:"column:item_count"`
 }
 
-// ListDictionaries lists tenant dictionaries with their aggregate item counts.
+// ListDictionaries 分页列出租户字典，LEFT JOIN 聚合各字典的字典项计数。
+// 计数只用于展示；字典项的增删不依赖该值。
 func (repository *Repository) ListDictionaries(
 	ctx context.Context,
 	tenantID string,
@@ -119,7 +121,7 @@ func (repository *Repository) ListDictionaries(
 	}, nil
 }
 
-// CreateDictionary inserts a tenant-owned dictionary.
+// CreateDictionary 插入租户自有字典；唯一键冲突映射为 ErrConflict。
 func (repository *Repository) CreateDictionary(
 	ctx context.Context,
 	input dictionaryapplication.DictionaryCreateInput,
@@ -147,7 +149,7 @@ func (repository *Repository) CreateDictionary(
 	return dictionaryToDomain(row, 0), nil
 }
 
-// GetDictionary returns one dictionary after applying its tenant boundary.
+// GetDictionary 在租户边界内返回单个字典及其字典项计数。
 func (repository *Repository) GetDictionary(
 	ctx context.Context,
 	tenantID string,
@@ -224,7 +226,7 @@ func (repository *Repository) UpdateDictionary(
 	return updated, nil
 }
 
-// GetDictionaryByCode retrieves a dictionary by its tenant-scoped code.
+// GetDictionaryByCode 按租户内编码检索字典；供运行时按编码取启用项使用。
 func (repository *Repository) GetDictionaryByCode(
 	ctx context.Context,
 	tenantID string,
@@ -394,9 +396,9 @@ func (repository *Repository) UpdateItem(
 	return updated, nil
 }
 
-// DeleteDictionary locks the tenant-owned dictionary row, then removes its items and the
-// dictionary itself in one transaction. The FK from dict_item is ON DELETE RESTRICT, so
-// items must go first; the lock serializes the cascade against concurrent item writes.
+// DeleteDictionary 先锁定租户自有字典行，再在同一事务内删除其字典项与字典
+// 本身，返回级联删除的字典项数。dict_item 外键为 ON DELETE RESTRICT，必须
+// 先删子项；行锁将级联删除与并发字典项写入串行化。
 func (repository *Repository) DeleteDictionary(
 	ctx context.Context,
 	input dictionaryapplication.DictionaryDeleteInput,
@@ -437,8 +439,8 @@ func (repository *Repository) DeleteDictionary(
 	return deletedItems, nil
 }
 
-// DeleteItem locks the item under its tenant and dictionary boundaries before removing it,
-// so a guessed global item ID cannot cross tenants or dictionaries.
+// DeleteItem 在租户与字典边界内锁定并删除单个字典项，防止猜中全局 ID 跨租户
+// 或跨字典删除。
 func (repository *Repository) DeleteItem(
 	ctx context.Context,
 	input dictionaryapplication.ItemDeleteInput,

@@ -6,7 +6,7 @@ set -Eeuo pipefail
 
 usage() {
   echo "usage: $0 {frontend|contract|project|settlement} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
-  echo "       $0 platform <platform-image@sha256:...> <file-gateway-image@sha256:...>" >&2
+  echo "       $0 platform <platform-image@sha256:...> <file-gateway-image@sha256:...> [<socket-proxy-image@sha256:...>]" >&2
   echo "       $0 data-analysis <dashboard-api@sha256:...> <aggregation-worker@sha256:...> <alert-worker@sha256:...> <production-migrate@sha256:...>" >&2
   exit 2
 }
@@ -20,16 +20,22 @@ if [[ "$service" == "data-analysis" ]]; then
   data_analysis_migrate_image="$5"
   image_ref="$data_analysis_dashboard_image"
 elif [[ "$service" == "platform" ]]; then
-  [[ $# -eq 3 ]] || usage
+  [[ $# -eq 3 || $# -eq 4 ]] || usage
   image_ref="$2"
   file_gateway_image_ref="$3"
+  docker_socket_proxy_image_ref="${4:-}"
+  platform_image_refs=("$image_ref" "$file_gateway_image_ref")
+  if [[ $# -eq 4 ]]; then
+    [[ -n "$docker_socket_proxy_image_ref" ]] || usage
+    platform_image_refs+=("$docker_socket_proxy_image_ref")
+  fi
 else
   [[ $# -eq 2 ]] || usage
   image_ref="$2"
 fi
 case "$service" in
   frontend) image_key=FRONTEND_IMAGE ;;
-  platform) image_key=PLATFORM_IMAGE; file_gateway_image_key=FILE_GATEWAY_IMAGE ;;
+  platform) image_key=PLATFORM_IMAGE; file_gateway_image_key=FILE_GATEWAY_IMAGE; docker_socket_proxy_image_key=DOCKER_SOCKET_PROXY_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
   project) image_key=PROJECT_IMAGE ;;
   settlement) image_key=SETTLEMENT_IMAGE ;;
@@ -52,7 +58,7 @@ if [[ "$service" == "data-analysis" ]]; then
     fi
   done
 elif [[ "$service" == "platform" ]]; then
-  for platform_image in "$image_ref" "$file_gateway_image_ref"; do
+  for platform_image in "${platform_image_refs[@]}"; do
     if [[ ! "$platform_image" =~ $acr_enterprise_or_new_personal && ! "$platform_image" =~ $acr_legacy_personal && ! "$platform_image" =~ $offline_local_registry ]]; then
       echo "拒绝可变或格式错误的平台/File Gateway 镜像引用：$platform_image" >&2
       exit 2
@@ -86,7 +92,7 @@ export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
 export SETTLEMENT_RUNTIME_ENV_FILE="$settlement_runtime_file"
 export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_runtime_file"
 
-for command_name in docker curl gzip flock awk mktemp install stat df ln; do
+for command_name in docker curl gzip flock awk mktemp install stat df ln sha256sum wc; do
   command -v "$command_name" >/dev/null || {
     echo "缺少命令：$command_name" >&2
     exit 1
@@ -111,13 +117,15 @@ source "$transport_helper"
 source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
 source "$script_dir/compose-scope.sh"
-# Compose expands all required image variables even for config --services. Use
-# the validated candidate references only while checking scope, before committing
-# release pointers; keep the parent environment unchanged for rollback.
+source "$script_dir/project-background.sh"
+# 即使 config --services 也会展开全部必需镜像变量。仅在提交发布指针前检查范围时使用已验证候选引用，父进程环境保持不变，以供回滚。
 (
   export "$image_key=$image_ref"
   if [[ "$service" == platform ]]; then
     export "$file_gateway_image_key=$file_gateway_image_ref"
+    if [[ -n "$docker_socket_proxy_image_ref" ]]; then
+      export "$docker_socket_proxy_image_key=$docker_socket_proxy_image_ref"
+    fi
   elif [[ "$service" == data-analysis ]]; then
     for index in "${!data_analysis_image_keys[@]}"; do
       export "${data_analysis_image_keys[$index]}=${data_analysis_image_refs[$index]}"
@@ -295,7 +303,7 @@ write_service_runtime_dsns() {
       target="$settlement_runtime_file"
       key="SETTLEMENT_MYSQL_DSN"
       password="$(dsn_env_value SETTLEMENT_MYSQL_PASSWORD)"
-      dsn="settlement:${password:-PENDING_SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC"
+      dsn="settlement:${password:-PENDING_SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai"
       ;;
     data-analysis)
       target="$data_analysis_runtime_file"
@@ -325,6 +333,11 @@ flock -w 900 9 || {
 require_service_control_plane_clearance || exit 1
 # 运行配置读取、DSN 原子改写和后续 .release.env 提交必须位于同一个锁窗口。
 # 否则等待锁期间 Agent 可能刚下发新凭据，发布脚本却用锁外读取的旧文件覆盖它。
+[[ -f "$script_dir/backup-all.sh" && ! -L "$script_dir/backup-all.sh" ]] || { echo '缺少安全完整备份入口，拒绝发布' >&2; exit 1; }
+if ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
+  echo '发布前完整备份失败，未修改运行配置或镜像版本指针；拒绝继续更新' >&2
+  exit 1
+fi
 case "$service" in
   contract)
     prepare_runtime_file "$contract_runtime_file" "$contract_runtime_template" "合同服务"
@@ -343,9 +356,7 @@ case "$service" in
     write_service_runtime_dsns data-analysis
     ;;
 esac
-# The transport coordinator persists its transition state in the runtime file
-# while holding this same lock. Re-read it after waiting so a service-only
-# deployment cannot accidentally drop the drain overlay with stale variables.
+# 传输协调器持有同一把锁，将切换状态持久化到运行文件。等待获得锁后重新读取，防止仅服务部署因旧变量而误丢弃排空覆盖配置。
 public_transport_prepare "$deploy_dir"
 ensure_application_network
 
@@ -370,9 +381,7 @@ ensure_temporal_application_network() {
   attached="$(docker inspect "$container" --format '{{if index .NetworkSettings.Networks "basic-platform-production"}}attached{{end}}')" || return
   [[ "$attached" != attached ]] || return 0
   echo 'Temporal 未连接生产共享网络；保留持久化数据并重建网络连接'
-  # Existing drifted containers may no longer resolve contract-mysql. Restore
-  # the shared database first, then recreate only Temporal rather than routinely
-  # restarting the workflow server on every business-service release.
+  # 漂移容器可能已无法解析 contract-mysql。先恢复共享数据库，再仅重建 Temporal，不要每次业务服务发布都惯例重启工作流服务器。
   compose up -d --wait --wait-timeout 240 contract-mysql || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 240 temporal
 }
@@ -386,6 +395,39 @@ env_value() {
       exit
     }
   ' "$runtime_file"
+}
+
+env_get() {
+  awk -F= -v key="$2" '$0 !~ /^[[:space:]]*#/ && $1 == key {sub(/^[^=]*=/, ""); print; exit}' "$1"
+}
+
+# deploy-service.sh 由 deploy.sh 以独立子进程调用，不继承 deploy.sh 里的 shell 函数。
+# 首次发布时 provision_iam_import_client 要把一次性客户端 secret 写回 .env；这里提供
+# 与 deploy.sh 同语义的原子写入，不能用“脚本能通过语法检查”代替这条真实初始化路径。
+env_set() {
+  local file="$1" key="$2" value="$3" temporary
+  [[ "$value" != *$'\n'* ]] || {
+    echo "拒绝为 $key 写入包含换行的值" >&2
+    return 1
+  }
+  temporary="$(mktemp "$deploy_dir/.env-update.XXXXXX")" || return 1
+  # 经环境变量把值交给 awk，避免 -v 对反斜杠/百分号等字符做转义。
+  if ! ENV_WRITE_KEY="$key" ENV_WRITE_VALUE="$value" awk -F= '
+    BEGIN {
+      key = ENVIRON["ENV_WRITE_KEY"]
+      value = ENVIRON["ENV_WRITE_VALUE"]
+      found = 0
+    }
+    $0 !~ /^[[:space:]]*#/ && $1 == key { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$file" || { rm -f -- "$temporary"; return 1; }
+  chmod 600 "$file"
 }
 
 contract_env_value() {
@@ -692,16 +734,92 @@ backup_database() {
   # 安全（SEC-F5c）：root 密码只经容器内 MYSQL_PWD 环境变量传给 mysqldump，
   # 不再以 -p 加明文密码的方式拼进 argv，避免密码出现在 /proc/*/cmdline。
   if ! compose exec -T "$mysql_service" sh -c \
-    'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump --single-transaction --routines --triggers -uroot "$1"' \
+    'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump --single-transaction --routines --triggers --events --all-databases -uroot' \
     _ "$database" \
     | gzip -9 >"$temporary"; then
     rm -f "$temporary"
     echo "数据库备份失败，已清理未完成备份文件" >&2
     return 1
   fi
-  mv -f "$temporary" "$output"
+  if ! gzip -t "$temporary" || [[ "$(gzip -dc "$temporary" | wc -c)" -eq 0 ]]; then
+    rm -f -- "$temporary"
+    echo '数据库备份损坏或SQL为空，拒绝迁移/发布' >&2
+    return 1
+  fi
+  mv -f "$temporary" "$output" || return 1
+  if ! (cd "$deploy_dir/backups" && sha256sum "$(basename -- "$output")" > "$(basename -- "$output").sha256" &&
+      chmod 600 "$(basename -- "$output").sha256" && sha256sum --check "$(basename -- "$output").sha256"); then
+    echo '数据库备份摘要校验失败，拒绝迁移/发布' >&2
+    return 1
+  fi
 }
 
+# mysql_query_scalar 在目标容器内做一次真实 SQL 探测。
+# 不能只依赖 Docker healthcheck：mysqladmin ping 在“访问被拒绝”时也可能返回 0，
+# 且健康状态与“此刻能否执行 SQL”之间存在竞态——容器可能刚被 OOM 杀掉并在重启，
+# 此时 compose exec 会成功进入新容器，而 mysqld 尚未监听，mysqldump 只会报 socket 连接失败。
+mysql_query_scalar() {
+  local mysql_service="$1" sql="$2"
+  compose exec -T "$mysql_service" sh -c \
+    'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -Nse "$1"' _ "$sql" 2>/dev/null
+}
+
+# require_mysql_ready 在 compose 报告启动成功后再确认数据库真的能执行 SQL，
+# 失败时输出容器状态、重启/OOM 证据与宿主内存，避免把“数据库没起来”误报成备份失败。
+require_mysql_ready() {
+  local mysql_service="$1"
+  local timeout="${2:-120}"
+  # 注意：local 的展开发生在内建命令执行之前，因此不能在同一条 local 里
+  # 引用刚声明的变量（set -u 下会报 unbound variable）。
+  local deadline=$((SECONDS + timeout)) probe
+  while ((SECONDS < deadline)); do
+    if probe="$(mysql_query_scalar "$mysql_service" 'SELECT 1')" && [[ "$probe" == "1" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "数据库容器在 ${timeout}s 内无法执行 SQL：$mysql_service" >&2
+  diagnose_mysql_container "$mysql_service"
+  return 1
+}
+
+# diagnose_mysql_container 收集判断“为什么数据库没起来”所需的最小证据集。
+diagnose_mysql_container() {
+  local mysql_service="$1" container
+  container="$(compose ps -q "$mysql_service" 2>/dev/null || true)"
+  {
+    echo "---- 诊断：$mysql_service ----"
+    if [[ -z "$container" ]]; then
+      echo "容器不存在或服务未创建：$mysql_service"
+    else
+      docker inspect --format '状态={{.State.Status}} 健康={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} 退出码={{.State.ExitCode}} 重启次数={{.RestartCount}} OOMKilled={{.State.OOMKilled}}' "$container" 2>&1 || true
+      echo "最近 40 行容器日志："
+      docker logs --tail 40 "$container" 2>&1 || true
+    fi
+    echo "宿主机内存："
+    free -m 2>/dev/null || true
+    echo "提示：MySQL 首次初始化需要数百 MiB 内存；宿主机可用内存不足（基线 16 GiB）或容器内存上限过低时，"
+    echo "mysqld 会被 OOM 杀掉并反复重启，表现为长时间不健康、随后 mysqldump 报 socket 连接失败。"
+    echo "请按 OFFLINE_RUNBOOK 的内存基线扩容，或减少并发启动的数据库数量后重试。"
+  } >&2
+}
+
+# backup_database_if_initialized 区分“首次安装”和“升级发布”。
+# 首次安装时目标库尚未创建，没有可备份的数据；此时跳过备份是正确行为，
+# 不能因为 mysqldump 连不上 socket 就把首次发布判为失败（并掩盖真正的启动问题）。
+backup_database_if_initialized() {
+  local mysql_service="$1" database="$2" backup_name="${3:-$service}" count
+  if ! count="$(mysql_query_scalar "$mysql_service" "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '${database}'")"; then
+    echo "无法确认数据库是否已初始化：$mysql_service（MySQL 未就绪）" >&2
+    diagnose_mysql_container "$mysql_service"
+    return 1
+  fi
+  if [[ "$count" == "0" ]]; then
+    echo "数据库 ${database} 尚未创建（首次安装），跳过发布前备份"
+    return 0
+  fi
+  backup_database "$mysql_service" "$database" "$backup_name"
+}
 require_backup_space() {
   local available_kib minimum_kib
   minimum_kib="${BASIC_PLATFORM_MIN_FREE_KIB:-262144}"
@@ -718,6 +836,55 @@ require_backup_space() {
     echo "发布前磁盘空间不足：${available_kib} KiB 可用，至少需要 ${minimum_kib} KiB；请先清理 backups/releases、Docker 无用层或扩容磁盘" >&2
     return 1
   fi
+}
+
+
+# 平台人员导入使用独立的 platform 应用机器客户端。旧版离线配置把 client id
+# 写成占位值，导致首次启动后换 token 401，随后若临时借用子系统客户端又会被
+# file-gateway 的 purpose/application 边界以 403 拒绝。这里在数据库迁移完成、
+# platform-api 启动之前自动创建该客户端，并把仅出现一次的 secret 写入 .env。
+iam_import_client_configured() {
+  local client_id client_secret
+  client_id="$(env_value IAM_IMPORT_FILE_GATEWAY_CLIENT_ID)"
+  client_secret="$(env_value IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET)"
+  [[ "$client_id" == "platform-iam-import-file-gateway" ]] || return 1
+  [[ -n "$client_secret" && "$client_secret" != REPLACE_WITH_* ]]
+}
+
+provision_iam_import_client() {
+  local tenant_id client_id fragment line key value found=false
+  if iam_import_client_configured; then
+    return 0
+  fi
+  tenant_id="$(env_value SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID)"
+  [[ -n "$tenant_id" ]] || {
+    echo '缺少 SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID，无法初始化人员导入文件网关客户端' >&2
+    return 1
+  }
+  client_id="$(env_value IAM_IMPORT_FILE_GATEWAY_CLIENT_ID)"
+  case "$client_id" in ''|REPLACE_WITH_*) client_id=platform-iam-import-file-gateway ;; esac
+  fragment="$(compose run -T --rm --no-deps \
+    -e IAM_IMPORT_PROVISION_TENANT_ID="$tenant_id" \
+    -e IAM_IMPORT_PROVISION_APPLICATION_CODE=platform \
+    -e IAM_IMPORT_PROVISION_ENVIRONMENT=prod \
+    -e IAM_IMPORT_PROVISION_CLIENT_ID="$client_id" \
+    -e IAM_IMPORT_PROVISION_OUTPUT_PATH=- \
+    platform-migrate ./provision-iam-import-client)" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      IAM_IMPORT_FILE_GATEWAY_BASE_URL=*|IAM_IMPORT_FILE_GATEWAY_TOKEN_URL=*|IAM_IMPORT_FILE_GATEWAY_CLIENT_ID=*|IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET=*|IAM_IMPORT_FILE_GATEWAY_SCOPE=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    env_set "$runtime_file" "$key" "$value" || return 1
+    found=true
+  done <<< "$fragment"
+  [[ "$found" == true ]] || {
+    echo '人员导入文件网关客户端已创建，但未取得可写入 .env 的凭据片段' >&2
+    return 1
+  }
+  echo '人员导入文件网关客户端已初始化；凭据已写入受保护的 .env。'
 }
 
 deploy_platform() {
@@ -742,13 +909,26 @@ deploy_platform() {
 		return 1
 	fi
   compose run --rm --no-deps platform-key-init || return
-  compose up -d --wait --wait-timeout 180 platform-mysql keycloak-db contract-mysql || return
-  backup_database platform-mysql basic_platform || return
+  compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" platform-mysql keycloak-db contract-mysql || {
+    diagnose_mysql_container platform-mysql
+    diagnose_mysql_container keycloak-db
+    diagnose_mysql_container contract-mysql
+    return 1
+  }
+  # compose 报告成功不等于此刻能执行 SQL：必须再做一次真实连接探测，
+  # 否则 mysqld 被杀/重启时会把“数据库没起来”误报成备份失败。
+  require_mysql_ready platform-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+  backup_database_if_initialized platform-mysql basic_platform || return
   compose run --rm --no-deps platform-migrate ./migrate || return
+  provision_iam_import_client || return 1
   ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout 180 keycloak temporal || return
-	compose up -d --wait --wait-timeout 180 file-gateway-mysql || return
-	backup_database file-gateway-mysql "$file_gateway_db_name" file-gateway || return
+	compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" file-gateway-mysql || {
+	  diagnose_mysql_container file-gateway-mysql
+	  return 1
+	}
+	require_mysql_ready file-gateway-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+	backup_database_if_initialized file-gateway-mysql "$file_gateway_db_name" file-gateway || return
 	if ! compose up -d --force-recreate --wait --wait-timeout 180 file-gateway; then
 		echo "file-gateway 健康启动失败" >&2
 		dump_file_gateway_debug
@@ -762,8 +942,7 @@ deploy_platform() {
 		return 1
 	fi
   verify_service_image compose file-gateway "$file_gateway_image_ref" || return 1
-  # Migrations have completed. Stop the old API before changing the Agent so
-  # no admission request can cross between different manifest/parser versions.
+  # 迁移已完成。修改 Agent 前停止旧 API，防止接入请求跨越不同清单或解析器版本。
   compose stop --timeout 60 platform-api || return 1
   # 平台 API 只通过共享 Unix Socket 调用生产接入 Agent。先让同一平台镜像中的
   # Agent 健康，再切 API，避免新旧协议短暂不一致或页面误报 Agent 未启用。
@@ -791,14 +970,20 @@ deploy_platform() {
   verify_service_stable platform-worker || return 1
   verify_subsystem_control_plane_profiles "$(compose ps -q subsystem-provisioner)" \
     "$(compose ps -q platform-api)" || return 1
-  # The marker remains throughout migration, Agent/API replacement and health
-  # checks. Only this verified pair can release the pending-assets deployment gate.
+  # 迁移、Agent 和 API 替换及健康检查期间始终保留标记；只有这对已验证进程能够解除待处理资产部署门禁。
   if [[ -f "$deploy_dir/runtime/.control-plane-reload-required" ]]; then
     rm -f -- "$deploy_dir/runtime/.control-plane-reload-required" || return 1
   fi
 }
 
 deploy_contract() {
+  local selected runtime_service
+  local -a runtime_services=()
+  selected="$(scope_runtime_services contract)" || return
+  while read -r runtime_service; do
+    [[ -n "$runtime_service" ]] && runtime_services+=("$runtime_service")
+  done <<< "$selected"
+  ((${#runtime_services[@]} > 0)) || return 1
   # 子系统只有在浏览器 OIDC 与机器目录发布凭据全部就绪后才能启动，避免容器进入 401 重启循环。
   require_contract_runtime_value OIDC_CLIENT_ID || return
   require_contract_runtime_value OIDC_CLIENT_SECRET || return
@@ -823,13 +1008,14 @@ deploy_contract() {
     return 1
   fi
   ensure_temporal_application_network || return
-  compose up -d --wait --wait-timeout 240 contract-mysql temporal || return
-  backup_database contract-mysql contract_management || return
+  compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" contract-mysql temporal || return
+  require_mysql_ready contract-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+  backup_database_if_initialized contract-mysql contract_management || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   compose run --rm --no-deps contract-migrate || return
-  if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api; then
-    echo "---- contract-api 启动失败日志 ----" >&2
-    compose logs --no-color --tail 120 contract-api >&2 || true
+  if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${runtime_services[@]}"; then
+    echo "---- 合同运行组件启动失败日志 ----" >&2
+    compose logs --no-color --tail 120 "${runtime_services[@]}" >&2 || true
     return 1
   fi
   if ! wait_for_health "http://127.0.0.1:$(port_value CONTRACT_API_PORT 18081)/healthz"; then
@@ -837,7 +1023,10 @@ deploy_contract() {
     compose logs --no-color --tail 120 contract-api >&2 || true
     return 1
   fi
-  verify_service_image compose contract-api "$image_ref" || return 1
+  for runtime_service in "${runtime_services[@]}"; do
+    verify_service_image compose "$runtime_service" "$image_ref" || return 1
+    verify_service_stable "$runtime_service" || return 1
+  done
 }
 
 deploy_project() {
@@ -853,8 +1042,10 @@ deploy_project() {
     return 1
   fi
   ensure_temporal_application_network || return
-  compose up -d --wait --wait-timeout 240 project-mysql temporal || return
-  backup_database project-mysql project_management || return
+  compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" project-mysql temporal || return
+  require_mysql_ready project-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+  backup_database_if_initialized project-mysql project_management || return
+  project_background_prepare || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   compose run --rm --no-deps project-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 project-api project-sla-notifier || return
@@ -865,6 +1056,7 @@ deploy_project() {
   fi
   verify_service_image compose project-api "$image_ref" || return 1
   verify_service_image compose project-sla-notifier "$image_ref" || return 1
+  project_background_activate || return 1
 }
 
 deploy_settlement() {
@@ -887,8 +1079,9 @@ deploy_settlement() {
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1
   }
-  compose up -d --wait --wait-timeout 240 settlement-mysql || return
-  backup_database settlement-mysql settlement || return
+  compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" settlement-mysql || return
+  require_mysql_ready settlement-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+  backup_database_if_initialized settlement-mysql settlement || return
   compose run --rm --no-deps settlement-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 settlement-api settlement-worker || return
   if ! wait_for_health "http://127.0.0.1:$(port_value SETTLEMENT_API_PORT 18087)/healthz"; then
@@ -922,11 +1115,50 @@ update_runtime_value() {
   chmod 600 "$file" || return 1
 }
 
+# 数据看板发布会在启动前把新镜像内嵌的授权目录哈希写入 runtime 文件。若发布失败，
+# 只回滚镜像指针会留下"旧镜像 + 新哈希"：旧程序按内嵌目录校验哈希后 fail-closed 退出，
+# 自动回滚也无法恢复服务。因此必须同时恢复哈希，未恢复前不得重建容器。
+data_analysis_previous_role_config_hash=""
+data_analysis_previous_role_config_hash_present=false
+
+capture_data_analysis_role_config_hash() {
+  local file="$1"
+  data_analysis_previous_role_config_hash="$(awk -F= '$1 == "OIDC_ROLE_CONFIG_HASH" {sub(/^[^=]*=/, ""); print; exit}' "$file" 2>/dev/null)"
+  if [[ -f "$file" ]] && awk -F= '$1 == "OIDC_ROLE_CONFIG_HASH" {found=1} END {exit !found}' "$file"; then
+    data_analysis_previous_role_config_hash_present=true
+  else
+    data_analysis_previous_role_config_hash_present=false
+  fi
+}
+
+restore_data_analysis_role_config_hash() {
+  local file="$1" temporary
+  if [[ "$data_analysis_previous_role_config_hash_present" == true ]]; then
+    update_runtime_value "$file" OIDC_ROLE_CONFIG_HASH "$data_analysis_previous_role_config_hash" || return 1
+    echo "已恢复数据看板授权目录哈希：${data_analysis_previous_role_config_hash:-<空值>}"
+    return 0
+  fi
+  [[ -f "$file" ]] || return 0
+  temporary="$(mktemp "$deploy_dir/runtime/.runtime-rollback.XXXXXX")" || return 1
+  chmod 600 "$temporary"
+  if ! awk -F= '$1 != "OIDC_ROLE_CONFIG_HASH" {print}' "$file" >"$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$file"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  chmod 600 "$file" || return 1
+  echo '已移除本次发布新增的数据看板授权目录哈希'
+}
+
 deploy_data_analysis() {
   # data_analysis 由 API、两个常驻 Worker 和一次性迁移镜像组成，四个镜像必须
   # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
-  compose up -d --wait --wait-timeout 240 data-analysis-mysql || return
-  backup_database data-analysis-mysql dashboard_aggregation || return
+  compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" data-analysis-mysql || return
+  require_mysql_ready data-analysis-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+  backup_database_if_initialized data-analysis-mysql dashboard_aggregation || return
   compose run --rm --no-deps data-analysis-metabase-init || return
   compose run --rm --no-deps data-analysis-migrate || return
   # 角色配置哈希必须与实际运行的不可变镜像一致：从迁移镜像内嵌的 authz-catalog
@@ -938,6 +1170,7 @@ deploy_data_analysis() {
     echo "无法从数据看板不可变镜像读取有效授权目录哈希" >&2
     return 1
   fi
+  capture_data_analysis_role_config_hash "$data_analysis_runtime_file"
   update_runtime_value "$data_analysis_runtime_file" OIDC_ROLE_CONFIG_HASH "$embedded_data_analysis_hash" || return 1
   echo "已写入数据看板镜像内嵌授权目录哈希：$embedded_data_analysis_hash"
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
@@ -997,8 +1230,7 @@ restore_legacy_file_gateway_pointer() {
     echo '旧 File Gateway 缺少可验证的不可变镜像；请先恢复 FILE_GATEWAY_IMAGE 后重试发布' >&2
     return 1
   fi
-  # Recover the actual running image before taking the rollback snapshot. A new
-  # candidate must never masquerade as the previous File Gateway version.
+  # 拍摄回滚快照前先获取实际运行镜像，绝不能将新候选伪装成原 File Gateway 版本。
   temporary="$(mktemp "$deploy_dir/.release.env.gateway-recovery.XXXXXX")" || return
   if ! awk -F= -v value="$image" '$1 != "FILE_GATEWAY_IMAGE" {print} END {print "FILE_GATEWAY_IMAGE=" value}' \
     "$release_file" >"$temporary"; then
@@ -1068,7 +1300,21 @@ rollback_runtime() {
       verify_service_image compose platform-worker "$restored_platform_image" || return 1
       verify_service_stable platform-worker || return 1
       ;;
-    contract) compose up -d --force-recreate --no-deps contract-api ;;
+    contract)
+      local restored_contract_image selected_contract_runtime contract_runtime_service
+      local -a restored_contract_services=()
+      restored_contract_image="${restored_images[0]}"
+      selected_contract_runtime="$(scope_runtime_services contract)" || return 1
+      while read -r contract_runtime_service; do
+        [[ -n "$contract_runtime_service" ]] && restored_contract_services+=("$contract_runtime_service")
+      done <<< "$selected_contract_runtime"
+      ((${#restored_contract_services[@]} > 0)) || return 1
+      compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${restored_contract_services[@]}" || return 1
+      for contract_runtime_service in "${restored_contract_services[@]}"; do
+        verify_service_image compose "$contract_runtime_service" "$restored_contract_image" || return 1
+        verify_service_stable "$contract_runtime_service" || return 1
+      done
+      ;;
     project)
       local restored_project_image
       restored_project_image="${restored_images[0]}"
@@ -1076,6 +1322,7 @@ rollback_runtime() {
       wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18085)/healthz" || return 1
       verify_service_image compose project-api "$restored_project_image" || return 1
       verify_service_image compose project-sla-notifier "$restored_project_image" || return 1
+      project_background_activate || return 1
       ;;
     settlement) compose up -d --force-recreate --no-deps settlement-api settlement-worker ;;
     data-analysis)
@@ -1117,12 +1364,18 @@ if [[ "$service" == "data-analysis" ]]; then
       }
     ' "$release_file" >"$next_release"
 elif [[ "$service" == "platform" ]]; then
-  awk -F= -v k1="$image_key" -v v1="$image_ref" -v k2="$file_gateway_image_key" -v v2="$file_gateway_image_ref" '
-    BEGIN { found1 = found2 = 0 }
+  awk -F= -v k1="$image_key" -v v1="$image_ref" -v k2="$file_gateway_image_key" -v v2="$file_gateway_image_ref" \
+    -v k3="$docker_socket_proxy_image_key" -v v3="$docker_socket_proxy_image_ref" '
+    BEGIN { found1 = found2 = found3 = 0 }
     $1 == k1 { print k1 "=" v1; found1 = 1; next }
     $1 == k2 { print k2 "=" v2; found2 = 1; next }
+    $1 == k3 && v3 != "" { print k3 "=" v3; found3 = 1; next }
     { print }
-    END { if (!found1) print k1 "=" v1; if (!found2) print k2 "=" v2 }
+    END {
+      if (!found1) print k1 "=" v1
+      if (!found2) print k2 "=" v2
+      if (v3 != "" && !found3) print k3 "=" v3
+    }
   ' "$release_file" >"$next_release"
 else
   awk -F= -v key="$image_key" -v value="$image_ref" '
@@ -1138,8 +1391,11 @@ else
     }
   ' "$release_file" >"$next_release"
 fi
-# deploy-service may be invoked by root during incident recovery. Preserve the
-# deploy account ownership of .release.env so later CI deployments can update it.
+# 故障恢复时可能由 root 调用 deploy-service。必须保留 .release.env 归属部署账号，供后续 CI 部署更新。
+if [[ "$service" == project ]]; then
+  project_build="$(project_background_build_id "$image_ref")" || exit 1
+  env_set "$next_release" PROJECT_BACKGROUND_BUILD_ID "$project_build" || exit 1
+fi
 if [[ "$(id -u)" -eq 0 ]]; then
   chown --reference="$release_file" "$next_release"
 fi
@@ -1157,7 +1413,7 @@ if [[ "$service" == "data-analysis" ]]; then
     fi
   done
 elif [[ "$service" == "platform" ]]; then
-  for platform_image in "$image_ref" "$file_gateway_image_ref"; do
+  for platform_image in "${platform_image_refs[@]}"; do
     echo "拉取不可变平台镜像：$platform_image"
     if ! docker pull "$platform_image"; then
       mv -f "$previous_release" "$release_file"
@@ -1257,12 +1513,21 @@ if "$deploy_function"; then
 fi
 
 echo "发布失败，恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+if [[ "$service" == project ]] && ! project_background_rollback; then
+  echo '新后台未能证明排空，禁止先恢复镜像指针；保留当前进程、候选及操作状态。' >&2
+  exit 1
+fi
 # 应用镜像可回退，数据库迁移不可自动逆转；迁移必须保持前后版本兼容或由人工执行恢复方案。
 mv -f "$previous_release" "$release_file"
 rm -f "$previous_release"
 if [[ "$service" != platform ]]; then
   refresh_subsystem_provisioner_config || \
     echo '警告：发布回滚后 Agent 配置一致性核验失败，请暂停接入操作并人工处理' >&2
+fi
+if [[ "$service" == "data-analysis" ]]; then
+  # 必须在 rollback_runtime 重建容器之前恢复：否则旧镜像会带着新哈希 fail-closed 启动。
+  restore_data_analysis_role_config_hash "$data_analysis_runtime_file" || \
+    echo '警告：数据看板授权目录哈希恢复失败，请人工核对 runtime/data-analysis.env 后再重建容器' >&2
 fi
 rollback_runtime || true
 exit 1

@@ -4,8 +4,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
 )
 
-// Infrastructure evidence is audited but never enrolled for migration or ACK.
-// A BI installation cannot freeze while silently dropping its upstream engine.
+// validateControlledInfrastructure 校验基础设施证据：只审计、绝不注册为迁移或 ACK
+// 成员。BI 安装若在冻结时静默丢失其上游引擎，必须失败而不是放行。
 func validateControlledInfrastructure(report evidence.Report, business map[string]evidence.Fact) error {
 	gateway, hasBI := business["data-analysis-api"]
 	if len(report.InfrastructureFacts) > 64 || (hasBI && gateway.Application == "data_analysis" && len(report.InfrastructureFacts) == 0) {

@@ -13,7 +13,7 @@ must_fail() {
     exit 1
   fi
 }
-# Standalone CI does not have a sibling authoritative module.
+# 独立 CI 没有同级权威模块。
 sh "$check" --check
 cp "$test_root/platform/third_party/license-core/clock.go" "$test_root/platform/third_party/license-core/issuer.go"
 must_fail 'non-core file in consumer snapshot'

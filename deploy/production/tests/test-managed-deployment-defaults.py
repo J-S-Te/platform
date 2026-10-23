@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Non-default deployment roots and narrowly managed proxy image compatibility."""
+"""验证非默认部署根目录及限定范围的受管代理镜像兼容性。"""
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +9,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PROXY = 'ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459'
 LEGACY = 'tecnativa/docker-socket-proxy:v0.5.0'
+MANAGED = '${DOCKER_SOCKET_PROXY_IMAGE:-' + PROXY + '}'
 
 with tempfile.TemporaryDirectory(prefix='managed-deployment-defaults-') as directory:
     fixture = Path(directory)
@@ -80,8 +81,7 @@ with tempfile.TemporaryDirectory(prefix='managed-deployment-defaults-') as direc
         if expected != selected:
             backup = next((host / 'backups').glob('install-assets.*'))
             assert (backup / 'docker-compose.yml').read_text() == selected
-            # Recovery of a failed transaction must also restore this targeted
-            # change, not leave a partially patched operator-selected Compose.
+            # 失败事务恢复时也必须还原这项定向修改，不能让操作人选定的 Compose 留下部分补丁。
             transaction = host / 'runtime/.assets-install-transaction'
             transaction.mkdir()
             (transaction / 'backup').write_text(str(backup) + '\n')
@@ -92,14 +92,15 @@ with tempfile.TemporaryDirectory(prefix='managed-deployment-defaults-') as direc
             assert recovered.returncode == 0, recovered.stdout + recovered.stderr
             assert (host / 'docker-compose.yml').read_text() == selected
 
-    install('managed', LEGACY, PROXY)
-    install('quoted-managed', "'docker.io/" + LEGACY + "'", "'" + PROXY + "'")
+    install('managed', LEGACY, MANAGED)
+    install('quoted-managed', "'docker.io/" + LEGACY + "'", "'" + MANAGED + "'")
     install('custom', 'registry.internal/socket-proxy@sha256:' + 'a' * 64,
             'registry.internal/socket-proxy@sha256:' + 'a' * 64)
     install('custom-version', 'tecnativa/docker-socket-proxy:v0.4.1',
             'tecnativa/docker-socket-proxy:v0.4.1')
     install('disabled', LEGACY, LEGACY, commented=True)
-    install('already-pinned', PROXY, PROXY)
+    install('already-pinned', PROXY, MANAGED)
+    install('already-managed', MANAGED, MANAGED)
 
     for name, address, disabled in [('legacy-frontend', '172.31.255.250', False),
                                      ('custom-frontend', '172.18.0.42', False),

@@ -9,8 +9,8 @@ import (
 	runtime "github.com/J-S-Te/license-core/runtime"
 )
 
-// Sign keeps the platform signing key inside the existing key owner. Purpose
-// separation is enforced by runtime's exact JWS typ, never by the HTTP caller.
+// Sign 令平台签名密钥始终留在既有密钥持有者内部；用途隔离由 runtime 校验精确的
+// JWS typ 实现，绝不信任 HTTP 调用方声明。
 func (manager *ApplicationJWTManager) Sign(snapshot runtime.PlatformSnapshot) (string, error) {
 	if manager == nil || len(manager.privateKey) != ed25519.PrivateKeySize {
 		return "", errors.New("platform snapshot signing key unavailable")
@@ -18,8 +18,8 @@ func (manager *ApplicationJWTManager) Sign(snapshot runtime.PlatformSnapshot) (s
 	return runtime.SignSnapshot(snapshot, manager.LicenseSnapshotKeyID(), manager.privateKey)
 }
 
-// LicenseSnapshotKeyID identifies the deployment's platform public key, not
-// the vendor's independently trusted commercial signing key.
+// LicenseSnapshotKeyID 标识部署自身的平台公钥，而非供应商独立信任的
+// 商业签名密钥，两类密钥空间不得混用。
 func (manager *ApplicationJWTManager) LicenseSnapshotKeyID() string {
 	if manager == nil || len(manager.publicKey) != ed25519.PublicKeySize {
 		return ""
@@ -28,8 +28,8 @@ func (manager *ApplicationJWTManager) LicenseSnapshotKeyID() string {
 	return "platform-" + hex.EncodeToString(hash[:16])
 }
 
-// VerifyLicenseSnapshot uses the platform's own configured public key and a
-// separately supplied vendor trust set; neither key set comes from the JWS.
+// VerifyLicenseSnapshot 使用平台自身配置的公钥与单独传入的供应商信任集校验快照；
+// 两套密钥都不取自 JWS 载荷本身。
 func (manager *ApplicationJWTManager) VerifyLicenseSnapshot(raw string, binding runtime.Binding, vendorKeys map[string]ed25519.PublicKey) (runtime.PlatformSnapshot, error) {
 	if manager == nil || len(manager.publicKey) != ed25519.PublicKeySize {
 		return runtime.PlatformSnapshot{}, errors.New("platform snapshot verification key unavailable")

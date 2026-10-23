@@ -69,8 +69,7 @@ docker() {
 
 compose() {
   printf '%s\n' "$*" >>"$calls"
-  # Custom proxy references retain their normal authenticated pull behavior;
-  # the pinned public-image branch has a separate executable Docker-argv test.
+  # 自定义代理引用保留正常认证拉取行为；固定公共镜像分支另有可执行 Docker 参数测试。
   if [[ "$*" == 'config --images docker-socket-proxy' ]]; then
     printf 'operator.example/custom-proxy:approved\n'
   fi
@@ -130,8 +129,7 @@ grep -Fq '均未运行' "$test_root/stopped.out" ||
   fail 'static validation unexpectedly started a stopped control plane'
 pass 'a not-yet-deployed control plane is validated without being started'
 
-# A previous failed reload can intentionally leave platform-api stopped. The
-# same command must be able to repair that fail-closed partial state.
+# 之前失败的重载可能刻意保持 platform-api 停止；同一命令必须能修复这种失败关闭的部分状态。
 provisioner_running=true
 platform_api_running=false
 : >"$calls"
@@ -145,8 +143,7 @@ grep -Fq 'up -d --force-recreate --wait --wait-timeout 120 --no-deps platform-ap
   fail 'reload did not recover the absent platform-api'
 pass 'paired reload repairs a fail-closed partial control-plane state'
 
-# Verify the public deploy.sh marker gate in an isolated asset directory. The
-# gate executes before mutating subcommands, while help remains available.
+# 在隔离资产目录验证公共 deploy.sh 标记门禁。门禁先于产生变更的子命令执行，同时保持帮助可用。
 fixture="$test_root/fixture"
 mkdir -p "$fixture/bin" "$fixture/runtime"
 for file in deploy.sh compose-scope.sh start-enabled.sh provisioner-config-refresh.sh \

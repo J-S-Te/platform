@@ -1,4 +1,4 @@
-// Package domain defines the file metadata and asynchronous job models owned by the filetask module.
+// Package domain 定义 filetask 模块拥有的文件元数据与异步任务模型。
 package domain
 
 import (
@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// 文件逻辑状态机：上传中、校验中、可用、被拒、隔离、删除中、已删除、失败与过期。
+// 每次状态迁移都必须有对应的审计记录。
 const (
 	FileStatusPendingUpload = "PENDING_UPLOAD"
 	FileStatusValidating    = "VALIDATING"
@@ -16,14 +18,26 @@ const (
 	FileStatusDeleted       = "DELETED"
 	FileStatusFailed        = "FAILED"
 	FileStatusExpired       = "EXPIRED"
+)
 
+// 保留类别：通用清理只允许 TEMPORARY；LONG_TERM 与保留期为空/未知必须保持字节不变。
+const (
+	RetentionClassTemporary = "TEMPORARY"
+	RetentionClassLongTerm  = "LONG_TERM"
+)
+
+// 文件版本状态机：同一文件按版本独立演进，REMOVED 表示内容字节已删除但元数据保留。
+const (
 	FileVersionStatusPendingUpload = "PENDING_UPLOAD"
 	FileVersionStatusValidating    = "VALIDATING"
 	FileVersionStatusReady         = "READY"
 	FileVersionStatusRejected      = "REJECTED"
 	FileVersionStatusFailed        = "FAILED"
 	FileVersionStatusRemoved       = "REMOVED"
+)
 
+// 任务状态机：PENDING/RUNNING 为活动态，FAILED 可自动重试，DEAD/CANCELLED 为终态。
+const (
 	JobStatusPending   = "PENDING"
 	JobStatusRunning   = "RUNNING"
 	JobStatusSucceeded = "SUCCEEDED"
@@ -32,8 +46,8 @@ const (
 	JobStatusCancelled = "CANCELLED"
 )
 
-// File contains the logical metadata for a locally stored file. Its storage path is deliberately
-// absent: API callers must never receive the server-side relative path.
+// File 保存本地存储文件的逻辑元数据。有意不含存储路径：API 调用方绝不能收到
+// 服务端相对路径。
 type File struct {
 	ID, TenantID, ApplicationID       string
 	Namespace, Purpose, PolicyVersion string
@@ -50,8 +64,8 @@ type File struct {
 	CreatedAt, UpdatedAt              time.Time
 }
 
-// FileVersion is one immutable binary version. StorageRelativePath is internal-only and must not
-// be returned by the HTTP adapter.
+// FileVersion 是一个不可变的二进制版本。StorageRelativePath 仅限内部使用，
+// HTTP 适配器不得返回。
 type FileVersion struct {
 	ID, FileID, StorageRelativePath string
 	VersionNo                       uint
@@ -64,7 +78,7 @@ type FileVersion struct {
 	ValidatedAt                     *time.Time
 }
 
-// StoredFile joins a file and its current binary version for secure download and cleanup work.
+// StoredFile 把文件与其当前二进制版本组合，供安全下载与清理使用。
 type StoredFile struct {
 	File    File
 	Version FileVersion
@@ -82,14 +96,14 @@ type FileBinding struct {
 	CreatedAt                   time.Time
 }
 
-// PageRequest is the common, tenant-scoped operation query shape.
+// PageRequest 是共用的、租户隔离的操作查询形态。
 type PageRequest struct {
 	Page, PageSize       int
 	Status, JobType      string
 	ApplicationID, Query string
 }
 
-// PageResult is a deterministic, pagination-friendly result set.
+// PageResult 是确定性的、便于分页的结果集。
 type PageResult[T any] struct {
 	Items    []T   `json:"items"`
 	Page     int   `json:"page"`
@@ -97,8 +111,8 @@ type PageResult[T any] struct {
 	Total    int64 `json:"total"`
 }
 
-// Job represents one MySQL-backed asynchronous task. Payload is intentionally opaque to the
-// scheduler; only the worker registered for JobType may interpret it.
+// Job 表示一个基于 MySQL 的异步任务。调度器有意不解释 Payload：
+// 只有注册到对应 JobType 的 worker 才能解析它。
 type Job struct {
 	ID               uint64
 	PublicID         string
@@ -133,14 +147,25 @@ type Job struct {
 	LastSucceededAt  *time.Time
 }
 
-// CleanupResult describes the bounded local-file cleanup pass. It purposely exposes counts only,
-// not physical paths or file contents.
+// CleanupResult 描述一次有界的本地文件清理。有意只暴露计数，不暴露物理路径或内容。
 type CleanupResult struct {
 	ClaimedFiles       int `json:"claimed_files"`
 	DeletedFiles       int `json:"deleted_files"`
 	FailedFiles        int `json:"failed_files"`
 	RemovedTempFiles   int `json:"removed_temp_files"`
 	TempCleanupFailure int `json:"temp_cleanup_failure"`
+	// ReconciledFiles 统计通过受控对账推进的遗留 DELETING 记录（新增字段，既有字段语义不变）。
+	ReconciledFiles int `json:"reconciled_files"`
+}
+
+// UploadSessionRecovery 描述与卡住文件一起恢复所需的上传会话字段。
+//
+// V2 上传把文件对象与上传会话分别落库：文件被对账推进到 READY 时，会话若仍停在
+// UPLOADING，客户端会永久轮询不到结果，业务绑定也不会发生。恢复必须同时收敛会话。
+type UploadSessionRecovery struct {
+	SessionID, TenantID, ApplicationID, ActorUserID string
+	FileID, ResourceType, ResourceID, BindingType   string
+	DisplayName, OriginalName                       string
 }
 
 // ReconcileResult 汇总一次有界文件状态对账，不暴露物理路径或内容。

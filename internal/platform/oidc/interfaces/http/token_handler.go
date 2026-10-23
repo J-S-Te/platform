@@ -82,10 +82,9 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 	writeTokenResult(w, result)
 }
 
-// healBrokerDriftOnClientFailure triggers a self-heal when a broker client's token
-// exchange fails with invalid_client. This is the observable signal that Keycloak is
-// presenting a stale broker secret that the platform no longer accepts. The repair runs
-// asynchronously so the failed response is not delayed; the healer rate-limits itself.
+// healBrokerDriftOnClientFailure 在 broker client 的 token 兑换以 invalid_client 失败时
+// 触发自愈。这是"Keycloak 正出示平台不再接受的陈旧 broker secret"的可观测信号。修复
+// 异步执行以免延迟失败响应；healer 自身负责限流。
 func (h *Handler) healBrokerDriftOnClientFailure(ctx context.Context, clientID string, err error) {
 	if h.brokerSelfHealer == nil || !errors.Is(err, application.ErrInvalidClient) || !isBrokerClientID(clientID) {
 		return
@@ -99,7 +98,7 @@ func (h *Handler) healBrokerDriftOnClientFailure(ctx context.Context, clientID s
 	}()
 }
 
-// isBrokerClientID reports whether clientID is a platform-managed Keycloak broker client.
+// isBrokerClientID 判断 clientID 是否为平台托管的 Keycloak broker client。
 func isBrokerClientID(clientID string) bool {
 	switch clientID {
 	case "keycloak-broker", "keycloak-customer-portal-broker":
@@ -158,10 +157,8 @@ func (h *Handler) tokenClientAuthentication(w http.ResponseWriter, r *http.Reque
 		}
 		return application.ClientAuthentication{ClientID: basicClientID, ClientSecret: basicClientSecret}, true
 	}
-	// Keycloak's OIDC broker uses client_secret_post for the upstream token
-	// exchange in the local Keycloak distribution. Keep this compatibility
-	// exception limited to the dedicated broker client; all business clients
-	// continue to require HTTP Basic authentication.
+	// 本地 Keycloak 发行版的 OIDC broker 对上游 token 兑换使用 client_secret_post。
+	// 该兼容例外只保留给专用 broker client；所有业务客户端仍必须使用 HTTP Basic 认证。
 	if allowBrokerClientSecretPost && formClientID == "keycloak-broker" && formParameterPresent(r.Form, "client_secret") && !hasAssertion && !hasAssertionType {
 		return application.ClientAuthentication{ClientID: formClientID, ClientSecret: r.Form.Get("client_secret")}, true
 	}

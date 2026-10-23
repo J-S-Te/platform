@@ -53,6 +53,8 @@ customer_notification_worker_services=(
 log() { printf '[docker-local] %s\n' "$*"; }
 fail() { printf '[docker-local] ERROR: %s\n' "$*" >&2; exit 1; }
 
+source "${script_dir}/local-project-background.sh"
+
 usage() {
     cat <<USAGE
 用法：
@@ -64,6 +66,18 @@ usage() {
   bash scripts/docker-local.sh logs [选项] [服务名...]
   bash scripts/docker-local.sh config
   bash scripts/docker-local.sh verify
+  bash scripts/docker-local.sh prepare-license --application CODE --operator NAME [--approve] [--replace]
+  bash scripts/docker-local.sh refresh-approvals --operator NAME [--applications a,b] [--approve]
+                           为全部已登记应用生成批准候选并打印核对单；--approve 才统一发布
+  bash scripts/docker-local.sh recover-license-pins [--apply]
+                           校验完整有效批准并预览固定文件恢复；--apply 先备份再原子恢复
+  bash scripts/docker-local.sh dev-up            一键启动：命令行能做的全做完，需要人工决定处停下给出指令
+  bash scripts/docker-local.sh dev-approve       发布运行批准（必须显式 --approve）
+  bash scripts/docker-local.sh status            只读状态总览：卡在哪里、下一步做什么
+  bash scripts/docker-local.sh prepare-discovery 为六个子系统创建探测候选（不启动业务进程，失败不阻断）
+  bash scripts/docker-local.sh bootstrap-admin  为已运行的控制面追加首个超级管理员（已存在则跳过）
+  bash scripts/docker-local.sh build-images     只准备候选镜像：不检查旧运行镜像、不迁移、不启动服务、不改写固定记录
+  bash scripts/docker-local.sh up --core-only   只恢复控制面：不执行业务迁移与业务校验，不启动业务 API/Worker
   bash scripts/docker-local.sh refresh-api
   bash scripts/docker-local.sh refresh-frontend
   bash scripts/docker-local.sh refresh-contract-api
@@ -124,7 +138,7 @@ up/restart 选项：
   settlement-worker 结算 Outbox 与催收 Worker
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
-  project-api   项目管理系统 API + Temporal Worker（完成 project_management/dev 接入后启用）
+  project-api   项目管理系统 API（后台由 sla-notifier 独立运行，接入后启用）
   dashboard-api 数据看板与统计分析 API（嵌入桥）+ aggregation-worker + alert-worker + Metabase（未接入时先创建探测候选容器）
   presale-worker 售前申请审批/PMS 投递 Worker（up 默认启动）
 
@@ -135,10 +149,47 @@ up/restart 选项：
 USAGE
 }
 
+# 无参数不再等于 up：旧行为会直接构建、迁移并创建容器，误触发代价高。
+# 这里只打印用法，不触碰 Docker、不写文件、不启动任何服务。
+if (($# == 0)); then
+    usage
+    cat >&2 <<'EMPTY'
+本地启动没有隐式默认动作：以上命令必须显式给出。
+
+  bash scripts/docker-local.sh status     只看当前状态与下一步
+  bash scripts/docker-local.sh dev-up     一键启动（推荐）
+EMPTY
+    exit 2
+fi
+
+# 此只读候选准备不会初始化或重置许可证。
+if [[ "${1:-}" == "prepare-license" ]]; then
+    shift
+    exec python3 "${script_dir}/prepare-local-runtime-license.py" "$@"
+fi
+
+# 状态总览：只读，一眼看清卡在哪、下一步做什么。
+if [[ "${1:-}" == "status" ]]; then
+    shift
+    exec python3 "${script_dir}/local-status.py" "$@"
+fi
+
+# 批量候选 + 统一发布；候选阶段只读，发布必须显式 --approve。
+if [[ "${1:-}" == "refresh-approvals" ]]; then
+    shift
+    exec python3 "${script_dir}/refresh-local-runtime-approvals.py" "$@"
+fi
+
+if [[ "${1:-}" == "recover-license-pins" ]]; then
+    shift
+    exec python3 "${script_dir}/recover-local-license-pins.py" "$@"
+fi
+
 remove_volumes=false
+core_only=false
 while (($# > 0)); do
     case "$1" in
-		up|down|stop|restart|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|refresh-data-analysis-api|start-presale-worker|start-presale-alert-worker)
+		up|down|stop|restart|build-images|bootstrap-admin|prepare-discovery|dev-up|dev-approve|ps|logs|config|verify|refresh-api|refresh-frontend|refresh-contract-api|refresh-customer-api|refresh-portal-api|refresh-project-api|refresh-data-analysis-api|start-presale-worker|start-presale-alert-worker)
             command_name="$1"
             shift
             ;;
@@ -152,6 +203,11 @@ while (($# > 0)); do
             ;;
         --volumes)
             remove_volumes=true
+            shift
+            ;;
+        --core-only)
+            # 业务镜像失效时用最小依赖恢复控制面，从而能够走“更新批准 → 受控重试”。
+            core_only=true
             shift
             ;;
         --admin-display-name)
@@ -452,6 +508,39 @@ compose() {
     # portal-api。首次接入前不能强行启动，因为此时浏览器 OIDC Client、租户、
     # 角色目录和六组机器凭据尚不存在；平台与 CRM 需先运行以完成受控接入。
     local compose_files=(--file "$compose_file")
+    # 已注册开发消费者保留已审核镜像和独立运行环境；构建只准备新候选，只有受控重试或更新才会接管。
+    local local_license_override="${project_root}/runtime/local-license.compose.json"
+    # 按实际子命令（而非整段参数字串）判断是否为构建：构建只准备候选镜像，
+    # 运行镜像由受控更新写入的固定记录决定，构建阶段不得加载固定记录。
+    local compose_subcommand="" compose_arg="" compose_skip_value=false
+    for compose_arg in "$@"; do
+        if [[ "$compose_skip_value" == true ]]; then
+            compose_skip_value=false
+            continue
+        fi
+        case "$compose_arg" in
+            --profile|--env-file|--file|-f|--project-name|--project-directory|--ansi|--parallel|--progress)
+                compose_skip_value=true
+                ;;
+            -*) ;;
+            *)
+                compose_subcommand="$compose_arg"
+                break
+                ;;
+        esac
+    done
+    case "$compose_subcommand" in
+        build) ;;
+        *)
+            # COMPOSE_SKIP_LICENSE_OVERRIDE=1 仅用于两类不产生运行进程的调用：
+            #   只读镜像存在性查询；探测候选创建（--no-start，容器不启动）。
+            # 任何会启动或运行服务的路径都必须加载固定记录。
+            if [[ "${COMPOSE_SKIP_LICENSE_OVERRIDE:-}" != "1" ]] && [[ -e "$local_license_override" || -L "$local_license_override" ]]; then
+                [[ -f "$local_license_override" && ! -L "$local_license_override" ]] || fail "本地授权 Compose 固定文件不安全"
+                compose_files+=(--file "$local_license_override")
+            fi
+            ;;
+    esac
     if [[ -n "${PUBLIC_TRANSPORT_COMPOSE_FILE:-}" ]]; then
         compose_files+=(--file "$PUBLIC_TRANSPORT_COMPOSE_FILE")
     fi
@@ -648,8 +737,7 @@ ensure_platform_env_file() {
             replace_line_in_file "$env_file" FILE_GATEWAY_DB_ROOT_PASSWORD "$(random_hex 32)"
         fi
     fi
-    # The management page performs Realm/Client initialization through the
-    # platform API.  These are non-secret local routing defaults.
+    # 管理页面通过平台 API 初始化 Realm 和 Client；这里仅是非敏感的本地路由默认值。
     replace_line_in_file "$env_file" KEYCLOAK_MANAGEMENT_ENABLED true
     replace_line_in_file "$env_file" KEYCLOAK_ADMIN_URL http://keycloak:8080
     replace_line_in_file "$env_file" KEYCLOAK_PUBLIC_URL http://localhost:18090
@@ -676,7 +764,7 @@ ensure_contract_env_file() {
     local strict="${1:-false}"
     command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成合同数据库密码"
 
-    # Compose names this volume explicitly. A missing file never implies a new DB.
+    # Compose 显式命名此卷，文件缺失绝不代表新数据库。
     local volume_inventory persistent_key persistent_value
     volume_inventory="$(docker volume ls --format '{{.Name}}')" || fail "无法确认合同保留数据卷；拒绝生成新凭据"
     if grep -Fxq 'basic-platform-local-contract-mysql-data' <<< "$volume_inventory"; then
@@ -757,10 +845,8 @@ ensure_contract_env_file() {
             log "已为合同管理补齐 Keycloak OIDC 容器内后通道"
         fi
     elif [[ -n "$keycloak_public_url" && "$oidc_issuer" == "${keycloak_public_url%/}/realms/"* && "$oidc_backchannel" == */realms/* ]]; then
-        # OIDC_BACKCHANNEL_BASE_URL is an origin, not the public issuer.  Older
-        # local configurations accidentally stored /realms/<realm> here, which
-        # makes the contract service fail before it can start.  Keep the value
-        # private to the Compose network and repair only this known-invalid form.
+        # OIDC_BACKCHANNEL_BASE_URL 是来源地址，不是公共签发者。旧本地配置误存 /realms/<realm> 会使合同服务启动前即失败。
+        # 值必须保持在 Compose 私网内，且只修复这一已知无效形式。
         replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
         log "已修复合同管理 Keycloak 后通道：移除了错误的 /realms 路径"
     fi
@@ -781,7 +867,7 @@ ensure_customer_env_file() {
         hmac_key="$(random_key)"
         replace_line_in_file "$customer_env_file" CUSTOMER_MYSQL_PASSWORD "$password"
         replace_line_in_file "$customer_env_file" CUSTOMER_MYSQL_ROOT_PASSWORD "$root_password"
-        replace_line_in_file "$customer_env_file" MYSQL_DSN "customer:${password}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=True&loc=UTC&multiStatements=true"
+        replace_line_in_file "$customer_env_file" MYSQL_DSN "customer:${password}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai&multiStatements=true"
         replace_line_in_file "$customer_env_file" SENSITIVE_ENCRYPTION_KEY_BASE64 "$encryption_key"
         replace_line_in_file "$customer_env_file" SENSITIVE_HMAC_KEY_BASE64 "$hmac_key"
         log "已生成客户与商机管理环境文件：$customer_env_file"
@@ -1210,9 +1296,17 @@ validate_local_runtime_target() {
 	if [[ -n "$environment_code" && "$environment_code" != "$expected_environment" ]]; then
 		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code}；Compose 目标环境=${expected_environment}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请使用 --subsystem-environment ${environment_code}，或重新同步 ${expected_application}/${expected_environment}"
 	fi
-	if [[ "$client_id" != "$expected_client_id" ]]; then
-		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code:-未配置}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请重新同步 ${expected_application}/${expected_environment}，禁止跨环境复用 Client"
+	if [[ "$client_id" == "$expected_client_id" ]]; then
+		return 0
 	fi
+	# 客户自助门户的浏览器 Client 也可以是平台 bootstrap 托管签发的中转 Client
+	# （bootstrap/customer_portal_broker_reconciler 签发并登记为应用 Client，
+	# applicationregistry 将其识别为 server-managed broker client）；其余应用
+	# 仍必须使用 ${application}-${environment}-web 自然键，禁止跨环境复用。
+	if [[ "$expected_application" == customer_portal && "$client_id" == keycloak-customer-portal-broker ]]; then
+		return 0
+	fi
+	fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code:-未配置}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}${expected_application:+（customer_portal 亦可为 keycloak-customer-portal-broker）}；请重新同步 ${expected_application}/${expected_environment}，禁止跨环境复用 Client"
 }
 
 # 机器客户端也必须和本地目标环境自然键一致。仅校验 Client ID，不读取、打印或
@@ -1324,6 +1418,13 @@ verify_local_file_gateway() {
     log "统一文件网关容器网络 readiness 检查通过"
 }
 
+ensure_platform_control_dependencies() {
+    # 定向刷新刻意使用 --no-deps，避免重复执行 one-shot 迁移；因此必须显式
+    # 补齐长期依赖。仅有 provisioner Socket 不代表它能访问 Docker。
+    compose_up_wait "基础平台数据库与受限 Docker 代理" --no-deps mysql file-gateway-mysql docker-socket-proxy
+    compose_up_wait "统一文件网关" --no-deps file-gateway
+}
+
 start_customer_notification_workers() {
 	local service container_id initial_restarts current_restarts
 	log "启动 CRM 通知生成与平台投递 Workers"
@@ -1336,7 +1437,7 @@ start_customer_notification_workers() {
 		sleep 2
 		[[ "$(docker inspect "$container_id" --format '{{.State.Running}}')" == "true" ]] || fail "CRM 通知 Worker 启动后退出：$service"
 		current_restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}')"
-		[[ "$current_restarts" == "$initial_restarts" ]] || fail "CRM 通知 Worker 启动后发生重启：$service（${initial_restarts} -> ${current_restarts}）"
+		[[ "$current_restarts" == "$initial_restarts" ]] || fail "CRM 通知 Worker 启动后发生重启：${service}（${initial_restarts} -> ${current_restarts}）"
 	done
 	log "CRM 通知 Workers 已稳定运行且未发生重启"
 }
@@ -1344,8 +1445,60 @@ start_customer_notification_workers() {
 # 首次接入时 customer-api 还拿不到目录发布/OIDC 凭据，不能运行；但平台的
 # “探测子系统”需要先读到它的受控 Docker 标签。只创建不启动候选容器，
 # 接入完成后仍由正常 up/provisioner 流程执行迁移、目录发布和健康启动。
+# 子系统探测候选：带 com.basic-platform.discovery 标签、但不启动进程的容器。
+# 平台“探测子系统”用 docker ps --all 读这些标签发现尚未接入的子系统；候选必须能被创建
+# （不启动），否则会形成“未接入不能启动、未运行不能探测”的死锁。
+subsystem_discovery_service() {
+	case "$1" in
+		contract_management) printf 'contract-api' ;;
+		customer_and_opportunity) printf 'customer-api' ;;
+		customer_portal) printf 'portal-api' ;;
+		project_management) printf 'project-api' ;;
+		settlement) printf 'settlement-api' ;;
+		data_analysis) printf 'dashboard-api' ;;
+		*) return 1 ;;
+	esac
+}
+
+# 六个子系统统一创建探测候选：不启动任何业务进程，只创建带标签的容器。
+# 单个失败不阻断其余候选；失败通常意味着该服务的运行固定镜像尚未刷新。
+ensure_subsystem_discovery_candidates() {
+	local application="" service="" created=0 skipped=0
+	log "创建子系统探测候选（带标准标签，不启动业务进程）"
+	for application in contract_management customer_and_opportunity customer_portal project_management settlement data_analysis; do
+		service="$(subsystem_discovery_service "$application")" || continue
+		# 已在运行的服务容器自带同一组标准标签，探测器可直接发现；跳过候选创建。
+		# 否则 skip-override 的基础配置会因配置漂移重建运行中的容器，剥掉固定记录
+		# 的 license 卷和 keys 挂载（settlement-api 曾因此丢卷进入重启循环）。
+		if docker ps --filter "label=com.docker.compose.project=${compose_project}" \
+			--filter "label=com.docker.compose.service=${service}" --format '{{.ID}}' | grep -q .; then
+			skipped=$((skipped + 1))
+			log "  [运行中] ${application}（${service}）：已有运行容器，跳过候选创建以保留固定记录挂载"
+			continue
+		fi
+		# 探测候选只创建容器、不启动进程，因此不受运行固定记录约束：
+		# 否则固定记录尚未受控更新时会形成「候选建不出来 → 探测不到 → 无法接入」的死锁。
+		local reason=""
+		# 捕获真实原因：失败时最常见的是本地标签镜像已被清理，必须让使用者看到原因，
+		# 而不是只看到"创建失败"四个字。
+		if reason="$(COMPOSE_SKIP_LICENSE_OVERRIDE=1 compose_run up --no-start --no-deps --no-build "$service" 2>&1)"; then
+			created=$((created + 1))
+		else
+			skipped=$((skipped + 1))
+			# grep 无匹配会返回非零，pipefail 下会让赋值失败并中止；这里显式兜底。
+			reason="$(printf "%s\n" "$reason" | grep -iE "no such image" | tail -1 || true)"
+			log "  [跳过] ${application}（${service}）：${reason:-探测候选创建失败}"
+		fi
+	done
+	log "探测候选：已创建或已存在 $created 个，跳过 $skipped 个"
+	if ((skipped > 0)); then
+		log "下一步：先补齐缺失的本地镜像（bash scripts/docker-local.sh build-images），再重跑本步骤"
+	fi
+	# 保留旧函数名以便既有调用与测试兼容。
+	return 0
+}
+
 ensure_crm_discovery_candidate() {
-	log "创建客户与商机管理探测候选（不启动业务进程）"
 	compose_run up --no-start --no-deps --no-build customer-api >/dev/null
 }
 
@@ -1390,7 +1543,7 @@ pull_image_with_retry() {
             sleep "$delay"
         fi
     done
-    fail "基础镜像拉取失败：$image。Docker Hub 认证端点不可达；请检查 Docker Desktop 的 Proxies/镜像加速器配置后重试。"
+    fail "基础镜像拉取失败：${image}。Docker Hub 认证端点不可达；请检查 Docker Desktop 的 Proxies/镜像加速器配置后重试。"
 }
 
 prepare_base_images() {
@@ -1428,12 +1581,333 @@ prepare_frontend_base_images() {
     done < <(collect_dockerfile_base_images)
 }
 
+# 只读预检接缝：测试用替身替换，生产走真实 Docker。
+docker_control_available() { docker info >/dev/null 2>&1; }
+local_image_present() { docker image inspect "$1" >/dev/null 2>&1; }
+
+# 启动前只读预检：V1 固定记录核对批准，V2 核对 Agent 下发的登记绑定；两者都检查不可变镜像。
+# 任何问题都在执行迁移之前一次性报出，避免逐个撞 No such image，也避免业务镜像失效时
+# 控制面一并被阻断。本函数不写入任何文件，也不修改固定记录。
+preflight_local_license_images() {
+    local override_file="${project_root}/runtime/local-license.compose.json"
+    local approvals_dir="${project_root}/runtime-approvals"
+    if [[ ! -e "$override_file" && ! -L "$override_file" ]]; then
+        # 尚无登记应用：未登记路径自行处理缺失镜像。
+        return 0
+    fi
+    if [[ -L "$override_file" || ! -f "$override_file" ]]; then
+        fail "本地授权 Compose 固定文件不安全（符号链接或非普通文件）：${override_file}；请人工核查后再启动"
+    fi
+    local mode
+    mode="$(stat -c '%a' "$override_file" 2>/dev/null || stat -f '%Lp' "$override_file" 2>/dev/null || true)"
+    if [[ "$mode" != "600" ]]; then
+        fail "本地授权 Compose 固定文件权限不安全（当前 ${mode:-未知}，要求 600）：$override_file"
+    fi
+    if ! docker_control_available; then
+        fail "Docker 不可达：无法核对已批准镜像是否存在。这是依赖不可用，不要按批准或镜像问题处理；请先启动 Docker Engine 后重试"
+    fi
+    local report problems=0
+report="$(PREFLIGHT_OVERRIDE="$override_file" PREFLIGHT_APPROVALS="$approvals_dir" PREFLIGHT_MANIFEST="${project_root}/config/local-license-components.json" python3 - <<'PY'
+import glob
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+IMMUTABLE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ALIASES = {
+    "presale-worker": "customer-presale-worker",
+    "contract-transfer-worker": "customer-contract-transfer-worker",
+    "sla-notifier": "project-sla-notifier",
+    "dashboard-api": "data-analysis-api",
+    "aggregation-worker": "data-analysis-aggregation-worker",
+    "alert-worker": "data-analysis-alert-worker",
+}
+
+
+def emit(*fields):
+    print("\t".join(str(field) for field in fields))
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def private_environment(path):
+    # 只读取 Agent 固定路径，不执行/sourcing env，也不把凭据或解析内容写入诊断。
+    if os.path.islink(os.path.dirname(path)):
+        raise ValueError("unsafe runtime directory")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536:
+            raise ValueError("unsafe environment file")
+        values = {}
+        for line in handle:
+            key, sep, value = line.rstrip("\n").partition("=")
+            if not sep or not re.fullmatch(r"[A-Z_][A-Z_0-9]*", key) or key in values:
+                raise ValueError("invalid environment format")
+            if value.startswith('"'):
+                value = json.loads(value)
+            elif not re.fullmatch(r"[-A-Za-z0-9_./:@,]*", value):
+                raise ValueError("invalid environment value")
+            if not isinstance(value, str) or any(char in value for char in "\r\n\x00"):
+                raise ValueError("invalid environment value")
+            values[key] = value
+    return values
+
+
+override = os.environ["PREFLIGHT_OVERRIDE"]
+approvals_dir = os.environ["PREFLIGHT_APPROVALS"]
+root = os.path.dirname(os.path.dirname(override))
+owners = {}
+migrations = {}
+try:
+    with open(os.environ["PREFLIGHT_MANIFEST"], encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    for application, target in manifest["applications"].items():
+        migrations[application] = target["migration"]["service"]
+        for name in list(target["services"]) + [target["migration"]["service"]]:
+            if name in owners:
+                raise ValueError("组件清单有重复服务")
+            owners[name] = application
+except Exception:
+    emit("error", "-", "-", "-", "权威组件清单无法读取或格式非法")
+try:
+    with open(override, encoding="utf-8") as handle:
+        pinned = json.load(handle, object_pairs_hook=unique_object)
+except Exception as exc:
+    emit("error", "-", "-", "-", "固定文件无法解析：" + str(exc)[:120])
+    sys.exit(0)
+services = pinned.get("services") if isinstance(pinned, dict) else None
+if not isinstance(services, dict) or not services:
+    emit("error", "-", "-", "-", "固定文件缺少 services 映射")
+    sys.exit(0)
+pinned_services = {}
+builtin = set()
+builtin_apps = set()
+for name, spec in services.items():
+    image = spec.get("image") if isinstance(spec, dict) else None
+    if not isinstance(name, str) or not isinstance(image, str) or not IMMUTABLE.match(image):
+        emit("error", owners.get(name, "未知应用"), str(name), json.dumps(image, ensure_ascii=False), "固定记录不是不可变镜像 ID")
+        continue
+    if name not in owners:
+        emit("error", "未知应用", name, image, "服务不在权威组件清单中")
+        continue
+    pinned_services[name] = image
+    if name in migrations.values() or not spec.get("env_file"):
+        continue
+    expected_env = os.path.join(root, "runtime", "license-" + name + ".env")
+    if spec["env_file"] != [expected_env]:
+        emit("error", owners[name], name, image, "运行凭据必须引用 Agent 固定路径")
+        continue
+    try:
+        values = private_environment(expected_env)
+    except Exception:
+        emit("error", owners[name], name, image, "运行凭据文件缺失、不安全或格式非法（要求普通文件、0600）")
+        continue
+    protocol = values.get("COMMERCIAL_LICENSE_REGISTRATION_PROTOCOL", "1")
+    if protocol == "1":
+        continue
+    emit("builtin", owners[name], name, image, "V2")
+    expected_values = {
+        "COMMERCIAL_LICENSE_ENABLED": "true", "COMMERCIAL_LICENSE_REGISTRATION_PROTOCOL": "2",
+        "COMMERCIAL_LICENSE_CATALOG_VERSION": "1",
+        "COMMERCIAL_LICENSE_SERVICE_ID": ALIASES.get(name, name),
+        "COMMERCIAL_LICENSE_PLATFORM_PUBLIC_KEY_PATH": "/app/data/keys/jwt-ed25519-public.pem",
+        "COMMERCIAL_LICENSE_PLATFORM_BASE_URL": "http://platform-api:8080",
+        "COMMERCIAL_LICENSE_ALLOW_HTTP": "true",
+    }
+    valid = all(values.get(key) == value for key, value in expected_values.items())
+    valid = valid and all(values.get("COMMERCIAL_LICENSE_" + key) for key in
+                          ("INSTANCE_ID", "ENVIRONMENT", "CLIENT_ID", "CLIENT_SECRET"))
+    # 商业实例的 environment 独立于应用 dev；状态文件沿 Agent 身份派生规则核对。
+    state_parts = [values.get("COMMERCIAL_LICENSE_" + key, "") for key in
+                   ("INSTANCE_ID", "ENVIRONMENT", "CLIENT_ID", "SERVICE_ID", "CATALOG_VERSION")]
+    state_parts.append("catalog-1")
+    state_id = hashlib.sha256("\x00".join(state_parts).encode("utf-8")).hexdigest()[:32]
+    expected_state = "/var/lib/commercial-license/" + ALIASES.get(name, name) + "-" + state_id + ".json"
+    valid = valid and values.get("COMMERCIAL_LICENSE_STATE_PATH") == expected_state
+    volumes = ["license-state-" + name + ":/var/lib/commercial-license",
+               os.path.join(root, "data", "keys") + ":/app/data/keys:ro"]
+    valid = valid and spec.get("pull_policy") == "never" and spec.get("volumes") == volumes
+    allowed_spec_keys = {"image", "pull_policy", "env_file", "volumes"}
+    # 项目后台需要把构建 ID 下发给 api 与 sla-notifier；只允许这两个服务使用
+    # 由固定镜像派生出的单一环境变量，其他额外字段仍然拒绝。
+    if name in ("project-api", "sla-notifier"):
+        expected_build_id = "project-background-sha256-" + image[len("sha256:"):]
+        if spec.get("environment") == {"PROJECT_BACKGROUND_BUILD_ID": expected_build_id}:
+            allowed_spec_keys.add("environment")
+    valid = valid and set(spec) == allowed_spec_keys
+    valid = valid and not set(pinned) - {"services", "volumes"}
+    declared_volumes = pinned.get("volumes", {})
+    valid = valid and isinstance(declared_volumes, dict) and declared_volumes.get("license-state-" + name) == {}
+    if not valid:
+        emit("error", owners[name], name, image, "V2 登记绑定、目录版本或受控挂载不匹配")
+        continue
+    builtin.add(name)
+    builtin_apps.add(owners[name])
+covered = set(builtin)
+expected = [(owners[name], name, pinned_services[name]) for name in sorted(builtin)]
+for application in sorted(builtin_apps):
+    migration = migrations[application]
+    spec = services.get(migration, {})
+    if migration not in pinned_services:
+        emit("unpinned", application, migration, "-", "V2 固定文件缺少迁移镜像")
+    elif spec.get("pull_policy") != "never" or set(spec) != {"image", "pull_policy"}:
+        emit("error", application, migration, pinned_services[migration], "V2 迁移固定记录非法")
+    else:
+        covered.add(migration)
+        expected.append((application, migration, pinned_services[migration]))
+    # 条件邀请补偿组件不因预检自动启用；其余目录消费者必须存在。
+    for name in manifest["applications"][application]["services"]:
+        if name != "portal-invite-compensation-worker" and name not in pinned_services:
+            emit("unpinned", application, name, "-", "V2 固定文件缺少必需消费者")
+for path in sorted(glob.glob(os.path.join(approvals_dir, "local-*-dev.json"))):
+    label = os.path.basename(path)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            approval = json.load(handle)
+    except Exception as exc:
+        emit("error", label, "-", "-", "批准文件无法解析：" + str(exc)[:120])
+        continue
+    if not isinstance(approval, dict) or not isinstance(approval.get("services"), list):
+        emit("error", label, "-", "-", "批准文件结构非法")
+        continue
+    application = approval.get("application") or label
+    wanted = [(item.get("name"), item.get("image_digest"))
+              for item in (approval.get("services") or []) if isinstance(item, dict)]
+    migration = approval.get("migration")
+    if isinstance(migration, dict):
+        wanted.append((migration.get("service"), migration.get("image_digest")))
+    for name, digest in wanted:
+        if not isinstance(name, str) or not isinstance(digest, str) or not digest:
+            continue
+        if name in builtin or (name == migrations.get(owners.get(name)) and owners.get(name) in builtin_apps):
+            # V2 Agent 已重新绑定此组件；遗留 V1 文件不再冻结其旧镜像。
+            continue
+        covered.add(name)
+        if name not in pinned_services:
+            emit("unpinned", application, name, digest, "固定文件缺少该服务")
+        elif pinned_services[name] != digest:
+            emit("mismatch", application, name, pinned_services[name], "固定记录与批准不一致")
+        expected.append((application, name, digest))
+for name, image in sorted(pinned_services.items()):
+    if name not in covered:
+        emit("unapproved", "-", name, image, "固定文件中的服务没有对应批准")
+for application, name, digest in expected:
+    emit("need", application, name, digest, "-")
+PY
+)" || fail "本地授权镜像预检无法完成（内部错误）"
+
+    local kind application service digest detail builtin_mode=false
+    while IFS=$'\t' read -r kind application service digest detail; do
+        [[ -n "$kind" ]] || continue
+        case "$kind" in
+            builtin)
+                builtin_mode=true
+                ;;
+            error)
+                log "  [固定文件或批准] ${application} / ${service} ${digest}（${detail}）"
+                problems=$((problems + 1))
+                ;;
+            mismatch)
+                log "  [固定记录不一致] ${application} / ${service} ${digest}（${detail}）"
+                problems=$((problems + 1))
+                ;;
+            unpinned)
+                log "  [固定文件缺服务] ${application} / ${service} ${digest}（${detail}）"
+                problems=$((problems + 1))
+                ;;
+            unapproved)
+                log "  [缺少批准] ${service} ${digest}（${detail}）"
+                problems=$((problems + 1))
+                ;;
+            need)
+                if ! local_image_present "$digest"; then
+                    log "  [镜像缺失] $application / $service $digest"
+                    problems=$((problems + 1))
+                fi
+                ;;
+        esac
+    done <<<"$report"
+    if ((problems > 0)); then
+        log "本地授权镜像预检未通过：共 $problems 项；不执行迁移，也不启动任何业务或平台容器"
+        if [[ "${preflight_candidates_prepared:-false}" == true ]]; then
+            log "本次 --build 已准备候选镜像；旧运行镜像仍需受控更新才会被采用。"
+            log "下一步（不要重复执行构建）："
+        else
+            log "下一步（复用已构建候选；仅在候选镜像缺失时构建）："
+            log "  0. 仅候选缺失时：bash scripts/docker-local.sh build-images"
+            log "     只准备候选镜像：不检查旧运行镜像、不迁移、不启动服务、不改写固定记录。"
+        fi
+        if [[ "$builtin_mode" == true ]]; then
+            log "  1. V2 组件：恢复固定 ID 对应的本地镜像，通过平台受控更新由 Agent 重新下发登记绑定；不生成旧版批准。"
+            log "  2. 若同时有 V1 组件，仍须核对该组件原有批准；不得手工改写运行凭据或固定 ID。"
+        else
+            log "  1. 为受影响 V1 应用生成批准候选，核对源码、完整组件与迁移镜像："
+            log "     bash scripts/docker-local.sh prepare-license --application <应用> --operator <标识>"
+            log "  2. 明确审核后发布批准：加 --approve（内容与现有批准不同时再加 --replace）"
+            log "     固定文件含非法记录时：bash scripts/docker-local.sh recover-license-pins（预览）"
+            log "     完整有效批准和镜像校验通过后加 --apply；先备份再恢复，不改运行凭据。"
+        fi
+        log "  3. 通过应用接入页或 scripts/subsystem.sh retry 走受控更新，由 Agent 更新固定记录"
+        log "  4. 确认对应登记/批准、固定记录与镜像检查通过后重新执行普通 up"
+        log "  5. 业务镜像失效导致控制面也无法启动时，可先执行 bash scripts/docker-local.sh up --core-only 恢复控制面"
+        fail "本地授权镜像预检失败：按上述顺序恢复；脚本不会用可变标签替代已批准的不可变镜像"
+    fi
+}
+
+# 只读：列出 Compose 解析出的默认本地镜像标签（不加载授权固定文件），供存在性判断使用。
+# 仅查询，不启动、不构建、不写文件。
+compose_default_local_images() {
+    COMPOSE_SKIP_LICENSE_OVERRIDE=1 compose \
+        --profile bootstrap --profile customer --profile portal --profile project \
+        --profile presale-worker --profile keycloak --ansi never config --format json 2>/dev/null \
+        | python3 -c '
+import json
+import sys
+try:
+    model = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for name, spec in sorted((model.get("services") or {}).items()):
+    image = spec.get("image") if isinstance(spec, dict) else None
+    if isinstance(image, str) and image:
+        sys.stdout.write(name + "\t" + image + "\n")
+'
+}
+
+# 已登记服务的运行镜像由固定记录决定；普通启动不得重建它们，否则会让已批准记录失效。
+pinned_local_service() {
+    local service="$1"
+    local override_file="${project_root}/runtime/local-license.compose.json"
+    [[ -f "$override_file" && ! -L "$override_file" ]] || return 1
+    python3 - "$override_file" "$service" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        pinned = json.load(handle)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if sys.argv[2] in (pinned.get("services") or {}) else 1)
+PY
+}
+
 build_images() {
     # SKIP_IMAGE_PREPARATION=1：完全离线/受限网络环境的逃生舱。调用方保证 :local 镜像
-    # 已预置（离线交付包加载、镜像 retag 或预构建），此时跳过基础镜像拉取与 compose
-    # build，直接进入编排启动。默认行为不变。
+    # 已预置（离线交付包加载、镜像 retag 或预构建），此时跳过基础镜像拉取与 compose build。
+    # 它不绕过启动前的镜像存在性预检。
     if [[ "${SKIP_IMAGE_PREPARATION:-}" == "1" ]]; then
-        log "SKIP_IMAGE_PREPARATION=1：使用预置镜像，跳过基础镜像拉取与镜像构建"
+        log "SKIP_IMAGE_PREPARATION=1：使用预置镜像，跳过基础镜像拉取与镜像构建（镜像存在性预检仍然生效）"
         return 0
     fi
     # Compose/BuildKit 会并发解析多个 Docker Hub 基础镜像。网络或代理不稳定时，
@@ -1442,11 +1916,44 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local build_services=(api file-gateway contract-api contract-worker settlement-api customer-api customer-presale-alert-worker portal-api project-api dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    local all_services=(api file-gateway contract-api contract-worker settlement-api customer-api customer-presale-alert-worker portal-api project-api sla-notifier dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    if [[ "${core_only:-false}" == true ]]; then
+        # 控制面单独恢复只准备控制面镜像；平台迁移与 Agent 复用 api 镜像。
+        all_services=(api file-gateway frontend)
+    fi
+    local build_services=()
+    local service="" image_map="" tag=""
     if [[ "$force_build" == true ]]; then
-        log "重新构建统一前端、平台/合同/结算/CRM/门户/项目后端及售前投递 Worker 镜像"
+        # --build 只准备候选镜像：不发布批准，也不改写运行固定记录。
+        build_services=("${all_services[@]}")
+        log "准备候选镜像（--build）：不会替换已批准固定记录；完成受控更新前运行仍使用已批准镜像"
+        log "受影响应用需按预检提示生成批准候选并经受控更新后才会采用新镜像"
     else
-        log "构建缺失或有变更的统一前端及独立后端镜像"
+        image_map="$(compose_default_local_images || true)"
+        if [[ -z "$image_map" ]]; then
+            # 无法解析镜像映射时保守处理：按原行为准备全部候选，避免漏建导致启动失败。
+            build_services=("${all_services[@]}")
+            log "无法解析 Compose 镜像映射，按保守策略准备候选镜像"
+        else
+            for service in "${all_services[@]}"; do
+                if pinned_local_service "$service"; then
+                    # 已登记：运行镜像由固定记录决定，普通启动不重建。
+                    continue
+                fi
+                tag="$(awk -F'\t' -v wanted="$service" '$1 == wanted { print $2; exit }' <<<"$image_map")"
+                if [[ -z "$tag" ]]; then
+                    continue
+                fi
+                if ! local_image_present "$tag"; then
+                    build_services+=("$service")
+                fi
+            done
+            if ((${#build_services[@]} == 0)); then
+                log "普通启动：现有本地镜像齐备，跳过镜像构建（需要新候选时执行 up --build）"
+                return 0
+            fi
+            log "构建缺失的本地镜像：${build_services[*]}"
+        fi
     fi
     # migrate/bootstrap-admin/subsystem-provisioner 都复用 api 构建出的
     # basic-platform/backend:local；CRM、Portal 和售前 Worker 使用不同 target/镜像，不会
@@ -1469,6 +1976,98 @@ prepare_gateway_config() {
 	PORTAL_GATEWAY_NGINX_INCLUDE="${project_root}/docker/portal-apps-locations.conf" \
 		"$gateway_script" remove project_management >/dev/null
 	log "已清理内置业务模块的旧式整站反向代理；五个前端均由统一 frontend 容器直接承载"
+}
+
+local_image_id() { docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
+
+# 一键启动：把命令行能做的全部做完（Docker 预检 → 控制面含迁移/超管/探测候选 → 批准候选与核对单 → 状态总览）。
+# 幂等，可重复执行。不改写固定记录、不发布批准、不替用户设置任何密码：
+# 需要人工决定的步骤只打印唯一指令，不自动跳过。
+dev_up() {
+    log "本地一键启动（dev-up）：幂等，可重复执行"
+    docker_control_available || fail "Docker 不可用：请确认 OrbStack 已启动，并执行 docker context use orbstack"
+    # 控制面：含平台迁移、首个超级管理员初始化、六个子系统探测候选。
+    start_control_plane_only
+    # 运行批准：只生成候选并打印核对单；发布仍是独立的人工审核动作。
+    local operator="${LOCAL_DEV_OPERATOR:-${admin_account_name:-local-dev}}"
+    log "生成运行批准候选（只生成，不发布；operator=${operator}）"
+    python3 "${script_dir}/refresh-local-runtime-approvals.py" \
+        --workspace "${workspace_root}" --operator "$operator" || true
+    # 收尾：状态总览给出唯一下一步。
+    python3 "${script_dir}/local-status.py" || true
+    return 0
+}
+
+# 发布运行批准：仍要求显式 --approve 才会写入批准文件。
+dev_approve() {
+    local operator="${LOCAL_DEV_OPERATOR:-${admin_account_name:-local-dev}}"
+    exec python3 "${script_dir}/refresh-local-runtime-approvals.py" \
+        --workspace "${workspace_root}" --operator "$operator" "$@"
+}
+
+# 独立候选构建入口：只准备本地候选镜像。不检查旧运行镜像是否存在、不执行迁移、
+# 不启动服务、不发布批准、不改写镜像固定记录。构建始终不加载授权固定文件。
+# 旧运行镜像缺失时，普通 up 会被预检阻断，因此恢复必须先经本入口准备候选。
+build_candidate_images() {
+    prepare_base_images
+    log "准备候选镜像：不检查旧运行镜像，不执行迁移，不启动服务，不修改批准与固定记录"
+    local all_services=(api file-gateway contract-api contract-worker settlement-api customer-api customer-presale-alert-worker portal-api project-api sla-notifier dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    # compose() 对 build 子命令始终不加载固定文件，这里与普通 up 共用同一入口。
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile customer --profile portal --profile project --profile presale-worker --ansi never build "${all_services[@]}"
+    log "候选镜像已准备（服务 / 标签 / 镜像 ID）："
+    local image_map="" service="" tag="" image_id=""
+    image_map="$(compose_default_local_images || true)"
+    for service in "${all_services[@]}"; do
+        tag="$(awk -F'\t' -v wanted="$service" '$1 == wanted { print $2; exit }' <<<"$image_map")"
+        [[ -n "$tag" ]] || continue
+        image_id="$(local_image_id "$tag")"
+        log "  $(printf '%-40s' "$service") $tag $image_id"
+    done
+    log "下一步：为受影响应用生成批准候选，核对源码、完整组件与迁移镜像："
+    log "  bash scripts/docker-local.sh prepare-license --application <应用> --operator <标识>"
+    log "明确审核后发布批准（--approve，内容不同再加 --replace），再通过应用接入页或 scripts/subsystem.sh retry 走受控更新。"
+}
+
+# 控制面单独恢复：业务镜像失效时普通 up 会被预检阻断，用本入口恢复控制面，
+# 从而能够走“更新批准 → 受控重试”。只校验控制面配置；所有 up 显式带 --no-deps，
+# 防止 Compose 递归拉起业务服务（frontend 依赖合同与结算 API，temporal 依赖合同库）。
+start_control_plane_only() {
+    log "控制面单独恢复（--core-only）：不执行业务迁移，不启动业务 API／Worker，不校验业务配置"
+    ensure_platform_env_file
+    # compose() 固定携带合同环境文件，这里只保证它存在，不校验其业务占位符。
+    ensure_contract_env_file true
+    build_images
+    log "启动受限 Docker 代理、平台 MySQL 与文件网关 MySQL"
+    compose_up_wait "控制面基础依赖" --no-deps docker-socket-proxy mysql file-gateway-mysql
+    log "执行基础平台数据库迁移"
+    compose_run run --rm --no-deps migrate ./migrate
+    # 控制面必须自带超级管理员初始化：否则控制面起来了也登不进去。
+    # 业务子系统没有独立账号密码，全部通过平台账号走 SSO。
+    bootstrap_admin_if_needed
+    log "启动统一文件网关"
+    compose_up_wait "统一文件网关" --no-deps file-gateway
+    log "启动受控子系统 provisioner（部署 Agent）"
+    compose_up_wait "部署 Agent" --no-deps subsystem-provisioner
+    log "启动 Keycloak 数据库与 Keycloak"
+    compose_up_wait "Keycloak" --no-deps keycloak-db keycloak
+    log "启动基础平台 API 与内嵌 Worker"
+    compose_up_wait "基础平台 API" --no-deps api
+    verify_local_file_gateway
+    log "启动统一前端（--no-deps：不递归启动合同与结算 API）"
+    compose_up_wait "统一前端" --no-deps frontend
+    # 优先让平台可探测：只创建带标签的候选容器，不启动业务进程。
+    # 运行固定镜像尚未刷新时个别候选会失败，但不得阻断控制面恢复。
+    ensure_subsystem_discovery_candidates
+    log "控制面恢复完成：平台登录与应用管理可用，业务系统保持未启动"
+    log "业务系统在完成受控更新并重新执行普通 up 之前不可用；控制面成功不代表全栈成功"
+    log "下一步（按顺序执行；命令均已存在，且不要重复执行候选构建）："
+    log "  1. 只读确认当前卡点与下一步：bash scripts/docker-local.sh status"
+    log "  2. 生成批准候选并打印核对单（只读、不发布）：bash scripts/docker-local.sh refresh-approvals --operator <标识>"
+    log "  3. 明确审核后发布批准（必须显式 --approve；内容不同再加 --replace）：同命令追加 --approve"
+    log "  4. 走受控更新刷新固定记录：应用接入页执行，或 bash scripts/subsystem.sh retry --application-code <应用编码>"
+    log "  5. 固定记录与批准一致、所需镜像存在后：bash scripts/docker-local.sh up"
+    log "  6. 可选：bash scripts/docker-local.sh verify（只校验网关路由，不代表业务可用）"
+    log "注意：第 5 步之前执行普通 up 会再次被镜像预检阻断；预检提示中的 build-images 无需重复执行。"
 }
 
 run_migrations() {
@@ -1510,13 +2109,17 @@ bootstrap_admin_if_needed() {
     fi
     [[ "$status_rc" -eq 3 ]] || fail "检查超级管理员状态失败，退出码：$status_rc"
 
-    if [[ -z "$admin_display_name" && -t 0 ]]; then read -r -p '首次超级管理员显示名称：' admin_display_name; fi
-    if [[ -z "$admin_account_name" && -t 0 ]]; then read -r -p '首次超级管理员账号：' admin_account_name; fi
-    if [[ -z "$admin_password" && "$admin_password_stdin" == true ]]; then
-        IFS= read -r admin_password || true
-    elif [[ -z "$admin_password" && -t 0 ]]; then
-        read -r -s -p '首次超级管理员密码：' admin_password
-        printf '\n'
+    if [[ -z "$admin_display_name" && -t 0 ]]; then read -r -p '首次超级管理员显示名称（如 本地管理员）：' admin_display_name; fi
+    if [[ -z "$admin_account_name" && -t 0 ]]; then read -r -p '首次超级管理员账号（3-64 位，仅字母数字与 . _ - ，登录用）：' admin_account_name; fi
+    if [[ -z "$admin_password" ]]; then
+        # 交互场景必须给出提示并关闭回显：--admin-password-stdin 以前在终端下静默读取，
+        # 使用者看不到提示，极易把密码填进账号那一行。管道输入保持静默，便于自动化。
+        if [[ -t 0 ]]; then
+            read -r -s -p '首次超级管理员密码（8-128 位，含大写/小写/数字/符号，不回显）：' admin_password
+            printf '\n'
+        elif [[ "$admin_password_stdin" == true ]]; then
+            IFS= read -r admin_password || true
+        fi
     fi
     [[ -n "$admin_display_name" ]] || fail "首次初始化需要 --admin-display-name 或 BASIC_PLATFORM_ADMIN_DISPLAY_NAME"
     [[ -n "$admin_account_name" ]] || fail "首次初始化需要 --admin-account-name 或 BASIC_PLATFORM_ADMIN_ACCOUNT_NAME"
@@ -1642,8 +2245,14 @@ verify_gateway_routes() {
 	wait_for_frontend_status /settlement/healthz 200 "结算与开票健康检查路径"
 	settlement_session_status="$(frontend_http_status /settlement/api/v1/auth/me)" || \
 		fail "无法访问结算与开票登录状态接口"
-	[[ "$settlement_session_status" == "200" ]] || \
-		fail "本地开发结算登录状态接口返回 ${settlement_session_status}，预期为 200"
+	# 结算已接入平台统一身份 OIDC；自检请求不携带 Cookie，未登录应为 401。
+	# 仅当显式保留 SETTLEMENT_DEVELOPMENT_AUTH=true 的旧开发认证模式时，才允许 200。
+	settlement_expected_auth_status=401
+	if [[ "$(env_value "$settlement_env_file" SETTLEMENT_DEVELOPMENT_AUTH 2>/dev/null || true)" == "true" ]]; then
+		settlement_expected_auth_status=200
+	fi
+	[[ "$settlement_session_status" == "$settlement_expected_auth_status" ]] || \
+		fail "本地结算登录状态接口返回 ${settlement_session_status}，预期为 ${settlement_expected_auth_status}"
 
     # 自检请求不携带登录 Cookie，因此 /auth/me 应返回 401。若返回 404，说明
     # /contract_management 前缀未被正确移除，部署必须立即失败。
@@ -1747,7 +2356,18 @@ start_stack() {
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
     prepare_gateway_config
+    # 顺序不可颠倒：先准备候选镜像（普通 up 只补缺失的未登记镜像；--build 只准备候选、
+    # 不改写固定记录），再核对运行固定镜像是否存在。若把预检放在前面，up --build 会在
+    # 构建前被拦住，而恢复提示又指向同一条命令，形成死循环。
     build_images
+    if [[ "$force_build" == true ]]; then
+        preflight_candidates_prepared=true
+    fi
+    preflight_local_license_images
+    if project_configured; then
+        configure_local_project_background_build
+        local_project_background prepare
+    fi
     run_migrations
     bootstrap_admin_if_needed
     log "启动独立 Keycloak 认证容器与 MySQL"
@@ -1759,16 +2379,15 @@ start_stack() {
     log "启动基础平台 API 与受控子系统 provisioner"
     compose_up_wait "基础平台 API" subsystem-provisioner api
     verify_local_file_gateway
-	log "启动结算与开票 API 与后台 Worker"
-	compose_up_wait "结算与开票 API" settlement-api
-	compose_run up -d --wait --no-deps settlement-worker
     # 统一前端必须先于子系统接入步骤可用：subsystem.sh onboard 要经
     # http://localhost:8081/api/v1 登录平台。若把前端排在 CRM 目录发布之后，
     # 平台库一旦缺少接入记录，up 会在发布处中止而 8081 始终起不来，接入与启动互相等待。
     log "启动统一前端（先于子系统接入步骤，保证门户网关可用于首次接入）"
     compose_up_wait "统一前端" frontend
-    ensure_crm_discovery_candidate
-    ensure_data_analysis_discovery_candidate
+	log "启动结算与开票 API 与后台 Worker"
+	compose_up_wait "结算与开票 API" settlement-api
+	compose_run up -d --wait --no-deps settlement-worker
+    ensure_subsystem_discovery_candidates
     crm_catalog_ready=true
     if ! sync_crm_authorization_catalog; then
         log "跳过客户与商机管理后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
@@ -1808,7 +2427,8 @@ start_stack() {
 		log "启动已接入的项目管理系统后端"
 		# project-migrate 同样已在 run_migrations 中完成，避免 Compose 在
 		# `--wait` 时重复重建一次性迁移容器。
-		compose_run up -d --wait --no-deps project-api
+		compose_run up -d --wait --no-deps project-api sla-notifier
+        local_project_background activate
 	else
 		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
 	fi
@@ -1854,8 +2474,8 @@ refresh_platform_api() {
     log "重新构建基础平台后端镜像（不构建 frontend、contract-api 或 customer-api）"
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build api
 
-    log "启动基础平台 MySQL，并执行基础平台数据库迁移"
-    compose_run up -d --wait mysql
+    log "确认基础平台控制面依赖，并执行基础平台数据库迁移"
+    ensure_platform_control_dependencies
     compose_run run --rm --no-deps migrate ./migrate
 
     # api 依赖 provisioner 的 Unix Socket。先以新镜像重建 provisioner，再重启 api，
@@ -1864,7 +2484,8 @@ refresh_platform_api() {
     compose_run up -d --wait --no-deps subsystem-provisioner
     log "重建基础平台 API"
     compose_run up -d --wait --no-deps api
-    compose_run ps api subsystem-provisioner mysql
+    verify_local_file_gateway
+    compose_run ps api subsystem-provisioner docker-socket-proxy mysql file-gateway file-gateway-mysql
     log "基础平台后端已刷新；统一前端、合同/CRM 后端、可选门户后端和现有统一登录接入配置保持不变"
 }
 
@@ -1895,6 +2516,7 @@ refresh_contract_backend() {
 
     # 平台 API 读取同一组 publisher 凭据为受控 update 流程服务。若脚本刚完成
     # 凭据归一化，必须重建 API 与 provisioner，不能让旧容器继续持有旧环境。
+    ensure_platform_control_dependencies
     log "重建基础平台 API 与 provisioner，使授权目录发布凭据保持一致"
     compose_run up -d --wait --force-recreate --no-deps subsystem-provisioner api
 
@@ -2066,14 +2688,17 @@ refresh_project_backend() {
 	prepare_go_backend_base_images "项目管理系统后端"
 
 	log "重新构建项目管理系统独立后端镜像"
-	COMPOSE_PARALLEL_LIMIT=1 compose --profile project --ansi never build project-api
+	COMPOSE_PARALLEL_LIMIT=1 compose --profile project --ansi never build project-api sla-notifier
+	configure_local_project_background_build
+	local_project_background prepare
 	log "启动项目管理系统 MySQL 并执行项目清单迁移"
-	compose_run up -d --wait project-mysql
+	compose_run up -d --wait project-mysql temporal
 	compose_run run --rm --no-deps project-migrate
 	log "重建 project-api 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
-	compose_run up -d --wait --no-deps project-api
+	compose_run up -d --wait --no-deps project-api sla-notifier
+	local_project_background activate
 	verify_gateway_routes
-	compose_run ps project-api project-mysql
+	compose_run ps project-api sla-notifier project-mysql
 }
 
 refresh_data_analysis_backend() {
@@ -2138,6 +2763,19 @@ start_presale_worker() {
 	compose_run --profile presale-worker up -d --no-deps presale-worker
 
 	local attempt heartbeat
+	# 获许可 worker 在激活前或到期后刻意暂停新业务；应观察真实当前运行时 ACK，不以业务活动作为依据。
+	if [[ "$(env_value "${project_root}/runtime/license-presale-worker.env" COMMERCIAL_LICENSE_ENABLED)" == "true" ]]; then
+		local confirmation
+		for attempt in $(seq 1 45); do
+			confirmation="$(compose_run exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 -u"$MYSQL_USER" -D "$MYSQL_DATABASE" -Nse "SELECT COUNT(*)=9 AND COALESCE(MIN(m.ready_at IS NOT NULL AND m.ack_at IS NOT NULL AND m.issued_revision=a.revision AND m.ack_revision=a.revision AND m.ready_at >= UTC_TIMESTAMP(3) - INTERVAL 60 SECOND AND m.ack_at >= UTC_TIMESTAMP(3) - INTERVAL 60 SECOND),0) FROM license_runtime_member m JOIN license_runtime_application a ON a.application=m.application WHERE m.application=0x637573746f6d65725f616e645f6f70706f7274756e697479 AND m.environment=0x646576 AND m.retired_at IS NULL"' 2>/dev/null || true)"
+			if [[ "$confirmation" == "1" ]]; then
+				log "本地 CRM 九组件当期授权确认通过；业务执行继续由商业授权决定"
+				return 0
+			fi
+			sleep 1
+		done
+		fail "本地 CRM 组件尚未完成当期授权确认；请检查授权同步状态"
+	fi
 	for attempt in $(seq 1 20); do
 		heartbeat="$(
 			compose_run exec -T customer-mysql sh -c \
@@ -2184,10 +2822,39 @@ prepare_operational_env() {
 
 case "$command_name" in
     up|restart)
-        start_stack
+        if [[ "$core_only" == true ]]; then
+            start_control_plane_only
+        else
+            start_stack
+        fi
+        ;;
+    build-images)
+        build_candidate_images
+        ;;
+    dev-up)
+        dev_up
+        ;;
+    dev-approve)
+        dev_approve "$@"
+        ;;
+    prepare-discovery)
+        # 优先走探测：为六个子系统创建带标签的候选容器（不启动业务进程），
+        # 使界面「应用接入 → 探测子系统」可以立即发现尚未接入的子系统。
+        ensure_platform_env_file
+        ensure_contract_env_file true
+        preflight_local_license_images
+        ensure_subsystem_discovery_candidates
+        ;;
+    bootstrap-admin)
+        # 为已在运行的控制面追加首个超级管理员。已初始化时只探测后返回，不重复创建。
+        # 业务子系统没有独立账号密码，全部通过平台账号走 SSO。
+        ensure_platform_env_file
+        ensure_contract_env_file true
+        bootstrap_admin_if_needed
         ;;
     down)
         prepare_operational_env
+        local_project_background teardown
         # 清理旧版本或已从当前 Compose 文件移除的服务容器。否则残留的
         # profile/worker 容器会继续占用项目网络，导致 `docker compose down`
         # 报 Resource is still in use，脚本无法完成收尾。
@@ -2199,11 +2866,14 @@ case "$command_name" in
         fi
         # Compose 在发现残留 endpoint 时可能已经输出过一次占用提示；容器
         # 清理后再次尝试移除网络，让 down 最终状态与实际资源一致。
+        local_project_background stopped
         docker network rm "${compose_project}_default" >/dev/null 2>&1 || true
         ;;
     stop)
         prepare_operational_env
+        local_project_background teardown
         compose_run stop
+        local_project_background stopped
         ;;
     ps)
         prepare_operational_env

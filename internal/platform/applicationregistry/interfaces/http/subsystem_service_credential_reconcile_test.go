@@ -408,6 +408,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 		"contract_management-prod-notification-publisher": {"notification.ingest"},
 		"contract_management-prod-owner-directory":        {"owner_directory.read"},
 		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
+		"contract_management-prod-settlement-integration": {"settlement.contract.ingest"},
 		"contract_management-prod-project-integration":    {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
@@ -416,6 +417,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 		application.ServiceCredentialNotificationIngest:       "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:       "new-secret",
 		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
+		application.ServiceCredentialSettlementContractIngest: "new-secret",
 		application.ServiceCredentialProjectContractImport:    "new-secret",
 		application.ServiceCredentialFileGatewayWrite:         "new-secret",
 	})
@@ -496,6 +498,7 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		"contract_management-prod-audit-publisher":        {"audit.ingest"},
 		"contract_management-prod-notification-publisher": {"notification.ingest"},
 		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
+		"contract_management-prod-settlement-integration": {"settlement.contract.ingest"},
 		"contract_management-prod-project-integration":    {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
@@ -504,6 +507,7 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		application.ServiceCredentialNotificationIngest:       "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:       "retry-secret",
 		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
+		application.ServiceCredentialSettlementContractIngest: "new-secret",
 		application.ServiceCredentialProjectContractImport:    "new-secret",
 		application.ServiceCredentialFileGatewayWrite:         "new-secret",
 	})
@@ -527,16 +531,20 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.
 		t.Fatalf("existing portal mapping credential was not redelivered: %#v", manager.secretInputs)
 	}
 	wantPurposes := map[string]bool{
-		application.ServiceCredentialAuditIngest:            false,
-		application.ServiceCredentialExternalUserProvision:  false,
-		application.ServiceCredentialApplicationRoleAssign:  false,
-		application.ServiceCredentialApplicationRoleRevoke:  false,
-		application.ServiceCredentialPortalMappingProvision: true,
-		application.ServiceCredentialPortalMappingDisable:   false,
-		application.ServiceCredentialPortalInviteVerify:     false,
-		application.ServiceCredentialFileGatewayWrite:       false,
+		application.ServiceCredentialPortalReportFileRead:             false,
+		application.ServiceCredentialPortalReportDownloadIdentityRead: false,
+		application.ServiceCredentialAuditIngest:                      false,
+		application.ServiceCredentialExternalUserProvision:            false,
+		application.ServiceCredentialApplicationRoleAssign:            false,
+		application.ServiceCredentialApplicationRoleRevoke:            false,
+		application.ServiceCredentialPortalMappingProvision:           true,
+		application.ServiceCredentialPortalMappingDisable:             false,
+		application.ServiceCredentialPortalInviteVerify:               false,
+		application.ServiceCredentialFileGatewayWrite:                 false,
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"customer_portal-prod-portal-report-source":    {"platform:file:portal_report"},
+		"customer_portal-prod-portal-report-identity":  {"portal.report.download_identity.read"},
 		"customer_portal-prod-audit-publisher":         {"audit.ingest"},
 		"customer_portal-prod-external-user-provision": {"external_user.provision"},
 		"customer_portal-prod-role-assign":             {"application_role.assign"},
@@ -547,7 +555,7 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.
 	})
 	for _, credential := range credentials {
 		if _, ok := wantPurposes[credential.Purpose]; !ok {
-			t.Fatalf("unexpected portal credential purpose: %#v", credential)
+			t.Fatalf("unexpected portal credential Purpose: %#v", credential)
 		}
 		wantPurposes[credential.Purpose] = true
 	}

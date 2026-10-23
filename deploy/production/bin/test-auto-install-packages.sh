@@ -73,12 +73,10 @@ grep -q '发现多个 platform 镜像包' "$test_root/duplicate.log" || fail 'am
 [[ ! -s "$events" ]] || fail 'performed operations before rejecting ambiguous packages'
 rm "$package_dir/platform-backend-v2-linux-amd64.tar.gz"
 
-# Signed-delivery installation imports identity before preparing business
-# candidates, then waits for actual enforcement; failure must not report success.
+# 签名交付安装先导入身份再准备业务候选，然后等待实际强制执行；失败绝不能报告成功。
 mkdir -p "$deploy_dir/license"
 printf 'fixture-license\n' > "$deploy_dir/license/commercial-license.jws"
-# The one-shot maintenance command needs the API's production configuration,
-# profile mounts and provisioner socket, without restarting its dependencies.
+# 一次性维护命令需要 API 的生产配置、profile 挂载和 provisioner 套接字，但不能重启其依赖。
 compose() { printf '%s\n' "$*" > "$test_root/license-compose"; }
 install_delivery_license import
 grep -q 'run -T --rm --no-deps .* platform-api ./license-install import' "$test_root/license-compose" || fail 'license maintenance did not inherit the API topology'
@@ -108,8 +106,7 @@ if (
   fail 'failed activation reported successful install'
 fi
 if grep -q '交付授权已生效' "$test_root/license-failure.log"; then fail 'failed activation printed enforcement success'; fi
-# Transport-only renewal checks: the real Go verifier/importer is independently
-# covered by signature and SQL tests, not simulated by this shell fixture.
+# 这里只检查续期传输；真实 Go 验证器和导入器分别由签名和 SQL 测试覆盖，不由此 Shell 夹具模拟。
 mkdir -p "$deploy_dir/runtime"
 flock() { return 0; }
 printf 'renewal-fixture\n' > "$test_root/renewal.jws"
@@ -124,7 +121,7 @@ if (
 cmp "$test_root/renewal.jws" "$deploy_dir/license/commercial-license.jws" || fail 'rejected renewal replaced the installed license'
 rm "$deploy_dir/license/commercial-license.jws"
 rmdir "$deploy_dir/license"
-# Control-flow fixtures only: real registration/ACK checks run in Go tests.
+# 仅覆盖控制流程夹具；真实注册和 ACK 检查由 Go 测试执行。
 for scenario in fresh migrate platform-only expand; do
   jq -n --arg scenario "$scenario" '{version:1,scenario:$scenario,customer_id:"fixture-customer"}' > "$deploy_dir/license-installation.json"
   : > "$events"

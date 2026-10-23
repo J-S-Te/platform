@@ -38,7 +38,11 @@ func (store *sweepFakeStore) RecoverStaleSubsystemDeployment(ctx context.Context
 	return true, store.TransitionSubsystemDeployment(ctx, state.TenantID, state.ApplicationCode, state.Environment, application.SubsystemDeploymentStatusFailed, operation, "DEPLOYMENT_INTERRUPTED", "", now)
 }
 
-func (store *sweepFakeStore) DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error {
+func (store *sweepFakeStore) ClaimFailedSubsystemDeploymentForDiscard(context.Context, string, string, string, uint64, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (store *sweepFakeStore) DiscardClaimedSubsystemDeployment(context.Context, string, string, string, uint64) error {
 	return nil
 }
 

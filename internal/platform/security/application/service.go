@@ -12,11 +12,11 @@ import (
 )
 
 var (
-	// ErrNotFound hides tenant-scoped resources that are absent or not visible to the caller.
+	// ErrNotFound 隐藏租户范围内不存在或对调用方不可见的资源，避免向调用方泄露资源存在性。
 	ErrNotFound = errors.New("security resource not found")
-	// ErrConflict reports an invalid state transition or optimistic-lock conflict.
+	// ErrConflict 表示非法状态迁移或乐观锁版本冲突，调用方应重新读取后重试。
 	ErrConflict = errors.New("security resource conflict")
-	// ErrValidation reports unsafe or incomplete input.
+	// ErrValidation 表示输入不完整或超出安全允许的范围，未触达存储层。
 	ErrValidation = errors.New("security validation failed")
 )
 
@@ -27,19 +27,19 @@ const (
 	defaultIdleTimeoutSeconds        = 30 * 60
 )
 
-// Clock enables deterministic security-policy tests.
+// Clock 抽象时间源，使锁定窗口、失败计数过期等安全策略可被确定性测试。
 type Clock interface {
 	Now() time.Time
 }
 
-// SystemClock is the production UTC clock.
+// SystemClock 是生产环境使用的 UTC 时钟实现。
 type SystemClock struct{}
 
-// Now returns the current UTC time.
+// Now 返回当前 UTC 时间，所有持久化时间戳一律以 UTC 落库。
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
-// LoginFailureInput contains the trusted account and client data for one failed password attempt.
-// Passwords are deliberately absent from this contract.
+// LoginFailureInput 携带一次密码失败中可信的账号与客户端信息；刻意不包含密码本身，
+// 防止明文口令进入安全审计存储。
 type LoginFailureInput struct {
 	TenantID    string
 	AccountID   string
@@ -48,30 +48,30 @@ type LoginFailureInput struct {
 	UserAgent   string
 }
 
-// LoginFailureRecorder allows the identity module to persist a failed attempt without depending
-// on security storage details.
+// LoginFailureRecorder 供 identity 模块在认证失败后落一条失败记录，
+// 而无需依赖安全模块的具体存储实现。
 type LoginFailureRecorder interface {
 	RecordFailedLogin(context.Context, LoginFailureInput) (LoginFailureResult, error)
 }
 
-// SessionIdleTimeoutProvider exposes the tenant-specific inactivity timeout without leaking
-// security storage details into the identity module.
+// SessionIdleTimeoutProvider 向 identity 模块暴露租户级空闲超时，
+// 避免其直接读取安全存储细节。
 type SessionIdleTimeoutProvider interface {
 	SessionIdleTimeout(context.Context, string) (time.Duration, error)
 }
 
-// LoginSecurityService is the dependency required by identity authentication.
+// LoginSecurityService 是 identity 认证流程依赖的最小安全能力集合。
 type LoginSecurityService interface {
 	LoginFailureRecorder
 	SessionIdleTimeoutProvider
 }
 
-// LoginFailureResult tells the authentication flow whether this failed attempt created a lock.
+// LoginFailureResult 告知认证流程本次失败是否触发了账号锁定，供登录响应给出一致提示。
 type LoginFailureResult struct {
 	LockedUntil *time.Time
 }
 
-// LoginPolicyUpdateInput is the replace payload for one tenant login policy.
+// LoginPolicyUpdateInput 是租户登录策略的整体替换载荷；Version 用于乐观锁并发控制。
 type LoginPolicyUpdateInput struct {
 	TenantID                  string
 	OperatorID                string
@@ -82,14 +82,14 @@ type LoginPolicyUpdateInput struct {
 	Version                   uint64
 }
 
-// PageRequest contains list filters for locked-account queries.
+// PageRequest 承载锁定账号列表查询的分页与关键字过滤条件。
 type PageRequest struct {
 	Page     int
 	PageSize int
 	Keyword  string
 }
 
-// PageResult is a tenant-scoped, page-number based result set.
+// PageResult 是按页码分页、以租户为范围过滤的结果集。
 type PageResult[T any] struct {
 	Items    []T
 	Page     int
@@ -97,14 +97,15 @@ type PageResult[T any] struct {
 	Total    int64
 }
 
-// UnlockInput identifies an administrator-initiated account unlock.
+// UnlockInput 标识一次由管理员发起的账号解锁操作，记录操作者以便审计追责。
 type UnlockInput struct {
 	TenantID   string
 	AccountID  string
 	OperatorID string
 }
 
-// Repository persists login-security aggregates. All operations must enforce tenant scope.
+// Repository 持久化登录安全聚合。所有实现必须在 SQL 层强制租户过滤，
+// 不得依赖调用方自行传参保证数据范围。
 type Repository interface {
 	GetLoginPolicy(context.Context, string) (domain.LoginPolicy, error)
 	UpdateLoginPolicy(context.Context, LoginPolicyUpdateInput, time.Time) (domain.LoginPolicy, error)
@@ -113,13 +114,13 @@ type Repository interface {
 	UnlockAccount(context.Context, UnlockInput, time.Time) (domain.LockedAccount, error)
 }
 
-// Service applies login-security validation before repository operations.
+// Service 在仓储操作前统一执行登录安全校验与输入规范化。
 type Service struct {
 	repository Repository
 	clock      Clock
 }
 
-// NewService creates a security application service.
+// NewService 创建安全应用服务；任一依赖为 nil 时失败关闭，拒绝构造半可用实例。
 func NewService(repository Repository, clock Clock) (*Service, error) {
 	if repository == nil || clock == nil {
 		return nil, errors.New("security service dependencies must not be nil")
@@ -140,7 +141,7 @@ func (service *Service) GetLoginPolicy(ctx context.Context, tenantID string) (do
 	return policy, err
 }
 
-// UpdateLoginPolicy validates and persists an administrator-selected tenant login policy.
+// UpdateLoginPolicy 校验并持久化管理员选择的租户登录策略，参数越界一律拒绝写入。
 func (service *Service) UpdateLoginPolicy(ctx context.Context, input LoginPolicyUpdateInput) (domain.LoginPolicy, error) {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" ||
 		!validPolicy(input.MaxFailedAttempts, input.LockoutDurationSeconds, input.FailureResetWindowSeconds, input.IdleTimeoutSeconds) {
@@ -173,7 +174,7 @@ func (service *Service) RecordFailedLogin(ctx context.Context, input LoginFailur
 	return service.repository.RecordFailedLogin(ctx, input, policy, now)
 }
 
-// ListLockedAccounts returns currently locked accounts visible to a tenant security administrator.
+// ListLockedAccounts 返回当前仍处于锁定期、对租户安全管理员可见的账号列表。
 func (service *Service) ListLockedAccounts(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.LockedAccount], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.LockedAccount]{}, ErrValidation

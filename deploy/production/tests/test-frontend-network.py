@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise real network helper with isolated Docker inventory, never a daemon."""
+"""使用隔离的 Docker 清单验证实际网络工具，不连接守护进程。"""
 import json
 import os
 from pathlib import Path

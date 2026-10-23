@@ -8,18 +8,17 @@ import (
 	core "github.com/J-S-Te/license-core"
 )
 
-// DeliveryImportResult reports persistence, not runtime enforcement. The
-// coordinator must still register and collect acknowledgements from components.
+// DeliveryImportResult 表示交付包已持久化，不代表运行时已生效执行；协调器仍须完成组件
+// 注册并收集各组件 ACK 后，授权才真正下发生效。
 type DeliveryImportResult struct {
 	State      domain.State `json:"state"`
 	Status     string       `json:"status"`
 	Idempotent bool         `json:"idempotent"`
 }
 
-// ImportDelivery is exclusively for a controlled offline deployment bootstrap.
-// A signed customer installation identity may initialize an empty installation;
-// normal management Initialize remains server-generated. Only monotonic term
-// extensions can renew automatically; other changes require Preview/Commit.
+// ImportDelivery 仅用于受控的离线部署引导。签名的客户安装身份可初始化空安装；
+// 正常管理端 Initialize 仍由服务端生成。只有单调的期限延长可自动续期，
+// 其余变更必须走 Preview/Commit 双阶段确认。
 func (s *Service) ImportDelivery(ctx context.Context, raw, expectedEnvironment string, actor domain.Actor) (DeliveryImportResult, error) {
 	var out DeliveryImportResult
 	if !validActor(actor) || expectedEnvironment == "" {
@@ -66,8 +65,7 @@ func (s *Service) ImportDelivery(ctx context.Context, raw, expectedEnvironment s
 					if blocked {
 						out.State, e = s.state(tx)
 					} else {
-						// A pending package must become current on bootstrap retry,
-						// without relying on an unrelated management Read request.
+						// 引导重试时挂起的交付包必须就地转为当前包，不能依赖无关的管理端 Read 请求来触发激活。
 						out.State, e = s.activate(tx, st, now)
 						out.State.HighestObservedAt = tx.Deployment().HighestObservedAt
 					}
@@ -80,8 +78,7 @@ func (s *Service) ImportDelivery(ctx context.Context, raw, expectedEnvironment s
 				return e
 			}
 		}
-		// Never auto-install a partially expired entitlement set. Expiry is
-		// exclusive and fixed, irrespective of the customer deployment date.
+		// 绝不自动安装部分已过期的授权集合。过期时间为排他的固定值，与客户实际部署日期无关。
 		for _, app := range l.Applications {
 			if now.Unix() >= app.ExpiresAt {
 				return fmt.Errorf("%w: delivery entitlement %s has expired", core.ErrDenied, app.Code)

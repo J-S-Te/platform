@@ -7,10 +7,9 @@ import (
 	"time"
 )
 
-// Logout implements a conservative RP-initiated logout edge: it revokes the current platform
-// cookie session when the identity logout adapter is configured, then only redirects externally to
-// an exact registered redirect URI. Any invalid logout parameter falls back to the platform's
-// existing issuer + "/login.html" landing page rather than an unregistered external location.
+// Logout 实现保守的 RP-initiated logout 边缘：在配置了身份登出适配器时撤销当前
+// 平台 cookie 会话，然后仅重定向到精确登记的外部 redirect URI。任何非法登出参数
+// 都回落到平台既有的 issuer + "/login.html" 落地页，而不是未登记的外部地址。
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)

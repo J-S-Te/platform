@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -46,24 +47,33 @@ type subsystemServiceDiscoveryRequest struct {
 	Environment     string `json:"environment"`
 }
 
-// subsystemAccessApplyPayload carries the public-access configuration for the apply-access action.
+// subsystemAccessApplyPayload 携带 apply-access 动作的对外访问配置。
 type subsystemAccessApplyPayload struct {
 	PublicOrigin              string `json:"public_origin"`
 	AllowInsecureHTTPRedirect bool   `json:"allow_insecure_http_redirect"`
 }
 
 type subsystemProvisioningReply struct {
+	ErrorCode               string                                     `json:"error_code,omitempty"`
 	RuntimeLicenseLifecycle *application.RuntimeLicenseReleaseApproval `json:"runtime_license_lifecycle,omitempty"`
 	RuntimeLicenseApproval  []application.RuntimeLicenseApproval       `json:"runtime_license_approval,omitempty"`
 	Success                 bool                                       `json:"success"`
 	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
 	// 单独放 Detail，避免被安全过滤整段吞掉。
-	Message         string                                         `json:"message,omitempty"`
-	Detail          string                                         `json:"detail,omitempty"`
-	Services        []application.SubsystemServiceInstance         `json:"services,omitempty"`
-	Candidates      []application.SubsystemDiscoveryCandidate      `json:"candidates,omitempty"`
-	Capabilities    *application.SubsystemProvisioningCapabilities `json:"capabilities,omitempty"`
-	LicenseEvidence *licenseevidence.Report                        `json:"license_evidence,omitempty"`
+	Message      string                                         `json:"message,omitempty"`
+	Detail       string                                         `json:"detail,omitempty"`
+	Services     []application.SubsystemServiceInstance         `json:"services,omitempty"`
+	Candidates   []application.SubsystemDiscoveryCandidate      `json:"candidates,omitempty"`
+	Capabilities *application.SubsystemProvisioningCapabilities `json:"capabilities,omitempty"`
+	// Images 是批准清单中的镜像在本机是否存在的明细（协议只增不改：旧客户端忽略该字段）。
+	Images          []application.SubsystemImageReadiness `json:"images,omitempty"`
+	LicenseEvidence *licenseevidence.Report               `json:"license_evidence,omitempty"`
+}
+
+// subsystemImageReadinessProvider 是可选能力：部署 Agent 读取本机镜像存在性。
+// 未实现时应答不带 images 字段，平台按未验证处理（既不当作就绪，也不当作缺失）。
+type subsystemImageReadinessProvider interface {
+	SubsystemImageReadiness(ctx context.Context, applicationCode, environment string) ([]application.SubsystemImageReadiness, error)
 }
 
 type subsystemServiceDiscovery interface {
@@ -81,10 +91,30 @@ type subsystemAvailableCapabilityProvider interface {
 // UnixSocketSubsystemProvisioner 是无特权 API 侧客户端，只能通过 Unix socket 请求固定动作；
 // 它不持有 Docker socket，也不接收命令输出，特权文件和命令执行始终留在隔离 Agent 内。
 type UnixSocketSubsystemProvisioner struct {
-	enabled      bool
-	socketPath   string
-	timeout      time.Duration
-	capabilities application.SubsystemProvisioningCapabilities
+	enabled                  bool
+	socketPath               string
+	timeout                  time.Duration
+	capabilities             application.SubsystemProvisioningCapabilities
+	releaseIntegrityRequired bool
+	releaseDigest            string
+}
+
+var releaseDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ConfigureReleaseIntegrity 将后续 Provision/Update 请求绑定到
+// 预期的已安装发布摘要。Agent 仍会验证清单，
+// 并在摘要不匹配时拒绝请求。
+func (provisioner *UnixSocketSubsystemProvisioner) ConfigureReleaseIntegrity(required bool, expected string) error {
+	expected = strings.TrimSpace(expected)
+	if expected != "" && !releaseDigestPattern.MatchString(expected) {
+		return fmt.Errorf("expected release digest must be sha256:<64 lowercase hex>")
+	}
+	if required && expected == "" {
+		return fmt.Errorf("release integrity is required but no expected release digest is configured")
+	}
+	provisioner.releaseIntegrityRequired = required
+	provisioner.releaseDigest = expected
+	return nil
 }
 
 // dialProvisioningSocket 容忍隔离 Agent 重启替换 socket 的短暂窗口；这只是连接层重试，不能
@@ -139,8 +169,8 @@ func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout 
 	return &UnixSocketSubsystemProvisioner{enabled: enabled, socketPath: socketPath, timeout: timeout, capabilities: capabilities}, nil
 }
 
-// Capabilities returns a defensive copy of the server-configured deployment policy. The
-// privileged Agent independently enforces the same values and never trusts this UI projection.
+// Capabilities 返回服务端配置部署策略的防御性副本。特权 Agent 独立强制同一套值，
+// 绝不信任这个 UI 投影。
 func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.SubsystemProvisioningCapabilities {
 	capabilities := provisioner.capabilities
 	capabilities.SupportedApplicationCodes = append([]string(nil), capabilities.SupportedApplicationCodes...)
@@ -149,10 +179,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.Su
 	return capabilities
 }
 
-// AvailableCapabilities asks the privileged Agent for the current non-sensitive availability
-// projection. It is deliberately separate from Capabilities: static policy is still used for
-// security checks, while live availability follows prepare/remove operations without exposing
-// .release.env or its other values to the API container.
+// AvailableCapabilities 向特权 Agent 询问当前非敏感的可用性投影。它与 Capabilities 有意分离：
+// 安全检查仍使用静态策略，而实时可用性跟随 prepare/remove 操作，且不把 .release.env 或其
+// 其他值暴露给 API 容器。
 func (provisioner *UnixSocketSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
 	if !provisioner.enabled {
 		capabilities := provisioner.Capabilities()
@@ -228,6 +257,7 @@ func normalizeSubsystemProvisioningCapabilities(capabilities application.Subsyst
 	capabilities.DefaultUpstreamURL = strings.TrimRight(strings.TrimSpace(capabilities.DefaultUpstreamURL), "/")
 	capabilities.DefaultPathPrefix = strings.TrimRight(strings.TrimSpace(capabilities.DefaultPathPrefix), "/")
 	capabilities.DefaultClientType = strings.ToLower(strings.TrimSpace(capabilities.DefaultClientType))
+	capabilities.ReleaseIntegrity = strings.ToLower(strings.TrimSpace(capabilities.ReleaseIntegrity))
 	capabilities.Targets = append([]application.SubsystemProvisioningTarget(nil), capabilities.Targets...)
 	for index := range capabilities.Targets {
 		capabilities.Targets[index].ApplicationCode = strings.ToLower(strings.TrimSpace(capabilities.Targets[index].ApplicationCode))
@@ -282,6 +312,48 @@ func normalizedCapabilityValues(values []string) []string {
 	return result
 }
 
+// ReadSubsystemAccessImages 读取「批准清单中的镜像在本机是否存在」的明细（只读）。
+// reported=false 表示该部署 Agent 未上报该字段（旧版本），调用方必须按「未验证」处理。
+func (provisioner *UnixSocketSubsystemProvisioner) ReadSubsystemAccessImages(ctx context.Context, applicationCode, environment string) ([]application.SubsystemImageReadiness, bool, error) {
+	if !provisioner.enabled {
+		return nil, false, nil
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, provisioner.timeout)
+	defer cancel()
+	connection, err := dialProvisioningSocket(operationCtx, provisioner.socketPath)
+	if err != nil {
+		return nil, false, provisioningError("deployment helper is unavailable")
+	}
+	defer connection.Close()
+	if deadline, ok := operationCtx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	watchProvisioningCancellation(operationCtx, connection)
+	request := subsystemProvisioningRequest{
+		Version:     subsystemProvisioningProtocolVersion,
+		Action:      "capabilities",
+		Code:        strings.TrimSpace(applicationCode),
+		Environment: strings.ToLower(strings.TrimSpace(environment)),
+		RequestID:   normalizedProvisioningRequestID(requestctx.RequestID(ctx)),
+	}
+	if err := json.NewEncoder(connection).Encode(request); err != nil {
+		return nil, false, provisioningError("send capabilities request")
+	}
+	var reply subsystemProvisioningReply
+	if err := json.NewDecoder(io.LimitReader(connection, 256*1024)).Decode(&reply); err != nil {
+		return nil, false, provisioningError("read capabilities response")
+	}
+	if !reply.Success {
+		return nil, false, provisioningRejectionError(reply.Message, reply.Detail)
+	}
+	if reply.Images == nil {
+		return nil, false, nil
+	}
+	return reply.Images, true, nil
+}
+
+// Preflight 把前置检查请求转发给部署辅助进程；本进程不做任何本地判断，Agent 侧的租户、
+// 镜像与文件边界校验是唯一权威。Agent 未启用时失败关闭。
 func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context, input application.SubsystemPreflightInput) error {
 	if !provisioner.enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
@@ -294,9 +366,14 @@ func (provisioner *UnixSocketSubsystemProvisioner) Preflight(ctx context.Context
 	})
 }
 
+// Provision 把接入请求转发给部署辅助进程执行；本进程不落盘任何部署产物，Agent 未启用时
+// 拒绝而不是排队。
 func (provisioner *UnixSocketSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if !provisioner.enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	if input.ReleaseDigest == "" {
+		input.ReleaseDigest = provisioner.releaseDigest
 	}
 	return provisioner.exchange(ctx, subsystemProvisioningRequest{
 		Version: subsystemProvisioningProtocolVersion,
@@ -305,9 +382,14 @@ func (provisioner *UnixSocketSubsystemProvisioner) Provision(ctx context.Context
 	})
 }
 
+// Update 把受控更新请求转发给部署辅助进程执行；失败语义与响应拒绝原因由 Agent 返回，
+// 本进程只负责转发与传递取消。
 func (provisioner *UnixSocketSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if !provisioner.enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	if input.ReleaseDigest == "" {
+		input.ReleaseDigest = provisioner.releaseDigest
 	}
 	return provisioner.exchange(ctx, subsystemProvisioningRequest{
 		Version: subsystemProvisioningProtocolVersion,
@@ -316,9 +398,8 @@ func (provisioner *UnixSocketSubsystemProvisioner) Update(ctx context.Context, i
 	})
 }
 
-// ApplyAccess asks the deployment helper to rewrite the local override environment files and
-// recreate the affected containers so the unified frontend and subsystem callbacks use the
-// configured public origin (empty origin restores local-only access).
+// ApplyAccess 请求部署辅助进程重写本机覆盖环境文件并重建受影响容器，使统一前端与子系统
+// 回调使用配置的公开 origin（空 origin 恢复仅本机访问）。
 func (provisioner *UnixSocketSubsystemProvisioner) ApplyAccess(ctx context.Context, input settingsapplication.AccessApplyInput) error {
 	if !provisioner.enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
@@ -333,6 +414,8 @@ func (provisioner *UnixSocketSubsystemProvisioner) ApplyAccess(ctx context.Conte
 	})
 }
 
+// Teardown 把拆除请求转发给部署辅助进程，并附上服务端批准投影中的清单校验和，让 Agent
+// 能核对该次拆除与已批准清单一致，防止误拆其他部署。
 func (provisioner *UnixSocketSubsystemProvisioner) Teardown(ctx context.Context, tenantID, applicationCode, environment string) error {
 	if !provisioner.enabled {
 		return provisioningError("automatic subsystem deployment is disabled")
@@ -360,9 +443,8 @@ func (provisioner *UnixSocketSubsystemProvisioner) manifestChecksumFor(applicati
 	return ""
 }
 
-// Discover asks the isolated Agent for services declared by the current runtime.
-// The response contains routing metadata only; secrets and host paths never cross
-// the socket.
+// Discover 向隔离 Agent 查询当前运行时声明的服务。响应只含路由元数据；
+// 秘密与宿主路径绝不跨越 socket。
 func (provisioner *UnixSocketSubsystemProvisioner) Discover(ctx context.Context, applicationCode, environment string) ([]application.SubsystemServiceInstance, error) {
 	if !provisioner.enabled {
 		return nil, provisioningError("automatic subsystem deployment is disabled")
@@ -374,8 +456,8 @@ func (provisioner *UnixSocketSubsystemProvisioner) Discover(ctx context.Context,
 	return services, nil
 }
 
-// DiscoverSubsystemCandidates inventories opt-in, not-yet-registered subsystem containers.
-// The API process still has no Docker socket; the isolated helper performs the read-only scan.
+// DiscoverSubsystemCandidates 盘点主动声明且尚未登记的子系统容器。API 进程仍无 Docker
+// socket；只读扫描由隔离辅助进程执行。
 func (provisioner *UnixSocketSubsystemProvisioner) DiscoverSubsystemCandidates(ctx context.Context) ([]application.SubsystemDiscoveryCandidate, error) {
 	if !provisioner.enabled {
 		return nil, provisioningError("automatic subsystem deployment is disabled")
@@ -408,6 +490,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 		return provisioningError("read deployment response")
 	}
 	if !reply.Success {
+		if known := runtimeApprovalReplyError(reply.ErrorCode); application.RuntimeLicenseApprovalErrorCode(known) == reply.ErrorCode {
+			return known
+		}
 		return provisioningRejectionError(reply.Message, reply.Detail)
 	}
 	return nil
@@ -674,10 +759,17 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			break
 		}
 		capabilities, capabilityErr := provider.AvailableCapabilities(operationContext)
+		// 镜像存在性由本机读取；读取失败不影响 capabilities 本身（images 留空即未验证）。
+		var images []application.SubsystemImageReadiness
+		if imageProvider, ok := executor.(subsystemImageReadinessProvider); ok {
+			if reported, imageErr := imageProvider.SubsystemImageReadiness(operationContext, request.Code, request.Environment); imageErr == nil {
+				images = reported
+			}
+		}
 		if capabilityErr != nil {
 			err = capabilityErr
 		} else {
-			_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, Capabilities: &capabilities})
+			_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, Capabilities: &capabilities, Images: images})
 			return
 		}
 	case "preflight":
@@ -770,6 +862,10 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	}
 	reply := subsystemProvisioningReply{Success: err == nil}
 	if err != nil {
+		if application.RuntimeLicenseApprovalErrorCode(err) != "" || request.Action == "LICENSE_RUNTIME_APPROVAL" || request.Action == "LICENSE_RUNTIME_LIFECYCLE_APPROVAL" {
+			err = application.RuntimeLicenseApprovalFailure(err)
+			reply.ErrorCode = application.RuntimeLicenseApprovalErrorCode(err)
+		}
 		reply.Message = safeSubsystemProvisioningMessage(err)
 		reply.Detail = safeSubsystemProvisioningDetail(err)
 		requestID := request.RequestID

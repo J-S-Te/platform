@@ -1,4 +1,4 @@
-// Package application coordinates tenant-scoped IAM management use cases.
+// Package application 编排租户范围内的 IAM 管理用例。
 package application
 
 import (
@@ -12,27 +12,27 @@ import (
 )
 
 var (
-	// ErrNotFound means a tenant-scoped IAM entity does not exist.
+	// ErrNotFound 表示租户范围内不存在该 IAM 实体，而非全局不存在。
 	ErrNotFound = errors.New("identity resource not found")
-	// ErrConflict means a requested create or state change violates an IAM uniqueness or lifecycle rule.
+	// ErrConflict 表示创建或状态变更请求违反了 IAM 的唯一性或生命周期规则。
 	ErrConflict = errors.New("identity resource conflict")
-	// ErrVersionConflict means the caller supplied a stale aggregate version.
+	// ErrVersionConflict 表示调用方提供了过期的聚合版本号（乐观锁冲突）。
 	ErrVersionConflict = errors.New("identity version conflict")
-	// ErrMembershipRequired prevents creating an IAM user that has no personnel appointment.
+	// ErrMembershipRequired 阻止创建没有人员任职关系的 IAM 用户。
 	ErrMembershipRequired = errors.New("user must be created with an appointment")
 )
 
 const (
-	// DefaultPlatformApplicationCode identifies the management console application whose
-	// baseline role is assigned to every newly created ordinary user.
+	// DefaultPlatformApplicationCode 标识管理控制台应用，其基线角色会分配给每个新建的普通用户。
 	DefaultPlatformApplicationCode = "platform"
-	// DefaultUserRoleCode is the built-in, permission-minimal role for ordinary users.
+	// DefaultUserRoleCode 是普通用户内置的最小权限角色。
 	DefaultUserRoleCode = "platform-user"
-	// MaxBatchUserCreateItems bounds one atomic batch to keep request and transaction sizes finite.
+	// MaxBatchUserCreateItems 限定单次原子批量的大小，保证请求体与事务规模有限。
 	MaxBatchUserCreateItems = 100
 )
 
-// PageRequest is the common bounded list query contract.
+// PageRequest 是通用且有界约束的列表查询契约；AllowedOrgUnitIDs/AllowedResourceIDs
+// 携带调用方的数据范围授权结果，超出范围的记录不得返回。
 type PageRequest struct {
 	Page               int
 	PageSize           int
@@ -43,7 +43,7 @@ type PageRequest struct {
 	AllowedResourceIDs []string
 }
 
-// PageResult is the common list response model used by the HTTP adapter.
+// PageResult 是 HTTP 适配层共用的列表响应模型。
 type PageResult[T any] struct {
 	Items    []T
 	Page     int
@@ -51,8 +51,8 @@ type PageResult[T any] struct {
 	Total    int64
 }
 
-// UserView is the client-safe user representation. It intentionally contains a masked mobile
-// value only; plaintext and ciphertext never leave the application layer.
+// UserView 是可安全返回给客户端的用户表示；有意只携带掩码手机号，明文与密文都绝不
+// 离开应用层。
 type UserView struct {
 	ID           string
 	DisplayName  string
@@ -67,7 +67,7 @@ type UserView struct {
 	UpdatedAt    time.Time
 }
 
-// UserCreateInput contains the writable fields supported by POST /users.
+// UserCreateInput 包含 POST /users 支持的可写字段。
 type UserCreateInput struct {
 	TenantID    string
 	OperatorID  string
@@ -77,15 +77,13 @@ type UserCreateInput struct {
 	Mobile      *string
 	Status      string
 	ValidUntil  *time.Time
-	// ApplicationRoles contains optional application-owned role assignments imported together
-	// with the user. The repository resolves these codes against synchronized ACTIVE catalogs and
-	// persists all users/bindings atomically; callers can never submit role IDs directly.
+	// ApplicationRoles 携可与用户一起导入的应用自有角色分配。仓储只把这些编码解析到已同步
+	// 的 ACTIVE 目录，并把用户/绑定原子落库；调用方永远不能直接提交角色 ID。
 	ApplicationRoles []ApplicationRoleAssignment
 }
 
-// ApplicationRoleAssignment identifies one application-owned role by either stable codes or the
-// human-readable names shown in the management console. Name-based import is resolved exactly in
-// the current tenant; persistence still uses stable application/role IDs.
+// ApplicationRoleAssignment 通过稳定编码或管理控制台展示的人类可读名称标识一个应用自有
+// 角色。按名称导入会在当前租户内精确解析；落库仍使用稳定的应用/角色 ID。
 type ApplicationRoleAssignment struct {
 	ApplicationCode string
 	ApplicationName string
@@ -93,14 +91,14 @@ type ApplicationRoleAssignment struct {
 	RoleName        string
 }
 
-// UserBatchCreateInput creates multiple ordinary users in one all-or-nothing transaction.
+// UserBatchCreateInput 在一个全有或全无的事务中创建多个普通用户。
 type UserBatchCreateInput struct {
 	TenantID   string
 	OperatorID string
 	Items      []UserCreateInput
 }
 
-// UserDeleteInput is the optimistic-lock command for logical user deletion.
+// UserDeleteInput 是逻辑删除用户的乐观锁命令。
 type UserDeleteInput struct {
 	TenantID   string
 	OperatorID string
@@ -108,8 +106,8 @@ type UserDeleteInput struct {
 	Version    uint64
 }
 
-// UserUpdateInput contains patchable user fields. Nil optional pointers mean no change; an empty
-// pointed-to value explicitly clears optional text fields.
+// UserUpdateInput 包含可修补的用户字段。可选指针为 nil 表示不变更；指针指向空值表示显式
+// 清空可选文本字段。
 type UserUpdateInput struct {
 	TenantID       string
 	OperatorID     string
@@ -126,7 +124,7 @@ type UserUpdateInput struct {
 	UpdateMobile   bool
 }
 
-// AccountUpdateInput contains the only account update fields exposed by the P0 contract.
+// AccountUpdateInput 是 P0 契约暴露的仅有的账号更新字段。
 type AccountUpdateInput struct {
 	TenantID       string
 	OperatorID     string
@@ -137,8 +135,8 @@ type AccountUpdateInput struct {
 	Version        uint64
 }
 
-// OrgUnitCreateInput contains writable P0 organization fields. Code and OrgType are
-// platform-managed so callers cannot introduce conflicting organization identifiers or types.
+// OrgUnitCreateInput 包含可写的 P0 组织字段。Code 与 OrgType 由平台管理，调用方不能引入
+// 冲突的组织标识或类型。
 type OrgUnitCreateInput struct {
 	TenantID   string
 	OperatorID string
@@ -147,8 +145,8 @@ type OrgUnitCreateInput struct {
 	SortOrder  int
 }
 
-// OrgUnitUpdateInput updates the mutable organization fields under optimistic locking.
-// Organization codes and types stay platform-managed and therefore cannot be changed by callers.
+// OrgUnitUpdateInput 在乐观锁下更新可变组织字段。组织编码与类型保持平台管理，
+// 调用方不可变更。
 type OrgUnitUpdateInput struct {
 	TenantID   string
 	OperatorID string
@@ -159,8 +157,8 @@ type OrgUnitUpdateInput struct {
 	Version    uint64
 }
 
-// OrgUnitDeleteInput logically deletes one organization subtree. Its positions and appointments
-// are disabled together so no active appointment can reference an inactive organization.
+// OrgUnitDeleteInput 逻辑删除一个组织子树。其下岗位与任职关系一并停用，确保不存在
+// 活跃任职引用已停用组织。
 type OrgUnitDeleteInput struct {
 	TenantID   string
 	OperatorID string
@@ -168,8 +166,8 @@ type OrgUnitDeleteInput struct {
 	Version    uint64
 }
 
-// PositionCreateInput contains caller-writable position fields. Position codes are generated by
-// the platform so callers cannot introduce duplicates or mutable naming conventions.
+// PositionCreateInput 包含调用方可写的岗位字段。岗位编码由平台生成，调用方不能引入重复
+// 编码或自定义命名规则。
 type PositionCreateInput struct {
 	TenantID   string
 	OperatorID string
@@ -177,9 +175,8 @@ type PositionCreateInput struct {
 	Name       string
 }
 
-// PositionDeleteInput logically deletes a position using optimistic locking. Historical
-// memberships remain queryable but are disabled so the deleted position can no longer confer
-// inherited authorization.
+// PositionDeleteInput 以乐观锁逻辑删除岗位。历史任职仍可查询但会被停用，被删岗位不再
+// 产生继承授权。
 type PositionDeleteInput struct {
 	TenantID   string
 	OperatorID string
@@ -187,8 +184,8 @@ type PositionDeleteInput struct {
 	Version    uint64
 }
 
-// MembershipCreateInput contains a user's appointment. PositionID is mandatory at persistence
-// level even though it was accidentally optional in the original OpenAPI property list.
+// MembershipCreateInput 描述用户任职关系。PositionID 在持久化层为必填，尽管最初的
+// OpenAPI 属性列表曾把它误标为可选。
 type MembershipCreateInput struct {
 	TenantID             string
 	OperatorID           string
@@ -201,7 +198,7 @@ type MembershipCreateInput struct {
 	InheritAuthorization *bool
 }
 
-// MembershipUpdateInput updates one appointment with optimistic locking.
+// MembershipUpdateInput 以乐观锁更新一条任职关系。
 type MembershipUpdateInput struct {
 	MembershipCreateInput
 	MembershipID string
@@ -209,7 +206,7 @@ type MembershipUpdateInput struct {
 	Version      uint64
 }
 
-// UserWrite is the storage-ready user mutation. It holds encrypted mobile data only.
+// UserWrite 是可直接落库的用户变更载体，只携带已加密的手机号数据。
 type UserWrite struct {
 	UserCreateInput
 	ID                      string
@@ -219,8 +216,8 @@ type UserWrite struct {
 	MobileHash              []byte
 }
 
-// ApplicationRoleBindingWrite carries a server-generated binding ID plus a code- or name-based
-// catalog reference into the identity repository's atomic user import transaction.
+// ApplicationRoleBindingWrite 携带服务端生成的绑定 ID 以及基于编码或名称的目录引用，
+// 进入身份仓储的原子用户导入事务。
 type ApplicationRoleBindingWrite struct {
 	ID              string
 	ApplicationCode string
@@ -229,8 +226,8 @@ type ApplicationRoleBindingWrite struct {
 	RoleName        string
 }
 
-// ManagementRepository defines persistence behavior for the IAM management endpoints. The
-// repository owns transactions that modify multiple IAM aggregates atomically.
+// ManagementRepository 定义 IAM 管理端点的持久化行为。修改多个 IAM 聚合的事务由仓储
+// 实现，保证原子性。
 type ManagementRepository interface {
 	ListUsers(context.Context, string, PageRequest) (PageResult[domain.User], error)
 	CreateUser(context.Context, UserWrite) (domain.User, error)
@@ -255,28 +252,26 @@ type ManagementRepository interface {
 	UpdateMembership(context.Context, MembershipUpdateInput) (domain.Membership, error)
 }
 
-// ExternalAccountStatusReader reads the effective status of accounts managed by
-// an external identity provider. It is optional so local-password deployments
-// do not require a Keycloak dependency.
+// ExternalAccountStatusReader 读取外置身份提供方管理的账号有效状态。接口可选：本地密码
+// 部署不依赖 Keycloak。
 type ExternalAccountStatusReader interface {
 	ReadAccountStatus(context.Context, string, string) (string, bool, error)
 }
 
-// ExternalAccountStatusSynchronizer persists a provider-side disablement in the
-// platform aggregate. Reconciliation is deliberately one-way for ACTIVE: an
-// external ACTIVE result must never re-enable a platform-disabled account.
+// ExternalAccountStatusSynchronizer 把提供方侧的停用结果持久化到平台聚合。对 ACTIVE 的
+// 对账是有意单向的：外置返回 ACTIVE 绝不能重新启用平台侧已停用的账号。
 type ExternalAccountStatusSynchronizer interface {
 	DisableExternalIdentity(context.Context, string, string) error
 }
 
-// MobileProtection handles optional at-rest encryption of mobile numbers.
+// MobileProtection 处理手机号的可选静态加密。
 type MobileProtection interface {
 	Encrypt(string) ([]byte, error)
 	Decrypt([]byte) (string, error)
 	Digest(string) []byte
 }
 
-// ManagementService implements user, account and organization management independent of HTTP.
+// ManagementService 实现独立于 HTTP 的用户、账号与组织管理。
 type ManagementService struct {
 	repository                        ManagementRepository
 	mobiles                           MobileProtection
@@ -287,19 +282,20 @@ type ManagementService struct {
 	externalAccountStatusSynchronizer ExternalAccountStatusSynchronizer
 }
 
-// SetExternalAccountStatusReader attaches the optional external status mirror
-// after the platform has constructed its Keycloak administration client.
+// SetExternalAccountStatusReader 在平台构造 Keycloak 管理客户端之后挂载可选的外置状态
+// 镜像读取器。
 func (service *ManagementService) SetExternalAccountStatusReader(reader ExternalAccountStatusReader) {
 	service.externalAccountStatusReader = reader
 }
 
-// SetExternalAccountStatusSynchronizer attaches the persistence-side
-// compensation used when Keycloak reports a disabled identity.
+// SetExternalAccountStatusSynchronizer 注册"把外置停用写回平台"的能力。
+//
+// 该能力不得由只读列表触发（见 ListAccounts）；它保留给需要显式更新权限的运维动作使用。
 func (service *ManagementService) SetExternalAccountStatusSynchronizer(synchronizer ExternalAccountStatusSynchronizer) {
 	service.externalAccountStatusSynchronizer = synchronizer
 }
 
-// NewManagementService creates the P0 IAM management service.
+// NewManagementService 构造 P0 IAM 管理服务；任一必需依赖为 nil 时返回错误。
 func NewManagementService(repository ManagementRepository, mobiles MobileProtection, ids IDGenerator, clock Clock, passwordHashers ...PasswordHasher) (*ManagementService, error) {
 	if repository == nil || mobiles == nil || ids == nil || clock == nil {
 		return nil, errors.New("identity management dependencies must not be nil")
@@ -311,7 +307,7 @@ func NewManagementService(repository ManagementRepository, mobiles MobileProtect
 	return &ManagementService{repository: repository, mobiles: mobiles, ids: ids, clock: clock, hasher: hasher}, nil
 }
 
-// ListUsers returns tenant-scoped users and masks mobile values before returning them.
+// ListUsers 返回租户范围内的用户列表，返回前对手机号做掩码处理。
 func (service *ManagementService) ListUsers(ctx context.Context, tenantID string, query PageRequest) (PageResult[UserView], error) {
 	query = normalizePageRequest(query)
 	result, err := service.repository.ListUsers(ctx, tenantID, query)
@@ -329,8 +325,8 @@ func (service *ManagementService) ListUsers(ctx context.Context, tenantID string
 	return PageResult[UserView]{Items: items, Page: result.Page, PageSize: result.PageSize, Total: result.Total}, nil
 }
 
-// CreateUser creates one tenant-scoped natural person and assigns the built-in ordinary-user role.
-// Login accounts remain a separate lifecycle and are not provisioned by this operation.
+// CreateUser 创建单个租户范围内的自然人并分配内置普通用户角色。登录账号是独立生命周期，
+// 本操作不为其开通任何凭据。
 func (service *ManagementService) CreateUser(ctx context.Context, input UserCreateInput) (UserView, error) {
 	return UserView{}, ErrMembershipRequired
 }
@@ -342,8 +338,7 @@ func (service *ManagementService) CreateUsersBatch(ctx context.Context, input Us
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" || len(input.Items) == 0 || len(input.Items) > MaxBatchUserCreateItems {
 		return nil, ErrValidation
 	}
-	// Standalone user creation is intentionally disabled; users must be created together
-	// with a membership so organization and position authorization is never bypassed.
+	// 独立创建用户被有意禁用：用户必须与任职关系一同创建，组织与岗位授权永远不能被绕过。
 	return nil, ErrMembershipRequired
 }
 
@@ -381,8 +376,8 @@ func applicationRoleAssignmentKey(applicationCode, applicationName, roleCode, ro
 	return applicationCode + "\x00" + applicationName + "\x00" + roleCode + "\x00" + roleName
 }
 
-// DeleteUser logically removes a user while retaining its identity row for audit and referential integrity.
-// All associated accounts, memberships and active browser sessions are disabled/revoked atomically.
+// DeleteUser 逻辑删除用户，但保留身份行以供审计与引用完整性。关联的账号、任职关系与
+// 活跃浏览器会话在同一事务内停用/吊销。
 func (service *ManagementService) DeleteUser(ctx context.Context, input UserDeleteInput) error {
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.OperatorID) == "" ||
 		strings.TrimSpace(input.UserID) == "" || input.Version == 0 || input.OperatorID == input.UserID {
@@ -391,7 +386,7 @@ func (service *ManagementService) DeleteUser(ctx context.Context, input UserDele
 	return service.repository.DeleteUser(ctx, input)
 }
 
-// GetUser returns a single tenant-scoped user.
+// GetUser 返回单个租户范围内的用户。
 func (service *ManagementService) GetUser(ctx context.Context, tenantID, userID string) (UserView, error) {
 	user, err := service.repository.GetUser(ctx, tenantID, userID)
 	if err != nil {
@@ -400,7 +395,7 @@ func (service *ManagementService) GetUser(ctx context.Context, tenantID, userID 
 	return service.toUserView(user)
 }
 
-// UpdateUser applies a versioned user update.
+// UpdateUser 应用带版本号（乐观锁）的用户更新；版本过期返回 ErrVersionConflict。
 func (service *ManagementService) UpdateUser(ctx context.Context, input UserUpdateInput) (UserView, error) {
 	if err := validateUserUpdate(input, service.clock.Now()); err != nil {
 		return UserView{}, err
@@ -420,13 +415,12 @@ func (service *ManagementService) UpdateUser(ctx context.Context, input UserUpda
 	return service.toUserView(user)
 }
 
-// ListAccounts lists tenant-scoped accounts without exposing credentials or failed-attempt data.
+// ListAccounts 列出租户范围内的账号，不暴露凭据或失败尝试计数。
 func (service *ManagementService) ListAccounts(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Account], error) {
 	result, err := service.repository.ListAccounts(ctx, tenantID, normalizePageRequest(query))
 	if err != nil || service.externalAccountStatusReader == nil {
 		return result, err
 	}
-	syncedDisabledUsers := make(map[string]struct{})
 	for index := range result.Items {
 		account := &result.Items[index]
 		if account.UserID == nil {
@@ -438,26 +432,21 @@ func (service *ManagementService) ListAccounts(ctx context.Context, tenantID str
 			return PageResult[domain.Account]{}, fmt.Errorf("read external account status: %w", readErr)
 		}
 		if available && strings.EqualFold(strings.TrimSpace(status), domain.StatusDisabled) {
-			// An external disable is an effective access revocation. Do not
-			// silently turn an already-disabled platform account back on when the
-			// provider reports ACTIVE; platform-side administrative disables remain
-			// authoritative for re-enabling.
+			// 只读列表只反映差异，不落业务状态。
+			//
+			// 这里曾经直接调用 DisableExternalIdentity：任何拥有 platform:account:read 的人
+			// 只要读取账号列表，就会停用用户、账号（连同登录名）、凭据、任职和会话。配合
+			// 投影侧把临时锁定写成 disabled 的问题，一次读取即可把"锁定到期自动恢复"变成
+			// 永久停用。外置停用状态仍按 Keycloak 权威值展示，但持久化只能由显式的写路径
+			// （具备相应更新权限的运维动作）触发，不能由 GET 触发。
 			account.Status = domain.StatusDisabled
-			if service.externalAccountStatusSynchronizer != nil {
-				if _, alreadySynced := syncedDisabledUsers[userID]; !alreadySynced {
-					if syncErr := service.externalAccountStatusSynchronizer.DisableExternalIdentity(ctx, tenantID, userID); syncErr != nil {
-						return PageResult[domain.Account]{}, fmt.Errorf("persist external account status: %w", syncErr)
-					}
-					syncedDisabledUsers[userID] = struct{}{}
-				}
-			}
 		}
 	}
 	return result, nil
 }
 
-// UpdateAccount changes an account between ACTIVE and DISABLED with optimistic locking. LOCKED is
-// owned by password-login failure handling and cannot be set through this management endpoint.
+// UpdateAccount 在乐观锁下把账号在 ACTIVE 与 DISABLED 之间切换。LOCKED 由密码登录失败
+// 处理逻辑持有，不能通过该管理端点设置。
 func (service *ManagementService) UpdateAccount(ctx context.Context, input AccountUpdateInput) (domain.Account, error) {
 	if input.TenantID == "" || input.OperatorID == "" || input.AccountID == "" || input.Version == 0 ||
 		(input.Status != domain.StatusActive && input.Status != domain.StatusDisabled) {
@@ -469,7 +458,7 @@ func (service *ManagementService) UpdateAccount(ctx context.Context, input Accou
 	return service.repository.UpdateAccount(ctx, input)
 }
 
-// ListOrgUnits lists tenant organization units using the shared, bounded pagination contract.
+// ListOrgUnits 使用共享且有界约束的分页契约列出租户组织单元。
 func (service *ManagementService) ListOrgUnits(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.OrgUnit], error) {
 	query = normalizePageRequest(query)
 	if tenantID == "" || !validStatusFilter(query.Status) {
@@ -478,10 +467,9 @@ func (service *ManagementService) ListOrgUnits(ctx context.Context, tenantID str
 	return service.repository.ListOrgUnits(ctx, tenantID, query.Keyword, query.Status, query)
 }
 
-// CreateOrgUnit appends a tenant-scoped organization node. The organization code is derived
-// from the server-generated ULID and therefore does not depend on mutable names or caller input.
-// Positions represent organization-specific duties and must be created separately; application
-// role names must not be copied into every new organization as appointment data.
+// CreateOrgUnit 追加租户范围内的组织节点。组织编码由服务端生成的 ULID 派生，不依赖
+// 可变名称或调用方输入。岗位表示组织专属职责，需单独创建；应用角色名不得作为任职数据
+// 复制进每个新建组织。
 func (service *ManagementService) CreateOrgUnit(ctx context.Context, input OrgUnitCreateInput) (domain.OrgUnit, error) {
 	if input.TenantID == "" || input.OperatorID == "" || !validName(input.Name, 100) {
 		return domain.OrgUnit{}, ErrValidation
@@ -495,8 +483,8 @@ func (service *ManagementService) CreateOrgUnit(ctx context.Context, input OrgUn
 	return service.repository.CreateOrgUnit(ctx, orgUnit, input.OperatorID)
 }
 
-// UpdateOrgUnit updates a tenant-scoped organization node. Moving a node is allowed only when it
-// cannot introduce a cycle; the repository rewrites the persisted subtree path atomically.
+// UpdateOrgUnit 更新租户范围内的组织节点。仅在不引入环时允许移动节点；仓储在事务内
+// 原子重写子树路径。
 func (service *ManagementService) UpdateOrgUnit(ctx context.Context, input OrgUnitUpdateInput) (domain.OrgUnit, error) {
 	if input.TenantID == "" || input.OperatorID == "" || input.OrgUnitID == "" || input.Version == 0 || !validName(input.Name, 100) {
 		return domain.OrgUnit{}, ErrValidation
@@ -505,8 +493,8 @@ func (service *ManagementService) UpdateOrgUnit(ctx context.Context, input OrgUn
 	return service.repository.UpdateOrgUnit(ctx, input)
 }
 
-// DeleteOrgUnit retains the organization hierarchy for audit/history but disables the target
-// subtree and all dependent positions and appointments in one transaction.
+// DeleteOrgUnit 为审计/历史保留组织层级，但在一个事务内停用目标子树及所有依赖的岗位与
+// 任职关系。
 func (service *ManagementService) DeleteOrgUnit(ctx context.Context, input OrgUnitDeleteInput) error {
 	if input.TenantID == "" || input.OperatorID == "" || input.OrgUnitID == "" || input.Version == 0 {
 		return ErrValidation
@@ -514,13 +502,13 @@ func (service *ManagementService) DeleteOrgUnit(ctx context.Context, input OrgUn
 	return service.repository.DeleteOrgUnit(ctx, input)
 }
 
-// generatedOrganizationCode creates a stable, tenant-unique business code from the same ULID
-// used as the organization primary key. The ORG prefix distinguishes it from other managed IDs.
+// generatedOrganizationCode 从组织主键 ULID 派生稳定且租户唯一的业务编码；ORG 前缀把它
+// 与其他托管 ID 区分开。
 func generatedOrganizationCode(id string) string {
 	return "ORG-" + strings.ToUpper(strings.TrimSpace(id))
 }
 
-// ListPositions returns tenant-scoped positions using the shared, bounded pagination contract.
+// ListPositions 使用共享且有界约束的分页契约返回租户范围内的岗位。
 func (service *ManagementService) ListPositions(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Position], error) {
 	query = normalizePageRequest(query)
 	if tenantID == "" || !validStatusFilter(query.Status) {
@@ -529,8 +517,8 @@ func (service *ManagementService) ListPositions(ctx context.Context, tenantID st
 	return service.repository.ListPositions(ctx, tenantID, query.Keyword, query.Status, query)
 }
 
-// CreatePosition creates an ACTIVE position under an existing ACTIVE organization unit. The
-// business code is derived from the generated ULID and remains stable if the position is renamed.
+// CreatePosition 在一个已 ACTIVE 的组织单元下创建 ACTIVE 岗位。业务编码由生成的 ULID
+// 派生，岗位改名后保持稳定。
 func (service *ManagementService) CreatePosition(ctx context.Context, input PositionCreateInput) (domain.Position, error) {
 	if input.TenantID == "" || input.OperatorID == "" || input.OrgUnitID == "" || !validName(input.Name, 100) {
 		return domain.Position{}, ErrValidation
@@ -544,14 +532,13 @@ func (service *ManagementService) CreatePosition(ctx context.Context, input Posi
 	return service.repository.CreatePosition(ctx, position, input.OperatorID)
 }
 
-// generatedPositionCode creates a stable position code from its ULID primary key.
+// generatedPositionCode 从岗位 ULID 主键派生稳定的岗位编码。
 func generatedPositionCode(id string) string {
 	return "POS-" + strings.ToUpper(strings.TrimSpace(id))
 }
 
-// DeletePosition preserves the position and appointment history while disabling the position and
-// all active memberships that reference it. New inherited authorization snapshots are invalidated
-// by the repository in the same transaction.
+// DeletePosition 保留岗位与任职历史，同时停用该岗位及其全部活跃任职；仓储在同一事务内
+// 使新的继承授权快照失效。
 func (service *ManagementService) DeletePosition(ctx context.Context, input PositionDeleteInput) error {
 	if input.TenantID == "" || input.OperatorID == "" || input.PositionID == "" || input.Version == 0 {
 		return ErrValidation
@@ -559,18 +546,17 @@ func (service *ManagementService) DeletePosition(ctx context.Context, input Posi
 	return service.repository.DeletePosition(ctx, input)
 }
 
-// ListMemberships returns historical and active tenant-scoped appointments.
+// ListMemberships 返回租户范围内的历史与活跃任职关系。
 func (service *ManagementService) ListMemberships(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Membership], error) {
 	return service.repository.ListMemberships(ctx, tenantID, normalizePageRequest(query))
 }
 
-// CreateMembership creates a user appointment and preserves the one-primary-membership invariant.
+// CreateMembership 创建用户任职关系并维护“仅一个主任职”不变量。
 func (service *ManagementService) CreateMembership(ctx context.Context, input MembershipCreateInput) (domain.Membership, error) {
 	if err := validateMembership(input.TenantID, input.OperatorID, input.UserID, input.OrgUnitID, input.PositionID, input.MembershipType, input.EffectiveFrom, input.EffectiveTo); err != nil {
 		return domain.Membership{}, err
 	}
-	// Backward compatibility: callers that do not send the new switch keep the historical
-	// behavior where an active appointment participates in organization/position inheritance.
+	// 向后兼容：未发送新开关的调用方保持历史行为——活跃任职参与组织/岗位继承授权。
 	if input.InheritAuthorization == nil {
 		enabled := true
 		input.InheritAuthorization = &enabled
@@ -583,7 +569,7 @@ func (service *ManagementService) CreateMembership(ctx context.Context, input Me
 	return service.repository.CreateMembership(ctx, input, id)
 }
 
-// UpdateMembership applies a versioned appointment update.
+// UpdateMembership 应用带版本号（乐观锁）的任职关系更新。
 func (service *ManagementService) UpdateMembership(ctx context.Context, input MembershipUpdateInput) (domain.Membership, error) {
 	if input.MembershipID == "" || input.Version == 0 || input.Status == nil ||
 		(*input.Status != domain.StatusActive && *input.Status != domain.StatusDisabled) {
@@ -599,7 +585,7 @@ func (service *ManagementService) UpdateMembership(ctx context.Context, input Me
 	return service.repository.UpdateMembership(ctx, input)
 }
 
-// ErrValidation allows adapters to distinguish invalid input from persistence failures.
+// ErrValidation 让适配层把无效输入与持久化失败区分开。
 var ErrValidation = errors.New("identity request validation failed")
 
 func (service *ManagementService) prepareUserWrite(input UserCreateInput, id string) (UserWrite, error) {
@@ -720,8 +706,8 @@ func validateMembership(tenantID, operatorID, userID, orgUnitID, positionID, kin
 	if tenantID == "" || operatorID == "" || userID == "" || orgUnitID == "" || positionID == "" || (kind != domain.MembershipPrimary && kind != domain.MembershipSecondary) {
 		return ErrValidation
 	}
-	// A long-term appointment omits both dates. A short-term appointment must provide the complete
-	// inclusive date range; accepting only one endpoint would make validity ambiguous.
+	// 长期任职两个日期都省略；短期任职必须提供完整的闭区间日期范围，只接受单端点会让
+	// 有效期语义产生歧义。
 	if (from == nil) != (to == nil) {
 		return ErrValidation
 	}

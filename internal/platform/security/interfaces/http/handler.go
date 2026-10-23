@@ -1,4 +1,4 @@
-// Package securityhttp adapts login-security use cases to the platform HTTP contract.
+// Package securityhttp 将登录安全用例适配为平台 HTTP 契约（租户范围、错误码映射统一走 httperror）。
 package securityhttp
 
 import (
@@ -21,7 +21,7 @@ import (
 
 const maxRequestBytes = 16 * 1024
 
-// service defines the login-security use cases exposed by this HTTP adapter.
+// service 约束本 HTTP 适配器暴露的登录安全用例集合，防止适配器越界依赖应用层实现细节。
 type service interface {
 	GetLoginPolicy(ctx context.Context, tenantID string) (securitydomain.LoginPolicy, error)
 	UpdateLoginPolicy(ctx context.Context, input securityapplication.LoginPolicyUpdateInput) (securitydomain.LoginPolicy, error)
@@ -29,13 +29,14 @@ type service interface {
 	UnlockAccount(ctx context.Context, input securityapplication.UnlockInput) (securitydomain.LockedAccount, error)
 }
 
-// Handler provides tenant-scoped login-security HTTP endpoints.
+// Handler 提供租户范围的登录安全 HTTP 端点；数据范围由认证中间件注入的租户身份决定，
+// 不接受请求参数指定租户。
 type Handler struct {
 	service service
 	logger  *slog.Logger
 }
 
-// NewHandler constructs a login-security HTTP handler.
+// NewHandler 构造登录安全 HTTP 处理器；依赖缺失时失败关闭。
 func NewHandler(service service, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("security HTTP handler dependencies must not be nil")
@@ -78,8 +79,7 @@ type pageResponse[T any] struct {
 	Total    int64 `json:"total"`
 }
 
-// GetLoginPolicy returns the current tenant login policy, including the documented default values
-// before a tenant has saved a custom policy.
+// GetLoginPolicy 返回当前租户登录策略；租户尚未保存自定义策略时返回文档化默认值。
 func (handler *Handler) GetLoginPolicy(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -93,7 +93,7 @@ func (handler *Handler) GetLoginPolicy(writer http.ResponseWriter, request *http
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录安全策略查询成功", loginPolicyToResponse(result))
 }
 
-// UpdateLoginPolicy replaces the tenant login policy through optimistic locking.
+// UpdateLoginPolicy 通过乐观锁整体替换租户登录策略，版本冲突时返回 409。
 func (handler *Handler) UpdateLoginPolicy(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -119,7 +119,7 @@ func (handler *Handler) UpdateLoginPolicy(writer http.ResponseWriter, request *h
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录安全策略已更新", loginPolicyToResponse(result))
 }
 
-// ListLockedAccounts lists active account locks for the current tenant.
+// ListLockedAccounts 分页列出当前租户仍生效的账号锁定。
 func (handler *Handler) ListLockedAccounts(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -137,7 +137,7 @@ func (handler *Handler) ListLockedAccounts(writer http.ResponseWriter, request *
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "锁定账号查询成功", pageResponse[lockedAccountResponse]{Items: items, Page: result.Page, PageSize: result.PageSize, Total: result.Total})
 }
 
-// UnlockAccount clears one active lock and resets its active failed-login counter.
+// UnlockAccount 解除一个生效中的锁定并清零其活跃失败计数，不恢复已被撤销的会话。
 func (handler *Handler) UnlockAccount(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {

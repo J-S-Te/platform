@@ -1,6 +1,5 @@
-// Package positiongrant implements reusable authorization templates for organization positions.
-// It deliberately materializes TEMPLATE-origin POSITION bindings rather than copying grants to
-// users. Users receive those bindings dynamically only through an active appointment.
+// Package positiongrant 为组织岗位实现可复用的授权模板。它有意物化为 TEMPLATE 来源的
+// POSITION 绑定，而不是把授权复制到用户：用户只在任职有效期内动态获得这些绑定。
 package positiongrant
 
 import (
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -30,25 +31,39 @@ const (
 )
 
 var (
-	ErrNotFound   = errors.New("position authorization template not found")
+	// ErrNotFound 表示租户内不存在该岗位授权模板或关联记录。
+	ErrNotFound = errors.New("position authorization template not found")
+	// ErrValidation 表示输入不满足模板/分配的输入契约。
 	ErrValidation = errors.New("position authorization template validation failed")
-	ErrConflict   = errors.New("position authorization template conflict")
+	// ErrConflict 表示乐观锁版本冲突或状态转换冲突。
+	ErrConflict = errors.New("position authorization template conflict")
+	// ErrForbidden 表示操作者试图通过模板委派本人并不拥有的权限。
+	ErrForbidden = errors.New("position authorization template delegation forbidden")
 )
 
+// IdentifierGenerator 为模板/分配/物化绑定提供可排序 ULID。
 type IdentifierGenerator interface {
 	New(time.Time) (string, error)
 }
+
+// Clock 使授权时间戳在测试中可确定。
 type Clock interface{ Now() time.Time }
+
+// SystemClock 是生产环境的 UTC 时钟。
 type SystemClock struct{}
 
+// Now 返回当前 UTC 时间。
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
+// Service 提供岗位授权模板的租户范围内用例：模板 CRUD、岗位分配对账、
+// 有效期交叉预览，以及把分配物化为可追溯的 POSITION 角色绑定。
 type Service struct {
 	db    *gorm.DB
 	ids   IdentifierGenerator
 	clock Clock
 }
 
+// NewService 校验依赖并构造岗位授权模板服务；任一依赖为 nil 即拒绝启动。
 func NewService(db *gorm.DB, ids IdentifierGenerator, clock Clock) (*Service, error) {
 	if db == nil || ids == nil || clock == nil {
 		return nil, errors.New("position authorization template service dependencies must not be nil")
@@ -56,6 +71,7 @@ func NewService(db *gorm.DB, ids IdentifierGenerator, clock Clock) (*Service, er
 	return &Service{db: db, ids: ids, clock: clock}, nil
 }
 
+// TemplateRoleInput 是模板内单个角色条目的输入；作用域只允许 TENANT 或 ENVIRONMENT。
 type TemplateRoleInput struct {
 	ApplicationID string     `json:"application_id"`
 	RoleID        string     `json:"role_id"`
@@ -66,7 +82,7 @@ type TemplateRoleInput struct {
 	Status        string     `json:"status,omitempty"`
 }
 
-// Legacy role-inheritance DTOs remain internal for migration compatibility; the HTTP feature is removed.
+// Legacy role-inheritance DTOs 仅为迁移兼容保留在内部；对应 HTTP 功能已下线。
 type RoleInheritanceInput struct {
 	SourceRoleID        string     `json:"source_role_id"`
 	TargetApplicationID string     `json:"target_application_id"`
@@ -77,6 +93,8 @@ type RoleInheritanceInput struct {
 	ValidUntil          *time.Time `json:"valid_until,omitempty"`
 	Status              string     `json:"status,omitempty"`
 }
+
+// RoleInheritanceView 是平台角色到子系统角色继承映射的展示形态。
 type RoleInheritanceView struct {
 	MappingID             string     `json:"mapping_id"`
 	SourceApplicationID   string     `json:"source_application_id"`
@@ -95,13 +113,15 @@ type RoleInheritanceView struct {
 	ValidUntil            *time.Time `json:"valid_until,omitempty"`
 	Status                string     `json:"status"`
 }
+
+// RoleInheritanceReplaceInput 以完整集合替换某平台角色的继承映射。
 type RoleInheritanceReplaceInput struct {
 	SourceRoleID string                 `json:"source_role_id"`
 	Mappings     []RoleInheritanceInput `json:"mappings"`
 }
 
-// TemplateInput deliberately does not accept a code. Template codes are immutable system
-// identifiers generated from the template ULID when the template is created.
+// TemplateInput 有意不接受 code：模板编码是不可变的系统标识，
+// 由创建时从模板 ULID 派生生成。
 type TemplateInput struct {
 	Name        string              `json:"name"`
 	Description string              `json:"description,omitempty"`
@@ -111,15 +131,22 @@ type TemplateInput struct {
 	Version     uint64              `json:"version,omitempty"`
 	Roles       []TemplateRoleInput `json:"roles"`
 }
+
+// AssignmentInput 描述把一个模板分配给岗位的输入；有效期受模板与条目有效期交叉约束。
 type AssignmentInput struct {
 	TemplateID string     `json:"template_id"`
 	Status     string     `json:"status,omitempty"`
 	ValidFrom  *time.Time `json:"valid_from,omitempty"`
 	ValidUntil *time.Time `json:"valid_until,omitempty"`
 }
+
+// ReplaceAssignmentsInput 以完整集合替换一个岗位的模板分配。
 type ReplaceAssignmentsInput struct {
-	Assignments []AssignmentInput `json:"assignments"`
+	Assignments      []AssignmentInput `json:"assignments"`
+	ExpectedRevision string            `json:"expected_revision"`
 }
+
+// PreviewInput 是岗位授权预览的输入；EffectiveFrom/EffectiveTo 可模拟未来任职窗口。
 type PreviewInput struct {
 	UserID               string     `json:"user_id,omitempty"`
 	OrgUnitID            string     `json:"org_unit_id,omitempty"`
@@ -129,6 +156,7 @@ type PreviewInput struct {
 	InheritAuthorization *bool      `json:"inherit_authorization,omitempty"`
 }
 
+// TemplateRoleView 是模板角色条目的展示形态，附带应用与角色的可读信息。
 type TemplateRoleView struct {
 	ItemID          string     `json:"item_id"`
 	ApplicationID   string     `json:"application_id"`
@@ -143,6 +171,8 @@ type TemplateRoleView struct {
 	ValidUntil      *time.Time `json:"valid_until,omitempty"`
 	Status          string     `json:"status"`
 }
+
+// TemplateView 是岗位授权模板的完整展示形态，包含角色集合与影响面计数。
 type TemplateView struct {
 	TemplateID      string             `json:"template_id"`
 	Code            string             `json:"code"`
@@ -156,6 +186,8 @@ type TemplateView struct {
 	AssignmentCount int64              `json:"assignment_count"`
 	AffectedUsers   int64              `json:"affected_users"`
 }
+
+// AssignmentView 是模板到岗位分配的展示形态。
 type AssignmentView struct {
 	AssignmentID string       `json:"assignment_id"`
 	PositionID   string       `json:"position_id"`
@@ -165,6 +197,8 @@ type AssignmentView struct {
 	ValidUntil   *time.Time   `json:"valid_until,omitempty"`
 	Version      uint64       `json:"version"`
 }
+
+// PreviewRole 是预览中单条将在有效期交集内生效的岗位角色。
 type PreviewRole struct {
 	ApplicationID   string     `json:"application_id"`
 	ApplicationCode string     `json:"application_code"`
@@ -177,6 +211,8 @@ type PreviewRole struct {
 	ValidFrom       *time.Time `json:"valid_from,omitempty"`
 	ValidUntil      *time.Time `json:"valid_until,omitempty"`
 }
+
+// Preview 是岗位授权预览结果：生效角色集合、继承开关以及超出应用角色上限的冲突说明。
 type Preview struct {
 	PositionID           string        `json:"position_id"`
 	InheritAuthorization bool          `json:"inherit_authorization"`
@@ -184,6 +220,7 @@ type Preview struct {
 	Conflicts            []string      `json:"conflicts"`
 }
 
+// AuthorizationTargetRoleView 是模板可选角色条目及其可分配性标记。
 type AuthorizationTargetRoleView struct {
 	RoleID     string `json:"role_id"`
 	RoleCode   string `json:"role_code"`
@@ -193,9 +230,8 @@ type AuthorizationTargetRoleView struct {
 	Assignable bool   `json:"assignable"`
 }
 
-// AuthorizationPositionView contains the active position and its active organization context
-// needed to group the task-specific assignment catalog. It deliberately remains narrower than
-// the organization- and position-management resources.
+// AuthorizationPositionView 聚合在册岗位及其在册组织上下文，用于分组展示岗位授权
+// 专用目录。有意比组织/岗位管理资源窄，不泄露管理元数据。
 type AuthorizationPositionView struct {
 	PositionID       string `json:"position_id"`
 	PositionCode     string `json:"position_code"`
@@ -220,18 +256,16 @@ type authorizationPositionRow struct {
 	OrgUnitSortOrder int    `gorm:"column:org_unit_sort_order"`
 }
 
-// AuthorizationTargetView is intentionally limited to the information needed when building a
-// position authorization template. It must not expose application management configuration or a
-// full application authorization catalog to a role-binding operator.
+// AuthorizationTargetView 有意只包含构建岗位授权模板所需的最小信息：
+// 绝不把应用管理配置或完整应用授权目录暴露给角色绑定操作者。
 type AuthorizationTargetView struct {
 	ApplicationID    string `json:"application_id"`
 	ApplicationCode  string `json:"application_code"`
 	ApplicationName  string `json:"application_name"`
 	CatalogVersion   string `json:"catalog_version,omitempty"`
 	CatalogSyncState string `json:"catalog_sync_status"`
-	// MaxEffectiveRoles is the application-owned catalog policy limit; 0 means unlimited.
-	// It is read-only and only shown so a position template operator can see the per-user
-	// role budget before saving a mapping that would otherwise be rejected by the backend.
+	// MaxEffectiveRoles 是应用自有目录策略的单用户角色上限；0 表示不限制。只读展示：
+	// 让模板操作者在保存映射前即可看到每用户角色预算，避免被后端拒绝。
 	MaxEffectiveRoles int                           `json:"max_effective_roles,omitempty"`
 	Roles             []AuthorizationTargetRoleView `json:"roles"`
 }
@@ -297,16 +331,14 @@ type roleProjection struct {
 	RoleName        string `gorm:"column:role_name"`
 }
 type bindingProjection struct {
-	ID, ApplicationID, RoleID, ScopeType, ScopeID, Status, OriginItemID string
-	ValidFrom, ValidUntil                                               *time.Time
-	Version                                                             uint64
+	ID, ApplicationID, RoleID, SubjectType, SubjectID, ScopeType, ScopeID, Status, OriginItemID string
+	ValidFrom, ValidUntil                                                                       *time.Time
+	Version                                                                                     uint64
 }
 
-// ListAuthorizationTargets returns only roles that can be selected by a position template.
-// Platform-native roles are authoritative in the platform database and therefore do not require
-// an application-owned catalog. Subsystem roles are exposed only after their catalog is SYNCED.
-// Keeping the catalog state in this task-specific response also avoids requiring the broader
-// platform:application:read permission merely to build a position template.
+// ListAuthorizationTargets 只返回岗位模板可选的角色。平台原生角色以平台库为权威，
+// 无需应用自有目录；子系统角色必须在其目录 SYNCED 之后才暴露。把目录状态并入这个
+// 专用响应，也避免仅为了构建模板就要求更宽的 platform:application:read 权限。
 func (s *Service) ListAuthorizationTargets(ctx context.Context, tenantID string) ([]AuthorizationTargetView, error) {
 	var rows []authorizationTargetRow
 	err := s.db.WithContext(ctx).
@@ -359,7 +391,7 @@ func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTarg
 	return targets
 }
 
-// ListRoleInheritances returns the durable platform-role to subsystem-role mappings.
+// ListRoleInheritances 返回持久化的平台角色到子系统角色继承映射。
 func (s *Service) ListRoleInheritances(ctx context.Context, tenantID string) ([]RoleInheritanceView, error) {
 	var rows []struct {
 		roleInheritanceModel
@@ -385,13 +417,15 @@ func (s *Service) ListRoleInheritances(ctx context.Context, tenantID string) ([]
 	return items, nil
 }
 
+// ReplaceRoleInheritances 以对账方式整体替换平台角色的继承映射；来源必须是有效的
+// 平台角色，所有写操作在租户级模板写事务内完成。
 func (s *Service) ReplaceRoleInheritances(ctx context.Context, tenantID, operatorID string, input RoleInheritanceReplaceInput) ([]RoleInheritanceView, error) {
 	input.SourceRoleID = strings.TrimSpace(input.SourceRoleID)
 	if input.SourceRoleID == "" || len(input.Mappings) > 200 {
 		return nil, ErrValidation
 	}
 	now := s.clock.Now().UTC()
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.templateWriteTransaction(ctx, tenantID, func(tx *gorm.DB) error {
 		var source struct{ ID, ApplicationID, RoleType, Status string }
 		if err := tx.Table("authz_role").Where("tenant_id=? AND id=?", tenantID, input.SourceRoleID).Take(&source).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -470,9 +504,8 @@ func (s *Service) ReplaceRoleInheritances(ctx context.Context, tenantID, operato
 				return err
 			}
 		}
-		// Mapping changes must take effect for already assigned templates immediately;
-		// otherwise existing positions would keep stale materialized subsystem bindings
-		// until an unrelated template or assignment change occurs.
+		// 映射变更必须立即作用于已分配模板：否则既有岗位会继续持有过期的物化子系统
+		// 绑定，直到下一次无关的模板或分配变更发生。
 		var assignments []assignmentModel
 		if err := tx.Where("tenant_id=? AND status=?", tenantID, activeStatus).Find(&assignments).Error; err != nil {
 			return err
@@ -515,9 +548,8 @@ func validateRoleInheritanceLimits(ctx context.Context, tx *gorm.DB, tenantID st
 	return nil
 }
 
-// ListAuthorizationPositions returns active positions for the same role-binding
-// permission boundary used by template assignment. Calling the general position-management
-// endpoint would incorrectly require platform:position:read from a role-binding operator.
+// ListAuthorizationPositions 返回在册岗位，权限边界与模板分配共用的角色绑定权限一致。
+// 若调用通用岗位管理端点，会错误地要求角色绑定操作者持有 platform:position:read。
 func (s *Service) ListAuthorizationPositions(ctx context.Context, tenantID string) ([]AuthorizationPositionView, error) {
 	var rows []authorizationPositionRow
 	if err := s.db.WithContext(ctx).
@@ -544,6 +576,7 @@ func authorizationPositionViews(rows []authorizationPositionRow) []Authorization
 	return items
 }
 
+// List 返回租户内全部岗位授权模板（含各模板的角色集合与影响面计数）。
 func (s *Service) List(ctx context.Context, tenantID string) ([]TemplateView, error) {
 	var rows []templateModel
 	if err := s.db.WithContext(ctx).Where("tenant_id = ?", tenantID).Order("created_at DESC, id DESC").Find(&rows).Error; err != nil {
@@ -559,6 +592,8 @@ func (s *Service) List(ctx context.Context, tenantID string) ([]TemplateView, er
 	}
 	return views, nil
 }
+
+// Get 返回单个岗位授权模板的完整展示形态。
 func (s *Service) Get(ctx context.Context, tenantID, templateID string) (TemplateView, error) {
 	return s.get(ctx, tenantID, templateID)
 }
@@ -579,14 +614,33 @@ func (s *Service) get(ctx context.Context, tenantID, templateID string) (Templat
 	if err := s.db.WithContext(ctx).Table("authz_position_grant_template_assignment").Where("tenant_id = ? AND template_id = ? AND status = ?", tenantID, templateID, activeStatus).Count(&assignments).Error; err != nil {
 		return TemplateView{}, fmt.Errorf("count template assignments: %w", err)
 	}
-	if err := s.db.WithContext(ctx).Table("iam_membership AS m").Distinct("m.user_id").Joins("JOIN authz_position_grant_template_assignment AS a ON a.tenant_id=m.tenant_id AND a.position_id=m.position_id AND a.template_id=? AND a.status=?", templateID, activeStatus).Where("m.tenant_id=? AND m.status=?", tenantID, activeStatus).Count(&users).Error; err != nil {
+	now := s.clock.Now().UTC()
+	// 影响人数代表受当前有效模板来源影响的用户；最终跨来源冲突另由权限解析判定。
+	// 同时检查来源窗口与物化绑定，避免历史漂移、未生效或已过期的授权被计入。
+	if err := s.db.WithContext(ctx).Table("iam_membership AS m").Distinct("m.user_id").
+		Joins("JOIN iam_user AS user ON user.tenant_id=m.tenant_id AND user.id=m.user_id AND user.status=? AND user.deleted_at IS NULL AND (user.valid_until IS NULL OR user.valid_until > ?)", activeStatus, now).
+		Joins("JOIN iam_org_unit AS organization ON organization.tenant_id=m.tenant_id AND organization.id=m.org_unit_id AND organization.status=?", activeStatus).
+		Joins("JOIN iam_position AS position ON position.tenant_id=m.tenant_id AND position.id=m.position_id AND position.org_unit_id=m.org_unit_id AND position.status=?", activeStatus).
+		Joins("JOIN authz_position_grant_template_assignment AS a ON a.tenant_id=m.tenant_id AND a.position_id=m.position_id AND a.template_id=? AND a.status=?", templateID, activeStatus).
+		Joins("JOIN authz_position_grant_template AS template ON template.tenant_id=a.tenant_id AND template.id=a.template_id AND template.status=?", activeStatus).
+		Joins("JOIN authz_role_binding AS binding ON binding.tenant_id=a.tenant_id AND binding.subject_type=? AND binding.subject_id=a.position_id AND binding.grant_origin=? AND binding.origin_id=a.id AND binding.status=?", subjectPosition, originTemplate, activeStatus).
+		Joins("JOIN authz_position_grant_template_role AS item ON item.tenant_id=template.tenant_id AND item.template_id=template.id AND item.id=binding.origin_item_id AND item.application_id=binding.application_id AND item.role_id=binding.role_id AND item.status=?", activeStatus).
+		Joins("JOIN platform_application AS application ON application.tenant_id=binding.tenant_id AND application.id=binding.application_id AND application.status=?", activeStatus).
+		Joins("JOIN authz_role AS role ON role.tenant_id=binding.tenant_id AND role.application_id=binding.application_id AND role.id=binding.role_id AND role.status=?", activeStatus).
+		Where("m.tenant_id=? AND m.status=? AND m.inherit_authorization=?", tenantID, activeStatus, true).
+		Where("(m.valid_from IS NULL OR m.valid_from <= ?) AND (m.valid_until IS NULL OR m.valid_until > ?)", now, now).
+		Where("(a.valid_from IS NULL OR a.valid_from <= ?) AND (a.valid_until IS NULL OR a.valid_until > ?)", now, now).
+		Where("(template.valid_from IS NULL OR template.valid_from <= ?) AND (template.valid_until IS NULL OR template.valid_until > ?)", now, now).
+		Where("(item.valid_from IS NULL OR item.valid_from <= ?) AND (item.valid_until IS NULL OR item.valid_until > ?)", now, now).
+		Where("(binding.valid_from IS NULL OR binding.valid_from <= ?) AND (binding.valid_until IS NULL OR binding.valid_until > ?)", now, now).
+		Count(&users).Error; err != nil {
 		return TemplateView{}, fmt.Errorf("count template affected users: %w", err)
 	}
 	return TemplateView{TemplateID: model.ID, Code: model.Code, Name: model.Name, Description: model.Description, Status: model.Status, ValidFrom: model.ValidFrom, ValidUntil: model.ValidUntil, Version: model.Version, Roles: roles, AssignmentCount: assignments, AffectedUsers: users}, nil
 }
 func (s *Service) templateRoles(ctx context.Context, tenantID, templateID string) ([]TemplateRoleView, error) {
 	var rows []roleProjection
-	err := s.db.WithContext(ctx).Table("authz_position_grant_template_role AS item").Select("item.*, a.code AS application_code, a.name AS application_name, r.code AS role_code, r.name AS role_name").Joins("JOIN platform_application AS a ON a.id=item.application_id AND a.tenant_id=item.tenant_id").Joins("JOIN authz_role AS r ON r.id=item.role_id AND r.tenant_id=item.tenant_id AND r.application_id=item.application_id").Where("item.tenant_id=? AND item.template_id=?", tenantID, templateID).Order("a.code, r.code, item.id").Find(&rows).Error
+	err := s.db.WithContext(ctx).Table("authz_position_grant_template_role AS item").Select("item.*, a.code AS application_code, a.name AS application_name, r.code AS role_code, r.name AS role_name").Joins("JOIN platform_application AS a ON a.id=item.application_id AND a.tenant_id=item.tenant_id").Joins("JOIN authz_role AS r ON r.id=item.role_id AND r.tenant_id=item.tenant_id AND r.application_id=item.application_id").Where("item.tenant_id=? AND item.template_id=? AND item.status=?", tenantID, templateID, activeStatus).Order("a.code, r.code, item.id").Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("list position authorization template roles: %w", err)
 	}
@@ -596,6 +650,8 @@ func (s *Service) templateRoles(ctx context.Context, tenantID, templateID string
 	}
 	return views, nil
 }
+
+// Create 创建模板及角色条目；模板编码由 ULID 派生，创建即不可变。
 func (s *Service) Create(ctx context.Context, tenantID, operatorID string, input TemplateInput) (TemplateView, error) {
 	if err := normalizeTemplateInput(&input); err != nil {
 		return TemplateView{}, err
@@ -605,7 +661,7 @@ func (s *Service) Create(ctx context.Context, tenantID, operatorID string, input
 	if err != nil {
 		return TemplateView{}, fmt.Errorf("generate template ID: %w", err)
 	}
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.templateWriteTransaction(ctx, tenantID, func(tx *gorm.DB) error {
 		row := templateModel{ID: id, TenantID: tenantID, Code: generatedTemplateCode(id), Name: input.Name, Description: input.Description, Status: input.Status, ValidFrom: input.ValidFrom, ValidUntil: input.ValidUntil, Version: 1, CreatedAt: now, UpdatedAt: now, CreatedBy: &operatorID, UpdatedBy: &operatorID}
 		if err := tx.Create(&row).Error; err != nil {
 			return writeError(err, "create position authorization template")
@@ -617,6 +673,9 @@ func (s *Service) Create(ctx context.Context, tenantID, operatorID string, input
 	}
 	return s.get(ctx, tenantID, id)
 }
+
+// Update 在乐观锁下更新模板展示信息、有效期与角色集合，并同步重算已分配岗位的
+// 物化绑定；模板编码不变。
 func (s *Service) Update(ctx context.Context, tenantID, operatorID, templateID string, input TemplateInput) (TemplateView, error) {
 	if err := normalizeTemplateInput(&input); err != nil {
 		return TemplateView{}, err
@@ -624,9 +683,10 @@ func (s *Service) Update(ctx context.Context, tenantID, operatorID, templateID s
 	now := s.clock.Now().UTC()
 	changedApps := map[string]struct{}{}
 	changedPositions := map[string]map[string]struct{}{}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.templateWriteTransaction(ctx, tenantID, func(tx *gorm.DB) error {
 		var existing templateModel
-		result := tx.Where("tenant_id=? AND id=?", tenantID, templateID).Take(&existing)
+		// 先加锁再做一致性读取，避免分配物化用到其他分配写入提交之前的快照。
+		result := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND id=?", tenantID, templateID).Take(&existing)
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
@@ -651,6 +711,8 @@ func (s *Service) Update(ctx context.Context, tenantID, operatorID, templateID s
 	}
 	return s.get(ctx, tenantID, templateID)
 }
+
+// Delete 以乐观锁停用模板并同步撤销其物化绑定；不做物理删除，保留审计链。
 func (s *Service) Delete(ctx context.Context, tenantID, operatorID, templateID string, version uint64) error {
 	if version == 0 {
 		return validation("version is required")
@@ -658,7 +720,7 @@ func (s *Service) Delete(ctx context.Context, tenantID, operatorID, templateID s
 	now := s.clock.Now().UTC()
 	changedApps := map[string]struct{}{}
 	changedPositions := map[string]map[string]struct{}{}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return s.templateWriteTransaction(ctx, tenantID, func(tx *gorm.DB) error {
 		result := tx.Model(&templateModel{}).Where("tenant_id=? AND id=? AND version=?", tenantID, templateID, version).Updates(map[string]any{"status": disabledStatus, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")})
 		if result.Error != nil {
 			return writeError(result.Error, "disable template")
@@ -666,51 +728,64 @@ func (s *Service) Delete(ctx context.Context, tenantID, operatorID, templateID s
 		if result.RowsAffected == 0 {
 			return ErrConflict
 		}
+		// 模板停用后其岗位分配不能再以 ACTIVE 留在编辑器中。否则下一次保存岗位
+		// 映射会把已停用模板一并提交，被 ensureTemplate 以 422 拒绝，表现为
+		// “校验未通过”。这里先把分配停用，再统一同步物化绑定。
+		if err := tx.Model(&assignmentModel{}).
+			Where("tenant_id=? AND template_id=? AND status=?", tenantID, templateID, activeStatus).
+			Updates(map[string]any{"status": disabledStatus, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			return writeError(err, "disable template assignments")
+		}
 		return s.syncTemplateAssignments(ctx, tx, tenantID, templateID, operatorID, now, changedApps, changedPositions)
 	})
 }
-func (s *Service) ListPositionAssignments(ctx context.Context, tenantID, positionID string) ([]AssignmentView, error) {
+
+// ListPositionAssignments 返回岗位的全部模板分配。
+func (s *Service) ListPositionAssignments(ctx context.Context, tenantID, positionID string) (AssignmentSetView, error) {
 	if err := s.ensurePosition(ctx, tenantID, positionID); err != nil {
-		return nil, err
+		return AssignmentSetView{}, err
 	}
-	// 岗位已在上方验证，AssignmentView 也不需要岗位名称，因此直接读取 assignmentModel。
-	// 避免把带别名的 a.* 扫描进嵌入模型：GORM 对该形态填充不稳定，曾导致 TemplateID
-	// 为空，使实际保存成功后的响应加载误报 PLATFORM_NOT_FOUND。
-	var rows []assignmentModel
-	err := s.db.WithContext(ctx).
-		Where("tenant_id=? AND position_id=?", tenantID, positionID).
-		Order("created_at DESC,id DESC").
-		Find(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("list position template assignments: %w", err)
-	}
-	views := make([]AssignmentView, 0, len(rows))
-	for _, row := range rows {
-		t, err := s.get(ctx, tenantID, row.TemplateID)
-		if err != nil {
-			return nil, err
-		}
-		views = append(views, AssignmentView{AssignmentID: row.ID, PositionID: row.PositionID, Template: t, Status: row.Status, ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil, Version: row.Version})
-	}
-	return views, nil
+	var result AssignmentSetView
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		result, err = s.readAssignmentSet(ctx, tx, tenantID, positionID)
+		return err
+	})
+	return result, err
 }
-func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, operatorID, positionID string, input ReplaceAssignmentsInput) ([]AssignmentView, error) {
+
+// ReplacePositionAssignments 以模板 ID 集合对账岗位分配，并同步物化或撤销
+// TEMPLATE 来源的 POSITION 角色绑定。
+func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, operatorID, positionID string, input ReplaceAssignmentsInput) (AssignmentSetView, error) {
+	if len(input.ExpectedRevision) != 67 || !strings.HasPrefix(input.ExpectedRevision, "v1:") {
+		return AssignmentSetView{}, validation("expected_revision from the current assignment snapshot is required")
+	}
 	if err := s.ensurePosition(ctx, tenantID, positionID); err != nil {
-		return nil, err
+		return AssignmentSetView{}, err
 	}
 	now := s.clock.Now().UTC()
 	normalized, err := normalizeAssignments(input.Assignments)
 	if err != nil {
-		return nil, err
+		return AssignmentSetView{}, err
 	}
 	changedApps := map[string]struct{}{}
 	changedPositions := map[string]map[string]struct{}{}
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	var result AssignmentSetView
+	err = s.templateWriteTransaction(ctx, tenantID, func(tx *gorm.DB) error {
 		// 以“模板 ID 集合”对账而非物理删除：移除项逻辑停用，已有项复用并递增版本，
 		// 新增项创建；每一步同步生成角色绑定，最后统一推进受影响应用的 revision。
+		// 即使集合为空也要锁定父岗位；仅靠分配表上的行锁/间隙锁无法在不同隔离级别下
+		// 可靠地串行化两个首次写入者。
+		var position struct{ ID string }
+		if err := tx.Table("iam_position").Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Where("tenant_id=? AND id=? AND status=?", tenantID, positionID, activeStatus).Take(&position).Error; err != nil {
+			return writeError(err, "lock assignment position")
+		}
 		var existing []assignmentModel
-		if err := tx.Where("tenant_id=? AND position_id=?", tenantID, positionID).Find(&existing).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND position_id=?", tenantID, positionID).Find(&existing).Error; err != nil {
 			return fmt.Errorf("load position assignments: %w", err)
+		}
+		if assignmentSetRevision(tenantID, positionID, existing) != input.ExpectedRevision {
+			return ErrConflict
 		}
 		wanted := map[string]AssignmentInput{}
 		for _, a := range normalized {
@@ -719,6 +794,11 @@ func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, oper
 		byTemplate := map[string]assignmentModel{}
 		for _, a := range existing {
 			byTemplate[a.TemplateID] = a
+		}
+		// 所有新增授权必须在第一次写入前复核，不能先套用一个模板给自己授予权限，
+		// 再以该权限通过同批次后续模板的委派校验。
+		if err := s.validateAssignmentDelegation(ctx, tx, tenantID, operatorID, positionID, normalized, byTemplate, now); err != nil {
+			return err
 		}
 		for _, a := range existing {
 			if _, ok := wanted[a.TemplateID]; ok || a.Status == disabledStatus {
@@ -732,9 +812,6 @@ func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, oper
 			}
 		}
 		for _, wantedAssignment := range normalized {
-			if err := s.ensureTemplate(ctx, tx, tenantID, wantedAssignment.TemplateID); err != nil {
-				return err
-			}
 			if old, ok := byTemplate[wantedAssignment.TemplateID]; ok {
 				if err := tx.Model(&assignmentModel{}).Where("id=?", old.ID).Updates(map[string]any{"status": wantedAssignment.Status, "valid_from": wantedAssignment.ValidFrom, "valid_until": wantedAssignment.ValidUntil, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 					return writeError(err, "update position assignment")
@@ -759,13 +836,91 @@ func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, oper
 		if err := bumpChanged(tx, tenantID, changedApps, now, "position authorization assignments synchronized"); err != nil {
 			return err
 		}
-		return s.enqueueAffectedUsers(tx, tenantID, changedApps, changedPositions, now)
+		if err := s.enqueueAffectedUsers(tx, tenantID, changedApps, changedPositions, now); err != nil {
+			return err
+		}
+		var err error
+		result, err = s.readAssignmentSet(ctx, tx, tenantID, positionID)
+		return err
 	})
 	if err != nil {
-		return nil, err
+		return AssignmentSetView{}, err
 	}
-	return s.ListPositionAssignments(ctx, tenantID, positionID)
+	return result, nil
 }
+
+// validateAssignmentDelegation 比较实际物化授权，而非仅比较分配状态。安全的撤销、
+// 缩小和不变保存不要求操作者继续持有旧权限；新增、重新激活及扩大的角色必须复核。
+func (s *Service) validateAssignmentDelegation(ctx context.Context, tx *gorm.DB, tenantID, operatorID, positionID string, wanted []AssignmentInput, existing map[string]assignmentModel, now time.Time) error {
+	// 在任何普通快照读取之前锁定全部目标模板，保持校验与后续物化读取同一版本；
+	// 固定锁顺序也避免两个岗位同时套用相反顺序的模板导致交叉等待。
+	ordered := append([]AssignmentInput(nil), wanted...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].TemplateID < ordered[j].TemplateID })
+	templates := make(map[string]templateModel, len(ordered))
+	for _, assignment := range ordered {
+		var template templateModel
+		if err := tx.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND id=?", tenantID, assignment.TemplateID).Take(&template).Error; err != nil {
+			return writeError(err, "get assignment template")
+		}
+		templates[assignment.TemplateID] = template
+	}
+	for _, assignment := range wanted {
+		template := templates[assignment.TemplateID]
+		if assignment.Status != activeStatus {
+			continue
+		}
+		if template.Status != activeStatus {
+			return fmt.Errorf("%w: 模板未启用（当前 %s）；请先将模板启用为 ACTIVE 再分配岗位", ErrValidation, template.Status)
+		}
+		var items []templateRoleModel
+		if err := tx.Where("tenant_id=? AND template_id=? AND status=?", tenantID, template.ID, activeStatus).Find(&items).Error; err != nil {
+			return fmt.Errorf("load assignment template roles: %w", err)
+		}
+		oldAssignment, hadAssignment := existing[assignment.TemplateID]
+		var bindings []bindingProjection
+		if hadAssignment && oldAssignment.Status == activeStatus {
+			if err := tx.Table("authz_role_binding").Clauses(clause.Locking{Strength: "UPDATE"}).Select("id,application_id,role_id,scope_type,scope_id,status,origin_item_id,valid_from,valid_until").
+				Where("tenant_id=? AND subject_type=? AND subject_id=? AND grant_origin=? AND origin_id=?", tenantID, subjectPosition, positionID, originTemplate, oldAssignment.ID).Find(&bindings).Error; err != nil {
+				return fmt.Errorf("load existing assignment bindings: %w", err)
+			}
+		}
+		for _, item := range items {
+			from, until, ok := intersect(template.ValidFrom, template.ValidUntil, assignment.ValidFrom, assignment.ValidUntil, item.ValidFrom, item.ValidUntil)
+			if !ok || (until != nil && !until.After(now)) {
+				continue
+			}
+			var role struct{ RoleType, Code string }
+			if err := tx.Table("authz_role AS role").Select("role.role_type, role.code").Where("role.tenant_id=? AND role.application_id=? AND role.id=?", tenantID, item.ApplicationID, item.RoleID).Take(&role).Error; err != nil {
+				return writeError(err, "get assignment role")
+			}
+			if role.RoleType == roleTypePlatform && domain.IsProtectedRoleCode(role.Code) {
+				return validation("platform control-plane roles cannot be delegated through position authorization templates")
+			}
+			covered := false
+			for _, binding := range bindings {
+				if binding.Status == activeStatus && binding.OriginItemID == item.ID && binding.ApplicationID == item.ApplicationID && binding.RoleID == item.RoleID && binding.ScopeType == item.ScopeType && binding.ScopeID == item.ScopeID &&
+					(binding.ValidFrom == nil || (from != nil && !from.Before(*binding.ValidFrom))) &&
+					(binding.ValidUntil == nil || (until != nil && !until.After(*binding.ValidUntil))) {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
+			if err := delegation.VerifyRolePermissionsForPositionTemplates(ctx, tx, tenantID, operatorID, item.ApplicationID, item.RoleID); err != nil {
+				if errors.Is(err, application.ErrForbidden) {
+					return ErrForbidden
+				}
+				return fmt.Errorf("verify assignment role delegation: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// Preview 计算岗位在给定任职窗口内将生效的角色集合；不写库。
+// 每条角色取任职、模板、分配与模板条目有效期的交集，并标记超出应用角色上限的冲突。
 func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInput) (Preview, error) {
 	input.PositionID = strings.TrimSpace(input.PositionID)
 	if input.PositionID == "" {
@@ -792,12 +947,14 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 		RoleID          string     `gorm:"column:role_id"`
 		RoleCode        string     `gorm:"column:role_code"`
 		RoleName        string     `gorm:"column:role_name"`
+		TemplateFrom    *time.Time `gorm:"column:template_from"`
+		TemplateUntil   *time.Time `gorm:"column:template_until"`
 		AssignmentFrom  *time.Time `gorm:"column:assignment_from"`
 		AssignmentUntil *time.Time `gorm:"column:assignment_until"`
 		ItemFrom        *time.Time `gorm:"column:item_from"`
 		ItemUntil       *time.Time `gorm:"column:item_until"`
 	}
-	err := s.db.WithContext(ctx).Table("authz_position_grant_template_assignment AS assignment").Select("assignment.template_id, template.name AS template_name, item.application_id, application.code AS application_code, application.name AS application_name, item.role_id, role.code AS role_code, role.name AS role_name, assignment.valid_from AS assignment_from, assignment.valid_until AS assignment_until, item.valid_from AS item_from, item.valid_until AS item_until").Joins("JOIN authz_position_grant_template AS template ON template.id=assignment.template_id AND template.tenant_id=assignment.tenant_id AND template.status=?", activeStatus).Joins("JOIN authz_position_grant_template_role AS item ON item.template_id=template.id AND item.tenant_id=template.tenant_id AND item.status=?", activeStatus).Joins("JOIN platform_application AS application ON application.id=item.application_id AND application.tenant_id=item.tenant_id AND application.status=?", activeStatus).Joins("JOIN authz_role AS role ON role.id=item.role_id AND role.application_id=item.application_id AND role.tenant_id=item.tenant_id AND role.status=? AND role.role_type IN ?", activeStatus, []string{roleTypeApplication, roleTypePlatform}).Where("assignment.tenant_id=? AND assignment.position_id=? AND assignment.status=?", tenantID, input.PositionID, activeStatus).Find(&rows).Error
+	err := s.db.WithContext(ctx).Table("authz_position_grant_template_assignment AS assignment").Select("assignment.template_id, template.name AS template_name, item.application_id, application.code AS application_code, application.name AS application_name, item.role_id, role.code AS role_code, role.name AS role_name, template.valid_from AS template_from, template.valid_until AS template_until, assignment.valid_from AS assignment_from, assignment.valid_until AS assignment_until, item.valid_from AS item_from, item.valid_until AS item_until").Joins("JOIN authz_position_grant_template AS template ON template.id=assignment.template_id AND template.tenant_id=assignment.tenant_id AND template.status=?", activeStatus).Joins("JOIN authz_position_grant_template_role AS item ON item.template_id=template.id AND item.tenant_id=template.tenant_id AND item.status=?", activeStatus).Joins("JOIN platform_application AS application ON application.id=item.application_id AND application.tenant_id=item.tenant_id AND application.status=?", activeStatus).Joins("JOIN authz_role AS role ON role.id=item.role_id AND role.application_id=item.application_id AND role.tenant_id=item.tenant_id AND role.status=? AND role.role_type IN ?", activeStatus, []string{roleTypeApplication, roleTypePlatform}).Where("assignment.tenant_id=? AND assignment.position_id=? AND assignment.status=?", tenantID, input.PositionID, activeStatus).Find(&rows).Error
 	if err != nil {
 		return Preview{}, fmt.Errorf("preview position authorization: %w", err)
 	}
@@ -806,7 +963,7 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 	for _, row := range rows {
 		// 一个岗位角色只有在预览任职、模板、模板分配和模板条目的有效期存在交集时
 		// 才生效；交集边界也会成为最终生成绑定的有效期。
-		from, until, ok := intersect(input.EffectiveFrom, input.EffectiveTo, row.AssignmentFrom, row.AssignmentUntil, row.ItemFrom, row.ItemUntil)
+		from, until, ok := intersect(input.EffectiveFrom, input.EffectiveTo, row.TemplateFrom, row.TemplateUntil, row.AssignmentFrom, row.AssignmentUntil, row.ItemFrom, row.ItemUntil)
 		if !ok {
 			continue
 		}
@@ -840,7 +997,7 @@ func (s *Service) Preview(ctx context.Context, tenantID string, input PreviewInp
 }
 
 func (s *Service) saveTemplateItems(ctx context.Context, tx *gorm.DB, tenantID, templateID, operatorID string, inputs []TemplateRoleInput, now time.Time) error {
-	if err := s.validateItems(ctx, tx, tenantID, inputs); err != nil {
+	if err := s.validateItems(ctx, tx, tenantID, operatorID, inputs); err != nil {
 		return err
 	}
 	return s.upsertTemplateItems(tx, tenantID, templateID, operatorID, inputs, now)
@@ -923,7 +1080,7 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 	// 模板分配不是查询时临时拼接，而是物化为来源可追踪的 POSITION 角色绑定。
 	// origin_id/origin_item_id 将每条绑定精确关联回分配和模板项，便于幂等对账与撤销。
 	var assignment assignmentModel
-	err := tx.Where("tenant_id=? AND id=?", tenantID, assignmentID).Take(&assignment).Error
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND id=?", tenantID, assignmentID).Take(&assignment).Error
 	if err != nil {
 		return writeError(err, "get position assignment")
 	}
@@ -933,7 +1090,7 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 		return writeError(err, "get assignment template")
 	}
 	var existing []bindingProjection
-	if err := tx.Table("authz_role_binding").Select("id,application_id,role_id,scope_type,scope_id,status,origin_item_id,valid_from,valid_until,version").Where("tenant_id=? AND subject_type=? AND subject_id=? AND grant_origin=? AND origin_id=?", tenantID, subjectPosition, assignment.PositionID, originTemplate, assignment.ID).Find(&existing).Error; err != nil {
+	if err := tx.Table("authz_role_binding").Clauses(clause.Locking{Strength: "UPDATE"}).Select("id,application_id,role_id,subject_type,subject_id,scope_type,scope_id,status,origin_item_id,valid_from,valid_until,version").Where("tenant_id=? AND grant_origin=? AND origin_id=?", tenantID, originTemplate, assignment.ID).Find(&existing).Error; err != nil {
 		return fmt.Errorf("load generated bindings: %w", err)
 	}
 	var items []templateRoleModel
@@ -950,16 +1107,24 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 	}
 	byItem := map[string]bindingProjection{}
 	for _, b := range existing {
-		byItem[b.OriginItemID] = b
+		if item, ok := desired[b.OriginItemID]; ok && generatedBindingMatches(b, item, assignment.PositionID) {
+			byItem[b.OriginItemID] = b
+		}
 	}
 	for _, binding := range existing {
-		if _, ok := desired[binding.OriginItemID]; ok || binding.Status == disabledStatus {
+		item, wanted := desired[binding.OriginItemID]
+		if (wanted && generatedBindingMatches(binding, item, assignment.PositionID)) || binding.Status == disabledStatus {
 			continue
 		}
 		if err := tx.Table("authz_role_binding").Where("id=?", binding.ID).Updates(map[string]any{"status": disabledStatus, "updated_at": now, "updated_by": operatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 			return writeError(err, "disable generated role binding")
 		}
 		markChangedPosition(changedApps, changedPositions, binding.ApplicationID, assignment.PositionID)
+		if binding.SubjectType != subjectPosition || binding.SubjectID != assignment.PositionID {
+			if err := s.enqueueDisplacedSubject(tx, tenantID, binding, now); err != nil {
+				return err
+			}
+		}
 	}
 	for itemID, item := range desired {
 		from, until, _ := intersect(template.ValidFrom, template.ValidUntil, assignment.ValidFrom, assignment.ValidUntil, item.ValidFrom, item.ValidUntil)
@@ -986,9 +1151,8 @@ func (s *Service) syncAssignment(ctx context.Context, tx *gorm.DB, tenantID, ass
 	return nil
 }
 
-// enqueueAffectedUsers records one durable recalculation request for every user whose current
-// position-derived authorization changed.  It runs in the caller's authorization transaction so
-// a committed materialized binding and its Keycloak projection request cannot diverge.
+// enqueueAffectedUsers 为每个岗位派生授权发生变化的用户记录一条持久化重算请求。
+// 它运行在调用方的授权事务内，保证物化绑定提交与其 Keycloak 投影请求不会分叉。
 func (s *Service) enqueueAffectedUsers(tx *gorm.DB, tenantID string, applications map[string]struct{}, positionsByApplication map[string]map[string]struct{}, now time.Time) error {
 	if len(applications) == 0 || len(positionsByApplication) == 0 {
 		return nil
@@ -1042,9 +1206,8 @@ func markChangedPosition(applications map[string]struct{}, positionsByApplicatio
 	positionsByApplication[applicationID][positionID] = struct{}{}
 }
 
-// expandInheritedTemplateRoles adds one synthetic template item per active mapping.
-// The mapping ID becomes origin_item_id, so changing a mapping can be reconciled and
-// audited without overwriting the source platform-role binding.
+// expandInheritedTemplateRoles 为每条生效的继承映射合成一个模板条目。映射 ID 充当
+// origin_item_id，使映射变更可对账、可审计，且不覆盖来源平台角色绑定本身。
 func (s *Service) expandInheritedTemplateRoles(ctx context.Context, tx *gorm.DB, tenantID string, items []templateRoleModel) ([]templateRoleModel, error) {
 	platformRoles := make([]string, 0)
 	for _, item := range items {
@@ -1081,7 +1244,7 @@ func bumpChanged(tx *gorm.DB, tenantID string, applications map[string]struct{},
 	return nil
 }
 
-func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID string, items []TemplateRoleInput) error {
+func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID, operatorID string, items []TemplateRoleInput) error {
 	if err := validateTemplateRoleSet(items); err != nil {
 		return err
 	}
@@ -1105,9 +1268,20 @@ func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID strin
 			return fmt.Errorf("validate template role: %w", err)
 		}
 		// 控制面受保护角色（super-admin/emergency-admin/break-glass）只能由租户级超级管理员
-		// 直接绑定，禁止通过岗位授权模板委派，防止安全管理员借模板放大权限。
+		// 直接绑定，禁止通过岗位授权模板委派；即使平台安全管理员可以管理普通模板角色，
+		// 也不能把上述受保护角色塞进模板。
 		if role.RoleType == roleTypePlatform && domain.IsProtectedRoleCode(role.Code) {
 			return validation("platform control-plane roles cannot be delegated through position authorization templates")
+		}
+		// 禁止受保护角色并不能覆盖权限扩大：持有 role-binding:update 的人仍然可以把本人
+		// 并不拥有的普通角色挂到自己的有效继承岗位上。岗位模板与岗位映射使用专用策略：
+		// 超级管理员和平台安全管理员可以豁免逐权限委派判定，其他操作者仍必须持有目标
+		// 角色的全部权限。
+		if err := delegation.VerifyRolePermissionsForPositionTemplates(ctx, tx, tenantID, operatorID, item.ApplicationID, item.RoleID); err != nil {
+			if errors.Is(err, application.ErrForbidden) {
+				return ErrForbidden
+			}
+			return fmt.Errorf("verify template role delegation: %w", err)
 		}
 		if item.ScopeType == scopeEnvironment {
 			var envCount int64
@@ -1132,9 +1306,8 @@ func (s *Service) validateItems(ctx context.Context, tx *gorm.DB, tenantID strin
 	return nil
 }
 
-// validateTemplateRoleSet disallows the same application role from being entered twice even
-// when scopes differ. A role is an effective-role identity; scope is a restriction, not a
-// second independently assignable role. This prevents duplicate TEMPLATE bindings.
+// validateTemplateRoleSet 禁止同一应用角色重复出现，即使作用域不同：角色即有效角色
+// 身份，作用域只是约束而不是第二个可独立分配的角色。以此防止重复的 TEMPLATE 绑定。
 func validateTemplateRoleSet(items []TemplateRoleInput) error {
 	seen := map[string]struct{}{}
 	for _, item := range items {
@@ -1147,9 +1320,8 @@ func validateTemplateRoleSet(items []TemplateRoleInput) error {
 	return nil
 }
 
-// templateRoleKey is the canonical identity of a template role. Scope is part of the
-// persisted item identity, while validateTemplateRoleSet intentionally passes empty scope
-// to reject assigning the same application role more than once across scopes.
+// templateRoleKey 是模板角色的规范身份。作用域属于持久化条目身份的一部分；
+// validateTemplateRoleSet 有意传空作用域，以拒绝跨作用域重复分配同一应用角色。
 func templateRoleKey(applicationID, roleID, scopeType, scopeID string) string {
 	return applicationID + "\x00" + roleID + "\x00" + scopeType + "\x00" + scopeID
 }
@@ -1226,13 +1398,18 @@ func (s *Service) ensurePosition(ctx context.Context, tenantID, positionID strin
 	return nil
 }
 func (s *Service) ensureTemplate(ctx context.Context, tx *gorm.DB, tenantID, templateID string) error {
-	var count int64
-	err := tx.WithContext(ctx).Table("authz_position_grant_template").Where("tenant_id=? AND id=?", tenantID, templateID).Count(&count).Error
+	var status string
+	err := tx.WithContext(ctx).Table("authz_position_grant_template").Select("status").Where("tenant_id=? AND id=?", tenantID, templateID).Take(&status).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
 		return fmt.Errorf("check template: %w", err)
 	}
-	if count != 1 {
-		return ErrNotFound
+	// DRAFT 模板可保存编辑但物化为零绑定；放行分配会让任职用户永远命中不了模板
+	// 授权（表现为“分配成功却不生效”）。在分配入口直接拒绝，迫使其先启用模板。
+	if status != activeStatus {
+		return fmt.Errorf("%w: 模板未启用（当前 %s）；请先将模板启用为 ACTIVE 再分配岗位", ErrValidation, status)
 	}
 	return nil
 }
@@ -1250,6 +1427,9 @@ func normalizeTemplateInput(in *TemplateInput) error {
 	if in.Name == "" || len(in.Name) > 128 {
 		return validation("name is required")
 	}
+	if len([]rune(in.Description)) > 1000 {
+		return validation("description exceeds the length limit")
+	}
 	if in.Status != activeStatus && in.Status != disabledStatus && in.Status != templateStatusDraft {
 		return validation("status must be DRAFT, ACTIVE or DISABLED")
 	}
@@ -1265,6 +1445,9 @@ func normalizeTemplateInput(in *TemplateInput) error {
 		role.Status = strings.ToUpper(strings.TrimSpace(role.Status))
 		if role.ApplicationID == "" || role.RoleID == "" {
 			return validation("application_id and role_id are required")
+		}
+		if len(role.ApplicationID) > 128 || len(role.RoleID) > 128 || len(role.ScopeID) > 128 {
+			return validation("role identifiers exceed the length limit")
 		}
 		if role.ScopeType == "" {
 			role.ScopeType = scopeTenant

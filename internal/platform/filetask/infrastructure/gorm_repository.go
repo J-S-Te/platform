@@ -18,6 +18,7 @@ import (
 // 运行时不调用 AutoMigrate，表结构和状态约束只由编号 SQL 迁移维护。
 type Repository struct{ database *gorm.DB }
 
+// NewGORMRepository 校验数据库依赖非空后构造 filetask 仓储，缺失依赖时失败关闭。
 func NewGORMRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("filetask GORM database must not be nil")
@@ -103,6 +104,8 @@ type asyncJobModel struct {
 
 func (asyncJobModel) TableName() string { return "async_job" }
 
+// CreateWriting 在单事务创建 PENDING_UPLOAD 文件对象、首个版本与上传会话，
+// 建立文件生命周期起点。
 func (repository *Repository) CreateWriting(ctx context.Context, file domain.File, version domain.FileVersion) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		// 独立网关库不复制平台应用目录；应用身份已经由上游 Bearer
@@ -136,7 +139,16 @@ func (repository *Repository) ReserveUpload(ctx context.Context, file domain.Fil
 
 	created := domain.StoredFile{File: file, Version: version}
 	now := file.CreatedAt.UTC()
+	var guardFailure error
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		guard, guardErr := lockUploadRequest(transaction, file.TenantID, file.ApplicationID, requestID)
+		if guardErr != nil {
+			guardFailure = guardErr
+			return guardErr
+		}
+		if guard.Retired {
+			return errUploadRequestRetired
+		}
 		session := fileUploadSessionModel{
 			TenantID: file.TenantID, ApplicationID: file.ApplicationID, RequestID: requestID,
 			RequestHash: append([]byte(nil), version.UploadRequestHash...), Status: "WRITING",
@@ -166,6 +178,12 @@ func (repository *Repository) ReserveUpload(ctx context.Context, file domain.Fil
 	})
 	if err == nil {
 		return created, true, nil
+	}
+	if errors.Is(err, errUploadRequestRetired) {
+		return domain.StoredFile{}, false, application.ErrConflict
+	}
+	if guardFailure != nil {
+		return domain.StoredFile{}, false, mapError(guardFailure)
 	}
 
 	// 不依赖驱动专用的 duplicate-key 文本判断：只有确实存在同一业务唯一键的会话
@@ -284,6 +302,7 @@ func (repository *Repository) transitionValidationState(ctx context.Context, ten
 	})
 }
 
+// MarkFailed 把校验中的文件、当前版本与 WRITING 会话统一置为失败终态。
 func (repository *Repository) MarkFailed(ctx context.Context, tenantID, fileID string, updatedAt time.Time) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var object fileObjectModel
@@ -302,6 +321,7 @@ func (repository *Repository) MarkFailed(ctx context.Context, tenantID, fileID s
 	})
 }
 
+// GetAvailable 只返回文件与当前版本都处于可用状态的存储文件，兼容历史状态值。
 func (repository *Repository) GetAvailable(ctx context.Context, tenantID, fileID string) (domain.StoredFile, error) {
 	var object fileObjectModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ? AND status IN ?", tenantID, fileID, []string{domain.FileStatusReady, "AVAILABLE", "ACTIVE"}).Take(&object).Error; err != nil {
@@ -325,6 +345,9 @@ func (repository *Repository) CreateBinding(ctx context.Context, binding domain.
 		var object fileObjectModel
 		if err := transaction.Clauses(clause.Locking{Strength: "SHARE"}).Where("tenant_id = ? AND application_id = ? AND id = ? AND status = ?", binding.TenantID, binding.ApplicationID, binding.FileID, domain.FileStatusReady).Take(&object).Error; err != nil {
 			return mapError(err)
+		}
+		if err := rejectReleasedBinding(transaction, binding); err != nil {
+			return err
 		}
 		var existing fileBindingModel
 		err := transaction.Where("application_id = ? AND resource_type = ? AND resource_id = ? AND file_id = ? AND binding_type = ?", binding.ApplicationID, binding.ResourceType, binding.ResourceID, binding.FileID, binding.BindingType).Take(&existing).Error
@@ -394,13 +417,75 @@ func (repository *Repository) ListRecoveryCandidates(ctx context.Context, tenant
 	return items, nil
 }
 
-// ClaimExpiredUnbound 用 FOR UPDATE SKIP LOCKED 领取一条旧且无绑定的文件，再推进到 DELETING。
+// uploadV2SessionModel 映射 V2 上传会话表（HTTP 写入同一张表，字段与 upload_v2.go 对齐）。
+type uploadV2SessionModel struct {
+	ID, TenantID, ApplicationID string
+	ActorUserID                 *string
+	FileID, ResourceType        string
+	ResourceID, BindingType     string
+	DisplayName, OriginalName   string
+	Status                      string
+	CompletedAt                 *time.Time
+	FailureCode                 *string
+	UpdatedAt                   time.Time
+}
+
+func (uploadV2SessionModel) TableName() string { return "file_upload_v2_session" }
+
+// PendingUploadSession 返回与该文件关联、仍停留在 UPLOADING 的上传会话。
+func (repository *Repository) PendingUploadSession(ctx context.Context, tenantID, fileID string) (domain.UploadSessionRecovery, bool, error) {
+	var session uploadV2SessionModel
+	err := repository.database.WithContext(ctx).
+		Where("tenant_id = ? AND file_id = ? AND status = ?", tenantID, fileID, "UPLOADING").
+		Order("created_at ASC").Take(&session).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.UploadSessionRecovery{}, false, nil
+	}
+	if err != nil {
+		return domain.UploadSessionRecovery{}, false, mapError(err)
+	}
+	return domain.UploadSessionRecovery{
+		SessionID: session.ID, TenantID: session.TenantID, ApplicationID: session.ApplicationID,
+		ActorUserID: dereference(session.ActorUserID), FileID: session.FileID,
+		ResourceType: session.ResourceType, ResourceID: session.ResourceID, BindingType: session.BindingType,
+		DisplayName: session.DisplayName, OriginalName: session.OriginalName,
+	}, true, nil
+}
+
+// MarkUploadSession 把仍处于 UPLOADING 的会话收敛到终态；已终结的会话不被覆盖。
+func (repository *Repository) MarkUploadSession(ctx context.Context, tenantID, sessionID, status, failureCode string, completedAt time.Time) error {
+	updates := map[string]any{"status": status, "updated_at": completedAt.UTC()}
+	if status == "READY" {
+		updates["completed_at"] = completedAt.UTC()
+		updates["failure_code"] = nil
+	}
+	if failureCode != "" {
+		updates["failure_code"] = failureCode
+	}
+	result := repository.database.WithContext(ctx).Model(&uploadV2SessionModel{}).
+		Where("id = ? AND tenant_id = ? AND status = ?", sessionID, tenantID, "UPLOADING").Updates(updates)
+	if result.Error != nil {
+		return mapError(result.Error)
+	}
+	// 0 行表示会话已被 HTTP 路径或其他恢复实例终结：幂等成功，不视为冲突。
+	return nil
+}
+
+// ClaimExpiredUnbound 用 FOR UPDATE SKIP LOCKED 领取一条可清理文件，再推进到 DELETING。
+// 可清理 = 保留类别为 TEMPORARY、保留期已到（retention_until <= retentionElapsedAt）、创建时间早于
+// createdBefore、当前版本可清理、且没有活动业务绑定；只按"文件较旧"删除会误删长期与未到期文件。
 // 慢速磁盘删除在短事务提交后执行，因此多个清理实例不会互相等待，也不会同时删除同一文件。
-func (repository *Repository) ClaimExpiredUnbound(ctx context.Context, tenantID string, cutoff time.Time) (domain.StoredFile, bool, error) {
+func (repository *Repository) ClaimExpiredUnbound(ctx context.Context, tenantID string, createdBefore, retentionElapsedAt time.Time) (domain.StoredFile, bool, error) {
 	var result domain.StoredFile
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var object fileObjectModel
-		err := transaction.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("tenant_id = ? AND status IN ? AND created_at < ? AND current_version_id IS NOT NULL", tenantID, []string{domain.FileStatusReady, "AVAILABLE", "ACTIVE"}, cutoff.UTC()).Where("NOT EXISTS (SELECT 1 FROM file_binding binding WHERE binding.file_id = file_object.id AND binding.status = ?)", "ACTIVE").Order("created_at ASC, id ASC").Take(&object).Error
+		err := transaction.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("tenant_id = ? AND status IN ? AND current_version_id IS NOT NULL", tenantID, []string{domain.FileStatusReady, "AVAILABLE", "ACTIVE"}).
+			Where("retention_class = ?", domain.RetentionClassTemporary).
+			Where("retention_until IS NOT NULL AND retention_until <= ?", retentionElapsedAt.UTC()).
+			Where("created_at < ?", createdBefore.UTC()).
+			Where("NOT EXISTS (SELECT 1 FROM file_binding binding WHERE binding.file_id = file_object.id AND binding.status = ?)", "ACTIVE").
+			Order("retention_until ASC, created_at ASC, id ASC").Take(&object).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
@@ -418,6 +503,8 @@ func (repository *Repository) ClaimExpiredUnbound(ctx context.Context, tenantID 
 		if update.RowsAffected != 1 {
 			return application.ErrConflict
 		}
+		// 领取后数据库版本已 +1；返回值必须携带领取后的版本，后续完成/释放才能做版本条件更新。
+		object.Version++
 		result = domain.StoredFile{File: toFile(object), Version: toVersion(version)}
 		return nil
 	})
@@ -427,18 +514,53 @@ func (repository *Repository) ClaimExpiredUnbound(ctx context.Context, tenantID 
 	return result, result.File.ID != "", nil
 }
 
-func (repository *Repository) MarkDeleted(ctx context.Context, tenantID, fileID string, updatedAt time.Time) error {
+// ListStaleDeleting 有界读取停留在 DELETING 且超过截止时间未推进的遗留记录（按租户），
+// 供受控对账检查保留策略、物理文件与数据库状态后逐条处理；不做批量重置。
+func (repository *Repository) ListStaleDeleting(ctx context.Context, tenantID string, updatedBefore time.Time, limit int) ([]domain.StoredFile, error) {
+	if limit <= 0 {
+		return nil, application.ErrValidation
+	}
+	var objects []fileObjectModel
+	if err := repository.database.WithContext(ctx).
+		Where("tenant_id = ? AND status = ? AND updated_at < ?", tenantID, domain.FileStatusDeleting, updatedBefore.UTC()).
+		Order("updated_at ASC, id ASC").Limit(limit).Find(&objects).Error; err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]domain.StoredFile, 0, len(objects))
+	for _, object := range objects {
+		stored := domain.StoredFile{File: toFile(object)}
+		if object.CurrentVersionID != nil {
+			var version fileVersionModel
+			if err := repository.database.WithContext(ctx).Where("id = ? AND file_id = ?", *object.CurrentVersionID, object.ID).Take(&version).Error; err != nil {
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, mapError(err)
+				}
+			} else {
+				stored.Version = toVersion(version)
+			}
+		}
+		result = append(result, stored)
+	}
+	return result, nil
+}
+
+// MarkDeleted 仅在领取版本未变化时把文件推进到 DELETED；版本不符返回冲突，交给对账处理。
+func (repository *Repository) MarkDeleted(ctx context.Context, tenantID, fileID string, expectedVersion uint64, updatedAt time.Time) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var object fileObjectModel
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ? AND status = ?", tenantID, fileID, domain.FileStatusDeleting).Take(&object).Error; err != nil {
 			return mapError(err)
+		}
+		// 行存在但版本已被并发写入推进：明确返回冲突，而不是伪装成"资源不存在"。
+		if object.Version != expectedVersion {
+			return application.ErrConflict
 		}
 		if object.CurrentVersionID != nil {
 			if err := transaction.Model(&fileVersionModel{}).Where("id = ? AND file_id = ?", *object.CurrentVersionID, fileID).Updates(map[string]any{"status": domain.FileVersionStatusRemoved}).Error; err != nil {
 				return mapError(err)
 			}
 		}
-		update := transaction.Model(&fileObjectModel{}).Where("tenant_id = ? AND id = ? AND status = ?", tenantID, fileID, domain.FileStatusDeleting).Updates(map[string]any{"status": domain.FileStatusDeleted, "updated_at": updatedAt.UTC(), "version": gorm.Expr("version + 1")})
+		update := transaction.Model(&fileObjectModel{}).Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", tenantID, fileID, domain.FileStatusDeleting, expectedVersion).Updates(map[string]any{"status": domain.FileStatusDeleted, "updated_at": updatedAt.UTC(), "version": gorm.Expr("version + 1")})
 		if update.Error != nil {
 			return mapError(update.Error)
 		}
@@ -449,20 +571,32 @@ func (repository *Repository) MarkDeleted(ctx context.Context, tenantID, fileID 
 	})
 }
 
-func (repository *Repository) ReleaseCleanupClaim(ctx context.Context, tenantID, fileID, restoreStatus string, updatedAt time.Time) error {
+// ReleaseCleanupClaim 在领取版本未变化时把 DELETING 释放回可下载状态（磁盘删除失败的安全回退路径）。
+func (repository *Repository) ReleaseCleanupClaim(ctx context.Context, tenantID, fileID, restoreStatus string, expectedVersion uint64, updatedAt time.Time) error {
 	if restoreStatus != domain.FileStatusReady && restoreStatus != "AVAILABLE" && restoreStatus != "ACTIVE" {
 		restoreStatus = domain.FileStatusReady
 	}
-	update := repository.database.WithContext(ctx).Model(&fileObjectModel{}).Where("tenant_id = ? AND id = ? AND status = ?", tenantID, fileID, domain.FileStatusDeleting).Updates(map[string]any{"status": restoreStatus, "updated_at": updatedAt.UTC(), "version": gorm.Expr("version + 1")})
-	if update.Error != nil {
-		return mapError(update.Error)
-	}
-	if update.RowsAffected != 1 {
-		return application.ErrConflict
-	}
-	return nil
+	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var object fileObjectModel
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ? AND status = ?", tenantID, fileID, domain.FileStatusDeleting).Take(&object).Error; err != nil {
+			return mapError(err)
+		}
+		if object.Version != expectedVersion {
+			return application.ErrConflict
+		}
+		update := transaction.Model(&fileObjectModel{}).Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", tenantID, fileID, domain.FileStatusDeleting, expectedVersion).Updates(map[string]any{"status": restoreStatus, "updated_at": updatedAt.UTC(), "version": gorm.Expr("version + 1")})
+		if update.Error != nil {
+			return mapError(update.Error)
+		}
+		if update.RowsAffected != 1 {
+			return application.ErrConflict
+		}
+		return nil
+	})
 }
 
+// CreateJob 创建任务；带幂等键时冲突返回原任务，但请求哈希不一致时按冲突拒绝，
+// 防止同键不同载荷被静默吞掉。
 func (repository *Repository) CreateJob(ctx context.Context, job domain.Job) (domain.Job, error) {
 	model := toJobModel(job)
 	if job.IdempotencyKey == "" {
@@ -495,6 +629,7 @@ func (repository *Repository) CreateJob(ctx context.Context, job domain.Job) (do
 	return toJob(existing), nil
 }
 
+// ListJobs 分页返回租户内任务，支持状态、类型、应用与关键字过滤，并附父任务号。
 func (repository *Repository) ListJobs(ctx context.Context, tenantID string, query domain.PageRequest) (domain.PageResult[domain.Job], error) {
 	database := repository.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ?", tenantID)
 	if query.Status != "" {
@@ -528,6 +663,7 @@ func (repository *Repository) ListJobs(ctx context.Context, tenantID string, que
 	return domain.PageResult[domain.Job]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// GetJob 按公开 ID 返回单个任务详情，附带父任务公开 ID。
 func (repository *Repository) GetJob(ctx context.Context, tenantID, jobID string) (domain.Job, error) {
 	var model asyncJobModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND public_id = ?", tenantID, jobID).Take(&model).Error; err != nil {
@@ -540,13 +676,15 @@ func (repository *Repository) GetJob(ctx context.Context, tenantID, jobID string
 	return jobs[0], nil
 }
 
+// ClaimJob 以 SKIP LOCKED 事务先回收失联 worker 的陈旧 RUNNING 任务，再认领一个
+// 到期 PENDING 任务并写入租约；数据库锁不跨 worker 业务处理。
 func (repository *Repository) ClaimJob(ctx context.Context, workerID string, allowedTypes []string, now, staleBefore time.Time) (domain.Job, bool, error) {
 	// PENDING 到期任务和锁已过期的 RUNNING 任务都可被领取；行锁只覆盖选择与状态更新，
 	// worker 的耗时业务处理不占用数据库锁。
 	var claimed domain.Job
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		// A stale worker cannot retain a job forever. Existing audit exports use the same recovery
-		// approach; generic workers only requeue the types that they were explicitly registered for.
+		// 失联 worker 不能永久占用任务。既有审计导出采用同一恢复方式；通用 worker
+		// 只回队列自己显式注册过的任务类型。
 		if err := transaction.Model(&asyncJobModel{}).Where("job_type IN ? AND status = ? AND locked_at < ?", allowedTypes, domain.JobStatusRunning, staleBefore.UTC()).Updates(map[string]any{"status": domain.JobStatusPending, "locked_by": nil, "locked_at": nil, "retry_count": gorm.Expr("retry_count + 1")}).Error; err != nil {
 			return err
 		}
@@ -578,6 +716,7 @@ func (repository *Repository) ClaimJob(ctx context.Context, workerID string, all
 	return claimed, claimed.PublicID != "", nil
 }
 
+// CompleteJob 只允许租约持有者完成 RUNNING 任务，防止过期 worker 覆盖新持有者的进度。
 func (repository *Repository) CompleteJob(ctx context.Context, job domain.Job, completedAt time.Time) error {
 	// 完成操作同时核对 worker lease。旧 Worker 即使在租约过期后恢复，也不能覆盖已经
 	// 被新 Worker 领取并执行的同一任务。
@@ -591,6 +730,8 @@ func (repository *Repository) CompleteJob(ctx context.Context, job domain.Job, c
 	return nil
 }
 
+// FailJob 按可重试性与剩余次数分流：不可重试进 DEAD，次数耗尽进 FAILED，
+// 否则按退避时间退回 PENDING；全部转换都核对租约持有者。
 func (repository *Repository) FailJob(ctx context.Context, job domain.Job, code, message string, retryable bool, retryAt, now time.Time) error {
 	// 状态转换同时核对 locked_by，过期 worker 不能覆盖新持有者已经推进的任务状态。
 	updates := map[string]any{"locked_by": nil, "locked_at": nil, "last_error_code": optional(code), "last_error_message": optional(message)}
@@ -615,6 +756,7 @@ func (repository *Repository) FailJob(ctx context.Context, job domain.Job, code,
 	return nil
 }
 
+// CancelJob 只允许取消 PENDING/FAILED/DEAD 任务，RUNNING 任务须先等租约失效。
 func (repository *Repository) CancelJob(ctx context.Context, tenantID, jobID string, now time.Time) error {
 	result := repository.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND status IN ?", tenantID, jobID, []string{domain.JobStatusPending, domain.JobStatusFailed, domain.JobStatusDead}).Updates(map[string]any{"status": domain.JobStatusCancelled, "completed_at": now.UTC(), "locked_by": nil, "locked_at": nil})
 	if result.Error != nil {
@@ -626,6 +768,7 @@ func (repository *Repository) CancelJob(ctx context.Context, tenantID, jobID str
 	return nil
 }
 
+// RetryJob 把 FAILED/DEAD 任务重置回 PENDING 并清零尝试计数，保留重试谱系。
 func (repository *Repository) RetryJob(ctx context.Context, tenantID, jobID string, now time.Time) error {
 	result := repository.database.WithContext(ctx).Model(&asyncJobModel{}).Where("tenant_id = ? AND public_id = ? AND status IN ?", tenantID, jobID, []string{domain.JobStatusFailed, domain.JobStatusDead}).Updates(map[string]any{"status": domain.JobStatusPending, "available_at": now.UTC(), "locked_by": nil, "locked_at": nil, "attempts": 0, "retry_count": gorm.Expr("retry_count + 1"), "completed_at": nil, "last_error_code": nil, "last_error_message": nil})
 	if result.Error != nil {
@@ -637,6 +780,7 @@ func (repository *Repository) RetryJob(ctx context.Context, tenantID, jobID stri
 	return nil
 }
 
+// CreateRerun 复用 CreateJob 持久化重跑任务；重跑谱系由 parent_job_id 维护。
 func (repository *Repository) CreateRerun(ctx context.Context, job domain.Job) (domain.Job, error) {
 	return repository.CreateJob(ctx, job)
 }

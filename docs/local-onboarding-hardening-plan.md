@@ -1,6 +1,6 @@
-# 子系统接入可靠化改造方案（完整版）
+# 子系统接入可靠化改造方案（2026-09-12 历史设计）
 
-> 状态：**方案已定稿，尚未实施**（本文只描述方案，不含任何代码改动）
+> 状态：保留 2026-09-12 定稿方案及当时的实测记录；“尚未实施”只描述当时状态，不代表当前代码。2026-10-22 已从源码确认统一接入持久操作（000122）、`subsystem.sh connect`、本地 status/dev-up、候选镜像/固定预检等入口存在，但本文的 doctor/reconcile/reset 设计不能直接当作可执行现行命令。当前步骤见[接入手册](subsystem-onboarding.md)和[本地 Runbook](local-dev-license-runbook.md)，本次未重跑历史实测。
 > 更新日期：2026-09-12
 > 适用对象：本地开发与联调人员、平台部署脚本维护者、架构评审、**后期服务器部署**
 > 关联文档：[子系统开发与统一身份接入手册](./subsystem-onboarding.md)、[本地 Docker 与脚本使用说明](./local-docker-operations.md)、[生产环境 CI/CD 部署](../deploy/production/README.md)

@@ -20,7 +20,7 @@ func TestResolveProductionOIDCBackchannelUsesTrustedProviderOnly(t *testing.T) {
 	for _, test := range []struct{ provider, want string }{
 		{"platform", "http://platform-api:8080"}, {"keycloak", "http://keycloak:8080"},
 	} {
-		// Deliberately misleading issuer paths must never choose the backchannel.
+		// 刻意误导的签发者路径绝不能影响后通道选择。
 		for _, issuer := range []string{"https://browser.example/realms/fake", "https://public.example", "http://untrusted:8080"} {
 			value, err := resolveProductionBinding(application.SubsystemProvisioningInput{AuthenticationProvider: test.provider, Issuer: issuer}, "oidc_backchannel_base_url")
 			if err != nil || value != test.want {
@@ -447,8 +447,8 @@ func TestProductionComposeSubsystemProvisionerWritesManagedSecretsAndRunsOnlyFix
 		t.Fatal("repeat runtime write rotated the generated key")
 	}
 
-	// Preflight performs Docker and Compose validation. Provision then performs exactly the
-	// dependency, migration and contract API operations; no browser value becomes an argument.
+	// Preflight 执行 Docker 和 Compose 校验，随后 Provision 严格执行
+	// 依赖、迁移和合同 API 操作；浏览器输入不会成为命令参数。
 	if len(runner.calls) != 8 {
 		t.Fatalf("runner calls = %d, want 8: %#v", len(runner.calls), runner.calls)
 	}
@@ -1073,8 +1073,8 @@ compose:
 	return provisioner, contractPath
 }
 
-// Existing command-order tests record deployment effects separately from the
-// read-only scope query. Scope rejection is exercised explicitly below.
+// 现有命令顺序测试将部署影响与
+// 只读范围查询分开记录；范围拒绝由下方专门验证。
 type productionScopeFixtureRunner struct {
 	wrapped    subsystemCommandRunner
 	services   string
@@ -1395,5 +1395,77 @@ func TestProductionComposeAvailableCapabilitiesFollowPreparedReleaseImages(t *te
 	}
 	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"customer_and_opportunity", "contract_management"}) {
 		t.Fatalf("updated available application codes = %#v", capabilities.SupportedApplicationCodes)
+	}
+}
+
+func TestProductionComposeReleaseIntegrityCheckBlocksBeforeRuntimeWrites(t *testing.T) {
+	provisioner, _, runtimePath := productionProvisionerFixture(t)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	expected := "sha256:" + strings.Repeat("e", 64)
+	target.config.ReleaseIntegrityCheck = func(_ context.Context, root, requested string) error {
+		called = true
+		if root != target.config.DeployRoot {
+			t.Fatalf("release integrity root = %q, want %q", root, target.config.DeployRoot)
+		}
+		if requested != expected {
+			t.Fatalf("release integrity requested digest = %q, want %q", requested, expected)
+		}
+		return errors.New("release integrity rejected")
+	}
+	input := productionContractInput("https://platform.example.com")
+	input.ReleaseDigest = expected
+	err = provisioner.Provision(context.Background(), input)
+	if err == nil || !strings.Contains(err.Error(), "release integrity verification failed") {
+		t.Fatalf("expected release integrity failure, got %v", err)
+	}
+	if !called {
+		t.Fatal("release integrity hook was not called")
+	}
+	after, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("runtime configuration was written despite release integrity failure")
+	}
+}
+
+func TestProductionComposeCapabilitiesAdvertiseReleaseIntegrity(t *testing.T) {
+	if got := releaseIntegrityCapability(nil); got != "" {
+		t.Fatalf("nil checker advertised %q", got)
+	}
+	if got := releaseIntegrityCapability(func(context.Context, string, string) error { return nil }); got != "release-integrity-v1" {
+		t.Fatalf("configured checker advertised %q", got)
+	}
+	provisioner, _, _ := productionProvisionerFixture(t)
+	if got := provisioner.Capabilities().ReleaseIntegrity; got != "" {
+		t.Fatalf("fixture without a checker advertised %q", got)
+	}
+}
+
+func TestProductionComposeRuntimeProjectionRunsBeforeAndAfterDeploy(t *testing.T) {
+	provisioner, _, _ := productionProvisionerFixture(t)
+	target, err := provisioner.target(testProductionApplicationCode, testProductionEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	target.config.RuntimeProjectionCheck = func(context.Context) error {
+		calls++
+		return nil
+	}
+	if err := provisioner.Provision(context.Background(), productionContractInput("https://platform.example.com")); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("runtime projection calls = %d, want pre+post = 2", calls)
 	}
 }

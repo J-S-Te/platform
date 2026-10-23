@@ -161,13 +161,13 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	machine := func(spec ServiceSpec) context.Context {
 		return appctx.WithPrincipal(ctx, appctx.Principal{OAuthClientID: "database-pk-" + spec.ServiceID, ClientID: spec.OAuthClientID, TenantID: "tenant", ApplicationID: "application", ApplicationCode: spec.Application, EnvironmentID: "environment", EnvironmentCode: spec.Environment, Scopes: map[string]struct{}{"license.runtime": {}}})
 	}
-	if !errors.Is(s.Ready(ctx, spec.ServiceID, ReadyInput{1, spec.CoverageDigest, spec.ImageDigest}), ErrForbidden) {
+	if !errors.Is(s.Ready(ctx, spec.ServiceID, ReadyInput{1, spec.CoverageDigest, spec.ImageDigest, 0}), ErrForbidden) {
 		t.Fatal("unauthenticated readiness")
 	}
-	if !errors.Is(s.Ready(machine(worker), spec.ServiceID, ReadyInput{1, spec.CoverageDigest, spec.ImageDigest}), ErrForbidden) {
+	if !errors.Is(s.Ready(machine(worker), spec.ServiceID, ReadyInput{1, spec.CoverageDigest, spec.ImageDigest, 0}), ErrForbidden) {
 		t.Fatal("cross client ready")
 	}
-	if e = s.Ready(machine(spec), spec.ServiceID, ReadyInput{1, spec.CoverageDigest, spec.ImageDigest}); e != nil {
+	if e = s.Ready(machine(spec), spec.ServiceID, ReadyInput{1, spec.CoverageDigest, spec.ImageDigest, 0}); e != nil {
 		t.Fatal(e)
 	}
 	if !errors.Is(s.BeginActivation(ctx, spec.Application, status.Revision, actor), ErrNotReady) {
@@ -187,7 +187,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = s.Ready(machine(worker), worker.ServiceID, ReadyInput{1, worker.CoverageDigest, worker.ImageDigest}); e != nil {
+	if e = s.Ready(machine(worker), worker.ServiceID, ReadyInput{1, worker.CoverageDigest, worker.ImageDigest, 0}); e != nil {
 		t.Fatal(e)
 	}
 	if e = db.Model(&Member{}).Where("service_id = ?", worker.ServiceID).Update("ready_at", now.Add(-61*time.Second)).Error; e != nil {
@@ -196,7 +196,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if !errors.Is(s.BeginActivation(ctx, spec.Application, status.Revision, actor), ErrNotReady) {
 		t.Fatal("stale readiness accepted")
 	}
-	if e = s.Ready(machine(worker), worker.ServiceID, ReadyInput{1, worker.CoverageDigest, worker.ImageDigest}); e != nil {
+	if e = s.Ready(machine(worker), worker.ServiceID, ReadyInput{1, worker.CoverageDigest, worker.ImageDigest, 0}); e != nil {
 		t.Fatal(e)
 	}
 	status, e = s.Status(ctx, spec.Application)
@@ -253,8 +253,8 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if e != nil || newStatus.MigrationEligible {
 		t.Fatal("new app inherited legacy", e)
 	}
-	// APP_ENV and OAuth application environments are distinct configuration
-	// fields in the real deployment (production versus prod).
+	// 真实部署中，APP_ENV 与 OAuth 应用环境属于不同
+	// 配置字段，分别使用 production 与 prod。
 	bound, e := NewService(db, lic, keys, testSigner{spriv, spub, keys}, func() time.Time { return now }, WithApplicationEnvironment("prod"))
 	if e != nil {
 		t.Fatal(e)
@@ -267,7 +267,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if e = bound.Register(ctx, profileSpec); e != nil {
 		t.Fatal("profile registration", e)
 	}
-	if e = bound.Ready(machine(profileSpec), profileSpec.ServiceID, ReadyInput{runtime.Protocol, profileSpec.CoverageDigest, profileSpec.ImageDigest}); e != nil {
+	if e = bound.Ready(machine(profileSpec), profileSpec.ServiceID, ReadyInput{runtime.Protocol, profileSpec.CoverageDigest, profileSpec.ImageDigest, 0}); e != nil {
 		t.Fatal("profile machine binding", e)
 	}
 	profileSnapshot, e := bound.Snapshot(machine(profileSpec), profileSpec.ServiceID)
@@ -280,11 +280,11 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	}
 	wrongEnvironment := profileSpec
 	wrongEnvironment.Environment = "production"
-	if !errors.Is(bound.Ready(machine(wrongEnvironment), profileSpec.ServiceID, ReadyInput{runtime.Protocol, profileSpec.CoverageDigest, profileSpec.ImageDigest}), ErrForbidden) {
+	if !errors.Is(bound.Ready(machine(wrongEnvironment), profileSpec.ServiceID, ReadyInput{runtime.Protocol, profileSpec.CoverageDigest, profileSpec.ImageDigest, 0}), ErrForbidden) {
 		t.Fatal("wrong OAuth environment accepted")
 	}
-	// A reviewed release explicitly replaces API identity and retires the
-	// optional Worker. Neither operation may restore migration compatibility.
+	// 已审核的发布会明确替换 API 身份并退役
+	// 可选 Worker；这两项操作均不能恢复迁移兼容模式。
 	oldSpec := spec
 	replacement := spec
 	replacement.OAuthClientID = "coord-client-api-v2"
@@ -357,7 +357,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if !errors.Is(s.ReconcileComponents(ctx, stale, actor), ErrConflict) {
 		t.Fatal("stale lifecycle accepted")
 	}
-	if !errors.Is(s.Ready(machine(oldSpec), oldSpec.ServiceID, ReadyInput{1, oldSpec.CoverageDigest, oldSpec.ImageDigest}), ErrForbidden) {
+	if !errors.Is(s.Ready(machine(oldSpec), oldSpec.ServiceID, ReadyInput{1, oldSpec.CoverageDigest, oldSpec.ImageDigest, 0}), ErrForbidden) {
 		t.Fatal("old client remained authorized")
 	}
 	if _, err := s.Snapshot(machine(worker), worker.ServiceID); !errors.Is(err, ErrForbidden) {
@@ -370,7 +370,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if !errors.Is(s.Ack(machine(replacement), replacement.ServiceID, AckInput{snapshot.Revision, snapshot.Digest}), ErrConflict) {
 		t.Fatal("previous acknowledgement inherited")
 	}
-	if e = s.Ready(machine(replacement), replacement.ServiceID, ReadyInput{1, replacement.CoverageDigest, replacement.ImageDigest}); e != nil {
+	if e = s.Ready(machine(replacement), replacement.ServiceID, ReadyInput{1, replacement.CoverageDigest, replacement.ImageDigest, 0}); e != nil {
 		t.Fatal(e)
 	}
 	currentSnapshot, err := s.Snapshot(machine(replacement), replacement.ServiceID)
@@ -384,8 +384,8 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if e != nil || status.State != runtime.Enforced {
 		t.Fatal("replacement did not finish fresh ACK", e)
 	}
-	// Recreate the coordinator to exercise persisted idempotence and permanent
-	// old-client rejection, not in-memory process state.
+	// 重新创建协调器，以验证持久化幂等及对旧客户端的永久
+	// 拒绝，不依赖进程内存状态。
 	s, e = NewService(db, lic, keys, testSigner{spriv, spub, keys}, func() time.Time { return now }, WithLifecycleApprovalVerifier(approval))
 	if e != nil {
 		t.Fatal(e)
@@ -423,7 +423,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 		}
 	}
 	for _, memberSpec := range []ServiceSpec{replacement, restored} {
-		if e = s.Ready(machine(memberSpec), memberSpec.ServiceID, ReadyInput{1, memberSpec.CoverageDigest, memberSpec.ImageDigest}); e != nil {
+		if e = s.Ready(machine(memberSpec), memberSpec.ServiceID, ReadyInput{1, memberSpec.CoverageDigest, memberSpec.ImageDigest, 0}); e != nil {
 			t.Fatal(e)
 		}
 		snap, err := s.Snapshot(machine(memberSpec), memberSpec.ServiceID)
@@ -438,8 +438,8 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if e != nil || status.State != runtime.Enforced {
 		t.Fatal("restore did not require complete fresh confirmation", e)
 	}
-	// An ENFORCED row alone must not report a new license as applied. First
-	// establish ACKs for the enforced snapshot, then renew without any polling.
+	// 单有 ENFORCED 行不能将新许可证报告为已应用。先为
+	// 强制快照建立 ACK，再在不轮询的情况下续期。
 	for _, memberSpec := range []ServiceSpec{replacement, restored} {
 		snap, err := s.Snapshot(machine(memberSpec), memberSpec.ServiceID)
 		if err != nil {
@@ -449,9 +449,9 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A partial image upgrade must work with an unchanged consumer's durable
-	// ENFORCED state. Exercise the actual signed snapshot/file-runtime boundary,
-	// rather than ACKing a payload the real consumer would reject as a rollback.
+	// 部分镜像升级必须兼容未变更消费者的持久化
+	// ENFORCED 状态。此处验证真实签名快照与文件运行时边界，
+	// 不能直接确认真实消费者会判定为回滚并拒绝的载荷。
 	workerRuntime, err := runtime.NewFileRuntime(filepath.Join(t.TempDir(), "worker-state.json"), runtime.Binding{InstanceID: state.InstanceID, Environment: restored.Environment, Application: restored.Application, ServiceID: restored.ServiceID}, map[string]ed25519.PublicKey{"test-platform": spub}, keys)
 	if err != nil {
 		t.Fatal(err)
@@ -490,7 +490,7 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 		t.Fatal("unchanged worker old ACK accepted")
 	}
 	for _, memberSpec := range []ServiceSpec{upgraded, restored} {
-		if err = s.Ready(machine(memberSpec), memberSpec.ServiceID, ReadyInput{1, memberSpec.CoverageDigest, memberSpec.ImageDigest}); err != nil {
+		if err = s.Ready(machine(memberSpec), memberSpec.ServiceID, ReadyInput{1, memberSpec.CoverageDigest, memberSpec.ImageDigest, 0}); err != nil {
 			t.Fatal(err)
 		}
 		snap, snapshotErr := s.Snapshot(machine(memberSpec), memberSpec.ServiceID)
@@ -555,8 +555,8 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if _, e = s.Snapshot(machine(spec), spec.ServiceID); !errors.Is(e, domain.ErrCorrupt) {
 		t.Fatal("tampered cached signature accepted", e)
 	}
-	// Rebuild only this isolated fixture's inventory to verify platform-only
-	// installation evidence and non-legacy enrollment after the empty freeze.
+	// 仅重建此隔离夹具的清单，以验证空冻结之后仅包含平台的
+	// 安装证据，以及非旧版接入流程。
 	for _, query := range []struct {
 		model any
 		where string

@@ -41,13 +41,13 @@ type OperationalModules struct {
 	RuntimeLicenses     *licensehttp.RuntimeHandler
 	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
 	SubsystemOnboarding *applicationregistryhttp.SubsystemOnboardingHandler
-	// KeycloakIntegration is deliberately separate from the application
-	// directory. It owns only provider synchronization and issuer cutover; it
-	// does not expose or create browser-visible OAuth client secrets.
+	// SubsystemAccess 是六个子系统共用的统一接入向导（预览/提交/查询/恢复）。
+	SubsystemAccess *applicationregistryhttp.SubsystemAccessHandler
+	// KeycloakIntegration 有意与应用目录分离：只负责身份提供方同步与 Issuer 切换，
+	// 不暴露也不创建浏览器可见的 OAuth client secret。
 	KeycloakIntegration *applicationregistryhttp.KeycloakIntegrationHandler
-	// BrokerHandler and DeploymentStatusHandler make the two read/verify
-	// boundaries explicit. During migration they may point to the legacy
-	// onboarding adapter, but the router no longer requires that concrete type.
+	// BrokerHandler 与 DeploymentStatusHandler 把“读取/校验”两条边界显式化。
+	// 迁移期二者可指向旧接入适配器，但路由不再依赖该具体类型。
 	BrokerHandler            applicationregistryhttp.BrokerHTTPHandler
 	DeploymentStatusHandler  applicationregistryhttp.DeploymentStatusHTTPHandler
 	SubsystemServiceRoutes   *applicationregistryhttp.SubsystemServiceRouteHandler
@@ -59,8 +59,8 @@ type OperationalModules struct {
 	PersonnelChanges         *identityhttp.PersonnelChangeHandler
 	AuthorizationOverview    *identityhttp.AuthorizationOverviewHandler
 	TenantAuthorizationClone *tenantclonehttp.Handler
-	// AccessApplier is the optional deployment agent used by the management-console
-	// "对外访问" apply action. Production/remote deployments leave it nil.
+	// AccessApplier 是管理控制台“对外访问”应用动作的可选部署执行器；
+	// 生产/远程部署保持 nil，不得在服务端隐式执行基础设施变更。
 	AccessApplier settingsapplication.AccessApplier
 }
 
@@ -141,8 +141,8 @@ func NewRouter(
 		router.GET("/oauth2/logout", middleware.RequireSameOriginNavigation(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 		router.POST("/oauth2/logout", middleware.RequireSameOrigin(cfg.Auth.OIDCIssuer), adaptHandler(oidcHandler.Logout))
 	} else if applicationTokenHandler != nil {
-		// Retain the existing machine-to-machine endpoint for deployments that have not yet
-		// configured the complete OIDC dependency graph.
+		// 尚未配置完整 OIDC 依赖图的部署保留既有机器对机器令牌端点，
+		// 使存量子系统接入不因迁移中断。
 		router.POST("/oauth2/token", middleware.FixedWindowRateLimit(60, time.Minute), adaptHandler(applicationTokenHandler.IssueToken))
 	}
 
@@ -181,9 +181,8 @@ func NewRouter(
 		protected.GET("/me", adaptHandler(authHandler.Me))
 	}
 
-	// This is intentionally a one-route Keycloak JWT boundary. Do not add it to
-	// the console session group: accepting a Keycloak bearer elsewhere would
-	// silently expand the platform authentication surface.
+	// 有意只建这一条 Keycloak JWT 路由边界。不得并入控制台会话路由组：
+	// 在别处接受 Keycloak bearer 会悄然扩大平台认证面。
 	if operational.SubsystemOnboarding != nil && cfg.Keycloak.Enabled {
 		realmPath := "/realms/" + strings.TrimSpace(cfg.Keycloak.Realm)
 		issuer := strings.TrimRight(cfg.Keycloak.PublicURL, "/") + realmPath
@@ -199,9 +198,8 @@ func NewRouter(
 			brokerHandler = operational.SubsystemOnboarding
 		}
 		brokerVerificationRouter.POST("/broker-login-verifications", adaptHandler(brokerHandler.VerifyKeycloakBrokerLogin))
-		// The new endpoint is the Keycloak authentication-integration boundary.
-		// Keep /api/v1/keycloak/... above for an existing Keycloak broker callback
-		// client while all new callers use this explicit namespace.
+		// 新端点是 Keycloak 认证集成边界。上方 /api/v1/keycloak/... 仅为兼容既有
+		// broker 回调客户端而保留，新调用方一律使用这一显式命名空间。
 		if operational.KeycloakIntegration != nil {
 			integrationBrokerRouter := router.Group("/api/v1/keycloak-integration")
 			integrationBrokerRouter.Use(middleware.RequireSafeWriteContentType(), middleware.KeycloakBrokerAuthentication(verifier))
@@ -227,6 +225,7 @@ func NewRouter(
 		if operational.Licenses != nil {
 			licenses := apiRouter.Group("/licenses")
 			licenses.GET("/status", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Status))
+			licenses.GET("/artifact", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Artifact))
 			licenses.GET("/request", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Request))
 			licenses.GET("/events", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.Licenses.Events))
 			licenses.POST("/initialize", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.Licenses.Initialize))
@@ -249,6 +248,7 @@ func NewRouter(
 			apiRouter.GET("/personnel-changes/:change_id/preview", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.Preview))
 			apiRouter.GET("/personnel-changes/:change_id/handover-items", middleware.RequirePermission("platform:user:read"), adaptHandler(operational.PersonnelChanges.ListHandoverItems))
 			apiRouter.POST("/personnel-changes/:change_id/handover-items/:item_id/complete", middleware.RequirePermission("platform:user:update"), middleware.RequirePermission("platform:approval:process"), adaptHandler(operational.PersonnelChanges.CompleteHandoverItem))
+			apiRouter.POST("/personnel-changes/:change_id/handover/retry", middleware.RequirePermission("platform:user:update"), middleware.RequirePermission("platform:approval:process"), adaptHandler(operational.PersonnelChanges.RetryHandover))
 		}
 
 		if managementHandler != nil {
@@ -300,6 +300,14 @@ func NewRouter(
 			)
 		}
 
+		if operational.SubsystemAccess != nil {
+			// 统一入口：路由级只要求只读权限，动作级权限（首次接入/接管/更新/恢复）由处理器按服务端判定的动作检查。
+			apiRouter.POST("/subsystem-access/preview", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.Preview))
+			apiRouter.POST("/subsystem-access/operations", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.Submit))
+			apiRouter.GET("/subsystem-access/operations", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.FindByTarget))
+			apiRouter.GET("/subsystem-access/operations/:operation_id", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.Get))
+			apiRouter.POST("/subsystem-access/operations/:operation_id/resume", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.Resume))
+		}
 		if operational.SubsystemOnboarding != nil {
 			apiRouter.GET("/portal/applications", adaptHandler(operational.SubsystemOnboarding.ListPortalApplications))
 			apiRouter.GET("/subsystem-capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemOnboarding.GetSubsystemCapabilities))
@@ -316,9 +324,8 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.AdoptSubsystem),
 			)
-			// V2 directory registration deliberately stops before any OIDC Client,
-			// credential or deployment mutation. Keycloak owns client lifecycle via
-			// the dedicated keycloak-integration endpoints.
+			// V2 目录注册有意止步于任何 OIDC Client、凭据或部署变更之前：
+			// client 生命周期由专用 keycloak-integration 端点管理。
 			apiRouter.POST("/subsystem-directory",
 				middleware.RequirePermission("platform:application:create"),
 				middleware.RequirePermission("platform:application-environment:create"),
@@ -333,13 +340,11 @@ func NewRouter(
 				middleware.RequirePermission("platform:role-binding:update"),
 				adaptHandler(operational.SubsystemOnboarding.OnboardSubsystem),
 			)
-			// Reapply a previously-onboarded subsystem: rewrite .env.local, rebuild containers,
-			// refresh the portal gateway include. Caller is expected to have already updated
-			// /environments and /oauth-clients via PATCH if BaseURL/UpstreamURL/PathPrefix changed.
-			// Use oauth-client:disable (not :update) because the platform's permission catalog
-			// only has granular update permissions (scope/redirect-uri/jwk), no generic :update.
-			// Re-provisioning effectively re-issues the running OAuth client binding, so :disable
-			// is the closest existing permission.
+			// 重新落地已接入的子系统：重写 .env.local、重建容器、刷新门户网关 include。
+			// 若 BaseURL/UpstreamURL/PathPrefix 变化，调用方应已通过 PATCH /environments
+			// 与 /oauth-clients 更新数据。选用 oauth-client:disable（而非 :update）是因为
+			// 权限目录对该资源只有细粒度更新权限（scope/redirect-uri/jwk），没有通用
+			// :update；重新供给等同于重发运行中的 OAuth client 绑定，:disable 是最接近的现存权限。
 			apiRouter.POST("/subsystem-update",
 				middleware.RequirePermission("platform:application:update"),
 				middleware.RequirePermission("platform:application-environment:update"),
@@ -352,8 +357,8 @@ func NewRouter(
 				middleware.RequirePermission("platform:application-environment:update"),
 				adaptHandler(operational.SubsystemOnboarding.SyncKeycloakClient),
 			)
-			// Retry uses the same safe reapply path as update, but records RETRY in the durable
-			// deployment state so operators can distinguish a recovery from a routine reapply.
+			// 重试与 update 走同一条安全重放路径，但在持久化部署状态中记录 RETRY，
+			// 让运维能区分一次故障恢复与例行的重新落地。
 			apiRouter.POST("/subsystem-retry",
 				middleware.RequirePermission("platform:application:update"),
 				middleware.RequirePermission("platform:application-environment:update"),
@@ -362,13 +367,11 @@ func NewRouter(
 				middleware.RequirePermission("platform:role-binding:update"),
 				adaptHandler(operational.SubsystemOnboarding.UpdateSubsystem),
 			)
-			// Tear down an onboarded subsystem: stop containers, remove .env.local, remove
-			// the portal gateway include, reload nginx. The HTTP layer does NOT delete the DB
-			// rows here; the script is expected to follow up with DELETE /environments and
-			// (optionally) DELETE /applications so the audit trail is preserved per step.
-			// Use lifecycle-update permissions, not :delete, because this endpoint mutates
-			// infrastructure state (containers/files/gateway), not DB rows. The DB delete is
-			// gated by the regular DELETE /environments endpoint's own :delete permission.
+			// 拆除已接入子系统：停容器、删 .env.local、移除门户网关 include 并重载 nginx。
+			// HTTP 层不删数据库行：脚本应随后调用 DELETE /environments（必要时再调
+			// DELETE /applications），使审计线索按步骤完整保留。选用生命周期更新权限
+			// 而非 :delete，因为本端点变更的是基础设施状态（容器/文件/网关）而非数据库行；
+			// 数据库删除由常规 DELETE /environments 端点自身的 :delete 权限把关。
 			apiRouter.POST("/subsystem-teardown",
 				middleware.RequirePermission("platform:application:update"),
 				middleware.RequirePermission("platform:application-environment:update"),
@@ -376,10 +379,9 @@ func NewRouter(
 				middleware.RequirePermission("platform:oauth-client:disable"),
 				adaptHandler(operational.SubsystemOnboarding.TeardownSubsystem),
 			)
-			// Discard a deployment stuck in PROVISION_FAILED: best-effort infrastructure
-			// cleanup plus deletion of the durable lifecycle record so the code+environment
-			// pair can be re-onboarded. Follow up with DELETE /applications and
-			// /environments to release the path prefix.
+			// 丢弃卡在 PROVISION_FAILED 的部署：尽力清理基础设施并删除持久化生命周期记录，
+			// 使 code+environment 组合可重新接入。需随后调用 DELETE /applications 与
+			// /environments 释放路径前缀。
 			apiRouter.POST("/subsystem-deployment-discard",
 				middleware.RequirePermission("platform:application:update"),
 				middleware.RequirePermission("platform:application-environment:update"),
@@ -389,18 +391,15 @@ func NewRouter(
 			)
 		}
 		if operational.KeycloakIntegration != nil {
-			// Authentication-provider operations have their own namespace. The
-			// application directory continues to own application/environment data,
-			// role catalogs and final authorization assignments only.
+			// 认证提供方操作使用独立命名空间：应用目录继续只负责应用/环境数据、
+			// 角色目录与最终授权分配，不再承担身份提供方职责。
 			keycloakIntegrationRouter := apiRouter.Group("/keycloak-integration")
 			keycloakIntegrationRouter.GET("/capabilities", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Capabilities))
 			keycloakIntegrationRouter.GET("/status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.Status))
 			keycloakIntegrationRouter.GET("/health-dashboard", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.HealthDashboard))
 			keycloakIntegrationRouter.GET("/sync-status", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.SyncStatus))
-			// FAILED authorization projections are a high-risk cutover blocker.
-			// Reading them follows application visibility; replay additionally needs
-			// role-binding update authority because it causes platform authorization
-			// facts to be projected back into a Keycloak Client.
+			// FAILED 投影是切换期高危阻塞点。读取遵循应用可见性；重放额外要求
+			// role-binding 更新权限，因为它会把平台授权事实回写进 Keycloak Client。
 			keycloakIntegrationRouter.GET("/projection-failures", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.ListProjectionFailures))
 			keycloakIntegrationRouter.GET("/projection-alerts", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.KeycloakIntegration.ProjectionAlerts))
 			keycloakIntegrationRouter.POST("/projection-failures/:event_id/replay", middleware.RequirePermission("platform:application:update"), middleware.RequirePermission("platform:application-environment:update"), middleware.RequirePermission("platform:role-binding:update"), adaptHandler(operational.KeycloakIntegration.ReplayProjectionFailure))
@@ -475,6 +474,7 @@ func NewRouter(
 			auditQueryRateLimit := middleware.FixedWindowRateLimit(60, time.Minute)
 			apiRouter.GET("/audit/events", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.ListEvents))
 			apiRouter.GET("/audit/events/:event_id", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.GetEvent))
+			apiRouter.GET("/audit/ingestion-health", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.IngestionHealth))
 			apiRouter.POST("/audit/export-jobs", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.CreateExportJob))
 			apiRouter.GET("/audit/export-jobs/:job_id", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.GetExportJob))
 			apiRouter.GET("/audit/export-jobs/:job_id/download", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.DownloadExport))
@@ -568,17 +568,15 @@ func NewRouter(
 		}
 	}
 
-	// Application authorization catalogs support both the platform console session and an
-	// application-owned OAuth client credential. The handler enforces the matching console
-	// permission/ownership or the target application's catalog scope.
+	// 应用授权目录同时支持平台控制台会话与应用自有的 OAuth client 凭据两种主体；
+	// handler 负责按主体校验对应的控制台权限/归属，或目标应用的目录级 scope。
 	if applicationAccessHandler != nil && authHandler != nil {
 		catalogRouter := router.Group("/api/v1")
 		if applicationAuthenticator != nil {
 			catalogRouter.Use(middleware.RequireAllowedOriginForUnsafeMethodsOrBearer(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType(), middleware.ConsoleOrApplicationAuthentication(authHandler, authHandler.CookieName(), applicationAuthenticator))
 		} else {
-			// Keep console catalog management available in reduced/test deployments that do not
-			// construct the application bearer authenticator. Full deployments additionally expose
-			// the application-owned credential path above.
+			// 未装配应用 bearer 认证器的精简/测试部署仍保留控制台目录管理能力；
+			// 完整部署额外开放上文的应用自有凭据路径。
 			catalogRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType(), middleware.Authentication(authHandler, authHandler.CookieName()))
 		}
 		if auditRecorder != nil {
@@ -595,22 +593,21 @@ func NewRouter(
 		runtimeRouter.GET("/:service_id/snapshot", adaptHandler(operational.RuntimeLicenses.Snapshot))
 		runtimeRouter.POST("/:service_id/ack", adaptHandler(operational.RuntimeLicenses.Ack))
 	}
-	// Integration audit ingestion has a separate bearer-token boundary. Console user roles do
-	// not grant an external business system permission to submit audit events.
+	// 集成侧审计上报使用独立的 bearer-token 边界：控制台用户角色不授予外部业务系统
+	// 提交审计事件的权限。
 	if applicationAuthenticator != nil && (auditHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil) {
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
 		if auditHandler != nil {
-			// This is a credential-free preflight for a subsystem's audit publisher.
-			// It deliberately shares the exact bearer-token and audit.ingest boundary
-			// with event ingestion, while making no Keycloak or audit-data mutation.
+			// 子系统审计发布方的免凭据预检：与事件上报共用完全相同的 bearer-token
+			// 与 audit.ingest 边界，但不触发任何 Keycloak 或审计数据变更。
 			integrationRouter.GET("/audit/ingest/validate", middleware.RequireApplicationScope("audit.ingest"), adaptHandler(auditHandler.ValidateIngestion))
 			integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
 			integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
 		}
 		if operational.Notifications != nil {
-			// External systems only submit durable event envelopes. Delivery expansion is
-			// performed asynchronously by the worker, and this scope is distinct from audit.
+			// 外部系统只提交持久化事件信封；投递展开由 worker 异步完成，
+			// 该 scope 与审计上报相互独立。
 			integrationRouter.POST("/notifications/events", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.Ingest))
 			integrationRouter.POST("/notifications/events/batch", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.IngestBatch))
 			integrationRouter.GET("/notifications/events/receipts/:receipt_id", middleware.RequireApplicationScope("notification.ingest"), adaptHandler(operational.Notifications.GetIngestionReceipt))

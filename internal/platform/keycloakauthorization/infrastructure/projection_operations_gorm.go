@@ -12,11 +12,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// ProjectionOperationsStore is the read/recovery adapter for durable FAILED
-// outbox records.  It intentionally uses the existing outbox schema: no retry
-// payload is copied, and all state transitions remain on the original event.
+// ProjectionOperationsStore 是持久化 FAILED outbox 记录的读取/恢复适配器。
+// 刻意复用既有 outbox 表结构：不复制任何重试载荷，全部状态转移都发生在原事件上。
 type ProjectionOperationsStore struct{ database *gorm.DB }
 
+// NewProjectionOperationsStore 构造运维存储；database 为空时返回错误。
 func NewProjectionOperationsStore(database *gorm.DB) (*ProjectionOperationsStore, error) {
 	if database == nil {
 		return nil, errors.New("Keycloak projection operations database must not be nil")
@@ -32,6 +32,8 @@ type failedProjectionRow struct {
 	ErrorCode, ErrorMessage                           string
 }
 
+// ListFailedProjections 返回租户内 FAILED 投影死信的分页视图；无环境的事件不
+// 阻塞切换门禁，因此 BlocksCutover 按是否存在 environment_id 判定。
 func (store *ProjectionOperationsStore) ListFailedProjections(ctx context.Context, tenantID string, query projectionapplication.FailurePageRequest) (projectionapplication.FailurePageResult, error) {
 	base := store.failedQuery(ctx, tenantID, query)
 	var total int64
@@ -58,6 +60,8 @@ outbox.completed_at AS failed_at, COALESCE(outbox.last_error_code, '') AS error_
 	return projectionapplication.FailurePageResult{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
+// GetProjectionAlertStatus 聚合租户内 FAILED 死信数量、受影响环境数与最早失败时间，
+// 归一化为无敏感信息的告警状态。
 func (store *ProjectionOperationsStore) GetProjectionAlertStatus(ctx context.Context, tenantID string) (projectionapplication.AlertStatus, error) {
 	var aggregate struct {
 		FailedCount              int64      `gorm:"column:failed_count"`
@@ -80,6 +84,8 @@ func (store *ProjectionOperationsStore) GetProjectionAlertStatus(ctx context.Con
 	}, nil
 }
 
+// ReplayFailedProjection 在行锁下执行 FAILED -> PENDING 的条件转移并清零尝试计数；
+// 事件已处于 PENDING/RUNNING 时按幂等成功处理，绝不重置已被领取的事件。
 func (store *ProjectionOperationsStore) ReplayFailedProjection(ctx context.Context, input projectionapplication.ReplayInput, availableAt time.Time) (projectionapplication.ReplayResult, error) {
 	result := projectionapplication.ReplayResult{EventID: input.EventID}
 	err := store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -108,9 +114,8 @@ func (store *ProjectionOperationsStore) ReplayFailedProjection(ctx context.Conte
 			result.Replayed, result.AvailableAt = true, availableAt.UTC()
 			return nil
 		case "PENDING", "RUNNING":
-			// A second request must not reset the attempt counter or move a row
-			// already claimed by another worker. This makes browser/network retry
-			// safe without an additional idempotency table.
+			// 第二次请求不得重置尝试计数，也不得移动已被其他 worker 领取的行。
+			// 这使浏览器/网络重试天然安全，无需额外的幂等表。
 			result.AlreadyPending = true
 			return nil
 		default:

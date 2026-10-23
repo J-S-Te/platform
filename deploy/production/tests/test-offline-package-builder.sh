@@ -7,10 +7,8 @@ fixture="$(mktemp -d "${TMPDIR:-/tmp}/offline-package-builder-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/tools" "$fixture/output"
 
-# macOS still ships Bash 3.2. Under `set -u`, an unbraced variable followed
-# immediately by multibyte Chinese punctuation can be parsed as a longer,
-# unset identifier. Keep this message braced because the local-image reuse
-# branch is part of the supported macOS cross-build path.
+# macOS 仍随附 Bash 3.2。在 set -u 下，未加花括号的变量若紧跟多字节中文标点，可能被解析为更长且未设置的标识符。此消息须保留花括号，
+# 因为本地镜像复用分支属于受支持的 macOS 交叉构建路径。
 grep -Fq '复用本地镜像（${image_platform}）：${image}' "$builder" || {
   echo 'local image reuse message is not safe under macOS Bash 3.2 nounset parsing' >&2
   exit 1
@@ -143,9 +141,7 @@ if find "$fixture" -type f \( -name '.build-info.*' -o -name '.build-info-check.
   exit 1
 fi
 
-# Only the trusted verifier process is replaced in this shell integration
-# fixture. Its cryptographic behavior is covered by license-package Go tests;
-# this checks transport, preflight ordering and per-customer output isolation.
+# 此 Shell 集成夹具仅替换可信验证器进程；加密行为由 license-package Go 测试覆盖。这里检查传输、预检顺序和按客户隔离输出。
 cat > "$fixture/tools/go" <<'STUB'
 #!/usr/bin/env bash
 set -Eeuo pipefail

@@ -1,4 +1,4 @@
-// Package middleware contains transport-level HTTP middleware shared by all modules.
+// Package middleware 提供所有模块共用的传输层 HTTP 中间件。
 package middleware
 
 import (
@@ -29,14 +29,14 @@ const defaultPlatformAuditEnvironmentCode = "dev"
 // 旧行为（write-through）并告警，避免异常大的响应长期占用内存。
 const maxPlatformAuditBufferedResponseBytes = 64 << 10
 
-// AuditSource identifies the configured application environment for server-generated events.
+// AuditSource 标识服务端自行生成审计事件时使用的应用环境配置。
 type AuditSource struct {
 	ApplicationCode string
 	EnvironmentCode string
 }
 
-// AuditRecorder is the narrow audit application contract used by HTTP middleware. Keeping this
-// interface at the transport boundary prevents the router from depending on persistence details.
+// AuditRecorder 是 HTTP 中间件使用的审计应用层窄契约。把接口留在传输边界，
+// 路由装配就不必依赖持久化细节。
 type AuditRecorder interface {
 	Ingest(context.Context, string, auditapplication.EventInput) (auditdomain.Receipt, error)
 }
@@ -106,18 +106,28 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			statusCode = http.StatusOK
 		}
 		now := time.Now().UTC()
-		requestSourceIP := RequestClientIP(context.Request)
-		sourceIP := loginIP(principal.LoginIP)
-		if sourceIP == "" {
-			sourceIP = requestSourceIP
+		// 统一审计来源协议：登录地址取会话创建时固定的来源，操作地址每次请求重新解析。
+		// 两者分别落库，不能再像旧实现那样用其中一个替代另一个——否则同一会话换网络后
+		// 审计里看不出"登录在哪、这次操作在哪"。
+		clientIP := RequestClientIP(context.Request)
+		loginIPValue := loginIP(principal.LoginIP)
+		ipSource := "TRUSTED_PROXY"
+		if requestctx.ClientIP(context.Request.Context()) == "" {
+			// 没有经过可信代理链（直连或测试适配器）：地址来自连接本身。
+			ipSource = "DIRECT"
+		}
+		if clientIP == "" && loginIPValue == "" {
+			ipSource = "UNKNOWN"
 		}
 		metadata := map[string]any{
 			"method":      context.Request.Method,
 			"path":        route,
 			"status_code": statusCode,
 		}
-		if requestSourceIP != "" && requestSourceIP != sourceIP {
-			metadata["request_source_ip"] = requestSourceIP
+		if loginIPValue != "" && clientIP != "" && clientIP != loginIPValue {
+			// 历史字段：只在“登录后换了网络”时保留差异线索，供旧版审计页读取；
+			// 登录地址缺失时操作地址已经写进 ClientIP，不再重复写入元数据。
+			metadata["request_source_ip"] = clientIP
 		}
 		// 安全审查 SEC-D5：优先采用业务处理器登记的目标对象 id（体寻址创建没有路径
 		// *_id），同时落入 metadata，满足审计“操作者+目标”的可检索要求。
@@ -147,8 +157,12 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			Classification:  "INTERNAL",
 			Summary:         auditSummary(context.Request.Method, route, statusCode),
 			Metadata:        metadata,
-			SourceIP:        sourceIP,
-			UserAgent:       context.Request.UserAgent(),
+			LoginIP:         loginIPValue,
+			ClientIP:        clientIP,
+			IPSource:        ipSource,
+			// SourceIP 是旧协议兼容列：保持历史语义（登录地址优先，其次操作地址）。
+			SourceIP:  legacySourceIP(loginIPValue, clientIP),
+			UserAgent: context.Request.UserAgent(),
 		}
 		if _, err := recorder.Ingest(context.Request.Context(), principal.Tenant.ID, input); err != nil {
 			logger.Error("write platform audit event", "error", err, "request_id", input.RequestID, "path", route)
@@ -166,6 +180,15 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 	}
 }
 
+// legacySourceIP 返回旧协议兼容列的值：登录地址优先，其次操作地址。
+// 新代码应读取 LoginIP / ClientIP，该函数只服务于尚未升级的消费方。
+func legacySourceIP(loginIPValue, clientIP string) string {
+	if loginIPValue != "" {
+		return loginIPValue
+	}
+	return clientIP
+}
+
 // platformAuditRequired 判定是否处于审计必开模式：PLATFORM_AUDIT_REQUIRED 显式设置优先，
 // 否则 APP_ENV=production 默认必开。平台配置键为 APP_ENV（internal/shared/config 的
 // Environment），与子系统 data_analysis/contract/PM 的 SEC-D4b 判定保持同一语义。
@@ -178,9 +201,8 @@ func platformAuditRequired() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
 }
 
-// loginIP returns only a normalized IP literal from the server-verified session
-// principal. It never falls back to a request header; that remains the transport
-// middleware's responsibility.
+// loginIP 只返回服务端已验证的会话主体中的规范化 IP 字面量，绝不回退到请求头；
+// 从请求解析来源始终是传输中间件的职责。
 func loginIP(value net.IP) string {
 	if value == nil {
 		return ""

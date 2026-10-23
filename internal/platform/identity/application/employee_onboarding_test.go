@@ -164,10 +164,10 @@ func TestManagementServiceCreateEmployeesBatchDefaultsToPositionAuthorizationInh
 		t.Fatalf("construct management service: %v", err)
 	}
 
-	// Leaving application_roles empty means the user's effective application roles must
-	// come from the selected position's authorization template. The onboarding write only
-	// needs to preserve that source by enabling membership inheritance; the authorization
-	// query later resolves POSITION/TEMPLATE bindings dynamically.
+	// application_roles 为空表示用户的有效应用角色必须
+	// 来自所选岗位的授权模板。入职写入只需通过启用成员关系继承
+	// 来保留该来源；授权查询随后会动态解析
+	// POSITION/TEMPLATE 绑定。
 	views, err := service.CreateEmployeesBatch(context.Background(), EmployeeBatchCreateInput{
 		TenantID: "tenant-1", OperatorID: "operator-1",
 		Items: []EmployeeCreateInput{{
@@ -180,8 +180,11 @@ func TestManagementServiceCreateEmployeesBatchDefaultsToPositionAuthorizationInh
 	if err != nil {
 		t.Fatalf("CreateEmployeesBatch: %v", err)
 	}
-	if !repository.called || len(repository.writes) != 1 || len(views) != 1 {
-		t.Fatalf("batch write/views = called:%t writes:%d views:%d, want true/1/1", repository.called, len(repository.writes), len(views))
+	if !repository.called || len(repository.writes) != 1 || len(views.Users) != 1 {
+		t.Fatalf("batch write/views = called:%t writes:%d views:%d, want true/1/1", repository.called, len(repository.writes), len(views.Users))
+	}
+	if len(views.InitialCredentials) != 1 || views.InitialCredentials[0].AccountName == "" || len(views.InitialCredentials[0].InitialPassword) < 12 {
+		t.Fatalf("initial credentials = %#v, want one deliverable per-account password", views.InitialCredentials)
 	}
 	write := repository.writes[0]
 	if write.Membership == nil || write.Membership.InheritAuthorization == nil || !*write.Membership.InheritAuthorization {
@@ -222,5 +225,23 @@ func TestManagementServiceCreateEmployeesBatchPreservesExplicitInheritanceOptOut
 	}
 	if repository.writes[0].Membership == nil || repository.writes[0].Membership.InheritAuthorization == nil || *repository.writes[0].Membership.InheritAuthorization {
 		t.Fatalf("membership inheritance = %#v, want explicit opt-out preserved", repository.writes[0].Membership)
+	}
+}
+
+func TestImportedEmployeeInitialPasswordIsUniqueAndPolicyCompliant(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]struct{}, 200)
+	for i := 0; i < 200; i++ {
+		password, err := importedEmployeeInitialPassword()
+		if err != nil {
+			t.Fatalf("generate password: %v", err)
+		}
+		if validateStrongPassword(password) != nil {
+			t.Fatalf("password %q violates the strong password policy", password)
+		}
+		if _, duplicate := seen[password]; duplicate {
+			t.Fatalf("password generator repeated a value after %d draws", i)
+		}
+		seen[password] = struct{}{}
 	}
 }

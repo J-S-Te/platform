@@ -6,9 +6,8 @@ import (
 	licenseevidence "github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
 )
 
-// Deployment runtimes and license consumers are different inventories. Only
-// the reviewed upstream BI engine is proxy-controlled infrastructure; it still
-// requires immutable installation evidence and must never become an exclusion.
+// 部署运行时与许可消费者是两份不同清点。只有受审的上游 BI 引擎属于代理管制的
+// 基础设施；它仍需要不可变的安装证据，且绝不能成为排除项。
 func runtimeLicenseConsumerServices(profile productionSubsystemProfile) ([]string, error) {
 	result := []string{}
 	for _, name := range profile.Manifest.Compose.RuntimeServices {

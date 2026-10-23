@@ -22,6 +22,7 @@ const archiveMediaType = "application/x-ndjson+gzip"
 // 不把宿主机绝对路径暴露为归档元数据；底层目录若可能被不可信进程替换，仍需文件系统权限隔离。
 type ArchiveWriter struct{ storageRoot string }
 
+// NewArchiveWriter 校验并规范化归档存储根目录；为空时失败关闭。
 func NewArchiveWriter(storageRoot string) (*ArchiveWriter, error) {
 	storageRoot = strings.TrimSpace(storageRoot)
 	if storageRoot == "" {
@@ -30,6 +31,8 @@ func NewArchiveWriter(storageRoot string) (*ArchiveWriter, error) {
 	return &ArchiveWriter{storageRoot: storageRoot}, nil
 }
 
+// WriteArchive 把事件流式写入 gzip NDJSON 临时文件，校验路径边界后原子改名发布，
+// 返回含相对路径与 SHA-256 的归档元数据。
 func (writer *ArchiveWriter) WriteArchive(ctx context.Context, task domain.RetentionTask, events []domain.Event, now time.Time) (domain.Archive, error) {
 	if strings.TrimSpace(task.ArchiveID) == "" || strings.TrimSpace(task.TenantID) == "" || strings.TrimSpace(task.ApplicationID) == "" {
 		return domain.Archive{}, errors.New("archive task identity is required")

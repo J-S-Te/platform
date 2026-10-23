@@ -1,4 +1,4 @@
-// Package http contains net/http adapters that are mounted through the platform Gin router.
+// Package http 包含经平台 Gin 路由挂载的 net/http 适配层。
 package http
 
 import (
@@ -36,14 +36,15 @@ type oauthClientManagementService interface {
 	DisableOAuthClientSecret(context.Context, application.OAuthClientSecretDisableInput) error
 }
 
-// OAuthClientManagementHandler exposes OAuth client-management use cases through HTTP.
-// Router and authorization policy registration are intentionally owned by the composition layer.
+// OAuthClientManagementHandler 经 HTTP 暴露 OAuth 客户端管理用例。
+// 路由与授权策略登记刻意归组合层持有，本适配层不自行挂载。
 type OAuthClientManagementHandler struct {
 	service oauthClientManagementService
 	logger  *slog.Logger
 }
 
-// NewOAuthClientManagementHandler constructs an OAuth client-management HTTP adapter.
+// NewOAuthClientManagementHandler 构造 OAuth 客户端管理 HTTP 适配器；
+// service 缺失即拒绝构造，logger 缺失时回退到默认日志器。
 func NewOAuthClientManagementHandler(service oauthClientManagementService, logger *slog.Logger) (*OAuthClientManagementHandler, error) {
 	if service == nil {
 		return nil, errors.New("oauth client management service is required")
@@ -54,7 +55,7 @@ func NewOAuthClientManagementHandler(service oauthClientManagementService, logge
 	return &OAuthClientManagementHandler{service: service, logger: logger}, nil
 }
 
-// ListOAuthClients handles GET /api/v1/oauth-clients.
+// ListOAuthClients 处理 GET /api/v1/oauth-clients，租户取自认证主体。
 func (handler *OAuthClientManagementHandler) ListOAuthClients(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" || strings.TrimSpace(principal.User.ID) == "" {
@@ -70,7 +71,7 @@ func (handler *OAuthClientManagementHandler) ListOAuthClients(writer stdhttp.Res
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "OAuth 客户端查询成功", toOAuthClientResponses(clients))
 }
 
-// CreateOAuthClient handles POST /api/v1/oauth-clients.
+// CreateOAuthClient 处理 POST /api/v1/oauth-clients；仅在响应体一次性返回初始 Secret。
 func (handler *OAuthClientManagementHandler) CreateOAuthClient(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" || strings.TrimSpace(principal.User.ID) == "" {
@@ -118,7 +119,7 @@ func (handler *OAuthClientManagementHandler) CreateOAuthClient(writer stdhttp.Re
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusCreated, "OAuth 客户端已创建", response)
 }
 
-// GetOAuthClient handles GET /api/v1/oauth-clients/:oauth_client_id.
+// GetOAuthClient 处理 GET /api/v1/oauth-clients/:oauth_client_id。
 func (handler *OAuthClientManagementHandler) GetOAuthClient(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok || strings.TrimSpace(principal.Tenant.ID) == "" || strings.TrimSpace(principal.User.ID) == "" {
@@ -139,7 +140,8 @@ func (handler *OAuthClientManagementHandler) GetOAuthClient(writer stdhttp.Respo
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "OAuth 客户端查询成功", toOAuthClientResponse(client))
 }
 
-// UpdateOAuthClientScopes handles PUT /api/v1/oauth-clients/:oauth_client_id/scopes.
+// UpdateOAuthClientScopes 处理 PUT /api/v1/oauth-clients/:oauth_client_id/scopes，
+// 请求体需携带乐观锁版本，冲突返回 409。
 func (handler *OAuthClientManagementHandler) UpdateOAuthClientScopes(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -165,7 +167,8 @@ func (handler *OAuthClientManagementHandler) UpdateOAuthClientScopes(writer stdh
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "OAuth 客户端 Scope 已更新", toOAuthClientResponse(client))
 }
 
-// UpdateOAuthClientRedirectURIs handles PUT /api/v1/oauth-clients/:oauth_client_id/redirect-uris.
+// UpdateOAuthClientRedirectURIs 处理 PUT /api/v1/oauth-clients/:oauth_client_id/redirect-uris，
+// 整体替换回调地址集合。
 func (handler *OAuthClientManagementHandler) UpdateOAuthClientRedirectURIs(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -282,7 +285,8 @@ func (handler *OAuthClientManagementHandler) UpdateOAuthClientJWKs(writer stdhtt
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "OAuth 客户端公钥已更新", toOAuthClientJWKsResponse(view))
 }
 
-// DisableOAuthClient handles POST /api/v1/oauth-clients/:oauth_client_id/disable.
+// DisableOAuthClient 处理 POST /api/v1/oauth-clients/:oauth_client_id/disable，
+// 同时吊销该客户端全部 ACTIVE Secret。
 func (handler *OAuthClientManagementHandler) DisableOAuthClient(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -307,7 +311,8 @@ func (handler *OAuthClientManagementHandler) DisableOAuthClient(writer stdhttp.R
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "OAuth 客户端已禁用", toOAuthClientResponse(client))
 }
 
-// CreateCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials.
+// CreateCredential 处理 POST /api/v1/oauth-clients/:oauth_client_id/credentials，
+// 新 Secret 仅随本响应一次性下发。
 func (handler *OAuthClientManagementHandler) CreateCredential(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -332,7 +337,8 @@ func (handler *OAuthClientManagementHandler) CreateCredential(writer stdhttp.Res
 	})
 }
 
-// DisableCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials/:credential_id/disable.
+// DisableCredential 处理 POST /api/v1/oauth-clients/:oauth_client_id/credentials/:credential_id/disable，
+// 立即吊销单个 Secret 版本。
 func (handler *OAuthClientManagementHandler) DisableCredential(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -352,7 +358,8 @@ func (handler *OAuthClientManagementHandler) DisableCredential(writer stdhttp.Re
 	writer.WriteHeader(stdhttp.StatusNoContent)
 }
 
-// RotateCredential handles POST /api/v1/oauth-clients/:oauth_client_id/credentials/rotate.
+// RotateCredential 处理 POST /api/v1/oauth-clients/:oauth_client_id/credentials/rotate，
+// 旧密钥仅在限定的重叠窗口内保持有效。
 func (handler *OAuthClientManagementHandler) RotateCredential(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, clientID, ok := handler.oauthClientPrincipalAndID(writer, request)
 	if !ok {
@@ -400,7 +407,7 @@ func (handler *OAuthClientManagementHandler) writeOAuthClientManagementError(wri
 	case errors.Is(err, application.ErrManagementConflict):
 		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.Conflict)
 	default:
-		// Do not record the error value: service errors can originate from secret operations.
+		// 不记录错误值：服务层错误可能源自 Secret 操作，其文本不得进入日志。
 		handler.logger.Error("oauth client management request failed", "path", request.URL.Path)
 		httpresponse.WriteError(writer, request, stdhttp.StatusInternalServerError, httperror.Internal)
 	}
@@ -513,8 +520,8 @@ type oauthClientJWKResponse struct {
 	Status     string          `json:"status"`
 }
 
-// oauthClientResponse defines the external API projection explicitly. Application-layer views
-// intentionally have no JSON tags because they are shared by non-HTTP adapters.
+// oauthClientResponse 显式定义对外 API 投影。应用层视图刻意不带 JSON 标签，
+// 因为它们还要被非 HTTP 适配层复用。
 type oauthClientResponse struct {
 	OAuthClientID          string                          `json:"oauth_client_id"`
 	ApplicationID          string                          `json:"application_id"`
@@ -536,8 +543,8 @@ type oauthClientResponse struct {
 	UpdatedAt              time.Time                       `json:"updated_at"`
 }
 
-// oauthClientCredentialResponse contains credential metadata only. Neither the secret plaintext
-// nor its bcrypt hash may be returned by read or mutation endpoints.
+// oauthClientCredentialResponse 仅含凭据元数据；Secret 明文与 bcrypt 哈希
+// 均不得经读取或变更端点返回。
 type oauthClientCredentialResponse struct {
 	CredentialID string     `json:"credential_id"`
 	Fingerprint  string     `json:"fingerprint"`

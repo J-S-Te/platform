@@ -3,20 +3,20 @@ package domain
 import "time"
 
 const (
-	// StatusActive marks an entity as available for normal use.
+	// StatusActive 表示实体可正常使用。
 	StatusActive = "ACTIVE"
-	// StatusDisabled marks an entity as retained but unavailable for new operations.
+	// StatusDisabled 表示实体保留但不可用于新操作。
 	StatusDisabled = "DISABLED"
-	// AccountStatusLocked is maintained by the authentication module while a password account is locked.
+	// AccountStatusLocked 由认证模块在密码账号锁定期间维护。
 	AccountStatusLocked = "LOCKED"
-	// MembershipPrimary identifies a user's primary organizational appointment.
+	// MembershipPrimary 标识用户的主组织任职。
 	MembershipPrimary = "PRIMARY"
-	// MembershipSecondary identifies a non-primary organizational appointment.
+	// MembershipSecondary 标识用户的非主组织任职。
 	MembershipSecondary = "SECONDARY"
 )
 
-// User is a natural person within one tenant. MobileCiphertext is deliberately never returned by
-// the HTTP adapter; it is only used by the application service to build a masked DTO.
+// User 是单个租户内的自然人。MobileCiphertext 绝不由 HTTP 适配器返回；
+// 仅由应用服务用于构造脱敏 DTO。
 type User struct {
 	ID               string
 	TenantID         string
@@ -32,21 +32,19 @@ type User struct {
 	UpdatedAt        time.Time
 }
 
-// Account is a login subject associated with a user where applicable.
+// Account 是与用户（如有关联）绑定的登录主体。
 type Account struct {
 	ID       string
 	TenantID string
 	UserID   *string
-	// User is the display reference for the linked natural person. UserID remains
-	// available for compatibility and write operations, while management reads use
-	// this reference to avoid forcing every client to issue one request per account.
+	// User 是关联自然人的展示引用。UserID 仍保留用于兼容与写操作；管理侧
+	// 读取使用该引用，避免客户端为每个账号单独发一次请求。
 	User        *ReferenceName
 	AccountName string
 	AccountType string
 	AuthSource  string
-	// PasswordInitialized is management metadata only; no credential hash or failure state is
-	// exposed. It lets administrators distinguish a credential-free reserved external account
-	// from an account whose password may be reset.
+	// PasswordInitialized 仅为管理元数据：不暴露凭据哈希或失败状态。它让管理员
+	// 能区分"无凭据的预留外部账号"与"可重置密码的账号"。
 	PasswordInitialized bool
 	Status              string
 	LastLoginAt         *time.Time
@@ -56,7 +54,7 @@ type Account struct {
 	UpdatedAt           time.Time
 }
 
-// OrgUnit represents one node in a tenant-scoped organization tree.
+// OrgUnit 表示租户内组织树中的一个节点。
 type OrgUnit struct {
 	ID        string
 	TenantID  string
@@ -71,7 +69,7 @@ type OrgUnit struct {
 	Version   uint64
 }
 
-// Position belongs to exactly one organization unit.
+// Position 只隶属一个组织单元。
 type Position struct {
 	ID        string
 	TenantID  string
@@ -82,7 +80,7 @@ type Position struct {
 	Version   uint64
 }
 
-// Membership represents a user appointment, including primary and secondary positions.
+// Membership 表示用户的组织任职，含主职与兼职。
 type Membership struct {
 	ID                   string
 	TenantID             string

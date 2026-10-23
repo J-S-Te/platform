@@ -8,6 +8,17 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+
+# 前端目录。统一前端是与 platform/ 平级的兄弟仓库（<workspace>/frontend）；仅当打包
+# 布局把前端复制到 platform/frontend 时才使用该子目录。硬编码 PROJECT_ROOT/frontend
+# 会让依赖检查、测试与静态资源构建全部指向不存在的路径。
+if [[ -f "${PROJECT_ROOT}/frontend/package.json" ]]; then
+  FRONTEND_ROOT="${PROJECT_ROOT}/frontend"
+elif [[ -f "${PROJECT_ROOT}/../frontend/package.json" ]]; then
+  FRONTEND_ROOT="${PROJECT_ROOT}/../frontend"
+else
+  FRONTEND_ROOT="${PROJECT_ROOT}/../frontend"
+fi
 ENV_FILE="${PROJECT_ROOT}/.env"
 ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
 LOG_FILE="${BASIC_PLATFORM_BOOTSTRAP_LOG:-/tmp/basic-platform-bootstrap-$(date +%Y%m%d-%H%M%S)-$$.log}"
@@ -406,9 +417,8 @@ detect_system() {
 
 ensure_root_access() {
   if (( EUID == 0 )); then
-    # CentOS 7 ships Bash 4.2. Under `set -u`, expanding an empty array via
-    # "${ROOT_PREFIX[@]}" raises an unbound-variable error. `command` is a
-    # shell builtin that safely acts as a no-op command prefix for root.
+    # CentOS 7 随附 Bash 4.2。在 set -u 下通过 ${ROOT_PREFIX[@]} 展开空数组会触发未绑定变量错误；
+    # Shell 内置 command 可安全作为 root 场景下无额外作用的命令前缀。
     ROOT_PREFIX=(command)
     return 0
   fi
@@ -537,8 +547,8 @@ current_npm_version() {
 }
 
 npm_is_compatible() {
-  # frontend/package-lock.json uses lockfileVersion 3. npm v7+ can read it;
-  # older npm v6 clients can fail during npm ci with opaque dependency errors.
+  # frontend/package-lock.json 使用 lockfileVersion 3，npm v7 及以上可读取；
+  # 旧 npm v6 执行 npm ci 时可能因不明确的依赖错误失败。
   version_ge "${1#v}" "7.0.0"
 }
 
@@ -946,9 +956,7 @@ configure_environment() {
   fi
 }
 
-# Native production deployment preparation. These helpers intentionally create only
-# the operating-system resources that can be safely derived from this project. Values
-# that identify the operator's domain or database are left for the operator to supply.
+# 原生生产部署准备。这些辅助函数只创建可从本项目安全推导的操作系统资源；操作人的域名或数据库标识值由操作人提供。
 RUNTIME_USER="${BASIC_PLATFORM_RUNTIME_USER:-basic-platform}"
 RUNTIME_GROUP="${BASIC_PLATFORM_RUNTIME_GROUP:-basic-platform}"
 PRODUCTION_ENV_TEMPLATE_CREATED=false
@@ -1037,7 +1045,7 @@ MYSQL_PASSWORD=REPLACE_WITH_DATABASE_PASSWORD
 # For remote MySQL, set the fixed application-server source address or an approved MySQL host pattern.
 # For local MySQL this may remain blank. Do not use '%' unless that access has been explicitly approved.
 MYSQL_APPLICATION_ALLOWED_HOST=
-MYSQL_PARAMS=charset=utf8mb4&parseTime=true&loc=UTC
+MYSQL_PARAMS=charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai
 # Database administrator credentials are deliberately not persisted in this file. For remote first-time
 # database creation, provide MYSQL_ADMIN_USERNAME (default root) and MYSQL_ADMIN_PASSWORD only to the
 # controlled deployment process.
@@ -1109,8 +1117,7 @@ validate_production_env_values() {
     fi
   done
 
-  # OIDC_ISSUER is optional. The backend derives it from APP_PUBLIC_BASE_URL when it is
-  # absent or blank, but an old template placeholder would be treated as a literal URL.
+  # OIDC_ISSUER 可选；缺失或为空时后端从 APP_PUBLIC_BASE_URL 推导，但旧模板占位值会被当作字面 URL。
   value="$(get_env_value OIDC_ISSUER || true)"
   if [[ "$value" == REPLACE_WITH_* ]]; then
     log "ERROR" "OIDC_ISSUER 可以留空并自动使用 APP_PUBLIC_BASE_URL；当前仍为占位符，请改为 OIDC_ISSUER= 或填写实际 HTTPS 地址。"
@@ -1168,16 +1175,13 @@ prepare_runtime_directories_and_jwt() {
   run_cmd chown root:"$RUNTIME_GROUP" "$ENV_FILE"
   run_cmd chmod 0640 "$ENV_FILE"
 
-  # Dry runs log the filesystem changes above but must not inspect the results
-  # of commands deliberately not executed by run_cmd.
+  # 试运行只记录上方文件系统变更，不得检查 run_cmd 刻意未执行的命令结果。
   if [[ "$DRY_RUN" == true ]]; then
     log "INFO" "预演：将保留完整 JWT 密钥对；缺失时优先使用 OpenSSL 生成 Ed25519 密钥，不支持时改用 Go 标准库。"
     return 0
   fi
 
-  # A failed key-generation attempt on older OpenSSL versions can leave an
-  # empty staging file. An empty key cannot be valid, so remove only that safe
-  # residue and keep any non-empty key for explicit operator review.
+  # 旧 OpenSSL 生成密钥失败可能留下空暂存文件。空密钥不可能有效，因此只移除此安全残留；非空密钥须保留供操作人显式审核。
   if [[ -e "$private_key" && ! -s "$private_key" ]]; then
     log "WARN" "发现空的 JWT 私钥文件，视为失败残留并删除：${private_key}"
     run_cmd rm -f -- "$private_key"
@@ -1199,10 +1203,8 @@ prepare_runtime_directories_and_jwt() {
     temporary_private_key="${temporary_directory}/jwt-ed25519-private.pem"
     temporary_public_key="${temporary_directory}/jwt-ed25519-public.pem"
 
-    # CentOS 7 normally carries OpenSSL 1.0.2, which does not implement
-    # ED25519. Try OpenSSL first when it is installed; otherwise, or when it
-    # rejects ED25519, use the project's standard-library Go generator. Both
-    # paths produce the PKCS#8/PKIX PEM encoding expected by the backend.
+    # CentOS 7 通常随附不支持 ED25519 的 OpenSSL 1.0.2。已安装时先尝试 OpenSSL；不存在或拒绝 ED25519 时，
+    # 改用项目的标准库 Go 生成器。两条路径均输出后端要求的 PKCS#8/PKIX PEM 编码。
     if command -v openssl >/dev/null 2>&1 \
       && run_cmd openssl genpkey -algorithm ED25519 -out "$temporary_private_key" \
       && run_cmd openssl pkey -in "$temporary_private_key" -pubout -out "$temporary_public_key"; then
@@ -1364,8 +1366,7 @@ is_local_mysql_host() {
 }
 
 valid_mysql_account_host() {
-  # MySQL account host values support host names, IPv4/IPv6 literals and the % wildcard.
-  # Quotes, whitespace and path-like characters are rejected before interpolating into SQL.
+  # MySQL 账号主机值支持主机名、IPv4 和 IPv6 字面量及 % 通配符；拼接 SQL 前拒绝引号、空白及路径类字符。
   [[ "$1" =~ ^[A-Za-z0-9._:%-]+$ ]]
 }
 
@@ -1464,10 +1465,8 @@ initialize_database() {
   {
     printf 'CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n' "$database"
     for account_host in "${account_hosts[@]}"; do
-      # Do not issue ALTER USER here. Re-deploying must not rotate an existing
-      # application credential or overwrite a password managed by the database owner.
-      # A pre-existing account whose password differs from MYSQL_PASSWORD will fail the
-      # connection probe below and requires an explicit operator/DBA correction.
+      # 这里不得执行 ALTER USER。重新部署不能轮换现有应用凭据或覆盖数据库所有者管理的密码。若已有账号密码与 MYSQL_PASSWORD 不同，
+      # 下方连接探测会失败，须由操作人或 DBA 显式修正。
       printf "CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '%s';\n" "$username" "$account_host" "$password"
       printf "GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%s';\n" "$database" "$username" "$account_host"
     done
@@ -1567,10 +1566,13 @@ run_bootstrap_admin_status() {
   if [[ "$DRY_RUN" == true ]]; then
     return 3
   fi
-  if runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" --status >>"$LOG_FILE" 2>&1; then
+  # 必须在命令之后立即读取 $?：if/fi 之后的 $? 是复合命令的退出状态（没有 else 分支时为 0），
+  # 会把"尚未初始化"的 3 和真实错误都变成 0，调用方据此跳过首个管理员创建。
+  local status=0
+  runuser -u "$RUNTIME_USER" -- env "ENV_FILE=${ENV_FILE}" "$bootstrap_binary" --status >>"$LOG_FILE" 2>&1 || status=$?
+  if [[ "$status" -eq 0 ]]; then
     return 0
   fi
-  local status=$?
   [[ "$status" -eq 3 ]] && return 3
   log "ERROR" "无法检查首个超级管理员初始化状态。请先确认迁移已成功执行且运行用户可读取环境文件。"
   return "$status"
@@ -1793,10 +1795,10 @@ check_environment() {
       fi
     fi
 
-    if [[ ! -d "${PROJECT_ROOT}/frontend/node_modules" ]]; then
+    if [[ ! -d "${FRONTEND_ROOT}/node_modules" ]]; then
       check_item "前端依赖" missing "未安装，执行 npm ci 后生成"
     elif [[ "$node_compatible" == true ]] && command -v npm >/dev/null 2>&1; then
-      if (cd "${PROJECT_ROOT}/frontend" && npm ls --depth=0 --silent >>"$LOG_FILE" 2>&1); then
+      if (cd "${FRONTEND_ROOT}" && npm ls --depth=0 --silent >>"$LOG_FILE" 2>&1); then
         check_item "前端依赖" ok "npm 依赖树完整"
       else
         check_item "前端依赖" missing "依赖树不完整；详细原因见 ${LOG_FILE}"
@@ -1811,6 +1813,31 @@ check_environment() {
   log "INFO" "环境检测通过。"
 }
 
+# install_project_dependencies 安装 Go module 与前端依赖。
+#
+# 该函数此前只被调用、从未定义：bootstrap 主流程与 `install-project` 子命令都会在
+# set -e 下以"command not found"失败。--skip-project-deps 仍然跳过安装。
+install_project_dependencies() {
+  if [[ "$SKIP_PROJECT_DEPS" == true ]]; then
+    log "INFO" "已按参数跳过项目依赖安装。"
+    return 0
+  fi
+  CURRENT_STEP="安装 Go 依赖"
+  log "INFO" "下载 Go module 依赖：${PROJECT_ROOT}"
+  run_cmd bash -c 'cd "$1" && go mod download' _ "${PROJECT_ROOT}"
+  if [[ ! -f "${FRONTEND_ROOT}/package.json" ]]; then
+    log "WARN" "未找到前端 package.json（${FRONTEND_ROOT}），跳过前端依赖安装。"
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    log "WARN" "未找到 npm，跳过前端依赖安装；请先执行 --install-node。"
+    return 0
+  fi
+  CURRENT_STEP="安装前端依赖"
+  log "INFO" "安装前端依赖：${FRONTEND_ROOT}"
+  run_cmd bash -c 'cd "$1" && npm ci' _ "${FRONTEND_ROOT}"
+}
+
 verify_environment() {
   CURRENT_STEP="验证后端 Go 代码"
   run_cmd bash -c 'cd "$1" && test -z "$(gofmt -l .)"' _ "${PROJECT_ROOT}"
@@ -1819,7 +1846,7 @@ verify_environment() {
   run_cmd bash -c 'cd "$1" && go test ./...' _ "${PROJECT_ROOT}"
 
   CURRENT_STEP="验证前端代码"
-  run_cmd bash -c 'cd "$1" && npm test' _ "${PROJECT_ROOT}/frontend"
+  run_cmd bash -c 'cd "$1" && npm test' _ "${FRONTEND_ROOT}"
   log "INFO" "代码验证通过；未执行前端 build。"
 }
 
@@ -1894,7 +1921,7 @@ build_release_artifacts() {
   run_cmd bash -c 'cd "$1" && go build -trimpath -o "$2/bin/bootstrap-admin" ./cmd/bootstrap-admin' _ "${PROJECT_ROOT}" "$staging_dir"
 
   CURRENT_STEP="构建前端静态资源"
-  run_cmd bash -c 'cd "$1" && npm run build && cp -a dist/. "$2/frontend/"' _ "${PROJECT_ROOT}/frontend" "$staging_dir"
+  run_cmd bash -c 'cd "$1" && npm run build && cp -a dist/. "$2/frontend/"' _ "${FRONTEND_ROOT}" "$staging_dir"
 
   CURRENT_STEP="写入发布元数据"
   run_cmd bash -c 'printf "release_id=%s\\nbuilt_at_utc=%s\\nsource_revision=%s\\n" "$1" "$2" "$3" > "$4/release-info"' _ "$DEPLOY_RELEASE_ID" "$build_timestamp" "$revision" "$staging_dir"
@@ -1964,9 +1991,8 @@ deploy_application() {
   # 则由 initialize_database 按安全策略跳过，随后由迁移步骤验证应用账号的实际连接权限。
   initialize_database
 
-  # The release build uses go mod download and npm ci. Ensure both toolchains
-  # are installed before resolving project dependencies, rather than relying
-  # on an arbitrary Node.js/npm pair already present on the host.
+  # 发布构建使用 go mod download 和 npm ci；解析项目依赖前确保两个工具链均已安装，
+  # 不依赖宿主机碰巧已有的任意 Node.js 和 npm 组合。
   install_go
   install_node
   install_project_dependencies

@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// Infrastructure is separately approved deployment evidence, never a protocol
-// consumer or an exemption from inspection. Only the reviewed BI engine is valid.
+// Infrastructure 是单独审批过的部署证据，绝不是协议消费方，也不能豁免检查。
+// 只有评审过的 BI 引擎是合法取值。
 type Infrastructure struct {
 	Application    string `json:"application"`
 	Environment    string `json:"environment"`
@@ -47,7 +47,7 @@ func validateInfrastructure(items []Infrastructure, services []Service) error {
 	return nil
 }
 
-// No environment, secrets, or unrestricted label/host configuration is read.
+// 投影不读取环境变量、机密或不受限的标签/宿主机配置。
 const infrastructureContainerFormat = `{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},"started_at":{{json .State.StartedAt}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"network_mode":{{json .HostConfig.NetworkMode}},"ports":{{json .NetworkSettings.Ports}},"networks":{{json .NetworkSettings.Networks}}}`
 const infrastructureImageFormat = `{"id":{{json .Id}}}`
 

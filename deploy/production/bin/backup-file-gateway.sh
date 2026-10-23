@@ -47,8 +47,7 @@ if find "$storage_root" -xdev \( -type l -o \( ! -type d ! -type f \) \) -print 
   exit 1
 fi
 
-# A file backup is a deployment-wide maintenance operation.  backup-all may
-# pass its already-held descriptor; direct invocations acquire the same lock.
+# 文件备份是全部署维护操作。backup-all 可传入已持有描述符，直接调用则获取同一把锁。
 install -d -m 700 "$deploy_dir/runtime"
 deploy_lock="$deploy_dir/runtime/.deploy.lock"
 [[ ! -L "$deploy_lock" ]] || { echo "部署锁不能是符号链接" >&2; exit 1; }
@@ -67,8 +66,8 @@ fi
 
 install -d -m 700 "$backup_root"
 [[ ! -L "$backup_root/.backup.lock" ]] || { echo "文件网关备份锁不能是符号链接" >&2; exit 1; }
-exec 9>"$backup_root/.backup.lock"
-flock -n 9 || { echo "另一个文件网关备份正在运行" >&2; exit 1; }
+exec {gateway_backup_lock_fd}>"$backup_root/.backup.lock"
+flock -n "$gateway_backup_lock_fd" || { echo "另一个文件网关备份正在运行" >&2; exit 1; }
 [[ ! -e "$backup_root/$stamp" ]] || { echo "备份批次已存在：$backup_root/$stamp" >&2; exit 1; }
 work="$(mktemp -d "$backup_root/.${stamp}.XXXXXX")"
 stopped_ids=()
@@ -107,8 +106,7 @@ db_container="$("${compose[@]}" ps -q file-gateway-mysql 2>/dev/null || true)"
 project="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$db_container" 2>/dev/null || true)"
 [[ -n "$project" && "$project" != '<no value>' ]] || { echo "无法识别文件网关 Compose project" >&2; exit 1; }
 
-# Stop every running instance labelled as the gateway in this project,
-# including orphaned containers whose service was pruned from current YAML.
+# 停止此项目内所有标记为网关的运行实例，包括服务已从当前 YAML 裁剪的孤立容器。
 while IFS= read -r candidate_id; do
   [[ -n "$candidate_id" ]] || continue
   stopped_ids+=("$candidate_id")
@@ -117,8 +115,7 @@ if ((${#stopped_ids[@]} > 0)); then
   docker stop --timeout 60 "${stopped_ids[@]}" >/dev/null
 fi
 
-# Refuse a hidden/legacy writer rather than taking a split database/file
-# snapshot. Environment values are inspected in-memory and are never logged.
+# 拒绝隐藏或旧版写入者，避免数据库和文件快照分裂。环境变量仅在内存检查，绝不记录日志。
 running_container_ids="$(docker ps -q)" || { echo "无法枚举运行中的 Docker 容器" >&2; exit 1; }
 unknown_writers=()
 while IFS= read -r candidate_id; do
@@ -136,16 +133,14 @@ if ((${#unknown_writers[@]} > 0)); then
   exit 1
 fi
 
-# Password is forwarded by environment name; its value never appears in the
-# docker/compose argv or backup logs.
+# 仅按环境变量名称转发密码，其值绝不出现在 docker、compose 参数或备份日志中。
 MYSQL_PWD="$db_password" "${compose[@]}" exec -T -e MYSQL_PWD file-gateway-mysql \
   mysqldump --single-transaction --routines --triggers --events -uroot "$db_name" | gzip -9 >"$work/database.sql.gz"
 gzip -t "$work/database.sql.gz"
-[[ -s "$work/database.sql.gz" ]] || { echo "文件网关数据库备份为空" >&2; exit 1; }
+sql_bytes="$(gzip -dc "$work/database.sql.gz" | wc -c)"
+((sql_bytes > 0)) || { echo "文件网关数据库备份SQL为空" >&2; exit 1; }
 
-# The gateway remains stopped from immediately before mysqldump until the
-# archive and inventory are complete. This makes DB rows and object files a
-# single write-free recovery point. Temporary uploads are intentionally omitted.
+# 从 mysqldump 前一刻起，直到归档和清单完成，网关始终停止，使数据库行和对象文件形成同一无写入恢复点。临时上传刻意不纳入。
 tar --create --gzip --file "$work/files.tar.gz" --directory "$storage_root" --exclude='./temporary' .
 file_count=0
 file_bytes=0

@@ -26,6 +26,6 @@ done
 MYSQL_PWD="$password" docker run --rm -e MYSQL_PWD mysql:8.4 mysql -hhost.docker.internal -P"$port" -uroot -e 'SELECT 1' file_gateway_test >/dev/null
 cd -- "$repo_dir"
 # DSN 仅经环境变量交给 go test（不进入 argv）；口令为本次随机值，测试结束即失效。
-FILE_GATEWAY_TEST_DSN="root:${password}@tcp(127.0.0.1:${port})/file_gateway_test?charset=utf8mb4&parseTime=true&loc=UTC" \
+FILE_GATEWAY_TEST_DSN="root:${password}@tcp(127.0.0.1:${port})/file_gateway_test?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai" \
   GOCACHE="${GOCACHE:-/tmp/basic-platform-go-cache}" \
   go test -count=1 ./internal/platform/filetask/infrastructure

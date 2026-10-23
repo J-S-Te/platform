@@ -1,6 +1,7 @@
 # github.com/J-S-Te/license-core v0.0.0 => ./third_party/license-core
 ## explicit; go 1.25.4
 github.com/J-S-Te/license-core
+github.com/J-S-Te/license-core/catalog
 github.com/J-S-Te/license-core/runtime
 # github.com/bytedance/sonic v1.11.6
 ## explicit; go 1.16

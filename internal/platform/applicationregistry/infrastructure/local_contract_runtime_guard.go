@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// validateRetainedContractRuntime must run before any runtime configuration write.
-// Losing a configuration file does not make an existing database a first installation.
+// validateRetainedContractRuntime 必须在任何运行时配置写入之前执行。
+// 配置文件丢失不会把既有数据库变成首次安装。
 func (provisioner *LocalDockerSubsystemProvisioner) validateRetainedContractRuntime(ctx context.Context, environmentPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -19,15 +19,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) validateRetainedContractRunt
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	// compose.local.yaml explicitly names this volume, independently of -p.
+	// compose.local.yaml 显式命名该卷，独立于 -p 项目名。
 	volume := "basic-platform-local-contract-mysql-data"
 	err := provisioner.runner.Run(checkCtx, provisioner.config.ProjectsRoot, os.Environ(), provisioner.config.DockerBinary, "volume", "inspect", volume)
 	if contextErr := checkCtx.Err(); contextErr != nil {
 		return contextErr
 	}
 	if err != nil {
-		// Docker reports both daemon failure and a missing volume as inspect errors.
-		// Only a successful inventory can establish absence; never infer it from an exit code.
+		// Docker 把守护进程失败与卷缺失都报为 inspect 错误。只有一次成功的清点才能确认
+		// 卷不存在；绝不能从退出码推断。
 		outputRunner, ok := provisioner.runner.(interface {
 			RunOutput(context.Context, string, []string, string, ...string) ([]byte, error)
 		})

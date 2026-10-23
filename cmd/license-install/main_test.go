@@ -42,3 +42,35 @@ func TestCLIRejectsUncontrolledArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyDeploymentCannotImportOrChangeInstallation(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"verify-deployment"}, "必须提供 --application"},
+		{[]string{"verify-deployment", "--application", "contract_management", "--file", "token"}, "不能导入许可证"},
+		{[]string{"verify-deployment", "--application", "contract_management", "--scenario", "fresh"}, "仅适用于 prepare"},
+		{[]string{"verify-deployment", "--application", "contract_management", "--customer", "customer"}, "仅适用于 prepare"},
+		{[]string{"activate", "--application", "contract_management"}, "仅适用于 verify-deployment"},
+	} {
+		if err := run(tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("args=%v: expected %q, got %v", tc.args, tc.want, err)
+		}
+	}
+}
+
+func TestVerifyEnforcementCannotChangeOrFilterLicense(t *testing.T) {
+	for _, args := range [][]string{
+		{"verify-enforcement", "--file", "unread-token.jws"},
+		{"verify-enforcement", "--application", "contract_management"},
+		{"verify-enforcement", "--scenario", "fresh"},
+		{"verify-enforcement", "--customer", "another-instance"},
+		{"verify-enforcement", "--timeout", "0s"},
+		{"verify-enforcement", "unexpected"},
+	} {
+		if err := run(args); err == nil {
+			t.Fatalf("unsafe enforcement verification accepted: %v", args)
+		}
+	}
+}

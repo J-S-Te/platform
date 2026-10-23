@@ -8,10 +8,9 @@ import (
 	"time"
 )
 
-// InstallationConfig must describe the entire operator-approved Compose
-// project. ExcludedServices are explicit reviewed infrastructure/init units,
-// never values inferred from container labels. Empty Services is permitted only
-// here, and only a successful complete project scan can prove platform-only.
+// InstallationConfig 必须描述运维审批过的完整 Compose 项目。ExcludedServices 是显式
+// 评审过的基础设施/初始化单元，绝不是从容器标签推断的值。Services 为空仅允许出现在
+// 此处，且只有完整项目扫描成功才能证明部署仅含本平台。
 type InstallationConfig struct {
 	Project          string
 	Services         []Service

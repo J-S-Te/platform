@@ -1,4 +1,4 @@
-"""Guard local helper build routing without weakening its network/socket boundary."""
+"""验证本地辅助工具的构建路由，不放宽网络或套接字边界。"""
 from pathlib import Path
 import unittest
 

@@ -19,9 +19,8 @@ type CatalogPolicyInput struct {
 	MaxEffectiveRoles int `json:"max_effective_roles,omitempty"`
 }
 
-// ApplicationAuthorizationPolicy is the persisted, application-owned policy resolved
-// by authorization code. Its provenance is exposed so callers can distinguish a
-// synchronized catalog constraint from a platform-side assignment decision.
+// ApplicationAuthorizationPolicy 是持久化的应用自有策略，按授权码（应用 ID）解析。
+// 暴露来源字段是为了让调用方区分"同步目录带来的约束"与"平台侧的分配决策"。
 type ApplicationAuthorizationPolicy struct {
 	ApplicationID     string     `json:"application_id"`
 	MaxEffectiveRoles int        `json:"max_effective_roles"`

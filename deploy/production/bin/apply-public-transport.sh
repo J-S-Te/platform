@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Re-entrant host-side driver for the database-backed transport Saga. Run it
-# after changing PUBLIC_HTTPS_ENABLED. A downgrade intentionally returns while
-# DISABLING_HTTPS is draining; run the same command again after the reported
-# deadline to remove 443 and its certificate mounts.
+# 数据库支撑的传输 Saga 的可重入宿主机驱动器，修改 PUBLIC_HTTPS_ENABLED 后执行。
+# 降级会在 DISABLING_HTTPS 排空期间主动返回；到报告的截止时间后再次执行相同命令，移除 443 及证书挂载。
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 deploy_dir="$(cd -- "$script_dir/.." && pwd)"
 runtime_file="${BASIC_PLATFORM_RUNTIME_ENV_FILE:-$deploy_dir/.env}"
@@ -29,9 +27,8 @@ coordinator() {
 
 running_enabled_services() {
   local enabled running service
-  # Use the portable service-only query. Some supported Compose releases reject
-  # environment-resolution flags, while older releases cannot validate bind
-  # mounts that retain literal default-expression colons under no-interpolate.
+  # 使用可移植的仅服务查询。部分受支持 Compose 版本拒绝环境解析标志，
+  # 旧版本则无法验证 no-interpolate 下保留默认表达式字面冒号的绑定挂载。
   enabled="$(base_compose config --services)" || return 1
   running="$(base_compose ps --services --status running)" || return 1
   while IFS= read -r service; do
@@ -72,7 +69,7 @@ origin_for_mode() {
   fi
 }
 
-# Target preflight is performed first. HTTP does not inspect certificate paths.
+# 先进行目标预检，HTTP 模式不检查证书路径。
 unset PUBLIC_TRANSPORT_STATE
 public_transport_prepare "$deploy_dir" "$runtime_file"
 configured_transition_state="$PUBLIC_TRANSPORT_STATE"
@@ -129,34 +126,26 @@ if [[ "$state" == "HTTP" || "$state" == "HTTPS" ]]; then
 fi
 
 if [[ "$state" == "ENABLING_HTTPS" || "$state" == "DISABLING_HTTPS" ]]; then
-  # Re-run the idempotent external preparation on every resume. This closes
-  # the crash window between the database dual-callback transaction and the
-  # Keycloak Admin API update.
+  # 每次恢复都重新执行幂等外部准备，关闭数据库双回调事务与 Keycloak Admin API 更新之间的崩溃窗口。
   status_json="$(coordinator prepare --target-mode "$desired_mode" --platform-origin "$target_platform_origin" --sso-origin "$target_sso_origin")"
   transition_id="$(jq -r '.TransitionID' <<<"$status_json")"
   persist_transport_state "$state"
 fi
 
-# Re-derive gateway environment from the persisted state. During downgrade this
-# validates and mounts the still-required certificate even though the target
-# PUBLIC_HTTPS_ENABLED value is false.
+# 根据持久化状态重新导出网关环境。降级时即使目标 PUBLIC_HTTPS_ENABLED 为 false，也仍须验证和挂载必需证书。
 export PUBLIC_TRANSPORT_STATE="$state"
 public_transport_prepare "$deploy_dir" "$runtime_file"
 command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
 public_transport_compose_args command
 public_transport_install_certificates
 if [[ "$state" == "ENABLING_HTTPS" ]]; then
-  # Bring up TLS first while the old HTTP-configured API/Worker keep running.
-  # Starting target-configured workers before the database commit would make
-  # their HTTPS transport gate reject the still-HTTP Environment records.
+  # 先启用 TLS，同时让使用旧 HTTP 配置的 API 和 Worker 继续运行。若数据库提交前启动目标配置 worker，
+  # 其 HTTPS 门禁会拒绝仍为 HTTP 的 Environment 记录。
   "${command[@]}" up -d --no-deps --wait --wait-timeout 120 frontend
   "${command[@]}" exec -T frontend nginx -t
 else
-  # Downgrade services must issue non-Secure replacement cookies throughout
-  # the drain, while the temporary frontend overlay keeps 443 alive. Keep
-  # background workers on the old runtime until the database callback commit;
-  # otherwise their startup reconciliation would collapse Keycloak's required
-  # dual callback set back to the source-only callback.
+  # 降级服务在整个排空期必须签发非 Secure 的替换 Cookie，临时前端覆盖配置则保持 443 可用。数据库回调提交前，
+  # 后台 worker 保持旧运行配置，否则启动对账会将 Keycloak 必需的双回调集合缩为仅源回调。
   drain_targets=(frontend)
   while IFS= read -r running_service; do
     case "$running_service" in
@@ -183,7 +172,7 @@ fi
 coordinator commit --transition-id "$transition_id"
 persist_transport_state ""
 
-# Switch only running, enabled services; never start an unadopted subsystem.
+# 仅切换已运行且已启用服务，绝不启动尚未接管的子系统。
 unset PUBLIC_TRANSPORT_STATE
 public_transport_prepare "$deploy_dir" "$runtime_file"
 final_command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")

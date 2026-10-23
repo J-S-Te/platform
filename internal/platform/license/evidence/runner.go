@@ -7,8 +7,8 @@ import (
 	"os/exec"
 )
 
-// ExecRunner belongs on the isolated deployment Agent, not the platform API.
-// DockerBinary must be configured by the operator, never request parameters.
+// ExecRunner 只应存在于隔离的部署 Agent 上，而不是 platform API 进程内。
+// DockerBinary 必须由运维配置，绝不能来自请求参数。
 type ExecRunner struct{ DockerBinary string }
 
 func (r ExecRunner) RunOutput(ctx context.Context, limit int, name string, args ...string) ([]byte, error) {
@@ -22,7 +22,7 @@ func (r ExecRunner) RunOutput(ctx context.Context, limit int, name string, args 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	output := &boundedBuffer{limit: limit}
 	cmd.Stdout = output
-	// stderr is intentionally discarded: daemon errors can contain credentials.
+	// 刻意丢弃 stderr：守护进程错误文本可能携带凭据等敏感信息。
 	if cmd.Run() != nil {
 		return nil, errors.New("evidence command failed")
 	}

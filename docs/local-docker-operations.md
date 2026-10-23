@@ -1,10 +1,20 @@
-# 本地 Docker 与脚本使用说明
+# 本地 Docker 与脚本操作说明
 
-> 更新日期：2026-08-19
+> 源码核验：2026-10-13。本次未运行脚本、构建、测试或容器；以下不代表实际环境验收通过。
 
-## 1. 推荐入口
+## 角色和启动条件
 
-在 `platform` 目录执行：
+由开发／测试运维持 Docker 权限执行；应用接入由对应租户的应用管理员执行。
+工作区需相邻的 platform、frontend、contract_management、customer_and_opportunity、project_management、Settlement、data_analysis。
+前端构建上下文是相邻 `../frontend`，不是 `platform/frontend`。
+
+保留已有环境文件、数据库密码、签名和字段加密密钥。脚本可以补齐受管非敏感配置，不能笼统理解为“已有文件完全不改”。
+已有平台／网关／合同数据卷时缺失原配置会触发安全拒绝，禁止用随机新 Secret 继续连接旧库。
+售前交付 Worker 的 `../customer_and_opportunity/.env.presale-worker` 不自动生成。
+
+## 启动与成功判断
+
+在 platform 目录：
 
 ```bash
 bash scripts/docker-local.sh up
@@ -13,59 +23,49 @@ bash scripts/docker-local.sh verify
 bash scripts/docker-local.sh logs api subsystem-provisioner
 ```
 
-`docker-local.sh up`：
+`up` 和 `restart` 同走 start_stack：准备／校验配置、构建镜像、启动数据库／Temporal、迁移、按需初始化管理员，
+再启动 Keycloak、File Gateway、平台及配置／目录就绪的子系统。
+合同严格配置校验要求有效接入凭据，完全新环境须先核实平台初始化／应用接入顺序；不能跳过凭据校验。
+CRM 目录未就绪时相关进程会跳过；Portal、项目、看板还有各自配置和受控接入条件，不能把部分启动当作全系统成功。
 
-- 只在缺失时从模板创建基础平台、合同管理、客户与商机管理及客户自助门户环境文件；
-- 不要求重建已有 `.env.local`；
-- 构建一个统一前端镜像，以及基础平台、合同管理、客户与商机管理、客户自助门户的独立 API/Worker 镜像；客户自助门户完成接入前只构建镜像、不启动 `portal-api`；
-- 执行迁移，按需初始化管理员，再分阶段启动服务；
-- 不删除已存在的 Application、Environment、LoginTarget 或 OAuth Client。
-
-### 子系统重试构建与网络隔离
-
-本地 `subsystem-provisioner` 仍只连接 internal 控制网络，经白名单 Socket Proxy
-访问 Docker，不直接挂载 docker.sock、不为修复构建而开放外网。默认
-`PROVISIONER_DOCKER_BUILDKIT=0` 让 Docker daemon 执行实际镜像构建，使用宿主
-Docker 的 DNS/代理；避免隔离助手侧 BuildKit 令牌提供器访问 `auth.docker.io`
-失败。宿主启动脚本及生产 CI 的构建方式不变。
-
-若已配置受控 BuildKit 网络，可显式设为 `1`。daemon legacy builder 是本地
-兼容路径，不是永久替代方案：Docker 未来移除它时，需要升级受控构建拓扑。
-失败时禁止使用旧镜像假装完成更新。修改该值或 Compose 默认值后只需重建
-部署助手，再对原应用环境点击“重试”，无需撤销接入、重建业务库或轮换密钥。
-
-## 2. 首次管理员
-
-人工运行时直接交互输入。CI 推荐：
+管理员人工输入密码；自动化通过安全注入的环境变量转标准输入：
 
 ```bash
 printf '%s\n' "$ADMIN_PASSWORD" | bash scripts/docker-local.sh up \
-  --admin-display-name '平台管理员' \
-  --admin-account-name admins \
-  --admin-password-stdin
+  --admin-display-name '平台管理员' --admin-account-name admins --admin-password-stdin
 ```
 
-`--admin-password PASSWORD` 仅为旧调用兼容保留，会把密码暴露到 shell history/进程参数，不应继续使用。
+禁止用 `--admin-password` 明文参数。`verify` 验证 Nginx、健康路由、匿名访问及登录重定向；
+不完成真实登录、权限、业务读写或异步任务验收。成功须补充授权测试账号验收。
 
-## 3. 环境文件
+## 环境文件和检查副作用
 
-| 文件 | 用途 | 是否自动覆盖 |
-| --- | --- | --- |
-| `docker/.env.local.example` | 基础平台本地模板 | 否 |
-| `docker/.env.local` | 本地实际配置，含 Secret | 只在缺失时创建 |
-| `docker/.env.customer.local.example` | 客户与商机管理本地模板 | 否 |
-| `docker/.env.customer.local` | 客户与商机管理实际配置，含数据库密码和密钥 | 只在缺失时创建 |
-| `docker/.env.portal.local.example` | 客户自助门户本地模板 | 否 |
-| `docker/.env.portal.local` | 客户自助门户实际配置；接入前只有本地密钥，接入 Agent 写入 OIDC 和六组最小权限服务凭据 | 缺失时创建，接入时受控更新 |
-| `../<subsystem>/.env.example` | 子系统模板 | 否 |
-| `../<subsystem>/.env.local` | 子系统实际配置 | onboard 时受控更新 |
-| `docker/.env.lan` | 临时局域网覆盖 | `lan-access.sh` 管理 |
+平台、CRM、Portal 配置分别位于 `docker/.env.local`、`docker/.env.customer.local`、`docker/.env.portal.local`；
+合同、项目、Settlement、data_analysis 使用相邻仓库的 `.env.local`。实际 Secret 文件保持 0600，不提交。
+首次缺失配置可由脚本生成／补齐；接入还会受控写入 OAuth／机器凭据，长期有效密钥不能随意替换。
 
-所有实际 Secret 文件必须保持 `0600`，禁止提交。
+本地统一入口是 `compose.local.yaml`，生产统一入口是 `deploy/production/docker-compose.yml`。
+`ps/logs/verify/stop/down/config` 先执行环境准备，可能创建或补齐本地文件／目录／密钥；不能用于严格零写入审计。
+`config` 还做严格校验和目录凭据整理，禁止把它当作无副作用的纯 YAML 检查。
 
-当前只保留两套 Docker 配置边界：本地/测试使用根目录 `compose.local.yaml`，生产使用 `deploy/production/docker-compose.yml`。旧的根目录 `compose.yaml`、`docker/.env` 和 `prepare-docker-env.sh` 已删除，禁止重新引入第三套并行配置。仓库根 `.env` 只允许由开发者从 `.env.example` 本地创建，不得提交。
+## 定向更新及实际影响
 
-## 4. 局域网访问
+| 命令 | 实际链路与前提 |
+| --- | --- |
+| refresh-api | 构建平台、补齐平台库／文件网关及其库／受限 Docker 代理、迁移、刷新 API 与 provisioner，并验证 API 到文件网关 readiness |
+| refresh-frontend | 重建统一多系统前端／网关；不代表所有子系统已接入 |
+| refresh-contract-api | 先整理目录发布凭据并刷新平台 API／provisioner，再构建合同 API／Worker、迁移及目录同步 |
+| refresh-customer-api | 构建 CRM／预警 Worker、迁移、目录同步、刷新五类通知 Worker 和前端；不重启独立售前交付 Worker |
+| start-presale-alert-worker | 构建预警 Worker，并先执行 CRM 迁移，不是仅启动进程 |
+| refresh-portal-api | 需 Portal 已配置；迁移并刷新 Portal、邀请补偿 Worker 及前端 |
+| refresh-project-api | 需项目配置就绪；迁移并刷新项目 API，不等于刷新所有 SLA Worker |
+| refresh-data-analysis-api | 配置就绪后构建四个 target，迁移并启动 API、聚合／告警 Worker 和 Metabase |
+| start-presale-worker | 需额外环境文件；构建交付 Worker／mock，启动 Temporal，校验新鲜 heartbeat；未通过不得开放申请入口 |
+
+这些入口不要求重新登记应用，但有构建、迁移、凭据整理和容器刷新影响。执行前检查对应依赖和维护窗口。
+日志先脱敏再分享；失败按具体配置／目录／迁移错误修复，不使用旧镜像伪装更新成功。
+
+## LAN 与远程测试
 
 ```bash
 bash scripts/lan-access.sh enable --address 192.168.3.11 --port 8081
@@ -73,86 +73,30 @@ bash scripts/lan-access.sh status
 bash scripts/lan-access.sh disable
 ```
 
-enable 会生成权限为 `0600` 的临时覆盖文件并重建统一 frontend、基础平台 API、合同 API 和 CRM API；若客户自助门户已接入，也会重建独立 Portal API。它保留数据库和统一登录控制面记录。该模式使用 HTTP，只适用于可信局域网。
+明确传 IP，Linux 自动探测不能作为可靠前提。该脚本生成 0600 的 `.env.lan`／`.env.customer.lan`，
+设置平台 HTTP Issuer，并重建 api、contract-api、contract-worker、customer-api、frontend。
+它不覆盖 Portal、项目、看板和 Keycloak 的完整地址／认证配置，不能承诺一条命令完成所有模块远程 SSO。
+只用于可信 LAN，地址变更需核对 Issuer、回调和网关；不能直接复制生产。
+远程部署步骤见 [服务器本地编排](server-local-orchestration.md)。
 
-局域网 OAuth HTTP 回调与接入脚本访问平台 API 是两套策略，详见 [子系统开发与统一身份接入手册](./subsystem-onboarding.md#33-http-回调策略)。
+## 停止与排错
 
-## 5. 定向更新
+`stop` 保留容器／卷；`down` 移除容器、orphan 和有关网络，`down --volumes` 删除命名数据卷，仅限明确批准销毁。
+File Gateway READY 检查包含数据库和目录；平台更新前先保证网关依赖可用。
+门户静态页面存在而 API 未接入是未可用状态，不能强改健康结果。
+当前工作区没有 `scripts/seed-local-test-data.sh`，不得按旧手册执行该不存在的入口。
 
-```bash
-bash scripts/docker-local.sh refresh-api
-bash scripts/docker-local.sh refresh-frontend
-bash scripts/docker-local.sh refresh-contract-api
-bash scripts/docker-local.sh refresh-customer-api
-bash scripts/docker-local.sh start-presale-alert-worker
-bash scripts/docker-local.sh refresh-portal-api
-```
+本地 provisioner 经白名单 Socket Proxy 访问 Docker；不要增加 docker.sock 直挂或开放代理公网。
 
-定向更新不会重新接入子系统：
+定向刷新平台或合同后端时，会先显式确认 Docker 代理与文件网关依赖，再用 `--no-deps` 更新 API／Agent，避免跳过依赖造成“平台健康但接入失败”。Agent 健康同时检查 Unix Socket 与经受限代理的 Docker 查询；仅有 Socket 不再算健康。代理或网关失败会中止刷新并输出相关服务诊断，不删除环境或业务卷。修复后在原有环境点击“重试”，不要重复新增接入；缺少受审核批准材料时则应先完成下节准备与审核。
+`portal-gateway.sh` 的写入及读取采用跨进程锁，超时先检查并发接入／更新，不删除锁绕过。
 
-- `refresh-api`：迁移并重建基础平台 API/provisioner；
-- `refresh-frontend`：同时重建基础平台、合同管理、客户与商机管理和客户自助门户前端；
-- `refresh-contract-api`：合同迁移并重建合同后端。
-- `refresh-customer-api`：执行客户与商机 CRM 迁移并重建独立 `customer-api` 和 `customer-presale-alert-worker`；同时刷新统一前端网关配置。
-- `start-presale-alert-worker`：只构建并启动客户与商机 TS-008 售前预警 Worker，适合 Worker 单独更新或故障恢复。
-- `refresh-portal-api`：仅在 `customer_portal/dev` 已接入后执行 Portal 迁移并重建独立 `portal-api`。
-- 未接入时统一前端中的 `/customer-portal/` 静态页面已存在，但 API 健康检查会失败；这是“尚未接入”的预期状态，不应伪装为可用门户。
+## 商业授权实例的本地 dev 接入
 
-## 6. 业务容器拓扑
+当前组合根已接入内置组件目录：登记协议 2、catalog version 1，签名快照及商业 JWS 协议仍为 1。新安装及旧 V1 应用通过受控更新登记/桥接；V2 组件身份不再从镜像/coverage digest 派生。实际运行仍需每组件独立机器凭据、状态卷、真实 READY/ACK 和有效许可证，构建成功或部署 READY 不能替代商业权益与业务验收。
 
-| Compose 服务 | Docker 镜像 | 内容 | 宿主机端口 |
-| --- | --- | --- | --- |
-| `frontend` | `basic-platform/frontend:local` | 基础平台前端 + 合同管理前端 + 客户与商机管理前端 + 客户自助门户前端 | `127.0.0.1:8081` |
-| `api` | `basic-platform:local` | 基础平台 API + Worker | 不发布 |
-| `contract-api` | `contract-management/backend:local` | 合同管理 API + Temporal Worker | 不发布 |
-| `customer-api` | `customer-opportunity/backend:local` | 客户与商机管理 API，只包含 `crm-server` | 不发布 |
-| `customer-presale-alert-worker` | `customer-opportunity/backend:local` | TS-008 售前超时预警扫描和站内消息投影 | 不发布 |
-| `portal-api` | `customer-portal/backend:local` | 客户自助门户 API，只包含 `portal-server`；仅在 `customer_portal/dev` 接入后启动 | 不发布 |
+`prepare-license/refresh-approvals/recover-license-pins` 是 legacy 批准和固定记录工具，候选会写独立文件，正式批准须显式审核。普通 `up` 不重建已固定服务，`up --build` 只准备候选，不自动采用；新版必须沿既有受控更新由 Agent 交付。不能继续使用“每次 up 都重建、所有接入都必须先准备新版 V1 批准”的旧规则。
 
-API 与 Worker 服务使用独立镜像目标、独立容器和对应运行配置，只通过 Compose 内网被统一 Nginx 或数据库/队列访问。CRM 与 Portal 虽然从同一个 `customer_and_opportunity` 源码仓库构建，但 Dockerfile 使用 `crm-runtime`、`portal-runtime`、`presale-alert-worker-runtime` 等目标：CRM 镜像不包含 `portal-server`，Portal 镜像不包含 `crm-server`。二者还使用独立 MySQL、独立 OIDC Client 和独立会话。
+启动预检按组件区分登记模式：V1 对照原批准核验镜像；V2 读取 Agent 固定路径的私有运行凭据，核对协议 2、目录版本 1、实例商业环境、服务绑定和受控挂载，不要求旧版批准。两者均检查不可变镜像是否存在；V2 应用还须有必需消费者与迁移镜像。条件邀请补偿组件缺席不会被自动启用，混合登记中的 V1 组件继续核对原批准。这是本地结构/镜像检查，真实凭据、商业权益与当前 ACK 仍由平台及消费者核验；不要清除状态卷、固定记录或关闭许可证门禁。
 
-`docker-local.sh up` 会构建客户与商机 API 及预警 Worker 镜像，并在客户 profile 启动 `customer-presale-alert-worker`。客户门户在首次受控接入前不会创建常驻 `portal-api` 容器，因为此时 OIDC Client、租户、角色目录和最小权限机器凭据尚不存在；完成 `customer_portal/dev` 接入后，再次执行 `up` 或 `refresh-portal-api` 即会启动 Portal API。MySQL、Temporal、迁移任务和 provisioner 属于基础设施或一次性任务，不计为业务应用容器。
-
-## 7. 远程服务器运行（测试/演示）
-
-把 `docker-local.sh` 全家桶（含"一键接入"）跑在远程服务器上的完整步骤、备份、开机自启与
-安全提醒见 [在远程服务器上运行本地统一编排](./server-local-orchestration.md)。
-
-## 7. 网关并发锁
-
-`portal-gateway.sh` 的读写命令都持有跨进程锁。Linux 使用 `flock`，无该命令时回退到原子目录锁。当前基础平台后端镜像已经安装 util-linux。
-
-```dotenv
-PORTAL_GATEWAY_LOCK_FILE=/path/to/portal-apps-locations.conf.lock
-PORTAL_GATEWAY_LOCK_TIMEOUT=60
-```
-
-正常 Docker 启动不需要配置这些变量。
-
-## 8. 本地测试数据
-
-```bash
-bash scripts/seed-local-test-data.sh --dry-run
-bash scripts/seed-local-test-data.sh
-```
-
-默认目标是：
-
-```text
-compose.local.yaml
-docker/.env.local
-project = basic-platform-local
-```
-
-脚本只允许 `APP_ENV=development/test/local` 且 `MYSQL_DATABASE=basic_platform`，然后检查本地 mysql 服务和基础数据。不要用它操作生产数据库。
-
-## 9. 常见问题
-
-| 现象 | 处理 |
-| --- | --- |
-| `.env.local` 有占位符 | 补齐模板要求的 Secret，再执行 `docker-local.sh config` |
-| API 更新后仍 404/405 | `bash scripts/docker-local.sh refresh-api` |
-| Compose 配置错误 | `bash scripts/docker-local.sh config` |
-| 依赖启动慢导致失败 | 查看对应服务日志；脚本已经分阶段等待并重试一次 |
-| 网关锁超时 | 检查是否有并发 onboard/offboard/CI |
-| LAN IP 改变 | 重新执行 `lan-access.sh enable`，或由 `docker-local.sh` 检测并更新覆盖 |
+完整步骤、legacy 固定记录恢复、错误分类和未验证项统一维护于[本地开发商业授权与子系统接入 Runbook](local-dev-license-runbook.md)。生产升级批准与发行完整性另按生产文档执行；本地源码指纹不自动赋予旧安装迁移资格。
