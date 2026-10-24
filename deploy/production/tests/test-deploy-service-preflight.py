@@ -30,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix='deploy-service-preflight-') as director
     release.write_text('PLATFORM_IMAGE=old-pointer\n')
     original = release.read_bytes()
     shutil.copyfile(ROOT / 'bin/compose-scope.sh', target / 'bin/compose-scope.sh')
+    shutil.copyfile(ROOT / 'bin/project-background.sh', target / 'bin/project-background.sh')
     (target / 'bin/public-transport.sh').write_text('public_transport_prepare() { :; }\n')
     (target / 'bin/provisioner-config-refresh.sh').write_text('''require_control_plane_reload_clearance() {
   [[ ! -f "$deploy_dir/runtime/.control-plane-reload-required" ]]
