@@ -66,6 +66,7 @@ type OfflineDeliveryRunner struct {
 	source              offlineInstallationSource
 	lifecycle           offlineInstallationLifecycle
 	initializer         offlineInstallationInitializer
+	catalog             registry.RuntimeComponentCatalogSource
 }
 
 // ConfigureInstallation 注入安装事实采集、基线冻结与初始化依赖；任一为空返回错误。
@@ -74,6 +75,16 @@ func (r *OfflineDeliveryRunner) ConfigureInstallation(source offlineInstallation
 		return errors.New("installation preparation dependencies are required")
 	}
 	r.source, r.lifecycle, r.initializer = source, lifecycle, initializer
+	return nil
+}
+
+// ConfigureRuntimeCatalog 注入内置运行时组件目录。V2 内置组件登记不使用
+// legacy runtime-approvals；证明路径必须从同一受限目录读取期望成员集合。
+func (r *OfflineDeliveryRunner) ConfigureRuntimeCatalog(source registry.RuntimeComponentCatalogSource) error {
+	if source == nil {
+		return errors.New("runtime component catalog source is required")
+	}
+	r.catalog = source
 	return nil
 }
 

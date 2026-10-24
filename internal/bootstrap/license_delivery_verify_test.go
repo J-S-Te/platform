@@ -18,12 +18,14 @@ import (
 	"time"
 
 	registry "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
+	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/infrastructure"
 	license "github.com/J-S-Te/Basic-Platform/internal/platform/license/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	core "github.com/J-S-Te/license-core"
+	"github.com/J-S-Te/license-core/catalog"
 	runtime "github.com/J-S-Te/license-core/runtime"
 )
 
@@ -262,6 +264,115 @@ func TestOfflineVerifyEnforcementFullPurchaseAndSelectedConditionalMembers(t *te
 			}
 			f.assertNoManagementWrites(t)
 		})
+	}
+}
+
+func (f *enforcementFixture) configureBuiltinV2(t *testing.T, app string) registry.RuntimeComponentSet {
+	t.Helper()
+	source := applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{}
+	set, err := source.RuntimeComponentSet(context.Background(), app, "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.r.catalog = source
+	status := coordination.Status{
+		Application:        coordination.Application{Application: app, State: runtime.Enforced, Revision: 31, CatalogVersion: catalog.Version, RegistrationMode: catalog.BuiltinComponentV2},
+		DeploymentRevision: f.reader.state.Revision,
+		SnapshotCurrent:    true,
+	}
+	for _, spec := range set.Components {
+		clientID := registry.RuntimeLicenseClientIDV2(f.reader.state.InstanceID, app, "prod", spec.ServiceID, spec.CredentialGeneration)
+		snapshot := runtime.PlatformSnapshot{Protocol: 1, InstanceID: f.reader.state.InstanceID, Environment: f.reader.state.Environment, Application: app, ServiceID: spec.ServiceID, Revision: status.Revision, EnforcementState: runtime.Enforced, CurrentLicenseJWS: f.currentRaw, HighestLicenseVersion: f.reader.state.CurrentVersion, SnapshotIssuedAt: f.now.Add(-time.Minute).Unix()}
+		f.snapshots[spec.ServiceID] = snapshot
+		issued, err := runtime.SignSnapshot(snapshot, "test-platform", f.platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		heartbeat := f.now.Add(-5 * time.Second)
+		status.Members = append(status.Members, coordination.Member{
+			Application: app, Environment: "prod", ServiceID: spec.ServiceID, OAuthClientID: clientID,
+			RegistrationProtocol: spec.RegistrationProtocol, CatalogVersion: spec.CatalogVersion, CredentialGeneration: spec.CredentialGeneration,
+			ReadyAt: &heartbeat, AckAt: &heartbeat, IssuedRevision: status.Revision, AckRevision: status.Revision, RawJWS: issued, IssuedDigest: enforcementHash(issued),
+		})
+	}
+	f.coordinator.statuses[app] = status
+	return set
+}
+
+func TestOfflineVerifyEnforcementBuiltinV2UsesCatalogNotLegacyApproval(t *testing.T) {
+	f := newEnforcementFixture(t, false)
+	app := "contract_management"
+	// Leave the stale V1 approval in place: V2 proof must not read it.
+	f.configureBuiltinV2(t, app)
+	out, err := f.run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ENFORCED" || len(out.Runtime) != 6 {
+		t.Fatalf("builtin V2 proof incomplete: %+v", out)
+	}
+	if f.approvals.reads[app] != 0 {
+		t.Fatalf("V2 proof read legacy approvals %d times", f.approvals.reads[app])
+	}
+	var contractComponents int
+	for _, proof := range out.Runtime {
+		if proof.Application == app {
+			contractComponents = len(proof.Components)
+		}
+	}
+	if contractComponents != 2 {
+		t.Fatalf("V2 contract component set = %d, want 2", contractComponents)
+	}
+	f.assertNoManagementWrites(t)
+}
+
+func TestOfflineVerifyEnforcementBuiltinV2RejectsNonCatalogIdentity(t *testing.T) {
+	cases := map[string]func(*enforcementFixture){
+		"protocol": func(f *enforcementFixture) {
+			f.changeMember("contract_management", func(m *coordination.Member) { m.RegistrationProtocol = 1 })
+		},
+		"catalog": func(f *enforcementFixture) {
+			f.changeMember("contract_management", func(m *coordination.Member) { m.CatalogVersion = 0 })
+		},
+		"generation": func(f *enforcementFixture) {
+			f.changeMember("contract_management", func(m *coordination.Member) { m.CredentialGeneration = "catalog-other" })
+		},
+		"oauth": func(f *enforcementFixture) {
+			f.changeMember("contract_management", func(m *coordination.Member) { m.OAuthClientID = "old-client" })
+		},
+		"missing-member": func(f *enforcementFixture) {
+			s := f.coordinator.statuses["contract_management"]
+			s.Members = s.Members[:1]
+			f.coordinator.statuses["contract_management"] = s
+		},
+		"stale-ack": func(f *enforcementFixture) {
+			f.changeMember("contract_management", func(m *coordination.Member) { m.AckRevision-- })
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newEnforcementFixture(t, false)
+			f.configureBuiltinV2(t, "contract_management")
+			mutate(f)
+			if out, err := f.run(); err == nil || out.Status == "ENFORCED" {
+				t.Fatalf("non-catalog V2 identity accepted: %+v %v", out, err)
+			}
+			f.assertNoManagementWrites(t)
+		})
+	}
+}
+
+func TestOfflineVerifyEnforcementBuiltinV2ImageDiagnosticsDoNotGate(t *testing.T) {
+	f := newEnforcementFixture(t, false)
+	app := "contract_management"
+	f.configureBuiltinV2(t, app)
+	f.changeMember(app, func(m *coordination.Member) {
+		m.ImageDigest = "sha256:" + strings.Repeat("c", 64)
+		m.CoverageDigest = "sha256:" + strings.Repeat("d", 64)
+	})
+	out, err := f.run()
+	if err != nil || out.Status != "ENFORCED" {
+		t.Fatalf("V2 diagnostic digests became an authorization gate: %+v %v", out, err)
 	}
 }
 

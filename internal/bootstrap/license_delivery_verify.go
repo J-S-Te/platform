@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	core "github.com/J-S-Te/license-core"
+	"github.com/J-S-Te/license-core/catalog"
 	runtime "github.com/J-S-Te/license-core/runtime"
 )
 
@@ -79,10 +81,6 @@ func (r *OfflineDeliveryRunner) verifyEnforcement(ctx context.Context, verify of
 	if _, err := r.principal(ctx); err != nil {
 		return out, fmt.Errorf("%w: active offline administrator is required", ErrOfflineEnforcementIncomplete)
 	}
-	source, ok := r.source.(registry.RuntimeLicenseLifecycleApprovalSource)
-	if !ok {
-		return out, fmt.Errorf("%w: isolated release approval reader unavailable", ErrOfflineEnforcementIncomplete)
-	}
 	state, err := r.initializer.Read(ctx)
 	if err != nil {
 		return out, fmt.Errorf("%w: verified current license unavailable", ErrOfflineEnforcementIncomplete)
@@ -92,41 +90,72 @@ func (r *OfflineDeliveryRunner) verifyEnforcement(ctx context.Context, verify of
 		return out, err
 	}
 	type approvedApplication struct {
-		digest string
-		specs  []coordination.ServiceSpec
-		status coordination.Status
+		builtin bool
+		digest  string
+		specs   []coordination.ServiceSpec
+		status  coordination.Status
 	}
 	approved := make(map[string]approvedApplication, len(apps))
+	var source registry.RuntimeLicenseLifecycleApprovalSource
 	for _, app := range apps {
 		if err = ctx.Err(); err != nil {
 			return out, err
-		}
-		release, e := source.ApprovedRuntimeLicenseLifecycle(ctx, app, "prod")
-		if e != nil {
-			return out, fmt.Errorf("%w: %s release approval unavailable", ErrOfflineEnforcementIncomplete, app)
-		}
-		digest, e := registry.RuntimeLicenseReleaseDigest(release)
-		if e != nil {
-			return out, fmt.Errorf("%w: %s release approval invalid", ErrOfflineEnforcementIncomplete, app)
-		}
-		lifecycle, e := registry.NewRuntimeLicenseLifecycleVerifier(source)
-		if e != nil {
-			return out, fmt.Errorf("%w: release verification unavailable", ErrOfflineEnforcementIncomplete)
-		}
-		// 复用真实的、感知代际的 OAuth 绑定。第二次可信读取必须与完整规范发布
-		// 一致，包括条件选择逻辑。
-		binding, e := lifecycle.VerifyRuntimeLifecycle(ctx, coordination.LifecycleInput{Application: app, Environment: "prod", ReleaseDigest: digest})
-		if e != nil {
-			return out, fmt.Errorf("%w: %s release approval changed", ErrOfflineEnforcementIncomplete, app)
 		}
 		status, e := r.coordinator.Status(ctx, app)
 		if e != nil {
 			return out, fmt.Errorf("%w: %s runtime status unavailable", ErrOfflineEnforcementIncomplete, app)
 		}
-		if e = offlineEnforcementStatus(state, app, status, binding.Specs, verify, clock().UTC()); e != nil {
-			return out, e
+		switch status.Application.RegistrationMode {
+		case catalog.BuiltinComponentV2:
+			set, e := r.builtinRuntimeComponentSet(ctx, app)
+			if e != nil {
+				return out, fmt.Errorf("%w: %s runtime component catalog unavailable", ErrOfflineEnforcementIncomplete, app)
+			}
+			specs, e := builtinRuntimeSpecs(state, app, status, set)
+			if e != nil {
+				return out, fmt.Errorf("%w: %s runtime component set is incomplete", ErrOfflineEnforcementIncomplete, app)
+			}
+			if e = offlineEnforcementStatusV2(state, app, status, specs, verify, clock().UTC()); e != nil {
+				return out, e
+			}
+			digest, e := runtimeComponentSetDigest(set)
+			if e != nil {
+				return out, fmt.Errorf("%w: %s runtime component set is invalid", ErrOfflineEnforcementIncomplete, app)
+			}
+			approved[app] = approvedApplication{builtin: true, digest: digest, specs: specs, status: status}
+		case catalog.BridgingComponentV2:
+			return out, fmt.Errorf("%w: %s bridging runtime proof is not supported", ErrOfflineEnforcementIncomplete, app)
+		default:
+			if source == nil {
+				var ok bool
+				source, ok = r.source.(registry.RuntimeLicenseLifecycleApprovalSource)
+				if !ok {
+					return out, fmt.Errorf("%w: isolated release approval reader unavailable", ErrOfflineEnforcementIncomplete)
+				}
+			}
+			release, e := source.ApprovedRuntimeLicenseLifecycle(ctx, app, "prod")
+			if e != nil {
+				return out, fmt.Errorf("%w: %s release approval unavailable", ErrOfflineEnforcementIncomplete, app)
+			}
+			digest, e := registry.RuntimeLicenseReleaseDigest(release)
+			if e != nil {
+				return out, fmt.Errorf("%w: %s release approval invalid", ErrOfflineEnforcementIncomplete, app)
+			}
+			lifecycle, e := registry.NewRuntimeLicenseLifecycleVerifier(source)
+			if e != nil {
+				return out, fmt.Errorf("%w: release verification unavailable", ErrOfflineEnforcementIncomplete)
+			}
+			// 复用真实的、感知代际的 OAuth 绑定。第二次可信读取必须与完整规范发布
+			// 一致，包括条件选择逻辑。
+			binding, e := lifecycle.VerifyRuntimeLifecycle(ctx, coordination.LifecycleInput{Application: app, Environment: "prod", ReleaseDigest: digest})
+			if e != nil {
+				return out, fmt.Errorf("%w: %s release approval changed", ErrOfflineEnforcementIncomplete, app)
+			}
+			if e = offlineEnforcementStatus(state, app, status, binding.Specs, verify, clock().UTC()); e != nil {
+				return out, e
+			}
+			approved[app] = approvedApplication{digest: digest, specs: binding.Specs, status: status}
 		}
-		approved[app] = approvedApplication{digest: digest, specs: binding.Specs, status: status}
 	}
 	// 后一个应用的检查不得掩盖前一个应用的续期、成员变化或心跳丢失。
 	// 重新观察整个集合；绝不代替消费方把这些观察变成 ACK。
@@ -135,19 +164,36 @@ func (r *OfflineDeliveryRunner) verifyEnforcement(ctx context.Context, verify of
 			return out, err
 		}
 		first := approved[app]
-		release, e := source.ApprovedRuntimeLicenseLifecycle(ctx, app, "prod")
-		if e != nil {
-			return out, fmt.Errorf("%w: %s final release approval unavailable", ErrOfflineEnforcementIncomplete, app)
-		}
-		digest, e := registry.RuntimeLicenseReleaseDigest(release)
-		if e != nil || digest != first.digest {
-			return out, fmt.Errorf("%w: %s release changed during verification", ErrOfflineEnforcementIncomplete, app)
+		var digest string
+		if first.builtin {
+			set, e := r.builtinRuntimeComponentSet(ctx, app)
+			if e != nil {
+				return out, fmt.Errorf("%w: %s runtime component catalog changed during verification", ErrOfflineEnforcementIncomplete, app)
+			}
+			digest, e = runtimeComponentSetDigest(set)
+			if e != nil || digest != first.digest {
+				return out, fmt.Errorf("%w: %s release changed during verification", ErrOfflineEnforcementIncomplete, app)
+			}
+		} else {
+			release, e := source.ApprovedRuntimeLicenseLifecycle(ctx, app, "prod")
+			if e != nil {
+				return out, fmt.Errorf("%w: %s final release approval unavailable", ErrOfflineEnforcementIncomplete, app)
+			}
+			digest, e = registry.RuntimeLicenseReleaseDigest(release)
+			if e != nil || digest != first.digest {
+				return out, fmt.Errorf("%w: %s release changed during verification", ErrOfflineEnforcementIncomplete, app)
+			}
 		}
 		status, e := r.coordinator.Status(ctx, app)
 		if e != nil || status.Revision != first.status.Revision {
 			return out, fmt.Errorf("%w: %s runtime changed during verification", ErrOfflineEnforcementIncomplete, app)
 		}
-		if e = offlineEnforcementStatus(state, app, status, first.specs, verify, clock().UTC()); e != nil {
+		if first.builtin {
+			e = offlineEnforcementStatusV2(state, app, status, first.specs, verify, clock().UTC())
+		} else {
+			e = offlineEnforcementStatus(state, app, status, first.specs, verify, clock().UTC())
+		}
+		if e != nil {
 			return out, e
 		}
 		proof := OfflineEnforcementApplicationProof{Application: app, Environment: "prod", Revision: status.Revision, ReleaseDigest: digest}
@@ -243,6 +289,104 @@ func offlineEnforcementStatus(state domain.State, app string, status coordinatio
 			}
 		}
 		delete(expected, member.ServiceID)
+	}
+	return nil
+}
+
+func (r *OfflineDeliveryRunner) builtinRuntimeComponentSet(ctx context.Context, app string) (registry.RuntimeComponentSet, error) {
+	if r.catalog == nil {
+		return registry.RuntimeComponentSet{}, errors.New("runtime component catalog is not configured")
+	}
+	set, err := r.catalog.RuntimeComponentSet(ctx, app, "prod")
+	if err != nil {
+		return registry.RuntimeComponentSet{}, err
+	}
+	if set.Application != app || set.Environment != "prod" {
+		return registry.RuntimeComponentSet{}, errors.New("runtime component catalog scope mismatch")
+	}
+	if err = registry.ValidateRuntimeComponentSet(set); err != nil {
+		return registry.RuntimeComponentSet{}, err
+	}
+	return set, nil
+}
+
+func builtinRuntimeSpecs(state domain.State, app string, status coordination.Status, set registry.RuntimeComponentSet) ([]coordination.ServiceSpec, error) {
+	if state.InstanceID == "" || status.Application.Application != app || status.Application.RegistrationMode != catalog.BuiltinComponentV2 || status.Application.CatalogVersion != set.CatalogVersion || set.Application != app || set.Environment != "prod" || len(set.Components) == 0 || len(status.Members) != len(set.Components) {
+		return nil, errors.New("builtin runtime set does not match the registered application")
+	}
+	specs := make([]coordination.ServiceSpec, 0, len(set.Components))
+	for _, component := range set.Components {
+		if component.ServiceID == "" || component.RegistrationProtocol != catalog.RegistrationProtocolV2 || component.CatalogVersion != set.CatalogVersion || component.CredentialGeneration == "" {
+			return nil, errors.New("builtin runtime component is invalid")
+		}
+		specs = append(specs, coordination.ServiceSpec{
+			Application: app, Environment: "prod", ServiceID: component.ServiceID,
+			OAuthClientID:        registry.RuntimeLicenseClientIDV2(state.InstanceID, app, "prod", component.ServiceID, component.CredentialGeneration),
+			RegistrationProtocol: component.RegistrationProtocol, CatalogVersion: component.CatalogVersion, CredentialGeneration: component.CredentialGeneration,
+		})
+	}
+	return specs, nil
+}
+
+func runtimeComponentSetDigest(set registry.RuntimeComponentSet) (string, error) {
+	components := append([]registry.RuntimeComponentSpec(nil), set.Components...)
+	sort.Slice(components, func(i, j int) bool { return components[i].ServiceID < components[j].ServiceID })
+	raw, err := json.Marshal(struct {
+		Application    string                          `json:"application"`
+		Environment    string                          `json:"environment"`
+		CatalogVersion int                             `json:"catalog_version"`
+		Components     []registry.RuntimeComponentSpec `json:"components"`
+	}{Application: set.Application, Environment: set.Environment, CatalogVersion: set.CatalogVersion, Components: components})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func offlineEnforcementStatusV2(state domain.State, app string, status coordination.Status, specs []coordination.ServiceSpec, verify offlineSnapshotVerification, now time.Time) error {
+	failure := func() error {
+		return fmt.Errorf("%w: %s requires the full approved current snapshot and fresh consumer ACKs", ErrOfflineEnforcementIncomplete, app)
+	}
+	if status.Application.Application != app || status.Application.RegistrationMode != catalog.BuiltinComponentV2 || status.State != runtime.Enforced || status.MigrationEligible || status.Revision == 0 || status.DeploymentRevision != state.Revision || !status.SnapshotCurrent || len(specs) == 0 || len(status.Members) != len(specs) {
+		return failure()
+	}
+	expected := make(map[string]coordination.ServiceSpec, len(specs))
+	for _, spec := range specs {
+		if spec.Application != app || spec.Environment != "prod" || spec.ServiceID == "" || spec.RegistrationProtocol != catalog.RegistrationProtocolV2 || spec.CatalogVersion == 0 || spec.CredentialGeneration == "" || expected[spec.ServiceID].ServiceID != "" {
+			return failure()
+		}
+		expected[spec.ServiceID] = spec
+	}
+	for _, member := range status.Members {
+		spec, ok := expected[member.ServiceID]
+		if !ok || member.Application != app || member.Environment != spec.Environment || member.OAuthClientID != spec.OAuthClientID || member.RegistrationProtocol != spec.RegistrationProtocol || member.CatalogVersion != spec.CatalogVersion || member.CredentialGeneration != spec.CredentialGeneration || member.RetiredAt != nil || member.IssuedRevision != status.Revision || member.AckRevision != status.Revision || member.ReadyAt == nil || member.AckAt == nil {
+			return failure()
+		}
+		// V2 的 image/coverage 只保留为诊断字段，不是商业授权等值门槛。
+		for _, heartbeat := range []*time.Time{member.ReadyAt, member.AckAt} {
+			if heartbeat.IsZero() || now.Sub(*heartbeat) > time.Minute || heartbeat.After(now.Add(time.Second)) {
+				return failure()
+			}
+		}
+		digest := sha256.Sum256([]byte(member.RawJWS))
+		if member.RawJWS == "" || member.IssuedDigest != hex.EncodeToString(digest[:]) {
+			return failure()
+		}
+		snapshot, err := verify(member.RawJWS, runtime.Binding{InstanceID: state.InstanceID, Environment: state.Environment, Application: app, ServiceID: member.ServiceID})
+		if err != nil || snapshot.Revision != status.Revision || snapshot.EnforcementState != runtime.Enforced || snapshot.MigrationEligible || snapshot.HighestLicenseVersion != state.HighestVersion || snapshot.SnapshotIssuedAt > now.Unix() {
+			return failure()
+		}
+		for _, slot := range []struct{ raw, digest string }{{snapshot.CurrentLicenseJWS, state.CurrentDigest}, {snapshot.PendingLicenseJWS, state.PendingDigest}} {
+			hash := sha256.Sum256([]byte(slot.raw))
+			if (slot.digest == "" && slot.raw != "") || (slot.digest != "" && (slot.raw == "" || hex.EncodeToString(hash[:]) != slot.digest)) {
+				return failure()
+			}
+		}
+		delete(expected, member.ServiceID)
+	}
+	if len(expected) != 0 {
+		return failure()
 	}
 	return nil
 }

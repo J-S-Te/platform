@@ -791,6 +791,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		if err == nil {
 			if source, ok := operational.AccessApplier.(offlineInstallationSource); ok {
 				err = offlineDelivery.ConfigureInstallation(source, licenseCoordinator, licenseService)
+				if err == nil {
+					err = offlineDelivery.ConfigureRuntimeCatalog(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{})
+				}
 			} else {
 				err = errors.New("offline installation evidence source is unavailable")
 			}
