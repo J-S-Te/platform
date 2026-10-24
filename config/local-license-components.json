@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "applications": {
+    "contract_management": {
+      "directory": "contract_management",
+      "services": {
+        "contract-api": "contract-management/backend:local",
+        "contract-worker": "contract-management/backend:local"
+      },
+      "migration": {
+        "service": "contract-migrate",
+        "image": "contract-management/backend:local"
+      }
+    },
+    "customer_and_opportunity": {
+      "directory": "customer_and_opportunity",
+      "services": {
+        "customer-api": "customer-opportunity/backend:local",
+        "customer-opportunity-alert-worker": "customer-opportunity/backend:local",
+        "customer-owner-notification-worker": "customer-opportunity/backend:local",
+        "customer-presale-assignment-notification-worker": "customer-opportunity/backend:local",
+        "customer-presale-progress-notification-worker": "customer-opportunity/backend:local",
+        "customer-notification-delivery-worker": "customer-opportunity/backend:local",
+        "customer-presale-alert-worker": "customer-opportunity/presale-alert-worker:local",
+        "presale-worker": "customer-opportunity/presale-worker:local",
+        "contract-transfer-worker": "customer-opportunity/backend:local"
+      },
+      "migration": {
+        "service": "customer-migrate",
+        "image": "customer-opportunity/backend:local"
+      }
+    },
+    "customer_portal": {
+      "directory": "customer_and_opportunity",
+      "services": {
+        "portal-api": "customer-portal/backend:local",
+        "portal-report-worker": "customer-portal/backend:local",
+        "portal-invite-compensation-worker": "customer-opportunity/backend:local"
+      },
+      "migration": {
+        "service": "portal-migrate",
+        "image": "customer-portal/backend:local"
+      }
+    },
+    "project_management": {
+      "directory": "project_management",
+      "services": {
+        "project-api": "project-management/backend:local",
+        "sla-notifier": "project-management/backend:local"
+      },
+      "migration": {
+        "service": "project-migrate",
+        "image": "project-management/backend:local"
+      }
+    },
+    "settlement": {
+      "directory": "Settlement",
+      "services": {
+        "settlement-api": "settlement/backend:local",
+        "settlement-worker": "settlement/backend:local"
+      },
+      "migration": {
+        "service": "settlement-migrate",
+        "image": "settlement/backend:local"
+      }
+    },
+    "data_analysis": {
+      "directory": "data_analysis",
+      "services": {
+        "dashboard-api": "data-analysis/dashboard-api:local",
+        "aggregation-worker": "data-analysis/aggregation-worker:local",
+        "alert-worker": "data-analysis/alert-worker:local"
+      },
+      "migration": {
+        "service": "dashboard-migrate",
+        "image": "data-analysis/local-migrate:local"
+      }
+    }
+  }
+}
