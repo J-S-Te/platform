@@ -38,6 +38,7 @@ backup_database() { log backup; [[ "$FAIL_PHASE" != backup ]]; }
 require_mysql_ready() { :; }
 diagnose_mysql_container() { :; }
 backup_database_if_initialized() { backup_database "$@"; }
+provision_iam_import_client() { :; }
 ensure_temporal_application_network() { :; }
 prepare_managed_public_proxy_image() { log proxy-prefetch; [[ "$FAIL_PHASE" != proxy ]]; }
 wait_for_health() { log api-health; }
