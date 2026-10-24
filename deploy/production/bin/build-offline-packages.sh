@@ -725,7 +725,7 @@ if want common; then
     fi
     ensure_local_platform_image "$tag"
     base_ref="$(offline_image_inspect "$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null |
-      awk -v name="${tag%%:*}" 'index($0, name "@sha256:") == 1 { print; exit }')"
+      awk -v name="${tag%%:*}" 'index($0, name "@sha256:") == 1 { print; exit }')" || base_ref=''
     [[ -n "$base_ref" ]] || base_ref="$tag"
     printf '%s\t%s\n' 'platform/deploy/production/bin/offline-base.Dockerfile' "$base_ref" >> "$base_evidence_temporary"
     common_index=$((common_index + 1))
