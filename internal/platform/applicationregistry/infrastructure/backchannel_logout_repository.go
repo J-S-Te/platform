@@ -16,6 +16,7 @@ type backchannelLogoutURIModel struct {
 	UpdatedAt     time.Time `gorm:"column:updated_at"`
 }
 
+// TableName 指定 GORM 行映射的 Back-Channel Logout URI 表名。
 func (backchannelLogoutURIModel) TableName() string { return "platform_oauth_backchannel_logout_uri" }
 
 // BackchannelLogoutURIRepository 持久化单个 OAuth Client 的标准 Back-Channel Logout URI。

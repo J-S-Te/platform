@@ -42,10 +42,10 @@ func TestCustomerPortalInitialAdministratorRepairIsNarrowAndDoesNotGrantDirectly
 	}
 }
 
-// TestCustomerPortalInitialAdministratorRepairOnMySQL writes only to an explicitly supplied,
-// empty disposable schema. It exercises the real historical chain through 111, followed by the
-// forward repair, because MySQL multi-table UPDATE and correlated NOT EXISTS semantics cannot be
-// established by a parser-only test.
+// TestCustomerPortalInitialAdministratorRepairOnMySQL 只写入显式提供的
+// 空临时 schema。测试执行真实历史迁移链直至 111，再执行
+// 前向修复，因为 MySQL 多表 UPDATE 和关联 NOT EXISTS 语义
+// 不能仅通过解析器测试确认。
 func TestCustomerPortalInitialAdministratorRepairOnMySQL(t *testing.T) {
 	dsn := os.Getenv("PLATFORM_PORTAL_ACCESS_MIGRATION_TEST_DSN")
 	if dsn == "" {

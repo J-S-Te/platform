@@ -10,13 +10,14 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 )
 
-// keycloakAuthorizationVerifier adapts the narrowly scoped broker verifier to
-// the authorization-context endpoint. It does not make Keycloak tokens valid
-// for platform management APIs or the platform OAuth token endpoint.
+// keycloakAuthorizationVerifier 把范围受限的 broker 验证器适配到
+// authorization-context 端点。它不会使 Keycloak token 对平台管理 API 或平台
+// OAuth token 端点变为有效。
 type keycloakAuthorizationVerifier struct {
 	verifier *middleware.KeycloakBrokerJWTVerifier
 }
 
+// Verify 验签 Keycloak 签发的访问 token 并提取 authorization-context 所需的紧凑声明。
 func (v keycloakAuthorizationVerifier) Verify(ctx context.Context, raw string) (oidchttp.ExternalAuthorizationTokenClaims, error) {
 	claims, err := v.verifier.VerifyAuthorizationAccessToken(ctx, raw)
 	if err != nil {
@@ -28,13 +29,15 @@ func (v keycloakAuthorizationVerifier) Verify(ctx context.Context, raw string) (
 	}, nil
 }
 
-// keycloakJWKSBackchannel keeps the public issuer in token validation while
-// allowing the API container to fetch signing keys over the Compose network.
+// keycloakJWKSBackchannel 在 token 校验中保留公开 issuer 的同时，
+// 允许 API 容器经 Compose 内网拉取签名密钥（JWKS）。
 type keycloakJWKSBackchannel struct {
 	base             http.RoundTripper
 	public, internal *url.URL
 }
 
+// RoundTrip 仅对匹配公开 issuer 的请求改写到 Compose 内网地址，其余请求原样转发，
+// 保证 token 校验仍以公开 issuer 为准。
 func (t keycloakJWKSBackchannel) RoundTrip(request *http.Request) (*http.Response, error) {
 	if request.URL.Scheme != t.public.Scheme || request.URL.Host != t.public.Host {
 		return t.base.RoundTrip(request)

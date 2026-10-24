@@ -1,4 +1,4 @@
-// Package domain contains identity concepts without transport or database dependencies.
+// Package domain 承载身份领域概念，不依赖任何传输层或数据库实现。
 package domain
 
 import (
@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// LoginAccount combines the identity and credential state required by a password-login use case.
+// LoginAccount 汇总密码登录用例所需的身份与凭据状态，登录判定全部以此为准。
 type LoginAccount struct {
 	TenantID           string
 	TenantName         string
@@ -27,7 +27,7 @@ type LoginAccount struct {
 	MustChangePassword bool
 }
 
-// Session is the persisted browser-session state used to build the API response and cookie.
+// Session 是持久化的浏览器会话状态，用于构造 API 响应与会话 cookie。
 type Session struct {
 	ID        string
 	TenantID  string
@@ -38,14 +38,14 @@ type Session struct {
 	UserAgent string
 }
 
-// ReferenceName is the compact API representation for a tenant, user, account or role.
+// ReferenceName 是租户、用户、账号或角色的紧凑 API 表示。
 type ReferenceName struct {
 	ID   string
 	Name string
 	Code string
 }
 
-// Principal is the authenticated server-side identity returned by session verification.
+// Principal 是会话验证返回的已认证服务端身份，其中携带服务端授权快照。
 type Principal struct {
 	SessionID       string
 	LoginIP         net.IP

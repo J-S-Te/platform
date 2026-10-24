@@ -35,7 +35,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ProcessRunner is implemented by each background loop composed into the worker process.
+// ProcessRunner 由组成 worker 进程的每个后台循环实现。
 type ProcessRunner interface {
 	Run(context.Context)
 }
@@ -63,7 +63,7 @@ func (runner *concurrentRunner) Run(ctx context.Context) {
 	group.Wait()
 }
 
-// Worker is the dependency container for local asynchronous job processing.
+// Worker 是本地异步任务处理的依赖容器。
 type Worker struct {
 	Runner ProcessRunner
 	Logger *slog.Logger
@@ -76,6 +76,9 @@ type Worker struct {
 // 参数 cfg 提供数据库与调度配置；返回 *Worker 表示可启动的完整 worker 进程依赖图。
 // Worker 不执行 AutoMigrate，数据库变更只能由独立 migrate 命令完成，避免扩容或重启后台任务时并发竞争 DDL。
 func NewWorker(cfg config.Config) (*Worker, error) {
+	// 传给统一接入执行器的 broker 端口（未启用 Keycloak 时保持 nil）。
+	var brokerCredentials applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerCredentials
+	var brokerControl applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerControl
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)
 	}
@@ -184,10 +187,10 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		return nil, fmt.Errorf("create identity expiry worker: %w", err)
 	}
 	runners = append(runners, expiryRunner)
-	// Scheduled personnel changes share the same worker process and database lease
-	// semantics; no extra service or broker is required.
+	// 计划人事异动与到期任务共用同一 worker 进程与数据库租约语义，
+	// 不需要额外的服务或消息代理。
 	personnelRepo := identityinfrastructure.NewPersonnelChangeGORMRepository(db)
-	personnelService, err := identityapplication.NewPersonnelChangeService(personnelRepo, ulid.Generator{}, identityapplication.SystemClock{})
+	personnelService, err := buildPersonnelWorkerService(cfg, db)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -196,24 +199,38 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 	// 到期异动由 Worker 真正执行，因此完成通知也必须注入 Worker 使用的服务实例；
 	// 只给 HTTP 组合根注入会导致自动执行成功却没有任何人员异动通知。
 	personnelService.SetNotifier(notificationService)
+	// 超管例外审批的本地审计 outbox 由同一 worker 进程补投。审计端装配与 HTTP 组合根
+	// 保持一致：只做字段翻译，不改变审批判定；投递失败保留 outbox 并退避重试。
+	personnelAudit := &personnelChangeAuditAdapter{service: service, config: cfg.Audit, ids: ulid.Generator{}}
+	personnelService.SetAuditSink(personnelAudit)
+	approvalExceptionDispatcher, err := identityapplication.NewApprovalExceptionDispatcher(personnelRepo, personnelAudit, identityapplication.SystemClock{})
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create personnel approval exception dispatcher: %w", err)
+	}
 	personnelRunner, err := identityworker.NewPersonnelChangeWorker(personnelService, logger, cfg.Worker.ID+"-personnel", cfg.Worker.PollInterval)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
+	personnelRunner.SetApprovalExceptionDispatcher(approvalExceptionDispatcher)
 	runners = append(runners, personnelRunner)
+	// 统一接入的角色目录投影复用本进程内同一个 applicationaccess.Service，
+	// 不在装配链里另建第二份实例（否则审计 sink 与缓存会分裂）。
+	var keycloakAccessCatalog *applicationaccess.Service
 	if cfg.Keycloak.Enabled {
-		// Reconcile Keycloak on every deployment/restart. Operators must not need
-		// to click "sync" after shipping a Broker policy or profile change.
+		// 每次部署/重启都对账 Keycloak。发布 Broker 策略或 profile 变更后，
+		// 运维不应该还需要手动点一次"同步"。
 		brokerClientID := strings.TrimSpace(cfg.Keycloak.BrokerClientID)
 		brokerClientSecret := strings.TrimSpace(cfg.Keycloak.BrokerClientSecret)
 		customerPortalBrokerClientID := strings.TrimSpace(cfg.Keycloak.CustomerPortalBrokerClientID)
 		customerPortalBrokerClientSecret := strings.TrimSpace(cfg.Keycloak.CustomerPortalBrokerClientSecret)
 		var brokerRegistrar keycloakBrokerRegistrar
 		var brokerTenantID string
-		// The periodic portal Broker reconciler also needs the registrar when all
-		// credentials are already configured, so initialize its repositories every time.
+		// 周期门户 Broker 对账器在凭据已全部配好时同样需要 registrar，
+		// 因此其仓储每次都要初始化。
 		{
 			managementRepository, managementErr := applicationregistryinfrastructure.NewManagementRepository(db)
 			if managementErr != nil {
@@ -257,6 +274,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 				realm:        cfg.Keycloak.Realm,
 				environment:  keycloakBrokerEnvironment(cfg.Environment),
 			}
+			brokerCredentials = brokerRegistrar
 			brokerTenantID = tenantID
 			if brokerClientID == "" || brokerClientSecret == "" {
 				brokerClientID, brokerClientSecret, tenantErr = brokerRegistrar.EnsureKeycloakBroker(context.Background(), tenantID)
@@ -294,10 +312,10 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			brokerClientID, brokerClientSecret,
 			cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
 		)
-		// When the broker client already has active credentials, ensureBrokerClient
-		// returns an empty secret to avoid unnecessary rotation. In that case we
-		// only verify the IdP exists and has a complete config; if the secret is
-		// available (new client or forced rotation), we do the full reconciliation.
+		brokerControl = controlPlane
+		// broker client 已有活动凭据时，ensureBrokerClient 返回空 secret 以避免
+		// 不必要的轮换。此时只验证 IdP 存在且配置完整；若拿到了 secret
+		// （新 client 或强制轮换），才执行完整对账。
 		if brokerClientID != "" && brokerClientSecret != "" {
 			if err := controlPlane.EnsureBroker(context.Background(), brokerClientID, brokerClientSecret); err != nil {
 				_ = database.Close(db)
@@ -359,6 +377,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			_ = logFile.Close()
 			return nil, fmt.Errorf("create Keycloak authorization access resolver: %w", err)
 		}
+		keycloakAccessCatalog = accessService
 		readinessStore, err := keycloakauthorizationinfrastructure.NewSwitchReadinessStore(db)
 		if err != nil {
 			_ = database.Close(db)
@@ -395,6 +414,13 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		}
 		for _, mapping := range mappings {
 			if err := reconcileStoredKeycloakClient(context.Background(), mapping, cfg.Keycloak.RequireHTTPS, reconcileDependencies); err != nil {
+				// 已退役或被删除的应用不再有授权资源：跳过该映射并留下告警，
+				// 不能因为一条历史映射就让整个 Worker（及同进程 API）退出。
+				if errors.Is(err, applicationaccess.ErrNotFound) {
+					slog.Warn("skip stored Keycloak Client reconcile for inactive application",
+						"application_id", mapping.ApplicationID, "environment_id", mapping.EnvironmentID, "client_id", mapping.ClientID)
+					continue
+				}
 				_ = database.Close(db)
 				_ = logFile.Close()
 				return nil, err
@@ -459,10 +485,9 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		}
 		keycloakRunner.SetEligibilityReconciler(eligibilityReconciler)
 		runners = append(runners, keycloakRunner)
-		// Keycloak does not need a custom listener plugin for the platform audit
-		// trail: the worker polls its standard user/admin event endpoints with a
-		// small idempotent overlap and maps subjects through external_subject_id.
-		// Events without a verified platform mapping are intentionally skipped.
+		// 平台审计轨迹不需要 Keycloak 安装自定义监听插件：worker 以小幅幂等重叠
+		// 轮询其标准用户/管理员事件端点，并经 external_subject_id 映射主体。
+		// 没有验证通过的平台映射的事件被刻意跳过。
 		auditIdentityResolver, err := keycloakauthorizationinfrastructure.NewAuditIdentityResolver(db)
 		if err != nil {
 			_ = database.Close(db)
@@ -475,7 +500,9 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			_ = logFile.Close()
 			return nil, err
 		}
-		eventAuditRunner, err := newKeycloakEventAuditRunner(eventCollector, logger, cfg.Worker.PollInterval)
+		// 批次 3：采集进度按 realm 持久化，停机后可续采。
+		cursorStore := keycloakauthorizationinfrastructure.NewEventCursorRepository(db)
+		eventAuditRunner, err := newKeycloakEventAuditRunner(eventCollector, cursorStore, cfg.Keycloak.Realm, logger, cfg.Worker.PollInterval)
 		if err != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()
@@ -510,11 +537,25 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		_ = logFile.Close()
 		return nil, fmt.Errorf("create subsystem deployment sweeper: %w", err)
 	}
+	// 统一接入的持久执行器：领取/续租/逐阶段推进（首次接入路径），随 Worker 进程启停。
+	// 仅在子系统接入启用时装配；任一步失败即进程启动失败（不做静默降级）。
+	if cfg.SubsystemOnboarding.Enabled {
+		accessRunner, accessErr := newSubsystemAccessRunnerFromConfig(cfg, db, logger, applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerReconciliation{
+			Credentials: brokerCredentials, Control: brokerControl,
+			IsRecoverable: applicationregistryhttp.IsRecoverableKeycloakBrokerConfigurationError,
+		}, keycloakAccessCatalog)
+		if accessErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("create subsystem access runner: %w", accessErr)
+		}
+		runners = append(runners, accessRunner)
+	}
 	runner := &concurrentRunner{runners: runners}
 	return &Worker{Runner: runner, Logger: logger, database: db, logFile: logFile}, nil
 }
 
-// Close releases resources held by the worker process.
+// Close 释放 worker 进程占用的资源。
 func (worker *Worker) Close() {
 	if worker == nil {
 		return

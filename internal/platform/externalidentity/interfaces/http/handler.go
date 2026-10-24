@@ -28,13 +28,17 @@ type externalIdentityService interface {
 	BindCustomer(context.Context, appctx.Principal, application.RequestProof, application.BindInput) (domain.BindingResult, error)
 	DisableCustomerBinding(context.Context, appctx.Principal, application.RequestProof, application.BindInput) (domain.BindingResult, error)
 	CustomerBindingStatus(context.Context, string, string, string) (domain.BindingResult, error)
+	// PortalApplicationCode 返回服务实例实际使用的门户应用码，避免读取侧硬编码默认值。
+	PortalApplicationCode() string
 }
 
+// Handler 适配外部身份机器用例到统一 HTTP 响应协议；防重放证明取自请求上下文。
 type Handler struct {
 	service externalIdentityService
 	logger  *slog.Logger
 }
 
+// NewHandler 构造外部身份 HTTP 处理器；任一依赖为 nil 时失败关闭。
 func NewHandler(service externalIdentityService, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("external identity handler dependencies must not be nil")
@@ -54,6 +58,7 @@ type roleRequest struct {
 	RoleCode        string `json:"role_code"`
 }
 
+// Provision 预置外部客户身份；只返回不含秘密的结果。
 func (handler *Handler) Provision(writer http.ResponseWriter, request *http.Request) {
 	principal, proof, ok := requestContext(writer, request)
 	if !ok {
@@ -71,10 +76,12 @@ func (handler *Handler) Provision(writer http.ResponseWriter, request *http.Requ
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "外部客户身份已预置", result)
 }
 
+// AssignRole 分配客户门户角色；角色与应用由服务端固定，不接受请求指定。
 func (handler *Handler) AssignRole(writer http.ResponseWriter, request *http.Request) {
 	handler.changeRole(writer, request, false)
 }
 
+// RevokeRole 撤销客户门户角色。
 func (handler *Handler) RevokeRole(writer http.ResponseWriter, request *http.Request) {
 	handler.changeRole(writer, request, true)
 }
@@ -184,7 +191,7 @@ func (handler *Handler) GetCustomerBinding(writer http.ResponseWriter, request *
 		return
 	}
 	platformUserID := strings.TrimSpace(request.PathValue("platform_user_id"))
-	result, err := handler.service.CustomerBindingStatus(request.Context(), principal.TenantID, platformUserID, application.PortalApplicationCode)
+	result, err := handler.service.CustomerBindingStatus(request.Context(), principal.TenantID, platformUserID, handler.service.PortalApplicationCode())
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return

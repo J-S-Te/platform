@@ -1,4 +1,4 @@
-// Package tokenissuer adapts the shared OIDC JWT signer to the OIDC application token boundary.
+// Package tokenissuer 把共享 OIDC JWT 签名器适配到 OIDC 应用的令牌边界。
 package tokenissuer
 
 import (
@@ -10,32 +10,31 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 )
 
-// jwtSigner is deliberately narrow so the protocol application layer remains independent from a
-// concrete JWT implementation, while this adapter can still be unit tested without key files.
+// jwtSigner 刻意保持狭窄，使协议应用层独立于具体 JWT 实现，
+// 同时本适配器无需密钥文件即可单元测试。
 type jwtSigner interface {
 	Issuer() string
 	IssueAccessToken(security.OIDCTokenClaims) (string, error)
 	IssueIDToken(security.OIDCTokenClaims) (string, error)
 }
 
-// Issuer signs end-user OAuth access tokens and optional OpenID Connect ID tokens. Refresh tokens
-// intentionally remain outside this component because they are opaque secrets managed by the OIDC
-// application service and stored only as one-way digests.
+// AuthorizationClaims 是签入 OAuth access token / ID token 的紧凑授权声明。
+// refresh token 刻意留在本组件之外：它是由 OIDC 应用服务管理的机密，
+// 仅以单向摘要持久化。
 type AuthorizationClaims struct {
 	TenantID string
 	PersonID string
 	Roles    []string
 }
 
-// AuthorizationResolver resolves the compact identity claims for the OAuth client's application.
-// Detailed permissions are served by AuthorizationContextResolver instead.
+// AuthorizationResolver 解析 OAuth client 所属应用的紧凑身份声明；
+// 详细权限改由 AuthorizationContextResolver 在线提供。
 type AuthorizationResolver interface {
 	ResolveOIDCAuthorization(context.Context, string, string, string) (AuthorizationClaims, error)
 }
 
-// DataScope is the durable scope boundary of an application role. Detailed
-// permission and scope data is served online by the authorization-context API,
-// never copied into an OIDC token.
+// DataScope 是应用角色的持久化数据范围边界。详细权限与范围数据由
+// authorization-context API 在线提供，绝不复制进 OIDC token。
 type DataScope struct {
 	RoleCode        string
 	ScopeType       string
@@ -43,6 +42,8 @@ type DataScope struct {
 	EnvironmentCode string
 }
 
+// AuthorizationContext 是 authorization-context 端点返回的完整授权快照：
+// 角色、权限、目录兼容窗口与授权修订号，供子系统做撤销与目录变化检测。
 type AuthorizationContext struct {
 	ClientID                   string
 	ApplicationCode            string
@@ -59,17 +60,19 @@ type AuthorizationContext struct {
 	AuthorizationRevision      uint64
 }
 
+// AuthorizationContextResolver 按租户/client/用户解析当前应用级授权快照。
 type AuthorizationContextResolver interface {
 	ResolveOIDCAuthorizationContext(context.Context, string, string, string) (AuthorizationContext, error)
 }
 
+// Issuer 用平台 OIDC JWT 管理器签署终端用户的 access token 与可选 ID token。
 type Issuer struct {
 	signer   jwtSigner
 	ids      oidcapplication.IDGenerator
 	resolver AuthorizationResolver
 }
 
-// New creates a token issuer backed by the configured OIDC JWT manager.
+// New 基于配置的 OIDC JWT 管理器创建令牌签发器。
 func New(manager *security.OIDCJWTManager, ids oidcapplication.IDGenerator, resolvers ...AuthorizationResolver) (*Issuer, error) {
 	return newIssuer(manager, ids, resolvers...)
 }
@@ -157,5 +160,5 @@ func (issuer *Issuer) IssueOIDCTokens(ctx context.Context, issue oidcapplication
 	return result, nil
 }
 
-// Compile-time conformance protects the bootstrap wiring from protocol-boundary drift.
+// 编译期一致性断言保护 bootstrap 装配不偏离协议边界。
 var _ oidcapplication.TokenIssuer = (*Issuer)(nil)

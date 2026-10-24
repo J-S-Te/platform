@@ -32,7 +32,7 @@ func (store *racingClaimStore) GetSubsystemDeploymentContext(context.Context, st
 		close(store.readBarrier)
 	}
 	store.mu.Unlock()
-	<-store.readBarrier // both requests have observed the same READY snapshot
+	<-store.readBarrier // 两个请求均已观察到相同的 READY 快照。
 	return store.state, nil
 }
 func (store *racingClaimStore) ClaimSubsystemDeployment(ctx context.Context, tenant, code, env, op string, now time.Time) (uint64, error) {
@@ -104,7 +104,7 @@ func TestPreparationFailureClosesClaimAfterRequestCancellation(t *testing.T) {
 	handler := asyncDeploymentTestHandler(t, base, provisioner)
 	response := httptest.NewRecorder()
 	request := asyncDeploymentRequest(t, `{"application_code":"contract_management","environment":"prod"}`)
-	// Preserve the principal while allowing the failing store to cancel the request.
+	// 保留认证主体，同时允许故障存储取消请求。
 	requestCtx, requestCancel := context.WithCancel(request.Context())
 	defer requestCancel()
 	handler.deploymentState = &preparationFailStore{base, requestCancel}

@@ -132,10 +132,12 @@ require_arg() {
 is_integrated_frontend_code() {
   local target="$1" item
   local items=()
-  IFS=',' read -r -a items <<<"$INTEGRATED_FRONTEND_CODES"
+  # INTEGRATED_FRONTEND_CODES 默认是空格分隔，历史配置可能写成逗号分隔。
+  # 只按逗号切分会把整个默认值当成一个应用编码，内置 SPA 的整站代理保护随之失效；
+  # 这里先把逗号归一化为空格，再按空白切分并忽略空项。
+  local normalized="${INTEGRATED_FRONTEND_CODES//,/ }"
+  read -r -a items <<<"$normalized"
   for item in "${items[@]}"; do
-    item="${item#${item%%[![:space:]]*}}"
-    item="${item%${item##*[![:space:]]}}"
     [[ "$target" != "$item" ]] || return 0
   done
   return 1

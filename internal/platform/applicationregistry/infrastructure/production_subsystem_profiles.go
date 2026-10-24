@@ -55,6 +55,9 @@ type productionSubsystemRuntimeManifest struct {
 }
 
 type productionSubsystemRuntimeFileManifest struct {
+	// Consumers 只表达“重载时的进程归属”，绝不表示许可覆盖范围或安装范围；
+	// 每条声明都只属于本清单对应的应用。
+	Consumers             []string          `yaml:"consumers"`
 	WhenService           string            `yaml:"when_service"`
 	Path                  string            `yaml:"path"`
 	TemplatePath          string            `yaml:"template_path"`
@@ -63,6 +66,8 @@ type productionSubsystemRuntimeFileManifest struct {
 	Values                map[string]string `yaml:"values"`
 	RequiredExistingKeys  []string          `yaml:"required_existing_keys"`
 	GeneratedKeys         []string          `yaml:"generated_keys"`
+	InheritFrom           string            `yaml:"inherit_from"`
+	InheritKeys           []string          `yaml:"inherit_keys"`
 }
 
 type productionSubsystemComposeManifest struct {
@@ -289,6 +294,37 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		if _, duplicate := seenComposeKeys[file.ComposeEnvironmentKey]; duplicate {
 			return errors.New("runtime Compose environment key is duplicated")
 		}
+		file.InheritFrom = strings.TrimSpace(file.InheritFrom)
+		file.InheritKeys = normalizedProductionEnvironmentKeys(file.InheritKeys)
+		if file.InheritKeys == nil {
+			return errors.New("runtime inherited key is invalid")
+		}
+		if file.InheritFrom != "" {
+			if app.Code != "customer_portal" {
+				return errors.New("runtime inheritance is only approved for Portal report vault")
+			}
+			if _, earlier := seenPaths[file.InheritFrom]; !earlier || len(file.InheritKeys) == 0 {
+				return errors.New("runtime inheritance requires an earlier file in the same profile")
+			}
+			for _, key := range file.InheritKeys {
+				if !allowedProductionInheritedKey(key) {
+					return errors.New("runtime inherited key is not approved")
+				}
+				if _, exists := file.Bindings[key]; exists {
+					return errors.New("runtime inherited key overlaps binding")
+				}
+				if _, exists := file.Values[key]; exists {
+					return errors.New("runtime inherited key overlaps value")
+				}
+				for _, generated := range file.GeneratedKeys {
+					if generated == key {
+						return errors.New("runtime inherited key overlaps generated key")
+					}
+				}
+			}
+		} else if len(file.InheritKeys) > 0 {
+			return errors.New("runtime inherited keys require a source")
+		}
 		seenPaths[file.Path] = struct{}{}
 		seenComposeKeys[file.ComposeEnvironmentKey] = struct{}{}
 		for key, source := range file.Bindings {
@@ -368,6 +404,19 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 	compose.InitializationServices = normalizedInitializers
 	compose.RuntimeServices = normalizedRuntimeServices
 	compose.TeardownServices = normalizedTeardownServices
+	for index := range runtime.Files {
+		file := &runtime.Files[index]
+		normalized := normalizedProductionServices(file.Consumers)
+		if len(file.Consumers) > 0 && normalized == nil {
+			return errors.New("runtime consumer policy is invalid")
+		}
+		for _, service := range normalized {
+			if !slices.Contains(compose.RuntimeServices, service) || !productionServiceOwnedByApplication(app.Code, service) {
+				return errors.New("runtime consumer must be an application-owned runtime service")
+			}
+		}
+		file.Consumers = normalized
+	}
 	for service, runtimePath := range compose.ConditionalRuntimeServices {
 		if !slices.Contains(compose.RuntimeServices, service) {
 			return errors.New("conditional service must belong to runtime services")
@@ -446,10 +495,14 @@ func validProductionGeneratedEnvironmentKey(value string) bool {
 
 func validProductionBindingSource(source string) bool {
 	switch source {
-	case "issuer", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
+	case "issuer", "oidc_backchannel_base_url", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
 		"tenant_id", "application_id", "application_code", "environment", "path_prefix", "upstream_url", "cookie_secure",
 		"allow_insecure_http_origin", "catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url":
 		return true
+	}
+	if strings.HasPrefix(source, "related_service.contract_management.settlement_contract_ingest.") {
+		suffix := strings.TrimPrefix(source, "related_service.contract_management.settlement_contract_ingest.")
+		return suffix == "client_id" || suffix == "oauth_client_id" || suffix == "application_id" || suffix == "environment_id"
 	}
 	parts := strings.Split(source, ".")
 	return len(parts) == 3 && parts[0] == "service" && validProductionTargetCode(parts[1], 64) && (parts[2] == "client_id" || parts[2] == "client_secret")
@@ -459,6 +512,9 @@ func validProductionBindingSource(source string) bool {
 // allowed_service_bindings 时按清单校验；未声明时回退到平台硬编码默认（保证既有行为不变）。
 // audit_ingest 是所有接入环境的基线能力，恒允许。
 func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest, source string) bool {
+	if strings.HasPrefix(source, "related_service.") {
+		return app.Code == "settlement" && validProductionBindingSource(source)
+	}
 	parts := strings.Split(source, ".")
 	if len(parts) != 3 || parts[0] != "service" {
 		return true
@@ -501,12 +557,16 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 			application.ServiceCredentialPortalMappingProvision,
 			application.ServiceCredentialPortalMappingDisable,
 			application.ServiceCredentialPortalInviteVerify,
+			application.ServiceCredentialPortalReportFileRead,
+			application.ServiceCredentialPortalReportDownloadIdentityRead,
 		}
 	case "contract_management":
 		return []string{
+			application.ServiceCredentialNotificationIngest,
 			application.ServiceCredentialContractSummaryRead,
 			application.ServiceCredentialContractOpportunitySignedWrite,
 			application.ServiceCredentialCRMContractReferenceRead,
+			application.ServiceCredentialSettlementContractIngest,
 			application.ServiceCredentialOwnerDirectoryRead,
 		}
 	case "project_management":
@@ -557,9 +617,13 @@ func isReservedProductionService(value string) bool {
 
 // productionServicesOwnedByApplication 限制清单只能操作本应用命名空间内的 Compose 服务。
 // temporal 只允许作为显式共享依赖，不能成为迁移、运行或下线目标。
+// CRM 售前 Worker 也使用其数据库，但不得获得合同业务服务的操作权限。
 func productionServicesOwnedByApplication(applicationCode string, services []string, allowSharedDependency bool) bool {
 	for _, service := range services {
 		if allowSharedDependency && service == "temporal" {
+			continue
+		}
+		if allowSharedDependency && applicationCode == "customer_and_opportunity" && service == "contract-mysql" {
 			continue
 		}
 		if !productionServiceOwnedByApplication(applicationCode, service) {
@@ -661,11 +725,9 @@ const (
 	brokerAliasCustomer = "basic-platform-customer"
 )
 
-// validateProductionOIDCValues enforces the broker channel contract on fixed runtime values:
-// the customer portal must use the customer broker, internal subsystems must use the internal
-// broker, and any *_IDP_HINT must resolve to a known Keycloak alias. This prevents a config
-// template from silently wiring the portal onto the internal employee broker, which fails
-// every external-customer login.
+// validateProductionOIDCValues 对固定运行时值强制代理通道契约：客户门户必须使用客户代理，
+// 内部子系统必须使用内部代理，任何 *_IDP_HINT 都必须解析到已知的 Keycloak 别名。防止配置
+// 模板把门户静默接到内部员工代理上——那会让所有外部客户登录失败。
 func validateProductionOIDCValues(appCode string, values map[string]string) error {
 	appCode = strings.ToLower(strings.TrimSpace(appCode))
 	isPortal := appCode == "customer_portal"
@@ -690,8 +752,8 @@ func validateProductionOIDCValues(appCode string, values map[string]string) erro
 	return nil
 }
 
-// validateProductionPortalBroker enforces the customer-portal broker contract across the whole
-// manifest: at least one runtime file must declare PORTAL_OIDC_IDP_HINT=basic-platform-customer.
+// validateProductionPortalBroker 在整个清单范围强制客户门户代理契约：至少一个运行时文件
+// 必须声明 PORTAL_OIDC_IDP_HINT=basic-platform-customer。
 func validateProductionPortalBroker(appCode string, files []productionSubsystemRuntimeFileManifest) error {
 	if strings.ToLower(strings.TrimSpace(appCode)) != "customer_portal" {
 		return nil
@@ -702,4 +764,12 @@ func validateProductionPortalBroker(appCode string, files []productionSubsystemR
 		}
 	}
 	return errors.New("customer_portal must set PORTAL_OIDC_IDP_HINT=basic-platform-customer")
+}
+
+func allowedProductionInheritedKey(key string) bool {
+	switch key {
+	case "PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64", "PORTAL_REPORT_CONTENT_KEY_BASE64", "PORTAL_OIDC_TENANT_ID", "PORTAL_REPORT_STORE_ROOT":
+		return true
+	}
+	return false
 }

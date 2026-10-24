@@ -1,4 +1,4 @@
-// Package http exposes notification HTTP adapters for mounting on the shared Gin router.
+// Package http 暴露通知模块的 HTTP 适配器，供共享 Gin 路由挂载。
 package http
 
 import (
@@ -20,11 +20,13 @@ import (
 
 const maxRequestBytes = 256 << 10
 
+// Handler 适配通知用例到统一 HTTP 响应协议；租户与用户身份一律取自认证上下文。
 type Handler struct {
 	service *app.Service
 	logger  *slog.Logger
 }
 
+// NewHandler 构造通知 HTTP 处理器；任一依赖为 nil 时失败关闭。
 func NewHandler(service *app.Service, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("notification handler dependencies must not be nil")
@@ -87,7 +89,7 @@ type ingestionBatchPayload struct {
 	Events []ingestionEventPayload `json:"events"`
 }
 
-// Ingest accepts a protected application event. Tenant and source always come from its bearer credential.
+// Ingest 接收受保护的应用事件。租户与来源永远取自 bearer 凭据，不采信请求体。
 func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.applicationPrincipal(w, r)
 	if !ok {
@@ -109,7 +111,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, status, "站内信事件已接收", receipt)
 }
 
-// IngestBatch keeps HTTP work bounded; each event is independently idempotent.
+// IngestBatch 把 HTTP 工作量限制在有界批次内；每个事件独立幂等。
 func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.applicationPrincipal(w, r)
 	if !ok {
@@ -135,8 +137,8 @@ func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "站内信事件批次已接收", map[string]any{"receipts": receipts, "accepted": len(receipts)})
 }
 
-// GetIngestionReceipt exposes asynchronous processing state to the submitting system.
-// ACCEPTED is only a durable receipt; COMPLETED is the user-visible projection result.
+// GetIngestionReceipt 向提交方暴露异步处理状态。ACCEPTED 只是持久化接收回执；
+// COMPLETED 才是用户可见的展开结果。
 func (h *Handler) GetIngestionReceipt(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.applicationPrincipal(w, r)
 	if !ok {
@@ -155,6 +157,7 @@ func (h *Handler) ingest(r *http.Request, p appctx.Principal, payload ingestionE
 	return h.service.Ingest(r.Context(), app.IngestInput{TenantID: p.TenantID, SourceApplication: p.ApplicationCode, SourceEnvironment: p.EnvironmentCode, Event: event})
 }
 
+// CreateTemplate 创建通知模板及其首个发布版本，模板编码在租户内唯一。
 func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -171,6 +174,7 @@ func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "站内信模板已创建", map[string]any{"template": t, "version": ver})
 }
+// ListTemplates 分页返回当前租户的模板列表。
 func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -183,6 +187,7 @@ func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信模板查询成功", out)
 }
+// CreateTemplateVersion 为指定模板发布新版本并立即切换为当前版本。
 func (h *Handler) CreateTemplateVersion(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -199,6 +204,7 @@ func (h *Handler) CreateTemplateVersion(w http.ResponseWriter, r *http.Request) 
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "站内信模板版本已发布", map[string]any{"template": t, "version": ver})
 }
+// ChangeTemplateStatus 以乐观锁切换模板启用/停用状态，版本冲突返回 409。
 func (h *Handler) ChangeTemplateStatus(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -215,6 +221,7 @@ func (h *Handler) ChangeTemplateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信模板状态已更新", out)
 }
+// CreateMessage 按模板与受众创建站内信，幂等键命中时返回既有消息。
 func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -235,6 +242,7 @@ func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "站内信已创建", out)
 }
+// ListInbox 返回当前登录用户自己的收件箱分页；不支持查看他人收件箱。
 func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -256,6 +264,7 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信列表查询成功", out)
 }
+// GetInboxItem 返回当前用户一条收件详情；他人的投递按未找到处理。
 func (h *Handler) GetInboxItem(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -268,6 +277,7 @@ func (h *Handler) GetInboxItem(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信详情查询成功", out)
 }
+// UnreadCount 返回当前用户按收件箱可见性口径统计的未读数量。
 func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -280,6 +290,7 @@ func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "未读站内信数量查询成功", map[string]int64{"unread_count": out})
 }
+// MarkRead 标记当前用户一条站内信为已读；操作幂等。
 func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -292,6 +303,7 @@ func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信已读状态已更新", out)
 }
+// MarkAllRead 把当前用户全部可见未读标记为已读，返回更新条数。
 func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -304,6 +316,7 @@ func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信已全部标记为已读", map[string]int64{"updated_count": out})
 }
+// ListDeliveries 是租户运营视角的投递分页查询，可按状态过滤。
 func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
@@ -318,6 +331,7 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信投递运营查询成功", out)
 }
 
+// RetryFailed 立即重试当前租户一批失败投递，数量由有界的 limit 查询参数约束。
 func (h *Handler) RetryFailed(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {

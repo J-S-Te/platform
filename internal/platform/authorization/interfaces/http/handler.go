@@ -13,6 +13,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
@@ -20,13 +21,13 @@ import (
 
 const maxRequestBytes = 64 << 10
 
-// Handler adapts authorization application operations to HTTP without exposing persistence models.
+// Handler 把授权应用操作适配到 HTTP，不暴露持久化模型。
 type Handler struct {
 	service *application.Service
 	logger  *slog.Logger
 }
 
-// NewHandler creates an authorization HTTP handler.
+// NewHandler 创建授权 HTTP 处理器；依赖为 nil 即拒绝启动。
 func NewHandler(service *application.Service, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("authorization HTTP handler dependencies must not be nil")
@@ -158,7 +159,7 @@ type permissionCreatePayload struct {
 }
 
 type roleCreatePayload struct {
-	// Code is accepted only for rolling compatibility and is ignored.
+	// Code 仅为滚动兼容接受，处理时忽略。
 	Code          *string  `json:"code,omitempty"`
 	Name          string   `json:"name"`
 	Description   *string  `json:"description"`
@@ -202,7 +203,7 @@ type roleBindingImpactPayload struct {
 	ExpiresAt   *time.Time `json:"expires_at"`
 }
 
-// ListResources returns resources available in the current tenant.
+// ListResources 返回当前租户可用的资源列表。
 func (h *Handler) ListResources(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -223,7 +224,7 @@ func (h *Handler) ListResources(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", newPageResponse(items, result))
 }
 
-// CreateResource creates a resource for an enabled application in the current tenant.
+// CreateResource 为当前租户的启用应用创建资源。
 func (h *Handler) CreateResource(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -251,7 +252,7 @@ func (h *Handler) CreateResource(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "资源已创建", resourceToResponse(result))
 }
 
-// ListPermissions returns permissions available in the current tenant.
+// ListPermissions 返回当前租户可用的权限列表。
 func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -272,7 +273,7 @@ func (h *Handler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", newPageResponse(items, result))
 }
 
-// CreatePermission creates a permission attached to a tenant resource.
+// CreatePermission 为当前租户的资源创建权限。
 func (h *Handler) CreatePermission(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -300,7 +301,7 @@ func (h *Handler) CreatePermission(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "权限已创建", permissionToResponse(result))
 }
 
-// ListRoles returns roles available in the current tenant.
+// ListRoles 返回当前租户可用的角色列表。
 func (h *Handler) ListRoles(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -350,7 +351,7 @@ func (h *Handler) CreateRole(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "角色已创建", roleToResponse(result))
 }
 
-// GetRole returns one tenant role and its allow-permission set.
+// GetRole 返回单个租户角色及其 ALLOW 权限集合。
 func (h *Handler) GetRole(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -398,7 +399,7 @@ func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "角色已更新", roleToResponse(result))
 }
 
-// ListRoleBindings returns role bindings in the current tenant.
+// ListRoleBindings 返回当前租户的角色绑定列表。
 func (h *Handler) ListRoleBindings(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -484,7 +485,7 @@ func (h *Handler) UpdateRoleBinding(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "角色绑定已更新", roleBindingToResponse(result))
 }
 
-// PreviewEffectiveAccess explains active role and permission sources for one login account.
+// PreviewEffectiveAccess 解释一个登录账号当前生效的角色与权限来源。
 func (h *Handler) PreviewEffectiveAccess(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -498,7 +499,7 @@ func (h *Handler) PreviewEffectiveAccess(w http.ResponseWriter, r *http.Request)
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", effectiveAccessPreviewToResponse(result))
 }
 
-// PreviewRoleBindingImpact calculates the currently affected active users before a binding is saved.
+// PreviewRoleBindingImpact 在绑定保存前计算当前将受影响的在册用户。
 func (h *Handler) PreviewRoleBindingImpact(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -542,7 +543,7 @@ func (h *Handler) Check(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", decisionToResponse(result))
 }
 
-// BatchCheck evaluates up to one hundred authorization checks in input order.
+// BatchCheck 按输入顺序评估至多一百次授权判定。
 func (h *Handler) BatchCheck(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -604,6 +605,11 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpresponse.WriteError(w, r, http.StatusForbidden, httperror.Forbidden)
 	case errors.Is(err, application.ErrVersionConflict):
 		httpresponse.WriteError(w, r, http.StatusConflict, httperror.VersionConflict)
+	case errors.Is(err, bootstrapadmin.ErrProtected):
+		httpresponse.WriteError(w, r, http.StatusConflict, httperror.BootstrapAdminProtected)
+	case errors.Is(err, bootstrapadmin.ErrConfiguration):
+		h.logger.Error("bootstrap administrator configuration is invalid", "error", err, "path", r.URL.Path)
+		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.BootstrapAdminConfiguration)
 	default:
 		h.logger.Error("authorization HTTP operation failed", "error", err, "path", r.URL.Path)
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)

@@ -10,14 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 	"gorm.io/gorm"
 )
 
+// Resolver 以平台数据库为来源实现人员目录查询。
 type Resolver struct {
 	database *gorm.DB
 }
 
+// New 构造人员目录解析器；database 为空时返回错误。
 func New(database *gorm.DB) (*Resolver, error) {
 	if database == nil {
 		return nil, errors.New("personnel directory database must not be nil")
@@ -30,18 +33,28 @@ type roleRow struct {
 	RoleCode string `gorm:"column:role_code"`
 }
 
+// ListActivePersonnel 返回租户内活动人员的最小投影及其在目标应用上的有效角色；
+// 结果排除部署初始超级管理员，且角色必须与 OAuth client 所属应用一致。
 func (resolver *Resolver) ListActivePersonnel(ctx context.Context, tenantID, oauthClientID string) ([]oidchttp.PersonnelDirectoryEntry, error) {
 	tenantID, oauthClientID = strings.TrimSpace(tenantID), strings.TrimSpace(oauthClientID)
 	if resolver == nil || resolver.database == nil || tenantID == "" || oauthClientID == "" {
 		return nil, errors.New("personnel directory resolver is not initialized")
 	}
 	entries := make([]oidchttp.PersonnelDirectoryEntry, 0)
-	if err := resolver.database.WithContext(ctx).
+	identity, initialized, err := bootstrapadmin.Resolve(ctx, resolver.database, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	entryQuery := resolver.database.WithContext(ctx).
 		Table("iam_user").
 		Select("id AS user_id", "display_name").
-		Where("tenant_id = ? AND status = ? AND display_name <> ''", tenantID, "ACTIVE").
-		Order("display_name ASC, id ASC").
-		Find(&entries).Error; err != nil {
+		Where("tenant_id = ? AND status = ? AND display_name <> ''", tenantID, "ACTIVE")
+	if initialized {
+		// 普通人员选择器不展示部署初始超级管理员；认证、会话与有效权限计算不使用该目录，
+		// 因此保留账号本身可登录和可管理。
+		entryQuery = entryQuery.Where("id <> ?", identity.UserID)
+	}
+	if err := entryQuery.Order("display_name ASC, id ASC").Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("list active tenant personnel: %w", err)
 	}
 	if len(entries) == 0 {
@@ -52,7 +65,7 @@ func (resolver *Resolver) ListActivePersonnel(ctx context.Context, tenantID, oau
 	// 应用角色必须与 OAuth 客户端所属应用一致，且只承认 TENANT/当前 ENVIRONMENT 范围；
 	// 组织和岗位绑定还要求有效任职关系显式开启 inherit_authorization。
 	roleRows := make([]roleRow, 0)
-	err := resolver.database.WithContext(ctx).
+	err = resolver.database.WithContext(ctx).
 		Table("iam_user AS person").
 		Select("DISTINCT person.id AS user_id, role.code AS role_code").
 		Joins("JOIN platform_oauth_client AS client ON client.id = ? AND client.tenant_id = person.tenant_id AND client.status = ?", oauthClientID, "ACTIVE").

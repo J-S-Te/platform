@@ -11,18 +11,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// HealthHandler owns process liveness and dependency readiness endpoints.
+// HealthHandler 承载进程存活与依赖就绪两类探针端点。
 type HealthHandler struct {
 	database *gorm.DB
 	appName  string
 }
 
-// NewHealthHandler creates a handler using the application's shared GORM connection.
+// NewHealthHandler 基于应用共享的 GORM 连接创建探针处理器。
 func NewHealthHandler(database *gorm.DB, appName string) HealthHandler {
 	return HealthHandler{database: database, appName: appName}
 }
 
-// Liveness reports whether the HTTP process is running. It intentionally does not query MySQL.
+// Liveness 报告 HTTP 进程是否存活。有意不查询 MySQL：存活探针若依赖外部服务，
+// 依赖抖动会让编排层误杀进程。
 func (handler HealthHandler) Liveness(ginContext *gin.Context) {
 	httpresponse.WriteSuccess(ginContext.Writer, ginContext.Request, http.StatusOK, "服务运行正常", map[string]string{
 		"status":  "ok",
@@ -30,7 +31,8 @@ func (handler HealthHandler) Liveness(ginContext *gin.Context) {
 	})
 }
 
-// Readiness reports whether the API's required database dependency can be reached.
+// Readiness 报告 API 必需的数据库依赖当前是否可达；不可达时返回 503，
+// 由负载均衡把实例摘出流量。
 func (handler HealthHandler) Readiness(ginContext *gin.Context) {
 	contextWithTimeout, cancel := context.WithTimeout(ginContext.Request.Context(), 2*time.Second)
 	defer cancel()

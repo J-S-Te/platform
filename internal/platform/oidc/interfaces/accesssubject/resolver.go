@@ -1,4 +1,4 @@
-// Package accesssubject binds compact OIDC JWT claims to active tenant-scoped storage records.
+// Package accesssubject 把紧凑 OIDC JWT 声明绑定回活动的租户内存储记录。
 package accesssubject
 
 import (
@@ -12,25 +12,25 @@ import (
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 )
 
-// repository is the minimal lookup set needed by UserInfo. Both lookups independently require
-// active client/session state; their tenant and subject identifiers are then cross-checked here.
+// repository 是 UserInfo 所需的最小查询集合。两个查询各自独立要求活动的
+// client/session 状态；其租户与主体标识再在此处交叉核对。
 type repository interface {
 	FindClient(context.Context, string, time.Time) (domain.Client, error)
 	ResolveSessionSubject(context.Context, string, time.Time) (domain.SessionSubject, error)
 }
 
-// Clock supplies the authoritative validation time for the active-session lookup.
+// Clock 为活动会话查询提供权威的校验时间。
 type Clock interface {
 	Now() time.Time
 }
 
-// Resolver is an OIDC HTTP AccessTokenSubjectResolver backed by the OIDC repository.
+// Resolver 是由 OIDC 仓储支撑的 AccessTokenSubjectResolver 实现。
 type Resolver struct {
 	repository repository
 	clock      Clock
 }
 
-// New creates a resolver. The passed repository may be the production GORM OIDC repository.
+// New 构造解析器；repository 可以是生产 GORM OIDC 仓储。
 func New(repository repository, clock Clock) (*Resolver, error) {
 	if repository == nil || clock == nil {
 		return nil, errors.New("OIDC access-token subject resolver dependencies must not be nil")
@@ -38,8 +38,8 @@ func New(repository repository, clock Clock) (*Resolver, error) {
 	return &Resolver{repository: repository, clock: clock}, nil
 }
 
-// ResolveAccessTokenSubject verifies that client_id, session ID, and user subject from the signed
-// access token still refer to one active tenant-scoped client/session combination.
+// ResolveAccessTokenSubject 校验签名 access token 中的 client_id、会话 ID 与用户主体
+// 仍指向同一组合的活动租户内 client/session 记录。
 func (resolver *Resolver) ResolveAccessTokenSubject(ctx context.Context, clientID, sessionID, userID string) (oidchttp.AccessTokenSubject, error) {
 	if resolver == nil || resolver.repository == nil || resolver.clock == nil {
 		return oidchttp.AccessTokenSubject{}, errors.New("OIDC access-token subject resolver is not initialized")

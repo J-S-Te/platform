@@ -3,8 +3,8 @@ package domain
 
 import "time"
 
-// Event is an append-only audit record exposed to authorized audit-console readers.
-// Correlation fields are included so an administrator can trace the event across services.
+// Event 是只追加的审计记录，供已授权的审计控制台读取。包含关联字段，
+// 使管理员可以跨服务追踪同一事件。
 type Event struct {
 	ID, EventID, TenantID, ApplicationID, ApplicationCode, ApplicationName string
 	EnvironmentID, EnvironmentCode                                         string
@@ -12,45 +12,51 @@ type Event struct {
 	OperatorDisplayName, ActionType, Action, Result                        string
 	ResourceType, ResourceID, ResourceName                                 string
 	Method, Path, ClientIP, UserAgent, RiskLevel, Detail, Summary          string
-	RequestID, TraceID, CorrelationID                                      string
-	StatusCode                                                             int
-	ChangeSummary                                                          []FieldChange
+	// 三类来源地址互相独立：登录地址在会话创建时固定，操作地址每个请求重新解析，
+	// 投递地址只描述"谁把审计送来"。IPSource 标记地址的获取方式，历史数据为 LEGACY_RECORD。
+	LoginIP, IngestPeerIP, IPSource   string
+	RequestID, TraceID, CorrelationID string
+	StatusCode                        int
+	ChangeSummary                     []FieldChange
 }
 
-// FieldChange contains a redacted change summary. It must not contain credential material.
+// FieldChange 保存脱敏后的变更摘要；绝不能包含凭据材料。
 type FieldChange struct {
 	Field  string `json:"field"`
 	Before any    `json:"before,omitempty"`
 	After  any    `json:"after,omitempty"`
 }
 
-// Receipt reports whether an ingestion event was accepted or previously deduplicated.
+// Receipt 报告摄取事件是本次接收还是此前已去重。
 type Receipt struct {
 	EventID string `json:"event_id"`
 	Status  string `json:"status"`
 }
 
-// ExportJob represents an asynchronously processed audit export.
+// ExportJob 表示一次异步处理的审计导出。
 type ExportJob struct {
 	JobID, Status, DownloadURL string
 	ErrorCode, ErrorMessage    string
 	CreatedAt, CompletedAt     time.Time
 }
 
-// ExportWork is an audit export job claimed by one local worker process.
+// ExportWork 是被单个本地 worker 进程领取的审计导出任务。
 type ExportWork struct {
 	JobID, TenantID, ApplicationID, OperatorID string
 	Query                                      ExportQuery
 	Attempts, MaxAttempts                      uint
+	// LockedBy 是领取该任务时写入 locked_by 的 Worker 标识。完成/失败回写必须带它，
+	// 否则租约过期被他人接管后，原 Worker 仍能覆盖接管者的结果。
+	LockedBy string
 }
 
-// ExportQuery is the persisted filter set used to produce an audit export.
+// ExportQuery 是生成审计导出时持久化的过滤条件集合。
 type ExportQuery struct {
 	Keyword, ApplicationCode, EnvironmentCode, Action, ActionCategory, Result, RiskLevel string
 	OccurredFrom, OccurredTo                                                             *time.Time
 }
 
-// ExportFile describes the local file attached to a completed audit export job.
+// ExportFile 描述已完成的审计导出任务附带的本地文件。
 type ExportFile struct {
 	FileID, VersionID, StorageRelativePath, OriginalName, MediaType string
 	SizeBytes                                                       uint64

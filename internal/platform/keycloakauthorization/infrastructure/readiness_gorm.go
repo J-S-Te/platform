@@ -13,11 +13,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// SwitchReadinessStore is the authoritative, durable Keycloak cutover gate.
-// It intentionally returns incomplete evidence as blocked rather than trying
-// to infer a successful browser login from an Admin API operation.
+// SwitchReadinessStore 是权威、持久化的 Keycloak 切换门禁。证据不完整时刻意
+// 返回"阻塞"，绝不试图用一次 Admin API 操作推断浏览器登录已成功。
 type SwitchReadinessStore struct{ database *gorm.DB }
 
+// NewSwitchReadinessStore 构造切换门禁存储；database 为空时返回错误。
 func NewSwitchReadinessStore(database *gorm.DB) (*SwitchReadinessStore, error) {
 	if database == nil {
 		return nil, errors.New("Keycloak switch readiness database must not be nil")
@@ -39,6 +39,8 @@ type readinessRow struct {
 	BrokerConfigurationHash string `gorm:"column:broker_verified_configuration_hash"`
 }
 
+// InspectKeycloakSwitchReadiness 返回指定应用环境的四道切换门禁状态。任何证据
+// 缺失、配置哈希不匹配或 outbox 仍有未完成事件都按"阻塞"处理（fail-closed）。
 func (store *SwitchReadinessStore) InspectKeycloakSwitchReadiness(ctx context.Context, tenantID, applicationCode, environment string) (registryhttp.KeycloakSwitchReadiness, error) {
 	// readiness 同时读取四项持久化门禁和 outbox 未完成数；队列未清空时强制撤销用户投影门禁。
 	scope, err := store.scope(ctx, tenantID, applicationCode, environment)
@@ -75,8 +77,8 @@ func (store *SwitchReadinessStore) InspectKeycloakSwitchReadiness(ctx context.Co
 	return readinessFromRow(row), nil
 }
 
-// MarkKeycloakClientAndRoleCatalogSynced is called only after both Keycloak
-// Admin operations and the local Client mapping have succeeded.
+// MarkKeycloakClientAndRoleCatalogSynced 仅在 Keycloak Admin 操作与本地 Client
+// 映射双双成功后调用。
 func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogSynced(ctx context.Context, tenantID, applicationID, environmentID string) error {
 	tenantID, applicationID, environmentID = strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), strings.TrimSpace(environmentID)
 	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -93,10 +95,9 @@ func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogSynced(ctx co
 	})
 }
 
-// MarkKeycloakClientAndRoleCatalogPending revokes the two Admin-API-backed
-// gates before a startup reconciliation. If Keycloak is unavailable or its
-// actual Client configuration is stale, the worker exits with these gates
-// blocked instead of retaining historical success evidence.
+// MarkKeycloakClientAndRoleCatalogPending 在启动对账前撤销两道依赖 Admin API 的
+// 门禁。若 Keycloak 不可用或其实际 Client 配置已过期，worker 将带着阻塞的门禁
+// 退出，而不是沿用历史成功证据。
 func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogPending(ctx context.Context, tenantID, applicationID, environmentID string) error {
 	return store.upsert(ctx, tenantID, applicationID, environmentID, map[string]any{
 		"client_ready":        false,
@@ -104,9 +105,8 @@ func (store *SwitchReadinessStore) MarkKeycloakClientAndRoleCatalogPending(ctx c
 	})
 }
 
-// MarkUserProjectionCompleted is deliberately explicit: callers must not mark
-// the user gate from a queued/scheduled projection.  It is available for the
-// projection coordinator once it has durably established completion.
+// MarkUserProjectionCompleted 刻意要求显式调用：调用方绝不能在投影仅被排队/计划
+// 时就标记用户门禁。只有投影协调器在持久确认完成后才允许调用。
 func (store *SwitchReadinessStore) MarkUserProjectionCompleted(ctx context.Context, tenantID, applicationID, environmentID string) error {
 	tenantID, applicationID, environmentID = strings.TrimSpace(tenantID), strings.TrimSpace(applicationID), strings.TrimSpace(environmentID)
 	return store.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -127,8 +127,8 @@ func (store *SwitchReadinessStore) MarkUserProjectionCompleted(ctx context.Conte
 	})
 }
 
-// RecordBrokerLoginVerification validates the persisted Client mapping before
-// atomically updating the current gate and appending immutable audit evidence.
+// RecordBrokerLoginVerification 先校验持久化的 Client 映射，再原子更新当前门禁
+// 并追加不可篡改的审计证据。
 func (store *SwitchReadinessStore) RecordBrokerLoginVerification(ctx context.Context, input registryhttp.KeycloakBrokerLoginVerification) error {
 	// 只有当前租户/应用/环境的已同步 Client 且带验签会话证据，才能开启最后一道门禁。
 	input = normalizeVerification(input)

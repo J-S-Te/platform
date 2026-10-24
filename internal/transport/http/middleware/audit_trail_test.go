@@ -87,8 +87,44 @@ func TestAuditTrailUsesSessionLoginIPAndRetainsRequestIP(t *testing.T) {
 	if got := recorder.input.SourceIP; got != "203.0.113.10" {
 		t.Fatalf("SourceIP = %q, want session login IP", got)
 	}
+	// 统一审计来源协议：登录地址与操作地址必须分别上报，不能被合并成一个字段。
+	if got := recorder.input.LoginIP; got != "203.0.113.10" {
+		t.Fatalf("LoginIP = %q, want session login IP", got)
+	}
+	if got := recorder.input.ClientIP; got != "198.51.100.20" {
+		t.Fatalf("ClientIP = %q, want current request IP", got)
+	}
+	if got := recorder.input.IPSource; got != "TRUSTED_PROXY" {
+		t.Fatalf("IPSource = %q, want TRUSTED_PROXY", got)
+	}
 	if got := recorder.input.Metadata["request_source_ip"]; got != "198.51.100.20" {
 		t.Fatalf("request_source_ip = %v, want current request IP", got)
+	}
+}
+
+// 同一会话换网络：登录地址保持不变，操作地址跟随新请求。
+func TestAuditTrailKeepsLoginIPStableWhenRequestNetworkChanges(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := &auditRecorderStub{}
+	router := gin.New()
+	router.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.POST("/write", func(context *gin.Context) { context.Status(http.StatusNoContent) })
+
+	request := httptest.NewRequest(http.MethodPost, "/write", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant:  authctx.ReferenceName{ID: "tenant-1"},
+		User:    authctx.ReferenceName{ID: "user-1"},
+		LoginIP: net.ParseIP("203.0.113.10"),
+	}))
+	// 办公网换到 VPN：登录地址仍旧，操作地址是新的。
+	request = request.WithContext(requestctx.WithClientIP(request.Context(), "10.8.0.5"))
+	router.ServeHTTP(httptest.NewRecorder(), request)
+
+	if recorder.input.LoginIP != "203.0.113.10" {
+		t.Fatalf("LoginIP = %q，登录地址必须保持不变", recorder.input.LoginIP)
+	}
+	if recorder.input.ClientIP != "10.8.0.5" {
+		t.Fatalf("ClientIP = %q，操作地址必须跟随请求", recorder.input.ClientIP)
 	}
 }
 

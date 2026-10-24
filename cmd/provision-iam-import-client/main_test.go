@@ -26,4 +26,15 @@ func TestIAMImportEnvironmentDoesNotContainSettlementKeys(t *testing.T) {
 	if strings.Contains(content, "SETTLEMENT_") || strings.Contains(content, "FILE_GATEWAY_URL=") {
 		t.Fatalf("IAM import environment contains unrelated settlement keys: %q", content)
 	}
+	for _, expected := range []string{
+		"IAM_IMPORT_FILE_GATEWAY_BASE_URL=http://file-gateway:8086",
+		"IAM_IMPORT_FILE_GATEWAY_TOKEN_URL=http://platform-api:8080/oauth2/token",
+		"IAM_IMPORT_FILE_GATEWAY_CLIENT_ID=client-1",
+		"IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET=secret-1",
+		"IAM_IMPORT_FILE_GATEWAY_SCOPE=platform:file:upload platform:file:bind",
+	} {
+		if !strings.Contains(content, expected+"\n") {
+			t.Fatalf("IAM import environment is missing %q: %q", expected, content)
+		}
+	}
 }

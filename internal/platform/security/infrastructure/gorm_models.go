@@ -1,9 +1,9 @@
-// Package infrastructure contains GORM-backed persistence for login security.
+// Package infrastructure 提供 login security 的 GORM 持久化实现。
 package infrastructure
 
 import "time"
 
-// loginPolicyModel maps the tenant-specific login policy maintained through manual SQL migrations.
+// loginPolicyModel 映射租户级登录策略表，该表结构由手工 SQL 迁移维护，不走 GORM 自动迁移。
 type loginPolicyModel struct {
 	TenantID                  string    `gorm:"column:tenant_id;primaryKey"`
 	MaxFailedAttempts         uint      `gorm:"column:max_failed_attempts"`
@@ -19,8 +19,8 @@ type loginPolicyModel struct {
 
 func (loginPolicyModel) TableName() string { return "sec_login_policy" }
 
-// loginAttemptModel stores non-secret login failures. ClearedAt preserves historical evidence while
-// excluding a failure from the active lockout window.
+// loginAttemptModel 存储不含机密的登录失败事实。ClearedAt 保留历史证据，
+// 同时把该次失败排除出有效锁定窗口的计数。
 type loginAttemptModel struct {
 	ID            uint64     `gorm:"column:id;primaryKey"`
 	OccurredAt    time.Time  `gorm:"column:occurred_at"`

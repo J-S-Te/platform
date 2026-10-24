@@ -13,8 +13,10 @@ import (
 )
 
 var (
+	// ErrValidation 表示克隆请求非法（自克隆、空幂等键等）。
 	ErrValidation = errors.New("tenant authorization clone validation failed")
-	ErrNotFound   = errors.New("tenant authorization clone tenant not found")
+	// ErrNotFound 表示源或目标租户不存在。
+	ErrNotFound = errors.New("tenant authorization clone tenant not found")
 )
 
 // PermissionCrossTenantClone 是「向调用方租户之外的目标租户写入授权目录」所需的

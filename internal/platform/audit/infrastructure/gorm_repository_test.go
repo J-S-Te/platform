@@ -9,9 +9,9 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// TestEventQueryRowMapsAuditEventColumns prevents audit_event fields from silently disappearing
-// when a joined query is scanned. GORM only parses exported destination fields, so Event must stay
-// exported and embedded in eventQueryRow.
+// TestEventQueryRowMapsAuditEventColumns 防止扫描联表查询时
+// audit_event 字段被静默丢失。GORM 只解析导出的目标字段，因此 Event 必须
+// 保持导出并嵌入 eventQueryRow。
 func TestEventQueryRowMapsAuditEventColumns(t *testing.T) {
 	parsed, err := schema.Parse(&eventQueryRow{}, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
@@ -35,8 +35,8 @@ func TestEventQueryRowMapsAuditEventColumns(t *testing.T) {
 	}
 }
 
-// TestActionCategoryPredicate locks the public operation-category contract to parameterized SQL.
-// The category itself must never be interpolated into a clause, and unknown values must match no rows.
+// TestActionCategoryPredicate 将公开操作分类契约限定为参数化 SQL。
+// 分类本身绝不能拼接到子句中，未知分类必须不匹配任何行。
 func TestActionCategoryPredicate(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -78,8 +78,8 @@ func TestActionCategoryPredicate(t *testing.T) {
 	}
 }
 
-// TestActionCategoryPredicateIncludesLogout verifies that authentication-session termination is
-// shown under the login category and explicitly excluded from the broad POST-based create category.
+// TestActionCategoryPredicateIncludesLogout 验证认证会话终止操作
+// 归入登录分类，并明确排除在宽泛的 POST 创建分类之外。
 func TestActionCategoryPredicateIncludesLogout(t *testing.T) {
 	_, loginArgs := actionCategoryPredicate("LOGIN")
 	wantLoginArgs := []any{"auth.login", "auth.login.%", "auth.logout", "auth.logout.%"}
@@ -94,8 +94,8 @@ func TestActionCategoryPredicateIncludesLogout(t *testing.T) {
 	}
 }
 
-// TestExportQueryPreservesActionCategory prevents asynchronous exports from silently dropping the
-// operation category selected on the audit page.
+// TestExportQueryPreservesActionCategory 防止异步导出静默丢失
+// 审计页面所选择的操作分类。
 func TestExportQueryPreservesActionCategory(t *testing.T) {
 	page := application.PageRequest{ActionCategory: "CREATE"}
 	persisted := exportQuery(page)

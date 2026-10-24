@@ -1,4 +1,4 @@
-// Package infrastructure implements the owner directory with tenant-scoped SQL.
+// Package infrastructure 以强制租户范围的 SQL 实现负责人目录。
 package infrastructure
 
 import (
@@ -7,16 +7,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/domain"
 	"gorm.io/gorm"
 )
 
+// Repository 以 SQL 直接实现负责人目录查询。
 type Repository struct {
 	db  *gorm.DB
 	now func() time.Time
 }
 
+// NewRepository 构造目录仓储；数据库缺失时失败关闭。
 func NewRepository(db *gorm.DB) (*Repository, error) {
 	if db == nil {
 		return nil, errors.New("owner directory database must not be nil")
@@ -36,8 +39,14 @@ type membershipRow struct {
 	IsPrimary        bool   `gorm:"column:is_primary"`
 }
 
+// List 返回有效且在调用应用/环境中实际持有授权的内部用户分页；
+// 结果同时排除受保护的部署初始化管理员。
 func (repository *Repository) List(ctx context.Context, tenantID, applicationID, environmentID string, query application.Query) (domain.Page, error) {
 	now := repository.now().UTC()
+	identity, initialized, err := bootstrapadmin.Resolve(ctx, repository.db, tenantID)
+	if err != nil {
+		return domain.Page{}, err
+	}
 	// 候选用户不仅要有有效任职，还必须在调用应用/环境中实际获得有效角色。组织和岗位绑定
 	// 只有在任职允许继承时才生效，且岗位必须仍属于同一组织，避免错组织关系扩大可选负责人范围。
 	authorized := repository.db.WithContext(ctx).Table("iam_user AS user").
@@ -60,6 +69,11 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 				OR (membership.inherit_authorization = 1 AND BINARY binding.subject_type = BINARY ? AND binding.subject_id = membership.position_id
 					AND EXISTS (SELECT 1 FROM iam_position AS position WHERE position.tenant_id = membership.tenant_id AND position.id = membership.position_id AND position.org_unit_id = membership.org_unit_id AND BINARY position.status = BINARY ?)))
 		)`, applicationID, "ACTIVE", "ACTIVE", "COMPATIBILITY", now, now, "TENANT", "ENVIRONMENT", environmentID, "USER", "ORG_UNIT", "POSITION", "ACTIVE")
+	if initialized {
+		// 部署初始超级管理员是系统保留账号，不作为任何应用的业务负责人候选；精确 user_id
+		// 查询也在同一处过滤，不能绕过。
+		authorized = authorized.Where("user.id <> ?", identity.UserID)
+	}
 	if len(query.RoleCodes) > 0 {
 		authorized = authorized.Where(`EXISTS (
 			SELECT 1 FROM authz_role_binding AS role_binding

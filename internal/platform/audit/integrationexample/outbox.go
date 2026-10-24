@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	// AuditIngestPath is the application-authenticated batch endpoint exposed by Basic Platform.
+	// AuditIngestPath 是基础平台暴露的应用认证批量摄取端点。
 	AuditIngestPath = "/api/v1/audit/events/batch"
 	maxBatchSize    = 100
 )
 
-// Event is the safe, documented payload sent to the Basic Platform audit-ingestion endpoint.
+// Event 是发送到基础平台审计摄取端点的安全、有文档约定的载荷。
 type Event struct {
 	EventID         string    `json:"event_id"`
 	ApplicationCode string    `json:"application_code"`
@@ -41,15 +41,14 @@ type Event struct {
 	RiskLevel       string    `json:"risk_level,omitempty"`
 	Classification  string    `json:"classification,omitempty"`
 	Summary         string    `json:"summary,omitempty"`
-	// UserLoginIP is the optional end-user login IP captured by the reporting
-	// application. If omitted, Basic Platform keeps using the delivery request IP.
+	// UserLoginIP 是上报应用捕获的终端用户登录 IP，可选。缺省时基础平台继续
+	// 使用投递请求的 IP。
 	UserLoginIP string         `json:"user_login_ip,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
-// OutboxRecord is the minimum MySQL row an integrated service should persist in the same GORM
-// transaction as its business mutation. Payload is the serialized Event only, after the business
-// service has redacted sensitive fields.
+// OutboxRecord 是集成服务应与其业务变更在同一个 GORM 事务内持久化的最小 MySQL 行。
+// Payload 只保存业务服务完成敏感字段脱敏后序列化的 Event。
 type OutboxRecord struct {
 	ID          string
 	EventID     string
@@ -74,20 +73,20 @@ type Store interface {
 	MarkDeadLetter(ctx context.Context, recordID, errorCode string, failedAt time.Time) error
 }
 
-// Sender sends a validated batch with an application Bearer token. Implementations must not log
-// the authorization header, raw HTTP response body, or serialized event payload.
+// Sender 携带应用 Bearer token 发送已校验的批次。实现不得记录 Authorization 头、
+// 原始 HTTP 响应体或序列化的事件载荷。
 type Sender interface {
 	Send(ctx context.Context, events []Event) ([]Receipt, error)
 }
 
-// Clock makes delivery scheduling deterministic in tests and callers that already centralize time.
+// Clock 使投递调度在测试与已集中管理时间的调用方中可确定。
 type Clock interface{ Now() time.Time }
 
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
-// Worker delivers one MySQL-claimed batch at a time. No Redis, broker, or browser storage is used.
+// Worker 每次投递一个 MySQL 领取的批次。不使用 Redis、消息代理或浏览器存储。
 type Worker struct {
 	store       Store
 	sender      Sender
@@ -96,7 +95,7 @@ type Worker struct {
 	maxAttempts uint
 }
 
-// NewWorker builds an outbox worker with a bounded batch and explicit retry policy.
+// NewWorker 以有界批次与显式重试策略构建 outbox worker。
 func NewWorker(store Store, sender Sender, workerID string, maxAttempts uint) (*Worker, error) {
 	if store == nil || sender == nil || workerID == "" || maxAttempts == 0 {
 		return nil, errors.New("audit outbox worker configuration is invalid")

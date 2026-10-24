@@ -12,6 +12,7 @@ import (
 // 与环境的可信来源；解析过程不接受浏览器指定应用编码，也不写死任何子系统名称。
 type ApplicationAuthorizationResolver struct{ service *Service }
 
+// NewApplicationAuthorizationResolver 构造 OIDC 授权解析适配器；service 为空时返回错误。
 func NewApplicationAuthorizationResolver(service *Service) (*ApplicationAuthorizationResolver, error) {
 	if service == nil {
 		return nil, errors.New("application authorization resolver service must not be nil")
@@ -22,6 +23,8 @@ func NewApplicationAuthorizationResolver(service *Service) (*ApplicationAuthoriz
 var _ tokenissuer.AuthorizationResolver = (*ApplicationAuthorizationResolver)(nil)
 var _ tokenissuer.AuthorizationContextResolver = (*ApplicationAuthorizationResolver)(nil)
 
+// ResolveOIDCAuthorization 把应用授权解析为 OIDC 登录声明（角色集）。
+// "未配置/不存在/被拒绝"统一收敛为 access denied，不向登录端泄露应用授权配置。
 func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx context.Context, tenantID, clientID, userID string) (tokenissuer.AuthorizationClaims, error) {
 	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
 	if err != nil {
@@ -35,6 +38,8 @@ func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorization(ctx c
 	return tokenissuer.AuthorizationClaims{TenantID: resolved.TenantID, PersonID: resolved.PersonID, Roles: append([]string(nil), resolved.Roles...)}, nil
 }
 
+// ResolveOIDCAuthorizationContext 把应用授权解析为 authorization-context 响应，
+// 额外携带权限、数据范围、目录哈希与修订号，供子系统做目录变化与撤销检测。
 func (resolver *ApplicationAuthorizationResolver) ResolveOIDCAuthorizationContext(ctx context.Context, tenantID, clientID, userID string) (tokenissuer.AuthorizationContext, error) {
 	resolved, err := resolver.service.ResolveOIDCAuthorization(ctx, tenantID, clientID, userID)
 	if err != nil {

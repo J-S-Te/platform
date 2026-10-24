@@ -15,25 +15,25 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// CatalogInput is the application-owned authorization manifest submitted to the platform.
-// The platform stores the catalog in generic authorization tables; it does not assign business
-// meaning to permission codes.
+// CatalogInput 是应用提交给平台的自有授权清单。平台把目录存入通用授权表，
+// 不为权限编码赋予任何业务含义。
 type CatalogInput struct {
 	CatalogVersion string `json:"catalog_version"`
 	Checksum       string `json:"checksum"`
-	// SourceType and SourceIdentifier are provenance fields managed by the HTTP
-	// transport from a verified application bearer; request values must not be trusted.
+	// SourceType 与 SourceIdentifier 是由 HTTP 传输层根据已验证的应用 Bearer
+	// 填写的来源字段；请求体中的同名值绝不可信。
 	SourceType       string             `json:"source_type"`
 	SourceIdentifier string             `json:"source_identifier"`
 	Permissions      []PermissionInput  `json:"permissions"`
 	Roles            []CatalogRoleInput `json:"roles"`
 	Policy           CatalogPolicyInput `json:"policy,omitempty"`
-	// ClaimsRoleConfigHash is application-owned opaque Claims compatibility
-	// metadata. The platform stores and forwards it, but does not derive it from
-	// application-specific roles or permissions.
+	// ClaimsRoleConfigHash 是应用自有的不透明 Claims 兼容元数据。平台只存储与
+	// 透传，不会从应用的角色或权限推导它。
 	ClaimsRoleConfigHash string `json:"claims_role_config_hash,omitempty"`
 }
 
+// PermissionInput 是目录提交中的权限声明项；同一目录内 资源编码+动作 必须唯一，
+// risk_level 缺省按 LOW 处理。
 type PermissionInput struct {
 	Code         string `json:"code"`
 	Name         string `json:"name"`
@@ -43,6 +43,8 @@ type PermissionInput struct {
 	RiskLevel    string `json:"risk_level,omitempty"`
 }
 
+// CatalogRoleInput 是目录提交中的角色声明项；permissions 必须引用本次目录
+// 已声明的权限编码，引用未知编码会被整体拒绝。
 type CatalogRoleInput struct {
 	Code        string   `json:"code"`
 	Name        string   `json:"name"`
@@ -50,6 +52,8 @@ type CatalogRoleInput struct {
 	Permissions []string `json:"permissions"`
 }
 
+// CatalogView 是应用授权目录的完整只读视图：当前版本与摘要、来源、同步状态、
+// 兼容窗口（当前与 N-1 版本）、应用策略（最大有效角色数）及角色/权限清单。
 type CatalogView struct {
 	ApplicationID        string                         `json:"application_id"`
 	ApplicationCode      string                         `json:"application_code"`
@@ -76,6 +80,7 @@ type CatalogCompatibilityVersion struct {
 	ClaimsRoleConfigHash string `json:"claims_role_config_hash,omitempty"`
 }
 
+// CatalogPermissionView 是目录视图中单个权限的展示项。
 type CatalogPermissionView struct {
 	Code         string `json:"code"`
 	Name         string `json:"name"`
@@ -85,6 +90,8 @@ type CatalogPermissionView struct {
 	Status       string `json:"status"`
 }
 
+// CatalogRoleView 是目录视图中单个角色的展示项；Permissions 为启用状态且
+// effect=ALLOW 的权限编码列表。
 type CatalogRoleView struct {
 	Code        string   `json:"code"`
 	Name        string   `json:"name"`
@@ -128,7 +135,7 @@ type catalogRoleRow struct {
 	Status      string `gorm:"column:status"`
 }
 
-// GetCatalog returns the latest synchronized catalog and its platform-side status.
+// GetCatalog 返回应用最近一次同步的授权目录及其平台侧同步状态。
 func (s *Service) GetCatalog(ctx context.Context, tenantID, applicationID string) (CatalogView, error) {
 	app, err := s.findApplicationByID(ctx, tenantID, applicationID)
 	if err != nil {
@@ -144,9 +151,9 @@ func (s *Service) GetCatalog(ctx context.Context, tenantID, applicationID string
 	return s.catalogView(ctx, app, metadata)
 }
 
-// SyncCatalog validates and atomically replaces the application-owned role catalog.
-// Every application, including contract_management, uses this application-owned mirror;
-// contract-specific role-assignment and token-issuance guardrails live in Service access logic.
+// SyncCatalog 校验并原子替换应用自有的角色目录。包括 contract_management 在内的
+// 所有应用都走这条应用自有镜像通道；contract 特有的角色授予与令牌签发约束
+// 由 Service 的访问逻辑负责，不在目录同步层实现。
 func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, operatorID string, input CatalogInput) (CatalogView, error) {
 	app, err := s.findApplicationByID(ctx, tenantID, applicationID)
 	if err != nil {
@@ -279,12 +286,10 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		if err := bumpRevision(tx, tenantID, app.ID, now, "authorization catalog synchronized"); err != nil {
 			return err
 		}
-		// A catalog publish can change the permissions behind an existing role (or
-		// disable a role/permission).  The users' database bindings did not change,
-		// so identity mutation hooks cannot enqueue these projections for us.  Queue
-		// every active user for every synchronized Client in this same transaction;
-		// otherwise the first login after a catalog edit can still receive stale
-		// Keycloak claims until an unrelated user change happens.
+		// 目录发布可能改变既有角色背后的权限（或停用角色/权限）。用户的数据库绑定
+		// 并未变化，身份变更钩子因此不会为我们入队这些投影。必须在同一事务内为
+		// 每个已同步 Client 排队所有活动用户；否则目录编辑后的首次登录仍可能拿到
+		// 旧的 Keycloak claims，直到该用户发生无关变更。
 		return enqueueCatalogProjectionUsers(tx, s.ids, tenantID, app.ID, now)
 	}); err != nil {
 		s.recordCatalogFailure(ctx, tenantID, app, operatorID, input, err)
@@ -321,9 +326,8 @@ func previousCatalogCompatibility(existing catalogMetadataRow, next CatalogInput
 	}
 }
 
-// enqueueCatalogProjectionUsers turns an application catalog publish into a
-// durable projection request. Keeping this in the catalog transaction makes a
-// committed catalog revision and its Keycloak invalidation inseparable.
+// enqueueCatalogProjectionUsers 把一次应用目录发布转成持久的投影请求。
+// 保持在目录事务内执行，使已提交的目录版本与其 Keycloak 失效通知不可分割。
 func enqueueCatalogProjectionUsers(tx *gorm.DB, ids IdentifierGenerator, tenantID, applicationID string, now time.Time) error {
 	var userIDs []string
 	if err := tx.Table("iam_user").Where("tenant_id = ? AND status = ?", tenantID, activeStatus).Order("id ASC").Pluck("id", &userIDs).Error; err != nil {
@@ -352,9 +356,8 @@ func enqueueCatalogProjectionUsers(tx *gorm.DB, ids IdentifierGenerator, tenantI
 	return nil
 }
 
-// recordCatalogFailure stores the latest failed synchronization attempt without replacing the
-// last known good catalog. It is deliberately best-effort so the original validation or database
-// error remains the response returned to the caller.
+// recordCatalogFailure 记录最近一次失败的同步尝试，但不替换最后一份可用目录。
+// 刻意做成尽力而为：调用方拿到的响应仍保持最初的校验或数据库错误。
 func (s *Service) recordCatalogFailure(ctx context.Context, tenantID string, app applicationRow, operatorID string, input CatalogInput, syncErr error) {
 	message := "authorization catalog synchronization failed"
 	if syncErr != nil {
@@ -543,10 +546,8 @@ func (s *Service) upsertCatalogPermission(tx *gorm.DB, tenantID, appID, operator
 		ID string `gorm:"column:id"`
 	}
 	err := catalogPermissionByCode(tx, tenantID, appID, item.Code).Take(&row).Error
-	// Permission codes can be renamed between catalog versions. The database
-	// also enforces one permission per resource/action, so reconcile the legacy
-	// row instead of attempting an insert that can never satisfy that unique
-	// constraint.
+	// 权限编码在目录版本之间可能被重命名，且数据库还强制"同一资源/动作仅一条
+	// 权限"的唯一约束，因此这里对旧行做对账更新，而不是尝试一次注定违反该约束的插入。
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		err = catalogPermissionByResourceAction(tx, tenantID, appID, resourceID, item.Action).Take(&row).Error
 	}
@@ -653,18 +654,15 @@ func catalogCompatibilityVersions(metadata catalogMetadataRow) []CatalogCompatib
 	return versions
 }
 
-// EnsurePlatformCatalogSynced mirrors the migration-seeded built-in platform roles and
-// permissions into the application-owned catalog row when the platform's own subsystem has not
-// published a catalog. The platform has no catalog-publisher OAuth client for itself, so this
-// bootstrap is the only path that surfaces the built-in data through the application-owned
-// catalog mirror. The function is idempotent: a SYNCED row whose catalog_hash matches the
-// current built-in data only refreshes last_synced_at/last_synced_by/updated_at/updated_by so
-// the catalog row tracks whoever (or whatever) most recently re-acknowledged the built-in data.
+// EnsurePlatformCatalogSynced 在平台自有子系统尚未发布目录时，把迁移种子的内置
+// 平台角色与权限镜像到应用自有的目录行。平台自身没有 catalog-publisher OAuth client，
+// 这条 bootstrap 是内置数据经应用自有目录镜像暴露的唯一路径。函数幂等：SYNCED 行的
+// catalog_hash 与当前内置数据一致时，仅刷新 last_synced_at/last_synced_by/updated_at/
+// updated_by，使目录行记录最近一次（由谁）重新确认内置数据的时间与操作者。
 //
-// The function deliberately avoids SyncCatalog: SyncCatalog is designed for subsystem-published
-// manifests and would overwrite the platform's role_type=PLATFORM / built_in=1 metadata with
-// role_type=APPLICATION / built_in=0. Mirroring only the catalog row preserves the platform's
-// built-in distinctions.
+// 本函数刻意不走 SyncCatalog：后者面向子系统发布的清单，会把平台的
+// role_type=PLATFORM / built_in=1 元数据覆盖为 role_type=APPLICATION / built_in=0。
+// 只镜像目录行才能保留平台的内置标记。
 func (s *Service) EnsurePlatformCatalogSynced(ctx context.Context, tenantID, operatorID string) (CatalogView, error) {
 	app, err := s.findApplicationByCode(ctx, tenantID, PlatformApplicationCode)
 	if err != nil {
@@ -701,8 +699,8 @@ func (s *Service) EnsurePlatformCatalogSynced(ctx context.Context, tenantID, ope
 		existing.SyncStatus != "SYNCED" ||
 		!strings.EqualFold(existing.CatalogHash, hash)
 	if !contentChanged && existing.LastSyncedBy == operatorID {
-		// Truly idempotent: the row already reflects the current built-in data and the same
-		// operator. Returning the live view is cheap and keeps callers consistent.
+		// 完全幂等：目录行已反映当前内置数据且操作者相同。返回实时视图成本低，
+		// 也让各调用方保持一致。
 		return s.GetCatalog(ctx, tenantID, app.ID)
 	}
 	var writeErr error
@@ -736,9 +734,8 @@ func (s *Service) EnsurePlatformCatalogSynced(ctx context.Context, tenantID, ope
 	return s.GetCatalog(ctx, tenantID, app.ID)
 }
 
-// computePlatformCatalogHash returns a stable sha256 digest of the platform's currently
-// active role and permission codes. Re-syncing is skipped while the hash is unchanged, so an
-// idempotent API restart does not churn the catalog row or the audit log.
+// computePlatformCatalogHash 返回平台当前活动角色与权限编码的稳定 sha256 摘要。
+// 哈希未变化时跳过重新同步，使幂等的 API 重启不会搅动目录行和审计日志。
 func (s *Service) computePlatformCatalogHash(ctx context.Context, tenantID, appID string) (string, error) {
 	var roleCodes []string
 	if err := s.db.WithContext(ctx).Table("authz_role").

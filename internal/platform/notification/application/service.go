@@ -15,11 +15,11 @@ var (
 	ErrNotFound = errors.New("notification resource not found")
 	// ErrConflict 表示幂等键或状态转换冲突，不暴露已存在消息的正文。
 	ErrConflict = errors.New("notification resource conflict")
-	// ErrVersionConflict identifies a stale template status update.
+	// ErrVersionConflict 表示模板状态更新携带的版本号已过期。
 	ErrVersionConflict = errors.New("notification template version conflict")
-	// ErrValidation identifies invalid input without disclosing message content.
+	// ErrValidation 表示输入非法；不泄露消息内容。
 	ErrValidation = errors.New("notification validation failed")
-	// ErrNoRecipients indicates no active user resulted from the supplied audience references.
+	// ErrNoRecipients 表示给定受众引用没有解析出任何在册用户。
 	ErrNoRecipients = errors.New("notification recipients are empty")
 )
 
@@ -30,7 +30,7 @@ const (
 	retryLease       = 2 * time.Minute
 )
 
-// Service exposes the notification application's tenant-scoped use cases.
+// Service 暴露通知应用层的租户范围内用例。
 type Service struct {
 	repository Repository
 	policy     DeliveryVisibilityPolicy
@@ -39,7 +39,7 @@ type Service struct {
 	clock      Clock
 }
 
-// NewService validates and constructs the notification application service.
+// NewService 校验依赖并构造通知应用服务；任一依赖为 nil 即拒绝启动。
 func NewService(repository Repository, policy DeliveryVisibilityPolicy, resolver RecipientResolver, ids IdentifierGenerator, clock Clock) (*Service, error) {
 	if repository == nil || policy == nil || resolver == nil || ids == nil || clock == nil {
 		return nil, errors.New("notification service dependencies must not be nil")
@@ -92,7 +92,7 @@ func (service *Service) ChangeTemplateStatus(ctx context.Context, input ChangeTe
 	return service.repository.ChangeTemplateStatus(ctx, input, service.clock.Now().UTC())
 }
 
-// ListTemplates returns a bounded tenant-scoped template list.
+// ListTemplates 返回有界、租户隔离的模板列表。
 func (service *Service) ListTemplates(ctx context.Context, tenantID string, page PageRequest) (PageResult[domain.Template], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.Template]{}, ErrValidation
@@ -172,32 +172,63 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (CreateRe
 // RetryFailedDeliveries 领取有限数量的到期失败投递。领取动作把记录置为带租约的 PROCESSING，
 // 多实例不会同时处理同一收件人；租约过期后才允许其他实例接管。
 func (service *Service) RetryFailedDeliveries(ctx context.Context, tenantID string, limit int) (RetryResult, error) {
-	if strings.TrimSpace(tenantID) == "" || limit < 1 {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" || limit < 1 {
 		return RetryResult{}, ErrValidation
 	}
 	if limit > maximumRetrySize {
 		limit = maximumRetrySize
 	}
 	now := service.clock.Now().UTC()
-	deliveries, err := service.repository.ClaimFailedDeliveries(ctx, strings.TrimSpace(tenantID), limit, now.Add(retryLease), now)
+	deliveries, err := service.repository.ClaimFailedDeliveries(ctx, tenantID, limit, now.Add(retryLease), now)
 	if err != nil {
 		return RetryResult{}, err
 	}
+	return service.retryDeliveries(ctx, deliveries, now, &tenantID)
+}
+
+// RetryDueDeliveries 推进后台到期投递队列，不对外暴露跨租户 HTTP 用例。
+// 收件人与消息已经持久化，重试只更新原投递，保留原提醒可见时间和租户归属。
+func (service *Service) RetryDueDeliveries(ctx context.Context, limit int) (RetryResult, error) {
+	if limit < 1 {
+		return RetryResult{}, ErrValidation
+	}
+	if limit > maximumRetrySize {
+		limit = maximumRetrySize
+	}
+	now := service.clock.Now().UTC()
+	deliveries, err := service.repository.ClaimDueDeliveries(ctx, limit, now.Add(retryLease), now)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	return service.retryDeliveries(ctx, deliveries, now, nil)
+}
+
+func (service *Service) retryDeliveries(ctx context.Context, deliveries []domain.Delivery, now time.Time, requiredTenantID *string) (RetryResult, error) {
 	result := RetryResult{Claimed: len(deliveries)}
+	var failures []error
 	for _, delivery := range deliveries {
-		if _, deliverErr := service.repository.CompleteDelivery(ctx, strings.TrimSpace(tenantID), delivery.ID, now); deliverErr != nil {
-			if failErr := service.repository.FailDelivery(ctx, strings.TrimSpace(tenantID), delivery.ID, "站内信重试失败", retryAt(now, delivery.AttemptCount+1), now); failErr != nil {
-				return result, fmt.Errorf("mark retried notification delivery failed: %w", failErr)
+		tenantID := delivery.TenantID
+		if requiredTenantID != nil {
+			// 手工路径的所有写入始终绑定认证租户，不能因领取结果异常而扩大范围。
+			tenantID = *requiredTenantID
+		}
+		if _, deliverErr := service.repository.CompleteDelivery(ctx, tenantID, delivery.ID, now); deliverErr != nil {
+			if failErr := service.repository.FailDelivery(ctx, tenantID, delivery.ID, "站内信重试失败", retryAt(now, delivery.AttemptCount+1), now); failErr != nil {
+				// 已领取的其他任务仍需执行；本条保留 PROCESSING 租约，后续轮询可在到期后接管。
+				failures = append(failures,
+					fmt.Errorf("complete retried notification delivery: %w", deliverErr),
+					fmt.Errorf("mark retried notification delivery failed: %w", failErr))
 			}
 			result.Failed++
 			continue
 		}
 		result.Delivered++
 	}
-	return result, nil
+	return result, errors.Join(failures...)
 }
 
-// ListDeliveries returns a bounded tenant-scoped operations view. A status filter is optional.
+// ListDeliveries 返回有界、租户隔离的运维投递视图；状态过滤可选。
 func (service *Service) ListDeliveries(ctx context.Context, tenantID string, status domain.DeliveryStatus, page PageRequest) (PageResult[domain.Delivery], error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return PageResult[domain.Delivery]{}, ErrValidation
@@ -216,7 +247,7 @@ func (service *Service) ListInbox(ctx context.Context, tenantID, userID string, 
 	return service.repository.ListInbox(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), normalizePage(page), service.clock.Now().UTC())
 }
 
-// GetInboxItem reads exactly one delivered inbox item owned by the authenticated user.
+// GetInboxItem 读取当前认证用户拥有的单条已投递站内信。
 func (service *Service) GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string) (domain.InboxItem, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(deliveryID) == "" {
 		return domain.InboxItem{}, ErrValidation
@@ -224,7 +255,7 @@ func (service *Service) GetInboxItem(ctx context.Context, tenantID, userID, deli
 	return service.repository.GetInboxItem(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(deliveryID), service.clock.Now().UTC())
 }
 
-// CountUnread returns the authenticated recipient's delivered unread item count.
+// CountUnread 返回当前认证收件人的已投递未读条数。
 func (service *Service) CountUnread(ctx context.Context, tenantID, userID string) (int64, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
 		return 0, ErrValidation
@@ -240,7 +271,7 @@ func (service *Service) MarkRead(ctx context.Context, tenantID, userID, delivery
 	return service.repository.MarkRead(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(deliveryID), service.clock.Now().UTC())
 }
 
-// MarkAllRead marks all delivered inbox items belonging to one authenticated user as read.
+// MarkAllRead 将单个认证用户的全部已投递站内信置为已读。
 func (service *Service) MarkAllRead(ctx context.Context, tenantID, userID string) (int64, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
 		return 0, ErrValidation

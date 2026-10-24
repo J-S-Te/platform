@@ -1,8 +1,10 @@
 # Keycloak Broker 隔离
 
+> 校准：2026-10-13。下表为默认 Broker 命名关系；现有环境以配置加载、Worker 装配及受控同步结果为准，不通过控制台临时修改业务归属。
+
 平台内部员工和客户门户不能共用同一个 Basic Platform Broker 客户端。OAuth 客户端对应的应用和环境决定了令牌中的授权上下文；共用 `keycloak-broker` 会使其中一类登录拿到另一类应用的 claims，最终表现为 `OIDC_INVALID_CLAIMS` 或身份提供商认证失败。
 
-## 固定关系
+## 默认关系
 
 | 场景 | Keycloak IdP alias | 平台 OAuth client | 平台应用/环境 |
 | --- | --- | --- | --- |
@@ -29,3 +31,7 @@ KEYCLOAK_CUSTOMER_PORTAL_CLIENT_SECRET
 ## 发布注意事项
 
 先发布平台 Worker/API，使两个 Broker 和客户门户投影链路生效，再重启客户门户。不要把客户门户的 IdP hint 改回 `basic-platform`，也不要通过数据库直接修改 OAuth 客户端归属来临时修复登录。
+
+同一个上游身份已关联到其他 Keycloak 用户时，不删除用户或覆盖 `sub` 来规避。按[身份映射手册](../keycloak-identity-mapping.md)核对原生主体、平台稳定身份和 Broker 关联，先修复关联冲突，再对原 FAILED 事件受控重放。
+
+源代码核验范围：[`配置`](../../internal/shared/config/config.go)、[`启动装配`](../../internal/bootstrap)、[`Keycloak 同步`](../../internal/platform/keycloakauthorization/application/synchronizer.go)及[接入运行手册](../subsystem-onboarding.md)。

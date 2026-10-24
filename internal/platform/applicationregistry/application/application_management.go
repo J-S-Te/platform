@@ -15,22 +15,21 @@ import (
 var (
 	safeUpstreamURLPattern = regexp.MustCompile(`^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~-]+)(:([0-9]{1,5}))?(/[A-Za-z0-9._~!%+/@-]*)?$`)
 
-	// ErrNotFound means a tenant-scoped application registry resource does not exist.
+	// ErrNotFound 表示租户范围内的应用登记资源不存在；跨租户访问同样折叠为该错误。
 	ErrNotFound = errors.New("application registry resource not found")
-	// ErrConflict means a requested registry mutation violates a uniqueness or lifecycle rule.
+	// ErrConflict 表示登记变更违反唯一性或生命周期约束（如重复编码、非法状态迁移）。
 	ErrConflict = errors.New("application registry resource conflict")
-	// ErrVersionConflict means the mutation was made against an outdated aggregate version.
+	// ErrVersionConflict 表示变更基于过期的聚合版本，调用方必须重读后重试。
 	ErrVersionConflict = errors.New("application registry version conflict")
-	// ErrValidation means a management request cannot be safely persisted.
+	// ErrValidation 表示管理请求存在无法安全落库的输入问题，调用方可自行修正。
 	ErrValidation = errors.New("invalid application registry input")
-	// ErrEnvironmentDeletionBlocked means an environment still has configuration or audit evidence
-	// that must be retained instead of being deleted.
+	// ErrEnvironmentDeletionBlocked 表示环境仍有必须保留的配置或审计证据，删除被拒绝。
 	ErrEnvironmentDeletionBlocked = errors.New("application environment deletion blocked by retained records")
-	// ErrEnvironmentNotOffboarded prevents irreversible cleanup until the deployment control plane
-	// has recorded successful runtime teardown for this exact tenant/application/environment.
+	// ErrEnvironmentNotOffboarded 在部署控制面为该精确租户/应用/环境记录运行时拆除成功之前，
+	// 阻止不可逆清理。
 	ErrEnvironmentNotOffboarded = errors.New("application environment is not offboarded")
-	// ErrEnvironmentRetentionApprovalInvalid requires a completed platform audit-retention purge
-	// task scoped to this exact tenant and application before deleting its audit receipt records.
+	// ErrEnvironmentRetentionApprovalInvalid 要求先完成限定到该租户与应用的平台审计保留清理任务，
+	// 才允许删除其审计回执记录。
 	ErrEnvironmentRetentionApprovalInvalid = errors.New("application environment retention approval is invalid")
 )
 
@@ -40,21 +39,19 @@ const (
 	maxMetadataBytes          = 64 << 10
 	builtInApplicationCode    = "platform"
 
-	// IssuerAliasPlatform and IssuerAliasKeycloak are the only authentication
-	// providers an application environment may select.  This deliberately keeps
-	// the provider selection in the existing issuer_alias field: a second
-	// issuer-kind field would create two competing sources of truth during a
-	// cutover or rollback.
+	// IssuerAliasPlatform/IssuerAliasKeycloak 是应用环境可选的全部认证提供方。
+	// 刻意沿用既有 issuer_alias 字段承载提供方选择：再设一个 issuer 类别字段
+	// 会在切换或回滚期间造成两个互相竞争的事实来源。
 	IssuerAliasPlatform = "platform"
 	IssuerAliasKeycloak = "keycloak"
 )
 
-// IdentifierGenerator supplies sortable identifiers for applications and environments.
+// IdentifierGenerator 为应用与环境提供可排序标识符；实现须时间有序且租户内唯一。
 type IdentifierGenerator interface {
 	New(at time.Time) (string, error)
 }
 
-// PageRequest contains the supported bounded application-management list filters.
+// PageRequest 承载应用管理列表查询的受边界约束的过滤参数。
 type PageRequest struct {
 	Page     int
 	PageSize int
@@ -62,7 +59,7 @@ type PageRequest struct {
 	Status   string
 }
 
-// PageResult is the tenant-safe list response returned by management queries.
+// PageResult 是管理查询返回的租户安全列表结果，可跨管理接口复用。
 type PageResult[T any] struct {
 	Items    []T
 	Page     int
@@ -70,8 +67,8 @@ type PageResult[T any] struct {
 	Total    int64
 }
 
-// Application is a tenant-scoped business-system registration. It intentionally excludes all
-// OAuth client, grant, callback and credential data.
+// Application 是租户范围内的业务系统登记。刻意不含任何 OAuth 客户端、授权类型、
+// 回调或凭据数据，目录视图与凭据面完全隔离。
 type Application struct {
 	ID              string
 	TenantID        string
@@ -88,17 +85,16 @@ type Application struct {
 	UpdatedAt       time.Time
 }
 
-// Environment is a deployment boundary under an application. Metadata is non-secret JSON
-// object data only; OAuth credentials and private keys are intentionally not modeled here.
+// Environment 是应用下的一个部署边界。Metadata 只允许非机密的 JSON 对象数据；
+// OAuth 凭据与私钥刻意不在本结构建模。
 //
-// Gateway fields split the public-facing address from the internal upstream so the platform can
-// act as a single-entry reverse proxy:
-//   - BaseURL:     public base URL every external caller (browser, OAuth client) sees for this
-//     environment; used as the prefix when LoginTarget.TargetURI is relative.
-//   - UpstreamURL: internal address of the registered sub-system, only reachable from the portal
-//     host (e.g. http://127.0.0.1:8081). Used to render the nginx upstream map.
-//   - PathPrefix:  sub-system path prefix under the portal (e.g. /contract); when set, the
-//     portal gateway strips/forwards it to UpstreamURL.
+// 网关字段把对外地址与内部上游分开，使平台可作为单入口反向代理：
+//   - BaseURL:     外部调用方（浏览器、OAuth 客户端）看到的公开基址；
+//     LoginTarget.TargetURI 为相对路径时以它为前缀解析。
+//   - UpstreamURL: 已登记子系统的内部地址，仅门户主机可达（如 http://127.0.0.1:8081），
+//     用于渲染 nginx upstream 映射。
+//   - PathPrefix:  子系统在门户下的路径前缀（如 /contract）；设置后由门户网关
+//     剥离并转发到 UpstreamURL。
 type Environment struct {
 	ID            string
 	TenantID      string
@@ -115,7 +111,7 @@ type Environment struct {
 	UpdatedAt     time.Time
 }
 
-// ApplicationCreateInput contains writable fields for a new application registration.
+// ApplicationCreateInput 包含新应用登记的全部可写字段；稳定编码一经创建不可改。
 type ApplicationCreateInput struct {
 	TenantID        string
 	OperatorID      string
@@ -129,8 +125,8 @@ type ApplicationCreateInput struct {
 	Status          string
 }
 
-// ApplicationUpdateInput updates an application with optimistic locking. The stable code is not
-// writable: it is used by permissions, audit provenance and configuration namespaces.
+// ApplicationUpdateInput 以乐观锁更新应用。稳定编码不可写：权限、审计溯源与
+// 配置命名空间都以它为键，变更会静默断开既有引用。
 type ApplicationUpdateInput struct {
 	TenantID        string
 	OperatorID      string
@@ -145,9 +141,8 @@ type ApplicationUpdateInput struct {
 	Version         uint64
 }
 
-// ApplicationDeleteInput retires an application registration after the caller confirms its
-// stable code. The operation is intentionally logical: related environments, OAuth clients,
-// login targets and audit history remain available for traceability.
+// ApplicationDeleteInput 在调用方确认稳定编码后退役应用登记。刻意做成逻辑删除：
+// 关联环境、OAuth 客户端、登录目标与审计历史保留可追溯。
 type ApplicationDeleteInput struct {
 	TenantID         string
 	OperatorID       string
@@ -156,7 +151,7 @@ type ApplicationDeleteInput struct {
 	Version          uint64
 }
 
-// EnvironmentCreateInput contains writable fields for one deployment environment.
+// EnvironmentCreateInput 包含单个部署环境的全部可写字段。
 type EnvironmentCreateInput struct {
 	TenantID      string
 	OperatorID    string
@@ -170,7 +165,7 @@ type EnvironmentCreateInput struct {
 	Status        string
 }
 
-// EnvironmentUpdateInput updates an environment with optimistic locking.
+// EnvironmentUpdateInput 以乐观锁更新环境；版本冲突须重读，不得覆盖并发修改。
 type EnvironmentUpdateInput struct {
 	TenantID      string
 	OperatorID    string
@@ -185,8 +180,8 @@ type EnvironmentUpdateInput struct {
 	Version       uint64
 }
 
-// EnvironmentDeleteInput physically removes one non-development deployment environment and its
-// derived login-target/OAuth integration records after explicit scoped confirmation.
+// EnvironmentDeleteInput 在显式范围确认后，物理移除一个非开发部署环境及其派生的
+// 登录目标/OAuth 集成记录；存在保留证据时仓储会拒绝。
 type EnvironmentDeleteInput struct {
 	TenantID         string
 	OperatorID       string
@@ -196,9 +191,8 @@ type EnvironmentDeleteInput struct {
 	Version          uint64
 }
 
-// EnvironmentPurgeInput is the irreversible, reviewed cleanup operation. It is intentionally
-// separate from DeleteEnvironment: callers must explicitly acknowledge that retained config and
-// audit evidence will be destroyed after the subsystem has been offboarded.
+// EnvironmentPurgeInput 是不可逆、需评审的清理操作。刻意与 DeleteEnvironment 分离：
+// 调用方必须显式确认子系统已下线，且保留配置与审计证据将被销毁。
 type EnvironmentPurgeInput struct {
 	TenantID            string
 	OperatorID          string
@@ -211,8 +205,8 @@ type EnvironmentPurgeInput struct {
 	Version             uint64
 }
 
-// ManagementRepository owns tenant-scoped persistence for application and environment
-// management. It does not expose OAuth client or credential mutation operations.
+// ManagementRepository 负责应用与环境管理的租户范围持久化。
+// 不暴露 OAuth 客户端或凭据变更操作，目录管理与凭据生命周期分层隔离。
 type ManagementRepository interface {
 	ListApplications(context.Context, string, PageRequest) (PageResult[Application], error)
 	CreateApplication(context.Context, ApplicationCreateInput, string, time.Time) (Application, error)
@@ -226,14 +220,14 @@ type ManagementRepository interface {
 	DeleteEnvironment(context.Context, EnvironmentDeleteInput) (Environment, error)
 }
 
-// ManagementService coordinates controlled, tenant-isolated application and environment changes.
+// ManagementService 串联受控且租户隔离的应用与环境变更；跨租户读取一律按 not found 处理。
 type ManagementService struct {
 	repository ManagementRepository
 	ids        IdentifierGenerator
 	clock      Clock
 }
 
-// NewManagementService constructs the application/environment management use cases.
+// NewManagementService 构造应用/环境管理用例；任一依赖缺失即拒绝构造。
 func NewManagementService(repository ManagementRepository, ids IdentifierGenerator, clock Clock) (*ManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("application registry management dependencies must not be nil")
@@ -241,7 +235,7 @@ func NewManagementService(repository ManagementRepository, ids IdentifierGenerat
 	return &ManagementService{repository: repository, ids: ids, clock: clock}, nil
 }
 
-// ListApplications returns applications visible within the authenticated tenant.
+// ListApplications 返回认证租户内可见的应用，分页参数有硬上限防刷。
 func (service *ManagementService) ListApplications(ctx context.Context, tenantID string, query PageRequest) (PageResult[Application], error) {
 	tenantID = strings.TrimSpace(tenantID)
 	query = normalizePageRequest(query)
@@ -251,7 +245,7 @@ func (service *ManagementService) ListApplications(ctx context.Context, tenantID
 	return service.repository.ListApplications(ctx, tenantID, query)
 }
 
-// CreateApplication registers a tenant-scoped business system with a stable code.
+// CreateApplication 以稳定编码登记租户范围内的业务系统；编码冲突返回 ErrConflict。
 func (service *ManagementService) CreateApplication(ctx context.Context, input ApplicationCreateInput) (Application, error) {
 	input = normalizeApplicationCreate(input)
 	if !validApplicationCreate(input) {
@@ -266,7 +260,7 @@ func (service *ManagementService) CreateApplication(ctx context.Context, input A
 	return service.repository.CreateApplication(ctx, input, applicationID, now)
 }
 
-// GetApplication returns one application scoped to the tenant.
+// GetApplication 返回租户范围内的单个应用。
 func (service *ManagementService) GetApplication(ctx context.Context, tenantID, applicationID string) (Application, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	applicationID = strings.TrimSpace(applicationID)
@@ -276,18 +270,27 @@ func (service *ManagementService) GetApplication(ctx context.Context, tenantID, 
 	return service.repository.GetApplication(ctx, tenantID, applicationID)
 }
 
-// UpdateApplication changes mutable registration details while preserving the stable code.
+// UpdateApplication 修改可变的登记信息，稳定编码保持不变。
 func (service *ManagementService) UpdateApplication(ctx context.Context, input ApplicationUpdateInput) (Application, error) {
 	input = normalizeApplicationUpdate(input)
 	if !validApplicationUpdate(input) {
 		return Application{}, ErrValidation
 	}
+	// PATCH 与 DELETE 必须共享同一生命周期保护：内置平台应用是登录与授权控制面的根节点，
+	// 只有普通应用更新权限的人把 status 改成 SUSPENDED/RETIRED 会让门户入口、登录目标和
+	// 机器客户端因父应用不再 ACTIVE 而失效，因此这里按稳定应用编码拒绝非 ACTIVE 变更。
+	current, err := service.repository.GetApplication(ctx, input.TenantID, input.ApplicationID)
+	if err != nil {
+		return Application{}, err
+	}
+	if current.Code == builtInApplicationCode && input.Status != "ACTIVE" {
+		return Application{}, ErrConflict
+	}
 	return service.repository.UpdateApplication(ctx, input, service.clock.Now().UTC())
 }
 
-// DeleteApplication logically deletes one application registration by moving it to RETIRED.
-// Physical deletion is deliberately avoided because environments, OAuth clients, login targets
-// and audit records may still reference the stable application identity.
+// DeleteApplication 把应用登记迁移到 RETIRED 完成逻辑删除。刻意避免物理删除：
+// 环境、OAuth 客户端、登录目标与审计记录仍可能引用稳定的应用身份。
 func (service *ManagementService) DeleteApplication(ctx context.Context, input ApplicationDeleteInput) (Application, error) {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
@@ -331,7 +334,7 @@ func (service *ManagementService) DeleteApplication(ctx context.Context, input A
 	}, service.clock.Now().UTC())
 }
 
-// ListEnvironments returns the environments registered beneath one tenant-scoped application.
+// ListEnvironments 返回某租户范围应用下登记的全部环境。
 func (service *ManagementService) ListEnvironments(ctx context.Context, tenantID, applicationID string, query PageRequest) (PageResult[Environment], error) {
 	tenantID = strings.TrimSpace(tenantID)
 	applicationID = strings.TrimSpace(applicationID)
@@ -345,8 +348,8 @@ func (service *ManagementService) ListEnvironments(ctx context.Context, tenantID
 	return service.repository.ListEnvironments(ctx, tenantID, applicationID, query)
 }
 
-// CreateEnvironment registers an isolated deployment environment. Retired and suspended
-// applications cannot gain new environments; DRAFT applications can be prepared before launch.
+// CreateEnvironment 登记一个隔离的部署环境。已退役/暂停应用不得新增环境；
+// DRAFT 应用允许在上线前预置。
 func (service *ManagementService) CreateEnvironment(ctx context.Context, input EnvironmentCreateInput) (Environment, error) {
 	input = normalizeEnvironmentCreate(input)
 	if !validEnvironmentCreate(input) {
@@ -369,7 +372,7 @@ func (service *ManagementService) CreateEnvironment(ctx context.Context, input E
 	return service.repository.CreateEnvironment(ctx, input, environmentID, now)
 }
 
-// GetEnvironment returns a single tenant/application-scoped environment.
+// GetEnvironment 返回租户/应用范围内的单个环境。
 func (service *ManagementService) GetEnvironment(ctx context.Context, tenantID, applicationID, environmentID string) (Environment, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	applicationID = strings.TrimSpace(applicationID)
@@ -380,7 +383,7 @@ func (service *ManagementService) GetEnvironment(ctx context.Context, tenantID, 
 	return service.repository.GetEnvironment(ctx, tenantID, applicationID, environmentID)
 }
 
-// UpdateEnvironment changes deployment metadata and lifecycle state using optimistic locking.
+// UpdateEnvironment 以乐观锁变更部署元数据与生命周期状态。
 func (service *ManagementService) UpdateEnvironment(ctx context.Context, input EnvironmentUpdateInput) (Environment, error) {
 	input = normalizeEnvironmentUpdate(input)
 	if !validEnvironmentUpdate(input) {
@@ -389,9 +392,8 @@ func (service *ManagementService) UpdateEnvironment(ctx context.Context, input E
 	return service.repository.UpdateEnvironment(ctx, input, service.clock.Now().UTC())
 }
 
-// DeleteEnvironment removes one non-development environment while preserving its parent
-// application and every other environment. The repository atomically removes only derived
-// integration records and rejects deletion when configuration or audit evidence exists.
+// DeleteEnvironment 移除一个非开发环境，保留父应用与其他环境不受影响。
+// 仓储只原子移除派生集成记录；存在配置或审计证据时拒绝删除。
 func (service *ManagementService) DeleteEnvironment(ctx context.Context, input EnvironmentDeleteInput) (Environment, error) {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
@@ -422,8 +424,8 @@ func (service *ManagementService) DeleteEnvironment(ctx context.Context, input E
 	return service.repository.DeleteEnvironment(ctx, input)
 }
 
-// PurgeEnvironment invokes the optional destructive repository operation only after strict,
-// scoped confirmations. Existing repositories that do not implement purge remain safe.
+// PurgeEnvironment 仅在严格且限定范围的确认之后才调用可选的破坏性仓储操作；
+// 未实现 purge 的既有仓储保持安全（按不支持处理）。
 func (service *ManagementService) PurgeEnvironment(ctx context.Context, input EnvironmentPurgeInput) (Environment, error) {
 	input.TenantID = strings.TrimSpace(input.TenantID)
 	input.OperatorID = strings.TrimSpace(input.OperatorID)
@@ -642,8 +644,8 @@ func validOptionalURL(value *string) bool {
 	return err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
 }
 
-// validOptionalBaseURL validates the public portal address used to compose browser redirects.
-// Unlike a general homepage URL it must not contain credentials, a query or a fragment.
+// validOptionalBaseURL 校验用于拼装浏览器跳转的公开门户地址。与普通主页 URL 不同，
+// 它不得包含凭据、query 或 fragment。
 func validOptionalBaseURL(value *string) bool {
 	if value == nil || *value == "" {
 		return true
@@ -668,9 +670,8 @@ func normalizeOptionalBaseURL(value *string) *string {
 	return &normalized
 }
 
-// validOptionalUpstreamURL is the strictly-internal counterpart to validOptionalURL. It is used
-// for the reverse-proxy target only and may point at private/loopback addresses, so it does not
-// share the public-suffix concerns of the public BaseURL.
+// validOptionalUpstreamURL 是公开地址校验的严格内部对应版本，仅用于反向代理目标，
+// 允许指向私网/回环地址，因此不适用公开 BaseURL 的公网后缀约束。
 func validOptionalUpstreamURL(value *string) bool {
 	if value == nil || *value == "" {
 		return true
@@ -705,25 +706,25 @@ func normalizeOptionalUpstreamURL(value *string) *string {
 	return &normalized
 }
 
-// validOptionalPathPrefix accepts an absolute path under the portal root. The trailing slash is
-// optional; // (protocol-relative), \\ (windows) and any :// (scheme) are rejected.
+// validOptionalPathPrefix 接受门户根下的绝对路径，尾部斜杠可选；
+// 协议相对（//）、Windows 盘符（\\）与任何 :// 协议形式一律拒绝。
 func validOptionalPathPrefix(value *string) bool {
 	if value == nil || *value == "" {
 		return true
 	}
-	// The portal root is reserved for the portal UI and cannot be assigned to a sub-system.
+	// 门户根路径保留给门户 UI 自身，不能分配给子系统。
 	return *value != "/" && validPortalPath(*value, 128)
 }
 
-// validPortalPath accepts one single-rooted, query-free path using the same conservative
-// character set as the nginx gateway renderer. Encoded characters and traversal are rejected.
+// validPortalPath 接受单根、无 query 的路径，字符集与 nginx 网关渲染器保持同一保守口径；
+// 百分号编码与目录穿越一律拒绝。
 func validPortalPath(value string, limit int) bool {
 	if value == "" || len(value) > limit || !strings.HasPrefix(value, "/") || strings.Contains(value, "//") {
 		return false
 	}
-	// Keep this character set aligned with scripts/portal-gateway.sh. Besides avoiding nginx
-	// configuration metacharacters, rejecting percent-encoding prevents browser/nginx double-
-	// decoding disagreements before a LoginTarget is joined to the public BaseURL.
+	// 字符集必须与 scripts/portal-gateway.sh 保持一致。除规避 nginx 配置元字符外，
+	// 拒绝百分号编码还能防止 LoginTarget 拼入公开 BaseURL 之前，浏览器与 nginx
+	// 对双重解码产生分歧。
 	for _, character := range []byte(value) {
 		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
 			(character >= '0' && character <= '9') || strings.ContainsRune("/._~!+-", rune(character)) {
@@ -755,11 +756,11 @@ func normalizeOptionalPathPrefix(value *string) *string {
 	return &normalized
 }
 
-// validGatewayTripleConsistent enforces a coarse invariant for the gateway fields:
-//   - path_prefix only makes sense when paired with a BaseURL (relative LoginTarget.TargetURI is
-//     resolved against BaseURL), so the presence of path_prefix implies BaseURL is set.
-//   - upstream_url + path_prefix describe a single reverse-proxy entry, so they must be set
-//     together (or both left empty when the environment is only used as a logical boundary).
+// validGatewayTripleConsistent 对网关三字段执行粗粒度不变式：
+//   - path_prefix 只有配合 BaseURL 才有意义（相对 LoginTarget.TargetURI 以 BaseURL 解析），
+//     因此出现 path_prefix 即要求 BaseURL 已设置。
+//   - upstream_url 与 path_prefix 共同描述一个反向代理条目，必须同时设置
+//     （环境仅作逻辑边界时两者都留空）。
 func validGatewayTripleConsistent(baseURL, upstreamURL, pathPrefix *string) bool {
 	// 网关三元组必须保持可组合：路径前缀必须有公网基址，且内部上游与路径前缀必须
 	// 同时出现，防止形成“门户可见但无法代理”的半配置状态。
@@ -820,11 +821,9 @@ func normalizeOptional(value *string) *string {
 	return &normalized
 }
 
-// normalizeIssuerAlias canonicalizes the persisted authentication provider.
-// A missing or blank value is the historic representation of Basic Platform
-// OIDC, so it is explicitly backfilled to platform rather than left nullable.
-// This makes all new writes compatible with the database invariant introduced
-// by the issuer-alias migration.
+// normalizeIssuerAlias 规范化持久化的认证提供方。缺失或空白值是基础平台 OIDC 的
+// 历史表示，因此显式回填为 platform 而不是保留 NULL，使新写入全部满足
+// issuer-alias 迁移引入的数据库不变式。
 func normalizeIssuerAlias(value *string) *string {
 	if value == nil || strings.TrimSpace(*value) == "" {
 		return stringPointer(IssuerAliasPlatform)

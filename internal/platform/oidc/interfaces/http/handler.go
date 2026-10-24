@@ -1,4 +1,4 @@
-// Package oidchttp adapts the OIDC/OAuth application service to protocol HTTP endpoints.
+// Package oidchttp 把 OIDC/OAuth 应用服务适配为协议 HTTP 端点。
 package oidchttp
 
 import (
@@ -21,8 +21,8 @@ const (
 	maxTokenRequestBytes     = 64 << 10
 )
 
-// Service is the OIDC application boundary used by this HTTP adapter. Keeping it as an interface
-// makes HTTP tests independent from persistence and lets bootstrap inject application.Service.
+// Service 是本 HTTP 适配器使用的 OIDC 应用边界。保持为接口使 HTTP 测试独立于
+// 持久化，并允许 bootstrap 直接注入 application.Service。
 type Service interface {
 	Authorize(context.Context, application.AuthorizationInput) (application.AuthorizationResult, error)
 	ResolveRequestObject(context.Context, application.RequestObjectAuthorizationInput) (application.AuthorizationInput, error)
@@ -38,26 +38,25 @@ type Service interface {
 	ResolveUserInfo(context.Context, application.UserInfoInput) (application.UserInfo, error)
 }
 
-// LegacyClientCredentialsIssuer preserves the existing client_credentials behavior while the
-// platform moves all public OAuth endpoints behind this handler.
+// LegacyClientCredentialsIssuer 在平台把全部公共 OAuth 端点迁移到本 Handler 期间，
+// 保留既有 client_credentials 行为。
 type LegacyClientCredentialsIssuer interface {
 	IssueClientCredentials(context.Context, string, string, []string) (applicationregistryapplication.TokenResult, error)
 }
 
-// BrowserSessionAuthenticator verifies the platform's signed browser-session cookie. The identity
-// application service already exposes a method with this shape, so bootstrap may inject it directly.
+// BrowserSessionAuthenticator 校验平台签名的浏览器会话 cookie。身份应用服务已
+// 暴露同形状方法，bootstrap 可直接注入。
 type BrowserSessionAuthenticator interface {
 	Authenticate(context.Context, string) (authctx.Principal, error)
 }
 
-// BrowserSessionLogout revokes an already authenticated platform session. It is deliberately
-// separate from BrowserSessionAuthenticator because deployments may initially publish OIDC before
-// wiring RP-initiated logout to the identity service.
+// BrowserSessionLogout 撤销一个已认证的平台会话。它刻意与 BrowserSessionAuthenticator
+// 分开：部署可能先发布 OIDC，之后再接线 RP-initiated logout。
 type BrowserSessionLogout interface {
 	Logout(context.Context, authctx.Principal) error
 }
 
-// JWTManager represents the OIDC signing-key operations needed at the protocol edge.
+// JWTManager 表示协议边缘所需的 OIDC 签名密钥操作。
 type JWTManager interface {
 	Issuer() string
 	JWKS() security.OIDCJWKS
@@ -65,29 +64,28 @@ type JWTManager interface {
 	VerifyIDToken(token, expectedAudience string, now time.Time) (security.OIDCTokenClaims, error)
 }
 
-// PostLogoutRedirectValidator confirms a URI against the dedicated post-logout registration set.
-// It must not reuse ordinary OAuth redirect URIs.
+// PostLogoutRedirectValidator 针对专用 post-logout 登记集合校验 URI；
+// 绝不复用普通 OAuth redirect URI。
 type PostLogoutRedirectValidator interface {
 	IsRegisteredPostLogoutRedirectURI(context.Context, string, string) (bool, error)
 }
 
-// AccessTokenSubject contains the tenant-scoped durable identifiers omitted from the compact
-// public JWT. A resolver must bind the signed client/session/user identifiers to active storage.
+// AccessTokenSubject 携带紧凑公共 JWT 中省略的租户内持久标识。解析器必须把签名
+// 的 client/session/user 标识绑定到活动存储记录。
 type AccessTokenSubject struct {
 	TenantID      string
 	OAuthClientID string
 	LoginIP       string
 }
 
-// AccessTokenSubjectResolver resolves the durable OIDC client and tenant IDs needed by
-// application.ResolveUserInfo and revocation checks. UserInfo fails closed when it is absent.
+// AccessTokenSubjectResolver 解析 application.ResolveUserInfo 与撤销检查所需的
+// 持久化 OIDC client 与租户 ID；缺失时 UserInfo fail-closed。
 type AccessTokenSubjectResolver interface {
 	ResolveAccessTokenSubject(context.Context, string, string, string) (AccessTokenSubject, error)
 }
 
-// ExternalAuthorizationTokenVerifier is the narrow trust boundary for an upstream
-// identity provider such as Keycloak. It is used only by authorization-context;
-// normal platform OAuth endpoints continue to accept platform-issued access tokens.
+// ExternalAuthorizationTokenVerifier 是面向 Keycloak 等上游身份提供方的窄信任边界。
+// 仅 authorization-context 使用它；平台常规 OAuth 端点继续接受平台签发的 access token。
 type ExternalAuthorizationTokenClaims struct {
 	Subject         string
 	IdentityID      string
@@ -98,34 +96,37 @@ type ExternalAuthorizationTokenClaims struct {
 	TokenUse        string
 }
 
+// ExternalAuthorizationTokenVerifier 验签外部签发的访问 token 并提取紧凑声明。
 type ExternalAuthorizationTokenVerifier interface {
 	Verify(context.Context, string) (ExternalAuthorizationTokenClaims, error)
 }
 
-// PersonnelDirectoryEntry is the minimal tenant personnel projection exposed to profile-scoped
-// subsystem sessions. Login names and employee numbers are deliberately excluded.
+// PersonnelDirectoryEntry 是暴露给持 profile scope 的子系统会话的最小租户人员投影；
+// 登录名与工号被刻意排除。
 type PersonnelDirectoryEntry struct {
 	UserID      string   `json:"user_id"`
 	DisplayName string   `json:"display_name"`
-	Roles       []string `json:"roles"`
+	Roles       []string `json:"roles" gorm:"-"`
 }
 
+// PersonnelDirectoryResolver 按租户与 OAuth client 列出可授权的活动人员。
 type PersonnelDirectoryResolver interface {
 	ListActivePersonnel(context.Context, string, string) ([]PersonnelDirectoryEntry, error)
 }
 
-// Clock makes JWT verification deterministic in unit tests.
+// Clock 使 JWT 校验在单元测试中可确定性复现。
 type Clock interface {
 	Now() time.Time
 }
 
 type systemClock struct{}
 
+// Now 返回当前 UTC 时间。
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
-// Config lists all bootstrap-owned dependencies for the OIDC HTTP edge. SessionAuthenticator,
-// SessionLogout, LegacyClientCredentialsIssuer, and PostLogoutRedirectValidator are intentionally
-// optional: endpoints that depend on an absent adapter fail closed rather than accepting input.
+// Config 列出 OIDC HTTP 边缘全部由 bootstrap 注入的依赖。SessionAuthenticator、
+// SessionLogout、LegacyClientCredentialsIssuer 与 PostLogoutRedirectValidator 刻意
+// 可选：依赖缺失适配器的端点一律 fail-closed，而不是放行输入。
 type Config struct {
 	Service                       Service
 	JWTManager                    JWTManager
@@ -138,10 +139,9 @@ type Config struct {
 	AuthorizationResolver         tokenissuer.AuthorizationResolver
 	AuthorizationContextResolver  tokenissuer.AuthorizationContextResolver
 	PersonnelDirectoryResolver    PersonnelDirectoryResolver
-	// AllowLegacyPlatformAccessToken only controls whether authorization-context
-	// accepts a platform-issued access token after the Keycloak cutover. The
-	// standard UserInfo endpoint must continue accepting tokens issued by this
-	// authorization server because the Keycloak Broker consumes it.
+	// AllowLegacyPlatformAccessToken 只控制 Keycloak 切换后 authorization-context
+	// 是否继续接受平台签发的 access token。标准 UserInfo 端点必须继续接受本授权
+	// 服务器签发的令牌，因为 Keycloak Broker 依赖它。
 	AllowLegacyPlatformAccessToken bool
 	// CustomerBindingResolver 在 EmitCustomerRef 打开时向 authorization-context 响应
 	// 追加 customer_ref 声明；实现由外部客户绑定模块注入。
@@ -154,7 +154,7 @@ type Config struct {
 	Logger                  *slog.Logger
 }
 
-// Handler contains only transport policy. Durable protocol state remains in application.Service.
+// Handler 只承载传输层策略；持久化协议状态仍留在 application.Service 中。
 type Handler struct {
 	service                        Service
 	jwtManager                     JWTManager
@@ -176,24 +176,22 @@ type Handler struct {
 	logger                         *slog.Logger
 }
 
-// BrokerDriftSelfHealer repairs a platform OAuth broker client whose secret stored in
-// Keycloak no longer matches the platform's active credential. It is invoked when the
-// token endpoint rejects a broker client's authentication, which is the earliest point
-// the platform can observe Keycloak using a stale secret. Implementations must be safe
-// for concurrent use and must rate-limit repairs to avoid a failure storm.
+// BrokerDriftSelfHealer 修复 Keycloak 侧存储的 broker client secret 与平台活动凭据
+// 不再匹配的平台 OAuth broker client。它在 token 端点拒绝 broker 客户端认证时触发，
+// 这是平台能观察到 Keycloak 持陈旧 secret 的最早时机。实现必须并发安全并限流修复，
+// 避免故障风暴。
 type BrokerDriftSelfHealer interface {
 	HealBrokerSecretDrift(ctx context.Context, clientID string) error
 }
 
-// SetBrokerDriftSelfHealer installs the broker secret drift self-healer. A nil value keeps
-// the endpoint fail-closed on invalid broker credentials without attempting a repair.
+// SetBrokerDriftSelfHealer 安装 broker secret 漂移自愈器；传 nil 表示端点在 broker
+// 凭据无效时保持 fail-closed，不做修复尝试。
 func (h *Handler) SetBrokerDriftSelfHealer(healer BrokerDriftSelfHealer) {
 	h.brokerSelfHealer = healer
 }
 
-// CustomerBindingResolver resolves the CRM customer reference bound to a platform
-// identity inside one application. Any error means the claim is omitted from the
-// authorization-context response; consumers fail closed on its absence.
+// CustomerBindingResolver 解析平台身份在同一应用内绑定的 CRM 客户引用。任何错误
+// 都意味着该声明从 authorization-context 响应中省略；消费方对缺失值 fail-closed。
 type CustomerBindingResolver interface {
 	ResolveCustomerBinding(ctx context.Context, tenantID, platformUserID, applicationCode string) (string, error)
 }
@@ -204,8 +202,8 @@ type cookieConfig struct {
 	sameSite http.SameSite
 }
 
-// NewHandler validates required protocol dependencies. A concrete *security.OIDCJWTManager and
-// *oidcapplication.Service satisfy the interfaces in Config without an adapter.
+// NewHandler 校验必需的协议依赖；具体的 *security.OIDCJWTManager 与
+// *oidcapplication.Service 无需适配器即可满足 Config 中的接口。
 func NewHandler(config Config) (*Handler, error) {
 	if config.Service == nil || config.JWTManager == nil {
 		return nil, errors.New("OIDC HTTP handler service and JWT manager must not be nil")

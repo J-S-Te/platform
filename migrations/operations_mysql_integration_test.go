@@ -12,10 +12,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestOperationalModulesOnIsolatedMySQL verifies the complete migration chain used by
-// configuration, dictionary, notifications, settings, identity expiry and audit exports.
-// The test refuses a non-empty database so it cannot be pointed at a local business or
-// production schema by mistake.
+// TestOperationalModulesOnIsolatedMySQL 验证配置、字典、通知、设置、
+// 身份有效期及审计导出所使用的完整迁移链。
+// 测试拒绝非空数据库，防止误指向本地业务库
+// 或生产数据库。
 func TestOperationalModulesOnIsolatedMySQL(t *testing.T) {
 	dsn := os.Getenv("PLATFORM_OPERATIONS_TEST_DSN")
 	if dsn == "" {

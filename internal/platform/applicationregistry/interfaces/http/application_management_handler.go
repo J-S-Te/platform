@@ -1,4 +1,4 @@
-// Package http contains net/http adapters that are mounted through the platform Gin router.
+// Package http 包含经平台 Gin 路由挂载的 net/http 适配层。
 package http
 
 import (
@@ -36,14 +36,14 @@ type environmentPurger interface {
 	PurgeEnvironment(context.Context, application.EnvironmentPurgeInput) (application.Environment, error)
 }
 
-// ManagementHandler serves controlled application registrations and their environments. It
-// deliberately has no OAuth client, callback, scope, or credential management endpoints.
+// ManagementHandler 服务受控的应用登记及其环境管理。刻意不提供任何 OAuth 客户端、
+// 回调、scope 或凭据管理端点，这些能力归独立的客户端管理工作流。
 type ManagementHandler struct {
 	service managementApplicationService
 	logger  *slog.Logger
 }
 
-// NewManagementHandler constructs the application-registry management HTTP adapter.
+// NewManagementHandler 构造应用登记管理 HTTP 适配器；任一依赖缺失即拒绝构造。
 func NewManagementHandler(service managementApplicationService, logger *slog.Logger) (*ManagementHandler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("application management handler dependencies must not be nil")
@@ -139,7 +139,7 @@ type managementPageResponse[T any] struct {
 	Total    int64 `json:"total"`
 }
 
-// ListApplications handles GET /api/v1/applications.
+// ListApplications 处理 GET /api/v1/applications。
 func (handler *ManagementHandler) ListApplications(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -161,7 +161,7 @@ func (handler *ManagementHandler) ListApplications(writer http.ResponseWriter, r
 	})
 }
 
-// CreateApplication handles POST /api/v1/applications.
+// CreateApplication 处理 POST /api/v1/applications。
 func (handler *ManagementHandler) CreateApplication(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -192,7 +192,7 @@ func (handler *ManagementHandler) CreateApplication(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "应用已创建", applicationToResponse(created))
 }
 
-// GetApplication handles GET /api/v1/applications/:application_id.
+// GetApplication 处理 GET /api/v1/applications/:application_id。
 func (handler *ManagementHandler) GetApplication(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -207,7 +207,7 @@ func (handler *ManagementHandler) GetApplication(writer http.ResponseWriter, req
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用查询成功", applicationToResponse(item))
 }
 
-// UpdateApplication handles PATCH /api/v1/applications/:application_id.
+// UpdateApplication 处理 PATCH /api/v1/applications/:application_id。
 func (handler *ManagementHandler) UpdateApplication(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -239,8 +239,8 @@ func (handler *ManagementHandler) UpdateApplication(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用已更新", applicationToResponse(updated))
 }
 
-// DeleteApplication handles DELETE /api/v1/applications/:application_id. The application is
-// retired rather than physically removed so existing integration and audit history stay intact.
+// DeleteApplication 处理 DELETE /api/v1/applications/:application_id。应用被退役而非物理删除，
+// 保证既有集成关系与审计历史完整可查。
 func (handler *ManagementHandler) DeleteApplication(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -266,7 +266,7 @@ func (handler *ManagementHandler) DeleteApplication(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用登记已删除，历史配置已保留", applicationToResponse(retired))
 }
 
-// ListEnvironments handles GET /api/v1/applications/:application_id/environments.
+// ListEnvironments 处理 GET /api/v1/applications/:application_id/environments。
 func (handler *ManagementHandler) ListEnvironments(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -290,7 +290,7 @@ func (handler *ManagementHandler) ListEnvironments(writer http.ResponseWriter, r
 	})
 }
 
-// CreateEnvironment handles POST /api/v1/applications/:application_id/environments.
+// CreateEnvironment 处理 POST /api/v1/applications/:application_id/environments。
 func (handler *ManagementHandler) CreateEnvironment(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -321,7 +321,7 @@ func (handler *ManagementHandler) CreateEnvironment(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "应用环境已创建", environmentToResponse(created))
 }
 
-// UpdateEnvironment handles PATCH /api/v1/applications/:application_id/environments/:environment_id.
+// UpdateEnvironment 处理 PATCH /api/v1/applications/:application_id/environments/:environment_id。
 func (handler *ManagementHandler) UpdateEnvironment(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -353,9 +353,8 @@ func (handler *ManagementHandler) UpdateEnvironment(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境已更新", environmentToResponse(updated))
 }
 
-// DeleteEnvironment handles DELETE /api/v1/applications/:application_id/environments/:environment_id.
-// It requires the caller to confirm the exact application-code/environment pair and only removes
-// integration records derived from that one environment.
+// DeleteEnvironment 处理 DELETE /api/v1/applications/:application_id/environments/:environment_id。
+// 调用方必须确认精确的应用编码/环境对，且只移除派生自该环境的集成记录。
 func (handler *ManagementHandler) DeleteEnvironment(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -389,8 +388,8 @@ func (handler *ManagementHandler) DeleteEnvironment(writer http.ResponseWriter, 
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用环境已删除，关联的登录目标与 OAuth 客户端配置已清理", environmentToResponse(removed))
 }
 
-// PurgeEnvironment permanently removes a previously offboarded environment after explicit
-// retention and scope confirmations. It is intentionally separate from DELETE.
+// PurgeEnvironment 在显式确认保留期与范围后，永久移除此前已下线的环境。
+// 刻意与 DELETE 分离为两个端点，防止误把物理清除当成普通下线。
 func (handler *ManagementHandler) PurgeEnvironment(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -503,9 +502,8 @@ func environmentToResponse(item application.Environment) environmentResponse {
 	return environmentResponse{
 		EnvironmentID: item.ID, ApplicationID: item.ApplicationID, Environment: item.Environment,
 		BaseURL: item.BaseURL, UpstreamURL: item.UpstreamURL, PathPrefix: item.PathPrefix,
-		// Environment metadata is an internal deployment extension point. The
-		// application-directory contract deliberately never returns it: arbitrary
-		// legacy metadata cannot be proven free of runtime credentials.
+		// 环境元数据是内部部署扩展点，应用目录契约刻意永不返回：
+		// 任意的遗留元数据无法证明不含运行时凭据。
 		IssuerAlias: item.IssuerAlias, Status: item.Status,
 		Version: item.Version, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}

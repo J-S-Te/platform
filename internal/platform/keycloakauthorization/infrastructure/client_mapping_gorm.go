@@ -14,16 +14,16 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// ClientMappingStore 持久化租户/应用/环境到 Keycloak realm 与 Client 的映射，
+// 并维护配置哈希与切换门禁的联动失效。
 type ClientMappingStore struct{ database *gorm.DB }
 
-// keycloakProjectionConfigurationVersion identifies the platform-managed
-// projection contract behind a Keycloak Client mapping. Any change to the
-// stable identity attributes or projection semantics must bump this value so
-// previously completed user projections and broker evidence cannot be reused.
-// v5 forces one complete re-projection for every existing Client mapping after
-// the independent identity_id mapper and startup Admin-API reconciliation
-// became part of the projection contract. This prevents historical database
-// readiness from masking a Realm Client whose actual mappers are stale.
+// keycloakProjectionConfigurationVersion 标识 Keycloak Client mapping 背后由平台
+// 管理的投影契约。稳定身份属性或投影语义的任何变化都必须递增该值，使此前完成的
+// 用户投影与 Broker 证据不可被复用。
+// v5：独立 identity_id mapper 与启动期 Admin API 对账纳入投影契约后，强制所有
+// 既有 Client mapping 完整重投影一次，防止数据库中的历史就绪状态掩盖 mappers
+// 实际已过期的 Realm Client。
 const keycloakProjectionConfigurationVersion = "stable-identity-projection-v5"
 
 type persistedClientMapping struct {
@@ -33,9 +33,8 @@ type persistedClientMapping struct {
 	Status            string `gorm:"column:status"`
 }
 
-// StoredKeycloakClientMapping contains the non-secret registration data needed
-// to re-apply a Realm Client at worker startup. The persisted Client ID remains
-// authoritative so a compatibility mapping is never silently renamed.
+// StoredKeycloakClientMapping 是 worker 启动时重新应用 Realm Client 所需的
+// 非机密注册数据。持久化的 Client ID 保持权威，兼容映射绝不会被悄悄改名。
 type StoredKeycloakClientMapping struct {
 	TenantID        string `gorm:"column:tenant_id"`
 	ApplicationID   string `gorm:"column:application_id"`
@@ -54,6 +53,7 @@ type managedClientConfiguration struct {
 	ClaimsRoleConfigHash string `gorm:"column:claims_role_config_hash"`
 }
 
+// NewClientMappingStore 构造 Client 映射存储；database 为空时返回错误。
 func NewClientMappingStore(database *gorm.DB) (*ClientMappingStore, error) {
 	if database == nil {
 		return nil, errors.New("Keycloak Client mapping database must not be nil")
@@ -61,9 +61,8 @@ func NewClientMappingStore(database *gorm.DB) (*ClientMappingStore, error) {
 	return &ClientMappingStore{database: database}, nil
 }
 
-// ListStoredKeycloakClientMappings returns every synchronized mapping together
-// with the current browser transport configuration. Callers must successfully
-// reconcile the real Keycloak Client and roles before saving the mapping again.
+// ListStoredKeycloakClientMappings 返回全部已同步映射及其当前浏览器传输配置。
+// 调用方必须先成功对账真实 Keycloak Client 与角色，才能再次保存映射。
 func (store *ClientMappingStore) ListStoredKeycloakClientMappings(ctx context.Context) ([]StoredKeycloakClientMapping, error) {
 	if store == nil || store.database == nil {
 		return nil, errors.New("Keycloak Client mapping database must not be nil")
@@ -86,6 +85,8 @@ func syncedKeycloakClientMappingsQuery(database *gorm.DB) *gorm.DB {
 		Order("mapping.tenant_id ASC, mapping.application_id ASC, mapping.environment_id ASC")
 }
 
+// SaveKeycloakClientMapping 在事务内保存映射并重算配置哈希；realm/Client ID 或
+// 托管配置变化时会撤销四道切换门禁、重置投影并重新入队全部用户的对账投影。
 func (store *ClientMappingStore) SaveKeycloakClientMapping(ctx context.Context, tenantID, applicationID, environmentID, realm, clientID string) error {
 	if store == nil || store.database == nil {
 		return errors.New("Keycloak Client mapping database must not be nil")
@@ -220,16 +221,13 @@ func invalidateKeycloakClientConfiguration(tx *gorm.DB, tenantID, applicationID,
 }
 
 func allKeycloakConfigurationUsersQuery(database *gorm.DB, tenantID string) *gorm.DB {
-	// Disabled and business-deleted identities are included so a configuration
-	// migration also disables their Keycloak account and removes stale detailed
-	// authorization attributes. ProjectionSource deliberately handles them with
-	// an empty grant snapshot.
+	// 包含停用与业务删除的身份，使配置迁移也会停用其 Keycloak 账号并清理过期的
+	// 详细授权属性。ProjectionSource 刻意以空授予快照处理它们。
 	return database.Table("iam_user").Where("tenant_id = ?", strings.TrimSpace(tenantID)).Order("id ASC")
 }
 
-// GetKeycloakClientMapping exposes a safe persisted mapping summary for the
-// application authentication UI.  Client secrets are never stored in this
-// table and are never part of this return value.
+// GetKeycloakClientMapping 向应用认证 UI 暴露一份安全的持久化映射摘要。
+// 该表从不存储 Client secret，返回值中也绝不包含。
 func (store *ClientMappingStore) GetKeycloakClientMapping(ctx context.Context, tenantID, applicationID, environmentID string) (registryhttp.KeycloakClientMapping, error) {
 	var row struct {
 		Realm        string     `gorm:"column:realm"`
@@ -250,12 +248,10 @@ func (store *ClientMappingStore) GetKeycloakClientMapping(ctx context.Context, t
 	return registryhttp.KeycloakClientMapping{Realm: strings.TrimSpace(row.Realm), ClientID: strings.TrimSpace(row.ClientID), Status: strings.TrimSpace(row.Status), LastSyncedAt: row.LastSyncedAt, Exists: true}, nil
 }
 
-// ResolveEffectiveKeycloakClient keeps existing subsystem configuration working
-// when the platform environment label has been normalized. A persisted mapping
-// is authoritative, except that one explicitly registered legacy browser OAuth
-// client on the same application/environment is preserved so a running subsystem
-// is not silently forced to change its client_id. Service clients are excluded.
-// No prod/dev string substitution or cross-environment lookup is performed.
+// ResolveEffectiveKeycloakClient 保证平台环境标签规范化后既有子系统配置仍可用。
+// 持久化映射是权威值；唯一例外是同一应用/环境下显式注册过的遗留浏览器 OAuth
+// client 会被保留，避免运行中的子系统被悄悄强制更换 client_id。Service client
+// 不在保留之列。不做任何 prod/dev 字符串替换或跨环境查找。
 func (store *ClientMappingStore) ResolveEffectiveKeycloakClient(ctx context.Context, tenantID, applicationID, environmentID, canonicalClientID string) (registryhttp.KeycloakClientResolution, error) {
 	canonicalClientID = strings.TrimSpace(canonicalClientID)
 	resolution := registryhttp.KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}

@@ -1,4 +1,4 @@
-// Package infrastructure loads OAuth application client registrations through GORM.
+// Package infrastructure 通过 GORM 加载 OAuth 应用客户端登记。
 package infrastructure
 
 import (
@@ -11,8 +11,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// Repository 以 GORM 提供登记数据的只读查询，供 client_credentials 令牌签发与客户端
+// 活性校验使用；不提供任何写入路径。
 type Repository struct{ database *gorm.DB }
 
+// NewRepository 构造只读登记仓库；数据库句柄为 nil 时返回错误，避免空句柄在请求期才失败。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("application registry database must not be nil")
@@ -40,6 +43,10 @@ type credentialModel struct {
 
 type stringRow struct{ Value string }
 
+// FindForClientCredentials 按 client_id 加载用于 client_credentials 令牌签发的客户端及其
+// 有效凭据。客户端、所属应用与环境三者必须均为 ACTIVE；凭据必须为 secret 类型、未吊销且
+// 处于 valid_from/valid_until 有效窗口内。任何一环未命中都统一映射为
+// application.ErrUnauthenticated，不区分“不存在”与“已停用”，避免向令牌端点调用方泄露登记状态。
 func (r *Repository) FindForClientCredentials(ctx context.Context, clientID string, now time.Time) (domain.OAuthClient, []domain.ClientCredential, error) {
 	client, err := r.findClient(ctx, "platform_oauth_client.client_id = ?", clientID)
 	if err != nil {
@@ -58,6 +65,8 @@ func (r *Repository) FindForClientCredentials(ctx context.Context, clientID stri
 	return r.withCapabilities(ctx, client, credentials)
 }
 
+// FindActiveByID 按内部主键校验客户端仍可参与令牌流程：客户端、应用与环境均 ACTIVE 才返回，
+// 不加载凭据；查无记录同样映射为 application.ErrUnauthenticated。时间参数仅为满足接口签名。
 func (r *Repository) FindActiveByID(ctx context.Context, clientID string, _ time.Time) (domain.OAuthClient, error) {
 	client, err := r.findClient(ctx, "platform_oauth_client.id = ?", clientID)
 	if err != nil {

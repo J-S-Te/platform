@@ -24,9 +24,13 @@ const (
 	integratedProjectApplicationCode       = "project_management"
 )
 
+// ServiceCredential* 常量枚举受管子系统按用途绑定的全部机器凭据用途，
+// 同时是“凭据最小权限”的协议标识：部署 Agent 按用途把不同密钥写入对应子系统，
+// 不能把其中任一机器客户端当成通用平台客户端复用。
 const (
-	// 审计写入客户端是所有接入环境的基线能力，只能追加审计事件；它与浏览器登录、
-	// 授权目录发布和子系统间业务调用使用不同客户端，避免任一密钥泄露后权限横向扩散。
+	// ServiceCredentialAuditIngest 是所有接入环境的基线能力，只能追加审计事件；
+	// 它与浏览器登录、授权目录发布和子系统间业务调用使用不同客户端，
+	// 避免任一密钥泄露后权限横向扩散。
 	ServiceCredentialAuditIngest                        = "audit_ingest"
 	ServiceCredentialNotificationIngest                 = "notification_ingest"
 	ServiceCredentialExternalUserProvision              = "external_user_provision"
@@ -44,6 +48,9 @@ const (
 	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
 	ServiceCredentialContractApprovedRead               = "contract_approved_read"
 	ServiceCredentialProjectContractImport              = "project_contract_import"
+	ServiceCredentialSettlementContractIngest           = "settlement_contract_ingest"
+	ServiceCredentialPortalReportFileRead               = "portal_report_file_read"
+	ServiceCredentialPortalReportDownloadIdentityRead   = "portal_report_download_identity_read"
 	// ServiceCredentialFileGatewayWrite 是业务子系统上传并绑定自身文件的最小组合凭据；
 	// 下载凭据不包含在内，避免写入型 Worker 同时取得任意文件读取能力。
 	ServiceCredentialFileGatewayWrite = "file_gateway_write"
@@ -64,6 +71,7 @@ type SubsystemOnboardingConflict struct {
 	Status          string
 }
 
+// Error 返回只含应用编码、环境与非敏感状态的冲突摘要，可直接进入日志与 API 响应。
 func (conflict *SubsystemOnboardingConflict) Error() string {
 	return fmt.Sprintf("subsystem onboarding environment already exists: application=%s environment=%s status=%s", conflict.ApplicationCode, conflict.Environment, conflict.Status)
 }
@@ -78,8 +86,8 @@ func (*SubsystemOnboardingConflict) Is(target error) bool {
 type SubsystemOnboardingInput struct {
 	TenantID   string
 	OperatorID string
-	// InitialAdminUserID is persisted with the deployment state so a failed first deployment
-	// can grant the originally selected administrator after a safe retry.
+	// InitialAdminUserID 随部署状态持久化，首次部署失败后安全重试时
+	// 仍能把管理员角色授予最初选定的人，而不是重试发起者。
 	InitialAdminUserID string
 	ApplicationCode    string
 	ApplicationName    string
@@ -89,9 +97,8 @@ type SubsystemOnboardingInput struct {
 	UpstreamURL        string
 	PathPrefix         string
 	ClientType         string
-	// IssuerAlias is the selected authentication provider.  It is persisted on
-	// the environment so a later deploy/retry has an explicit, auditable choice
-	// instead of guessing from the current process configuration.
+	// IssuerAlias 是所选认证提供方，随环境持久化；后续部署/重试据此使用
+	// 明确且可审计的选择，而不是从当前进程配置反推。
 	IssuerAlias *string
 	// AllowedServiceBindings 是该应用清单声明的可创建服务凭据用途（不含 audit_ingest 基线）。
 	// 为空且清单未声明时回退到平台硬编码默认，保证既有行为不变。
@@ -122,16 +129,12 @@ type SubsystemOnboardingWrite struct {
 	ServiceClients []SubsystemServiceClientWrite
 }
 
-// SubsystemDirectoryRegistrationInput is the non-authentication half of an
-// application integration.  It deliberately contains no OAuth client type,
-// callback URI or credential fields: those are owned by the selected identity
-// provider (for example Keycloak) and are created through its separate
-// integration workflow.
+// SubsystemDirectoryRegistrationInput 是应用集成的非认证部分。刻意不含 OAuth
+// 客户端类型、回调 URI 或凭据字段：这些由所选身份提供方（如 Keycloak）持有，
+// 经其独立的集成工作流创建。
 //
-// The legacy SubsystemOnboardingInput remains available for already deployed
-// installations.  New callers should register the directory first, then use
-// the Keycloak integration APIs to create/synchronise the provider client and
-// finally apply the runtime deployment configuration.
+// 遗留的 SubsystemOnboardingInput 仍供已部署安装使用。新调用方应先登记目录，
+// 再用 Keycloak 集成 API 创建/同步提供方客户端，最后下发运行时部署配置。
 type SubsystemDirectoryRegistrationInput struct {
 	TenantID        string
 	OperatorID      string
@@ -145,9 +148,8 @@ type SubsystemDirectoryRegistrationInput struct {
 	IssuerAlias     *string
 }
 
-// SubsystemDirectoryRegistrationWrite is the atomic persistence boundary for
-// application directory information.  OAuth clients, service credentials and
-// deployment state are intentionally absent.
+// SubsystemDirectoryRegistrationWrite 是应用目录信息的原子持久化边界。
+// OAuth 客户端、服务凭据与部署状态刻意不在其中，分别归各自的工作流管。
 type SubsystemDirectoryRegistrationWrite struct {
 	Application   ApplicationCreateInput
 	ApplicationID string
@@ -157,8 +159,8 @@ type SubsystemDirectoryRegistrationWrite struct {
 	LoginTargetID string
 }
 
-// SubsystemDirectoryRegistrationResult is safe to expose to administrators:
-// it is only the application catalogue, environment and landing target.
+// SubsystemDirectoryRegistrationResult 可安全展示给管理员：
+// 只含应用目录、环境与落地目标，不含凭据或运行时细节。
 type SubsystemDirectoryRegistrationResult struct {
 	Application Application
 	Environment Environment
@@ -166,6 +168,8 @@ type SubsystemDirectoryRegistrationResult struct {
 	PublicURL   string
 }
 
+// SubsystemServiceClientWrite 是按用途创建的机器客户端写模型；
+// 每种用途一把密钥，写入与 Secret 哈希同事务持久化。
 type SubsystemServiceClientWrite struct {
 	Purpose           string
 	OAuthClient       OAuthClientCreateInput
@@ -173,6 +177,8 @@ type SubsystemServiceClientWrite struct {
 	OAuthClientSecret *SecretWrite
 }
 
+// SubsystemServiceCredential 是按用途交付的机器凭据：明文 Secret 仅存在于
+// 一次性交付链路，消费方必须按 Purpose 写入对应配置项，不得交叉复用。
 type SubsystemServiceCredential struct {
 	Purpose         string
 	OAuthClient     OAuthClientView
@@ -211,9 +217,8 @@ type PortalApplication struct {
 	Projection    PortalProjectionReadiness
 }
 
-// PortalProjectionReadiness is the current principal's user-specific Keycloak
-// projection gate for one exact application environment. Portal clients must
-// use Ready/Allowed instead of inferring readiness from application visibility.
+// PortalProjectionReadiness 是当前主体对某个精确应用环境的用户级 Keycloak 投影门禁。
+// 门户客户端必须使用 Ready/Allowed 判定，不能从"应用是否可见"反推就绪状态。
 type PortalProjectionReadiness struct {
 	Status     string
 	Ready      bool
@@ -229,11 +234,9 @@ type SubsystemOnboardingRepository interface {
 	ResolveApplicationEnvironment(context.Context, string, string, string) (string, string, error)
 }
 
-// ListRegisteredApplicationCodes returns the tenant's active application identities without
-// applying user portal visibility or choosing one environment. Discovery is an administrative
-// inventory operation: an application already adopted in any environment must not be offered as
-// a new subsystem merely because the current operator lacks its business role or Docker reports a
-// different environment label.
+// ListRegisteredApplicationCodes 返回租户内活跃应用身份，不套用用户门户可见性，
+// 也不替用户选择环境。发现属于管理盘点：已在任一环境接管的应用，不能仅因
+// 当前操作者缺少其业务角色、或 Docker 上报了不同环境标签，就被当作新子系统再次提供。
 func (service *SubsystemOnboardingService) ListRegisteredApplicationCodes(ctx context.Context, tenantID string) ([]string, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
@@ -287,15 +290,14 @@ func ValidateSubsystemOnboardingInput(input SubsystemOnboardingInput) error {
 	return nil
 }
 
-// PreflightValidate extends ValidateSubsystemOnboardingInput with database-level
-// conflict checks. It verifies that the application code + environment pair is
-// available and that the path prefix does not collide with an existing registration.
+// PreflightValidate 在 ValidateSubsystemOnboardingInput 之上增加数据库级冲突检查：
+// 核验应用编码+环境组合可用、路径前缀不与既有登记冲突，供部署器在写入前先行拦截。
 func (service *SubsystemOnboardingService) PreflightValidate(ctx context.Context, input SubsystemOnboardingInput) error {
 	input = normalizeSubsystemOnboardingInput(input)
 	if !validSubsystemOnboardingInput(input) {
 		return ErrValidation
 	}
-	// Check if the application + environment already exists.
+	// 检查应用+环境是否已存在。
 	_, _, err := service.repository.ResolveApplicationEnvironment(ctx, input.TenantID, input.ApplicationCode, input.Environment)
 	if err == nil {
 		return ErrSubsystemOnboardingAlreadyExists
@@ -303,7 +305,7 @@ func (service *SubsystemOnboardingService) PreflightValidate(ctx context.Context
 	if !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("preflight: check application environment: %w", err)
 	}
-	// Check path prefix collision with other applications.
+	// 检查路径前缀是否与其他应用冲突。
 	items, listErr := service.repository.ListPortalApplications(ctx, input.TenantID, "", "")
 	if listErr != nil {
 		return fmt.Errorf("preflight: list existing applications: %w", listErr)
@@ -458,12 +460,9 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	return result, nil
 }
 
-// RegisterSubsystemDirectory registers only the business application, its
-// environment and an approved post-login landing target.  In particular, it
-// never creates a platform browser OAuth client.  This keeps application
-// directory/authorization administration independent from Keycloak Client
-// lifecycle while preserving the legacy all-in-one onboarding path above for
-// existing deployments.
+// RegisterSubsystemDirectory 只登记业务应用、其环境与一个已批准的登录后落地目标；
+// 尤其绝不创建平台浏览器 OAuth 客户端。这使应用目录/授权管理与 Keycloak 客户端
+// 生命周期解耦，同时保留上方的一体式遗留接入路径供既有部署使用。
 func (service *SubsystemOnboardingService) RegisterSubsystemDirectory(ctx context.Context, input SubsystemDirectoryRegistrationInput) (SubsystemDirectoryRegistrationResult, error) {
 	input = normalizeSubsystemDirectoryRegistrationInput(input)
 	if !validSubsystemDirectoryRegistrationInput(input) {
@@ -545,6 +544,9 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialProjectDashboardRead:               {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
 	ServiceCredentialContractApprovedRead:               {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
 	ServiceCredentialProjectContractImport:              {ServiceCredentialProjectContractImport, "project-integration", "Project Contract Importer", "project.contract.import"},
+	ServiceCredentialSettlementContractIngest:           {ServiceCredentialSettlementContractIngest, "settlement-integration", "Settlement Contract Ingester", "settlement.contract.ingest"},
+	ServiceCredentialPortalReportFileRead:               {ServiceCredentialPortalReportFileRead, "portal-report-source", "Portal Report Source Reader", "platform:file:portal_report"},
+	ServiceCredentialPortalReportDownloadIdentityRead:   {ServiceCredentialPortalReportDownloadIdentityRead, "portal-report-identity", "Portal Report Identity Reader", "portal.report.download_identity.read"},
 	ServiceCredentialFileGatewayWrite:                   {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
 }
 
@@ -562,9 +564,11 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 			ServiceCredentialPortalMappingProvision,
 			ServiceCredentialPortalMappingDisable,
 			ServiceCredentialPortalInviteVerify,
+			ServiceCredentialPortalReportFileRead,
+			ServiceCredentialPortalReportDownloadIdentityRead,
 		}
 	case integratedContractApplicationCode:
-		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialSettlementContractIngest}
 	case integratedProjectApplicationCode:
 		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
 		// 负责人目录权限；不授予通知写入等其它集成能力。
@@ -638,8 +642,8 @@ func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input S
 	return writes, secrets, nil
 }
 
-// ResolveApplicationEnvironment reads the registered pair without portal visibility or
-// deployment-readiness filters. Control-plane synchronization must repair failed environments.
+// ResolveApplicationEnvironment 读取已登记的应用/环境对，不套用门户可见性或
+// 部署就绪过滤；控制面同步流程必须能借它修复失败环境，因此不得加门禁。
 func (service *SubsystemOnboardingService) ResolveApplicationEnvironment(ctx context.Context, tenantID, applicationCode, environment string) (string, string, error) {
 	tenantID, applicationCode, environment = strings.TrimSpace(tenantID), strings.TrimSpace(applicationCode), strings.ToLower(strings.TrimSpace(environment))
 	if tenantID == "" || applicationCode == "" || !validEnvironmentCode(environment) {

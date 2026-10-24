@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Controlled Keycloak MySQL logical restore for an isolated drill or an
-# explicitly approved recovery. It never stops/starts containers itself: the
-# operator must first freeze writes and stop every Keycloak node.
+# 仅供隔离演练或显式批准恢复使用的受控 Keycloak MySQL 逻辑恢复。脚本自身不启停容器，操作人必须先冻结写入并停止全部 Keycloak 节点。
 set -Eeuo pipefail
 umask 077
 
@@ -133,9 +131,7 @@ if [[ -n "$keycloak_state" ]]; then
   exit 2
 fi
 
-# The database and root password are read only inside the container. The
-# destructive SQL is fixed; neither the backup filename nor host input is
-# interpolated into the SQL command.
+# 数据库和 root 密码仅在容器内读取；破坏性 SQL 固定，备份文件名及宿主机输入均不会拼接到 SQL 命令。
 gzip -dc -- "$candidate" | "${compose_args[@]}" exec -T keycloak-db sh -ec '
   set -eu
   case "$MYSQL_DATABASE" in

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"gorm.io/driver/mysql"
@@ -320,13 +321,13 @@ func TestOperatorAccountIDFromContextUsesOnlyMatchingAuthenticatedPrincipal(t *t
 		Account: authctx.ReferenceName{ID: "account-1"},
 	}
 	ctx := authctx.WithPrincipal(context.Background(), principal)
-	if got := operatorAccountIDFromContext(ctx, "tenant-1", "operator-1"); got != "account-1" {
+	if got := delegation.OperatorAccountIDFromContext(ctx, "tenant-1", "operator-1"); got != "account-1" {
 		t.Fatalf("matching principal account = %q, want account-1", got)
 	}
-	if got := operatorAccountIDFromContext(ctx, "tenant-2", "operator-1"); got != "" {
+	if got := delegation.OperatorAccountIDFromContext(ctx, "tenant-2", "operator-1"); got != "" {
 		t.Fatalf("cross-tenant principal account = %q, want empty", got)
 	}
-	if got := operatorAccountIDFromContext(ctx, "tenant-1", "operator-2"); got != "" {
+	if got := delegation.OperatorAccountIDFromContext(ctx, "tenant-1", "operator-2"); got != "" {
 		t.Fatalf("different operator principal account = %q, want empty", got)
 	}
 }

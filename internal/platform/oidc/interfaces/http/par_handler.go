@@ -11,9 +11,8 @@ import (
 
 const defaultPARTTL = 90 * time.Second
 
-// PAR accepts an RFC 9126 pushed authorization request. Bootstrap should publish this handler at
-// POST /oauth2/par; it intentionally has no router dependency so deployments can wire it alongside
-// their existing OIDC endpoints.
+// PAR 接受 RFC 9126 pushed authorization request。bootstrap 应把本处理器发布在
+// POST /oauth2/par；它刻意不依赖路由器，便于部署方与既有 OIDC 端点并行接线。
 func (h *Handler) PAR(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)

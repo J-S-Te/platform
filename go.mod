@@ -3,6 +3,7 @@ module github.com/J-S-Te/Basic-Platform
 go 1.26.4
 
 require (
+	github.com/J-S-Te/license-core v0.0.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/mozillazg/go-pinyin v0.20.0
 	golang.org/x/crypto v0.31.0
@@ -10,6 +11,8 @@ require (
 	gorm.io/driver/mysql v1.5.2
 	gorm.io/gorm v1.30.0
 )
+
+replace github.com/J-S-Te/license-core => ./third_party/license-core
 
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect

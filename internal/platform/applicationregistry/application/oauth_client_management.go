@@ -1,4 +1,4 @@
-// Package application provides OAuth client registration and credential lifecycle use cases.
+// Package application 提供 OAuth 客户端登记与凭据生命周期用例。
 package application
 
 import (
@@ -25,11 +25,12 @@ import (
 )
 
 var (
-	// ErrManagementNotFound indicates a tenant-scoped OAuth client or credential was not found.
+	// ErrManagementNotFound 表示租户范围内的 OAuth 客户端或凭据不存在；
+	// 跨租户查询同样折叠为该错误，不泄露存在性。
 	ErrManagementNotFound = errors.New("OAuth client resource not found")
-	// ErrManagementConflict indicates a duplicate client id or a stale aggregate version.
+	// ErrManagementConflict 表示客户端 ID 重复或聚合版本过期（乐观锁失败）。
 	ErrManagementConflict = errors.New("OAuth client resource conflict")
-	// ErrManagementValidation indicates caller-correctable registration input.
+	// ErrManagementValidation 表示调用方可自行修正的登记输入错误。
 	ErrManagementValidation = errors.New("invalid OAuth client management input")
 )
 
@@ -50,14 +51,15 @@ var (
 	scopePattern    = regexp.MustCompile(`^[A-Za-z0-9:._-]{1,128}$`)
 )
 
-// ManagementIdentifierGenerator supplies aggregate and credential identifiers.
+// ManagementIdentifierGenerator 提供聚合与凭据标识符；实现必须保证时间有序且全局唯一，
+// 供审计追踪与凭据版本管理使用。
 type ManagementIdentifierGenerator interface {
 	New(at time.Time) (string, error)
 }
 
-// OAuthClientManagementRepository persists OAuth client aggregate changes. Implementations must
-// make each write atomic, including replacement of aggregate child collections and credential
-// rotation.
+// OAuthClientManagementRepository 持久化 OAuth 客户端聚合变更。
+// 每次写入必须原子完成，包括聚合子集合的整体替换与凭据轮换，
+// 不允许出现聚合主记录与子记录不一致的中间状态。
 type OAuthClientManagementRepository interface {
 	CreateOAuthClient(context.Context, OAuthClientCreateInput, string, *SecretWrite, time.Time) (OAuthClientView, error)
 	ListOAuthClients(context.Context, string) ([]OAuthClientView, error)
@@ -75,9 +77,9 @@ type OAuthClientManagementRepository interface {
 	DisableOAuthClientSecret(context.Context, OAuthClientSecretDisableInput, time.Time) error
 }
 
-// OAuthClientCreateInput defines a tenant-scoped client registration. A client using
-// client_secret_basic receives one generated secret in the create result; it is never stored in
-// this input or in a normal OAuthClientView.
+// OAuthClientCreateInput 定义租户范围内的客户端登记。使用 client_secret_basic 的客户端
+// 会在创建结果中收到一枚生成的 Secret；该 Secret 绝不存入本输入结构，
+// 也不会出现在常规 OAuthClientView 中。
 type OAuthClientCreateInput struct {
 	TenantID               string
 	ApplicationID          string
@@ -96,7 +98,8 @@ type OAuthClientCreateInput struct {
 	SecretValidUntil       *time.Time
 }
 
-// OAuthClientScopesUpdateInput replaces every allowed scope using optimistic locking.
+// OAuthClientScopesUpdateInput 以乐观锁整体替换允许的 scope 集合；
+// 部分修改必须读改写整个集合，防止并发更新产生口径漂移。
 type OAuthClientScopesUpdateInput struct {
 	TenantID      string
 	OAuthClientID string
@@ -105,7 +108,8 @@ type OAuthClientScopesUpdateInput struct {
 	Version       uint64
 }
 
-// OAuthClientRedirectURIsUpdateInput replaces every callback URL using optimistic locking.
+// OAuthClientRedirectURIsUpdateInput 以乐观锁整体替换回调地址集合；
+// 替换是全量的，任何未随请求提交的旧地址在成功后立即失效。
 type OAuthClientRedirectURIsUpdateInput struct {
 	TenantID      string
 	OAuthClientID string
@@ -161,7 +165,8 @@ type OAuthClientJWKsView struct {
 	JWKs          []OAuthClientJWK
 }
 
-// OAuthClientDisableInput disables a client and revokes all its active secrets.
+// OAuthClientDisableInput 停用客户端并吊销其全部 ACTIVE Secret；
+// Version 用于乐观锁，防止并发修改被静默覆盖。
 type OAuthClientDisableInput struct {
 	TenantID      string
 	OAuthClientID string
@@ -169,16 +174,19 @@ type OAuthClientDisableInput struct {
 	Version       uint64
 }
 
-// OAuthClientSecretCreateInput creates an additional concurrently active secret.
+// OAuthClientSecretCreateInput 追加一枚可并发生效的 Secret。
 type OAuthClientSecretCreateInput struct {
 	TenantID      string
 	OAuthClientID string
 	OperatorID    string
 	ValidUntil    *time.Time
+	// ExpectedClientVersion 在完成租户/应用/环境/scope 核验后，为受控的按用途
+	// 重新交付提供围栏；nil 表示沿用旧 API 的无围栏语义。
+	ExpectedClientVersion *uint64
 }
 
-// OAuthClientSecretRotateInput creates a new secret and keeps currently active secrets valid
-// only through the requested bounded overlap window. An overlap of zero revokes them immediately.
+// OAuthClientSecretRotateInput 生成新 Secret，并仅在请求的重叠窗口内保持既有
+// ACTIVE Secret 有效；重叠为 0 表示立即吊销，避免无界的双密钥共存期。
 type OAuthClientSecretRotateInput struct {
 	TenantID       string
 	OAuthClientID  string
@@ -187,7 +195,8 @@ type OAuthClientSecretRotateInput struct {
 	ValidUntil     *time.Time
 }
 
-// OAuthClientSecretDisableInput revokes one credential version without exposing its hash.
+// OAuthClientSecretDisableInput 吊销单个凭据版本；入参不含也不回显 Secret 哈希，
+// 防止管理面成为哈希泄露通道。
 type OAuthClientSecretDisableInput struct {
 	TenantID      string
 	OAuthClientID string
@@ -195,8 +204,8 @@ type OAuthClientSecretDisableInput struct {
 	OperatorID    string
 }
 
-// SecretWrite is the persistence-safe representation of a generated secret. PlaintextSecret is
-// intentionally separate and must never be passed to a repository or logged.
+// SecretWrite 是生成 Secret 的持久化安全表示。PlaintextSecret 刻意独立在结构之外，
+// 绝不传入仓储层，也绝不允许进日志。
 type SecretWrite struct {
 	CredentialID string
 	SecretHash   []byte
@@ -204,7 +213,8 @@ type SecretWrite struct {
 	ValidUntil   *time.Time
 }
 
-// OAuthClientCredentialView contains safe secret-version metadata only.
+// OAuthClientCredentialView 仅含安全的 Secret 版本元数据（指纹与有效期），
+// 不含哈希与明文，供管理面展示与审计比对。
 type OAuthClientCredentialView struct {
 	ID          string
 	Fingerprint string
@@ -214,8 +224,8 @@ type OAuthClientCredentialView struct {
 	Status      string
 }
 
-// OAuthClientView is a safe management projection. It deliberately has no secret hash or secret
-// plaintext fields.
+// OAuthClientView 是安全的管理投影，刻意不含 Secret 哈希或明文字段，
+// 可直接跨管理接口传输。
 type OAuthClientView struct {
 	ID                     string
 	TenantID               string
@@ -245,8 +255,8 @@ type OAuthClientSecretResult struct {
 	PlaintextSecret string
 }
 
-// OAuthClientCreateResult returns a safe registration projection plus the initial secret, when
-// the selected authentication method requires one.
+// OAuthClientCreateResult 返回安全的登记投影；仅当所选认证方式需要 Secret 时
+// 才附带初始明文，且只出现在本次响应中。
 type OAuthClientCreateResult struct {
 	Client          OAuthClientView
 	PlaintextSecret string
@@ -258,8 +268,8 @@ type RedirectURIValidationPolicy struct {
 	AllowInsecureHTTP bool
 }
 
-// OAuthClientManagementService coordinates validation, cryptographic secret generation, hashing,
-// and tenant-scoped persistence for OAuth client registrations.
+// OAuthClientManagementService 串联登记输入校验、加密级 Secret 生成与哈希、
+// 以及租户范围内的持久化；Secret 明文只在生成调用链上存在。
 type OAuthClientManagementService struct {
 	repository                  OAuthClientManagementRepository
 	ids                         ManagementIdentifierGenerator
@@ -267,7 +277,8 @@ type OAuthClientManagementService struct {
 	redirectURIValidationPolicy RedirectURIValidationPolicy
 }
 
-// NewOAuthClientManagementService constructs the management service.
+// NewOAuthClientManagementService 构造管理服务；仓储、ID 生成器或时钟缺失时拒绝构造，
+// 凭据生命周期不允许在没有审计时钟的情况下运行。
 func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy) (*OAuthClientManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("OAuth client management service dependencies must not be nil")
@@ -277,8 +288,8 @@ func NewOAuthClientManagementService(repository OAuthClientManagementRepository,
 	}, nil
 }
 
-// CreateOAuthClient registers an OAuth client and creates its initial secret only for
-// client_secret_basic registrations.
+// CreateOAuthClient 登记 OAuth 客户端；仅 client_secret_basic 登记会生成初始 Secret，
+// 公开客户端不产生任何可持久化凭据。
 func (service *OAuthClientManagementService) CreateOAuthClient(ctx context.Context, input OAuthClientCreateInput) (OAuthClientCreateResult, error) {
 	input, err := normalizeOAuthClientCreate(input, service.redirectURIValidationPolicy)
 	if err != nil {
@@ -311,7 +322,7 @@ func (service *OAuthClientManagementService) CreateOAuthClient(ctx context.Conte
 	return OAuthClientCreateResult{Client: client, PlaintextSecret: plaintext}, nil
 }
 
-// ListOAuthClients returns safe OAuth client projections for one tenant.
+// ListOAuthClients 返回单个租户内的安全客户端投影集合，不跨租户聚合。
 func (service *OAuthClientManagementService) ListOAuthClients(ctx context.Context, tenantID string) ([]OAuthClientView, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
@@ -320,7 +331,7 @@ func (service *OAuthClientManagementService) ListOAuthClients(ctx context.Contex
 	return service.repository.ListOAuthClients(ctx, tenantID)
 }
 
-// GetOAuthClient returns a safe tenant-scoped client projection.
+// GetOAuthClient 按内部聚合 ID 返回租户范围内的安全客户端投影。
 func (service *OAuthClientManagementService) GetOAuthClient(ctx context.Context, tenantID, oauthClientID string) (OAuthClientView, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(oauthClientID) == "" {
 		return OAuthClientView{}, ErrManagementValidation
@@ -328,9 +339,9 @@ func (service *OAuthClientManagementService) GetOAuthClient(ctx context.Context,
 	return service.repository.GetOAuthClient(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(oauthClientID))
 }
 
-// GetOAuthClientByClientID returns a safe tenant-scoped client projection using the public
-// client_id string instead of the internal aggregate ID. This avoids a full tenant scan
-// when looking up broker or well-known clients by their stable identifier.
+// GetOAuthClientByClientID 用公开的 client_id 字符串（而非内部聚合 ID）返回
+// 租户范围内的安全投影，供按稳定标识查找 broker 或 well-known 客户端，
+// 避免为定位单客户端而扫描整个租户列表。
 func (service *OAuthClientManagementService) GetOAuthClientByClientID(ctx context.Context, tenantID, clientID string) (OAuthClientView, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	clientID = strings.TrimSpace(clientID)
@@ -340,7 +351,8 @@ func (service *OAuthClientManagementService) GetOAuthClientByClientID(ctx contex
 	return service.repository.GetOAuthClientByClientID(ctx, tenantID, clientID)
 }
 
-// ReplaceOAuthClientScopes replaces all allowed scopes for a client.
+// ReplaceOAuthClientScopes 整体替换客户端允许的 scope 集合；版本冲突返回
+// ErrManagementConflict，调用方必须重读后重试而不是盲目覆盖。
 func (service *OAuthClientManagementService) ReplaceOAuthClientScopes(ctx context.Context, input OAuthClientScopesUpdateInput) (OAuthClientView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	input.Scopes = normalizeStrings(input.Scopes)
@@ -350,7 +362,8 @@ func (service *OAuthClientManagementService) ReplaceOAuthClientScopes(ctx contex
 	return service.repository.ReplaceOAuthClientScopes(ctx, input, service.clock.Now().UTC())
 }
 
-// ReplaceOAuthClientRedirectURIs replaces all registered callback URLs for a client.
+// ReplaceOAuthClientRedirectURIs 整体替换客户端登记的回调地址；新集合先经
+// RedirectURIValidationPolicy 校验，非法协议在写入前即被拒绝。
 func (service *OAuthClientManagementService) ReplaceOAuthClientRedirectURIs(ctx context.Context, input OAuthClientRedirectURIsUpdateInput) (OAuthClientView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	input.RedirectURIs = normalizeStrings(input.RedirectURIs)
@@ -404,7 +417,8 @@ func (service *OAuthClientManagementService) ReplaceOAuthClientJWKs(ctx context.
 	return service.repository.ReplaceOAuthClientJWKs(ctx, input, now)
 }
 
-// DisableOAuthClient disables the aggregate and revokes every currently active client secret.
+// DisableOAuthClient 停用聚合并吊销全部当前 ACTIVE 的客户端 Secret；
+// 吊销即时生效，已签发令牌由认证时的登记回查兜底失效。
 func (service *OAuthClientManagementService) DisableOAuthClient(ctx context.Context, input OAuthClientDisableInput) (OAuthClientView, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 {
@@ -413,8 +427,8 @@ func (service *OAuthClientManagementService) DisableOAuthClient(ctx context.Cont
 	return service.repository.DisableOAuthClient(ctx, input, service.clock.Now().UTC())
 }
 
-// CreateOAuthClientSecret adds a new active secret. It is restricted to active
-// client_secret_basic clients by the repository's guarded write.
+// CreateOAuthClientSecret 追加一枚新的 ACTIVE Secret。仓储的守卫写入把它限制在
+// ACTIVE 且使用 client_secret_basic 的客户端上，停用或公开客户端无法获得密钥。
 func (service *OAuthClientManagementService) CreateOAuthClientSecret(ctx context.Context, input OAuthClientSecretCreateInput) (OAuthClientSecretResult, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" {
@@ -459,7 +473,8 @@ func (service *OAuthClientManagementService) RotateOAuthClientSecret(ctx context
 	return OAuthClientSecretResult{Credential: credential, PlaintextSecret: plaintext}, nil
 }
 
-// DisableOAuthClientSecret immediately revokes one secret version.
+// DisableOAuthClientSecret 立即吊销单个 Secret 版本，不产生重叠窗口；
+// 用于凭据疑似泄露时的紧急止损。
 func (service *OAuthClientManagementService) DisableOAuthClientSecret(ctx context.Context, input OAuthClientSecretDisableInput) error {
 	input.TenantID, input.OAuthClientID, input.CredentialID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.CredentialID), strings.TrimSpace(input.OperatorID)
 	if input.TenantID == "" || input.OAuthClientID == "" || input.CredentialID == "" || input.OperatorID == "" {
@@ -567,10 +582,9 @@ func validRedirectURIs(values []string, policy RedirectURIValidationPolicy) bool
 	return true
 }
 
-// validRedirectURI accepts an absolute HTTP(S) callback address. The authorization endpoint still
-// requires an exact match with the URI registered for the OAuth client, so this does not turn the
-// callback target into an open redirect. HTTP callback URLs outside loopback require explicit
-// process configuration because authorization codes must otherwise traverse an insecure channel.
+// validRedirectURI 接受绝对 HTTP(S) 回调地址。授权端点仍要求与客户端登记的 URI
+// 精确匹配，因此这里的宽松解析不会把回调目标变成开放重定向；回环之外的 HTTP 回调
+// 必须经进程配置显式开启，否则授权码将穿越不安全信道。
 func validRedirectURI(value string, policy RedirectURIValidationPolicy) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {

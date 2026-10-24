@@ -18,7 +18,7 @@ printf 'services: {}\n' > "$compose_file"
 printf 'schema_version: 1\n' > "$deploy_dir/subsystems.d/contract_management-prod.yaml"
 printf 'schema_version: 1\n' > "$deploy_dir/subsystems.d/data-analysis-prod.yaml"
 
-mock_candidate=false
+mock_candidate_marker="$test_root/candidate-present"
 mock_candidate_code=contract_management
 mock_candidate_environment=prod
 mock_service=false
@@ -26,13 +26,18 @@ mock_health=healthy
 mock_removed=false
 mock_provisioner=false
 mock_platform_api=false
+mock_runtime_verified=false
 
 flock() { return 0; }
 stat() { if [[ "$*" == '-c %a '* ]]; then printf '600\n'; else command stat "$@"; fi; }
 public_transport_prepare() { :; }
 scope_services() { printf '%s\n' platform-api frontend contract-api data-analysis-api; }
+# 本文件验证阶段切换和刷新顺序；完整运行时镜像、成员和状态校验由 test-subsystem-completion.py 执行。
+verify_selected_runtime() { [[ "$mock_runtime_verified" == true ]]; }
 compose() {
-  if [[ "$*" == 'ps -q contract-api' && "$mock_service" == true ]]; then
+  if [[ "$*" == 'config --images docker-socket-proxy' ]]; then
+    printf 'ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459\n'
+  elif [[ "$*" == 'ps -q contract-api' && "$mock_service" == true ]]; then
     printf 'contract-service-id\n'
   elif [[ "$*" == 'ps -q subsystem-provisioner' && "$mock_provisioner" == true ]]; then
     printf 'provisioner-id\n'
@@ -46,6 +51,7 @@ compose() {
   fi
 }
 docker() {
+  if [[ "$1" == image && "$2" == inspect ]]; then return 0; fi
   if [[ "$1" == container && "$2" == inspect ]]; then
     if [[ "$3" == -f ]]; then
       case "$4" in
@@ -53,10 +59,10 @@ docker() {
         *environment*) printf '%s\n' "$mock_candidate_environment" ;;
         *) return 97 ;;
       esac
-      [[ "$mock_candidate" == true ]]
+      [[ -e "$mock_candidate_marker" ]]
       return
     fi
-    [[ "$3" == uip-contract-candidate && "$mock_candidate" == true ]]
+    [[ "$3" == uip-contract-candidate && -e "$mock_candidate_marker" ]]
     return
   fi
   if [[ "$1" == inspect && "$2" == -f ]]; then
@@ -78,11 +84,11 @@ docker() {
   fi
   if [[ "$1" == create ]]; then
     [[ " $* " == *' --label com.basic-platform.environment=prod '* ]] || return 96
-    mock_candidate=true
+    touch "$mock_candidate_marker"
     return
   fi
   if [[ "$1" == rm && "$2" == uip-contract-candidate ]]; then
-    mock_candidate=false
+    rm -f "$mock_candidate_marker"
     mock_removed=true
     return
   fi
@@ -124,11 +130,11 @@ assert_phase() {
 }
 
 assert_phase NOT_IMPORTED
-printf 'COMPONENT=contract\nVERSION=test\nIMAGE_REF=127.0.0.1:5000/uip/contract@sha256:test\n' > "$manifest_dir/contract-test.imported"
+printf 'COMPONENT=contract\nVERSION=test\nIMAGE_REF=127.0.0.1:5000/uip/contract@sha256:%064d\n' 1 > "$manifest_dir/contract-test.imported"
 assert_phase IMPORTED
 
 prepare_subsystem contract > "$test_root/prepare.out"
-[[ "$mock_candidate" == true ]]
+[[ -e "$mock_candidate_marker" ]]
 grep -q 'WAITING_FOR_PLATFORM_ADOPTION' "$test_root/prepare.out"
 grep -q 'contract_management/prod' "$test_root/prepare.out"
 assert_phase WAITING_FOR_PLATFORM_ADOPTION
@@ -180,7 +186,7 @@ if (prepare_subsystem contract) >/dev/null 2>&1; then
   echo 'prepare accepted a dev candidate for the production target' >&2
   exit 1
 fi
-[[ "$mock_candidate" == true ]]
+[[ -e "$mock_candidate_marker" ]]
 mock_candidate_environment=prod
 
 cat > "$deploy_dir/runtime/contract.env" <<'EOF'
@@ -207,16 +213,24 @@ chmod 600 "$deploy_dir/runtime/contract.env"
 assert_phase PROVISIONING_OR_FAILED
 
 mock_service=true
+assert_phase PROVISIONING_OR_FAILED
+if continue_subsystem contract > "$test_root/incomplete-runtime.out" 2>&1; then
+  echo 'healthy API hid incomplete runtime or failed platform deployment' >&2; exit 1
+fi
+[[ -e "$mock_candidate_marker" && "$mock_removed" == false ]]
+mock_runtime_verified=true
 assert_phase READY_TO_CONTINUE
 continue_subsystem contract > "$test_root/continue.out"
-[[ "$mock_candidate" == false && "$mock_removed" == true ]]
+[[ ! -e "$mock_candidate_marker" && "$mock_removed" == true ]]
 grep -q 'VERIFIED' "$test_root/continue.out"
 assert_phase VERIFIED
 subsystem_status contract > "$test_root/status.out"
 grep -q '当前阶段：VERIFIED' "$test_root/status.out"
+mock_runtime_verified=false
+assert_phase IMPORTED
+mock_runtime_verified=true
 
-# The data-analysis application code is snake_case, but its delivered profile
-# uses the component's hyphenated slug. prepare must resolve the real filename.
+# 数据分析应用代码采用下划线命名，交付配置采用组件的连字符标识；prepare 必须解析实际文件名。
 data_image="127.0.0.1:5000/uip/data-analysis@sha256:$(printf '%064d' 1)"
 printf 'COMPONENT=data-analysis\nVERSION=test\nIMAGE_REF=%s\n' "$data_image" > "$manifest_dir/data-analysis-test.imported"
 for data_key in DATA_ANALYSIS_DASHBOARD_API_IMAGE DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE DATA_ANALYSIS_ALERT_WORKER_IMAGE DATA_ANALYSIS_MIGRATE_IMAGE; do

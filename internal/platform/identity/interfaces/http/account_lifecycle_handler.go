@@ -14,9 +14,9 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
-// AccountLifecycleHandler exposes normal local-account provisioning and password lifecycle
-// endpoints. Plaintext passwords are deliberately confined to request handling and the immediate
-// reset response; this handler never logs or audits them.
+// AccountLifecycleHandler 暴露常规本地账号开通与密码生命周期端点。
+// 明文密码被刻意限制在请求处理与紧随其后的重置响应内；本 handler
+// 绝不记录或审计它们。
 type AccountLifecycleHandler struct {
 	service     accountLifecycleApplicationService
 	authHandler *Handler
@@ -30,7 +30,7 @@ type accountLifecycleApplicationService interface {
 	ChangeOwnPassword(context.Context, application.PasswordChangeInput) error
 }
 
-// NewAccountLifecycleHandler constructs the HTTP adapter for local account lifecycle operations.
+// NewAccountLifecycleHandler 构造本地账号生命周期操作的 HTTP 适配器。
 func NewAccountLifecycleHandler(service accountLifecycleApplicationService, authHandler *Handler, logger *slog.Logger) (*AccountLifecycleHandler, error) {
 	if service == nil || authHandler == nil || logger == nil {
 		return nil, errors.New("account lifecycle handler dependencies must not be nil")
@@ -64,7 +64,7 @@ type passwordResetResponse struct {
 	TemporaryPassword string `json:"temporary_password"`
 }
 
-// CreateLocalAccount provisions a HUMAN/LOCAL account and its initial password credential.
+// CreateLocalAccount 开通 HUMAN/LOCAL 账号及其初始密码凭据。
 func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -92,7 +92,7 @@ func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseW
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "账号已创建", toAccountResponse(account))
 }
 
-// InitializePassword sets a password only for a local account that does not yet have a credential.
+// InitializePassword 仅为尚无凭据的本地账号设置密码。
 func (handler *AccountLifecycleHandler) InitializePassword(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -115,8 +115,8 @@ func (handler *AccountLifecycleHandler) InitializePassword(writer http.ResponseW
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "密码已初始化", toAccountResponse(account))
 }
 
-// ResetPassword creates a strong server-generated password for offline delivery by the
-// administrator. The value is returned exactly once and is not written to logs or audit records.
+// ResetPassword 生成由管理员线下交付的高强度服务端随机密码。该值仅返回一次，
+// 不写入日志或审计记录。
 func (handler *AccountLifecycleHandler) ResetPassword(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -137,14 +137,14 @@ func (handler *AccountLifecycleHandler) ResetPassword(writer http.ResponseWriter
 		return
 	}
 
-	// Do not add the generated password to any log, audit event, retry cache, or response header.
+	// 生成的密码不得进入任何日志、审计事件、重试缓存或响应头。
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "密码已重置，请立即复制并线下交付", passwordResetResponse{
 		AccountID: result.AccountID, TemporaryPassword: result.TemporaryPassword,
 	})
 }
 
-// ChangeOwnPassword changes the authenticated account's password and clears its browser session
-// cookie after revoking all server-side sessions.
+// ChangeOwnPassword 修改已认证账号的密码；吊销全部服务端会话后清除其浏览器
+// 会话 cookie。
 func (handler *AccountLifecycleHandler) ChangeOwnPassword(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {

@@ -36,11 +36,40 @@ func main() {
 	}
 
 	kind := optional("FILE_GATEWAY_PROVISION_KIND", "iam-import")
-	tenantID := requiredFor(kind, "TENANT_ID")
-	applicationID := requiredFor(kind, "APPLICATION_ID")
-	environmentID := requiredFor(kind, "ENVIRONMENT_ID")
+	var tenantID, applicationID, environmentID string
+	if kind == "iam-import" {
+		tenantID = optional("IAM_IMPORT_PROVISION_TENANT_ID",
+			optional("SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", ""))
+		if tenantID == "" {
+			log.Fatal("IAM_IMPORT_PROVISION_TENANT_ID or SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID is required")
+		}
+		applicationID = optional("IAM_IMPORT_PROVISION_APPLICATION_ID", "")
+		environmentID = optional("IAM_IMPORT_PROVISION_ENVIRONMENT_ID", "")
+		applicationCode := optional("IAM_IMPORT_PROVISION_APPLICATION_CODE", "platform")
+		environmentCode := optional("IAM_IMPORT_PROVISION_ENVIRONMENT", "prod")
+		if applicationID == "" {
+			var row struct{ ID string }
+			if err := db.Table("platform_application").Select("id").
+				Where("code = ? AND status = ?", applicationCode, "ACTIVE").Take(&row).Error; err != nil {
+				log.Fatalf("resolve IAM import application %q: %v", applicationCode, err)
+			}
+			applicationID = row.ID
+		}
+		if environmentID == "" {
+			var row struct{ ID string }
+			if err := db.Table("platform_application_environment").Select("id").
+				Where("application_id = ? AND environment = ? AND status = ?", applicationID, environmentCode, "ACTIVE").Take(&row).Error; err != nil {
+				log.Fatalf("resolve IAM import environment %q: %v", environmentCode, err)
+			}
+			environmentID = row.ID
+		}
+	} else {
+		tenantID = requiredFor(kind, "TENANT_ID")
+		applicationID = requiredFor(kind, "APPLICATION_ID")
+		environmentID = requiredFor(kind, "ENVIRONMENT_ID")
+	}
 	clientID := requiredFor(kind, "CLIENT_ID")
-	outputPath := requiredFor(kind, "OUTPUT_PATH")
+	outputPath := optional(kindPrefix(kind)+"OUTPUT_PATH", "-")
 	clientName, scopes := "平台人员导入文件网关", []string{"platform:file:upload", "platform:file:bind"}
 	if kind == "settlement" {
 		clientName = "结算系统文件网关"
@@ -82,6 +111,13 @@ func main() {
 	if kind == "settlement" {
 		content = settlementEnvironment(applicationID, clientID, plaintextSecret)
 	}
+	if outputPath == "-" {
+		if _, err = os.Stdout.WriteString(content); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("%s file gateway client provisioned; credentials written to stdout", kind)
+		return
+	}
 	file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		log.Fatal(err)
@@ -96,12 +132,15 @@ func main() {
 	log.Printf("%s file gateway client provisioned; credentials written to %s", kind, outputPath)
 }
 
-func requiredFor(kind, suffix string) string {
-	prefix := "IAM_IMPORT_PROVISION_"
-	if kind != "iam-import" {
-		prefix = "FILE_GATEWAY_PROVISION_"
+func kindPrefix(kind string) string {
+	if kind == "iam-import" {
+		return "IAM_IMPORT_PROVISION_"
 	}
-	name := prefix + suffix
+	return "FILE_GATEWAY_PROVISION_"
+}
+
+func requiredFor(kind, suffix string) string {
+	name := kindPrefix(kind) + suffix
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
 		log.Fatalf("%s is required", name)
@@ -117,7 +156,7 @@ func optional(name, fallback string) string {
 }
 
 func iamImportEnvironment(clientID, secret string) string {
-	return fmt.Sprintf("IAM_IMPORT_FILE_GATEWAY_BASE_URL=http://file-gateway:8086\nIAM_IMPORT_FILE_GATEWAY_TOKEN_URL=http://platform-api:8080/oauth2/token\nIAM_IMPORT_FILE_GATEWAY_CLIENT_ID=%s\nIAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET=%s\n", clientID, secret)
+	return fmt.Sprintf("IAM_IMPORT_FILE_GATEWAY_BASE_URL=http://file-gateway:8086\nIAM_IMPORT_FILE_GATEWAY_TOKEN_URL=http://platform-api:8080/oauth2/token\nIAM_IMPORT_FILE_GATEWAY_CLIENT_ID=%s\nIAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET=%s\nIAM_IMPORT_FILE_GATEWAY_SCOPE=platform:file:upload platform:file:bind\n", clientID, secret)
 }
 
 func settlementEnvironment(applicationID, clientID, secret string) string {

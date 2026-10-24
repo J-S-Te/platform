@@ -1,4 +1,4 @@
-// Package worker consumes durable Keycloak authorization projection events.
+// Package worker 消费持久化的 Keycloak 授权投影事件。
 package worker
 
 import (
@@ -10,11 +10,15 @@ import (
 	"time"
 )
 
+// Event 是一条待投影的 Keycloak 授权 outbox 事件；Attempts 记录已执行次数，
+// 供重试预算与退避计算使用。
 type Event struct {
 	ID, TenantID, IdentityID, ApplicationID, EnvironmentID, EventType string
 	Attempts                                                          uint
 }
 
+// Queue 是投影事件的持久化队列契约：支持回收崩溃遗留锁、按 worker 领取、
+// 成功完成、退避重试和转入死信。
 type Queue interface {
 	RecoverStale(context.Context, time.Time, time.Time) error
 	Claim(context.Context, string, time.Time) (Event, bool, error)
@@ -23,25 +27,28 @@ type Queue interface {
 	Fail(context.Context, Event, string, string) error
 }
 
-// Synchronizer owns the Keycloak Admin API calls. It must create/update the
-// stable identity_id user mapping, organization groups and only the target
-// application's Client Roles.
+// Synchronizer 持有对 Keycloak Admin API 的调用职责。它必须创建/更新稳定的
+// identity_id 用户映射、组织组，以及仅限目标应用的 Client Roles。
 type Synchronizer interface {
 	SyncAuthorization(context.Context, Event) error
 }
 
-// EligibilityReconciler detects account expiry and active lock windows, which
-// change with time and therefore do not necessarily have a write event.
+// EligibilityReconciler 检测账号过期及角色、任职有效窗口。这类状态随时间自然变化，
+// 不一定伴随写事件，需要周期对账。
 type EligibilityReconciler interface {
 	Reconcile(context.Context, time.Time) error
 }
 
+// Clock 提供当前时间；测试可注入确定性时钟。
 type Clock interface{ Now() time.Time }
 
 type systemClock struct{}
 
+// Now 返回当前 UTC 时间。
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
+// Worker 消费授权投影 outbox 事件并驱动 Keycloak 同步；轮询、过期锁回收、
+// 重试退避与死信转移均以队列契约为准。
 type Worker struct {
 	queue        Queue
 	synchronizer Synchronizer
@@ -50,16 +57,15 @@ type Worker struct {
 	poll         time.Duration
 	clock        Clock
 	eligibility  EligibilityReconciler
-	// StaleLockTimeout is the maximum time an event may remain RUNNING before
-	// another worker assumes its owner crashed and returns it to PENDING.
+	// StaleLockTimeout 是事件允许停留在 RUNNING 状态的最长时间；超过后其他
+	// worker 将判定其属主已崩溃，把事件退回 PENDING。
 	StaleLockTimeout time.Duration
-	// MaxAttempts bounds repeated Keycloak control-plane failures.  Once the
-	// bounded retry budget is exhausted the event becomes FAILED (dead-letter
-	// state) and continues to block an auth-provider cutover until an operator
-	// replays it through a controlled recovery path.
+	// MaxAttempts 限制 Keycloak 控制面失败的重复次数。重试预算耗尽后事件转为
+	// FAILED（死信状态），持续阻塞认证提供方切换，直到运维经受控恢复路径重放。
 	MaxAttempts uint
 }
 
+// SetEligibilityReconciler 挂接可选的账号资格对账器；必须在启动 Run 循环之前调用。
 func (worker *Worker) SetEligibilityReconciler(reconciler EligibilityReconciler) {
 	worker.eligibility = reconciler
 }

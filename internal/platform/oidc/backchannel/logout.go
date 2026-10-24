@@ -1,5 +1,4 @@
-// Package backchannel implements the protocol-specific validation and delivery
-// boundary for OIDC Back-Channel Logout 1.0.
+// Package backchannel 实现 OIDC Back-Channel Logout 1.0 的协议校验与投递边界。
 package backchannel
 
 import (
@@ -11,6 +10,7 @@ import (
 	"time"
 )
 
+// EventURI 是 Back-Channel Logout 规范固定的事件标识。
 const EventURI = "http://schemas.openid.net/event/backchannel-logout"
 
 var (
@@ -18,7 +18,7 @@ var (
 	ErrReplay       = errors.New("OIDC back-channel logout token was already consumed")
 )
 
-// Claims are the claims specific to a logout_token after JWT signature validation.
+// Claims 是 logout_token 在 JWT 验签之后仍需校验的声明集合。
 type Claims struct {
 	Issuer   string
 	Audience []string
@@ -31,8 +31,8 @@ type Claims struct {
 	Nonce    string
 }
 
-// ValidateClaims enforces the Back-Channel Logout 1.0 claim set and short TTL.
-// JWT signature/issuer/audience cryptography remains the caller's responsibility.
+// ValidateClaims 强制执行 Back-Channel Logout 1.0 的声明集与短 TTL 约束；
+// JWT 签名/issuer/audience 的密码学校验仍由调用方负责。
 func ValidateClaims(claims Claims, expectedIssuer, expectedAudience string, now time.Time, maxTTL time.Duration) error {
 	if strings.TrimSpace(claims.Issuer) != strings.TrimSpace(expectedIssuer) || strings.TrimSpace(expectedAudience) == "" || !contains(claims.Audience, expectedAudience) {
 		return ErrInvalidToken
@@ -61,26 +61,26 @@ func contains(values []string, want string) bool {
 	return false
 }
 
-// Delivery is the minimal durable outbox dependency. Implementations must persist
-// the JTI before sending and atomically claim retries.
+// Delivery 是最小的持久化 outbox 依赖。实现必须在发送前持久化 JTI（防重放），
+// 并以原子方式领取待重试消息。
 type Delivery interface {
 	Claim(context.Context, time.Time, int) ([]Message, error)
 	Complete(context.Context, string, time.Time) error
 	Fail(context.Context, string, string, time.Time) error
 }
 
-// Message is an audience-bound logout notification ready for signed delivery.
+// Message 是一条绑定 audience、待签名投递的登出通知。
 type Message struct {
 	ID, Audience, Subject, Session, JTI, URI string
 	Attempt                                  int
 }
 
-// Sender posts a signed logout_token to one registered RP URI.
+// Sender 把签名后的 logout_token 投递到一个已注册的 RP URI。
 type Sender interface {
 	Send(context.Context, Message) error
 }
 
-// Dispatcher drains durable logout notifications and leaves failures for retry.
+// Dispatcher 持续排空持久化的登出通知；失败消息保留在队列中等待重试。
 type Dispatcher struct {
 	Queue      Delivery
 	Sender     Sender
@@ -107,7 +107,7 @@ func (d *Dispatcher) Run(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// RunOnce sends one bounded batch; it never drops a message after a send error.
+// RunOnce 发送一批有上限的消息；发送失败的消息绝不丢弃，而是按退避重新排队。
 func (d *Dispatcher) RunOnce(ctx context.Context, now time.Time) (int, error) {
 	if d == nil || d.Queue == nil || d.Sender == nil || d.BatchSize <= 0 {
 		return 0, fmt.Errorf("back-channel logout dispatcher is not configured")
@@ -137,7 +137,8 @@ func (d *Dispatcher) RunOnce(ctx context.Context, now time.Time) (int, error) {
 	return len(items), joined
 }
 
-// ValidateLogoutURI only permits an absolute HTTPS URI (or an explicitly local HTTP URI).
+// ValidateLogoutURI 仅允许绝对 HTTPS URI（或在显式开启时允许 localhost/127.0.0.1
+// 的 HTTP URI），拒绝携带用户信息、查询串或片段的地址。
 func ValidateLogoutURI(raw string, allowLocalHTTP bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {

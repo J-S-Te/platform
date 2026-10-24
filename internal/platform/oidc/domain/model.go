@@ -7,29 +7,29 @@ import (
 )
 
 const (
-	// ClientStatusActive is the only client status eligible for protocol processing.
+	// ClientStatusActive 是唯一可参与协议处理的客户端状态。
 	ClientStatusActive = "ACTIVE"
-	// SessionStatusActive is the only local session status eligible for authorization.
+	// SessionStatusActive 是唯一可用于授权的本地会话状态。
 	SessionStatusActive = "ACTIVE"
-	// AuthorizationCodeStatusActive marks an authorization code that has not been exchanged.
+	// AuthorizationCodeStatusActive 标记尚未兑换的授权码。
 	AuthorizationCodeStatusActive = "ACTIVE"
-	// AuthorizationCodeStatusConsumed marks a code permanently used by the token endpoint.
+	// AuthorizationCodeStatusConsumed 标记已被 token 端点永久使用的授权码。
 	AuthorizationCodeStatusConsumed = "CONSUMED"
-	// AuthorizationCodeStatusRevoked marks an unconsumed code invalidated with its browser session.
+	// AuthorizationCodeStatusRevoked 标记未消费但已随浏览器会话一并失效的授权码。
 	AuthorizationCodeStatusRevoked = "REVOKED"
-	// TokenFamilyStatusActive marks a refresh-token family that can still rotate.
+	// TokenFamilyStatusActive 标记仍可轮换的 refresh token 族。
 	TokenFamilyStatusActive = "ACTIVE"
-	// TokenFamilyStatusRevoked marks a family invalid after logout, revocation, or replay.
+	// TokenFamilyStatusRevoked 标记因登出、撤销或重放而整族失效的 refresh token 族。
 	TokenFamilyStatusRevoked = "REVOKED"
-	// RefreshTokenStatusActive marks the single refresh token that can be exchanged next.
+	// RefreshTokenStatusActive 标记当前唯一可兑换的 refresh token。
 	RefreshTokenStatusActive = "ACTIVE"
-	// RefreshTokenStatusConsumed marks a refresh token replaced during rotation.
+	// RefreshTokenStatusConsumed 标记在轮换中已被替换的 refresh token。
 	RefreshTokenStatusConsumed = "CONSUMED"
-	// RefreshTokenStatusRevoked marks a refresh token invalidated with its family.
+	// RefreshTokenStatusRevoked 标记随其令牌族一并失效的 refresh token。
 	RefreshTokenStatusRevoked = "REVOKED"
-	// TokenTypeAccess identifies a bearer access-token revocation record.
+	// TokenTypeAccess 标识 bearer access token 撤销记录。
 	TokenTypeAccess = "access_token"
-	// TokenTypeRefresh identifies a refresh-token revocation record.
+	// TokenTypeRefresh 标识 refresh token 撤销记录。
 	TokenTypeRefresh = "refresh_token"
 )
 
@@ -51,15 +51,15 @@ type Client struct {
 	JWKs                   []ClientJWK
 }
 
-// ClientCredential is a currently usable client-secret verifier. The plaintext secret is never
-// copied into domain state, storage, logs, or returned values.
+// ClientCredential 是当前可用的 client secret 校验器。明文密钥绝不进入领域状态、
+// 存储、日志或返回值。
 type ClientCredential struct {
 	SecretHash []byte
 	ValidUntil *time.Time
 }
 
-// SessionSubject is the local authenticated browser session to which an authorization code is
-// bound. The repository only returns it when tenant, session, account and user remain active.
+// SessionSubject 是授权码绑定的本地已认证浏览器会话；仓储只在租户、会话、
+// 账号与用户全部保持活动时才返回它。
 type SessionSubject struct {
 	TenantID           string
 	SessionID          string
@@ -113,8 +113,8 @@ type RefreshToken struct {
 	Status               string
 }
 
-// TokenGrant is a validated subject/client binding from which an access token, optional ID token,
-// and a rotated refresh token may safely be issued.
+// TokenGrant 是经验证的主体/客户端绑定，只有它才能安全签发 access token、
+// 可选 ID token 及轮换后的 refresh token。
 type TokenGrant struct {
 	TenantID      string
 	OAuthClientID string
@@ -127,8 +127,8 @@ type TokenGrant struct {
 	AuthorizedAt  time.Time
 }
 
-// UserInfoSubject is a current tenant-scoped user projection. It deliberately contains only
-// claims that UserInfo may selectively expose according to granted scopes.
+// UserInfoSubject 是租户内当前的用户投影。它刻意只包含 UserInfo 可按已授予
+// scope 选择性暴露的声明。
 type UserInfoSubject struct {
 	TenantID          string
 	OAuthClientID     string
@@ -139,8 +139,8 @@ type UserInfoSubject struct {
 	Email             string
 }
 
-// ClientJWK is an active public signing key registered for private_key_jwt or signed request objects.
-// The JWK is public-only; private JWK members are rejected by the application service.
+// ClientJWK 是为 private_key_jwt 或签名请求对象注册的活动公开验签密钥。
+// JWK 仅允许公开成员；含私钥成员的提交会被应用服务拒绝。
 type ClientJWK struct {
 	PublicJWK  []byte
 	KeyID      string

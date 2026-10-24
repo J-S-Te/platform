@@ -21,8 +21,7 @@ extract_function() {
   ' "$file"
 }
 
-# 4. A failed public HTTP probe must be the frontend deployment result even if
-# the immutable image is already running.
+# 4. 即使不可变镜像已经运行，公共 HTTP 探测失败仍须作为前端部署的失败结果。
 eval "$(extract_function deploy_frontend "$deploy_service")"
 deploy_dir="$test_root/deploy"
 PUBLIC_HTTP_PORT=8081
@@ -36,7 +35,7 @@ if deploy_frontend; then
 fi
 pass 'frontend probe failure propagates as non-zero'
 
-# 5. Runtime initialization/DSN writes must start only after the shared lock.
+# 5. 只有获得共享锁后，才能开始运行时初始化和 DSN 写入。
 lock_line="$(grep -n 'flock -w 900 9' "$deploy_service" | head -n1 | cut -d: -f1)"
 runtime_write_line="$(grep -n '^    prepare_runtime_file "\$contract_runtime_file"' "$deploy_service" | head -n1 | cut -d: -f1)"
 [[ -n "$lock_line" && -n "$runtime_write_line" && "$lock_line" -lt "$runtime_write_line" ]] ||
@@ -55,9 +54,7 @@ for oneoff in \
 done
 pass 'all migration/init one-shot containers are removed after completion'
 
-# The legacy two-image CRM/Portal entrypoint remains supported. It must use the
-# same lock and Agent refresh contract as deploy-service.sh rather than becoming
-# an unlocked compatibility bypass.
+# 继续支持旧的 CRM 和门户双镜像入口，但必须使用与 deploy-service.sh 相同的锁及 Agent 刷新契约，不能成为无锁的兼容绕行路径。
 legacy_lock_line="$(grep -n 'flock -w 900 9' "$legacy_customer_deploy" | head -n1 | cut -d: -f1)"
 legacy_runtime_write_line="$(grep -n '^initialize_runtime_file "\$customer_runtime_file"' "$legacy_customer_deploy" | head -n1 | cut -d: -f1)"
 [[ -n "$legacy_lock_line" && -n "$legacy_runtime_write_line" && "$legacy_lock_line" -lt "$legacy_runtime_write_line" ]] ||
@@ -90,7 +87,7 @@ grep -Fxq 'refresh' "$legacy_refresh_calls" ||
   fail 'legacy CRM/Portal rollback did not execute Agent refresh'
 pass 'legacy CRM/Portal entrypoint shares lock and refreshes Agent on commit/rollback'
 
-# 6. Project deploy/rollback must treat API and notifier worker as one release.
+# 6. 项目部署和回滚必须将 API 与通知 worker 视为同一发布。
 grep -Fq 'verify_service_image compose project-sla-notifier "$image_ref"' "$deploy_service" ||
   fail 'project notifier image is not verified during deployment'
 eval "$(extract_function rollback_ref_is_immutable "$deploy_service")"
@@ -104,15 +101,42 @@ compose() { printf 'compose %s\n' "$*" >>"$project_calls"; }
 wait_for_health() { printf 'health %s\n' "$*" >>"$project_calls"; }
 verify_service_image() { printf 'verify %s\n' "$*" >>"$project_calls"; }
 port_value() { printf '18085\n'; }
+# 本用例验证镜像/成员回退；控制协议与真实helper失败传播由test-project-background.py覆盖。
+project_background_activate() { printf 'background activate\n' >>"$project_calls"; }
 rollback_runtime
 grep -Fq 'project-api project-sla-notifier' "$project_calls" || fail 'project rollback omitted notifier worker'
 grep -Fq 'verify compose project-api ' "$project_calls" || fail 'project API rollback image was not verified'
 grep -Fq 'verify compose project-sla-notifier ' "$project_calls" || fail 'project notifier rollback image was not verified'
+grep -Fxq 'background activate' "$project_calls" || fail 'project rollback omitted controlled background activation'
 pass 'project API and worker roll back and verify together'
 
-# A failed first installation has only mutable public placeholders in the
-# previous release file.  It must restore the file but never ask Compose to
-# pull those placeholders as a fake rollback on an offline host.
+# 合同直接发布和恢复使用同一套已审核运行组件。API 健康不能掩盖工作流或分发 worker 缺失、不稳定的问题。
+scope_runtime_services() { [[ "$1" == contract ]] && printf '%s\n' contract-api contract-worker; }
+verify_service_stable() { printf 'stable %s\n' "$*" >>"$project_calls"; [[ "${failed_contract_worker:-false}" != true || "$1" != contract-worker ]]; }
+require_contract_runtime_value() { :; }
+contract_env_value() { [[ "$1" != PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED ]] || printf 'true\n'; }
+ensure_temporal_application_network() { :; }
+require_mysql_ready() { :; }
+backup_database_if_initialized() { :; }
+eval "$(extract_function deploy_contract "$deploy_service")"
+image_ref='127.0.0.1:5000/uip/contract@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+: >"$project_calls"
+deploy_contract
+grep -Fq 'contract-api contract-worker' "$project_calls" || fail 'contract release omitted workflow worker'
+grep -Fq 'verify compose contract-worker ' "$project_calls" || fail 'contract worker release image was not verified'
+grep -Fxq 'stable contract-worker' "$project_calls" || fail 'contract worker stability was not verified'
+printf 'CONTRACT_IMAGE=%s\n' "$image_ref" >"$release_file"
+service=contract
+: >"$project_calls"
+rollback_runtime
+grep -Fq 'contract-api contract-worker' "$project_calls" || fail 'contract rollback omitted workflow worker'
+grep -Fq 'verify compose contract-worker ' "$project_calls" || fail 'contract worker rollback image was not verified'
+failed_contract_worker=true
+if deploy_contract; then fail 'contract release accepted an unstable worker'; fi
+failed_contract_worker=false
+pass 'contract API and worker publish, recover and verify as one runtime set'
+
+# 首次安装失败时，旧发布文件只有可变公共占位值。必须还原该文件，但绝不能让 Compose 在离线主机拉取这些占位镜像来伪造回滚。
 printf 'PLATFORM_IMAGE=ghcr.io/j-s-te/platform:main\nFILE_GATEWAY_IMAGE=ghcr.io/j-s-te/platform-file-gateway:main\n' >"$release_file"
 service=platform
 : >"$project_calls"
@@ -122,7 +146,7 @@ grep -Fq '跳过运行态回滚' "$test_root/first-install-rollback.log" ||
   fail 'first-install rollback skip reason was not reported'
 pass 'first-install failure never pulls mutable public placeholder images'
 
-# 7. Refresh must recreate (not restart) Agent and compare both mounted files.
+# 7. 刷新必须重建 Agent 而非仅重启，并比对两个挂载文件。
 source "$bin_dir/provisioner-config-refresh.sh"
 deploy_dir="$test_root/deploy"
 release_file="$deploy_dir/.release.env"
@@ -160,19 +184,17 @@ fi
 grep -Fq 'refresh_subsystem_provisioner_config' "$start_enabled" || fail 'CRM/Portal release does not refresh Agent config'
 pass 'Agent is recreated and host/container config digests are enforced'
 
-# 8. Worker has a Compose health probe and the deploy path enforces a stable
-# running/healthy restart count before success.
+# 8. Worker 具有 Compose 健康探针，部署路径在报告成功前必须检查持续运行、健康状态和稳定的重启次数。
 worker_block="$(awk '/^  platform-worker:$/ {inside=1} /^  frontend:$/ {inside=0} inside' "$compose_file")"
-# The temporary compose fixture shadows compose_file above; read the production
-# file explicitly for this assertion.
+# 临时 Compose 夹具覆盖了上方 compose_file；此断言须显式读取生产文件。
 worker_block="$(awk '/^  platform-worker:$/ {inside=1} /^  frontend:$/ {inside=0} inside' "$bin_dir/../docker-compose.yml")"
 grep -Fq 'healthcheck:' <<<"$worker_block" || fail 'platform worker has no Compose healthcheck'
 grep -Fq '/app/worker' <<<"$worker_block" || fail 'platform worker healthcheck does not identify the worker process'
 grep -Fq 'verify_service_stable platform-worker' "$deploy_service" || fail 'platform worker has no release stability gate'
 pass 'platform worker health and restart stability are release gates'
 
-# 9. A narrow Compose health window that fails the data-analysis dependency wait
-# must fall back to waiting for the running API container instead of rolling back.
+# 9. 若 Compose 健康窗口过短导致数据分析依赖等待失败，必须回退为等待已运行的 API 容器，不能直接回滚。
+eval "$(extract_function capture_data_analysis_role_config_hash "$deploy_service")"
 eval "$(extract_function deploy_data_analysis "$deploy_service")"
 eval "$(extract_function wait_container_healthy "$deploy_service")"
 compose() {

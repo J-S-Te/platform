@@ -9,8 +9,8 @@ import (
 
 const loginTargetStatusActive = "ACTIVE"
 
-// LoginTargetResolveInput identifies one pre-registered business landing target. All fields are
-// required and are matched exactly; the resolver never accepts or derives a caller-supplied URI.
+// LoginTargetResolveInput 定位一个预先登记的业务落地目标。全部字段必填且精确匹配；
+// 解析器绝不接受或推导调用方提供的 URI，跳转地址只能来自注册数据。
 type LoginTargetResolveInput struct {
 	TenantID      string
 	ApplicationID string
@@ -18,9 +18,8 @@ type LoginTargetResolveInput struct {
 	TargetCode    string
 }
 
-// LoginTarget is the minimal persistence view required by the internal runtime resolver. It is
-// intentionally separate from OAuth redirect URI registrations and must never be used as an
-// authorization-code callback.
+// LoginTarget 是内部运行时解析器所需的最小持久化视图。
+// 刻意与 OAuth redirect_uri 登记相互独立，绝不可当作授权码回调地址使用。
 type LoginTarget struct {
 	ID            string
 	TenantID      string
@@ -31,27 +30,28 @@ type LoginTarget struct {
 	Status        string
 }
 
-// LoginTargetRepository resolves an active target through the complete tenant, application and
-// environment boundary. Implementations must not provide fallback or prefix matching behavior.
+// LoginTargetRepository 在完整的租户/应用/环境边界内解析 ACTIVE 目标。
+// 实现不得提供回退匹配或前缀匹配语义，跨边界的模糊命中一律视为不存在。
 type LoginTargetRepository interface {
 	FindActiveLoginTarget(context.Context, LoginTargetResolveInput) (LoginTarget, error)
 	FindActiveEnvironment(context.Context, string, string, string) (Environment, error)
 }
 
-// LoginTargetResolver is the internal contract used after the caller has established a trusted
-// application context. It is deliberately not an anonymous HTTP-facing API.
+// LoginTargetResolver 是调用方已建立可信应用上下文之后使用的内部契约，
+// 刻意不作为匿名 HTTP 面向外部的 API 暴露。
 type LoginTargetResolver interface {
 	ResolveActiveTargetURI(context.Context, LoginTargetResolveInput) (string, error)
 }
 
-// LoginTargetService performs input and defensive result validation around exact persistence
-// lookup. Missing, inactive or boundary-inconsistent targets are reported as not found so callers
-// fail closed instead of redirecting to an unapproved address.
+// LoginTargetService 围绕精确持久化查询做输入校验与防御性结果复核。
+// 目标缺失、非 ACTIVE 或边界不一致一律按 not found 报告，让调用方
+// 失败关闭，而不是跳转到未批准的地址。
 type LoginTargetService struct {
 	repository LoginTargetRepository
 }
 
-// NewLoginTargetService constructs the internal login-target resolver.
+// NewLoginTargetService 构造内部登录目标解析器；repository 缺失时拒绝构造，
+// 避免出现绕过注册数据的服务实例。
 func NewLoginTargetService(repository LoginTargetRepository) (*LoginTargetService, error) {
 	if repository == nil {
 		return nil, errors.New("application login target repository must not be nil")
@@ -59,15 +59,14 @@ func NewLoginTargetService(repository LoginTargetRepository) (*LoginTargetServic
 	return &LoginTargetService{repository: repository}, nil
 }
 
-// ResolveActiveTargetURI resolves one exact ACTIVE business landing target. The returned URI is
-// registry-controlled data and is not an OAuth redirect_uri.
+// ResolveActiveTargetURI 解析恰好一个 ACTIVE 的业务落地目标。返回的 URI 是
+// 注册数据管控的内容，不是 OAuth redirect_uri，不得接入授权码流程。
 //
-// TargetURI accepts two forms:
-//   - Absolute https URL: returned as-is.
-//   - Absolute path beginning with a single '/': resolved against the parent environment's public
-//     BaseURL and optional PathPrefix so administrators can register sub-systems without
-//     hard-coding the portal host and port. A relative TargetURI without a usable BaseURL is
-//     treated as a resolution failure and reported as not found.
+// TargetURI 接受两种形式：
+//   - 绝对 https URL：原样返回。
+//   - 以单个 '/' 开头的绝对路径：基于所属环境的公开 BaseURL 与可选 PathPrefix
+//     解析，管理员无需在注册数据里写死门户主机与端口。相对路径在 BaseURL
+//     不可用时按解析失败处理并报告 not found。
 func (service *LoginTargetService) ResolveActiveTargetURI(ctx context.Context, input LoginTargetResolveInput) (string, error) {
 	if !validLoginTargetResolveInput(input) {
 		return "", ErrValidation
@@ -105,13 +104,13 @@ func validLoginTargetIdentifier(value string) bool {
 	return len(value) == 26 && validIdentifier(value)
 }
 
-// validLoginTargetURI accepts both an absolute public URL and an absolute path under the portal.
+// validLoginTargetURI 同时接受绝对公开 URL 与门户下的绝对路径。
 //
-//   - Absolute public URL: scheme https, host non-empty, no userinfo, no opaque component.
-//   - Relative path: a single leading '/', no scheme, no query/fragment, ASCII printable only.
+//   - 绝对公开 URL：scheme 必须为 https、host 非空、无 userinfo、无 opaque 成分。
+//   - 相对路径：单个前导 '/'，不含 scheme、query/fragment，仅限 ASCII 可打印字符。
 //
-// Pure hostname strings (e.g. "example.com"), scheme-relative ("//x") and protocol-bearing
-// garbage are rejected to keep this from being abused as an open redirect helper.
+// 纯主机名字符串（如 "example.com"）、协议相对地址（"//x"）及带协议的杂项
+// 一律拒绝，防止本函数被滥用为开放重定向构造器。
 func validLoginTargetURI(value string) bool {
 	if value == "" || len(value) > 2048 {
 		return false
@@ -129,8 +128,8 @@ func validLoginTargetURI(value string) bool {
 		parsed.Opaque == "" && strings.EqualFold(parsed.Scheme, "https")
 }
 
-// isRelativeLoginTargetURI returns true when value is a safe absolute path the resolver is
-// allowed to expand against the parent environment's BaseURL.
+// isRelativeLoginTargetURI 判定 value 是否为解析器允许基于所属环境 BaseURL
+// 展开的安全绝对路径。
 func isRelativeLoginTargetURI(value string) bool {
 	if !validPortalPath(value, 2048) {
 		return false
@@ -138,9 +137,9 @@ func isRelativeLoginTargetURI(value string) bool {
 	return true
 }
 
-// joinEnvironmentBaseURLAndTargetURI composes the externally visible landing URL from three
-// independently managed values: the portal BaseURL, the environment PathPrefix and the target's
-// relative path. Internal UpstreamURL values never participate in browser redirects.
+// joinEnvironmentBaseURLAndTargetURI 由三个独立管理的值拼出对外可见的落地 URL：
+// 门户 BaseURL、环境 PathPrefix 与目标相对路径。内部 UpstreamURL 绝不参与
+// 浏览器重定向，避免把集群拓扑泄露给外部跳转链。
 func joinEnvironmentBaseURLAndTargetURI(baseURL string, pathPrefix *string, targetURI string) (string, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||

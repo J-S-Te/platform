@@ -1,8 +1,8 @@
 # 统一身份认证平台：构建、离线部署与恢复操作手册
 
-> 更新日期：2026-09-27  
-> 适用版本：当前工作区 `platform/deploy/production/` 交付链路  
-> 文档地位：**这是构建和离线部署的唯一详细操作手册。** `README.md` 与
+> 源码核对：2026-10-22（静态文档更新，非新部署验收）
+> 适用版本：当前工作区 `platform/deploy/production/` 交付链路
+> 文档地位：**这是本目录构建和离线部署的详细操作手册。** 根目录 `操作说明/` 提供固定发行批次示例，`DELIVERY_WORKFLOW.md` 说明统一入口与续跑。`README.md` 与
 > `OFFLINE_DEPLOYMENT.md` 只提供入口和摘要；备份实现细节见
 > [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md)。脚本帮助与本手册不一致时，先停止操作并按缺陷处理，不能自行跳过门禁。
 
@@ -18,7 +18,9 @@
 | 离线部署机 | Linux x86_64 | `/opt/unified-identity-platform` | 安装、配置和恢复使用 `root`；日常只读检查可用获授权运维用户 | 允许内网访问，不要求公网 |
 | 交付中转介质 | 受控文件服务器或加密移动介质 | 独立发布目录 | 只允许发布人员写入 | 不得混入运行配置或备份 |
 
-生产部署根固定为 `/opt/unified-identity-platform`。脚本不会保存 SSH 密码；密码只允许在 SSH 客户端交互提示中输入，禁止写进命令、脚本、手册、聊天记录或日志。
+本文示例部署根为 `/opt/unified-identity-platform`，并非固定磁盘限制。中文入口用 `--target`、底层入口用各自 `--dir`/部署根参数选择同一实际目录，例如 `/data/unified-identity-platform`；Docker/containerd存储根独立配置。脚本不会保存 SSH 密码；密码只允许在 SSH 客户端交互提示中输入，禁止写进命令、脚本、手册、聊天记录或日志。
+
+正式签名批次先按 [DELIVERY_WORKFLOW.md](DELIVERY_WORKFLOW.md) 设置介质外可信 verifier/trust，并对解压目录启用 `--require-release-integrity`。结构检查与SHA不能替代发行验签。当前登记支持V2/桥接；本手册涉及镜像运行批准的章节仅用于遗留V1或显式采用该材料的安装路径，不能解释成每次V2重建都需重新批准身份。
 
 ### 1.2 资源基线和容量估算
 
@@ -30,7 +32,7 @@
 - inode：Docker 数据目录与部署分区分别建议至少 100,000 个可用 inode。
 - CPU 架构：交付目标固定为 `linux/amd64`，服务器上的 `uname -m` 应为 `x86_64`。
 
-**内存是部署硬门禁。** 完整平台或包含数据分析/Metabase 的部署机低于 16 GiB 时，必须在预检阶段停止全量部署并先扩容；增加 swap、无限延长 Compose 健康等待、删除探针或放宽健康标准都不能替代物理内存。Metabase 首次初始化会同时运行 JVM、数据库和平台依赖，内存不足可能导致 swap 耗尽、Docker API/SSH 长时间停顿，并使其他已健康系统失去运维响应。仅验证基础平台或少量子系统时也必须逐阶段观察 `free -h`、容器健康和宿主响应，出现持续换页或 swap 耗尽立即停止新增模块。
+**16 GiB是完整部署建议起点，当前中文脚本在低于该值时请求资源警告确认，并非不可跳过的代码硬门禁。** 获得继续提示不证明资源足够；完整平台或包含Metabase时应先按实际服务预算评估和扩容。增加swap、无限延长健康等待或删除探针不能替代容量评估。Metabase首次初始化同时运行JVM、数据库与平台依赖，内存不足可能导致换页、Docker API/SSH停顿。分阶段观察 `free -h`、容器健康与宿主响应，出现持续换页或swap耗尽时停止新增模块。
 
 ### 1.3 两台机器先做只读预检
 
@@ -135,16 +137,9 @@ git rev-parse HEAD
 git submodule status --recursive 2>/dev/null || true
 ```
 
-若交付的源码不含 Git 元数据，生成不含 `.git`、构建产物和运行 Secret 的文件清单：
-
-```bash
-find platform frontend customer_and_opportunity contract_management \
-  project_management Settlement data_analysis \
-  -type f ! -path '*/.git/*' ! -path '*/node_modules/*' \
-  ! -path '*/vendor/*' ! -path '*/.artifacts/*' -print0 \
-  | LC_ALL=C sort -z | xargs -0 sha256sum > /tmp/uip-source-files.sha256
-sha256sum /tmp/uip-source-files.sha256
-```
+若交付源码不含 Git 元数据，记录正式打包器生成的 BUILD_INFO.txt 内 SOURCE_INPUT_SHA256，
+并保存经审核的源版本标识。不要对整个工作区递归哈希：实际 .env、私钥、运行数据和日志可能混入清单。
+该指纹只证明打包输入身份，不是源码或 Secret 的备份。
 
 同时保存以下非敏感版本输出：
 
@@ -170,7 +165,7 @@ docker pull --platform linux/amd64 metabase/metabase:v0.53.7
 docker pull --platform linux/amd64 prom/prometheus:v3.5.0
 docker pull --platform linux/amd64 prom/node-exporter:v1.9.1
 docker pull --platform linux/amd64 registry:2.8.3
-docker pull --platform linux/amd64 tecnativa/docker-socket-proxy:v0.5.0
+docker pull --platform linux/amd64 ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
 ```
 
 预期：每个镜像可通过 `docker image inspect` 读取。CloudFront、Go Proxy 或 Alpine 镜像源超时属于构建网络问题，不要通过删除 `go.sum`、关闭校验或改成未审核依赖解决。
@@ -307,10 +302,16 @@ done
 - 部署使用的 `image@sha256:...`：镜像推入本机 Registry 后得到的不可变 Registry manifest digest，由 `prepare/deploy` 写入 `.release.env`。
 
 目标 Docker 使用 containerd 镜像存储时，`docker image inspect .Id` 可能报告
-image index 摘要而不是选定平台的 config digest。导入器先使用 `.Id` 快速核对；
-若不同，会把刚加载的精确标签临时重新导出，并用同一归档解析器核对其中
-`linux/amd64` config blob。只有重新导出的 config digest 与包清单一致才继续，
-因此该兼容路径不等于跳过摘要校验。临时验证标签和归档在成功或失败后都会清理。
+image index/manifest 摘要而不是选定平台的 config digest。导入器先使用 `.Id`
+核对配置摘要；若不同，优先从已通过 SHA256 校验的原 `images.tar` 一次性读取
+小型 OCI 元数据，核验精确标签→索引/清单→唯一 `linux/amd64` 配置的关联、
+每个关联元数据对象的 SHA256/size 及清单指定的 config digest。Docker 返回的
+ID 恰好是这条已核验链的索引/清单摘要时，直接显示“镜像校验通过”，无需再次
+导出所有文件系统层。不会拿任意 RepoDigest、其他标签或其他平台的摘要放行。
+已识别的 OCI 元数据损坏、摘要/大小不一致或平台选择歧义会直接拒绝；
+旧归档、不支持的布局或缺少身份关联时，仍临时重新导出已加载的精确标签，并
+核对 `linux/amd64` config blob；等待期间打印明确进度。真实配置摘要不同仍拒绝。
+临时验证标签和归档在成功或失败后都会清理，所有包/架构/发布门禁保持有效。
 镜像包解压和重新导出的临时文件默认写入部署目录的
 `runtime/import-tmp/`，不使用可能只有少量容量的 `/tmp` tmpfs。安装器的部署分区
 空间预算已覆盖该路径。如需使用独立大容量分区，执行导入或安装前显式设置
@@ -324,7 +325,7 @@ image index 摘要而不是选定平台的 config digest。导入器先使用 `.
 `10001:10001`，也不要为了绕过权限错误放宽凭据文件到 `0644`。Agent 创建的
 Unix Socket 使用共享 GID 10001 和 `0660`，平台 API 仍以非 root 身份访问。
 
-`tecnativa/docker-socket-proxy:v0.5.0` 内置 HAProxy 3.4，日志级别必须使用
+`ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459` 内置 HAProxy 3.4，日志级别必须使用
 `warning`，不能使用会导致配置解析失败和重启循环的缩写 `warn`。编排会等待代理
 健康后才启动 Agent。首次安装失败时，若上一发布配置仍是 `:main/:pending` 等占位
 镜像，脚本只恢复配置文件并明确跳过运行态回滚，不会在离线服务器拉取公网占位镜像。
@@ -475,7 +476,7 @@ cd /root/uip-delivery
   /opt/unified-identity-platform
 ```
 
-预期：显示安装目标和旧资产备份路径，不启动容器。安装器校验独立 sidecar、归档路径、文件类型和允许列表；已有 Compose 会保留，新模板写成 `docker-compose.yml.dist`。
+预期：显示安装目标和旧资产备份路径，不启动容器。安装器校验独立 sidecar、归档路径、文件类型和允许列表；已有 Compose 通常保留，新模板写成 docker-compose.yml.dist；安装器也会受控迁移旧 Socket Proxy 镜像、frontend 地址表达式及 runtime-approvals 挂载，须审查实际差异。
 
 若中断后出现 `runtime/.assets-install-transaction`：
 
@@ -490,9 +491,11 @@ cd /root/uip-delivery
 
 ```bash
 install -d -m 700 /opt/unified-identity-platform/packages
-cp -p /root/uip-delivery/*-linux-amd64.tar.gz \
-  /root/uip-delivery/*-linux-amd64.tar.gz.sha256 \
+# 逐一替换为本批次实际文件名，仅复制镜像组件；不要使用会匹配宿主依赖的通配符。
+cp -p /root/uip-delivery/common-infrastructure-linux-amd64.tar.gz \
+  /root/uip-delivery/common-infrastructure-linux-amd64.tar.gz.sha256 \
   /opt/unified-identity-platform/packages/
+# 再按本批次清单复制 platform、frontend 和获批业务组件及其同名 sidecar。
 ```
 
 不要把 `deployment-assets-*.tar.gz` 放入 `packages/`。预期 `packages/` 中每个组件只有一个候选版本；同组件多个版本会被自动发现逻辑拒绝。
@@ -505,10 +508,10 @@ cp -p /root/uip-delivery/*-linux-amd64.tar.gz \
 /opt/unified-identity-platform/runtime/.control-plane-reload-required
 ```
 
-门禁清除前，所有会改变状态的入口都会被拒绝，只放行 `doctor`、`status`、`logs`、`help`：
+门禁清除前，通常写入口拒绝；doctor/status/logs/help 可诊断。当前 import 只放行经校验的 common/platform，recover-platform 和显式协调的平台发布有专用路径，不能把普通业务 import 或 frontend 当作恢复入口：
 
-- `deploy.sh` 的 `import`、`prepare`、`deploy`、`continue`、`upgrade`、`start`、`resume`、`disable`、`restore`、`install`；
-- CI 的 `deploy-service.sh`（含平台镜像发布）；
+- deploy.sh 的 prepare、普通 deploy、continue、upgrade、start、resume、disable、restore、install 等；import 的 common/platform 和 recover-platform 按专用绑定检查放行；
+- CI 普通 deploy-service.sh；绑定审核平台镜像的显式协调升级是受控例外；
 - 一键部署脚本与 `lifecycle.sh repair`（后者转发到 `deploy-service.sh`）。
 
 被拒绝时输出：
@@ -519,7 +522,7 @@ cp -p /root/uip-delivery/*-linux-amd64.tar.gz \
 请先执行：/opt/unified-identity-platform/bin/deploy.sh reload-control-plane
 ```
 
-按提示执行一次即可，然后重试刚才的操作：
+仅普通清单重载使用下述命令；标记绑定新版 PLATFORM_IMAGE／资产摘要时，必须使用本批次平台包走 recover-platform（根目录 forward-recover.sh 包装该流程），不能先让旧二进制解析新清单。普通重载成功后再重试：
 
 ```bash
 cd /opt/unified-identity-platform
@@ -536,6 +539,38 @@ sudo ./bin/deploy.sh reload-control-plane
 > **为什么不能只重启 Agent：** 只重建一侧会让两侧清单集合不同，平台的受控采用/更新会被 `production subsystem manifest drift detected` 正确拒绝，现场表现为“点多少次重试都没用”。
 
 > **旧交付介质必须重新制作。** 本门禁与成对重载只存在于包含该修复的 `deployment-assets` 中。把新脚本单独拷进旧介质、或只替换旧介质 `bin/` 下的文件，都不构成完整修复：旧介质可能仍携带不兼容的 `subsystems.d` 与模板，也不会写入门禁。增量制作（`--extend-from`）在基线不兼容时会直接拒绝复用，此时必须重新构建完整基线。
+
+### 5.5 升级批准替换（维护窗口）
+
+此节是遗留V1四系统批准发布路径；先核实实际平台/Agent版本与登记模式。内置V2普通镜像更新不因摘要变化执行此发布器；不能用V1工具强制覆盖V2身份。
+
+新镜像的运行批准必须随最终包单独交付；资产安装器仍拒绝覆盖不同批准，不能把新批准文件直接塞进 `runtime-approvals/`。本批次 `deployment-assets` 内含 `bin/publish-runtime-approvals.py`，由它在同一部署锁内完成：
+
+1. 校验新批准 bundle 的 `SHA256SUMS`、schema、旧批准 CAS、旧运行镜像和 `upgrade-before.json`；
+2. 调用原生 `backup-all.sh` 做全库/配置/文件备份并验证，再独立备份旧批准；
+3. 停止 `platform-api` 和 `subsystem-provisioner`，确认没有 UPDATING/VERIFYING/FAILED 业务后原子写入 4 份业务 release 和 `license-evidence.json`；
+4. 通过 `lifecycle.sh approval-reload` 成对重载控制面并验证 Agent 只读挂载；
+5. 保持 `business_updated:false`、`runtime_ack_observed:false`，业务更新/ACK 另行执行。
+
+服务器 root 终端：
+
+```bash
+bundle=/root/uip-final-approval-bundle
+deploy=/data/unified-identity-platform
+(cd "$bundle" && sha256sum --check SHA256SUMS)
+bundle_sha=$(sha256sum "$bundle/SHA256SUMS" | awk '{print $1}')
+proof=$(python3 "$deploy/bin/publish-runtime-approvals.py" \
+  --deploy-root "$deploy" --bundle "$bundle" --bundle-sha256 "$bundle_sha")
+before=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["before_sha256"])' <<<"$proof")
+python3 "$deploy/bin/publish-runtime-approvals.py" \
+  --deploy-root "$deploy" --bundle "$bundle" --bundle-sha256 "$bundle_sha" \
+  --before-sha256 "$before" --apply --confirm PUBLISH_RUNTIME_APPROVALS_MAINTENANCE
+```
+
+- 先运行升级入口完成 deployment-assets、平台和前端安装，并把业务镜像暂存（平台停在受控更新等待，不启动新业务镜像）；确认 `bin/publish-runtime-approvals.py` 和带 `approval-reload` 的 `bin/lifecycle.sh` 已就位后执行发布器；再在平台应用页受控更新/重试并完成 ACK。
+- 若业务更新先执行并被旧批准拦住，不要手工覆盖批准或删除旧文件；执行发布器后用原升级命令 `--resume` 收口。
+- 发布失败时 `platform-api` 保持停止是有意的 containment。保留 `runtime/.runtime-approval-publish`、备份和门禁，使用同一 bundle/哈希执行 `--resume`；不得手工启动 API 或删除事务目录。
+- 厂商侧正式批准生成命令和源码分类/目标 facts 前置条件见 [运行组件批准清单教程](../../../sharedDocs/09_商业授权/02_运行组件批准清单.md) 第八节 2026-10-20 小节；候选包不能当正式批准。
 
 ## 6. 选择模块与生成配置
 
@@ -611,7 +646,7 @@ cd /opt/unified-identity-platform
 ./bin/deploy.sh install
 ```
 
-`install` 先扫描全部包并拒绝歧义，然后按：common → platform → 基础平台健康 → frontend → 公开入口健康 → 子系统 import/prepare 的顺序执行。子系统只准备候选，不自动绕过平台接入。
+`install` 先扫描全部包并拒绝歧义，然后按：common → platform → 基础平台健康 → frontend → 公开入口健康 → 子系统 import/prepare 的顺序执行。普通路径只准备候选；匹配签名许可与审核安装计划的专用路径会调用受控采用，不绕过平台接入规则。
 
 预期：基础平台和前端通过健康门禁；已提供且已启用的子系统显示等待平台采用。任何阶段失败都应停止后续阶段，并保留诊断现场。
 
@@ -641,6 +676,21 @@ docker logs --tail 200 <失败容器名>
 ```
 
 迁移失败容器会保留供检查。不要删除数据库卷，不要把 `Running` 或单个 HTTP 200 当作业务成功。
+
+#### 7.2.1 首次安装的数据库冷启动与等待预算
+
+首次安装时公共 MySQL 需要初始化数据目录并重启一次。实测（16 vCPU / 5.4 GiB 内存的测试机）从容器启动到 `ready for connections ... port 3306` 约 **4.5 分钟**；旧的 180s 等待会在初始化完成前放弃，并把随后必然失败的备份报成"发布失败"，掩盖真正的启动原因。
+
+- 等待预算默认 **600 秒**，可用环境变量 `BASIC_PLATFORM_DB_START_TIMEOUT`（秒）覆盖；慢盘或低配机建议设为 `900`。
+- 数据库启动失败时脚本输出：容器 `状态/健康/退出码/重启次数/OOMKilled`、最近 40 行容器日志、宿主机 `free -m`，以及内存基线提示；不再只报 `mysqldump ... socket` 这种误导性错误。
+- 首次安装时目标库尚未创建，脚本跳过发布前备份并说明原因；升级发布仍强制备份，备份失败仍中止发布。
+- 快速判断是否内存不足（基线 16 GiB）：
+
+  ```bash
+  docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' <容器名>
+  dmesg -T | grep -iE 'oom|killed process'
+  free -m
+  ```
 
 ### 7.3 地址和基础验收
 
@@ -950,3 +1000,33 @@ File Gateway 数据库禁止单独恢复，必须使用同批次数据库+文件
 [ ] 故障、安装中断、损坏包和恢复演练结果已记录
 [ ] 网络限制已恢复；未执行项和外部阻塞已单列
 ```
+
+## 2026-10-13 全链路核验补充
+
+本手册的构建机／生产运维／应用管理员／业务复核人角色及步骤保持区分；本次只核验源码，不声明新动态验收。
+近期工作区未提交脚本改动也是本次事实来源；正式介质必须重新构建，不能因为本地说明更新就认定服务器有新能力。
+
+1. 中文一键入口自动判断空安装／旧安装；残留部署标识不完整时拒绝猜测。
+   --check-only 检查介质、系统、资源并在隔离 scratch 中试装资产，不修改现有部署，但会创建临时文件。
+   --upgrade 不是 dry-run：先调用原安装的 backup-all，再导入及安装资产，最后才展示／合并差异。
+   --yes 仅资源提示，不代表升级或差异审批；非交互合并须在审阅后明确 --apply-compose。
+2. install 普通路径依次扫描包、导入 common/platform、发布平台并检查、导入发布 frontend，再准备业务候选。
+   带匹配 license-dir／审核 license-plan 时另执行专用许可安装和自动采用路径；不把这条路径改写成“永远只 prepare”。
+   本次只核实辅助脚本调用，商业授权政策由原授权文档负责。
+3. prepare 在范围锁内保存摘要、刷新控制面并创建 network=none 的停止候选；不启动业务数据库。
+   continue 仅允许已由后台采用的 READY_TO_CONTINUE，删除候选后完成技术阶段；不做新部署或迁移。
+   VERIFIED 不等于期望新 digest 已在所有服务生效，仍须 verify、实际容器摘要和业务验收。
+4. 平台／前端 upgrade 实际发布，业务 upgrade 先暂存后从页面更新。
+   start 和 resume 会调用发布、备份、迁移、目录同步及健康等待，不能当作单纯 docker start；
+   resume 还要求已接入、当前运行容器和本地镜像满足检查。
+5. 受控采用／更新要求对应租户的应用、环境、登录目标更新及 OAuth disable 权限；
+   重试另需 role-binding:update。后台事务锁定代次，写入凭据、desired manifest、Agent 更新、迁移及所有声明 API／Worker，
+   最后写 applied manifest／初始权限及 READY；受理响应不代表完成，失败查看终态错误并保持数据。
+6. 底层发布使用统一部署锁及完整备份；控制面更新须平台 API／Agent 同版本。
+   资产安装只备份静态文件并记录持久事务；残留事务先 install-assets.sh --recover，数据库恢复不属于该回滚。
+   HTTPS／排空不加载旧覆盖层，runtime/compose.timezone.yaml 是新时区流程例外，避免裸 Compose 丢失设置。
+7. 基础 verify 包含健康、discovery 与匿名网关接口 401／405，不做真实登录、IAM 权限、业务读写或 Workflow；
+   Keycloak TCP 9000 探测不能替代 HTTP ready。
+8. 备份跨库非同一时点，状态归档加密不包括 SQL／网关文件；网关停写时长取决于数据量。
+   隔离网关 drill 使用平台工具、临时 1 GiB MySQL 和最多 100000 条 READY 对账；核对扫描总数。
+   网关 SQL 部分导入时文件回退不等于 SQL 回滚，保持停写；详见 [BACKUP_RECOVERY](BACKUP_RECOVERY.md)。

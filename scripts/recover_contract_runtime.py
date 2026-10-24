@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Recover immutable local contract secrets from the still-running trusted API.
+"""从仍在运行的可信 API 恢复本地合同系统的不可变运行密钥。
 
-Never rotate a database account or encryption key to repair a lost runtime file.
-Only four persistence/session keys are recovered; managed OAuth settings are kept.
+不得通过轮换数据库账号或加密密钥修复丢失的运行文件。
+仅恢复四项持久化及会话密钥，保留受管 OAuth 配置。
 """
 import base64
 import json
@@ -21,7 +21,7 @@ KEYS = (
 def checked_run(args, data=None):
     result = subprocess.run(args, input=data, capture_output=True, text=True, timeout=30)
     if result.returncode:
-        # Docker/DB errors can contain connection strings: never surface raw output.
+        # Docker 或数据库错误可能包含连接字符串，绝不直接暴露原始输出。
         raise RuntimeError("受控恢复校验失败；未修改配置或数据库")
     return result.stdout
 
@@ -53,7 +53,7 @@ def validated_values(container):
                 valid = False
             if not valid:
                 raise RuntimeError("旧运行时加密密钥格式无效")
-    # Do not adopt a database password unrelated to the API's actual connection.
+    # 不要接纳与 API 实际连接无关的数据库密码。
     if not env.get("MYSQL_DSN", "").startswith("contract:" + values["CONTRACT_MYSQL_PASSWORD"] + "@tcp(contract-mysql:3306)/"):
         raise RuntimeError("旧 API 数据库连接与运行时凭据不一致")
     return values
@@ -102,7 +102,7 @@ def main():
                and m.get("Destination") == "/var/lib/mysql" for m in database.get("Mounts", [])):
         raise RuntimeError("数据库没有挂载当前编排的保留数据卷")
     values = validated_values(api)
-    # Feed credentials over stdin, not shell interpolation, argv, or log output.
+    # 通过标准输入传递凭据，不使用 Shell 插值、argv 或日志输出。
     for user, key in (("contract", KEYS[0]), ("root", KEYS[1])):
         output = checked_run(["docker", "exec", "-i", project + "-contract-mysql-1", "sh", "-c",
                               'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec mysql -h127.0.0.1 -u "$1" -Nse "SELECT 1"',

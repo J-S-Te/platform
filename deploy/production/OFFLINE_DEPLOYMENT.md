@@ -1,10 +1,15 @@
 # 离线统一部署流程
 
-> 本文是流程摘要。可直接照做的唯一详细手册为
+> 2026-10-22 当前工作区源码核对；未运行部署或动态验收。
+
+
+> 本文是流程摘要。本目录具体步骤与完成判据见
 > [OFFLINE_RUNBOOK.md](OFFLINE_RUNBOOK.md)，其中逐步注明执行机器、目录、身份、预期输出和失败处理；
 > 服务器验收证据清单见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md)。本文与手册不一致时停止部署并修正文档/脚本，不自行选择较宽松的步骤。
 
 生产只维护 `docker-compose.yml`，部署目录默认 `/opt/unified-identity-platform`。镜像导入和容器启动是两个独立动作。
+
+优先使用[统一交付检查与分阶段恢复](DELIVERY_WORKFLOW.md)。以下保留底层安装/运维步骤，手工运行资产安装器不等于经过可信发行签名门禁。正式签名介质使用介质外可信verifier/trust，中文入口 `--require-release-integrity` 当前要求已解压目录。目标可以显式选 `/data/unified-identity-platform`，但所有入口必须使用同一真实路径；Docker/containerd数据根目录另行配置，不随部署路径自动迁移。
 
 ## 1. 构建和安装部署资产
 
@@ -37,9 +42,9 @@ sudo ./bin/deploy.sh configure
 `bash/tar/gzip/sha256sum/dpkg/apt-get`；Docker Engine 与 Compose plugin 仍需单独预装，
 安装器不会自动安装或替换 Docker。
 
-安装器保护既有 `.env`、`.release.env`、runtime、数据和备份。升级时保留当前 `docker-compose.yml`，将新模板写为 `docker-compose.yml.dist` 供管理员合并，避免覆盖已注释的部署范围。
+安装器保护既有运行 Secret、数据和备份。新模板通常写为 docker-compose.yml.dist 供管理员合并；旧代理镜像、frontend 地址表达式及批准目录挂载可能受控迁移，不能承诺活动 Compose 绝不变化。
 
-资产安装会先完成全量备份，再写入 `runtime/.assets-install-transaction` 事务标记。若磁盘、复制或进程中断留下标记，`deploy.sh` 和下一次资产安装都会拒绝在混合版本上继续；先执行显式恢复：
+资产安装会先完成静态资产事务备份（不是数据库全系统备份），再写入 `runtime/.assets-install-transaction` 事务标记。若磁盘、复制或进程中断留下标记，`deploy.sh` 和下一次资产安装都会拒绝在混合版本上继续；先执行显式恢复：
 
 ```bash
 sudo ./bin/install-assets.sh --recover /opt/unified-identity-platform
@@ -67,13 +72,15 @@ sudo ./bin/deploy.sh verify
 docker ps -a
 ```
 
-导入要求 `.sha256` 只含一条摘要，且文件名必须与当前包完全相同；随后校验包 SHA-256、包内 images.tar 摘要、登记名称和 linux/amd64 架构，再 docker load 并登记 digest。每次成功导入会原子更新该组件的 `*.latest` 指针，部署使用最后一次明确导入的版本，不按版本字符串字典序猜测“最新”。导入不会自动启动。
+导入要求 `.sha256` 只含一条摘要，且文件名必须与当前包完全相同；随后校验包 SHA-256、包内 images.tar 摘要、登记名称和 linux/amd64 架构，再 docker load 并登记 digest。每次成功导入会原子更新该组件的 `*.latest` 指针，部署使用最后一次明确导入的版本，不按版本字符串字典序猜测“最新”。导入不会启动业务应用，但可能启动本地 Registry／相关基础设施，不能视为零运行态变更。
 
-平台发布分阶段执行 platform-key-init、公共数据库健康等待、平台迁移、Keycloak/Temporal、网关、socket proxy、Agent、API/Worker，再初始化或验证管理员。前端单独发布，HTTPS 和排空使用同一服务与 runtime/public-tls 受管目录，不加载覆盖文件。
+平台发布分阶段执行 platform-key-init、公共数据库健康等待、平台迁移、Keycloak/Temporal、网关、socket proxy、Agent、API/Worker，再初始化或验证管理员。前端单独发布，HTTPS 和排空使用同一服务与 runtime/public-tls 受管目录，不加载旧 HTTPS／排空覆盖文件；受管 runtime/compose.timezone.yaml 是当前时区例外。
 
 `deploy.sh install` 可扫描 packages 自动完成公共平台和前端，再为 YAML 保留且已提供镜像包的子系统准备候选。被注释模块不会要求镜像、runtime 或迁移。
 
 ## 4. 平台接入业务子系统
+
+接入前先确认当前登记模式：内置目录V2/旧模式桥接由平台和Agent按代码及持久状态决定；遗留V1才按实际镜像/覆盖批准发放身份。两条路径均保留有效商业授权、业务权限及全部必需服务的自然READY/ACK，不能通过先接入全部业务绕过授权。普通V2镜像更新不等同于重新签商业许可证。详见[授权总览](../../../sharedDocs/09_商业授权/README.md)。
 
 以 CRM 为例：
 
@@ -99,7 +106,7 @@ sudo ./bin/deploy.sh status
 sudo ./bin/deploy.sh disable contract
 ```
 
-start 使用当前 release 版本分阶段启动公共平台及已接入模块；首次初始化管理员仍使用 deploy platform。resume 只操作已接入单系统，完成依赖健康等待、备份、迁移、必要目录同步和启动。保留既有 workflow namespace、队列和 Worker 版本策略。
+start 使用当前 release 调用底层发布／备份／迁移，再启动已接入模块；不是简单进程重启。resume 只操作已接入单系统，完成依赖健康等待、备份、迁移、必要目录同步和启动。保留既有 workflow namespace、队列和 Worker 版本策略。
 
 已运行模块被注释后，旧容器不会自动停止。启动/状态检查列出差异并提示 disable 命令。disable 仅按项目/服务标签停止容器，保留卷与凭据，不执行 down 或 remove-orphans。重新启用需取消注释，再 resume。
 
@@ -121,3 +128,18 @@ docker inspect uip-platform-api
 业务升级先导入镜像，再 upgrade 暂存，最后由平台受控更新。常驻容器具备健康检查、日志轮转和资源限制。失败迁移保留容器供 docker ps -a / docker logs 检查；不要删除数据库卷来解决配置或认证问题。
 
 验收必须包括全系统、单块及多块裁剪、平台独立启动、重复启动、故障迁移、Worker 重启和工作流恢复。Compose 解析与脚本测试不等于真实业务验收；真实登录、恢复演练需要可用镜像、凭据和隔离服务器环境。
+
+## 2026-10-13 核验后的操作条件
+
+由生产运维选择批准的目标目录和介质，应用管理员完成租户内采用／更新，业务人员做登录／业务验收；本次未实际部署。
+默认示例目录不限制 --dir／--target 的显式部署根，但全套入口必须指向同一实际目录。
+
+install 普通路径只为提供包且启用的子系统准备候选；匹配 license-plan 或 license-dir 的审核自动安装路径另会执行受控采用和授权确认。
+continue 不绕过采用，只在 READY_TO_CONTINUE 清理候选；VERIFIED 不能替代新旧实际容器摘要和业务验证。
+平台／前端 upgrade 会实际发布，业务 upgrade 先暂存，再从页面受控更新。
+完整备份先于中文升级导入／资产安装；底层发布可能再次备份，预留空间和 File Gateway 停写时间。
+
+资产事务残留先恢复安装器；控制面升级标记仅允许受限 import common/platform 或绑定平台制品恢复，不是所有 import 一律允许／拒绝。
+普通 reload-control-plane 不能代替需要新平台二进制的协调升级。
+恢复镜像／配置不等于恢复数据库；网关 SQL 导入失败可能部分改变库，维持停写并人工处置。
+具体判据及备份容量／加密范围见 [BACKUP_RECOVERY](BACKUP_RECOVERY.md)。

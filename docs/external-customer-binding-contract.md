@@ -1,105 +1,37 @@
-# 外部客户绑定契约（External Customer Binding Contract）
+# 外部客户绑定契约与对账操作
 
-> 版本：v1（2026-08-14，Phase 0 冻结）
-> 关联方案：`sharedDocs/01_架构设计/客户门户独立化与公网暴露方案.md`
-> 服务端实现：`platform/internal/platform/externalidentity`；消费方：CRM（`customer_and_opportunity`）、客户门户（`customer_portal`）
+> 源码核验日期：2026-10-13。平台只维护身份与不透明客户标识的受保护绑定；无人工控制台绑定入口，不代表 CRM 邀请、门户映射或真实部署已全部验收。
 
-## 1. 范围
+## 角色、前提与端点
 
-本契约定义"平台身份 ↔ CRM 客户标识"绑定的机器接口与 authorization-context 声明。平台只保存
-键控 SM3 摘要与 AES-256-GCM 密文，不理解 customer_ref 的业务语义；明文只在服务端受控路径解密下发。
+调用者为验签的应用机器身份，不是浏览器管理员。绑定/读取使用 `portal_mapping_provision`，禁用使用 `portal_mapping_disable`；不要与门户自身 identity_mapping scope 混用。租户/Client 从可信身份取得，平台身份须存在且未停用。
 
-## 2. 通用要求（所有端点）
+| 操作 | 路径（前缀 /api/v1/internal） |
+| --- | --- |
+| 绑定或恢复 | `PUT /external-users/{platform_user_id}/customer-binding` |
+| 禁用 | `POST /external-users/{platform_user_id}/customer-binding/disable` |
+| 对账 | `GET /external-users/{platform_user_id}/customer-binding` |
 
-- 认证：应用 Bearer（client_credentials），scope 见各端点；非匹配 scope 一律 403。
-- 防重放请求头（与既有 external-identity 机器接口一致）：
-  - `Idempotency-Key`：`<=128` 字符，相同键只接受同一规范化请求，否则 409；
-  - `X-Integration-Timestamp`：RFC3339Nano UTC，前后 5 分钟窗口，否则 409；
-  - `X-Integration-Nonce`：`<=128` 字符，平台 10 分钟内唯一（tenant 域），重复即 409。
-- 错误码沿用平台 envelope（`code/message/request_id`）：`COMMON_VALIDATION_ERROR`(422)、`COMMON_CONFLICT_ERROR`(409)、`COMMON_NOT_FOUND_ERROR`(404)、`INTERNAL_ERROR`(500)。
+写接口 JSON 为 `{"customer_ref":"CRM-CUST-2001"}`，携带 Idempotency-Key、X-Integration-Timestamp（RFC3339，当前时刻前后 5 分钟）、X-Integration-Nonce。键与 nonce 长度上限 128，nonce 在租户域 10 分钟内不得重复。GET 只需匹配机器身份/scope，不要求写接口防重放头。
 
-## 3. 端点
+实际校验先 trim：platform_user_id 非空且不超过 128 字节，业务含义为 iam_user.id，但此层不是显式“必须 26 位 ULID”的校验；customer_ref trim 后 1..64 字节，拒绝控制字符，允许内部普通空格。不要将字符数写成字节数或声称拒绝一切空白；CRM/门户可有更严输入规则，应分别核验。
 
-### 3.1 写入绑定（BIND）
+## 操作步骤与幂等限制
 
-```
-PUT /api/v1/internal/external-users/{platform_user_id}/customer-binding
-Scope: portal_mapping_provision
-```
+1. CRM 等服务核实平台身份和本系统客户资格，生成稳定幂等键及新 nonce、时间戳，提交绑定。
+2. 成功后 GET 对账，检查 platform_user_id、application_code、ACTIVE；响应不回显 customer_ref、密文或摘要。
+3. 同客户在同租户/应用已绑定另一身份会冲突；同身份绑定可 upsert 替换/恢复。平台事务同时处理 nonce、幂等记录、绑定和审计，不修改 CRM 客户业务数据。
+4. 禁用必须指定当前匹配的 customer_ref 且绑定为 ACTIVE；新幂等键重复禁用已禁用绑定会 409，而不是无条件成功。
+5. 原幂等键同规范化请求可重放响应，但每次重试必须用新 nonce 和当前时间。先检 nonce 再查幂等结果，原 nonce 的直接重发会冲突；同键异请求也冲突。幂等响应不是永远最新的业务状态，必要时再次 GET。
 
-请求体：
+不存在/停用身份或不存在绑定按 404；冲突 409；校验 422。缺失保护密钥时写入失败关闭，可返回 503 INTERNAL_ERROR；数据库等错误可为 500。保留 request_id 排查，绝不把真实客户标识、Token 或密钥复制到公共工单。
 
-```json
-{ "customer_ref": "CRM-CUST-2001" }
-```
+## 存储、声明与恢复
 
-- `platform_user_id`：`iam_user.id`（OIDC identity_id），26 位 ULID；
-- `customer_ref`：`1..=64` 字符，前后无空白，CRM 持有的不透明客户标识。
+迁移对“租户/身份/应用”和“租户/customer_ref_digest”建立唯一约束，并将 application_code 限制为 customer_portal；摘要输入本身含应用域。保护为 HMAC-SM3 摘要（输入含 customer、tenant、application 域分隔）与 AES-256-GCM 密文；禁用保留密文/摘要及审计，不物理删除记录。
 
-响应 200：
+`AUTHZ_CONTEXT_CUSTOMER_REF_ENABLED` 开启后，面向客户门户的 `/oauth2/authorization-context` 在身份/绑定活动且解密成功时追加可选 customer_ref；缺失/解密失败省略，消费者必须按无绑定失败关闭。不自动修改 Keycloak Client/ID Token Mapper，也不自动撤销 CRM 业务授权或证明门户会话即时失效。
 
-```json
-{ "code": "OK", "data": { "platform_user_id": "01KZ...", "application_code": "customer_portal", "status": "ACTIVE" } }
-```
+保护密钥分别为 `IAM_CUSTOMER_REF_DIGEST_KEY`、`IAM_CUSTOMER_REF_ENCRYPTION_KEY`。格式错误会导致配置失败，缺失不降级明文。当前实现没有自动双 key 读取/轮换；双 key 迁移是未来受控方案需求，不是现成操作能力。恢复或轮换交部署/数据负责人另行审核，不能盲目换 key 后期待旧绑定正常解密。
 
-语义：幂等 upsert；已存在绑定更新状态为 ACTIVE 并刷新密文/摘要；身份不存在、身份 DISABLED、
-同客户已绑定其他身份 → 409/404。明文 customer_ref 不回显。
-
-### 3.2 禁用绑定（DISABLE_BIND）
-
-```
-POST /api/v1/internal/external-users/{platform_user_id}/customer-binding/disable
-Scope: portal_mapping_disable
-```
-
-请求体同 3.1（需携带 `customer_ref` 以定位绑定）。成功响应 status 为 `DISABLED`。
-
-### 3.3 对账读取
-
-```
-GET /api/v1/internal/external-users/{platform_user_id}/customer-binding
-Scope: portal_mapping_provision
-```
-
-响应 200：
-
-```json
-{ "code": "OK", "data": { "platform_user_id": "01KZ...", "application_code": "customer_portal", "status": "ACTIVE" } }
-```
-
-无绑定 → 404。不返回 `customer_ref` 明文或密文。
-
-## 4. authorization-context 扩展
-
-`GET /oauth2/authorization-context` 响应在启用 `AUTHZ_CONTEXT_CUSTOMER_REF_ENABLED` 后，
-对命中 ACTIVE 绑定的 subject 追加**可选**顶层声明（解密自平台侧密文，仅服务端路径）：
-
-```jsonc
-{
-  "sub": "...", "identity_id": "...", "tenant_id": "...",
-  "client_id": "customer_portal-dev-web",
-  "application_code": "customer_portal",
-  // ...现有字段不变...
-  "customer_ref": "CRM-CUST-2001"   // 仅存在 ACTIVE 绑定且解密成功时出现
-}
-```
-
-- 绑定缺失/解密失败：**省略该声明**（消费方按无绑定 fail closed），不改变其余字段；
-- 不改 Keycloak、不改 ID Token、不改 claim mapper；
-- 消费方（门户）校验：`customer_ref` 非空、无空白、`1..=64` 字符。
-
-## 5. 平台存储与保护口径（决策 1：SM3）
-
-| 字段 | 原语 | 说明 |
-| --- | --- | --- |
-| `customer_ref_digest` BINARY(32) | HMAC-SM3（`IAM_CUSTOMER_REF_DIGEST_KEY`） | 输入 `"customer\x00"+tenant_id+"\x00"+application_code+"\x00"+customer_ref`；查重/唯一约束 |
-| `customer_ref_cipher` VARBINARY(256) | AES-256-GCM（`IAM_CUSTOMER_REF_ENCRYPTION_KEY`） | 仅 authorization-context 服务端解密下发 |
-
-两密钥未配置时，绑定写入失败关闭（`INTERNAL_ERROR` 或服务不可用），无明文降级路径。
-密钥轮换需要：双 key 读取过渡 + 按租户重算摘要的受控迁移。
-
-## 6. 兼容性承诺
-
-- 新增字段均为可选/追加，旧客户端不受影响；
-- `customer_ref` 声明只在开关启用后出现；开关默认关闭；
-- 端点路径、scope、幂等语义一经发布不得破坏性变更；新增字段须先加后删。
+依据：[平台核验记录](../../.ai/modules/operation-docs-platform-20261013.md)。

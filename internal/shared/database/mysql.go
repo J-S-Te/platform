@@ -21,9 +21,8 @@ func OpenMySQL(cfg config.MySQLConfig) (*gorm.DB, error) {
 	return OpenMySQLWithPool(cfg, 50, 20, 15*time.Minute, 2*time.Minute)
 }
 
-// OpenMySQLWithPool creates a MySQL handle with an isolated connection-pool
-// budget. Callers that protect latency-sensitive paths can use a separate
-// handle without changing the shared platform pool.
+// OpenMySQLWithPool 创建使用独立连接池预算的 MySQL 句柄。需要保护时延敏感路径的
+// 调用方可以单独建句柄，而不挤占平台共享池。
 func OpenMySQLWithPool(cfg config.MySQLConfig, maxOpen, maxIdle int, maxLifetime, maxIdleTime time.Duration) (*gorm.DB, error) {
 	if maxOpen <= 0 || maxIdle < 0 || maxIdle > maxOpen || maxLifetime <= 0 || maxIdleTime <= 0 {
 		return nil, fmt.Errorf("invalid mysql connection pool settings")
@@ -60,7 +59,7 @@ func OpenMySQLWithPool(cfg config.MySQLConfig, maxOpen, maxIdle int, maxLifetime
 	return database, nil
 }
 
-// Close releases the underlying connection pool owned by a GORM database handle.
+// Close 释放 GORM 句柄底层的连接池；nil 句柄按幂等成功处理。
 func Close(database *gorm.DB) error {
 	if database == nil {
 		return nil

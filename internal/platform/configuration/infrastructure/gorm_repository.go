@@ -1,4 +1,4 @@
-// Package infrastructure persists configuration aggregates with GORM against migration-owned tables.
+// Package infrastructure 使用 GORM 持久化配置聚合，表结构由 SQL 迁移统一管理，不启用自动迁移。
 package infrastructure
 
 import (
@@ -82,6 +82,7 @@ func NewRepository(database *gorm.DB) (*Repository, error) {
 	return &Repository{database: database}, nil
 }
 
+// ListNamespaces 分页返回租户内配置命名空间，附带所属应用信息。
 func (r *Repository) ListNamespaces(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Namespace], error) {
 	db := r.database.WithContext(ctx).Table("cfg_namespace AS namespace").Joins("JOIN platform_application AS application ON application.id = namespace.application_id").Where("namespace.tenant_id = ?", tenantID)
 	if query.Keyword != "" {
@@ -105,6 +106,8 @@ func (r *Repository) ListNamespaces(ctx context.Context, tenantID string, query 
 	}
 	return application.PageResult[domain.Namespace]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
+// CreateNamespace 反查平台注册表确认应用与 dev 环境有效后才创建命名空间；
+// 查询始终携带租户过滤，阻断跨租户同码应用绑定时序。
 func (r *Repository) CreateNamespace(ctx context.Context, input application.NamespaceCreateInput, id string, now time.Time) (domain.Namespace, error) {
 	// 应用和环境归属始终从平台注册表反查；当前配置控制面只允许为 ACTIVE 的 dev 环境建命名空间。
 	// 安全（SEC-D2）：platform_application 只在 (tenant_id,code) 上唯一，跨租户同码应用真实存在。
@@ -125,6 +128,7 @@ func (r *Repository) CreateNamespace(ctx context.Context, input application.Name
 	}
 	return domain.Namespace{ID: id, Application: domain.Reference{ID: app.ID, Code: app.Code, Name: app.Name}, Code: input.Code, Name: input.Name, Description: input.Description, Version: 1}, nil
 }
+// ListItems 分页返回租户内配置草稿项。
 func (r *Repository) ListItems(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[domain.Item], error) {
 	db := r.database.WithContext(ctx).Table("cfg_item AS item").Joins("JOIN cfg_namespace AS namespace ON namespace.id = item.namespace_id").Where("namespace.tenant_id = ?", tenantID)
 	if query.NamespaceID != "" {
@@ -155,6 +159,7 @@ func (r *Repository) ListItems(ctx context.Context, tenantID string, query appli
 	}
 	return application.PageResult[domain.Item]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
+// CreateItem 校验命名空间有效并按 ValueType 编码后创建 DRAFT 配置项。
 func (r *Repository) CreateItem(ctx context.Context, input application.ItemCreateInput, id string, now time.Time) (domain.Item, error) {
 	var namespace namespaceModel
 	if err := r.database.WithContext(ctx).Where("id = ? AND tenant_id = ? AND status = ?", input.NamespaceID, input.TenantID, "ACTIVE").Take(&namespace).Error; err != nil {
@@ -170,6 +175,7 @@ func (r *Repository) CreateItem(ctx context.Context, input application.ItemCreat
 	}
 	return domain.Item{ID: id, Namespace: domain.Reference{ID: namespace.ID, Code: namespace.Name, Name: namespace.DisplayName}, Key: input.Key, ValueType: input.ValueType, Value: input.Value, Secret: false, Version: 1, UpdatedAt: now.UTC()}, nil
 }
+// UpdateItem 在乐观锁与双重租户校验下更新 DRAFT 配置项，禁止跨租户移动。
 func (r *Repository) UpdateItem(ctx context.Context, input application.ItemUpdateInput, now time.Time) (domain.Item, error) {
 	text, raw, err := encodeValue(input.ValueType, input.Value)
 	if err != nil {
@@ -188,6 +194,11 @@ func (r *Repository) UpdateItem(ctx context.Context, input application.ItemUpdat
 		}
 		if current.Version != input.Version {
 			return application.ErrVersionConflict
+		}
+		if current.NamespaceID != input.NamespaceID {
+			// 配置项不属于可移动资源：页面切换命名空间后误保存会把草稿挪到另一个命名空间，
+			// 让原命名空间的发布版本与草稿脱节。更新只允许改写当前命名空间内的草稿。
+			return application.ErrValidation
 		}
 
 		var target namespaceModel
@@ -224,6 +235,8 @@ func (r *Repository) UpdateItem(ctx context.Context, input application.ItemUpdat
 
 	return r.itemByID(ctx, input.TenantID, input.ItemID)
 }
+// CreateRelease 锁定命名空间后，在同一事务中校验草稿版本、生成不可变快照并推进
+// 当前发布号；任一步失败都不留下半成品发布。
 func (r *Repository) CreateRelease(ctx context.Context, input application.ReleaseCreateInput, id string, now time.Time) (domain.Release, error) {
 	var result domain.Release
 	// 锁定命名空间后，在同一事务中校验草稿版本、生成快照并推进当前发布号；任一步失败都不留下半成品发布。
@@ -290,6 +303,7 @@ func (r *Repository) CreateRelease(ctx context.Context, input application.Releas
 	})
 	return result, err
 }
+// GetRelease 返回租户内指定发布快照的元数据。
 func (r *Repository) GetRelease(ctx context.Context, tenantID, releaseID string) (domain.Release, error) {
 	var row struct {
 		ID, NamespaceID, NamespaceCode, NamespaceName, ReleaseStatus, ChangeSummary string
@@ -306,6 +320,8 @@ func (r *Repository) GetRelease(ctx context.Context, tenantID, releaseID string)
 	}
 	return domain.Release{ID: row.ID, Namespace: domain.Reference{ID: row.NamespaceID, Code: row.NamespaceCode, Name: row.NamespaceName}, VersionNo: row.ReleaseNo, Status: row.ReleaseStatus, Comment: row.ChangeSummary, CreatedAt: row.CreatedAt, PublishedAt: row.ReleasedAt}, nil
 }
+// GetPublished 解析命名空间当前 PUBLISHED 快照的键值；只读发布态并在查询层
+// 再次排除敏感项，草稿数据永远不出现在结果中。
 func (r *Repository) GetPublished(ctx context.Context, tenantID, applicationCode, namespaceCode string) (domain.PublishedConfig, error) {
 	// 运行时只解析命名空间指向的当前 PUBLISHED 快照，绝不回退读取仍可变化的 DRAFT 项。
 	var release struct {

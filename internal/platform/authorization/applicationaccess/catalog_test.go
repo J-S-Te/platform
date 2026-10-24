@@ -245,9 +245,9 @@ func TestNormalizeCatalogRejectsInvalidMaxEffectiveRoles(t *testing.T) {
 }
 
 func TestPlatformCatalogConstantsAreStableAndWellFormed(t *testing.T) {
-	// The bootstrap mirror exposes these constants to the API bootstrap, the platform audit
-	// adapter, and the on-disk catalog row. Drift between Go and the migrations would be
-	// silent; lock the values down with a unit test so any change forces a conscious review.
+	// 引导镜像将这些常量提供给 API 引导流程、平台审计
+	// 适配器及磁盘上的目录行。Go 与迁移之间的偏差可能
+	// 静默发生，因此用单测锁定取值，确保变更必须经过明确审核。
 	if PlatformApplicationCode != "platform" {
 		t.Fatalf("PlatformApplicationCode drift: got %q want %q", PlatformApplicationCode, "platform")
 	}

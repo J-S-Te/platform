@@ -1,4 +1,6 @@
-# 后端子系统解耦改造方案（待评审，未实施）
+# 后端子系统解耦改造方案（历史提案）
+
+> 本文保留原清单化提案；新增字段与 feature flag 是设计，不是当前已支持配置。2026-10-22 核对，现有 `subsystem_onboarding.go`、本地 provisioner、`externalidentity` 仍保留具体应用边界，不能宣称任意新增清单即可完全免代码接入。当前可用目标由服务端能力/审核清单返回，操作见[接入手册](subsystem-onboarding.md)。
 
 > 目标：让平台后端不再硬编码具体子系统（contract_management / customer_and_opportunity /
 > customer_portal / project_management），新增子系统只改 `subsystems.d/*.yaml` 清单即可，

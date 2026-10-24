@@ -1,4 +1,4 @@
-// Package domain defines the login-security entities shared by the security module.
+// Package domain 定义 security 模块内共享的登录安全实体与策略模型。
 package domain
 
 import "time"

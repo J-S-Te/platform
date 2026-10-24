@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build and export the basic-platform backend image (including file-gateway)
-# using the production offline-package format consumed by deploy.sh import.
+# 按 deploy.sh import 使用的生产离线包格式，构建并导出基础平台后端镜像，包括 file-gateway。
 set -Eeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

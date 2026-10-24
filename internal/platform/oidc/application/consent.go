@@ -16,6 +16,7 @@ type ConsentDecision struct {
 	Scopes   []string
 }
 
+// ConsentInput 是一次用户同意判定或记录的入参；Scopes 为本次请求的 scope 集合。
 type ConsentInput struct {
 	TenantID string
 	UserID   string
@@ -23,13 +24,15 @@ type ConsentInput struct {
 	Scopes   []string
 }
 
+// ConsentRepository 持久化用户对单个客户端的已授予 scope 集合；实现必须以
+// 租户/用户/客户端三元组为边界。
 type ConsentRepository interface {
 	FindConsent(context.Context, string, string, string, time.Time) ([]string, bool, error)
 	GrantConsent(context.Context, string, string, string, []string, time.Time) error
 	RevokeConsent(context.Context, string, string, string, time.Time) error
 }
 
-// DecideConsent evaluates an existing durable approval; it never grants by default.
+// DecideConsent 评估既有的持久同意；绝不在无记录时默认授予。
 func (service *Service) DecideConsent(ctx context.Context, input ConsentInput) (ConsentDecision, error) {
 	input = normalizedConsentInput(input)
 	if input.TenantID == "" || input.UserID == "" || input.ClientID == "" || len(input.Scopes) == 0 {
@@ -59,6 +62,8 @@ func (service *Service) DecideConsent(ctx context.Context, input ConsentInput) (
 	return ConsentDecision{Required: false, Granted: true, Scopes: input.Scopes}, nil
 }
 
+// GrantConsent 记录用户对客户端的 scope 授权；scope 必须全部在客户端当前
+// 登记范围内。
 func (service *Service) GrantConsent(ctx context.Context, input ConsentInput) error {
 	input = normalizedConsentInput(input)
 	if input.TenantID == "" || input.UserID == "" || input.ClientID == "" || len(input.Scopes) == 0 {
@@ -82,6 +87,7 @@ func (service *Service) GrantConsent(ctx context.Context, input ConsentInput) er
 	return repository.GrantConsent(ctx, input.TenantID, input.UserID, client.ID, input.Scopes, service.now())
 }
 
+// RevokeConsent 移除用户对单个客户端的全部已存储授权。
 func (service *Service) RevokeConsent(ctx context.Context, tenantID, userID, clientID string) error {
 	tenantID, userID, clientID = strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(clientID)
 	if tenantID == "" || userID == "" || clientID == "" {
@@ -100,17 +106,19 @@ func (service *Service) RevokeConsent(ctx context.Context, tenantID, userID, cli
 	}
 	err = repository.RevokeConsent(ctx, tenantID, userID, client.ID, service.now())
 	if errors.Is(err, ErrNotFound) {
-		// Consent withdrawal is idempotent: an already absent approval is still safely revoked.
+		// 同意撤回是幂等的：授权本就不存在时仍按安全撤销处理。
 		return nil
 	}
 	return err
 }
 
+// PostLogoutRedirectRepository 提供客户端专用的 post-logout 重定向登记查询。
 type PostLogoutRedirectRepository interface {
 	IsRegisteredPostLogoutRedirectURI(context.Context, string, string, time.Time) (bool, error)
 }
 
-// IsRegisteredPostLogoutRedirectURI deliberately queries only the dedicated registration set.
+// IsRegisteredPostLogoutRedirectURI 刻意只查询专用的 post-logout 登记集合，
+// 不复用普通 OAuth redirect URI。
 func (service *Service) IsRegisteredPostLogoutRedirectURI(ctx context.Context, clientID, redirectURI string) (bool, error) {
 	clientID, redirectURI = strings.TrimSpace(clientID), strings.TrimSpace(redirectURI)
 	if clientID == "" || redirectURI == "" {

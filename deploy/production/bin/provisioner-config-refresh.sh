@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 
-# subsystem-provisioner receives .release.env and docker-compose.yml as single-file
-# bind mounts. Both files are intentionally updated with rename(2), so a running
-# container remains attached to the old inode until it is recreated. Both the
-# provisioner and platform-api also cache subsystems.d at process startup. When
-# deployment assets replace that directory, recreating only one process produces
-# different manifest checksums and every controlled retry is correctly rejected as
-# drift. Callers must hold runtime/.deploy.lock before invoking these helpers. The
-# helpers deliberately do not acquire the lock themselves: deploy.sh,
-# deploy-service.sh and start-enabled.sh protect the surrounding transaction.
+# subsystem-provisioner 以单文件绑定挂载接收 .release.env 和 docker-compose.yml；
+# 两者刻意通过 rename(2) 更新，运行容器会保持绑定旧 inode，直到重建。
+# provisioner 和 platform-api 还会在启动时缓存 subsystems.d；资产替换该目录后若仅重建一方，清单校验和将不一致，
+# 受控重试会正确地因漂移而拒绝。调用方必须先持有 runtime/.deploy.lock；辅助函数本身不加锁，
+# 由 deploy.sh、deploy-service.sh 和 start-enabled.sh 保护外围事务。
 
 prepare_managed_public_proxy_image() {
   local image expected config endpoint status
   expected='ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459'
   image="$(compose config --images docker-socket-proxy)" || return 1
   [[ -n "$image" ]] || { echo '未解析到 Docker Socket Proxy 镜像，拒绝继续' >&2; return 1; }
+  if [[ "$image" =~ ^127\.0\.0\.1:[0-9]+/uip/docker-socket-proxy@sha256:[a-f0-9]{64}$ ]]; then
+    docker image inspect "$image" >/dev/null 2>&1 && return 0
+    echo '离线公共代理镜像未在本机就绪；请重新导入已校验的新版 common 包，禁止公网补齐' >&2
+    return 1
+  fi
   [[ "$image" == "$expected" ]] || return 0
   docker image inspect "$image" >/dev/null 2>&1 && return 0
-  # Public GHCR pulls must not inherit a stale personal registry credential.
-  # Resolve the original endpoint before changing CLI config so the anonymous
-  # pull populates the same daemon cache used by Compose and ACR deployments.
+  if [[ "${UIP_OFFLINE_DEPLOYMENT:-}" == 1 || "${UIP_OFFLINE_DEPLOYMENT:-}" == true ||
+        -e "${deploy_dir:-/nonexistent}/manifests/common.latest" ||
+        -e "${deploy_dir:-/nonexistent}/packages/PLATFORM_ASSETS_COMPATIBILITY.delivery.env" ]]; then
+    echo '离线部署缺少固定版本公共代理；请导入包含代理来源记录的新版 common 包，禁止公网补齐' >&2
+    return 1
+  fi
+  # 公共 GHCR 拉取不得继承过期的个人仓库凭据。修改 CLI 配置前解析原端点，使匿名拉取填充 Compose 和 ACR 部署使用的同一守护进程缓存。
   if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
     endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$DOCKER_CONTEXT")" || return 1
   else
@@ -49,8 +54,7 @@ prepare_managed_public_proxy_image() {
   }
 }
 
-# CI can install into a non-default root. Compose's bind-mount sources and both
-# control-plane processes must resolve that same root before any reload attempt.
+# CI 可以安装到非默认根目录；任何重载尝试前，Compose 绑定挂载源和两个控制面进程必须解析到同一根目录。
 prepare_ci_deploy_root() (
   local runtime temporary configured profiles gateway
   [[ "${deploy_dir:-}" == /* && "$deploy_dir" != / ]] || { echo '无效 CI 部署根目录' >&2; return 1; }
@@ -121,6 +125,10 @@ require_control_plane_reload_clearance() {
     return 1
   fi
   [[ -f "$marker" ]] || return 0
+  if grep -q '^RUNTIME_APPROVAL_PUBLISH_SHA256=' "$marker"; then
+    echo '错误：运行批准发布尚未完整完成；仅允许按原 bundle/CAS 恢复该批准事务，平台升级例外不能越过此门禁。' >&2
+    return 1
+  fi
   if [[ "${1:-}" == platform-upgrade && "${DEPLOY_PLATFORM_CONTROL_PLANE_UPGRADE:-false}" == true ]]; then
     upgrade_image="$(awk -F= '$1=="PLATFORM_UPGRADE_IMAGE" {print substr($0,index($0,"=")+1); exit}' "$marker")" || return 1
     [[ -z "$upgrade_image" || "$upgrade_image" == "${image_ref:-}" ]] || {
@@ -285,10 +293,8 @@ refresh_subsystem_provisioner_config() {
   verify_subsystem_provisioner_config_consistency "$container"
 }
 
-# Recreate both processes that cache production manifests. platform-api is
-# stopped first so it cannot submit a checksum from the old profile set while
-# the provisioner is already serving the new set. The caller-held deployment
-# lock prevents a concurrent Agent operation from crossing this reload window.
+# 重建缓存生产清单的两个进程。先停止 platform-api，避免 provisioner 已使用新配置时它仍提交旧配置校验和；
+# 调用方持有的部署锁防止并发 Agent 操作跨越重载窗口。
 refresh_subsystem_control_plane_config() {
   local provisioner platform_api health marker
   marker="$(control_plane_reload_marker_path)" || return 1
@@ -308,7 +314,8 @@ refresh_subsystem_control_plane_config() {
 
   provisioner="$(subsystem_control_plane_container subsystem-provisioner)"
   platform_api="$(subsystem_control_plane_container platform-api)"
-  if [[ -z "$provisioner" && -z "$platform_api" ]]; then
+  if [[ -z "$provisioner" && -z "$platform_api" &&
+        ! -e "$deploy_dir/runtime/.runtime-approval-publish" && ! -L "$deploy_dir/runtime/.runtime-approval-publish" ]]; then
     echo 'platform-api 与 subsystem-provisioner 均未运行；部署资产静态校验通过，无需重载容器'
     return 0
   fi
@@ -332,6 +339,16 @@ refresh_subsystem_control_plane_config() {
     return 1
   }
   verify_subsystem_provisioner_config_consistency "$provisioner" || return 1
+
+  # 发布后两个控制面服务可能刻意保持停止。文件事务未完成或目录绑定过期时，绝不能重新开放 API。
+  if [[ -e "$deploy_dir/runtime/.runtime-approval-publish" || -L "$deploy_dir/runtime/.runtime-approval-publish" ]]; then
+    local approval_tool
+    approval_tool="$deploy_dir/bin/publish-runtime-approvals.py"
+    [[ -f "$approval_tool" && ! -L "$approval_tool" ]] || {
+      echo '批准发布事务存在但缺少可信校验工具；platform-api 保持停止' >&2; return 1;
+    }
+    python3 "$approval_tool" --deploy-root "$deploy_dir" --agent-proof "$provisioner" || return 1
+  fi
 
   compose up -d --force-recreate --wait --wait-timeout 120 --no-deps platform-api || return 1
   platform_api="$(compose ps -q platform-api 2>/dev/null || true)"

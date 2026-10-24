@@ -11,17 +11,16 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
-// keycloakProjectionReplayRequest is intentionally small. The server owns the
-// target event ID (path), tenant (session) and replay time; an operator must
-// echo the event ID and provide a human-readable reason to prevent accidental
-// replay from a stale management page.
+// keycloakProjectionReplayRequest 刻意保持精简：目标事件 ID（路径）、租户（会话）
+// 与重放时间都归服务端所有；操作者必须回显事件 ID 并给出可读原因，
+// 防止过期管理页面上的误触重放。
 type keycloakProjectionReplayRequest struct {
 	Confirmation string `json:"confirmation"`
 	Reason       string `json:"reason"`
 }
 
-// projectionFailureResponse keeps JSON tags visible and avoids returning any
-// outbox payload/credential data. Time is left as its standard RFC3339 value.
+// projectionFailureResponse 保留 JSON 字段命名，但不返回任何 outbox 载荷或凭据数据；
+// 时间保持标准 RFC3339 值，供前端直接渲染。
 type projectionFailureResponse struct {
 	EventID         string `json:"event_id"`
 	IdentityID      string `json:"identity_id"`
@@ -37,8 +36,8 @@ type projectionFailureResponse struct {
 	BlocksCutover   bool   `json:"blocks_cutover"`
 }
 
-// ListKeycloakProjectionFailures serves the FAILED/dead-letter management
-// page. It is read-only and returns only durable diagnostic fields.
+// ListKeycloakProjectionFailures 服务于 FAILED/死信管理页，只读，
+// 且只返回可持久展示的诊断字段。
 func (handler *SubsystemOnboardingHandler) ListKeycloakProjectionFailures(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -71,9 +70,8 @@ func (handler *SubsystemOnboardingHandler) ListKeycloakProjectionFailures(writer
 	})
 }
 
-// GetKeycloakProjectionAlerts is the small, poll-friendly operations alert
-// contract. A FAILED event is elevated to CRITICAL because cutover remains
-// blocked until it has been replayed and processed successfully.
+// GetKeycloakProjectionAlerts 是精简、适合轮询的运维告警契约。
+// FAILED 事件被升格为 CRITICAL：在其被重放并处理成功之前，认证切换一直被阻断。
 func (handler *SubsystemOnboardingHandler) GetKeycloakProjectionAlerts(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -92,9 +90,8 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakProjectionAlerts(writer st
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak 授权投影告警状态查询成功", status)
 }
 
-// ReplayKeycloakProjectionFailure performs a conditional FAILED -> PENDING
-// transition. Repeating the same POST after a network timeout is idempotent:
-// it reports already_pending and never inserts a duplicate authorization job.
+// ReplayKeycloakProjectionFailure 执行有条件的 FAILED -> PENDING 迁移。
+// 网络超时后重复同一 POST 是幂等的：返回 already_pending，绝不重复插入授权任务。
 func (handler *SubsystemOnboardingHandler) ReplayKeycloakProjectionFailure(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {

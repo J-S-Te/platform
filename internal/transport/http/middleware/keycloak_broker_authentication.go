@@ -27,18 +27,15 @@ import (
 const (
 	maxKeycloakBrokerJWTLength = 16 * 1024
 
-	// Keycloak JWKS normally changes only during signing-key rotation. Keep the
-	// normal cache relatively short so rotations converge quickly, and permit a
-	// much shorter stale window only for a previously validated keyset. The
-	// stale window is deliberately not an authentication bypass: a token still
-	// has to be signed by a known cached key and pass all regular claim checks.
+	// Keycloak JWKS 正常情况下仅在签名密钥轮换时变化。常规缓存保持较短使轮换快速收敛；
+	// 过期兜底窗口只允许作用于“此前已验证过的密钥集”，且明显更短。该兜底窗口不是
+	// 认证旁路：令牌仍必须由缓存中的已知密钥签名并通过全部常规声明校验。
 	defaultKeycloakJWKSCacheTTL = 5 * time.Minute
 	defaultKeycloakJWKSMaxStale = time.Minute
 )
 
-// KeycloakBrokerJWTVerifier verifies only end-user JWTs issued by the one
-// configured Keycloak realm. It deliberately does not provide a reusable
-// platform authentication mechanism.
+// KeycloakBrokerJWTVerifier 只校验唯一配置的 Keycloak realm 签发的终端用户 JWT，
+// 有意不作为可复用的平台认证机制。
 type KeycloakBrokerJWTVerifier struct {
 	issuer   string
 	jwksURL  string
@@ -49,19 +46,16 @@ type KeycloakBrokerJWTVerifier struct {
 	cache    keycloakJWKSCache
 }
 
-// KeycloakAuthorizationAccessTokenClaims is the strict, application-bound
-// token view used by the authorization-context endpoint. Broker verification
-// keeps its narrower compatibility contract, while authorization lookup must
-// additionally prove that the token is an access token whose authorized party
-// is present in the audience of the calling Client.
+// KeycloakAuthorizationAccessTokenClaims 是 authorization-context 端点使用的严格、
+// 应用绑定令牌视图。broker 校验维持较窄的兼容契约，而授权查询必须额外证明该令牌
+// 是 access token，且其授权方（azp）出现在调用方 Client 的 audience 中。
 type KeycloakAuthorizationAccessTokenClaims struct {
 	keycloakctx.BrokerClaims
 	TokenUse string
 }
 
-// keycloakJWKSCache coalesces concurrent refreshes without holding its mutex
-// over a network request. A completed fetch replaces the map instead of
-// mutating it, so keys returned to concurrent verifications remain immutable.
+// keycloakJWKSCache 合并并发刷新且不持锁跨越网络请求。完成的抓取以整体替换 map
+// 而非原地修改，返回给并发校验的密钥因此保持不可变。
 type keycloakJWKSCache struct {
 	mu         sync.Mutex
 	keys       map[string]*rsa.PublicKey
@@ -71,15 +65,14 @@ type keycloakJWKSCache struct {
 	done       chan struct{}
 }
 
+// NewKeycloakBrokerJWTVerifier 以 issuer 同时作为令牌信任边界与 JWKS 抓取地址构造校验器。
 func NewKeycloakBrokerJWTVerifier(issuer string, client *http.Client) (*KeycloakBrokerJWTVerifier, error) {
 	return NewKeycloakBrokerJWTVerifierWithBackchannel(issuer, issuer, client)
 }
 
-// NewKeycloakBrokerJWTVerifierWithBackchannel keeps the browser-visible issuer
-// as the token trust boundary while fetching signing keys from a separately
-// configured container-reachable issuer URL. This is required when the public
-// Keycloak hostname resolves only from the user's browser (for example a
-// localhost port published by Docker).
+// NewKeycloakBrokerJWTVerifierWithBackchannel 以浏览器可见的 issuer 作为令牌信任边界，
+// 而从单独配置的容器可达 issuer URL 抓取签名密钥。当公网 Keycloak 域名仅能被用户
+// 浏览器解析（如 Docker 发布的 localhost 端口）时必须使用此构造。
 func NewKeycloakBrokerJWTVerifierWithBackchannel(issuer, backchannelIssuer string, client *http.Client) (*KeycloakBrokerJWTVerifier, error) {
 	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
 	if !validKeycloakIssuerURL(issuer) {
@@ -103,11 +96,9 @@ func validKeycloakIssuerURL(value string) bool {
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
-// KeycloakBrokerAuthentication accepts a bearer token only for the dedicated
-// broker-verification route. Verification uses a bounded cache of successfully
-// parsed Keycloak JWKS documents. A Keycloak outage therefore does not make
-// every in-flight broker verification fail at once, but a cache never accepts
-// an unknown key and cannot outlive its short stale allowance.
+// KeycloakBrokerAuthentication 仅服务于专用的 broker 校验路由，接受 bearer token。
+// 校验使用有界缓存的“已成功解析”Keycloak JWKS 文档：Keycloak 短暂故障不会让所有
+// 在途 broker 校验同时失败，但缓存绝不接受未知密钥，也不会超出其短暂过期窗口。
 func KeycloakBrokerAuthentication(verifier *KeycloakBrokerJWTVerifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if verifier == nil {
@@ -132,6 +123,8 @@ func KeycloakBrokerAuthentication(verifier *KeycloakBrokerJWTVerifier) gin.Handl
 	}
 }
 
+// Verify 验签并校验一个 Keycloak broker JWT，返回收窄后的最小声明集。
+// 签名密钥只来自有界缓存的 Keycloak JWKS；任何校验失败都返回错误且不产生身份。
 func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw string) (keycloakctx.BrokerClaims, error) {
 	if verifier == nil || len(raw) == 0 || len(raw) > maxKeycloakBrokerJWTLength {
 		return keycloakctx.BrokerClaims{}, errors.New("invalid Keycloak broker JWT")
@@ -171,8 +164,8 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
 		return keycloakctx.BrokerClaims{}, errors.New("invalid Keycloak broker JWT claims")
 	}
-	// Keycloak's reserved `sub` remains the issuer-native subject. The platform
-	// identity_id mapper is a separate, required claim used for authorization.
+	// Keycloak 保留的 `sub` 仍是 issuer 原生主体；平台 identity_id mapper 是独立的
+	// 必需声明，专用于授权，二者不可混用。
 	payload.Subject = strings.TrimSpace(payload.Subject)
 	payload.IdentityID = strings.TrimSpace(payload.IdentityID)
 	audience, ok := keycloakAudience(payload.Audience)
@@ -194,18 +187,16 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, AuthorizedParty: strings.TrimSpace(payload.AuthorizedParty), Audience: audience}, nil
 }
 
-// KeycloakIDTokenClaims is the strict ID-token view used by the platform's own
-// OIDC login callback. The broker verifier authenticates the signature first;
-// this layer additionally proves the token is an ID token bound to the
-// platform's OIDC client with the expected nonce.
+// KeycloakIDTokenClaims 是平台自身 OIDC 登录回调使用的严格 ID-token 视图。
+// broker 校验器先完成签名认证；本层再证明该令牌是绑定平台 OIDC client 且
+// 携带预期 nonce 的 ID token。
 type KeycloakIDTokenClaims struct {
 	keycloakctx.BrokerClaims
 	Nonce string
 }
 
-// VerifyIDToken applies the additional token-purpose, nonce and Client binding
-// checks required before an ID token can complete the platform's OIDC login.
-// The signed payload is decoded again only after Verify has authenticated it.
+// VerifyIDToken 在 ID token 完成平台 OIDC 登录前追加令牌用途、nonce 与 Client
+// 绑定校验。签名的负载只在 Verify 认证通过后才再次解码，未认证值不会到达调用方。
 func (verifier *KeycloakBrokerJWTVerifier) VerifyIDToken(ctx context.Context, raw, expectedNonce, expectedClientID string) (KeycloakIDTokenClaims, error) {
 	claims, err := verifier.Verify(ctx, raw)
 	if err != nil {
@@ -237,10 +228,9 @@ func (verifier *KeycloakBrokerJWTVerifier) VerifyIDToken(ctx context.Context, ra
 	return KeycloakIDTokenClaims{BrokerClaims: claims, Nonce: nonce}, nil
 }
 
-// VerifyAuthorizationAccessToken applies the additional token-purpose and
-// Client audience checks required before a Keycloak token can select an
-// application authorization context. The signed payload is decoded again only
-// after Verify has authenticated it; no unverified value reaches the caller.
+// VerifyAuthorizationAccessToken 在 Keycloak 令牌可用于选择应用授权上下文前追加
+// 令牌用途与 Client audience 校验。签名的负载只在 Verify 认证通过后才再次解码；
+// 任何未认证的值都不会到达调用方。
 func (verifier *KeycloakBrokerJWTVerifier) VerifyAuthorizationAccessToken(ctx context.Context, raw string) (KeycloakAuthorizationAccessTokenClaims, error) {
 	claims, err := verifier.Verify(ctx, raw)
 	if err != nil {
@@ -264,11 +254,9 @@ func (verifier *KeycloakBrokerJWTVerifier) VerifyAuthorizationAccessToken(ctx co
 	return KeycloakAuthorizationAccessTokenClaims{BrokerClaims: claims, TokenUse: tokenUse}, nil
 }
 
-// keyFor returns a validated Keycloak signing key. A cache hit is used only
-// while fresh. A missing kid always forces one refresh, even when the cached
-// set is fresh, which makes Keycloak signing-key rotation converge immediately.
-// If that refresh fails, only an already-known key may be used, and only within
-// the bounded stale window established by the last successful fetch.
+// keyFor 返回经过校验的 Keycloak 签名密钥。缓存命中仅在新鲜期内使用；kid 未知时
+// 即使缓存仍新鲜也强制刷新一次，使 Keycloak 签名密钥轮换立即收敛。刷新失败时
+// 只允许使用已知的旧密钥，且仅限上次成功抓取建立的有界过期窗口之内。
 func (verifier *KeycloakBrokerJWTVerifier) keyFor(ctx context.Context, keyID string) (*rsa.PublicKey, error) {
 	if verifier == nil {
 		return nil, errors.New("Keycloak broker verifier is not initialized")
@@ -292,8 +280,8 @@ func (verifier *KeycloakBrokerJWTVerifier) keyFor(ctx context.Context, keyID str
 			}
 		}
 
-		// Capture a stale key before releasing the lock. The cache replacement
-		// below never mutates this map, so it remains safe to use on fetch error.
+		// 释放锁之前先捕获过期密钥。下方的缓存替换从不原地修改 map，
+		// 抓取失败时继续使用它是安全的。
 		staleKey := key
 		staleUntil := verifier.cache.staleUntil
 		verifier.cache.refreshing = true

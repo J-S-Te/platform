@@ -1,5 +1,11 @@
 # Basic Platform Context
 
+> 源码校准：2026-10-22。工作区全局入口为父工程 `.ai/PROJECT_CONTEXT.md` 与 `sharedDocs/当前实现基线.md`；这里只记录平台边界，历史测试不作为本轮结果。
+
+授权执行协调模块 `internal/platform/license/coordination` 与迁移117：独立服务Client、稳定签名快照、全组件Ready/ACK和单调激活状态。机器分发使用独立license.runtime scope；管理读/激活保留用户权限与同源保护。APP_ENV商业部署环境与OAuth应用环境独立绑定，不把production/prod当同一值。各业务已显式装配consumer/同步及执行门禁，API/Worker分别登记并自然确认；源码接线不能证明当前服务器已完成强制执行。内置组件登记V2/目录1与遗留V1桥接已实现，商业JWS与签名快照仍协议1。
+
+商业授权管理入口 `internal/platform/license`，迁移 116 保存部署身份、原始签名许可证、导入事件与已消费恢复凭据。信任公钥编译于 trust 包，不接受许可证或运行配置更换公钥。许可证预览不写业务数据，提交使用行锁/预期版本和显式缩减/替换确认；待生效许可证整份切换。管理页面已接入运行时执行/服务准备/修订确认视图；安装基线、凭据分发与激活为独立受控链，不能靠标签或页面计数推断当前有效授权。到期按操作分类限制，保留同步与必要历史服务，不整体停止API/Worker。平台身份与权限链路不受商业期限限制。
+
 基础平台负责租户、身份、登录账号、组织岗位、授权和 Keycloak 接入。`iam_user` 与 `iam_account` 是平台身份事实源；Keycloak 是外部身份与授权投影目标。Keycloak 管理客户端位于 `internal/platform/keycloakauthorization/infrastructure`，身份管理应用位于 `internal/platform/identity/application`。
 
 关键约束：所有查询按租户隔离；关联平台用户的账号会在 Keycloak 管理状态可用时核对外部用户状态；Keycloak 禁用状态会以单向、幂等补偿方式持久化为平台用户及关联账号的 `DISABLED`，外部 `ACTIVE` 不得反向启用平台禁用状态；临时账号到期和临时锁定属于基于时间的有效性，Keycloak 授权投影必须以至少一个有效登录账号为准，并通过 Worker 周期性对账入队，不能依赖账号写事件；Keycloak 凭据不得进入日志或响应。
@@ -12,8 +18,10 @@
 
 基础平台前端遵循 UniLab UI Kit。全局设计变量的唯一事实源是 `frontend/src/modules/platform/shared/styles/main.css` 的 `:root`；控制台、IAM、门户和设置页面只维护语义别名，不复制基础颜色、字号、圆角或阴影值。登录页使用纯色深色品牌区；子系统门户使用整页展示型大屏，首次默认深色，并支持浅色、深色、跟随系统三态切换和浏览器本地持久化。门户允许低对比度 Canvas 粒子、网格柔光、受限卡片 3D 跟随和短时错峰入场，但必须限制粒子数量和延迟上限、按绘制帧节流、页面不可见时暂停，并遵循 `prefers-reduced-motion` 与精细指针能力；Canvas 配色需要随最终解析主题同步变化。
 
-人员异动以 `iam_personnel_change_request` 为业务事实源，状态只能按领域状态机推进并使用版本号进行并发保护。晋升、降职和调岗真实关闭原任职并建立目标任职；离职必须经过审批和持久化责任交接，所有 `iam_personnel_handover_item` 完成后才能排期，执行时撤销会话并禁用任职、账号和用户；复职恢复既有本地账号、强制下次改密并建立新任职。每次状态推进写入 `iam_personnel_change_transition`，不得以页面状态或自由文本替代审批与交接证据。
+人员异动以 `iam_personnel_change_request` 为业务事实源，状态只能按领域状态机推进并使用版本号进行并发保护。晋升、降职和调岗真实关闭原任职并建立目标任职；离职必须经过审批和持久化责任交接，按跨系统回执核验交接后才能排期，执行前还需复验；不能把本地人工COMPLETED当作远端转移证据，执行时撤销会话并禁用任职、账号和用户；复职恢复既有本地账号、强制下次改密并建立新任职。每次状态推进写入 `iam_personnel_change_transition`，不得以页面状态或自由文本替代审批与交接证据。
 
 生产公开传输由 `deploy/production/bin/public-transport.sh` 统一派生。平台入口与 Keycloak SSO 可以使用不同端口：`PUBLIC_HTTP_PORT` / `PUBLIC_HTTPS_PORT` 控制平台入口，`PUBLIC_SSO_HTTP_PORT` / `PUBLIC_SSO_HTTPS_PORT` 控制 SSO Origin；SSO 端口留空时才继承对应平台端口。所有子系统的 `OIDC_ISSUER` 必须由真实 SSO Origin 派生并与 Keycloak discovery 返回的 issuer 完全一致，不能按平台入口端口推断。
 
 部署兼容约束：CI/CD 与离线安装共用生产 Compose、`deploy-service.sh`、迁移及 readiness 流程；两者仅以不可变镜像的交付/导入方式区分。File Gateway 是独立运行镜像和独立发布摘要，禁止离线部署或 CI/CD 将其折叠进平台 API 镜像。跨系统发布 target 对齐检查见 `deploy/production/bin/test-deployment-parity.sh`，详细契约见 `deploy/production/DEPLOYMENT_COMPATIBILITY.md`。
+
+独立文件网关迁移当前至 `000105_file_upload_request_retirement.sql`，主库至000126。上传请求解析/退休使用已验签租户与应用；请求墓碑和精确引用释放共同封住迟到Reserve/Bind。见 `docs/file-upload-request-recovery.md`，本轮仅静态核对，没有运行网关或数据库。

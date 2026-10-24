@@ -1,8 +1,5 @@
-# OPTIONAL Keycloak HA overlay. It is intentionally not part of compose.yaml.
-# Before use, provide an external HA MySQL endpoint and put an external load
-# balancer on the application network (or another network attached to every
-# Keycloak replica). The LB is responsible for the public listener and health
-# checks; this file exposes no replica port on the Docker host.
+# 可选的 Keycloak 高可用覆盖配置，刻意不纳入 compose.yaml。使用前须提供外部高可用 MySQL 端点，
+# 并将外部负载均衡器接入应用网络或全部 Keycloak 副本均连接的网络。负载均衡器负责公共监听和健康检查，本文件不向 Docker 宿主机暴露副本端口。
 services:
   keycloak-db:
     profiles: [single-node-keycloak]

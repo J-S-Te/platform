@@ -868,9 +868,9 @@ func TestUpdateSubsystemCallsProvisionerWithMinimalInput(t *testing.T) {
 	if provisioner.input.ApplicationCode != "contract_management" || provisioner.input.Environment != "prod" {
 		t.Fatalf("update input = %#v, want minimal {contract_management, prod}", provisioner.input)
 	}
-	// The browser OAuth secret is never recoverable or replayed. The catalog
-	// publisher is a machine credential and controlled updates intentionally mint
-	// a fresh delivery secret because the production runtime cannot start without it.
+	// 浏览器 OAuth 密钥绝不恢复或重放。目录发布者
+	// 使用机器凭据，受控更新会刻意生成新的交付密钥，
+	// 因为生产运行环境缺少该密钥就无法启动。
 	if provisioner.input.ClientSecret != "" || provisioner.input.CatalogPublisherClientSecret != "new-secret" {
 		t.Fatalf("update used unexpected client secrets: %#v", provisioner.input)
 	}
@@ -999,6 +999,12 @@ type recordingSubsystemDeploymentStateStore struct {
 	transitionErr      error
 	getErr             error
 	contextErr         error
+	// 丢弃用例：默认占用成功，便于既有行为保持不变；竞态用例显式置 discardClaimLost。
+	discardClaimLost    bool
+	discardClaimErr     error
+	discardErr          error
+	discarded           bool
+	discardedGeneration uint64
 }
 
 func (store *recordingSubsystemDeploymentStateStore) TransitionSubsystemDeployment(ctx context.Context, tenantID, applicationCode, environment, status, operation, errorCode, errorMessage string, _ time.Time) error {
@@ -1020,7 +1026,16 @@ func (store *recordingSubsystemDeploymentStateStore) RecoverStaleSubsystemDeploy
 	return true, store.TransitionSubsystemDeployment(ctx, state.TenantID, state.ApplicationCode, state.Environment, application.SubsystemDeploymentStatusFailed, state.Operation, "DEPLOYMENT_INTERRUPTED", "部署请求中断，请点击重试", now)
 }
 
-func (store *recordingSubsystemDeploymentStateStore) DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error {
+func (store *recordingSubsystemDeploymentStateStore) ClaimFailedSubsystemDeploymentForDiscard(_ context.Context, _, _, _ string, _ uint64, _ time.Time) (bool, error) {
+	return !store.discardClaimLost, store.discardClaimErr
+}
+
+func (store *recordingSubsystemDeploymentStateStore) DiscardClaimedSubsystemDeployment(_ context.Context, _, _, _ string, claimedGeneration uint64) error {
+	store.discardedGeneration = claimedGeneration
+	if store.discardErr != nil {
+		return store.discardErr
+	}
+	store.discarded = true
 	return nil
 }
 
@@ -1256,9 +1271,9 @@ func TestRecoverStaleSubsystemDeploymentPersistsFailureWithCanceledContext(t *te
 
 func TestUpdateSubsystemDoesNotConvertUnmanagedEnvironmentIntoProvisionFailure(t *testing.T) {
 	t.Parallel()
-	// Directory registration deliberately has no deployment-state row.  Until the
-	// dedicated adoption endpoint exists, the legacy update endpoint must refuse
-	// that state before invoking the Agent or persisting PROVISION_FAILED.
+	// 目录注册刻意不创建部署状态行。在专用接管
+	// 接口实现之前，旧更新接口必须在调用 Agent
+	// 或持久化 PROVISION_FAILED 之前拒绝该状态。
 	stateStore := &recordingSubsystemDeploymentStateStore{contextErr: application.ErrNotFound}
 	provisioner := &recordingHTTPSubsystemProvisioner{}
 	handler, err := NewSubsystemOnboardingHandler(
@@ -1304,6 +1319,8 @@ func TestAdoptSubsystemCreatesManagedLifecycleForUnmanagedEnvironment(t *testing
 		t.Fatalf("construct handler: %v", err)
 	}
 	handler.serviceCredentials = &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
+		ID: "contract-source-client", TenantID: "01K10A00000000000000000001", ApplicationID: "settlement-app", EnvironmentID: "settlement-dev", ClientID: "contract_management-dev-settlement-integration", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"settlement.contract.ingest"},
+	}, {
 		ID: "settlement-catalog-client", ApplicationID: "settlement-app", EnvironmentID: "settlement-dev",
 		ClientID: "settlement-dev-catalog-publisher", Status: "ACTIVE",
 	}}}
@@ -1481,11 +1498,11 @@ func TestGetSubsystemStatusRecoversStaleProvisioningStateForRetry(t *testing.T) 
 func TestUpdateServiceCredentialRequirementsRedeliverProjectOwnerDirectory(t *testing.T) {
 	found := false
 	for _, requirement := range updateServiceCredentialRequirements("project_management") {
-		if requirement.purpose != application.ServiceCredentialOwnerDirectoryRead {
+		if requirement.Purpose != application.ServiceCredentialOwnerDirectoryRead {
 			continue
 		}
 		found = true
-		if requirement.suffix != "owner-directory" || requirement.scope != "owner_directory.read" || !requirement.rotate {
+		if requirement.Suffix != "owner-directory" || requirement.PrimaryScope() != "owner_directory.read" || !requirement.Rotate {
 			t.Fatalf("owner-directory requirement = %#v", requirement)
 		}
 	}
@@ -1497,11 +1514,11 @@ func TestUpdateServiceCredentialRequirementsRedeliverProjectOwnerDirectory(t *te
 func TestUpdateServiceCredentialRequirementsRedeliverContractCRMReference(t *testing.T) {
 	found := false
 	for _, requirement := range updateServiceCredentialRequirements("contract_management") {
-		if requirement.purpose != application.ServiceCredentialCRMContractReferenceRead {
+		if requirement.Purpose != application.ServiceCredentialCRMContractReferenceRead {
 			continue
 		}
 		found = true
-		if requirement.suffix != "crm-contract-reference" || requirement.scope != "customer.contract_reference.read" || !requirement.rotate {
+		if requirement.Suffix != "crm-contract-reference" || requirement.PrimaryScope() != "customer.contract_reference.read" || !requirement.Rotate {
 			t.Fatalf("crm-contract-reference requirement = %#v", requirement)
 		}
 	}
@@ -1513,11 +1530,11 @@ func TestUpdateServiceCredentialRequirementsRedeliverContractCRMReference(t *tes
 func TestUpdateServiceCredentialRequirementsRedeliverPortalAuditPublisher(t *testing.T) {
 	found := false
 	for _, requirement := range updateServiceCredentialRequirements("customer_portal") {
-		if requirement.purpose != application.ServiceCredentialAuditIngest {
+		if requirement.Purpose != application.ServiceCredentialAuditIngest {
 			continue
 		}
 		found = true
-		if requirement.suffix != "audit-publisher" || requirement.scope != "audit.ingest" || !requirement.rotate {
+		if requirement.Suffix != "audit-publisher" || requirement.PrimaryScope() != "audit.ingest" || !requirement.Rotate {
 			t.Fatalf("portal audit requirement = %#v", requirement)
 		}
 	}

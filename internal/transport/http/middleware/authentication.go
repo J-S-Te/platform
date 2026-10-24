@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Authenticator verifies a browser session token and returns the server-side principal.
+// Authenticator 校验浏览器会话令牌并返回服务端解析出的主体。
 type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
 }

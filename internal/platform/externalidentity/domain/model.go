@@ -8,8 +8,10 @@ const (
 	// IdentityPendingActivation 表示稳定 OIDC subject 已预留，但平台尚未完成凭据初始化
 	// 或上游身份激活；外部系统不能把该状态等同于可登录。
 	IdentityPendingActivation = "PENDING_ACTIVATION"
-	IdentityActive            = "ACTIVE"
-	IdentityDisabled          = "DISABLED"
+	// IdentityActive 表示身份已激活，可正常登录。
+	IdentityActive = "ACTIVE"
+	// IdentityDisabled 表示身份被停用，登录被阻断但映射保留。
+	IdentityDisabled = "DISABLED"
 )
 
 // Identity 是不含秘密的外部客户身份投影。PlatformUserID（iam_user.id）是权威 OIDC subject；
@@ -26,7 +28,7 @@ type Identity struct {
 	UpdatedAt      time.Time
 }
 
-// RoleResult is the stable response returned by Portal role convergence operations.
+// RoleResult 是 Portal 角色收敛操作返回的稳定响应结构。
 type RoleResult struct {
 	PlatformUserID  string `json:"platform_user_id"`
 	ApplicationCode string `json:"application_code"`
@@ -35,24 +37,23 @@ type RoleResult struct {
 }
 
 const (
-	// BindingActive marks an external customer binding that authorizes the
-	// subject for the bound application; BindingDisabled freezes it without
-	// deleting the durable mapping history.
-	BindingActive   = "ACTIVE"
+	// BindingActive 表示外部客户绑定正在为 subject 授予所绑定应用的访问权；
+	// BindingDisabled 冻结授权但保留持久映射历史，不做物理删除。
+	BindingActive = "ACTIVE"
+	// BindingDisabled 冻结授权但保留持久映射历史，不做物理删除。
 	BindingDisabled = "DISABLED"
 )
 
-// BindingResult is the stable, secret-free response returned by customer
-// binding operations. The plaintext customer reference is never echoed back.
+// BindingResult 是客户绑定操作返回的稳定且不含秘密的响应。
+// 明文客户引用绝不回显给调用方。
 type BindingResult struct {
 	PlatformUserID  string `json:"platform_user_id"`
 	ApplicationCode string `json:"application_code"`
 	Status          string `json:"status"`
 }
 
-// CustomerBinding is the durable binding record read by the authorization
-// resolver. Only the ciphertext leaves storage; decryption happens in the
-// application service right before the protected claim is emitted.
+// CustomerBinding 是授权解析器读取的持久绑定记录。密文是唯一允许离开存储的形态；
+// 解密只发生在应用服务中、且仅在即将签发受保护 claim 之前。
 type CustomerBinding struct {
 	ApplicationCode   string
 	CustomerRefCipher []byte

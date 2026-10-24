@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the actual CI asset transport and reload steps against an isolated host."""
+"""在隔离主机上执行实际 CI 资产传输与控制面重载步骤。"""
 import os
 from pathlib import Path
 import shutil
@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix='ci-assets-sync-') as directory:
                    'nginx', 'monitoring', 'tests')
     files = ('docker-compose.yml', '.env.example', '.release.env.example', '.gitignore',
              'ACCEPTANCE_CHECKLIST.md', 'README.md', 'OFFLINE_DEPLOYMENT.md',
-             'OFFLINE_RUNBOOK.md', 'DEPLOYMENT_COMPATIBILITY.md', 'BACKUP_RECOVERY.md')
+             'OFFLINE_RUNBOOK.md', 'DEPLOYMENT_COMPATIBILITY.md', 'DELIVERY_WORKFLOW.md', 'BACKUP_RECOVERY.md')
     for name in directories:
         (source / name).mkdir()
     for name in files:
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='ci-assets-sync-') as directory:
     shutil.copyfile(production / 'bin/install-assets.sh', source / 'bin/install-assets.sh')
     shutil.copyfile(production / 'bin/provisioner-config-refresh.sh', source / 'bin/provisioner-config-refresh.sh')
     shutil.copyfile(production / 'bin/frontend-network.py', source / 'bin/frontend-network.py')
-    # Transport must exclude old overlays and acceptance evidence rejected by the installer.
+    # 交付传输必须排除安装器拒绝的旧覆盖配置和验收证据。
     (source / 'compose.yaml').write_text('legacy overlay must not ship\n')
     (source / 'acceptance').mkdir()
     (source / 'subsystems.d/new.yaml').write_text('new manifest\n')
@@ -126,20 +126,18 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     assert marker.is_file(), 'failed reload must retain deployment gate'
     execute(sync, {'FAIL_RELOAD': 'true'}, succeeds=False)
     assert marker.is_file()
-    # A retry first reloads the previously installed assets and consumes the old
-    # gate, then installs this archive and creates its new reload requirement.
+    # 重试先重新加载已安装资产并消除旧门禁，再安装本归档并创建新的重载要求。
     execute(sync)
     assert marker.is_file()
     execute(reload)
-    # Legacy binary rejects the new manifest schema. An actual platform-image
-    # release must retain the pending marker rather than trying that old reload.
+    # 旧二进制无法解析新清单 schema。实际发布平台镜像时必须保留待处理标记，不能尝试使用旧版本重载。
     execute(sync)
     execute(reload, {'FAIL_RELOAD': 'true'}, succeeds=False)
     before_upgrade = (fixture / 'reload.log').read_text()
     execute(sync, {'BACKEND_CHANGED': 'true', 'FAIL_RELOAD': 'true'})
     assert marker.is_file()
     assert (fixture / 'reload.log').read_text() == before_upgrade
-    # Ordinary installation is still rejected with this pending requirement.
+    # 待处理要求尚在时，普通安装仍须拒绝。
     execute(sync, {'FAIL_RELOAD': 'true'}, succeeds=False)
     execute(reload)
     failure = execute(sync, {'TAMPER_ARCHIVE': 'true'}, succeeds=False)

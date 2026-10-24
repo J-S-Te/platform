@@ -23,7 +23,7 @@ func TestOutboxClaimUsesLockedPendingSelectionAndAtomicRunningTransition(t *test
 		t.Fatal(err)
 	}
 	_, _, _ = queue.Claim(context.Background(), "worker-1", time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC))
-	// Dry-run deliberately has no selected row. Verify the query shape directly:
+	// 试运行刻意不选出任何行，直接验证查询结构。
 	statement := database.Session(&gorm.Session{DryRun: true}).Clauses().Model(&authorizationOutboxRow{}).
 		Where("id = ? AND status = ?", "event-1", "PENDING").Updates(map[string]any{"status": "RUNNING"}).Statement
 	if !strings.Contains(statement.SQL.String(), "WHERE id = ? AND status = ?") {

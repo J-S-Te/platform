@@ -6,12 +6,13 @@ deploy_dir="$(cd -- "$test_dir/.." && pwd -P)"
 builder="$deploy_dir/bin/build-host-dependencies.sh"
 installer="$deploy_dir/bin/install-host-dependencies.sh"
 aggregate_builder="$deploy_dir/bin/build-offline-packages.sh"
+inspector="$deploy_dir/bin/delivery-inspect.py"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 [[ -x "$builder" && -x "$installer" ]] || fail 'host dependency entrypoints are not executable'
 bash -n "$builder" "$installer" "$aggregate_builder"
 
-for package in jq curl ca-certificates tar gzip coreutils; do
+for package in jq curl ca-certificates tar gzip coreutils tzdata python3; do
   grep -Eq "(^|[[:space:]])${package}([[:space:]]|$)" "$builder" || {
     fail "required host package is not included: $package"
   }
@@ -25,6 +26,8 @@ grep -q -- "--sort=name" "$builder" || fail 'host dependency archive does not no
 grep -q -- "--mtime='@0'" "$builder" || fail 'host dependency archive does not normalize timestamps'
 grep -q -- '--numeric-owner' "$builder" || fail 'host dependency archive does not normalize ownership'
 grep -q -- 'gzip -n' "$builder" || fail 'host dependency archive gzip header is not deterministic'
+grep -Fq 'debs/[A-Za-z0-9][A-Za-z0-9._+%~-]*\.deb' "$inspector" || fail 'host dependency inspector rejects Debian tilde versions'
+grep -Fq '([A-Za-z0-9][A-Za-z0-9._+%/~-]*)' "$inspector" || fail 'host dependency checksum inspector rejects Debian tilde versions'
 
 if (($# == 1)); then
   archive="$1"
@@ -40,7 +43,7 @@ if (($# == 1)); then
   grep -q '^OS_ID=ubuntu$' <<< "$metadata" || fail 'archive is not Ubuntu-bound'
   grep -q '^ARCHITECTURE=amd64$' <<< "$metadata" || fail 'archive is not amd64-bound'
   requested="$(awk -F= '$1 == "REQUESTED_PACKAGES" {sub(/^[^=]*=/, ""); print}' <<< "$metadata")"
-  for package in jq curl ca-certificates tar gzip coreutils; do
+  for package in jq curl ca-certificates tar gzip coreutils tzdata python3; do
     case ",$requested," in
       *",$package,"*) ;;
       *) fail "archive metadata omits required package: $package" ;;

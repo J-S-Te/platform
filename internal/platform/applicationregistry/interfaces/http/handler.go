@@ -1,4 +1,4 @@
-// Package http exposes the OAuth Client Credentials token endpoint.
+// Package http 暴露 OAuth Client Credentials 令牌端点。
 package http
 
 import (
@@ -11,13 +11,19 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
+// maxTokenRequestBytes 限制令牌请求体上限：本端点只需 grant_type/scope 几个字段，
+// 64 KiB 足够且能防止恶意超大 body 被解析与记账。
 const maxTokenRequestBytes = 64 << 10
 
+// Handler 是应用令牌端点的 HTTP 适配层：只做协议校验与错误映射，
+// 授权判定全部委托给 application.Service，自身不持有任何客户端凭据。
 type Handler struct {
 	service *application.Service
 	logger  *slog.Logger
 }
 
+// NewHandler 装配令牌端点 Handler；service 或 logger 缺失时返回错误，
+// 拒绝构造半可用的认证端点。
 func NewHandler(service *application.Service, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("application token handler dependencies must not be nil")
@@ -25,8 +31,9 @@ func NewHandler(service *application.Service, logger *slog.Logger) (*Handler, er
 	return &Handler{service: service, logger: logger}, nil
 }
 
-// IssueToken implements OAuth 2.0 Client Credentials with client_secret_basic only. Client
-// secrets are intentionally not accepted in form fields to prevent accidental body logging.
+// IssueToken 实现 OAuth 2.0 Client Credentials，且仅接受 client_secret_basic。
+// 刻意不接受表单字段里的 client_secret，防止 secret 随请求体被日志意外记录；
+// 表单中出现 client_id/client_secret 一律按 invalid_request 拒绝。
 func (h *Handler) IssueToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)

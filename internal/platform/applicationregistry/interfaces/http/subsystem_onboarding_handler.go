@@ -21,11 +21,10 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 )
 
-// readCatalogPublisherCredentials returns the long-lived catalog-publisher OAuth client
-// credentials that the platform operator has provisioned for the contract_management
-// subsystem. The credentials live in the platform's own environment so that the API container
-// (which intentionally has no access to the subsystem's .env.local on disk) can hand them
-// to the deployment helper for the post-rebuild catalog sync.
+// readCatalogPublisherCredentials 返回平台操作者为 contract_management 子系统预置的
+// 长期目录发布 OAuth 客户端凭据。凭据保存在平台自身环境中，因此 API 容器
+// （刻意无法读取子系统磁盘上的 .env.local）可以把它们转交给部署助手，
+// 完成重建后的目录同步。
 func readCatalogPublisherCredentials() (string, string, bool) {
 	id := strings.TrimSpace(os.Getenv("CONTRACT_CATALOG_PUBLISHER_CLIENT_ID"))
 	secret := strings.TrimSpace(os.Getenv("CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET"))
@@ -43,10 +42,9 @@ func optionalIssuerAlias(value string) *string {
 	return &value
 }
 
-// resolveApplicationContext looks up the (application, environment) identifiers for a
-// (code, environment-name) pair. The post-rebuild catalog sync needs the platform-side primary
-// keys, not the human-readable codes, to address the right application. The lookup piggybacks
-// on the existing portal listing path so no new repository method is needed.
+// resolveApplicationContext 按（编码, 环境名）查找（应用 ID, 环境 ID）。重建后的目录同步
+// 需要平台侧主键而非人类可读编码来定位应用。查找复用既有门户列表路径，
+// 不为此新增仓储方法。
 func (handler *SubsystemOnboardingHandler) resolveApplicationContext(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) (string, string, bool) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -81,10 +79,9 @@ type subsystemOnboardingService interface {
 	PreflightValidate(context.Context, application.SubsystemOnboardingInput) error
 }
 
-// subsystemEnvironmentIssuerResolver is an optional capability implemented by
-// the durable control-plane repository. It lets UpdateSubsystem tell a real
-// issuer cutover apart from a rebuild of an environment already using the
-// requested provider, while lightweight test services remain compatible.
+// subsystemEnvironmentIssuerResolver 由持久化控制面仓储实现的可选能力。
+// 它让 UpdateSubsystem 能区分真正的 Issuer 切换与"环境本就在使用该提供方"的重建，
+// 同时保持轻量测试服务兼容（无此能力时按保守规则处理）。
 type subsystemEnvironmentIssuerResolver interface {
 	ResolveEnvironmentIssuerAlias(context.Context, string, string, string) (string, error)
 }
@@ -102,16 +99,18 @@ type keycloakClientMappingStore interface {
 	BackfillKeycloakAuthorization(context.Context, string, string, string) error
 }
 
-// keycloakClientCompatibilityResolver is an optional persistence capability used
-// during onboarding retries. It preserves a previously registered browser Client
-// ID when the environment label was later normalized (for example, an existing
-// contract_management-prod-web used by the dev deployment). The resolver is
-// tenant/application/environment scoped and never guesses by replacing prod/dev
-// strings.
+// keycloakClientCompatibilityResolver 是接入重试期间使用的可选持久化能力：
+// 当环境标签后来被规范化时（例如 dev 部署曾登记 contract_management-prod-web），
+// 保留先前登记的浏览器客户端 ID。解析器以租户/应用/环境为界，
+// 绝不通过替换 prod/dev 字符串去猜。
 type keycloakClientCompatibilityResolver interface {
 	ResolveEffectiveKeycloakClient(context.Context, string, string, string, string) (KeycloakClientResolution, error)
 }
 
+// KeycloakClientResolution 是同步时实际采用的生效 Keycloak Client 身份：
+// ClientID 为本次请求使用的值；CanonicalClientID 为规范化 ID；Source 标识取值
+// 来源（canonical 或兼容解析）；LegacyCompatibility 表示沿用环境标签规范化之前
+// 登记的旧客户端 ID。
 type KeycloakClientResolution struct {
 	ClientID            string
 	CanonicalClientID   string
@@ -119,10 +118,9 @@ type KeycloakClientResolution struct {
 	LegacyCompatibility bool
 }
 
-// KeycloakClientMapping is the deliberately non-sensitive projection of one
-// environment's Realm Client.  It lets the authentication page survive a
-// refresh without asking the browser to retain a Client secret or infer state
-// from a successful sync response.
+// KeycloakClientMapping 是单个环境 Realm 客户端的刻意非敏感投影。
+// 认证页面凭它刷新后仍可用，无需浏览器保存客户端 Secret 或从同步成功
+// 响应反推状态。
 type KeycloakClientMapping struct {
 	Realm        string     `json:"realm,omitempty"`
 	ClientID     string     `json:"client_id,omitempty"`
@@ -131,16 +129,14 @@ type KeycloakClientMapping struct {
 	Exists       bool       `json:"exists"`
 }
 
-// keycloakClientMappingInspector is intentionally optional so older test and
-// deployment adapters retain compatibility.  Absence is reported as an
-// unconfigured mapping; it never opens a cutover gate.
+// keycloakClientMappingInspector 刻意做成可选，旧测试与部署适配器因此保持兼容。
+// 缺失按"映射未配置"报告；它绝不开任何切换门禁。
 type keycloakClientMappingInspector interface {
 	GetKeycloakClientMapping(context.Context, string, string, string) (KeycloakClientMapping, error)
 }
 
-// KeycloakSwitchGate is a non-sensitive, auditable cutover prerequisite.  A
-// false value means either that the prerequisite failed or that this server
-// cannot independently verify it; clients must treat both cases as blocked.
+// KeycloakSwitchGate 是非敏感、可审计的切换前置条件。值为 false 表示前置条件
+// 未满足，或本服务器无法独立核验；客户端必须把两种情况都当作阻断。
 type KeycloakSwitchGate struct {
 	Key        string `json:"key"`
 	Label      string `json:"label"`
@@ -149,9 +145,8 @@ type KeycloakSwitchGate struct {
 	NextAction string `json:"next_action,omitempty"`
 }
 
-// KeycloakSwitchReadiness is intentionally supplied by a separately owned
-// verifier.  The application registry must never infer a brokered login from
-// an Admin API write or a browser assertion.
+// KeycloakSwitchReadiness 刻意由独立持有的校验器供给。应用登记绝不允许
+// 从 Admin API 写入成功或浏览器断言推断"代理登录已验证"。
 type KeycloakSwitchReadiness struct {
 	Gates       []KeycloakSwitchGate `json:"switch_gates"`
 	SwitchReady bool                 `json:"switch_ready"`
@@ -162,28 +157,29 @@ type keycloakSwitchReadinessInspector interface {
 	InspectKeycloakSwitchReadiness(context.Context, string, string, string) (KeycloakSwitchReadiness, error)
 }
 
-// keycloakSwitchReadinessUpdater is deliberately narrower than the inspector:
-// only server-side successful synchronization may open its first two gates.
+// keycloakSwitchReadinessUpdater 刻意比校验器更窄：只有服务端同步成功
+// 才能打开其前两道门禁。
 type keycloakSwitchReadinessUpdater interface {
 	MarkKeycloakClientAndRoleCatalogSynced(context.Context, string, string, string) error
 }
 
-// keycloakBrokerLoginVerificationRecorder persists evidence supplied by the
-// authenticated current-session verification endpoint.
+// keycloakBrokerLoginVerificationRecorder 持久化由当前已认证会话的校验端点
+// 提供的证据，供切换门禁审计。
 type keycloakBrokerLoginVerificationRecorder interface {
 	RecordBrokerLoginVerification(context.Context, KeycloakBrokerLoginVerification) error
 }
 
-// keycloakProjectionOperations keeps dead-letter management behind the
-// Keycloak authorization application service.  It is configured only in the
-// composition root and has no access to secrets, Keycloak Admin credentials or
-// arbitrary queue mutation methods.
+// keycloakProjectionOperations 把死信管理收敛到 Keycloak 授权应用服务之后。
+// 仅在组合根配置；接触不到任何 Secret、Keycloak Admin 凭据或任意队列变更方法。
 type keycloakProjectionOperations interface {
 	ListFailed(context.Context, string, projectionapplication.FailurePageRequest) (projectionapplication.FailurePageResult, error)
 	AlertStatus(context.Context, string) (projectionapplication.AlertStatus, error)
 	Replay(context.Context, projectionapplication.ReplayInput) (projectionapplication.ReplayResult, error)
 }
 
+// KeycloakBrokerLoginVerification 是一次 Broker 登录验证的持久化证据：
+// 记录被验证的目标环境、身份、Issuer、Client 与验证者会话，供切换门禁审计；
+// 不含任何令牌或 Secret。
 type KeycloakBrokerLoginVerification struct {
 	TenantID, ApplicationID, EnvironmentID string
 	IdentityID, Issuer, ClientID           string
@@ -202,22 +198,21 @@ type subsystemCandidateDiscoverer interface {
 	DiscoverSubsystemCandidates(context.Context) ([]application.SubsystemDiscoveryCandidate, error)
 }
 
-// subsystemInitialAccessManager keeps subsystem-specific authorization outside the application
-// registry. An empty role code means the registered subsystem has no managed role catalog yet.
+// subsystemInitialAccessManager 把子系统专属授权放在应用登记之外管理。
+// 角色编码为空表示该已登记子系统还没有受管角色目录。
 type subsystemInitialAccessManager interface {
 	AssignInitialAdministrator(context.Context, string, string, string, string) (string, error)
 }
 
-// keycloakBrokerProvisioner creates the one dedicated platform OAuth client
-// used by Keycloak as an upstream broker. Its secret never reaches HTTP.
+// keycloakBrokerProvisioner 创建 Keycloak 作为上游 broker 使用的唯一专用平台
+// OAuth 客户端；其 Secret 绝不经 HTTP 暴露。
 type keycloakBrokerProvisioner interface {
 	EnsureKeycloakBroker(context.Context, string) (string, string, error)
 	RecoverKeycloakBroker(context.Context, string, string) (string, string, error)
 }
 
-// keycloakControlPlaneOperations contains only the Keycloak administration
-// actions used by the subsystem lifecycle. Keeping this boundary explicit
-// makes recovery behavior testable without a live Keycloak server.
+// keycloakControlPlaneOperations 只包含子系统生命周期用到的 Keycloak 管理动作。
+// 保持该边界显式，使恢复行为无需真实 Keycloak 服务即可测试。
 type keycloakControlPlaneOperations interface {
 	EnsureBroker(context.Context, string, string) error
 	VerifyBrokerExists(context.Context) error
@@ -226,10 +221,9 @@ type keycloakControlPlaneOperations interface {
 	DetectSubsystemKeycloakDrift(context.Context, string, string, []string) (KeycloakDriftReport, error)
 }
 
-// subsystemServiceCredentialManager is the narrow control-plane capability used to
-// backfill newly introduced machine bindings for an already registered environment.
-// Plaintext is produced only for a newly created/rotated secret and is passed directly
-// to the isolated deployment Agent; it is never returned to the browser.
+// subsystemServiceCredentialManager 是窄口径的控制面能力，用于为已登记环境回填
+// 新引入的机器绑定。明文只为新建/轮换的 Secret 生成，直接交给隔离部署 Agent；
+// 绝不返回浏览器。
 type subsystemServiceCredentialManager interface {
 	ListOAuthClients(context.Context, string) ([]application.OAuthClientView, error)
 	CreateOAuthClient(context.Context, application.OAuthClientCreateInput) (application.OAuthClientCreateResult, error)
@@ -254,30 +248,32 @@ type SubsystemLifecycleNotification struct {
 	Detail          string
 }
 
-// SubsystemOnboardingHandler exposes the simplified onboarding workflow and authenticated portal
-// catalog. The configured OIDC issuer is used only by the isolated deployment workflow and is not
-// returned to the browser together with generated credentials or infrastructure commands.
+// SubsystemOnboardingHandler 暴露简化接入工作流与已认证的门户目录。
+// 所配置的 OIDC Issuer 仅由隔离部署工作流使用，绝不与生成的凭据或基础设施
+// 命令一起返回给浏览器。
 type SubsystemOnboardingHandler struct {
-	service              subsystemOnboardingService
-	provisioner          application.SubsystemProvisioner
-	access               subsystemInitialAccessManager
-	deploymentState      application.SubsystemDeploymentStateStore
-	notifications        subsystemNotificationSink
-	oidcIssuer           string
-	keycloakIssuer       string
-	keycloakRealm        string
-	keycloakEnabled      bool
-	keycloakRequireHTTPS bool
-	defaultIssuerAlias   string
-	keycloakControl      keycloakControlPlaneOperations
-	keycloakBroker       keycloakBrokerProvisioner
-	keycloakCatalog      keycloakAuthorizationCatalog
-	keycloakMappings     keycloakClientMappingStore
-	keycloakReadiness    keycloakSwitchReadinessInspector
-	keycloakOperations   keycloakProjectionOperations
-	keycloakCutover      keycloakCutoverLifecycleStore
-	serviceCredentials   subsystemServiceCredentialManager
-	logger               *slog.Logger
+	service                subsystemOnboardingService
+	provisioner            application.SubsystemProvisioner
+	access                 subsystemInitialAccessManager
+	deploymentState        application.SubsystemDeploymentStateStore
+	notifications          subsystemNotificationSink
+	oidcIssuer             string
+	keycloakIssuer         string
+	keycloakRealm          string
+	keycloakEnabled        bool
+	keycloakRequireHTTPS   bool
+	defaultIssuerAlias     string
+	keycloakControl        keycloakControlPlaneOperations
+	keycloakBroker         keycloakBrokerProvisioner
+	keycloakCatalog        keycloakAuthorizationCatalog
+	keycloakMappings       keycloakClientMappingStore
+	keycloakReadiness      keycloakSwitchReadinessInspector
+	keycloakOperations     keycloakProjectionOperations
+	keycloakCutover        keycloakCutoverLifecycleStore
+	serviceCredentials     subsystemServiceCredentialManager
+	runtimeLicenses        *application.RuntimeLicenseEnrollmentService
+	runtimeLicenseSettings func(context.Context) (application.RuntimeLicenseSettings, error)
+	logger                 *slog.Logger
 	// egress 是健康探针出网策略（SEC-B5），与反向代理共用 application.EgressPolicy。
 	egress *application.EgressPolicy
 	// deploymentJobs 跟踪在途的后台部署编排；waitForDeploymentJobs 供测试确定性收口。
@@ -292,45 +288,43 @@ const (
 	keycloakRollbackWindow    = 7 * 24 * time.Hour
 )
 
-// ConfigureKeycloak enables Keycloak as an explicit deployment provider.  The
-// credentials remain solely between the API and the deployment Agent; this
-// object intentionally carries only public status information.
+// ConfigureKeycloak 把 Keycloak 启用为显式部署提供方。凭据只在 API 与部署 Agent
+// 之间流转；该配置仅承载公开状态信息。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloak(enabled bool, publicIssuer, realm string) {
 	handler.keycloakEnabled = enabled
 	handler.keycloakIssuer = strings.TrimRight(strings.TrimSpace(publicIssuer), "/")
 	handler.keycloakRealm = strings.TrimSpace(realm)
 }
 
-// ConfigureKeycloakTransportPolicy controls whether a future cutover must use
-// HTTPS.  False is intentionally compatible with the current HTTP deployment;
-// the preflight still derives Redirect URI and Secure Cookie from the public
-// origin so the three settings cannot drift.
+// ConfigureKeycloakTransportPolicy 控制未来切换是否强制 HTTPS。false 刻意兼容
+// 当前 HTTP 部署；preflight 仍由公开 origin 推导 Redirect URI 与安全 Cookie，
+// 使三项设置不会漂移。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakTransportPolicy(requireHTTPS bool) {
 	handler.keycloakRequireHTTPS = requireHTTPS
 }
 
-// ConfigureDefaultIssuerAlias controls the provider used when the onboarding
-// request omits issuer_alias. Explicit user choices always take precedence.
+// ConfigureDefaultIssuerAlias 控制接入请求缺省 issuer_alias 时使用的提供方；
+// 用户的显式选择始终优先于该默认值。
 func (handler *SubsystemOnboardingHandler) ConfigureDefaultIssuerAlias(alias string) {
 	handler.defaultIssuerAlias = strings.ToLower(strings.TrimSpace(alias))
 }
 
-// ConfigureKeycloakControlPlane is called only from the composition root.  The
-// browser never receives this object or its Keycloak administrative credentials.
+// ConfigureKeycloakControlPlane 仅允许组合根调用；浏览器永远拿不到该对象
+// 及其 Keycloak 管理凭据。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakControlPlane(control keycloakControlPlaneOperations) {
 	handler.keycloakControl = control
 }
 
+// ConfigureKeycloakBroker 挂接 Keycloak broker 专用 OAuth 客户端的创建与恢复能力。
+// 仅组合根可调用；未挂接时 Keycloak 同步与切换一律不可用（失败关闭）。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakBroker(provisioner keycloakBrokerProvisioner) {
 	handler.keycloakBroker = provisioner
 }
 
-// reconcileKeycloakBroker keeps the Keycloak IdP and its platform OAuth client
-// consistent. Existing active credentials intentionally have no retrievable
-// plaintext, so a healthy IdP is only verified. A new secret is generated only
-// after Keycloak has deterministically reported an incomplete IdP configuration;
-// connectivity, authentication and permission errors remain fail-closed and do
-// not rotate credentials.
+// reconcileKeycloakBroker 保持 Keycloak IdP 与其平台 OAuth 客户端一致。
+// 既有有效凭据刻意没有可取回的明文，因此 IdP 健康时只做核验；
+// 只有 Keycloak 确定性地报告 IdP 配置不完整时才生成新 Secret——
+// 连接、认证与权限错误保持失败关闭，绝不触发凭据轮换。
 func (handler *SubsystemOnboardingHandler) reconcileKeycloakBroker(ctx context.Context, tenantID, operatorID string) error {
 	brokerID, brokerSecret, err := handler.keycloakBroker.EnsureKeycloakBroker(ctx, tenantID)
 	if err != nil {
@@ -345,9 +339,8 @@ func (handler *SubsystemOnboardingHandler) reconcileKeycloakBroker(ctx context.C
 		return err
 	}
 
-	// The stored value is a one-way hash and cannot safely be reconstructed.
-	// Rotate through the OAuth client service, then immediately reconcile the
-	// IdP with the one-time plaintext result. No secret is logged or returned.
+	// 存储值是单向哈希，无法安全还原。改经 OAuth 客户端服务轮换，
+	// 再用一次性明文结果立即调和 IdP。全程不记录、不返回任何 Secret。
 	brokerID, brokerSecret, err = handler.keycloakBroker.RecoverKeycloakBroker(ctx, tenantID, operatorID)
 	if err != nil {
 		return fmt.Errorf("rotate broker credential after incomplete IdP config: %w", err)
@@ -358,39 +351,51 @@ func (handler *SubsystemOnboardingHandler) reconcileKeycloakBroker(ctx context.C
 	return handler.keycloakControl.EnsureBroker(ctx, brokerID, brokerSecret)
 }
 
+// ConfigureKeycloakAuthorizationCatalog 挂接应用角色目录的读取来源；
+// 未挂接时 Client 同步与 Keycloak 投影不可用。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakAuthorizationCatalog(catalog keycloakAuthorizationCatalog) {
 	handler.keycloakCatalog = catalog
 }
 
+// ConfigureKeycloakClientMappingStore 挂接 Client 映射持久化与授权投影回填；
+// 未挂接时同步请求按校验失败拒绝，不产生任何 Keycloak 侧写入。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakClientMappingStore(store keycloakClientMappingStore) {
 	handler.keycloakMappings = store
 }
 
-// ConfigureKeycloakSwitchReadinessInspector attaches an authoritative,
-// server-side source of projection and broker-login evidence.  It is optional
-// for backward compatibility; without it every Keycloak cutover stays closed.
+// ConfigureKeycloakSwitchReadinessInspector 挂接权威的服务端投影与 broker 登录
+// 证据来源。为向后兼容做成可选；未挂接时所有 Keycloak 切换保持关闭。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakSwitchReadinessInspector(inspector keycloakSwitchReadinessInspector) {
 	handler.keycloakReadiness = inspector
 }
 
-// ConfigureKeycloakProjectionOperations enables tenant-scoped inspection and
-// controlled replay of FAILED projection records. A nil value intentionally
-// leaves the operations endpoints unavailable rather than exposing a partial
-// recovery path.
+// ConfigureKeycloakProjectionOperations 启用租户范围内的 FAILED 投影检查与受控重放。
+// 传 nil 时运维端点刻意保持不可用，而不是暴露一条不完整的恢复路径。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakProjectionOperations(operations keycloakProjectionOperations) {
 	handler.keycloakOperations = operations
 }
 
-// ConfigureKeycloakCutoverLifecycle attaches the durable, per-environment
-// seven-day observation and rollback-window control plane.
+// ConfigureKeycloakCutoverLifecycle 挂接持久化的按环境七天观察期与回滚窗口控制面。
 func (handler *SubsystemOnboardingHandler) ConfigureKeycloakCutoverLifecycle(store keycloakCutoverLifecycleStore) {
 	handler.keycloakCutover = store
 }
 
-// ConfigureSubsystemServiceCredentials enables idempotent migration of new
-// purpose-bound machine credentials for environments created by an older release.
+// ConfigureSubsystemServiceCredentials 为旧版本创建的环境启用新用途绑定机器凭据的
+// 幂等迁移。
 func (handler *SubsystemOnboardingHandler) ConfigureSubsystemServiceCredentials(manager subsystemServiceCredentialManager) {
 	handler.serviceCredentials = manager
+}
+
+// 仅组合根可启用商业授权登记；普通 HTTP 请求无法提供组件审批或另选凭据来源。
+func (handler *SubsystemOnboardingHandler) ConfigureRuntimeLicenseEnrollment(service *application.RuntimeLicenseEnrollmentService) {
+	handler.runtimeLicenses = service
+}
+
+// ConfigureRuntimeLicenseSettings 挂接运行时授权所需的实例级设置读取。仅组合根可
+// 调用；商业授权登记已启用而该读取缺失或失败时，部署编排按
+// LICENSE_RUNTIME_BINDING_FAILED 收口失败，绝不无设置放行。
+func (handler *SubsystemOnboardingHandler) ConfigureRuntimeLicenseSettings(provider func(context.Context) (application.RuntimeLicenseSettings, error)) {
+	handler.runtimeLicenseSettings = provider
 }
 
 func unverifiedKeycloakSwitchReadiness() KeycloakSwitchReadiness {
@@ -477,9 +482,8 @@ func keycloakObservationReasonCode(err error) string {
 }
 
 func (handler *SubsystemOnboardingHandler) keycloakCutoverRequired(ctx context.Context, tenantID, applicationCode, environment string) bool {
-	// The onboarding service owns the environment aggregate in normal
-	// composition.  Keep the state-store fallback for older compositions that
-	// expose this optional lookup there instead.
+	// 常规装配下环境聚合由接入服务持有；保留状态存储回退，兼容把该可选查询
+	// 暴露在状态存储上的旧装配。
 	for _, candidate := range []any{handler.service, handler.deploymentState} {
 		resolver, ok := candidate.(subsystemEnvironmentIssuerResolver)
 		if !ok {
@@ -490,8 +494,8 @@ func (handler *SubsystemOnboardingHandler) keycloakCutoverRequired(ctx context.C
 			return !strings.EqualFold(strings.TrimSpace(currentAlias), "keycloak")
 		}
 	}
-	// Unknown state must remain fail-closed. Production wires the durable
-	// resolver, while lightweight callers/tests retain the first-switch rule.
+	// 未知状态必须保持失败关闭：生产装配注入持久化 resolver，
+	// 轻量调用方/测试沿用"首次切换即切换"规则。
 	return true
 }
 
@@ -518,12 +522,56 @@ func (handler *SubsystemOnboardingHandler) effectiveIssuerAlias(alias string) st
 	if alias == "" {
 		alias = handler.defaultIssuerAlias
 	}
+	if alias == "" || alias == "basic_platform" {
+		alias = "platform"
+	}
 	return alias
 }
 
-// NewSubsystemOnboardingHandler constructs the subsystem onboarding HTTP adapter. The optional
-// state store keeps compatibility with lightweight callers/tests while production wiring passes
-// the durable control-plane repository.
+// 普通重建保留环境已持久化的提供方；更换提供方只能走专用的、带门禁的
+// 切换/回滚操作。
+func (handler *SubsystemOnboardingHandler) deploymentIssuerAlias(ctx context.Context, tenant, app, env, requested, forced string) (string, error) {
+	if forced != "" {
+		alias := handler.effectiveIssuerAlias(forced)
+		if _, err := handler.issuerForAlias(alias); err != nil {
+			return "", err
+		}
+		return alias, nil
+	}
+	for _, candidate := range []any{handler.service, handler.deploymentState} {
+		resolver, ok := candidate.(subsystemEnvironmentIssuerResolver)
+		if !ok {
+			continue
+		}
+		persisted, err := resolver.ResolveEnvironmentIssuerAlias(ctx, tenant, app, env)
+		if err != nil {
+			return "", err
+		}
+		alias := strings.ToLower(strings.TrimSpace(persisted))
+		// 历史持久化的 NULL/空表示平台 Issuer，而不是当前接入默认值
+		// （默认值可能已改为 Keycloak）。
+		if alias == "" || alias == "basic_platform" {
+			alias = "platform"
+		}
+		if _, err = handler.issuerForAlias(alias); err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(requested) != "" && handler.effectiveIssuerAlias(requested) != alias {
+			return "", application.ErrValidation
+		}
+		return alias, nil
+	}
+	// 轻量遗留组合没有持久化 resolver（生产装配必须提供）：这里按请求别名解析，
+	// 遗留调用方的既有切换门禁保持不变。
+	alias := handler.effectiveIssuerAlias(requested)
+	if _, err := handler.issuerForAlias(alias); err != nil {
+		return "", err
+	}
+	return alias, nil
+}
+
+// NewSubsystemOnboardingHandler 构造子系统接入 HTTP 适配器。可选状态存储保持
+// 轻量调用方/测试兼容；生产装配传入持久化控制面仓储。
 func NewSubsystemOnboardingHandler(service subsystemOnboardingService, provisioner application.SubsystemProvisioner, access subsystemInitialAccessManager, oidcIssuer string, logger *slog.Logger, stateStores ...application.SubsystemDeploymentStateStore) (*SubsystemOnboardingHandler, error) {
 	return NewSubsystemOnboardingHandlerWithNotifications(service, provisioner, access, oidcIssuer, logger, nil, stateStores...)
 }
@@ -548,11 +596,9 @@ func NewSubsystemOnboardingHandlerWithNotifications(service subsystemOnboardingS
 	}, nil
 }
 
-// DiscoverSubsystemCandidates exposes only opt-in Docker label metadata for containers that are
-// not yet registered in the caller's tenant. Registration is matched by application identity,
-// not by the candidate's environment and not by the current user's portal visibility. It never
-// runs a deployment command and therefore
-// can be granted with application read permission independently of onboarding permission.
+// DiscoverSubsystemCandidates 仅暴露租户内尚未登记容器的自愿申报 Docker 标签元数据。
+// 已登记判定按应用身份匹配，既不按候选自报的环境，也不按当前用户的门户可见性。
+// 本端点绝不执行部署命令，因此可以独立于接入权限、仅授予应用读权限。
 func (handler *SubsystemOnboardingHandler) DiscoverSubsystemCandidates(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -669,9 +715,8 @@ type subsystemOnboardingRequest struct {
 	IssuerAlias     string  `json:"issuer_alias"`
 }
 
-// subsystemDirectoryRegistrationRequest contains only directory and gateway
-// metadata.  OAuth client creation is intentionally excluded: for Keycloak it
-// happens through /keycloak-integration/sync after this registration succeeds.
+// subsystemDirectoryRegistrationRequest 只含目录与网关元数据。刻意排除 OAuth 客户端
+// 创建：Keycloak 场景在本登记成功后经 /keycloak-integration/sync 完成。
 type subsystemDirectoryRegistrationRequest struct {
 	ApplicationCode string  `json:"application_code"`
 	ApplicationName string  `json:"application_name"`
@@ -683,9 +728,8 @@ type subsystemDirectoryRegistrationRequest struct {
 	IssuerAlias     string  `json:"issuer_alias"`
 }
 
-// subsystemLifecycleRequest is the shared payload for Update and Teardown. Update may also carry
-// the already-persisted public gateway fields so the Agent can reapply non-secret runtime values;
-// Teardown ignores them.
+// subsystemLifecycleRequest 是 Update 与 Teardown 共用的载荷。Update 可携带已持久化的
+// 公开网关字段，让 Agent 重放非机密运行时值；Teardown 忽略它们。
 type subsystemLifecycleRequest struct {
 	ApplicationCode string `json:"application_code"`
 	Environment     string `json:"environment"`
@@ -708,9 +752,8 @@ type keycloakClientSyncResponse struct {
 	NextAction          string               `json:"next_action,omitempty"`
 }
 
-// keycloakBrokerLoginVerificationRequest is intentionally not a generic
-// callback assertion: the current authenticated session must attest to its own
-// identity and to the exact application environment and Keycloak Client.
+// keycloakBrokerLoginVerificationRequest 刻意不是通用回调断言：当前已认证会话
+// 必须为自身身份、精确的应用环境与 Keycloak 客户端作证。
 type keycloakBrokerLoginVerificationRequest struct {
 	ApplicationCode string `json:"application_code"`
 	Environment     string `json:"environment"`
@@ -814,8 +857,8 @@ type subsystemProvisioningCapabilitiesResponse struct {
 	AuthenticationProviders   []subsystemAuthenticationProviderResponse `json:"authentication_providers"`
 }
 
-// subsystemAuthenticationProviderResponse is deliberately non-sensitive.  It
-// is the page contract for provider state, switch availability and rollback.
+// subsystemAuthenticationProviderResponse 刻意非敏感，是提供方状态、切换可用性与
+// 回滚的页面契约。
 type subsystemAuthenticationProviderResponse struct {
 	Alias       string               `json:"alias"`
 	Name        string               `json:"name"`
@@ -828,7 +871,7 @@ type subsystemAuthenticationProviderResponse struct {
 	Detail      string               `json:"detail,omitempty"`
 }
 
-// OnboardSubsystem handles POST /api/v1/subsystem-onboarding.
+// OnboardSubsystem 处理 POST /api/v1/subsystem-onboarding。
 func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
@@ -876,14 +919,19 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err, "preflight")
 		return
 	}
+	relatedClients, relatedErr := handler.relatedServiceClients(request.Context(), principal.Tenant.ID, onboardingInput.ApplicationCode, onboardingInput.Environment)
+	if relatedErr != nil {
+		handler.writeError(writer, request, relatedErr, "contract integration dependency")
+		return
+	}
 	result, err := handler.service.OnboardSubsystem(request.Context(), onboardingInput)
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
 	pathPrefix, upstreamURL := "", ""
-	// Onboard atomically creates generation 1. Keep that ownership token even
-	// when the request is canceled before the following state read can finish.
+	// Onboard 原子地创建 generation 1。即使在后续状态读取完成前请求被取消，
+	// 也要保留该所有权标记，避免并发接管。
 	generation := uint64(1)
 	accepted := false
 	defer func() {
@@ -921,16 +969,23 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		provisioningClientID, provisioningClientSecret = client.ClientID, client.ClientSecret
 		keycloakClientID = client.ClientID
 	}
-	provisioningInput := application.SubsystemProvisioningInput{
-		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, ApplicationCode: result.Application.Code,
-		Environment: result.Environment.Environment, Issuer: issuer,
-		ManifestChecksum: manifestChecksum,
-		ClientID:         provisioningClientID, ClientSecret: provisioningClientSecret,
+	// 装配逻辑提取到应用层（BuildSubsystemOnboardingProvisioningInput）：统一入口与旧路径共用同一份装配，
+	// 避免两套实现漂移；凭据仍只在内存中传递，不落库、不回显。
+	provisioningInput, err := application.BuildSubsystemOnboardingProvisioningInput(application.SubsystemOnboardingProvisioningAssembly{
+		TenantID: principal.Tenant.ID, ApplicationID: result.Application.ID, EnvironmentID: result.Environment.ID,
+		ApplicationCode: result.Application.Code, Environment: result.Environment.Environment,
+		Issuer: issuer, AuthenticationProvider: effectiveIssuerAlias, ManifestChecksum: manifestChecksum,
+		ClientID: provisioningClientID, ClientSecret: provisioningClientSecret,
 		CatalogPublisherClientID:     result.CatalogPublisherOAuthClient.ClientID,
 		CatalogPublisherClientSecret: result.CatalogPublisherPlaintextSecret,
 		ServiceCredentials:           result.ServiceCredentials,
+		RelatedServiceClients:        relatedClients,
 		RedirectURI:                  result.RedirectURI, PublicURL: result.PublicURL,
 		PathPrefix: pathPrefix, UpstreamURL: upstreamURL,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
 	}
 	handler.startSubsystemDeploymentJob(request, subsystemDeploymentJob{
 		Operation:          "ONBOARD",
@@ -962,14 +1017,12 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 	)
 }
 
-// RegisterSubsystemDirectory handles POST /api/v1/subsystem-directory.
+// RegisterSubsystemDirectory 处理 POST /api/v1/subsystem-directory。
 //
-// It is the V2 registration entry point for application directory, environment
-// and login-target data.  No platform OAuth Client, Keycloak Client, service
-// credential, deployment state or initial role assignment is created here.
-// Existing all-in-one /subsystem-onboarding callers stay supported during the
-// migration, but new Keycloak integrations must use this endpoint followed by
-// the dedicated Keycloak integration API.
+// 这是 V2 登记入口：只登记应用目录、环境与登录目标数据。此处不创建任何平台
+// OAuth Client、Keycloak Client、服务凭据、部署状态或初始角色授权。迁移期间
+// 既有的一体化 /subsystem-onboarding 调用方继续受支持，但新的 Keycloak 集成
+// 必须先走本端点，再使用专用 Keycloak 集成 API。
 func (handler *SubsystemOnboardingHandler) RegisterSubsystemDirectory(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -1004,12 +1057,11 @@ func (handler *SubsystemOnboardingHandler) RegisterSubsystemDirectory(writer std
 	})
 }
 
-// ListPortalApplications handles GET /api/v1/portal/applications. All authenticated users may read
-// the active tenant catalog; management permissions are not required for this read-only endpoint.
+// ListPortalApplications 处理 GET /api/v1/portal/applications。所有已认证用户可读
+// 当前租户的活跃目录；该只读端点不要求管理权限。
 func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
-	// This response is a user-specific authorization projection. Without explicit cache controls a
-	// browser or reverse proxy can serve the previous bp_session user's module list after account
-	// switching, even though authentication itself already resolves the new Cookie correctly.
+	// 本响应是用户级授权投影。若无显式缓存控制，账号切换后浏览器或反向代理可能
+	// 继续返回上一个 bp_session 用户的模块列表，即使认证本身已正确解析新 Cookie。
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	writer.Header().Add("Vary", "Cookie")
@@ -1035,8 +1087,8 @@ func (handler *SubsystemOnboardingHandler) ListPortalApplications(writer stdhttp
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "门户应用目录查询成功", responses)
 }
 
-// GetSubsystemCapabilities exposes the non-sensitive, server-configured onboarding policy used
-// to render the management form. The isolated Agent still performs authoritative validation.
+// GetSubsystemCapabilities 暴露服务端配置的非敏感接入策略，供渲染管理表单；
+// 权威校验仍由隔离部署 Agent 执行。
 func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	if _, ok := subsystemPrincipal(writer, request); !ok {
 		return
@@ -1118,7 +1170,7 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemCapabilities(writer stdht
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统部署能力查询成功", response)
 }
 
-// SubsystemHealthEntry describes the integration health of one subsystem environment.
+// SubsystemHealthEntry 描述单个子系统环境的集成健康度。
 type SubsystemHealthEntry struct {
 	ApplicationCode   string `json:"application_code"`
 	ApplicationName   string `json:"application_name"`
@@ -1136,8 +1188,7 @@ type SubsystemHealthEntry struct {
 	NextAction        string `json:"next_action,omitempty"`
 }
 
-// GetSubsystemHealthDashboard returns the integration health of all subsystems
-// for the current tenant. It is a read-only diagnostic endpoint.
+// GetSubsystemHealthDashboard 返回当前租户全部子系统的集成健康度，只读诊断端点。
 func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -1229,14 +1280,9 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemHealthDashboard(writer st
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "子系统健康状态查询成功", entries)
 }
 
-// SyncKeycloakClient creates or updates the selected subsystem's Keycloak RP
-// and its required token claim mappers.  It is deliberately separate from the
-// issuer switch: a successful Admin API write is not proof that brokered login
-// has been tested, so the final runtime cutover remains fail-closed.
-// VerifyKeycloakBrokerLogin records evidence from the dedicated Keycloak user
-// JWT verification route. The route middleware fixes the issuer and verifies
-// the signature before this handler binds the token identity and audience to a
-// single application environment.
+// VerifyKeycloakBrokerLogin 从专用 Keycloak 用户 JWT 校验路由记录证据；
+// 路由中间件先固定 Issuer 并验签，本 handler 再把令牌身份与受众绑定到
+// 单个应用环境。
 func (handler *SubsystemOnboardingHandler) VerifyKeycloakBrokerLogin(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	claims, ok := keycloakctx.BrokerClaimsFromContext(request.Context())
 	if !ok {
@@ -1266,14 +1312,13 @@ func (handler *SubsystemOnboardingHandler) VerifyKeycloakBrokerLogin(writer stdh
 	}
 	applicationID, environmentID, found := handler.resolveApplicationContextForIdentity(request, claims.TenantID, claims.IdentityID, payload.ApplicationCode, payload.Environment)
 	if !found {
-		// Do not disclose whether a target outside the current session's portal
-		// visibility exists.
+		// 不得泄露当前会话门户可见范围之外的目标是否存在。
 		handler.writeError(writer, request, application.ErrValidation)
 		return
 	}
 	recorder, ok := handler.keycloakReadiness.(keycloakBrokerLoginVerificationRecorder)
 	if !ok {
-		// Missing durable recorder is a fail-closed deployment configuration.
+		// 缺少持久化记录器属于失败关闭的部署配置。
 		handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 		return
 	}
@@ -1300,6 +1345,9 @@ func containsExactAudience(audience []string, expected string) bool {
 	return false
 }
 
+// SyncKeycloakClient 创建或更新所选子系统的 Keycloak RP 及其必需的 token claim mapper。
+// 刻意与 Issuer 切换分离：Admin API 写入成功不能证明代理登录已被实测，
+// 最终运行时切换保持失败关闭。
 func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	if _, ok := subsystemPrincipal(writer, request); !ok {
 		return
@@ -1381,9 +1429,8 @@ func (handler *SubsystemOnboardingHandler) SyncKeycloakClient(writer stdhttp.Res
 		}
 	}
 	writer.Header().Set("Cache-Control", "no-store, private")
-	// The Admin API calls above prove only the first two gates for this
-	// request.  If a deployment has an authoritative verifier, ask it for the
-	// complete per-environment evidence; otherwise retain the partial result.
+	// 上述 Admin API 调用只证明本次请求的前两道门禁。部署若配有权威校验器，
+	// 应向其索取完整的环境级证据；否则保留部分结果，不自行放行。
 	readiness := keycloakSyncReadiness()
 	if handler.keycloakReadiness != nil {
 		readiness = handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, payload.ApplicationCode, payload.Environment)
@@ -1424,9 +1471,8 @@ func (handler *SubsystemOnboardingHandler) ensureWebOAuthClient(ctx context.Cont
 	return created.Client, nil
 }
 
-// writeKeycloakSyncFailure keeps the external contract deliberately non-sensitive while
-// preserving enough stage information for an operator to select the right remediation.
-// The original error is logged only on the server and correlated with the request ID.
+// writeKeycloakSyncFailure 保持对外契约刻意非敏感，同时保留足够阶段信息让运维
+// 选择正确的修复动作。原始错误只在服务端记录，并以请求 ID 关联。
 func (handler *SubsystemOnboardingHandler) writeKeycloakSyncFailure(writer stdhttp.ResponseWriter, request *stdhttp.Request, payload subsystemLifecycleRequest, stage string, err error) {
 	detail, nextAction := keycloakSyncFailureGuidance(stage)
 	handler.logger.Warn("Keycloak Client synchronization failed",
@@ -1464,130 +1510,36 @@ func keycloakSyncFailureGuidance(stage string) (detail, nextAction string) {
 	}
 }
 
-// UpdateSubsystem handles POST /api/v1/subsystem-update. The handler assumes the caller has
-// already updated any DB aggregate (Environment base URL, OAuth redirect URI) via the regular
-// management PATCH endpoints. This endpoint only re-runs the provisioner so the running subsystem
-// picks up the new .env.local values and the portal gateway is reloaded.
+// UpdateSubsystem 处理 POST /api/v1/subsystem-update。调用方必须先经常规管理
+// PATCH 端点更新数据库聚合（Environment 基址、OAuth redirect URI）；本端点只重跑
+// provisioner，让运行中的子系统拿到新的 .env.local 值并重载门户网关。
 func (handler *SubsystemOnboardingHandler) UpdateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	handler.updateSubsystem(writer, request, "", "UPDATE")
 }
 
-// AdoptSubsystem brings a directory-only environment under the deployment
-// state machine. It is intentionally separate from update: callers cannot
-// accidentally treat an unmanaged runtime as already deployed.
+// AdoptSubsystem 把仅在目录中登记的环境纳入部署状态机。刻意与 update 分开：
+// 调用方无法把未受管的运行时误当成"已部署"处理。
 func (handler *SubsystemOnboardingHandler) AdoptSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	handler.updateSubsystem(writer, request, "", "ADOPT")
 }
 
-// SwitchToKeycloak is the explicit authentication-integration cutover action.
-// Its target issuer is intentionally fixed by the server so a browser cannot
-// turn a Keycloak switch request into an arbitrary provider update.
+// SwitchToKeycloak 是显式的认证集成切换动作。目标 Issuer 由服务端固定下发，
+// 浏览器无法把一次 Keycloak 切换请求变成任意的提供方变更。
 func (handler *SubsystemOnboardingHandler) SwitchToKeycloak(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	handler.updateSubsystem(writer, request, "keycloak", "UPDATE")
 }
 
-// RollbackToPlatform is the explicit authentication-integration rollback
-// action. It reuses the same controlled deployment workflow as legacy
-// subsystem updates while pinning the target issuer to Basic Platform.
+// RollbackToPlatform 是显式的认证集成回滚动作。复用与旧版子系统更新相同的
+// 受控部署工作流，同时把目标 Issuer 固定为 Basic Platform。
 func (handler *SubsystemOnboardingHandler) RollbackToPlatform(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	handler.updateSubsystem(writer, request, "platform", "UPDATE")
 }
 
-type updateServiceCredentialRequirement struct {
-	purpose    string
-	suffix     string
-	clientName string
-	scope      string
-	rotate     bool
-}
+type updateServiceCredentialRequirement = application.SubsystemUpdateServiceCredentialRequirement
 
 func updateServiceCredentialRequirements(applicationCode string) []updateServiceCredentialRequirement {
-	fileGateway := updateServiceCredentialRequirement{
-		purpose: application.ServiceCredentialFileGatewayWrite, suffix: "file-gateway-writer",
-		clientName: "文件网关写入器", scope: "platform:file:upload", rotate: true,
-	}
-	switch applicationCode {
-	case "contract_management":
-		return []updateServiceCredentialRequirement{
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "合同管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
-			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "合同管理系统 Owner Directory Reader", scope: "owner_directory.read"},
-			// 外部合同创建会同步校验 CRM 客户和商机。历史环境可能早于该集成能力，
-			// 受控更新必须创建或轮换凭据并把明文 Secret 重新下发到运行文件。
-			{purpose: application.ServiceCredentialCRMContractReferenceRead, suffix: "crm-contract-reference", clientName: "合同管理系统 CRM Contract Reference Reader", scope: "customer.contract_reference.read", rotate: true},
-			{purpose: application.ServiceCredentialProjectContractImport, suffix: "project-integration", clientName: "合同管理系统 Project Contract Importer", scope: "project.contract.import", rotate: true},
-			fileGateway,
-		}
-	case "customer_and_opportunity":
-		// Audit and notification secrets are runtime delivery credentials. Existing
-		// installations may predate notification_ingest or may contain a credential
-		// delivered for another environment, so every controlled update rotates and
-		// redelivers both values atomically with the environment file.
-		return []updateServiceCredentialRequirement{
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户与商机管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
-			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "客户与商机管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
-			{purpose: application.ServiceCredentialContractSummaryRead, suffix: "contract-summary", clientName: "客户与商机管理系统 Contract Summary Reader", scope: "contract.summary.read", rotate: true},
-			// CRM 的已签约商机写入接口必须使用独立的 opportunity.signed.write
-			// 服务 Client。首次接入按清单创建；受控重试也必须轮换/重建并把明文 Secret
-			// 重新交付给 Agent，否则历史部分失败环境会持续缺少 CONTRACT_CLIENT_SECRET。
-			{purpose: application.ServiceCredentialContractOpportunitySignedWrite, suffix: "opportunity-intake", clientName: "客户与商机管理系统 Contract Opportunity Signed Writer", scope: "opportunity.signed.write", rotate: true},
-			// 客户管理负责人/组织选择依赖平台 Owner Directory；更新流程必须像首次接入一样
-			// 确保该机器凭据存在并重新下发，否则运行时会因缺少凭据直接拒绝启动。
-			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "客户与商机管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
-			{purpose: application.ServiceCredentialContractOpportunitySignedCountRead, suffix: "contract-signed-count", clientName: "客户与商机管理系统 Contract Opportunity Signed Count Reader", scope: "contract.opportunity_signed_count.read", rotate: true},
-			fileGateway,
-		}
-	case "customer_portal":
-		// Portal 的服务凭据同时会被写入 portal.env 与 customer.env：门户 API
-		// 负责身份映射/邀请校验，CRM 侧的补偿 Worker 负责异步修复跨系统状态。
-		// 旧版本部署可能已经创建了这些 OAuth Client，但运行时文件没有收到
-		// 明文 Secret；受控更新必须重新签发并原子下发，不能依赖只写密钥回读。
-		return []updateServiceCredentialRequirement{
-			// Portal API publishes audit events during startup/runtime. Directory-only
-			// adoption must create and redeliver this credential just like first-time
-			// onboarding; otherwise the production manifest fails closed before any
-			// portal container can start.
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "客户自助门户 Audit Publisher", scope: "audit.ingest", rotate: true},
-			{purpose: application.ServiceCredentialExternalUserProvision, suffix: "external-user-provision", clientName: "客户自助门户 External User Provisioner", scope: "external_user.provision", rotate: true},
-			{purpose: application.ServiceCredentialApplicationRoleAssign, suffix: "role-assign", clientName: "客户自助门户 Application Role Assigner", scope: "application_role.assign", rotate: true},
-			{purpose: application.ServiceCredentialApplicationRoleRevoke, suffix: "role-revoke", clientName: "客户自助门户 Application Role Revoker", scope: "application_role.revoke", rotate: true},
-			{purpose: application.ServiceCredentialPortalMappingProvision, suffix: "portal-mapping-provision", clientName: "客户自助门户 Portal Identity Mapping Provisioner", scope: "portal.identity_mapping.provision", rotate: true},
-			{purpose: application.ServiceCredentialPortalMappingDisable, suffix: "portal-mapping-disable", clientName: "客户自助门户 Portal Identity Mapping Disabler", scope: "portal.identity_mapping.disable", rotate: true},
-			{purpose: application.ServiceCredentialPortalInviteVerify, suffix: "portal-invite-verify", clientName: "客户自助门户 Portal Invite Verifier", scope: "portal.invite.verify", rotate: true},
-			fileGateway,
-		}
-	case "data_analysis":
-		return []updateServiceCredentialRequirement{
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "数据看板与统计分析系统 Audit Publisher", scope: "audit.ingest", rotate: true},
-			// 合同与项目读取凭据必须分离；任一密钥泄露时不能横向读取另一业务域。
-			{purpose: application.ServiceCredentialContractDashboardRead, suffix: "contract-dashboard", clientName: "数据看板合同看板读取器", scope: "dashboard.contract.read", rotate: true},
-			{purpose: application.ServiceCredentialProjectDashboardRead, suffix: "project-dashboard", clientName: "数据看板项目看板读取器", scope: "dashboard.project.read", rotate: true},
-			fileGateway,
-		}
-	case "project_management":
-		// 服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读负责人目录凭据；
-		// 人工新建项目必须通过独立机器身份读取已审批合同。受控更新/重试必须像首次
-		// 接入一样补齐并重新下发这些凭据，否则运行时会因缺少 Secret 而拒绝部署。
-		return []updateServiceCredentialRequirement{
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "项目管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
-			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "项目管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
-			// 自动化规则命中后把站内信投递到平台统一 outbox。
-			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-ingest", clientName: "项目管理系统 站内信投递器", scope: "notification.ingest", rotate: true},
-			{purpose: application.ServiceCredentialContractApprovedRead, suffix: "contract-approved-reader", clientName: "项目管理系统 Approved Contract Reader", scope: "contract.approved.internal.read", rotate: true},
-			fileGateway,
-		}
-	case "settlement", "settlement_and_invoicing":
-		// Settlement 的实际应用编码是 settlement。保留旧编码仅用于历史环境
-		// 兼容；更新和重试必须补发运行时真实使用的审计、通知、人员目录及
-		// 文件网关凭据，不能因为编码漂移静默返回空凭据集合。
-		return []updateServiceCredentialRequirement{
-			{purpose: application.ServiceCredentialAuditIngest, suffix: "audit-publisher", clientName: "结算与开票管理系统 Audit Publisher", scope: "audit.ingest", rotate: true},
-			{purpose: application.ServiceCredentialNotificationIngest, suffix: "notification-publisher", clientName: "结算与开票管理系统 Notification Publisher", scope: "notification.ingest", rotate: true},
-			{purpose: application.ServiceCredentialOwnerDirectoryRead, suffix: "owner-directory", clientName: "结算与开票管理系统 Owner Directory Reader", scope: "owner_directory.read", rotate: true},
-			fileGateway,
-		}
-	default:
-		return nil
-	}
+	// 需求表已提取到应用层（逐行复制）；这里转调，使既有用例成为等价性证明。
+	return application.SubsystemUpdateServiceCredentialRequirements(applicationCode)
 }
 
 func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, operation string) ([]application.SubsystemServiceCredential, error) {
@@ -1608,9 +1560,13 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 	}
 	credentials := make([]application.SubsystemServiceCredential, 0, len(requirements))
 	for _, requirement := range requirements {
-		clientID := applicationCode + "-" + environment + "-" + requirement.suffix
+		clientID := applicationCode + "-" + environment + "-" + requirement.Suffix
 		if client, ok := byClientID[clientID]; ok {
 			if !strings.EqualFold(client.Status, "ACTIVE") || client.ApplicationID != applicationID || client.EnvironmentID != environmentID {
+				return nil, application.ErrConflict
+			}
+			if (p1ServicePurpose(requirement.Purpose) || applicationCode == "contract_management" && requirement.Purpose == application.ServiceCredentialNotificationIngest) &&
+				(client.TenantID != tenantID || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || !sameStringSet(client.GrantTypes, []string{"client_credentials"})) {
 				return nil, application.ErrConflict
 			}
 			desiredScopes := serviceCredentialScopes(requirement)
@@ -1625,27 +1581,34 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 					return nil, err
 				}
 			}
-			// A retry always creates a recoverable replacement because a prior secret
-			// may have been minted immediately before an Agent failure. Credentials
-			// marked rotate are also redelivered on normal controlled updates.
-			if operation != "RETRY" && !requirement.rotate {
+			// 接管与重试要生成可恢复的替换凭据：此前生成的 Secret 可能恰在 Agent 失败前
+			// 刚刚签发。标记 rotate 的凭据在普通受控更新中同样会重新下发。
+			if operation != "RETRY" && operation != "ADOPT" && !requirement.Rotate {
+				if p1ServicePurpose(requirement.Purpose) {
+					credentials = append(credentials, application.SubsystemServiceCredential{Purpose: requirement.Purpose, OAuthClient: client})
+				}
 				continue
 			}
+			var expectedVersion *uint64
+			if p1ServicePurpose(requirement.Purpose) {
+				v := client.Version
+				expectedVersion = &v
+			}
 			secret, secretErr := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{
-				TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID,
+				TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID, ExpectedClientVersion: expectedVersion,
 			})
 			if secretErr != nil {
 				return nil, secretErr
 			}
 			credentials = append(credentials, application.SubsystemServiceCredential{
-				Purpose: requirement.purpose, OAuthClient: client, PlaintextSecret: secret.PlaintextSecret,
+				Purpose: requirement.Purpose, OAuthClient: client, PlaintextSecret: secret.PlaintextSecret,
 			})
 			continue
 		}
 		scopes := serviceCredentialScopes(requirement)
 		created, createErr := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
 			TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
-			ClientID: clientID, ClientName: requirement.clientName, ClientType: "service",
+			ClientID: clientID, ClientName: requirement.ClientName, ClientType: "service",
 			TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
 			GrantTypes: []string{"client_credentials"}, Scopes: scopes,
 		})
@@ -1653,17 +1616,71 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 			return nil, createErr
 		}
 		credentials = append(credentials, application.SubsystemServiceCredential{
-			Purpose: requirement.purpose, OAuthClient: created.Client, PlaintextSecret: created.PlaintextSecret,
+			Purpose: requirement.Purpose, OAuthClient: created.Client, PlaintextSecret: created.PlaintextSecret,
 		})
 	}
 	return credentials, nil
 }
 
+// ensureInitialPlatformBrowserCredential 面向只写的平台浏览器初始 Secret：
+// 仅受信任的首次接管/重试路径可为既有绑定客户端铸造新版本。
+func (handler *SubsystemOnboardingHandler) ensureInitialPlatformBrowserCredential(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, redirectURI string) (application.OAuthClientView, string, error) {
+	if handler.serviceCredentials == nil || applicationID == "" || environmentID == "" {
+		return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+	}
+	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return application.OAuthClientView{}, "", err
+	}
+	canonical := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
+	for _, client := range clients {
+		if client.ClientID != canonical {
+			continue
+		}
+		if client.ApplicationID != applicationID || client.EnvironmentID != environmentID || !strings.EqualFold(client.Status, "ACTIVE") || client.ClientType != "confidential" || client.TokenAuthMethod != "client_secret_basic" || !containsExactString(client.GrantTypes, "authorization_code") || !client.RequirePKCE || !containsExactString(client.RedirectURIs, redirectURI) {
+			return application.OAuthClientView{}, "", application.ErrConflict
+		}
+		secret, err := handler.serviceCredentials.CreateOAuthClientSecret(ctx, application.OAuthClientSecretCreateInput{TenantID: tenantID, OAuthClientID: client.ID, OperatorID: operatorID})
+		if err != nil {
+			return application.OAuthClientView{}, "", err
+		}
+		if strings.TrimSpace(secret.PlaintextSecret) == "" {
+			return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+		}
+		return client, secret.PlaintextSecret, nil
+	}
+	if strings.TrimSpace(redirectURI) == "" {
+		return application.OAuthClientView{}, "", application.ErrValidation
+	}
+	created, err := handler.serviceCredentials.CreateOAuthClient(ctx, application.OAuthClientCreateInput{
+		TenantID: tenantID, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operatorID,
+		ClientID: canonical, ClientName: applicationCode + " Web", ClientType: "confidential", TokenAuthMethod: "client_secret_basic",
+		AccessTokenTTLSeconds: 15 * 60, RefreshTokenTTLSeconds: 30 * 24 * 60 * 60,
+		RequirePKCE: true, GrantTypes: []string{"authorization_code", "refresh_token"}, Scopes: []string{"openid", "profile"}, RedirectURIs: []string{redirectURI},
+	})
+	if err != nil {
+		return application.OAuthClientView{}, "", err
+	}
+	if strings.TrimSpace(created.PlaintextSecret) == "" {
+		return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
+	}
+	return created.Client, created.PlaintextSecret, nil
+}
+
+func containsExactString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 // serviceCredentialScopes 返回指定机器凭据的完整最小权限集合。
 // 文件网关客户端需要上传、绑定及按文件 ID 回读；其他用途保持单一 Scope。
 func serviceCredentialScopes(requirement updateServiceCredentialRequirement) []string {
-	scopes := []string{requirement.scope}
-	if requirement.purpose == application.ServiceCredentialFileGatewayWrite {
+	scopes := []string{requirement.PrimaryScope()}
+	if requirement.Purpose == application.ServiceCredentialFileGatewayWrite {
 		scopes = append(scopes, "platform:file:bind", "platform:file:download")
 	}
 	return scopes
@@ -1687,10 +1704,9 @@ func sameStringSet(left, right []string) bool {
 	return true
 }
 
-// ensureCatalogPublisherCredential recovers a publish capability for a controlled
-// retry without attempting to read a stored secret. Secrets are write-only, so a
-// new version is minted exclusively for the trusted deployment Agent and never
-// returned to the browser.
+// ensureCatalogPublisherCredential 为受控重试恢复目录发布能力，且绝不尝试读取
+// 已存储的 Secret。Secret 是只写的：新版本只为受信任的部署 Agent 铸造，
+// 绝不返回给浏览器。
 func (handler *SubsystemOnboardingHandler) ensureCatalogPublisherCredential(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID string) (application.OAuthClientView, string, error) {
 	if handler.serviceCredentials == nil {
 		return application.OAuthClientView{}, "", application.ErrSubsystemProvisioningUnavailable
@@ -1753,13 +1769,17 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		return
 	}
 	isRetry := requestedOperation == "RETRY" || strings.HasSuffix(strings.TrimRight(request.URL.Path, "/"), "/subsystem-retry")
-	// 普通更新不会无条件轮换浏览器 OAuth 密钥；只有认证切换或目录恢复时才会把
-	// 新密钥交给部署 Agent。授权目录发布凭据则例外：它是应用绑定的机器身份，
+	// 平台签发的浏览器密钥不在普通更新中轮换。Keycloak 环境则需重新读取当前
+	// RP 密钥并交给 Agent，修复运行配置漂移；读取不是轮换。授权目录发布凭据
+	// 是应用绑定的机器身份，
 	// 每次受控更新都必须重新下发，才能修复旧环境中遗留的占位值或已失效密钥。
-	effectiveIssuerAlias := handler.effectiveIssuerAlias(payload.IssuerAlias)
-	// An explicit /switch request is always a cutover attempt, even if a legacy
-	// browser first updated issuer_alias optimistically.  Otherwise the generic
-	// metadata write could accidentally bypass the observation-window gate.
+	effectiveIssuerAlias, aliasErr := handler.deploymentIssuerAlias(request.Context(), principal.Tenant.ID, applicationCode, environment, payload.IssuerAlias, forcedIssuerAlias)
+	if aliasErr != nil {
+		handler.writeError(writer, request, aliasErr)
+		return
+	}
+	// 显式 /switch 请求始终视为一次切换尝试，即使旧版浏览器已先行乐观更新了
+	// issuer_alias。否则通用元数据写入可能意外绕过观察期门禁。
 	keycloakCutover := strings.EqualFold(effectiveIssuerAlias, "keycloak") && (strings.EqualFold(forcedIssuerAlias, "keycloak") || handler.keycloakCutoverRequired(request.Context(), principal.Tenant.ID, applicationCode, environment))
 	if keycloakCutover {
 		readiness := handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, applicationCode, environment)
@@ -1778,9 +1798,8 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 			return
 		}
 	}
-	// As with cutover, explicit rollback must not rely on a browser's previous
-	// issuer_alias update. The lifecycle store is the source of truth for the
-	// rollback deadline and rejects a platform-only environment safely.
+	// 与切换同理，显式回滚不得依赖浏览器此前的 issuer_alias 更新。生命周期存储是
+	// 回滚截止期限的事实来源，并对仅平台环境安全拒绝。
 	keycloakRollback := strings.EqualFold(forcedIssuerAlias, "platform")
 	if keycloakRollback {
 		if handler.keycloakCutover == nil {
@@ -1799,33 +1818,23 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
-	updateInput := application.SubsystemProvisioningInput{
-		TenantID:         principal.Tenant.ID,
-		ApplicationCode:  applicationCode,
-		Environment:      environment,
-		ManifestChecksum: handler.manifestChecksumForTarget(applicationCode, environment),
-		// Issuer is required by the post-rebuild catalog sync (it issues the PUT against
-		// the platform's /authorization-catalog endpoint). Use the platform-configured OIDC
-		// issuer as a stable source of truth instead of having the client send it in.
-		Issuer:                      issuer,
-		AuthenticationRuntimeUpdate: keycloakCutover || keycloakRollback,
-	}
+	// 网关字段的裁剪与派生规则在应用层统一实现（BuildSubsystemUpdateProvisioningInput）；
+	// 这里保留局部变量供后续受控步骤（凭据刷新、发布者凭据）复用。
 	publicBaseURL := strings.TrimRight(strings.TrimSpace(payload.PublicBaseURL), "/")
 	upstreamURL := strings.TrimRight(strings.TrimSpace(payload.UpstreamURL), "/")
 	pathPrefix := strings.TrimRight(strings.TrimSpace(payload.PathPrefix), "/")
-	// When the management page supplies the current gateway fields, carry the derived
-	// browser URLs to the Agent so a changed host/port updates both runtime config and
-	// the OIDC callback without re-onboarding the environment. Legacy callers may omit
-	// the fields and retain the rebuild-only behavior.
-	if publicBaseURL != "" || upstreamURL != "" || pathPrefix != "" {
-		if publicBaseURL == "" || upstreamURL == "" || pathPrefix == "" {
-			handler.writeError(writer, request, application.ErrValidation)
-			return
-		}
-		updateInput.PublicURL = publicBaseURL + pathPrefix + "/"
-		updateInput.RedirectURI = publicBaseURL + pathPrefix + "/auth/callback"
-		updateInput.PathPrefix = pathPrefix
-		updateInput.UpstreamURL = upstreamURL
+	// 装配逻辑提取到应用层（BuildSubsystemUpdateProvisioningInput）：统一入口与旧路径共用同一份派生与校验，
+	// 避免两套实现漂移；凭据仍在后续受控步骤中解析后填充。
+	updateInput, err := application.BuildSubsystemUpdateProvisioningInput(application.SubsystemUpdateProvisioningAssembly{
+		TenantID: principal.Tenant.ID, ApplicationCode: applicationCode, Environment: environment,
+		ManifestChecksum: handler.manifestChecksumForTarget(applicationCode, environment),
+		Issuer:           issuer, AuthenticationProvider: effectiveIssuerAlias,
+		AuthenticationRuntimeUpdate: keycloakCutover || keycloakRollback,
+		PublicBaseURL:               payload.PublicBaseURL, UpstreamURL: payload.UpstreamURL, PathPrefix: payload.PathPrefix,
+	})
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
 	}
 	// 生产模式下 Agent 只接受随发布包审核的清单目标，并要求请求携带清单校验和。API 侧
 	// 若解析不到目标（清单缺失，或 platform-api 与 subsystem-provisioner 的部署模式
@@ -1838,18 +1847,32 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 			return
 		}
 	}
-	// Directory-only registration deliberately does not create runtime credentials.  A
-	// subsequent ADOPT/RETRY must therefore re-resolve the Keycloak web Client and pass its
-	// current secret to the Agent; otherwise the Agent starts the container with
-	// PENDING_ONBOARDING and the application fails with a catalog-token 401.
+	// 每次携带显式网关字段的受控 Keycloak 重建都要调和 RP 凭据，而不只是 ADOPT/RETRY。
+	// 此前普通 UPDATE 会保留过期的运行时 Secret，即使 Client 映射与容器都健康，
+	// OIDC 回调仍会报 unauthorized_client。EnsureClient 只读取既有 Secret，
+	// 不轮换、也不暴露给浏览器。
 	keycloakRuntimeCredentialRefresh := strings.EqualFold(effectiveIssuerAlias, "keycloak") &&
-		(requestedOperation == "ADOPT" || isRetry) && !keycloakCutover
-	ensureKeycloakCredentials := func() bool {
-		if keycloakRuntimeCredentialRefresh && handler.keycloakControl != nil && strings.TrimSpace(updateInput.RedirectURI) != "" {
+		!keycloakCutover && strings.TrimSpace(updateInput.RedirectURI) != ""
+	ensureKeycloakCredentials := func(applicationID, environmentID string) bool {
+		if keycloakRuntimeCredentialRefresh {
+			if handler.keycloakControl == nil {
+				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+				return false
+			}
 			canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
 			resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
+			if resolver, ok := handler.keycloakMappings.(keycloakClientCompatibilityResolver); ok {
+				effective, resolveErr := resolver.ResolveEffectiveKeycloakClient(request.Context(), principal.Tenant.ID, applicationID, environmentID, canonicalClientID)
+				if resolveErr != nil {
+					handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+					return false
+				}
+				if strings.TrimSpace(effective.ClientID) != "" {
+					resolution = effective
+				}
+			}
 			client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
-			if clientErr != nil {
+			if clientErr != nil || client.ClientID != resolution.ClientID || strings.TrimSpace(client.ClientSecret) == "" {
 				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 				return false
 			}
@@ -1893,18 +1916,16 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		}
 		return true
 	}
-	// Resolve identifiers from the deployment control plane, not the portal projection: failed
-	// and updating environments are intentionally hidden from the user-facing portal catalog.
+	// 标识符从部署控制面解析，而不是门户投影：失败与更新中的环境被刻意隐藏在
+	// 用户可见的门户目录之外。
 	var deploymentContext application.SubsystemDeploymentState
 	environmentID := ""
 	if handler.deploymentState != nil {
 		state, err := handler.deploymentState.GetSubsystemDeploymentContext(request.Context(), principal.Tenant.ID, applicationCode, environment)
 		if err != nil {
-			// A directory-only registration has application/environment records but no
-			// deployment-state row yet.  The UI exposes the recovery action as “retry”
-			// after a failed first deployment, so treat RETRY like ADOPT at this
-			// boundary.  ResolveApplicationEnvironment still enforces that the target
-			// is a known, tenant-scoped application; unknown targets remain 404.
+			// 仅目录登记的应用/环境还没有部署状态行。首次部署失败后 UI 以"重试"暴露
+			// 恢复动作，因此在该边界把 RETRY 视同 ADOPT。ResolveApplicationEnvironment
+			// 仍会校验目标是已知的租户内应用；未知目标保持 404。
 			if requestedOperation != "ADOPT" && !isRetry || !errors.Is(err, application.ErrNotFound) {
 				handler.writeError(writer, request, err)
 				return
@@ -1959,6 +1980,10 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	if isRetry {
 		operation = "RETRY"
 	}
+	if provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider); ok {
+		updateInput.InitialRuntimeProvisioning = handler.deploymentState != nil && strings.EqualFold(provider.Capabilities().Mode, "production") &&
+			(operation == "ADOPT" || (operation == "RETRY" && deploymentContext.Status == application.SubsystemDeploymentStatusFailed)) && deploymentContext.AppliedManifestChecksum == "" && deploymentContext.ManifestLastAppliedAt == nil
+	}
 	if requiresCatalogPublisherCredential(applicationCode) && handler.serviceCredentials == nil {
 		// 授权目录发布凭据为只写密钥，缺少凭据管理器时绝不能假装更新成功并让
 		// Agent 启动一个仍使用占位值的容器。
@@ -2007,8 +2032,23 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 			handler.markDeploymentFailureDetached(subsystemDeploymentJob{TenantID: principal.Tenant.ID, ApplicationCode: applicationCode, Environment: environment, Operation: operation, Generation: generation}, "DEPLOYMENT_PREPARATION_FAILED", "部署准备失败，请点击重试")
 		}
 	}()
-	if !ensureKeycloakCredentials() {
+	relatedClients, relatedErr := handler.relatedServiceClients(request.Context(), principal.Tenant.ID, applicationCode, environment)
+	if relatedErr != nil {
+		handler.writeError(writer, request, relatedErr, "contract integration dependency")
 		return
+	}
+	updateInput.RelatedServiceClients = relatedClients
+	if !ensureKeycloakCredentials(updateInput.ApplicationID, environmentID) {
+		return
+	}
+	if updateInput.InitialRuntimeProvisioning && !strings.EqualFold(effectiveIssuerAlias, "keycloak") {
+		client, secret, err := handler.ensureInitialPlatformBrowserCredential(request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID, applicationCode, environment, principal.User.ID, updateInput.RedirectURI)
+		if err != nil {
+			handler.writeError(writer, request, err)
+			return
+		}
+		updateInput.ClientID, updateInput.ClientSecret = client.ClientID, secret
+		updateInput.AuthenticationRuntimeUpdate = true
 	}
 	serviceCredentials, credentialErr := handler.ensureUpdateServiceCredentials(
 		request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID,
@@ -2019,6 +2059,8 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		return
 	}
 	updateInput.ServiceCredentials = serviceCredentials
+	updateInput.EnvironmentID = environmentID
+
 	if handler.serviceCredentials != nil && requiresCatalogPublisherCredential(applicationCode) {
 		publisher, publisherSecret, publisherErr := handler.ensureCatalogPublisherCredential(
 			request.Context(), principal.Tenant.ID, updateInput.ApplicationID, environmentID, applicationCode, environment, principal.User.ID,
@@ -2107,10 +2149,9 @@ func requiresCatalogPublisherCredential(applicationCode string) bool {
 	}
 }
 
-// TeardownSubsystem handles POST /api/v1/subsystem-teardown. Stops containers, removes
-// .env.local, drops the portal gateway include, and reloads nginx. The HTTP layer does not
-// delete the corresponding DB rows here: the script follows up with DELETE /environments and
-// (optionally) DELETE /applications so the audit trail preserves each cleanup step.
+// TeardownSubsystem 处理 POST /api/v1/subsystem-teardown。停止容器、删除 .env.local、
+// 移除门户网关 include 并重载 nginx。HTTP 层不在此删除对应数据库行：脚本随后调用
+// DELETE /environments 与（可选的）DELETE /applications，让审计留痕保留每个清理步骤。
 func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
@@ -2161,13 +2202,15 @@ func (handler *SubsystemOnboardingHandler) TeardownSubsystem(writer stdhttp.Resp
 	)
 }
 
-// DiscardFailedSubsystemDeployment handles POST /api/v1/subsystem-deployment-discard. It is the
-// cleanup path for a half-provisioned subsystem: the control-plane record exists, the deployment
-// failed, and operators need to release the code+environment pair for a fresh onboarding. The
-// Agent teardown runs best-effort because a failed deployment may have never created containers
-// or files; the durable lifecycle record is only deleted when it is in the terminal
-// PROVISION_FAILED state. The application/environment rows are intentionally preserved — follow
-// up with DELETE /applications and DELETE /environments to free the path prefix.
+// DiscardFailedSubsystemDeployment 处理 POST /api/v1/subsystem-deployment-discard。
+// 这是半成品子系统的清理路径：控制面记录存在、部署失败，运维需要释放
+// code+environment 组合以便重新接入。
+//
+// 顺序是安全边界：先按 status+generation 原子占用记录（PROVISION_FAILED → DISCARDING），只有
+// 抢占成功的请求才执行 Agent Teardown。旧实现先 Teardown、再按 status=FAILED 删除记录，并发
+// 的「重试」把记录推进为 UPDATING 后删除会被拒绝，但 Teardown 已经拆掉了重试刚部署的环境。
+// Teardown 仍是 best-effort（失败部署可能从未创建容器或文件）；应用/环境记录刻意保留，随后
+// 用 DELETE /applications 与 DELETE /environments 释放路径前缀。
 func (handler *SubsystemOnboardingHandler) DiscardFailedSubsystemDeployment(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
@@ -2194,13 +2237,30 @@ func (handler *SubsystemOnboardingHandler) DiscardFailedSubsystemDeployment(writ
 		handler.writeError(writer, request, fmt.Errorf("deployment is not in a failed state: %s", state.Status))
 		return
 	}
-	// Best-effort infrastructure cleanup: a failed deployment may have stopped after the database
-	// commit, so containers, .env.local, or the gateway include may not exist at all.
+	now := time.Now().UTC()
+	// 先占用再销毁：占用失败说明状态已被并发推进（通常是对同一环境的「重试」已经接管），
+	// 此时继续 Teardown 会拆掉重试刚部署起来的基础设施，因此直接按冲突返回且不做任何清理。
+	claimed, claimErr := handler.deploymentState.ClaimFailedSubsystemDeploymentForDiscard(request.Context(), principal.Tenant.ID, applicationCode, environment, state.Generation, now)
+	if claimErr != nil {
+		handler.writeError(writer, request, claimErr)
+		return
+	}
+	if !claimed {
+		handler.logger.Warn("failed subsystem deployment discard skipped because the state advanced",
+			"path", request.URL.Path, "application_code", applicationCode, "environment", environment,
+			"generation", state.Generation, "actor_user_id", principal.User.ID, "actor_tenant_id", principal.Tenant.ID,
+		)
+		handler.writeError(writer, request, fmt.Errorf("%w: 该环境的部署状态已被并发操作推进（可能已开始重试），本次未清理任何基础设施；请刷新状态后确认", application.ErrConflict))
+		return
+	}
+	// 基础设施清理是尽力而为：失败部署可能在数据库提交后才停止，容器、.env.local
+	// 或网关 include 可能根本不存在。
 	if teardownErr := handler.provisioner.Teardown(request.Context(), principal.Tenant.ID, applicationCode, environment); teardownErr != nil {
 		handler.logger.Warn("discard teardown left infrastructure residue",
 			"application_code", applicationCode, "environment", environment, "error", teardownErr)
 	}
-	if err := handler.deploymentState.DiscardFailedSubsystemDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, time.Now().UTC()); err != nil {
+	// 占用时 generation 自增 1，删除必须带上占用后的代号，避免误删被看护任务收口后的记录。
+	if err := handler.deploymentState.DiscardClaimedSubsystemDeployment(request.Context(), principal.Tenant.ID, applicationCode, environment, state.Generation+1); err != nil {
 		handler.writeError(writer, request, err)
 		return
 	}
@@ -2221,30 +2281,25 @@ func (handler *SubsystemOnboardingHandler) DiscardFailedSubsystemDeployment(writ
 
 const subsystemDeploymentHTTPTimeout = 16 * time.Minute
 
-// Failure-state writes must survive a disconnected browser or a reverse proxy
-// timeout. Keep them bounded so a degraded database cannot hold the request
-// handler indefinitely while still allowing the deployment lifecycle to reach
-// a terminal state.
+// 失败状态写入必须能在浏览器断连或反向代理超时后完成。保持较短的超时，让降级的
+// 数据库不能无限占住请求 handler，同时部署生命周期仍能到达终态。
 const subsystemDeploymentFailureWriteTimeout = 10 * time.Second
 
-// A deployment state is written before the long-running Agent call. If the API
-// process is terminated during that call, the state must not remain in a
-// non-terminal status forever: the management UI only exposes retry for a
-// failed attempt. Keep this slightly above the synchronous request timeout so
-// a genuinely slow but still live deployment is not interrupted by a status
-// poll.
+// 部署状态会在长耗时 Agent 调用之前写入。若 API 进程在该调用期间被终止，
+// 状态不能永远停留在非终态：管理 UI 只对失败的尝试暴露重试。该阈值刻意略高于
+// 同步请求超时，使真正缓慢但仍存活的部署不会被状态轮询打断。
 const subsystemDeploymentStaleAfter = application.SubsystemDeploymentStaleAfter
 
-// extendSubsystemDeploymentWriteDeadline keeps the synchronous control-plane request alive for
-// the Agent's bounded 15-minute deployment window. ResponseController unwraps Gin's writer to the
-// underlying network connection; httptest and unsupported writers safely ignore the capability.
+// extendSubsystemDeploymentWriteDeadline 让同步控制面请求在 Agent 有界的 15 分钟
+// 部署窗口内保持存活。ResponseController 解包 Gin writer 直达底层网络连接；
+// httptest 与不支持的 writer 安全忽略该能力。
 func extendSubsystemDeploymentWriteDeadline(writer stdhttp.ResponseWriter) {
 	controller := stdhttp.NewResponseController(writer)
 	_ = controller.SetWriteDeadline(time.Now().Add(subsystemDeploymentHTTPTimeout))
 }
 
-// GetSubsystemStatus handles GET /api/v1/subsystem-status. It exposes durable lifecycle
-// metadata only; deployment commands, filesystem paths and credentials never cross this API.
+// GetSubsystemStatus 处理 GET /api/v1/subsystem-status。仅暴露持久化的生命周期
+// 元数据；部署命令、文件系统路径与凭据绝不经过该 API。
 func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -2262,11 +2317,9 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 	}
 	state, err := handler.deploymentState.GetSubsystemDeploymentState(request.Context(), principal.Tenant.ID, applicationCode, environment)
 	if err != nil {
-		// A manually registered application/environment predates, or intentionally
-		// bypasses, a managed deployment record. It is still a valid control-plane
-		// resource, so the status read must not turn the whole runtime card into a
-		// 404. Resolve the registry boundary first; an unknown application remains
-		// a real 404, while a known one receives an explicit safe state.
+		// 手工登记的应用/环境先于（或有意绕过）受管部署记录存在，但仍是合法的
+		// 控制面资源，因此状态读取不能把整个运行时卡片变成 404。先解析登记边界：
+		// 未知应用保持真实 404，已知应用返回明确的安全状态。
 		if !errors.Is(err, application.ErrNotFound) {
 			handler.writeError(writer, request, err)
 			return
@@ -2306,11 +2359,9 @@ func (handler *SubsystemOnboardingHandler) GetSubsystemStatus(writer stdhttp.Res
 	})
 }
 
-// GetKeycloakIntegrationStatus handles GET /api/v1/keycloak-integration/status.
-// It is separate from deployment status: the response is a durable view of
-// the selected provider, its non-sensitive Client mapping and server-checked
-// cutover gates.  Runtime credentials and arbitrary environment metadata are
-// intentionally excluded.
+// GetKeycloakIntegrationStatus 处理 GET /api/v1/keycloak-integration/status。
+// 与部署状态分开：响应是所选提供方、其非敏感 Client 映射和服务端核验切换门禁的
+// 持久视图。运行时凭据与任意环境元数据被刻意排除。
 func (handler *SubsystemOnboardingHandler) GetKeycloakIntegrationStatus(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -2387,9 +2438,8 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakIntegrationStatus(writer s
 	})
 }
 
-// KeycloakSyncStatusResponse is the focused synchronization status for one
-// subsystem environment. It includes drift detection results for operational
-// dashboards.
+// KeycloakSyncStatusResponse 是单个子系统环境的聚焦同步状态，包含供运维看板
+// 使用的漂移检测结果。
 type KeycloakSyncStatusResponse struct {
 	ApplicationCode string `json:"application_code"`
 	Environment     string `json:"environment"`
@@ -2418,8 +2468,7 @@ func (handler *SubsystemOnboardingHandler) loadKeycloakRoleCodesForDrift(ctx con
 	return handler.keycloakCatalog.ListKeycloakRoleCodes(ctx, tenantID, applicationID)
 }
 
-// GetKeycloakSyncStatus returns a focused synchronization status including
-// drift detection for one subsystem environment.
+// GetKeycloakSyncStatus 返回单个子系统环境的聚焦同步状态，含漂移检测。
 func (handler *SubsystemOnboardingHandler) GetKeycloakSyncStatus(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	principal, ok := subsystemPrincipal(writer, request)
 	if !ok {
@@ -2441,7 +2490,7 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakSyncStatus(writer stdhttp.
 		Environment:     environment,
 		Realm:           handler.keycloakRealm,
 	}
-	// Get client mapping.
+	// 读取 Client 映射。
 	if inspector, supported := handler.keycloakMappings.(keycloakClientMappingInspector); supported {
 		mapping, loadErr := inspector.GetKeycloakClientMapping(request.Context(), principal.Tenant.ID, applicationID, environmentID)
 		if loadErr != nil {
@@ -2454,10 +2503,10 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakSyncStatus(writer stdhttp.
 			response.LastSyncedAt = mapping.LastSyncedAt
 		}
 	}
-	// Get readiness.
+	// 读取切换门禁就绪状态。
 	readiness := handler.keycloakSwitchReadiness(request.Context(), principal.Tenant.ID, applicationCode, environment)
 	response.SwitchReady = readiness.SwitchReady
-	// Get drift detection if control plane is available.
+	// 控制面可用时执行漂移检测。
 	if handler.keycloakControl != nil && response.ClientID != "" {
 		roleCodes, catalogErr := handler.loadKeycloakRoleCodesForDrift(request.Context(), principal.Tenant.ID, applicationID)
 		if catalogErr != nil {
@@ -2511,10 +2560,9 @@ func (handler *SubsystemOnboardingHandler) GetKeycloakSyncStatus(writer stdhttp.
 	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "Keycloak 同步状态查询成功", response)
 }
 
-// recoverStaleSubsystemDeployment closes the only lifecycle states that can be
-// left behind by an API/Agent restart. The transition is deliberately performed
-// from the authenticated status path, so an operator refreshing the page can
-// recover the UI without a direct database operation or a second onboarding.
+// recoverStaleSubsystemDeployment 只收口 API/Agent 重启可能遗留的生命周期状态。
+// 转移刻意从已认证的状态读取路径执行，运维刷新页面即可恢复界面，
+// 无需直接操作数据库或重新发起接入。
 func (handler *SubsystemOnboardingHandler) recoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState) application.SubsystemDeploymentState {
 	if !staleSubsystemDeployment(state, time.Now().UTC()) {
 		return state
@@ -2545,7 +2593,8 @@ func (handler *SubsystemOnboardingHandler) recoverStaleSubsystemDeployment(ctx c
 func staleSubsystemDeployment(state application.SubsystemDeploymentState, now time.Time) bool {
 	if state.Status != application.SubsystemDeploymentStatusProvisioning &&
 		state.Status != application.SubsystemDeploymentStatusUpdating &&
-		state.Status != application.SubsystemDeploymentStatusVerifying {
+		state.Status != application.SubsystemDeploymentStatusVerifying &&
+		state.Status != application.SubsystemDeploymentStatusDiscarding {
 		return false
 	}
 	if state.StartedAt == nil {
@@ -2567,6 +2616,9 @@ func subsystemDeploymentStateNextAction(state application.SubsystemDeploymentSta
 	}
 	if state.LastErrorCode == "INITIAL_ACCESS_ASSIGNMENT_FAILED" || state.LastErrorCode == "INITIAL_ACCESS_STATE_FAILED" {
 		return "部署运行时已完成，但初始管理员授权尚未完成；确认目标用户有效且授权目录已同步后，点击“重试”"
+	}
+	if _, nextAction := runtimeLicenseApprovalDiagnostic(state.LastErrorCode); nextAction != "" {
+		return nextAction
 	}
 	return "请检查部署 Agent、Docker 和目标 API 健康状态，修复后在当前环境点击“重试”；不要重复新增接入"
 }
@@ -2610,10 +2662,9 @@ func validateLifecycleRequest(payload subsystemLifecycleRequest) error {
 	return nil
 }
 
-// isBuiltInPlatformApplication reports whether the (application) target is the platform's own
-// control-plane application. The value mirrors application.builtInApplicationCode, which is
-// intentionally unexported; the HTTP boundary keeps its own copy so the runtime lifecycle
-// guard cannot drift with a rename elsewhere.
+// isBuiltInPlatformApplication 判断目标应用是否是平台自身的控制面应用。
+// 取值刻意镜像未导出的 application.builtInApplicationCode：HTTP 边界保留自己的
+// 副本，使运行时生命周期守卫不因别处重命名而漂移。
 func isBuiltInPlatformApplication(applicationCode string) bool {
 	switch strings.ToLower(strings.TrimSpace(applicationCode)) {
 	case "platform", "basic_platform":
@@ -2623,9 +2674,9 @@ func isBuiltInPlatformApplication(applicationCode string) bool {
 	}
 }
 
-// writeBuiltInPlatformRuntimeBlocked rejects runtime lifecycle operations against the platform
-// application itself. The platform runtime is deployed by the platform release pipeline, never by
-// the subsystem deployment Agent, so exposing the action only produces an opaque Agent failure.
+// writeBuiltInPlatformRuntimeBlocked 拒绝针对平台应用自身的运行时生命周期操作。
+// 平台运行时由平台发布流程部署，绝不由子系统部署 Agent 部署；
+// 暴露该动作只会产生一个难以理解的 Agent 失败。
 func writeBuiltInPlatformRuntimeBlocked(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) {
 	httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
 		"IAM_PLATFORM_RUNTIME_NOT_MANAGED",
@@ -2639,10 +2690,6 @@ func writeBuiltInPlatformRuntimeBlocked(writer stdhttp.ResponseWriter, request *
 	))
 }
 
-// writeProductionManifestTargetMissing rejects a production runtime operation whose target has no
-// approved manifest checksum. This happens when the API cannot find the application/environment
-// in subsystems.d, or when platform-api and subsystem-provisioner disagree about the deployment
-// mode. Failing here keeps the lifecycle state untouched and gives the operator a concrete fix.
 // subsystemDeploymentJob 携带一次已受理的部署编排脱离 HTTP 请求执行。所有持久标识都在
 // 请求返回前捕获完成；后台步骤绝不读取 request 作用域的状态。
 type subsystemDeploymentJob struct {
@@ -2701,9 +2748,32 @@ func (handler *SubsystemOnboardingHandler) startSubsystemDeploymentJob(request *
 // 都自行把生命周期收口（脱离 ctx），编排超时也只会落在 PROVISION_FAILED，绝不冻结在
 // UPDATING。
 func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx context.Context, job subsystemDeploymentJob) error {
+	if handler.runtimeLicenses != nil {
+		if handler.runtimeLicenseSettings == nil {
+			handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_BINDING_FAILED", "授权实例绑定读取未配置", application.ErrValidation, false)
+			return application.ErrValidation
+		}
+		settings, settingsErr := handler.runtimeLicenseSettings(ctx)
+		if settingsErr != nil && !errors.Is(settingsErr, application.ErrRuntimeLicenseNotInitialized) {
+			handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_BINDING_FAILED", "授权实例绑定读取失败", settingsErr, false)
+			return settingsErr
+		}
+		if settingsErr == nil {
+			job.Input.RuntimeLicenseSettings = settings
+			credentials, err := handler.runtimeLicenses.PrepareWithSettings(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID, job.ApplicationCode, job.Environment, job.OperatorUserID, settings)
+			if err != nil {
+				handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_ENROLLMENT_FAILED", "授权运行组件登记失败；请检查批准发布清单后重试", err, false)
+				return err
+			}
+			job.Input.RuntimeLicenseCredentials = credentials
+		}
+	}
 	if job.Operation == "ONBOARD" {
 		if err := handler.provisioner.Provision(ctx, job.Input); err != nil {
 			handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败", err, true)
+			return err
+		}
+		if err := handler.waitLocalRuntimeConfirmation(ctx, job); err != nil {
 			return err
 		}
 		if err := handler.markManifestApplied(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.ManifestChecksum); err != nil {
@@ -2731,6 +2801,9 @@ func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx 
 	}
 	if err := handler.provisioner.Update(ctx, job.Input); err != nil {
 		handler.closeFailedDeployment(ctx, job, "DEPLOYMENT_AGENT_FAILED", "部署 Agent 执行失败", err, true)
+		return err
+	}
+	if err := handler.waitLocalRuntimeConfirmation(ctx, job); err != nil {
 		return err
 	}
 	if err := handler.markManifestApplied(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.ManifestChecksum); err != nil {
@@ -2769,41 +2842,65 @@ func (handler *SubsystemOnboardingHandler) runSubsystemDeploymentCompletion(ctx 
 	return nil
 }
 
-// completeOnboardKeycloakProjection 完成 Keycloak 优先接入的角色目录投影与就绪标记；
-// 任一步失败都把生命周期收口为对应错误码（与同步时代的错误码一一对应）。
+// completeOnboardKeycloakProjection 完成 Keycloak 优先接入的角色目录投影与就绪标记。
+//
+// 具体步骤由共享应用服务 KeycloakAuthorizationProjectionService 实现：新旧接入入口
+// 调用同一份逻辑，避免"新入口迁移了主步骤、却漏掉旧流程必要处理"的漂移。
 func (handler *SubsystemOnboardingHandler) completeOnboardKeycloakProjection(ctx context.Context, job subsystemDeploymentJob) error {
 	if job.KeycloakClientID == "" {
 		return nil
 	}
 	if handler.keycloakCatalog == nil || handler.keycloakMappings == nil {
-		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_MAPPING_UNAVAILABLE", "Keycloak 授权映射组件不可用", nil, false)
+		handler.closeFailedDeployment(ctx, job, application.KeycloakProjectionCodeMappingUnavailable, "Keycloak 授权映射组件不可用", nil, false)
 		return application.ErrSubsystemProvisioningUnavailable
 	}
-	roleCodes, catalogErr := handler.keycloakCatalog.ListKeycloakRoleCodes(ctx, job.TenantID, job.ApplicationID)
-	if catalogErr != nil || handler.keycloakControl.EnsureClientRoles(ctx, job.KeycloakClientID, roleCodes) != nil {
-		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_ROLE_CATALOG_SYNC_FAILED", "Keycloak 角色目录同步失败", catalogErr, false)
-		return application.ErrSubsystemProvisioningUnavailable
-	}
-	if mappingErr := handler.keycloakMappings.SaveKeycloakClientMapping(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID, handler.keycloakRealm, job.KeycloakClientID); mappingErr != nil {
-		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_CLIENT_MAPPING_FAILED", "Keycloak Client 映射保存失败", mappingErr, false)
-		return application.ErrSubsystemProvisioningUnavailable
-	}
-	if backfillErr := handler.keycloakMappings.BackfillKeycloakAuthorization(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID); backfillErr != nil {
-		handler.closeFailedDeployment(ctx, job, "KEYCLOAK_AUTHORIZATION_BACKFILL_FAILED", "Keycloak 授权投影回填失败", backfillErr, false)
-		return application.ErrSubsystemProvisioningUnavailable
-	}
+	var readiness application.KeycloakProjectionReadinessUpdater
 	if updater, ok := handler.keycloakReadiness.(keycloakSwitchReadinessUpdater); ok {
-		if readinessErr := updater.MarkKeycloakClientAndRoleCatalogSynced(ctx, job.TenantID, job.ApplicationID, job.EnvironmentID); readinessErr != nil {
-			handler.closeFailedDeployment(ctx, job, "KEYCLOAK_READINESS_UPDATE_FAILED", "Keycloak 就绪状态写入失败", readinessErr, false)
-			return application.ErrSubsystemProvisioningUnavailable
-		}
+		readiness = updater
+	}
+	service, err := application.NewKeycloakAuthorizationProjectionService(handler.keycloakCatalog, handler.keycloakControl, handler.keycloakMappings, readiness)
+	if err != nil {
+		handler.closeFailedDeployment(ctx, job, application.KeycloakProjectionCodeMappingUnavailable, "Keycloak 授权映射组件不可用", err, false)
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	result, err := service.Project(ctx, application.KeycloakProjectionInput{
+		TenantID: job.TenantID, ApplicationID: job.ApplicationID, EnvironmentID: job.EnvironmentID,
+		ClientID: job.KeycloakClientID, Realm: handler.keycloakRealm,
+	})
+	if err != nil {
+		handler.closeFailedDeployment(ctx, job, application.KeycloakProjectionCodeBackfillFail, "Keycloak 授权投影失败", err, false)
+		return application.ErrSubsystemProvisioningUnavailable
+	}
+	if result.ErrorCode != "" {
+		handler.closeFailedDeployment(ctx, job, result.ErrorCode, keycloakProjectionFailureMessage(result.ErrorCode), errors.New(result.Diagnostic), false)
+		return application.ErrSubsystemProvisioningUnavailable
 	}
 	return nil
+}
+
+// keycloakProjectionFailureMessage 把共享服务的错误码翻译成面向操作员的描述。
+func keycloakProjectionFailureMessage(code string) string {
+	switch code {
+	case application.KeycloakProjectionCodeRoleCatalogSyncFail:
+		return "Keycloak 角色目录同步失败"
+	case application.KeycloakProjectionCodeClientMappingFail:
+		return "Keycloak Client 映射保存失败"
+	case application.KeycloakProjectionCodeBackfillFail:
+		return "Keycloak 授权投影回填失败"
+	case application.KeycloakProjectionCodeReadinessFail:
+		return "Keycloak 就绪状态写入失败"
+	default:
+		return "Keycloak 授权投影失败"
+	}
 }
 
 // closeFailedDeployment 用独立超时的上下文把失败收口进生命周期状态机：即使编排 ctx 已因
 // 超时取消，状态机也必须落在 PROVISION_FAILED。通知沿用原始 ctx 尽力而为。
 func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Context, job subsystemDeploymentJob, errorCode, errorMessage string, cause error, notify bool) {
+	if code := application.RuntimeLicenseApprovalErrorCode(cause); code != "" {
+		errorCode = code
+		errorMessage, _ = runtimeLicenseApprovalDiagnostic(code)
+	}
 	writeCtx, cancel := context.WithTimeout(context.Background(), subsystemDeploymentFailureWriteTimeout)
 	defer cancel()
 	if err := handler.completeDeployment(writeCtx, job, application.SubsystemDeploymentStatusFailed, errorCode, errorMessage); err != nil {
@@ -2815,8 +2912,8 @@ func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Con
 	}
 }
 
-// waitForDeploymentBlocks until every accepted background deployment finishes. Tests in this
-// package use it to make the async orchestration deterministic.
+// waitForDeploymentJobs 等待全部已受理的后台部署完成。本包测试用它使异步编排
+// 可以确定性收口。
 func (handler *SubsystemOnboardingHandler) waitForDeploymentJobs() {
 	handler.deploymentJobs.Wait()
 }
@@ -2839,6 +2936,10 @@ func (handler *SubsystemOnboardingHandler) completeDeployment(ctx context.Contex
 	return handler.deploymentState.CompleteSubsystemDeployment(ctx, job.TenantID, job.ApplicationCode, job.Environment, job.Generation, status, job.Operation, code, message, time.Now().UTC())
 }
 
+// writeProductionManifestTargetMissing 拒绝目标缺少已审核清单校验和的生产运行时操作。
+// 触发场景：API 在 subsystems.d 中找不到该应用/环境，或 platform-api 与
+// subsystem-provisioner 对部署模式的认定不一致。在此处失败可保持生命周期状态
+// 不被触碰，并给操作者一个具体的修复方向。
 func writeProductionManifestTargetMissing(writer stdhttp.ResponseWriter, request *stdhttp.Request, applicationCode, environment string) {
 	httpresponse.WriteError(writer, request, stdhttp.StatusUnprocessableEntity, httperror.New(
 		"IAM_SUBSYSTEM_TARGET_NOT_IN_PRODUCTION_MANIFEST",
@@ -2881,6 +2982,9 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 				"next_action":      "该环境的控制面记录已存在。子系统日常代码、镜像、功能模块和业务迁移发布无需执行接入或撤销脚本；仅基础设施入口参数变更时使用环境、登录目标或 OAuth 客户端的受控更新接口。若此前部署 Agent 失败，请先查询 subsystem-status，再使用 subsystem-retry，不要重复 onboard",
 			},
 		))
+	case errors.Is(err, errRelatedContractDependency):
+		handler.logger.Warn("subsystem source credential dependency unavailable", "path", request.URL.Path, "source_application", "contract_management", "error", err)
+		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New("IAM_SUBSYSTEM_CONTRACT_DEPENDENCY_REQUIRED", "结算接入需要已登记的合同事件机器凭据", map[string]string{"source_application": "contract_management", "next_action": "请先在同一租户和环境接入或受控更新合同管理系统，补齐 settlement_contract_ingest 用途凭据，再重试结算接入或更新"}))
 	case errors.Is(err, application.ErrValidation), errors.Is(err, application.ErrManagementValidation):
 		httpresponse.WriteError(writer, request, stdhttp.StatusUnprocessableEntity, httperror.Validation)
 	case errors.Is(err, application.ErrNotFound), errors.Is(err, application.ErrManagementNotFound):
@@ -3080,4 +3184,24 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 		return diagnosis + "；修复后重新提交本次接入。该失败发生在预检阶段，平台尚未创建应用环境"
 	}
 	return diagnosis + "；修复后在当前环境点击“重试”，不要重复创建应用环境"
+}
+
+// waitLocalRuntimeConfirmation 只对本地模式生效：本地开发允许在购买强制校验未完成时
+// 先行部署，改为观察真实的消费者确认，而不是要求业务活动证明。
+func (handler *SubsystemOnboardingHandler) waitLocalRuntimeConfirmation(ctx context.Context, job subsystemDeploymentJob) error {
+	if len(job.Input.RuntimeLicenseCredentials) == 0 {
+		return nil
+	}
+	provider, ok := handler.provisioner.(subsystemProvisioningCapabilityProvider)
+	if !ok || provider.Capabilities().Mode != "local" {
+		return nil
+	}
+	if handler.runtimeLicenses == nil {
+		return application.ErrValidation
+	}
+	err := handler.runtimeLicenses.WaitForRuntimeConfirmation(ctx, job.ApplicationCode, job.Environment, job.Input.RuntimeLicenseCredentials)
+	if err != nil {
+		handler.closeFailedDeployment(ctx, job, "LICENSE_RUNTIME_CONFIRMATION_FAILED", "运行组件尚未完成当期授权确认；请检查组件同步状态后重试", err, false)
+	}
+	return err
 }

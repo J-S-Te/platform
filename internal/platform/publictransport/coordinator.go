@@ -1,6 +1,6 @@
-// Package publictransport persists and reconciles the public HTTP/HTTPS cutover.
-// It deliberately owns only system-managed origins and callback values; secrets
-// and arbitrary third-party redirect URIs never enter this workflow.
+// Package publictransport 持久化并协调公共 HTTP/HTTPS 切换。
+// 它只管理系统维护的来源地址和回调值；密钥
+// 及任意第三方重定向 URI 均不得进入此流程。
 package publictransport
 
 import (
@@ -132,9 +132,9 @@ func (c *Coordinator) Active(ctx context.Context) (Transition, []KeycloakClient,
 	return transition, clients, err
 }
 
-// Begin is restart-safe. The first call creates the transition, adds target
-// callbacks beside current callbacks and caps every login/refresh lifetime for
-// downgrade. Later calls return the same transition without duplicating work.
+// Begin 支持重启恢复。首次调用创建切换记录，将目标
+// 回调加入当前回调集合，并在降级时限制每次登录和刷新有效期。
+// 后续调用返回同一切换记录，不重复执行工作。
 func (c *Coordinator) Begin(ctx context.Context, input BeginInput) (Transition, []KeycloakClient, error) {
 	input.TargetMode = strings.ToUpper(strings.TrimSpace(input.TargetMode))
 	var transition Transition
@@ -217,8 +217,8 @@ func (c *Coordinator) MarkExternalPrepared(ctx context.Context, transitionID str
 	return c.advancePhase(ctx, transitionID, PhaseCallbacksPrepared, PhaseExternalPrepared)
 }
 
-// CommitControlPlane atomically switches environment/homepage origins and
-// removes only the exact old callback values captured by Begin.
+// CommitControlPlane 原子切换环境和首页来源地址，
+// 并且只移除 Begin 捕获的确切旧回调值。
 func (c *Coordinator) CommitControlPlane(ctx context.Context, transitionID string) error {
 	return c.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		state, transition, err := lockActiveTransition(tx, transitionID)
@@ -295,9 +295,9 @@ func (c *Coordinator) Fail(ctx context.Context, transitionID, stage string, caus
 	})
 }
 
-// RecordRetryableFailure keeps a post-commit external failure visible without
-// undoing active database callback/origin state. Re-running commit reconciles
-// Keycloak to the target set and then finalizes this same transition.
+// RecordRetryableFailure 保留提交后外部故障的可见状态，
+// 不撤销数据库中已生效的回调和来源状态。重新执行提交会将
+// Keycloak 对账到目标集合，再完成同一次切换。
 func (c *Coordinator) RecordRetryableFailure(ctx context.Context, transitionID, stage string, cause error) error {
 	message := "unspecified retryable transition failure"
 	if cause != nil {

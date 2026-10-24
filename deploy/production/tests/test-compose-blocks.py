@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate every optional-subsystem combination without starting containers."""
+"""验证所有可选子系统组合，不启动容器。"""
 import itertools
 import json
 import os
@@ -27,12 +27,20 @@ def main():
     assert "profiles:" not in text
     assert "compose.https.yaml" not in text
     assert "compose.drain.yaml" not in text
+    profile = subprocess.run(["ruby", "-rjson", "-ryaml", "-e",
+                              "puts JSON.generate(YAML.safe_load(File.read(ARGV[0]), permitted_classes: [], aliases: false))",
+                              str(SOURCE.parent / "subsystems.d/customer_and_opportunity-prod.yaml")],
+                             capture_output=True, text=True, check=True)
+    crm_profile = json.loads(profile.stdout)
+    crm_dependencies = crm_profile["compose"]["dependency_services"]
+    assert set(crm_dependencies) == {"customer-mysql", "contract-mysql", "temporal"}
+    assert {"CONTRACT_MYSQL_PASSWORD", "CONTRACT_MYSQL_ROOT_PASSWORD"} <= set(crm_profile["runtime"]["required_infrastructure_keys"])
     with tempfile.TemporaryDirectory(prefix="uip-compose-blocks-") as directory:
         root = Path(directory)
         runtime = root / ".env"
         runtime.write_text("")
         env = {k: v for k, v in os.environ.items() if not re.match(r"^(COMPOSE_|PUBLIC_|.*_IMAGE$|.*_RUNTIME_ENV_FILE$)", k)}
-        # No optional runtime files or optional images exist in this fixture.
+        # 此夹具不存在可选运行文件或可选镜像。
         env.update({
             "BASIC_PLATFORM_RUNTIME_ENV_FILE": str(runtime),
             "PLATFORM_KEYS_DIR": str(root / "custom-keys"),
@@ -64,6 +72,13 @@ def main():
                 assert "contract-mysql" in services and "temporal" in services
                 assert services["temporal"]["environment"]["MYSQL_SEEDS"] == "contract-mysql"
                 assert services["contract-mysql"]["volumes"][0]["source"] == "contract-mysql-data"
+                if "customer" not in disabled:
+                    # 仅购买 CRM 时全部依赖目标仍须可用；--no-deps 刻意不会隐式启动被省略的基础设施。
+                    assert set(crm_dependencies) <= set(services)
+                    for dependency in crm_dependencies:
+                        assert set(services[dependency].get("depends_on", {})) <= set(crm_dependencies)
+                    assert services["customer-presale-worker"]["environment"]["PRESALE_TEMPORAL_ENABLED"] == "true"
+                    assert services["temporal"]["depends_on"]["contract-mysql"]["condition"] == "service_healthy"
                 assert model["name"] == "basic-platform-production"
                 init = services["subsystem-provisioner-socket-init"]
                 assert init["user"] == "0:0" and init["network_mode"] == "none"
@@ -97,6 +112,30 @@ def main():
                     for dependency in service.get("depends_on", {}):
                         assert dependency in services, dependency
                 assert "profiles" not in json.dumps(services)
+                assert ("contract-worker" in services) == ("contract" not in disabled)
+                if "contract" not in disabled:
+                    for component in ("contract-api", "contract-worker"):
+                        assert services[component]["environment"]["CONTRACT_PROCESS_MODE"] == "split"
+                        assert services[component]["environment"]["CONTRACT_RUN_WORKER_WITH_API"] == "false"
+                    assert services["contract-worker"]["command"] == ["./worker"]
+                    assert "ports" not in services["contract-worker"]
+                licensed = ("contract-api", "contract-worker", "project-api", "project-sla-notifier", "customer-api",
+                            "customer-opportunity-alert-worker", "customer-owner-notification-worker",
+                            "customer-presale-alert-worker", "customer-presale-assignment-notification-worker",
+                            "customer-presale-progress-notification-worker", "customer-notification-delivery-worker",
+                            "customer-presale-worker", "portal-api", "portal-invite-compensation-worker",
+                            "settlement-api", "settlement-worker", "data-analysis-api",
+                            "data-analysis-aggregation-worker", "data-analysis-alert-worker")
+                for component in licensed:
+                    if component not in services:
+                        continue
+                    mounts = services[component].get("volumes", [])
+                    state = [v for v in mounts if v["target"] == "/var/lib/commercial-license"]
+                    assert len(state) == 1 and state[0]["source"] == "license-state-" + component
+                    keys = [v for v in mounts if v["target"] == "/app/data/keys/jwt-ed25519-public.pem"]
+                    assert len(keys) == 1 and keys[0]["read_only"]
+                    assert f"path: runtime/license-{component}.env" in text
+                assert services["platform-api"]["environment"]["LICENSE_RUNTIME_PLATFORM_BASE_URL"] == "http://platform-api:8080"
                 checked += 1
         env["FILE_GATEWAY_HOST_ROOT"] = str(root / "company-custom-files")
         explicit = subprocess.run(["docker", "compose", "--project-directory", directory,

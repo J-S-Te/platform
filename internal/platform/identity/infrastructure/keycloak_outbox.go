@@ -10,19 +10,17 @@ import (
 	"gorm.io/gorm"
 )
 
-// keycloakProjectionTarget is deliberately read from the Keycloak application mapping. The
-// outbox schema has no tenant-wide target, and the worker recalculates snapshots only for mapped
-// applications. Keeping that lookup here prevents identity writes from guessing application
-// ownership or duplicating projection data.
+// keycloakProjectionTarget 有意从 Keycloak 应用映射读取。outbox schema 没有租户级目标，
+// worker 只为已映射应用重算快照；把该查询保留在这里，身份写入就不必猜测应用归属或复制
+// 投影数据。
 type keycloakProjectionTarget struct {
 	ApplicationID string `gorm:"column:application_id"`
 	EnvironmentID string `gorm:"column:environment_id"`
 }
 
-// enqueueKeycloakIdentityEvents records a recalculation request in the caller's transaction.
-// A missing target is intentional: the tenant has no synchronized Keycloak application mapping.
-// A new identity is therefore included as soon as an application is mapped, without requiring a
-// prior projection output row.
+// enqueueKeycloakIdentityEvents 在调用方事务中记录一条重算请求。目标缺失是有意行为：
+// 该租户没有已同步的 Keycloak 应用映射；一旦应用完成映射，新身份即被纳入，无需预先存在
+// 投影输出行。
 func enqueueKeycloakIdentityEvents(transaction *gorm.DB, tenantID string, identityIDs []string, occurredAt time.Time, eventType string) error {
 	identityIDs = uniqueIdentityIDs(identityIDs)
 	if len(identityIDs) == 0 {

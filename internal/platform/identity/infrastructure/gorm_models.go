@@ -2,8 +2,8 @@ package infrastructure
 
 import "time"
 
-// The persistence models in this file intentionally remain separate from domain types. They map
-// the current migration-owned schema only; GORM schema-evolution APIs must not evolve this schema.
+// 本文件的持久化模型有意与领域类型保持分离，只映射当前迁移所管的 schema；
+// GORM 的 schema 演进 API 不得改动该 schema。
 
 type tenantModel struct {
 	ID     string `gorm:"column:id;primaryKey"`
@@ -12,6 +12,7 @@ type tenantModel struct {
 	Status string `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的租户表名。
 func (tenantModel) TableName() string { return "iam_tenant" }
 
 type userModel struct {
@@ -40,6 +41,7 @@ type userModel struct {
 	UpdatedBy         *string    `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的用户表名。
 func (userModel) TableName() string { return "iam_user" }
 
 type accountModel struct {
@@ -63,6 +65,7 @@ type accountModel struct {
 	UpdatedBy           *string    `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的账号表名。
 func (accountModel) TableName() string { return "iam_account" }
 
 type passwordCredentialModel struct {
@@ -81,6 +84,7 @@ type passwordCredentialModel struct {
 	UpdatedAt         time.Time  `gorm:"column:updated_at"`
 }
 
+// TableName 指定 GORM 行映射的密码凭据表名。
 func (passwordCredentialModel) TableName() string { return "iam_password_credential" }
 
 type sessionModel struct {
@@ -98,6 +102,7 @@ type sessionModel struct {
 	Status            string     `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的会话表名。
 func (sessionModel) TableName() string { return "iam_session" }
 
 type orgUnitModel struct {
@@ -118,6 +123,7 @@ type orgUnitModel struct {
 	UpdatedBy *string   `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的组织单元表名。
 func (orgUnitModel) TableName() string { return "iam_org_unit" }
 
 type positionModel struct {
@@ -134,6 +140,7 @@ type positionModel struct {
 	UpdatedBy *string   `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的岗位表名。
 func (positionModel) TableName() string { return "iam_position" }
 
 type membershipModel struct {
@@ -155,10 +162,10 @@ type membershipModel struct {
 	UpdatedBy            *string    `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的成员关系表名。
 func (membershipModel) TableName() string { return "iam_membership" }
 
-// Projection models are read-only result sets for joins. They do not represent aggregate domain
-// objects and are converted by explicit mapper functions below.
+// 投影模型是只读的联表结果集，不代表聚合领域对象；由下方的显式映射函数转换。
 type loginAccountProjection struct {
 	TenantID           string     `gorm:"column:tenant_id"`
 	TenantName         string     `gorm:"column:tenant_name"`
@@ -219,7 +226,7 @@ type membershipProjection struct {
 	InheritAuthorization bool       `gorm:"column:inherit_authorization"`
 }
 
-// bootstrapStateModel is the migration-owned one-time initialization marker.
+// bootstrapStateModel 是迁移所管的一次性初始化标记。
 type bootstrapStateModel struct {
 	ID                       string    `gorm:"column:id;primaryKey"`
 	TenantID                 string    `gorm:"column:tenant_id"`
@@ -228,9 +235,10 @@ type bootstrapStateModel struct {
 	InitializedAt            time.Time `gorm:"column:initialized_at"`
 }
 
+// TableName 指定 GORM 行映射的初始化标记表名。
 func (bootstrapStateModel) TableName() string { return "iam_bootstrap_state" }
 
-// bootstrapApplicationModel projects only application columns required by the bootstrap boundary.
+// bootstrapApplicationModel 只投影引导边界所需的应用列。
 type bootstrapApplicationModel struct {
 	ID       string `gorm:"column:id;primaryKey"`
 	TenantID string `gorm:"column:tenant_id"`
@@ -239,9 +247,10 @@ type bootstrapApplicationModel struct {
 	Status   string `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的应用登记表名。
 func (bootstrapApplicationModel) TableName() string { return "platform_application" }
 
-// bootstrapRoleModel projects the built-in role resolved during initial setup.
+// bootstrapRoleModel 投影初始化流程解析出的内置角色。
 type bootstrapRoleModel struct {
 	ID            string `gorm:"column:id;primaryKey"`
 	TenantID      string `gorm:"column:tenant_id"`
@@ -252,9 +261,10 @@ type bootstrapRoleModel struct {
 	Status        string `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的内置角色表名。
 func (bootstrapRoleModel) TableName() string { return "authz_role" }
 
-// bootstrapRoleBindingModel maps the immutable super-administrator role assignment.
+// bootstrapRoleBindingModel 映射不可变的超级管理员角色授予。
 type bootstrapRoleBindingModel struct {
 	ID            string     `gorm:"column:id;primaryKey"`
 	TenantID      string     `gorm:"column:tenant_id"`
@@ -277,11 +287,11 @@ type bootstrapRoleBindingModel struct {
 	UpdatedBy     *string    `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的角色授予表名。
 func (bootstrapRoleBindingModel) TableName() string { return "authz_role_binding" }
 
-// identityPolicyRevisionModel projects the authorization cache revision updated when identity
-// management automatically assigns a role. It is local to this bounded context to avoid coupling
-// identity persistence to authorization infrastructure implementation types.
+// identityPolicyRevisionModel 投影身份管理自动分配角色时更新的授权缓存修订号。它保留在本
+// 限界上下文内，避免身份持久化耦合授权基础设施的实现类型。
 type identityPolicyRevisionModel struct {
 	TenantID      string    `gorm:"column:tenant_id;primaryKey"`
 	ApplicationID string    `gorm:"column:application_id;primaryKey"`
@@ -290,11 +300,11 @@ type identityPolicyRevisionModel struct {
 	ChangeReason  string    `gorm:"column:change_reason"`
 }
 
+// TableName 指定 GORM 行映射的授权策略修订表名。
 func (identityPolicyRevisionModel) TableName() string { return "authz_policy_revision" }
 
-// personnelChangeRequestModel is the durable control-plane record for a
-// personnel change. It intentionally contains no computed permissions: those
-// are generated at preview/execution time from the current role catalog.
+// personnelChangeRequestModel 是人员异动的控制面持久记录。它有意不包含计算出的权限：
+// 权限在预览/执行时由当前角色目录生成。
 type personnelChangeRequestModel struct {
 	ID                 string     `gorm:"column:id;primaryKey"`
 	TenantID           string     `gorm:"column:tenant_id"`
@@ -317,4 +327,5 @@ type personnelChangeRequestModel struct {
 	UpdatedAt          time.Time  `gorm:"column:updated_at"`
 }
 
+// TableName 指定 GORM 行映射的人员异动请求表名。
 func (personnelChangeRequestModel) TableName() string { return "iam_personnel_change_request" }

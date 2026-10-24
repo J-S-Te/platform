@@ -44,10 +44,10 @@ func TestLegacyContractDevelopmentEnvironmentIsRetiredWithoutRewritingHistory(t 
 	}
 }
 
-// This test writes only to an explicitly supplied, empty disposable database. It proves the
-// upgrade path: a legacy environment with durable OAuth evidence is retained but made invisible
-// and inactive, while a fresh installation without evidence is physically removed by the same
-// migration (the latter is covered by the complete-chain integration gate).
+// 此测试只写入显式提供的空临时数据库，以验证
+// 升级路径：存在持久化 OAuth 证据的旧环境会被保留，但设为不可见
+// 和停用；无证据的新安装则由同一迁移物理删除，
+// 后者由完整迁移链集成门禁覆盖。
 func TestLegacyContractDevelopmentEnvironmentWithEvidenceIsSafelyRetiredOnMySQL(t *testing.T) {
 	dsn := os.Getenv("PLATFORM_LEGACY_CONTRACT_MIGRATION_TEST_DSN")
 	if dsn == "" {

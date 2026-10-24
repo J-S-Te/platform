@@ -293,8 +293,14 @@ public_transport_prepare() {
 }
 
 public_transport_compose_args() {
-  # 保留调用接口；协议通过环境变量与受管证书目录驱动同一个服务。
-  :
+  # 协议仍由统一配置派生；显示时区独立覆盖，不改业务/数据库配置。
+  local argument_name="$1" timezone_file="${deploy_dir:-}/runtime/compose.timezone.yaml"
+  [[ "$argument_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+  [[ ! -L "$timezone_file" ]] || { public_transport_fail '时区覆盖层不能是符号链接'; return 1; }
+  if [[ -f "$timezone_file" ]]; then
+    # 数组名仅来自上述白名单校验；路径通过变量展开，不解释为 shell 源码。
+    eval "$argument_name+=(--file \"\$timezone_file\")"
+  fi
 }
 
 public_transport_install_certificates() {

@@ -14,15 +14,15 @@ const (
 	brokerClientIDCustomerPortal = "keycloak-customer-portal-broker"
 )
 
-// brokerHealthVerifier verifies that a Keycloak Broker IdP exists with a complete config.
-// The Keycloak control plane implements it.
+// brokerHealthVerifier 验证 Keycloak Broker IdP 存在且配置完整，
+// 由 Keycloak 控制面实现。
 type brokerHealthVerifier interface {
 	VerifyBrokerExists(ctx context.Context) error
 	VerifyCustomerPortalBrokerExists(ctx context.Context) error
 }
 
-// brokerCredentialChecker reports whether a platform broker OAuth client has an active
-// credential. The GORM implementation queries the platform database.
+// brokerCredentialChecker 报告平台 broker OAuth client 是否存在活动凭据，
+// 由 GORM 实现查询平台数据库。
 type brokerCredentialChecker interface {
 	HasActiveCredential(ctx context.Context, clientID string) error
 }
@@ -31,9 +31,11 @@ type customerPortalBrokerHealthReconciler interface {
 	Reconcile(context.Context) (registered bool, err error)
 }
 
-// gormBrokerCredentialChecker is the database-backed credential checker.
+// gormBrokerCredentialChecker 是基于数据库的凭据检查器。
 type gormBrokerCredentialChecker struct{ db *gorm.DB }
 
+// HasActiveCredential 校验指定 broker client 存在 ACTIVE 状态的凭据记录；
+// 无凭据时返回错误供健康检查升级告警。
 func (c gormBrokerCredentialChecker) HasActiveCredential(ctx context.Context, clientID string) error {
 	var count int64
 	err := c.db.WithContext(ctx).
@@ -50,11 +52,10 @@ func (c gormBrokerCredentialChecker) HasActiveCredential(ctx context.Context, cl
 	return nil
 }
 
-// keycloakBrokerHealthRunner periodically verifies the two platform Keycloak Broker IdPs
-// and their platform-side OAuth clients. It exists because Broker config is reconciled
-// only once at startup; a later drift (empty IdP config, missing client credential) would
-// otherwise surface only when a user logs in. Detected problems are logged and recorded
-// without a hot error loop.
+// keycloakBrokerHealthRunner 周期性验证两个平台 Keycloak Broker IdP 及其平台侧
+// OAuth client。它存在的原因是 Broker 配置只在启动时对账一次；之后的漂移
+// （IdP 配置为空、client 凭据丢失）否则只会在用户登录时才暴露。检测到的问题
+// 被记录下来，但不进入热错误循环。
 type keycloakBrokerHealthRunner struct {
 	verifier         brokerHealthVerifier
 	checker          brokerCredentialChecker
@@ -77,8 +78,8 @@ func newKeycloakBrokerHealthRunner(verifier brokerHealthVerifier, db *gorm.DB, l
 	return runner, nil
 }
 
-// Run verifies both brokers on an interval. Failures are rate-limited to one log line per
-// minute so a persistent misconfiguration cannot flood the worker log.
+// Run 按时间间隔验证两个 broker。失败按每分钟最多一条日志限流，
+// 使持续性的配置错误无法刷爆 worker 日志。
 func (runner *keycloakBrokerHealthRunner) Run(ctx context.Context) {
 	ticker := time.NewTicker(runner.poll)
 	defer ticker.Stop()

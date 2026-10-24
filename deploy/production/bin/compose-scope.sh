@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 # 部署范围只取决于统一 Compose 的实际服务；不维护第二份启用名单。
+scope_profile_helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/subsystem-runtime.py"
+
+# 同一不可变 CRM 发布在离线准备、直接发布、重试和恢复中，必须保持同一个 Temporal Worker 版本身份。
+customer_presale_build_id() {
+  local image="${1:-}" digest
+  [[ "$image" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || {
+    printf 'CRM 售前 Build ID 必须绑定不可变镜像摘要。\n' >&2
+    return 1
+  }
+  digest="${image##*@sha256:}"
+  printf 'customer-presale-%s\n' "${digest:0:16}"
+}
+
+# 保留完整摘要，使配置、暂存、回退使用同一个后台版本身份。
+project_background_build_id() {
+  local image="${1:-}" digest
+  [[ "$image" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || {
+    printf '项目后台 Build ID 必须绑定不可变镜像摘要。\n' >&2
+    return 1
+  }
+  digest="${image##*@sha256:}"
+  printf 'project-background-sha256-%s\n' "$digest"
+}
 scope_services() {
   docker compose --project-directory "$deploy_dir" --file "$deploy_dir/docker-compose.yml" \
     --env-file "$runtime_file" --env-file "$release_file" config --services
@@ -29,16 +52,25 @@ scope_require() {
   return 1
 }
 
+scope_profile_services() {
+  local action="$1" component="$2"
+  local directory="${profiles_dir:-$deploy_dir/subsystems.d}"
+  [[ -f "$scope_profile_helper" && ! -L "$scope_profile_helper" ]] || {
+    printf '缺少受控生产运行组件解析工具：%s\n' "$scope_profile_helper" >&2
+    return 1
+  }
+  python3 "$scope_profile_helper" "$action" --target "$deploy_dir" \
+    --profiles-dir "$directory" --component "$component"
+}
+
 scope_owned_services() {
-  case "$1" in
-    contract) printf '%s\n' contract-api contract-migrate ;;
-    project) printf '%s\n' project-api project-migrate project-mysql project-sla-notifier ;;
-    customer-opportunity) printf '%s\n' customer-api customer-migrate customer-mysql customer-opportunity-alert-worker customer-owner-notification-worker customer-presale-alert-worker customer-presale-assignment-notification-worker customer-presale-progress-notification-worker customer-notification-delivery-worker customer-presale-worker ;;
-    customer-portal) printf '%s\n' portal-api portal-migrate portal-mysql portal-invite-compensation-worker ;;
-    settlement) printf '%s\n' settlement-api settlement-worker settlement-migrate settlement-catalog-sync settlement-mysql ;;
-    data-analysis) printf '%s\n' data-analysis-api data-analysis-migrate data-analysis-mysql data-analysis-metabase-init data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase ;;
-    *) printf '只能停用业务子系统：%s\n' "$1" >&2; return 1 ;;
-  esac
+  scope_profile_services owned "$1"
+}
+
+scope_runtime_services() {
+  local services
+  services="$(scope_services)" || return
+  printf '%s\n' "$services" | scope_profile_services runtime "$1"
 }
 
 scope_project() {
@@ -82,14 +114,15 @@ scope_report() {
 }
 
 scope_disable() {
-  local module="$1" project service id owned
+  local module="$1" project service id owned ids
   owned="$(scope_owned_services "$module")" || return
-  project="$(scope_project)"
+  project="$(scope_project)" || return
   while read -r service; do
+    ids="$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$service")" || return
     while read -r id; do
       [[ -n "$id" ]] || continue
       docker stop --timeout 60 "$id" || return
       printf '已停止 %s（%s），保留容器、数据库卷和密钥。\n' "$service" "$id"
-    done < <(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$service")
+    done <<< "$ids"
   done <<< "$owned"
 }

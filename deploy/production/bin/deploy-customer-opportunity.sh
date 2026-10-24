@@ -38,6 +38,7 @@ runtime_file="$deploy_dir/.env"
 release_file="$deploy_dir/.release.env"
 customer_runtime_file="$deploy_dir/runtime/customer.env"
 portal_runtime_file="$deploy_dir/runtime/portal.env"
+portal_report_runtime_file="$deploy_dir/runtime/portal-report-worker.env"
 customer_runtime_template="$deploy_dir/subsystem-templates/customer.env.example"
 portal_runtime_template="$deploy_dir/subsystem-templates/portal.env.example"
 compose_file="$deploy_dir/docker-compose.yml"
@@ -46,15 +47,8 @@ provisioner_refresh_helper="$deploy_dir/bin/provisioner-config-refresh.sh"
 profiles_dir="$deploy_dir/subsystems.d"
 export CUSTOMER_RUNTIME_ENV_FILE="$customer_runtime_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_runtime_file"
-customer_worker_services=(
-  customer-opportunity-alert-worker
-  customer-owner-notification-worker
-  customer-presale-alert-worker
-  customer-presale-assignment-notification-worker
-  customer-presale-progress-notification-worker
-  customer-notification-delivery-worker
-  customer-presale-worker
-)
+export PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE="$portal_report_runtime_file"
+customer_worker_services=()
 relax_runtime_perm_check="${DEPLOY_RELAX_RUNTIME_PERM_CHECK:-false}"
 
 for command_name in docker curl gzip flock awk mktemp install stat df ln; do
@@ -169,12 +163,12 @@ write_runtime_dsn_value() {
 write_runtime_dsns() {
   local customer_dsn portal_dsn password
   password="$(dsn_env_value CUSTOMER_MYSQL_PASSWORD)"
-  customer_dsn="customer:${password:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true"
+  customer_dsn="customer:${password:-PENDING_CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai&multiStatements=true"
   write_runtime_dsn_value "$customer_runtime_file" MYSQL_DSN "$customer_dsn"
   # portal 邀请补偿 Worker 合并 x-customer-service，读取的 env_file 是 customer.env（SEC-N10b）。
   write_runtime_dsn_value "$customer_runtime_file" PORTAL_INVITE_COMPENSATION_MYSQL_DSN "$customer_dsn"
   password="$(dsn_env_value PORTAL_MYSQL_PASSWORD)"
-  portal_dsn="portal:${password:-PENDING_PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true"
+  portal_dsn="portal:${password:-PENDING_PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai&multiStatements=true"
   write_runtime_dsn_value "$portal_runtime_file" PORTAL_MYSQL_DSN "$portal_dsn"
 }
 initialize_runtime_file() {
@@ -222,6 +216,11 @@ initialize_runtime_file() {
 }
 exec 9>"$deploy_dir/runtime/.deploy.lock"
 flock -w 900 9 || { echo "等待其他发布任务超时" >&2; exit 1; }
+[[ -f "$script_dir/backup-all.sh" && ! -L "$script_dir/backup-all.sh" ]] || { echo '缺少安全完整备份入口，拒绝CRM/Portal发布' >&2; exit 1; }
+if ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
+  echo 'CRM/Portal更新前完整备份失败，拒绝修改配置或继续发布' >&2
+  exit 1
+fi
 public_transport_prepare "$deploy_dir"
 
 # runtime 初始化、DSN 写入与后续的 .release.env 指针提交必须处于同一把
@@ -297,7 +296,7 @@ portal_runtime_ready() {
     PORTAL_PUBLIC_ORIGIN PORTAL_OIDC_ISSUER PORTAL_OIDC_CLIENT_ID PORTAL_OIDC_CLIENT_SECRET PORTAL_OIDC_REDIRECT_URI PORTAL_OIDC_TENANT_ID PORTAL_ROLE_CONFIG_HASH \
     PORTAL_ACCOUNT_SECURITY_CENTER_URL PORTAL_MACHINE_TOKEN_ISSUER PORTAL_MACHINE_TOKEN_AUDIENCE PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH \
     PORTAL_CRM_PROVISION_CLIENT_SUBJECT PORTAL_CRM_DISABLE_CLIENT_SUBJECT PORTAL_CRM_INVITE_BASE_URL PORTAL_CRM_INVITE_TOKEN_URL PORTAL_CRM_INVITE_CLIENT_ID PORTAL_CRM_INVITE_CLIENT_SECRET \
-    PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_HMAC_KEY_BASE64 \
+    PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_REPORT_CONTENT_KEY_BASE64 PORTAL_REPORT_STORE_ROOT PORTAL_PDF_CONFIG_ROOT PORTAL_CJK_FONT_PATH PORTAL_REPORT_IDENTITY_URL PORTAL_REPORT_IDENTITY_CLIENT_ID PORTAL_REPORT_IDENTITY_CLIENT_SECRET PORTAL_HMAC_KEY_BASE64 \
     PORTAL_PLATFORM_BASE_URL PORTAL_AUTHORIZATION_CATALOG_APPLICATION_ID PORTAL_AUTHORIZATION_CATALOG_CLIENT_ID PORTAL_AUTHORIZATION_CATALOG_CLIENT_SECRET \
     PLATFORM_APPLICATION_CODE PLATFORM_ENVIRONMENT_CODE PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET; do
     require_value "$portal_runtime_file" "$key" || return 1
@@ -308,6 +307,14 @@ portal_runtime_ready() {
   }
 }
 
+portal_report_worker_configured() {
+  local key
+  [[ -f "$portal_report_runtime_file" && ! -L "$portal_report_runtime_file" ]] || return 1
+  for key in PORTAL_REPORT_WORKER_MYSQL_DSN PORTAL_OIDC_TENANT_ID PORTAL_REPORT_STORE_ROOT PORTAL_REPORT_CONTENT_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_REPORT_SOURCE_BASE_URL PORTAL_REPORT_SOURCE_TOKEN_URL PORTAL_REPORT_SOURCE_CLIENT_ID PORTAL_REPORT_SOURCE_CLIENT_SECRET; do
+    usable_value "$(env_value_from "$portal_report_runtime_file" "$key")" || return 1
+  done
+}
+
 portal_compensation_worker_configured() {
   local key
   for key in \
@@ -315,11 +322,10 @@ portal_compensation_worker_configured() {
     PORTAL_INVITE_COMPENSATION_PORTAL_CLIENT_SECRET \
     PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_ID \
     PORTAL_INVITE_COMPENSATION_PLATFORM_CLIENT_SECRET; do
-    # portal-invite-compensation-worker inherits the CRM service anchor and
-    # therefore receives CUSTOMER_RUNTIME_ENV_FILE (runtime/customer.env),
-    # not PORTAL_RUNTIME_ENV_FILE.  Reading portal.env here made a complete
-    # Agent-rendered configuration look incomplete and silently skipped the
-    # worker in production.
+    # portal-invite-compensation-worker 继承 CRM 服务锚点，
+    # 因此读取 CUSTOMER_RUNTIME_ENV_FILE（runtime/customer.env），
+    # 而非 PORTAL_RUNTIME_ENV_FILE。此前读取 portal.env 会将完整的 Agent 渲染配置误判为不完整，
+    # 导致生产静默跳过此 worker。
     usable_value "$(env_value_from "$customer_runtime_file" "$key")" || return 1
   done
 }
@@ -418,8 +424,7 @@ chmod 600 "$deploy_dir/backups/releases/customer-${release_id}.env"
 
 # 售前 Worker 与 CRM 使用同一不可变镜像；将摘要前缀作为本次 Temporal
 # Deployment Build ID，确保代码版本变化时不会错误复用旧 Worker 版本。
-crm_digest="${crm_image_ref##*@sha256:}"
-customer_presale_worker_build_id="customer-presale-${crm_digest:0:16}"
+customer_presale_worker_build_id="$(customer_presale_build_id "$crm_image_ref")" || exit 1
 
 awk -F= -v crm="$crm_image_ref" -v portal="$portal_image_ref" -v worker_build_id="$customer_presale_worker_build_id" '
   BEGIN { crm_found=0; portal_found=0; worker_build_id_found=0 }
@@ -491,10 +496,8 @@ fi
 echo "已写入 CRM 镜像内嵌授权目录哈希：$embedded_crm_hash"
 echo "已写入 CRM 镜像内嵌最大有效角色数：$embedded_crm_max_roles"
 
-# Portal has its own embedded authorization catalog and its runtime file is
-# independent from CRM.  Keep the hash synchronized with the exact immutable
-# Portal image before health checks; otherwise portal-api exits with a catalog
-# incompatibility and the deployment rolls back after already restarting CRM.
+# 门户拥有独立内嵌授权目录和运行文件。健康检查前须将哈希与确切不可变门户镜像同步，否则 portal-api 会因目录不兼容退出，
+# 并在 CRM 已重启后触发部署回滚。
 embedded_portal_hash="$(docker run --rm --entrypoint ./authz-catalog "$portal_image_ref" print portal 2>/dev/null \
   | awk -F= '$1 == "claims_role_config_hash" { print $2; exit }')"
 if [[ ! "$embedded_portal_hash" =~ ^sha256:[a-f0-9]{64}$ ]]; then
@@ -510,19 +513,26 @@ if ! update_runtime_value "$portal_runtime_file" PORTAL_ROLE_CONFIG_HASH "$embed
 fi
 echo "已写入 Portal 镜像内嵌授权目录哈希：$embedded_portal_hash"
 
-if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready; then
+if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready || ! portal_report_worker_configured; then
   release_committed=true
   echo "CRM/Portal 镜像已安全暂存；运行凭据尚未完整配置，未启动数据库迁移或业务服务。"
   echo "请先在基础平台应用接入页面完成或重试对应环境；Agent 会补齐 runtime 配置，随后重新运行同一发布命令。"
   exit 0
 fi
 
-if portal_compensation_worker_configured; then
-  customer_worker_services+=(portal-invite-compensation-worker)
-  echo "Portal 邀请补偿 Worker 凭据完整，纳入本次发布"
-else
-  echo "门户邀请补偿不可用：跳过补偿 Worker，请在平台完成跨系统凭据交付。" >&2
-fi
+# 直接发布与 Agent 采用同一份已审核配置，新增运行 worker 不能在旧兼容入口中被遗漏。
+crm_selected_runtime="$(scope_runtime_services customer-opportunity)" || exit 1
+portal_selected_runtime="$(scope_runtime_services customer-portal)" || exit 1
+while read -r selected_runtime_service; do
+  [[ -n "$selected_runtime_service" ]] || continue
+  case "$selected_runtime_service" in customer-api|portal-api) continue ;; esac
+  if [[ "$selected_runtime_service" == portal-invite-compensation-worker ]] && ! portal_compensation_worker_configured; then
+    echo '门户补偿组件在当前审核运行范围内，但机器凭据不完整；请先在平台执行受控重试。' >&2
+    exit 1
+  fi
+  customer_worker_services+=("$selected_runtime_service")
+done <<< "$crm_selected_runtime
+$portal_selected_runtime"
 
 backup_database() {
   local mysql_service="$1" database="$2" label="$3"
@@ -542,6 +552,66 @@ backup_database() {
   mv "$temporary" "$output"
 }
 
+# mysql_query_scalar 在目标容器内做一次真实 SQL 探测：healthcheck 的 mysqladmin ping
+# 在“访问被拒绝”时也可能返回 0，且容器可能刚被 OOM 杀掉正在重启，
+# 此时 compose exec 能进入新容器而 mysqld 尚未监听，mysqldump 只会报 socket 失败。
+mysql_query_scalar() {
+  local mysql_service="$1" sql="$2"
+  compose exec -T "$mysql_service" sh -c \
+    'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -Nse "$1"' _ "$sql" 2>/dev/null
+}
+
+require_mysql_ready() {
+  local mysql_service="$1"
+  local timeout="${2:-120}"
+  # 注意：local 的展开发生在内建命令执行之前，因此不能在同一条 local 里
+  # 引用刚声明的变量（set -u 下会报 unbound variable）。
+  local deadline=$((SECONDS + timeout)) probe
+  while ((SECONDS < deadline)); do
+    if probe="$(mysql_query_scalar "$mysql_service" 'SELECT 1')" && [[ "$probe" == "1" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "数据库容器在 ${timeout}s 内无法执行 SQL：$mysql_service" >&2
+  diagnose_mysql_container "$mysql_service"
+  return 1
+}
+
+diagnose_mysql_container() {
+  local mysql_service="$1" container
+  container="$(compose ps -q "$mysql_service" 2>/dev/null || true)"
+  {
+    echo "---- 诊断：$mysql_service ----"
+    if [[ -z "$container" ]]; then
+      echo "容器不存在或服务未创建：$mysql_service"
+    else
+      docker inspect --format '状态={{.State.Status}} 健康={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} 退出码={{.State.ExitCode}} 重启次数={{.RestartCount}} OOMKilled={{.State.OOMKilled}}' "$container" 2>&1 || true
+      echo "最近 40 行容器日志："
+      docker logs --tail 40 "$container" 2>&1 || true
+    fi
+    echo "宿主机内存："
+    free -m 2>/dev/null || true
+    echo "提示：MySQL 首次初始化需要数百 MiB 内存；宿主机可用内存不足（基线 16 GiB）或容器内存上限过低时，"
+    echo "mysqld 会被 OOM 杀掉并反复重启，表现为长时间不健康、随后 mysqldump 报 socket 连接失败。"
+  } >&2
+}
+
+# 首次安装时目标库尚未创建，没有可备份的数据，跳过备份是正确行为，
+# 不能因为 mysqldump 连不上就把首次发布判为失败并掩盖真正的启动问题。
+backup_database_if_initialized() {
+  local mysql_service="$1" database="$2" label="$3" count
+  if ! count="$(mysql_query_scalar "$mysql_service" "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '${database}'")"; then
+    echo "无法确认数据库是否已初始化：$mysql_service（MySQL 未就绪）" >&2
+    diagnose_mysql_container "$mysql_service"
+    return 1
+  fi
+  if [[ "$count" == "0" ]]; then
+    echo "数据库 ${database} 尚未创建（首次安装），跳过发布前备份"
+    return 0
+  fi
+  backup_database "$mysql_service" "$database" "$label"
+}
 require_backup_space() {
   local available_kib minimum_kib
   minimum_kib="${BASIC_PLATFORM_MIN_FREE_KIB:-262144}"
@@ -637,7 +707,7 @@ wait_for_workers() {
       return 1
     }
     health="$(docker inspect "$container_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
-    [[ "$health" != "unhealthy" ]] || { echo "Worker 健康检查失败：$service" >&2; return 1; }
+    [[ "$health" == healthy || "$health" == none ]] || { echo "Worker 健康检查尚未通过：$service（${health:-missing}）" >&2; return 1; }
   done
   echo "CRM Workers 已稳定运行 10 秒且未发生重启"
 }
@@ -673,14 +743,18 @@ rollback_runtime() {
 
 echo "启动 CRM/Portal 数据库与 Temporal"
 require_backup_space || exit 1
-if ! compose up -d --wait --wait-timeout 180 customer-mysql portal-mysql temporal; then
+if ! compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" customer-mysql portal-mysql temporal; then
+  diagnose_mysql_container customer-mysql
+  diagnose_mysql_container portal-mysql
   restore_release
   rm -f "$previous_release"
   echo "数据库启动失败，发布配置已恢复" >&2
   exit 1
 fi
-backup_database customer-mysql customer_opportunity customer
-backup_database portal-mysql customer_portal portal
+require_mysql_ready customer-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || exit 1
+backup_database_if_initialized customer-mysql customer_opportunity customer
+require_mysql_ready portal-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || exit 1
+backup_database_if_initialized portal-mysql customer_portal portal
 
 echo "执行 CRM 语句级生产迁移"
 if ! compose run --no-deps customer-migrate; then
@@ -745,7 +819,7 @@ if ! compose up -d --force-recreate --no-deps "${customer_worker_services[@]}" |
 fi
 for worker_service in "${customer_worker_services[@]}"; do
   worker_image="$crm_image_ref"
-  [[ "$worker_service" == "portal-invite-compensation-worker" ]] && worker_image="$portal_image_ref"
+  [[ "$worker_service" != "portal-invite-compensation-worker" && "$worker_service" != "portal-report-worker" ]] || worker_image="$portal_image_ref"
   verify_service_image "$worker_service" "$worker_image" || {
     rollback_runtime
     rm -f "$previous_release"

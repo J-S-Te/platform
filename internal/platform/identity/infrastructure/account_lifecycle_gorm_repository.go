@@ -41,12 +41,12 @@ func (repository *GORMRepository) CreateLocalAccount(ctx context.Context, write 
 	return account, nil
 }
 
-// InitializePassword creates a password credential only for an account that does not have one.
+// InitializePassword 只为尚无密码凭据的账号创建凭据。
 func (repository *GORMRepository) InitializePassword(ctx context.Context, write application.PasswordWrite) (domain.Account, error) {
 	return repository.writeAdministratorPassword(ctx, write, true)
 }
 
-// ResetPassword replaces an existing local password credential and clears any account lock.
+// ResetPassword 替换既有本地密码凭据并清除账号锁定。
 func (repository *GORMRepository) ResetPassword(ctx context.Context, write application.PasswordWrite) (domain.Account, error) {
 	return repository.writeAdministratorPassword(ctx, write, false)
 }
@@ -74,9 +74,8 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 		if row.AccountType != "HUMAN" || row.AuthSource != "LOCAL" {
 			return application.ErrConflict
 		}
-		// Initializing a missing password is allowed only for active accounts. An administrator may
-		// reset a locked account to deliver a new password offline; resetting also clears the lock
-		// so the newly delivered password can be used immediately.
+		// 只允许为活跃账号初始化缺失的密码。管理员可以重置被锁定账号以便线下交付新密码；
+		// 重置同时清除锁定，使新密码在事务提交后立即可用。
 		if initialize && row.Status != domain.StatusActive {
 			return application.ErrConflict
 		}
@@ -113,10 +112,8 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 		operatorID := write.OperatorID
 		accountFields := map[string]any{"locked_until": nil, "updated_at": write.OccurredAt, "updated_by": &operatorID, "version": gorm.Expr("version + 1")}
 		if !initialize {
-			// Password reset is also the administrative recovery path for legacy
-			// rows whose authentication lock was persisted as account status.
-			// Clear both lock representations so the new password is immediately
-			// usable after the transaction commits.
+			// 密码重置也是历史行的管理员恢复路径：这些行把认证锁定持久化成了账号状态。
+			// 两种锁定表示都要清除，新密码在事务提交后立即可用。
 			accountFields["status"] = domain.StatusActive
 		}
 		accountUpdate := transaction.Model(&accountModel{}).Where("tenant_id = ? AND id = ? AND version = ?", write.TenantID, write.AccountID, write.ExpectedVersion).Updates(accountFields)
@@ -141,7 +138,7 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 	return account, nil
 }
 
-// FindLocalPasswordCredential reads a credential for self-service password verification.
+// FindLocalPasswordCredential 读取凭据供自助密码校验使用。
 func (repository *GORMRepository) FindLocalPasswordCredential(ctx context.Context, tenantID, accountID string) (application.LocalPasswordCredential, error) {
 	var account accountModel
 	result := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ? AND account_type = ? AND auth_source = ?", tenantID, accountID, "HUMAN", "LOCAL").First(&account)
@@ -162,8 +159,8 @@ func (repository *GORMRepository) FindLocalPasswordCredential(ctx context.Contex
 	return application.LocalPasswordCredential{TenantID: tenantID, AccountID: accountID, AccountStatus: account.Status, CredentialStatus: credential.Status, PasswordHash: append([]byte(nil), credential.PasswordHash...), HashAlgorithm: credential.HashAlgorithm, AlgorithmParams: append([]byte(nil), credential.AlgorithmParams...)}, nil
 }
 
-// ChangeOwnPassword uses compare-and-set on the previous digest to prevent a concurrent password
-// change from silently replacing a newer secret. It revokes all active sessions atomically.
+// ChangeOwnPassword 以上一个摘要为 compare-and-set 条件，防止并发改密静默覆盖更新的
+// 秘密；并在同一事务内吊销全部活跃会话。
 func (repository *GORMRepository) ChangeOwnPassword(ctx context.Context, write application.PasswordWrite) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		result := transaction.Model(&passwordCredentialModel{}).Where("account_id = ? AND password_hash = ? AND status = ?", write.AccountID, write.ExpectedHash, domain.StatusActive).Updates(map[string]any{"password_hash": append([]byte(nil), write.PasswordDigest...), "hash_algorithm": "argon2id", "algorithm_params": append([]byte(nil), write.AlgorithmParams...), "must_change": false, "failed_attempts": 0, "last_failed_at": nil, "password_changed_at": write.OccurredAt, "updated_at": write.OccurredAt})
@@ -195,8 +192,8 @@ func revokeActiveSessions(transaction *gorm.DB, write application.PasswordWrite)
 	return nil
 }
 
-// FindAccountIdentity resolves the server-side authentication source before any password reset.
-// External accounts are rejected by the local lifecycle service rather than creating a stray local credential.
+// FindAccountIdentity 在任何密码重置前解析服务端认证来源。外部账号由本地生命周期服务
+// 拒绝，而不是创建游离的本地凭据。
 func (repository *GORMRepository) FindAccountIdentity(ctx context.Context, tenantID, accountID string) (application.AccountIdentity, error) {
 	var account accountModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, accountID).First(&account).Error; err != nil {

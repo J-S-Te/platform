@@ -1,7 +1,7 @@
 package infrastructure
 
-// This adapter is intentionally small: Basic Platform remains the source of
-// truth, while Keycloak receives a retry-safe projection through its Admin API.
+// 本适配器刻意保持精简：Basic Platform 始终是事实源，Keycloak 只经其 Admin API
+// 接收可重试安全的投影。
 
 import (
 	"bytes"
@@ -24,19 +24,16 @@ const (
 	platformBrokerAlias = "basic-platform"
 )
 
-// KeycloakAdmin implements the authorization projection's Keycloak Admin API
-// boundary. The supplied administrator credentials must have realm-management
-// permissions for the configured realm.
+// KeycloakAdmin 实现授权投影的 Keycloak Admin API 边界。所提供的管理员凭据
+// 必须对配置的 realm 具有 realm-management 权限。
 type KeycloakAdmin struct {
 	adminURL, realm, username, password, clientID, clientSecret string
 	httpClient                                                  *stdhttp.Client
 }
 
-// KeycloakAdminCredentials explicitly supplies the credentials used for the
-// Keycloak Admin API. A complete service-account pair is preferred over the
-// legacy username/password grant, matching the control-plane credential
-// policy. Values are process-only inputs and are never returned by this
-// adapter.
+// KeycloakAdminCredentials 显式提供 Keycloak Admin API 使用的凭据。依据控制面
+// 凭据策略，优先使用完整的 service-account 对，而非遗留的 username/password grant。
+// 这些值仅作为进程内输入，本适配器绝不回传。
 type KeycloakAdminCredentials struct {
 	ServiceAccountClientID     string
 	ServiceAccountClientSecret string
@@ -44,9 +41,8 @@ type KeycloakAdminCredentials struct {
 	Password                   string
 }
 
-// NewKeycloakAdmin preserves the username/password constructor used by
-// existing callers. New projection code should use
-// NewKeycloakAdminWithCredentials so dependencies are explicit.
+// NewKeycloakAdmin 保留既有调用方使用的 username/password 构造方式。
+// 新投影代码应使用 NewKeycloakAdminWithCredentials，使依赖显式化。
 func NewKeycloakAdmin(adminURL, realm, username, password string, clients ...*stdhttp.Client) (*KeycloakAdmin, error) {
 	return NewKeycloakAdminWithCredentials(adminURL, realm, KeycloakAdminCredentials{
 		Username: username,
@@ -54,11 +50,9 @@ func NewKeycloakAdmin(adminURL, realm, username, password string, clients ...*st
 	}, clients...)
 }
 
-// NewKeycloakAdminWithCredentials constructs an Admin API adapter from
-// explicit credentials. It deliberately does not read process environment
-// variables, so Worker and API composition remain deterministic and support
-// credential rotation without hidden dependencies. Supplying a client is
-// useful both for tests and for callers that need custom transport settings.
+// NewKeycloakAdminWithCredentials 用显式凭据构造 Admin API 适配器。它刻意不读
+// 进程环境变量，使 Worker 与 API 的组装保持确定性，并支持在不引入隐藏依赖的
+// 情况下轮换凭据。提供 client 便于测试以及需要自定义传输配置的调用方。
 func NewKeycloakAdminWithCredentials(adminURL, realm string, credentials KeycloakAdminCredentials, clients ...*stdhttp.Client) (*KeycloakAdmin, error) {
 	if len(clients) > 1 || strings.TrimSpace(adminURL) == "" || strings.Trim(strings.TrimSpace(realm), "/") == "" {
 		return nil, errors.New("Keycloak admin configuration is invalid")
@@ -88,35 +82,30 @@ func NewKeycloakAdminWithCredentials(adminURL, realm string, credentials Keycloa
 	return admin, nil
 }
 
-// ListKeycloakAuditEvents reads only the standard user LOGIN/LOGOUT stream and
-// realm admin-events stream.  It does not expose raw Keycloak JSON outside the
-// infrastructure boundary; callers receive a deliberately redacted event
-// projection that can be appended to the platform audit log.
+// ListKeycloakAuditEvents 只读取标准的用户 LOGIN/LOGOUT 事件流和 realm 管理事件流。
+// 原始 Keycloak JSON 不会越过 infrastructure 边界暴露；调用方收到的是刻意脱敏的
+// 事件投影，可直接追加进平台审计日志。
 func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since time.Time) ([]projectionapplication.KeycloakAuditEvent, error) {
 	token, err := admin.token(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// Keep the Admin API request identical to the minimal endpoint supported by
-	// the deployed Keycloak instance. Apply both pagination/windowing concerns
-	// locally; this avoids version-specific query routing differences.
-	userEvents, err := admin.listEventPage(ctx, token, "/events")
+	// Admin API 请求保持与已部署 Keycloak 实例支持的最小端点一致。
+	// 分页与时间窗都在本地处理，避免版本相关的查询参数路由差异。
+	userEvents, err := admin.listAllEventPages(ctx, token, "/events")
 	if err != nil {
-		// Event collection is supplementary. Some deployed Keycloak gateways
-		// return 404 for the event resource to an Admin API client even though
-		// the realm and token endpoints are available. Treat that variant as an
-		// empty audit window so it cannot interrupt projection or Broker flows.
+		// 事件采集是补充能力。部分已部署的 Keycloak 网关对 Admin API 客户端访问
+		// event 资源返回 404，而 realm 与 token 端点可用。把这种变体视为空审计窗，
+		// 使其不能中断投影或 Broker 流程。
 		if strings.Contains(err.Error(), "returned HTTP 404") {
 			return []projectionapplication.KeycloakAuditEvent{}, nil
 		}
 		return nil, fmt.Errorf("list Keycloak user audit events (admin_url=%q realm=%q): %w", admin.adminURL, admin.realm, err)
 	}
-	// User LOGIN/LOGOUT events are required for Broker verification. Admin
-	// events are an additional audit stream and may be unavailable when the
-	// Keycloak administrator has no admin-event permission (some Keycloak
-	// deployments expose that condition as 404). Do not discard valid login
-	// evidence just because the optional admin stream is unavailable.
-	adminEvents, adminEventsErr := admin.listEventPage(ctx, token, "/admin-events")
+	// 用户 LOGIN/LOGOUT 事件是 Broker 验证的必需证据。管理员事件是附加审计流：
+	// 当 Keycloak 管理员没有 admin-event 权限时可能不可用（部分部署以 404 表现
+	// 该状态）。绝不能因为可选的管理员流不可用就丢弃有效的登录证据。
+	adminEvents, adminEventsErr := admin.listAllEventPages(ctx, token, "/admin-events")
 	if adminEventsErr != nil {
 		adminEvents = nil
 	}
@@ -143,10 +132,34 @@ func (admin *KeycloakAdmin) ListKeycloakAuditEvents(ctx context.Context, since t
 	return items, nil
 }
 
+// eventPageSize 是单页上限；Keycloak Admin API 的默认页大小可能截断窗口，
+// 必须显式分页直到取到不足一页为止，否则停机/高峰后的事件会被静默丢弃。
+const eventPageSize = 100
+
+// listAllEventPages 按 first/max 循环取完整事件流（AUD-IP-2026 批次 3）。
+func (admin *KeycloakAdmin) listAllEventPages(ctx context.Context, token, suffix string) ([]map[string]any, error) {
+	items := make([]map[string]any, 0, eventPageSize)
+	for first := 0; first < 10000; first += eventPageSize {
+		separator := "?"
+		if strings.Contains(suffix, "?") {
+			separator = "&"
+		}
+		page, err := admin.listEventPage(ctx, token, fmt.Sprintf("%s%sfirst=%d&max=%d", suffix, separator, first, eventPageSize))
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, page...)
+		if len(page) < eventPageSize {
+			return items, nil
+		}
+	}
+	return items, nil
+}
+
 func (admin *KeycloakAdmin) listEventPage(ctx context.Context, token, suffix string) ([]map[string]any, error) {
-	// request already prefixes every Admin API path with
-	// /admin/realms/{realm}; passing the fully qualified path here would send
-	// /admin/realms/{realm}/admin/realms/{realm}/events and always return 404.
+	// request 已经为每个 Admin API 路径加了 /admin/realms/{realm} 前缀；这里若再传
+	// 全限定路径，实际会请求 /admin/realms/{realm}/admin/realms/{realm}/events，
+	// 恒返回 404。
 	response, err := admin.request(ctx, token, stdhttp.MethodGet, suffix, nil)
 	path := "/admin/realms/" + url.PathEscape(admin.realm) + suffix
 	if err != nil {
@@ -178,24 +191,24 @@ func keycloakEventTime(value any) time.Time {
 	}
 }
 
+// EnsureUser 创建或更新与平台身份对齐的 Keycloak 用户：优先复用经由 Broker 登录
+// 先行创建、且确属该上游 subject 的既有账号；冲突或归属其他租户时显式失败，
+// 绝不合并账号。启用状态与展示属性以快照为准。
 func (admin *KeycloakAdmin) EnsureUser(ctx context.Context, snapshot projectionapplication.Snapshot) error {
 	// 用户以平台 identity_id 对齐；Keycloak 内部用户 ID 只作为外部资源句柄使用。
 	token, err := admin.token(ctx)
 	if err != nil {
 		return err
 	}
-	// Pre-link the upstream OIDC subject to the projected Keycloak user. This
-	// makes Broker login resolve the existing account directly instead of
-	// running Keycloak's just-in-time registration/profile-completion flow.
+	// 预先把上游 OIDC subject 关联到投影出的 Keycloak 用户，使 Broker 登录能直接
+	// 解析到既有账号，而不是触发 Keycloak 的 just-in-time 注册/资料补全流程。
 	brokerAlias := platformBrokerAlias
 	if strings.EqualFold(strings.TrimSpace(snapshot.ApplicationCode), "customer_portal") {
 		brokerAlias = "basic-platform-customer"
 	}
-	// A previous Broker login can create the Keycloak user before the platform
-	// projection arrives. Reuse that account only when the exact upstream subject
-	// owns the link and the account is not already attributed to another platform
-	// identity or tenant. This avoids both duplicate Keycloak accounts and unsafe
-	// cross-tenant account merging.
+	// 此前的 Broker 登录可能先于平台投影创建 Keycloak 用户。只有当确切的该上游
+	// subject 持有该关联、且账号尚未归属其他平台身份或租户时才允许复用，
+	// 同时避免重复 Keycloak 账号与不安全的跨租户账号合并。
 	ownerID, err := admin.findUserByBrokerIdentity(ctx, token, snapshot.IdentityID, brokerAlias)
 	if err != nil {
 		return err
@@ -239,11 +252,9 @@ func compatibleBrokerUser(user keycloakUser, snapshot projectionapplication.Snap
 	return true
 }
 
-// ReadAccountStatus reads the Keycloak-managed user status for a platform
-// identity. The tenant attribute is checked before returning a result so a
-// caller cannot use this read path to match an identity from another tenant.
-// available=false means that no uniquely mapped Keycloak user exists; it is not
-// treated as an enabled state.
+// ReadAccountStatus 读取某平台身份在 Keycloak 侧管理的用户状态。返回前会校验
+// 租户属性，保证调用方无法借这条读取路径匹配其他租户的身份。
+// available=false 表示不存在唯一映射的 Keycloak 用户，它不代表"已启用"。
 func (admin *KeycloakAdmin) ReadAccountStatus(ctx context.Context, tenantID, identityID string) (status string, available bool, err error) {
 	tenantID = strings.TrimSpace(tenantID)
 	identityID = strings.TrimSpace(identityID)
@@ -259,8 +270,8 @@ func (admin *KeycloakAdmin) ReadAccountStatus(ctx context.Context, tenantID, ide
 		return "", false, err
 	}
 	if len(users) == 0 {
-		// Older projected users may predate the identity_id attribute. Their
-		// deterministic username remains a safe, tenant-checked association key.
+		// 较早投影的用户可能早于 identity_id 属性存在。其确定性用户名仍是安全、
+		// 且经过租户校验的关联键。
 		users, err = admin.findUsersByStableUsername(ctx, token, identityID)
 		if err != nil {
 			return "", false, err
@@ -281,6 +292,8 @@ func (admin *KeycloakAdmin) ReadAccountStatus(ctx context.Context, tenantID, ide
 	return "DISABLED", true, nil
 }
 
+// EnsureOrganizationGroups 把用户组织成员关系投影为平台托管命名空间内的组关系，
+// 并移除快照之外的平台托管组；平台命名空间之外的组一律不触碰。
 func (admin *KeycloakAdmin) EnsureOrganizationGroups(ctx context.Context, snapshot projectionapplication.Snapshot) error {
 	// 仅管理 basic-platform/tenant-*/organization-* 命名空间，绝不触碰租户外的用户组。
 	token, err := admin.token(ctx)
@@ -335,6 +348,8 @@ func (admin *KeycloakAdmin) EnsureOrganizationGroups(ctx context.Context, snapsh
 	return nil
 }
 
+// AssignClientRoles 把快照中的角色同步为目标 Client 的 Client Role：先确保角色
+// 存在，再移除该 Client 上的陈旧平台托管映射，最后授予目标集合；不触碰其他 Client。
 func (admin *KeycloakAdmin) AssignClientRoles(ctx context.Context, snapshot projectionapplication.Snapshot) error {
 	// 角色变更限定在目标 Client，清理也只清理该 Client 的平台托管角色映射。
 	token, err := admin.token(ctx)
@@ -412,6 +427,8 @@ func (admin *KeycloakAdmin) assignedClientRoles(ctx context.Context, token, user
 	return roles, nil
 }
 
+// SetClientAuthorizationAttributes 把租户、身份、角色配置哈希与授权修订号等
+// 稳定授权属性写入 Keycloak 用户属性；详细权限仍以基础平台为事实源。
 func (admin *KeycloakAdmin) SetClientAuthorizationAttributes(ctx context.Context, snapshot projectionapplication.Snapshot) error {
 	// Keycloak 用户属性只保留稳定身份和必要展示属性。角色通过
 	// Client Role、组织通过 Group 投影；详细权限仍以基础平台为事实源。
@@ -490,14 +507,12 @@ func (admin *KeycloakAdmin) ensureBrokerIdentityWithAlias(ctx context.Context, t
 			return fmt.Errorf("link Keycloak Broker identity: upstream identity %q is already linked to Keycloak user %q", identityID, owner)
 		}
 		if owner == user.ID {
-			// The owner query already observes the desired result while the user's
-			// link list is stale. Do not delete a link that may have converged in a
-			// concurrent transaction.
+			// 属主查询已经观察到期望结果，只是用户的关联列表尚未刷新。
+			// 不要删除一条可能已在并发事务中收敛一致的关联。
 			return nil
 		}
-		// The provider link belongs to this platform-managed Keycloak user but
-		// points at a stale upstream subject. Repair only after proving the desired
-		// upstream identity is not owned by a different Keycloak user.
+		// 该 provider 关联属于本平台管理的 Keycloak 用户，但指向了过期的上游
+		// subject。必须先证明期望的上游身份未被其他 Keycloak 用户持有，才允许修复。
 		response, err = admin.request(ctx, token, stdhttp.MethodDelete, base+"/"+url.PathEscape(brokerAlias), nil)
 		if err != nil {
 			return err
@@ -516,9 +531,8 @@ func (admin *KeycloakAdmin) ensureBrokerIdentityWithAlias(ctx context.Context, t
 	status := response.StatusCode
 	response.Body.Close()
 	if status == stdhttp.StatusConflict {
-		// POST is not guaranteed to be idempotent. A concurrent projection may
-		// have created the exact same link between our GET and POST; re-read the
-		// authoritative state before classifying 409 as a real ownership conflict.
+		// POST 不保证幂等。并发投影可能在我们 GET 与 POST 之间创建了完全相同的
+		// 关联；必须重读权威状态，再判定 409 是否为真实的属主冲突。
 		identities, readErr := admin.brokerIdentities(ctx, token, user.ID)
 		if readErr != nil {
 			return readErr
@@ -1043,10 +1057,9 @@ func attributeSegment(value string) string {
 
 var _ projectionapplication.KeycloakAdmin = (*KeycloakAdmin)(nil)
 
-// LogoutIdentitySessions revokes every Realm session owned by the projected
-// Keycloak user for a stable platform identity. Both the Broker link and the
-// managed identity_id attribute are considered so pre-link and legacy users
-// are covered. Missing users are an idempotent success.
+// LogoutIdentitySessions 为稳定的平台身份注销其投影 Keycloak 用户拥有的全部
+// realm 会话。Broker 关联与受管的 identity_id 属性都会被纳入，使预关联用户与
+// 遗留用户都被覆盖。用户不存在视为幂等成功。
 func (admin *KeycloakAdmin) LogoutIdentitySessions(ctx context.Context, identityID string) error {
 	identityID = strings.TrimSpace(identityID)
 	if identityID == "" {
@@ -1087,8 +1100,8 @@ func (admin *KeycloakAdmin) LogoutIdentitySessions(ctx context.Context, identity
 	return nil
 }
 
-// ResetPasswordAndLogout updates a federated user's Keycloak credential and revokes
-// all of that user's active sessions. It is intentionally server-side only.
+// ResetPasswordAndLogout 更新联邦用户的 Keycloak 凭据并吊销该用户全部活动会话。
+// 刻意只提供服务端调用路径，绝不暴露给浏览器端。
 func (admin *KeycloakAdmin) ResetPasswordAndLogout(ctx context.Context, userID, password string) error {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(password) == "" {
 		return errors.New("Keycloak reset user and password are required")

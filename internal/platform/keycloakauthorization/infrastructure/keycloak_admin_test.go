@@ -608,7 +608,7 @@ func TestEnsureBrokerIdentityDoesNotDeleteStaleLinkWhenTargetHasAnotherOwner(t *
 }
 
 func TestKeycloakAdminUsesServiceAccountClientCredentialsWhenConfigured(t *testing.T) {
-	// Environment values must never influence an explicitly composed adapter.
+	// 环境变量绝不能影响显式组装的适配器。
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_ID", "ignored-environment-client")
 	t.Setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "ignored-environment-secret")
 	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {

@@ -34,7 +34,7 @@ import (
 
 // buildOperationalModules 只通过各模块公开的应用契约完成装配，不让路由层接触仓储实现。
 // 这里同样禁止 AutoMigrate：进程启动与 schema 发布必须保持两个独立生命周期。
-func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service, applicationManagementService *applicationregistryapplication.ManagementService, oauthClientManagementService *applicationregistryapplication.OAuthClientManagementService) (httptransport.OperationalModules, error) {
+func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service, applicationManagementService *applicationregistryapplication.ManagementService, oauthClientManagementService *applicationregistryapplication.OAuthClientManagementService, personnelAudit identityapplication.PersonnelChangeAuditSink, personnelHandover *identityapplication.HandoverOrchestrator) (httptransport.OperationalModules, error) {
 	if database == nil || logger == nil || applicationAccessService == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
 	}
@@ -69,39 +69,18 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	provisioningCapabilities := applicationregistryapplication.SubsystemProvisioningCapabilities{
-		Enabled: cfg.SubsystemOnboarding.Enabled,
-		Mode:    cfg.SubsystemOnboarding.Mode,
+	// 清单与部署 Agent 客户端的解析提取为共用函数：API 与 Worker 使用同一份口径。
+	provisioningCapabilities, err := resolveSubsystemProvisioningCapabilities(cfg)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
 	}
-	// 生产环境的可接入目标来自随发布包审核的清单；本地环境则使用固定的开发能力集合。
-	// 这里先解析能力，再注入 handler，保证页面展示的选项与 Agent 实际允许的目标一致。
-	if strings.EqualFold(strings.TrimSpace(cfg.SubsystemOnboarding.Mode), "production") {
-		if cfg.SubsystemOnboarding.Enabled {
-			provisioningCapabilities, err = applicationregistryinfrastructure.LoadProductionSubsystemCapabilities(
-				cfg.SubsystemOnboarding.ProductionDeployRoot,
-				cfg.SubsystemOnboarding.ProductionProfilesDirectory,
-			)
-			if err != nil {
-				return httptransport.OperationalModules{}, fmt.Errorf("load production subsystem capabilities: %w", err)
-			}
-			provisioningCapabilities.Enabled = true
-		}
-	} else {
-		provisioningCapabilities.SupportedEnvironments = []string{"dev", "test", "staging", "prod"}
-		provisioningCapabilities.DefaultEnvironment = "dev"
-		provisioningCapabilities.DefaultClientType = "confidential"
-	}
-	subsystemProvisioner, err := applicationregistryinfrastructure.NewUnixSocketSubsystemProvisioner(
-		cfg.SubsystemOnboarding.Enabled,
-		cfg.SubsystemOnboarding.SocketPath,
-		cfg.SubsystemOnboarding.Timeout,
-		provisioningCapabilities,
-	)
+	subsystemProvisioner, err := newSubsystemAccessProvisioner(cfg)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
 	// API 进程只持有 Unix Socket 客户端；Docker Socket、Compose 文件和宿主机写权限均留在
 	// 隔离 Agent 中。这样即使管理 API 被调用，也不能直接把平台容器权限扩大为宿主机权限。
+
 	notificationRepository, err := notificationinfrastructure.NewRepository(database)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -137,15 +116,49 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	// Keycloak is optional.  Keeping this explicit means a page can show it as
-	// unavailable instead of letting an operator save an issuer alias that the
-	// deployment Agent cannot honour.
+	// Keycloak 是可选模块。保持显式声明，让页面可以把它显示为"不可用"，
+	// 而不是让运维保存一条部署 Agent 无法兑现的 issuer 别名。
 	subsystemHandler.ConfigureKeycloak(
 		cfg.Keycloak.Enabled,
 		keycloakRealmIssuer(cfg.Keycloak.PublicURL, cfg.Keycloak.Realm),
 		cfg.Keycloak.Realm,
 	)
 	subsystemHandler.ConfigureKeycloakTransportPolicy(cfg.Keycloak.RequireHTTPS)
+
+	// 统一接入向导：操作/阶段仓储 + 事实与就绪适配器 + 服务 + 处理器。
+	// 部署 Agent（subsystemProvisioner）同时提供能力清单与运行批准事实，二者来自同一受控来源；
+	// 镜像与认证观察期待接入时以"未验证"上报，不默认就绪。
+	subsystemAccessRepository, err := applicationregistryinfrastructure.NewSubsystemAccessOperationGORMRepository(database)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	// 镜像就绪由部署 Agent 上报（协议只增不改）：未上报的旧 Agent 保持「未验证」。
+	subsystemImageReadiness, err := applicationregistryinfrastructure.NewSubsystemAccessImageReadinessAdapter(subsystemProvisioner)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemAccessReadiness, err := applicationregistryinfrastructure.NewSubsystemAccessReadinessAdapter(database, subsystemProvisioner, subsystemImageReadiness, subsystemHandler)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	// 登记查询器与阶段执行器的目录登记端口共用同一实现，保证口径一致。
+	subsystemAccessRegistry, err := applicationregistryinfrastructure.NewSubsystemAccessRegistryGORMReader(database)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemAccessFacts, err := applicationregistryinfrastructure.NewSubsystemAccessFactsAdapter(database, subsystemProvisioner, subsystemAccessReadiness, subsystemAccessRegistry)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemAccessService, err := applicationregistryapplication.NewSubsystemAccessService(
+		subsystemAccessRepository, subsystemAccessFacts, ulid.Generator{}, applicationregistryapplication.SystemClock{})
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemAccessHandler, err := applicationregistryhttp.NewSubsystemAccessHandler(subsystemAccessService, logger)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
 	subsystemHandler.ConfigureDefaultIssuerAlias(cfg.SubsystemOnboarding.DefaultIssuerAlias)
 	subsystemHandler.ConfigureSubsystemServiceCredentials(oauthClientManagementService)
 	if cfg.Keycloak.Enabled {
@@ -215,6 +228,12 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		return httptransport.OperationalModules{}, err
 	}
 	personnelService.SetNotifier(notificationService)
+	// 注入审计写入端后超管例外审批才可用；缺失时身份服务按 fail-closed 拒绝例外。
+	personnelService.SetAuditSink(personnelAudit)
+	// 仅在配置启用时注入跨系统交接编排；未启用时保持既有 HandoverChecker 闸门行为。
+	if personnelHandover != nil {
+		personnelService.SetHandoverCoordinator(personnelHandover)
+	}
 	personnelHandler := identityhttp.NewPersonnelChangeHandler(personnelService)
 	keycloakIntegrationHandler, err := applicationregistryhttp.NewKeycloakIntegrationHandler(subsystemHandler)
 	if err != nil {
@@ -228,6 +247,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	return httptransport.OperationalModules{
 		LoginTargets:        loginTargetHandler,
 		SubsystemOnboarding: subsystemHandler,
+		SubsystemAccess:     subsystemAccessHandler,
 		KeycloakIntegration: keycloakIntegrationHandler,
 		// 组合根按职责显式注入边界；当前实现仍由旧编排适配器承载，后续可无协议变更替换为独立 Handler。
 		BrokerHandler:            subsystemHandler,
@@ -244,6 +264,8 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 
 type keycloakAuthorizationCatalogAdapter struct{ service *applicationaccess.Service }
 
+// ListKeycloakRoleCodes 返回应用当前授权目录中的全部角色编码，供 Keycloak
+// Client 角色对账使用。
 func (adapter keycloakAuthorizationCatalogAdapter) ListKeycloakRoleCodes(ctx context.Context, tenantID, applicationID string) ([]string, error) {
 	view, err := adapter.service.GetCatalog(ctx, tenantID, applicationID)
 	if err != nil {
@@ -285,6 +307,8 @@ type onboardingNotificationSink struct {
 	service *notificationapplication.Service
 }
 
+// SendSubsystemLifecycle 把子系统接入生命周期事件投递为站内通知；通知服务未
+// 配置时静默跳过（可选依赖）。
 func (sink onboardingNotificationSink) SendSubsystemLifecycle(ctx context.Context, input applicationregistryhttp.SubsystemLifecycleNotification) error {
 	if sink.service == nil {
 		return nil
@@ -314,6 +338,8 @@ func (sink onboardingNotificationSink) SendSubsystemLifecycle(ctx context.Contex
 	return err
 }
 
+// AssignInitialAdministrator 给接入操作人授予该应用清单声明的初始管理员角色；
+// 无声明角色时直接返回成功，不写入任何绑定。
 func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 	ctx context.Context,
 	tenantID string,
@@ -338,9 +364,9 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 		TenantID: tenantID, UserID: userID, OperatorID: operatorID, Roles: roles, RolesProvided: true,
 	}, applicationCode)
 	if err != nil {
-		// Provision returns only after the subsystem has published its role catalog. Treat a missing
-		// or disabled administrator role as an incomplete deployment instead of silently marking the
-		// environment READY without granting the operator access. Retry remains safe and idempotent.
+		// Provision 只有在子系统发布角色目录后才返回。管理员角色缺失或停用应视为
+		// 部署未完成，而不是在不授予运维访问权的情况下悄悄把环境标记为 READY。
+		// 重试保持安全且幂等。
 		if errors.Is(err, applicationaccess.ErrValidation) {
 			return "", fmt.Errorf("%w: initial administrator role is unavailable", applicationregistryapplication.ErrSubsystemProvisioningUnavailable)
 		}
@@ -359,14 +385,12 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case "settlement":
-		// Settlement owns a deliberately namespaced role catalog. Falling back to
-		// the legacy generic "admin" role would grant nothing and must not make a
-		// successfully deployed runtime appear ready.
+		// Settlement 拥有刻意带命名空间的角色目录。回退到遗留的通用 "admin" 角色
+		// 将授予不了任何权限，也绝不能让部署成功的运行时显得已就绪。
 		return []string{"settlement_admin"}
 	case "data_analysis":
-		// Data analysis owns a business-specific administrator role. Its production
-		// provisioning manifest declares the same role; retain this fallback while
-		// manifest-driven initial access remains opt-in.
+		// Data analysis 拥有业务特定的管理员角色，其生产开通清单声明的是同一角色。
+		// 在清单驱动的初始访问仍为可选项期间，保留此回退。
 		return []string{"dashboard_admin"}
 	case "customer_and_opportunity":
 		// CRM 不创建绕过业务范围的“万能管理员”。三个目录角色共同覆盖运营职责，同时仍受

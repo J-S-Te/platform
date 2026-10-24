@@ -12,13 +12,13 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// ManagementRepository persists the application/environment aggregate without handling OAuth
-// clients, callback URLs, scopes, grants, or credentials.
+// ManagementRepository 持久化应用/环境聚合，不处理 OAuth 客户端、回调 URL、范围、授权
+// 或凭据。
 type ManagementRepository struct {
 	database *gorm.DB
 }
 
-// NewManagementRepository constructs application/environment management persistence.
+// NewManagementRepository 构造应用/环境管理持久化；数据库句柄为 nil 时返回错误。
 func NewManagementRepository(database *gorm.DB) (*ManagementRepository, error) {
 	if database == nil {
 		return nil, errors.New("application registry management database must not be nil")
@@ -44,6 +44,7 @@ type managementApplicationModel struct {
 	UpdatedBy       *string   `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的应用表名。
 func (managementApplicationModel) TableName() string { return "platform_application" }
 
 type managementEnvironmentModel struct {
@@ -64,9 +65,10 @@ type managementEnvironmentModel struct {
 	UpdatedBy     *string         `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的环境表名。
 func (managementEnvironmentModel) TableName() string { return "platform_application_environment" }
 
-// ListApplications lists one tenant's applications using stable pagination.
+// ListApplications 以稳定分页列出一个租户的应用。
 func (repository *ManagementRepository) ListApplications(ctx context.Context, tenantID string, query application.PageRequest) (application.PageResult[application.Application], error) {
 	database := repository.database.WithContext(ctx).Model(&managementApplicationModel{}).Where("tenant_id = ?", tenantID)
 	if query.Status != "" {
@@ -93,7 +95,7 @@ func (repository *ManagementRepository) ListApplications(ctx context.Context, te
 	return application.PageResult[application.Application]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// CreateApplication writes the application registration with its initial version.
+// CreateApplication 写入应用登记及其初始版本 1。
 func (repository *ManagementRepository) CreateApplication(ctx context.Context, input application.ApplicationCreateInput, applicationID string, now time.Time) (application.Application, error) {
 	model := managementApplicationModel{
 		ID: applicationID, TenantID: input.TenantID, Code: input.Code, Name: input.Name, ApplicationType: input.ApplicationType,
@@ -107,7 +109,7 @@ func (repository *ManagementRepository) CreateApplication(ctx context.Context, i
 	return toApplication(model), nil
 }
 
-// GetApplication resolves an application only within the specified tenant.
+// GetApplication 只在指定租户内解析应用。
 func (repository *ManagementRepository) GetApplication(ctx context.Context, tenantID, applicationID string) (application.Application, error) {
 	var model managementApplicationModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, applicationID).Take(&model).Error; err != nil {
@@ -116,7 +118,7 @@ func (repository *ManagementRepository) GetApplication(ctx context.Context, tena
 	return toApplication(model), nil
 }
 
-// UpdateApplication applies a versioned mutation and leaves the stable code untouched.
+// UpdateApplication 应用带版本号的变更，稳定的编码不可修改。
 func (repository *ManagementRepository) UpdateApplication(ctx context.Context, input application.ApplicationUpdateInput, now time.Time) (application.Application, error) {
 	updates := map[string]any{
 		"name":             input.Name,
@@ -142,7 +144,7 @@ func (repository *ManagementRepository) UpdateApplication(ctx context.Context, i
 	return repository.GetApplication(ctx, input.TenantID, input.ApplicationID)
 }
 
-// ListEnvironments lists a tenant/application-scoped environment collection.
+// ListEnvironments 列出租户/应用范围内的环境集合。
 func (repository *ManagementRepository) ListEnvironments(ctx context.Context, tenantID, applicationID string, query application.PageRequest) (application.PageResult[application.Environment], error) {
 	database := repository.database.WithContext(ctx).Model(&managementEnvironmentModel{}).Where("tenant_id = ? AND application_id = ?", tenantID, applicationID)
 	if query.Status != "" {
@@ -169,7 +171,7 @@ func (repository *ManagementRepository) ListEnvironments(ctx context.Context, te
 	return application.PageResult[application.Environment]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// CreateEnvironment writes an isolated deployment environment beneath an application.
+// CreateEnvironment 在应用下写入一个隔离的部署环境。
 func (repository *ManagementRepository) CreateEnvironment(ctx context.Context, input application.EnvironmentCreateInput, environmentID string, now time.Time) (application.Environment, error) {
 	model := managementEnvironmentModel{
 		ID: environmentID, TenantID: input.TenantID, ApplicationID: input.ApplicationID, Environment: input.Environment,
@@ -183,7 +185,7 @@ func (repository *ManagementRepository) CreateEnvironment(ctx context.Context, i
 	return toEnvironment(model), nil
 }
 
-// GetEnvironment resolves an environment through both tenant and application boundaries.
+// GetEnvironment 同时经过租户与应用两个边界解析环境。
 func (repository *ManagementRepository) GetEnvironment(ctx context.Context, tenantID, applicationID, environmentID string) (application.Environment, error) {
 	var model managementEnvironmentModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND application_id = ? AND id = ?", tenantID, applicationID, environmentID).Take(&model).Error; err != nil {
@@ -192,7 +194,7 @@ func (repository *ManagementRepository) GetEnvironment(ctx context.Context, tena
 	return toEnvironment(model), nil
 }
 
-// UpdateEnvironment applies a versioned metadata and status mutation.
+// UpdateEnvironment 应用带版本号的元数据与状态变更。
 func (repository *ManagementRepository) UpdateEnvironment(ctx context.Context, input application.EnvironmentUpdateInput, now time.Time) (application.Environment, error) {
 	updates := map[string]any{
 		"base_url":     copyString(input.BaseURL),
@@ -217,9 +219,8 @@ func (repository *ManagementRepository) UpdateEnvironment(ctx context.Context, i
 	return repository.GetEnvironment(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID)
 }
 
-// DeleteEnvironment removes a single deployment environment and integration records that are
-// derived from it. Configuration namespaces and audit receipts are deliberately retained; their
-// existence blocks deletion instead of silently destroying operational evidence.
+// DeleteEnvironment 移除单个部署环境及其派生的集成记录。配置命名空间与审计回执被有意
+// 保留：它们的存在会阻止删除，而不是静默销毁运维证据。
 func (repository *ManagementRepository) DeleteEnvironment(ctx context.Context, input application.EnvironmentDeleteInput) (application.Environment, error) {
 	var removed managementEnvironmentModel
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -277,8 +278,7 @@ func (repository *ManagementRepository) DeleteEnvironment(ctx context.Context, i
 	return toEnvironment(removed), nil
 }
 
-// PurgeEnvironment permanently removes the environment and all tenant-scoped derived records.
-// This operation is reachable only through the application-layer confirmation workflow.
+// PurgeEnvironment 永久移除环境及全部租户内派生记录；只能通过应用层的确认工作流触达。
 func (repository *ManagementRepository) PurgeEnvironment(ctx context.Context, input application.EnvironmentPurgeInput) (application.Environment, error) {
 	var removed managementEnvironmentModel
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -358,7 +358,7 @@ func deleteEnvironmentOAuthClientRecords(transaction *gorm.DB, clientIDs []strin
 		return nil
 	}
 
-	// Refresh-token lineage is self-referential, so detach parent links before deleting rows.
+	// 刷新令牌的 lineage 自引用，删除行之前先解除父链接。
 	if err := transaction.Exec("UPDATE oauth_refresh_token SET parent_refresh_token_id = NULL WHERE oauth_client_id IN ?", clientIDs).Error; err != nil {
 		return err
 	}
@@ -445,9 +445,9 @@ func mapManagementError(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return application.ErrNotFound
 	}
-	// mysql.go enables GORM TranslateError, which converts duplicate-key errors into
-	// gorm.ErrDuplicatedKey before they reach this repository. Map both forms so a
-	// client conflict never leaks through the HTTP handler as a generic 500.
+	// mysql.go 启用了 GORM TranslateError，重复键错误在到达本仓储前已被转换为
+	// gorm.ErrDuplicatedKey。两种形态都做映射，客户端冲突就不会以通用 500 的形式从
+	// HTTP handler 泄露。
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return application.ErrConflict
 	}

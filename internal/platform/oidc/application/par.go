@@ -24,8 +24,8 @@ type PushedAuthorizationRequest struct {
 	CreatedAt, ExpiresAt                             time.Time
 }
 
-// PushAuthorizationRequestInput is a client-authenticated PAR request. RequestObjectAudience is
-// supplied by the trusted HTTP adapter and must be the provider's authorization endpoint URI.
+// PushAuthorizationRequestInput 是已完成客户端认证的 PAR 请求。RequestObjectAudience
+// 由受信任的 HTTP 适配器提供，必须是提供方授权端点 URI。
 type PushAuthorizationRequestInput struct {
 	ClientAuthentication
 	ResponseType                                     string
@@ -36,15 +36,18 @@ type PushAuthorizationRequestInput struct {
 	TTL                                              time.Duration
 }
 
+// PushAuthorizationRequestResult 返回给客户端的短期 request_uri 及其剩余秒数。
 type PushAuthorizationRequestResult struct {
 	RequestURI string
 	ExpiresIn  int64
 }
 
+// ConsumePushedAuthorizationRequestInput 是浏览器授权端点兑换 PAR 的入参；
+// SessionID 由 HTTP 层在浏览器认证完成后才填充。
 type ConsumePushedAuthorizationRequestInput struct{ ClientID, RequestURI, SessionID string }
 
-// RequestObjectAuthorizationInput represents a signed request object submitted directly to the
-// authorization endpoint. SessionID is deliberately supplied only after browser authentication.
+// RequestObjectAuthorizationInput 表示直接提交到授权端点的签名请求对象。
+// SessionID 刻意只在浏览器认证完成后才由传输层填充。
 type RequestObjectAuthorizationInput struct {
 	AuthorizationInput
 	ResponseType          string
@@ -52,6 +55,8 @@ type RequestObjectAuthorizationInput struct {
 	RequestObjectAudience string
 }
 
+// PushedAuthorizationRequestRepository 持久化并原子消费 PAR 状态；实现必须按
+// request URI 摘要检索并在事务内完成一次性消费。
 type PushedAuthorizationRequestRepository interface {
 	CreatePushedAuthorizationRequest(context.Context, PushedAuthorizationRequest) error
 	ConsumePushedAuthorizationRequest(context.Context, string, string, [32]byte, time.Time) (PushedAuthorizationRequest, error)
@@ -119,8 +124,8 @@ func (service *Service) PushAuthorizationRequest(ctx context.Context, input Push
 	return PushAuthorizationRequestResult{RequestURI: requestURI, ExpiresIn: int64(input.TTL / time.Second)}, nil
 }
 
-// ConsumePushedAuthorizationRequest resolves and atomically consumes a PAR URI for the same
-// client. A request URI is never reusable and cannot be transferred to another client.
+// ConsumePushedAuthorizationRequest 为同一客户端解析并原子消费一个 PAR URI。
+// request URI 绝不可重复使用，也不能转移给其他客户端。
 func (service *Service) ConsumePushedAuthorizationRequest(ctx context.Context, input ConsumePushedAuthorizationRequestInput) (AuthorizationInput, error) {
 	input.ClientID = strings.TrimSpace(input.ClientID)
 	input.RequestURI = strings.TrimSpace(input.RequestURI)

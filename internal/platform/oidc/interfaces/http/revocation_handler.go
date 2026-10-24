@@ -9,8 +9,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/domain"
 )
 
-// Revoke implements RFC 7009. After successful client authentication it returns 200 for unknown,
-// expired, or already-revoked tokens, deliberately preventing token-existence disclosure.
+// Revoke 实现 RFC 7009。客户端认证成功后，对未知、过期或已撤销的令牌一律返回 200，
+// 刻意避免泄露令牌是否存在。
 func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -45,8 +45,8 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 	case domain.TokenTypeAccess, domain.TokenTypeRefresh:
 		types = append(types, hint)
 	default:
-		// RFC 7009 makes the hint optional. Try both supported representations so an unhinted
-		// refresh token is revoked while an access token remains blacklisted.
+		// RFC 7009 使 hint 可选。依次尝试两种受支持的表示，使未提示的 refresh token
+		// 被撤销，而 access token 仍保留在黑名单中。
 		types = append(types, domain.TokenTypeAccess, domain.TokenTypeRefresh)
 	}
 	for _, tokenType := range types {

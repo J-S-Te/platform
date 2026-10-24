@@ -29,12 +29,15 @@ import (
 
 const maxRequestBytes = 256 << 10
 
+// Handler 适配审计用例到统一 HTTP 响应协议；租户范围取自认证上下文，
+// 导出下载受 storageRoot 约束。
 type Handler struct {
 	service     *application.Service
 	logger      *slog.Logger
 	storageRoot string
 }
 
+// NewHandler 构造审计 HTTP 处理器；任一依赖缺失时失败关闭。
 func NewHandler(service *application.Service, logger *slog.Logger, storageRoot string) (*Handler, error) {
 	if service == nil || logger == nil || strings.TrimSpace(storageRoot) == "" {
 		return nil, errors.New("audit HTTP handler dependencies must not be nil")
@@ -64,10 +67,15 @@ type eventInputPayload struct {
 	RiskLevel       string    `json:"risk_level,omitempty"`
 	Classification  string    `json:"classification,omitempty"`
 	Summary         string    `json:"summary,omitempty"`
-	// UserLoginIP is the end user's login IP as observed by the reporting
-	// application. It is optional because existing publishers only provide the
-	// delivery request IP. It must never be populated from an untrusted proxy
-	// header at this boundary.
+	// 统一审计来源协议（AUD-IP-2026）：
+	//   login_ip  创建应用会话时观察到的客户端地址（登录态固定）
+	//   client_ip 本次业务操作的客户端地址
+	//   ip_source 地址来源标记：DIRECT / TRUSTED_PROXY / LEGACY_PROTOCOL
+	// 三者都必须由发布方在可信入口解析后填写，平台不接受来自不可信代理头的推断。
+	LoginIP  string `json:"login_ip,omitempty"`
+	ClientIP string `json:"client_ip,omitempty"`
+	IPSource string `json:"ip_source,omitempty"`
+	// UserLoginIP 是旧协议的兼容字段：只填登录地址，缺省时按 LEGACY_PROTOCOL 处理。
 	UserLoginIP   string               `json:"user_login_ip,omitempty"`
 	Metadata      map[string]any       `json:"metadata,omitempty"`
 	ChangeSummary []domain.FieldChange `json:"change_summary,omitempty"`
@@ -111,6 +119,9 @@ type eventResponse struct {
 	Method              string               `json:"method,omitempty"`
 	Path                string               `json:"path,omitempty"`
 	ClientIP            string               `json:"client_ip,omitempty"`
+	LoginIP             string               `json:"login_ip,omitempty"`
+	IngestPeerIP        string               `json:"ingest_peer_ip,omitempty"`
+	IPSource            string               `json:"ip_source,omitempty"`
 	UserAgent           string               `json:"user_agent,omitempty"`
 	RequestID           string               `json:"request_id,omitempty"`
 	TraceID             string               `json:"trace_id,omitempty"`
@@ -131,9 +142,8 @@ type exportResponse struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
-// ingestionValidationResponse is deliberately credential-free.  It lets an
-// audit publisher prove that the platform accepted its bearer token and source
-// binding without ever exposing a token, secret, or authorization internals.
+// ingestionValidationResponse 有意不含任何凭据。它让审计发布方证明平台已接受其
+// bearer token 与来源绑定，而不暴露任何令牌、密钥或授权内部细节。
 type ingestionValidationResponse struct {
 	Status          string `json:"status"`
 	ApplicationCode string `json:"application_code"`
@@ -142,6 +152,7 @@ type ingestionValidationResponse struct {
 	AuditIngest     bool   `json:"audit_ingest"`
 }
 
+// ListEvents 分页返回当前租户的审计事件。
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -158,6 +169,7 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计事件查询成功", pageResponse[eventResponse]{Items: items, Page: result.Page, PageSize: result.PageSize, Total: result.Total})
 }
+// Ingest 接收应用机器主体提交的单个审计事件；租户与来源取自已验签凭据。
 func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.applicationPrincipal(w, r)
 	if !ok {
@@ -183,6 +195,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "审计事件已接收", receipt)
 }
+// IngestBatch 接收有界批量审计事件；整批校验通过后才持久化，重复事件按幂等成功返回。
 func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.applicationPrincipal(w, r)
 	if !ok {
@@ -214,10 +227,8 @@ func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "审计事件已接收", receipts)
 }
 
-// ValidateIngestion verifies the OAuth application principal at the same
-// boundary as ingestion. It is intentionally read-only and does not create an
-// audit receipt, so deployment probes can detect an application/environment/
-// client mismatch before an Outbox starts accumulating retries.
+// ValidateIngestion 在与摄取相同的边界上校验 OAuth 应用主体。有意只读且不创建
+// 审计回执，使部署探针能在 Outbox 开始堆积重试之前发现应用/环境/client 不匹配。
 func (h *Handler) ValidateIngestion(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.applicationPrincipal(w, r)
 	if !ok {
@@ -231,6 +242,7 @@ func (h *Handler) ValidateIngestion(w http.ResponseWriter, r *http.Request) {
 		AuditIngest:     principal.HasScope("audit.ingest"),
 	})
 }
+// GetEvent 返回租户内单个审计事件详情。
 func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -243,6 +255,25 @@ func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计事件查询成功", eventToResponse(event))
 }
+
+// IngestionHealth 返回平台侧审计摄取健康度（批次 3）。
+//
+// 只读、租户隔离；用于审计页的"摄取健康"卡片，口径是平台已接收的事件，
+// 不代表各子系统本地 Outbox 的积压量（那些库平台读不到）。
+func (h *Handler) IngestionHealth(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	health, err := h.service.IngestionHealth(r.Context(), principal.Tenant.ID, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计摄取健康度查询成功", health)
+}
+
+// CreateExportJob 以当前查询条件创建异步审计导出任务。
 func (h *Handler) CreateExportJob(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -260,8 +291,8 @@ func (h *Handler) CreateExportJob(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "审计导出任务已创建", exportToResponse(job))
 }
 
-// DownloadExport streams a completed tenant-scoped export from the local storage root.
-// Storage paths are never accepted from the request and are validated before opening a file.
+// DownloadExport 从本地存储根流式返回一个已完成的租户隔离导出。
+// 绝不从请求接受存储路径，并在打开文件前校验路径合法性。
 func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -305,6 +336,7 @@ func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, file.OriginalName, info.ModTime(), opened)
 }
 
+// GetExportJob 返回导出任务状态与下载地址。
 func (h *Handler) GetExportJob(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -361,15 +393,14 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 }
 func pageQuery(r *http.Request) application.PageRequest {
 	values := r.URL.Query()
-	query := application.PageRequest{Page: parseInt(values.Get("page"), 1), PageSize: parseInt(values.Get("page_size"), 20), Keyword: strings.TrimSpace(values.Get("keyword")), ApplicationCode: strings.TrimSpace(filterValue(values, "application_code")), EnvironmentCode: strings.TrimSpace(filterValue(values, "environment_code")), Action: strings.TrimSpace(filterValue(values, "action")), ActionCategory: strings.TrimSpace(filterValue(values, "action_category")), Result: strings.TrimSpace(filterValue(values, "result")), RiskLevel: strings.TrimSpace(filterValue(values, "risk_level"))}
+	query := application.PageRequest{Page: parseInt(values.Get("page"), 1), PageSize: parseInt(values.Get("page_size"), 20), Keyword: strings.TrimSpace(values.Get("keyword")), ApplicationCode: strings.TrimSpace(filterValue(values, "application_code")), EnvironmentCode: strings.TrimSpace(filterValue(values, "environment_code")), Action: strings.TrimSpace(filterValue(values, "action")), ActionCategory: strings.TrimSpace(filterValue(values, "action_category")), Result: strings.TrimSpace(filterValue(values, "result")), RiskLevel: strings.TrimSpace(filterValue(values, "risk_level")), ClientIP: strings.TrimSpace(filterValue(values, "client_ip")), ResourceID: strings.TrimSpace(filterValue(values, "resource_id")), RequestID: strings.TrimSpace(filterValue(values, "request_id"))}
 	query.OccurredFrom = parseTime(filterValue(values, "occurred_from"))
 	query.OccurredTo = parseTime(filterValue(values, "occurred_to"))
 	return query
 }
 
-// filterValue accepts the documented filter[field] syntax and the flat field
-// spelling used by older console bundles. Supporting both keeps rolling
-// frontend deployments from silently dropping a condition during cache overlap.
+// filterValue 兼容文档化的 filter[field] 语法与旧版前端包使用的扁平字段写法。
+// 同时支持两者，避免滚动发布期间缓存混布时静默丢失过滤条件。
 func filterValue(values url.Values, name string) string {
 	if value := values.Get("filter[" + name + "]"); value != "" {
 		return value
@@ -377,8 +408,8 @@ func filterValue(values url.Values, name string) string {
 	return values.Get(name)
 }
 
-// applicationInput requires an explicit source binding from an application bearer token.
-// The external payload never controls client_id: it is injected only from the verified principal.
+// applicationInput 要求来自应用 bearer token 的显式来源绑定。外部载荷永远不能控制
+// client_id：它只从已验证主体注入。
 func applicationInput(payload eventInputPayload, r *http.Request, principal appctx.Principal) (application.EventInput, error) {
 	if payload.ApplicationCode == "" || strings.TrimSpace(payload.ApplicationCode) != payload.ApplicationCode || payload.ApplicationCode != principal.ApplicationCode {
 		return application.EventInput{}, fmt.Errorf("%w: application_code must be non-empty and exactly match access token", application.ErrValidation)
@@ -398,8 +429,8 @@ func applicationInput(payload eventInputPayload, r *http.Request, principal appc
 	return input, nil
 }
 
-// batchDeliveryInput captures trusted transport metadata for one Outbox delivery. These values are
-// stored independently from every event's original operation correlation fields.
+// batchDeliveryInput 捕获一次 Outbox 投递的可信传输元数据。这些值与每条事件原有的
+// 操作级关联字段分开存储。
 func batchDeliveryInput(r *http.Request, principal appctx.Principal) application.BatchDeliveryInput {
 	return application.BatchDeliveryInput{
 		ApplicationCode: principal.ApplicationCode,
@@ -413,9 +444,9 @@ func batchDeliveryInput(r *http.Request, principal appctx.Principal) application
 	}
 }
 
-// validateExternalCorrelation enforces the published subsystem audit contract. A single-event
-// request must repeat the trusted transport triplet in its body. A batch request keeps one
-// delivery-level transport triplet while every event carries its original operation triplet.
+// validateExternalCorrelation 强制执行已发布的子系统审计契约。单事件请求必须在
+// 请求体中重复可信传输三元组；批量请求保留一个投递级传输三元组，每条事件
+// 各自携带原有的操作级三元组。
 func validateExternalCorrelation(ctx context.Context, payload eventInputPayload, matchTransport bool) error {
 	if strings.TrimSpace(payload.ActorType) == "" || strings.TrimSpace(payload.RequestID) == "" || strings.TrimSpace(payload.TraceID) == "" || strings.TrimSpace(payload.CorrelationID) == "" {
 		return fmt.Errorf("%w: actor_type, request_id, trace_id and correlation_id are required", application.ErrValidation)
@@ -433,36 +464,92 @@ func validateExternalCorrelation(ctx context.Context, payload eventInputPayload,
 
 func toInput(payload eventInputPayload, r *http.Request) (application.EventInput, error) {
 	metadata := copyMetadata(payload.Metadata)
-	// method and path can describe the audited subsystem operation. Keep supplied values and add
-	// receiver values only when the reporting application did not provide them.
+	// method 与 path 可以描述被审计的子系统操作。保留上报方提供的值，仅在
+	// 上报应用未提供时补充接收侧的值。
 	if _, ok := metadata["method"]; !ok {
 		metadata["method"] = r.Method
 	}
 	if _, ok := metadata["path"]; !ok {
 		metadata["path"] = r.URL.Path
 	}
-	sourceIP, err := eventSourceIP(payload.UserLoginIP, r)
+	loginIP, clientIP, sourceFlag, legacySourceIP, err := resolveEventIPs(payload, r)
 	if err != nil {
 		return application.EventInput{}, err
 	}
-	return application.EventInput{EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: sourceIP, UserAgent: r.UserAgent()}, nil
+	return application.EventInput{LoginIP: loginIP, ClientIP: clientIP, IngestPeerIP: deliveryPeerIP(r), IPSource: sourceFlag, EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: legacySourceIP, UserAgent: r.UserAgent()}, nil
 }
 
-// eventSourceIP preserves the historical delivery-request address when a
-// publisher has no user login IP. A supplied value is accepted only when it is
-// a canonical IP literal, so malformed values cannot silently enter audit data.
-func eventSourceIP(userLoginIP string, r *http.Request) (string, error) {
-	if userLoginIP == "" {
-		return clientIP(r), nil
+// resolveEventIPs 依据统一审计来源协议解析三类地址。
+//
+// 规则：
+//   - 新协议字段（login_ip / client_ip）优先，必须是合法 IP 字面量；
+//   - 只提供旧字段 user_login_ip 时按 LEGACY_PROTOCOL 处理，并只当作"登录地址"；
+//   - 什么都没提供时登录/操作地址保持空，由界面显示"未采集"，绝不用投递地址冒充；
+//   - legacySourceIP 仅用于兼容旧列 source_ip，保持历史读数的连续性。
+func resolveEventIPs(payload eventInputPayload, r *http.Request) (loginIP, clientIP, ipSource, legacySourceIP string, err error) {
+	peer := deliveryPeerIP(r)
+	parse := func(field, value string) (string, error) {
+		if strings.TrimSpace(value) != value || value == "" {
+			return "", fmt.Errorf("%w: %s must be a valid IP address", application.ErrValidation, field)
+		}
+		parsed := net.ParseIP(value)
+		if parsed == nil {
+			return "", fmt.Errorf("%w: %s must be a valid IP address", application.ErrValidation, field)
+		}
+		return parsed.String(), nil
 	}
-	if strings.TrimSpace(userLoginIP) != userLoginIP {
-		return "", fmt.Errorf("%w: user_login_ip must be a valid IP address", application.ErrValidation)
+	ipSource = normalizeAuditIPSource(payload.IPSource)
+	if payload.LoginIP != "" {
+		if loginIP, err = parse("login_ip", payload.LoginIP); err != nil {
+			return "", "", "", "", err
+		}
 	}
-	parsed := net.ParseIP(userLoginIP)
-	if parsed == nil {
-		return "", fmt.Errorf("%w: user_login_ip must be a valid IP address", application.ErrValidation)
+	if payload.ClientIP != "" {
+		if clientIP, err = parse("client_ip", payload.ClientIP); err != nil {
+			return "", "", "", "", err
+		}
 	}
-	return parsed.String(), nil
+	if loginIP == "" && clientIP == "" && payload.UserLoginIP != "" {
+		// 旧发布方只上报登录地址。
+		if loginIP, err = parse("user_login_ip", payload.UserLoginIP); err != nil {
+			return "", "", "", "", err
+		}
+		ipSource = "LEGACY_PROTOCOL"
+	}
+	if loginIP == "" && clientIP == "" && payload.UserLoginIP == "" {
+		ipSource = "UNKNOWN"
+	}
+	// 兼容列：保持历史语义（登录地址优先，其次投递地址），供仍在读取 source_ip 的旧消费方使用。
+	legacySourceIP = loginIP
+	if legacySourceIP == "" {
+		legacySourceIP = peer
+	}
+	return loginIP, clientIP, ipSource, legacySourceIP, nil
+}
+
+// normalizeAuditIPSource 收敛发布方上报的来源标记；未知取值记为 UNKNOWN。
+func normalizeAuditIPSource(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "DIRECT":
+		return "DIRECT"
+	case "TRUSTED_PROXY":
+		return "TRUSTED_PROXY"
+	case "LEGACY_PROTOCOL":
+		return "LEGACY_PROTOCOL"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// deliveryPeerIP 只描述"谁把审计送来"：可信代理解析出的请求地址，缺省回退连接地址。
+func deliveryPeerIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if trusted := strings.TrimSpace(requestctx.ClientIP(r.Context())); net.ParseIP(trusted) != nil {
+		return net.ParseIP(trusted).String()
+	}
+	return clientIP(r)
 }
 
 func copyMetadata(metadata map[string]any) map[string]any {
@@ -476,7 +563,7 @@ func copyMetadata(metadata map[string]any) map[string]any {
 	return copy
 }
 func eventToResponse(event domain.Event) eventResponse {
-	return eventResponse{EventID: event.EventID, OccurredAt: event.OccurredAt, OperatorDisplayName: event.OperatorDisplayName, ActionType: event.ActionType, ApplicationCode: event.ApplicationCode, ApplicationName: event.ApplicationName, EnvironmentCode: event.EnvironmentCode, Action: event.Action, Result: event.Result, ResourceType: event.ResourceType, ResourceID: event.ResourceID, ResourceName: event.ResourceName, Method: event.Method, Path: event.Path, ClientIP: event.ClientIP, UserAgent: event.UserAgent, RequestID: event.RequestID, TraceID: event.TraceID, CorrelationID: event.CorrelationID, StatusCode: event.StatusCode, RiskLevel: event.RiskLevel, Detail: event.Detail, Summary: event.Summary, ChangeSummary: event.ChangeSummary}
+	return eventResponse{EventID: event.EventID, OccurredAt: event.OccurredAt, OperatorDisplayName: event.OperatorDisplayName, ActionType: event.ActionType, ApplicationCode: event.ApplicationCode, ApplicationName: event.ApplicationName, EnvironmentCode: event.EnvironmentCode, Action: event.Action, Result: event.Result, ResourceType: event.ResourceType, ResourceID: event.ResourceID, ResourceName: event.ResourceName, Method: event.Method, Path: event.Path, ClientIP: event.ClientIP, LoginIP: event.LoginIP, IngestPeerIP: event.IngestPeerIP, IPSource: event.IPSource, UserAgent: event.UserAgent, RequestID: event.RequestID, TraceID: event.TraceID, CorrelationID: event.CorrelationID, StatusCode: event.StatusCode, RiskLevel: event.RiskLevel, Detail: event.Detail, Summary: event.Summary, ChangeSummary: event.ChangeSummary}
 }
 func exportToResponse(job domain.ExportJob) exportResponse {
 	result := exportResponse{JobID: job.JobID, Status: job.Status, DownloadURL: job.DownloadURL, ErrorCode: job.ErrorCode, ErrorMessage: job.ErrorMessage, CreatedAt: job.CreatedAt}

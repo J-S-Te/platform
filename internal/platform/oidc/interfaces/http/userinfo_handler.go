@@ -91,8 +91,8 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := map[string]any{
 		"sub": info.Subject,
-		// identity_id is the explicit platform alias for the canonical iam_user.id.
-		// Account IDs, person IDs and subsystem-local IDs remain business mappings.
+		// identity_id 是规范标识 iam_user.id 的显式平台别名。
+		// 账号 ID、人员 ID 与子系统本地 ID 仍属于业务映射。
 		"identity_id": info.Subject,
 		"tenant_id":   authorization.TenantID,
 		"roles":       append([]string(nil), authorization.Roles...),

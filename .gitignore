@@ -57,3 +57,11 @@ data/logs/*.jsonl
 # 生产备份和监控输出可能包含数据库记录或运行时状态。
 deploy/production/backups/
 deploy/production/monitoring/textfile/
+
+# Local operator approvals and component secrets are host runtime state.
+/runtime-approvals/
+/runtime/license-*.env
+/runtime/local-license.compose.json
+/runtime/local-license.compose.json.*.bak
+/runtime/.license-pin-recovery.lock
+/runtime/private/

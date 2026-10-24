@@ -15,13 +15,13 @@ const (
 	activeLoginTargetParentStatus      = "ACTIVE"
 )
 
-// LoginTargetGORMRepository resolves registered application landing targets through GORM. It is
-// a runtime read model only and does not manage OAuth redirect URI registrations.
+// LoginTargetGORMRepository 通过 GORM 解析已登记的应用落地目标。它只是运行时读模型，
+// 不管理 OAuth redirect URI 登记。
 type LoginTargetGORMRepository struct {
 	database *gorm.DB
 }
 
-// NewLoginTargetGORMRepository constructs the internal login-target persistence adapter.
+// NewLoginTargetGORMRepository 构造内部登录目标持久化适配器。
 func NewLoginTargetGORMRepository(database *gorm.DB) (*LoginTargetGORMRepository, error) {
 	if database == nil {
 		return nil, errors.New("application login target database must not be nil")
@@ -39,6 +39,7 @@ type loginTargetModel struct {
 	Status        string `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的登录目标表名。
 func (loginTargetModel) TableName() string { return "platform_application_login_target" }
 
 type loginTargetEnvironmentModel struct {
@@ -59,11 +60,11 @@ type loginTargetEnvironmentModel struct {
 	UpdatedBy     *string         `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的环境表名。
 func (loginTargetEnvironmentModel) TableName() string { return "platform_application_environment" }
 
-// FindActiveLoginTarget performs an exact lookup across all four resolver inputs. Parent joins
-// enforce that the environment belongs to the same active tenant/application boundary; inactive
-// or inconsistent data therefore fails closed as not found.
+// FindActiveLoginTarget 对全部四个解析输入做精确查找。父级联接强制环境属于同一活跃
+// 租户/应用边界；停用或不一致的数据以“未找到”失败关闭。
 func (repository *LoginTargetGORMRepository) FindActiveLoginTarget(ctx context.Context, input application.LoginTargetResolveInput) (application.LoginTarget, error) {
 	var model loginTargetModel
 	err := activeLoginTargetQuery(repository.database.WithContext(ctx), input).Take(&model).Error
@@ -73,10 +74,9 @@ func (repository *LoginTargetGORMRepository) FindActiveLoginTarget(ctx context.C
 	return toLoginTarget(model), nil
 }
 
-// FindActiveEnvironment returns the parent environment for a login-target resolution. It enforces
-// the same tenant/application/environment boundary as the target resolver and only returns rows
-// that are linked to an ACTIVE parent application. The method exists so the runtime target
-// resolver can expand relative TargetURIs without depending on the management repository.
+// FindActiveEnvironment 返回登录目标解析所需的父环境。它强制与目标解析器相同的租户/应用/
+// 环境边界，且只返回关联到 ACTIVE 父应用的行。提供该方法是让运行时目标解析器能展开相对
+// TargetURI，而不依赖管理仓储。
 func (repository *LoginTargetGORMRepository) FindActiveEnvironment(ctx context.Context, tenantID, applicationID, environmentID string) (application.Environment, error) {
 	var model loginTargetEnvironmentModel
 	database := repository.database.WithContext(ctx).

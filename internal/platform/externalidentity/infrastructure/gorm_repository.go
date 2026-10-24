@@ -1,4 +1,4 @@
-// Package infrastructure persists external identity operations in the platform schema.
+// Package infrastructure 在平台 schema 内持久化外部身份操作。
 package infrastructure
 
 import (
@@ -21,11 +21,13 @@ import (
 
 const activeStatus = "ACTIVE"
 
+// GORMRepository 在平台 schema 内持久化外部身份聚合，并同步写治理审计事件。
 type GORMRepository struct {
 	database *gorm.DB
 	audit    *auditapplication.Service
 }
 
+// NewGORMRepository 构造外部身份仓储；任一依赖为 nil 时失败关闭。
 func NewGORMRepository(database *gorm.DB, audit *auditapplication.Service) (*GORMRepository, error) {
 	if database == nil || audit == nil {
 		return nil, errors.New("external identity repository dependencies must not be nil")
@@ -47,6 +49,8 @@ type idempotencyModel struct {
 
 func (idempotencyModel) TableName() string { return "iam_external_identity_idempotency" }
 
+// Provision 在同一事务提交 nonce、幂等结果、用户/账号/外部身份与审计事件，
+// 幂等键命中时返回首次结果，避免平台返回成功却缺少安全记录。
 func (repository *GORMRepository) Provision(ctx context.Context, command application.ProvisionCommand) (application.ProvisionResult, error) {
 	var response application.ProvisionResult
 	// nonce、幂等结果、用户/账号/外部身份和审计事件在同一事务中提交，避免平台返回成功却缺少任一安全记录。
@@ -103,10 +107,9 @@ func (repository *GORMRepository) Provision(ctx context.Context, command applica
 			}).Error; err != nil {
 				return mapWriteError(err)
 			}
-			// iam_external_identity.login_account_id is NOT NULL since
-			// migration 000071, so the HUMAN/LOCAL login account must exist
-			// before the identity row is inserted. No password credential is
-			// created; initialization stays an explicit admin lifecycle action.
+			// 自迁移 000071 起 iam_external_identity.login_account_id 为 NOT NULL，
+			// 因此必须先创建 HUMAN/LOCAL 登录账号，再插入身份行。此处不创建密码凭据：
+			// 初始化保持为显式的管理员生命周期动作。
 			accountID, accountErr := createExternalLoginAccount(tx, command, command.PlatformUserID, command.AccountNo)
 			if accountErr != nil {
 				return mapWriteError(accountErr)
@@ -366,10 +369,12 @@ func createExternalLoginAccount(tx *gorm.DB, command application.ProvisionComman
 	return account.ID, nil
 }
 
+// AssignRole 分配 Portal 客户角色绑定并写审计事件。
 func (repository *GORMRepository) AssignRole(ctx context.Context, command application.RoleCommand) (domain.RoleResult, error) {
 	return repository.changeRole(ctx, command, false)
 }
 
+// RevokeRole 撤销 Portal 客户角色绑定并写审计事件。
 func (repository *GORMRepository) RevokeRole(ctx context.Context, command application.RoleCommand) (domain.RoleResult, error) {
 	return repository.changeRole(ctx, command, true)
 }

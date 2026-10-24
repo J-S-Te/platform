@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// ErrInvalidBackchannelLogoutURI 表示回调地址未通过 ValidateBackchannelLogoutURI 的
+// 合规校验（协议、内嵌凭据、query/fragment），属于配置错误而非网络故障；
+// 调用方应原样返回给操作者，不得回退为静默丢弃登出通知。
 var ErrInvalidBackchannelLogoutURI = errors.New("invalid back-channel logout URI")
 
 // BackchannelLogoutURIUpdate 是客户端登出回调地址的租户范围更新请求。

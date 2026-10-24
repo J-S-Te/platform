@@ -15,15 +15,13 @@ const (
 	ingestionRetryDelay        = time.Minute
 )
 
-// Ingest accepts a cross-system notification without synchronously expanding deliveries.
+// Ingest 接收跨系统通知，但不同步展开投递。
 func (service *Service) Ingest(ctx context.Context, input IngestInput) (domain.IngestionReceipt, error) {
 	if err := validateIngestInput(input); err != nil {
 		return domain.IngestionReceipt{}, err
 	}
-	// Validate the delivery audience before acknowledging the event. ACCEPTED is
-	// intentionally a durable-receipt status, but a known-disabled inbox or an
-	// audience with no active users must not be accepted and later turned into a
-	// DEAD event that the source system cannot observe.
+	// 确认事件前先校验投递受众。ACCEPTED 有意只表示持久化接收，但已知关闭的
+	// 站内信开关或没有在册用户的受众绝不能先接收、再变成来源系统无法观测的 DEAD 事件。
 	now := service.clock.Now().UTC().Truncate(time.Millisecond)
 	enabled, _, err := service.policy.DeliveryVisibility(ctx, strings.TrimSpace(input.TenantID), now)
 	if err != nil {
@@ -51,6 +49,7 @@ func (service *Service) Ingest(ctx context.Context, input IngestInput) (domain.I
 	return service.repository.AcceptIngestion(ctx, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.SourceApplication), strings.TrimSpace(input.SourceEnvironment), event, receiptID, now)
 }
 
+// GetIngestionReceipt 校验来源三元组后查询事件处理回执，供提交方跟踪异步状态。
 func (service *Service) GetIngestionReceipt(ctx context.Context, tenantID, sourceApplication, sourceEnvironment, receiptID string) (domain.IngestionReceipt, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(sourceApplication) == "" || strings.TrimSpace(sourceEnvironment) == "" || strings.TrimSpace(receiptID) == "" {
 		return domain.IngestionReceipt{}, ErrValidation
@@ -58,8 +57,8 @@ func (service *Service) GetIngestionReceipt(ctx context.Context, tenantID, sourc
 	return service.repository.GetIngestionReceipt(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(sourceApplication), strings.TrimSpace(sourceEnvironment), strings.TrimSpace(receiptID))
 }
 
-// ProcessIngestionBatch projects accepted events to the user inbox. Callers supply the worker
-// lease; events are independently idempotent through the source-event unique key.
+// ProcessIngestionBatch 把已接收事件展开为用户站内信。租约由调用方（worker）提供；
+// 每个事件都通过来源事件唯一键独立幂等。
 func (service *Service) ProcessIngestionBatch(ctx context.Context, limit int, leaseUntil time.Time) (int, error) {
 	if limit < 1 || limit > 200 || !leaseUntil.After(service.clock.Now()) {
 		return 0, ErrValidation
@@ -92,7 +91,7 @@ func (service *Service) ProcessIngestionBatch(ctx context.Context, limit int, le
 }
 
 func (service *Service) projectIngestionEvent(ctx context.Context, tenantID, sourceApplication, sourceEnvironment string, event domain.IngestionEvent, now time.Time) (string, error) {
-	enabled, _, err := service.policy.DeliveryVisibility(ctx, tenantID, now)
+	enabled, remindAt, err := service.policy.DeliveryVisibility(ctx, tenantID, now)
 	if err != nil {
 		return "", err
 	}
@@ -121,7 +120,9 @@ func (service *Service) projectIngestionEvent(ctx context.Context, tenantID, sou
 		if idErr != nil {
 			return "", idErr
 		}
-		deliveries = append(deliveries, domain.Delivery{ID: deliveryID, TenantID: tenantID, MessageID: messageID, RecipientUserID: userID, Status: domain.DeliveryStatusPending, CreatedAt: now, UpdatedAt: now})
+		// 跨系统事件与平台内部通知必须使用同一份可见性策略：丢掉 remindAt 会让租户设置的
+		// 每日/每周提醒频率对这类事件完全失效（建即投递、立即出现在收件箱）。
+		deliveries = append(deliveries, domain.Delivery{ID: deliveryID, TenantID: tenantID, MessageID: messageID, RecipientUserID: userID, Status: domain.DeliveryStatusPending, RemindAt: &remindAt, CreatedAt: now, UpdatedAt: now})
 	}
 	created, err := service.repository.CreateMessage(ctx, message, deliveries)
 	if err != nil {

@@ -24,13 +24,13 @@ const (
 	maxBootstrapRequestBytes = 8 * 1024
 )
 
-// bootstrapInitializer is the use-case dependency exposed to the HTTP bootstrap boundary.
+// bootstrapInitializer 是暴露给 HTTP bootstrap 边界的用例依赖。
 type bootstrapInitializer interface {
 	InitializeFirstSuperAdmin(context.Context, identityapplication.BootstrapInput) (identityapplication.BootstrapResult, error)
 }
 
-// BootstrapHandler exposes the tightly controlled, one-time first-super-administrator endpoint.
-// It stores only a SHA-256 digest of the configured bootstrap token.
+// BootstrapHandler 暴露严格受控的一次性首位超级管理员端点。
+// 它只存储配置 token 的 SHA-256 摘要。
 type BootstrapHandler struct {
 	service       bootstrapInitializer
 	logger        *slog.Logger
@@ -61,9 +61,8 @@ type bootstrapResponse struct {
 	InitializedAt time.Time                  `json:"initialized_at"`
 }
 
-// NewBootstrapHandler constructs the operator-only bootstrap transport. An empty configuration
-// token intentionally disables the endpoint, allowing applications to keep the route installed
-// without exposing setup functionality after initialization.
+// NewBootstrapHandler 构造仅运维可用的 bootstrap 传输层。配置 token 为空时
+// 刻意停用该端点，使应用可以保留路由安装，但初始化完成后不再暴露设置功能。
 func NewBootstrapHandler(
 	service bootstrapInitializer,
 	logger *slog.Logger,
@@ -92,8 +91,8 @@ func NewBootstrapHandler(
 	return handler, nil
 }
 
-// InitializeFirstSuperAdmin handles the only unauthenticated IAM mutation. The configured token
-// is compared in constant time and is never persisted, logged, or returned to the caller.
+// InitializeFirstSuperAdmin 处理唯一的未认证 IAM 变更操作。配置 token 以常量时间
+// 比较，且绝不持久化、不写日志、不回传给调用方。
 func (handler *BootstrapHandler) InitializeFirstSuperAdmin(writer http.ResponseWriter, request *http.Request) {
 	if !handler.enabled {
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)

@@ -1,4 +1,4 @@
-// Command file-gateway runs the isolated file metadata and binary service.
+// Command file-gateway 运行隔离的文件元数据与二进制服务。
 package main
 
 import (
@@ -108,6 +108,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	cleanupEnabled, err := strconv.ParseBool(getenv("FILE_GATEWAY_CLEANUP_ENABLED", "true"))
+	if err != nil {
+		return fmt.Errorf("FILE_GATEWAY_CLEANUP_ENABLED must be true or false")
+	}
+	if err := runner.ConfigureCleanup(cleanupEnabled, durationEnv("FILE_GATEWAY_CLEANUP_INTERVAL", time.Hour), durationEnv("FILE_GATEWAY_CLEANUP_MINIMUM_AGE", 24*time.Hour), intEnv("FILE_GATEWAY_CLEANUP_BATCH_SIZE", 100)); err != nil {
+		return fmt.Errorf("file gateway cleanup configuration: %w", err)
+	}
 	go runner.Run(ctx)
 	if localStore != nil {
 		go monitorLocalCapacity(ctx, localStore, slog.Default())
@@ -185,8 +192,11 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, middleware 
 		}
 	})
 	mux.Handle("POST /api/v1/files", middleware.wrap(http.HandlerFunc(handler.Upload), "platform:file:upload"))
+	mux.Handle("GET /api/v1/file-upload-requests/{request_id}", middleware.wrap(http.HandlerFunc(handler.ResolveUploadRequest), "platform:file:upload"))
+	mux.Handle("POST /api/v1/file-upload-requests/{request_id}/retire", middleware.wrap(http.HandlerFunc(handler.RetireUploadRequest), "platform:file:upload"))
 	mux.Handle("GET /api/v1/files/{file_id}/content", middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download"))
 	mux.Handle("POST /api/v1/files/{file_id}/bindings", middleware.wrap(http.HandlerFunc(handler.BindFile), "platform:file:bind"))
+	mux.Handle("POST /api/v1/files/{file_id}/bindings/release", middleware.wrap(http.HandlerFunc(handler.ReleaseFileBinding), "platform:file:bind"))
 	mux.Handle("DELETE /api/v1/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(handler.UnbindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/cleanup", middleware.wrap(http.HandlerFunc(handler.CleanupFiles), "platform:file:cleanup"))
 	mux.Handle("POST /api/v1/files/reconcile", middleware.wrap(http.HandlerFunc(handler.ReconcileFiles), "platform:file:cleanup"))
@@ -197,6 +207,7 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, middleware 
 	mux.Handle("GET /api/v2/upload-sessions/{upload_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:upload"))
 	mux.Handle("GET /api/v2/files/{file_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:download"))
 	mux.Handle("POST /api/v2/files/{file_id}/download-tickets", middleware.wrap(http.HandlerFunc(v2.IssueDownloadTicket), "platform:file:download"))
+	mux.Handle("POST /api/v2/portal-report-files/{file_id}/content", middleware.wrap(http.HandlerFunc(v2.PortalReportContent), "platform:file:portal_report"))
 	mux.HandleFunc("GET /api/v2/files/{file_id}/content", v2.DownloadContent)
 	mux.Handle("DELETE /api/v2/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(v2.UnbindFile), "platform:file:bind"))
 	return mux

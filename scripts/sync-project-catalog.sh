@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the application-owned project-management authorization catalog.
+# 发布由项目管理应用拥有的授权目录。
 set -euo pipefail
 : "${PLATFORM_APPLICATION_ID:?missing application id}"
 : "${PLATFORM_BASE_URL:?missing platform url}"

@@ -1,4 +1,4 @@
-// Package infrastructure contains the GORM/MySQL and local-directory implementations for filetask.
+// Package infrastructure 包含 filetask 的 GORM/MySQL 与本地目录实现。
 package infrastructure
 
 import (
@@ -38,6 +38,7 @@ func (store *LocalStore) Ready(_ context.Context) error {
 	return nil
 }
 
+// NewLocalStore 以存储根下的默认 temporary/quarantine 子目录构造本地存储。
 func NewLocalStore(root string) (*LocalStore, error) {
 	return NewLocalStoreWithPaths(root, filepath.Join(root, "temporary"), filepath.Join(root, "quarantine"))
 }
@@ -48,6 +49,8 @@ func NewLocalStoreWithPaths(root, temporaryRoot, quarantineRoot string) (*LocalS
 	return NewLocalStoreWithCapacityLimit(root, temporaryRoot, quarantineRoot, 90)
 }
 
+// NewLocalStoreWithCapacityLimit 构造本地存储并设置磁盘占用拒绝阈值（百分比）。
+// 辅助目录被强制约束在存储根之内，且解析符号链接后仍不得逃逸。
 func NewLocalStoreWithCapacityLimit(root, temporaryRoot, quarantineRoot string, rejectUsagePercent uint64) (*LocalStore, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -176,6 +179,7 @@ func (store *LocalStore) UsagePercent() (uint64, error) {
 	return (total - available) * 100 / total, nil
 }
 
+// OpenStaged 打开 temporary 目录中的上传半成品，供内容校验读取。
 func (store *LocalStore) OpenStaged(stageID string) (io.ReadSeekCloser, error) {
 	path, err := store.safeStagePath(stageID)
 	if err != nil {
@@ -184,6 +188,7 @@ func (store *LocalStore) OpenStaged(stageID string) (io.ReadSeekCloser, error) {
 	return openRegular(path)
 }
 
+// PublishStaged 通过同文件系统原子 rename 把校验通过的半成品发布到正式命名空间。
 func (store *LocalStore) PublishStaged(stageID, relativePath string) error {
 	stagedPath, err := store.safeStagePath(stageID)
 	if err != nil {
@@ -210,6 +215,7 @@ func (store *LocalStore) PublishStaged(stageID, relativePath string) error {
 	return nil
 }
 
+// RemoveStaged 删除上传半成品；目标不存在视为成功，保证清理路径幂等。
 func (store *LocalStore) RemoveStaged(stageID string) error {
 	path, err := store.safeStagePath(stageID)
 	if err != nil {
@@ -221,6 +227,8 @@ func (store *LocalStore) RemoveStaged(stageID string) error {
 	return nil
 }
 
+// QuarantineStaged 把校验失败的半成品移动到隔离目录；文件名被改写，
+// 不会被正常下载流程触及。
 func (store *LocalStore) QuarantineStaged(stageID string) error {
 	path, err := store.safeStagePath(stageID)
 	if err != nil {
@@ -259,6 +267,8 @@ func (store *LocalStore) Quarantine(relativePath string) error {
 	return nil
 }
 
+// OpenVerified 打开正式目录中的普通文件供下载；拒绝符号链接与非常规文件，
+// 读取永远不越出存储根。
 func (store *LocalStore) OpenVerified(relativePath string) (io.ReadSeekCloser, error) {
 	// safePath 校验字符串边界后仍需 Lstat：合法路径上的符号链接也可能在运行时把读取重定向到根目录外。
 	absolutePath, err := store.safePath(relativePath)
@@ -282,6 +292,7 @@ func (store *LocalStore) OpenVerified(relativePath string) (io.ReadSeekCloser, e
 	return file, nil
 }
 
+// Remove 删除正式目录中的文件；目标不存在视为成功。
 func (store *LocalStore) Remove(relativePath string) error {
 	absolutePath, err := store.safePath(relativePath)
 	if err != nil {
@@ -340,6 +351,26 @@ func (store *LocalStore) CleanupTemporary(cutoff time.Time) (int, error) {
 		return nil
 	})
 	return removed, err
+}
+
+// Exists 只判断命名空间内的常规文件是否存在：符号链接、目录与越界路径一律按不存在处理，
+// 对账据此区分"磁盘已删除"与"字节仍在"，避免把链接目标当成业务文件。
+func (store *LocalStore) Exists(relativePath string) (bool, error) {
+	if store == nil || store.realRoot == "" {
+		return false, errors.New("local file store is not configured")
+	}
+	absolutePath, err := store.safePath(relativePath)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(absolutePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
 }
 
 func (store *LocalStore) safePath(relativePath string) (string, error) {

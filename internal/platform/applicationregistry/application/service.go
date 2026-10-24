@@ -1,4 +1,4 @@
-// Package application implements OAuth Client Credentials issuance and bearer authentication.
+// Package application 实现机器客户端的 OAuth Client Credentials 签发与 Bearer 令牌认证。
 package application
 
 import (
@@ -16,46 +16,54 @@ import (
 )
 
 var (
-	// ErrUnauthenticated intentionally covers unknown clients and invalid secrets so the token
-	// endpoint does not disclose whether a client identifier is registered.
+	// ErrUnauthenticated 刻意同时覆盖"客户端不存在"与"secret 错误"两种情况，
+	// 使令牌端点无法被用来探测某个 client 标识符是否已注册。
 	ErrUnauthenticated = errors.New("application client authentication failed")
-	ErrInvalidGrant    = errors.New("unsupported OAuth grant")
-	ErrInvalidScope    = errors.New("requested OAuth scope is not allowed")
+	// ErrInvalidGrant 表示客户端存在但未登记所请求的授权类型或认证方式。
+	ErrInvalidGrant = errors.New("unsupported OAuth grant")
+	// ErrInvalidScope 表示请求的 scope 超出客户端登记集合，按 OAuth 语义必须拒绝而非裁剪。
+	ErrInvalidScope = errors.New("requested OAuth scope is not allowed")
 )
 
+// Clock 隔离时间源，供服务与测试注入；所有时间戳必须走 UTC。
 type Clock interface{ Now() time.Time }
 
+// SystemClock 是生产环境的真实时钟实现，统一返回 UTC。
 type SystemClock struct{}
 
+// Now 返回当前 UTC 时间；签发与校验共用同一时间口径，避免时钟漂移误判过期。
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
-// Repository provides the two registration reads needed by the token lifecycle.
+// Repository 只暴露令牌生命周期所需的两类登记读取：按客户端密钥认证查找、
+// 按 ID 查 ACTIVE 客户端。实现不得返回跨租户或含明文 secret 的数据。
 type Repository interface {
 	FindForClientCredentials(context.Context, string, time.Time) (domain.OAuthClient, []domain.ClientCredential, error)
 	FindActiveByID(context.Context, string, time.Time) (domain.OAuthClient, error)
 }
 
-// TokenManager isolates the Ed25519 JWT implementation from the OAuth application service.
+// TokenManager 把 Ed25519 JWT 实现与 OAuth 应用服务隔离；
+// 服务层只面向 claims 契约，不接触签名细节。
 type TokenManager interface {
 	Issue(security.ApplicationTokenClaims) (string, error)
 	Verify(string, time.Time) (security.ApplicationTokenClaims, error)
 }
 
+// TokenResult 是令牌端点的成功响应负载，字段与 OAuth 2.0 响应一一对应。
 type TokenResult struct {
 	AccessToken string
 	ExpiresIn   int64
 	Scope       string
 }
 
-// Service issues short-lived application tokens and validates their current database-backed
-// client registration. The latter re-check means client suspension/revocation takes effect
-// without Redis or an in-process denylist.
+// Service 签发短时效应用令牌，并在认证时回查数据库确认客户端登记仍然有效。
+// 后一次回查使客户端停用/吊销即时生效，无需 Redis 或进程内 denylist。
 type Service struct {
 	repository Repository
 	tokens     TokenManager
 	clock      Clock
 }
 
+// NewService 装配应用令牌服务；任一依赖缺失即拒绝构造，认证组件不允许半可用。
 func NewService(repository Repository, tokens TokenManager, clock Clock) (*Service, error) {
 	if repository == nil || tokens == nil || clock == nil {
 		return nil, errors.New("application registry service dependencies must not be nil")
@@ -63,7 +71,9 @@ func NewService(repository Repository, tokens TokenManager, clock Clock) (*Servi
 	return &Service{repository: repository, tokens: tokens, clock: clock}, nil
 }
 
-// IssueClientCredentials validates HTTP Basic client authentication and creates an access token.
+// IssueClientCredentials 校验 HTTP Basic 客户端认证并签发访问令牌。
+// 认证失败统一折叠为 ErrUnauthenticated/ErrInvalidGrant，不区分具体失败环节，
+// 防止把错误细 feed 给探测者。
 func (s *Service) IssueClientCredentials(ctx context.Context, clientID, clientSecret string, requestedScopes []string) (TokenResult, error) {
 	clientID = strings.TrimSpace(clientID)
 	if clientID == "" || clientSecret == "" {
@@ -111,8 +121,8 @@ func (s *Service) IssueClientCredentials(ctx context.Context, clientID, clientSe
 	return TokenResult{AccessToken: token, ExpiresIn: int64(ttl / time.Second), Scope: strings.Join(scopes, " ")}, nil
 }
 
-// Authenticate validates a bearer token and confirms the referenced application client remains
-// active and bound to the same tenant/application/environment.
+// Authenticate 校验 Bearer 令牌，并确认其引用的应用客户端当前仍为 ACTIVE
+// 且仍绑定在同一租户/应用/环境上。JWT 已过期或边界不一致一律 ErrUnauthenticated。
 func (s *Service) Authenticate(ctx context.Context, token string) (appctx.Principal, error) {
 	claims, err := s.tokens.Verify(strings.TrimSpace(token), s.clock.Now().UTC())
 	if err != nil {

@@ -17,13 +17,14 @@ type authorizationOutboxRow struct {
 	Attempts                                                                  uint
 }
 
+// TableName 绑定 GORM 模型到 keycloak_authorization_outbox 表。
 func (authorizationOutboxRow) TableName() string { return "keycloak_authorization_outbox" }
 
-// OutboxQueue is the durable MySQL adapter used by the projection worker.
-// Claim uses a row lock so concurrent worker replicas cannot synchronize the
-// same identity/application pair at the same time.
+// OutboxQueue 是投影 worker 使用的持久化 MySQL 适配器。
+// Claim 通过行锁保证并发的 worker 副本不会同时同步同一 identity/application 对。
 type OutboxQueue struct{ database *gorm.DB }
 
+// NewOutboxQueue 构造 outbox 队列适配器；database 为空时返回错误。
 func NewOutboxQueue(database *gorm.DB) (*OutboxQueue, error) {
 	if database == nil {
 		return nil, errors.New("Keycloak authorization outbox database must not be nil")
@@ -31,11 +32,10 @@ func NewOutboxQueue(database *gorm.DB) (*OutboxQueue, error) {
 	return &OutboxQueue{database: database}, nil
 }
 
-// RecoverStale returns events left RUNNING by a crashed worker to PENDING.
-// The conditional update makes recovery safe when worker replicas race: after
-// one replica changes a row's status, the others no longer match it.
-// Attempts deliberately remain unchanged because recovery did not start a new
-// processing attempt; Claim increments them when the event is claimed again.
+// RecoverStale 把崩溃 worker 遗留的 RUNNING 事件退回 PENDING。条件更新使多副本
+// 竞争下的恢复是安全的：一个副本改掉行状态后，其余副本的条件不再匹配。
+// Attempts 刻意保持不变——恢复并未开始一次新的处理尝试；事件被再次领取时
+// 由 Claim 递增。
 func (queue *OutboxQueue) RecoverStale(ctx context.Context, staleBefore, availableAt time.Time) error {
 	result := queue.database.WithContext(ctx).Model(&authorizationOutboxRow{}).
 		Where("status = ? AND locked_at < ?", "RUNNING", staleBefore.UTC()).
@@ -57,6 +57,9 @@ func staleRecoveryUpdates(availableAt time.Time) map[string]any {
 	}
 }
 
+// Claim 在事务内锁定并领取一条到期 PENDING 事件：SKIP LOCKED 行锁保证多副本
+// 只有一个 worker 处理同一条事件，领取时递增 Attempts 并置为 RUNNING。
+// 无可领取事件时返回 claimed=false。
 func (queue *OutboxQueue) Claim(ctx context.Context, workerID string, now time.Time) (projectionworker.Event, bool, error) {
 	// 先锁定再标记 RUNNING，保证多副本只会有一个 worker 处理同一条事件。
 	workerID = strings.TrimSpace(workerID)
@@ -95,6 +98,8 @@ func (queue *OutboxQueue) Claim(ctx context.Context, workerID string, now time.T
 	return projectionworker.Event{ID: claimed.ID, TenantID: claimed.TenantID, IdentityID: claimed.IdentityID, ApplicationID: claimed.ApplicationID, EnvironmentID: claimed.EnvironmentID, EventType: claimed.EventType, Attempts: claimed.Attempts}, true, nil
 }
 
+// Complete 把 RUNNING 事件置为 SUCCEEDED；当该事件所属环境再无 PENDING/RUNNING/FAILED
+// 事件时，同事务开放 keycloak_switch_readiness 的 user_projection_completed 门禁。
 func (queue *OutboxQueue) Complete(ctx context.Context, event projectionworker.Event) error {
 	// 事件完成后才检查环境队列；确认无 PENDING/RUNNING 事件，才开放用户投影门禁。
 	now := time.Now().UTC()
@@ -124,6 +129,8 @@ func (queue *OutboxQueue) Complete(ctx context.Context, event projectionworker.E
 	})
 }
 
+// Retry 把 RUNNING 事件退回 PENDING 并记录错误码/消息，availableAt 由 worker
+// 按指数退避计算；事件不是 RUNNING 状态时返回错误，防止并发转移。
 func (queue *OutboxQueue) Retry(ctx context.Context, event projectionworker.Event, code, message string, availableAt time.Time) error {
 	// 重试释放锁并回到 PENDING，指数退避由 worker 决定，避免失败事件阻塞整个队列。
 	result := queue.database.WithContext(ctx).Model(&authorizationOutboxRow{}).Where("id = ? AND status = ?", strings.TrimSpace(event.ID), "RUNNING").Updates(map[string]any{
@@ -139,9 +146,8 @@ func (queue *OutboxQueue) Retry(ctx context.Context, event projectionworker.Even
 	return nil
 }
 
-// Fail moves an exhausted projection event to durable dead-letter state.  It
-// intentionally leaves the event queryable instead of dropping it, and a
-// FAILED event blocks the per-environment Keycloak cutover gate.
+// Fail 把重试耗尽的投影事件转入持久的死信状态。事件刻意保持可查询而非删除；
+// FAILED 事件会阻塞对应环境的 Keycloak 切换门禁。
 func (queue *OutboxQueue) Fail(ctx context.Context, event projectionworker.Event, code, message string) error {
 	result := queue.database.WithContext(ctx).Model(&authorizationOutboxRow{}).Where("id = ? AND status = ?", strings.TrimSpace(event.ID), "RUNNING").Updates(map[string]any{
 		"status": "FAILED", "completed_at": time.Now().UTC(), "locked_by": nil, "locked_at": nil,

@@ -1,10 +1,27 @@
 # 统一生产编排与裁剪
 
-> 构建、复制、空白机安装、配置、分阶段部署、子系统接入和故障处理的唯一详细操作手册是
+统一交付检查、安装阶段、状态查询与恢复命令见 [DELIVERY_WORKFLOW.md](DELIVERY_WORKFLOW.md)。
+
+> 2026-10-22 当前工作区源码核对；未运行部署或动态验收。发行完整性、结构检查、安装会话与授权分别核验，历史记录保持原日期。
+
+
+> 构建、复制、空白机安装、配置、分阶段部署、子系统接入和故障处理的本目录详细操作手册是
 > [OFFLINE_RUNBOOK.md](OFFLINE_RUNBOOK.md)。本文件保留架构、生产编排和 CI/CD 参考，不应作为另一套离线执行流程。
 > 服务器验收逐项记录使用 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md)。
 
 生产只使用 `docker-compose.yml`。公共平台必选；七个可选块以 `# BEGIN SUBSYSTEM: contract|project|customer|portal|settlement|data-analysis|monitoring` 和对应 END 标记划分。整块注释即可排除该系统，无需修改 profiles 或额外启用列表。部署脚本和平台 Agent 都以 Compose 解析出的服务为准，拒绝发布被注释模块。运行配置缺失不阻止解析，但接入完成前不能启动业务容器。
+
+正式离线交付使用根中文入口的可信发布验签与分阶段安装，示例见[批次操作说明](../../../操作说明/README.md)；固定批次摘要不会随源码更新而改变。当前组件登记支持内置目录V2和遗留V1桥接，JWS/快照协议仍为1。V1的运行批准发布与V2普通镜像更新有不同前提，见[商业授权总览](../../../sharedDocs/09_商业授权/README.md)。
+
+生产清单当前为CRM9、合同2、项目2、结算2、BI3、Portal最多3个消费者；项目第二进程是SLA notifier，门户邀请补偿是条件组件。Metabase属于另行核验的基础设施，不发业务ACK。验收依清单和实际启用集合，不能只核对API。
+
+2026-10-23 项目后台改为独立 Temporal Runtime：三类Schedule调度SLA、派生事件与通知，人工审批/状态事务仍由MySQL处理。新发行模板显式temporal，Build由完整不可变镜像摘要派生。首次bootstrap健康允许登记，随后仍须真实许可、当前自然ACK、显式版本提升及execution验收。
+
+项目更新、恢复、停用和移除统一经过 `bin/project-background.sh` 保护：先备份并保存私有状态、pause/drain，再迁移替换；新进程bootstrap后ensure/resume/verify。排空失败保留旧进程和候选，人工暂停不被恢复操作擅自解除。首次失败没有已保存旧镜像时拒绝自动回滚；修正条件后按原受控入口续跑。不得手改 `runtime/project-background/operation.json`、提前切镜像或以API健康代替后台执行验收。
+
+调度参数与镜像同时变更时，项目私有操作记录保存旧进程实际使用的七项非秘密参数。回滚在旧容器重建前原子恢复 `runtime/project.env` 中这七项，保留凭据及其他字段，再以 restore 验证旧 Build/规格。旧参数缺失、越界、身份不符或运行文件不安全时停止恢复并保留候选；不回滚整份运行配置。未知旧控制协议须人工核对，不能绕过校验。生产仍只有两个项目消费者，四系统合计16个。
+
+已有部署可用 `docker compose --env-file .env --env-file .release.env -f docker-compose.yml exec -T project-sla-notifier /usr/local/bin/project-background-control --action inspect` 只读诊断。旧自定义Compose由安装器保留，新模板写入 `.dist`；升级前须合并后台Build、Temporal依赖、bootstrap探针和停止等待窗口。真实签名许可/服务器验收不包含在本轮本地与隔离测试中。
 
 ```bash
 docker compose --env-file .env --env-file .release.env -f docker-compose.yml config --services
@@ -101,7 +118,7 @@ cd /opt/unified-identity-platform
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 
-应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前五个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*`、`CUSTOMER_MYSQL_* + PORTAL_MYSQL_*`、`PROJECT_MYSQL_*` 或 `DASHBOARD_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。
+应用接入不会在**预检阶段**要求所有平台级密钥都已经替换完成。预检只检查审核清单、模板、文件权限、镜像摘要和 Compose 配置；真正发布目标子系统时，Agent 只校验该目标声明的数据库凭据。当前六个生产目标分别需要 `CONTRACT_MYSQL_*`、`CUSTOMER_MYSQL_*`、`CUSTOMER_MYSQL_* + PORTAL_MYSQL_*`、`PROJECT_MYSQL_*` 、`SETTLEMENT_MYSQL_*` 或 `DASHBOARD_MYSQL_*`。数据库密码一旦用于持久化 MySQL，就不能由 Agent 随意生成或轮换，否则会导致已有数据库无法登录；因此它们仍需在第一次发布前由部署人员初始化。其他平台级密钥由平台自身启动和 CI/CD 初始化流程负责，不应阻塞无关子系统的预检。
 
 测试服务器（一次性验证接入流程、没有历史数据）可在 `.env` 中设置 `SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS=true`，Agent 将跳过数据库凭据校验，让 Compose 在首次创建空数据库时使用占位密码完成接入。该开关只应出现在测试服务器：已有持久化数据的数据库不会因为开关而自动改密，生产环境必须保持 `false`。
 
@@ -158,7 +175,7 @@ PLATFORM_AUDIT_CLIENT_ID
 PLATFORM_AUDIT_CLIENT_SECRET
 ```
 
-`SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT` 必须填写当前生产部署目录的规范绝对路径，默认 `/opt/unified-identity-platform`。`SUBSYSTEM_PRODUCTION_PROFILES_DIR` 默认 `/opt/unified-identity-platform/subsystems.d`，必须位于部署根内、不能是符号链接，目录和清单不能组/全局可写。`SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID` 默认对应迁移内置租户，标准单租户部署不需要额外配置。平台镜像更新后会同时重建 `platform-api` 和 `subsystem-provisioner`，二者分别只读同一清单并通过共享 Unix Socket 通信；只有 Agent 挂载 Docker Socket。
+`SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT` 必须填写当前生产部署目录的规范绝对路径，默认 `/opt/unified-identity-platform`。`SUBSYSTEM_PRODUCTION_PROFILES_DIR` 默认 `/opt/unified-identity-platform/subsystems.d`，必须位于部署根内、不能是符号链接，目录和清单不能组/全局可写。`SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID` 默认对应迁移内置租户，标准单租户部署不需要额外配置。平台镜像更新后会同时重建 `platform-api` 和 `subsystem-provisioner`，二者分别只读同一清单并通过共享 Unix Socket 通信；只有 docker-socket-proxy 挂载 Docker Socket；Agent 经受限代理 API 操作 Docker，不直挂宿主 Socket。
 
 ### 4.1 新增生产子系统目标（部署人员）
 
@@ -283,11 +300,11 @@ CI 远端调用：
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。首次发布 contract 或 project 且接入凭据仍为占位值时只保存不可变镜像指针，实际迁移和启动由基础平台页面接入触发。
 
-CI 发布不会删除或重建 Application、Environment、LoginTarget、OAuth Client，也不会覆盖服务器 `.env`、`.release.env` 或 `runtime/*.env`；它会更新随代码审核的 `subsystems.d` 清单。仅基础平台首次接入会更新目标清单明确列出的运行时字段，其他长期业务密钥保持不变。
+CI 发布不删除或重建 Application、Environment、LoginTarget、OAuth Client；资产安装保护运行 Secret，但发布会更新 `.release.env`，并按发布链路受控更新 runtime 的目录哈希／管理键，不能理解为这些文件永不改写；它会更新随代码审核的 `subsystems.d` 清单。首次接入及受控更新／重试会更新目标清单明确列出的运行时字段，其他长期业务密钥保持不变。
 
 项目管理系统发布显式运行 project-migrate，不影响既有 platform/frontend/contract 发布。首次发布 project 且 `runtime/project.env` 仍含 `PENDING_*`/`REPLACE_WITH_*` 时只安全暂存 `PROJECT_IMAGE` digest，接入完成后再由 Agent 迁移并启动 `project-api`。
 
-客户与商机旧双 digest 入口用于联合发布，独立发布采用本文顶部单模块命令；不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`，并把 CRM 镜像内嵌的授权目录哈希原子写入 `runtime/customer.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成一致性备份、执行两个 schema 的语句级迁移，再切换 CRM、Portal API、CRM Workers 和 Portal 邀请补偿 Worker，并检查健康/运行状态；失败时这些服务统一回滚。
+客户与商机旧双 digest 入口用于联合发布，独立发布采用本文顶部单模块命令；不影响既有 platform/frontend/contract 发布。脚本先校验两个 ACR 不可变 digest，然后更新并备份 `.release.env`，并把 CRM 镜像内嵌的授权目录哈希原子写入 `runtime/customer.env`。如果 `.env`、`runtime/customer.env` 或 `runtime/portal.env` 仍含 `REPLACE_WITH_*`/`PENDING_*`，脚本只暂存镜像，不启动服务。配置完整后依次启动双库、生成各库逻辑备份（不是跨库同一时点一致性快照）、执行两个 schema 的语句级迁移，再切换 CRM、Portal API、CRM Workers 和 Portal 邀请补偿 Worker，并检查健康/运行状态；失败时这些服务统一回滚。
 
 测试服务器继续使用非回环 HTTP 时，在 `.env` 设置 `SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION=true`。
 完成 HTTPS、Redirect URI 和 Secure Cookie 迁移后改为 `false`；该部署级开关会统一覆盖 CRM 与
@@ -297,7 +314,7 @@ Portal 的 HTTP 会话例外，清单不再永久写死允许值。
 
 ### 安装或升级客户商机生产资产
 
-将本目录的 `docker-compose.yml`、完整 `subsystem-templates/`、`bin/deploy-customer-opportunity.sh` 和 Nginx 示例同步到服务器同名路径，然后执行：
+通过已校验部署资产包和 install-assets.sh 事务安装完整资产，不能以直接覆盖单个脚本／清单代替协调升级。完成门禁处理后执行：
 
 ```bash
 cd /opt/unified-identity-platform
@@ -367,3 +384,39 @@ cd /opt/unified-identity-platform
 ```
 
 导入成功不代表恢复完成。恢复后使用备份匹配的受控配置启动经批准的 Keycloak 镜像，再验证数据库健康、`/health/ready`、Issuer discovery、Realm、Client、JWKS 和一次测试账号登录；同时记录实际 RTO/RPO。脚本只接受 `backups/keycloak` 目录中的 `keycloak-*.sql.gz`，默认拒绝符号链接与未停止 Keycloak 时的导入。
+
+## 商业授权组件更新
+
+先运行平台真实迁移至 118，再发布支持受控生命周期的 API 和 Agent。镜像或覆盖摘要变化由审核后的固定 `runtime-license-<app>-<env>.json` 驱动；普通用户及 runtime Token 不能提交组件删除清单。平台接入重试会核对完整批准集合、生成新机器身份、版本锁定替换并保留审计，旧机器身份立即失去协调接口权限。替换不恢复存量迁移资格，全部有效成员需重新确认。
+
+合同使用 `contract-api` 与 `contract-worker` 两服务，同镜像但分别配置 `runtime/license-contract-api.env`、`runtime/license-contract-worker.env` 和独立持久卷。新 profile 两者均为必需运行单元；不能只批准 API 或让 Worker 复用 API 的 Secret。默认 split 禁止内嵌 Worker，迁移和 Temporal 健康检查先于两组件启动，Worker `/readyz` 端口不对公网发布。退役不删除数据库、授权状态卷或业务文件。
+
+审核清单可提供 `release_generation`（回滚或恢复旧逻辑服务必须使用新的批准代次）与 `retire_service_ids`（明确允许的旧成员）。清单未声明的成员不能退役；启用中的必需/条件组件不能退役。此流程的协议和隔离数据库测试不代替全栈安装验收。
+
+API 与 Agent 应同步升级：每组件交付需携带完整审核摘要，Agent 在写凭据和停止进程前严格复核组件、必需成员、退役名单及代次，缺失摘要或审核文件漂移都会拒绝。状态文件名绑定实例、环境、机器身份和镜像/覆盖摘要，新身份不能继承旧迁移缓存；同身份 Secret 轮转保留持久状态。退役只停止经完整容器 ID 和项目/服务标签复核的本应用进程，不删除容器、状态卷或业务数据；跨应用及基础设施名单被拒绝。
+
+## 2026-10-13 当前操作判据
+
+本文由生产运维执行发布／恢复，应用管理员执行所属租户接入，业务人员执行真实业务验收。
+本次只核验源码，没有新部署或动态验收；文内测试／发布命令均是待执行步骤。
+
+资产安装持 runtime/.deploy.lock 并备份静态资产，这不是全系统数据库灾备；中文升级入口和底层发布另执行 backup-all。
+已有 Compose 通常写 .dist 供审阅，但安装器会受控迁移旧 Socket Proxy 镜像、frontend 地址表达式和批准目录挂载，不能称为活动 Compose 绝不修改。
+资产事务残留先 install-assets.sh --recover；控制面普通重载与绑定新版平台镜像的协调升级按不同门禁处理，不手删标记。
+
+平台发布使用平台／网关两摘要，数据分析使用四个 target 摘要；只有声明齐全才能采用。
+prepare 创建不启动的候选；continue 只在已受控接入且 READY_TO_CONTINUE 时清理候选，不执行部署或新迁移。
+install 在普通路径暂存业务候选，带匹配许可及审核安装计划时有专用自动采用路径。
+业务升级先暂存新摘要，再由页面更新；平台／前端 upgrade 则实际执行发布，不能统一描述成只暂存。
+
+页面采用／更新需要 application:update、application-environment:update、application-login-target:update、oauth-client:disable；
+重试另需 role-binding:update，完整权限均以 platform: 为前缀。状态／候选读取需要 application:read。
+后台按租户解析应用环境、校验目标／认证／清单，事务锁定部署代次，受控交付凭据，Agent 写 runtime、备份、迁移和启动所有声明服务，
+最后保存已应用清单／初始访问／终态。请求受理不等于 READY，也不等于真实登录可用。
+失败保留数据和错误证据；生产 Agent 没有可以一概保证的全流程旧镜像／SQL 自动回滚。
+
+start/resume 会走发布、备份和迁移，不是仅 docker start。基础 verify 的网关匿名接口接受 401 或 405，不代表授权业务请求通过。
+时区例外使用 runtime/compose.timezone.yaml，包装脚本和新版 Agent 会加载；HTTPS／排空仍使用受管统一前端，不另开旧覆盖流程。
+
+专用 Keycloak 恢复的 verify-only 仍需 Docker／数据库，实际恢复缺少通用恢复的全容器写入者及统一锁门禁；
+优先按 [备份恢复](BACKUP_RECOVERY.md) 采用完整批次。多节点须人工全部停写，单库导入失败没有 SQL 自动回滚。

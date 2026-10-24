@@ -386,8 +386,8 @@ func jwtTime(values map[string]json.RawMessage, name string) (time.Time, bool) {
 	return value, present && err == nil
 }
 
-// jwtOptionalTime distinguishes an absent optional NumericDate from a malformed supplied value.
-// Optional time claims must still be valid NumericDates when a client chooses to send them.
+// jwtOptionalTime 区分"可选时间声明缺席"与"提供了畸形值"。客户端选择发送可选
+// 时间声明时，仍必须是合法的 NumericDate。
 func jwtOptionalTime(values map[string]json.RawMessage, name string) (time.Time, bool, error) {
 	raw, exists := values[name]
 	if !exists {

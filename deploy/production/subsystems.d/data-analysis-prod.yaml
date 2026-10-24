@@ -45,10 +45,13 @@ runtime:
         PROJECT_MACHINE_TOKEN_SCOPE: dashboard.project.read
         CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
         PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
+        PROJECT_PROJECTION_URL: http://project-api:8082/internal/v1/dashboard/projects/snapshot
+        PROJECT_PROJECTION_HTTP_TIMEOUT: 35s
       bindings:
         APP_PATH_PREFIX: path_prefix
         APP_PUBLIC_ORIGIN: public_origin
         OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri

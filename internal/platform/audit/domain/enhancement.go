@@ -8,11 +8,13 @@ const (
 	// RetentionTaskPurge 仅删除已由归档清单证明已归档的在线审计记录。
 	RetentionTaskPurge = "PURGE"
 
+	// 任务状态机：任务只能单向推进；FAILED 任务必须由人工重新发起，不自动重试。
 	RetentionTaskPending   = "PENDING"
 	RetentionTaskRunning   = "RUNNING"
 	RetentionTaskCompleted = "COMPLETED"
 	RetentionTaskFailed    = "FAILED"
 
+	// 死信状态：PENDING 可重放或忽略，REPLAYED/IGNORED 均为终态。
 	DeadLetterPending  = "PENDING"
 	DeadLetterReplayed = "REPLAYED"
 	DeadLetterIgnored  = "IGNORED"
@@ -25,6 +27,9 @@ type RetentionTask struct {
 	CandidateCount, ProcessedCount                                        uint64
 	FailureCode, FailureMessage                                           string
 	CreatedAt, StartedAt, CompletedAt                                     time.Time
+	// WorkerID 是领取该任务时写入 worker_id 的执行者标识。完成/失败回写必须带它，
+	// 否则租约过期被接管后，旧执行者仍能覆盖接管者的结果。
+	WorkerID string
 }
 
 // Archive 描述只读归档文件及其完整性摘要。物理文件只允许由受控 worker 创建。
@@ -57,8 +62,8 @@ type DeadLetterStatus struct {
 	OldestPendingAt            *time.Time
 }
 
-// IngestionReceipt describes one externally submitted batch delivery. It records receiver-side
-// transport correlation independently from each audit event's original business correlation.
+// IngestionReceipt 描述一次外部提交的批量投递。它按接收侧记录传输层关联信息，
+// 与每条审计事件原有的业务关联字段相互独立。
 type IngestionReceipt struct {
 	ID                                                                                        uint64
 	TenantID, ApplicationID, ApplicationCode, ApplicationName, EnvironmentID, EnvironmentCode string
@@ -68,8 +73,8 @@ type IngestionReceipt struct {
 	ReceivedAt, CreatedAt                                                                     time.Time
 }
 
-// DeadLetterReplayResult records the observable outcome of one manual replay attempt. It never
-// contains the stored payload, credentials, or raw upstream transport errors.
+// DeadLetterReplayResult 记录一次手动重放的可观测结果。它绝不包含已存储的 payload、
+// 凭据或上游原始传输错误。
 type DeadLetterReplayResult struct {
 	DeadLetterID, EventID, Status, ReceiptStatus, ErrorCode string
 	ReplayedAt                                              time.Time

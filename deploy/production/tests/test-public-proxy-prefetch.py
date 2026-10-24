@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run anonymous public-image preparation without changing caller credentials."""
+"""执行匿名公共镜像准备流程，不修改调用方凭据。"""
 import json
 import os
 from pathlib import Path
@@ -71,8 +71,7 @@ sys.exit(1)
                ORIGINAL_CONFIG=str(credentials), DOCKER_CONFIG=str(credentials),
                COMPOSE_LOG=str(compose_log), DOCKER_LOG=str(docker_log), CACHE_IMAGE=str(cache),
                ANON_CONFIG=str(anonymous_config), EXPECTED_PROXY=PROXY, PROXY_IMAGE=PROXY)
-    # An explicit context takes precedence over DOCKER_HOST. The isolated config
-    # must not accidentally pull to this competing daemon endpoint.
+    # 显式上下文优先于 DOCKER_HOST；隔离配置不得误将镜像拉取到这个竞争的守护进程端点。
     env['DOCKER_HOST'] = 'unix:///wrong-daemon.sock'
     env['DOCKER_CONTEXT'] = 'fixture-context'
 
@@ -96,6 +95,24 @@ sys.exit(1)
     calls, commands = run()
     assert not any(args[:1] == ['--config'] for args in commands), 'cached fixed digest must work offline'
     cache.unlink()
+    calls, commands = run({'UIP_OFFLINE_DEPLOYMENT': '1'}, succeeds=False)
+    assert 'stop ' not in calls
+    assert not any(args[:1] == ['--config'] for args in commands), 'offline deployments must never pull from the public registry'
+    calls, commands = run({'PROXY_IMAGE': '127.0.0.1:5000/uip/docker-socket-proxy@sha256:' + 'b' * 64}, succeeds=False)
+    assert 'stop ' not in calls
+    assert not any(args[:1] == ['--config'] for args in commands), 'missing local immutable proxy must refuse public fallback'
+    cache.touch()
+    calls, commands = run({'PROXY_IMAGE': '127.0.0.1:5000/uip/docker-socket-proxy@sha256:' + 'b' * 64,
+                           'UIP_OFFLINE_DEPLOYMENT': '1'})
+    assert 'stop --timeout 60 platform-api' in calls
+    assert not any(args[:1] == ['--config'] for args in commands), 'cached local immutable proxy needs no public network'
+    cache.unlink()
+    (fixture / 'manifests').mkdir()
+    (fixture / 'manifests/common.latest').write_text('common-reviewed.imported\n')
+    calls, commands = run(succeeds=False)
+    assert 'stop ' not in calls
+    assert not any(args[:1] == ['--config'] for args in commands), 'existing offline import must prohibit public fallback'
+    (fixture / 'manifests/common.latest').unlink()
     calls, commands = run({'TEST_ENDPOINT': 'tcp://remote-daemon:2376'}, succeeds=False)
     assert 'stop ' not in calls
     assert not any(args[:1] == ['--config'] for args in commands)

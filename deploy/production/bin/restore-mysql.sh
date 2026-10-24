@@ -79,9 +79,7 @@ for command_name in docker flock install realpath gzip sha256sum awk; do
   command -v "$command_name" >/dev/null || { echo "missing command: $command_name" >&2; exit 127; }
 done
 
-# Hold the same lock used by deploy/prepare/continue for the complete writer
-# discovery and import window. This closes the check-then-restart race where a
-# concurrent release could bring a writer back after the preflight check.
+# 整个写入者发现和导入窗口都持有 deploy、prepare、continue 使用的同一把锁，防止并发发布在预检后重新启动写入者。
 install -d -m 700 "$deploy_dir/runtime"
 [[ ! -L "$deploy_dir/runtime/.deploy.lock" ]] || { echo "deployment lock must not be a symbolic link" >&2; exit 1; }
 exec 8>"$deploy_dir/runtime/.deploy.lock"
@@ -102,9 +100,9 @@ known_writer_for_database() {
     platform-mysql:platform-api|platform-mysql:platform-worker|platform-mysql:subsystem-provisioner|platform-mysql:platform-migrate|platform-mysql:bootstrap-admin) return 0 ;;
     keycloak-db:keycloak) return 0 ;;
     file-gateway-mysql:file-gateway) return 0 ;;
-    customer-mysql:customer-api|customer-mysql:customer-migrate|customer-mysql:customer-opportunity-alert-worker|customer-mysql:customer-owner-notification-worker|customer-mysql:customer-presale-alert-worker|customer-mysql:customer-presale-assignment-notification-worker|customer-mysql:customer-presale-progress-notification-worker|customer-mysql:customer-notification-delivery-worker|customer-mysql:customer-presale-worker) return 0 ;;
-    portal-mysql:portal-api|portal-mysql:portal-migrate|portal-mysql:portal-invite-compensation-worker) return 0 ;;
-    contract-mysql:contract-api|contract-mysql:contract-migrate|contract-mysql:temporal) return 0 ;;
+    customer-mysql:customer-api|customer-mysql:customer-migrate|customer-mysql:customer-contract-transfer-worker|customer-mysql:customer-opportunity-alert-worker|customer-mysql:customer-owner-notification-worker|customer-mysql:customer-presale-alert-worker|customer-mysql:customer-presale-assignment-notification-worker|customer-mysql:customer-presale-progress-notification-worker|customer-mysql:customer-notification-delivery-worker|customer-mysql:customer-presale-worker) return 0 ;;
+    portal-mysql:portal-api|portal-mysql:portal-migrate|portal-mysql:portal-report-worker|portal-mysql:portal-invite-compensation-worker) return 0 ;;
+    contract-mysql:contract-api|contract-mysql:contract-worker|contract-mysql:contract-migrate|contract-mysql:temporal) return 0 ;;
     project-mysql:project-api|project-mysql:project-migrate|project-mysql:project-sla-notifier) return 0 ;;
     settlement-mysql:settlement-api|settlement-mysql:settlement-migrate|settlement-mysql:settlement-worker|settlement-mysql:settlement-catalog-sync) return 0 ;;
     data-analysis-mysql:data-analysis-api|data-analysis-mysql:data-analysis-migrate|data-analysis-mysql:data-analysis-aggregation-worker|data-analysis-mysql:data-analysis-alert-worker|data-analysis-mysql:data-analysis-metabase|data-analysis-mysql:data-analysis-metabase-init) return 0 ;;
@@ -114,9 +112,7 @@ known_writer_for_database() {
 
 container_references_database() {
   local candidate_id="$1" database="$2"
-  # Inspect only inside this process and never print environment values: they
-  # can contain DSNs and client secrets. This also finds orphaned/pruned
-  # Compose services that no longer exist in the current YAML.
+  # 只在此进程内检查，绝不打印可能包含 DSN 或客户端密钥的环境变量。这也能发现当前 YAML 中已不存在的孤立或被裁剪的 Compose 服务。
   docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$candidate_id" 2>/dev/null |
     awk -v database="$database" 'index($0, database) { found=1 } END { exit(found ? 0 : 1) }'
 }
@@ -146,9 +142,8 @@ if ((${#writers[@]} > 0)); then
   exit 1
 fi
 
-# Security (SEC-F5b): the root password reaches the mysql client only via the
-# in-container MYSQL_PWD environment variable, never as a -p argument, so the
-# password does not appear in argv (/proc/*/cmdline, visible to ps).
+# 安全约束 SEC-F5b：root 密码仅通过容器内 MYSQL_PWD 环境变量传给 mysql 客户端，绝不用 -p 参数，
+# 避免出现在 argv、/proc/*/cmdline 或 ps 输出中。
 gzip -dc "$backup" | "${compose[@]}" exec -T "$service" sh -ec 'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot'
 printf 'database restore completed: service=%s backup=%s\n' "$service" "$backup"
 echo 'Keep the maintenance window active, start approved dependents, and run deploy.sh verify before declaring recovery complete.'

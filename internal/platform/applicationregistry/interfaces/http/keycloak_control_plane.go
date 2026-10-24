@@ -1,8 +1,7 @@
 package http
 
-// This adapter owns the small, auditable subset of the Keycloak Admin API used
-// by application onboarding.  It deliberately does not proxy the Admin API to
-// browsers and never returns an access token or a client secret.
+// 本适配器只持有应用接入所需的 Keycloak Admin API 小型可审计子集。
+// 刻意不把 Admin API 代理给浏览器，也绝不返回 access token 或客户端 Secret。
 
 import (
 	"bytes"
@@ -34,10 +33,9 @@ type keycloakControlPlane struct {
 	httpClient                                                                                                                                     *stdhttp.Client
 }
 
-// keycloakBrokerConfigurationError marks a deterministic configuration defect
-// returned by Keycloak. Callers may use it to decide whether a narrowly scoped
-// broker credential recovery is safe; transport and authorization failures must
-// never trigger a credential rotation.
+// keycloakBrokerConfigurationError 标记 Keycloak 返回的确定性配置缺陷。
+// 调用方可据此判断是否适合执行窄范围的 broker 凭据恢复；
+// 传输与授权失败绝不允许触发凭据轮换。
 type keycloakBrokerConfigurationError struct {
 	alias      string
 	missingKey string
@@ -47,21 +45,18 @@ func (err *keycloakBrokerConfigurationError) Error() string {
 	return fmt.Sprintf("Keycloak IdP %s config incomplete: missing %s", err.alias, err.missingKey)
 }
 
-// IsRecoverableKeycloakBrokerConfigurationError reports whether Keycloak
-// responded with a complete, local configuration defect. It deliberately
-// excludes network, authentication and authorization failures.
+// IsRecoverableKeycloakBrokerConfigurationError 判断 Keycloak 是否返回了完整、
+// 局部的配置缺陷。刻意排除网络、认证与授权失败，避免把环境故障误判为可恢复。
 func IsRecoverableKeycloakBrokerConfigurationError(err error) bool {
 	var configurationError *keycloakBrokerConfigurationError
 	return errors.As(err, &configurationError)
 }
 
-// KeycloakControlPlaneCredentials explicitly supplies the credentials used by
-// the control plane to call the Keycloak Admin API. When a complete service
-// account pair is supplied it is preferred and exchanged with
-// client_credentials. Username/password remains supported for existing
-// deployments and is used when no service account is configured.
+// KeycloakControlPlaneCredentials 显式提供控制面调用 Keycloak Admin API 所用凭据。
+// 提供完整服务账号对时优先使用并以 client_credentials 兑换；
+// 用户名/口令仍为既有部署保留，仅在未配置服务账号时使用。
 //
-// The credentials are process-only inputs; the adapter never returns them.
+// 凭据是进程内输入；适配器绝不将其返回给任何调用方。
 type KeycloakControlPlaneCredentials struct {
 	ServiceAccountClientID     string
 	ServiceAccountClientSecret string
@@ -74,13 +69,12 @@ type keycloakClientResult struct {
 	ClientSecret string `json:"-"`
 }
 
-// keycloakIdentityClaimMappings is the explicit, one-way projection from the
-// Basic Platform identity/authorization model into a brokered Keycloak user.
-// Keycloak may relay these values to relying parties, but it is not allowed to
-// become the source of truth for personnel, organisation or authorization.
+// keycloakIdentityClaimMappings 是基础平台身份/授权模型到受代理 Keycloak 用户的
+// 显式单向投影。Keycloak 可以把这些值转发给依赖方，但绝不允许成为人员、
+// 组织或授权数据的事实来源。
 var keycloakIdentityClaimMappings = []keycloakIdentityClaimMapping{
-	// identity_id is the immutable platform principal. Publish it as the OIDC
-	// subject so every relying party uses one stable identity key.
+	// identity_id 是不可变的平台主体。发布为 OIDC subject，
+	// 使每个依赖方都使用同一稳定身份键。
 	{Name: "identity_id", ClaimName: "sub"},
 	{Name: "tenant_id"},
 	{Name: "person_id"},
@@ -120,16 +114,14 @@ func newKeycloakControlPlaneWithCredentials(adminURL, realm string, credentials 
 	return &keycloakControlPlane{adminURL: strings.TrimRight(adminURL, "/"), realm: realm, username: credentials.Username, password: credentials.Password, adminClientID: credentials.ServiceAccountClientID, adminClientSecret: credentials.ServiceAccountClientSecret, brokerClientID: brokerClientID, brokerClientSecret: brokerClientSecret, platformIssuer: strings.TrimRight(platformIssuer, "/"), platformBackchannel: strings.TrimRight(platformBackchannel, "/"), httpClient: &stdhttp.Client{Timeout: 12 * time.Second}}
 }
 
-// NewKeycloakControlPlane intentionally returns an opaque adapter.  Only the
-// bootstrap package is allowed to construct it from process secrets.
+// NewKeycloakControlPlane 刻意返回不透明的适配器：仅允许 bootstrap 包
+// 从进程密钥构造它，其余代码不得自行拼装控制面客户端。
 func NewKeycloakControlPlane(adminURL, realm, username, password, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel string) *keycloakControlPlane {
 	return newKeycloakControlPlane(adminURL, realm, username, password, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel)
 }
 
-// NewKeycloakControlPlaneWithCredentials constructs a control plane with
-// explicitly injected Admin API credentials. A complete service-account pair
-// uses client_credentials; otherwise the supplied username/password pair is
-// used for backwards compatibility.
+// NewKeycloakControlPlaneWithCredentials 以显式注入的 Admin API 凭据构造控制面。
+// 完整服务账号对走 client_credentials；否则按向后兼容使用用户名/口令对。
 func NewKeycloakControlPlaneWithCredentials(adminURL, realm string, credentials KeycloakControlPlaneCredentials, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel string) *keycloakControlPlane {
 	return newKeycloakControlPlaneWithCredentials(adminURL, realm, credentials, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel)
 }
@@ -191,10 +183,9 @@ func (control *keycloakControlPlane) request(ctx context.Context, token, method,
 	return control.httpClient.Do(req)
 }
 
-// keycloakStatusError produces a safe, bounded diagnostic for an Admin API
-// failure. It must be called before the response body is closed. The response
-// body is intentionally not decoded as a successful Keycloak payload when its
-// status is unexpected.
+// keycloakStatusError 为 Admin API 失败生成有界且脱敏的诊断摘要；
+// 必须在关闭响应体之前调用。状态码不符时，响应体刻意不按成功的 Keycloak
+// 载荷解码，防止把错误页当成数据。
 func keycloakStatusError(operation string, response *stdhttp.Response, accepted ...int) error {
 	for _, status := range accepted {
 		if response.StatusCode == status {
@@ -217,10 +208,9 @@ func keycloakResponseSummary(body io.Reader) string {
 	if summary == "" {
 		return "<empty>"
 	}
-	// Keycloak usually returns JSON, but reverse proxies and custom extensions
-	// can return plain-text HTTP headers. Redact those forms before the generic
-	// key/value matcher so a value such as "Authorization: Bearer <token>"
-	// cannot leave the token following the word "Bearer" in logs.
+	// Keycloak 通常返回 JSON，但反向代理与自定义扩展可能返回纯文本 HTTP 头。
+	// 必须先脱敏这类形式再执行通用键值匹配，防止 "Authorization: Bearer <token>"
+	// 中的 token 跟着 "Bearer" 一词留在日志里。
 	summary = keycloakAdminBearerToken.ReplaceAllString(summary, "$1<redacted>")
 	summary = keycloakAdminCookieValue.ReplaceAllString(summary, "$1<redacted>")
 	summary = keycloakAdminJWT.ReplaceAllString(summary, "<redacted>")
@@ -242,9 +232,8 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		if readErr != nil {
 			return readErr
 		}
-		// A compatible Admin API proxy may answer 200 without returning the
-		// Realm representation. Keep onboarding compatible; reconciliation
-		// will enforce the settings once a complete response is available.
+		// 兼容的 Admin API 代理可能返回 200 却不携带 Realm 表示。保持接入兼容；
+		// 待完整响应可用时由调和流程强制设置项。
 		if len(bytes.TrimSpace(body)) == 0 {
 			return nil
 		}
@@ -432,10 +421,9 @@ const (
 	keycloakReviewProfileModeKey        = "update.profile.on.first.login"
 )
 
-// ensurePrelinkedBrokerFlow creates a provider-specific, fail-closed first
-// login flow. Keycloak skips this flow for an already linked Federated
-// Identity. An unknown subject reaches the single deny execution instead of
-// entering Keycloak's JIT user/profile registration flow.
+// ensurePrelinkedBrokerFlow 创建提供方专属、失败关闭的首次登录流程。
+// 对已关联的联合身份 Keycloak 会跳过该流程；未知主体只会命中唯一的 deny
+// 执行项，而不会进入 Keycloak 的 JIT 用户/资料注册流程。
 func (control *keycloakControlPlane) ensurePrelinkedBrokerFlow(ctx context.Context, token string) error {
 	realmPath := "/admin/realms/" + url.PathEscape(control.realm)
 	flowPath := realmPath + "/authentication/flows/" + url.PathEscape(keycloakPrelinkedBrokerFlowAlias)
@@ -549,10 +537,9 @@ func (control *keycloakControlPlane) ensurePrelinkedBrokerFlow(ctx context.Conte
 	return nil
 }
 
-// ensureBrokerReviewProfileDisabled reconciles the effective Keycloak 26
-// setting. updateProfileFirstLoginMode on the IdentityProvider representation
-// is retained for compatibility, but current Keycloak versions read the mode
-// from the Review Profile authenticator execution in the first Broker flow.
+// ensureBrokerReviewProfileDisabled 调和 Keycloak 26 的实际生效设置。
+// IdentityProvider 表示上的 updateProfileFirstLoginMode 仅为兼容保留；
+// 当前版本从首个 Broker 流程的 Review Profile authenticator 执行项读取该模式。
 func (control *keycloakControlPlane) ensureBrokerReviewProfileDisabled(ctx context.Context, token, brokerAlias string) error {
 	realmPath := "/admin/realms/" + url.PathEscape(control.realm)
 	providerPath := realmPath + "/identity-provider/instances/" + url.PathEscape(brokerAlias)
@@ -665,14 +652,13 @@ func (control *keycloakControlPlane) ensureBrokerReviewProfileDisabled(ctx conte
 		defer response.Body.Close()
 		return keycloakStatusError("update Keycloak Broker Review Profile config", response, stdhttp.StatusNoContent)
 	}
-	// A custom flow without Review Profile already satisfies the no-interaction
-	// contract and needs no authenticator configuration.
+	// 不含 Review Profile 的自定义流程本身已满足"零交互"契约，无需再配置 authenticator。
 	return nil
 }
 
-// ensureBrokerUserProfile declares the attributes imported from Basic Platform.
-// Keycloak 26 validates mapper targets against the Realm user-profile schema,
-// so an Attribute Importer cannot create arbitrary attributes on first login.
+// ensureBrokerUserProfile 声明从基础平台导入的属性。Keycloak 26 会按 Realm
+// user-profile 模式校验 mapper 目标，Attribute Importer 无法在首次登录时
+// 任意创建属性，因此必须先声明。
 func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context, token string) error {
 	path := "/admin/realms/" + url.PathEscape(control.realm) + "/users/profile"
 	response, err := control.request(ctx, token, stdhttp.MethodGet, path, nil)
@@ -688,8 +674,7 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 		return err
 	}
 	attributes, _ := profile["attributes"].([]any)
-	// Basic Platform owns profile validation. Keycloak must not turn optional
-	// platform fields into a first-login registration form.
+	// 资料校验归基础平台所有；Keycloak 不得把可选的平台字段变成首次登录注册表单。
 	for index, raw := range attributes {
 		attribute, ok := raw.(map[string]any)
 		if !ok {
@@ -708,9 +693,8 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 			if !ok || attribute["name"] != claim.Name {
 				continue
 			}
-			// Repair any manually changed profile metadata during every sync so
-			// a Keycloak administrator cannot silently turn a list claim into a
-			// scalar or make the mapping user-editable.
+			// 每次同步都修复被手工改动的资料元数据，防止 Keycloak 管理员把列表 claim
+			// 静默改成标量，或把映射改成用户可编辑。
 			attribute["displayName"] = claim.Name
 			attribute["multivalued"] = claim.MultiValued
 			attribute["permissions"] = map[string]any{"view": []string{"admin"}, "edit": []string{"admin"}}
@@ -770,29 +754,25 @@ func (control *keycloakControlPlane) ensureBrokerUserProfile(ctx context.Context
 	return nil
 }
 
-// EnsureBroker registers an upstream Basic Platform identity provider and
-// imports the authorization claims into Keycloak user attributes. The alias is
-// intentionally explicit: internal employees and external customers use
-// different Broker clients so one application's callback cannot overwrite the
-// other's client credentials.
+// EnsureBroker 注册上游基础平台身份提供方，并把授权 claims 导入 Keycloak 用户属性。
+// 别名刻意显式区分：内部员工与外部客户使用不同 Broker 客户端，
+// 一个应用的回调无法覆盖另一个应用的客户端凭据。
 func (control *keycloakControlPlane) EnsureBroker(ctx context.Context, clientID, clientSecret string) error {
 	return control.ensureBroker(ctx, "basic-platform", "基础平台", clientID, clientSecret)
 }
 
-// EnsureCustomerPortalBroker configures the isolated customer portal IdP.
+// EnsureCustomerPortalBroker 配置与内部 Broker 隔离的客户门户 IdP，凭据互不复用。
 func (control *keycloakControlPlane) EnsureCustomerPortalBroker(ctx context.Context, clientID, clientSecret string) error {
 	return control.ensureBroker(ctx, "basic-platform-customer", "客户自助门户", clientID, clientSecret)
 }
 
-// VerifyBrokerExists checks that the basic-platform IdP exists and has a
-// complete config. It does not modify the IdP or require a client secret.
-// Use this when the platform already has active credentials and only needs
-// to confirm the Keycloak side is healthy.
+// VerifyBrokerExists 检查 basic-platform IdP 存在且配置完整；不修改 IdP，
+// 也不需要客户端 Secret。适用于平台已持有有效凭据、仅需确认 Keycloak 侧健康的场景。
 func (control *keycloakControlPlane) VerifyBrokerExists(ctx context.Context) error {
 	return control.verifyBrokerExists(ctx, "basic-platform")
 }
 
-// VerifyCustomerPortalBrokerExists checks the customer portal IdP health.
+// VerifyCustomerPortalBrokerExists 检查客户门户 IdP 的健康状态。
 func (control *keycloakControlPlane) VerifyCustomerPortalBrokerExists(ctx context.Context) error {
 	return control.verifyBrokerExists(ctx, "basic-platform-customer")
 }
@@ -812,11 +792,9 @@ func (control *keycloakControlPlane) verifyBrokerExists(ctx context.Context, bro
 	}
 	defer response.Body.Close()
 	if response.StatusCode == stdhttp.StatusNotFound {
-		// The platform keeps only a hash for a healthy broker credential, so
-		// recreating a deleted IdP requires the narrowly-scoped credential
-		// recovery path. A 404 for this exact alias is deterministic Keycloak
-		// configuration drift, unlike transport, authentication, or permission
-		// failures, and is therefore safe to mark as recoverable.
+		// 平台对健康的 broker 凭据只保存哈希，因此重建被删除的 IdP 必须走窄范围的
+		// 凭据恢复路径。该别名的 404 属于确定性的 Keycloak 配置漂移，与传输、认证或
+		// 权限失败不同，因此可安全标记为可恢复。
 		return &keycloakBrokerConfigurationError{alias: brokerAlias, missingKey: "identity-provider"}
 	}
 	if err := keycloakStatusError("read Keycloak IdP", response, stdhttp.StatusOK); err != nil {
@@ -837,8 +815,8 @@ func (control *keycloakControlPlane) verifyBrokerExists(ctx context.Context, bro
 	return nil
 }
 
-// KeycloakDriftReport describes detected configuration differences between the
-// platform's expected state and the actual Keycloak state for one subsystem client.
+// KeycloakDriftReport 描述单个子系统客户端在"平台期望状态"与"Keycloak 实际状态"
+// 之间检测到的配置差异，各布尔字段即对应检查项的符合性。
 type KeycloakDriftReport struct {
 	ClientID       string   `json:"client_id"`
 	HasDrift       bool     `json:"has_drift"`
@@ -869,22 +847,20 @@ func mapsEqual(left, right map[string]string) bool {
 	return true
 }
 
-// DetectSubsystemKeycloakDrift compares the expected Keycloak configuration for a
-// subsystem client against the actual state. It checks:
-//   - Client existence and redirect URI
-//   - Role catalog completeness
-//   - Protocol mapper presence and configuration
-//   - Broker IdP config completeness
+// DetectSubsystemKeycloakDrift 将子系统客户端的期望 Keycloak 配置与实际状态比对，检查：
+//   - 客户端存在性与回调 URI
+//   - 角色目录完整性
+//   - 协议 mapper 的存在与配置
+//   - Broker IdP 配置完整性
 //
-// This method is read-only and does not modify Keycloak state. Use the result
-// to decide whether to trigger a reconciliation.
+// 本方法只读，不修改任何 Keycloak 状态；结果仅用于决定是否触发调和。
 func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Context, clientID, expectedRedirectURI string, expectedRoleCodes []string) (KeycloakDriftReport, error) {
 	report := KeycloakDriftReport{ClientID: clientID, RedirectURIOK: true, BrokerConfigOK: true}
 	token, err := control.token(ctx)
 	if err != nil {
 		return report, err
 	}
-	// Check client exists.
+	// 检查客户端是否存在。
 	lookupPath := "/admin/realms/" + url.PathEscape(control.realm) + "/clients?clientId=" + url.QueryEscape(clientID)
 	response, err := control.request(ctx, token, stdhttp.MethodGet, lookupPath, nil)
 	if err != nil {
@@ -908,7 +884,7 @@ func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Co
 		return report, nil
 	}
 	internalID := clients[0].ID
-	// Check redirect URI.
+	// 检查回调 URI。
 	if expectedRedirectURI != "" {
 		found := false
 		for _, uri := range clients[0].RedirectURIs {
@@ -922,7 +898,7 @@ func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Co
 			report.HasDrift = true
 		}
 	}
-	// Check roles.
+	// 检查角色目录。
 	rolePath := "/admin/realms/" + url.PathEscape(control.realm) + "/clients/" + url.PathEscape(internalID) + "/roles"
 	response, err = control.request(ctx, token, stdhttp.MethodGet, rolePath, nil)
 	if err != nil {
@@ -962,8 +938,8 @@ func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Co
 	}
 	sort.Strings(report.MissingRoles)
 	sort.Strings(report.StaleRoles)
-	// Compare the platform-owned protocol mappers by name and configuration;
-	// a mapper with the right name but a changed claim is still drift.
+	// 按名称与配置双维度比较平台管控的协议 mapper；
+	// 名称相同但 claim 已变的 mapper 仍视为漂移。
 	mapperPath := "/admin/realms/" + url.PathEscape(control.realm) + "/clients/" + url.PathEscape(internalID) + "/protocol-mappers/models"
 	response, err = control.request(ctx, token, stdhttp.MethodGet, mapperPath, nil)
 	if err != nil {
@@ -1008,7 +984,7 @@ func (control *keycloakControlPlane) DetectSubsystemKeycloakDrift(ctx context.Co
 	}
 	sort.Strings(report.MissingMappers)
 	sort.Strings(report.DriftedMappers)
-	// Check broker config.
+	// 检查 broker 配置。
 	brokerAlias := brokerAliasForClient(clientID)
 	response, err = control.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(control.realm)+"/identity-provider/instances/"+url.PathEscape(brokerAlias), nil)
 	if err != nil {
@@ -1065,14 +1041,12 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 	if backchannel == "" {
 		backchannel = control.platformIssuer
 	}
-	// The browser-facing endpoints must use the public issuer. Only the
-	// token and userinfo calls are server-to-server and may use the backchannel;
-	// exposing an internal Docker hostname as logoutUrl makes Keycloak redirect
-	// the user's browser to an unreachable host during Broker logout.
-	// Users are provisioned and linked by the platform authorization projection
-	// before they can enter a subsystem. Never expose Keycloak's first-login
-	// profile completion form: email and split first/last names are optional in
-	// the platform and must not become an additional registration contract.
+	// 面向浏览器的端点必须使用公开 Issuer；只有 token 与 userinfo 调用是服务端到
+	// 服务端，可走 backchannel。把内部 Docker 主机名暴露为 logoutUrl 会让
+	// Keycloak 在 Broker 登出期间把用户浏览器重定向到不可达主机。
+	// 用户在进入子系统之前已由平台授权投影完成供给与关联；绝不暴露 Keycloak 的
+	// 首次登录资料补全表单——邮箱与拆分的姓名在平台侧是可选字段，
+	// 不能变成另一套注册契约。
 	payload := control.brokerRepresentation(brokerAlias, displayName, clientID, clientSecret, backchannel)
 	if exists {
 		response, err = control.request(ctx, token, stdhttp.MethodPut, base, payload)
@@ -1104,16 +1078,14 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 	if decodeErr != nil {
 		return decodeErr
 	}
-	// Self-healing: verify IdP config completeness. Keycloak can return an
-	// empty config{} after a timing race or cache miss during PUT. Re-apply
-	// the payload once; if it still fails, surface the error so the worker
-	// retries on next startup instead of silently leaving a broken IdP.
+	// 自愈：核验 IdP 配置完整性。PUT 期间的时序竞争或缓存未命中可能让 Keycloak
+	// 返回空 config{}。重新提交一次载荷；仍失败则把错误上抛，由 Worker 在下次
+	// 启动时重试，而不是静默留下一个损坏的 IdP。
 	if err := control.ensureBrokerConfigComplete(ctx, token, base, brokerAlias, payload, verifiedBroker.Config); err != nil {
 		return err
 	}
-	// Keycloak 26 can keep returning the legacy top-level profile mode as
-	// "on". The provider-specific deny-only flow is the authoritative
-	// no-registration contract.
+	// Keycloak 26 可能持续把遗留的顶层 profile 模式报为 "on"；
+	// 提供方专属的 deny-only 流程才是权威的"不注册"契约。
 	if verifiedBroker.FirstBrokerLoginFlowAlias != keycloakPrelinkedBrokerFlowAlias {
 		return fmt.Errorf("Keycloak Broker policy did not converge to prelinked-only mode")
 	}
@@ -1164,8 +1136,8 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 		}
 		method, path := stdhttp.MethodPost, base+"/mappers"
 		if mapperID != "" {
-			// Keycloak 26's cache layer can reject in-place mapper updates for
-			// otherwise valid records. Delete and recreate only a drifted mapper.
+			// Keycloak 26 的缓存层可能拒绝就地更新 mapper，即使记录本身有效。
+			// 只对发生漂移的 mapper 执行删除重建，避免放大影响面。
 			response, err = control.request(ctx, token, stdhttp.MethodDelete, base+"/mappers/"+url.PathEscape(mapperID), nil)
 			if err != nil {
 				return err
@@ -1186,9 +1158,9 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 		}
 		createErr := keycloakStatusError("configure Keycloak broker claim "+claim.Name, response, stdhttp.StatusCreated)
 		response.Body.Close()
-		// Keycloak 26.2 can persist an IdP mapper then return 400 while it
-		// finalizes the Admin event. Re-read and update it so the operation
-		// remains correct and safe to retry instead of exposing a false 503.
+		// Keycloak 26.2 可能在落库 IdP mapper 后、收尾 Admin 事件时返回 400。
+		// 此时重读并更新该 mapper，使操作保持正确且可安全重试，
+		// 而不是对外暴露一个虚假的 503。
 		mapperIDs, err = listMappers()
 		if err != nil {
 			return err
@@ -1205,10 +1177,9 @@ func (control *keycloakControlPlane) ensureBroker(ctx context.Context, brokerAli
 	return nil
 }
 
-// ensureBrokerConfigComplete verifies that the IdP config received from Keycloak
-// contains all required fields. If the config is empty or missing critical keys,
-// it re-applies the expected payload once. This self-heals the known Keycloak
-// race condition where a PUT returns 204 but the config remains empty {}.
+// ensureBrokerConfigComplete 核验从 Keycloak 读回的 IdP 配置是否包含全部必需字段；
+// 配置为空或缺关键键时重新提交一次期望载荷。该自愈针对 Keycloak 已知竞态：
+// PUT 返回 204 但配置仍为空 {}。
 func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Context, token, base, brokerAlias string, expected map[string]any, actual map[string]string) error {
 	requiredKeys := []string{"clientId", "clientSecret", "tokenUrl", "userInfoUrl", "authorizationUrl"}
 	complete := true
@@ -1221,7 +1192,7 @@ func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Cont
 	if complete {
 		return nil
 	}
-	// Re-apply the expected configuration once.
+	// 重新提交一次期望配置。
 	response, err := control.request(ctx, token, stdhttp.MethodPut, base, expected)
 	if err != nil {
 		return fmt.Errorf("self-heal Keycloak IdP %s config: %w", brokerAlias, err)
@@ -1230,7 +1201,7 @@ func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Cont
 	if response.StatusCode != stdhttp.StatusNoContent {
 		return fmt.Errorf("self-heal Keycloak IdP %s config returned HTTP %d", brokerAlias, response.StatusCode)
 	}
-	// Verify the fix took effect.
+	// 核验修复已生效。
 	response, err = control.request(ctx, token, stdhttp.MethodGet, base, nil)
 	if err != nil {
 		return fmt.Errorf("verify self-healed Keycloak IdP %s config: %w", brokerAlias, err)
@@ -1253,18 +1224,15 @@ func (control *keycloakControlPlane) ensureBrokerConfigComplete(ctx context.Cont
 	return nil
 }
 
-// EnsureClient creates/updates a confidential RP and the claims expected by
-// the existing subsystems. Attribute import from the upstream platform IdP is
-// configured separately before this method is allowed to switch production.
+// EnsureClient 创建/更新机密 RP 及既有子系统期望的 claims。来自上游平台 IdP 的
+// 属性导入必须先单独配置完成，本方法才允许用于生产切换。
 func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID, name, redirectURI string) (keycloakClientResult, error) {
 	return control.EnsureClientRedirectURIs(ctx, clientID, name, []string{redirectURI})
 }
 
-// EnsureClientRedirectURIs atomically replaces the complete platform-managed
-// callback set for one Realm Client. Transport cutovers use two callbacks while
-// traffic drains, then call it again with the single target callback. The
-// method never reads or mutates unrelated Client secrets beyond the existing
-// secret retrieval required by subsystem onboarding.
+// EnsureClientRedirectURIs 原子替换单个 Realm 客户端的全部平台管控回调集合。
+// 传输层切换期间先配置两个回调等流量排空，再以单一目标回调重新调用。
+// 除子系统接入所需的既有 Secret 读取外，本方法不读取也不改动任何无关客户端凭据。
 func (control *keycloakControlPlane) EnsureClientRedirectURIs(ctx context.Context, clientID, name string, redirectURIs []string) (keycloakClientResult, error) {
 	redirectURIs = canonicalRedirectURIs(redirectURIs)
 	if len(redirectURIs) == 0 {
@@ -1375,9 +1343,9 @@ func canonicalRedirectURIs(values []string) []string {
 	return result
 }
 
-// EnsureClientRoles mirrors the platform-published role catalog into the
-// target Keycloak Client. Roles remain namespaced by Client, so an "admin"
-// role in contract management can never grant CRM or project access.
+// EnsureClientRoles 把平台发布的角色目录镜像到目标 Keycloak 客户端。
+// 角色始终按客户端命名空间隔离，合同管理里的 "admin" 角色绝不可能授予
+// CRM 或项目系统的访问权限。
 func (control *keycloakControlPlane) EnsureClientRoles(ctx context.Context, clientID string, roleCodes []string) error {
 	token, err := control.token(ctx)
 	if err != nil {
@@ -1478,10 +1446,9 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 	}
 	managedMappers := make([]keycloakManagedProtocolMapper, 0, len(keycloakIdentityClaimMappings)+3)
 	for _, claim := range keycloakIdentityClaimMappings {
-		// identity_id is managed by the explicit stable mapper below.  The legacy
-		// generic projection named platform-identity_id used to map this attribute
-		// to the reserved OIDC `sub` claim, which overwrote the canonical subject
-		// and made Portal reject otherwise valid authorization-code logins.
+		// identity_id 由下方的显式稳定 mapper 管理。遗留的通用投影 platform-identity_id
+		// 曾把该属性映射到保留的 OIDC `sub` claim，覆盖了规范 subject，
+		// 导致门户拒绝本应有效的授权码登录。
 		if claim.Name == "identity_id" {
 			continue
 		}
@@ -1497,10 +1464,9 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 		managedNames[mapper.Name] = struct{}{}
 	}
 
-	// Remove stale platform-owned mappers and exact historical detailed
-	// authorization Claims. Matching claim.name instead of fuzzy mapper names
-	// migrates manually named legacy mappers without touching third-party
-	// profile or role mappers.
+	// 移除过期的平台管控 mapper 与历史上精确的明细授权 Claim。按 claim.name 精确
+	// 匹配而非按 mapper 名称模糊匹配，可以在不触碰第三方资料/角色 mapper 的
+	// 前提下迁移手工命名的遗留 mapper。
 	for name, current := range known {
 		if _, keep := managedNames[name]; keep {
 			continue
@@ -1553,9 +1519,8 @@ func (control *keycloakControlPlane) ensureClaimMappers(ctx context.Context, tok
 func keycloakAuthorizationProtocolMappers(publicClientID string) []keycloakManagedProtocolMapper {
 	return []keycloakManagedProtocolMapper{
 		{
-			// Keep the stable platform identity available under its explicit
-			// contract name as well as OIDC sub. Existing relying parties use
-			// identity_id, while sub remains the canonical OIDC subject.
+			// 让稳定平台身份同时以其显式契约名 identity_id 与 OIDC sub 两个键可用：
+			// 既有依赖方使用 identity_id，sub 保持为规范 OIDC subject。
 			Name:           "platform-stable-identity-id",
 			ProtocolMapper: "oidc-usermodel-attribute-mapper",
 			Config: map[string]string{

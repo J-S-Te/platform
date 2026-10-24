@@ -68,7 +68,7 @@ active_bindings="$(docker exec -e MYSQL_PWD=restore-drill-only "$db_container" m
 orphan_ready="$(docker exec -e MYSQL_PWD=restore-drill-only "$db_container" mysql -uroot -N -B file_gateway -e "SELECT COUNT(*) FROM file_object f LEFT JOIN file_binding b ON b.file_id=f.id AND b.status='ACTIVE' WHERE f.status='READY' AND b.id IS NULL;")"
 inventory_output="$(docker run --rm --network "container:$db_container" \
   --volume "$drill_root/files:/app/data/file-gateway:ro" \
-  -e FILE_GATEWAY_DATABASE_DSN='root:restore-drill-only@tcp(127.0.0.1:3306)/file_gateway?charset=utf8mb4&parseTime=true&loc=UTC' \
+  -e FILE_GATEWAY_DATABASE_DSN='root:restore-drill-only@tcp(127.0.0.1:3306)/file_gateway?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai' \
   -e FILE_GATEWAY_STORAGE_ROOT=/app/data/file-gateway \
   "$platform_image" ./file-inventory --limit 100000 --interval 0s)"
 [[ "$orphan_ready" == "0" ]] || { echo "隔离恢复发现 READY 孤立文件：$orphan_ready" >&2; exit 2; }

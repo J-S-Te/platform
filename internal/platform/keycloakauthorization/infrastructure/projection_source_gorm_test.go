@@ -32,10 +32,20 @@ func TestProjectionUserQueryIncludesProfileAndDeletionState(t *testing.T) {
 	database := newDryRunMySQL(t)
 	statement := projectionUserQuery(database, projectionworker.Event{TenantID: "tenant", IdentityID: "identity"}).Find(&[]projectionUserRow{}).Statement
 	sql := statement.SQL.String()
-	for _, expected := range []string{"iam_user", "iam_account", "display_name", "email", "status", "deleted_at", "valid_until", "locked_until", "tenant_id = ?", "id = ?"} {
+	for _, expected := range []string{"iam_user", "iam_account", "display_name", "email", "status", "deleted_at", "valid_until", "tenant_id = ?", "id = ?"} {
 		if !strings.Contains(sql, expected) {
 			t.Errorf("user query missing %q: %s", expected, sql)
 		}
+	}
+	// 临时锁定不得让用户被投影为 disabled：否则管理员读取一次账号列表就会把
+	// Keycloak 的 disabled 反向写回平台，把锁定升级成永久停用。
+	if strings.Contains(sql, "locked_until") {
+		t.Fatalf("projection eligibility must ignore transient account lock: %s", sql)
+	}
+	// 临时锁定不得让用户被投影为 disabled：否则管理员读取一次账号列表就会把
+	// Keycloak 的 disabled 反向写回平台，把锁定升级成永久停用。
+	if strings.Contains(sql, "locked_until") {
+		t.Fatalf("projection eligibility must ignore transient account lock: %s", sql)
 	}
 	if !projectionUserEnabled(projectionUserRow{Status: "ACTIVE", HasLoginAccount: true}) {
 		t.Error("active user with an eligible account was not enabled")

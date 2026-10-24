@@ -17,9 +17,7 @@ for file in "$deploy_script" "$offline_builder"; do
   [[ -f "$file" ]] || { echo "required deployment source is missing: $file" >&2; exit 1; }
 done
 
-# In a full workspace, the offline path and CI/CD path must publish the same
-# four independently executable data-analysis targets. Standalone platform CI
-# still runs the release mapping checks below.
+# 完整工作区中，离线与 CI/CD 路径必须发布相同的四个可独立执行的数据分析目标；独立平台 CI 仍执行下方发布映射检查。
 if [[ -d "$workspace_root/data_analysis" ]]; then
   for file in "$data_analysis_dockerfile" "$workflow"; do
     [[ -f "$file" ]] || { echo "required data-analysis deployment source is missing: $file" >&2; exit 1; }
@@ -50,9 +48,8 @@ for catalog_sync in sync-contract-catalog.sh sync-settlement-catalog.sh sync-pro
   }
 done
 
-# Every build context is deny-by-default. This keeps local credentials,
-# databases, reports and host binaries out of BuildKit uploads/cache even when
-# a future Dockerfile accidentally broadens a COPY statement.
+# 所有构建上下文默认拒绝未知文件，即使未来 Dockerfile 意外扩大 COPY 范围，
+# 本地凭据、数据库、报告和宿主机二进制也不会进入 BuildKit 上传或缓存。
 for context in platform frontend customer_and_opportunity contract_management project_management Settlement data_analysis; do
   ignore_file="$workspace_root/$context/.dockerignore"
   [[ -f "$ignore_file" ]] || { echo "missing Docker build-context policy: $ignore_file" >&2; exit 1; }
@@ -82,9 +79,7 @@ for context in platform frontend customer_and_opportunity contract_management pr
   done
 done
 
-# Go builders must use the exact toolchain declared by go.mod, retain module
-# checksum verification and retry transient proxy failures. Broad COPY of the
-# repository root is forbidden for backend production builds.
+# Go 构建器必须使用 go.mod 声明的准确工具链，保留模块校验和验证并重试瞬时代理故障。后端生产构建禁止宽泛复制仓库根目录。
 for context in platform customer_and_opportunity contract_management project_management Settlement data_analysis; do
   dockerfile="$workspace_root/$context/Dockerfile"
   go_mod="$workspace_root/$context/go.mod"
@@ -137,8 +132,7 @@ grep -Fq 'DATA_ANALYSIS_DASHBOARD_API_IMAGE DATA_ANALYSIS_AGGREGATION_WORKER_IMA
   exit 1
 }
 
-# Load deploy.sh definitions without running its CLI, then verify package
-# import metadata is copied exactly and not collapsed to the API image.
+# 仅加载 deploy.sh 定义而不运行 CLI，再验证包导入元数据被准确复制，未被简化成 API 镜像。
 source "$deploy_script"
 release_file="$test_root/.release.env"
 cat > "$release_file" <<'EOF'

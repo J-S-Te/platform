@@ -1,5 +1,7 @@
 # File Gateway 生产运行说明
 
+> 源码核验：2026-10-13；由生产运维、应用凭据管理员及业务验收人员分别执行。本文未声明真实环境已部署或验收。
+
 ## 进程与数据边界
 
 `file-gateway` 是独立进程，使用独立 MySQL Schema 和宿主机持久化目录。基础平台 API
@@ -27,7 +29,7 @@ CREATED -> UPLOADING -> VALIDATING -> READY
 
 ## 本地目录存储
 
-生产使用 `/opt/unified-identity-platform/data/file-gateway` 宿主机目录，仅 File Gateway 容器挂载。
+生产默认使用部署根目录下的 `data/file-gateway`；可由 `FILE_GATEWAY_HOST_ROOT` 指定，必须以实际 Compose 装配为准，不能假定总是 `/opt/unified-identity-platform`。仅 File Gateway 容器挂载对象目录。
 容器内网关进程以专用 UID/GID `10001` 运行，目录和文件权限分别为 `0750`、`0640`。
 业务子系统只保存 `file_id` 和摘要，不接触物理路径。正式文件按
 `namespace/purpose/tenant/year/month/file/version/content` 分层；半成品和被拒绝文件分别进入
@@ -61,6 +63,30 @@ CREATED -> UPLOADING -> VALIDATING -> READY
 
 人工恢复端点仍保留，但不是唯一恢复机制。
 
+### 到期临时文件清理与精确引用释放
+
+网关后台同时调度到期临时文件清理，默认每小时、每租户最多 100 条，并要求文件创建至少 24 小时。
+数据库仍独立检查 `TEMPORARY`、保留期已到和没有 ACTIVE 绑定，不能仅凭文件年龄删除。
+`LONG_TERM`、仍绑定的文件及业务历史不会被该调度清理。
+
+```dotenv
+FILE_GATEWAY_CLEANUP_ENABLED=true
+FILE_GATEWAY_CLEANUP_INTERVAL=1h
+FILE_GATEWAY_CLEANUP_MINIMUM_AGE=24h
+FILE_GATEWAY_CLEANUP_BATCH_SIZE=100
+```
+
+可以显式设为 `false` 暂停自动物理清理，不影响正常上传、下载和上传状态对账。
+批量须为 1～500，清理周期至少 1 分钟，最小年龄不得小于上传超时恢复窗口。
+
+业务持久补偿使用 `POST /api/v1/files/{file_id}/bindings/release`，仍需 `platform:file:bind`。
+请求体为 `application_id/resource_type/resource_id/binding_type`，只允许已验签租户和应用的精确引用；
+重复释放成功，已释放的相同文件/资源绑定不能被迟到请求复活，其他代次不受影响。接口不删除文件字节。
+此能力要求独立网关迁移 `000104_file_binding_release.sql`，应先完成备份、升级网关及健康检查，再升级使用它的业务 Worker。
+升级代码不会自动扫描或删除历史上缺少业务任务记录的孤立绑定。
+
+清理每次按租户短事务领取一条（`FOR UPDATE SKIP LOCKED`）并先置 DELETING，磁盘删除在事务外执行。失败释放与完成均按领取后版本 CAS；后台有界对账遗留 DELETING：字节已不存在只推进 DELETED，字节仍在但保留条件已不满足则释放，仍满足条件才删除，无法读取或版本冲突继续保留待处理。不能批量重置 READY 冒充文件恢复。
+
 ## 发布与验证
 
 发布前至少执行：
@@ -73,5 +99,18 @@ docker compose -f compose.local.yaml config --quiet
 真实 MySQL 并发验证通过 `FILE_GATEWAY_TEST_DSN` 启用。测试 DSN 必须指向可清空的专用数据库，
 文件测试使用独立临时目录。
 
-生产切换顺序：先发布独立数据库与网关，确认 `/readyz`；再为子系统交付网关凭据并使用双写；
-完成历史文件回填与抽样校验后切换为必需模式，最后删除子系统旧 BLOB/本地文件写路径。
+生产运维先校验独立网关镜像、数据库密码、宿主目录与签名公钥，再通过生产包装入口发布。
+网关启动实际先连接 MySQL、执行文件迁移，再装配本地存储、文件／任务服务、上传处理器、应用 Token 校验、对账和容量监控。
+由平台受控接入下发各应用凭据后，验证 `/readyz`、真实上传／下载、大小及 SHA-256、租户／资源绑定和无权限拒绝。
+上述测试命令只是待执行步骤；本次未运行测试。旧手册的“双写后统一删除 BLOB”不是本次已核实的自动操作能力，不得据此清除历史数据。
+
+## 备份恢复及失败处理
+
+按 [生产备份恢复](../deploy/production/BACKUP_RECOVERY.md) 使用同批次数据库／对象备份，暂停所有网关写入者；临时上传被排除，quarantine 被保留。
+恢复数据库导入失败时脚本可恢复旧文件目录，但数据库可能已部分写入，网关保持停止；必须人工评估数据库恢复，不宣称已完整回滚。
+隔离网关演练使用 PLATFORM_IMAGE 内的 inventory 工具、临时 1 GiB MySQL 和最多 100000 条记录扫描，超过范围不能标记全量对账完成。
+恢复成功还需技术健康、真实业务读写和摘要校验；只校验归档、`/livez` 或脚本退出零均不等于业务恢复。
+
+## 上传请求解析与退休（2026-10-22源码同步）
+
+当前独立网关迁移还包括000105。`GET /api/v1/file-upload-requests/{request_id}`读取稳定标识/状态，`POST …/{request_id}/retire`持久化请求墓碑，两者需机器scope `platform:file:upload`，租户/应用从已验签主体取得。退休回执不保证文件READY，也不删除字节；消费者拿到file_id后还需按精确资源tuple释放引用，禁止用GET404或临时超时就换key重复上传。当前实现与重试边界见[上传请求恢复](file-upload-request-recovery.md)；本轮未运行该迁移或MySQL测试。

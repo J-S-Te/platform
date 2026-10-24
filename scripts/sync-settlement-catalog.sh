@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Publishes the trusted, application-owned Settlement authorization manifest.
-# It runs only inside the deployment Agent's one-shot container with a
-# catalog-publisher credential supplied through the process environment.
+# 发布可信、由应用管理的结算授权清单。仅在部署 Agent 的一次性容器内运行，catalog-publisher 凭据通过进程环境提供。
 set -euo pipefail
 
 prefix="[settlement-catalog-sync]"

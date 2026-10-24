@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install a verified deployment-assets archive while retaining local module selection.
+# 安装已验证的部署资产归档，并保留本地模块选择。
 set -Eeuo pipefail
 
 usage() {
@@ -21,7 +21,36 @@ validate_target() {
 }
 
 safe_top_name() {
-  [[ "$1" =~ ^(bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|docker-compose\.yml\.dist|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|BACKUP_RECOVERY\.md)$ ]]
+  case "$1" in
+    license-installation.json|license-migration-evidence.json|license-evidence.json|runtime-license-contract_management-prod.json|runtime-license-customer_and_opportunity-prod.json|runtime-license-customer_portal-prod.json|runtime-license-project_management-prod.json|runtime-license-settlement-prod.json|runtime-license-data_analysis-prod.json) return 0 ;;
+  esac
+  [[ "$1" =~ ^(runtime-approvals|license|bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|docker-compose\.yml\.dist|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|DELIVERY_WORKFLOW\.md|BACKUP_RECOVERY\.md|CONTAINER_TIMEZONE\.md)$ ]]
+}
+
+approval_name() {
+  [[ "$1" == license-evidence.json || "$1" == license-migration-evidence.json || "$1" =~ ^runtime-license-(contract_management|customer_and_opportunity|customer_portal|project_management|settlement|data_analysis)-prod\.json$ ]]
+}
+
+validate_approval_file() {
+  local file="$1"
+  [[ -f "$file" && ! -L "$file" && "$(wc -c < "$file")" -le 10485760 ]] || { echo '授权批准必须为有限大小普通文件' >&2; return 1; }
+  command -v jq >/dev/null || { echo '迁移批准 JSON 需要 jq' >&2; return 1; }
+  jq -e -s --arg name "$(basename "$file")" 'length == 1 and (.[0] | type == "object" and .version == 1 and
+    ((keys - (if ($name | startswith("runtime-license-")) then ["version","application","environment","components","release_generation","retire_service_ids"]
+      else ["version","project","installation_boundary","services","infrastructure","excluded_services"] end)) | length == 0) and
+    (if ($name | startswith("runtime-license-")) then
+      ((has("release_generation") | not) or
+        (.release_generation | type == "string" and (. == "" or test("^[a-z][a-z0-9_-]{0,63}$")))) and
+      ((has("retire_service_ids") | not) or
+        (.retire_service_ids | type == "array" and length <= 32 and
+          all(.[]; type == "string" and test("^[a-z][a-z0-9_-]{0,63}$")) and
+          (length == (unique | length))))
+      else true end) and
+    ([paths | select(.[-1] | type == "string") | .[-1] | ascii_downcase |
+       select(test("password|secret|private.?key|access.?token|refresh.?token"))] | length == 0) and
+    ([.. | strings | select(test("-----BEGIN [A-Z ]*PRIVATE KEY-----"))] | length == 0))' "$file" >/dev/null || {
+    echo '批准文件 JSON 格式无效或包含凭据字段' >&2; return 1;
+  }
 }
 
 compose_project_name() {
@@ -156,7 +185,9 @@ printf '%s\n' "$listing" | awk '
   { sub(/^\.\//, ""); if ($0 == "" || $0 == ".") next;
     if ($0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/) exit 1;
     split($0, a, "/");
-    if (a[1] !~ /^(bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|BACKUP_RECOVERY\.md)$/) exit 1;
+    if (a[1] == "license") { if ($0 != "license/" && $0 != "license/commercial-license.jws") exit 1; next; }
+    if (a[1] ~ /^(license-installation\.json|license-migration-evidence\.json|license-evidence\.json|runtime-license-(contract_management|customer_and_opportunity|customer_portal|project_management|settlement|data_analysis)-prod\.json)$/) { if (length(a)>1) exit 1; next; }
+    if (a[1] !~ /^(bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|DELIVERY_WORKFLOW\.md|BACKUP_RECOVERY\.md|CONTAINER_TIMEZONE\.md)$/) exit 1;
   }' || { echo '资产包含非部署文件或不安全路径' >&2; exit 1; }
 tar -tvzf "$archive" | awk 'substr($1,1,1) != "-" && substr($1,1,1) != "d" {exit 1}' || { echo '资产禁止包含链接或特殊文件' >&2; exit 1; }
 
@@ -211,9 +242,43 @@ trap cleanup EXIT
 tar -xzf "$archive" --no-same-owner --no-same-permissions -C "$stage"
 [[ -f "$stage/docker-compose.yml" && -f "$stage/bin/deploy.sh" ]] || { echo '资产缺少统一编排或部署入口' >&2; exit 1; }
 bash -n "$stage/bin/deploy.sh"
+for entrypoint in start-enabled.sh deploy-service.sh lifecycle.sh; do
+  if [[ -f "$stage/bin/$entrypoint" ]] && grep -Fq 'project-background.sh' "$stage/bin/$entrypoint"; then
+    [[ -f "$stage/bin/project-background.sh" && ! -L "$stage/bin/project-background.sh" && -f "$stage/bin/compose-scope.sh" ]] || {
+      echo '资产缺少项目后台受控生命周期依赖 bin/project-background.sh 或 bin/compose-scope.sh' >&2; exit 1;
+    }
+    bash -n "$stage/bin/project-background.sh" || exit 1
+  fi
+done
 
-# Preserve operator-selected services. Only the known managed Docker Hub proxy
-# reference changes registry; version, proxy ACLs and every other YAML line stay.
+# 保持对根目录固定交付布局的兼容，但 Agent 只读取此专用目录。绝不复制任意运行配置、密钥或敏感信息。
+install -d -m 700 "$stage/runtime-approvals"
+shopt -s dotglob nullglob
+if [[ -e "$target/runtime-approvals" || -L "$target/runtime-approvals" ]]; then
+  [[ -d "$target/runtime-approvals" && ! -L "$target/runtime-approvals" ]] || { echo '现有批准目录不安全' >&2; exit 1; }
+  for file in "$target/runtime-approvals"/*; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    approval_name "$(basename "$file")" || { echo '批准目录含未登记文件' >&2; exit 1; }
+    validate_approval_file "$file"
+    cp -p -- "$file" "$stage/runtime-approvals/$(basename "$file")"
+  done
+fi
+for base in "$target" "$stage"; do
+  for file in "$base"/*.json; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    name="$(basename "$file")"
+    approval_name "$name" || continue
+    validate_approval_file "$file"
+    if [[ -e "$stage/runtime-approvals/$name" ]]; then
+      cmp -s -- "$file" "$stage/runtime-approvals/$name" || { echo '批准目录已有不同内容，拒绝资产安装覆盖；请执行独立受控批准更新' >&2; exit 1; }
+    else
+      cp -p -- "$file" "$stage/runtime-approvals/$name"
+    fi
+  done
+done
+find "$stage/runtime-approvals" -type f -exec chmod 600 {} +
+
+# 保留操作人选择的服务。仅已知受管 Docker Hub 代理引用变更仓库；版本、代理 ACL 和其他所有 YAML 行均保持不变。
 if [[ -f "$target/docker-compose.yml" ]]; then
   [[ ! -L "$target/docker-compose.yml" ]] || { echo '统一编排不能是符号链接' >&2; exit 1; }
   compose_update="$(mktemp "$target/.compose-managed-image.XXXXXX")"
@@ -230,12 +295,35 @@ if [[ -f "$target/docker-compose.yml" ]]; then
     proxy && /^    image:[[:space:]]/ {
       image=$2
       gsub(/["\047]/, "", image)
-      if (image=="tecnativa/docker-socket-proxy:v0.5.0" || image=="docker.io/tecnativa/docker-socket-proxy:v0.5.0")
-        sub(/(docker[.]io\/)?tecnativa\/docker-socket-proxy:v0[.]5[.]0/,
-            "ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459")
+      if (image=="tecnativa/docker-socket-proxy:v0.5.0" || image=="docker.io/tecnativa/docker-socket-proxy:v0.5.0" ||
+          image=="ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459")
+        sub(/((ghcr[.]io|docker[.]io)\/)?tecnativa\/docker-socket-proxy:v0[.]5[.]0(@sha256:[a-f0-9]{64})?/,
+            "${DOCKER_SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459}")
     }
     {print}
   ' "$target/docker-compose.yml" >"$compose_update"
+  # 仅修改活动 Agent 服务的普通块式卷列表；不支持的自定义 YAML 直接拒绝，不重写整个模型。
+  managed_mount='      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime-approvals:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime-approvals:ro'
+  if grep -q '"subsystem-provisioner"' "$compose_update"; then
+    echo '现有 JSON 编排须先人工审核 Agent 的批准目录挂载，禁止自动文本改写' >&2
+    exit 1
+  fi
+  mount_update="$(mktemp "$target/.compose-approvals.XXXXXX")"
+  if ! awk -v mount="$managed_mount" '
+    function flush() {if (agent && !found) {if (!volumes) {bad=1; return} print mount}}
+    /^  subsystem-provisioner:[[:space:]]*(#.*)?$/ {flush(); agent=1; volumes=0; found=0; print; next}
+    /^  [^[:space:]#]/ || /^[^[:space:]#]/ {flush(); agent=0}
+    agent && /^    volumes:[[:space:]]*(#.*)?$/ {volumes=1; print; next}
+    agent && /runtime-approvals/ {if ($0 != mount || found) {bad=1}; found=1}
+    agent && volumes && /^    [^[:space:]#]/ {if (!found) {print mount; found=1}; volumes=0}
+    {print}
+    END {flush(); if (bad) exit 1}
+  ' "$compose_update" >"$mount_update"; then
+    rm -f -- "$mount_update"
+    echo '自定义 Agent 编排无法安全定向加入批准目录只读挂载，请人工审核该单一配置项' >&2
+    exit 1
+  fi
+  mv -f -- "$mount_update" "$compose_update"
   if cmp -s -- "$target/docker-compose.yml" "$compose_update"; then
     rm -f -- "$compose_update"
     compose_update=''
@@ -259,6 +347,25 @@ if [[ -n "$compose_update" ]]; then
 fi
 
 shopt -s dotglob nullglob
+if [[ -e "$stage/license" ]]; then
+  [[ -d "$stage/license" && ! -L "$stage/license" && -f "$stage/license/commercial-license.jws" && ! -L "$stage/license/commercial-license.jws" ]] || {
+    echo '交付许可证目录或文件不安全' >&2; exit 1;
+  }
+  [[ "$(find "$stage/license" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]] || {
+    echo '交付许可证目录只能包含 commercial-license.jws，禁止夹带私钥或其他资产' >&2; exit 1;
+  }
+  if [[ -e "$target/license" || -L "$target/license" ]]; then
+    [[ -d "$target/license" && ! -L "$target/license" && -f "$target/license/commercial-license.jws" && ! -L "$target/license/commercial-license.jws" ]] || {
+      echo '现有许可证目录不安全，拒绝覆盖' >&2; exit 1;
+    }
+    cmp -s "$stage/license/commercial-license.jws" "$target/license/commercial-license.jws" || {
+      echo '已有许可证与交付包不同；请使用独立受控续期操作，不允许资产升级覆盖授权身份' >&2; exit 1;
+    }
+    # 相同许可证留在原位，资产回滚不能移除既有安装授权。
+    rm -- "$stage/license/commercial-license.jws"
+    rmdir -- "$stage/license"
+  fi
+fi
 for source in "$stage"/*; do
   name="$(basename "$source")"
   destination_name="$name"
@@ -309,6 +416,8 @@ for name in subsystems.d subsystem-templates mysql-init nginx monitoring; do
     find "$target/$name" -type f -exec chmod 644 {} +
   fi
 done
+chmod 700 "$target/runtime-approvals"
+find "$target/runtime-approvals" -type f -exec chmod 600 {} +
 chmod 750 "$target/bin/"*.sh
 if [[ "$control_plane_running" == true || "$pending_platform_upgrade" == true ]]; then
   write_control_plane_reload_marker

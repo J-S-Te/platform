@@ -9,12 +9,16 @@ import (
 	"gorm.io/gorm"
 )
 
+// ExpiryGORMRepository 以 GORM 扫描与标记身份有效期到期记录，供过期 worker 轮询。
 type ExpiryGORMRepository struct{ database *gorm.DB }
 
+// NewExpiryGORMRepository 构造过期仓储。
 func NewExpiryGORMRepository(database *gorm.DB) *ExpiryGORMRepository {
 	return &ExpiryGORMRepository{database: database}
 }
 
+// ListDueExpirations 返回已到 valid_until 且尚未处理的有效期候选，用户优先于账号，均按
+// 到期时间与 ID 稳定排序。单次返回上限 200，避免一轮扫描长时间占用数据库。
 func (repository *ExpiryGORMRepository) ListDueExpirations(ctx context.Context, now time.Time, limit int) ([]application.ExpiryCandidate, error) {
 	if repository == nil || repository.database == nil || limit < 1 {
 		return nil, application.ErrValidation
@@ -53,6 +57,9 @@ func (repository *ExpiryGORMRepository) ListDueExpirations(ctx context.Context, 
 	return result, nil
 }
 
+// MarkExpirationProcessed 以条件更新把候选标记为已处理：条件同时绑定 valid_until 与
+// expiry_processed_at IS NULL，因此只有尚未被并发 worker 处理的行会更新；不校验影响行数，
+// 重复调用天然幂等。
 func (repository *ExpiryGORMRepository) MarkExpirationProcessed(ctx context.Context, candidate application.ExpiryCandidate, processedAt time.Time) error {
 	table := "iam_account"
 	if candidate.Kind == application.ExpiryKindUser {

@@ -49,6 +49,7 @@ type UploadV2Handler struct {
 	newID  func(time.Time) (string, error)
 }
 
+// NewUploadV2Handler 构造 v2 上传处理器；任一依赖为 nil 时失败关闭。
 func NewUploadV2Handler(db *gorm.DB, files uploadV2FileService, newID func(time.Time) (string, error), logger *slog.Logger) (*UploadV2Handler, error) {
 	if db == nil || files == nil || newID == nil || logger == nil {
 		return nil, errors.New("v2 upload dependencies are required")
@@ -157,6 +158,8 @@ type createUploadRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+// CreateSession 按白名单用途创建上传会话：校验大小、SHA256、绑定与幂等键后落库，
+// 此时尚未接收任何字节。
 func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	p, ok := v2Principal(w, r)
 	if !ok {
@@ -229,6 +232,8 @@ func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) 
 	v2JSON(w, http.StatusCreated, sessionResponse(session))
 }
 
+// IssueUploadTicket 为 CREATED 会话签发一次性上传票据；数据库只存票据哈希，
+// 原文仅在响应中出现一次。
 func (h *UploadV2Handler) IssueUploadTicket(w http.ResponseWriter, r *http.Request) {
 	p, ok := v2Principal(w, r)
 	if !ok {
@@ -257,6 +262,8 @@ func (h *UploadV2Handler) IssueUploadTicket(w http.ResponseWriter, r *http.Reque
 	v2JSON(w, http.StatusCreated, map[string]any{"upload_id": session.ID, "file_id": session.FileID, "mode": session.UploadMode, "upload_url": "/file-gateway/api/v2/upload-sessions/" + session.ID + "/content", "ticket": raw, "expires_at": expires.Format(time.RFC3339Nano)})
 }
 
+// UploadContent 以一次性票据兑换上传：核验哈希、占用与状态后流式落盘并完成
+// 内容校验、会话推进与绑定创建，全程带审计。
 func (h *UploadV2Handler) UploadContent(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "UploadTicket "))
 	if raw == "" {
@@ -335,7 +342,10 @@ func (h *UploadV2Handler) UploadContent(w http.ResponseWriter, r *http.Request) 
 	v2JSON(w, http.StatusCreated, map[string]any{"upload_id": session.ID, "file_id": file.ID, "binding_id": binding.ID, "status": "READY"})
 }
 
+// Complete 与 GetSession 同义：按会话 ID 或文件 ID 查询上传进度与结果。
 func (h *UploadV2Handler) Complete(w http.ResponseWriter, r *http.Request) { h.GetSession(w, r) }
+
+// GetSession 按 upload_id 或 file_id 返回上传会话状态；只对会话所属应用可见。
 func (h *UploadV2Handler) GetSession(w http.ResponseWriter, r *http.Request) {
 	p, ok := v2Principal(w, r)
 	if !ok {
@@ -360,6 +370,8 @@ type downloadTicketRequest struct {
 	ResourceID   string `json:"resource_id"`
 }
 
+// IssueDownloadTicket 为已绑定资源签发一次性下载票据；资源标识必须由调用方
+// 事先完成 ACL 校验，票据本身不携带授权。
 func (h *UploadV2Handler) IssueDownloadTicket(w http.ResponseWriter, r *http.Request) {
 	p, ok := v2Principal(w, r)
 	if !ok {
@@ -403,6 +415,8 @@ func (h *UploadV2Handler) IssueDownloadTicket(w http.ResponseWriter, r *http.Req
 	v2JSON(w, http.StatusCreated, map[string]any{"download_url": "/file-gateway/api/v2/files/" + stored.File.ID + "/content", "ticket": raw, "expires_at": ticket.ExpiresAt.Format(time.RFC3339Nano)})
 }
 
+// DownloadContent 以一次性票据兑换下载：事务内核销票据后按票据中的服务端资源
+// 标识重新校验访问权，再流式输出文件并写审计。
 func (h *UploadV2Handler) DownloadContent(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "DownloadTicket "))
 	if raw == "" {
@@ -445,6 +459,7 @@ func (h *UploadV2Handler) DownloadContent(w http.ResponseWriter, r *http.Request
 	h.auditDirect(r.Context(), ticket.TenantID, ticket.ApplicationID, ticket.FileID, "", "download-ticket", "DOWNLOAD_COMPLETED", "SUCCESS", r.Header.Get("X-Request-ID"))
 }
 
+// UnbindFile 停用当前应用对指定文件的资源绑定；仅限绑定所属应用调用。
 func (h *UploadV2Handler) UnbindFile(w http.ResponseWriter, r *http.Request) {
 	p, ok := v2Principal(w, r)
 	if !ok {
@@ -468,14 +483,19 @@ func (h *UploadV2Handler) findIdempotent(ctx context.Context, p authctx.Principa
 	err := h.db.WithContext(ctx).Where("tenant_id = ? AND application_id = ? AND idempotency_key = ?", p.Tenant.ID, p.Account.ID, key).Take(&item).Error
 	return item, err == nil
 }
+
+// failSession / rejectSession 只收敛仍在进行中的会话。
+//
+// 慢上传期间文件对账 Worker 可能已经把同一会话收敛到终态（恢复成功置 READY 并补做绑定）；
+// 无条件的失败回写会把已成功的会话改写为 FAILED，客户端随后看到失败但文件其实可用。
 func (h *UploadV2Handler) failSession(ctx context.Context, session uploadV2Session, code string) {
 	now := h.now()
-	h.db.WithContext(ctx).Model(&uploadV2Session{}).Where("id = ?", session.ID).Updates(map[string]any{"status": "FAILED", "failure_code": code, "updated_at": now})
+	h.db.WithContext(ctx).Model(&uploadV2Session{}).Where("id = ? AND status IN ?", session.ID, []string{"CREATED", "UPLOADING"}).Updates(map[string]any{"status": "FAILED", "failure_code": code, "updated_at": now})
 	h.audit(ctx, session, "UPLOAD_COMPLETED", "FAILED", "")
 }
 func (h *UploadV2Handler) rejectSession(ctx context.Context, session uploadV2Session, code string) {
 	now := h.now()
-	h.db.WithContext(ctx).Model(&uploadV2Session{}).Where("id = ?", session.ID).Updates(map[string]any{"status": "REJECTED", "failure_code": code, "updated_at": now})
+	h.db.WithContext(ctx).Model(&uploadV2Session{}).Where("id = ? AND status IN ?", session.ID, []string{"CREATED", "UPLOADING"}).Updates(map[string]any{"status": "REJECTED", "failure_code": code, "updated_at": now})
 	h.audit(ctx, session, "UPLOAD_REJECTED", "FAILED", "")
 }
 func (h *UploadV2Handler) validation(ctx context.Context, session uploadV2Session, result, code string) {

@@ -338,8 +338,8 @@ func TestSubjectAccessWritePolicyRejectsOrganizationAndPosition(t *testing.T) {
 }
 
 func TestUpdateSubjectAccessRejectsManualWriteBeforePersistence(t *testing.T) {
-	// A service without persistence dependencies is intentional: the policy must reject the
-	// historical write endpoint before any application, role, subject or binding query is made.
+	// 刻意不为服务提供持久化依赖：策略必须在查询任何
+	// 应用、角色、主体或绑定之前拒绝历史写入接口。
 	service := &Service{}
 	for _, subjectType := range []string{subjectTypeOrgUnit, subjectTypePosition} {
 		_, err := service.UpdateSubjectAccess(context.Background(), UpdateSubjectAccessInput{

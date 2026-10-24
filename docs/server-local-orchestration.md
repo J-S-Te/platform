@@ -1,237 +1,64 @@
-# 在远程服务器上运行本地统一编排（测试/演示服务器）
+# 在远程服务器运行本地统一编排
 
-> 更新日期：2026-08-19。
-> 适用场景：一台 **测试/演示服务器**（例如阿里云 ECS `203.0.113.10`），希望像本地开发一样使用
-> `docker-local.sh` 全家桶，并让 UI 的"一键接入 / 新增接入"可用。
-> 生产环境（`platform/deploy/production/`、CI/CD 发布不可变镜像）**不要**用本文档的编排方式。
+> 源码核验：2026-10-13。本页仅用于获授权的开发／演示服务器，不是生产离线部署手册。
+> 生产使用 [OFFLINE_RUNBOOK](../deploy/production/OFFLINE_RUNBOOK.md)。
 
-## 0. 先说清楚一个事实
+## 角色、条件与边界
 
-测试/演示环境的一键接入依赖 **本地部署 Agent + Docker Socket + 完整工作区**。正式生产目录也提供独立的受控 Agent，但只允许随发布包审核的 `subsystems.d` 精确目标、不可变镜像和固定 Compose 服务；新增目标通过代码评审发布清单，不由浏览器或服务器临时参数扩权。本文仍只介绍把服务器当**本地开发机**的方式：
+服务器运维确认目标机、Docker 权限、可信网络和测试数据范围；应用管理员完成所属租户接入；
+业务人员验证真实登录／权限／任务。不得照抄历史服务器地址，也不得自动删除已有数据。
+服务器需相邻七仓库：platform、frontend、contract_management、customer_and_opportunity、
+project_management、Settlement、data_analysis，以及脚本需要的配置、Docker／Compose、构建依赖和网络。
+这是源码构建路径：未预加载镜像时会构建／拉取，不能声称天然断网可用。
 
-```text
-一个 frontend 容器（四个前端模块）
-api / contract-api / customer-api / customer-presale-alert-worker / portal-api 独立后端与 Worker 容器
-MySQL x4、Temporal、迁移与部署 Agent
-仅 frontend 对外发布 8081，其余全部在内网
-```
+## 操作步骤
 
-## 1. 服务器准备
-
-```bash
-# CentOS/RHEL
-sudo dnf install -y git openssl
-sudo systemctl enable --now docker
-sudo systemctl status docker
-
-# 或 Debian/Ubuntu
-sudo apt-get update && sudo apt-get install -y git openssl
-sudo systemctl enable --now docker
-```
-
-防火墙/安全组开放 `8081`（ECS 安全组 + 本机防火墙都要放行）：
+1. 将获批源码版本按相邻目录传到测试服务器；传输前排除实际 `.env`、`.env.local`、`.env.presale-worker`、
+   私钥、data、backups 和未审查日志。不能直接 rsync 整个开发工作区连同 Secret。
+2. 经受控渠道准备本服务器独立配置，保留已有库对应的密码和加密／签名密钥；实际文件 0600。
+   售前 Worker 的独立环境文件不由启动脚本生成；已有卷但原配置丢失时停止并恢复配置。
+3. 如已有平台可用，先完成有效应用接入；合同严格启动条件不接受占位 Client。首次平台初始化须按实际环境拆分核实，不能绕过校验。
+4. 在 platform 目录执行：
 
 ```bash
-# firewalld
-sudo firewall-cmd --permanent --add-port=8081/tcp && sudo firewall-cmd --reload
-# 或 ufw
-sudo ufw allow 8081/tcp
-```
-
-## 2. 把工作区放到服务器
-
-需要 **同一个父目录下** 的四个仓库（目录结构必须和本地一致）：
-
-```bash
-# 例如放到 /opt/workspace，先建目录
-sudo mkdir -p /opt/workspace && sudo chown "$(id -u):$(id -g)" /opt/workspace
-cd /opt/workspace
-
-# 方式一：直接拷贝本地工作区（推荐，保证一致）
-rsync -a --exclude node_modules --exclude .git \
-  /path/to/Unified_Identity_Authentication_Platform/ /opt/workspace/Unified_Identity_Authentication_Platform/
-
-# 方式二：分别 clone 四个仓库（需要四个仓库都可访问）
-git clone <platform-git>        Unified_Identity_Authentication_Platform/platform
-git clone <frontend-git>        Unified_Identity_Authentication_Platform/frontend
-git clone <contract-git>        Unified_Identity_Authentication_Platform/contract_management
-git clone <customer-git>        Unified_Identity_Authentication_Platform/customer_and_opportunity
-```
-
-> 四个仓库缺一不可：`docker-local.sh` 会从 `platform`、`frontend`、`../contract_management`、
-> `../customer_and_opportunity` 构建镜像，找不到任何一个都会构建失败。
-
-## 3. 首次启动（会生成环境文件并初始化管理员）
-
-```bash
-cd /opt/workspace/Unified_Identity_Authentication_Platform/platform
-
-# 交互式（会提示输入管理员显示名/账号/密码）
 bash scripts/docker-local.sh up
-
-# 或 CI/非交互（密码走 stdin，不要用 --admin-password）
-printf '%s\n' '你的管理员密码' | bash scripts/docker-local.sh up \
-  --admin-display-name '平台管理员' \
-  --admin-account-name admins \
-  --admin-password-stdin
+bash scripts/docker-local.sh ps
+bash scripts/docker-local.sh verify
+bash scripts/docker-local.sh logs api subsystem-provisioner
 ```
 
-首次启动自动完成：
+首次管理员交互输入；自动化仅用 `--admin-password-stdin`。
+`up/restart` 会重走构建、迁移和分阶段启动，不是安全的只读检查或单纯重启。
+需要使用已加载本地镜像时可显式 `SKIP_IMAGE_PREPARATION=1`，但必须先确保所有所需 `:local` 镜像齐全且版本一致；
+这不转换为生产不可变摘要发布。
 
-- 从模板生成 `docker/.env.local`、`../contract_management/.env.local`、
-  `docker/.env.customer.local`、`docker/.env.portal.local`（含随机密码/密钥，权限 0600）；
-- 串行拉取基础镜像、构建 1 个前端及 API/Worker 镜像；
-- 执行数据库迁移、初始化第一个超级管理员、分阶段启动并做网关自检。
+## 访问与成功判断
 
-## 4. 配置公网/远程访问（服务器是 IP + HTTP）
+默认 frontend 在回环端口 8081；对远程访问先由运维批准绑定和防火墙。
+`lan-access.sh enable --address <获批地址> --port 8081` 只覆盖平台、合同、CRM 和统一前端；
+不自动重建 Portal／项目／看板／Keycloak。它设置平台 HTTP Issuer，不能保证原 Keycloak 登录无须其它变更。
+公开访问、TLS、公网回调及 Secure Cookie 使用生产部署模型，不开放数据库或 Docker 代理到公网。
 
-默认 `docker-local.sh` 把公开地址写成 `http://localhost:8081`，且前端只绑定 `127.0.0.1`。
-要让外部用 `http://203.0.113.10:8081` 访问，启用"局域网覆盖"模式（对公网 IP 同样适用）：
+`verify` 只给出路由／匿名状态／健康／登录重定向检查；还需从实际客户端测试 Issuer、登录、租户权限、
+各启用业务模块及 Worker 的最终结果。Portal／项目／看板有配置和接入门禁，静态页不代表服务已上线。
 
-```bash
-# 1) 允许 OAuth HTTP 回调（公网 IP 非回环，默认被平台拒绝）
-sed -i 's/^AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=.*/AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true/' docker/.env.local
+## 备份与恢复
 
-# 2) 把公开地址切到服务器 IP，前端绑定 0.0.0.0
-bash scripts/lan-access.sh enable --address 203.0.113.10 --port 8081
+Docker 命名卷和对象目录需要独立受控备份；直接复制运行中 MySQL 卷不是一致性备份。
+本地脚本不提供生产 `backup-all` 的完整批次协议，不要在本地目录直接调用生产恢复器。
+维护前识别实际 Compose project、服务、卷和文件目录；审批停写后使用对应数据库逻辑导出，
+并将配置／密钥与数据库／文件恢复点配套保存。数据库密码只在容器内读取，不能放 `docker exec -e MYSQL_PWD=<明文>` 参数。
 
-# 3) 重建 API（让上面两步的配置生效）并重新拉起
-bash scripts/docker-local.sh up
-```
+涉及 File Gateway 的恢复必须让数据库和正式／隔离对象目录来自一致批次；临时上传排除策略需明确。
+只有在隔离环境验证数据库导入、密钥匹配、READY 文件对账、登录和业务后，才可批准在线恢复。
+生产灾备命令与局限见 [备份恢复](../deploy/production/BACKUP_RECOVERY.md)，其目录和锁协议不能假设与本地编排相同。
 
-> `lan-access.sh enable` 会把以下内容写入 `docker/.env.lan` 等覆盖文件并重建相关容器：
-> `APP_PUBLIC_BASE_URL/OIDC_ISSUER/OIDC_REDIRECT_URI=.../contract_management/auth/callback`、
-> `.../customer-opportunity/auth/callback`，并把 `FRONTEND_BIND_ADDRESS` 切到 `0.0.0.0`。
-> 该模式使用 HTTP，**只适用于可信网络/测试机**，不要用于公网生产。
+## 自启与日常运维
 
-## 5. 验证
+已有且正确创建的 `unless-stopped` 容器可随 daemon 恢复；这不会补齐未接入模块或迁移新版本。
+不能未经审批把 `docker-local.sh up` 作为每次开机的无人值守任务：它可能构建、拉取、迁移并要求输入／有效凭据。
+若需要 systemd 包装，先评审环境、启动顺序、网络依赖、Secret 权限和失败策略，本页不提供未经验证的自动上线单元。
 
-```bash
-cd /opt/workspace/Unified_Identity_Authentication_Platform/platform
-bash scripts/docker-local.sh verify          # 网关自检
-bash scripts/docker-local.sh ps             # 看所有容器
-curl -I http://203.0.113.10:8081/          # 外部可访问
-```
-
-浏览器打开 `http://203.0.113.10:8081/` → 用平台管理员登录 →
-**应用接入 → 合同管理系统 → 新增接入环境**（或直接"新增接入"）即可一键接入，和本地行为一致。
-
-服务器 shell 里想用脚本接入时，用回环地址（脚本只允许 HTTPS 或回环 HTTP）：
-
-```bash
-bash scripts/subsystem.sh onboard \
-  --preset contract-management-local \
-  --api-base-url http://127.0.0.1:8081/api/v1 \
-  --platform-origin http://203.0.113.10:8081 \
-  --account admins
-```
-
-## 6. 环境文件与备份
-
-需要备份（全部含 Secret，保持 0600）：
-
-```text
-platform/docker/.env.local
-platform/docker/.env.customer.local
-platform/docker/.env.portal.local
-platform/docker/.env.lan            （公网覆盖，lan-access enable 生成）
-contract_management/.env.local
-platform/data/keys/                 （JWT 私钥，丢了登录全部失效）
-platform/data/uploads/
-```
-
-```bash
-cd /opt/workspace/Unified_Identity_Authentication_Platform
-sudo install -d -m 700 /opt/backup/basic-platform
-tar -czf /opt/backup/basic-platform/env-and-keys-$(date +%F).tgz \
-  platform/docker/.env.local platform/docker/.env.customer.local \
-  platform/docker/.env.portal.local platform/docker/.env.lan \
-  contract_management/.env.local platform/data/keys platform/data/uploads
-```
-
-数据库备份示例：
-
-```bash
-cd platform
-MYSQL_ROOT_PASSWORD="$(awk -F= '$1=="MYSQL_ROOT_PASSWORD"{print substr($0,index($0,"=")+1)}' docker/.env.local)"
-docker exec basic-platform-local-mysql-1 sh -lc \
-  "MYSQL_PWD='$MYSQL_ROOT_PASSWORD' mysqldump -uroot --single-transaction basic_platform" \
-  > /opt/backup/basic-platform/basic_platform.sql
-```
-
-## 7. 开机自启与保活
-
-Docker 本身开机自启后，容器 `restart: unless-stopped` 会自动恢复，通常无需额外配置：
-
-```bash
-sudo systemctl enable --now docker
-```
-
-如需"开机后确保编排完整拉起"（例如停机维护后），加一个 systemd oneshot：
-
-```ini
-# /etc/systemd/system/basic-platform-local.service
-[Unit]
-Description=Basic Platform local orchestration
-After=docker.service network-online.target
-Requires=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=/opt/workspace/Unified_Identity_Authentication_Platform/platform
-ExecStart=/usr/bin/env bash scripts/docker-local.sh up
-ExecStartPost=/usr/bin/env bash scripts/docker-local.sh verify
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now basic-platform-local
-```
-
-## 8. 日常维护
-
-```bash
-cd /opt/workspace/Unified_Identity_Authentication_Platform/platform
-
-bash scripts/docker-local.sh ps                    # 状态
-bash scripts/docker-local.sh logs api contract-api # 看日志
-bash scripts/docker-local.sh verify               # 网关自检
-bash scripts/docker-local.sh refresh-api          # 只重建平台后端
-bash scripts/docker-local.sh refresh-frontend     # 只重建统一前端
-bash scripts/docker-local.sh refresh-contract-api # 只重建合同后端
-bash scripts/docker-local.sh refresh-customer-api # 重建 CRM API 和售前预警 Worker
-bash scripts/docker-local.sh start-presale-alert-worker # 单独拉起售前预警 Worker
-```
-
-升级（拉代码 + 重建）：
-
-```bash
-cd /opt/workspace/Unified_Identity_Authentication_Platform
-for d in platform frontend contract_management customer_and_opportunity; do
-  git -C "$d" pull --ff-only
-done
-cd platform && bash scripts/docker-local.sh up --build
-```
-
-> 升级不会覆盖已有的 `.env.local` 等环境文件，也不会删除 Application / OAuth Client / 登录目标。
-
-## 9. 常见问题
-
-| 现象 | 处理 |
-| --- | --- |
-| UI 一键接入 503"未启用自动部署 Agent" | 本地确认 `compose.local.yaml` 已启动 `subsystem-provisioner`；生产确认已同步最新 `deploy/production` 资产并且 `platform-api`、`subsystem-provisioner` 健康 |
-| 登录回调被拒 / unauthorized_client | `AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS=true` 没生效；改后需重建 api（`docker-local.sh up`） |
-| 外部访问 8081 不通 | 检查 ECS 安全组 + 本机防火墙 + `FRONTEND_BIND_ADDRESS=0.0.0.0`（lan-access enable 后应已设置） |
-| 平台账号提示已有有效会话 | 使用 `--replace-existing-session` 或先在原终端退出 |
-| 构建拉镜像超时 | `docker-local.sh up` 已串行重试基础镜像；网络差可手动 `docker pull` 后再跑 |
-
-## 10. 安全提醒（务必阅读）
-
-- 本文档方式把平台管理后台 + 各子系统以 **HTTP 明文** 暴露在你指定的地址上；**只允许内网/测试环境使用**。
-- 若该地址公网可达，任何人可访问登录页并尝试口令爆破；请至少加 IP 白名单、改强口令，或直接套一层 HTTPS 反向代理（Nginx/CLB 终止 TLS，内部仍可走 8081）。
-- 测试数据不要与生产数据混用；`.env.local` 中的密码/密钥与生产 `.env` 相互独立，不要互相复制。
-- 正式生产请使用 `platform/deploy/production/` + CI/CD 发布，并按 `production/README.md` 的控制面流程接入子系统。
+按 [本地操作说明](local-docker-operations.md) 使用定向更新；`ps/logs/verify/config` 的环境准备也可能写文件。
+失败保留状态，查看脱敏日志；`stop` 保留数据，`down` 移除容器与 orphan，
+`down --volumes` 只有批准销毁测试数据库时才能执行。禁止以重建卷、重新接入或关闭鉴权作为故障恢复。

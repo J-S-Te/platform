@@ -33,6 +33,10 @@ type cfgScript struct {
 	appOwnerTenant  string
 	environmentSeen []string
 	namespaceInsert int
+	// 配置项更新用例：itemNamespaceID 是现有草稿所属命名空间；itemUpdateCalls 记录
+	// cfg_item 的 UPDATE 次数，用于断言跨命名空间移动从未落库。
+	itemNamespaceID string
+	itemUpdateCalls int
 }
 
 func TestCreateNamespaceRejectsCrossTenantApplicationCode(t *testing.T) {
@@ -166,6 +170,10 @@ func (cfgScriptTx) Rollback() error { return nil }
 
 func (connection *cfgScriptConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	connection.script.environmentSeen = append(connection.script.environmentSeen, query)
+	if strings.Contains(query, "cfg_item") {
+		connection.script.itemUpdateCalls++
+		return cfgScriptResult(1), nil
+	}
 	if strings.Contains(query, "cfg_namespace") {
 		connection.script.namespaceInsert++
 		return cfgScriptResult(1), nil
@@ -180,6 +188,25 @@ func (connection *cfgScriptConn) QueryContext(_ context.Context, query string, v
 		args = append(args, value.Value)
 	}
 	switch {
+	case strings.Contains(query, "cfg_item"):
+		namespaceID := connection.script.itemNamespaceID
+		if namespaceID == "" {
+			namespaceID = "01J000000000000000000000NS1"
+		}
+		return &cfgScriptRows{
+			columns: []string{"id", "namespace_id", "namespace_code", "namespace_name", "config_key", "value_type", "value_text", "value_json", "sensitive", "version", "updated_at"},
+			values:  [][]driver.Value{{"01J00000000000000000000ITEM", namespaceID, "cfg", "配置", "key-1", "STRING", "value-1", nil, false, uint64(1), time.Now()}},
+		}, nil
+	case strings.Contains(query, "cfg_namespace"):
+		// 目标命名空间必须在同一租户内且为 ACTIVE；脚本驱动按脚本给出的命名空间返回行。
+		namespaceID := connection.script.itemNamespaceID
+		if namespaceID == "" {
+			namespaceID = "01J000000000000000000000NS1"
+		}
+		return &cfgScriptRows{
+			columns: []string{"id", "tenant_id", "application_id", "environment_id", "name", "display_name", "description", "status", "current_release_no", "version"},
+			values:  [][]driver.Value{{namespaceID, cfgTestTenantA, cfgTestAppID, nil, "cfg", "配置", "", "ACTIVE", uint64(0), uint64(1)}},
+		}, nil
 	case strings.Contains(query, "platform_application_environment"):
 		// 环境行只属于 appOwnerTenant；查询不带租户过滤或过滤到归属租户才命中。
 		if !queryFiltersTenant(query) || argsContain(args, connection.script.appOwnerTenant) {
@@ -227,4 +254,42 @@ func (rows *cfgScriptRows) Next(destination []driver.Value) error {
 	copy(destination, rows.values[rows.index])
 	rows.index++
 	return nil
+}
+
+// 配置项不是可移动资源：页面切换命名空间后误保存，曾经会把草稿挪到另一个命名空间，
+// 让原命名空间的草稿与已发布版本脱节。
+func TestUpdateItemRejectsCrossNamespaceMove(t *testing.T) {
+	script := &cfgScript{appOwnerTenant: cfgTestTenantA, itemNamespaceID: cfgTestTenantA + "-ns-a"}
+	repository := newCfgRepositoryTest(t, script)
+
+	_, err := repository.UpdateItem(context.Background(), application.ItemUpdateInput{
+		TenantID: cfgTestTenantA, OperatorID: "operator", ItemID: "01J00000000000000000000ITEM",
+		NamespaceID: cfgTestTenantA + "-ns-b", Key: "key-1", ValueType: "STRING", Value: "value-2", Version: 1,
+	}, time.Now())
+	if !errors.Is(err, application.ErrValidation) {
+		t.Fatalf("UpdateItem(跨命名空间) error = %v, want ErrValidation", err)
+	}
+	if script.itemUpdateCalls != 0 {
+		t.Fatalf("cfg_item 更新次数 = %d, 跨命名空间移动不得落库", script.itemUpdateCalls)
+	}
+}
+
+func TestUpdateItemStillAllowsSameNamespaceDraftUpdate(t *testing.T) {
+	namespaceID := cfgTestTenantA + "-ns-a"
+	script := &cfgScript{appOwnerTenant: cfgTestTenantA, itemNamespaceID: namespaceID}
+	repository := newCfgRepositoryTest(t, script)
+
+	item, err := repository.UpdateItem(context.Background(), application.ItemUpdateInput{
+		TenantID: cfgTestTenantA, OperatorID: "operator", ItemID: "01J00000000000000000000ITEM",
+		NamespaceID: namespaceID, Key: "key-1", ValueType: "STRING", Value: "value-2", Version: 1,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("UpdateItem(同命名空间) error = %v", err)
+	}
+	if item.ID != "01J00000000000000000000ITEM" {
+		t.Fatalf("item = %+v", item)
+	}
+	if script.itemUpdateCalls != 1 {
+		t.Fatalf("cfg_item 更新次数 = %d, want 1", script.itemUpdateCalls)
+	}
 }

@@ -1,4 +1,5 @@
-// Package dictionaryhttp exposes business dictionary management through the platform response envelope.
+// Package dictionaryhttp 以平台统一响应信封暴露业务字典管理接口。
+// 租户边界由会话主体决定；每个端点在路由层挂对应的 platform:dictionary* 权限。
 package dictionaryhttp
 
 import (
@@ -34,13 +35,13 @@ type service interface {
 	ListActiveItemsByCode(ctx context.Context, tenantID, code string, query dictionaryapplication.PageRequest) (dictionaryapplication.PageResult[dictionarydomain.Item], error)
 }
 
-// Handler provides authenticated, tenant-scoped dictionary endpoints.
+// Handler 提供经认证、按租户隔离的字典管理端点。
 type Handler struct {
 	service service
 	logger  *slog.Logger
 }
 
-// NewHandler validates dependencies and creates the dictionary HTTP adapter.
+// NewHandler 校验依赖并构造字典 HTTP 适配器。
 func NewHandler(service service, logger *slog.Logger) (*Handler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("dictionary HTTP handler dependencies must not be nil")
@@ -96,7 +97,7 @@ type pageResponse[T any] struct {
 	Total    int64 `json:"total"`
 }
 
-// ListDictionaries lists dictionaries that belong to the current tenant.
+// ListDictionaries 分页列出当前租户的字典。
 func (handler *Handler) ListDictionaries(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -118,7 +119,7 @@ func (handler *Handler) ListDictionaries(writer http.ResponseWriter, request *ht
 	})
 }
 
-// CreateDictionary creates a tenant-scoped business dictionary.
+// CreateDictionary 创建租户级业务字典；编码在租户内唯一。
 func (handler *Handler) CreateDictionary(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -142,7 +143,7 @@ func (handler *Handler) CreateDictionary(writer http.ResponseWriter, request *ht
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "业务字典已创建", dictionaryToResponse(result))
 }
 
-// GetDictionary returns one dictionary in the current tenant.
+// GetDictionary 返回当前租户内的单个字典。
 func (handler *Handler) GetDictionary(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -158,7 +159,7 @@ func (handler *Handler) GetDictionary(writer http.ResponseWriter, request *http.
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "业务字典查询成功", dictionaryToResponse(result))
 }
 
-// UpdateDictionary replaces a dictionary under optimistic locking.
+// UpdateDictionary 以乐观锁替换字典字段；Version 过期返回版本冲突。
 func (handler *Handler) UpdateDictionary(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -182,7 +183,7 @@ func (handler *Handler) UpdateDictionary(writer http.ResponseWriter, request *ht
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "业务字典已更新", dictionaryToResponse(result))
 }
 
-// ListItems lists all items, including disabled items, for administration.
+// ListItems 列出字典下全部状态的字典项（含停用项），仅供管理端使用。
 func (handler *Handler) ListItems(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -204,7 +205,7 @@ func (handler *Handler) ListItems(writer http.ResponseWriter, request *http.Requ
 	})
 }
 
-// CreateItem creates a dictionary item under the requested dictionary.
+// CreateItem 在指定字典下创建字典项。
 func (handler *Handler) CreateItem(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -228,7 +229,7 @@ func (handler *Handler) CreateItem(writer http.ResponseWriter, request *http.Req
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "字典项已创建", itemToResponse(result))
 }
 
-// UpdateItem replaces a dictionary item under optimistic locking.
+// UpdateItem 以乐观锁替换字典项字段。
 func (handler *Handler) UpdateItem(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -253,7 +254,7 @@ func (handler *Handler) UpdateItem(writer http.ResponseWriter, request *http.Req
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "字典项已更新", itemToResponse(result))
 }
 
-// DeleteDictionary removes a dictionary together with every item it owns.
+// DeleteDictionary 删除字典并级联删除其全部字典项（响应携带级联数量）。
 func (handler *Handler) DeleteDictionary(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -273,7 +274,7 @@ func (handler *Handler) DeleteDictionary(writer http.ResponseWriter, request *ht
 	})
 }
 
-// DeleteItem removes one item under a tenant-owned dictionary.
+// DeleteItem 删除租户自有字典下的单个字典项。
 func (handler *Handler) DeleteItem(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -294,7 +295,8 @@ func (handler *Handler) DeleteItem(writer http.ResponseWriter, request *http.Req
 	})
 }
 
-// ListActiveItemsByCode returns active values for business read-only selection controls.
+// ListActiveItemsByCode 按编码返回启用字典的启用字典项，供业务只读选择控件
+// 消费；本接口刻意不暴露停用值与管理元数据。
 func (handler *Handler) ListActiveItemsByCode(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {

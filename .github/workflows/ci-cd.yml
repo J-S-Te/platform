@@ -54,6 +54,20 @@ jobs:
           python3 deploy/production/tests/test-managed-deployment-defaults.py
           python3 deploy/production/tests/test-frontend-network.py
           python3 deploy/production/tests/test-public-proxy-prefetch.py
+          python3 deploy/production/tests/test-offline-image-identities.py
+          python3 -B deploy/production/tests/test-offline-platform-selection.py
+          python3 -B deploy/production/tests/test-delivery-inspect.py
+          python3 -B deploy/production/tests/test-deployment-session.py
+          python3 -B deploy/production/tests/test-delivery-files.py
+          python3 -B deploy/production/tests/test-delivery-runtime.py
+          python3 deploy/production/bin/test-subsystem-runtime.py
+          python3 deploy/production/bin/test-subsystem-completion.py
+          python3 deploy/production/bin/test-presale-release-transaction.py
+          bash deploy/production/bin/test-compose-scope.sh
+          bash deploy/production/bin/test-start-enabled.sh
+          bash deploy/production/bin/test-subsystem-state-machine.sh
+          bash deploy/production/bin/test-offline-import.sh
+          bash deploy/production/bin/test-verify-readiness.sh
           bash deploy/production/tests/test-key-init.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh
@@ -184,7 +198,7 @@ jobs:
             bin subsystems.d subsystem-templates mysql-init nginx monitoring tests \
             docker-compose.yml .env.example .release.env.example .gitignore \
             ACCEPTANCE_CHECKLIST.md README.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md \
-            DEPLOYMENT_COMPATIBILITY.md BACKUP_RECOVERY.md
+            DEPLOYMENT_COMPATIBILITY.md DELIVERY_WORKFLOW.md BACKUP_RECOVERY.md
           (cd "$asset_work_dir" && sha256sum deployment-assets.tar.gz > deployment-assets.tar.gz.sha256)
           cp deploy/production/bin/install-assets.sh "$asset_work_dir/install-assets.sh"
           cp deploy/production/bin/provisioner-config-refresh.sh "$asset_work_dir/provisioner-config-refresh.sh"
@@ -248,9 +262,9 @@ jobs:
           # 拼进 ssh 命令参数后被本地 shell、ssh 和远端 shell 多次解析。
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd $(printf '%q' "$DEPLOY_PATH") && bash -s -- $(printf '%q' "$FILE_GATEWAY_IMAGE_REF")" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
-          # Legacy release.env may not contain the separate File Gateway image.
-          # Use the validated candidate only to parse Compose for paired reload.
-          # Keep PLATFORM_IMAGE unchanged until migrations run in deploy-service.
+          # 旧版 release.env 可能尚未包含独立文件网关镜像。
+          # 已验证的候选镜像仅用于解析 Compose 并执行控制面成对重载。
+          # deploy-service 执行迁移前，保持 PLATFORM_IMAGE 不变。
           [[ "${1:-}" =~ @sha256:[a-f0-9]{64}$ ]] || { echo 'invalid File Gateway candidate digest' >&2; exit 1; }
           export FILE_GATEWAY_IMAGE="$1"
           ./bin/deploy.sh reload-control-plane

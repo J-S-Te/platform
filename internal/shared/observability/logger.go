@@ -12,8 +12,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 )
 
-// NewLogger creates a JSON logger that writes to standard output and a local append-only log
-// file. Rotation and centralized export are intentionally deferred to the observability module.
+// NewLogger 创建同时写标准输出与本地追加式日志文件的 JSON 日志器。
+// 轮转与集中采集有意延后到可观测性模块处理，本包不重复造轮子。
 func NewLogger(cfg config.LoggingConfig, appName, environment string) (*slog.Logger, io.Closer, error) {
 	if !strings.EqualFold(cfg.Format, "json") {
 		return nil, nil, fmt.Errorf("LOG_FORMAT %q is not supported; only json is supported", cfg.Format)

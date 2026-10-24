@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// OIDCBackchannelLogoutEvent 是 OIDC Back-Channel Logout 规范规定的 events 成员 URI，
+// 注销令牌必须携带该成员才被视为登出事件。
 const OIDCBackchannelLogoutEvent = "http://schemas.openid.net/event/backchannel-logout"
 
 // OIDCLogoutTokenClaims 是 Back-Channel Logout 专用声明，不复用 ID Token 声明模型。

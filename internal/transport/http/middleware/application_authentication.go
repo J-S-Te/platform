@@ -1,4 +1,4 @@
-// Package middleware contains application bearer authentication for integration endpoints.
+// Package middleware 提供集成端点使用的应用 bearer 认证中间件。
 package middleware
 
 import (
@@ -15,7 +15,7 @@ import (
 
 const maxApplicationBearerTokenLength = 16 * 1024
 
-// ApplicationAuthenticator verifies an external system bearer access token.
+// ApplicationAuthenticator 校验外部系统的 bearer 访问令牌。
 type ApplicationAuthenticator interface {
 	Authenticate(context.Context, string) (appctx.Principal, error)
 }

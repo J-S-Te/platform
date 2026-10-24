@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Read-only acceptance evidence collector. It deliberately never reads config
-# values, container environments, database rows, application logs or Secrets.
+# 只读验收证据采集器，刻意不读取配置值、容器环境、数据库行、应用日志或密钥。
 set -Eeuo pipefail
 umask 077
 

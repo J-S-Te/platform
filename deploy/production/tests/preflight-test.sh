@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Linux regression for the current blank-server bootstrap path. The retired
-# 20260922 all-in-one installer is deliberately not a dependency: a delivery
-# must be installable with the standalone install-assets.sh emitted beside the
-# deployment-assets archive.
+# 覆盖当前空白服务器引导路径的 Linux 回归测试。刻意不依赖已退役的 20260922 一体化安装器；
+# 交付包必须可通过部署资产归档旁独立生成的 install-assets.sh 安装。
 set -Eeuo pipefail
 
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"

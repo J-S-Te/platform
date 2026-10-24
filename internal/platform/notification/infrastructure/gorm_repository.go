@@ -15,10 +15,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Repository persists notification templates, messages and inbox deliveries through GORM.
+// Repository 通过 GORM 持久化通知模板、消息与站内信投递。
 type Repository struct{ database *gorm.DB }
 
-// NewRepository creates a notification repository backed by MySQL.
+// NewRepository 创建基于 MySQL 的通知仓储。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("notification database must not be nil")
@@ -116,6 +116,7 @@ type inboxRow struct {
 	ReadAt        *time.Time `gorm:"column:read_at"`
 }
 
+// CreateTemplate 在同一事务创建模板与其首个发布版本；模板编码冲突向上返回映射错误。
 func (repository *Repository) CreateTemplate(ctx context.Context, template domain.Template, version domain.TemplateVersion) (domain.Template, domain.TemplateVersion, error) {
 	variables, err := marshalVariables(version.Variables)
 	if err != nil {
@@ -139,6 +140,8 @@ func (repository *Repository) CreateTemplate(ctx context.Context, template domai
 	return template, version, nil
 }
 
+// AppendTemplateVersion 在行锁保护下追加新的发布版本并把当前版本指针切换过去，
+// 新版本立即生效为唯一发布版本。
 func (repository *Repository) AppendTemplateVersion(ctx context.Context, tenantID, templateID, operatorID, versionID, titleTemplate, bodyTemplate string, variables []domain.VariableDefinition, now time.Time) (domain.Template, domain.TemplateVersion, error) {
 	// 锁住模板聚合后计算下一版本并切换当前版本，保证并发发布不会生成相同 version_no。
 	encoded, err := marshalVariables(variables)
@@ -172,6 +175,7 @@ func (repository *Repository) AppendTemplateVersion(ctx context.Context, tenantI
 	return resultTemplate, resultVersion, err
 }
 
+// ChangeTemplateStatus 以乐观锁切换模板启用/停用状态；版本不匹配返回版本冲突。
 func (repository *Repository) ChangeTemplateStatus(ctx context.Context, input application.ChangeTemplateStatusInput, now time.Time) (domain.Template, error) {
 	// 行锁与 Version 双重约束把旧管理页面的覆盖写转换为明确的版本冲突。
 	var row templateModel
@@ -201,6 +205,7 @@ func (repository *Repository) ChangeTemplateStatus(ctx context.Context, input ap
 	return templateToDomain(row), nil
 }
 
+// ListTemplates 分页返回租户内模板，按更新时间倒序。
 func (repository *Repository) ListTemplates(ctx context.Context, tenantID string, page application.PageRequest) (application.PageResult[domain.Template], error) {
 	db := repository.database.WithContext(ctx).Model(&templateModel{}).Where("tenant_id = ?", tenantID)
 	var total int64
@@ -218,6 +223,8 @@ func (repository *Repository) ListTemplates(ctx context.Context, tenantID string
 	return application.PageResult[domain.Template]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
+// GetActiveTemplateByCode 只返回启用状态模板的当前发布版本；停用模板按未找到处理，
+// 保证停用立即阻断新消息创建。
 func (repository *Repository) GetActiveTemplateByCode(ctx context.Context, tenantID, code string) (domain.Template, domain.TemplateVersion, error) {
 	var template templateModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND code = ? AND status = ?", tenantID, code, domain.TemplateStatusActive).Take(&template).Error; err != nil {
@@ -234,6 +241,8 @@ func (repository *Repository) GetActiveTemplateByCode(ctx context.Context, tenan
 	return templateToDomain(template), mapped, nil
 }
 
+// CreateMessage 基于租户内幂等键创建消息及其全部投递记录；键命中时返回既有消息，
+// 首次创建在单事务完成，避免出现只有消息没有投递的半成品。
 func (repository *Repository) CreateMessage(ctx context.Context, message domain.Message, deliveries []domain.Delivery) (application.MessageCreation, error) {
 	// 租户内幂等键命中时返回原消息及投递，不创建第二套收件箱项；首次消息和全部收件人
 	// 在一个事务中写入，不能留下只有消息而没有投递的半成品。
@@ -262,6 +271,7 @@ func (repository *Repository) CreateMessage(ctx context.Context, message domain.
 	return output, err
 }
 
+// CompleteDelivery 把投递标记为已送达并写入收件箱可见时间；终态不允许覆盖。
 func (repository *Repository) CompleteDelivery(ctx context.Context, tenantID, deliveryID string, now time.Time) (domain.Delivery, error) {
 	// PENDING 与 PROCESSING 都可完成，以兼容首次同步投递和租约重试；其他终态不能被覆盖。
 	var row deliveryModel
@@ -287,6 +297,7 @@ func (repository *Repository) CompleteDelivery(ctx context.Context, tenantID, de
 	}
 	return deliveryToDomain(row), nil
 }
+// FailDelivery 记录失败原因与下次重试时间；只有 PENDING/PROCESSING 可转为失败。
 func (repository *Repository) FailDelivery(ctx context.Context, tenantID, deliveryID, safeReason string, nextRetryAt, now time.Time) error {
 	result := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND status IN ?", deliveryID, tenantID, []string{string(domain.DeliveryStatusPending), string(domain.DeliveryStatusProcessing)}).Updates(map[string]any{"status": string(domain.DeliveryStatusFailed), "attempt_count": gorm.Expr("attempt_count + 1"), "last_error": safeReason, "next_retry_at": nextRetryAt, "locked_until": nil, "updated_at": now})
 	if result.Error != nil {
@@ -297,16 +308,38 @@ func (repository *Repository) FailDelivery(ctx context.Context, tenantID, delive
 	}
 	return nil
 }
+// ClaimFailedDeliveries 以 SKIP LOCKED 认领到期失败或租约过期的投递并写入新租约，
+// 支持多实例并发重试而不重复接管。
 func (repository *Repository) ClaimFailedDeliveries(ctx context.Context, tenantID string, limit int, leaseUntil, now time.Time) ([]domain.Delivery, error) {
-	// SKIP LOCKED 允许多个重试实例各取不同记录；next_retry_at 在 PROCESSING 阶段充当租约到期时间，
-	// 进程崩溃后记录可被重新纳入领取条件。
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, application.ErrValidation
+	}
+	return repository.claimDeliveryBatch(ctx, limit, leaseUntil, now,
+		"tenant_id = ? AND "+deliveryRetryClaimable,
+		[]any{strings.TrimSpace(tenantID), domain.DeliveryStatusFailed, now, domain.DeliveryStatusProcessing, now})
+}
+
+// ClaimDueDeliveries 是后台任务的显式跨租户领取入口；空租户从不表示扩大手工运维范围。
+func (repository *Repository) ClaimDueDeliveries(ctx context.Context, limit int, leaseUntil, now time.Time) ([]domain.Delivery, error) {
+	return repository.claimDeliveryBatch(ctx, limit, leaseUntil, now,
+		deliveryRetryClaimable,
+		[]any{domain.DeliveryStatusFailed, now, domain.DeliveryStatusProcessing, now})
+}
+
+const deliveryRetryClaimable = "((status = ? AND next_retry_at <= ?) OR (status = ? AND locked_until IS NOT NULL AND locked_until < ?))"
+
+func (repository *Repository) claimDeliveryBatch(ctx context.Context, limit int, leaseUntil, now time.Time, claimable string, claimableArgs []any) ([]domain.Delivery, error) {
+	// SKIP LOCKED 允许多个重试实例各取不同记录。
+	// 可领取集合 = 到期的 FAILED，或"租约已过期的 PROCESSING"：领取后进程崩溃会留下
+	// PROCESSING 记录，旧实现只认 FAILED，运营端"重试"按钮因此永远领不到它们。
 	var rows []deliveryModel
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("tenant_id = ? AND status = ? AND next_retry_at <= ? AND (locked_until IS NULL OR locked_until < ?)", tenantID, domain.DeliveryStatusFailed, now, now).Order("next_retry_at ASC,id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where(claimable, claimableArgs...).Order("next_retry_at ASC,id ASC").Limit(limit).Find(&rows).Error; err != nil {
 			return fmt.Errorf("claim failed notification deliveries: %w", err)
 		}
 		for i := range rows {
-			result := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND status = ?", rows[i].ID, tenantID, domain.DeliveryStatusFailed).Updates(map[string]any{"status": string(domain.DeliveryStatusProcessing), "locked_until": leaseUntil, "updated_at": now})
+			// 条件更新与领取条件一致：并发实例不能重复接管同一条投递。
+			result := tx.Model(&deliveryModel{}).Where("id = ? AND "+claimable, append([]any{rows[i].ID}, claimableArgs...)...).Where("tenant_id = ?", rows[i].TenantID).Updates(map[string]any{"status": string(domain.DeliveryStatusProcessing), "locked_until": leaseUntil, "updated_at": now})
 			if result.Error != nil {
 				return fmt.Errorf("lock notification delivery: %w", result.Error)
 			}
@@ -327,6 +360,7 @@ func (repository *Repository) ClaimFailedDeliveries(ctx context.Context, tenantI
 	}
 	return items, nil
 }
+// ListDeliveries 分页返回租户内投递记录，可按状态过滤，按更新时间倒序。
 func (repository *Repository) ListDeliveries(ctx context.Context, tenantID string, status domain.DeliveryStatus, page application.PageRequest) (application.PageResult[domain.Delivery], error) {
 	db := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("tenant_id = ?", tenantID)
 	if status != "" {
@@ -347,6 +381,7 @@ func (repository *Repository) ListDeliveries(ctx context.Context, tenantID strin
 	return application.PageResult[domain.Delivery]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
+// ListInbox 返回收件人可见（已送达且到提醒时间）的收件箱分页，可只看未读。
 func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID string, page application.PageRequest, now time.Time) (application.PageResult[domain.InboxItem], error) {
 	base := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ? AND (d.remind_at IS NULL OR d.remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now)
 	if page.UnreadOnly {
@@ -366,10 +401,12 @@ func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID st
 	}
 	return application.PageResult[domain.InboxItem]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
+// GetInboxItem 返回收件人自己的单条收件箱项；不可见或不存在一律按未找到处理。
 func (repository *Repository) GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error) {
 	return repository.inboxItem(ctx, tenantID, userID, deliveryID, now)
 }
 
+// CountUnread 按与收件箱相同的可见性口径统计未读数；不使用已退役的物化计数表。
 func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
 	// 未读口径必须与收件箱可见性一致：remind_at 未到点的投递对收件人不存在。
 	// notification_user_stat 物化计数在延迟可见（DAILY/WEEKLY）下无法增量维护，
@@ -381,6 +418,8 @@ func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID 
 	}
 	return total, nil
 }
+// MarkRead 把收件人自己的一条可见未读投递标记为已读；已读操作幂等，
+// 越权或不可见的投递返回未找到而非暴露存在性。
 func (repository *Repository) MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&deliveryModel{}).Where("id = ? AND tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", deliveryID, tenantID, userID, domain.DeliveryStatusDelivered, now).Updates(map[string]any{"read_at": now, "updated_at": now})
@@ -403,6 +442,7 @@ func (repository *Repository) MarkRead(ctx context.Context, tenantID, userID, de
 	}
 	return repository.inboxItem(ctx, tenantID, userID, deliveryID, now)
 }
+// MarkAllRead 一次性标记该收件人全部可见未读为已读，返回实际更新的条数。
 func (repository *Repository) MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
 	var affected int64
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

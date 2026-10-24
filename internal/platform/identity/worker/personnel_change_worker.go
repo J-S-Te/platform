@@ -12,12 +12,21 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 )
 
+// approvalExceptionDispatcher 是超管例外审计 outbox 的幂等投递端口（由应用层实现）。
+type approvalExceptionDispatcher interface {
+	DispatchOnce(context.Context, int) (application.ApprovalExceptionDispatchReport, error)
+}
+
+// approvalExceptionDispatchBatch 是单轮投递上限，避免积压时长时间占用 worker 循环。
+const approvalExceptionDispatchBatch = 50
+
 // PersonnelChangeWorker 是由数据库协调的轻量调度器；复用应用服务以共享状态机和全部校验闸门。
 type PersonnelChangeWorker struct {
-	service      *application.PersonnelChangeService
-	logger       *slog.Logger
-	workerID     string
-	pollInterval time.Duration
+	service            *application.PersonnelChangeService
+	logger             *slog.Logger
+	workerID           string
+	pollInterval       time.Duration
+	approvalExceptions approvalExceptionDispatcher
 }
 
 // NewPersonnelChangeWorker 创建人员变更 Worker，完成依赖和参数校验。
@@ -34,7 +43,13 @@ func NewPersonnelChangeWorker(service *application.PersonnelChangeService, logge
 	return &PersonnelChangeWorker{service: service, logger: logger, workerID: strings.TrimSpace(workerID), pollInterval: pollInterval}, nil
 }
 
-// Run 按固定间隔轮询待执行的已到期人员变更并执行状态迁移。
+// SetApprovalExceptionDispatcher 注入超管例外审计 outbox 的投递器；未注入时跳过投递，
+// 已提交的审批状态与 outbox 行不受影响，后续可安全补投。
+func (w *PersonnelChangeWorker) SetApprovalExceptionDispatcher(dispatcher approvalExceptionDispatcher) {
+	w.approvalExceptions = dispatcher
+}
+
+// Run 按固定间隔执行到期人员变更、补偿已执行离职的批次完成，随后补投超管例外审计。
 // 每轮先执行一次处理，随后等待 ctx 或 ticker 触发；context 取消时立刻退出循环，防止服务关闭阻塞。
 func (w *PersonnelChangeWorker) Run(ctx context.Context) {
 	// 先立即处理一次，再按固定间隔轮询；取消上下文会停止后续轮询。
@@ -42,12 +57,39 @@ func (w *PersonnelChangeWorker) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		w.ProcessDue(ctx)
+		w.CompleteExecutedHandovers(ctx)
+		w.DispatchApprovalExceptions(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// CompleteExecutedHandovers 每轮只补偿最多 50 个已提交离职的远端完成操作。
+func (w *PersonnelChangeWorker) CompleteExecutedHandovers(ctx context.Context) int {
+	completed, err := w.service.CompleteExecutedHandovers(ctx, 50)
+	if err != nil {
+		w.logger.Error("complete executed personnel handovers", "worker", w.workerID, "completed", completed, "error", err)
+	}
+	return completed
+}
+
+// DispatchApprovalExceptions 投递一轮超管例外审计 outbox，返回成功投递条数。
+// 投递失败只记录重试进度并写日志，不影响已提交的审批状态；未注入投递器时是安全 no-op。
+func (w *PersonnelChangeWorker) DispatchApprovalExceptions(ctx context.Context) int {
+	if w.approvalExceptions == nil {
+		return 0
+	}
+	report, err := w.approvalExceptions.DispatchOnce(ctx, approvalExceptionDispatchBatch)
+	if err != nil {
+		w.logger.Error("dispatch personnel approval exception audit outbox", "worker", w.workerID, "error", err)
+	}
+	if report.Delivered > 0 {
+		w.logger.Info("delivered personnel approval exception audit events", "worker", w.workerID, "delivered", report.Delivered)
+	}
+	return report.Delivered
 }
 
 // ProcessDue 执行当前已到期的 SCHEDULED 请求；仓储事务保证 Execute 幂等，多副本可安全并行。

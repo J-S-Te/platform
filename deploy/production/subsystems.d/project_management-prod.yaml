@@ -30,6 +30,11 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: project_management
         PLATFORM_ENVIRONMENT_CODE: prod
+        PROJECT_BACKGROUND_ENGINE: temporal
+        PROJECT_BACKGROUND_TASK_QUEUE: project-management-background-v1
+        PROJECT_BACKGROUND_DEPLOYMENT_NAME: project-management-background
+        PROJECT_BACKGROUND_HEALTH_ADDRESS: 127.0.0.1:9093
+        PROJECT_BACKGROUND_CONTROL_SOCKET: /tmp/project-background/control.sock
         # 服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读负责人目录。
         OWNER_DIRECTORY_ENABLED: "true"
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
@@ -64,6 +69,7 @@ runtime:
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
         OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
         OIDC_CLIENT_SECRET: client_secret
         OIDC_REDIRECT_URI: redirect_uri

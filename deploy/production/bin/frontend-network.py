@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare exact proxy peers without replacing a long-lived Docker network."""
+"""准备精确的代理对端信息，不替换长期使用的 Docker 网络。"""
 import ipaddress
 import json
 import pathlib
@@ -33,8 +33,7 @@ def config(path):
 
 
 def resolve(values):
-    # A missing network is permitted only after a successful network inventory;
-    # an unavailable daemon must never be mistaken for a new installation.
+    # 只有成功枚举网络后才允许认定网络缺失；绝不能将守护进程不可用误判为新安装。
     result = subprocess.run(['docker', 'network', 'ls', '--filter',
                              'name=^basic-platform-production$', '--format', '{{.Name}}'],
                             capture_output=True, text=True, timeout=15)
@@ -87,7 +86,7 @@ def resolve(values):
     elif frontend is not None and usable(frontend):
         selected = frontend
     else:
-        # Inspect only a bounded tail, not millions of addresses on large subnets.
+        # 仅检查有界尾部，不扫描大子网中数百万地址。
         selected = next((ipaddress.ip_address(number) for number in
                          range(int(subnet.broadcast_address) - 1,
                                max(int(subnet.network_address), int(subnet.broadcast_address) - 256), -1)

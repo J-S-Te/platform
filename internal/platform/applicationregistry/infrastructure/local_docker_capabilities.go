@@ -8,9 +8,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
-// AvailableCapabilities exposes local installation availability without reading runtime
-// credentials or invoking Docker. Preflight remains responsible for daemon connectivity
-// and deployment validation; a local workspace is not a prepared production release.
+// AvailableCapabilities 在不读取运行时凭据、不调用 Docker 的情况下暴露本机安装可用性。
+// 守护进程连通性与部署校验仍由 Preflight 负责；本地工作区不等于已准备好的生产发布。
 func (provisioner *LocalDockerSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
 	capabilities := application.SubsystemProvisioningCapabilities{
 		Mode: "local", SupportedApplicationCodes: []string{}, Targets: []application.SubsystemProvisioningTarget{},

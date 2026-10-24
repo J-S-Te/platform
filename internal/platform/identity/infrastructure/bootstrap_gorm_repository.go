@@ -11,9 +11,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// BootstrapFirstSuperAdmin performs the migration-owned, one-time IAM initialization in a single
-// database transaction. The default tenant row is locked so concurrent bootstrap attempts cannot
-// create multiple administrators before the state marker is committed.
+// BootstrapFirstSuperAdmin 在单个数据库事务内完成迁移所管的一次性 IAM 初始化。default
+// 租户行被锁定，并发引导尝试在状态标记提交前无法创建多个管理员。
 func (repository *GORMRepository) BootstrapFirstSuperAdmin(ctx context.Context, write application.BootstrapWrite) (application.BootstrapResult, error) {
 	var output application.BootstrapResult
 
@@ -204,8 +203,8 @@ func (repository *GORMRepository) BootstrapFirstSuperAdmin(ctx context.Context, 
 	return output, err
 }
 
-// FirstSuperAdminInitialized reports whether the one-time bootstrap state has already been
-// committed for the migration-seeded default tenant. It does not expose any account data.
+// FirstSuperAdminInitialized 报告迁移种子的 default 租户是否已提交一次性引导状态；
+// 它不暴露任何账号数据。
 func (repository *GORMRepository) FirstSuperAdminInitialized(ctx context.Context) (bool, error) {
 	var tenant tenantModel
 	result := repository.database.WithContext(ctx).

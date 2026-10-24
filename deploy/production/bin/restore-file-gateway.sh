@@ -132,8 +132,7 @@ storage_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
 storage_root="${storage_root:-$deploy_dir/data/file-gateway}"
 [[ "$storage_root" == /* && "$storage_root" != / && ! -L "$storage_root" ]] || { echo "存储根目录不安全：$storage_root" >&2; exit 1; }
 
-# Keep the unified deployment lock from final backup revalidation through DB
-# import, directory swap, ownership repair and gateway health verification.
+# 从最终备份复核开始，经过数据库导入、目录交换、归属修复直到网关健康验证，全程持有统一部署锁。
 install -d -m 700 "$deploy_dir/runtime"
 deploy_lock="$deploy_dir/runtime/.deploy.lock"
 [[ ! -L "$deploy_lock" ]] || { echo "部署锁不能是符号链接" >&2; exit 1; }
@@ -146,8 +145,7 @@ install -d -m 750 "$parent_dir"
 exec 9>"$parent_dir/.file-gateway-restore.lock"
 flock -n 9 || { echo "另一个文件网关恢复正在运行" >&2; exit 1; }
 
-# Revalidate immediately before changing live data. Move the already validated
-# tree to the target filesystem so the final swap remains atomic.
+# 变更现行数据前立即复核。将已验证目录树移到目标文件系统，保证最终交换仍为原子操作。
 validate_checksum_manifest
 stage="$(mktemp -d "$parent_dir/.file-gateway-restore.XXXXXX")"
 tar --extract --gzip --file "$backup_dir/files.tar.gz" --directory "$stage" --no-same-owner --no-same-permissions
@@ -208,7 +206,7 @@ fi
 mv -- "$stage" "$storage_root"
 stage=""
 
-# MYSQL_PWD is forwarded by name so the secret never appears in argv.
+# 仅按名称转发 MYSQL_PWD，避免密钥出现在 argv 中。
 if ! gzip --decompress --stdout "$backup_dir/database.sql.gz" |
     MYSQL_PWD="$db_password" "${compose[@]}" exec -T -e MYSQL_PWD file-gateway-mysql mysql -uroot "$db_name"; then
   failed="$parent_dir/.file-gateway-failed-restore-$(date -u +%Y%m%dT%H%M%SZ)"

@@ -72,6 +72,71 @@ if (auto_install_packages) >"$test_root/duplicate.log" 2>&1; then fail 'ambiguou
 grep -q '发现多个 platform 镜像包' "$test_root/duplicate.log" || fail 'ambiguous package error absent'
 [[ ! -s "$events" ]] || fail 'performed operations before rejecting ambiguous packages'
 rm "$package_dir/platform-backend-v2-linux-amd64.tar.gz"
+
+# 签名交付安装先导入身份再准备业务候选，然后等待实际强制执行；失败绝不能报告成功。
+mkdir -p "$deploy_dir/license"
+printf 'fixture-license\n' > "$deploy_dir/license/commercial-license.jws"
+# 一次性维护命令需要 API 的生产配置、profile 挂载和 provisioner 套接字，但不能重启其依赖。
+compose() { printf '%s\n' "$*" > "$test_root/license-compose"; }
+install_delivery_license import
+grep -q 'run -T --rm --no-deps .* platform-api ./license-install import' "$test_root/license-compose" || fail 'license maintenance did not inherit the API topology'
+for scenario in fresh migrate platform-only expand; do
+  jq -n --arg scenario "$scenario" '{version:1,scenario:$scenario,customer_id:"fixture-customer"}' > "$deploy_dir/license-installation.json"
+  prepare_license_installation
+  grep -q "platform-api ./license-install prepare --scenario $scenario --customer fixture-customer --file" "$test_root/license-compose" || fail 'scenario or customer not passed to controlled preparation'
+done
+: > "$events"
+if (
+  compose() { return 1; }
+  auto_install_packages
+) > "$test_root/baseline-failure.log" 2>&1; then fail 'failed baseline accepted'; fi
+if grep -q '^prepare:' "$events"; then fail 'business preparation started after failed baseline'; fi
+rm "$deploy_dir/license-installation.json"
+install_delivery_license() { printf 'license:%s\n' "$1" >> "$events"; }
+: > "$events"
+auto_install_packages > "$test_root/license.log"
+grep -q '^license:import$' "$events" || fail 'delivery import missing'
+grep -q '^license:activate$' "$events" || fail 'enforcement confirmation missing'
+[[ "$(tail -1 "$events")" == license:activate ]] || fail 'activation ran before preparation completed'
+grep -q '交付授权已生效' "$test_root/license.log" || fail 'confirmed enforcement result absent'
+if (
+  install_delivery_license() { [[ "$1" != activate ]]; }
+  auto_install_packages
+) > "$test_root/license-failure.log" 2>&1; then
+  fail 'failed activation reported successful install'
+fi
+if grep -q '交付授权已生效' "$test_root/license-failure.log"; then fail 'failed activation printed enforcement success'; fi
+# 这里只检查续期传输；真实 Go 验证器和导入器分别由签名和 SQL 测试覆盖，不由此 Shell 夹具模拟。
+mkdir -p "$deploy_dir/runtime"
+flock() { return 0; }
+printf 'renewal-fixture\n' > "$test_root/renewal.jws"
+renew_delivery_license "$test_root/renewal.jws"
+cmp "$test_root/renewal.jws" "$deploy_dir/license/commercial-license.jws" || fail 'verified renewal was not atomically installed'
+grep -q 'run -T --rm --no-deps .* platform-api ./license-install import' "$test_root/license-compose" || fail 'renewal did not inherit API topology'
+printf 'rejected-fixture\n' > "$test_root/rejected.jws"
+if (
+  compose() { return 1; }
+  renew_delivery_license "$test_root/rejected.jws"
+) > "$test_root/renewal-failure.log" 2>&1; then fail 'rejected renewal returned success'; fi
+cmp "$test_root/renewal.jws" "$deploy_dir/license/commercial-license.jws" || fail 'rejected renewal replaced the installed license'
+rm "$deploy_dir/license/commercial-license.jws"
+rmdir "$deploy_dir/license"
+# 仅覆盖控制流程夹具；真实注册和 ACK 检查由 Go 测试执行。
+for scenario in fresh migrate platform-only expand; do
+  jq -n --arg scenario "$scenario" '{version:1,scenario:$scenario,customer_id:"fixture-customer"}' > "$deploy_dir/license-installation.json"
+  : > "$events"
+  (
+    compose() { printf 'maintenance:%s\n' "$*" >> "$events"; }
+    auto_install_packages
+  ) > "$test_root/scenario-$scenario.log"
+  [[ "$(tail -1 "$events")" == 'maintenance:run -T --rm --no-deps platform-api ./license-install migrate' ]] || fail 'migration confirmation did not follow business preparation'
+  baseline_line="$(grep -n 'license-install prepare' "$events" | cut -d: -f1)"
+  business_line="$(grep -n '^prepare:customer-opportunity$' "$events" | cut -d: -f1)"
+  [[ "$baseline_line" -lt "$business_line" ]] || fail 'baseline captured after business preparation'
+  grep -q '新增未授权系统不会开放业务' "$test_root/scenario-$scenario.log" || fail 'scenario safety notice absent'
+  if grep -q '交付授权已生效' "$test_root/scenario-$scenario.log"; then fail 'unlicensed migration claimed formal enforcement'; fi
+done
+rm "$deploy_dir/license-installation.json"
 scope_services() { printf '%s\n' platform-api frontend; }
 : > "$events"
 auto_install_packages > "$test_root/core-only.log"

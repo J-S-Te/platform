@@ -55,9 +55,11 @@ func EgressPolicyFromEnv() *EgressPolicy {
 	}
 }
 
-// AllowLoopbackReports/AllowPrivateReports 用于诊断输出与测试断言当前策略。
+// AllowLoopback 报告回环目标当前是否被显式放行，用于诊断输出与测试断言策略生效。
 func (policy *EgressPolicy) AllowLoopback() bool { return policy.allowLoopback }
 
+// AllowPrivate 报告私网目标当前是否被显式放行；探针告警依赖该值区分
+// "策略拒绝"与"服务不可达"，不能为告警文案私自放行。
 func (policy *EgressPolicy) AllowPrivate() bool { return policy.allowPrivate }
 
 func envFlagEnabled(name string) bool {

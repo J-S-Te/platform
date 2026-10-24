@@ -19,8 +19,8 @@ type OAuthClient struct {
 	Scopes                map[string]struct{}
 }
 
-// ClientCredential represents a currently usable secret hash. It deliberately stores only
-// the one-way hash read from platform_oauth_client_credential.
+// ClientCredential 表示当前可用的密钥哈希，刻意只保存
+// 从 platform_oauth_client_credential 读取的单向哈希。
 type ClientCredential struct {
 	SecretHash []byte
 	ValidUntil *time.Time

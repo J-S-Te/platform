@@ -1,4 +1,4 @@
-// Package application coordinates identity authentication use cases.
+// Package application 编排身份认证用例。
 package application
 
 import (
@@ -27,8 +27,8 @@ var (
 	dummyPasswordMetadata = mustDummyPasswordMetadata()
 )
 
-// ConcurrentSessionError retains trusted account identity for security audit logging while the
-// public API returns only a stable conflict code and client-safe message.
+// ConcurrentSessionError 在公共 API 只返回稳定冲突码与客户端安全消息的同时，保留受信的
+// 账号身份供安全审计日志使用。
 type ConcurrentSessionError struct {
 	TenantID    string
 	UserID      string
@@ -37,8 +37,7 @@ type ConcurrentSessionError struct {
 	AccountName string
 }
 
-// LoginFailedError retains trusted account identity for audit logging while preserving the public
-// generic invalid-credential response.
+// LoginFailedError 在保持公共通用“凭据无效”响应的同时，保留受信账号身份供审计日志使用。
 type LoginFailedError struct {
 	TenantID    string
 	UserID      string
@@ -47,13 +46,19 @@ type LoginFailedError struct {
 	AccountName string
 }
 
+// Error 返回通用“凭据无效”文本；受信账号身份只能经结构化字段进入审计日志。
 func (error LoginFailedError) Error() string { return ErrUnauthenticated.Error() }
+
+// Unwrap 固定映射到 ErrUnauthenticated，保证调用方无法从错误链区分“账号不存在”与“密码错误”。
 func (error LoginFailedError) Unwrap() error { return ErrUnauthenticated }
 
+// Error 返回稳定冲突码对应的通用文本，不暴露会话细节。
 func (error ConcurrentSessionError) Error() string { return ErrConcurrentSession.Error() }
+
+// Unwrap 固定映射到 ErrConcurrentSession，使并发会话冲突可被 errors.Is 识别。
 func (error ConcurrentSessionError) Unwrap() error { return ErrConcurrentSession }
 
-// Repository defines persistence operations required by the password and session use cases.
+// Repository 定义密码登录与会话用例所需的持久化操作。
 type Repository interface {
 	FindLoginAccount(ctx context.Context, accountName string) (domain.LoginAccount, error)
 	FindLoginAccountByIdentityID(ctx context.Context, identityID string) (domain.LoginAccount, error)
@@ -66,35 +71,34 @@ type Repository interface {
 	RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error
 }
 
-// PasswordVerifier verifies the password credential supplied by a login request.
+// PasswordVerifier 校验登录请求提供的密码凭据。
 type PasswordVerifier interface {
 	Verify(password, algorithm string, digest, metadata []byte) (bool, error)
 }
 
-// TokenManager signs and verifies the server-owned JWT browser cookie.
+// TokenManager 签发并校验服务端持有的 JWT 浏览器 Cookie。
 type TokenManager interface {
 	Issue(claims security.TokenClaims) (string, error)
 	Verify(token string, now time.Time) (security.TokenClaims, error)
 }
 
-// IDGenerator allows tests to use deterministic session IDs.
+// IDGenerator 允许测试使用确定性的会话 ID。
 type IDGenerator interface {
 	New(now time.Time) (string, error)
 }
 
-// Clock exposes the current time so expiry behavior can be tested deterministically.
+// Clock 暴露当前时间，使过期行为可以被确定性测试。
 type Clock interface {
 	Now() time.Time
 }
 
-// ExternalSessionTerminator revokes sessions held by the external identity
-// broker for one stable platform identity. Implementations must be idempotent:
-// an identity that has not been projected yet is already logged out.
+// ExternalSessionTerminator 为一个稳定的平台身份吊销外置身份代理持有的会话。实现必须
+// 幂等：尚未投影的身份视为已登出。
 type ExternalSessionTerminator interface {
 	LogoutIdentitySessions(ctx context.Context, identityID string) error
 }
 
-// Service implements password login and server-verified cookie session operations.
+// Service 实现密码登录与服务端校验的 Cookie 会话操作。
 type Service struct {
 	repository       Repository
 	passwords        PasswordVerifier
@@ -106,7 +110,7 @@ type Service struct {
 	externalSessions ExternalSessionTerminator
 }
 
-// NewService validates and builds an authentication service.
+// NewService 校验依赖并构造认证服务；任一必需依赖为 nil 或 sessionTTL 非正时返回错误。
 func NewService(repository Repository, passwords PasswordVerifier, tokens TokenManager, ids IDGenerator, clock Clock, loginSecurity securityapplication.LoginSecurityService, sessionTTL time.Duration, externalSessionTerminators ...ExternalSessionTerminator) (*Service, error) {
 	if repository == nil || passwords == nil || tokens == nil || ids == nil || clock == nil || loginSecurity == nil {
 		return nil, errors.New("identity authentication dependencies must not be nil")
@@ -124,22 +128,20 @@ func NewService(repository Repository, passwords PasswordVerifier, tokens TokenM
 	return service, nil
 }
 
-// LoginInput contains validated password-login data plus non-sensitive client metadata.
+// LoginInput 包含已校验的密码登录数据与非敏感的客户端元数据。
 type LoginInput struct {
 	Account                string
 	Password               string
 	IPAddress              net.IP
 	UserAgent              string
 	ReplaceExistingSession bool
-	// CurrentPrincipal is the already authenticated browser identity, when one
-	// exists. It is used only to make an account switch revoke the previous
-	// platform and Keycloak sessions before the new cookie is issued.
+	// CurrentPrincipal 是可能已存在的已认证浏览器身份。它只用于在签发新 Cookie 之前，
+	// 让账号切换先吊销上一身份的平台与 Keycloak 会话。
 	CurrentPrincipal *authctx.Principal
 }
 
-// OIDCLoginInput contains the already-verified stable identity returned by the
-// platform's configured OIDC provider. Token signature and issuer validation is
-// performed at the OIDC HTTP boundary before this method is called.
+// OIDCLoginInput 携带平台所配置 OIDC 提供方已校验的稳定身份。令牌签名与 issuer 校验在
+// OIDC HTTP 边界完成，之后才会调用本方法。
 type OIDCLoginInput struct {
 	IdentityID             string
 	AccountName            string
@@ -149,15 +151,14 @@ type OIDCLoginInput struct {
 	CurrentPrincipal       *authctx.Principal
 }
 
-// SessionResult is the non-sensitive API session representation plus the HttpOnly cookie value.
+// SessionResult 是非敏感的 API 会话表示，附带 HttpOnly Cookie 值。
 type SessionResult struct {
 	ExpiresAt          time.Time
 	RedirectURL        string
 	Token              string
 	MustChangePassword bool
 
-	// Identity fields are server-side metadata for lifecycle auditing. They are deliberately not
-	// included in the HTTP response body or browser cookie.
+	// 身份字段是服务端生命周期审计元数据，有意不进入 HTTP 响应体或浏览器 Cookie。
 	SessionID               string
 	TenantID                string
 	UserID                  string
@@ -167,7 +168,8 @@ type SessionResult struct {
 	ReplacedExistingSession bool
 }
 
-// Login validates a local account's Argon2id password, persists iam_session and signs its cookie.
+// Login 校验本地账号的 Argon2id 密码，持久化 iam_session 并签发其 Cookie。未知账号同样
+// 消耗一次等价的哈希计算以对抗枚举。
 func (service *Service) Login(ctx context.Context, input LoginInput) (SessionResult, error) {
 	accountName := strings.TrimSpace(input.Account)
 	if accountName == "" || input.Password == "" {
@@ -215,9 +217,8 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
 
-// LoginOIDC creates the same server-side platform session as password login,
-// without consulting password state or Broker Verification. Broker evidence is
-// an onboarding/cutover gate, never a runtime prerequisite for this path.
+// LoginOIDC 创建与密码登录相同的服务端平台会话，但不查询密码状态或代理校验结果。
+// 代理证据只是接入/切换门禁，绝不是该路径的运行时前置条件。
 func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (SessionResult, error) {
 	identityID := strings.TrimSpace(input.IdentityID)
 	if identityID == "" {
@@ -240,10 +241,9 @@ func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (Se
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
 
-// terminatePreviousBrowserIdentity keeps the platform cookie and the Keycloak
-// Realm session on the same user. Without this step, logging in as B while the
-// browser still holds A's platform session leaves A authenticated in Keycloak;
-// the next brokered subsystem login then fails with different_user_authenticated.
+// terminatePreviousBrowserIdentity 保证平台 Cookie 与 Keycloak Realm 会话属于同一用户。
+// 缺少该步骤时，浏览器仍持有 A 的平台会话却以 B 登录，会让 A 在 Keycloak 保持已认证，
+// 下一次代理式子系统登录随即以 different_user_authenticated 失败。
 func (service *Service) terminatePreviousBrowserIdentity(ctx context.Context, current *authctx.Principal, nextUserID string) error {
 	if current == nil || current.User.ID == "" || current.User.ID == nextUserID {
 		return nil
@@ -374,7 +374,7 @@ func (service *Service) RecordInteraction(ctx context.Context, principal authctx
 	return nil
 }
 
-// Refresh renews the current active session and returns a new JWT Cookie value.
+// Refresh 续期当前活跃会话并返回新的 JWT Cookie 值。
 func (service *Service) Refresh(ctx context.Context, principal authctx.Principal) (SessionResult, error) {
 	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.User.ID == "" || principal.Account.ID == "" {
 		return SessionResult{}, ErrUnauthenticated
@@ -406,9 +406,8 @@ func (service *Service) Logout(ctx context.Context, principal authctx.Principal)
 	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.User.ID == "" || principal.Account.ID == "" {
 		return ErrUnauthenticated
 	}
-	// Revoke the broker session first. If Keycloak is unavailable, fail closed
-	// and leave the still-valid platform session in place so the browser cannot
-	// switch to another platform account while an older Realm session survives.
+	// 先吊销代理会话；Keycloak 不可用时失败关闭，保留仍有效的平台会话，避免在旧的
+	// Realm 会话尚存时浏览器切换到另一个平台账号。
 	if service.externalSessions != nil {
 		if err := service.externalSessions.LogoutIdentitySessions(ctx, principal.User.ID); err != nil {
 			return fmt.Errorf("revoke external identity sessions: %w", err)
@@ -420,7 +419,7 @@ func (service *Service) Logout(ctx context.Context, principal authctx.Principal)
 	return nil
 }
 
-// SessionIdleTimeout returns the current tenant inactivity timeout for the browser lifecycle.
+// SessionIdleTimeout 返回当前租户的浏览器生命周期空闲超时。
 func (service *Service) SessionIdleTimeout(ctx context.Context, tenantID string) (time.Duration, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return 0, ErrUnauthenticated
@@ -439,10 +438,8 @@ func isLoginEligible(account domain.LoginAccount, now time.Time) bool {
 	return account.CredentialExpiry == nil || account.CredentialExpiry.After(now)
 }
 
-// isSessionLoginEligible contains the login requirements shared by every
-// authentication method that creates a platform session. Keep the lock check
-// here so an account locked after repeated local-password failures cannot
-// establish a new session through OIDC.
+// isSessionLoginEligible 汇集所有创建平台会话的认证方式共享的登录条件。锁定检查放在这里，
+// 使本地密码连续失败后被锁定的账号也无法经 OIDC 建立新会话。
 func isSessionLoginEligible(account domain.LoginAccount, now time.Time) bool {
 	return isIdentityEligible(account) && (account.LockedUntil == nil || !account.LockedUntil.After(now))
 }

@@ -1,4 +1,4 @@
-// Package infrastructure persists OIDC/OAuth runtime state with GORM and MySQL transactions.
+// Package infrastructure 以 GORM 与 MySQL 事务持久化 OIDC/OAuth 运行时状态。
 package infrastructure
 
 import (
@@ -17,9 +17,10 @@ import (
 
 const activeStatus = "ACTIVE"
 
+// Repository 是 OIDC/OAuth 运行时协议状态的 MySQL 持久化实现。
 type Repository struct{ database *gorm.DB }
 
-// NewRepository creates the MySQL-backed OIDC/OAuth runtime repository.
+// NewRepository 构造 MySQL 版 OIDC/OAuth 运行时仓储；database 为空时返回错误。
 func NewRepository(database *gorm.DB) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("OIDC/OAuth database must not be nil")
@@ -145,9 +146,8 @@ type userInfoProjection struct {
 	Email             string
 }
 
-// FindClient resolves one active registration and its exact redirect URI, grants, scopes, and
-// active client-secret verifiers. It also rejects clients whose tenant, application, or
-// environment is disabled.
+// FindClient 解析一个活动注册及其精确 redirect URI、grant、scope 与当前可用的
+// client secret 校验器；租户、应用或环境被停用的客户端一并拒绝。
 func (r *Repository) FindClient(ctx context.Context, clientID string, now time.Time) (domain.Client, error) {
 	client, err := r.findClient(ctx, r.database, "platform_oauth_client.client_id = ?", clientID)
 	if err != nil {
@@ -219,8 +219,8 @@ func (r *Repository) withCapabilities(ctx context.Context, database *gorm.DB, cl
 	return result, nil
 }
 
-// ResolveSessionSubject returns a subject only while the local session and all tenant-scoped
-// identity records remain active and the session is neither expired nor revoked.
+// ResolveSessionSubject 仅在本地会话与全部租户内身份记录保持活动、且会话未过期
+// 未撤销时返回会话主体。
 func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string, now time.Time) (domain.SessionSubject, error) {
 	return r.resolveSessionSubject(ctx, r.database, sessionID, now, false)
 }
@@ -253,6 +253,7 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 	}, nil
 }
 
+// CreateAuthorizationCode 持久化一条授权码记录；原始授权码不落库，仅保存其摘要。
 func (r *Repository) CreateAuthorizationCode(ctx context.Context, code domain.AuthorizationCode) error {
 	return r.database.WithContext(ctx).Table("oauth_authorization_code").Create(&authorizationCodeRow{
 		ID: code.ID, TenantID: code.TenantID, OAuthClientID: code.OAuthClientID, SessionID: code.SessionID, AccountID: code.AccountID, UserID: code.UserID,
@@ -261,6 +262,7 @@ func (r *Repository) CreateAuthorizationCode(ctx context.Context, code domain.Au
 	}).Error
 }
 
+// FindAuthorizationCode 按摘要查找授权码行，不过滤过期状态（状态判定留给消费事务）。
 func (r *Repository) FindAuthorizationCode(ctx context.Context, codeHash [32]byte, _ time.Time) (domain.AuthorizationCode, error) {
 	var row authorizationCodeRow
 	if err := r.database.WithContext(ctx).Table("oauth_authorization_code").Where("code_hash = ?", codeHash[:]).Take(&row).Error; err != nil {
@@ -316,6 +318,7 @@ func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command appli
 	return grant, nil
 }
 
+// FindRefreshToken 按摘要查找 refresh token 及其令牌族投影，供只读判断使用。
 func (r *Repository) FindRefreshToken(ctx context.Context, tokenHash [32]byte, now time.Time) (domain.RefreshToken, error) {
 	row, err := r.refreshByHash(ctx, r.database, tokenHash, false)
 	if err != nil {
@@ -328,6 +331,10 @@ func (r *Repository) FindRefreshToken(ctx context.Context, tokenHash [32]byte, n
 // 会先撤销整个令牌族再返回重放错误，使并发刷新和窃取后的重放都不能留下可用后代。
 func (r *Repository) RotateRefreshToken(ctx context.Context, command application.RotateRefreshTokenCommand, now time.Time) (domain.TokenGrant, error) {
 	var grant domain.TokenGrant
+	// 重放检测必须在事务内撤销令牌族，但撤销本身要提交：如果从事务回调返回错误，
+	// GORM 会回滚整个事务，撤销随之失效，窃取者持有的后代令牌仍然可用。
+	// 因此这里先在事务内完成撤销并正常提交，再在事务外返回重放错误。
+	var replayDetected bool
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		row, err := r.refreshByHash(ctx, tx, command.TokenHash, true)
 		if err != nil {
@@ -345,7 +352,8 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, command application
 			if err := revokeFamily(tx, family, now, "refresh_token_replay"); err != nil {
 				return err
 			}
-			return application.ErrRefreshTokenReplay
+			replayDetected = true
+			return nil
 		}
 		if row.Status != domain.RefreshTokenStatusActive || row.RevokedAt != nil || !row.ExpiresAt.After(now) || family.Status != domain.TokenFamilyStatusActive || family.RevokedAt != nil || !family.ExpiresAt.After(now) {
 			return application.ErrNotFound
@@ -379,11 +387,15 @@ func (r *Repository) RotateRefreshToken(ctx context.Context, command application
 	if err != nil {
 		return domain.TokenGrant{}, err
 	}
+	if replayDetected {
+		// 撤销已经提交；这里只负责把重放错误返回给调用方，令牌族保持已撤销状态。
+		return domain.TokenGrant{}, application.ErrRefreshTokenReplay
+	}
 	return grant, nil
 }
 
-// RevokeToken records access-token revocation or revokes the entire matching refresh-token family.
-// Unknown refresh tokens are accepted as no-op to preserve RFC 7009 response behavior.
+// RevokeToken 记录 access token 撤销，或撤销匹配的整个 refresh token 族。
+// 未知 refresh token 按 no-op 接受，以保持 RFC 7009 的响应行为。
 func (r *Repository) RevokeToken(ctx context.Context, command application.RevokeTokenCommand, now time.Time) error {
 	return r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if command.TokenType == domain.TokenTypeRefresh {
@@ -414,12 +426,15 @@ func (r *Repository) upsertRevocation(tx *gorm.DB, command application.RevokeTok
 	}).Create(&tokenRevocationRow{ID: command.RevocationID, TenantID: command.TenantID, OAuthClientID: command.OAuthClientID, TokenHash: command.TokenHash[:], TokenType: command.TokenType, RevokedAt: now.UTC(), ExpiresAt: utcPointer(command.ExpiresAt), Reason: command.Reason}).Error
 }
 
+// IsTokenRevoked 查询租户范围内是否已有该令牌摘要的撤销记录。
 func (r *Repository) IsTokenRevoked(ctx context.Context, tenantID string, tokenHash [32]byte, now time.Time) (bool, error) {
 	var count int64
 	err := r.database.WithContext(ctx).Table("oauth_token_revocation").Where("tenant_id = ? AND token_hash = ? AND (expires_at IS NULL OR expires_at > ?)", tenantID, tokenHash[:], now).Count(&count).Error
 	return count > 0, err
 }
 
+// ResolveUserInfo 重新核对会话、租户、账号、用户与客户端全部处于活动状态后，
+// 返回 UserInfo 允许暴露的用户投影。
 func (r *Repository) ResolveUserInfo(ctx context.Context, query application.UserInfoQuery, now time.Time) (domain.UserInfoSubject, error) {
 	var row userInfoProjection
 	err := r.database.WithContext(ctx).Table("iam_session").
@@ -579,7 +594,7 @@ func (r *Repository) RecordClientAssertionReplay(ctx context.Context, oauthClien
 	return nil
 }
 
-// IsRegisteredPostLogoutRedirectURI accepts only an exact URI from the dedicated registration table.
+// IsRegisteredPostLogoutRedirectURI 只接受专用登记表中的精确 URI。
 func (r *Repository) IsRegisteredPostLogoutRedirectURI(ctx context.Context, clientID, redirectURI string, now time.Time) (bool, error) {
 	client, err := r.findClient(ctx, r.database, "platform_oauth_client.client_id = ?", clientID)
 	if err != nil {
@@ -596,6 +611,7 @@ func isDuplicateKey(err error) bool {
 
 var _ application.ClientAssertionReplayRepository = (*Repository)(nil)
 
+// FindConsent 返回用户对客户端的已授予 scope 集合与有效状态；无记录时按不存在处理。
 func (r *Repository) FindConsent(ctx context.Context, tenantID, userID, oauthClientID string, _ time.Time) ([]string, bool, error) {
 	var row struct {
 		Scope     string
@@ -610,11 +626,13 @@ func (r *Repository) FindConsent(ctx context.Context, tenantID, userID, oauthCli
 	}
 	return parseScopes(row.Scope), row.Status == activeStatus && row.RevokedAt == nil, nil
 }
+// GrantConsent 以聚合行 upsert 记录用户同意，整体替换 scope 并递增版本。
 func (r *Repository) GrantConsent(ctx context.Context, tenantID, userID, oauthClientID string, scopes []string, now time.Time) error {
 	// 同一用户与客户端只有一条同意聚合；重复授权整体替换 scope 并递增版本，撤销后再次授权也复用该行。
 	row := map[string]any{"tenant_id": tenantID, "user_id": userID, "oauth_client_id": oauthClientID, "scope": joinScopes(scopes), "granted_at": now.UTC(), "revoked_at": nil, "updated_at": now.UTC(), "status": activeStatus, "version": 1}
 	return r.database.WithContext(ctx).Table("iam_oidc_user_consent").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "user_id"}, {Name: "oauth_client_id"}}, DoUpdates: clause.Assignments(map[string]any{"scope": joinScopes(scopes), "granted_at": now.UTC(), "revoked_at": nil, "updated_at": now.UTC(), "status": activeStatus, "version": gorm.Expr("version + 1")})}).Create(row).Error
 }
+// RevokeConsent 撤销用户对客户端的同意聚合行；行不存在时返回 ErrNotFound。
 func (r *Repository) RevokeConsent(ctx context.Context, tenantID, userID, oauthClientID string, now time.Time) error {
 	result := r.database.WithContext(ctx).Table("iam_oidc_user_consent").Where("tenant_id = ? AND user_id = ? AND oauth_client_id = ?", tenantID, userID, oauthClientID).Updates(map[string]any{"revoked_at": now.UTC(), "updated_at": now.UTC(), "status": "REVOKED", "version": gorm.Expr("version + 1")})
 	if result.Error != nil {
@@ -641,6 +659,7 @@ type parRow struct {
 	Status                                                               string
 }
 
+// CreatePushedAuthorizationRequest 持久化一条 PAR 状态，仅保存 request URI 摘要。
 func (r *Repository) CreatePushedAuthorizationRequest(ctx context.Context, request application.PushedAuthorizationRequest) error {
 	var objectHash []byte
 	if request.RequestObjectHash != nil {
@@ -648,6 +667,8 @@ func (r *Repository) CreatePushedAuthorizationRequest(ctx context.Context, reque
 	}
 	return r.database.WithContext(ctx).Table("oauth_pushed_authorization_request").Create(map[string]any{"id": request.ID, "tenant_id": request.TenantID, "oauth_client_id": request.OAuthClientID, "request_uri_hash": request.RequestURIHash[:], "redirect_uri": request.RedirectURI, "scope": joinScopes(request.Scopes), "state": stringPointer(request.State), "nonce": stringPointer(request.Nonce), "code_challenge": stringPointer(request.CodeChallenge), "code_challenge_method": stringPointer(request.CodeChallengeMethod), "request_object_hash": objectHash, "created_at": request.CreatedAt.UTC(), "expires_at": request.ExpiresAt.UTC(), "status": activeStatus}).Error
 }
+// ConsumePushedAuthorizationRequest 在行锁内完成查找、租户/客户端绑定校验、
+// 过期判断与一次性状态转移，防止同一 PAR 被并发兑换成两个授权流程。
 func (r *Repository) ConsumePushedAuthorizationRequest(ctx context.Context, tenantID, oauthClientID string, hash [32]byte, now time.Time) (application.PushedAuthorizationRequest, error) {
 	// request_uri 的查找、租户/客户端绑定、过期判断和状态转换必须在同一行锁内完成，
 	// 否则两个并发浏览器请求可能把同一 PAR 兑换成两个授权码流程。

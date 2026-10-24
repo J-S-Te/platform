@@ -8,12 +8,16 @@ import (
 	"net/http"
 )
 
-// AuthorizationOverviewHandler returns a compact, read-only IAM overview for one person.
+// AuthorizationOverviewHandler 返回单个人员的紧凑只读 IAM 总览。
 type AuthorizationOverviewHandler struct{ db *gorm.DB }
 
+// NewAuthorizationOverviewHandler 构造总览处理器；查询始终以会话主体的租户为边界。
 func NewAuthorizationOverviewHandler(db *gorm.DB) *AuthorizationOverviewHandler {
 	return &AuthorizationOverviewHandler{db: db}
 }
+
+// Get 返回指定用户的账号、任职、角色绑定、在途变更、交接项与 Keycloak 同步状态
+// 的只读聚合；目标用户不存在时返回 404。
 func (h *AuthorizationOverviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 	p, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok {
@@ -37,7 +41,7 @@ func (h *AuthorizationOverviewHandler) Get(w http.ResponseWriter, r *http.Reques
 	out["pending_changes"] = h.rows(r, "iam_personnel_change_request", "tenant_id=? AND user_id=? AND status IN ('DRAFT','PENDING_APPROVAL','PENDING_HANDOVER','SCHEDULED')", p.Tenant.ID, uid)
 	out["handover"] = h.rows(r, "iam_personnel_handover_item", "tenant_id=? AND current_owner_id=? AND status NOT IN ('COMPLETED','CANCELLED')", p.Tenant.ID, uid)
 	var sync []map[string]any
-	// Keycloak sync state is emitted when the outbox table is present; a missing optional table is safe.
+	// outbox 表存在时才输出 Keycloak 同步状态；该可选表缺失是安全情形。
 	h.db.WithContext(r.Context()).Table("keycloak_authorization_outbox").Where("tenant_id=? AND identity_id=?", p.Tenant.ID, uid).Order("created_at DESC").Limit(20).Find(&sync)
 	out["keycloak_sync"] = sync
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", out)

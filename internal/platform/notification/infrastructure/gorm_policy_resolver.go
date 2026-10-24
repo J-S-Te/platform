@@ -15,7 +15,7 @@ import (
 // InboxPolicy 读取租户站内信开关，但不让 notification 依赖 settings 的内部模型。
 type InboxPolicy struct{ database *gorm.DB }
 
-// NewInboxPolicy constructs the settings read adapter used by notification creation.
+// NewInboxPolicy 构造通知创建使用的设置读取适配器。
 func NewInboxPolicy(database *gorm.DB) (*InboxPolicy, error) {
 	if database == nil {
 		return nil, fmt.Errorf("notification policy database must not be nil")
@@ -28,16 +28,23 @@ type notificationSettingRow struct {
 	ReminderFrequency string `gorm:"column:reminder_frequency"`
 }
 
+func (notificationSettingRow) TableName() string { return "notification_setting" }
+
 // DeliveryVisibility 解析租户通知创建时的可见性计划：站内信是否启用，以及新投递何时
 // 对收件人可见。行不存在（租户从未保存设置）按 IMMEDIATE 处理，保持现状行为；
 // 数据库故障不能伪装成默认值。
 func (policy *InboxPolicy) DeliveryVisibility(ctx context.Context, tenantID string, now time.Time) (bool, time.Time, error) {
 	var row notificationSettingRow
 	err := policy.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Take(&row).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// 与 settings.application 的未保存租户默认值保持一致：站内信启用、立即可见。
+		// 显式保存的停用行不属于默认值。
+		return true, now, nil
+	}
+	if err != nil {
 		return false, now, fmt.Errorf("read notification delivery visibility: %w", err)
 	}
-	if err != nil || !row.InboxEnabled {
+	if !row.InboxEnabled {
 		return false, now, nil
 	}
 	switch strings.ToUpper(strings.TrimSpace(row.ReminderFrequency)) {
@@ -81,7 +88,7 @@ func nextWeeklyReleasePoint(now time.Time) time.Time {
 // 绝不产生角色绑定或业务权限。
 type RecipientResolver struct{ database *gorm.DB }
 
-// NewRecipientResolver constructs the GORM tenant audience resolver.
+// NewRecipientResolver 构造基于 GORM 的租户受众解析器。
 func NewRecipientResolver(database *gorm.DB) (*RecipientResolver, error) {
 	if database == nil {
 		return nil, fmt.Errorf("notification recipient resolver database must not be nil")
@@ -93,7 +100,7 @@ type recipientUserRow struct {
 	ID string `gorm:"column:id"`
 }
 
-// ResolveRecipients resolves USER, ORGANIZATION and ROLE targets to enabled tenant users.
+// ResolveRecipients 把 USER、ORGANIZATION 与 ROLE 目标解析为当前租户的在册用户。
 func (resolver *RecipientResolver) ResolveRecipients(ctx context.Context, tenantID string, targets []domain.RecipientTarget, at time.Time) ([]string, error) {
 	users := make(map[string]struct{})
 	for _, target := range targets {

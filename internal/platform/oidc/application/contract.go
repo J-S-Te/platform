@@ -1,4 +1,4 @@
-// Package application coordinates OIDC/OAuth protocol state without HTTP dependencies.
+// Package application 在不依赖 HTTP 的情况下协调 OIDC/OAuth 协议状态。
 package application
 
 import (
@@ -10,62 +10,62 @@ import (
 )
 
 var (
-	// ErrInvalidRequest identifies malformed protocol input.
+	// ErrInvalidRequest 标识畸形的协议输入。
 	ErrInvalidRequest = errors.New("invalid OIDC/OAuth request")
-	// ErrInvalidClient deliberately covers unknown, disabled, and improperly authenticated clients.
+	// ErrInvalidClient 刻意覆盖未知、停用与认证不当的客户端，不向调用方区分具体原因。
 	ErrInvalidClient = errors.New("invalid OIDC/OAuth client")
-	// ErrUnauthorizedClient means a valid client is not registered for the requested grant.
+	// ErrUnauthorizedClient 表示客户端有效但未注册使用所请求的 grant。
 	ErrUnauthorizedClient = errors.New("OIDC/OAuth client is not authorized for this grant")
-	// ErrAccessDenied means the authenticated resource owner has no application-level access.
-	// Transport adapters must expose only the standard OAuth error code and must not leak role data.
+	// ErrAccessDenied 表示已认证的资源属主没有应用级访问权。传输适配器只能暴露
+	// 标准 OAuth 错误码，绝不能泄露角色数据。
 	ErrAccessDenied = errors.New("OIDC/OAuth resource owner access is denied")
-	// ErrInvalidScope identifies an unregistered or malformed requested scope.
+	// ErrInvalidScope 标识未注册或畸形的请求 scope。
 	ErrInvalidScope = errors.New("invalid OIDC/OAuth scope")
-	// ErrInvalidGrant deliberately covers expired, consumed, mismatched, and unknown grants.
+	// ErrInvalidGrant 刻意覆盖过期、已消费、不匹配与未知的 grant。
 	ErrInvalidGrant = errors.New("invalid OIDC/OAuth grant")
-	// ErrRefreshTokenReplay indicates a prior refresh token was presented again. Its token family is
-	// revoked before this error is returned; transport should map it to invalid_grant.
+	// ErrRefreshTokenReplay 表示先前的 refresh token 被再次出示。返回该错误前其
+	// 令牌族已被撤销；传输层应把它映射为 invalid_grant。
 	ErrRefreshTokenReplay = errors.New("OIDC/OAuth refresh token replay detected")
-	// ErrInvalidToken identifies a token or subject that cannot be used for UserInfo.
+	// ErrInvalidToken 标识不能用于 UserInfo 的令牌或主体。
 	ErrInvalidToken = errors.New("invalid OIDC/OAuth token")
 
-	// ErrNotFound is returned by repositories for an absent tenant-scoped record. Application
-	// methods map it to a public protocol-safe error instead of exposing record existence.
+	// ErrNotFound 由仓储在租户范围内找不到记录时返回。应用方法会把它映射为
+	// 协议安全的公共错误，避免暴露记录是否存在。
 	ErrNotFound = errors.New("OIDC/OAuth record not found")
-	// ErrAuthorizationCodeUnavailable is returned atomically when a code is expired or consumed.
+	// ErrAuthorizationCodeUnavailable 在授权码过期或已消费时原子返回。
 	ErrAuthorizationCodeUnavailable = errors.New("OIDC/OAuth authorization code is unavailable")
 )
 
-// Clock supplies UTC protocol time and enables deterministic expiry tests.
+// Clock 提供协议用 UTC 时间，使过期行为可确定性测试。
 type Clock interface {
 	Now() time.Time
 }
 
-// SystemClock is the production clock implementation.
+// SystemClock 是生产环境时钟实现。
 type SystemClock struct{}
 
-// Now returns the current UTC instant.
+// Now 返回当前 UTC 时刻。
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
-// IDGenerator supplies durable aggregate IDs. Production callers can use the shared ULID generator.
+// IDGenerator 生成持久化聚合 ID；生产调用方可使用共享 ULID 生成器。
 type IDGenerator interface {
 	New(at time.Time) (string, error)
 }
 
-// SecretGenerator supplies a cryptographically strong, URL-safe opaque value. Values returned by
-// this interface are immediately hashed before persistence and must never be logged.
+// SecretGenerator 生成密码学强度足够、URL 安全的不透明值。本接口返回的值会
+// 立即哈希后再持久化，绝不允许写入日志。
 type SecretGenerator interface {
 	NewSecret() (string, error)
 }
 
-// TokenIssuer signs protocol access and ID tokens after the service has validated the durable
-// authorization state. JWT/JWKS implementation is intentionally outside this module.
+// TokenIssuer 在服务完成持久化授权状态校验之后签署协议 access token 与 ID token。
+// JWT/JWKS 的具体实现被刻意留在本模块之外。
 type TokenIssuer interface {
 	IssueOIDCTokens(context.Context, TokenIssue) (IssuedTokens, error)
 }
 
-// Repository defines the durable MySQL operations required by OIDC/OAuth runtime. Commands that
-// consume or rotate secrets must execute their compare-and-transition logic in one transaction.
+// Repository 定义 OIDC/OAuth 运行时所需的持久化 MySQL 操作。消费或轮换机密的
+// 命令必须在单个事务内完成"比较并转移"逻辑。
 type Repository interface {
 	FindClient(ctx context.Context, clientID string, now time.Time) (domain.Client, error)
 	ResolveSessionSubject(ctx context.Context, sessionID string, now time.Time) (domain.SessionSubject, error)
@@ -79,8 +79,8 @@ type Repository interface {
 	ResolveUserInfo(ctx context.Context, query UserInfoQuery, now time.Time) (domain.UserInfoSubject, error)
 }
 
-// AuthorizationInput is a browser authorization request after HTTP has authenticated the local
-// session. State is echoed only for the transport redirect and is intentionally not persisted.
+// AuthorizationInput 是浏览器授权请求在 HTTP 层完成本地会话认证后的形态。
+// State 仅用于传输层重定向回显，刻意不持久化。
 type AuthorizationInput struct {
 	ClientID            string
 	RedirectURI         string
@@ -92,7 +92,7 @@ type AuthorizationInput struct {
 	SessionID           string
 }
 
-// AuthorizationResult contains the opaque one-time code for a registered exact redirect URI.
+// AuthorizationResult 携带面向已注册精确 redirect URI 的一次性不透明授权码。
 type AuthorizationResult struct {
 	AuthorizationCode string
 	RedirectURI       string
@@ -101,18 +101,18 @@ type AuthorizationResult struct {
 	ExpiresAt         time.Time
 }
 
-// ClientAuthentication represents token-endpoint client authentication. The HTTP adapter should
-// populate ClientSecret only from a transport-safe credential source such as HTTP Basic.
+// ClientAuthentication 表示 token 端点的客户端认证。HTTP 适配器只能从传输层安全
+// 来源（如 HTTP Basic）填充 ClientSecret。
 type ClientAuthentication struct {
 	ClientID     string
 	ClientSecret string
-	// ClientAssertion is a signed JWT used only with private_key_jwt. It is never persisted.
+	// ClientAssertion 是仅配合 private_key_jwt 使用的签名 JWT，绝不持久化。
 	ClientAssertion         string
 	ClientAssertionType     string
 	ClientAssertionAudience string
 }
 
-// AuthorizationCodeExchangeInput represents grant_type=authorization_code.
+// AuthorizationCodeExchangeInput 表示 grant_type=authorization_code。
 type AuthorizationCodeExchangeInput struct {
 	ClientAuthentication
 	Code         string
@@ -120,14 +120,14 @@ type AuthorizationCodeExchangeInput struct {
 	CodeVerifier string
 }
 
-// RefreshTokenInput represents grant_type=refresh_token.
+// RefreshTokenInput 表示 grant_type=refresh_token。
 type RefreshTokenInput struct {
 	ClientAuthentication
 	RefreshToken string
 }
 
-// RevokeTokenInput represents RFC 7009-style revocation after the HTTP layer has selected a
-// supported token hint. Unknown token values are deliberately accepted as a successful no-op.
+// RevokeTokenInput 表示 RFC 7009 风格的撤销请求，在 HTTP 层已选定受支持的
+// token hint 后进入。未知令牌值刻意按成功的 no-op 处理。
 type RevokeTokenInput struct {
 	ClientAuthentication
 	Token     string
@@ -136,8 +136,8 @@ type RevokeTokenInput struct {
 	Reason    string
 }
 
-// TokenIssue is the complete, validated claim material that an OIDC JWT adapter may sign. The
-// token identifier is stable before persistence so an adapter can include it as jti.
+// TokenIssue 是 OIDC JWT 适配器可签署的完整、已校验声明材料。令牌标识在持久化
+// 之前就已固定，适配器可将其作为 jti 写入。
 type TokenIssue struct {
 	AccessTokenID        string
 	TenantID             string
@@ -154,15 +154,15 @@ type TokenIssue struct {
 	IssueIDToken         bool
 }
 
-// IssuedTokens is returned by the signing adapter. Refresh tokens are generated and retained by
-// this service rather than the signer, so the signer never receives a long-lived bearer secret.
+// IssuedTokens 由签名适配器返回。refresh token 由本服务而非签名器生成与保存，
+// 因此签名器永远接触不到长效 bearer 机密。
 type IssuedTokens struct {
 	AccessToken string
 	IDToken     string
 }
 
-// TokenResult is safe for a token HTTP response. The refresh token is present only when the client
-// is registered for refresh_token and has a positive refresh token TTL.
+// TokenResult 可安全用于 token HTTP 响应。refresh token 仅在客户端注册了
+// refresh_token grant 且 refresh token TTL 为正时才返回。
 type TokenResult struct {
 	AccessToken  string
 	TokenType    string
@@ -172,7 +172,7 @@ type TokenResult struct {
 	RefreshToken string
 }
 
-// NewRefreshToken describes the durable state added at authorization-code exchange or rotation.
+// NewRefreshToken 描述授权码兑换或轮换时新增的持久化 refresh token 状态。
 type NewRefreshToken struct {
 	ID                   string
 	TokenFamilyID        string
@@ -189,8 +189,8 @@ type NewRefreshToken struct {
 	ExpiresAt            time.Time
 }
 
-// ConsumeAuthorizationCodeCommand binds consumption to the exact client, redirect URI, and
-// optional refresh token creation. Implementations must lock by CodeHash before transitioning.
+// ConsumeAuthorizationCodeCommand 把授权码消费绑定到精确的 client、redirect URI，
+// 以及可选的 refresh token 创建。实现必须先按 CodeHash 加锁再转移状态。
 type ConsumeAuthorizationCodeCommand struct {
 	CodeHash    [32]byte
 	ClientID    string
@@ -198,14 +198,14 @@ type ConsumeAuthorizationCodeCommand struct {
 	Refresh     *NewRefreshToken
 }
 
-// RotateRefreshTokenCommand atomically consumes the presented token and creates its successor.
+// RotateRefreshTokenCommand 原子消费出示的 token 并创建其后继节点。
 type RotateRefreshTokenCommand struct {
 	TokenHash [32]byte
 	ClientID  string
 	Refresh   NewRefreshToken
 }
 
-// RevokeTokenCommand records an access-token digest or revokes the matching refresh-token family.
+// RevokeTokenCommand 记录 access token 摘要，或撤销匹配的 refresh token 族。
 type RevokeTokenCommand struct {
 	RevocationID  string
 	TenantID      string
@@ -216,8 +216,8 @@ type RevokeTokenCommand struct {
 	Reason        string
 }
 
-// UserInfoInput is constructed from an already verified, non-revoked user access token. Claims
-// are re-resolved against MySQL so disabled tenants, sessions, accounts and users are rejected.
+// UserInfoInput 由已经验签且未撤销的用户 access token 构造。声明会重新对照
+// MySQL 解析，因此停用的租户、会话、账号与用户都会被拒绝。
 type UserInfoInput struct {
 	TenantID      string
 	OAuthClientID string
@@ -226,7 +226,7 @@ type UserInfoInput struct {
 	Scopes        []string
 }
 
-// UserInfoQuery is the repository-safe equivalent of UserInfoInput.
+// UserInfoQuery 是 UserInfoInput 的仓储安全等价形态。
 type UserInfoQuery struct {
 	TenantID      string
 	OAuthClientID string
@@ -234,7 +234,7 @@ type UserInfoQuery struct {
 	UserID        string
 }
 
-// UserInfo contains only claims permitted by the access token's granted scopes.
+// UserInfo 只包含 access token 已授予 scope 所允许的声明。
 type UserInfo struct {
 	Subject           string
 	Name              string

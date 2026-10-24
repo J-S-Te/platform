@@ -13,13 +13,14 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// OAuthClientManagementRepository persists OAuth client registration and credential lifecycle
-// writes. It never returns or selects credential secret hashes for management responses.
+// OAuthClientManagementRepository 持久化 OAuth 客户端登记与凭据生命周期写入。它绝不读取
+// 或返回凭据 secret 哈希用于管理响应。
 type OAuthClientManagementRepository struct {
 	database *gorm.DB
 }
 
-// NewOAuthClientManagementRepository constructs OAuth client management persistence.
+// NewOAuthClientManagementRepository 构造 OAuth 客户端管理持久化；数据库句柄为 nil 时
+// 返回错误。
 func NewOAuthClientManagementRepository(database *gorm.DB) (*OAuthClientManagementRepository, error) {
 	if database == nil {
 		return nil, errors.New("OAuth client management database must not be nil")
@@ -47,6 +48,7 @@ type oauthClientManagementModel struct {
 	UpdatedBy              *string   `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的 OAuth 客户端表名。
 func (oauthClientManagementModel) TableName() string { return "platform_oauth_client" }
 
 type oauthClientEnvironmentModel struct {
@@ -56,6 +58,7 @@ type oauthClientEnvironmentModel struct {
 	Status        string `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的环境表名。
 func (oauthClientEnvironmentModel) TableName() string { return "platform_application_environment" }
 
 type oauthClientApplicationModel struct {
@@ -64,6 +67,7 @@ type oauthClientApplicationModel struct {
 	Status   string `gorm:"column:status"`
 }
 
+// TableName 指定 GORM 行映射的应用表名。
 func (oauthClientApplicationModel) TableName() string { return "platform_application" }
 
 type oauthClientRedirectURIModel struct {
@@ -72,6 +76,7 @@ type oauthClientRedirectURIModel struct {
 	CreatedAt     time.Time `gorm:"column:created_at"`
 }
 
+// TableName 指定 GORM 行映射的回调地址表名。
 func (oauthClientRedirectURIModel) TableName() string { return "platform_oauth_redirect_uri" }
 
 // oauthClientPostLogoutRedirectURIModel 映射独立的 RP-initiated logout 回调地址集合。
@@ -81,6 +86,7 @@ type oauthClientPostLogoutRedirectURIModel struct {
 	CreatedAt             time.Time `gorm:"column:created_at"`
 }
 
+// TableName 指定 GORM 行映射的登出回调地址表名。
 func (oauthClientPostLogoutRedirectURIModel) TableName() string {
 	return "platform_oauth_post_logout_redirect_uri"
 }
@@ -100,6 +106,7 @@ type oauthClientJWKModel struct {
 	CreatedAt     time.Time  `gorm:"column:created_at"`
 }
 
+// TableName 指定 GORM 行映射的客户端公钥表名。
 func (oauthClientJWKModel) TableName() string { return "oauth_client_jwk" }
 
 type oauthClientGrantTypeModel struct {
@@ -107,6 +114,7 @@ type oauthClientGrantTypeModel struct {
 	GrantType     string `gorm:"column:grant_type;primaryKey"`
 }
 
+// TableName 指定 GORM 行映射的授权模式表名。
 func (oauthClientGrantTypeModel) TableName() string { return "platform_oauth_grant_type" }
 
 type oauthClientScopeModel struct {
@@ -114,6 +122,7 @@ type oauthClientScopeModel struct {
 	ScopeCode     string `gorm:"column:scope_code;primaryKey"`
 }
 
+// TableName 指定 GORM 行映射的 scope 授权表名。
 func (oauthClientScopeModel) TableName() string { return "platform_oauth_client_scope" }
 
 type oauthClientCredentialModel struct {
@@ -129,6 +138,7 @@ type oauthClientCredentialModel struct {
 	CreatedAt      time.Time  `gorm:"column:created_at"`
 }
 
+// TableName 指定 GORM 行映射的凭据表名。
 func (oauthClientCredentialModel) TableName() string { return "platform_oauth_client_credential" }
 
 const oauthClientSecretCredentialType = "secret"
@@ -178,7 +188,7 @@ func (repository *OAuthClientManagementRepository) CreateOAuthClient(ctx context
 	return result, mapOAuthClientManagementError(err)
 }
 
-// ListOAuthClients returns safe aggregate projections for the tenant.
+// ListOAuthClients 返回该租户安全的聚合投影。
 func (repository *OAuthClientManagementRepository) ListOAuthClients(ctx context.Context, tenantID string) ([]application.OAuthClientView, error) {
 	var clients []oauthClientManagementModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ?", tenantID).Order("created_at DESC, id DESC").Find(&clients).Error; err != nil {
@@ -196,15 +206,14 @@ func (repository *OAuthClientManagementRepository) ListOAuthClients(ctx context.
 	return result, nil
 }
 
-// GetOAuthClient returns one safe aggregate projection scoped to the tenant.
+// GetOAuthClient 返回租户范围内的单个安全聚合投影。
 func (repository *OAuthClientManagementRepository) GetOAuthClient(ctx context.Context, tenantID, oauthClientID string) (application.OAuthClientView, error) {
 	view, err := oauthClientManagementView(repository.database.WithContext(ctx), tenantID, oauthClientID)
 	return view, mapOAuthClientManagementError(err)
 }
 
-// GetOAuthClientByClientID returns one safe aggregate projection using the public client_id
-// string instead of the internal aggregate ID. This avoids a full tenant scan when looking
-// up broker or well-known clients by their stable identifier.
+// GetOAuthClientByClientID 以公开的 client_id 字符串而非内部聚合 ID 返回单个安全聚合投影，
+// 便于按稳定标识查找代理或 well-known 客户端时避免全租户扫描。
 func (repository *OAuthClientManagementRepository) GetOAuthClientByClientID(ctx context.Context, tenantID, clientID string) (application.OAuthClientView, error) {
 	var client oauthClientManagementModel
 	if err := repository.database.WithContext(ctx).Where("tenant_id = ? AND client_id = ? AND status = ?", tenantID, clientID, "ACTIVE").Take(&client).Error; err != nil {
@@ -336,7 +345,7 @@ func (repository *OAuthClientManagementRepository) ReplaceOAuthClientJWKs(ctx co
 	return result, mapOAuthClientManagementError(err)
 }
 
-// DisableOAuthClient disables the aggregate and revokes all currently active secret versions.
+// DisableOAuthClient 停用聚合并吊销当前全部活跃 secret 版本。
 func (repository *OAuthClientManagementRepository) DisableOAuthClient(ctx context.Context, input application.OAuthClientDisableInput, now time.Time) (application.OAuthClientView, error) {
 	var result application.OAuthClientView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -367,7 +376,8 @@ func (repository *OAuthClientManagementRepository) DisableOAuthClient(ctx contex
 	return result, mapOAuthClientManagementError(err)
 }
 
-// CreateOAuthClientSecret adds a credential version to an active client_secret_basic client.
+// CreateOAuthClientSecret 为处于 ACTIVE 且采用 client_secret_basic 的客户端追加一个新
+// 凭据版本；写入在事务中完成，同时校验客户端版本乐观锁并推进版本号，使并发管理操作冲突可见。
 func (repository *OAuthClientManagementRepository) CreateOAuthClientSecret(ctx context.Context, input application.OAuthClientSecretCreateInput, secret application.SecretWrite, now time.Time) (application.OAuthClientCredentialView, error) {
 	var result application.OAuthClientCredentialView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -376,6 +386,9 @@ func (repository *OAuthClientManagementRepository) CreateOAuthClientSecret(ctx c
 			return err
 		}
 		if client.Status != "ACTIVE" || client.TokenAuthMethod != "client_secret_basic" {
+			return application.ErrManagementConflict
+		}
+		if input.ExpectedClientVersion != nil && client.Version != *input.ExpectedClientVersion {
 			return application.ErrManagementConflict
 		}
 		if err := createOAuthClientSecret(transaction, client.ID, secret, now); err != nil {
@@ -428,7 +441,7 @@ func (repository *OAuthClientManagementRepository) RotateOAuthClientSecret(ctx c
 	return result, mapOAuthClientManagementError(err)
 }
 
-// DisableOAuthClientSecret revokes one secret credential without ever reading its hash.
+// DisableOAuthClientSecret 吊销一个 secret 凭据，全程不读取其哈希。
 func (repository *OAuthClientManagementRepository) DisableOAuthClientSecret(ctx context.Context, input application.OAuthClientSecretDisableInput, now time.Time) error {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		client, err := lockOAuthClient(transaction, input.TenantID, input.OAuthClientID)

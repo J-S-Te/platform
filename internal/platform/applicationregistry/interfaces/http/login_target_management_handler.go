@@ -14,8 +14,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
-// loginTargetManagementService is intentionally small so the HTTP adapter cannot reach runtime
-// resolver internals or OAuth redirect URI registration operations.
+// loginTargetManagementService 刻意保持精简，使 HTTP 适配层接触不到运行时解析器
+// 内部，也接触不到 OAuth redirect_uri 登记操作，两类白名单在接口层就隔离。
 type loginTargetManagementService interface {
 	ListLoginTargets(context.Context, string, string, string, application.PageRequest) (application.PageResult[application.LoginTargetManagementItem], error)
 	CreateLoginTarget(context.Context, application.LoginTargetCreateInput) (application.LoginTargetManagementItem, error)
@@ -23,14 +23,15 @@ type loginTargetManagementService interface {
 	UpdateLoginTarget(context.Context, application.LoginTargetUpdateInput) (application.LoginTargetManagementItem, error)
 }
 
-// LoginTargetManagementHandler exposes protected application login-target control-plane APIs. It
-// is a net/http adapter mounted only through the shared Gin router's adapter function.
+// LoginTargetManagementHandler 暴露受保护的应用登录目标控制面 API，
+// 是仅经共享 Gin 路由适配函数挂载的 net/http 适配层。
 type LoginTargetManagementHandler struct {
 	service loginTargetManagementService
 	logger  *slog.Logger
 }
 
-// NewLoginTargetManagementHandler constructs the protected login-target control-plane adapter.
+// NewLoginTargetManagementHandler 构造受保护的登录目标控制面适配器；
+// 任一依赖缺失即拒绝构造，避免挂载出未接服务的路由。
 func NewLoginTargetManagementHandler(service loginTargetManagementService, logger *slog.Logger) (*LoginTargetManagementHandler, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("application login target management handler dependencies must not be nil")
@@ -65,7 +66,8 @@ type loginTargetResponse struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-// ListLoginTargets handles GET /api/v1/applications/:application_id/environments/:environment_id/login-targets.
+// ListLoginTargets 处理 GET /api/v1/applications/:application_id/environments/:environment_id/login-targets，
+// 租户取自认证主体，路径参数仅作边界输入。
 func (handler *LoginTargetManagementHandler) ListLoginTargets(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -86,7 +88,8 @@ func (handler *LoginTargetManagementHandler) ListLoginTargets(writer http.Respon
 	})
 }
 
-// CreateLoginTarget handles POST /api/v1/applications/:application_id/environments/:environment_id/login-targets.
+// CreateLoginTarget 处理 POST /api/v1/applications/:application_id/environments/:environment_id/login-targets，
+// 操作者与租户身份取自认证主体，不信任请求体中的身份字段。
 func (handler *LoginTargetManagementHandler) CreateLoginTarget(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -109,7 +112,7 @@ func (handler *LoginTargetManagementHandler) CreateLoginTarget(writer http.Respo
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "应用登录目标已创建", loginTargetToResponse(item))
 }
 
-// GetLoginTarget handles GET /api/v1/applications/:application_id/environments/:environment_id/login-targets/:login_target_id.
+// GetLoginTarget 处理 GET /api/v1/applications/:application_id/environments/:environment_id/login-targets/:login_target_id。
 func (handler *LoginTargetManagementHandler) GetLoginTarget(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -123,7 +126,8 @@ func (handler *LoginTargetManagementHandler) GetLoginTarget(writer http.Response
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "应用登录目标查询成功", loginTargetToResponse(item))
 }
 
-// UpdateLoginTarget handles PATCH /api/v1/applications/:application_id/environments/:environment_id/login-targets/:login_target_id.
+// UpdateLoginTarget 处理 PATCH /api/v1/applications/:application_id/environments/:environment_id/login-targets/:login_target_id，
+// TargetCode 不可经此接口修改，版本冲突返回 409。
 func (handler *LoginTargetManagementHandler) UpdateLoginTarget(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {

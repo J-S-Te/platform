@@ -1,0 +1,7 @@
+# 可选的隔离 BI 监听器。生产应在独立可注册域名上使用独立 HTTPS 边缘入口，不能将 8082 端口作为业务 API 暴露。
+services:
+  frontend:
+    environment:
+      BI_EMBED_PUBLIC_ORIGIN: ${BI_EMBED_PUBLIC_ORIGIN:?configure an independent embed origin}
+    ports:
+      - ${BI_EMBED_BIND_ADDRESS:-127.0.0.1}:${BI_EMBED_HTTP_PORT:-8182}:8082

@@ -20,6 +20,8 @@ type applicationAccessAuditAdapter struct {
 	ids     ulid.Generator
 }
 
+// RecordApplicationAccessAudit 把一次应用授权业务事件写入平台审计管线，
+// 生成事件 ID 并固定以平台自身为事件来源。
 func (adapter *applicationAccessAuditAdapter) RecordApplicationAccessAudit(
 	ctx context.Context,
 	event applicationaccess.AuditEvent,

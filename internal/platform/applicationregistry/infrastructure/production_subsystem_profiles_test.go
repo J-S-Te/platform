@@ -11,6 +11,31 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
+func TestCRMSharedWorkflowDependencyPolicy(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name         string
+		application  string
+		services     []string
+		dependencies bool
+		want         bool
+	}{
+		{"CRM workflow infrastructure", "customer_and_opportunity", []string{"customer-mysql", "contract-mysql", "temporal"}, true, true},
+		{"not runtime targets", "customer_and_opportunity", []string{"contract-mysql", "temporal"}, false, false},
+		{"no contract business access", "customer_and_opportunity", []string{"contract-api"}, true, false},
+		{"no contract migrations", "customer_and_opportunity", []string{"contract-migrate"}, true, false},
+		{"no other subsystem storage", "customer_and_opportunity", []string{"project-mysql"}, true, false},
+		{"no platform storage", "customer_and_opportunity", []string{"platform-mysql"}, true, false},
+		{"not granted to portal", "customer_portal", []string{"contract-mysql"}, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := productionServicesOwnedByApplication(test.application, test.services, test.dependencies); got != test.want {
+				t.Fatalf("policy = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) {
 	t.Parallel()
 	root := platformModuleRoot(t)
@@ -59,6 +84,41 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	}
 	if _, err := provisioner.target("unreviewed_system", "prod"); err == nil {
 		t.Fatal("unreviewed target was routable")
+	}
+}
+
+func TestProductionContractNotificationPublisherIsBoundInReviewedProfileAndTemplate(t *testing.T) {
+	root := platformModuleRoot(t)
+	profiles, _, err := loadProductionSubsystemProfiles(filepath.Join(root, "deploy", "production"), filepath.Join(root, "deploy", "production", "subsystems.d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profile productionSubsystemProfile
+	for _, candidate := range profiles {
+		if candidate.Manifest.Application.Code == "contract_management" {
+			profile = candidate
+		}
+	}
+	if len(profile.Manifest.Runtime.Files) == 0 {
+		t.Fatal("contract profile missing")
+	}
+	if profile.Manifest.Application.AllowedServiceBindings == nil || !stringSliceContains(*profile.Manifest.Application.AllowedServiceBindings, application.ServiceCredentialNotificationIngest) {
+		t.Fatal("contract notification purpose not allowed")
+	}
+	bindings := profile.Manifest.Runtime.Files[0].Bindings
+	for key, source := range map[string]string{"PLATFORM_NOTIFICATION_CLIENT_ID": "service.notification_ingest.client_id", "PLATFORM_NOTIFICATION_CLIENT_SECRET": "service.notification_ingest.client_secret"} {
+		if bindings[key] != source {
+			t.Fatalf("notification binding %s is not controlled", key)
+		}
+	}
+	template, err := os.ReadFile(filepath.Join(root, "deploy", "production", "subsystem-templates", "contract.env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"PLATFORM_NOTIFICATION_CLIENT_ID", "PLATFORM_NOTIFICATION_CLIENT_SECRET"} {
+		if !strings.Contains(string(template), key+"=PENDING_ONBOARDING") {
+			t.Fatal("notification template key missing")
+		}
 	}
 }
 

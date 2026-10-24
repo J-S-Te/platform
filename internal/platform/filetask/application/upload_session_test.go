@@ -101,6 +101,7 @@ func (stub *uploadSessionStoreStub) OpenVerified(string) (io.ReadSeekCloser, err
 
 func (*uploadSessionStoreStub) Remove(string) error                     { return nil }
 func (*uploadSessionStoreStub) CleanupTemporary(time.Time) (int, error) { return 0, nil }
+func (*uploadSessionStoreStub) Exists(string) (bool, error)             { return true, nil }
 
 func newUploadSessionService(t *testing.T, repository *uploadSessionRepositoryStub, store *uploadSessionStoreStub) *FileService {
 	t.Helper()

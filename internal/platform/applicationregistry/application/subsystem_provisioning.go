@@ -41,6 +41,11 @@ var subsystemDeploymentTransitions = map[string][]string{
 	SubsystemDeploymentStatusFailed: {
 		SubsystemDeploymentStatusProvisioning, SubsystemDeploymentStatusUpdating,
 		SubsystemDeploymentStatusVerifying, SubsystemDeploymentStatusDraining,
+		// 看护任务把中断的丢弃占用态收口回失败，使运维可以重新发起丢弃或重试部署。
+		SubsystemDeploymentStatusDiscarding,
+	},
+	SubsystemDeploymentStatusDiscarding: {
+		SubsystemDeploymentStatusFailed,
 	},
 	SubsystemDeploymentStatusDraining: {
 		SubsystemDeploymentStatusReady, SubsystemDeploymentStatusFailed,
@@ -51,7 +56,8 @@ var subsystemDeploymentTransitions = map[string][]string{
 	},
 }
 
-// SubsystemDeploymentTransitionAllowed reports whether from→to is a legal lifecycle move.
+// SubsystemDeploymentTransitionAllowed 判定 from→to 是否为合法生命周期迁移；
+// 未登记的目标状态一律拒绝，调用方不得绕过该门禁直接改库。
 func SubsystemDeploymentTransitionAllowed(from, to string) bool {
 	allowed, ok := subsystemDeploymentTransitions[to]
 	if !ok {
@@ -66,21 +72,38 @@ func SubsystemDeploymentTransitionAllowed(from, to string) bool {
 }
 
 const (
+	// SubsystemDeploymentStatusProvisioning 表示首次部署进行中。
 	SubsystemDeploymentStatusProvisioning = "PROVISIONING"
-	SubsystemDeploymentStatusUpdating     = "UPDATING"
-	SubsystemDeploymentStatusVerifying    = "VERIFYING"
-	SubsystemDeploymentStatusReady        = "READY"
-	SubsystemDeploymentStatusFailed       = "PROVISION_FAILED"
-	SubsystemDeploymentStatusDraining     = "DRAINING"
-	SubsystemDeploymentStatusOffboarded   = "OFFBOARDED"
-	// SubsystemDeploymentStatusUnmanaged means the application/environment is
-	// registered in the control plane, but no managed deployment attempt has
-	// created a lifecycle record yet. It is deliberately not READY: operators
-	// must still verify or adopt the running service through the normal flow.
+	// SubsystemDeploymentStatusUpdating 表示受控更新进行中。
+	SubsystemDeploymentStatusUpdating = "UPDATING"
+	// SubsystemDeploymentStatusVerifying 表示部署命令已完成、就绪核验尚未通过；
+	// 只有核验通过才允许进入 READY。
+	SubsystemDeploymentStatusVerifying = "VERIFYING"
+	// SubsystemDeploymentStatusReady 表示运行就绪且通过核验。
+	SubsystemDeploymentStatusReady = "READY"
+	// SubsystemDeploymentStatusFailed 表示部署失败，等待重试、接管或丢弃；
+	// 值沿用历史字符串 PROVISION_FAILED 以兼容既有数据。
+	SubsystemDeploymentStatusFailed = "PROVISION_FAILED"
+	// SubsystemDeploymentStatusDraining 表示下线进行中：Teardown 已开始但尚未完成。
+	SubsystemDeploymentStatusDraining = "DRAINING"
+	// SubsystemDeploymentStatusOffboarded 表示下线完成，运行时资源与网关配置均已移除。
+	SubsystemDeploymentStatusOffboarded = "OFFBOARDED"
+	// SubsystemDeploymentStatusDiscarding 是"失败部署正在被丢弃"的占用态。
+	//
+	// 丢弃必须先原子占用再销毁基础设施：否则「丢弃」（先 Teardown 再按 FAILED 删记录）与
+	// 「重试」（把 FAILED 推进为 UPDATING 并重新部署）并发时，删除会被正确地拒绝，但
+	// Teardown 已经拆掉了重试刚建起来的环境。占用态让重试在丢弃进行中无法接管。
+	SubsystemDeploymentStatusDiscarding = "DISCARDING"
+	// SubsystemDeploymentStatusUnmanaged 表示应用/环境已在控制面登记，
+	// 但还没有任何受管部署尝试创建生命周期记录。刻意不等于 READY：
+	// 运行中的服务仍须走正常流程核验或接管。
 	SubsystemDeploymentStatusUnmanaged = "UNMANAGED"
-	SubsystemServiceStatusDiscovered   = "DISCOVERED"
-	SubsystemServiceStatusHealthy      = "HEALTHY"
-	SubsystemServiceStatusUnavailable  = "UNAVAILABLE"
+	// SubsystemServiceStatus* 是发现实例的探活状态：DISCOVERED 表示容器已发现但
+	// 探活尚未通过；HEALTHY 表示探活通过、可参与网关路由选择；UNAVAILABLE 表示
+	// 探活失败或实例已被下线，不得参与路由。
+	SubsystemServiceStatusDiscovered  = "DISCOVERED"
+	SubsystemServiceStatusHealthy     = "HEALTHY"
+	SubsystemServiceStatusUnavailable = "UNAVAILABLE"
 )
 
 // SubsystemHealthTarget 是一次运行时探活的目标投影：只含应用编码、环境与内部健康检查
@@ -131,18 +154,17 @@ func (instance SubsystemServiceInstance) UpstreamURL() (string, error) {
 	return fmt.Sprintf("%s://%s", instance.Protocol, net.JoinHostPort(instance.InternalHost, fmt.Sprintf("%d", instance.InternalPort))), nil
 }
 
-// SubsystemServiceRegistry persists discovered service instances. The Agent will use
-// this contract through the existing local transport in the next migration step.
+// SubsystemServiceRegistry 持久化发现到的服务实例；部署 Agent 将在下一步迁移中
+// 经既有本地传输使用该契约，实现必须按租户边界过滤读取。
 type SubsystemServiceRegistry interface {
 	UpsertSubsystemServiceInstance(context.Context, SubsystemServiceInstance) error
 	ListSubsystemServiceInstances(context.Context, string, string, string) ([]SubsystemServiceInstance, error)
 	MarkUnavailableSubsystemServiceInstances(context.Context, time.Time, time.Time) error
 }
 
-// SubsystemDiscoveryCandidate is the non-sensitive declaration a subsystem publishes through
-// Docker labels before it has been registered by the platform.  It deliberately contains no
-// tenant, database, filesystem, image or credential data: discovery is an inventory operation,
-// while onboarding remains the audited control-plane write.
+// SubsystemDiscoveryCandidate 是子系统在被平台登记之前经 Docker 标签发布的
+// 非敏感自述。刻意不含租户、数据库、文件系统、镜像或凭据数据：
+// 发现只是盘点操作，接入仍然是经过审计的控制面写入。
 type SubsystemDiscoveryCandidate struct {
 	ApplicationCode       string `json:"application_code"`
 	ApplicationName       string `json:"application_name"`
@@ -202,9 +224,13 @@ type SubsystemDeploymentStateStore interface {
 	MarkSubsystemInitialAccessAssigned(context.Context, string, string, string, string, time.Time) error
 	GetSubsystemDeploymentContext(context.Context, string, string, string) (SubsystemDeploymentState, error)
 	GetSubsystemDeploymentState(context.Context, string, string, string) (SubsystemDeploymentState, error)
-	// DiscardFailedSubsystemDeployment 删除一条停留在 PROVISION_FAILED 的生命周期记录，
-	// 释放 code+environment 以便重新接入。只允许终态失败记录被丢弃；任何在途状态都会被拒绝。
-	DiscardFailedSubsystemDeployment(context.Context, string, string, string, time.Time) error
+	// ClaimFailedSubsystemDeploymentForDiscard 原子占用一条失败部署记录用于丢弃：
+	// 仅当记录仍处于 PROVISION_FAILED 且 generation 与读取时一致时推进为 DISCARDING。
+	// 返回 false 表示状态已被并发推进（通常是重试已接管），调用方不得执行 Teardown。
+	ClaimFailedSubsystemDeploymentForDiscard(context.Context, string, string, string, uint64, time.Time) (bool, error)
+	// DiscardClaimedSubsystemDeployment 删除已占用的失败记录，释放 code+environment 以便
+	// 重新接入。只匹配 DISCARDING + 占用时拿到的 generation。
+	DiscardClaimedSubsystemDeployment(context.Context, string, string, string, uint64) error
 }
 
 // SubsystemDeploymentStaleAfter 是在途部署状态被判定为“编排已死”的阈值。HTTP 层的
@@ -223,10 +249,9 @@ type SubsystemManifestStateStore interface {
 	MarkSubsystemManifestApplied(context.Context, string, string, string, string, time.Time) error
 }
 
-// SubsystemProvisioningCapabilities describes the safe deployment boundary exposed to the
-// management console. It intentionally contains no host paths, tenant binding, image reference,
-// credentials, or arbitrary command/service names. Targets are loaded from reviewed server-side
-// deployment manifests; the browser can select one of them but cannot create a new target.
+// SubsystemProvisioningCapabilities 描述暴露给管理控制台的安全部署边界。
+// 刻意不含宿主机路径、租户绑定、镜像引用、凭据或任意命令/服务名。
+// 目标只能从服务端已评审的部署清单加载；浏览器可以选择其一，但不能创建新目标。
 type SubsystemProvisioningCapabilities struct {
 	Enabled                   bool
 	Mode                      string
@@ -240,12 +265,14 @@ type SubsystemProvisioningCapabilities struct {
 	DefaultUpstreamURL        string
 	DefaultPathPrefix         string
 	DefaultClientType         string
+	// ReleaseIntegrity 是 Agent 已接线的发布完整性能力名；空表示未启用。
+	// 它只声明能力，不表示某个候选已经验签通过。
+	ReleaseIntegrity string `json:"release_integrity,omitempty"`
 }
 
-// SubsystemProvisioningTarget is the non-sensitive projection of one reviewed deployment
-// manifest. PublicBaseURL is entered by the operator because the browser-facing origin may vary
-// by host, port or reverse-proxy deployment; the Agent still validates the reviewed path/upstream
-// and the exact callback derived from that origin.
+// SubsystemProvisioningTarget 是一份已评审部署清单的非敏感投影。PublicBaseURL 由
+// 操作者录入，因为浏览器侧 origin 可能随主机、端口或反向代理部署而变化；
+// 部署 Agent 仍会校验已评审的路径/上游，以及由该 origin 推导出的精确回调地址。
 type SubsystemProvisioningTarget struct {
 	ApplicationCode string
 	ApplicationName string
@@ -267,27 +294,53 @@ type SubsystemProvisioningTarget struct {
 type SubsystemProvisioningInput struct {
 	TenantID         string
 	ApplicationID    string
+	EnvironmentID    string
 	ApplicationCode  string
 	Environment      string
 	ManifestChecksum string
-	Issuer           string
-	ClientID         string
-	ClientSecret     string
-	// AuthenticationRuntimeUpdate is set only by the dedicated switch/rollback
-	// endpoints. Generic rebuilds must not overwrite issuer or browser credentials.
+	// ReleaseDigest 是 API 本次要求 Agent 绑定的已安装 release manifest 摘要；
+	// 空表示由 Agent 本机配置决定（兼容旧客户端）。
+	ReleaseDigest string `json:"release_digest,omitempty"`
+	Issuer        string
+	// AuthenticationProvider 由控制面从持久化环境绑定解析，绝不来自 Agent 配置
+	// 或仅存于浏览器的提示。
+	AuthenticationProvider string
+	ClientID               string
+	ClientSecret           string
+	// AuthenticationRuntimeUpdate 只由专用的切换/回滚端点设置；
+	// 普通重建不得覆盖 Issuer 或浏览器凭据。
 	AuthenticationRuntimeUpdate bool
-	// CatalogPublisherClientID and CatalogPublisherClientSecret are a separate
-	// service credential for authorization catalog synchronization.
+	// InitialRuntimeProvisioning 由控制面仅为"首次发布从未完成"的已评审
+	// 接管/重试推导；它不是浏览器生命周期请求字段。
+	InitialRuntimeProvisioning bool
+	// CatalogPublisherClientID/Secret 是授权目录同步专用的独立服务凭据，
+	// 与应用主凭据分离以收敛泄露影响面。
 	CatalogPublisherClientID     string
 	CatalogPublisherClientSecret string
-	// ServiceCredentials are one-time, purpose-bound credentials created during onboarding.
-	// They are delivered only to the isolated deployment Agent and written to mode-0600 runtime
-	// environment files; the browser response and operational logs never receive them.
+	// ServiceCredentials 是接入时创建的一次性、按用途绑定的凭据：仅交付给隔离
+	// 部署 Agent 并写入 mode-0600 运行时环境文件；浏览器响应与运维日志绝不可见。
 	ServiceCredentials []SubsystemServiceCredential
-	RedirectURI        string
-	PublicURL          string
-	PathPrefix         string
-	UpstreamURL        string
+	// RelatedServiceClients 仅含已核验元数据，绝不含其他应用的明文 Secret
+	// 或浏览器随意提供的客户端 ID。
+	RelatedServiceClients []RelatedSubsystemServiceClient
+	// 组件凭据与应用级 env 文件相互隔离，避免共享文件放大泄露范围。
+	RuntimeLicenseCredentials []RuntimeLicenseCredential
+	RuntimeLicenseSettings    RuntimeLicenseSettings
+	RedirectURI               string
+	PublicURL                 string
+	PathPrefix                string
+	UpstreamURL               string
+}
+
+// RelatedSubsystemServiceClient 是关联应用服务客户端的只读元数据投影，
+// 仅在跨应用集成时随一次性交付封套下发，绝不携带对端明文 Secret。
+type RelatedSubsystemServiceClient struct {
+	ApplicationCode string
+	ApplicationID   string
+	Environment     string
+	EnvironmentID   string
+	Purpose         string
+	Client          OAuthClientView
 }
 
 // ServiceCredential 按业务用途取凭据，而不是按切片位置取值。这样新增集成能力时不会
@@ -324,4 +377,19 @@ type SubsystemProvisioner interface {
 	Provision(context.Context, SubsystemProvisioningInput) error
 	Update(context.Context, SubsystemProvisioningInput) error
 	Teardown(context.Context, string, string, string) error
+}
+
+// RegisteredServiceCredential 即使在受控更新刻意沿用已交付 Secret 时，也返回
+// 持久化的客户端元数据。消费方必须核验目标并要求其既有运行时 Secret；
+// 对全新安装而言，本方法返回的空 Secret 不构成可用凭据。
+func (input SubsystemProvisioningInput) RegisteredServiceCredential(purpose string) (SubsystemServiceCredential, bool) {
+	var found SubsystemServiceCredential
+	count := 0
+	for _, credential := range input.ServiceCredentials {
+		if credential.Purpose == purpose && credential.OAuthClient.ClientID != "" {
+			found = credential
+			count++
+		}
+	}
+	return found, count == 1
 }

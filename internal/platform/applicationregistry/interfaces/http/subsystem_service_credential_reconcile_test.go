@@ -405,18 +405,76 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
 		"contract_management-prod-audit-publisher":        {"audit.ingest"},
+		"contract_management-prod-notification-publisher": {"notification.ingest"},
 		"contract_management-prod-owner-directory":        {"owner_directory.read"},
 		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
+		"contract_management-prod-settlement-integration": {"settlement.contract.ingest"},
 		"contract_management-prod-project-integration":    {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
 		application.ServiceCredentialAuditIngest:              "new-secret",
+		application.ServiceCredentialNotificationIngest:       "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:       "new-secret",
 		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
+		application.ServiceCredentialSettlementContractIngest: "new-secret",
 		application.ServiceCredentialProjectContractImport:    "new-secret",
 		application.ServiceCredentialFileGatewayWrite:         "new-secret",
 	})
+}
+
+func TestContractNotificationCredentialRecoveredOnEveryControlledUpdate(t *testing.T) {
+	for _, operation := range []string{"UPDATE", "RETRY", "ADOPT"} {
+		t.Run(operation, func(t *testing.T) {
+			client := application.OAuthClientView{ID: "notification-client", TenantID: "tenant-1", ApplicationID: "application-1", EnvironmentID: "environment-1",
+				ClientID: "contract_management-prod-notification-publisher", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic",
+				GrantTypes: []string{"client_credentials"}, Scopes: []string{"notification.ingest"}, Version: 1}
+			manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{client}}
+			handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+			credentials, err := handler.ensureUpdateServiceCredentials(context.Background(), "tenant-1", "application-1", "environment-1", "contract_management", "prod", "operator-1", operation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := requireDeliveredCredential(t, credentials, application.ServiceCredentialNotificationIngest, "retry-secret")
+			if !reflect.DeepEqual(got.OAuthClient.Scopes, []string{"notification.ingest"}) || manager.secretInput.OAuthClientID != client.ID {
+				t.Fatal("notification recovery lost its least-privilege client identity")
+			}
+		})
+	}
+}
+
+func TestContractNotificationCredentialRejectsForeignBindingBeforeSecretIssue(t *testing.T) {
+	for _, field := range []string{"tenant", "application", "environment", "type", "auth", "grant"} {
+		t.Run(field, func(t *testing.T) {
+			client := application.OAuthClientView{ID: "notification-client", TenantID: "tenant-1", ApplicationID: "application-1", EnvironmentID: "environment-1",
+				ClientID: "contract_management-prod-notification-publisher", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"notification.ingest"}}
+			switch field {
+			case "tenant":
+				client.TenantID = "other"
+			case "application":
+				client.ApplicationID = "other"
+			case "environment":
+				client.EnvironmentID = "other"
+			case "type":
+				client.ClientType = "confidential"
+			case "auth":
+				client.TokenAuthMethod = "none"
+			case "grant":
+				client.GrantTypes = []string{"authorization_code"}
+			}
+			manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{client}}
+			handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
+			_, err := handler.ensureUpdateServiceCredentials(context.Background(), "tenant-1", "application-1", "environment-1", "contract_management", "prod", "operator-1", "UPDATE")
+			if err != application.ErrConflict {
+				t.Fatalf("foreign binding error = %v", err)
+			}
+			for _, secret := range manager.secretInputs {
+				if secret.OAuthClientID == client.ID {
+					t.Fatal("issued foreign notification secret")
+				}
+			}
+		})
+	}
 }
 
 func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T) {
@@ -438,14 +496,18 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
 		"contract_management-prod-audit-publisher":        {"audit.ingest"},
+		"contract_management-prod-notification-publisher": {"notification.ingest"},
 		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
+		"contract_management-prod-settlement-integration": {"settlement.contract.ingest"},
 		"contract_management-prod-project-integration":    {"project.contract.import"},
 		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
 		application.ServiceCredentialAuditIngest:              "new-secret",
+		application.ServiceCredentialNotificationIngest:       "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:       "retry-secret",
 		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
+		application.ServiceCredentialSettlementContractIngest: "new-secret",
 		application.ServiceCredentialProjectContractImport:    "new-secret",
 		application.ServiceCredentialFileGatewayWrite:         "new-secret",
 	})
@@ -469,16 +531,20 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.
 		t.Fatalf("existing portal mapping credential was not redelivered: %#v", manager.secretInputs)
 	}
 	wantPurposes := map[string]bool{
-		application.ServiceCredentialAuditIngest:            false,
-		application.ServiceCredentialExternalUserProvision:  false,
-		application.ServiceCredentialApplicationRoleAssign:  false,
-		application.ServiceCredentialApplicationRoleRevoke:  false,
-		application.ServiceCredentialPortalMappingProvision: true,
-		application.ServiceCredentialPortalMappingDisable:   false,
-		application.ServiceCredentialPortalInviteVerify:     false,
-		application.ServiceCredentialFileGatewayWrite:       false,
+		application.ServiceCredentialPortalReportFileRead:             false,
+		application.ServiceCredentialPortalReportDownloadIdentityRead: false,
+		application.ServiceCredentialAuditIngest:                      false,
+		application.ServiceCredentialExternalUserProvision:            false,
+		application.ServiceCredentialApplicationRoleAssign:            false,
+		application.ServiceCredentialApplicationRoleRevoke:            false,
+		application.ServiceCredentialPortalMappingProvision:           true,
+		application.ServiceCredentialPortalMappingDisable:             false,
+		application.ServiceCredentialPortalInviteVerify:               false,
+		application.ServiceCredentialFileGatewayWrite:                 false,
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"customer_portal-prod-portal-report-source":    {"platform:file:portal_report"},
+		"customer_portal-prod-portal-report-identity":  {"portal.report.download_identity.read"},
 		"customer_portal-prod-audit-publisher":         {"audit.ingest"},
 		"customer_portal-prod-external-user-provision": {"external_user.provision"},
 		"customer_portal-prod-role-assign":             {"application_role.assign"},
@@ -489,7 +555,7 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerPortalBindings(t *testing.
 	})
 	for _, credential := range credentials {
 		if _, ok := wantPurposes[credential.Purpose]; !ok {
-			t.Fatalf("unexpected portal credential purpose: %#v", credential)
+			t.Fatalf("unexpected portal credential Purpose: %#v", credential)
 		}
 		wantPurposes[credential.Purpose] = true
 	}

@@ -13,8 +13,8 @@ func TestRehireResponseNeverCarriesAnUndeliverableTemporaryPassword(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rehire executes in a background worker. A generated password returned only
-	// from Execute would be discarded and make the restored account unusable.
+	// 复职在后台 worker 中执行。若生成的密码只通过
+	// Execute 返回，就会被丢弃，导致恢复的账号无法使用。
 	if strings.Contains(string(encoded), "temporary_password") {
 		t.Fatalf("personnel rehire response must not expose a temporary password: %s", encoded)
 	}

@@ -1,4 +1,4 @@
-// Package identityhttp adapts identity authentication use cases to the public HTTP API.
+// Package identityhttp 把身份认证用例适配到公开 HTTP API。
 package identityhttp
 
 import (
@@ -31,7 +31,7 @@ import (
 
 const maxLoginRequestBytes = 8 * 1024
 
-// Handler exposes the OpenAPI /auth endpoints.
+// Handler 暴露 OpenAPI 的 /auth 端点。
 type Handler struct {
 	service         applicationService
 	logger          *slog.Logger
@@ -84,21 +84,20 @@ type applicationService interface {
 	SessionIdleTimeout(ctx context.Context, tenantID string) (time.Duration, error)
 }
 
-// lifecycleAuditRecorder persists server-generated identity lifecycle events. Recording is best
-// effort because a completed authentication response must not be turned into a failure if audit
-// persistence is temporarily unavailable.
+// lifecycleAuditRecorder 持久化服务端产生的身份生命周期事件。记录是尽力而为：
+// 审计存储临时不可用时，绝不能把已完成的认证响应翻转成失败。
 type lifecycleAuditRecorder interface {
 	Ingest(ctx context.Context, tenantID string, input auditapplication.EventInput) (auditdomain.Receipt, error)
 }
 
-// cookieConfig keeps only cookie properties that must remain consistent when setting or clearing.
+// cookieConfig 只保留设置与清除 cookie 时必须保持一致的属性。
 type cookieConfig struct {
 	name     string
 	secure   bool
 	sameSite http.SameSite
 }
 
-// NewHandler creates the identity HTTP adapter. The caller validates the service during bootstrap.
+// NewHandler 构造身份 HTTP 适配器；service 由装配层在 bootstrap 时校验。
 func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig, auditRecorder lifecycleAuditRecorder, auditConfig config.AuditConfig, loginTargetResolver applicationregistry.LoginTargetResolver, options ...IDTokenVerifierOption) (*Handler, error) {
 	if service == nil || logger == nil || auditRecorder == nil {
 		return nil, errors.New("identity HTTP handler dependencies must not be nil")
@@ -165,7 +164,7 @@ type principalResponse struct {
 	IdleTimeoutSeconds uint `json:"idle_timeout_seconds"`
 }
 
-// Login handles the sole P0 login type: a local account with an Argon2id password credential.
+// Login 处理唯一的 P0 登录类型：携带 Argon2id 密码凭据的本地账号。
 func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request) {
 	payload, err := decodeLoginRequest(writer, request)
 	if err != nil {
@@ -197,8 +196,8 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", toSessionResponse(result))
 }
 
-// BeginOIDCLogin starts the platform's normal browser login. It is an RP
-// redirect only; no Broker Verification endpoint is called here.
+// BeginOIDCLogin 发起平台自身的常规浏览器登录。它只是 RP 重定向，
+// 此处绝不调用 Broker Verification 端点。
 func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http.Request) {
 	if !handler.oidc.enabled || handler.oidc.issuer == "" || handler.oidc.clientID == "" || handler.oidc.redirectPath == "" {
 		httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New("AUTH_OIDC_UNAVAILABLE", "统一认证暂不可用", nil))
@@ -226,9 +225,8 @@ func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http
 	http.Redirect(writer, request, handler.oidc.issuer+"/protocol/openid-connect/auth?"+query.Encode(), http.StatusFound)
 }
 
-// OIDCCallback exchanges the code with Keycloak and resolves identity through
-// UserInfo. Keycloak has already validated the access token before UserInfo
-// returns; this callback never performs Broker Verification or records a gate.
+// OIDCCallback 用 code 换取令牌并经 UserInfo 解析身份。UserInfo 返回前 Keycloak
+// 已校验过 access token；本回调绝不执行 Broker Verification，也不记录任何门禁。
 func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.Request) {
 	if !handler.oidc.enabled {
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
@@ -372,15 +370,17 @@ func (handler *Handler) fetchOIDCIdentity(ctx context.Context, accessToken strin
 		return "", err
 	}
 	identityID := strings.TrimSpace(payload.IdentityID)
-	if identityID == "" || strings.TrimSpace(payload.Subject) == "" || identityID != strings.TrimSpace(payload.Subject) {
-		return "", errors.New("OIDC identity_id does not match sub")
+	// Keycloak 的 sub 与平台 identity_id 是两个不同的标识（Keycloak 用户 ID vs 平台 ULID），
+	// 这里只要求两者都存在，并以平台身份作为登录主体；相等性要求会拒绝正常投影用户。
+	if identityID == "" || strings.TrimSpace(payload.Subject) == "" {
+		return "", errors.New("OIDC userinfo has no usable identity claims")
 	}
 	return identityID, nil
 }
 
-// resolveLoginRedirect converts a complete target tuple into a pre-registered HTTPS address. The
-// browser never supplies a URI. Missing, inactive or temporarily unavailable targets fail closed
-// to the platform root without exposing stored addresses in application logs.
+// resolveLoginRedirect 把"完整目标三元组"解析为预注册的 HTTPS 地址，浏览器
+// 永远不提供 URI。目标缺失、停用或临时不可用时 fail-closed 回平台根路径，
+// 且不在应用日志中暴露存储的地址。
 func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID string, payload loginRequest) string {
 	if payload.ApplicationID == "" {
 		return "/"
@@ -401,8 +401,8 @@ func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID strin
 	return redirectURI
 }
 
-// Activity records an interaction explicitly reported by the browser. It is intentionally a
-// separate endpoint so regular authenticated API traffic cannot extend the idle timeout.
+// Activity 记录浏览器显式上报的交互。刻意设为独立端点，使常规认证 API 流量
+// 无法顺带延长空闲超时。
 func (handler *Handler) Activity(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -421,7 +421,7 @@ func (handler *Handler) Activity(writer http.ResponseWriter, request *http.Reque
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "用户活动已记录", principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)})
 }
 
-// Refresh renews the already authenticated current browser session and replaces its cookie.
+// Refresh 续期当前已认证的浏览器会话并替换其 cookie。
 func (handler *Handler) Refresh(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -437,8 +437,7 @@ func (handler *Handler) Refresh(writer http.ResponseWriter, request *http.Reques
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "会话已刷新", toSessionResponse(result))
 }
 
-// Logout revokes the already authenticated session and always writes a matching expired cookie on
-// a successful server-side revocation.
+// Logout 吊销已认证会话；服务端吊销成功后总是写入匹配的过期 cookie。
 func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -454,11 +453,10 @@ func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "已退出所有应用系统", map[string]any{})
 }
 
-// Me returns only the principal that middleware obtained by verifying the JWT and persisted state.
+// Me 只返回中间件校验 JWT 与持久化状态后得到的主身份。
 func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
-	// The authenticated principal contains a live server-side authorization snapshot.
-	// It must never be stored by browsers or shared proxies, otherwise a role change could
-	// leave an active page rendering a stale set of permissions.
+	// 已认证主身份包含实时服务端授权快照，绝不能被浏览器或共享代理缓存，
+	// 否则角色变更后活动页面会继续渲染过期的权限集合。
 	writer.Header().Set("Cache-Control", "no-store, private")
 	writer.Header().Set("Pragma", "no-cache")
 	writer.Header().Set("Vary", "Cookie")
@@ -475,14 +473,13 @@ func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)})
 }
 
-// Authenticate delegates token verification to the application service for HTTP middleware.
+// Authenticate 供 HTTP 中间件调用，把 token 校验委托给应用服务。
 func (handler *Handler) Authenticate(ctx context.Context, token string) (authctx.Principal, error) {
 	return handler.service.Authenticate(ctx, token)
 }
 
-// currentBrowserPrincipal resolves an existing platform cookie before a login
-// response replaces it. Invalid or expired cookies are treated as no session;
-// authentication errors must not disclose whether an old cookie was present.
+// currentBrowserPrincipal 在登录响应替换 cookie 之前解析既有平台 cookie。
+// 无效或过期 cookie 一律视为无会话；认证错误不得泄露"曾经存在旧 cookie"这一事实。
 func (handler *Handler) currentBrowserPrincipal(request *http.Request) *authctx.Principal {
 	cookie, err := request.Cookie(handler.cookie.name)
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
@@ -495,12 +492,12 @@ func (handler *Handler) currentBrowserPrincipal(request *http.Request) *authctx.
 	return &principal
 }
 
-// CookieName exposes the configured cookie name to the HTTP authentication middleware.
+// CookieName 把配置的 cookie 名暴露给 HTTP 认证中间件。
 func (handler *Handler) CookieName() string {
 	return handler.cookie.name
 }
 
-// recordLogin writes a successful password-login event after the session has been persisted.
+// recordLogin 在会话持久化之后写入一次成功的密码登录事件。
 func (handler *Handler) recordLogin(request *http.Request, result application.SessionResult) {
 	action := "auth.login"
 	riskLevel := "LOW"
@@ -517,9 +514,8 @@ func (handler *Handler) recordLogin(request *http.Request, result application.Se
 	})
 }
 
-// recordLoginFailure records only trusted account metadata when the authentication service found
-// an existing account. Unknown-account failures intentionally remain unlinked to prevent account
-// enumeration and avoid creating misleading identity records.
+// recordLoginFailure 只在认证服务确认账号存在时记录可信的账号元数据。
+// 未知账号的失败刻意不做关联，防止账号枚举，也避免制造误导性的身份记录。
 func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 	var concurrent application.ConcurrentSessionError
 	if errors.As(err, &concurrent) {
@@ -543,7 +539,7 @@ func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 	// locked 事件分支；锁定状态由安全模块的 sec_login_attempt 与解锁接口承载。
 }
 
-// recordLogout writes a successful logout event after the current server-side session is revoked.
+// recordLogout 在当前服务端会话吊销之后写入一次成功的登出事件。
 func (handler *Handler) recordLogout(request *http.Request, principal authctx.Principal) {
 	handler.recordLifecycleEvent(request, principal.Tenant.ID, auditapplication.EventInput{
 		ActorType: "USER", ActorID: principal.User.ID, ActorName: principal.User.Name, SessionID: principal.SessionID,
@@ -553,8 +549,8 @@ func (handler *Handler) recordLogout(request *http.Request, principal authctx.Pr
 	})
 }
 
-// recordLifecycleEvent enriches a server-generated audit event with trusted HTTP context. It never
-// records passwords, cookies, authorization headers, request IDs, or trace IDs.
+// recordLifecycleEvent 用可信的 HTTP 上下文充实服务端产生的审计事件。
+// 绝不记录密码、cookie、Authorization 头、请求 ID 或 trace ID。
 func (handler *Handler) recordLifecycleEvent(request *http.Request, tenantID string, input auditapplication.EventInput) {
 	if strings.TrimSpace(tenantID) == "" {
 		handler.logger.Error("identity lifecycle audit skipped because tenant is missing", "action", input.Action)
@@ -587,7 +583,7 @@ func (handler *Handler) setSessionCookie(writer http.ResponseWriter, token strin
 	})
 }
 
-// ClearSessionCookie removes the browser session cookie after a security-sensitive state change.
+// ClearSessionCookie 在安全敏感状态变更后移除浏览器会话 cookie。
 func (handler *Handler) ClearSessionCookie(writer http.ResponseWriter) {
 	handler.clearSessionCookie(writer)
 }

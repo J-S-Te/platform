@@ -1,50 +1,34 @@
-# Keycloak 身份与授权映射
+# Keycloak 身份、授权投影与切换操作
 
-基础平台是企业数字身份、组织、岗位和最终授权的唯一事实来源。Keycloak 是统一登录入口与 OIDC Token 中继层，不得在 Keycloak 控制台手工赋予业务角色或权限来绕过基础平台。
+> 源码核验日期：2026-10-13；未执行真实 Broker 登录、观察期或运行时切换。
 
-## 映射契约
+## 事实来源与投影
 
-Keycloak Broker 从基础平台 OIDC UserInfo 导入以下属性，并在 Keycloak Realm Client 的 ID Token、Access Token 与 UserInfo 中原样输出：
+基础平台是身份、组织、岗位及最终授权来源，Keycloak 提供 Broker 登录和 OIDC Client/Token 能力。不要在 Keycloak 控制台手工维护业务角色来绕过平台。
 
-`/oauth2/userinfo` 是基础平台作为上游 OIDC 授权服务器时的标准端点，Keycloak
-Broker 会在授权码换取 Token 后调用它。
-`AUTH_LEGACY_PLATFORM_ACCESS_TOKEN_ENABLED=false` 只关闭旧平台 Token 直接访问
-`/oauth2/authorization-context` 的兼容路径，不得关闭 UserInfo，否则所有通过
-`basic-platform` Identity Provider 登录的子系统都会在 Broker 回调阶段失败。
+完整投影由事务 outbox → Worker → 最新平台快照 → 确保用户/组织 Group → 同步目标 Client Role → 应用/Client 范围授权属性 → 标记同步完成组成。实现实际创建/分配 Client Roles，并清理目标 Client 的陈旧映射；不是“只写用户属性、不转换角色”。不同应用不能共用全局 roles/permissions 属性互相覆盖；权限、hash、revision 的来源仍是平台。
 
-| 基础平台声明 | Keycloak 用户属性 / Token Claim | 含义 |
-| --- | --- | --- |
-| `identity_id` | `identity_id` | 企业内唯一数字身份 ID（`iam_user.id`） |
-| `tenant_id` | `tenant_id` | 租户边界 |
-| `person_id` | `person_id` | 人员档案 ID；可为空 |
-| `primary_org_id` | `primary_org_id` | 主组织 |
-| `organization_ids` | `organization_ids` | 所属组织集合 |
-| `roles` | `roles` | 基础平台计算出的有效业务角色集合 |
-| `permissions` | `permissions` | 基础平台计算出的有效权限集合 |
-| `role_config_hash` | `role_config_hash` | 角色目录版本摘要 |
-| `authz_revision` | `authz_revision` | 用户授权修订号 |
+稳定 identity_id、tenant_id、人员/主组织及组织集合与应用授权属性按 Mapper 输出；不要把 Keycloak subject 当成平台用户 ID。基础平台上游标准 `/oauth2/userinfo` 是 Broker 所需能力；关闭旧平台 Token 直接调用 authorization-context 的兼容开关不等于关闭 UserInfo。
 
-`organization_ids`、`roles` 与 `permissions` 是多值 JSON 声明；其余为单值声明。角色与权限以 Keycloak 用户属性和 Token Claim 的形式镜像，不转换成可由管理员手工编辑的 Realm Role。这样可避免两套授权源发生漂移。
+## 管理员步骤与门禁
 
-## 同步与生效
+1. 具有应用/环境更新权限的管理员，在“应用接入”中选择精确环境，先登记目录并执行“同步 Keycloak”。这不等于已部署应用、已登录或可以马上切换。
+2. 检查四项持久化门禁：Client 就绪、角色目录同步、用户投影完成、Broker 登录验证。门禁绑定当前 Client 配置 hash；未完成 outbox（PENDING/RUNNING/FAILED）会撤销用户投影完成条件。
+3. 失败投影先处理依赖，再通过页面选定事件及原因重放；重放只重新排队，不代表同步完成。成功以持久化状态、当前配置 hash 及无待处理事件为准。
+4. Broker 验证须来自真实验签的会话证据；Admin API 同步成功不能冒充登录成功。四项齐备后启动 7 天观察期，观察未结束不能切换。
+5. 观察结束且服务端重新校验门禁后，具有登录目标更新/OAuth Client 禁用等切换权限的管理员执行“切换 Keycloak”。确认 Agent 执行、部署状态和新登录均正常，不以按钮提示或 HTTP 202 当成功。
+6. 成功切换后回滚窗口也是 7 天；窗口内按页面“回滚基础平台”及服务端条件恢复原提供方。超过窗口不能保证页面允许回滚，需升级为受控恢复流程。
 
-在基础平台“应用接入管理”执行“同步 Keycloak”时，平台会校验并补齐 Broker 属性、Identity Provider Mapper 与各 Realm Client Claim Mapper。基础平台上的组织、岗位、角色或个人例外授权变更后，以最新 `authz_revision` 和 `role_config_hash` 为准；子系统不得仅根据旧 Token 长期缓存权限。
+既有环境不会因默认 issuer 设置被隐式切换；新目录默认 alias 也不等于 Client、凭据、投影、运行时已就绪。Secret 只在服务端和受控 Agent 间传递，不从页面导出。
 
-## 子系统认证接入
+## 当前页面与服务端限制
 
-Keycloak 管理子系统的 Realm Client、回调地址、Client Secret、会话和 Token 签发；基础平台不再作为子系统认证 Client 的事实源。基础平台仍保存应用目录、访问入口和授权投影，以便计算最终角色与权限并同步到 Keycloak。
+页面提供仅满足三项门禁时的运行时准备提示，但当前 updateSubsystem 对 Keycloak 准备/切换仍要求四项及观察期条件；不要写成“三项满足就一定能部署准备”。若被阻断，保留 request_id 由主 Agent/研发处理，不绕过门禁。本次仅改文档。
 
-- **新接入环境**：当 `SUBSYSTEM_DEFAULT_ISSUER_ALIAS=keycloak` 且 Keycloak 管理能力已启用时，接入页面默认选择 Keycloak。平台会创建或更新 `<application_code>-<environment>-web` Client，并将受控运行时配置交给部署 Agent。
-- **已有环境**：不会因修改默认值被隐式切换。管理员必须在该环境依次执行“同步 Keycloak”与“切换 Keycloak”；系统确认 Client、角色目录、用户投影和 Broker 登录四项门禁后才写入新的 Issuer。
-- **回滚**：若目标应用健康检查或登录验证失败，使用“回滚基础平台”恢复该环境原有基础平台 OIDC 配置；不会删除 Keycloak Client 或平台授权数据。
+目录发布、岗位/任职和用户例外变更推进投影；快照按精确环境求值，只有 GRANTED 携带角色/权限，冲突或无授权投影空集以撤销旧角色。周期对账在活动 Client 映射内补偿绑定/任职/超管自然生效及到期，只入普通 outbox，PENDING/RUNNING 抑制重复；未建立 SYNCED 投影仍需首次接入或受控重投。排队、平台事务提交与 Keycloak 远端成功不是一回事。失败后依赖恢复和 Worker 运行是必要条件；投影失败通知是辅助，不是成功证明。
 
-Client Secret 只在服务端、Keycloak 和受控部署 Agent 之间传递。页面只能展示是否已配置，不能读取或导出明文。不要在 Keycloak 控制台手工给用户写入业务角色或权限；这会绕开基础平台的岗位、组织和个人例外授权计算。
+## 故障边界
 
-## Keycloak 故障策略
+固定策略 `continue_existing_platform_sessions` 允许已建立的平台浏览器会话按原超时/撤销规则继续，不允许用缓存或过期 Keycloak Token 创建新平台会话。新 Broker 登录、Client 同步及切换依赖不可用时失败关闭。使用 Keycloak 的子系统已有会话能否继续须看各自复核/JWKS 实现，不能泛化为全部系统持续可用。
 
-策略固定为 `continue_existing_platform_sessions`：
-
-- 已建立的基础平台浏览器会话继续可用，直到其原有过期、空闲超时、主动退出或被平台撤销。会话签发、签名和校验均由基础平台及其数据库完成，不依赖 Keycloak。
-- 不允许通过缓存的 Keycloak Token、过期 Token 或无法实时校验的外部 Token 创建新的基础平台会话。
-- Keycloak 不可用时，新的 Keycloak Broker 登录、Realm Client 同步和认证提供方切换均失败关闭；管理员应修复 Keycloak 后重试。
-- 使用 Keycloak 作为 Issuer 的子系统能否继续访问取决于其自身已建立会话与本地 JWKS 缓存策略；这不扩大基础平台的会话授权范围。
+关联：[接入与生命周期](subsystem-onboarding.md)、[源码证据](../../.ai/modules/operation-docs-platform-20261013.md)。

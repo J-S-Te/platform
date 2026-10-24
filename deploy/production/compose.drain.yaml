@@ -1,8 +1,7 @@
 name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
 
-# Internal overlay selected only while the persisted coordinator is in
-# DISABLING_HTTPS. Business services use HTTP/non-Secure-cookie settings from
-# the base compose, while the gateway keeps 443 and its certificates mounted.
+# 仅当持久化协调器处于 DISABLING_HTTPS 状态时选用此内部覆盖配置。
+# 业务服务沿用基础 Compose 的 HTTP 和非 Secure Cookie 设置，网关则保留 443 端口及证书挂载。
 services:
   frontend:
     environment:

@@ -8,9 +8,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// loginTargetManagementModel is kept separate from the minimal runtime lookup model so control
-// plane fields such as name, version and operator timestamps cannot accidentally leak into the
-// anonymous post-login resolver.
+// loginTargetManagementModel 与最小化的运行时查询模型保持分离，防止名称、版本与操作者
+// 时间戳等控制面字段意外泄露给匿名的登录后解析器。
 type loginTargetManagementModel struct {
 	ID            string    `gorm:"column:id;primaryKey"`
 	TenantID      string    `gorm:"column:tenant_id"`
@@ -27,12 +26,11 @@ type loginTargetManagementModel struct {
 	UpdatedBy     *string   `gorm:"column:updated_by"`
 }
 
+// TableName 指定 GORM 行映射的登录目标表名。
 func (loginTargetManagementModel) TableName() string { return "platform_application_login_target" }
 
-// EnsureLoginTargetBoundary verifies that the requested environment belongs to the supplied
-// tenant/application pair. Status is deliberately not filtered here: administrators may prepare
-// targets before an application environment is activated, while runtime resolution independently
-// requires every parent and the target itself to be ACTIVE.
+// EnsureLoginTargetBoundary 校验请求的环境属于提供的租户/应用对。这里有意不过滤状态：
+// 管理员可以在应用环境激活之前准备目标；运行时解析则独立要求所有父级与目标本身为 ACTIVE。
 func (repository *LoginTargetGORMRepository) EnsureLoginTargetBoundary(ctx context.Context, tenantID, applicationID, environmentID string) error {
 	var count int64
 	err := repository.database.WithContext(ctx).
@@ -50,7 +48,7 @@ func (repository *LoginTargetGORMRepository) EnsureLoginTargetBoundary(ctx conte
 	return nil
 }
 
-// ListLoginTargets returns one exact environment's targets with bounded stable pagination.
+// ListLoginTargets 以有界稳定分页返回一个精确环境的全部目标。
 func (repository *LoginTargetGORMRepository) ListLoginTargets(ctx context.Context, tenantID, applicationID, environmentID string, query application.PageRequest) (application.PageResult[application.LoginTargetManagementItem], error) {
 	database := loginTargetManagementScope(repository.database.WithContext(ctx), tenantID, applicationID, environmentID)
 	if query.Status != "" {
@@ -77,7 +75,7 @@ func (repository *LoginTargetGORMRepository) ListLoginTargets(ctx context.Contex
 	return application.PageResult[application.LoginTargetManagementItem]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// CreateLoginTarget persists a registry-approved landing URI with an initial optimistic version.
+// CreateLoginTarget 持久化登记已批准的落地 URI，初始乐观锁版本为 1。
 func (repository *LoginTargetGORMRepository) CreateLoginTarget(ctx context.Context, input application.LoginTargetCreateInput, identifier string, now time.Time) (application.LoginTargetManagementItem, error) {
 	model := loginTargetManagementModel{
 		ID: identifier, TenantID: input.TenantID, ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID,
@@ -90,7 +88,7 @@ func (repository *LoginTargetGORMRepository) CreateLoginTarget(ctx context.Conte
 	return toLoginTargetManagementItem(model), nil
 }
 
-// GetLoginTarget retrieves a target only from the exact parent boundary.
+// GetLoginTarget 只从精确的父边界检索目标。
 func (repository *LoginTargetGORMRepository) GetLoginTarget(ctx context.Context, tenantID, applicationID, environmentID, loginTargetID string) (application.LoginTargetManagementItem, error) {
 	var model loginTargetManagementModel
 	if err := loginTargetManagementScope(repository.database.WithContext(ctx), tenantID, applicationID, environmentID).
@@ -101,9 +99,8 @@ func (repository *LoginTargetGORMRepository) GetLoginTarget(ctx context.Context,
 	return toLoginTargetManagementItem(model), nil
 }
 
-// UpdateLoginTarget updates only mutable target data under the current version. A zero-row update
-// is resolved as either a not-found boundary or an optimistic-lock conflict without exposing
-// cross-tenant existence.
+// UpdateLoginTarget 在当前版本下只更新可变目标数据。零行更新会被解析为“边界不存在”或
+// “乐观锁冲突”，不暴露跨租户存在性。
 func (repository *LoginTargetGORMRepository) UpdateLoginTarget(ctx context.Context, input application.LoginTargetUpdateInput, now time.Time) (application.LoginTargetManagementItem, error) {
 	updates := map[string]any{
 		"name": input.Name, "target_uri": input.TargetURI, "status": input.Status, "version": input.Version + 1,

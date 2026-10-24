@@ -47,8 +47,7 @@ classic_actual="$(offline_saved_image_config_id "$classic_tar" "$classic_manifes
   exit 1
 }
 
-# A correctly hashed but wrong-platform config must not be labelled as an
-# amd64 package merely because its archive/tag shape is valid.
+# 即使归档和标签结构有效，也不能将哈希正确但平台错误的配置标为 amd64 包。
 wrong_platform_root="$test_root/wrong-platform"
 mkdir -p "$wrong_platform_root"
 printf '{"architecture":"arm64","os":"linux","config":{"Cmd":["run"]}}\n' > "$wrong_platform_root/config.json"
@@ -76,10 +75,8 @@ if offline_saved_image_config_id "$unknown_tar" "$unknown_manifest" 'uip-package
   exit 1
 fi
 
-# Pure OCI archive: there is deliberately no Docker manifest.json. The top
-# index identifies the requested tag and points to a multi-platform image
-# index. The helper must select linux/amd64 and return the config digest, never
-# either image-manifest or image-index digest.
+# 纯 OCI 归档刻意不包含 Docker manifest.json。顶层索引标识请求标签并指向多平台镜像索引；辅助函数必须选择 linux/amd64，
+# 返回配置摘要，绝不返回镜像清单或镜像索引摘要。
 oci_root="$test_root/oci"
 mkdir -p "$oci_root/blobs/sha256"
 oci_tar="$oci_root/images.tar"
@@ -129,8 +126,7 @@ if offline_saved_image_config_id "$oci_tar" "$oci_missing_docker_manifest" 'uip-
   exit 1
 fi
 
-# Every descriptor/config blob is content-addressed. Corruption must be
-# rejected even if index.json still names the original digest.
+# 每个描述符和配置内容均按内容寻址；即使 index.json 仍指定原摘要，也必须拒绝损坏数据。
 corrupt_root="$test_root/oci-corrupt"
 mkdir -p "$corrupt_root"
 tar -xf "$oci_tar" -C "$corrupt_root"
@@ -142,8 +138,8 @@ if offline_saved_image_config_id "$corrupt_tar" "$oci_missing_docker_manifest" "
   exit 1
 fi
 
-# Duplicate tag annotations are ambiguous and must not be resolved by array
-# order.
+# 重复标签注解存在歧义，不能按数组
+# 顺序消解。
 ambiguous_root="$test_root/oci-ambiguous"
 mkdir -p "$ambiguous_root"
 tar -xf "$oci_tar" -C "$ambiguous_root"
@@ -156,9 +152,8 @@ if offline_saved_image_config_id "$ambiguous_tar" "$oci_missing_docker_manifest"
   exit 1
 fi
 
-# Builder integration: exercise the real package_images path with a Docker CLI
-# fixture. This catches regressions where the builder requires manifest.json
-# before the helper can inspect a pure OCI archive.
+# 构建器集成：使用 Docker CLI 夹具验证真实 package_images 路径，
+# 防止构建器在辅助工具检查纯 OCI 归档前就要求存在 manifest.json。
 builder="$script_dir/build-offline-packages.sh"
 fake_bin="$test_root/fake-bin"
 mkdir -p "$fake_bin"
@@ -219,8 +214,7 @@ classic_package_id="$(tar -xOzf "$classic_package" package.env | awk -F= '$1 == 
 }
 (cd "$classic_output" && sha256sum --check SHA256SUMS >/dev/null)
 
-# Repeating byte-identical input is allowed, while the same release name with
-# different image content must be rejected without changing the first package.
+# 允许重复字节完全相同的输入；同一发布名对应不同镜像内容时必须拒绝，且不能改变首个包。
 classic_package_before="$(sha256sum "$classic_package" | awk '{print $1}')"
 env PATH="$fake_bin:$PATH" FIXTURE_TAR="$classic_builder_root/images.tar" \
   bash "$builder" --component platform --version "$classic_builder_version" --output "$classic_output" >/dev/null
@@ -261,8 +255,7 @@ oci_package_id="$(tar -xOzf "$oci_package" package.env | awk -F= '$1 == "IMAGE_C
 }
 (cd "$oci_output" && sha256sum --check SHA256SUMS >/dev/null)
 
-# A partial docker save must not replace the last verified package or leak a
-# publish-stage archive. Existing release bytes remain immutable.
+# 不完整的 docker save 不得替换最后一个已验证包，也不得泄漏发布暂存归档；已有发布字节保持不可变。
 oci_package_before="$(sha256sum "$oci_package" | awk '{print $1}')"
 if env PATH="$fake_bin:$PATH" FIXTURE_TAR="$oci_builder_root/images.tar" FAIL_SAVE=1 \
   bash "$builder" --component platform --version "$oci_builder_version" --output "$oci_output" >/dev/null 2>&1; then
