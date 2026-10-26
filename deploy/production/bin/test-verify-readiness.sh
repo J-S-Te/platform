@@ -65,7 +65,7 @@ if (wait_for_required_service_health platform-api) > "$test_root/invalid-timeout
 fi
 grep -q '必须是 1 到 3600 之间的整数秒' "$test_root/invalid-timeout.log" || fail 'invalid timeout message absent'
 
-verify_body="$(sed -n '/^verify() {$/,/^}$/p' "$source_dir/bin/deploy.sh")"
+verify_body="$(declare -f verify)"
 for core_service in platform-api platform-worker file-gateway keycloak temporal subsystem-provisioner frontend; do
   grep -Fq "$core_service" <<<"$verify_body" || fail "core verify gate omits $core_service"
 done
