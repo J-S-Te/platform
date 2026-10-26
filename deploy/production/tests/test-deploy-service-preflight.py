@@ -149,3 +149,10 @@ restore_legacy_file_gateway_pointer
     assert recover('gateway-id', existing=existing).endswith(existing)
 
 print('Candidate scope, release gate, immutable rollback recovery and Temporal network recovery: PASS')
+
+# A rejected project Compose must fail before candidate pointers are written.
+# Otherwise rollback tries to drain a lifecycle operation that was never prepared.
+project_preflight = 'if [[ "$service" == project ]]; then\n  _project_background_preflight || exit 1\nfi'
+assert project_preflight in SCRIPT, 'missing early project Compose gate'
+assert SCRIPT.index(project_preflight) < SCRIPT.index('previous_release="$(mktemp'), 'gate ran after release snapshot'
+assert SCRIPT.index(project_preflight) < SCRIPT.index('mv "$next_release" "$release_file"'), 'gate ran after pointer commit'

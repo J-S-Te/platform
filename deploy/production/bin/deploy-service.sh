@@ -1365,6 +1365,12 @@ rollback_runtime() {
   esac
 }
 
+# 拒绝旧项目编排必须早于候选指针提交。此时还没有后台生命周期操作，
+# 不能依赖失败后的 drain/rollback 来恢复一个尚未 prepare 的操作。
+if [[ "$service" == project ]]; then
+  _project_background_preflight || exit 1
+fi
+
 require_backup_space || exit 1
 restore_legacy_file_gateway_pointer || exit 1
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
