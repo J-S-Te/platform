@@ -32,7 +32,7 @@ offline_build_input_paths() {
       find platform/deploy/production/bin platform/deploy/production/monitoring \
         platform/deploy/production/mysql-init platform/deploy/production/nginx \
         platform/deploy/production/subsystem-templates platform/deploy/production/subsystems.d \
-        -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0
+        -type f ! -path '*/__pycache__/*' ! -path '*/.mimosa/*' ! -name '*.pyc' -print0
       printf '%s\0' platform/deploy/production/.env.example \
         platform/deploy/production/.release.env.example platform/deploy/production/docker-compose.yml
       ;;
@@ -50,7 +50,7 @@ offline_build_input_paths() {
       fi
       find platform/deploy/production -type f \
         ! -path '*/runtime/*' ! -path '*/backups/*' ! -path '*/packages/*' ! -path '*/manifests/*' \
-        ! -path '*/__pycache__/*' ! -name '*.pyc' \
+        ! -path '*/__pycache__/*' ! -path '*/.mimosa/*' ! -name '*.pyc' \
         ! -name '.env' ! -name '.release.env' ! -name '*.pem' ! -name '*.key' \
         ! -name '*.bak' ! -name '*.backup' ! -name '*.dump' ! -name 'dump*.sql' -print0
       ;;

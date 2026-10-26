@@ -39,6 +39,13 @@ class LocalOperationsArgumentsTest(unittest.TestCase):
             path.touch()
         self.script = scripts / "docker-local.sh"
         self.script.write_bytes(SCRIPT.read_bytes())
+        # 入口脚本 source 同目录的函数库与项目后台编排，临时工作区必须带上同一批文件。
+        (scripts / "local-project-background.sh").write_bytes(
+            (ROOT / "scripts/local-project-background.sh").read_bytes())
+        lib_dir = scripts / "lib"
+        lib_dir.mkdir()
+        for lib in sorted((ROOT / "scripts/lib").glob("*.sh")):
+            (lib_dir / lib.name).write_bytes(lib.read_bytes())
         (scripts / "refresh-local-runtime-approvals.py").write_text(
             "import json, os, sys\n"
             "print(json.dumps(sys.argv[1:]))\n"

@@ -28,6 +28,8 @@ import (
 	configurationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/configuration/application"
 	configurationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/configuration/infrastructure"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/configuration/interfaces/http"
+	credentialcrypto "github.com/J-S-Te/Basic-Platform/internal/platform/credentialcrypto"
+	credentialhttp "github.com/J-S-Te/Basic-Platform/internal/platform/credentialcrypto/interfaces/http"
 	dictionaryapplication "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/application"
 	dictionaryinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/infrastructure"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/interfaces/http"
@@ -696,6 +698,39 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
+	}
+	if cfg.CredentialEncryption.Mode != "" && cfg.CredentialEncryption.Mode != "disabled" {
+		keyRing, keyErr := credentialcrypto.LoadKeyRing(cfg.CredentialEncryption.KeyRingFile, time.Now().UTC())
+		if keyErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("load credential encryption keyring: %w", keyErr)
+		}
+		challengeRepository, repoErr := credentialcrypto.NewChallengeGORMRepository(db)
+		if repoErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, fmt.Errorf("create credential challenge repository: %w", repoErr)
+		}
+		challengeService := &credentialcrypto.ChallengeService{
+			Repository:       challengeRepository,
+			TTL:              cfg.CredentialEncryption.ChallengeTTL,
+			CleanupBatchSize: cfg.CredentialEncryption.CleanupBatch,
+		}
+		challengeService.StartCleanup(context.Background(), time.Minute, func(cleanupErr error) {
+			logger.Warn("credential challenge cleanup failed", "error", cleanupErr)
+		})
+		operational.CredentialEncryption = &credentialhttp.Handler{
+			KeyRing:           keyRing,
+			Challenges:        challengeService,
+			Mode:              cfg.CredentialEncryption.Mode,
+			Authenticator:     authHandler,
+			SessionCookie:     cfg.Auth.SessionCookieName,
+			CookieSecure:      cfg.Auth.SessionCookieSecure,
+			Logger:            logger,
+			ResponseMaxBytes:  cfg.CredentialEncryption.ResponseMaxBytes,
+			AllowLoginAccount: credentialhttp.NewAccountWindowLimiter(30, time.Minute).Allow,
+		}
 	}
 	// 部署 Agent 可选：未启用时设置仍可保存，但“应用配置”会失败关闭；启用时只把受限的
 	// 对外访问操作接口注入处理器，不向普通设置逻辑暴露 Docker 或宿主机权限。

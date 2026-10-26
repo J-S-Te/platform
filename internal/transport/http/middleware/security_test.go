@@ -31,7 +31,7 @@ func TestClientIPUsesForwardingHeaderOnlyFromTrustedProxy(t *testing.T) {
 			if err := router.SetTrustedProxies(test.trustedProxies); err != nil {
 				t.Fatalf("SetTrustedProxies() error = %v", err)
 			}
-			router.Use(ClientIP())
+			router.Use(ClientIP(test.trustedProxies))
 			router.GET("/", func(context *gin.Context) { _, _ = context.Writer.WriteString(RequestClientIP(context.Request)) })
 
 			request := httptest.NewRequest(http.MethodGet, "/", nil)

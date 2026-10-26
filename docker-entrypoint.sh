@@ -2,6 +2,11 @@
 # 仅平台 API 在首次启动时负责生成 Ed25519 JWT 密钥；其他服务只读取共享密钥。
 set -eu
 
+# 配置校验必须只读：不生成 JWT 密钥，不启动 API/worker。
+if [ "${1:-}" = "./api" ] && [ "${2:-}" = "config-check" ]; then
+    exec ./api config-check
+fi
+
 if [ "${1:-}" = "./api" ] || [ "${1:-}" = "init-keys" ] || [ "${1:-}" = "./init-keys" ]; then
     private_key_path="${AUTH_JWT_PRIVATE_KEY_PATH:-}"
     public_key_path="${AUTH_JWT_PUBLIC_KEY_PATH:-}"

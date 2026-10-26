@@ -53,7 +53,7 @@ CORE = {"keycloak-db", "keycloak", "platform-mysql", "platform-migrate", "platfo
         "prometheus", "keycloak-backup-metrics"}
 ASSET_DIRS = {"bin", "subsystems.d", "subsystem-templates", "mysql-init", "nginx", "monitoring", "tests"}
 ASSET_FILES = {"docker-compose.yml", ".env.example", ".release.env.example", ".gitignore", "ACCEPTANCE_CHECKLIST.md", "README.md",
-               "OFFLINE_DEPLOYMENT.md", "OFFLINE_RUNBOOK.md", "DELIVERY_WORKFLOW.md", "DEPLOYMENT_COMPATIBILITY.md", "BACKUP_RECOVERY.md", "CONTAINER_TIMEZONE.md",
+               "OFFLINE_DEPLOYMENT.md", "OFFLINE_RUNBOOK.md", "DELIVERY_WORKFLOW.md", "DEPLOYMENT_COMPATIBILITY.md", "deployment-compatibility.json", "BACKUP_RECOVERY.md", "CONTAINER_TIMEZONE.md",
                "license-installation.json", "license-evidence.json", "license-migration-evidence.json"}
 APPROVAL_NAMES = {"runtime-license-"+app+"-prod.json" for app in PROFILES}
 RECOVERY_TOOLS = {"deployment-workflow.sh", "deployment-session.py", "delivery-runtime.sh", "delivery-runtime.py",
@@ -134,6 +134,7 @@ def env_document(raw, allowed=None):
 RELEASE_INTEGRITY_TOP_LEVEL = {
     "release-manifest.json",
     "release-manifest.sigstore.json",
+    "release-plan.json",
 }
 RELEASE_INTEGRITY_DIRECTORIES = {"attestations", "profiles"}
 
@@ -827,8 +828,28 @@ class Inspection:
         else:
             self.check("authorization.scope", "PASS", "AUTHORIZATION", "仅交付基础平台，未声明业务授权或存量资格", False)
 
+    def release_plan(self):
+        name = "release-plan.json"
+        available = getattr(self.media, "snapshots", None) or getattr(self.media, "members", {})
+        if name not in available:
+            return
+        with self.media.open(name) as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise Invalid("release plan exceeds limit")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeError):
+            raise Invalid("release plan is not valid JSON")
+        if not isinstance(value, dict) or value.get("schema") != "uip.release-materials/v1":
+            raise Invalid("release plan schema is invalid")
+        if value.get("overall_status") not in ("READY", "NEEDS_ACTION"):
+            raise Invalid("release plan is blocked or has unknown status")
+        self.check("authorization.materials", "PASS", "AUTHORIZATION", "冻结材料计划 schema 与状态有效")
+
     def run(self):
         try:
+            self.release_plan()
             self.structure()
             self.authorization()
             self.media.verify()

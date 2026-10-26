@@ -9,6 +9,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[4]
 WRAPPER = (ROOT / "服务器一键离线部署.sh").read_text()
 DEPLOY = (ROOT / "platform/deploy/production/bin/deploy.sh").read_text()
+IMPORT = (ROOT / "platform/deploy/production/bin/deploy-import.sh").read_text()
+assert 'source "$script_dir/deploy-import.sh"' in DEPLOY
 
 
 def shell(code):
@@ -100,7 +102,7 @@ class SafetyRegression(unittest.TestCase):
                 self.assertEqual(shell(code).returncode, expected, command + ':' + arg)
 
     def test_import_checks_actual_component_before_docker_load(self):
-        check = DEPLOY.split('# Pending assets may need a new parser binary.', 1)[1].split('\n  if ! docker load', 1)[0]
+        check = '  if [[ -e "$control_plane_reload_marker"' + IMPORT.split('  if [[ -e "$control_plane_reload_marker"', 1)[1].split('\n  if ! docker load', 1)[0]
         with tempfile.TemporaryDirectory() as tmp:
             marker = pathlib.Path(tmp) / 'marker'
             marker.touch()
@@ -110,7 +112,7 @@ class SafetyRegression(unittest.TestCase):
         self.assertIn('import_package "${2:?请指定经过校验的 platform 离线镜像包}" platform', DEPLOY)
 
     def test_bound_candidate_cannot_be_replaced(self):
-        check = DEPLOY.split('  if [[ "$component" == platform && -f "$control_plane_reload_marker" ]]; then', 1)[1].split('\n  fi', 1)[0]
+        check = IMPORT.split('  if [[ "$component" == platform && -f "$control_plane_reload_marker" ]]; then', 1)[1].split('\n  fi', 1)[0]
         with tempfile.TemporaryDirectory() as tmp:
             marker = pathlib.Path(tmp) / 'marker'
             for value, expected in [('PLATFORM_UPGRADE_IMAGE=candidate-a\n', 0),

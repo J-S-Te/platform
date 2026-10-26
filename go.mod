@@ -6,7 +6,7 @@ require (
 	github.com/J-S-Te/license-core v0.0.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/mozillazg/go-pinyin v0.20.0
-	golang.org/x/crypto v0.31.0
+	golang.org/x/crypto v0.57.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.2
 	gorm.io/gorm v1.30.0
@@ -37,12 +37,12 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 )
 
 require (
 	github.com/go-sql-driver/mysql v1.7.1
-	golang.org/x/net v0.30.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )

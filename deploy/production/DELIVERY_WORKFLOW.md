@@ -4,6 +4,58 @@
 
 > 源码核对：2026-10-22。本页描述通用脚本能力，不是某批介质或服务器的验收记录。固定签名批次步骤见[操作说明索引](../../../操作说明/README.md)。
 
+## 统一只读计划（2026-10-25）
+
+已安装环境新增统一计划入口，根 `--check-only`、`bin/deploy.sh`、运维工具和 CI 使用同一检查核心：
+
+```bash
+cd /opt/unified-identity-platform
+./bin/deploy.sh plan --action upgrade --component platform --format human
+./bin/deploy.sh plan --action upgrade --component platform --format json
+# 只有已选择前向恢复并持有受控材料时：
+./bin/deploy.sh plan --action upgrade --component platform --forward-recovery \
+  --recovery-evidence /secure/recovery-evidence.json --format human
+# 执行前可用此前报告检测现场变化：
+./bin/deploy.sh plan --action upgrade --component platform --format human \
+  --baseline-report /secure/plan-before.json
+# 根入口可在 check-only 保存基线，正式升级时消费 .env 指纹：
+sudo bash ./服务器一键离线部署.sh --media <介质> --target <目录> --install --check-only \
+  --upgrade --plan-baseline /secure/plan-baseline.json
+sudo bash ./服务器一键离线部署.sh --media <介质> --target <目录> --install \
+  --upgrade --plan-baseline /secure/plan-baseline.json
+```
+
+平台发布前还会执行只读 `./api config-check`（复用 API `config.Load`，不启动 HTTP/worker、不生成密钥），配置无效时在数据库迁移前失败。
+
+退出码：`0` 可执行，`2` 有阻断，`3` 需要外部输入或人工处理，`64` 参数错误。计划只读，不启动/停止容器，不修改配置、会话、发布指针或数据库；执行入口仍会在部署锁内重新核对镜像、配置、数据库和目标状态，旧计划不能作为授权来源。
+
+报告至少包含：操作、目标、组件、实际执行账号、当前/目标镜像摘要、配置/编排/兼容性指纹、稳定检查编号、状态、严重程度、脱敏证据、修复建议、预计阶段、服务影响和恢复边界。权限检查以调用账号为准；root 的 `--check-only` 不代替部署账号的权限验证，正式执行前应以部署账号复跑 `plan`。检查覆盖介质/镜像、资产事务、控制面重载标记、安装会话、必填配置/重复键与租户、实际账号可读写的备份/文件网关路径、磁盘/inode、Docker/Compose、数据库连接，以及升级/恢复兼容性。
+
+新发行应携带 `deployment-compatibility.json`（`uip.deployment-compatibility/v1`），由 `bin/build-deployment-compatibility.py` 在资产构建时生成，表达资产/配置契约、迁移目标、迁移集合哈希、上一程序迁移后兼容性和恢复类型。兼容性证据必须来自独立的 `uip.deployment-compatibility-evidence/v1` 文件且迁移哈希匹配；否则保持 `unknown`。恢复兼容性未知或明确不兼容时，普通升级阻断；只有显式选择前向恢复并提交完整备份摘要、迁移目标和经验证步骤，才允许继续。根升级在资产安装后、迁移前再次执行 `--compatibility-only` 门禁；不满足条件时停止，不能凭旧计划继续。历史介质不修改、不重签、不补写原 manifest。
+
+`--check-only` 在已安装目标上复用该计划；阻断时返回非零，待办时保留介质检查结论并提示正式执行前处理。CI 已纳入计划单测和兼容性声明资产，并提供仓库变量 `ENFORCE_DEPLOY_COMPATIBILITY=true` 的远端兼容性门禁；默认关闭，待当前批次兼容证据齐备后启用。新工具和声明必须同步进入资产白名单、打包内容、安装校验和测试夹具。
+
+## 场景化打包入口（2026-10-25）
+
+根打包器保留全部旧参数，并新增只读/门禁入口：
+
+```bash
+./一键制作离线镜像包.sh plan --scenario fresh --spec <release-spec.json> --components contract,project
+./一键制作离线镜像包.sh plan --scenario update --spec <release-spec.json> --write-plan /绝对路径/release-plan.json
+./一键制作离线镜像包.sh build --version <版本> --components contract,project --release-integrity-spec <release-spec.json>
+./一键制作离线镜像包.sh status --output <交付目录>
+./一键制作离线镜像包.sh package --output <已冻结目录> --version <版本> \
+  --verifier /usr/local/bin/release-verifier \
+  --trust-dir /etc/unified-identity-platform/release-trust
+```
+
+- `plan` 只读计算应用、登记协议、必需材料和下一步，不构建、不签名；
+- 材料计划通过 `release-materials.py --output` 原子冻结为 0600 JSON；
+- `build/resume` 在调用旧构建入口前执行协议门禁：V1 缺少正式运行批准阻断，V2 不要求逐镜像批准；
+- `finalize` 校验绝对路径、SHA256SUMS、密钥/信任/verifier 和重复签名后，才调用 `finalize-release-integrity.sh`；
+- `package` 只打包已冻结目录，默认要求已签名 `release-manifest.json`；旧介质需显式 `--allow-legacy-unsigned`；
+- `release-plan.json` 为 `BLOCKED`、schema 错误或未知状态时，服务器入口拒绝继续安装。
+
 ## 先明确发布信任与登记模式
 
 `--check-delivery` 只做结构与声明检查，不验正式发行签名，也不证明实例商业授权或当前ACK。正式签名部署应先通过独立可信渠道安装 verifier/公钥，再用**已解压目录**启用以下门禁；总TAR应先核对传输摘要并安全解压：
@@ -104,3 +156,11 @@ sudo bash ./服务器一键离线部署.sh \
 ```
 
 `--new-session` 不能与 `--resume` 同用，也不能跳过未完成、失败或等待人工的旧会话。编排有差异时必须显式 `--apply-compose` 或交互批准；`--yes` 只确认资源警告。
+
+### 打包前门禁补充（2026-10-26）
+
+正式 `package` 必须提供介质之外的独立 verifier 和固定信任目录，验签返回 VERIFIED 后才创建总归档；签名文件存在本身不算通过。旧的无签名介质仅保留显式 `--allow-legacy-unsigned` 兼容入口，不用于新发行。
+
+材料检查程序异常、输出无效或返回 BLOCKED 时拒绝构建。计划基线必须来自 READY 报告；完整计划比较组件范围及现场指纹，资产替换后的兼容性检查同时复核运行配置和兼容性声明指纹，不能凭旧声明继续。
+
+显式使用 `--plan-baseline` 的首次升级会在安装运行锁内、会话创建前再次核验完整计划，防止预检与人工确认期间发生的现场变化被遗漏。续跑身份绑定同一路径和原计划摘要，不能替换计划后复用旧会话。安装执行锁只协调同一安装入口；独立运维操作仍需遵循各自发布锁和受控窗口。

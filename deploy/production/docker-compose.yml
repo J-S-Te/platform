@@ -470,6 +470,8 @@ services:
       # 若将来出现 127.0.0.1 上游需显式设 true；169.254/链路本地元数据恒拒，不受开关影响。
       PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
       AUDIT_ENVIRONMENT_CODE: prod
+      # 方案兼容发布第 2 步：所有调用方携带 expected_revision 后才置 true。
+      IAM_APPLICATION_ACCESS_REVISION_STRICT: ${IAM_APPLICATION_ACCESS_REVISION_STRICT:-false}
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
       SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
       SUBSYSTEM_ONBOARDING_MODE: production

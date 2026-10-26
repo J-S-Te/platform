@@ -45,8 +45,11 @@ type PageRequest struct {
 	Keyword, ApplicationCode, EnvironmentCode, Action, ActionCategory, Result, RiskLevel string
 	// 批次 3：按操作地址、对象与链路 ID 精确检索，便于从一条审计追到整条链路。
 	ClientIP, ResourceID, RequestID string
-	OccurredFrom, OccurredTo        *time.Time
+	// 统一审计方案 §2.4：按事件、操作者、关联 ID 与登录地址精确检索。
+	EventID, ActorID, CorrelationID, LoginIP string
+	OccurredFrom, OccurredTo                 *time.Time
 }
+
 // PageResult 是审计查询的单页结果。
 type PageResult[T any] struct {
 	Items    []T   `json:"items"`
@@ -67,6 +70,8 @@ type EventInput struct {
 	// 统一审计来源协议字段。SourceIP 是旧协议兼容列（历史行为：user_login_ip，缺省为投递地址），
 	// 新发布方应提供 LoginIP/ClientIP/IPSource；IngestPeerIP 只由平台摄取端写入。
 	LoginIP, ClientIP, IngestPeerIP, IPSource string
+	// LoginIPSource 记录登录地址的获取方式（会话期固定）；历史记录为空。
+	LoginIPSource string
 }
 
 // BatchDeliveryInput 描述一次传输批次。这里的关联标识属于“子系统到平台接收端”的投递链路；
@@ -82,11 +87,11 @@ type BatchDeliveryInput struct {
 // 口径说明：各子系统的审计 Outbox 位于各自数据库，平台无法读取，因此这里统计的是
 // "平台已接收的事件"——近期接收量、来源未采集数与最近接收时间，用于发现采集/上报停摆。
 type IngestionHealth struct {
-	TotalEvents        int64      `json:"total_events"`
-	RecentEvents       int64      `json:"recent_events"`
-	UnknownProvenance  int64      `json:"unknown_provenance"`
-	LastReceivedAt     *time.Time `json:"last_received_at,omitempty"`
-	OldestUnknownAt    *time.Time `json:"oldest_unknown_at,omitempty"`
+	TotalEvents       int64      `json:"total_events"`
+	RecentEvents      int64      `json:"recent_events"`
+	UnknownProvenance int64      `json:"unknown_provenance"`
+	LastReceivedAt    *time.Time `json:"last_received_at,omitempty"`
+	OldestUnknownAt   *time.Time `json:"oldest_unknown_at,omitempty"`
 }
 
 // Repository 持久化审计事件、摄取健康度与导出任务；实现必须强制租户范围并保证
@@ -153,6 +158,7 @@ func (s *Service) IngestBatch(ctx context.Context, tenantID string, delivery Bat
 	}
 	return s.repository.IngestBatch(ctx, tenantID, normalizeBatchDelivery(delivery), normalized, s.clock.Now())
 }
+
 // List 分页返回租户内审计事件，过滤条件先规范化再校验。
 func (s *Service) List(ctx context.Context, tenantID string, query PageRequest) (PageResult[domain.Event], error) {
 	query = normalizePage(query)
@@ -161,6 +167,7 @@ func (s *Service) List(ctx context.Context, tenantID string, query PageRequest) 
 	}
 	return s.repository.List(ctx, tenantID, query)
 }
+
 // Get 返回租户内单个审计事件详情。
 func (s *Service) Get(ctx context.Context, tenantID, eventID string) (domain.Event, error) {
 	if strings.TrimSpace(eventID) == "" {
@@ -168,6 +175,7 @@ func (s *Service) Get(ctx context.Context, tenantID, eventID string) (domain.Eve
 	}
 	return s.repository.Get(ctx, tenantID, strings.TrimSpace(eventID))
 }
+
 // CreateExportJob 以规范化后的查询快照创建异步导出任务。
 func (s *Service) CreateExportJob(ctx context.Context, tenantID, operatorID string, query PageRequest) (domain.ExportJob, error) {
 	if strings.TrimSpace(operatorID) == "" {
@@ -183,6 +191,7 @@ func (s *Service) CreateExportJob(ctx context.Context, tenantID, operatorID stri
 	}
 	return s.repository.CreateExportJob(ctx, tenantID, operatorID, query, id, s.clock.Now())
 }
+
 // GetExportJob 返回导出任务状态与产物元数据。
 func (s *Service) GetExportJob(ctx context.Context, tenantID, jobID string) (domain.ExportJob, error) {
 	if strings.TrimSpace(jobID) == "" {

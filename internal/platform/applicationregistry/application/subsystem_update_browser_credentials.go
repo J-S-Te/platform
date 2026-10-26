@@ -62,7 +62,7 @@ func (service *SubsystemUpdateBrowserCredentialsService) Ensure(ctx context.Cont
 			TenantID: tenantID, ApplicationID: strings.TrimSpace(applicationID), EnvironmentID: strings.TrimSpace(environmentID),
 			OperatorID: strings.TrimSpace(operatorID), ClientID: name, ClientName: applicationCode + " Web",
 			ClientType: "confidential", TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 15 * 60,
-			RequirePKCE: true, GrantTypes: []string{"authorization_code"},
+			RequirePKCE: true, GrantTypes: []string{"authorization_code", "refresh_token"},
 			Scopes: []string{"openid", "profile"}, RedirectURIs: []string{strings.TrimSpace(redirectURI)},
 		})
 		if createErr != nil {
@@ -89,4 +89,30 @@ func (service *SubsystemUpdateBrowserCredentialsService) Ensure(ctx context.Cont
 		return SubsystemUpdateBrowserCredential{}, errors.New("browser credential secret was not issued")
 	}
 	return SubsystemUpdateBrowserCredential{ClientID: client.ClientID, ClientSecret: secret.PlaintextSecret}, nil
+}
+
+// ReadSubsystemAccessBrowserClientID 恢复认证投影所需的非敏感引用，禁止创建或轮换密钥。
+func (service *SubsystemUpdateBrowserCredentialsService) ReadSubsystemAccessBrowserClientID(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment string) (string, error) {
+	clients, err := service.clients.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	expectation := SubsystemUpdateBrowserClientExpectation(tenantID, applicationID, environmentID, applicationCode, environment, "")
+	var found *OAuthClientView
+	for i := range clients {
+		if clients[i].ClientID != expectation.CanonicalName {
+			continue
+		}
+		if found != nil {
+			return "", ErrSubsystemUpdateServiceClientInvalid
+		}
+		found = &clients[i]
+	}
+	if found == nil {
+		return "", ErrSubsystemUpdateServiceClientInvalid
+	}
+	if err := ValidateSubsystemUpdateServiceClient(*found, expectation); err != nil {
+		return "", err
+	}
+	return found.ClientID, nil
 }

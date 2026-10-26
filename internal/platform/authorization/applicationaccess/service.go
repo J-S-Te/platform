@@ -70,6 +70,10 @@ const (
 var (
 	// ErrNotFound 表示目标资源在当前租户内不存在。
 	ErrNotFound = errors.New("application authorization resource not found")
+	// ErrAccessReadback 表示授权变更（含授权版本与 Keycloak Outbox）已在数据库原子
+	// 提交，但随后构造响应视图的读取失败。它与「保存失败」必须区分：保存事实已
+	// 成立，客户端应提示「已保存、读取最新状态失败」而不是重试保存。
+	ErrAccessReadback = errors.New("authorization committed but the updated access view could not be read")
 	// ErrNotConfigured 表示主体尚未配置该应用的任何授权。这是合法业务状态而非故障，
 	// 查询方通常以携带当前目录哈希的空授权视图呈现，写入方视为主体无可撤销内容。
 	ErrNotConfigured = errors.New("user application access is not configured")
@@ -78,6 +82,9 @@ var (
 	ErrValidation = errors.New("application authorization validation failed")
 	// ErrAccessDenied 表示主体未被授权访问目标应用（有效授权状态非 GRANTED）。
 	ErrAccessDenied = errors.New("user is not authorized for application")
+	// ErrRevisionConflict 表示整组保存携带的 edit_revision 条件已陈旧：可编辑授权
+	// 集合被其他管理员先行修改。调用方必须重新读取后再决策，禁止自动换新版本重提。
+	ErrRevisionConflict = errors.New("application access edit revision conflict")
 )
 
 // IdentifierGenerator 生成全局唯一、按时间可排序的记录标识（通常为 ULID），
@@ -186,11 +193,19 @@ type Access struct {
 	AuthzRevision        uint64   `json:"authz_revision"`
 	AuthorizationState   string   `json:"authorization_state"`
 	Conflicts            []string `json:"conflicts"`
+	// EditRevision 是本响应中可编辑授权集合（MANUAL 直绑 + 历史自定义权限）的
+	// 一致快照版本。写回时作为 expected_revision 条件提交；它由集合内容决定，
+	// 与应用级 authz_revision 相互独立，不可由客户端推导或修改。
+	EditRevision string `json:"edit_revision"`
 }
 
 // UpdateAccessInput 是用户应用授权的更新入参。RolesProvided 区分"未提供 roles
 // （不修改角色）"与"显式空数组（撤销全部人工直绑）"；CustomPermissionsProvided
 // 恒走拒绝路径——权限只能来自应用目录的角色映射，仅为兼容解码保留。
+// ExpectedRevision 是条件写入版本（GET 响应的 edit_revision）：非空时在事务锁内
+// 比较，陈旧返回 ErrRevisionConflict；兼容期允许为空。
+// StrictRevisionRequired 来自部署配置（Handler 构造时读取环境变量），是方案
+// 兼容发布第 2 步的开关：全部调用方传条件后置 true，缺省条件即 422 拒绝。
 type UpdateAccessInput struct {
 	TenantID                  string
 	UserID                    string
@@ -200,14 +215,20 @@ type UpdateAccessInput struct {
 	RolesProvided             bool
 	CustomPermissions         []string
 	CustomPermissionsProvided bool
+	ExpectedRevision          string
+	StrictRevisionRequired    bool
 }
 
 // DeleteAccessInput 撤销用户在指定应用上的全部人工授权。
+// ExpectedRevision/StrictRevisionRequired 语义与 UpdateAccessInput 相同；
+// HTTP 层经查询参数承载条件，严格开关来自部署配置。
 type DeleteAccessInput struct {
-	TenantID     string
-	UserID       string
-	OperatorID   string
-	OperatorName string
+	TenantID              string
+	UserID                string
+	OperatorID            string
+	OperatorName          string
+	ExpectedRevision      string
+	StrictRevisionRequired bool
 }
 
 // UpdateSubjectAccessInput 兼容保留的历史组织/岗位写入口入参；当前恒被写策略拒绝。
@@ -584,12 +605,27 @@ func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCo
 	if application.Code == PlatformApplicationCode {
 		roleType = platformRoleType
 	}
-	manualRows, err := s.loadManagedManualRoles(ctx, tenantID, application.ID, userID, roleType, s.clock.Now().UTC())
+	// 可编辑集合与 edit_revision 必须来自同一一致快照：单事务内读取管理视图的
+	// 人工绑定行并计算版本（方案第三阶段第 4 节），避免视图与版本混入不同
+	// 时刻的数据。有效权限视图不参与该快照约束。
+	now := s.clock.Now().UTC()
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		manualRows, rowsErr := loadManagedManualRolesOn(tx, tenantID, application.ID, userID, roleType, now)
+		if rowsErr != nil {
+			return rowsErr
+		}
+		_, manualViews, _, _ := resolveAssignedRoles(manualRows, subjectTypeUser)
+		access.ManualRoles = filterManualRoles(manualViews)
+		revision, revErr := s.computeEditRevision(tx, tenantID, userID, application.ID)
+		if revErr != nil {
+			return revErr
+		}
+		access.EditRevision = revision
+		return nil
+	})
 	if err != nil {
 		return Access{}, err
 	}
-	_, manualViews, _, _ := resolveAssignedRoles(manualRows, subjectTypeUser)
-	access.ManualRoles = filterManualRoles(manualViews)
 	return access, nil
 }
 
@@ -645,6 +681,9 @@ func (s *Service) HasApplicationEnvironmentGrant(ctx context.Context, tenantID, 
 // 停用本次不再需要的绑定；模板与系统来源不受本次编辑影响。变更与 revision 推进、
 // Keycloak 投影入队同事务提交，并记录 HIGH 风险审计（含变更前后差异）。
 // 部分更新语义：未提供 roles 时不修改角色；提供 custom_permissions 恒被拒绝。
+// 并发条件：ExpectedRevision 非空时在租户锁内比较 edit_revision，陈旧返回
+// ErrRevisionConflict；比较与变更处于同一事务，冲突时不产生任何写入、revision
+// 推进或成功投影任务。锁序：iam_tenant 行锁 → 目标/目录校验 → 版本比较 → 变更。
 func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applicationCode string) (Access, error) {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.UserID = strings.TrimSpace(in.UserID)
@@ -653,14 +692,12 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if in.TenantID == "" || in.UserID == "" || in.OperatorID == "" || applicationCode == "" {
 		return Access{}, validation("tenant_id, user_id, operator_id and application_code are required")
 	}
-	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
-	if err != nil {
-		return Access{}, err
-	}
 	if err := validateCustomPermissionsUpdate(in.CustomPermissionsProvided); err != nil {
 		return Access{}, err
 	}
-	if err := s.ensureUser(ctx, in.TenantID, in.UserID); err != nil {
+	// 事务外的只读查找仅用于审计元数据；写入决策以锁内的 findApplicationOn 为准。
+	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
+	if err != nil {
 		return Access{}, err
 	}
 	now := s.clock.Now().UTC()
@@ -668,22 +705,40 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if err != nil {
 		return Access{}, err
 	}
-	resolved, err := s.resolveRoleBindings(ctx, in.TenantID, application.ID, normalizedRoles)
-	if err != nil {
-		return Access{}, err
-	}
-	if err := s.validateDirectRoleLimit(ctx, in.TenantID, application.ID, resolved); err != nil {
-		return Access{}, err
-	}
 	// 先读取完整生效视图用于审计差异；真正写入只替换 MANUAL 来源的用户直绑，
-	// 组织、岗位模板和系统来源不会被一次用户编辑意外覆盖。
-	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
+	// 组织、岗位模板和系统来源不会被一次用户编辑意外覆盖。审计基线在锁外读取，
+	// 仅作差异展示，不参与并发判定。
+	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, applicationCode)
 	if err != nil && !errors.Is(err, ErrNotConfigured) {
 		return Access{}, err
 	}
 
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 方案锁序第一环：iam_tenant 行锁串行化同租户的整组保存与撤销，第一轮
+		// 不新增版本表。锁内完成全部校验与版本比较，消除"校验后状态被改"窗口。
+		if err := lockTenantRow(tx, in.TenantID); err != nil {
+			return err
+		}
+		application, err := findApplicationOn(tx, in.TenantID, applicationCode)
+		if err != nil {
+			return err
+		}
+		if err := ensureUserOn(tx, in.TenantID, in.UserID); err != nil {
+			return err
+		}
+		resolved, err := resolveRoleBindingsOn(tx, in.TenantID, application.ID, normalizedRoles)
+		if err != nil {
+			return err
+		}
+		if err := validateDirectRoleLimitOn(tx, in.TenantID, application.ID, resolved); err != nil {
+			return err
+		}
+		// 版本比较在全部校验之后、任何写入之前：失败不得修改绑定、推进授权
+		// 版本或产生成功投影任务。空条件（兼容期旧调用方）跳过比较。
+		if _, err := s.ensureExpectedRevision(tx, in.TenantID, in.UserID, application.ID, in.ExpectedRevision, in.StrictRevisionRequired); err != nil {
+			return err
+		}
 		if in.RolesProvided {
 			roleChanged, err := s.replaceManualUserRoleBindings(tx, in.TenantID, application.ID, in.UserID, in.OperatorID, resolved, now)
 			if err != nil {
@@ -703,12 +758,22 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	if err != nil {
 		return Access{}, err
 	}
-	access, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
-	if err != nil {
-		return Access{}, err
+	// 提交事实已成立：读回失败绝不能把已保存的变更误报为保存失败，也不得跳过
+	// 成功审计。审计记录 SUCCESS 并标注读取失败原因；Changes 在视图不可用时省略。
+	access, readErr := s.GetAccess(ctx, in.TenantID, in.UserID, applicationCode)
+	if readErr != nil {
+		metadata := map[string]any{"roles_provided": in.RolesProvided, "custom_permissions_provided": in.CustomPermissionsProvided, "changed": changed, "grant_origin": grantOriginManual, "access_view_error": truncateForAudit(readErr)}
+		s.recordAudit(ctx, AuditEvent{
+			TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: applicationCode,
+			OperatorID: in.OperatorID, OperatorName: in.OperatorName, SubjectID: in.UserID, Action: "authorization.application_access.updated",
+			ResourceType: "application_access", ResourceID: in.UserID, Result: "SUCCESS", RiskLevel: "HIGH",
+			Summary: "应用用户授权已更新", OccurredAt: now,
+			Metadata: metadata,
+		})
+		return Access{}, fmt.Errorf("%w: %v", ErrAccessReadback, readErr)
 	}
 	s.recordAudit(ctx, AuditEvent{
-		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
+		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: applicationCode,
 		OperatorID: in.OperatorID, OperatorName: in.OperatorName, SubjectID: in.UserID, Action: "authorization.application_access.updated",
 		ResourceType: "application_access", ResourceID: in.UserID, Result: "SUCCESS", RiskLevel: "HIGH",
 		Summary: "应用用户授权已更新", OccurredAt: now,
@@ -718,9 +783,20 @@ func (s *Service) UpdateAccess(ctx context.Context, in UpdateAccessInput, applic
 	return access, nil
 }
 
+// truncateForAudit 把读回错误压到审计可承载的长度，避免基础设施长错误污染审计。
+func truncateForAudit(err error) string {
+	message := err.Error()
+	if len(message) > 200 {
+		return message[:200]
+	}
+	return message
+}
+
 // DeleteAccess 逻辑撤销用户在指定应用上的全部人工授权：停用 MANUAL 直绑并清理
 // 历史自定义权限，不触碰岗位模板等可追溯来源；若用户仍有继承角色，有效视图如实
 // 保留。无变更时同样返回成功，仍记录审计以便追溯操作者。
+// 并发条件：ExpectedRevision 非空时在租户锁内比较（与 UpdateAccess 同一锁序），
+// 防止旧页面"撤销全部"误撤销期间新增的授权。
 func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applicationCode string) error {
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.UserID = strings.TrimSpace(in.UserID)
@@ -729,21 +805,36 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 	if in.TenantID == "" || in.UserID == "" || in.OperatorID == "" || applicationCode == "" {
 		return validation("tenant_id, user_id, operator_id and application_code are required")
 	}
+	// 事务外的只读查找仅用于审计元数据；写入决策以锁内的 findApplicationOn 为准。
 	application, err := s.findApplication(ctx, in.TenantID, applicationCode)
 	if err != nil {
 		return err
 	}
-	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
+	before, err := s.GetAccess(ctx, in.TenantID, in.UserID, applicationCode)
 	if err != nil && !errors.Is(err, ErrNotConfigured) {
 		return err
 	}
 	now := s.clock.Now().UTC()
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 与 UpdateAccess 相同的租户锁序；两个入口修改同一份 MANUAL 集合，必须
+		// 受同一并发约束（方案 R11）。
+		if err := lockTenantRow(tx, in.TenantID); err != nil {
+			return err
+		}
+		lockedApplication, err := findApplicationOn(tx, in.TenantID, applicationCode)
+		if err != nil {
+			return err
+		}
+		// 版本比较在停用操作之前：旧页面基于陈旧快照发起的"撤销全部"在此被拒绝，
+		// 不会误删期间新增授权，也不产生 revision 推进或投影任务。
+		if _, err := s.ensureExpectedRevision(tx, in.TenantID, in.UserID, lockedApplication.ID, in.ExpectedRevision, in.StrictRevisionRequired); err != nil {
+			return err
+		}
 		// 删除应用授权是逻辑撤销：仅停用人工直绑并清理历史自定义权限，不触碰岗位
 		// 模板等可追溯来源；若用户仍有继承角色，有效视图仍会如实保留。
-		directClause, directArgs := manualDirectApplicationRoleBindingFilter(in.TenantID, application.ID, in.UserID)
-		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, application.ID, applicationRoleType)
+		directClause, directArgs := manualDirectApplicationRoleBindingFilter(in.TenantID, lockedApplication.ID, in.UserID)
+		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, lockedApplication.ID, applicationRoleType)
 		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.role_id IN (?)", applicationRoleIDs).Where("rb.status = ?", activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
 		if result.Error != nil {
 			return fmt.Errorf("revoke application role bindings: %w", result.Error)
@@ -751,7 +842,7 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 		if result.RowsAffected > 0 {
 			changed = true
 		}
-		permissionResult := tx.Table("authz_user_permission").Where("tenant_id = ? AND application_id = ? AND user_id = ?", in.TenantID, application.ID, in.UserID).Delete(nil)
+		permissionResult := tx.Table("authz_user_permission").Where("tenant_id = ? AND application_id = ? AND user_id = ?", in.TenantID, lockedApplication.ID, in.UserID).Delete(nil)
 		if permissionResult.Error != nil {
 			return fmt.Errorf("remove legacy user permissions: %w", permissionResult.Error)
 		}
@@ -759,19 +850,27 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 			changed = true
 		}
 		if changed {
-			if err := bumpRevision(tx, in.TenantID, application.ID, now, "user application access revoked"); err != nil {
+			if err := bumpRevision(tx, in.TenantID, lockedApplication.ID, now, "user application access revoked"); err != nil {
 				return err
 			}
-			return s.enqueueKeycloakAuthorizationOutbox(tx, in.TenantID, in.UserID, application.ID, now, "AUTHORIZATION_CHANGED")
+			return s.enqueueKeycloakAuthorizationOutbox(tx, in.TenantID, in.UserID, lockedApplication.ID, now, "AUTHORIZATION_CHANGED")
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	after, err := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
-	if err != nil && !errors.Is(err, ErrNotConfigured) {
-		return err
+	// 与 UpdateAccess 相同的读回语义：撤销已提交后读取失败，成功审计不得跳过。
+	after, readErr := s.GetAccess(ctx, in.TenantID, in.UserID, application.Code)
+	if readErr != nil && !errors.Is(readErr, ErrNotConfigured) {
+		s.recordAudit(ctx, AuditEvent{
+			TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
+			OperatorID: in.OperatorID, OperatorName: in.OperatorName, SubjectID: in.UserID, Action: "authorization.application_access.deleted",
+			ResourceType: "application_access", ResourceID: in.UserID, Result: "SUCCESS", RiskLevel: "HIGH",
+			Summary: "应用用户授权已删除", OccurredAt: now,
+			Metadata: map[string]any{"changed": changed, "grant_origin": grantOriginManual, "access_view_error": truncateForAudit(readErr)},
+		})
+		return fmt.Errorf("%w: %v", ErrAccessReadback, readErr)
 	}
 	s.recordAudit(ctx, AuditEvent{
 		TenantID: in.TenantID, ApplicationID: application.ID, ApplicationCode: application.Code,
@@ -999,6 +1098,11 @@ func (s *Service) ensureManagedSubject(ctx context.Context, tenantID, subjectTyp
 }
 
 func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, applicationID string, roles []RoleInput) ([]resolvedBinding, error) {
+	return resolveRoleBindingsOn(s.db.WithContext(ctx), tenantID, applicationID, roles)
+}
+
+// resolveRoleBindingsOn 是 resolveRoleBindings 的事务句柄变体。
+func resolveRoleBindingsOn(database *gorm.DB, tenantID, applicationID string, roles []RoleInput) ([]resolvedBinding, error) {
 	// 外部只提交稳定角色编码和作用域；此处解析为当前租户、当前应用的活动目录角色，
 	// 禁止使用数据库 ID 绕过目录所有权、角色状态或受保护角色策略。
 	resolved := make([]resolvedBinding, 0, len(roles))
@@ -1007,7 +1111,7 @@ func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, application
 		// 应用访问是应用自有的边界。平台控制面角色只能由通用且受保护的角色绑定
 		// API 管理。在此保留 role_type 谓词，可防止 platform-super-admin 授予
 		// 借应用授权更新被夹带写入。
-		if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type = ?", tenantID, applicationID, activeStatus, role.RoleCode, applicationRoleType).Take(&roleRecord).Error; err != nil {
+		if err := database.Table("authz_role").Where("tenant_id = ? AND application_id = ? AND status = ? AND code = ? AND role_type = ?", tenantID, applicationID, activeStatus, role.RoleCode, applicationRoleType).Take(&roleRecord).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, validation("one or more application roles do not exist or are disabled")
 			}
@@ -1021,7 +1125,7 @@ func (s *Service) resolveRoleBindings(ctx context.Context, tenantID, application
 			var environment struct {
 				ID string `gorm:"column:id"`
 			}
-			if err := s.db.WithContext(ctx).Table("platform_application_environment").Select("id").Where("tenant_id = ? AND application_id = ? AND environment = ? AND status = ?", tenantID, applicationID, role.EnvironmentCode, activeStatus).Take(&environment).Error; err != nil {
+			if err := database.Table("platform_application_environment").Select("id").Where("tenant_id = ? AND application_id = ? AND environment = ? AND status = ?", tenantID, applicationID, role.EnvironmentCode, activeStatus).Take(&environment).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return nil, validation("environment does not exist or is disabled")
 				}
@@ -1045,7 +1149,12 @@ func ensureApplicationAccessRole(role roleRow) error {
 // 持久化一条立即冲突的直接分配。跨来源冲突依赖有效成员关系，仍留待授权
 // 解析时 fail-closed。
 func (s *Service) validateDirectRoleLimit(ctx context.Context, tenantID, applicationID string, resolved []resolvedBinding) error {
-	policy, err := s.ResolveApplicationAuthorizationPolicy(ctx, tenantID, applicationID)
+	return validateDirectRoleLimitOn(s.db.WithContext(ctx), tenantID, applicationID, resolved)
+}
+
+// validateDirectRoleLimitOn 是 validateDirectRoleLimit 的事务句柄变体。
+func validateDirectRoleLimitOn(database *gorm.DB, tenantID, applicationID string, resolved []resolvedBinding) error {
+	policy, err := resolveApplicationAuthorizationPolicyOn(database, tenantID, applicationID)
 	if err != nil {
 		return err
 	}
@@ -1178,8 +1287,14 @@ func (s *Service) findClientApplication(ctx context.Context, tenantID, clientID 
 }
 
 func (s *Service) findApplication(ctx context.Context, tenantID, code string) (applicationRow, error) {
+	return findApplicationOn(s.db.WithContext(ctx), tenantID, code)
+}
+
+// findApplicationOn 是 findApplication 的数据库句柄参数化变体：事务内调用方
+// 传入 tx，保证目标校验与后续变更处于同一锁与快照边界。
+func findApplicationOn(database *gorm.DB, tenantID, code string) (applicationRow, error) {
 	var row applicationRow
-	err := s.db.WithContext(ctx).Where("tenant_id = ? AND code = ? AND status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(code), activeStatus).Take(&row).Error
+	err := database.Where("tenant_id = ? AND code = ? AND status = ?", strings.TrimSpace(tenantID), strings.TrimSpace(code), activeStatus).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return applicationRow{}, ErrNotFound
 	}
@@ -1190,8 +1305,13 @@ func (s *Service) findApplication(ctx context.Context, tenantID, code string) (a
 }
 
 func (s *Service) ensureUser(ctx context.Context, tenantID, userID string) error {
+	return ensureUserOn(s.db.WithContext(ctx), tenantID, userID)
+}
+
+// ensureUserOn 是 ensureUser 的事务句柄变体。
+func ensureUserOn(database *gorm.DB, tenantID, userID string) error {
 	var count int64
-	if err := s.db.WithContext(ctx).Table("iam_user").Where("tenant_id = ? AND id = ?", tenantID, userID).Count(&count).Error; err != nil {
+	if err := database.Table("iam_user").Where("tenant_id = ? AND id = ?", tenantID, userID).Count(&count).Error; err != nil {
 		return fmt.Errorf("load user: %w", err)
 	}
 	if count == 0 {
@@ -1622,10 +1742,16 @@ func (s *Service) loadInheritedPlatformRoles(ctx context.Context, tenantID, targ
 // loadManagedManualRoles 是管理集合，不参与有效角色/权限计算。未来分配必须可见，
 // 否则管理界面以有效视图提交完整集合时，会把尚未生效的分配置为 DISABLED。
 func (s *Service) loadManagedManualRoles(ctx context.Context, tenantID, applicationID, userID, roleType string, now time.Time) ([]assignedRoleRow, error) {
+	return loadManagedManualRolesOn(s.db.WithContext(ctx), tenantID, applicationID, userID, roleType, now)
+}
+
+// loadManagedManualRolesOn 是 loadManagedManualRoles 的事务句柄变体：管理端
+// GET 在事务内调用它，保证可编辑集合与 edit_revision 来自同一快照。
+func loadManagedManualRolesOn(database *gorm.DB, tenantID, applicationID, userID, roleType string, now time.Time) ([]assignedRoleRow, error) {
 	var rows []assignedRoleRow
 	filter, args := manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID)
 	scopeFilter, scopeArgs := applicationAccessScopeFilter("")
-	err := s.db.WithContext(ctx).Table("authz_role_binding AS rb").
+	err := database.Table("authz_role_binding AS rb").
 		Select("r.id AS role_id, r.code, r.name, rb.scope_type, rb.scope_id, e.environment AS environment_code, rb.valid_from, rb.valid_until, rb.subject_type, rb.subject_id, rb.grant_origin, rb.origin_id, rb.origin_item_id, COALESCE(u.display_name, '') AS source_name").
 		Joins("JOIN authz_role AS r ON r.id=rb.role_id AND r.tenant_id=rb.tenant_id AND r.application_id=rb.application_id AND r.status=? AND r.role_type=?", activeStatus, roleType).
 		Joins("LEFT JOIN platform_application_environment AS e ON e.id=rb.scope_id AND e.application_id=rb.application_id AND e.tenant_id=rb.tenant_id").

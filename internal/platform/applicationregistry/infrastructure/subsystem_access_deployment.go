@@ -100,8 +100,20 @@ type SubsystemAccessInitialAdminMarker interface {
 //   - DEPLOY：用 round 21 的装配函数构造部署输入并调用部署 Agent 的 Provision；
 //   - READINESS：读取受控部署状态，只有 READY 才算成功。
 //
-// 接管/更新/恢复（ADOPT/UPDATE/RETRY）的更新路径尚未接线：调用即返回"未接线"错误，不静默成功。
+// 接管/更新/恢复（ADOPT/UPDATE/RETRY）复用受控更新端口及认证观察期门禁。
+type SubsystemAccessBrowserReferenceReader interface {
+	ReadSubsystemAccessBrowserClientID(context.Context, string, string, string, string, string) (string, error)
+}
+
+type SubsystemAccessConfigurationEvidence interface {
+	Snapshot(context.Context, application.SubsystemAccessOperation) (string, error)
+	Verify(context.Context, application.SubsystemAccessOperation) (bool, error)
+}
+
 type SubsystemAccessDeploymentAdapter struct {
+	configuration        SubsystemAccessConfigurationEvidence
+	registry             SubsystemAccessRegistrationLookup
+	browserReferences    SubsystemAccessBrowserReferenceReader
 	service              SubsystemAccessOnboardingProvisioningService
 	provisioner          application.SubsystemProvisioner
 	catalog              SubsystemAccessCatalogSource
@@ -201,6 +213,12 @@ func (adapter *SubsystemAccessDeploymentAdapter) configureUpdateAuthentication(c
 
 // ProvisionSubsystemAccess 首次接入的部署：装配输入后调用部署 Agent。
 func (adapter *SubsystemAccessDeploymentAdapter) ProvisionSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
+	var identityErr error
+	operation, identityErr = adapter.resolveRegistration(ctx, operation)
+	if identityErr != nil {
+		return application.SubsystemAccessStageOutcome{}, identityErr
+	}
+
 	if operation.Action != application.SubsystemAccessActionOnboard {
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("provisioning for action %s is not wired: %w", operation.Action, application.ErrSubsystemAccessInvalidRequest)
 	}
@@ -224,6 +242,22 @@ func (adapter *SubsystemAccessDeploymentAdapter) ProvisionSubsystemAccess(ctx co
 
 // provisionOnboard 是首次接入的部署主体（凭据已就绪）。
 func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboard(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
+	snapshot := ""
+	if adapter.configuration != nil {
+		var err error
+		snapshot, err = adapter.configuration.Snapshot(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
+	outcome, err := adapter.provisionOnboardWithCandidate(ctx, operation, run)
+	if err == nil && outcome.Status == application.SubsystemAccessStatusSucceeded && snapshot != "" {
+		outcome.EvidenceRef = accessCandidatePrefix + snapshot + ";" + outcome.EvidenceRef
+	}
+	return outcome, err
+}
+
+func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	target, ok, err := resolveSubsystemAccessTarget(ctx, adapter.catalog, operation)
 	if err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
@@ -275,6 +309,22 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboard(ctx context.Co
 
 // UpdateSubsystemAccess 接管/更新/恢复：更新路径尚未接线（明确报错，不静默成功）。
 func (adapter *SubsystemAccessDeploymentAdapter) UpdateSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
+	snapshot := ""
+	if adapter.configuration != nil {
+		var err error
+		snapshot, err = adapter.configuration.Snapshot(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
+	outcome, err := adapter.updateSubsystemAccessWithCandidate(ctx, operation, run)
+	if err == nil && outcome.Status == application.SubsystemAccessStatusSucceeded && snapshot != "" {
+		outcome.EvidenceRef = accessCandidatePrefix + snapshot + ";" + outcome.EvidenceRef
+	}
+	return outcome, err
+}
+
+func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandidate(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	// 观察期门禁（只读）：未结束/未开始/已存在时受控更新必须等待，而不是继续执行。
 	if adapter.observation != nil {
 		allowed, reason, err := adapter.observation.CanProceedWithUpdate(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode)
@@ -600,6 +650,21 @@ func resolveSubsystemAccessTarget(ctx context.Context, catalog SubsystemAccessCa
 // 写 READY。统一入口目前只承担"初始管理员授权"这一步（其余由既有部署/更新流程
 // 在各自阶段完成）；未注入标记端口时不阻断，但证据必须显式标注 skipped。
 func (adapter *SubsystemAccessDeploymentAdapter) FinalizeSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
+	var identityErr error
+	operation, identityErr = adapter.resolveRegistration(ctx, operation)
+	if identityErr != nil {
+		return application.SubsystemAccessStageOutcome{}, identityErr
+	}
+
+	if adapter.configuration != nil {
+		verified, err := adapter.configuration.Verify(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+		if !verified {
+			return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusFailed, ErrorCode: "CONFIGURATION_CHANGED", Message: "部署候选已变更或缺少部署证据，请重新检查条件后发起受控更新"}, nil
+		}
+	}
 	outcome, err := adapter.finalizeInitialAdmin(ctx, operation, run)
 	if err != nil || outcome.Status != application.SubsystemAccessStatusSucceeded {
 		return outcome, err
@@ -639,7 +704,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) finalizeInitialAdmin(ctx contex
 }
 
 // projectKeycloakAuthorization 对 Keycloak 提供方执行认证投影（复用共享服务）。
-// projected=false 表示按输入跳过（非 Keycloak、缺 ClientID 或未注入服务）。
+// projected=false 表示非 Keycloak 或未注入服务；缺少 ClientID 必须失败。
 func (adapter *SubsystemAccessDeploymentAdapter) projectKeycloakAuthorization(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, bool, error) {
 	if !strings.EqualFold(strings.TrimSpace(operation.AuthProvider), "keycloak") {
 		return application.SubsystemAccessStageOutcome{}, false, nil
@@ -650,6 +715,13 @@ func (adapter *SubsystemAccessDeploymentAdapter) projectKeycloakAuthorization(ct
 	clientID := ""
 	if run != nil && run.Credentials != nil {
 		clientID = strings.TrimSpace(run.Credentials.ClientID)
+	}
+	if clientID == "" && adapter.browserReferences != nil {
+		var err error
+		clientID, err = adapter.browserReferences.ReadSubsystemAccessBrowserClientID(ctx, operation.TenantID, operation.ApplicationID, operation.EnvironmentID, operation.ApplicationCode, operation.EnvironmentCode)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, true, fmt.Errorf("read projection client reference: %w", err)
+		}
 	}
 	if clientID == "" {
 		// 没有 ClientID 就无法投影：不能假装成功，也不能空跑。
@@ -767,4 +839,31 @@ func (adapter *SubsystemAccessDeploymentAdapter) rebuildOnboardCredentials(ctx c
 	}
 	return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusSucceeded,
 		EvidenceRef: "credentials:rebuilt"}, nil
+}
+
+// SetIdentityReaders 注入只读目录和客户端查询；恢复结果阶段不会签发新凭据。
+func (adapter *SubsystemAccessDeploymentAdapter) SetIdentityReaders(registry SubsystemAccessRegistrationLookup, browser SubsystemAccessBrowserReferenceReader) {
+	adapter.registry, adapter.browserReferences = registry, browser
+}
+
+func (adapter *SubsystemAccessDeploymentAdapter) resolveRegistration(ctx context.Context, operation application.SubsystemAccessOperation) (application.SubsystemAccessOperation, error) {
+	if adapter.registry == nil {
+		return operation, nil
+	}
+	appID, envID, found, err := adapter.registry.LookupSubsystemAccessRegistration(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode)
+	if err != nil {
+		return operation, err
+	}
+	if !found || appID == "" || envID == "" {
+		return operation, fmt.Errorf("subsystem registration is missing: %w", application.ErrSubsystemAccessInvalidRequest)
+	}
+	if (operation.ApplicationID != "" && operation.ApplicationID != appID) || (operation.EnvironmentID != "" && operation.EnvironmentID != envID) {
+		return operation, fmt.Errorf("subsystem registration changed: %w", application.ErrSubsystemAccessInvalidRequest)
+	}
+	operation.ApplicationID, operation.EnvironmentID = appID, envID
+	return operation, nil
+}
+
+func (adapter *SubsystemAccessDeploymentAdapter) SetConfigurationEvidence(tracker SubsystemAccessConfigurationEvidence) {
+	adapter.configuration = tracker
 }

@@ -75,6 +75,8 @@ type eventInputPayload struct {
 	LoginIP  string `json:"login_ip,omitempty"`
 	ClientIP string `json:"client_ip,omitempty"`
 	IPSource string `json:"ip_source,omitempty"`
+	// LoginIPSource 是登录地址的来源标记，与 ip_source（当前操作地址来源）互相独立。
+	LoginIPSource string `json:"login_ip_source,omitempty"`
 	// UserLoginIP 是旧协议的兼容字段：只填登录地址，缺省时按 LEGACY_PROTOCOL 处理。
 	UserLoginIP   string               `json:"user_login_ip,omitempty"`
 	Metadata      map[string]any       `json:"metadata,omitempty"`
@@ -86,15 +88,23 @@ type batchPayload struct {
 }
 
 type exportPayload struct {
-	ApplicationCode string     `json:"application_code,omitempty"`
-	EnvironmentCode string     `json:"environment_code,omitempty"`
-	Action          string     `json:"action,omitempty"`
-	ActionCategory  string     `json:"action_category,omitempty"`
-	Result          string     `json:"result,omitempty"`
-	RiskLevel       string     `json:"risk_level,omitempty"`
-	Keyword         string     `json:"keyword,omitempty"`
-	OccurredFrom    *time.Time `json:"occurred_from,omitempty"`
-	OccurredTo      *time.Time `json:"occurred_to,omitempty"`
+	ApplicationCode string `json:"application_code,omitempty"`
+	EnvironmentCode string `json:"environment_code,omitempty"`
+	Action          string `json:"action,omitempty"`
+	ActionCategory  string `json:"action_category,omitempty"`
+	Result          string `json:"result,omitempty"`
+	RiskLevel       string `json:"risk_level,omitempty"`
+	Keyword         string `json:"keyword,omitempty"`
+	// 与列表共用同一组精确过滤条件；导出不得比页面看到得更宽。
+	EventID       string     `json:"event_id,omitempty"`
+	ActorID       string     `json:"actor_id,omitempty"`
+	CorrelationID string     `json:"correlation_id,omitempty"`
+	ClientIP      string     `json:"client_ip,omitempty"`
+	LoginIP       string     `json:"login_ip,omitempty"`
+	ResourceID    string     `json:"resource_id,omitempty"`
+	RequestID     string     `json:"request_id,omitempty"`
+	OccurredFrom  *time.Time `json:"occurred_from,omitempty"`
+	OccurredTo    *time.Time `json:"occurred_to,omitempty"`
 }
 
 type pageResponse[T any] struct {
@@ -104,33 +114,40 @@ type pageResponse[T any] struct {
 	Total    int64 `json:"total"`
 }
 type eventResponse struct {
-	EventID             string               `json:"event_id"`
-	OccurredAt          time.Time            `json:"occurred_at"`
-	OperatorDisplayName string               `json:"operator_display_name"`
-	ActionType          string               `json:"action_type"`
-	ApplicationCode     string               `json:"application_code"`
-	ApplicationName     string               `json:"application_name"`
-	EnvironmentCode     string               `json:"environment_code"`
-	Action              string               `json:"action"`
-	Result              string               `json:"result"`
-	ResourceType        string               `json:"resource_type"`
-	ResourceID          string               `json:"resource_id,omitempty"`
-	ResourceName        string               `json:"resource_name,omitempty"`
-	Method              string               `json:"method,omitempty"`
-	Path                string               `json:"path,omitempty"`
-	ClientIP            string               `json:"client_ip,omitempty"`
-	LoginIP             string               `json:"login_ip,omitempty"`
-	IngestPeerIP        string               `json:"ingest_peer_ip,omitempty"`
-	IPSource            string               `json:"ip_source,omitempty"`
-	UserAgent           string               `json:"user_agent,omitempty"`
-	RequestID           string               `json:"request_id,omitempty"`
-	TraceID             string               `json:"trace_id,omitempty"`
-	CorrelationID       string               `json:"correlation_id,omitempty"`
-	StatusCode          int                  `json:"status_code,omitempty"`
-	RiskLevel           string               `json:"risk_level"`
-	Detail              string               `json:"detail,omitempty"`
-	Summary             string               `json:"summary,omitempty"`
-	ChangeSummary       []domain.FieldChange `json:"change_summary"`
+	EventID             string     `json:"event_id"`
+	OccurredAt          time.Time  `json:"occurred_at"`
+	ReceivedAt          *time.Time `json:"received_at,omitempty"`
+	OperatorDisplayName string     `json:"operator_display_name"`
+	// 稳定定位字段：名称会变、用户会重名，追溯必须依赖 ID 与类型。
+	ActorID         string               `json:"actor_id,omitempty"`
+	ActorType       string               `json:"actor_type,omitempty"`
+	ReasonCode      string               `json:"reason_code,omitempty"`
+	BusinessID      string               `json:"business_id,omitempty"`
+	LoginIPSource   string               `json:"login_ip_source,omitempty"`
+	ActionType      string               `json:"action_type"`
+	ApplicationCode string               `json:"application_code"`
+	ApplicationName string               `json:"application_name"`
+	EnvironmentCode string               `json:"environment_code"`
+	Action          string               `json:"action"`
+	Result          string               `json:"result"`
+	ResourceType    string               `json:"resource_type"`
+	ResourceID      string               `json:"resource_id,omitempty"`
+	ResourceName    string               `json:"resource_name,omitempty"`
+	Method          string               `json:"method,omitempty"`
+	Path            string               `json:"path,omitempty"`
+	ClientIP        string               `json:"client_ip,omitempty"`
+	LoginIP         string               `json:"login_ip,omitempty"`
+	IngestPeerIP    string               `json:"ingest_peer_ip,omitempty"`
+	IPSource        string               `json:"ip_source,omitempty"`
+	UserAgent       string               `json:"user_agent,omitempty"`
+	RequestID       string               `json:"request_id,omitempty"`
+	TraceID         string               `json:"trace_id,omitempty"`
+	CorrelationID   string               `json:"correlation_id,omitempty"`
+	StatusCode      int                  `json:"status_code,omitempty"`
+	RiskLevel       string               `json:"risk_level"`
+	Detail          string               `json:"detail,omitempty"`
+	Summary         string               `json:"summary,omitempty"`
+	ChangeSummary   []domain.FieldChange `json:"change_summary"`
 }
 type exportResponse struct {
 	JobID        string     `json:"job_id"`
@@ -169,6 +186,7 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计事件查询成功", pageResponse[eventResponse]{Items: items, Page: result.Page, PageSize: result.PageSize, Total: result.Total})
 }
+
 // Ingest 接收应用机器主体提交的单个审计事件；租户与来源取自已验签凭据。
 func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.applicationPrincipal(w, r)
@@ -195,6 +213,7 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "审计事件已接收", receipt)
 }
+
 // IngestBatch 接收有界批量审计事件；整批校验通过后才持久化，重复事件按幂等成功返回。
 func (h *Handler) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.applicationPrincipal(w, r)
@@ -242,6 +261,7 @@ func (h *Handler) ValidateIngestion(w http.ResponseWriter, r *http.Request) {
 		AuditIngest:     principal.HasScope("audit.ingest"),
 	})
 }
+
 // GetEvent 返回租户内单个审计事件详情。
 func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -283,7 +303,7 @@ func (h *Handler) CreateExportJob(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &payload) {
 		return
 	}
-	job, err := h.service.CreateExportJob(r.Context(), principal.Tenant.ID, principal.User.ID, application.PageRequest{Keyword: payload.Keyword, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, Action: payload.Action, ActionCategory: payload.ActionCategory, Result: payload.Result, RiskLevel: payload.RiskLevel, OccurredFrom: payload.OccurredFrom, OccurredTo: payload.OccurredTo})
+	job, err := h.service.CreateExportJob(r.Context(), principal.Tenant.ID, principal.User.ID, application.PageRequest{Keyword: payload.Keyword, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, Action: payload.Action, ActionCategory: payload.ActionCategory, Result: payload.Result, RiskLevel: payload.RiskLevel, OccurredFrom: payload.OccurredFrom, OccurredTo: payload.OccurredTo, EventID: payload.EventID, ActorID: payload.ActorID, CorrelationID: payload.CorrelationID, ClientIP: payload.ClientIP, LoginIP: payload.LoginIP, ResourceID: payload.ResourceID, RequestID: payload.RequestID})
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -393,7 +413,7 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 }
 func pageQuery(r *http.Request) application.PageRequest {
 	values := r.URL.Query()
-	query := application.PageRequest{Page: parseInt(values.Get("page"), 1), PageSize: parseInt(values.Get("page_size"), 20), Keyword: strings.TrimSpace(values.Get("keyword")), ApplicationCode: strings.TrimSpace(filterValue(values, "application_code")), EnvironmentCode: strings.TrimSpace(filterValue(values, "environment_code")), Action: strings.TrimSpace(filterValue(values, "action")), ActionCategory: strings.TrimSpace(filterValue(values, "action_category")), Result: strings.TrimSpace(filterValue(values, "result")), RiskLevel: strings.TrimSpace(filterValue(values, "risk_level")), ClientIP: strings.TrimSpace(filterValue(values, "client_ip")), ResourceID: strings.TrimSpace(filterValue(values, "resource_id")), RequestID: strings.TrimSpace(filterValue(values, "request_id"))}
+	query := application.PageRequest{Page: parseInt(values.Get("page"), 1), PageSize: parseInt(values.Get("page_size"), 20), Keyword: strings.TrimSpace(values.Get("keyword")), ApplicationCode: strings.TrimSpace(filterValue(values, "application_code")), EnvironmentCode: strings.TrimSpace(filterValue(values, "environment_code")), Action: strings.TrimSpace(filterValue(values, "action")), ActionCategory: strings.TrimSpace(filterValue(values, "action_category")), Result: strings.TrimSpace(filterValue(values, "result")), RiskLevel: strings.TrimSpace(filterValue(values, "risk_level")), ClientIP: strings.TrimSpace(filterValue(values, "client_ip")), ResourceID: strings.TrimSpace(filterValue(values, "resource_id")), RequestID: strings.TrimSpace(filterValue(values, "request_id")), EventID: strings.TrimSpace(filterValue(values, "event_id")), ActorID: strings.TrimSpace(filterValue(values, "actor_id")), CorrelationID: strings.TrimSpace(filterValue(values, "correlation_id")), LoginIP: strings.TrimSpace(filterValue(values, "login_ip"))}
 	query.OccurredFrom = parseTime(filterValue(values, "occurred_from"))
 	query.OccurredTo = parseTime(filterValue(values, "occurred_to"))
 	return query
@@ -463,7 +483,10 @@ func validateExternalCorrelation(ctx context.Context, payload eventInputPayload,
 }
 
 func toInput(payload eventInputPayload, r *http.Request) (application.EventInput, error) {
-	metadata := copyMetadata(payload.Metadata)
+	metadata, err := copyMetadata(payload.Metadata)
+	if err != nil {
+		return application.EventInput{}, err
+	}
 	// method 与 path 可以描述被审计的子系统操作。保留上报方提供的值，仅在
 	// 上报应用未提供时补充接收侧的值。
 	if _, ok := metadata["method"]; !ok {
@@ -472,11 +495,11 @@ func toInput(payload eventInputPayload, r *http.Request) (application.EventInput
 	if _, ok := metadata["path"]; !ok {
 		metadata["path"] = r.URL.Path
 	}
-	loginIP, clientIP, sourceFlag, legacySourceIP, err := resolveEventIPs(payload, r)
+	loginIP, clientIP, sourceFlag, legacySourceIP, loginIPSource, err := resolveEventIPs(payload, r)
 	if err != nil {
 		return application.EventInput{}, err
 	}
-	return application.EventInput{LoginIP: loginIP, ClientIP: clientIP, IngestPeerIP: deliveryPeerIP(r), IPSource: sourceFlag, EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: legacySourceIP, UserAgent: r.UserAgent()}, nil
+	return application.EventInput{LoginIP: loginIP, ClientIP: clientIP, IngestPeerIP: deliveryPeerIP(r), IPSource: sourceFlag, LoginIPSource: loginIPSource, EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: legacySourceIP, UserAgent: r.UserAgent()}, nil
 }
 
 // resolveEventIPs 依据统一审计来源协议解析三类地址。
@@ -486,7 +509,7 @@ func toInput(payload eventInputPayload, r *http.Request) (application.EventInput
 //   - 只提供旧字段 user_login_ip 时按 LEGACY_PROTOCOL 处理，并只当作"登录地址"；
 //   - 什么都没提供时登录/操作地址保持空，由界面显示"未采集"，绝不用投递地址冒充；
 //   - legacySourceIP 仅用于兼容旧列 source_ip，保持历史读数的连续性。
-func resolveEventIPs(payload eventInputPayload, r *http.Request) (loginIP, clientIP, ipSource, legacySourceIP string, err error) {
+func resolveEventIPs(payload eventInputPayload, r *http.Request) (loginIP, clientIP, ipSource, legacySourceIP, loginIPSource string, err error) {
 	peer := deliveryPeerIP(r)
 	parse := func(field, value string) (string, error) {
 		if strings.TrimSpace(value) != value || value == "" {
@@ -501,18 +524,18 @@ func resolveEventIPs(payload eventInputPayload, r *http.Request) (loginIP, clien
 	ipSource = normalizeAuditIPSource(payload.IPSource)
 	if payload.LoginIP != "" {
 		if loginIP, err = parse("login_ip", payload.LoginIP); err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
 	}
 	if payload.ClientIP != "" {
 		if clientIP, err = parse("client_ip", payload.ClientIP); err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
 	}
 	if loginIP == "" && clientIP == "" && payload.UserLoginIP != "" {
 		// 旧发布方只上报登录地址。
 		if loginIP, err = parse("user_login_ip", payload.UserLoginIP); err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
 		ipSource = "LEGACY_PROTOCOL"
 	}
@@ -524,7 +547,13 @@ func resolveEventIPs(payload eventInputPayload, r *http.Request) (loginIP, clien
 	if legacySourceIP == "" {
 		legacySourceIP = peer
 	}
-	return loginIP, clientIP, ipSource, legacySourceIP, nil
+	// 登录地址来源独立于当前操作地址来源：只接受显式上报，缺失时留空。
+	if strings.TrimSpace(payload.LoginIPSource) != "" {
+		loginIPSource = normalizeAuditIPSource(payload.LoginIPSource)
+	} else if loginIP != "" {
+		loginIPSource = "LEGACY_PROTOCOL"
+	}
+	return loginIP, clientIP, ipSource, legacySourceIP, loginIPSource, nil
 }
 
 // normalizeAuditIPSource 收敛发布方上报的来源标记；未知取值记为 UNKNOWN。
@@ -552,18 +581,72 @@ func deliveryPeerIP(r *http.Request) string {
 	return clientIP(r)
 }
 
-func copyMetadata(metadata map[string]any) map[string]any {
+// 敏感键匹配规则（统一审计方案 §3.4）：发布端先过滤，摄取侧再防御一次。
+//
+// 只用"精确键 + 词缀"匹配，不做任意包含匹配——`authorization_revision` 是合法的
+// 授权版本号，含 "authorization" 但不是凭据，不能被误杀。
+func isSensitiveMetadataKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.NewReplacer("-", "_", ".", "_").Replace(normalized)
+	switch normalized {
+	case "password", "passwd", "token", "secret", "authorization", "cookie", "set_cookie",
+		"dsn", "private_key", "api_key", "apikey", "session_key", "client_secret",
+		"access_token", "refresh_token", "id_token":
+		return true
+	}
+	for _, suffix := range []string{"_password", "_passwd", "_token", "_secret", "_api_key", "_apikey", "_private_key", "_session_key", "_dsn"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"password_", "passwd_", "token_", "secret_"} {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyMetadata 复制上报方的 metadata，并在摄取侧做敏感键防御。
+// 返回错误表示载荷含凭据类字段，调用方必须拒绝整条事件而不是静默截断。
+func copyMetadata(metadata map[string]any) (map[string]any, error) {
 	if len(metadata) == 0 {
-		return map[string]any{}
+		return map[string]any{}, nil
 	}
 	copy := make(map[string]any, len(metadata)+2)
 	for key, value := range metadata {
+		if isSensitiveMetadataKey(key) {
+			return nil, fmt.Errorf("%w: metadata contains sensitive field %q", application.ErrValidation, key)
+		}
+		if nested, ok := value.(map[string]any); ok {
+			if _, err := copyMetadata(nested); err != nil {
+				return nil, err
+			}
+		}
 		copy[key] = value
 	}
-	return copy
+	return copy, nil
 }
 func eventToResponse(event domain.Event) eventResponse {
-	return eventResponse{EventID: event.EventID, OccurredAt: event.OccurredAt, OperatorDisplayName: event.OperatorDisplayName, ActionType: event.ActionType, ApplicationCode: event.ApplicationCode, ApplicationName: event.ApplicationName, EnvironmentCode: event.EnvironmentCode, Action: event.Action, Result: event.Result, ResourceType: event.ResourceType, ResourceID: event.ResourceID, ResourceName: event.ResourceName, Method: event.Method, Path: event.Path, ClientIP: event.ClientIP, LoginIP: event.LoginIP, IngestPeerIP: event.IngestPeerIP, IPSource: event.IPSource, UserAgent: event.UserAgent, RequestID: event.RequestID, TraceID: event.TraceID, CorrelationID: event.CorrelationID, StatusCode: event.StatusCode, RiskLevel: event.RiskLevel, Detail: event.Detail, Summary: event.Summary, ChangeSummary: event.ChangeSummary}
+	response := eventResponse{
+		EventID: event.EventID, OccurredAt: event.OccurredAt,
+		OperatorDisplayName: event.OperatorDisplayName,
+		ActorID:             event.ActorID, ActorType: event.ActorType,
+		ReasonCode: event.ReasonCode, BusinessID: event.BusinessID, LoginIPSource: event.LoginIPSource,
+		ActionType: event.ActionType, ApplicationCode: event.ApplicationCode, ApplicationName: event.ApplicationName,
+		EnvironmentCode: event.EnvironmentCode, Action: event.Action, Result: event.Result,
+		ResourceType: event.ResourceType, ResourceID: event.ResourceID, ResourceName: event.ResourceName,
+		Method: event.Method, Path: event.Path, ClientIP: event.ClientIP, LoginIP: event.LoginIP,
+		IngestPeerIP: event.IngestPeerIP, IPSource: event.IPSource, UserAgent: event.UserAgent,
+		RequestID: event.RequestID, TraceID: event.TraceID, CorrelationID: event.CorrelationID,
+		StatusCode: event.StatusCode, RiskLevel: event.RiskLevel, Detail: event.Detail,
+		Summary: event.Summary, ChangeSummary: event.ChangeSummary,
+	}
+	if !event.ReceivedAt.IsZero() {
+		received := event.ReceivedAt
+		response.ReceivedAt = &received
+	}
+	return response
 }
 func exportToResponse(job domain.ExportJob) exportResponse {
 	result := exportResponse{JobID: job.JobID, Status: job.Status, DownloadURL: job.DownloadURL, ErrorCode: job.ErrorCode, ErrorMessage: job.ErrorMessage, CreatedAt: job.CreatedAt}

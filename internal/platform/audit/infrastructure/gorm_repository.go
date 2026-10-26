@@ -50,6 +50,7 @@ type eventModel struct {
 	SourceIP                                                                                   []byte
 	LoginIP, ClientIP, IngestPeerIP                                                            []byte
 	IPSource                                                                                   string `gorm:"column:ip_source"`
+	LoginIPSource                                                                              string `gorm:"column:login_ip_source"`
 	Result                                                                                     string
 	ReasonCode                                                                                 *string
 	RiskLevel, Classification                                                                  string
@@ -237,7 +238,7 @@ func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environ
 		return domain.Receipt{}, fmt.Errorf("marshal audit payload: %w", err)
 	}
 	hash := sha256.Sum256(payload)
-	event := eventModel{OccurredMonth: uint(input.OccurredAt.UTC().Year()*100 + int(input.OccurredAt.UTC().Month())), EventID: input.EventID, TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, EventCategory: input.EventCategory, EventType: input.EventType, OccurredAt: input.OccurredAt.UTC(), ReceivedAt: now.UTC(), ActorType: input.ActorType, ActorID: optional(input.ActorID), ActorNameSnapshot: optional(input.ActorName), SessionID: optional(input.SessionID), ClientID: optional(input.ClientID), Action: input.Action, ResourceType: input.ResourceType, ResourceID: optional(input.ResourceID), ResourceNameSnapshot: optional(input.ResourceName), BusinessID: optional(input.BusinessID), RequestID: optional(input.RequestID), TraceID: optionalTraceID(input.TraceID), CorrelationID: optional(input.CorrelationID), SourceIP: optionalIP(input.SourceIP), LoginIP: optionalIP(input.LoginIP), ClientIP: optionalIP(input.ClientIP), IngestPeerIP: optionalIP(input.IngestPeerIP), IPSource: normalizeIPSource(input.IPSource), UserAgent: optional(input.UserAgent), Result: input.Result, ReasonCode: optional(input.ReasonCode), RiskLevel: input.RiskLevel, Classification: input.Classification, Summary: optional(input.Summary), Metadata: metadata, Changes: changes, PayloadHash: hash[:]}
+	event := eventModel{OccurredMonth: uint(input.OccurredAt.UTC().Year()*100 + int(input.OccurredAt.UTC().Month())), EventID: input.EventID, TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, EventCategory: input.EventCategory, EventType: input.EventType, OccurredAt: input.OccurredAt.UTC(), ReceivedAt: now.UTC(), ActorType: input.ActorType, ActorID: optional(input.ActorID), ActorNameSnapshot: optional(input.ActorName), SessionID: optional(input.SessionID), ClientID: optional(input.ClientID), Action: input.Action, ResourceType: input.ResourceType, ResourceID: optional(input.ResourceID), ResourceNameSnapshot: optional(input.ResourceName), BusinessID: optional(input.BusinessID), RequestID: optional(input.RequestID), TraceID: optionalTraceID(input.TraceID), CorrelationID: optional(input.CorrelationID), SourceIP: optionalIP(input.SourceIP), LoginIP: optionalIP(input.LoginIP), ClientIP: optionalIP(input.ClientIP), IngestPeerIP: optionalIP(input.IngestPeerIP), IPSource: normalizeIPSource(input.IPSource), LoginIPSource: normalizeIPSource(input.LoginIPSource), UserAgent: optional(input.UserAgent), Result: input.Result, ReasonCode: optional(input.ReasonCode), RiskLevel: input.RiskLevel, Classification: input.Classification, Summary: optional(input.Summary), Metadata: metadata, Changes: changes, PayloadHash: hash[:]}
 	if err := tx.Create(&event).Error; err != nil {
 		return domain.Receipt{}, err
 	}
@@ -288,6 +289,7 @@ func (r *Repository) List(ctx context.Context, tenantID string, query applicatio
 	}
 	return application.PageResult[domain.Event]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
+
 // Get 返回租户内单个审计事件详情。
 func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.Event, error) {
 	var record eventQueryRow
@@ -330,6 +332,7 @@ func (r *Repository) CreateExportJob(ctx context.Context, tenantID, operatorID s
 	}
 	return domain.ExportJob{JobID: publicID, Status: "PENDING", CreatedAt: now.UTC()}, nil
 }
+
 // GetExportJob 返回导出任务状态；成功任务附带受控下载地址。
 func (r *Repository) GetExportJob(ctx context.Context, tenantID, jobID string) (domain.ExportJob, error) {
 	var job asyncJobModel
@@ -458,10 +461,10 @@ func (r *Repository) GetExportFile(ctx context.Context, tenantID, jobID string) 
 }
 
 func exportQuery(query application.PageRequest) domain.ExportQuery {
-	return domain.ExportQuery{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, ActionCategory: query.ActionCategory, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo}
+	return domain.ExportQuery{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, ActionCategory: query.ActionCategory, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo, EventID: query.EventID, ActorID: query.ActorID, CorrelationID: query.CorrelationID, ClientIP: query.ClientIP, LoginIP: query.LoginIP, ResourceID: query.ResourceID, RequestID: query.RequestID}
 }
 func pageRequest(query domain.ExportQuery) application.PageRequest {
-	return application.PageRequest{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, ActionCategory: query.ActionCategory, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo, Page: 1, PageSize: 100}
+	return application.PageRequest{Keyword: query.Keyword, ApplicationCode: query.ApplicationCode, EnvironmentCode: query.EnvironmentCode, Action: query.Action, ActionCategory: query.ActionCategory, Result: query.Result, RiskLevel: query.RiskLevel, OccurredFrom: query.OccurredFrom, OccurredTo: query.OccurredTo, EventID: query.EventID, ActorID: query.ActorID, CorrelationID: query.CorrelationID, ClientIP: query.ClientIP, LoginIP: query.LoginIP, ResourceID: query.ResourceID, RequestID: query.RequestID, Page: 1, PageSize: 100}
 }
 
 func (r *Repository) eventQuery(ctx context.Context, tenantID string, query application.PageRequest) *gorm.DB {
@@ -516,6 +519,26 @@ func (r *Repository) eventQuery(ctx context.Context, tenantID string, query appl
 	}
 	if query.RequestID != "" {
 		db = db.Where("audit_event.request_id = ?", query.RequestID)
+	}
+	if query.EventID != "" {
+		db = db.Where("audit_event.event_id = ?", query.EventID)
+	}
+	if query.ActorID != "" {
+		db = db.Where("audit_event.actor_id = ?", query.ActorID)
+	}
+	if query.CorrelationID != "" {
+		db = db.Where("audit_event.correlation_id = ?", query.CorrelationID)
+	}
+	if query.LoginIP != "" {
+		if parsed := net.ParseIP(strings.TrimSpace(query.LoginIP)); parsed != nil {
+			value := parsed.To4()
+			if value == nil {
+				value = parsed.To16()
+			}
+			db = db.Where("audit_event.login_ip = ?", value)
+		} else {
+			db = db.Where("1 = 0")
+		}
 	}
 	if query.RiskLevel != "" {
 		db = db.Where("audit_event.risk_level = ?", query.RiskLevel)
@@ -580,7 +603,7 @@ func (r *Repository) mapError(err error) error {
 func toEvent(model eventModel, appCode, appName, environmentCode string) domain.Event {
 	var changes []domain.FieldChange
 	_ = json.Unmarshal(model.Changes, &changes)
-	return domain.Event{ID: fmt.Sprint(model.ID), EventID: model.EventID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, ApplicationCode: appCode, ApplicationName: appName, EnvironmentID: model.EnvironmentID, EnvironmentCode: environmentCode, OccurredAt: model.OccurredAt, OperatorDisplayName: value(model.ActorNameSnapshot), ActionType: model.EventType, Action: model.Action, Result: model.Result, ResourceType: model.ResourceType, ResourceID: value(model.ResourceID), ResourceName: value(model.ResourceNameSnapshot), Method: valueFromMetadata(model.Metadata, "method"), Path: valueFromMetadata(model.Metadata, "path"), ClientIP: auditClientIP(model), LoginIP: ipString(model.LoginIP), IngestPeerIP: ipString(model.IngestPeerIP), IPSource: normalizeIPSource(model.IPSource), UserAgent: value(model.UserAgent), RequestID: value(model.RequestID), TraceID: value(model.TraceID), CorrelationID: value(model.CorrelationID), StatusCode: intFromMetadata(model.Metadata, "status_code"), RiskLevel: model.RiskLevel, Detail: value(model.ReasonCode), Summary: value(model.Summary), ChangeSummary: changes}
+	return domain.Event{ID: fmt.Sprint(model.ID), EventID: model.EventID, TenantID: model.TenantID, ApplicationID: model.ApplicationID, ApplicationCode: appCode, ApplicationName: appName, EnvironmentID: model.EnvironmentID, EnvironmentCode: environmentCode, OccurredAt: model.OccurredAt, ReceivedAt: model.ReceivedAt, ActorID: value(model.ActorID), ActorType: model.ActorType, ReasonCode: value(model.ReasonCode), BusinessID: value(model.BusinessID), LoginIPSource: model.LoginIPSource, OperatorDisplayName: value(model.ActorNameSnapshot), ActionType: model.EventType, Action: model.Action, Result: model.Result, ResourceType: model.ResourceType, ResourceID: value(model.ResourceID), ResourceName: value(model.ResourceNameSnapshot), Method: valueFromMetadata(model.Metadata, "method"), Path: valueFromMetadata(model.Metadata, "path"), ClientIP: auditClientIP(model), LoginIP: ipString(model.LoginIP), IngestPeerIP: ipString(model.IngestPeerIP), IPSource: normalizeIPSource(model.IPSource), UserAgent: value(model.UserAgent), RequestID: value(model.RequestID), TraceID: value(model.TraceID), CorrelationID: value(model.CorrelationID), StatusCode: intFromMetadata(model.Metadata, "status_code"), RiskLevel: model.RiskLevel, Detail: value(model.ReasonCode), Summary: value(model.Summary), ChangeSummary: changes}
 }
 func optional(value string) *string {
 	value = strings.TrimSpace(value)

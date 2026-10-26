@@ -28,6 +28,8 @@ license_snapshot=''
 license_digest=''
 runtime_approval_dir=''
 runtime_approval_approved=false
+builtin_v2_no_approvals=false
+release_spec=''
 reuse_approved_crm_image=false
 runtime_approval_digest=''
 installation_scenario=''
@@ -102,6 +104,8 @@ while (($#)); do
     --license-file) license_file="${2:?缺少许可证文件}"; shift 2 ;;
     --runtime-approval-dir) runtime_approval_dir="${2:?缺少批准目录}"; shift 2 ;;
     --runtime-approval-approved) runtime_approval_approved=true; shift ;;
+    --builtin-v2-no-runtime-approvals) builtin_v2_no_approvals=true; shift ;;
+    --release-spec) release_spec="${2:?缺少 release spec}"; shift 2 ;;
     --reuse-approved-crm-image) reuse_approved_crm_image=true; shift ;;
     --installation-scenario) installation_scenario="${2:?缺少安装场景}"; shift 2 ;;
     --customer-id) installation_customer="${2:?缺少客户标识}"; shift 2 ;;
@@ -157,7 +161,20 @@ if ((${#missing_inputs[@]} > 0)); then
   exit 1
 fi
 
-if [[ -n "$license_file" && -z "$runtime_approval_dir" ]]; then
+if [[ "$builtin_v2_no_approvals" == true ]]; then
+  [[ -n "$license_file" && -n "$release_spec" && -z "$runtime_approval_dir" ]] || {
+    echo '内置 V2 交付必须同时提供许可证和 release spec，且不得混用 runtime approval 目录' >&2
+    exit 2
+  }
+  [[ -f "$release_spec" && ! -L "$release_spec" ]] || {
+    echo '内置 V2 release spec 必须是安全普通文件' >&2
+    exit 2
+  }
+  python3 "$script_dir/release-materials.py" --v2-only --spec "$release_spec" --format json >/dev/null || {
+    echo 'release spec 不是全部应用 V2，拒绝跳过 V1 运行批准' >&2
+    exit 2
+  }
+elif [[ -n "$license_file" && -z "$runtime_approval_dir" ]]; then
   echo '客户授权安装包必须提供 --runtime-approval-dir 和 --runtime-approval-approved' >&2
   exit 2
 fi
@@ -354,6 +371,7 @@ render_build_info() {
   [[ -z "$license_digest" ]] || printf 'LICENSE_SHA256=%s\n' "$license_digest"
   [[ -z "$runtime_approval_digest" ]] || printf 'RUNTIME_APPROVAL_SHA256=%s\n' "$runtime_approval_digest"
   [[ -z "$installation_digest" ]] || printf 'INSTALLATION_PLAN_SHA256=%s\n' "$installation_digest"
+  [[ "$builtin_v2_no_approvals" != true ]] || printf 'RUNTIME_APPROVAL_MODE=BUILTIN_V2\n'
   printf 'DOCKER_CLIENT_VERSION=%s\n' "$docker_client"
   printf 'DOCKER_SERVER_VERSION=%s\n' "$docker_server"
   printf 'BUILDX_VERSION=%s\n' "${buildx_version:-unavailable}"
@@ -800,22 +818,23 @@ fi
 package_assets() (
   local assets_archive assets_temporary sidecar_temporary assets_stage relative destination assets_digest
   local -a asset_files=(
-    .env.example .gitignore .release.env.example ACCEPTANCE_CHECKLIST.md BACKUP_RECOVERY.md DEPLOYMENT_COMPATIBILITY.md DELIVERY_WORKFLOW.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md README.md docker-compose.yml
+    .env.example .gitignore .release.env.example ACCEPTANCE_CHECKLIST.md BACKUP_RECOVERY.md DEPLOYMENT_COMPATIBILITY.md deployment-compatibility.json DELIVERY_WORKFLOW.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md README.md docker-compose.yml
     bin/acceptance-evidence.sh bin/apply-public-transport.sh bin/backup-all.sh bin/backup-file-gateway.sh bin/backup-keycloak-mysql.sh bin/portal-report-backup.sh
-    bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
+    bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-common.sh bin/deploy-import.sh bin/deploy-subsystem.sh bin/deploy-license.sh bin/deploy-doctor.sh bin/deploy-package.sh bin/deploy-status.sh bin/deploy-verify.sh bin/deploy-menu.sh bin/deploy-registry.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
     bin/install-host-dependencies.sh
     bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-image-identities.py
     bin/export-license-inventory.py bin/frontend-network.py bin/check-frontend-network.sh bin/subsystem-runtime.py
     bin/delivery-inspect.py bin/delivery-inspect-images.py bin/delivery-inspect-v2.py bin/delivery-runtime.py bin/delivery-runtime.sh
-    bin/deployment-session.py bin/deployment-workflow.sh bin/delivery-files.py
+    bin/deployment-session.py bin/deployment-plan.py bin/build-deployment-compatibility.py bin/deployment-workflow.sh bin/delivery-files.py
+    bin/release-materials.py bin/release-workflow.py
     bin/provisioner-config-refresh.sh bin/publish-runtime-approvals.py bin/public-transport.sh bin/reload-public-certificate.sh
     bin/restore-file-gateway.sh bin/restore-keycloak-mysql.sh bin/restore-mysql.sh bin/start-enabled.sh
     bin/set-container-timezone.sh bin/test-container-timezone.sh CONTAINER_TIMEZONE.md
     bin/test-auto-install-packages.sh bin/test-compose-scope.sh bin/test-deployment-parity.sh bin/test-doctor.sh bin/test-project-background.py
     bin/test-file-gateway-wiring.sh bin/test-lifecycle.sh bin/test-offline-configure.sh bin/test-offline-import.sh bin/test-offline-registry-network.sh
     bin/test-offline-package-metadata.sh bin/test-offline-transport.sh bin/test-public-transport.sh bin/test-start-enabled.sh
-    bin/test-backup-recovery-safety.sh bin/test-control-plane-reload.sh bin/test-release-reliability.sh bin/test-subsystem-state-machine.sh bin/test-verify-readiness.sh
+    bin/test-backup-recovery-safety.sh bin/test-control-plane-reload.sh bin/test-release-reliability.sh bin/test-deployment-plan.py bin/test-first-failure.sh bin/test-recovery-status.sh bin/test-subsystem-state-machine.sh bin/test-verify-readiness.sh
     monitoring/prometheus/file-gateway-alerts.yml monitoring/prometheus/keycloak-alerts.yml monitoring/prometheus/prometheus.yml
     mysql-init/contract-databases.sql mysql-init/data-analysis-metabase.sql nginx/basic-platform.conf.example
     subsystem-templates/contract.env.example subsystem-templates/customer.env.example subsystem-templates/data-analysis.env.example
@@ -824,7 +843,8 @@ package_assets() (
     subsystems.d/customer_portal-prod.yaml subsystems.d/data-analysis-prod.yaml subsystems.d/project_management-prod.yaml
     subsystems.d/settlement-prod.yaml tests/preflight-test.sh tests/test-acceptance-evidence.sh tests/test-assets-install.sh tests/test-compose-blocks.py
     tests/test-host-dependencies.sh tests/test-offline-package-builder.sh tests/test-offline-image-identities.py
-    tests/test-frontend-modes.sh tests/test-key-init.sh tests/test-metabase-init.sh
+    tests/test-frontend-modes.sh tests/test-key-init.sh tests/test-metabase-init.sh tests/test-deployment-compatibility.py
+    tests/test-release-materials.py tests/test-release-workflow.py tests/test-release-plan-inspect.py tests/test-publisher-diff.py
   )
   assets_archive="$output_root/deployment-assets-${version}.tar.gz"
   assets_temporary="$(mktemp "$output_root/.deployment-assets.archive.XXXXXX")"
@@ -841,6 +861,7 @@ package_assets() (
 
   # 不要整体归档生产目录。仅将已审核静态文件放入暂存区，使 .env 备份、私钥、数据库转储及未来未知文件均默认排除。
   for relative in "${asset_files[@]}"; do
+    [[ "$relative" == "deployment-compatibility.json" ]] && continue
     [[ -f "$deploy_dir/$relative" && ! -L "$deploy_dir/$relative" ]] || {
       echo "静态部署资产缺失或不是普通文件：$relative" >&2
       exit 1
@@ -849,6 +870,9 @@ package_assets() (
     mkdir -p -- "$(dirname -- "$destination")"
     cp -p -- "$deploy_dir/$relative" "$destination"
   done
+  python3 "$deploy_dir/bin/build-deployment-compatibility.py" --migrations "$workspace_root/platform/migrations" --release "$version" --output "$assets_stage/deployment-compatibility.json" >/dev/null || {
+      echo '无法生成部署兼容性声明；拒绝发布' >&2; exit 1;
+    }
   if [[ -n "$license_snapshot" ]]; then
     mkdir -p -- "$assets_stage/license"
     install -m 600 -- "$license_snapshot" "$assets_stage/license/commercial-license.jws"

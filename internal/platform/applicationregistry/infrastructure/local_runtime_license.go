@@ -382,10 +382,10 @@ func (p *LocalDockerSubsystemProvisioner) CollectLicenseEvidence(ctx context.Con
 }
 
 type localPinnedService struct {
-	PullPolicy string   `json:"pull_policy,omitempty"`
-	Image      string   `json:"image"`
-	EnvFile    []string `json:"env_file,omitempty"`
-	Volumes    []string `json:"volumes,omitempty"`
+	PullPolicy  string            `json:"pull_policy,omitempty"`
+	Image       string            `json:"image"`
+	EnvFile     []string          `json:"env_file,omitempty"`
+	Volumes     []string          `json:"volumes,omitempty"`
 	Environment map[string]string `json:"environment,omitempty"`
 }
 type localPinnedCompose struct {

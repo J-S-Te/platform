@@ -54,6 +54,13 @@ for oneoff in \
 done
 pass 'all migration/init one-shot containers are removed after completion'
 
+# 平台配置校验必须复用 API 解析器且只读，并在迁移前失败关闭。
+grep -Fq 'platform-migrate ./api config-check' "$deploy_service" ||
+  fail 'platform migration does not run read-only config-check first'
+grep -Fq 'exec ./api config-check' "$bin_dir/../../../docker-entrypoint.sh" ||
+  fail 'entrypoint config-check still triggers key initialization'
+pass 'platform config-check is read-only and runs before migration'
+
 # 继续支持旧的 CRM 和门户双镜像入口，但必须使用与 deploy-service.sh 相同的锁及 Agent 刷新契约，不能成为无锁的兼容绕行路径。
 legacy_lock_line="$(grep -n 'flock -w 900 9' "$legacy_customer_deploy" | head -n1 | cut -d: -f1)"
 legacy_runtime_write_line="$(grep -n '^initialize_runtime_file "\$customer_runtime_file"' "$legacy_customer_deploy" | head -n1 | cut -d: -f1)"

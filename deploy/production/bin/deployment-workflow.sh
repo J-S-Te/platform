@@ -3,11 +3,38 @@
 
 workflow_enabled() { [[ -n "${UIP_INSTALL_SESSION:-}" ]]; }
 
+record_first_failure() {
+  local stage="$1" reason="${2:-STAGE_FAILED}" directory="${UIP_INSTALL_TARGET}/runtime"
+  local output="$directory/first-failure.json" temporary
+  [[ "$stage" =~ ^[a-z][a-z0-9_-]{0,63}$ && "$reason" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || return 0
+  [[ -d "$directory" ]] || return 0
+  [[ ! -e "$output" && ! -L "$output" ]] || return 0
+  temporary="$(mktemp "$directory/.first-failure.XXXXXX")" || return 0
+  if python3 - "$temporary" "$stage" "$reason" "$UIP_INSTALL_SESSION" >"$temporary" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+print(json.dumps({
+    "schema": "uip.first-failure/v1",
+    "at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "stage": sys.argv[2],
+    "reason": sys.argv[3],
+    "session": sys.argv[4],
+}, ensure_ascii=False, sort_keys=True))
+PY
+  then
+    chmod 600 "$temporary" || { rm -f -- "$temporary"; return 0; }
+    if [[ ! -e "$output" && ! -L "$output" ]]; then mv -f -- "$temporary" "$output" || rm -f -- "$temporary"; else rm -f -- "$temporary"; fi
+  else
+    rm -f -- "$temporary"
+  fi
+}
+
 workflow_update() {
   workflow_enabled || return 0
   local -a args=(update --state-dir "$UIP_INSTALL_STATE_DIR" --session "$UIP_INSTALL_SESSION" --stage "$1" --status "$2")
   [[ -z "${3:-}" ]] || args+=(--reason-code "$3")
-  python3 "$UIP_INSTALL_SESSION_TOOL" "${args[@]}"
+  python3 "$UIP_INSTALL_SESSION_TOOL" "${args[@]}" || return $?
+  if [[ "$2" == FAILED ]]; then record_first_failure "$1" "${3:-STAGE_FAILED}"; fi
 }
 
 workflow_start() {
@@ -114,6 +141,7 @@ workflow_open() {
   UIP_INSTALL_STATE_DIR="${target_dir}.installation-state"
   UIP_INSTALL_ENTRY="$(cd -- "$script_dir" && pwd -P)/$(basename -- "$script_path")"
   UIP_INSTALL_TARGET="$target_dir"
+  if [[ "${new_installation_session:-false}" == true ]]; then rm -f -- "$target_dir/runtime/first-failure.json" 2>/dev/null || true; fi
   previous='{}'
   if previous="$(python3 "$delivery_session_tool" status --state-dir "$UIP_INSTALL_STATE_DIR" --format json)"; then :
   else
@@ -137,13 +165,16 @@ finally: os.close(fd)
 PY
   exec 6<>"${target_dir}.installation-run.lock"
   flock -n 6 || die '同一目标已有安装流程运行；请等待后查看 --status'
+  # Recheck the baseline under the installation lock, before begin changes session
+  # state. A resumed session already binds this previously checked plan's hash.
+  if declare -F deployment_baseline_gate >/dev/null; then deployment_baseline_gate; fi
   identity_directory="$(mktemp -d "${TMPDIR:-/tmp}/uip-install-identity.XXXXXX")"
   identity_file="$identity_directory/identity.json"
   if ! python3 - "$identity_file" "$target_dir" "$media_dir" "$deployment_mode" \
     "$skip_host_deps" "$skip_configure" "$apply_compose" "$legacy_license_mode" \
-    "$license_customer" "$license_file_arg" "${workflow_components[@]}" <<'PY'
+    "$license_customer" "$license_file_arg" "${plan_baseline:-}" "${workflow_components[@]}" <<'PY'
 import hashlib, json, os, sys
-out,target,media,mode,skipdeps,skipconf,apply,legacy,customer,licensepath,*components=sys.argv[1:]
+out,target,media,mode,skipdeps,skipconf,apply,legacy,customer,licensepath,planpath,*components=sys.argv[1:]
 data={'version':1,'target':os.path.realpath(target),'media':os.path.realpath(media),
       'delivery_id':'sha256:'+hashlib.sha256(open(os.path.join(media,'SHA256SUMS'),'rb').read()).hexdigest(),
       'mode':mode,'components':sorted(set(components)),
@@ -151,6 +182,9 @@ data={'version':1,'target':os.path.realpath(target),'media':os.path.realpath(med
                  'apply_compose':apply=='true','legacy_license_mode':legacy,
                  'customer':customer,'license_file_path':os.path.realpath(licensepath) if licensepath else '',
                  'license_file_sha256':hashlib.sha256(open(licensepath,'rb').read()).hexdigest() if licensepath else ''}}
+if planpath:
+    data['options']['plan_baseline_path']=os.path.realpath(planpath)
+    data['options']['plan_baseline_sha256']=hashlib.sha256(open(planpath,'rb').read()).hexdigest()
 with open(out,'w',encoding='utf-8') as stream: json.dump(data,stream,ensure_ascii=False)
 PY
   then rm -rf -- "$identity_directory"; die '无法生成安装会话身份'; fi

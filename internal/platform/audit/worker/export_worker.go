@@ -142,11 +142,15 @@ func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (
 	hash := sha256.New()
 	// CSV 字节在写盘的同时进入哈希，避免二次读取大文件；摘要覆盖最终文件的精确内容。
 	writer := csv.NewWriter(io.MultiWriter(output, hash))
-	if err := writer.Write([]string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent"}); err != nil {
+	if err := writer.Write([]string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent", "actor_id", "actor_type", "reason_code", "business_id", "login_ip", "login_ip_source", "ingest_peer_ip", "ip_source", "received_at"}); err != nil {
 		return domain.ExportFile{}, "", fmt.Errorf("write audit export header: %w", err)
 	}
 	for _, event := range events {
-		row := []string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary, event.RequestID, event.TraceID, event.CorrelationID, event.Method, event.Path, event.ClientIP, event.UserAgent}
+		receivedAt := ""
+		if !event.ReceivedAt.IsZero() {
+			receivedAt = event.ReceivedAt.UTC().Format(time.RFC3339Nano)
+		}
+		row := []string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary, event.RequestID, event.TraceID, event.CorrelationID, event.Method, event.Path, event.ClientIP, event.UserAgent, event.ActorID, event.ActorType, event.ReasonCode, event.BusinessID, event.LoginIP, event.LoginIPSource, event.IngestPeerIP, event.IPSource, receivedAt}
 		// 安全审查 SEC-B6：所有数据单元格统一做公式注入转义——攻击者可控字段
 		// （User-Agent/资源名/路径等）若以 = + - @ 或前导 tab/CR 开头，审计员用
 		// Excel/WPS 打开导出文件时会被解释为公式并可能执行。

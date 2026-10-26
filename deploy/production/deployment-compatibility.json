@@ -1,0 +1,16 @@
+{
+  "schema": "uip.deployment-compatibility/v1",
+  "release": "2026-10-26",
+  "assets_contract": "1",
+  "config_contract": "1",
+  "database": {
+    "current_min": 0,
+    "migrate_to": 128,
+    "previous_program_after_migration": "unknown",
+    "migration_set_sha256": "6c5fe40148042995f3558d779f08745cf05a29407598c5bc98ea1b5d85eb9fe4"
+  },
+  "recovery": {
+    "type": "forward-only",
+    "requires_backup": true
+  }
+}

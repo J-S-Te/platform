@@ -14,6 +14,8 @@ import (
 	authorizationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/interfaces/http"
 	positiongrant "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/positiongrant"
 	configurationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/configuration/interfaces/http"
+	credentialcrypto "github.com/J-S-Te/Basic-Platform/internal/platform/credentialcrypto"
+	credentialhttp "github.com/J-S-Te/Basic-Platform/internal/platform/credentialcrypto/interfaces/http"
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/interfaces/http"
 	externalidentityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/interfaces/http"
@@ -61,7 +63,8 @@ type OperationalModules struct {
 	TenantAuthorizationClone *tenantclonehttp.Handler
 	// AccessApplier 是管理控制台“对外访问”应用动作的可选部署执行器；
 	// 生产/远程部署保持 nil，不得在服务端隐式执行基础设施变更。
-	AccessApplier settingsapplication.AccessApplier
+	AccessApplier        settingsapplication.AccessApplier
+	CredentialEncryption *credentialhttp.Handler
 }
 
 // NewRouter 先建立请求标识、可信代理、日志、恢复、CORS、CSRF 与内容类型等统一边界，
@@ -94,6 +97,24 @@ func NewRouter(
 	// 这种顺序让每个路由组的认证边界清晰，也避免某个可选模块缺失时意外暴露半成品接口。
 	router := gin.New()
 	operationalMetrics := NewOperationalMetrics(database)
+	credentialJSON := func(purpose, routeKey string, next http.HandlerFunc) http.HandlerFunc {
+		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
+			return operational.CredentialEncryption.WrapJSON(purpose, routeKey, next)
+		}
+		return next
+	}
+	credentialResourceJSON := func(purpose, routeKey string, next http.HandlerFunc) http.HandlerFunc {
+		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
+			return operational.CredentialEncryption.WrapJSONResource(purpose, routeKey, nil, next)
+		}
+		return next
+	}
+	credentialBatch := func(purpose, routeKey string, next http.HandlerFunc) http.HandlerFunc {
+		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
+			return operational.CredentialEncryption.WrapJSONOrMultipart(purpose, routeKey, next)
+		}
+		return next
+	}
 	router.HandleMethodNotAllowed = true
 	if err := router.SetTrustedProxies(cfg.HTTP.TrustedProxies); err != nil {
 		panic("invalid trusted proxy configuration: " + err.Error())
@@ -104,7 +125,7 @@ func NewRouter(
 	router.Use(
 		middleware.RequestID(),
 		middleware.TraceCorrelation(),
-		middleware.ClientIP(),
+		middleware.ClientIP(cfg.HTTP.TrustedProxies),
 		operationalMetrics.Middleware(),
 		middleware.Recover(logger),
 		middleware.AccessLog(logger),
@@ -164,7 +185,14 @@ func NewRouter(
 		// 安全审查 SEC-B7：登录改双桶限流——账号维度30/min先限（换 IP 不豁免）、
 		// IP 维度120/min兜底（随机换号撞库有界），消灭原“全客户端共用一个30/min IP 桶、
 		// 单攻击者可触发全员锁定”的问题。多副本与反代配置要求见 platform/docs/rate-limiting.md。
-		authRouter.POST("/login", middleware.LoginRateLimit("account", 30, 120, time.Minute), adaptHandler(authHandler.Login))
+		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
+			authRouter.POST("/credential-challenges", adaptHandler(operational.CredentialEncryption.IssueChallenge))
+		}
+		loginHandler := authHandler.Login
+		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
+			loginHandler = operational.CredentialEncryption.WrapJSON(credentialcrypto.PurposeLogin, "auth.login", loginHandler)
+		}
+		authRouter.POST("/login", middleware.LoginRateLimit("account", 30, 120, time.Minute), adaptHandler(loginHandler))
 		// 安全审查 AUD-2026-010：GET /login 与 GET /oidc/callback 每次都会触发对身份源的
 		// 出站协议动作（授权重定向 / token 交换 + userinfo + DB 查询），复用 /oauth2/token 的
 		// IP 固定窗口限流（60/min）约束出站放大面。与 protocolRouter 共享同一限流器实例，
@@ -254,8 +282,8 @@ func NewRouter(
 		if managementHandler != nil {
 			apiRouter.GET("/users", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.ListUsers))
 			apiRouter.POST("/users", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUser))
-			apiRouter.POST("/employees", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateEmployee))
-			apiRouter.POST("/employees/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateEmployeesBatch))
+			apiRouter.POST("/employees", middleware.RequirePermission("platform:user:create"), adaptHandler(credentialJSON(credentialcrypto.PurposeCreateEmployee, "employee.create", managementHandler.CreateEmployee)))
+			apiRouter.POST("/employees/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(credentialBatch(credentialcrypto.PurposeCreateEmployees, "employee.batch", managementHandler.CreateEmployeesBatch)))
 			apiRouter.POST("/users/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUsersBatch))
 			apiRouter.GET("/users/:user_id", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.GetUser))
 			apiRouter.PATCH("/users/:user_id", middleware.RequirePermission("platform:user:update"), adaptHandler(managementHandler.UpdateUser))
@@ -442,10 +470,10 @@ func NewRouter(
 		}
 
 		if accountLifecycleHandler != nil {
-			apiRouter.POST("/accounts", middleware.RequirePermission("platform:account:create"), adaptHandler(accountLifecycleHandler.CreateLocalAccount))
-			apiRouter.POST("/accounts/:account_id/password/initialize", middleware.RequirePermission("platform:account:password-initialize"), adaptHandler(accountLifecycleHandler.InitializePassword))
-			apiRouter.POST("/accounts/:account_id/password/reset", middleware.RequirePermission("platform:account:password-reset"), adaptHandler(accountLifecycleHandler.ResetPassword))
-			apiRouter.POST("/auth/password/change", adaptHandler(accountLifecycleHandler.ChangeOwnPassword))
+			apiRouter.POST("/accounts", middleware.RequirePermission("platform:account:create"), adaptHandler(credentialJSON(credentialcrypto.PurposeCreateAccount, "account.create", accountLifecycleHandler.CreateLocalAccount)))
+			apiRouter.POST("/accounts/:account_id/password/initialize", middleware.RequirePermission("platform:account:password-initialize"), adaptHandler(credentialResourceJSON(credentialcrypto.PurposeInitialize, "account.password.initialize", accountLifecycleHandler.InitializePassword)))
+			apiRouter.POST("/accounts/:account_id/password/reset", middleware.RequirePermission("platform:account:password-reset"), adaptHandler(credentialResourceJSON(credentialcrypto.PurposeReset, "account.password.reset", accountLifecycleHandler.ResetPassword)))
+			apiRouter.POST("/auth/password/change", adaptHandler(credentialJSON(credentialcrypto.PurposeChangePassword, "auth.password.change", accountLifecycleHandler.ChangeOwnPassword)))
 		}
 
 		if applicationAccessHandler != nil {

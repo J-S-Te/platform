@@ -111,10 +111,13 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		// 审计里看不出"登录在哪、这次操作在哪"。
 		clientIP := RequestClientIP(context.Request)
 		loginIPValue := loginIP(principal.LoginIP)
-		ipSource := "TRUSTED_PROXY"
-		if requestctx.ClientIP(context.Request.Context()) == "" {
-			// 没有经过可信代理链（直连或测试适配器）：地址来自连接本身。
-			ipSource = "DIRECT"
+		// 来源由可信代理中间件的解析过程给出（DIRECT / TRUSTED_PROXY / UNKNOWN），
+		// 不再按“上下文里有没有地址”推断——直连请求不应被标成可信代理。
+		_, ipSource := requestctx.ClientIPWithSource(context.Request.Context())
+		if ipSource == "" {
+			// 仅设置过地址的适配器（历史调用方/测试）：无法得知解析路径，标记未知，
+			// 不能凭“有地址”就推断为可信代理。
+			ipSource = "UNKNOWN"
 		}
 		if clientIP == "" && loginIPValue == "" {
 			ipSource = "UNKNOWN"

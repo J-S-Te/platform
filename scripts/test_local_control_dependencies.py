@@ -12,13 +12,18 @@ def function(name):
     return name + "() {" + SCRIPT.split(name + "() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 
 
+def source_lib(name):
+    """加载 scripts/lib/<name>.sh 真实库文件（仅函数定义，加载零副作用）。"""
+    return 'source "' + str(ROOT / "scripts/lib" / (name + ".sh")) + '"\n'
+
+
 class LocalRuntimeTargetValidationTest(unittest.TestCase):
     def validate(self, application, environment, client_id, *, succeeds=True,
                  application_code="", environment_code=""):
         harness = """
 set -Eeuo pipefail
 fail() { echo "FAIL: $*" >&2; exit 7; }
-runtime_value_configured() { [[ -n "$1" ]]; }
+""" + source_lib("runtime-validation") + """
 env_value() {
     local key="$2"
     case "$key" in
@@ -27,7 +32,7 @@ env_value() {
         *) printf '%s' "$STUB_CLIENT_ID" ;;
     esac
 }
-""" + function("validate_local_runtime_target")
+"""
         harness += 'validate_local_runtime_target 描述 runtime.env "$APPLICATION" "$ENVIRONMENT" CLIENT_KEY\n'
         env = {"PATH": "/usr/bin:/bin", "STUB_APPLICATION_CODE": application_code or application,
                "STUB_ENVIRONMENT_CODE": environment_code or environment, "STUB_CLIENT_ID": client_id}
@@ -60,6 +65,23 @@ env_value() {
 
     def test_stale_metadata_still_skips_validation(self):
         self.validate("customer_portal", "dev", "", application_code="", environment_code="")
+
+
+class CrmWorkerInventoryTest(unittest.TestCase):
+    def test_up_starts_every_licensed_crm_worker(self):
+        # start-presale-worker 的授权门禁要求 CRM 九个运行组件在窗口内全部 ACK：
+        # customer-api、presale-worker、presale-alert-worker 由各自步骤启动，其余六个
+        # worker 必须全部在 customer_notification_worker_services 中，否则 up 永远卡在门禁。
+        block = SCRIPT.split("customer_notification_worker_services=(", 1)[1].split(")", 1)[0]
+        services = {line.strip() for line in block.splitlines() if line.strip()}
+        self.assertEqual(services, {
+            "customer-opportunity-alert-worker",
+            "customer-owner-notification-worker",
+            "customer-presale-assignment-notification-worker",
+            "customer-presale-progress-notification-worker",
+            "customer-notification-delivery-worker",
+            "contract-transfer-worker",
+        })
 
 
 class DiscoveryCandidateSafetyTest(unittest.TestCase):
@@ -129,12 +151,16 @@ class LocalControlDependenciesTest(unittest.TestCase):
         harness = """
 set -Eeuo pipefail
 exec 3>&1
+""" + source_lib("compose") + """
 force_build=false
 log() { :; }
 sleep() { :; }
 prepare_operational_env() { :; }
 ensure_catalog_publisher_credentials_consistent() { :; }
 prepare_go_backend_base_images() { :; }
+preflight_local_license_images() { :; }
+refuse_pinned_rebuild() { :; }
+report_candidate_drift() { :; }
 ensure_platform_env_file() { :; }
 ensure_contract_env_file() { :; }
 ensure_customer_env_file() { :; }
@@ -155,7 +181,9 @@ compose_run() {
     fi
 }
 """
-        for name in ("compose_up_wait", "verify_local_file_gateway",
+        # compose_up_wait 已拆分到 lib/compose.sh，由 source 提供真实实现；
+        # 其余入口函数仍从 docker-local.sh 抽取。
+        for name in ("verify_local_file_gateway",
                      "ensure_platform_control_dependencies", target):
             harness += function(name)
         harness += target + "\n"

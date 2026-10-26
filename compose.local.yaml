@@ -270,6 +270,9 @@ services:
       SUBSYSTEM_PLATFORM_DOCKER_NETWORK: basic-platform-local_default
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # 应用授权编辑版本严格模式（handler 启动读取）：true 时 PUT/DELETE 必须携带
+      # expected_revision；默认 false 保持兼容期行为，切换须按发布流程显式开启。
+      IAM_APPLICATION_ACCESS_REVISION_STRICT: ${IAM_APPLICATION_ACCESS_REVISION_STRICT:-false}
       # catalog-publisher 长期凭据（SEC-N10）：Compose 不再插值，改由 env_file
       # （docker/.env.local，docker-local.sh 接入时写入）注入容器环境，避免在
       # compose 解析结果与进程环境中二次出现明文插值。

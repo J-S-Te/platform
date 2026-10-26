@@ -21,6 +21,7 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 [ -n "$output" ] && : > "$output"
+exit 0
 EOF
 
 cat > "$test_root/bin/id" <<'EOF'

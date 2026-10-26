@@ -58,6 +58,13 @@ jobs:
           python3 -B deploy/production/tests/test-offline-platform-selection.py
           python3 -B deploy/production/tests/test-delivery-inspect.py
           python3 -B deploy/production/tests/test-deployment-session.py
+          python3 deploy/production/bin/test-deployment-plan.py
+          python3 deploy/production/tests/test-deployment-compatibility.py
+          bash deploy/production/bin/test-recovery-status.sh
+          bash deploy/production/bin/test-first-failure.sh
+          bash deploy/production/bin/test-offline-configure.sh
+          bash deploy/production/bin/test-release-reliability.sh
+          bash deploy/production/tests/test-assets-install.sh
           python3 -B deploy/production/tests/test-delivery-files.py
           python3 -B deploy/production/tests/test-delivery-runtime.py
           python3 deploy/production/bin/test-subsystem-runtime.py
@@ -198,13 +205,38 @@ jobs:
             bin subsystems.d subsystem-templates mysql-init nginx monitoring tests \
             docker-compose.yml .env.example .release.env.example .gitignore \
             ACCEPTANCE_CHECKLIST.md README.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md \
-            DEPLOYMENT_COMPATIBILITY.md DELIVERY_WORKFLOW.md BACKUP_RECOVERY.md
+            DEPLOYMENT_COMPATIBILITY.md deployment-compatibility.json DELIVERY_WORKFLOW.md BACKUP_RECOVERY.md
           (cd "$asset_work_dir" && sha256sum deployment-assets.tar.gz > deployment-assets.tar.gz.sha256)
           cp deploy/production/bin/install-assets.sh "$asset_work_dir/install-assets.sh"
           cp deploy/production/bin/provisioner-config-refresh.sh "$asset_work_dir/provisioner-config-refresh.sh"
           cp deploy/production/bin/frontend-network.py "$asset_work_dir/frontend-network.py"
           printf -v install_command 'deploy_path=%q; gateway_image=%q; platform_image=%q; backend_changed=%q; set -Eeuo pipefail; [[ "$gateway_image" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1; work_dir=$(mktemp -d); trap '\''rm -rf -- "$work_dir"'\'' EXIT; tar -xzf - -C "$work_dir"; source "$work_dir/provisioner-config-refresh.sh"; deploy_dir="$deploy_path"; prepare_ci_deploy_root; if [[ "$backend_changed" != true ]] && { test -e "$deploy_path/runtime/.control-plane-reload-required" || test -L "$deploy_path/runtime/.control-plane-reload-required"; }; then (cd "$deploy_path" && FILE_GATEWAY_IMAGE="$gateway_image" ./bin/deploy.sh reload-control-plane); fi; if [[ "$backend_changed" == true ]]; then [[ "$platform_image" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]] || exit 1; export ASSETS_PLATFORM_UPGRADE_IMAGE="$platform_image"; fi; bash "$work_dir/install-assets.sh" "$work_dir/deployment-assets.tar.gz" "$deploy_path"' "$DEPLOY_PATH" "$FILE_GATEWAY_IMAGE_REF" "$IMAGE_REF" "$BACKEND_CHANGED"
           tar -C "$asset_work_dir" -czf - deployment-assets.tar.gz deployment-assets.tar.gz.sha256 install-assets.sh provisioner-config-refresh.sh frontend-network.py | ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "bash -c $(printf '%q' "$install_command")"
+      - name: Check deployment compatibility
+        if: steps.detect.outputs.backend_changed == 'true' && vars.ENFORCE_DEPLOY_COMPATIBILITY == 'true'
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          printf -v remote_command 'cd %q && ./bin/deploy.sh plan --action upgrade --component platform --compatibility-only --format human' "$DEPLOY_PATH"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command"
+
       - name: Apply test-server placeholder database credentials switch
         # 当前部署环境为测试服务器（environment: test）。每次部署都会把占位凭据
         # 开关写入服务器 .env 并重建 Agent，让测试接入不再被数据库密码阻塞。

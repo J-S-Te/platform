@@ -34,6 +34,7 @@ func toDomainAccount(model accountModel) domain.Account {
 		PasswordInitialized: model.PasswordInitialized,
 		Status:              model.Status,
 		LastLoginAt:         copyTime(model.LastLoginAt),
+		LockedUntil:         copyTime(model.LockedUntil),
 		ValidUntil:          copyTime(model.ValidUntil),
 		Version:             model.Version,
 		CreatedAt:           model.CreatedAt.UTC(),

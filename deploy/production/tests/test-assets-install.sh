@@ -232,10 +232,14 @@ bootstrap_installer="$fixture/output/install-assets.sh"
 }
 (cd "$fixture/output" && sha256sum --check install-assets.sh.sha256)
 cmp "$installer" "$bootstrap_installer"
-tar -tzf "$asset_archive" | grep -qx './bin/publish-runtime-approvals.py' || {
+asset_listing="$fixture/assets.list"
+tar -tzf "$asset_archive" > "$asset_listing" || {
+  echo '无法读取资产包清单' >&2; exit 1;
+}
+grep -qx './bin/publish-runtime-approvals.py' "$asset_listing" || {
   echo '资产包缺少运行批准发布器，approval-reload 无法执行' >&2; exit 1
 }
-if tar -tzf "$asset_archive" | grep -Eq '(^|/)(\.env$|\.release\.env$|.*\.bak$|.*\.pem$|.*\.key$|dump[^/]*\.sql(\.gz)?$)'; then
+if grep -Eq '(^|/)(\.env$|\.release\.env$|.*\.bak$|.*\.pem$|.*\.key$|dump[^/]*\.sql(\.gz)?$)' "$asset_listing"; then
   echo 'sensitive or runtime file entered the explicit asset package' >&2; exit 1
 fi
 

@@ -19,6 +19,26 @@ configure_local_project_background_build() {
   export PROJECT_BACKGROUND_BUILD_ID="project-background-sha256-${local_project_image#sha256:}"
 }
 
+# 本地 dev 未导入厂商 JWS 是常态：后台 worker 此时按 PAUSED_LICENSE 刻意暂停执行，
+# 生产状态机会拒绝完成受控切换并保留候选（stage=activating，不放宽其语义）。此函数
+# 只在「唯一阻塞是授权暂停且 bootstrap/routing 均就绪」时为真；其他任何失败都不可
+# 容忍，调用方必须按原样失败。
+local_project_background_license_paused() {
+  local operation state rc=1
+  local state_file="$project_root/runtime/project-background/operation.json"
+  [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
+  operation="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("operation_id",""))' "$state_file" 2>/dev/null)" || return 1
+  [[ -n "$operation" ]] || return 1
+  state="$(mktemp "${TMPDIR:-/tmp}/uip-project-inspect.XXXXXX")" || return 1
+  if compose exec -T sla-notifier /usr/local/bin/project-background-control --action inspect --operation-id "$operation" >"$state" 2>/dev/null; then
+    if python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("paused_reason")=="PAUSED_LICENSE" and d.get("bootstrap_ready") is True and d.get("routing_ready") is True else 1)' "$state"; then
+      rc=0
+    fi
+  fi
+  rm -f -- "$state"
+  return "$rc"
+}
+
 local_project_background() (
   local action="${1:-}"
   case "$action" in prepare|activate|verify|teardown|stopped) ;; *) return 2 ;; esac

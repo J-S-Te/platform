@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +17,15 @@ import (
 )
 
 func main() {
+	// 只读配置校验：复用 API 的同一套解析/校验逻辑，不启动 HTTP、数据库或后台任务。
+	if len(os.Args) == 2 && os.Args[1] == "config-check" {
+		if _, err := config.Load(); err != nil {
+			slog.Error("configuration invalid", "error", err)
+			os.Exit(1)
+		}
+		fmt.Println("configuration valid")
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("api process stopped with an error", "error", err)
 		os.Exit(1)

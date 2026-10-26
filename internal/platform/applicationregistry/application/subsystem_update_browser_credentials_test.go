@@ -104,3 +104,50 @@ func TestSubsystemUpdateBrowserCredentialsRejectsMissingOrDrifted(t *testing.T) 
 		t.Fatalf("duplicate client err = %v", err)
 	}
 }
+
+func TestSubsystemAccessBrowserReferenceIsReadOnly(t *testing.T) {
+	for _, invalid := range []string{"", "missing", "tenant", "disabled", "duplicate"} {
+		t.Run(invalid, func(t *testing.T) {
+			client := browserClientFixture()
+			clients := []OAuthClientView{client}
+			switch invalid {
+			case "missing":
+				clients = nil
+			case "tenant":
+				clients[0].TenantID = "other"
+			case "disabled":
+				clients[0].Status = "DISABLED"
+			case "duplicate":
+				clients = append(clients, client)
+			}
+			stub := &browserCredentialPortStub{clients: clients}
+			id, err := browserCredentialServiceFor(t, stub).ReadSubsystemAccessBrowserClientID(context.Background(), "tenant-1", client.ApplicationID, client.EnvironmentID, "settlement", "dev")
+			if invalid == "" {
+				if err != nil || id != client.ClientID {
+					t.Fatalf("id=%q err=%v", id, err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid reference accepted")
+			}
+			if stub.secretCalls != 0 || stub.createCalls != 0 {
+				t.Fatal("read-only recovery wrote credentials")
+			}
+		})
+	}
+}
+
+func TestSubsystemAccessRecoversNewlyCreatedBrowserClient(t *testing.T) {
+	client := browserClientFixture()
+	stub := &browserCredentialPortStub{created: OAuthClientCreateResult{Client: client, PlaintextSecret: "one-time-secret"}}
+	service := browserCredentialServiceFor(t, stub)
+	_, err := service.Ensure(context.Background(), client.TenantID, "operator-1", client.ApplicationID, client.EnvironmentID, "settlement", "dev", client.RedirectURIs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.GrantTypes = stub.lastCreate.GrantTypes
+	stub.clients = []OAuthClientView{client}
+	id, err := service.ReadSubsystemAccessBrowserClientID(context.Background(), client.TenantID, client.ApplicationID, client.EnvironmentID, "settlement", "dev")
+	if err != nil || id != client.ClientID || stub.secretCalls != 0 || stub.createCalls != 1 {
+		t.Fatalf("id=%q err=%v create=%d secrets=%d", id, err, stub.createCalls, stub.secretCalls)
+	}
+}

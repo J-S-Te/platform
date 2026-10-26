@@ -49,6 +49,9 @@ type RetentionRepository interface {
 // ArchiveWriter 将事件写入受控只读归档目录。归档正文不进入业务 MySQL。
 type ArchiveWriter interface {
 	WriteArchive(context.Context, domain.RetentionTask, []domain.Event, time.Time) (domain.Archive, error)
+	// VerifyArchive 在清理前核对归档文件仍存在且摘要一致。
+	// 统一审计方案 §3.4：不能只凭数据库元数据就删除在线记录。
+	VerifyArchive(domain.Archive) error
 }
 
 // RetentionService 通过任务模型管理归档和清理；故意不公开直接删除审计事件的方法。
@@ -188,6 +191,12 @@ func (service *RetentionService) purge(ctx context.Context, task domain.Retentio
 	}
 	if err := service.repository.SetRetentionTaskCandidateCount(ctx, task.TaskID, archive.EventCount); err != nil {
 		return service.fail(ctx, task, "PURGE_CANDIDATE_COUNT_UPDATE_FAILED", err, now)
+	}
+	// 清理前必须证明归档真实存在且摘要有效；校验失败时一条在线记录都不能删。
+	if archive.EventCount > 0 {
+		if err := service.writer.VerifyArchive(archive); err != nil {
+			return service.fail(ctx, task, "ARCHIVE_INTEGRITY_FAILED", err, now)
+		}
 	}
 	if archive.EventCount == 0 {
 		if err := service.record(ctx, task, "audit.retention.purge", "audit_archive", archive.ArchiveID, "空归档清理任务已完成"); err != nil {

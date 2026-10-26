@@ -50,14 +50,17 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(os.stat(backups[0]).st_mode & 0o777, 0o600)
 
     def test_shell_retained_volume_guard_never_generates_missing_config(self):
-        source = Path(__file__).with_name("docker-local.sh").read_text()
-        function = source.split("ensure_contract_env_file() {", 1)[1].split("\n}\n", 1)[0]
+        # ensure_contract_env_file 已拆分到 scripts/lib/env-templates.sh：
+        # 直接加载真实函数库验证保留数据卷守卫，docker 用只读替身拦截。
+        lib = Path(__file__).with_name("lib") / "env-templates.sh"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "missing.env"
             script = '''set -Eeuo pipefail
 fail() { echo "$1"; exit 1; }
 docker() { echo basic-platform-local-contract-mysql-data; }
-ensure_contract_env_file() {''' + function + '\n}\nensure_contract_env_file false\n'
+source "''' + str(lib) + '''"
+ensure_contract_env_file false
+'''
             result = subprocess.run(["bash", "-c", 'contract_env_file="$1"; ' + script, "bash", str(path)], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("配置丢失", result.stdout)

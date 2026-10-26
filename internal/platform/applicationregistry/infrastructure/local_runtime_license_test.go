@@ -228,6 +228,7 @@ func TestLocalRuntimeLicenseCredentialDeliveryAndPinnedCompleteStartup(t *testin
 		t.Fatal("secret rotation changed image/state binding")
 	}
 }
+
 // 已批准发行缺少组件凭据时，错误必须能被上层归类为“授权实例未初始化”，
 // 并给出可执行的中文指引，而不是让用户看到与实际原因无关的凭据报错。
 func TestLocalRuntimeLicenseMissingCredentialsNamesTheLicenseCause(t *testing.T) {

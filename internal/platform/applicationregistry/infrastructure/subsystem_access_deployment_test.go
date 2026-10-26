@@ -800,3 +800,103 @@ type updateCatalogPublisherStub struct{}
 func (updateCatalogPublisherStub) Ensure(context.Context, string, string, string, string, string, string) (application.SubsystemUpdateCatalogPublisherCredential, error) {
 	return application.SubsystemUpdateCatalogPublisherCredential{ClientID: "settlement-dev-catalog-publisher", ClientSecret: "publisher-secret"}, nil
 }
+
+type accessBrowserReferenceStub struct {
+	calls        int
+	appID, envID string
+	err          error
+}
+
+func (stub *accessBrowserReferenceStub) ReadSubsystemAccessBrowserClientID(_ context.Context, _, appID, envID, _, _ string) (string, error) {
+	stub.calls++
+	stub.appID, stub.envID = appID, envID
+	return "settlement-dev-web", stub.err
+}
+func TestSubsystemAccessFinalizerRecoversIdentityAfterRestart(t *testing.T) {
+	projection := &keycloakProjectionStub{}
+	adapter, err := NewSubsystemAccessDeploymentAdapter(&deploymentOnboardingStub{}, &deploymentProvisionerStub{}, accessCatalogWithTarget(), relatedClientsStub{}, deploymentStateStub{}, issuerStub{}, nil, updateCredentialStub{}, updateBrowserStub{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewKeycloakAuthorizationProjectionService(projection, projection, projection, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.SetKeycloakProjection(service, "basic")
+	references := &accessBrowserReferenceStub{}
+	adapter.SetIdentityReaders(registryLookupStub{applicationID: "app-1", environmentID: "env-1", found: true}, references)
+	op := onboardingOperation()
+	op.ApplicationID = ""
+	op.EnvironmentID = ""
+	op.AuthProvider = "keycloak"
+	for _, run := range []*application.SubsystemAccessRunState{{Credentials: &application.SubsystemProvisioningCredentials{ClientID: "settlement-dev-web"}}, {}} {
+		outcome, err := adapter.FinalizeSubsystemAccess(context.Background(), op, run)
+		if err != nil || outcome.Status != application.SubsystemAccessStatusSucceeded {
+			t.Fatalf("outcome=%+v err=%v", outcome, err)
+		}
+	}
+	if references.calls != 1 || references.appID != "app-1" || references.envID != "env-1" {
+		t.Fatalf("references=%+v", references)
+	}
+	op.ApplicationID = "other-app"
+	if _, err := adapter.FinalizeSubsystemAccess(context.Background(), op, &application.SubsystemAccessRunState{}); err == nil {
+		t.Fatal("changed registration accepted")
+	}
+	references.err = errors.New("reference unavailable")
+	op.ApplicationID = ""
+	if _, err := adapter.FinalizeSubsystemAccess(context.Background(), op, &application.SubsystemAccessRunState{}); err == nil {
+		t.Fatal("failed reference read accepted")
+	}
+}
+
+type accessConfigurationEvidenceStub struct {
+	snapshot                 string
+	verified                 bool
+	err                      error
+	snapshots, verifications int
+}
+
+func (stub *accessConfigurationEvidenceStub) Snapshot(context.Context, application.SubsystemAccessOperation) (string, error) {
+	stub.snapshots++
+	return stub.snapshot, stub.err
+}
+func (stub *accessConfigurationEvidenceStub) Verify(context.Context, application.SubsystemAccessOperation) (bool, error) {
+	stub.verifications++
+	return stub.verified, stub.err
+}
+func TestSubsystemAccessFinalizerRejectsChangedConfiguration(t *testing.T) {
+	adapter, err := NewSubsystemAccessDeploymentAdapter(&deploymentOnboardingStub{}, &deploymentProvisionerStub{}, accessCatalogWithTarget(), relatedClientsStub{}, deploymentStateStub{}, issuerStub{}, nil, updateCredentialStub{}, updateBrowserStub{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := &accessConfigurationEvidenceStub{verified: false}
+	adapter.SetConfigurationEvidence(tracker)
+	outcome, err := adapter.FinalizeSubsystemAccess(context.Background(), onboardingOperation(), &application.SubsystemAccessRunState{})
+	if err != nil || outcome.Status != application.SubsystemAccessStatusFailed || outcome.ErrorCode != "CONFIGURATION_CHANGED" {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+	tracker.err = errors.New("evidence unavailable")
+	if _, err = adapter.FinalizeSubsystemAccess(context.Background(), onboardingOperation(), nil); err == nil {
+		t.Fatal("unreadable evidence accepted")
+	}
+}
+
+func TestSubsystemAccessProvisionCarriesResolvedIdentityAndCandidate(t *testing.T) {
+	provisioner := &deploymentProvisionerStub{}
+	adapter := deploymentAdapterFor(t, &deploymentOnboardingStub{}, provisioner, relatedClientsStub{}, deploymentStateStub{}, issuerStub{issuer: "https://sso.example.com"})
+	adapter.SetIdentityReaders(registryLookupStub{applicationID: "app-1", environmentID: "env-1", found: true}, nil)
+	tracker := &accessConfigurationEvidenceStub{snapshot: strings.Repeat("a", 64)}
+	adapter.SetConfigurationEvidence(tracker)
+	run := &application.SubsystemAccessRunState{Credentials: &application.SubsystemProvisioningCredentials{ClientID: "settlement-dev-web", ClientSecret: "secret", RedirectURI: "https://settlement.example.com/callback", PublicURL: "https://settlement.example.com"}}
+	outcome, err := adapter.ProvisionSubsystemAccess(context.Background(), onboardingOperation(), run)
+	if err != nil || outcome.Status != application.SubsystemAccessStatusSucceeded || accessCandidateFromEvidence(outcome.EvidenceRef) != tracker.snapshot {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+	if provisioner.seen.ApplicationID != "app-1" || provisioner.seen.EnvironmentID != "env-1" {
+		t.Fatal("first onboarding IDs were not forwarded")
+	}
+	tracker.err = errors.New("snapshot unavailable")
+	if _, err = adapter.ProvisionSubsystemAccess(context.Background(), onboardingOperation(), run); err == nil || provisioner.provisionCalls != 1 {
+		t.Fatal("deployment ran without candidate evidence")
+	}
+}

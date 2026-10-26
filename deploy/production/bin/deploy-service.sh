@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+rollback_skipped=false
+recovery_config_failed=false
+migration_state=not_started
 
 # 每次发布只接受带 sha256 digest 的阿里云镜像。版本指针写入 .release.env，运行密钥仍留在
 # 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
@@ -919,7 +922,10 @@ deploy_platform() {
   # 否则 mysqld 被杀/重启时会把“数据库没起来”误报成备份失败。
   require_mysql_ready platform-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
   backup_database_if_initialized platform-mysql basic_platform || return
+  compose run --rm --no-deps platform-migrate ./api config-check || return
+  migration_state=attempted
   compose run --rm --no-deps platform-migrate ./migrate || return
+  migration_state=completed
   provision_iam_import_client || return 1
   ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout 180 keycloak temporal || return
@@ -1245,7 +1251,33 @@ restore_legacy_file_gateway_pointer() {
   echo '已从既有 File Gateway 容器恢复不可变版本指针，后续发布可按原镜像回滚'
 }
 
+record_recovery_result() {
+  local result="$1" message="$2" migration="${migration_state:-unknown}" output="$deploy_dir/runtime/recovery-status.json" temporary
+  mkdir -p "$deploy_dir/runtime" || return 0
+  temporary="$(mktemp "$deploy_dir/runtime/.recovery-status.XXXXXX")" || return 0
+  if python3 - "$output" "$result" "$service" "$message" "$migration" >"$temporary" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+print(json.dumps({
+    "schema": "uip.recovery-status/v1",
+    "at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "service": sys.argv[3],
+    "status": sys.argv[2],
+    "migration": sys.argv[5],
+    "message": sys.argv[4],
+    "verified": sys.argv[2] == "recovered",
+}, ensure_ascii=False, sort_keys=True))
+PY
+  then
+    chmod 600 "$temporary" && mv -f -- "$temporary" "$output" || rm -f -- "$temporary"
+  else
+    rm -f -- "$temporary"
+    echo '警告：无法写入恢复结果记录；请保留现场并人工核对。' >&2
+  fi
+}
+
 rollback_runtime() {
+  rollback_skipped=false
   local -a restored_images=()
   local restored_image_key restored_image
   case "$service" in
@@ -1269,6 +1301,7 @@ rollback_runtime() {
   for restored_image in "${restored_images[@]}"; do
     if ! rollback_ref_is_immutable "$restored_image"; then
       echo "上一发布配置没有可回滚的不可变镜像（${restored_image:-空值}）；这是首次安装或旧配置占位值，保留已健康的基础设施并跳过运行态回滚" >&2
+      rollback_skipped=true
       return 0
     fi
   done
@@ -1507,7 +1540,7 @@ echo "开始发布 $service"
 # 标识符字符；统一转换后再动态调用，避免执行 deploy_data-analysis 这样的外部命令。
 deploy_function="deploy_${service//-/_}"
 if "$deploy_function"; then
-  rm -f "$previous_release"
+  rm -f "$previous_release" "$deploy_dir/runtime/recovery-status.json" 2>/dev/null || true
   echo "$service 发布成功：$image_ref"
   exit 0
 fi
@@ -1515,19 +1548,34 @@ fi
 echo "发布失败，恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
 if [[ "$service" == project ]] && ! project_background_rollback; then
   echo '新后台未能证明排空，禁止先恢复镜像指针；保留当前进程、候选及操作状态。' >&2
+  record_recovery_result failed '新后台未能证明排空，未恢复镜像指针'
   exit 1
 fi
 # 应用镜像可回退，数据库迁移不可自动逆转；迁移必须保持前后版本兼容或由人工执行恢复方案。
 mv -f "$previous_release" "$release_file"
 rm -f "$previous_release"
 if [[ "$service" != platform ]]; then
-  refresh_subsystem_provisioner_config || \
-    echo '警告：发布回滚后 Agent 配置一致性核验失败，请暂停接入操作并人工处理' >&2
+  if ! refresh_subsystem_provisioner_config; then
+    recovery_config_failed=true
+    echo '错误：发布回滚后 Agent 配置一致性核验失败，请暂停接入操作并人工处理' >&2
+  fi
 fi
 if [[ "$service" == "data-analysis" ]]; then
   # 必须在 rollback_runtime 重建容器之前恢复：否则旧镜像会带着新哈希 fail-closed 启动。
-  restore_data_analysis_role_config_hash "$data_analysis_runtime_file" || \
-    echo '警告：数据看板授权目录哈希恢复失败，请人工核对 runtime/data-analysis.env 后再重建容器' >&2
+  if ! restore_data_analysis_role_config_hash "$data_analysis_runtime_file"; then
+    recovery_config_failed=true
+    echo '错误：数据看板授权目录哈希恢复失败，请人工核对 runtime/data-analysis.env 后再重建容器' >&2
+  fi
 fi
-rollback_runtime || true
+if rollback_runtime; then
+  if [[ "$recovery_config_failed" == true ]]; then
+    record_recovery_result failed '上一镜像已重建，但 Agent/配置一致性核验失败'
+  elif [[ "$rollback_skipped" == true ]]; then
+    record_recovery_result not_applicable '首次安装或无可回滚的不可变镜像，未执行运行态回滚'
+  else
+    record_recovery_result recovered '上一镜像已恢复并通过镜像和健康核验'
+  fi
+else
+  record_recovery_result failed '上一镜像恢复未通过镜像/健康/配置核验，请保留现场人工处理'
+fi
 exit 1

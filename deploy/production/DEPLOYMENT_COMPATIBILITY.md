@@ -63,3 +63,11 @@ Shell 发布具备对应镜像／指针回退分支，但生产 Agent 更新不�
 
 生产脚本使用相同统一发布锁、受控清单和数据库备份门禁；时区覆盖须由新版包装入口与 Agent 一起读取。
 恢复和业务验收以 [BACKUP_RECOVERY](BACKUP_RECOVERY.md) 及 [ACCEPTANCE_CHECKLIST](ACCEPTANCE_CHECKLIST.md) 为准。
+
+## 2026-10-25 机器可读声明
+
+新增 `deployment-compatibility.json`（schema `uip.deployment-compatibility/v1`），随部署资产打包并纳入资产白名单。当前基线声明 `database.migrate_to=127`、`previous_program_after_migration=unknown`、`recovery.type=forward-only`；这只是**未证明**的保守基线，不是兼容证据，也不是运行批准。
+
+声明由 `bin/build-deployment-compatibility.py` 在资产构建时根据当前迁移文件生成，`migration_set_sha256` 与迁移内容绑定；上一程序兼容性只能从独立的 `uip.deployment-compatibility-evidence/v1` 证据文件读取，证据哈希不匹配时自动回落 `unknown`，不接受操作员手写 compatible。
+
+`bin/deploy.sh plan --action upgrade ...` 会读取该声明：上一程序兼容性未知或明确不兼容时普通升级阻断；显式选择前向恢复时仍要求完整备份摘要、迁移目标、审核人、批准时间和经验证步骤。`tests/test-deployment-compatibility.py` 将声明与当前迁移文件名/内容哈希 `migration_set_sha256` 绑定，防止只改声明或漏改迁移；真实发布批次仍需提供经测试的兼容性证据，不能把 `unknown` 手工改成 `compatible` 当作证明。

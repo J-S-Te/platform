@@ -60,8 +60,16 @@ func (*writeBoundaryConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("unexpected prepared SQL")
 }
 func (*writeBoundaryConn) Close() error { return nil }
+
+// readBoundaryTx 允许管理端 GET 为"可编辑集合与版本同快照"开启只读事务；
+// 事务内任何写入仍被 ExecContext 拒绝，写路径的边界断言不受影响。
+type readBoundaryTx struct{}
+
+func (readBoundaryTx) Commit() error   { return nil }
+func (readBoundaryTx) Rollback() error { return nil }
+
 func (*writeBoundaryConn) Begin() (driver.Tx, error) {
-	return nil, errors.New("unexpected transaction")
+	return readBoundaryTx{}, nil
 }
 func (c *writeBoundaryConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	q := strings.ToLower(query)
@@ -91,6 +99,18 @@ func (c *writeBoundaryConn) QueryContext(_ context.Context, query string, args [
 	if c.scenario.upcoming != nil {
 		plain := strings.ReplaceAll(q, "`", "")
 		switch {
+		case strings.Contains(plain, "order by rb.id"):
+			// edit_revision 的绑定行版本查询：必须带租户/应用/主体/来源边界。
+			if !boundaryArg(args, "tenant-1") || !boundaryArg(args, "app-1") || !boundaryArg(args, "MANUAL") {
+				return nil, fmt.Errorf("edit revision query lost tenant/application/origin boundary: %s", query)
+			}
+			return &writeBoundaryRows{columns: []string{"id", "version", "role_id", "scope_type", "scope_id", "status", "valid_from", "valid_until", "grant_origin", "origin_id", "origin_item_id"}}, nil
+		case strings.Contains(plain, "authz_user_permission"):
+			// edit_revision 的历史自定义权限查询：必须带租户/应用边界。
+			if !boundaryArg(args, "tenant-1") || !boundaryArg(args, "app-1") {
+				return nil, fmt.Errorf("edit revision permission query lost tenant/application boundary: %s", query)
+			}
+			return &writeBoundaryRows{columns: []string{"permission_id", "created_at"}}, nil
 		case strings.Contains(plain, "from platform_application "):
 			return &writeBoundaryRows{columns: []string{"id", "tenant_id", "code"}, values: [][]driver.Value{{"app-1", "tenant-1", "sales-app"}}}, nil
 		case strings.Contains(plain, "from authz_application_authorization_policy"):
@@ -113,6 +133,21 @@ func (c *writeBoundaryConn) QueryContext(_ context.Context, query string, args [
 		}
 	}
 	switch {
+	case strings.Contains(q, "from iam_tenant"):
+		// 写路径必须在目标校验前以 FOR UPDATE 锁定租户行（方案锁序第一环）。
+		if !strings.Contains(q, "for update") {
+			return nil, errors.New("application access write missing tenant row lock")
+		}
+		return &writeBoundaryRows{columns: []string{"id"}, values: [][]driver.Value{{"tenant-1"}}}, nil
+	case strings.Contains(q, "order by rb.id"):
+		// edit_revision 的绑定行版本查询（非 upcoming 写边界测试场景）。
+		rows := &writeBoundaryRows{columns: []string{"id", "version", "role_id", "scope_type", "scope_id", "status", "valid_from", "valid_until", "grant_origin", "origin_id", "origin_item_id"}}
+		for _, binding := range c.scenario.existing {
+			rows.values = append(rows.values, []driver.Value{binding.ID, int64(binding.Version), binding.RoleID, binding.ScopeType, binding.ScopeID, binding.Status, boundaryTime(binding.ValidFrom), boundaryTime(binding.ValidUntil), "MANUAL", "", ""})
+		}
+		return rows, nil
+	case strings.Contains(q, "authz_user_permission"):
+		return &writeBoundaryRows{columns: []string{"permission_id", "created_at"}}, nil
 	case strings.Contains(q, "authz_role_binding as rb") && strings.Contains(q, "rb.version"):
 		if !strings.Contains(q, "rb.tenant_id = ?") || !strings.Contains(q, "rb.application_id = ?") || !boundaryArg(args, "tenant-1") || !boundaryArg(args, "app-1") || !boundaryArg(args, "operator-1") {
 			return nil, fmt.Errorf("unscoped reconciliation query: %s", query)

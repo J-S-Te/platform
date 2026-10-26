@@ -330,9 +330,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 
 	// 集成子系统与平台共用 Compose 项目，因此只能停止自己的运行组件，不能执行 down；
 	// 独立子系统则拥有完整栈和 .env.local，可按项目整体清理。
-		// 独立子系统的 Compose 栈和 .env.local 位于其项目目录内；集成的 contract、customer 和
-		// Portal API 与平台共用 Compose 项目，因此 teardown 只停止其运行组件，并有意保留共享
-		// 运行环境文件中的数据库/密钥材料。
+	// 独立子系统的 Compose 栈和 .env.local 位于其项目目录内；集成的 contract、customer 和
+	// Portal API 与平台共用 Compose 项目，因此 teardown 只停止其运行组件，并有意保留共享
+	// 运行环境文件中的数据库/密钥材料。
 	projectDirectory, projectErr := provisioner.projectDirectory(applicationCode)
 	if projectErr == nil {
 		localApproval := filepath.Join(provisioner.localPlatformRoot(), "runtime-approvals", "local-"+applicationCode+"-dev.json")
@@ -344,20 +344,31 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 			} else if applicationCode == integratedPortalApplicationCode {
 				services = []string{"portal-api", "portal-report-worker"}
 			}
-			if applicationCode == integratedProjectApplicationCode {services=[]string{"project-api","sla-notifier"}}
+			if applicationCode == integratedProjectApplicationCode {
+				services = []string{"project-api", "sla-notifier"}
+			}
 			if localApprovalErr == nil && len(localLicenseServices[applicationCode]) > 0 {
 				services = append([]string(nil), localLicenseServices[applicationCode]...)
 			}
-            var background *localProjectBackground
-            if applicationCode==integratedProjectApplicationCode {
-                var err error
-                background,err=provisioner.projectBackgroundTarget(operationCtx);if err!=nil{return err}
-                if err:=prepareProjectBackground(operationCtx,background,true);err!=nil{return err}
-            }
+			var background *localProjectBackground
+			if applicationCode == integratedProjectApplicationCode {
+				var err error
+				background, err = provisioner.projectBackgroundTarget(operationCtx)
+				if err != nil {
+					return err
+				}
+				if err := prepareProjectBackground(operationCtx, background, true); err != nil {
+					return err
+				}
+			}
 			if runErr := provisioner.runIntegratedPlatformCompose(operationCtx, append([]string{"stop"}, services...)...); runErr != nil {
 				return provisioningError("stop subsystem containers")
 			}
-            if background!=nil {if err:=markProjectBackgroundStopped(background);err!=nil{return err}}
+			if background != nil {
+				if err := markProjectBackgroundStopped(background); err != nil {
+					return err
+				}
+			}
 		} else {
 			if composeFile, composeErr := locateComposeFile(projectDirectory); composeErr == nil {
 				runErr := provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,

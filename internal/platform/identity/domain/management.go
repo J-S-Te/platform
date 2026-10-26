@@ -48,6 +48,7 @@ type Account struct {
 	PasswordInitialized bool
 	Status              string
 	LastLoginAt         *time.Time
+	LockedUntil         *time.Time
 	ValidUntil          *time.Time
 	Version             uint64
 	CreatedAt           time.Time

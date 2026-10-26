@@ -18,6 +18,14 @@ type Event struct {
 	RequestID, TraceID, CorrelationID string
 	StatusCode                        int
 	ChangeSummary                     []FieldChange
+	// 稳定定位字段（统一审计方案 §2.2）：名称只是快照，追溯必须依赖 ID。
+	ActorID    string
+	ActorType  string
+	ReasonCode string
+	BusinessID string
+	ReceivedAt time.Time
+	// LoginIPSource 记录登录地址的获取方式；历史记录为空，不回填、不推算。
+	LoginIPSource string
 }
 
 // FieldChange 保存脱敏后的变更摘要；绝不能包含凭据材料。
@@ -54,6 +62,8 @@ type ExportWork struct {
 type ExportQuery struct {
 	Keyword, ApplicationCode, EnvironmentCode, Action, ActionCategory, Result, RiskLevel string
 	OccurredFrom, OccurredTo                                                             *time.Time
+	// 与列表共用同一组精确过滤条件，避免“页面过滤正确、导出越界”。
+	EventID, ActorID, CorrelationID, ClientIP, LoginIP, ResourceID, RequestID string
 }
 
 // ExportFile 描述已完成的审计导出任务附带的本地文件。

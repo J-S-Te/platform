@@ -121,3 +121,40 @@ bash scripts/docker-local.sh prepare-license --application <应用编码> --oper
 - 消费端：`license-core/consumer/consumer.go`、`license-core/runtime/state.go`。
 
 旧 2026-10-15 排障中的现场 Docker context、日志、固定镜像和测试结果均不作当前环境事实。本轮未访问 Docker、业务库、签发私钥或真实许可证；V2 与 legacy 脚本兼容、全组件进程确认和浏览器业务验收仍需隔离环境验证。
+
+## 7. 运行时护栏（2026-10-24 增补）
+
+以下行为已在 `scripts/docker-local.sh` 与 `scripts/local-status.py` 落地，目的是把"事后 403 / 静默跑旧镜像"提前成启动期的明确错误。
+
+### 7.1 `refresh-*` 不再重建已固定的服务
+
+已登记应用的运行镜像由固定记录（`runtime/local-license.compose.json`）按不可变 ID 绑定。`refresh-<app>-api` 在构建前会调用 `refuse_pinned_rebuild`，命中固定记录时**直接拒绝**并打印受控路径：
+
+    build-images → refresh-approvals --operator <标识> → --approve
+      → 应用接入页受控更新（或 subsystem.sh retry --application-code <编码>）→ up
+
+原因：重建会产生新镜像 ID，使固定记录与批准同时失效；已运行容器仍跑旧镜像，而 `up` 预检会因 `No such image` 阻断。
+
+### 7.2 刷新流程先过固定记录预检
+
+所有 `refresh-*` 在构建前执行 `preflight_local_license_images`：固定镜像缺失、批准指针失效、组件清单不一致都会在**迁移与重启之前**一次性报出。
+
+### 7.3 构建后提示与迁移镜像滞后检测
+
+`report_candidate_drift` 在刷新结束时：
+
+- 列出"刚构建的候选镜像与固定记录不一致"的服务（提示新构建不会生效）；
+- 当应用镜像比其迁移镜像更新时告警——这正是 `migrations are current` 假阳性的根因（迁移镜像内嵌的迁移集合落后于应用）。
+
+### 7.4 `local-status` 新增判定
+
+| 检查 | 判定 |
+|---|---|
+| 授权实例 | 需同时满足 `license_deployment > 0` 且 `license_artifact > 0`；无产物时明确提示"业务会返回 COMMERCIAL_LICENSE_DENIED" |
+| 授权登记覆盖 | `license_runtime_member` 的应用数对比组件清单；不足时提示重新同步缺失应用 |
+| 许可证有效期 | 解码产物载荷，显示最早到期天数 |
+| 运行镜像一致 | 逐个容器比对实际镜像与固定记录；偏离时提示走批准 + 受控更新 |
+
+### 7.5 项目后台状态自愈
+
+`runtime/project-background/operation.json` 停在 `activating/prepared/teardown-drained` 且后台容器已随整体停机消失时，`up` 会先把状态文件**归档**（`*.stale.<UTC时间>`，保留证据）再重新准备，避免"无法重新证明排空"导致整栈起不来。运行中或容器仍存在时不做任何处理。

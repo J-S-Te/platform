@@ -52,8 +52,17 @@ func (*environmentGrantConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("unexpected prepared query")
 }
 func (*environmentGrantConn) Close() error { return nil }
+
+// readBoundaryTx 允许管理端 GET 为"可编辑集合与版本同快照"开启只读事务；
+// 事务内任何写入仍被 ExecContext 拒绝（该桩未实现 Exec，database/sql 对
+// 未实现 ExecContext 的 Conn 走 Prepare 路径，同样被拒绝）。
+type environmentGrantReadTx struct{}
+
+func (environmentGrantReadTx) Commit() error   { return nil }
+func (environmentGrantReadTx) Rollback() error { return nil }
+
 func (*environmentGrantConn) Begin() (driver.Tx, error) {
-	return nil, errors.New("environment grant checks must not write")
+	return environmentGrantReadTx{}, nil
 }
 func environmentGrantArg(args []driver.NamedValue, want string) bool {
 	for _, arg := range args {
@@ -70,6 +79,18 @@ func (c *environmentGrantConn) QueryContext(_ context.Context, query string, arg
 	q := strings.ReplaceAll(strings.ToLower(query), "`", "")
 	has := func(v string) bool { return environmentGrantArg(args, v) }
 	switch {
+	case strings.Contains(q, "order by rb.id"):
+		// edit_revision 的绑定行版本查询：必须带租户/应用/主体来源边界。
+		if !has("tenant-1") || !has("app-1") || !has("MANUAL") {
+			return nil, errors.New("edit revision query lost tenant/application/origin boundary")
+		}
+		return &environmentGrantRows{columns: []string{"id", "version", "role_id", "scope_type", "scope_id", "status", "valid_from", "valid_until", "grant_origin", "origin_id", "origin_item_id"}}, nil
+	case strings.Contains(q, "authz_user_permission"):
+		// edit_revision 的历史自定义权限查询：必须带租户/应用边界。
+		if !has("tenant-1") || !has("app-1") {
+			return nil, errors.New("edit revision permission query lost tenant/application boundary")
+		}
+		return &environmentGrantRows{columns: []string{"permission_id", "created_at"}}, nil
 	case strings.Contains(q, "from platform_application "):
 		rows := &environmentGrantRows{columns: []string{"id", "tenant_id", "code"}}
 		if has("tenant-1") && (has("orders") || has("app-1")) && has("ACTIVE") {

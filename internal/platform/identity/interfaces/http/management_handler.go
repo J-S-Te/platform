@@ -260,6 +260,7 @@ type accountResponse struct {
 	PasswordInitialized bool               `json:"password_initialized"`
 	Status              string             `json:"status"`
 	LastLoginAt         *time.Time         `json:"last_login_at,omitempty"`
+	LockedUntil         *time.Time         `json:"locked_until,omitempty"`
 	ValidUntil          *time.Time         `json:"valid_until,omitempty"`
 	Version             uint64             `json:"version"`
 	CreatedAt           time.Time          `json:"created_at"`
@@ -1270,7 +1271,7 @@ func toUserResponse(value application.UserView) userResponse {
 	return userResponse{UserID: value.ID, DisplayName: value.DisplayName, EmployeeNo: value.EmployeeNo, PMSPersonID: value.PMSPersonID, Email: value.Email, MobileMasked: value.MobileMasked, Status: value.Status, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 func toAccountResponse(value domain.Account) accountResponse {
-	response := accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, PasswordInitialized: value.PasswordInitialized, Status: value.Status, LastLoginAt: value.LastLoginAt, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	response := accountResponse{AccountID: value.ID, UserID: value.UserID, AccountName: value.AccountName, AccountType: value.AccountType, AuthSource: value.AuthSource, PasswordInitialized: value.PasswordInitialized, Status: value.Status, LastLoginAt: value.LastLoginAt, LockedUntil: value.LockedUntil, ValidUntil: value.ValidUntil, Version: value.Version, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 	if value.User != nil {
 		response.User = &referenceResponse{ID: value.User.ID, Name: value.User.Name}
 	}

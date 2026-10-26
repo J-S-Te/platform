@@ -48,6 +48,12 @@ type applicationAuthorizationPolicyRow struct {
 // 别名混淆授权目标。缺少策略行按兼容默认值处理：max_effective_roles=0，不限制角色数。
 // 只有正数限制且去重后的有效角色超过限制时，授权路径才应拒绝。
 func (s *Service) ResolveApplicationAuthorizationPolicy(ctx context.Context, tenantID, applicationID string) (ApplicationAuthorizationPolicy, error) {
+	return resolveApplicationAuthorizationPolicyOn(s.db.WithContext(ctx), tenantID, applicationID)
+}
+
+// resolveApplicationAuthorizationPolicyOn 是 ResolveApplicationAuthorizationPolicy
+// 的事务句柄变体：写入路径在租户锁内调用它，保证目录策略校验与变更同事务。
+func resolveApplicationAuthorizationPolicyOn(database *gorm.DB, tenantID, applicationID string) (ApplicationAuthorizationPolicy, error) {
 	policy := ApplicationAuthorizationPolicy{
 		ApplicationID:     strings.TrimSpace(applicationID),
 		MaxEffectiveRoles: 0,
@@ -57,7 +63,7 @@ func (s *Service) ResolveApplicationAuthorizationPolicy(ctx context.Context, ten
 	}
 
 	var row applicationAuthorizationPolicyRow
-	err := s.db.WithContext(ctx).Table("authz_application_authorization_policy").
+	err := database.Table("authz_application_authorization_policy").
 		Where("tenant_id = ? AND application_id = ?", strings.TrimSpace(tenantID), policy.ApplicationID).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

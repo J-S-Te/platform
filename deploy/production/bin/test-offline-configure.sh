@@ -4,7 +4,7 @@ source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/offline-configure-test.XXXXXX")"
 trap 'rm -r -- "$test_root"' EXIT
 mkdir -p "$test_root/deploy/bin" "$test_root/deploy/subsystem-templates" "$test_root/tmp"
-cp "$source_dir"/bin/{deploy.sh,compose-scope.sh,start-enabled.sh,provisioner-config-refresh.sh,offline-configure.sh,offline-package-metadata.sh,public-transport.sh} "$test_root/deploy/bin/"
+cp "$source_dir"/bin/{deploy.sh,compose-scope.sh,start-enabled.sh,provisioner-config-refresh.sh,project-background.sh,offline-configure.sh,offline-package-metadata.sh,public-transport.sh} "$test_root/deploy/bin/"
 cp "$source_dir"/{.env.example,.release.env.example,docker-compose.yml} "$test_root/deploy/"
 cp "$source_dir"/subsystem-templates/*.env.example "$test_root/deploy/subsystem-templates/"
 export TEST_LOG="$test_root/commands.log" MOCK_FIREWALL=ufw MOCK_OCCUPIED="" MOCK_DEPLOYED=""

@@ -4,10 +4,12 @@
 只读：不构建、不启动、不迁移、不改写固定记录或批准，也不写任何文件。
 """
 from pathlib import Path
+import base64
 import json
 import re
 import subprocess
 import sys
+import time
 
 WORKSPACE = Path(__file__).absolute().parents[2]
 PLATFORM = WORKSPACE / "platform"
@@ -65,6 +67,40 @@ def load_pins():
         return json.loads(PIN.read_text(encoding="utf-8")).get("services", {})
     except (ValueError, OSError):
         return None
+
+
+def decode_license_expiry(raw):
+    """从许可证 JWS 载荷读取最早到期时间与覆盖应用；不做验签（运行时负责验签）。"""
+    try:
+        payload = raw.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        document = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+    except (IndexError, ValueError, UnicodeError):
+        return None
+    applications = document.get("applications") or []
+    if not isinstance(applications, list):
+        return None
+    return {
+        "code": document.get("code", {}).get("application", "") if isinstance(document.get("code"), dict) else "",
+        "expires": [item.get("expires_at", 0) for item in applications if isinstance(item, dict)],
+    }
+
+
+def running_image_mismatches(pins):
+    """运行容器实际镜像与固定记录不一致的服务列表（跳过未登记服务）。"""
+    mismatches = []
+    names = docker(["ps", "--filter", "label=com.docker.compose.project=" + PROJECT,
+                    "--format", "{{.Names}}"]).stdout.split()
+    for name in names:
+        service = re.sub("^" + re.escape(PROJECT) + "-", "", name)
+        service = re.sub(r"-\d+$", "", service)
+        pinned = (pins.get(service) or {}).get("image", "")
+        if not pinned:
+            continue
+        actual = docker(["inspect", "--format", "{{.Image}}", name]).stdout.strip()
+        if actual and actual != pinned:
+            mismatches.append(service)
+    return mismatches
 
 
 def main():
@@ -136,15 +172,55 @@ def main():
     instances = scalar("SELECT COUNT(*) FROM license_deployment;")
     artifacts = scalar("SELECT COUNT(*) FROM license_artifact;")
     accounts = scalar("SELECT COUNT(*) FROM iam_account;")
-    if instances is None:
-        steps.append(("平台数据库", "不可查询（控制面未就绪）", False))
-    else:
-        steps.append(("授权实例", "%d 个实例 / %d 个产物" % (instances, artifacts), instances > 0))
+    if instances is not None:
+        steps.append(("授权实例", "%d 个实例 / %d 个产物" % (instances, artifacts), instances > 0 and artifacts > 0))
         steps.append(("平台账号", "%d 个" % (accounts or 0), (accounts or 0) > 0))
         if instances == 0:
             blockers.append("授权实例未初始化：在「商业授权」初始化并导入签发产物（否则接入必然失败，固定记录也不会刷新）")
+        if artifacts == 0:
+            # 没有授权产物时，登记过的服务会在运行期一律返回 COMMERCIAL_LICENSE_DENIED（含只读接口）。
+            blockers.append(
+                "没有可用授权产物：登记过的业务服务会返回 COMMERCIAL_LICENSE_DENIED（含只读查询）。"
+                "下一步：license-install import --file <签名许可证>，再执行 license-install activate。"
+            )
         if not accounts:
             blockers.append("没有平台账号：执行 bootstrap-admin 创建首个超级管理员")
+
+        members = scalar("SELECT COUNT(DISTINCT application) FROM license_runtime_member")
+        registered = 0
+        manifest = PLATFORM / "config" / "local-license-components.json"
+        if manifest.is_file():
+            try:
+                registered = len(json.loads(manifest.read_text(encoding="utf-8")).get("applications", {}))
+            except (ValueError, OSError):
+                registered = 0
+        if members is not None and registered:
+            steps.append(("授权登记覆盖", "%d / %d 个应用" % (members, registered), members >= registered))
+            if members < registered:
+                blockers.append(
+                    "授权登记不完整：平台只登记了 %d/%d 个应用，未登记应用的凭据同步必然失败（表现为 403 或 LICENSE_RUNTIME_* 错误）。"
+                    "下一步：在应用接入页重新同步缺失应用，或执行 scripts/subsystem.sh retry --application-code <编码>。"
+                    % (members, registered)
+                )
+
+        license_raw = query("SELECT raw_jws FROM license_artifact ORDER BY created_at DESC LIMIT 1")
+        expiry = decode_license_expiry(license_raw) if license_raw else None
+        if expiry and expiry["expires"]:
+            earliest = min(expiry["expires"])
+            days = int((earliest - time.time()) // 86400)
+            steps.append(("许可证有效期", "%d 天后到期（%d 个应用）" % (days, len(expiry["expires"])), days > 0))
+            if days <= 0:
+                blockers.append("授权产物已过期：写入类操作会被拒绝；请导入新的签名许可证并激活")
+
+    if pins is not None:
+        mismatched = running_image_mismatches(pins)
+        steps.append(("运行镜像一致", "%d 个服务偏离固定记录" % len(mismatched), not mismatched))
+        if mismatched:
+            blockers.append(
+                "这些服务正在运行与固定记录不一致的镜像：%s。"
+                "下一步：重新发布批准并走受控更新（refresh-approvals --approve → 应用接入受控更新 → up），不要直接 compose up。"
+                % "、".join(mismatched[:8])
+            )
 
     print("[status] 本地启动状态")
     for name, value, ok in steps:

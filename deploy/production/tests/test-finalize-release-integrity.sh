@@ -93,6 +93,18 @@ artifacts={item['path']:item for item in manifest['artifacts']}
 assert artifacts['清理首次部署产物.sh']['type']=='script'
 assert 'FIRST_INSTALL_RESET.md' in artifacts
 PY
+# Exercise the facade with the real verifier and ephemeral test-only keys.
+python3 "$deploy/bin/release-workflow.py" package --output "$media" --version signed-test \
+  --verifier "$work/release-verifier" --trust-dir "$work/trust"
+[[ -f "$work/uip-offline-delivery-signed-test-linux-amd64.tar" ]]
+cp "$media/release-manifest.sigstore.json" "$work/original-signature.json"
+printf 'invalid signature JSON\n' > "$media/release-manifest.sigstore.json"
+if python3 "$deploy/bin/release-workflow.py" package --output "$media" --version rejected-test \
+  --verifier "$work/release-verifier" --trust-dir "$work/trust" > "$work/package-rejected.log" 2>&1; then
+  echo 'invalid signature unexpectedly passed package verification' >&2; exit 1
+fi
+[[ ! -e "$work/uip-offline-delivery-rejected-test-linux-amd64.tar" ]]
+cp "$work/original-signature.json" "$media/release-manifest.sigstore.json"
 printf '\n# tampered fixture\n' >> "$media/清理首次部署产物.sh"
 if "$work/release-verifier" verify --media "$media" --trust-dir "$work/trust" --output json > "$work/tampered.json"; then
   echo 'tampered reset tool unexpectedly passed release verification' >&2

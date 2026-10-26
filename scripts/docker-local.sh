@@ -48,12 +48,23 @@ customer_notification_worker_services=(
 	customer-presale-assignment-notification-worker
 	customer-presale-progress-notification-worker
 	customer-notification-delivery-worker
+	contract-transfer-worker
 )
 
 log() { printf '[docker-local] %s\n' "$*"; }
 fail() { printf '[docker-local] ERROR: %s\n' "$*" >&2; exit 1; }
 
 source "${script_dir}/local-project-background.sh"
+
+# 职责拆分后的函数库：仅定义函数与只读常量，加载零副作用；路径基于 script_dir 解析，
+# 按依赖顺序加载：env-templates（env 行读写）→ runtime-validation（依赖 env_value）→
+# access-mode（依赖 log/fail 与局域网覆盖文件路径）→ compose（依赖 configured 探测）→
+# base-images（依赖 log/fail）。
+source "${script_dir}/lib/env-templates.sh"
+source "${script_dir}/lib/runtime-validation.sh"
+source "${script_dir}/lib/access-mode.sh"
+source "${script_dir}/lib/compose.sh"
+source "${script_dir}/lib/base-images.sh"
 
 usage() {
     cat <<USAGE
@@ -361,119 +372,6 @@ validate_local_automation_paths() {
 
 validate_local_automation_paths
 
-# scripts/lan-access.sh 通过 docker/.env.lan 标记临时局域网模式。docker-local
-# 必须继续为基础平台、合同后端和客户商机后端加载同源覆盖配置，否则平台
-# 发布的 OIDC issuer 与子系统期望的 issuer 会分别落到 LAN 地址和 localhost，
-# 业务后端将因 discovery 校验失败而持续重启。
-#
-# 同时：每次 up 启动时实时检测当前网络的 IPv4 地址（不再信任 docker/.env.lan
-# 里写死的值）。当网段切换、远程 ssh 或换 WiFi 后，up 仍然能用正确的 IP 配置
-# 平台后端的 OIDC issuer / CORS allowed origin / 回调地址，避免 403。
-is_ipv4() {
-    local candidate="$1" octet
-    [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    IFS='.' read -r -a octets <<< "$candidate"
-    for octet in "${octets[@]}"; do
-        ((10#$octet <= 255)) || return 1
-    done
-}
-
-# 实时检测宿主机可用的第一个非 loopback IPv4。优先用 default route 对应接口
-# 的地址，否则回退到 ifconfig 列表里第一个非 127.x 的 IPv4。
-detect_current_lan_ipv4() {
-    local iface candidate
-    iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
-    if [[ -n "$iface" ]]; then
-        candidate="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
-        if is_ipv4 "$candidate" && [[ "$candidate" != 127.* ]]; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    fi
-
-    while IFS= read -r candidate; do
-        [[ -z "$candidate" ]] && continue
-        is_ipv4 "$candidate" || continue
-        [[ "$candidate" == 127.* ]] && continue
-        printf '%s' "$candidate"
-        return 0
-    done < <(ifconfig 2>/dev/null | awk '/inet / {print $2}')
-    return 1
-}
-
-# 用新 IP 覆盖 docker/.env.lan 中所有 http://<旧IP>:<端口> 的值，
-# 保持端口与 path 前缀不变，让 docker compose 重新加载后使用新地址。
-rewrite_lan_override_file() {
-    local new_ip="$1" file_ip="$2"
-    local file_port
-    file_port="$(awk -F= '$1 == "APP_PUBLIC_BASE_URL" {print substr($0, index($0, "=") + 1); exit}' "$lan_override_file" | sed -E 's|^http://[^:]+:||; s|/.*$||')"
-    [[ -z "$file_port" ]] && file_port="${FRONTEND_HTTP_PORT:-8081}"
-    sed -i.bak -E "s|http://${file_ip}:${file_port}|http://${new_ip}:${file_port}|g" "$lan_override_file"
-    rm -f "$lan_override_file.bak"
-    if [[ -f "$customer_lan_override_file" ]]; then
-        sed -i.bak -E "s|http://${file_ip}:${file_port}|http://${new_ip}:${file_port}|g" "$customer_lan_override_file"
-        rm -f "$customer_lan_override_file.bak"
-    fi
-}
-
-write_customer_lan_override() {
-    local public_origin="$1"
-    umask 077
-    cat > "$customer_lan_override_file" <<EOF
-# 由 scripts/docker-local.sh/lan-access.sh 自动维护；仅用于临时局域网访问。
-APP_PUBLIC_ORIGIN=${public_origin}
-OIDC_ISSUER=${public_origin}
-OIDC_REDIRECT_URI=${public_origin}/customer-opportunity/auth/callback
-OIDC_POST_LOGOUT_REDIRECT_URI=${public_origin}/customer-opportunity/
-EOF
-    chmod 600 "$customer_lan_override_file"
-}
-
-configure_access_mode() {
-    local public_origin lan_port detected_ip file_ip
-
-    [[ -f "$lan_placeholder_file" ]] || fail "局域网占位环境文件不存在：$lan_placeholder_file"
-
-    if [[ ! -f "$lan_override_file" ]]; then
-        export BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
-        export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
-		export CUSTOMER_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
-		export PORTAL_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
-		export PROJECT_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
-        export FRONTEND_BIND_ADDRESS="${FRONTEND_BIND_ADDRESS:-127.0.0.1}"
-        frontend_public_origin="http://localhost:${FRONTEND_HTTP_PORT:-8081}"
-        return 0
-    fi
-
-    file_ip="$(awk -F= '$1 == "APP_PUBLIC_BASE_URL" {print substr($0, index($0, "=") + 1); exit}' "$lan_override_file" | sed -E 's|^http://||; s|:.*$||')"
-    detected_ip="$(detect_current_lan_ipv4 || true)"
-
-    if [[ -z "$detected_ip" ]]; then
-        log "WARN: 未检测到可用 IPv4，沿用 docker/.env.lan 中写死的 $file_ip"
-    elif [[ "$detected_ip" != "$file_ip" ]]; then
-        log "WARN: 当前 IPv4 ($detected_ip) 与 docker/.env.lan 中写死的 $file_ip 不一致，自动用检测值；如需落盘可执行 bash scripts/lan-access.sh enable"
-        rewrite_lan_override_file "$detected_ip" "$file_ip"
-    fi
-
-    public_origin="$(awk -F= '$1 == "APP_PUBLIC_BASE_URL" {print substr($0, index($0, "=") + 1); exit}' "$lan_override_file")"
-    [[ "$public_origin" =~ ^http://([0-9]{1,3}\.){3}[0-9]{1,3}:[1-9][0-9]{0,4}$ ]] || \
-        fail "局域网覆盖文件中的 APP_PUBLIC_BASE_URL 无效：${public_origin:-'(空)'}；请重新执行 bash scripts/lan-access.sh enable"
-
-    lan_port="${public_origin##*:}"
-    ((lan_port <= 65535)) || fail "局域网覆盖文件中的端口无效：$lan_port"
-
-    write_customer_lan_override "$public_origin"
-    export BASIC_PLATFORM_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
-	export CONTRACT_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
-	export CUSTOMER_LAN_OVERRIDE_ENV_FILE="$customer_lan_override_file"
-	export PORTAL_LAN_OVERRIDE_ENV_FILE="$lan_placeholder_file"
-	export PROJECT_LAN_OVERRIDE_ENV_FILE="$lan_override_file"
-    export FRONTEND_BIND_ADDRESS="0.0.0.0"
-    export FRONTEND_HTTP_PORT="$lan_port"
-    frontend_public_origin="$public_origin"
-    log "统一访问地址：$public_origin"
-}
-
 configure_access_mode
 
 # 本地默认 HTTP 拓扑必须保持向后兼容：PUBLIC_HTTPS_ENABLED 未配置或为 false
@@ -501,872 +399,6 @@ else
     export PUBLIC_TRANSPORT_COMPOSE_FILE=""
 fi
 
-compose() {
-    # macOS 自带 Bash 3.2 在 `set -u` 下展开空数组会报 unbound variable，
-    # 因此不使用可选数组，而是按是否接入 Portal 显式分支。
-    # customer_portal/dev 接入成功后，普通 up/down/stop/ps/logs/config 自动纳入
-    # portal-api。首次接入前不能强行启动，因为此时浏览器 OIDC Client、租户、
-    # 角色目录和六组机器凭据尚不存在；平台与 CRM 需先运行以完成受控接入。
-    local compose_files=(--file "$compose_file")
-    # 已注册开发消费者保留已审核镜像和独立运行环境；构建只准备新候选，只有受控重试或更新才会接管。
-    local local_license_override="${project_root}/runtime/local-license.compose.json"
-    # 按实际子命令（而非整段参数字串）判断是否为构建：构建只准备候选镜像，
-    # 运行镜像由受控更新写入的固定记录决定，构建阶段不得加载固定记录。
-    local compose_subcommand="" compose_arg="" compose_skip_value=false
-    for compose_arg in "$@"; do
-        if [[ "$compose_skip_value" == true ]]; then
-            compose_skip_value=false
-            continue
-        fi
-        case "$compose_arg" in
-            --profile|--env-file|--file|-f|--project-name|--project-directory|--ansi|--parallel|--progress)
-                compose_skip_value=true
-                ;;
-            -*) ;;
-            *)
-                compose_subcommand="$compose_arg"
-                break
-                ;;
-        esac
-    done
-    case "$compose_subcommand" in
-        build) ;;
-        *)
-            # COMPOSE_SKIP_LICENSE_OVERRIDE=1 仅用于两类不产生运行进程的调用：
-            #   只读镜像存在性查询；探测候选创建（--no-start，容器不启动）。
-            # 任何会启动或运行服务的路径都必须加载固定记录。
-            if [[ "${COMPOSE_SKIP_LICENSE_OVERRIDE:-}" != "1" ]] && [[ -e "$local_license_override" || -L "$local_license_override" ]]; then
-                [[ -f "$local_license_override" && ! -L "$local_license_override" ]] || fail "本地授权 Compose 固定文件不安全"
-                compose_files+=(--file "$local_license_override")
-            fi
-            ;;
-    esac
-    if [[ -n "${PUBLIC_TRANSPORT_COMPOSE_FILE:-}" ]]; then
-        compose_files+=(--file "$PUBLIC_TRANSPORT_COMPOSE_FILE")
-    fi
-    data_analysis_profile_arg=""
-    if data_analysis_configured; then
-        data_analysis_profile_arg="--profile data-analysis"
-    fi
-    if portal_configured && project_configured; then
-        docker compose \
-            --project-name "$compose_project" \
-            "${compose_files[@]}" \
-            --env-file "$env_file" \
-            --env-file "$contract_env_file" \
-            --env-file "$customer_env_file" \
-            --env-file "$portal_env_file" \
-            --env-file "$project_env_file" \
-            --env-file "$data_analysis_env_file" \
-            --env-file "$settlement_env_file" \
-            --profile portal \
-            --profile project \
-            --profile presale-worker \
-            --profile keycloak \
-            $data_analysis_profile_arg \
-            "$@"
-        return
-    fi
-    if portal_configured; then
-        docker compose \
-            --project-name "$compose_project" \
-            "${compose_files[@]}" \
-            --env-file "$env_file" \
-            --env-file "$contract_env_file" \
-            --env-file "$customer_env_file" \
-            --env-file "$portal_env_file" \
-            --env-file "$project_env_file" \
-            --env-file "$data_analysis_env_file" \
-            --env-file "$settlement_env_file" \
-            --profile portal \
-            --profile presale-worker \
-            --profile keycloak \
-            $data_analysis_profile_arg \
-            "$@"
-        return
-    fi
-    if project_configured; then
-        docker compose \
-            --project-name "$compose_project" \
-            "${compose_files[@]}" \
-            --env-file "$env_file" \
-            --env-file "$contract_env_file" \
-            --env-file "$customer_env_file" \
-            --env-file "$portal_env_file" \
-            --env-file "$project_env_file" \
-            --env-file "$data_analysis_env_file" \
-            --env-file "$settlement_env_file" \
-            --profile project \
-            --profile presale-worker \
-            --profile keycloak \
-            $data_analysis_profile_arg \
-            "$@"
-        return
-    fi
-    docker compose \
-        --project-name "$compose_project" \
-        "${compose_files[@]}" \
-        --env-file "$env_file" \
-        --env-file "$contract_env_file" \
-        --env-file "$customer_env_file" \
-        --env-file "$portal_env_file" \
-        --env-file "$project_env_file" \
-        --env-file "$data_analysis_env_file" \
-        --env-file "$settlement_env_file" \
-        --profile presale-worker \
-        --profile keycloak \
-        $data_analysis_profile_arg \
-        "$@"
-}
-
-replace_line_in_file() {
-    local file="$1" key="$2" value="$3" tmp
-    tmp="$(mktemp "${TMPDIR:-/tmp}/docker-local-env.XXXXXX")"
-    # 先写入临时文件并设为 0600，再原子替换，避免中断时留下半行配置或短暂放宽密钥权限。
-    # 临时文件位于系统临时目录，mv 跨文件系统时未必原子；调用者应避免并发执行多个编排命令。
-    awk -v key="$key" -v value="$value" '
-        index($0, key "=") == 1 { print key "=" value; found=1; next }
-        { print }
-        END { if (!found) print key "=" value }
-    ' "$file" > "$tmp"
-    chmod 600 "$tmp"
-    mv "$tmp" "$file"
-}
-
-random_hex() { openssl rand -hex "$1" | tr -d '\n'; }
-random_key() { openssl rand -base64 32 | tr -d '\n'; }
-
-ensure_platform_jwt_key_pair() {
-    local key_dir="${project_root}/data/keys"
-    local private_key="${key_dir}/jwt-ed25519-private.pem"
-    local public_key="${key_dir}/jwt-ed25519-public.pem"
-    if [[ -f "$private_key" && -f "$public_key" ]]; then
-        chmod 600 "$private_key" "$public_key"
-        return
-    fi
-    if [[ -e "$private_key" || -e "$public_key" ]]; then
-        fail "JWT 密钥对不完整；请恢复配套公私钥，或同时移走 ${private_key} 和 ${public_key} 后重新生成"
-    fi
-
-    local temporary_dir
-    temporary_dir="$(mktemp -d "${key_dir}/.jwt-keys.XXXXXX")"
-    openssl genpkey -algorithm ED25519 -out "${temporary_dir}/private.pem" >/dev/null 2>&1 || {
-        rm -rf -- "$temporary_dir"
-        fail "生成 Ed25519 JWT 私钥失败"
-    }
-    openssl pkey -in "${temporary_dir}/private.pem" -pubout -out "${temporary_dir}/public.pem" >/dev/null 2>&1 || {
-        rm -rf -- "$temporary_dir"
-        fail "生成 Ed25519 JWT 公钥失败"
-    }
-    chmod 600 "${temporary_dir}/private.pem" "${temporary_dir}/public.pem"
-    mv "${temporary_dir}/private.pem" "$private_key"
-    mv "${temporary_dir}/public.pem" "$public_key"
-    rmdir "$temporary_dir"
-    log "已生成本地 Ed25519 JWT 密钥对：${key_dir}"
-}
-
-ensure_platform_env_file() {
-    command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成本地密码和密钥"
-    mkdir -p "$(dirname "$env_file")" "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
-    chmod 700 "${project_root}/data/keys" "${project_root}/data/logs" "${project_root}/data/uploads"
-    ensure_platform_jwt_key_pair
-
-    # 仅在文件不存在时生成密钥；重复 up 绝不轮换既有数据库密码和加密密钥。
-    if [[ ! -f "$env_file" ]]; then
-        # Docker 数据卷会保留 MySQL 初始化时的账号密码。若环境文件丢失但卷还在，
-        # 重新随机生成 MYSQL_PASSWORD 会让迁移和 API 永久无法登录旧库。此处明确
-        # 停止并要求恢复环境文件或走受控密码恢复，绝不在用户不知情时删除数据卷。
-        # compose.local.yaml 为本地卷指定了固定 name（使用连字符，而不是
-        # Compose 默认的下划线名称）。平台库和 Keycloak 库任意一个存在，都
-        # 说明不能安全地依据模板重新随机化 .env.local 中的数据库密码。
-        local retained_volume
-        for retained_volume in \
-            "${compose_project}-mysql-data" \
-            "${compose_project}-keycloak-mysql-data" \
-            "${compose_project}-file-gateway-mysql-data"
-        do
-            if command -v docker >/dev/null 2>&1 && docker volume inspect "$retained_volume" >/dev/null 2>&1; then
-                fail "检测到已有本地数据卷 ${retained_volume}，但环境文件缺失：${env_file}。请先恢复旧 .env.local，或按数据库密码恢复流程重置账号；不要删除数据卷。"
-            fi
-        done
-        [[ -f "$platform_template_file" ]] || fail "基础平台环境模板不存在：$platform_template_file"
-        cp "$platform_template_file" "$env_file"
-        chmod 600 "$env_file"
-        replace_line_in_file "$env_file" MYSQL_PASSWORD "$(random_hex 24)"
-        replace_line_in_file "$env_file" MYSQL_ROOT_PASSWORD "$(random_hex 32)"
-        replace_line_in_file "$env_file" IAM_MOBILE_ENCRYPTION_KEY "$(random_key)"
-        replace_line_in_file "$env_file" IAM_FEDERATED_PROVIDER_SECRET_ENCRYPTION_KEY "$(random_key)"
-        replace_line_in_file "$env_file" IAM_EXTERNAL_LOGIN_STATE_ENCRYPTION_KEY "$(random_key)"
-        replace_line_in_file "$env_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
-        replace_line_in_file "$env_file" KEYCLOAK_DB_PASSWORD "$(random_hex 24)"
-        replace_line_in_file "$env_file" KEYCLOAK_DB_ROOT_PASSWORD "$(random_hex 32)"
-        replace_line_in_file "$env_file" KEYCLOAK_ADMIN_PASSWORD "$(random_hex 32)"
-        log "已根据模板生成基础平台环境文件：$env_file"
-    fi
-
-    # Keycloak 使用独立 MySQL 卷；升级到该编排版本时，仅为新增字段
-    # 生成凭据，不轮换已有真实凭据。
-    local keycloak_db_password keycloak_db_root_password keycloak_admin_username keycloak_admin_password
-    keycloak_db_password="$(env_value "$env_file" KEYCLOAK_DB_PASSWORD)"
-    keycloak_db_root_password="$(env_value "$env_file" KEYCLOAK_DB_ROOT_PASSWORD)"
-    keycloak_admin_username="$(env_value "$env_file" KEYCLOAK_ADMIN_USERNAME)"
-    keycloak_admin_password="$(env_value "$env_file" KEYCLOAK_ADMIN_PASSWORD)"
-    if [[ -z "$keycloak_db_password" || "$keycloak_db_password" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$env_file" KEYCLOAK_DB_PASSWORD "$(random_hex 24)"
-    fi
-    if [[ -z "$keycloak_db_root_password" || "$keycloak_db_root_password" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$env_file" KEYCLOAK_DB_ROOT_PASSWORD "$(random_hex 32)"
-    fi
-    if [[ -z "$keycloak_admin_password" || "$keycloak_admin_password" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$env_file" KEYCLOAK_ADMIN_PASSWORD "$(random_hex 32)"
-    fi
-    if [[ -z "$keycloak_admin_username" || "$keycloak_admin_username" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$env_file" KEYCLOAK_ADMIN_USERNAME admin
-    fi
-    local gateway_db_password gateway_db_root_password
-    gateway_db_password="$(env_value "$env_file" FILE_GATEWAY_DB_PASSWORD)"
-    gateway_db_root_password="$(env_value "$env_file" FILE_GATEWAY_DB_ROOT_PASSWORD)"
-    if [[ -z "$gateway_db_password" || "$gateway_db_password" == REPLACE_WITH_* || -z "$gateway_db_root_password" || "$gateway_db_root_password" == REPLACE_WITH_* ]]; then
-        if docker volume inspect "${compose_project}-file-gateway-mysql-data" >/dev/null 2>&1; then
-            fail "检测到已有 File Gateway MySQL 数据卷，但运行配置缺少数据库凭据：${env_file}。请恢复原凭据；不要删除数据卷或自动轮换密码。"
-        fi
-        if [[ -z "$gateway_db_password" || "$gateway_db_password" == REPLACE_WITH_* ]]; then
-            replace_line_in_file "$env_file" FILE_GATEWAY_DB_PASSWORD "$(random_hex 24)"
-        fi
-        if [[ -z "$gateway_db_root_password" || "$gateway_db_root_password" == REPLACE_WITH_* ]]; then
-            replace_line_in_file "$env_file" FILE_GATEWAY_DB_ROOT_PASSWORD "$(random_hex 32)"
-        fi
-    fi
-    # 管理页面通过平台 API 初始化 Realm 和 Client；这里仅是非敏感的本地路由默认值。
-    replace_line_in_file "$env_file" KEYCLOAK_MANAGEMENT_ENABLED true
-    replace_line_in_file "$env_file" KEYCLOAK_ADMIN_URL http://keycloak:8080
-    replace_line_in_file "$env_file" KEYCLOAK_PUBLIC_URL http://localhost:18090
-    replace_line_in_file "$env_file" KEYCLOAK_REALM basic-platform
-    # 新接入环境默认走 Keycloak；已有环境的 issuer_alias 存在于平台数据库，
-    # 不会因这里变更而被隐式切换，仍需通过应用接入页完成受控迁移。
-    replace_line_in_file "$env_file" SUBSYSTEM_DEFAULT_ISSUER_ALIAS keycloak
-
-    # OIDC_ROLE_CONFIG_HASH 是 CRM Token Claims 的目录一致性校验值。旧模板
-    # 使用占位符时在 Compose 解析前填入可信本地基线；启动 CRM 前仍会用镜像
-    # 实际目录哈希复核，目录发生变化不会被这个基线静默掩盖。
-    local role_config_hash
-    role_config_hash="$(env_value "$env_file" OIDC_ROLE_CONFIG_HASH)"
-    if [[ -z "$role_config_hash" || "$role_config_hash" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$env_file" OIDC_ROLE_CONFIG_HASH "$local_crm_role_config_hash"
-    fi
-
-    local unresolved
-    unresolved="$(grep -E 'REPLACE_WITH_' "$env_file" | grep -v '^#' || true)"
-    [[ -z "$unresolved" ]] || fail "基础平台环境文件仍包含未填写占位符：$env_file"
-}
-
-ensure_contract_env_file() {
-    local strict="${1:-false}"
-    command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成合同数据库密码"
-
-    # Compose 显式命名此卷，文件缺失绝不代表新数据库。
-    local volume_inventory persistent_key persistent_value
-    volume_inventory="$(docker volume ls --format '{{.Name}}')" || fail "无法确认合同保留数据卷；拒绝生成新凭据"
-    if grep -Fxq 'basic-platform-local-contract-mysql-data' <<< "$volume_inventory"; then
-        [[ -f "$contract_env_file" ]] || fail "合同数据卷已存在但配置丢失；请恢复原配置，不要重置数据库或加密密钥"
-        for persistent_key in CONTRACT_MYSQL_PASSWORD CONTRACT_MYSQL_ROOT_PASSWORD OIDC_SESSION_ENCRYPTION_KEY_BASE64 SIGNING_PHONE_ENCRYPTION_KEY_BASE64; do
-            persistent_value="$(env_value "$contract_env_file" "$persistent_key")"
-            [[ -n "$persistent_value" && "$persistent_value" != REPLACE_WITH_* ]] || fail "合同保留数据的持久化配置缺失：${persistent_key}；请恢复原配置"
-            if [[ "$persistent_key" == *_BASE64 ]]; then
-                [[ "$(printf '%s' "$persistent_value" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] || fail "合同保留数据的加密密钥无效：${persistent_key}；请恢复原配置"
-            fi
-        done
-    fi
-
-    if [[ ! -f "$contract_env_file" ]]; then
-        [[ -f "$contract_template_file" ]] || fail "合同管理环境模板不存在：$contract_template_file"
-        cp "$contract_template_file" "$contract_env_file"
-        chmod 600 "$contract_env_file"
-        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_PASSWORD "$(random_hex 24)"
-        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD "$(random_hex 32)"
-        replace_line_in_file "$contract_env_file" PLATFORM_BASE_URL "http://localhost:8081"
-        replace_line_in_file "$contract_env_file" OIDC_ISSUER "http://localhost:18090/realms/basic-platform"
-        replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
-        replace_line_in_file "$contract_env_file" OIDC_REDIRECT_URI "http://localhost:8081/contract_management/auth/callback"
-        replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
-        # SEC-D7b：签署人手机号列加密密钥（Base64 32 字节）与 session 键一样在首次生成时写入。
-        replace_line_in_file "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64 "$(random_key)"
-        replace_line_in_file "$contract_env_file" APP_PUBLIC_URL "http://localhost:8081/contract_management/dashboard"
-        replace_line_in_file "$contract_env_file" APP_PATH_PREFIX "/contract_management"
-        log "已生成合同管理环境文件：$contract_env_file"
-        log "请先在基础平台完成合同管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
-    fi
-
-    if [[ -z "$(env_value "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$contract_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
-    fi
-
-    # SEC-D7b：签署人手机号列加密密钥必填（AES-GCM，Base64 32 字节）；既有 env 文件缺失或
-    # 占位时补齐，否则 contract /readyz 失败关闭、寄送写入被拒绝。幂等：已有合法键不覆盖。
-    if [[ -z "$(env_value "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64)" || "$(env_value "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$contract_env_file" SIGNING_PHONE_ENCRYPTION_KEY_BASE64 "$(random_key)"
-    fi
-
-    if [[ "$strict" == true ]]; then
-        local unresolved
-        unresolved="$(grep -E 'REPLACE_WITH_' "$contract_env_file" | grep -v '^#' || true)"
-        [[ -z "$unresolved" ]] || fail "合同管理环境文件仍包含接入占位符：$contract_env_file"
-    fi
-
-    # 旧版本曾在基础平台环境文件中保存合同数据库凭据。统一部署继续使用已有
-    # 数据卷时，优先沿用这组凭据，避免新建合同环境文件后静默生成第二套密码。
-    # MySQL 的 MYSQL_PASSWORD 只在空数据目录首次初始化时生效，单纯修改 env
-    # 文件不会更新已有数据库账号。
-    local legacy_contract_password legacy_contract_root_password current_contract_password current_contract_root_password
-    legacy_contract_password="$(env_value "$env_file" CONTRACT_MYSQL_PASSWORD)"
-    legacy_contract_root_password="$(env_value "$env_file" CONTRACT_MYSQL_ROOT_PASSWORD)"
-    current_contract_password="$(env_value "$contract_env_file" CONTRACT_MYSQL_PASSWORD)"
-    current_contract_root_password="$(env_value "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD)"
-    if [[ -n "$legacy_contract_password" && -n "$legacy_contract_root_password" ]] && \
-       [[ "$legacy_contract_password" != "$current_contract_password" || "$legacy_contract_root_password" != "$current_contract_root_password" ]]; then
-        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_PASSWORD "$legacy_contract_password"
-        replace_line_in_file "$contract_env_file" CONTRACT_MYSQL_ROOT_PASSWORD "$legacy_contract_root_password"
-        log "已沿用基础平台环境文件中的既有合同数据库凭据，避免已有数据卷认证失败"
-    fi
-
-    # OIDC_ISSUER 是浏览器可见地址；容器自身不能通过 localhost 访问宿主机
-    # 的 8081。运行时文件没有后通道时，按 Issuer 补齐对应 Compose 内网地址。
-    # 已由应用接入流程写入的非空值绝不覆盖，避免干扰已切换的环境。
-    local oidc_issuer oidc_backchannel keycloak_public_url
-    oidc_issuer="$(env_value "$contract_env_file" OIDC_ISSUER)"
-    oidc_backchannel="$(env_value "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL)"
-    keycloak_public_url="$(env_value "$env_file" KEYCLOAK_PUBLIC_URL)"
-    if [[ -z "$oidc_backchannel" ]]; then
-        if [[ "$oidc_issuer" == "http://localhost:8081" || "$oidc_issuer" == "http://127.0.0.1:8081" ]]; then
-            replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://platform-api:8080"
-            log "已为合同管理补齐基础平台 OIDC 容器内后通道"
-        elif [[ -n "$keycloak_public_url" && "$oidc_issuer" == "${keycloak_public_url%/}/realms/"* ]]; then
-            replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
-            log "已为合同管理补齐 Keycloak OIDC 容器内后通道"
-        fi
-    elif [[ -n "$keycloak_public_url" && "$oidc_issuer" == "${keycloak_public_url%/}/realms/"* && "$oidc_backchannel" == */realms/* ]]; then
-        # OIDC_BACKCHANNEL_BASE_URL 是来源地址，不是公共签发者。旧本地配置误存 /realms/<realm> 会使合同服务启动前即失败。
-        # 值必须保持在 Compose 私网内，且只修复这一已知无效形式。
-        replace_line_in_file "$contract_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
-        log "已修复合同管理 Keycloak 后通道：移除了错误的 /realms 路径"
-    fi
-}
-
-ensure_customer_env_file() {
-    command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成客户与商机管理数据库密码和敏感字段密钥"
-    # CRM 的加密键与检索 HMAC 键职责不同，首次生成后都必须稳定保留，否则历史敏感字段不可读/不可查。
-    if [[ ! -f "$customer_env_file" ]]; then
-        [[ -f "$customer_template_file" ]] || fail "客户与商机管理环境模板不存在：$customer_template_file"
-        cp "$customer_template_file" "$customer_env_file"
-        chmod 600 "$customer_env_file"
-
-        local password root_password encryption_key hmac_key
-        password="$(random_hex 24)"
-        root_password="$(random_hex 32)"
-        encryption_key="$(random_key)"
-        hmac_key="$(random_key)"
-        replace_line_in_file "$customer_env_file" CUSTOMER_MYSQL_PASSWORD "$password"
-        replace_line_in_file "$customer_env_file" CUSTOMER_MYSQL_ROOT_PASSWORD "$root_password"
-        replace_line_in_file "$customer_env_file" MYSQL_DSN "customer:${password}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai&multiStatements=true"
-        replace_line_in_file "$customer_env_file" SENSITIVE_ENCRYPTION_KEY_BASE64 "$encryption_key"
-        replace_line_in_file "$customer_env_file" SENSITIVE_HMAC_KEY_BASE64 "$hmac_key"
-        log "已生成客户与商机管理环境文件：$customer_env_file"
-    fi
-
-    local unresolved
-    unresolved="$(grep -E 'REPLACE_WITH_' "$customer_env_file" | grep -v '^#' || true)"
-    [[ -z "$unresolved" ]] || fail "客户与商机管理环境文件仍包含未填写占位符：$customer_env_file"
-
-    # OIDC_BACKCHANNEL_BASE_URL 只接受容器内可达的 HTTP(S) origin，不能携带
-    # /realms/<realm> 路径。修复历史本地配置，避免 CRM 在 Compose 健康检查前循环重启。
-    local oidc_backchannel
-    oidc_backchannel="$(env_value "$customer_env_file" OIDC_BACKCHANNEL_BASE_URL)"
-    if [[ "$oidc_backchannel" == */realms/* ]]; then
-        replace_line_in_file "$customer_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
-        log "已修复客户与商机管理 Keycloak 后通道：移除了错误的 /realms 路径"
-    fi
-}
-
-ensure_portal_env_file() {
-	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成客户门户数据库密码和安全密钥"
-	if [[ ! -f "$portal_env_file" ]]; then
-		[[ -f "$portal_template_file" ]] || fail "客户自助门户环境模板不存在：$portal_template_file"
-		cp "$portal_template_file" "$portal_env_file"
-		chmod 600 "$portal_env_file"
-
-		local password root_password encryption_key descriptor_key hmac_key
-		password="$(random_hex 24)"
-		root_password="$(random_hex 32)"
-		encryption_key="$(random_key)"
-		descriptor_key="$(random_key)"
-		hmac_key="$(random_key)"
-		replace_line_in_file "$portal_env_file" PORTAL_MYSQL_PASSWORD "$password"
-		replace_line_in_file "$portal_env_file" PORTAL_MYSQL_ROOT_PASSWORD "$root_password"
-		replace_line_in_file "$portal_env_file" PORTAL_MYSQL_DSN "portal:${password}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true"
-		replace_line_in_file "$portal_env_file" PORTAL_ENCRYPTION_KEY_BASE64 "$encryption_key"
-		replace_line_in_file "$portal_env_file" PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 "$descriptor_key"
-		replace_line_in_file "$portal_env_file" PORTAL_HMAC_KEY_BASE64 "$hmac_key"
-		log "已生成客户自助门户环境文件：$portal_env_file"
-	fi
-
-	local unresolved
-	unresolved="$(grep -E 'REPLACE_WITH_' "$portal_env_file" | grep -v '^#' || true)"
-	[[ -z "$unresolved" ]] || fail "客户自助门户环境文件仍包含未填写占位符：$portal_env_file"
-}
-
-ensure_project_env_file() {
-	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成项目管理系统数据库密码"
-	if [[ ! -f "$project_env_file" ]]; then
-		[[ -f "$project_template_file" ]] || fail "项目管理系统环境模板不存在：$project_template_file"
-		cp "$project_template_file" "$project_env_file"
-		chmod 600 "$project_env_file"
-
-		local password root_password
-		password="$(random_hex 24)"
-		root_password="$(random_hex 32)"
-		replace_line_in_file "$project_env_file" PROJECT_MYSQL_PASSWORD "$password"
-		replace_line_in_file "$project_env_file" PROJECT_MYSQL_ROOT_PASSWORD "$root_password"
-		replace_line_in_file "$project_env_file" MYSQL_DSN "project:${password}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
-		replace_line_in_file "$project_env_file" PLATFORM_BASE_URL "http://localhost:8081"
-		replace_line_in_file "$project_env_file" PROJECT_PLATFORM_BACKCHANNEL_BASE_URL "http://platform-api:8080"
-        replace_line_in_file "$project_env_file" OIDC_ISSUER "http://localhost:18090/realms/basic-platform"
-        replace_line_in_file "$project_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
-        replace_line_in_file "$project_env_file" OIDC_REDIRECT_URI "http://localhost:8081/project_management/auth/callback"
-        replace_line_in_file "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
-        replace_line_in_file "$project_env_file" OIDC_POST_LOGOUT_REDIRECT_URI "http://localhost:8081/project_management/logged-out"
-        replace_line_in_file "$project_env_file" APP_PATH_PREFIX "/project_management"
-        replace_line_in_file "$project_env_file" OIDC_SESSION_COOKIE_SECURE "false"
-        replace_line_in_file "$project_env_file" PLATFORM_ENVIRONMENT_CODE "dev"
-        log "已生成项目管理系统环境文件：$project_env_file"
-        log "请先在基础平台完成项目管理系统接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
-    fi
-
-    if [[ -z "$(env_value "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
-        replace_line_in_file "$project_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
-    fi
-}
-
-ensure_settlement_env_file() {
-	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成结算与开票数据库密码和会话密钥"
-	if [[ ! -f "$settlement_env_file" ]]; then
-		[[ -f "$settlement_template_file" ]] || fail "结算与开票环境模板不存在：$settlement_template_file"
-		cp "$settlement_template_file" "$settlement_env_file"
-		chmod 600 "$settlement_env_file"
-		local password root_password
-		password="$(random_hex 24)"
-		root_password="$(random_hex 32)"
-		replace_line_in_file "$settlement_env_file" SETTLEMENT_MYSQL_PASSWORD "$password"
-		replace_line_in_file "$settlement_env_file" SETTLEMENT_MYSQL_ROOT_PASSWORD "$root_password"
-		replace_line_in_file "$settlement_env_file" SETTLEMENT_MYSQL_DSN "settlement:${password}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC"
-		replace_line_in_file "$settlement_env_file" SETTLEMENT_PUBLIC_ORIGIN "$frontend_public_origin"
-		replace_line_in_file "$settlement_env_file" PLATFORM_BASE_URL "http://platform-api:8080"
-		replace_line_in_file "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
-		log "已生成结算与开票运行环境文件：$settlement_env_file"
-	fi
-
-	if [[ -z "$(env_value "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" || "$(env_value "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64)" == REPLACE_WITH_* ]]; then
-		replace_line_in_file "$settlement_env_file" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_key)"
-	fi
-	local unresolved
-	unresolved="$(grep -E 'REPLACE_WITH_' "$settlement_env_file" | grep -v '^#' || true)"
-	[[ -z "$unresolved" ]] || fail "结算与开票环境文件仍包含未填写占位符：$settlement_env_file"
-}
-
-project_configured() {
-	# 项目后端启动强校验 OIDC 四项接入值；缺少任何一项都视为尚未完成 project_management/dev 接入。
-	[[ -n "$(env_value "$project_env_file" OIDC_CLIENT_ID)" ]] &&
-		[[ -n "$(env_value "$project_env_file" OIDC_CLIENT_SECRET)" ]] &&
-		[[ -n "$(env_value "$project_env_file" OIDC_REDIRECT_URI)" ]] &&
-		[[ -n "$(env_value "$project_env_file" OIDC_TENANT_ID)" ]]
-}
-
-ensure_data_analysis_env_file() {
-	command -v openssl >/dev/null 2>&1 || fail "未找到 openssl，无法生成数据看板数据库密码"
-	if [[ ! -f "$data_analysis_env_file" ]]; then
-		[[ -f "$data_analysis_template_file" ]] || fail "数据看板环境模板不存在：$data_analysis_template_file"
-		cp "$data_analysis_template_file" "$data_analysis_env_file"
-		chmod 600 "$data_analysis_env_file"
-
-		local password root_password
-		password="$(random_hex 24)"
-		root_password="$(random_hex 32)"
-		replace_line_in_file "$data_analysis_env_file" DASHBOARD_MYSQL_PASSWORD "$password"
-		replace_line_in_file "$data_analysis_env_file" DASHBOARD_MYSQL_ROOT_PASSWORD "$root_password"
-		replace_line_in_file "$data_analysis_env_file" OIDC_CODEC_KEY "$(random_hex 32)"
-		replace_line_in_file "$data_analysis_env_file" METABASE_EMBEDDING_SECRET "$(random_hex 32)"
-		replace_line_in_file "$data_analysis_env_file" PLATFORM_BASE_URL "http://localhost:8081"
-		replace_line_in_file "$data_analysis_env_file" OIDC_ISSUER "http://localhost:18090/realms/basic-platform"
-		replace_line_in_file "$data_analysis_env_file" OIDC_BACKCHANNEL_BASE_URL "http://keycloak:8080"
-		replace_line_in_file "$data_analysis_env_file" OIDC_REDIRECT_URI "http://localhost:8081/data_analysis/auth/callback"
-		replace_line_in_file "$data_analysis_env_file" APP_PATH_PREFIX "/data_analysis"
-		replace_line_in_file "$data_analysis_env_file" APP_PUBLIC_ORIGIN "http://localhost:8081"
-		replace_line_in_file "$data_analysis_env_file" COOKIE_SECURE "false"
-		log "已生成数据看板环境文件：$data_analysis_env_file"
-		log "请先在基础平台完成数据看板接入，并填写 OIDC_CLIENT_ID、OIDC_CLIENT_SECRET、OIDC_TENANT_ID。"
-	fi
-
-	if [[ -z "$(env_value "$data_analysis_env_file" OIDC_CODEC_KEY)" || "$(env_value "$data_analysis_env_file" OIDC_CODEC_KEY)" == REPLACE_WITH_* ]]; then
-		replace_line_in_file "$data_analysis_env_file" OIDC_CODEC_KEY "$(random_hex 32)"
-	fi
-}
-
-data_analysis_configured() {
-	# 数据看板后端强校验 OIDC 四项接入值；缺少任何一项都视为尚未完成 data_analysis/dev 接入。
-	[[ -n "$(env_value "$data_analysis_env_file" OIDC_CLIENT_ID)" ]] &&
-		[[ -n "$(env_value "$data_analysis_env_file" OIDC_CLIENT_SECRET)" ]] &&
-		[[ -n "$(env_value "$data_analysis_env_file" OIDC_REDIRECT_URI)" ]] &&
-		[[ -n "$(env_value "$data_analysis_env_file" OIDC_TENANT_ID)" ]]
-}
-
-data_analysis_machine_credentials_configured() {
-	[[ -n "$(env_value "$data_analysis_env_file" CONTRACT_MACHINE_CLIENT_ID)" ]] &&
-		[[ -n "$(env_value "$data_analysis_env_file" CONTRACT_MACHINE_CLIENT_SECRET)" ]] &&
-		[[ -n "$(env_value "$data_analysis_env_file" PROJECT_MACHINE_CLIENT_ID)" ]] &&
-		[[ -n "$(env_value "$data_analysis_env_file" PROJECT_MACHINE_CLIENT_SECRET)" ]]
-}
-
-# data_analysis_catalog_credentials_live 判断数据看板本地配置里的授权目录同步凭据
-# 是否仍被平台接受。平台库重建后 .env.local 仍保留旧凭据，只看 env 会把"已失效"
-# 误判成"已接入"；dashboard-api 启动时才在目录同步处 401 并进入重启循环，最终以
-# unhealthy 中止整套 up。
-data_analysis_catalog_credentials_live() {
-	data_analysis_catalog_status=""
-	# 目录同步关闭时 dashboard-api 不会申请令牌，也就不存在这类启动失败。
-	[[ "$(env_value "$data_analysis_env_file" PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || return 0
-	data_analysis_catalog_status="$(platform_catalog_token_status \
-		"$(env_value "$data_analysis_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID)" \
-		"$(env_value "$data_analysis_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET)")" || data_analysis_catalog_status=""
-	[[ "$data_analysis_catalog_status" == "200" ]]
-}
-
-# data_analysis_onboarding_remediation 给出可直接执行的接入提示。
-data_analysis_onboarding_remediation() {
-	cat <<'REMEDIATION'
-
-请先在基础平台完成一次性数据看板接入，然后重新执行 up：
-
-  bash scripts/subsystem.sh onboard \
-    --application-code data_analysis \
-    --application-name 数据看板与统计分析 \
-    --environment dev \
-    --api-base-url http://localhost:8081/api/v1 \
-    --platform-origin http://localhost:8081 \
-    --public-base-url http://localhost:8081 \
-    --upstream-url http://dashboard-api:8080 \
-    --path-prefix /data_analysis \
-    --account <平台管理员账号>
-
-接入完成后按提示回填 data_analysis/.env.local 的 OIDC_* 与
-PLATFORM_AUTHORIZATION_CATALOG_* 凭据，再重新执行 up。
-REMEDIATION
-}
-
-portal_configured() {
-	# 不能只看镜像或数据库是否存在；四项接入产物齐全才允许把 Portal 纳入默认 profile 启动。
-	[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_ID)" ]] &&
-		[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_CLIENT_SECRET)" ]] &&
-		[[ -n "$(env_value "$portal_env_file" PORTAL_OIDC_TENANT_ID)" ]] &&
-		[[ -n "$(env_value "$portal_env_file" PORTAL_ROLE_CONFIG_HASH)" ]]
-}
-
-ensure_catalog_publisher_credentials_consistent() {
-    local runtime_id runtime_secret platform_id platform_secret
-    runtime_id="$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID)"
-    runtime_secret="$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET)"
-    platform_id="$(env_value "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_ID)"
-    platform_secret="$(env_value "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET)"
-
-    if [[ -n "$platform_id" && -n "$platform_secret" ]]; then
-        if [[ "$platform_id" != "$runtime_id" || "$platform_secret" != "$runtime_secret" ]]; then
-            # 平台环境中的长期凭据是既有 OAuth 客户端的运维记录。子系统配置可能
-            # 来自更早一次接入，必须由平台向子系统同步，不能用已失效值反向覆盖。
-            replace_line_in_file "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID "$platform_id"
-            replace_line_in_file "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET "$platform_secret"
-            log "已将平台保存的有效授权目录发布凭据同步到合同后端运行配置"
-        fi
-        return 0
-    fi
-    if [[ -n "$runtime_id" && -n "$runtime_secret" ]]; then
-        # 兼容首次接入：旧平台环境尚未记录 publisher 凭据，但 provisioner 已将
-        # 一次性明文安全写入子系统环境文件。此时补齐平台侧的长期运维记录。
-        replace_line_in_file "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_ID "$runtime_id"
-        replace_line_in_file "$env_file" CONTRACT_CATALOG_PUBLISHER_CLIENT_SECRET "$runtime_secret"
-        log "已从首次接入配置补齐平台授权目录发布凭据"
-    fi
-}
-
-env_value() {
-    local file="$1" key="$2" value
-    [[ -f "$file" ]] || return 0
-    value="$(awk -v key="$key" '
-        index($0, key "=") == 1 {
-            value=substr($0, length(key) + 2)
-            print value
-            exit
-        }
-    ' "$file")"
-    if [[ ${#value} -ge 2 ]]; then
-        case "$value" in
-            \"*\") value="${value:1:${#value}-2}" ;;
-            \'*\') value="${value:1:${#value}-2}" ;;
-        esac
-    fi
-    printf '%s' "$value"
-}
-
-runtime_value_configured() {
-	local value="${1:-}"
-	[[ -n "$value" && "$value" != PENDING_ONBOARDING && "$value" != REPLACE_WITH_* ]]
-}
-
-# 新环境的浏览器 OIDC 必须由 Keycloak 提供；基础平台只提供在线
-# authorization-context，不再充当子系统的 token issuer。以下校验只对已经
-# 写入浏览器 Client 的运行时文件生效，因此首次接入前仍可以先启动控制面。
-trim_trailing_slash() {
-    local value="${1:-}"
-    while [[ "$value" == */ ]]; do value="${value%/}"; done
-    printf '%s' "$value"
-}
-
-valid_http_origin() {
-    local value
-    value="$(trim_trailing_slash "${1:-}")"
-    [[ "$value" =~ ^https?://[^/@?#]+(:[0-9]{1,5})?$ ]]
-}
-
-keycloak_realm_issuer() {
-    local public_url realm
-    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" == "true" ]]; then
-        printf '%s' "$PUBLIC_KEYCLOAK_ISSUER"
-        return 0
-    fi
-    public_url="$(trim_trailing_slash "$(env_value "$env_file" KEYCLOAK_PUBLIC_URL)")"
-    realm="$(env_value "$env_file" KEYCLOAK_REALM)"
-    runtime_value_configured "$public_url" || fail "KEYCLOAK_PUBLIC_URL 未配置，无法校验子系统 OIDC 运行时"
-    runtime_value_configured "$realm" || fail "KEYCLOAK_REALM 未配置，无法校验子系统 OIDC 运行时"
-    valid_http_origin "$public_url" || fail "KEYCLOAK_PUBLIC_URL 必须是 HTTP(S) origin：${public_url}"
-    printf '%s/realms/%s' "$public_url" "$realm"
-}
-
-keycloak_internal_origin() {
-    local value
-    value="$(trim_trailing_slash "$(env_value "$env_file" KEYCLOAK_INTERNAL_URL)")"
-    [[ -n "$value" ]] || value="http://keycloak:8080"
-    valid_http_origin "$value" || fail "KEYCLOAK_INTERNAL_URL 必须是容器可达的 HTTP(S) origin：${value}"
-    printf '%s' "$value"
-}
-
-validate_runtime_value() {
-    local description="$1" key="$2" value="$3"
-    runtime_value_configured "$value" || fail "${description}运行时 ${key} 未配置或仍是占位符；请先在应用接入页同步 Keycloak Client"
-}
-
-# 对一份已接入的子系统运行时文件执行同一套 V2 门禁：
-# - 浏览器 issuer 必须是公开 Keycloak Realm；
-# - 后通道只能是 Compose 私网 Keycloak origin，不能携带 realm/path；
-# - redirect、client、租户、应用/环境自然键和角色目录哈希必须成组一致；
-# - online authorization-context 由 Compose 固定注入 platform-api；运行时平台
-#   地址只允许是统一入口或 Compose 私网平台 API，不能误配为 Keycloak。
-validate_keycloak_runtime() {
-    local description="$1" runtime_file="$2" application_code="$3" environment_code="$4"
-    local issuer_key="$5" backchannel_key="$6" client_key="$7" secret_key="$8" redirect_key="$9" tenant_key="${10}"
-    local platform_base_key="${11}" expected_redirect="${12}" hash_key="${13:-}"
-    local issuer backchannel client_id client_secret redirect_uri tenant_id platform_base hash_value
-    local expected_issuer expected_backchannel expected_client_id
-
-    client_id="$(env_value "$runtime_file" "$client_key")"
-    # 尚未由控制面创建 Client 的可选子系统不会启动；这里不把初始接入过程
-    # 误判为错误。只要已有 Client，就必须通过完整门禁。
-    runtime_value_configured "$client_id" || return 0
-
-    issuer="$(env_value "$runtime_file" "$issuer_key")"
-    backchannel="$(trim_trailing_slash "$(env_value "$runtime_file" "$backchannel_key")")"
-    client_secret="$(env_value "$runtime_file" "$secret_key")"
-    redirect_uri="$(env_value "$runtime_file" "$redirect_key")"
-    tenant_id="$(env_value "$runtime_file" "$tenant_key")"
-    platform_base="$(trim_trailing_slash "$(env_value "$runtime_file" "$platform_base_key")")"
-    expected_issuer="$(keycloak_realm_issuer)"
-    expected_backchannel="$(keycloak_internal_origin)"
-    expected_client_id="${application_code}-${environment_code}-web"
-
-    validate_runtime_value "$description" "$issuer_key" "$issuer"
-    validate_runtime_value "$description" "$backchannel_key" "$backchannel"
-    validate_runtime_value "$description" "$secret_key" "$client_secret"
-    validate_runtime_value "$description" "$redirect_key" "$redirect_uri"
-    validate_runtime_value "$description" "$tenant_key" "$tenant_id"
-    validate_runtime_value "$description" "$platform_base_key" "$platform_base"
-    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" != "true" ]]; then
-        [[ "$(trim_trailing_slash "$issuer")" == "$expected_issuer" ]] || \
-            fail "${description}运行时 ${issuer_key}=${issuer}；本地 Keycloak Realm 应为 ${expected_issuer}"
-    fi
-    [[ "$backchannel" == "$expected_backchannel" ]] || \
-        fail "${description}运行时 ${backchannel_key}=${backchannel}；应为 Compose 私网地址 ${expected_backchannel}（不得包含 /realms 路径）"
-    [[ "$client_id" == "$expected_client_id" ]] || \
-        fail "${description}运行时 ${client_key}=${client_id}；本地 ${environment_code} 环境要求 ${expected_client_id}"
-    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" != "true" ]]; then
-        [[ "$redirect_uri" == "$expected_redirect" ]] || \
-            fail "${description}运行时 ${redirect_key}=${redirect_uri}；应与统一前端入口一致：${expected_redirect}"
-    fi
-    if [[ "${PUBLIC_HTTPS_ENABLED:-false}" != "true" ]]; then
-        case "$platform_base" in
-            "$(trim_trailing_slash "$frontend_public_origin")"|http://platform-api:8080) ;;
-            *) fail "${description}运行时 ${platform_base_key}=${platform_base}；只能使用统一前端入口 ${frontend_public_origin} 或 Compose 私网平台地址 http://platform-api:8080，不能指向 Keycloak" ;;
-        esac
-    fi
-
-    if [[ -n "$hash_key" ]]; then
-        hash_value="$(env_value "$runtime_file" "$hash_key")"
-        validate_runtime_value "$description" "$hash_key" "$hash_value"
-        [[ "$hash_value" =~ ^sha256:[a-f0-9]{64}$ ]] || \
-            fail "${description}运行时 ${hash_key} 必须为 sha256:<64位小写十六进制目录哈希>"
-    fi
-}
-
-# 每个本地子系统可以独立绑定 dev/test/staging/prod。优先使用运行时显式环境，
-# 旧 Portal 配置没有该字段时从规范 Client ID 推导，最后才使用命令行默认值。
-runtime_target_environment() {
-	local runtime_file="$1" application_code="$2" client_key="$3"
-	local environment_code client_id client_prefix client_suffix
-	environment_code="$(env_value "$runtime_file" PLATFORM_ENVIRONMENT_CODE)"
-	case "$environment_code" in
-		dev|test|staging|prod) printf '%s' "$environment_code"; return ;;
-	esac
-	client_id="$(env_value "$runtime_file" "$client_key")"
-	client_prefix="${application_code}-"
-	client_suffix="-web"
-	if [[ "$client_id" == "${client_prefix}"*"${client_suffix}" ]]; then
-		environment_code="${client_id#"$client_prefix"}"
-		environment_code="${environment_code%"$client_suffix"}"
-		case "$environment_code" in
-			dev|test|staging|prod) printf '%s' "$environment_code"; return ;;
-		esac
-	fi
-	printf '%s' "$subsystem_environment"
-}
-
-sync_local_subsystem_environment_exports() {
-	export CONTRACT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)"
-	export CUSTOMER_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)"
-	export PORTAL_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)"
-	export PROJECT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)"
-	export DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$data_analysis_env_file" data_analysis OIDC_CLIENT_ID)"
-	export SETTLEMENT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$settlement_env_file" settlement OIDC_CLIENT_ID)"
-}
-
-validate_authorization_context_wiring() {
-    local expected='http://platform-api:8080/oauth2/authorization-context'
-    local standard_count portal_count
-    standard_count="$(grep -F "PLATFORM_AUTHORIZATION_CONTEXT_URL: ${expected}" "$compose_file" | wc -l | tr -d '[:space:]')"
-    portal_count="$(grep -F "PORTAL_AUTHORIZATION_CONTEXT_URL: ${expected}" "$compose_file" | wc -l | tr -d '[:space:]')"
-    [[ "$standard_count" -ge 3 && "$portal_count" -ge 1 ]] || \
-        fail "Compose 未为合同、项目、CRM、Portal 完整注入平台在线 authorization-context：${expected}"
-}
-
-validate_all_keycloak_runtimes() {
-	validate_authorization_context_wiring
-    validate_keycloak_runtime "合同管理" "$contract_env_file" contract_management "$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)" \
-        OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
-        PLATFORM_BASE_URL "${frontend_public_origin}/contract_management/auth/callback"
-    validate_keycloak_runtime "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" \
-        OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
-        PLATFORM_BASE_URL "${frontend_public_origin}/customer-opportunity/auth/callback" OIDC_ROLE_CONFIG_HASH
-    validate_keycloak_runtime "客户自助门户" "$portal_env_file" customer_portal "$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)" \
-        PORTAL_OIDC_ISSUER PORTAL_OIDC_BACKCHANNEL_BASE_URL PORTAL_OIDC_CLIENT_ID PORTAL_OIDC_CLIENT_SECRET PORTAL_OIDC_REDIRECT_URI PORTAL_OIDC_TENANT_ID \
-        PORTAL_PLATFORM_BASE_URL "${frontend_public_origin}/customer-portal/auth/callback" PORTAL_ROLE_CONFIG_HASH
-    validate_keycloak_runtime "项目管理" "$project_env_file" project_management "$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)" \
-        OIDC_ISSUER OIDC_BACKCHANNEL_BASE_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_REDIRECT_URI OIDC_TENANT_ID \
-        PLATFORM_BASE_URL "${frontend_public_origin}/project_management/auth/callback"
-}
-
-# 本地 Compose 的发现环境由 --subsystem-environment 显式选择。运行时一旦完成 OIDC 接入，Client、
-# application code 和 environment code 必须指向同一自然键；缺省元数据兼容旧 Portal
-# 文件，但任何显式冲突都在启动/重建前失败，避免把 prod Client 装入 dev 容器。
-validate_local_runtime_target() {
-	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5"
-	local application_code environment_code client_id expected_client_id
-	application_code="$(env_value "$runtime_file" PLATFORM_APPLICATION_CODE)"
-	environment_code="$(env_value "$runtime_file" PLATFORM_ENVIRONMENT_CODE)"
-	client_id="$(env_value "$runtime_file" "$client_key")"
-	expected_client_id="${expected_application}-${expected_environment}-web"
-
-	runtime_value_configured "$client_id" || return 0
-	if [[ -n "$application_code" && "$application_code" != "$expected_application" ]]; then
-		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前应用=${application_code}；Compose 发现应用=${expected_application}；请重新执行 ${expected_application}/${expected_environment} 应用接入"
-	fi
-	if [[ -n "$environment_code" && "$environment_code" != "$expected_environment" ]]; then
-		fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code}；Compose 目标环境=${expected_environment}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}；请使用 --subsystem-environment ${environment_code}，或重新同步 ${expected_application}/${expected_environment}"
-	fi
-	if [[ "$client_id" == "$expected_client_id" ]]; then
-		return 0
-	fi
-	# 客户自助门户的浏览器 Client 也可以是平台 bootstrap 托管签发的中转 Client
-	# （bootstrap/customer_portal_broker_reconciler 签发并登记为应用 Client，
-	# applicationregistry 将其识别为 server-managed broker client）；其余应用
-	# 仍必须使用 ${application}-${environment}-web 自然键，禁止跨环境复用。
-	if [[ "$expected_application" == customer_portal && "$client_id" == keycloak-customer-portal-broker ]]; then
-		return 0
-	fi
-	fail "${description}本地运行配置不匹配：文件=${runtime_file}；当前环境=${environment_code:-未配置}；当前 Client=${client_id:-未配置}；期望 Client=${expected_client_id}${expected_application:+（customer_portal 亦可为 keycloak-customer-portal-broker）}；请重新同步 ${expected_application}/${expected_environment}，禁止跨环境复用 Client"
-}
-
-# 机器客户端也必须和本地目标环境自然键一致。仅校验 Client ID，不读取、打印或
-# 猜测 Secret；密钥只能由接入控制面写入受限权限的 env 文件。
-validate_local_service_client_target() {
-	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5" expected_suffix="$6"
-	local client_id expected_client_id
-	client_id="$(env_value "$runtime_file" "$client_key")"
-	runtime_value_configured "$client_id" || return 0
-	expected_client_id="${expected_application}-${expected_environment}-${expected_suffix}"
-	[[ "$client_id" == "$expected_client_id" ]] || \
-		fail "${description}本地运行配置错配：${client_key}=${client_id}；当前 Compose 是 ${expected_application}/${expected_environment}，必须使用 ${expected_client_id}。请通过子系统 retry/update 重新下发对应环境凭据，禁止跨环境复制 Secret"
-}
-
-require_local_service_client_target() {
-	local description="$1" runtime_file="$2" expected_application="$3" expected_environment="$4" client_key="$5" secret_key="$6" expected_suffix="$7"
-	local client_id secret
-	client_id="$(env_value "$runtime_file" "$client_key")"
-	secret="$(env_value "$runtime_file" "$secret_key")"
-	runtime_value_configured "$client_id" && runtime_value_configured "$secret" || \
-		fail "${description}凭据未由接入控制面完整下发；请对 ${expected_application}/${expected_environment} 执行 subsystem-retry，禁止手工复制其他环境密钥"
-	validate_local_service_client_target "$description" "$runtime_file" "$expected_application" "$expected_environment" "$client_key" "$expected_suffix"
-}
-
-validate_all_local_runtime_targets() {
-	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management "$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
-	validate_local_runtime_target "客户与商机管理" "$customer_env_file" customer_and_opportunity "$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)" OIDC_CLIENT_ID
-	validate_customer_local_service_clients
-	validate_local_runtime_target "客户自助门户" "$portal_env_file" customer_portal "$(runtime_target_environment "$portal_env_file" customer_portal PORTAL_OIDC_CLIENT_ID)" PORTAL_OIDC_CLIENT_ID
-	validate_local_runtime_target "项目管理" "$project_env_file" project_management "$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
-}
-
-validate_customer_local_service_clients() {
-	local customer_environment
-	customer_environment="$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)"
-	require_local_service_client_target "客户与商机管理审计" "$customer_env_file" customer_and_opportunity "$customer_environment" PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET audit-publisher
-	require_local_service_client_target "客户与商机管理通知" "$customer_env_file" customer_and_opportunity "$customer_environment" PLATFORM_NOTIFICATION_CLIENT_ID PLATFORM_NOTIFICATION_CLIENT_SECRET notification-publisher
-}
-
-portal_compensation_configured() {
-	local key
-	for key in PORTAL_PROVISION_CLIENT_ID PORTAL_PROVISION_CLIENT_SECRET PLATFORM_ROLE_ASSIGN_CLIENT_ID PLATFORM_ROLE_ASSIGN_CLIENT_SECRET; do
-		runtime_value_configured "$(env_value "$customer_env_file" "$key")" || return 1
-	done
-}
-
-disable_contract_startup_catalog_sync() {
-    # 本地授权目录由隔离 provisioner 在接入/更新流程中发布。旧环境若仍启用
-    # contract-api 启动同步，失效的 publisher 凭据会令 API 和 Worker 一起重启。
-    if [[ "$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]]; then
-        replace_line_in_file "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED false
-        log "已关闭合同后端启动期授权目录同步；目录改由受控 provisioner 发布"
-    fi
-}
-
-compose_run() {
-	sync_local_subsystem_environment_exports
-    compose --ansi never "$@"
-}
-
 # 旧版本的 split-runtime profile 可能留下名为 worker 的平台 Worker。
 # 当前默认编排不启用该 profile，Compose --remove-orphans 不会处理未激活
 # profile 中的服务；down 时只按 Compose 项目和服务标签清理这一类遗留容器，
@@ -1381,34 +413,6 @@ remove_legacy_split_runtime_containers() {
         log "移除遗留 split-runtime Worker 容器：$container_id"
         docker rm -f "$container_id" >/dev/null
     done <<< "$container_ids"
-}
-
-# Compose --wait 可能在冷启动尚可恢复时立即因 unhealthy 返回。这里做一次有界重试；
-# 仍失败则输出服务状态与日志，避免只留下无法定位的 dependency failed to start。
-compose_up_wait() {
-    local description="$1"
-    shift
-    local attempt recreate_flag=""
-
-    if [[ "$force_build" == true ]]; then
-        recreate_flag="--force-recreate"
-    fi
-
-    for attempt in 1 2; do
-        if compose_run up -d --wait $recreate_flag "$@"; then
-            return 0
-        fi
-        if [[ "$attempt" -eq 1 ]]; then
-            log "${description}仍在冷启动，首次健康等待未完成；输出当前状态并在 5 秒后重试"
-            compose_run ps "$@" >&2 || true
-            sleep 5
-            continue
-        fi
-        log "ERROR: ${description}启动失败，以下为容器状态和最近日志"
-        compose_run ps -a "$@" >&2 || true
-        compose_run logs --no-color --tail=200 "$@" >&2 || true
-        return 1
-    done
 }
 
 verify_local_file_gateway() {
@@ -1512,75 +516,6 @@ ensure_data_analysis_discovery_candidate() {
 	compose_run up --no-start --no-deps --no-build dashboard-api >/dev/null
 }
 
-collect_dockerfile_base_images() {
-    # 动态收集各子系统 Dockerfile 的 FROM 基础镜像，替代手工清单：基础镜像升级后
-    # 手工清单必然漂移（合同子系统升到 golang:1.27.1 而清单仍是 1.26.4，重建时
-    # 现场拉取遇上 Docker Hub 不可达即部署失败）。多阶段引用（FROM runtime-base）
-    # 与 scratch 不含 .:/ 分隔符，据此过滤，只保留真实镜像引用。
-    local dockerfile
-    local images=()
-    local line
-    while IFS= read -r dockerfile; do
-        while IFS= read -r line; do
-            [[ -n "$line" ]] && images+=("$line")
-        done < <(grep -E "^FROM " "$dockerfile" | awk '{print $2}' | grep -E '[.:/]' || true)
-    done < <(find "$workspace_root" -maxdepth 3 -name "Dockerfile" -type f 2>/dev/null)
-    printf '%s\n' "${images[@]}" | sort -u
-}
-
-pull_image_with_retry() {
-    local image="$1" max_attempts="${2:-5}" attempt delay
-    if docker image inspect "$image" >/dev/null 2>&1; then
-        log "基础镜像已存在，跳过拉取：$image"
-        return 0
-    fi
-    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        log "串行拉取基础镜像（${attempt}/${max_attempts}）：$image"
-        if docker pull "$image"; then return 0; fi
-        if ((attempt < max_attempts)); then
-            delay=$((attempt * 5))
-            log "基础镜像拉取失败，${delay} 秒后重试：$image"
-            sleep "$delay"
-        fi
-    done
-    fail "基础镜像拉取失败：${image}。Docker Hub 认证端点不可达；请检查 Docker Desktop 的 Proxies/镜像加速器配置后重试。"
-}
-
-prepare_base_images() {
-    local image
-    local images=()
-    while IFS= read -r image; do
-        [[ -n "$image" ]] && images+=("$image")
-    done < <(collect_dockerfile_base_images)
-    # 编排在 compose image: 字段直接引用、不经任何 Dockerfile 构建的基础镜像。
-    images+=("mysql:8.4" "quay.io/keycloak/keycloak:26.2" "temporalio/auto-setup:1.29.7")
-    log "检查并串行准备基础镜像"
-    for image in "${images[@]}"; do pull_image_with_retry "$image"; done
-}
-
-prepare_go_backend_base_images() {
-    local target_name="${1:-Go 后端}"
-    local image
-    log "检查并串行准备${target_name}所需基础镜像"
-    while IFS= read -r image; do
-        [[ -n "$image" ]] || continue
-        case "$image" in
-            golang:*|alpine:*) pull_image_with_retry "$image" ;;
-        esac
-    done < <(collect_dockerfile_base_images)
-}
-
-prepare_frontend_base_images() {
-    local image
-    log "检查并串行准备统一前端所需基础镜像"
-    while IFS= read -r image; do
-        [[ -n "$image" ]] || continue
-        case "$image" in
-            node:*|nginx:*) pull_image_with_retry "$image" ;;
-        esac
-    done < <(collect_dockerfile_base_images)
-}
-
 # 只读预检接缝：测试用替身替换，生产走真实 Docker。
 docker_control_available() { docker info >/dev/null 2>&1; }
 local_image_present() { docker image inspect "$1" >/dev/null 2>&1; }
@@ -1588,6 +523,92 @@ local_image_present() { docker image inspect "$1" >/dev/null 2>&1; }
 # 启动前只读预检：V1 固定记录核对批准，V2 核对 Agent 下发的登记绑定；两者都检查不可变镜像。
 # 任何问题都在执行迁移之前一次性报出，避免逐个撞 No such image，也避免业务镜像失效时
 # 控制面一并被阻断。本函数不写入任何文件，也不修改固定记录。
+# 重建后对比"刚构建的候选镜像"与"固定记录"：固定记录存在时 compose up 用的是已批准镜像，
+# 因此新构建不会自动生效。这里只提示，不阻断（阻断见 preflight_local_license_images）。
+# 已登记（已固定）的应用不允许用 refresh-* 直接重建：重建会生成新镜像 ID，
+# 使固定记录与批准同时失效（运行中的服务仍跑旧镜像，up 预检则报 No such image）。
+# 受控路径：build-images 准备候选 → refresh-approvals --approve → 应用接入受控更新 → up。
+# 冷启动自愈：上一次项目后台操作停在中间态、而容器已随整体停机消失时，
+# 旧状态无法再被证明排空，up 会拒绝启动。这里把状态文件归档（不删除）后重新准备。
+recover_stale_project_background_state() {
+    local state_file="${project_root}/runtime/project-background/operation.json"
+    [[ -f "$state_file" ]] || return 0
+    local running existing verdict
+    running="$(compose --profile project ps -q project-api sla-notifier 2>/dev/null | grep -c . || true)"
+    existing="$(compose --profile project ps -aq project-api sla-notifier 2>/dev/null | grep -c . || true)"
+    verdict="$(python3 "${script_dir}/project_background_state.py" "$state_file" "$running" "$existing" 2>/dev/null)" || return 0
+    [[ "$verdict" == archive ]] || return 0
+    local backup="${state_file}.stale.$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$state_file" "$backup" || return 1
+    log "项目后台存在无法排空的旧状态（容器已不存在），已归档到 ${backup}，重新准备"
+}
+
+refuse_pinned_rebuild() {
+    local pin_file="${project_root}/runtime/local-license.compose.json"
+    [[ -f "$pin_file" ]] || return 0
+    python3 - "$pin_file" "$@" <<'PYEOF'
+import json, sys
+pins = json.load(open(sys.argv[1], encoding="utf-8")).get("services", {})
+requested = [name for name in sys.argv[2:] if name in pins]
+if requested:
+    print("[拒绝重建] 这些服务已写入授权固定记录，refresh-* 重建会让固定记录与批准同时失效：")
+    for name in requested:
+        print("  " + name)
+    print("  受控路径：bash scripts/docker-local.sh build-images")
+    print("            bash scripts/docker-local.sh refresh-approvals --operator <标识>")
+    print("            bash scripts/docker-local.sh dev-approve --replace")
+    print("            应用接入页受控更新（或 bash scripts/subsystem.sh retry --application-code <编码>）后执行 up")
+    sys.exit(3)
+PYEOF
+}
+
+report_candidate_drift() {
+    local manifest="${project_root}/config/local-license-components.json"
+    local pin_file="${project_root}/runtime/local-license.compose.json"
+    [[ -f "$manifest" && -f "$pin_file" ]] || return 0
+    python3 - "$manifest" "$pin_file" <<'PYEOF' || true
+import json, subprocess, sys
+manifest, pin_file = sys.argv[1], sys.argv[2]
+apps = json.load(open(manifest, encoding="utf-8")).get("applications", {})
+pins = json.load(open(pin_file, encoding="utf-8")).get("services", {})
+rows = []
+for app, spec in apps.items():
+    for service, tag in (spec.get("services") or {}).items():
+        pinned = (pins.get(service) or {}).get("image")
+        if not pinned:
+            continue
+        actual = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+                                capture_output=True, text=True).stdout.strip()
+        if actual and actual != pinned:
+            rows.append((app, service, tag, pinned[:19], actual[:19]))
+stale = []
+for app, spec in apps.items():
+    migration = (spec.get("migration") or {})
+    services = spec.get("services") or {}
+    api_service = next((name for name in services if name.endswith("-api")), None)
+    app_images = [services[api_service]] if api_service else []
+    migrate_tag = migration.get("image")
+    if not migrate_tag or not app_images:
+        continue
+    def created(tag):
+        return subprocess.run(["docker", "image", "inspect", "--format", "{{.Created}}", tag],
+                              capture_output=True, text=True).stdout.strip()
+    migrate_created, app_created = created(migrate_tag), [created(t) for t in app_images]
+    if migrate_created and any(t and t < migrate_created for t in app_created):
+        stale.append((app, migrate_tag))
+if stale:
+    print("[迁移镜像滞后] 应用镜像比迁移镜像更新，\"migrations are current\" 可能是假象：")
+    for app, tag in stale:
+        print("  %-24s 迁移镜像=%s" % (app, tag))
+    print("  下一步：同一次构建里重建迁移镜像（如 refresh-data-analysis-api 会一并重建 dashboard-migrate）")
+if rows:
+    print("[候选镜像未生效] 以下服务刚构建的镜像与固定记录不一致，重启后运行的仍是已批准镜像：")
+    for app, service, tag, pin, actual in rows:
+        print("  %-24s %-28s 固定=%s 候选=%s (%s)" % (app, service, pin, actual, tag))
+    print("  下一步：refresh-approvals --operator <标识> → --approve → 应用接入受控更新（或 subsystem.sh retry）→ up")
+PYEOF
+}
+
 preflight_local_license_images() {
     local override_file="${project_root}/runtime/local-license.compose.json"
     local approvals_dir="${project_root}/runtime-approvals"
@@ -1863,26 +884,6 @@ PY
         log "  5. 业务镜像失效导致控制面也无法启动时，可先执行 bash scripts/docker-local.sh up --core-only 恢复控制面"
         fail "本地授权镜像预检失败：按上述顺序恢复；脚本不会用可变标签替代已批准的不可变镜像"
     fi
-}
-
-# 只读：列出 Compose 解析出的默认本地镜像标签（不加载授权固定文件），供存在性判断使用。
-# 仅查询，不启动、不构建、不写文件。
-compose_default_local_images() {
-    COMPOSE_SKIP_LICENSE_OVERRIDE=1 compose \
-        --profile bootstrap --profile customer --profile portal --profile project \
-        --profile presale-worker --profile keycloak --ansi never config --format json 2>/dev/null \
-        | python3 -c '
-import json
-import sys
-try:
-    model = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-for name, spec in sorted((model.get("services") or {}).items()):
-    image = spec.get("image") if isinstance(spec, dict) else None
-    if isinstance(image, str) and image:
-        sys.stdout.write(name + "\t" + image + "\n")
-'
 }
 
 # 已登记服务的运行镜像由固定记录决定；普通启动不得重建它们，否则会让已批准记录失效。
@@ -2365,6 +1366,7 @@ start_stack() {
     fi
     preflight_local_license_images
     if project_configured; then
+        recover_stale_project_background_state
         configure_local_project_background_build
         local_project_background prepare
     fi
@@ -2428,7 +1430,14 @@ start_stack() {
 		# project-migrate 同样已在 run_migrations 中完成，避免 Compose 在
 		# `--wait` 时重复重建一次性迁移容器。
 		compose_run up -d --wait --no-deps project-api sla-notifier
-        local_project_background activate
+		if ! local_project_background activate; then
+			# 本地未导入厂商 JWS 时 worker 按 PAUSED_LICENSE 暂停，生产状态机会
+			# 拒绝完成切换；不放宽状态机，只是不中断其余启动。候选与恢复记录已保留。
+			if ! local_project_background_license_paused; then
+				fail "项目后台受控切换失败；请检查许可或依赖"
+			fi
+			log "项目后台因本地未导入许可证保持暂停（PAUSED_LICENSE）；候选已保留，导入许可证后重跑 up 完成切换"
+		fi
 	else
 		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
 	fi
@@ -2472,6 +1481,9 @@ refresh_platform_api() {
     prepare_go_backend_base_images "基础平台后端"
 
     log "重新构建基础平台后端镜像（不构建 frontend、contract-api 或 customer-api）"
+    # 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+    preflight_local_license_images
+    refuse_pinned_rebuild api
     COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --ansi never build api
 
     log "确认基础平台控制面依赖，并执行基础平台数据库迁移"
@@ -2485,6 +1497,7 @@ refresh_platform_api() {
     log "重建基础平台 API"
     compose_run up -d --wait --no-deps api
     verify_local_file_gateway
+    report_candidate_drift
     compose_run ps api subsystem-provisioner docker-socket-proxy mysql file-gateway file-gateway-mysql
     log "基础平台后端已刷新；统一前端、合同/CRM 后端、可选门户后端和现有统一登录接入配置保持不变"
 }
@@ -2495,10 +1508,14 @@ refresh_unified_frontend() {
     prepare_gateway_config
 
     log "重新构建统一前端镜像（基础平台 + 合同管理 + 客户与商机管理 + 客户自助门户 + 项目管理系统前端）"
+    # 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+    preflight_local_license_images
+    refuse_pinned_rebuild frontend
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build frontend
     log "重建统一 frontend 容器；平台/合同/CRM 后端、可选门户/项目后端和统一登录接入配置保持不变"
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
+    report_candidate_drift
     compose_run ps frontend
 }
 
@@ -2521,6 +1538,9 @@ refresh_contract_backend() {
     compose_run up -d --wait --force-recreate --no-deps subsystem-provisioner api
 
     log "重新构建合同管理后端镜像（不构建 frontend 或基础平台 api）"
+    # 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+    preflight_local_license_images
+    refuse_pinned_rebuild contract-api contract-worker
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build contract-api contract-worker
     log "启动合同数据库与 Temporal，并执行合同管理数据库迁移"
     compose_run up -d --wait contract-mysql temporal
@@ -2530,6 +1550,7 @@ refresh_contract_backend() {
     log "重建 contract-api 与 contract-worker 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
     compose_run up -d --wait --no-deps contract-api contract-worker
     verify_gateway_routes
+    report_candidate_drift
     compose_run ps contract-api contract-worker contract-mysql temporal
 }
 
@@ -2544,6 +1565,9 @@ refresh_customer_backend() {
     prepare_go_backend_base_images "客户与商机管理后端"
 
     log "重新构建客户与商机管理后端镜像（不构建 frontend、基础平台 api 或 contract-api）"
+    # 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+    preflight_local_license_images
+    refuse_pinned_rebuild customer-api customer-presale-alert-worker
     COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build customer-api customer-presale-alert-worker
 	ensure_crm_discovery_candidate
     sync_crm_authorization_catalog
@@ -2558,6 +1582,7 @@ refresh_customer_backend() {
 	start_customer_notification_workers
     compose_run up -d --wait --no-deps frontend
     verify_gateway_routes
+    report_candidate_drift
 	compose_run ps customer-api customer-mysql
 }
 
@@ -2661,6 +1686,9 @@ refresh_portal_backend() {
 	prepare_go_backend_base_images "客户自助门户后端"
 
 	log "重新构建客户自助门户独立后端镜像"
+	# 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+	preflight_local_license_images
+    refuse_pinned_rebuild portal-api
 	COMPOSE_PARALLEL_LIMIT=1 compose --ansi never build portal-api
 	prepare_gateway_config
 	log "刷新统一前端网关中的客户门户路由"
@@ -2673,6 +1701,7 @@ refresh_portal_backend() {
 	compose_run up -d --no-deps portal-invite-compensation-worker
 	compose_run up -d --wait --no-deps frontend
 	verify_gateway_routes
+    report_candidate_drift
 	compose_run ps portal-api portal-invite-compensation-worker portal-mysql frontend
 }
 
@@ -2688,7 +1717,11 @@ refresh_project_backend() {
 	prepare_go_backend_base_images "项目管理系统后端"
 
 	log "重新构建项目管理系统独立后端镜像"
+	# 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+	preflight_local_license_images
+    refuse_pinned_rebuild project-api sla-notifier
 	COMPOSE_PARALLEL_LIMIT=1 compose --profile project --ansi never build project-api sla-notifier
+	recover_stale_project_background_state
 	configure_local_project_background_build
 	local_project_background prepare
 	log "启动项目管理系统 MySQL 并执行项目清单迁移"
@@ -2696,8 +1729,13 @@ refresh_project_backend() {
 	compose_run run --rm --no-deps project-migrate
 	log "重建 project-api 容器；统一前端、基础平台后端和统一登录接入配置保持不变"
 	compose_run up -d --wait --no-deps project-api sla-notifier
-	local_project_background activate
+	if ! local_project_background activate; then
+		local_project_background_license_paused ||
+			fail "项目后台受控切换失败；请检查许可或依赖"
+		log "项目后台因本地未导入许可证保持暂停（PAUSED_LICENSE）；候选已保留，导入许可证后重跑 refresh-project-api 完成切换"
+	fi
 	verify_gateway_routes
+    report_candidate_drift
 	compose_run ps project-api sla-notifier project-mysql
 }
 
@@ -2714,6 +1752,9 @@ refresh_data_analysis_backend() {
 	prepare_go_backend_base_images "数据看板后端"
 
 	log "重新构建数据看板独立后端镜像"
+	# 固定记录预检：重建后仍会按已批准镜像重启，先确认固定镜像与批准可用。
+	preflight_local_license_images
+    refuse_pinned_rebuild dashboard-migrate dashboard-api aggregation-worker alert-worker
 	COMPOSE_PARALLEL_LIMIT=1 compose --profile data-analysis --ansi never build dashboard-migrate dashboard-api aggregation-worker alert-worker
 	log "启动数据看板 MySQL并执行版本化迁移"
 	compose_run up -d --wait dashboard-mysql
@@ -2721,6 +1762,7 @@ refresh_data_analysis_backend() {
 	log "重建 dashboard-api 与 Worker；统一前端、基础平台后端和统一登录接入配置保持不变"
 	compose_run up -d --wait --no-deps dashboard-api aggregation-worker alert-worker metabase
 	verify_gateway_routes
+    report_candidate_drift
 	compose_run ps dashboard-api aggregation-worker alert-worker dashboard-mysql
 }
 

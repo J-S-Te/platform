@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -94,4 +95,33 @@ func (writer *ArchiveWriter) WriteArchive(ctx context.Context, task domain.Reten
 	}
 	completed = true
 	return domain.Archive{ArchiveID: task.ArchiveID, TenantID: task.TenantID, ApplicationID: task.ApplicationID, StorageRelativePath: filepath.ToSlash(relativePath), MediaType: archiveMediaType, SHA256: hash.Sum(nil), EventCount: uint64(len(events)), OccurredFrom: occurredFrom, OccurredTo: occurredTo, CreatedAt: now.UTC()}, nil
+}
+
+// VerifyArchive 在清理在线记录前核对归档文件仍然存在且未被替换。
+// 统一审计方案 §3.4：清理前必须证明归档真实存在、摘要有效；校验失败时调用方不得删除任何在线事件。
+func (writer *ArchiveWriter) VerifyArchive(archive domain.Archive) error {
+	relativePath := strings.TrimSpace(archive.StorageRelativePath)
+	if relativePath == "" {
+		return errors.New("archive storage path is empty")
+	}
+	if len(archive.SHA256) == 0 {
+		return errors.New("archive sha256 is empty")
+	}
+	absolutePath, err := safeStoragePath(writer.storageRoot, relativePath)
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(absolutePath)
+	if err != nil {
+		return fmt.Errorf("open audit archive: %w", err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fmt.Errorf("hash audit archive: %w", err)
+	}
+	if !bytes.Equal(hash.Sum(nil), archive.SHA256) {
+		return errors.New("audit archive checksum mismatch")
+	}
+	return nil
 }

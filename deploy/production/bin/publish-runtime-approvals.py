@@ -648,12 +648,35 @@ class Publisher:
             self.lock_fd = None
 
 
+def file_sha(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def print_bundle_diff(before, current):
+    before, current = Path(before), Path(current)
+    old = {p.name: file_sha(p) for p in before.iterdir() if p.is_file() and not p.is_symlink()} if before.is_dir() else {}
+    new = {p.name: file_sha(p) for p in current.iterdir() if p.is_file() and not p.is_symlink()} if current.is_dir() else {}
+    print('审核差异：新增 %d，删除 %d，变化 %d' % (len(set(new) - set(old)), len(set(old) - set(new)),
+                                                len({n for n in set(old) & set(new) if old[n] != new[n]})))
+    for name in sorted(set(new) - set(old)):
+        print('  + ' + name)
+    for name in sorted(set(old) - set(new)):
+        print('  - ' + name)
+    for name in sorted(n for n in set(old) & set(new) if old[n] != new[n]):
+        print('  ~ ' + name)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--deploy-root', required=True, type=Path)
     parser.add_argument('--bundle', type=Path)
     parser.add_argument('--bundle-sha256')
     parser.add_argument('--before-sha256')
+    parser.add_argument('--diff-before', type=Path, help='只读打印候选 bundle 与旧批准目录的差异')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--verify-only', action='store_true')
@@ -683,6 +706,8 @@ def main(argv=None):
             verify_agent(args.deploy_root, args.agent_proof)
             return 0
         require(args.bundle is not None and args.bundle_sha256 is not None, 'reviewed bundle required')
+        if args.diff_before:
+            print_bundle_diff(args.diff_before, args.deploy_root / 'runtime-approvals')
         if args.apply:
             def terminated(_number, _frame):
                 raise InterruptedError('publication terminated; inspect durable transaction before resuming')

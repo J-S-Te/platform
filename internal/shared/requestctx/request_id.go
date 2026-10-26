@@ -45,8 +45,24 @@ func CorrelationID(ctx context.Context) string {
 
 // WithClientIP 保存可信代理中间件解析出的客户端地址。
 // 业务处理器必须使用该值，不得自行读取转发请求头。
+type clientIPSourceKey struct{}
+
 func WithClientIP(ctx context.Context, clientIP string) context.Context {
 	return context.WithValue(ctx, clientIPKey{}, clientIP)
+}
+
+// WithClientIPSource 保存可信代理中间件解析出的客户端地址与来源标记。
+// 来源由解析过程产生（DIRECT / TRUSTED_PROXY / UNKNOWN），下游不得自行推断。
+func WithClientIPSource(ctx context.Context, clientIP, source string) context.Context {
+	ctx = context.WithValue(ctx, clientIPKey{}, clientIP)
+	return context.WithValue(ctx, clientIPSourceKey{}, source)
+}
+
+// ClientIPWithSource 返回客户端地址与解析来源；来源为空表示调用方只写了地址。
+func ClientIPWithSource(ctx context.Context) (string, string) {
+	clientIP, _ := ctx.Value(clientIPKey{}).(string)
+	source, _ := ctx.Value(clientIPSourceKey{}).(string)
+	return clientIP, source
 }
 
 // ClientIP 返回经过传输层校验的客户端地址；未解析出时返回空值。

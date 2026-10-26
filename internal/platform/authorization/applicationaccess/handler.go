@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -19,14 +20,33 @@ const maxAccessRequestBytes = 32 << 10
 
 // Handler 提供应用访问授权与授权目录同步的 HTTP 入口。
 // 所有操作以会话主体所属租户为边界；授权目录写操作仅接受已验证的应用 Bearer 凭据。
-type Handler struct{ service *Service }
+// strictRevision 是方案兼容发布第 2 步的开关：环境变量
+// IAM_APPLICATION_ACCESS_REVISION_STRICT 置为 1/true/yes 时，写接口缺省
+// expected_revision 一律 422（全部调用方传条件后才允许开启，开启后不得为回退
+// 重新开放无条件覆盖）。
+type Handler struct {
+	service        *Service
+	strictRevision bool
+}
+
+// strictRevisionEnvironmentVariable 是严格模式的部署配置项。
+const strictRevisionEnvironmentVariable = "IAM_APPLICATION_ACCESS_REVISION_STRICT"
+
+func strictRevisionFromEnvironment(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // NewHandler 构造 HTTP 适配器；service 为空时返回错误。
 func NewHandler(service *Service) (*Handler, error) {
 	if service == nil {
 		return nil, errors.New("application authorization HTTP handler service must not be nil")
 	}
-	return &Handler{service: service}, nil
+	return &Handler{service: service, strictRevision: strictRevisionFromEnvironment(os.Getenv(strictRevisionEnvironmentVariable))}, nil
 }
 
 type rolePayload struct {
@@ -41,6 +61,10 @@ type updatePayload struct {
 	Roles             *[]rolePayload `json:"roles"`
 	RoleCode          string         `json:"role_code"`
 	CustomPermissions *[]string      `json:"custom_permissions"`
+	// ExpectedRevision 是整组保存的乐观并发条件（GET 响应的 edit_revision）。
+	// 兼容发布第一阶段允许缺省；携带但陈旧返回 409 APPLICATION_ACCESS_REVISION_CONFLICT，
+	// 格式非法返回 422。该字段是状态摘要，不承担认证或授权能力。
+	ExpectedRevision string `json:"expected_revision"`
 }
 
 // GetAccess 返回某用户在指定应用上的有效授权视图（含直绑、继承与有效权限）。
@@ -80,6 +104,7 @@ func (h *Handler) UpdateAccess(w http.ResponseWriter, r *http.Request) {
 		TenantID: principal.Tenant.ID, UserID: strings.TrimSpace(r.PathValue("user_id")), OperatorID: principal.User.ID, OperatorName: principal.User.Name,
 		Roles: roles, RolesProvided: provided,
 		CustomPermissions: valueOrEmpty(payload.CustomPermissions), CustomPermissionsProvided: payload.CustomPermissions != nil,
+		ExpectedRevision: payload.ExpectedRevision, StrictRevisionRequired: h.strictRevision,
 	}, strings.TrimSpace(r.PathValue("application_code")))
 	if err != nil {
 		writeError(w, r, err)
@@ -172,6 +197,8 @@ func (h *Handler) DeleteAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	err := h.service.DeleteAccess(r.Context(), DeleteAccessInput{
 		TenantID: principal.Tenant.ID, UserID: strings.TrimSpace(r.PathValue("user_id")), OperatorID: principal.User.ID, OperatorName: principal.User.Name,
+		// DELETE 的并发条件经查询参数承载，避免依赖 DELETE body；参数只是状态摘要。
+		ExpectedRevision: r.URL.Query().Get("expected_revision"), StrictRevisionRequired: h.strictRevision,
 	}, strings.TrimSpace(r.PathValue("application_code")))
 	if err != nil {
 		writeError(w, r, err)
@@ -251,6 +278,21 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, ErrAccessDenied), errors.Is(err, authapplication.ErrForbidden):
 		httpresponse.WriteError(w, r, http.StatusForbidden, httperror.Forbidden)
+	case errors.Is(err, ErrRevisionConflict):
+		// 稳定错误标识供前端区分"并发冲突（保留草稿，提示重新读取）"与其他失败；
+		// 前端不得自动换用最新版本重提。
+		httpresponse.WriteError(w, r, http.StatusConflict, httperror.New(
+			"APPLICATION_ACCESS_REVISION_CONFLICT",
+			"应用授权已被其他管理员修改，请刷新读取最新授权后重试。",
+			nil,
+		))
+	case errors.Is(err, ErrAccessReadback):
+		// 写事务已提交；不得让调用方误以为写失败并重复提交。
+		httpresponse.WriteError(w, r, http.StatusServiceUnavailable, httperror.New(
+			"APPLICATION_ACCESS_READBACK_FAILED",
+			"授权已保存，但最新结果读取失败，请刷新核对，勿重复提交。",
+			map[string]string{"write_committed": "true", "next_action": "refresh"},
+		))
 	default:
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 	}

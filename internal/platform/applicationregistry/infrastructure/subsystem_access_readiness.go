@@ -33,11 +33,16 @@ type SubsystemAccessAuthObservationReader interface {
 //   - 历史演示与配置漂移：无读取器时同样记入 Unverified（不默认"无漂移"）。
 //
 // 任一必需来源失败即返回错误：不猜测、不默认就绪。
+type SubsystemAccessConfigurationDriftReader interface {
+	ReadSubsystemAccessConfigurationDrift(context.Context, string, string, string) (bool, []string, string, error)
+}
+
 type SubsystemAccessReadinessAdapter struct {
-	database    *gorm.DB
-	approvals   application.RuntimeLicenseApprovalSource
-	images      SubsystemAccessImageReadinessReader
-	observation SubsystemAccessAuthObservationReader
+	configuration SubsystemAccessConfigurationDriftReader
+	database      *gorm.DB
+	approvals     application.RuntimeLicenseApprovalSource
+	images        SubsystemAccessImageReadinessReader
+	observation   SubsystemAccessAuthObservationReader
 }
 
 // NewSubsystemAccessReadinessAdapter 构造适配器；数据库与批准来源必需。
@@ -114,8 +119,18 @@ func (adapter *SubsystemAccessReadinessAdapter) ReadSubsystemAccessReadiness(ctx
 	} else {
 		readiness.Unverified = append(readiness.Unverified, "auth_observation")
 	}
-	// 无读取器的事实：不宣称"无漂移/非历史演示"，明确标为未验证。
-	readiness.Unverified = append(readiness.Unverified, "configuration_drift", "legacy_demo")
+	// 无批准时仍沿用既有缺项提示，不将缺批准转换成预览 500。
+	if adapter.configuration != nil && readiness.ApprovalReady {
+		drift, summary, version, err := adapter.configuration.ReadSubsystemAccessConfigurationDrift(ctx, tenantID, applicationCode, environmentCode)
+		if err != nil {
+			return SubsystemAccessReadiness{}, fmt.Errorf("read configuration drift: %w", err)
+		}
+		readiness.ConfigurationDrift, readiness.ChangeSummary = drift, summary
+		versions = append(versions, version)
+	} else {
+		readiness.Unverified = append(readiness.Unverified, "configuration_drift")
+	}
+	readiness.Unverified = append(readiness.Unverified, "legacy_demo")
 	sort.Strings(readiness.Unverified)
 
 	readiness.Version = readinessVersion(versions, readiness.Unverified)
@@ -157,4 +172,8 @@ func subsystemAccessEnvironmentAliases(environment string) []string {
 		return values
 	}
 	return []string{normalized}
+}
+
+func (adapter *SubsystemAccessReadinessAdapter) SetConfigurationDriftReader(reader SubsystemAccessConfigurationDriftReader) {
+	adapter.configuration = reader
 }

@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix='ci-assets-sync-') as directory:
                    'nginx', 'monitoring', 'tests')
     files = ('docker-compose.yml', '.env.example', '.release.env.example', '.gitignore',
              'ACCEPTANCE_CHECKLIST.md', 'README.md', 'OFFLINE_DEPLOYMENT.md',
-             'OFFLINE_RUNBOOK.md', 'DEPLOYMENT_COMPATIBILITY.md', 'DELIVERY_WORKFLOW.md', 'BACKUP_RECOVERY.md')
+             'OFFLINE_RUNBOOK.md', 'DEPLOYMENT_COMPATIBILITY.md', 'deployment-compatibility.json', 'DELIVERY_WORKFLOW.md', 'BACKUP_RECOVERY.md')
     for name in directories:
         (source / name).mkdir()
     for name in files:

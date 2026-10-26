@@ -43,6 +43,17 @@ class LocalProjectBackgroundTests(unittest.TestCase):
             block = text[text.rindex('    '+action):]
             self.assertLess(block.index('local_project_background teardown'), block.index('compose_run '+action[:-1]))
 
+    def test_activate_failures_are_only_tolerated_for_license_pause(self):
+        # 本地未导入厂商 JWS 时生产状态机按设计拒绝完成切换并保留候选；
+        # 启动链不得放宽状态机，也不得把其他失败静默放行。
+        text = (ROOT / 'scripts/docker-local.sh').read_text()
+        helper = (ROOT / 'scripts/local-project-background.sh').read_text()
+        self.assertIn('local_project_background_license_paused() {', helper)
+        self.assertEqual(helper.count('local_project_background_license_paused'), 1)
+        self.assertEqual(text.count('if ! local_project_background activate; then'), 2)
+        self.assertEqual(text.count('local_project_background_license_paused'), 2)
+        self.assertIn('PAUSED_LICENSE', text)
+
 class ComposeRuntimeEnvironmentTests(unittest.TestCase):
     build_id = 'project-background-sha256-' + 'a' * 64
 

@@ -298,6 +298,9 @@ services:
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
+      # 应用授权编辑版本严格模式（handler 启动读取）：true 时 PUT/DELETE 必须携带
+      # expected_revision。默认 false 为兼容期；生产切换须按发布流程显式置 true 并保留切换记录。
+      IAM_APPLICATION_ACCESS_REVISION_STRICT: ${IAM_APPLICATION_ACCESS_REVISION_STRICT:-false}
       # 四项配置必须成组提供。未完成专用机器客户端初始化前保持全部为空，
       # 避免仅有地址却没有凭据导致平台 API 在启动校验阶段退出。
       IAM_IMPORT_FILE_GATEWAY_BASE_URL: ${IAM_IMPORT_FILE_GATEWAY_BASE_URL:-}

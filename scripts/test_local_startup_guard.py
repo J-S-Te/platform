@@ -1,7 +1,7 @@
 """启动流程守护：子命令解析、候选构建入口、普通启动复用已登记镜像、控制面单独恢复。
 
-只读替身：不调用 Docker、不构建、不启动容器。函数体从 docker-local.sh 抽取，
-保证测的是真实实现。
+只读替身：不调用 Docker、不构建、不启动容器。入口函数体从 docker-local.sh 抽取，
+已拆分到 scripts/lib/ 的函数簇改为直接 source 真实脚本库，保证测的是真实实现。
 """
 from pathlib import Path
 import re
@@ -11,6 +11,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "scripts/docker-local.sh").read_text()
+
+
+def source_lib(name):
+    """加载 scripts/lib/<name>.sh 真实库文件（仅函数定义，加载零副作用）。"""
+    path = ROOT / "scripts/lib" / (name + ".sh")
+    return 'source "' + str(path) + '"\n'
 
 
 def function(name):
@@ -65,7 +71,7 @@ class ComposeSubcommandTest(unittest.TestCase):
                 "portal_configured() { return 0; }\nproject_configured() { return 1; }\n",
                 "data_analysis_configured() { return 1; }\n",
                 "docker() { printf 'DOCKER %s\\n' \"$*\" >&3; }\n",
-                function("compose"),
+                source_lib("compose"),
                 "compose " + " ".join(args) + "\n",
             ])
             env = {"PATH": "/usr/bin:/bin"}

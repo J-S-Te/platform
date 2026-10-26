@@ -141,6 +141,11 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	subsystemConfiguration, err := applicationregistryinfrastructure.NewSubsystemAccessConfigurationTracker(database, subsystemProvisioner, subsystemProvisioner)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemAccessReadiness.SetConfigurationDriftReader(subsystemConfiguration)
 	// 登记查询器与阶段执行器的目录登记端口共用同一实现，保证口径一致。
 	subsystemAccessRegistry, err := applicationregistryinfrastructure.NewSubsystemAccessRegistryGORMReader(database)
 	if err != nil {

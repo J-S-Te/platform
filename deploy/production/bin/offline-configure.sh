@@ -259,12 +259,21 @@ configure() (
     openssl pkey -in "$private" -pubout -out "$derived" || die '无法读取现有私钥，拒绝覆盖'
     if [[ -f "$public" ]] && ! cmp -s "$derived" "$public"; then die '现有公私钥不匹配，拒绝自动覆盖；请人工检查备份'; fi
   fi
+  configuration_require_keys() {
+    local key value
+    for key in COMPOSE_PROJECT_NAME SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID FILE_GATEWAY_HOST_ROOT; do
+      value="$(env_get "$runtime_file" "$key")"
+      [[ -n "$value" && "$value" != REPLACE_WITH_* ]] || die "运行配置缺少必需项或仍为占位值：${key}；未写入新配置"
+    done
+  }
+
   gateway_root="$(env_get "$runtime_file" FILE_GATEWAY_HOST_ROOT)"
   if [[ "$first" == true || -z "$gateway_root" ]]; then gateway_root="$deploy_dir/data/file-gateway"; fi
   configuration_safe_directory "$gateway_root"
   env_set "$runtime_file" FILE_GATEWAY_HOST_ROOT "$gateway_root"
   env_set "$runtime_file" PLATFORM_KEYS_DIR "$keys_dir"
   env_set "$runtime_file" OFFLINE_CONFIGURATION_COMPLETE true
+  configuration_require_keys
   if [[ -f "$actual_runtime" ]]; then
     backup="$(mktemp -d "$deploy_dir/backups/configuration-$(date +%Y%m%d-%H%M%S).XXXXXX")"
     install -m 600 "$actual_runtime" "$backup/.env"

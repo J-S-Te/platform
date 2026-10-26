@@ -249,6 +249,11 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	if err != nil {
 		return nil, err
 	}
+	configurationTracker, err := infrastructure.NewSubsystemAccessConfigurationTracker(database, provisioner, provisioner)
+	if err != nil {
+		return nil, err
+	}
+	deploymentPort.SetConfigurationEvidence(configurationTracker)
 	executor, err := application.NewSubsystemAccessStageExecutor(onboardingPort, deploymentPort)
 	if err != nil {
 		return nil, err
@@ -272,6 +277,7 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	// 完成收口：初始管理员授权落库 + 已应用清单核对，均复用既有实现。
 	deploymentPort.SetInitialAdminMarker(onboardingRepository)
 	deploymentPort.SetAppliedManifestReader(subsystemAccessAppliedManifestPort{reader: stateReader})
+	deploymentPort.SetIdentityReaders(registry, updateBrowserCredentials)
 	// 认证投影：仅 Keycloak 启用且拿到同一份 applicationaccess.Service 时接线；
 	// 否则结果阶段会显式标注 projection-skipped（不静默假装完成）。
 	if cfg.Keycloak.Enabled && keycloakCatalog != nil {

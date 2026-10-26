@@ -38,7 +38,19 @@ type Config struct {
 	CORSOrigins           []string
 	CommercialRuntime     CommercialRuntimeConfig
 	// Handover 配置离职交接的跨系统机器协议连接；未启用时不注入编排器，保持既有交接闸门。
-	Handover HandoverConfig
+	Handover             HandoverConfig
+	CredentialEncryption CredentialEncryptionConfig
+}
+
+// CredentialEncryptionConfig controls the uip-credential/v1 application-layer
+// credential envelope. disabled preserves legacy behavior; compat accepts both;
+// required rejects plaintext on registered credential routes.
+type CredentialEncryptionConfig struct {
+	Mode             string
+	KeyRingFile      string
+	ChallengeTTL     time.Duration
+	CleanupBatch     int
+	ResponseMaxBytes int64
 }
 
 // HandoverConfig 描述离职交接的机器协议接入参数。
@@ -400,6 +412,13 @@ func Load() (Config, error) {
 		},
 		CORSOrigins:           commaSeparated(value("APP_CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 		PortalApplicationCode: value("PLATFORM_PORTAL_APPLICATION_CODE", "customer_portal"),
+		CredentialEncryption: CredentialEncryptionConfig{
+			Mode:             strings.ToLower(value("CREDENTIAL_ENCRYPTION_MODE", "disabled")),
+			KeyRingFile:      resolveConfigPath(envFile, value("CREDENTIAL_ENCRYPTION_KEYRING_FILE", "")),
+			ChallengeTTL:     credentialChallengeTTL(value("CREDENTIAL_ENCRYPTION_CHALLENGE_TTL_SECONDS", "60")),
+			CleanupBatch:     credentialCleanupBatch(value("CREDENTIAL_ENCRYPTION_CLEANUP_BATCH_SIZE", "1000")),
+			ResponseMaxBytes: credentialResponseMax(value("CREDENTIAL_ENCRYPTION_RESPONSE_MAX_BYTES", "8388608")),
+		},
 		Handover: HandoverConfig{
 			Enabled:      handoverEnabled,
 			Environment:  value("HANDOVER_ENVIRONMENT", "prod"),
@@ -545,6 +564,40 @@ func (cfg Config) Validate() error {
 		default:
 			return fmt.Errorf("SUBSYSTEM_ONBOARDING_MODE must be local or production")
 		}
+	}
+	credentialMode := strings.ToLower(strings.TrimSpace(cfg.CredentialEncryption.Mode))
+	if credentialMode == "" {
+		credentialMode = "disabled"
+	}
+	credentialTTL := cfg.CredentialEncryption.ChallengeTTL
+	if credentialTTL == 0 {
+		credentialTTL = 60 * time.Second
+	}
+	credentialBatch := cfg.CredentialEncryption.CleanupBatch
+	if credentialBatch == 0 {
+		credentialBatch = 1000
+	}
+	credentialResponseMax := cfg.CredentialEncryption.ResponseMaxBytes
+	if credentialResponseMax == 0 {
+		credentialResponseMax = 8 << 20
+	}
+	switch credentialMode {
+	case "disabled":
+	case "compat", "required":
+		if strings.TrimSpace(cfg.CredentialEncryption.KeyRingFile) == "" {
+			return fmt.Errorf("CREDENTIAL_ENCRYPTION_KEYRING_FILE is required when credential encryption is enabled")
+		}
+	default:
+		return fmt.Errorf("CREDENTIAL_ENCRYPTION_MODE must be disabled, compat or required")
+	}
+	if credentialTTL < 30*time.Second || credentialTTL > 120*time.Second {
+		return fmt.Errorf("CREDENTIAL_ENCRYPTION_CHALLENGE_TTL_SECONDS must be between 30 and 120")
+	}
+	if credentialBatch < 1 || credentialBatch > 1000 {
+		return fmt.Errorf("CREDENTIAL_ENCRYPTION_CLEANUP_BATCH_SIZE must be between 1 and 1000")
+	}
+	if credentialResponseMax < 1024 || credentialResponseMax > 32<<20 {
+		return fmt.Errorf("CREDENTIAL_ENCRYPTION_RESPONSE_MAX_BYTES must be between 1KiB and 32MiB")
 	}
 	if len(cfg.CORSOrigins) == 0 {
 		return fmt.Errorf("APP_CORS_ALLOWED_ORIGINS must contain at least one exact origin")
@@ -717,4 +770,28 @@ func validSameSite(value string) bool {
 	default:
 		return false
 	}
+}
+
+func credentialChallengeTTL(raw string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || seconds <= 0 || seconds > 120 {
+		return 60 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func credentialCleanupBatch(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 || value > 1000 {
+		return 1000
+	}
+	return value
+}
+
+func credentialResponseMax(raw string) int64 {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value < 1024 || value > 32<<20 {
+		return 8 << 20
+	}
+	return value
 }

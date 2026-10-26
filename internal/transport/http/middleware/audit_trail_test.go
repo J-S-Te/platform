@@ -81,7 +81,7 @@ func TestAuditTrailUsesSessionLoginIPAndRetainsRequestIP(t *testing.T) {
 		User:    authctx.ReferenceName{ID: "user-1"},
 		LoginIP: net.ParseIP("203.0.113.10"),
 	}))
-	request = request.WithContext(requestctx.WithClientIP(request.Context(), "198.51.100.20"))
+	request = request.WithContext(requestctx.WithClientIPSource(request.Context(), "198.51.100.20", "TRUSTED_PROXY"))
 	router.ServeHTTP(httptest.NewRecorder(), request)
 
 	if got := recorder.input.SourceIP; got != "203.0.113.10" {
