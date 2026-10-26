@@ -514,6 +514,12 @@ fi
 echo "已写入 Portal 镜像内嵌授权目录哈希：$embedded_portal_hash"
 
 if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready || ! portal_report_worker_configured; then
+  # 首次接入可显式保留候选；CI 更新必须证明实际部署，不能把暂存当成功。
+  if [[ "${DEPLOY_FAIL_IF_RUNTIME_NOT_READY:-false}" == true ]]; then
+    restore_release || exit 1
+    echo 'CRM/Portal运行配置不完整，拒绝将仅暂存报告为发布成功；已恢复发布指针和运行配置' >&2
+    exit 1
+  fi
   release_committed=true
   echo "CRM/Portal 镜像已安全暂存；运行凭据尚未完整配置，未启动数据库迁移或业务服务。"
   echo "请先在基础平台应用接入页面完成或重试对应环境；Agent 会补齐 runtime 配置，随后重新运行同一发布命令。"
