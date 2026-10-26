@@ -1,5 +1,5 @@
 #!/bin/sh
-# 仅平台 API 在首次启动时负责生成 Ed25519 JWT 密钥；其他服务只读取共享密钥。
+# 平台 API 保留 JWT 首次初始化；凭据 RSA 密钥仅由显式 init-keys 任务创建。
 set -eu
 
 # 配置校验必须只读：不生成 JWT 密钥，不启动 API/worker。
@@ -36,6 +36,39 @@ if [ "${1:-}" = "./api" ] || [ "${1:-}" = "init-keys" ] || [ "${1:-}" = "./init-
 fi
 
 if [ "${1:-}" = "init-keys" ] || [ "${1:-}" = "./init-keys" ]; then
+    # 凭据传输密钥只在显式初始化任务生成。API/config-check 不能隐式换钥。
+    case "${CREDENTIAL_ENCRYPTION_MODE:-disabled}" in
+        disabled) ;;
+        compat|required)
+            credential_file="${CREDENTIAL_ENCRYPTION_KEYRING_FILE:-}"
+            case "$credential_file" in
+                /*.json) ;;
+                *) echo 'credential keyring requires an absolute JSON path' >&2; exit 1 ;;
+            esac
+            [ ! -L "$credential_file" ] || { echo 'credential keyring cannot be a symlink' >&2; exit 1; }
+            [ ! -e "$credential_file" ] || [ -f "$credential_file" ] || { echo 'credential keyring must be a regular file' >&2; exit 1; }
+            if [ ! -f "$credential_file" ]; then
+                credential_dir="$(dirname "$credential_file")"
+                [ ! -L "$credential_dir" ] || { echo 'credential key directory cannot be a symlink' >&2; exit 1; }
+                mkdir -p "$credential_dir"
+                credential_name="$(basename "$credential_file" .json)"
+                for credential_existing in "$credential_dir/$credential_name"-*.private.pem "$credential_dir/$credential_name"-*.public.pem; do
+                    if [ -e "$credential_existing" ] || [ -L "$credential_existing" ]; then
+                        echo 'credential key files exist without metadata; restore the keyring instead of generating a new identity' >&2
+                        exit 1
+                    fi
+                done
+                if [ "$(id -u)" = 0 ]; then
+                    # 沿用挂载目录属主，使0600私钥可由既有部署账号完整备份。
+                    credential_owner="$(stat -c '%u:%g' "$credential_dir")"
+                    su-exec "$credential_owner" ./credential-keygen --dir "$credential_dir" --name "$credential_name"
+                else
+                    ./credential-keygen --dir "$credential_dir" --name "$credential_name"
+                fi
+            fi
+            ;;
+        *) echo 'invalid credential encryption mode' >&2; exit 1 ;;
+    esac
     exit 0
 fi
 

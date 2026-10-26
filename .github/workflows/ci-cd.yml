@@ -47,6 +47,7 @@ jobs:
             exit 1
           fi
           bash -n deploy/production/bin/*.sh
+          sh scripts/test-docker-entrypoint-key-init.sh
           python3 deploy/production/tests/test-compose-blocks.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py

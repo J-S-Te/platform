@@ -46,6 +46,7 @@ RUN CGO_ENABLED=0 go test ./migrations \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/migrate ./cmd/migrate \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/public-transport-coordinator ./cmd/public-transport-coordinator \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/bootstrap-admin ./cmd/bootstrap-admin \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/credential-keygen ./cmd/credential-keygen \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/license-package ./cmd/license-package \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/license-install ./cmd/license-install \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/provision-iam-import-client ./cmd/provision-iam-import-client \
@@ -80,6 +81,7 @@ COPY --from=builder /out/worker ./worker
 COPY --from=builder /out/migrate ./migrate
 COPY --from=builder /out/public-transport-coordinator ./public-transport-coordinator
 COPY --from=builder /out/bootstrap-admin ./bootstrap-admin
+COPY --from=builder /out/credential-keygen ./credential-keygen
 COPY --from=builder /out/license-package ./license-package
 COPY --from=builder /out/license-install ./license-install
 COPY --from=builder /out/provision-iam-import-client ./provision-iam-import-client

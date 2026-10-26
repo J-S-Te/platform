@@ -72,3 +72,9 @@ go run ./cmd/credential-keygen -dir ./data/keys -name credential-keyring
 ## 上线门禁
 
 尚未完成：真实 MySQL 迁移验证、多实例 challenge 竞争测试、浏览器 HTTP 非 localhost 验收、完整全业务回归、`required` 模式部署证据。上述完成前不能把本机制标记为生产可用。
+
+## 容器发布初始化（2026-10-26）
+
+生产 `.env.example` 与前端生产构建统一为 `required`。`platform-key-init` 的显式初始化阶段在开启 `compat/required` 时创建缺失的 RSA-2048 密钥环；API 常规启动与 `config-check` 不生成或轮换该密钥。镜像包含 `credential-keygen`，运行时沿用密钥挂载目录的属主并使用0600私钥/元数据权限，便于既有部署账号执行完整备份。
+
+已有环境升级时先按发布门禁完成完整备份，确认没有待恢复的密钥环或旧RSA文件，然后同时设置 `CREDENTIAL_ENCRYPTION_MODE=required` 和 `CREDENTIAL_ENCRYPTION_KEYRING_FILE=/app/data/keys/credential-keyring.json`，执行正常平台发布（含显式key-init、迁移及config-check）。已有有效密钥环保持不变；存在孤立PEM或非普通文件时初始化拒绝继续，不自动换钥。发布后验证公开challenge接口，再由用户完成真实登录验收；HTTP模式的保护边界仍以本文开头说明为准。
