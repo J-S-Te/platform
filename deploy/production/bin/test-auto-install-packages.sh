@@ -5,6 +5,7 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/auto-install-packages-test.XXXXXX")"
 trap 'rm -r -- "$test_root"' EXIT
 mkdir -p "$test_root/deploy/bin" "$test_root/deploy/packages" "$test_root/deploy/manifests"
 cp "$source_dir/bin/deploy.sh" "$source_dir/bin/compose-scope.sh" "$source_dir/bin/start-enabled.sh" "$source_dir/bin/provisioner-config-refresh.sh" "$source_dir/bin/offline-configure.sh" "$source_dir/bin/offline-package-metadata.sh" "$source_dir/bin/public-transport.sh" "$test_root/deploy/bin/"
+cp "$source_dir"/bin/deploy-{common,import,subsystem,license,doctor,package,status,verify,menu,registry}.sh "$test_root/deploy/bin/"
 cp "$source_dir/docker-compose.yml" "$test_root/deploy/"
 touch "$test_root/deploy/.env" "$test_root/deploy/.release.env"
 chmod 600 "$test_root/deploy/.env" "$test_root/deploy/.release.env"

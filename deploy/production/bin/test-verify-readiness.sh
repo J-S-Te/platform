@@ -7,6 +7,7 @@ trap 'rm -r -- "$test_root"' EXIT
 mkdir -p "$test_root/deploy/bin" "$test_root/deploy/manifests" "$test_root/deploy/packages"
 mkdir -p "$test_root/checks"
 cp "$source_dir/bin/deploy.sh" "$source_dir/bin/compose-scope.sh" "$source_dir/bin/subsystem-runtime.py" "$source_dir/bin/start-enabled.sh" "$source_dir/bin/project-background.sh" "$source_dir/bin/provisioner-config-refresh.sh" "$source_dir/bin/offline-configure.sh" "$source_dir/bin/offline-package-metadata.sh" "$source_dir/bin/public-transport.sh" "$test_root/deploy/bin/"
+cp "$source_dir"/bin/deploy-{common,import,subsystem,license,doctor,package,status,verify,menu,registry}.sh "$test_root/deploy/bin/"
 cp "$source_dir/docker-compose.yml" "$test_root/deploy/"
 cp -R "$source_dir/subsystems.d" "$test_root/deploy/"
 : > "$test_root/deploy/.env"
