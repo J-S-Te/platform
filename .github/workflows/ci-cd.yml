@@ -62,7 +62,7 @@ jobs:
           python3 deploy/production/tests/test-deployment-compatibility.py
           bash deploy/production/bin/test-recovery-status.sh
           bash deploy/production/bin/test-first-failure.sh
-          bash deploy/production/bin/test-offline-configure.sh
+          sudo bash deploy/production/bin/test-offline-configure.sh
           bash deploy/production/bin/test-release-reliability.sh
           bash deploy/production/tests/test-assets-install.sh
           python3 -B deploy/production/tests/test-delivery-files.py
