@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/license-core/catalog"
@@ -226,7 +227,17 @@ func runtimeLicenseStatePath(settings application.RuntimeLicenseSettings, creden
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return filepath.Join(settings.StateDirectory, credential.Approval.ServiceID+"-"+hex.EncodeToString(sum[:16])+".json")
 }
+
+// writeIsolatedRuntimeLicenseEnvironment 用途：原子保存私有许可凭据并继承部署目录属主。
+// 参数：path 为受控凭据文件路径，values 为仅在内存交付的运行配置。
+// 返回值：保存成功返回 nil；属主、写入或同步失败返回错误且不替换原文件。
 func writeIsolatedRuntimeLicenseEnvironment(path string, values map[string]string) error {
+	// Agent 以 root 运行，生成文件仍应归部署目录属主所有，以便完整备份读取；
+	// 通过继承属主解决读取问题，不扩大 0600 权限。
+	owner, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
 	var b strings.Builder
 	for _, key := range sortedEnvironmentKeys(values) {
 		b.WriteString(key + "=" + encodeEnvironmentValue(values[key]) + "\n")
@@ -238,6 +249,11 @@ func writeIsolatedRuntimeLicenseEnvironment(path string, values map[string]strin
 	name := file.Name()
 	defer os.Remove(name)
 	if err = file.Chmod(0600); err == nil {
+		if stat, ok := owner.Sys().(*syscall.Stat_t); ok {
+			err = file.Chown(int(stat.Uid), int(stat.Gid))
+		}
+	}
+	if err == nil {
 		_, err = file.WriteString(b.String())
 	}
 	if err == nil {
