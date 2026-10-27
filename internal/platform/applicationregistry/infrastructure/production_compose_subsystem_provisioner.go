@@ -353,8 +353,9 @@ func (target *productionComposeTarget) Preflight(ctx context.Context, input appl
 	return nil
 }
 
-// Provision 串行写入清单允许的键，并在与 CI/CD 共用的文件锁内执行固定步骤；锁同时保护
-// 运行时文件、数据库备份和 Compose 操作，使自动重试不会与发布流程交叉覆盖。
+// Provision 用途：在共用发布锁内完成受控首次部署并核验许可配置加载。
+// 参数：ctx 为部署上下文，input 为服务端批准的部署与凭据绑定。
+// 返回值：备份、配置或部署失败返回错误，成功返回 nil。
 func (target *productionComposeTarget) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
@@ -390,6 +391,9 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.writeRuntimeLicenseCredentials(input); err != nil {
 		return err
 	}
+	if err := target.validateRuntimeLicenseWiring(operationContext, input); err != nil {
+		return err
+	}
 	if err := target.retireRuntimeLicenseContainers(operationContext, input); err != nil {
 		return err
 	}
@@ -409,10 +413,9 @@ func (target *productionComposeTarget) checkReleaseIntegrity(ctx context.Context
 	return nil
 }
 
-// Update 只重用已落盘的浏览器 OAuth 配置，不尝试从数据库恢复或隐式轮换它。重试/更新时
-// 仍会把清单中的固定值、非敏感身份绑定和缺失的生成密钥写入 runtime 文件，使清单新增的
-// 配置（如测试服务器的非 Secure Cookie 开关）无需重新 onboarding 即可生效。机器凭据仅在
-// 控制面明确重新下发时覆盖，避免把浏览器密钥暴露给普通更新流程。
+// Update 用途：在共用发布锁内更新清单配置、凭据及组件并核验许可接线。
+// 参数：ctx 为部署上下文，input 为服务端批准的部署与凭据绑定。
+// 返回值：备份、配置或部署失败返回错误，成功返回 nil。
 func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if input.InitialRuntimeProvisioning {
 		// 受信控制面已提供完整的一次性初始凭据；Provision 会在创建任何运行文件前完成
@@ -453,6 +456,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 		return err
 	}
 	if err := target.writeRuntimeLicenseCredentials(input); err != nil {
+		return err
+	}
+	if err := target.validateRuntimeLicenseWiring(operationContext, input); err != nil {
 		return err
 	}
 	if err := target.validateRuntimeIntegrationConfiguration(); err != nil {

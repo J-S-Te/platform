@@ -569,6 +569,13 @@ func (stub *manifestStateStub) SetSubsystemDesiredManifest(_ context.Context, te
 	return stub.err
 }
 
+// MarkSubsystemManifestApplied 用途：为既有期望清单测试提供完整状态存储端口。
+// 参数：全部为测试部署上下文与已应用清单。
+// 返回值：无持久化失败时返回 nil。
+func (stub *manifestStateStub) MarkSubsystemManifestApplied(context.Context, string, string, string, string, time.Time) error {
+	return nil
+}
+
 // 期望清单落库：未注入不落库；已注入且清单非空则落库；清单为空则不动。
 func TestSubsystemAccessDeploymentRecordsDesiredManifest(t *testing.T) {
 	// 未注入：不落库（行为与接线前一致）。

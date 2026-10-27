@@ -145,6 +145,9 @@ func TestBuiltinRetirementDoesNotReadLegacyApprovalWithoutRemovedMembers(t *test
 	}
 }
 
+// TestProductionBuiltinProvisionAndUpdateWithoutLegacyApproval 用途：验证 V2 完整部署不读取旧批准且实际加载私有许可。
+// 参数：t 为隔离部署测试上下文。
+// 返回值：无。
 func TestProductionBuiltinProvisionAndUpdateWithoutLegacyApproval(t *testing.T) {
 	for _, update := range []bool{false, true} {
 		p, _, _ := productionProvisionerFixture(t)
@@ -158,6 +161,7 @@ func TestProductionBuiltinProvisionAndUpdateWithoutLegacyApproval(t *testing.T) 
 		for _, id := range target.config.Profile.Manifest.Compose.RuntimeServices {
 			input.RuntimeLicenseCredentials = append(input.RuntimeLicenseCredentials, application.RuntimeLicenseCredential{Approval: application.RuntimeLicenseApproval{ServiceID: id, Protocol: 2}, RegistrationProtocol: 2, CatalogVersion: 1, CredentialGeneration: "catalog-1", ClientID: "builtin-" + id, ClientSecret: "isolated-secret", RetirementNotRequired: true})
 		}
+		target.runner = &licensedComposeFixtureRunner{subsystemCommandRunner: target.runner, input: input}
 		// Fixture starts without a V1 runtime approval file. Both full Agent paths must
 		// reach deployment while preserving all normal manifest/configuration checks.
 		if update {

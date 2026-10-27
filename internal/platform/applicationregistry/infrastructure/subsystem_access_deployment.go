@@ -38,6 +38,7 @@ type SubsystemAccessBrowserCredentialPreparer interface {
 
 // SubsystemAccessManifestStateStore 记录期望清单（漂移检测基准）；与既有实现同一应用层接口。
 type SubsystemAccessManifestStateStore interface {
+	MarkSubsystemManifestApplied(context.Context, string, string, string, string, time.Time) error
 	SetSubsystemDesiredManifest(ctx context.Context, tenantID, applicationCode, environment, checksum string, at time.Time) error
 }
 
@@ -275,6 +276,9 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboard(ctx context.Co
 	return outcome, err
 }
 
+// provisionOnboardWithCandidate 用途：同步完成首次部署并持久化实际应用清单。
+// 参数：ctx 为执行上下文，operation 为授权操作，run 为内存凭据。
+// 返回值：返回阶段结果，部署或保存失败返回错误。
 func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	target, ok, err := resolveSubsystemAccessTarget(ctx, adapter.catalog, operation)
 	if err != nil {
@@ -327,6 +331,9 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(c
 			return application.SubsystemAccessStageOutcome{}, fmt.Errorf("record desired manifest after onboarding: %w", err)
 		}
 	}
+	if err := adapter.recordAppliedAccessManifest(ctx, operation, target.ManifestChecksum); err != nil {
+		return application.SubsystemAccessStageOutcome{}, err
+	}
 	return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusSucceeded,
 		EvidenceRef: "provision:" + strings.TrimSpace(target.ManifestChecksum)}, nil
 }
@@ -348,6 +355,9 @@ func (adapter *SubsystemAccessDeploymentAdapter) UpdateSubsystemAccess(ctx conte
 	return outcome, err
 }
 
+// updateSubsystemAccessWithCandidate 用途：同步执行受控更新并记录真实部署清单。
+// 参数：ctx 为执行上下文，operation 为授权操作，run 为内存凭据。
+// 返回值：返回阶段结果；部署或持久化失败返回错误。
 func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandidate(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	// 观察期门禁（只读）：未结束/未开始/已存在时受控更新必须等待，而不是继续执行。
 	if adapter.observation != nil {
@@ -480,6 +490,9 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("update subsystem: %w", err)
 	}
 	if err := adapter.confirmRuntimeLicense(ctx, operation, input); err != nil {
+		return application.SubsystemAccessStageOutcome{}, err
+	}
+	if err := adapter.recordAppliedAccessManifest(ctx, operation, target.ManifestChecksum); err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
 	return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusSucceeded,
