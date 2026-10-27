@@ -55,3 +55,11 @@ func TestSubsystemAccessImageReadinessAdapterThreeStates(t *testing.T) {
 		t.Fatal("nil reader must fail construction")
 	}
 }
+
+func TestEmptyImageInventoryIsNotReady(t *testing.T) {
+	adapter, _ := NewSubsystemAccessImageReadinessAdapter(imageReaderStub{reported: true})
+	ready, _, verified, err := adapter.ReadSubsystemAccessImageReadiness(context.Background(), "tenant", "settlement", "prod")
+	if err != nil || ready || verified {
+		t.Fatalf("empty inventory must remain unverified: %v %v %v", ready, verified, err)
+	}
+}

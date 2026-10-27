@@ -39,6 +39,7 @@ type SubsystemAccessConfigurationDriftReader interface {
 
 type SubsystemAccessReadinessAdapter struct {
 	configuration SubsystemAccessConfigurationDriftReader
+	builtin       application.RuntimeComponentCatalogSource
 	database      *gorm.DB
 	approvals     application.RuntimeLicenseApprovalSource
 	images        SubsystemAccessImageReadinessReader
@@ -64,22 +65,33 @@ func (adapter *SubsystemAccessReadinessAdapter) ReadSubsystemAccessReadiness(ctx
 
 	readiness := SubsystemAccessReadiness{}
 	environments := subsystemAccessEnvironmentAliases(environmentCode)
-	var components []application.RuntimeLicenseApproval
-	for _, candidate := range environments {
-		approved, approvalErr := adapter.approvals.ApprovedRuntimeLicenseComponents(ctx, applicationCode, candidate)
-		if approvalErr != nil {
-			// 批准域的诊断（不可用 / 不匹配 / 启动校验失败 / 运行时不可用 / 未初始化）
-			// 都是「未就绪」的正常结果，不是传输失败：记为未就绪并继续尝试其它别名，
-			// 不能因此把整个预览打成 500。
-			if application.RuntimeLicenseApprovalErrorCode(approvalErr) != "" {
-				continue
-			}
-			return SubsystemAccessReadiness{}, fmt.Errorf("read approved runtime license components: %w", approvalErr)
+	approvalVersion := ""
+	if adapter.builtin != nil {
+		var err error
+		approvalVersion, err = builtinAccessCatalogVersion(ctx, adapter.builtin, applicationCode, environmentCode)
+		if err != nil {
+			return SubsystemAccessReadiness{}, fmt.Errorf("read builtin runtime components: %w", err)
 		}
-		components = append(components, approved...)
+		readiness.ApprovalReady = true
+	} else {
+		var components []application.RuntimeLicenseApproval
+		for _, candidate := range environments {
+			approved, approvalErr := adapter.approvals.ApprovedRuntimeLicenseComponents(ctx, applicationCode, candidate)
+			if approvalErr != nil {
+				// 批准域的诊断（不可用 / 不匹配 / 启动校验失败 / 运行时不可用 / 未初始化）
+				// 都是「未就绪」的正常结果，不是传输失败：记为未就绪并继续尝试其它别名，
+				// 不能因此把整个预览打成 500。
+				if application.RuntimeLicenseApprovalErrorCode(approvalErr) != "" {
+					continue
+				}
+				return SubsystemAccessReadiness{}, fmt.Errorf("read approved runtime license components: %w", approvalErr)
+			}
+			components = append(components, approved...)
+		}
+		readiness.ApprovalReady = len(components) > 0
+		approvalVersion = approvalComponentsVersion(components)
+
 	}
-	readiness.ApprovalReady = len(components) > 0
-	approvalVersion := approvalComponentsVersion(components)
 
 	var artifacts int64
 	if err := adapter.database.WithContext(ctx).Table("license_artifact").Count(&artifacts).Error; err != nil {
@@ -120,7 +132,7 @@ func (adapter *SubsystemAccessReadinessAdapter) ReadSubsystemAccessReadiness(ctx
 		readiness.Unverified = append(readiness.Unverified, "auth_observation")
 	}
 	// 无批准时仍沿用既有缺项提示，不将缺批准转换成预览 500。
-	if adapter.configuration != nil && readiness.ApprovalReady {
+	if adapter.configuration != nil && readiness.ApprovalReady && (adapter.builtin == nil || readiness.ImagesReady) {
 		drift, summary, version, err := adapter.configuration.ReadSubsystemAccessConfigurationDrift(ctx, tenantID, applicationCode, environmentCode)
 		if err != nil {
 			return SubsystemAccessReadiness{}, fmt.Errorf("read configuration drift: %w", err)
@@ -176,4 +188,8 @@ func subsystemAccessEnvironmentAliases(environment string) []string {
 
 func (adapter *SubsystemAccessReadinessAdapter) SetConfigurationDriftReader(reader SubsystemAccessConfigurationDriftReader) {
 	adapter.configuration = reader
+}
+
+func (adapter *SubsystemAccessReadinessAdapter) SetBuiltinRuntimeSource(source application.RuntimeComponentCatalogSource) {
+	adapter.builtin = source
 }

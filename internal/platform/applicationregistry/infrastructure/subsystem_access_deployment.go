@@ -111,6 +111,9 @@ type SubsystemAccessConfigurationEvidence interface {
 }
 
 type SubsystemAccessDeploymentAdapter struct {
+	runtimeLicenses      SubsystemAccessRuntimeEnrollment
+	runtimeSettings      func(context.Context) (application.RuntimeLicenseSettings, error)
+	runtimeLocal         bool
 	configuration        SubsystemAccessConfigurationEvidence
 	registry             SubsystemAccessRegistrationLookup
 	browserReferences    SubsystemAccessBrowserReferenceReader
@@ -292,9 +295,15 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(c
 		return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusFailed, ErrorCode: "PROVISIONING_INPUT_INVALID",
 			Message: err.Error()}, nil
 	}
+	if err := adapter.prepareRuntimeLicense(ctx, operation, &input); err != nil {
+		return application.SubsystemAccessStageOutcome{}, err
+	}
 	if err := adapter.provisioner.Provision(ctx, input); err != nil {
 		// 部署结果未知（可能已提交）：保留租约，下一轮先核对证据再决定，不重复执行。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("provision subsystem: %w", err)
+	}
+	if err := adapter.confirmRuntimeLicense(ctx, operation, input); err != nil {
+		return application.SubsystemAccessStageOutcome{}, err
 	}
 	// 首次接入成功后同样要落期望清单（漂移检测基准）；更新路径已在派发前落库，
 	// 首次接入若漏掉会出现"已接入但清单基准为空"，后续永远判不出漂移。
@@ -448,9 +457,15 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 	if err := adapter.reconcileKeycloakBroker(ctx, operation); err != nil {
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("reconcile keycloak broker: %w", err)
 	}
+	if err := adapter.prepareRuntimeLicense(ctx, operation, &input); err != nil {
+		return application.SubsystemAccessStageOutcome{}, err
+	}
 	if err := adapter.provisioner.Update(ctx, input); err != nil {
 		// 结果未知（可能已提交）：保留租约，下一轮先核对证据再决定。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("update subsystem: %w", err)
+	}
+	if err := adapter.confirmRuntimeLicense(ctx, operation, input); err != nil {
+		return application.SubsystemAccessStageOutcome{}, err
 	}
 	return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusSucceeded,
 		EvidenceRef: "update:" + strings.TrimSpace(target.ManifestChecksum)}, nil

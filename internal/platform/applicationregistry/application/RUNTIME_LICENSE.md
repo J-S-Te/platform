@@ -1,6 +1,6 @@
 # 受控商业运行时组件登记
 
-> 2026-10-22 按当前组合根、登记服务、内置目录与 Agent 源码核对；本轮未部署、登记组件或执行 READY/ACK 验收。
+> 源码边界说明；发布与真实 READY/ACK 验收须另行核对运行证据。
 
 `RuntimeLicenseEnrollmentService` 由已认证、已授权的受控部署任务调用，不是浏览器可直接填组件的登记端点。组合根 `internal/bootstrap/api.go` 注入 `BuiltinRuntimeComponentCatalog`、普通 OAuth Client 管理器和协调器，实例/商业环境来自持久化设置。只有 `ErrRuntimeLicenseNotInitialized` 保留从未初始化实例的旧兼容路径，其余读取、登记和交付错误均明确阻断。
 
@@ -27,3 +27,11 @@ V2 Client ID 绑定 `instance/application/environment/service/credential_generat
 成功至少要求部署结果、`snapshot_current=true`、当前完整消费者集合及 `issued_revision=ack_revision=应用 revision`，同时具备准备/确认时间；保留 ENFORCED 的更新也需重新证明当前集合。首次切至 ENFORCED 会再推进修订并要求确认。失败读取模式、修订、诊断和受控 Agent 状态，修复后沿原操作恢复，不共享凭据、伪造 ACK 或退回旧模式。
 
 源码入口：`runtime_license_enrollment.go` → `infrastructure/runtime_component_catalog.go` → `license-core/catalog/catalog.go` → `license/coordination`；交付分别见 `infrastructure/local_runtime_license.go`、`runtime_license_delivery.go`。商业 instance/customer/environment 与应用目录租户/应用/环境 ID 是不同边界。
+
+## 统一接入向导与独立 Worker
+
+生产向导与后台候选基线使用同一内置 V2 目录，不再把遗留 V1 镜像批准文件当作 V2 登记前提。生产 Agent 从受审目标的实际 Compose 拓扑读取不可变镜像及本机存在性（含迁移/初始化镜像），只返回服务与镜像投影；空清单、不可验证或缺失镜像不能视为就绪。候选摘要绑定清单、组件目录代次及实际镜像。缺少一致性事实时不能返回“无需操作”。本地遗留批准预检兼容边界仍见上文。
+
+统一向导任务由独立 platform-worker 执行，不能依赖仅在 HTTP Handler 配置的内存登记服务。Worker 使用相同持久化商业实例、厂商信任公钥、平台受管签名身份和协调器，在 Agent 调用前完成 V2 登记；按 Agent 报告的已选消费者收窄条件组件，并校验必需组件完整。登记失败阻止部署，凭据仅通过受限 Agent 接口交付，不进入阶段证据。本地模式沿用真实确认等待；生产运行确认与强制执行仍以商业授权页面的当前修订 READY/ACK 为准，部署成功不代表所有组件已经 ACK。
+
+V2 免读旧退役文件的证明由协调器内部查询完整成员历史生成，绑定应用修订；公开 Status 只含活跃成员，不能作为无退役需求的证明。首次登记或完整历史仍全部包含于当前部署选集时可免读 V1 退役文件；存在已移除历史成员、历史读取失败或修订冲突时保留原退役门禁。失败重试不能因旧成员已写墓碑而变成免审更新。

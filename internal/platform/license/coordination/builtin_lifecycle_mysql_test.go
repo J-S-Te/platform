@@ -151,4 +151,18 @@ func TestMySQLReconcileBuiltinComponentsPreservesEnforcement(t *testing.T) {
 	if err = db.Model(&RetiredClient{}).Where("service_id IN ?", []string{"contract-api", "contract-worker"}).Count(&retired).Error; err != nil || retired != 2 {
 		t.Fatalf("retired clients = %d, err = %v", retired, err)
 	}
+	// The public status hides tombstones; internal deployment evidence must not.
+	if safe, err := service.RuntimeRetirementNotRequired(ctx, "contract_management", app.Revision, []string{"contract-api", "contract-worker"}); err != nil || !safe {
+		t.Fatalf("unchanged history: %v %v", safe, err)
+	}
+	if err := db.Model(&Member{}).Where("application = ? AND service_id = ?", "contract_management", "contract-worker").Update("retired_at", now).Error; err != nil {
+		t.Fatal(err)
+	}
+	if safe, err := service.RuntimeRetirementNotRequired(ctx, "contract_management", app.Revision, []string{"contract-api"}); err != nil || safe {
+		t.Fatalf("retired worker disappeared from deployment history: %v %v", safe, err)
+	}
+	if _, err := service.RuntimeRetirementNotRequired(ctx, "contract_management", app.Revision+1, []string{"contract-api"}); err != ErrConflict {
+		t.Fatalf("stale revision accepted: %v", err)
+	}
+
 }

@@ -900,3 +900,66 @@ func TestSubsystemAccessProvisionCarriesResolvedIdentityAndCandidate(t *testing.
 		t.Fatal("deployment ran without candidate evidence")
 	}
 }
+
+type accessRuntimeEnrollmentStub struct {
+	fail bool
+	seen application.RuntimeLicenseSettings
+}
+
+func (s *accessRuntimeEnrollmentStub) PrepareWithSettings(_ context.Context, tenant, appID, envID, app, env, operator string, settings application.RuntimeLicenseSettings) ([]application.RuntimeLicenseCredential, error) {
+	s.seen = settings
+	if s.fail {
+		return nil, errors.New("enrollment rejected")
+	}
+	return []application.RuntimeLicenseCredential{{Approval: application.RuntimeLicenseApproval{ServiceID: "settlement-api"}, RegistrationProtocol: 2, ClientID: "runtime-client", ClientSecret: "runtime-secret"}}, nil
+}
+func (*accessRuntimeEnrollmentStub) WaitForRuntimeConfirmation(context.Context, string, string, []application.RuntimeLicenseCredential) error {
+	return nil
+}
+func TestAccessDeploymentDeliversEnrollmentAndStopsOnFailure(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		p := &deploymentProvisionerStub{}
+		adapter := deploymentAdapterFor(t, &deploymentOnboardingStub{}, p, relatedClientsStub{}, deploymentStateStub{}, issuerStub{issuer: "https://platform.example"})
+		enrollment := &accessRuntimeEnrollmentStub{fail: fail}
+		adapter.SetRuntimeLicenseEnrollment(enrollment, func(context.Context) (application.RuntimeLicenseSettings, error) {
+			return application.RuntimeLicenseSettings{InstanceID: "instance", Environment: "production"}, nil
+		}, false)
+		run := &application.SubsystemAccessRunState{Credentials: &application.SubsystemProvisioningCredentials{ClientID: "web", ClientSecret: "secret", RedirectURI: "https://settlement.example.com/callback", PublicURL: "https://settlement.example.com"}}
+		outcome, err := adapter.ProvisionSubsystemAccess(context.Background(), onboardingOperation(), run)
+		if fail {
+			if err == nil {
+				t.Fatal("enrollment failure ignored")
+			}
+			if p.seen.ApplicationCode != "" {
+				t.Fatal("Agent invoked after enrollment failure")
+			}
+			continue
+		}
+		if err != nil || outcome.Status != application.SubsystemAccessStatusSucceeded {
+			t.Fatalf("deployment: %v %v", outcome, err)
+		}
+		if len(p.seen.RuntimeLicenseCredentials) != 1 || p.seen.RuntimeLicenseSettings.InstanceID != "instance" {
+			t.Fatal("runtime credentials not delivered to Agent")
+		}
+	}
+}
+
+func TestAccessUpdateDeliversEnrollmentAndStopsOnFailure(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		provisioner := &updateProvisionerStub{}
+		adapter := updateAdapterFor(t, &updateCredentialPreparerStub{}, &browserCredentialPreparerStub{credential: application.SubsystemUpdateBrowserCredential{ClientID: "web", ClientSecret: "secret"}}, provisioner)
+		adapter.SetRuntimeLicenseEnrollment(&accessRuntimeEnrollmentStub{fail: fail}, func(context.Context) (application.RuntimeLicenseSettings, error) {
+			return application.RuntimeLicenseSettings{InstanceID: "instance", Environment: "production"}, nil
+		}, false)
+		outcome, err := adapter.UpdateSubsystemAccess(context.Background(), updateOperationFixture(), &application.SubsystemAccessRunState{})
+		if fail {
+			if err == nil || provisioner.calls != 0 {
+				t.Fatal("enrollment failure did not block update")
+			}
+			continue
+		}
+		if err != nil || outcome.Status != application.SubsystemAccessStatusSucceeded || len(provisioner.seen.RuntimeLicenseCredentials) != 1 {
+			t.Fatalf("update enrollment missing: %v %v", outcome, err)
+		}
+	}
+}

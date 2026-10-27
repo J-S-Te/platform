@@ -126,3 +126,55 @@ func TestMixedLegacyAndBuiltinDeliveryKeepsEachProtocol(t *testing.T) {
 		t.Fatalf("builtin env changed: %v", builtinValues)
 	}
 }
+
+func TestBuiltinRetirementDoesNotReadLegacyApprovalWithoutRemovedMembers(t *testing.T) {
+	target, input := runtimeLicenseFixture(t)
+	if err := os.Remove(filepath.Join(target.config.DeployRoot, "runtime-license-contract_management-prod.json")); err != nil {
+		t.Fatal(err)
+	}
+	for i := range input.RuntimeLicenseCredentials {
+		input.RuntimeLicenseCredentials[i].RegistrationProtocol = 2
+		input.RuntimeLicenseCredentials[i].RetirementNotRequired = true
+	}
+	if err := target.retireRuntimeLicenseContainers(context.Background(), input); err != nil {
+		t.Fatalf("unchanged V2 topology requires legacy approval: %v", err)
+	}
+	input.RuntimeLicenseCredentials[0].RetirementNotRequired = false
+	if err := target.retireRuntimeLicenseContainers(context.Background(), input); err == nil {
+		t.Fatal("unverified retirement bypassed approval")
+	}
+}
+
+func TestProductionBuiltinProvisionAndUpdateWithoutLegacyApproval(t *testing.T) {
+	for _, update := range []bool{false, true} {
+		p, _, _ := productionProvisionerFixture(t)
+		target, err := p.target(testProductionApplicationCode, testProductionEnvironment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := productionContractInput("https://platform.example.com")
+		_, binding := runtimeLicenseFixture(t)
+		input.RuntimeLicenseSettings = binding.RuntimeLicenseSettings
+		for _, id := range target.config.Profile.Manifest.Compose.RuntimeServices {
+			input.RuntimeLicenseCredentials = append(input.RuntimeLicenseCredentials, application.RuntimeLicenseCredential{Approval: application.RuntimeLicenseApproval{ServiceID: id, Protocol: 2}, RegistrationProtocol: 2, CatalogVersion: 1, CredentialGeneration: "catalog-1", ClientID: "builtin-" + id, ClientSecret: "isolated-secret", RetirementNotRequired: true})
+		}
+		// Fixture starts without a V1 runtime approval file. Both full Agent paths must
+		// reach deployment while preserving all normal manifest/configuration checks.
+		if update {
+			if err := p.Provision(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
+			err = p.Update(context.Background(), input)
+		} else {
+			err = p.Provision(context.Background(), input)
+		}
+		if err != nil {
+			t.Fatalf("update=%v: %v", update, err)
+		}
+		for _, credential := range input.RuntimeLicenseCredentials {
+			if _, err := os.Stat(filepath.Join(target.config.DeployRoot, "runtime", "license-"+credential.Approval.ServiceID+".env")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}

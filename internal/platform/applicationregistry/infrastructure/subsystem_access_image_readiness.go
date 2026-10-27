@@ -34,7 +34,7 @@ func (adapter *SubsystemAccessImageReadinessAdapter) ReadSubsystemAccessImageRea
 	if err != nil {
 		return false, "", false, err
 	}
-	if !reported {
+	if !reported || len(images) == 0 {
 		// 旧版 Agent 未上报该字段：保持未验证。
 		return false, "unreported", false, nil
 	}

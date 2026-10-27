@@ -184,5 +184,10 @@ func DecideSubsystemAccessAction(facts SubsystemAccessFacts) SubsystemAccessDeci
 	if facts.ConfigurationDrift {
 		return SubsystemAccessDecision{Action: SubsystemAccessActionUpdate, Reason: "已接入但配置与期望不一致，展示变更摘要后受控更新"}
 	}
+	// 未取得一致性事实不能当作已一致，否则缺少批准时漂移查询被跳过，
+	// 向导会误报无需操作，无法展示后续受控检查的真实缺项。
+	if subsystemAccessFactUnverified(facts, "configuration_drift") {
+		return SubsystemAccessDecision{Action: SubsystemAccessActionUpdate, Reason: "运行配置一致性尚未核验，补齐条件后执行受控检查"}
+	}
 	return SubsystemAccessDecision{Action: SubsystemAccessActionNone, DisplayOnly: true, Reason: "已接入且配置一致，仅展示当前结果"}
 }

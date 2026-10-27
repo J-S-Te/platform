@@ -27,13 +27,15 @@ type RuntimeLicenseApproval struct {
 // RuntimeLicenseCredential 是交付给部署 Agent 的单组件凭据包：
 // 一次仅经审批通道下发，明文 Secret 不落库、不进日志。
 type RuntimeLicenseCredential struct {
-	Approval             RuntimeLicenseApproval `json:"approval"`
-	RegistrationProtocol int                    `json:"registration_protocol,omitempty"`
-	CatalogVersion       int                    `json:"catalog_version,omitempty"`
-	CredentialGeneration string                 `json:"credential_generation,omitempty"`
-	ClientID             string                 `json:"client_id"`
-	ClientSecret         string                 `json:"client_secret"`
-	ReleaseDigest        string                 `json:"release_digest,omitempty"`
+	// RetirementNotRequired 仅由受控登记的持久成员核对生成；默认 false 保留退役门禁。
+	RetirementNotRequired bool                   `json:"retirement_not_required,omitempty"`
+	Approval              RuntimeLicenseApproval `json:"approval"`
+	RegistrationProtocol  int                    `json:"registration_protocol,omitempty"`
+	CatalogVersion        int                    `json:"catalog_version,omitempty"`
+	CredentialGeneration  string                 `json:"credential_generation,omitempty"`
+	ClientID              string                 `json:"client_id"`
+	ClientSecret          string                 `json:"client_secret"`
+	ReleaseDigest         string                 `json:"release_digest,omitempty"`
 }
 
 // RuntimeLicenseSettings 携带内置目录路径所需的实例级设置；
@@ -334,11 +336,31 @@ func (s *RuntimeLicenseEnrollmentService) prepareBuiltin(ctx context.Context, te
 		result = append(result, RuntimeLicenseCredential{Approval: RuntimeLicenseApproval{ServiceID: component.ServiceID, Protocol: component.RegistrationProtocol}, RegistrationProtocol: component.RegistrationProtocol, CatalogVersion: component.CatalogVersion, CredentialGeneration: component.CredentialGeneration, ClientID: client.ClientID, ClientSecret: secret, ReleaseDigest: runtimeComponentSetDigest(set)})
 	}
 	registered := false
+	retirementNotRequired := false
 	if coordinator, ok := s.registrar.(interface {
 		Status(context.Context, string) (coordination.Status, error)
 	}); ok {
 		status, statusErr := coordinator.Status(ctx, app)
+		if errors.Is(statusErr, coordination.ErrNotReady) {
+			retirementNotRequired = true
+		}
 		if statusErr == nil {
+			// Status excludes tombstones. An independent persisted-history check is
+			// required, so a failed retirement cannot disappear on a later retry.
+			retirementNotRequired = false
+			if checker, ok := s.registrar.(interface {
+				RuntimeRetirementNotRequired(context.Context, string, uint64, []string) (bool, error)
+			}); ok {
+				ids := make([]string, 0, len(set.Components))
+				for _, component := range set.Components {
+					ids = append(ids, component.ServiceID)
+				}
+				safe, err := checker.RuntimeRetirementNotRequired(ctx, app, status.Revision, ids)
+				if err != nil {
+					return nil, errors.New("commercial runtime retirement history unavailable")
+				}
+				retirementNotRequired = safe
+			}
 			reconciler, ok := s.registrar.(interface {
 				ReconcileBuiltinComponents(context.Context, coordination.BuiltinReconcileInput, domain.Actor) error
 			})
@@ -370,6 +392,7 @@ func (s *RuntimeLicenseEnrollmentService) prepareBuiltin(ctx context.Context, te
 		}
 	}
 	for index, client := range rotate {
+		result[index].RetirementNotRequired = retirementNotRequired
 		if client.ID != "" {
 			rotated, rotateErr := s.clients.CreateOAuthClientSecret(ctx, OAuthClientSecretCreateInput{TenantID: tenant, OAuthClientID: client.ID, OperatorID: operator})
 			if rotateErr != nil || rotated.PlaintextSecret == "" {

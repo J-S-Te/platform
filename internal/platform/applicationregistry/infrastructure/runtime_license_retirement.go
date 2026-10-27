@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
+	"github.com/J-S-Te/license-core/catalog"
 )
 
 var runtimeRetirementContainerID = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -19,6 +20,17 @@ func runtimeLicenseRetirementPrefix(app string) string {
 // 注销登记无法使已缓存到线下的签名快照失效；必须先精确停止旧进程，再收编替代进程。
 func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if len(input.RuntimeLicenseCredentials) == 0 {
+		return nil
+	}
+	// 纯 V2 且控制面核对持久成员集合没有移除项时，无旧进程退役需求。
+	// 未核验、V1、混合或成员减少仍必须执行原有受审退役链，不能仅凭协议跳过。
+	noRetirement := true
+	for _, credential := range input.RuntimeLicenseCredentials {
+		if credential.RegistrationProtocol != catalog.RegistrationProtocolV2 || !credential.RetirementNotRequired {
+			noRetirement = false
+		}
+	}
+	if noRetirement {
 		return nil
 	}
 	path, err := productionRuntimeApprovalPath(target.config.DeployRoot, "runtime-license-"+target.config.Profile.Manifest.Application.Code+"-"+target.config.Profile.Manifest.Application.Environment+".json")

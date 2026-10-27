@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
@@ -116,4 +117,69 @@ func TestBuiltinEnrollmentRequiresInstanceBinding(t *testing.T) {
 	if _, err := service.PrepareWithSettings(context.Background(), "tenant", "app", "env", "contract_management", "prod", "operator", RuntimeLicenseSettings{}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("missing instance error = %v", err)
 	}
+}
+
+type builtinMembersRegistrar struct {
+	builtinBridgeRegistrarStub
+	members []coordination.Member
+}
+
+func (s *builtinMembersRegistrar) Status(context.Context, string) (coordination.Status, error) {
+	active := []coordination.Member{}
+	for _, member := range s.members {
+		if member.RetiredAt == nil {
+			active = append(active, member)
+		}
+	}
+	return coordination.Status{Application: coordination.Application{Application: "contract_management", RegistrationMode: catalog.BuiltinComponentV2, Revision: 3}, Members: active}, nil
+}
+func TestBuiltinRetirementProofRequiresNoRemovedMembers(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		registrar := &builtinMembersRegistrar{members: []coordination.Member{{ServiceID: "contract-api"}, {ServiceID: "contract-worker"}}}
+		if removed {
+			registrar.members = append(registrar.members, coordination.Member{ServiceID: "contract-old-worker"})
+		}
+		service, err := NewRuntimeLicenseEnrollmentServiceWithCatalog(nil, builtinCatalogStub{}, &runtimeClientsStub{}, registrar)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			out, err := service.PrepareWithSettings(context.Background(), "tenant", "app", "env", "contract_management", "prod", "operator", RuntimeLicenseSettings{InstanceID: "instance-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, credential := range out {
+				if credential.RetirementNotRequired == removed {
+					t.Fatalf("unsafe retirement proof removed=%v", removed)
+				}
+			}
+		}
+	}
+}
+
+func (s *builtinMembersRegistrar) ReconcileBuiltinComponents(context.Context, coordination.BuiltinReconcileInput, domain.Actor) error {
+	now := time.Now()
+	for i := range s.members {
+		if s.members[i].ServiceID == "contract-old-worker" {
+			s.members[i].RetiredAt = &now
+		}
+	}
+	return nil
+}
+func (s *builtinBridgeRegistrarStub) RuntimeRetirementNotRequired(context.Context, string, uint64, []string) (bool, error) {
+	return true, nil
+}
+func (s *builtinMembersRegistrar) RuntimeRetirementNotRequired(_ context.Context, _ string, _ uint64, ids []string) (bool, error) {
+	for _, member := range s.members {
+		found := false
+		for _, id := range ids {
+			if id == member.ServiceID {
+				found = true
+			}
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return true, nil
 }

@@ -19,6 +19,7 @@ func TestDecideSubsystemAccessActionFollowsServerFacts(t *testing.T) {
 		{"历史演示环境", SubsystemAccessFacts{InScope: true, Registered: true, LegacyDemo: true}, SubsystemAccessActionAdopt, false},
 		{"上次失败", SubsystemAccessFacts{InScope: true, Registered: true, ControlledDeployment: true, LastOperationFailed: true}, SubsystemAccessActionRetry, false},
 		{"配置漂移", SubsystemAccessFacts{InScope: true, Registered: true, ControlledDeployment: true, ConfigurationDrift: true}, SubsystemAccessActionUpdate, false},
+		{"配置一致性未核验不能视为无需操作", SubsystemAccessFacts{InScope: true, Registered: true, ControlledDeployment: true, Unverified: []string{"configuration_drift"}}, SubsystemAccessActionUpdate, false},
 		{"已一致", SubsystemAccessFacts{InScope: true, Registered: true, ControlledDeployment: true}, SubsystemAccessActionNone, true},
 	}
 	for _, testCase := range cases {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
@@ -20,6 +21,8 @@ type SubsystemAccessConfigurationTracker struct {
 	database  *gorm.DB
 	catalog   SubsystemAccessCatalogSource
 	approvals application.RuntimeLicenseApprovalSource
+	builtin   application.RuntimeComponentCatalogSource
+	images    SubsystemAccessImageReader
 }
 
 func NewSubsystemAccessConfigurationTracker(db *gorm.DB, catalog SubsystemAccessCatalogSource, approvals application.RuntimeLicenseApprovalSource) (*SubsystemAccessConfigurationTracker, error) {
@@ -52,6 +55,34 @@ func (tracker *SubsystemAccessConfigurationTracker) Snapshot(ctx context.Context
 	}
 	if !found {
 		return "", application.ErrSubsystemAccessInvalidRequest
+	}
+	if tracker.builtin != nil {
+		version, err := builtinAccessCatalogVersion(ctx, tracker.builtin, operation.ApplicationCode, operation.EnvironmentCode)
+		if err != nil {
+			return "", err
+		}
+		if tracker.images == nil {
+			return "", errors.New("configuration snapshot requires image inventory")
+		}
+		images, reported, err := tracker.images.ReadSubsystemAccessImages(ctx, operation.ApplicationCode, operation.EnvironmentCode)
+		if err != nil {
+			return "", err
+		}
+		if !reported || len(images) == 0 {
+			return "", errors.New("configuration snapshot requires verified images")
+		}
+		entries := []string{target.ManifestChecksum, version}
+		seen := map[string]bool{}
+		for _, image := range images {
+			if image.ServiceID == "" || seen[image.ServiceID] || !image.Present || !isImmutableProductionImageReference(image.ImageDigest) {
+				return "", errors.New("configuration snapshot contains unavailable or invalid image")
+			}
+			seen[image.ServiceID] = true
+			entries = append(entries, image.ServiceID+"="+image.ImageDigest)
+		}
+		sort.Strings(entries)
+		sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
+		return hex.EncodeToString(sum[:]), nil
 	}
 	var components []application.RuntimeLicenseApproval
 	for _, environment := range subsystemAccessEnvironmentAliases(operation.EnvironmentCode) {
@@ -127,4 +158,25 @@ func (tracker *SubsystemAccessConfigurationTracker) Verify(ctx context.Context, 
 		return false, fmt.Errorf("read deployed candidate evidence: %w", result.Error)
 	}
 	return accessCandidateFromEvidence(stage.EvidenceRef) == candidate, nil
+}
+
+// SetBuiltinRuntimeSource 与实际登记服务保持同一 V2 目录；遗留调用方仍保留 V1 路径。
+func (tracker *SubsystemAccessConfigurationTracker) SetBuiltinRuntimeSource(source application.RuntimeComponentCatalogSource, images SubsystemAccessImageReader) {
+	tracker.builtin, tracker.images = source, images
+}
+func builtinAccessCatalogVersion(ctx context.Context, source application.RuntimeComponentCatalogSource, app, env string) (string, error) {
+	set, err := source.RuntimeComponentSet(ctx, app, env)
+	if err != nil {
+		return "", err
+	}
+	if set.Application != app || set.Environment != env || application.ValidateRuntimeComponentSet(set) != nil {
+		return "", application.ErrValidation
+	}
+	entries := []string{fmt.Sprint(set.CatalogVersion), app, env}
+	for _, component := range set.Components {
+		entries = append(entries, component.ServiceID+"="+component.CredentialGeneration)
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
+	return "builtin=" + hex.EncodeToString(sum[:]), nil
 }
