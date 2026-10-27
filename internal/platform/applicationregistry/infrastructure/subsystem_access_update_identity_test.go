@@ -23,3 +23,28 @@ func TestAccessUpdateRetainsRegisteredEnvironment(t *testing.T) {
 		t.Fatal("registered tenant/application/environment identity lost in update assembly")
 	}
 }
+
+// TestAccessRecoveryPreparesRetryCredentials 用途：验证恢复尝试重建不可恢复的机器明文凭据。
+// 参数：t 为隔离测试上下文。
+// 返回值：无。
+func TestAccessRecoveryPreparesRetryCredentials(t *testing.T) {
+	for _, attempt := range []uint32{1, 2} {
+		credentials := &updateCredentialPreparerStub{}
+		adapter := updateAdapterFor(t, credentials,
+			&browserCredentialPreparerStub{credential: application.SubsystemUpdateBrowserCredential{
+				ClientID: "client", ClientSecret: "secret",
+			}}, &updateProvisionerStub{})
+		op := updateOperationFixture()
+		op.AttemptCount = attempt
+		if _, err := adapter.UpdateSubsystemAccess(context.Background(), op, nil); err != nil {
+			t.Fatal(err)
+		}
+		expected := "UPDATE"
+		if attempt > 1 {
+			expected = "RETRY"
+		}
+		if credentials.seen.Operation != expected || op.Action != application.SubsystemAccessActionUpdate {
+			t.Fatalf("attempt=%d credential mode=%s, want %s", attempt, credentials.seen.Operation, expected)
+		}
+	}
+}

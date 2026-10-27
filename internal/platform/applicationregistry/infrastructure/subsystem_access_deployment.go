@@ -390,7 +390,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		TenantID: operation.TenantID, OperatorID: operation.OperatorID,
 		ApplicationID: operation.ApplicationID, EnvironmentID: operation.EnvironmentID,
 		ApplicationCode: operation.ApplicationCode, Environment: operation.EnvironmentCode,
-		Operation:    string(operation.Action),
+		Operation:    accessCredentialOperation(operation),
 		Requirements: application.SubsystemUpdateServiceCredentialRequirements(operation.ApplicationCode),
 	})
 	if err != nil {
@@ -828,11 +828,9 @@ func (adapter *SubsystemAccessDeploymentAdapter) verifyAppliedManifest(ctx conte
 // errOnboardCredentialsNotRebuildable 表示无法安全重建首次接入凭据。
 var errOnboardCredentialsNotRebuildable = errors.New("onboard credentials are not rebuildable")
 
-// rebuildOnboardCredentials 在"进程重启后从部署阶段继续"时，从已登记状态重建部署凭据。
-//
-// 前提：部署状态行存在（OnboardSubsystem 已创建目录与客户端）。此时复用受控更新的
-// 凭据服务（浏览器客户端按现有 Client 重新签发、服务凭据轮换、目录发布者恢复），
-// 不保存或复用任何明文密钥；状态行不存在说明认证效果未发生，必须重新执行接入。
+// rebuildOnboardCredentials 用途：从已登记状态为重启后的部署恢复重建内存凭据。
+// 参数：ctx 为执行上下文，operation 为已领取操作，run 为本次内存交接状态。
+// 返回值：返回恢复结果；目录未登记、凭据重建或依赖失败返回错误。
 func (adapter *SubsystemAccessDeploymentAdapter) rebuildOnboardCredentials(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	if adapter.credentials == nil || adapter.browser == nil || adapter.publisher == nil || adapter.state == nil {
 		return application.SubsystemAccessStageOutcome{}, errOnboardCredentialsNotRebuildable
@@ -865,7 +863,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) rebuildOnboardCredentials(ctx c
 		TenantID: operation.TenantID, OperatorID: operation.OperatorID,
 		ApplicationID: operation.ApplicationID, EnvironmentID: operation.EnvironmentID,
 		ApplicationCode: operation.ApplicationCode, Environment: operation.EnvironmentCode,
-		Operation:    strings.ToUpper(string(operation.Action)),
+		Operation:    accessCredentialOperation(operation),
 		Requirements: application.SubsystemUpdateServiceCredentialRequirements(operation.ApplicationCode),
 	})
 	if err != nil {
