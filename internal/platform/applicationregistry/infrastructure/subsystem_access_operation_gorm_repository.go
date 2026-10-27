@@ -9,6 +9,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 统一接入向导的操作/阶段仓储。并发语义要点：
@@ -299,55 +300,62 @@ func (repository *SubsystemAccessOperationGORMRepository) AdvanceOperationStage(
 	return result.RowsAffected == 1, nil
 }
 
-// RequeueOperation 把 WAITING/FAILED 的操作放回 PENDING：清空租约并**原子重占槽位**。
-//
-// FAILED 在终态时已释放 active_slot；若此时同目标已有新操作，旧失败操作直接重排会
-// 绕过互斥（两个操作并行推进同一目标）。这里在事务内重新申请槽位，冲突则拒绝恢复。
+// RequeueOperation 用途：原子恢复等待或失败操作，清单核验失败时重新执行部署。
+// 参数：ctx 为数据库上下文，tenantID 与 id 为授权操作身份，now 为恢复时间。
+// 返回值：成功重占槽位返回 true；重复调用或目标被占用返回 false，存储失败返回错误。
 func (repository *SubsystemAccessOperationGORMRepository) RequeueOperation(ctx context.Context, tenantID, id string, now time.Time) (bool, error) {
-	now = now.UTC()
-	reacquired := true
+	reacquired := false
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row subsystemAccessOperationModel
-		if err := tx.Where("tenant_id = ? AND id = ?", strings.TrimSpace(tenantID), strings.TrimSpace(id)).
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ?", strings.TrimSpace(tenantID), strings.TrimSpace(id)).
 			Take(&row).Error; err != nil {
 			return err
+		}
+		if row.Status != string(application.SubsystemAccessStatusWaiting) &&
+			row.Status != string(application.SubsystemAccessStatusFailed) {
+			return nil
 		}
 		slotKey, err := application.ActiveSlotKey(row.TenantID, row.ApplicationCode, row.EnvironmentCode)
 		if err != nil {
 			return err
 		}
 		if row.ActiveSlot == nil {
-			// 终态释放过槽位：重新占用时必须确认没有被新操作持有。
 			var held int64
 			if err := tx.Model(&subsystemAccessOperationModel{}).
 				Where("active_slot = ? AND id <> ?", slotKey, row.ID).Count(&held).Error; err != nil {
 				return err
 			}
 			if held > 0 {
-				reacquired = false
 				return nil
 			}
 		}
-		return tx.Model(&subsystemAccessOperationModel{}).
-			Where("tenant_id = ? AND id = ?", strings.TrimSpace(tenantID), strings.TrimSpace(id)).
+		result := tx.Model(&subsystemAccessOperationModel{}).
+			Where("tenant_id = ? AND id = ? AND status = ? AND version = ?", row.TenantID, row.ID, row.Status, row.Version).
 			Updates(map[string]any{
-				"status":           string(application.SubsystemAccessStatusPending),
-				"active_slot":      slotKey,
-				"lease_owner":      nil,
-				"lease_expires_at": nil,
-				"error_code":       nil,
-				"error_message":    nil,
-				"version":          gorm.Expr("version + 1"),
-				"updated_at":       now,
-			}).Error
+				"status": string(application.SubsystemAccessStatusPending),
+				"stage":  subsystemAccessRecoveryStage(row), "active_slot": slotKey,
+				"lease_owner": nil, "lease_expires_at": nil, "error_code": nil,
+				"error_message": nil, "result_ref": nil,
+				"version": gorm.Expr("version + 1"), "updated_at": now.UTC(),
+			})
+		reacquired = result.Error == nil && result.RowsAffected == 1
+		return result.Error
 	})
-	if err != nil {
-		return false, err
+	return reacquired, err
+}
+
+// subsystemAccessRecoveryStage 用途：把需要重新部署的核验失败恢复到部署阶段。
+// 参数：row 为已锁定且允许恢复的操作；其它失败保留原阶段。
+// 返回值：返回本次恢复应执行的阶段，不重跑目录或认证登记。
+func subsystemAccessRecoveryStage(row subsystemAccessOperationModel) string {
+	if row.Stage == string(application.SubsystemAccessStageReadiness) && row.ErrorCode != nil {
+		switch *row.ErrorCode {
+		case "MANIFEST_MISMATCH", "DEPLOYMENT_FAILED":
+			return string(application.SubsystemAccessStageDeploy)
+		}
 	}
-	if !reacquired {
-		return false, nil
-	}
-	return true, nil
+	return row.Stage
 }
 
 // UpsertOperationStage 记录阶段结果（同操作同阶段唯一）。

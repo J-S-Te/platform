@@ -244,3 +244,33 @@ func TestSubsystemAccessOperationRequeueOnMySQL(t *testing.T) {
 		t.Fatalf("terminal operation must not be requeued: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestSubsystemAccessOperationManifestRetryOnMySQL 用途：确保清单不一致从部署恢复且不重复登记认证。
+// 参数：t 为显式隔离 MySQL 测试上下文。
+// 返回值：无。
+func TestSubsystemAccessOperationManifestRetryOnMySQL(t *testing.T) {
+	repository, _ := subsystemAccessRepositoryFor(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	operation, _, err := repository.CreateOperation(ctx,
+		accessCreate("tenant-1", "01OP0000000000000000000039", "digest-retry", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := repository.ClaimOperation(ctx, "tenant-1", operation.ID, "worker-a", time.Minute, now); err != nil || !ok {
+		t.Fatalf("claim: %v", err)
+	}
+	if ok, err := repository.CompleteOperation(ctx, application.SubsystemAccessOperationCompletion{
+		TenantID: "tenant-1", ID: operation.ID, LeaseOwner: "worker-a", Status: application.SubsystemAccessStatusFailed,
+		Stage: application.SubsystemAccessStageReadiness, ErrorCode: "MANIFEST_MISMATCH", Now: now,
+	}); err != nil || !ok {
+		t.Fatalf("fail readiness: %v", err)
+	}
+	if ok, err := repository.RequeueOperation(ctx, "tenant-1", operation.ID, now); err != nil || !ok {
+		t.Fatalf("resume: %v", err)
+	}
+	current, err := repository.GetOperation(ctx, "tenant-1", operation.ID)
+	if err != nil || current.Stage != application.SubsystemAccessStageDeploy || current.Status != application.SubsystemAccessStatusPending {
+		t.Fatalf("retry did not return to deployment: %+v %v", current, err)
+	}
+}
