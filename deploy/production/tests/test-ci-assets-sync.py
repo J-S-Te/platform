@@ -151,4 +151,40 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     execute(sync, succeeds=False)
     assert not marker.exists()
 
+# 执行真实工作流中的检测脚本，确保服务编排变化不能只重载 API 而遗漏 Worker。
+with tempfile.TemporaryDirectory(prefix='ci-platform-detect-') as directory:
+    detection_root = Path(directory)
+    detection_tools = detection_root / 'tools'
+    detection_tools.mkdir()
+    executable(detection_tools / 'git', r'''#!/bin/sh
+cat "$TEST_CHANGED_PATHS_FILE"
+''')
+    detection_cases = [
+        ('deploy/production/docker-compose.yml', 'true'),
+        ('internal/bootstrap/worker.go', 'true'),
+        ('internal/bootstrap/worker_test.go', 'false'),
+        ('deploy/production/subsystems.d/customer_portal-prod.yaml', 'false'),
+        ('docs/runtime.md', 'false'),
+        ('\n'.join('internal/module/file%d.go' % i for i in range(5000)), 'true'),
+    ]
+    for changed_paths, expected_change in detection_cases:
+        output = detection_root / 'outputs'
+        output.write_text('')
+        changed_file = detection_root / 'changed-paths'
+        changed_file.write_text(changed_paths)
+        detection_env = dict(
+            os.environ,
+            PATH=str(detection_tools) + os.pathsep + os.environ['PATH'],
+            TEST_CHANGED_PATHS_FILE=str(changed_file),
+            GITHUB_OUTPUT=str(output),
+        )
+        process = subprocess.run(
+            ['bash', '-e', '-o', 'pipefail', '-c', run_step('Detect backend image changes')],
+            env=detection_env, capture_output=True, text=True,
+        )
+        assert process.returncode == 0, process.stderr
+        assert output.read_text().strip() == 'backend_changed=' + expected_change, (
+            changed_paths[:100], output.read_text(), expected_change,
+        )
+
 print('CI asset transport, transaction install, module selection and reload gates: PASS')

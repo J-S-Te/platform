@@ -170,14 +170,19 @@ jobs:
         with:
           fetch-depth: 2
       - name: Detect backend image changes
-        # 只有会改变平台镜像内容的文件（backend 非测试源码、Dockerfile、go 模块、
-        # CI 工作流）变化才需要部署新镜像并重启 platform-api；纯清单/文档/部署脚本
-        # 变更同步资产后成对重载控制面，复用当前镜像。
+        # 后端或服务编排变化必须执行完整平台发布，应用 API/Worker/Agent 的配置。
+        # 纯清单、文档与部署脚本变化仍可同步资产后成对重载控制面，复用当前镜像。
         id: detect
         shell: bash
         run: |
           changed="$(git diff --name-only HEAD^ HEAD || true)"
-          if grep -E '^\.github/workflows/ci-cd\.yml$' <<<"$changed" >/dev/null             || { grep -E '^(cmd|internal|migrations)/|^(Dockerfile|go\.mod|go\.sum|docker-entrypoint\.sh)$|^scripts/' <<<"$changed" | grep -vE '_test\.go$' | grep -q .; }; then
+          platform_release_paths='^\.github/workflows/ci-cd\.yml$'
+          platform_release_paths+='|^deploy/production/docker-compose\.yml$'
+          backend_paths='^(cmd|internal|migrations|scripts)/'
+          backend_paths+='|^(Dockerfile|go\.mod|go\.sum|docker-entrypoint\.sh)$'
+          if grep -Eq "$platform_release_paths" <<<"$changed" \
+            || { grep -E "$backend_paths" <<<"$changed" \
+                 | grep -vE '_test\.go$' >/dev/null; }; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
