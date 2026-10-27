@@ -3,6 +3,7 @@ package http
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -274,6 +275,87 @@ func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计事件查询成功", eventToResponse(event))
+}
+
+// payloadHashVerificationResponse 是完整性摘要重算比对的对外结果；摘要以十六进制呈现。
+type payloadHashVerificationResponse struct {
+	EventID      string `json:"event_id"`
+	Algorithm    string `json:"algorithm"`
+	Matched      bool   `json:"matched"`
+	StoredHash   string `json:"stored_hash"`
+	ComputedHash string `json:"computed_hash"`
+}
+
+// VerifyEventHash 以操作者提交的事件输入（与摄取时相同的字段值）重算完整性摘要并与存储行比对
+// （审计 P0 · 防篡改取证，Vault /sys/audit-hash 同一模式）。路径落在 /api/v1/audit/ 下，
+// 本次核验动作本身会被通用审计轨迹记录。
+func (h *Handler) VerifyEventHash(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	var input application.EventInput
+	if !decode(w, r, &input) {
+		return
+	}
+	verification, err := h.service.VerifyPayloadHash(r.Context(), principal.Tenant.ID, r.PathValue("event_id"), input)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计事件摘要核验完成", payloadHashVerificationResponse{
+		EventID:      verification.EventID,
+		Algorithm:    verification.Algorithm,
+		Matched:      verification.Matched,
+		StoredHash:   hex.EncodeToString(verification.StoredHash),
+		ComputedHash: hex.EncodeToString(verification.ComputedHash),
+	})
+}
+
+// chainVerificationResponse 是哈希链分段校验的对外结果。
+type chainVerificationResponse struct {
+	ApplicationCode string `json:"application_code"`
+	EnvironmentCode string `json:"environment_code"`
+	FromSequence    uint64 `json:"from_sequence"`
+	CheckedRows     int    `json:"checked_rows"`
+	LastSequence    uint64 `json:"last_sequence"`
+	Verified        bool   `json:"verified"`
+	MoreRemaining   bool   `json:"more_remaining"`
+	BrokenSequence  uint64 `json:"broken_sequence,omitempty"`
+	BrokenEventID   string `json:"broken_event_id,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+// VerifyEventChain 校验（租户、应用、环境）维度的哈希链分段（审计 P1 · 防篡改取证）。
+// 行级自证：H(chain_prev_hash, payload_hash) == chain_hash；窗口内序列连续、链指针连续；
+// 窗口超上限时 more_remaining=true，可携 from_sequence 续跑。核验动作本身被通用审计轨迹记录。
+func (h *Handler) VerifyEventChain(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	fromSequence, _ := strconv.ParseUint(query.Get("from_sequence"), 10, 64)
+	limit, _ := strconv.ParseInt(query.Get("limit"), 10, 64)
+	verification, err := h.service.VerifyEventChain(r.Context(), principal.Tenant.ID,
+		strings.TrimSpace(query.Get("application")), strings.TrimSpace(query.Get("environment")),
+		fromSequence, int(limit))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "哈希链校验完成", chainVerificationResponse{
+		ApplicationCode: verification.ApplicationCode,
+		EnvironmentCode: verification.EnvironmentCode,
+		FromSequence:    verification.FromSequence,
+		CheckedRows:     verification.CheckedRows,
+		LastSequence:    verification.LastSequence,
+		Verified:        verification.Verified,
+		MoreRemaining:   verification.MoreRemaining,
+		BrokenSequence:  verification.BrokenSequence,
+		BrokenEventID:   verification.BrokenEventID,
+		Reason:          verification.Reason,
+	})
 }
 
 // IngestionHealth 返回平台侧审计摄取健康度（批次 3）。
