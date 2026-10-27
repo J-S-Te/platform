@@ -89,6 +89,14 @@ def main():
                 assert proxy["image"] == "ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
                 assert proxy["environment"]["LOG_LEVEL"] == "warning"
                 assert proxy["healthcheck"]["test"] == ["CMD", "haproxy", "-c", "-f", "/tmp/haproxy.cfg"]
+                api = services["platform-api"]
+                worker = services["platform-worker"]
+                for key in ["SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED", "SUBSYSTEM_ONBOARDING_MODE", "SUBSYSTEM_PROVISIONING_SOCKET_PATH", "SUBSYSTEM_PRODUCTION_DEPLOY_ROOT", "SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID", "SUBSYSTEM_PRODUCTION_PROFILES_DIR", "SUBSYSTEM_ONBOARDING_TIMEOUT", "LICENSE_RUNTIME_PLATFORM_BASE_URL", "LICENSE_RUNTIME_PUBLIC_KEY_PATH", "LICENSE_RUNTIME_STATE_DIRECTORY", "AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS"]:
+                    assert worker["environment"].get(key) == api["environment"][key], (key, "access worker is not wired like API")
+                assert worker["depends_on"]["subsystem-provisioner"]["condition"] == "service_healthy"
+                assert any(v.get("source") == "subsystem-provisioner-socket" and v["target"] == "/run/basic-platform-provisioner" for v in worker["volumes"])
+                assert any(v["target"] == str(root / "custom-deploy/subsystems.d") and v.get("read_only") for v in worker["volumes"])
+                assert all(v["target"] != "/var/run/docker.sock" for v in worker["volumes"])
                 provisioner = services["subsystem-provisioner"]
                 gateway = services["file-gateway"]
                 gateway_storage = next(v for v in gateway["volumes"] if v["target"] == "/app/data/file-gateway")

@@ -538,8 +538,23 @@ services:
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
       - ./data/platform/logs:/app/data/logs
       - ./data/platform/uploads:/app/data/uploads
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
+      - subsystem-provisioner-socket:/run/basic-platform-provisioner
     environment:
       APP_ENV: production
+      LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
+      LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      LICENSE_RUNTIME_STATE_DIRECTORY: /var/lib/commercial-license
+      AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS:-false}}
+      SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
+      SUBSYSTEM_ONBOARDING_MODE: production
+      SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
+      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}
+      SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}
+      SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+      SUBSYSTEM_DOCKER_BINARY: docker
+      SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
       APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
       AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
@@ -558,6 +573,8 @@ services:
       platform-mysql:
         condition: service_healthy
       keycloak:
+        condition: service_healthy
+      subsystem-provisioner:
         condition: service_healthy
     restart: unless-stopped
     # Worker 不提供 HTTP 端口；以 PID 1 的真实可执行文件作为容器内存活探针。
