@@ -18,7 +18,8 @@ var ErrSubsystemAccessStageNotWired = errors.New("subsystem access stage is not 
 // SubsystemAccessRunState 是一次运行内的共享状态（Worker 持有，**不落库、不打日志**）。
 // 目录与凭据由既有原子流程一次创建后，凭据经此交接给部署阶段；运行结束即丢弃。
 type SubsystemAccessRunState struct {
-	Credentials *SubsystemProvisioningCredentials
+	CandidateSnapshot string
+	Credentials       *SubsystemProvisioningCredentials
 }
 
 // SubsystemProvisioningCredentials 是既有流程解析出的部署凭据（仅内存传递）。

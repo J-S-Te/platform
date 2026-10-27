@@ -291,24 +291,36 @@ func (provisioner *LocalDockerSubsystemProvisioner) Preflight(ctx context.Contex
 	return nil
 }
 
-// Provision 应用生成配置并执行部署；所有调用串行化，因为一次运行会同时修改共享 Docker、
-// 环境文件和 nginx 状态，失败后应沿用部署状态重试而非并发补偿。
+// Provision 用途：在部署互斥内执行本地受控部署并持久化成功回执。
+// 参数：ctx 为上下文，input 为已授权目标与部署参数。
+// 返回值：执行或回执保存失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	// 所有接入/更新/下线共享同一把进程锁，因为它们会改写公共 Compose 与 nginx 配置；
 	// 并发执行可能让一个请求覆盖另一个请求刚写好的密钥或网关片段。
+	if err := validateAccessReceipt(input); err != nil {
+		return err
+	}
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
-	return provisioner.applyLocked(ctx, input)
+	if err := provisioner.applyLocked(ctx, input); err != nil {
+		return err
+	}
+	return writeAccessDeploymentReceipt(provisioner.localPlatformRoot(), input)
 }
 
-// Update 重建运行中的子系统容器，但不改动 .env.local 与门户网关。适用场景是“子系统代码
-// 变更后重新部署”；BaseURL/UpstreamURL/secret 变更应先通过常规管理端点 PATCH 环境与
-// OAuth 客户端，再单独执行更新流程。让 Update 在集成层保持无副作用，是为了规避 bcrypt
-// 哈希后的客户端 secret 无法还原、进而无法重新签发 .env.local 的问题。
+// Update 用途：在部署互斥内执行本地受控部署并持久化成功回执。
+// 参数：ctx 为上下文，input 为已授权目标与部署参数。
+// 返回值：执行或回执保存失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if err := validateAccessReceipt(input); err != nil {
+		return err
+	}
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
-	return provisioner.rebuildLocked(ctx, input)
+	if err := provisioner.rebuildLocked(ctx, input); err != nil {
+		return err
+	}
+	return writeAccessDeploymentReceipt(provisioner.localPlatformRoot(), input)
 }
 
 // Teardown 停止 Compose、删除生成的 .env.local、移除门户网关片段并 reload nginx；它不删除

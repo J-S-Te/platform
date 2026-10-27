@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
+	"github.com/J-S-Te/Basic-Platform/migrations"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// 真实数据库验证（显式隔离 DSN）：唯一约束、并发领取、租约过期、过期执行者写入拒绝。
+// subsystemAccessRepositoryFor 用途：仅在显式隔离 DSN 上建立持久任务及代次表。
+// 参数：t 为隔离测试上下文。
+// 返回值：返回任务仓储和专用测试数据库；无 DSN 时跳过，不探测业务数据库。
 func subsystemAccessRepositoryFor(t *testing.T) (*SubsystemAccessOperationGORMRepository, *gorm.DB) {
 	t.Helper()
 	dsn := os.Getenv("PLATFORM_SUBSYSTEM_ACCESS_TEST_DSN")
@@ -25,6 +28,7 @@ func subsystemAccessRepositoryFor(t *testing.T) (*SubsystemAccessOperationGORMRe
 		t.Fatalf("open disposable MySQL schema: %v", err)
 	}
 	statements := []string{
+		"DROP TABLE IF EXISTS subsystem_access_deployment_attempt",
 		"DROP TABLE IF EXISTS subsystem_access_operation_stage",
 		"DROP TABLE IF EXISTS subsystem_access_operation",
 		`CREATE TABLE subsystem_access_operation (
@@ -54,6 +58,13 @@ func subsystemAccessRepositoryFor(t *testing.T) (*SubsystemAccessOperationGORMRe
 		if err := db.Exec(statement).Error; err != nil {
 			t.Fatalf("prepare disposable schema: %v", err)
 		}
+	}
+	migrationSQL, err := migrations.Files.ReadFile("000132_subsystem_access_deployment_attempt.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(migrationSQL)).Error; err != nil {
+		t.Fatal(err)
 	}
 	repository, err := NewSubsystemAccessOperationGORMRepository(db)
 	if err != nil {

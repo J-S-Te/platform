@@ -152,11 +152,29 @@ func NewSubsystemAccessDeploymentAdapter(service SubsystemAccessOnboardingProvis
 // AuthHandledByProvisioning 为假：首次接入的认证由本适配器的 ConfigureSubsystemAccessAuthentication 承担。
 func (adapter *SubsystemAccessDeploymentAdapter) AuthHandledByProvisioning() bool { return false }
 
-// ConfigureSubsystemAccessAuthentication 首次接入：调用既有原子流程创建目录与凭据，并把凭据放进运行状态。
+// ConfigureSubsystemAccessAuthentication 用途：创建或恢复首次接入的认证资源及持久代次绑定。
+// 参数：ctx 为上下文，operation 为持有租约的任务，run 为内存凭据。
+// 返回值：返回阶段状态；失租、派发或持久化失败返回错误。
 func (adapter *SubsystemAccessDeploymentAdapter) ConfigureSubsystemAccessAuthentication(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	if operation.Action != application.SubsystemAccessActionOnboard {
 		return adapter.configureUpdateAuthentication(ctx, operation, run)
 	}
+	if reader, ok := adapter.state.(interface {
+		ReadAccessDeploymentBinding(context.Context, application.SubsystemAccessOperation) (bool, error)
+	}); ok {
+		bound, err := reader.ReadAccessDeploymentBinding(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+		if bound {
+			operation, err = adapter.resolveRegistration(ctx, operation)
+			if err != nil {
+				return application.SubsystemAccessStageOutcome{}, err
+			}
+			return adapter.rebuildOnboardCredentials(ctx, operation, run)
+		}
+	}
+
 	target, ok, err := resolveSubsystemAccessTarget(ctx, adapter.catalog, operation)
 	if err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
@@ -166,7 +184,8 @@ func (adapter *SubsystemAccessDeploymentAdapter) ConfigureSubsystemAccessAuthent
 			Message: "目标不在当前清单的可接入范围内"}, nil
 	}
 	result, err := adapter.service.OnboardSubsystem(ctx, application.SubsystemOnboardingInput{
-		TenantID: operation.TenantID, OperatorID: operation.OperatorID, InitialAdminUserID: operation.InitialAdminID,
+		AccessOperation: &operation,
+		TenantID:        operation.TenantID, OperatorID: operation.OperatorID, InitialAdminUserID: operation.InitialAdminID,
 		ApplicationCode: operation.ApplicationCode, ApplicationName: target.ApplicationName, Environment: operation.EnvironmentCode,
 		PublicBaseURL: strings.TrimSpace(operation.PublicOrigin), UpstreamURL: target.UpstreamURL,
 		PathPrefix: target.PathPrefix, ClientType: target.ClientType,
@@ -230,8 +249,11 @@ func (adapter *SubsystemAccessDeploymentAdapter) configureUpdateAuthentication(c
 		EvidenceRef: "delegated:update-credentials"}, nil
 }
 
-// ProvisionSubsystemAccess 首次接入的部署：装配输入后调用部署 Agent。
-func (adapter *SubsystemAccessDeploymentAdapter) ProvisionSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
+// ProvisionSubsystemAccess 用途：恢复原部署代次后执行首次派发。
+// 参数：ctx 为上下文，operation 为持有租约的任务，run 为内存凭据。
+// 返回值：返回阶段状态；失租、派发或持久化失败返回错误。
+func (adapter *SubsystemAccessDeploymentAdapter) ProvisionSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (outcome application.SubsystemAccessStageOutcome, resultErr error) {
+	defer adapter.finishAccessFailure(ctx, operation, &outcome, &resultErr)
 	var identityErr error
 	operation, identityErr = adapter.resolveRegistration(ctx, operation)
 	if identityErr != nil {
@@ -241,6 +263,10 @@ func (adapter *SubsystemAccessDeploymentAdapter) ProvisionSubsystemAccess(ctx co
 	if operation.Action != application.SubsystemAccessActionOnboard {
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("provisioning for action %s is not wired: %w", operation.Action, application.ErrSubsystemAccessInvalidRequest)
 	}
+	if outcome, stop, err := adapter.accessDeploymentRecovery(ctx, operation); stop || err != nil {
+		return outcome, err
+	}
+
 	if run == nil {
 		run = &application.SubsystemAccessRunState{}
 	}
@@ -259,7 +285,9 @@ func (adapter *SubsystemAccessDeploymentAdapter) ProvisionSubsystemAccess(ctx co
 	return adapter.provisionOnboard(ctx, operation, run)
 }
 
-// provisionOnboard 是首次接入的部署主体（凭据已就绪）。
+// provisionOnboard 用途：保存本次候选摘要并执行首次受控部署。
+// 参数：ctx 为上下文，operation 为任务，run 为内存凭据与候选交接。
+// 返回值：返回阶段结果；读取候选或部署失败返回错误。
 func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboard(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
 	snapshot := ""
 	if adapter.configuration != nil {
@@ -269,6 +297,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboard(ctx context.Co
 			return application.SubsystemAccessStageOutcome{}, err
 		}
 	}
+	run.CandidateSnapshot = snapshot
 	outcome, err := adapter.provisionOnboardWithCandidate(ctx, operation, run)
 	if err == nil && outcome.Status == application.SubsystemAccessStatusSucceeded && snapshot != "" {
 		outcome.EvidenceRef = accessCandidatePrefix + snapshot + ";" + outcome.EvidenceRef
@@ -317,6 +346,27 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(c
 	if err := adapter.prepareRuntimeLicense(ctx, operation, &input); err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
+	if reader, ok := adapter.state.(interface {
+		SaveAccessRuntimeExpectations(context.Context, application.SubsystemAccessOperation, []application.RuntimeLicenseCredential) error
+	}); ok {
+		if err := reader.SaveAccessRuntimeExpectations(ctx, operation, input.RuntimeLicenseCredentials); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
+	if lifecycle, ok := adapter.state.(SubsystemAccessDeploymentLifecycle); ok {
+		if err := lifecycle.DispatchAccessDeployment(ctx, operation, input.ManifestChecksum, run.CandidateSnapshot); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
+	if reader, ok := adapter.state.(interface {
+		ReadAccessDeploymentReceipt(context.Context, application.SubsystemAccessOperation) (application.SubsystemAccessDeploymentReceipt, string, error)
+	}); ok {
+		receipt, _, err := reader.ReadAccessDeploymentReceipt(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+		input.AccessReceipt = &receipt
+	}
 	if err := adapter.provisioner.Provision(ctx, input); err != nil {
 		// 部署结果未知（可能已提交）：保留租约，下一轮先核对证据再决定，不重复执行。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("provision subsystem: %w", err)
@@ -326,20 +376,31 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(c
 	}
 	// 首次接入成功后同样要落期望清单（漂移检测基准）；更新路径已在派发前落库，
 	// 首次接入若漏掉会出现"已接入但清单基准为空"，后续永远判不出漂移。
-	if adapter.manifestState != nil && strings.TrimSpace(target.ManifestChecksum) != "" {
+	if _, managed := adapter.state.(SubsystemAccessDeploymentLifecycle); !managed && adapter.manifestState != nil && strings.TrimSpace(target.ManifestChecksum) != "" {
 		if err := adapter.manifestState.SetSubsystemDesiredManifest(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode, strings.TrimSpace(target.ManifestChecksum), time.Now().UTC()); err != nil {
 			return application.SubsystemAccessStageOutcome{}, fmt.Errorf("record desired manifest after onboarding: %w", err)
 		}
 	}
-	if err := adapter.recordAppliedAccessManifest(ctx, operation, target.ManifestChecksum); err != nil {
+	if lifecycle, ok := adapter.state.(SubsystemAccessDeploymentLifecycle); ok {
+		if err := lifecycle.CompleteAccessDeployment(ctx, operation, target.ManifestChecksum); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	} else if err := adapter.recordAppliedAccessManifest(ctx, operation, target.ManifestChecksum); err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
 	return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusSucceeded,
 		EvidenceRef: "provision:" + strings.TrimSpace(target.ManifestChecksum)}, nil
 }
 
-// UpdateSubsystemAccess 接管/更新/恢复：更新路径尚未接线（明确报错，不静默成功）。
-func (adapter *SubsystemAccessDeploymentAdapter) UpdateSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (application.SubsystemAccessStageOutcome, error) {
+// UpdateSubsystemAccess 用途：领取原子代次并执行受控接管、更新或恢复。
+// 参数：ctx 为上下文，operation 为持有租约的任务，run 为内存凭据。
+// 返回值：返回阶段状态；失租、派发或持久化失败返回错误。
+func (adapter *SubsystemAccessDeploymentAdapter) UpdateSubsystemAccess(ctx context.Context, operation application.SubsystemAccessOperation, run *application.SubsystemAccessRunState) (outcome application.SubsystemAccessStageOutcome, resultErr error) {
+	defer adapter.finishAccessFailure(ctx, operation, &outcome, &resultErr)
+	if outcome, stop, err := adapter.accessDeploymentRecovery(ctx, operation); stop || err != nil {
+		return outcome, err
+	}
+
 	snapshot := ""
 	if adapter.configuration != nil {
 		var err error
@@ -348,6 +409,10 @@ func (adapter *SubsystemAccessDeploymentAdapter) UpdateSubsystemAccess(ctx conte
 			return application.SubsystemAccessStageOutcome{}, err
 		}
 	}
+	if run == nil {
+		run = &application.SubsystemAccessRunState{}
+	}
+	run.CandidateSnapshot = snapshot
 	outcome, err := adapter.updateSubsystemAccessWithCandidate(ctx, operation, run)
 	if err == nil && outcome.Status == application.SubsystemAccessStatusSucceeded && snapshot != "" {
 		outcome.EvidenceRef = accessCandidatePrefix + snapshot + ";" + outcome.EvidenceRef
@@ -436,6 +501,18 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		}
 	}
 
+	if adapter.productionRuntime {
+		if reader, ok := adapter.state.(interface {
+			ReadAccessInitialRuntimeProvisioning(context.Context, application.SubsystemAccessOperation) (bool, error)
+		}); ok {
+			initial, err := reader.ReadAccessInitialRuntimeProvisioning(ctx, operation)
+			if err != nil {
+				return application.SubsystemAccessStageOutcome{}, err
+			}
+			initialRuntimeProvisioning = initial
+		}
+	}
+
 	// 目录发布者凭据：按应用判定，需要时恢复（与既有实现一致）。
 	publisherClientID, publisherSecret := "", ""
 	if application.RequiresSubsystemCatalogPublisherCredential(operation.ApplicationCode) {
@@ -474,7 +551,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusFailed, ErrorCode: "PROVISIONING_INPUT_INVALID", Message: err.Error()}, nil
 	}
 	// 期望清单落库（既有更新流程在协调 IdP 与派发部署之前执行；空清单不落库）。
-	if adapter.manifestState != nil && strings.TrimSpace(target.ManifestChecksum) != "" {
+	if _, managed := adapter.state.(SubsystemAccessDeploymentLifecycle); !managed && adapter.manifestState != nil && strings.TrimSpace(target.ManifestChecksum) != "" {
 		if err := adapter.manifestState.SetSubsystemDesiredManifest(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode, strings.TrimSpace(target.ManifestChecksum), time.Now().UTC()); err != nil {
 			return application.SubsystemAccessStageOutcome{}, fmt.Errorf("record desired manifest: %w", err)
 		}
@@ -486,6 +563,27 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 	if err := adapter.prepareRuntimeLicense(ctx, operation, &input); err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
+	if reader, ok := adapter.state.(interface {
+		SaveAccessRuntimeExpectations(context.Context, application.SubsystemAccessOperation, []application.RuntimeLicenseCredential) error
+	}); ok {
+		if err := reader.SaveAccessRuntimeExpectations(ctx, operation, input.RuntimeLicenseCredentials); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
+	if lifecycle, ok := adapter.state.(SubsystemAccessDeploymentLifecycle); ok {
+		if err := lifecycle.DispatchAccessDeployment(ctx, operation, input.ManifestChecksum, run.CandidateSnapshot); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
+	if reader, ok := adapter.state.(interface {
+		ReadAccessDeploymentReceipt(context.Context, application.SubsystemAccessOperation) (application.SubsystemAccessDeploymentReceipt, string, error)
+	}); ok {
+		receipt, _, err := reader.ReadAccessDeploymentReceipt(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+		input.AccessReceipt = &receipt
+	}
 	if err := adapter.provisioner.Update(ctx, input); err != nil {
 		// 结果未知（可能已提交）：保留租约，下一轮先核对证据再决定。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("update subsystem: %w", err)
@@ -493,7 +591,11 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 	if err := adapter.confirmRuntimeLicense(ctx, operation, input); err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
-	if err := adapter.recordAppliedAccessManifest(ctx, operation, target.ManifestChecksum); err != nil {
+	if lifecycle, ok := adapter.state.(SubsystemAccessDeploymentLifecycle); ok {
+		if err := lifecycle.CompleteAccessDeployment(ctx, operation, target.ManifestChecksum); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	} else if err := adapter.recordAppliedAccessManifest(ctx, operation, target.ManifestChecksum); err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
 	return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusSucceeded,
@@ -565,8 +667,32 @@ func (adapter *SubsystemAccessDeploymentAdapter) reconcileKeycloakBroker(ctx con
 	return control.EnsureBroker(ctx, brokerID, brokerSecret)
 }
 
-// SubsystemAccessDeploymentReady 就绪核验：只有受控部署状态为 READY 才算成功。
+// SubsystemAccessDeploymentReady 用途：核对原代次成功回执、生命周期状态和清单一致性。
+// 参数：ctx 为上下文，operation 为当前租约任务。
+// 返回值：返回就绪、等待或失败；读取或所有权校验失败返回错误。
 func (adapter *SubsystemAccessDeploymentAdapter) SubsystemAccessDeploymentReady(ctx context.Context, operation application.SubsystemAccessOperation) (application.SubsystemAccessStageOutcome, error) {
+	if reader, ok := adapter.state.(interface {
+		ReadAccessDeploymentBinding(context.Context, application.SubsystemAccessOperation) (bool, error)
+	}); ok {
+		bound, err := reader.ReadAccessDeploymentBinding(ctx, operation)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+		if bound {
+			if lifecycle, ok := adapter.state.(SubsystemAccessDeploymentLifecycle); ok {
+				phase, err := lifecycle.PrepareAccessDeployment(ctx, operation)
+				if err != nil {
+					return application.SubsystemAccessStageOutcome{}, err
+				}
+				if phase != "SUCCEEDED" {
+					return unknownAccessDeployment(), nil
+				}
+			}
+		} else if operation.Action == application.SubsystemAccessActionOnboard {
+			return application.SubsystemAccessStageOutcome{Status: application.SubsystemAccessStatusWaiting, ErrorCode: "LEGACY_DEPLOYMENT_REVIEW_REQUIRED", Message: "历史首次接入缺少原部署代次绑定，需受控核对后恢复"}, nil
+		}
+	}
+
 	status, generation, attemptCount, found, err := adapter.state.ReadSubsystemAccessDeploymentState(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode)
 	if err != nil {
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("read subsystem deployment state: %w", err)

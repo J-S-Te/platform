@@ -84,8 +84,10 @@ func (*SubsystemOnboardingConflict) Is(target error) bool {
 // 输入只接收管理员需要决定的公开信息；资源 ID、门户目标、OAuth 回调及凭据由服务端
 // 统一推导，避免分别调用多个管理接口时形成环境错配或遗漏安全参数。
 type SubsystemOnboardingInput struct {
-	TenantID   string
-	OperatorID string
+	// AccessOperation 仅由持久向导执行器设置，绑定原子登记与部署代次。
+	AccessOperation *SubsystemAccessOperation
+	TenantID        string
+	OperatorID      string
 	// InitialAdminUserID 随部署状态持久化，首次部署失败后安全重试时
 	// 仍能把管理员角色授予最初选定的人，而不是重试发起者。
 	InitialAdminUserID string
@@ -108,6 +110,7 @@ type SubsystemOnboardingInput struct {
 // 写模型汇总一次接入产生的控制面对象，仓储在一个数据库事务内持久化；明文密钥不进入
 // 写模型，持久化边界只接收经过保护的 SecretWrite。
 type SubsystemOnboardingWrite struct {
+	AccessOperation    *SubsystemAccessOperation
 	InitialAdminUserID string
 	Application        ApplicationCreateInput
 	ApplicationID      string
@@ -318,8 +321,9 @@ func (service *SubsystemOnboardingService) PreflightValidate(ctx context.Context
 	return nil
 }
 
-// 接入先在内存中生成完整聚合和一次性密钥，再由仓储事务统一落库；数据库成功并不等于
-// 部署文件已经写入，后续部署失败必须由上层补偿或重试，不能把两者描述成跨系统原子操作。
+// OnboardSubsystem 用途：原子登记控制面资源及可选任务代次，不代表外部部署已完成。
+// 参数：ctx 为上下文，input 为接入目标、操作者及持久任务绑定。
+// 返回值：返回登记资源和本次交付凭据；验证或数据库事务失败返回错误。
 func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context, input SubsystemOnboardingInput) (SubsystemOnboardingResult, error) {
 	input = normalizeSubsystemOnboardingInput(input)
 	if !validSubsystemOnboardingInput(input) {
@@ -433,6 +437,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	}
 
 	result, err := service.repository.CreateSubsystem(ctx, SubsystemOnboardingWrite{
+		AccessOperation:    input.AccessOperation,
 		InitialAdminUserID: input.InitialAdminUserID,
 		Application:        applicationInput, ApplicationID: applicationID,
 		Environment: environmentInput, EnvironmentID: environmentID,

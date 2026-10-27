@@ -55,11 +55,15 @@ func (c *attemptConn) QueryContext(_ context.Context, q string, _ []driver.Named
 	c.queries++
 	return &deleteEnvRows{columns: []string{"tenant_id", "application_code", "environment_code", "status", "generation", "started_at"}, values: [][]driver.Value{{"tenant", "app", "prod", c.store.status, c.store.generation, c.store.started}}}, nil
 }
+
+// ExecContext 用途：执行带代次保护的测试更新，允许合法的相关子查询。
+// 参数：ctx 为上下文，q 为 SQL，args 为绑定参数。
+// 返回值：返回模拟受影响行数；缺少保护条件时返回错误。
 func (c *attemptConn) ExecContext(_ context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
 	if !strings.HasPrefix(q, "UPDATE") {
 		return nil, fmt.Errorf("unexpected exec %s", q)
 	}
-	parts := strings.Split(q, " WHERE ")
+	parts := strings.SplitN(q, " WHERE ", 2)
 	if len(parts) != 2 {
 		return nil, errors.New("unguarded update")
 	}

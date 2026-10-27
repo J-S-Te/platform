@@ -205,20 +205,24 @@ func TestSubsystemAccessWorkerDoesNotRepeatUnknownStage(t *testing.T) {
 	}
 }
 
-// 租约丢失：执行者被接管后必须停止，不覆盖新结果。
+// TestSubsystemAccessWorkerStopsWhenLeaseLost 用途：验证旧领取快照不能续租或覆盖新执行者。
+// 参数：t 为测试上下文。
+// 返回值：无。
 func TestSubsystemAccessWorkerStopsWhenLeaseLost(t *testing.T) {
 	repository := &workerRepositoryStub{operation: operationFixture(), claimable: true}
 	executor := &scriptedExecutor{}
 	worker := workerFor(t, repository, executor)
+	worker.maxStages = 1
 
 	if _, err := worker.RunOnce(context.Background(), "tenant-1", repository.operation.ID); err != nil {
 		t.Fatal(err)
 	}
-	// 模拟另一次执行接管：租约主人变化。
+	original := repository.operation
+	// 模拟另一次执行接管：旧执行者仍持有接管前快照。
 	repository.leaseHeld = true
 	repository.operation.LeaseOwner = "worker-2"
 	repository.operation.Status = SubsystemAccessStatusRunning
-	err := worker.drive(context.Background(), repository.operation)
+	err := worker.drive(context.Background(), original)
 	if !errors.Is(err, ErrSubsystemAccessOperationLeaseLost) {
 		t.Fatalf("err = %v, want lease lost", err)
 	}

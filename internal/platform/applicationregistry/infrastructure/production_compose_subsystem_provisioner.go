@@ -357,6 +357,9 @@ func (target *productionComposeTarget) Preflight(ctx context.Context, input appl
 // 参数：ctx 为部署上下文，input 为服务端批准的部署与凭据绑定。
 // 返回值：备份、配置或部署失败返回错误，成功返回 nil。
 func (target *productionComposeTarget) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if err := validateAccessReceipt(input); err != nil {
+		return err
+	}
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
 	if err := target.validateProvisioningInput(input); err != nil {
@@ -400,7 +403,10 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...); err != nil {
 		return err
 	}
-	return target.checkRuntimeProjection(operationContext)
+	if err := target.checkRuntimeProjection(operationContext); err != nil {
+		return err
+	}
+	return writeAccessDeploymentReceipt(target.config.DeployRoot, input)
 }
 
 func (target *productionComposeTarget) checkReleaseIntegrity(ctx context.Context, expected string) error {
@@ -421,6 +427,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 		// 受信控制面已提供完整的一次性初始凭据；Provision 会在创建任何运行文件前完成
 		// 全量校验。
 		return target.Provision(ctx, input)
+	}
+	if err := validateAccessReceipt(input); err != nil {
+		return err
 	}
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
@@ -473,7 +482,10 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...); err != nil {
 		return err
 	}
-	return target.checkRuntimeProjection(operationContext)
+	if err := target.checkRuntimeProjection(operationContext); err != nil {
+		return err
+	}
+	return writeAccessDeploymentReceipt(target.config.DeployRoot, input)
 }
 
 func (target *productionComposeTarget) checkRuntimeProjection(ctx context.Context) error {

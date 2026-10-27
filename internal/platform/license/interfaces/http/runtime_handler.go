@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
@@ -31,13 +32,16 @@ type RuntimeHandler struct {
 	service     runtimeCoordinator
 	evidence    EvidenceSource
 	environment string
+	state       licenseStateReader
+	observer    RuntimeObserver
+	now         func() time.Time
 }
 
 func NewRuntimeHandler(service runtimeCoordinator) (*RuntimeHandler, error) {
 	if service == nil {
 		return nil, domain.ErrInvalid
 	}
-	return &RuntimeHandler{service: service}, nil
+	return &RuntimeHandler{service: service, now: time.Now}, nil
 }
 
 // ConfigureEvidence 挂接已经过约束的部署 Agent 证据来源；绝不接受浏览器提供的采集器

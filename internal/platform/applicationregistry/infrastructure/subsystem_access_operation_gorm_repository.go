@@ -300,9 +300,9 @@ func (repository *SubsystemAccessOperationGORMRepository) AdvanceOperationStage(
 	return result.RowsAffected == 1, nil
 }
 
-// RequeueOperation 用途：原子恢复等待或失败操作，清单核验失败时重新执行部署。
-// 参数：ctx 为数据库上下文，tenantID 与 id 为授权操作身份，now 为恢复时间。
-// 返回值：成功重占槽位返回 true；重复调用或目标被占用返回 false，存储失败返回错误。
+// RequeueOperation 用途：按原状态重排任务，并将核验失败的显式重试与崩溃恢复区分。
+// 参数：ctx 为上下文，tenantID/id 为任务，now 为恢复时间。
+// 返回值：返回是否重获槽位；冲突或写入失败返回错误。
 func (repository *SubsystemAccessOperationGORMRepository) RequeueOperation(ctx context.Context, tenantID, id string, now time.Time) (bool, error) {
 	reacquired := false
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -328,6 +328,14 @@ func (repository *SubsystemAccessOperationGORMRepository) RequeueOperation(ctx c
 			}
 			if held > 0 {
 				return nil
+			}
+		}
+		if subsystemAccessRecoveryStage(row) != row.Stage {
+			// 这是用户对核验失败的显式重试；与崩溃后的旧成功回执恢复严格区分。
+			if err := tx.Model(&subsystemAccessDeploymentAttempt{}).
+				Where("tenant_id = ? AND operation_id = ? AND phase IN ?", row.TenantID, row.ID, []string{"SUCCEEDED", "FAILED"}).
+				Updates(map[string]any{"phase": "RETRY_REQUESTED", "updated_at": now.UTC()}).Error; err != nil {
+				return err
 			}
 		}
 		result := tx.Model(&subsystemAccessOperationModel{}).

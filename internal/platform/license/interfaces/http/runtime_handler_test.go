@@ -18,6 +18,7 @@ type runtimeStub struct {
 	calls     int
 	serviceID string
 	actor     domain.Actor
+	status    coordination.Status
 	err       error
 }
 
@@ -95,7 +96,7 @@ func (s *runtimeStub) Ack(_ context.Context, id string, _ coordination.AckInput)
 }
 func (s *runtimeStub) Status(context.Context, string) (coordination.Status, error) {
 	s.calls++
-	return coordination.Status{}, s.err
+	return s.status, s.err
 }
 func (s *runtimeStub) BeginActivation(_ context.Context, _ string, _ uint64, actor domain.Actor) error {
 	s.calls++

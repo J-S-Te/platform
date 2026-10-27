@@ -212,13 +212,25 @@ func NewSubsystemOnboardingGORMRepository(database *gorm.DB) (*SubsystemOnboardi
 	return &SubsystemOnboardingGORMRepository{database: database}, nil
 }
 
-// CreateSubsystem 原子持久化全部控制面资源。同租户同编码的已登记应用只允许复用来追加
-// 新环境；既有环境、登录目标与 OAuth 客户端绝不会被该只创建流程覆盖。
+// CreateSubsystem 用途：原子创建接入目录、客户端、初始状态及可选向导代次绑定。
+// 参数：ctx 为上下文，write 为已校验的写模型，now 为创建时间。
+// 返回值：返回创建资源；任一写入或租约检查失败则全部回滚。
 func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context.Context, write application.SubsystemOnboardingWrite, now time.Time) (application.SubsystemOnboardingResult, error) {
 	var result application.SubsystemOnboardingResult
 	// 应用、环境、登录目标、浏览器客户端、目录发布客户端和初始部署状态必须同成同败。
 	// 只要任一子资源写入失败，事务回滚，避免门户出现无法完成 OAuth 登录的半接入卡片。
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if write.AccessOperation != nil {
+			if _, err := lockAccessOperation(ctx, transaction, *write.AccessOperation, time.Now().UTC()); err != nil {
+				return err
+			}
+			if write.AccessOperation.Action != application.SubsystemAccessActionOnboard ||
+				write.AccessOperation.TenantID != write.Application.TenantID ||
+				write.AccessOperation.ApplicationCode != write.Application.Code ||
+				write.AccessOperation.EnvironmentCode != write.Environment.Environment {
+				return application.ErrSubsystemAccessOperationConflict
+			}
+		}
 		management := &ManagementRepository{database: transaction}
 		createdApplication, err := management.CreateApplication(ctx, write.Application, write.ApplicationID, now)
 		if err != nil {
@@ -308,6 +320,12 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 			return err
 		}
 
+		if write.AccessOperation != nil {
+			op := *write.AccessOperation
+			if err := bindInitialAccessDeployment(ctx, transaction, op, createdApplication.ID, createdEnvironment.ID, now); err != nil {
+				return err
+			}
+		}
 		result = application.SubsystemOnboardingResult{
 			Application: createdApplication, Environment: createdEnvironment,
 			LoginTarget: createdLoginTarget, OAuthClient: createdOAuthClient,
@@ -631,8 +649,9 @@ func (repository *SubsystemOnboardingGORMRepository) CompleteSubsystemDeployment
 	})
 }
 
-// RecoverStaleSubsystemDeployment 在 UPDATE 本身内比较枚举的快照；若改为重读再做基于新
-// generation 的 CAS，会错误地收口一个刚启动的重试。
+// RecoverStaleSubsystemDeployment 用途：仅清理无人持有的过期代次，保留持久向导的恢复权。
+// 参数：ctx 为上下文，state 为枚举快照，cutoff 为过期界限，now 为当前时间。
+// 返回值：返回是否完成回收；代次变化或向导仍持有槽位时返回 false。
 func (repository *SubsystemOnboardingGORMRepository) RecoverStaleSubsystemDeployment(ctx context.Context, state application.SubsystemDeploymentState, cutoff, now time.Time) (bool, error) {
 	if state.StartedAt == nil || !state.StartedAt.Before(cutoff) {
 		return false, nil
@@ -648,6 +667,15 @@ func (repository *SubsystemOnboardingGORMRepository) RecoverStaleSubsystemDeploy
 	}
 	result := repository.database.WithContext(ctx).Model(&subsystemDeploymentStateModel{}).
 		Where("tenant_id = ? AND application_code = ? AND environment_code = ? AND generation = ? AND status = ? AND started_at = ? AND started_at < ?", state.TenantID, state.ApplicationCode, state.Environment, state.Generation, state.Status, state.StartedAt.UTC(), cutoff.UTC()).
+		Where(`NOT EXISTS (
+   SELECT 1 FROM subsystem_access_deployment_attempt AS attempt
+   JOIN subsystem_access_operation AS access_op
+    ON access_op.tenant_id = attempt.tenant_id AND access_op.id = attempt.operation_id
+   WHERE attempt.tenant_id = subsystem_deployment_state.tenant_id
+    AND attempt.environment_id = subsystem_deployment_state.environment_id
+    AND attempt.generation = subsystem_deployment_state.generation
+    AND (attempt.phase = 'DISPATCHED' OR (access_op.active_slot IS NOT NULL AND attempt.phase = 'PREPARED'))
+  )`).
 		Updates(map[string]any{"status": application.SubsystemDeploymentStatusFailed, "last_error_code": errorCode, "last_error_message": errorMessage, "completed_at": now.UTC(), "updated_at": now.UTC()})
 	return result.RowsAffected == 1, result.Error
 }

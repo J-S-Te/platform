@@ -246,6 +246,7 @@ func NewRouter(
 		}
 		if operational.RuntimeLicenses != nil {
 			apiRouter.GET("/licenses/installation-evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.InstallationEvidence))
+			apiRouter.GET("/licenses/enforcement/:application/overview", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Overview))
 			apiRouter.GET("/licenses/enforcement/:application", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Status))
 			apiRouter.GET("/licenses/enforcement/:application/evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Evidence))
 			apiRouter.POST("/licenses/enforcement/:application/activation", middleware.RequirePermission("platform:license:manage"), adaptHandler(operational.RuntimeLicenses.BeginActivation))

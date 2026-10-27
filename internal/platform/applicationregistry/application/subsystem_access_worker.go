@@ -2,6 +2,8 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -61,9 +63,15 @@ func NewSubsystemAccessWorker(repository SubsystemAccessOperationRepository, exe
 		workerID: strings.TrimSpace(workerID), leaseTTL: leaseTTL, maxStages: maxStages, maxAttempts: maxAttempts}, nil
 }
 
-// RunOnce 领取并推进一个操作；handled=false 表示该操作当前不可领取（他人在执行或已终态）。
+// RunOnce 用途：领取并推进任务，每次执行使用独立租约身份。
+// 参数：ctx 为上下文，tenantID/operationID 为目标任务。
+// 返回值：返回是否领取及执行错误。
 func (worker *SubsystemAccessWorker) RunOnce(ctx context.Context, tenantID, operationID string) (bool, error) {
-	operation, claimed, err := worker.repository.ClaimOperation(ctx, tenantID, operationID, worker.workerID, worker.leaseTTL, worker.clock.Now())
+	claimID, err := worker.claimIdentity()
+	if err != nil {
+		return false, err
+	}
+	operation, claimed, err := worker.repository.ClaimOperation(ctx, tenantID, operationID, claimID, worker.leaseTTL, worker.clock.Now())
 	if err != nil {
 		return false, err
 	}
@@ -92,6 +100,9 @@ func (worker *SubsystemAccessWorker) DriveClaimable(ctx context.Context, limit i
 	return handled, nil
 }
 
+// drive 用途：按原领取轮次逐阶段推进操作。
+// 参数：ctx 为上下文，operation 为持久领取快照。
+// 返回值：阶段、租约或持久化失败返回错误。
 func (worker *SubsystemAccessWorker) drive(ctx context.Context, operation SubsystemAccessOperation) error {
 	// 运行内共享状态：目录/凭据阶段的产物只在本次执行内交接，不落库。
 	run := &SubsystemAccessRunState{}
@@ -105,7 +116,7 @@ func (worker *SubsystemAccessWorker) drive(ctx context.Context, operation Subsys
 		}
 		now := worker.clock.Now().UTC()
 		// 阶段执行前续租：租约丢失说明已被接管，立即停止（不覆盖新结果）。
-		renewed, err := worker.repository.RenewOperationLease(ctx, operation.TenantID, operation.ID, worker.workerID, worker.leaseTTL, now)
+		renewed, err := worker.repository.RenewOperationLease(ctx, operation.TenantID, operation.ID, operation.LeaseOwner, worker.leaseTTL, now)
 		if err != nil {
 			return err
 		}
@@ -113,23 +124,24 @@ func (worker *SubsystemAccessWorker) drive(ctx context.Context, operation Subsys
 			return ErrSubsystemAccessOperationLeaseLost
 		}
 		outcome, executeErr := worker.executor.ExecuteSubsystemAccessStage(ctx, operation, stage, run)
+		now = worker.clock.Now().UTC()
 		if executeErr != nil {
 			return worker.recordUnknown(ctx, operation, stage, executeErr)
 		}
 		switch outcome.Status {
 		case SubsystemAccessStatusSucceeded:
-			if err := worker.repository.UpsertOperationStage(ctx, operation.TenantID, operation.ID, stage,
+			if err := worker.recordStage(ctx, operation, stage,
 				SubsystemAccessStatusSucceeded, "", "", outcome.EvidenceRef, now); err != nil {
 				return err
 			}
 			next, hasNext := NextSubsystemAccessStage(stage)
 			if !hasNext {
 				_, err := worker.repository.CompleteOperation(ctx, SubsystemAccessOperationCompletion{
-					TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: worker.workerID,
+					TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: operation.LeaseOwner,
 					Status: SubsystemAccessStatusSucceeded, Stage: stage, ResultRef: outcome.EvidenceRef, Now: now})
 				return err
 			}
-			advanced, err := worker.repository.AdvanceOperationStage(ctx, operation.TenantID, operation.ID, worker.workerID, next, now)
+			advanced, err := worker.repository.AdvanceOperationStage(ctx, operation.TenantID, operation.ID, operation.LeaseOwner, next, now)
 			if err != nil {
 				return err
 			}
@@ -139,17 +151,17 @@ func (worker *SubsystemAccessWorker) drive(ctx context.Context, operation Subsys
 			operation.Stage = next
 			stage = next
 		case SubsystemAccessStatusWaiting, SubsystemAccessStatusFailed:
-			if err := worker.repository.UpsertOperationStage(ctx, operation.TenantID, operation.ID, stage,
+			if err := worker.recordStage(ctx, operation, stage,
 				outcome.Status, outcome.ErrorCode, outcome.Message, outcome.EvidenceRef, now); err != nil {
 				return err
 			}
 			_, err := worker.repository.CompleteOperation(ctx, SubsystemAccessOperationCompletion{
-				TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: worker.workerID, Status: outcome.Status,
+				TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: operation.LeaseOwner, Status: outcome.Status,
 				Stage: stage, ErrorCode: outcome.ErrorCode, ErrorMessage: outcome.Message, ResultRef: outcome.EvidenceRef, Now: now})
 			return err
 		default:
 			// 仍在进行中（例如已提交但结果未知）：记录状态后保留租约，交由下一轮核对。
-			return worker.repository.UpsertOperationStage(ctx, operation.TenantID, operation.ID, stage,
+			return worker.recordStage(ctx, operation, stage,
 				SubsystemAccessStatusRunning, outcome.ErrorCode, outcome.Message, outcome.EvidenceRef, now)
 		}
 	}
@@ -157,28 +169,30 @@ func (worker *SubsystemAccessWorker) drive(ctx context.Context, operation Subsys
 	return nil
 }
 
-// recordUnknown 处理"阶段执行结果未知"：不重复执行；超过尝试上限才判定失败。
+// recordUnknown 用途：保留结果未知的任务，达到上限后如实记录失败。
+// 参数：ctx 为上下文，operation 为任务，stage 为阶段，executeErr 为执行错误。
+// 返回值：返回持久化或执行错误。
 func (worker *SubsystemAccessWorker) recordUnknown(ctx context.Context, operation SubsystemAccessOperation, stage SubsystemAccessStage, executeErr error) error {
 	now := worker.clock.Now().UTC()
 	message := executeErr.Error()
 	// 已知不可重试（未接线、请求不合法）：立即判定失败，不做无意义重试。
 	if errors.Is(executeErr, ErrSubsystemAccessStageNotWired) || errors.Is(executeErr, ErrSubsystemAccessInvalidRequest) {
-		if err := worker.repository.UpsertOperationStage(ctx, operation.TenantID, operation.ID, stage,
+		if err := worker.recordStage(ctx, operation, stage,
 			SubsystemAccessStatusFailed, "STAGE_NOT_WIRED", message, "", now); err != nil {
 			return err
 		}
 		_, err := worker.repository.CompleteOperation(ctx, SubsystemAccessOperationCompletion{
-			TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: worker.workerID,
+			TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: operation.LeaseOwner,
 			Status: SubsystemAccessStatusFailed, Stage: stage, ErrorCode: "STAGE_NOT_WIRED", ErrorMessage: message, Now: now})
 		return err
 	}
-	if err := worker.repository.UpsertOperationStage(ctx, operation.TenantID, operation.ID, stage,
+	if err := worker.recordStage(ctx, operation, stage,
 		SubsystemAccessStatusRunning, "STAGE_EXECUTION_UNKNOWN", message, "", now); err != nil {
 		return err
 	}
 	if operation.AttemptCount >= worker.maxAttempts {
 		_, err := worker.repository.CompleteOperation(ctx, SubsystemAccessOperationCompletion{
-			TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: worker.workerID,
+			TenantID: operation.TenantID, ID: operation.ID, LeaseOwner: operation.LeaseOwner,
 			Status: SubsystemAccessStatusFailed, Stage: stage, ErrorCode: "STAGE_EXECUTION_FAILED", ErrorMessage: message, Now: now})
 		if err != nil {
 			return err
@@ -186,4 +200,31 @@ func (worker *SubsystemAccessWorker) recordUnknown(ctx context.Context, operatio
 		return fmt.Errorf("subsystem access operation %s failed at %s: %w", operation.ID, stage, executeErr)
 	}
 	return nil
+}
+
+// claimIdentity 用途：为每次领取生成唯一租约身份，避免同名 Worker 重启后旧执行者续租。
+// 参数：无。
+// 返回值：返回不超过 64 字符的身份；随机源失败时返回错误。
+func (worker *SubsystemAccessWorker) claimIdentity() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	prefix := worker.workerID
+	if len(prefix) > 30 {
+		prefix = prefix[:30]
+	}
+	return prefix + "-" + hex.EncodeToString(nonce[:]), nil
+}
+
+// recordStage 用途：在真实仓储中按原领取轮次写阶段，拒绝迟到执行者。
+// 参数：ctx 为上下文，operation 为领取快照，stage/status 为结果，code/message/ref 为非秘密说明，now 为时间。
+// 返回值：返回持久化或租约错误；测试替身可沿用旧端口。
+func (worker *SubsystemAccessWorker) recordStage(ctx context.Context, operation SubsystemAccessOperation, stage SubsystemAccessStage, status SubsystemAccessStatus, code, message, ref string, now time.Time) error {
+	if repository, ok := worker.repository.(interface {
+		UpsertClaimedOperationStage(context.Context, SubsystemAccessOperation, SubsystemAccessStage, SubsystemAccessStatus, string, string, string, time.Time) error
+	}); ok {
+		return repository.UpsertClaimedOperationStage(ctx, operation, stage, status, code, message, ref, now)
+	}
+	return worker.repository.UpsertOperationStage(ctx, operation.TenantID, operation.ID, stage, status, code, message, ref, now)
 }

@@ -27,12 +27,13 @@ const (
 )
 
 type subsystemProvisioningRequest struct {
-	Version     int    `json:"version"`
-	Action      string `json:"action"`
-	RequestID   string `json:"request_id,omitempty"`
-	Code        string `json:"code,omitempty"`
-	TenantID    string `json:"tenant_id,omitempty"`
-	Environment string `json:"environment,omitempty"`
+	Receipt     *application.SubsystemAccessDeploymentReceipt `json:"receipt,omitempty"`
+	Version     int                                           `json:"version"`
+	Action      string                                        `json:"action"`
+	RequestID   string                                        `json:"request_id,omitempty"`
+	Code        string                                        `json:"code,omitempty"`
+	TenantID    string                                        `json:"tenant_id,omitempty"`
+	Environment string                                        `json:"environment,omitempty"`
 	// ManifestChecksum 供 teardown 在生产模式满足与 preflight/provision/update 相同的
 	// 已批准清单门槛；客户端按 code→environment 从服务端下发的目标投影解析后填入。
 	ManifestChecksum string                                  `json:"manifest_checksum,omitempty"`
@@ -54,6 +55,7 @@ type subsystemAccessApplyPayload struct {
 }
 
 type subsystemProvisioningReply struct {
+	DeploymentCompleted     bool                                       `json:"deployment_completed,omitempty"`
 	ErrorCode               string                                     `json:"error_code,omitempty"`
 	RuntimeLicenseLifecycle *application.RuntimeLicenseReleaseApproval `json:"runtime_license_lifecycle,omitempty"`
 	RuntimeLicenseApproval  []application.RuntimeLicenseApproval       `json:"runtime_license_approval,omitempty"`
@@ -68,6 +70,8 @@ type subsystemProvisioningReply struct {
 	// Images 是批准清单中的镜像在本机是否存在的明细（协议只增不改：旧客户端忽略该字段）。
 	Images          []application.SubsystemImageReadiness `json:"images,omitempty"`
 	LicenseEvidence *licenseevidence.Report               `json:"license_evidence,omitempty"`
+	// RuntimeObservation 是普通只读运行观察；与需要批准材料的 LicenseEvidence 分开。
+	RuntimeObservation *licenseevidence.RuntimeObservation `json:"runtime_observation,omitempty"`
 }
 
 // subsystemImageReadinessProvider 是可选能力：部署 Agent 读取本机镜像存在性。
@@ -658,6 +662,9 @@ func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, exec
 	}
 }
 
+// handleSubsystemProvisioningConnection 用途：处理受限部署协议及只读完成回执查询。
+// 参数：ctx 为服务上下文，connection 为已接受连接，executor 为受控部署执行器。
+// 返回值：无；结果通过协议响应返回，连接始终关闭。
 func handleSubsystemProvisioningConnection(ctx context.Context, connection net.Conn, executor application.SubsystemProvisioner) {
 	defer connection.Close()
 	_ = connection.SetReadDeadline(time.Now().Add(subsystemProvisioningHandshakeTimeout))
@@ -687,6 +694,19 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		requiresManifestChecksum = provider.Capabilities().Mode == "production"
 	}
 	switch request.Action {
+	case "access-deployment-receipt":
+		reader, ok := executor.(accessDeploymentReceiptReader)
+		if !ok || request.Receipt == nil {
+			err = provisioningError("deployment receipt query unavailable")
+			break
+		}
+		completed, readErr := reader.ReadAccessDeploymentCompletion(operationContext, *request.Receipt)
+		if readErr != nil {
+			err = readErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, DeploymentCompleted: completed})
+		return
 	case "LICENSE_RUNTIME_LIFECYCLE_APPROVAL":
 		provider, ok := executor.(runtimeLicenseLifecycleProvider)
 		if !ok || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" || request.TenantID != "" {
@@ -751,6 +771,21 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			break
 		}
 		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, LicenseEvidence: &report})
+		return
+	case "LICENSE_RUNTIME_OBSERVATION":
+		provider, ok := executor.(runtimeObservationProvider)
+		if !ok || request.Code == "" || request.Environment == "" || request.TenantID != "" || request.Receipt != nil || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" {
+			err = provisioningError("LICENSE_RUNTIME_OBSERVATION_UNSUPPORTED: runtime observation action unavailable")
+			break
+		}
+		observationContext, cancel := context.WithTimeout(operationContext, 10*time.Second)
+		observation, observeErr := provider.ObserveLicenseRuntime(observationContext, request.Code, request.Environment)
+		cancel()
+		if observeErr != nil {
+			err = observeErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RuntimeObservation: &observation})
 		return
 	case "capabilities":
 		provider, ok := executor.(subsystemAvailableCapabilityProvider)
