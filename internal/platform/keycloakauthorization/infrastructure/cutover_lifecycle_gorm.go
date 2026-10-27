@@ -115,7 +115,15 @@ func (store *CutoverLifecycleStore) CanKeycloakCutover(ctx context.Context, tena
 	if err != nil {
 		return err
 	}
-	if lifecycle.ObservationEndsAt == nil || time.Now().UTC().Before(lifecycle.ObservationEndsAt.UTC()) {
+	return keycloakCutoverGate(lifecycle, time.Now().UTC())
+}
+
+// 未开始观察仍拒绝认证切换，但应与正在观察区分，让普通运行更新不会误认有活动观察期。
+func keycloakCutoverGate(lifecycle registryhttp.KeycloakCutoverLifecycle, now time.Time) error {
+	if lifecycle.Status == "NOT_STARTED" {
+		return errors.New("Keycloak observation has not started")
+	}
+	if lifecycle.ObservationEndsAt == nil || now.Before(lifecycle.ObservationEndsAt.UTC()) {
 		return errors.New("Keycloak observation window has not completed")
 	}
 	if lifecycle.Status == "SWITCHED" {
