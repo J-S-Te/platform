@@ -36,6 +36,10 @@ usage() {
   BASIC_PLATFORM_INSECURE_HTTP_API_ALLOWED_HOSTS=<精确主机列表>。
   此规则不限制 --public-base-url 或 OAuth HTTP 回调。
 
+凭据加密：
+  平台启用 CREDENTIAL_ENCRYPTION_MODE=required 时，登录会自动申请 challenge
+  并以 uip-credential/v1 加密提交，不先发送明文口令；旧平台缺少该能力时回退明文。
+
 通用控制：
   -y, --yes                      跳过确认；适用于 CI
   -h, --help                     显示本帮助

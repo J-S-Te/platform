@@ -130,11 +130,82 @@ elif code == "IAM_ENVIRONMENT_DELETE_BLOCKED":
 PY
 }
 
+credential_envelope_helper() {
+  # 本函数定义在 lib/subsystem-http.sh 中，BASH_SOURCE 始终指向该库文件。
+  printf '%s' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/credential-envelope.py"
+}
+
+# login_via_credential_envelope 使用 uip-credential/v1 封套完成一次登录。
+# 输出登录 HTTP 状态码；返回 0 表示已使用加密流程，1 表示平台不支持加密，2 表示失败。
+# 挑战端点 503/404/405 视为旧平台或未启用加密，调用方回退到明文登录；其余错误直接失败。
+login_via_credential_envelope() {
+  local payload_file="$1"
+  local response_file="$2"
+  local challenge_request="$TEMP_DIR/credential-challenge-request.json"
+  local challenge_response="$TEMP_DIR/credential-challenge-response.json"
+  local envelope_request="$TEMP_DIR/login-envelope.json"
+  local response_key_file="$TEMP_DIR/credential-response-key"
+  local meta_file="$TEMP_DIR/credential-envelope-meta.json"
+  local decrypted_response="$TEMP_DIR/login-response-plain.json"
+  local status=""
+
+  printf '%s' '{"purpose":"LOGIN","resource_id":""}' >"$challenge_request"
+  status="$(http_post_json "/auth/credential-challenges" "$challenge_request" "$challenge_response")" || {
+    diagnose_connection_failure "/auth/credential-challenges"
+    return 2
+  }
+  case "$status" in
+    200) ;;
+    503|404|405)
+      return 1
+      ;;
+    *)
+      print_api_error "$status" "$challenge_response" "/auth/credential-challenges"
+      return 2
+      ;;
+  esac
+
+  if ! python3 "$(credential_envelope_helper)" encrypt \
+    --challenge "$challenge_response" \
+    --plaintext "$payload_file" \
+    --purpose LOGIN \
+    --resource-id '' \
+    --content-type application/json \
+    --request-out "$envelope_request" \
+    --response-key-out "$response_key_file" \
+    --meta-out "$meta_file"; then
+    log "ERROR" "平台要求加密凭据，但本地无法完成 uip-credential/v1 封装；未提交登录"
+    return 2
+  fi
+  : >"$payload_file"
+
+  status="$(http_post_json "/auth/login" "$envelope_request" "$response_file")" || {
+    diagnose_connection_failure "/auth/login"
+    return 2
+  }
+  : >"$envelope_request"
+
+  if ! python3 "$(credential_envelope_helper)" decrypt \
+    --response "$response_file" \
+    --response-key "$response_key_file" \
+    --meta-file "$meta_file" \
+    --output "$decrypted_response"; then
+    log "ERROR" "凭据响应无法解析；为避免重复提交，未重试登录"
+    return 2
+  fi
+  : >"$response_key_file"
+  mv "$decrypted_response" "$response_file"
+  printf '%s' "$status"
+  return 0
+}
+
 login() {
   local password=""
   local login_payload="$TEMP_DIR/login.json"
   local login_response="$TEMP_DIR/login-response.json"
   local status=""
+  local encryption_status=0
+  local encrypted_status=""
 
   if [[ "$PASSWORD_STDIN" == true ]]; then
     IFS= read -r password || true
@@ -155,10 +226,21 @@ login() {
   password=""
   unset password
 
-  status="$(http_post_json "/auth/login" "$login_payload" "$login_response")" || {
-    diagnose_connection_failure "/auth/login"
-    exit 1
-  }
+  # 优先使用应用层加密凭据提交，避免先发送明文口令；旧平台不支持挑战端点时回退明文登录。
+  if encrypted_status="$(login_via_credential_envelope "$login_payload" "$login_response")"; then
+    status="$encrypted_status"
+  else
+    encryption_status=$?
+    if [[ "$encryption_status" -eq 2 ]]; then
+      : >"$login_payload"
+      exit 1
+    fi
+    status="$(http_post_json "/auth/login" "$login_payload" "$login_response")" || {
+      : >"$login_payload"
+      diagnose_connection_failure "/auth/login"
+      exit 1
+    }
+  fi
   : >"$login_payload"
 
   if [[ "$status" != "200" ]]; then

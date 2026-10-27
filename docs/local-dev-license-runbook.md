@@ -55,7 +55,7 @@ bash scripts/subsystem.sh connect --application-code customer_and_opportunity --
 bash scripts/subsystem.sh connect --resume <操作ID>
 ```
 
-旧部署可沿原记录使用受控 `update/retry`。若显式传 `--issuer-alias`，必须与已登记环境一致；不要把所有环境写死为 keycloak。管理员密码从交互/标准输入或受控 Cookie 文件读取，不能放命令行。
+旧部署可沿原记录使用受控 `update/retry`。若显式传 `--issuer-alias`，必须与已登记环境一致；不要把所有环境写死为 keycloak。管理员密码从交互/标准输入或受控 Cookie 文件读取，不能放命令行。平台启用 `CREDENTIAL_ENCRYPTION_MODE=required` 时，CLI 登录会自动申请 challenge 并用 `uip-credential/v1` 加密提交；旧平台缺少 challenge 能力时回退明文。
 
 V2 Agent 会读取真实 Compose 镜像、交付组件私有 env 并写固定记录；部署后等待真实 READY 和当前 ACK。业务 Worker 在权益无效时暂停领取，进程存活不是业务可用。普通镜像重建仍须受控部署采用新镜像，不能只构建后期望现有固定记录自动更新。
 
