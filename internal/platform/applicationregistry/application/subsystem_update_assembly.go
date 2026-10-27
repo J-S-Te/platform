@@ -10,6 +10,7 @@ import (
 type SubsystemUpdateProvisioningAssembly struct {
 	TenantID        string
 	ApplicationID   string
+	EnvironmentID   string
 	ApplicationCode string
 	Environment     string
 	// ManifestChecksum 来自服务端清单目标；生产模式下为空必须由调用方先行拒绝。
@@ -32,9 +33,9 @@ type SubsystemUpdateProvisioningAssembly struct {
 	InitialRuntimeProvisioning   bool
 }
 
-// BuildSubsystemUpdateProvisioningInput 装配受控更新的部署输入。
-// 网关字段语义与既有实现一致：任一非空即要求三者齐全（否则 ErrValidation），
-// 派生 PublicURL = base + prefix + "/" 与 RedirectURI = base + prefix + "/auth/callback"。
+// BuildSubsystemUpdateProvisioningInput 用途：保留登记身份并装配受控更新的部署输入。
+// 参数：assembly 为服务端解析的身份、凭据及完整或全空的网关字段。
+// 返回值：返回派生 URL 和完整身份；部分网关字段无效时返回校验错误。
 func BuildSubsystemUpdateProvisioningInput(assembly SubsystemUpdateProvisioningAssembly) (SubsystemProvisioningInput, error) {
 	publicBaseURL := strings.TrimRight(strings.TrimSpace(assembly.PublicBaseURL), "/")
 	upstreamURL := strings.TrimRight(strings.TrimSpace(assembly.UpstreamURL), "/")
@@ -42,6 +43,7 @@ func BuildSubsystemUpdateProvisioningInput(assembly SubsystemUpdateProvisioningA
 	input := SubsystemProvisioningInput{
 		TenantID:                     strings.TrimSpace(assembly.TenantID),
 		ApplicationID:                strings.TrimSpace(assembly.ApplicationID),
+		EnvironmentID:                strings.TrimSpace(assembly.EnvironmentID),
 		ApplicationCode:              strings.TrimSpace(assembly.ApplicationCode),
 		Environment:                  strings.TrimSpace(assembly.Environment),
 		ManifestChecksum:             strings.TrimSpace(assembly.ManifestChecksum),

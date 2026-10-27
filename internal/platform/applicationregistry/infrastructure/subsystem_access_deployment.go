@@ -457,7 +457,8 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("resolve related service clients: %w", err)
 	}
 	input, err := application.BuildSubsystemUpdateProvisioningInput(application.SubsystemUpdateProvisioningAssembly{
-		TenantID: operation.TenantID, ApplicationID: operation.ApplicationID, ApplicationCode: operation.ApplicationCode,
+		TenantID: operation.TenantID, ApplicationID: operation.ApplicationID,
+		EnvironmentID: operation.EnvironmentID, ApplicationCode: operation.ApplicationCode,
 		Environment: operation.EnvironmentCode, ManifestChecksum: target.ManifestChecksum,
 		Issuer: issuer, AuthenticationProvider: operation.AuthProvider,
 		AuthenticationRuntimeUpdate: true,

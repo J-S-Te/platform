@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// TestUpdateAssemblyKeepsEnvironmentIdentity 用途：验证更新装配保留并规范化已登记环境 ID。
+// 参数：t 为隔离单元测试上下文。
+// 返回值：无。
+func TestUpdateAssemblyKeepsEnvironmentIdentity(t *testing.T) {
+	assembly := updateAssemblyFixture()
+	assembly.EnvironmentID = " env-production "
+	input, err := BuildSubsystemUpdateProvisioningInput(assembly)
+	if err != nil || input.EnvironmentID != "env-production" {
+		t.Fatalf("registered environment lost: %q %v", input.EnvironmentID, err)
+	}
+}
+
 func updateAssemblyFixture() SubsystemUpdateProvisioningAssembly {
 	return SubsystemUpdateProvisioningAssembly{
 		TenantID: " tenant-1 ", ApplicationID: " 01APP000000000000000000001 ", ApplicationCode: " settlement ",
