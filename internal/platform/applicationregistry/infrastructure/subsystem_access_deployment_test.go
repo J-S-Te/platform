@@ -963,3 +963,38 @@ func TestAccessUpdateDeliversEnrollmentAndStopsOnFailure(t *testing.T) {
 		}
 	}
 }
+
+type accessProviderBrowserStub struct{ fail bool }
+
+func (s accessProviderBrowserStub) EnsureForProvider(context.Context, application.SubsystemAccessOperation, string) (application.SubsystemUpdateBrowserCredential, error) {
+	if s.fail {
+		return application.SubsystemUpdateBrowserCredential{}, errors.New("provider unavailable")
+	}
+	return application.SubsystemUpdateBrowserCredential{ClientID: "actual-keycloak-rp", ClientSecret: "actual-keycloak-secret"}, nil
+}
+func TestAccessOnboardingAndRecoveryUseProviderBrowserCredentials(t *testing.T) {
+	service := &deploymentOnboardingStub{result: application.SubsystemOnboardingResult{Application: application.Application{ID: "app"}, Environment: application.Environment{ID: "env"}, OAuthClient: application.OAuthClientView{ClientID: "platform-client"}, PlaintextSecret: "platform-secret", RedirectURI: "https://settlement.example.com/callback", PublicURL: "https://settlement.example.com"}}
+	adapter := deploymentAdapterFor(t, service, &deploymentProvisionerStub{}, relatedClientsStub{}, deploymentStateStub{found: true}, issuerStub{})
+	adapter.SetProviderBrowserCredentials(accessProviderBrowserStub{})
+	op := onboardingOperation()
+	op.AuthProvider = "keycloak"
+	op.ApplicationID = "app"
+	op.EnvironmentID = "env"
+	run := &application.SubsystemAccessRunState{}
+	if _, err := adapter.ConfigureSubsystemAccessAuthentication(context.Background(), op, run); err != nil {
+		t.Fatal(err)
+	}
+	if run.Credentials.ClientID != "actual-keycloak-rp" || run.Credentials.ClientSecret != "actual-keycloak-secret" {
+		t.Fatal("first enrollment used platform RP secret for Keycloak")
+	}
+	adapter.credentials = &updateCredentialPreparerStub{}
+	adapter.browser = &browserCredentialPreparerStub{credential: application.SubsystemUpdateBrowserCredential{ClientID: "wrong-platform", ClientSecret: "wrong-secret"}}
+	adapter.publisher = &catalogPublisherPreparerStub{}
+	run.Credentials = nil
+	if _, err := adapter.rebuildOnboardCredentials(context.Background(), op, run); err != nil {
+		t.Fatal(err)
+	}
+	if run.Credentials.ClientID != "actual-keycloak-rp" || run.Credentials.ClientSecret != "actual-keycloak-secret" {
+		t.Fatal("recovered deployment used platform RP secret for Keycloak")
+	}
+}

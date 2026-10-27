@@ -99,6 +99,16 @@ func (adapter *SubsystemAccessFactsAdapter) ReadSubsystemAccessFacts(ctx context
 		facts.Registered = true
 		facts.ApplicationID = registry.ApplicationID
 		facts.EnvironmentID = registry.EnvironmentID
+		repository, err := NewSubsystemOnboardingGORMRepository(adapter.database)
+		if err != nil {
+			return application.SubsystemAccessFacts{}, application.SubsystemAccessPreviewVersion{}, err
+		}
+		provider, err := repository.ResolveEnvironmentIssuerAlias(ctx, tenantID, applicationCode, environmentCode)
+		if err != nil {
+			return application.SubsystemAccessFacts{}, application.SubsystemAccessPreviewVersion{}, err
+		}
+		facts.AuthenticationProvider = provider
+
 	}
 
 	deployment, found, err := adapter.readDeployment(ctx, tenantID, applicationCode, environmentCode)
@@ -167,22 +177,23 @@ func (adapter *SubsystemAccessFactsAdapter) readDeployment(ctx context.Context, 
 // subsystemAccessPreviewVersion 把事实折算成稳定摘要：任一事实变化都会让旧预览失效。
 func subsystemAccessPreviewVersion(facts application.SubsystemAccessFacts, capabilities application.SubsystemProvisioningCapabilities, readiness SubsystemAccessReadiness, deployment subsystemAccessDeploymentRow) (string, error) {
 	canonical := map[string]any{
-		"in_scope":            facts.InScope,
-		"registered":          facts.Registered,
-		"controlled":          facts.ControlledDeployment,
-		"last_failed":         facts.LastOperationFailed,
-		"drift":               facts.ConfigurationDrift,
-		"approval_ready":      facts.ApprovalReady,
-		"license_ready":       facts.LicenseReady,
-		"images_ready":        facts.ImagesReady,
-		"observation_pending": facts.AuthObservationPending,
-		"legacy_demo":         facts.LegacyDemo,
-		"catalog_mode":        capabilities.Mode,
-		"manifest_checksum":   facts.ManifestChecksum,
-		"readiness_version":   strings.TrimSpace(readiness.Version),
-		"deployment_status":   deployment.Status,
-		"deployment_gen":      deployment.Generation,
-		"deployment_attempts": deployment.Attempts,
+		"in_scope":                facts.InScope,
+		"registered":              facts.Registered,
+		"authentication_provider": facts.AuthenticationProvider,
+		"controlled":              facts.ControlledDeployment,
+		"last_failed":             facts.LastOperationFailed,
+		"drift":                   facts.ConfigurationDrift,
+		"approval_ready":          facts.ApprovalReady,
+		"license_ready":           facts.LicenseReady,
+		"images_ready":            facts.ImagesReady,
+		"observation_pending":     facts.AuthObservationPending,
+		"legacy_demo":             facts.LegacyDemo,
+		"catalog_mode":            capabilities.Mode,
+		"manifest_checksum":       facts.ManifestChecksum,
+		"readiness_version":       strings.TrimSpace(readiness.Version),
+		"deployment_status":       deployment.Status,
+		"deployment_gen":          deployment.Generation,
+		"deployment_attempts":     deployment.Attempts,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {

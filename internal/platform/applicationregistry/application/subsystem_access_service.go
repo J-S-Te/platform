@@ -193,6 +193,18 @@ func (service *SubsystemAccessService) Submit(ctx context.Context, request Subsy
 	if decision.DisplayOnly {
 		return SubsystemAccessSubmitResult{DisplayOnly: true, Decision: decision}, nil
 	}
+	// This wizard updates a registered runtime; provider migration belongs to
+	// the explicit switch/rollback endpoints and their observation gates.
+	if facts.Registered {
+		provider := strings.ToLower(strings.TrimSpace(facts.AuthenticationProvider))
+		if provider == "" {
+			provider = "platform"
+		}
+		if provider != "platform" && provider != "keycloak" {
+			return SubsystemAccessSubmitResult{}, ErrSubsystemAccessInvalidRequest
+		}
+		request.AuthProvider = provider
+	}
 	digest, err := subsystemAccessRequestDigest(request, decision.Action)
 	if err != nil {
 		return SubsystemAccessSubmitResult{}, err

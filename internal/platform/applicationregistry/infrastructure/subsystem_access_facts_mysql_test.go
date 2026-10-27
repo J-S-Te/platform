@@ -50,7 +50,7 @@ func TestSubsystemAccessFactsAdapterOnMySQL(t *testing.T) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE platform_application_environment (
 			id CHAR(26) NOT NULL, tenant_id CHAR(26) NOT NULL, application_id CHAR(26) NOT NULL,
-			environment VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL,
+			environment VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL, issuer_alias VARCHAR(32) NULL,
 			PRIMARY KEY (id), UNIQUE KEY uq_platform_environment (tenant_id, application_id, environment)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE subsystem_deployment_state (

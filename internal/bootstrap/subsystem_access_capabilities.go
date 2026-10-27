@@ -283,7 +283,9 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	// 完成收口：初始管理员授权落库 + 已应用清单核对，均复用既有实现。
 	deploymentPort.SetInitialAdminMarker(onboardingRepository)
 	deploymentPort.SetAppliedManifestReader(subsystemAccessAppliedManifestPort{reader: stateReader})
-	deploymentPort.SetIdentityReaders(registry, updateBrowserCredentials)
+	browserRuntime := &subsystemAccessBrowserCredentialPort{provider: onboardingRepository, platform: updateBrowserCredentials}
+	deploymentPort.SetProviderBrowserCredentials(browserRuntime)
+	deploymentPort.SetIdentityReaders(registry, browserRuntime)
 	// 认证投影：仅 Keycloak 启用且拿到同一份 applicationaccess.Service 时接线；
 	// 否则结果阶段会显式标注 projection-skipped（不静默假装完成）。
 	if cfg.Keycloak.Enabled && keycloakCatalog != nil {
@@ -304,6 +306,7 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 			},
 			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret, cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
 		)
+		browserRuntime.mappings, browserRuntime.keycloak = mappingStore, controlPlane
 		projection, projectionErr := application.NewKeycloakAuthorizationProjectionService(
 			keycloakAuthorizationCatalogAdapter{service: keycloakCatalog}, controlPlane, mappingStore, readinessStore,
 		)

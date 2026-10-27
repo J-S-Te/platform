@@ -111,6 +111,9 @@ type SubsystemAccessConfigurationEvidence interface {
 }
 
 type SubsystemAccessDeploymentAdapter struct {
+	providerBrowser interface {
+		EnsureForProvider(context.Context, application.SubsystemAccessOperation, string) (application.SubsystemUpdateBrowserCredential, error)
+	}
 	runtimeLicenses      SubsystemAccessRuntimeEnrollment
 	runtimeSettings      func(context.Context) (application.RuntimeLicenseSettings, error)
 	runtimeLocal         bool
@@ -176,10 +179,22 @@ func (adapter *SubsystemAccessDeploymentAdapter) ConfigureSubsystemAccessAuthent
 		// 结果未知（可能已创建）：交给 Worker 保留租约、下一轮先核对再决定。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("onboard subsystem: %w", err)
 	}
+	browser := application.SubsystemUpdateBrowserCredential{ClientID: result.OAuthClient.ClientID, ClientSecret: result.PlaintextSecret}
+	if strings.EqualFold(operation.AuthProvider, "keycloak") {
+		bound := operation
+		bound.ApplicationID, bound.EnvironmentID = result.Application.ID, result.Environment.ID
+		if err := adapter.reconcileKeycloakBroker(ctx, bound); err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+		browser, err = adapter.ensureProviderBrowser(ctx, bound, result.RedirectURI)
+		if err != nil {
+			return application.SubsystemAccessStageOutcome{}, err
+		}
+	}
 	if run != nil {
 		run.Credentials = &application.SubsystemProvisioningCredentials{
-			ClientID:                     result.OAuthClient.ClientID,
-			ClientSecret:                 result.PlaintextSecret,
+			ClientID:                     browser.ClientID,
+			ClientSecret:                 browser.ClientSecret,
 			CatalogPublisherClientID:     result.CatalogPublisherOAuthClient.ClientID,
 			CatalogPublisherClientSecret: result.CatalogPublisherPlaintextSecret,
 			ServiceCredentials:           result.ServiceCredentials,
@@ -376,7 +391,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 	}
 	// 回调地址与更新装配同一派生来源：公开地址 + 清单路径前缀 + /auth/callback。
 	redirectURI := strings.TrimRight(strings.TrimSpace(operation.PublicOrigin), "/") + strings.TrimRight(strings.TrimSpace(target.PathPrefix), "/") + "/auth/callback"
-	browserCredential, err := adapter.browser.Ensure(ctx, operation.TenantID, operation.OperatorID, operation.ApplicationID, operation.EnvironmentID, operation.ApplicationCode, operation.EnvironmentCode, redirectURI)
+	browserCredential, err := adapter.ensureProviderBrowser(ctx, operation, redirectURI)
 	if err == nil && run != nil {
 		// 结果阶段的认证投影需要 ClientID：与首次接入一致，写入本次运行状态（仅内存）。
 		run.Credentials = &application.SubsystemProvisioningCredentials{
@@ -828,8 +843,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) rebuildOnboardCredentials(ctx c
 		return application.SubsystemAccessStageOutcome{}, err
 	}
 	redirectURI := strings.TrimRight(strings.TrimSpace(operation.PublicOrigin), "/") + "/" + strings.Trim(target.PathPrefix, "/") + "/auth/callback"
-	browser, err := adapter.browser.Ensure(ctx, operation.TenantID, operation.OperatorID,
-		operation.ApplicationID, operation.EnvironmentID, operation.ApplicationCode, operation.EnvironmentCode, redirectURI)
+	browser, err := adapter.ensureProviderBrowser(ctx, operation, redirectURI)
 	if err != nil {
 		return application.SubsystemAccessStageOutcome{}, err
 	}
@@ -881,4 +895,20 @@ func (adapter *SubsystemAccessDeploymentAdapter) resolveRegistration(ctx context
 
 func (adapter *SubsystemAccessDeploymentAdapter) SetConfigurationEvidence(tracker SubsystemAccessConfigurationEvidence) {
 	adapter.configuration = tracker
+}
+
+func (a *SubsystemAccessDeploymentAdapter) SetProviderBrowserCredentials(port interface {
+	EnsureForProvider(context.Context, application.SubsystemAccessOperation, string) (application.SubsystemUpdateBrowserCredential, error)
+}) {
+	a.providerBrowser = port
+}
+
+func (a *SubsystemAccessDeploymentAdapter) ensureProviderBrowser(ctx context.Context, op application.SubsystemAccessOperation, redirect string) (application.SubsystemUpdateBrowserCredential, error) {
+	if a.providerBrowser != nil {
+		return a.providerBrowser.EnsureForProvider(ctx, op, redirect)
+	}
+	if strings.EqualFold(op.AuthProvider, "keycloak") || a.browser == nil {
+		return application.SubsystemUpdateBrowserCredential{}, application.ErrSubsystemAccessStageNotWired
+	}
+	return a.browser.Ensure(ctx, op.TenantID, op.OperatorID, op.ApplicationID, op.EnvironmentID, op.ApplicationCode, op.EnvironmentCode, redirect)
 }

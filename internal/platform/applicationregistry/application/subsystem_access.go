@@ -138,6 +138,8 @@ type SubsystemAccessFacts struct {
 	ConfigurationDrift bool
 	// ApplicationID / EnvironmentID 在已登记时提供（用于操作记录与审计）。
 	ApplicationID, EnvironmentID string
+	// AuthenticationProvider is the persisted environment binding; ordinary updates preserve it.
+	AuthenticationProvider string
 	// ManifestChecksum 是服务端清单中该目标的规范化摘要（提交时重新核对，防止清单漂移）。
 	ManifestChecksum string
 	// ResumeStage 是应当从哪个阶段开始或恢复（空表示从 CHECK 开始）。

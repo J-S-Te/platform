@@ -46,7 +46,7 @@ func (stub *accessRepositoryStub) CreateOperation(_ context.Context, create Subs
 	}
 	operation := SubsystemAccessOperation{ID: create.ID, TenantID: create.TenantID, ApplicationID: create.ApplicationID,
 		EnvironmentID: create.EnvironmentID, ApplicationCode: create.ApplicationCode, EnvironmentCode: create.EnvironmentCode,
-		Action: create.Action, Stage: create.Stage, Status: SubsystemAccessStatusPending, PreviewVersion: create.PreviewVersion,
+		AuthProvider: create.AuthProvider, Action: create.Action, Stage: create.Stage, Status: SubsystemAccessStatusPending, PreviewVersion: create.PreviewVersion,
 		RequestDigest: create.RequestDigest, IdempotencyKey: create.IdempotencyKey, OperatorID: create.OperatorID,
 		Version: 1, CreatedAt: create.Now, UpdatedAt: create.Now}
 	stub.operations[operation.ID] = operation
@@ -310,5 +310,18 @@ func TestSubsystemAccessPreviewReportsExecutionPath(t *testing.T) {
 		if !item.wantHint && preview.LegacyHint != "" {
 			t.Fatalf("%s: unexpected hint %q", item.name, preview.LegacyHint)
 		}
+	}
+}
+
+func TestSubsystemAccessUpdateKeepsRegisteredAuthenticationProvider(t *testing.T) {
+	facts := &accessFactsStub{facts: SubsystemAccessFacts{InScope: true, Registered: true, ControlledDeployment: true, ConfigurationDrift: true, AuthenticationProvider: "keycloak", ApprovalReady: true, LicenseReady: true, ImagesReady: true}, version: "pv-auth"}
+	repository := newAccessRepositoryStub()
+	service := accessServiceFor(t, facts, repository)
+	result, err := service.Submit(context.Background(), SubsystemAccessSubmitRequest{TenantID: "tenant-1", OperatorID: "operator-1", ApplicationCode: "settlement", EnvironmentCode: "dev", PublicOrigin: "https://platform.example", AuthProvider: "platform", PreviewVersion: "pv-auth", IdempotencyKey: "keep-registered-auth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Operation.AuthProvider != "keycloak" {
+		t.Fatalf("ordinary update changed registered provider: %q", result.Operation.AuthProvider)
 	}
 }
