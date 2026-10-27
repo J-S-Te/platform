@@ -443,6 +443,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.validateEnabledServices(ctx); err != nil {
 		return err
 	}
+	if err := target.initializeInheritedRuntimeExtensions(input); err != nil {
+		return err
+	}
 	if err := target.validateDeploymentFiles(false, true); err != nil {
 		return err
 	}
