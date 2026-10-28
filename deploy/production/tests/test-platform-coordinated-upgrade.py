@@ -39,6 +39,7 @@ require_mysql_ready() { :; }
 diagnose_mysql_container() { :; }
 backup_database_if_initialized() { backup_database "$@"; }
 provision_iam_import_client() { :; }
+initialize_platform_audit_hash_key() { log audit-key; [[ "$FAIL_PHASE" != audit-key ]]; }
 ensure_temporal_application_network() { :; }
 prepare_managed_public_proxy_image() { log proxy-prefetch; [[ "$FAIL_PHASE" != proxy ]]; }
 wait_for_health() { log api-health; }
@@ -112,6 +113,7 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
     calls, _ = run()
     assert calls.index('migrate') < calls.index('agent') < calls.index('api') < calls.index('profiles')
     assert calls.index('migrate') < calls.index('stop-old-api') < calls.index('agent')
+    assert calls.index('migrate') < calls.index('audit-key') < calls.index('stop-old-api')
     assert 'digest-subsystem-provisioner' in calls
     assert 'digest-platform-api' in calls and 'digest-platform-worker' in calls
     assert calls.index('worker-stable') < calls.index('profiles')
@@ -122,11 +124,13 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
     run({'MARKER_IMAGE': image})
     calls, old = run({'PLATFORM_IMAGE': 'old-image'}, succeeds=False)
     assert 'legacy Agent: unknown fields' in old.stderr and 'api' not in calls
-    for phase in ('backup', 'proxy', 'migrate', 'agent', 'api', 'profiles', 'digest', 'stability'):
+    for phase in ('backup', 'proxy', 'migrate', 'audit-key', 'agent', 'api', 'profiles', 'digest', 'stability'):
         calls, _ = run({'FAIL_PHASE': phase}, succeeds=False)
         if phase in ('migrate', 'agent'):
             assert 'api' not in calls
         if phase == 'migrate':
+            assert 'agent' not in calls and 'stop-old-api' not in calls
+        if phase == 'audit-key':
             assert 'agent' not in calls and 'stop-old-api' not in calls
         if phase == 'api':
             assert 'runtime-diagnostics' in calls, 'candidate logs must be captured before rollback'
