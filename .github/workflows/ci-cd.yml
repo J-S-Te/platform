@@ -179,6 +179,7 @@ jobs:
           platform_release_paths='^\.github/workflows/ci-cd\.yml$'
           platform_release_paths+='|^deploy/production/docker-compose\.yml$'
           platform_release_paths+='|^deploy/production/bin/platform-mysql-command\.py$'
+          platform_release_paths+='|^deploy/production/bin/deploy-service\.sh$'
           backend_paths='^(cmd|internal|migrations|scripts)/'
           backend_paths+='|^(Dockerfile|go\.mod|go\.sum|docker-entrypoint\.sh)$'
           if grep -Eq "$platform_release_paths" <<<"$changed" \

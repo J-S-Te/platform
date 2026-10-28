@@ -890,6 +890,24 @@ provision_iam_import_client() {
   echo '人员导入文件网关客户端已初始化；凭据已写入受保护的 .env。'
 }
 
+# dump_platform_runtime_debug 收集候选 API/Worker 在回退前的健康状态与错误日志。
+# 参数：无，使用当前发布的 Compose 与服务标识。
+# 返回值：无；诊断失败不覆盖原始发布错误，不读取容器环境或运行密钥。
+dump_platform_runtime_debug() {
+  local runtime_service container_id
+  compose logs --no-color --tail 120 platform-api platform-worker >&2 || true
+  for runtime_service in platform-api platform-worker; do
+    container_id="$(compose ps -a -q "$runtime_service" 2>/dev/null || true)"
+    [[ -n "$container_id" ]] || continue
+    docker inspect --format \
+      '服务={{.Name}} 状态={{.State.Status}} 退出码={{.State.ExitCode}} 重启={{.RestartCount}} OOM={{.State.OOMKilled}} 健康={{json .State.Health}}' \
+      "$container_id" >&2 || true
+  done
+}
+
+# deploy_platform 备份并迁移数据库，再升级同版本平台控制面与后台进程。
+# 参数：无，使用已校验的候选镜像及当前部署目录。
+# 返回值：成功为零；备份、迁移、配置、镜像或健康校验失败则中止发布。
 deploy_platform() {
 	local file_gateway_root file_gateway_db_name file_gateway_container file_gateway_health
   prepare_managed_public_proxy_image || return 1
@@ -964,7 +982,10 @@ deploy_platform() {
   fi
   verify_subsystem_provisioner_config_consistency "$(compose ps -q subsystem-provisioner)" || return
   verify_service_image compose subsystem-provisioner "$image_ref" || return 1
-  compose up -d --force-recreate --no-deps --wait --wait-timeout 120 platform-api platform-worker || return
+  if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 platform-api platform-worker; then
+    dump_platform_runtime_debug
+    return 1
+  fi
   wait_for_health "http://127.0.0.1:$(port_value PLATFORM_API_PORT 18080)/readyz" || {
     # 兜底：新镜像首启异常时强制重建一次并再次等待，避免平台 API 停留在宕机状态。
     echo "platform-api 未通过健康检查，强制重建一次后重试" >&2
