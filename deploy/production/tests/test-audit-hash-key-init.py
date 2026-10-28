@@ -75,14 +75,18 @@ with tempfile.TemporaryDirectory(prefix='audit-key-publish-') as directory:
     root = Path(directory)
     (root / 'backups').mkdir()
     env_file, backup = root / '.env', root / 'backups/platform-audit-hash-key.initial.env'
-    env_file.write_text('APP_ENV=production\n')
+    env_file.write_text('APP_ENV=production\nMYSQL_DATABASE=audit_fixture\n')
     env_file.chmod(0o600)
     harness = '''set -Eeuo pipefail
 deploy_dir="$1"
 runtime_file="$deploy_dir/.env"
 script_dir="$2"
+env_value() { sed -n "s/^$1=//p" "$runtime_file"; }
 mysql_query_scalar() {
   [[ "$1" == platform-mysql && "$2" == *"audit_event"* && "$2" == *"SHA-256"* ]] || return 9
+  [[ "$2" == *"audit_fixture.audit_event"* ]] || return 9
+  [[ "$2" == *"audit_fixture.audit_archive_item"* ]] || return 9
+  [[ "$2" == *"audit_fixture.audit_event_chain"* ]] || return 9
   [[ "$2" == *"audit_archive_item"* && "$2" == *"purged_at IS NOT NULL"* ]] || return 9
   [[ "$2" == *"audit_event_chain"* ]] || return 9
   [[ "${TEST_HISTORY}" != fail ]] || return 8
