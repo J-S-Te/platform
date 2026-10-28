@@ -59,6 +59,7 @@ jobs:
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 deploy/production/tests/test-customer-deploy-result.py
           python3 deploy/production/tests/test-platform-coordinated-upgrade.py
+          python3 -B deploy/production/tests/test-audit-hash-key-init.py
           python3 deploy/production/tests/test-managed-deployment-defaults.py
           python3 deploy/production/tests/test-frontend-network.py
           python3 deploy/production/tests/test-public-proxy-prefetch.py

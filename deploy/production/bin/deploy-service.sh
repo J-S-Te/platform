@@ -890,6 +890,33 @@ provision_iam_import_client() {
   echo '人员导入文件网关客户端已初始化；凭据已写入受保护的 .env。'
 }
 
+# initialize_platform_audit_hash_key 补齐审计必开模式所需密钥且保护历史可验证性。
+# 参数：无，使用当前发布的运行配置与平台数据库。
+# 返回值：已配置或安全初始化返回零；缺失历史密钥、备份或查询失败则阻断发布。
+initialize_platform_audit_hash_key() {
+  local helper="$script_dir/initialize-audit-hash-key.py" check_status history history_query
+  if python3 "$helper" --env "$runtime_file" --check; then
+    return 0
+  else
+    check_status=$?
+  fi
+  [[ "$check_status" == 3 ]] || return 1
+  history_query="SELECT (EXISTS(SELECT 1 FROM audit_event WHERE "
+  history_query+="UPPER(TRIM(COALESCE(payload_hash_alg, ''))) NOT IN ('', 'SHA-256')) OR "
+  # 已清理归档或链头仍可能依赖旧密钥；无法从活动行证明无历史时不能自动换钥。
+  history_query+="EXISTS(SELECT 1 FROM audit_archive_item WHERE purged_at IS NOT NULL) OR "
+  history_query+="EXISTS(SELECT 1 FROM audit_event_chain))"
+  history="$(mysql_query_scalar platform-mysql "$history_query")" || return 1
+  [[ "$history" == 0 || "$history" == 1 ]] || {
+    echo '无法核验历史审计摘要，拒绝初始化密钥' >&2
+    return 1
+  }
+  python3 "$helper" --env "$runtime_file" \
+    --backup "$deploy_dir/backups/platform-audit-hash-key.initial.env" \
+    --has-hmac-history "$history" || return 1
+  echo '审计密钥已完成受保护备份与运行配置写入；未输出密钥内容'
+}
+
 # dump_platform_runtime_debug 收集候选 API/Worker 在回退前的健康状态与错误日志。
 # 参数：无，使用当前发布的 Compose 与服务标识。
 # 返回值：无；诊断失败不覆盖原始发布错误，不读取容器环境或运行密钥。
@@ -944,6 +971,7 @@ deploy_platform() {
   migration_state=attempted
   compose run --rm --no-deps platform-migrate ./migrate || return
   migration_state=completed
+  initialize_platform_audit_hash_key || return 1
   provision_iam_import_client || return 1
   ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout 180 keycloak temporal || return

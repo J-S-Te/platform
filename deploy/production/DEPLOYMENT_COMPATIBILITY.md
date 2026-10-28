@@ -71,3 +71,17 @@ Shell 发布具备对应镜像／指针回退分支，但生产 Agent 更新不�
 声明由 `bin/build-deployment-compatibility.py` 在资产构建时根据当前迁移文件生成，`migration_set_sha256` 与迁移内容绑定；上一程序兼容性只能从独立的 `uip.deployment-compatibility-evidence/v1` 证据文件读取，证据哈希不匹配时自动回落 `unknown`，不接受操作员手写 compatible。
 
 `bin/deploy.sh plan --action upgrade ...` 会读取该声明：上一程序兼容性未知或明确不兼容时普通升级阻断；显式选择前向恢复时仍要求完整备份摘要、迁移目标、审核人、批准时间和经验证步骤。`tests/test-deployment-compatibility.py` 将声明与当前迁移文件名/内容哈希 `migration_set_sha256` 绑定，防止只改声明或漏改迁移；真实发布批次仍需提供经测试的兼容性证据，不能把 `unknown` 手工改成 `compatible` 当作证明。
+
+## 审计摘要密钥初始化
+
+平台审计必开时，API 与 Worker 均要求 `PLATFORM_AUDIT_HASH_KEY`，为标准 base64
+编码、解码后至少 32 字节的随机密钥。平台发布在数据库迁移完成后、停止旧 API 前校验
+运行配置；已有有效密钥复用，不自动轮换。
+
+仅当密钥缺失且审计表不存在非旧 SHA-256 算法的历史数据、已清理归档或链头时，发布入口才生成 32 字节
+随机密钥，先将其写入 `backups/platform-audit-hash-key.initial.env`（0600）并同步、读回
+校验，再原子写入受保护的 `.env`。备份须沿用现有加密存储与访问控制要求妥善保存。
+重试复用同一初始化备份；密钥格式错误、备份不安全、历史查询失败均停止发布。
+
+已有 HMAC 或其他非旧算法历史而缺少密钥时，必须从受控备份恢复原密钥；不能生成新钥、
+切换回无键摘要或关闭审计来恢复启动。该流程不重算、改写已有审计事件或历史迁移。
