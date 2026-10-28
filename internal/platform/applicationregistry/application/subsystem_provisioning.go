@@ -289,9 +289,20 @@ type SubsystemProvisioningTarget struct {
 	AllowedServiceBindings []string
 }
 
+// SubsystemAccessDeploymentReceipt 仅携带部署完成事实的绑定信息，不包含运行凭据。
+type SubsystemAccessDeploymentReceipt struct {
+	TenantID         string
+	OperationID      string
+	ApplicationCode  string
+	Environment      string
+	Generation       uint64
+	ManifestChecksum string
+}
+
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
 // 进程内接口与受限 Unix socket 到达部署 Agent，不得写日志、返回浏览器或出现在命令行参数中。
 type SubsystemProvisioningInput struct {
+	AccessReceipt    *SubsystemAccessDeploymentReceipt `json:"access_receipt,omitempty"`
 	TenantID         string
 	ApplicationID    string
 	EnvironmentID    string

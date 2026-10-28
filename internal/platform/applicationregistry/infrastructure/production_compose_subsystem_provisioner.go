@@ -357,6 +357,9 @@ func (target *productionComposeTarget) Preflight(ctx context.Context, input appl
 // 参数：ctx 为部署上下文，input 为服务端批准的部署与凭据绑定。
 // 返回值：备份、配置或部署失败返回错误，成功返回 nil。
 func (target *productionComposeTarget) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	if err := validateAccessReceipt(input); err != nil {
+		return err
+	}
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
 	if err := target.validateProvisioningInput(input); err != nil {
@@ -400,7 +403,10 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 	if err := target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...); err != nil {
 		return err
 	}
-	return target.checkRuntimeProjection(operationContext)
+	if err := target.checkRuntimeProjection(operationContext); err != nil {
+		return err
+	}
+	return writeAccessDeploymentReceipt(target.config.DeployRoot, input)
 }
 
 func (target *productionComposeTarget) checkReleaseIntegrity(ctx context.Context, expected string) error {
@@ -421,6 +427,9 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 		// 受信控制面已提供完整的一次性初始凭据；Provision 会在创建任何运行文件前完成
 		// 全量校验。
 		return target.Provision(ctx, input)
+	}
+	if err := validateAccessReceipt(input); err != nil {
+		return err
 	}
 	target.mutex.Lock()
 	defer target.mutex.Unlock()
@@ -473,7 +482,10 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 	if err := target.deployAndRefreshLocked(operationContext, productionProvisioningSecrets(input)...); err != nil {
 		return err
 	}
-	return target.checkRuntimeProjection(operationContext)
+	if err := target.checkRuntimeProjection(operationContext); err != nil {
+		return err
+	}
+	return writeAccessDeploymentReceipt(target.config.DeployRoot, input)
 }
 
 func (target *productionComposeTarget) checkRuntimeProjection(ctx context.Context) error {
@@ -939,9 +951,9 @@ func (target *productionComposeTarget) selectedRuntimeServices() []string {
 	return services
 }
 
-// writeRuntimeFixedValues 写入清单固定值、生成密钥和可安全更新的运行时绑定。
-// 应用身份绑定是非敏感控制面数据，每次更新都应对齐，防止手工创建的旧运行文件保留过期
-// application ID；浏览器 OAuth 密钥仅在 AuthenticationRuntimeUpdate 明确携带替换值时覆盖。
+// writeRuntimeFixedValues 更新清单值及受控身份，保留符合条件的一次性秘密。
+// 参数：input 为目标环境及本次受控交付的凭据。
+// 返回值：全部配置核验并写入成功时为空，否则返回错误。
 func (target *productionComposeTarget) writeRuntimeFixedValues(input application.SubsystemProvisioningInput) error {
 
 	files := target.selectedRuntimeFiles()
@@ -1030,7 +1042,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					values[key] = value
 					continue
 				}
-				if isP1ProductionServiceBinding(source) {
+				if strictProductionServiceBinding(input, source) {
 					value, err := resolveProductionBinding(input, source)
 					if err != nil {
 						return err
@@ -1089,6 +1101,9 @@ func isPublicRuntimeBinding(source string) bool {
 	}
 }
 
+// writeRuntimeConfiguration 从正式清单生成完整运行文件并校验机器身份。
+// 参数：input 为目标应用环境及本次签发的身份和密钥。
+// 返回值：文件写入成功时为空；配置或凭据不完整时拒绝。
 func (target *productionComposeTarget) writeRuntimeConfiguration(input application.SubsystemProvisioningInput) error {
 
 	files := target.selectedRuntimeFiles()
@@ -1115,7 +1130,7 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 			if resolveErr != nil {
 				return resolveErr
 			}
-			if isP1ProductionServiceBinding(source) && strings.HasSuffix(source, ".client_secret") && !usableProductionCredential(value) {
+			if strictProductionServiceBinding(input, source) && strings.HasSuffix(source, ".client_secret") && !usableProductionCredential(value) {
 				return provisioningError("new service credential delivery requires controlled RETRY")
 			}
 			values[key] = value
@@ -1136,7 +1151,13 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 	return updateProductionRuntimeGroup(updates)
 }
 
+// resolveProductionBinding 将受控输入解析为运行配置并核验关联身份。
+// 参数：input 为目标环境及已登记凭据，source 为清单绑定来源。
+// 返回值：绑定值；身份不匹配或来源不受支持时返回错误。
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
+	if strings.HasPrefix(source, "related_service.settlement.settlement_project_reference_read.") {
+		return resolveSettlementReferenceIdentity(input, source)
+	}
 	if strings.HasPrefix(source, "related_service.contract_management.settlement_contract_ingest.") {
 		if input.ApplicationCode != "settlement" {
 			return "", provisioningError("related service binding does not match receiver")
@@ -1239,13 +1260,13 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 	parts := strings.Split(source, ".")
 	if len(parts) == 3 && parts[0] == "service" {
 		credential, ok := input.ServiceCredential(parts[1])
-		if isP1ProductionServiceBinding(source) {
+		if strictProductionServiceBinding(input, source) {
 			credential, ok = input.RegisteredServiceCredential(parts[1])
 		}
 		if !ok {
 			return "", provisioningError("production subsystem service credential is incomplete")
 		}
-		if isP1ProductionServiceBinding(source) {
+		if strictProductionServiceBinding(input, source) {
 			if err := validateP1ServiceCredential(input, parts[1], credential.OAuthClient); err != nil {
 				return "", err
 			}

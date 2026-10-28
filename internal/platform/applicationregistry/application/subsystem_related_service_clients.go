@@ -36,13 +36,19 @@ func NewRelatedServiceClientsResolver(registry SubsystemRelatedApplicationRegist
 	return &RelatedServiceClientsResolver{registry: registry, clients: clients}, nil
 }
 
-// Resolve 返回该应用需要的相关服务客户端；不需要时返回 nil（不是错误）。
-// 只读取已持久化的元数据，**不会获得任何来源明文凭据**。
+// Resolve 读取接收应用所需的已登记来源身份，不读取来源密钥。
+// 参数：ctx 控制读取，tenantID、applicationCode和environment限定接收环境。
+// 返回值：同租户应用环境的最小权限身份；缺失或漂移返回错误。
 func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tenantID, applicationCode, environment string) ([]RelatedSubsystemServiceClient, error) {
-	if strings.TrimSpace(applicationCode) != "settlement" {
+	source, purpose, suffix, scope := "contract_management", ServiceCredentialSettlementContractIngest, "settlement-integration", "settlement.contract.ingest"
+	switch strings.TrimSpace(applicationCode) {
+	case "settlement":
+	case "project_management":
+		source, purpose, suffix, scope = "settlement", ServiceCredentialSettlementProjectReferenceRead, "project-reference", "settlement.project_reference.read"
+	default:
 		return nil, nil
 	}
-	applicationID, environmentID, err := resolver.registry.ResolveApplicationEnvironment(ctx, tenantID, "contract_management", environment)
+	applicationID, environmentID, err := resolver.registry.ResolveApplicationEnvironment(ctx, tenantID, source, environment)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRelatedServiceClientUnavailable, err)
 	}
@@ -50,7 +56,7 @@ func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tena
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRelatedServiceClientUnavailable, err)
 	}
-	name := "contract_management-" + environment + "-settlement-integration"
+	name := source + "-" + environment + "-" + suffix
 	var found *OAuthClientView
 	for index := range clients {
 		client := clients[index]
@@ -71,12 +77,12 @@ func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tena
 		!strings.EqualFold(canonical.Status, "ACTIVE") || canonical.ClientType != "service" ||
 		canonical.TokenAuthMethod != "client_secret_basic" ||
 		!sameStringSetValues(canonical.GrantTypes, []string{"client_credentials"}) ||
-		!sameStringSetValues(canonical.Scopes, []string{"settlement.contract.ingest"}) {
+		!sameStringSetValues(canonical.Scopes, []string{scope}) {
 		return nil, ErrRelatedServiceClientUnavailable
 	}
 	return []RelatedSubsystemServiceClient{{
-		ApplicationCode: "contract_management", ApplicationID: applicationID, Environment: environment,
-		EnvironmentID: environmentID, Purpose: ServiceCredentialSettlementContractIngest, Client: canonical,
+		ApplicationCode: source, ApplicationID: applicationID, Environment: environment,
+		EnvironmentID: environmentID, Purpose: purpose, Client: canonical,
 	}}, nil
 }
 

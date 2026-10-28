@@ -38,6 +38,10 @@ func (s testSigner) Sign(p runtime.PlatformSnapshot) (string, error) {
 func (s testSigner) Verify(raw string, b runtime.Binding) (runtime.PlatformSnapshot, error) {
 	return runtime.VerifySnapshot(raw, b, map[string]ed25519.PublicKey{"test-platform": s.pub}, s.vendor)
 }
+
+// TestMySQLCoordinationLifecycle 用途：验证隔离数据库中的登记、双修订激活及自然确认推进。
+// 参数：t 为测试上下文，DSN必须是显式隔离库。
+// 返回值：无。
 func TestMySQLCoordinationLifecycle(t *testing.T) {
 	dsn := os.Getenv("LICENSE_TEST_DSN")
 	if dsn == "" {
@@ -203,7 +207,13 @@ func TestMySQLCoordinationLifecycle(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = s.BeginActivation(ctx, spec.Application, status.Revision, actor); e != nil {
+	if err := s.BeginActivationChecked(ctx, spec.Application, status.Revision, status.DeploymentRevision+1, actor); !errors.Is(err, ErrConflict) {
+		t.Fatal("mismatched license confirmation accepted", err)
+	}
+	if current, err := s.Status(ctx, spec.Application); err != nil || current.State != runtime.Pending {
+		t.Fatal("rejected confirmation changed enforcement", err)
+	}
+	if e = s.BeginActivationChecked(ctx, spec.Application, status.Revision, status.DeploymentRevision, actor); e != nil {
 		t.Fatal(e)
 	}
 	snapshot, e := s.Snapshot(machine(spec), spec.ServiceID)

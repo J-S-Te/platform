@@ -25,8 +25,8 @@ import (
 const defaultPlatformAuditApplicationCode = "platform"
 const defaultPlatformAuditEnvironmentCode = "dev"
 
-// maxPlatformAuditBufferedResponseBytes 是必开模式下单请求响应缓冲上限：超过即降级为
-// 旧行为（write-through）并告警，避免异常大的响应长期占用内存。
+// maxPlatformAuditBufferedResponseBytes 是必开模式下单请求响应的内存缓冲上限：超过即溢写到
+// 临时文件继续扣留（见 platformAuditBuffer），不再放行直写，避免异常大的响应长期占用内存。
 const maxPlatformAuditBufferedResponseBytes = 64 << 10
 
 // AuditSource 标识服务端自行生成审计事件时使用的应用环境配置。
@@ -79,8 +79,13 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			}
 		}
 		// handler panic 展平时先恢复真实 writer，外层 gin.Recovery 才能把 500 写出去；
-		// 缓冲中的半成品响应被直接丢弃，不会被当成成功提交。
-		defer func() { context.Writer = origWriter }()
+		// 缓冲中的半成品响应被直接丢弃，不会被当成成功提交；溢写的临时文件一并清理。
+		defer func() {
+			context.Writer = origWriter
+			if buffered != nil {
+				buffered.dispose()
+			}
+		}()
 		// 必须先执行后续链，才能采集最终路由模板、HTTP 状态和授权拒绝结果。
 		context.Next()
 
@@ -105,6 +110,13 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		if statusCode == 0 {
 			statusCode = http.StatusOK
 		}
+		// 响应超过硬上限时无法在审计确认前完整扣留：按失败如实记录（保留业务 handler 的状态码
+		// 供追溯），并在下方拒绝请求——绝不记录“成功”却把 503 交给客户端，也绝不放行直写。
+		oversized := buffered != nil && buffered.oversized
+		handlerStatusCode := statusCode
+		if oversized {
+			statusCode = http.StatusServiceUnavailable
+		}
 		now := time.Now().UTC()
 		// 统一审计来源协议：登录地址取会话创建时固定的来源，操作地址每次请求重新解析。
 		// 两者分别落库，不能再像旧实现那样用其中一个替代另一个——否则同一会话换网络后
@@ -126,6 +138,10 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			"method":      context.Request.Method,
 			"path":        route,
 			"status_code": statusCode,
+		}
+		if oversized {
+			metadata["audit_rejection"] = "AUDIT_RESPONSE_TOO_LARGE"
+			metadata["handler_status_code"] = handlerStatusCode
 		}
 		if loginIPValue != "" && clientIP != "" && clientIP != loginIPValue {
 			// 历史字段：只在“登录后换了网络”时保留差异线索，供旧版审计页读取；
@@ -169,15 +185,22 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		}
 		if _, err := recorder.Ingest(context.Request.Context(), principal.Tenant.ID, input); err != nil {
 			logger.Error("write platform audit event", "error", err, "request_id", input.RequestID, "path", route)
-			if buffered != nil && !buffered.overflowed {
+			if buffered != nil {
 				// 必开模式（AUD-2026-005/SEC-D4b）：审计事件写入失败必须拒绝请求，
-				// 丢弃缓冲的业务响应并返回 503，错误码与子系统保持一致。
+				// 丢弃扣留的业务响应并返回 503，错误码与子系统保持一致。响应已溢写到
+				// 临时文件时同样成立——扣留不再因体积放弃，因此这里没有直写例外。
 				context.Writer = origWriter
 				httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_WRITE_REJECTED", "审计记录写入失败，操作未被确认", nil))
 			}
 			return
 		}
-		if buffered != nil && !buffered.overflowed {
+		if oversized {
+			// 审计已如实记录“响应超限、未被确认”，客户端同样不能拿到成功。
+			context.Writer = origWriter
+			httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_RESPONSE_TOO_LARGE", "响应超过审计扣留上限，操作未被确认", nil))
+			return
+		}
+		if buffered != nil {
 			buffered.flushTo(origWriter)
 		}
 	}

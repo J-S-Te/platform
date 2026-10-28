@@ -256,6 +256,7 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	if strings.EqualFold(cfg.SubsystemOnboarding.Mode, "production") {
 		configurationTracker.SetBuiltinRuntimeSource(infrastructure.BuiltinRuntimeComponentCatalog{}, provisioner)
 	}
+	configurationTracker.SetRuntimeRegistrationCheck(provisioner)
 	deploymentPort.SetConfigurationEvidence(configurationTracker)
 	if err := configureSubsystemAccessRuntimeEnrollment(cfg, database, oauthService, provisioner, deploymentPort); err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
@@ -31,13 +32,16 @@ type RuntimeHandler struct {
 	service     runtimeCoordinator
 	evidence    EvidenceSource
 	environment string
+	state       licenseStateReader
+	observer    RuntimeObserver
+	now         func() time.Time
 }
 
 func NewRuntimeHandler(service runtimeCoordinator) (*RuntimeHandler, error) {
 	if service == nil {
 		return nil, domain.ErrInvalid
 	}
-	return &RuntimeHandler{service: service}, nil
+	return &RuntimeHandler{service: service, now: time.Now}, nil
 }
 
 // ConfigureEvidence 挂接已经过约束的部署 Agent 证据来源；绝不接受浏览器提供的采集器
@@ -174,18 +178,36 @@ func (h *RuntimeHandler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, 200, "授权执行状态", out)
 }
+
+// BeginActivation 用途：接收显式激活确认，并将新客户端的许可修订交给原子校验。
+// 参数：w 为响应，r 为具有管理权限的请求。
+// 返回值：无；旧请求契约兼容，新确认绑定不允许静默降级。
 func (h *RuntimeHandler) BeginActivation(w http.ResponseWriter, r *http.Request) {
 	actor, ok := principal(w, r, true)
 	if !ok {
 		return
 	}
 	var in struct {
-		ExpectedRevision uint64 `json:"expected_revision"`
+		ExpectedRevision        uint64  `json:"expected_revision"`
+		ExpectedLicenseRevision *uint64 `json:"expected_license_revision,omitempty"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if err := h.service.BeginActivation(r.Context(), applicationPath(r), in.ExpectedRevision, actor); err != nil {
+	var err error
+	if in.ExpectedLicenseRevision != nil {
+		checked, ok := h.service.(interface {
+			BeginActivationChecked(context.Context, string, uint64, uint64, domain.Actor) error
+		})
+		if !ok {
+			httpresponse.WriteError(w, r, 503, httperror.New("LICENSE_ACTIVATION_UNSUPPORTED", "当前服务不支持绑定许可修订的激活，请同步升级控制面", nil))
+			return
+		}
+		err = checked.BeginActivationChecked(r.Context(), applicationPath(r), in.ExpectedRevision, *in.ExpectedLicenseRevision, actor)
+	} else {
+		err = h.service.BeginActivation(r.Context(), applicationPath(r), in.ExpectedRevision, actor)
+	}
+	if err != nil {
 		runtimeError(w, r, err)
 		return
 	}

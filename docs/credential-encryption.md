@@ -67,6 +67,7 @@ go run ./cmd/credential-keygen -dir ./data/keys -name credential-keyring
 
 - 后端协议模块、challenge、密钥环、HTTP 封套、登录/改密/账号创建/员工创建/批量导入/初始化/重置路由适配已接入。
 - 前端 `src/modules/shared/credential/` 提供协议、challenge、RSA/AES 和 JSON/multipart 请求封装。
+- Host CLI：`scripts/lib/subsystem-http.sh` 在平台提供 challenge 端点时自动走 `uip-credential/v1` 加密登录（`scripts/lib/credential-envelope.py`，纯 Python 标准库，无额外依赖）；challenge 不可用的旧平台回退到受传输校验保护的明文登录。
 - 前端登录和改密 API 已按 `VITE_CREDENTIAL_ENCRYPTION_MODE` 切换；IAM 创建账号、员工、批量导入、初始化/重置已接入。
 
 ## 上线门禁

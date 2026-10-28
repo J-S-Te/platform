@@ -153,10 +153,54 @@ def read_base_image_evidence(path: str) -> dict[str, list[str]]:
     return mapping
 
 
+def dockerfile_base_refs(raw: str, resolved: list[str] | None = None) -> list[tuple[int, str]]:
+    """Parse external FROM inputs once for preflight and post-build evidence."""
+    aliases: set[str] = set()
+    args: dict[str, str] = {}
+    refs = []
+    pending = ""
+    first_line = 0
+    in_stage = False
+    for number, physical in enumerate(raw.splitlines(), 1):
+        if not pending:
+            first_line = number
+        if not physical.strip() or physical.lstrip().startswith("#"):
+            continue
+        pending += physical.strip()
+        if pending.endswith("\\"):
+            pending = pending[:-1] + " "
+            continue
+        line, pending = pending, ""
+        arg = re.match(r"ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", line, re.I)
+        if arg and not in_stage:
+            args[arg.group(1)] = arg.group(2) or ""
+            continue
+        match = re.match(r"FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*$", line, re.I)
+        if not match:
+            if re.match(r"FROM\b", line, re.I):
+                refs.append((first_line, "<无法解析 FROM>"))
+            continue
+        in_stage = True
+        ref, alias = match.groups()
+        if ref.lower() != "scratch" and ref.lower() not in aliases:
+            if ref in ("${BASE_IMAGE}", "$BASE_IMAGE") and resolved:
+                refs.extend((first_line, item) for item in resolved)
+            else:
+                ref = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                             lambda m: args.get(m.group(1) or m.group(2), m.group(0)), ref)
+                refs.append((first_line, ref))
+        if alias:
+            aliases.add(alias.lower())
+    if not in_stage:
+        refs.append((1, "<没有 FROM 构建阶段>"))
+    if pending:
+        refs.append((first_line, "<未结束的 FROM/指令续行>"))
+    return refs
+
+
 def collect_dockerfiles(workspace: Path, packages: list[dict], base_evidence: dict[str, list[str]] | None = None) -> tuple[list[dict], bool]:
     base_evidence = base_evidence or {}
-    evidence: list[dict] = []
-    all_pinned = True
+    evidence = []
     seen_paths: set[str] = set()
     for package in packages:
         for relative in DOCKERFILES[package["component"]]:
@@ -166,46 +210,11 @@ def collect_dockerfiles(workspace: Path, packages: list[dict], base_evidence: di
             path = workspace / relative
             if path.is_symlink() or not path.is_file():
                 raise EvidenceError(f"缺少构建 Dockerfile：{relative}")
-            raw = path.read_text(encoding="utf-8")
-            base_refs: list[str] = []
-            aliases: set[str] = set()
-            for line in raw.splitlines():
-                match = FROM_RE.match(line)
-                if not match:
-                    continue
-                ref = match.group(1)
-                if ref.lower() == "scratch":
-                    continue
-                if ref.lower() in aliases:
-                    # 之前阶段的别名表示内部构建阶段，不是外部仓库基础镜像。
-                    alias_match = re.search(r"\s+AS\s+(\S+)", line, re.IGNORECASE)
-                    if alias_match:
-                        aliases.add(alias_match.group(1).lower())
-                    continue
-                if ref.startswith("$"):
-                    resolved = base_evidence.get(relative, [])
-                    if not resolved:
-                        base_refs.append(ref)
-                        all_pinned = False
-                    else:
-                        for resolved_ref in resolved:
-                            base_refs.append(resolved_ref)
-                            if "@sha256:" not in resolved_ref:
-                                all_pinned = False
-                else:
-                    base_refs.append(ref)
-                    if "@sha256:" not in ref:
-                        all_pinned = False
-                alias_match = re.search(r"\s+AS\s+(\S+)", line, re.IGNORECASE)
-                if alias_match:
-                    aliases.add(alias_match.group(1).lower())
-            evidence.append({
-                "path": relative,
-                "sha256": sha256_file(path),
-                "from": base_refs,
-                "all_base_refs_pinned": all("@sha256:" in ref for ref in base_refs),
-            })
-    return evidence, all_pinned and bool(evidence)
+            refs = [ref for _, ref in dockerfile_base_refs(path.read_text(encoding="utf-8"), base_evidence.get(relative))]
+            pinned = all(re.fullmatch(r"[^\s$]+@sha256:[0-9a-f]{64}", ref) for ref in refs)
+            evidence.append({"path": relative, "sha256": sha256_file(path), "from": refs,
+                             "all_base_refs_pinned": pinned})
+    return evidence, bool(evidence) and all(item["all_base_refs_pinned"] for item in evidence)
 
 
 def collect_source_index(output_root: Path, workspace: Path, configured: str) -> dict:

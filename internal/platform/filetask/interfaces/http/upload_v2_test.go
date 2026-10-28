@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// TestUploadPoliciesUseStableLocalNamespaces 用途：核对财务附件用途及存储命名空间。
+// 参数：t为测试上下文。
+// 返回值：无，用途缺失、越界或策略不完整时失败。
 func TestUploadPoliciesUseStableLocalNamespaces(t *testing.T) {
 	expected := map[string]string{
 		"platform.iam.user-import":          "platform/iam-user-import",
@@ -19,6 +22,7 @@ func TestUploadPoliciesUseStableLocalNamespaces(t *testing.T) {
 		"project.report":                    "project/report",
 		"project.capability.import":         "project/capability-import",
 		"project.detection-category.import": "project/detection-category-import",
+		"settlement.receipt.document":       "settlement/receipt-document",
 		"settlement.invoice.document":       "settlement/invoice-document",
 	}
 	for key, path := range expected {

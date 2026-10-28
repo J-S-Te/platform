@@ -103,6 +103,8 @@ services:
       MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
       MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${FILE_GATEWAY_DB_ROOT_PASSWORD:-REPLACE_WITH_FILE_GATEWAY_DB_ROOT_PASSWORD}
+    command:
+      - --log-bin-trust-function-creators=1
     volumes:
       - file_gateway_mysql_local_data:/var/lib/mysql
     networks: [default]
@@ -161,6 +163,8 @@ services:
       # 不再以文档化占位口令启动（与生产 H5 同做法）。
       MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set (run scripts/docker-local.sh)}
       MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD:?KEYCLOAK_DB_ROOT_PASSWORD must be set (run scripts/docker-local.sh)}
+    command:
+      - --log-bin-trust-function-creators=1
     volumes:
       - keycloak_mysql_local_data:/var/lib/mysql
     healthcheck:
@@ -211,6 +215,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - mysql_local_data:/var/lib/mysql
     healthcheck:
@@ -448,6 +453,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - settlement_mysql_local_data:/var/lib/mysql
     healthcheck:
@@ -559,6 +565,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - contract_mysql_local_data:/var/lib/mysql
       - ../contract_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
@@ -749,6 +756,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - project_mysql_local_data:/var/lib/mysql
       - ../project_management/docker/mysql-init/000_databases.sql:/docker-entrypoint-initdb.d/000_databases.sql:ro
@@ -890,6 +898,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - dashboard_mysql_local_data:/var/lib/mysql
       - ../data_analysis/docker/mysql/init:/docker-entrypoint-initdb.d:ro
@@ -1067,6 +1076,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - customer_mysql_local_data:/var/lib/mysql
     healthcheck:
@@ -1340,6 +1350,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+      - --log-bin-trust-function-creators=1
     volumes:
       - portal_mysql_local_data:/var/lib/mysql
     healthcheck:

@@ -791,6 +791,10 @@ func NewAPI(cfg config.Config) (*API, error) {
 	if source, ok := operational.AccessApplier.(licensehttp.EvidenceSource); ok {
 		operational.RuntimeLicenses.ConfigureEvidence(source, cfg.Audit.EnvironmentCode)
 	}
+	operational.RuntimeLicenses.ConfigureOverview(licenseService, cfg.Audit.EnvironmentCode)
+	if observer, ok := operational.AccessApplier.(licensehttp.RuntimeObserver); ok {
+		operational.RuntimeLicenses.ConfigureObserver(observer)
+	}
 	if operational.SubsystemOnboarding != nil {
 		var approvalSource applicationregistryapplication.RuntimeLicenseApprovalSource
 		if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseApprovalSource); ok {

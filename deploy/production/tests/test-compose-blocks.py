@@ -22,6 +22,42 @@ def trim_blocks(text, disabled):
     return text
 
 
+MYSQL_SERVER_IMAGE = "mysql:8.4"
+LOG_BIN_TRUST_FLAG = "--log-bin-trust-function-creators=1"
+# 该服务用 mysql 客户端执行初始化 SQL，不是 mysqld 服务端，不要求该参数。
+MYSQL_CLIENT_SERVICES = {"data-analysis-metabase-init"}
+EXPECTED_MYSQL_SERVERS = {
+    "keycloak-db", "platform-mysql", "contract-mysql", "file-gateway-mysql",
+    "project-mysql", "customer-mysql", "portal-mysql", "settlement-mysql",
+    "data-analysis-mysql",
+}
+
+
+def assert_mysql_servers_trust_function_creators(services):
+    """MySQL 8.4 默认 log_bin=1，官方镜像创建的 MYSQL_USER 只有本库权限、没有 SUPER；
+    迁移 000130 的 CREATE TRIGGER 会报 ERROR 1419（project_management 000033 的存储过程
+    为一致配置）。以 mysqld 参数集启动的 mysql:8.4 服务端必须显式信任函数创建者；
+    data-analysis-metabase-init 是 mysql 客户端，不属于服务端，不要求该参数。"""
+    servers = set()
+    for name, service in services.items():
+        if service.get("image") != MYSQL_SERVER_IMAGE:
+            continue
+        command = service.get("command")
+        assert not isinstance(command, str), (name, "command must be an argument list")
+        if command is None:
+            # 未写 command 时按镜像默认 CMD 运行 mysqld，无法携带该参数，按缺失处理。
+            raise AssertionError((name, "mysql:8.4 server must set an explicit command with " + LOG_BIN_TRUST_FLAG))
+        assert command, (name, "empty command")
+        if not (command[0] == "mysqld" or command[0].startswith("-")):
+            # 非 mysqld 参数集的 mysql:8.4 服务只允许显式登记为客户端（如 metabase-init）。
+            assert name in MYSQL_CLIENT_SERVICES, (name, command)
+            continue
+        servers.add(name)
+        trusted = [argument for argument in command if argument.startswith("--log-bin-trust-function-creators")]
+        assert trusted == [LOG_BIN_TRUST_FLAG], (name, command)
+    return servers
+
+
 def main():
     text = SOURCE.read_text()
     assert "profiles:" not in text
@@ -57,6 +93,7 @@ def main():
             "CONTRACT_MYSQL_ROOT_PASSWORD": "fixture-not-a-secret",
         })
         checked = 0
+        mysql_servers_checked = set()
         for count in range(len(MODULES) + 1):
             for disabled in itertools.combinations(MODULES, count):
                 candidate = root / "docker-compose.yml"
@@ -67,6 +104,7 @@ def main():
                 assert result.returncode == 0, f"disabled={disabled}: {result.stderr}"
                 model = json.loads(result.stdout)
                 services = model["services"]
+                mysql_servers_checked |= assert_mysql_servers_trust_function_creators(services)
                 for name in MODULES:
                     assert (API[name] in services) == (name not in disabled), (name, disabled)
                 assert "contract-mysql" in services and "temporal" in services
@@ -145,6 +183,8 @@ def main():
                     assert f"path: runtime/license-{component}.env" in text
                 assert services["platform-api"]["environment"]["LICENSE_RUNTIME_PLATFORM_BASE_URL"] == "http://platform-api:8080"
                 checked += 1
+        # 每个可选子系统关闭组合都渲染后，必须覆盖全部预期 MySQL 服务端，防止新增服务漏加参数。
+        assert mysql_servers_checked == EXPECTED_MYSQL_SERVERS, mysql_servers_checked
         env["FILE_GATEWAY_HOST_ROOT"] = str(root / "company-custom-files")
         explicit = subprocess.run(["docker", "compose", "--project-directory", directory,
                                    "--env-file", str(runtime), "-f", str(candidate), "config", "--format", "json"],

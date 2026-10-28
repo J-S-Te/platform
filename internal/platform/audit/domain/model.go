@@ -41,6 +41,33 @@ type Receipt struct {
 	Status  string `json:"status"`
 }
 
+// PayloadHashVerification 是对单条审计事件完整性摘要的重算比对结果（审计 P0 · 防篡改）。
+// Algorithm 取自存储行；ComputedHash 由候选规范输入按同一算法（HMAC 需平台密钥）重算。
+type PayloadHashVerification struct {
+	EventID      string
+	Algorithm    string
+	Matched      bool
+	StoredHash   []byte
+	ComputedHash []byte
+}
+
+// ChainVerification 是哈希链分段校验结果（审计 P1 · 防篡改）。
+// 每行自证：H(chain_prev_hash, payload_hash) == chain_hash（HMAC 需平台密钥）；
+// 窗口内相邻行做序列连续性与链指针连续性校验。链首（sequence=1）额外要求 prev 为全零。
+type ChainVerification struct {
+	TenantID             string
+	ApplicationCode      string
+	EnvironmentCode      string
+	FromSequence         uint64
+	CheckedRows          int
+	LastSequence         uint64
+	Verified             bool
+	MoreRemaining        bool
+	BrokenSequence       uint64
+	BrokenEventID        string
+	Reason               string
+}
+
 // ExportJob 表示一次异步处理的审计导出。
 type ExportJob struct {
 	JobID, Status, DownloadURL string

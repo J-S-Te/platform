@@ -192,13 +192,16 @@ func (r *Repository) PurgeArchivedEvents(ctx context.Context, tenantID, archiveI
 		}
 		now := time.Now().UTC().Truncate(time.Millisecond)
 		for _, item := range items {
+			// 迁移 000130 的 purge_guard 触发器只放行“已被标记 purged_at”的行：
+			// 先标记归档条目（证明归档副本已核验），再删除事件行；同一事务内原子回滚。
+			if err := tx.Model(&archiveItemModel{}).Where("archive_id = ? AND audit_row_id = ? AND occurred_month = ? AND purged_at IS NULL", archiveID, item.AuditRowID, item.OccurredMonth).Update("purged_at", now).Error; err != nil {
+				return err
+			}
 			result := tx.Where("id = ? AND occurred_month = ?", item.AuditRowID, item.OccurredMonth).Delete(&eventModel{})
 			if result.Error != nil {
 				return result.Error
 			}
-			if err := tx.Model(&archiveItemModel{}).Where("archive_id = ? AND audit_row_id = ? AND occurred_month = ? AND purged_at IS NULL", archiveID, item.AuditRowID, item.OccurredMonth).Update("purged_at", now).Error; err != nil {
-				return err
-			}
+			// 返回值语义保持“已标记处理的清单条目数”，而非物理删除行数。
 			purged++
 		}
 		return nil

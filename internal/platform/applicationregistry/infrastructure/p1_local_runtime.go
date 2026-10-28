@@ -25,8 +25,12 @@ func p1CredentialValues(input application.SubsystemProvisioningInput, purpose, i
 	values[idKey] = client.ClientID
 	return nil
 }
+
+// p1LocalRuntimeValues 填充本地受控集成配置并拒绝不完整的机器身份。
+// 参数：input 为登记输入，path 为运行文件，values 接收值，fresh 标识首次接入。
+// 返回值：无错误表示配置完整；否则返回配置或身份错误。
 func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input application.SubsystemProvisioningInput, path string, values map[string]string, fresh bool) error {
-	if input.ApplicationCode != "contract_management" && input.ApplicationCode != "customer_portal" && input.ApplicationCode != "settlement" {
+	if input.ApplicationCode != "contract_management" && input.ApplicationCode != "customer_portal" && input.ApplicationCode != "settlement" && input.ApplicationCode != "project_management" {
 		return nil
 	}
 	current := map[string]string{}
@@ -39,6 +43,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 	} else if !os.IsNotExist(err) {
 		return provisioningError("read business runtime configuration")
 	}
+	if input.ApplicationCode == "project_management" {
+		return projectSettlementReferenceRuntimeValues(input, values)
+	}
 	if input.ApplicationCode == "contract_management" {
 		if err := p1CredentialValues(input, application.ServiceCredentialSettlementContractIngest, "SETTLEMENT_INTEGRATION_CLIENT_ID", "SETTLEMENT_INTEGRATION_CLIENT_SECRET", current, values); err != nil {
 			return err
@@ -50,6 +57,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		return nil
 	}
 	if input.ApplicationCode == "settlement" {
+		if err := settlementRoleRuntimeValues(input, current, values); err != nil {
+			return err
+		}
 		// 本地 dev 的结算子系统以 SETTLEMENT_DEVELOPMENT_AUTH=true 运行，且其 .env.local 不含浏览器
 		// 登录 OIDC 配置（settlement-dev-web 客户端要等接入的「同步 Client」步骤才创建）。结算自身的
 		// 配置校验明确拒绝「开发鉴权 + 平台机器令牌/合同集成」组合（Settlement/internal/config/config.go:159-164）。
@@ -122,6 +132,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 	return updateProductionRuntimeGroup([]runtimeEnvironmentUpdate{{path: workerPath, values: workerValues}})
 }
 
+// validateP1ServiceCredential 检查机器身份归属及用途的单scope约束。
+// 参数：input 为目标登记环境，purpose 为用途，client 为持久身份元数据。
+// 返回值：匹配时为空，否则为拒绝原因。
 func validateP1ServiceCredential(input application.SubsystemProvisioningInput, purpose string, client application.OAuthClientView) error {
 	if input.TenantID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || client.ID == "" {
 		return provisioningError("new business credential registered identity is unavailable")
@@ -129,7 +142,15 @@ func validateP1ServiceCredential(input application.SubsystemProvisioningInput, p
 	if client.TenantID != input.TenantID || client.ApplicationID != input.ApplicationID || client.EnvironmentID != input.EnvironmentID || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || client.Status != "ACTIVE" || len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" {
 		return provisioningError("new business service credential target mismatch")
 	}
-	expectedScope := map[string]string{application.ServiceCredentialSettlementContractIngest: "settlement.contract.ingest", application.ServiceCredentialPortalReportFileRead: "platform:file:portal_report", application.ServiceCredentialPortalReportDownloadIdentityRead: "portal.report.download_identity.read"}[purpose]
+	expectedScope := map[string]string{
+		application.ServiceCredentialSettlementProjectReferenceRead:   "settlement.project_reference.read",
+		application.ServiceCredentialOwnerDirectoryRead:               "owner_directory.read",
+		application.ServiceCredentialNotificationIngest:               "notification.ingest",
+		application.ServiceCredentialAuditIngest:                      "audit.ingest",
+		application.ServiceCredentialSettlementContractIngest:         "settlement.contract.ingest",
+		application.ServiceCredentialPortalReportFileRead:             "platform:file:portal_report",
+		application.ServiceCredentialPortalReportDownloadIdentityRead: "portal.report.download_identity.read",
+	}[purpose]
 	if len(client.Scopes) != 1 || client.Scopes[0] != expectedScope {
 		return provisioningError("new business service credential scope mismatch")
 	}

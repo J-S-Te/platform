@@ -807,7 +807,7 @@ sudo ./系统运维工具.sh
 sudo ./系统运维工具.sh overview
 ```
 
-运维工具只转发到本节下方的原生脚本，不绕过部署锁、不可变镜像、runtime 完整性、备份和健康门禁。可写操作要求精确确认词；数据库恢复、删除子系统、清理环境和删除数据卷故意不出现在普通菜单中。
+运维工具复用本节原生脚本，不绕过不可变镜像、runtime、备份、许可和健康门禁。2026-10-28加固版的 `overview/resources/collect` 只读取元数据；`doctor/status/verify` 底层可能准备网络或创建一次性验收容器，须明确传入 `RUN_DEPLOY_CHECKS`，例如 `sudo ./系统运维工具.sh status contract RUN_DEPLOY_CHECKS`。核心组件升级实际发布，确认词为 `PUBLISH_CORE_UPGRADE`；业务暂存仍为 `STAGE_UPGRADE`。其他变更保留原精确确认词。数据库恢复、删除子系统、清理环境和删除数据卷不出现在普通菜单中。
 
 ```bash
 ./bin/deploy.sh doctor
@@ -818,7 +818,7 @@ sudo ./系统运维工具.sh overview
 docker stats --no-stream
 ```
 
-`doctor` 是只读诊断；`verify` 是健康门禁。前端不可用时从宿主和同网段客户端分别访问平台 `/healthz`，区分容器、宿主防火墙和上游网络问题。
+原生 `doctor/status` 带子系统参数时可经部署阶段检查进入一次性验收，不能一概视为纯只读；`verify` 是健康门禁。需要纯元数据时使用运维工具的 `overview` 或 `collect`。前端不可用时从宿主和同网段客户端分别访问平台 `/healthz`，区分容器、宿主防火墙和上游网络问题。
 
 ### 9.2 单系统升级与回滚
 

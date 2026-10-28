@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -92,6 +93,9 @@ type IngestionHealth struct {
 	UnknownProvenance int64      `json:"unknown_provenance"`
 	LastReceivedAt    *time.Time `json:"last_received_at,omitempty"`
 	OldestUnknownAt   *time.Time `json:"oldest_unknown_at,omitempty"`
+	// DeadLetterPending 是摄取死信表中仍待重放的行数（审计 P1）：平台侧摄取写不进去时
+	// 事件进入 audit_dead_letter，该计数大于零即表示存在未被平台持久化的审计事件。
+	DeadLetterPending int64 `json:"dead_letter_pending"`
 }
 
 // Repository 持久化审计事件、摄取健康度与导出任务；实现必须强制租户范围并保证
@@ -109,6 +113,9 @@ type Repository interface {
 	CompleteExportJob(context.Context, domain.ExportWork, domain.ExportFile, time.Time) error
 	FailExportJob(context.Context, domain.ExportWork, string, string, time.Time, time.Time) error
 	GetExportFile(context.Context, string, string) (domain.ExportFile, error)
+	// VerifyPayloadHash 按存储行的算法标签重算候选规范 payload 的摘要并比对（HMAC 密钥由实现持有）。
+	VerifyPayloadHash(context.Context, string, string, []byte) (domain.PayloadHashVerification, error)
+	VerifyEventChain(context.Context, string, string, string, uint64, int) (domain.ChainVerification, error)
 }
 
 // Service 是审计应用服务：统一执行输入校验、链路补全与租户范围约束。
@@ -174,6 +181,34 @@ func (s *Service) Get(ctx context.Context, tenantID, eventID string) (domain.Eve
 		return domain.Event{}, validation("event_id is required")
 	}
 	return s.repository.Get(ctx, tenantID, strings.TrimSpace(eventID))
+}
+
+// VerifyPayloadHash 重算候选事件输入的完整性摘要并与存储行比对（审计 P0 · 防篡改取证）。
+// 规范化方式与摄取一致：先 normalizeInput、再对 EventInput 做结构体 JSON 序列化
+// （字段顺序由结构体固定），因此调用方只需提供与摄取时相同的字段值，不必复刻原始字节。
+func (s *Service) VerifyPayloadHash(ctx context.Context, tenantID, eventID string, input EventInput) (domain.PayloadHashVerification, error) {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return domain.PayloadHashVerification{}, validation("event_id is required")
+	}
+	if strings.TrimSpace(input.EventID) != "" && strings.TrimSpace(input.EventID) != eventID {
+		return domain.PayloadHashVerification{}, validation("payload EventID must match the path event_id")
+	}
+	payload, err := json.Marshal(normalizeInput(input))
+	if err != nil {
+		return domain.PayloadHashVerification{}, fmt.Errorf("marshal audit payload: %w", err)
+	}
+	return s.repository.VerifyPayloadHash(ctx, tenantID, eventID, payload)
+}
+
+// VerifyEventChain 校验（租户、应用、环境）维度的哈希链分段：自证每行 chain_hash 可由
+// chain_prev_hash 与 payload_hash 重算，且窗口内 chain_sequence 连续。链首（sequence=1）
+// 额外要求 prev 为全零。校验调用本身会被通用审计轨迹记录。
+func (s *Service) VerifyEventChain(ctx context.Context, tenantID, applicationCode, environmentCode string, fromSequence uint64, limit int) (domain.ChainVerification, error) {
+	if strings.TrimSpace(applicationCode) == "" || strings.TrimSpace(environmentCode) == "" {
+		return domain.ChainVerification{}, validation("application and environment are required")
+	}
+	return s.repository.VerifyEventChain(ctx, tenantID, strings.TrimSpace(applicationCode), strings.TrimSpace(environmentCode), fromSequence, limit)
 }
 
 // CreateExportJob 以规范化后的查询快照创建异步导出任务。

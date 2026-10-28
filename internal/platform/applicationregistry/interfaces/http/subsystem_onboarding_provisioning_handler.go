@@ -262,6 +262,12 @@ func updateServiceCredentialRequirements(applicationCode string) []updateService
 	return application.SubsystemUpdateServiceCredentialRequirements(applicationCode)
 }
 
+// ensureUpdateServiceCredentials 准备受控更新的独立服务身份及只写密钥。
+// 参数：ctx 控制调用，tenantID 为租户，applicationID/applicationCode 为应用，
+//
+//	environmentID/environment 为环境，operatorID 为操作人，operation 为更新模式。
+//
+// 返回值：应重新交付的凭据；身份漂移或签发失败时返回错误。
 func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, operation string) ([]application.SubsystemServiceCredential, error) {
 	requirements := updateServiceCredentialRequirements(applicationCode)
 	if handler.serviceCredentials == nil || len(requirements) == 0 {
@@ -285,7 +291,7 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 			if !strings.EqualFold(client.Status, "ACTIVE") || client.ApplicationID != applicationID || client.EnvironmentID != environmentID {
 				return nil, application.ErrConflict
 			}
-			if (p1ServicePurpose(requirement.Purpose) || applicationCode == "contract_management" && requirement.Purpose == application.ServiceCredentialNotificationIngest) &&
+			if application.RequiresStrictSubsystemUpdateServiceClientValidation(applicationCode, requirement.Purpose) &&
 				(client.TenantID != tenantID || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || !sameStringSet(client.GrantTypes, []string{"client_credentials"})) {
 				return nil, application.ErrConflict
 			}
@@ -310,7 +316,9 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 				continue
 			}
 			var expectedVersion *uint64
-			if p1ServicePurpose(requirement.Purpose) {
+			settlementPlatformIdentity := (applicationCode == "settlement" || applicationCode == "settlement_and_invoicing") &&
+				application.RequiresStrictSubsystemUpdateServiceClientValidation(applicationCode, requirement.Purpose)
+			if p1ServicePurpose(requirement.Purpose) || settlementPlatformIdentity {
 				v := client.Version
 				expectedVersion = &v
 			}

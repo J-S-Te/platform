@@ -2,8 +2,8 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,14 +19,37 @@ import (
 
 // Repository 映射 audit_event、async_job、file_object 等既有表；结构演进只由
 // 编号 SQL 迁移维护，不启用 AutoMigrate。
-type Repository struct{ database *gorm.DB }
+type Repository struct {
+	database *gorm.DB
+	hasher   payloadHasher
+}
+
+// RepositoryOption 调整仓储构造；用于测试注入确定性密钥。
+type RepositoryOption func(*Repository)
+
+// WithPayloadHashKey 显式指定 payload_hash 的 HMAC 密钥，覆盖环境变量读取。
+func WithPayloadHashKey(key []byte) RepositoryOption {
+	return func(r *Repository) { r.hasher = payloadHasher{key: append([]byte(nil), key...)} }
+}
 
 // NewRepository 校验数据库依赖非空后构造审计仓储，缺失依赖时失败关闭。
-func NewRepository(database *gorm.DB) (*Repository, error) {
+// 未显式注入密钥时从 PLATFORM_AUDIT_HASH_KEY 读取；审计必开模式下缺密钥同样失败关闭。
+func NewRepository(database *gorm.DB, options ...RepositoryOption) (*Repository, error) {
 	if database == nil {
 		return nil, errors.New("audit database must not be nil")
 	}
-	return &Repository{database: database}, nil
+	repository := &Repository{database: database}
+	for _, option := range options {
+		option(repository)
+	}
+	if len(options) == 0 {
+		hasher, err := payloadHasherFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		repository.hasher = hasher
+	}
+	return repository, nil
 }
 
 type applicationModel struct{ ID, TenantID, Code, Name, Status string }
@@ -57,6 +80,9 @@ type eventModel struct {
 	Summary                                                                                    *string
 	Metadata, Changes                                                                          []byte
 	PayloadHash                                                                                []byte
+	PayloadHashAlg                                                                             string `gorm:"column:payload_hash_alg"`
+	ChainPrevHash, ChainHash                                                                   []byte
+	ChainSequence                                                                              *uint64 `gorm:"column:chain_sequence"`
 }
 
 func (eventModel) TableName() string { return "audit_event" }
@@ -78,6 +104,20 @@ type dedupModel struct {
 }
 
 func (dedupModel) TableName() string { return "audit_event_dedup" }
+
+// chainHeadModel 是（租户、应用、环境）维度的哈希链头：摄取事务内 FOR UPDATE 读取并推进，
+// 串行化同一来源的并发摄取，防止链分叉。
+type chainHeadModel struct {
+	TenantID       string
+	ApplicationID  string
+	EnvironmentID  string
+	LastEventID    string
+	LastChainHash  []byte
+	LastSequence   uint64
+	UpdatedAt      time.Time
+}
+
+func (chainHeadModel) TableName() string { return "audit_event_chain" }
 
 // ingestionReceiptModel 保存一次批量 Outbox 投递的传输层元数据。有意与 audit_event
 // 分离：投递关联三元组绝不能顶替单条事件原有的操作级关联字段。
@@ -151,7 +191,7 @@ func (r *Repository) Ingest(ctx context.Context, tenantID string, input applicat
 		if err != nil {
 			return err
 		}
-		receipt, err = ingestEvent(tx, tenantID, app, env, input, now)
+		receipt, err = r.ingestEvent(tx, tenantID, app, env, input, now)
 		return err
 	})
 	if err != nil {
@@ -173,7 +213,7 @@ func (r *Repository) IngestBatch(ctx context.Context, tenantID string, delivery 
 		acceptedCount := uint(0)
 		duplicateCount := uint(0)
 		for _, input := range inputs {
-			receipt, err := ingestEvent(tx, tenantID, app, env, input, now)
+			receipt, err := r.ingestEvent(tx, tenantID, app, env, input, now)
 			if err != nil {
 				return err
 			}
@@ -211,7 +251,7 @@ func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environme
 	return app, env, nil
 }
 
-func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environmentModel, input application.EventInput, now time.Time) (domain.Receipt, error) {
+func (r *Repository) ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environmentModel, input application.EventInput, now time.Time) (domain.Receipt, error) {
 	// 去重键按应用隔离，同一应用重试相同 event_id 返回 DUPLICATE；事件行和去重行在同一
 	// 事务写入，即使并发竞争唯一键，也不会留下只有一侧记录的不完整状态。
 	var existing dedupModel
@@ -237,9 +277,39 @@ func ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environ
 	if err != nil {
 		return domain.Receipt{}, fmt.Errorf("marshal audit payload: %w", err)
 	}
-	hash := sha256.Sum256(payload)
-	event := eventModel{OccurredMonth: uint(input.OccurredAt.UTC().Year()*100 + int(input.OccurredAt.UTC().Month())), EventID: input.EventID, TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, EventCategory: input.EventCategory, EventType: input.EventType, OccurredAt: input.OccurredAt.UTC(), ReceivedAt: now.UTC(), ActorType: input.ActorType, ActorID: optional(input.ActorID), ActorNameSnapshot: optional(input.ActorName), SessionID: optional(input.SessionID), ClientID: optional(input.ClientID), Action: input.Action, ResourceType: input.ResourceType, ResourceID: optional(input.ResourceID), ResourceNameSnapshot: optional(input.ResourceName), BusinessID: optional(input.BusinessID), RequestID: optional(input.RequestID), TraceID: optionalTraceID(input.TraceID), CorrelationID: optional(input.CorrelationID), SourceIP: optionalIP(input.SourceIP), LoginIP: optionalIP(input.LoginIP), ClientIP: optionalIP(input.ClientIP), IngestPeerIP: optionalIP(input.IngestPeerIP), IPSource: normalizeIPSource(input.IPSource), LoginIPSource: normalizeIPSource(input.LoginIPSource), UserAgent: optional(input.UserAgent), Result: input.Result, ReasonCode: optional(input.ReasonCode), RiskLevel: input.RiskLevel, Classification: input.Classification, Summary: optional(input.Summary), Metadata: metadata, Changes: changes, PayloadHash: hash[:]}
+	// 防篡改摘要按当前算法计算（配置密钥时为 HMAC-SHA256，算法标签随行持久化）；
+	// 历史行保持 SHA-256 标签，验证按标签选择算法，不混用。
+	digest := r.hasher.Sum(payload)
+	// 哈希链（审计 P1）：chain_hash = H(chain_prev_hash || payload_hash)。链头行在同一事务内
+	// FOR UPDATE 串行化，杜绝并发摄取造成链分叉；链首以全零 prev 起链（显式 32 字节，避免
+	// 空切片被写成 NULL）。行内同时保存 chain_prev_hash，留存清理删除旧行后剩余行仍可自证。
+	prevChain := make([]byte, 32)
+	var sequence uint64 = 1
+	var head chainHeadModel
+	headErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("tenant_id = ? AND application_id = ? AND environment_id = ?", tenantID, app.ID, env.ID).
+		Take(&head).Error
+	switch {
+	case headErr == nil:
+		prevChain = head.LastChainHash
+		sequence = head.LastSequence + 1
+	case errors.Is(headErr, gorm.ErrRecordNotFound):
+		// 链首：prev 保持全零。
+	default:
+		return domain.Receipt{}, headErr
+	}
+	chainHash := r.hasher.SumChain(prevChain, digest)
+	chainSequence := sequence
+	event := eventModel{OccurredMonth: uint(input.OccurredAt.UTC().Year()*100 + int(input.OccurredAt.UTC().Month())), EventID: input.EventID, TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, EventCategory: input.EventCategory, EventType: input.EventType, OccurredAt: input.OccurredAt.UTC(), ReceivedAt: now.UTC(), ActorType: input.ActorType, ActorID: optional(input.ActorID), ActorNameSnapshot: optional(input.ActorName), SessionID: optional(input.SessionID), ClientID: optional(input.ClientID), Action: input.Action, ResourceType: input.ResourceType, ResourceID: optional(input.ResourceID), ResourceNameSnapshot: optional(input.ResourceName), BusinessID: optional(input.BusinessID), RequestID: optional(input.RequestID), TraceID: optionalTraceID(input.TraceID), CorrelationID: optional(input.CorrelationID), SourceIP: optionalIP(input.SourceIP), LoginIP: optionalIP(input.LoginIP), ClientIP: optionalIP(input.ClientIP), IngestPeerIP: optionalIP(input.IngestPeerIP), IPSource: normalizeIPSource(input.IPSource), LoginIPSource: normalizeIPSource(input.LoginIPSource), UserAgent: optional(input.UserAgent), Result: input.Result, ReasonCode: optional(input.ReasonCode), RiskLevel: input.RiskLevel, Classification: input.Classification, Summary: optional(input.Summary), Metadata: metadata, Changes: changes, PayloadHash: digest, PayloadHashAlg: r.hasher.Algorithm(), ChainPrevHash: prevChain[:], ChainHash: chainHash[:], ChainSequence: &chainSequence}
 	if err := tx.Create(&event).Error; err != nil {
+		return domain.Receipt{}, err
+	}
+	if headErr == nil {
+		if err := tx.Model(&chainHeadModel{}).Where("tenant_id = ? AND application_id = ? AND environment_id = ?", tenantID, app.ID, env.ID).
+			Updates(map[string]any{"last_event_id": input.EventID, "last_chain_hash": chainHash[:], "last_sequence": sequence, "updated_at": now.UTC()}).Error; err != nil {
+			return domain.Receipt{}, err
+		}
+	} else if err := tx.Create(&chainHeadModel{TenantID: tenantID, ApplicationID: app.ID, EnvironmentID: env.ID, LastEventID: input.EventID, LastChainHash: chainHash[:], LastSequence: sequence, UpdatedAt: now.UTC()}).Error; err != nil {
 		return domain.Receipt{}, err
 	}
 	rowID := event.ID
@@ -298,6 +368,34 @@ func (r *Repository) Get(ctx context.Context, tenantID, eventID string) (domain.
 		return domain.Event{}, r.mapError(err)
 	}
 	return toEvent(record.Event, record.ApplicationCode, record.ApplicationName, record.EnvironmentCode), nil
+}
+
+// payloadHashRow 只读取完整性摘要列，避免为取证把整行事件再搬一遍。
+type payloadHashRow struct {
+	PayloadHash    []byte `gorm:"column:payload_hash"`
+	PayloadHashAlg string `gorm:"column:payload_hash_alg"`
+}
+
+// VerifyPayloadHash 在租户范围内定位事件（与 Get 相同的 event_id 寻址与排序），按存储行的算法
+// 标签重算候选 payload 摘要并常量时间比对。存储行为 HMAC 而本进程无密钥时报冲突而非“不匹配”。
+func (r *Repository) VerifyPayloadHash(ctx context.Context, tenantID, eventID string, payload []byte) (domain.PayloadHashVerification, error) {
+	var row payloadHashRow
+	err := r.database.WithContext(ctx).Table("audit_event").Select("payload_hash, payload_hash_alg").Where("tenant_id = ? AND event_id = ?", tenantID, eventID).Order("occurred_at DESC, id DESC").Take(&row).Error
+	if err != nil {
+		return domain.PayloadHashVerification{}, r.mapError(err)
+	}
+	algorithm := strings.TrimSpace(row.PayloadHashAlg)
+	if algorithm == "" {
+		algorithm = PayloadHashAlgorithmSHA256
+	}
+	computed, matched, err := r.hasher.Verify(algorithm, payload, row.PayloadHash)
+	if err != nil {
+		if errors.Is(err, ErrPayloadHashKeyUnavailable) {
+			return domain.PayloadHashVerification{}, fmt.Errorf("%w: %v", application.ErrConflict, err)
+		}
+		return domain.PayloadHashVerification{}, err
+	}
+	return domain.PayloadHashVerification{EventID: eventID, Algorithm: algorithm, Matched: matched, StoredHash: append([]byte(nil), row.PayloadHash...), ComputedHash: computed}, nil
 }
 
 // maxActiveAuditExportJobsPerTenant 是每租户活跃（PENDING/RUNNING）审计导出任务上限
@@ -740,6 +838,83 @@ func sensitiveField(field string) bool {
 //
 // 各子系统的 Outbox 在各自数据库内，平台无法读取；这里统计"平台收到的量"，
 // 用于发现上报停摆：近期接收量掉零、来源未采集数上升、最后接收时间过旧。
+// maxChainVerifyWindow 是单次哈希链校验的行数上限：校验有界、可分页续跑。
+const maxChainVerifyWindow = 10000
+
+// chainVerifyRow 是哈希链校验的扫描目标。
+type chainVerifyRow struct {
+	ID             uint64
+	EventID        string
+	PayloadHash    []byte
+	PayloadHashAlg string
+	ChainPrevHash  []byte
+	ChainHash      []byte
+	ChainSequence  uint64
+}
+
+// VerifyEventChain 校验（租户、应用、环境）维度的哈希链分段：自证每行 chain_hash 可由
+// chain_prev_hash 与 payload_hash 重算，窗口内序列连续、链指针连续；链首要求 prev 为全零。
+// 序列缺口（留存清理或历史数据）记为 GAP 停止校验，不是“链断裂”。
+func (r *Repository) VerifyEventChain(ctx context.Context, tenantID, applicationCode, environmentCode string, fromSequence uint64, limit int) (domain.ChainVerification, error) {
+	app, env, err := resolveActiveSource(r.database.WithContext(ctx), tenantID, applicationCode, environmentCode)
+	if err != nil {
+		return domain.ChainVerification{}, r.mapError(err)
+	}
+	if fromSequence < 1 {
+		fromSequence = 1
+	}
+	if limit < 1 || limit > maxChainVerifyWindow {
+		limit = maxChainVerifyWindow
+	}
+	var rows []chainVerifyRow
+	err = r.database.WithContext(ctx).Table("audit_event").
+		Select("id, event_id, payload_hash, payload_hash_alg, chain_prev_hash, chain_hash, chain_sequence").
+		Where("tenant_id = ? AND application_id = ? AND environment_id = ? AND chain_sequence IS NOT NULL AND chain_sequence >= ?", tenantID, app.ID, env.ID, fromSequence).
+		Order("chain_sequence ASC").Limit(limit + 1).Find(&rows).Error
+	if err != nil {
+		return domain.ChainVerification{}, r.mapError(err)
+	}
+	more := len(rows) > limit
+	if more {
+		rows = rows[:limit]
+	}
+	result := domain.ChainVerification{TenantID: tenantID, ApplicationCode: applicationCode, EnvironmentCode: environmentCode, FromSequence: fromSequence, CheckedRows: len(rows), LastSequence: fromSequence - 1}
+	previousHash := []byte{}
+	for index, row := range rows {
+		if row.ChainSequence != fromSequence+uint64(index) {
+			return domain.ChainVerification{TenantID: tenantID, ApplicationCode: applicationCode, EnvironmentCode: environmentCode, FromSequence: fromSequence, CheckedRows: index, LastSequence: previousSequence(rows, index), Verified: false, MoreRemaining: more, BrokenSequence: row.ChainSequence, BrokenEventID: row.EventID, Reason: "sequence gap"}, nil
+		}
+		_, matched, verifyErr := r.hasher.Verify(row.PayloadHashAlg, append(append([]byte{}, row.ChainPrevHash...), row.PayloadHash...), row.ChainHash)
+		if verifyErr != nil {
+			return domain.ChainVerification{}, verifyErr
+		}
+		if !matched {
+			return domain.ChainVerification{TenantID: tenantID, ApplicationCode: applicationCode, EnvironmentCode: environmentCode, FromSequence: fromSequence, CheckedRows: index + 1, LastSequence: row.ChainSequence, MoreRemaining: more, BrokenSequence: row.ChainSequence, BrokenEventID: row.EventID, Reason: "chain hash recompute mismatch"}, nil
+		}
+		if index == 0 {
+			if fromSequence == 1 && !bytes.Equal(row.ChainPrevHash, make([]byte, 32)) {
+				return domain.ChainVerification{TenantID: tenantID, ApplicationCode: applicationCode, EnvironmentCode: environmentCode, FromSequence: fromSequence, CheckedRows: 1, LastSequence: row.ChainSequence, MoreRemaining: more, BrokenSequence: row.ChainSequence, BrokenEventID: row.EventID, Reason: "chain genesis prev must be zero"}, nil
+			}
+		} else if !bytes.Equal(row.ChainPrevHash, rows[index-1].ChainHash) {
+			return domain.ChainVerification{TenantID: tenantID, ApplicationCode: applicationCode, EnvironmentCode: environmentCode, FromSequence: fromSequence, CheckedRows: index, LastSequence: rows[index-1].ChainSequence, MoreRemaining: more, BrokenSequence: row.ChainSequence, BrokenEventID: row.EventID, Reason: "chain linkage break"}, nil
+		}
+		previousHash = row.ChainHash
+		result.LastSequence = row.ChainSequence
+	}
+	_ = previousHash
+	result.Verified = true
+	result.MoreRemaining = more
+	return result, nil
+}
+
+// previousSequence 返回截止 index 前一行（含）的链序列；index==0 时返回 from 起点前一格。
+func previousSequence(rows []chainVerifyRow, index int) uint64 {
+	if index == 0 {
+		return 0
+	}
+	return rows[index-1].ChainSequence
+}
+
 func (r *Repository) IngestionHealth(ctx context.Context, tenantID string, recentAfter time.Time) (application.IngestionHealth, error) {
 	var health application.IngestionHealth
 	if err := r.database.WithContext(ctx).Model(&eventModel{}).
@@ -757,6 +932,11 @@ func (r *Repository) IngestionHealth(ctx context.Context, tenantID string, recen
 	var bounds struct {
 		LastReceived  *time.Time `gorm:"column:last_received"`
 		OldestUnknown *time.Time `gorm:"column:oldest_unknown"`
+	}
+	// 审计 P1：摄取死信表中仍待重放的行数——大于零即存在未被平台持久化的审计事件。
+	if err := r.database.WithContext(ctx).Model(&deadLetterModel{}).
+		Where("tenant_id = ? AND status = ?", tenantID, domain.DeadLetterPending).Count(&health.DeadLetterPending).Error; err != nil {
+		return application.IngestionHealth{}, err
 	}
 	// 单条聚合查询避免多次全表扫描；COALESCE 保证没有数据时返回 NULL 而不是报错。
 	if err := r.database.WithContext(ctx).Model(&eventModel{}).

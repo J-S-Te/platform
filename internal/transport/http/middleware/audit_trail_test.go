@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -363,9 +364,12 @@ func TestAuditTrailRequiredModeOnlyGuardsRecordedRequests(t *testing.T) {
 	}
 }
 
-// 缓冲超限时降级为旧行为：响应已 write-through 提交无法撤回，只能保留错误日志并告警。
-func TestAuditTrailRequiredModeDegradesToWriteThroughWhenBufferOverflows(t *testing.T) {
+// 缓冲超限（进入溢写临时文件）时不再有直写例外：审计摄取失败仍然拒绝请求，
+// 扣留的业务响应被丢弃，客户端拿到 503 AUDIT_WRITE_REJECTED，绝不出现“无审计的成功”。
+func TestAuditTrailRequiredModeSpillsOversizedResponseAndRejectsWhenIngestFails(t *testing.T) {
 	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
 	logs := &capturingLogHandler{}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/dictionaries", nil)
 	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
@@ -378,26 +382,118 @@ func TestAuditTrailRequiredModeDegradesToWriteThroughWhenBufferOverflows(t *test
 	overflowRouter.POST("/api/v1/dictionaries", func(context *gin.Context) {
 		context.Header("X-Business-Header", "value")
 		context.Status(http.StatusOK)
-		large := strings.Repeat("x", maxPlatformAuditBufferedResponseBytes+1)
-		_, _ = context.Writer.WriteString(large)
+		_, _ = context.Writer.WriteString(strings.Repeat("x", maxPlatformAuditBufferedResponseBytes+1))
 	})
 	overflowRouter.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("overflowed response status = %d, want %d (write-through must keep business status)", response.Code, http.StatusOK)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("oversized response status = %d, want %d; body = %s", response.Code, http.StatusServiceUnavailable, response.Body.String())
 	}
-	if len(response.Body.String()) != maxPlatformAuditBufferedResponseBytes+1 {
-		t.Fatalf("overflowed response size = %d, want %d", len(response.Body.String()), maxPlatformAuditBufferedResponseBytes+1)
+	if !strings.Contains(response.Body.String(), "AUDIT_WRITE_REJECTED") {
+		t.Fatalf("body = %s, want AUDIT_WRITE_REJECTED", response.Body.String())
 	}
-	if response.Header().Get("X-Business-Header") != "value" {
-		t.Fatal("business headers must survive write-through degradation")
+	if strings.Contains(response.Body.String(), strings.Repeat("x", 32)) {
+		t.Fatal("spilled business response must be discarded when audit ingest fails")
 	}
+	if response.Header().Get("X-Business-Header") != "" {
+		t.Fatal("business headers must not leak to the client when the request is rejected")
+	}
+	assertNoSpillFilesLeft(t, tmp)
 	warned := false
 	for _, record := range logs.records {
-		if record.Level == slog.LevelWarn && strings.Contains(record.Message, "degrading to write-through") {
+		if record.Level == slog.LevelInfo && strings.Contains(record.Message, "spilling to temporary file") {
 			warned = true
 		}
 	}
 	if !warned {
-		t.Fatal("buffer overflow must emit a warning log when degrading")
+		t.Fatal("spilling to temporary file must be logged")
+	}
+}
+
+// 溢写 + 审计成功：扣留的大响应必须原样（逐字节）提交给客户端，临时文件随即清理。
+func TestAuditTrailRequiredModeSpillsOversizedResponseAndFlushesIntactWhenIngestSucceeds(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	recorder := &auditRecorderStub{}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/dictionaries", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+	overflowRouter := gin.New()
+	overflowRouter.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	overflowRouter.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		context.Header("X-Business-Header", "value")
+		context.Status(http.StatusCreated)
+		_, _ = context.Writer.WriteString(strings.Repeat("x", maxPlatformAuditBufferedResponseBytes+1))
+		_, _ = context.Writer.WriteString("tail")
+	})
+	overflowRouter.ServeHTTP(response, request)
+	want := strings.Repeat("x", maxPlatformAuditBufferedResponseBytes+1) + "tail"
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusCreated)
+	}
+	if response.Body.String() != want {
+		t.Fatalf("spilled response not replayed intact: got %d bytes, want %d", len(response.Body.String()), len(want))
+	}
+	if response.Header().Get("X-Business-Header") != "value" {
+		t.Fatal("business headers must survive the spill/flush round trip")
+	}
+	if recorder.input.Result != "SUCCESS" {
+		t.Fatalf("audit Result = %q, want SUCCESS", recorder.input.Result)
+	}
+	assertNoSpillFilesLeft(t, tmp)
+}
+
+// 超过硬上限的响应无法被完整扣留：审计必须如实记录失败（保留 handler 状态码供追溯），
+// 客户端拿到 503 AUDIT_RESPONSE_TOO_LARGE，绝不出现“审计记成功、客户端拿 503”的错位。
+func TestAuditTrailRequiredModeRejectsResponseBeyondSpillHardLimit(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	originalHardLimit := maxPlatformAuditSpilledResponseBytes
+	maxPlatformAuditSpilledResponseBytes = maxPlatformAuditBufferedResponseBytes + 10
+	defer func() { maxPlatformAuditSpilledResponseBytes = originalHardLimit }()
+	recorder := &auditRecorderStub{}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/dictionaries", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+	overflowRouter := gin.New()
+	overflowRouter.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	overflowRouter.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		_, _ = context.Writer.WriteString(strings.Repeat("x", maxPlatformAuditBufferedResponseBytes+100))
+	})
+	overflowRouter.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusServiceUnavailable, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "AUDIT_RESPONSE_TOO_LARGE") {
+		t.Fatalf("body = %s, want AUDIT_RESPONSE_TOO_LARGE", response.Body.String())
+	}
+	if recorder.input.Result != "FAILURE" {
+		t.Fatalf("audit Result = %q, want FAILURE", recorder.input.Result)
+	}
+	if recorder.input.Metadata["audit_rejection"] != "AUDIT_RESPONSE_TOO_LARGE" {
+		t.Fatalf("audit metadata audit_rejection = %v, want AUDIT_RESPONSE_TOO_LARGE", recorder.input.Metadata["audit_rejection"])
+	}
+	if recorder.input.Metadata["handler_status_code"] != http.StatusOK {
+		t.Fatalf("audit metadata handler_status_code = %v, want %d", recorder.input.Metadata["handler_status_code"], http.StatusOK)
+	}
+	assertNoSpillFilesLeft(t, tmp)
+}
+
+// 溢写临时文件必须在请求结束时清理：提交、拒绝（含 ingest 失败与超硬上限）路径均不留痕。
+func assertNoSpillFilesLeft(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read TMPDIR %q: %v", dir, err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("spill temp files left behind in %s: %d entries", dir, len(entries))
 	}
 }
