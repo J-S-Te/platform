@@ -1696,6 +1696,10 @@ func p1FixtureScope(purpose string) string {
 	}
 	return "unused-existing-fixture"
 }
+
+// p1FixtureProvisioningInput 补齐本地受控部署测试的独立集成身份。
+// 参数：input 为待测试的目标应用和环境。
+// 返回值：带最小权限登记身份的隔离测试输入。
 func p1FixtureProvisioningInput(input application.SubsystemProvisioningInput) application.SubsystemProvisioningInput {
 	if input.TenantID == "" {
 		input.TenantID = "tenant-1"
@@ -1710,6 +1714,21 @@ func p1FixtureProvisioningInput(input application.SubsystemProvisioningInput) ap
 		input.ServiceCredentials = append(input.ServiceCredentials, application.SubsystemServiceCredential{Purpose: application.ServiceCredentialSettlementContractIngest, PlaintextSecret: "settlement-source-test-secret", OAuthClient: application.OAuthClientView{ID: "contract-source-client", TenantID: input.TenantID, ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID, ClientID: "contract_management-" + input.Environment + "-settlement-integration", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"settlement.contract.ingest"}}})
 	}
 	if input.ApplicationCode == "settlement" {
+		for purpose, scope := range map[string]string{
+			application.ServiceCredentialSettlementProjectReferenceRead: "settlement.project_reference.read",
+			application.ServiceCredentialOwnerDirectoryRead:             "owner_directory.read",
+			application.ServiceCredentialNotificationIngest:             "notification.ingest",
+			application.ServiceCredentialAuditIngest:                    "audit.ingest",
+		} {
+			input.ServiceCredentials = append(input.ServiceCredentials, application.SubsystemServiceCredential{
+				Purpose: purpose, PlaintextSecret: "fixture-" + purpose,
+				OAuthClient: application.OAuthClientView{ID: "fixture-" + purpose,
+					TenantID: input.TenantID, ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID,
+					ClientID: "settlement-" + input.Environment + "-" + purpose, Status: "ACTIVE",
+					ClientType: "service", TokenAuthMethod: "client_secret_basic",
+					GrantTypes: []string{"client_credentials"}, Scopes: []string{scope}},
+			})
+		}
 		input.RelatedServiceClients = []application.RelatedSubsystemServiceClient{{ApplicationCode: "contract_management", ApplicationID: "contract-app-1", Environment: input.Environment, EnvironmentID: "contract-env-1", Purpose: application.ServiceCredentialSettlementContractIngest, Client: application.OAuthClientView{ID: "contract-source-client", TenantID: input.TenantID, ApplicationID: "contract-app-1", EnvironmentID: "contract-env-1", ClientID: "contract_management-" + input.Environment + "-settlement-integration", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"settlement.contract.ingest"}}}}
 	}
 	return input

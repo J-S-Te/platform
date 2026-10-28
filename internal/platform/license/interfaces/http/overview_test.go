@@ -72,7 +72,11 @@ func TestOverviewSeparatesLicenseAndRegistrationGaps(t *testing.T) {
 			h, _ := NewRuntimeHandler(service)
 			h.ConfigureOverview(&overviewLicenseStub{state: tc.state, err: tc.stateErr}, "prod")
 			body := invoke(h.Overview, overviewRequest()).Body.String()
-			for _, want := range []string{`"status":"` + tc.wantStatus + `"`, tc.wantReason, "IMPORT_LICENSE"} {
+			wants := []string{`"status":"` + tc.wantStatus + `"`, tc.wantReason}
+			if tc.wantStatus != "NOT_EFFECTIVE" {
+				wants = append(wants, "IMPORT_LICENSE")
+			}
+			for _, want := range wants {
 				if !strings.Contains(body, want) {
 					t.Fatalf("overview lost %s: %s", want, body)
 				}

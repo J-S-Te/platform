@@ -18,11 +18,12 @@ const accessCandidatePrefix = "candidate:v1:"
 // SubsystemAccessConfigurationTracker 只保存候选摘要到既有阶段证据，不保存配置或密钥。
 // 基线只取成功操作的 DEPLOY 证据；失败或尚在运行的部署不能成为一致性证明。
 type SubsystemAccessConfigurationTracker struct {
-	database  *gorm.DB
-	catalog   SubsystemAccessCatalogSource
-	approvals application.RuntimeLicenseApprovalSource
-	builtin   application.RuntimeComponentCatalogSource
-	images    SubsystemAccessImageReader
+	registrationImages SubsystemAccessImageReader
+	database           *gorm.DB
+	catalog            SubsystemAccessCatalogSource
+	approvals          application.RuntimeLicenseApprovalSource
+	builtin            application.RuntimeComponentCatalogSource
+	images             SubsystemAccessImageReader
 }
 
 func NewSubsystemAccessConfigurationTracker(db *gorm.DB, catalog SubsystemAccessCatalogSource, approvals application.RuntimeLicenseApprovalSource) (*SubsystemAccessConfigurationTracker, error) {
@@ -101,6 +102,9 @@ func (tracker *SubsystemAccessConfigurationTracker) Snapshot(ctx context.Context
 	return accessConfigurationFingerprint(target.ManifestChecksum, components), nil
 }
 
+// ReadSubsystemAccessConfigurationDrift 用途：比较成功部署基线，并核对受控组件登记是否完整。
+// 参数：ctx 为上下文，tenantID/code/environment 为授权目标。
+// 返回值：返回漂移、变更说明与版本指纹；任何事实不可读则返回错误。
 func (tracker *SubsystemAccessConfigurationTracker) ReadSubsystemAccessConfigurationDrift(ctx context.Context, tenantID, code, environment string) (bool, []string, string, error) {
 	op := application.SubsystemAccessOperation{TenantID: tenantID, ApplicationCode: code, EnvironmentCode: environment}
 	candidate, err := tracker.Snapshot(ctx, op)
@@ -129,6 +133,16 @@ func (tracker *SubsystemAccessConfigurationTracker) ReadSubsystemAccessConfigura
 		return false, nil, "", err
 	}
 	drift, summary := accessConfigurationDrift(candidate, applied, target.ManifestChecksum, state.AppliedManifestChecksum)
+	if !drift && tracker.registrationImages != nil {
+		registered, err := tracker.runtimeRegistrationMatches(ctx, tenantID, code, environment)
+		if err != nil {
+			return false, nil, "", err
+		}
+		if !registered {
+			drift = true
+			summary = append(summary, "运行许可组件尚未完整登记，需要经受控更新补齐身份与接线")
+		}
+	}
 	return drift, summary, candidate + ":" + applied + ":" + state.AppliedManifestChecksum, nil
 }
 
@@ -179,4 +193,11 @@ func builtinAccessCatalogVersion(ctx context.Context, source application.Runtime
 	sort.Strings(entries)
 	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
 	return "builtin=" + hex.EncodeToString(sum[:]), nil
+}
+
+// SetRuntimeRegistrationCheck 用途：为本地和生产接入预检接入只读登记完整性校验。
+// 参数：source 为真实所选镜像库存，不改变原配置指纹或批准机制。
+// 返回值：无。
+func (tracker *SubsystemAccessConfigurationTracker) SetRuntimeRegistrationCheck(source SubsystemAccessImageReader) {
+	tracker.registrationImages = source
 }

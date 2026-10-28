@@ -33,16 +33,24 @@ docker_root="$fixture/docker-root"
 output="$fixture/extension-v1"
 mkdir -p "$baseline" "$tools" "$docker_root"
 
+# 用途：生成包含真实 OCI 字节及独立注册镜像名的最小基线包。
+# 参数：组件编码、基线版本及输出归档文件名。
+# 返回值：成功返回零；夹具生成失败时终止测试。
 make_baseline_image_package() {
-  local component="$1" version="$2" name="$3" stage
-  stage="$(mktemp -d "$fixture/base-package.XXXXXX")"
-  printf 'PACKAGE_FORMAT=2\nCOMPONENT=%s\nVERSION=%s\nPLATFORM=linux/amd64\n' "$component" "$version" \
-    > "$stage/package.env"
-  printf 'baseline image payload for %s\n' "$component" > "$stage/images.tar"
-  (cd "$stage" && sha256sum images.tar > SHA256SUMS)
-  COPYFILE_DISABLE=1 tar -czf "$baseline/$name" -C "$stage" package.env SHA256SUMS images.tar
-  (cd "$baseline" && sha256sum "$name" > "$name.sha256")
-  rm -rf -- "$stage"
+  python3 -B - "$repo_root" "$baseline/$3" "$1" "$2" <<'PY'
+import hashlib, importlib.util, pathlib, sys
+root, output, component, version = sys.argv[1:]
+path = pathlib.Path(root) / 'platform/deploy/production/tests/test-delivery-inspect.py'
+spec = importlib.util.spec_from_file_location('extension_image_fixture', path)
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+fixture.VERSION = version
+raw, _ = fixture.image_package(component, image_version=version)
+target = pathlib.Path(output)
+target.write_bytes(raw)
+target.with_name(target.name + '.sha256').write_text(
+    hashlib.sha256(raw).hexdigest() + '  ' + target.name + '\n')
+PY
 }
 
 make_baseline_image_package common base-v1 common-infrastructure-linux-amd64.tar.gz
@@ -51,19 +59,17 @@ make_baseline_image_package frontend base-v1 frontend-base-v1-linux-amd64.tar.gz
 make_baseline_image_package contract base-v1 contract-backend-base-v1-linux-amd64.tar.gz
 
 asset_stage="$(mktemp -d "$fixture/base-assets.XXXXXX")"
-mkdir -p "$asset_stage/subsystems.d"
-cat > "$asset_stage/subsystems.d/data-analysis-prod.yaml" <<'YAML'
-version: 1
-application:
-  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, file_gateway_write]
-runtime:
-  files:
-    - bindings:
-        FILE_GATEWAY_APPLICATION_ID: application_id
-        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
-        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
-YAML
-COPYFILE_DISABLE=1 tar -czf "$baseline/deployment-assets-base-v1.tar.gz" -C "$asset_stage" subsystems.d/data-analysis-prod.yaml
+mkdir -p "$asset_stage/subsystems.d" "$asset_stage/bin"
+cp "$repo_root/platform/deploy/production/subsystems.d/"*.yaml "$asset_stage/subsystems.d/"
+for helper in deployment-workflow.sh deployment-session.py delivery-runtime.sh delivery-runtime.py \
+  delivery-inspect.py delivery-inspect-images.py delivery-inspect-v2.py delivery-files.py \
+  subsystem-runtime.py project-background.sh; do
+  cp "$repo_root/platform/deploy/production/bin/$helper" "$asset_stage/bin/"
+done
+printf 'services: {}\n' > "$asset_stage/docker-compose.yml"
+printf '#!/bin/sh\nexit 99\n' > "$asset_stage/bin/deploy.sh"
+COPYFILE_DISABLE=1 tar -czf "$baseline/deployment-assets-base-v1.tar.gz" -C "$asset_stage" \
+  subsystems.d bin docker-compose.yml
 rm -rf -- "$asset_stage"
 (cd "$baseline" && sha256sum deployment-assets-base-v1.tar.gz > deployment-assets-base-v1.tar.gz.sha256)
 
@@ -127,16 +133,19 @@ case "${1:-} ${2:-}" in
     printf '{"schemaVersion":2,"manifests":[]}\n' > "$root/index.json"
     shift 3
     for tag in "$@"; do
-    printf '{"architecture":"amd64","os":"linux","config":{"Cmd":["%s"]}}\n' "$tag" > "$root/config.json"
+    printf '{"architecture":"amd64","os":"linux","config":{"Cmd":["%s"],"Labels":{"org.opencontainers.image.version":"%s","com.basic-platform.license.protocol":"1"}}}\n' \
+      "$tag" "${tag##*:}" > "$root/config.json"
     config_digest="$(sha256sum "$root/config.json" | awk '{print $1}')"
+    config_size="$(wc -c < "$root/config.json" | tr -d ' ')"
     mv "$root/config.json" "$root/blobs/sha256/$config_digest"
-    jq -cn --arg digest "sha256:$config_digest" \
-      '{schemaVersion:2,mediaType:"application/vnd.oci.image.manifest.v1+json",config:{mediaType:"application/vnd.oci.image.config.v1+json",digest:$digest,size:1},layers:[]}' \
+    jq -cn --arg digest "sha256:$config_digest" --argjson size "$config_size" \
+      '{schemaVersion:2,mediaType:"application/vnd.oci.image.manifest.v1+json",config:{mediaType:"application/vnd.oci.image.config.v1+json",digest:$digest,size:$size},layers:[]}' \
       > "$root/manifest.json"
     manifest_digest="$(sha256sum "$root/manifest.json" | awk '{print $1}')"
+    manifest_size="$(wc -c < "$root/manifest.json" | tr -d ' ')"
     mv "$root/manifest.json" "$root/blobs/sha256/$manifest_digest"
-    jq --arg digest "sha256:$manifest_digest" --arg tag "$tag" \
-      '.manifests += [{mediaType:"application/vnd.oci.image.manifest.v1+json",digest:$digest,size:1,annotations:{"org.opencontainers.image.ref.name":$tag}}]' \
+    jq --arg digest "sha256:$manifest_digest" --arg tag "$tag" --argjson size "$manifest_size" \
+      '.manifests += [{mediaType:"application/vnd.oci.image.manifest.v1+json",digest:$digest,size:$size,annotations:{"org.opencontainers.image.ref.name":$tag}}]' \
       "$root/index.json" > "$root/index-next.json"
     mv "$root/index-next.json" "$root/index.json"
     done
@@ -159,7 +168,7 @@ base_compatibility_digest="$(sha256sum "$baseline/PLATFORM_ASSETS_COMPATIBILITY.
 base_manifest_digest="$(sha256sum "$baseline/SHA256SUMS" | awk '{print $1}')"
 
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" \
+  bash "$wrapper" --candidate \
     --version extension-v1 \
     --output "$output" \
     --extend-from "$baseline" \
@@ -194,14 +203,14 @@ done
 (cd "$fixture" && sha256sum --check uip-offline-delivery-extension-v1-linux-amd64.tar.sha256 >/dev/null) || fail 'extension outer archive checksum failed'
 
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version missing-components --output "$fixture/missing-components" \
+  bash "$wrapper" --candidate --version missing-components --output "$fixture/missing-components" \
     --extend-from "$baseline" --skip-host-deps --no-pause > "$fixture/missing-components.log" 2>&1; then
   fail '--extend-from accepted an implicit component selection'
 fi
 grep -q '必须同时显式指定 --components' "$fixture/missing-components.log" || fail 'missing component selection guidance absent'
 
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version compatible-data-analysis --output "$fixture/compatible-data-analysis" \
+  bash "$wrapper" --candidate --version compatible-data-analysis --output "$fixture/compatible-data-analysis" \
     --extend-from "$baseline" --components data-analysis --skip-host-deps --preflight-only --no-pause \
     > "$fixture/compatible-data-analysis.log"
 grep -q '构建前检查通过' "$fixture/compatible-data-analysis.log" || fail 'compatible data-analysis baseline did not pass preflight'
@@ -237,7 +246,7 @@ rm -f -- "$fixture/legacy-data-analysis-base/PLATFORM_ASSETS_COMPATIBILITY.env.b
     install-assets.sh > SHA256SUMS
 )
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version legacy-data-analysis --output "$fixture/legacy-data-analysis-output" \
+  bash "$wrapper" --candidate --version legacy-data-analysis --output "$fixture/legacy-data-analysis-output" \
     --extend-from "$fixture/legacy-data-analysis-base" --components data-analysis \
     --skip-host-deps --preflight-only --no-pause > "$fixture/legacy-data-analysis.log" 2>&1; then
   fail 'extension accepted legacy data-analysis assets without File Gateway bindings'
@@ -259,7 +268,7 @@ rm -f -- "$fixture/legacy-no-lock-base/PLATFORM_ASSETS_COMPATIBILITY.env"
     install-assets.sh > SHA256SUMS
 )
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version legacy-no-lock --output "$fixture/legacy-no-lock-output" \
+  bash "$wrapper" --candidate --version legacy-no-lock --output "$fixture/legacy-no-lock-output" \
     --extend-from "$fixture/legacy-no-lock-base" --components customer-opportunity \
     --skip-host-deps --preflight-only --no-pause > "$fixture/legacy-no-lock.log" 2>&1; then
   fail 'extension accepted a legacy baseline without a compatibility lock'
@@ -285,7 +294,7 @@ rm -f -- "$fixture/shared-input-drift-base/PLATFORM_ASSETS_COMPATIBILITY.env.bak
     install-assets.sh > SHA256SUMS
 )
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version shared-input-drift --output "$fixture/shared-input-drift-output" \
+  bash "$wrapper" --candidate --version shared-input-drift --output "$fixture/shared-input-drift-output" \
     --extend-from "$fixture/shared-input-drift-base" --components customer-opportunity \
     --skip-host-deps --preflight-only --no-pause > "$fixture/shared-input-drift.log" 2>&1; then
   fail 'extension accepted a baseline from different shared platform/assets inputs'
@@ -297,7 +306,7 @@ grep -q '共享部署输入已与基线不同' "$fixture/shared-input-drift.log"
 cp -R "$baseline" "$fixture/tampered-base"
 printf 'tampered\n' >> "$fixture/tampered-base/platform-backend-base-v1-linux-amd64.tar.gz"
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version tampered-base --output "$fixture/tampered-output" \
+  bash "$wrapper" --candidate --version tampered-base --output "$fixture/tampered-output" \
     --extend-from "$fixture/tampered-base" --components customer-opportunity \
     --skip-host-deps --no-pause > "$fixture/tampered.log" 2>&1; then
   fail 'extension accepted a tampered baseline delivery'
@@ -308,7 +317,7 @@ grep -Eq 'FAILED|SHA256' "$fixture/tampered.log" || fail 'tampered baseline chec
 : > "$fixture/docker-events"
 full_output="$fixture/full-v1"
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version full-v1 --output "$full_output" \
+  bash "$wrapper" --candidate --version full-v1 --output "$full_output" \
     --components none --skip-host-deps --no-pause > "$fixture/full-v1.log"
 [[ -f "$full_output/PLATFORM_ASSETS_COMPATIBILITY.env" ]] || fail 'full baseline compatibility lock missing'
 grep -Fxq "PLATFORM_ASSETS_INPUT_SHA256=$(platform_assets_input_fingerprint)" \
@@ -333,16 +342,59 @@ jq -cn --arg digest "$(sha256sum "${5:?}" | awk '{print $1}')" \
 STUB
 chmod +x "$tools/go"
 mkdir -p "$fixture/approvals"
-printf 'fixture-only-not-a-real-license\n' > "$fixture/license.jws"
-printf '{"version":1}\n' > "$fixture/approvals/license-evidence.json"
-printf '{"version":1,"services":[]}\n' > "$fixture/approvals/license-migration-evidence.json"
-printf '{"application":"contract_management","environment":"prod"}\n' \
-  > "$fixture/approvals/runtime-license-contract_management-prod.json"
+# 用途：为临时镜像生成结构完整的测试许可、运行批准和安装边界。
+# 参数：本轮夹具镜像版本，用于绑定该镜像的真实配置摘要。
+# 返回值：成功返回零；临时测试材料生成失败时终止测试。
+prepare_licensed_fixture() {
+  python3 -B - "$fixture" "$1" <<'PY'
+import base64, hashlib, json, pathlib, subprocess, sys
+root, version = pathlib.Path(sys.argv[1]), sys.argv[2]
+tag = 'uip-package/contract-backend:' + version
+config = {'architecture': 'amd64', 'os': 'linux', 'config': {'Cmd': [tag], 'Labels': {
+    'org.opencontainers.image.version': version, 'com.basic-platform.license.protocol': '1'}}}
+raw = (json.dumps(config, separators=(',', ':')) + '\n').encode()
+digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
+services = ['contract-api', 'contract-worker']
+approval = {'version': 1, 'application': 'contract_management', 'environment': 'prod',
+            'components': [{'service_id': service, 'protocol': 1,
+                            'coverage_digest': 'sha256:' + 'c' * 64, 'image_digest': digest}
+                           for service in services]}
+evidence = {'version': 1, 'project': 'fixture-project', 'installation_boundary': True,
+            'services': [{'application': 'contract_management', 'environment': 'prod',
+                          'name': service, 'image_digest': digest, 'version': version,
+                          'protocol': '1', 'replicas': 1} for service in services],
+            'excluded_services': []}
+baseline = dict(evidence, services=[])
+for name, value in [('runtime-license-contract_management-prod.json', approval),
+                    ('license-evidence.json', evidence),
+                    ('license-migration-evidence.json', baseline)]:
+    (root / 'approvals' / name).write_text(json.dumps(value) + '\n')
+header = {'alg': 'EdDSA', 'typ': 'commercial-license+jws', 'kid': 'fixture-only'}
+claims = {'protocol_version': 1, 'issuer': 'unified-business-suite-vendor',
+          'product_id': 'unified-business-suite', 'license_id': 'fixture-license',
+          'customer_id': 'fixture-customer', 'instance_id': 'fixture-instance',
+          'environment': 'production', 'version': 1, 'issued_at': 1700000000,
+          'not_before': 1700000000, 'applications': [{'code': 'contract_management',
+          'kind': 'FULL', 'not_before': 1700000000, 'expires_at': 2000000000}]}
+segments = [base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b'=')
+            for value in (header, claims)]
+signing_input = root / 'fixture-signing-input'
+signing_input.write_bytes(b'.'.join(segments))
+key = root / 'fixture-signing-key.pem'
+if not key.exists():
+    subprocess.run(['openssl', 'genpkey', '-algorithm', 'ED25519', '-out', str(key)], check=True)
+signature = subprocess.run(['openssl', 'pkeyutl', '-sign', '-rawin', '-inkey', str(key),
+                            '-in', str(signing_input)], check=True, capture_output=True).stdout
+segments.append(base64.urlsafe_b64encode(signature).rstrip(b'='))
+(root / 'license.jws').write_bytes(b'.'.join(segments))
+PY
+}
+prepare_licensed_fixture licensed-full
 license_args=(--license-file "$fixture/license.jws" --runtime-approval-dir "$fixture/approvals" \
   --runtime-approval-approved --installation-scenario fresh --customer-id fixture-customer)
 licensed_full="$fixture/licensed-full"
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version licensed-full --output "$licensed_full" --components contract \
+  bash "$wrapper" --candidate --version licensed-full --output "$licensed_full" --components contract \
     --skip-host-deps --no-pause "${license_args[@]}" > "$fixture/licensed-full.log"
 grep -Fxq "LICENSE_SHA256=$(sha256sum "$fixture/license.jws" | awk '{print $1}')" \
   "$licensed_full/BUILD_INFO.txt" || fail 'licensed components lost BUILD_INFO binding'
@@ -357,8 +409,9 @@ done
 (cd "$licensed_full" && sha256sum --check SHA256SUMS >/dev/null) || fail 'licensed full checksums failed'
 
 licensed_extension="$fixture/licensed-extension"
+prepare_licensed_fixture licensed-extension
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version licensed-extension --output "$licensed_extension" --extend-from "$baseline" \
+  bash "$wrapper" --candidate --version licensed-extension --output "$licensed_extension" --extend-from "$baseline" \
     --components contract --skip-host-deps --no-pause "${license_args[@]}" > "$fixture/licensed-extension.log"
 [[ ! -e "$licensed_extension/deployment-assets-base-v1.tar.gz" ]] || fail 'licensed extension inherited old customer assets'
 [[ -f "$licensed_extension/deployment-assets-licensed-extension.tar.gz.sha256" ]] || fail 'new licensed asset sidecar missing'
@@ -372,7 +425,7 @@ cmp -s "$fixture/license.jws" <(tar -xOf "$licensed_extension/deployment-assets-
   || fail 'licensed extension license missing'
 (cd "$licensed_extension" && sha256sum --check SHA256SUMS >/dev/null) || fail 'licensed extension checksum failed'
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" STUB_LICENSE_REJECT=true \
-  bash "$wrapper" --version rejected-license --output "$fixture/rejected-license" --components contract \
+  bash "$wrapper" --candidate --version rejected-license --output "$fixture/rejected-license" --components contract \
     --skip-host-deps --no-pause "${license_args[@]}" > "$fixture/rejected-license.log" 2>&1; then
   fail 'wrapper accepted rejected license'
 fi
@@ -382,7 +435,7 @@ fi
 legacy_bridge="$fixture/legacy-bridge"
 : > "$fixture/docker-events"
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --legacy-license-bridge gays-sq --version legacy-bridge \
+  bash "$wrapper" --candidate --legacy-license-bridge gays-sq --version legacy-bridge \
     --output "$legacy_bridge" --skip-host-deps --no-pause > "$fixture/legacy-bridge.log"
 [[ ! -e "$legacy_bridge/customer-opportunity-backend-legacy-bridge-linux-amd64.tar.gz" ]] || fail 'bridge packaged CRM'
 if grep -Eq 'customer-opportunity|contract-backend' "$fixture/docker-events"; then fail 'bridge built business images'; fi
@@ -393,8 +446,9 @@ fi
 grep -q '客户 gays-sq' "$fixture/legacy-bridge.log" || fail 'bridge lost initialization hint'
 
 legacy_migrate="$fixture/legacy-migrate"
+prepare_licensed_fixture legacy-migrate
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --legacy-license-upgrade gays-sq --components contract --version legacy-migrate \
+  bash "$wrapper" --candidate --legacy-license-upgrade gays-sq --components contract --version legacy-migrate \
     --output "$legacy_migrate" --runtime-approval-dir "$fixture/approvals" \
     --runtime-approval-approved --skip-host-deps --no-pause > "$fixture/legacy-migrate.log"
 tar -xOf "$legacy_migrate/deployment-assets-legacy-migrate.tar.gz" ./license-installation.json \
@@ -412,7 +466,7 @@ legacy_expect_rejected() {
   shift 2
   before="$(sha256sum "$fixture/docker-events" | awk '{print $1}')"
   if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-    bash "$wrapper" --version "$label" --output "$fixture/$label" --skip-host-deps \
+    bash "$wrapper" --candidate --version "$label" --output "$fixture/$label" --skip-host-deps \
       --preflight-only --no-pause "$@" > "$fixture/$label.log" 2>&1; then fail "legacy accepted $label"; fi
   grep -q "$expected" "$fixture/$label.log" || fail "legacy rejection guidance missing: $label"
   [[ ! -e "$fixture/$label" ]] || fail "legacy rejection created output: $label"
@@ -445,7 +499,7 @@ printf '{bad json\n' > "$fixture/approvals/runtime-license-contract_management-p
 legacy_expect_rejected legacy-bad-json '单个 JSON 对象' "${legacy_test_args[@]}"
 mv "$fixture/runtime-approval.saved" "$fixture/approvals/runtime-license-contract_management-prod.json"
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
-  bash "$wrapper" --version legacy-preflight --output "$fixture/legacy-preflight" \
+  bash "$wrapper" --candidate --version legacy-preflight --output "$fixture/legacy-preflight" \
     --skip-host-deps --preflight-only --no-pause "${legacy_test_args[@]}" > "$fixture/legacy-preflight.log"
 [[ ! -e "$fixture/legacy-preflight" ]] || fail 'legacy preflight created output'
 grep -q '构建前检查通过' "$fixture/legacy-preflight.log" || fail 'valid legacy preflight rejected'

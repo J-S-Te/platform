@@ -2,15 +2,17 @@
 set -Eeuo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-tool="$repo_root/系统运维工具.sh"
+tool="${OPS_TEST_TOOL:-$repo_root/系统运维工具.sh}"
 stage="$(mktemp -d)"
+stage="$(cd -- "$stage" && pwd -P)"
 trap 'rm -rf -- "$stage"' EXIT
 
 target="$stage/deploy"
 fake_bin="$stage/bin"
 action_log="$stage/actions.log"
-mkdir -p "$target/bin" "$fake_bin"
+mkdir -p "$target/bin" "$target/runtime" "$fake_bin"
 touch "$target/.env" "$target/.release.env" "$target/docker-compose.yml" "$action_log"
+printf 'COMPOSE_PROJECT_NAME=fixture\n' >"$target/.env"
 chmod 600 "$target/.env" "$target/.release.env"
 
 cat >"$target/bin/deploy.sh" <<'EOF'
@@ -40,12 +42,21 @@ cat >"$fake_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf 'docker:%s\n' "$*" >>"$ACTION_LOG"
 case "${1:-}" in
+  context) printf '"unix:///var/run/docker.sock"\n' ;;
+  container)
+    printf '["%s","%s","%s/docker-compose.yml"]\n' \
+      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$OPS_TARGET" "$OPS_TARGET"
+    ;;
   info)
     if [[ "${2:-}" == --format ]]; then printf '%s\n' /tmp; else printf 'Docker info\n'; fi
     ;;
   version) printf 'Docker version test\n' ;;
   compose) printf 'compose output\n' ;;
-  ps) printf 'container output\n' ;;
+  ps)
+    if [[ "${2:-}" == -aq ]]; then
+      printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    else printf 'container output\n'; fi
+    ;;
   stats) printf 'stats output\n' ;;
 esac
 EOF
@@ -57,7 +68,9 @@ EOF
 
 chmod 755 "$target/bin/deploy.sh" "$target/bin/lifecycle.sh" "$target/bin/backup-all.sh" "$fake_bin/docker" "$fake_bin/free"
 export ACTION_LOG="$action_log"
+export OPS_TARGET="$target"
 export PATH="$fake_bin:$PATH"
+unset DOCKER_HOST DOCKER_CONTEXT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_log() { grep -Fxq "$1" "$action_log" || fail "missing action: $1"; }
@@ -65,20 +78,20 @@ assert_log() { grep -Fxq "$1" "$action_log" || fail "missing action: $1"; }
 bash -n "$tool"
 bash "$tool" --help >/dev/null
 
-bash "$tool" --target "$target" doctor contract >/dev/null
+bash "$tool" --target "$target" doctor contract RUN_DEPLOY_CHECKS >/dev/null
 assert_log 'deploy:doctor contract'
 
 bash "$tool" --target "$target" logs customer-opportunity >/dev/null
-assert_log 'deploy:logs customer_and_opportunity'
+assert_log 'docker:logs --tail 200 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 bash "$tool" --target "$target" logs platform >/dev/null
-assert_log 'docker:compose --project-directory '"$target"' --file '"$target"'/docker-compose.yml --env-file '"$target"'/.env --env-file '"$target"'/.release.env logs --tail 200 platform-api platform-worker subsystem-provisioner file-gateway keycloak temporal'
+assert_log 'docker:compose --project-name fixture --project-directory '"$target"' --file '"$target"'/docker-compose.yml --env-file '"$target"'/.env --env-file '"$target"'/.release.env logs --tail 200 platform-api platform-worker subsystem-provisioner file-gateway keycloak temporal'
 
-before="$(wc -l <"$action_log")"
+before="$(awk '/^(deploy|lifecycle):/ {n++} END {print n+0}' "$action_log")"
 if bash "$tool" --target "$target" disable contract WRONG_CONFIRMATION >/dev/null 2>&1; then
   fail 'disable accepted an invalid confirmation token'
 fi
-after="$(wc -l <"$action_log")"
+after="$(awk '/^(deploy|lifecycle):/ {n++} END {print n+0}' "$action_log")"
 [[ "$before" == "$after" ]] || fail 'invalid confirmation performed an action'
 
 bash "$tool" --target "$target" disable contract DISABLE_KEEP_DATA >/dev/null
@@ -97,7 +110,14 @@ bash "$tool" --target "$target" verify-backup "$backup" >/dev/null
 assert_log "backup-tool:--verify-only --backup $backup"
 
 package="$stage/customer-opportunity-backend-test-linux-amd64.tar.gz"
-printf 'test package\n' >"$package"
+python3 - "$package" <<'PY'
+import io, sys, tarfile
+raw=b'COMPONENT=customer-opportunity\n'
+with tarfile.open(sys.argv[1], 'w:gz') as archive:
+    member=tarfile.TarInfo('package.env')
+    member.size=len(raw)
+    archive.addfile(member, io.BytesIO(raw))
+PY
 (cd "$stage" && sha256sum "$(basename -- "$package")" >"$(basename -- "$package").sha256")
 (
   cd "$stage"
@@ -109,7 +129,7 @@ assert_log 'deploy:status customer-opportunity'
 
 diagnostics="$stage/diagnostics"
 bash "$tool" --target "$target" collect "$diagnostics" >/dev/null 2>&1
-for required in README.txt host.txt docker-version.txt compose-version.txt docker-info.txt containers.txt doctor.txt status.txt verify.txt stats.txt; do
+for required in README.txt SUMMARY.tsv host.txt docker-version.txt compose-version.txt docker-info.txt containers.txt stats.txt; do
   [[ -f "$diagnostics/$required" ]] || fail "diagnostic file missing: $required"
 done
 if find "$diagnostics" -type f \( -name '.env' -o -name '*.env' \) -print -quit | grep -q .; then

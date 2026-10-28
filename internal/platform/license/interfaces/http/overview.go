@@ -3,6 +3,8 @@ package licensehttp
 import (
 	"context"
 	"errors"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	core "github.com/J-S-Te/license-core"
 	"net/http"
 	"time"
 
@@ -24,11 +26,12 @@ type RuntimeObserver interface {
 }
 
 type overviewLicense struct {
-	Status    string `json:"status"`
-	Revision  uint64 `json:"revision"`
-	Version   uint64 `json:"version"`
-	NotBefore int64  `json:"not_before"`
-	ExpiresAt int64  `json:"expires_at"`
+	Initialized bool   `json:"initialized"`
+	Status      string `json:"status"`
+	Revision    uint64 `json:"revision"`
+	Version     uint64 `json:"version"`
+	NotBefore   int64  `json:"not_before"`
+	ExpiresAt   int64  `json:"expires_at"`
 }
 
 type overviewRegistration struct {
@@ -38,6 +41,8 @@ type overviewRegistration struct {
 }
 
 type overviewMember struct {
+	ReadyFresh     bool       `json:"ready_fresh"`
+	AckCurrent     bool       `json:"ack_current"`
 	ServiceID      string     `json:"service_id"`
 	ReadyAt        *time.Time `json:"ready_at"`
 	IssuedRevision uint64     `json:"issued_revision"`
@@ -54,6 +59,7 @@ type overviewEnforcement struct {
 }
 
 type licenseOverview struct {
+	Activation           overviewActivation                 `json:"activation"`
 	Application          string                             `json:"application"`
 	Environment          string                             `json:"environment"`
 	License              overviewLicense                    `json:"license"`
@@ -66,8 +72,9 @@ type licenseOverview struct {
 	CheckedAt            time.Time                          `json:"checked_at"`
 }
 
-// ConfigureOverview 挂接许可证状态读取与普通运行观察。environment 与正式证据共用，
-// 但观察本身不依赖批准材料；未配置观察时页面显示 UNKNOWN，不得解释为已停止。
+// ConfigureOverview 用途：挂接许可证事实读取和部署环境。
+// 参数：state 为可信状态读取器，environment 为已配置环境。
+// 返回值：无。
 func (h *RuntimeHandler) ConfigureOverview(state licenseStateReader, environment string) {
 	h.state = state
 	if environment != "" {
@@ -80,6 +87,9 @@ func (h *RuntimeHandler) ConfigureObserver(observer RuntimeObserver) {
 	h.observer = observer
 }
 
+// Overview 用途：分别读取许可证、登记、运行及激活事实。
+// 参数：w 为响应，r 为带权限的读取请求。
+// 返回值：无；通过响应返回事实，存储失败不伪造状态。
 func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	if _, ok := principal(w, r, false); !ok {
 		return
@@ -125,6 +135,8 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 			members = append(members, overviewMember{
 				ServiceID: member.ServiceID, ReadyAt: member.ReadyAt,
 				IssuedRevision: member.IssuedRevision, AckRevision: member.AckRevision, AckAt: member.AckAt,
+				ReadyFresh: overviewFresh(member.ReadyAt, checkedAt),
+				AckCurrent: status.SnapshotCurrent && member.IssuedRevision == status.Revision && member.AckRevision == status.Revision && overviewFresh(member.ReadyAt, checkedAt) && overviewFresh(member.AckAt, checkedAt),
 			})
 		}
 		enforcementState := string(status.State)
@@ -139,6 +151,8 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, coordination.ErrNotReady):
 		out.Registration = overviewRegistration{Status: "UNREGISTERED"}
 		out.Enforcement = overviewEnforcement{Status: "UNREGISTERED", Members: []overviewMember{}}
+	case errors.Is(err, domain.ErrNotInitialized), errors.Is(err, domain.ErrClock), errors.Is(err, domain.ErrCorrupt):
+		// 不能从协调器暂不可读反推未登记；许可证事实仍可准确展示初始化/时钟状态。
 	case errors.Is(err, coordination.ErrInvalid):
 		writeError(w, r, domain.ErrInvalid)
 		return
@@ -155,6 +169,13 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out.License = licenseFact
+	if status.DeploymentRevision != licenseFact.Revision {
+		out.Enforcement.SnapshotCurrent = false
+		for i := range out.Enforcement.Members {
+			out.Enforcement.Members[i].AckCurrent = false
+		}
+	}
+	out.Activation = projectOverviewActivation(out, status.UpdatedAt, checkedAt)
 	if out.License.Status == "INVALID" {
 		out.BlockingReasons = append(out.BlockingReasons, "LICENSE_STATE_INVALID")
 	}
@@ -169,8 +190,12 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	if out.Registration.Status == "UNREGISTERED" {
 		out.BlockingReasons = append(out.BlockingReasons, "RUNTIME_NOT_REGISTERED")
 	}
-	if out.License.Status != "VALID" {
+	if out.License.Status == "NO_LICENSE" || out.License.Status == "NOT_PURCHASED" || out.License.Status == "EXPIRED" {
 		out.AllowedActions = append(out.AllowedActions, "IMPORT_LICENSE")
+	}
+	if p, ok := authctx.PrincipalFromContext(r.Context()); ok && overviewHasPermission(p.PermissionCodes, "platform:application:read") &&
+		(out.Registration.Status == "UNREGISTERED" || out.Activation.Status == "STALLED") {
+		out.AllowedActions = append(out.AllowedActions, "OPEN_ACCESS_WIZARD")
 	}
 	if h.observer != nil {
 		observation, observeErr := h.observer.ObserveLicenseRuntime(r.Context(), application, h.environment)
@@ -189,38 +214,64 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "运行时授权概览", out)
 }
 
+// readOverviewLicense 用途：按生效时间和最高观测时间投影许可证事实。
+// 参数：ctx 为上下文，reader 为可信读取器，application 为系统，now 为时间。
+// 返回值：返回当前或待生效许可事实；存储读取失败返回错误。
 func readOverviewLicense(ctx context.Context, reader licenseStateReader, application string, now time.Time) (overviewLicense, error) {
 	state, err := reader.Read(ctx)
 	switch {
 	case errors.Is(err, domain.ErrNotInitialized):
 		return overviewLicense{Status: "NO_LICENSE"}, nil
 	case errors.Is(err, domain.ErrClock), errors.Is(err, domain.ErrCorrupt):
-		return overviewLicense{Status: "INVALID"}, nil
+		return overviewLicense{Status: "INVALID", Initialized: true}, nil
 	case err != nil:
 		return overviewLicense{}, err
 	}
-	out := overviewLicense{Revision: state.Revision, Version: state.CurrentVersion}
-	if state.Current == nil {
+	effective := now.Unix()
+	if state.HighestObservedAt > effective {
+		effective = state.HighestObservedAt
+	}
+	selected := state.Current
+	if overviewApplicationLicense(selected, application) == nil && overviewApplicationLicense(state.Pending, application) != nil {
+		selected = state.Pending
+	}
+	out := overviewLicense{Initialized: true, Revision: state.Revision, Version: state.CurrentVersion}
+	if selected == nil {
 		out.Status = "NO_LICENSE"
 		return out, nil
 	}
-	out.Version = state.Current.Version
-	out.NotBefore = state.Current.NotBefore
-	for _, licensed := range state.Current.Applications {
-		if licensed.Code != application {
-			continue
-		}
-		out.NotBefore = licensed.NotBefore
-		out.ExpiresAt = licensed.ExpiresAt
-		if now.Unix() < state.Current.NotBefore || now.Unix() < licensed.NotBefore {
-			out.Status = "NOT_EFFECTIVE"
-		} else if now.Unix() >= licensed.ExpiresAt {
-			out.Status = "EXPIRED"
-		} else {
-			out.Status = "VALID"
-		}
+	out.Version, out.NotBefore = selected.Version, selected.NotBefore
+	licensed := overviewApplicationLicense(selected, application)
+	if licensed == nil {
+		out.Status = "NOT_PURCHASED"
 		return out, nil
 	}
-	out.Status = "NOT_PURCHASED"
+	out.NotBefore, out.ExpiresAt = licensed.NotBefore, licensed.ExpiresAt
+	if selected.NotBefore > out.NotBefore {
+		out.NotBefore = selected.NotBefore
+	}
+	switch {
+	case effective < out.NotBefore:
+		out.Status = "NOT_EFFECTIVE"
+	case effective >= licensed.ExpiresAt:
+		out.Status = "EXPIRED"
+	default:
+		out.Status = "VALID"
+	}
 	return out, nil
+}
+
+// overviewApplicationLicense 用途：按系统编码查找已验签许可证的权益。
+// 参数：license 为已验签许可，application 为系统编码。
+// 返回值：返回匹配权益；不存在时返回 nil。
+func overviewApplicationLicense(license *core.License, application string) *core.Application {
+	if license == nil {
+		return nil
+	}
+	for i := range license.Applications {
+		if license.Applications[i].Code == application {
+			return &license.Applications[i]
+		}
+	}
+	return nil
 }

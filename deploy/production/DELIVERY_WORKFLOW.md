@@ -164,3 +164,19 @@ sudo bash ./服务器一键离线部署.sh \
 材料检查程序异常、输出无效或返回 BLOCKED 时拒绝构建。计划基线必须来自 READY 报告；完整计划比较组件范围及现场指纹，资产替换后的兼容性检查同时复核运行配置和兼容性声明指纹，不能凭旧声明继续。
 
 显式使用 `--plan-baseline` 的首次升级会在安装运行锁内、会话创建前再次核验完整计划，防止预检与人工确认期间发生的现场变化被遗漏。续跑身份绑定同一路径和原计划摘要，不能替换计划后复用旧会话。安装执行锁只协调同一安装入口；独立运维操作仍需遵循各自发布锁和受控窗口。
+
+## 构建前正式发布检查（2026-10-27）
+
+根目录 `一键制作离线镜像包.sh` 默认按正式发布检查输入，`--preflight-only` 也执行相同检查。它在任何镜像 build/save 前检查所选业务、平台、前端的外部 FROM（含多阶段和 ARG），错误包含 Dockerfile 路径与行号。不自动选择或改写摘要。
+
+先配置真实构建身份 `UIP_BUILD_BUILDER_ID`，需与后续信任策略匹配。命令行未设置 `UIP_BUILD_INVOCATION_ID` 时自动生成本次唯一 UUID，不生成或猜测构建身份；Web 生成的作业脚本已设置这两个变量。不要复用旧 invocation 或冒用其他构建者身份。正式签名原本就要求这些证据字段，本次把失败提前到构建前。
+
+完整构建先只读检查公共基础镜像的目标平台和 RepoDigest；冷缓存或本地仅有其他架构时，自动通过仓库清单只读确认 linux/amd64 与摘要，不要求人工逐个拉取。正常构建随后沿用原流程自动准备/拉取全部公共镜像，并在第一条 build/save 前核验实际来源；`--preflight-only` 只解析元数据，不执行 pull/build/save。仓库无法解析或没有目标架构时提前报错。七项公共镜像证据不能代替业务 Dockerfile 检查。构建后的实际镜像身份、来源证据、许可证和正式签名门禁仍必须通过；预检通过不是交付验收。
+
+只制作开发/审核用未签候选时，显式加 `--candidate`（可与 `--preflight-only` 配合）；此模式允许尚不满足正式签名条件的输入，不允许同时传正式签名密钥，不绕过原有许可证、来源或完整性检查。底层 `build-offline-packages.sh` 保留候选构建用途，正式日常交付使用根入口。
+
+`--extend-from` 共享指纹不匹配时，使用基线 SHA256SUMS 绑定的 `source-input-index.tsv` 列出共享文件变化；旧包没有有效索引时只报告无法定位，不猜测变化来源。合同业务 Dockerfile 不属于 shared 指纹范围。历史 r1 材料缺失，不能据此还原当时哪些共享文件发生变化。
+
+本次不增加镜像缓存或断点续跑参数。若构建已成功而签名/总归档未完成，应先核验冻结介质再使用现有 `finalize` / `package`；不要把修改当前 Dockerfile 后补证据当作旧镜像的真实构建证明。
+
+公共镜像平台检查兼容 OrbStack 的描述符布局：顶层 Os/Architecture 为空时，只接受有效单镜像 Descriptor.platform 的 linux/amd64；不把“未知平台”当成功。仓库索引按 linux/amd64 描述符检查，单平台清单按固定 digest 读取 Image 配置确认；实现参考 Docker 官方 imagetools inspect 的 Manifest/Image JSON 输出（https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/）。

@@ -64,6 +64,183 @@ done
 contains "$backup_all" 'BINLOG_POSITIONS=required' 'system backup does not require binlog position sidecars'
 contains "$backup_keycloak" 'keycloak-*.sql.gz.binlog-position' 'Keycloak retention does not include position sidecars'
 
+# 全新首装回归：compose 预建的空命名卷不得触发 fail-closed；有数据、非 local 或无法核验的卷仍必须拒绝。
+(
+  set -Eeuo pipefail
+  fixture="$(mktemp -d "${TMPDIR:-/tmp}/fresh-volume-test.XXXXXX")"
+  trap 'rm -rf -- "$fixture"' EXIT
+  install -d "$fixture/deploy/bin" "$fixture/stub" "$fixture/empty-volume" "$fixture/data-volume"
+  printf 'stale database page\n' >"$fixture/data-volume/stale.dat"
+  # 宿主机 Bash 3 不支持动态文件描述符；仅在临时夹具中替换锁描述符分配，生产脚本保持不变。
+  awk '
+    /exec \{backup_lock_fd\}>/ {
+      print "backup_lock_fd=11"
+      sub(/exec \{backup_lock_fd\}>/, "exec 11>")
+    }
+    { print }
+  ' "$backup_all" >"$fixture/deploy/bin/backup-all.sh"
+  printf '%s\n' 'COMPOSE_PROJECT_NAME=fresh-volume-fixture' >"$fixture/deploy/.env"
+  printf '%s\n' 'PLATFORM_IMAGE=fixture' >"$fixture/deploy/.release.env"
+  printf '%s\n' 'services: {}' >"$fixture/deploy/docker-compose.yml"
+  cat >"$fixture/stub/flock" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fixture/stub/docker" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ "$1" == compose ]]; then
+  case "$*" in
+    *' config --services')
+      printf '%s\n' platform-mysql file-gateway-mysql
+      ;;
+    *' ps -a -q '*)
+      service=''
+      for argument in "$@"; do service="$argument"; done
+      if [[ " ${EXISTING_CONTAINERS:-} " == *" $service "* ]]; then
+        printf '%s\n' fixture-container
+      fi
+      ;;
+    *) exit 90 ;;
+  esac
+elif [[ "$1" == volume && "${2:-}" == ls ]]; then
+  [[ "${VOLUMES_FAILED:-false}" != true ]] || exit 9
+  for argument in "$@"; do
+    case "$argument" in
+      label=com.docker.compose.volume=*)
+        name="${argument#label=com.docker.compose.volume=}"
+        if [[ " ${EXISTING_VOLUMES:-} " == *" $name "* ]]; then
+          printf 'fixture_%s\n' "$name"
+        fi
+        ;;
+    esac
+  done
+elif [[ "$1" == volume && "${2:-}" == inspect ]]; then
+  [[ "${INSPECT_FAILED:-false}" != true ]] || exit 9
+  printf '%s|%s\n' "${VOLUME_DRIVER:-local}" "${VOLUME_MOUNTPOINT:?}"
+else
+  exit 91
+fi
+EOF
+  chmod 750 "$fixture/stub/flock" "$fixture/stub/docker"
+  run_fresh_backup() {
+    local output="$1"
+    shift
+    env PATH="$fixture/stub:$PATH" "$@" bash "$fixture/deploy/bin/backup-all.sh" --if-existing >"$output" 2>&1
+  }
+
+  # 1) 数据库卷与网关卷均为空且无容器：全新首装必须成功跳过。
+  if ! run_fresh_backup "$fixture/empty.out" \
+      EXISTING_VOLUMES='platform-mysql-data file-gateway-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/empty-volume"; then
+    sed -n '1,120p' "$fixture/empty.out" >&2
+    fail 'fresh install with only empty pre-created volumes was rejected'
+  fi
+  contains "$fixture/empty.out" 'has never stored data and has no platform-mysql container' \
+    'fresh install skip did not explain the empty database volume'
+  contains "$fixture/empty.out" 'has no file-gateway-mysql container' \
+    'fresh install skip did not explain the empty gateway volume'
+  if grep -Fq 'exists without a restorable' "$fixture/empty.out"; then
+    fail 'fresh install with empty volumes produced the fail-closed database message'
+  fi
+
+  # 2) 有数据的数据库卷仍必须 fail-closed，并保留原文案。
+  if run_fresh_backup "$fixture/data.out" \
+      EXISTING_VOLUMES='platform-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/data-volume"; then
+    fail 'backup accepted a data-bearing database volume without its container'
+  fi
+  contains "$fixture/data.out" 'database volume platform-mysql-data exists without a restorable platform-mysql container' \
+    'data-bearing database volume rejection lost its fail-closed message'
+
+  # 3) 非 local driver 即使目录为空也按已有数据处理。
+  if run_fresh_backup "$fixture/foreign.out" \
+      EXISTING_VOLUMES='platform-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/empty-volume" \
+      VOLUME_DRIVER=nfs; then
+    fail 'backup skipped a non-local database volume'
+  fi
+  contains "$fixture/foreign.out" 'database volume platform-mysql-data exists without a restorable' \
+    'non-local volume did not fail closed with the database volume message'
+
+  # 4) 无法核验空卷（docker volume inspect 失败）时必须按已有数据处理。
+  if run_fresh_backup "$fixture/inspect-failed.out" \
+      EXISTING_VOLUMES='platform-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/empty-volume" \
+      INSPECT_FAILED=true; then
+    fail 'backup skipped a database volume that could not be inspected'
+  fi
+  contains "$fixture/inspect-failed.out" 'database volume platform-mysql-data exists without a restorable' \
+    'unverifiable volume did not fail closed'
+
+  # 5) 只有 file-gateway 空卷也必须被识别为全新首装。
+  if ! run_fresh_backup "$fixture/gateway-empty.out" \
+      EXISTING_VOLUMES='file-gateway-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/empty-volume"; then
+    sed -n '1,120p' "$fixture/gateway-empty.out" >&2
+    fail 'fresh install with an empty gateway volume was rejected'
+  fi
+  contains "$fixture/gateway-empty.out" 'file-gateway-mysql-data has never stored data' \
+    'fresh install skip did not explain the empty gateway volume'
+
+  # 6) 网关卷有数据或网关容器存在时仍拒绝跳过备份。
+  if run_fresh_backup "$fixture/gateway-data.out" \
+      EXISTING_VOLUMES='file-gateway-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/data-volume"; then
+    fail 'backup skipped a data-bearing gateway volume'
+  fi
+  contains "$fixture/gateway-data.out" 'gateway data exists without the core databases; cannot skip backup' \
+    'gateway data rejection lost its fail-closed message'
+  if run_fresh_backup "$fixture/gateway-container.out" \
+      EXISTING_CONTAINERS='file-gateway-mysql'; then
+    fail 'backup skipped backup even though the gateway container exists'
+  fi
+  contains "$fixture/gateway-container.out" 'gateway data exists without the core databases; cannot skip backup' \
+    'existing gateway container rejection lost its fail-closed message'
+
+  # 7) 没有任何卷和容器时保持原有全新首装早退语义。
+  if ! run_fresh_backup "$fixture/fresh.out"; then
+    sed -n '1,120p' "$fixture/fresh.out" >&2
+    fail 'plain fresh install early exit regressed'
+  fi
+  contains "$fixture/fresh.out" 'Fresh installation: no database containers or database data' \
+    'plain fresh install early exit message regressed'
+
+  # 8) 直接验证空卷判定边界：local driver、绝对路径、非符号链接空目录缺一不可。
+  volume_function="$(sed -n '/^volume_has_no_data() {$/,/^}$/p' "$backup_all")"
+  [[ -n "$volume_function" ]] || fail 'backup-all is missing the volume_has_no_data helper'
+  (
+    eval "$volume_function"
+    volume_driver=local
+    volume_mountpoint="$fixture/empty-volume"
+    inspect_failed=false
+    docker() {
+      if [[ "$1" == volume && "${2:-}" == inspect ]]; then
+        [[ "$inspect_failed" != true ]] || return 9
+        printf '%s|%s\n' "$volume_driver" "$volume_mountpoint"
+      else
+        return 91
+      fi
+    }
+    volume_has_no_data fixture-volume || fail 'empty local volume was not detected as unused'
+    volume_driver=nfs
+    if volume_has_no_data fixture-volume; then fail 'non-local volume was treated as unused'; fi
+    volume_driver=local
+    volume_mountpoint="$fixture/data-volume"
+    if volume_has_no_data fixture-volume; then fail 'data-bearing volume was treated as unused'; fi
+    volume_mountpoint=relative/volume/path
+    if volume_has_no_data fixture-volume; then fail 'relative volume mountpoint was treated as unused'; fi
+    volume_mountpoint="$fixture/volume-link"
+    ln -s "$fixture/empty-volume" "$fixture/volume-link"
+    if volume_has_no_data fixture-volume; then fail 'symbolic-link volume mountpoint was treated as unused'; fi
+    volume_mountpoint="$fixture/empty-volume"
+    inspect_failed=true
+    if volume_has_no_data fixture-volume; then fail 'unverifiable volume was treated as unused'; fi
+    inspect_failed=false
+    if volume_has_no_data $'one\ntwo'; then fail 'ambiguous multiple volume match was treated as unused'; fi
+  )
+)
+
 # 从脚本正文取出解析函数执行，防止测试复制一份实现。
 (
   set -Eeuo pipefail

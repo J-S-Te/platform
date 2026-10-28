@@ -1,6 +1,8 @@
 package application
 
-// SubsystemUpdateServiceCredentialRequirements 返回受控更新时需要确保的服务凭据需求（逐行自既有实现复制）。
+// SubsystemUpdateServiceCredentialRequirements 返回受控更新必须重新交付的服务凭据需求。
+// 参数：applicationCode 为目标应用编码。
+// 返回值：服务用途、最小scope及只写密钥的补发策略。
 func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []SubsystemUpdateServiceCredentialRequirement {
 	fileGateway := SubsystemUpdateServiceCredentialRequirement{
 		Purpose: ServiceCredentialFileGatewayWrite, Suffix: "file-gateway-writer",
@@ -87,6 +89,7 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "结算与开票管理系统 Audit Publisher", Scopes: []string{"audit.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialNotificationIngest, Suffix: "notification-publisher", ClientName: "结算与开票管理系统 Notification Publisher", Scopes: []string{"notification.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialOwnerDirectoryRead, Suffix: "owner-directory", ClientName: "结算与开票管理系统 Owner Directory Reader", Scopes: []string{"owner_directory.read"}, Rotate: true},
+			{Purpose: ServiceCredentialSettlementProjectReferenceRead, Suffix: "project-reference", ClientName: "结算项目引用只读", Scopes: []string{"settlement.project_reference.read"}, Rotate: true},
 			fileGateway,
 		}
 	default:

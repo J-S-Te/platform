@@ -406,6 +406,19 @@ database_volume_for_service() {
     data-analysis-mysql) printf data-analysis-mysql-data ;;
   esac
 }
+# 全新首装时 compose 可能一次性创建项目全部命名卷。只有确认卷从未写入任何数据
+# （local driver、真实存在的非符号链接空目录）才允许跳过；其余情况一律按“已有数据”处理。
+volume_has_no_data() {
+  local volume="$1" metadata driver mountpoint entry
+  [[ -n "$volume" && "$volume" != *$'\n'* ]] || return 1
+  metadata="$(docker volume inspect --format '{{.Driver}}|{{.Mountpoint}}' "$volume" 2>/dev/null)" || return 1
+  driver="${metadata%%|*}"
+  mountpoint="${metadata#*|}"
+  [[ "$driver" == local ]] || return 1
+  [[ "$mountpoint" == /* && -d "$mountpoint" && ! -L "$mountpoint" ]] || return 1
+  entry="$(find "$mountpoint" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 1
+  [[ -z "$entry" ]]
+}
 compose_project="$(env_value_from "$runtime_file" COMPOSE_PROJECT_NAME)"
 compose_project="${compose_project:-basic-platform-production}"
 backed_up=0
@@ -423,6 +436,10 @@ for service in "${services[@]}"; do
     retained_volume="$(docker volume ls -q \
       --filter "label=com.docker.compose.project=$compose_project" \
       --filter "label=com.docker.compose.volume=$database_volume")" || { echo "cannot inspect retained database volumes: $service" >&2; exit 1; }
+    if [[ -n "$retained_volume" ]] && volume_has_no_data "$retained_volume"; then
+      echo "fresh installation: database volume $database_volume has never stored data and has no $service container; skipping $service backup"
+      continue
+    fi
     [[ -z "$retained_volume" ]] || {
       echo "database volume $database_volume exists without a restorable $service container; re-enable/start the database before creating a complete disaster backup" >&2
       exit 1
@@ -475,8 +492,14 @@ if ((backed_up == 0)) && [[ "$if_existing" == true ]]; then
   fi
   gateway_volume="$(docker volume ls -q --filter "label=com.docker.compose.project=$compose_project" \
     --filter 'label=com.docker.compose.volume=file-gateway-mysql-data')" || { echo 'cannot inspect retained gateway volume' >&2; exit 1; }
-  [[ -z "$gateway_container" && -z "$gateway_volume" ]] || { echo 'gateway data exists without the core databases; cannot skip backup' >&2; exit 1; }
-  echo 'Fresh installation: no database containers or retained database volumes; no existing database to back up.'
+  if [[ -n "$gateway_container" ]] || { [[ -n "$gateway_volume" ]] && ! volume_has_no_data "$gateway_volume"; }; then
+    echo 'gateway data exists without the core databases; cannot skip backup' >&2
+    exit 1
+  fi
+  if [[ -n "$gateway_volume" ]]; then
+    echo 'fresh installation: File Gateway volume file-gateway-mysql-data has never stored data and has no file-gateway-mysql container; skipping gateway database backup'
+  fi
+  echo 'Fresh installation: no database containers or database data; no existing database to back up.'
   exit 0
 fi
 ((backed_up > 0)) || { echo "no running MySQL service was found" >&2; exit 1; }

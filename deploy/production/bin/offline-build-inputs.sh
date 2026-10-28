@@ -94,3 +94,10 @@ offline_build_input_index() (
   mv -f -- "$temporary" "$output"
   trap - EXIT
 )
+
+# Keep formal preflight and actual common builds on the same image list.
+offline_common_base_images() {
+  printf '%s\n' mysql:8.4 quay.io/keycloak/keycloak:26.2 temporalio/auto-setup:1.29.7 \
+    metabase/metabase:v0.53.7 prom/prometheus:v3.5.0 prom/node-exporter:v1.9.1 \
+    registry:2.8.3 tecnativa/docker-socket-proxy:v0.5.0
+}

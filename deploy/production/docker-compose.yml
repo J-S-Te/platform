@@ -18,6 +18,7 @@ services:
       # H5 修复：Keycloak 凭据改为必填（:?），漏配时 compose 直接失败，不再以文档化占位口令启动。
       MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set}
       MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD:?KEYCLOAK_DB_ROOT_PASSWORD must be set}
+    command: ["--log-bin-trust-function-creators=1"]
     volumes:
       - keycloak-mysql-data:/var/lib/mysql
       # 宿主机目录须为 0700；仅存放加密后的、访问受控的逻辑备份。
@@ -48,7 +49,8 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    # 迁移 000130 的 CREATE TRIGGER 在 MySQL 8.4 默认 log_bin=1 下对无 SUPER 用户报 1419；project_management 000033 含存储过程，各库一致信任函数创建者。
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - platform-mysql-data:/var/lib/mysql
     networks: [application]
@@ -76,7 +78,7 @@ services:
       MYSQL_USER: contract
       MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - contract-mysql-data:/var/lib/mysql
       - ./mysql-init/contract-databases.sql:/docker-entrypoint-initdb.d/010_contract_databases.sql:ro
@@ -107,6 +109,7 @@ services:
       MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
       MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:?FILE_GATEWAY_DB_PASSWORD must be set}
       MYSQL_ROOT_PASSWORD: ${FILE_GATEWAY_DB_ROOT_PASSWORD:?FILE_GATEWAY_DB_ROOT_PASSWORD must be set}
+    command: ["--log-bin-trust-function-creators=1"]
     volumes:
       - file-gateway-mysql-data:/var/lib/mysql
     networks: [application]
@@ -818,7 +821,7 @@ services:
       MYSQL_USER: project
       MYSQL_PASSWORD: ${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${PROJECT_MYSQL_ROOT_PASSWORD:-PENDING_PROJECT_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - project-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -999,7 +1002,7 @@ services:
       MYSQL_USER: customer
       MYSQL_PASSWORD: ${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${CUSTOMER_MYSQL_ROOT_PASSWORD:-PENDING_CUSTOMER_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - customer-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -1544,7 +1547,7 @@ services:
       MYSQL_USER: portal
       MYSQL_PASSWORD: ${PORTAL_MYSQL_PASSWORD:-PENDING_PORTAL_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${PORTAL_MYSQL_ROOT_PASSWORD:-PENDING_PORTAL_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - portal-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -1757,7 +1760,7 @@ services:
       MYSQL_USER: settlement
       MYSQL_PASSWORD: ${SETTLEMENT_MYSQL_PASSWORD:-PENDING_SETTLEMENT_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${SETTLEMENT_MYSQL_ROOT_PASSWORD:-PENDING_SETTLEMENT_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - settlement-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -1960,7 +1963,7 @@ services:
       MYSQL_USER: dashboard
       MYSQL_PASSWORD: ${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${DASHBOARD_MYSQL_ROOT_PASSWORD:-PENDING_DASHBOARD_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - data-analysis-mysql-data:/var/lib/mysql
       - ./mysql-init/data-analysis-metabase.sql:/docker-entrypoint-initdb.d/020_metabase.sql:ro

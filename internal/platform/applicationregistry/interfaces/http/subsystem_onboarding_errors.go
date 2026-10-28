@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// writeError 输出接入错误及安全的受控恢复指引。
+// 参数：writer和request为HTTP上下文，err为原因，provisioningStages为失败阶段。
+// 返回值：无；通过HTTP输出错误。
 func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWriter, request *stdhttp.Request, err error, provisioningStages ...string) {
 	var onboardingConflict *application.SubsystemOnboardingConflict
 	switch {
@@ -29,6 +32,16 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 				"next_action":      "该环境的控制面记录已存在。子系统日常代码、镜像、功能模块和业务迁移发布无需执行接入或撤销脚本；仅基础设施入口参数变更时使用环境、登录目标或 OAuth 客户端的受控更新接口。若此前部署 Agent 失败，请先查询 subsystem-status，再使用 subsystem-retry，不要重复 onboard",
 			},
 		))
+	case errors.Is(err, errRelatedSettlementReferenceDependency):
+		handler.logger.Warn("subsystem source credential dependency unavailable",
+			"path", request.URL.Path, "source_application", "settlement", "error", err)
+		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+			"IAM_SUBSYSTEM_SETTLEMENT_REFERENCE_DEPENDENCY_REQUIRED",
+			"项目接入需要已登记的结算项目引用只读机器身份",
+			map[string]string{
+				"source_application": "settlement",
+				"next_action":        "请先在同一租户和环境接入或受控更新结算系统，补齐 settlement_project_reference_read 用途凭据，再重试项目接入或更新",
+			}))
 	case errors.Is(err, errRelatedContractDependency):
 		handler.logger.Warn("subsystem source credential dependency unavailable", "path", request.URL.Path, "source_application", "contract_management", "error", err)
 		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New("IAM_SUBSYSTEM_CONTRACT_DEPENDENCY_REQUIRED", "结算接入需要已登记的合同事件机器凭据", map[string]string{"source_application": "contract_management", "next_action": "请先在同一租户和环境接入或受控更新合同管理系统，补齐 settlement_contract_ingest 用途凭据，再重试结算接入或更新"}))

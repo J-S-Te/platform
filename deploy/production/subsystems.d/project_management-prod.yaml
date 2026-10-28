@@ -22,6 +22,10 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        SETTLEMENT_REFERENCE_ENABLED: "true"
+        SETTLEMENT_REFERENCE_AUDIENCE: basic-platform-application
+        SETTLEMENT_REFERENCE_ISSUER: basic-platform
+        SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         MYSQL_DSN: 'project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SESSION_COOKIE_NAME: project_management_session
@@ -68,6 +72,8 @@ runtime:
         FILE_GATEWAY_ENABLED: "true"
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind
       bindings:
+        SETTLEMENT_REFERENCE_CLIENT_ID: related_service.settlement.settlement_project_reference_read.client_id
+        SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE: environment
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id

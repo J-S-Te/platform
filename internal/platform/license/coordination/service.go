@@ -55,7 +55,7 @@ var containerPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 type Option func(*Service) error
 
 // WithApplicationEnvironment 绑定注册用的 OAuth/资料环境，独立于 APP_ENV
-//（如 prod 与 production 的差异）。该显式启动配置绝不从机器请求或许可证令牌推断。
+// （如 prod 与 production 的差异）。该显式启动配置绝不从机器请求或许可证令牌推断。
 func WithApplicationEnvironment(environment string) Option {
 	return func(s *Service) error {
 		if !identifier.MatchString(environment) {
@@ -65,6 +65,7 @@ func WithApplicationEnvironment(environment string) Option {
 		return nil
 	}
 }
+
 // NewService 构造协调服务；校验数据库、读取器、签名器与厂商公钥的合法性，
 // 任一无效返回 ErrInvalid。
 func NewService(db *gorm.DB, reader LicenseReader, vendor map[string]ed25519.PublicKey, signer Signer, now func() time.Time, options ...Option) (*Service, error) {
@@ -349,6 +350,7 @@ func matchesRuntimeMember(p appctx.Principal, m Member, environment string) bool
 	// 主键；Authenticate 已经把两个身份都对当前活动且绑定租户/应用/环境的行核对过。
 	return m.RetiredAt == nil && p.ClientID == m.OAuthClientID && p.ApplicationCode == m.Application && p.EnvironmentCode == m.Environment && m.Environment == environment
 }
+
 // Ready 记录机器成员的 READY 信号。输入按注册协议校验（V1 校验镜像/覆盖一致，
 // V2 校验持久身份与目录版本）；READY 只有在新鲜时间窗内才对 Ack 生效。
 func (s *Service) Ready(ctx context.Context, id string, in ReadyInput) error {
@@ -376,13 +378,32 @@ func contentDigest(a Application, d *domain.Deployment) string {
 	b, _ := json.Marshal([]any{a.State, a.RegistrationMode, a.CatalogVersion, a.MigrationEligible, d.CurrentDigest, d.PendingDigest, d.HighestVersion})
 	return hash(string(b))
 }
-// BeginActivation 在期望修订一致、全部在册成员 READY 且当前许可证允许变更时，
-// 把应用推进到 APPLYING 并清零所有成员的 ACK。激活同时撤销迁移资格。
+
+// BeginActivation 用途：兼容既有客户端的按执行修订激活入口。
+// 参数：ctx 为上下文，app 为系统，expected 为执行修订，actor 为操作者。
+// 返回值：返回就绪、许可、修订或持久化错误；新管理端使用双修订入口。
 func (s *Service) BeginActivation(ctx context.Context, app string, expected uint64, actor domain.Actor) error {
+	return s.beginActivation(ctx, app, expected, nil, actor)
+}
+
+// BeginActivationChecked 用途：将新管理端确认绑定到许可证域与应用两项修订。
+// 参数：ctx 为上下文，app 为应用，expected 为执行修订，licenseRevision 为许可修订，actor 为操作者。
+// 返回值：任一修订已变化时返回冲突，其余沿用既有激活校验。
+func (s *Service) BeginActivationChecked(ctx context.Context, app string, expected, licenseRevision uint64, actor domain.Actor) error {
+	return s.beginActivation(ctx, app, expected, &licenseRevision, actor)
+}
+
+// beginActivation 用途：在同一部署锁内核对确认与有效许可并推进激活。
+// 参数：ctx 为上下文，app 为应用，expected 为执行修订，licenseRevision 为可选许可修订，actor 为操作者。
+// 返回值：返回并发冲突、许可拒绝或事务错误，不重复创建成员。
+func (s *Service) beginActivation(ctx context.Context, app string, expected uint64, licenseRevision *uint64, actor domain.Actor) error {
 	if !validApplication(app) || !identifier.MatchString(actor.TenantID) || !identifier.MatchString(actor.UserID) {
 		return ErrInvalid
 	}
 	return s.lock(ctx, func(tx *gorm.DB, d *domain.Deployment, st domain.State) error {
+		if licenseRevision != nil && d.Revision != *licenseRevision {
+			return ErrConflict
+		}
 		var a Application
 		if e := tx.First(&a, "application = ?", app).Error; e != nil {
 			if errors.Is(e, gorm.ErrRecordNotFound) {
@@ -433,6 +454,7 @@ func (s *Service) BeginActivation(ctx context.Context, app string, expected uint
 		return tx.Create(&domain.Event{Kind: "ENFORCEMENT_APPLYING", Revision: d.Revision, TenantID: actor.TenantID, UserID: actor.UserID, CreatedAt: s.now().UTC()}).Error
 	})
 }
+
 // Snapshot 为机器成员签发（或复验既有）平台快照。内容摘要变化会撤销应用全部
 // 成员的 ACK；签发结果持久化前先经 verifyIssued 校验，防止落库不可验的快照。
 func (s *Service) Snapshot(ctx context.Context, id string) (SnapshotOutput, error) {
@@ -498,6 +520,7 @@ func (s *Service) Snapshot(ctx context.Context, id string) (SnapshotOutput, erro
 	})
 	return out, err
 }
+
 // Ack 确认成员已持久化当前修订的快照。校验链覆盖内容摘要、成员签发摘要与 READY
 // 新鲜度；V2 桥接应用在全员确认同一修订后升为内置模式，APPLYING 应用在全员 ACK
 // 后进入 ENFORCED。
@@ -588,6 +611,7 @@ func (s *Service) verifyIssued(m Member, a Application, d *domain.Deployment) er
 	}
 	return nil
 }
+
 // Status 返回应用的运行时协调状态；应用未注册或编码非法时分别返回 ErrNotReady/ErrInvalid。
 func (s *Service) Status(ctx context.Context, app string) (Status, error) {
 	var out Status

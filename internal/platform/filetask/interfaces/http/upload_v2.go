@@ -78,6 +78,7 @@ var uploadPolicies = map[string]uploadPolicy{
 	"project.report":                    policy("project", "report", false, "application/pdf"),
 	"project.capability.import":         policy("project", "capability-import", true, "text/csv"),
 	"project.detection-category.import": policy("project", "detection-category-import", true, "text/csv"),
+	"settlement.receipt.document":       policy("settlement", "receipt-document", false, "application/pdf", "image/png", "image/jpeg"),
 	"settlement.invoice.document":       policy("settlement", "invoice-document", false, "application/pdf", "image/png", "image/jpeg", "application/xml", "text/xml", "application/ofd"),
 }
 

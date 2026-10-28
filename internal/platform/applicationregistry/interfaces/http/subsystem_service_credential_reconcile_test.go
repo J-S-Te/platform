@@ -229,6 +229,9 @@ func TestEnsureUpdateServiceCredentialsRecreatesMissingCustomerSignedOpportunity
 	requireDeliveredCredential(t, credentials, application.ServiceCredentialContractSummaryRead, "new-secret")
 }
 
+// TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials 验证结算更新补齐所有独立用途。
+// 参数：t 为测试上下文。
+// 返回值：无。
 func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *testing.T) {
 	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
 		ID: "file-client-id", ApplicationID: "application-1", EnvironmentID: "environment-1",
@@ -257,12 +260,14 @@ func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *te
 		"settlement-prod-audit-publisher":        {"audit.ingest"},
 		"settlement-prod-notification-publisher": {"notification.ingest"},
 		"settlement-prod-owner-directory":        {"owner_directory.read"},
+		"settlement-prod-project-reference":      {"settlement.project_reference.read"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialAuditIngest:        "new-secret",
-		application.ServiceCredentialNotificationIngest: "new-secret",
-		application.ServiceCredentialOwnerDirectoryRead: "new-secret",
-		application.ServiceCredentialFileGatewayWrite:   "retry-secret",
+		application.ServiceCredentialAuditIngest:                    "new-secret",
+		application.ServiceCredentialSettlementProjectReferenceRead: "new-secret",
+		application.ServiceCredentialNotificationIngest:             "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead:             "new-secret",
+		application.ServiceCredentialFileGatewayWrite:               "retry-secret",
 	})
 }
 

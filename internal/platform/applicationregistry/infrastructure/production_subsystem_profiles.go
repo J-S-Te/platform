@@ -493,7 +493,13 @@ func validProductionGeneratedEnvironmentKey(value string) bool {
 	return strings.HasSuffix(value, "_KEY_BASE64") || strings.HasSuffix(value, "_PEPPER_BASE64") || value == "OIDC_CODEC_KEY"
 }
 
+// validProductionBindingSource 校验清单允许引用的受控输入字段。
+// 参数：source 为绑定来源。
+// 返回值：来源和字段是否受支持。
 func validProductionBindingSource(source string) bool {
+	if strings.HasPrefix(source, "related_service.settlement.settlement_project_reference_read.") {
+		return strings.TrimPrefix(source, "related_service.settlement.settlement_project_reference_read.") == "client_id"
+	}
 	switch source {
 	case "issuer", "oidc_backchannel_base_url", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
 		"tenant_id", "application_id", "application_code", "environment", "path_prefix", "upstream_url", "cookie_secure",
@@ -508,12 +514,13 @@ func validProductionBindingSource(source string) bool {
 	return len(parts) == 3 && parts[0] == "service" && validProductionTargetCode(parts[1], 64) && (parts[2] == "client_id" || parts[2] == "client_secret")
 }
 
-// productionServiceBindingAllowed 决定某服务用途绑定是否被允许。B2 解耦：清单显式声明
-// allowed_service_bindings 时按清单校验；未声明时回退到平台硬编码默认（保证既有行为不变）。
-// audit_ingest 是所有接入环境的基线能力，恒允许。
+// productionServiceBindingAllowed 按清单声明或兼容默认限制接收应用的绑定。
+// 参数：app 为接收应用清单，source 为待解析来源。
+// 返回值：是否允许该应用消费该用途或关联身份。
 func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest, source string) bool {
 	if strings.HasPrefix(source, "related_service.") {
-		return app.Code == "settlement" && validProductionBindingSource(source)
+		return (app.Code == "settlement" && strings.HasPrefix(source, "related_service.contract_management.settlement_contract_ingest.") ||
+			app.Code == "project_management" && strings.HasPrefix(source, "related_service.settlement.settlement_project_reference_read.")) && validProductionBindingSource(source)
 	}
 	parts := strings.Split(source, ".")
 	if len(parts) != 3 || parts[0] != "service" {

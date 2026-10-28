@@ -48,6 +48,7 @@ const (
 	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
 	ServiceCredentialContractApprovedRead               = "contract_approved_read"
 	ServiceCredentialProjectContractImport              = "project_contract_import"
+	ServiceCredentialSettlementProjectReferenceRead     = "settlement_project_reference_read"
 	ServiceCredentialSettlementContractIngest           = "settlement_contract_ingest"
 	ServiceCredentialPortalReportFileRead               = "portal_report_file_read"
 	ServiceCredentialPortalReportDownloadIdentityRead   = "portal_report_download_identity_read"
@@ -532,6 +533,7 @@ type integratedServicePurposeDefinition struct {
 }
 
 var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefinition{
+	ServiceCredentialSettlementProjectReferenceRead:     {ServiceCredentialSettlementProjectReferenceRead, "project-reference", "Settlement Project Reference Reader", "settlement.project_reference.read"},
 	ServiceCredentialAuditIngest:                        {ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
 	ServiceCredentialNotificationIngest:                 {ServiceCredentialNotificationIngest, "notification-publisher", "Notification Publisher", "notification.ingest"},
 	ServiceCredentialOwnerDirectoryRead:                 {ServiceCredentialOwnerDirectoryRead, "owner-directory", "Owner Directory Reader", "owner_directory.read"},
@@ -555,8 +557,9 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialFileGatewayWrite:                   {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
 }
 
-// hardcodedIntegratedServicePurposes 是平台内置默认的集成服务用途（不含 audit_ingest 基线）。
-// 清单未声明 allowed_service_bindings 时使用，保证既有行为不变。
+// hardcodedIntegratedServicePurposes 返回未声明清单用途时的应用默认集成能力。
+// 参数：applicationCode 为目标应用编码。
+// 返回值：默认用途，不含所有应用必有的审计基线。
 func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case integratedCustomerApplicationCode:
@@ -574,6 +577,8 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 		}
 	case integratedContractApplicationCode:
 		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialSettlementContractIngest}
+	case "settlement", "settlement_and_invoicing":
+		return []string{ServiceCredentialSettlementProjectReferenceRead, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case integratedProjectApplicationCode:
 		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
 		// 负责人目录权限；不授予通知写入等其它集成能力。

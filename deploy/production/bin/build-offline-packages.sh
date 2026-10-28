@@ -23,6 +23,7 @@ version="${OFFLINE_RELEASE_VERSION:-$(date -u +%Y%m%dT%H%M%SZ)}"
 output_root="${OFFLINE_OUTPUT_DIR:-$workspace_root/.artifacts/offline/$version}"
 output_explicit=false
 component="all"
+formal_build=false
 license_file=''
 license_snapshot=''
 license_digest=''
@@ -98,6 +99,7 @@ EOF
 
 while (($#)); do
   case "$1" in
+    --formal-build) formal_build=true; shift ;;
     --component) component="${2:?缺少组件名称}"; shift 2 ;;
     --version) version="${2:?缺少版本号}"; shift 2 ;;
     --output) output_root="${2:?缺少输出目录}"; output_explicit=true; shift 2 ;;
@@ -315,7 +317,29 @@ offline_configure_platform_selection() {
 }
 
 offline_image_inspect() {
-  docker image inspect ${offline_inspect_platform_args[@]+"${offline_inspect_platform_args[@]}"} "$@"
+  local value argument fallback=false
+  local inspect_args=()
+  value="$(docker image inspect ${offline_inspect_platform_args[@]+"${offline_inspect_platform_args[@]}"} "$@")" || return $?
+  # OrbStack/new image stores may put the selected platform on Descriptor only.
+  # Preserve the established inspect call for old daemons; retry only empty platform output.
+  if [[ "$value" == / || -z "$value" ]]; then
+    for argument in "$@"; do
+      case "$argument" in
+        '{{.Os}}/{{.Architecture}}')
+          argument='{{if .Descriptor}}{{if .Descriptor.Platform}}{{.Descriptor.Platform.OS}}/{{.Descriptor.Platform.Architecture}}{{end}}{{end}}'
+          fallback=true ;;
+        '{{.Architecture}}/{{.Os}}')
+          argument='{{if .Descriptor}}{{if .Descriptor.Platform}}{{.Descriptor.Platform.Architecture}}/{{.Descriptor.Platform.OS}}{{end}}{{end}}'
+          fallback=true ;;
+      esac
+      inspect_args+=("$argument")
+    done
+    if [[ "$fallback" == true ]]; then
+      docker image inspect ${offline_inspect_platform_args[@]+"${offline_inspect_platform_args[@]}"} "${inspect_args[@]}"
+      return $?
+    fi
+  fi
+  printf '%s\n' "$value"
 }
 
 offline_save_images() {
@@ -689,8 +713,8 @@ if want host-deps; then
 fi
 
 ensure_local_platform_image() {
-  local image="$1" image_platform='' attempt=0
-  if image_platform="$(offline_image_inspect "$image" --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)"; then
+  local image="$1" force_pull="${2:-false}" image_platform='' attempt=0
+  if [[ "$force_pull" != true ]] && image_platform="$(offline_image_inspect "$image" --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)"; then
     if [[ "$image_platform" == "linux/amd64" ]]; then
       echo "复用本地镜像（${image_platform}）：${image}"
       return 0
@@ -716,11 +740,31 @@ ensure_local_platform_image() {
 }
 
 if want common; then
-  common_base_images=(
-    mysql:8.4 quay.io/keycloak/keycloak:26.2 temporalio/auto-setup:1.29.7
-    metabase/metabase:v0.53.7 prom/prometheus:v3.5.0 prom/node-exporter:v1.9.1
-    registry:2.8.3 tecnativa/docker-socket-proxy:v0.5.0
-  )
+  common_base_images=()
+  while IFS= read -r base_image; do common_base_images+=("$base_image"); done < <(offline_common_base_images)
+  # Finish all network/local preparation before the first common build/save.
+  # Formal runs must have actual immutable source evidence, not just a tag fallback.
+  for base_image in "${common_base_images[@]}"; do
+    if [[ "$base_image" == "$managed_proxy_transport" ]]; then
+      ensure_local_platform_image "$managed_proxy_upstream"
+      continue
+    fi
+    ensure_local_platform_image "$base_image"
+    if [[ "$formal_build" == true ]]; then
+      prepared_ref="$(offline_image_inspect "$base_image" --format '{{range .RepoDigests}}{{println .}}{{end}}' |
+        awk -v name="${base_image%%:*}" 'index($0, name "@sha256:") == 1 { print; exit }')"
+      if [[ ! "$prepared_ref" =~ @sha256:[a-f0-9]{64}$ ]]; then
+        # A previously wrapped transport tag can have the right architecture but no upstream digest.
+        # Refresh it from the registry, never attach remote evidence to unproven local bytes.
+        ensure_local_platform_image "$base_image" true
+        prepared_ref="$(offline_image_inspect "$base_image" --format '{{range .RepoDigests}}{{println .}}{{end}}' |
+          awk -v name="${base_image%%:*}" 'index($0, name "@sha256:") == 1 { print; exit }')"
+      fi
+      [[ "$prepared_ref" =~ @sha256:[a-f0-9]{64}$ ]] || {
+        echo "公共镜像准备后仍缺少实际来源摘要：${base_image}；未开始镜像构建" >&2; exit 1;
+      }
+    fi
+  done
   common_images=()
   common_index=0
   base_evidence="$output_root/base-image-evidence.tsv"
@@ -728,7 +772,6 @@ if want common; then
   : > "$base_evidence_temporary"
   for tag in "${common_base_images[@]}"; do
     if [[ "$tag" == "$managed_proxy_transport" ]]; then
-      ensure_local_platform_image "$managed_proxy_upstream"
       managed_proxy_native_id="$(offline_image_inspect "$managed_proxy_upstream" --format '{{.Id}}')"
       [[ "$managed_proxy_native_id" =~ ^sha256:[a-f0-9]{64}$ ]] || {
         echo '固定上游公共代理没有有效的本机镜像身份' >&2; exit 1;
@@ -741,7 +784,6 @@ if want common; then
       common_images+=("$tag")
       continue
     fi
-    ensure_local_platform_image "$tag"
     base_ref="$(offline_image_inspect "$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null |
       awk -v name="${tag%%:*}" 'index($0, name "@sha256:") == 1 { print; exit }')" || base_ref=''
     [[ -n "$base_ref" ]] || base_ref="$tag"
