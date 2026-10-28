@@ -2,6 +2,7 @@
 """在隔离主机上执行实际 CI 资产传输与控制面重载步骤。"""
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -42,6 +43,8 @@ with tempfile.TemporaryDirectory(prefix='ci-assets-sync-') as directory:
     shutil.copyfile(production / 'bin/install-assets.sh', source / 'bin/install-assets.sh')
     shutil.copyfile(production / 'bin/provisioner-config-refresh.sh', source / 'bin/provisioner-config-refresh.sh')
     shutil.copyfile(production / 'bin/frontend-network.py', source / 'bin/frontend-network.py')
+    shutil.copyfile(production / 'bin/platform-mysql-command.py',
+                    source / 'bin/platform-mysql-command.py')
     # 交付传输必须排除安装器拒绝的旧覆盖配置和验收证据。
     (source / 'compose.yaml').write_text('legacy overlay must not ship\n')
     (source / 'acceptance').mkdir()
@@ -87,7 +90,23 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     host = fixture / 'host with spaces'
     (host / 'subsystems.d').mkdir(parents=True)
     (host / 'subsystems.d/stale.yaml').write_text('stale manifest\n')
-    selection = '# operator disabled a subsystem\nservices: {}\n'
+    selection = '''# operator disabled a subsystem
+services:
+  platform-mysql:
+    image: mysql:8.4
+    command: ["--character-set-server=utf8mb4", "--max-connections=120"]
+    volumes: [platform-mysql-data:/var/lib/mysql]
+  contract-mysql:
+    image: mysql:8.4
+    command: ["--max-connections=80"]
+#  settlement-mysql:
+#    image: mysql:8.4
+#    command: ["--max-connections=60"]
+'''
+    expected_selection = selection.replace(
+        '"--max-connections=120"]',
+        '"--max-connections=120", "--log-bin-trust-function-creators=1"]',
+    )
     (host / 'docker-compose.yml').write_text(selection)
     (host / '.env').write_text('COMPOSE_PROJECT_NAME=fixture\n')
     runtime = host / 'runtime'
@@ -111,7 +130,10 @@ sys.exit(subprocess.run(sys.argv[-1], shell=True, executable='/bin/bash', input=
     reload = 'Reload paired subsystem control plane'
     marker = runtime / '.control-plane-reload-required'
     execute(sync)
-    assert (host / 'docker-compose.yml').read_text() == selection
+    assert (host / 'docker-compose.yml').read_text() == expected_selection, (
+        'existing platform MySQL must receive trigger migration configuration '
+        'without changing module selection or custom arguments'
+    )
     assert (host / 'docker-compose.yml.dist').read_bytes() == (source / 'docker-compose.yml').read_bytes()
     assert not (host / 'subsystems.d/stale.yaml').exists()
     assert (host / 'subsystems.d/new.yaml').exists()
@@ -161,6 +183,7 @@ cat "$TEST_CHANGED_PATHS_FILE"
 ''')
     detection_cases = [
         ('deploy/production/docker-compose.yml', 'true'),
+        ('deploy/production/bin/platform-mysql-command.py', 'true'),
         ('internal/bootstrap/worker.go', 'true'),
         ('internal/bootstrap/worker_test.go', 'false'),
         ('deploy/production/subsystems.d/customer_portal-prod.yaml', 'false'),
@@ -186,5 +209,27 @@ cat "$TEST_CHANGED_PATHS_FILE"
         assert output.read_text().strip() == 'backend_changed=' + expected_change, (
             changed_paths[:100], output.read_text(), expected_change,
         )
+
+# 对实际文本更新器验证缺参、重复运行、裁剪及拒绝冲突，避免失败后留下部分改写。
+update_compose = runpy.run_path(str(production / 'bin/platform-mysql-command.py'))['update_compose']
+assert update_compose(expected_selection) == expected_selection
+without_command = 'services:\n  platform-mysql:\n    image: mysql:8.4\n    volumes: [data:/var/lib/mysql]\n'
+assert update_compose(without_command) == without_command.replace(
+    '    image: mysql:8.4\n',
+    '    image: mysql:8.4\n    command: ["--log-bin-trust-function-creators=1"]\n',
+)
+assert update_compose('#  platform-mysql:\nservices: {}\n') == '#  platform-mysql:\nservices: {}\n'
+for invalid in (
+    selection.replace('"--max-connections=120"', '"--log-bin-trust-function-creators=0"'),
+    selection.replace('["--character-set-server=utf8mb4", "--max-connections=120"]', 'mysqld --custom'),
+    selection.replace('    image: mysql:8.4', '    image: mysql:8.0', 1),
+    selection + '  platform-mysql:\n    image: mysql:8.4\n',
+):
+    try:
+        update_compose(invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('conflicting or unsupported database configuration must fail closed')
 
 print('CI asset transport, transaction install, module selection and reload gates: PASS')
