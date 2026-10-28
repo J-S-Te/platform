@@ -894,19 +894,27 @@ provision_iam_import_client() {
 # 参数：无，使用当前发布的运行配置与平台数据库。
 # 返回值：已配置或安全初始化返回零；缺失历史密钥、备份或查询失败则阻断发布。
 initialize_platform_audit_hash_key() {
-  local helper="$script_dir/initialize-audit-hash-key.py" check_status history history_query
+  local helper="$script_dir/initialize-audit-hash-key.py" check_status history history_query database_name
   if python3 "$helper" --env "$runtime_file" --check; then
     return 0
   else
     check_status=$?
   fi
   [[ "$check_status" == 3 ]] || return 1
-  history_query="SELECT (EXISTS(SELECT 1 FROM audit_event WHERE "
+  database_name="$(env_value MYSQL_DATABASE)"
+  [[ "$database_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || {
+    echo '平台数据库名缺失或不支持安全标识符，拒绝初始化审计密钥' >&2
+    return 1
+  }
+  history_query="SELECT (EXISTS(SELECT 1 FROM ${database_name}.audit_event WHERE "
   history_query+="UPPER(TRIM(COALESCE(payload_hash_alg, ''))) NOT IN ('', 'SHA-256')) OR "
   # 已清理归档或链头仍可能依赖旧密钥；无法从活动行证明无历史时不能自动换钥。
-  history_query+="EXISTS(SELECT 1 FROM audit_archive_item WHERE purged_at IS NOT NULL) OR "
-  history_query+="EXISTS(SELECT 1 FROM audit_event_chain))"
-  history="$(mysql_query_scalar platform-mysql "$history_query")" || return 1
+  history_query+="EXISTS(SELECT 1 FROM ${database_name}.audit_archive_item WHERE purged_at IS NOT NULL) OR "
+  history_query+="EXISTS(SELECT 1 FROM ${database_name}.audit_event_chain))"
+  if ! history="$(mysql_query_scalar platform-mysql "$history_query")"; then
+    echo '平台审计历史查询失败，未生成或替换密钥' >&2
+    return 1
+  fi
   [[ "$history" == 0 || "$history" == 1 ]] || {
     echo '无法核验历史审计摘要，拒绝初始化密钥' >&2
     return 1
