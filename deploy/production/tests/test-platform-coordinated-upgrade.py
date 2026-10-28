@@ -44,6 +44,7 @@ prepare_managed_public_proxy_image() { log proxy-prefetch; [[ "$FAIL_PHASE" != p
 wait_for_health() { log api-health; }
 dump_subsystem_provisioner_debug() { :; }
 dump_file_gateway_debug() { :; }
+dump_platform_runtime_debug() { log runtime-diagnostics; }
 compose() {
   case "$*" in
     'stop --timeout 60 platform-api') log stop-old-api ;;
@@ -127,6 +128,8 @@ with tempfile.TemporaryDirectory(prefix='platform-upgrade-') as directory:
             assert 'api' not in calls
         if phase == 'migrate':
             assert 'agent' not in calls and 'stop-old-api' not in calls
+        if phase == 'api':
+            assert 'runtime-diagnostics' in calls, 'candidate logs must be captured before rollback'
         if phase == 'proxy':
             assert 'migrate' not in calls and 'stop-old-api' not in calls
         if phase == 'backup':

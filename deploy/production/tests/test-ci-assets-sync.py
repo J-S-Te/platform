@@ -184,6 +184,7 @@ cat "$TEST_CHANGED_PATHS_FILE"
     detection_cases = [
         ('deploy/production/docker-compose.yml', 'true'),
         ('deploy/production/bin/platform-mysql-command.py', 'true'),
+        ('deploy/production/bin/deploy-service.sh', 'true'),
         ('internal/bootstrap/worker.go', 'true'),
         ('internal/bootstrap/worker_test.go', 'false'),
         ('deploy/production/subsystems.d/customer_portal-prod.yaml', 'false'),
