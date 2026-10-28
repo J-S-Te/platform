@@ -324,6 +324,20 @@ if [[ -f "$target/docker-compose.yml" ]]; then
     exit 1
   fi
   mv -f -- "$mount_update" "$compose_update"
+  # 保留现场裁剪时也必须传递迁移 000130 所需数据库启动参数；只改平台库，
+  # 不覆盖其他 MySQL、卷、镜像或自定义参数。实际重建仍在备份校验后的发布阶段。
+  if grep -Eq '^  platform-mysql:[[:space:]]*(#.*)?$' "$compose_update"; then
+    [[ -f "$stage/bin/platform-mysql-command.py" ]] || {
+      echo '资产缺少平台数据库编排更新器，拒绝部分安装' >&2
+      exit 1
+    }
+    mount_update="$(mktemp "$target/.compose-platform-mysql.XXXXXX")"
+    if ! python3 "$stage/bin/platform-mysql-command.py" "$compose_update" >"$mount_update"; then
+      rm -f -- "$mount_update"
+      exit 1
+    fi
+    mv -f -- "$mount_update" "$compose_update"
+  fi
   if cmp -s -- "$target/docker-compose.yml" "$compose_update"; then
     rm -f -- "$compose_update"
     compose_update=''
