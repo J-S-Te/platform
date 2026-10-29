@@ -60,6 +60,11 @@ def assert_mysql_servers_trust_function_creators(services):
 
 def main():
     text = SOURCE.read_text()
+    # compose.yaml 是仓库参考副本，不随资产包发布；平台 MySQL 也必须与发布物同样
+    # 显式信任非 SUPER 迁移账号创建触发器，避免参考环境与交付介质漂移。
+    reference_text = (SOURCE.parent / "compose.yaml").read_text()
+    assert re.search(r"(?ms)^  platform-mysql:\n(?:(?!^  [a-z0-9-]+:).)*?    command:.*--log-bin-trust-function-creators=1", reference_text), \
+        "compose.yaml platform-mysql must trust non-SUPER trigger creation"
     assert "profiles:" not in text
     assert "compose.https.yaml" not in text
     assert "compose.drain.yaml" not in text

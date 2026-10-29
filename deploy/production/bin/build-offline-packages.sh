@@ -31,6 +31,8 @@ runtime_approval_dir=''
 runtime_approval_approved=false
 builtin_v2_no_approvals=false
 release_spec=''
+selected_optional_components=''
+selected_components_provided=false
 reuse_approved_crm_image=false
 runtime_approval_digest=''
 installation_scenario=''
@@ -60,6 +62,7 @@ usage() {
 用法：build-offline-packages.sh [--component 组件名|all] [--version 版本] [--output 输出目录]
   [--license-file 客户许可证.jws --runtime-approval-dir 批准目录 --runtime-approval-approved]
   [--reuse-approved-crm-image] 复用批准目录绑定的本机CRM镜像，避免重建改变ID
+  [--selected-components <可选项列表>] 生成 deployment-assets 时按实际交付范围投影 Compose/模板
   [--installation-scenario fresh|migrate|platform-only|expand --customer-id 客户标识]
 
 可用组件：
@@ -108,6 +111,7 @@ while (($#)); do
     --runtime-approval-approved) runtime_approval_approved=true; shift ;;
     --builtin-v2-no-runtime-approvals) builtin_v2_no_approvals=true; shift ;;
     --release-spec) release_spec="${2:?缺少 release spec}"; shift 2 ;;
+    --selected-components) selected_optional_components="${2-}"; selected_components_provided=true; shift 2 ;;
     --reuse-approved-crm-image) reuse_approved_crm_image=true; shift ;;
     --installation-scenario) installation_scenario="${2:?缺少安装场景}"; shift 2 ;;
     --customer-id) installation_customer="${2:?缺少客户标识}"; shift 2 ;;
@@ -857,6 +861,19 @@ if want data-analysis; then
   package_images data-analysis data-analysis-backend "${data_analysis_images[@]}"
 fi
 
+selected_component() {
+  [[ " $selected_optional_components " == *" $1 "* ]]
+}
+
+disabled_compose_modules() {
+  local component module
+  for mapping in customer-opportunity:customer customer-portal:portal contract:contract project:project settlement:settlement data-analysis:data-analysis; do
+    component="${mapping%%:*}"
+    module="${mapping#*:}"
+    selected_component "$component" || printf '%s\n' "$module"
+  done
+}
+
 package_assets() (
   local assets_archive assets_temporary sidecar_temporary assets_stage relative destination assets_digest
   local -a asset_files=(
@@ -888,6 +905,12 @@ package_assets() (
     tests/test-frontend-modes.sh tests/test-key-init.sh tests/test-metabase-init.sh tests/test-deployment-compatibility.py
     tests/test-release-materials.py tests/test-release-workflow.py tests/test-release-plan-inspect.py tests/test-publisher-diff.py
   )
+  local disabled_csv=""
+  if [[ "$selected_components_provided" == true ]]; then
+    while IFS= read -r module; do
+      [[ -z "$module" ]] || disabled_csv="${disabled_csv:+${disabled_csv},}${module}"
+    done < <(disabled_compose_modules)
+  fi
   assets_archive="$output_root/deployment-assets-${version}.tar.gz"
   assets_temporary="$(mktemp "$output_root/.deployment-assets.archive.XXXXXX")"
   sidecar_temporary="$(mktemp "$output_root/.deployment-assets.sidecar.XXXXXX")"
@@ -904,13 +927,26 @@ package_assets() (
   # 不要整体归档生产目录。仅将已审核静态文件放入暂存区，使 .env 备份、私钥、数据库转储及未来未知文件均默认排除。
   for relative in "${asset_files[@]}"; do
     [[ "$relative" == "deployment-compatibility.json" ]] && continue
+    if [[ "$selected_components_provided" == true ]] && ! selected_component customer-portal; then
+      case "$relative" in
+        subsystem-templates/portal.env.example|subsystem-templates/portal-report-worker.env.example) continue ;;
+      esac
+    fi
     [[ -f "$deploy_dir/$relative" && ! -L "$deploy_dir/$relative" ]] || {
       echo "静态部署资产缺失或不是普通文件：$relative" >&2
       exit 1
     }
     destination="$assets_stage/$relative"
     mkdir -p -- "$(dirname -- "$destination")"
-    cp -p -- "$deploy_dir/$relative" "$destination"
+    if [[ "$relative" == "docker-compose.yml" && "$selected_components_provided" == true && -n "$disabled_csv" ]]; then
+      python3 "$deploy_dir/bin/project-compose-assets.py" \
+        --input "$deploy_dir/$relative" --output "$destination" --disabled "$disabled_csv" || {
+          echo '无法按组件选择投影 docker-compose.yml；拒绝发布' >&2
+          exit 1
+        }
+    else
+      cp -p -- "$deploy_dir/$relative" "$destination"
+    fi
   done
   python3 "$deploy_dir/bin/build-deployment-compatibility.py" --migrations "$workspace_root/platform/migrations" --release "$version" --output "$assets_stage/deployment-compatibility.json" >/dev/null || {
       echo '无法生成部署兼容性声明；拒绝发布' >&2; exit 1;

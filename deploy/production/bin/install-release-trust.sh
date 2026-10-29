@@ -16,6 +16,8 @@ usage() {
     [--expected-trust-sha256 <sha256>] \
     [--expected-verifier-sha256 <sha256>] \
     [--force]
+说明：expected 摘要必须来自独立可信渠道；--force 仅在核对本批摘要并备份旧 trust/verifier 后使用，
+      会覆盖目标机已有的不同文件，不能用来跳过摘要核对。
 USAGE
 }
 die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
@@ -83,7 +85,7 @@ if [[ -e "$destination_trust" || -L "$destination_trust" ]]; then
   elif [[ "$force" == true ]]; then
     install -m 600 "$trust_policy" "$destination_trust"
   else
-    die '已存在不同的 trust policy；核对后使用 --force 或先备份'
+    die '已存在不同的 trust policy；核对交付说明中的本批摘要并备份后，再使用 --force 覆盖'
   fi
 else
   install -m 600 "$trust_policy" "$destination_trust"
@@ -99,7 +101,7 @@ if [[ -e "$verifier_path" || -L "$verifier_path" ]]; then
   elif [[ "$force" == true ]]; then
     install -m 755 "$verifier_source" "$verifier_path"
   else
-    die '已存在不同的 verifier；核对后使用 --force 或先备份'
+    die '已存在不同的 verifier；核对交付说明中的本批摘要并备份后，再使用 --force 覆盖'
   fi
 else
   install -m 755 "$verifier_source" "$verifier_path"
