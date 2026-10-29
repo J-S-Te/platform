@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -24,6 +25,18 @@ const (
 )
 
 var migrationFilePattern = regexp.MustCompile(`^(\d{6})_([a-z0-9_]+)\.sql$`)
+
+// wrapStatementError 保留底层 MySQL 错误链，并对 1419 补充可执行的运维提示。
+// 不在迁移代码中尝试 SET GLOBAL：迁移账号按最小权限运行，不能依赖 SUPER，
+// 也不应因为自动提权而掩盖部署配置缺失。
+func wrapStatementError(version uint64, name string, statementIndex int, err error) error {
+	base := fmt.Errorf("execute migration %06d_%s statement %d: %w", version, name, statementIndex, err)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1419 {
+		return fmt.Errorf("%w；MySQL 1419：当前 MySQL 未允许非 SUPER 账号创建触发器/存储过程。请由 DBA 在 mysqld 启用 log_bin_trust_function_creators=1（部署 compose 已默认携带）后重试，不要给业务迁移账号授予 SUPER。", base)
+	}
+	return base
+}
 
 // Item 表示一份按版本排序且发布后不可修改的 SQL 迁移；Checksum 用来阻止直接改写历史文件。
 type Item struct {
@@ -144,7 +157,7 @@ func Run(ctx context.Context, database *gorm.DB, source fs.FS) ([]Applied, error
 			}
 			for statementIndex, statement := range statements {
 				if err := lockDatabase.WithContext(ctx).Exec(statement).Error; err != nil {
-					return fmt.Errorf("execute migration %06d_%s statement %d: %w", item.Version, item.Name, statementIndex+1, err)
+					return wrapStatementError(item.Version, item.Name, statementIndex+1, err)
 				}
 			}
 

@@ -153,6 +153,19 @@ EOF
   contains "$fixture/data.out" 'database volume platform-mysql-data exists without a restorable platform-mysql container' \
     'data-bearing database volume rejection lost its fail-closed message'
 
+  # 2b) 多个数据库卷同时缺失时必须一次性列全，而不是遇到第一个就退出。
+  if run_fresh_backup "$fixture/data-all.out" \
+      EXISTING_VOLUMES='platform-mysql-data keycloak-mysql-data' \
+      VOLUME_MOUNTPOINT="$fixture/data-volume"; then
+    fail 'backup accepted multiple database volumes without containers'
+  fi
+  contains "$fixture/data-all.out" 'database volume platform-mysql-data exists without a restorable platform-mysql container' \
+    'multi-volume rejection lost platform-mysql message'
+  contains "$fixture/data-all.out" 'database volume keycloak-mysql-data exists without a restorable keycloak-db container' \
+    'multi-volume rejection did not collect keycloak-db'
+  contains "$fixture/data-all.out" 'disaster backup' \
+    'multi-volume rejection did not explain the aggregated failure'
+
   # 3) 非 local driver 即使目录为空也按已有数据处理。
   if run_fresh_backup "$fixture/foreign.out" \
       EXISTING_VOLUMES='platform-mysql-data' \

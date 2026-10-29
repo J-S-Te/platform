@@ -422,43 +422,46 @@ volume_has_no_data() {
 compose_project="$(env_value_from "$runtime_file" COMPOSE_PROJECT_NAME)"
 compose_project="${compose_project:-basic-platform-production}"
 backed_up=0
+# 门禁先收集所有数据库服务的缺失/异常，再统一失败；避免一次只暴露一个，
+# 同时保证有任一问题时不把本次备份误报为成功。
+backup_problems=()
 for service in "${services[@]}"; do
   container=""
   if grep -Fxq "$service" <<< "$configured_services"; then
-    container="$("${compose[@]}" ps -a -q "$service")" || { echo "cannot inspect database service: $service" >&2; exit 1; }
+    container="$("${compose[@]}" ps -a -q "$service")" || { backup_problems+=("cannot inspect database service: $service"); continue; }
   fi
   if [[ "$container" == *$'\n'* ]]; then
-    echo "multiple database containers found for $service; refuse an ambiguous disaster backup" >&2
-    exit 1
+    backup_problems+=("multiple database containers found for $service; refuse an ambiguous disaster backup")
+    continue
   fi
   if [[ -z "$container" ]]; then
     database_volume="$(database_volume_for_service "$service")"
     retained_volume="$(docker volume ls -q \
       --filter "label=com.docker.compose.project=$compose_project" \
-      --filter "label=com.docker.compose.volume=$database_volume")" || { echo "cannot inspect retained database volumes: $service" >&2; exit 1; }
+      --filter "label=com.docker.compose.volume=$database_volume")" || { backup_problems+=("cannot inspect retained database volumes: $service"); continue; }
     if [[ -n "$retained_volume" ]] && volume_has_no_data "$retained_volume"; then
       echo "fresh installation: database volume $database_volume has never stored data and has no $service container; skipping $service backup"
       continue
     fi
     [[ -z "$retained_volume" ]] || {
-      echo "database volume $database_volume exists without a restorable $service container; re-enable/start the database before creating a complete disaster backup" >&2
-      exit 1
+      backup_problems+=("database volume $database_volume exists without a restorable $service container; re-enable/start the database before creating a complete disaster backup")
+      continue
     }
     continue
   fi
   [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == true ]] || {
-    echo "database container is stopped: $service; start it before creating a complete disaster backup" >&2
-    exit 1
+    backup_problems+=("database container is stopped: $service; start it before creating a complete disaster backup")
+    continue
   }
   log_bin="$("${compose[@]}" exec -T "$service" sh -ec \
     'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -Nse "SELECT @@log_bin"')" || {
-    echo "cannot determine binlog state: $service" >&2
-    exit 1
+    backup_problems+=("cannot determine binlog state: $service")
+    continue
   }
   log_bin="${log_bin//[[:space:]]/}"
   case "$log_bin" in
     0|1) ;;
-    *) echo "unexpected binlog state '$log_bin': $service" >&2; exit 1 ;;
+    *) backup_problems+=("unexpected binlog state '$log_bin': $service"); continue ;;
   esac
 
   dump_args=(--single-transaction --routines --triggers --events --all-databases)
@@ -472,19 +475,38 @@ for service in "${services[@]}"; do
   if ! "${compose[@]}" exec -T "$service" sh -ec \
     'exec env MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump "$@" -uroot' _ "${dump_args[@]}" |
       gzip -9 >"$temporary"; then
-    echo "database backup failed: $service" >&2
-    exit 1
+    rm -f -- "$temporary"
+    backup_problems+=("database backup failed: $service")
+    continue
   fi
-  gzip -t "$temporary"
-  sql_bytes="$(gzip -dc "$temporary" | wc -c)"
-  ((sql_bytes > 0)) || { echo "empty SQL database backup: $service" >&2; exit 1; }
+  if ! gzip -t "$temporary"; then
+    rm -f -- "$temporary"
+    backup_problems+=("database backup produced an invalid gzip stream: $service")
+    continue
+  fi
+  if ! sql_bytes="$(gzip -dc "$temporary" | wc -c)"; then
+    rm -f -- "$temporary"
+    backup_problems+=("cannot count SQL database backup bytes: $service")
+    continue
+  fi
+  if ((sql_bytes == 0)); then
+    rm -f -- "$temporary"
+    backup_problems+=("empty SQL database backup: $service")
+    continue
+  fi
   if ! write_binlog_position "$log_bin" "$temporary" "$work/${service}.sql.gz.binlog-position"; then
-    echo "binlog position is missing from the database backup: $service" >&2
-    exit 1
+    rm -f -- "$temporary"
+    backup_problems+=("binlog position is missing from the database backup: $service")
+    continue
   fi
   mv "$temporary" "$work/${service}.sql.gz"
   backed_up=$((backed_up + 1))
 done
+if ((${#backup_problems[@]})); then
+  echo "disaster backup preflight failed; refusing to report a complete backup:" >&2
+  printf ' - %s\n' "${backup_problems[@]}" >&2
+  exit 1
+fi
 if ((backed_up == 0)) && [[ "$if_existing" == true ]]; then
   gateway_container=""
   if grep -Fxq file-gateway-mysql <<< "$configured_services"; then
