@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -c -o "$RUNNER_TEMP/runtime-license-owner.test" ./internal/platform/applicationregistry/infrastructure
-          sudo -n -- "$RUNNER_TEMP/runtime-license-owner.test" -test.run '^TestRuntimeLicenseCredentialsUseRuntimeDirectoryOwner$' -test.v
+          sudo -n -- "$RUNNER_TEMP/runtime-license-owner.test" -test.run '^Test(RuntimeLicenseCredentials|AccessProofs)UseRuntimeDirectoryOwner$' -test.v
       - run: go vet ./...
       - name: Validate production deployment scripts
         working-directory: .
