@@ -45,6 +45,11 @@ func writeAccessDeploymentReceipt(root string, input application.SubsystemProvis
 		receipt.Environment != input.Environment || receipt.ManifestChecksum != input.ManifestChecksum {
 		return provisioningError("deployment receipt target mismatch")
 	}
+	if _, found, err := readAccessDeploymentOutcome(root, receipt); err != nil {
+		return err
+	} else if found {
+		return provisioningError("deployment terminal outcome cannot become a success receipt")
+	}
 	path, err := accessReceiptPath(root, receipt)
 	if err != nil {
 		return err
@@ -99,6 +104,9 @@ func readAccessDeploymentReceipt(root string, receipt application.SubsystemAcces
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 		return false, provisioningError("deployment receipt file is unsafe")
 	}
+	if _, found, err := readAccessDeploymentOutcome(root, receipt); err != nil || found {
+		return false, provisioningError("deployment success conflicts with terminal outcome evidence")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return false, err
@@ -110,6 +118,9 @@ func readAccessDeploymentReceipt(root string, receipt application.SubsystemAcces
 	}
 	if actual != receipt {
 		return false, provisioningError("deployment receipt binding mismatch")
+	}
+	if err := confirmAccessProofDurability(root, path, file, syncAccessDirectory); err != nil {
+		return false, err
 	}
 	return true, nil
 }

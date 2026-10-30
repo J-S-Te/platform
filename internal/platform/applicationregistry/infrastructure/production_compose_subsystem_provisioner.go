@@ -356,7 +356,7 @@ func (target *productionComposeTarget) Preflight(ctx context.Context, input appl
 // Provision 用途：在共用发布锁内完成受控首次部署并核验许可配置加载。
 // 参数：ctx 为部署上下文，input 为服务端批准的部署与凭据绑定。
 // 返回值：备份、配置或部署失败返回错误，成功返回 nil。
-func (target *productionComposeTarget) Provision(ctx context.Context, input application.SubsystemProvisioningInput) error {
+func (target *productionComposeTarget) Provision(ctx context.Context, input application.SubsystemProvisioningInput) (resultErr error) {
 	if err := validateAccessReceipt(input); err != nil {
 		return err
 	}
@@ -372,6 +372,10 @@ func (target *productionComposeTarget) Provision(ctx context.Context, input appl
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
+	defer target.recordAccessCredentialRejection(input, &resultErr)
+	if closed, err := target.accessDeploymentAlreadyClosed(input); err != nil || closed {
+		return err
+	}
 
 	if err := target.validateEnabledServices(operationContext); err != nil {
 		return err
@@ -422,7 +426,7 @@ func (target *productionComposeTarget) checkReleaseIntegrity(ctx context.Context
 // Update 用途：在共用发布锁内更新清单配置、凭据及组件并核验许可接线。
 // 参数：ctx 为部署上下文，input 为服务端批准的部署与凭据绑定。
 // 返回值：备份、配置或部署失败返回错误，成功返回 nil。
-func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) error {
+func (target *productionComposeTarget) Update(ctx context.Context, input application.SubsystemProvisioningInput) (resultErr error) {
 	if input.InitialRuntimeProvisioning {
 		// 受信控制面已提供完整的一次性初始凭据；Provision 会在创建任何运行文件前完成
 		// 全量校验。
@@ -449,6 +453,10 @@ func (target *productionComposeTarget) Update(ctx context.Context, input applica
 		return provisioningError("production deployment lock is unavailable")
 	}
 	defer releaseProvisioningFileLock(lock)
+	defer target.recordAccessCredentialRejection(input, &resultErr)
+	if closed, err := target.accessDeploymentAlreadyClosed(input); err != nil || closed {
+		return err
+	}
 	if err := target.validateEnabledServices(ctx); err != nil {
 		return err
 	}
@@ -1060,7 +1068,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 							}
 						}
 						if !strings.HasSuffix(source, ".client_secret") || !usableProductionCredential(currentValues[key]) || !matchedID {
-							return provisioningError("new service credential delivery requires controlled RETRY")
+							return serviceCredentialRetryError()
 						}
 					} else {
 						values[key] = value
@@ -1131,7 +1139,7 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 				return resolveErr
 			}
 			if strictProductionServiceBinding(input, source) && strings.HasSuffix(source, ".client_secret") && !usableProductionCredential(value) {
-				return provisioningError("new service credential delivery requires controlled RETRY")
+				return serviceCredentialRetryError()
 			}
 			values[key] = value
 		}
