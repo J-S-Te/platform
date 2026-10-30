@@ -480,10 +480,14 @@ func activateProjectBackgroundControls(ctx context.Context, target projectBackgr
 	operation string, expected projectBackgroundControlState) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	// bootstrap并不等待异步许可同步；先观察真实门禁通过，不能凭健康状态开始激活。
+	if err := waitProjectBackgroundReadiness(ctx, target, operation, expected, "license"); err != nil {
+		return err
+	}
 	for _, step := range []struct {
-		action    string
-		execution bool
-	}{{"ensure", false}, {"resume", true}} {
+		action string
+		phase  string
+	}{{"ensure", "routing"}, {"resume", "execution"}} {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -492,7 +496,7 @@ func activateProjectBackgroundControls(ctx context.Context, target projectBackgr
 				return fmt.Errorf("project background %s: %w", step.action, err)
 			}
 		}
-		if err := waitProjectBackgroundReadiness(ctx, target, operation, expected, step.execution); err != nil {
+		if err := waitProjectBackgroundReadiness(ctx, target, operation, expected, step.phase); err != nil {
 			return err
 		}
 	}
@@ -503,10 +507,10 @@ func activateProjectBackgroundControls(ctx context.Context, target projectBackgr
 }
 
 // waitProjectBackgroundReadiness 只读重查已核验候选，不重复迁移、恢复或路由变更。
-// 参数：ctx为共享预算，target为控制边界，operation及expected固定原身份，execution区分门禁。
-// 返回值：目标门禁真实通过时为空；取消、协议漂移、许可拒绝或错误均失败关闭。
+// 参数：ctx为共享预算，target为控制边界，operation及expected固定身份，phase区分许可、路由和执行。
+// 返回值：目标门禁真实通过时为空；许可阻塞有界等待，取消、协议漂移或明确错误失败关闭。
 func waitProjectBackgroundReadiness(ctx context.Context, target projectBackgroundBackend,
-	operation string, expected projectBackgroundControlState, execution bool) error {
+	operation string, expected projectBackgroundControlState, phase string) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -528,11 +532,14 @@ func waitProjectBackgroundReadiness(ctx context.Context, target projectBackgroun
 		if err := json.Unmarshal(raw, &state); err != nil {
 			return err
 		}
-		if state.Engine != expected.Engine || state.ErrorCode != "" || state.PausedReason == "PAUSED_LICENSE" {
+		if state.Engine != expected.Engine || state.ErrorCode != "" {
 			return errors.New("project background readiness is blocked; candidate retained")
 		}
-		ready := state.BootstrapReady && state.RoutingReady
-		if execution {
+		ready := state.BootstrapReady && projectBackgroundLicenseObserved(state)
+		if phase != "license" {
+			ready = ready && state.RoutingReady
+		}
+		if phase == "execution" {
 			ready = ready && (state.ExecutionReady || state.PausedReason == "PAUSED_OPERATOR")
 		}
 		if ready {
@@ -543,6 +550,25 @@ func waitProjectBackgroundReadiness(ctx context.Context, target projectBackgroun
 			return fmt.Errorf("project background readiness remains pending: %w", ctx.Err())
 		case <-ticker.C:
 		}
+	}
+}
+
+// projectBackgroundLicenseObserved 根据固定控制协议的门禁优先级识别已通过许可检查的状态。
+// 参数：state为只读inspect状态；许可检查在其他暂停原因与执行就绪之前执行。
+// 返回值：真实执行就绪或已知后置状态为true；许可阻塞和无就绪证据的未知状态为false。
+func projectBackgroundLicenseObserved(state projectBackgroundControlState) bool {
+	if state.PausedReason == "PAUSED_LICENSE" {
+		return false
+	}
+	if state.ExecutionReady {
+		return true
+	}
+	switch state.PausedReason {
+	case "READY", "POLLING_UNPROMOTED", "DEPENDENCY_UNAVAILABLE", "PAUSED_OPERATION",
+		"PAUSED_BOOTSTRAP", "PAUSED_OPERATOR", "BOOTSTRAP_PENDING":
+		return true
+	default:
+		return false
 	}
 }
 

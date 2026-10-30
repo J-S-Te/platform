@@ -16,6 +16,8 @@ type projectReadinessRunner struct {
 	neverReady, wrongTenant      bool
 	verifyExit, pausedLicense    bool
 	ensureExit                   bool
+	licenseReads, licenseDelay   int
+	earlyControl                 bool
 	inspectionFault              string
 	cancelInspection             context.CancelFunc
 }
@@ -34,6 +36,18 @@ func (r *projectReadinessRunner) RunOutput(ctx context.Context, dir string, env 
 	if err := json.Unmarshal(output, &state); err != nil {
 		return nil, err
 	}
+	if action == "inspect" && !r.ensured {
+		r.licenseReads++
+	}
+	licenseBlocked := r.pausedLicense || r.licenseDelay > 0 && r.licenseReads <= r.licenseDelay
+	if action != "inspect" && licenseBlocked {
+		r.earlyControl = true
+		state["error_code"] = "CONTROL_BLOCKED"
+		state["paused_reason"] = "PAUSED_LICENSE"
+		state["execution_ready"] = false
+		output, _ = json.Marshal(state)
+		return output, errors.New("synthetic license gate blocked")
+	}
 	switch action {
 	case "ensure":
 		r.ensured = true
@@ -50,8 +64,9 @@ func (r *projectReadinessRunner) RunOutput(ctx context.Context, dir string, env 
 	state["routing_ready"] = r.ensured && r.routingReads > 1 && !r.neverReady
 	state["execution_ready"] = r.resumed && r.executionReads > 1
 	state["paused_reason"] = "PAUSED_OPERATION"
-	if r.pausedLicense {
+	if licenseBlocked {
 		state["paused_reason"] = "PAUSED_LICENSE"
+		state["execution_ready"] = false
 	}
 	if r.wrongTenant && r.ensured {
 		state["tenant_id"] = "other-tenant"
@@ -98,6 +113,26 @@ func (r *projectReadinessRunner) RunOutput(ctx context.Context, dir string, env 
 		return append(output, []byte("\nbackground control blocked\n")...), errors.New("synthetic CLI exit 1")
 	}
 	return json.Marshal(state)
+}
+
+// TestProjectBackgroundWaitsForLicenseBeforeControl 重现健康先于异步许可同步完成。
+// 参数：t为测试上下文；观察许可通过前禁止任何激活动作。
+// 返回值：无；过早ensure、忽略许可或未完成真实就绪时失败。
+func TestProjectBackgroundWaitsForLicenseBeforeControl(t *testing.T) {
+	target, runner := projectReadinessFixture(t)
+	runner.licenseDelay = 2
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	if err := target.activateProjectBackground(ctx); err != nil {
+		t.Fatalf("license became ready within budget: %v", err)
+	}
+	if runner.earlyControl || runner.licenseReads <= runner.licenseDelay {
+		t.Fatal("activation ran before observing the real license gate")
+	}
+	operation, err := target.loadProjectBackgroundOperation()
+	if err != nil || operation.Stage != "complete" {
+		t.Fatal("fully observed candidate did not complete")
+	}
 }
 
 // projectReadinessAction 读取正式控制命令的固定动作参数。
@@ -183,7 +218,7 @@ func TestProjectBackgroundReadinessFailsClosed(t *testing.T) {
 			runner.pausedLicense = name == "license"
 			runner.inspectionFault = name
 			budget := 5 * time.Second
-			if name == "never ready" {
+			if name == "never ready" || name == "license" {
 				budget = 30 * time.Millisecond
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
@@ -196,6 +231,9 @@ func TestProjectBackgroundReadinessFailsClosed(t *testing.T) {
 			}
 			if err := target.activateProjectBackground(ctx); err == nil {
 				t.Fatal("blocked candidate reported successful activation")
+			}
+			if name == "license" && runner.earlyControl {
+				t.Fatal("denied license allowed an activation mutation")
 			}
 			operation, err := target.loadProjectBackgroundOperation()
 			if err != nil || operation.Stage == "complete" {
