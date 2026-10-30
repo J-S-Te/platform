@@ -54,7 +54,7 @@ func writeAccessDeploymentReceipt(root string, input application.SubsystemProvis
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err = privateAccessDirectory(root, filepath.Dir(path), true); err != nil {
 		return err
 	}
 	file, err := os.CreateTemp(filepath.Dir(path), ".receipt-*")
@@ -64,6 +64,9 @@ func writeAccessDeploymentReceipt(root string, input application.SubsystemProvis
 	defer os.Remove(file.Name())
 	defer file.Close()
 	if err = file.Chmod(0600); err != nil {
+		return err
+	}
+	if err = inheritAccessProofOwner(file, filepath.Join(root, "runtime")); err != nil {
 		return err
 	}
 	if err = json.NewEncoder(file).Encode(receipt); err != nil {

@@ -86,6 +86,9 @@ func confirmAccessProofDurability(root, path string, file *os.File, syncDirector
 	if err := privateAccessDirectoryWithSync(root, filepath.Dir(path), true, syncDirectory); err != nil {
 		return err
 	}
+	if err := inheritAccessProofOwner(file, filepath.Join(root, "runtime")); err != nil {
+		return err
+	}
 	if err := file.Sync(); err != nil {
 		return err
 	}
@@ -117,6 +120,11 @@ func privateAccessDirectoryWithSync(root, directory string, create bool, syncDir
 		}
 		// 同步父目录项，包括上次同步失败后已经存在的目录，才能安全确认栅栏持久化。
 		if create {
+			if path == directory {
+				if err = inheritAccessDirectoryOwner(path, runtime); err != nil {
+					return err
+				}
+			}
 			if err = syncDirectory(filepath.Dir(path)); err != nil {
 				return err
 			}
@@ -143,6 +151,9 @@ func writePrivateAccessJSONWithSync(path string, value any, syncDirectory func(s
 	defer os.Remove(file.Name())
 	defer file.Close()
 	if err = file.Chmod(0600); err != nil {
+		return err
+	}
+	if err = inheritAccessProofOwner(file, filepath.Dir(filepath.Dir(path))); err != nil {
 		return err
 	}
 	if err = json.NewEncoder(file).Encode(value); err != nil {
