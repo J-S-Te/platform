@@ -11,6 +11,9 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
+// TestP1ControlledRetryPinsVersionOperatorAndPreservesMetadataOnUpdate 验证旧集成用途UPDATE保留元数据及RETRY携带版本和操作者。
+// 参数：t为测试上下文，使用内存受控登记替身。
+// 返回值：无；凭据用途、权限或恢复结果不符即失败。
 func TestP1ControlledRetryPinsVersionOperatorAndPreservesMetadataOnUpdate(t *testing.T) {
 	for _, app := range []string{"contract_management", "customer_portal"} {
 		t.Run(app, func(t *testing.T) {
@@ -25,7 +28,7 @@ func TestP1ControlledRetryPinsVersionOperatorAndPreservesMetadataOnUpdate(t *tes
 			}
 			count := 0
 			for _, credential := range metadata {
-				if p1ServicePurpose(credential.Purpose) {
+				if p1ServicePurpose(credential.Purpose) && credential.Purpose != application.ServiceCredentialAnalysisContractImportReportStatus {
 					count++
 					if credential.PlaintextSecret != "" || credential.OAuthClient.Version != 7 {
 						t.Fatal("normal update did not preserve registered metadata/secret")

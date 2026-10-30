@@ -22,6 +22,11 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        PROJECT_CONTRACT_IMPORT_CLIENT_ID: contract_management-prod-project-integration
+        PROJECT_CONTRACT_IMPORT_ISSUER: basic-platform
+        PROJECT_CONTRACT_IMPORT_AUDIENCE: basic-platform-application
+        PROJECT_CONTRACT_IMPORT_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        PROJECT_CONTRACT_IMPORT_CALLER_ENVIRONMENT_CODE: prod
         SETTLEMENT_REFERENCE_ENABLED: "true"
         SETTLEMENT_REFERENCE_AUDIENCE: basic-platform-application
         SETTLEMENT_REFERENCE_ISSUER: basic-platform

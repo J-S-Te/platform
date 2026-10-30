@@ -3,7 +3,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, project_contract_import]
+  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, project_contract_import, analysis_contract_import_report_status]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -23,6 +23,20 @@ runtime:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
         - SIGNING_PHONE_ENCRYPTION_KEY_BASE64
       values:
+        CONTRACT_IMPORT_REPORT_BASE_URL: http://data-analysis-api:8080
+        CONTRACT_IMPORT_REPORT_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_IMPORT_REPORT_SCOPE: analysis.contract-import.report-status
+        CONTRACT_IMPORT_PROJECT_BASE_URL: http://project-api:8082
+        CONTRACT_IMPORT_PROJECT_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_IMPORT_PROJECT_SCOPE: project.contract.import
+        CONTRACT_IMPORT_FINANCE_BASE_URL: http://settlement-api:8085
+        CONTRACT_IMPORT_FINANCE_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_IMPORT_FINANCE_SCOPE: settlement.contract.ingest
+        CONTRACT_IMPORT_REPORT_READ_ISSUER: basic-platform
+        CONTRACT_IMPORT_REPORT_READ_AUDIENCE: basic-platform-application
+        CONTRACT_IMPORT_REPORT_READ_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        CONTRACT_IMPORT_REPORT_READ_CLIENT_ID: data_analysis-prod-contract-import-report-read
+        CONTRACT_IMPORT_REPORT_READ_CALLER_ENVIRONMENT_CODE: prod
         SETTLEMENT_INTEGRATION_OUTBOUND_ENABLED: "true"
         SETTLEMENT_API_BASE_URL: http://settlement-api:8085
         SETTLEMENT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
@@ -76,6 +90,12 @@ runtime:
         PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         PROJECT_INTEGRATION_AUDIENCE: basic-platform-application
       bindings:
+        CONTRACT_IMPORT_REPORT_CLIENT_ID: service.analysis_contract_import_report_status.client_id
+        CONTRACT_IMPORT_REPORT_CLIENT_SECRET: service.analysis_contract_import_report_status.client_secret
+        CONTRACT_IMPORT_PROJECT_CLIENT_ID: service.project_contract_import.client_id
+        CONTRACT_IMPORT_PROJECT_CLIENT_SECRET: service.project_contract_import.client_secret
+        CONTRACT_IMPORT_FINANCE_CLIENT_ID: service.settlement_contract_ingest.client_id
+        CONTRACT_IMPORT_FINANCE_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
         SETTLEMENT_INTEGRATION_CLIENT_ID: service.settlement_contract_ingest.client_id
         SETTLEMENT_INTEGRATION_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
         OIDC_ISSUER: issuer

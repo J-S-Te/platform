@@ -143,13 +143,15 @@ func validateP1ServiceCredential(input application.SubsystemProvisioningInput, p
 		return provisioningError("new business service credential target mismatch")
 	}
 	expectedScope := map[string]string{
-		application.ServiceCredentialSettlementProjectReferenceRead:   "settlement.project_reference.read",
-		application.ServiceCredentialOwnerDirectoryRead:               "owner_directory.read",
-		application.ServiceCredentialNotificationIngest:               "notification.ingest",
-		application.ServiceCredentialAuditIngest:                      "audit.ingest",
-		application.ServiceCredentialSettlementContractIngest:         "settlement.contract.ingest",
-		application.ServiceCredentialPortalReportFileRead:             "platform:file:portal_report",
-		application.ServiceCredentialPortalReportDownloadIdentityRead: "portal.report.download_identity.read",
+		application.ServiceCredentialContractImportReportRead:           "contract.import.report.read",
+		application.ServiceCredentialAnalysisContractImportReportStatus: "analysis.contract-import.report-status",
+		application.ServiceCredentialSettlementProjectReferenceRead:     "settlement.project_reference.read",
+		application.ServiceCredentialOwnerDirectoryRead:                 "owner_directory.read",
+		application.ServiceCredentialNotificationIngest:                 "notification.ingest",
+		application.ServiceCredentialAuditIngest:                        "audit.ingest",
+		application.ServiceCredentialSettlementContractIngest:           "settlement.contract.ingest",
+		application.ServiceCredentialPortalReportFileRead:               "platform:file:portal_report",
+		application.ServiceCredentialPortalReportDownloadIdentityRead:   "portal.report.download_identity.read",
 	}[purpose]
 	if len(client.Scopes) != 1 || client.Scopes[0] != expectedScope {
 		return provisioningError("new business service credential scope mismatch")

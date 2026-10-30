@@ -159,6 +159,9 @@ func TestBrowserCannotRequestAuthenticationProvider(t *testing.T) {
 	}
 }
 
+// TestAdoptionRedeliversEveryExistingServiceCredential 验证接管和重试重新交付必要密钥，普通更新遵守各用途轮换政策。
+// 参数：t为测试上下文，使用内存受控登记替身。
+// 返回值：无；凭据用途、权限或恢复结果不符即失败。
 func TestAdoptionRedeliversEveryExistingServiceCredential(t *testing.T) {
 	for _, operation := range []string{"ADOPT", "RETRY", "UPDATE"} {
 		t.Run(operation, func(t *testing.T) {
@@ -179,10 +182,10 @@ func TestAdoptionRedeliversEveryExistingServiceCredential(t *testing.T) {
 				t.Fatal("initial adoption/retry lost a required service credential")
 			}
 			for _, credential := range credentials {
-				if credential.PlaintextSecret == "" && !(operation == "UPDATE" && p1ServicePurpose(credential.Purpose)) {
+				if credential.PlaintextSecret == "" && !(operation == "UPDATE" && p1ServicePurpose(credential.Purpose) && credential.Purpose != application.ServiceCredentialAnalysisContractImportReportStatus) {
 					t.Fatal("service credential not delivered")
 				}
-				if operation == "UPDATE" && p1ServicePurpose(credential.Purpose) && credential.PlaintextSecret != "" {
+				if operation == "UPDATE" && p1ServicePurpose(credential.Purpose) && credential.Purpose != application.ServiceCredentialAnalysisContractImportReportStatus && credential.PlaintextSecret != "" {
 					t.Fatal("ordinary UPDATE rotated new purpose secret")
 				}
 				if operation == "UPDATE" && credential.Purpose == application.ServiceCredentialOwnerDirectoryRead {

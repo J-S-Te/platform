@@ -15,15 +15,7 @@ var errRelatedSettlementReferenceDependency = errors.New("registered settlement 
 // 参数：purpose 为机器凭据的用途。
 // 返回值：是否启用严格身份校验及版本保护。
 func p1ServicePurpose(purpose string) bool {
-	switch purpose {
-	case application.ServiceCredentialSettlementProjectReferenceRead,
-		application.ServiceCredentialSettlementContractIngest,
-		application.ServiceCredentialPortalReportFileRead,
-		application.ServiceCredentialPortalReportDownloadIdentityRead:
-		return true
-	default:
-		return false
-	}
+	return application.RequiresStrictSubsystemUpdateServiceClientValidation("", purpose)
 }
 
 // relatedServiceClients 解析接收应用的已登记来源身份，不接触来源密钥。

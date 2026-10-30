@@ -23,7 +23,7 @@ func usableProductionCredential(value string) bool {
 // 参数：source 为清单的服务绑定来源。
 // 返回值：是否属于严格机器身份绑定。
 func isP1ProductionServiceBinding(source string) bool {
-	for _, purpose := range []string{"settlement_project_reference_read", "settlement_contract_ingest", "portal_report_file_read", "portal_report_download_identity_read"} {
+	for _, purpose := range []string{"contract_import_report_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "portal_report_file_read", "portal_report_download_identity_read"} {
 		if source == "service."+purpose+".client_id" || source == "service."+purpose+".client_secret" {
 			return true
 		}
