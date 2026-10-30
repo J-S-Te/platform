@@ -27,6 +27,7 @@ const (
 )
 
 type subsystemProvisioningRequest struct {
+	Recovery    *application.SubsystemAccessAbandonRequest    `json:"recovery,omitempty"`
 	Receipt     *application.SubsystemAccessDeploymentReceipt `json:"receipt,omitempty"`
 	Version     int                                           `json:"version"`
 	Action      string                                        `json:"action"`
@@ -55,11 +56,13 @@ type subsystemAccessApplyPayload struct {
 }
 
 type subsystemProvisioningReply struct {
-	DeploymentCompleted     bool                                       `json:"deployment_completed,omitempty"`
-	ErrorCode               string                                     `json:"error_code,omitempty"`
-	RuntimeLicenseLifecycle *application.RuntimeLicenseReleaseApproval `json:"runtime_license_lifecycle,omitempty"`
-	RuntimeLicenseApproval  []application.RuntimeLicenseApproval       `json:"runtime_license_approval,omitempty"`
-	Success                 bool                                       `json:"success"`
+	RecoveryEvidence        *application.SubsystemAccessRecoveryEvidence  `json:"recovery_evidence,omitempty"`
+	DeploymentOutcome       *application.SubsystemAccessDeploymentOutcome `json:"deployment_outcome,omitempty"`
+	DeploymentCompleted     bool                                          `json:"deployment_completed,omitempty"`
+	ErrorCode               string                                        `json:"error_code,omitempty"`
+	RuntimeLicenseLifecycle *application.RuntimeLicenseReleaseApproval    `json:"runtime_license_lifecycle,omitempty"`
+	RuntimeLicenseApproval  []application.RuntimeLicenseApproval          `json:"runtime_license_approval,omitempty"`
+	Success                 bool                                          `json:"success"`
 	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
 	// 单独放 Detail，避免被安全过滤整段吞掉。
 	Message      string                                         `json:"message,omitempty"`
@@ -469,6 +472,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) DiscoverSubsystemCandidates(c
 	return provisioner.exchangeCandidateDiscovery(ctx)
 }
 
+// exchange 通过受限Unix协议执行固定部署操作并保留结构化拒绝类别。
+// 参数：ctx控制取消与截止时间，request为已授权目标及固定动作封套。
+// 返回值：明确执行成功为空；通信或部署失败返回错误，不能据此断定无副作用。
 func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context, request subsystemProvisioningRequest) error {
 	// API 容器不持有 Docker socket，只能通过受限 Unix 协议请求固定动作。超时同时作用于
 	// 连接、发送和响应，防止部署 Agent 卡住后耗尽 API 请求协程。
@@ -494,6 +500,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 		return provisioningError("read deployment response")
 	}
 	if !reply.Success {
+		if reply.ErrorCode == application.AccessCredentialRetryRequired {
+			return serviceCredentialRetryError()
+		}
 		if known := runtimeApprovalReplyError(reply.ErrorCode); application.RuntimeLicenseApprovalErrorCode(known) == reply.ErrorCode {
 			return known
 		}
@@ -694,6 +703,49 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		requiresManifestChecksum = provider.Capabilities().Mode == "production"
 	}
 	switch request.Action {
+	case "access-deployment-recovery-check", "access-deployment-abandon":
+		reader, ok := executor.(accessDeploymentRecoveryAgent)
+		if !ok || request.Recovery == nil || request.Receipt != nil || request.Input != nil ||
+			request.Preflight != nil || request.Access != nil || request.Discovery != nil ||
+			request.Code != "" || request.Environment != "" || request.TenantID != "" || request.ManifestChecksum != "" {
+			err = provisioningError("deployment recovery action unavailable")
+			break
+		}
+		if request.Action == "access-deployment-recovery-check" {
+			value, readErr := reader.CheckAccessDeploymentRecovery(operationContext, *request.Recovery)
+			if readErr != nil {
+				err = readErr
+				break
+			}
+			_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RecoveryEvidence: &value})
+			return
+		}
+		value, abandonErr := reader.AbandonAccessDeployment(operationContext, *request.Recovery)
+		if abandonErr != nil {
+			err = abandonErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, DeploymentOutcome: &value})
+		return
+	case "access-deployment-outcome":
+		reader, ok := executor.(accessDeploymentOutcomeReader)
+		if !ok || request.Receipt == nil || request.Input != nil || request.Preflight != nil ||
+			request.Access != nil || request.Discovery != nil || request.Code != "" ||
+			request.Environment != "" || request.TenantID != "" || request.ManifestChecksum != "" || request.Recovery != nil {
+			err = provisioningError("deployment outcome query unavailable")
+			break
+		}
+		value, found, readErr := reader.ReadAccessDeploymentOutcome(operationContext, *request.Receipt)
+		if readErr != nil {
+			err = readErr
+			break
+		}
+		reply := subsystemProvisioningReply{Success: true}
+		if found {
+			reply.DeploymentOutcome = &value
+		}
+		_ = json.NewEncoder(connection).Encode(reply)
+		return
 	case "access-deployment-receipt":
 		reader, ok := executor.(accessDeploymentReceiptReader)
 		if !ok || request.Receipt == nil {
@@ -897,9 +949,19 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 	}
 	reply := subsystemProvisioningReply{Success: err == nil}
 	if err != nil {
+		if errors.Is(err, application.ErrServiceCredentialRetryRequired) {
+			reply.ErrorCode = application.AccessCredentialRetryRequired
+		}
 		if application.RuntimeLicenseApprovalErrorCode(err) != "" || request.Action == "LICENSE_RUNTIME_APPROVAL" || request.Action == "LICENSE_RUNTIME_LIFECYCLE_APPROVAL" {
 			err = application.RuntimeLicenseApprovalFailure(err)
 			reply.ErrorCode = application.RuntimeLicenseApprovalErrorCode(err)
+		}
+		if reply.ErrorCode == "" && (request.Action == "access-deployment-recovery-check" || request.Action == "access-deployment-abandon") {
+			if errors.Is(err, application.ErrSubsystemAccessOperationConflict) {
+				reply.ErrorCode = "ACCESS_RECOVERY_CONFLICT"
+			} else if errors.Is(err, application.ErrValidation) {
+				reply.ErrorCode = "ACCESS_RECOVERY_INVALID"
+			}
 		}
 		reply.Message = safeSubsystemProvisioningMessage(err)
 		reply.Detail = safeSubsystemProvisioningDetail(err)

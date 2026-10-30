@@ -296,11 +296,14 @@ func (reader *SubsystemAccessDeploymentStateGORMReader) FailAccessDeployment(ctx
 		if err := tx.Where("tenant_id = ? AND operation_id = ?", operation.TenantID, operation.ID).Take(&attempt).Error; err != nil {
 			return err
 		}
-		if attempt.Phase != "PREPARED" {
+		if attempt.Phase != "PREPARED" && attempt.Phase != "FAILED" {
 			return application.ErrSubsystemAccessOperationConflict
 		}
 		if err := verifyAccessAttempt(ctx, tx, operation, attempt); err != nil {
 			return err
+		}
+		if attempt.Phase == "FAILED" {
+			return nil
 		}
 		repo := &SubsystemOnboardingGORMRepository{database: tx}
 		if err := repo.CompleteSubsystemDeployment(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode, attempt.Generation, application.SubsystemDeploymentStatusFailed, string(operation.Action), code, message, time.Now().UTC()); err != nil {

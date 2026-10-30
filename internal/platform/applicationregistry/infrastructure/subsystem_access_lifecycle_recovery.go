@@ -32,13 +32,18 @@ func (adapter *SubsystemAccessDeploymentAdapter) accessDeploymentRecovery(ctx co
 			return application.SubsystemAccessStageOutcome{}, true, err
 		}
 		if phase == "DISPATCHED" {
+			if outcome, found, err := adapter.recoverAccessDeploymentRejection(ctx, operation, receipt); found {
+				return outcome, true, err
+			}
+			// 新结果能力不可用时仍接受旧协议的真实成功证明；其余情况保持未知。
+			// Agent同时校验正负证明互斥，损坏结果不能通过成功回执回退隐藏。
 			agent, ok := adapter.provisioner.(accessDeploymentReceiptReader)
 			if !ok {
 				return unknownAccessDeployment(), true, nil
 			}
 			confirmed, err := agent.ReadAccessDeploymentCompletion(ctx, receipt)
 			if err != nil {
-				return application.SubsystemAccessStageOutcome{}, true, err
+				return unknownAccessDeployment(), true, nil
 			}
 			if !confirmed {
 				return unknownAccessDeployment(), true, nil

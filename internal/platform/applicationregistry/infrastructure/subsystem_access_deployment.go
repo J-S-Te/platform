@@ -368,6 +368,14 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(c
 		input.AccessReceipt = &receipt
 	}
 	if err := adapter.provisioner.Provision(ctx, input); err != nil {
+		if input.AccessReceipt != nil {
+			outcome, found, recoveryErr := adapter.recoverAccessDeploymentRejection(ctx, operation, *input.AccessReceipt)
+			if found {
+				return outcome, recoveryErr
+			}
+			// 已派发而没有可信结果，必须等待核对，不能按错误次数判定无副作用失败。
+			return unknownAccessDeployment(), nil
+		}
 		// 部署结果未知（可能已提交）：保留租约，下一轮先核对证据再决定，不重复执行。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("provision subsystem: %w", err)
 	}
@@ -585,6 +593,14 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		input.AccessReceipt = &receipt
 	}
 	if err := adapter.provisioner.Update(ctx, input); err != nil {
+		if input.AccessReceipt != nil {
+			outcome, found, recoveryErr := adapter.recoverAccessDeploymentRejection(ctx, operation, *input.AccessReceipt)
+			if found {
+				return outcome, recoveryErr
+			}
+			// 已派发而没有可信结果，必须等待核对，不能按错误次数判定无副作用失败。
+			return unknownAccessDeployment(), nil
+		}
 		// 结果未知（可能已提交）：保留租约，下一轮先核对证据再决定。
 		return application.SubsystemAccessStageOutcome{}, fmt.Errorf("update subsystem: %w", err)
 	}

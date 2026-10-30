@@ -33,7 +33,12 @@ import (
 )
 
 // buildOperationalModules 只通过各模块公开的应用契约完成装配，不让路由层接触仓储实现。
-// 这里同样禁止 AutoMigrate：进程启动与 schema 发布必须保持两个独立生命周期。
+// 参数：cfg限定部署与认证，database为平台库，logger负责追踪；
+//
+//	applicationAccessService解析入口，applicationManagementService管理目录，
+//	oauthClientManagementService管理凭据，personnelAudit及personnelHandover负责人员审计与交接。
+//
+// 返回值：完整运行模块；依赖或接线失败返回错误，启动不执行AutoMigrate。
 func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service, applicationManagementService *applicationregistryapplication.ManagementService, oauthClientManagementService *applicationregistryapplication.OAuthClientManagementService, personnelAudit identityapplication.PersonnelChangeAuditSink, personnelHandover *identityapplication.HandoverOrchestrator) (httptransport.OperationalModules, error) {
 	if database == nil || logger == nil || applicationAccessService == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
@@ -165,6 +170,11 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	manualRecovery, err := applicationregistryinfrastructure.NewSubsystemAccessManualRecoveryAdapter(database, subsystemProvisioner)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemAccessService.SetManualRecovery(manualRecovery)
 	subsystemAccessHandler, err := applicationregistryhttp.NewSubsystemAccessHandler(subsystemAccessService, logger)
 	if err != nil {
 		return httptransport.OperationalModules{}, err

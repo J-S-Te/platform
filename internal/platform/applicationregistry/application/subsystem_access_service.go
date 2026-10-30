@@ -115,10 +115,11 @@ type SubsystemAccessOperationView struct {
 
 // SubsystemAccessService 统一接入向导的服务端流程编排。
 type SubsystemAccessService struct {
-	repository SubsystemAccessOperationRepository
-	facts      SubsystemAccessFactsSource
-	ids        IdentifierGenerator
-	clock      Clock
+	manualRecovery SubsystemAccessManualRecoveryPort
+	repository     SubsystemAccessOperationRepository
+	facts          SubsystemAccessFactsSource
+	ids            IdentifierGenerator
+	clock          Clock
 }
 
 // NewSubsystemAccessService 构造服务；依赖缺失即失败（不使用可选依赖静默降级）。

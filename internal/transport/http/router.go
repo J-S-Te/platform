@@ -67,8 +67,17 @@ type OperationalModules struct {
 	CredentialEncryption *credentialhttp.Handler
 }
 
-// NewRouter 先建立请求标识、可信代理、日志、恢复、CORS、CSRF 与内容类型等统一边界，
-// 再通过各领域公开 HTTP 适配器注册路由；具体仓储实现不能泄漏到传输层。
+// NewRouter 建立统一安全边界并通过各领域公开HTTP适配器注册路由。
+// 参数：cfg为运行及边界配置，logger记录请求，database支持健康检查与指标；
+//
+//	authHandler、bootstrapHandler、managementHandler、accountLifecycleHandler处理身份生命周期，
+//	authorizationHandler、applicationAccessHandler、positionGrantHandler处理授权及岗位授予，
+//	auditHandler、configurationHandler、settingsHandler、dictionaryHandler、securityHandler处理平台管理，
+//	applicationTokenHandler、applicationManagementHandler、oauthClientManagementHandler管理应用及机器客户端，
+//	applicationAuthenticator校验应用身份，auditRecorder记录业务变更，oidcHandler处理OIDC，
+//	operational提供已接线的可选运行模块。
+//
+// 返回值：注册完成的HTTP引擎，具体仓储实现不泄漏到传输层。
 func NewRouter(
 	cfg config.Config,
 	logger *slog.Logger,
@@ -330,6 +339,8 @@ func NewRouter(
 		}
 
 		if operational.SubsystemAccess != nil {
+			apiRouter.GET("/subsystem-access/operations/:operation_id/recovery-preview", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.PreviewManualRecovery))
+			apiRouter.POST("/subsystem-access/operations/:operation_id/abandon", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.AbandonManualRecovery))
 			// 统一入口：路由级只要求只读权限，动作级权限（首次接入/接管/更新/恢复）由处理器按服务端判定的动作检查。
 			apiRouter.POST("/subsystem-access/preview", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.Preview))
 			apiRouter.POST("/subsystem-access/operations", middleware.RequirePermission("platform:application:read"), adaptHandler(operational.SubsystemAccess.Submit))
