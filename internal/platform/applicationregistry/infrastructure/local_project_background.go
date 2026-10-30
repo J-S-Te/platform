@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"os"
 	"path/filepath"
@@ -151,15 +150,16 @@ func (b *localProjectBackground) projectBackgroundInspect(ctx context.Context, i
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// projectBackgroundControl 在本地边界复用相同的严格身份与CLI结果判定。
+// 参数：ctx为期限，action及operation固定原动作和操作，build为本地已钉定身份，drained要求排空。
+// 返回值：已核验状态；异常不被当作成功，特定提升观察滞后保留专用哨兵。
 func (b *localProjectBackground) projectBackgroundControl(ctx context.Context, action, operation, build string, drained bool) (json.RawMessage, error) {
 	out, err := b.provisioner.runIntegratedPlatformComposeOutput(ctx, "exec", "-T", "sla-notifier", "/usr/local/bin/project-background-control", "--action", action, "--operation-id", operation)
-	if err != nil {
-		return nil, fmt.Errorf("local project background %s failed; operation retained", action)
-	}
-	if err := validateProjectBackgroundControl(out, build, b.tenant, b.environment, action, drained); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return json.RawMessage(out), nil
+	return projectBackgroundControlResult(out, err, action, operation, build, b.tenant, b.environment, drained)
 }
 func (b *localProjectBackground) preflight(ctx context.Context) error {
 	_, build, err := b.projectBackgroundRelease()
