@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,7 @@ type projectBackgroundControlState struct {
 	RoutingReady   bool   `json:"routing_ready"`
 	ExecutionReady bool   `json:"execution_ready"`
 	PausedReason   string `json:"paused_reason"`
+	ErrorCode      string `json:"error_code,omitempty"`
 	Schedules      []struct {
 		OperationID string `json:"operation_id"`
 	} `json:"schedules"`
@@ -176,15 +178,16 @@ func (target *productionComposeTarget) projectBackgroundInspect(ctx context.Cont
 	return strings.TrimSpace(string(output)), err
 }
 
+// projectBackgroundControl 执行固定控制动作并保留严格作用域的结构化CLI结果。
+// 参数：ctx为期限，action及operation限定控制动作和原操作，build为不可变身份，drained要求排空证明。
+// 返回值：已核验状态；确定错误或身份漂移失败关闭，提升观察滞后返回专用哨兵。
 func (target *productionComposeTarget) projectBackgroundControl(ctx context.Context, action, operation, build string, drained bool) (json.RawMessage, error) {
 	output, err := target.runComposeOutput(ctx, "exec", "-T", "project-sla-notifier", "/usr/local/bin/project-background-control", "--action", action, "--operation-id", operation)
-	if err != nil {
-		return nil, fmt.Errorf("project background %s failed; operation retained", action)
-	}
-	if err := validateProjectBackgroundControl(output, build, target.config.AllowedTenantID, target.config.Profile.Manifest.Application.Environment, action, drained); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return json.RawMessage(output), nil
+	return projectBackgroundControlResult(output, err, action, operation, build,
+		target.config.AllowedTenantID, target.config.Profile.Manifest.Application.Environment, drained)
 }
 
 func validateProjectBackgroundControl(output []byte, build, tenant, environment, action string, drained bool) error {
@@ -408,7 +411,13 @@ func (target *productionComposeTarget) activateProjectBackground(ctx context.Con
 	return activateProjectBackground(ctx, target)
 }
 
+// activateProjectBackground 在候选身份及既有门禁通过后完成后台激活。
+// 参数：ctx限制整个更新，target为已受控选择的候选执行边界。
+// 返回值：全部真实就绪并持久保存complete时为空；失败保留当前候选。
 func activateProjectBackground(ctx context.Context, target projectBackgroundBackend) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	image, build, err := target.projectBackgroundRelease()
 	if err != nil {
 		return err
@@ -454,13 +463,87 @@ func activateProjectBackground(ctx context.Context, target projectBackgroundBack
 	if err := target.saveProjectBackgroundOperation(operation); err != nil {
 		return err
 	}
-	for _, action := range []string{"ensure", "resume", "verify"} {
-		if _, err := target.projectBackgroundControl(ctx, action, operation.OperationID, build, false); err != nil {
-			return err
-		}
+	if err := activateProjectBackgroundControls(ctx, target, operation.OperationID, state); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	operation.Stage = "complete"
 	return target.saveProjectBackgroundOperation(operation)
+}
+
+// activateProjectBackgroundControls 每个变更动作仅执行一次，并等待其真实可见性。
+// 参数：ctx为父期限，target为控制边界，operation为原操作，expected为已核验候选身份。
+// 返回值：路由、执行与最终verify全部通过时为空；一分钟内未完成仍失败。
+func activateProjectBackgroundControls(ctx context.Context, target projectBackgroundBackend,
+	operation string, expected projectBackgroundControlState) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	for _, step := range []struct {
+		action    string
+		execution bool
+	}{{"ensure", false}, {"resume", true}} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := target.projectBackgroundControl(ctx, step.action, operation, expected.BuildID, false); err != nil {
+			if step.action != "ensure" || !errors.Is(err, errProjectBackgroundEnsurePending) {
+				return fmt.Errorf("project background %s: %w", step.action, err)
+			}
+		}
+		if err := waitProjectBackgroundReadiness(ctx, target, operation, expected, step.execution); err != nil {
+			return err
+		}
+	}
+	if _, err := target.projectBackgroundControl(ctx, "verify", operation, expected.BuildID, false); err != nil {
+		return fmt.Errorf("project background verify: %w", err)
+	}
+	return ctx.Err()
+}
+
+// waitProjectBackgroundReadiness 只读重查已核验候选，不重复迁移、恢复或路由变更。
+// 参数：ctx为共享预算，target为控制边界，operation及expected固定原身份，execution区分门禁。
+// 返回值：目标门禁真实通过时为空；取消、协议漂移、许可拒绝或错误均失败关闭。
+func waitProjectBackgroundReadiness(ctx context.Context, target projectBackgroundBackend,
+	operation string, expected projectBackgroundControlState, execution bool) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw, err := target.projectBackgroundControl(ctx, "inspect", operation, expected.BuildID, false)
+		if err != nil {
+			return fmt.Errorf("project background readiness inspect: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := validateProjectBackgroundControl(raw, expected.BuildID, expected.TenantID,
+			expected.Environment, "inspect", false); err != nil {
+			return err
+		}
+		var state projectBackgroundControlState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return err
+		}
+		if state.Engine != expected.Engine || state.ErrorCode != "" || state.PausedReason == "PAUSED_LICENSE" {
+			return errors.New("project background readiness is blocked; candidate retained")
+		}
+		ready := state.BootstrapReady && state.RoutingReady
+		if execution {
+			ready = ready && (state.ExecutionReady || state.PausedReason == "PAUSED_OPERATOR")
+		}
+		if ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("project background readiness remains pending: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // Mark only after the caller successfully stops/removes the protected service.
