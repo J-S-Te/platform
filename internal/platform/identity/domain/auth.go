@@ -47,11 +47,12 @@ type ReferenceName struct {
 
 // Principal 是会话验证返回的已认证服务端身份，其中携带服务端授权快照。
 type Principal struct {
-	SessionID       string
-	LoginIP         net.IP
-	Tenant          ReferenceName
-	User            ReferenceName
-	Account         ReferenceName
-	Roles           []ReferenceName
-	PermissionCodes []string
+	SessionID           string    `json:"-"`
+	SessionIdleDeadline time.Time `json:"-"`
+	LoginIP             net.IP
+	Tenant              ReferenceName
+	User                ReferenceName
+	Account             ReferenceName
+	Roles               []ReferenceName
+	PermissionCodes     []string
 }

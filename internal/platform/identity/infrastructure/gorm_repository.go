@@ -221,8 +221,9 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 	})
 }
 
-// FindPrincipalBySession 每次都以数据库当前状态验证会话、账号、用户和租户，再加载平台
-// 应用的活动角色与权限；Cookie 中不缓存权限，因此停用主体或撤销角色无需等待 JWT 过期。
+// FindPrincipalBySession 校验当前会话及主体状态，加载实时授权与权威空闲期限。
+// 参数：ctx 为请求上下文，sessionID 为 Cookie 会话，now 为校验时间，idleTimeout 为当前租户策略。
+// 返回值：有效主体；过期或撤销返回未认证，数据库异常返回对应错误。
 func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error) {
 	if idleTimeout <= 0 {
 		return domain.Principal{}, application.ErrUnauthenticated
@@ -297,14 +298,26 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		return domain.Principal{}, err
 	}
 	return domain.Principal{
-		SessionID:       row.SessionID,
-		LoginIP:         append(net.IP(nil), row.LoginIPAddress...),
-		Tenant:          domain.ReferenceName{ID: row.TenantID, Name: row.TenantName, Code: row.TenantCode},
-		User:            domain.ReferenceName{ID: row.UserID, Name: row.UserName},
-		Account:         domain.ReferenceName{ID: row.AccountID, Name: row.AccountName},
-		Roles:           roles,
-		PermissionCodes: permissions,
+		SessionID:           row.SessionID,
+		SessionIdleDeadline: sessionIdleDeadline(session, idleTimeout),
+		LoginIP:             append(net.IP(nil), row.LoginIPAddress...),
+		Tenant:              domain.ReferenceName{ID: row.TenantID, Name: row.TenantName, Code: row.TenantCode},
+		User:                domain.ReferenceName{ID: row.UserID, Name: row.UserName},
+		Account:             domain.ReferenceName{ID: row.AccountID, Name: row.AccountName},
+		Roles:               roles,
+		PermissionCodes:     permissions,
 	}, nil
+}
+
+// sessionIdleDeadline 以当前空闲策略和固定到期时间计算会话的权威期限。
+// 参数：session 为已验证的持久化会话，idleTimeout 为当前租户空闲策略。
+// 返回值：最后交互加空闲策略与固定到期时间中的较早时刻。
+func sessionIdleDeadline(session sessionModel, idleTimeout time.Duration) time.Time {
+	deadline := session.LastInteractiveAt.Add(idleTimeout)
+	if session.ExpiresAt.Before(deadline) {
+		return session.ExpiresAt.UTC()
+	}
+	return deadline.UTC()
 }
 
 // RefreshSession 保持登录时确定的不可变到期时间，只记录当前活动。返回持久化的到期时间，

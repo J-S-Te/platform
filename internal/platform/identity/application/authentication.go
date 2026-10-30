@@ -471,6 +471,9 @@ func truncateUserAgent(userAgent string) string {
 	return userAgent[:maxUserAgentBytes]
 }
 
+// toAuthContextPrincipal 将领域主体转换为请求上下文并保留内部会话期限。
+// 参数：principal 为持久化会话校验后的领域主体。
+// 返回值：可供处理器使用的主体；内部会话信息不参与 JSON。
 func toAuthContextPrincipal(principal domain.Principal) authctx.Principal {
 	roles := make([]authctx.ReferenceName, len(principal.Roles))
 	for index, role := range principal.Roles {
@@ -483,12 +486,13 @@ func toAuthContextPrincipal(principal domain.Principal) authctx.Principal {
 		userName = principal.Account.Name
 	}
 	return authctx.Principal{
-		SessionID:       principal.SessionID,
-		LoginIP:         append(net.IP(nil), principal.LoginIP...),
-		Tenant:          authctx.ReferenceName{ID: principal.Tenant.ID, Name: principal.Tenant.Name, Code: principal.Tenant.Code},
-		User:            authctx.ReferenceName{ID: principal.User.ID, Name: userName, Code: principal.User.Code},
-		Account:         authctx.ReferenceName{ID: principal.Account.ID, Name: principal.Account.Name, Code: principal.Account.Code},
-		Roles:           roles,
-		PermissionCodes: append([]string(nil), principal.PermissionCodes...),
+		SessionID:           principal.SessionID,
+		SessionIdleDeadline: principal.SessionIdleDeadline,
+		LoginIP:             append(net.IP(nil), principal.LoginIP...),
+		Tenant:              authctx.ReferenceName{ID: principal.Tenant.ID, Name: principal.Tenant.Name, Code: principal.Tenant.Code},
+		User:                authctx.ReferenceName{ID: principal.User.ID, Name: userName, Code: principal.User.Code},
+		Account:             authctx.ReferenceName{ID: principal.Account.ID, Name: principal.Account.Name, Code: principal.Account.Code},
+		Roles:               roles,
+		PermissionCodes:     append([]string(nil), principal.PermissionCodes...),
 	}
 }

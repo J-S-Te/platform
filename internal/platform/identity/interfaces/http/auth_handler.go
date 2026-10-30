@@ -161,7 +161,8 @@ type sessionResponse struct {
 
 type principalResponse struct {
 	authctx.Principal
-	IdleTimeoutSeconds uint `json:"idle_timeout_seconds"`
+	IdleTimeoutSeconds uint   `json:"idle_timeout_seconds"`
+	IdleRemainingMS    *int64 `json:"idle_remaining_ms,omitempty"`
 }
 
 // Login 处理唯一的 P0 登录类型：携带 Argon2id 密码凭据的本地账号。
@@ -453,7 +454,9 @@ func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "已退出所有应用系统", map[string]any{})
 }
 
-// Me 只返回中间件校验 JWT 与持久化状态后得到的主身份。
+// Me 返回持久化状态校验后的主身份和不续期的权威剩余空闲窗口。
+// 参数：writer 为响应输出，request 为已由认证中间件处理的请求。
+// 返回值：无；未认证或策略读取失败时写入对应错误响应。
 func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 	// 已认证主身份包含实时服务端授权快照，绝不能被浏览器或共享代理缓存，
 	// 否则角色变更后活动页面会继续渲染过期的权限集合。
@@ -470,7 +473,12 @@ func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 		handler.writeApplicationError(writer, request, err)
 		return
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)})
+	response := principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)}
+	if !principal.SessionIdleDeadline.IsZero() {
+		remaining := max(int64(0), time.Until(principal.SessionIdleDeadline).Milliseconds())
+		response.IdleRemainingMS = &remaining
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", response)
 }
 
 // Authenticate 供 HTTP 中间件调用，把 token 校验委托给应用服务。
