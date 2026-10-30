@@ -850,6 +850,7 @@ services:
         required: false
     # OIDC_* 只从 runtime/project.env 读取。按环境维护配置，以同时保留平台 OIDC 兼容路径和 Keycloak 迁移路径。
     environment:
+      PROJECT_BACKGROUND_BUILD_ID: ${PROJECT_BACKGROUND_BUILD_ID:-}
       OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
       OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
       OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
