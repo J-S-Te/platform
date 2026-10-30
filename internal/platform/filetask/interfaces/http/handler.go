@@ -122,8 +122,9 @@ type reconcilePayload struct {
 	Limit  int       `json:"limit"`
 }
 
-// Upload 接收一个 multipart 文件并持久化到配置的本地存储根下。
-// 期望字段：application_id、classification（可选）和 file。
+// Upload 接收有界文件并使用可信应用身份及正式用途持久化。
+// 参数：writer为响应，request含application_id、用途、分类及单个文件。
+// 返回值：无；鉴权、用途策略、内容或持久化失败时返回错误且不伪造成功。
 func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -149,11 +150,15 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 	namespace := ""
 	policyVersion, retentionClass := "", ""
 	var retentionUntil *time.Time
+	var strictPolicy *uploadPolicy
 	if purpose != "" {
 		selected, exists := uploadPolicies[purpose]
 		if !exists || !validPurposeApplication(principal.Account.Code, selected.Namespace) {
 			httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 			return
+		}
+		if purpose == "contract.external.pdf-source" || purpose == "contract.import.source" {
+			strictPolicy = &selected
 		}
 		namespace, purpose = selected.Namespace, selected.Purpose
 		policyVersion, retentionClass = v2PolicyVersion, "LONG_TERM"
@@ -168,6 +173,14 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	defer fileContent.Close()
+	if strictPolicy != nil {
+		mediaType, _, mimeErr := mime.ParseMediaType(fileHeader.Header.Get("Content-Type"))
+		_, allowed := strictPolicy.Media[mediaType]
+		if mimeErr != nil || !allowed || fileHeader.Size <= 0 || uint64(fileHeader.Size) > strictPolicy.MaxBytes {
+			httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+			return
+		}
+	}
 
 	file, err := handler.files.Upload(request.Context(), application.UploadInput{
 		TenantID:              principal.Tenant.ID,

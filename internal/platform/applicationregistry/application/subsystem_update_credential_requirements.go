@@ -11,6 +11,7 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 	switch applicationCode {
 	case "contract_management":
 		return []SubsystemUpdateServiceCredentialRequirement{
+			{Purpose: ServiceCredentialAnalysisContractImportReportStatus, Suffix: "analysis-import-report-status", ClientName: "历史导入报表水位读取器", Scopes: []string{"analysis.contract-import.report-status"}, Rotate: true},
 			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "合同管理系统 Audit Publisher", Scopes: []string{"audit.ingest"}, Rotate: true},
 			// 通知 Secret 只写不可回读。普通更新也重新交付，修复历史运行文件缺键，
 			// 不轮换浏览器凭据或给通知客户端附加业务写权限。
@@ -63,6 +64,7 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 		}
 	case "data_analysis":
 		return []SubsystemUpdateServiceCredentialRequirement{
+			{Purpose: ServiceCredentialContractImportReportRead, Suffix: "contract-import-report-read", ClientName: "历史合同完整摘要读取器", Scopes: []string{"contract.import.report.read"}, Rotate: true},
 			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "数据看板与统计分析系统 Audit Publisher", Scopes: []string{"audit.ingest"}, Rotate: true},
 			// 合同与项目读取凭据必须分离；任一密钥泄露时不能横向读取另一业务域。
 			{Purpose: ServiceCredentialContractDashboardRead, Suffix: "contract-dashboard", ClientName: "数据看板合同看板读取器", Scopes: []string{"dashboard.contract.read"}, Rotate: true},

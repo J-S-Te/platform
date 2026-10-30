@@ -44,6 +44,8 @@ const (
 	ServiceCredentialContractSummaryRead                = "contract_summary_read"
 	ServiceCredentialContractOpportunitySignedCountRead = "contract_opportunity_signed_count_read"
 	ServiceCredentialCRMContractReferenceRead           = "crm_contract_reference_read"
+	ServiceCredentialContractImportReportRead           = "contract_import_report_read"
+	ServiceCredentialAnalysisContractImportReportStatus = "analysis_contract_import_report_status"
 	ServiceCredentialContractDashboardRead              = "contract_dashboard_read"
 	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
 	ServiceCredentialContractApprovedRead               = "contract_approved_read"
@@ -533,6 +535,8 @@ type integratedServicePurposeDefinition struct {
 }
 
 var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefinition{
+	ServiceCredentialContractImportReportRead:           {ServiceCredentialContractImportReportRead, "contract-import-report-read", "Historical Contract Report Source Reader", "contract.import.report.read"},
+	ServiceCredentialAnalysisContractImportReportStatus: {ServiceCredentialAnalysisContractImportReportStatus, "analysis-import-report-status", "Historical Contract Report Status Reader", "analysis.contract-import.report-status"},
 	ServiceCredentialSettlementProjectReferenceRead:     {ServiceCredentialSettlementProjectReferenceRead, "project-reference", "Settlement Project Reference Reader", "settlement.project_reference.read"},
 	ServiceCredentialAuditIngest:                        {ServiceCredentialAuditIngest, "audit-publisher", "Audit Publisher", "audit.ingest"},
 	ServiceCredentialNotificationIngest:                 {ServiceCredentialNotificationIngest, "notification-publisher", "Notification Publisher", "notification.ingest"},

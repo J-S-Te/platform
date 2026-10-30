@@ -71,6 +71,8 @@ var uploadPolicies = map[string]uploadPolicy{
 	"crm.opportunity.attachment":        policy("crm", "opportunity-attachment", false, "application/pdf", "image/png", "image/jpeg", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
 	"portal.filing.material":            policy("portal", "filing-material", false, "application/pdf", "image/png", "image/jpeg"),
 	"contract.external.source":          policyWithMax("contract", "external-source", false, 10<<20, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+	"contract.external.pdf-source":      policyWithMax("contract", "external-pdf-source", false, 20<<20, "application/pdf"),
+	"contract.import.source":            policyWithMax("contract", "import-source", true, 20<<20, "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
 	"contract.template":                 policyWithMax("contract", "template", false, 10<<20, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
 	"contract.stamped-pdf":              policy("contract", "stamped-pdf", false, "application/pdf"),
 	"project.field.evidence":            policy("project", "field-evidence", false, "application/pdf", "image/png", "image/jpeg"),

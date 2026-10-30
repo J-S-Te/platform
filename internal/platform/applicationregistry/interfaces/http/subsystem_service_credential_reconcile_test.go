@@ -271,6 +271,9 @@ func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *te
 	})
 }
 
+// TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders 验证数据看板及历史报告读取身份独立创建并保持精确scope。
+// 参数：t为测试上下文，使用内存受控登记替身。
+// 返回值：无；凭据用途、权限或恢复结果不符即失败。
 func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *testing.T) {
 	manager := &serviceCredentialManagerStub{}
 	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
@@ -282,17 +285,19 @@ func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *tes
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"data_analysis-prod-audit-publisher":     {"audit.ingest"},
-		"data_analysis-prod-contract-dashboard":  {"dashboard.contract.read"},
-		"data_analysis-prod-project-dashboard":   {"dashboard.project.read"},
-		"data_analysis-prod-file-gateway-writer": {"platform:file:upload", "platform:file:bind", "platform:file:download"},
+		"data_analysis-prod-contract-import-report-read": {"contract.import.report.read"},
+		"data_analysis-prod-audit-publisher":             {"audit.ingest"},
+		"data_analysis-prod-contract-dashboard":          {"dashboard.contract.read"},
+		"data_analysis-prod-project-dashboard":           {"dashboard.project.read"},
+		"data_analysis-prod-file-gateway-writer":         {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, want)
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialAuditIngest:           "new-secret",
-		application.ServiceCredentialContractDashboardRead: "new-secret",
-		application.ServiceCredentialProjectDashboardRead:  "new-secret",
-		application.ServiceCredentialFileGatewayWrite:      "new-secret",
+		application.ServiceCredentialContractImportReportRead: "new-secret",
+		application.ServiceCredentialAuditIngest:              "new-secret",
+		application.ServiceCredentialContractDashboardRead:    "new-secret",
+		application.ServiceCredentialProjectDashboardRead:     "new-secret",
+		application.ServiceCredentialFileGatewayWrite:         "new-secret",
 	})
 }
 
@@ -398,6 +403,9 @@ func TestReconcileKeycloakBrokerDoesNotRotateForTransientFailures(t *testing.T) 
 	}
 }
 
+// TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory 验证合同受控更新补齐负责人目录及独立报告凭据。
+// 参数：t为测试上下文，使用内存受控登记替身。
+// 返回值：无；凭据用途、权限或恢复结果不符即失败。
 func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testing.T) {
 	manager := &serviceCredentialManagerStub{}
 	handler := &SubsystemOnboardingHandler{serviceCredentials: manager}
@@ -409,22 +417,24 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 		t.Fatal(err)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
-		"contract_management-prod-audit-publisher":        {"audit.ingest"},
-		"contract_management-prod-notification-publisher": {"notification.ingest"},
-		"contract_management-prod-owner-directory":        {"owner_directory.read"},
-		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
-		"contract_management-prod-settlement-integration": {"settlement.contract.ingest"},
-		"contract_management-prod-project-integration":    {"project.contract.import"},
-		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
+		"contract_management-prod-analysis-import-report-status": {"analysis.contract-import.report-status"},
+		"contract_management-prod-audit-publisher":               {"audit.ingest"},
+		"contract_management-prod-notification-publisher":        {"notification.ingest"},
+		"contract_management-prod-owner-directory":               {"owner_directory.read"},
+		"contract_management-prod-crm-contract-reference":        {"customer.contract_reference.read"},
+		"contract_management-prod-settlement-integration":        {"settlement.contract.ingest"},
+		"contract_management-prod-project-integration":           {"project.contract.import"},
+		"contract_management-prod-file-gateway-writer":           {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialAuditIngest:              "new-secret",
-		application.ServiceCredentialNotificationIngest:       "new-secret",
-		application.ServiceCredentialOwnerDirectoryRead:       "new-secret",
-		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
-		application.ServiceCredentialSettlementContractIngest: "new-secret",
-		application.ServiceCredentialProjectContractImport:    "new-secret",
-		application.ServiceCredentialFileGatewayWrite:         "new-secret",
+		application.ServiceCredentialAnalysisContractImportReportStatus: "new-secret",
+		application.ServiceCredentialAuditIngest:                        "new-secret",
+		application.ServiceCredentialNotificationIngest:                 "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead:                 "new-secret",
+		application.ServiceCredentialCRMContractReferenceRead:           "new-secret",
+		application.ServiceCredentialSettlementContractIngest:           "new-secret",
+		application.ServiceCredentialProjectContractImport:              "new-secret",
+		application.ServiceCredentialFileGatewayWrite:                   "new-secret",
 	})
 }
 
@@ -482,6 +492,9 @@ func TestContractNotificationCredentialRejectsForeignBindingBeforeSecretIssue(t 
 	}
 }
 
+// TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret 验证重试保留负责人身份并重新交付各专用服务密钥。
+// 参数：t为测试上下文，使用内存受控登记替身。
+// 返回值：无；凭据用途、权限或恢复结果不符即失败。
 func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T) {
 	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
 		ID: "client-1", ApplicationID: "application-1", EnvironmentID: "environment-1",
@@ -500,21 +513,23 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		t.Fatalf("retry did not issue a replacement delivery secret: input=%#v credentials=%#v", manager.secretInput, credentials)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
-		"contract_management-prod-audit-publisher":        {"audit.ingest"},
-		"contract_management-prod-notification-publisher": {"notification.ingest"},
-		"contract_management-prod-crm-contract-reference": {"customer.contract_reference.read"},
-		"contract_management-prod-settlement-integration": {"settlement.contract.ingest"},
-		"contract_management-prod-project-integration":    {"project.contract.import"},
-		"contract_management-prod-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
+		"contract_management-prod-analysis-import-report-status": {"analysis.contract-import.report-status"},
+		"contract_management-prod-audit-publisher":               {"audit.ingest"},
+		"contract_management-prod-notification-publisher":        {"notification.ingest"},
+		"contract_management-prod-crm-contract-reference":        {"customer.contract_reference.read"},
+		"contract_management-prod-settlement-integration":        {"settlement.contract.ingest"},
+		"contract_management-prod-project-integration":           {"project.contract.import"},
+		"contract_management-prod-file-gateway-writer":           {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialAuditIngest:              "new-secret",
-		application.ServiceCredentialNotificationIngest:       "new-secret",
-		application.ServiceCredentialOwnerDirectoryRead:       "retry-secret",
-		application.ServiceCredentialCRMContractReferenceRead: "new-secret",
-		application.ServiceCredentialSettlementContractIngest: "new-secret",
-		application.ServiceCredentialProjectContractImport:    "new-secret",
-		application.ServiceCredentialFileGatewayWrite:         "new-secret",
+		application.ServiceCredentialAnalysisContractImportReportStatus: "new-secret",
+		application.ServiceCredentialAuditIngest:                        "new-secret",
+		application.ServiceCredentialNotificationIngest:                 "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead:                 "retry-secret",
+		application.ServiceCredentialCRMContractReferenceRead:           "new-secret",
+		application.ServiceCredentialSettlementContractIngest:           "new-secret",
+		application.ServiceCredentialProjectContractImport:              "new-secret",
+		application.ServiceCredentialFileGatewayWrite:                   "new-secret",
 	})
 }
 

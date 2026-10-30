@@ -3,7 +3,7 @@ default: false
 application:
   code: data_analysis
   initial_admin_roles: [dashboard_admin]
-  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, file_gateway_write]
+  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, file_gateway_write, contract_import_report_read]
   name: 数据看板与统计分析系统
   description: 经营总览、合同项目分析、预警与指标看板
   environment: prod
@@ -23,6 +23,14 @@ runtime:
       # 会话编解码密钥仅用于本系统 Cookie；首次接入生成并长期复用。
       generated_keys: [OIDC_CODEC_KEY]
       values:
+        CONTRACT_IMPORT_SUMMARY_URL: http://contract-api:8081/internal/v1/contract-imports/report-source
+        CONTRACT_IMPORT_SYNC_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CONTRACT_IMPORT_SYNC_SCOPE: contract.import.report.read
+        CONTRACT_IMPORT_STATUS_ISSUER: basic-platform
+        CONTRACT_IMPORT_STATUS_AUDIENCE: basic-platform-application
+        CONTRACT_IMPORT_STATUS_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        CONTRACT_IMPORT_STATUS_CLIENT_ID: contract_management-prod-analysis-import-report-status
+        CONTRACT_IMPORT_STATUS_CALLER_ENVIRONMENT_CODE: prod
         DASHBOARD_MYSQL_DSN: 'dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
@@ -48,6 +56,9 @@ runtime:
         PROJECT_PROJECTION_URL: http://project-api:8082/internal/v1/dashboard/projects/snapshot
         PROJECT_PROJECTION_HTTP_TIMEOUT: 35s
       bindings:
+        CONTRACT_IMPORT_SYNC_CLIENT_ID: service.contract_import_report_read.client_id
+        CONTRACT_IMPORT_SYNC_CLIENT_SECRET: service.contract_import_report_read.client_secret
+        CONTRACT_IMPORT_STATUS_TENANT_ID: tenant_id
         APP_PATH_PREFIX: path_prefix
         APP_PUBLIC_ORIGIN: public_origin
         OIDC_ISSUER: issuer
