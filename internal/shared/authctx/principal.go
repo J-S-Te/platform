@@ -4,6 +4,7 @@ package authctx
 import (
 	"context"
 	"net"
+	"time"
 )
 
 type principalKey struct{}
@@ -19,6 +20,8 @@ type ReferenceName struct {
 // 它只能由认证中间件写入，调用方不得根据请求头自行构造。
 type Principal struct {
 	SessionID string `json:"-"`
+	// SessionIdleDeadline 来自持久化会话与当前策略，仅用于服务端响应剩余窗口。
+	SessionIdleDeadline time.Time `json:"-"`
 	// LoginIP 是创建该浏览器会话时捕获的已验证客户端 IP。仅限内部请求上下文使用，
 	// 身份类 API 不得把它返回给前端。
 	LoginIP         net.IP          `json:"-"`
