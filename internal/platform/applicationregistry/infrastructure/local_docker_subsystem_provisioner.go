@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -140,9 +141,9 @@ func (execSubsystemCommandRunner) Run(ctx context.Context, directory string, env
 	return err
 }
 
-// RunOutput 与 Run 等价，但额外把命令合并输出返回给调用方。生产 Agent 在固定部署步骤
-// 失败时会用它在受限时间内抓取目标容器日志摘要，把真实原因附到 provisioning 错误里，
-// 让平台页面直接看到而不是只显示通用的健康检查提示。输出仍先截断再写入 Agent 标准错误。
+// RunOutput 成功时返回独立标准输出，失败时保留两路输出供受限诊断。
+// 参数：ctx控制执行期限，directory为目录提示，environment为进程环境，name及arguments为命令。
+// 返回值：成功的标准输出或失败诊断；执行失败时同时返回错误。
 func (execSubsystemCommandRunner) RunOutput(ctx context.Context, directory string, environment []string, name string, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, arguments...)
 	// `directory` 只是提示值：command.Dir 只接受真实目录，因此调用方可能传入 unix socket 路径
@@ -154,8 +155,15 @@ func (execSubsystemCommandRunner) RunOutput(ctx context.Context, directory strin
 		command.Dir = string(filepath.Separator)
 	}
 	command.Env = environment
-	output, err := command.CombinedOutput()
+	var diagnostics bytes.Buffer
+	command.Stderr = &diagnostics
+	output, err := command.Output()
 	if err != nil {
+		// Compose 的成功警告不能混入 JSON；失败时仍保留原有诊断能力。
+		if len(output) > 0 && diagnostics.Len() > 0 {
+			output = append(output, '\n')
+		}
+		output = append(output, diagnostics.Bytes()...)
 		// 把失败命令输出的截断摘要写到标准错误，供运维诊断部署失败。不得原样返回命令参数或
 		// 输出：两者都可能包含实现细节。OAuth secret 从不作为命令行参数传入，但该规则也为
 		// 后续改动兜底。
