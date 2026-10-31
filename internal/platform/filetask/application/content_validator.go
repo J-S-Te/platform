@@ -15,6 +15,8 @@ import (
 	"path"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/J-S-Te/Basic-Platform/internal/shared/pdfobjectpolicy"
 )
 
 func calculateStoredIntegrity(content io.ReadSeeker) (uint64, []byte, error) {
@@ -270,6 +272,9 @@ func verifyStoredIntegrity(content io.ReadSeeker, expectedSize uint64, expectedD
 	return nil
 }
 
+// validatePDFEnvelope 保留文件信封校验并对可疑原始标记执行有界对象准入。
+// 参数：content为已通过网关全局与用途体积限制的隔离文件流。
+// 返回值：合法信封或可疑但静态的原件返回nil；损坏或禁止对象返回错误。
 func validatePDFEnvelope(content io.ReadSeeker) error {
 	header := make([]byte, 8)
 	count, err := io.ReadFull(content, header)
@@ -298,10 +303,11 @@ func validatePDFEnvelope(content io.ReadSeeker) error {
 	if err != nil {
 		return errors.New("PDF structure cannot be read")
 	}
-	// 第一阶段按危险字典失败关闭；后续独立网关可替换为 pdfcpu 深度解析器。
+	// 仅升级旧标记命中的分支，保留无标记PDF及其他格式的既有准入口径。
 	for _, marker := range [][]byte{[]byte("/JavaScript"), []byte("/JS"), []byte("/EmbeddedFile"), []byte("/Launch"), []byte("/Encrypt")} {
 		if bytes.Contains(data, marker) {
-			return errors.New("PDF contains a disallowed active or embedded feature")
+			// 以已验证的实际文件大小为输入上限，不对其他用途硬套合同20MiB上限。
+			return pdfobjectpolicy.Validate(data, end)
 		}
 	}
 	return nil
