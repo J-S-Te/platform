@@ -201,11 +201,17 @@ func defaultLoginPolicy(tenantID string) domain.LoginPolicy {
 	}
 }
 
+// validPolicy 拒绝无法被中央会话执行器采用的登录策略，避免保存后统一会话不可用。
+// 参数：maxAttempts为失败阈值，lockoutSeconds为锁定时长；
+//
+//	resetSeconds为重置窗口，idleTimeoutSeconds为空闲窗口。
+//
+// 返回值：各字段均在支持范围内时为真，空闲窗口最多三十分钟。
 func validPolicy(maxAttempts, lockoutSeconds, resetSeconds, idleTimeoutSeconds uint) bool {
 	return maxAttempts >= 1 && maxAttempts <= 20 &&
 		lockoutSeconds >= 60 && lockoutSeconds <= 24*60*60 &&
 		resetSeconds >= 60 && resetSeconds <= 24*60*60 &&
-		idleTimeoutSeconds >= 60 && idleTimeoutSeconds <= 24*60*60
+		idleTimeoutSeconds >= 60 && idleTimeoutSeconds <= defaultIdleTimeoutSeconds
 }
 
 func normalizePage(query PageRequest) PageRequest {
