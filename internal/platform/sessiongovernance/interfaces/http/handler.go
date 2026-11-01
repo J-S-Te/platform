@@ -57,9 +57,9 @@ func NewHandler(repository Repository, verifier Verifier, authenticator Authenti
 	return &Handler{repository: repository, verifier: verifier, authenticator: authenticator, cookieName: cookieName, now: time.Now}, nil
 }
 
-// Begin 核对精确登记回调并签发一次性浏览器桥接票据。
+// Begin 核对精确登记回调，在平台正常登录后签发有父周期的桥接票据。
 // 参数：w为响应，r携带client_id、redirect_uri、原state与nonce摘要。
-// 返回值：无；成功仅回跳已登记URI，失败不反射目标地址。
+// 返回值：无；未登录先同源登录，签票后只回已登记URI，失败不反射目标。
 func (h *Handler) Begin(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	id, redirect, state, nonce := q.Get("client_id"), q.Get("redirect_uri"), q.Get("state"), q.Get("nonce_challenge")
@@ -73,25 +73,14 @@ func (h *Handler) Begin(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
-	parent := ""
-	if cookie, cookieErr := r.Cookie(h.cookieName); cookieErr == nil && cookie.Value != "" {
-		principal, authErr := h.authenticator.Authenticate(r.Context(), cookie.Value)
-		if authErr != nil && !errors.Is(authErr, identityapplication.ErrUnauthenticated) {
-			failure(w, authErr)
-			return
-		}
-		if authErr == nil {
-			state, stateErr := h.repository.PlatformState(r.Context(), principal.SessionID, h.now().UTC(), false)
-			if stateErr != nil {
-				failure(w, stateErr)
-				return
-			}
-			if state.TenantID != client.TenantID {
-				failure(w, domain.ErrBindingConflict)
-				return
-			}
-			parent = state.SessionID
-		}
+	parent, err := h.platformParent(r, client)
+	if errors.Is(err, domain.ErrInactive) {
+		redirectPlatformLogin(w, r)
+		return
+	}
+	if err != nil {
+		failure(w, err)
+		return
 	}
 	ticket, err := h.repository.Begin(r.Context(), client, nonce, parent, h.now().UTC())
 	if err != nil {
@@ -110,6 +99,46 @@ func (h *Handler) Begin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// platformParent 只接受当前浏览器已认证且有效的平台中央父周期。
+// 参数：r为浏览器请求，client为已登记回调所属客户端。
+// 返回值：有效父周期；未登录/到期返回失效，依赖和租户错误保留原语义。
+func (h *Handler) platformParent(r *http.Request, client store.Client) (string, error) {
+	cookie, err := r.Cookie(h.cookieName)
+	if err != nil || cookie.Value == "" {
+		return "", domain.ErrInactive
+	}
+	principal, err := h.authenticator.Authenticate(r.Context(), cookie.Value)
+	if errors.Is(err, identityapplication.ErrUnauthenticated) {
+		return "", domain.ErrInactive
+	}
+	if err != nil {
+		return "", err
+	}
+	state, err := h.repository.PlatformState(r.Context(), principal.SessionID, h.now().UTC(), false)
+	if err != nil {
+		return "", err
+	}
+	if state.TenantID != client.TenantID {
+		return "", domain.ErrBindingConflict
+	}
+	return state.SessionID, nil
+}
+
+// redirectPlatformLogin 先完成正常平台登录，再回到固定同源桥接入口。
+// 参数：w为响应，r携带已经校验的四项桥接参数。
+// 返回值：无；不签发票据，不接受浏览器指定额外返回目标。
+func redirectPlatformLogin(w http.ResponseWriter, r *http.Request) {
+	query := url.Values{}
+	for _, key := range []string{"client_id", "redirect_uri", "state", "nonce_challenge"} {
+		query.Set(key, r.URL.Query().Get(key))
+	}
+	back := "/oauth2/session-links/begin?" + query.Encode()
+	target := "/login?" + url.Values{"return_to": {back}}.Encode()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 // Complete 独立验签并原子消费票据，绑定原文只返回服务器调用方。
