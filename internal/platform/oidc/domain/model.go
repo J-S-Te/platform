@@ -61,6 +61,7 @@ type ClientCredential struct {
 // SessionSubject 是授权码绑定的本地已认证浏览器会话；仓储只在租户、会话、
 // 账号与用户全部保持活动时才返回它。
 type SessionSubject struct {
+	AuthenticatedAt    time.Time
 	TenantID           string
 	SessionID          string
 	AccountID          string
@@ -73,6 +74,7 @@ type SessionSubject struct {
 // AuthorizationCode 是持久化的一次性凭据。CodeHash 固定为高熵随机授权码的 SHA-256 摘要，
 // RedirectURI、PKCE 与会话主体一并冻结，兑换时不得从当前请求重新推断。
 type AuthorizationCode struct {
+	AuthenticatedAt     time.Time
 	ID                  string
 	TenantID            string
 	OAuthClientID       string

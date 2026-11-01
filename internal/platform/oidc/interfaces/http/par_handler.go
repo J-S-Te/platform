@@ -11,8 +11,12 @@ import (
 
 const defaultPARTTL = 90 * time.Second
 
-// PAR 接受 RFC 9126 pushed authorization request。bootstrap 应把本处理器发布在
-// POST /oauth2/par；它刻意不依赖路由器，便于部署方与既有 OIDC 端点并行接线。
+// PAR 验证客户端并创建有界、单次消费的推送授权请求。
+//   PAR 接受 RFC 9126 pushed authorization request。bootstrap 应把本处理器发布在
+//   POST /oauth2/par；它刻意不依赖路由器，便于部署方与既有 OIDC 端点并行接线。
+// 参数：w为HTTP响应写入器。
+//   r为原始HTTP请求。
+// 返回值：无。
 func (h *Handler) PAR(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -25,6 +29,11 @@ func (h *Handler) PAR(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAuthorizeRequestBytes)
 	if err := r.ParseForm(); err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "")
+		return
+	}
+	// PAR当前存储不承载重新认证要求，明确拒绝而不是静默丢失安全参数。
+	if r.Form.Has("prompt") || r.Form.Has("max_age") {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "")
 		return
 	}

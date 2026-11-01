@@ -187,12 +187,25 @@ type requestObjectFields struct {
 	ClientID, ResponseType, RedirectURI, Scope, State, Nonce, CodeChallenge, CodeChallengeMethod string
 }
 
+// validateRequestObject 核验签名请求对象的客户端、受众和短效期限；不支持的新鲜认证配置明确拒绝。
+// 参数：raw为原始待核验材料。
+//   client为本调用的client业务输入。
+//   audience为本调用的audience业务输入。
+//   now为本次服务端校验时间。
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func validateRequestObject(raw string, client domain.Client, audience string, now time.Time) (requestObjectFields, error) {
 	// JAR 的受众固定为平台授权端点，而非 token 端点；短 exp 和可选 iat/nbf 时间窗限制了
 	// 被截获请求对象的可重放周期。真正的一次性语义则由 PAR request_uri 的消费事务提供。
 	token, err := parseCompactJWT(raw)
 	if err != nil || verifyCompactJWT(token, client.JWKs) != nil {
 		return requestObjectFields{}, errors.New("invalid request object")
+	}
+	// 未承载新鲜认证语义的签名请求配置必须明确拒绝，不能签出看似新鲜的令牌。
+	if _, present := token.Claims["prompt"]; present {
+		return requestObjectFields{}, errors.New("request object freshness profile is unsupported")
+	}
+	if _, present := token.Claims["max_age"]; present {
+		return requestObjectFields{}, errors.New("request object freshness profile is unsupported")
 	}
 	issuer, ok := jwtString(token.Claims, "iss")
 	if !ok || issuer != client.ClientID {

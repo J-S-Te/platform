@@ -121,6 +121,11 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	centralSessionPolicy, err := applicationregistryapplication.NewCentralSessionRuntimePolicy(cfg.Auth.CentralSessionEnabled, cfg.HTTP.PublicBaseURL)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+	subsystemHandler.ConfigureCentralSessionPolicy(*centralSessionPolicy)
 	// Keycloak 是可选模块。保持显式声明，让页面可以把它显示为"不可用"，
 	// 而不是让运维保存一条部署 Agent 无法兑现的 issuer 别名。
 	subsystemHandler.ConfigureKeycloak(
@@ -194,7 +199,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 				Password:                   cfg.Keycloak.AdminPassword,
 			},
 			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret, cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
-		))
+		).WithCentralSessionGovernance(cfg.Auth.CentralSessionEnabled))
 		subsystemHandler.ConfigureKeycloakBroker(keycloakBrokerRegistrar{applications: applicationManagementService, oauth: oauthClientManagementService, publicURL: cfg.Keycloak.PublicURL, realm: cfg.Keycloak.Realm, environment: keycloakBrokerEnvironment(cfg.Environment)})
 		subsystemHandler.ConfigureKeycloakAuthorizationCatalog(keycloakAuthorizationCatalogAdapter{service: applicationAccessService})
 		subsystemHandler.ConfigureKeycloakClientMappingStore(mappingStore)

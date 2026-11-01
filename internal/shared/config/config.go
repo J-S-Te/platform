@@ -111,6 +111,7 @@ type AuthConfig struct {
 	SessionCookieSecure    bool
 	SessionCookieSameSite  string
 	SessionTTL             time.Duration
+	CentralSessionEnabled  bool
 	// AllowLegacyPlatformAccessToken 在 Keycloak 切换后继续保留
 	// /oauth2/authorization-context 使用的旧平台访问令牌路径。它不关闭授权服务器
 	// 标准的 /oauth2/userinfo 端点——Keycloak Broker 仍依赖该端点。
@@ -225,8 +226,13 @@ type SubsystemOnboardingAutomationConfig struct {
 	DefaultIssuerAlias string
 }
 
-// Load 显式设置 ENV_FILE 时只读取该文件；否则在当前目录及父目录寻找 .env，使 backend/ 下运行的
-// 命令仍共享仓库根配置。宿主环境始终优先于文件，容器编排和密钥注入不会被本地文件覆盖。
+// Load 读取并严格解析平台运行配置。
+//
+//	Load 显式设置 ENV_FILE 时只读取该文件；否则在当前目录及父目录寻找 .env，使 backend/ 下运行的
+//	命令仍共享仓库根配置。宿主环境始终优先于文件，容器编排和密钥注入不会被本地文件覆盖。
+//
+// 参数：无。
+// 返回值：校验后的运行配置及解析或约束错误。
 func Load() (Config, error) {
 	envFile := resolveEnvFile()
 	if err := LoadDotEnv(envFile); err != nil {
@@ -261,6 +267,10 @@ func Load() (Config, error) {
 	}
 
 	sessionTTL, err := duration("AUTH_SESSION_TTL", 8*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	centralSessionEnabled, err := boolean("AUTH_CENTRAL_SESSION_ENABLED", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -342,6 +352,7 @@ func Load() (Config, error) {
 			SessionCookieSecure:                      cookieSecure,
 			SessionCookieSameSite:                    value("AUTH_SESSION_COOKIE_SAME_SITE", "Lax"),
 			SessionTTL:                               sessionTTL,
+			CentralSessionEnabled:                    centralSessionEnabled,
 			AllowLegacyPlatformAccessToken:           legacyPlatformAccessTokenEnabled,
 			AuthzContextCustomerRefEnabled:           authzContextCustomerRefEnabled,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
@@ -450,12 +461,17 @@ func handoverSystemURLs(raw string) map[string]string {
 	return systems
 }
 
-// Validate 在创建网络监听和数据库连接前拒绝不安全配置。传输层（Public BaseURL 的 scheme）
-// 仍由部署环境显式配置，兼容 HTTP 网关/内网部署；但会话 Cookie Secure 是会话劫持的直接
-// 防线：production 环境默认拒绝 AUTH_SESSION_COOKIE_SECURE=false（SEC-B2 fail-closed），
-// 仅当 APP_PUBLIC_BASE_URL 明确为 http:// 的隔离网络 HTTP 部署才放行；非生产环境可通过
-// 显式环境变量放行本地 HTTP 开发。CORS 使用凭据时仍禁止通配源，
-// 部署自动化只有在所选模式所需路径完整时才允许启用。
+// Validate 校验平台配置及统一会话管理的期限约束。
+//
+//	Validate 在创建网络监听和数据库连接前拒绝不安全配置。传输层（Public BaseURL 的 scheme）
+//	仍由部署环境显式配置，兼容 HTTP 网关/内网部署；但会话 Cookie Secure 是会话劫持的直接
+//	防线：production 环境默认拒绝 AUTH_SESSION_COOKIE_SECURE=false（SEC-B2 fail-closed），
+//	仅当 APP_PUBLIC_BASE_URL 明确为 http:// 的隔离网络 HTTP 部署才放行；非生产环境可通过
+//	显式环境变量放行本地 HTTP 开发。CORS 使用凭据时仍禁止通配源，
+//	部署自动化只有在所选模式所需路径完整时才允许启用。
+//
+// 参数：无。
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (cfg Config) Validate() error {
 	if cfg.AppName == "" {
 		return fmt.Errorf("APP_NAME must not be empty")
@@ -507,6 +523,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Auth.SessionTTL <= 0 {
 		return fmt.Errorf("AUTH_SESSION_TTL must be greater than zero")
+	}
+	if cfg.Auth.CentralSessionEnabled && cfg.Auth.SessionTTL != 8*time.Hour {
+		return fmt.Errorf("AUTH_SESSION_TTL must be 8h when AUTH_CENTRAL_SESSION_ENABLED=true")
 	}
 	if !validSameSite(cfg.Auth.SessionCookieSameSite) {
 		return fmt.Errorf("AUTH_SESSION_COOKIE_SAME_SITE must be Lax, Strict or None")

@@ -1004,6 +1004,15 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 				continue
 			}
 			switch source {
+			case "central_session_enabled", "central_session_public_base_url":
+				if input.CentralSessionPolicy == nil {
+					continue
+				}
+				value, resolveErr := resolveProductionBinding(input, source)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				values[key] = value
 			case "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
 				value, resolveErr := resolveProductionBinding(input, source)
 				if resolveErr != nil {
@@ -1236,6 +1245,21 @@ func resolveProductionBinding(input application.SubsystemProvisioningInput, sour
 		return input.ApplicationID, nil
 	case "application_code":
 		return input.ApplicationCode, nil
+	case "central_session_enabled", "central_session_public_base_url":
+		if input.CentralSessionPolicy == nil {
+			if source == "central_session_enabled" {
+				return "false", nil
+			}
+			return publicOriginFromURL(input.PublicURL)
+		}
+		policy, err := application.NewCentralSessionRuntimePolicy(input.CentralSessionPolicy.Enabled, input.CentralSessionPolicy.PublicBaseURL)
+		if err != nil {
+			return "", err
+		}
+		if source == "central_session_enabled" {
+			return booleanEnvironmentValue(policy.Enabled), nil
+		}
+		return policy.PublicBaseURL, nil
 	case "environment":
 		return input.Environment, nil
 	case "path_prefix":

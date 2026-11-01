@@ -302,13 +302,15 @@ type SubsystemAccessDeploymentReceipt struct {
 // SubsystemProvisioningInput 是一次性交付给子系统运行时的配置封套。ClientSecret 仅允许经过
 // 进程内接口与受限 Unix socket 到达部署 Agent，不得写日志、返回浏览器或出现在命令行参数中。
 type SubsystemProvisioningInput struct {
-	AccessReceipt    *SubsystemAccessDeploymentReceipt `json:"access_receipt,omitempty"`
-	TenantID         string
-	ApplicationID    string
-	EnvironmentID    string
-	ApplicationCode  string
-	Environment      string
-	ManifestChecksum string
+	// CentralSessionPolicy由服务端统一配置构造，不接收生命周期HTTP请求中的人员输入。
+	CentralSessionPolicy *CentralSessionRuntimePolicy      `json:"central_session_policy,omitempty"`
+	AccessReceipt        *SubsystemAccessDeploymentReceipt `json:"access_receipt,omitempty"`
+	TenantID             string
+	ApplicationID        string
+	EnvironmentID        string
+	ApplicationCode      string
+	Environment          string
+	ManifestChecksum     string
 	// ReleaseDigest 是 API 本次要求 Agent 绑定的已安装 release manifest 摘要；
 	// 空表示由 Agent 本机配置决定（兼容旧客户端）。
 	ReleaseDigest string `json:"release_digest,omitempty"`

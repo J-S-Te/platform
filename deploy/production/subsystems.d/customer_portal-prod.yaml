@@ -48,6 +48,8 @@ runtime:
         PORTAL_REPORT_IDENTITY_CLIENT_SECRET: service.portal_report_download_identity_read.client_secret
         PORTAL_PUBLIC_ORIGIN: public_origin
         PORTAL_PATH_PREFIX: path_prefix
+        PORTAL_CENTRAL_SESSION_ENABLED: central_session_enabled
+        PORTAL_CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
         PORTAL_OIDC_ISSUER: issuer
         PORTAL_OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         PORTAL_OIDC_CLIENT_ID: client_id

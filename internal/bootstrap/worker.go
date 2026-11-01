@@ -28,6 +28,7 @@ import (
 	notificationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/notification/application"
 	notificationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/notification/infrastructure"
 	notificationworker "github.com/J-S-Te/Basic-Platform/internal/platform/notification/worker"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/database"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/observability"
@@ -72,9 +73,14 @@ type Worker struct {
 	logFile  io.Closer
 }
 
-// NewWorker 装配审计导出、留存清理、人员变更与 Keycloak 观察者等任务。
-// 参数 cfg 提供数据库与调度配置；返回 *Worker 表示可启动的完整 worker 进程依赖图。
-// Worker 不执行 AutoMigrate，数据库变更只能由独立 migrate 命令完成，避免扩容或重启后台任务时并发竞争 DDL。
+// NewWorker 装配后台任务及中央到期撤销依赖。
+//
+//	NewWorker 装配审计导出、留存清理、人员变更与 Keycloak 观察者等任务。
+//	参数 cfg 提供数据库与调度配置；返回 *Worker 表示可启动的完整 worker 进程依赖图。
+//	Worker 不执行 AutoMigrate，数据库变更只能由独立 migrate 命令完成，避免扩容或重启后台任务时并发竞争 DDL。
+//
+// 参数：cfg为已校验的运行配置。
+// 返回值：装配后的应用或认证实例；配置与依赖装配失败时返回错误。
 func NewWorker(cfg config.Config) (*Worker, error) {
 	// 传给统一接入执行器的 broker 端口（未启用 Keycloak 时保持 nil）。
 	var brokerCredentials applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerCredentials
@@ -176,6 +182,15 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, fmt.Errorf("create identity repository for expiry worker: %w", err)
+	}
+	if cfg.Auth.CentralSessionEnabled {
+		central, centralErr := sessionstore.NewStore(db)
+		if centralErr != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, centralErr
+		}
+		identityRepository.EnableCentralSessions(central)
 	}
 	expiryRunner, err := identityworker.NewExpiryWorker(
 		identityinfrastructure.NewExpiryGORMRepository(db), identityRepository, service, notificationService,
@@ -311,7 +326,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			},
 			brokerClientID, brokerClientSecret,
 			cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
-		)
+		).WithCentralSessionGovernance(cfg.Auth.CentralSessionEnabled)
 		brokerControl = controlPlane
 		// broker client 已有活动凭据时，ensureBrokerClient 返回空 secret 以避免
 		// 不必要的轮换。此时只验证 IdP 存在且配置完整；若拿到了 secret

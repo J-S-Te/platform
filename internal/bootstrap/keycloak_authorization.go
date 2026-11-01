@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
@@ -47,6 +48,13 @@ func (t keycloakJWKSBackchannel) RoundTrip(request *http.Request) (*http.Respons
 	return t.base.RoundTrip(clone)
 }
 
+// newKeycloakAuthorizationVerifier 装配有界网络访问的上游签名验证器。
+// 参数：cfgIssuer为受配置管理的预期发行者。
+//
+//	cfgAdminURL为受控Keycloak管理入口。
+//	realm为既有受控Realm配置。
+//
+// 返回值：装配后的应用或认证实例；配置与依赖装配失败时返回错误。
 func newKeycloakAuthorizationVerifier(cfgIssuer, cfgAdminURL, realm string) (*keycloakAuthorizationVerifier, error) {
 	publicIssuer := strings.TrimRight(cfgIssuer, "/") + "/realms/" + strings.TrimSpace(realm)
 	internalIssuer := strings.TrimRight(cfgAdminURL, "/") + "/realms/" + strings.TrimSpace(realm)
@@ -58,7 +66,7 @@ func newKeycloakAuthorizationVerifier(cfgIssuer, cfgAdminURL, realm string) (*ke
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Transport: keycloakJWKSBackchannel{base: http.DefaultTransport, public: public, internal: internal}}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: keycloakJWKSBackchannel{base: http.DefaultTransport, public: public, internal: internal}}
 	verifier, err := middleware.NewKeycloakBrokerJWTVerifier(publicIssuer, client)
 	if err != nil {
 		return nil, err

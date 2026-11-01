@@ -58,6 +58,8 @@ runtime:
         CONTRACT_INTEGRATION_OAUTH_CLIENT_ID: related_service.contract_management.settlement_contract_ingest.oauth_client_id
         CONTRACT_INTEGRATION_APPLICATION_ID: related_service.contract_management.settlement_contract_ingest.application_id
         CONTRACT_INTEGRATION_ENVIRONMENT_ID: related_service.contract_management.settlement_contract_ingest.environment_id
+        CENTRAL_SESSION_ENABLED: central_session_enabled
+        CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id

@@ -98,6 +98,8 @@ runtime:
         CONTRACT_IMPORT_FINANCE_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
         SETTLEMENT_INTEGRATION_CLIENT_ID: service.settlement_contract_ingest.client_id
         SETTLEMENT_INTEGRATION_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
+        CENTRAL_SESSION_ENABLED: central_session_enabled
+        CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id
