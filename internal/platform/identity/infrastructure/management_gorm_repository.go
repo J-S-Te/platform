@@ -11,6 +11,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -314,7 +315,17 @@ func (repository *GORMRepository) GetUser(ctx context.Context, tenantID, userID 
 	return toDomainUser(row), nil
 }
 
-// UpdateUser 以乐观锁执行更新，持久化字段使用显式白名单。
+// UpdateUser 在既有人员更新事务内同步必要的会话撤销。
+//
+//	UpdateUser 以乐观锁执行更新，持久化字段使用显式白名单。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//	mobileCiphertext为按既有机制加密的联系方式。
+//	mobileHash为联系方式的不可逆检索摘要。
+//
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func (repository *GORMRepository) UpdateUser(ctx context.Context, input application.UserUpdateInput, mobileCiphertext, mobileHash []byte) (domain.User, error) {
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var existing userModel
@@ -392,6 +403,11 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 				Updates(map[string]any{"status": domain.StatusDisabled, "revoked_at": now, "revoke_reason": "USER_DISABLED"}).Error; err != nil {
 				return fmt.Errorf("revoke disabled user sessions: %w", err)
 			}
+			if repository.central != nil {
+				if err := sessionstore.RevokeIdentityTx(transaction, input.TenantID, input.UserID, now, "USER_DISABLED", ""); err != nil {
+					return err
+				}
+			}
 		}
 		if err := enqueueKeycloakIdentityEvents(transaction, input.TenantID, []string{input.UserID}, now, "IDENTITY_CHANGED"); err != nil {
 			return err
@@ -404,9 +420,17 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 	return repository.GetUser(ctx, input.TenantID, input.UserID)
 }
 
-// DeleteUser 执行租户范围内的业务删除。用户、账号与任职行保留为停用记录以维持审计与
-// 外键完整性，但关联登录账号与任职从常规管理视图消失；既有会话在同一事务内吊销，
-// 被删用户立即失去访问。
+// DeleteUser 在既有人员删除事务内撤销对应会话。
+//
+//	DeleteUser 执行租户范围内的业务删除。用户、账号与任职行保留为停用记录以维持审计与
+//	外键完整性，但关联登录账号与任职从常规管理视图消失；既有会话在同一事务内吊销，
+//	被删用户立即失去访问。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (repository *GORMRepository) DeleteUser(ctx context.Context, input application.UserDeleteInput) error {
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var user userModel
@@ -462,6 +486,11 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 			Where("tenant_id = ? AND account_id IN (?) AND status = ? AND revoked_at IS NULL", input.TenantID, accountIDs, domain.StatusActive).
 			Updates(map[string]any{"status": domain.StatusDisabled, "revoked_at": now, "revoke_reason": reason}).Error; err != nil {
 			return fmt.Errorf("revoke user sessions: %w", err)
+		}
+		if repository.central != nil {
+			if err := sessionstore.RevokeIdentityTx(transaction, input.TenantID, input.UserID, now, reason, ""); err != nil {
+				return err
+			}
 		}
 		if err := enqueueKeycloakIdentityEvents(transaction, input.TenantID, []string{input.UserID}, now, "IDENTITY_CHANGED"); err != nil {
 			return err
@@ -523,10 +552,17 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 	return application.PageResult[domain.Account]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// UpdateAccount 变更账号状态并在同一事务内使其会话失效。
+// UpdateAccount 更新账号并在失效时同步撤销中央周期。
 //
-// 旧会话仍在有效期内时，被停用账号绝不能靠简单重新启用恢复访问。行锁使状态转移与
-// 会话吊销原子化：任一写入失败，两者都不生效。
+//	UpdateAccount 变更账号状态并在同一事务内使其会话失效。
+//	旧会话仍在有效期内时，被停用账号绝不能靠简单重新启用恢复访问。行锁使状态转移与
+//	会话吊销原子化：任一写入失败，两者都不生效。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func (repository *GORMRepository) UpdateAccount(ctx context.Context, input application.AccountUpdateInput) (domain.Account, error) {
 	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -578,6 +614,11 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 			if result.Error != nil {
 				return fmt.Errorf("revoke account sessions after status change: %w", result.Error)
 			}
+			if repository.central != nil {
+				if err := sessionstore.RevokeAccountTx(transaction, input.TenantID, input.AccountID, now, "ACCOUNT_STATUS_CHANGED"); err != nil {
+					return err
+				}
+			}
 		}
 		if existing.UserID != nil {
 			if err := enqueueKeycloakIdentityEvents(transaction, input.TenantID, []string{*existing.UserID}, now, "IDENTITY_CHANGED"); err != nil {
@@ -592,8 +633,17 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 	return repository.getAccount(ctx, input.TenantID, input.AccountID)
 }
 
-// DisableExternalIdentity 把提供方侧的停用结果对账进平台聚合。它有意永不启用任何东西：
-// 平台侧管理员是恢复访问的唯一权威。
+// DisableExternalIdentity 禁用外部身份并撤销该账号关联的中央会话。
+//
+//	DisableExternalIdentity 把提供方侧的停用结果对账进平台聚合。它有意永不启用任何东西：
+//	平台侧管理员是恢复访问的唯一权威。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	tenantID为可信租户标识。
+//	userID为目标租户内人员标识。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, tenantID, userID string) error {
 	tenantID = strings.TrimSpace(tenantID)
 	userID = strings.TrimSpace(userID)
@@ -657,6 +707,11 @@ func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, t
 			if err := transaction.Model(&sessionModel{}).Where("tenant_id = ? AND account_id IN ? AND status = ? AND revoked_at IS NULL", tenantID, accountIDs, domain.StatusActive).
 				Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "EXTERNAL_ACCOUNT_DISABLED"}).Error; err != nil {
 				return fmt.Errorf("revoke external user sessions: %w", err)
+			}
+			if repository.central != nil {
+				if err := sessionstore.RevokeIdentityTx(transaction, tenantID, userID, now, "EXTERNAL_ACCOUNT_DISABLED", ""); err != nil {
+					return err
+				}
 			}
 		}
 		if changed {

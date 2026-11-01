@@ -79,6 +79,8 @@ runtime:
       bindings:
         SETTLEMENT_REFERENCE_CLIENT_ID: related_service.settlement.settlement_project_reference_read.client_id
         SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE: environment
+        CENTRAL_SESSION_ENABLED: central_session_enabled
+        CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id

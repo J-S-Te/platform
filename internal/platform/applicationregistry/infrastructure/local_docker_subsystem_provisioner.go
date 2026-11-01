@@ -747,8 +747,17 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 	return nil
 }
 
+// updateOIDCRuntimeConfiguration 通过既有受控运行配置更新OIDC与统一会话接线。
+// 参数：input为经过调用方边界校验的业务输入。
+//
+//	environmentPath为受控运行环境文件路径。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfiguration(input application.SubsystemProvisioningInput, environmentPath string) error {
-	values := map[string]string{}
+	values, policyErr := managedSessionEnvironment(input.CentralSessionPolicy, input.ApplicationCode)
+	if policyErr != nil {
+		return policyErr
+	}
 	backchannel := provisioner.oidcBackchannelBaseURL(input.Issuer)
 	currentContent, readErr := os.ReadFile(environmentPath)
 	if readErr != nil {
@@ -847,8 +856,16 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 	return nil
 }
 
-// applyLocked 包含 Provision 的实际写入与启动流程，调用方必须先持有互斥锁；环境文件采用
-// 临时文件加原子替换，Compose 或网关失败时保留现场，便于诊断和安全重试。
+// applyLocked 在部署互斥保护内执行已授权的接入请求。
+//
+//	applyLocked 包含 Provision 的实际写入与启动流程，调用方必须先持有互斥锁；环境文件采用
+//	临时文件加原子替换，Compose 或网关失败时保留现场，便于诊断和安全重试。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if err := provisioner.deliverLocalRuntimeLicense(ctx, input); err != nil {
 		return err
@@ -1129,6 +1146,13 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 	}
 	if err := provisioner.p1LocalRuntimeValues(input, environmentPath, values, true); err != nil {
 		return err
+	}
+	policyValues, policyErr := managedSessionEnvironment(input.CentralSessionPolicy, input.ApplicationCode)
+	if policyErr != nil {
+		return policyErr
+	}
+	for key, value := range policyValues {
+		values[key] = value
 	}
 	if err := updateSubsystemEnvironment(environmentSource, environmentPath, values); err != nil {
 		return provisioningError("write subsystem environment file")

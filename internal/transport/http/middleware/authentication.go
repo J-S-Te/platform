@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"context"
+	"errors"
+	identityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"net/http"
 
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
@@ -15,8 +17,16 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (authctx.Principal, error)
 }
 
-// Authentication 在受保护路由前校验 HttpOnly 会话 Cookie。用户、租户和权限只能来自服务端
-// 会话解析结果，浏览器可伪造的身份请求头永远不进入可信上下文。
+// Authentication 将已核验的平台身份和会话期限写入请求上下文。
+//
+//	Authentication 在受保护路由前校验 HttpOnly 会话 Cookie。用户、租户和权限只能来自服务端
+//	会话解析结果，浏览器可伪造的身份请求头永远不进入可信上下文。
+//
+// 参数：authenticator为本应用服务端会话校验器。
+//
+//	cookieName为当前应用独立Cookie名称。
+//
+// 返回值：执行服务端会话校验并写入可信主体的HTTP中间件。
 func Authentication(authenticator Authenticator, cookieName string) gin.HandlerFunc {
 	return func(context *gin.Context) {
 		cookie, err := context.Request.Cookie(cookieName)
@@ -28,7 +38,11 @@ func Authentication(authenticator Authenticator, cookieName string) gin.HandlerF
 		principal, err := authenticator.Authenticate(context.Request.Context(), cookie.Value)
 		if err != nil {
 			context.Abort()
-			httpresponse.WriteError(context.Writer, context.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+			if errors.Is(err, identityapplication.ErrUnauthenticated) {
+				httpresponse.WriteError(context.Writer, context.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+			} else {
+				httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUTH_DEPENDENCY_UNAVAILABLE", "会话服务暂不可用，请稍后重试", nil))
+			}
 			return
 		}
 		// Cookie 响应与租户、用户绑定，必须在业务处理器写响应前禁用浏览器和共享代理缓存；

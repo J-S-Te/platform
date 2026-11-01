@@ -8,12 +8,15 @@ import (
 	"github.com/J-S-Te/Basic-Platform/migrations"
 )
 
+// TestEmbeddedMigrationsAreContiguousAndParseable 核验连续迁移、SQL可解析性及历史校验和。
+// 参数：t为测试上下文。
+// 返回值：无；版本缺失或已应用迁移被改写时失败。
 func TestEmbeddedMigrationsAreContiguousAndParseable(t *testing.T) {
 	items, err := migration.Load(migrations.Files)
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	const latestMigrationVersion = 132
+	const latestMigrationVersion = 134
 	if len(items) == 0 || items[len(items)-1].Version != latestMigrationVersion {
 		t.Fatalf("last migration version = %d, want %d", items[len(items)-1].Version, latestMigrationVersion)
 	}

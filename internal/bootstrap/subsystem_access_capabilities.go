@@ -157,9 +157,20 @@ func (port subsystemAccessRelatedClientsPort) ResolveSubsystemRelatedServiceClie
 	return port.resolver.Resolve(ctx, tenantID, applicationCode, environmentCode)
 }
 
-// newSubsystemAccessRunnerFromConfig 装配统一接入的持久执行器：
-// 清单/批准（部署 Agent）→ 目录与部署端口 → 阶段执行器 → 持久执行器 → 调度循环。
-// 仅当 cfg.SubsystemOnboarding.Enabled 为真时由 Worker 调用；任一步失败即整体失败（不做静默降级）。
+// newSubsystemAccessRunnerFromConfig 装配既有签名接入流程并注入平台统一策略。
+//
+//	newSubsystemAccessRunnerFromConfig 装配统一接入的持久执行器：
+//	清单/批准（部署 Agent）→ 目录与部署端口 → 阶段执行器 → 持久执行器 → 调度循环。
+//	仅当 cfg.SubsystemOnboarding.Enabled 为真时由 Worker 调用；任一步失败即整体失败（不做静默降级）。
+//
+// 参数：cfg为已校验的运行配置。
+//
+//	database为本应用数据库连接。
+//	logger为不记录凭据的结构化日志入口。
+//	broker为既有身份代理校验器。
+//	keycloakCatalog为受控Keycloak应用目录依赖。
+//
+// 返回值：装配后的应用或认证实例；配置与依赖装配失败时返回错误。
 func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, logger *slog.Logger, broker infrastructure.SubsystemAccessKeycloakBrokerReconciliation, keycloakCatalog *applicationaccess.Service) (*subsystemAccessRunner, error) {
 	if database == nil || logger == nil {
 		return nil, errors.New("subsystem access runner requires database and logger")
@@ -249,6 +260,11 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	if err != nil {
 		return nil, err
 	}
+	centralSessionPolicy, err := application.NewCentralSessionRuntimePolicy(cfg.Auth.CentralSessionEnabled, cfg.HTTP.PublicBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	deploymentPort.SetCentralSessionPolicy(*centralSessionPolicy)
 	configurationTracker, err := infrastructure.NewSubsystemAccessConfigurationTracker(database, provisioner, provisioner)
 	if err != nil {
 		return nil, err
@@ -306,7 +322,7 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 				Password:                   cfg.Keycloak.AdminPassword,
 			},
 			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret, cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
-		)
+		).WithCentralSessionGovernance(cfg.Auth.CentralSessionEnabled)
 		browserRuntime.mappings, browserRuntime.keycloak = mappingStore, controlPlane
 		projection, projectionErr := application.NewKeycloakAuthorizationProjectionService(
 			keycloakAuthorizationCatalogAdapter{service: keycloakCatalog}, controlPlane, mappingStore, readinessStore,

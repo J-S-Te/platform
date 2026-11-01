@@ -21,6 +21,9 @@ import (
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	auditdomain "github.com/J-S-Te/Basic-Platform/internal/platform/audit/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
+	identitydomain "github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
+	sessiondomain "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/domain"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -41,6 +44,21 @@ type Handler struct {
 	loginTargets    applicationregistry.LoginTargetResolver
 	oidc            oidcLoginConfig
 	idTokenVerifier oidcIDTokenVerifier
+	central         *sessionstore.Store
+	centralVerifier centralTokenVerifier
+}
+
+// centralTokenVerifier 返回完整且成对验签的原始认证声明。
+type centralTokenVerifier interface {
+	VerifySessionTokens(context.Context, string, string, string, string) (sessionstore.VerifiedIdentity, error)
+	TerminateSession(context.Context, sessionstore.VerifiedIdentity) error
+}
+
+// WithCentralSessionAuthority 接入平台统一周期，保持现有业务授权不变。
+// 参数：central为中央存储，verifier为已配置上游签名验证器。
+// 返回值：仅组合根使用的装配选项。
+func WithCentralSessionAuthority(central *sessionstore.Store, verifier centralTokenVerifier) IDTokenVerifierOption {
+	return func(h *Handler) { h.central = central; h.centralVerifier = verifier }
 }
 
 type oidcLoginConfig struct {
@@ -161,8 +179,9 @@ type sessionResponse struct {
 
 type principalResponse struct {
 	authctx.Principal
-	IdleTimeoutSeconds uint   `json:"idle_timeout_seconds"`
-	IdleRemainingMS    *int64 `json:"idle_remaining_ms,omitempty"`
+	IdleTimeoutSeconds uint                  `json:"idle_timeout_seconds"`
+	IdleRemainingMS    *int64                `json:"idle_remaining_ms,omitempty"`
+	SessionContext     *sessionstore.Context `json:"session_context,omitempty"`
 }
 
 // Login 处理唯一的 P0 登录类型：携带 Argon2id 密码凭据的本地账号。
@@ -197,8 +216,16 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "登录成功", toSessionResponse(result))
 }
 
-// BeginOIDCLogin 发起平台自身的常规浏览器登录。它只是 RP 重定向，
-// 此处绝不调用 Broker Verification 端点。
+// BeginOIDCLogin 建立平台原始OIDC事务并进入上游认证。
+//
+//	BeginOIDCLogin 发起平台自身的常规浏览器登录。它只是 RP 重定向，
+//	此处绝不调用 Broker Verification 端点。
+//
+// 参数：writer为HTTP响应写入器。
+//
+//	request为经过调用方校验的请求内容。
+//
+// 返回值：无。
 func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http.Request) {
 	if !handler.oidc.enabled || handler.oidc.issuer == "" || handler.oidc.clientID == "" || handler.oidc.redirectPath == "" {
 		httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New("AUTH_OIDC_UNAVAILABLE", "统一认证暂不可用", nil))
@@ -223,11 +250,22 @@ func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http
 		"redirect_uri":   {handler.oidc.redirectURI(request)},
 		"code_challenge": {oidcCodeChallenge(state)}, "code_challenge_method": {"S256"},
 	}
+	if handler.central != nil {
+		query.Set("claims", `{"id_token":{"auth_time":{"essential":true}}}`)
+	}
 	http.Redirect(writer, request, handler.oidc.issuer+"/protocol/openid-connect/auth?"+query.Encode(), http.StatusFound)
 }
 
-// OIDCCallback 用 code 换取令牌并经 UserInfo 解析身份。UserInfo 返回前 Keycloak
-// 已校验过 access token；本回调绝不执行 Broker Verification，也不记录任何门禁。
+// OIDCCallback 核验上游身份后继承中央原期限创建平台Cookie。
+//
+//	OIDCCallback 用 code 换取令牌并经 UserInfo 解析身份。UserInfo 返回前 Keycloak
+//	已校验过 access token；本回调绝不执行 Broker Verification，也不记录任何门禁。
+//
+// 参数：writer为HTTP响应写入器。
+//
+//	request为经过调用方校验的请求内容。
+//
+// 返回值：无。
 func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.Request) {
 	if !handler.oidc.enabled {
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
@@ -282,9 +320,49 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	if identityID == "" {
 		identityID = userInfoID
 	}
+	var centralAnchor *identitydomain.SessionAnchor
+	var currentPrincipal *authctx.Principal
+	if handler.central == nil {
+		currentPrincipal = handler.currentBrowserPrincipal(request)
+	}
+	if handler.central != nil {
+		currentPrincipal, err = trustedBrowserPrincipal(request, handler.cookie.name, handler.service)
+		if err != nil {
+			writeCentralSessionFailure(writer, request, err)
+			return
+		}
+		sum := sha256.Sum256([]byte(nonceCookie.Value))
+		verified, verifyErr := handler.centralVerifier.VerifySessionTokens(request.Context(), accessToken, rawIDToken, handler.oidc.clientID, base64.RawURLEncoding.EncodeToString(sum[:]))
+		if verifyErr != nil {
+			writeCentralSessionFailure(writer, request, verifyErr)
+			return
+		}
+		parent := ""
+		if currentPrincipal != nil && currentPrincipal.User.ID == verified.IdentityID && currentPrincipal.Tenant.ID == verified.TenantID {
+			state, stateErr := handler.central.PlatformState(request.Context(), currentPrincipal.SessionID, time.Now().UTC(), false)
+			if stateErr != nil {
+				writeCentralSessionFailure(writer, request, stateErr)
+				return
+			}
+			parent = state.SessionID
+		}
+		anchor, resolveErr := handler.central.ResolveOIDC(request.Context(), verified, parent, time.Now().UTC())
+		if resolveErr != nil {
+			if errors.Is(resolveErr, sessiondomain.ErrUpstreamInactive) {
+				if terminateErr := handler.centralVerifier.TerminateSession(request.Context(), verified); terminateErr != nil {
+					httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.Internal)
+					return
+				}
+			}
+			writeCentralSessionFailure(writer, request, resolveErr)
+			return
+		}
+		centralAnchor = &identitydomain.SessionAnchor{ID: anchor.ID, ExpiresAt: anchor.ExpiresAt}
+	}
 	result, err := handler.service.LoginOIDC(request.Context(), application.OIDCLoginInput{
 		IdentityID: identityID, IPAddress: remoteIP(request), UserAgent: request.UserAgent(),
-		CurrentPrincipal: handler.currentBrowserPrincipal(request),
+		CurrentPrincipal: currentPrincipal,
+		CentralSession:   centralAnchor,
 	})
 	if err != nil {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_ACCOUNT_NOT_LINKED", "统一身份尚未绑定平台账号", nil))
@@ -402,8 +480,16 @@ func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID strin
 	return redirectURI
 }
 
-// Activity 记录浏览器显式上报的交互。刻意设为独立端点，使常规认证 API 流量
-// 无法顺带延长空闲超时。
+// Activity 记录经过同源保护的当前平台会话真实交互。
+//
+//	Activity 记录浏览器显式上报的交互。刻意设为独立端点，使常规认证 API 流量
+//	无法顺带延长空闲超时。
+//
+// 参数：writer为HTTP响应写入器。
+//
+//	request为经过调用方校验的请求内容。
+//
+// 返回值：无。
 func (handler *Handler) Activity(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -419,7 +505,12 @@ func (handler *Handler) Activity(writer http.ResponseWriter, request *http.Reque
 		handler.writeApplicationError(writer, request, err)
 		return
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusOK, "用户活动已记录", principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)})
+	response, err := handler.lifecycleResponse(request.Context(), principal, idleTimeout)
+	if err != nil {
+		handler.writeApplicationError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "用户活动已记录", response)
 }
 
 // Refresh 续期当前已认证的浏览器会话并替换其 cookie。
@@ -473,12 +564,35 @@ func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 		handler.writeApplicationError(writer, request, err)
 		return
 	}
+	response, err := handler.lifecycleResponse(request.Context(), principal, idleTimeout)
+	if err != nil {
+		handler.writeApplicationError(writer, request, err)
+		return
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", response)
+}
+
+// lifecycleResponse 生成受中央绝对截止约束的会话视图，不把活动响应重置成三十分钟。
+// 参数：ctx为请求，principal为当前授权主体，idleTimeout为平台策略。
+// 返回值：不含秘密的主体和生命周期；中央故障或失效时返回错误。
+func (handler *Handler) lifecycleResponse(ctx context.Context, principal authctx.Principal, idleTimeout time.Duration) (principalResponse, error) {
 	response := principalResponse{Principal: principal, IdleTimeoutSeconds: uint(idleTimeout / time.Second)}
-	if !principal.SessionIdleDeadline.IsZero() {
+	if handler.central != nil {
+		state, err := handler.central.PlatformState(ctx, principal.SessionID, time.Now().UTC(), false)
+		if errors.Is(err, sessiondomain.ErrInactive) {
+			return response, application.ErrUnauthenticated
+		}
+		if err != nil {
+			return response, err
+		}
+		response.SessionContext = &state
+		response.IdleTimeoutSeconds = uint(state.IdleTimeoutSeconds)
+		response.IdleRemainingMS = &state.IdleRemainingMS
+	} else if !principal.SessionIdleDeadline.IsZero() {
 		remaining := max(int64(0), time.Until(principal.SessionIdleDeadline).Milliseconds())
 		response.IdleRemainingMS = &remaining
 	}
-	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", response)
+	return response, nil
 }
 
 // Authenticate 供 HTTP 中间件调用，把 token 校验委托给应用服务。

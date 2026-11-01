@@ -58,8 +58,16 @@ func (service *Service) IsRegisteredRedirectURI(ctx context.Context, clientID, r
 	return registered, nil
 }
 
-// Authorize 只有在回调地址精确命中登记值、客户端允许授权码模式且浏览器会话仍属于同一租户时，
-// 才签发一次性授权码。数据库只保存摘要，原始授权码仅经浏览器回传给客户端。
+// Authorize 核验客户端、原始认证时间和会话后签发一次性授权码。
+//
+//	Authorize 只有在回调地址精确命中登记值、客户端允许授权码模式且浏览器会话仍属于同一租户时，
+//	才签发一次性授权码。数据库只保存摘要，原始授权码仅经浏览器回传给客户端。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//
+// 返回值：一次性授权码与精确回调；任何校验或依赖失败返回错误。
 func (service *Service) Authorize(ctx context.Context, input AuthorizationInput) (AuthorizationResult, error) {
 	input = normalizeAuthorizationInput(input)
 	if input.ClientID == "" || input.RedirectURI == "" || input.SessionID == "" || !validProtocolText(input.State, 2048) || !validProtocolText(input.Nonce, 255) {
@@ -98,6 +106,13 @@ func (service *Service) Authorize(ctx context.Context, input AuthorizationInput)
 	if subject.MustChangePassword {
 		return AuthorizationResult{}, ErrAccessDenied
 	}
+	if subject.AuthenticatedAt.IsZero() || subject.AuthenticatedAt.After(now) {
+		return AuthorizationResult{}, ErrInvalidGrant
+	}
+
+	if freshAuthenticationRequired(input, subject.AuthenticatedAt, now) {
+		return AuthorizationResult{}, ErrFreshAuthenticationRequired
+	}
 
 	codeID, err := service.ids.New(now)
 	if err != nil {
@@ -112,7 +127,8 @@ func (service *Service) Authorize(ctx context.Context, input AuthorizationInput)
 	}
 	expiresAt := now.Add(service.authorizationCodeTTL)
 	code := domain.AuthorizationCode{
-		ID: codeID, TenantID: subject.TenantID, OAuthClientID: client.ID, SessionID: subject.SessionID,
+		AuthenticatedAt: subject.AuthenticatedAt.UTC(),
+		ID:              codeID, TenantID: subject.TenantID, OAuthClientID: client.ID, SessionID: subject.SessionID,
 		AccountID: subject.AccountID, UserID: subject.UserID, CodeHash: digest(rawCode), RedirectURI: input.RedirectURI,
 		Scopes: scopes, Nonce: input.Nonce, CodeChallenge: challenge, CodeChallengeMethod: method,
 		CreatedAt: now, ExpiresAt: expiresAt, Status: domain.AuthorizationCodeStatusActive,
@@ -427,10 +443,16 @@ func (service *Service) now() time.Time { return service.clock.Now().UTC() }
 
 func digest(value string) [sha256.Size]byte { return sha256.Sum256([]byte(value)) }
 
+// grantFromAuthorizationCode 从授权码恢复包含原始认证时间的授权上下文。
+// 参数：code为一次性OIDC授权码。
+//
+//	client为受登记边界约束的OAuth客户端。
+//
+// 返回值：包含原始认证时间和服务器端材料的持久投影。
 func grantFromAuthorizationCode(code domain.AuthorizationCode, client domain.Client) domain.TokenGrant {
 	return domain.TokenGrant{
 		TenantID: code.TenantID, OAuthClientID: code.OAuthClientID, ClientID: client.ClientID, SessionID: code.SessionID,
-		AccountID: code.AccountID, UserID: code.UserID, Scopes: append([]string(nil), code.Scopes...), Nonce: code.Nonce, AuthorizedAt: code.CreatedAt,
+		AccountID: code.AccountID, UserID: code.UserID, Scopes: append([]string(nil), code.Scopes...), Nonce: code.Nonce, AuthorizedAt: code.AuthenticatedAt,
 	}
 }
 
@@ -483,10 +505,19 @@ func registeredScopes(client domain.Client, requested []string) ([]string, error
 	return scopes, nil
 }
 
+// validAuthorizationCode 核验授权码用途、PKCE及固定时间边界。
+// 参数：code为一次性OIDC授权码。
+//
+//	client为受登记边界约束的OAuth客户端。
+//	redirectURI为精确登记的回调地址。
+//	now为本次服务端校验时间。
+//
+// 返回值：授权码及其用途、时间和PKCE约束是否全部有效。
 func validAuthorizationCode(code domain.AuthorizationCode, client domain.Client, redirectURI string, now time.Time) bool {
 	return code.TenantID == client.TenantID && code.OAuthClientID == client.ID && code.RedirectURI == redirectURI &&
 		code.Status == domain.AuthorizationCodeStatusActive && code.ConsumedAt == nil && code.ExpiresAt.After(now) &&
-		code.SessionID != "" && code.AccountID != "" && code.UserID != ""
+		code.SessionID != "" && code.AccountID != "" && code.UserID != "" &&
+		!code.AuthenticatedAt.IsZero() && !code.AuthenticatedAt.After(now)
 }
 
 func validRefreshToken(token domain.RefreshToken, now time.Time) bool {

@@ -9,6 +9,7 @@ import (
 
 	securityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/security/application"
 	securitydomain "github.com/J-S-Te/Basic-Platform/internal/platform/security/domain"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -18,7 +19,13 @@ const loginAttemptFailure = "FAILURE"
 // GORMRepository 基于 GORM 与 MySQL 实现 security 应用层持久化契约。
 type GORMRepository struct {
 	database *gorm.DB
+	central  bool
 }
+
+// EnableCentralSessions 由平台组合根启用锁定时的中央身份撤销。
+// 参数：无；启用状态不能来自登录请求。
+// 返回值：无。
+func (repository *GORMRepository) EnableCentralSessions() { repository.central = true }
 
 // NewGORMRepository 校验数据库依赖非空后构造安全仓储，缺失依赖时失败关闭。
 func NewGORMRepository(database *gorm.DB) (*GORMRepository, error) {
@@ -96,8 +103,9 @@ func (repository *GORMRepository) UpdateLoginPolicy(ctx context.Context, input s
 	return result, nil
 }
 
-// RecordFailedLogin 保存非秘密的失败证据，并在达到租户阈值时于同一事务锁定账号、撤销活跃会话；
-// 密码及其派生值均不进入安全事件表。
+// RecordFailedLogin 保存失败证据，并在达到阈值时同一事务锁定账号及撤销中央周期。
+// 参数：ctx为请求，input为非秘密登录证据，policy为租户策略，now为平台时钟。
+// 返回值：锁定状态；存储或撤销失败会回滚整个锁定事务。
 func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input securityapplication.LoginFailureInput, policy securitydomain.LoginPolicy, now time.Time) (securityapplication.LoginFailureResult, error) {
 	var result securityapplication.LoginFailureResult
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -159,6 +167,11 @@ func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input s
 			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, "ACTIVE").
 			Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "ACCOUNT_LOCKED"}).Error; err != nil {
 			return fmt.Errorf("revoke sessions after account lock: %w", err)
+		}
+		if repository.central {
+			if err := sessionstore.RevokeAccountTx(transaction, input.TenantID, input.AccountID, now, "ACCOUNT_LOCKED"); err != nil {
+				return err
+			}
 		}
 		result.LockedUntil = &lockedUntil
 		return nil

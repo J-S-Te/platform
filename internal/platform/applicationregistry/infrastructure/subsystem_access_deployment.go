@@ -112,7 +112,8 @@ type SubsystemAccessConfigurationEvidence interface {
 }
 
 type SubsystemAccessDeploymentAdapter struct {
-	providerBrowser interface {
+	centralSessionPolicy *application.CentralSessionRuntimePolicy
+	providerBrowser      interface {
 		EnsureForProvider(context.Context, application.SubsystemAccessOperation, string) (application.SubsystemUpdateBrowserCredential, error)
 	}
 	runtimeLicenses      SubsystemAccessRuntimeEnrollment
@@ -139,6 +140,13 @@ type SubsystemAccessDeploymentAdapter struct {
 	appliedManifest      SubsystemAccessAppliedManifestReader
 	projection           *application.KeycloakAuthorizationProjectionService
 	keycloakRealm        string
+}
+
+// SetCentralSessionPolicy 注入基础平台统一策略，禁止从生命周期HTTP请求覆盖。
+// 参数：policy为平台组合根已校验的非秘密策略。
+// 返回值：无；按值复制，避免调用方后续改写已组装的部署输入。
+func (adapter *SubsystemAccessDeploymentAdapter) SetCentralSessionPolicy(policy application.CentralSessionRuntimePolicy) {
+	adapter.centralSessionPolicy = &policy
 }
 
 // NewSubsystemAccessDeploymentAdapter 构造适配器；依赖缺失即失败（不做静默降级）。
@@ -367,6 +375,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) provisionOnboardWithCandidate(c
 		}
 		input.AccessReceipt = &receipt
 	}
+	input.CentralSessionPolicy = adapter.centralSessionPolicy
 	if err := adapter.provisioner.Provision(ctx, input); err != nil {
 		if input.AccessReceipt != nil {
 			outcome, found, recoveryErr := adapter.recoverAccessDeploymentRejection(ctx, operation, *input.AccessReceipt)
@@ -592,6 +601,7 @@ func (adapter *SubsystemAccessDeploymentAdapter) updateSubsystemAccessWithCandid
 		}
 		input.AccessReceipt = &receipt
 	}
+	input.CentralSessionPolicy = adapter.centralSessionPolicy
 	if err := adapter.provisioner.Update(ctx, input); err != nil {
 		if input.AccessReceipt != nil {
 			outcome, found, recoveryErr := adapter.recoverAccessDeploymentRejection(ctx, operation, *input.AccessReceipt)

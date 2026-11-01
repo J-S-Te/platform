@@ -82,14 +82,18 @@ type Repository interface {
 // AuthorizationInput 是浏览器授权请求在 HTTP 层完成本地会话认证后的形态。
 // State 仅用于传输层重定向回显，刻意不持久化。
 type AuthorizationInput struct {
-	ClientID            string
-	RedirectURI         string
-	Scopes              []string
-	State               string
-	Nonce               string
-	CodeChallenge       string
-	CodeChallengeMethod string
-	SessionID           string
+	Prompt        string
+	MaxAgeSeconds *uint64
+	// ReauthenticatedAfter仅由HTTP适配器核验原请求的签名凭据后设置。
+	ReauthenticatedAfter time.Time
+	ClientID             string
+	RedirectURI          string
+	Scopes               []string
+	State                string
+	Nonce                string
+	CodeChallenge        string
+	CodeChallengeMethod  string
+	SessionID            string
 }
 
 // AuthorizationResult 携带面向已注册精确 redirect URI 的一次性不透明授权码。

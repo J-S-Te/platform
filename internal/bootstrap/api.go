@@ -59,6 +59,8 @@ import (
 	securityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/security/application"
 	securityinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/security/infrastructure"
 	securityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/security/interfaces/http"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
+	sessionhttp "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/interfaces/http"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 	settingsinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/settings/infrastructure"
 	settingshttp "github.com/J-S-Te/Basic-Platform/internal/platform/settings/interfaces/http"
@@ -86,9 +88,14 @@ type API struct {
 	logoutWorkerDone   chan struct{}
 }
 
-// NewAPI 按启动配置创建本地存储目录、结构化日志、数据库连接池与 HTTP 路由。
-// 参数 cfg 为完整应用配置；返回值是装配完成的 API 运行时对象；若任一依赖初始化失败则返回错误并释放已分配资源。
-// 该初始化阶段不做数据库 ping：/readyz 负责反馈依赖状态，/healthz 始终对进程活性负责。
+// NewAPI 装配基础平台API及统一会话管理依赖。
+//
+//	NewAPI 按启动配置创建本地存储目录、结构化日志、数据库连接池与 HTTP 路由。
+//	参数 cfg 为完整应用配置；返回值是装配完成的 API 运行时对象；若任一依赖初始化失败则返回错误并释放已分配资源。
+//	该初始化阶段不做数据库 ping：/readyz 负责反馈依赖状态，/healthz 始终对进程活性负责。
+//
+// 参数：cfg为已校验的运行配置。
+// 返回值：装配后的应用或认证实例；配置与依赖装配失败时返回错误。
 func NewAPI(cfg config.Config) (*API, error) {
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)
@@ -138,11 +145,23 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	centralSessions, err := sessionstore.NewStore(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	if cfg.Auth.CentralSessionEnabled {
+		repository.EnableCentralSessions(centralSessions)
+	}
 	loginSecurityRepository, err := securityinfrastructure.NewGORMRepository(db)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
+	}
+	if cfg.Auth.CentralSessionEnabled {
+		loginSecurityRepository.EnableCentralSessions()
 	}
 	loginSecurityService, err := securityapplication.NewService(
 		loginSecurityRepository, securityapplication.SystemClock{},
@@ -363,6 +382,23 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 	var authHandlerOptions []identityhttp.IDTokenVerifierOption
+	var centralVerifier *keycloakAuthorizationVerifier
+	if cfg.Keycloak.Enabled {
+		centralVerifier, err = newKeycloakAuthorizationVerifier(cfg.Keycloak.PublicURL, cfg.Keycloak.AdminURL, cfg.Keycloak.Realm)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
+	}
+	if cfg.Auth.CentralSessionEnabled {
+		if centralVerifier == nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, errors.New("central sessions require configured Keycloak")
+		}
+		authHandlerOptions = append(authHandlerOptions, identityhttp.WithCentralSessionAuthority(centralSessions, centralSessionVerifier{verifier: centralVerifier.verifier, terminator: keycloakAdmin}))
+	}
 	if cfg.Auth.KeycloakOIDCEnabled && cfg.Keycloak.Enabled {
 		// P1-2：平台自身 OIDC 登录校验 ID Token（签名/issuer/aud/exp/nonce/azp）。
 		// 复用与 broker 验证同源的 JWKS 验证器，验证面不扩大。
@@ -441,6 +477,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
+	}
+	if cfg.Auth.CentralSessionEnabled {
+		oidcRepository.EnableCentralSessions()
 	}
 	oidcAuthorizationResolver, err := applicationaccess.NewApplicationAuthorizationResolver(applicationAccessService)
 	if err != nil {
@@ -608,7 +647,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 			},
 			cfg.Keycloak.BrokerClientID, cfg.Keycloak.BrokerClientSecret,
 			cfg.Auth.OIDCIssuer, cfg.Keycloak.PlatformBackchannelURL,
-		)
+		).WithCentralSessionGovernance(cfg.Auth.CentralSessionEnabled)
 		oidcHandler.SetBrokerDriftSelfHealer(applicationregistryhttp.NewBrokerDriftSelfHealer(oauthClientManagementService, brokerControl, tenantID, logger))
 	}
 
@@ -698,6 +737,14 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
+	}
+	if centralVerifier != nil {
+		operational.SessionGovernance, err = sessionhttp.NewHandler(centralSessions, centralSessionVerifier{verifier: centralVerifier.verifier, terminator: keycloakAdmin}, authService, cfg.Auth.SessionCookieName)
+		if err != nil {
+			_ = database.Close(db)
+			_ = logFile.Close()
+			return nil, err
+		}
 	}
 	if cfg.CredentialEncryption.Mode != "" && cfg.CredentialEncryption.Mode != "disabled" {
 		keyRing, keyErr := credentialcrypto.LoadKeyRing(cfg.CredentialEncryption.KeyRingFile, time.Now().UTC())

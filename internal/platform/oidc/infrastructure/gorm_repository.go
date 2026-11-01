@@ -11,6 +11,8 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/domain"
+	sessiondomain "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/domain"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -18,7 +20,15 @@ import (
 const activeStatus = "ACTIVE"
 
 // Repository 是 OIDC/OAuth 运行时协议状态的 MySQL 持久化实现。
-type Repository struct{ database *gorm.DB }
+type Repository struct {
+	database *gorm.DB
+	central  bool
+}
+
+// EnableCentralSessions 由组合根启用原生OIDC的中央会话校验。
+// 参数：无。
+// 返回值：无。
+func (r *Repository) EnableCentralSessions() { r.central = true }
 
 // NewRepository 构造 MySQL 版 OIDC/OAuth 运行时仓储；database 为空时返回错误。
 func NewRepository(database *gorm.DB) (*Repository, error) {
@@ -53,6 +63,7 @@ type clientJWKRow struct {
 }
 
 type authorizationCodeRow struct {
+	AuthenticatedAt     time.Time
 	ID                  string
 	TenantID            string
 	OAuthClientID       string `gorm:"column:oauth_client_id"`
@@ -225,15 +236,25 @@ func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string
 	return r.resolveSessionSubject(ctx, r.database, sessionID, now, false)
 }
 
+// resolveSessionSubject 从有效会话恢复原始认证主体与时间。
+// 参数：ctx为调用上下文与取消边界。
+//
+//	database为本应用数据库连接。
+//	sessionID为当前会话持久标识。
+//	now为本次服务端校验时间。
+//	lock为当前部署操作的互斥保护。
+//
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.DB, sessionID string, now time.Time, lock bool) (domain.SessionSubject, error) {
 	var row struct {
 		TenantID, SessionID, AccountID, UserID string
 		LoginIP                                []byte
 		ExpiresAt                              time.Time
 		MustChangePassword                     bool
+		AuthenticatedAt                        time.Time
 	}
 	query := database.WithContext(ctx).Table("iam_session").
-		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at, COALESCE(iam_password_credential.must_change, FALSE) AS must_change_password").
+		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at, iam_session.created_at AS authenticated_at, COALESCE(iam_password_credential.must_change, FALSE) AS must_change_password").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
 		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
@@ -246,17 +267,48 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 	if err != nil {
 		return domain.SessionSubject{}, mapError(err)
 	}
+	if r.central {
+		store, err := sessionstore.NewStore(database)
+		if err != nil {
+			return domain.SessionSubject{}, err
+		}
+		state, err := store.PlatformState(ctx, sessionID, now, false)
+		if errors.Is(err, sessiondomain.ErrInactive) {
+			return domain.SessionSubject{}, application.ErrNotFound
+		}
+		if err != nil {
+			return domain.SessionSubject{}, err
+		}
+		var anchor sessiondomain.Session
+		if err = database.WithContext(ctx).Table("sgov_session").Where("id = ?", state.SessionID).Take(&anchor).Error; err != nil {
+			return domain.SessionSubject{}, err
+		}
+		row.AuthenticatedAt = anchor.AuthenticatedAt
+		if anchor.ExpiresAt.Before(row.ExpiresAt) {
+			row.ExpiresAt = anchor.ExpiresAt
+		}
+	}
 	return domain.SessionSubject{
-		TenantID: row.TenantID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID,
+		AuthenticatedAt: row.AuthenticatedAt.UTC(),
+		TenantID:        row.TenantID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID,
 		LoginIP: append(net.IP(nil), row.LoginIP...), ExpiresAt: row.ExpiresAt.UTC(),
 		MustChangePassword: row.MustChangePassword,
 	}, nil
 }
 
-// CreateAuthorizationCode 持久化一条授权码记录；原始授权码不落库，仅保存其摘要。
+// CreateAuthorizationCode 持久化绑定客户端、会话和原始认证时间的授权码。
+//
+//	CreateAuthorizationCode 持久化一条授权码记录；原始授权码不落库，仅保存其摘要。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	code为一次性OIDC授权码。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (r *Repository) CreateAuthorizationCode(ctx context.Context, code domain.AuthorizationCode) error {
 	return r.database.WithContext(ctx).Table("oauth_authorization_code").Create(&authorizationCodeRow{
-		ID: code.ID, TenantID: code.TenantID, OAuthClientID: code.OAuthClientID, SessionID: code.SessionID, AccountID: code.AccountID, UserID: code.UserID,
+		AuthenticatedAt: code.AuthenticatedAt.UTC(),
+		ID:              code.ID, TenantID: code.TenantID, OAuthClientID: code.OAuthClientID, SessionID: code.SessionID, AccountID: code.AccountID, UserID: code.UserID,
 		CodeHash: code.CodeHash[:], RedirectURI: code.RedirectURI, Scope: joinScopes(code.Scopes), Nonce: code.Nonce, CodeChallenge: code.CodeChallenge,
 		CodeChallengeMethod: code.CodeChallengeMethod, CreatedAt: code.CreatedAt.UTC(), ExpiresAt: code.ExpiresAt.UTC(), ConsumedAt: utcPointer(code.ConsumedAt), Status: code.Status,
 	}).Error
@@ -271,8 +323,17 @@ func (r *Repository) FindAuthorizationCode(ctx context.Context, codeHash [32]byt
 	return authorizationCodeFromRow(row), nil
 }
 
-// ConsumeAuthorizationCode 锁定授权码摘要行，在事务内重做客户端、回调地址、授权模式和会话校验，
-// 并原子地消费授权码、创建首个刷新令牌族节点。应用层的预校验不能替代这里的最终提交判断。
+// ConsumeAuthorizationCode 原子消费绑定客户端的一次性授权码。
+//
+//	ConsumeAuthorizationCode 锁定授权码摘要行，在事务内重做客户端、回调地址、授权模式和会话校验，
+//	并原子地消费授权码、创建首个刷新令牌族节点。应用层的预校验不能替代这里的最终提交判断。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	command为已校验的持久化操作输入。
+//	now为本次服务端校验时间。
+//
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command application.ConsumeAuthorizationCodeCommand, now time.Time) (domain.TokenGrant, error) {
 	var grant domain.TokenGrant
 	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -300,6 +361,9 @@ func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command appli
 		if err := tx.Table("oauth_authorization_code").Where("id = ? AND status = ? AND consumed_at IS NULL", code.ID, domain.AuthorizationCodeStatusActive).
 			Updates(map[string]any{"status": domain.AuthorizationCodeStatusConsumed, "consumed_at": now.UTC()}).Error; err != nil {
 			return err
+		}
+		if code.AuthenticatedAt.IsZero() {
+			return application.ErrAuthorizationCodeUnavailable
 		}
 		grant = grantFromCode(code, client.ClientID)
 		if command.Refresh != nil {
@@ -504,10 +568,13 @@ func validateRotatedRefresh(refresh application.NewRefreshToken, parent refreshP
 	return nil
 }
 
+// authorizationCodeFromRow 恢复持久化授权码及不可变原始认证时间。
+// 参数：row为数据库持久投影。
+// 返回值：包含原始认证时间和服务器端材料的持久投影。
 func authorizationCodeFromRow(row authorizationCodeRow) domain.AuthorizationCode {
 	var hash [32]byte
 	copy(hash[:], row.CodeHash)
-	return domain.AuthorizationCode{ID: row.ID, TenantID: row.TenantID, OAuthClientID: row.OAuthClientID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, CodeHash: hash, RedirectURI: row.RedirectURI, Scopes: parseScopes(row.Scope), Nonce: row.Nonce, CodeChallenge: row.CodeChallenge, CodeChallengeMethod: row.CodeChallengeMethod, CreatedAt: row.CreatedAt.UTC(), ExpiresAt: row.ExpiresAt.UTC(), ConsumedAt: utcPointer(row.ConsumedAt), Status: row.Status}
+	return domain.AuthorizationCode{ID: row.ID, TenantID: row.TenantID, OAuthClientID: row.OAuthClientID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, CodeHash: hash, RedirectURI: row.RedirectURI, Scopes: parseScopes(row.Scope), Nonce: row.Nonce, CodeChallenge: row.CodeChallenge, CodeChallengeMethod: row.CodeChallengeMethod, AuthenticatedAt: row.AuthenticatedAt.UTC(), CreatedAt: row.CreatedAt.UTC(), ExpiresAt: row.ExpiresAt.UTC(), ConsumedAt: utcPointer(row.ConsumedAt), Status: row.Status}
 }
 
 func refreshFromProjection(row refreshProjection, now time.Time) domain.RefreshToken {
@@ -528,8 +595,14 @@ func refreshFromProjection(row refreshProjection, now time.Time) domain.RefreshT
 	return domain.RefreshToken{ID: row.ID, TenantID: row.TenantID, OAuthClientID: row.OAuthClientID, SessionID: row.SessionID, AccountID: row.AccountID, UserID: row.UserID, Scopes: parseScopes(row.Scope), AuthorizedAt: row.AuthorizedAt.UTC(), TokenFamilyID: row.TokenFamilyID, ParentRefreshTokenID: dereference(row.ParentRefreshTokenID), TokenHash: hash, IssuedAt: row.IssuedAt.UTC(), ExpiresAt: row.ExpiresAt.UTC(), UsedAt: utcPointer(row.UsedAt), RevokedAt: revokedAt, RevokeReason: revokeReason, Status: status}
 }
 
+// grantFromCode 从已消费授权码恢复令牌授权上下文。
+// 参数：code为一次性OIDC授权码。
+//
+//	clientID为登记的OAuth客户端标识。
+//
+// 返回值：包含原始认证时间和服务器端材料的持久投影。
 func grantFromCode(code authorizationCodeRow, clientID string) domain.TokenGrant {
-	return domain.TokenGrant{TenantID: code.TenantID, OAuthClientID: code.OAuthClientID, ClientID: clientID, SessionID: code.SessionID, AccountID: code.AccountID, UserID: code.UserID, Scopes: parseScopes(code.Scope), Nonce: code.Nonce, AuthorizedAt: code.CreatedAt.UTC()}
+	return domain.TokenGrant{TenantID: code.TenantID, OAuthClientID: code.OAuthClientID, ClientID: clientID, SessionID: code.SessionID, AccountID: code.AccountID, UserID: code.UserID, Scopes: parseScopes(code.Scope), Nonce: code.Nonce, AuthorizedAt: code.AuthenticatedAt.UTC()}
 }
 
 func grantFromFamily(family tokenFamilyRow, clientID string) domain.TokenGrant {
@@ -626,12 +699,14 @@ func (r *Repository) FindConsent(ctx context.Context, tenantID, userID, oauthCli
 	}
 	return parseScopes(row.Scope), row.Status == activeStatus && row.RevokedAt == nil, nil
 }
+
 // GrantConsent 以聚合行 upsert 记录用户同意，整体替换 scope 并递增版本。
 func (r *Repository) GrantConsent(ctx context.Context, tenantID, userID, oauthClientID string, scopes []string, now time.Time) error {
 	// 同一用户与客户端只有一条同意聚合；重复授权整体替换 scope 并递增版本，撤销后再次授权也复用该行。
 	row := map[string]any{"tenant_id": tenantID, "user_id": userID, "oauth_client_id": oauthClientID, "scope": joinScopes(scopes), "granted_at": now.UTC(), "revoked_at": nil, "updated_at": now.UTC(), "status": activeStatus, "version": 1}
 	return r.database.WithContext(ctx).Table("iam_oidc_user_consent").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "user_id"}, {Name: "oauth_client_id"}}, DoUpdates: clause.Assignments(map[string]any{"scope": joinScopes(scopes), "granted_at": now.UTC(), "revoked_at": nil, "updated_at": now.UTC(), "status": activeStatus, "version": gorm.Expr("version + 1")})}).Create(row).Error
 }
+
 // RevokeConsent 撤销用户对客户端的同意聚合行；行不存在时返回 ErrNotFound。
 func (r *Repository) RevokeConsent(ctx context.Context, tenantID, userID, oauthClientID string, now time.Time) error {
 	result := r.database.WithContext(ctx).Table("iam_oidc_user_consent").Where("tenant_id = ? AND user_id = ? AND oauth_client_id = ?", tenantID, userID, oauthClientID).Updates(map[string]any{"revoked_at": now.UTC(), "updated_at": now.UTC(), "status": "REVOKED", "version": gorm.Expr("version + 1")})
@@ -667,6 +742,7 @@ func (r *Repository) CreatePushedAuthorizationRequest(ctx context.Context, reque
 	}
 	return r.database.WithContext(ctx).Table("oauth_pushed_authorization_request").Create(map[string]any{"id": request.ID, "tenant_id": request.TenantID, "oauth_client_id": request.OAuthClientID, "request_uri_hash": request.RequestURIHash[:], "redirect_uri": request.RedirectURI, "scope": joinScopes(request.Scopes), "state": stringPointer(request.State), "nonce": stringPointer(request.Nonce), "code_challenge": stringPointer(request.CodeChallenge), "code_challenge_method": stringPointer(request.CodeChallengeMethod), "request_object_hash": objectHash, "created_at": request.CreatedAt.UTC(), "expires_at": request.ExpiresAt.UTC(), "status": activeStatus}).Error
 }
+
 // ConsumePushedAuthorizationRequest 在行锁内完成查找、租户/客户端绑定校验、
 // 过期判断与一次性状态转移，防止同一 PAR 被并发兑换成两个授权流程。
 func (r *Repository) ConsumePushedAuthorizationRequest(ctx context.Context, tenantID, oauthClientID string, hash [32]byte, now time.Time) (application.PushedAuthorizationRequest, error) {
