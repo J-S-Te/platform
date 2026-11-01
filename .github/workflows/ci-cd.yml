@@ -57,6 +57,7 @@ jobs:
           python3 deploy/production/tests/test-compose-blocks.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
+          python3 deploy/production/tests/test-runtime-dsn-dotenv.py
           python3 deploy/production/tests/test-customer-deploy-result.py
           python3 deploy/production/tests/test-platform-coordinated-upgrade.py
           python3 -B deploy/production/tests/test-audit-hash-key-init.py
