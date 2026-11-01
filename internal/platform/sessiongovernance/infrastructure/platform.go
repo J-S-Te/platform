@@ -129,19 +129,35 @@ func RevokeAccountTx(tx *gorm.DB, tenant, account string, now time.Time, reason 
 	return RevokeIdentityTx(tx, tenant, *row.UserID, now, reason, "")
 }
 
-// RegisteredClient 精确核验回调和有效租户、应用、环境、授权码许可范围。
+// RegisteredClient 精确核验网页回调及已同步别名的同租户、应用、环境边界。
 // 参数：ctx为请求，id为已登记client_id，redirect为精确回调URI。
 // 返回值：可信客户端投影；未登记或失效返回参数错误，数据库异常保持原错误。
 func (s *Store) RegisteredClient(ctx context.Context, id, redirect string) (Client, error) {
+	direct := s.db.Table("platform_oauth_redirect_uri AS registered").Select("1").
+		Where("registered.oauth_client_id=c.id AND registered.redirect_uri=?", redirect)
+	// 既有Keycloak别名可同时用作平台到Keycloak的broker客户端，其本身登记的回调
+	// 并非业务应用回调。仅复用同应用环境标准网页客户端已有的精确URI，不改OAuth登记。
+	mapped := s.db.Table("keycloak_application_client_mapping AS mapping").Select("1").
+		Joins(`JOIN platform_oauth_client AS browser ON browser.tenant_id=mapping.tenant_id
+			AND browser.application_id=mapping.application_id
+			AND browser.environment_id=mapping.environment_id AND browser.status='ACTIVE'`).
+		Joins(`JOIN platform_oauth_redirect_uri AS registered ON registered.oauth_client_id=browser.id
+			AND registered.redirect_uri=?`, redirect).
+		Joins(`JOIN platform_oauth_grant_type AS browser_grant ON browser_grant.oauth_client_id=browser.id
+			AND browser_grant.grant_type='authorization_code'`).
+		Where(`mapping.tenant_id=c.tenant_id AND mapping.application_id=c.application_id
+			AND mapping.environment_id=c.environment_id AND mapping.keycloak_client_id=c.client_id
+			AND mapping.status='SYNCED' AND browser.id<>c.id
+			AND browser.client_id=CONCAT(a.code,'-',e.environment,'-web')`)
 	var result Client
 	err := s.db.WithContext(ctx).Table("platform_oauth_client AS c").
 		Select("c.client_id AS id,c.tenant_id,a.code AS application_code,e.environment AS environment_code").
 		Joins("JOIN platform_application AS a ON a.id=c.application_id AND a.tenant_id=c.tenant_id AND a.status='ACTIVE'").
 		Joins("JOIN platform_application_environment AS e ON e.id=c.environment_id AND e.application_id=a.id AND e.tenant_id=c.tenant_id AND e.status='ACTIVE'").
 		Joins("JOIN iam_tenant AS t ON t.id=c.tenant_id AND t.status='ACTIVE'").
-		Joins("JOIN platform_oauth_redirect_uri AS r ON r.oauth_client_id=c.id AND r.redirect_uri=?", redirect).
 		Joins("JOIN platform_oauth_grant_type AS g ON g.oauth_client_id=c.id AND g.grant_type='authorization_code'").
-		Where("c.client_id=? AND c.status='ACTIVE'", id).Take(&result).Error
+		Where("c.client_id=? AND c.status='ACTIVE'", id).
+		Where("(EXISTS (?) OR EXISTS (?))", direct, mapped).Take(&result).Error
 	if err == gorm.ErrRecordNotFound {
 		return result, domain.ErrValidation
 	}
