@@ -409,8 +409,18 @@ func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID 
 	if result.Error != nil {
 		return time.Time{}, fmt.Errorf("refresh fixed session activity: %w", result.Error)
 	}
-	if result.RowsAffected != 1 {
-		return time.Time{}, application.ErrUnauthenticated
+	if result.RowsAffected == 0 {
+		// MySQL同毫秒写相同last_seen返回零变更；必须复核撤销和原截止，不能误判为退出。
+		recheck := repository.database.WithContext(ctx).
+			Select("id", "expires_at").
+			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?",
+				sessionID, domain.StatusActive, refreshedAt.UTC()).Take(&session)
+		if errors.Is(recheck.Error, gorm.ErrRecordNotFound) {
+			return time.Time{}, application.ErrUnauthenticated
+		}
+		if recheck.Error != nil {
+			return time.Time{}, fmt.Errorf("recheck fixed session refresh: %w", recheck.Error)
+		}
 	}
 	return session.ExpiresAt.UTC(), nil
 }

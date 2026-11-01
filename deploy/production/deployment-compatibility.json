@@ -2,10 +2,11 @@
   "assets_contract": "1",
   "config_contract": "1",
   "database": {
+    "compatibility_evidence": "Previous main 0dfa4f91f2211fdb3b4685e351c4dbbc7c833efb, unmodified business code plus isolated fixture: MySQL8.4 migrated1..134, legacy IAM read/refresh/activity/revoke and OIDC insert/read/single-use consume; real -race tests passed. Cross-system downgrade not exercised; keep forward-only recovery. Log SHA256 6edf2deb7340008bb89f5f98916296cea64df411c13b017a766f6d96fd6ba6b9",
     "current_min": 0,
     "migrate_to": 134,
     "migration_set_sha256": "f855b69bd9e0fa1413165da3560b82905fb14940d69f762ff69bbdd411458fb0",
-    "previous_program_after_migration": "unknown"
+    "previous_program_after_migration": "compatible"
   },
   "recovery": {
     "requires_backup": true,
