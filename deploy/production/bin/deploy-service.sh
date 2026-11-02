@@ -244,47 +244,53 @@ prepare_runtime_file() {
   fi
 }
 
-# SEC-N10b：数据库 DSN 以文件注入方式写入本服务的 env_file（runtime/*.env，0600），
-# 不再依赖 compose environment 的明文插值供给。组装值与 compose 原插值逐字节一致
-# （含 :- 默认值语义），密码只出现在本进程环境与目标文件中，不进入任何命令行参数。
+# SEC-N10b：凭据仅经进程环境及 0600 文件传递，不进入命令行参数或日志。
+# 用途：通过 Compose 自身的 dotenv 规则读取数据库密码，避免把引号当作密码。
+# 参数：key 为 .env 中的数据库密码变量名；其余环境与正式 Compose 调用一致。
+# 返回值：解码后的变量值；非法变量名或配置解析失败返回非零。
 dsn_env_value() {
   local key="$1"
-  awk -F= -v key="$key" '
-    $0 !~ /^[[:space:]]*#/ && $1 == key {
-      sub(/^[^=]*=/, "")
-      print
-      exit
-    }
-  ' "$runtime_file"
+  [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+  printf 'services:\n  probe:\n    image: scratch\n    environment:\n      VALUE: "${%s:-}"\n' "$key" |
+    docker compose --project-directory "$deploy_dir" --project-name runtime-dsn \
+      --env-file "$runtime_file" --env-file "$release_file" --file - \
+      config --format json |
+    python3 -c 'import json,sys
+# Compose config 的可复用输出会把所有 $ 翻倍；还原后才是容器接收的值。
+value = json.load(sys.stdin)["services"]["probe"]["environment"]["VALUE"]
+sys.stdout.write(value.replace("$$", "$"))'
 }
 
+# 用途：原子写入可经 Compose 无损解码的 DSN，保留其他配置并收紧权限。
+# 参数：file 为服务运行文件；key 为 DSN 变量名；value 为已解码的 DSN。
+# 返回值：成功返回零；多行输入、符号链接或文件操作失败返回非零。
 write_runtime_dsn_value() {
-  local file="$1" key="$2" value="$3" temporary
-  [[ "$value" != *$'\n'* ]] || {
-    echo "拒绝为 $key 写入包含换行的 DSN" >&2
-    return 1
-  }
-  temporary="$(mktemp "$deploy_dir/runtime/.runtime-dsn.XXXXXX")"
-  chmod 600 "$temporary"
-  # 经 awk 的 ENVIRON 传值，避免 awk -v 做反斜杠转义，保证与 compose 插值逐字节一致。
-  if ! DSN_WRITE_KEY="$key" DSN_WRITE_VALUE="$value" awk -F= '
-    BEGIN {
-      key = ENVIRON["DSN_WRITE_KEY"]
-      value = ENVIRON["DSN_WRITE_VALUE"]
-      found = 0
-    }
-    $0 !~ /^[[:space:]]*#/ && $1 == key { print key "=" value; found = 1; next }
-    { print }
-    END { if (!found) print key "=" value }
-  ' "$file" >"$temporary"; then
-    rm -f "$temporary"
-    return 1
-  fi
-  if ! mv -f "$temporary" "$file"; then
-    rm -f "$temporary"
-    return 1
-  fi
-  chmod 600 "$file"
+  local file="$1" key="$2" value="$3"
+  DSN_WRITE_FILE="$file" DSN_WRITE_KEY="$key" DSN_WRITE_VALUE="$value" python3 - <<'PYTHON'
+import os
+from pathlib import Path
+import tempfile
+
+path = Path(os.environ['DSN_WRITE_FILE'])
+key, value = os.environ['DSN_WRITE_KEY'], os.environ['DSN_WRITE_VALUE']
+if '\n' in value or '\r' in value or path.is_symlink():
+    raise SystemExit('拒绝多行 DSN 或符号链接运行文件')
+escaped = value.replace('\\', '\\\\').replace('"', '\\"').replace('$', '$$')
+entry = key + '="' + escaped + '"'
+lines = path.read_text().splitlines()
+found = any(line.startswith(key + '=') for line in lines)
+lines = [entry if line.startswith(key + '=') else line for line in lines]
+if not found:
+    lines.append(entry)
+fd, temporary = tempfile.mkstemp(prefix='.runtime-dsn.', dir=path.parent)
+try:
+    with os.fdopen(fd, 'w') as output:
+        output.write('\n'.join(lines) + '\n')
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PYTHON
 }
 
 write_service_runtime_dsns() {

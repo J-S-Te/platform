@@ -503,7 +503,8 @@ func validProductionBindingSource(source string) bool {
 	switch source {
 	case "issuer", "oidc_backchannel_base_url", "client_id", "client_secret", "redirect_uri", "logged_out_url", "public_url", "public_url_no_trailing_slash", "public_origin",
 		"tenant_id", "application_id", "application_code", "environment", "path_prefix", "upstream_url", "cookie_secure",
-		"allow_insecure_http_origin", "catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url":
+		"allow_insecure_http_origin", "catalog_publisher_client_id", "catalog_publisher_client_secret", "issuer_security_center_url", "authorization_context_url",
+		"central_session_enabled", "central_session_public_base_url":
 		return true
 	}
 	if strings.HasPrefix(source, "related_service.contract_management.settlement_contract_ingest.") {

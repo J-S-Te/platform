@@ -29,13 +29,20 @@ type LoginAccount struct {
 
 // Session 是持久化的浏览器会话状态，用于构造 API 响应与会话 cookie。
 type Session struct {
+	ID               string
+	TenantID         string
+	AccountID        string
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	IPAddress        []byte
+	UserAgent        string
+	CentralSessionID string
+}
+
+// SessionAnchor 是组合根经中央协议解析出的原始认证周期，不接受浏览器提供。
+type SessionAnchor struct {
 	ID        string
-	TenantID  string
-	AccountID string
-	CreatedAt time.Time
 	ExpiresAt time.Time
-	IPAddress []byte
-	UserAgent string
 }
 
 // ReferenceName 是租户、用户、账号或角色的紧凑 API 表示。

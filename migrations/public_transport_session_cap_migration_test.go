@@ -7,8 +7,11 @@ import (
 
 // 降级截断的原值记录表契约（BIZ-RUNTIME-06）：只保存恢复所需的非秘密元数据，
 // 唯一键必须能保证"同一切换、同一表、同一会话"只记录一次（重试幂等）。
+// TestPublicTransportSessionCapMigrationKeepsRecoverableMetadata 验证仅保存恢复所需元数据。
+// 参数：t为迁移契约测试上下文。
+// 返回值：无；缺少幂等键、恢复约束或记录敏感凭据时失败。
 func TestPublicTransportSessionCapMigrationKeepsRecoverableMetadata(t *testing.T) {
-	body, err := Files.ReadFile("000134_create_public_transport_session_cap.sql")
+	body, err := Files.ReadFile("000136_create_public_transport_session_cap.sql")
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}
@@ -52,8 +55,11 @@ func TestPublicTransportSessionCapMigrationKeepsRecoverableMetadata(t *testing.T
 
 // 历史切换没有原始到期时间可用，因此本迁移不做回填；回填语句一旦出现就意味着
 // 生产升级会凭空改写会话到期时间。
+// TestPublicTransportSessionCapMigrationDoesNotBackfillSessions 验证不会伪造历史会话原值。
+// 参数：t为迁移契约测试上下文。
+// 返回值：无；迁移改写或回填既有会话时失败。
 func TestPublicTransportSessionCapMigrationDoesNotBackfillSessions(t *testing.T) {
-	body, err := Files.ReadFile("000134_create_public_transport_session_cap.sql")
+	body, err := Files.ReadFile("000136_create_public_transport_session_cap.sql")
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}

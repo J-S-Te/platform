@@ -25,6 +25,7 @@ import (
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/interfaces/http"
 	securityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/security/interfaces/http"
+	sessionhttp "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/interfaces/http"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 	settingshttp "github.com/J-S-Te/Basic-Platform/internal/platform/settings/interfaces/http"
 	tenantclonehttp "github.com/J-S-Te/Basic-Platform/internal/platform/tenantclone/interfaces/http"
@@ -39,6 +40,7 @@ import (
 // OperationalModules 聚合后续扩展能力，避免组合根继续增长位置参数，也允许路由测试整体省略
 // 可选模块。字段为 nil 时只表示该能力未装配，不应注册一个会绕过依赖检查的空路由。
 type OperationalModules struct {
+	SessionGovernance   *sessionhttp.Handler
 	Licenses            *licensehttp.Handler
 	RuntimeLicenses     *licensehttp.RuntimeHandler
 	LoginTargets        *applicationregistryhttp.LoginTargetManagementHandler
@@ -176,6 +178,13 @@ func NewRouter(
 		router.POST("/oauth2/token", middleware.FixedWindowRateLimit(60, time.Minute), adaptHandler(applicationTokenHandler.IssueToken))
 	}
 
+	if sessions := operational.SessionGovernance; sessions != nil {
+		limit := middleware.FixedWindowRateLimit(120, time.Minute)
+		router.GET("/oauth2/session-links/begin", limit, middleware.RequireSameOriginNavigation(cfg.Auth.PublicBaseURL), adaptHandler(sessions.Begin))
+		router.POST("/oauth2/session-links/complete", limit, adaptHandler(sessions.Complete))
+		router.GET("/oauth2/session-context", adaptHandler(sessions.State))
+		router.POST("/oauth2/session/activity", adaptHandler(sessions.Activity))
+	}
 	if bootstrapHandler != nil {
 		bootstrapRouter := router.Group("/api/v1/iam/bootstrap")
 		bootstrapRouter.Use(middleware.RequireSafeWriteContentType())

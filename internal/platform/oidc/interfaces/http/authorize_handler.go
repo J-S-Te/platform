@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
@@ -18,8 +19,12 @@ type parsedAuthorizationRequest struct {
 	responseType  string
 }
 
-// Authorize 接受普通参数、一次性 PAR request_uri 或签名 JAR，但三种输入形态不能混用。
-// 只有 Service.Authorize 已精确验证登记回调地址后才向客户端跳转；此前所有错误都在平台本域返回。
+// Authorize 核验客户端、原始认证时间和会话后签发一次性授权码。
+//   Authorize 接受普通参数、一次性 PAR request_uri 或签名 JAR，但三种输入形态不能混用。
+//   只有 Service.Authorize 已精确验证登记回调地址后才向客户端跳转；此前所有错误都在平台本域返回。
+// 参数：w为HTTP响应写入器。
+//   r为原始HTTP请求。
+// 返回值：无。
 func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -38,6 +43,10 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 
 	principal, ok := h.authenticateBrowserSession(r)
 	if !ok {
+		if parsed.input.Prompt != "" || parsed.input.MaxAgeSeconds != nil {
+			h.redirectForFreshAuthentication(w, r, "", parsed.input)
+			return
+		}
 		redirectToPlatformLogin(w, r)
 		return
 	}
@@ -62,7 +71,12 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeAuthorizeServiceError(w, h.logger, err)
 		return
 	}
+	input.ReauthenticatedAfter = h.reauthenticationAfter(r, principal.SessionID)
 	result, err := h.service.Authorize(r.Context(), input)
+	if errors.Is(err, application.ErrFreshAuthenticationRequired) {
+		h.redirectForFreshAuthentication(w, r, principal.SessionID, input)
+		return
+	}
 	if err != nil {
 		writeAuthorizeServiceError(w, h.logger, err)
 		return
@@ -73,6 +87,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeAuthorizationError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
+	h.setReauthenticationCookie(w, "", -1)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	http.Redirect(w, r, location, http.StatusFound)
@@ -97,9 +112,12 @@ func (h *Handler) authenticateBrowserSession(r *http.Request) (authctx.Principal
 	return principal, true
 }
 
+// parseAuthorizationRequest 解析互斥的原生授权输入，拒绝重复参数与非法新鲜认证要求。
+// 参数：r为原始HTTP请求。
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func parseAuthorizationRequest(r *http.Request) (parsedAuthorizationRequest, error) {
 	query := r.URL.Query()
-	if err := requireAtMostOne(query, "response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "prompt", "code_challenge", "code_challenge_method", "request", "request_uri"); err != nil {
+	if err := requireAtMostOne(query, "response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "prompt", "max_age", "code_challenge", "code_challenge_method", "request", "request_uri"); err != nil {
 		return parsedAuthorizationRequest{}, err
 	}
 	clientID := strings.TrimSpace(query.Get("client_id"))
@@ -109,7 +127,7 @@ func parseAuthorizationRequest(r *http.Request) (parsedAuthorizationRequest, err
 	requestURI, requestObject := strings.TrimSpace(query.Get("request_uri")), strings.TrimSpace(query.Get("request"))
 	// PAR/JAR 已封装授权参数，若同时携带外层 redirect_uri、scope 等字段会产生双重解释，故直接拒绝。
 	if requestURI != "" {
-		if requestObject != "" || hasAnyParameter(query, "response_type", "redirect_uri", "scope", "state", "nonce", "prompt", "code_challenge", "code_challenge_method") {
+		if requestObject != "" || hasAnyParameter(query, "response_type", "redirect_uri", "scope", "state", "nonce", "prompt", "max_age", "code_challenge", "code_challenge_method") {
 			return parsedAuthorizationRequest{}, errors.New("request_uri cannot be combined with authorization parameters")
 		}
 		if len(requestURI) > 1024 {
@@ -141,6 +159,10 @@ func parseAuthorizationRequest(r *http.Request) (parsedAuthorizationRequest, err
 	return parsedAuthorizationRequest{input: input, responseType: "code"}, nil
 }
 
+// parseDirectAuthorizationInput 解析直接授权请求的精确回调、PKCE及新鲜认证参数。
+// 参数：query为本调用的query业务输入。
+//   clientID为登记的OAuth客户端标识。
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func parseDirectAuthorizationInput(query url.Values, clientID string) (application.AuthorizationInput, error) {
 	redirectURI := strings.TrimSpace(query.Get("redirect_uri"))
 	if redirectURI != "" && !validAbsoluteRedirectURI(redirectURI) {
@@ -158,11 +180,20 @@ func parseDirectAuthorizationInput(query url.Values, clientID string) (applicati
 	if err := validatePrompt(query.Get("prompt")); err != nil {
 		return application.AuthorizationInput{}, err
 	}
+	var maxAge *uint64
+	if raw, present := query["max_age"]; present {
+		value, err := strconv.ParseUint(raw[0], 10, 32)
+		if err != nil {
+			return application.AuthorizationInput{}, errors.New("max_age is invalid")
+		}
+		maxAge = &value
+	}
 	challenge, method := strings.TrimSpace(query.Get("code_challenge")), strings.TrimSpace(query.Get("code_challenge_method"))
 	if (challenge == "") != (method == "") || (method != "" && method != "S256") || !validPKCEChallenge(challenge) {
 		return application.AuthorizationInput{}, errors.New("PKCE parameters are invalid")
 	}
 	return application.AuthorizationInput{
+		Prompt: strings.TrimSpace(query.Get("prompt")), MaxAgeSeconds: maxAge,
 		ClientID: clientID, RedirectURI: redirectURI, Scopes: strings.Fields(query.Get("scope")), State: query.Get("state"),
 		Nonce: query.Get("nonce"), CodeChallenge: challenge, CodeChallengeMethod: method,
 	}, nil

@@ -25,9 +25,15 @@ func (control *keycloakControlPlane) EnsureClient(ctx context.Context, clientID,
 	return control.EnsureClientRedirectURIs(ctx, clientID, name, []string{redirectURI})
 }
 
-// EnsureClientRedirectURIs 原子替换单个 Realm 客户端的全部平台管控回调集合。
-// 传输层切换期间先配置两个回调等流量排空，再以单一目标回调重新调用。
-// 除子系统接入所需的既有 Secret 读取外，本方法不读取也不改动任何无关客户端凭据。
+// EnsureClientRedirectURIs 调和受控客户端的精确回调及在线技术会话期限。
+//   EnsureClientRedirectURIs 原子替换单个 Realm 客户端的全部平台管控回调集合。
+//   传输层切换期间先配置两个回调等流量排空，再以单一目标回调重新调用。
+//   除子系统接入所需的既有 Secret 读取外，本方法不读取也不改动任何无关客户端凭据。
+// 参数：ctx为调用上下文与取消边界。
+//   clientID为登记的OAuth客户端标识。
+//   name为受控客户端展示名称。
+//   redirectURIs为受控客户端的精确回调集合。
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func (control *keycloakControlPlane) EnsureClientRedirectURIs(ctx context.Context, clientID, name string, redirectURIs []string) (keycloakClientResult, error) {
 	redirectURIs = canonicalRedirectURIs(redirectURIs)
 	if len(redirectURIs) == 0 {
@@ -50,7 +56,8 @@ func (control *keycloakControlPlane) EnsureClientRedirectURIs(ctx context.Contex
 		return keycloakClientResult{}, err
 	}
 	var clients []struct {
-		ID string `json:"id"`
+		ID         string            `json:"id"`
+		Attributes map[string]string `json:"attributes"`
 	}
 	decodeErr := json.NewDecoder(response.Body).Decode(&clients)
 	response.Body.Close()
@@ -58,6 +65,13 @@ func (control *keycloakControlPlane) EnsureClientRedirectURIs(ctx context.Contex
 		return keycloakClientResult{}, decodeErr
 	}
 	payload := map[string]any{"clientId": clientID, "name": name, "enabled": true, "protocol": "openid-connect", "publicClient": false, "standardFlowEnabled": true, "directAccessGrantsEnabled": false, "redirectUris": redirectURIs, "webOrigins": []string{"+"}}
+	if control.centralSessionGovernance {
+		var previous map[string]string
+		if len(clients) > 0 {
+			previous = clients[0].Attributes
+		}
+		payload["attributes"] = centralClientSessionAttributes(previous, true)
+	}
 	internalID := ""
 	if len(clients) == 0 {
 		response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms/"+url.PathEscape(control.realm)+"/clients", payload)

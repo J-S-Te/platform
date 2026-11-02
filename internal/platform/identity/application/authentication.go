@@ -149,6 +149,7 @@ type OIDCLoginInput struct {
 	UserAgent              string
 	ReplaceExistingSession bool
 	CurrentPrincipal       *authctx.Principal
+	CentralSession         *domain.SessionAnchor
 }
 
 // SessionResult 是非敏感的 API 会话表示，附带 HttpOnly Cookie 值。
@@ -217,8 +218,16 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
 }
 
-// LoginOIDC 创建与密码登录相同的服务端平台会话，但不查询密码状态或代理校验结果。
-// 代理证据只是接入/切换门禁，绝不是该路径的运行时前置条件。
+// LoginOIDC 为已核验OIDC身份创建继承原期限的平台会话。
+//
+//	LoginOIDC 创建与密码登录相同的服务端平台会话，但不查询密码状态或代理校验结果。
+//	代理证据只是接入/切换门禁，绝不是该路径的运行时前置条件。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//
+// 返回值：受原始期限约束的登录结果；身份、绑定或依赖失败返回错误。
 func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (SessionResult, error) {
 	identityID := strings.TrimSpace(input.IdentityID)
 	if identityID == "" {
@@ -238,7 +247,7 @@ func (service *Service) LoginOIDC(ctx context.Context, input OIDCLoginInput) (Se
 	if err := service.terminatePreviousBrowserIdentity(ctx, input.CurrentPrincipal, account.UserID); err != nil {
 		return SessionResult{}, err
 	}
-	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession)
+	return service.createSession(ctx, account, input.IPAddress, input.UserAgent, now, input.ReplaceExistingSession, input.CentralSession)
 }
 
 // terminatePreviousBrowserIdentity 保证平台 Cookie 与 Keycloak Realm 会话属于同一用户。
@@ -268,7 +277,10 @@ func mustDummyPasswordMetadata() []byte {
 	return metadata
 }
 
-func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time, replaceExisting bool) (SessionResult, error) {
+// createSession 生成受中央原始截止约束的平台Cookie，并持久化服务端会话。
+// 参数：ctx为请求，account为有效账号，ipAddress/userAgent为元数据，now为时钟，replaceExisting为替换意图，central为可信OIDC锚点。
+// 返回值：登录结果；生成、持久化、并发冲突或原期限失效时返回错误。
+func (service *Service) createSession(ctx context.Context, account domain.LoginAccount, ipAddress net.IP, userAgent string, now time.Time, replaceExisting bool, central ...*domain.SessionAnchor) (SessionResult, error) {
 	// 绝对有效期由平台会话 TTL 决定，空闲有效期则读取租户当前安全策略。二者由仓储
 	// 同时校验，因此放宽 Cookie/JWT 的 exp 也不能绕过服务端空闲超时。
 	idleTimeout, err := service.loginSecurity.SessionIdleTimeout(ctx, account.TenantID)
@@ -284,6 +296,16 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 		return SessionResult{}, fmt.Errorf("generate session ID: %w", err)
 	}
 	expiresAt := now.Add(service.sessionTTL).UTC().Truncate(time.Second)
+	centralID := ""
+	if len(central) > 0 && central[0] != nil {
+		if central[0].ID == "" || !central[0].ExpiresAt.After(now) {
+			return SessionResult{}, ErrUnauthenticated
+		}
+		centralID = central[0].ID
+		if central[0].ExpiresAt.Before(expiresAt) {
+			expiresAt = central[0].ExpiresAt.UTC().Truncate(time.Second)
+		}
+	}
 	token, err := service.tokens.Issue(security.TokenClaims{
 		SessionID: sessionID, UserID: account.UserID, TenantID: account.TenantID, AccountID: account.AccountID,
 		IssuedAt: now, ExpiresAt: expiresAt,
@@ -295,7 +317,8 @@ func (service *Service) createSession(ctx context.Context, account domain.LoginA
 	session := domain.Session{
 		ID: sessionID, TenantID: account.TenantID, AccountID: account.AccountID,
 		CreatedAt: now, ExpiresAt: expiresAt, IPAddress: normalizeIP(ipAddress),
-		UserAgent: truncateUserAgent(userAgent),
+		UserAgent:        truncateUserAgent(userAgent),
+		CentralSessionID: centralID,
 	}
 	if err := service.repository.CreateSession(ctx, account, session, idleTimeout, replaceExisting); err != nil {
 		if errors.Is(err, ErrConcurrentSession) {
@@ -351,8 +374,16 @@ func (service *Service) Authenticate(ctx context.Context, token string) (authctx
 	return toAuthContextPrincipal(principal), nil
 }
 
-// RecordInteraction 只在浏览器上报可信点击、按键、滚动或触摸后推进交互时间；普通鉴权
-// 请求不会续期空闲窗口，避免轮询、后台标签页或恶意请求让无人操作的会话永久存活。
+// RecordInteraction 仅将显式真实交互记录到当前会话权威。
+//
+//	RecordInteraction 只在浏览器上报可信点击、按键、滚动或触摸后推进交互时间；普通鉴权
+//	请求不会续期空闲窗口，避免轮询、后台标签页或恶意请求让无人操作的会话永久存活。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	principal为当前服务端核验主体。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (service *Service) RecordInteraction(ctx context.Context, principal authctx.Principal) error {
 	if principal.SessionID == "" || principal.Tenant.ID == "" || principal.Account.ID == "" {
 		return ErrUnauthenticated
@@ -364,8 +395,8 @@ func (service *Service) RecordInteraction(ctx context.Context, principal authctx
 	}
 	if err := service.repository.RecordSessionInteraction(ctx, principal.SessionID, now, idleTimeout); err != nil {
 		if errors.Is(err, ErrUnauthenticated) {
-			if revokeErr := service.repository.RevokeAccountSessions(ctx, principal.Tenant.ID, principal.Account.ID, now, "IDLE_TIMEOUT"); revokeErr != nil {
-				return fmt.Errorf("revoke expired account sessions: %w", revokeErr)
+			if revokeErr := service.repository.RevokeSession(ctx, principal.SessionID, now, "IDLE_TIMEOUT"); revokeErr != nil && !errors.Is(revokeErr, ErrUnauthenticated) {
+				return fmt.Errorf("revoke expired browser session: %w", revokeErr)
 			}
 			return ErrUnauthenticated
 		}
