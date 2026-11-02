@@ -457,8 +457,32 @@ write_build_info() (
   fi
 )
 
+# DEP-01 发布阻断：prometheus 的 rule_files 与权威编排引用的部署资产必须已进入 git 索引。
+# 症状是“文件在开发机磁盘上、构建也能打包，但从未 git add”：换一台机器 checkout 后
+# 资产包缺规则/模板文件，prometheus 容器启动即失败。判据由
+# tests/test_git_index_completeness.py 实现（只读 git 索引，不修改工作树）。
+# 构建脚本只在仓库内运行；没有 .git 的交付副本明确跳过，而不是静默通过。
+check_tracked_deployment_assets() (
+  if ! git -C "$deploy_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '警告：%s 不在 git 工作树内，跳过部署资产入库完整性检查（DEP-01）\n' "$deploy_dir" >&2
+    exit 0
+  fi
+  local checker="$deploy_dir/tests/test_git_index_completeness.py"
+  [[ -f "$checker" && ! -L "$checker" ]] || {
+    echo '缺少 tests/test_git_index_completeness.py：无法校验告警规则/编排引用的部署资产已入库（DEP-01）' >&2
+    exit 1
+  }
+  python3 "$checker" || {
+    echo '部署资产入库完整性检查失败：先 git add 缺失的规则/模板文件再构建（见 DEP-01）' >&2
+    exit 1
+  }
+  printf '部署资产入库完整性检查通过：rule_files 与编排引用的部署文件均已在 git 索引中\n'
+)
+
 # 构建首个组件前检查整个发布的源码和工具链基线，避免同一版本的增量构建混入不同源码树或 Docker 工具链生成的包。
 check_build_info_baseline
+# 紧接着做入库完整性检查：它比镜像构建更便宜，且能避免“打完包才发现资产缺文件”。
+check_tracked_deployment_assets
 
 publish_artifact() {
   local staged_archive="$1" archive="$2" staged_sidecar="$3"
@@ -881,7 +905,9 @@ package_assets() (
     bin/acceptance-evidence.sh bin/apply-public-transport.sh bin/backup-all.sh bin/backup-file-gateway.sh bin/backup-keycloak-mysql.sh bin/portal-report-backup.sh
     bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-common.sh bin/deploy-import.sh bin/deploy-subsystem.sh bin/deploy-license.sh bin/deploy-doctor.sh bin/deploy-package.sh bin/deploy-status.sh bin/deploy-verify.sh bin/deploy-menu.sh bin/deploy-registry.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
-    bin/install-host-dependencies.sh
+    bin/install-host-dependencies.sh bin/initialize-audit-hash-key.py bin/platform-mysql-command.py
+    bin/release-backup-policy.py
+    bin/project-compose-assets.py bin/check-asset-bundle.py
     bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-image-identities.py
     bin/export-license-inventory.py bin/frontend-network.py bin/check-frontend-network.sh bin/subsystem-runtime.py
     bin/delivery-inspect.py bin/delivery-inspect-images.py bin/delivery-inspect-v2.py bin/delivery-runtime.py bin/delivery-runtime.sh
@@ -894,7 +920,7 @@ package_assets() (
     bin/test-file-gateway-wiring.sh bin/test-lifecycle.sh bin/test-offline-configure.sh bin/test-offline-import.sh bin/test-offline-registry-network.sh
     bin/test-offline-package-metadata.sh bin/test-offline-transport.sh bin/test-public-transport.sh bin/test-start-enabled.sh
     bin/test-backup-recovery-safety.sh bin/test-control-plane-reload.sh bin/test-release-reliability.sh bin/test-deployment-plan.py bin/test-first-failure.sh bin/test-recovery-status.sh bin/test-subsystem-state-machine.sh bin/test-verify-readiness.sh
-    monitoring/prometheus/file-gateway-alerts.yml monitoring/prometheus/keycloak-alerts.yml monitoring/prometheus/prometheus.yml
+    monitoring/prometheus/file-gateway-alerts.yml monitoring/prometheus/integration-alerts.yml monitoring/prometheus/keycloak-alerts.yml monitoring/prometheus/platform-alerts.yml monitoring/prometheus/prometheus.yml
     mysql-init/contract-databases.sql mysql-init/data-analysis-metabase.sql nginx/basic-platform.conf.example
     subsystem-templates/contract.env.example subsystem-templates/customer.env.example subsystem-templates/data-analysis.env.example
     subsystem-templates/portal.env.example subsystem-templates/portal-report-worker.env.example subsystem-templates/project.env.example subsystem-templates/settlement.env.example
@@ -963,6 +989,10 @@ package_assets() (
       [[ ! -f "$license_stage/approvals/$approval_name" ]] || install -m 600 -- "$license_stage/approvals/$approval_name" "$assets_stage/$approval_name"
     done
   fi
+  python3 "$deploy_dir/bin/check-asset-bundle.py" --stage "$assets_stage" --source-root "$deploy_dir" --source-bin "$deploy_dir/bin" || {
+    echo '部署资产缺少被引用的运行时文件，拒绝打包' >&2
+    exit 1
+  }
   COPYFILE_DISABLE=1 tar --no-xattrs -C "$assets_stage" -czf "$assets_temporary" .
   gzip -t "$assets_temporary"
   assets_digest="$(sha256sum "$assets_temporary" | awk '{print tolower($1)}')"

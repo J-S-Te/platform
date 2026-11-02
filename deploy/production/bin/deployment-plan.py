@@ -537,8 +537,9 @@ def build_plan(target, action, components, *, script_dir=None, runner=run, docke
         if not container:
             add(checks, "DB-001", "平台数据库连接", "BLOCKED", "BLOCKER", "未找到运行中的 platform-mysql 容器", "先启动/恢复平台数据库")
         else:
+            # 安全（SEC-1）：密码经容器内 MYSQL_PWD 传入 mysqladmin，不再以 -p 进入进程 argv。
             rc2, out2, err2 = runner(["docker", "exec", container, "sh", "-c",
-                                      'mysqladmin ping --silent -h 127.0.0.1 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD"'], target, 15)
+                                      'exec env MYSQL_PWD="$MYSQL_PASSWORD" mysqladmin ping --silent -h 127.0.0.1 -u"$MYSQL_USER"'], target, 15)
             if rc2 != 0:
                 add(checks, "DB-001", "平台数据库连接", "BLOCKED", "BLOCKER", "platform-mysql 连接失败", "检查数据库容器、凭据和网络")
             else:

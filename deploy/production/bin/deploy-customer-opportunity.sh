@@ -608,7 +608,7 @@ diagnose_mysql_container() {
 backup_database_if_initialized() {
   local mysql_service="$1" database="$2" label="$3" count
   if ! count="$(mysql_query_scalar "$mysql_service" "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '${database}'")"; then
-    echo "无法确认数据库是否已初始化：$mysql_service（MySQL 未就绪）" >&2
+    echo "无法确认数据库是否已初始化：${mysql_service}（MySQL 未就绪）" >&2
     diagnose_mysql_container "$mysql_service"
     return 1
   fi
@@ -713,7 +713,7 @@ wait_for_workers() {
       return 1
     }
     health="$(docker inspect "$container_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
-    [[ "$health" == healthy || "$health" == none ]] || { echo "Worker 健康检查尚未通过：$service（${health:-missing}）" >&2; return 1; }
+    [[ "$health" == healthy || "$health" == none ]] || { echo "Worker 健康检查尚未通过：${service}（${health:-missing}）" >&2; return 1; }
   done
   echo "CRM Workers 已稳定运行 10 秒且未发生重启"
 }

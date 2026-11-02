@@ -5,7 +5,24 @@ global:
 rule_files:
   - /etc/prometheus/keycloak-alerts.yml
   - /etc/prometheus/file-gateway-alerts.yml
+  - /etc/prometheus/platform-alerts.yml
+  - /etc/prometheus/integration-alerts.yml
 
+# 抓取边界（BIZ-XWIRE-08）：本文件全部 target 都是 Compose `application` 网络内的服务名，
+# 不含宿主机地址。被监控服务的 /metrics 一律不发布宿主机端口，也不出现在前端 nginx 的
+# `location` 里（frontend/nginx/*.conf* 只代理显式业务路径）；prometheus 与 node-exporter
+# 自身同样不发布端口。因此“仅集群内可抓取”由网络层保证：无需额外 Ingress 规则，也不允许
+# 为抓取给下列任一服务补 `ports:`。改动本文件后必须让
+# tests/test-compose-orchestration-consistency.py 通过（它校验 target 都是已声明服务、
+# 且指标端口未被发布到宿主机）。
+#
+# 凭据（SEC-B4）：平台 /metrics 由 internal/transport/http/middleware/metrics_access.go 的
+# RequireMetricsAccess 保护——配置了 METRICS_ACCESS_TOKEN 时必须带 Authorization: Bearer，
+# 未配置时只放行回环对端。生产的 prometheus 是跨容器抓取，因此平台 job 必须带 token。
+# token 文件不在仓库内、也不随离线资产包发布：由部署方写入部署目录的
+# runtime/prometheus-secrets/platform-metrics-token（见 README「观测接入：指标、告警与凭据」），
+# 再只读挂载到容器的 /etc/prometheus/secrets。文件缺失时 prometheus 启动即失败（fail-closed），
+# 不会静默 401；这是有意的取舍，不要改回内联 credentials。
 scrape_configs:
   # Keycloak 管理端点仅在 Compose 网络内部可访问。
   - job_name: keycloak
@@ -22,3 +39,36 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["file-gateway:8086"]
+
+  # 合同服务集成 Outbox 死信计数（BIZ-XEVT2-03）。contract-api 的 /metrics 与 /healthz、
+  # /readyz 同级注册，刻意不进 /api/v1（无用户会话与许可证操作上下文），也不接受公网代理：
+  # 前端 nginx 只代理 /contract_management/auth/、/contract_management/healthz 等显式路径，
+  # 没有 /metrics 路由。该端点只暴露聚合计数，不含租户/合同/事件 id，仅限内网抓取。
+  - job_name: contract
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["contract-api:8081"]
+
+  # 平台自身 /metrics（BIZ-XEVT2-07 / SEC-B4）：back-channel logout 缺口 gauge
+  # （platform_oauth_backchannel_unregistered_rp、platform_oauth_backchannel_logout_no_endpoint）、
+  # 队列/outbox 积压与投递失败计数、连接池统计。端口取 docker-compose.yml 里 platform-api
+  # 的容器端口 8080（宿主机只回环发布 127.0.0.1:${PLATFORM_API_PORT}，抓取不走宿主机端口）。
+  # authorization 按 RequireMetricsAccess 的实际实现配置：仅 Bearer token，凭据从只读挂载的
+  # 文件读取，仓库内不得出现真实 token。
+  - job_name: platform-api
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/platform-metrics-token
+    static_configs:
+      - targets: ["platform-api:8080"]
+
+  # 结算 /metrics（BIZ-XAPI-10）：settlement_outbox_pending{destination}、
+  # settlement_integration_destination_configured{destination}、settlement_integration_audit_required、
+  # settlement_outbox_unconfigured_pending、settlement_outbox_pending_query_error。
+  # 端点与 /healthz、/readyz 同级实现（Settlement/internal/httpapi/integration_status.go），
+  # 只输出目的地名称/布尔/计数；端口取权威编排 settlement-api 的容器端口 8085。
+  - job_name: settlement-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["settlement-api:8085"]

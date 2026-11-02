@@ -1,5 +1,25 @@
 name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
 
+# ⚠️ 权威关系（BIZ-XWIRE-08，先读这条再动手）：
+# 本文件不是部署入口，禁止用于 `docker compose up`、发布脚本、provisioner 或任何运维命令。
+# 生产唯一权威编排是同目录 docker-compose.yml：离线资产包只发布它
+# （bin/build-offline-packages.sh 静态资产清单），deploy-service.sh / lifecycle.sh /
+# publish-runtime-approvals.py 与 provisioner 的 SUBSYSTEM_PRODUCTION_COMPOSE_FILE 都指向它。
+# 本文件是“评审对照样本”：除注释/日志/资源上限/发布 profile 这类非关键键外，与权威一致；
+# 商业许可接线（runtime/license-*.env、license-state-*/var/lib/commercial-license 状态卷、
+# LICENSE_RUNTIME_STATE_DIRECTORY）与健康检查逐服务由
+# tests/test-compose-orchestration-consistency.py 门禁。它保留的目的只是让评审能快速
+# 看清服务划分；任何需要部署的内容一律改 docker-compose.yml。
+# 两份文件的权威标记、关键服务的 image/端口/网络/env 取值、许可接线、健康检查与监控
+# 抓取目标由 tests/test-compose-orchestration-consistency.py 门禁，出现新漂移会直接让
+# 测试失败。
+# 健康检查（O6）：常驻服务与权威编排逐键一致，包括无 HTTP 端点的 Worker 用
+# `test "$(readlink /proc/1/exe)" = /app/<binary>` 的 PID1 可执行文件探针；一次性迁移/
+# 初始化任务（restart: "no"）刻意不声明 healthcheck：容器退出后探针只会停在
+# unhealthy，`compose up --wait` 会把“成功完成”误判为启动失败。逐项判定见 README 的
+# 「健康检查覆盖范围（O6）」；“参考副本有意保留”的差异（profiles、portal-migrate /
+# settlement 一次性任务的额外卷、env_file 简写）见 README 的「已知差异（参考副本有意保留）」。
+
 # ⚠️ 上线顺序（SEC-N10d，部署必读）：本文件已删除全部11处 *_MYSQL_DSN 明文 environment，
 # DSN 改由 deploy-*.sh 写入的 0600 runtime env_file 注入（7键 parity：contract/customer/
 # project 的 MYSQL_DSN、PORTAL_MYSQL_DSN、SETTLEMENT_MYSQL_DSN、DASHBOARD_MYSQL_DSN、
@@ -12,7 +32,7 @@ x-platform-service: &platform-service
     - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
   networks: [application]
   volumes:
-    - ./data/platform/keys:/app/data/keys
+    - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
     - ./data/platform/logs:/app/data/logs
     - ./data/platform/uploads:/app/data/uploads
   restart: unless-stopped
@@ -45,7 +65,7 @@ x-contract-service: &contract-service
     GIN_MODE: release
   networks: [application]
   volumes:
-    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 
 x-customer-service: &customer-service
@@ -78,7 +98,7 @@ x-customer-service: &customer-service
     GIN_MODE: release
   networks: [application]
   volumes:
-    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 
 x-portal-service: &portal-service
@@ -102,7 +122,7 @@ x-portal-service: &portal-service
   networks: [application]
   volumes:
     - portal-reports-data:/app/data/portal-reports
-    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 x-project-service: &project-service
   image: ${PROJECT_IMAGE:-project-management/project:pending}
@@ -123,7 +143,7 @@ x-project-service: &project-service
     GIN_MODE: release
   networks: [application]
   volumes:
-    - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
   restart: unless-stopped
 
 x-settlement-service: &settlement-service
@@ -173,6 +193,8 @@ services:
       # H5 修复：Keycloak 凭据改为必填（:?），漏配时 compose 直接失败，不再以文档化占位口令启动。
       MYSQL_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD must be set}
       MYSQL_ROOT_PASSWORD: ${KEYCLOAK_DB_ROOT_PASSWORD:?KEYCLOAK_DB_ROOT_PASSWORD must be set}
+    # 与权威编排一致：存储过程/函数创建需要该项，缺它会以 1418 失败。
+    command: ["--log-bin-trust-function-creators=1"]
     volumes:
       - keycloak-mysql-data:/var/lib/mysql
       # 宿主机目录须为 0700；仅存放加密后的、访问受控的逻辑备份。
@@ -244,6 +266,20 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # 首次部署前生成 JWT 签名密钥；无网络、无重启，与权威编排逐键一致。
+  platform-key-init:
+    image: ${PLATFORM_IMAGE}
+    env_file:
+      - ${BASIC_PLATFORM_RUNTIME_ENV_FILE:-.env}
+    command: ["./init-keys"]
+    environment:
+      AUTH_JWT_PRIVATE_KEY_PATH: /app/data/keys/jwt-ed25519-private.pem
+      AUTH_JWT_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
+    network_mode: none
+    restart: "no"
+
   platform-migrate:
     <<: *platform-service
     command: ["./migrate"]
@@ -261,6 +297,10 @@ services:
       # 生产编排必须覆盖旧的 .env 值，避免把 test/development 运行配置带入
       # production 项目，进而让审计、投影门禁按错误环境运行。
       APP_ENV: production
+      # 商业授权运行态与权威编排同源注入；缺失时许可证校验会退回镜像内默认路径。
+      LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
+      LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      LICENSE_RUNTIME_STATE_DIRECTORY: /var/lib/commercial-license
       APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
       AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
@@ -292,9 +332,9 @@ services:
       SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
       SUBSYSTEM_ONBOARDING_MODE: production
       SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
-      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}
+      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}
       SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
-      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
@@ -324,10 +364,10 @@ services:
         condition: service_healthy
 
     volumes:
-      - ./data/platform/keys:/app/data/keys
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
       - ./data/platform/logs:/app/data/logs
       - ./data/platform/uploads:/app/data/uploads
-      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:ro
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
       - subsystem-provisioner-socket:/run/basic-platform-provisioner
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
@@ -342,6 +382,20 @@ services:
     <<: *platform-service
     environment:
       APP_ENV: production
+      # 与权威编排一致：Worker 承载受控接入自动化，缺这些键时接入流程会静默失效。
+      LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
+      LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      LICENSE_RUNTIME_STATE_DIRECTORY: /var/lib/commercial-license
+      AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS:-false}}
+      SUBSYSTEM_ONBOARDING_AUTOMATION_ENABLED: "true"
+      SUBSYSTEM_ONBOARDING_MODE: production
+      SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
+      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}
+      SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}
+      SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
+      SUBSYSTEM_DOCKER_BINARY: docker
+      SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
       APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
       AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
@@ -356,12 +410,30 @@ services:
       # 169.254/链路本地元数据恒拒，不受任何开关影响。
       PLATFORM_EGRESS_ALLOW_PRIVATE: "true"
     command: ["./worker"]
+    # 与权威编排一致：Worker 承载受控接入自动化，必须真实挂载清单目录与 provisioner
+    # Unix Socket（只声明 SUBSYSTEM_PROVISIONING_SOCKET_PATH 而不挂卷时接入必然失败）。
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}:/app/data/keys
+      - ./data/platform/logs:/app/data/logs
+      - ./data/platform/uploads:/app/data/uploads
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
+      - subsystem-provisioner-socket:/run/basic-platform-provisioner
     depends_on:
       platform-mysql:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+      subsystem-provisioner:
+        condition: service_healthy
     restart: unless-stopped
+    # Worker 不提供 HTTP 端口；以 PID 1 的真实可执行文件作为容器内存活探针。
+    # 与权威编排逐键一致，缺失会让 depends_on: service_healthy 在这些消费者上失效。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
 
   # 生产接入 Agent 仅通过 Unix Socket 接收固定生命周期动作。平台 API 不挂载
   # Docker Socket；Agent 也不再直接挂载 docker.sock，只经下方白名单代理访问受限
@@ -393,7 +465,35 @@ services:
       # 该挂载是全 compose 中唯一的 docker.sock 入口，且不发布任何宿主机端口。
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [docker-control]
+    healthcheck:
+      # 与权威编排逐键一致：配置自检失败时 Agent 必须看到“不可用”，而不是继续转发。
+      test: ["CMD", "haproxy", "-c", "-f", "/tmp/haproxy.cfg"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
     restart: unless-stopped
+
+  # 命名卷首次创建归 root；只初始化本卷的目录属主，不访问业务数据或密钥。
+  subsystem-provisioner-socket-init:
+    image: ${PLATFORM_IMAGE}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - 'chown "$$SOCKET_OWNER" /run/basic-platform-provisioner && chmod 0770 /run/basic-platform-provisioner'
+    environment:
+      SOCKET_OWNER: ${SUBSYSTEM_PROVISIONER_USER:-0:10001}
+    volumes:
+      - subsystem-provisioner-socket:/run/basic-platform-provisioner
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: "0.25"
+    restart: "no"
 
   subsystem-provisioner:
     image: ${PLATFORM_IMAGE}
@@ -404,22 +504,24 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       HOME: /tmp
       SUBSYSTEM_PROVISIONING_SOCKET_PATH: /run/basic-platform-provisioner/provisioner.sock
-      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}
+      SUBSYSTEM_PRODUCTION_DEPLOY_ROOT: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}
       SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID: ${SUBSYSTEM_PRODUCTION_ALLOWED_TENANT_ID:-01J00000000000000000000000}
-      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}
-      SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env
-      SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env
-      SUBSYSTEM_PRODUCTION_COMPOSE_FILE: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml
+      SUBSYSTEM_PRODUCTION_PROFILES_DIR: ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}
+      SUBSYSTEM_PRODUCTION_RUNTIME_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env
+      SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env
+      SUBSYSTEM_PRODUCTION_COMPOSE_FILE: ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
       # 仅测试服务器可设为 true：跳过子系统数据库凭据校验，允许占位密码首次初始化。
       SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS: ${SUBSYSTEM_PRODUCTION_ALLOW_PLACEHOLDER_DATABASE_CREDENTIALS:-false}
     command: ["./subsystem-provisioner"]
-    # 安全审查 SEC-F3：以非 root 运行（默认复用镜像内置的 filegateway uid10001）。
-    # 若宿主机部署脚本要求 runtime 文件属主为部署用户，可在 .env 显式设置
-    # SUBSYSTEM_PROVISIONER_USER=<uid>:<gid>（stat -c %u:%g /opt/basic-platform 确认）。
-    user: "${SUBSYSTEM_PROVISIONER_USER:-10001:10001}"
+    # 与权威编排一致（BIZ-XWIRE-08）：Docker 不会给非 root 用户提升 cap_add 为 effective
+    # capability，实机 uid10001 的 CapEff=0 读不了 0600 的 .env/.release.env，也无法原子
+    # 维护 runtime 文件。这里用 uid0 + 业务共享 gid10001，但仍先 drop ALL，只恢复
+    # DAC_OVERRIDE/FOWNER/CHOWN 三个文件协作能力；no-new-privileges、只读根文件系统与
+    # Docker API 白名单边界继续生效。
+    user: "${SUBSYSTEM_PROVISIONER_USER:-0:10001}"
     read_only: true
     cap_drop: [ALL]
     # 非 root 下保留的三个能力均为宿主机文件协作所必需，其余 capability 全部丢弃：
@@ -435,17 +537,18 @@ services:
       - /tmp:size=64m,mode=1770
     depends_on:
       docker-socket-proxy:
-        condition: service_started
+        condition: service_healthy
     volumes:
       # docker.sock 不再挂入本容器（SEC-F3）：Docker 访问统一走 docker-socket-proxy 白名单。
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.env:ro
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/runtime
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/.release.env:ro
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/compose.yaml:ro
-      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystems.d}:ro
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystem-templates:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/subsystem-templates:ro
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/mysql-init:ro
-      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/basic-platform}/backups
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.env:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime-approvals:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/runtime-approvals:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/.release.env:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/docker-compose.yml:ro
+      - ${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:${SUBSYSTEM_PRODUCTION_PROFILES_DIR:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystems.d}:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystem-templates:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/subsystem-templates:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/mysql-init:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/mysql-init:ro
+      - ${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/backups:${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/backups
       - subsystem-provisioner-socket:/run/basic-platform-provisioner
     # 原 network_mode:none 的隔离由专有 internal 网络（docker-control）继承：
     # 仅白名单代理可达，无网关与外网出口；平台与业务容器均不在该网络中。
@@ -465,7 +568,7 @@ services:
       MYSQL_USER: contract
       MYSQL_PASSWORD: ${CONTRACT_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${CONTRACT_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - contract-mysql-data:/var/lib/mysql
       - ./mysql-init/contract-databases.sql:/docker-entrypoint-initdb.d/010_contract_databases.sql:ro
@@ -504,6 +607,20 @@ services:
   contract-migrate:
     <<: *contract-service
     command: ["./migrate"]
+    profiles: ["release"]
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  # 合同编号巡检是一次性只读运维任务，由 bin/deploy-service.sh 在合同发布成功后
+  # 以 `compose run --rm --no-deps -T contract-number-audit` 调用。故意与
+  # contract-migrate 完全同构（同一 env_file 提供的 MYSQL_DSN、同一 application
+  # 网络、同一 contract-mysql healthy 依赖），不引入新凭据，也不暴露端口。
+  # 它不是发布门禁：巡检失败只落盘证据并告警，不阻塞也不回滚发布。
+  contract-number-audit:
+    <<: *contract-service
+    command: ["./contract-number-audit"]
     profiles: ["release"]
     depends_on:
       contract-mysql:
@@ -608,7 +725,7 @@ services:
       MYSQL_USER: project
       MYSQL_PASSWORD: ${PROJECT_MYSQL_PASSWORD:-PENDING_PROJECT_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${PROJECT_MYSQL_ROOT_PASSWORD:-PENDING_PROJECT_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - project-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -632,6 +749,15 @@ services:
 
   project-api:
     <<: *project-service
+    # 商业许可接线与权威编排逐项一致：少写 license-*.env 或状态卷，消费者会按未授权
+    # fail-closed；参考副本被评审照抄时不能比权威少这一层。
+    env_file:
+      - ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
+      - path: runtime/license-project-api.env
+        required: false
+    volumes:
+      - license-state-project-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       project-mysql:
         condition: service_healthy
@@ -666,7 +792,14 @@ services:
   # 项目 SLA 与通知 outbox 独立消费者。API 事务只负责可靠入库；该进程按幂等键重试投递。
   project-sla-notifier:
     <<: *project-service
+    env_file:
+      - ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
+      - path: runtime/license-project-sla-notifier.env
+        required: false
     entrypoint: ["/usr/local/bin/sla-notifier"]
+    volumes:
+      - license-state-project-sla-notifier:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     environment:
       PM_HTTP_ADDR: :8082
       PLATFORM_BASE_URL: http://platform-api:8080
@@ -698,7 +831,7 @@ services:
       MYSQL_USER: settlement
       MYSQL_PASSWORD: ${SETTLEMENT_MYSQL_PASSWORD:-PENDING_SETTLEMENT_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${SETTLEMENT_MYSQL_ROOT_PASSWORD:-PENDING_SETTLEMENT_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - settlement-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -731,6 +864,15 @@ services:
 
   settlement-api:
     <<: *settlement-service
+    # 商业许可接线与权威编排逐项一致：少写 license-*.env 或状态卷，消费者会按未授权
+    # fail-closed；参考副本被评审照抄时不能比权威少这一层。
+    env_file:
+      - ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+      - path: runtime/license-settlement-api.env
+        required: false
+    volumes:
+      - license-state-settlement-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       settlement-mysql:
         condition: service_healthy
@@ -762,7 +904,14 @@ services:
 
   settlement-worker:
     <<: *settlement-service
+    env_file:
+      - ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
+      - path: runtime/license-settlement-worker.env
+        required: false
     entrypoint: ["/usr/local/bin/settlement-worker"]
+    volumes:
+      - license-state-settlement-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       settlement-mysql:
         condition: service_healthy
@@ -786,9 +935,10 @@ services:
       MYSQL_USER: dashboard
       MYSQL_PASSWORD: ${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${DASHBOARD_MYSQL_ROOT_PASSWORD:-PENDING_DASHBOARD_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - data-analysis-mysql-data:/var/lib/mysql
+      - ./mysql-init/data-analysis-metabase.sql:/docker-entrypoint-initdb.d/020_metabase.sql:ro
       - ./backups:/backups
     networks: [application]
     healthcheck:
@@ -798,6 +948,24 @@ services:
       retries: 30
       start_period: 20s
     restart: unless-stopped
+
+  # 既有数据库卷不会再次执行 entrypoint-initdb.d；每次受控发布先幂等补齐 Metabase 库。
+  data-analysis-metabase-init:
+    image: mysql:8.4
+    environment:
+      MYSQL_PWD: ${DASHBOARD_MYSQL_ROOT_PASSWORD:-PENDING_DASHBOARD_MYSQL_ROOT_PASSWORD}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mysql --protocol=TCP -h data-analysis-mysql -uroot < /run/init/metabase.sql"]
+    volumes:
+      - ./mysql-init/data-analysis-metabase.sql:/run/init/metabase.sql:ro
+    networks: [application]
+    depends_on:
+      data-analysis-mysql:
+        condition: service_healthy
+    restart: "no"
+    pids_limit: 64
+    cpus: "0.5"
+    mem_limit: 256m
 
   data-analysis-migrate:
     <<: *data-analysis-service
@@ -812,6 +980,25 @@ services:
   data-analysis-api:
     <<: *data-analysis-service
     image: ${DATA_ANALYSIS_DASHBOARD_API_IMAGE:-data-analysis/dashboard-api:pending}
+    # 商业许可接线与权威编排逐项一致：少写 license-*.env 或状态卷，消费者会按未授权
+    # fail-closed；参考副本被评审照抄时不能比权威少这一层。
+    env_file:
+      - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+      - path: runtime/license-data-analysis-api.env
+        required: false
+    volumes:
+      - license-state-data-analysis-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    # YAML merge 不递归合并 environment：声明本块会整体替换 anchor 的同名映射，
+    # 因此这里重复列出 anchor 的键，并补上权威编排中的 DASHBOARD_TIMEZONE。
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      PLATFORM_BASE_URL: http://platform-api:8080
+      APP_PATH_PREFIX: /data_analysis
+      GIN_MODE: release
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
     depends_on:
       data-analysis-mysql:
         condition: service_healthy
@@ -844,12 +1031,20 @@ services:
   data-analysis-aggregation-worker:
     <<: *data-analysis-service
     image: ${DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE:-data-analysis/aggregation-worker:pending}
+    env_file:
+      - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+      - path: runtime/license-data-analysis-aggregation-worker.env
+        required: false
+    volumes:
+      - license-state-data-analysis-aggregation-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     environment:
       AGGREGATION_ONCE: "false"
       CONTRACT_READ_DSN: ${CONTRACT_READ_DSN:-}
       CRM_READ_DSN: ${CRM_READ_DSN:-}
       PROJECT_READ_DSN: ${PROJECT_READ_DSN:-}
       SETTLEMENT_READ_DSN: ${SETTLEMENT_READ_DSN:-}
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
       # 机器令牌端点、两个最小权限客户端及接口 URL 均由受控 runtime 文件下发，
       # Compose 不得用空默认值覆盖已经完成接入的环境配置。
     depends_on:
@@ -857,15 +1052,48 @@ services:
         condition: service_healthy
       data-analysis-api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/aggregation-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
 
   data-analysis-alert-worker:
     <<: *data-analysis-service
     image: ${DATA_ANALYSIS_ALERT_WORKER_IMAGE:-data-analysis/alert-worker:pending}
+    env_file:
+      - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
+      - path: runtime/license-data-analysis-alert-worker.env
+        required: false
+    volumes:
+      - license-state-data-analysis-alert-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    # YAML merge 不会递归合并 environment 映射，声明本块会整体替换 anchor 的同名映射，
+    # 因此这里重复列出 anchor 的键（与 docker-compose.yml 保持一致）。
+    # OIDC_TENANT_ID 仍由 runtime/data-analysis.env 提供，Compose 层不给默认值：
+    # 缺失时 alert-worker 启动失败（fail-closed），不会带着占位租户写错租户的告警。
+    # 告警生命周期收敛（BIZ-DATA-07）默认 false；开关只在 Compose 插值来源 .env 生效。
+    environment:
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      PLATFORM_BASE_URL: http://platform-api:8080
+      APP_PATH_PREFIX: /data_analysis
+      GIN_MODE: release
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
+      ALERT_AUTO_RESOLVE: ${ALERT_AUTO_RESOLVE:-false}
     depends_on:
       data-analysis-mysql:
         condition: service_healthy
       data-analysis-api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/alert-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
 
   data-analysis-metabase:
     image: metabase/metabase:v0.53.7
@@ -911,7 +1139,7 @@ services:
       MYSQL_USER: customer
       MYSQL_PASSWORD: ${CUSTOMER_MYSQL_PASSWORD:-PENDING_CUSTOMER_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${CUSTOMER_MYSQL_ROOT_PASSWORD:-PENDING_CUSTOMER_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - customer-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -936,9 +1164,16 @@ services:
 
   customer-api:
     <<: *customer-service
+    # 商业许可接线与权威编排逐项一致：少写 license-*.env 或状态卷，消费者会按未授权
+    # fail-closed；参考副本被评审照抄时不能比权威少这一层。
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-api.env
+        required: false
     command: ["./crm-server"]
     volumes:
-      - ./data/platform/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+      - license-state-customer-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
       - customer-attachment-data:/app/data/attachments
     ports:
       - "127.0.0.1:${CUSTOMER_API_PORT:-18083}:8090"
@@ -972,18 +1207,45 @@ services:
 
   customer-opportunity-alert-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-opportunity-alert-worker.env
+        required: false
     command: ["./opportunity-alert-worker"]
+    volumes:
+      - license-state-customer-opportunity-alert-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
+    # 与权威编排逐个键一致：无 HTTP 端点的常驻 Worker 用 PID1 可执行文件探针。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/opportunity-alert-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   customer-owner-notification-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-owner-notification-worker.env
+        required: false
     command: ["./opportunity-owner-notification-worker"]
+    volumes:
+      - license-state-customer-owner-notification-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/opportunity-owner-notification-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   customer-contract-transfer-worker:
@@ -994,6 +1256,11 @@ services:
       - path: runtime/license-customer-contract-transfer-worker.env
         required: false
     command: ["./contract-transfer-worker"]
+    # YAML merge 不会递归合并 environment：本 Worker 与权威编排一致，只拿
+    # PLATFORM_BASE_URL，不再继承 CRM API 的 OIDC/HTTP/附件键（继承会让 Worker 带着
+    # API 的监听与回调配置启动，排障时看起来像“同一进程两套配置”）。
+    environment:
+      PLATFORM_BASE_URL: http://platform-api:8080
     volumes:
       - license-state-customer-contract-transfer-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
@@ -1017,41 +1284,100 @@ services:
 
   customer-presale-alert-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-presale-alert-worker.env
+        required: false
     command: ["./presale-alert-worker"]
+    volumes:
+      - license-state-customer-presale-alert-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-alert-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   customer-presale-assignment-notification-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-presale-assignment-notification-worker.env
+        required: false
     command: ["./presale-assignment-notification-worker"]
+    volumes:
+      - license-state-customer-presale-assignment-notification-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-assignment-notification-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   customer-presale-progress-notification-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-presale-progress-notification-worker.env
+        required: false
     command: ["./presale-progress-notification-worker"]
+    volumes:
+      - license-state-customer-presale-progress-notification-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-progress-notification-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   customer-notification-delivery-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-notification-delivery-worker.env
+        required: false
     command: ["./notification-delivery-worker"]
+    volumes:
+      - license-state-customer-notification-delivery-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/notification-delivery-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   # 售前申请投递 Worker：消费 CRM outbox，写入审批引擎/PMS，并持续写入
   # crm_worker_heartbeats。CRM API 依据该心跳决定是否受理新的售前申请。
   customer-presale-worker:
     <<: *customer-service
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-customer-presale-worker.env
+        required: false
     command: ["./presale-worker"]
+    volumes:
+      - license-state-customer-presale-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     environment:
       PRESALE_TEMPORAL_ENABLED: ${PRESALE_TEMPORAL_ENABLED:-true}
       PRESALE_TEMPORAL_INTERNAL_MODE: ${PRESALE_TEMPORAL_INTERNAL_MODE:-true}
@@ -1073,6 +1399,12 @@ services:
         condition: service_healthy
       temporal:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   portal-mysql:
@@ -1082,7 +1414,7 @@ services:
       MYSQL_USER: portal
       MYSQL_PASSWORD: ${PORTAL_MYSQL_PASSWORD:-PENDING_PORTAL_MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${PORTAL_MYSQL_ROOT_PASSWORD:-PENDING_PORTAL_MYSQL_ROOT_PASSWORD}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - portal-mysql-data:/var/lib/mysql
       - ./backups:/backups
@@ -1107,7 +1439,17 @@ services:
 
   portal-api:
     <<: *portal-service
+    # 商业许可接线与权威编排逐项一致：少写 license-*.env 或状态卷，消费者会按未授权
+    # fail-closed；参考副本被评审照抄时不能比权威少这一层。
+    env_file:
+      - ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
+      - path: runtime/license-portal-api.env
+        required: false
     command: ["./portal-server"]
+    volumes:
+      - license-state-portal-api:/var/lib/commercial-license
+      - portal-reports-data:/app/data/portal-reports
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     ports:
       - "127.0.0.1:${PORTAL_API_PORT:-18084}:8091"
     labels:
@@ -1146,7 +1488,10 @@ services:
     env_file:
       - path: ${PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE:-runtime/portal-report-worker.env}
         required: false
+      - path: runtime/license-portal-report-worker.env
+        required: false
     volumes:
+      - license-state-portal-report-worker:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
       - portal-reports-data:/app/data/portal-reports
     networks: [application]
@@ -1157,6 +1502,12 @@ services:
         condition: service_healthy
       platform-api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/portal-report-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
     stop_grace_period: 60s
     logging:
@@ -1175,7 +1526,14 @@ services:
     # 补偿 worker 随门户镜像交付。它消费 CRM 补偿任务，因此共享 CRM 运行配置和数据库，
     # 但不得从 x-customer-service 继承 CRM 镜像；部署脚本会明确对照 CUSTOMER_PORTAL_IMAGE 验证。
     image: ${CUSTOMER_PORTAL_IMAGE:-customer-opportunity/portal:pending}
+    env_file:
+      - ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
+      - path: runtime/license-portal-invite-compensation-worker.env
+        required: false
     command: ["./portal-invite-compensation-worker"]
+    volumes:
+      - license-state-portal-invite-compensation-worker:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     environment:
       PORTAL_INVITE_COMPENSATION_PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
       PORTAL_INVITE_COMPENSATION_PORTAL_TOKEN_URL: http://platform-api:8080/oauth2/token
@@ -1197,17 +1555,30 @@ services:
         condition: service_healthy
       portal-api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/portal-invite-compensation-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     profiles: ["customer"]
 
   frontend:
     # 前端尚未发布时允许 platform 独立发布；frontend 发布脚本会覆盖为不可变 digest。
     image: ${FRONTEND_IMAGE:-frontend/frontend:pending}
     environment:
-      PUBLIC_HTTPS_ENABLED: "false"
+      PUBLIC_HTTPS_ENABLED: ${PUBLIC_HTTPS_ENABLED:-false}
+      # 与权威编排一致：HTTP/HTTPS 传输状态由 public-transport.sh 写入，Compose 不写死。
+      PUBLIC_TRANSPORT_STATE: ${PUBLIC_TRANSPORT_STATE:-HTTP}
       PUBLIC_PLATFORM_HOST: ${PUBLIC_PLATFORM_HOST:-localhost}
       PUBLIC_SSO_HOST: ${PUBLIC_FRONTEND_SSO_HOST:-${PUBLIC_SSO_HOST:-sso.localhost}}
     ports:
       - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTP_PORT:-${FRONTEND_PORT:-18082}}:80"
+      # HTTPS 与会话排空复用同一 frontend 服务，证书由脚本写入 runtime/public-tls。
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${PUBLIC_HTTPS_PORT:-443}:443"
+    # 与权威编排一致：受管证书目录只读挂载，HTTP/HTTPS/drain 三种模式都用它。
+    volumes:
+      - ${PUBLIC_TLS_MANAGED_DIR:-./runtime/public-tls}:/run/tls:ro
     # 固化地址供 APP_TRUSTED_PROXIES 精确信任；既有网络不迁移，保留原前端地址：
     # frontend nginx 是转发 X-Forwarded-For 到 platform-api 的唯一容器来源（SEC-N6）。
     networks:
@@ -1217,6 +1588,13 @@ services:
       platform-api:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      # 内部前端监听在 HTTP、HTTPS 和排空模式均存在，避免健康探针被 TLS 重定向。
+      # 与权威编排逐键一致；缺它时前端容器“起来了但 nginx 未就绪”会被判成功。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8088/"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
 
   file-gateway-mysql:
     restart: unless-stopped
@@ -1226,6 +1604,8 @@ services:
       MYSQL_USER: ${FILE_GATEWAY_DB_USER:-file_gateway}
       MYSQL_PASSWORD: ${FILE_GATEWAY_DB_PASSWORD:?FILE_GATEWAY_DB_PASSWORD must be set}
       MYSQL_ROOT_PASSWORD: ${FILE_GATEWAY_DB_ROOT_PASSWORD:?FILE_GATEWAY_DB_ROOT_PASSWORD must be set}
+    # 与权威编排一致：存储过程/函数创建需要该项，缺它会以 1418 失败。
+    command: ["--log-bin-trust-function-creators=1"]
     volumes:
       - file-gateway-mysql-data:/var/lib/mysql
     networks: [application]
@@ -1266,8 +1646,8 @@ services:
     volumes:
       # 仅挂载公开验签密钥文件。宿主机 keys 目录为 0700，直接挂载目录会让
       # 非 root 的 filegateway 账号无法穿越目录并读取其中的 0644 公钥。
-      - ${PLATFORM_KEYS_DIR:-/opt/basic-platform/data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
-      - ${FILE_GATEWAY_HOST_ROOT:-/opt/basic-platform/data/file-gateway}:/app/data/file-gateway
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+      - ${FILE_GATEWAY_HOST_ROOT:-${SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT:-/opt/unified-identity-platform}/data/file-gateway}:/app/data/file-gateway
     depends_on:
       file-gateway-mysql:
         condition: service_healthy
@@ -1277,6 +1657,51 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+
+  # BEGIN SUBSYSTEM: monitoring — 监控（可选）。与权威编排 docker-compose.yml 的
+  # monitoring 子系统逐键一致；两个服务都不发布宿主机端口，抓取只走 application 内网。
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/keycloak-alerts.yml:/etc/prometheus/keycloak-alerts.yml:ro
+      - ./monitoring/prometheus/file-gateway-alerts.yml:/etc/prometheus/file-gateway-alerts.yml:ro
+      - ./monitoring/prometheus/platform-alerts.yml:/etc/prometheus/platform-alerts.yml:ro
+      - ./monitoring/prometheus/integration-alerts.yml:/etc/prometheus/integration-alerts.yml:ro
+      - prometheus-data:/prometheus
+      # 与权威编排一致：部署方提供的只读抓取凭据目录（runtime/ 下，不随资产包发布）。
+      - ./runtime/prometheus-secrets:/etc/prometheus/secrets:ro
+    networks: [application]
+    restart: unless-stopped
+    healthcheck:
+      # 与权威编排逐键一致：Prometheus 未就绪时运维应看到 unhealthy，而不是“抓到空指标”。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # 备份时间戳文本文件采集器（node-exporter textfile collector），同样不发布端口。
+  keycloak-backup-metrics:
+    image: prom/node-exporter:v1.9.1
+    command:
+      - --collector.disable-defaults
+      - --collector.textfile
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - ./monitoring/textfile:/textfile:ro
+    networks: [application]
+    restart: unless-stopped
+    healthcheck:
+      # 与权威编排逐键一致：采集器自身挂掉时备份可见性告警不能静默。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9100/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  # END SUBSYSTEM: monitoring
 
 networks:
   application:
@@ -1306,3 +1731,22 @@ volumes:
   subsystem-provisioner-socket:
   keycloak-mysql-data:
   file-gateway-mysql-data:
+  prometheus-data:
+  license-state-project-api:
+  license-state-project-sla-notifier:
+  license-state-customer-api:
+  license-state-customer-opportunity-alert-worker:
+  license-state-customer-owner-notification-worker:
+  license-state-customer-presale-alert-worker:
+  license-state-customer-presale-assignment-notification-worker:
+  license-state-customer-presale-progress-notification-worker:
+  license-state-customer-notification-delivery-worker:
+  license-state-customer-presale-worker:
+  license-state-portal-api:
+  license-state-portal-report-worker:
+  license-state-portal-invite-compensation-worker:
+  license-state-settlement-api:
+  license-state-settlement-worker:
+  license-state-data-analysis-api:
+  license-state-data-analysis-aggregation-worker:
+  license-state-data-analysis-alert-worker:

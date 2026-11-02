@@ -50,7 +50,7 @@ set_value() {
   awk -F= -v key="$key" -v value="$value" '$1==key {$0=key "=" value;found=1} {print} END {if(!found) print key "=" value}' "$test_root/deploy/.env" > "$output"
   chmod 600 "$output"; mv "$output" "$test_root/deploy/.env"
 }
-printf ' 192.0.2.20 \r\n18080\n08081\n18090\nadmin\nAsia/Shanghai\nn\n' | run_config || { cat "$test_root/result.log"; fail 'initial configure with pasted whitespace/CRLF IP'; }
+printf ' 192.0.2.20 \r\n18080\n08081\n18090\nadmin\nn\n' | run_config || { cat "$test_root/result.log"; fail 'initial configure with pasted whitespace/CRLF IP'; }
 [[ "$(value PUBLIC_HTTP_PORT)" == 8081 ]] || fail 'port normalization'
 [[ "$(value COMPOSE_PROJECT_NAME)" == uip ]] || fail 'project name'
 [[ "$(value KEYCLOAK_PUBLIC_URL)" == http://192.0.2.20:18090 ]] || fail 'SSO port'
@@ -79,17 +79,17 @@ run_config </dev/null || { cat "$test_root/result.log"; fail 'idempotent repair'
 [[ "$(stat -c %a "$keys/jwt-ed25519-public.pem")" == 644 ]] || fail 'public key repair'
 [[ "$(stat -c %u "$(value FILE_GATEWAY_HOST_ROOT)")" == 10001 ]] || fail 'owner repair'
 [[ "$(value MYSQL_PASSWORD)" == "$secret" && "$(sha256sum "$keys/jwt-ed25519-private.pem")" == "$private_hash" ]] || fail 'secret rotation'
-printf '\n\n\n\n\n\n\n' | run_config --force || { cat "$test_root/result.log"; fail 'force same settings'; }
+printf '\n\n\n\n\n\n' | run_config --force || { cat "$test_root/result.log"; fail 'force same settings'; }
 [[ "$(value IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET)" == retained-secret && "$(value OIDC_ROLE_CONFIG_HASH)" == retained-hash ]] || fail 'force cleared credentials'
 before="$(sha256sum "$test_root/deploy/.env")"
 if printf '999.999.999.999\n' | run_config --force; then fail 'invalid IP accepted'; fi
 [[ "$(sha256sum "$test_root/deploy/.env")" == "$before" ]] || fail 'failed config altered env'
-if printf '192.0.2.20\n8081\n08081\n18090\nadmin\nAsia/Shanghai\nn\n' | run_config --force; then fail 'duplicate numeric ports accepted'; fi
+if printf '192.0.2.20\n8081\n08081\n18090\nadmin\nn\n' | run_config --force; then fail 'duplicate numeric ports accepted'; fi
 export MOCK_OCCUPIED=1
 if run_config </dev/null; then fail 'occupied port accepted'; fi
 unset MOCK_OCCUPIED; export MOCK_OCCUPIED=""
 export MOCK_DEPLOYED=1
-if printf '192.0.2.21\n\n\n\n\n\n\n' | run_config --force; then fail 'unsafe live address change'; fi
+if printf '192.0.2.21\n\n\n\n\n\n' | run_config --force; then fail 'unsafe live address change'; fi
 export MOCK_DEPLOYED=""
 export MOCK_FIREWALL=firewalld
 run_config </dev/null || { cat "$test_root/result.log"; fail 'firewalld'; }
@@ -114,7 +114,7 @@ set_value PUBLIC_TLS_PRIVATE_KEY_PATH tls.key
 set_value AUTH_SESSION_COOKIE_SECURE true
 set_value KEYCLOAK_REQUIRE_HTTPS true
 set_value APP_CORS_ALLOWED_ORIGINS https://custom.example.com
-printf '\n\n\n' | run_config --force || { cat "$test_root/result.log"; fail 'HTTPS force'; }
+printf '\n\n' | run_config --force || { cat "$test_root/result.log"; fail 'HTTPS force'; }
 [[ "$(value PUBLIC_HTTPS_ENABLED)" == true && "$(value AUTH_SESSION_COOKIE_SECURE)" == true && "$(value KEYCLOAK_REQUIRE_HTTPS)" == true ]] || fail 'HTTPS downgraded'
 [[ "$(value APP_CORS_ALLOWED_ORIGINS)" == https://custom.example.com ]] || fail 'custom CORS overwritten'
 [[ "$(value IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET)" == retained-secret ]] || fail 'domain force cleared credentials'

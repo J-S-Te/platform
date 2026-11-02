@@ -1,3 +1,5 @@
+# 许可运行态键（COMMERCIAL_LICENSE_ENABLED / COMMERCIAL_LICENSE_COMPATIBILITY）不在本清单：
+# 由平台写入 runtime/license-<service>.env；兼容放行开关生产必须缺省（缺省即 fail-closed）。
 version: 1
 default: false
 application:
@@ -37,6 +39,8 @@ runtime:
         OIDC_ROLE_CONFIG_HASH: sha256:1c1d94091fdfd3f5665d04215b91089434a737b0f43e9f1a9901755af97f621a
         OIDC_MAX_EFFECTIVE_ROLES: "10"
         OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
+        OIDC_SESSION_IDLE_TTL: 30m
+        OIDC_SESSION_ABSOLUTE_TTL: 8h
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: customer_and_opportunity
@@ -45,10 +49,10 @@ runtime:
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
         PLATFORM_OWNER_DIRECTORY_SCOPE: owner_directory.read
-        # 合同摘要凭据只在运行时已完成密钥交付后显式开启。历史环境的
-        # Retry/Update 不会从平台数据库恢复 OAuth 明文，因此默认关闭可
-        # 安全修复旧环境，避免把缺失凭据误报成 Docker/目录不可用。
-        CONTRACT_VERIFICATION_ENABLED: "false"
+        # 合同摘要端点与双向机器凭据已由受控接入创建；生产必须开启，
+        # 否则商机“确认签约/赢单”会因 verifier 为空返回 503。
+        # 手工/灾后环境在凭据未交付前保持关闭，由受控更新补齐后再开启。
+        CONTRACT_VERIFICATION_ENABLED: "true"
         CONTRACT_SUMMARY_URL: http://contract-api:8081/internal/contract-summary
         CONTRACT_SUMMARY_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_SUMMARY_SCOPE: contract.summary.read

@@ -1,6 +1,13 @@
 name: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
 
 # 生产唯一编排入口。仅使用 bin 中的受控启动/发布脚本启动，以执行接入与迁移门禁。
+# ⚠️ 权威关系（BIZ-XWIRE-08）：本文件是唯一权威编排，且是离线资产包唯一发布的编排文件
+# （bin/build-offline-packages.sh 静态资产清单只收 docker-compose.yml；deploy-service.sh、
+# lifecycle.sh、publish-runtime-approvals.py、provisioner 的 SUBSYSTEM_PRODUCTION_COMPOSE_FILE
+# 都指向它）。同目录 compose.yaml 是“不得用于部署”的评审对照样本，compose.observability.yaml
+# 是已被本文件 monitoring 子系统取代的历史覆盖示例。任何编排变更只改本文件，再按需同步
+# compose.yaml；两份文件的权威标记、关键 env/端口/监控目标由
+# tests/test-compose-orchestration-consistency.py 门禁（改错文件会红）。
 # 可选子系统：将 BEGIN SUBSYSTEM 到 END SUBSYSTEM 之间的所有行整体注释。
 # YAML 中保留表示允许部署，未完成平台接入的业务服务不会被启动脚本启动。
 # 禁止全栈 up/down 或 --remove-orphans；单服务发布与停用由受控脚本执行。
@@ -694,6 +701,50 @@ services:
     cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
     mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
 
+  # 合同编号巡检是一次性只读运维任务，由 bin/deploy-service.sh 在合同发布成功后
+  # 以 `compose run --rm --no-deps -T contract-number-audit` 调用，不随 up 启动。
+  # 刻意与 contract-migrate 逐键同构：同一 env_file 提供 MYSQL_DSN（不引入新凭据）、
+  # 同一 application 网络、同一 contract-mysql healthy 依赖、同样的只读公钥挂载与
+  # 资源上限；不暴露端口，也不改任何既有服务。巡检失败只落盘证据并告警，
+  # 不是发布门禁（处理路径见 bin/deploy-service.sh 的 audit_contract_number_registry）。
+  contract-number-audit:
+    image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
+    env_file:
+      - path: ${CONTRACT_RUNTIME_ENV_FILE:-runtime/contract.env}
+        required: false
+    environment:
+      # 巡检只读 MYSQL_DSN；其余键保留是为了与 contract-migrate 保持同一容器环境，
+      # 避免两个一次性任务在同一次发布里出现配置漂移。
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+      APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
+      HTTP_ADDRESS: :8081
+      PLATFORM_BASE_URL: http://platform-api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: contract-management
+      TEMPORAL_WORKER_VERSIONING_ENABLED: ${CONTRACT_TEMPORAL_WORKER_VERSIONING_ENABLED:-false}
+      TEMPORAL_WORKER_VERSIONING_POLICY: PINNED
+      TEMPORAL_METRICS_ADDRESS: :9091
+      GIN_MODE: release
+    networks: [application]
+    volumes:
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    command: ["./contract-number-audit"]
+    depends_on:
+      contract-mysql:
+        condition: service_healthy
+    restart: "no"
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    pids_limit: 512
+    cpus: "${CONTAINER_CPU_LIMIT:-2.0}"
+    mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+
   contract-api:
     image: ${CONTRACT_IMAGE:-contract-management/contract:pending}
     env_file:
@@ -1188,6 +1239,15 @@ services:
     depends_on:
       customer-mysql:
         condition: service_healthy
+    # 无 HTTP 端口的常驻 Worker 用 PID1 可执行文件探针：二进制路径由镜像 WORKDIR /app 与
+    # command 共同决定，与 customer-contract-transfer-worker 保持同一判据。探针只证明
+    # “PID1 仍是该 Worker 而不是被 shell/重启循环替换”，不额外发布端口、不伪造业务健康。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/opportunity-alert-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1238,6 +1298,12 @@ services:
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/opportunity-owner-notification-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1329,6 +1395,12 @@ services:
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-alert-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1379,6 +1451,12 @@ services:
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-assignment-notification-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1429,6 +1507,12 @@ services:
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-progress-notification-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1479,6 +1563,12 @@ services:
     depends_on:
       customer-mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/notification-delivery-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
 
   # 售前申请投递 Worker：消费 CRM outbox，写入审批引擎/PMS，并持续写入
   # crm_worker_heartbeats。CRM API 依据该心跳决定是否受理新的售前申请。
@@ -1528,6 +1618,14 @@ services:
         condition: service_healthy
       temporal:
         condition: service_healthy
+    # Temporal Worker 以 ./presale-worker 为 PID1（镜像 WORKDIR /app）。9093 是 Temporal
+    # metrics 端口而非 HTTP 健康端点，因此仍用 PID1 可执行文件探针，不新增端口发布。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/presale-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1710,6 +1808,13 @@ services:
         condition: service_healthy
       portal-api:
         condition: service_healthy
+    # 补偿 Worker 是常驻消费者（无 HTTP 端点），探针只校验 PID1 仍是 ./portal-invite-compensation-worker。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/portal-invite-compensation-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -1740,6 +1845,12 @@ services:
         condition: service_healthy
       platform-api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/portal-report-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
     stop_grace_period: 60s
     logging:
@@ -2049,6 +2160,7 @@ services:
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
       GIN_MODE: release
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
     networks: [application]
     restart: unless-stopped
     image: ${DATA_ANALYSIS_DASHBOARD_API_IMAGE:-data-analysis/dashboard-api:pending}
@@ -2106,6 +2218,9 @@ services:
       AGGREGATION_ONCE: "false"
       CONTRACT_READ_DSN: ${CONTRACT_READ_DSN:-}
       CRM_READ_DSN: ${CRM_READ_DSN:-}
+      PROJECT_READ_DSN: ${PROJECT_READ_DSN:-}
+      SETTLEMENT_READ_DSN: ${SETTLEMENT_READ_DSN:-}
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
       # 机器令牌端点、两个最小权限客户端及接口 URL 均由受控 runtime 文件下发，
       # Compose 不得用空默认值覆盖已经完成接入的环境配置。
     depends_on:
@@ -2113,6 +2228,14 @@ services:
         condition: service_healthy
       data-analysis-api:
         condition: service_healthy
+    # 该 Worker 不覆盖 command，PID1 由镜像 ENTRYPOINT 决定（data_analysis/Dockerfile 的
+    # aggregation-worker 目标为 /app/aggregation-worker），因此探针按镜像实际路径断言。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/aggregation-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -2139,6 +2262,16 @@ services:
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
       GIN_MODE: release
+      # 告警规则隔离的 OIDC_TENANT_ID 由 runtime/data-analysis.env 提供，Compose 层
+      # 刻意不给默认值：缺失时 alert-worker 启动即失败退出（fail-closed），而不是带着
+      # 占位租户把告警写进错误租户（模板见 subsystem-templates/data-analysis.env.example）。
+      #
+      # 告警生命周期收敛（BIZ-DATA-07）默认关闭，保持现网“只增不关”的行为；
+      # 显式置 ALERT_AUTO_RESOLVE=true（写在 Compose 插值来源 .env，不是 runtime 文件）
+      # 才启用自动 CLOSED/重开。runtime/data-analysis.env 里的同名值会被这里的 Compose
+      # environment 覆盖，因此开关只有 .env 一处生效，避免两处配置互相打架。
+      ALERT_AUTO_RESOLVE: ${ALERT_AUTO_RESOLVE:-false}
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
     networks: [application]
     restart: unless-stopped
     image: ${DATA_ANALYSIS_ALERT_WORKER_IMAGE:-data-analysis/alert-worker:pending}
@@ -2147,6 +2280,13 @@ services:
         condition: service_healthy
       data-analysis-api:
         condition: service_healthy
+    # 同 aggregation-worker：不覆盖 command，PID1 为镜像 ENTRYPOINT 的 /app/alert-worker。
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/alert-worker"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     stop_grace_period: 60s
     logging:
       driver: json-file
@@ -2216,7 +2356,14 @@ services:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/prometheus/keycloak-alerts.yml:/etc/prometheus/keycloak-alerts.yml:ro
       - ./monitoring/prometheus/file-gateway-alerts.yml:/etc/prometheus/file-gateway-alerts.yml:ro
+      - ./monitoring/prometheus/platform-alerts.yml:/etc/prometheus/platform-alerts.yml:ro
+      - ./monitoring/prometheus/integration-alerts.yml:/etc/prometheus/integration-alerts.yml:ro
       - prometheus-data:/prometheus
+      # 部署方提供的抓取令牌目录（只读）。平台 /metrics 受 RequireMetricsAccess 保护，
+      # token 必须与 platform-api 的 METRICS_ACCESS_TOKEN 一致。该目录在 .gitignore 的
+      # runtime/ 下，不随资产包发布；缺失时 prometheus 启动即失败（fail-closed），
+      # 不会静默 401。不要在编排或 prometheus.yml 里内联真实 token。
+      - ./runtime/prometheus-secrets:/etc/prometheus/secrets:ro
     networks: [application]
     restart: unless-stopped
     stop_grace_period: 60s

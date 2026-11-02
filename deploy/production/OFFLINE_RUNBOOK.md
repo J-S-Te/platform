@@ -615,7 +615,6 @@ cd /opt/unified-identity-platform
 | 统一前端 HTTP 端口 | 浏览器平台入口，默认 8081 | HTTP 仅限隔离可信网络 |
 | Keycloak HTTP 端口 | OIDC/SSO 公开入口，默认 18090 | 与前端/API 端口不能重复 |
 | 管理员账号 | 首个基础平台管理员账户名 | 修改 `.env` 不会给数据库已有账户改名 |
-| 时区 | IANA 时区，例如 `Asia/Shanghai` | 服务器必须安装相应 tzdata |
 | 启用监控 | 是否启用 monitoring 块 | Compose 中已注释监控块时仍以 Compose 范围为准 |
 
 预期：生成权限为 `0600` 的 `.env`、`.release.env` 和所选模块 runtime 文件；生成签名密钥与随机数据库密码；显示平台和 SSO 地址。UFW/firewalld 只有在已处于 active 状态时才增加配置端口，不会启用或关闭防火墙；云安全组仍需人工确认。
@@ -868,13 +867,34 @@ HTTP 只允许隔离网络。准备证书后先检查：
 ./bin/deploy.sh verify
 ```
 
-预期：证书链、SAN、私钥匹配和有效期通过，传输状态机完成回调和 Secure Cookie 切换。续期后执行：
+预期：证书链、SAN、私钥匹配和有效期通过，传输状态机完成回调和 Secure Cookie 切换。降级进入 `DISABLING_HTTPS` 排空期后如果必须放弃本次切换，按 9.5 执行 `abort`，不要手工修改数据库里的会话到期时间或状态机字段。续期后执行：
 
 ```bash
 ./bin/reload-public-certificate.sh
 ```
 
 资源限制以 `docker-compose.yml` 为事实来源。修改后先 `docker compose ... config`，再按受控发布路径重建；不要在线直接改容器造成配置漂移。
+
+### 9.5 降级失败或运维放弃时的回滚（BIZ-RUNTIME-06）
+
+HTTPS→HTTP 降级在准备阶段会把 `iam_session`、`oauth_token_family`、`oauth_refresh_token` 中超过排空截止时间的到期时间截断到截止时间。截断前，协调器先把原值和截断值写入 `platform_public_transport_session_cap`（唯一键 `transition_id + session_table + session_id`），因此失败的、被运维放弃的降级可以恢复，不再等于"强制全平台重新登录"。
+
+**执行卡：部署机；部署根；root；会撤销本次切换准备阶段写入的回调。**
+
+```bash
+./bin/apply-public-transport.sh abort --yes
+```
+
+等价于协调器的 `abort`（即 `fail --stage OPERATOR_ABORT`）；`--yes` 是必须的显式确认，老的 `fail` 命令保持兼容仍可直接使用。协调器在同一数据库事务内依次：撤销准备阶段写入的目标回调 → 按 cap 表恢复被截断的会话到期时间 → 复位状态并清除 `drain_until`。
+
+恢复语义（按此判断现场现象）：
+
+- 只恢复"当前值仍等于截断值"的行。截断之后又发生续期、重新登录或已自然过期的会话保持原状，不会被覆盖；这类行保留 cap 记录作为审计证据，已恢复的行在恢复后删除记录。
+- **恢复不复活窗口内自然过期的会话**：到期时间回到原值，但已经过去的时间不会因此变成未来；排空期内正常过期的会话仍需重新登录。
+- 控制面已提交（`CONTROL_COMMITTED`）后不允许自动回滚，只能前进恢复（forward recovery）。此时 `abort`/`fail` 会报错，请继续执行 `./bin/apply-public-transport.sh` 完成切换。
+- 升级到本版本之前的降级切换没有 cap 记录，无法恢复（迁移不做历史回填）。
+
+`abort` 只撤销本次切换，不重启容器、不改 `PUBLIC_HTTPS_ENABLED`。确认 `public-transport-coordinator status` 已回到原模式（`State`/`Mode` 一致且无 `TransitionID`、无 `DrainUntil`）后，再按 9.2 的正常发布路径把运行配置收敛回当前模式。
 
 ## 10. 备份恢复与排错
 

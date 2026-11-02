@@ -1,0 +1,232 @@
+# 跨系统集成（Settlement / Contract）的 /metrics 告警规则。
+#
+# 指标名来源（全部来自代码实际输出，不得臆造）：
+#   settlement_outbox_pending{destination}
+#   settlement_integration_destination_configured{destination}
+#   settlement_integration_audit_required
+#   settlement_outbox_unconfigured_pending
+#   settlement_outbox_pending_query_error
+#     → Settlement/internal/httpapi/integration_status.go:101-130（renderMetrics，BIZ-XAPI-10）
+#       目的地字面量 PLATFORM_AUDIT / PLATFORM_NOTIFICATION 见
+#       Settlement/internal/outbox/destinations.go:13,15；TAX_INVOICE_COMMAND 见
+#       Settlement/internal/httpapi/integration_status.go:31；未配置判定语义见同文件 :34-53。
+#   contract_integration_outbox_dead{kind}
+#   contract_integration_outbox_dead_total
+#     → contract_management/internal/transport/httpapi/metrics.go:54-66
+#   up
+#     → Prometheus 自身抓取健康度（up{job="settlement-api"} / up{job="contract"}）
+#
+# readyz 降级的可观测映射（只写有指标的部分，不臆造）：
+#   * Settlement：/readyz 在“审计目的地为必开但机器凭据不全”时返回 503
+#     （integration_status.go:80-83），恰好等于
+#     settlement_integration_audit_required == 1 且
+#     settlement_integration_destination_configured{destination="PLATFORM_AUDIT"} == 0，
+#     因此这条 readyz 降级可以被指标化告警。通知目的地缺失只让 /readyz 返回 200
+#     degraded（不阻断启动），因此只做长期未配置提示。
+#   * 平台、合同、项目当前没有把 /readyz 结果导出为指标（无 *_ready 类 gauge），
+#     本项目不写“readyz 降级”规则，避免用不存在的指标名造假告警；
+#     它们只能用 up==0（进程/端口不可达）与指标样本缺失来覆盖。
+#
+# Settlement 的 settlement_outbox_pending 只在该目的地有积压行时才有样本
+# （Settlement/internal/outbox/worker.go:75-94 按 destination 分组），
+# 空 outbox 时没有样本是正常状态——所以**不能**对这条指标写 absent()，
+# 否则健康集群会被误报。样本缺失的兜底用始终输出的
+# settlement_integration_audit_required / contract_integration_outbox_dead_total。
+groups:
+  - name: settlement-integration
+    rules:
+      - alert: SettlementMetricsScrapeDown
+        expr: up{job="settlement-api"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Settlement /metrics scrape target is down
+          description: >-
+            Prometheus 连续 5 分钟无法抓取 settlement-api:8085/metrics；期间集成目的地与
+            outbox 积压完全不可见。
+          runbook: platform/deploy/production/README.md#监控抓取与指标端点边界
+
+      # settlement_integration_audit_required 在每次成功渲染时都会输出（即使值为 0），
+      # 缺失即代表端点未按预期返回（404/503/被代理拦截），而不代表“没有积压”。
+      - alert: SettlementMetricsSamplesMissing
+        expr: absent(settlement_integration_audit_required{job="settlement-api"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement /metrics is reachable but exposes no samples
+          description: >-
+            settlement_integration_audit_required 无样本说明 /metrics 未按预期返回；
+            检查结算 API 版本是否包含 XAPI-10 端点、路由是否被上游拦截。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 按 destination 的积压阈值。审计目的地最敏感（合规证据必须及时送达），
+      # 站内信可以容忍更大积压，税控命令受开票窗口限制。
+      - alert: SettlementAuditOutboxBacklog
+        expr: settlement_outbox_pending{destination="PLATFORM_AUDIT"} > 200
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement audit outbox backlog is above the expected ceiling
+          description: >-
+            PLATFORM_AUDIT 目的地待投递事件持续超过 200 条：审计证据正在延迟，先确认平台
+            入站可达与机器凭据，再评估重试策略，不要通过删除 outbox 行规避。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: SettlementNotificationOutboxBacklog
+        expr: settlement_outbox_pending{destination="PLATFORM_NOTIFICATION"} > 500
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement notification outbox backlog is above the expected ceiling
+          description: >-
+            PLATFORM_NOTIFICATION 目的地待投递事件持续超过 500 条：站内信与业务提醒正在延迟。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: SettlementTaxOutboxBacklog
+        expr: settlement_outbox_pending{destination="TAX_INVOICE_COMMAND"} > 200
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement tax command outbox backlog is above the expected ceiling
+          description: >-
+            TAX_INVOICE_COMMAND 目的地待投递命令持续超过 200 条：开票命令未送达，可能影响
+            开票窗口与对账。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: SettlementOutboxBacklogTotalCritical
+        expr: sum(settlement_outbox_pending) > 2000
+        for: 2h
+        labels:
+          severity: critical
+        annotations:
+          summary: Settlement outbox total backlog has persisted above 2000 events
+          description: >-
+            全部目的地积压合计超过 2000 条且持续 2 小时：投递链路整体失效，不再只是单个
+            目的地阈值问题，需要升级处理并评估暂停开票/审计写入的影响。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # “有积压但目的地未配置”是 XAPI-10 的核心缺口：事件在本地保留，永远不会投递。
+      - alert: SettlementOutboxUnconfiguredPending
+        expr: settlement_outbox_unconfigured_pending > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement outbox holds events whose destination has no credentials
+          description: >-
+            settlement_outbox_unconfigured_pending > 0 表示待投递事件的目的地没有可用机器
+            凭据（审计/通知/税控）。这不是重试问题，必须补齐受控接入下发的客户端凭据。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 可指标化的 readyz 降级：审计目的地必开但凭据缺失时 /readyz 返回 503。
+      - alert: SettlementAuditDestinationRequiredButUnconfigured
+        expr: >-
+          settlement_integration_audit_required == 1
+          and on() settlement_integration_destination_configured{destination="PLATFORM_AUDIT"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Settlement audit destination is required but not configured
+          description: >-
+            生产（APP_ENV=production 或 PLATFORM_ENVIRONMENT_CODE=prod，或显式
+            SETTLEMENT_AUDIT_REQUIRED=true）要求审计目的地必开，但机器凭据不全：
+            /readyz 返回 503，结算 worker 对审计写入失败关闭。补齐 SETTLEMENT_AUDIT_CLIENT_ID
+            /SETTLEMENT_AUDIT_CLIENT_SECRET 并重启后才会恢复。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 可选目的地长期未配置：/readyz 只 degraded（200），不阻断启动，因此用长窗口提示。
+      - alert: SettlementNotificationDestinationUnconfigured
+        expr: settlement_integration_destination_configured{destination="PLATFORM_NOTIFICATION"} == 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement notification destination has been unconfigured for six hours
+          description: >-
+            /readyz 会保持 200 degraded（通知缺失不阻断启动）。若本部署确实需要站内信
+            提醒，补 SETTLEMENT_NOTIFICATION_CLIENT_ID/SECRET；确认不需要时在验收记录中
+            写明豁免，而不是长期忽略告警。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: SettlementOutboxPendingQueryError
+        expr: settlement_outbox_pending_query_error == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Settlement cannot query outbox backlog for its metrics
+          description: >-
+            settlement_outbox_pending_query_error == 1 表示积压查询失败（通常为数据库不可用）：
+            此时 settlement_outbox_pending 与未配置计数可能缺失或过期，不能据此判定“没有积压”。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+  - name: contract-integration
+    rules:
+      - alert: ContractMetricsScrapeDown
+        expr: up{job="contract"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Contract /metrics scrape target is down
+          description: >-
+            Prometheus 连续 5 分钟无法抓取 contract-api:8081/metrics；合同集成 Outbox 死信
+            在此期间不可见。
+          runbook: platform/deploy/production/README.md#监控抓取与指标端点边界
+
+      # 合同 /metrics 在计数能力缺失（disabled）或查询失败时返回 503 且不输出任何样本
+      # （contract_management/internal/transport/httpapi/metrics.go:37-44）。up 仍是 1，
+      # 因此必须用 absent() 才能看见这种“抓取成功但没有指标”的失败。
+      - alert: ContractMetricsUnavailable
+        expr: absent(contract_integration_outbox_dead_total{job="contract"})
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Contract /metrics returns no samples (dead counts unavailable)
+          description: >-
+            contract_integration_outbox_dead_total 缺失说明 /metrics 返回 503 或路由失效：
+            合同集成死信计数不可用，不能据此判定“没有死信”。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: ContractIntegrationOutboxDead
+        expr: contract_integration_outbox_dead_total > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Contract integration outbox has dead letters
+          description: >-
+            contract_integration_outbox_dead_total > 0 表示合同出站集成已有死信；按 kind
+            定位具体出站边后受控重放，不要直接改库。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: ContractIntegrationOutboxDeadCritical
+        expr: contract_integration_outbox_dead_total > 100
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: Contract integration outbox dead letters have persisted above 100
+          description: >-
+            合同集成死信超过 100 条且持续 1 小时：下游（结算/审计/通知）已持续缺失合同事件，
+            需要升级处理并核对补齐范围。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: ContractIntegrationOutboxDeadPerEdge
+        expr: contract_integration_outbox_dead{kind=~".+"} > 50
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: One contract integration outbox edge has more than 50 dead letters
+          description: >-
+            contract_integration_outbox_dead{kind} 单条出站边死信超过 50；对照合同
+            /readyz 的 integration outbox 计数确认范围，先修下游再重放。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据

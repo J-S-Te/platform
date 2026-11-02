@@ -43,6 +43,8 @@ def image(ref):
         db[ref]={'architecture':'amd64','os':'linux','config':{'Cmd':[ref],'Labels':{}}}; persist()
     return db[ref]
 if a==['buildx','version']: print('buildx packaging-fixture-v1'); sys.exit(0)
+if len(a)==3 and a[:2]==['version','--format'] and a[2] in ('{{.Client.APIVersion}}','{{.Server.APIVersion}}'):
+    print('1.49'); sys.exit(0)
 if len(a)==3 and a[:2]==['version','--format'] and a[2] in ('{{.Client.Version}}','{{.Server.Version}}'):
     print('packaging-fixture-v1'); sys.exit(0)
 if a==['info']: sys.exit(0)
@@ -70,12 +72,18 @@ if a[:2]==['buildx','build']:
         'Labels':{'org.opencontainers.image.version':version,'com.basic-platform.license.protocol':'1'}}}
     persist(); sys.exit(0)
 if len(a)==3 and a[0]=='tag': db[a[2]]=image(a[1]); persist(); sys.exit(0)
+if a==['image','inspect','--help']: print('--platform'); sys.exit(0)
+if a[:4]==['image','inspect','--platform','linux/amd64']: a=a[:2]+a[4:]
 if len(a)==5 and a[:2]==['image','inspect'] and a[3]=='--format':
     config=image(a[2]); fmt=a[4]
     if fmt=='{{.Id}}': print('sha256:'+digest(raw(config)))
     elif fmt=='{{.Architecture}}/{{.Os}}': print('amd64/linux')
     elif fmt=='{{.Os}}/{{.Architecture}}': print('linux/amd64')
     elif fmt=='{{range .RepoDigests}}{{println .}}{{end}}': print(a[2].split(':',1)[0]+'@sha256:'+digest(raw(config)))
+    elif fmt=='{{json .}}':
+        print(json.dumps({'Os':config['os'],'Architecture':config['architecture'],
+            'Id':'sha256:'+digest(raw(config)),
+            'RepoDigests':[a[2].rsplit(':',1)[0]+'@sha256:'+digest(raw(config))]}))
     else: sys.exit('Unexpected inspect format: '+fmt)
     sys.exit(0)
 if len(a)>=4 and a[:2]==['save','--output']:
@@ -151,6 +159,9 @@ os.execv(sys.executable,[sys.executable]+a)
 
 
 class DeliveryPackaging(unittest.TestCase):
+    # 用途：为实际构建与检查器提供隔离 OCI/Docker 边界，正式门禁不替换。
+    # 参数：无。
+    # 返回值：无；所有生成物仅位于临时目录。
     def setUp(self):
         BASE.DeliveryContract.setUp(self)
         self.addCleanup(self.temp.cleanup)
@@ -164,6 +175,18 @@ class DeliveryPackaging(unittest.TestCase):
             path = self.tools / name
             path.write_text("#!" + sys.executable + "\n" + program)
             path.chmod(0o755)
+
+    # 用途：确认正式构建身份缺失仍在任何构建或保存之前阻断。
+    # 参数：无。
+    # 返回值：无；不得创建交付输出或调用模拟 build/save。
+    def test_missing_builder_identity_blocks_before_build_or_save(self):
+        env = dict(self.env)
+        env.pop('UIP_BUILD_BUILDER_ID')
+        result = self.build(success=False, env=env)
+        self.assertIn('UIP_BUILD_BUILDER_ID', result.stderr)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertFalse(any(call[:2] == ['buildx', 'build'] or call[:1] == ['save'] for call in calls))
+        self.assertFalse(self.output.exists())
 
     def command(self, args, *, success=True, env=None):
         result = subprocess.run(args, env=self.env if env is None else env, capture_output=True,

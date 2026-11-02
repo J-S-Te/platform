@@ -1,9 +1,11 @@
+# 许可运行态键（COMMERCIAL_LICENSE_ENABLED / COMMERCIAL_LICENSE_COMPATIBILITY）不在本清单：
+# 由平台写入 runtime/license-<service>.env；兼容放行开关生产必须缺省（缺省即 fail-closed）。
 version: 1
 default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, project_contract_import, analysis_contract_import_report_status]
+  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, crm_contract_link_write, project_contract_import, analysis_contract_import_report_status]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -41,10 +43,16 @@ runtime:
         SETTLEMENT_API_BASE_URL: http://settlement-api:8085
         SETTLEMENT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         SETTLEMENT_INTEGRATION_AUDIENCE: basic-platform-application
+        # 受控“合同财务变更”入口（BIZ-XEVT2-05 合同侧）：开启需产品确认（单人改额
+        # 口径尚未签认），当前与子系统模板同为关闭；开启时须同步修改模板，
+        # 否则按模板重建会静默关掉该入口。
+        CONTRACT_FINANCIAL_CHANGE_ENABLED: "false"
         MYSQL_DSN: 'contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
         OIDC_SESSION_COOKIE_NAME: contract_management_session
+        OIDC_SESSION_IDLE_TTL: 30m
+        OIDC_SESSION_ABSOLUTE_TTL: 8h
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: contract_management
         PLATFORM_ENVIRONMENT_CODE: prod
@@ -78,6 +86,24 @@ runtime:
         CRM_SIGNED_COUNT_MACHINE_CALLER_APPLICATION_CODE: customer_and_opportunity
         CRM_SIGNED_COUNT_MACHINE_CALLER_ENVIRONMENT_CODE: prod
         CRM_SIGNED_COUNT_MACHINE_REQUIRED_SCOPE: contract.opportunity_signed_count.read
+        CRM_OPPORTUNITY_INTAKE_MACHINE_ENABLED: "true"
+        CRM_OPPORTUNITY_INTAKE_MACHINE_REQUIRE_BEARER: "true"
+        CRM_OPPORTUNITY_INTAKE_MACHINE_ISSUER: basic-platform
+        CRM_OPPORTUNITY_INTAKE_MACHINE_AUDIENCE: basic-platform-application
+        CRM_OPPORTUNITY_INTAKE_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        CRM_OPPORTUNITY_INTAKE_MACHINE_CLIENT_ID: customer_and_opportunity-prod-opportunity-intake
+        CRM_OPPORTUNITY_INTAKE_MACHINE_CALLER_APPLICATION_CODE: customer_and_opportunity
+        CRM_OPPORTUNITY_INTAKE_MACHINE_CALLER_ENVIRONMENT_CODE: prod
+        CRM_OPPORTUNITY_INTAKE_MACHINE_REQUIRED_SCOPE: opportunity.signed.write
+        CONTRACT_SUMMARY_MACHINE_ENABLED: "true"
+        CONTRACT_SUMMARY_MACHINE_REQUIRE_BEARER: "true"
+        CONTRACT_SUMMARY_MACHINE_ISSUER: basic-platform
+        CONTRACT_SUMMARY_MACHINE_AUDIENCE: basic-platform-application
+        CONTRACT_SUMMARY_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        CONTRACT_SUMMARY_MACHINE_CLIENT_ID: customer_and_opportunity-prod-contract-summary
+        CONTRACT_SUMMARY_MACHINE_CALLER_APPLICATION_CODE: customer_and_opportunity
+        CONTRACT_SUMMARY_MACHINE_CALLER_ENVIRONMENT_CODE: prod
+        CONTRACT_SUMMARY_MACHINE_REQUIRED_SCOPE: contract.summary.read
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
         STAMPED_FILE_GATEWAY_MODE: dual
@@ -85,10 +111,25 @@ runtime:
         CRM_REFERENCE_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_REFERENCE_SCOPE: customer.contract_reference.read
+        CRM_LINK_BASE_URL: http://customer-api:8090/customer-opportunity
+        CRM_LINK_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CRM_LINK_SCOPE: opportunity.signed.write
         PROJECT_INTEGRATION_ENABLED: "true"
         PROJECT_API_BASE_URL: http://project-api:8082
         PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         PROJECT_INTEGRATION_AUDIENCE: basic-platform-application
+        # 人员离职交接入站（BIZ-XWIRE-04）：平台按批次租户自签短效 application JWT，
+        # 合同侧只用平台 Ed25519 公钥验签；issuer/audience/client/应用/环境/scope 全部固定，
+        # 租户只来自令牌，不接受请求体或请求头覆盖。
+        HANDOVER_MACHINE_ENABLED: "true"
+        HANDOVER_MACHINE_REQUIRE_BEARER: "true"
+        HANDOVER_MACHINE_ISSUER: basic-platform
+        HANDOVER_MACHINE_AUDIENCE: basic-platform-application
+        HANDOVER_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        HANDOVER_MACHINE_CLIENT_ID: platform-handover
+        HANDOVER_MACHINE_CALLER_APPLICATION_CODE: platform
+        HANDOVER_MACHINE_CALLER_ENVIRONMENT_CODE: prod
+        HANDOVER_MACHINE_REQUIRED_SCOPE: handover.machine
       bindings:
         CONTRACT_IMPORT_REPORT_CLIENT_ID: service.analysis_contract_import_report_status.client_id
         CONTRACT_IMPORT_REPORT_CLIENT_SECRET: service.analysis_contract_import_report_status.client_secret
@@ -123,6 +164,8 @@ runtime:
         FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
         CRM_REFERENCE_CLIENT_ID: service.crm_contract_reference_read.client_id
         CRM_REFERENCE_CLIENT_SECRET: service.crm_contract_reference_read.client_secret
+        CRM_LINK_CLIENT_ID: service.crm_contract_link_write.client_id
+        CRM_LINK_CLIENT_SECRET: service.crm_contract_link_write.client_secret
         PROJECT_INTEGRATION_CLIENT_ID: service.project_contract_import.client_id
         PROJECT_INTEGRATION_CLIENT_SECRET: service.project_contract_import.client_secret
 compose:

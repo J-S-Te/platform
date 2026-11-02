@@ -1,3 +1,5 @@
+# 许可运行态键（COMMERCIAL_LICENSE_ENABLED / COMMERCIAL_LICENSE_COMPATIBILITY）不在本清单：
+# 由平台写入 runtime/license-<service>.env；兼容放行开关生产必须缺省（缺省即 fail-closed）。
 version: 1
 default: false
 application:

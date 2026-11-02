@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 # 数据库支撑的传输 Saga 的可重入宿主机驱动器，修改 PUBLIC_HTTPS_ENABLED 后执行。
 # 降级会在 DISABLING_HTTPS 排空期间主动返回；到报告的截止时间后再次执行相同命令，移除 443 及证书挂载。
+# 失败或运维放弃当前切换时执行 `apply-public-transport.sh abort --yes`：撤销准备阶段回调并把
+# 降级期被截断的会话到期时间恢复原值（控制面已提交后只允许前进恢复）。
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 deploy_dir="$(cd -- "$script_dir/.." && pwd)"
 runtime_file="${BASIC_PLATFORM_RUNTIME_ENV_FILE:-$deploy_dir/.env}"
@@ -68,6 +70,48 @@ origin_for_mode() {
     public_transport_origin http "$host" "$port"
   fi
 }
+
+# 运维放弃当前切换：等价于协调器的 abort（fail --stage OPERATOR_ABORT），必须显式 --yes。
+# 协调器在同一事务内撤销准备阶段写入的目标回调、按 cap 表恢复降级期被截断的会话到期时间，
+# 再复位状态并清除 drain_until；控制面已提交的切换不允许回滚，只能继续前进完成。
+abort_transition() {
+  local status_json transition_id
+  status_json="$(coordinator status 2>/dev/null || true)"
+  if [[ -z "$status_json" ]]; then
+    echo "无法读取公开传输状态（协调器不可用），未执行 abort" >&2
+    exit 1
+  fi
+  transition_id="$(jq -r '.TransitionID // empty' <<<"$status_json")"
+  if [[ -z "$transition_id" ]]; then
+    echo "没有进行中的公开传输切换，无需 abort"
+    persist_transport_state ""
+    exit 0
+  fi
+  coordinator abort --transition-id "$transition_id" --yes
+  persist_transport_state ""
+  echo "已放弃切换 ${transition_id}：目标回调已撤销，降级期被截断的会话到期时间已恢复原值"
+  echo "注意：恢复不复活窗口内自然过期的会话；控制面已提交的切换不会被 abort 回滚"
+}
+
+if [[ "${1:-}" == "abort" ]]; then
+  shift
+  abort_confirmed=0
+  for argument in "$@"; do
+    case "$argument" in
+      --yes | -y) abort_confirmed=1 ;;
+      *)
+        echo "abort 只接受 --yes，收到未知参数：$argument" >&2
+        exit 2
+        ;;
+    esac
+  done
+  if ((abort_confirmed == 0)); then
+    echo "abort 会放弃当前切换并恢复会话到期时间，必须显式确认：$0 abort --yes" >&2
+    exit 2
+  fi
+  abort_transition
+  exit 0
+fi
 
 # 先进行目标预检，HTTP 模式不检查证书路径。
 unset PUBLIC_TRANSPORT_STATE

@@ -17,7 +17,7 @@ ensure_registry_bridge() {
   addresses="$(ip -4 -j addr show dev "$bridge")" || die "无法读取桥地址：$bridge"
   if ! jq -e --arg gateway "$gateway" --argjson prefix "$prefix" 'any(.[].addr_info[]?; .local == $gateway and .prefixlen == $prefix)' <<<"$addresses" >/dev/null; then
     jq -e '[.[].addr_info[]? | select(.family == "inet")] | length == 0' <<<"$addresses" >/dev/null || die "桥 $bridge 已有其他 IPv4 地址，拒绝覆盖；请核对 Docker 与宿主网络配置"
-    [[ "$EUID" -eq 0 ]] || die "桥 $bridge 缺少 $gateway/$prefix，需要 root 恢复后重试"
+    [[ "$EUID" -eq 0 ]] || die "桥 $bridge 缺少 $gateway/${prefix}，需要 root 恢复后重试"
     printf '恢复 Docker bridge 缺失地址：%s → %s/%s\n' "$bridge" "$gateway" "$prefix"
     ip address add "$gateway/$prefix" dev "$bridge" || die '恢复 Docker bridge 地址失败'
   fi

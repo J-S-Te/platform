@@ -113,7 +113,7 @@ configure() (
   ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3))) || die 'configure 需要 Bash 4.3 或以上'
   ((EUID == 0)) || die '请使用 root 或 sudo 执行 configure，以正确设置容器目录权限'
   local command_name force=false first=false saved=false imported=false staging backup='' actual_runtime="$runtime_file"
-  local host old_host mode frontend_port old_frontend platform_port old_platform keycloak_port old_keycloak https_port admin timezone monitoring key runtime_name keys_dir gateway_root private public derived
+  local host old_host mode frontend_port old_frontend platform_port old_platform keycloak_port old_keycloak https_port admin monitoring key runtime_name keys_dir gateway_root private public derived
   for command_name in docker openssl awk install stat chown flock ss cmp; do need "$command_name"; done
   while (($#)); do case "$1" in --force) force=true ;; *) die "configure 未知参数：$1" ;; esac; shift; done
   for runtime_name in runtime data backups logs manifests packages; do
@@ -143,7 +143,6 @@ configure() (
   if valid_port "$old_platform"; then old_platform=$((10#$old_platform)); fi
   if valid_port "$old_keycloak"; then old_keycloak=$((10#$old_keycloak)); fi
   admin="$(env_get "$runtime_file" OFFLINE_ADMIN_ACCOUNT)"; admin="${admin:-$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME)}"
-  timezone="$(env_get "$runtime_file" APP_TIMEZONE)"; timezone="${timezone:-Asia/Shanghai}"
   monitoring="$(env_get "$runtime_file" OFFLINE_MONITORING_ENABLED)"; monitoring="${monitoring:-false}"
   if [[ "$first" == false ]] && public_transport_valid_host "$host" && valid_port "$frontend_port" && valid_port "$platform_port" && valid_port "$keycloak_port" && [[ "$admin" =~ ^[A-Za-z0-9._@-]+$ ]]; then saved=true; fi
   configuration_platform_exists && imported=true
@@ -158,7 +157,6 @@ configure() (
       keycloak_port="$(configuration_prompt 'Keycloak HTTP 端口' "${keycloak_port:-18090}")"
     fi
     admin="$(configuration_prompt '基础平台管理员账号' "${admin:-admin}")"
-    timezone="$(configuration_prompt '时区' "$timezone")"
     monitoring="$(configuration_prompt '启用监控？true/false' "$monitoring")"
     case "$monitoring" in y|Y|true) monitoring=true ;; n|N|false) monitoring=false ;; *) die '监控选项必须为 true/false 或 y/n' ;; esac
   fi
@@ -166,7 +164,6 @@ configure() (
   platform_port=$((10#$platform_port)); frontend_port=$((10#$frontend_port)); keycloak_port=$((10#$keycloak_port))
   [[ "$platform_port" != "$frontend_port" && "$platform_port" != "$keycloak_port" && "$frontend_port" != "$keycloak_port" ]] || die 'API、前端、Keycloak 端口不能重复'
   [[ "$admin" =~ ^[A-Za-z0-9._@-]+$ ]] || die '管理员账号格式不正确'
-  [[ "$timezone" != /* && "$timezone" != *..* && "$timezone" =~ ^[A-Za-z0-9_+/-]+$ && -f "/usr/share/zoneinfo/$timezone" ]] || die '时区无效或服务器未安装对应 tzdata'
   if [[ "$imported" == true && "$mode" == ip ]]; then
     [[ "$host" == "$old_host" && "$frontend_port" == "$old_frontend" && "$keycloak_port" == "$old_keycloak" && "$platform_port" == "$old_platform" ]] || die '已有平台导入/容器记录，不能直接修改 IP 或端口；请先规划并迁移数据库中的 OAuth 回调、客户端与公开传输配置'
   fi
@@ -212,7 +209,6 @@ configure() (
     if [[ "$first" == true ]]; then env_set "$runtime_file" APP_CORS_ALLOWED_ORIGINS "$PUBLIC_PLATFORM_ORIGIN"; fi
   fi
   env_set "$runtime_file" SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT "$deploy_dir"
-  env_set "$runtime_file" APP_TIMEZONE "$timezone"
   env_set "$runtime_file" OFFLINE_ADMIN_ACCOUNT "$admin"
   env_set "$runtime_file" IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME "$admin"
   env_set "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME "$admin"

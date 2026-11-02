@@ -28,7 +28,7 @@ doctor_release_keys() {
 }
 
 doctor_check_config_files() {
-  printf '\n[1/6] 运行配置文件存在性与权限\n'
+  printf '\n[1/7] 运行配置文件存在性与权限\n'
   local file label mode
   for file in "$runtime_file" "$release_file"; do
     label="${file##*/}"
@@ -54,7 +54,7 @@ doctor_check_config_files() {
 }
 
 doctor_check_packages() {
-  printf '\n[2/6] packages/ 镜像包伴随校验文件\n'
+  printf '\n[2/7] packages/ 镜像包伴随校验文件\n'
   shopt -s nullglob
   local archives=("$package_dir"/*-linux-amd64.tar.gz)
   shopt -u nullglob
@@ -83,7 +83,7 @@ doctor_check_packages() {
 }
 
 doctor_check_manifests() {
-  printf '\n[3/6] manifests/ 导入记录与 .release.env 不可变引用\n'
+  printf '\n[3/7] manifests/ 导入记录与 .release.env 不可变引用\n'
   shopt -s nullglob
   local records=("$manifest_dir"/*.imported)
   shopt -u nullglob
@@ -205,7 +205,7 @@ doctor_check_manifests() {
 }
 
 doctor_check_provisioner_binding() {
-  printf '\n[4/6] subsystem-provisioner 容器内 .release.env 绑定一致性\n'
+  printf '\n[4/7] subsystem-provisioner 容器内 .release.env 绑定一致性\n'
   if [[ "$doctor_docker_available" != true ]]; then
     doctor_warn '未找到 docker 命令，跳过容器内 .release.env 比对'
     return 0
@@ -259,7 +259,7 @@ doctor_check_provisioner_binding() {
 }
 
 doctor_check_runtime_placeholders() {
-  printf '\n[5/6] runtime/*.env 待平台下发的凭据\n'
+  printf '\n[5/7] runtime/*.env 待平台下发的凭据\n'
   shopt -s nullglob
   local files=("$deploy_dir"/runtime/*.env)
   shopt -u nullglob
@@ -292,9 +292,84 @@ doctor_check_runtime_placeholders() {
   printf '        也不要手工填入猜测值；按 status <子系统> 的下一步操作即可。\n'
 }
 
+# doctor_duration_seconds 把 Go duration 字面量（ns/us/ms/s/m/h，可组合）换算成秒。
+# 解析失败时不输出并返回非 0：调用方据此区分"没写"与"写错"。
+doctor_duration_seconds() {
+  awk -v value="$1" 'BEGIN {
+    if (value !~ /^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$/) exit 1
+    total = 0
+    rest = value
+    while (length(rest) > 0) {
+      if (!match(rest, /^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h)/)) exit 1
+      chunk = substr(rest, 1, RLENGTH)
+      rest = substr(rest, RLENGTH + 1)
+      if (!match(chunk, /(ns|us|ms|s|m|h)$/)) exit 1
+      unit = substr(chunk, RSTART, RLENGTH)
+      number = substr(chunk, 1, RSTART - 1)
+      factor = 1
+      if (unit == "ns") factor = 1e-9
+      else if (unit == "us") factor = 1e-6
+      else if (unit == "ms") factor = 1e-3
+      else if (unit == "s") factor = 1
+      else if (unit == "m") factor = 60
+      else if (unit == "h") factor = 3600
+      total += number * factor
+    }
+    printf "%.0f\n", total
+  }'
+}
+
+# 旧 OAuth Client Secret 退役策略（RUNTIME-05）。默认 keep 时旧 Secret 永久有效，
+# 运维必须能"发现当前实际策略"，否则容易把 keep 当成已开启灰度。本检查只读 .env 并
+# 输出警告，不阻断部署：取值非法时 platform-api 自己会拒绝启动（fail-closed），
+# doctor 的作用是提前把原因说清楚。
+doctor_check_secret_retirement_policy() {
+  printf '\n[6/7] 旧 OAuth Client Secret 退役策略\n'
+  if [[ ! -f "$runtime_file" || -L "$runtime_file" ]]; then
+    doctor_warn "无法读取 ${runtime_file##*/}，跳过旧 OAuth Client Secret 退役策略检查"
+    return 0
+  fi
+  local policy normalized grace grace_seconds
+  policy="$(env_get "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT || true)"
+  normalized="$(printf '%s' "$policy" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  if [[ -z "$normalized" ]]; then
+    doctor_warn "AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT 缺失：当前生效 keep，旧 OAuth Client Secret 不会退役（泄露或容器里遗留的旧值仍能换令牌）；需要收紧时在 ${runtime_file} 显式写 keep/grace/revoke 并受控重启 platform-api 与 platform-worker"
+    return 0
+  fi
+  case "$normalized" in
+    keep)
+      doctor_ok '旧 Secret 退役策略为 keep（默认）：旧值不退役，按 README「OAuth Client Secret 吊销灰度」评估是否开启 grace/revoke'
+      ;;
+    revoke)
+      doctor_ok '旧 Secret 退役策略为 revoke：受控更新/许可登记签发新 Secret 时在同一事务内吊销旧值'
+      ;;
+    grace)
+      grace="$(env_get "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE || true)"
+      grace="$(printf '%s' "$grace" | tr -d '[:space:]')"
+      if [[ -z "$grace" ]]; then
+        doctor_warn 'AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=grace 但缺少 AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE：进程按 24h 默认收敛，请显式写明窗口（如 24h，上限 720h）'
+        return 0
+      fi
+      if ! grace_seconds="$(doctor_duration_seconds "$grace")"; then
+        doctor_warn "AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=${grace} 不是合法的 Go duration（可用 ns/us/ms/s/m/h，如 24h）：platform-api 会拒绝启动"
+        return 0
+      fi
+      if ((grace_seconds <= 0 || grace_seconds > 2592000)); then
+        doctor_warn "AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=${grace} 超出允许窗口 (0, 720h]：应用层会拒绝该策略，platform-api 启动失败"
+        return 0
+      fi
+      doctor_ok "旧 Secret 退役策略为 grace：旧值有效期收紧到 ${grace}（只缩短，不延长）"
+      ;;
+    *)
+      doctor_warn "AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=${policy} 取值不合法：只接受 keep/revoke/grace；当前配置会让 platform-api 拒绝启动（fail-closed）"
+      ;;
+  esac
+}
+
 doctor_check_subsystem() {
   local component="$1"
-  printf '\n[6/6] 子系统 %s\n' "$component"
+  printf '\n[7/7] 子系统 %s\n' "$component"
+
   case "$component" in
     customer-opportunity|customer-portal|contract|project|settlement|data-analysis) ;;
     *)
@@ -335,6 +410,7 @@ doctor() {
   doctor_check_manifests
   doctor_check_provisioner_binding
   doctor_check_runtime_placeholders
+  doctor_check_secret_retirement_policy
   if [[ -n "$component" ]]; then
     doctor_check_subsystem "$component"
   fi

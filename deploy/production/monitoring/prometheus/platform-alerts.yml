@@ -1,0 +1,250 @@
+# 平台自身 /metrics（docker-compose.yml 的 platform-api:8080）告警规则。
+#
+# 指标名来源（全部来自代码实际输出，不得臆造；改指标名先改代码与本文档）：
+#   platform_oauth_backchannel_unregistered_rp
+#   platform_oauth_backchannel_logout_no_endpoint
+#     → platform/internal/platform/oidc/backchannel/observability.go:16,18
+#   platform_http_requests_total / platform_authz_failures_total /
+#   platform_oidc_login_failures_total / platform_metric_collection_errors_total
+#     → platform/internal/transport/http/metrics.go:113,116,117,119
+#   platform_keycloak_outbox_backlog / platform_keycloak_outbox_dead /
+#   platform_async_job_backlog / platform_async_job_dead /
+#   platform_oidc_backchannel_logout_backlog / platform_oidc_backchannel_logout_failed
+#     → platform/internal/transport/http/metrics.go:73-79
+#   platform_async_job_last_success_timestamp_seconds
+#     → platform/internal/transport/http/metrics.go:160
+#   platform_oauth_client_secret_active{status} /
+#   platform_oauth_client_secret_active_client{client_id} /
+#   platform_oauth_client_secret_active_clients /
+#   platform_oauth_client_secret_oldest_active_seconds /
+#   platform_oauth_client_secret_active_over_90d
+#     → platform/internal/transport/http/metrics.go 的 Secret 指标常量块（RUNTIME-05）
+#   up
+#     → Prometheus 自身抓取健康度（up{job="platform-api"}）
+#
+# 采集语义（BIZ-XEVT2-07）：back-channel 的两条 gauge 在采集失败时**不输出**，
+# 而不是输出 0——所以“没有告警”也可能是没有样本，必须有 absent() 兜底规则
+# （见下方 PlatformMetricsSamplesMissing），否则缺口会被当成一切正常。
+# OAuth Client Secret gauge 同语义：采集失败时整组跳过（只有 collection_errors 增长），
+# 因此 platform-oauth-secrets 组额外用 absent() 兜底，避免“查不到”被当成“密钥很新”。
+# 所有 summary/runbook 指向 platform/deploy/production/README.md 的观测接入章节。
+groups:
+  - name: platform-scrape
+    rules:
+      # 抓取层面的硬失败：连接失败、超时、容器未运行。401/403 不在这里（up 仍为 1），
+      # 由下一条 absent() 与 backchannel 缺口规则暴露。
+      - alert: PlatformMetricsScrapeDown
+        expr: up{job="platform-api"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Platform /metrics scrape target is down
+          description: >-
+            Prometheus 连续 5 分钟无法抓取 platform-api:8080/metrics。抓取失败的期间所有
+            backchannel/队列 gauge 都无样本，监控盲区等同于没有告警。
+          runbook: platform/deploy/production/README.md#监控抓取与指标端点边界
+
+      # up 为 1 但没有任何平台指标样本：token 不匹配（RequireMetricsAccess 返回 401）、
+      # 路由缺失或被反代拦截。这条规则是“抓取成功但内容为空”的唯一信号。
+      - alert: PlatformMetricsSamplesMissing
+        expr: absent(platform_http_requests_total{job="platform-api"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Platform /metrics is reachable but exposes no samples
+          description: >-
+            platform_http_requests_total 在每次抓取时无条件输出，样本缺失说明抓取被
+            RequireMetricsAccess 拒绝（METRICS_ACCESS_TOKEN 与
+            runtime/prometheus-secrets/platform-metrics-token 不一致）或 /metrics 路由失效。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 采集失败只在写库/查询出错时累加；对应 gauge 会被跳过（不以 0 冒充“没有缺口”）。
+      - alert: PlatformMetricCollectionErrors
+        expr: increase(platform_metric_collection_errors_total[10m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Platform metric collection is failing repeatedly
+          description: >-
+            队列/backchannel 采集在最近 10 分钟内持续失败，对应 gauge 已被跳过输出。
+            先查数据库可用性与 platform_metric_collection_errors_total 的增长速率。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+  - name: platform-backchannel
+    rules:
+      # 未登记 RP：存在 ACTIVE token family 但没有 logout_uri 登记。这类 RP 的登出通知
+      # 根本无法送达（fail-closed 于监控面），>0 持续 15 分钟即需要登记修复。
+      - alert: PlatformBackchannelUnregisteredRP
+        expr: platform_oauth_backchannel_unregistered_rp > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: OAuth clients hold active sessions without a back-channel logout URI
+          description: >-
+            platform_oauth_backchannel_unregistered_rp > 0 表示有 RP 存在活跃登录状态但没有
+            logout_uri 登记，登出通知无法投递。按只读清单确认客户端后走受控更新补登记，
+            不要直接改库。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # NO_ENDPOINT 积压：已生成但目的地缺登记端点、不可投递的 outbox 行。它不是“投递失败”，
+      # 而是“目的地不存在”；warning 表示新缺口正在产生，需要补登记。
+      - alert: PlatformBackchannelNoEndpointBacklog
+        expr: platform_oauth_backchannel_logout_no_endpoint > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Back-channel logout events are piling up without a deliverable endpoint
+          description: >-
+            platform_oauth_backchannel_logout_no_endpoint 是 status=NO_ENDPOINT 的 outbox 行数：
+            事件已生成，但目标 RP 没有登记 logout_uri，因此永远不可投递。warning 级语义是
+            “缺口已持续一个投放周期且未清零”，处理方式是补登记后受控幂等重放，而不是删除行。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 同一缺口持续 6 小时：登记修复没有完成，用户侧仍保留失效会话。升级为 critical，
+      # 与 30 分钟 warning 的差别是“需要跨团队升级”，不是“另一个指标”。
+      - alert: PlatformBackchannelNoEndpointBacklogPersistent
+        expr: platform_oauth_backchannel_logout_no_endpoint > 0
+        for: 6h
+        labels:
+          severity: critical
+        annotations:
+          summary: Back-channel logout endpoint gap has persisted for six hours
+          description: >-
+            NO_ENDPOINT 积压 6 小时未清零：要么登记修复未完成，要么重放未执行。此时 RP 侧
+            仍持有已登出会话，属于安全缺口，需要升级与书面记录。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 投递失败（status=FAILED）：端点存在但投递失败，与 NO_ENDPOINT 语义不同。
+      - alert: PlatformBackchannelLogoutDeliveryFailed
+        expr: platform_oidc_backchannel_logout_failed > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Back-channel logout deliveries are failing
+          description: >-
+            platform_oidc_backchannel_logout_failed 是 status=FAILED 的投递行；端点已登记但
+            RP 返回失败。检查 RP 可达性、超时与重试窗口，不要用删除行规避。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+  - name: platform-queues
+    rules:
+      - alert: PlatformKeycloakOutboxBacklog
+        expr: platform_keycloak_outbox_backlog > 200
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Keycloak authorization outbox backlog is above the expected ceiling
+          description: >-
+            platform_keycloak_outbox_backlog 统计 PENDING/PROCESSING/RETRY 行数；持续 30 分钟
+            过高说明 Keycloak 投影消费者落后，用户与角色变更不会及时生效。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: PlatformKeycloakOutboxDead
+        expr: platform_keycloak_outbox_dead > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Keycloak authorization outbox has dead letters
+          description: >-
+            platform_keycloak_outbox_dead 统计 FAILED/DEAD 行；>0 表示重试已耗尽，需要人工
+            核对原因后受控重放。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      - alert: PlatformAsyncJobDead
+        expr: platform_async_job_dead > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Platform async jobs have dead letters
+          description: >-
+            platform_async_job_dead 统计 FAILED/DEAD 的异步任务；>0 表示任务已停止自动重试。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 最后成功时间戳为 0 表示“从未成功过”，此时不应按“停滞”告警（会与 dead 规则重复，
+      # 且新环境必然命中），因此显式排除 0。
+      - alert: PlatformAsyncJobStalled
+        expr: >-
+          time() - platform_async_job_last_success_timestamp_seconds > 7200
+          and platform_async_job_last_success_timestamp_seconds > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Platform async jobs have not succeeded for two hours
+          description: >-
+            platform_async_job_last_success_timestamp_seconds 已超过 2 小时没有前进；消费者可能
+            空转或全部失败。该指标在采集失败时不输出，先确认 up 与
+            platform_metric_collection_errors_total。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+  # OAuth Client Secret 退役面（RUNTIME-05）。默认 keep 时旧 Secret 永久有效：
+  # 受控更新/许可登记每签发一次新值就多一行 ACTIVE，泄露的旧值仍能换令牌。
+  # 这组规则把“累积了多个 ACTIVE”“龄期超过 90 天”“gauge 采集失败”变成可发现的信号。
+  - name: platform-oauth-secrets
+    rules:
+      # 单客户端 ACTIVE Secret > 1。两个来源都合法，必须区分后再处理：
+      #   1) GRACE/轮换重叠窗口内（AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=grace，
+      #      或 credentials/rotate 的 overlap_seconds>0）：旧值被收紧有效期但仍为 ACTIVE，
+      #      窗口内 >1 属预期；窗口结束后应回到 1，否则说明退役没生效。
+      #   2) 默认 keep：旧值永不退役，>1 就是需要人工收窗的累积（先 rotate 用
+      #      overlap_seconds=0 或 disable 旧 credential，不要直接改库）。
+      # for: 1h 是为了不把刚完成的受控更新/轮换当成事故。
+      - alert: PlatformClientSecretActivePerClientAccumulated
+        expr: platform_oauth_client_secret_active_client > 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: An OAuth client holds more than one ACTIVE secret
+          description: >-
+            platform_oauth_client_secret_active_client{client_id} > 1：该客户端有多行仍可用于
+            换令牌的 Secret。GRACE 窗口或 overlap_seconds>0 的轮换期间属预期，窗口结束后
+            仍 >1 即为 keep 累积——用 credentials/rotate 的 overlap_seconds=0 收紧，或用
+            credentials/{id}/disable 吊销旧值。核对 platform_oauth_client_secret_active_clients
+            与 platform_oauth_client_secret_active_over_90d 判断遗留面大小。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # 最老 ACTIVE Secret 超过 90 天（7776000s）：制度上限，说明该客户端的密钥从未轮换。
+      # 该 gauge 在采集失败或无 ACTIVE Secret 时不输出，因此缺席不等于“密钥很新”。
+      - alert: PlatformClientSecretActiveOldestOver90Days
+        expr: platform_oauth_client_secret_oldest_active_seconds > 7776000
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: The oldest ACTIVE OAuth client secret is older than 90 days
+          description: >-
+            platform_oauth_client_secret_oldest_active_seconds > 7776000（90 天）：至少有一个
+            OAuth Client 的 ACTIVE Secret 超过制度龄期上限。先按
+            platform_oauth_client_secret_active_client{client_id} 定位客户端，再走受控轮换
+            （credentials/rotate，重叠时长 ≤ 30 天）。持续未处理时旧值一旦泄露即可长期换令牌。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+      # gauge 采集失败/样本缺失兜底：Secret 指标在采集失败时整组跳过（不写 0），
+      # 只靠 collection_errors 增长。抓取 up 正常但样本缺席 = 采集链路或鉴权坏了，
+      # 此时 age/累积告警全部静默，必须单独告警。
+      - alert: PlatformClientSecretGaugeSamplesMissing
+        expr: >-
+          absent(platform_oauth_client_secret_active_clients{job="platform-api"})
+          and up{job="platform-api"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: OAuth client secret gauges are missing from platform /metrics
+          description: >-
+            platform-api 抓取正常（up=1）但 platform_oauth_client_secret_active_clients 无样本：
+            Secret 采集被数据库错误跳过，或 /metrics 被 RequireMetricsAccess 拒绝（token 与
+            runtime/prometheus-secrets/platform-metrics-token 不一致）。先看
+            platform_metric_collection_errors_total 的增速，再确认抓取凭据；不要在没有样本时
+            认为“没有累积、没有超龄密钥”。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据

@@ -266,7 +266,7 @@ sha256sum --check SHA256SUMS
 | 端口占用 | 预检明确列出冲突并停止，不杀死未知进程 |
 | 网络冲突 | Compose project/network 冲突明确失败，不复用未知网络 |
 | 防火墙 | 只提示或操作明确端口；不自动启用/关闭整套主机防火墙 |
-| 时区 | 输入值合法，容器和应用时间一致 |
+| 时区 | configure 不再询问时区；业务时间固定北京时间，容器显示时区按 CONTAINER_TIMEZONE.md 单独配置 |
 | 密钥 | 首次生成、权限、持久化和灾备均有证据；报告不出现密钥内容 |
 
 配置后运行：
@@ -309,6 +309,8 @@ sudo ./bin/deploy.sh status
 - File Gateway 匿名受保护接口返回 401/405，而不是 404/502/504。
 - Temporal 真正接受连接；不能只看容器 Running。
 - 前端从部署机本地入口和另一台内网客户端都可访问；安全组/边界防火墙另有证据。
+- 常驻 Worker 探针（O6）：`docker inspect` 显示 `customer-*`、`portal-report-worker`、`portal-invite-compensation-worker`、`data-analysis-aggregation-worker`、`data-analysis-alert-worker` 的 `State.Health.Status` 为 `healthy`，且重启次数在观察窗口内不增长；探针在真实镜像里可执行（镜像内有 `readlink`、`/proc` 可读、健康检查用户有权限），不能只依据本地解析结果判定通过。
+- 一次性任务无探针（O6）：`platform-migrate`、`contract-migrate`、`customer-migrate`、`portal-migrate`、`settlement-migrate`、`data-analysis-migrate` 等 `restart: "no"` 服务完成退出后，`docker inspect` 的 `State.Health` 为空，且 `docker compose up --wait` 未因它们报启动失败。
 - 失败迁移容器保留且日志可定位，成功后本次迁移容器被精确清理。
 
 ## 11. 阶段 H：业务系统受控接入
@@ -352,6 +354,50 @@ import 包
 9. API 超时、依赖失败和重复请求不会错误返回成功或生成重复业务数据。
 
 报告只记录测试记录 ID、状态、响应码、耗时和脱敏截图；不要复制响应中的个人信息或 Token。
+
+### 12.1 File Gateway 直达 8086 的受控入口（判据 5 的执行方式，BIZ-XWIRE-08）
+
+判据 5 要求直接核对 File Gateway 上落盘内容的 SHA-256。生产编排**不发布 8086**，也不允许为了验收把它改成 `ports: 8086:8086`（等于对 0.0.0.0 暴露内部 API 与 `/metrics`）。只允许下面两种受控入口，执行细节见 [README.md](README.md) 的「File Gateway 8086 的受控直达入口」：
+
+1. 首选零暴露：`docker compose ... exec -T file-gateway wget -qO- --header="Authorization: Bearer <token>" http://127.0.0.1:8086/api/v1/files/<file_id>/content | sha256sum`，SHA 计算留在宿主机；
+2. 备选回环中继：在 `application` 网络上临时起**仅绑定 `127.0.0.1`** 的中继容器，验收窗口结束立即 `docker rm -f`。
+
+记录项：
+
+- [ ] 与上传时登记的 SHA-256 一致；重复下载内容稳定（幂等）。
+- [ ] 越权/过期票据下载返回 401/403，且没有文件字节流出。
+- [ ] 受控入口类型（exec 或回环中继）、开启与关闭时间、使用身份已记录；验收后 `docker ps` 中不存在临时中继容器。
+- [ ] 部署目录与 compose 覆盖文件中没有残留 8086 端口发布（`grep -n "8086:8086"` 为空）。
+
+### 12.2 监控抓取与指标端点边界
+
+- [ ] `docker compose ... config --services | grep -x prometheus` 有输出，且 `monitoring` 子系统未被注释；Keycloak、备份时间戳、File Gateway、合同、**平台（`platform-api`）与结算（`settlement-api`）** 六个 job 在 Prometheus `/targets` 上为 UP。
+- [ ] 合同 `outbox` 死信指标可见：Prometheus 中能查到合同 job 的指标；`curl -s http://contract-api:8081/metrics` 只在 `application` 内网成功（宿主机直连必须失败）。
+- [ ] 平台 job 有样本：Prometheus 能查到 `platform_oauth_backchannel_unregistered_rp` 与 `platform_oauth_backchannel_logout_no_endpoint`；若平台 job `up=1` 却无样本，先按 README「观测接入：指标、告警与凭据」核对 `METRICS_ACCESS_TOKEN` 与 `runtime/prometheus-secrets/platform-metrics-token` 是否一致（不一致会命中 `PlatformMetricsSamplesMissing`）。
+- [ ] 结算 job 有样本：Prometheus 能查到 `settlement_integration_audit_required`、`settlement_integration_destination_configured{destination}`、`settlement_outbox_unconfigured_pending` 与 `settlement_outbox_pending_query_error`；`settlement_outbox_pending{destination}` 在空 outbox 时没有样本属正常（不要据此判定采集失败）。
+- [ ] 指标端点未对外暴露：`docker compose ... config` 中 file-gateway/prometheus/keycloak-backup-metrics 无 `ports`；平台/合同/**结算**仅 `127.0.0.1` 回环绑定；公网域名下 `/metrics` 返回前端静态 404，不是代理转发。
+- [ ] 告警收敛保持默认关闭：`data-analysis-alert-worker` 的 `ALERT_AUTO_RESOLVE` 解析结果为 `false`，且告警列表行为与升级前一致（只增不关）。
+- [ ] 新增告警已加载：Prometheus `/rules` 页能看到 `platform-alerts.yml` 与 `integration-alerts.yml` 两个 group，且无规则报错（`rule_files` 与只读挂载见 README 表格）。
+- [ ] 抓取令牌由部署方提供且不进版本库：`runtime/prometheus-secrets/platform-metrics-token` 存在且权限 `600`；`git status` 与资产包清单中都不含该文件；`prometheus.yml` 里没有内联 `credentials`/`bearer_token`。
+- [ ] 数析与项目未被伪造抓取：`prometheus.yml` 中不存在指向 `data-analysis-*`/`project-*` 的 job（它们没有 HTTP `/metrics` 端点）。
+
+### 12.3 观测接入的发布前核对（XAPI-10 新键与集成目的地）
+
+- [ ] 结算审计目的地：`runtime/settlement.env` 的 `SETTLEMENT_AUDIT_CLIENT_ID`/`SETTLEMENT_AUDIT_CLIENT_SECRET` 已由受控接入下发（不是 `PENDING_ONBOARDING`）；生产下 `PLATFORM_ENVIRONMENT_CODE=prod` 本身即判定审计必开，缺凭据会让 `/readyz` 返回 503 并触发 `SettlementAuditDestinationRequiredButUnconfigured`。
+- [ ] 项目审计目的地：新键 `PROJECT_AUDIT_REQUIRED` 与兼容旧键 `PLATFORM_AUDIT_REQUIRED` 不会同时写相反值；`PLATFORM_AUDIT_CLIENT_ID`/`PLATFORM_AUDIT_CLIENT_SECRET` 已下发。显式值非 `true`/`false` 时按失败关闭处理。
+- [ ] 结算 `/readyz` 返回 200；`degraded_destinations`/`unconfigured_destinations` 的每一项都有明确处置（补凭据或验收记录豁免），没有“长期 degraded 无人跟”。
+- [ ] 规则与文档一致：`tests/test-compose-orchestration-consistency.py` 通过，且 README「观测接入：指标、告警与凭据」的指标名、告警名、凭据路径与本次发布一致。
+
+### 12.4 许可运行环境文件的键位核对（O5：`COMMERCIAL_LICENSE_*`）
+
+本轮只做“键位说明与静态门禁”，**不改变生产默认值**（兼容开关仍为缺省 fail-closed）。发布前逐项核对：
+
+- [ ] 清单与模板都不声明许可运行态键：`grep -n 'COMMERCIAL_LICENSE_ENABLED\|COMMERCIAL_LICENSE_COMPATIBILITY' subsystem-templates/*.env.example subsystems.d/*.yaml` 只应命中解释性注释（`#` 开头），不得有 `KEY=`/`KEY:` 声明。
+- [ ] 编排层不写默认值：`docker compose ... config` 解析结果中，没有任何服务的 `environment` 含 `COMMERCIAL_LICENSE_ENABLED` 或 `COMMERCIAL_LICENSE_COMPATIBILITY`；两者只能出现在 `runtime/license-<service>.env`（由平台受控接入写入、权限 `0600`、不进版本库与资产包）。
+- [ ] 兼容放行开关保持缺省：`runtime/license-*.env` 与 `.env` 中都不存在 `COMMERCIAL_LICENSE_COMPATIBILITY=true`；命中即为绕过授权的放行配置，按安全事件处置，不得作为“接入排障手段”保留。
+- [ ] 运行态键完整：每个启用的受控组件在 `runtime/license-<service>.env` 里有平台签发的 `COMMERCIAL_LICENSE_ENABLED`、`COMMERCIAL_LICENSE_INSTANCE_ID`、`COMMERCIAL_LICENSE_SERVICE_ID`、`COMMERCIAL_LICENSE_STATE_PATH`、`COMMERCIAL_LICENSE_PLATFORM_*`、`COMMERCIAL_LICENSE_CLIENT_ID`/`_SECRET` 等键（只核对键名，不记录取值），且挂载了 `license-state-*:/var/lib/commercial-license` 持久状态目录。
+- [ ] 重建安全：按 `subsystem-templates/*.env.example` 重建运行文件后仍不出现上述两类键（模板只保留说明注释）；重建流程不得把模板里的注释当成键写回 `.env`。
+- [ ] 门禁覆盖：`tests/test-compose-orchestration-consistency.py` 的 `test_license_compatibility_switch_is_never_wired_in_production` 通过；该用例锁住“缺说明先补文档/注释，而不是补默认值”。
 
 ## 13. 阶段 J：裁剪、故障和升级回归
 
