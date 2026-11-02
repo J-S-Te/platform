@@ -264,3 +264,44 @@ func TestKeycloakBrokerHealthPollInterval(t *testing.T) {
 		t.Fatalf("non-positive should fallback, got %v", got)
 	}
 }
+
+func TestLoadDefaultsOAuthClientSecretRetirementToKeep(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Auth.OAuthClientSecretPreviousRetirement != "keep" {
+		t.Fatalf("OAuthClientSecretPreviousRetirement = %q, want keep (compat default)", cfg.Auth.OAuthClientSecretPreviousRetirement)
+	}
+	if cfg.Auth.OAuthClientSecretPreviousGrace != 24*time.Hour {
+		t.Fatalf("OAuthClientSecretPreviousGrace = %s, want 24h default grace window", cfg.Auth.OAuthClientSecretPreviousGrace)
+	}
+}
+
+func TestLoadReadsOAuthClientSecretRetirementPolicy(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT", "GRACE")
+	t.Setenv("AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE", "2h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Auth.OAuthClientSecretPreviousRetirement != "grace" {
+		t.Fatalf("OAuthClientSecretPreviousRetirement = %q, want grace", cfg.Auth.OAuthClientSecretPreviousRetirement)
+	}
+	if cfg.Auth.OAuthClientSecretPreviousGrace != 2*time.Hour {
+		t.Fatalf("OAuthClientSecretPreviousGrace = %s, want 2h", cfg.Auth.OAuthClientSecretPreviousGrace)
+	}
+}
+
+func TestLoadRejectsUnknownOAuthClientSecretRetirementPolicy(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	t.Setenv("AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT", "forever")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT") {
+		t.Fatalf("Load() error = %v, want unknown retirement policy rejection", err)
+	}
+}

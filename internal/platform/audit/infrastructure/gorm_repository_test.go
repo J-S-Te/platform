@@ -35,6 +35,29 @@ func TestEventQueryRowMapsAuditEventColumns(t *testing.T) {
 	}
 }
 
+// TestDedupModelKeysOnEnvironment 固定审计去重维度为（应用、环境、事件）。
+// 缺环境维度会让跨环境同名 event 被当成 DUPLICATE 丢弃（RUNTIME-08），
+// 因此这里同时校验列映射与主键顺序，防止模型与 000133 迁移再次漂移。
+func TestDedupModelKeysOnEnvironment(t *testing.T) {
+	parsed, err := schema.Parse(&dedupModel{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("parse audit dedup schema: %v", err)
+	}
+
+	for _, column := range []string{"application_id", "environment_id", "event_id", "audit_row_id", "occurred_month", "received_at"} {
+		if _, exists := parsed.FieldsByDBName[column]; !exists {
+			t.Errorf("audit dedup model does not map database column %q", column)
+		}
+	}
+	keys := make([]string, 0, len(parsed.PrimaryFields))
+	for _, field := range parsed.PrimaryFields {
+		keys = append(keys, field.DBName)
+	}
+	if want := []string{"application_id", "environment_id", "event_id"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("audit dedup primary key = %v, want %v", keys, want)
+	}
+}
+
 // TestActionCategoryPredicate 将公开操作分类契约限定为参数化 SQL。
 // 分类本身绝不能拼接到子句中，未知分类必须不匹配任何行。
 func TestActionCategoryPredicate(t *testing.T) {

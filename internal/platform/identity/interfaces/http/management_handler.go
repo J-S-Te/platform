@@ -61,6 +61,10 @@ type managementApplicationService interface {
 	ListMemberships(context.Context, string, application.PageRequest) (application.PageResult[domain.Membership], error)
 	CreateMembership(context.Context, application.MembershipCreateInput) (domain.Membership, error)
 	UpdateMembership(context.Context, application.MembershipUpdateInput) (domain.Membership, error)
+	// UserManagementScopeOrgUnitIDs/AccountManagementScopeOrgUnitIDs 提供目标用户/账号的
+	// 服务端权威组织归属，用于按 ID 的管理范围判定；缺失时失败关闭。
+	UserManagementScopeOrgUnitIDs(context.Context, string, string) ([]string, error)
+	AccountManagementScopeOrgUnitIDs(context.Context, string, string) ([]string, error)
 }
 
 // ConfigureEmployeeImportGateway 启用 fail-closed 的 CSV 持久化与校验。
@@ -307,7 +311,7 @@ type pageResponse[T any] struct {
 	Total    int64 `json:"total"`
 }
 
-// ListUsers 返回当前租户的用户分页列表。
+// ListUsers 返回当前租户的用户分页列表，结果按操作者的数据管理范围过滤。
 func (handler *ManagementHandler) ListUsers(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -319,6 +323,11 @@ func (handler *ManagementHandler) ListUsers(writer http.ResponseWriter, request 
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:user:read")
+	if !ok {
+		return
+	}
+	query = applyManagementScope(query, scope)
 	result, err := handler.service.ListUsers(request.Context(), principal.Tenant.ID, query)
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -377,9 +386,17 @@ func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, req
 		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 		return
 	}
-	if payload.Membership != nil && !principalHasPermission(principal, "platform:membership:create") {
-		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
-		return
+	if payload.Membership != nil {
+		if !principalHasPermission(principal, "platform:membership:create") {
+			httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+			return
+		}
+		// 聚合入口在用户创建权限之外还会创建任职，因此任职的组织范围必须和独立的
+		// /memberships 入口一样在调用服务之前判定，否则受限操作者可以借入职接口在
+		// 范围外组织写入任职。
+		if !handler.requireMembershipCreationScope(writer, request, principal, payload.Membership.OrgUnitID) {
+			return
+		}
 	}
 	status := domain.StatusActive
 	if payload.User.Status != nil {
@@ -537,6 +554,17 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		return
 	}
 	items := make([]application.EmployeeCreateInput, 0, len(payload.Items))
+	// 批量导入的每一行都会创建一条任职，所以整批预检 platform:membership:create 的
+	// 可管理范围：任一行组织越范围就整批拒绝，与服务端的整批原子语义一致，绝不产生
+	// 部分写入。范围只解析一次，避免逐行重复查询绑定。
+	var membershipScope managementscope.Scope
+	if len(payload.Items) > 0 {
+		scope, ok := handler.requireManagementScope(writer, request, principal, "platform:membership:create")
+		if !ok {
+			return
+		}
+		membershipScope = scope
+	}
 	hasRoles := false
 	for index, item := range payload.Items {
 		row := item.LineNo
@@ -556,6 +584,10 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		}
 		if orgID == "" {
 			handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "organization", Code: "ORGANIZATION_NOT_FOUND", Message: "组织不存在或已停用"})
+			return
+		}
+		if !membershipScope.Allows(orgID, "") {
+			handler.forbidden(writer, request)
 			return
 		}
 		positionID, err := resolveExactPosition(request.Context(), handler.service, principal.Tenant.ID, orgID, position)
@@ -678,14 +710,22 @@ func valueOrDefault(value *string, fallback string) string {
 	return *value
 }
 
-// GetUser 返回当前租户内指定用户的详情。
+// GetUser 返回当前租户内指定用户的详情；受限管理范围下范围外用户按无权限拒绝。
 func (handler *ManagementHandler) GetUser(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
 		handler.unauthenticated(writer, request)
 		return
 	}
-	result, err := handler.service.GetUser(request.Context(), principal.Tenant.ID, request.PathValue("user_id"))
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:user:read")
+	if !ok {
+		return
+	}
+	userID := request.PathValue("user_id")
+	if !handler.requireUserManagementScope(writer, request, principal.Tenant.ID, scope, userID) {
+		return
+	}
+	result, err := handler.service.GetUser(request.Context(), principal.Tenant.ID, userID)
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -703,7 +743,7 @@ func mobileUpdateRequested(mobile *string) bool {
 }
 
 // UpdateUser 更新用户基础信息与有效期；手机号仅在提交非空白值时才被视为修改，
-// 乐观锁 Version 不匹配时失败。
+// 乐观锁 Version 不匹配时失败。受限管理范围下必须在任何写入之前完成目标范围核验。
 func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -715,7 +755,15 @@ func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request
 		handler.validation(writer, request)
 		return
 	}
-	result, err := handler.service.UpdateUser(request.Context(), application.UserUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: request.PathValue("user_id"), DisplayName: payload.DisplayName, EmployeeNo: payload.EmployeeNo, PMSPersonID: payload.PMSPersonID, Email: payload.Email, Mobile: payload.Mobile, Status: payload.Status, ValidUntil: payload.ValidUntil, UpdateValidity: payload.UpdateValidity || payload.ValidUntil != nil, Version: payload.Version, UpdateMobile: mobileUpdateRequested(payload.Mobile)})
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:user:update")
+	if !ok {
+		return
+	}
+	userID := request.PathValue("user_id")
+	if !handler.requireUserManagementScope(writer, request, principal.Tenant.ID, scope, userID) {
+		return
+	}
+	result, err := handler.service.UpdateUser(request.Context(), application.UserUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: userID, DisplayName: payload.DisplayName, EmployeeNo: payload.EmployeeNo, PMSPersonID: payload.PMSPersonID, Email: payload.Email, Mobile: payload.Mobile, Status: payload.Status, ValidUntil: payload.ValidUntil, UpdateValidity: payload.UpdateValidity || payload.ValidUntil != nil, Version: payload.Version, UpdateMobile: mobileUpdateRequested(payload.Mobile)})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -723,7 +771,8 @@ func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "用户已更新", toUserResponse(result))
 }
 
-// DeleteUser 逻辑删除用户并停用其关联的全部登录路径。
+// DeleteUser 逻辑删除用户并停用其关联的全部登录路径。受限管理范围下必须在任何写入之前
+// 完成目标范围核验，绝不能先写后查。
 func (handler *ManagementHandler) DeleteUser(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -735,8 +784,16 @@ func (handler *ManagementHandler) DeleteUser(writer http.ResponseWriter, request
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:user:delete")
+	if !ok {
+		return
+	}
+	userID := request.PathValue("user_id")
+	if !handler.requireUserManagementScope(writer, request, principal.Tenant.ID, scope, userID) {
+		return
+	}
 	if err := handler.service.DeleteUser(request.Context(), application.UserDeleteInput{
-		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: request.PathValue("user_id"), Version: payload.Version,
+		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, UserID: userID, Version: payload.Version,
 	}); err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -744,7 +801,7 @@ func (handler *ManagementHandler) DeleteUser(writer http.ResponseWriter, request
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "用户已删除", map[string]any{})
 }
 
-// ListAccounts 返回当前租户的登录账号分页列表。
+// ListAccounts 返回当前租户的登录账号分页列表，结果按操作者的数据管理范围过滤。
 func (handler *ManagementHandler) ListAccounts(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -756,6 +813,11 @@ func (handler *ManagementHandler) ListAccounts(writer http.ResponseWriter, reque
 		handler.validation(writer, request)
 		return
 	}
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:account:read")
+	if !ok {
+		return
+	}
+	query = applyManagementScope(query, scope)
 	result, err := handler.service.ListAccounts(request.Context(), principal.Tenant.ID, query)
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -768,7 +830,8 @@ func (handler *ManagementHandler) ListAccounts(writer http.ResponseWriter, reque
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "操作成功", pageResponse[accountResponse]{Items: items, Page: result.Page, PageSize: result.PageSize, Total: result.Total})
 }
 
-// UpdateAccount 更新账号状态与有效期；乐观锁 Version 不匹配时失败。
+// UpdateAccount 更新账号状态与有效期；乐观锁 Version 不匹配时失败。受限管理范围下账号
+// 的组织归属经其属主用户的有效任职判定，且必须在写入之前完成。
 func (handler *ManagementHandler) UpdateAccount(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -780,7 +843,15 @@ func (handler *ManagementHandler) UpdateAccount(writer http.ResponseWriter, requ
 		handler.validation(writer, request)
 		return
 	}
-	result, err := handler.service.UpdateAccount(request.Context(), application.AccountUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, AccountID: request.PathValue("account_id"), Status: payload.Status, ValidUntil: payload.ValidUntil, UpdateValidity: payload.UpdateValidity || payload.ValidUntil != nil, Version: payload.Version})
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:account:update")
+	if !ok {
+		return
+	}
+	accountID := request.PathValue("account_id")
+	if !handler.requireAccountManagementScope(writer, request, principal.Tenant.ID, scope, accountID) {
+		return
+	}
+	result, err := handler.service.UpdateAccount(request.Context(), application.AccountUpdateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, AccountID: accountID, Status: payload.Status, ValidUntil: payload.ValidUntil, UpdateValidity: payload.UpdateValidity || payload.ValidUntil != nil, Version: payload.Version})
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
@@ -1135,6 +1206,81 @@ func applyManagementScope(query application.PageRequest, scope managementscope.S
 	query.AllowedOrgUnitIDs = append([]string(nil), scope.OrgUnitIDs...)
 	query.AllowedResourceIDs = append([]string(nil), scope.ResourceIDs...)
 	return query
+}
+
+// requireMembershipCreationScope 核验新建任职的目标组织是否落在调用者对
+// platform:membership:create 的可管理范围内。聚合创建入口（入职与批量导入）必须与独立的
+// /memberships 入口使用同一套判定：空范围、资源级范围与范围外组织一律 403，且在调用
+// 应用服务之前就被拒绝，不产生用户或任职写入。
+func (handler *ManagementHandler) requireMembershipCreationScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, orgUnitID string) bool {
+	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:membership:create")
+	if !ok {
+		return false
+	}
+	if !scope.Allows(orgUnitID, "") {
+		handler.forbidden(writer, request)
+		return false
+	}
+	return true
+}
+
+// requireUserManagementScope 在受限数据管理范围下核验目标用户是否属于调用者的组织范围。
+// 归属只取自服务端存储的有效任职；范围外用户、不存在用户以及无法判定归属的仓库一律按
+// 无权限拒绝，避免用 403/404 差异探测范围外对象是否存在。
+func (handler *ManagementHandler) requireUserManagementScope(writer http.ResponseWriter, request *http.Request, tenantID string, scope managementscope.Scope, userID string) bool {
+	if scope.Unrestricted {
+		return true
+	}
+	orgUnitIDs, err := handler.service.UserManagementScopeOrgUnitIDs(request.Context(), tenantID, userID)
+	if err != nil {
+		return handler.denyManagementScope(writer, request, "USER", userID, err)
+	}
+	if !scopeCoversAnyOrganization(scope, orgUnitIDs) {
+		handler.forbidden(writer, request)
+		return false
+	}
+	return true
+}
+
+// requireAccountManagementScope 在受限数据管理范围下核验目标账号的组织归属。账号经其属主
+// 用户的有效任职归属组织；没有属主用户的服务账号不属于任何组织范围。
+func (handler *ManagementHandler) requireAccountManagementScope(writer http.ResponseWriter, request *http.Request, tenantID string, scope managementscope.Scope, accountID string) bool {
+	if scope.Unrestricted {
+		return true
+	}
+	orgUnitIDs, err := handler.service.AccountManagementScopeOrgUnitIDs(request.Context(), tenantID, accountID)
+	if err != nil {
+		return handler.denyManagementScope(writer, request, "ACCOUNT", accountID, err)
+	}
+	if !scopeCoversAnyOrganization(scope, orgUnitIDs) {
+		handler.forbidden(writer, request)
+		return false
+	}
+	return true
+}
+
+// scopeCoversAnyOrganization 判断受限范围是否覆盖目标用户的任一有效任职组织。组织范围在
+// 解析阶段已展开到全部后代，因此这里只做精确匹配。资源级（RESOURCE）绑定不能可靠地还原
+// 为人员归属，不参与用户/账号判定：仅含资源范围的受限调用者一律被拒绝。
+func scopeCoversAnyOrganization(scope managementscope.Scope, orgUnitIDs []string) bool {
+	for _, orgUnitID := range orgUnitIDs {
+		if scope.Allows(orgUnitID, "") {
+			return true
+		}
+	}
+	return false
+}
+
+// denyManagementScope 统一处理范围上下文读取失败：目标不存在或参数非法仍按无权限拒绝，
+// 只有真正的存储/解析故障才上报 500，并且都不继续执行既有写操作。
+func (handler *ManagementHandler) denyManagementScope(writer http.ResponseWriter, request *http.Request, resourceType, resourceID string, err error) bool {
+	if errors.Is(err, application.ErrNotFound) || errors.Is(err, application.ErrValidation) {
+		handler.forbidden(writer, request)
+		return false
+	}
+	handler.logger.Error("load management authorization scope target", "resource_type", resourceType, "resource_id", resourceID, "error", err)
+	httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+	return false
 }
 
 func (handler *ManagementHandler) requireExistingResourceScope(writer http.ResponseWriter, request *http.Request, tenantID string, scope managementscope.Scope, resourceType, resourceID string) bool {

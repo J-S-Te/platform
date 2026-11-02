@@ -3,6 +3,7 @@ package filetaskhttp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -57,6 +58,13 @@ func (service *recordingV2FileService) OpenDownload(_ context.Context, access ap
 
 type ticketScript struct {
 	executed []string
+	queries  []ticketQuery
+}
+
+// ticketQuery 记录兑换查询的实参，用于断言票据只来自 Authorization 头。
+type ticketQuery struct {
+	query string
+	args  []driver.NamedValue
 }
 
 type ticketDriver struct{ script *ticketScript }
@@ -84,7 +92,8 @@ func (connection *ticketConn) ExecContext(_ context.Context, query string, _ []d
 	connection.script.executed = append(connection.script.executed, query)
 	return ticketResult(1), nil
 }
-func (connection *ticketConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+func (connection *ticketConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	connection.script.queries = append(connection.script.queries, ticketQuery{query: query, args: args})
 	return nil, errors.New("unexpected query in ticket test")
 }
 
@@ -208,6 +217,42 @@ func TestIssueDownloadTicketMapsForbiddenServiceRejection(t *testing.T) {
 	for _, query := range script.executed {
 		if strings.HasPrefix(strings.TrimSpace(query), "INSERT") {
 			t.Fatalf("被拒绝的请求不得写入下载票据: %s", query)
+		}
+	}
+}
+
+// A5 回归：下载票据只接受 Authorization: DownloadTicket 头；历史 ?ticket= 查询参数回退
+// 已移除，避免 bearer 能力进入浏览器历史、访问日志与代理记录。
+func TestDownloadContentRejectsTicketQueryParameter(t *testing.T) {
+	script := &ticketScript{}
+	handler := newTicketTestHandler(t, script, &recordingV2FileService{})
+	request := httptest.NewRequest(http.MethodGet, "/file-gateway/api/v2/files/file-1/content?ticket=leaked-query-ticket", nil)
+	request.SetPathValue("file_id", "file-1")
+	response := httptest.NewRecorder()
+
+	handler.DownloadContent(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "FILE_DOWNLOAD_TICKET_INVALID") {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+	if len(script.queries) != 1 {
+		t.Fatalf("兑换查询次数 = %d, want 1", len(script.queries))
+	}
+	args := script.queries[0].args
+	if len(args) < 2 {
+		t.Fatalf("兑换查询参数不足: %+v", args)
+	}
+	emptyHash := sha256.Sum256(nil)
+	gotHash, ok := args[1].Value.([]byte)
+	if !ok || !bytes.Equal(gotHash, emptyHash[:]) {
+		t.Fatalf("查询参数票据不得参与兑换：token_hash = %v, want sha256(空票据)", args[1].Value)
+	}
+	for _, executed := range script.executed {
+		if strings.Contains(executed, "leaked-query-ticket") {
+			t.Fatalf("查询参数票据不得进入 SQL: %s", executed)
 		}
 	}
 }

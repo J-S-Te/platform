@@ -391,6 +391,20 @@ func (repository *Repository) HasActiveBinding(ctx context.Context, tenantID, fi
 	return count > 0, mapError(err)
 }
 
+// HasExactActiveBinding 精确校验租户、文件、应用、业务资源四元组上的 ACTIVE 绑定，
+// 并可选按 binding_type 收窄。证据核验必须走这里：同一应用内只判断"该文件存在任意
+// 绑定"会让服务项 A 的证据被复用到服务项 B。bindingType 为空时不额外过滤，因此
+// 老数据只要资源标识精确仍然可以通过。
+func (repository *Repository) HasExactActiveBinding(ctx context.Context, tenantID, fileID, applicationID, resourceType, resourceID, bindingType string) (bool, error) {
+	query := repository.database.WithContext(ctx).Model(&fileBindingModel{}).Where("tenant_id = ? AND file_id = ? AND application_id = ? AND resource_type = ? AND resource_id = ? AND status = ?", tenantID, fileID, applicationID, resourceType, resourceID, "ACTIVE")
+	if bindingType = strings.TrimSpace(bindingType); bindingType != "" {
+		query = query.Where("binding_type = ?", bindingType)
+	}
+	var count int64
+	err := query.Count(&count).Error
+	return count > 0, mapError(err)
+}
+
 // HasAnyActiveBinding 只用于 v1 机器下载的滚动兼容。它仍严格限制租户、文件和应用，
 // 防止无 owner 的机器上传文件因空值相等而被任意下载。
 func (repository *Repository) HasAnyActiveBinding(ctx context.Context, tenantID, fileID, applicationID string) (bool, error) {

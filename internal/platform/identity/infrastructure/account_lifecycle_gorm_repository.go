@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	"gorm.io/gorm"
@@ -17,12 +19,25 @@ func (repository *GORMRepository) CreateLocalAccount(ctx context.Context, write 
 	var account domain.Account
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var user userModel
-		result := transaction.Where("tenant_id = ? AND id = ? AND status = ?", write.TenantID, write.UserID, domain.StatusActive).First(&user)
+		// 锁定目标用户行：新增可登录账号等同于为该用户追加一条认证凭证，必须与并发的
+		// 用户状态变更串行，否则可能为刚被停用的用户开出可用账号。
+		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("tenant_id = ? AND id = ? AND status = ?", write.TenantID, write.UserID, domain.StatusActive).
+			First(&user)
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return application.ErrNotFound
 		}
 		if result.Error != nil {
 			return fmt.Errorf("get account user: %w", result.Error)
+		}
+		// 部署初始化超管的账号是系统保留登录路径。绕过管理端点直接追加本地账号会扩大
+		// 超管的可登录凭证集合，因此在锁定用户后失败关闭，解析异常原样返回。
+		bootstrapIdentity, bootstrapInitialized, bootstrapErr := bootstrapadmin.Resolve(ctx, transaction, write.TenantID)
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		if bootstrapInitialized && bootstrapIdentity.ProtectsUser(write.UserID) {
+			return bootstrapadmin.ErrProtected
 		}
 		accountName := write.AccountName
 		operatorID := write.OperatorID
@@ -67,6 +82,21 @@ func (repository *GORMRepository) writeAdministratorPassword(ctx context.Context
 		}
 		if result.Error != nil {
 			return fmt.Errorf("lock account password update: %w", result.Error)
+		}
+		// 管理员密码生命周期同样不能成为超管保护的后门：命中受保护账号或该账号属主
+		// 用户是部署初始化超管时，一律在写入任何凭据之前拒绝。
+		bootstrapIdentity, bootstrapInitialized, bootstrapErr := bootstrapadmin.Resolve(ctx, transaction, write.TenantID)
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		if bootstrapInitialized {
+			ownerUserID := ""
+			if row.UserID != nil {
+				ownerUserID = strings.TrimSpace(*row.UserID)
+			}
+			if bootstrapIdentity.ProtectsAccount(write.AccountID) || (ownerUserID != "" && bootstrapIdentity.ProtectsUser(ownerUserID)) {
+				return bootstrapadmin.ErrProtected
+			}
 		}
 		if row.Version != write.ExpectedVersion {
 			return application.ErrVersionConflict

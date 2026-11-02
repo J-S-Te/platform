@@ -275,14 +275,14 @@ func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 4 {
-		t.Fatalf("fallback clients = %d, want audit + owner_directory + notification + signed count", len(repository.write.ServiceClients))
+	if len(repository.write.ServiceClients) != 6 {
+		t.Fatalf("fallback clients = %d, want audit + owner_directory + notification + signed count + contract summary + signed write", len(repository.write.ServiceClients))
 	}
 	purposes := map[string]bool{}
 	for _, item := range repository.write.ServiceClients {
 		purposes[item.Purpose] = true
 	}
-	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] || !purposes[ServiceCredentialNotificationIngest] || !purposes[ServiceCredentialContractOpportunitySignedCountRead] {
+	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] || !purposes[ServiceCredentialNotificationIngest] || !purposes[ServiceCredentialContractOpportunitySignedCountRead] || !purposes[ServiceCredentialContractSummaryRead] || !purposes[ServiceCredentialContractOpportunitySignedWrite] {
 		t.Fatalf("fallback clients = %v", purposes)
 	}
 }
@@ -320,7 +320,7 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 4 || len(result.ServiceCredentials) != 4 {
+	if len(repository.write.ServiceClients) != 6 || len(result.ServiceCredentials) != 6 {
 		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
 	}
 	credentials := make(map[string]SubsystemServiceCredential, len(result.ServiceCredentials))

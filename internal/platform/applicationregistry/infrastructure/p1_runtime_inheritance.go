@@ -19,11 +19,16 @@ func usableProductionCredential(value string) bool {
 	return value != "" && value != "PENDING_ONBOARDING" && !strings.HasPrefix(value, "REPLACE_WITH_")
 }
 
+// p1StrictServicePurposes 是需要严格登记校验与密钥补发保护的机器身份用途。
+// 每个用途都必须在 p1ServiceCredentialScopes 声明唯一允许的 scope；遗漏会让
+// 对应清单绑定在校验阶段必然失败（contract_management 的 crm_contract_link_write 曾因此阻断接入）。
+var p1StrictServicePurposes = []string{"contract_import_report_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "crm_contract_link_write", "portal_report_file_read", "portal_report_download_identity_read"}
+
 // isP1ProductionServiceBinding 识别需要严格登记校验和密钥补发保护的绑定。
 // 参数：source 为清单的服务绑定来源。
 // 返回值：是否属于严格机器身份绑定。
 func isP1ProductionServiceBinding(source string) bool {
-	for _, purpose := range []string{"contract_import_report_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "portal_report_file_read", "portal_report_download_identity_read"} {
+	for _, purpose := range p1StrictServicePurposes {
 		if source == "service."+purpose+".client_id" || source == "service."+purpose+".client_secret" {
 			return true
 		}

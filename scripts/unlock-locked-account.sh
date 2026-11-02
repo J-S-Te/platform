@@ -11,14 +11,19 @@
 #   ./unlock-locked-account.sh --base-url https://host --admin localadmin --list
 #   ./unlock-locked-account.sh ... --password-stdin < 密码文件
 #   ./unlock-locked-account.sh --base-url https://host --probe
+#   ./unlock-locked-account.sh --base-url https://host --cookie-stdin --target admins < 会话Cookie.txt
+#   ./unlock-locked-account.sh --base-url https://host --cookie-file ~/bp.cookie --target admins
 #   ./unlock-locked-account.sh --base-url https://host --cookie "bp_session=..." --target admins
 #   （Cookie 名默认 bp_session，可用 --cookie-name 覆盖；从浏览器开发者工具复制）
 #
 # 生产环境通常开启凭据加密（uip-credential/v1），密码模式会被 422 拒绝；
-# 此时用浏览器的会话 Cookie（--cookie）或直接在界面里解锁。
+# 此时用浏览器的会话 Cookie（优先 --cookie-stdin / --cookie-file）或直接在界面里解锁。
 #
 # 说明：
 #   - 密码只从标准输入/终端读取，不接受命令行参数（避免进入 shell 历史与进程列表）；
+#   - 会话 Cookie 优先用 --cookie-stdin（标准输入）或 --cookie-file（须为 0600 常规文件）：
+#     值只写入 0700 临时目录内的 0600 文件，再以 curl -b <file> 发送，不进入命令行；
+#   - --cookie 保留兼容旧用法，但值会进入 shell 历史与进程列表，脚本会打印警告；
 #   - 只调用 POST /api/v1/security/locked-accounts/{account_id}/unlock；
 #   - 解锁不会恢复锁定期间已被撤销的会话，目标账号需要重新登录；
 #   - 该操作会被平台请求审计记录（操作者、来源地址、结果）。
@@ -34,11 +39,18 @@ ASSUME_YES=0
 PASSWORD_STDIN=0
 PASSWORD=""
 COOKIE=""
+COOKIE_STDIN=0
+COOKIE_FILE_IN=""
 COOKIE_NAME="bp_session"
 PROBE=0
+WORKDIR=""
+COOKIE_JAR=""
+COOKIE_SOURCE_FILE=""
+BODY_FILE=""
 
+# 打印本文件顶部的用法注释块（遇到第一行非注释即停止），避免行号漂移导致帮助被截断。
 usage() {
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
     exit "${1:-0}"
 }
 
@@ -56,6 +68,8 @@ while [[ $# -gt 0 ]]; do
         --yes) ASSUME_YES=1; shift ;;
         --password-stdin) PASSWORD_STDIN=1; shift ;;
         --cookie) COOKIE="${2:-}"; shift 2 ;;
+        --cookie-stdin) COOKIE_STDIN=1; shift ;;
+        --cookie-file) COOKIE_FILE_IN="${2:-}"; shift 2 ;;
         --probe) PROBE=1; shift ;;
         --cookie-name) COOKIE_NAME="${2:-bp_session}"; shift 2 ;;
         -h|--help) usage 0 ;;
@@ -88,7 +102,8 @@ if [[ "${PROBE}" -eq 1 ]]; then
     exit 0
 fi
 
-[[ -n "${ADMIN}" || -n "${COOKIE}" ]] || fail "缺少 --admin（有解锁权限的账号名）或 --cookie"
+[[ -n "${ADMIN}" || -n "${COOKIE}" || "${COOKIE_STDIN}" -eq 1 || -n "${COOKIE_FILE_IN}" ]] ||
+    fail "缺少 --admin（有解锁权限的账号名）或会话 Cookie（--cookie-stdin / --cookie-file / --cookie）"
 [[ "${BASE_URL}" == https://* ]] || log "警告：入口不是 https，密码与会话将以明文传输"
 
 command -v curl >/dev/null 2>&1 || fail "需要 curl"
@@ -97,11 +112,49 @@ if [[ "${LIST_ONLY}" -eq 0 && -z "${ACCOUNT_ID}" && -z "${TARGET}" ]]; then
     fail "缺少 --target 或 --account-id"
 fi
 
+# 安全（SEC-4）：会话 Cookie 不进入 curl 的 argv（会留在 shell 历史与 ps 输出里）。
+# 三种来源互斥；--cookie-stdin / --cookie-file 的值只落到 0700 临时目录内的 0600
+# Netscape Cookie 文件，再以 curl -b <file> 发送。
+cookie_sources=0
+[[ -z "${COOKIE}" ]] || cookie_sources=$((cookie_sources + 1))
+[[ "${COOKIE_STDIN}" -eq 0 ]] || cookie_sources=$((cookie_sources + 1))
+[[ -z "${COOKIE_FILE_IN}" ]] || cookie_sources=$((cookie_sources + 1))
+[[ "${cookie_sources}" -le 1 ]] || fail "--cookie / --cookie-stdin / --cookie-file 只能指定一个"
+
+file_mode() { # 输出八进制权限位；Linux 用 stat -c，macOS 用 stat -f
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+if [[ "${COOKIE_STDIN}" -eq 1 ]]; then
+    IFS= read -r COOKIE || true
+    [[ -n "${COOKIE}" ]] || fail "--cookie-stdin 未从标准输入读到会话 Cookie"
+elif [[ -n "${COOKIE_FILE_IN}" ]]; then
+    [[ -f "${COOKIE_FILE_IN}" && ! -L "${COOKIE_FILE_IN}" ]] ||
+        fail "--cookie-file 必须是非符号链接的常规文件：${COOKIE_FILE_IN}"
+    cookie_file_mode="$(file_mode "${COOKIE_FILE_IN}")" ||
+        fail "无法读取 --cookie-file 权限：${COOKIE_FILE_IN}"
+    [[ "${cookie_file_mode}" =~ ^[0-7]{3,4}$ ]] || fail "--cookie-file 权限不可识别：${cookie_file_mode}"
+    (( (8#${cookie_file_mode} & 8#077) == 0 )) ||
+        fail "--cookie-file 对 group/other 开放（权限 ${cookie_file_mode}），请先 chmod 600 <文件>"
+    (( (8#${cookie_file_mode} & 8#400) != 0 )) ||
+        fail "--cookie-file 当前用户不可读（权限 ${cookie_file_mode}）"
+    COOKIE="$(<"${COOKIE_FILE_IN}")"
+    [[ -n "${COOKIE}" ]] || fail "--cookie-file 内容为空：${COOKIE_FILE_IN}"
+else
+    [[ -z "${COOKIE}" ]] ||
+        log "警告：--cookie 会把会话 Cookie 写进 shell 历史与进程列表；建议改用 --cookie-stdin 或 --cookie-file"
+fi
+if [[ -n "${COOKIE}" ]]; then
+    COOKIE="${COOKIE#"${COOKIE%%[![:space:]]*}"}"
+    COOKIE="${COOKIE%"${COOKIE##*[![:space:]]}"}"
+    [[ -n "${COOKIE}" ]] || fail "会话 Cookie 为空"
+fi
+
 if [[ -z "${COOKIE}" ]]; then
     if [[ "${PASSWORD_STDIN}" -eq 1 ]]; then
         IFS= read -r PASSWORD || true
     else
-        [[ -t 0 ]] || fail "非交互环境请使用 --password-stdin 或 --cookie"
+        [[ -t 0 ]] || fail "非交互环境请使用 --password-stdin 或 --cookie-stdin"
         read -r -s -p "有解锁权限的账号 [${ADMIN}] 密码：" PASSWORD
         printf '\n' >&2
     fi
@@ -111,8 +164,44 @@ fi
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/unlock.XXXXXX")"
 chmod 700 "${WORKDIR}"
 COOKIE_JAR="${WORKDIR}/cookies"
+COOKIE_SOURCE_FILE="${WORKDIR}/session-cookie.txt"
 BODY_FILE="${WORKDIR}/body"
 trap 'rm -rf "${WORKDIR}"' EXIT
+
+# 把 --cookie / --cookie-stdin / --cookie-file 的值写成 Netscape Cookie 文件，
+# 供 curl -b 读取；文件始终 0600，进程退出即随临时目录删除。
+if [[ -n "${COOKIE}" ]]; then
+    cookie_host="${BASE_URL#*://}"
+    cookie_host="${cookie_host%%/*}"
+    if [[ "${cookie_host}" == \[* ]]; then
+        cookie_host="${cookie_host%%]*}]"
+    else
+        cookie_host="${cookie_host%%:*}"
+    fi
+    [[ -n "${cookie_host}" ]] || fail "无法从 --base-url 解析 Cookie 域"
+    cookie_secure=FALSE
+    [[ "${BASE_URL}" == https://* ]] && cookie_secure=TRUE
+    ( umask 077; : > "${COOKIE_SOURCE_FILE}" ) || fail "无法创建临时会话 Cookie 文件"
+    printf '# Netscape HTTP Cookie File\n' >> "${COOKIE_SOURCE_FILE}"
+    IFS=';' read -r -a cookie_pairs <<< "${COOKIE}"
+    cookie_count=0
+    for cookie_pair in "${cookie_pairs[@]}"; do
+        cookie_pair="${cookie_pair#"${cookie_pair%%[![:space:]]*}"}"
+        cookie_pair="${cookie_pair%"${cookie_pair##*[![:space:]]}"}"
+        [[ -n "${cookie_pair}" ]] || continue
+        [[ "${cookie_pair}" == *=* ]] || fail "会话 Cookie 条目缺少 =：${cookie_pair%%=*}"
+        cookie_name="${cookie_pair%%=*}"
+        cookie_value="${cookie_pair#*=}"
+        [[ "${cookie_name}" =~ ^[A-Za-z0-9_.!#$%+^|~-]+$ ]] ||
+            fail "会话 Cookie 名含非法字符：${cookie_name}"
+        [[ "${cookie_value}" != *[$'\t\n\r']* ]] || fail "会话 Cookie 值含控制字符"
+        printf '%s\tFALSE\t/\t%s\t0\t%s\t%s\n' \
+            "${cookie_host}" "${cookie_secure}" "${cookie_name}" "${cookie_value}" >> "${COOKIE_SOURCE_FILE}"
+        cookie_count=$((cookie_count + 1))
+    done
+    [[ "${cookie_count}" -gt 0 ]] || fail "会话 Cookie 未包含任何 name=value 条目"
+    chmod 600 "${COOKIE_SOURCE_FILE}"
+fi
 
 # api METHOD PATH [DATA_FILE] -> 打印 HTTP 状态码；响应体写入 BODY_FILE。
 api() {
@@ -121,8 +210,8 @@ api() {
         -b "${COOKIE_JAR}" -c "${COOKIE_JAR}"
         -H "Accept: application/json" -H "Origin: ${ORIGIN}"
         -X "${method}" "${BASE_URL}${path}")
-    if [[ -n "${COOKIE}" ]]; then
-        args+=(-H "Cookie: ${COOKIE}")
+    if [[ -f "${COOKIE_SOURCE_FILE}" ]]; then
+        args+=(-b "${COOKIE_SOURCE_FILE}")
     fi
     if [[ -n "${data_file}" ]]; then
         args+=(-H "Content-Type: application/json" --data-binary "@${data_file}")

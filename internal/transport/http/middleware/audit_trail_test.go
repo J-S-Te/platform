@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/domain"
@@ -19,11 +20,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type auditRecorderStub struct{ input application.EventInput }
+// auditRecorderStub 记录全部 Ingest 事件（input 保持“最后一条”语义）并接受死信落库。
+type auditRecorderStub struct {
+	input   application.EventInput
+	inputs  []application.EventInput
+	spooled []application.EventInput
+}
 
 func (stub *auditRecorderStub) Ingest(_ context.Context, _ string, input application.EventInput) (domain.Receipt, error) {
 	stub.input = input
+	stub.inputs = append(stub.inputs, input)
 	return domain.Receipt{}, nil
+}
+
+func (stub *auditRecorderStub) Spool(_ context.Context, _ string, input application.EventInput) error {
+	stub.spooled = append(stub.spooled, input)
+	return nil
 }
 
 // failingAuditRecorder 模拟审计管道故障（连接断开、审计库不可写等）。
@@ -31,6 +43,43 @@ type failingAuditRecorder struct{ err error }
 
 func (recorder failingAuditRecorder) Ingest(context.Context, string, application.EventInput) (domain.Receipt, error) {
 	return domain.Receipt{}, recorder.err
+}
+
+func (recorder failingAuditRecorder) Spool(context.Context, string, application.EventInput) error {
+	return recorder.err
+}
+
+// auditRecorderScript 按调用顺序控制 Ingest / Spool 的结果，用于覆盖 BIZ-RUNTIME-11 的
+// “意图→结果→死信”三段路径。结果列表耗尽后一律成功。
+type auditRecorderScript struct {
+	ingestErrs   []error
+	spoolErrs    []error
+	ingested     []application.EventInput
+	ingestTenant []string
+	spooled      []application.EventInput
+	spoolTenant  []string
+}
+
+func (script *auditRecorderScript) Ingest(_ context.Context, tenantID string, input application.EventInput) (domain.Receipt, error) {
+	script.ingested = append(script.ingested, input)
+	script.ingestTenant = append(script.ingestTenant, tenantID)
+	if len(script.ingestErrs) == 0 {
+		return domain.Receipt{}, nil
+	}
+	err := script.ingestErrs[0]
+	script.ingestErrs = script.ingestErrs[1:]
+	return domain.Receipt{}, err
+}
+
+func (script *auditRecorderScript) Spool(_ context.Context, tenantID string, input application.EventInput) error {
+	script.spooled = append(script.spooled, input)
+	script.spoolTenant = append(script.spoolTenant, tenantID)
+	if len(script.spoolErrs) == 0 {
+		return nil
+	}
+	err := script.spoolErrs[0]
+	script.spoolErrs = script.spoolErrs[1:]
+	return err
 }
 
 // capturingLogHandler 捕获结构化日志记录，供测试断言错误日志字段。
@@ -274,8 +323,9 @@ func TestAuditResourceIDUsesInnermostResource(t *testing.T) {
 	}
 }
 
-// 安全审查 AUD-2026-005：必开模式下审计 Ingest 失败必须拒绝请求——业务响应被丢弃，
-// 客户端收到 503 AUDIT_WRITE_REJECTED，绝不能“无审计的成功”。
+// 安全审查 AUD-2026-005 / BIZ-RUNTIME-11：必开模式下意图事件写不进去必须在业务链之前
+// 拒绝请求——客户端收到 503 AUDIT_WRITE_REJECTED，业务 handler 根本不执行，也就没有
+// 已生效却拿失败响应的重试陷阱。
 func TestAuditTrailRequiredModeRejectsWhenIngestFails(t *testing.T) {
 	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
 	router := newAuditTrailTestRouter(failingAuditRecorder{err: errors.New("audit store unavailable")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -287,7 +337,7 @@ func TestAuditTrailRequiredModeRejectsWhenIngestFails(t *testing.T) {
 		t.Fatalf("body = %s, want AUDIT_WRITE_REJECTED", response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), "business payload") {
-		t.Fatal("buffered business response must be discarded, not committed, when audit ingest fails")
+		t.Fatal("business response must not exist when the intent event is rejected before the handler")
 	}
 }
 
@@ -364,9 +414,10 @@ func TestAuditTrailRequiredModeOnlyGuardsRecordedRequests(t *testing.T) {
 	}
 }
 
-// 缓冲超限（进入溢写临时文件）时不再有直写例外：审计摄取失败仍然拒绝请求，
-// 扣留的业务响应被丢弃，客户端拿到 503 AUDIT_WRITE_REJECTED，绝不出现“无审计的成功”。
-func TestAuditTrailRequiredModeSpillsOversizedResponseAndRejectsWhenIngestFails(t *testing.T) {
+// 缓冲超限（进入溢写临时文件）时同样没有直写例外：结果事件与死信都写不进去时仍然拒绝
+// 请求，扣留的大响应被丢弃，客户端拿到 503 AUDIT_RESULT_WRITE_REJECTED，绝不出现
+// “审计无结论的成功”。
+func TestAuditTrailRequiredModeSpillsOversizedResponseAndRejectsWhenResultUnwritable(t *testing.T) {
 	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
@@ -378,7 +429,12 @@ func TestAuditTrailRequiredModeSpillsOversizedResponseAndRejectsWhenIngestFails(
 	}))
 	response := httptest.NewRecorder()
 	overflowRouter := gin.New()
-	overflowRouter.Use(AuditTrail(failingAuditRecorder{err: errors.New("audit store unavailable")}, slog.New(logs)))
+	// 意图事件写入成功；结果写入（含一次同步重试）与死信落库全部失败。
+	recorder := &auditRecorderScript{
+		ingestErrs: []error{nil, errors.New("audit store unavailable"), errors.New("audit store unavailable")},
+		spoolErrs:  []error{errors.New("audit dead letter unavailable")},
+	}
+	overflowRouter.Use(AuditTrail(recorder, slog.New(logs)))
 	overflowRouter.POST("/api/v1/dictionaries", func(context *gin.Context) {
 		context.Header("X-Business-Header", "value")
 		context.Status(http.StatusOK)
@@ -388,11 +444,11 @@ func TestAuditTrailRequiredModeSpillsOversizedResponseAndRejectsWhenIngestFails(
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("oversized response status = %d, want %d; body = %s", response.Code, http.StatusServiceUnavailable, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "AUDIT_WRITE_REJECTED") {
-		t.Fatalf("body = %s, want AUDIT_WRITE_REJECTED", response.Body.String())
+	if !strings.Contains(response.Body.String(), "AUDIT_RESULT_WRITE_REJECTED") {
+		t.Fatalf("body = %s, want AUDIT_RESULT_WRITE_REJECTED", response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), strings.Repeat("x", 32)) {
-		t.Fatal("spilled business response must be discarded when audit ingest fails")
+		t.Fatal("spilled business response must be discarded when the audit outcome is rejected")
 	}
 	if response.Header().Get("X-Business-Header") != "" {
 		t.Fatal("business headers must not leak to the client when the request is rejected")
@@ -483,6 +539,18 @@ func TestAuditTrailRequiredModeRejectsResponseBeyondSpillHardLimit(t *testing.T)
 	if recorder.input.Metadata["handler_status_code"] != http.StatusOK {
 		t.Fatalf("audit metadata handler_status_code = %v, want %d", recorder.input.Metadata["handler_status_code"], http.StatusOK)
 	}
+	// 业务链已执行完：超大响应只影响审计扣留，不改变业务事实是否生效，
+	// 因此必须如实说明 operation_applied，不得再对已生效的写操作谎报“未被确认”。
+	body := response.Body.String()
+	if !strings.Contains(body, `"operation_applied":"true"`) {
+		t.Fatalf("body = %s, want operation_applied=true (the business fact is committed)", body)
+	}
+	if !strings.Contains(body, `"next_action":"do_not_retry"`) {
+		t.Fatalf("body = %s, want next_action=do_not_retry", body)
+	}
+	if strings.Contains(body, "未被确认") {
+		t.Fatalf("body = %s, must not claim the operation is unconfirmed after commit", body)
+	}
 	assertNoSpillFilesLeft(t, tmp)
 }
 
@@ -495,5 +563,266 @@ func assertNoSpillFilesLeft(t *testing.T, dir string) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("spill temp files left behind in %s: %d entries", dir, len(entries))
+	}
+}
+
+// BIZ-RUNTIME-11：审计必开模式下，意图事件写不进去时业务链根本不会执行；快速失败窗口
+// 让后续重试也在业务链之前被拒绝，绝不重复执行非幂等业务写入。
+func TestAuditTrailRequiredModeFailsFastBeforeBusinessWriteAfterAuditFailure(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	businessCalls := 0
+	router := gin.New()
+	router.Use(AuditTrail(failingAuditRecorder{err: errors.New("audit store unavailable")}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		businessCalls++
+		context.String(http.StatusCreated, "business payload")
+	})
+
+	first := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if first.Code != http.StatusServiceUnavailable || !strings.Contains(first.Body.String(), "AUDIT_WRITE_REJECTED") {
+		t.Fatalf("first failure status=%d body=%s; want 503 AUDIT_WRITE_REJECTED", first.Code, first.Body.String())
+	}
+	if businessCalls != 0 {
+		t.Fatalf("intent failure must reject before the business handler, calls = %d, want 0", businessCalls)
+	}
+
+	retry := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if retry.Code != http.StatusServiceUnavailable || !strings.Contains(retry.Body.String(), "AUDIT_UNAVAILABLE") {
+		t.Fatalf("retry status=%d body=%s; want 503 AUDIT_UNAVAILABLE", retry.Code, retry.Body.String())
+	}
+	if businessCalls != 0 {
+		t.Fatalf("retry must be rejected before the business write, handler calls = %d, want 0", businessCalls)
+	}
+	if strings.Contains(retry.Body.String(), "business payload") {
+		t.Fatal("retry must not replay a business response")
+	}
+}
+
+// 快速失败只用于审计必开模式：非必开模式保持既有“审计失败仍返回业务响应”的行为，
+// 且不会因为一次失败而挡住后续请求。
+func TestAuditTrailNonRequiredModeDoesNotBlockBusinessWritesAfterAuditFailure(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "false")
+	businessCalls := 0
+	router := gin.New()
+	router.Use(AuditTrail(failingAuditRecorder{err: errors.New("audit store unavailable")}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		businessCalls++
+		context.String(http.StatusCreated, "business payload")
+	})
+	for attempt := 1; attempt <= 2; attempt++ {
+		response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+		if response.Code != http.StatusCreated || response.Body.String() != "business payload" {
+			t.Fatalf("attempt %d status=%d body=%s; want 201 business payload", attempt, response.Code, response.Body.String())
+		}
+	}
+	if businessCalls != 2 {
+		t.Fatalf("non-required mode must keep executing business writes, calls = %d, want 2", businessCalls)
+	}
+}
+
+// 快速失败窗口到期后必须重新放行，避免一次审计抖动把写入口永久关闭。
+func TestAuditGateReopensAfterCooldown(t *testing.T) {
+	gate := &auditGate{}
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	if gate.blocked(now) {
+		t.Fatal("fresh gate must not block requests")
+	}
+	gate.recordFailure(now)
+	if !gate.blocked(now) {
+		t.Fatal("gate must block requests inside the cooldown window")
+	}
+	if gate.blocked(now.Add(auditAvailabilityCooldown)) {
+		t.Fatal("gate must reopen once the cooldown elapsed")
+	}
+	gate.recordFailure(now)
+	gate.recordSuccess()
+	if gate.blocked(now) {
+		t.Fatal("successful audit write must clear the fast-fail window")
+	}
+}
+
+// 审计恢复后（窗口到期且写入成功）必须关闭快速失败窗口，业务流程继续正常完成。
+func TestAuditTrailRequiredModeResumesAfterGateReopens(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	recorder := &auditRecorderStub{}
+	gate := &auditGate{}
+	now := time.Now().UTC()
+	gate.recordFailure(now)
+	businessCalls := 0
+	router := gin.New()
+	router.Use(auditTrailHandler(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)), AuditSource{ApplicationCode: "platform", EnvironmentCode: "dev"}, gate))
+	router.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		businessCalls++
+		context.String(http.StatusCreated, "business payload")
+	})
+
+	blocked := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if blocked.Code != http.StatusServiceUnavailable || businessCalls != 0 {
+		t.Fatalf("gated request status=%d calls=%d; want 503 before business write", blocked.Code, businessCalls)
+	}
+
+	// 冷却窗口到期：允许探测，审计成功后窗口立即关闭，后续请求照常执行。
+	gate.mu.Lock()
+	gate.reopenAt = time.Now().UTC().Add(-time.Second)
+	gate.mu.Unlock()
+	if response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries"); response.Code != http.StatusCreated {
+		t.Fatalf("probe after cooldown status=%d body=%s; want 201", response.Code, response.Body.String())
+	}
+	if businessCalls != 1 {
+		t.Fatalf("probe after cooldown business calls = %d, want 1", businessCalls)
+	}
+	if gate.blocked(time.Now().UTC()) {
+		t.Fatal("successful audit write must reopen the gate")
+	}
+	if response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries"); response.Code != http.StatusCreated {
+		t.Fatalf("post-recovery status=%d body=%s; want 201", response.Code, response.Body.String())
+	}
+}
+
+// BIZ-RUNTIME-11 步骤 1+2：必开模式一次请求产生“意图 + 结果”两条事件，顺序与关联可核验。
+func TestAuditTrailRequiredModeWritesIntentBeforeHandlerAndResultAfter(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	recorder := &auditRecorderStub{}
+	router := newAuditTrailTestRouter(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if response.Code != http.StatusCreated || response.Body.String() != "business payload" {
+		t.Fatalf("status=%d body=%s; want 201 business payload", response.Code, response.Body.String())
+	}
+	if len(recorder.inputs) != 2 {
+		t.Fatalf("audit events = %d, want intent + result", len(recorder.inputs))
+	}
+	intent, result := recorder.inputs[0], recorder.inputs[1]
+	if intent.Metadata["phase"] != "intent" || intent.Result != "REQUESTED" {
+		t.Fatalf("intent event phase=%v result=%q; want intent/REQUESTED", intent.Metadata["phase"], intent.Result)
+	}
+	if intent.EventID == "" || intent.EventID == result.EventID {
+		t.Fatalf("intent event id = %q, result event id = %q; want distinct non-empty ids", intent.EventID, result.EventID)
+	}
+	if _, recorded := intent.Metadata["status_code"]; recorded {
+		t.Fatal("intent event must not claim a status code before the business handler runs")
+	}
+	if result.Metadata["phase"] != "result" || result.Metadata["correlates_to"] != intent.EventID {
+		t.Fatalf("result event phase=%v correlates_to=%v; want result/%s", result.Metadata["phase"], result.Metadata["correlates_to"], intent.EventID)
+	}
+	if result.Result != "SUCCESS" || result.Metadata["status_code"] != http.StatusCreated {
+		t.Fatalf("result event result=%q status_code=%v; want SUCCESS/%d", result.Result, result.Metadata["status_code"], http.StatusCreated)
+	}
+	if len(recorder.spooled) != 0 {
+		t.Fatalf("dead letters = %d, want 0 when both events are written", len(recorder.spooled))
+	}
+}
+
+// BIZ-RUNTIME-11 步骤 2：结果事件同步重试后仍失败 → 落审计死信，并放行业务成功响应
+// （意图事件已在库，合规成立；不再对已生效的操作谎报“未被确认”）。
+func TestAuditTrailRequiredModeDeadLettersResultAndReleasesBusinessResponse(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	businessCalls := 0
+	recorder := &auditRecorderScript{ingestErrs: []error{nil, errors.New("audit store unavailable"), errors.New("audit store unavailable")}}
+	router := gin.New()
+	router.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		businessCalls++
+		context.String(http.StatusCreated, "business payload")
+	})
+
+	response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if response.Code != http.StatusCreated || response.Body.String() != "business payload" {
+		t.Fatalf("status=%d body=%s; want 201 business payload after result spooled", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "AUDIT_WRITE_REJECTED") {
+		t.Fatal("a written intent event must not produce AUDIT_WRITE_REJECTED")
+	}
+	if businessCalls != 1 {
+		t.Fatalf("business calls = %d, want 1", businessCalls)
+	}
+	// 意图 1 次 + 结果 1 次 + 同步重试 1 次。
+	if len(recorder.ingested) != 3 || len(recorder.spooled) != 1 {
+		t.Fatalf("ingest calls = %d, spooled = %d; want 3/1", len(recorder.ingested), len(recorder.spooled))
+	}
+	intent, result := recorder.ingested[0], recorder.ingested[1]
+	deadLetter := recorder.spooled[0]
+	if deadLetter.EventID != result.EventID {
+		t.Fatalf("dead letter event id = %q, want the failed result event %q", deadLetter.EventID, result.EventID)
+	}
+	if deadLetter.Metadata["phase"] != "result" || deadLetter.Metadata["correlates_to"] != intent.EventID {
+		t.Fatalf("dead letter phase=%v correlates_to=%v; want result/%s", deadLetter.Metadata["phase"], deadLetter.Metadata["correlates_to"], intent.EventID)
+	}
+	if deadLetter.Result != "SUCCESS" || deadLetter.Metadata["status_code"] != http.StatusCreated {
+		t.Fatalf("dead letter result=%q status_code=%v; want SUCCESS/%d", deadLetter.Result, deadLetter.Metadata["status_code"], http.StatusCreated)
+	}
+	if recorder.spoolTenant[0] != "tenant-1" {
+		t.Fatalf("dead letter tenant = %q, want tenant-1", recorder.spoolTenant[0])
+	}
+}
+
+// BIZ-RUNTIME-11：意图 + 结果 + 死信全不可写时才拒绝，且必须明确 operation_applied 语义，
+// 绝不写成“未被确认”，也不引导对已生效写操作的无脑重试。
+func TestAuditTrailRequiredModeRejectsWithOperationAppliedWhenResultAndDeadLetterFail(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	businessCalls := 0
+	recorder := &auditRecorderScript{
+		ingestErrs: []error{nil, errors.New("audit store unavailable"), errors.New("audit store unavailable")},
+		spoolErrs:  []error{errors.New("audit dead letter unavailable")},
+	}
+	router := gin.New()
+	router.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		businessCalls++
+		context.String(http.StatusCreated, "business payload")
+	})
+
+	response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if businessCalls != 1 {
+		t.Fatalf("business calls = %d, want the handler to run before the result event", businessCalls)
+	}
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusServiceUnavailable, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "AUDIT_RESULT_WRITE_REJECTED") {
+		t.Fatalf("body = %s, want AUDIT_RESULT_WRITE_REJECTED", body)
+	}
+	if !strings.Contains(body, `"operation_applied":"true"`) {
+		t.Fatalf("body = %s, want operation_applied=true (the business fact is committed)", body)
+	}
+	if !strings.Contains(body, `"next_action":"do_not_retry"`) {
+		t.Fatalf("body = %s, want next_action=do_not_retry for an applied write", body)
+	}
+	if !strings.Contains(body, `"handler_status_code":"201"`) {
+		t.Fatalf("body = %s, want handler_status_code=201", body)
+	}
+	if strings.Contains(body, "未被确认") {
+		t.Fatalf("body = %s, must not claim the operation is unconfirmed once it was applied", body)
+	}
+	if strings.Contains(body, "business payload") {
+		t.Fatal("rejected response must not leak the buffered business payload")
+	}
+}
+
+// 非必开模式行为不变：每次请求仍只有一条终态通用轨迹事件，没有 phase/correlates_to，
+// 也不走死信路径。
+func TestAuditTrailNonRequiredModeWritesSingleEventWithoutPhase(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "false")
+	recorder := &auditRecorderStub{}
+	router := newAuditTrailTestRouter(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+	if response.Code != http.StatusCreated || response.Body.String() != "business payload" {
+		t.Fatalf("status=%d body=%s; want 201 business payload", response.Code, response.Body.String())
+	}
+	if len(recorder.inputs) != 1 {
+		t.Fatalf("audit events = %d, want exactly one generic event in non-required mode", len(recorder.inputs))
+	}
+	event := recorder.inputs[0]
+	if _, recorded := event.Metadata["phase"]; recorded {
+		t.Fatalf("non-required mode event must not carry metadata.phase: %v", event.Metadata["phase"])
+	}
+	if _, recorded := event.Metadata["correlates_to"]; recorded {
+		t.Fatalf("non-required mode event must not carry metadata.correlates_to: %v", event.Metadata["correlates_to"])
+	}
+	if event.Result != "SUCCESS" || event.Metadata["status_code"] != http.StatusCreated {
+		t.Fatalf("event result=%q status_code=%v; want SUCCESS/%d", event.Result, event.Metadata["status_code"], http.StatusCreated)
+	}
+	if len(recorder.spooled) != 0 {
+		t.Fatalf("dead letters = %d, want 0 in non-required mode", len(recorder.spooled))
 	}
 }

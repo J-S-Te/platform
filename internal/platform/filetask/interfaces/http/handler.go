@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,8 +25,10 @@ import (
 )
 
 const (
-	maxJSONRequestBytes   = 320 * 1024
-	maxUploadRequestBytes = 21 << 20 // 默认策略 20MiB 加 multipart 编码开销。
+	maxJSONRequestBytes = 320 * 1024
+	// maxUploadRequestBytes 是策略表中最大用途上限（20MiB）加 multipart 编码开销；
+	// v1 已无“无策略上传”通道，per-purpose 更小的上限由策略校验拒绝（BIZ-XAPI-11）。
+	maxUploadRequestBytes = 21 << 20
 	// v1MaxConcurrentFileOps 是 v1 上传/下载的每实例并发上限（AUD-2026-025）。v1 路径经
 	// ParseMultipartForm 缓冲整个请求体、服务层再整段读入校验（最坏约两份 20MiB 缓冲），
 	// 与 v2 会话路径按申报大小流式落盘不同，故 v2 不加该信号量。上限取常量以约束单实例
@@ -146,26 +150,28 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	classification := strings.TrimSpace(request.FormValue("classification"))
-	purpose := strings.TrimSpace(request.FormValue("purpose"))
-	namespace := ""
-	policyVersion, retentionClass := "", ""
+	purposeKey := strings.TrimSpace(request.FormValue("purpose"))
+	// 用途必填（BIZ-XAPI-11）：空 purpose 会让 v1 上传退化成“无策略通道”，既不做
+	// 媒体白名单也不做 per-purpose 大小校验。历史裸上传必须改用策略表中显式登记的
+	// 用途键（如结算报表导出的 settlement.report.export），禁止在这里静默放行。
+	if purposeKey == "" {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		return
+	}
+	resolved, exists := uploadPolicies[purposeKey]
+	if !exists || !validPurposeApplication(principal.Account.Code, resolved.Namespace) {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
+	// 所有登记 purpose 一律执行所属策略的媒体白名单与大小上限，而不是只对两个
+	// 合同 purpose 生效（BIZ-XAPI-11）：策略表是 v1/v2 共用的唯一事实源，未登记
+	// purpose 在上一行已经失败关闭。
+	namespace, purpose := resolved.Namespace, resolved.Purpose
+	policyVersion, retentionClass := v2PolicyVersion, "LONG_TERM"
 	var retentionUntil *time.Time
-	var strictPolicy *uploadPolicy
-	if purpose != "" {
-		selected, exists := uploadPolicies[purpose]
-		if !exists || !validPurposeApplication(principal.Account.Code, selected.Namespace) {
-			httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
-			return
-		}
-		if purpose == "contract.external.pdf-source" || purpose == "contract.import.source" {
-			strictPolicy = &selected
-		}
-		namespace, purpose = selected.Namespace, selected.Purpose
-		policyVersion, retentionClass = v2PolicyVersion, "LONG_TERM"
-		if selected.Temporary {
-			value := time.Now().UTC().Add(24 * time.Hour)
-			retentionUntil, retentionClass = &value, "TEMPORARY"
-		}
+	if resolved.Temporary {
+		value := time.Now().UTC().Add(24 * time.Hour)
+		retentionUntil, retentionClass = &value, "TEMPORARY"
 	}
 	fileContent, fileHeader, err := request.FormFile("file")
 	if err != nil {
@@ -173,13 +179,9 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	defer fileContent.Close()
-	if strictPolicy != nil {
-		mediaType, _, mimeErr := mime.ParseMediaType(fileHeader.Header.Get("Content-Type"))
-		_, allowed := strictPolicy.Media[mediaType]
-		if mimeErr != nil || !allowed || fileHeader.Size <= 0 || uint64(fileHeader.Size) > strictPolicy.MaxBytes {
-			httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
-			return
-		}
+	if err := enforceUploadPolicy(fileHeader, resolved); err != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		return
 	}
 
 	file, err := handler.files.Upload(request.Context(), application.UploadInput{
@@ -206,6 +208,28 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 	}
 	handler.auditFileAccess(request.Context(), principal.Tenant.ID, applicationID, file.ID, principal.User.ID, principal.SessionID, "UPLOAD_COMPLETED", "SUCCESS", request.Header.Get("X-Request-ID"))
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "文件上传成功", fileToResponse(file))
+}
+
+// enforceUploadPolicy 把目的策略的媒体白名单与大小上限应用到 v1 上传。策略表是
+// v1/v2 共用的唯一事实源：任何登记 purpose 都必须命中白名单且不超过该 purpose 的
+// 实际上限，未登记 purpose 由查表阶段失败关闭（BIZ-XAPI-11）。
+func enforceUploadPolicy(header *multipart.FileHeader, selected uploadPolicy) error {
+	if header == nil {
+		return errors.New("upload policy requires a file part")
+	}
+	// 声明媒体与 v2 会话路径使用同一归一函数：去参数并小写，避免 "Application/PDF"
+	// 之类的大小写/参数差异让白名单判断放行实际不在策略内的类型。
+	mediaType := canonicalMedia(header.Header.Get("Content-Type"))
+	if mediaType == "" {
+		return fmt.Errorf("declared media type %q is not parseable", header.Header.Get("Content-Type"))
+	}
+	if _, allowed := selected.Media[mediaType]; !allowed {
+		return fmt.Errorf("media type %q is not allowed for this purpose", mediaType)
+	}
+	if header.Size <= 0 || uint64(header.Size) > selected.MaxBytes {
+		return fmt.Errorf("upload size %d is outside the purpose policy", header.Size)
+	}
+	return nil
 }
 
 // Download 在打开二进制前校验租户与属主/权限访问。绝不向调用方返回存储路径、
@@ -286,6 +310,13 @@ func bindingOperator(principal authctx.Principal) string {
 	return strings.TrimSpace(principal.Account.ID)
 }
 
+// applicationMachinePrincipal 判定调用方是否为应用机器主体：应用机器令牌只携带应用
+// 身份，没有平台用户主体（见 cmd/file-gateway/auth.go 的令牌装配）；浏览器/用户主体
+// 始终带 User.ID。归属校验只对前者收紧，避免破坏既有浏览器运营路径。
+func applicationMachinePrincipal(principal authctx.Principal) bool {
+	return strings.TrimSpace(principal.Account.ID) != "" && strings.TrimSpace(principal.User.ID) == ""
+}
+
 // UnbindFile 停用指定资源绑定，保留数据库记录用于后续审计与排障。
 func (handler *Handler) UnbindFile(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
@@ -300,6 +331,8 @@ func (handler *Handler) UnbindFile(writer http.ResponseWriter, request *http.Req
 }
 
 // CreateJob 排队一个应用自有任务。只有注册的 worker 才能解析其 payload。
+// 应用机器主体只能为自己的应用建任务，不能借请求体 application_id 冒充其他应用归属；
+// 浏览器主体（带平台用户身份）沿用既有行为，仍可按权限为指定应用建任务。
 func (handler *Handler) CreateJob(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := handler.principal(writer, request)
 	if !ok {
@@ -309,13 +342,18 @@ func (handler *Handler) CreateJob(writer http.ResponseWriter, request *http.Requ
 	if !decodeJSON(writer, request, &payload) {
 		return
 	}
+	applicationID := strings.TrimSpace(payload.ApplicationID)
+	if applicationMachinePrincipal(principal) && applicationID != "" && applicationID != strings.TrimSpace(principal.Account.ID) {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
 	headerIdempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
 	if headerIdempotencyKey != "" && strings.TrimSpace(payload.IdempotencyKey) != "" && headerIdempotencyKey != strings.TrimSpace(payload.IdempotencyKey) {
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
 		return
 	}
 	job, err := handler.jobs.Enqueue(request.Context(), application.JobCreateInput{
-		TenantID: principal.Tenant.ID, ApplicationID: payload.ApplicationID, JobType: payload.JobType,
+		TenantID: principal.Tenant.ID, ApplicationID: applicationID, JobType: payload.JobType,
 		AggregateType: payload.AggregateType, AggregateID: payload.AggregateID, Payload: payload.Payload,
 		IdempotencyKey: firstNonEmpty(headerIdempotencyKey, payload.IdempotencyKey),
 		RequestID:      requestctx.RequestID(request.Context()), TraceID: requestctx.TraceID(request.Context()),

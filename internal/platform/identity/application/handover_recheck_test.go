@@ -110,7 +110,7 @@ func TestReviewInventoryFailureMustNotProveHandoverComplete(t *testing.T) {
 
 type reviewDiscoveryFailureClient struct{ handoverFakeClient }
 
-func (*reviewDiscoveryFailureClient) Responsibilities(context.Context, string, string, int) (HandoverResponsibilityPage, error) {
+func (*reviewDiscoveryFailureClient) Responsibilities(context.Context, string, string, string, int) (HandoverResponsibilityPage, error) {
 	return HandoverResponsibilityPage{}, errors.New("page unavailable")
 }
 

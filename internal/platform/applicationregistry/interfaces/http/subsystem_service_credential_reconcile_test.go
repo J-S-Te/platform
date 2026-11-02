@@ -261,12 +261,14 @@ func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *te
 		"settlement-prod-notification-publisher": {"notification.ingest"},
 		"settlement-prod-owner-directory":        {"owner_directory.read"},
 		"settlement-prod-project-reference":      {"settlement.project_reference.read"},
+		"settlement-prod-crm-credit-ingest":      {"customer.credit.payment.ingest"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
 		application.ServiceCredentialAuditIngest:                    "new-secret",
 		application.ServiceCredentialSettlementProjectReferenceRead: "new-secret",
 		application.ServiceCredentialNotificationIngest:             "new-secret",
 		application.ServiceCredentialOwnerDirectoryRead:             "new-secret",
+		application.ServiceCredentialCRMCreditPaymentIngest:         "new-secret",
 		application.ServiceCredentialFileGatewayWrite:               "retry-secret",
 	})
 }
@@ -424,6 +426,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 		"contract_management-prod-crm-contract-reference":        {"customer.contract_reference.read"},
 		"contract_management-prod-settlement-integration":        {"settlement.contract.ingest"},
 		"contract_management-prod-project-integration":           {"project.contract.import"},
+		"contract_management-prod-crm-contract-link":              {"opportunity.signed.write"},
 		"contract_management-prod-file-gateway-writer":           {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
@@ -434,6 +437,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsContractOwnerDirectory(t *testin
 		application.ServiceCredentialCRMContractReferenceRead:           "new-secret",
 		application.ServiceCredentialSettlementContractIngest:           "new-secret",
 		application.ServiceCredentialProjectContractImport:              "new-secret",
+		application.ServiceCredentialCRMContractLinkWrite:               "new-secret",
 		application.ServiceCredentialFileGatewayWrite:                   "new-secret",
 	})
 }
@@ -519,6 +523,7 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		"contract_management-prod-crm-contract-reference":        {"customer.contract_reference.read"},
 		"contract_management-prod-settlement-integration":        {"settlement.contract.ingest"},
 		"contract_management-prod-project-integration":           {"project.contract.import"},
+		"contract_management-prod-crm-contract-link":              {"opportunity.signed.write"},
 		"contract_management-prod-file-gateway-writer":           {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
@@ -529,6 +534,7 @@ func TestEnsureUpdateServiceCredentialsRetryIssuesRecoverableSecret(t *testing.T
 		application.ServiceCredentialCRMContractReferenceRead:           "new-secret",
 		application.ServiceCredentialSettlementContractIngest:           "new-secret",
 		application.ServiceCredentialProjectContractImport:              "new-secret",
+		application.ServiceCredentialCRMContractLinkWrite:               "new-secret",
 		application.ServiceCredentialFileGatewayWrite:                   "new-secret",
 	})
 }

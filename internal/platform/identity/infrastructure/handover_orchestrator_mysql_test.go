@@ -45,18 +45,18 @@ func newFakeHandoverSystem(resources ...string) *fakeHandoverSystem {
 
 func (system *fakeHandoverSystem) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	switch {
-	case request.Method == http.MethodPost && request.URL.Path == "/internal/handover/freeze":
+	case request.Method == http.MethodPost && request.URL.Path == "/internal/v1/handover/freeze":
 		system.mutex.Lock()
 		system.frozen = true
 		count := len(system.responsibilities)
 		system.mutex.Unlock()
 		writeJSON(writer, map[string]any{"system": "contract", "frozen": true, "responsibility_count": count})
-	case request.Method == http.MethodGet && request.URL.Path == "/internal/handover/responsibilities":
+	case request.Method == http.MethodGet && request.URL.Path == "/internal/v1/handover/responsibilities":
 		system.mutex.Lock()
 		items := append([]application.HandoverResponsibility(nil), system.responsibilities...)
 		system.mutex.Unlock()
 		writeJSON(writer, map[string]any{"system": "contract", "items": items})
-	case request.Method == http.MethodPost && request.URL.Path == "/internal/handover/transfers":
+	case request.Method == http.MethodPost && request.URL.Path == "/internal/v1/handover/transfers":
 		var body struct {
 			ItemID          string `json:"item_id"`
 			ResourceID      string `json:"resource_id"`
@@ -84,7 +84,7 @@ func (system *fakeHandoverSystem) ServeHTTP(writer http.ResponseWriter, request 
 		}
 		system.transfers[body.IdempotencyKey] = receipt
 		writeJSON(writer, receipt)
-	case request.Method == http.MethodGet && len(request.URL.Path) > len("/internal/handover/transfers/"):
+	case request.Method == http.MethodGet && len(request.URL.Path) > len("/internal/v1/handover/transfers/"):
 		key := request.URL.Query().Get("idempotency_key")
 		system.mutex.Lock()
 		receipt, ok := system.transfers[key]
@@ -95,7 +95,7 @@ func (system *fakeHandoverSystem) ServeHTTP(writer http.ResponseWriter, request 
 			return
 		}
 		writeJSON(writer, receipt)
-	case request.Method == http.MethodPost && request.URL.Path == "/internal/handover/complete":
+	case request.Method == http.MethodPost && request.URL.Path == "/internal/v1/handover/complete":
 		var body struct {
 			Outcome string `json:"outcome"`
 		}
@@ -152,7 +152,8 @@ func handoverEndToEndService(t *testing.T, server *httptest.Server, capability s
 func handoverEndToEndClient(t *testing.T, server *httptest.Server) *infrastructure.HandoverHTTPClient {
 	t.Helper()
 	client, err := infrastructure.NewHandoverHTTPClient(infrastructure.HandoverHTTPClientConfig{
-		System: "contract", BaseURL: server.URL, MachineToken: "machine-token-value",
+		System: "contract", BaseURL: server.URL,
+		TokenSource:     func(tenantID string) (string, error) { return "application-jwt-for-" + tenantID, nil },
 		ApplicationCode: "platform", Environment: "prod", Timeout: 5 * time.Second,
 		RequestID: func() (string, error) { return ulid.Generator{}.New(time.Now().UTC()) },
 	})

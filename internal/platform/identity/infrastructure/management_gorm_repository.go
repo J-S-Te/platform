@@ -26,6 +26,7 @@ func (repository *GORMRepository) ListUsers(ctx context.Context, tenantID string
 	}
 	database := applyUserFilter(repository.database.WithContext(ctx).Model(&userModel{}).
 		Where("EXISTS (SELECT 1 FROM iam_membership AS membership WHERE membership.tenant_id = iam_user.tenant_id AND membership.user_id = iam_user.id)"), tenantID, query)
+	database = applyUserManagementScope(database, query)
 	database = excludeBootstrapUser(database, identity, initialized)
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
@@ -371,7 +372,18 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 			return application.ErrVersionConflict
 		}
 		if input.Status != nil && *input.Status == domain.StatusDisabled && existing.Status != domain.StatusDisabled {
-			accountIDs := transaction.Model(&accountModel{}).Select("id").Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID)
+			accountIDs, err := managementUserAccountIDs(transaction, input.TenantID, input.UserID)
+			if err != nil {
+				return err
+			}
+			// 停用用户必须先做与离职执行一致的完整撤销：平台会话、OAuth 刷新令牌族、未消费
+			// 授权码以及 RP Back-Channel Logout。仅更新 iam_session 会让已停用账号的子系统
+			// 会话与可刷新的 ID/访问令牌继续存活。撤销与业务写入同事务，任一失败全部回滚。
+			for _, accountID := range accountIDs {
+				if _, err := repository.revokeAccountSessionsTx(transaction, input.TenantID, accountID, now, "USER_DISABLED"); err != nil {
+					return err
+				}
+			}
 			if err := transaction.Model(&accountModel{}).Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID).
 				Updates(map[string]any{"username": nil, "status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return mapWriteError(err, "disable user accounts")
@@ -433,6 +445,7 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 		}
 
 		now := time.Now().UTC()
+		reason := "USER_DELETED"
 		if err := transaction.Model(&userModel{}).Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.UserID, input.Version).
 			Updates(map[string]any{
 				"status": domain.StatusDisabled, "primary_org_id": nil, "deleted_at": now, "deleted_by": input.OperatorID, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1"),
@@ -440,8 +453,17 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 			return mapWriteError(err, "delete user")
 		}
 
-		accountIDs := transaction.Model(&accountModel{}).Select("id").
-			Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID)
+		accountIDs, err := managementUserAccountIDs(transaction, input.TenantID, input.UserID)
+		if err != nil {
+			return err
+		}
+		// 与停用用户一致：业务删除必须先做完整撤销（会话、OAuth 刷新令牌族、未消费授权码、
+		// RP Back-Channel Logout），否则被删用户的子系统 SSO 会话与可刷新令牌仍可继续访问。
+		for _, accountID := range accountIDs {
+			if _, err := repository.revokeAccountSessionsTx(transaction, input.TenantID, accountID, now, reason); err != nil {
+				return err
+			}
+		}
 		if err := transaction.Model(&accountModel{}).
 			Where("tenant_id = ? AND user_id = ?", input.TenantID, input.UserID).
 			Updates(map[string]any{"username": nil, "status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
@@ -457,7 +479,6 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 			Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "updated_at": now, "updated_by": input.OperatorID, "version": gorm.Expr("version + 1")}).Error; err != nil {
 			return mapWriteError(err, "disable user memberships")
 		}
-		reason := "USER_DELETED"
 		if err := transaction.Model(&sessionModel{}).
 			Where("tenant_id = ? AND account_id IN (?) AND status = ? AND revoked_at IS NULL", input.TenantID, accountIDs, domain.StatusActive).
 			Updates(map[string]any{"status": domain.StatusDisabled, "revoked_at": now, "revoke_reason": reason}).Error; err != nil {
@@ -477,6 +498,7 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 		return application.PageResult[domain.Account]{}, err
 	}
 	database := applyAccountFilter(repository.database.WithContext(ctx).Model(&accountModel{}), tenantID, query)
+	database = applyAccountManagementScope(database, query)
 	database = excludeBootstrapAccount(database, identity, initialized)
 	var total int64
 	if err := database.Count(&total).Error; err != nil {
@@ -572,6 +594,12 @@ func (repository *GORMRepository) UpdateAccount(ctx context.Context, input appli
 		// 即使重新启用也必须重新认证。这里保留泛化的非 ACTIVE 判断，供后续锁定生命周期复用。
 		validityNowExpired := input.UpdateValidity && input.ValidUntil != nil && !input.ValidUntil.After(now)
 		if existing.Status == domain.StatusActive && (input.Status != domain.StatusActive || validityNowExpired) {
+			// 与停用用户/离职执行一致：除了平台会话，还必须撤销该账号派生的 OAuth 刷新令牌族
+			// 与未消费授权码，并为已登录 RP 入队 Back-Channel Logout，否则停用账号仍可用旧刷新
+			// 令牌换发子系统令牌。撤销与账号写入同事务，任一失败全部回滚。
+			if _, err := repository.revokeAccountSessionsTx(transaction, input.TenantID, input.AccountID, now, "ACCOUNT_STATUS_CHANGED"); err != nil {
+				return err
+			}
 			result = transaction.Model(&sessionModel{}).
 				Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", input.TenantID, input.AccountID, domain.StatusActive).
 				Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "ACCOUNT_STATUS_CHANGED"})
@@ -654,9 +682,13 @@ func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, t
 				Updates(map[string]any{"status": domain.StatusDisabled, "is_primary": false, "updated_at": now, "updated_by": nil, "version": gorm.Expr("version + 1")}).Error; err != nil {
 				return mapWriteError(err, "disable external user memberships")
 			}
-			if err := transaction.Model(&sessionModel{}).Where("tenant_id = ? AND account_id IN ? AND status = ? AND revoked_at IS NULL", tenantID, accountIDs, domain.StatusActive).
-				Updates(map[string]any{"status": "REVOKED", "revoked_at": now, "revoke_reason": "EXTERNAL_ACCOUNT_DISABLED"}).Error; err != nil {
-				return fmt.Errorf("revoke external user sessions: %w", err)
+			// 与停用用户/账号/离职执行保持一致：外部提供方停用后，除了平台会话，还必须撤销
+			// 该账号派生的 OAuth 刷新令牌族、刷新令牌与未消费授权码，并为已登录 RP 入队
+			// Back-Channel Logout，否则外部停用的账号仍能用旧刷新令牌换发子系统令牌。
+			// 撤销与账号写入同事务，任一账号失败都回滚整个对账。撤销语句只命中仍有效的
+			// 派生物，因此重复对账不会报错。
+			if err := repository.revokeExternallyDisabledAccountSessionsTx(transaction, tenantID, accountIDs, now); err != nil {
+				return err
 			}
 		}
 		if changed {
@@ -664,6 +696,25 @@ func (repository *GORMRepository) DisableExternalIdentity(ctx context.Context, t
 		}
 		return nil
 	})
+}
+
+// externalAccountDisabledReason 是外部提供方停用对账写入撤销原因的固定取值，供审计与
+// 排障区分“外部来源停用”和平台侧停用/离职。
+const externalAccountDisabledReason = "EXTERNAL_ACCOUNT_DISABLED"
+
+// revokeExternallyDisabledAccountSessionsTx 在外部停用对账的同一事务内，对每个受影响的账号
+// 执行与 IAM-02 一致的完整撤销：平台会话、OAuth 刷新令牌族与刷新令牌、未消费授权码，以及
+// 面向已登录 RP 的 Back-Channel Logout 投递任务。
+//
+// 它必须是调用方事务的句柄：任一账号撤销失败都要让整个停用对账回滚。撤销条件只命中仍然
+// 有效的行，所以对账重复执行是幂等的，不会因为会话已 REVOKED 而报错。
+func (repository *GORMRepository) revokeExternallyDisabledAccountSessionsTx(transaction *gorm.DB, tenantID string, accountIDs []string, now time.Time) error {
+	for _, accountID := range accountIDs {
+		if _, err := repository.revokeAccountSessionsTx(transaction, tenantID, accountID, now, externalAccountDisabledReason); err != nil {
+			return fmt.Errorf("revoke externally disabled account sessions: %w", err)
+		}
+	}
+	return nil
 }
 
 func (repository *GORMRepository) versionedAccountError(ctx context.Context, tenantID, accountID string) error {
@@ -1623,6 +1674,120 @@ func applyManagementAuthorizationScope(database *gorm.DB, query application.Page
 
 func pageOffset(query application.PageRequest) int {
 	return (query.Page - 1) * query.PageSize
+}
+
+// applyUserManagementScope 把受限数据管理范围下推为用户的有效任职组织谓词。Count 与 Items
+// 必须使用同一口径，因此调用方在分页与计数之前一次性应用它。
+//
+// 资源级（RESOURCE）范围不映射到用户：资源 ID 可能是组织、岗位、任职或任意受管对象，
+// 无法可靠还原为人员归属，安全默认是只在组织范围成立时放行；仅含资源绑定的受限调用者
+// 因此看不到/管理不了任何用户。授权组织已在解析阶段展开到全部后代，这里只做精确匹配。
+func applyUserManagementScope(database *gorm.DB, query application.PageRequest) *gorm.DB {
+	if !query.ScopeRestricted {
+		return database
+	}
+	predicate, arguments := effectiveMembershipScopePredicate("iam_user.tenant_id", "iam_user.id", query)
+	return database.Where(predicate, arguments...)
+}
+
+// applyAccountManagementScope 把受限数据管理范围下推为账号属主用户的有效任职组织谓词。
+// 没有属主用户的服务账号不属于任何组织范围，受限调用者不得列出或管理它们。
+func applyAccountManagementScope(database *gorm.DB, query application.PageRequest) *gorm.DB {
+	if !query.ScopeRestricted {
+		return database
+	}
+	predicate, arguments := effectiveMembershipScopePredicate("iam_account.tenant_id", "iam_account.user_id", query)
+	return database.Where(predicate, arguments...)
+}
+
+// effectiveMembershipScopePredicate 生成“目标用户存在有效任职于授权组织”的范围谓词。
+// userColumn 指向待判定的用户列（用户表主键，或账号表的属主用户列）。范围为空或仅含资源
+// 绑定时没有可匹配的组织，必须显式失败关闭而不是退化为全租户。
+func effectiveMembershipScopePredicate(tenantColumn, userColumn string, query application.PageRequest) (string, []any) {
+	if len(query.AllowedOrgUnitIDs) == 0 {
+		return "1 = 0", nil
+	}
+	now := time.Now().UTC()
+	predicate := "EXISTS (SELECT 1 FROM iam_membership AS scope_membership" +
+		" WHERE scope_membership.tenant_id = " + tenantColumn +
+		" AND scope_membership.user_id = " + userColumn +
+		" AND scope_membership.status = ?" +
+		" AND (scope_membership.valid_from IS NULL OR scope_membership.valid_from <= ?)" +
+		" AND (scope_membership.valid_until IS NULL OR scope_membership.valid_until > ?)" +
+		" AND scope_membership.org_unit_id IN ?)"
+	return predicate, []any{domain.StatusActive, now, now, query.AllowedOrgUnitIDs}
+}
+
+// UserScopeOrgUnitIDs 返回用户当前有效任职的组织单元，供 HTTP 适配器按 ID 判定管理范围。
+// 组织范围在解析阶段包含后代，因此这里返回精确任职组织即可；用户不存在时返回 ErrNotFound，
+// 调用方据此按无权限拒绝，避免泄露范围外对象是否存在。
+func (repository *GORMRepository) UserScopeOrgUnitIDs(ctx context.Context, tenantID, userID string) ([]string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	userID = strings.TrimSpace(userID)
+	if tenantID == "" || userID == "" {
+		return nil, application.ErrValidation
+	}
+	var found int64
+	if err := repository.database.WithContext(ctx).Model(&userModel{}).
+		Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", tenantID, userID).
+		Count(&found).Error; err != nil {
+		return nil, fmt.Errorf("check user management scope target: %w", err)
+	}
+	if found == 0 {
+		return nil, application.ErrNotFound
+	}
+	var orgUnitIDs []string
+	if err := effectiveMembershipQuery(repository.database.WithContext(ctx), tenantID, userID, time.Now().UTC()).
+		Distinct().Pluck("org_unit_id", &orgUnitIDs).Error; err != nil {
+		return nil, fmt.Errorf("load user effective membership organizations: %w", err)
+	}
+	return orgUnitIDs, nil
+}
+
+// effectiveMembershipQuery 是“用户当前有效任职”的唯一定义：状态 ACTIVE 且落在有效窗口内。
+// 列表范围谓词、按 ID 范围判定和人员目录都复用同一套条件，避免两处口径漂移。
+func effectiveMembershipQuery(database *gorm.DB, tenantID, userID string, now time.Time) *gorm.DB {
+	return database.Model(&membershipModel{}).
+		Where("tenant_id = ? AND user_id = ? AND status = ?", tenantID, userID, domain.StatusActive).
+		Where("valid_from IS NULL OR valid_from <= ?", now.UTC()).
+		Where("valid_until IS NULL OR valid_until > ?", now.UTC())
+}
+
+// AccountScopeOrgUnitIDs 返回账号的权威组织归属：经其属主用户的当前有效任职。没有属主
+// 用户的服务账号不属于任何组织范围，返回空集合（调用方按范围外拒绝）。
+func (repository *GORMRepository) AccountScopeOrgUnitIDs(ctx context.Context, tenantID, accountID string) ([]string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	accountID = strings.TrimSpace(accountID)
+	if tenantID == "" || accountID == "" {
+		return nil, application.ErrValidation
+	}
+	var row accountModel
+	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
+	result := repository.database.WithContext(ctx).Select("id", "user_id").
+		Where("tenant_id = ? AND id = ?", tenantID, accountID).
+		Where(ownerClause, ownerArgs...).
+		Take(&row)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, application.ErrNotFound
+	}
+	if result.Error != nil {
+		return nil, fmt.Errorf("load account management scope target: %w", result.Error)
+	}
+	if row.UserID == nil || strings.TrimSpace(*row.UserID) == "" {
+		return nil, nil
+	}
+	return repository.UserScopeOrgUnitIDs(ctx, tenantID, strings.TrimSpace(*row.UserID))
+}
+
+// managementUserAccountIDs 列出用户下的全部账号 ID，供停用/删除时逐个执行完整撤销。
+func managementUserAccountIDs(transaction *gorm.DB, tenantID, userID string) ([]string, error) {
+	var accountIDs []string
+	if err := transaction.Model(&accountModel{}).
+		Where("tenant_id = ? AND user_id = ?", tenantID, userID).
+		Pluck("id", &accountIDs).Error; err != nil {
+		return nil, fmt.Errorf("list user accounts for revocation: %w", err)
+	}
+	return accountIDs, nil
 }
 
 func toAccountWithFallbackName(model accountModel) domain.Account {

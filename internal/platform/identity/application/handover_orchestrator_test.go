@@ -164,12 +164,15 @@ func (r *handoverFakeRepository) ListItems(context.Context, string, string) ([]H
 type handoverFakeClient struct {
 	calls            []string
 	responsibilities []HandoverResponsibility
-	transfer         HandoverTransferReceipt
-	transferErr      error
-	receipt          HandoverTransferReceipt
-	receiptErr       error
-	finishOutcomes   []string
-	freezeFails      bool
+	// responsibilityUserIDs 记录每次 responsibilities 收到的离职人 userID，用于钉住
+	// "发现必须带批次 userID"这一跨系统契约。
+	responsibilityUserIDs []string
+	transfer              HandoverTransferReceipt
+	transferErr           error
+	receipt               HandoverTransferReceipt
+	receiptErr            error
+	finishOutcomes        []string
+	freezeFails           bool
 }
 
 func (c *handoverFakeClient) Freeze(context.Context, HandoverFreezeRequest) (HandoverFreezeResponse, error) {
@@ -179,8 +182,9 @@ func (c *handoverFakeClient) Freeze(context.Context, HandoverFreezeRequest) (Han
 	}
 	return HandoverFreezeResponse{Frozen: true}, nil
 }
-func (c *handoverFakeClient) Responsibilities(context.Context, string, string, int) (HandoverResponsibilityPage, error) {
+func (c *handoverFakeClient) Responsibilities(_ context.Context, _, userID, _ string, _ int) (HandoverResponsibilityPage, error) {
 	c.calls = append(c.calls, "responsibilities")
+	c.responsibilityUserIDs = append(c.responsibilityUserIDs, userID)
 	return HandoverResponsibilityPage{Items: c.responsibilities}, nil
 }
 func (c *handoverFakeClient) Transfer(context.Context, HandoverTransferRequest) (HandoverTransferReceipt, error) {
@@ -246,6 +250,30 @@ func TestStartFreezesBeforeDiscoveryAndSkipsNotInstalled(t *testing.T) {
 	}
 	if batch.Status == HandoverBatchBlocked {
 		t.Fatal("not-installed systems must not block the batch")
+	}
+}
+
+// TestStartDiscoversResponsibilitiesForTheLeaverUserID 钉住发现阶段的过滤条件：编排器必须把
+// 批次的离职人 userID 传给每个系统的 responsibilities 调用（合同、CRM、项目、结算都以
+// user_id 为必填查询参数），不得留空。
+func TestStartDiscoversResponsibilitiesForTheLeaverUserID(t *testing.T) {
+	repository := newHandoverFakeRepository()
+	contract := &handoverFakeClient{responsibilities: []HandoverResponsibility{{System: "contract", ResourceType: "contract", ResourceID: "c-1", OwnerUserID: "user-leaver", Version: 3}}}
+	settlement := &handoverFakeClient{}
+	orchestrator := handoverOrchestratorFor(t, repository,
+		handoverFakeInventory{states: []HandoverSystemState{
+			{System: "contract", Capability: HandoverSystemApplicable},
+			{System: "settlement", Capability: HandoverSystemApplicable},
+		}},
+		map[string]HandoverSystemClient{"contract": contract, "settlement": settlement})
+
+	if _, err := orchestrator.Start(context.Background(), "tenant-1", "request-1", "user-leaver"); err != nil {
+		t.Fatal(err)
+	}
+	for system, client := range map[string]*handoverFakeClient{"contract": contract, "settlement": settlement} {
+		if len(client.responsibilityUserIDs) != 1 || client.responsibilityUserIDs[0] != "user-leaver" {
+			t.Fatalf("%s responsibilities user ids = %v, want the batch leaver user-leaver", system, client.responsibilityUserIDs)
+		}
 	}
 }
 

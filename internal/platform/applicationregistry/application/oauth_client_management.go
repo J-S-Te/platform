@@ -175,6 +175,12 @@ type OAuthClientDisableInput struct {
 }
 
 // OAuthClientSecretCreateInput 追加一枚可并发生效的 Secret。
+//
+// PreviousSecretPolicy 决定同一事务内如何处置该客户端既有的 ACTIVE Secret：
+// 零值（KEEP）保持既有“只追加”语义，旧值继续可用——这是默认行为，保证现网
+// 客户端与受控更新窗口不受影响；REVOKE 立即吊销旧值；GRACE 把旧值有效期收紧
+// 到 PreviousSecretGrace 窗口内，给已下发但尚未重启的消费者留出有上限的过渡期。
+// 无论哪种策略，处置都只改状态/有效期、不删除凭据行，因此保留可核对的审计痕迹。
 type OAuthClientSecretCreateInput struct {
 	TenantID      string
 	OAuthClientID string
@@ -183,6 +189,56 @@ type OAuthClientSecretCreateInput struct {
 	// ExpectedClientVersion 在完成租户/应用/环境/scope 核验后，为受控的按用途
 	// 重新交付提供围栏；nil 表示沿用旧 API 的无围栏语义。
 	ExpectedClientVersion *uint64
+	// PreviousSecretPolicy 覆盖服务级默认的旧 Secret 处置策略；空值沿用默认。
+	PreviousSecretPolicy OAuthClientSecretRetirementPolicy
+	// PreviousSecretGrace 是 GRACE 策略下旧 Secret 的剩余有效期，必须为正且不超过
+	// maxRotationOverlap；REVOKE/KEEP 下必须为空。
+	PreviousSecretGrace time.Duration
+}
+
+// OAuthClientSecretRetirementPolicy 是签发新 Secret 时对既有 ACTIVE Secret 的处置策略。
+// 旧实现只会追加新 Secret（KEEP），旧值永久可用，退役容器或泄露的旧环境变量仍能换令牌。
+type OAuthClientSecretRetirementPolicy string
+
+const (
+	// OAuthClientSecretRetirementKeep 保留既有 ACTIVE Secret（默认，兼容既有客户端）。
+	OAuthClientSecretRetirementKeep OAuthClientSecretRetirementPolicy = ""
+	// OAuthClientSecretRetirementRevoke 在同一事务内立即吊销既有 ACTIVE Secret。
+	OAuthClientSecretRetirementRevoke OAuthClientSecretRetirementPolicy = "REVOKE"
+	// OAuthClientSecretRetirementGrace 在同一事务内把既有 ACTIVE Secret 的有效期
+	// 收紧到宽限窗口（不会延长原本更早到期的密钥）。
+	OAuthClientSecretRetirementGrace OAuthClientSecretRetirementPolicy = "GRACE"
+)
+
+// OAuthClientSecretRetirement 是运维可选开启的旧 Secret 处置策略。
+// 零值即 KEEP：默认不会让现网旧密钥失效，是否启用由显式配置决定。
+type OAuthClientSecretRetirement struct {
+	Policy OAuthClientSecretRetirementPolicy
+	Grace  time.Duration
+}
+
+// ParseOAuthClientSecretRetirement 把运维配置（策略名 + 宽限时长）解析为策略值。
+// 未配置时返回 KEEP；未知策略名或宽限时长不合法时拒绝，避免静默降级为“永久可用”。
+func ParseOAuthClientSecretRetirement(policy string, grace time.Duration) (OAuthClientSecretRetirement, error) {
+	switch normalized := strings.ToUpper(strings.TrimSpace(policy)); normalized {
+	case "", "KEEP": // 未配置或显式 KEEP：保持既有“只追加”语义
+		if grace != 0 {
+			return OAuthClientSecretRetirement{}, fmt.Errorf("%w: grace window requires the GRACE policy", ErrManagementValidation)
+		}
+		return OAuthClientSecretRetirement{}, nil
+	case string(OAuthClientSecretRetirementRevoke):
+		if grace != 0 {
+			return OAuthClientSecretRetirement{}, fmt.Errorf("%w: grace window is only valid with the GRACE policy", ErrManagementValidation)
+		}
+		return OAuthClientSecretRetirement{Policy: OAuthClientSecretRetirementRevoke}, nil
+	case string(OAuthClientSecretRetirementGrace):
+		if grace <= 0 || grace > maxRotationOverlap {
+			return OAuthClientSecretRetirement{}, fmt.Errorf("%w: GRACE policy requires a grace window within (0, %s]", ErrManagementValidation, maxRotationOverlap)
+		}
+		return OAuthClientSecretRetirement{Policy: OAuthClientSecretRetirementGrace, Grace: grace}, nil
+	default:
+		return OAuthClientSecretRetirement{}, fmt.Errorf("%w: unknown secret retirement policy %q", ErrManagementValidation, policy)
+	}
 }
 
 // OAuthClientSecretRotateInput 生成新 Secret，并仅在请求的重叠窗口内保持既有
@@ -275,17 +331,42 @@ type OAuthClientManagementService struct {
 	ids                         ManagementIdentifierGenerator
 	clock                       Clock
 	redirectURIValidationPolicy RedirectURIValidationPolicy
+	// secretRetirement 是签发新 Secret 时对既有 ACTIVE Secret 的默认处置。
+	// 零值 KEEP 保持既有“只追加”语义，是否收紧由显式配置开启。
+	secretRetirement OAuthClientSecretRetirement
+}
+
+// OAuthClientManagementOption 调整管理服务的可选行为，不改变既有构造调用。
+type OAuthClientManagementOption func(*OAuthClientManagementService)
+
+// WithOAuthClientSecretRetirement 开启旧 Secret 退役策略：受控更新、许可登记等
+// 追加式签发路径在成功后不再留下永久可用的旧密钥。
+func WithOAuthClientSecretRetirement(retirement OAuthClientSecretRetirement) OAuthClientManagementOption {
+	return func(service *OAuthClientManagementService) { service.secretRetirement = retirement }
 }
 
 // NewOAuthClientManagementService 构造管理服务；仓储、ID 生成器或时钟缺失时拒绝构造，
 // 凭据生命周期不允许在没有审计时钟的情况下运行。
-func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy) (*OAuthClientManagementService, error) {
+func NewOAuthClientManagementService(repository OAuthClientManagementRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy, options ...OAuthClientManagementOption) (*OAuthClientManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("OAuth client management service dependencies must not be nil")
 	}
-	return &OAuthClientManagementService{
+	service := &OAuthClientManagementService{
 		repository: repository, ids: ids, clock: clock, redirectURIValidationPolicy: redirectURIValidationPolicy,
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	// 退役策略在构造期就校验，避免非法策略拖到第一次签发时才发现（此时旧密钥
+	// 已经可能被误判为“继续可用”）。零值 KEEP 合法且是默认行为。
+	if service.secretRetirement.Policy != OAuthClientSecretRetirementKeep {
+		if _, err := ParseOAuthClientSecretRetirement(string(service.secretRetirement.Policy), service.secretRetirement.Grace); err != nil {
+			return nil, err
+		}
+	}
+	return service, nil
 }
 
 // CreateOAuthClient 登记 OAuth 客户端；仅 client_secret_basic 登记会生成初始 Secret，
@@ -429,11 +510,26 @@ func (service *OAuthClientManagementService) DisableOAuthClient(ctx context.Cont
 
 // CreateOAuthClientSecret 追加一枚新的 ACTIVE Secret。仓储的守卫写入把它限制在
 // ACTIVE 且使用 client_secret_basic 的客户端上，停用或公开客户端无法获得密钥。
+// 旧 Secret 的处置由请求字段或服务级默认策略决定：默认 KEEP 保持既有“只追加”语义，
+// 显式开启 REVOKE/GRACE 后旧值在同一事务内被吊销或收紧有效期（RUNTIME-05）。
 func (service *OAuthClientManagementService) CreateOAuthClientSecret(ctx context.Context, input OAuthClientSecretCreateInput) (OAuthClientSecretResult, error) {
 	input.TenantID, input.OAuthClientID, input.OperatorID = strings.TrimSpace(input.TenantID), strings.TrimSpace(input.OAuthClientID), strings.TrimSpace(input.OperatorID)
 	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" {
 		return OAuthClientSecretResult{}, ErrManagementValidation
 	}
+	retirement := service.secretRetirement
+	if input.PreviousSecretPolicy != "" || input.PreviousSecretGrace != 0 {
+		// 显式请求覆盖服务默认；直接复用解析器的校验，未知策略或非法宽限窗口一律拒绝。
+		parsed, err := ParseOAuthClientSecretRetirement(string(input.PreviousSecretPolicy), input.PreviousSecretGrace)
+		if err != nil {
+			return OAuthClientSecretResult{}, err
+		}
+		retirement = parsed
+	}
+	if retirement.Policy == OAuthClientSecretRetirementGrace && (retirement.Grace <= 0 || retirement.Grace > maxRotationOverlap) {
+		return OAuthClientSecretResult{}, ErrManagementValidation
+	}
+	input.PreviousSecretPolicy, input.PreviousSecretGrace = retirement.Policy, retirement.Grace
 	now := service.clock.Now().UTC()
 	validUntil := normalizeSecretValidUntil(input.ValidUntil)
 	if !validSecretValidUntil(validUntil, now) {

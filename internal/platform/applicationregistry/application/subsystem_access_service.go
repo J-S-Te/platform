@@ -194,6 +194,14 @@ func (service *SubsystemAccessService) Submit(ctx context.Context, request Subsy
 	if decision.DisplayOnly {
 		return SubsystemAccessSubmitResult{DisplayOnly: true, Decision: decision}, nil
 	}
+	// 缺批准/许可/镜像等阻塞类条件不能只做展示：创建操作前必须硬拦截，否则会出现
+	// "受理成功但必然不可执行"（V1 无批准时进入三轮未知后 FAILED）。
+	// 认证观察期例外：它由 worker 以 WAITING 如实返回，保留既有等待语义。
+	if subsystemAccessActionExecutable(decision.Action) {
+		if blocking := blockingSubsystemAccessMissing(describeSubsystemAccessMissing(facts)); len(blocking) > 0 {
+			return SubsystemAccessSubmitResult{}, &SubsystemAccessPrerequisitesMissingError{Missing: blocking}
+		}
+	}
 	// This wizard updates a registered runtime; provider migration belongs to
 	// the explicit switch/rollback endpoints and their observation gates.
 	if facts.Registered {
@@ -310,6 +318,83 @@ func subsystemAccessExecutionPath(decision SubsystemAccessDecision, _, _ string)
 	}
 }
 
+// ErrSubsystemAccessPrerequisitesMissing 表示提交时仍有阻塞类条件未满足
+// （缺运行批准/商业授权/镜像，或目标范围外），因此不得创建执行操作。
+var ErrSubsystemAccessPrerequisitesMissing = errors.New("subsystem access prerequisites are missing")
+
+// SubsystemAccessPrerequisitesMissingError 携带缺失码清单与下一步提示，
+// 供 HTTP 层映射为 409 并原样返回分项缺项；错误分类由类型判定，不靠字符串拼装。
+type SubsystemAccessPrerequisitesMissingError struct {
+	// Missing 只包含阻塞类缺项（顺序与预览一致，便于界面稳定展示）。
+	Missing []SubsystemAccessMissing
+}
+
+// Error 用中文列出缺项与下一步；不内嵌稳定码（界面按结构化的 missing 展示）。
+func (err *SubsystemAccessPrerequisitesMissingError) Error() string {
+	if err == nil || len(err.Missing) == 0 {
+		return "接入条件未满足，不能提交接入或更新操作"
+	}
+	labels := make([]string, 0, len(err.Missing))
+	steps := make([]string, 0, len(err.Missing))
+	for _, item := range err.Missing {
+		label := strings.TrimSpace(item.Message)
+		if label == "" {
+			label = strings.TrimSpace(item.Code)
+		}
+		if label != "" {
+			labels = append(labels, label)
+		}
+		if step := strings.TrimSpace(item.NextAction); step != "" {
+			steps = append(steps, step)
+		}
+	}
+	message := "接入条件未满足，不能提交接入或更新操作："
+	if len(labels) > 0 {
+		message += strings.Join(labels, "、")
+	}
+	if len(steps) > 0 {
+		message += "。下一步：" + strings.Join(steps, "；")
+	}
+	return message
+}
+
+// Unwrap 让调用方可以用 errors.Is(err, ErrSubsystemAccessPrerequisitesMissing) 归类。
+func (err *SubsystemAccessPrerequisitesMissingError) Unwrap() error {
+	return ErrSubsystemAccessPrerequisitesMissing
+}
+
+// subsystemAccessBlockingMissingCodes 是提交时必须硬拦截的缺项码：
+// 这些条件不满足时执行必然失败（或无法确认可执行），因此不允许创建操作。
+// AUTH_OBSERVATION_PENDING 刻意不在其中：观察期由 worker 返回 WAITING，保留等待语义。
+var subsystemAccessBlockingMissingCodes = map[string]struct{}{
+	"OUT_OF_SCOPE":             {},
+	"RUNTIME_APPROVAL_MISSING": {},
+	"LICENSE_MISSING":          {},
+	"IMAGES_MISSING":           {},
+	"IMAGES_UNVERIFIED":        {},
+}
+
+// subsystemAccessActionExecutable 判断动作是否可执行（会创建操作）。
+func subsystemAccessActionExecutable(action SubsystemAccessAction) bool {
+	switch action {
+	case SubsystemAccessActionOnboard, SubsystemAccessActionAdopt, SubsystemAccessActionUpdate, SubsystemAccessActionRetry:
+		return true
+	default:
+		return false
+	}
+}
+
+// blockingSubsystemAccessMissing 从缺项清单中筛出阻塞类缺项（保持原有顺序）。
+func blockingSubsystemAccessMissing(missing []SubsystemAccessMissing) []SubsystemAccessMissing {
+	blocking := make([]SubsystemAccessMissing, 0, len(missing))
+	for _, item := range missing {
+		if _, ok := subsystemAccessBlockingMissingCodes[strings.TrimSpace(item.Code)]; ok {
+			blocking = append(blocking, item)
+		}
+	}
+	return blocking
+}
+
 // describeSubsystemAccessMissing 把事实折算成用户可执行的缺项清单；顺序稳定便于测试与界面展示。
 func describeSubsystemAccessMissing(facts SubsystemAccessFacts) []SubsystemAccessMissing {
 	missing := []SubsystemAccessMissing{}
@@ -329,7 +414,7 @@ func describeSubsystemAccessMissing(facts SubsystemAccessFacts) []SubsystemAcces
 		if subsystemAccessFactUnverified(facts, "images") {
 			// 未上报 ≠ 缺失：不能因为读不到状态就让用户去"准备镜像"。
 			missing = append(missing, SubsystemAccessMissing{Code: "IMAGES_UNVERIFIED", Message: "镜像就绪状态未上报（无法确认）",
-				NextAction: "确认部署 Agent 版本并重试条件检查；未确认前不要按缺少镜像处理"})
+				NextAction: "先用 deploy.sh 升级部署 Agent，再重新检查条件；不要凭猜测准备镜像，也不要把未上报当成缺少镜像"})
 		} else {
 			missing = append(missing, SubsystemAccessMissing{Code: "IMAGES_MISSING", Message: "缺少所需镜像",
 				NextAction: "准备候选镜像，或先对固定记录执行受控更新"})

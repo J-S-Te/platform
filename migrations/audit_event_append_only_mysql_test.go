@@ -94,6 +94,9 @@ func TestAuditEventAppendOnlyAndPayloadHashMySQL(t *testing.T) {
 	}
 	applyMigrationVersion(129)
 	applyMigrationVersion(130)
+	// 000133 给去重表补 environment_id；摄取路径按（应用、环境、事件）判重，缺列时
+	// 真实的 Ingest 会直接失败，因此这里必须把 schema 推进到当前形态。
+	applyMigrationVersion(133)
 
 	gormDB, err := gorm.Open(mysql.New(mysql.Config{Conn: raw, SkipInitializeWithVersion: true}), &gorm.Config{SkipDefaultTransaction: true})
 	if err != nil {

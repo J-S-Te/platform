@@ -132,6 +132,21 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 	return updateProductionRuntimeGroup([]runtimeEnvironmentUpdate{{path: workerPath, values: workerValues}})
 }
 
+// p1ServiceCredentialScopes 是严格机器身份每个用途唯一允许的 scope。
+// 必须覆盖 p1StrictServicePurposes 的全部用途；缺失时校验会因空 scope 判为不匹配。
+var p1ServiceCredentialScopes = map[string]string{
+	application.ServiceCredentialContractImportReportRead:           "contract.import.report.read",
+	application.ServiceCredentialAnalysisContractImportReportStatus: "analysis.contract-import.report-status",
+	application.ServiceCredentialSettlementProjectReferenceRead:     "settlement.project_reference.read",
+	application.ServiceCredentialOwnerDirectoryRead:                 "owner_directory.read",
+	application.ServiceCredentialNotificationIngest:                 "notification.ingest",
+	application.ServiceCredentialAuditIngest:                        "audit.ingest",
+	application.ServiceCredentialSettlementContractIngest:           "settlement.contract.ingest",
+	application.ServiceCredentialCRMContractLinkWrite:               "opportunity.signed.write",
+	application.ServiceCredentialPortalReportFileRead:               "platform:file:portal_report",
+	application.ServiceCredentialPortalReportDownloadIdentityRead:   "portal.report.download_identity.read",
+}
+
 // validateP1ServiceCredential 检查机器身份归属及用途的单scope约束。
 // 参数：input 为目标登记环境，purpose 为用途，client 为持久身份元数据。
 // 返回值：匹配时为空，否则为拒绝原因。
@@ -142,17 +157,7 @@ func validateP1ServiceCredential(input application.SubsystemProvisioningInput, p
 	if client.TenantID != input.TenantID || client.ApplicationID != input.ApplicationID || client.EnvironmentID != input.EnvironmentID || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || client.Status != "ACTIVE" || len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" {
 		return provisioningError("new business service credential target mismatch")
 	}
-	expectedScope := map[string]string{
-		application.ServiceCredentialContractImportReportRead:           "contract.import.report.read",
-		application.ServiceCredentialAnalysisContractImportReportStatus: "analysis.contract-import.report-status",
-		application.ServiceCredentialSettlementProjectReferenceRead:     "settlement.project_reference.read",
-		application.ServiceCredentialOwnerDirectoryRead:                 "owner_directory.read",
-		application.ServiceCredentialNotificationIngest:                 "notification.ingest",
-		application.ServiceCredentialAuditIngest:                        "audit.ingest",
-		application.ServiceCredentialSettlementContractIngest:           "settlement.contract.ingest",
-		application.ServiceCredentialPortalReportFileRead:               "platform:file:portal_report",
-		application.ServiceCredentialPortalReportDownloadIdentityRead:   "portal.report.download_identity.read",
-	}[purpose]
+	expectedScope := p1ServiceCredentialScopes[purpose]
 	if len(client.Scopes) != 1 || client.Scopes[0] != expectedScope {
 		return provisioningError("new business service credential scope mismatch")
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	authapplication "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -278,6 +279,12 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, ErrAccessDenied), errors.Is(err, authapplication.ErrForbidden):
 		httpresponse.WriteError(w, r, http.StatusForbidden, httperror.Forbidden)
+	case errors.Is(err, bootstrapadmin.ErrProtected):
+		// 部署初始化写入的超级管理员绑定不可撤销：与通用角色绑定入口保持同一规则，
+		// 不让应用授权撤销变成绕过保护的捷径。
+		httpresponse.WriteError(w, r, http.StatusConflict, httperror.BootstrapAdminProtected)
+	case errors.Is(err, bootstrapadmin.ErrConfiguration):
+		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.BootstrapAdminConfiguration)
 	case errors.Is(err, ErrRevisionConflict):
 		// 稳定错误标识供前端区分"并发冲突（保留草稿，提示重新读取）"与其他失败；
 		// 前端不得自动换用最新版本重提。

@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	authapplication "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
+	authzdomain "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/tokenissuer"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -601,10 +604,7 @@ func (s *Service) GetAccess(ctx context.Context, tenantID, userID, applicationCo
 		}
 		access = emptyAccess(application.Code, "", roleConfigHash, revision)
 	}
-	roleType := applicationRoleType
-	if application.Code == PlatformApplicationCode {
-		roleType = platformRoleType
-	}
+	roleType := managedAccessRoleType(application.Code)
 	// 可编辑集合与 edit_revision 必须来自同一一致快照：单事务内读取管理视图的
 	// 人工绑定行并计算版本（方案第三阶段第 4 节），避免视图与版本混入不同
 	// 时刻的数据。有效权限视图不参与该快照约束。
@@ -833,8 +833,14 @@ func (s *Service) DeleteAccess(ctx context.Context, in DeleteAccessInput, applic
 		}
 		// 删除应用授权是逻辑撤销：仅停用人工直绑并清理历史自定义权限，不触碰岗位
 		// 模板等可追溯来源；若用户仍有继承角色，有效视图仍会如实保留。
+		// 角色类型必须与读取路径一致：平台应用的人工例外是 PLATFORM 角色绑定，按
+		// APPLICATION 过滤只会命中 0 行却仍返回成功（BIZ-IAM-03）。
+		roleType := managedAccessRoleType(lockedApplication.Code)
+		if err := ensurePlatformControlPlaneRevocable(tx, ctx, in.TenantID, lockedApplication.ID, subjectTypeUser, in.UserID, in.OperatorID, roleType); err != nil {
+			return err
+		}
 		directClause, directArgs := manualDirectApplicationRoleBindingFilter(in.TenantID, lockedApplication.ID, in.UserID)
-		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, lockedApplication.ID, applicationRoleType)
+		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, lockedApplication.ID, roleType)
 		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.role_id IN (?)", applicationRoleIDs).Where("rb.status = ?", activeStatus).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID})
 		if result.Error != nil {
 			return fmt.Errorf("revoke application role bindings: %w", result.Error)
@@ -1011,8 +1017,11 @@ func (s *Service) DeleteSubjectAccess(ctx context.Context, in DeleteSubjectAcces
 	now := s.clock.Now().UTC()
 	changed := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensurePlatformControlPlaneRevocable(tx, ctx, in.TenantID, application.ID, subjectType, in.SubjectID, in.OperatorID, managedAccessRoleType(application.Code)); err != nil {
+			return err
+		}
 		directClause, directArgs := manualSubjectRoleBindingFilter(in.TenantID, application.ID, subjectType, in.SubjectID)
-		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, application.ID, applicationRoleType)
+		applicationRoleIDs := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND role_type = ?", in.TenantID, application.ID, managedAccessRoleType(application.Code))
 		result := tx.Table("authz_role_binding AS rb").Where(directClause, directArgs...).Where("rb.role_id IN (?)", applicationRoleIDs).Where("rb.status = ?", activeStatus).Updates(map[string]any{
 			"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": in.OperatorID,
 		})
@@ -1332,7 +1341,7 @@ func emptyAccess(applicationCode, environmentCode, roleConfigHash string, revisi
 }
 
 func (s *Service) getSubjectAccessByApplication(ctx context.Context, tenantID, subjectType, subjectID, applicationID, applicationCode, environmentID, environmentCode string) (Access, error) {
-	roles, err := s.loadSubjectRoles(ctx, tenantID, applicationID, subjectType, subjectID, environmentID, s.clock.Now().UTC())
+	roles, err := s.loadSubjectRoles(ctx, tenantID, applicationID, subjectType, subjectID, environmentID, managedAccessRoleType(applicationCode), s.clock.Now().UTC())
 	if err != nil {
 		return Access{}, err
 	}
@@ -1377,10 +1386,7 @@ func (s *Service) getAccessByApplication(ctx context.Context, tenantID, userID, 
 		return Access{}, validation("tenant_id, user_id and application are required")
 	}
 	now := s.clock.Now().UTC()
-	roleType := applicationRoleType
-	if applicationCode == PlatformApplicationCode {
-		roleType = platformRoleType
-	}
+	roleType := managedAccessRoleType(applicationCode)
 	isSuperAdmin := false
 	var checkErr error
 	roles, err := s.loadGenericRoles(ctx, tenantID, applicationID, userID, environmentID, now, roleType)
@@ -1650,6 +1656,63 @@ func subjectRoleBindingFilter(tenantID, applicationID, subjectType, subjectID st
 	return "rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ?", []any{tenantID, applicationID, subjectType, subjectID}
 }
 
+// ensurePlatformControlPlaneRevocable 在撤销平台应用的个人例外前执行与通用角色绑定写入口
+// 一致的控制面保护。修复 BIZ-IAM-03 后，撤销路径会真正停用 PLATFORM 角色绑定，因此必须
+// 复用同样的边界，否则应用授权入口会成为绕过保护的捷径：
+//  1. 受保护角色（超管、应急管理员、紧急接管）只有已认证的租户级超级管理员可以撤权；
+//  2. 部署初始化写入的超管绑定不可撤销，与通用角色绑定入口的不可变规则一致。
+//
+// 任一条件命中都在任何写入之前失败关闭，绝不返回“撤销成功”却保留权威绑定。
+func ensurePlatformControlPlaneRevocable(tx *gorm.DB, ctx context.Context, tenantID, applicationID, subjectType, subjectID, operatorID, roleType string) error {
+	if roleType != platformRoleType {
+		return nil
+	}
+	var roleCodes []string
+	if err := tx.Table("authz_role_binding AS rb").
+		Joins("JOIN authz_role AS r ON r.id = rb.role_id AND r.tenant_id = rb.tenant_id AND r.application_id = rb.application_id").
+		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ?", tenantID, applicationID, subjectType, subjectID).
+		Where("rb.status = ? AND rb.grant_origin = ? AND r.role_type = ?", activeStatus, grantOriginManual, platformRoleType).
+		Distinct().Pluck("r.code", &roleCodes).Error; err != nil {
+		return fmt.Errorf("load revocable platform role bindings: %w", err)
+	}
+	if len(roleCodes) == 0 {
+		return nil
+	}
+	for _, code := range roleCodes {
+		if authzdomain.IsProtectedRoleCode(code) && !delegation.IsPlatformSuperAdmin(ctx, tenantID, operatorID) {
+			return fmt.Errorf("revoking protected platform role %q requires a tenant super administrator: %w", code, authapplication.ErrForbidden)
+		}
+	}
+	if subjectType != subjectTypeUser {
+		return nil
+	}
+	identity, initialized, err := bootstrapadmin.Resolve(ctx, tx, tenantID)
+	if err != nil {
+		// 初始化记录不一致时必须失败关闭：无法证明的撤销不能报成功。
+		return err
+	}
+	if !initialized || !identity.ProtectsUser(subjectID) {
+		return nil
+	}
+	for _, code := range roleCodes {
+		if code == BootstrapSuperAdminRoleCode {
+			return bootstrapadmin.ErrProtected
+		}
+	}
+	return nil
+}
+
+// managedAccessRoleType 返回管理/撤销路径应匹配的角色类型。平台自有应用（code=platform）
+// 的内置角色目录是 PLATFORM 类型，其余应用是 APPLICATION 类型。读取路径
+// （GetAccess / getAccessByApplication）一直按该规则选类型；撤销路径必须使用同一规则，
+// 否则平台应用的个人例外撤销会命中 0 行却返回成功（BIZ-IAM-03）。
+func managedAccessRoleType(applicationCode string) string {
+	if strings.TrimSpace(applicationCode) == PlatformApplicationCode {
+		return platformRoleType
+	}
+	return applicationRoleType
+}
+
 func manualDirectApplicationRoleBindingFilter(tenantID, applicationID, userID string) (string, []any) {
 	clause, args := subjectRoleBindingFilter(tenantID, applicationID, subjectTypeUser, userID)
 	return clause + " AND rb.grant_origin = ?", append(args, grantOriginManual)
@@ -1666,7 +1729,9 @@ func manualSubjectRoleBindingFilter(tenantID, applicationID, subjectType, subjec
 	return clause + " AND rb.grant_origin = ?", append(args, grantOriginManual)
 }
 
-func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID, subjectType, subjectID, environmentID string, now time.Time) ([]assignedRoleRow, error) {
+// loadSubjectRoles 与用户路径使用同一角色类型口径：角色类型由调用方按应用传入
+// （managedAccessRoleType），使组织/岗位绑定的读取与撤销看到同一集合。
+func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID, subjectType, subjectID, environmentID, roleType string, now time.Time) ([]assignedRoleRow, error) {
 	var rows []assignedRoleRow
 	scopeClause, scopeArgs := applicationAccessScopeFilter(environmentID)
 	query := s.db.WithContext(ctx).Table("authz_role_binding AS rb").Select(`
@@ -1686,7 +1751,7 @@ func (s *Service) loadSubjectRoles(ctx context.Context, tenantID, applicationID,
 		Joins("LEFT JOIN iam_position AS p ON rb.subject_type = ? AND p.id = rb.subject_id AND p.tenant_id = rb.tenant_id", subjectTypePosition).
 		Joins("LEFT JOIN authz_position_grant_template_assignment AS ta ON ta.tenant_id = rb.tenant_id AND ta.id = rb.origin_id AND rb.grant_origin = ?", grantOriginTemplate).
 		Joins("LEFT JOIN authz_position_grant_template AS template ON template.tenant_id = ta.tenant_id AND template.id = ta.template_id").
-		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND rb.status = ? AND r.role_type = ?", tenantID, applicationID, subjectType, subjectID, activeStatus, applicationRoleType).
+		Where("rb.tenant_id = ? AND rb.application_id = ? AND rb.subject_type = ? AND rb.subject_id = ? AND rb.status = ? AND r.role_type = ?", tenantID, applicationID, subjectType, subjectID, activeStatus, roleType).
 		Where("(rb.valid_from IS NULL OR rb.valid_from <= ?) AND (rb.valid_until IS NULL OR rb.valid_until > ?)", now, now).
 		Where(scopeClause, scopeArgs...)
 	if err := query.Order("r.code ASC, rb.scope_type ASC, rb.scope_id ASC").Find(&rows).Error; err != nil {

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/managementscope"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
@@ -18,9 +20,10 @@ import (
 // 明文密码被刻意限制在请求处理与紧随其后的重置响应内；本 handler
 // 绝不记录或审计它们。
 type AccountLifecycleHandler struct {
-	service     accountLifecycleApplicationService
-	authHandler *Handler
-	logger      *slog.Logger
+	service         accountLifecycleApplicationService
+	authHandler     *Handler
+	logger          *slog.Logger
+	scopeAuthorizer managementscope.Authorizer
 }
 
 type accountLifecycleApplicationService interface {
@@ -31,11 +34,11 @@ type accountLifecycleApplicationService interface {
 }
 
 // NewAccountLifecycleHandler 构造本地账号生命周期操作的 HTTP 适配器。
-func NewAccountLifecycleHandler(service accountLifecycleApplicationService, authHandler *Handler, logger *slog.Logger) (*AccountLifecycleHandler, error) {
-	if service == nil || authHandler == nil || logger == nil {
+func NewAccountLifecycleHandler(service accountLifecycleApplicationService, authHandler *Handler, logger *slog.Logger, scopeAuthorizer managementscope.Authorizer) (*AccountLifecycleHandler, error) {
+	if service == nil || authHandler == nil || logger == nil || scopeAuthorizer == nil {
 		return nil, errors.New("account lifecycle handler dependencies must not be nil")
 	}
-	return &AccountLifecycleHandler{service: service, authHandler: authHandler, logger: logger}, nil
+	return &AccountLifecycleHandler{service: service, authHandler: authHandler, logger: logger, scopeAuthorizer: scopeAuthorizer}, nil
 }
 
 type localAccountCreateRequest struct {
@@ -77,6 +80,9 @@ func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseW
 		handler.validation(writer, request)
 		return
 	}
+	if !handler.requireUnrestrictedManagementScope(writer, request, principal, "platform:account:create") {
+		return
+	}
 	account, err := handler.service.CreateLocalAccount(request.Context(), application.LocalAccountCreateInput{
 		TenantID:        principal.Tenant.ID,
 		OperatorID:      principal.User.ID,
@@ -105,6 +111,9 @@ func (handler *AccountLifecycleHandler) InitializePassword(writer http.ResponseW
 		handler.validation(writer, request)
 		return
 	}
+	if !handler.requireUnrestrictedManagementScope(writer, request, principal, "platform:account:password-initialize") {
+		return
+	}
 	account, err := handler.service.InitializePassword(request.Context(), application.PasswordInitializeInput{
 		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, AccountID: request.PathValue("account_id"), Password: payload.Password, Version: payload.Version,
 	})
@@ -127,6 +136,9 @@ func (handler *AccountLifecycleHandler) ResetPassword(writer http.ResponseWriter
 	var payload passwordResetRequest
 	if !decodeManagementRequest(writer, request, &payload) {
 		handler.validation(writer, request)
+		return
+	}
+	if !handler.requireUnrestrictedManagementScope(writer, request, principal, "platform:account:password-reset") {
 		return
 	}
 	result, err := handler.service.ResetPassword(request.Context(), application.PasswordResetInput{
@@ -167,6 +179,30 @@ func (handler *AccountLifecycleHandler) ChangeOwnPassword(writer http.ResponseWr
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "密码已修改，请重新登录", map[string]any{})
 }
 
+// requireUnrestrictedManagementScope 解析当前主体在给定权限码上的有效管理范围。
+//
+// 账号开通与管理员密码生命周期会直接改变某个用户的登录凭证，作用域必须服务端解析，
+// 不能只依赖会话中的扁平权限码。受限范围下按“目标用户组织归属”细化的判定尚未实现，
+// 当前采用 interim fail-closed：空范围与任何受限范围一律整体拒绝，等后续按目标用户/
+// 账号的组织归属细化后再放开，避免在细化完成前用范围外凭证操作绕过组织边界。
+func (handler *AccountLifecycleHandler) requireUnrestrictedManagementScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, permissionCode string) bool {
+	scope, err := handler.scopeAuthorizer.Resolve(request.Context(), managementscope.Subject{
+		TenantID:  principal.Tenant.ID,
+		UserID:    principal.User.ID,
+		AccountID: principal.Account.ID,
+	}, permissionCode)
+	if err != nil {
+		handler.logger.Error("resolve account lifecycle authorization scope", "permission", permissionCode, "error", err)
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return false
+	}
+	if scope.Empty() || !scope.Unrestricted {
+		handler.forbidden(writer, request)
+		return false
+	}
+	return true
+}
+
 func (handler *AccountLifecycleHandler) writeError(writer http.ResponseWriter, request *http.Request, err error) {
 	switch {
 	case errors.Is(err, application.ErrValidation):
@@ -181,6 +217,11 @@ func (handler *AccountLifecycleHandler) writeError(writer http.ResponseWriter, r
 		httpresponse.WriteError(writer, request, http.StatusBadGateway, httperror.DependencyUnavailable)
 	case errors.Is(err, application.ErrUnauthenticated):
 		handler.unauthenticated(writer, request)
+	case errors.Is(err, bootstrapadmin.ErrProtected):
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.BootstrapAdminProtected)
+	case errors.Is(err, bootstrapadmin.ErrConfiguration):
+		handler.logger.Error("bootstrap administrator configuration is invalid", "error", err, "path", request.URL.Path)
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.BootstrapAdminConfiguration)
 	default:
 		handler.logger.Error("identity account lifecycle request failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
@@ -193,4 +234,8 @@ func (handler *AccountLifecycleHandler) validation(writer http.ResponseWriter, r
 
 func (handler *AccountLifecycleHandler) unauthenticated(writer http.ResponseWriter, request *http.Request) {
 	httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
+}
+
+func (handler *AccountLifecycleHandler) forbidden(writer http.ResponseWriter, request *http.Request) {
+	httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 }

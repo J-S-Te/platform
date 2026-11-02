@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	identityinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/identity/infrastructure"
 	coordination "github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 )
@@ -33,15 +35,66 @@ func (reader lazyHandoverLicenseReader) Status(ctx context.Context, application 
 	return target.Status(ctx, application)
 }
 
+// 交接机器身份固定绑定平台自身的应用/环境编码；令牌按批次租户铸造，TTL 保持短效，
+// 过期即失效，平台不再持有子系统的长期静态令牌。
+const (
+	handoverCallerApplicationCode = "platform"
+	handoverTokenTTL              = 5 * time.Minute
+)
+
+// handoverTokenSource 用平台自己的 ApplicationJWTManager 为每个批次租户铸造短效
+// application JWT。租户缺失、scope 为空或密钥未就绪时返回错误，调用方据此失败关闭
+// 且不发送请求；返回的令牌只放入内存中的 Authorization 头。
+func handoverTokenSource(cfg config.HandoverConfig, manager *security.ApplicationJWTManager, now func() time.Time) func(string) (string, error) {
+	if now == nil {
+		now = time.Now
+	}
+	return func(tenantID string) (string, error) {
+		if manager == nil {
+			return "", errors.New("handover application token manager is not configured")
+		}
+		tenant := strings.TrimSpace(tenantID)
+		if tenant == "" {
+			return "", errors.New("handover application token requires a tenant")
+		}
+		scopes := strings.Fields(cfg.MachineScope)
+		if len(scopes) == 0 {
+			return "", errors.New("handover application token requires a scope")
+		}
+		issuedAt := now().UTC()
+		return manager.Issue(security.ApplicationTokenClaims{
+			OAuthClientID: cfg.MachineClientID, ClientID: cfg.MachineClientID, TenantID: tenant,
+			ApplicationID: cfg.MachineApplicationID, ApplicationCode: handoverCallerApplicationCode,
+			EnvironmentID: cfg.MachineEnvironmentID, EnvironmentCode: cfg.Environment,
+			Scopes: scopes, IssuedAt: issuedAt, NotBefore: issuedAt, ExpiresAt: issuedAt.Add(handoverTokenTTL),
+		})
+	}
+}
+
+// loadHandoverTokenSource 在交接启用时从平台签名密钥构造令牌源。停用时根本不读私钥，
+// 保持"默认关闭即无出网凭据"的既有行为。
+func loadHandoverTokenSource(cfg config.Config) (func(string) (string, error), error) {
+	manager, err := security.LoadApplicationJWTManager(
+		cfg.Auth.JWTIssuer, cfg.Auth.ApplicationJWTAudience, cfg.Auth.JWTPrivateKeyPath, cfg.Auth.JWTPublicKeyPath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load handover application JWT signing keys: %w", err)
+	}
+	return handoverTokenSource(cfg.Handover, manager, time.Now), nil
+}
+
 // handoverClientsFromConfig 按配置为每个子系统构造机器协议客户端。
-func handoverClientsFromConfig(cfg config.Config, requestID func() (string, error)) (map[string]application.HandoverSystemClient, error) {
+func handoverClientsFromConfig(cfg config.Config, tokenSource func(tenantID string) (string, error), requestID func() (string, error)) (map[string]application.HandoverSystemClient, error) {
+	if tokenSource == nil {
+		return nil, errors.New("handover clients require an application token source")
+	}
 	clients := make(map[string]application.HandoverSystemClient, len(cfg.Handover.SystemURLs))
 	for rawSystem, baseURL := range cfg.Handover.SystemURLs {
 		system := strings.ToLower(strings.TrimSpace(rawSystem))
 		client, err := identityinfrastructure.NewHandoverHTTPClient(identityinfrastructure.HandoverHTTPClientConfig{
-			System: system, BaseURL: baseURL, MachineToken: cfg.Handover.MachineToken,
-			// 平台是调用方；租户由请求体与机器凭据绑定共同确定，不写死在客户端配置里。
-			ApplicationCode: "platform", Environment: cfg.Handover.Environment, Timeout: cfg.Handover.Timeout,
+			System: system, BaseURL: baseURL, TokenSource: tokenSource,
+			// 平台是调用方；租户由每个批次的上下文决定，不写死在客户端配置里。
+			ApplicationCode: handoverCallerApplicationCode, Environment: cfg.Handover.Environment, Timeout: cfg.Handover.Timeout,
 			RequestID: requestID,
 		})
 		if err != nil {
@@ -68,7 +121,11 @@ func buildHandoverCoordinator(cfg config.Config, database *gorm.DB, registry han
 		registry: registry, licenses: licenses,
 		systems: handoverSystemCodes(cfg), environment: cfg.Handover.Environment,
 	}
-	clients, err := handoverClientsFromConfig(cfg, func() (string, error) { return ulid.Generator{}.New(time.Now().UTC()) })
+	tokenSource, err := loadHandoverTokenSource(cfg)
+	if err != nil {
+		return nil, err
+	}
+	clients, err := handoverClientsFromConfig(cfg, tokenSource, func() (string, error) { return ulid.Generator{}.New(time.Now().UTC()) })
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +184,7 @@ func (c personnelWorkerFinishClient) Finish(ctx context.Context, batchID, reques
 func (personnelWorkerFinishClient) Freeze(context.Context, application.HandoverFreezeRequest) (application.HandoverFreezeResponse, error) {
 	return application.HandoverFreezeResponse{}, application.ErrConflict
 }
-func (personnelWorkerFinishClient) Responsibilities(context.Context, string, string, int) (application.HandoverResponsibilityPage, error) {
+func (personnelWorkerFinishClient) Responsibilities(context.Context, string, string, string, int) (application.HandoverResponsibilityPage, error) {
 	return application.HandoverResponsibilityPage{}, application.ErrConflict
 }
 func (personnelWorkerFinishClient) Transfer(context.Context, application.HandoverTransferRequest) (application.HandoverTransferReceipt, error) {
@@ -151,7 +208,11 @@ func buildPersonnelWorkerService(cfg config.Config, database *gorm.DB) (*applica
 		if err != nil {
 			return nil, err
 		}
-		clients, err := handoverClientsFromConfig(cfg, func() (string, error) { return ulid.Generator{}.New(time.Now().UTC()) })
+		tokenSource, err := loadHandoverTokenSource(cfg)
+		if err != nil {
+			return nil, err
+		}
+		clients, err := handoverClientsFromConfig(cfg, tokenSource, func() (string, error) { return ulid.Generator{}.New(time.Now().UTC()) })
 		if err != nil {
 			return nil, err
 		}

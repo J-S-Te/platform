@@ -12,6 +12,7 @@ import (
 	applicationregistryinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/infrastructure"
 	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/interfaces/http"
 	applicationaccess "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/applicationaccess"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/managementscope"
 	filetaskapplication "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/application"
 	filetaskinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/infrastructure"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/interfaces/http"
@@ -36,11 +37,14 @@ import (
 // 参数：cfg限定部署与认证，database为平台库，logger负责追踪；
 //
 //	applicationAccessService解析入口，applicationManagementService管理目录，
-//	oauthClientManagementService管理凭据，personnelAudit及personnelHandover负责人员审计与交接。
+//	oauthClientManagementService管理凭据，personnelAudit及personnelHandover负责人员审计与交接，
+//	backchannelAudit把接入阶段的 Back-Channel Logout 决定写入平台审计（nil 表示未接线：
+//	默认登记照常，显式 opt-out 仍按既有语义失败关闭），managementScopeAuthorizer
+//	解析授权总览等只读聚合的管理范围。
 //
 // 返回值：完整运行模块；依赖或接线失败返回错误，启动不执行AutoMigrate。
-func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service, applicationManagementService *applicationregistryapplication.ManagementService, oauthClientManagementService *applicationregistryapplication.OAuthClientManagementService, personnelAudit identityapplication.PersonnelChangeAuditSink, personnelHandover *identityapplication.HandoverOrchestrator) (httptransport.OperationalModules, error) {
-	if database == nil || logger == nil || applicationAccessService == nil {
+func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.Logger, applicationAccessService *applicationaccess.Service, applicationManagementService *applicationregistryapplication.ManagementService, oauthClientManagementService *applicationregistryapplication.OAuthClientManagementService, personnelAudit identityapplication.PersonnelChangeAuditSink, personnelHandover *identityapplication.HandoverOrchestrator, backchannelAudit applicationregistryapplication.BackchannelLogoutAuditSink, managementScopeAuthorizer managementscope.Authorizer) (httptransport.OperationalModules, error) {
+	if database == nil || logger == nil || applicationAccessService == nil || managementScopeAuthorizer == nil {
 		return httptransport.OperationalModules{}, errors.New("operational module dependencies must not be nil")
 	}
 
@@ -74,6 +78,9 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	// 接入阶段的 Back-Channel Logout 决定在这里接线到审计：默认登记不需要审计，只有
+	// opt-out / 端点校验失败才写事件；审计写入失败即接入失败（失败关闭），保持上一任务的契约。
+	subsystemService.SetBackchannelLogoutAuditSink(backchannelAudit)
 	// 清单与部署 Agent 客户端的解析提取为共用函数：API 与 Worker 使用同一份口径。
 	provisioningCapabilities, err := resolveSubsystemProvisioningCapabilities(cfg)
 	if err != nil {
@@ -263,6 +270,12 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
+	// 授权总览是只读聚合，但同样携带账号与授权数据；管理范围解析在构造期强制接线，
+	// 缺失依赖直接失败，避免退回“只按权限码”的旧口径。
+	authorizationOverviewHandler, err := identityhttp.NewAuthorizationOverviewHandler(database, managementScopeAuthorizer, logger)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
 
 	return httptransport.OperationalModules{
 		LoginTargets:        loginTargetHandler,
@@ -277,7 +290,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		AsyncJobs:                fileTaskHandler,
 		AccessApplier:            subsystemProvisioner,
 		PersonnelChanges:         personnelHandler,
-		AuthorizationOverview:    identityhttp.NewAuthorizationOverviewHandler(database),
+		AuthorizationOverview:    authorizationOverviewHandler,
 		TenantAuthorizationClone: tenantCloneHandler,
 	}, nil
 }

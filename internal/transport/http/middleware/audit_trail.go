@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
@@ -29,6 +30,50 @@ const defaultPlatformAuditEnvironmentCode = "dev"
 // 临时文件继续扣留（见 platformAuditBuffer），不再放行直写，避免异常大的响应长期占用内存。
 const maxPlatformAuditBufferedResponseBytes = 64 << 10
 
+// auditAvailabilityCooldown 是审计管道故障后的快速失败窗口（BIZ-RUNTIME-11）。必开模式
+// 下审计写入失败发生在业务提交之后，客户端重试会把非幂等写入重复执行；因此一旦观测到
+// 写入失败，就在窗口内把新的“将被审计”请求在业务链之前拒绝，重试不再产生业务事实。
+// 窗口到期后允许单个请求再次探测审计管道：恢复即放行，仍失败则继续拒绝。
+// 该机制只做快速失败，不改变审计事件本身的事务/异步 outbox 语义。
+const auditAvailabilityCooldown = 30 * time.Second
+
+// auditGate 保存审计管道最近一次写入失败后开启的快速失败窗口。实例随中间件挂载
+// 进程内共享；零值表示可用，无需初始化。
+type auditGate struct {
+	mu       sync.Mutex
+	reopenAt time.Time
+}
+
+// blocked 报告当前是否处于快速失败窗口内。
+func (gate *auditGate) blocked(now time.Time) bool {
+	if gate == nil {
+		return false
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return now.Before(gate.reopenAt)
+}
+
+// recordFailure 在审计写入失败后开启（或延长）快速失败窗口。
+func (gate *auditGate) recordFailure(now time.Time) {
+	if gate == nil {
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	gate.reopenAt = now.Add(auditAvailabilityCooldown)
+}
+
+// recordSuccess 在审计写入成功后立即关闭快速失败窗口。
+func (gate *auditGate) recordSuccess() {
+	if gate == nil {
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	gate.reopenAt = time.Time{}
+}
+
 // AuditSource 标识服务端自行生成审计事件时使用的应用环境配置。
 type AuditSource struct {
 	ApplicationCode string
@@ -37,9 +82,20 @@ type AuditSource struct {
 
 // AuditRecorder 是 HTTP 中间件使用的审计应用层窄契约。把接口留在传输边界，
 // 路由装配就不必依赖持久化细节。
+//
+// BIZ-RUNTIME-11：必开模式下中间件按“意图 + 结果”两段写入，结果事件在同步重试后仍
+// 写不进去时不能再让已经生效的业务事实失去审计结论，因此契约除 Ingest 外再暴露 Spool。
 type AuditRecorder interface {
 	Ingest(context.Context, string, auditapplication.EventInput) (auditdomain.Receipt, error)
+	// Spool 把同步写入/重试都失败的审计事件按审计死信语义（PENDING + 脱敏载荷）持久化，
+	// 供运营重放或忽略。tenantID 与 Ingest 一致，是租户边界，实现必须强制。
+	Spool(context.Context, string, auditapplication.EventInput) error
 }
+
+// auditResultRetryAttempts 是必开模式下“结果事件”写入失败后的同步重试次数（不含首次）。
+// 意图事件已先落库时，结果事件丢失等于业务事实没有审计结论；先同步重试一次，仍失败才落
+// 死信。重试次数有意保持为 1：再多的同步重试只会把客户端拖在已经生效的请求上。
+const auditResultRetryAttempts = 1
 
 // AuditTrail 在处理器完成后记录成功、失败和拒绝的写操作，也记录会泄露安全信息的审计查询/导出。
 // 外部审计摄取接口有意排除，因为其载荷本身就是待保存事件，再生成一条平台审计会造成重复。
@@ -57,6 +113,20 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		}
 	}
 
+	// 每次挂载共享一个快速失败窗口：同一进程内被审计的请求感知同一次审计管道故障。
+	return auditTrailHandler(recorder, logger, source, &auditGate{})
+}
+
+// auditTrailHandler 是 AuditTrail 的内部构造，额外接收快速失败窗口，使必开模式的
+// “业务写入前拒绝审计不可用请求”语义可独立测试。
+//
+// BIZ-RUNTIME-11 事务顺序（方案 A 步骤 1+2）：必开模式下先在业务链之前写入“意图事件”
+// （metadata.phase=intent，Result=REQUESTED），写不进去就当场 503 且 handler 不执行；
+// 业务链结束后补写“结果事件”（metadata.phase=result，metadata.correlates_to=意图
+// EventID，含真实状态码语义）。结果事件先同步重试一次，仍失败则落审计死信并放行业务
+// 响应——审计事实已在库，不再对已经生效的操作谎报“未被确认”。只有意图、结果、死信
+// 三者都不可写才拒绝，且必须明确告知 operation_applied。
+func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source AuditSource, gate *auditGate) gin.HandlerFunc {
 	return func(context *gin.Context) {
 		// 安全审查 SEC-D5：执行业务链前挂载可变目标 id 槽位，创建类处理器在成功后
 		// 通过 MarkCreatedResource 登记对象 id，链路结束时统一采集进审计事件。
@@ -65,18 +135,55 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		}
 		origWriter := context.Writer
 		var buffered *platformAuditBuffer
-		// 审计必开模式（AUD-2026-005）：对“将被记录审计事件”的请求先把响应缓冲在内存里，
-		// Ingest 失败时丢弃业务响应并返回 503，保证“审计写不进去 ⇒ 客户端拿不到成功”。
-		// 只改变满足记录条件的请求；/readyz 等只读路由与非必开模式行为完全不变。
+		// 审计必开模式（AUD-2026-005 / BIZ-RUNTIME-11）：判定条件与“将被记录审计事件”的
+		// 记录条件保持一致；/readyz 等只读路由与非必开模式行为完全不变。
+		auditedRequest := false
+		auditRoute := ""
+		var auditedPrincipal authctx.Principal
 		if platformAuditRequired() && recorder != nil && context.Request != nil {
-			pendingRoute := context.FullPath()
-			if pendingRoute == "" {
-				pendingRoute = context.Request.URL.Path
+			auditRoute = auditRequestRoute(context)
+			if pendingPrincipal, ok := authctx.PrincipalFromContext(context.Request.Context()); ok && strings.TrimSpace(pendingPrincipal.Tenant.ID) != "" && shouldRecordAuditTrail(context.Request.Method, auditRoute) {
+				auditedRequest = true
+				auditedPrincipal = pendingPrincipal
 			}
-			if pendingPrincipal, ok := authctx.PrincipalFromContext(context.Request.Context()); ok && strings.TrimSpace(pendingPrincipal.Tenant.ID) != "" && shouldRecordAuditTrail(context.Request.Method, pendingRoute) {
-				buffered = newPlatformAuditBuffer(origWriter, maxPlatformAuditBufferedResponseBytes, logger)
-				context.Writer = buffered
+		}
+		// BIZ-RUNTIME-11：审计不可用的检查必须早于业务写入。审计写入失败只可能发生在业务
+		// 提交之后，此时才拒绝响应会让客户端重试并重复执行非幂等写入；因此把上一次审计
+		// 失败转成快速失败窗口，窗口内的新请求在执行业务链之前即被拒绝，不产生业务事实。
+		if auditedRequest && gate.blocked(time.Now().UTC()) {
+			logger.Warn("reject write before business commit because the audit pipeline is unavailable",
+				"path", context.Request.URL.Path, "request_id", requestctx.RequestID(context.Request.Context()))
+			// 必须 Abort：gin 的中间件返回本身不会终止链路，否则业务处理器仍会执行。
+			context.Abort()
+			httpresponse.WriteError(origWriter, context.Request, http.StatusServiceUnavailable, httperror.New(
+				"AUDIT_UNAVAILABLE",
+				"审计记录暂不可用，操作未被受理",
+				map[string]string{"operation_applied": "false", "retryable": "true", "next_action": "retry_allowed"},
+			))
+			return
+		}
+		// BIZ-RUNTIME-11 步骤 1：意图事件必须落在业务链之前。审计写不进去就当场 503 且
+		// handler 不执行——这才是真正的 fail-closed：既没有副作用，也没有“已生效但未确认”
+		// 的重试陷阱。意图写入成功后才扣留响应（oversized 仍需能如实记录并拒绝）。
+		intentEventID := ""
+		if auditedRequest {
+			intent := newPlatformAuditInput(context, source, auditedPrincipal, platformAuditEventFields{route: auditRoute, phase: "intent"})
+			if _, err := recorder.Ingest(context.Request.Context(), auditedPrincipal.Tenant.ID, intent); err != nil {
+				logger.Error("write platform audit intent event", "error", err, "request_id", intent.RequestID, "path", auditRoute)
+				gate.recordFailure(time.Now().UTC())
+				// 必须 Abort：gin 的中间件返回本身不会终止链路，否则业务处理器仍会执行。
+				context.Abort()
+				httpresponse.WriteError(origWriter, context.Request, http.StatusServiceUnavailable, httperror.New(
+					"AUDIT_WRITE_REJECTED",
+					"审计记录写入失败，操作未被受理",
+					map[string]string{"operation_applied": "false", "retryable": "true", "next_action": "retry_allowed"},
+				))
+				return
 			}
+			intentEventID = intent.EventID
+			gate.recordSuccess()
+			buffered = newPlatformAuditBuffer(origWriter, maxPlatformAuditBufferedResponseBytes, logger)
+			context.Writer = buffered
 		}
 		// handler panic 展平时先恢复真实 writer，外层 gin.Recovery 才能把 500 写出去；
 		// 缓冲中的半成品响应被直接丢弃，不会被当成成功提交；溢写的临时文件一并清理。
@@ -93,15 +200,17 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 			return
 		}
 
-		route := context.FullPath()
-		if route == "" {
-			route = context.Request.URL.Path
-		}
-		if !shouldRecordAuditTrail(context.Request.Method, route) {
+		route := auditRequestRoute(context)
+		if intentEventID == "" && !shouldRecordAuditTrail(context.Request.Method, route) {
 			return
 		}
 
 		principal, ok := authctx.PrincipalFromContext(context.Request.Context())
+		if intentEventID != "" {
+			// 意图事件已经落库，结果事件必须成对写入：路由解析在业务链后被改写也不能让
+			// 一条意图没有结论。
+			principal, ok = auditedPrincipal, true
+		}
 		if !ok || strings.TrimSpace(principal.Tenant.ID) == "" {
 			return
 		}
@@ -117,87 +226,67 @@ func AuditTrail(recorder AuditRecorder, logger *slog.Logger, sources ...AuditSou
 		if oversized {
 			statusCode = http.StatusServiceUnavailable
 		}
-		now := time.Now().UTC()
-		// 统一审计来源协议：登录地址取会话创建时固定的来源，操作地址每次请求重新解析。
-		// 两者分别落库，不能再像旧实现那样用其中一个替代另一个——否则同一会话换网络后
-		// 审计里看不出"登录在哪、这次操作在哪"。
-		clientIP := RequestClientIP(context.Request)
-		loginIPValue := loginIP(principal.LoginIP)
-		// 来源由可信代理中间件的解析过程给出（DIRECT / TRUSTED_PROXY / UNKNOWN），
-		// 不再按“上下文里有没有地址”推断——直连请求不应被标成可信代理。
-		_, ipSource := requestctx.ClientIPWithSource(context.Request.Context())
-		if ipSource == "" {
-			// 仅设置过地址的适配器（历史调用方/测试）：无法得知解析路径，标记未知，
-			// 不能凭“有地址”就推断为可信代理。
-			ipSource = "UNKNOWN"
+		fields := platformAuditEventFields{route: route, statusCode: statusCode, handlerStatusCode: handlerStatusCode, oversized: oversized}
+		retries := 0
+		if intentEventID != "" {
+			// 必开模式：结果事件与意图事件通过 correlates_to 关联，需要同步重试 + 死信兜底。
+			fields.phase = "result"
+			fields.correlatesTo = intentEventID
+			retries = auditResultRetryAttempts
 		}
-		if clientIP == "" && loginIPValue == "" {
-			ipSource = "UNKNOWN"
-		}
-		metadata := map[string]any{
-			"method":      context.Request.Method,
-			"path":        route,
-			"status_code": statusCode,
-		}
-		if oversized {
-			metadata["audit_rejection"] = "AUDIT_RESPONSE_TOO_LARGE"
-			metadata["handler_status_code"] = handlerStatusCode
-		}
-		if loginIPValue != "" && clientIP != "" && clientIP != loginIPValue {
-			// 历史字段：只在“登录后换了网络”时保留差异线索，供旧版审计页读取；
-			// 登录地址缺失时操作地址已经写进 ClientIP，不再重复写入元数据。
-			metadata["request_source_ip"] = clientIP
-		}
-		// 安全审查 SEC-D5：优先采用业务处理器登记的目标对象 id（体寻址创建没有路径
-		// *_id），同时落入 metadata，满足审计“操作者+目标”的可检索要求。
-		resourceID := auditResourceID(context)
-		if handlerResourceID := AuditResourceIDFromRequest(context.Request); handlerResourceID != "" {
-			resourceID = handlerResourceID
-			metadata["resource_id"] = handlerResourceID
-		}
-		input := auditapplication.EventInput{
-			EventID:         newPlatformAuditEventID(),
-			ApplicationCode: source.ApplicationCode,
-			EnvironmentCode: source.EnvironmentCode,
-			EventCategory:   "PLATFORM",
-			EventType:       context.Request.Method + " " + route,
-			OccurredAt:      now,
-			ActorType:       "USER",
-			ActorID:         principal.User.ID,
-			ActorName:       principal.User.Name,
-			SessionID:       principal.SessionID,
-			Action:          context.Request.Method + " " + route,
-			ResourceType:    auditResourceType(route),
-			ResourceID:      resourceID,
-			RequestID:       requestctx.RequestID(context.Request.Context()),
-			TraceID:         requestctx.TraceID(context.Request.Context()),
-			Result:          auditResult(statusCode),
-			RiskLevel:       auditRiskLevel(context.Request.Method, route, statusCode),
-			Classification:  "INTERNAL",
-			Summary:         auditSummary(context.Request.Method, route, statusCode),
-			Metadata:        metadata,
-			LoginIP:         loginIPValue,
-			ClientIP:        clientIP,
-			IPSource:        ipSource,
-			// SourceIP 是旧协议兼容列：保持历史语义（登录地址优先，其次操作地址）。
-			SourceIP:  legacySourceIP(loginIPValue, clientIP),
-			UserAgent: context.Request.UserAgent(),
-		}
-		if _, err := recorder.Ingest(context.Request.Context(), principal.Tenant.ID, input); err != nil {
+		input := newPlatformAuditInput(context, source, principal, fields)
+		if err := ingestPlatformAuditEvent(context.Request.Context(), recorder, principal.Tenant.ID, input, retries); err != nil {
 			logger.Error("write platform audit event", "error", err, "request_id", input.RequestID, "path", route)
-			if buffered != nil {
-				// 必开模式（AUD-2026-005/SEC-D4b）：审计事件写入失败必须拒绝请求，
-				// 丢弃扣留的业务响应并返回 503，错误码与子系统保持一致。响应已溢写到
-				// 临时文件时同样成立——扣留不再因体积放弃，因此这里没有直写例外。
-				context.Writer = origWriter
-				httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_WRITE_REJECTED", "审计记录写入失败，操作未被确认", nil))
+			if intentEventID == "" {
+				// 非必开模式/无意图事件：保持既有“尽力而为 + 结构化错误日志”语义，响应照常。
+				gate.recordFailure(time.Now().UTC())
+				return
 			}
-			return
+			// BIZ-RUNTIME-11 步骤 2：结果事件同步重试后仍不可写，落审计死信（既有 PENDING
+			// 死信语义，可被运营重放或忽略）。意图事件已在库，合规成立，因此放行业务响应。
+			if spoolErr := recorder.Spool(context.Request.Context(), principal.Tenant.ID, input); spoolErr != nil {
+				logger.Error("spool platform audit result event to dead letter", "error", spoolErr,
+					"request_id", input.RequestID, "path", route, "event_id", input.EventID, "intent_event_id", intentEventID)
+				gate.recordFailure(time.Now().UTC())
+				// 意图 + 结果 + 死信全不可写：只能拒绝响应，但必须如实说明业务事实是否生效，
+				// 绝不谎报“未被确认”，也不对已生效的写操作引导无脑重试。
+				applied := handlerStatusCode >= http.StatusOK && handlerStatusCode < http.StatusMultipleChoices
+				detail := map[string]string{
+					"handler_status_code": strconv.Itoa(handlerStatusCode),
+					"intent_event_id":     intentEventID,
+					"operation_applied":   strconv.FormatBool(applied),
+					"next_action":         "retry_allowed",
+				}
+				message := "审计结果写入失败且无法落死信，业务操作未生效"
+				if applied {
+					detail["next_action"] = "do_not_retry"
+					message = "审计结果写入失败且无法落死信，业务操作已生效，请勿重复提交"
+				}
+				context.Writer = origWriter
+				httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_RESULT_WRITE_REJECTED", message, detail))
+				return
+			}
+			logger.Warn("platform audit result event stored as dead letter after retry exhaustion",
+				"request_id", input.RequestID, "path", route, "event_id", input.EventID, "intent_event_id", intentEventID)
+		} else {
+			gate.recordSuccess()
 		}
 		if oversized {
-			// 审计已如实记录“响应超限、未被确认”，客户端同样不能拿到成功。
+			// 业务链已执行完，超大响应只说明无法完整扣留审计载荷，不改变业务事实是否生效。
+			// 因此与步骤 2 同一口径：如实告知 operation_applied，绝不再写“未被确认”。
+			applied := handlerStatusCode >= http.StatusOK && handlerStatusCode < http.StatusMultipleChoices
+			detail := map[string]string{
+				"handler_status_code": strconv.Itoa(handlerStatusCode),
+				"operation_applied":   strconv.FormatBool(applied),
+				"next_action":         "retry_allowed",
+			}
+			message := "响应超过审计扣留上限，业务操作未生效"
+			if applied {
+				detail["next_action"] = "do_not_retry"
+				message = "响应超过审计扣留上限，业务操作已生效，请勿重复提交"
+			}
 			context.Writer = origWriter
-			httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_RESPONSE_TOO_LARGE", "响应超过审计扣留上限，操作未被确认", nil))
+			httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_RESPONSE_TOO_LARGE", message, detail))
 			return
 		}
 		if buffered != nil {
@@ -213,6 +302,137 @@ func legacySourceIP(loginIPValue, clientIP string) string {
 		return loginIPValue
 	}
 	return clientIP
+}
+
+// auditRequestRoute 返回审计事件使用的路由标识：优先路由模板（可按路由聚合），
+// 没有匹配模板时退回原始请求路径。业务链前后都要用同一口径，避免意图与结果事件
+// 落在不同 path 上。
+func auditRequestRoute(context *gin.Context) string {
+	if context == nil {
+		return ""
+	}
+	route := context.FullPath()
+	if route == "" && context.Request != nil {
+		route = context.Request.URL.Path
+	}
+	return route
+}
+
+// platformAuditEventFields 是“意图事件”和“结果事件”之间的差异部分。
+type platformAuditEventFields struct {
+	route string
+	// phase 为空表示非必开模式的单条终态事件（保持既有通用轨迹语义）；
+	// 必开模式下取 intent / result。
+	phase string
+	// correlatesTo 是结果事件回指意图事件 EventID 的关联标识。
+	correlatesTo string
+	// statusCode 为 0 表示业务尚未执行（意图事件没有结论可记）。
+	statusCode int
+	// handlerStatusCode 只在响应超限时用于保留业务真实状态码供追溯。
+	handlerStatusCode int
+	oversized         bool
+}
+
+// newPlatformAuditInput 组装中间件审计事件。必开模式下同一请求产生两条事件：业务链之前
+// 的意图事件（Result=REQUESTED、无状态码）和业务链之后的结果事件（真实状态码、
+// correlates_to 指向意图 EventID）；非必开模式仍是既有的一条终态事件，字段语义不变。
+func newPlatformAuditInput(context *gin.Context, source AuditSource, principal authctx.Principal, fields platformAuditEventFields) auditapplication.EventInput {
+	method := context.Request.Method
+	// 统一审计来源协议：登录地址取会话创建时固定的来源，操作地址每次请求重新解析。
+	// 两者分别落库，不能再像旧实现那样用其中一个替代另一个——否则同一会话换网络后
+	// 审计里看不出"登录在哪、这次操作在哪"。
+	clientIP, loginIPValue, ipSource := platformAuditOrigin(context, principal)
+	metadata := map[string]any{"method": method, "path": fields.route}
+	if fields.phase != "" {
+		metadata["phase"] = fields.phase
+	}
+	if fields.correlatesTo != "" {
+		metadata["correlates_to"] = fields.correlatesTo
+	}
+	if fields.statusCode > 0 {
+		metadata["status_code"] = fields.statusCode
+	}
+	if fields.oversized {
+		metadata["audit_rejection"] = "AUDIT_RESPONSE_TOO_LARGE"
+		metadata["handler_status_code"] = fields.handlerStatusCode
+	}
+	if loginIPValue != "" && clientIP != "" && clientIP != loginIPValue {
+		// 历史字段：只在“登录后换了网络”时保留差异线索，供旧版审计页读取；
+		// 登录地址缺失时操作地址已经写进 ClientIP，不再重复写入元数据。
+		metadata["request_source_ip"] = clientIP
+	}
+	// 安全审查 SEC-D5：优先采用业务处理器登记的目标对象 id（体寻址创建没有路径
+	// *_id），同时落入 metadata，满足审计“操作者+目标”的可检索要求。
+	resourceID := auditResourceID(context)
+	if handlerResourceID := AuditResourceIDFromRequest(context.Request); handlerResourceID != "" {
+		resourceID = handlerResourceID
+		metadata["resource_id"] = handlerResourceID
+	}
+	// 意图事件的结论未定：Result 用 REQUESTED 与终态结果区分，Summary 也不谎报状态。
+	result := "REQUESTED"
+	summary := method + " " + fields.route + " requested"
+	riskStatus := http.StatusOK
+	if fields.statusCode > 0 {
+		result = auditResult(fields.statusCode)
+		summary = auditSummary(method, fields.route, fields.statusCode)
+		riskStatus = fields.statusCode
+	}
+	return auditapplication.EventInput{
+		EventID:         newPlatformAuditEventID(),
+		ApplicationCode: source.ApplicationCode,
+		EnvironmentCode: source.EnvironmentCode,
+		EventCategory:   "PLATFORM",
+		EventType:       method + " " + fields.route,
+		OccurredAt:      time.Now().UTC(),
+		ActorType:       "USER",
+		ActorID:         principal.User.ID,
+		ActorName:       principal.User.Name,
+		SessionID:       principal.SessionID,
+		Action:          method + " " + fields.route,
+		ResourceType:    auditResourceType(fields.route),
+		ResourceID:      resourceID,
+		RequestID:       requestctx.RequestID(context.Request.Context()),
+		TraceID:         requestctx.TraceID(context.Request.Context()),
+		Result:          result,
+		RiskLevel:       auditRiskLevel(method, fields.route, riskStatus),
+		Classification:  "INTERNAL",
+		Summary:         summary,
+		Metadata:        metadata,
+		LoginIP:         loginIPValue,
+		ClientIP:        clientIP,
+		IPSource:        ipSource,
+		// SourceIP 是旧协议兼容列：保持历史语义（登录地址优先，其次操作地址）。
+		SourceIP:  legacySourceIP(loginIPValue, clientIP),
+		UserAgent: context.Request.UserAgent(),
+	}
+}
+
+// platformAuditOrigin 解析统一审计来源协议的两个地址与来源标记。
+func platformAuditOrigin(context *gin.Context, principal authctx.Principal) (clientIP, loginIPValue, ipSource string) {
+	clientIP = RequestClientIP(context.Request)
+	loginIPValue = loginIP(principal.LoginIP)
+	// 来源由可信代理中间件的解析过程给出（DIRECT / TRUSTED_PROXY / UNKNOWN），
+	// 不再按“上下文里有没有地址”推断——直连请求不应被标成可信代理。
+	_, ipSource = requestctx.ClientIPWithSource(context.Request.Context())
+	if ipSource == "" {
+		// 仅设置过地址的适配器（历史调用方/测试）：无法得知解析路径，标记未知，
+		// 不能凭“有地址”就推断为可信代理。
+		ipSource = "UNKNOWN"
+	}
+	if clientIP == "" && loginIPValue == "" {
+		ipSource = "UNKNOWN"
+	}
+	return clientIP, loginIPValue, ipSource
+}
+
+// ingestPlatformAuditEvent 写入一条中间件审计事件；retries > 0 时失败后同步重试，
+// 复用同一 EventID，避免重试生成两条语义相同的事件。
+func ingestPlatformAuditEvent(ctx context.Context, recorder AuditRecorder, tenantID string, input auditapplication.EventInput, retries int) error {
+	_, err := recorder.Ingest(ctx, tenantID, input)
+	for attempt := 0; err != nil && attempt < retries; attempt++ {
+		_, err = recorder.Ingest(ctx, tenantID, input)
+	}
+	return err
 }
 
 // platformAuditRequired 判定是否处于审计必开模式：PLATFORM_AUDIT_REQUIRED 显式设置优先，

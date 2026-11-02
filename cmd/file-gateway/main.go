@@ -98,6 +98,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// 只读证据元数据端点：业务子系统提交现场记录/签名/报告证据前回源核验文件网关
+	// （BIZ-PROJECT-03），权限复用 platform:file:download，不新增权限目录条目。
+	evidenceHandler, err := filehttp.NewEvidenceHandler(files, slog.Default())
+	if err != nil {
+		return err
+	}
 	verifier, err := security.LoadApplicationJWTVerifier(issuer, audience, publicKey)
 	if err != nil {
 		return err
@@ -119,7 +125,7 @@ func run() error {
 	if localStore != nil {
 		go monitorLocalCapacity(ctx, localStore, slog.Default())
 	}
-	server := &http.Server{Addr: address, Handler: routes(handler, v2Handler, tokenMiddleware{verifier}, ready, database, localStore), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: address, Handler: routes(handler, v2Handler, evidenceHandler, tokenMiddleware{verifier}, ready, database, localStore), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -155,7 +161,7 @@ func monitorLocalCapacity(ctx context.Context, store interface{ UsagePercent() (
 	}
 }
 
-func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, middleware tokenMiddleware, ready func(context.Context) error, database *gorm.DB, capacity interface{ UsagePercent() (uint64, error) }) http.Handler {
+func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *filehttp.EvidenceHandler, middleware tokenMiddleware, ready func(context.Context) error, database *gorm.DB, capacity interface{ UsagePercent() (uint64, error) }) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /readyz", func(writer http.ResponseWriter, request *http.Request) {
@@ -195,6 +201,10 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, middleware 
 	mux.Handle("GET /api/v1/file-upload-requests/{request_id}", middleware.wrap(http.HandlerFunc(handler.ResolveUploadRequest), "platform:file:upload"))
 	mux.Handle("POST /api/v1/file-upload-requests/{request_id}/retire", middleware.wrap(http.HandlerFunc(handler.RetireUploadRequest), "platform:file:upload"))
 	mux.Handle("GET /api/v1/files/{file_id}/content", middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download"))
+	// 只读证据元数据：业务子系统在提交现场证据/报告证据前回源核验，返回元数据而非内容。
+	if evidence != nil {
+		mux.Handle("GET /api/v1/files/{file_id}/evidence-metadata", middleware.wrap(http.HandlerFunc(evidence.StatFile), "platform:file:download"))
+	}
 	mux.Handle("POST /api/v1/files/{file_id}/bindings", middleware.wrap(http.HandlerFunc(handler.BindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/{file_id}/bindings/release", middleware.wrap(http.HandlerFunc(handler.ReleaseFileBinding), "platform:file:bind"))
 	mux.Handle("DELETE /api/v1/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(handler.UnbindFile), "platform:file:bind"))

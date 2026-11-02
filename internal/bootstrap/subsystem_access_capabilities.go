@@ -160,7 +160,9 @@ func (port subsystemAccessRelatedClientsPort) ResolveSubsystemRelatedServiceClie
 // newSubsystemAccessRunnerFromConfig 装配统一接入的持久执行器：
 // 清单/批准（部署 Agent）→ 目录与部署端口 → 阶段执行器 → 持久执行器 → 调度循环。
 // 仅当 cfg.SubsystemOnboarding.Enabled 为真时由 Worker 调用；任一步失败即整体失败（不做静默降级）。
-func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, logger *slog.Logger, broker infrastructure.SubsystemAccessKeycloakBrokerReconciliation, keycloakCatalog *applicationaccess.Service) (*subsystemAccessRunner, error) {
+// backchannelAudit 是接入阶段 Back-Channel Logout 决定的审计写入端；nil 表示未接线，
+// 此时接入仍按既有语义工作（默认登记照常，显式 opt-out 失败关闭）。
+func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, logger *slog.Logger, broker infrastructure.SubsystemAccessKeycloakBrokerReconciliation, keycloakCatalog *applicationaccess.Service, backchannelAudit application.BackchannelLogoutAuditSink) (*subsystemAccessRunner, error) {
 	if database == nil || logger == nil {
 		return nil, errors.New("subsystem access runner requires database and logger")
 	}
@@ -179,13 +181,22 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	if err != nil {
 		return nil, err
 	}
+	// 接入阶段的 Back-Channel Logout 决定（opt-out / 端点校验失败）必须可审计：
+	// 未接线时 opt-out 仍失败关闭，不会在"没人知道该 RP 收不到登出"的情况下完成接入。
+	onboardingService.SetBackchannelLogoutAuditSink(backchannelAudit)
 	oauthRepository, err := infrastructure.NewOAuthClientManagementRepository(database)
+	if err != nil {
+		return nil, err
+	}
+	// 旧 Secret 退役策略由显式运维配置控制（默认 keep，不改变现网密钥有效期）。
+	secretRetirement, err := oauthClientSecretRetirementOption(cfg)
 	if err != nil {
 		return nil, err
 	}
 	oauthService, err := application.NewOAuthClientManagementService(
 		oauthRepository, ulid.Generator{}, application.SystemClock{},
 		application.RedirectURIValidationPolicy{AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs},
+		secretRetirement,
 	)
 	if err != nil {
 		return nil, err
@@ -228,7 +239,16 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	if err != nil {
 		return nil, err
 	}
-	updateBrowserCredentials, err := application.NewSubsystemUpdateBrowserCredentialsService(oauthService)
+	// 更新路径同样补齐 Back-Channel Logout 登记（存量回填）：写侧复用既有仓储的
+	// upsert（ON DUPLICATE KEY UPDATE），协议校验不放宽；未接线的组合根保持既有行为。
+	backchannelLogoutRepository, err := infrastructure.NewBackchannelLogoutURIRepository(database)
+	if err != nil {
+		return nil, err
+	}
+	updateBrowserCredentials, err := application.NewSubsystemUpdateBrowserCredentialsService(
+		oauthService,
+		application.WithBackchannelLogoutBackfill(subsystemAccessBackchannelLogoutPort{repository: backchannelLogoutRepository}),
+	)
 	if err != nil {
 		return nil, err
 	}

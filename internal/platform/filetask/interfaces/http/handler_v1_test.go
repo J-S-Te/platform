@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strings"
 	"sync"
 	"testing"
@@ -91,6 +92,8 @@ func v1Principal() authctx.Principal {
 	}
 }
 
+// v1UploadRequest 构造一条策略内合法上传：BIZ-XAPI-11 之后 v1 已无空 purpose 通道，
+// 审计/并发回归用例必须携带策略表中的用途与白名单媒体。
 func v1UploadRequest(t *testing.T) *http.Request {
 	t.Helper()
 	body := &bytes.Buffer{}
@@ -98,7 +101,13 @@ func v1UploadRequest(t *testing.T) *http.Request {
 	if err := writer.WriteField("application_id", "app-1"); err != nil {
 		t.Fatal(err)
 	}
-	part, err := writer.CreateFormFile("file", "hello.txt")
+	if err := writer.WriteField("purpose", "contract.template"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="file"; filename="hello.docx"`},
+		"Content-Type":        {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

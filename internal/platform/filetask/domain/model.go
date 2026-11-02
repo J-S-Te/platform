@@ -154,6 +154,8 @@ type CleanupResult struct {
 	FailedFiles        int `json:"failed_files"`
 	RemovedTempFiles   int `json:"removed_temp_files"`
 	TempCleanupFailure int `json:"temp_cleanup_failure"`
+	// RemovedQuarantineFiles 统计本次清理从隔离目录删除的过期 .rejected 文件。
+	RemovedQuarantineFiles int `json:"removed_quarantine_files"`
 	// ReconciledFiles 统计通过受控对账推进的遗留 DELETING 记录（新增字段，既有字段语义不变）。
 	ReconciledFiles int `json:"reconciled_files"`
 }

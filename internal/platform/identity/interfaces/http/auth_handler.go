@@ -52,6 +52,9 @@ type oidcLoginConfig struct {
 	publicBaseURL string
 	stateCookie   string
 	nonceCookie   string
+	// verifierCookie 保存本次授权请求的 PKCE code_verifier；它必须与 state 分离，
+	// 且只在回调兑换令牌时使用一次。
+	verifierCookie string
 }
 
 // oidcIDTokenVerifier 校验平台自身 OIDC 登录回调收到的 ID Token（签名/issuer/aud/exp/
@@ -121,14 +124,15 @@ func NewHandler(service applicationService, logger *slog.Logger, authConfig conf
 		logger:  logger,
 		cookie:  cookieConfig{name: cookieName, secure: authConfig.SessionCookieSecure, sameSite: sameSite},
 		oidc: oidcLoginConfig{
-			enabled:       authConfig.KeycloakOIDCEnabled,
-			issuer:        strings.TrimRight(strings.TrimSpace(authConfig.KeycloakOIDCIssuer), "/"),
-			clientID:      strings.TrimSpace(authConfig.KeycloakOIDCClientID),
-			clientSecret:  authConfig.KeycloakOIDCClientSecret,
-			redirectPath:  strings.TrimSpace(authConfig.KeycloakOIDCRedirectPath),
-			publicBaseURL: strings.TrimRight(strings.TrimSpace(authConfig.PublicBaseURL), "/"),
-			stateCookie:   "bp_oidc_state",
-			nonceCookie:   "bp_oidc_nonce",
+			enabled:        authConfig.KeycloakOIDCEnabled,
+			issuer:         strings.TrimRight(strings.TrimSpace(authConfig.KeycloakOIDCIssuer), "/"),
+			clientID:       strings.TrimSpace(authConfig.KeycloakOIDCClientID),
+			clientSecret:   authConfig.KeycloakOIDCClientSecret,
+			redirectPath:   strings.TrimSpace(authConfig.KeycloakOIDCRedirectPath),
+			publicBaseURL:  strings.TrimRight(strings.TrimSpace(authConfig.PublicBaseURL), "/"),
+			stateCookie:    "bp_oidc_state",
+			nonceCookie:    "bp_oidc_nonce",
+			verifierCookie: "bp_oidc_verifier",
 		},
 		auditRecorder: auditRecorder,
 		auditConfig:   auditConfig,
@@ -214,14 +218,22 @@ func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
+	// PKCE 的 code_verifier 必须是独立的随机秘密。复用 state 会使授权请求里的公开参数
+	// 直接变成令牌兑换凭证，任何能看到 state 的一方都能完成 code 兑换。
+	verifier, err := randomOIDCCodeVerifier()
+	if err != nil {
+		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return
+	}
 	secure := handler.cookie.secure
-	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: state, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: 600})
-	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.nonceCookie, Value: nonce, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: 600})
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: state, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: oidcCookieMaxAgeSeconds})
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.nonceCookie, Value: nonce, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: oidcCookieMaxAgeSeconds})
+	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.verifierCookieName(), Value: verifier, Path: "/", HttpOnly: true, Secure: secure, SameSite: handler.cookie.sameSite, MaxAge: oidcCookieMaxAgeSeconds})
 	query := url.Values{
 		"client_id": {handler.oidc.clientID}, "response_type": {"code"},
 		"scope": {"openid profile"}, "state": {state}, "nonce": {nonce},
 		"redirect_uri":   {handler.oidc.redirectURI(request)},
-		"code_challenge": {oidcCodeChallenge(state)}, "code_challenge_method": {"S256"},
+		"code_challenge": {oidcCodeChallenge(verifier)}, "code_challenge_method": {"S256"},
 	}
 	http.Redirect(writer, request, handler.oidc.issuer+"/protocol/openid-connect/auth?"+query.Encode(), http.StatusFound)
 }
@@ -243,14 +255,25 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
 		return
 	}
+	// verifier cookie 与 state/nonce 一样必须存在且格式合法；缺失时不能退回任何其他
+	// 值作为 code_verifier。
+	verifierCookie, err := request.Cookie(handler.oidc.verifierCookieName())
+	if err != nil || !validOIDCCodeVerifier(verifierCookie.Value) {
+		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
+		return
+	}
 	code := strings.TrimSpace(request.URL.Query().Get("code"))
 	if code == "" {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
 	}
-	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.stateCookie, Value: "", Path: "/", HttpOnly: true, Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, MaxAge: -1})
-	http.SetCookie(writer, &http.Cookie{Name: handler.oidc.nonceCookie, Value: "", Path: "/", HttpOnly: true, Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, MaxAge: -1})
-	accessToken, rawIDToken, err := handler.exchangeOIDCCode(request.Context(), request, code, stateCookie.Value)
+	clearOIDCCookie := func(name string) {
+		http.SetCookie(writer, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: handler.cookie.secure, SameSite: handler.cookie.sameSite, MaxAge: -1})
+	}
+	clearOIDCCookie(handler.oidc.stateCookie)
+	clearOIDCCookie(handler.oidc.nonceCookie)
+	clearOIDCCookie(handler.oidc.verifierCookieName())
+	accessToken, rawIDToken, err := handler.exchangeOIDCCode(request.Context(), request, code, verifierCookie.Value)
 	if err != nil {
 		handler.logger.Warn("Keycloak OIDC code exchange failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
@@ -301,6 +324,52 @@ func randomOIDCState() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+// oidcCodeVerifierLength 满足 RFC 7636 对 code_verifier 的 43-128 字符要求；
+// 32 字节随机数的 base64url 编码固定为 43 字符。
+const oidcCodeVerifierLength = 43
+
+// oidcCookieMaxAgeSeconds 是 state/nonce/verifier 三个一次性 cookie 的共同生命周期。
+const oidcCookieMaxAgeSeconds = 600
+
+// defaultOIDCVerifierCookie 是 PKCE verifier cookie 的默认名；装配层未显式配置时使用。
+const defaultOIDCVerifierCookie = "bp_oidc_verifier"
+
+// randomOIDCCodeVerifier 生成独立的 crypto/rand PKCE code_verifier。
+func randomOIDCCodeVerifier() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+// validOIDCCodeVerifier 按 RFC 7636 的字符集与长度校验回调携带的 verifier。
+func validOIDCCodeVerifier(verifier string) bool {
+	if len(verifier) < oidcCodeVerifierLength || len(verifier) > 128 {
+		return false
+	}
+	for _, character := range verifier {
+		switch {
+		case character >= 'a' && character <= 'z':
+		case character >= 'A' && character <= 'Z':
+		case character >= '0' && character <= '9':
+		case character == '-', character == '.', character == '_', character == '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// verifierCookieName 返回 verifier cookie 名；未配置时回退到默认名，避免装配遗漏
+// 产生无名的 Set-Cookie。
+func (config oidcLoginConfig) verifierCookieName() string {
+	if name := strings.TrimSpace(config.verifierCookie); name != "" {
+		return name
+	}
+	return defaultOIDCVerifierCookie
 }
 
 func oidcCodeChallenge(verifier string) string {

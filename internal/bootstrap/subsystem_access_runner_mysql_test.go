@@ -82,7 +82,7 @@ func TestSubsystemAccessRunnerWiringOnMySQL(t *testing.T) {
 	cfg.Worker.PollInterval = time.Second
 
 	loggerInstance := slog.New(slog.NewTextHandler(io.Discard, nil))
-	runner, err := newSubsystemAccessRunnerFromConfig(cfg, db, loggerInstance, applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerReconciliation{}, nil)
+	runner, err := newSubsystemAccessRunnerFromConfig(cfg, db, loggerInstance, applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerReconciliation{}, nil, nil)
 	if err != nil {
 		t.Fatalf("wire subsystem access runner: %v", err)
 	}

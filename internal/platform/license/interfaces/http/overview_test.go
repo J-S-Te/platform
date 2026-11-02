@@ -107,6 +107,98 @@ func TestOverviewReportsRegisteredEnforcementAndMembers(t *testing.T) {
 	}
 }
 
+func TestOverviewReportsStaleAckWhenSnapshotCurrent(t *testing.T) {
+	now := time.Now().Unix()
+	readyAt := time.Unix(now-10, 0)
+	staleAckAt := time.Unix(now-600, 0)
+	service := &runtimeStub{status: coordination.Status{
+		Application:        coordination.Application{Application: "contract_management", State: "ENFORCED", Revision: 2, CatalogVersion: 1},
+		DeploymentRevision: 3, SnapshotCurrent: true,
+		Members: []coordination.Member{
+			{ServiceID: "contract-api", ReadyAt: &readyAt, IssuedRevision: 2, AckRevision: 2, AckAt: &readyAt},
+			{ServiceID: "contract-worker", ReadyAt: &readyAt, IssuedRevision: 2, AckRevision: 1, AckAt: &staleAckAt},
+		},
+	}}
+	h, _ := NewRuntimeHandler(service)
+	h.ConfigureOverview(&overviewLicenseStub{state: overviewState("contract_management", now-60, now+3600)}, "prod")
+	body := invoke(h.Overview, overviewRequest()).Body.String()
+	if got := strings.Count(body, `"RUNTIME_ACK_STALE"`); got != 1 {
+		t.Fatalf("ack stale reason count=%d: %s", got, body)
+	}
+	for _, want := range []string{`"ack_current":false`, `"snapshot_current":true`, `"service_id":"contract-worker"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("overview lost %s: %s", want, body)
+		}
+	}
+}
+
+func TestOverviewOmitsAckStaleWhenAllMembersCurrent(t *testing.T) {
+	now := time.Now().Unix()
+	readyAt := time.Unix(now-10, 0)
+	ackAt := time.Unix(now-5, 0)
+	service := &runtimeStub{status: coordination.Status{
+		Application:        coordination.Application{Application: "contract_management", State: "ENFORCED", Revision: 2, CatalogVersion: 1},
+		DeploymentRevision: 3, SnapshotCurrent: true,
+		Members: []coordination.Member{
+			{ServiceID: "contract-api", ReadyAt: &readyAt, IssuedRevision: 2, AckRevision: 2, AckAt: &ackAt},
+		},
+	}}
+	h, _ := NewRuntimeHandler(service)
+	h.ConfigureOverview(&overviewLicenseStub{state: overviewState("contract_management", now-60, now+3600)}, "prod")
+	body := invoke(h.Overview, overviewRequest()).Body.String()
+	if strings.Contains(body, "RUNTIME_ACK_STALE") {
+		t.Fatalf("current ack misreported as stale: %s", body)
+	}
+	for _, want := range []string{`"ack_current":true`, `"snapshot_current":true`, `"blocking_reasons":[]`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("overview lost %s: %s", want, body)
+		}
+	}
+}
+
+func TestOverviewKeepsSnapshotGapWithoutAckStale(t *testing.T) {
+	now := time.Now().Unix()
+	readyAt := time.Unix(now-10, 0)
+	ackAt := time.Unix(now-5, 0)
+	members := []coordination.Member{{ServiceID: "contract-api", ReadyAt: &readyAt, IssuedRevision: 2, AckRevision: 2, AckAt: &ackAt}}
+	t.Run("snapshot not current", func(t *testing.T) {
+		service := &runtimeStub{status: coordination.Status{
+			Application:        coordination.Application{Application: "contract_management", State: "APPLYING", Revision: 2, CatalogVersion: 1},
+			DeploymentRevision: 3, SnapshotCurrent: false,
+			Members: members,
+		}}
+		h, _ := NewRuntimeHandler(service)
+		h.ConfigureOverview(&overviewLicenseStub{state: overviewState("contract_management", now-60, now+3600)}, "prod")
+		body := invoke(h.Overview, overviewRequest()).Body.String()
+		if strings.Contains(body, "RUNTIME_ACK_STALE") {
+			t.Fatalf("snapshot gap misreported as ack stale: %s", body)
+		}
+		for _, want := range []string{`"snapshot_current":false`, `"ack_current":false`, `"status":"APPLYING"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("overview lost %s: %s", want, body)
+			}
+		}
+	})
+	t.Run("deployment revision differs from license", func(t *testing.T) {
+		service := &runtimeStub{status: coordination.Status{
+			Application:        coordination.Application{Application: "contract_management", State: "ENFORCED", Revision: 2, CatalogVersion: 1},
+			DeploymentRevision: 9, SnapshotCurrent: true,
+			Members: members,
+		}}
+		h, _ := NewRuntimeHandler(service)
+		h.ConfigureOverview(&overviewLicenseStub{state: overviewState("contract_management", 0, now-60)}, "prod")
+		body := invoke(h.Overview, overviewRequest()).Body.String()
+		if strings.Contains(body, "RUNTIME_ACK_STALE") {
+			t.Fatalf("snapshot gap misreported as ack stale: %s", body)
+		}
+		for _, want := range []string{`"snapshot_current":false`, `"LICENSE_EXPIRED"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("overview lost %s: %s", want, body)
+			}
+		}
+	})
+}
+
 func TestOverviewRequiresReadPermissionAndRejectsUnknownApplication(t *testing.T) {
 	service := &runtimeStub{err: coordination.ErrNotReady}
 	h, _ := NewRuntimeHandler(service)

@@ -325,6 +325,6 @@ func accessSettingsToResponse(settings settingsdomain.AccessSettings) accessSett
 		PublicOrigin:              settings.PublicOrigin,
 		AllowInsecureHTTPRedirect: settings.AllowInsecureHTTPRedirect,
 		Version:                   settings.Version,
-		UpdatedAt:                 settings.UpdatedAt.Format(time.RFC3339),
+		UpdatedAt:                 settings.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 func TestUploadRequestResolutionRouteRequiresMachineAuthentication(t *testing.T) {
-	h := routes(&filehttp.Handler{}, &filehttp.UploadV2Handler{}, tokenMiddleware{}, nil, nil, nil)
+	h := routes(&filehttp.Handler{}, &filehttp.UploadV2Handler{}, nil, tokenMiddleware{}, nil, nil, nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/file-upload-requests/source-key", nil))
 	if w.Code != http.StatusUnauthorized {
@@ -18,7 +18,7 @@ func TestUploadRequestResolutionRouteRequiresMachineAuthentication(t *testing.T)
 }
 
 func TestUploadRequestRetirementRouteRequiresMachineAuthentication(t *testing.T) {
-	h := routes(&filehttp.Handler{}, &filehttp.UploadV2Handler{}, tokenMiddleware{}, nil, nil, nil)
+	h := routes(&filehttp.Handler{}, &filehttp.UploadV2Handler{}, nil, tokenMiddleware{}, nil, nil, nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/file-upload-requests/source-key/retire", nil))
 	if w.Code != http.StatusUnauthorized {

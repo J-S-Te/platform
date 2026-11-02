@@ -247,7 +247,10 @@ func decodeSubsystemAccess(writer http.ResponseWriter, request *http.Request, ta
 }
 
 func (handler *SubsystemAccessHandler) writeError(writer http.ResponseWriter, request *http.Request, err error) {
+	var prerequisites *application.SubsystemAccessPrerequisitesMissingError
 	switch {
+	case errors.As(err, &prerequisites):
+		handler.writePrerequisitesMissing(writer, request, prerequisites)
 	case errors.Is(err, application.ErrSubsystemAccessInvalidRequest):
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
 	case errors.Is(err, application.ErrSubsystemAccessOperationNotFound):
@@ -258,6 +261,33 @@ func (handler *SubsystemAccessHandler) writeError(writer http.ResponseWriter, re
 		handler.logger.Error("subsystem access request failed", "error", err, "path", request.URL.Path)
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
 	}
+}
+
+// subsystemAccessPrerequisiteDetails 是 409 的结构化详情：分项缺项供界面逐条展示。
+type subsystemAccessPrerequisiteDetails struct {
+	Missing []subsystemAccessMissingDetail `json:"missing"`
+}
+
+// subsystemAccessMissingDetail 是缺项的下发形态（下划线字段名与其余接口保持一致）。
+type subsystemAccessMissingDetail struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	NextAction string `json:"next_action"`
+}
+
+// writePrerequisitesMissing 把阻塞类缺项映射为 409：预览里展示的条件必须同样拦住提交。
+func (handler *SubsystemAccessHandler) writePrerequisitesMissing(writer http.ResponseWriter, request *http.Request, err *application.SubsystemAccessPrerequisitesMissingError) {
+	details := subsystemAccessPrerequisiteDetails{Missing: make([]subsystemAccessMissingDetail, 0, len(err.Missing))}
+	for _, item := range err.Missing {
+		details.Missing = append(details.Missing, subsystemAccessMissingDetail{
+			Code: strings.TrimSpace(item.Code), Message: strings.TrimSpace(item.Message), NextAction: strings.TrimSpace(item.NextAction)})
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		message = "接入条件未满足，不能提交接入或更新操作"
+	}
+	httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New(
+		"SUBSYSTEM_ACCESS_PREREQUISITES_MISSING", message, details))
 }
 
 func subsystemAccessViewResponse(view application.SubsystemAccessOperationView) subsystemAccessOperationResponse {

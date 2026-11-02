@@ -955,6 +955,19 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedContractDoesNotReload
 			t.Fatalf("integrated contract provisioning must not mutate or reload the current gateway: %#v", call)
 		}
 	}
+	// 合同应用自身的凭据不满足 claims.Subject 验签约束：合同接入不得把它们写进客户运行文件。
+	customerBytes, readErr := os.ReadFile(filepath.Join(platformRoot, "docker", ".env.customer.local"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(customerBytes) != "CUSTOMER_SETTING=keep\n" {
+		t.Fatalf("contract provisioning rewrote customer runtime file:\n%s", customerBytes)
+	}
+	for _, forbidden := range []string{"CONTRACT_SUMMARY_CLIENT_ID", "CONTRACT_CLIENT_ID", "CONTRACT_SUMMARY_CLIENT_SECRET", "CONTRACT_CLIENT_SECRET", "contract_management-prod-contract-summary", "contract_management-prod-opportunity-intake"} {
+		if strings.Contains(string(customerBytes), forbidden) {
+			t.Fatalf("contract provisioning leaked contract-owned identity %q into customer runtime file:\n%s", forbidden, customerBytes)
+		}
+	}
 }
 
 func TestLocalDockerSubsystemProvisionerPreflightIntegratedCustomerDoesNotRequireStandaloneCompose(t *testing.T) {
@@ -1095,6 +1108,8 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "notification-secret"},
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "owner-directory-secret"},
 			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "signed-count-secret"},
+			{Purpose: application.ServiceCredentialContractSummaryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-summary"}, PlaintextSecret: "contract-summary-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedWrite, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-opportunity-intake"}, PlaintextSecret: "opportunity-intake-secret"},
 		},
 	})); err != nil {
 		t.Fatalf("provision integrated customer subsystem: %v", err)
@@ -1115,6 +1130,18 @@ func TestLocalDockerSubsystemProvisionerProvisionIntegratedCustomerWritesSharedE
 		"PLATFORM_MANAGEMENT_TOKEN_URL=http://platform-api:8080/oauth2/token", "PLATFORM_OWNER_DIRECTORY_SCOPE=owner_directory.read",
 		"PLATFORM_OWNER_DIRECTORY_CLIENT_ID=customer_and_opportunity-dev-owner-directory",
 		"PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET=owner-directory-secret",
+		// 合同摘要核验/商机签约事件的客户端身份必须由客户应用分支写入。
+		"CONTRACT_VERIFICATION_ENABLED=true",
+		"CONTRACT_SUMMARY_URL=http://contract-api:8081/internal/contract-summary",
+		"CONTRACT_SUMMARY_TOKEN_URL=http://platform-api:8080/oauth2/token",
+		"CONTRACT_SUMMARY_CLIENT_ID=customer_and_opportunity-dev-contract-summary",
+		"CONTRACT_SUMMARY_CLIENT_SECRET=contract-summary-secret",
+		"CONTRACT_SUMMARY_SCOPE=contract.summary.read",
+		"CONTRACT_TOKEN_URL=http://platform-api:8080/oauth2/token",
+		"CONTRACT_OPPORTUNITY_INTAKE_URL=http://contract-api:8081/internal/opportunity-signed-events",
+		"CONTRACT_CLIENT_ID=customer_and_opportunity-dev-opportunity-intake",
+		"CONTRACT_CLIENT_SECRET=opportunity-intake-secret",
+		"CONTRACT_SCOPE=opportunity.signed.write",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("shared customer environment missing %q:\n%s", expected, contents)
@@ -1162,6 +1189,8 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "new-notification-secret"},
 			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "new-owner-directory-secret"},
 			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "new-signed-count-secret"},
+			{Purpose: application.ServiceCredentialContractSummaryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-summary"}, PlaintextSecret: "new-contract-summary-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedWrite, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-opportunity-intake"}, PlaintextSecret: "new-opportunity-intake-secret"},
 		},
 	})); err != nil {
 		t.Fatalf("update integrated customer subsystem: %v", err)
@@ -1182,9 +1211,94 @@ func TestLocalDockerSubsystemProvisionerUpdateIntegratedCustomerRedeliversAuditA
 		"CONTRACT_SIGNED_COUNT_ENABLED=true",
 		"CONTRACT_SIGNED_COUNT_CLIENT_ID=customer_and_opportunity-dev-contract-signed-count",
 		"CONTRACT_SIGNED_COUNT_CLIENT_SECRET=new-signed-count-secret",
+		// 受控更新同样由客户应用分支重放合同侧客户端身份。
+		"CONTRACT_VERIFICATION_ENABLED=true",
+		"CONTRACT_SUMMARY_CLIENT_ID=customer_and_opportunity-dev-contract-summary",
+		"CONTRACT_SUMMARY_CLIENT_SECRET=new-contract-summary-secret",
+		"CONTRACT_SUMMARY_SCOPE=contract.summary.read",
+		"CONTRACT_CLIENT_ID=customer_and_opportunity-dev-opportunity-intake",
+		"CONTRACT_CLIENT_SECRET=new-opportunity-intake-secret",
+		"CONTRACT_SCOPE=opportunity.signed.write",
 	} {
 		if !strings.Contains(string(contents), expected) {
 			t.Fatalf("updated customer environment missing %q:\n%s", expected, contents)
+		}
+	}
+}
+
+func customerContractIdentityTestInput() application.SubsystemProvisioningInput {
+	return p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
+		ApplicationCode: integratedCustomerApplicationCode, Environment: "dev",
+		ServiceCredentials: []application.SubsystemServiceCredential{
+			{Purpose: application.ServiceCredentialAuditIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-audit-publisher"}, PlaintextSecret: "audit-secret"},
+			{Purpose: application.ServiceCredentialNotificationIngest, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-notification-publisher"}, PlaintextSecret: "notification-secret"},
+			{Purpose: application.ServiceCredentialOwnerDirectoryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-owner-directory"}, PlaintextSecret: "owner-directory-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedCountRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-signed-count"}, PlaintextSecret: "signed-count-secret"},
+			{Purpose: application.ServiceCredentialContractSummaryRead, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-contract-summary"}, PlaintextSecret: "contract-summary-secret"},
+			{Purpose: application.ServiceCredentialContractOpportunitySignedWrite, OAuthClient: application.OAuthClientView{ClientID: "customer_and_opportunity-dev-opportunity-intake"}, PlaintextSecret: "opportunity-intake-secret"},
+		},
+	})
+}
+
+func TestCustomerContractIdentityRequiresCustomerOwnedCredentials(t *testing.T) {
+	const existing = "CONTRACT_VERIFICATION_ENABLED=false\nCONTRACT_SUMMARY_CLIENT_ID=\n"
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*application.SubsystemProvisioningInput)
+	}{
+		{name: "missing summary", mutate: func(input *application.SubsystemProvisioningInput) {
+			input.ServiceCredentials = removeServiceCredential(input.ServiceCredentials, application.ServiceCredentialContractSummaryRead)
+		}},
+		{name: "missing opportunity signed write", mutate: func(input *application.SubsystemProvisioningInput) {
+			input.ServiceCredentials = removeServiceCredential(input.ServiceCredentials, application.ServiceCredentialContractOpportunitySignedWrite)
+		}},
+		{name: "contract owned summary client", mutate: func(input *application.SubsystemProvisioningInput) {
+			setServiceCredentialClientID(input.ServiceCredentials, application.ServiceCredentialContractSummaryRead, "contract_management-dev-contract-summary")
+		}},
+		{name: "contract owned opportunity intake client", mutate: func(input *application.SubsystemProvisioningInput) {
+			setServiceCredentialClientID(input.ServiceCredentials, application.ServiceCredentialContractOpportunitySignedWrite, "contract_management-dev-opportunity-intake")
+		}},
+		{name: "other environment summary client", mutate: func(input *application.SubsystemProvisioningInput) {
+			setServiceCredentialClientID(input.ServiceCredentials, application.ServiceCredentialContractSummaryRead, "customer_and_opportunity-prod-contract-summary")
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".env.customer.local")
+			if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input := customerContractIdentityTestInput()
+			testCase.mutate(&input)
+			provisioner := &LocalDockerSubsystemProvisioner{}
+			if err := provisioner.updateServiceCredentialRuntimeConfiguration(input, path); err == nil {
+				t.Fatal("customer contract identity accepted a credential the contract verifier cannot match")
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != existing {
+				t.Fatalf("failed contract identity validation still rewrote customer runtime file:\n%s", contents)
+			}
+		})
+	}
+}
+
+func removeServiceCredential(credentials []application.SubsystemServiceCredential, purpose string) []application.SubsystemServiceCredential {
+	result := make([]application.SubsystemServiceCredential, 0, len(credentials))
+	for _, credential := range credentials {
+		if credential.Purpose == purpose {
+			continue
+		}
+		result = append(result, credential)
+	}
+	return result
+}
+
+func setServiceCredentialClientID(credentials []application.SubsystemServiceCredential, purpose, clientID string) {
+	for index := range credentials {
+		if credentials[index].Purpose == purpose {
+			credentials[index].OAuthClient.ClientID = clientID
 		}
 	}
 }
