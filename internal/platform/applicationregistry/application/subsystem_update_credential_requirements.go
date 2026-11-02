@@ -20,6 +20,10 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 			// 外部合同创建会同步校验 CRM 客户和商机。历史环境可能早于该集成能力，
 			// 受控更新必须创建或轮换凭据并把明文 Secret 重新下发到运行文件。
 			{Purpose: ServiceCredentialCRMContractReferenceRead, Suffix: "crm-contract-reference", ClientName: "合同管理系统 CRM Contract Reference Reader", Scopes: []string{"customer.contract_reference.read"}, Rotate: true},
+			// 合同审核结论回写 CRM 必须使用独立的 opportunity.signed.write 服务 Client
+			// （BIZ-XEVT2-02）。历史环境升级时若不随更新补发，运行文件中的
+			// CRM_LINK_CLIENT_ID/SECRET 仍是占位值，合同进程会按 fail-closed 拒绝启动。
+			{Purpose: ServiceCredentialCRMContractLinkWrite, Suffix: "crm-contract-link", ClientName: "合同管理系统 CRM Contract Link Writer", Scopes: []string{"opportunity.signed.write"}, Rotate: true},
 			{Purpose: ServiceCredentialProjectContractImport, Suffix: "project-integration", ClientName: "合同管理系统 Project Contract Importer", Scopes: []string{"project.contract.import"}, Rotate: true},
 			{Purpose: ServiceCredentialSettlementContractIngest, Suffix: "settlement-integration", ClientName: "合同结算事件投递器", Scopes: []string{"settlement.contract.ingest"}},
 			fileGateway,
@@ -92,6 +96,10 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 			{Purpose: ServiceCredentialNotificationIngest, Suffix: "notification-publisher", ClientName: "结算与开票管理系统 Notification Publisher", Scopes: []string{"notification.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialOwnerDirectoryRead, Suffix: "owner-directory", ClientName: "结算与开票管理系统 Owner Directory Reader", Scopes: []string{"owner_directory.read"}, Rotate: true},
 			{Purpose: ServiceCredentialSettlementProjectReferenceRead, Suffix: "project-reference", ClientName: "结算项目引用只读", Scopes: []string{"settlement.project_reference.read"}, Rotate: true},
+			// 结算→CRM 信用事实同步凭据进入运行文件（settlement-prod.yaml 的
+			// service.crm_credit_payment_ingest.*）。受控更新必须创建/轮换并重新下发，
+			// 否则清单绑定无法解析，运行配置生成失败。
+			{Purpose: ServiceCredentialCRMCreditPaymentIngest, Suffix: "crm-credit-ingest", ClientName: "结算 CRM 信用事实投递器", Scopes: []string{"customer.credit.payment.ingest"}, Rotate: true},
 			fileGateway,
 		}
 	default:

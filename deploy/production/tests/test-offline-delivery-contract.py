@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -59,6 +60,9 @@ sys.exit('Unexpected Docker stub invocation: '+repr(args))
 
 
 class DeliveryContract(unittest.TestCase):
+    # 用途：建立含真实迁移输入的隔离工作区，所有 Docker 操作均为严格命令替身。
+    # 参数：无。
+    # 返回值：无；不读取业务配置或操作真实 Docker。
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="offline-delivery-contract-")
         self.root = Path(self.temp.name).resolve()
@@ -74,6 +78,8 @@ class DeliveryContract(unittest.TestCase):
                 source = REPO / module / name
                 if source.is_file():
                     shutil.copyfile(source, self.workspace / module / name)
+        (self.workspace / 'platform/migrations/000001_fixture.up.sql').write_text(
+            '-- Isolated compatibility input; never executed against a database.\nSELECT 1;\n')
         for directory in ("src", "public", "nginx"):
             (self.workspace / "frontend" / directory).mkdir(parents=True, exist_ok=True)
         for name in ("Dockerfile", ".dockerignore", "package.json", "package-lock.json", "index.html", "login.html", "vite.config.js"):
@@ -89,7 +95,7 @@ class DeliveryContract(unittest.TestCase):
             path.write_text("reviewed fixture input\n")
         self.tools = self.root / "tools"
         self.tools.mkdir()
-        (self.tools / "docker").write_text(DOCKER)
+        (self.tools / "docker").write_text(DOCKER.replace('#!/usr/bin/env python3', '#!' + sys.executable, 1))
         (self.tools / "docker").chmod(0o755)
         if not shutil.which("flock"):
             (self.tools / "flock").write_text("#!/bin/sh\nexit 0\n")
@@ -99,6 +105,8 @@ class DeliveryContract(unittest.TestCase):
         self.log = self.root / "docker.log"
         self.env = dict(os.environ, PATH=str(self.tools)+os.pathsep+os.environ["PATH"],
                         PROBE_DOCKER_LOG=str(self.log), PROBE_DOCKER_ROOT=str(self.root),
+                        UIP_BUILD_BUILDER_ID='builder://test/offline-contract',
+                        UIP_BUILD_INVOCATION_ID='isolated-delivery-contract',
                         OFFLINE_PULL_RETRIES="1", OFFLINE_PULL_RETRY_DELAY_SECONDS="1", PYTHONDONTWRITEBYTECODE="1")
 
     def tearDown(self):
@@ -160,6 +168,17 @@ class DeliveryContract(unittest.TestCase):
         self.assertTrue(callable(collector.collect))
         self.assertTrue(callable(collector.write_inventory))
         self.assertFalse(list(target.rglob("__pycache__")))
+
+    # 用途：确认修正夹具后仍保留缺迁移阻断，不用固定成功掩盖门禁。
+    # 参数：无。
+    # 返回值：无；缺迁移不得生成部署资产。
+    def test_asset_build_without_migration_inputs_is_rejected(self):
+        (self.workspace / 'platform/migrations/000001_fixture.up.sql').unlink()
+        output = self.root / 'invalid-assets'
+        result = self.command(['bash', str(self.production / 'bin/build-offline-packages.sh'),
+            '--component', 'assets', '--version', 'invalid-v1', '--output', str(output)], succeeds=False)
+        self.assertIn('no migrations found', result.stderr)
+        self.assertFalse((output / 'deployment-assets-invalid-v1.tar.gz').exists())
 
     def fingerprint(self):
         helper = self.production / "bin/offline-build-inputs.sh"

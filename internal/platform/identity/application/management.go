@@ -51,6 +51,14 @@ type PageResult[T any] struct {
 	Total    int64
 }
 
+// ManagementScopeContextRepository 是用户/账号按 ID 管理范围判定所需的可选仓储能力。
+// 与 EmployeeOnboardingRepository 一样在 ManagementRepository 之上保持可选，既有管理测试
+// 替身与旧契约无需实现新方法；生产 GORM 存储按有效任职返回服务端权威归属。
+type ManagementScopeContextRepository interface {
+	UserScopeOrgUnitIDs(context.Context, string, string) ([]string, error)
+	AccountScopeOrgUnitIDs(context.Context, string, string) ([]string, error)
+}
+
 // UserView 是可安全返回给客户端的用户表示；有意只携带掩码手机号，明文与密文都绝不
 // 离开应用层。
 type UserView struct {
@@ -456,6 +464,38 @@ func (service *ManagementService) UpdateAccount(ctx context.Context, input Accou
 		return domain.Account{}, ErrValidation
 	}
 	return service.repository.UpdateAccount(ctx, input)
+}
+
+// UserManagementScopeOrgUnitIDs 返回用户当前有效任职的组织单元，供 HTTP 适配器在受限
+// 数据管理范围下判定“这个用户能否被读取/更新/删除”。归属只取自服务端数据，请求体或查询
+// 参数中的组织字段不参与判定。仓储不支持范围判定时返回错误，由调用方按失败关闭处理。
+func (service *ManagementService) UserManagementScopeOrgUnitIDs(ctx context.Context, tenantID, userID string) ([]string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	userID = strings.TrimSpace(userID)
+	if tenantID == "" || userID == "" {
+		return nil, ErrValidation
+	}
+	repository, ok := service.repository.(ManagementScopeContextRepository)
+	if !ok {
+		return nil, fmt.Errorf("user management scope is not supported by this identity repository")
+	}
+	return repository.UserScopeOrgUnitIDs(ctx, tenantID, userID)
+}
+
+// AccountManagementScopeOrgUnitIDs 返回账号的权威组织归属（经其属主用户的有效任职）。
+// 没有属主用户的服务账号不属于任何组织范围，返回空集合而不是报错，使受限调用方按
+// “不在范围内”拒绝。
+func (service *ManagementService) AccountManagementScopeOrgUnitIDs(ctx context.Context, tenantID, accountID string) ([]string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	accountID = strings.TrimSpace(accountID)
+	if tenantID == "" || accountID == "" {
+		return nil, ErrValidation
+	}
+	repository, ok := service.repository.(ManagementScopeContextRepository)
+	if !ok {
+		return nil, fmt.Errorf("account management scope is not supported by this identity repository")
+	}
+	return repository.AccountScopeOrgUnitIDs(ctx, tenantID, accountID)
 }
 
 // ListOrgUnits 使用共享且有界约束的分页契约列出租户组织单元。

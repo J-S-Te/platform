@@ -88,7 +88,7 @@ func (runner *Runner) runOnce(ctx context.Context) {
 				cleanupFailed = true
 				runner.logger.Error("file gateway temporary cleanup failed", "tenant_id", tenantID, "error", err, "failed", cleaned.FailedFiles)
 			} else {
-				runner.logger.Info("file gateway temporary cleanup completed", "tenant_id", tenantID, "claimed", cleaned.ClaimedFiles, "deleted", cleaned.DeletedFiles, "temporary_fragments", cleaned.RemovedTempFiles)
+				runner.logger.Info("file gateway temporary cleanup completed", "tenant_id", tenantID, "claimed", cleaned.ClaimedFiles, "deleted", cleaned.DeletedFiles, "temporary_fragments", cleaned.RemovedTempFiles, "quarantine_files", cleaned.RemovedQuarantineFiles)
 			}
 		}
 	}

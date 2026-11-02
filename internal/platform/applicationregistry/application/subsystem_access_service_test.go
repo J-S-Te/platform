@@ -325,3 +325,127 @@ func TestSubsystemAccessUpdateKeepsRegisteredAuthenticationProvider(t *testing.T
 		t.Fatalf("ordinary update changed registered provider: %q", result.Operation.AuthProvider)
 	}
 }
+
+// 提交门禁：缺批准/许可/镜像不再只是展示项，必须拒绝创建操作；
+// 认证观察期不拦截（由 worker 返回 WAITING）；已一致（DisplayOnly）不创建操作。
+func TestSubsystemAccessSubmitBlocksMissingPrerequisites(t *testing.T) {
+	ready := func() SubsystemAccessFacts {
+		return SubsystemAccessFacts{InScope: true, ApprovalReady: true, LicenseReady: true, ImagesReady: true}
+	}
+	cases := []struct {
+		name            string
+		facts           SubsystemAccessFacts
+		wantCreated     bool
+		wantDisplayOnly bool
+		wantMissing     []string
+	}{
+		{name: "无缺项 → 创建操作", facts: ready(), wantCreated: true},
+		{name: "缺少运行批准 → 拒绝", facts: func() SubsystemAccessFacts {
+			facts := ready()
+			facts.ApprovalReady = false
+			return facts
+		}(), wantMissing: []string{"RUNTIME_APPROVAL_MISSING"}},
+		{name: "缺少商业授权 → 拒绝", facts: func() SubsystemAccessFacts {
+			facts := ready()
+			facts.LicenseReady = false
+			return facts
+		}(), wantMissing: []string{"LICENSE_MISSING"}},
+		{name: "缺少镜像 → 拒绝", facts: func() SubsystemAccessFacts {
+			facts := ready()
+			facts.ImagesReady = false
+			return facts
+		}(), wantMissing: []string{"IMAGES_MISSING"}},
+		{name: "镜像状态未上报 → 拒绝", facts: func() SubsystemAccessFacts {
+			facts := ready()
+			facts.ImagesReady = false
+			facts.Unverified = []string{"images"}
+			return facts
+		}(), wantMissing: []string{"IMAGES_UNVERIFIED"}},
+		{name: "多项阻塞缺项 → 一次列全", facts: SubsystemAccessFacts{InScope: true},
+			wantMissing: []string{"RUNTIME_APPROVAL_MISSING", "LICENSE_MISSING", "IMAGES_MISSING"}},
+		// 认证观察期不阻塞：worker 会以 WAITING 如实返回，保留既有等待语义。
+		{name: "认证观察期未结束 → 不拦截", facts: func() SubsystemAccessFacts {
+			facts := ready()
+			facts.AuthObservationPending = true
+			return facts
+		}(), wantCreated: true},
+		// 已一致（DisplayOnly）不创建操作，也不因缺项报错：保持既有展示语义。
+		{name: "已接入且一致 → 仅展示", facts: SubsystemAccessFacts{InScope: true, Registered: true, ControlledDeployment: true,
+			ApprovalReady: true, LicenseReady: true, ImagesReady: true}, wantDisplayOnly: true},
+		// 范围外：动作判定为 NONE 且 DisplayOnly，维持既有行为（不创建、不报缺项错误）。
+		{name: "目标范围外 → 仅展示", facts: SubsystemAccessFacts{InScope: false}, wantDisplayOnly: true},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			repository := newAccessRepositoryStub()
+			service := accessServiceFor(t, &accessFactsStub{facts: item.facts, version: "pv-prereq"}, repository)
+			result, err := service.Submit(context.Background(), SubsystemAccessSubmitRequest{
+				TenantID: "tenant-1", ApplicationCode: "settlement", EnvironmentCode: "dev",
+				PreviewVersion: "pv-prereq", IdempotencyKey: "idem-prereq", OperatorID: "operator-1"})
+
+			if len(item.wantMissing) > 0 {
+				var missingErr *SubsystemAccessPrerequisitesMissingError
+				if !errors.As(err, &missingErr) {
+					t.Fatalf("err = %v, want SubsystemAccessPrerequisitesMissingError", err)
+				}
+				if !errors.Is(err, ErrSubsystemAccessPrerequisitesMissing) {
+					t.Fatalf("err %v must unwrap to ErrSubsystemAccessPrerequisitesMissing", err)
+				}
+				codes := make([]string, 0, len(missingErr.Missing))
+				for _, missing := range missingErr.Missing {
+					codes = append(codes, missing.Code)
+					if strings.TrimSpace(missing.Message) == "" || strings.TrimSpace(missing.NextAction) == "" {
+						t.Fatalf("missing item must carry message and next action: %+v", missing)
+					}
+				}
+				if strings.Join(codes, ",") != strings.Join(item.wantMissing, ",") {
+					t.Fatalf("missing codes = %v, want %v", codes, item.wantMissing)
+				}
+				// 阻塞类缺项不得留下操作记录（既不能受理也不能占槽位）。
+				if len(repository.operations) != 0 {
+					t.Fatalf("rejected submit must not create an operation: %+v", repository.operations)
+				}
+				if result.Operation.ID != "" || result.Created {
+					t.Fatalf("rejected submit result = %+v", result)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.DisplayOnly != item.wantDisplayOnly {
+				t.Fatalf("display_only = %v, want %v", result.DisplayOnly, item.wantDisplayOnly)
+			}
+			if item.wantDisplayOnly {
+				if len(repository.operations) != 0 {
+					t.Fatalf("display-only submit must not create an operation: %+v", repository.operations)
+				}
+				return
+			}
+			if !result.Created || len(repository.operations) != 1 {
+				t.Fatalf("created = %v operations = %d, want 1", result.Created, len(repository.operations))
+			}
+		})
+	}
+}
+
+// 错误文案必须中文、列出缺项与下一步，且可通过类型取出缺失码（不靠字符串分类）。
+func TestSubsystemAccessPrerequisitesErrorDescribesMissingAndNextAction(t *testing.T) {
+	err := &SubsystemAccessPrerequisitesMissingError{Missing: []SubsystemAccessMissing{
+		{Code: "LICENSE_MISSING", Message: "缺少商业授权", NextAction: "在「商业授权」完成初始化并导入签发产物"},
+		{Code: "IMAGES_MISSING", Message: "缺少所需镜像", NextAction: "准备候选镜像"},
+	}}
+	message := err.Error()
+	for _, expected := range []string{"缺少商业授权", "在「商业授权」完成初始化并导入签发产物", "缺少所需镜像", "准备候选镜像"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("error message %q missing %q", message, expected)
+		}
+	}
+	if !errors.Is(err, ErrSubsystemAccessPrerequisitesMissing) {
+		t.Fatal("typed error must unwrap to the sentinel")
+	}
+	if (&SubsystemAccessPrerequisitesMissingError{}).Error() == "" {
+		t.Fatal("empty error must still carry a readable message")
+	}
+}

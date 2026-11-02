@@ -313,8 +313,11 @@ services:
   # Docker Socket 白名单代理（安全审查 SEC-F3）：本地 Agent 经专有 internal 网络访问
   # 受限 Docker API；docker.sock 只读挂载仅存在于本代理，Agent 容器不再持有 socket。
   # 本地白名单比生产多开 BUILD：本地接入流程使用 docker compose up --build / compose build。
+  # 安全（SEC-2）：本容器独占宿主 docker.sock，镜像引用与生产逐字一致：限定 ghcr.io
+  # registry 并锁定 digest，避免同名 docker.io 镜像或浮动标签漂移；升级时与
+  # deploy/production/compose.yaml 的 DOCKER_SOCKET_PROXY_IMAGE 同步修改。
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.5.0
+    image: ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     environment:
       TZ: Asia/Shanghai
       # tecnativa/docker-socket-proxy 浮动标签现随 HAProxy 3.4.x 构建，'warn' 已不是

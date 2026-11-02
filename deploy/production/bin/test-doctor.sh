@@ -122,6 +122,8 @@ reset_green() {
   rm -rf "$deploy_dir"
   mkdir -p "$manifest_dir" "$package_dir" "$deploy_dir/runtime" "$deploy_dir/subsystems.d"
   printf 'OFFLINE_CONFIGURATION_COMPLETE=true\nPUBLIC_ACCESS_MODE=ip\nPUBLIC_PLATFORM_HOST=192.0.2.20\nPUBLIC_SSO_HOST=192.0.2.20\nPUBLIC_HTTP_PORT=8081\nKEYCLOAK_HTTP_PORT=18090\n' > "$runtime_file"
+  # 旧 Secret 退役策略必须显式出现在夹具里：缺失会让 doctor 报警告，全绿用例就不成立。
+  printf 'AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=keep\nAUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=24h\n' >> "$runtime_file"
   chmod 600 "$runtime_file"
   write_release
   printf 'COMPONENT=contract\nVERSION=test\nIMAGE_REF=%s\nIMAGE_DIGEST=%s\nPACKAGE_SHA256=%s\n' \
@@ -339,5 +341,69 @@ run_doctor
 expect_rc 1
 expect_log '[失败] .release.env 不存在'
 reject_log "can't open file"
+
+# ---------------------------------------------------------------------------
+# 7. 旧 OAuth Client Secret 退役策略（RUNTIME-05）：缺失/非法只警告，不阻断部署
+# ---------------------------------------------------------------------------
+drop_runtime_key() {
+  local key="$1" temporary="$test_root/runtime.drop.$$"
+  grep -v "^${key}=" "$runtime_file" > "$temporary" || true
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$runtime_file"
+}
+
+# 缺键：默认 keep 生效，必须明确告诉运维“旧值不退役”，且不能阻断。
+reset_green
+drop_runtime_key AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT
+run_doctor
+expect_rc 0
+expect_log '[警告] AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT 缺失'
+expect_log '未发现阻断问题，但有'
+reject_log '[失败]'
+
+# 非法取值：platform-api 会 fail-closed，doctor 必须提前指出原因，但仍不阻断。
+reset_green
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT retire
+run_doctor
+expect_rc 0
+expect_log '[警告] AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=retire 取值不合法'
+reject_log '[失败]'
+
+# grace 缺窗口：提示默认收敛到 24h。
+reset_green
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT grace
+drop_runtime_key AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE
+run_doctor
+expect_rc 0
+expect_log '[警告] AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=grace 但缺少 AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE'
+reject_log '[失败]'
+
+# grace 合法窗口（上限 720h）：必须给出 OK 而不是警告。
+reset_green
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT grace
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE 720h
+run_doctor
+expect_rc 0
+expect_log '旧 Secret 退役策略为 grace：旧值有效期收紧到 720h'
+reject_log '[警告]'
+reject_log '[失败]'
+
+# 超出 (0, 720h]：应用层会拒绝该策略。
+reset_green
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT grace
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE 800h
+run_doctor
+expect_rc 0
+expect_log '[警告] AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=800h 超出允许窗口'
+reject_log '[失败]'
+
+# Go duration 不接受 "30d"，写错单位会让进程起不来。
+reset_green
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT grace
+env_set "$runtime_file" AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE 30d
+run_doctor
+expect_rc 0
+expect_log '[警告] AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=30d 不是合法的 Go duration'
+reject_log '[失败]'
 
 echo 'doctor read-only environment self-check tests passed'

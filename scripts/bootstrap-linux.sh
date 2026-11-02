@@ -1032,7 +1032,6 @@ write_production_env_template() {
 # This file contains secrets. Keep it outside the release directory and do not commit it.
 APP_ENV=production
 APP_NAME=basic-platform
-APP_TIMEZONE=Asia/Shanghai
 APP_HTTP_ADDR=127.0.0.1:8080
 APP_PUBLIC_BASE_URL=REPLACE_WITH_HTTPS_PUBLIC_BASE_URL
 APP_CORS_ALLOWED_ORIGINS=REPLACE_WITH_HTTPS_PUBLIC_ORIGIN

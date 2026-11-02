@@ -39,6 +39,175 @@ docker ps -a
 
 HTTP、HTTPS 和会话排空统一由同一 frontend 服务及 `runtime/public-tls/` 受管目录处理，不再加载生产 frontend/HTTPS/drain/observability 覆盖文件。升级资产使用 `bin/install-assets.sh`，保留当前 `docker-compose.yml`，将新模板写到 `.dist` 供合并；不要覆盖用户的注释范围。
 
+### 编排文件的权威关系（BIZ-XWIRE-08）
+
+- `docker-compose.yml` 是**唯一权威编排**，也是离线资产包唯一发布的编排文件：`bin/deploy-service.sh`、`bin/lifecycle.sh`、`bin/publish-runtime-approvals.py` 以及 provisioner 的 `SUBSYSTEM_PRODUCTION_COMPOSE_FILE` 都指向它。
+- `compose.yaml` 是**不得用于部署**的评审参考副本：除注释/日志/资源上限/发布 profile 这类非关键键外，商业许可接线（每个消费者的 `runtime/license-*.env`、`license-state-*:/var/lib/commercial-license` 状态卷、`LICENSE_RUNTIME_STATE_DIRECTORY`）与健康检查（`test`/`interval`/`timeout`/`retries`）都与权威一致，缺一项即门禁失败；它不随资产包发布。
+- `compose.observability.yaml` 是被权威编排 `monitoring` 子系统取代的历史覆盖示例，任何脚本都不引用；再用 `-f` 叠加只会制造同名服务的第二份定义。
+- 改编排只改 `docker-compose.yml`，需要时再同步 `compose.yaml`。`tests/test-compose-orchestration-consistency.py`（CI 已登记）会校验三份文件的权威标记、两份文件的服务/卷集合、同名服务的镜像/端口/网络/environment 无矛盾、许可接线与健康检查无缺失（常驻服务必须有探针、一次性任务必须没有、PID1 探针必须指向真实 Worker 二进制）、`COMMERCIAL_LICENSE_*` 不得写进编排/模板/清单、旧部署根 `/opt/basic-platform` 不复现、参考副本不把 provisioner 指回 `compose.yaml`；出现新漂移直接失败。
+
+### 已知差异（参考副本有意保留）
+
+`compose.yaml` 是评审对照样本，不是等价部署样本。下列差异**有意保留**：评审不要要求逐键对齐，门禁也刻意不检查它们；照抄参考副本会得到与权威不同的解析结果。
+
+- `profiles`：参考副本给 23 个服务标了发布/迁移 profile（`release`、`project-release`、`customer`、`customer-release`、`settlement-release`、`data-analysis-release`），方便按子系统单独解析。权威编排靠 `# BEGIN/END SUBSYSTEM` 注释块加 `bin/deploy-service.sh` 的显式服务名控制启动范围，不使用 profile。因此按参考副本执行 `docker compose up`（未启用对应 profile 时）不会启动这些服务，启动范围与权威不同，**不能**用参考副本核对发布范围。
+- `portal-migrate`：参考副本经 `*portal-service` 锚点继承 `portal-reports-data:/app/data/portal-reports`；权威编排的 `portal-migrate` 只跑 schema 迁移，不挂报表卷。
+- `settlement-migrate`、`settlement-catalog-sync`：参考副本经 `*settlement-service` 锚点继承 `jwt-ed25519-public.pem` 只读卷；权威编排这两个一次性任务不挂该卷。
+- `env_file` 写法：参考副本用 `- runtime/*.env` 字符串简写，权威编排用 `- path: ... / required: false` 映射写法。映射写法在 runtime 文件尚未初始化时不阻断解析，字符串简写会直接报错；只有 `docker-compose.yml` 的那份写法具备部署语义。
+- 锚点与非关键资源键：`x-*-service` 锚点/`<<:` 合并、`logging`、`cpus`、`mem_limit`、`pids_limit`、`stop_grace_period` 只在权威编排声明。
+
+新增差异前先判断它属于"非关键键"还是"会改变部署解析结果"：后者一律改 `docker-compose.yml`，再同步参考副本，并让门禁覆盖到。
+
+### 健康检查覆盖范围（O6：已补齐常驻服务，一次性任务按语义不补）
+
+本轮已把权威编排里的常驻服务全部补上 healthcheck（`docker-compose.yml` 与参考副本 `compose.yaml` 逐键一致，门禁双向比对）。判定规则是“该服务被 `depends_on: condition: service_healthy` 依赖或本身常驻”，短命任务不加探针。
+
+**已补齐（11 个常驻 Worker，PID1 可执行文件探针）**：`customer-opportunity-alert-worker`、`customer-owner-notification-worker`、`customer-presale-alert-worker`、`customer-presale-assignment-notification-worker`、`customer-presale-progress-notification-worker`、`customer-notification-delivery-worker`、`customer-presale-worker`、`portal-invite-compensation-worker`、`portal-report-worker`、`data-analysis-aggregation-worker`、`data-analysis-alert-worker`。
+
+探针判据与既有的 `platform-worker`、`customer-contract-transfer-worker` 一致：
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "test \"$$(readlink /proc/1/exe)\" = /app/<binary>"]
+  interval: 5s
+  timeout: 2s
+  retries: 12
+  start_period: 5s
+```
+
+- 期望路径 = 镜像 `WORKDIR`（`/app`）+ 容器实际运行的二进制：覆盖 `command` 的服务取该命令的文件名；`data-analysis-aggregation-worker` / `data-analysis-alert-worker` 未覆盖 `command`，路径来自镜像 `ENTRYPOINT`（`data_analysis/Dockerfile` 的 `aggregation-worker` → `/app/aggregation-worker`、`alert-worker` → `/app/alert-worker`）。
+- 探针只回答“PID1 仍是该 Worker 而不是被 shell、包装脚本或重启循环替换”，不新增端口、不对外暴露任何端点，也不把业务就绪伪装成进程存在。逐服务的期望二进制登记在 `tests/test-compose-orchestration-consistency.py` 的 `PID1_EXPECTED`，写错路径或删键都会让门禁失败。
+
+**按语义不补（12 个一次性任务）**：`platform-key-init`、`platform-migrate`、`subsystem-provisioner-socket-init`、`contract-migrate`、`contract-number-audit`、`project-migrate`、`customer-migrate`、`portal-migrate`、`settlement-migrate`、`settlement-catalog-sync`、`data-analysis-migrate`、`data-analysis-metabase-init`。
+
+理由不是“省事”，而是探针会改坏发布门禁：这些服务 `restart: "no"`、跑完即退出，退出后 Docker 只会把 healthcheck 记成 `unhealthy`，`docker compose up --wait` 因此把“成功完成”判成启动失败。它们的一次性语义由部署脚本按退出码校验（见 `bin/deploy-service.sh`），没有任何服务用 `service_healthy` 依赖它们。门禁 `test_one_shot_services_declare_no_healthcheck` 固定了这条结论。
+
+**行为影响与仍未验证的部分**：healthcheck 就绪后，`depends_on: service_healthy` 的等待条件与发布脚本 `--wait` 的判定从“容器在运行”变成“探针通过”。本轮只做源码与配置解析级验证（`ruby -ryaml` 解析 + 门禁断言），**没有**在本机或隔离环境跑 Docker，因此发布脚本等待窗口、探针在真实镜像里的路径/权限、重启循环的观察窗口都仍需在隔离环境按 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 验收，不能据本文件宣布完成。
+
+### 许可运行环境文件的键位（O5：`COMMERCIAL_LICENSE_*` 不进模板/清单）
+
+`COMMERCIAL_LICENSE_ENABLED` 与 `COMMERCIAL_LICENSE_COMPATIBILITY` 刻意**不出现**在 `subsystem-templates/*.env.example`、`subsystems.d/*.yaml` 和两份 Compose 的 `environment` 里，这是默认值而非缺口：
+
+- `COMMERCIAL_LICENSE_ENABLED` 等运行态键由平台按受控接入生成到 `runtime/license-<service>.env`（`internal/platform/applicationregistry/infrastructure/runtime_license_delivery.go` 与 `local_runtime_license.go` 写入 `COMMERCIAL_LICENSE_*` 组），Compose 只负责用 `env_file` 只读引用；`runtime/` 被 `.gitignore` 忽略，不随资产包发布。把它写进模板或清单等于让“按模板重建”覆盖平台签发的运行态凭据。
+- `COMMERCIAL_LICENSE_COMPATIBILITY` 是**兼容放行开关**（`license-core/consumer/consumer.go`：只有归一后等于 `true` 才放行，且仅适用于从未登记的组件），生产必须缺省——缺省即 fail-closed。任何模板、清单或 Compose 默认值都不许打开它，否则 `COMMERCIAL_LICENSE_ENABLED=false` 就能冒充“已授权”。
+- 回归守卫：`tests/test-compose-orchestration-consistency.py` 的 `test_license_compatibility_switch_is_never_wired_in_production` 断言这两类键不出现在两份编排的 `environment` 里，且 7 份模板与 6 份清单都不声明它们；发布前核对项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 的「12.4 许可运行环境文件的键位核对」。
+
+### 检查清单（发版前手动执行）
+
+改过生产编排、监控规则、子系统清单或 runtime 模板后，在本仓库根执行：
+
+```bash
+cd platform
+python3 deploy/production/tests/test-compose-orchestration-consistency.py
+python3 deploy/production/tests/test_integration_wiring.py
+```
+
+改动只需要语法自检时（不解析 YAML、不需要 ruby）：
+
+```bash
+cd platform
+python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/production/tests/test-compose-orchestration-consistency.py','deploy/production/tests/test_integration_wiring.py']]; print('SYNTAX_OK')"
+```
+
+- `test-compose-orchestration-consistency.py`：适用时机是改动 `docker-compose.yml`、`compose.yaml`、`compose.observability.yaml`、`monitoring/prometheus/*.yml`（含告警规则）、`subsystem-templates/*.env.example`、`subsystems.d/*.yaml` 之后；需要本机有 `ruby`（`ruby -ryaml` 还原锚点与合并）。它守权威标记、服务与卷集合、镜像/端口/网络/environment 无矛盾、许可接线与健康检查无缺失（含常驻服务必须有探针、一次性任务必须没有探针、PID1 探针必须指向真实 Worker 二进制）、`COMMERCIAL_LICENSE_*` 不得写进编排/模板/清单、旧部署根不复现、监控抓取与指标端口边界，以及新增的观测面门禁：`platform-api`/`settlement-api` 抓取 target 必须是已声明服务、平台 job 必须是 `Bearer` + `credentials_file`、规则文件必须存在/被 `rule_files` 引用/被只读挂载、告警表达式里的指标名必须在“代码实际输出”白名单内；`profiles`、日志、资源上限、一次性任务的额外卷不在断言范围内（见上一小节）。
+- `test_integration_wiring.py`：适用时机是改动 `subsystems.d/*.yaml`、`subsystem-templates/*.env.example`、`.env.example` 或 `docker-compose.yml` 的接线键之后；只用标准库，不读 runtime 文件、不启容器、不连数据库。
+- CI 状态：两项都登记在 `.github/workflows/ci-cd.yml` 的 `test` job「Validate production deployment scripts」步骤里，紧邻执行（先一致性门禁、后接线门禁），与其它生产资产检查同一 shell 段、同一失败即停语义。"CI 绿"因此可作为两项检查都跑过的证据；但 CI 只做静态解析，仍需按 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 做真实部署验收。
+
+### 监控抓取与指标端点边界
+
+- `monitoring/prometheus/prometheus.yml` 抓取 `keycloak`、`keycloak-backup`、`file-gateway`、`contract`（`contract-api:8081`）、`platform-api`（`platform-api:8080`，平台自身 `/metrics`）与 `settlement-api`（`settlement-api:8085`）。所有 target 都是 Compose 服务名，只走 `application` 内网，不含宿主机地址。
+- `/metrics` 只由网络层保护：业务服务的指标端口仅允许回环发布（平台 8080、合同 8081、结算 8085），File Gateway 8086、Prometheus 9090、node-exporter 9100 完全不发布端口；前端 nginx 只代理显式业务路径，没有 `/metrics` 路由。禁止为了抓取补 `ports:`，也不要加公网 Ingress/反代。
+- contract 的 `/metrics` 不校验凭据，但只暴露聚合计数（不含租户/合同/事件 id），且与 `/healthz`、`/readyz` 同级注册、不进 `/api/v1`。它的唯一边界就是上面这条网络限制，因此“临时放开抓取端口”不是可接受的排障手段。
+- 平台 `/metrics` 额外有应用层鉴权（`RequireMetricsAccess`，SEC-B4）：配置 `METRICS_ACCESS_TOKEN` 时必须带 `Authorization: Bearer`，未配置时只放行回环对端。因此平台 job 必须用部署方提供的凭据文件抓取，见下一节。结算 `/metrics` 与合同的同级实现一致，不做应用层鉴权。
+- 数析（data-analysis）与项目管理（project）当前**没有** HTTP `/metrics` 端点，本编排刻意不为它们新增抓取 job（没有端点就写 job 只会得到永远 `up == 0` 的假目标）。它们的集成缺口只能通过各自的 `/readyz` 与日志观察；需要指标时先实现端点，再改本文件与门禁。
+
+### 观测接入：指标、告警与凭据
+
+本节是 BIZ-XEVT2-07（back-channel logout 可观测）与 BIZ-XAPI-10（集成目的地必开）落地后新增观测面的唯一入口：新增指标清单、告警清单、部署方必须提供的凭据文件，以及发布前核对项。改指标名或改抓取配置时，必须同步本文件与 `tests/test-compose-orchestration-consistency.py`（它把指标名、规则文件挂载、凭据挂载都做成了门禁）。
+
+#### 1. 新增抓取 job 与指标清单
+
+| 抓取 job | 端点 | 指标 | 来源（代码实际输出） |
+| --- | --- | --- | --- |
+| `platform-api` | `http://platform-api:8080/metrics`（Bearer） | `platform_oauth_backchannel_unregistered_rp`、`platform_oauth_backchannel_logout_no_endpoint` | `platform/internal/platform/oidc/backchannel/observability.go:16,18` |
+| `platform-api` | 同上 | `platform_http_requests_total`、`platform_http_errors_total`、`platform_http_request_duration_seconds_*`、`platform_authz_failures_total`、`platform_oidc_login_failures_total`、`platform_metric_collection_errors_total` | `platform/internal/transport/http/metrics.go:113-119` |
+| `platform-api` | 同上 | `platform_keycloak_outbox_backlog`/`_dead`、`platform_async_job_backlog`/`_dead`、`platform_oidc_backchannel_logout_backlog`/`_failed`/`_delivered` | `platform/internal/transport/http/metrics.go:73-79` |
+| `platform-api` | 同上 | `platform_async_job_retries_total`、`platform_async_job_last_success_timestamp_seconds`、`platform_database_*` | `platform/internal/transport/http/metrics.go:135-137,159-160` |
+| `settlement-api` | `http://settlement-api:8085/metrics` | `settlement_outbox_pending{destination}`、`settlement_integration_destination_configured{destination}`、`settlement_integration_audit_required`、`settlement_outbox_unconfigured_pending`、`settlement_outbox_pending_query_error` | `Settlement/internal/httpapi/integration_status.go:101-130`；目的地字面量 `Settlement/internal/outbox/destinations.go:13,15` 与 `integration_status.go:31` |
+| `contract`（既有） | `http://contract-api:8081/metrics` | `contract_integration_outbox_dead{kind}`、`contract_integration_outbox_dead_total` | `contract_management/internal/transport/httpapi/metrics.go:54-66` |
+
+采集语义要在排障前读懂，否则会把“没有样本”当成“一切正常”：
+
+- back-channel 两条 gauge 在采集失败时**不输出**（不以 0 兜底）。所以 `up == 1` 但指标缺失，本身就是故障信号。
+- `settlement_outbox_pending{destination}` 只在该目的地有积压行时才有样本（`Settlement/internal/outbox/worker.go:75-94` 按 destination 分组），空 outbox 没有样本是正常的——不要对它写 `absent()`，否则健康集群会被误报。样本缺失的兜底用始终输出的 `settlement_integration_audit_required`。
+- 合同 `/metrics` 在计数能力缺失或查询失败时返回 503 且不输出任何样本（`contract_management/internal/transport/httpapi/metrics.go:37-44`），同样必须用 `absent()` 才能看见。
+
+#### 2. 新增告警规则与清单
+
+`rule_files` 现为四个文件，全部只读挂载进 prometheus：
+
+| 规则文件 | 主题 | 主要告警（`for`/级别） |
+| --- | --- | --- |
+| `keycloak-alerts.yml`（既有） | Keycloak 与备份时间戳 | `KeycloakMetricsUnavailable` 等 |
+| `file-gateway-alerts.yml`（既有） | File Gateway 容量 | `FileGatewayStorage*` 等 |
+| `platform-alerts.yml`（新增） | 平台抓取、backchannel 缺口、队列 | `PlatformBackchannelUnregisteredRP`（`unregistered_rp > 0`，15m，warning）；`PlatformBackchannelNoEndpointBacklog`（`logout_no_endpoint > 0`，30m，warning）；`PlatformBackchannelNoEndpointBacklogPersistent`（同一指标 6h，critical）；`PlatformBackchannelLogoutDeliveryFailed`（`logout_failed > 0`，30m，warning）；`PlatformMetricsScrapeDown`（`up{job="platform-api"} == 0`，5m，critical）；`PlatformMetricsSamplesMissing`（`absent(platform_http_requests_total{job="platform-api"})`，15m，warning，覆盖 token 不匹配导致的 401）；`PlatformMetricCollectionErrors`；`PlatformKeycloakOutboxBacklog`/`_Dead`；`PlatformAsyncJobDead`/`_Stalled` |
+| `integration-alerts.yml`（新增） | 结算与合同集成 | `SettlementMetricsScrapeDown`（5m，critical）；`SettlementMetricsSamplesMissing`；按 destination 的积压阈值 `SettlementAuditOutboxBacklog`（`PLATFORM_AUDIT > 200`，30m）、`SettlementNotificationOutboxBacklog`（`PLATFORM_NOTIFICATION > 500`，30m）、`SettlementTaxOutboxBacklog`（`TAX_INVOICE_COMMAND > 200`，30m）、`SettlementOutboxBacklogTotalCritical`（合计 `> 2000`，2h）；`SettlementOutboxUnconfiguredPending`（`> 0`，15m）；`SettlementAuditDestinationRequiredButUnconfigured`（`audit_required == 1` 且 `PLATFORM_AUDIT` 未配置，5m，critical）；`SettlementNotificationDestinationUnconfigured`（6h）；`SettlementOutboxPendingQueryError`；`ContractMetricsScrapeDown`（5m，critical）；`ContractMetricsUnavailable`（`absent(contract_integration_outbox_dead_total)`，10m）；`ContractIntegrationOutboxDead`（`> 0`，10m）、`_Critical`（`> 100`，1h）、`_PerEdge`（单条出边 `> 50`，30m） |
+
+告警语义与取舍：
+
+- backchannel `NO_ENDPOINT` 积压的 30 分钟 warning 表示“事件已生成但目标 RP 没有登记 `logout_uri`，永远不可投递”，处理方式是补登记后受控重放，不是删除 outbox 行；6 小时 critical 表示缺口跨班次未清零、RP 侧仍保留已登出会话。两者是同一指标的两个升级档，不是两个故障。
+- 积压阈值按目的地分开写（审计 200 / 通知 500 / 税控 200）：合规证据时效、用户可见提醒和开票窗口的容忍度不同。调阈值只改规则文件，不改服务。
+- `/readyz` 降级只在**有指标**时写规则：Settlement 的 503（审计必开但凭据缺失）恰好等价于 `settlement_integration_audit_required == 1` 且 `settlement_integration_destination_configured{destination="PLATFORM_AUDIT"} == 0`，因此可以指标化；平台、合同、数析、项目当前没有把 `/readyz` 结果导出成 gauge，本编排**不写** readyz 规则（不臆造指标名），它们只能用 `up == 0` 与样本缺失覆盖。
+- 每条规则的 `annotations.runbook` 指向本文件或既有运维文档；改本节标题锚点时要同步规则文件。
+
+#### 3. 部署方必须提供的抓取凭据文件
+
+平台 `/metrics` 走 `RequireMetricsAccess`，跨容器抓取必须带 token。**仓库内和离线资产包里都不包含该 token**，由部署方在部署目录生成：
+
+```bash
+cd /opt/unified-identity-platform
+install -d -m 700 runtime/prometheus-secrets
+umask 077
+openssl rand -hex 32 > runtime/prometheus-secrets/platform-metrics-token
+# 把同一个值写入 .env 的 METRICS_ACCESS_TOKEN，然后重启两个消费者
+docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d platform-api
+docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d prometheus
+```
+
+约束与失败症状：
+
+- 目录 `runtime/prometheus-secrets/` 被 `.gitignore` 的 `runtime/` 覆盖：不进版本库、不随资产包发布，也**不得**复制进 `monitoring/`（`install-assets.sh` 会整体替换 `monitoring/`）。
+- prometheus 只按 `credentials_file: /etc/prometheus/secrets/platform-metrics-token` 读取，令牌目录以只读方式挂载（`./runtime/prometheus-secrets:/etc/prometheus/secrets:ro`）。**不要在 `prometheus.yml` 或编排里内联 `credentials`/`bearer_token`**：门禁会失败。
+- 文件缺失时 prometheus **启动即失败**（日志出现 `unable to read authorization credentials file`）。这是有意的 fail-closed：静默 401 会让 backchannel 缺口与队列指标长期无样本而无人发现。补文件后重启 prometheus 即可。
+- token 与 `platform-api` 的 `METRICS_ACCESS_TOKEN` 不一致时 prometheus 能起来但平台 job 无样本，触发 `PlatformMetricsSamplesMissing`（15m）。轮换 token 必须两侧同时改。
+- 不发布宿主机端口：不要为抓取给 `platform-api`/`settlement-api` 增加 `ports:`，也不要改前端 nginx 增加 `/metrics` 路由；跨容器抓取只走 `application` 网络。
+
+#### 4. XAPI-10 新键发布前核对（`SETTLEMENT_AUDIT_REQUIRED` / `PROJECT_AUDIT_REQUIRED`）
+
+结算与项目新增了显式审计必开开关，判定顺序与平台 `platformAuditRequired` 同构：显式键 > `APP_ENV=production` > 生产环境编码（`PLATFORM_ENVIRONMENT_CODE=prod`）。生产编排里结算/项目的 `PLATFORM_ENVIRONMENT_CODE` 固定为 `prod`，因此**不写显式键也判定为“审计必开”**：凭据不全时结算 `/readyz` 返回 503、worker 对审计写入失败关闭。发布前逐项核对：
+
+- [ ] 结算：`runtime/settlement.env` 的 `SETTLEMENT_AUDIT_CLIENT_ID`/`SETTLEMENT_AUDIT_CLIENT_SECRET` 已由受控接入下发（不是 `PENDING_ONBOARDING`）。确需临时豁免时显式写 `SETTLEMENT_AUDIT_REQUIRED=false` 并在验收记录写明理由，不要靠删键“恢复”。
+- [ ] 项目：新键是 `PROJECT_AUDIT_REQUIRED`，兼容旧键 `PLATFORM_AUDIT_REQUIRED`（新部署只写新键）；审计机器客户端 `PLATFORM_AUDIT_CLIENT_ID`/`PLATFORM_AUDIT_CLIENT_SECRET` 已下发。显式值必须是 `true`/`false`，非法值按失败关闭处理（启动装配按 `true`）。
+- [ ] 数析模板 `subsystem-templates/data-analysis.env.example` 的 `PLATFORM_AUDIT_REQUIRED=true` 与清单 `subsystems.d/data-analysis-prod.yaml` 的同一键保持一致，不要只改一侧。
+- [ ] 发布后 5 分钟内 `SettlementAuditDestinationRequiredButUnconfigured` 未触发；Prometheus `/targets` 上 `platform-api`、`settlement-api`、`contract` 均为 UP；结算 `/readyz` 返回 200（degraded 时 `outbox_pending`/`unconfigured_destinations` 已有记录）。
+- [ ] 结算通知目的地若本部署不需要，`SettlementNotificationDestinationUnconfigured`（6h）的豁免要在验收记录中写明，不要长期忽略告警。
+
+### File Gateway 8086 的受控直达入口（P0 验收用）
+
+P0 验收需要直接在 File Gateway 上核对下载内容的 SHA-256。生产编排刻意**不**发布 8086，也不允许为了验收写成 `ports: 8086:8086`（那等于对 0.0.0.0 暴露内部 API 与 `/metrics`）。受控做法按优先级如下：
+
+1. 首选（零暴露）：在容器内取流，SHA 计算留在宿主机。
+   ```bash
+   docker compose --env-file .env --env-file .release.env -f docker-compose.yml \
+     exec -T file-gateway wget -qO- \
+     --header="Authorization: Bearer $FILE_TOKEN" \
+     http://127.0.0.1:8086/api/v1/files/<file_id>/content | sha256sum
+   ```
+   与上传时登记的 SHA-256 比对；再用无权/越权 token 重试，必须返回 401/403 且不得产生下载字节。
+2. 备选（本机回环中继，验收后立即拆除）：在 `application` 网络上临时起一个**只绑定 `127.0.0.1`** 的中继容器（例如 `-p 127.0.0.1:18086:8086` 的 `socat` 中继），验收窗口结束执行 `docker rm -f`。禁止绑定 `0.0.0.0`、禁止改前端 nginx 代理 `/api/v1/files`、禁止把临时端口写进受控 compose 或覆盖文件。
+3. 证据：受控入口的开启/关闭时间、使用身份与 SHA 比对结果写入验收记录；临时入口不得留在部署目录中。
+
+
 注释系统只能保证其他服务可启动，不能保证依赖业务完整：合同缺失影响 CRM 合同交接；项目缺失影响合同交接和门户项目查询；CRM 缺失影响权威数据查询和门户补偿；结算缺失影响开票；门户缺失影响客户自助入口；看板缺失影响统计分析。缺失上游由动态 DNS 网关返回不可用状态，异步任务保持原有重试策略。
 
 CRM/门户独立发布使用 `bin/deploy-customer-opportunity.sh customer-opportunity <digest>` 或 `customer-portal <digest>`；旧双 digest 入口仅用于两块都启用的兼容联合发布。
@@ -103,7 +272,7 @@ cd /opt/unified-identity-platform
 
 协调器先在同一数据库事务中为已有平台 OAuth Client 增加目标登录/退出回调，并记录受影响的 Application Environment、应用主页与 Keycloak Client；随后把 Keycloak Client 临时设置为新旧双回调。网关和业务运行配置健康后，协调器再事务性切换 Environment/主页地址、移除旧 OAuth 回调，并把 Keycloak 收敛到目标单回调。失败可回滚准备阶段，外部控制面成功前不会留下半套最终配置。
 
-HTTPS 降级不会立即卸载证书。状态进入 `DISABLING_HTTPS` 后，统一 frontend 配置让 80/443 同时服务，业务服务改用 HTTP 与非 Secure Cookie，从 HTTPS 请求换发的 Cookie 可继续用于 HTTP；同时 `iam_session`、`oauth_token_family`、`oauth_refresh_token` 的绝对到期时间会被统一截断到“当前时间 + `AUTH_SESSION_TTL` + `PUBLIC_HTTPS_DRAIN_GRACE`”。截止时间前最终提交会被数据库协调器拒绝。截止后再次执行同一命令即可完成回调切换、停止 443 监听并保留受管证书供后续启用。证书路径在 `DISABLING_HTTPS` 结束前必须保持可读。
+HTTPS 降级不会立即卸载证书。状态进入 `DISABLING_HTTPS` 后，统一 frontend 配置让 80/443 同时服务，业务服务改用 HTTP 与非 Secure Cookie，从 HTTPS 请求换发的 Cookie 可继续用于 HTTP；同时 `iam_session`、`oauth_token_family`、`oauth_refresh_token` 的绝对到期时间会被统一截断到“当前时间 + `AUTH_SESSION_TTL` + `PUBLIC_HTTPS_DRAIN_GRACE`”。截断前，协调器先把原值与截断值写入 `platform_public_transport_session_cap`，使失败的或被放弃的降级可以恢复（见 1.3）。截止时间前最终提交会被数据库协调器拒绝。截止后再次执行同一命令即可完成回调切换、停止 443 监听并保留受管证书供后续启用。证书路径在 `DISABLING_HTTPS` 结束前必须保持可读。
 
 统一发布入口仅使用 `docker-compose.yml`，从传输配置派生 Origin、Issuer、回调和 Cookie 设置；HTTPS/排空由同一 frontend 服务与受管证书目录实现。
 
@@ -115,6 +284,62 @@ cd /opt/unified-identity-platform
 ```
 
 本地开发同样支持该开关，配置位于 `platform/docker/.env.local`；默认仍保持 `http://localhost:8081`，只有显式启用 HTTPS 才加载 `platform/compose.https.yaml`。排空状态由协调器提供，`PUBLIC_TRANSPORT_STATE` 是内部恢复字段，不能作为日常开关手工长期保留。
+
+### 1.2 OAuth Client Secret 吊销灰度（BIZ-RUNTIME-05）
+
+受控更新与许可登记每次签发新 Secret 都会新增一行 ACTIVE 凭据，退役策略由 `AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT` 决定：`keep`（默认，不退役旧值）/`grace`（把旧值有效期收紧到窗口内）/`revoke`（立即吊销）。默认 `keep` 意味着旧 Secret 永久有效，泄露或容器遗留的 env 仍可换令牌，因此生产要按下面的灰度推进；三种策略的机制都已实现，本节是纯配置与运维流程。
+
+运维入口与前置检查：
+
+- 配置键写进部署目录的 `runtime/.env`（`platform/.env.example` 与 `deploy/production/.env.example` 都有带注释的模板），`platform-api` 与 `platform-worker` 都从该文件读取；改值后受控重启这两个服务。取值非法时进程拒绝启动（fail-closed），不是静默降级成 `keep`。
+- `./bin/deploy.sh doctor` 新增只读检查 `[6/7] 旧 OAuth Client Secret 退役策略`：键缺失、取值非法、`grace` 缺窗口或窗口超出 `(0, 720h]` 都会给出 `[警告]`（不阻断部署）；`keep`/`revoke`/合法 `grace` 给出 `[OK]`，用于确认“以为开了灰度、实际还是 keep”的情况。
+- `AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE` 只对 `grace` 生效，取 Go duration 字面量（如 `24h`，上限 `720h` = 30 天）；`30d` 这类写法会被拒绝。`keep`/`revoke` 下该键被忽略。
+
+**Phase 0 盘点（只读，不改库）**：先看 `/metrics`（`RequireMetricsAccess` 保护，10s 抓取缓存）：
+
+| 指标 | 用途 | 告警判据 |
+| --- | --- | --- |
+| `platform_oauth_client_secret_active{status}` | 按状态统计的 Secret **总数**（全局分布） | 只作总览，不能用它反推单客户端累积 |
+| `platform_oauth_client_secret_active_client{client_id}` | 单客户端 ACTIVE Secret 数量；按数量降序最多输出 200 个客户端序列（基数保护） | `> 1` 即该客户端有多个仍可换令牌的旧值；`grace`/轮换重叠窗口内属预期 |
+| `platform_oauth_client_secret_active_clients` | 有 ACTIVE Secret 的去重客户端数 | 若大于 200，说明 `client_id` 序列被上限截断，需按客户端定向排查 |
+| `platform_oauth_client_secret_oldest_active_seconds` | 最老 ACTIVE Secret 龄期（秒） | > 7776000（90 天） |
+| `platform_oauth_client_secret_active_over_90d` | 龄期超过 90 天的 ACTIVE Secret 总数 | 衡量遗留面大小；告警以“最老龄期”为准 |
+| `platform_oauth_client_secret_revoked_total` | 已吊销 Secret 总数 | 用于确认灰度收窗进度 |
+
+采集失败时这一组指标整体缺席并计入 `platform_metric_collection_errors_total`，不会输出 0：看到指标缺失要先查采集链路，不能当成“龄期很新/没有累积”。没有任何 ACTIVE Secret 时 `oldest_active_seconds` 不输出（该维度无定义），而 `active_clients`/`active_over_90d` 输出 `0`（这是真实事实，样本缺席只代表采集失败或 `/metrics` 鉴权失效）。
+
+对应告警规则（`monitoring/prometheus/platform-alerts.yml` 的 `platform-oauth-secrets` 组）：`PlatformClientSecretActivePerClientAccumulated`（单客户端 ACTIVE > 1，持续 1h；GRACE/重叠窗口内属预期）、`PlatformClientSecretActiveOldestOver90Days`（最老龄期 > 90 天，持续 6h）、`PlatformClientSecretGaugeSamplesMissing`（`up=1` 但 Secret gauge 无样本，抓取/采集失败兜底）。
+
+**Phase 1 非生产开 GRACE**：在非生产 `runtime/.env` 设 `AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=grace`、`AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=24h`（窗口上限 720h = 30 天；先跑一次 `./bin/deploy.sh doctor` 确认显示 `[OK] ... grace`），受控重启 `platform-api` 与 `platform-worker`，然后做一次受控更新并确认消费者在窗口内完成新 Secret 下发与重启。
+
+**Phase 2 生产灰度**：先对非关键租户/客户端开 `grace`（24h→48h，窗口下限 = 最慢消费者重启耗时 + 一次受控更新重试）；稳定一周后对高敏客户端逐个收窗。**注意：HTTP 面没有请求级 `PreviousSecretPolicy` 字段**——全局策略之外的“单客户端立即退役”只能通过下面两个既有入口完成（都需要 `platform:oauth-client-credential:rotate` / `:disable` 权限，审计留痕）：
+
+- `POST /api/v1/oauth-clients/{oauth_client_id}/credentials/rotate`，请求体 `{"overlap_seconds": 0, ...}`：同一事务内先吊销该客户端全部旧 ACTIVE Secret 再插入新值；`overlap_seconds` 非零则只把旧值有效期收紧到窗口内（≤ 30 天）。
+- `POST /api/v1/oauth-clients/{oauth_client_id}/credentials/{credential_id}/disable`：按凭据 ID 精确吊销单个旧值（用来清掉 `keep` 期间累积的历史行）。
+
+受控更新/许可登记（子系统接入流程）本身不带请求级策略，一律遵循全局配置；因此“高敏客户端立即退役”要么走上面的 rotate/disable，要么把全局策略切到 `revoke`（影响所有客户端，先演练）。
+
+**Phase 3 密钥龄期制度**：最大 ACTIVE Secret 龄期 90 天；到期前用 `credentials/rotate`（重叠时长 ≤ 30 天）完成轮换，轮换后用 `platform_oauth_client_secret_active_client` 确认旧值已不在 ACTIVE 列表。
+
+灰度回滚：把配置改回 `keep` 并重启即可停止继续退役；**已 REVOKE 的 Secret 不复活**（fail-closed），已收紧的 `valid_until` 也不会被回滚延长，需要恢复可用性只能重新签发新值。该灰度不涉及表结构迁移。
+
+**发现与监控清单**：`keep` 是默认值且不阻断部署，所以“可发现”依赖三件事——`deploy.sh doctor` 的 `[6/7]` 策略检查（缺键/非法/窗口越界均警告）、上面的 `/metrics` 单客户端维度与龄期指标、以及 `platform-oauth-secrets` 组的三条告警。三者都缺失时不要假设“当前没有累积”。
+
+### 1.3 HTTPS→HTTP 降级回滚（BIZ-RUNTIME-06）
+
+降级在准备阶段会截断三张会话/令牌表的绝对到期时间。截断前协调器先把 `original_expires_at`/`capped_expires_at` 写入 `platform_public_transport_session_cap`（唯一键 `transition_id + session_table + session_id`），所以一次失败或运维放弃的降级不会固化成“全平台强制重新登录”。
+
+```bash
+cd /opt/unified-identity-platform
+./bin/apply-public-transport.sh abort --yes
+```
+
+`abort` 等价于协调器 `fail --stage OPERATOR_ABORT`，`--yes` 是必须的显式确认；`fail` 命令保持兼容。协调器在一个事务内撤销准备阶段写入的目标回调、按 cap 表恢复被截断的到期时间、复位状态并清除 `drain_until`。要点：
+
+- 只恢复“当前值仍等于截断值”的行：截断后被续期、重新登录或已自然过期的会话保持原状；这类行保留 cap 记录作为审计证据，已恢复的行删除记录。
+- **恢复不复活窗口内自然过期的会话**：到期时间回到原值，但已经过去的时间不会变成未来。
+- 控制面已提交（`CONTROL_COMMITTED`）后仍拒绝自动回滚，只允许前进恢复；此时 `abort`/`fail` 报错，请继续执行 `./bin/apply-public-transport.sh` 完成切换。
+- 升级到本版本之前的降级切换没有 cap 记录，无法恢复（迁移不做历史回填）。运维细节见 [OFFLINE_RUNBOOK.md](OFFLINE_RUNBOOK.md) 9.5。
 
 本节是**一次性基础设施初始化**，由部署人员或 CI/CD 完成，不是每次接入子系统都要执行的管理员命令。Docker/Compose、镜像仓库访问、平台密钥、数据库、部署目录和隔离 Agent 准备完成后，日常平台管理员只使用基础平台“应用接入”页面。
 

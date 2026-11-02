@@ -29,6 +29,9 @@ type FileRepository interface {
 	CreateBinding(context.Context, domain.FileBinding) (domain.FileBinding, error)
 	DeactivateBinding(context.Context, string, string, string, string, time.Time) error
 	HasActiveBinding(context.Context, string, string, string, string, string) (bool, error)
+	// HasExactActiveBinding 在"租户 + 文件 + 应用 + 业务资源"之上可选按绑定类型收窄，
+	// 供证据核验拒绝"同一应用内把服务项 A 的证据复用到服务项 B"。
+	HasExactActiveBinding(context.Context, string, string, string, string, string, string) (bool, error)
 	HasAnyActiveBinding(context.Context, string, string, string) (bool, error)
 	ListRecoveryCandidates(context.Context, string, time.Time, int) ([]domain.StoredFile, error)
 	// PendingUploadSession 返回与该文件关联且仍停留在 UPLOADING 的上传会话。
@@ -59,6 +62,9 @@ type LocalStore interface {
 	OpenVerified(string) (io.ReadSeekCloser, error)
 	Remove(string) error
 	CleanupTemporary(time.Time) (int, error)
+	// CleanupQuarantine 删除早于截止点的隔离文件；实现必须只处理隔离目录内的常规文件，
+	// 不跟随符号链接或越界路径。
+	CleanupQuarantine(time.Time) (int, error)
 	// Exists 判断命名空间内是否仍存在该常规文件；对账用它区分"磁盘已删"与"字节仍在"。
 	Exists(string) (bool, error)
 }

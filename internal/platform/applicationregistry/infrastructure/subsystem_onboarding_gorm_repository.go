@@ -291,6 +291,11 @@ func (repository *SubsystemOnboardingGORMRepository) CreateSubsystem(ctx context
 		if err != nil {
 			return err
 		}
+		// Back-Channel Logout 端点与浏览器客户端同事务登记（BIZ-XEVT2-07）：
+		// 只有登记随接入一起提交，离职停用/中央登出才可能通知到该 RP。
+		if err := UpsertBackchannelLogoutURIWithin(transaction, createdOAuthClient.ID, write.BackchannelLogoutURI, now); err != nil {
+			return err
+		}
 		createdServiceCredentials := make([]application.SubsystemServiceCredential, 0, len(write.ServiceClients))
 		for _, serviceClient := range write.ServiceClients {
 			created, createErr := oauthClients.CreateOAuthClient(ctx, serviceClient.OAuthClient, serviceClient.OAuthClientID, serviceClient.OAuthClientSecret, now)

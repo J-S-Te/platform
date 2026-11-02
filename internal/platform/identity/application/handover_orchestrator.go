@@ -12,7 +12,9 @@ import (
 // HandoverSystemClient 是业务系统机器协议的客户端端口；4c 的四个业务仓库实现服务端。
 type HandoverSystemClient interface {
 	Freeze(context.Context, HandoverFreezeRequest) (HandoverFreezeResponse, error)
-	Responsibilities(context.Context, string, string, int) (HandoverResponsibilityPage, error)
+	// Responsibilities 分页读取权威责任；参数依次为请求 ID、离职人 userID、游标与页大小。
+	// userID 是四端 responsibilities 端点要求的必填过滤条件，不得省略。
+	Responsibilities(ctx context.Context, requestID, userID, cursor string, limit int) (HandoverResponsibilityPage, error)
 	Transfer(context.Context, HandoverTransferRequest) (HandoverTransferReceipt, error)
 	Receipt(context.Context, string, string) (HandoverTransferReceipt, error)
 	Finish(context.Context, string, string, string) error
@@ -120,6 +122,8 @@ func NewHandoverOrchestrator(repository HandoverOrchestrationRepository, invento
 
 // Start 创建批次、逐系统冻结并发现权威责任；未安装系统标为不适用，阻断系统立即失败。
 func (orchestrator *HandoverOrchestrator) Start(ctx context.Context, tenantID, requestID, userID string) (HandoverBatch, error) {
+	// 机器客户端的令牌按批次租户铸造；租户只来自编排入口，不来自协议对端。
+	ctx = WithHandoverTenant(ctx, tenantID)
 	now := orchestrator.clock.Now().UTC()
 	batch, err := orchestrator.repository.EnsureBatch(ctx, tenantID, requestID, userID, now)
 	if err != nil {
@@ -198,7 +202,8 @@ func (orchestrator *HandoverOrchestrator) Start(ctx context.Context, tenantID, r
 func (orchestrator *HandoverOrchestrator) discover(ctx context.Context, tenantID string, batch HandoverBatch, system, userID string) (int, error) {
 	cursor, total := "", 0
 	for {
-		page, err := orchestrator.clients[system].Responsibilities(ctx, batch.RequestID, cursor, handoverPageSize)
+		// 发现必须按离职人索取：四端 responsibilities 端点以 user_id 为必填过滤条件。
+		page, err := orchestrator.clients[system].Responsibilities(ctx, batch.RequestID, userID, cursor, handoverPageSize)
 		if err != nil {
 			return total, fmt.Errorf("discover responsibilities from %s: %w", system, err)
 		}
@@ -333,6 +338,7 @@ func (orchestrator *HandoverOrchestrator) DispatchOnce(ctx context.Context, tena
 	if maxItems <= 0 {
 		return 0, ErrValidation
 	}
+	ctx = WithHandoverTenant(ctx, tenantID)
 	batch, err := orchestrator.repository.GetBatchByID(ctx, tenantID, batchID)
 	if err != nil {
 		return 0, err
@@ -410,6 +416,7 @@ func (orchestrator *HandoverOrchestrator) DispatchOnce(ctx context.Context, tena
 // Complete 供人员服务在离职已提交后调用；补偿入口通过持久队列筛选已执行请求。
 // 只在没有阻断系统且所有责任项都已结清时通知各系统解除冻结并推进批次完成。
 func (orchestrator *HandoverOrchestrator) Complete(ctx context.Context, tenantID, batchID string) error {
+	ctx = WithHandoverTenant(ctx, tenantID)
 	batch, err := orchestrator.repository.GetBatchByID(ctx, tenantID, batchID)
 	if err != nil {
 		return err
@@ -474,6 +481,7 @@ func (orchestrator *HandoverOrchestrator) CancelByRequest(ctx context.Context, t
 
 // Cancel 先确认没有在途派发，再逐系统解除冻结；已完成转移保留，不反向改回。
 func (orchestrator *HandoverOrchestrator) Cancel(ctx context.Context, tenantID, batchID string) error {
+	ctx = WithHandoverTenant(ctx, tenantID)
 	batch, err := orchestrator.repository.GetBatchByID(ctx, tenantID, batchID)
 	if err != nil {
 		return err

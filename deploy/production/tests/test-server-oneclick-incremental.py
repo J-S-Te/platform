@@ -157,6 +157,9 @@ def image_package(component, version=VERSION):
 
 @unittest.skipUnless(platform.system() == "Linux" and os.geteuid() == 0, "Linux root fixture required")
 class IncrementalTests(unittest.TestCase):
+    # 用途：构造配套完整恢复工具的临时增装基线，并隔离宿主资源及 Docker。
+    # 参数：无。
+    # 返回值：无；不操作真实业务服务。
     def setUp(self):
         for tool in ("jq", "flock", "sha256sum"):
             self.assertIsNotNone(shutil.which(tool), "real host QA tool required: "+tool)
@@ -170,7 +173,8 @@ class IncrementalTests(unittest.TestCase):
         script(self.assets / "bin/deploy.sh", DEPLOY)
         script(self.assets / "bin/backup-all.sh", "#!/usr/bin/env bash\nexit 99\n")
         for tool in ('deployment-workflow.sh','deployment-session.py','delivery-runtime.sh','delivery-runtime.py',
-                     'delivery-inspect.py','delivery-inspect-images.py','delivery-files.py','subsystem-runtime.py'):
+                     'delivery-inspect.py','delivery-inspect-images.py','delivery-inspect-v2.py',
+                     'delivery-files.py','subsystem-runtime.py','project-background.sh'):
             shutil.copy2(PRODUCTION / 'bin' / tool, self.assets / 'bin' / tool)
         (self.assets / "docker-compose.yml").write_text(COMPOSE)
         for filename in FIXTURE.PROFILES.values():
@@ -204,6 +208,15 @@ class IncrementalTests(unittest.TestCase):
         self.save_compat()
         (self.target / "packages/contract-backend-existing-linux-amd64.tar.gz").write_bytes(image_package("contract", "existing"))
         script(self.tools / "docker", DOCKER)
+        script(self.tools / 'df', '''#!/usr/bin/env bash
+set -eu
+[[ $# == 2 ]] || exit 89
+case "$1" in
+  -Pk) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 999999999 1 999999998 1%% /\\n' ;;
+  -Pi) printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\\nfixture 99999999 1 99999998 1%% /\\n' ;;
+  *) exit 89 ;;
+esac
+''')
         # 只检查存在性的前置条件，即使对隔离宿主机也不得产生变更。
         for name in ("curl", "openssl", "update-ca-certificates", "ss", "systemctl", "containerd"):
             script(self.tools / name, "#!/usr/bin/env bash\nprintf 'forbidden host command: %s\\n' "+name+' >> "${INCREMENTAL_REJECTED:?}"\nexit 99\n')

@@ -55,12 +55,19 @@ jobs:
           bash -n deploy/production/bin/*.sh
           sh scripts/test-docker-entrypoint-key-init.sh
           python3 deploy/production/tests/test-compose-blocks.py
+          python3 -B deploy/production/tests/test-compose-one-shot-parity.py
+          python3 -B deploy/production/tests/test-compose-orchestration-consistency.py
+          # 接线漂移（清单键未写入模板、client_id 字面量推导不出、数析只读 DSN 缺失）
+          # 只在联调阶段以 401/空数据暴露，因此在同一个 job 里与一致性门禁一起跑。
+          python3 -B deploy/production/tests/test_integration_wiring.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
+          python3 -B deploy/production/tests/test-release-backup-policy.py
           python3 deploy/production/tests/test-runtime-dsn-dotenv.py
           python3 deploy/production/tests/test-customer-deploy-result.py
           python3 deploy/production/tests/test-platform-coordinated-upgrade.py
           python3 -B deploy/production/tests/test-audit-hash-key-init.py
+          python3 -B deploy/production/tests/test-delivery-asset-completeness.py
           python3 deploy/production/tests/test-managed-deployment-defaults.py
           python3 deploy/production/tests/test-frontend-network.py
           python3 deploy/production/tests/test-public-proxy-prefetch.py

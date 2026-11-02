@@ -1,3 +1,5 @@
+# 许可运行态键（COMMERCIAL_LICENSE_ENABLED / COMMERCIAL_LICENSE_COMPATIBILITY）不在本清单：
+# 由平台写入 runtime/license-<service>.env；兼容放行开关生产必须缺省（缺省即 fail-closed）。
 version: 1
 default: false
 application:
@@ -31,10 +33,16 @@ runtime:
         CONTRACT_IMPORT_STATUS_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         CONTRACT_IMPORT_STATUS_CLIENT_ID: contract_management-prod-analysis-import-report-status
         CONTRACT_IMPORT_STATUS_CALLER_ENVIRONMENT_CODE: prod
+        # BIZ-XAPI-13：报表状态端点的期望 OAuth client 身份，仅由受控接入写入（合同侧签发给
+        # 数析的 analysis-import-report-status 客户端 ID）。保持空占位 = 端点不挂载（fail-closed）；
+        # 不要手填：身份不符会让合同→数析的状态查询直接 401，且不会伪造报表状态。
+        REPORT_STATUS_MACHINE_OAUTH_CLIENT_ID: ""
         DASHBOARD_MYSQL_DSN: 'dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci'
         OIDC_IDP_HINT: basic-platform
         OIDC_SCOPES: openid profile
         OIDC_SESSION_COOKIE_NAME: data_analysis_session
+        OIDC_SESSION_IDLE_TTL: 30m
+        OIDC_SESSION_ABSOLUTE_TTL: 8h
         OIDC_AUTHORIZATION_REFRESH_INTERVAL: 1m
         OIDC_ROLE_CONFIG_HASH: sha256:265b9f487ff7ff2f298f9daef323d0e92883bd2086b51f0a57e6ceea3e3b9f1a
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"

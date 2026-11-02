@@ -2,6 +2,7 @@
 """使用临时介质和模拟 Docker 命令行验证实际升级及预检代码。"""
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import platform
@@ -103,6 +104,9 @@ class ComposeTests(unittest.TestCase):
 
 @unittest.skipUnless(platform.system() == 'Linux' and os.geteuid() == 0, 'Linux root fixture required')
 class UpgradeFlowTests(unittest.TestCase):
+    # 用途：为实际升级入口提供完整恢复工具和明确的宿主资源夹具。
+    # 参数：无。
+    # 返回值：无；宿主、Docker 与业务发布均在临时目录中隔离。
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -123,8 +127,10 @@ class UpgradeFlowTests(unittest.TestCase):
             script(path / 'bin/deploy.sh', DEPLOY)
             script(path / 'bin/backup-all.sh', BACKUP)
         for tool in ('deployment-workflow.sh','deployment-session.py','delivery-runtime.sh','delivery-runtime.py',
-                     'delivery-inspect.py','delivery-inspect-images.py','delivery-inspect-v2.py','delivery-files.py','subsystem-runtime.py'):
+                     'delivery-inspect.py','delivery-inspect-images.py','delivery-inspect-v2.py','delivery-files.py',
+                     'subsystem-runtime.py','project-background.sh','deployment-plan.py'):
             shutil.copy2(INSTALLER.parent/tool,self.assets/'bin'/tool)
+        self.compatibility_fixture()
         profiles=self.assets/'subsystems.d'
         profiles.mkdir()
         for source in (INSTALLER.parent.parent/'subsystems.d').glob('*.yaml'):
@@ -169,10 +175,39 @@ case "$1 ${2:-}" in
   *) echo "unexpected docker $*" >&2; exit 88 ;;
 esac
 ''')
+        script(self.tools / 'df', '''#!/usr/bin/env bash
+set -eu
+[[ $# == 2 ]] || exit 89
+case "$1" in
+  -Pk) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 999999999 1 999999998 1%% /\\n' ;;
+  -Pi) printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\\nfixture 99999999 1 99999998 1%% /\\n' ;;
+  *) exit 89 ;;
+esac
+''')
         self.env = dict(os.environ, PATH=str(self.tools) + ':' + os.environ['PATH'],
                         UPGRADE_EVENTS=str(self.events), UPGRADE_DOCKER_ROOT=str(self.path / 'docker-root'),
                         TMPDIR=str(self.path))
         self.refresh_media()
+
+    # 用途：由真实生成器生成绑定隔离无操作迁移的兼容性测试材料。
+    # 参数：无。
+    # 返回值：无；只证明夹具边界，不生成或替代正式迁移兼容性审核。
+    def compatibility_fixture(self):
+        migrations = self.path / 'fixture-migrations'
+        migrations.mkdir()
+        name, sql = '000001_noop.sql', b'-- isolated no-op migration\nSELECT 1;\n'
+        (migrations / name).write_bytes(sql)
+        digest_value = hashlib.sha256(name.encode() + b'\0' + sql + b'\0').hexdigest()
+        evidence = self.path / 'test-compatibility-evidence.json'
+        evidence.write_text(json.dumps(dict(schema='uip.deployment-compatibility-evidence/v1',
+            migration_set_sha256=digest_value, previous_program_after_migration='compatible',
+            recovery_type='backward', verified_at='2026-10-29T00:00:00Z', verifier='isolated-fixture',
+            evidence='synthetic-noop-migration-contract')))
+        result = subprocess.run(['python3', str(INSTALLER.parent / 'build-deployment-compatibility.py'),
+            '--migrations', str(migrations), '--release', 'test', '--output',
+            str(self.assets / 'deployment-compatibility.json'), '--previous-evidence', str(evidence)],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def sidecar(self, path):
         Path(str(path) + '.sha256').write_text(f'{digest(path)}  {path.name}\n')
@@ -284,6 +319,21 @@ esac
         self.assertIn('分阶段安装工具', result.stderr)
         self.assertEqual(self.operations(), [])
         self.assertFalse(Path(str(self.target)+'.installation-state').exists())
+
+    # 用途：确认补齐配套工具后，未知迁移兼容性仍阻止平台发布。
+    # 参数：无。
+    # 返回值：无；真实兼容性计划必须拒绝，不能以升级夹具隐式跳过。
+    def test_unknown_migration_compatibility_blocks_platform_publication(self):
+        path = self.assets / 'deployment-compatibility.json'
+        value = json.loads(path.read_text())
+        value['database']['previous_program_after_migration'] = 'unknown'
+        path.write_text(json.dumps(value))
+        self.refresh_media()
+        result = self.run_upgrade('--apply-compose')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('兼容性门禁阻断升级', result.stderr)
+        self.assertNotIn('deploy platform', self.operations())
+        self.assertEqual(self.old_contract.read_bytes(), b'old contract transport')
 
     def test_base_upgrade_preserves_unrequested_business_and_archives_same_name(self):
         result = self.run_upgrade('--apply-compose')

@@ -62,7 +62,7 @@ usage() {
 不带子命令时进入中文交互菜单。
 
 部署主流程（按此顺序）：
-  configure                     一次性运行配置：IP、端口、管理员、时区、防火墙
+  configure                     一次性运行配置：IP、端口、管理员、防火墙
   plan --action <install|upgrade|add|repair|resume> [--component <组件>] [--format human|json]
                                 [--compatibility <声明>] [--baseline-report <文件>] [--forward-recovery --recovery-evidence <文件>]
                                 只读生成统一预检、执行阶段和恢复边界；不改运行状态

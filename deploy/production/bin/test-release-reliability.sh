@@ -104,7 +104,17 @@ release_file="$test_root/.release.env"
 printf 'PROJECT_IMAGE=%s\n' '127.0.0.1:5000/uip/project@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' >"$release_file"
 service=project
 project_calls="$test_root/project.calls"
-compose() { printf 'compose %s\n' "$*" >>"$project_calls"; }
+# compose 用途：记录组件发布调用并模拟编号巡检的外部命令结果。
+# 参数：$* 为发布函数传入的 Compose 参数。
+# 返回值：普通调用成功；巡检返回当前场景设置的退出码。
+compose() {
+  printf 'compose %s\n' "$*" >>"$project_calls"
+  if [[ "$*" == 'run --rm --no-deps -T contract-number-audit' ]]; then
+    printf '%s\n' "${contract_audit_output:-编号一致}"
+    return "${contract_audit_status:-0}"
+  fi
+  return 0
+}
 wait_for_health() { printf 'health %s\n' "$*" >>"$project_calls"; }
 verify_service_image() { printf 'verify %s\n' "$*" >>"$project_calls"; }
 port_value() { printf '18085\n'; }
@@ -125,6 +135,13 @@ contract_env_value() { [[ "$1" != PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED ]]
 ensure_temporal_application_network() { :; }
 require_mysql_ready() { :; }
 backup_database_if_initialized() { :; }
+eval "$(extract_function audit_contract_number_registry "$deploy_service")"
+# warn 用途：将真实巡检函数的告警写入当前测试捕获的标准错误。
+# 参数：$* 为不含生产凭据的合成告警内容。
+# 返回值：日志写入的退出码。
+warn() { printf '[警告] %s\n' "$*" >&2; }
+release_id=contract-runtime-fixture
+mkdir -p "$deploy_dir/backups"
 eval "$(extract_function deploy_contract "$deploy_service")"
 image_ref='127.0.0.1:5000/uip/contract@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 : >"$project_calls"
@@ -132,6 +149,10 @@ deploy_contract
 grep -Fq 'contract-api contract-worker' "$project_calls" || fail 'contract release omitted workflow worker'
 grep -Fq 'verify compose contract-worker ' "$project_calls" || fail 'contract worker release image was not verified'
 grep -Fxq 'stable contract-worker' "$project_calls" || fail 'contract worker stability was not verified'
+grep -Fxq 'compose run --rm --no-deps -T contract-number-audit' "$project_calls" ||
+  fail 'contract release omitted its post-release number audit'
+grep -Fxq 'RESULT=clean' "$deploy_dir/backups/contract-number-audit-${release_id}.txt" ||
+  fail 'contract release did not persist its successful number audit evidence'
 printf 'CONTRACT_IMAGE=%s\n' "$image_ref" >"$release_file"
 service=contract
 : >"$project_calls"
@@ -142,6 +163,26 @@ failed_contract_worker=true
 if deploy_contract; then fail 'contract release accepted an unstable worker'; fi
 failed_contract_worker=false
 pass 'contract API and worker publish, recover and verify as one runtime set'
+
+# 只替换外部 Compose 结果，真实巡检函数仍须落盘退出码和分类并保留非致命发布语义。
+for audit_case in '1 findings-or-error' '73 error' '127 skipped-missing-binary'; do
+  read -r contract_audit_status expected_audit_result <<<"$audit_case"
+  contract_audit_output='合成巡检漂移或执行错误'
+  if [[ "$contract_audit_status" == 127 ]]; then
+    contract_audit_output='no such service: contract-number-audit'
+  fi
+  release_id="contract-audit-${contract_audit_status}"
+  audit_contract_number_registry >"$test_root/audit.stdout" 2>"$test_root/audit.stderr" ||
+    fail 'nonfatal number audit unexpectedly failed a healthy release'
+  audit_report="$deploy_dir/backups/contract-number-audit-${release_id}.txt"
+  grep -Fxq "EXIT_CODE=$contract_audit_status" "$audit_report" ||
+    fail 'number audit evidence lost its actual command exit code'
+  grep -Fxq "RESULT=$expected_audit_result" "$audit_report" ||
+    fail 'number audit evidence misclassified a failed or skipped command'
+  [[ -s "$test_root/audit.stderr" ]] || fail 'failed number audit was silently accepted'
+done
+contract_audit_status=0
+pass 'contract number audit records findings, errors and missing binaries without rolling back a healthy release'
 
 # 首次安装失败时，旧发布文件只有可变公共占位值。必须还原该文件，但绝不能让 Compose 在离线主机拉取这些占位镜像来伪造回滚。
 printf 'PLATFORM_IMAGE=ghcr.io/j-s-te/platform:main\nFILE_GATEWAY_IMAGE=ghcr.io/j-s-te/platform-file-gateway:main\n' >"$release_file"

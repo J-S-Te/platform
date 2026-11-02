@@ -343,7 +343,20 @@ require_service_control_plane_clearance || exit 1
 # 运行配置读取、DSN 原子改写和后续 .release.env 提交必须位于同一个锁窗口。
 # 否则等待锁期间 Agent 可能刚下发新凭据，发布脚本却用锁外读取的旧文件覆盖它。
 [[ -f "$script_dir/backup-all.sh" && ! -L "$script_dir/backup-all.sh" ]] || { echo '缺少安全完整备份入口，拒绝发布' >&2; exit 1; }
-if ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
+# 首次安装尚未完成且平台阶段从未发布时，不存在可回滚的既有发布，也不承载业务数据；
+# 此时要求完整灾难备份会让从未启动的 File Gateway 数据库阻断续跑。
+# 判断工具缺失或输出异常时一律按“必须备份”处理，不放宽既有部署。
+release_backup_policy=backup
+if [[ -f "$script_dir/release-backup-policy.py" && ! -L "$script_dir/release-backup-policy.py" ]]; then
+  if ! release_backup_policy="$(python3 "$script_dir/release-backup-policy.py" \
+      --state-dir "${deploy_dir}.installation-state" \
+      --session-tool "$script_dir/deployment-session.py" 2>/dev/null)"; then
+    release_backup_policy=backup
+  fi
+fi
+if [[ "$release_backup_policy" == skip ]]; then
+  echo '[信息] 首次安装尚未完成且平台阶段从未发布，没有可回滚的既有发布；跳过发布前完整备份（平台库迁移前备份仍保留）' >&2
+elif ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
   echo '发布前完整备份失败，未修改运行配置或镜像版本指针；拒绝继续更新' >&2
   exit 1
 fi
@@ -819,7 +832,7 @@ diagnose_mysql_container() {
 backup_database_if_initialized() {
   local mysql_service="$1" database="$2" backup_name="${3:-$service}" count
   if ! count="$(mysql_query_scalar "$mysql_service" "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '${database}'")"; then
-    echo "无法确认数据库是否已初始化：$mysql_service（MySQL 未就绪）" >&2
+    echo "无法确认数据库是否已初始化：${mysql_service}（MySQL 未就绪）" >&2
     diagnose_mysql_container "$mysql_service"
     return 1
   fi
@@ -1045,6 +1058,81 @@ deploy_platform() {
   fi
 }
 
+# warn 输出非致命提示，与服务器一键离线部署.sh、bin/deploy-doctor.sh 同一格式。
+#
+# 参数：$* 为中文提示内容。
+# 返回值：恒为 0，调用方因此不会因告警本身中断发布。
+warn() { printf '[警告] %s\n' "$*" >&2; }
+
+# audit_contract_number_registry 发布成功后执行一次只读合同编号巡检并落盘证据。
+#
+# 巡检命令 ./contract-number-audit 与 ./migrate 同镜像、同 env_file（MYSQL_DSN 由
+# runtime/contract.env 提供），因此不需要新增数据库凭据；它自己开只读会话
+# （SET SESSION TRANSACTION READ ONLY），不会修改业务库，也不需要额外写权限。
+#
+# 这是现场非致命校验，不是发布门禁：发现漂移、巡检自身失败、部署目录的
+# docker-compose.yml 还没有该服务、镜像里没有该二进制，都只打印 [警告] 并写入
+# 证据文件，绝不返回非零 —— 失败返回会进入发布失败分支并回滚刚通过健康检查的
+# 镜像，把“数据有问题”误判成“发布有问题”。
+#
+# 证据落在脚本已创建并校验可写的 backups/ 目录，命名与其他发布件同用 release_id。
+#
+# 参数：无（使用全局 deploy_dir、release_id、image_ref 和 compose 包装器）。
+# 返回值：恒为 0。
+audit_contract_number_registry() {
+  local report="$deploy_dir/backups/contract-number-audit-${release_id}.txt"
+  local temporary status=0 result
+  if ! temporary="$(mktemp "$deploy_dir/backups/.contract-number-audit-${release_id}.XXXXXX")"; then
+    warn "合同编号巡检跳过（未执行）：无法在 $deploy_dir/backups 创建证据临时文件，请检查目录属主与磁盘空间"
+    return 0
+  fi
+  echo "执行合同编号巡检并落盘证据：$report"
+  # compose run 的退出码就是巡检结论（0 一致 / 1 有问题或无法完成）。用 || 捕获，
+  # 避免 set -e 在巡检失败时中止发布；-T 不分配 TTY，让证据文件保持纯文本行尾。
+  compose run --rm --no-deps -T contract-number-audit >"$temporary" 2>&1 || status=$?
+  # 「无此服务 / 找不到二进制」= 部署目录的 compose 或合同镜像还是旧版：这是「跳过」，
+  # 不是数据问题，但必须明确告警，否则运维会误以为本次发布已经校验过合同编号。
+  if grep -Eqi 'no such service|no such file|not found' "$temporary"; then
+    result="skipped-missing-binary"
+    warn "合同编号巡检跳过：docker compose 未找到 contract-number-audit 服务或其二进制（退出码 ${status}），本次发布未做合同编号校验；请确认 docker-compose.yml 与合同镜像都已更新，再单独补跑"
+  else
+    case "$status" in
+      0)
+        result="clean"
+        echo "合同编号巡检通过：未发现重复编号、未登记或登记错配"
+        ;;
+      1)
+        result="findings-or-error"
+        warn "合同编号巡检报告存在漂移或未能完成（退出码 1）；发布不回滚，证据见 ${report}，请按清单受控更正后重新巡检"
+        ;;
+      *)
+        result="error"
+        warn "合同编号巡检未能正常执行（退出码 ${status}）；发布不回滚，请检查证据：${report}"
+        ;;
+    esac
+  fi
+  if {
+    printf 'COMMAND=compose run --rm --no-deps -T contract-number-audit\n'
+    printf 'EXIT_CODE=%s\n' "$status"
+    printf 'RESULT=%s\n' "$result"
+    printf 'RELEASE_ID=%s\n' "$release_id"
+    printf 'CONTRACT_IMAGE=%s\n' "${image_ref:-unknown}"
+    printf 'COLLECTED_AT_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf -- '--- 巡检输出 ---\n'
+    cat "$temporary"
+  } >"$report"; then
+    chmod 600 "$report" || warn "合同编号巡检证据权限收紧失败，请手工执行 chmod 600：$report"
+    # 变量必须写成 ${name}：中文全角括号紧跟 $name 时，Bash 会把多字节序列的一部分
+    # 并进变量名，在 set -u 下直接报 unbound variable 并中止发布。
+    echo "合同编号巡检证据已写入：${report}（退出码 ${status}）"
+  else
+    rm -f "$report"
+    warn "合同编号巡检证据写入失败：$report"
+  fi
+  rm -f "$temporary"
+  return 0
+}
+
 deploy_contract() {
   local selected runtime_service
   local -a runtime_services=()
@@ -1096,6 +1184,9 @@ deploy_contract() {
     verify_service_image compose "$runtime_service" "$image_ref" || return 1
     verify_service_stable "$runtime_service" || return 1
   done
+  # 合同编号巡检是非致命现场校验：它恒返回 0，只采集证据并告警，
+  # 既不在 || return 链上，也不改变本次发布的成功判定。
+  audit_contract_number_registry
 }
 
 deploy_project() {

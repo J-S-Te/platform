@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/backchannel"
 )
 
 const (
@@ -23,6 +25,11 @@ const (
 	integratedContractApplicationCode      = "contract_management"
 	integratedProjectApplicationCode       = "project_management"
 )
+
+// defaultBackchannelLogoutPath 是平台与各子系统约定的 Back-Channel Logout 端点后缀
+// （子系统接收端点：/<prefix>/auth/backchannel-logout）。接入时据此自动登记，
+// 不再依赖人工调用管理 API（BIZ-XEVT2-07）。
+const defaultBackchannelLogoutPath = "/auth/backchannel-logout"
 
 // ServiceCredential* 常量枚举受管子系统按用途绑定的全部机器凭据用途，
 // 同时是“凭据最小权限”的协议标识：部署 Agent 按用途把不同密钥写入对应子系统，
@@ -44,6 +51,11 @@ const (
 	ServiceCredentialContractSummaryRead                = "contract_summary_read"
 	ServiceCredentialContractOpportunitySignedCountRead = "contract_opportunity_signed_count_read"
 	ServiceCredentialCRMContractReferenceRead           = "crm_contract_reference_read"
+	// ServiceCredentialCRMContractLinkWrite 允许合同系统把商机签约关联结果回写
+	// CRM 的契约端点；CRM 机器入口固定要求 scope opportunity.signed.write，
+	// 与合同机器入口共用同一最小权限语义但使用独立专用客户端
+	// （BIZ-XEVT2-02）。静态 Bearer 不再被接受。
+	ServiceCredentialCRMContractLinkWrite               = "crm_contract_link_write"
 	ServiceCredentialContractImportReportRead           = "contract_import_report_read"
 	ServiceCredentialAnalysisContractImportReportStatus = "analysis_contract_import_report_status"
 	ServiceCredentialContractDashboardRead              = "contract_dashboard_read"
@@ -52,8 +64,12 @@ const (
 	ServiceCredentialProjectContractImport              = "project_contract_import"
 	ServiceCredentialSettlementProjectReferenceRead     = "settlement_project_reference_read"
 	ServiceCredentialSettlementContractIngest           = "settlement_contract_ingest"
-	ServiceCredentialPortalReportFileRead               = "portal_report_file_read"
-	ServiceCredentialPortalReportDownloadIdentityRead   = "portal_report_download_identity_read"
+	// ServiceCredentialCRMCreditPaymentIngest 是结算→CRM 回款/冲销信用事实写入的
+	// 受控用途。scope 必须与 CRM 机器入口权限白名单（customer.credit.payment.ingest）
+	// 完全一致，否则结算启用同步即 401（BIZ-XAPI-02 / BIZ-XWIRE-06）。
+	ServiceCredentialCRMCreditPaymentIngest           = "crm_credit_payment_ingest"
+	ServiceCredentialPortalReportFileRead             = "portal_report_file_read"
+	ServiceCredentialPortalReportDownloadIdentityRead = "portal_report_download_identity_read"
 	// ServiceCredentialFileGatewayWrite 是业务子系统上传并绑定自身文件的最小组合凭据；
 	// 下载凭据不包含在内，避免写入型 Worker 同时取得任意文件读取能力。
 	ServiceCredentialFileGatewayWrite = "file_gateway_write"
@@ -61,6 +77,46 @@ const (
 
 // 上述用途常量同时是“凭据最小权限”的协议标识：部署 Agent 按用途把不同密钥写入
 // 对应子系统，不能把其中任一机器客户端当成通用平台客户端复用。
+
+// 接入阶段对 Back-Channel Logout 登记的决定。三种决定都必须可审计：登记成功是
+// 默认路径，opt-out 与"端点校验失败被跳过"都会让该 RP 收不到登出通知。
+const (
+	// BackchannelLogoutDecisionRegistered 表示已自动登记 logout_uri。
+	BackchannelLogoutDecisionRegistered = "REGISTERED"
+	// BackchannelLogoutDecisionOptOut 表示调用方显式声明该 RP 不支持 Back-Channel Logout。
+	BackchannelLogoutDecisionOptOut = "OPT_OUT"
+	// BackchannelLogoutDecisionSkipped 表示自动登记被跳过（端点未通过协议校验，
+	// 例如非回环明文 HTTP）。任务生成侧会以 NO_ENDPOINT 暴露该缺口。
+	BackchannelLogoutDecisionSkipped = "SKIPPED_INVALID_ENDPOINT"
+)
+
+// ErrBackchannelLogoutAuditUnavailable 表示显式 opt-out 缺少审计写入端。
+// opt-out 会让离职停用/中央登出无法通知该 RP，属安全相关决策，必须留痕；
+// 没有审计通道时失败关闭，而不是静默放行。
+var ErrBackchannelLogoutAuditUnavailable = errors.New("back-channel logout opt-out requires an audit sink")
+
+// BackchannelLogoutAuditEvent 是接入阶段 Back-Channel Logout 决定的最小审计事实，
+// 由组合根适配到平台审计服务，不携带任何凭据。
+type BackchannelLogoutAuditEvent struct {
+	TenantID        string
+	OperatorID      string
+	ApplicationCode string
+	Environment     string
+	OAuthClientID   string
+	ClientID        string
+	Decision        string
+	LogoutURI       string
+	Reason          string
+	// Metadata 中恒含 missing_logout_uri 键：决定不是 REGISTERED 时该 RP 本应被
+	// 通知却无登记端点，告警与检索据此聚合，不得退化为自由文本。
+	Metadata map[string]any
+}
+
+// BackchannelLogoutAuditSink 由组合根适配到平台审计服务；opt-out 与登记跳过
+// 必须经它留痕。
+type BackchannelLogoutAuditSink interface {
+	RecordBackchannelLogoutDecision(context.Context, BackchannelLogoutAuditEvent) error
+}
 
 // 接入是仅创建操作；同租户的应用环境已经存在时返回可识别冲突，调用方可以提示改走
 // 更新或重试流程，同时不把内部 ID、数据库信息或凭据材料带入错误响应。
@@ -108,6 +164,12 @@ type SubsystemOnboardingInput struct {
 	// AllowedServiceBindings 是该应用清单声明的可创建服务凭据用途（不含 audit_ingest 基线）。
 	// 为空且清单未声明时回退到平台硬编码默认，保证既有行为不变。
 	AllowedServiceBindings []string
+	// BackchannelLogoutPath 是 Back-Channel Logout 端点相对公开基址的路径后缀。
+	// nil 表示未声明：使用 defaultBackchannelLogoutPath 并自动登记
+	// （BIZ-XEVT2-07：登记不再依赖人工调用管理 API）。
+	// 显式空串表示该 RP 不支持 Back-Channel Logout，属于有意的 opt-out：不写登记行，
+	// 但必须留下审计痕迹，不允许静默跳过。
+	BackchannelLogoutPath *string
 }
 
 // 写模型汇总一次接入产生的控制面对象，仓储在一个数据库事务内持久化；明文密钥不进入
@@ -124,6 +186,9 @@ type SubsystemOnboardingWrite struct {
 	OAuthClient        OAuthClientCreateInput
 	OAuthClientID      string
 	OAuthClientSecret  *SecretWrite
+	// BackchannelLogoutURI 与浏览器客户端在同一次数据库事务内登记；空表示显式
+	// opt-out（由应用层审计），仓储不得自行补登记或改写协议校验。
+	BackchannelLogoutURI string
 
 	// 授权目录发布使用独立机器客户端，不能与浏览器 OIDC 回调或其他系统集成复用。
 	CatalogPublisherOAuthClient       OAuthClientCreateInput
@@ -204,7 +269,11 @@ type SubsystemOnboardingResult struct {
 	CatalogPublisherPlaintextSecret string
 	ServiceCredentials              []SubsystemServiceCredential
 	RedirectURI                     string
-	PublicURL                       string
+	// BackchannelLogoutURI 是本次接入自动登记的 Back-Channel Logout 端点；
+	// 空串表示显式 opt-out 或端点未通过校验，具体决定见 BackchannelLogoutDecision。
+	BackchannelLogoutURI      string
+	BackchannelLogoutDecision string
+	PublicURL                 string
 }
 
 // 门户投影只包含已认证用户可见且可解析的跳转信息，不携带控制面配置或任何凭据。
@@ -274,6 +343,8 @@ type SubsystemOnboardingService struct {
 	ids                         ManagementIdentifierGenerator
 	clock                       Clock
 	redirectURIValidationPolicy RedirectURIValidationPolicy
+	// backchannelAudit 在模块组装后注入；显式 opt-out 没有它即失败关闭。
+	backchannelAudit BackchannelLogoutAuditSink
 }
 
 // 构造时要求 ID、时钟和仓储齐备；回调 URI 策略允许由环境控制是否接受受限 HTTP。
@@ -284,6 +355,12 @@ func NewSubsystemOnboardingService(repository SubsystemOnboardingRepository, ids
 	return &SubsystemOnboardingService{
 		repository: repository, ids: ids, clock: clock, redirectURIValidationPolicy: redirectURIValidationPolicy,
 	}, nil
+}
+
+// SetBackchannelLogoutAuditSink 在模块组装完成后注入 Back-Channel Logout 决定的
+// 审计写入端。显式 opt-out 属于安全相关决策，必须在写控制面之前可用。
+func (service *SubsystemOnboardingService) SetBackchannelLogoutAuditSink(sink BackchannelLogoutAuditSink) {
+	service.backchannelAudit = sink
 }
 
 // 预检只规范化并验证公开接入参数，不生成 ID、密钥或数据库记录，便于部署器在真正写入
@@ -335,6 +412,23 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 
 	publicURL := input.PublicBaseURL + input.PathPrefix + "/"
 	redirectURI := input.PublicBaseURL + input.PathPrefix + "/auth/callback"
+	// Back-Channel Logout 端点由公开基址与接入路径推导，与浏览器客户端同事务登记
+	// （BIZ-XEVT2-07）。此前登记只能靠人工调用管理 API，漏登记时离职停用/中央登出
+	// 对该 RP 完全没有投递任务。校验不放宽：只接受 HTTPS（本地回环明文仅在进程策略
+	// 显式开启时接受），失败即"跳过并留痕"，不写入不可投递的登记行。
+	logoutURI, logoutDecision := "", BackchannelLogoutDecisionOptOut
+	if path := strings.TrimSpace(derefString(input.BackchannelLogoutPath)); path != "" {
+		candidate := input.PublicBaseURL + input.PathPrefix + path
+		if ValidateBackchannelLogoutURI(candidate, service.redirectURIValidationPolicy.AllowInsecureHTTP) == nil {
+			logoutURI, logoutDecision = candidate, BackchannelLogoutDecisionRegistered
+		} else {
+			logoutDecision = BackchannelLogoutDecisionSkipped
+		}
+	}
+	// opt-out 会让该 RP 永远收不到登出通知，必须在写入任何控制面之前确认审计可用。
+	if logoutDecision == BackchannelLogoutDecisionOptOut && service.backchannelAudit == nil {
+		return SubsystemOnboardingResult{}, ErrBackchannelLogoutAuditUnavailable
+	}
 	clientID := input.ApplicationCode + "-" + input.Environment + "-web"
 	// 浏览器公开客户端不能安全保存 secret，因此只能使用 PKCE；机密客户端则由后续的
 	// 一次性交付链路把 secret 交给部署 Agent，明文不会进入仓储写模型。
@@ -446,6 +540,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		Environment: environmentInput, EnvironmentID: environmentID,
 		LoginTarget: loginTargetInput, LoginTargetID: loginTargetID,
 		OAuthClient: oauthClientInput, OAuthClientID: oauthClientID, OAuthClientSecret: secret,
+		BackchannelLogoutURI:              logoutURI,
 		CatalogPublisherOAuthClient:       catalogPublisherClientInput,
 		CatalogPublisherOAuthClientID:     catalogPublisherOAuthClientID,
 		CatalogPublisherOAuthClientSecret: &catalogPublisherSecretWrite,
@@ -465,7 +560,44 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 	}
 	result.RedirectURI = redirectURI
 	result.PublicURL = publicURL
+	result.BackchannelLogoutURI = logoutURI
+	result.BackchannelLogoutDecision = logoutDecision
+	// 登记以外的两种决定都意味着"本应通知却无端点"：必须留痕并可在审计里检索，
+	// 不允许因为接入成功就静默。审计写入失败即返回错误，避免做出无法追责的决定。
+	if logoutDecision != BackchannelLogoutDecisionRegistered && service.backchannelAudit != nil {
+		event := BackchannelLogoutAuditEvent{
+			TenantID: input.TenantID, OperatorID: input.OperatorID,
+			ApplicationCode: result.Application.Code, Environment: result.Environment.Environment,
+			OAuthClientID: result.OAuthClient.ID, ClientID: result.OAuthClient.ClientID,
+			Decision: logoutDecision, LogoutURI: logoutURI,
+			Reason:   logoutDecisionReason(logoutDecision),
+			Metadata: missingLogoutURIAuditMetadata(result.OAuthClient.ID, logoutDecision),
+		}
+		if err := service.backchannelAudit.RecordBackchannelLogoutDecision(ctx, event); err != nil {
+			return SubsystemOnboardingResult{}, fmt.Errorf("record back-channel logout decision: %w", err)
+		}
+	}
 	return result, nil
+}
+
+// logoutDecisionReason 为审计事件提供稳定的原因码，便于告警规则区分"有意 opt-out"
+// 与"端点校验失败"，两者的处置动作不同。
+func logoutDecisionReason(decision string) string {
+	switch decision {
+	case BackchannelLogoutDecisionOptOut:
+		return "opt_out"
+	case BackchannelLogoutDecisionSkipped:
+		return "invalid_logout_endpoint"
+	}
+	return "registered"
+}
+
+// missingLogoutURIAuditMetadata 复用协议层固定的 missing_logout_uri 键，保证接入期
+// 审计与投递期 NO_ENDPOINT 原因码可被同一条告警规则聚合。
+func missingLogoutURIAuditMetadata(oauthClientID, decision string) map[string]any {
+	metadata := backchannel.MissingLogoutURIMetadata(oauthClientID)
+	metadata["reason"] = logoutDecisionReason(decision)
+	return metadata
 }
 
 // RegisterSubsystemDirectory 只登记业务应用、其环境与一个已批准的登录后落地目标；
@@ -551,11 +683,13 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialContractSummaryRead:                {ServiceCredentialContractSummaryRead, "contract-summary", "Contract Summary Reader", "contract.summary.read"},
 	ServiceCredentialContractOpportunitySignedCountRead: {ServiceCredentialContractOpportunitySignedCountRead, "contract-signed-count", "Contract Opportunity Signed Count Reader", "contract.opportunity_signed_count.read"},
 	ServiceCredentialCRMContractReferenceRead:           {ServiceCredentialCRMContractReferenceRead, "crm-contract-reference", "CRM Contract Reference Reader", "customer.contract_reference.read"},
+	ServiceCredentialCRMContractLinkWrite:               {ServiceCredentialCRMContractLinkWrite, "crm-contract-link", "CRM Contract Link Writer", "opportunity.signed.write"},
 	ServiceCredentialContractDashboardRead:              {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
 	ServiceCredentialProjectDashboardRead:               {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
 	ServiceCredentialContractApprovedRead:               {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
 	ServiceCredentialProjectContractImport:              {ServiceCredentialProjectContractImport, "project-integration", "Project Contract Importer", "project.contract.import"},
 	ServiceCredentialSettlementContractIngest:           {ServiceCredentialSettlementContractIngest, "settlement-integration", "Settlement Contract Ingester", "settlement.contract.ingest"},
+	ServiceCredentialCRMCreditPaymentIngest:             {ServiceCredentialCRMCreditPaymentIngest, "crm-credit-ingest", "CRM Credit Payment Ingester", "customer.credit.payment.ingest"},
 	ServiceCredentialPortalReportFileRead:               {ServiceCredentialPortalReportFileRead, "portal-report-source", "Portal Report Source Reader", "platform:file:portal_report"},
 	ServiceCredentialPortalReportDownloadIdentityRead:   {ServiceCredentialPortalReportDownloadIdentityRead, "portal-report-identity", "Portal Report Identity Reader", "portal.report.download_identity.read"},
 	ServiceCredentialFileGatewayWrite:                   {ServiceCredentialFileGatewayWrite, "file-gateway-writer", "File Gateway Writer", "platform:file:upload"},
@@ -567,7 +701,10 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case integratedCustomerApplicationCode:
-		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialContractOpportunitySignedCountRead}
+		// 合同核验与签约回写是 CRM 的默认跨系统能力：本地/首次接入也必须
+		// 用 CRM 自己的 client 身份（customer_and_opportunity-<env>-*）创建，
+		// 不能借用合同应用凭据（否则合同 Ed25519 验签的 caller 绑定会 401）。
+		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialContractOpportunitySignedCountRead, ServiceCredentialContractSummaryRead, ServiceCredentialContractOpportunitySignedWrite}
 	case integratedPortalApplicationCode:
 		return []string{
 			ServiceCredentialExternalUserProvision,
@@ -580,9 +717,11 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 			ServiceCredentialPortalReportDownloadIdentityRead,
 		}
 	case integratedContractApplicationCode:
-		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialSettlementContractIngest}
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialCRMContractLinkWrite, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialSettlementContractIngest}
 	case "settlement", "settlement_and_invoicing":
-		return []string{ServiceCredentialSettlementProjectReferenceRead, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+		// 信用同步是结算的回款/冲销事实回流能力：默认创建用途客户端但由结算
+		// SETTLEMENT_CRM_CREDIT_SYNC_ENABLED 控制是否启用，避免启用时才发现平台无用途。
+		return []string{ServiceCredentialSettlementProjectReferenceRead, ServiceCredentialCRMCreditPaymentIngest, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case integratedProjectApplicationCode:
 		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
 		// 负责人目录权限；不授予通知写入等其它集成能力。
@@ -764,7 +903,27 @@ func normalizeSubsystemOnboardingInput(input SubsystemOnboardingInput) Subsystem
 	if input.ClientType == "" {
 		input.ClientType = "confidential"
 	}
+	input.BackchannelLogoutPath = normalizeBackchannelLogoutPath(input.BackchannelLogoutPath)
 	return input
+}
+
+// normalizeBackchannelLogoutPath 归一化自动登记端点路径：nil 取默认端点；显式空串
+// 保留为空（opt-out）；其余去空白、补前导 "/"、去掉尾部 "/"。
+func normalizeBackchannelLogoutPath(value *string) *string {
+	if value == nil {
+		path := defaultBackchannelLogoutPath
+		return &path
+	}
+	path := strings.TrimSpace(*value)
+	if path == "" {
+		empty := ""
+		return &empty
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+	return &path
 }
 
 func normalizeSubsystemDirectoryRegistrationInput(input SubsystemDirectoryRegistrationInput) SubsystemDirectoryRegistrationInput {
@@ -818,7 +977,17 @@ func validSubsystemOnboardingInput(input SubsystemOnboardingInput) bool {
 		validManagementText(input.ApplicationName, 128, false) && validEnvironmentCode(input.Environment) &&
 		validOptionalBaseURL(&baseURL) && validOptionalUpstreamURL(&upstreamURL) &&
 		validOptionalPathPrefix(&pathPrefix) && validGatewayTripleConsistent(&baseURL, &upstreamURL, &pathPrefix) &&
-		oneOf(input.ClientType, "public", "confidential")
+		oneOf(input.ClientType, "public", "confidential") &&
+		validBackchannelLogoutPath(input.BackchannelLogoutPath)
+}
+
+// validBackchannelLogoutPath 只接受空（显式 opt-out）或与门户路径同一保守口径的相对路径，
+// 避免把 query/fragment/目录穿越拼进自动登记的端点。
+func validBackchannelLogoutPath(value *string) bool {
+	if value == nil || *value == "" {
+		return true
+	}
+	return validPortalPath(*value, 128)
 }
 
 func validSubsystemDirectoryRegistrationInput(input SubsystemDirectoryRegistrationInput) bool {
@@ -851,3 +1020,11 @@ func resolvePortalTarget(baseURL, targetURI string) (string, error) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+// derefString 把可选字符串安全解引用；nil 视为空串，供"未声明即取默认"的归一化使用。
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}

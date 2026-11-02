@@ -378,6 +378,8 @@ func (repository *OAuthClientManagementRepository) DisableOAuthClient(ctx contex
 
 // CreateOAuthClientSecret 为处于 ACTIVE 且采用 client_secret_basic 的客户端追加一个新
 // 凭据版本；写入在事务中完成，同时校验客户端版本乐观锁并推进版本号，使并发管理操作冲突可见。
+// 旧 Secret 的处置由 input.PreviousSecretPolicy 决定：默认 KEEP 只追加（既有兼容行为），
+// REVOKE/GRACE 在同一事务内吊销或收紧既有 ACTIVE 版本，避免旧值永久可用（RUNTIME-05）。
 func (repository *OAuthClientManagementRepository) CreateOAuthClientSecret(ctx context.Context, input application.OAuthClientSecretCreateInput, secret application.SecretWrite, now time.Time) (application.OAuthClientCredentialView, error) {
 	var result application.OAuthClientCredentialView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -391,6 +393,10 @@ func (repository *OAuthClientManagementRepository) CreateOAuthClientSecret(ctx c
 		if input.ExpectedClientVersion != nil && client.Version != *input.ExpectedClientVersion {
 			return application.ErrManagementConflict
 		}
+		// 先退役旧版本再插入新版本：同一事务内不存在“两个都可用且无人负责”的窗口。
+		if err := retireOAuthClientSecrets(transaction, client.ID, input.PreviousSecretPolicy, input.PreviousSecretGrace, now); err != nil {
+			return err
+		}
 		if err := createOAuthClientSecret(transaction, client.ID, secret, now); err != nil {
 			return err
 		}
@@ -401,6 +407,42 @@ func (repository *OAuthClientManagementRepository) CreateOAuthClientSecret(ctx c
 		return nil
 	})
 	return result, mapOAuthClientManagementError(err)
+}
+
+// retireOAuthClientSecrets 按策略处置客户端既有的 ACTIVE Secret。KEEP 是零值，保持
+// 既有“只追加”语义；REVOKE 立即吊销；GRACE 只缩短有效期（CASE 保证不延长更早的截止时间）。
+// 三种处置都只改状态/有效期，不删除凭据行，吊销痕迹（status、revoked_at）始终可核对。
+// 无既有 ACTIVE 行时受影响行数为 0，重复执行不报错，因而对受控更新的重试保持幂等。
+func retireOAuthClientSecrets(transaction *gorm.DB, oauthClientID string, policy application.OAuthClientSecretRetirementPolicy, grace time.Duration, now time.Time) error {
+	if policy == "" || policy == application.OAuthClientSecretRetirementKeep {
+		return nil
+	}
+	updates, err := oauthClientSecretRetirementUpdates(policy, grace, now)
+	if err != nil {
+		return err
+	}
+	return transaction.Model(&oauthClientCredentialModel{}).
+		Where("oauth_client_id = ? AND credential_type = ? AND status = ?", oauthClientID, oauthClientSecretCredentialType, "ACTIVE").
+		Updates(updates).Error
+}
+
+// oauthClientSecretRetirementUpdates 返回旧 Secret 的更新集合。纯函数便于校验策略语义：
+// REVOKE 写 REVOKED + revoked_at；GRACE 只收紧 valid_until；未知策略拒绝而不是静默保留。
+func oauthClientSecretRetirementUpdates(policy application.OAuthClientSecretRetirementPolicy, grace time.Duration, now time.Time) (map[string]any, error) {
+	switch policy {
+	case application.OAuthClientSecretRetirementRevoke:
+		return map[string]any{"status": "REVOKED", "revoked_at": now}, nil
+	case application.OAuthClientSecretRetirementGrace:
+		if grace <= 0 {
+			return nil, application.ErrManagementValidation
+		}
+		graceUntil := now.Add(grace)
+		return map[string]any{
+			"valid_until": gorm.Expr("CASE WHEN valid_until IS NULL OR valid_until > ? THEN ? ELSE valid_until END", graceUntil, graceUntil),
+		}, nil
+	default:
+		return nil, application.ErrManagementValidation
+	}
 }
 
 // RotateOAuthClientSecret 在一个事务中先收紧所有旧活跃密钥的有效期，再插入新版本。

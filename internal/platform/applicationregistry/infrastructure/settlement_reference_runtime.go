@@ -6,14 +6,13 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
-// resolveSettlementReferenceIdentity 校验项目接收端所绑定的结算只读身份。
-// 参数：input 为项目环境及已登记来源，source 为允许的关联身份字段。
-// 返回值：已核验的公开客户端标识；来源缺失、歧义或漂移时拒绝。
-func resolveSettlementReferenceIdentity(input application.SubsystemProvisioningInput, source string) (string, error) {
-	const binding = "related_service.settlement.settlement_project_reference_read.client_id"
-	if input.ApplicationCode != "project_management" || source != binding {
-		return "", provisioningError("settlement reference binding does not match receiver")
-	}
+// settlementReferenceBinding 是项目清单声明结算只读身份的关联绑定来源。
+const settlementReferenceBinding = "related_service.settlement.settlement_project_reference_read.client_id"
+
+// findSettlementReferenceSource 查找项目接收端可用的结算只读来源（不做字段校验）。
+// 参数：input 为项目环境及已登记来源。
+// 返回值：未登记时返回 nil；同名来源重复时返回歧义错误。
+func findSettlementReferenceSource(input application.SubsystemProvisioningInput) (*application.RelatedSubsystemServiceClient, error) {
 	var found *application.RelatedSubsystemServiceClient
 	for index := range input.RelatedServiceClients {
 		candidate := &input.RelatedServiceClients[index]
@@ -22,9 +21,23 @@ func resolveSettlementReferenceIdentity(input application.SubsystemProvisioningI
 			continue
 		}
 		if found != nil {
-			return "", provisioningError("settlement reference source is ambiguous")
+			return nil, provisioningError("settlement reference source is ambiguous")
 		}
 		found = candidate
+	}
+	return found, nil
+}
+
+// resolveSettlementReferenceIdentity 校验项目接收端所绑定的结算只读身份。
+// 参数：input 为项目环境及已登记来源，source 为允许的关联身份字段。
+// 返回值：已核验的公开客户端标识；来源缺失、歧义或漂移时拒绝。
+func resolveSettlementReferenceIdentity(input application.SubsystemProvisioningInput, source string) (string, error) {
+	if input.ApplicationCode != "project_management" || source != settlementReferenceBinding {
+		return "", provisioningError("settlement reference binding does not match receiver")
+	}
+	found, err := findSettlementReferenceSource(input)
+	if err != nil {
+		return "", err
 	}
 	if found == nil || found.ApplicationID == "" || found.EnvironmentID == "" ||
 		found.Environment != input.Environment {
@@ -39,12 +52,24 @@ func resolveSettlementReferenceIdentity(input application.SubsystemProvisioningI
 	return found.Client.ClientID, nil
 }
 
-// projectSettlementReferenceRuntimeValues 配置项目独立的结算引用验签入口。
+// projectSettlementReferenceRuntimeValues 配置项目独立的结算引用验签入口（本地/开发路径）。
 // 参数：input 为项目环境及已核验来源元数据，values 为待写入配置。
-// 返回值：配置完整时为空，否则拒绝发布。
+// 返回值：配置完整时为空；来源未登记（结算后接入）时关闭集成并清空残留来源身份；
+// 来源已登记但漂移/歧义时拒绝发布。
 func projectSettlementReferenceRuntimeValues(input application.SubsystemProvisioningInput, values map[string]string) error {
-	clientID, err := resolveSettlementReferenceIdentity(input,
-		"related_service.settlement.settlement_project_reference_read.client_id")
+	if input.ApplicationCode != "project_management" {
+		return provisioningError("settlement reference binding does not match receiver")
+	}
+	found, err := findSettlementReferenceSource(input)
+	if err != nil {
+		return err
+	}
+	if found == nil {
+		// 结算侧尚未接入：项目按安全失败关闭先接入，结算接入后再次受控更新才启用引用接口。
+		disableSettlementReferenceRuntimeValues(values)
+		return nil
+	}
+	clientID, err := resolveSettlementReferenceIdentity(input, settlementReferenceBinding)
 	if err != nil {
 		return err
 	}
@@ -55,6 +80,21 @@ func projectSettlementReferenceRuntimeValues(input application.SubsystemProvisio
 	values["SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
 	values["SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE"] = input.Environment
 	return nil
+}
+
+// disableSettlementReferenceRuntimeValues 关闭项目结算引用集成并清空上一次登记的来源身份。
+// 参数：values 为待写入配置。来源字段写空值而非保留旧值，避免沿用已不存在客户端的残留配置。
+func disableSettlementReferenceRuntimeValues(values map[string]string) {
+	values["SETTLEMENT_REFERENCE_ENABLED"] = "false"
+	for _, key := range []string{
+		"SETTLEMENT_REFERENCE_CLIENT_ID",
+		"SETTLEMENT_REFERENCE_AUDIENCE",
+		"SETTLEMENT_REFERENCE_ISSUER",
+		"SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH",
+		"SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE",
+	} {
+		values[key] = ""
+	}
 }
 
 // settlementRoleRuntimeValues 配置结算项目查询、人员目录及通知审计出站身份。

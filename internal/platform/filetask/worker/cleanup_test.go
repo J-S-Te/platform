@@ -35,11 +35,16 @@ func (*cleanupRepo) ListStaleDeleting(context.Context, string, time.Time, int) (
 
 type cleanupStore struct {
 	application.LocalStore
-	removed bool
+	removed           bool
+	quarantineCleaned bool
 }
 
 func (s *cleanupStore) Remove(string) error                   { s.removed = true; return nil }
 func (*cleanupStore) CleanupTemporary(time.Time) (int, error) { return 0, nil }
+func (s *cleanupStore) CleanupQuarantine(time.Time) (int, error) {
+	s.quarantineCleaned = true
+	return 1, nil
+}
 
 type cleanupIDs struct{}
 
@@ -64,6 +69,9 @@ func TestRunnerSchedulesExpiredUnboundCleanup(t *testing.T) {
 	runner.runOnce(context.Background())
 	if !repo.deleted || !store.removed {
 		t.Fatalf("scheduled maintenance did not remove eligible temporary file: deleted=%v removed=%v", repo.deleted, store.removed)
+	}
+	if !store.quarantineCleaned {
+		t.Fatal("scheduled maintenance did not sweep expired quarantine files")
 	}
 }
 

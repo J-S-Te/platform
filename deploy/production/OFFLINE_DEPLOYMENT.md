@@ -58,7 +58,7 @@ sudo ./bin/install-assets.sh --recover /opt/unified-identity-platform
 
 部署范围仅由 Compose 实际服务决定，不再维护 profiles 或另一份启用列表。配置向导只准备启用模块的 runtime。公共 contract-mysql 保留原服务名和卷，用作 Temporal 共享数据库；注释合同业务不会停止它。
 
-configure 询问 IP、端口、账号、时区等，生成并保留所需随机密钥和密码。runtime 目录 0700、凭据文件 0600。重复配置保留已有密钥；不手填 PENDING 平台凭据。平台生成 OIDC、授权目录、通知、人员目录、审计和 File Gateway 调用凭据。
+configure 询问 IP、端口、账号等，生成并保留所需随机密钥和密码。runtime 目录 0700、凭据文件 0600。重复配置保留已有密钥；不手填 PENDING 平台凭据。平台生成 OIDC、授权目录、通知、人员目录、审计和 File Gateway 调用凭据。业务时间固定北京时间，configure 不再询问时区（容器显示时区另见 CONTAINER_TIMEZONE.md）。
 
 ## 3. 导入并部署基础平台
 

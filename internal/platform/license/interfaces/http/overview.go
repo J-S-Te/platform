@@ -190,6 +190,11 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	if out.Registration.Status == "UNREGISTERED" {
 		out.BlockingReasons = append(out.BlockingReasons, "RUNTIME_NOT_REGISTERED")
 	}
+	// 快照本身不当前时上面的分支已把成员 AckCurrent 置为 false，此处只报告“快照当前但 ACK 未跟上/回退”，
+	// 避免用 ACK 停滞掩盖快照修订不一致这一更上游的原因。
+	if overviewAckStale(out.Enforcement) {
+		out.BlockingReasons = append(out.BlockingReasons, "RUNTIME_ACK_STALE")
+	}
 	if out.License.Status == "NO_LICENSE" || out.License.Status == "NOT_PURCHASED" || out.License.Status == "EXPIRED" {
 		out.AllowedActions = append(out.AllowedActions, "IMPORT_LICENSE")
 	}
@@ -212,6 +217,21 @@ func (h *RuntimeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "运行时授权概览", out)
+}
+
+// overviewAckStale 用途：识别“快照已签发为当前修订，但成员 ACK 未跟上或已回退”的停滞。
+// 参数：enforcement 为已投影的强制执行事实。
+// 返回值：快照当前且存在 AckCurrent=false 的成员时返回 true；快照不当前一律返回 false。
+func overviewAckStale(enforcement overviewEnforcement) bool {
+	if !enforcement.SnapshotCurrent {
+		return false
+	}
+	for _, member := range enforcement.Members {
+		if !member.AckCurrent {
+			return true
+		}
+	}
+	return false
 }
 
 // readOverviewLicense 用途：按生效时间和最高观测时间投影许可证事实。

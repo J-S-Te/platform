@@ -142,6 +142,53 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, input EventInput)
 	return s.repository.Ingest(ctx, tenantID, normalizeInput(input), s.clock.Now())
 }
 
+// SpoolErrorCodeWriteExhausted 是中间件把“同步写入 + 重试都失败”的结果事件落死信时
+// 使用的稳定错误码（BIZ-RUNTIME-11）。死信是运营可重放/可忽略的故障证据，因此错误码
+// 必须稳定，不能把上游驱动的原始错误文本当分类。
+const SpoolErrorCodeWriteExhausted = "AUDIT_EVENT_WRITE_RETRY_EXHAUSTED"
+
+// Spool 把同步写入与重试都失败的事件按审计死信语义（PENDING + 脱敏载荷 + 租户边界）保存，
+// 供运营重放或忽略。它与 DeadLetterService.RecordFailure 使用同一套载荷编解码与初始状态，
+// 区别只在入口：审计管道故障时，中间件不能让已经生效的业务事实失去审计结论。
+//
+// 死信仓储与审计仓储通常是同一实现（如 MySQL 仓储）；实现不支持死信时必须失败关闭并
+// 返回错误，由调用方按“审计不可用”处理。
+func (s *Service) Spool(ctx context.Context, tenantID string, input EventInput) error {
+	input = completeCorrelation(ctx, input)
+	if err := validateInput(tenantID, input); err != nil {
+		return err
+	}
+	repository, ok := s.repository.(DeadLetterRepository)
+	if !ok {
+		return errors.New("audit repository does not support dead-letter spooling")
+	}
+	input = normalizeInput(input)
+	now := s.clock.Now().UTC().Truncate(time.Millisecond)
+	deadLetterID, err := s.ids.New(now)
+	if err != nil {
+		return err
+	}
+	payload, err := marshalDeadLetterEvent(input)
+	if err != nil {
+		return err
+	}
+	_, err = repository.CreateDeadLetter(ctx, domain.DeadLetter{
+		DeadLetterID:     deadLetterID,
+		TenantID:         strings.TrimSpace(tenantID),
+		ApplicationCode:  input.ApplicationCode,
+		EnvironmentCode:  input.EnvironmentCode,
+		EventID:          input.EventID,
+		Status:           domain.DeadLetterPending,
+		Payload:          payload,
+		LastErrorCode:    []byte(SpoolErrorCodeWriteExhausted),
+		LastErrorMessage: []byte("audit event write failed after synchronous retry"),
+		Attempts:         1,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	})
+	return err
+}
+
 // IngestBatch 在持久化前校验整批事件，并把“首次接收/幂等重复”的判定交给同一个仓储事务。
 // 任一事件无效或事务失败都不会留下部分事件或批次回执；重复事件则作为逐条成功结果返回，
 // 使采用事务发件箱重试的子系统无需把已接收事件误判为失败。
@@ -262,7 +309,7 @@ func validatePage(query PageRequest) error {
 	if !validActionCategory(query.ActionCategory) {
 		return validation("action_category is invalid")
 	}
-	if query.Result != "" && !oneOf(query.Result, "SUCCESS", "FAILURE", "DENIED") {
+	if query.Result != "" && !oneOf(query.Result, "SUCCESS", "FAILURE", "DENIED", "REQUESTED") {
 		return validation("result is invalid")
 	}
 	if query.RiskLevel != "" && !oneOf(query.RiskLevel, "LOW", "MEDIUM", "HIGH", "CRITICAL") {
@@ -344,7 +391,9 @@ func validateInput(tenantID string, input EventInput) error {
 	if input.TraceID != "" && (!traceIDPattern.MatchString(input.TraceID) || input.TraceID == strings.Repeat("0", 32)) {
 		return validation("trace_id must be a non-zero 32-character lowercase hexadecimal value")
 	}
-	if !oneOf(input.Result, "SUCCESS", "FAILURE", "DENIED") {
+	if !oneOf(input.Result, "SUCCESS", "FAILURE", "DENIED", "REQUESTED") {
+		// REQUESTED 是 BIZ-RUNTIME-11 的“意图事件”结论：业务尚未执行、结果待定。
+		// 它只在必开模式的意图/结果配对里出现，消费方应按 metadata.phase 区分。
 		return validation("result is invalid")
 	}
 	if input.ResourceType == "" {

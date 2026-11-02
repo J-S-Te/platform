@@ -287,7 +287,7 @@ class DeploymentPlanTest(unittest.TestCase):
             self.assertEqual(same["summary"], "READY")
             self.assertIn("PLAN-001", {item["id"] for item in same["checks"]})
             with (target / ".env").open("a", encoding="utf-8") as stream:
-                stream.write("APP_TIMEZONE=UTC\n")
+                stream.write("APP_HTTP_ADDR=:9090\n")
             changed = self.build(target, baseline_report=str(baseline))
             self.assertEqual(changed["summary"], "BLOCKED")
             check = next(item for item in changed["checks"] if item["id"] == "PLAN-001")
@@ -304,7 +304,7 @@ class DeploymentPlanTest(unittest.TestCase):
                                                baseline_report=str(baseline))
             self.assertEqual(same["summary"], "READY")
             with (target / ".env").open("a", encoding="utf-8") as stream:
-                stream.write("APP_TIMEZONE=UTC\n")
+                stream.write("APP_HTTP_ADDR=:9090\n")
             changed = PLAN.compatibility_document(target, "upgrade", ["platform"],
                                                   compatibility_path=str(target / "deployment-compatibility.json"),
                                                   baseline_report=str(baseline))

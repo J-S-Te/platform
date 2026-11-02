@@ -578,6 +578,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		values["CONTRACT_SIGNED_COUNT_CLIENT_ID"] = signedCountCredential.OAuthClient.ClientID
 		values["CONTRACT_SIGNED_COUNT_CLIENT_SECRET"] = signedCountCredential.PlaintextSecret
 		values["CONTRACT_SIGNED_COUNT_SCOPE"] = "contract.opportunity_signed_count.read"
+		// 合同摘要核验与商机签约事件上报的机器身份属于客户应用：合同侧验签比对
+		// claims.Subject 与 customer_and_opportunity-<env>-contract-summary/-opportunity-intake，
+		// 只有客户自己的这两个凭据能通过。缺失或串环境时失败关闭，不用合同侧凭据兜底。
+		if err := customerContractIdentityRuntimeValues(input, values); err != nil {
+			return err
+		}
 	case integratedContractApplicationCode:
 		if err := contractNotificationRuntimeValues(input, values, false); err != nil {
 			return err
@@ -605,6 +611,52 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["PROJECT_INTEGRATION_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["PROJECT_INTEGRATION_CLIENT_SECRET"] = credential.PlaintextSecret
 			values["PROJECT_INTEGRATION_AUDIENCE"] = "basic-platform-application"
+		}
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialFileGatewayWrite); ok {
+			// 外部合同创建与批量导入把原件写入文件网关；mode 不可为 legacy，
+			// 且 application_id 必须与绑定归属一致，随受控更新与凭据同原子交付。
+			values["STAMPED_FILE_GATEWAY_MODE"] = "dual"
+			values["FILE_GATEWAY_BASE_URL"] = "http://file-gateway:8086"
+			values["FILE_GATEWAY_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["FILE_GATEWAY_APPLICATION_ID"] = input.ApplicationID
+			values["FILE_GATEWAY_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["FILE_GATEWAY_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["FILE_GATEWAY_SCOPE"] = "platform:file:upload platform:file:bind platform:file:download"
+		}
+		// 本地/开发栈与生产清单使用同一组合同侧机器入口：CRM 商机签约事件（intake）
+		// 与合同摘要的调用方固定为 customer_and_opportunity，client id 按
+		// 「应用-环境-用途后缀」随 input.Environment 推导；这里只下发公开的信任域
+		// 参数，不写死 prod 值、也不引入任何密钥。缺少这些键时合同进程会关闭对应
+		// 端点，本地无法复现 P0（商机确认签约）与 CRM 合同摘要核验。
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_ENABLED"] = "true"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_REQUIRE_BEARER"] = "true"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_ISSUER"] = "basic-platform"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_AUDIENCE"] = "basic-platform-application"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_CLIENT_ID"] = integratedCustomerApplicationCode + "-" + input.Environment + "-opportunity-intake"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_CALLER_APPLICATION_CODE"] = integratedCustomerApplicationCode
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_CALLER_ENVIRONMENT_CODE"] = input.Environment
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_REQUIRED_SCOPE"] = "opportunity.signed.write"
+		values["CONTRACT_SUMMARY_MACHINE_ENABLED"] = "true"
+		values["CONTRACT_SUMMARY_MACHINE_REQUIRE_BEARER"] = "true"
+		values["CONTRACT_SUMMARY_MACHINE_ISSUER"] = "basic-platform"
+		values["CONTRACT_SUMMARY_MACHINE_AUDIENCE"] = "basic-platform-application"
+		values["CONTRACT_SUMMARY_MACHINE_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CONTRACT_SUMMARY_MACHINE_CLIENT_ID"] = integratedCustomerApplicationCode + "-" + input.Environment + "-contract-summary"
+		values["CONTRACT_SUMMARY_MACHINE_CALLER_APPLICATION_CODE"] = integratedCustomerApplicationCode
+		values["CONTRACT_SUMMARY_MACHINE_CALLER_ENVIRONMENT_CODE"] = input.Environment
+		values["CONTRACT_SUMMARY_MACHINE_REQUIRED_SCOPE"] = "contract.summary.read"
+		// 合同→CRM 回写默认关闭：本地没有受控的 crm_contract_link_write 凭据时把
+		// 地址留空，合同进程据此停用 dispatcher，而不是拿着占位 id/secret 在启动
+		// 校验阶段失败关闭（crash-loop）。受控更新交付完整凭据后才打开回写。
+		values["CRM_LINK_BASE_URL"] = ""
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialCRMContractLinkWrite); ok &&
+			strings.TrimSpace(credential.OAuthClient.ClientID) != "" && strings.TrimSpace(credential.PlaintextSecret) != "" {
+			values["CRM_LINK_BASE_URL"] = "http://customer-api:8090/customer-opportunity"
+			values["CRM_LINK_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["CRM_LINK_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["CRM_LINK_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["CRM_LINK_SCOPE"] = "opportunity.signed.write"
 		}
 	case "data_analysis":
 		contractCredential, ok := input.ServiceCredential(application.ServiceCredentialContractDashboardRead)
@@ -642,6 +694,43 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 	if err := updateSubsystemEnvironment(environmentPath, environmentPath, values); err != nil {
 		return provisioningError("write subsystem service credential configuration")
 	}
+	return nil
+}
+
+// customerContractIdentityRuntimeValues 下发客户应用侧「合同摘要核验」与「商机签约事件」
+// 的客户端身份。合同 API 的机器验签严格要求 claims.Subject 等于
+// customer_and_opportunity-<env>-contract-summary / -opportunity-intake，因此这两组凭据
+// 必须来自客户应用自己的 ServiceCredential，不能用合同应用的同类用途凭据替代。
+// 参数：input 为已授权的目标子系统与凭据，values 为待写入客户运行文件的键值。
+// 返回值：凭据缺失或 client id 不属于目标环境时返回 provisioningError。
+func customerContractIdentityRuntimeValues(input application.SubsystemProvisioningInput, values map[string]string) error {
+	summaryCredential, ok := input.ServiceCredential(application.ServiceCredentialContractSummaryRead)
+	if !ok {
+		return provisioningError("customer contract summary credential is unavailable")
+	}
+	expectedSummaryClientID := input.ApplicationCode + "-" + input.Environment + "-contract-summary"
+	if summaryCredential.OAuthClient.ClientID != expectedSummaryClientID {
+		return provisioningError("customer contract summary credential does not match the target environment")
+	}
+	intakeCredential, ok := input.ServiceCredential(application.ServiceCredentialContractOpportunitySignedWrite)
+	if !ok {
+		return provisioningError("customer contract opportunity signed write credential is unavailable")
+	}
+	expectedIntakeClientID := input.ApplicationCode + "-" + input.Environment + "-opportunity-intake"
+	if intakeCredential.OAuthClient.ClientID != expectedIntakeClientID {
+		return provisioningError("customer contract opportunity signed write credential does not match the target environment")
+	}
+	values["CONTRACT_VERIFICATION_ENABLED"] = "true"
+	values["CONTRACT_SUMMARY_URL"] = "http://contract-api:8081/internal/contract-summary"
+	values["CONTRACT_SUMMARY_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+	values["CONTRACT_SUMMARY_CLIENT_ID"] = summaryCredential.OAuthClient.ClientID
+	values["CONTRACT_SUMMARY_CLIENT_SECRET"] = summaryCredential.PlaintextSecret
+	values["CONTRACT_SUMMARY_SCOPE"] = "contract.summary.read"
+	values["CONTRACT_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+	values["CONTRACT_OPPORTUNITY_INTAKE_URL"] = "http://contract-api:8081/internal/opportunity-signed-events"
+	values["CONTRACT_CLIENT_ID"] = intakeCredential.OAuthClient.ClientID
+	values["CONTRACT_CLIENT_SECRET"] = intakeCredential.PlaintextSecret
+	values["CONTRACT_SCOPE"] = "opportunity.signed.write"
 	return nil
 }
 
@@ -703,6 +792,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 			values["PLATFORM_OWNER_DIRECTORY_SCOPE"] = "owner_directory.read"
 			values["PLATFORM_OWNER_DIRECTORY_CLIENT_ID"] = ownerCredential.OAuthClient.ClientID
 			values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
+		}
+		// 证据/报告与三类 CSV 的核验都依赖统一文件网关客户端：只有拿到受控的
+		// file_gateway_write 凭据才开启，否则项目侧 verifyFileEvidence 因为没有
+		// 客户端而返回 503。本地没有真实凭据（或不完整）时不写，不伪造机器身份，
+		// 留给下一次受控更新补齐。
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialFileGatewayWrite); ok &&
+			strings.TrimSpace(credential.OAuthClient.ClientID) != "" && strings.TrimSpace(credential.PlaintextSecret) != "" {
+			values["FILE_GATEWAY_ENABLED"] = "true"
+			values["FILE_GATEWAY_BASE_URL"] = "http://file-gateway:8086"
+			values["FILE_GATEWAY_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["FILE_GATEWAY_APPLICATION_ID"] = input.ApplicationID
+			values["FILE_GATEWAY_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["FILE_GATEWAY_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["FILE_GATEWAY_SCOPE"] = "platform:file:upload platform:file:bind platform:file:download"
 		}
 	default:
 		values = map[string]string{
@@ -981,6 +1084,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["PLATFORM_OWNER_DIRECTORY_SCOPE"] = "owner_directory.read"
 		values["PLATFORM_OWNER_DIRECTORY_CLIENT_ID"] = ownerCredential.OAuthClient.ClientID
 		values["PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"] = ownerCredential.PlaintextSecret
+		// 合同摘要核验与商机签约事件上报的客户端身份由客户应用分支下发：合同 API
+		// 按 claims.Subject 比对 customer_and_opportunity-<env>-contract-summary/-opportunity-intake，
+		// 合同应用自身的同名用途凭据不满足该验签约束。
+		if err := customerContractIdentityRuntimeValues(input, values); err != nil {
+			return err
+		}
 	}
 	if input.ApplicationCode == integratedProjectApplicationCode {
 		if err := projectNotificationRuntimeValues(input, values); err != nil {
@@ -1008,6 +1117,18 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		}
 		values["PLATFORM_AUDIT_CLIENT_ID"] = auditCredential.OAuthClient.ClientID
 		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
+		// 首次接入按受控凭据启用统一文件网关客户端；没有凭据时不写，项目侧
+		// verifyFileEvidence 保持 503 失败关闭，而不是伪造写入身份。
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialFileGatewayWrite); ok &&
+			strings.TrimSpace(credential.OAuthClient.ClientID) != "" && strings.TrimSpace(credential.PlaintextSecret) != "" {
+			values["FILE_GATEWAY_ENABLED"] = "true"
+			values["FILE_GATEWAY_BASE_URL"] = "http://file-gateway:8086"
+			values["FILE_GATEWAY_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["FILE_GATEWAY_APPLICATION_ID"] = input.ApplicationID
+			values["FILE_GATEWAY_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["FILE_GATEWAY_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["FILE_GATEWAY_SCOPE"] = "platform:file:upload platform:file:bind platform:file:download"
+		}
 	}
 	if input.ApplicationCode == integratedPortalApplicationCode {
 		credentials, credentialErr := requiredPortalServiceCredentials(input)
@@ -1125,24 +1246,43 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		values["PROJECT_INTEGRATION_CLIENT_ID"] = credentials[application.ServiceCredentialProjectContractImport].OAuthClient.ClientID
 		values["PROJECT_INTEGRATION_CLIENT_SECRET"] = credentials[application.ServiceCredentialProjectContractImport].PlaintextSecret
 		values["PROJECT_INTEGRATION_AUDIENCE"] = "basic-platform-application"
-		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
-		customerEnvironment := filepath.Join(platformRoot, "docker", ".env.customer.local")
-		customerValues := map[string]string{
-			"CONTRACT_VERIFICATION_ENABLED":   "true",
-			"CONTRACT_SUMMARY_URL":            "http://contract-api:8081/internal/contract-summary",
-			"CONTRACT_SUMMARY_TOKEN_URL":      "http://platform-api:8080/oauth2/token",
-			"CONTRACT_SUMMARY_CLIENT_ID":      credentials[application.ServiceCredentialContractSummaryRead].OAuthClient.ClientID,
-			"CONTRACT_SUMMARY_CLIENT_SECRET":  credentials[application.ServiceCredentialContractSummaryRead].PlaintextSecret,
-			"CONTRACT_SUMMARY_SCOPE":          "contract.summary.read",
-			"CONTRACT_TOKEN_URL":              "http://platform-api:8080/oauth2/token",
-			"CONTRACT_OPPORTUNITY_INTAKE_URL": "http://contract-api:8081/internal/opportunity-signed-events",
-			"CONTRACT_CLIENT_ID":              credentials[application.ServiceCredentialContractOpportunitySignedWrite].OAuthClient.ClientID,
-			"CONTRACT_CLIENT_SECRET":          credentials[application.ServiceCredentialContractOpportunitySignedWrite].PlaintextSecret,
-			"CONTRACT_SCOPE":                  "opportunity.signed.write",
+		// 首次接入同样要下发合同侧机器入口，否则本地新建栈需要先做一次受控更新
+		// 才能复现 P0（商机确认签约）与 CRM 合同摘要核验。只写公开信任域参数，
+		// client id 随 input.Environment 推导。
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_ENABLED"] = "true"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_REQUIRE_BEARER"] = "true"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_ISSUER"] = "basic-platform"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_AUDIENCE"] = "basic-platform-application"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_CLIENT_ID"] = integratedCustomerApplicationCode + "-" + input.Environment + "-opportunity-intake"
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_CALLER_APPLICATION_CODE"] = integratedCustomerApplicationCode
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_CALLER_ENVIRONMENT_CODE"] = input.Environment
+		values["CRM_OPPORTUNITY_INTAKE_MACHINE_REQUIRED_SCOPE"] = "opportunity.signed.write"
+		values["CONTRACT_SUMMARY_MACHINE_ENABLED"] = "true"
+		values["CONTRACT_SUMMARY_MACHINE_REQUIRE_BEARER"] = "true"
+		values["CONTRACT_SUMMARY_MACHINE_ISSUER"] = "basic-platform"
+		values["CONTRACT_SUMMARY_MACHINE_AUDIENCE"] = "basic-platform-application"
+		values["CONTRACT_SUMMARY_MACHINE_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
+		values["CONTRACT_SUMMARY_MACHINE_CLIENT_ID"] = integratedCustomerApplicationCode + "-" + input.Environment + "-contract-summary"
+		values["CONTRACT_SUMMARY_MACHINE_CALLER_APPLICATION_CODE"] = integratedCustomerApplicationCode
+		values["CONTRACT_SUMMARY_MACHINE_CALLER_ENVIRONMENT_CODE"] = input.Environment
+		values["CONTRACT_SUMMARY_MACHINE_REQUIRED_SCOPE"] = "contract.summary.read"
+		// CRM 回写默认关闭（地址留空 = 该边停用）：首次接入通常还没有回写凭据，
+		// 写入占位值会让合同进程启动校验失败关闭。
+		values["CRM_LINK_BASE_URL"] = ""
+		if credential, ok := input.ServiceCredential(application.ServiceCredentialCRMContractLinkWrite); ok &&
+			strings.TrimSpace(credential.OAuthClient.ClientID) != "" && strings.TrimSpace(credential.PlaintextSecret) != "" {
+			values["CRM_LINK_BASE_URL"] = "http://customer-api:8090/customer-opportunity"
+			values["CRM_LINK_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
+			values["CRM_LINK_CLIENT_ID"] = credential.OAuthClient.ClientID
+			values["CRM_LINK_CLIENT_SECRET"] = credential.PlaintextSecret
+			values["CRM_LINK_SCOPE"] = "opportunity.signed.write"
 		}
-		if err := updateSubsystemEnvironment(customerEnvironment, customerEnvironment, customerValues); err != nil {
-			return provisioningError("write CRM contract integration configuration")
-		}
+		// 合同摘要核验/商机签约事件的客户端身份归属客户应用（见
+		// customerContractIdentityRuntimeValues）。这里有意不再向 .env.customer.local 写
+		// CONTRACT_* 的 client id/secret：合同应用自身的凭据不满足 claims.Subject 要求，
+		// 覆盖只会让本地 P0 恒 401；合同分支也不写 verification 开关，避免客户应用在
+		// 尚未下发凭据时因 CONTRACT_VERIFICATION_ENABLED=true 启动校验失败关闭。
 	}
 	if err := provisioner.p1LocalRuntimeValues(input, environmentPath, values, true); err != nil {
 		return err

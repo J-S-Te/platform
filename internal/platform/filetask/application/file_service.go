@@ -274,7 +274,9 @@ func uploadRequestHash(input UploadInput, mediaType string, content []byte) [32]
 }
 
 // OpenDownload 只解析 READY 文件，并在打开本地句柄前再次执行“所有者或下载权限”判断。
-// 即使路由权限配置错误，应用层也不会让任意已登录用户绕过文件归属；调用方负责流式发送后关闭句柄。
+// 属主仅对没有 ACTIVE 业务绑定的个人文件直通；已绑定业务资源的文件必须同时满足
+// platform:file:download 与资源绑定证明。即使路由权限配置错误，应用层也不会让任意
+// 已登录用户绕过文件归属；调用方负责流式发送后关闭句柄。
 func (service *FileService) OpenDownload(ctx context.Context, access DownloadAccess, fileID string) (domain.StoredFile, io.ReadSeekCloser, error) {
 	// UserID 仅在浏览器用户下载时必填；File Gateway 机器令牌无平台用户主体，机器上传的文件
 	// OwnerUserID 为空，owner 匹配直接放行，非 owner 则走权限/绑定校验。
@@ -286,6 +288,19 @@ func (service *FileService) OpenDownload(ctx context.Context, access DownloadAcc
 		return domain.StoredFile{}, nil, err
 	}
 	ownerMatch := strings.TrimSpace(stored.File.OwnerUserID) != "" && strings.TrimSpace(access.UserID) != "" && stored.File.OwnerUserID == access.UserID
+	if ownerMatch {
+		// 属主直通只适用于"个人文件"（尚未绑定任何业务资源）。文件一旦存在 ACTIVE
+		// 业务绑定，它就属于该业务资源，上传者身份不再构成访问授权：否则上传者可以
+		// 打穿业务 ACL 下载已绑定到其它业务对象的文件。此处只查"是否存在任意绑定"，
+		// 应用维度取文件归属应用（stored.File.ApplicationID），不采信请求声明的应用。
+		bound, bindErr := service.repository.HasAnyActiveBinding(ctx, stored.File.TenantID, stored.File.ID, stored.File.ApplicationID)
+		if bindErr != nil {
+			return domain.StoredFile{}, nil, bindErr
+		}
+		if bound {
+			ownerMatch = false
+		}
+	}
 	if !ownerMatch {
 		if !hasPermission(access.PermissionCodes, "platform:file:download") {
 			return domain.StoredFile{}, nil, ErrForbidden
@@ -442,6 +457,13 @@ func (service *FileService) CleanupUnboundExpired(ctx context.Context, tenantID 
 		return result, errors.Join(releaseErr, err)
 	}
 	result.RemovedTempFiles = removed
+	// 隔离目录（.rejected）同样必须随清理周期收敛，否则反复提交校验失败内容的客户端
+	// 可以让隔离文件无限占用磁盘（A2）。与临时目录一致，沿用同一个截止点。
+	removedQuarantine, err := service.store.CleanupQuarantine(cutoff.UTC())
+	if err != nil {
+		return result, errors.Join(releaseErr, err)
+	}
+	result.RemovedQuarantineFiles = removedQuarantine
 	if releaseErr != nil {
 		return result, releaseErr
 	}

@@ -218,6 +218,9 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 	// 保持一致：只做字段翻译，不改变审批判定；投递失败保留 outbox 并退避重试。
 	personnelAudit := &personnelChangeAuditAdapter{service: service, config: cfg.Audit, ids: ulid.Generator{}}
 	personnelService.SetAuditSink(personnelAudit)
+	// 接入阶段 Back-Channel Logout 决定（opt-out / 端点校验失败）的审计端与 HTTP 组合根
+	// 一致：同一审计服务、同一 ingestion，未接线时 opt-out 仍失败关闭（BIZ-XEVT2-07）。
+	backchannelLogoutAudit := &backchannelLogoutAuditAdapter{service: service, config: cfg.Audit, ids: ulid.Generator{}}
 	approvalExceptionDispatcher, err := identityapplication.NewApprovalExceptionDispatcher(personnelRepo, personnelAudit, identityapplication.SystemClock{})
 	if err != nil {
 		_ = database.Close(db)
@@ -267,9 +270,17 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 				_ = logFile.Close()
 				return nil, fmt.Errorf("create Keycloak Broker OAuth repository: %w", oauthErr)
 			}
+			// 旧 Secret 退役策略由显式运维配置控制（默认 keep，不改变现网密钥有效期）。
+			secretRetirement, retirementErr := oauthClientSecretRetirementOption(cfg)
+			if retirementErr != nil {
+				_ = database.Close(db)
+				_ = logFile.Close()
+				return nil, fmt.Errorf("create Keycloak Broker OAuth service: %w", retirementErr)
+			}
 			oauthService, oauthErr := applicationregistryapplication.NewOAuthClientManagementService(
 				oauthRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
 				applicationregistryapplication.RedirectURIValidationPolicy{AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs},
+				secretRetirement,
 			)
 			if oauthErr != nil {
 				_ = database.Close(db)
@@ -558,7 +569,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		accessRunner, accessErr := newSubsystemAccessRunnerFromConfig(cfg, db, logger, applicationregistryinfrastructure.SubsystemAccessKeycloakBrokerReconciliation{
 			Credentials: brokerCredentials, Control: brokerControl,
 			IsRecoverable: applicationregistryhttp.IsRecoverableKeycloakBrokerConfigurationError,
-		}, keycloakAccessCatalog)
+		}, keycloakAccessCatalog, backchannelLogoutAudit)
 		if accessErr != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()

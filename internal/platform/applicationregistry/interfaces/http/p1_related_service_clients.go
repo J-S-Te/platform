@@ -40,5 +40,11 @@ func (handler *SubsystemOnboardingHandler) relatedServiceClients(ctx context.Con
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", dependencyErr, err)
 	}
+	if app == "project_management" && len(clients) == 0 && handler.logger != nil {
+		// 结算后接入：项目先按 SETTLEMENT_REFERENCE_ENABLED=false 安全失败关闭运行，
+		// 结算登记后再对项目做一次受控更新即启用引用接口。这里只告警，不阻断接入。
+		handler.logger.Warn("project settlement reference dependency not ready; integration disabled",
+			"application_code", app, "environment", environment)
+	}
 	return clients, nil
 }

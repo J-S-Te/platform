@@ -82,6 +82,9 @@ var uploadPolicies = map[string]uploadPolicy{
 	"project.detection-category.import": policy("project", "detection-category-import", true, "text/csv"),
 	"settlement.receipt.document":       policy("settlement", "receipt-document", false, "application/pdf", "image/png", "image/jpeg"),
 	"settlement.invoice.document":       policy("settlement", "invoice-document", false, "application/pdf", "image/png", "image/jpeg", "application/xml", "text/xml", "application/ofd"),
+	// 结算报表导出（v1 通道沿用）必须显式声明用途：文本 CSV 才允许，上限 20MB、非临时文件。
+	// 该用途把原先"空 purpose 裸上传"的报表导出收敛到策略表内，v1 与 v2 共用同一事实源。
+	"settlement.report.export": policyWithMax("settlement", "report-export", false, 20<<20, "text/csv"),
 }
 
 func policy(namespace, purpose string, temporary bool, media ...string) uploadPolicy {
@@ -189,9 +192,27 @@ func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) 
 		v2Error(w, http.StatusForbidden, "FILE_PURPOSE_FORBIDDEN", "当前应用不能使用该文件用途")
 		return
 	}
+	// 操作人只能来自已认证主体。请求体的 actor_user_id 为兼容留存字段，服务端不再信任：
+	// 声明值与主体不一致立即失败关闭，否则调用方可以替任意用户声明文件归属；机器主体
+	// 没有用户身份时同样拒绝替用户声明。
+	actor := strings.TrimSpace(p.User.ID)
+	if declared := strings.TrimSpace(input.ActorUserID); declared != "" && declared != actor {
+		v2Error(w, http.StatusUnprocessableEntity, "FILE_ACTOR_MISMATCH", "请求体声明的操作人与已认证身份不一致")
+		return
+	}
 	if existing, found := h.findIdempotent(r.Context(), p, input.IdempotencyKey); found {
-		if existing.Purpose != input.Purpose || existing.ExpectedSize != input.SizeBytes || subtle.ConstantTimeCompare(existing.ExpectedSHA256, digest) != 1 || existing.ResourceType != input.ResourceType || existing.ResourceID != input.ResourceID {
+		// 会话落库的是策略内用途（selected.Purpose，如 "template"），请求体用的是用途键
+		// （如 "contract.template"）。指纹必须与落库形态比较，否则同键同请求也会被误判成
+		// 不同请求，幂等回放永远 409。
+		if existing.Purpose != selected.Purpose || existing.ExpectedSize != input.SizeBytes || subtle.ConstantTimeCompare(existing.ExpectedSHA256, digest) != 1 || existing.ResourceType != input.ResourceType || existing.ResourceID != input.ResourceID {
 			v2Error(w, http.StatusConflict, "FILE_IDEMPOTENCY_CONFLICT", "幂等键已被不同文件请求使用")
+			return
+		}
+		// 终态失败会话（FAILED/REJECTED）已无法继续或成功。此前按 200 返回会让客户端
+		// 误以为会话仍可用，因此这里失败关闭：不返回 sessionResponse、不改旧会话，
+		// 要求客户端换用新的幂等键重新发起。
+		if terminalUploadSessionFailure(existing.Status) {
+			v2Error(w, http.StatusConflict, "FILE_UPLOAD_SESSION_FAILED", "该幂等键对应的上传已失败，请使用新的 Idempotency-Key 重新发起")
 			return
 		}
 		v2JSON(w, http.StatusOK, sessionResponse(existing))
@@ -226,7 +247,7 @@ func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) 
 		value := now.Add(24 * time.Hour)
 		retentionUntil = &value
 	}
-	session := uploadV2Session{ID: sessionID, TenantID: p.Tenant.ID, ApplicationID: p.Account.ID, ApplicationCode: p.Account.Code, AuthenticatedClientID: p.SessionID, ActorUserID: optionalString(input.ActorUserID), FileID: fileID, VersionID: versionID, Namespace: selected.Namespace, Purpose: selected.Purpose, PolicyVersion: v2PolicyVersion, OriginalName: filepath.Base(input.OriginalName), DeclaredMediaType: input.MediaType, Classification: classification, ExpectedSize: input.SizeBytes, ExpectedSHA256: digest, ResourceType: input.ResourceType, ResourceID: input.ResourceID, BindingType: input.BindingType, DisplayName: strings.TrimSpace(input.DisplayName), IdempotencyKey: input.IdempotencyKey, UploadMode: mode, RetentionUntil: retentionUntil, Status: "CREATED", CreatedAt: now, UpdatedAt: now}
+	session := uploadV2Session{ID: sessionID, TenantID: p.Tenant.ID, ApplicationID: p.Account.ID, ApplicationCode: p.Account.Code, AuthenticatedClientID: p.SessionID, ActorUserID: optionalString(actor), FileID: fileID, VersionID: versionID, Namespace: selected.Namespace, Purpose: selected.Purpose, PolicyVersion: v2PolicyVersion, OriginalName: filepath.Base(input.OriginalName), DeclaredMediaType: input.MediaType, Classification: classification, ExpectedSize: input.SizeBytes, ExpectedSHA256: digest, ResourceType: input.ResourceType, ResourceID: input.ResourceID, BindingType: input.BindingType, DisplayName: strings.TrimSpace(input.DisplayName), IdempotencyKey: input.IdempotencyKey, UploadMode: mode, RetentionUntil: retentionUntil, Status: "CREATED", CreatedAt: now, UpdatedAt: now}
 	if err := h.db.WithContext(r.Context()).Create(&session).Error; err != nil {
 		v2Internal(w)
 		return
@@ -421,10 +442,10 @@ func (h *UploadV2Handler) IssueDownloadTicket(w http.ResponseWriter, r *http.Req
 // DownloadContent 以一次性票据兑换下载：事务内核销票据后按票据中的服务端资源
 // 标识重新校验访问权，再流式输出文件并写审计。
 func (h *UploadV2Handler) DownloadContent(w http.ResponseWriter, r *http.Request) {
+	// 票据只接受 Authorization: DownloadTicket 头。历史实现允许 ?ticket= 查询参数回退，
+	// 但 URL 会被浏览器历史、访问日志与代理记录留存，等于把 bearer 能力写进日志链；
+	// 这里不再回退，缺失头即按空票据处理（下方统一返回既有无效票据错误）。
 	raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "DownloadTicket "))
-	if raw == "" {
-		raw = strings.TrimSpace(r.URL.Query().Get("ticket"))
-	}
 	hash := sha256.Sum256([]byte(raw))
 	now := h.now()
 	var ticket downloadTicket
@@ -485,6 +506,18 @@ func (h *UploadV2Handler) findIdempotent(ctx context.Context, p authctx.Principa
 	var item uploadV2Session
 	err := h.db.WithContext(ctx).Where("tenant_id = ? AND application_id = ? AND idempotency_key = ?", p.Tenant.ID, p.Account.ID, key).Take(&item).Error
 	return item, err == nil
+}
+
+// terminalUploadSessionFailure 判断会话是否处于终态失败。file_upload_v2_session 的
+// 状态只有 CREATED/UPLOADING/READY/FAILED/REJECTED，其中 FAILED/REJECTED 已收敛：
+// 会话不会再推进，命中幂等键时必须让客户端换新键重生，而不是回 200 假装可用。
+func terminalUploadSessionFailure(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "FAILED", "REJECTED":
+		return true
+	default:
+		return false
+	}
 }
 
 // failSession / rejectSession 只收敛仍在进行中的会话。

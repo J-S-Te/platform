@@ -19,7 +19,6 @@ const defaultEnvFile = ".env"
 type Config struct {
 	Environment         string
 	AppName             string
-	Timezone            string
 	HTTP                HTTPConfig
 	MySQL               MySQLConfig
 	Auth                AuthConfig
@@ -53,11 +52,20 @@ type CredentialEncryptionConfig struct {
 	ResponseMaxBytes int64
 }
 
-// HandoverConfig 描述离职交接的机器协议接入参数。
+// HandoverConfig 描述离职交接的机器协议接入参数。平台不再持有子系统的静态机器
+// 令牌：每次请求都用平台自己的 Ed25519 密钥铸造短效 application JWT，因此这里只
+// 保留签发所需的客户端/应用/环境/scope 绑定，缺失即 fail-closed。
 type HandoverConfig struct {
-	Enabled      bool
-	Environment  string
-	MachineToken string
+	Enabled     bool
+	Environment string
+	// MachineClientID 是平台交接机器身份（oauth_client_id/client_id），对端按它固定调用方。
+	MachineClientID string
+	// MachineApplicationID 是平台应用标识（application_id），对端按它固定调用应用。
+	MachineApplicationID string
+	// MachineEnvironmentID 是平台环境标识（environment_id），对端按它固定调用环境。
+	MachineEnvironmentID string
+	// MachineScope 是交接最小权限 scope 清单（空格分隔，默认 handover.machine）。
+	MachineScope string
 	// SystemURLs 是"系统编码 → 内网基址"映射；只允许 http(s) 绝对地址且不得内嵌凭据。
 	SystemURLs map[string]string
 	Timeout    time.Duration
@@ -119,6 +127,13 @@ type AuthConfig struct {
 	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
 	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
+	// OAuthClientSecretPreviousRetirement 控制签发新 Secret 时对既有 ACTIVE Secret
+	// 的处置：keep（默认，旧值继续可用，保持既有轮换窗口与客户端兼容）、revoke
+	// （立即吊销）、grace（收紧到 OAuthClientSecretPreviousGrace 宽限窗口）。
+	// 只有显式配置才收紧旧密钥，默认不改变现网行为。
+	OAuthClientSecretPreviousRetirement string
+	// OAuthClientSecretPreviousGrace 是 grace 策略的旧 Secret 宽限窗口。
+	OAuthClientSecretPreviousGrace time.Duration
 	// KeycloakOIDC 是平台浏览器侧的 OIDC client，服务于平台正常登录流程；
 	// broker 校验有意不进入该运行时路径。
 	KeycloakOIDCEnabled      bool
@@ -266,6 +281,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// 旧 Secret 退役策略：keep 是默认值，保证不改变现网密钥有效期；revoke/grace 必须
+	// 由运维显式配置。宽限窗口的具体上限由 application 层策略解析统一校验。
+	oauthClientSecretPreviousRetirement := strings.ToLower(strings.TrimSpace(value("AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT", "keep")))
+	switch oauthClientSecretPreviousRetirement {
+	case "keep", "revoke", "grace":
+	default:
+		return Config{}, fmt.Errorf("AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT must be keep, revoke or grace")
+	}
+	oauthClientSecretPreviousGrace, err := duration("AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE", 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+
 	sessionTTL, err := duration("AUTH_SESSION_TTL", 8*time.Hour)
 	if err != nil {
 		return Config{}, err
@@ -313,7 +341,6 @@ func Load() (Config, error) {
 	cfg := Config{
 		Environment: value("APP_ENV", "development"),
 		AppName:     value("APP_NAME", "basic-platform"),
-		Timezone:    value("APP_TIMEZONE", "Asia/Shanghai"),
 		CommercialRuntime: CommercialRuntimeConfig{
 			PlatformBaseURL:       value("LICENSE_RUNTIME_PLATFORM_BASE_URL", publicBaseURL),
 			PlatformPublicKeyPath: value("LICENSE_RUNTIME_PUBLIC_KEY_PATH", "/app/data/keys/jwt-ed25519-public.pem"),
@@ -344,7 +371,7 @@ func Load() (Config, error) {
 			PublicBaseURL:                            publicBaseURL,
 			JWTIssuer:                                value("AUTH_JWT_ISSUER", "basic-platform"),
 			JWTAudience:                              value("AUTH_JWT_AUDIENCE", "basic-platform-console"),
-			ApplicationJWTAudience:                   value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-integration"),
+			ApplicationJWTAudience:                   value("AUTH_APPLICATION_JWT_AUDIENCE", "basic-platform-application"),
 			OIDCIssuer:                               strings.TrimRight(oidcIssuer, "/"),
 			JWTPrivateKeyPath:                        resolveConfigPath(envFile, value("AUTH_JWT_PRIVATE_KEY_PATH", "")),
 			JWTPublicKeyPath:                         resolveConfigPath(envFile, value("AUTH_JWT_PUBLIC_KEY_PATH", "")),
@@ -356,6 +383,8 @@ func Load() (Config, error) {
 			AllowLegacyPlatformAccessToken:           legacyPlatformAccessTokenEnabled,
 			AuthzContextCustomerRefEnabled:           authzContextCustomerRefEnabled,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
+			OAuthClientSecretPreviousRetirement:      oauthClientSecretPreviousRetirement,
+			OAuthClientSecretPreviousGrace:           oauthClientSecretPreviousGrace,
 			KeycloakOIDCEnabled:                      keycloakEnabled && strings.EqualFold(value("KEYCLOAK_PLATFORM_OIDC_ENABLED", "false"), "true"),
 			KeycloakOIDCIssuer:                       strings.TrimRight(value("KEYCLOAK_PLATFORM_OIDC_ISSUER", ""), "/"),
 			KeycloakOIDCClientID:                     value("KEYCLOAK_PLATFORM_OIDC_CLIENT_ID", ""),
@@ -431,11 +460,14 @@ func Load() (Config, error) {
 			ResponseMaxBytes: credentialResponseMax(value("CREDENTIAL_ENCRYPTION_RESPONSE_MAX_BYTES", "8388608")),
 		},
 		Handover: HandoverConfig{
-			Enabled:      handoverEnabled,
-			Environment:  value("HANDOVER_ENVIRONMENT", "prod"),
-			MachineToken: value("HANDOVER_MACHINE_TOKEN", ""),
-			SystemURLs:   handoverSystemURLs(value("HANDOVER_SYSTEM_URLS", "")),
-			Timeout:      handoverTimeout,
+			Enabled:              handoverEnabled,
+			Environment:          value("HANDOVER_ENVIRONMENT", "prod"),
+			MachineClientID:      value("HANDOVER_MACHINE_CLIENT_ID", "platform-handover"),
+			MachineApplicationID: value("HANDOVER_MACHINE_APPLICATION_ID", "platform"),
+			MachineEnvironmentID: value("HANDOVER_MACHINE_ENVIRONMENT_ID", "prod"),
+			MachineScope:         value("HANDOVER_MACHINE_SCOPE", "handover.machine"),
+			SystemURLs:           handoverSystemURLs(value("HANDOVER_SYSTEM_URLS", "")),
+			Timeout:              handoverTimeout,
 		},
 	}
 
@@ -477,8 +509,25 @@ func (cfg Config) Validate() error {
 		return fmt.Errorf("APP_NAME must not be empty")
 	}
 	if cfg.Handover.Enabled {
-		if strings.TrimSpace(cfg.Handover.MachineToken) == "" {
-			return fmt.Errorf("HANDOVER_MACHINE_TOKEN is required when HANDOVER_ENABLED=true")
+		// 交接令牌由平台自签，不需要（也不再接受）子系统静态机器令牌；但签发所需的
+		// 客户端/应用/环境/scope 绑定与目标清单必须齐全，否则对端无法固定调用方。
+		// 逐项检查（不用 map）保证多处缺失时报错稳定可复现。
+		for _, bound := range []struct {
+			key   string
+			value string
+		}{
+			{"HANDOVER_MACHINE_CLIENT_ID", cfg.Handover.MachineClientID},
+			{"HANDOVER_MACHINE_APPLICATION_ID", cfg.Handover.MachineApplicationID},
+			{"HANDOVER_MACHINE_ENVIRONMENT_ID", cfg.Handover.MachineEnvironmentID},
+			{"HANDOVER_MACHINE_SCOPE", cfg.Handover.MachineScope},
+			{"HANDOVER_ENVIRONMENT", cfg.Handover.Environment},
+		} {
+			if strings.TrimSpace(bound.value) == "" {
+				return fmt.Errorf("%s is required when HANDOVER_ENABLED=true", bound.key)
+			}
+		}
+		if len(strings.Fields(cfg.Handover.MachineScope)) == 0 {
+			return fmt.Errorf("HANDOVER_MACHINE_SCOPE must list at least one scope when HANDOVER_ENABLED=true")
 		}
 		if len(cfg.Handover.SystemURLs) == 0 {
 			return fmt.Errorf("HANDOVER_SYSTEM_URLS must list at least one subsystem when HANDOVER_ENABLED=true")

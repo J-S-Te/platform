@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -34,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: public-transport-coordinator <init|prepare|commit|fail|status>")
+		return errors.New("usage: public-transport-coordinator <init|prepare|commit|fail|abort|status>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -147,33 +148,19 @@ func run(args []string) error {
 		}
 		return writeState(state)
 	case "fail":
-		set := flag.NewFlagSet("fail", flag.ContinueOnError)
-		id := set.String("transition-id", "", "active transition id")
-		stage := set.String("stage", "OPERATOR_ABORT", "failure stage")
-		message := set.String("message", "transition aborted by operator", "sanitized failure summary")
-		if err := set.Parse(args[1:]); err != nil {
-			return err
-		}
-		transition, clients, err := coordinator.Active(ctx)
+		request, err := parseFailRequest(args[1:])
 		if err != nil {
 			return err
 		}
-		if *id != "" && *id != transition.ID {
-			return errors.New("requested transition is not active")
-		}
-		rollbackErr := reconcileKeycloak(ctx, cfg, clients, "source")
-		rollback := "Keycloak callbacks restored"
-		if rollbackErr != nil {
-			rollback = "Keycloak rollback failed: " + rollbackErr.Error()
-		}
-		if err := coordinator.Fail(ctx, transition.ID, *stage, errors.New(*message), rollback); err != nil {
-			return err
-		}
-		state, err := coordinator.Status(ctx)
+		return failTransition(ctx, cfg, coordinator, request)
+	case "abort":
+		// abort 等价于 fail --stage OPERATOR_ABORT，但必须显式 --yes：
+		// 放弃切换会恢复降级期被截断的会话有效期，运维要明确知道自己在放弃这次切换。
+		request, err := parseAbortRequest(args[1:])
 		if err != nil {
 			return err
 		}
-		return writeState(state)
+		return failTransition(ctx, cfg, coordinator, request)
 	case "status":
 		state, err := coordinator.Status(ctx)
 		if err != nil {
@@ -183,6 +170,80 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown public transport coordinator command %q", args[0])
 	}
+}
+
+// failureRequest 是 fail/abort 共用的参数集合。两者最终都走同一条协调器失败路径，
+// 唯一区别是 abort 固定使用 OPERATOR_ABORT 阶段并强制 --yes 确认。
+type failureRequest struct {
+	TransitionID, Stage, Message string
+}
+
+const (
+	// operatorAbortStage 是运维主动放弃切换的阶段标记（与历史 fail 默认值一致）。
+	operatorAbortStage = "OPERATOR_ABORT"
+	// defaultAbortMessage 写入 transition.failure_message，只记录可公开的运维语义。
+	defaultAbortMessage = "transition aborted by operator"
+)
+
+// parseFailRequest 保持既有 fail 语义：不带 --yes，默认阶段仍是 OPERATOR_ABORT。
+func parseFailRequest(args []string) (failureRequest, error) {
+	set := flag.NewFlagSet("fail", flag.ContinueOnError)
+	set.SetOutput(io.Discard)
+	id := set.String("transition-id", "", "active transition id")
+	stage := set.String("stage", operatorAbortStage, "failure stage")
+	message := set.String("message", defaultAbortMessage, "sanitized failure summary")
+	if err := set.Parse(args); err != nil {
+		return failureRequest{}, err
+	}
+	if set.NArg() > 0 {
+		return failureRequest{}, errors.New("fail accepts no positional arguments: " + strings.Join(set.Args(), " "))
+	}
+	return failureRequest{TransitionID: *id, Stage: *stage, Message: *message}, nil
+}
+
+// parseAbortRequest 要求显式 --yes：abort 会放弃整次切换并把降级期被截断的会话有效期
+// 恢复原值，属于不可静默触发的操作。阶段固定为 OPERATOR_ABORT，不接受覆盖。
+func parseAbortRequest(args []string) (failureRequest, error) {
+	set := flag.NewFlagSet("abort", flag.ContinueOnError)
+	set.SetOutput(io.Discard)
+	id := set.String("transition-id", "", "active transition id")
+	message := set.String("message", defaultAbortMessage, "sanitized failure summary")
+	yes := set.Bool("yes", false, "confirm dropping the active transition")
+	if err := set.Parse(args); err != nil {
+		return failureRequest{}, err
+	}
+	if set.NArg() > 0 {
+		return failureRequest{}, errors.New("abort accepts no positional arguments: " + strings.Join(set.Args(), " "))
+	}
+	if !*yes {
+		return failureRequest{}, errors.New("abort requires --yes: it drops the active transition, restores capped session lifetimes and removes target callbacks")
+	}
+	return failureRequest{TransitionID: *id, Stage: operatorAbortStage, Message: *message}, nil
+}
+
+// failTransition 撤销外部回调、把切换标记为失败，并由协调器恢复被截断的会话有效期。
+// 只输出状态元数据，不打印凭据或证书内容。
+func failTransition(ctx context.Context, cfg config.Config, coordinator *publictransport.Coordinator, request failureRequest) error {
+	transition, clients, err := coordinator.Active(ctx)
+	if err != nil {
+		return err
+	}
+	if request.TransitionID != "" && request.TransitionID != transition.ID {
+		return errors.New("requested transition is not active")
+	}
+	rollbackErr := reconcileKeycloak(ctx, cfg, clients, "source")
+	rollback := "Keycloak callbacks restored"
+	if rollbackErr != nil {
+		rollback = "Keycloak rollback failed: " + rollbackErr.Error()
+	}
+	if err := coordinator.Fail(ctx, transition.ID, request.Stage, errors.New(request.Message), rollback); err != nil {
+		return err
+	}
+	state, err := coordinator.Status(ctx)
+	if err != nil {
+		return err
+	}
+	return writeState(state)
 }
 
 func reconcileKeycloak(ctx context.Context, cfg config.Config, clients []publictransport.KeycloakClient, callbackSet string) error {

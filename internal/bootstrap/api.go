@@ -428,7 +428,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	accountLifecycleHandler, err := identityhttp.NewAccountLifecycleHandler(accountLifecycleService, authHandler, logger)
+	accountLifecycleHandler, err := identityhttp.NewAccountLifecycleHandler(accountLifecycleService, authHandler, logger, managementScopeAuthorizer)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -609,11 +609,19 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	// 旧 Secret 退役策略由显式运维配置控制（默认 keep，不改变现网密钥有效期）。
+	secretRetirement, err := oauthClientSecretRetirementOption(cfg)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
 	oauthClientManagementService, err := applicationregistryapplication.NewOAuthClientManagementService(
 		oauthClientManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
 		applicationregistryapplication.RedirectURIValidationPolicy{
 			AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs,
 		},
+		secretRetirement,
 	)
 	if err != nil {
 		_ = database.Close(db)
@@ -724,6 +732,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 
 	personnelChangeAudit := &personnelChangeAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
+	// 接入阶段的 Back-Channel Logout 决定（opt-out / 端点校验失败）经同一审计服务留痕；
+	// 适配器只做字段翻译，未装配时接入侧保持失败关闭（BIZ-XEVT2-07）。
+	backchannelLogoutAudit := &backchannelLogoutAuditAdapter{service: auditService, config: cfg.Audit, ids: ulid.Generator{}}
 	// 授权协调服务在下方才构造；交接 inventory 通过延迟解析读取端，未就绪时按不可达阻断。
 	var handoverLicenseReader handoverLicenseStatusReader
 	personnelHandover, err := buildHandoverCoordinator(cfg, db, applicationManagementService, lazyHandoverLicenseReader{resolve: func() handoverLicenseStatusReader { return handoverLicenseReader }})
@@ -732,7 +743,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService, applicationManagementService, oauthClientManagementService, personnelChangeAudit, personnelHandover)
+	operational, err := buildOperationalModules(cfg, db, logger, applicationAccessService, applicationManagementService, oauthClientManagementService, personnelChangeAudit, personnelHandover, backchannelLogoutAudit, managementScopeAuthorizer)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()

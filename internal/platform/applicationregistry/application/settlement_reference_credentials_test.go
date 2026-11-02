@@ -66,7 +66,7 @@ func TestSettlementReferenceInitialClients(t *testing.T) {
 // 参数：t 为测试上下文。
 // 返回值：无。
 func TestSettlementReferenceRelatedClientResolver(t *testing.T) {
-	for _, name := range []string{"valid", "missing", "tenant", "app", "environment", "scope", "type", "duplicate"} {
+	for _, name := range []string{"valid", "tenant", "app", "environment", "scope", "type", "duplicate"} {
 		t.Run(name, func(t *testing.T) {
 			client := canonicalRelatedClient()
 			client.ClientID = "settlement-prod-project-reference"
@@ -84,9 +84,6 @@ func TestSettlementReferenceRelatedClientResolver(t *testing.T) {
 				client.ClientType = "confidential"
 			}
 			clients := []OAuthClientView{client}
-			if name == "missing" {
-				clients = nil
-			}
 			if name == "duplicate" {
 				clients = append(clients, client)
 			}
@@ -109,6 +106,16 @@ func TestSettlementReferenceRelatedClientResolver(t *testing.T) {
 				t.Fatalf("project binding unavailable: %v", err)
 			}
 		})
+	}
+
+	// 结算后接入：来源客户端缺失属"可选依赖未就绪"，返回空集合由本地运行配置关闭引用集成；
+	// 生产清单的严格绑定仍在生产路径解析时失败关闭。
+	resolver := relatedResolverFor(t,
+		&relatedRegistryStub{applicationID: "01APP000000000000000000002",
+			environmentID: "01ENV000000000000000000001"},
+		relatedClientListerStub{})
+	if clients, err := resolver.Resolve(context.Background(), "tenant-1", "project_management", "prod"); err != nil || clients != nil {
+		t.Fatalf("missing settlement source must be optional: clients=%v err=%v", clients, err)
 	}
 }
 

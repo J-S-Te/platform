@@ -353,6 +353,44 @@ func (store *LocalStore) CleanupTemporary(cutoff time.Time) (int, error) {
 	return removed, err
 }
 
+// CleanupQuarantine 只删除隔离目录内本模块生成的 .rejected 常规文件；遍历时跳过
+// 符号链接与目录，不跟随任何可能指向存储根目录外的目录项。反复提交校验失败内容的
+// 客户端会让隔离目录无限增长，该清理沿用与 CleanupTemporary 相同的截止点语义，
+// 重复调用保持幂等（已删除或仍新的条目不会被再次处理）。
+func (store *LocalStore) CleanupQuarantine(cutoff time.Time) (int, error) {
+	removed := 0
+	err := filepath.WalkDir(store.quarantineRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == store.quarantineRoot {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rejected") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !safeRegularFile(info) || !info.ModTime().UTC().Before(cutoff.UTC()) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		removed++
+		return nil
+	})
+	return removed, err
+}
+
 // Exists 只判断命名空间内的常规文件是否存在：符号链接、目录与越界路径一律按不存在处理，
 // 对账据此区分"磁盘已删除"与"字节仍在"，避免把链接目标当成业务文件。
 func (store *LocalStore) Exists(relativePath string) (bool, error) {

@@ -39,18 +39,30 @@ func NewRelatedServiceClientsResolver(registry SubsystemRelatedApplicationRegist
 // Resolve 读取接收应用所需的已登记来源身份，不读取来源密钥。
 // 参数：ctx 控制读取，tenantID、applicationCode和environment限定接收环境。
 // 返回值：同租户应用环境的最小权限身份；缺失或漂移返回错误。
+// 例外：项目的结算只读引用允许"结算后接入"——来源应用/环境尚未登记或来源客户端
+// 尚未创建时返回 (nil, nil)，表示可选依赖未就绪（项目按 SETTLEMENT_REFERENCE_ENABLED=false
+// 安全失败关闭运行）。来源已登记但重复、归属或字段漂移仍必须失败，不得静默接受错误配置。
 func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tenantID, applicationCode, environment string) ([]RelatedSubsystemServiceClient, error) {
 	source, purpose, suffix, scope := "contract_management", ServiceCredentialSettlementContractIngest, "settlement-integration", "settlement.contract.ingest"
+	optionalSource := false
 	switch strings.TrimSpace(applicationCode) {
 	case "settlement":
 	case "project_management":
 		source, purpose, suffix, scope = "settlement", ServiceCredentialSettlementProjectReferenceRead, "project-reference", "settlement.project_reference.read"
+		optionalSource = true
 	default:
 		return nil, nil
 	}
 	applicationID, environmentID, err := resolver.registry.ResolveApplicationEnvironment(ctx, tenantID, source, environment)
 	if err != nil {
+		// 来源应用/环境未登记属"可选依赖未就绪"；其他读取失败（数据库不可用等）仍需失败。
+		if optionalSource && errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("%w: %w", ErrRelatedServiceClientUnavailable, err)
+	}
+	if optionalSource && (applicationID == "" || environmentID == "") {
+		return nil, nil
 	}
 	clients, err := resolver.clients.ListOAuthClients(ctx, tenantID)
 	if err != nil {
@@ -69,6 +81,9 @@ func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tena
 		found = &client
 	}
 	if found == nil {
+		if optionalSource {
+			return nil, nil
+		}
 		return nil, ErrRelatedServiceClientUnavailable
 	}
 	canonical := *found

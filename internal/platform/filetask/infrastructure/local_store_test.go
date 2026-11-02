@@ -179,3 +179,82 @@ func TestLocalStoreCleanupTemporaryOnlyRemovesUploadFragments(t *testing.T) {
 	}
 }
 
+// TestLocalStoreCleanupQuarantineOnlyRemovesOldRejectedFiles 锁定 A2 边界：隔离清理
+// 只删除隔离目录内早于截止点的 .rejected 常规文件；新文件、非 .rejected 名称与
+// 符号链接保持不动（不跟随链接目标），重复调用保持幂等。
+func TestLocalStoreCleanupQuarantineOnlyRemovesOldRejectedFiles(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewLocalStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile := func(path string, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldRejected := filepath.Join(store.quarantineRoot, "old-1.rejected")
+	newRejected := filepath.Join(store.quarantineRoot, "new-1.rejected")
+	oldOther := filepath.Join(store.quarantineRoot, "old-1.keep")
+	writeFile(oldRejected, "old-rejected")
+	writeFile(newRejected, "new-rejected")
+	writeFile(oldOther, "keep")
+	formal := filepath.Join(root, "namespace", "formal.bin")
+	writeFile(formal, "formal-bytes")
+	link := filepath.Join(store.quarantineRoot, "linked.rejected")
+	if err := os.Symlink(formal, link); err != nil {
+		t.Fatal(err)
+	}
+	// 指向目录的符号链接同样不能被跟随：链接目标目录里的旧 .rejected 文件必须原样保留。
+	outsideDir := t.TempDir()
+	outsideOldRejected := filepath.Join(outsideDir, "outside-old.rejected")
+	writeFile(outsideOldRejected, "outside-bytes")
+	linkDir := filepath.Join(store.quarantineRoot, "linked-dir.rejected")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-48 * time.Hour)
+	for _, path := range []string{oldRejected, oldOther, outsideOldRejected} {
+		if err := os.Chtimes(path, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := store.CleanupQuarantine(time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want exactly the one old rejected regular file", removed)
+	}
+	if _, err := os.Stat(oldRejected); !os.IsNotExist(err) {
+		t.Fatalf("old rejected file still exists: %v", err)
+	}
+	for _, path := range []string{newRejected, oldOther} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s must be kept: %v", filepath.Base(path), err)
+		}
+	}
+	for _, linkPath := range []string{link, linkDir} {
+		if _, err := os.Lstat(linkPath); err != nil {
+			t.Fatalf("symlink entry %s must be left untouched: %v", filepath.Base(linkPath), err)
+		}
+	}
+	if content, err := os.ReadFile(formal); err != nil || string(content) != "formal-bytes" {
+		t.Fatalf("symlink target changed: %q err=%v", content, err)
+	}
+	if content, err := os.ReadFile(outsideOldRejected); err != nil || string(content) != "outside-bytes" {
+		t.Fatalf("symlinked directory content changed: %q err=%v", content, err)
+	}
+
+	again, err := store.CleanupQuarantine(time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Fatalf("second cleanup removed %d files, want idempotent 0", again)
+	}
+}

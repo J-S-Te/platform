@@ -36,11 +36,18 @@ LOCK_FILE="${PORTAL_GATEWAY_LOCK_FILE:-${NGINX_INCLUDE}.lock}"
 LOCK_TIMEOUT="${PORTAL_GATEWAY_LOCK_TIMEOUT:-60}"
 # 这些模块已经编译进统一 Vue 前端，只允许代理其后端 API 子路径，不能生成整站反代。
 INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management customer_and_opportunity customer-opportunity}"
+# 安全（SEC-5）：承载 Bearer Token 的临时 curl 配置文件路径；由 do_sync 创建并在退出时删除。
+AUTH_CONFIG_FILE=""
 
 log() {
   local level="$1"
   shift
   printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >&2
+}
+
+# 转义要写入 curl --config 的双引号字符串值，避免 token 中的 " 或 \ 破坏配置。
+escape_curl_config() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 usage() {
@@ -429,6 +436,13 @@ do_sync() {
   validate_page_limit
   ensure_include_file "$NGINX_INCLUDE"
 
+  # 安全（SEC-5）：Bearer Token 不进入 curl 的 argv（ps 可见）。
+  # 写入 0600 临时 curl 配置文件，以 --config 传入，语义等同 -H "Authorization: ..."。
+  AUTH_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/portal-gateway-auth.XXXXXX")"
+  trap 'rm -f -- "${AUTH_CONFIG_FILE:-}"' EXIT
+  chmod 0600 "$AUTH_CONFIG_FILE"
+  printf 'header = "Authorization: Bearer %s"\n' "$(escape_curl_config "$API_TOKEN")" >"$AUTH_CONFIG_FILE"
+
   local sync_input
   sync_input="$(mktemp "${NGINX_INCLUDE}.sync-input.XXXXXX")"
   local page=1
@@ -438,7 +452,7 @@ do_sync() {
       --data-urlencode "page=${page}" \
       --data-urlencode "page_size=${PAGE_LIMIT}" \
       --data-urlencode "status=ACTIVE" \
-      -H "Authorization: Bearer ${API_TOKEN}" \
+      --config "${AUTH_CONFIG_FILE}" \
       "${API_BASE_URL}/api/v1/applications") || {
       rm -f "$sync_input"
       log "ERROR" "拉取 application 列表失败（page=${page}）"
@@ -469,7 +483,7 @@ do_sync() {
           --data-urlencode "page=${environment_page}" \
           --data-urlencode "page_size=${PAGE_LIMIT}" \
           --data-urlencode "status=ACTIVE" \
-          -H "Authorization: Bearer ${API_TOKEN}" \
+          --config "${AUTH_CONFIG_FILE}" \
           "${API_BASE_URL}/api/v1/applications/${application_id}/environments") || {
           rm -f "$sync_input"
           log "ERROR" "拉取 environment 列表失败（application=${application_id}, page=${environment_page}）"

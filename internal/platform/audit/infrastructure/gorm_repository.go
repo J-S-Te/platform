@@ -96,11 +96,16 @@ type eventQueryRow struct {
 	EnvironmentCode string     `gorm:"column:environment_code"`
 }
 
+// dedupModel 映射 audit_event_dedup：去重维度是（应用、环境、事件）三元组。
+// 环境维度自 000133 起进入主键——同一应用在不同环境复用同一 event_id 是合法场景
+// （环境克隆/共用发布批次），只有同环境内重复才算 DUPLICATE。
 type dedupModel struct {
-	ApplicationID, EventID string
-	AuditRowID             *uint64
-	OccurredMonth          uint
-	ReceivedAt             time.Time
+	ApplicationID string `gorm:"column:application_id;primaryKey"`
+	EnvironmentID string `gorm:"column:environment_id;primaryKey"`
+	EventID       string `gorm:"column:event_id;primaryKey"`
+	AuditRowID    *uint64
+	OccurredMonth uint
+	ReceivedAt    time.Time
 }
 
 func (dedupModel) TableName() string { return "audit_event_dedup" }
@@ -252,10 +257,11 @@ func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environme
 }
 
 func (r *Repository) ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environmentModel, input application.EventInput, now time.Time) (domain.Receipt, error) {
-	// 去重键按应用隔离，同一应用重试相同 event_id 返回 DUPLICATE；事件行和去重行在同一
+	// 去重键按（应用、环境）隔离，同环境重试相同 event_id 返回 DUPLICATE，跨环境同名
+	// event_id 必须是独立事件（000133 起主键含 environment_id）；事件行和去重行在同一
 	// 事务写入，即使并发竞争唯一键，也不会留下只有一侧记录的不完整状态。
 	var existing dedupModel
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("application_id = ? AND event_id = ?", app.ID, input.EventID).Take(&existing).Error
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("application_id = ? AND environment_id = ? AND event_id = ?", app.ID, env.ID, input.EventID).Take(&existing).Error
 	if err == nil {
 		return domain.Receipt{EventID: input.EventID, Status: "DUPLICATE"}, nil
 	}
@@ -313,7 +319,7 @@ func (r *Repository) ingestEvent(tx *gorm.DB, tenantID string, app applicationMo
 		return domain.Receipt{}, err
 	}
 	rowID := event.ID
-	if err := tx.Create(&dedupModel{ApplicationID: app.ID, EventID: input.EventID, AuditRowID: &rowID, OccurredMonth: event.OccurredMonth, ReceivedAt: now.UTC()}).Error; err != nil {
+	if err := tx.Create(&dedupModel{ApplicationID: app.ID, EnvironmentID: env.ID, EventID: input.EventID, AuditRowID: &rowID, OccurredMonth: event.OccurredMonth, ReceivedAt: now.UTC()}).Error; err != nil {
 		return domain.Receipt{}, err
 	}
 	return domain.Receipt{EventID: input.EventID, Status: "ACCEPTED"}, nil

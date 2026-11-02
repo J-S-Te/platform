@@ -24,6 +24,12 @@ type bindingRepositoryStub struct {
 	sessionTransitions  []string
 	sessionFailureCodes []string
 	bindingErr          error
+	// 证据核验用例使用：精确绑定（租户+文件+应用+资源+可选类型）的返回与观察值。
+	exactBound        *bool
+	exactBindingCalls int
+	exactResourceType string
+	exactResourceID   string
+	exactBindingType  string
 	// 受控对账用例使用：待对账的遗留 DELETING 记录与写入调用记录。
 	stale       []domain.StoredFile
 	deleted     []string
@@ -85,6 +91,18 @@ func (stub *bindingRepositoryStub) DeactivateBinding(context.Context, string, st
 func (stub *bindingRepositoryStub) HasActiveBinding(context.Context, string, string, string, string, string) (bool, error) {
 	return stub.bound, nil
 }
+
+// HasExactActiveBinding 记录资源维度，供证据核验用例断言"绑定到哪个服务项"确实下推到仓储，
+// exactBound 为 nil 时沿用 bound（既有用例只关心是否存在任意 ACTIVE 绑定）。
+func (stub *bindingRepositoryStub) HasExactActiveBinding(_ context.Context, _, _, _, resourceType, resourceID, bindingType string) (bool, error) {
+	stub.exactBindingCalls++
+	stub.exactResourceType, stub.exactResourceID, stub.exactBindingType = resourceType, resourceID, bindingType
+	if stub.exactBound != nil {
+		return *stub.exactBound, nil
+	}
+	return stub.bound, nil
+}
+
 func (stub *bindingRepositoryStub) HasAnyActiveBinding(context.Context, string, string, string) (bool, error) {
 	return stub.bound, nil
 }
@@ -117,8 +135,9 @@ func (bindingStoreStub) WriteAtomically(context.Context, string, io.Reader, int6
 func (stub bindingStoreStub) OpenVerified(string) (io.ReadSeekCloser, error) {
 	return &readSeekCloser{Reader: bytes.NewReader(stub.content)}, nil
 }
-func (bindingStoreStub) Remove(string) error                     { return nil }
-func (bindingStoreStub) CleanupTemporary(time.Time) (int, error) { return 0, nil }
+func (bindingStoreStub) Remove(string) error                      { return nil }
+func (bindingStoreStub) CleanupTemporary(time.Time) (int, error)  { return 0, nil }
+func (bindingStoreStub) CleanupQuarantine(time.Time) (int, error) { return 0, nil }
 
 type readSeekCloser struct{ *bytes.Reader }
 

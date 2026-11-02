@@ -1,3 +1,10 @@
+# ⚠️ 历史覆盖示例（BIZ-XWIRE-08）：监控已内置在权威编排 docker-compose.yml 的
+# `BEGIN/END SUBSYSTEM: monitoring` 块中，本文件不被任何脚本、文档或 CI 引用，
+# 不要再通过 `-f compose.observability.yaml` 叠加启动——那会与权威编排里同名服务
+# 合并/冲突，排障时无法判断哪一份生效。保留本文件只为历史对照；它的 prometheus /
+# keycloak-backup-metrics 关键键（镜像、配置挂载、网络）必须与权威编排一致，由
+# tests/test-compose-orchestration-consistency.py 门禁。需要监控时只部署
+# docker-compose.yml 的 monitoring 子系统。
 # 可选的可观测性覆盖配置，只有显式指定才会启用。Prometheus 和 node-exporter 保留在内部应用网络，本示例不向宿主机发布监控端口。
 services:
   prometheus:
@@ -10,7 +17,11 @@ services:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/prometheus/keycloak-alerts.yml:/etc/prometheus/keycloak-alerts.yml:ro
       - ./monitoring/prometheus/file-gateway-alerts.yml:/etc/prometheus/file-gateway-alerts.yml:ro
+      - ./monitoring/prometheus/platform-alerts.yml:/etc/prometheus/platform-alerts.yml:ro
+      - ./monitoring/prometheus/integration-alerts.yml:/etc/prometheus/integration-alerts.yml:ro
       - prometheus-data:/prometheus
+      # 与权威编排一致：部署方提供的只读抓取凭据目录（runtime/ 下，不随资产包发布）。
+      - ./runtime/prometheus-secrets:/etc/prometheus/secrets:ro
     networks: [application]
     restart: unless-stopped
 

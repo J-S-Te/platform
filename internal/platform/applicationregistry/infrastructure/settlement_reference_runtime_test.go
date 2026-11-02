@@ -4,6 +4,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,7 +51,9 @@ func settlementRoleRuntimeFixture(t *testing.T,
 		"notification_ingest":    "notification.ingest",
 		"audit_ingest":           "audit.ingest",
 		"file_gateway_write":     "platform:file:upload",
-		"contract_approved_read": "contract.approved.internal.read"} {
+		"contract_approved_read": "contract.approved.internal.read",
+		// 结算→CRM 信用同步：清单声明的 crm_credit_payment_ingest 绑定需要同用途凭据。
+		"crm_credit_payment_ingest": "customer.credit.payment.ingest"} {
 		input.ServiceCredentials = append(input.ServiceCredentials,
 			application.SubsystemServiceCredential{Purpose: purpose,
 				PlaintextSecret: "isolated-" + purpose,
@@ -147,43 +150,87 @@ func TestSettlementRoleProductionRuntimeDelivery(t *testing.T) {
 	}
 }
 
-// TestProjectSettlementReferenceProductionBinding 验证项目入站绑定同租户、应用及环境并拒绝漂移。
+// TestProjectSettlementReferenceProductionManifestDecoupled 验证生产清单不再声明结算 client 依赖：
+// 结算来源未登记时项目照常接入，引用入口按平台 Application JWT + scope 授权（ALLOW_ANY_CLIENT=true）。
 // 参数：t 为测试上下文。
 // 返回值：无。
-func TestProjectSettlementReferenceProductionBinding(t *testing.T) {
-	for _, name := range []string{"valid", "tenant", "app", "env-id", "env-code", "scope", "type", "duplicate"} {
+func TestProjectSettlementReferenceProductionManifestDecoupled(t *testing.T) {
+	target, input := settlementRoleRuntimeFixture(t, "project_management")
+	input.RelatedServiceClients = nil
+	for _, runtimeFile := range target.config.Profile.Manifest.Runtime.Files {
+		for key, source := range runtimeFile.Bindings {
+			if strings.HasPrefix(source, "related_service.settlement.") {
+				t.Fatalf("project manifest still binds settlement client: %s=%s", key, source)
+			}
+			if key == "SETTLEMENT_REFERENCE_CLIENT_ID" {
+				t.Fatalf("project manifest still binds settlement client id: %s", source)
+			}
+		}
+		if environment, exists := runtimeFile.Values["SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT"]; !exists || environment != "true" {
+			t.Fatal("project manifest must accept any verified settlement client")
+		}
+		if enabled := runtimeFile.Values["SETTLEMENT_REFERENCE_ENABLED"]; enabled != "true" {
+			t.Fatal("project manifest must enable the settlement reference route")
+		}
+		if source := runtimeFile.Bindings["SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE"]; source != "environment" {
+			t.Fatalf("project reference caller environment binding = %q, want environment", source)
+		}
+	}
+	if err := target.writeRuntimeConfiguration(input); err != nil {
+		t.Fatalf("project onboarding requires settlement dependency: %v", err)
+	}
+	values, err := readEnvironmentValues(filepath.Join(target.config.DeployRoot, "runtime/project.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["SETTLEMENT_REFERENCE_ENABLED"] != "true" || values["SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT"] != "true" {
+		t.Fatalf("project reference route not enabled after decoupling: %q/%q",
+			values["SETTLEMENT_REFERENCE_ENABLED"], values["SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT"])
+	}
+	if values["SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE"] != "prod" {
+		t.Fatalf("caller environment = %q, want prod", values["SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE"])
+	}
+	// 清单不再写入可用的结算来源身份；模板占位也必须是空值。
+	if usableProductionCredential(values["SETTLEMENT_REFERENCE_CLIENT_ID"]) {
+		t.Fatalf("production published settlement reference identity: %q", values["SETTLEMENT_REFERENCE_CLIENT_ID"])
+	}
+}
+
+// TestProjectSettlementReferenceStrictResolverRejectsDrift 验证保留的严格解析器仍然拒绝漂移：
+// 清单不再引用它，但它一旦被重新引用不得放宽同租户、应用、环境、scope 与客户端类型校验。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestProjectSettlementReferenceStrictResolverRejectsDrift(t *testing.T) {
+	for _, name := range []string{"valid", "tenant", "app", "env-id", "env-code", "scope", "type", "duplicate", "missing"} {
 		t.Run(name, func(t *testing.T) {
-			target, input := settlementRoleRuntimeFixture(t, "project_management")
-			client := &input.RelatedServiceClients[0].Client
+			_, input := settlementRoleRuntimeFixture(t, "project_management")
 			switch name {
+			case "missing":
+				input.RelatedServiceClients = nil
 			case "tenant":
-				client.TenantID = "other"
+				input.RelatedServiceClients[0].Client.TenantID = "other"
 			case "app":
-				client.ApplicationID = "other"
+				input.RelatedServiceClients[0].Client.ApplicationID = "other"
 			case "env-id":
-				client.EnvironmentID = "other"
+				input.RelatedServiceClients[0].Client.EnvironmentID = "other"
 			case "env-code":
 				input.RelatedServiceClients[0].Environment = "dev"
 			case "scope":
-				client.Scopes = append(client.Scopes, "dashboard.project.read")
+				input.RelatedServiceClients[0].Client.Scopes = append(input.RelatedServiceClients[0].Client.Scopes, "dashboard.project.read")
 			case "type":
-				client.ClientType = "confidential"
+				input.RelatedServiceClients[0].Client.ClientType = "confidential"
 			case "duplicate":
 				input.RelatedServiceClients = append(input.RelatedServiceClients, input.RelatedServiceClients[0])
 			}
-			err := target.writeRuntimeConfiguration(input)
-			if name != "valid" {
-				if err == nil {
-					t.Fatal("untrusted related client published")
+			clientID, err := resolveSettlementReferenceIdentity(input, settlementReferenceBinding)
+			if name == "valid" {
+				if err != nil || clientID != "settlement-prod-project-reference" {
+					t.Fatalf("trusted settlement source rejected: clientID=%q err=%v", clientID, err)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			values, err := readEnvironmentValues(filepath.Join(target.config.DeployRoot, "runtime/project.env"))
-			if err != nil || values["SETTLEMENT_REFERENCE_ENABLED"] != "true" || values["SETTLEMENT_REFERENCE_CLIENT_ID"] != "settlement-prod-project-reference" || values["SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE"] != "prod" {
-				t.Fatal("project reference route not bound")
+			if err == nil {
+				t.Fatalf("untrusted settlement source accepted: %q", clientID)
 			}
 		})
 	}
@@ -230,7 +277,7 @@ func TestSettlementRoleLocalRuntimeDelivery(t *testing.T) {
 	}
 }
 
-// TestProjectSettlementReferenceLocalRuntime 验证项目本地接入写入受控来源且缺依赖时拒绝。
+// TestProjectSettlementReferenceLocalRuntime 验证项目本地接入写入受控来源。
 // 参数：t 为测试上下文。
 // 返回值：无。
 func TestProjectSettlementReferenceLocalRuntime(t *testing.T) {
@@ -252,9 +299,88 @@ func TestProjectSettlementReferenceLocalRuntime(t *testing.T) {
 		actual["SETTLEMENT_REFERENCE_CLIENT_ID"] != "settlement-prod-project-reference" || actual["KEEP"] != "original" {
 		t.Fatal("local project reference identity not delivered")
 	}
-	input.RelatedServiceClients = nil
-	if err := provisioner.p1LocalRuntimeValues(input, path, map[string]string{}, false); err == nil {
-		t.Fatal("missing related source accepted")
+}
+
+// TestProjectSettlementReferenceLocalRuntimeAllowsSettlementLater 验证本地"项目先接入、结算后接入"：
+// 结算来源未登记时关闭引用集成并清空残留身份，来源存在但漂移时仍拒绝。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestProjectSettlementReferenceLocalRuntimeAllowsSettlementLater(t *testing.T) {
+	provisioner := &LocalDockerSubsystemProvisioner{}
+	path := filepath.Join(t.TempDir(), "project.env")
+	if err := os.WriteFile(path, []byte("KEEP=original\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, ready := settlementRoleRuntimeFixture(t, "project_management")
+
+	// 先用已登记来源完成一次接入，制造可被继承的旧客户端配置。
+	values := map[string]string{}
+	if err := provisioner.p1LocalRuntimeValues(ready, path, values, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateSubsystemEnvironment(path, path, values); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readEnvironmentValues(path)
+	if err != nil || before["SETTLEMENT_REFERENCE_ENABLED"] != "true" {
+		t.Fatal("local project reference identity not delivered")
+	}
+
+	// 结算侧尚未接入（无相关来源）：本地更新必须安全关闭引用集成而不是 422。
+	_, pending := settlementRoleRuntimeFixture(t, "project_management")
+	pending.RelatedServiceClients = nil
+	values = map[string]string{}
+	if err := provisioner.p1LocalRuntimeValues(pending, path, values, false); err != nil {
+		t.Fatalf("missing settlement source must not block local project update: %v", err)
+	}
+	if values["SETTLEMENT_REFERENCE_ENABLED"] != "false" || values["SETTLEMENT_REFERENCE_CLIENT_ID"] != "" {
+		t.Fatalf("pending settlement source wrote enabled integration: %v", values)
+	}
+	if err := updateSubsystemEnvironment(path, path, values); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := readEnvironmentValues(path)
+	if err != nil || actual["KEEP"] != "original" || actual["SETTLEMENT_REFERENCE_ENABLED"] != "false" ||
+		actual["SETTLEMENT_REFERENCE_CLIENT_ID"] != "" || actual["SETTLEMENT_REFERENCE_AUDIENCE"] != "" ||
+		actual["SETTLEMENT_REFERENCE_ISSUER"] != "" || actual["SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH"] != "" ||
+		actual["SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE"] != "" {
+		t.Fatalf("stale settlement reference identity retained: %v", actual)
+	}
+
+	// 首次接入（无既有运行文件）同样允许先接入。
+	freshPath := filepath.Join(t.TempDir(), "fresh-project.env")
+	if err := os.WriteFile(freshPath, []byte("KEEP=original\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fresh := map[string]string{}
+	if err := provisioner.p1LocalRuntimeValues(pending, freshPath, fresh, true); err != nil {
+		t.Fatalf("first local project onboarding blocked by missing settlement source: %v", err)
+	}
+	if fresh["SETTLEMENT_REFERENCE_ENABLED"] != "false" || fresh["SETTLEMENT_REFERENCE_CLIENT_ID"] != "" {
+		t.Fatalf("first onboarding enabled unsettled integration: %v", fresh)
+	}
+
+	// 结算来源已登记但字段漂移：仍必须拒绝，不能静默关闭。
+	for name, mutate := range map[string]func(*application.RelatedSubsystemServiceClient){
+		"environment": func(client *application.RelatedSubsystemServiceClient) { client.Environment = "dev" },
+		"scope": func(client *application.RelatedSubsystemServiceClient) {
+			client.Client.Scopes = []string{"settlement.contract.read"}
+		},
+		"status":      func(client *application.RelatedSubsystemServiceClient) { client.Client.Status = "DISABLED" },
+		"application": func(client *application.RelatedSubsystemServiceClient) { client.ApplicationID = "" },
+	} {
+		_, drifted := settlementRoleRuntimeFixture(t, "project_management")
+		mutate(&drifted.RelatedServiceClients[0])
+		if err := provisioner.p1LocalRuntimeValues(drifted, path, map[string]string{}, false); err == nil {
+			t.Fatalf("%s drift accepted by local project update", name)
+		}
+	}
+
+	// 同名来源重复：拒绝（不能任选其一）。
+	_, duplicated := settlementRoleRuntimeFixture(t, "project_management")
+	duplicated.RelatedServiceClients = append(duplicated.RelatedServiceClients, duplicated.RelatedServiceClients[0])
+	if err := provisioner.p1LocalRuntimeValues(duplicated, path, map[string]string{}, false); err == nil {
+		t.Fatal("duplicate settlement source accepted by local project update")
 	}
 }
 

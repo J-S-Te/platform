@@ -171,6 +171,18 @@ func (capture *captureLogger) find(message string) (slog.Record, bool) {
 	return slog.Record{}, false
 }
 
+func (capture *captureLogger) findAll(message string) []slog.Record {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	var records []slog.Record
+	for _, record := range capture.records {
+		if record.Message == message {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
 func recordAttrs(record slog.Record) map[string]string {
 	fields := map[string]string{}
 	record.Attrs(func(attr slog.Attr) bool {
@@ -355,5 +367,110 @@ func TestUploadContentValidTicketStillSucceedsAgainstScriptedDriver(t *testing.T
 
 	if strings.Contains(response.Body.String(), "FILE_TICKET_INVALID") {
 		t.Fatalf("匹配票据不应被拒绝: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// A1 回归：file_access_audit 的 ascii 列宽约束不能成为"让文件操作无审计"的开关。
+// 超长 request_id/file_id 必须在写库前收敛到列宽，插入仍然执行（不被 MySQL 1406 拒绝）；
+// 收敛只记录字段名与原长度、不记录原值；actor 为空仍以 NULL 落库。
+func TestWriteFileAccessAuditTruncatesOverlongFields(t *testing.T) {
+	script := &auditScript{}
+	capture := &captureLogger{}
+	database := newAuditTestDB(t, script)
+	fileID := strings.Repeat("F", 40)
+	requestID := strings.Repeat("R", 200)
+
+	writeFileAccessAudit(context.Background(), database, slog.New(capture), accessAudit{
+		TenantID: "tenant-1", ApplicationID: "app-1", FileID: fileID,
+		AuthenticatedClientID: "client-1", Action: "UPLOAD_COMPLETED", Result: "SUCCESS",
+		RequestID: &requestID, CreatedAt: time.Now().UTC(),
+	})
+
+	inserts := script.inserts()
+	if len(inserts) != 1 {
+		t.Fatalf("超长字段必须仍产生恰好一条审计 INSERT，实际 %d: %v", len(inserts), script.execs)
+	}
+	var storedFileID, storedRequestID string
+	actorNull := false
+	for _, arg := range inserts[0].args {
+		if arg.Value == nil {
+			actorNull = true
+			continue
+		}
+		text, ok := arg.Value.(string)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(text, "F"):
+			storedFileID = text
+		case strings.HasPrefix(text, "R"):
+			storedRequestID = text
+		}
+	}
+	if storedFileID != strings.Repeat("F", 26) {
+		t.Fatalf("file_id 落库值 = %q(len=%d), want 26 字符截断", storedFileID, len(storedFileID))
+	}
+	if storedRequestID != strings.Repeat("R", 128) {
+		t.Fatalf("request_id 落库值 = %q(len=%d), want 128 字符截断", storedRequestID, len(storedRequestID))
+	}
+	if !actorNull {
+		t.Fatal("actor 为空时必须保持 NULL，不得写入空串占位")
+	}
+	if _, failed := capture.find("file access audit write failed"); failed {
+		t.Fatal("收敛后的审计写入不应失败")
+	}
+	assertNormalizedAuditFields(t, capture, map[string]string{"file_id": "40", "request_id": "200"})
+}
+
+// A1 回归：ascii 列同样容不下多字节字符（MySQL 1366）；非 ASCII 值必须被替换而不是
+// 让整行审计插入失败。替换按字符计，先替换后截断，不会产生无效 UTF-8。
+func TestWriteFileAccessAuditReplacesNonASCIIValues(t *testing.T) {
+	script := &auditScript{}
+	capture := &captureLogger{}
+	database := newAuditTestDB(t, script)
+	requestID := strings.Repeat("请", 10) // 10 字符/30 字节：未越界，但 ascii 列无法存储
+
+	writeFileAccessAudit(context.Background(), database, slog.New(capture), accessAudit{
+		TenantID: "tenant-1", ApplicationID: "app-1", FileID: "file-1",
+		AuthenticatedClientID: "client-1", Action: "UPLOAD_COMPLETED", Result: "SUCCESS",
+		RequestID: &requestID, CreatedAt: time.Now().UTC(),
+	})
+
+	inserts := script.inserts()
+	if len(inserts) != 1 {
+		t.Fatalf("非 ASCII 请求标识不得导致审计行丢失: %v", script.execs)
+	}
+	var storedRequestID string
+	for _, arg := range inserts[0].args {
+		if text, ok := arg.Value.(string); ok && strings.HasPrefix(text, "?") {
+			storedRequestID = text
+		}
+	}
+	if storedRequestID != strings.Repeat("?", 10) {
+		t.Fatalf("非 ASCII request_id 落库值 = %q, want 10 个 '?'", storedRequestID)
+	}
+	assertNormalizedAuditFields(t, capture, map[string]string{"request_id": "30"})
+}
+
+func assertNormalizedAuditFields(t *testing.T, capture *captureLogger, wantOriginalLengths map[string]string) {
+	t.Helper()
+	records := capture.findAll("file access audit field normalized before insert")
+	if len(records) != len(wantOriginalLengths) {
+		t.Fatalf("收敛日志条数 = %d, want %d: %+v", len(records), len(wantOriginalLengths), records)
+	}
+	for _, record := range records {
+		fields := recordAttrs(record)
+		field, ok := fields["field"]
+		if !ok {
+			t.Fatalf("收敛日志缺少字段名: %v", fields)
+		}
+		want, expected := wantOriginalLengths[field]
+		if !expected {
+			t.Fatalf("收敛日志记录了意外字段 %q", field)
+		}
+		if fields["original_length"] != want {
+			t.Fatalf("字段 %q original_length = %q, want %q", field, fields["original_length"], want)
+		}
 	}
 }
