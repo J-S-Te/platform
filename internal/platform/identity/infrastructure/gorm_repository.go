@@ -633,7 +633,8 @@ func backchannelLogoutOutboxRow(id string, target backchannelLogoutTarget, now t
 }
 
 // enqueueBackchannelLogout 在调用方事务中为已登录 RP 创建持久投递任务。
-// 参数 transaction 必须是 RevokeAccountSessions 的事务句柄；返回错误时调用方必须回滚整个会话撤销。
+// 参数：transaction 为撤销事务，tenantID/accountID 为账号范围，sessions/now 为会话及撤销时钟。
+// 返回值：生成或持久化通知失败时返回错误，由调用方回滚整个会话撤销。
 func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB, tenantID, accountID string, sessions []sessionModel, now time.Time) error {
 	if transaction == nil || len(sessions) == 0 {
 		return nil
@@ -652,9 +653,15 @@ func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB,
 			return fmt.Errorf("generate back-channel logout event ID: %w", err)
 		}
 		row := backchannelLogoutOutboxRow(id, target, now)
-		// 其他数据库错误仍向上传播，不能把 Outbox 失败伪装成注销成功。
+		// map 插入没有模型 Schema，MySQL 的 DoNothing 无法推导无操作更新列。
+		// 显式保留已有 ID，避免重复入队覆盖事件标识、jti 或投递进度；其他错误仍回滚。
 		if err = transaction.Table("platform_oauth_backchannel_logout_outbox").
-			Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}}, DoNothing: true}).
+			Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}},
+				DoUpdates: clause.Set{{
+					Column: clause.Column{Name: "id"}, Value: clause.Column{Name: "id"},
+				}},
+			}).
 			Create(row).Error; err != nil {
 			return fmt.Errorf("enqueue OIDC back-channel logout: %w", err)
 		}
