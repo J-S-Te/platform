@@ -15,6 +15,22 @@ import re
 import sys
 
 BLOCK_TEMPLATE = r"(?ms)^  # BEGIN SUBSYSTEM: {name} .*?^  # END SUBSYSTEM: {name} [^\n]*"
+# 子系统标记行必须保持可解析：升级脚本按 `^\s*#\s*(BEGIN|END)\s+SUBSYSTEM\s*[:：]`
+# 推导块状态，标记行一旦被再次注释（`#   # BEGIN ...`）就整块不可见，受控升级会误判
+# "未启用或缺少模块"。空行与块内既有注释同样无需二次注释。
+SUBSYSTEM_MARKER = re.compile(r"^[ \t]*#[ \t]*(BEGIN|END)[ \t]+SUBSYSTEM[ \t]*[:：]")
+COMMENTED_LINE = re.compile(r"^[ \t]*#")
+
+
+def comment_lines(lines: list[str]) -> str:
+    """注释块内容但保留标记行与既有注释，保证块状态仍可被部署脚本解析。"""
+    commented = []
+    for line in lines:
+        if SUBSYSTEM_MARKER.match(line) or not line.strip() or COMMENTED_LINE.match(line):
+            commented.append(line)
+        else:
+            commented.append("# " + line)
+    return "\n".join(commented)
 TOP_VOLUME = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*$")
 MOUNT_REF = re.compile(r"^\s*-\s+([A-Za-z0-9_.-]+):")
 TOP_LEVEL = re.compile(r"^[A-Za-z0-9_.-]+:")
@@ -31,7 +47,7 @@ def block_match(text: str, name: str):
 
 def comment_block(text: str, name: str) -> str:
     pattern = BLOCK_TEMPLATE.format(name=re.escape(name))
-    result, count = re.subn(pattern, lambda m: "\n".join("# " + line for line in m[0].splitlines()), text)
+    result, count = re.subn(pattern, lambda m: comment_lines(m[0].splitlines()), text)
     if count != 1:
         raise ProjectionError(f"missing or duplicate subsystem block: {name}")
     return result
@@ -97,11 +113,39 @@ def project(text: str, disabled: list[str]) -> str:
     return output
 
 
+def block_states(text: str) -> dict[str, str]:
+    """按部署脚本同款规则推导块状态：块内存在任何未注释的非空行即 enabled。"""
+    states: dict[str, str] = {}
+    key = ""
+    content = 0
+    for line in text.splitlines():
+        begin = re.match(r"^[ \t]*#[ \t]*BEGIN[ \t]+SUBSYSTEM[ \t]*[:：][ \t]*([a-z][a-z0-9-]*)", line)
+        if begin:
+            if key:
+                raise ProjectionError(f"nested subsystem block: {line.strip()}")
+            key, content = begin.group(1), 0
+            continue
+        end = re.match(r"^[ \t]*#[ \t]*END[ \t]+SUBSYSTEM[ \t]*[:：][ \t]*([a-z][a-z0-9-]*)", line)
+        if end:
+            if key != end.group(1):
+                raise ProjectionError(f"BEGIN/END mismatch: {line.strip()}")
+            states[key] = "enabled" if content else "disabled"
+            key = ""
+            continue
+        if key and line.strip() and not COMMENTED_LINE.match(line):
+            content += 1
+    if key:
+        raise ProjectionError("unclosed subsystem block")
+    return states
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--disabled", default="", help="comma-separated subsystem markers")
+    parser.add_argument("--require-enabled", default="",
+                        help="comma-separated markers that must stay enabled after projection")
     args = parser.parse_args()
     source = Path(args.input)
     destination = Path(args.output)
@@ -109,8 +153,18 @@ def main() -> int:
         print("compose input is not a regular file", file=sys.stderr)
         return 1
     disabled = [value.strip() for value in args.disabled.split(",") if value.strip()]
+    required = [value.strip() for value in args.require_enabled.split(",") if value.strip()]
     try:
         projected = project(source.read_text(encoding="utf-8"), disabled)
+        states = block_states(projected)
+        if states.get("common") != "enabled":
+            raise ProjectionError("common subsystem block must stay enabled")
+        for name in disabled:
+            if states.get(name) != "disabled":
+                raise ProjectionError(f"subsystem block must be fully commented: {name}")
+        for name in required:
+            if states.get(name) != "enabled":
+                raise ProjectionError(f"subsystem block disabled but shipped in this batch: {name}")
     except (OSError, UnicodeError, ProjectionError) as exc:
         print(f"compose projection failed: {exc}", file=sys.stderr)
         return 1
