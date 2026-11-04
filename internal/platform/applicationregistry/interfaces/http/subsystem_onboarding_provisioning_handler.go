@@ -13,7 +13,15 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
-// OnboardSubsystem 处理 POST /api/v1/subsystem-onboarding。
+// OnboardSubsystem 通过既有受控接入流程创建子系统配置。
+//
+//	OnboardSubsystem 处理 POST /api/v1/subsystem-onboarding。
+//
+// 参数：writer为HTTP响应写入器。
+//
+//	request为经过调用方校验的请求内容。
+//
+// 返回值：无。
 func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
@@ -129,6 +137,7 @@ func (handler *SubsystemOnboardingHandler) OnboardSubsystem(writer stdhttp.Respo
 		handler.writeError(writer, request, err)
 		return
 	}
+	provisioningInput.CentralSessionPolicy = handler.centralSessionPolicy
 	handler.startSubsystemDeploymentJob(request, subsystemDeploymentJob{
 		Operation:          "ONBOARD",
 		Generation:         generation,
@@ -469,6 +478,14 @@ func (handler *SubsystemOnboardingHandler) ensureCatalogPublisherCredential(ctx 
 	return created.Client, created.PlaintextSecret, nil
 }
 
+// updateSubsystem 通过既有受控更新流程下发子系统配置。
+// 参数：writer为HTTP响应写入器。
+//
+//	request为经过调用方校验的请求内容。
+//	forcedIssuerAlias为受控配置提供的发行者别名。
+//	requestedOperation为调用方申请的既有许可操作类别。
+//
+// 返回值：无。
 func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.ResponseWriter, request *stdhttp.Request, forcedIssuerAlias, requestedOperation string) {
 	extendSubsystemDeploymentWriteDeadline(writer)
 	principal, ok := subsystemPrincipal(writer, request)
@@ -564,6 +581,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 		handler.writeError(writer, request, err)
 		return
 	}
+	updateInput.CentralSessionPolicy = handler.centralSessionPolicy
 	// 生产模式下 Agent 只接受随发布包审核的清单目标，并要求请求携带清单校验和。API 侧
 	// 若解析不到目标（清单缺失，或 platform-api 与 subsystem-provisioner 的部署模式
 	// 不一致），继续调用 Agent 只会得到无信息的拒绝并污染部署状态。这里先给出可执行的

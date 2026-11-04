@@ -16,6 +16,19 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      logout-mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: platform_test_extpdf_idle
+        ports:
+          - "127.0.0.1::3306"
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --silent"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=30
     defaults:
       run:
         working-directory: .
@@ -26,6 +39,14 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - run: go test ./...
+      - name: Verify account logout transaction on isolated MySQL
+        env:
+          PLATFORM_IDENTITY_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.logout-mysql.ports[3306] }})/platform_test_extpdf_idle?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+        run: |
+          set -euo pipefail
+          docker exec '${{ job.services.logout-mysql.id }}' mysql -uroot -e \
+            "SET GLOBAL collation_server='utf8mb4_unicode_ci'; SET GLOBAL default_collation_for_utf8mb4='utf8mb4_general_ci'; ALTER DATABASE platform_test_extpdf_idle CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          go test ./internal/platform/identity/infrastructure -run '^TestAccountLogoutEnqueuesBackchannelOnMySQL$' -count=1 -v
       - name: Verify Agent credential ownership under isolated root execution
         shell: bash
         run: |
@@ -63,6 +84,7 @@ jobs:
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 -B deploy/production/tests/test-release-backup-policy.py
+          python3 deploy/production/tests/test-runtime-dsn-dotenv.py
           python3 -B deploy/production/tests/test-upgrade-config-preservation.py
           python3 deploy/production/tests/test-customer-deploy-result.py
           python3 deploy/production/tests/test-platform-coordinated-upgrade.py

@@ -42,8 +42,11 @@ monitoring/prometheus/*.yml 条目。）
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -420,6 +423,73 @@ class OrchestrationConsistencyTest(unittest.TestCase):
         services = document.get("services")
         self.assertIsInstance(services, dict, f"{filename} 缺少顶层 services 映射")
         return services
+
+    def test_platform_central_session_uses_independent_runtime_env_file(self) -> None:
+        """用途：用真实Compose解析保护独立runtime文件的中央会话开关。
+        参数：无；输入来自两份真实编排的API和Worker环境块。
+        返回值：无；缺Compose时明确跳过，覆盖runtime或解析失败时断言失败。
+        """
+        docker = shutil.which("docker")
+        if docker is None:
+            self.skipTest("缺少Docker CLI，无法执行Compose配置解析")
+        # 只保留查找CLI及插件所需的环境，任何shell业务键均不能掩盖覆盖问题。
+        clean_env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
+        available = subprocess.run(
+            [docker, "compose", "version"], capture_output=True, text=True,
+            env=clean_env, check=False, timeout=30,
+        )
+        if available.returncode != 0:
+            self.skipTest("Docker Compose不可用，未执行配置解析")
+        for filename, document in ((CANONICAL, self.canonical), (REFERENCE, self.reference)):
+            services = self.services(document, filename)
+            for name in ("platform-api", "platform-worker"):
+                service = services[name]
+                for runtime_value in ("true", "false", None):
+                    with self.subTest(filename=filename, service=name, runtime=runtime_value):
+                        effective = self.render_runtime_environment(
+                            docker, clean_env, service, runtime_value,
+                        )
+                        self.assertEqual(
+                            effective.get("AUTH_CENTRAL_SESSION_ENABLED"), runtime_value,
+                            f"{filename}/{name}覆盖独立runtime的中央会话配置；"
+                            "缺省键必须留给应用默认策略处理",
+                        )
+                        self.assertEqual(effective.get("RUNTIME_SOURCE_MARKER"), "loaded")
+
+    def render_runtime_environment(
+        self, docker: str, clean_env: dict, service: dict, runtime_value: str | None,
+    ) -> dict:
+        """用途：以实际服务环境块构造最小Compose并解析最终容器环境，不访问daemon。
+        参数：docker为CLI路径，clean_env为隔离进程环境，service为服务配置，runtime_value为开关输入。
+        返回值：真实Compose合并后的环境；配置解析失败立即断言，不降级为静态检查。
+        """
+        with tempfile.TemporaryDirectory(prefix="platform-central-runtime-env-") as temporary:
+            root = Path(temporary)
+            runtime = root / "platform.env"
+            runtime.write_text(
+                "RUNTIME_SOURCE_MARKER=loaded\n" + (
+                    f"AUTH_CENTRAL_SESSION_ENABLED={runtime_value}\n"
+                    if runtime_value is not None else ""
+                ), encoding="utf-8",
+            )
+            interpolation = root / ".env"
+            interpolation.write_text(
+                f"BASIC_PLATFORM_RUNTIME_ENV_FILE={runtime}\n", encoding="utf-8",
+            )
+            candidate = root / "compose.json"
+            candidate.write_text(json.dumps({"services": {"probe": {
+                "image": "scratch",
+                "env_file": service.get("env_file"),
+                "environment": service.get("environment"),
+            }}}), encoding="utf-8")
+            rendered = subprocess.run(
+                [docker, "compose", "--project-name", "central-session-env-regression",
+                 "--project-directory", temporary, "--env-file", str(interpolation),
+                 "-f", str(candidate), "config", "--format", "json"],
+                env=clean_env, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(rendered.returncode, 0, "真实Compose配置解析失败")
+            return json.loads(rendered.stdout)["services"]["probe"].get("environment", {})
 
     # ---------- 1. 权威标记 ----------
     def test_authority_markers_name_the_single_deployable_file(self) -> None:

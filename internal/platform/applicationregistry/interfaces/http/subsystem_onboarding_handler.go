@@ -313,6 +313,7 @@ type SubsystemLifecycleNotification struct {
 // 所配置的 OIDC Issuer 仅由隔离部署工作流使用，绝不与生成的凭据或基础设施
 // 命令一起返回给浏览器。
 type SubsystemOnboardingHandler struct {
+	centralSessionPolicy   *application.CentralSessionRuntimePolicy
 	service                subsystemOnboardingService
 	provisioner            application.SubsystemProvisioner
 	access                 subsystemInitialAccessManager
@@ -342,6 +343,13 @@ type SubsystemOnboardingHandler struct {
 	// deploymentTimeout 覆盖后台编排窗口；零值用 subsystemDeploymentAsyncTimeout。测试注入
 	// 短窗口时必须走该字段（包级变量会被并行测试读成数据竞争）。
 	deploymentTimeout time.Duration
+}
+
+// ConfigureCentralSessionPolicy 注入基础平台统一会话接入策略，不接受浏览器自定义期限。
+// 参数：policy为组合根已校验的公开桥接地址和总开关。
+// 返回值：无；保留按值复制的策略供签名部署装配使用。
+func (handler *SubsystemOnboardingHandler) ConfigureCentralSessionPolicy(policy application.CentralSessionRuntimePolicy) {
+	handler.centralSessionPolicy = &policy
 }
 
 const (

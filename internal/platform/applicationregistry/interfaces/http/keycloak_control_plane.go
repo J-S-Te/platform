@@ -26,6 +26,7 @@ var (
 )
 
 type keycloakControlPlane struct {
+	centralSessionGovernance                                                                                                                       bool
 	adminURL, realm, username, password, adminClientID, adminClientSecret, brokerClientID, brokerClientSecret, platformIssuer, platformBackchannel string
 	httpClient                                                                                                                                     *stdhttp.Client
 }

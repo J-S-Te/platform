@@ -34,6 +34,9 @@ const (
 	defaultKeycloakJWKSMaxStale = time.Minute
 )
 
+// ErrKeycloakUnavailable 表示签名材料依赖暂不可用，不能据此确定浏览器会话失效。
+var ErrKeycloakUnavailable = errors.New("Keycloak signing service is temporarily unavailable")
+
 // KeycloakBrokerJWTVerifier 只校验唯一配置的 Keycloak realm 签发的终端用户 JWT，
 // 有意不作为可复用的平台认证机制。
 type KeycloakBrokerJWTVerifier struct {
@@ -254,9 +257,17 @@ func (verifier *KeycloakBrokerJWTVerifier) VerifyAuthorizationAccessToken(ctx co
 	return KeycloakAuthorizationAccessTokenClaims{BrokerClaims: claims, TokenUse: tokenUse}, nil
 }
 
-// keyFor 返回经过校验的 Keycloak 签名密钥。缓存命中仅在新鲜期内使用；kid 未知时
-// 即使缓存仍新鲜也强制刷新一次，使 Keycloak 签名密钥轮换立即收敛。刷新失败时
-// 只允许使用已知的旧密钥，且仅限上次成功抓取建立的有界过期窗口之内。
+// keyFor 通过有界JWKS访问获取指定签名验证密钥。
+//
+//	keyFor 返回经过校验的 Keycloak 签名密钥。缓存命中仅在新鲜期内使用；kid 未知时
+//	即使缓存仍新鲜也强制刷新一次，使 Keycloak 签名密钥轮换立即收敛。刷新失败时
+//	只允许使用已知的旧密钥，且仅限上次成功抓取建立的有界过期窗口之内。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	keyID为签名声明中的密钥标识。
+//
+// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
 func (verifier *KeycloakBrokerJWTVerifier) keyFor(ctx context.Context, keyID string) (*rsa.PublicKey, error) {
 	if verifier == nil {
 		return nil, errors.New("Keycloak broker verifier is not initialized")
@@ -307,7 +318,7 @@ func (verifier *KeycloakBrokerJWTVerifier) keyFor(ctx context.Context, keyID str
 			if staleKey != nil && completedAt.Before(staleUntil) {
 				return staleKey, nil
 			}
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrKeycloakUnavailable, err)
 		}
 		key = keys[keyID]
 		if key == nil {

@@ -3,14 +3,14 @@
   "config_contract": "1",
   "database": {
     "current_min": 0,
-    "migrate_to": 134,
-    "migration_set_sha256": "b20cd97ef1c88cc94db36b046146c19481837b7ed4313d4da3494d0c83b9de35",
+    "migrate_to": 136,
+    "migration_set_sha256": "05c4049d59fb4528ccbf62a81f6a4eda1f045ee8a33aba54acfdece1dca6c4a7",
     "previous_program_after_migration": "unknown"
   },
   "recovery": {
     "requires_backup": true,
     "type": "forward-only"
   },
-  "release": "2026-10-28",
+  "release": "2026-11-02",
   "schema": "uip.deployment-compatibility/v1"
 }
