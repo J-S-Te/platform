@@ -384,8 +384,11 @@ stage_subsystem_release() (
 )
 
 
+# deploy_component 发布目标组件，已有平台管理员通过状态检查后直接保留。
+# 参数：component 为已在交付范围内的组件名。
+# 返回值：发布及必需的首次初始化完成返回成功；门禁或依赖失败返回错误。
 deploy_component() {
-  local component="${1:?component required}" image file_gateway_image proxy_image bootstrap_password bootstrap_display bootstrap_account
+  local component="${1:?component required}" image file_gateway_image proxy_image bootstrap_password bootstrap_display bootstrap_account bootstrap_status value
   require_initialized
   scope_require "$component" || return
   image="$(latest_image "$component")"
@@ -402,13 +405,23 @@ deploy_component() {
       else
         "$script_dir/deploy-service.sh" platform "$image" "$file_gateway_image"
       fi
-      bootstrap_password="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_PASSWORD)"
-      bootstrap_display="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME)"
-      bootstrap_account="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME)"
-      [[ -n "$bootstrap_password" && -n "$bootstrap_display" && -n "$bootstrap_account" ]] || die "首个平台管理员配置不完整"
-      printf '%s\n' "$bootstrap_password" | compose run -T --rm platform-migrate ./bootstrap-admin \
-        --display-name "$bootstrap_display" --account-name "$bootstrap_account" --password-stdin
-      echo '基础平台管理员已初始化或已经存在；受保护的初始凭据仍保存在权限为 0600 的运行时配置文件中，请首次登录后及时修改。'
+      if compose run -T --rm platform-migrate ./bootstrap-admin --status; then
+        echo '基础平台管理员已存在；保留账号及原配置，不生成或重置初始化密码。'
+      else
+        bootstrap_status=$?
+        [[ "$bootstrap_status" == 3 ]] || return "$bootstrap_status"
+        bootstrap_password="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_PASSWORD)"
+        bootstrap_display="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME)"
+        bootstrap_account="$(env_get "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME)"
+        for value in "$bootstrap_password" "$bootstrap_display" "$bootstrap_account"; do
+          case "$value" in
+            ''|REPLACE_WITH_*|PENDING_*) die '尚未初始化管理员，请提供有效原始初始化材料；升级不会猜测密码或使用占位值' ;;
+          esac
+        done
+        printf '%s\n' "$bootstrap_password" | compose run -T --rm platform-migrate ./bootstrap-admin \
+          --display-name "$bootstrap_display" --account-name "$bootstrap_account" --password-stdin
+        echo '基础平台管理员首次初始化完成；原配置已保留。配置内为初始密码，改密后不代表当前密码。'
+      fi
       if scope_services | grep -Fxq prometheus; then
         compose_monitoring up -d prometheus keycloak-backup-metrics
       fi
