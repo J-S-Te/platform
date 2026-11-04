@@ -46,6 +46,9 @@ BOOTSTRAP_ADMIN_PASSWORD=""
 mkdir -p "$(dirname -- "$LOG_FILE")"
 : >"$LOG_FILE"
 
+# usage 显示后端部署参数及关键配置保留规则。
+# 参数：无。
+# 返回值：无；向终端输出帮助。
 usage() {
   cat <<'USAGE'
 用法：
@@ -83,7 +86,7 @@ usage() {
   远程 MySQL 仅在通过受保护进程环境提供 MYSQL_ADMIN_PASSWORD 并在环境文件设置
   MYSQL_APPLICATION_ALLOWED_HOST 时自动创建；否则需由数据库管理员预先准备，并使用
   --skip-database-init 明确跳过初始化。迁移成功后，未初始化的首个超级管理员会使用
-  IAM_BOOTSTRAP_ADMIN_* 一次性配置或交互输入创建，成功后自动清除其中的密码。
+  IAM_BOOTSTRAP_ADMIN_* 一次性配置或交互输入创建，配置中的初始密码保留，已有管理员不会被更新流程改密。
   -h, --help               显示帮助
 
 示例：
@@ -690,18 +693,9 @@ is_bootstrap_admin_placeholder() {
   [[ "$1" == REPLACE_WITH_* ]]
 }
 
-clear_bootstrap_admin_password() {
-  local configured_password
-  configured_password="$(get_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD || true)"
-  [[ -n "$configured_password" ]] || return 0
-
-  CURRENT_STEP="清除一次性超级管理员密码"
-  set_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD ""
-  run_cmd chown root:"$RUNTIME_GROUP" "$ENV_FILE"
-  run_cmd chmod 0640 "$ENV_FILE"
-  log "INFO" "已清除环境文件中的一次性 IAM_BOOTSTRAP_ADMIN_PASSWORD；现有管理员未被修改。"
-}
-
+# load_bootstrap_admin_input 读取首次初始化管理员输入，不写回或清空原配置。
+# 参数：无；使用受保护环境文件或当前终端输入。
+# 返回值：输入完整返回成功；非交互缺项或确认不一致时失败。
 load_bootstrap_admin_input() {
   BOOTSTRAP_ADMIN_DISPLAY_NAME="$(get_env_value IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME || true)"
   BOOTSTRAP_ADMIN_ACCOUNT_NAME="$(get_env_value IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME || true)"
@@ -713,7 +707,7 @@ load_bootstrap_admin_input() {
 
   if [[ -z "$BOOTSTRAP_ADMIN_DISPLAY_NAME" || -z "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" || -z "$BOOTSTRAP_ADMIN_PASSWORD" ]]; then
     if [[ "$ASSUME_YES" == true || ! -t 0 ]]; then
-      log "ERROR" "首次创建超级管理员需要在 ${ENV_FILE} 设置 IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME、IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME 和 IAM_BOOTSTRAP_ADMIN_PASSWORD。密码仅在成功初始化后自动清除。"
+      log "ERROR" "首次创建超级管理员需要在 ${ENV_FILE} 设置 IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME、IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME 和 IAM_BOOTSTRAP_ADMIN_PASSWORD。原配置会保留，仅用于首次初始化；已有账号不会自动改密。"
       return 1
     fi
 
@@ -779,6 +773,9 @@ run_bootstrap_admin_initialize() {
   return 1
 }
 
+# bootstrap_first_super_admin 仅在尚未初始化时创建管理员，始终保留配置文件原值。
+# 参数：bootstrap_binary 为当前候选版本的管理员初始化程序。
+# 返回值：已存在或创建成功返回成功；状态检查与初始化失败返回原错误。
 bootstrap_first_super_admin() {
   local bootstrap_binary="$1"
   [[ -x "$bootstrap_binary" ]] || {
@@ -794,7 +791,6 @@ bootstrap_first_super_admin() {
   local status
   if run_bootstrap_admin_status "$bootstrap_binary"; then
     log "INFO" "首个超级管理员已初始化，跳过创建且不覆盖现有账号。"
-    clear_bootstrap_admin_password
     return 0
   else
     status=$?
@@ -805,11 +801,10 @@ bootstrap_first_super_admin() {
 
   load_bootstrap_admin_input
   if ! run_bootstrap_admin_initialize "$bootstrap_binary"; then
-    log "ERROR" "首个超级管理员初始化失败；未清除一次性密码，以便修复配置后重试。"
+    log "ERROR" "首个超级管理员初始化失败；保留原配置供修复后重试。"
     return 1
   fi
 
-  clear_bootstrap_admin_password
   BOOTSTRAP_ADMIN_PASSWORD=""
   log "INFO" "首个超级管理员初始化完成。"
 }

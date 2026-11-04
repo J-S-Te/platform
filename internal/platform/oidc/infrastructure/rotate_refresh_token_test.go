@@ -27,6 +27,9 @@ type rotateStatement struct {
 	query        string
 	placeholders int
 	args         int
+	// values 保留本次语句绑定变量的实际取值，供 M-1 会话空闲门禁用例核对
+	// 默认窗口常量、毫秒截断的截止基准等参数，而不是只看占位符个数。
+	values []driver.Value
 }
 
 type rotateScript struct {
@@ -41,8 +44,12 @@ type rotateScript struct {
 	rollbacks int
 }
 
-func (script *rotateScript) record(query string, args int) {
-	entry := rotateStatement{query: query, placeholders: strings.Count(query, "?"), args: args}
+func (script *rotateScript) record(query string, named []driver.NamedValue) {
+	values := make([]driver.Value, 0, len(named))
+	for _, value := range named {
+		values = append(values, value.Value)
+	}
+	entry := rotateStatement{query: query, placeholders: strings.Count(query, "?"), args: len(named), values: values}
 	script.statements = append(script.statements, entry)
 	if entry.placeholders != entry.args {
 		script.mismatches = append(script.mismatches, entry)
@@ -167,12 +174,12 @@ func (tx rotateScriptTx) Commit() error   { tx.script.commits++; return nil }
 func (tx rotateScriptTx) Rollback() error { tx.script.rollbacks++; return nil }
 
 func (connection *rotateScriptConn) ExecContext(_ context.Context, query string, values []driver.NamedValue) (driver.Result, error) {
-	connection.script.record(query, len(values))
+	connection.script.record(query, values)
 	return rotateScriptResult(1), nil
 }
 
 func (connection *rotateScriptConn) QueryContext(_ context.Context, query string, values []driver.NamedValue) (driver.Rows, error) {
-	connection.script.record(query, len(values))
+	connection.script.record(query, values)
 	script := connection.script
 	switch {
 	case strings.Contains(query, "SELECT oauth_refresh_token.id"):

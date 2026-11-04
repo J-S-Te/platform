@@ -1390,6 +1390,9 @@ services:
       PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
       PORTAL_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      # 安全审计 M-10：本地 frontend 固定地址为 172.31.255.250；缺失会让登录限流退化为
+      # 网关单桶。仅信任网关与 frontend，其它容器伪造 XFF 仍被忽略。
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.250/32}
       GIN_MODE: release
     command: ["./portal-server"]
     volumes:

@@ -159,6 +159,13 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 	if err != nil {
 		return CatalogView{}, err
 	}
+	// 控制面应用的授权目录只由 bootstrap 镜像维护，应用通道在其之前失败关闭：
+	// 一旦放行，任何持有 authorization.catalog.sync 的客户端都能改写/停用平台内置
+	// 角色，从而取得任意 platform:* 权限（H-1）。此判定先于任何写事务与失败元数据
+	// 记录，保证平台目录行不会被应用通道触碰。
+	if err := catalogSyncTargetAllowed(app); err != nil {
+		return CatalogView{}, err
+	}
 	submittedInput := input
 	input, checksum, err := normalizeCatalog(input)
 	if err != nil {
@@ -249,8 +256,8 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		if len(roleCodes) == 0 {
 			roleCodes = []string{"__no_catalog_role__"}
 		}
-		if err := tx.Table("authz_role").Where("tenant_id = ? AND application_id = ? AND role_type <> ? AND code NOT IN ?", tenantID, app.ID, "COMPATIBILITY", roleCodes).Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": operatorID}).Error; err != nil {
-			return fmt.Errorf("disable removed catalog roles: %w", err)
+		if err := disableRemovedCatalogRoles(tx, tenantID, app.ID, roleCodes, operatorID, now); err != nil {
+			return err
 		}
 		// 不物理删除目录中移除的角色/权限：历史绑定和审计仍需可追溯；置为 DISABLED
 		// 后它们会立即退出授权查询，并可在后续同步中按稳定编码恢复。
@@ -306,6 +313,37 @@ func (s *Service) SyncCatalog(ctx context.Context, tenantID, applicationID, oper
 		Metadata: map[string]any{"catalog_version": input.CatalogVersion, "checksum": input.Checksum, "source_type": input.SourceType, "source_identifier": input.SourceIdentifier, "idempotent": false},
 	})
 	return view, nil
+}
+
+// catalogSyncTargetAllowed 判定目标应用是否允许通过应用自有通道发布授权目录。
+// 控制面应用（code=platform）的内置角色与权限由 bootstrap 镜像维护，任何应用
+// Bearer 都不能改写它：否则持 authorization.catalog.sync 的客户端可以覆盖
+// role_type/built_in、停用平台内置角色，进而取得任意 platform:* 权限。
+// 返回 ErrAccessDenied 使 HTTP 适配层按 403 失败关闭；非控制面应用行为不变。
+func catalogSyncTargetAllowed(app applicationRow) error {
+	if strings.TrimSpace(app.Code) != PlatformApplicationCode {
+		return nil
+	}
+	return fmt.Errorf("%w: the platform authorization catalog is managed by bootstrap and cannot be published through the application catalog API", ErrAccessDenied)
+}
+
+// disableRemovedCatalogRoles 停用本次目录未声明的应用角色。内置角色（built_in=1）
+// 属于平台基础数据而非应用自有目录，目录同步绝不能停用它们；role_type=COMPATIBILITY
+// 的兼容角色同样不参与该对账。
+func disableRemovedCatalogRoles(tx *gorm.DB, tenantID, appID string, roleCodes []string, operatorID string, now time.Time) error {
+	err := removedCatalogRolesQuery(tx, tenantID, appID, roleCodes).
+		Updates(map[string]any{"status": disabledStatus, "version": gorm.Expr("version + 1"), "updated_at": now, "updated_by": operatorID}).Error
+	if err != nil {
+		return fmt.Errorf("disable removed catalog roles: %w", err)
+	}
+	return nil
+}
+
+// removedCatalogRolesQuery 构造"停用本次目录未声明角色"的条件。built_in = 0 是
+// 硬性边界：内置角色不属于应用自有目录，目录同步不得停用或改写它们。
+func removedCatalogRolesQuery(tx *gorm.DB, tenantID, appID string, roleCodes []string) *gorm.DB {
+	return tx.Table("authz_role").
+		Where("tenant_id = ? AND application_id = ? AND role_type <> ? AND built_in = ? AND code NOT IN ?", tenantID, appID, "COMPATIBILITY", 0, roleCodes)
 }
 
 func previousCatalogCompatibility(existing catalogMetadataRow, next CatalogInput) CatalogCompatibilityVersion {
@@ -583,9 +621,11 @@ func catalogPermissionByResourceAction(tx *gorm.DB, tenantID, appID, resourceID,
 
 func (s *Service) upsertCatalogRole(tx *gorm.DB, tenantID, appID, operatorID string, now time.Time, item CatalogRoleInput) (string, error) {
 	var row struct {
-		ID string `gorm:"column:id"`
+		ID       string `gorm:"column:id"`
+		BuiltIn  int    `gorm:"column:built_in"`
+		RoleType string `gorm:"column:role_type"`
 	}
-	err := tx.Table("authz_role").Select("id").Where("tenant_id = ? AND application_id = ? AND code = ?", tenantID, appID, item.Code).Take(&row).Error
+	err := tx.Table("authz_role").Select("id, built_in, role_type").Where("tenant_id = ? AND application_id = ? AND code = ?", tenantID, appID, item.Code).Take(&row).Error
 	values := map[string]any{"tenant_id": tenantID, "application_id": appID, "code": item.Code, "name": item.Name, "role_type": "APPLICATION", "description": item.Description, "built_in": 0, "status": activeStatus, "version": 1, "updated_at": now, "updated_by": operatorID}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		id, e := s.ids.New(now)
@@ -600,6 +640,13 @@ func (s *Service) upsertCatalogRole(tx *gorm.DB, tenantID, appID, operatorID str
 	}
 	if err != nil {
 		return "", err
+	}
+	// 内置角色（built_in=1 或 role_type=PLATFORM）是平台基础数据，不由应用目录
+	// 定义。目录同步若改写它们，会同时抹掉 built_in 标记并把 role_type 覆盖为
+	// APPLICATION，使后续保护失效；这里明确失败而不是静默跳过，避免调用方误以为
+	// 发布成功。
+	if row.BuiltIn != 0 || strings.EqualFold(strings.TrimSpace(row.RoleType), platformRoleType) {
+		return "", validation("catalog role " + item.Code + " is a built-in platform role and cannot be rewritten by application catalog synchronization")
 	}
 	values["version"] = gorm.Expr("version + 1")
 	if err := tx.Table("authz_role").Where("id = ?", row.ID).Updates(values).Error; err != nil {

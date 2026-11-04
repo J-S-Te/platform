@@ -65,3 +65,6 @@ deploy/production/monitoring/textfile/
 /runtime/local-license.compose.json.*.bak
 /runtime/.license-pin-recovery.lock
 /runtime/private/
+
+
+.ai

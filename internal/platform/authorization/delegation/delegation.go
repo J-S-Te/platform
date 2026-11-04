@@ -19,6 +19,10 @@ import (
 const (
 	activeStatus    = "ACTIVE"
 	tenantScopeType = "TENANT"
+	// platformApplicationCode 是迁移种子内置的控制面应用编码。委派包不导入
+	// applicationaccess（后者依赖本包），因此在此保留同值常量；漂移由
+	// applicationaccess 包既有常量测试锁定。
+	platformApplicationCode = "platform"
 )
 
 // delegationBypass 定义哪些已认证控制面角色可以委派本人并未逐项持有的权限。
@@ -72,6 +76,20 @@ func verifyRolePermissions(ctx context.Context, tx *gorm.DB, tenantID, operatorI
 		return fmt.Errorf("load role permissions for delegation: %w", result.Error)
 	}
 	if len(permissionIDs) == 0 {
+		// 零权限角色曾经无条件放行：控制面应用上的空角色可以在目录同步后重新获得
+		// 权限，构成绕过逐项委派检查的提权路径。控制面应用的零权限角色改为失败
+		// 关闭，非控制面应用维持既有语义；显式 bypass（超管、岗位模板的安全管理员）
+		// 保持原行为。
+		if bypass.allows(ctx, tenantID, operatorID) {
+			return nil
+		}
+		platformApplication, err := isPlatformApplication(ctx, tx, tenantID, applicationID)
+		if err != nil {
+			return err
+		}
+		if platformApplication {
+			return fmt.Errorf("role %s exposes no permissions on the platform application, and only a platform super administrator may delegate it: %w", roleID, application.ErrForbidden)
+		}
 		return nil
 	}
 	// 平台超级管理员是租户控制面最高权限身份。其有效应用角色由
@@ -83,6 +101,20 @@ func verifyRolePermissions(ctx context.Context, tx *gorm.DB, tenantID, operatorI
 		return nil
 	}
 	return VerifyPermissions(ctx, tx, tenantID, operatorID, OperatorAccountIDFromContext(ctx, tenantID, operatorID), applicationID, permissionIDs)
+}
+
+// isPlatformApplication 判断委派目标是否为控制面应用。查询始终带 tenant_id，
+// 不允许跨租户应用影响本租户的委派决策；找不到应用时返回 false 并沿用调用方
+// 既有的失败路径（权限计数不匹配仍会拒绝非零权限）。
+func isPlatformApplication(ctx context.Context, tx *gorm.DB, tenantID, applicationID string) (bool, error) {
+	var code string
+	result := tx.WithContext(ctx).Table("platform_application").
+		Where("tenant_id = ? AND id = ?", strings.TrimSpace(tenantID), strings.TrimSpace(applicationID)).
+		Limit(1).Pluck("code", &code)
+	if result.Error != nil {
+		return false, fmt.Errorf("load delegation target application: %w", result.Error)
+	}
+	return strings.TrimSpace(code) == platformApplicationCode, nil
 }
 
 func (bypass delegationBypass) allows(ctx context.Context, tenantID, operatorID string) bool {

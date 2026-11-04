@@ -1686,6 +1686,7 @@ services:
       PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       # SEC-N2 fail-closed：与 CRM 同一开关，默认不放行非 Secure 的门户会话。
       PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32}
       GIN_MODE: release
     networks: [application]
     volumes:
@@ -1725,6 +1726,10 @@ services:
       PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       # SEC-N2 fail-closed：与 CRM 同一开关，默认不放行非 Secure 的门户会话。
       PORTAL_ALLOW_INSECURE_HTTP_SESSION: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}
+      # 安全审计 M-10：登录入口限流以客户端地址为桶键，只有直接对端命中可信代理时才采信
+      # X-Real-IP/XFF；缺省时 Portal 看到的对端是 frontend 容器，会退化成网关单桶并锁死
+      # 全部客户登录。取值与 platform-api 同源（网关 172.31.255.1、frontend 172.31.255.250）。
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32}
       GIN_MODE: release
     networks: [application]
     volumes:

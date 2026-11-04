@@ -14,12 +14,49 @@ MODULES = ("contract", "project", "customer", "portal", "settlement", "data-anal
 API = {name: name + "-api" for name in MODULES}
 
 
+BLOCK_MARKER = re.compile(r"^[ \t]*#[ \t]*(BEGIN|END)[ \t]+SUBSYSTEM[ \t]*[:：]")
+COMMENTED_LINE = re.compile(r"^[ \t]*#")
+
+
 def trim_blocks(text, disabled):
+    # 与 bin/project-compose-assets.py 的裁剪语义保持一致：只注释块内容，
+    # 标记行必须保持 `# BEGIN/END SUBSYSTEM` 可解析，否则受控升级会误判模块未启用。
     for name in disabled:
         pattern = rf"(?ms)^  # BEGIN SUBSYSTEM: {re.escape(name)} .*?^  # END SUBSYSTEM: {re.escape(name)} [^\n]*"
-        text, count = re.subn(pattern, lambda m: "\n".join("# " + line for line in m[0].splitlines()), text)
+
+        def comment(match):
+            lines = []
+            for line in match.group(0).splitlines():
+                if BLOCK_MARKER.match(line) or not line.strip() or COMMENTED_LINE.match(line):
+                    lines.append(line)
+                else:
+                    lines.append("# " + line)
+            return "\n".join(lines)
+
+        text, count = re.subn(pattern, comment, text)
         assert count == 1, f"missing or duplicate block: {name}"
+    assert_subsystem_markers_parseable(text)
     return text
+
+
+def assert_subsystem_markers_parseable(text):
+    """模拟服务器一键离线部署.sh 的状态推导：标记行必须可匹配，且块内容注释完整。"""
+    in_block = None
+    content = 0
+    for line in text.splitlines():
+        begin = re.match(r"^[ \t]*#[ \t]*BEGIN[ \t]+SUBSYSTEM[ \t]*[:：][ \t]*([a-z][a-z0-9-]*)", line)
+        if begin:
+            assert in_block is None, f"nested subsystem block at: {line}"
+            in_block, content = begin.group(1), 0
+            continue
+        end = re.match(r"^[ \t]*#[ \t]*END[ \t]+SUBSYSTEM[ \t]*[:：][ \t]*([a-z][a-z0-9-]*)", line)
+        if end:
+            assert in_block == end.group(1), f"BEGIN/END mismatch at: {line}"
+            in_block = None
+            continue
+        if in_block is not None and line.strip() and not COMMENTED_LINE.match(line):
+            content += 1
+    assert in_block is None, "unclosed subsystem block"
 
 
 MYSQL_SERVER_IMAGE = "mysql:8.4"

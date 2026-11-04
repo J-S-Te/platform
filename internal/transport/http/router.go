@@ -203,8 +203,15 @@ func NewRouter(
 		// 安全审查 SEC-B7：登录改双桶限流——账号维度30/min先限（换 IP 不豁免）、
 		// IP 维度120/min兜底（随机换号撞库有界），消灭原“全客户端共用一个30/min IP 桶、
 		// 单攻击者可触发全员锁定”的问题。多副本与反代配置要求见 platform/docs/rate-limiting.md。
+		// 安全审查 M-9：/credential-challenges 是匿名端点，每次调用都会向
+		// credential_encryption_challenge 插入一行，必须与登录同量级地约束写入放大。
+		// 该桶本身独立于 authFlowRateLimit（出站协议桶）：两者共池会让打满挑战桶的
+		// 攻击者连带耗尽登录跳转/回调额度。阈值 120/min/IP 与 /login 的 IP 兜底桶
+		// 同量级，高于人类正常登录前的挑战频次，但把无限流时代的刷库速率压到可清理
+		// 的量级。本路由仅在 CREDENTIAL_ENCRYPTION_MODE != disabled 时注册。
+		credentialChallengeRateLimit := middleware.FixedWindowRateLimit(120, time.Minute)
 		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
-			authRouter.POST("/credential-challenges", adaptHandler(operational.CredentialEncryption.IssueChallenge))
+			authRouter.POST("/credential-challenges", credentialChallengeRateLimit, adaptHandler(operational.CredentialEncryption.IssueChallenge))
 		}
 		loginHandler := authHandler.Login
 		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {

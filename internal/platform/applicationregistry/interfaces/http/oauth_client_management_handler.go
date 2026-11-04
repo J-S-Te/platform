@@ -406,6 +406,10 @@ func (handler *OAuthClientManagementHandler) writeOAuthClientManagementError(wri
 		httpresponse.WriteError(writer, request, stdhttp.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, application.ErrManagementConflict):
 		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.Conflict)
+	case errors.Is(err, application.ErrManagementForbidden):
+		// H-1：操作者不是目标应用属主、也不持有应用管理权限（或试图管理控制面
+		// 应用客户端）时返回 403；服务层已在写入前失败关闭，这里只补齐语义。
+		httpresponse.WriteError(writer, request, stdhttp.StatusForbidden, httperror.Forbidden)
 	default:
 		// 不记录错误值：服务层错误可能源自 Secret 操作，其文本不得进入日志。
 		handler.logger.Error("oauth client management request failed", "path", request.URL.Path)
