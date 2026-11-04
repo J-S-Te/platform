@@ -172,8 +172,15 @@ func (service *ChallengeService) Consume(ctx context.Context, raw, kid, purposeC
 	return err
 }
 
+// Cleanup 删除已超出宽限期的过期挑战行（安全审查 M-9）。
+// 回收点刻意晚一个实际发放 TTL（默认 DefaultChallengeTTL = 60s）而不是“此刻之前
+// 全部过期行”：过期行若在客户端重放前就被删掉，消费路径只能报
+// CREDENTIAL_CHALLENGE_INVALID，把原本可诊断的 CHALLENGE_EXPIRED 语义抹平。
+// 宽限期取本服务实际生效的 TTL（受 Min/MaxChallengeTTL 约束，默认即
+// DefaultChallengeTTL），配置更长的 TTL 时宽限期同步变长，不会提前删除仍可能被
+// 诊断的过期行。
 func (service *ChallengeService) Cleanup(ctx context.Context) (int64, error) {
-	cutoff := service.now().Add(-5 * time.Minute)
+	cutoff := service.now().Add(-service.ttl())
 	limit := service.CleanupBatchSize
 	if limit <= 0 || limit > MaxCleanupBatch {
 		limit = MaxCleanupBatch

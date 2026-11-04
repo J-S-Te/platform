@@ -19,6 +19,12 @@ import (
 
 const activeStatus = "ACTIVE"
 
+// defaultSessionIdleTimeoutSeconds 是租户尚未持久化登录策略时的会话空闲窗口默认值。
+// 与 security 模块 application.defaultIdleTimeoutSeconds（30*60）一致，也与迁移 000039
+// 给 sec_login_policy.idle_timeout_seconds 定义的 DEFAULT 1800 一致；三处必须同步，
+// 不得在本包另造魔数。
+const defaultSessionIdleTimeoutSeconds = 1800
+
 // Repository 是 OIDC/OAuth 运行时协议状态的 MySQL 持久化实现。
 type Repository struct {
 	database *gorm.DB
@@ -236,15 +242,11 @@ func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string
 	return r.resolveSessionSubject(ctx, r.database, sessionID, now, false)
 }
 
-// resolveSessionSubject 从有效会话恢复原始认证主体与时间。
-// 参数：ctx为调用上下文与取消边界。
-//
-//	database为本应用数据库连接。
-//	sessionID为当前会话持久标识。
-//	now为本次服务端校验时间。
-//	lock为当前部署操作的互斥保护。
-//
-// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
+// 非中央模式使用 IAM 空闲策略；中央模式的真实交互只更新 sgov_session，
+// 因此必须由下方 PlatformState 统一裁决，不能再叠加已停止推进的旧活动时钟。
+// resolveSessionSubject 从未撤销、未过期且满足租户空闲策略的会话恢复主体。
+// 参数：ctx 为调用上下文，database 为数据库连接，sessionID 为会话标识，now 为校验时间，lock 控制行锁。
+// 返回值：有效会话主体；失效会话返回 ErrNotFound，数据库失败返回原错误。
 func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.DB, sessionID string, now time.Time, lock bool) (domain.SessionSubject, error) {
 	var row struct {
 		TenantID, SessionID, AccountID, UserID string
@@ -260,6 +262,11 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
 		Joins("LEFT JOIN iam_password_credential ON iam_password_credential.account_id = iam_account.id AND iam_password_credential.status = ?", activeStatus).
 		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now)
+	if !r.central {
+		idleCutoffBase := now.UTC().Truncate(time.Millisecond)
+		query = query.Joins("LEFT JOIN sec_login_policy ON sec_login_policy.tenant_id = iam_session.tenant_id").
+			Where("COALESCE(sec_login_policy.idle_timeout_seconds, ?) > 0 AND iam_session.last_interactive_at > DATE_SUB(?, INTERVAL COALESCE(sec_login_policy.idle_timeout_seconds, ?) SECOND)", defaultSessionIdleTimeoutSeconds, idleCutoffBase, defaultSessionIdleTimeoutSeconds)
+	}
 	if lock {
 		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 	}

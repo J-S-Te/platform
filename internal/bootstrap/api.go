@@ -775,7 +775,13 @@ func NewAPI(cfg config.Config) (*API, error) {
 			TTL:              cfg.CredentialEncryption.ChallengeTTL,
 			CleanupBatchSize: cfg.CredentialEncryption.CleanupBatch,
 		}
-		challengeService.StartCleanup(context.Background(), time.Minute, func(cleanupErr error) {
+		// 安全审查 M-9：挑战行只保留一个 TTL 宽限期，回收必须比签发速度快得多。
+		// 原 1 分钟间隔下，匿名端点持续插入的过期行最多可积压“1 分钟插入量”，
+		// 与限流后的每分钟上限叠加成可观测的堆积；15s 间隔把单次清理批量的时间窗
+		// 缩小到 1/4，配合 challenge.Cleanup 的 cutoff=now-TTL 保持
+		// CHALLENGE_EXPIRED 的错误码语义。批量上限仍为 MaxCleanupBatch(1000)，
+		// DeleteExpired 的 clamp 与之相同，无需同步调整。
+		challengeService.StartCleanup(context.Background(), 15*time.Second, func(cleanupErr error) {
 			logger.Warn("credential challenge cleanup failed", "error", cleanupErr)
 		})
 		operational.CredentialEncryption = &credentialhttp.Handler{

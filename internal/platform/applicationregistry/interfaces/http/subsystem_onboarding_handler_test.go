@@ -351,7 +351,9 @@ func (service *stubSubsystemOnboardingService) ListPortalApplications(context.Co
 	if code == "" {
 		code = "contract_management"
 	}
-	return []application.PortalApplication{{ApplicationID: applicationID, Code: code, Environment: environment}}, nil
+	// 与真实门户投影一致：命中项必须同时带应用与环境主键，否则调用方无法定位
+	// 具体环境（resolveApplicationContextForIdentity 会按失败关闭处理）。
+	return []application.PortalApplication{{ApplicationID: applicationID, EnvironmentID: "env-1", Code: code, Environment: environment}}, nil
 }
 
 func (service *stubSubsystemOnboardingService) ListRegisteredApplicationCodes(context.Context, string) ([]string, error) {

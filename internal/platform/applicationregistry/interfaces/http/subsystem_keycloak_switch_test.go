@@ -254,7 +254,8 @@ func TestVerifyKeycloakBrokerLoginBindsAuthenticatedSessionToExactTarget(t *test
 	handler.ConfigureKeycloakSwitchReadinessInspector(readiness)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/keycloak/broker-login-verifications", strings.NewReader(`{"application_code":"contract_management","environment":"prod","identity_id":"user-1","issuer":"https://sso.example.com/","client_id":"contract-prod-web"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(keycloakctx.WithBrokerClaims(request.Context(), keycloakctx.BrokerClaims{Issuer: "https://sso.example.com", SessionID: "session-1", TenantID: "tenant-1", IdentityID: "user-1", Audience: []string{"contract-prod-web"}}))
+	// 安全（M-2）：证据的 Client 由已验证令牌的 azp 推导，azp 必须出现在自身 aud 中。
+	request = request.WithContext(keycloakctx.WithBrokerClaims(request.Context(), keycloakctx.BrokerClaims{Issuer: "https://sso.example.com", SessionID: "session-1", TenantID: "tenant-1", IdentityID: "user-1", AuthorizedParty: "contract-prod-web", Audience: []string{"contract-prod-web"}, TokenUse: keycloakctx.TokenUseAccessToken}))
 	response := httptest.NewRecorder()
 
 	handler.VerifyKeycloakBrokerLogin(response, request)
@@ -264,6 +265,74 @@ func TestVerifyKeycloakBrokerLoginBindsAuthenticatedSessionToExactTarget(t *test
 	}
 	if got := readiness.verification; got.TenantID != "tenant-1" || got.ApplicationID != "app-1" || got.EnvironmentID != "env-1" || got.IdentityID != "user-1" || got.VerifiedByID != "user-1" || got.SessionID != "session-1" || got.Issuer != "https://sso.example.com" || got.ClientID != "contract-prod-web" {
 		t.Fatalf("unexpected bound verification: %#v", got)
+	}
+}
+
+// 安全审计 M-2 回归：broker 登录证据的 Client 身份不得由请求体决定。
+// 覆盖三类被伪造/越权的输入：请求体 client_id 与令牌 azp 不一致、令牌没有 azp、
+// 目标应用不在该身份可见的门户列表内（旧实现会走不看身份可见性的登记表直查分支）。
+func TestVerifyKeycloakBrokerLoginRejectsUnboundClientOrInvisibleApplication(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		body       string
+		claims     keycloakctx.BrokerClaims
+		portalApps []application.PortalApplication
+	}{
+		{
+			name:   "body client id differs from authorized party",
+			body:   `{"application_code":"contract_management","environment":"prod","identity_id":"user-1","issuer":"https://sso.example.com","client_id":"other-prod-web"}`,
+			claims: keycloakctx.BrokerClaims{Issuer: "https://sso.example.com", SessionID: "session-1", TenantID: "tenant-1", IdentityID: "user-1", AuthorizedParty: "contract-prod-web", Audience: []string{"contract-prod-web"}, TokenUse: keycloakctx.TokenUseAccessToken},
+			portalApps: []application.PortalApplication{
+				{ApplicationID: "app-1", EnvironmentID: "env-1", Code: "contract_management", Environment: "prod"},
+			},
+		},
+		{
+			name:   "token without authorized party",
+			body:   `{"application_code":"contract_management","environment":"prod","identity_id":"user-1","issuer":"https://sso.example.com","client_id":"contract-prod-web"}`,
+			claims: keycloakctx.BrokerClaims{Issuer: "https://sso.example.com", SessionID: "session-1", TenantID: "tenant-1", IdentityID: "user-1", Audience: []string{"contract-prod-web"}, TokenUse: keycloakctx.TokenUseAccessToken},
+			portalApps: []application.PortalApplication{
+				{ApplicationID: "app-1", EnvironmentID: "env-1", Code: "contract_management", Environment: "prod"},
+			},
+		},
+		{
+			name:   "authorized party missing from own audience",
+			body:   `{"application_code":"contract_management","environment":"prod","identity_id":"user-1","issuer":"https://sso.example.com","client_id":"contract-prod-web"}`,
+			claims: keycloakctx.BrokerClaims{Issuer: "https://sso.example.com", SessionID: "session-1", TenantID: "tenant-1", IdentityID: "user-1", AuthorizedParty: "contract-prod-web", Audience: []string{"account"}, TokenUse: keycloakctx.TokenUseAccessToken},
+			portalApps: []application.PortalApplication{
+				{ApplicationID: "app-1", EnvironmentID: "env-1", Code: "contract_management", Environment: "prod"},
+			},
+		},
+		{
+			name:   "application outside identity visible portal list",
+			body:   `{"application_code":"contract_management","environment":"prod","identity_id":"user-1","issuer":"https://sso.example.com","client_id":"contract-prod-web"}`,
+			claims: keycloakctx.BrokerClaims{Issuer: "https://sso.example.com", SessionID: "session-1", TenantID: "tenant-1", IdentityID: "user-1", AuthorizedParty: "contract-prod-web", Audience: []string{"contract-prod-web"}, TokenUse: keycloakctx.TokenUseAccessToken},
+			portalApps: []application.PortalApplication{
+				{ApplicationID: "app-9", EnvironmentID: "env-9", Code: "customer_and_opportunity", Environment: "prod"},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &stubSubsystemOnboardingService{portalItems: test.portalApps}
+			handler, err := NewSubsystemOnboardingHandler(service, &recordingHTTPSubsystemProvisioner{}, &recordingSubsystemAccessManager{}, "https://portal.example.com", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			readiness := &recordingKeycloakReadiness{}
+			handler.ConfigureKeycloak(true, "https://sso.example.com", "basic-platform")
+			handler.ConfigureKeycloakSwitchReadinessInspector(readiness)
+			request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/keycloak/broker-login-verifications", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request = request.WithContext(keycloakctx.WithBrokerClaims(request.Context(), test.claims))
+			response := httptest.NewRecorder()
+
+			handler.VerifyKeycloakBrokerLogin(response, request)
+
+			if response.Code != stdhttp.StatusUnprocessableEntity || readiness.called {
+				t.Fatalf("response = %d %s, recorder called = %v", response.Code, response.Body.String(), readiness.called)
+			}
+		})
 	}
 }
 

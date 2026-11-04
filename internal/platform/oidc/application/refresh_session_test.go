@@ -15,6 +15,7 @@ type refreshSessionRepositoryStub struct {
 	subject      domain.SessionSubject
 	subjectErr   error
 	subjectCalls int
+	rotateCalls  int
 }
 
 func (repository *refreshSessionRepositoryStub) FindClient(context.Context, string, time.Time) (domain.Client, error) {
@@ -36,7 +37,8 @@ func (*refreshSessionRepositoryStub) ConsumeAuthorizationCode(context.Context, C
 func (repository *refreshSessionRepositoryStub) FindRefreshToken(context.Context, [32]byte, time.Time) (domain.RefreshToken, error) {
 	return repository.token, nil
 }
-func (*refreshSessionRepositoryStub) RotateRefreshToken(context.Context, RotateRefreshTokenCommand, time.Time) (domain.TokenGrant, error) {
+func (repository *refreshSessionRepositoryStub) RotateRefreshToken(context.Context, RotateRefreshTokenCommand, time.Time) (domain.TokenGrant, error) {
+	repository.rotateCalls++
 	return domain.TokenGrant{}, errors.New("rotation must not run for an invalid browser session")
 }
 func (*refreshSessionRepositoryStub) RevokeToken(context.Context, RevokeTokenCommand, time.Time) error {
@@ -80,6 +82,44 @@ func TestRefreshRejectsTokenWhoseBrowserSessionWasRevoked(t *testing.T) {
 	}
 	if repository.subjectCalls != 1 {
 		t.Fatalf("ResolveSessionSubject calls = %d, want 1", repository.subjectCalls)
+	}
+}
+
+// 安全审计 M-1：浏览器会话空闲超过租户策略窗口时，共享会话门禁
+// （ResolveSessionSubject 的 sec_login_policy 空闲谓词）返回未找到，刷新令牌流程必须
+// 在轮换前终止。仓储层 SQL 语义见 oidc/infrastructure 的 M-1 用例；这里锁定“拒绝且不
+// 发生 rotate”，避免修复被回退成只拒绝响应而仍换出新令牌。
+func TestRefreshRejectsIdleBrowserSessionWithoutRotation(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.November, 2, 12, 0, 0, 0, time.UTC)
+	repository := &refreshSessionRepositoryStub{
+		client: domain.Client{
+			ID: "oauth-client-1", TenantID: "tenant-1", ClientID: "contract-web",
+			ClientType: "public", TokenAuthMethod: "none",
+			GrantTypes: map[string]struct{}{"refresh_token": {}},
+		},
+		token: domain.RefreshToken{
+			ID: "refresh-1", TenantID: "tenant-1", OAuthClientID: "oauth-client-1",
+			SessionID: "session-idle", AccountID: "account-1", UserID: "user-1",
+			Status: domain.RefreshTokenStatusActive, ExpiresAt: now.Add(time.Hour),
+		},
+		// 空闲超窗：仓储的空闲谓词不再返回该会话，等价于身份侧 ErrUnauthenticated。
+		subjectErr: ErrNotFound,
+	}
+	service := &Service{repository: repository, clock: refreshSessionClock{now: now}}
+
+	_, err := service.Refresh(context.Background(), RefreshTokenInput{
+		ClientAuthentication: ClientAuthentication{ClientID: "contract-web"},
+		RefreshToken:         "idle-session-refresh-token",
+	})
+	if !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("Refresh() error = %v, want ErrInvalidGrant", err)
+	}
+	if repository.subjectCalls != 1 {
+		t.Fatalf("ResolveSessionSubject calls = %d, want 1", repository.subjectCalls)
+	}
+	if repository.rotateCalls != 0 {
+		t.Fatalf("RotateRefreshToken calls = %d, want 0 for an idle session", repository.rotateCalls)
 	}
 }
 

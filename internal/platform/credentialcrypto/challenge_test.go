@@ -61,11 +61,33 @@ func TestChallengeRejectsWrongResourceAndPurpose(t *testing.T) {
 	}
 }
 
+// 安全审查 M-9：清理点必须晚一个实际发放 TTL，而不是“此刻之前全部过期行”。
+// 若 cutoff 回到 now（或任何短于有效 TTL 的值），过期挑战会在客户端重放前被删除，
+// 消费路径的错误码就从 CHALLENGE_EXPIRED 退化成 CHALLENGE_INVALID。
 func TestChallengeCleanupIsBounded(t *testing.T) {
-	repo := &challengeRepoStub{}
-	service := &ChallengeService{Repository: repo, Now: func() time.Time { return time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC) }, TTL: 60 * time.Second}
-	n, err := service.Cleanup(context.Background())
-	if err != nil || n != 3 || repo.deletedLimit != 1000 || !repo.deletedCutoff.Equal(time.Date(2026, 10, 26, 11, 55, 0, 0, time.UTC)) {
-		t.Fatalf("unexpected cleanup: n=%d err=%v cutoff=%v limit=%d", n, err, repo.deletedCutoff, repo.deletedLimit)
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		ttl       time.Duration
+		wantGrace time.Duration
+	}{
+		{name: "default TTL grace period", ttl: 60 * time.Second, wantGrace: DefaultChallengeTTL},
+		{name: "configured longer TTL grace period", ttl: MaxChallengeTTL, wantGrace: MaxChallengeTTL},
+		{name: "unset TTL falls back to default grace period", ttl: 0, wantGrace: DefaultChallengeTTL},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := &challengeRepoStub{}
+			service := &ChallengeService{Repository: repo, Now: func() time.Time { return now }, TTL: test.ttl}
+			n, err := service.Cleanup(context.Background())
+			if err != nil || n != 3 || repo.deletedLimit != MaxCleanupBatch {
+				t.Fatalf("unexpected cleanup: n=%d err=%v limit=%d", n, err, repo.deletedLimit)
+			}
+			if !repo.deletedCutoff.Equal(now.Add(-test.wantGrace)) {
+				t.Fatalf("cleanup cutoff = %v, want %v", repo.deletedCutoff, now.Add(-test.wantGrace))
+			}
+			if !repo.deletedCutoff.Before(now) {
+				t.Fatal("cleanup cutoff must keep a grace period instead of deleting every expired challenge")
+			}
+		})
 	}
 }

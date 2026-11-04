@@ -47,6 +47,14 @@ jobs:
           docker exec '${{ job.services.logout-mysql.id }}' mysql -uroot -e \
             "SET GLOBAL collation_server='utf8mb4_unicode_ci'; SET GLOBAL default_collation_for_utf8mb4='utf8mb4_general_ci'; ALTER DATABASE platform_test_extpdf_idle CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
           go test ./internal/platform/identity/infrastructure -run '^TestAccountLogoutEnqueuesBackchannelOnMySQL$' -count=1 -v
+      - name: Verify OIDC idle policy on isolated MySQL
+        env:
+          PLATFORM_OIDC_IDLE_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.logout-mysql.ports[3306] }})/platform_oidc_test_idle?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+        run: |
+          set -euo pipefail
+          docker exec '${{ job.services.logout-mysql.id }}' mysql -uroot -e \
+            "CREATE DATABASE platform_oidc_test_idle CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          go test ./internal/platform/oidc/infrastructure -run '^TestResolveSessionSubject(Idle|CentralIdle)PolicyMySQL$' -count=1 -v
       - name: Verify Agent credential ownership under isolated root execution
         shell: bash
         run: |
