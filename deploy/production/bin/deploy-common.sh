@@ -25,8 +25,16 @@ env_set() {
   mv -f "$temporary" "$file" || { rm -f -- "$temporary"; return 1; }
 }
 
+# env_set_generated 仅为首次创建的配置生成材料，更新时连空值也保持原状。
+# 参数：file/key/value 为目标与候选材料，initialize 表示本文件首次创建。
+# 返回值：保留或写入成功返回成功；非法初始化标志或写入失败返回错误。
 env_set_generated() {
   local file="$1" key="$2" value="$3" current
+  case "${4:-false}" in
+    false) return 0 ;;
+    true) ;;
+    *) die '关键材料初始化标志必须为 true 或 false' ;;
+  esac
   current="$(env_get "$file" "$key")"
   if [[ -n "$current" && "$current" != REPLACE_WITH_* && "$current" != PENDING_* ]]; then
     return 0

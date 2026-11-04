@@ -35,12 +35,29 @@ configuration_safe_directory() {
   [[ "$deploy_dir/" != "$resolved/"* && "$resolved" != "$deploy_dir/data" ]] || die "拒绝把部署根目录或其父目录作为应用数据目录：$resolved"
 }
 
+# configuration_platform_exists 识别已导入或已创建的平台，约束公开入口迁移。
+# 参数：无；读取导入记录和既有容器元数据。
+# 返回值：已存在真实平台返回成功，否则返回失败。
 configuration_platform_exists() {
   compgen -G "$manifest_dir/platform-*.imported" >/dev/null && return 0
   local container
   for container in uip-platform-api uip-platform-mysql uip-keycloak; do
     docker container inspect "$container" >/dev/null 2>&1 && return 0
   done
+  return 1
+}
+
+# configuration_material_exists 识别需保留的运行材料，防止丢配置后误当全新安装。
+# 参数：无；读取部署证据、运行配置文件存在性及镜像指针。
+# 返回值：存在既有材料返回成功；不读取或输出密码。
+configuration_material_exists() {
+  configuration_platform_exists && return 0
+  compgen -G "$deploy_dir/runtime/*.env" >/dev/null && return 0
+  local image
+  if [[ -f "$release_file" ]]; then
+    image="$(env_get "$release_file" PLATFORM_IMAGE)"
+    [[ "$image" =~ @sha256:[a-f0-9]{64}$ ]] && return 0
+  fi
   return 1
 }
 
@@ -107,6 +124,9 @@ configure_firewall() {
   printf '云安全组、边界防火墙及外部可达性尚未验证；不会自动启用或关闭主机防火墙。\n'
 }
 
+# configure 在暂存区准备首次配置或普通更新，保留已有关键材料及管理员记录。
+# 参数：可选 --force 仅重新确认普通部署选项，不授权重置密码或密钥。
+# 返回值：校验和原子提交成功返回成功；失败时保留正式配置。
 configure() (
   set -Eeuo pipefail
   umask 077
@@ -146,6 +166,9 @@ configure() (
   monitoring="$(env_get "$runtime_file" OFFLINE_MONITORING_ENABLED)"; monitoring="${monitoring:-false}"
   if [[ "$first" == false ]] && public_transport_valid_host "$host" && valid_port "$frontend_port" && valid_port "$platform_port" && valid_port "$keycloak_port" && [[ "$admin" =~ ^[A-Za-z0-9._@-]+$ ]]; then saved=true; fi
   configuration_platform_exists && imported=true
+  if [[ "$first" == true ]] && configuration_material_exists; then
+    die '已有部署或运行材料但主配置缺失；请恢复原 .env，禁止按首次安装重新生成关键材料'
+  fi
   if [[ "$first" == true || "$saved" == false || "$force" == true ]]; then
     if [[ "$first" == true ]]; then mode=ip; host=''; frontend_port=8081; platform_port=18080; keycloak_port=18090; fi
     if [[ "$mode" == ip ]]; then
@@ -210,13 +233,18 @@ configure() (
   fi
   env_set "$runtime_file" SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT "$deploy_dir"
   env_set "$runtime_file" OFFLINE_ADMIN_ACCOUNT "$admin"
-  env_set "$runtime_file" IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME "$admin"
-  env_set "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME "$admin"
+  if [[ "$first" == true ]]; then
+    env_set "$runtime_file" IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME "$admin"
+    env_set "$runtime_file" IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME "$admin"
+  fi
   env_set "$runtime_file" OFFLINE_MONITORING_ENABLED "$monitoring"
-  for key in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_DB_ROOT_PASSWORD KEYCLOAK_ADMIN_PASSWORD CONTRACT_MYSQL_PASSWORD CONTRACT_MYSQL_ROOT_PASSWORD CUSTOMER_MYSQL_PASSWORD CUSTOMER_MYSQL_ROOT_PASSWORD PORTAL_MYSQL_PASSWORD PORTAL_MYSQL_ROOT_PASSWORD PROJECT_MYSQL_PASSWORD PROJECT_MYSQL_ROOT_PASSWORD SETTLEMENT_MYSQL_PASSWORD SETTLEMENT_MYSQL_ROOT_PASSWORD DASHBOARD_MYSQL_PASSWORD DASHBOARD_MYSQL_ROOT_PASSWORD FILE_GATEWAY_DB_PASSWORD FILE_GATEWAY_DB_ROOT_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_hex 24)"; done
-  for key in IAM_MOBILE_ENCRYPTION_KEY IAM_BOOTSTRAP_ADMIN_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_b64)"; done
-  env_set_generated "$runtime_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)"
-  env_set_generated "$runtime_file" CUSTOMER_PORTAL_INITIAL_PASSWORD "$(random_hex 24)"
+  # 只有首次创建配置才生成关键材料；空值和缺项也可能代表既有状态，升级不得猜测。
+  if [[ "$first" == true ]]; then
+    for key in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_DB_ROOT_PASSWORD KEYCLOAK_ADMIN_PASSWORD CONTRACT_MYSQL_PASSWORD CONTRACT_MYSQL_ROOT_PASSWORD CUSTOMER_MYSQL_PASSWORD CUSTOMER_MYSQL_ROOT_PASSWORD PORTAL_MYSQL_PASSWORD PORTAL_MYSQL_ROOT_PASSWORD PROJECT_MYSQL_PASSWORD PROJECT_MYSQL_ROOT_PASSWORD SETTLEMENT_MYSQL_PASSWORD SETTLEMENT_MYSQL_ROOT_PASSWORD DASHBOARD_MYSQL_PASSWORD DASHBOARD_MYSQL_ROOT_PASSWORD FILE_GATEWAY_DB_PASSWORD FILE_GATEWAY_DB_ROOT_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_hex 24)" true; done
+    for key in IAM_MOBILE_ENCRYPTION_KEY IAM_BOOTSTRAP_ADMIN_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_b64)" true; done
+    env_set_generated "$runtime_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)" true
+    env_set_generated "$runtime_file" CUSTOMER_PORTAL_INITIAL_PASSWORD "$(random_hex 24)" true
+  fi
   mkdir "$staging/runtime"
   local configured_services module
   configured_services="$(docker compose --project-directory "$deploy_dir" --file "$deploy_dir/docker-compose.yml" --env-file "$runtime_file" --env-file "$staging/.release.env" config --services)" || die '统一 Compose 无法解析'
@@ -227,17 +255,18 @@ configure() (
     if [[ -f "$deploy_dir/runtime/$runtime_name.env" ]]; then install -m 600 "$deploy_dir/runtime/$runtime_name.env" "$staging/runtime/$runtime_name.env"; else install -m 600 "$deploy_dir/subsystem-templates/$runtime_name.env.example" "$staging/runtime/$runtime_name.env"; fi
   done
   for runtime_name in contract project settlement; do
-    [[ ! -f "$staging/runtime/$runtime_name.env" ]] || env_set_generated "$staging/runtime/$runtime_name.env" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_b64)"
+    [[ ! -f "$deploy_dir/runtime/$runtime_name.env" ]] || continue
+    [[ ! -f "$staging/runtime/$runtime_name.env" ]] || env_set_generated "$staging/runtime/$runtime_name.env" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_b64)" true
   done
-  if [[ -f "$staging/runtime/customer.env" ]]; then
-    for key in SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do env_set_generated "$staging/runtime/customer.env" "$key" "$(random_b64)"; done
+  if [[ -f "$staging/runtime/customer.env" && ! -f "$deploy_dir/runtime/customer.env" ]]; then
+    for key in SENSITIVE_ENCRYPTION_KEY_BASE64 SENSITIVE_HMAC_KEY_BASE64 PORTAL_INVITE_PEPPER_BASE64; do env_set_generated "$staging/runtime/customer.env" "$key" "$(random_b64)" true; done
   fi
-  if [[ -f "$staging/runtime/portal.env" ]]; then
-    for key in PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_HMAC_KEY_BASE64; do env_set_generated "$staging/runtime/portal.env" "$key" "$(random_b64)"; done
+  if [[ -f "$staging/runtime/portal.env" && ! -f "$deploy_dir/runtime/portal.env" ]]; then
+    for key in PORTAL_ENCRYPTION_KEY_BASE64 PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64 PORTAL_HMAC_KEY_BASE64; do env_set_generated "$staging/runtime/portal.env" "$key" "$(random_b64)" true; done
   fi
-  if [[ -f "$staging/runtime/data-analysis.env" ]]; then
-    env_set_generated "$staging/runtime/data-analysis.env" OIDC_CODEC_KEY "$(random_hex 32)"
-    env_set_generated "$staging/runtime/data-analysis.env" METABASE_EMBEDDING_SECRET "$(random_hex 32)"
+  if [[ -f "$staging/runtime/data-analysis.env" && ! -f "$deploy_dir/runtime/data-analysis.env" ]]; then
+    env_set_generated "$staging/runtime/data-analysis.env" OIDC_CODEC_KEY "$(random_hex 32)" true
+    env_set_generated "$staging/runtime/data-analysis.env" METABASE_EMBEDDING_SECRET "$(random_hex 32)" true
   fi
   keys_dir="$(env_get "$runtime_file" PLATFORM_KEYS_DIR)"; keys_dir="${keys_dir:-./data/platform/keys}"
   keys_dir="${keys_dir#./}"
@@ -245,7 +274,7 @@ configure() (
   configuration_safe_directory "$keys_dir"
   private="$keys_dir/jwt-ed25519-private.pem"; public="$keys_dir/jwt-ed25519-public.pem"
   [[ ! -L "$private" && ! -L "$public" ]] || die '拒绝符号链接密钥文件'
-  if [[ ! -f "$private" && ( -e "$public" || "$imported" == true ) ]]; then die '私钥缺失但公钥或部署记录已存在，拒绝自动轮换签名密钥；请从备份恢复'; fi
+  if [[ ! -f "$private" && ( -e "$public" || "$imported" == true || "$first" == false ) ]]; then die '已有配置、部署记录或公钥时私钥缺失，拒绝自动轮换签名密钥；请从备份恢复'; fi
   install -d -m 700 "$keys_dir"
   derived="$staging/derived-public.pem"
   if [[ ! -f "$private" ]]; then

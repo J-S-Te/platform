@@ -847,6 +847,9 @@ set_env_value() {
   mv -- "$temp_file" "$ENV_FILE"
 }
 
+# ensure_env_secret 仅首次创建配置时生成密钥，升级缺失必需材料时要求恢复。
+# 参数：key 为配置名，generator 为生成类型，initialize 表示首次创建配置。
+# 返回值：已有值或允许的空引导令牌返回成功；缺失必需材料或生成失败返回错误。
 ensure_env_secret() {
   local key="$1"
   local generator="$2"
@@ -855,6 +858,14 @@ ensure_env_secret() {
   if [[ -n "$current" ]]; then
     log "INFO" "${key} 已配置，保留现有值。"
     return 0
+  fi
+  if [[ "${3:-false}" != true ]]; then
+    if [[ "$key" == IAM_BOOTSTRAP_TOKEN ]]; then
+      log "INFO" "保留现有空引导令牌，不在升级中重新启用。"
+      return 0
+    fi
+    log "ERROR" "已有配置缺少 ${key}；请恢复原材料，升级不会随机生成替代值。"
+    return 1
   fi
   local generated
   case "$generator" in
@@ -879,6 +890,9 @@ resolve_env_path() {
   fi
 }
 
+# merge_env_defaults 只为已有配置补齐普通选项，保留关键材料的原始状态。
+# 参数：initialize 表示首次创建配置，只有首次允许使用模板中的关键项。
+# 返回值：模板不存在或合并成功返回成功；配置写入失败返回错误。
 merge_env_defaults() {
   [[ -f "$ENV_EXAMPLE" ]] || return 0
   local line normalized key default_value current_value
@@ -890,6 +904,11 @@ merge_env_defaults() {
     key="${normalized%%=*}"
     key="${key//[[:space:]]/}"
     [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+    if [[ "${1:-false}" != true ]]; then
+      case "$key" in
+        *PASSWORD*|*SECRET*|*TOKEN*|*ENCRYPTION*|*PEPPER*|*KEY*|IAM_BOOTSTRAP_ADMIN_*) continue ;;
+      esac
+    fi
     default_value="${normalized#*=}"
     [[ -n "$default_value" ]] || continue
     current_value="$(get_env_value "$key" || true)"
@@ -900,10 +919,15 @@ merge_env_defaults() {
   done <"$ENV_EXAMPLE"
 }
 
+# configure_environment 区分首次配置与升级，保留已有密码、密钥和空引导状态。
+# 参数：无；使用已校验的环境文件位置和部署参数。
+# 返回值：配置和存储准备成功返回成功；缺少原关键材料时失败。
 configure_environment() {
   CURRENT_STEP="创建项目环境配置"
   require_command openssl
+  local initialize=false
   if [[ ! -f "$ENV_FILE" ]]; then
+    initialize=true
     [[ -f "$ENV_EXAMPLE" ]] || {
       log "ERROR" "缺少环境模板：${ENV_EXAMPLE}"
       return 1
@@ -916,7 +940,7 @@ configure_environment() {
     fi
   else
     chmod 600 "$ENV_FILE" 2>/dev/null || true
-    log "INFO" "保留现有非空值，仅补齐缺失或空白的开发配置：${ENV_FILE}"
+    log "INFO" "保留已有关键配置，仅补齐普通开发选项：${ENV_FILE}"
   fi
 
   local app_env
@@ -926,10 +950,10 @@ configure_environment() {
     return 1
   fi
 
-  merge_env_defaults
-  ensure_env_secret MYSQL_PASSWORD hex
-  ensure_env_secret IAM_MOBILE_ENCRYPTION_KEY base64
-  ensure_env_secret IAM_BOOTSTRAP_TOKEN hex
+  merge_env_defaults "$initialize"
+  ensure_env_secret MYSQL_PASSWORD hex "$initialize"
+  ensure_env_secret IAM_MOBILE_ENCRYPTION_KEY base64 "$initialize"
+  ensure_env_secret IAM_BOOTSTRAP_TOKEN hex "$initialize"
 
   CURRENT_STEP="创建本地数据目录与 JWT 密钥"
   local storage_root log_directory private_key public_key
@@ -943,6 +967,9 @@ configure_environment() {
     log "INFO" "JWT 密钥已存在，保留现有密钥。"
   elif [[ -e "$private_key" || -e "$public_key" ]]; then
     log "ERROR" "JWT 私钥和公钥必须同时存在；当前仅发现其中一个，请人工核对后重试。"
+    return 1
+  elif [[ "$initialize" != true ]]; then
+    log "ERROR" "已有配置的 JWT 密钥缺失；请从备份恢复，升级不会生成替代密钥。"
     return 1
   else
     run_cmd openssl genpkey -algorithm ED25519 -out "$private_key"
@@ -1017,6 +1044,9 @@ ensure_runtime_account() {
   fi
 }
 
+# write_production_env_template 仅为缺失的生产配置创建模板，不替换已有材料。
+# 参数：无；使用已校验的环境文件位置。
+# 返回值：模板准备成功返回成功，写入失败返回错误。
 write_production_env_template() {
   [[ -f "$ENV_FILE" ]] && return 0
 
@@ -1087,7 +1117,7 @@ ENV_TEMPLATE
   run_cmd install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$env_directory"
   run_cmd install -o root -g "$RUNTIME_GROUP" -m 0640 "$template_file" "$ENV_FILE"
   PRODUCTION_ENV_TEMPLATE_CREATED=true
-  log "WARN" "已创建生产环境模板：${ENV_FILE}。脚本不会猜测域名、数据库地址或数据库密码；请替换所有 REPLACE_WITH_* 值后重新执行同一部署命令。IAM_BOOTSTRAP_TOKEN 默认留空；请填写 IAM_BOOTSTRAP_ADMIN_* 以供首次部署自动创建超级管理员，成功后密码会自动清除。"
+  log "WARN" "已创建生产环境模板：${ENV_FILE}。脚本不会猜测域名、数据库地址或数据库密码；请替换所有 REPLACE_WITH_* 值后重新执行同一部署命令。IAM_BOOTSTRAP_TOKEN 默认留空；请填写 IAM_BOOTSTRAP_ADMIN_* 以供首次部署自动创建超级管理员，原初始化配置会保留，升级不会清空或重置管理员密码。"
 }
 
 validate_production_env_values() {
@@ -1505,18 +1535,9 @@ is_bootstrap_admin_placeholder() {
   [[ "$1" == REPLACE_WITH_* ]]
 }
 
-clear_bootstrap_admin_password() {
-  local configured_password
-  configured_password="$(get_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD || true)"
-  [[ -n "$configured_password" ]] || return 0
-
-  CURRENT_STEP="清除一次性超级管理员密码"
-  set_env_value IAM_BOOTSTRAP_ADMIN_PASSWORD ""
-  run_cmd chown root:"$RUNTIME_GROUP" "$ENV_FILE"
-  run_cmd chmod 0640 "$ENV_FILE"
-  log "INFO" "已清除环境文件中的一次性 IAM_BOOTSTRAP_ADMIN_PASSWORD；现有管理员未被修改。"
-}
-
+# load_bootstrap_admin_input 读取首次初始化管理员输入，不写回或清空原配置。
+# 参数：无；使用受保护环境文件或当前终端输入。
+# 返回值：输入完整返回成功；非交互缺项或确认不一致时失败。
 load_bootstrap_admin_input() {
   BOOTSTRAP_ADMIN_DISPLAY_NAME="$(get_env_value IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME || true)"
   BOOTSTRAP_ADMIN_ACCOUNT_NAME="$(get_env_value IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME || true)"
@@ -1528,7 +1549,7 @@ load_bootstrap_admin_input() {
 
   if [[ -z "$BOOTSTRAP_ADMIN_DISPLAY_NAME" || -z "$BOOTSTRAP_ADMIN_ACCOUNT_NAME" || -z "$BOOTSTRAP_ADMIN_PASSWORD" ]]; then
     if [[ "$ASSUME_YES" == true || ! -t 0 ]]; then
-      log "ERROR" "首次创建超级管理员需要在 ${ENV_FILE} 设置 IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME、IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME 和 IAM_BOOTSTRAP_ADMIN_PASSWORD。密码仅在成功初始化后自动清除。"
+      log "ERROR" "首次创建超级管理员需要在 ${ENV_FILE} 设置 IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME、IAM_BOOTSTRAP_ADMIN_ACCOUNT_NAME 和 IAM_BOOTSTRAP_ADMIN_PASSWORD。原配置会保留，仅用于首次初始化；已有账号不会自动改密。"
       return 1
     fi
 
@@ -1594,6 +1615,9 @@ run_bootstrap_admin_initialize() {
   return 1
 }
 
+# bootstrap_first_super_admin 仅在尚未初始化时创建管理员，始终保留配置文件原值。
+# 参数：bootstrap_binary 为当前候选版本的管理员初始化程序。
+# 返回值：已存在或创建成功返回成功；状态检查与初始化失败返回原错误。
 bootstrap_first_super_admin() {
   local bootstrap_binary="$1"
   [[ -x "$bootstrap_binary" ]] || {
@@ -1609,7 +1633,6 @@ bootstrap_first_super_admin() {
   local status
   if run_bootstrap_admin_status "$bootstrap_binary"; then
     log "INFO" "首个超级管理员已初始化，跳过创建且不覆盖现有账号。"
-    clear_bootstrap_admin_password
     return 0
   else
     status=$?
@@ -1620,11 +1643,10 @@ bootstrap_first_super_admin() {
 
   load_bootstrap_admin_input
   if ! run_bootstrap_admin_initialize "$bootstrap_binary"; then
-    log "ERROR" "首个超级管理员初始化失败；未清除一次性密码，以便修复配置后重试。"
+    log "ERROR" "首个超级管理员初始化失败；保留原配置供修复后重试。"
     return 1
   fi
 
-  clear_bootstrap_admin_password
   BOOTSTRAP_ADMIN_PASSWORD=""
   log "INFO" "首个超级管理员初始化完成。"
 }

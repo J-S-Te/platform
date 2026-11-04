@@ -70,6 +70,8 @@ grep -q 'ufw allow 8081/tcp' "$TEST_LOG" || fail 'frontend firewall'
 grep -q 'ufw allow 18090/tcp' "$TEST_LOG" || fail 'SSO firewall'
 if grep -q 'ufw allow 18080/tcp' "$TEST_LOG"; then fail 'private API exposed'; fi
 secret="$(value MYSQL_PASSWORD)"; private_hash="$(sha256sum "$keys/jwt-ed25519-private.pem")"
+initial_password="$(value IAM_BOOTSTRAP_ADMIN_PASSWORD)"
+[[ -n "$initial_password" && "$initial_password" != REPLACE_WITH_* ]] || fail 'first administrator password initialization'
 set_value IAM_IMPORT_FILE_GATEWAY_CLIENT_ID retained-id
 set_value IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET retained-secret
 set_value OIDC_ROLE_CONFIG_HASH retained-hash
@@ -79,8 +81,28 @@ run_config </dev/null || { cat "$test_root/result.log"; fail 'idempotent repair'
 [[ "$(stat -c %a "$keys/jwt-ed25519-public.pem")" == 644 ]] || fail 'public key repair'
 [[ "$(stat -c %u "$(value FILE_GATEWAY_HOST_ROOT)")" == 10001 ]] || fail 'owner repair'
 [[ "$(value MYSQL_PASSWORD)" == "$secret" && "$(sha256sum "$keys/jwt-ed25519-private.pem")" == "$private_hash" ]] || fail 'secret rotation'
+[[ "$(value IAM_BOOTSTRAP_ADMIN_PASSWORD)" == "$initial_password" ]] || fail 'administrator password changed on repeated configure'
+# 空值/缺项也不能被升级补成随机值；既有子系统配置按原文件完整保留。
+set_value IAM_BOOTSTRAP_ADMIN_PASSWORD ''
+set_value IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME retained-display
+critical_before="$(awk -F= '$1 ~ /(PASSWORD|SECRET|TOKEN|PEPPER|ENCRYPTION|(^|_)KEY(S)?(_|$))/ {print}' "$test_root/deploy/.env" | sha256sum)"
+runtime_before="$(find "$test_root/deploy/runtime" -type f -name '*.env' -exec sha256sum {} \; | sort)"
 printf '\n\n\n\n\n\n' | run_config --force || { cat "$test_root/result.log"; fail 'force same settings'; }
+[[ "$(value IAM_BOOTSTRAP_ADMIN_PASSWORD)" == '' ]] || fail 'upgrade generated a replacement administrator password'
+[[ "$(value IAM_BOOTSTRAP_ADMIN_DISPLAY_NAME)" == retained-display ]] || fail 'upgrade replaced original administrator metadata'
+[[ "$(awk -F= '$1 ~ /(PASSWORD|SECRET|TOKEN|PEPPER|ENCRYPTION|(^|_)KEY(S)?(_|$))/ {print}' "$test_root/deploy/.env" | sha256sum)" == "$critical_before" ]] || fail 'force changed critical root configuration'
+[[ "$(find "$test_root/deploy/runtime" -type f -name '*.env' -exec sha256sum {} \; | sort)" == "$runtime_before" ]] || fail 'force changed existing runtime configuration'
+# 首装只完成configure但尚未导入/启动平台时，仍可修正IP，关键材料必须保留。
+printf '192.0.2.21\n18080\n8081\n18090\nadmin\nn\n' | run_config --force || fail 'pre-install address correction blocked'
+[[ "$(value PUBLIC_PLATFORM_HOST)" == 192.0.2.21 ]] || fail 'pre-install address correction missing'
+[[ "$(awk -F= '$1 ~ /(PASSWORD|SECRET|TOKEN|PEPPER|ENCRYPTION|(^|_)KEY(S)?(_|$))/ {print}' "$test_root/deploy/.env" | sha256sum)" == "$critical_before" ]] || fail 'address correction changed secrets'
+printf '192.0.2.20\n18080\n8081\n18090\nadmin\nn\n' | run_config --force || fail 'pre-install address restoration blocked'
 [[ "$(value IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET)" == retained-secret && "$(value OIDC_ROLE_CONFIG_HASH)" == retained-hash ]] || fail 'force cleared credentials'
+# 现有 runtime 材料仍在时，主配置遗失不能按首次安装重新生成。
+mv "$test_root/deploy/.env" "$test_root/env.saved"
+if printf '192.0.2.20\n18080\n8081\n18090\nadmin\nn\n' | run_config; then fail 'lost main config accepted as new installation'; fi
+[[ ! -e "$test_root/deploy/.env" ]] || fail 'lost main config was replaced'
+mv "$test_root/env.saved" "$test_root/deploy/.env"
 before="$(sha256sum "$test_root/deploy/.env")"
 if printf '999.999.999.999\n' | run_config --force; then fail 'invalid IP accepted'; fi
 [[ "$(sha256sum "$test_root/deploy/.env")" == "$before" ]] || fail 'failed config altered env'
@@ -131,6 +153,13 @@ set_value PUBLIC_HTTPS_PORT 8443
 mv "$keys/jwt-ed25519-private.pem" "$keys/saved-private.pem"
 if run_config </dev/null; then fail 'missing private key silently replaced'; fi
 mv "$keys/saved-private.pem" "$keys/jwt-ed25519-private.pem"
+# 已有配置即使整对密钥都缺失，也不能自动生成另一套身份材料。
+mv "$keys/jwt-ed25519-private.pem" "$keys/saved-private.pem"
+mv "$keys/jwt-ed25519-public.pem" "$keys/saved-public.pem"
+if run_config </dev/null; then fail 'lost key pair silently replaced during update'; fi
+[[ ! -e "$keys/jwt-ed25519-private.pem" && ! -e "$keys/jwt-ed25519-public.pem" ]] || fail 'update wrote replacement keys'
+mv "$keys/saved-private.pem" "$keys/jwt-ed25519-private.pem"
+mv "$keys/saved-public.pem" "$keys/jwt-ed25519-public.pem"
 
 # 直接调用纯校验函数；fixtures从实际模板派生，不运行容器。
 source "$deploy"
