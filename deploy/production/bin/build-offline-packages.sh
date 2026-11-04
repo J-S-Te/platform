@@ -33,6 +33,25 @@ builtin_v2_no_approvals=false
 release_spec=''
 selected_optional_components=''
 selected_components_provided=false
+# 选择项同时接受 CLI 名（contract/customer-opportunity/...）与应用编码
+# （contract_management/customer_and_opportunity/...）：发布流程会把应用编码原样传进来，
+# 若不归一化，所有可选块都会被当成"未选择"而整体注释掉，受控升级随后必失败。
+normalize_selected_components() {
+  local raw="${1-}" token out=""
+  raw="${raw//,/ }"
+  for token in $raw; do
+    case "$token" in
+      contract_management|contract-management) token=contract ;;
+      customer_and_opportunity|customer-opportunity) token=customer-opportunity ;;
+      project_management|project-management) token=project ;;
+      data_analysis|data-analysis) token=data-analysis ;;
+      settlement_and_invoicing|settlement-invoicing) token=settlement ;;
+      customer_portal|customer-portal) token=customer-portal ;;
+    esac
+    case " $out " in *" $token "*) ;; *) out="${out}${out:+ }${token}" ;; esac
+  done
+  printf '%s\n' "$out"
+}
 reuse_approved_crm_image=false
 runtime_approval_digest=''
 installation_scenario=''
@@ -127,6 +146,9 @@ fi
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "版本号格式不正确" >&2; exit 2; }
 case "$installation_scenario" in ''|fresh|migrate|platform-only|expand) ;; *) echo '安装场景无效' >&2; exit 2 ;; esac
 [[ -n "$installation_scenario" || -z "$installation_customer" ]] || { echo '--customer-id 必须与安装场景同时提供' >&2; exit 2; }
+if [[ "$selected_components_provided" == true ]]; then
+  selected_optional_components="$(normalize_selected_components "$selected_optional_components")"
+fi
 [[ "$reuse_approved_crm_image" != true || ( -n "$runtime_approval_dir" && "$runtime_approval_approved" == true ) ]] || { echo '复用CRM镜像需要已审核运行批准' >&2; exit 2; }
 [[ -z "$installation_scenario" || -n "$runtime_approval_dir" ]] || { echo '四场景安装必须提供已批准目录' >&2; exit 2; }
 case "$component" in common|platform|frontend|customer-opportunity|customer-portal|contract|project|settlement|data-analysis|host-deps|assets|all) ;; *) usage >&2; exit 2 ;; esac
@@ -898,6 +920,16 @@ disabled_compose_modules() {
   done
 }
 
+# 本批实际交付的可选子系统模块：投影后必须仍为 enabled，否则受控升级会判"未启用"。
+enabled_compose_modules() {
+  local component module
+  for mapping in customer-opportunity:customer customer-portal:portal contract:contract project:project settlement:settlement data-analysis:data-analysis; do
+    component="${mapping%%:*}"
+    module="${mapping#*:}"
+    selected_component "$component" && printf '%s\n' "$module"
+  done
+}
+
 package_assets() (
   local assets_archive assets_temporary sidecar_temporary assets_stage relative destination assets_digest
   local -a asset_files=(
@@ -931,11 +963,14 @@ package_assets() (
     tests/test-frontend-modes.sh tests/test-key-init.sh tests/test-metabase-init.sh tests/test-deployment-compatibility.py
     tests/test-release-materials.py tests/test-release-workflow.py tests/test-release-plan-inspect.py tests/test-publisher-diff.py
   )
-  local disabled_csv=""
+  local disabled_csv="" enabled_csv=""
   if [[ "$selected_components_provided" == true ]]; then
     while IFS= read -r module; do
       [[ -z "$module" ]] || disabled_csv="${disabled_csv:+${disabled_csv},}${module}"
     done < <(disabled_compose_modules)
+    while IFS= read -r module; do
+      [[ -z "$module" ]] || enabled_csv="${enabled_csv:+${enabled_csv},}${module}"
+    done < <(enabled_compose_modules)
   fi
   assets_archive="$output_root/deployment-assets-${version}.tar.gz"
   assets_temporary="$(mktemp "$output_root/.deployment-assets.archive.XXXXXX")"
@@ -966,7 +1001,8 @@ package_assets() (
     mkdir -p -- "$(dirname -- "$destination")"
     if [[ "$relative" == "docker-compose.yml" && "$selected_components_provided" == true && -n "$disabled_csv" ]]; then
       python3 "$deploy_dir/bin/project-compose-assets.py" \
-        --input "$deploy_dir/$relative" --output "$destination" --disabled "$disabled_csv" || {
+        --input "$deploy_dir/$relative" --output "$destination" \
+        --disabled "$disabled_csv" --require-enabled "$enabled_csv" || {
           echo '无法按组件选择投影 docker-compose.yml；拒绝发布' >&2
           exit 1
         }
