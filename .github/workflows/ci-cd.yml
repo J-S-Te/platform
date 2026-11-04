@@ -91,6 +91,8 @@ jobs:
           python3 -B deploy/production/tests/test_integration_wiring.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
+          python3 -B deploy/production/tests/test-deploy-service-env-set.py
+          python3 -B deploy/production/tests/test-portal-proxy-deployment.py
           python3 -B deploy/production/tests/test-release-backup-policy.py
           python3 deploy/production/tests/test-runtime-dsn-dotenv.py
           python3 -B deploy/production/tests/test-upgrade-config-preservation.py
