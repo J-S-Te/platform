@@ -324,6 +324,73 @@ if [[ -f "$target/docker-compose.yml" ]]; then
     exit 1
   fi
   mv -f -- "$mount_update" "$compose_update"
+  # 模板仅落到 .dist；历史活动编排须在同一事务内定向补齐 Portal 代理映射。
+  mount_update="$(mktemp "$target/.compose-portal-proxy.XXXXXX")"
+  if ! python3 - "$compose_update" >"$mount_update" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+
+def update_portal_proxy(source):
+    """用途：只为活动 Portal 服务补缺失代理映射，保留现场所有其他行。
+    参数：source 为安装事务中的活动 Compose 文本。
+    返回值：兼容升级文本；不支持或重复结构抛出异常且不写目标文件。
+    """
+    lines = source.splitlines(keepends=True)
+    mapping = ('      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-'
+               '127.0.0.1/32,::1/128,172.31.255.1/32,172.31.255.250/32}\n')
+    for service in ('portal-api', 'portal-migrate'):
+        starts = [i for i, line in enumerate(lines)
+                  if re.fullmatch(r'  ' + service + r':\s*(?:#.*)?\n?', line)]
+        if len(starts) > 1:
+            raise ValueError('Portal 服务重复，须人工审核')
+        if not starts:
+            if any(re.match(r'  [\'"]' + service + r'[\'"]:', line) for line in lines):
+                raise ValueError('Portal 自定义服务声明须人工审核')
+            continue
+        start = starts[0]
+        end = next((i for i in range(start + 1, len(lines))
+                    if re.match(r'^(?:  [^\s#]|[^\s#])', lines[i])), len(lines))
+        block = lines[start:end]
+        envs = [i for i, line in enumerate(block) if re.match(r'    environment:', line)]
+        if len(envs) > 1:
+            raise ValueError('Portal environment 重复，须人工审核')
+        if not envs:
+            if any(re.match(r'    <<:', line) for line in block):
+                raise ValueError('Portal 继承环境须人工审核，禁止覆盖继承字段')
+            block[1:1] = ['    environment:\n', mapping]
+        else:
+            index = envs[0]
+            if not re.fullmatch(r'    environment:\s*(?:#.*)?\n?', block[index]):
+                raise ValueError('Portal environment 须为普通块式映射')
+            stop = next((i for i in range(index + 1, len(block))
+                         if re.match(r'    [^\s#]', block[i])), len(block))
+            entries = [line for line in block[index + 1:stop]
+                       if line.strip() and not line.lstrip().startswith('#')]
+            if any(not re.match(r'      [A-Za-z_][A-Za-z0-9_]*:', line)
+                   for line in entries):
+                raise ValueError('Portal 自定义环境结构须人工审核')
+            keys = [line.split(':', 1)[0].strip() for line in entries]
+            if len(keys) != len(set(keys)):
+                raise ValueError('Portal 环境键重复，须人工审核')
+            if 'APP_TRUSTED_PROXIES' not in keys:
+                block.insert(index + 1, mapping)
+        lines[start:end] = block
+    return ''.join(lines)
+
+
+try:
+    sys.stdout.write(update_portal_proxy(Path(sys.argv[1]).read_text()))
+except (OSError, ValueError) as error:
+    print('Portal 代理编排升级失败：' + str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    rm -f -- "$mount_update"
+    exit 1
+  fi
+  mv -f -- "$mount_update" "$compose_update"
   # 保留现场裁剪时也必须传递迁移 000130 所需数据库启动参数；只改平台库，
   # 不覆盖其他 MySQL、卷、镜像或自定义参数。实际重建仍在备份校验后的发布阶段。
   if grep -Eq '^  platform-mysql:[[:space:]]*(#.*)?$' "$compose_update"; then
