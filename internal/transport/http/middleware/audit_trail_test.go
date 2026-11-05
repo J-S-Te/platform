@@ -826,3 +826,31 @@ func TestAuditTrailNonRequiredModeWritesSingleEventWithoutPhase(t *testing.T) {
 		t.Fatalf("dead letters = %d, want 0 in non-required mode", len(recorder.spooled))
 	}
 }
+
+// SEC-D4b 平台侧必开判定：显式键可解析时用解析值，空值回退 APP_ENV=production，
+// 显式值非法（如 "notabool"）按失败关闭返回 true——强制审计被配错不得静默关闭，
+// 与 project_management / Settlement 的同类实现同语义。
+func TestPlatformAuditRequiredFailsClosedOnInvalidExplicitValue(t *testing.T) {
+	cases := []struct {
+		name         string
+		explicit     string
+		appEnv       string
+		wantRequired bool
+	}{
+		{name: "非法显式值按失败关闭", explicit: "notabool", appEnv: "dev", wantRequired: true},
+		{name: "空值回退 production 判定", explicit: "", appEnv: "production", wantRequired: true},
+		{name: "空值非 production 不要求必开", explicit: "", appEnv: "dev", wantRequired: false},
+		{name: "显式 false 在 production 下关闭必开", explicit: "false", appEnv: "production", wantRequired: false},
+		{name: "显式 true 在非 production 下要求必开", explicit: "true", appEnv: "dev", wantRequired: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("PLATFORM_AUDIT_REQUIRED", testCase.explicit)
+			t.Setenv("APP_ENV", testCase.appEnv)
+			if required := platformAuditRequired(); required != testCase.wantRequired {
+				t.Fatalf("platformAuditRequired() = %v, want %v (PLATFORM_AUDIT_REQUIRED=%q, APP_ENV=%q)",
+					required, testCase.wantRequired, testCase.explicit, testCase.appEnv)
+			}
+		})
+	}
+}

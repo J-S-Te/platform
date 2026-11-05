@@ -131,3 +131,41 @@ func TestNewRepositoryFailsClosedWhenRequiredAndKeyMissing(t *testing.T) {
 		t.Fatalf("err = %v, want ErrPayloadHashKeyRequired", err)
 	}
 }
+
+// 与传输层同语义：显式键可解析时用解析值，空值回退 APP_ENV=production，
+// 显式值非法（如 "notabool"）按失败关闭返回 true。
+func TestAuditRequiredFromEnvFailsClosedOnInvalidExplicitValue(t *testing.T) {
+	cases := []struct {
+		name         string
+		explicit     string
+		appEnv       string
+		wantRequired bool
+	}{
+		{name: "非法显式值按失败关闭", explicit: "notabool", appEnv: "dev", wantRequired: true},
+		{name: "空值回退 production 判定", explicit: "", appEnv: "production", wantRequired: true},
+		{name: "空值非 production 不要求必开", explicit: "", appEnv: "dev", wantRequired: false},
+		{name: "显式 false 在 production 下关闭必开", explicit: "false", appEnv: "production", wantRequired: false},
+		{name: "显式 true 在非 production 下要求必开", explicit: "true", appEnv: "dev", wantRequired: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("PLATFORM_AUDIT_REQUIRED", testCase.explicit)
+			t.Setenv("APP_ENV", testCase.appEnv)
+			if required := auditRequiredFromEnv(); required != testCase.wantRequired {
+				t.Fatalf("auditRequiredFromEnv() = %v, want %v (PLATFORM_AUDIT_REQUIRED=%q, APP_ENV=%q)",
+					required, testCase.wantRequired, testCase.explicit, testCase.appEnv)
+			}
+		})
+	}
+}
+
+// 非法显式值 + 未配置 payload hash key ⇒ 必开模式生效，构造函数失败关闭，
+// 不再静默退回无键 SHA-256。这是本修复对 payloadHasherFromEnv 的预期影响。
+func TestPayloadHasherFromEnvFailsClosedOnInvalidExplicitValue(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "notabool")
+	t.Setenv("APP_ENV", "dev")
+	t.Setenv(PayloadHashKeyEnv, "")
+	if _, err := payloadHasherFromEnv(); !errors.Is(err, ErrPayloadHashKeyRequired) {
+		t.Fatalf("err = %v, want ErrPayloadHashKeyRequired", err)
+	}
+}

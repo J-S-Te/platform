@@ -438,11 +438,16 @@ func ingestPlatformAuditEvent(ctx context.Context, recorder AuditRecorder, tenan
 // platformAuditRequired 判定是否处于审计必开模式：PLATFORM_AUDIT_REQUIRED 显式设置优先，
 // 否则 APP_ENV=production 默认必开。平台配置键为 APP_ENV（internal/shared/config 的
 // Environment），与子系统 data_analysis/contract/PM 的 SEC-D4b 判定保持同一语义。
+// 显式值非法（strconv.ParseBool 解析失败）按失败关闭返回 true：把强制审计配错不该静默
+// 降级成“非必开”，与 project_management / Settlement 的同类实现同语义。
 func platformAuditRequired() bool {
 	raw := strings.TrimSpace(os.Getenv("PLATFORM_AUDIT_REQUIRED"))
 	if raw != "" {
 		required, err := strconv.ParseBool(raw)
-		return err == nil && required
+		if err != nil {
+			return true
+		}
+		return required
 	}
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
 }
