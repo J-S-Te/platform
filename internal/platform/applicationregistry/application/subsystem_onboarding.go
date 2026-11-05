@@ -55,7 +55,15 @@ const (
 	// CRM 的契约端点；CRM 机器入口固定要求 scope opportunity.signed.write，
 	// 与合同机器入口共用同一最小权限语义但使用独立专用客户端
 	// （BIZ-XEVT2-02）。静态 Bearer 不再被接受。
-	ServiceCredentialCRMContractLinkWrite               = "crm_contract_link_write"
+	ServiceCredentialCRMContractLinkWrite = "crm_contract_link_write"
+	// ServiceCredentialCRMCustomerImportProvision / ServiceCredentialCRMOpportunityImportProvision
+	// 是合同历史导入自动开立 CRM 客户/商机所用的两个专用用途：scope 必须分别与
+	// CRM 内部导入通道的机器入口白名单（customer.import_provision /
+	// opportunity.import_provision）完全一致，否则开启导入开立即 401。平台按
+	// “一用途一 client 一 scope”授予，客户与商机凭据分离，且都不复用合同核验与
+	// 签约回写凭据。
+	ServiceCredentialCRMCustomerImportProvision         = "crm_customer_import_provision"
+	ServiceCredentialCRMOpportunityImportProvision      = "crm_opportunity_import_provision"
 	ServiceCredentialContractImportReportRead           = "contract_import_report_read"
 	ServiceCredentialAnalysisContractImportReportStatus = "analysis_contract_import_report_status"
 	ServiceCredentialContractDashboardRead              = "contract_dashboard_read"
@@ -684,6 +692,8 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialContractOpportunitySignedCountRead: {ServiceCredentialContractOpportunitySignedCountRead, "contract-signed-count", "Contract Opportunity Signed Count Reader", "contract.opportunity_signed_count.read"},
 	ServiceCredentialCRMContractReferenceRead:           {ServiceCredentialCRMContractReferenceRead, "crm-contract-reference", "CRM Contract Reference Reader", "customer.contract_reference.read"},
 	ServiceCredentialCRMContractLinkWrite:               {ServiceCredentialCRMContractLinkWrite, "crm-contract-link", "CRM Contract Link Writer", "opportunity.signed.write"},
+	ServiceCredentialCRMCustomerImportProvision:         {ServiceCredentialCRMCustomerImportProvision, "crm-customer-import-provision", "CRM Customer Import Provisioner", "customer.import_provision"},
+	ServiceCredentialCRMOpportunityImportProvision:      {ServiceCredentialCRMOpportunityImportProvision, "crm-opportunity-import-provision", "CRM Opportunity Import Provisioner", "opportunity.import_provision"},
 	ServiceCredentialContractDashboardRead:              {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
 	ServiceCredentialProjectDashboardRead:               {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
 	ServiceCredentialContractApprovedRead:               {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
@@ -717,7 +727,9 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 			ServiceCredentialPortalReportDownloadIdentityRead,
 		}
 	case integratedContractApplicationCode:
-		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialCRMContractLinkWrite, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialSettlementContractIngest}
+		// 历史导入开立客户/商机是合同的默认集成能力（由 CONTRACT_IMPORT_CRM_PROVISION_ENABLED
+		// 控制是否启用）：首次接入即创建专用客户端，避免开关打开时才发现平台无该用途。
+		return []string{ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialContractSummaryRead, ServiceCredentialCRMContractReferenceRead, ServiceCredentialCRMContractLinkWrite, ServiceCredentialCRMCustomerImportProvision, ServiceCredentialCRMOpportunityImportProvision, ServiceCredentialProjectContractImport, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialSettlementContractIngest}
 	case "settlement", "settlement_and_invoicing":
 		// 信用同步是结算的回款/冲销事实回流能力：默认创建用途客户端但由结算
 		// SETTLEMENT_CRM_CREDIT_SYNC_ENABLED 控制是否启用，避免启用时才发现平台无用途。
