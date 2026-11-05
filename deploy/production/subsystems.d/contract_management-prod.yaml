@@ -56,6 +56,7 @@ runtime:
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: contract_management
         PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUDIT_REQUIRED: "true"
         CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
         CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
         CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem

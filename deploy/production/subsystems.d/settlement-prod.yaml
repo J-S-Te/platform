@@ -51,6 +51,7 @@ runtime:
         PLATFORM_PERSONNEL_DIRECTORY_URL: http://platform-api:8080
         PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUDIT_REQUIRED: "true"
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         # 人员离职交接入站（BIZ-XWIRE-04）：平台按批次租户自签短效 application JWT，
         # 结算侧只用平台 Ed25519 公钥验签；issuer/audience/client/应用/环境/scope 固定，

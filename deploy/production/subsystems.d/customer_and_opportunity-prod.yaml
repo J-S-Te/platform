@@ -45,6 +45,7 @@ runtime:
         PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: customer_and_opportunity
         PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUDIT_REQUIRED: "true"
         OWNER_DIRECTORY_ENABLED: "true"
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
