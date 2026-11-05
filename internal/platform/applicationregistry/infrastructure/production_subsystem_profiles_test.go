@@ -177,7 +177,14 @@ func TestProductionSubsystemProfilesProvidePortableDatabaseDSNs(t *testing.T) {
 	}
 }
 
-func TestProductionDataAnalysisProfileDeliversFileGatewayCredentials(t *testing.T) {
+// TestProductionDataAnalysisProfileOmitsUnusedFileGatewayCredentials 校验数析生产清单
+// 不再声明/下发文件网关写凭据。
+//
+// 背景：data_analysis 的代码从未读取 FILE_GATEWAY_*（../data_analysis 全仓零引用），
+// 但清单仍声明 file_gateway_write 并下发客户端凭据，等于给一个用不到凭据的子系统
+// 发了文件网关写权限。收回后这里把“最小授权”绑成门禁：绑定不得再出现，运行配置也
+// 不得再出现任何 FILE_GATEWAY_* 键（否则只是删了白名单、仍在下发凭据）。
+func TestProductionDataAnalysisProfileOmitsUnusedFileGatewayCredentials(t *testing.T) {
 	t.Parallel()
 	root := platformModuleRoot(t)
 	profiles, _, err := loadProductionSubsystemProfiles(
@@ -192,21 +199,24 @@ func TestProductionDataAnalysisProfileDeliversFileGatewayCredentials(t *testing.
 		if profile.Manifest.Application.Code != "data_analysis" {
 			continue
 		}
-		if profile.Manifest.Application.AllowedServiceBindings == nil ||
-			!stringSliceContains(*profile.Manifest.Application.AllowedServiceBindings, application.ServiceCredentialFileGatewayWrite) {
-			t.Fatal("data_analysis production profile does not allow file_gateway_write")
+		if profile.Manifest.Application.AllowedServiceBindings != nil &&
+			stringSliceContains(*profile.Manifest.Application.AllowedServiceBindings, application.ServiceCredentialFileGatewayWrite) {
+			t.Fatal("data_analysis production profile must not allow file_gateway_write: 代码未使用文件网关")
 		}
 		if len(profile.Manifest.Runtime.Files) != 1 {
 			t.Fatalf("data_analysis runtime files = %d, want 1", len(profile.Manifest.Runtime.Files))
 		}
-		bindings := profile.Manifest.Runtime.Files[0].Bindings
-		for key, source := range map[string]string{
-			"FILE_GATEWAY_APPLICATION_ID": "application_id",
-			"FILE_GATEWAY_CLIENT_ID":      "service.file_gateway_write.client_id",
-			"FILE_GATEWAY_CLIENT_SECRET":  "service.file_gateway_write.client_secret",
+		for _, block := range []struct {
+			name   string
+			values map[string]string
+		}{
+			{"values", profile.Manifest.Runtime.Files[0].Values},
+			{"bindings", profile.Manifest.Runtime.Files[0].Bindings},
 		} {
-			if bindings[key] != source {
-				t.Fatalf("data_analysis binding %s = %q, want %q", key, bindings[key], source)
+			for key := range block.values {
+				if strings.HasPrefix(key, "FILE_GATEWAY_") {
+					t.Fatalf("data_analysis runtime file %s still declares %s: 代码未读取该凭据", block.name, key)
+				}
 			}
 		}
 		return
