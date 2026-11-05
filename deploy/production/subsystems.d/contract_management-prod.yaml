@@ -5,7 +5,7 @@ default: true
 application:
   code: contract_management
   initial_admin_roles: [admin]
-  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, crm_contract_link_write, project_contract_import, analysis_contract_import_report_status]
+  allowed_service_bindings: [settlement_contract_ingest, owner_directory_read, notification_ingest, file_gateway_write, crm_contract_reference_read, crm_contract_link_write, crm_customer_import_provision, crm_opportunity_import_provision, project_contract_import, analysis_contract_import_report_status]
   name: 合同管理系统
   description: 合同创建、审批与客户管理系统
   environment: prod
@@ -114,6 +114,17 @@ runtime:
         CRM_LINK_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_LINK_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_LINK_SCOPE: opportunity.signed.write
+        # 历史导入自动开立 CRM 客户/商机（导入专用通道，开关默认关闭）：与合同核验、
+        # 签约回写分开的最小权限凭据。客户/商机两个 scope 在平台侧是两个独立用途
+        # （crm_customer_import_provision / crm_opportunity_import_provision），
+        # 平台按“一用途一 client 一 scope”授予，因此这里也必须给两对 client：
+        # CRM_PROVISION_* 服务客户查询/创建，CRM_PROVISION_OPPORTUNITY_* 服务
+        # 商机创建与推进；任一 pair 缺失时合同侧启动必须失败关闭。
+        CONTRACT_IMPORT_CRM_PROVISION_ENABLED: "false"
+        CRM_PROVISION_BASE_URL: http://customer-api:8090/customer-opportunity
+        CRM_PROVISION_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CRM_PROVISION_SCOPE: customer.import_provision
+        CRM_PROVISION_OPPORTUNITY_SCOPE: opportunity.import_provision
         PROJECT_INTEGRATION_ENABLED: "true"
         PROJECT_API_BASE_URL: http://project-api:8082
         PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
@@ -168,6 +179,10 @@ runtime:
         CRM_REFERENCE_CLIENT_SECRET: service.crm_contract_reference_read.client_secret
         CRM_LINK_CLIENT_ID: service.crm_contract_link_write.client_id
         CRM_LINK_CLIENT_SECRET: service.crm_contract_link_write.client_secret
+        CRM_PROVISION_CLIENT_ID: service.crm_customer_import_provision.client_id
+        CRM_PROVISION_CLIENT_SECRET: service.crm_customer_import_provision.client_secret
+        CRM_PROVISION_OPPORTUNITY_CLIENT_ID: service.crm_opportunity_import_provision.client_id
+        CRM_PROVISION_OPPORTUNITY_CLIENT_SECRET: service.crm_opportunity_import_provision.client_secret
         PROJECT_INTEGRATION_CLIENT_ID: service.project_contract_import.client_id
         PROJECT_INTEGRATION_CLIENT_SECRET: service.project_contract_import.client_secret
 compose:
