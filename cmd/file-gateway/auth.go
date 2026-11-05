@@ -42,7 +42,9 @@ func (middleware tokenMiddleware) wrap(next http.Handler, permission string) htt
 
 func hasScope(scopes []string, required string) bool {
 	for _, scope := range scopes {
-		if scope == required || scope == "*" {
+		// 只做精确匹配：平台侧只签发具体 scope，从不产生 "*" 通配，保留通配分支
+		// 相当于一条死代码旁路（AUD 收敛）。
+		if scope == required {
 			return true
 		}
 	}

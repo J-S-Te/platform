@@ -40,6 +40,7 @@ PROJECT_MANIFEST = PRODUCTION / "subsystems.d" / "project_management-prod.yaml"
 SETTLEMENT_TEMPLATE = PRODUCTION / "subsystem-templates" / "settlement.env.example"
 SETTLEMENT_MANIFEST = PRODUCTION / "subsystems.d" / "settlement-prod.yaml"
 PORTAL_MANIFEST = PRODUCTION / "subsystems.d" / "customer_portal-prod.yaml"
+PORTAL_TEMPLATE = PRODUCTION / "subsystem-templates" / "portal.env.example"
 DATA_ANALYSIS_MANIFEST = PRODUCTION / "subsystems.d" / "data-analysis-prod.yaml"
 DATA_ANALYSIS_TEMPLATE = PRODUCTION / "subsystem-templates" / "data-analysis.env.example"
 SUBSYSTEMS_DIR = PRODUCTION / "subsystems.d"
@@ -178,6 +179,21 @@ TEMPLATE_MANIFEST_EXPECTATIONS = (
         DATA_ANALYSIS_MANIFEST,
     ),
 )
+
+# 审计必开门禁（BIZ-XAPI-10）：生产清单的 API 运行配置必须显式声明
+# PLATFORM_AUDIT_REQUIRED=true。显式键为空时各子系统按 PLATFORM_ENVIRONMENT_CODE=prod
+# 兜底，语义上仍是必开，但“显式声明”能防止模板/清单被改成非生产口径后审计静默降级。
+# customer_portal 只约束承载 portal-api 的 portal.env；portal-report-worker.env 是后台
+# worker 配置，不承载 API 进程。
+AUDIT_REQUIRED_PAIRS = (
+    ("contract_management", MANIFEST, TEMPLATE),
+    ("customer_and_opportunity", CRM_MANIFEST, CUSTOMER_TEMPLATE),
+    ("project_management", PROJECT_MANIFEST, PROJECT_TEMPLATE),
+    ("settlement", SETTLEMENT_MANIFEST, SETTLEMENT_TEMPLATE),
+    ("customer_portal", PORTAL_MANIFEST, PORTAL_TEMPLATE),
+    ("data_analysis", DATA_ANALYSIS_MANIFEST, DATA_ANALYSIS_TEMPLATE),
+)
+AUDIT_REQUIRED_KEY = "PLATFORM_AUDIT_REQUIRED"
 
 MACHINE_KEY_SUFFIXES = (
     "ENABLED",
@@ -537,6 +553,40 @@ class IntegrationWiringTest(unittest.TestCase):
                     template[key].strip().lower(),
                     declared[key].strip().lower(),
                     f"{template_path.name} 与 {manifest.name} 的 {key} 不一致",
+                )
+
+    def test_production_templates_require_audit(self) -> None:
+        """六个生产子系统的审计必开必须是显式配置，而不是只靠环境编码兜底。
+
+        模板是重建入口、清单是生产权威取值来源：任一侧缺键都会让“审计必开”退回
+        PLATFORM_ENVIRONMENT_CODE=prod 兜底，一旦环境编码被改成非生产口径，审计就从
+        必开静默降级为可选，且没有任何启动期报错。缺失时失败信息打印具体文件名。
+        """
+        for label, manifest, template in AUDIT_REQUIRED_PAIRS:
+            with self.subTest(subsystem=label):
+                template_values = parse_env_template(template)
+                self.assertIn(
+                    AUDIT_REQUIRED_KEY,
+                    template_values,
+                    f"{template.name}（{label}）缺少 {AUDIT_REQUIRED_KEY}："
+                    "按模板重建会让生产审计退回环境编码兜底",
+                )
+                self.assertEqual(
+                    template_values[AUDIT_REQUIRED_KEY].strip().lower(),
+                    "true",
+                    f"{template.name} 的 {AUDIT_REQUIRED_KEY} 必须显式为 true",
+                )
+                declared = manifest_values_for(manifest, template)
+                self.assertIn(
+                    AUDIT_REQUIRED_KEY,
+                    declared,
+                    f"{manifest.name}（{label}）缺少 {AUDIT_REQUIRED_KEY}："
+                    "受控更新没有键可下发审计必开",
+                )
+                self.assertEqual(
+                    declared[AUDIT_REQUIRED_KEY].strip().lower(),
+                    "true",
+                    f"{manifest.name} 的 {AUDIT_REQUIRED_KEY} 必须显式为 true",
                 )
 
     def test_data_analysis_oidc_values_match_manifest(self) -> None:

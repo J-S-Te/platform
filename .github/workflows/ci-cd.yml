@@ -137,6 +137,10 @@ jobs:
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1
           fi
+      - name: Verify license-core mirror stays in sync
+        run: sh scripts/license-core-sync.sh --check
+      - name: Verify license-core sync guard
+        run: sh scripts/license-core-sync-test.sh
 
   image:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

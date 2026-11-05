@@ -102,12 +102,16 @@ func parsePayloadHashKey(raw string) ([]byte, error) {
 }
 
 // auditRequiredFromEnv 与传输层/子系统的必开判定保持同一语义：PLATFORM_AUDIT_REQUIRED 显式优先，
-// 否则 APP_ENV=production 默认必开。
+// 否则 APP_ENV=production 默认必开。显式值非法（strconv.ParseBool 解析失败）按失败关闭返回 true：
+// 把强制审计配错不该静默降级成“非必开”，与 project_management / Settlement 的同类实现同语义。
 func auditRequiredFromEnv() bool {
 	raw := strings.TrimSpace(os.Getenv("PLATFORM_AUDIT_REQUIRED"))
 	if raw != "" {
 		required, err := strconv.ParseBool(raw)
-		return err == nil && required
+		if err != nil {
+			return true
+		}
+		return required
 	}
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
 }

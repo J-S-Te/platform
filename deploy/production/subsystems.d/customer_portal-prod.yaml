@@ -43,6 +43,7 @@ runtime:
         PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: customer_portal
         PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUDIT_REQUIRED: "true"
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
       bindings:

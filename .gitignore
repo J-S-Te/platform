@@ -68,3 +68,10 @@ deploy/production/monitoring/textfile/
 
 
 .ai
+
+# 根目录编译产物（go build 输出）：用 ^/ 锚定仓库根，只忽略根目录二进制，
+# 不误伤 cmd/api 等源码目录以及子目录下的同名文件。
+/api
+/worker
+/migrate
+/file-gateway
