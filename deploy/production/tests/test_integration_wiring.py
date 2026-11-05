@@ -60,6 +60,8 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "owner-directory",
         "crm-contract-reference",
         "crm-contract-link",
+        "crm-customer-import-provision",
+        "crm-opportunity-import-provision",
         "project-integration",
         "settlement-integration",
         FILE_GATEWAY_SUFFIX,

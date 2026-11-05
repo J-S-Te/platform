@@ -20,6 +20,11 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 			// 外部合同创建会同步校验 CRM 客户和商机。历史环境可能早于该集成能力，
 			// 受控更新必须创建或轮换凭据并把明文 Secret 重新下发到运行文件。
 			{Purpose: ServiceCredentialCRMContractReferenceRead, Suffix: "crm-contract-reference", ClientName: "合同管理系统 CRM Contract Reference Reader", Scopes: []string{"customer.contract_reference.read"}, Rotate: true},
+			// 历史导入自动开立 CRM 客户/商机使用独立的最小权限用途（scope 与 CRM
+			// 内部导入通道白名单一致）。受控更新必须创建或轮换并把明文 Secret 重新
+			// 下发到运行文件，否则开启导入开立后合同进程会按 fail-closed 拒绝启动。
+			{Purpose: ServiceCredentialCRMCustomerImportProvision, Suffix: "crm-customer-import-provision", ClientName: "合同管理系统 CRM Customer Import Provisioner", Scopes: []string{"customer.import_provision"}, Rotate: true},
+			{Purpose: ServiceCredentialCRMOpportunityImportProvision, Suffix: "crm-opportunity-import-provision", ClientName: "合同管理系统 CRM Opportunity Import Provisioner", Scopes: []string{"opportunity.import_provision"}, Rotate: true},
 			// 合同审核结论回写 CRM 必须使用独立的 opportunity.signed.write 服务 Client
 			// （BIZ-XEVT2-02）。历史环境升级时若不随更新补发，运行文件中的
 			// CRM_LINK_CLIENT_ID/SECRET 仍是占位值，合同进程会按 fail-closed 拒绝启动。
