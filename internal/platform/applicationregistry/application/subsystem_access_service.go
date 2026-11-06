@@ -242,6 +242,11 @@ func (service *SubsystemAccessService) Submit(ctx context.Context, request Subsy
 }
 
 // Resume 在条件补齐后继续：重新检查事实，满足则回到可领取状态，否则维持等待并返回新的缺项。
+//
+// 派发效果未知（DEPLOYMENT_EFFECT_UNKNOWN）时**拒绝**重排：PrepareAccessDeployment 只从
+// PREPARED 领取代次，已 DISPATCHED 的原代次不会因为重排而重新部署；重排只会清掉错误码、
+// 增加领取轮次，然后再次回到同一个未知，属于"看似重试、实际无效"的循环。这类操作必须经
+// 人工核验通道收口（原代次被取代或无成功回执/无终止结果），不得由恢复入口放开重派。
 func (service *SubsystemAccessService) Resume(ctx context.Context, tenantID, operationID string) (SubsystemAccessOperationView, error) {
 	operation, err := service.repository.GetOperation(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(operationID))
 	if err != nil {
@@ -249,6 +254,11 @@ func (service *SubsystemAccessService) Resume(ctx context.Context, tenantID, ope
 	}
 	if operation.Status != SubsystemAccessStatusWaiting && operation.Status != SubsystemAccessStatusFailed {
 		return SubsystemAccessOperationView{}, fmt.Errorf("operation %s is %s and cannot resume: %w", operation.ID, operation.Status, ErrSubsystemAccessOperationConflict)
+	}
+	if strings.TrimSpace(operation.ErrorCode) == AccessDeploymentEffectUnknown {
+		return SubsystemAccessOperationView{}, fmt.Errorf(
+			"operation %s dispatched a deployment whose effect is unknown; requeue would not redeploy: %w",
+			operation.ID, ErrSubsystemAccessRecoveryRequired)
 	}
 	facts, _, err := service.readFacts(ctx, operation.TenantID, operation.ApplicationCode, operation.EnvironmentCode)
 	if err != nil {
