@@ -18,6 +18,7 @@ scope_require() { [[ "$enabled" == true ]]; }
 scope_project() { printf 'test-project\n'; }
 scope_services() { printf '%s\n' contract-api contract-worker contract-migrate contract-mysql; }
 scope_runtime_services() { printf '%s\n' contract-api contract-worker; }
+scope_initialization_services() { printf '%s\n' "$1-migrate"; }
 subsystem_metadata() { subsystem_runtime="$test_root/runtime/contract.env"; subsystem_key=CONTRACT_IMAGE; subsystem_service=contract-api; subsystem_candidate=uip-contract-candidate; }
 runtime_ready() { [[ "$ready" == true ]]; }
 env_get() { printf 'registry.invalid/app@sha256:%064d\n' 1; }
