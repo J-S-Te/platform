@@ -58,6 +58,13 @@ log() {
   printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >&2
 }
 
+# 临时诊断钩子（PORTAL_GATEWAY_LOCK_DEBUG=1）：把抢锁时间线写到 stderr，
+# 便于在 CI 上定位并发丢更新。默认关闭，开销是一次 [[ -n ]]。
+lock_debug() {
+  [[ -n "${PORTAL_GATEWAY_LOCK_DEBUG:-}" ]] || return 0
+  printf '[LOCKDBG] %s pid=%s %s\n' "${EPOCHREALTIME:-$(date '+%s')}" "$$" "$*" >&2
+}
+
 usage() {
   cat <<'USAGE'
 用法：
@@ -109,6 +116,7 @@ run_with_gateway_lock() {
 
   if command -v flock >/dev/null 2>&1; then
     local rc
+    lock_debug "branch=flock path=${LOCK_FILE} begin"
     exec 9>"$LOCK_FILE"
     if ! flock -w "$LOCK_TIMEOUT" 9; then
       # 全角括号紧跟变量时必须用 ${var} 形式：bash 3.2 会把非 ASCII 字节当作变量名的一部分，
@@ -117,6 +125,7 @@ run_with_gateway_lock() {
       exec 9>&-
       return 1
     fi
+    lock_debug "branch=flock path=${LOCK_FILE} acquired"
     if ( "$@" ); then rc=0; else rc=$?; fi
     flock -u 9 || true
     exec 9>&-
@@ -125,7 +134,9 @@ run_with_gateway_lock() {
 
   # macOS 没有系统 flock 时，mkdir 的原子性提供互斥；锁目录只使用固定后缀，不拼入操作参数。
   local lock_dir="${LOCK_FILE}.d" waited=0 rc
+  lock_debug "branch=mkdir path=${lock_dir} begin"
   while ! mkdir -- "$lock_dir" 2>/dev/null; do
+    lock_debug "branch=mkdir path=${lock_dir} busy attempt=${waited}"
     if (( waited >= LOCK_TIMEOUT )); then
       log "ERROR" "等待网关配置目录锁超时：${lock_dir}（操作：${operation}）"
       return 1
@@ -133,8 +144,10 @@ run_with_gateway_lock() {
     sleep 1
     waited=$((waited + 1))
   done
+  lock_debug "branch=mkdir path=${lock_dir} acquired"
   # 子进程隔离可确保被调用函数中的 exit 不会跳过目录锁清理。
   if ( "$@" ); then rc=0; else rc=$?; fi
+  lock_debug "branch=mkdir path=${lock_dir} release rc=${rc}"
   rmdir -- "$lock_dir" 2>/dev/null || true
   return "$rc"
 }
