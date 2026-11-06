@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,5 +75,49 @@ func TestAccessManualRecoveryUnixProtocol(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("recovery server did not finish")
+	}
+}
+
+// TestAccessSupersessionUnixProtocol 验证真实Unix连接上的取代否定证明读取。
+// 参数：t为本次私有socket和受控目标文件夹的测试上下文，Docker由明确替身提供。
+// 返回值：无，不将此隔离协议测试冒充真实业务系统验收。
+func TestAccessSupersessionUnixProtocol(t *testing.T) {
+	agent, _, _, request := accessRecoveryFixture(t)
+	// 回执清单已不再等于当前审核清单：这正是生产事故中 fenced 路径永久失败的现场。
+	request.Receipt.ManifestChecksum = "sha256:" + strings.Repeat("c", 64)
+	directory, err := os.MkdirTemp("/tmp", "access-supersession-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		handleSubsystemProvisioningConnection(context.Background(), connection, agent)
+	}()
+	client := &UnixSocketSubsystemProvisioner{enabled: true, socketPath: socket, timeout: time.Second}
+	evidence, err := client.ReadAccessDeploymentSupersession(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Receipt != request.Receipt || evidence.CurrentProfileChecksum == "" ||
+		evidence.CurrentProfileChecksum == request.Receipt.ManifestChecksum ||
+		evidence.SuccessReceipt || evidence.TerminalOutcome {
+		t.Fatalf("wire supersession evidence = %+v", evidence)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supersession server did not finish")
 	}
 }

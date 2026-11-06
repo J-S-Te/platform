@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
@@ -126,5 +127,83 @@ func TestAccessManualFenceRejectsDriftAndActiveRequest(t *testing.T) {
 	}
 	if _, found, err := readAccessDeploymentOutcome(target.config.DeployRoot, request.Receipt); err != nil || found {
 		t.Fatal("rejected manual decision created a fence", err)
+	}
+}
+
+// supersededAccessRecoveryFixture 构造"审核清单已漂移"的原代次。
+// 参数：t为隔离部署根上下文。
+// 返回值：生产Agent替身、受控目标及清单摘要不再等于当前 profile 的恢复请求。
+func supersededAccessRecoveryFixture(t *testing.T) (*ProductionComposeSubsystemProvisioner,
+	*productionComposeTarget, application.SubsystemAccessAbandonRequest) {
+	t.Helper()
+	p, target, _, request := accessRecoveryFixture(t)
+	// 事故现场：CI 替换了 profile 清单，原回执清单摘要永久不再等于当前清单。
+	request.Receipt.ManifestChecksum = "sha256:" + strings.Repeat("c", 64)
+	return p, target, request
+}
+
+// TestAccessSupersessionReadsNegativeProofWhenManifestChanged 覆盖生产分支此前从未被测的场景：
+// 回执清单不等于当前 profile 时，fenced 预检必须拒绝，而否定证明仍必须可读。
+// 参数：t为隔离部署根上下文。
+// 返回值：无；取代证明只含否定事实，不带运行文件或容器事实。
+func TestAccessSupersessionReadsNegativeProofWhenManifestChanged(t *testing.T) {
+	p, target, request := supersededAccessRecoveryFixture(t)
+	if _, err := p.CheckAccessDeploymentRecovery(context.Background(), request); !errors.Is(err, application.ErrSubsystemAccessOperationConflict) {
+		t.Fatal("fenced preview accepted a superseded manifest", err)
+	}
+	evidence, err := p.ReadAccessDeploymentSupersession(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Receipt != request.Receipt || evidence.CurrentProfileChecksum != target.config.Profile.Checksum ||
+		evidence.SuccessReceipt || evidence.TerminalOutcome ||
+		len(evidence.RuntimeFiles) != 0 || len(evidence.Containers) != 0 || evidence.EvidenceDigest != "" {
+		t.Fatalf("supersession evidence = %+v", evidence)
+	}
+}
+
+// TestAccessSupersessionReportsSuccessReceipt 验证真实成功回执会否定取代收口。
+// 参数：t为隔离部署根上下文。
+// 返回值：无，成功回执必须被如实报告而不是被当成"没有结果"。
+func TestAccessSupersessionReportsSuccessReceipt(t *testing.T) {
+	p, target, request := supersededAccessRecoveryFixture(t)
+	if err := writeAccessDeploymentReceipt(target.config.DeployRoot, application.SubsystemProvisioningInput{
+		TenantID: request.Receipt.TenantID, ApplicationCode: request.Receipt.ApplicationCode,
+		Environment: request.Receipt.Environment, ManifestChecksum: request.Receipt.ManifestChecksum,
+		AccessReceipt: &request.Receipt}); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := p.ReadAccessDeploymentSupersession(context.Background(), request)
+	if err != nil || !evidence.SuccessReceipt || evidence.TerminalOutcome {
+		t.Fatalf("supersession missed the success receipt: %+v %v", evidence, err)
+	}
+}
+
+// TestAccessSupersessionReportsTerminalOutcome 验证已持久终止结果会否定取代收口。
+// 参数：t为隔离部署根上下文。
+// 返回值：无，终止结果必须被如实报告，不能重复收口。
+func TestAccessSupersessionReportsTerminalOutcome(t *testing.T) {
+	p, target, request := supersededAccessRecoveryFixture(t)
+	if err := writeAccessDeploymentOutcome(target.config.DeployRoot, application.SubsystemAccessDeploymentOutcome{
+		Receipt: request.Receipt, State: application.AccessDeploymentRejected,
+		Code: application.AccessCredentialRetryRequired, RecordedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := p.ReadAccessDeploymentSupersession(context.Background(), request)
+	if err != nil || evidence.SuccessReceipt || !evidence.TerminalOutcome {
+		t.Fatalf("supersession missed the terminal outcome: %+v %v", evidence, err)
+	}
+}
+
+// TestAccessSupersessionRejectsLiveDeployment 验证仍在执行的部署不可被取代收口。
+// 参数：t为隔离目标互斥锁上下文。
+// 返回值：无，活动部署必须返回冲突且不产生任何证明读取结果。
+func TestAccessSupersessionRejectsLiveDeployment(t *testing.T) {
+	p, target, request := supersededAccessRecoveryFixture(t)
+	target.mutex.Lock()
+	_, err := p.ReadAccessDeploymentSupersession(context.Background(), request)
+	target.mutex.Unlock()
+	if !errors.Is(err, application.ErrSubsystemAccessOperationConflict) {
+		t.Fatal("live deployment reached supersession proof", err)
 	}
 }
