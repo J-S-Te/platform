@@ -19,6 +19,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	eventmetrics "github.com/J-S-Te/Basic-Platform/internal/shared/metrics"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 	"github.com/gin-gonic/gin"
 )
@@ -39,9 +40,31 @@ const auditAvailabilityCooldown = 30 * time.Second
 
 // auditGate 保存审计管道最近一次写入失败后开启的快速失败窗口。实例随中间件挂载
 // 进程内共享；零值表示可用，无需初始化。
+//
+// events 是审计写入失败指标的注册表（platform_audit_write_failures_total{stage}）。
+// 它只承担记账：失败窗口的开关仍完全由 reopenAt 决定，指标绝不改变失败关闭语义。
 type auditGate struct {
 	mu       sync.Mutex
 	reopenAt time.Time
+	events   *eventmetrics.Registry
+}
+
+// eventMetrics 返回该 gate 的失败计数注册表；未注入时回退进程默认注册表。
+func (gate *auditGate) eventMetrics() *eventmetrics.Registry {
+	if gate == nil {
+		return eventmetrics.Shared()
+	}
+	return eventmetrics.RegistryOr(gate.events)
+}
+
+// recordWriteFailure 在失败发生点按 stage 计数，不触碰快速失败窗口。
+// 它必须与 recordFailure 分开：结果事件已落死信时属于“可继续放行”的降级路径，
+// 硬把窗口打开会把一次可恢复的审计降级升级成拒绝全部写请求。
+func (gate *auditGate) recordWriteFailure(stage string) {
+	if gate == nil {
+		return
+	}
+	gate.eventMetrics().RecordAuditWriteFailure(stage)
 }
 
 // blocked 报告当前是否处于快速失败窗口内。
@@ -153,6 +176,9 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 		if auditedRequest && gate.blocked(time.Now().UTC()) {
 			logger.Warn("reject write before business commit because the audit pipeline is unavailable",
 				"path", context.Request.URL.Path, "request_id", requestctx.RequestID(context.Request.Context()))
+			// 被失败窗口拒绝的请求没有执行任何写入尝试：stage=unavailable 记录的是
+			// “审计不可用”这一后果（与 write 失败分开计），不参与窗口判定。
+			gate.recordWriteFailure(eventmetrics.AuditStageUnavailable)
 			// 必须 Abort：gin 的中间件返回本身不会终止链路，否则业务处理器仍会执行。
 			context.Abort()
 			httpresponse.WriteError(origWriter, context.Request, http.StatusServiceUnavailable, httperror.New(
@@ -173,6 +199,7 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 			intent := newPlatformAuditInput(context, source, auditedPrincipal, platformAuditEventFields{route: auditRoute, phase: "intent", bodyNotCaptured: bodyNotCaptured})
 			if _, err := recorder.Ingest(context.Request.Context(), auditedPrincipal.Tenant.ID, intent); err != nil {
 				logger.Error("write platform audit intent event", "error", err, "request_id", intent.RequestID, "path", auditRoute)
+				gate.recordWriteFailure(eventmetrics.AuditStageIntent)
 				gate.recordFailure(time.Now().UTC())
 				// 必须 Abort：gin 的中间件返回本身不会终止链路，否则业务处理器仍会执行。
 				context.Abort()
@@ -245,6 +272,9 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 		input := newPlatformAuditInput(context, source, principal, fields)
 		if err := ingestPlatformAuditEvent(context.Request.Context(), recorder, principal.Tenant.ID, input, retries); err != nil {
 			logger.Error("write platform audit event", "error", err, "request_id", input.RequestID, "path", route)
+			// 结果事件（含同步重试）写入失败先按 stage=result 计数；是否同时按死信
+			// 失败计数取决于下面的 Spool 结果，是否打开失败窗口仍只看既有 recordFailure 调用。
+			gate.recordWriteFailure(eventmetrics.AuditStageResult)
 			if intentEventID == "" {
 				// 非必开模式/无意图事件：保持既有“尽力而为 + 结构化错误日志”语义，响应照常。
 				gate.recordFailure(time.Now().UTC())
@@ -255,6 +285,7 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 			if spoolErr := recorder.Spool(context.Request.Context(), principal.Tenant.ID, input); spoolErr != nil {
 				logger.Error("spool platform audit result event to dead letter", "error", spoolErr,
 					"request_id", input.RequestID, "path", route, "event_id", input.EventID, "intent_event_id", intentEventID)
+				gate.recordWriteFailure(eventmetrics.AuditStageDeadLetter)
 				gate.recordFailure(time.Now().UTC())
 				// 意图 + 结果 + 死信全不可写：只能拒绝响应，但必须如实说明业务事实是否生效，
 				// 绝不谎报“未被确认”，也不对已生效的写操作引导无脑重试。

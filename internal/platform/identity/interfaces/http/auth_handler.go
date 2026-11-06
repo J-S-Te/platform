@@ -28,6 +28,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	eventmetrics "github.com/J-S-Te/Basic-Platform/internal/shared/metrics"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 )
@@ -49,6 +50,9 @@ type Handler struct {
 	postLoginRedirectPolicy applicationregistry.PostLoginRedirectPolicy
 	central                 *sessionstore.Store
 	centralVerifier         centralTokenVerifier
+	// eventMetrics 是登录失败事件级计数器（platform_login_failures_total{reason}）。
+	// reason 由错误类型映射到固定枚举，绝不含账号/租户/原始错误文本。
+	eventMetrics *eventmetrics.Registry
 }
 
 // centralTokenVerifier 返回完整且成对验签的原始认证声明。
@@ -105,6 +109,16 @@ func WithIDTokenVerifier(verifier oidcIDTokenVerifier) IDTokenVerifierOption {
 // 结构校验，装配层始终注入真实集合。
 func WithPostLoginRedirectPolicy(policy applicationregistry.PostLoginRedirectPolicy) HandlerOption {
 	return func(handler *Handler) { handler.postLoginRedirectPolicy = policy }
+}
+
+// WithEventMetrics 注入登录失败事件级计数器；nil 被忽略，未注入时使用进程默认注册表，
+// 与平台 /metrics 的 exposition 共用同一份计数。
+func WithEventMetrics(registry *eventmetrics.Registry) HandlerOption {
+	return func(handler *Handler) {
+		if registry != nil {
+			handler.eventMetrics = registry
+		}
+	}
 }
 
 type applicationService interface {
@@ -166,6 +180,7 @@ func NewHandler(service applicationService, logger *slog.Logger, authConfig conf
 		},
 		auditRecorder: auditRecorder,
 		auditConfig:   auditConfig,
+		eventMetrics:  eventmetrics.Shared(),
 	}
 	if loginTargetResolver != nil {
 		handler.loginTargets = loginTargetResolver
@@ -219,6 +234,7 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 	})
 	if err != nil {
 		handler.recordLoginFailure(request, err)
+		handler.recordLoginFailureMetric(err)
 		if errors.Is(err, application.ErrUnauthenticated) {
 			httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_UNAUTHENTICATED", "账号或密码错误", nil))
 			return
@@ -244,6 +260,7 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 // 返回值：无。
 func (handler *Handler) BeginOIDCLogin(writer http.ResponseWriter, request *http.Request) {
 	if !handler.oidc.enabled || handler.oidc.issuer == "" || handler.oidc.clientID == "" || handler.oidc.redirectPath == "" {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 		httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.New("AUTH_OIDC_UNAVAILABLE", "统一认证暂不可用", nil))
 		return
 	}
@@ -297,11 +314,15 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	}
 	stateCookie, err := request.Cookie(handler.oidc.stateCookie)
 	if err != nil || stateCookie.Value == "" || request.URL.Query().Get("state") == "" || stateCookie.Value != request.URL.Query().Get("state") {
+		// 登录事务（state/nonce/verifier）只在一次性 cookie 有效期内成立：过期或缺失
+		// 属于会话/事务失效，而不是 IdP 故障。
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureSessionExpired)
 		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
 		return
 	}
 	nonceCookie, err := request.Cookie(handler.oidc.nonceCookie)
 	if err != nil || nonceCookie.Value == "" {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureSessionExpired)
 		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
 		return
 	}
@@ -309,11 +330,14 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	// 值作为 code_verifier。
 	verifierCookie, err := request.Cookie(handler.oidc.verifierCookieName())
 	if err != nil || !validOIDCCodeVerifier(verifierCookie.Value) {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureSessionExpired)
 		httpresponse.WriteError(writer, request, http.StatusBadRequest, httperror.New("AUTH_OIDC_STATE_INVALID", "登录状态已失效，请重试", nil))
 		return
 	}
 	code := strings.TrimSpace(request.URL.Query().Get("code"))
 	if code == "" {
+		// IdP 没有回传授权码（用户取消、上游报错等），属于上游认证失败。
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
 	}
@@ -325,6 +349,7 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	clearOIDCCookie(handler.oidc.verifierCookieName())
 	accessToken, rawIDToken, err := handler.exchangeOIDCCode(request.Context(), request, code, verifierCookie.Value)
 	if err != nil {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 		handler.logger.Warn("Keycloak OIDC code exchange failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
@@ -335,6 +360,7 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	if handler.idTokenVerifier != nil {
 		verifiedID, verifyErr := handler.idTokenVerifier.VerifyIDToken(request.Context(), rawIDToken, nonceCookie.Value, handler.oidc.clientID)
 		if verifyErr != nil {
+			handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 			handler.logger.Warn("Keycloak OIDC ID token verification failed", "error", verifyErr)
 			httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 			return
@@ -343,11 +369,13 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	}
 	userInfoID, err := handler.fetchOIDCIdentity(request.Context(), accessToken)
 	if err != nil {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 		handler.logger.Warn("Keycloak OIDC identity lookup failed", "error", err)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
 	}
 	if identityID != "" && identityID != userInfoID {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 		handler.logger.Warn("Keycloak OIDC identity mismatch", "id_token", identityID, "userinfo", userInfoID)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_FAILED", "统一认证失败", nil))
 		return
@@ -363,12 +391,14 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 	if handler.central != nil {
 		currentPrincipal, err = trustedBrowserPrincipal(request, handler.cookie.name, handler.service)
 		if err != nil {
+			handler.recordCentralSessionFailureMetric(err)
 			writeCentralSessionFailure(writer, request, err)
 			return
 		}
 		sum := sha256.Sum256([]byte(nonceCookie.Value))
 		verified, verifyErr := handler.centralVerifier.VerifySessionTokens(request.Context(), accessToken, rawIDToken, handler.oidc.clientID, base64.RawURLEncoding.EncodeToString(sum[:]))
 		if verifyErr != nil {
+			handler.recordCentralSessionFailureMetric(verifyErr)
 			writeCentralSessionFailure(writer, request, verifyErr)
 			return
 		}
@@ -376,6 +406,7 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 		if currentPrincipal != nil && currentPrincipal.User.ID == verified.IdentityID && currentPrincipal.Tenant.ID == verified.TenantID {
 			state, stateErr := handler.central.PlatformState(request.Context(), currentPrincipal.SessionID, time.Now().UTC(), false)
 			if stateErr != nil {
+				handler.recordCentralSessionFailureMetric(stateErr)
 				writeCentralSessionFailure(writer, request, stateErr)
 				return
 			}
@@ -385,10 +416,12 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 		if resolveErr != nil {
 			if errors.Is(resolveErr, sessiondomain.ErrUpstreamInactive) {
 				if terminateErr := handler.centralVerifier.TerminateSession(request.Context(), verified); terminateErr != nil {
+					handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
 					httpresponse.WriteError(writer, request, http.StatusServiceUnavailable, httperror.Internal)
 					return
 				}
 			}
+			handler.recordCentralSessionFailureMetric(resolveErr)
 			writeCentralSessionFailure(writer, request, resolveErr)
 			return
 		}
@@ -400,6 +433,9 @@ func (handler *Handler) OIDCCallback(writer http.ResponseWriter, request *http.R
 		CentralSession:   centralAnchor,
 	})
 	if err != nil {
+		// 上游身份已核验，失败在平台账号侧（未绑定或身份不可用）。错误被刻意统一成
+		// ErrUnauthenticated 以防枚举，这里也只记兜底原因，不猜测更细的分类。
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureOther)
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.New("AUTH_OIDC_ACCOUNT_NOT_LINKED", "统一身份尚未绑定平台账号", nil))
 		return
 	}
@@ -609,6 +645,10 @@ func (handler *Handler) Refresh(writer http.ResponseWriter, request *http.Reques
 	}
 	result, err := handler.service.Refresh(request.Context(), principal)
 	if err != nil {
+		if errors.Is(err, application.ErrUnauthenticated) {
+			// 服务端会话在续期时已失效（绝对到期、空闲超时或已吊销）。
+			handler.recordLoginFailureReason(eventmetrics.LoginFailureSessionExpired)
+		}
 		handler.writeApplicationError(writer, request, err)
 		return
 	}
@@ -746,6 +786,53 @@ func (handler *Handler) recordLoginFailure(request *http.Request, err error) {
 	}
 	// 锁定窗口内的密码失败走统一 auth.login.failed 审计（防枚举），不再有独立的
 	// locked 事件分支；锁定状态由安全模块的 sec_login_attempt 与解锁接口承载。
+}
+
+// recordLoginFailureMetric 在登录失败发生点按受约束的 reason 枚举记账
+// （platform_login_failures_total{reason}）。
+//
+// 它与“401/403 + 路径前缀”的 platform_oidc_login_failures_total 启发式互补而不是替换：
+// 启发式只能说明某类路径上出现过拒绝，这里能说明登录为什么失败，且标签只有 reason，
+// 不含账号、租户、IP 或原始错误文本。
+func (handler *Handler) recordLoginFailureMetric(err error) {
+	handler.recordLoginFailureReason(loginFailureReason(err))
+}
+
+// recordCentralSessionFailureMetric 把中央会话/令牌校验失败分类到固定 reason：
+// 会话确实失效记 session_expired，其余验签/依赖失败记 idp_error。
+func (handler *Handler) recordCentralSessionFailureMetric(err error) {
+	if errors.Is(err, sessiondomain.ErrInactive) {
+		handler.recordLoginFailureReason(eventmetrics.LoginFailureSessionExpired)
+		return
+	}
+	handler.recordLoginFailureReason(eventmetrics.LoginFailureIdPError)
+}
+
+// recordLoginFailureReason 把 reason 记进处理器注入的注册表；未注入时回退进程默认注册表。
+// 传入非枚举值时由注册表折叠进 other，调用方不需要（也不能）自行拼接标签。
+func (handler *Handler) recordLoginFailureReason(reason string) {
+	eventmetrics.RegistryOr(handler.eventMetrics).RecordLoginFailure(reason)
+}
+
+// loginFailureReason 把登录/回调错误映射到受约束枚举。
+//
+// 映射只依据错误类型，不读取错误文本或账号数据：
+//   - 凭据正确但身份不可用（LoginFailedError.Ineligible）→ account_disabled；
+//   - 凭据不匹配或未知账号（LoginFailedError / ErrUnauthenticated）→ invalid_credentials，
+//     两者共用同一桶，避免指标变成账号枚举侧信道；
+//   - 并发会话冲突、依赖故障、未知错误 → other。
+func loginFailureReason(err error) string {
+	var failed application.LoginFailedError
+	if errors.As(err, &failed) {
+		if failed.Ineligible {
+			return eventmetrics.LoginFailureAccountDisabled
+		}
+		return eventmetrics.LoginFailureInvalidCredentials
+	}
+	if errors.Is(err, application.ErrUnauthenticated) {
+		return eventmetrics.LoginFailureInvalidCredentials
+	}
+	return eventmetrics.LoginFailureOther
 }
 
 // recordLogout 在当前服务端会话吊销之后写入一次成功的登出事件。

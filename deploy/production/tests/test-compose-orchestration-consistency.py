@@ -98,6 +98,10 @@ KNOWN_METRICS = {
     "platform_http_request_duration_seconds_count",
     "platform_authz_failures_total",
     "platform_oidc_login_failures_total",
+    # C2 事件级失败计数（platform/internal/shared/metrics/events.go）：
+    # 登录失败按受约束 reason 枚举、审计写入失败按 stage 枚举；标签仅这两个维度。
+    "platform_login_failures_total",
+    "platform_audit_write_failures_total",
     "platform_metric_collection_errors_total",
     # platform/internal/transport/http/metrics.go:364-370（queueMetricSpecs，队列/可靠性计数）
     "platform_keycloak_outbox_backlog",

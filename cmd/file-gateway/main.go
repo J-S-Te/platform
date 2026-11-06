@@ -207,6 +207,8 @@ func monitorLocalCapacity(ctx context.Context, store interface{ UsagePercent() (
 
 func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *filehttp.EvidenceHandler, middleware tokenMiddleware, ready func(context.Context) error, database *gorm.DB, capacity interface{ UsagePercent() (uint64, error) }) http.Handler {
 	mux := http.NewServeMux()
+	// 请求级指标：路由维度由注册点显式给出固定枚举，未标注路由统一由外层记 other。
+	requestMetrics := newFileGatewayRequestMetrics()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /readyz", func(writer http.ResponseWriter, request *http.Request) {
 		ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
@@ -233,6 +235,8 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *f
 		fmt.Fprintln(writer, "# TYPE file_gateway_storage_warning_threshold_percent gauge\nfile_gateway_storage_warning_threshold_percent 70")
 		fmt.Fprintln(writer, "# TYPE file_gateway_storage_high_threshold_percent gauge\nfile_gateway_storage_high_threshold_percent 80")
 		fmt.Fprintf(writer, "# TYPE file_gateway_metric_collection_errors gauge\nfile_gateway_metric_collection_errors %d\n", collectionError)
+		// 请求级指标（C2）：命名空间与容量/连接数指标一致，均由 /metrics 手写 exposition 输出。
+		requestMetrics.write(writer)
 		if database != nil {
 			if sqlDB, dbErr := database.DB(); dbErr == nil {
 				stats := sqlDB.Stats()
@@ -241,30 +245,31 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *f
 			}
 		}
 	})
-	mux.Handle("POST /api/v1/files", middleware.wrap(http.HandlerFunc(handler.Upload), "platform:file:upload"))
-	mux.Handle("GET /api/v1/file-upload-requests/{request_id}", middleware.wrap(http.HandlerFunc(handler.ResolveUploadRequest), "platform:file:upload"))
-	mux.Handle("POST /api/v1/file-upload-requests/{request_id}/retire", middleware.wrap(http.HandlerFunc(handler.RetireUploadRequest), "platform:file:upload"))
-	mux.Handle("GET /api/v1/files/{file_id}/content", middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download"))
+	mux.Handle("POST /api/v1/files", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(handler.Upload), "platform:file:upload")))
+	mux.Handle("GET /api/v1/file-upload-requests/{request_id}", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(handler.ResolveUploadRequest), "platform:file:upload")))
+	mux.Handle("POST /api/v1/file-upload-requests/{request_id}/retire", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(handler.RetireUploadRequest), "platform:file:upload")))
+	mux.Handle("GET /api/v1/files/{file_id}/content", requestMetrics.track(fileGatewayRouteDownload, middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download")))
 	// 只读证据元数据：业务子系统在提交现场证据/报告证据前回源核验，返回元数据而非内容。
 	if evidence != nil {
-		mux.Handle("GET /api/v1/files/{file_id}/evidence-metadata", middleware.wrap(http.HandlerFunc(evidence.StatFile), "platform:file:download"))
+		mux.Handle("GET /api/v1/files/{file_id}/evidence-metadata", requestMetrics.track(fileGatewayRouteDownload, middleware.wrap(http.HandlerFunc(evidence.StatFile), "platform:file:download")))
 	}
 	mux.Handle("POST /api/v1/files/{file_id}/bindings", middleware.wrap(http.HandlerFunc(handler.BindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/{file_id}/bindings/release", middleware.wrap(http.HandlerFunc(handler.ReleaseFileBinding), "platform:file:bind"))
 	mux.Handle("DELETE /api/v1/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(handler.UnbindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/cleanup", middleware.wrap(http.HandlerFunc(handler.CleanupFiles), "platform:file:cleanup"))
 	mux.Handle("POST /api/v1/files/reconcile", middleware.wrap(http.HandlerFunc(handler.ReconcileFiles), "platform:file:cleanup"))
-	mux.Handle("POST /api/v2/upload-sessions", middleware.wrap(http.HandlerFunc(v2.CreateSession), "platform:file:upload"))
-	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/tickets", middleware.wrap(http.HandlerFunc(v2.IssueUploadTicket), "platform:file:upload"))
-	mux.HandleFunc("PUT /api/v2/upload-sessions/{upload_id}/content", v2.UploadContent)
-	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/complete", middleware.wrap(http.HandlerFunc(v2.Complete), "platform:file:upload"))
-	mux.Handle("GET /api/v2/upload-sessions/{upload_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:upload"))
-	mux.Handle("GET /api/v2/files/{file_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:download"))
-	mux.Handle("POST /api/v2/files/{file_id}/download-tickets", middleware.wrap(http.HandlerFunc(v2.IssueDownloadTicket), "platform:file:download"))
-	mux.Handle("POST /api/v2/portal-report-files/{file_id}/content", middleware.wrap(http.HandlerFunc(v2.PortalReportContent), "platform:file:portal_report"))
-	mux.HandleFunc("GET /api/v2/files/{file_id}/content", v2.DownloadContent)
+	mux.Handle("POST /api/v2/upload-sessions", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.CreateSession), "platform:file:upload")))
+	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/tickets", requestMetrics.track(fileGatewayRouteTicket, middleware.wrap(http.HandlerFunc(v2.IssueUploadTicket), "platform:file:upload")))
+	mux.Handle("PUT /api/v2/upload-sessions/{upload_id}/content", requestMetrics.track(fileGatewayRouteUpload, http.HandlerFunc(v2.UploadContent)))
+	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/complete", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.Complete), "platform:file:upload")))
+	mux.Handle("GET /api/v2/upload-sessions/{upload_id}", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:upload")))
+	mux.Handle("GET /api/v2/files/{file_id}", requestMetrics.track(fileGatewayRouteDownload, middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:download")))
+	mux.Handle("POST /api/v2/files/{file_id}/download-tickets", requestMetrics.track(fileGatewayRouteTicket, middleware.wrap(http.HandlerFunc(v2.IssueDownloadTicket), "platform:file:download")))
+	mux.Handle("POST /api/v2/portal-report-files/{file_id}/content", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.PortalReportContent), "platform:file:portal_report")))
+	mux.Handle("GET /api/v2/files/{file_id}/content", requestMetrics.track(fileGatewayRouteDownload, http.HandlerFunc(v2.DownloadContent)))
 	mux.Handle("DELETE /api/v2/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(v2.UnbindFile), "platform:file:bind"))
-	return mux
+	// 外层兜底：未被 track 标注的路由（健康检查、绑定、清理、404 等）记 route="other"。
+	return requestMetrics.wrap(mux)
 }
 
 type tenantSource struct{ database *gorm.DB }

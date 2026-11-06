@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/backchannel"
+	eventmetrics "github.com/J-S-Te/Basic-Platform/internal/shared/metrics"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -21,6 +21,11 @@ import (
 // 只输出聚合运行数据，不包含租户、用户、业务单号或 URL 参数，避免高基数和隐私泄漏。
 type OperationalMetrics struct {
 	database *gorm.DB
+
+	// events 是事件级失败计数器（登录失败 reason、审计写入失败 stage，见
+	// internal/shared/metrics）。它与业务失败发生点共用进程默认注册表：处理器在失败
+	// 现场直接记账，/metrics 只负责把同一份计数渲染出来，不做二次推导。
+	events *eventmetrics.Registry
 
 	// HTTP 请求面按 {method,route,status} 拆序列累计（见 httpSeriesKey）：
 	// 只有带标签才能表达 5xx 率与按路由的尾延迟，而标签维度又必须受约束，
@@ -286,7 +291,7 @@ func (metrics *OperationalMetrics) writeHTTPMetrics(writer http.ResponseWriter) 
 // formatHTTPBucketBound 用最短往返表示输出桶上界（0.005、0.025、1、2.5、10），
 // 避免 %f 的尾零或科学计数法让 le 值与阈值比较时失真。
 func formatHTTPBucketBound(bound float64) string {
-	return strconv.FormatFloat(bound, 'g', -1, 64)
+	return eventmetrics.FormatBucketBound(bound)
 }
 
 // OAuth Client Secret 龄期/吊销指标（BIZ-RUNTIME-05）。它们与队列计数共用同一 10s TTL
@@ -372,7 +377,15 @@ var queueMetricSpecs = []queueMetricSpec{
 
 // NewOperationalMetrics 创建进程内 HTTP 指标收集器；数据库参数用于按需采集连接池和队列积压。
 func NewOperationalMetrics(database *gorm.DB) *OperationalMetrics {
-	return &OperationalMetrics{database: database}
+	return &OperationalMetrics{database: database, events: eventmetrics.Shared()}
+}
+
+// eventMetrics 返回事件级计数注册表；nil 时回退进程默认注册表（装配遗漏只丢计数）。
+func (metrics *OperationalMetrics) eventMetrics() *eventmetrics.Registry {
+	if metrics == nil {
+		return eventmetrics.Shared()
+	}
+	return eventmetrics.RegistryOr(metrics.events)
 }
 
 // Middleware 记录按 {method,route,status} 拆分的请求总量、错误量、耗时直方图，
@@ -418,6 +431,9 @@ func (metrics *OperationalMetrics) ServeHTTP(writer http.ResponseWriter, request
 	metrics.writeHTTPMetrics(writer)
 	fmt.Fprintf(writer, "# TYPE platform_authz_failures_total counter\nplatform_authz_failures_total %d\n", metrics.authzFailures.Load())
 	fmt.Fprintf(writer, "# TYPE platform_oidc_login_failures_total counter\nplatform_oidc_login_failures_total %d\n", metrics.oidcFailures.Load())
+	// 事件级失败计数（C2）：platform_oidc_login_failures_total 是“401/403 + 路径前缀”的
+	// 启发式，只说明某类路径上出现过拒绝；这两条指标在失败发生点记账，能区分原因与阶段。
+	metrics.eventMetrics().Write(writer)
 	metrics.writeDatabaseMetrics(writer, request.Context())
 	fmt.Fprintf(writer, "# TYPE platform_metric_collection_errors_total counter\nplatform_metric_collection_errors_total %d\n", metrics.collectionErrors.Load())
 }
@@ -643,8 +659,8 @@ func collectClientSecretMetrics(ctx context.Context, database *gorm.DB, now time
 // escapeMetricLabelValue 按 Prometheus 文本协议转义标签值。status 来自受约束的枚举，
 // 但转义仍然必要：一个含引号或换行的值会破坏整个抓取结果。
 func escapeMetricLabelValue(value string) string {
-	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return replacer.Replace(value)
+	// 转义实现集中在 internal/shared/metrics，避免平台 /metrics 与 file-gateway 两套规则漂移。
+	return eventmetrics.EscapeLabelValue(value)
 }
 
 // gatherBackchannelGauges 采集 Back-Channel Logout 的两条 gauge。失败时不计 0，而是把
