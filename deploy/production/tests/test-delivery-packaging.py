@@ -104,6 +104,17 @@ if len(a)>=4 and a[:2]==['save','--output']:
         changed=pathlib.Path(os.environ['PROBE_WORKSPACE'])/'platform/third_party/license-core/license.go'
         changed.write_bytes(changed.read_bytes()+b'changed during isolated fixture build\n')
     sys.exit(0)
+if len(a)>=4 and a[0]=='create' and a[1]=='--platform':
+    if a[2]!='linux/amd64': sys.exit('Unexpected create platform')
+    image(a[3]); print('fixture-frontend-container'); sys.exit(0)
+if len(a)==3 and a[0]=='cp':
+    container,path=a[1].split(':',1)
+    if path!='/usr/share/nginx/html/frontend-modules.json' or container!='fixture-frontend-container':
+        sys.exit('Unexpected cp request')
+    codes=json.loads(os.environ.get('PROBE_FRONTEND_MODULES','["basic-platform","contract_management"]'))
+    pathlib.Path(a[2]).write_text(json.dumps({'schema_version':1,'enabled_modules':codes,'compiled_modules':codes},separators=(',',':')))
+    sys.exit(0)
+if len(a)==2 and a[0]=='rm': sys.exit(0)
 sys.exit('Unexpected Docker fixture invocation: '+repr(a))
 '''
 
@@ -170,7 +181,8 @@ class DeliveryPackaging(unittest.TestCase):
         self.python_log = self.root / "python.log"
         self.fault_log = self.root / "fault.log"
         self.env.update(PROBE_WORKSPACE=str(self.workspace), PROBE_IMAGE_STORE=str(self.root / "images.json"),
-                        PROBE_PYTHON_LOG=str(self.python_log), PROBE_FAULT_LOG=str(self.fault_log))
+                        PROBE_PYTHON_LOG=str(self.python_log), PROBE_FAULT_LOG=str(self.fault_log),
+                        PROBE_FRONTEND_MODULES='["basic-platform","contract_management"]')
         for name, program in (("docker", DOCKER), ("python3", PYTHON_TRACE)):
             path = self.tools / name
             path.write_text("#!" + sys.executable + "\n" + program)

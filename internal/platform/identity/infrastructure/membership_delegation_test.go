@@ -129,6 +129,10 @@ func (c *auditMembershipConn) QueryContext(_ context.Context, q string, args []d
 		return rows([]string{"id", "name", "code"}, []driver.Value{"super-role", "super", "platform-super-admin"}), nil
 	case strings.Contains(q, "FROM authz_role_permission AS role_permission"):
 		return rows([]string{"permission_id"}, []driver.Value{"target-permission"}), nil
+	// 授予策略守卫（SUPER_ADMIN_ONLY）会在委派检查里额外查一次受限权限；
+	// 本夹具的角色都不含受限权限，返回 0 表示不拦截。
+	case strings.Contains(q, "count(*)") && strings.Contains(q, "authz_permission") && strings.Contains(q, "grant_policy"):
+		return rows([]string{"count(*)"}, []driver.Value{int64(0)}), nil
 	case strings.Contains(q, "COUNT(DISTINCT"):
 		total := int64(0)
 		if c.s.delegated {
