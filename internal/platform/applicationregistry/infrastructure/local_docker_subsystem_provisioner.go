@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -986,17 +985,6 @@ func (provisioner *LocalDockerSubsystemProvisioner) updatePublicRuntimeConfigura
 	return nil
 }
 
-// debugOIDCUpdateFingerprint 临时诊断：确认运行时标记与 Secret 指纹（不含明文），定位后删除。
-func debugOIDCUpdateFingerprint(input application.SubsystemProvisioningInput) {
-	fingerprint := "<empty>"
-	if strings.TrimSpace(input.ClientSecret) != "" {
-		sum := sha256.Sum256([]byte(input.ClientSecret))
-		fingerprint = hex.EncodeToString(sum[:])[:8]
-	}
-	fmt.Fprintf(os.Stderr, "[debug] oidc_update app=%s environment=%s runtime_update=%v client_id=%s secret_fp=%s\n",
-		input.ApplicationCode, input.Environment, input.AuthenticationRuntimeUpdate, input.ClientID, fingerprint)
-}
-
 // updateOIDCRuntimeConfiguration 通过既有受控运行配置更新OIDC与统一会话接线。
 // 参数：input为经过调用方边界校验的业务输入。
 //
@@ -1004,7 +992,6 @@ func debugOIDCUpdateFingerprint(input application.SubsystemProvisioningInput) {
 //
 // 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfiguration(input application.SubsystemProvisioningInput, environmentPath string) error {
-	debugOIDCUpdateFingerprint(input)
 	values, policyErr := managedSessionEnvironment(input.CentralSessionPolicy, input.ApplicationCode)
 	if policyErr != nil {
 		return policyErr
