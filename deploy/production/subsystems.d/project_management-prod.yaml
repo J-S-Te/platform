@@ -58,6 +58,7 @@ runtime:
         PLATFORM_APPLICATION_CODE: project_management
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
+        PROJECT_RUN_WORKER_WITH_API: "false"
         PROJECT_BACKGROUND_ENGINE: temporal
         PROJECT_BACKGROUND_TASK_QUEUE: project-management-background-v1
         PROJECT_BACKGROUND_DEPLOYMENT_NAME: project-management-background
