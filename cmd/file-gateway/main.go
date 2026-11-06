@@ -20,9 +20,18 @@ import (
 	filemigrations "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/migrations"
 	fileworker "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/worker"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/shutdown"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
+)
+
+const (
+	// fileGatewayHTTPShutdownBudget 是 HTTP 停止接收并排空在途请求的上限，沿用整改前的 10s。
+	fileGatewayHTTPShutdownBudget = 10 * time.Second
+	// fileGatewayDrainBudget 覆盖“HTTP 排空 + 对账/容量监控协程退出”，
+	// 明显小于容器 stop_grace_period（60s），保证超时前能留下可读日志。
+	fileGatewayDrainBudget = 30 * time.Second
 )
 
 func main() {
@@ -108,8 +117,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	runner, err := fileworker.NewRunner(files, tenantSource{database}, durationEnv("FILE_GATEWAY_RECONCILIATION_INTERVAL", time.Minute), durationEnv("FILE_GATEWAY_RECONCILIATION_STALE_AFTER", 15*time.Minute), intEnv("FILE_GATEWAY_RECONCILIATION_BATCH_SIZE", 100), slog.Default())
 	if err != nil {
 		return err
@@ -121,22 +128,59 @@ func run() error {
 	if err := runner.ConfigureCleanup(cleanupEnabled, durationEnv("FILE_GATEWAY_CLEANUP_INTERVAL", time.Hour), durationEnv("FILE_GATEWAY_CLEANUP_MINIMUM_AGE", 24*time.Hour), intEnv("FILE_GATEWAY_CLEANUP_BATCH_SIZE", 100)); err != nil {
 		return fmt.Errorf("file gateway cleanup configuration: %w", err)
 	}
-	go runner.Run(ctx)
+
+	// 停机骨架：HTTP 先停止接收并在预算内排空在途请求，随后等待对账/清理与容量监控协程退出。
+	manager := shutdown.New(fileGatewayDrainBudget).WithLogger(slog.Default())
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignal)
+	drainContext, cancelDrain := context.WithCancel(context.Background())
+	defer cancelDrain()
+
+	manager.Go("file-reconciliation", runner.Run)
 	if localStore != nil {
-		go monitorLocalCapacity(ctx, localStore, slog.Default())
+		manager.Go("local-capacity-monitor", func(ctx context.Context) {
+			monitorLocalCapacity(ctx, localStore, slog.Default())
+		})
 	}
+
 	server := &http.Server{Addr: address, Handler: routes(handler, v2Handler, evidenceHandler, tokenMiddleware{verifier}, ready, database, localStore), ReadHeaderTimeout: 10 * time.Second}
+	manager.Register(shutdown.Hook{
+		Name:   "http-server",
+		Budget: fileGatewayHTTPShutdownBudget,
+		Run: func(hookContext context.Context) error {
+			slog.Default().Info("file gateway draining", "address", address, "in_flight_budget", fileGatewayHTTPShutdownBudget.String())
+			return server.Shutdown(hookContext)
+		},
+	})
+
+	serverErrors := make(chan error, 1)
+	// 监听协程由 Manager 跟踪：Shutdown 结束后必须等它返回，后台协程才算真正收尾。
+	manager.Go("http-listener", func(context.Context) {
+		serverErrors <- server.ListenAndServe()
+	})
+
+	drained := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
+		drained <- manager.Run(drainContext)
 	}()
-	err = server.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+
+	var serveErr error
+	select {
+	case serveErr = <-serverErrors:
+		// 监听提前失败（例如端口被占用）：同样走排空路径，保证后台协程被有界收尾。
+		cancelDrain()
+	case signalValue := <-shutdownSignal:
+		slog.Default().Info("file gateway shutdown signal received", "signal", signalValue.String())
+		cancelDrain()
 	}
-	return err
+
+	drainErr := <-drained
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
+	}
+	// 后台协程或 HTTP 排空超时必须暴露为非零退出，不能静默返回 nil。
+	return drainErr
 }
 
 func monitorLocalCapacity(ctx context.Context, store interface{ UsagePercent() (uint64, error) }, logger *slog.Logger) {

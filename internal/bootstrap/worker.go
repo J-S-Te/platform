@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	applicationregistryapplication "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
@@ -41,27 +43,135 @@ type ProcessRunner interface {
 	Run(context.Context)
 }
 
-// concurrentRunner 让互不依赖的后台循环共享同一取消信号；关闭时等待全部循环完成清理再退出进程。
+// JoinErrorReporter 由能报告有界 join 结果的后台 Runner 实现。
+// 这是可选接口：不改变 ProcessRunner 契约，装配侧据此把排空失败上报给进程退出码。
+type JoinErrorReporter interface {
+	JoinError() error
+}
+
+// defaultRunnerJoinBudget 是收到停机信号后等待全部后台循环退出的上限。
+// 必须明显小于编排层 stop_grace_period（60s），才能在容器被强制杀死前留下可读日志。
+const defaultRunnerJoinBudget = 20 * time.Second
+
+// concurrentRunner 让互不依赖的后台循环共享同一取消信号；关闭时在预算内等待全部循环完成清理再退出进程。
 type concurrentRunner struct {
-	runners []ProcessRunner
+	runners    []ProcessRunner
+	logger     *slog.Logger
+	joinBudget time.Duration
+
+	mutex   sync.Mutex
+	joinErr error
+}
+
+// runnerState 记录单个后台循环的可观测名称与退出状态。
+type runnerState struct {
+	name     string
+	finished atomic.Bool
+}
+
+// newConcurrentRunner 装配并发执行器；logger 为 nil 时回落到 slog.Default()，
+// joinBudget 非正数时回落到 defaultRunnerJoinBudget。
+func newConcurrentRunner(runners []ProcessRunner, logger *slog.Logger, joinBudget time.Duration) *concurrentRunner {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if joinBudget <= 0 {
+		joinBudget = defaultRunnerJoinBudget
+	}
+	return &concurrentRunner{runners: runners, logger: logger, joinBudget: joinBudget}
+}
+
+// JoinError 返回关停时有界等待后台循环的结果；nil 表示全部循环已按时退出。
+func (runner *concurrentRunner) JoinError() error {
+	if runner == nil {
+		return nil
+	}
+	runner.mutex.Lock()
+	defer runner.mutex.Unlock()
+	return runner.joinErr
 }
 
 // Run 并发启动所有 Runner 并等待全部退出。
-// 并发边界：每个 Runner 各自独立 goroutine 运行；context 被所有子 goroutine 共用；
-// 如果 context 被取消，子 Runner 退场后 WaitGroup 才会释放并让进程安全退出。
+// 并发边界：每个 Runner 各自独立 goroutine 运行；context 被所有子 goroutine 共用。
+// 收到取消信号后在 joinBudget 内等待子 Runner 退场；超时则点名报告未退出的 Runner，
+// 否则进程会在容器宽限期内静默卡住且没有任何可排查线索。
 func (runner *concurrentRunner) Run(ctx context.Context) {
+	if runner == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	states := make([]*runnerState, 0, len(runner.runners))
 	var group sync.WaitGroup
 	for _, process := range runner.runners {
 		if process == nil {
 			continue
 		}
+		state := &runnerState{name: runnerName(process)}
+		states = append(states, state)
 		group.Add(1)
-		go func(current ProcessRunner) {
+		go func(current ProcessRunner, currentState *runnerState) {
 			defer group.Done()
+			defer currentState.finished.Store(true)
 			current.Run(ctx)
-		}(process)
+		}(process, state)
 	}
-	group.Wait()
+	joined := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(joined)
+	}()
+
+	// join 预算只在取消之后计时：取消前后台循环可以合法地长期运行。
+	select {
+	case <-joined:
+		return
+	case <-ctx.Done():
+	}
+	joinTimer := time.NewTimer(runner.joinBudget)
+	defer joinTimer.Stop()
+	select {
+	case <-joined:
+		return
+	case <-joinTimer.C:
+		unfinished := unfinishedRunnerNames(states)
+		joinErr := fmt.Errorf("worker shutdown: %d runner(s) still running after %s: %s",
+			len(unfinished), runner.joinBudget.String(), strings.Join(unfinished, ", "))
+		runner.mutex.Lock()
+		runner.joinErr = joinErr
+		runner.mutex.Unlock()
+		runner.logger.Error("worker shutdown did not drain all runners",
+			"count", len(unfinished), "runners", strings.Join(unfinished, ", "), "join_budget", runner.joinBudget.String())
+	}
+}
+
+// unfinishedRunnerNames 返回预算内未退出的 Runner 名称；全部为空时仍给出占位，避免空报告。
+func unfinishedRunnerNames(states []*runnerState) []string {
+	names := make([]string, 0, len(states))
+	for _, state := range states {
+		if !state.finished.Load() {
+			names = append(names, state.name)
+		}
+	}
+	if len(names) == 0 {
+		names = append(names, "unknown")
+	}
+	return names
+}
+
+// runnerName 复用 Runner 自身的可观测信息：优先 Name()，否则用类型名。
+// 类型名足以在日志里定位是哪一个后台循环没有按时退出，且无需改动各 Runner 实现。
+func runnerName(process ProcessRunner) string {
+	if named, ok := process.(interface{ Name() string }); ok {
+		if name := strings.TrimSpace(named.Name()); name != "" {
+			return name
+		}
+	}
+	if value := reflect.TypeOf(process); value != nil {
+		return value.String()
+	}
+	return "unknown"
 }
 
 // Worker 是本地异步任务处理的依赖容器。
@@ -598,8 +708,22 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		}
 		runners = append(runners, accessRunner)
 	}
-	runner := &concurrentRunner{runners: runners}
+	// 有界 join：停机信号后最多等待 defaultRunnerJoinBudget，仍未退出的循环会被点名记录，
+	// 由 cmd/worker 转成非零退出码，避免容器宽限期耗尽后被静默 SIGKILL。
+	runner := newConcurrentRunner(runners, logger, defaultRunnerJoinBudget)
 	return &Worker{Runner: runner, Logger: logger, database: db, logFile: logFile}, nil
+}
+
+// JoinError 向上暴露后台循环的有界 join 结果；nil 表示全部循环已按时退出。
+// 装配出的 Runner 不支持该可选接口时返回 nil，保持原有 ProcessRunner 契约不变。
+func (worker *Worker) JoinError() error {
+	if worker == nil {
+		return nil
+	}
+	if reporter, ok := worker.Runner.(JoinErrorReporter); ok {
+		return reporter.JoinError()
+	}
+	return nil
 }
 
 // Close 释放 worker 进程占用的资源。
