@@ -50,7 +50,9 @@ jobs:
           set -Eeuo pipefail
           specs=0
           for spec in docs/openapi/*.yaml; do
-            ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$spec"
+            # 只做语法解析（Psych.parse_file）：不做 alias 解析，因此既不依赖 Psych 的
+            # aliases 关键字（Ruby 2.6 不支持、3.1+ 默认禁用），也不会因锚点/别名误判。
+            ruby -ryaml -e 'Psych.parse_file(ARGV[0])' "$spec"
             echo "openapi syntax ok: $spec"
             specs=$((specs + 1))
           done
@@ -210,13 +212,15 @@ jobs:
           MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
         ports:
           - "127.0.0.1::3306"
+        # options 会被原样追加到 `docker create`，只能是 Docker 自己的参数；
+        # --character-set-server/--collation-server 是 mysqld 参数，写在这里会让
+        # 容器初始化直接失败（真实 GA 已复现 exit 125）。8.4 默认就是 utf8mb4，
+        # 各测试库的字符集/排序规则在下面的 CREATE DATABASE 里显式指定。
         options: >-
           --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --silent"
           --health-interval=5s
           --health-timeout=3s
           --health-retries=30
-          --character-set-server=utf8mb4
-          --collation-server=utf8mb4_unicode_ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
