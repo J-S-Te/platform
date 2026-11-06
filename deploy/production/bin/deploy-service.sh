@@ -1519,7 +1519,7 @@ refresh_recreated_database_dependents() {
 # 返回值：成功为零；备份、迁移、配置、镜像或健康校验失败则中止发布。
 deploy_platform() {
 	local file_gateway_root file_gateway_db_name file_gateway_container file_gateway_health
-	local database_snapshot database_refresh_inline_dependents database
+	local database_snapshot database database_refresh_inline_dependents=""
 	local -a database_refresh_inline_databases=()
 	local -a keycloak_start_options
   prepare_managed_public_proxy_image || return 1
