@@ -44,6 +44,10 @@ type LoginFailedError struct {
 	UserName    string
 	AccountID   string
 	AccountName string
+	// Ineligible 表示凭据本身正确，但身份当前不可用（租户/用户/账号停用、锁定窗口内
+	// 或凭据过期）。它只用于服务端错误分类与指标 reason（account_disabled），
+	// 绝不进入 Error() 文本或 HTTP 响应：公共响应仍统一是“账号或密码错误”。
+	Ineligible bool
 }
 
 // Error 返回通用“凭据无效”文本；受信账号身份只能经结构化字段进入审计日志。
@@ -192,7 +196,7 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 		return SessionResult{}, fmt.Errorf("verify password credential: %w", err)
 	}
 	if !isLoginEligible(account, now) {
-		return SessionResult{}, loginFailedError(account)
+		return SessionResult{}, loginFailedError(account, true)
 	}
 	if !matched {
 		_, err := service.loginSecurity.RecordFailedLogin(ctx, securityapplication.LoginFailureInput{
@@ -202,7 +206,7 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 		if err != nil {
 			return SessionResult{}, fmt.Errorf("record failed password login: %w", err)
 		}
-		return SessionResult{}, loginFailedError(account)
+		return SessionResult{}, loginFailedError(account, false)
 	}
 
 	if err := service.repository.RecordSuccessfulPasswordVerification(ctx, account, now); err != nil {
@@ -343,9 +347,9 @@ func concurrentSessionError(account domain.LoginAccount) ConcurrentSessionError 
 		AccountID: account.AccountID, AccountName: account.AccountName}
 }
 
-func loginFailedError(account domain.LoginAccount) LoginFailedError {
+func loginFailedError(account domain.LoginAccount, ineligible bool) LoginFailedError {
 	return LoginFailedError{TenantID: account.TenantID, UserID: account.UserID, UserName: account.UserName,
-		AccountID: account.AccountID, AccountName: account.AccountName}
+		AccountID: account.AccountID, AccountName: account.AccountName, Ineligible: ineligible}
 }
 
 // Authenticate 不把已签名 JWT 当作完整授权快照：JWT 只提供不可篡改的会话和主体标识，
