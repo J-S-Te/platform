@@ -21,10 +21,17 @@ prepare_license_installation() {
 
 install_delivery_license() {
   local action="${1:?授权操作必填}"
-  case "$action" in import|activate) ;; *) die '不支持的交付授权操作' ;; esac
+  local -a extra=()
+  case "$action" in
+    # 导入现在默认自动激活；但打包安装先导入、等业务镜像导入和候选准备完成后再显式
+    # activate。若这里也自动激活，就会在业务镜像尚未就绪时提前采用并等待部署确认。
+    import) extra+=(--no-activate) ;;
+    activate) ;;
+    *) die '不支持的交付授权操作' ;;
+  esac
   [[ -d "$deploy_dir/license" && ! -L "$deploy_dir/license" && -f "$deploy_dir/license/commercial-license.jws" && ! -L "$deploy_dir/license/commercial-license.jws" ]] || die '交付许可证必须是安全常规文件'
   if ! compose run -T --rm --no-deps -v "$deploy_dir/license:/delivery-license:ro" platform-api \
-    ./license-install "$action" --file /delivery-license/commercial-license.jws; then
+    ./license-install "$action" --file /delivery-license/commercial-license.jws ${extra[@]+"${extra[@]}"}; then
     printf '自动授权暂停（%s）；已完成的安装状态保留。排查明确错误后重试 install，不会重新起算期限。\n' "$action" >&2
     return 1
   fi
@@ -46,8 +53,10 @@ renew_delivery_license() {
     staged="$(mktemp "$deploy_dir/license/.renewal.XXXXXX")"
     trap 'rm -f -- "$staged"' EXIT
     install -m 600 -- "$source_dir/$source_name" "$staged"
+    # 续期导入只持久化签名续期；等原子替换为正式许可证文件后，再由下面一次显式
+    # activate 完成整条激活流水线，避免对临时暂存文件激活或重复执行同一流水线。
     compose run -T --rm --no-deps -v "$deploy_dir/license:/delivery-license:ro" platform-api \
-      ./license-install import --file "/delivery-license/$(basename -- "$staged")" || exit 1
+      ./license-install import --no-activate --file "/delivery-license/$(basename -- "$staged")" || exit 1
     [[ ! -L "$deploy_dir/license/commercial-license.jws" ]] || die '现有许可证不能是符号链接'
     mv -f -- "$staged" "$deploy_dir/license/commercial-license.jws"
   ) || return 1
