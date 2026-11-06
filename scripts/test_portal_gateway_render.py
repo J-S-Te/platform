@@ -1496,5 +1496,92 @@ class ReloadTest(unittest.TestCase):
         self.assertEqual([], self.harness.stub_records("docker"))
 
 
+class _CiLockProbe(unittest.TestCase):
+    """临时诊断用例（根因确认后删除）：只打印证据，不做断言。
+
+    目的：在 CI 机器上直接采集两类事实——
+      1. mkdir 互斥是否原子：8 个进程同时 mkdir 同一路径，成功数必须为 1；
+      2. 并发 add 的锁时间线：重复多轮，打印每个写者的 LOCKDBG 轨迹、
+         耗时与最终 include 内容，用于捕捉偶发丢更新的那一轮。
+    """
+
+    def _probe_mkdir_atomicity(self):
+        for round_index in range(4):
+            tmp = Path(tempfile.mkdtemp(prefix="portal-gateway-probe-mkdir-"))
+            self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+            target = tmp / "guard.d"
+            body = 'if mkdir -- "$1" 2>/dev/null; then echo won; else echo lost; fi'
+            processes = [
+                subprocess.Popen(
+                    [bash_executable(), "-c", body, "probe", str(target)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(8)
+            ]
+            outputs = [process.communicate() for process in processes]
+            results = [stdout.strip() for stdout, _ in outputs]
+            print(
+                f"[PROBE-MKDIR round={round_index}] won={results.count('won')} "
+                f"lost={results.count('lost')} raw={results} exists={target.exists()}",
+                flush=True,
+            )
+
+    def _probe_concurrent_pair(self):
+        for round_index in range(8):
+            harness = GatewayHarness(self, path_mode="fallback")
+            env = harness.env(
+                PORTAL_GATEWAY_LOCK_TIMEOUT="30",
+                PORTAL_GATEWAY_LOCK_DEBUG="1",
+            )
+            commands = [
+                ("demo", "/demo/", "http://10.0.0.1:1"),
+                ("other", "/other/", "http://10.0.0.2:2"),
+            ]
+            started = []
+            processes = []
+            for argv in commands:
+                started.append(time.monotonic())
+                processes.append(
+                    subprocess.Popen(
+                        [bash_executable(), str(SCRIPT), "add", *argv],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        errors="replace",
+                        env=env,
+                    )
+                )
+            outputs = [process.communicate(timeout=120) for process in processes]
+            elapsed = [round(time.monotonic() - start, 3) for start in started]
+            content = harness.read_include() if harness.include.exists() else ""
+            entries = [
+                (entry.code, entry.prefix) for entry in gateway_render.parse_entry(content)
+            ]
+            print(
+                f"[PROBE-PAIR round={round_index}] elapsed={elapsed} "
+                f"rc={[process.returncode for process in processes]} entries={entries} "
+                f"lockdir_left={Path(str(harness.lock) + '.d').exists()}",
+                flush=True,
+            )
+            for argv, stderr in zip(commands, (output for _, output in outputs)):
+                for line in stderr[1].splitlines():
+                    if "LOCKDBG" in line:
+                        print(f"[PROBE-PAIR round={round_index} {argv[0]}] {line}", flush=True)
+
+    def test_probe_lock_evidence(self):
+        """打印 mkdir 原子性与并发 add 时间线证据。"""
+        print(f"[PROBE] bash={bash_executable()} python={sys.executable}", flush=True)
+        print(
+            "[PROBE] which="
+            + repr({name: shutil.which(name) for name in ("flock", "mkdir", "sleep", "cat")}),
+            flush=True,
+        )
+        print(f"[PROBE] tmpdir={tempfile.gettempdir()}", flush=True)
+        self._probe_mkdir_atomicity()
+        self._probe_concurrent_pair()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
