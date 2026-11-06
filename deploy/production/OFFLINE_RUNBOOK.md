@@ -781,7 +781,77 @@ HTTP Cookie 在网络中明文传输，只能用于隔离验收或可信内网�
 ./bin/deploy.sh logs <平台应用编码>
 ```
 
-### 8.3 业务验收而非容器验收
+### 8.3 许可运行态门禁（必做：宣布部署成功之前）
+
+**执行卡：离线部署机；部署根；root。第 8.2 的 `continue`/`verify` 已内置该门禁；平台页面上的受控更新/重试之后也必须单独执行一次。**
+
+现场故障形态（必须认得出来）：
+
+- 某个子系统的 API 容器（如 `project_management` 的 `project-api`）启动即失败，日志出现
+  `commercial license configuration failed`，随后每分钟重启一次，`RestartCount` 持续增长；
+- 平台页面只显示**「部署 Agent 执行失败」**，不显示许可原因；重复点击「重试」7 次都无效，
+  因为重试既不会补上缺失的卷，也不会纠正不一致的许可实例。
+
+根因只有两类：
+
+1. 容器缺少 `/var/lib/commercial-license` 许可状态卷（编排里应写成
+   `license-state-<服务>:/var/lib/commercial-license`），许可状态无处落盘，进程启动即失败；
+2. 容器环境里的 `COMMERCIAL_LICENSE_INSTANCE_ID` 与平台库 `license_deployment.instance_id`
+   不一致（旧实例的许可残留、跨实例复用卷、或平台侧重新初始化过许可），容器持续拒绝许可。
+
+门禁脚本只读四项事实，任何一项不通过即失败关闭：
+
+```bash
+# 不带应用编码：检查全部已登记商业应用；也可只查一个，如 project_management
+sudo ./bin/deploy.sh license-runtime
+sudo ./bin/deploy.sh license-runtime project_management
+```
+
+| 检查项 | 判据 | 失败时的含义 |
+| --- | --- | --- |
+| 容器存在且健康 | 每个已登记应用的 API 容器 `running` 且 `healthy`（无 healthcheck 时看运行状态） | 容器没起来、健康检查失败，或仍在启动/重启循环 |
+| 许可状态卷 | `docker inspect` 的挂载目标含 `/var/lib/commercial-license`，且是命名卷 | 缺卷即本次故障：启动失败 → 每分钟重启 |
+| 许可实例一致 | 容器 `COMMERCIAL_LICENSE_INSTANCE_ID` == 平台库 `license_deployment.instance_id` | 容器持有别的实例的许可，持续拒绝并在重启循环里失败 |
+| 受控部署核验 | `./license-install verify-deployment --application <编码>` 返回 0 | 平台侧受控部署/清单确认尚未完成 |
+
+**正确的执行顺序（不能调换）：**
+
+```bash
+sudo ./bin/deploy.sh license-prepare      # 按已安装计划冻结真实范围（如需）
+sudo ./bin/deploy.sh license-activate     # 导入并激活许可，等待必需组件确认
+sudo ./bin/deploy.sh continue <CLI参数>   # 接入/受控更新的收尾验收
+sudo ./bin/deploy.sh verify <CLI参数>     # 健康 + 受控部署 + 许可运行态
+sudo ./bin/deploy.sh license-runtime      # 单独复核；返回 0 才宣布部署成功
+```
+
+即：**导入并激活许可 → 接入/受控更新 → 运行许可运行态门禁 → 再宣布部署成功。**
+`continue`、`verify` 和 `start` 的末尾都已内置该门禁，任一检查失败即中止、不会打印成功结论；
+平台页面上的受控更新/重试属于平台侧动作，脚本无法替它收尾，因此**平台报成功后仍要单独跑一次
+`license-runtime`**，把这一条写进本次验收记录。
+
+`license-runtime` 输出的是脱敏证据：只显示许可实例的前 8 位前缀、卷名、容器状态和健康，
+不打印任何密钥、口令、凭据或许可原文；`--json` 可把同一份证据写入验收材料。
+
+已经用 `./bin/deploy.sh disable <CLI参数>` 显式停用的子系统，其容器停在 `exited`：门禁在**自动
+发现**应用时把这种“干净停止”记为按停用跳过，并在结论里逐个列出；但 `continue <CLI参数>`、
+`verify <CLI参数>` 和 `license-runtime <应用编码>` 属于显式指定，容器没起来仍然直接失败。
+缺卷/实例不一致在 `restart: unless-stopped` 下表现为 `restarting` 或 `running`+`unhealthy`，
+不会被当成“已停用”而放过。
+
+**禁止动作（做了只会掩盖故障）：**
+
+- 不要重复点击平台页面上的「重试」：缺卷与实例不一致都不在重试的修复范围内；
+- 不要手工修改固定记录（`runtime/` 下的授权固定文件、`.release.env` 里的镜像绑定）、
+  不要用 `docker run` 手工挂卷"救活"容器，也不要 `docker restart` 冒充修复；
+- 不要删除 `/var/lib/commercial-license` 卷来“重置”许可状态，也不要关闭
+  `COMMERCIAL_LICENSE_ENABLED` 或打开 `COMMERCIAL_LICENSE_COMPATIBILITY` 绕过：删卷会让容器
+  丢掉许可状态并在重启后失败，关闭开关会被门禁判为 `license-runtime-disabled` 直接失败关闭；
+- 不要为了“先上线”把门禁改成告警：本次故障正是在“部署成功”之前没有核对该状态才拖了 7 轮重试。
+
+正确处置只有一条：按当前平台实例**重新执行受控更新/接入**，让 Agent 按固定记录重建带许可状态卷的
+容器，然后重跑 `./bin/deploy.sh license-runtime`，返回 0 之后再宣布部署成功。
+
+### 8.4 业务验收而非容器验收
 
 每个启用系统至少记录：
 
@@ -1003,6 +1073,7 @@ File Gateway 数据库禁止单独恢复，必须使用同批次数据库+文件
 | 提示“部署资产已更新但控制面尚未成对重载” | 执行 `sudo ./bin/deploy.sh reload-control-plane` 后重试 | 手工删除 `runtime/.control-plane-reload-required`、只重启 Agent |
 | 受控采用反复报 `production subsystem manifest drift detected` | 先 `reload-control-plane` 让两侧清单一致，再在原环境重试 | 重复新增接入、只重建单个进程 |
 | API unhealthy | 看失败容器、迁移容器和 runtime 日志 | 删除数据库卷、吞掉探针 |
+| 子系统 API 每分钟重启、日志含 `commercial license configuration failed`、平台只显示「部署 Agent 执行失败」 | 先跑 `sudo ./bin/deploy.sh license-runtime <应用编码>` 定性（缺许可状态卷 / 许可实例不一致），再按当前平台实例重新执行受控更新或接入，返回 0 后才算完成（见 8.3） | 重复点「重试」、`docker run` 手工挂卷、改 `runtime/` 固定记录或 `.release.env` 绑定、关闭 `COMMERCIAL_LICENSE_ENABLED` |
 | 子系统凭据缺失 | 在原环境修复控制面用途 Client 后重试 | 重复创建应用环境、填占位凭据 |
 | 客户门户返回 `PORTAL_AUTHORIZATION_REQUIRED` | 确认 platform、customer-portal 与 deployment-assets 均为包含 000112 的同一新发布；在原 `customer_portal/prod` 环境执行一次受控“更新/重试”，等待 Keycloak 授权投影成功后退出旧会话并重新登录 | 给内部管理员授予 `portal_customer`、直接改授权表、重复创建环境 |
 | 前端 504 | 检查目标 API 与依赖健康、网关日志 | 把 HTTP 200 当作业务成功 |
@@ -1021,6 +1092,8 @@ File Gateway 数据库禁止单独恢复，必须使用同批次数据库+文件
 - 每个包大小、包 SHA、组件/版本/平台、镜像 config 摘要；
 - 部署机只读预检、Compose 实际服务列表、本机 Registry 中发布 digest；
 - 平台、前端和每个子系统的真实登录、关键读写、文件与异步任务范围；
+- 每个已登记商业应用的许可运行态证据：`sudo ./bin/deploy.sh license-runtime --json` 的
+  `ok=true`、四项检查结论和许可实例前缀（**不要**记录完整实例、密钥或凭据；见 8.3）；
 - 故障演练、恢复批次、恢复后业务核对和清理结果；
 - 所有阻塞项、未执行项及原因。
 

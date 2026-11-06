@@ -7,6 +7,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 	stdhttp "net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // writeError 输出接入错误及安全的受控恢复指引。
@@ -114,6 +115,10 @@ func subsystemProvisioningErrorCode(err error) string {
 		return "PROVISIONING_MIGRATION_FAILED"
 	case strings.Contains(message, "backup production subsystem database"), strings.Contains(message, "prepare production subsystem backup"):
 		return "PROVISIONING_BACKUP_FAILED"
+	case strings.Contains(message, "license runtime state is unavailable"):
+		return "LICENSE_RUNTIME_STATE_UNAVAILABLE"
+	case strings.Contains(message, "commercial license configuration failed"):
+		return "LICENSE_RUNTIME_CONFIGURATION_FAILED"
 	case strings.Contains(message, "start production subsystem dependencies"), strings.Contains(message, "start production subsystem services"), strings.Contains(message, "start subsystem containers"), strings.Contains(message, "rebuild subsystem containers"), strings.Contains(message, "release environment is unavailable"), strings.Contains(message, "production environment is unavailable"):
 		return "PROVISIONING_RUNTIME_UNHEALTHY"
 	case strings.Contains(message, "unavailable"):
@@ -140,6 +145,28 @@ func subsystemLifecycleFailureDetail(err error) string {
 		return code
 	}
 	return code + ": " + summary
+}
+
+// persistedDeploymentFailureDetail 生成可以写入 subsystem_deployment_state.last_error_message
+// 的真实失败原因：单行、已脱敏、限长。没有它时，状态表与状态接口只剩一句“部署 Agent
+// 执行失败”，运维无法区分许可运行态、镜像与数据库问题，只能盲目重试。
+// 安全（SEC-B3）：SQL/ORM 关键词命中时整体丢弃；文件路径替换为 [internal]。
+func persistedDeploymentFailureDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" || internalErrorDetailPattern.MatchString(message) {
+		return ""
+	}
+	message = errorPathPattern.ReplaceAllString(message, "[internal]")
+	// 换行与制表符必须消失：该文本既要进 varchar(1000)，也要出现在状态接口的 JSON 里。
+	message = strings.Join(strings.Fields(message), " ")
+	const limit = 800
+	if utf8.RuneCountInString(message) > limit {
+		message = string([]rune(message)[:limit]) + "...(truncated)"
+	}
+	return message
 }
 
 // redactInternalText 剥离内部细节：SQL 关键词命中时返回空串（不保留任何原文），
@@ -191,6 +218,12 @@ func subsystemProvisioningNextAction(err error, stages ...string) string {
 	message := strings.ToLower(err.Error())
 	diagnosis := "平台部署 Agent 或目标 API 暂时不可用"
 	switch {
+	// 许可运行态判定必须优先于通用的“重建/启动失败”与“不可用”分支：这两类失败的真实
+	// 原因就是许可运行态没下发，泛化文案会让运维只能反复重试。
+	case strings.Contains(message, "license runtime state is unavailable"):
+		diagnosis = "该应用的商业许可运行态未下发（常见原因：许可实例未初始化/未激活，或固定记录缺少 license-state 卷）。请先在商业授权完成导入与激活，再执行受控更新；不要重复创建应用环境"
+	case strings.Contains(message, "commercial license configuration failed"):
+		diagnosis = "目标 API 因商业许可配置失败而反复重启；请核对 license-state 卷挂载与许可实例是否一致"
 	case strings.Contains(message, "disabled"):
 		diagnosis = "当前环境未启用受控部署 Agent；请升级并重新发布生产部署资产，确认 platform-api 与 subsystem-provisioner 均健康"
 	case strings.Contains(message, "deployment helper is unavailable"), strings.Contains(message, "read deployment response"), strings.Contains(message, "send deployment request"):

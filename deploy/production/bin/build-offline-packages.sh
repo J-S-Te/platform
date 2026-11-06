@@ -971,7 +971,7 @@ package_assets() (
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
     bin/install-host-dependencies.sh bin/initialize-audit-hash-key.py bin/platform-mysql-command.py
     bin/release-backup-policy.py
-    bin/project-compose-assets.py bin/check-asset-bundle.py
+    bin/project-compose-assets.py bin/check-asset-bundle.py bin/check-license-runtime.py
     bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-frontend-selection.sh bin/offline-image-identities.py
     bin/export-license-inventory.py bin/frontend-network.py bin/check-frontend-network.sh bin/subsystem-runtime.py
     bin/delivery-inspect.py bin/delivery-inspect-images.py bin/delivery-inspect-v2.py bin/delivery-runtime.py bin/delivery-runtime.sh

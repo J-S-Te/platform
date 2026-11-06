@@ -26,6 +26,10 @@ func (r *compositionRuntimeRunner) RunOutput(ctx context.Context, dir string, en
 	if len(args) > 1 && args[0] == "image" && args[1] == "inspect" {
 		return []byte(`{"id":"sha256:` + strings.Repeat("a", 64) + `"}`), nil
 	}
+	// 受控 Compose 操作现在也走 RunOutput（失败时要带回真实原因），因此不再算未预期命令。
+	if len(args) > 0 && args[0] == "compose" {
+		return nil, nil
+	}
 	return nil, errors.New("unexpected composition fixture output command")
 }
 
