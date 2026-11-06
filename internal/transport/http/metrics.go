@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,10 +20,14 @@ import (
 // OperationalMetrics 提供不依赖外部 SDK 的最低限度 Prometheus 指标。
 // 只输出聚合运行数据，不包含租户、用户、业务单号或 URL 参数，避免高基数和隐私泄漏。
 type OperationalMetrics struct {
-	database         *gorm.DB
-	requests         atomic.Uint64
-	errors           atomic.Uint64
-	durationNanos    atomic.Uint64
+	database *gorm.DB
+
+	// HTTP 请求面按 {method,route,status} 拆序列累计（见 httpSeriesKey）：
+	// 只有带标签才能表达 5xx 率与按路由的尾延迟，而标签维度又必须受约束，
+	// 否则任意扫描路径会把序列数打爆。
+	httpMu     sync.RWMutex
+	httpSeries map[httpSeriesKey]*httpSeries
+
 	authzFailures    atomic.Uint64
 	oidcFailures     atomic.Uint64
 	collectionErrors atomic.Uint64
@@ -50,6 +56,238 @@ const defaultQueueMetricsTTL = 10 * time.Second
 
 // metricsPath 是 /metrics 抓取端点路径，注册与自我计量豁免共用同一常量。
 const metricsPath = "/metrics"
+
+// HTTP 请求面指标名。名字保持原样（改名会打断既有规则与看板），本轮只补标签维度并把
+// 延迟从 summary 改成 histogram。三条指标共用同一组标签 {method,route,status}，
+// 因此可以互相比值（例如 5xx 错误率），也可以按 route 聚合后算分位。
+const (
+	metricHTTPRequestsTotal   = "platform_http_requests_total"
+	metricHTTPErrorsTotal     = "platform_http_errors_total"
+	metricHTTPDurationSeconds = "platform_http_request_duration_seconds"
+)
+
+// maxHTTPSeries 是 HTTP 指标序列数的硬上限（基数保护）。
+//
+// 三个标签维度都可能被未匹配请求放大：若 route 退回 Request.URL.Path，任意扫描路径
+// 都会新建一条序列，/metrics 正文大小与 Prometheus 内存会被单个来源线性放大，同时
+// 把 URL 里的查询串（token、手机号等）复制进指标。因此：
+//   - route 只取 gin 注册模式（FullPath），空值固定 "__unmatched__"；
+//   - method 走白名单，未知方法记 "OTHER"；
+//   - status 只分 1xx/2xx/3xx/4xx/5xx 五个桶（另有 "other" 兜底）。
+//
+// 达到上限后新组合折叠进 httpOverflowSeriesKey 继续计数（不丢请求量），所以本进程
+// 输出的 HTTP 序列数上界是 maxHTTPSeries + 1 个溢出序列。
+const maxHTTPSeries = 1000
+
+// 标签取值域的固定枚举：全部是代码内常量，绝不来自请求内容。
+const (
+	httpMethodOther    = "OTHER"
+	httpRouteUnmatched = "__unmatched__"
+	httpRouteOverflow  = "__overflow__"
+	httpStatusOther    = "other"
+)
+
+// httpDurationBucketCount 是耗时直方图的桶个数（不含 +Inf）。
+const httpDurationBucketCount = 11
+
+// httpDurationBuckets 是耗时直方图的桶上界（秒）。使用 Prometheus 官方推荐的
+// HTTP 延迟桶，覆盖 5ms 到 10s：低于 5ms 的请求全部落在第一个桶，高于 10s 的只计入
+// +Inf 桶（跑满超时的那一类，本身就是要看的信号）。
+var httpDurationBuckets = [httpDurationBucketCount]float64{
+	0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+}
+
+// httpSeriesKey 是 HTTP 指标的唯一序列键。三个维度的取值域都被上面的约束限死，
+// 因此键空间是可枚举且有上界的。
+type httpSeriesKey struct {
+	method string
+	route  string
+	status string
+}
+
+// httpOverflowSeriesKey 是序列数超限后的折叠目标：用固定的枚举值吸收所有新组合。
+var httpOverflowSeriesKey = httpSeriesKey{method: httpMethodOther, route: httpRouteOverflow, status: httpStatusOther}
+
+// labels 渲染 Prometheus 标签串；顺序固定 method→route→status，保证输出确定性。
+func (key httpSeriesKey) labels() string {
+	return key.labelsWith("")
+}
+
+// labelsWith 追加一个额外标签（直方图桶用 `le="..."`）。
+func (key httpSeriesKey) labelsWith(extra string) string {
+	rendered := `{method="` + escapeMetricLabelValue(key.method) +
+		`",route="` + escapeMetricLabelValue(key.route) +
+		`",status="` + escapeMetricLabelValue(key.status) + `"`
+	if extra != "" {
+		rendered += "," + extra
+	}
+	return rendered + "}"
+}
+
+// httpSeries 是一条序列的累计值。
+//
+// buckets[i] 直接存 "耗时 <= httpDurationBuckets[i]" 的**累计**次数，因此桶天然单调；
+// +Inf 桶不单独存储，输出时直接取 requests——它按定义就是“所有耗时”的累计值，
+// 这样 `+Inf == _count` 是结构上的恒等式，不依赖两处计数保持一致。
+type httpSeries struct {
+	requests      atomic.Uint64
+	errors        atomic.Uint64
+	durationNanos atomic.Uint64
+	buckets       [httpDurationBucketCount]atomic.Uint64
+}
+
+// httpMethodLabel 把请求方法映射到白名单值，未知方法一律 OTHER。
+func httpMethodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodHead:
+		return method
+	default:
+		return httpMethodOther
+	}
+}
+
+// httpRouteLabel 只接受 gin 注册模式；空串（未匹配路由/405）固定 "__unmatched__"。
+// 这里绝不退回 Request.URL.Path：那是高基数与 PII 泄漏的入口。
+func httpRouteLabel(fullPath string) string {
+	if fullPath == "" {
+		return httpRouteUnmatched
+	}
+	return fullPath
+}
+
+// httpStatusLabel 把状态码归入 1xx/2xx/3xx/4xx/5xx 五个桶；非标准码（<100 或 >599）
+// 记 "other"，避免把畸形状态码变成新序列。
+func httpStatusLabel(statusCode int) string {
+	switch {
+	case statusCode >= 100 && statusCode < 200:
+		return "1xx"
+	case statusCode >= 200 && statusCode < 300:
+		return "2xx"
+	case statusCode >= 300 && statusCode < 400:
+		return "3xx"
+	case statusCode >= 400 && statusCode < 500:
+		return "4xx"
+	case statusCode >= 500 && statusCode < 600:
+		return "5xx"
+	default:
+		return httpStatusOther
+	}
+}
+
+// httpSeriesFor 返回 key 对应的序列（必要时创建）。超过 maxHTTPSeries 个常规序列后，
+// 新组合折叠到 httpOverflowSeriesKey 共享一条序列，保证基数有上界。
+func (metrics *OperationalMetrics) httpSeriesFor(key httpSeriesKey) *httpSeries {
+	metrics.httpMu.RLock()
+	series, exists := metrics.httpSeries[key]
+	metrics.httpMu.RUnlock()
+	if exists {
+		return series
+	}
+	metrics.httpMu.Lock()
+	defer metrics.httpMu.Unlock()
+	if series, exists = metrics.httpSeries[key]; exists {
+		return series
+	}
+	if metrics.httpSeries == nil {
+		metrics.httpSeries = make(map[httpSeriesKey]*httpSeries, 16)
+	}
+	if len(metrics.httpSeries) >= maxHTTPSeries && key != httpOverflowSeriesKey {
+		key = httpOverflowSeriesKey
+		if series, exists = metrics.httpSeries[key]; exists {
+			return series
+		}
+	}
+	series = &httpSeries{}
+	metrics.httpSeries[key] = series
+	return series
+}
+
+// recordHTTPRequest 把一次请求记到 {method,route,status} 序列。method 走白名单、
+// route 只收注册模式、status 只分桶——调用方传什么都不会产生新的取值域。
+func (metrics *OperationalMetrics) recordHTTPRequest(method, route string, statusCode int, elapsed time.Duration) {
+	series := metrics.httpSeriesFor(httpSeriesKey{
+		method: httpMethodLabel(method),
+		route:  httpRouteLabel(route),
+		status: httpStatusLabel(statusCode),
+	})
+	series.requests.Add(1)
+	if statusCode >= http.StatusBadRequest {
+		series.errors.Add(1)
+	}
+	nanos := elapsed.Nanoseconds()
+	if nanos < 0 {
+		nanos = 0
+	}
+	series.durationNanos.Add(uint64(nanos))
+	seconds := float64(nanos) / float64(time.Second)
+	for index := range httpDurationBuckets {
+		if seconds <= httpDurationBuckets[index] {
+			series.buckets[index].Add(1)
+		}
+	}
+}
+
+// httpSeriesSnapshot 是抓取期的一条序列（只持有指针，不复制 atomic 字段）。
+type httpSeriesSnapshot struct {
+	key    httpSeriesKey
+	series *httpSeries
+}
+
+// sortedHTTPSeries 在锁内复制键集合，解锁后按键排序（method→route→status），
+// 保证同一状态多次抓取的输出顺序稳定，抓取期间也不阻塞新序列创建。
+func (metrics *OperationalMetrics) sortedHTTPSeries() []httpSeriesSnapshot {
+	metrics.httpMu.RLock()
+	snapshot := make([]httpSeriesSnapshot, 0, len(metrics.httpSeries))
+	for key, series := range metrics.httpSeries {
+		snapshot = append(snapshot, httpSeriesSnapshot{key: key, series: series})
+	}
+	metrics.httpMu.RUnlock()
+	sort.Slice(snapshot, func(left, right int) bool {
+		if snapshot[left].key.method != snapshot[right].key.method {
+			return snapshot[left].key.method < snapshot[right].key.method
+		}
+		if snapshot[left].key.route != snapshot[right].key.route {
+			return snapshot[left].key.route < snapshot[right].key.route
+		}
+		return snapshot[left].key.status < snapshot[right].key.status
+	})
+	return snapshot
+}
+
+// writeHTTPMetrics 输出 HTTP 请求面三条指标。TYPE 行无条件声明一次（多序列只重复样本行）；
+// 没有任何序列时只输出 TYPE，不伪造全零样本——"还没有请求"和"抓取被拒绝"必须能区分，
+// 所以样本缺失的兜底规则改用无条件输出的 collection_errors（见 platform-alerts.yml）。
+func (metrics *OperationalMetrics) writeHTTPMetrics(writer http.ResponseWriter) {
+	fmt.Fprintf(writer, "# TYPE %s counter\n", metricHTTPRequestsTotal)
+	fmt.Fprintf(writer, "# TYPE %s counter\n", metricHTTPErrorsTotal)
+	fmt.Fprintf(writer, "# TYPE %s histogram\n", metricHTTPDurationSeconds)
+	for _, entry := range metrics.sortedHTTPSeries() {
+		labels := entry.key.labels()
+		requests := entry.series.requests.Load()
+		errors := entry.series.errors.Load()
+		fmt.Fprintf(writer, "%s%s %d\n", metricHTTPRequestsTotal, labels, requests)
+		fmt.Fprintf(writer, "%s%s %d\n", metricHTTPErrorsTotal, labels, errors)
+		for index := range httpDurationBuckets {
+			fmt.Fprintf(writer, "%s_bucket%s %d\n", metricHTTPDurationSeconds,
+				entry.key.labelsWith(`le="`+formatHTTPBucketBound(httpDurationBuckets[index])+`"`),
+				entry.series.buckets[index].Load())
+		}
+		// +Inf 桶按定义等于 _count，直接取请求数，避免两处计数不一致。
+		fmt.Fprintf(writer, "%s_bucket%s %d\n", metricHTTPDurationSeconds,
+			entry.key.labelsWith(`le="+Inf"`), requests)
+		// _sum 沿用原有精度口径：纳秒整数累加后按秒输出 %.9f。
+		fmt.Fprintf(writer, "%s_sum%s %.9f\n", metricHTTPDurationSeconds, labels,
+			float64(entry.series.durationNanos.Load())/float64(time.Second))
+		fmt.Fprintf(writer, "%s_count%s %d\n", metricHTTPDurationSeconds, labels, requests)
+	}
+}
+
+// formatHTTPBucketBound 用最短往返表示输出桶上界（0.005、0.025、1、2.5、10），
+// 避免 %f 的尾零或科学计数法让 le 值与阈值比较时失真。
+func formatHTTPBucketBound(bound float64) string {
+	return strconv.FormatFloat(bound, 'g', -1, 64)
+}
 
 // OAuth Client Secret 龄期/吊销指标（BIZ-RUNTIME-05）。它们与队列计数共用同一 10s TTL
 // 快照，避免每次抓取都做全表聚合。
@@ -137,7 +375,12 @@ func NewOperationalMetrics(database *gorm.DB) *OperationalMetrics {
 	return &OperationalMetrics{database: database}
 }
 
-// Middleware 记录请求总量、错误量、累计延迟以及认证授权失败。
+// Middleware 记录按 {method,route,status} 拆分的请求总量、错误量、耗时直方图，
+// 以及认证授权失败。
+//
+// route 取 ginContext.FullPath()（注册模式），不取 Request.URL.Path：注册模式的
+// 取值域由路由表决定，而真实路径可被任意扫描串撑成无限序列并把查询串写进指标。
+// 未匹配路由（404）与 405 的 FullPath 为空，统一记 "__unmatched__"。
 //
 // /metrics 抓取自身有意不计量：这个端点的响应正文就是这些计数器，若把抓取本身算进
 // requests_total / duration，抓取频率（以及抓取端重试）会直接改写被观测值，形成自我
@@ -153,11 +396,11 @@ func (metrics *OperationalMetrics) Middleware() gin.HandlerFunc {
 		startedAt := time.Now()
 		ginContext.Next()
 		status := ginContext.Writer.Status()
-		metrics.requests.Add(1)
-		metrics.durationNanos.Add(uint64(time.Since(startedAt)))
-		if status >= http.StatusBadRequest {
-			metrics.errors.Add(1)
+		method := ""
+		if ginContext.Request != nil {
+			method = ginContext.Request.Method
 		}
+		metrics.recordHTTPRequest(method, ginContext.FullPath(), status, time.Since(startedAt))
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
 			metrics.authzFailures.Add(1)
 			path := ginContext.Request.URL.Path
@@ -172,10 +415,7 @@ func (metrics *OperationalMetrics) Middleware() gin.HandlerFunc {
 func (metrics *OperationalMetrics) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
-	requests := metrics.requests.Load()
-	fmt.Fprintf(writer, "# TYPE platform_http_requests_total counter\nplatform_http_requests_total %d\n", requests)
-	fmt.Fprintf(writer, "# TYPE platform_http_errors_total counter\nplatform_http_errors_total %d\n", metrics.errors.Load())
-	fmt.Fprintf(writer, "# TYPE platform_http_request_duration_seconds summary\nplatform_http_request_duration_seconds_sum %.9f\nplatform_http_request_duration_seconds_count %d\n", float64(metrics.durationNanos.Load())/float64(time.Second), requests)
+	metrics.writeHTTPMetrics(writer)
 	fmt.Fprintf(writer, "# TYPE platform_authz_failures_total counter\nplatform_authz_failures_total %d\n", metrics.authzFailures.Load())
 	fmt.Fprintf(writer, "# TYPE platform_oidc_login_failures_total counter\nplatform_oidc_login_failures_total %d\n", metrics.oidcFailures.Load())
 	metrics.writeDatabaseMetrics(writer, request.Context())
