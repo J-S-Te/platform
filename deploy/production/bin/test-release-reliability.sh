@@ -250,6 +250,12 @@ grep -Fq '/app/worker' <<<"$worker_block" || fail 'platform worker healthcheck d
 grep -Fq 'verify_service_stable platform-worker' "$deploy_service" || fail 'platform worker has no release stability gate'
 pass 'platform worker health and restart stability are release gates'
 
+# 服务端 Compose 可能保留模块裁剪后的旧 environment，发布必须先纠正运行文件。
+deploy_project_body="$(extract_function deploy_project "$deploy_service")"
+grep -Fq 'env_set "$project_runtime_file" PROJECT_RUN_WORKER_WITH_API false' <<<"$deploy_project_body" ||
+  fail 'project release does not force PROJECT_RUN_WORKER_WITH_API=false'
+pass 'project release forces embedded worker off before deployment'
+
 # 9. 若 Compose 健康窗口过短导致数据分析依赖等待失败，必须回退为等待已运行的 API 容器，不能直接回滚。
 eval "$(extract_function capture_data_analysis_role_config_hash "$deploy_service")"
 eval "$(extract_function deploy_data_analysis "$deploy_service")"

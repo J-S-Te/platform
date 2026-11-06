@@ -1806,6 +1806,10 @@ deploy_project() {
     echo "PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED 必须为 true" >&2
     return 1
   fi
+  # 生产必须关闭进程内后台 Worker（由 project-sla-notifier 承担）。服务端
+  # docker-compose.yml 按模块裁剪保留旧值，compose environment 未必生效，
+  # 因此发布前在受管运行文件里统一纠正，env_file 与 notifier 都读取该值。
+  env_set "$project_runtime_file" PROJECT_RUN_WORKER_WITH_API false || return
   ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" project-mysql temporal || return
   require_mysql_ready project-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
