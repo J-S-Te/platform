@@ -18,6 +18,9 @@ func runtimeLicenseApprovalDiagnostic(code string) (message, nextAction string) 
 		return "运行组件当前修订确认失败", "请核对当前部署修订与许可证覆盖范围是否一致，完成确认流程后在当前环境点击“重试”"
 	case "LICENSE_RUNTIME_BINDING_FAILED":
 		return "许可证绑定校验失败，运行组件无法确认授权归属", "请确认当前应用与环境已绑定到有效许可证，绑定修复后点击“重试”，不要重复新增接入"
+	case "LICENSE_RUNTIME_STATE_UNAVAILABLE":
+		return "该应用的商业许可运行态未下发（常见原因：许可实例未初始化/未激活，或固定记录缺少 license-state 卷）",
+			"请先在商业授权完成导入与激活，再执行受控更新；不要重复创建应用环境"
 	case "LICENSE_NOT_INITIALIZED":
 		return "商业运行实例尚未初始化（缺少有效许可证）", "请先由授权管理员导入厂商签发的许可证并完成初始化，再回到当前环境重试接入"
 	case "LICENSE_CONFIRMATION_REQUIRED":
