@@ -56,13 +56,29 @@ func (handler *SubsystemAccessHandler) PreviewManualRecovery(writer stdhttp.Resp
 	}
 	// 旧回执使用Go默认字段名且参与持久文件哈希，不能为前端改动其序列化。
 	// 此处显式映射公共DTO，保持旧代次回执路径和恢复绑定不变。
-	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, "人工恢复现场核验完成，尚未终止原代次", map[string]any{
+	message := "人工恢复现场核验完成，尚未终止原代次"
+	if value.Mode == application.SubsystemAccessRecoveryModeSuperseded {
+		// 审核基准已变更：只确认否定证明，不提供（也不允许）运行事实核对。
+		message = "原代次的审核基准已被当前发布取代；仅确认既无成功回执也无终止结果，尚未终止原代次"
+	}
+	// 取代模式没有运行事实：显式下发空数组，避免前端把 null 当成"字段缺失"。
+	files := value.Evidence.RuntimeFiles
+	if files == nil {
+		files = []application.SubsystemAccessRecoveryFile{}
+	}
+	containers := value.Evidence.Containers
+	if containers == nil {
+		containers = []application.SubsystemAccessRecoveryContainer{}
+	}
+	httpresponse.WriteSuccess(writer, request, stdhttp.StatusOK, message, map[string]any{
 		"operation_id": value.OperationID, "operation_version": value.OperationVersion,
 		"application_code": value.Evidence.Receipt.ApplicationCode, "environment": value.Evidence.Receipt.Environment,
 		"generation": value.Evidence.Receipt.Generation, "manifest_checksum": value.Evidence.Receipt.ManifestChecksum,
-		"evidence_digest": value.Evidence.EvidenceDigest, "runtime_files": value.Evidence.RuntimeFiles,
-		"containers": value.Evidence.Containers, "already_fenced": value.Evidence.AlreadyFenced,
+		"evidence_digest": value.Evidence.EvidenceDigest, "runtime_files": files,
+		"containers": containers, "already_fenced": value.Evidence.AlreadyFenced,
 		"error_code": value.ErrorCode, "error_message": value.ErrorMessage,
+		"mode": value.Mode, "receipt_manifest_checksum": value.ReceiptManifestChecksum,
+		"current_profile_checksum": value.CurrentProfileChecksum,
 	})
 }
 
@@ -70,7 +86,11 @@ type manualRecoveryRequest struct {
 	ExpectedVersion uint64 `json:"expected_version"`
 	Generation      uint64 `json:"generation"`
 	EvidenceDigest  string `json:"evidence_digest"`
-	Reason          string `json:"reason"`
+	// Mode 为空时按 fenced 处理，保持既有请求体兼容。
+	Mode                    string `json:"mode"`
+	ReceiptManifestChecksum string `json:"receipt_manifest_checksum"`
+	CurrentProfileChecksum  string `json:"current_profile_checksum"`
+	Reason                  string `json:"reason"`
 }
 
 // decodeManualRecovery 严格限制终止请求的字段、大小及尾随JSON。
@@ -105,7 +125,9 @@ func (handler *SubsystemAccessHandler) AbandonManualRecovery(writer stdhttp.Resp
 	}
 	value, err := service.AbandonManualRecovery(request.Context(), application.SubsystemAccessManualRecoveryInput{
 		TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, OperationID: request.PathValue("operation_id"),
-		ExpectedVersion: body.ExpectedVersion, Generation: body.Generation, EvidenceDigest: body.EvidenceDigest, Reason: body.Reason})
+		ExpectedVersion: body.ExpectedVersion, Generation: body.Generation, EvidenceDigest: body.EvidenceDigest,
+		Mode: body.Mode, ReceiptManifestChecksum: body.ReceiptManifestChecksum,
+		CurrentProfileChecksum: body.CurrentProfileChecksum, Reason: body.Reason})
 	if err != nil {
 		handler.writeManualRecoveryError(writer, request, err)
 		return

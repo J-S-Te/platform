@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -268,5 +270,51 @@ func TestSubsystemAccessHandlerPreviewExposesExecutionPath(t *testing.T) {
 	// 四类动作都走统一入口后，预览不应再把用户引回 CLI。
 	if strings.Contains(body, "subsystem.sh update") {
 		t.Fatalf("preview still advertises legacy CLI: %s", body)
+	}
+}
+
+// resumeRecoveryErrorStub 让 Describe 成功、Resume 返回未知效果错误。
+type resumeRecoveryErrorStub struct {
+	subsystemAccessServiceStub
+	err error
+}
+
+// Resume 返回预置的"需要人工恢复"错误。
+// 参数：其余参数沿用用例契约，本替身不执行任何恢复。
+// 返回值：预置错误，用于验证 HTTP 映射。
+func (stub *resumeRecoveryErrorStub) Resume(context.Context, string, string) (application.SubsystemAccessOperationView, error) {
+	return application.SubsystemAccessOperationView{}, stub.err
+}
+
+// TestSubsystemAccessResumeUnknownEffectReturnsNextAction 验证未知派发的恢复被映射为可执行提示。
+// 参数：t为具更新权限的HTTP边界测试上下文。
+// 返回值：无，409 响应必须带 next_action，引导人工核验而不是重复部署。
+func TestSubsystemAccessResumeUnknownEffectReturnsNextAction(t *testing.T) {
+	stub := &resumeRecoveryErrorStub{
+		subsystemAccessServiceStub: subsystemAccessServiceStub{view: application.SubsystemAccessOperationView{
+			Operation: application.SubsystemAccessOperation{Action: application.SubsystemAccessActionUpdate}}},
+		err: fmt.Errorf("operation dispatched an unknown effect: %w", application.ErrSubsystemAccessRecoveryRequired)}
+	handler, err := NewSubsystemAccessHandler(stub, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := accessPrincipal(application.SubsystemAccessRequiredPermissions(application.SubsystemAccessActionUpdate)...)
+	request := subsystemAccessRequest(t, http.MethodPost, "/resume", "{}", &principal)
+	request.SetPathValue("operation_id", "operation-1")
+	response := httptest.NewRecorder()
+	handler.Resume(response, request)
+	var body struct {
+		Code    string         `json:"code"`
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusConflict || body.Code != "SUBSYSTEM_ACCESS_DEPLOYMENT_EFFECT_UNKNOWN" {
+		t.Fatalf("unknown effect response = %d %s", response.Code, response.Body.String())
+	}
+	next, _ := body.Details["next_action"].(string)
+	if !strings.Contains(next, "recovery-preview") || !strings.Contains(next, "不要重复部署") {
+		t.Fatalf("next_action = %q", next)
 	}
 }

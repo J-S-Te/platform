@@ -124,3 +124,76 @@ func TestManualRecoveryHTTPStrictBodyAndPrincipal(t *testing.T) {
 		t.Fatal("trusted recovery input or failure response lost", response.Code)
 	}
 }
+
+// TestManualRecoveryHTTPPreviewReportsSupersessionBaseline 验证取代模式预检返回审核基准。
+// 参数：t为具完整更新权限的HTTP边界测试上下文。
+// 返回值：无，模式与双清单摘要必须出现在公共响应里，运行事实允许为空。
+func TestManualRecoveryHTTPPreviewReportsSupersessionBaseline(t *testing.T) {
+	receiptChecksum := "sha256:" + strings.Repeat("a", 64)
+	currentChecksum := "sha256:" + strings.Repeat("c", 64)
+	s := &accessRecoveryHTTPStub{preview: application.SubsystemAccessManualRecoveryPreview{
+		OperationID: "operation-1", OperationVersion: 5,
+		Mode: application.SubsystemAccessRecoveryModeSuperseded,
+		Evidence: application.SubsystemAccessRecoveryEvidence{
+			Receipt: application.SubsystemAccessDeploymentReceipt{
+				ApplicationCode: "contract_management", Environment: "prod", Generation: 7,
+				ManifestChecksum: receiptChecksum},
+			CurrentProfileChecksum: currentChecksum},
+		ReceiptManifestChecksum: receiptChecksum, CurrentProfileChecksum: currentChecksum}}
+	h, err := NewSubsystemAccessHandler(s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := accessPrincipal(application.SubsystemAccessRequiredPermissions(application.SubsystemAccessActionUpdate)...)
+	request := subsystemAccessRequest(t, stdhttp.MethodGet, "/recovery-preview", "", &principal)
+	response := httptest.NewRecorder()
+	h.PreviewManualRecovery(response, request)
+	var body struct {
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 200 || body.Data["mode"] != application.SubsystemAccessRecoveryModeSuperseded ||
+		body.Data["receipt_manifest_checksum"] != receiptChecksum ||
+		body.Data["current_profile_checksum"] != currentChecksum {
+		t.Fatalf("superseded preview response = %s", response.Body.String())
+	}
+	for _, key := range []string{"runtime_files", "containers"} {
+		if items, ok := body.Data[key].([]any); !ok || len(items) != 0 {
+			t.Fatalf("%s must be an empty list in superseded mode: %v", key, body.Data[key])
+		}
+	}
+	if !strings.Contains(body.Message, "审核基准已被当前发布取代") {
+		t.Fatalf("superseded preview message = %q", body.Message)
+	}
+}
+
+// TestManualRecoveryHTTPSupersededBodyReachesService 验证取代模式的请求字段原样下传。
+// 参数：t为具完整更新权限的HTTP边界测试上下文。
+// 返回值：无，模式与双摘要缺一不可地到达用例层。
+func TestManualRecoveryHTTPSupersededBodyReachesService(t *testing.T) {
+	s := &accessRecoveryHTTPStub{}
+	h, err := NewSubsystemAccessHandler(s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := accessPrincipal(application.SubsystemAccessRequiredPermissions(application.SubsystemAccessActionUpdate)...)
+	receiptChecksum := "sha256:" + strings.Repeat("b", 64)
+	currentChecksum := "sha256:" + strings.Repeat("d", 64)
+	body := `{"mode":"superseded","expected_version":5,"generation":7,"receipt_manifest_checksum":"` +
+		receiptChecksum + `","current_profile_checksum":"` + currentChecksum +
+		`","reason":"核对过原代次无成功回执且无终止结果，确认由新发布取代。"}`
+	request := subsystemAccessRequest(t, stdhttp.MethodPost, "/abandon", body, &principal)
+	request.SetPathValue("operation_id", "operation-1")
+	response := httptest.NewRecorder()
+	h.AbandonManualRecovery(response, request)
+	if response.Code != 200 || s.calls != 1 {
+		t.Fatalf("superseded body rejected: %d %s", response.Code, response.Body.String())
+	}
+	if s.seen.Mode != application.SubsystemAccessRecoveryModeSuperseded ||
+		s.seen.ReceiptManifestChecksum != receiptChecksum || s.seen.CurrentProfileChecksum != currentChecksum {
+		t.Fatalf("superseded fields lost: %+v", s.seen)
+	}
+}

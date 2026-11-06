@@ -16,6 +16,9 @@ var (
 	ErrSubsystemAccessOperationConflict = errors.New("subsystem access operation conflict")
 	// ErrSubsystemAccessOperationLeaseLost 表示租约已失效：过期执行者不得覆盖新结果。
 	ErrSubsystemAccessOperationLeaseLost = errors.New("subsystem access operation lease lost")
+	// ErrSubsystemAccessRecoveryRequired 表示部署派发的效果未知：恢复重排不会重新执行外部
+	// 部署（同一持久代次不会从 DISPATCHED 退回 PREPARED），只能经人工核验后失败收口。
+	ErrSubsystemAccessRecoveryRequired = errors.New("subsystem access dispatch effect is unknown; manual recovery required")
 )
 
 // SubsystemAccessOperation 是一次向导操作（非秘密信息）。

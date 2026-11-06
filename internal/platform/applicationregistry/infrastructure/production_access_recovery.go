@@ -78,6 +78,45 @@ func (p *ProductionComposeSubsystemProvisioner) withAccessRecoveryLock(ctx conte
 	return action(ctx, target)
 }
 
+// withAccessSupersessionLock 在同目标互斥锁及共用发布锁内只读核对原代次。
+// 参数：ctx控制锁期限，request限定原目标，action仅为固定只读操作。
+// 返回值：目标越界、活动部署或锁冲突时返回错误。
+//
+// 与 withAccessRecoveryLock 的关键差异：刻意**不**要求原回执清单等于当前审核清单，
+// 也不校验当前发布完整性/运行投影。原代次的否定证明（无成功回执、无终止结果）只依赖
+// 回执散列路径，与当前清单无关；CI 替换清单后仍必须能够证明"确实没成功、也没终止"。
+func (p *ProductionComposeSubsystemProvisioner) withAccessSupersessionLock(ctx context.Context,
+	request application.SubsystemAccessAbandonRequest, action func(context.Context, *productionComposeTarget) error) error {
+	target, err := p.target(request.Receipt.ApplicationCode, request.Receipt.Environment)
+	if err != nil {
+		return err
+	}
+	if err = target.validateTenant(request.Receipt.TenantID); err != nil {
+		return err
+	}
+	if _, err = accessReceiptPath(target.config.DeployRoot, request.Receipt); err != nil {
+		return err
+	}
+	if !target.mutex.TryLock() {
+		return accessRecoveryConflict("deployment is still executing")
+	}
+	defer target.mutex.Unlock()
+	if err = privateAccessDirectory(target.config.DeployRoot,
+		filepath.Join(target.config.DeployRoot, "runtime", ".access-deployment-outcomes"), false); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	lockCtx, cancelLock := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelLock()
+	lock, err := acquireProvisioningFileLock(lockCtx, filepath.Join(target.config.DeployRoot, "runtime", ".deploy.lock"))
+	if err != nil {
+		return accessRecoveryConflict("shared deployment lock is busy")
+	}
+	defer releaseProvisioningFileLock(lock)
+	return action(ctx, target)
+}
+
 // recoveryRuntimeFiles 只输出清单内文件的存在性和摘要，不暴露运行配置。
 // 参数：无，使用已通过审批的目标清单；调用方持有发布锁。
 // 返回值：排序后的文件事实，不安全路径或异常读取返回错误。
@@ -184,7 +223,8 @@ func (target *productionComposeTarget) recoveryRuntimeContainers(ctx context.Con
 // 返回值：不含秘密的事实与摘要；已有确定拒绝则要求正常恢复。
 func (target *productionComposeTarget) recoveryEvidence(ctx context.Context,
 	receipt application.SubsystemAccessDeploymentReceipt) (application.SubsystemAccessRecoveryEvidence, error) {
-	result := application.SubsystemAccessRecoveryEvidence{Receipt: receipt}
+	result := application.SubsystemAccessRecoveryEvidence{Receipt: receipt,
+		CurrentProfileChecksum: target.config.Profile.Checksum}
 	value, found, err := readAccessDeploymentOutcome(target.config.DeployRoot, receipt)
 	if err != nil {
 		return result, err
@@ -219,6 +259,47 @@ func (p *ProductionComposeSubsystemProvisioner) CheckAccessDeploymentRecovery(ct
 	err := p.withAccessRecoveryLock(ctx, request, func(operationCtx context.Context, target *productionComposeTarget) error {
 		var err error
 		result, err = target.recoveryEvidence(operationCtx, request.Receipt)
+		return err
+	})
+	return result, err
+}
+
+// recoveryNegativeProof 在锁内只读确认原代次既无成功回执也无终止结果。
+// 参数：receipt 为平台原代次绑定，root 为受控部署根；调用方持有发布锁。
+// 返回值：否定证明及当前审核清单摘要；证明文件损坏或不安全时失败关闭。
+//
+// 先读成功回执再读终止结果：两者互斥（任一存在都会让另一个读取报冲突证据），
+// 因此顺序读取才能精确区分"有成功"与"有终止"，而不是把互斥当成读取失败。
+func (target *productionComposeTarget) recoveryNegativeProof(receipt application.SubsystemAccessDeploymentReceipt) (
+	application.SubsystemAccessRecoveryEvidence, error) {
+	result := application.SubsystemAccessRecoveryEvidence{Receipt: receipt,
+		CurrentProfileChecksum: target.config.Profile.Checksum}
+	completed, err := readAccessDeploymentReceipt(target.config.DeployRoot, receipt)
+	if err != nil {
+		return result, err
+	}
+	if completed {
+		result.SuccessReceipt = true
+		return result, nil
+	}
+	_, found, err := readAccessDeploymentOutcome(target.config.DeployRoot, receipt)
+	if err != nil {
+		return result, err
+	}
+	result.TerminalOutcome = found
+	return result, nil
+}
+
+// ReadAccessDeploymentSupersession 只读确认原代次没有成功回执也没有终止结果。
+// 参数：ctx控制查询，request限定原目标与原代次绑定（清单摘要可已过期）。
+// 返回值：否定证明、当前审核清单摘要；活动部署、目标越界或不可观察时拒绝。
+// 本方法不写任何文件，也不修改栅栏：终止写者仍然只有 Agent 的人工终止入口。
+func (p *ProductionComposeSubsystemProvisioner) ReadAccessDeploymentSupersession(ctx context.Context,
+	request application.SubsystemAccessAbandonRequest) (application.SubsystemAccessRecoveryEvidence, error) {
+	var result application.SubsystemAccessRecoveryEvidence
+	err := p.withAccessSupersessionLock(ctx, request, func(_ context.Context, target *productionComposeTarget) error {
+		var err error
+		result, err = target.recoveryNegativeProof(request.Receipt)
 		return err
 	})
 	return result, err
