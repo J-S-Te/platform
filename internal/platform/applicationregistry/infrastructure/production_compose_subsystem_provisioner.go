@@ -1146,6 +1146,8 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
 			return err
 		}
+		// 运维已明确写入的联动开关不能被受控更新的清单默认值覆盖。
+		preserveExplicitBusinessModeValues(target.config.Profile.Manifest.Application.Code, currentValues, values)
 		effective, err := readEnvironmentValues(path)
 		if err != nil {
 			return provisioningError("read runtime inheritance source")
@@ -1214,6 +1216,7 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
 			return err
 		}
+		preserveExplicitBusinessModeValues(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values)
 		effective, err := readEnvironmentValues(path)
 		if err != nil {
 			return provisioningError("read runtime inheritance source")

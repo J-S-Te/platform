@@ -425,6 +425,9 @@ func (c *roleBindingTestConn) QueryContext(_ context.Context, query string, args
 		return singleInt64Rows("count", roleBindingReferenceCount(c.scenario)), nil
 	case strings.HasPrefix(strings.TrimSpace(normalized), "select count(*) from `iam_membership`") || strings.HasPrefix(strings.TrimSpace(normalized), "select count(*) from iam_membership"):
 		return singleInt64Rows("count", roleBindingReferenceCount(c.scenario)), nil
+	case strings.Contains(normalized, "from `authz_permission`") || strings.Contains(normalized, "from authz_permission"):
+		// 委派门禁先统计角色权限里“仅超级管理员可授予”的数量；本组夹具聚焦可委派权限判定。
+		return singleInt64Rows("count", 0), nil
 	case strings.Contains(normalized, "from authz_role_permission") || strings.Contains(normalized, "from `authz_role_permission`"):
 		roleID := namedString(args, 3)
 		if roleID == "" {
