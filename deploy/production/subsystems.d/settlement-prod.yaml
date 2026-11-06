@@ -24,6 +24,7 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        SETTLEMENT_INTEGRATION_ENABLED: "true"
         CONTRACT_INTEGRATION_AUDIENCE: basic-platform-application
         PLATFORM_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         PLATFORM_MACHINE_TOKEN_ISSUER: basic-platform
