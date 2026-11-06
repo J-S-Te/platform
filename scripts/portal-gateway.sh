@@ -134,9 +134,9 @@ run_with_gateway_lock() {
 
   # macOS 没有系统 flock 时，mkdir 的原子性提供互斥；锁目录只使用固定后缀，不拼入操作参数。
   local lock_dir="${LOCK_FILE}.d" waited=0 rc
-  lock_debug "branch=mkdir path=${lock_dir} begin"
+  lock_debug "branch=mkdir path=${lock_dir} begin cwd=${PWD} mkdir=$(command -v mkdir) conf=$( [[ -d "$(dirname -- "$lock_dir")" ]] && echo yes || echo no )"
   while ! mkdir -- "$lock_dir" 2>/dev/null; do
-    lock_debug "branch=mkdir path=${lock_dir} busy attempt=${waited}"
+    lock_debug "branch=mkdir path=${lock_dir} busy attempt=${waited} d=$( [[ -d "$lock_dir" ]] && echo yes || echo no )"
     if (( waited >= LOCK_TIMEOUT )); then
       log "ERROR" "等待网关配置目录锁超时：${lock_dir}（操作：${operation}）"
       return 1
@@ -144,7 +144,7 @@ run_with_gateway_lock() {
     sleep 1
     waited=$((waited + 1))
   done
-  lock_debug "branch=mkdir path=${lock_dir} acquired"
+  lock_debug "branch=mkdir path=${lock_dir} acquired d=$( [[ -d "$lock_dir" ]] && echo yes || echo no ) ls=$(ls -ld -- "$lock_dir" 2>&1 | head -1) include=$( [[ -f "$NGINX_INCLUDE" ]] && echo yes || echo no )"
   # 子进程隔离可确保被调用函数中的 exit 不会跳过目录锁清理。
   if ( "$@" ); then rc=0; else rc=$?; fi
   lock_debug "branch=mkdir path=${lock_dir} release rc=${rc}"

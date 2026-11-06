@@ -1579,6 +1579,20 @@ class _CiLockProbe(unittest.TestCase):
             flush=True,
         )
         print(f"[PROBE] tmpdir={tempfile.gettempdir()}", flush=True)
+        for name in ("mkdir", "install", "dirname", "rmdir", "flock"):
+            resolved = shutil.which(name)
+            if not resolved:
+                print(f"[PROBE] {name}=MISSING", flush=True)
+                continue
+            real = os.path.realpath(resolved)
+            version = subprocess.run(
+                [resolved, "--version"], capture_output=True, text=True, timeout=30
+            )
+            first = (version.stdout or version.stderr).splitlines()[:1]
+            print(
+                f"[PROBE] {name}={resolved} real={real} rc={version.returncode} v={first}",
+                flush=True,
+            )
         self._probe_mkdir_atomicity()
         self._probe_concurrent_pair()
 
