@@ -45,13 +45,18 @@ pass 'runtime DSN mutation occurs inside the deployment lock'
 for oneoff in \
   'platform-migrate ./migrate' \
   contract-migrate \
-  project-migrate \
+  '-e PROJECT_RUN_WORKER_WITH_API=false project-migrate' \
   settlement-migrate \
   data-analysis-migrate; do
   grep -Fq "compose run --rm --no-deps $oneoff" "$deploy_service" ||
     fail "one-shot task does not remove its completed container: $oneoff"
 done
 pass 'all migration one-shot containers are removed after completion'
+
+# 服务端 Compose 保留模块裁剪时 environment 可能仍是旧值，迁移必须显式覆盖。
+grep -Fq 'compose run --rm --no-deps -e PROJECT_RUN_WORKER_WITH_API=false project-migrate' deploy/production/bin/deploy-service.sh ||
+  fail 'project migration does not force PROJECT_RUN_WORKER_WITH_API=false for stale Compose'
+pass 'project migration forces embedded worker off'
 
 # 子系统初始化服务（如 data-analysis-metabase-init）由生产子系统 provisioner 以
 # 具名容器运行并在成功后精确删除，不能要求 deploy-service.sh 也拥有 --rm 调用；
