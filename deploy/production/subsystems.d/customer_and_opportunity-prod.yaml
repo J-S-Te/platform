@@ -56,6 +56,7 @@ runtime:
         CONTRACT_SUMMARY_URL: http://contract-api:8081/internal/contract-summary
         CONTRACT_SUMMARY_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_SUMMARY_SCOPE: contract.summary.read
+        CONTRACT_VERIFICATION_ENABLED: "true"
         CONTRACT_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_OPPORTUNITY_INTAKE_URL: http://contract-api:8081/internal/opportunity-signed-events
         CONTRACT_SCOPE: opportunity.signed.write

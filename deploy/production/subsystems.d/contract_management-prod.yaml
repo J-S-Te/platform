@@ -42,6 +42,7 @@ runtime:
         SETTLEMENT_API_BASE_URL: http://settlement-api:8085
         SETTLEMENT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         SETTLEMENT_INTEGRATION_AUDIENCE: basic-platform-application
+        SETTLEMENT_INTEGRATION_OUTBOUND_ENABLED: "true"
         # 受控“合同财务变更”入口（BIZ-XEVT2-05 合同侧）：开启需产品确认（单人改额
         # 口径尚未签认），当前与子系统模板同为关闭；开启时须同步修改模板，
         # 否则按模板重建会静默关掉该入口。

@@ -38,6 +38,11 @@ backup_database() { log backup; [[ "$FAIL_PHASE" != backup ]]; }
 require_mysql_ready() { :; }
 diagnose_mysql_container() { :; }
 backup_database_if_initialized() { backup_database "$@"; }
+# 平台发布新引入的数据库身份快照与依赖刷新助手同样定义在 deploy_platform 之外；
+# 夹具返回稳定的旧容器身份，表示本轮没有数据库重建，不触发强制重启分支。
+database_container_id_snapshot() { printf 'platform-mysql=old-db\nkeycloak-db=old-db\ncontract-mysql=old-db\n'; }
+refresh_recreated_database_dependents() { :; }
+database_refresh_state_stale() { return 1; }
 provision_iam_import_client() { :; }
 initialize_platform_audit_hash_key() { log audit-key; [[ "$FAIL_PHASE" != audit-key ]]; }
 ensure_temporal_application_network() { :; }
