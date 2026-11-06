@@ -314,6 +314,7 @@ services:
       # 生产编排必须覆盖旧的 .env 值，避免把 test/development 运行配置带入
       # production 项目，进而让审计、投影门禁按错误环境运行。
       APP_ENV: production
+      GIN_MODE: release
       # 商业授权运行态与权威编排同源注入；缺失时许可证校验会退回镜像内默认路径。
       LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
       LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
@@ -399,6 +400,7 @@ services:
     <<: *platform-service
     environment:
       APP_ENV: production
+      GIN_MODE: release
       # 与权威编排一致：Worker 承载受控接入自动化，缺这些键时接入流程会静默失效。
       LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
       LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem

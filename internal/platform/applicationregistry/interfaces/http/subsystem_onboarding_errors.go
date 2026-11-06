@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -95,6 +96,15 @@ func subsystemProvisioningErrorCode(err error) string {
 	}
 	message := strings.ToLower(err.Error())
 	switch {
+	// 许可运行态类失败必须排在通用 "unavailable" 分支之前：这些错误文本同时含
+	// unavailable，落入通用分支只会给出与许可无关的“依赖不可用”误导诊断。
+	case errors.Is(err, application.ErrRuntimeLicenseStateUnavailable),
+		strings.Contains(message, "license_runtime_state_unavailable"),
+		strings.Contains(message, "license runtime state is unavailable"):
+		return "LICENSE_RUNTIME_STATE_UNAVAILABLE"
+	case strings.Contains(message, "commercial license configuration failed"),
+		strings.Contains(message, "license configuration failed"):
+		return "LICENSE_RUNTIME_CONFIGURATION_FAILED"
 	case strings.Contains(message, "disabled"):
 		return "PROVISIONING_AGENT_DISABLED"
 	case strings.Contains(message, "deployment helper is unavailable"), strings.Contains(message, "read deployment response"), strings.Contains(message, "send deployment request"), strings.Contains(message, "docker service"):
@@ -126,6 +136,56 @@ func subsystemProvisioningErrorCode(err error) string {
 	default:
 		return "PROVISIONING_FAILED"
 	}
+}
+
+// subsystemDeploymentFailureDetail 生成写入部署状态表的失败摘要：单行、限长、脱敏。
+// 只有携带真实下层原因的错误才返回非空摘要；裸哨兵、上下文取消与纯内部细节（SQL/路径）
+// 返回空串，让调用方保留既有“部署 Agent 执行失败”通用文案。
+// 参数：err 为部署失败的下层原因。
+// 返回值：可持久化的摘要；不携带可公开信息时返回空串。
+func subsystemDeploymentFailureDetail(err error) string {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ""
+	}
+	message := err.Error()
+	for _, sentinel := range subsystemFailureSentinels {
+		message = strings.ReplaceAll(message, sentinel.Error(), " ")
+	}
+	return singleLineDiagnosticDetail(message)
+}
+
+// subsystemFailureSentinels 是不携带下层信息的哨兵：它们自身文本必须从摘要中剔除，
+// 否则“裸哨兵”会被误判为可诊断失败而覆盖既有通用文案。
+var subsystemFailureSentinels = []error{application.ErrSubsystemProvisioningUnavailable}
+
+// singleLineDiagnosticDetail 把任意诊断文本压成单行、按 rune 限长并脱敏的摘要。
+// last_error_message 是 varchar(1000) 且参与 JSON 编码：换行、超长或半个多字节字符
+// 都会破坏状态接口，因此这里按 rune 截断而不是按字节。
+// 参数：raw 为原始诊断文本。
+// 返回值：单行摘要；命中 SQL/ORM 内部细节时返回空串。
+func singleLineDiagnosticDetail(raw string) string {
+	if internalErrorDetailPattern.MatchString(raw) {
+		return ""
+	}
+	message := errorPathPattern.ReplaceAllString(raw, "[internal]")
+	message = strings.Map(func(character rune) rune {
+		if character == '\n' || character == '\r' || character == '\t' {
+			return ' '
+		}
+		if character < 0x20 || character == 0x7f {
+			return -1
+		}
+		return character
+	}, message)
+	message = strings.Join(strings.Fields(message), " ")
+	if message == "" {
+		return ""
+	}
+	const limit = 800
+	if utf8.RuneCountInString(message) > limit {
+		message = string([]rune(message)[:limit]) + "...(truncated)"
+	}
+	return message
 }
 
 // subsystemLifecycleFailureDetail 生成站内通知用的失败摘要：稳定错误码 + 脱敏短摘要。

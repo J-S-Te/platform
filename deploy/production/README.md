@@ -194,6 +194,25 @@ docker compose --env-file .env --env-file .release.env -f docker-compose.yml up 
 - [ ] 发布后 5 分钟内 `SettlementAuditDestinationRequiredButUnconfigured` 未触发；Prometheus `/targets` 上 `platform-api`、`settlement-api`、`contract` 均为 UP；结算 `/readyz` 返回 200（degraded 时 `outbox_pending`/`unconfigured_destinations` 已有记录）。
 - [ ] 结算通知目的地若本部署不需要，`SettlementNotificationDestinationUnconfigured`（6h）的豁免要在验收记录中写明，不要长期忽略告警。
 
+### File Gateway 存储后端：仅本地 POSIX（S3/OSS/MinIO 未实现）
+
+File Gateway **只实现了本地 POSIX 目录存储**，本文与其它部署文档中出现的“对象目录/存储根”
+都是指宿主机目录挂载。必须按以下事实配置，不能按“支持对象存储”假设排期：
+
+- `FILE_GATEWAY_STORAGE_BACKEND` 唯一可用值是 `local`。生产编排
+  （`docker-compose.yml` / `compose.yaml` 的 `file-gateway` 服务）已把它固定为 `local`；
+  设成 `s3` 等其它值不会降级，而是**直接启动失败**——
+  `platform/cmd/file-gateway/main.go:38,58` 对未知后端返回
+  `unsupported FILE_GATEWAY_STORAGE_BACKEND %q`。
+- S3 / OSS / MinIO 后端**未实现**：没有实现代码、没有集成测试、没有发布路径。
+- 历史遗留的 `FILE_GATEWAY_S3_*` 一组键（endpoint/bucket/region/AK/SK/session token/
+  prefix/use_path_style/max_read_bytes）**已从两个模板移除**：
+  `platform/.env.example` 与 `platform/deploy/production/.env.example` 现在只声明
+  `FILE_GATEWAY_STORAGE_BACKEND=local`，不再声明任何 `S3_*` 键。
+  所以“模板里找不到 S3 配置”是预期结果，不是漏配。
+- 若将来要接对象存储，必须同时补实现、集成测试与迁移/回滚方案，属于另立项；
+  在此之前不得在运维记录里写成“已支持对象存储”。
+
 ### File Gateway 8086 的受控直达入口（P0 验收用）
 
 P0 验收需要直接在 File Gateway 上核对下载内容的 SHA-256。生产编排刻意**不**发布 8086，也不允许为了验收写成 `ports: 8086:8086`（那等于对 0.0.0.0 暴露内部 API 与 `/metrics`）。受控做法按优先级如下：

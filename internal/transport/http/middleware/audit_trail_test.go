@@ -257,6 +257,181 @@ func TestShouldRecordAuditTrailCoversExportDownloadTickets(t *testing.T) {
 	}
 }
 
+// 响应体扣留口径必须只对“真正需要正文的路由”成立：审计导出下载是流式二进制响应，
+// 留痕只需要方法/路径/主体/状态码，缓冲正文既不增加审计价值又会写临时文件或 503。
+func TestShouldCaptureAuditResponseBodySkipsOnlyExportDownload(t *testing.T) {
+	downloadRoute := "/api/v1/audit/export-jobs/:job_id/download"
+	if shouldCaptureAuditResponseBody(downloadRoute) {
+		t.Fatal("export download must not buffer its response body")
+	}
+	// 未命中路由模板时的原始路径口径同样要豁免（auditRequestRoute 会退回 URL.Path）。
+	if shouldCaptureAuditResponseBody("/api/v1/audit/export-jobs/job-1/download") {
+		t.Fatal("raw export download path must not buffer its response body")
+	}
+	for _, route := range []string{
+		"/api/v1/audit/export-jobs/:job_id/download-tickets",
+		"/api/v1/audit/events",
+		"/api/v1/audit/events/batch",
+		"/api/v1/users",
+		"/api/v1/dictionaries",
+	} {
+		if !shouldCaptureAuditResponseBody(route) {
+			t.Fatalf("%s 必须保持原有的响应体扣留语义", route)
+		}
+	}
+}
+
+// 审计导出下载的大响应必须原样流给客户端：不出现 spill 临时文件、不因 512MiB 硬上限
+// 变成 AUDIT_RESPONSE_TOO_LARGE 503，同时仍然产生意图 + 结果两条审计记录，并在
+// metadata 里如实标注 response_body=not_captured。
+func TestAuditTrailExportDownloadStreamsLargeBodyWithoutBuffering(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	originalHardLimit := maxPlatformAuditSpilledResponseBytes
+	// 把硬上限压到内存上限附近：任何缓冲都会立刻超限并被拒绝，便于证明下载路由没有走缓冲。
+	maxPlatformAuditSpilledResponseBytes = maxPlatformAuditBufferedResponseBytes + 10
+	defer func() { maxPlatformAuditSpilledResponseBytes = originalHardLimit }()
+	payload := strings.Repeat("z", maxPlatformAuditBufferedResponseBytes*4)
+
+	gin.SetMode(gin.TestMode)
+	recorder := &auditRecorderStub{}
+	router := gin.New()
+	router.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.GET("/api/v1/audit/export-jobs/:job_id/download", func(context *gin.Context) {
+		context.Header("Content-Type", "application/zip")
+		_, _ = context.Writer.WriteString(payload)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/audit/export-jobs/job-1/download", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (下载不得因响应体未扣留被拒): body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.String() != payload {
+		t.Fatalf("body length = %d, want %d (下载内容必须逐字节完整)", response.Body.Len(), len(payload))
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("Content-Type = %q, want application/zip", contentType)
+	}
+	// 不缓冲 ⇒ 不溢写：临时目录里不允许出现任何 spill 文件。
+	assertNoSpillFilesLeft(t, tmp)
+
+	if len(recorder.inputs) != 2 {
+		t.Fatalf("audit events = %d, want 2 (intent + result)", len(recorder.inputs))
+	}
+	if recorder.inputs[0].Metadata["phase"] != "intent" {
+		t.Fatalf("first event phase = %v, want intent", recorder.inputs[0].Metadata["phase"])
+	}
+	result := recorder.inputs[1]
+	if result.EventType != "GET /api/v1/audit/export-jobs/:job_id/download" {
+		t.Fatalf("EventType = %q, want the export download route", result.EventType)
+	}
+	if result.ActorID != "user-1" {
+		t.Fatalf("audit actor = %q, want the downloading user", result.ActorID)
+	}
+	if result.Result != "SUCCESS" {
+		t.Fatalf("Result = %q, want SUCCESS", result.Result)
+	}
+	if result.Metadata["status_code"] != http.StatusOK {
+		t.Fatalf("metadata status_code = %v, want %d", result.Metadata["status_code"], http.StatusOK)
+	}
+	if result.Metadata["response_body"] != "not_captured" {
+		t.Fatalf("metadata response_body = %v, want not_captured", result.Metadata["response_body"])
+	}
+	if _, found := result.Metadata["audit_rejection"]; found {
+		t.Fatal("未采集正文不等于审计失败：下载事件不得带 audit_rejection")
+	}
+}
+
+// 豁免只针对下载路由：同一硬上限下，审计查询路由仍然被扣留并如实拒绝超限响应。
+func TestAuditTrailAuditQueryKeepsBufferingSemantics(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	originalHardLimit := maxPlatformAuditSpilledResponseBytes
+	maxPlatformAuditSpilledResponseBytes = maxPlatformAuditBufferedResponseBytes + 10
+	defer func() { maxPlatformAuditSpilledResponseBytes = originalHardLimit }()
+
+	gin.SetMode(gin.TestMode)
+	recorder := &auditRecorderStub{}
+	router := gin.New()
+	router.Use(AuditTrail(recorder, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	router.GET("/api/v1/audit/events", func(context *gin.Context) {
+		_, _ = context.Writer.WriteString(strings.Repeat("x", maxPlatformAuditBufferedResponseBytes+100))
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/audit/events", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusServiceUnavailable, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "AUDIT_RESPONSE_TOO_LARGE") {
+		t.Fatalf("body = %s, want AUDIT_RESPONSE_TOO_LARGE", response.Body.String())
+	}
+	if recorder.input.Metadata["audit_rejection"] != "AUDIT_RESPONSE_TOO_LARGE" {
+		t.Fatalf("metadata audit_rejection = %v, want AUDIT_RESPONSE_TOO_LARGE", recorder.input.Metadata["audit_rejection"])
+	}
+	if _, found := recorder.input.Metadata["response_body"]; found {
+		t.Fatal("被扣留的路由不应声明 response_body=not_captured")
+	}
+}
+
+// 下载路由的响应已经直接流给客户端，因此“结果事件 + 死信都写不进去”时不能再补写 503：
+// 那会污染一个已经完整送达的文件。此时只保留意图事件与错误日志，响应保持原样。
+func TestAuditTrailExportDownloadKeepsStreamedResponseWhenAuditResultUnwritable(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	payload := "zip-bytes-payload"
+	logs := &capturingLogHandler{}
+	recorder := &auditRecorderScript{
+		ingestErrs: []error{nil, errors.New("audit store unavailable"), errors.New("audit store unavailable")},
+		spoolErrs:  []error{errors.New("audit dead letter unavailable")},
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(AuditTrail(recorder, slog.New(logs)))
+	router.GET("/api/v1/audit/export-jobs/:job_id/download", func(context *gin.Context) {
+		_, _ = context.Writer.WriteString(payload)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/audit/export-jobs/job-1/download", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"},
+		User:   authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.String() != payload {
+		t.Fatalf("body = %q, want the intact download %q (不得追加 503 报文)", response.Body.String(), payload)
+	}
+	if len(recorder.ingested) != 3 {
+		t.Fatalf("ingest attempts = %d, want 3 (intent + result + one retry)", len(recorder.ingested))
+	}
+	if len(recorder.spooled) != 1 {
+		t.Fatalf("spool attempts = %d, want 1", len(recorder.spooled))
+	}
+	warned := false
+	for _, record := range logs.records {
+		if record.Level == slog.LevelError && strings.Contains(record.Message, "already streamed") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatal("响应已流式提交后审计结论不可写必须记 ERROR 日志")
+	}
+}
+
 func TestAuditTrailRecordsGenericEventForBusinessAuditRoute(t *testing.T) {
 	// 端到端兜底断言：即使业务审计（applicationaccess 层）摄取失败，通用轨迹中间件
 	// 对该路由也必须实际产出一条记录——即“业务审计失败 → 通用轨迹仍有记录”。

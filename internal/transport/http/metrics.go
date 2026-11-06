@@ -48,6 +48,9 @@ type OperationalMetrics struct {
 // defaultQueueMetricsTTL 是队列统计默认抓取缓存时长（SEC-B4）。
 const defaultQueueMetricsTTL = 10 * time.Second
 
+// metricsPath 是 /metrics 抓取端点路径，注册与自我计量豁免共用同一常量。
+const metricsPath = "/metrics"
+
 // OAuth Client Secret 龄期/吊销指标（BIZ-RUNTIME-05）。它们与队列计数共用同一 10s TTL
 // 快照，避免每次抓取都做全表聚合。
 const (
@@ -135,8 +138,18 @@ func NewOperationalMetrics(database *gorm.DB) *OperationalMetrics {
 }
 
 // Middleware 记录请求总量、错误量、累计延迟以及认证授权失败。
+//
+// /metrics 抓取自身有意不计量：这个端点的响应正文就是这些计数器，若把抓取本身算进
+// requests_total / duration，抓取频率（以及抓取端重试）会直接改写被观测值，形成自我
+// 计量的正反馈；同时 RequireMetricsAccess 在未授权时返回的 401/403 也会被当成业务
+// 侧认证授权失败计入 authz_failures，让“令牌配错”伪装成“用户登录被拒”触发告警。
+// 因此 /metrics 只在链路上透传，不做任何计数；其它路径语义保持不变。
 func (metrics *OperationalMetrics) Middleware() gin.HandlerFunc {
 	return func(ginContext *gin.Context) {
+		if ginContext.Request != nil && ginContext.Request.URL.Path == metricsPath {
+			ginContext.Next()
+			return
+		}
 		startedAt := time.Now()
 		ginContext.Next()
 		status := ginContext.Writer.Status()

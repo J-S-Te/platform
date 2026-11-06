@@ -148,7 +148,8 @@ func NewRouter(
 	router.GET("/readyz", healthHandler.Readiness)
 	// 安全审查 SEC-B4：/metrics 暴露队列积压、授权失败计数与连接池状态——
 	// 未认证者不得读取，廉价抓取也不能再放大 DB 负载（计数另有10s TTL 缓存）。
-	router.GET("/metrics", middleware.RequireMetricsAccess(cfg.HTTP.MetricsAccessToken), gin.WrapH(operationalMetrics))
+	// 该路径不参与 HTTP 指标计数（抓取自身不计量），见 OperationalMetrics.Middleware。
+	router.GET(metricsPath, middleware.RequireMetricsAccess(cfg.HTTP.MetricsAccessToken), gin.WrapH(operationalMetrics))
 
 	// 完整 OIDC handler 提供浏览器授权和标准协议端点；在迁移期只有机器令牌 handler 时，
 	// 仅保留 token 发行接口，避免把不完整的 OIDC 端点注册出来。

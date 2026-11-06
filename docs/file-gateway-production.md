@@ -29,11 +29,22 @@ CREATED -> UPLOADING -> VALIDATING -> READY
 
 ## 本地目录存储
 
+> **存储后端现状（务必先读）**：File Gateway **只实现了本地 POSIX 目录存储**。
+> `FILE_GATEWAY_STORAGE_BACKEND` 唯一可用的值是 `local`；设成其它值（含 `s3`）
+> 会让进程直接启动失败——`cmd/file-gateway/main.go:38,58` 会把未知后端拼成
+> `unsupported FILE_GATEWAY_STORAGE_BACKEND %q` 并返回错误。
+>
+> S3 / OSS / MinIO 等对象存储后端**未实现**（没有对应实现、没有集成测试、没有部署路径）。
+> 相应地，历史遗留的 `FILE_GATEWAY_S3_*` 一组键**已从两个模板移除**
+> （`platform/.env.example` 与 `platform/deploy/production/.env.example` 只声明
+> `FILE_GATEWAY_STORAGE_BACKEND=local`）。如果有人再补回 `FILE_GATEWAY_S3_*`，
+> 那只是配置项，不代表能力存在——要接对象存储必须先写实现与验收，属于另立项。
+
 生产默认使用部署根目录下的 `data/file-gateway`；可由 `FILE_GATEWAY_HOST_ROOT` 指定，必须以实际 Compose 装配为准，不能假定总是 `/opt/unified-identity-platform`。仅 File Gateway 容器挂载对象目录。
 容器内网关进程以专用 UID/GID `10001` 运行，目录和文件权限分别为 `0750`、`0640`。
 业务子系统只保存 `file_id` 和摘要，不接触物理路径。正式文件按
 `namespace/purpose/tenant/year/month/file/version/content` 分层；半成品和被拒绝文件分别进入
-`temporary` 和 `quarantine`。不使用 OSS、S3 或 MinIO。
+`temporary` 和 `quarantine`。不使用 OSS、S3 或 MinIO（原因见上方现状说明：未实现）。
 
 必填配置：
 
