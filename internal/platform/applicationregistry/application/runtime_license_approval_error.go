@@ -18,13 +18,18 @@ var (
 	// ErrRuntimeLicenseApprovalMismatch 表示运行时发行与已评审审批不一致，
 	// 属于完整性破坏信号，不允许仅凭重启恢复。
 	ErrRuntimeLicenseApprovalMismatch = errors.New("LICENSE_RUNTIME_APPROVAL_MISMATCH: runtime release does not match reviewed approval")
+	// ErrRuntimeLicenseStateUnavailable 表示目标运行配置要求商业许可运行态
+	// （COMMERCIAL_LICENSE_ENABLED=true），但本次受控操作没有可交付的许可运行凭据，
+	// 或固定记录里缺少 license-state-<service> 卷。该组合必然让目标 API 启动即失败并
+	// 反复重启；必须作为独立诊断穿越部署边界，而不是折叠成通用的“部署 Agent 执行失败”。
+	ErrRuntimeLicenseStateUnavailable = errors.New("LICENSE_RUNTIME_STATE_UNAVAILABLE: license runtime state is unavailable")
 )
 
 // RuntimeLicenseApprovalFailure 把任意错误归约为已知诊断哨兵后原样返回：
 // 未命中白名单的一律折叠为 ErrRuntimeLicenseApprovalUnavailable。
 // 该函数是审批边界：底层命令、凭据、主机路径绝不可随错误穿越到调用方。
 func RuntimeLicenseApprovalFailure(err error) error {
-	for _, known := range []error{ErrRuntimeLicenseDockerUnavailable, ErrRuntimeLicenseApprovalMismatch, ErrRuntimeLicenseApprovalUnavailable, ErrRuntimeLicenseStartupFailed, ErrRuntimeLicenseNotInitialized} {
+	for _, known := range []error{ErrRuntimeLicenseDockerUnavailable, ErrRuntimeLicenseApprovalMismatch, ErrRuntimeLicenseApprovalUnavailable, ErrRuntimeLicenseStartupFailed, ErrRuntimeLicenseNotInitialized, ErrRuntimeLicenseStateUnavailable} {
 		if errors.Is(err, known) {
 			return known
 		}
@@ -45,6 +50,10 @@ func RuntimeLicenseApprovalErrorCode(err error) string {
 		return "LICENSE_RUNTIME_APPROVAL_MISMATCH"
 	case errors.Is(err, ErrRuntimeLicenseApprovalUnavailable):
 		return "LICENSE_RUNTIME_APPROVAL_UNAVAILABLE"
+	// 目标运行配置要求商业许可运行态，但本次没有许可凭据或缺少许可状态卷：必须给出
+	// “先完成授权导入与激活”的可执行指引，而不是让运维反复重试部署。
+	case errors.Is(err, ErrRuntimeLicenseStateUnavailable):
+		return "LICENSE_RUNTIME_STATE_UNAVAILABLE"
 	// 商业运行实例尚未初始化：已批准发行拿不到组件凭据时的根因。必须映射到
 	// 用户可读诊断，而不是落到与授权无关的通用“部署 Agent 执行失败”。
 	case errors.Is(err, ErrRuntimeLicenseNotInitialized):

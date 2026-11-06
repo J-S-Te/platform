@@ -161,6 +161,9 @@ func TestLocalProjectDeploymentCannotMigrateWhenBackgroundDrainFails(t *testing.
 	}
 	runner := &localBackgroundLifecycleRunner{localLicenseRunner: localLicenseRunner{image: localImageMetadata{ID: "sha256:" + strings.Repeat("a", 64), Version: "local", Protocol: "1"}}, failure: "drain"}
 	p.runner = runner
+	// 受许可部署要求固定记录已声明 license-state 卷；本用例只校验 drain 边界，
+	// 因此直接写入与 deliverLocalBuiltinRuntimeLicense 同形的固定记录。
+	writeLocalLicensedOverrideFixture(t, p, localLicenseServices["project_management"]...)
 	if err := p.deployLicensedLocalStack(context.Background(), input); err == nil {
 		t.Fatal("drain failure was accepted")
 	}

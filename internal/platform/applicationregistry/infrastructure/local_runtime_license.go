@@ -468,6 +468,12 @@ func writeLocalRuntimeJSON(path string, b []byte) error {
 // 本操作之前必须已完成收编登记。在这里构建会使控制面刚登记的发布失效，
 // 因此全部运行时镜像保持钉定。
 func (p *LocalDockerSubsystemProvisioner) deployLicensedLocalStack(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	// 受许可容器必须在固定记录里带 license-state-<service> 卷与只读公钥挂载：缺失时 API
+	// 启动即因“commercial license configuration failed”重启，且不会进入健康检查失败的
+	// 可见路径。这里在第一个 Compose 操作之前失败关闭。
+	if err := p.requireLicensedLocalRuntimeVolumes(input); err != nil {
+		return err
+	}
 	run := p.runIntegratedPlatformCompose
 	var deps []string
 	var migration, api string

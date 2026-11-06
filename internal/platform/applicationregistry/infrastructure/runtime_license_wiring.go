@@ -25,6 +25,13 @@ type runtimeLicenseComposeService struct {
 // 参数：ctx 为部署上下文，input 为已登记并下发的组件与实例绑定。
 // 返回值：配置缺失或不匹配时失败关闭；错误不包含配置值或凭据。
 func (target *productionComposeTarget) validateRuntimeLicenseWiring(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	// fail-closed：目标运行配置要求商业许可运行态（上一次受控接入写入的
+	// runtime/license-<service>.env 或 runtime 运行配置声明 COMMERCIAL_LICENSE_ENABLED=true），
+	// 本次却没有可交付凭据时，重建容器只会得到启动即重启的 API。此判定发生在任何容器
+	// 变更之前，且不写任何文件。
+	if err := target.requireProductionLicenseRuntimeState(input); err != nil {
+		return err
+	}
 	services := []string{}
 	for _, credential := range input.RuntimeLicenseCredentials {
 		if credential.RegistrationProtocol == 2 {
