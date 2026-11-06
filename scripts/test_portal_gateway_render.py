@@ -1529,7 +1529,7 @@ class _CiLockProbe(unittest.TestCase):
             )
 
     def _probe_concurrent_pair(self):
-        for round_index in range(8):
+        for round_index in range(12):
             harness = GatewayHarness(self, path_mode="fallback")
             env = harness.env(
                 PORTAL_GATEWAY_LOCK_TIMEOUT="30",
@@ -1562,13 +1562,13 @@ class _CiLockProbe(unittest.TestCase):
             print(
                 f"[PROBE-PAIR round={round_index}] elapsed={elapsed} "
                 f"rc={[process.returncode for process in processes]} entries={entries} "
-                f"lockdir_left={Path(str(harness.lock) + '.d').exists()}",
+                f"lockdir_left={Path(str(harness.lock) + '.d').exists()} "
+                f"lock={harness.lock} include={harness.include}",
                 flush=True,
             )
-            for argv, stderr in zip(commands, (output for _, output in outputs)):
-                for line in stderr[1].splitlines():
-                    if "LOCKDBG" in line:
-                        print(f"[PROBE-PAIR round={round_index} {argv[0]}] {line}", flush=True)
+            for index, argv in enumerate(commands):
+                for line in outputs[index][1].splitlines():
+                    print(f"[PROBE-PAIR round={round_index} {argv[0]}] {line}", flush=True)
 
     def test_probe_lock_evidence(self):
         """打印 mkdir 原子性与并发 add 时间线证据。"""
