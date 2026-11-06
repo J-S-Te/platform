@@ -201,6 +201,9 @@ type LocalDockerSubsystemProvisioner struct {
 	// roleConfigHashes 缓存从本地子镜像内嵌 authz-catalog 读到的目录哈希，
 	// 避免平台侧硬编码常量与业务仓库授权目录漂移。
 	roleConfigHashes map[string]string
+	// operationSecrets 是部署 Agent 侧配置里真实携带的凭据明文，仅用于失败诊断输出
+	// （Compose 输出、容器日志）脱敏；不得外泄到错误摘要之外，也不写回状态表或日志。
+	operationSecrets []string
 }
 
 // NewLocalDockerSubsystemProvisioner 构造本机部署自动化适配器；配置不完整时返回错误，
@@ -229,7 +232,23 @@ func newLocalDockerSubsystemProvisioner(config LocalDockerSubsystemProvisionerCo
 	if config.Timeout <= 0 {
 		config.Timeout = 15 * time.Minute
 	}
-	return &LocalDockerSubsystemProvisioner{config: config, runner: runner}, nil
+	return &LocalDockerSubsystemProvisioner{config: config, runner: runner, operationSecrets: localOperationSecrets(config)}, nil
+}
+
+// localOperationSecrets 收集本地 provisioner 配置里真实存在的凭据明文，供失败诊断输出脱敏
+// （Compose 输出与容器日志都可能回显密码）。只收配置结构体里实际会下发给 Compose 的字段，
+// 空值与重复值一律跳过；这些明文不得出现在错误摘要、日志或状态表里。
+func localOperationSecrets(config LocalDockerSubsystemProvisionerConfig) []string {
+	candidates := []string{config.CatalogSyncMysqlPassword}
+	secrets := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		// 脱敏必须比对原文：裁剪空白会改变密码本身，导致输出里的真实值漏网。
+		if candidate == "" || strings.TrimSpace(candidate) == "" || slices.Contains(secrets, candidate) {
+			continue
+		}
+		secrets = append(secrets, candidate)
+	}
+	return secrets
 }
 
 // oidcBackchannelBaseURL 仅当所选 issuer 是本部署的 Keycloak Realm 时返回 Compose 私网端点。
@@ -493,13 +512,18 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 // 参数：ctx为操作上下文，input为已授权的目标及公开运行配置。
 // 返回值：配置、许可或重建失败时返回错误，不清空旧业务队列。
 func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	// 许可运行态前置判定必须在任何文件重写与容器操作之前完成：目标运行配置要求商业许可
+	// 运行态而本次没有凭据时，放行只会得到一个启动即失败、每分钟重启的容器。
+	if !provisioner.config.Enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	if err := provisioner.requireLocalLicenseRuntimeState(input); err != nil {
+		return err
+	}
 	if err := provisioner.deliverLocalRuntimeLicense(ctx, input); err != nil {
 		return err
 	}
 
-	if !provisioner.config.Enabled {
-		return provisioningError("automatic subsystem deployment is disabled")
-	}
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
 	// Settlement 编译进统一的平台 Compose 拓扑，绝不能落入独立项目分支——那会在同一浏览器
@@ -1106,13 +1130,17 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 //
 // 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
+	// 与重建路径同一条 fail-closed 门禁：接入/接管同样不得在没有许可运行凭据时创建容器。
+	if !provisioner.config.Enabled {
+		return provisioningError("automatic subsystem deployment is disabled")
+	}
+	if err := provisioner.requireLocalLicenseRuntimeState(input); err != nil {
+		return err
+	}
 	if err := provisioner.deliverLocalRuntimeLicense(ctx, input); err != nil {
 		return err
 	}
 
-	if !provisioner.config.Enabled {
-		return provisioningError("automatic subsystem deployment is disabled")
-	}
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
 
@@ -2535,7 +2563,14 @@ func localRuntimeDeploymentError(err error, fallback string) error {
 	if application.RuntimeLicenseApprovalErrorCode(err) != "" {
 		return application.RuntimeLicenseApprovalFailure(err)
 	}
-	return provisioningError(fallback)
+	// 下层原因必须随外层短语一起返回：只留短语会让状态表只剩“部署 Agent 执行失败”，
+	// 运维看不到“commercial license configuration failed”这类真实根因。输出先压成
+	// 单行、限长，避免破坏 last_error_message 的 varchar(1000) 与 JSON。
+	detail := singleLineFailureDetail(err.Error(), nil)
+	if detail == "" {
+		return provisioningError(fallback)
+	}
+	return fmt.Errorf("%w: %s: %s", application.ErrSubsystemProvisioningUnavailable, fallback, detail)
 }
 
 // ApplyAccess 重写本机访问覆盖并重建现行固定集合中的平台、合同与 CRM 容器。

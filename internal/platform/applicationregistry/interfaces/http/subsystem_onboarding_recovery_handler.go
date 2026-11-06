@@ -347,6 +347,14 @@ func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Con
 	if code := application.RuntimeLicenseApprovalErrorCode(cause); code != "" {
 		errorCode = code
 		errorMessage, _ = runtimeLicenseApprovalDiagnostic(code)
+	} else if errorCode == "DEPLOYMENT_AGENT_FAILED" {
+		// 部署 Agent 的失败原因必须作为稳定诊断码 + 脱敏单行摘要落库：只写“部署 Agent
+		// 执行失败”会让状态表、诊断接口和站内通知同时丢掉“commercial license
+		// configuration failed”这类可执行根因。裸哨兵与上下文取消不携带新信息，仍保留通用文案。
+		if detail := subsystemDeploymentFailureDetail(cause); detail != "" {
+			errorCode = subsystemProvisioningErrorCode(cause)
+			errorMessage = detail
+		}
 	}
 	writeCtx, cancel := context.WithTimeout(context.Background(), subsystemDeploymentFailureWriteTimeout)
 	defer cancel()

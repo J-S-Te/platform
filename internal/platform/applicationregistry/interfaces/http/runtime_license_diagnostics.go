@@ -2,6 +2,9 @@ package http
 
 func runtimeLicenseApprovalDiagnostic(code string) (message, nextAction string) {
 	switch code {
+	case "LICENSE_RUNTIME_STATE_UNAVAILABLE":
+		return "商业许可运行态未下发，部署资产缺少 license-state 卷或许可运行凭据",
+			"请先由授权管理员完成许可证导入与运行组件登记，并确认 license-state 卷与只读公钥挂载随部署资产一同下发；随后在当前环境点击“重试”，不要重复创建应用环境或手工写入 runtime"
 	case "LICENSE_RUNTIME_STARTUP_FAILED":
 		return "已批准运行组件未通过启动稳定性校验", "请检查目标 API 和 Worker 的运行状态、重启及健康检查结果；修复后在当前环境点击“重试”，不要重复新增接入"
 	case "LICENSE_RUNTIME_DOCKER_UNAVAILABLE":
