@@ -4,6 +4,21 @@
 // 把超时与失败原样聚合上报，避免每个长驻进程各写一套互不一致的收尾逻辑。
 // 该包不启动任何后台协程，也不接管信号；调用方仍用 signal.NotifyContext 得到
 // 取消信号，再把该 context 交给 Run。
+//
+// 预算语义：本包不定义任何“业务默认值”，总预算由调用方按进程类型传入，
+// 只有调用方误传非正数时才回落到 defaultTotalBudget（30s）兜底；
+// 钩子的 Hook.Budget 是该步骤自身上限，总预算始终是唯一硬上限。
+// 当前 platform 各长驻进程的取值：
+//   - worker：后台循环 join 预算 20s（见 internal/bootstrap/worker.go 的 defaultRunnerJoinBudget）；
+//   - api：HTTP 停止接收 + 排空在途 15s（cmd/api 的 apiDrainBudget）；
+//   - file-gateway：30s（cmd/file-gateway 的 fileGatewayDrainBudget）；
+//   - subsystem-provisioner：20s（cmd/subsystem-provisioner 的 subsystemProvisionerDrainBudget）。
+//
+// 覆盖方式：业务仓（各子系统的独立仓库）用 <REPO>_SHUTDOWN_DRAIN_SECONDS 覆盖自身预算，
+// 例如 CONTRACT_SHUTDOWN_DRAIN_SECONDS、SETTLEMENT_SHUTDOWN_DRAIN_SECONDS；
+// platform 目前是固定预算常量，不读取任何 *_SHUTDOWN_DRAIN_SECONDS 环境变量。
+// 若需要让 platform 也支持 env 覆盖，应另立项统一实现（同时更新部署清单与文档），
+// 而不是在单个进程里私自读取，否则同一个二进制的停机上限会随部署环境漂移。
 package shutdown
 
 import (

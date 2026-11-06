@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -655,6 +656,17 @@ func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, exec
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
+	// 停机时必须能等到在途连接收尾：调用方（cmd/subsystem-provisioner）把本函数放进
+	// shutdown.Manager 跟踪的协程里，只有这里把处理协程等完，Manager 的 join 才真正
+	// 覆盖“停止接收 + 排空在途”，而不是提前返回后由进程直接退出截断回执写入。
+	var inFlight sync.WaitGroup
+	defer func() {
+		// 仅在调用方取消 ctx（正常停机）时等待。监听异常（ctx 未取消）已由调用方以非零
+		// 退出收尾，此时再等在途 Docker 操作只会拖延故障暴露，且没有可用预算。
+		if ctx.Err() != nil {
+			inFlight.Wait()
+		}
+	}()
 	connectionSlots := make(chan struct{}, subsystemProvisioningMaxConnections)
 	for {
 		connection, acceptErr := listener.Accept()
@@ -666,7 +678,9 @@ func RunSubsystemProvisioningServer(ctx context.Context, socketPath string, exec
 		}
 		select {
 		case connectionSlots <- struct{}{}:
+			inFlight.Add(1)
 			go func() {
+				defer inFlight.Done()
 				defer func() { <-connectionSlots }()
 				handleSubsystemProvisioningConnection(ctx, connection, executor)
 			}()
