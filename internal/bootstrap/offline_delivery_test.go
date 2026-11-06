@@ -453,3 +453,101 @@ func TestEnforcementCompleteRejectsStaleOrMissingMembers(t *testing.T) {
 		t.Fatal("empty confirmations accepted")
 	}
 }
+
+func TestOfflineImportAndActivateReusesActivationPipeline(t *testing.T) {
+	r, _, l, c, o := offlineFixture(t)
+	out, err := r.ImportAndActivate(context.Background(), "signed")
+	if err != nil || out.Status != "ENFORCED" || !reflect.DeepEqual(out.Applications, []string{"project_management"}) {
+		t.Fatal("import did not activate", out, err)
+	}
+	if c.calls != 1 || o.invalid {
+		t.Fatal("activation did not begin through the controlled pipeline", c.calls, o.calls)
+	}
+	// 导入即激活只导入一次，激活流水线不得为了复核再次导入产生额外写入。
+	if l.calls != 1 {
+		t.Fatalf("activation re-imported the license: %d", l.calls)
+	}
+	if o.state != registry.SubsystemDeploymentStatusReady {
+		t.Fatal("deployment did not reach READY", o.state)
+	}
+}
+
+func TestOfflineImportOnlyPathNeverActivatesOrDeploys(t *testing.T) {
+	// 等价于 CLI 的 --no-activate：只调用旧 Import，不得新增部署或激活调用。
+	r, _, l, c, o := offlineFixture(t)
+	out, err := r.Import(context.Background(), "signed")
+	if err != nil || out.Status != "IMPORTED" || l.calls != 1 {
+		t.Fatal("import-only path changed", out, err, l.calls)
+	}
+	if c.calls != 0 || len(o.calls) != 0 {
+		t.Fatal("import-only path activated or deployed", c.calls, o.calls)
+	}
+}
+
+func TestOfflineImportAndActivateNeverActivatesIneligibleLicense(t *testing.T) {
+	for _, tc := range []struct {
+		status  string
+		current bool
+	}{
+		{"PENDING_EFFECTIVE_DATE", true},
+		{"EXPIRED", true},
+		{"IMPORTED", false},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			r, _, l, c, o := offlineFixture(t)
+			l.result.Status = tc.status
+			if !tc.current {
+				l.result.State.Current = nil
+			}
+			out, err := r.ImportAndActivate(context.Background(), "signed")
+			if err == nil || out.Status != tc.status {
+				t.Fatalf("ineligible license activated: %+v %v", out, err)
+			}
+			if c.calls != 0 || len(o.calls) != 0 || l.calls != 1 {
+				t.Fatal("ineligible license mutated deployment or coordinator", c.calls, o.calls, l.calls)
+			}
+		})
+	}
+}
+
+func TestOfflineActivationRejectsUnsupportedApplicationBeforeDeploying(t *testing.T) {
+	for _, activate := range []bool{false, true} {
+		r, _, l, c, o := offlineFixture(t)
+		l.result.State.Current = &core.License{Applications: []core.Application{{Code: "project_management"}, {Code: "unregistered_erp"}}}
+		var err error
+		if activate {
+			_, err = r.Activate(context.Background(), "signed")
+		} else {
+			_, err = r.ImportAndActivate(context.Background(), "signed")
+		}
+		if err == nil || !strings.Contains(err.Error(), "unsupported deployment application") {
+			t.Fatalf("unsupported signed application accepted: %v", err)
+		}
+		// 集合后部的未知应用必须在任何部署/激活调用之前被拒绝，不能留下部分部署。
+		if len(o.calls) != 0 || c.calls != 0 || o.invalid {
+			t.Fatal("deployed before validating the whole signed set", o.calls, c.calls)
+		}
+	}
+}
+
+func TestOfflinePrepareOnlyImportsWithoutActivating(t *testing.T) {
+	r, _, l, c, o := offlineFixture(t)
+	s := &offlinePreparationSpy{report: evidence.Report{Project: "owned-installation", Complete: true}}
+	if err := r.ConfigureInstallation(s, s, s); err != nil {
+		t.Fatal(err)
+	}
+	l.result.State = domain.State{CustomerID: "customer", Environment: "production", InstanceID: "signed-instance"}
+	l.onImport = func() { s.state = l.result.State }
+	raw := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"customer_id":"customer"}`)) + ".signature"
+	baseline, err := r.Prepare(context.Background(), "fresh", "customer", raw)
+	if err != nil || baseline.InstanceID != "signed-instance" {
+		t.Fatal("preparation failed", baseline, err)
+	}
+	// 冻结基线要求成员/清单/应用三张表为空，因此 prepare 内部导入绝不能激活或部署。
+	if l.calls != 1 || s.prepares != 1 {
+		t.Fatal("preparation import count changed", l.calls, s.prepares)
+	}
+	if c.calls != 0 || len(o.calls) != 0 {
+		t.Fatal("prepare activated or deployed inventory", c.calls, o.calls)
+	}
+}

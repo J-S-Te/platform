@@ -47,19 +47,23 @@ func readLicense(path string) (string, error) {
 
 func run(args []string) error {
 	if len(args) == 0 || (args[0] != "import" && args[0] != "activate" && args[0] != "prepare" && args[0] != "migrate" && args[0] != "verify-deployment" && args[0] != "verify-enforcement") {
-		return errors.New("用法：license-install prepare --scenario fresh|migrate|platform-only|expand --customer ID [--file PATH]；migrate [--timeout 15m]；import|activate --file PATH；verify-deployment --application CODE；verify-enforcement")
+		return errors.New("用法：license-install prepare --scenario fresh|migrate|platform-only|expand --customer ID [--file PATH]；migrate [--timeout 15m]；import [--no-activate] --file PATH；activate --file PATH；verify-deployment --application CODE；verify-enforcement")
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	file := fs.String("file", "", "受控只读签名许可证路径")
 	scenario := fs.String("scenario", "", "安装场景")
 	customer := fs.String("customer", "", "安装客户标识")
 	application := fs.String("application", "", "核验已完成的受控部署（只读）")
+	noActivate := fs.Bool("no-activate", false, "导入成功后不自动激活，仅保留导入结果（仅 import）")
 	timeout := fs.Duration("timeout", 15*time.Minute, "全部组件执行确认等待时间")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || *timeout <= 0 || *timeout > time.Hour {
 		return errors.New("参数无效，超时必须介于0与1小时之间")
+	}
+	if *noActivate && args[0] != "import" {
+		return errors.New("--no-activate 仅适用于 import")
 	}
 	if args[0] == "prepare" {
 		if (*scenario != "fresh" && *scenario != "migrate" && *scenario != "platform-only" && *scenario != "expand") || strings.TrimSpace(*customer) == "" {
@@ -142,10 +146,19 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(os.Stdout).Encode(struct {
-			Status     string `json:"status"`
-			Idempotent bool   `json:"idempotent"`
-		}{out.Status, out.Idempotent})
+		// 未生效/已到期仍然只导入：保持既有输出与退出语义，不部署、不激活。
+		if *noActivate || out.Status != "IMPORTED" {
+			return json.NewEncoder(os.Stdout).Encode(struct {
+				Status     string `json:"status"`
+				Idempotent bool   `json:"idempotent"`
+			}{out.Status, out.Idempotent})
+		}
+		// 导入成功后自动复用 activate 流水线；失败保留已导入状态，不报告成功。
+		activated, err := api.OfflineDelivery.ImportAndActivate(ctx, raw)
+		if err != nil {
+			return fmt.Errorf("许可证已导入，但自动激活未完成；可重跑同一命令续跑：%w", err)
+		}
+		return json.NewEncoder(os.Stdout).Encode(activated)
 	}
 	out, err := api.OfflineDelivery.Activate(ctx, raw)
 	if err != nil {

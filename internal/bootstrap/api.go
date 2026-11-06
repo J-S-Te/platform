@@ -841,6 +841,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 	licenseCoordinator, err := licensecoordination.NewService(db, licenseService, licensetrust.Keys(), licenseSnapshotSigner{applicationTokenManager, licensetrust.Keys()}, time.Now, licenseCoordinatorOptions...)
 	// 授权协调服务就绪后交接 inventory 即可读取真实授权状态。
 	handoverLicenseReader = licenseCoordinator
+	// 状态接口在协调器之前创建，因此协调器就绪后再挂接运行状态读取，
+	// 让单次状态查询即可带出各应用的强制执行聚合（避免前端 N+1）。
+	operational.Licenses.ConfigureRuntimeStatus(licenseCoordinator)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()

@@ -74,3 +74,27 @@ func TestVerifyEnforcementCannotChangeOrFilterLicense(t *testing.T) {
 		}
 	}
 }
+
+func TestNoActivateOnlyAppliesToImport(t *testing.T) {
+	usage := run(nil)
+	if usage == nil || !strings.Contains(usage.Error(), "--no-activate") {
+		t.Fatalf("usage does not document --no-activate: %v", usage)
+	}
+	// 该标志必须被解析识别，否则会得到未定义参数的 flag 错误。
+	if err := run([]string{"import", "--no-activate", "--timeout", "0s"}); err == nil || !strings.Contains(err.Error(), "超时必须介于0与1小时之间") {
+		t.Fatalf("--no-activate not recognized for import: %v", err)
+	}
+	for _, args := range [][]string{
+		{"activate", "--no-activate", "--file", "token"},
+		{"prepare", "--scenario", "fresh", "--customer", "customer", "--no-activate"},
+		{"prepare", "--scenario", "migrate", "--customer", "customer", "--file", "token", "--no-activate"},
+		{"migrate", "--no-activate"},
+		{"verify-deployment", "--application", "contract_management", "--no-activate"},
+		{"verify-enforcement", "--no-activate"},
+	} {
+		err := run(args)
+		if err == nil || !strings.Contains(err.Error(), "--no-activate 仅适用于 import") {
+			t.Fatalf("args=%v: expected --no-activate rejection, got %v", args, err)
+		}
+	}
+}

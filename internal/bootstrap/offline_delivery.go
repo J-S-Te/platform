@@ -307,9 +307,34 @@ func (r *OfflineDeliveryRunner) MigrateExisting(ctx context.Context) (OfflineAct
 	}
 }
 
+// offlineActivationVerifier 在整个签名集合复核前重新核验许可证有效性。
+// 只有 Activate 这类可能长时间续跑、需要从原始交付包重读许可证的入口才提供；
+// 导入即激活的入口刚完成可信导入，不再重复导入以免产生不必要的写入。
+type offlineActivationVerifier func(context.Context) error
+
 // Activate 可安全断点续跑：registry 开通与执行 ACK 由既有服务持久化，
-// 而不是依赖内存中的进度文件。
+// 而不是依赖内存中的进度文件。行为与导入自动激活共用同一流水线。
 func (r *OfflineDeliveryRunner) Activate(ctx context.Context, raw string) (OfflineActivationResult, error) {
+	return r.importAndActivate(ctx, raw, func(ctx context.Context) error {
+		current, err := r.Import(ctx, raw)
+		if err != nil {
+			return err
+		}
+		if current.Status != "IMPORTED" {
+			return fmt.Errorf("license validity changed during activation: %s", current.Status)
+		}
+		return nil
+	})
+}
+
+// ImportAndActivate 供 CLI import 在导入成功后自动激活时使用。它只导入一次，
+// 然后复用与 Activate 完全相同的受控激活流水线；不存在的生效日期或已到期
+// 许可证仍然只导入、不部署、不激活。
+func (r *OfflineDeliveryRunner) ImportAndActivate(ctx context.Context, raw string) (OfflineActivationResult, error) {
+	return r.importAndActivate(ctx, raw, nil)
+}
+
+func (r *OfflineDeliveryRunner) importAndActivate(ctx context.Context, raw string, verify offlineActivationVerifier) (OfflineActivationResult, error) {
 	out := OfflineActivationResult{Status: "INCOMPLETE"}
 	imported, err := r.Import(ctx, raw)
 	if err != nil {
@@ -319,7 +344,21 @@ func (r *OfflineDeliveryRunner) Activate(ctx context.Context, raw string) (Offli
 		out.Status = imported.Status
 		return out, fmt.Errorf("offline activation is not available: %s", imported.Status)
 	}
-	applications := offlineDeploymentOrder(imported.State.Current.Applications)
+	return r.activateApplications(ctx, imported.State.Current.Applications, verify)
+}
+
+// activateApplications 是唯一的激活流水线：先整集合校验受控路由，再逐应用
+// 确保受控部署 READY、发起激活并等待组件自然 ACK，最后复核整个签名集合。
+func (r *OfflineDeliveryRunner) activateApplications(ctx context.Context, signed []core.Application, verify offlineActivationVerifier) (OfflineActivationResult, error) {
+	out := OfflineActivationResult{Status: "INCOMPLETE"}
+	applications := offlineDeploymentOrder(signed)
+	// 任何部署调用之前先确认签名集合全部属于受控部署路由表，
+	// 避免集合后面的未知应用导致前面已经部分部署、留下不可续跑的半成品。
+	for _, app := range applications {
+		if _, ok := offlineTargets[app.Code]; !ok {
+			return out, errors.New("license includes unsupported deployment application")
+		}
+	}
 	for _, app := range applications {
 		if err := ctx.Err(); err != nil {
 			return out, err
@@ -385,12 +424,10 @@ func (r *OfflineDeliveryRunner) Activate(ctx context.Context, raw string) (Offli
 		if _, err := r.principal(ctx); err != nil {
 			return out, err
 		}
-		current, err := r.Import(ctx, raw)
-		if err != nil {
-			return out, err
-		}
-		if current.Status != "IMPORTED" {
-			return out, fmt.Errorf("license validity changed during activation: %s", current.Status)
+		if verify != nil {
+			if err := verify(ctx); err != nil {
+				return out, err
+			}
 		}
 		complete := true
 		for _, app := range applications {
