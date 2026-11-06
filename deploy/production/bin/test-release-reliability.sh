@@ -45,7 +45,7 @@ pass 'runtime DSN mutation occurs inside the deployment lock'
 for oneoff in \
   'platform-migrate ./migrate' \
   contract-migrate \
-  project-migrate \
+  '-e PROJECT_RUN_WORKER_WITH_API=false project-migrate' \
   settlement-migrate \
   data-analysis-migrate; do
   grep -Fq "compose run --rm --no-deps $oneoff" "$deploy_service" ||
