@@ -1,6 +1,7 @@
 package licensehttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/application"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
@@ -16,16 +18,28 @@ import (
 	core "github.com/J-S-Te/license-core"
 )
 
+// runtimeStatusReader 是协调器按应用读取运行状态的最小只读入口。
+type runtimeStatusReader interface {
+	Status(context.Context, string) (coordination.Status, error)
+}
+
 type Handler struct {
 	service     *application.Service
 	environment string
+	runtime     runtimeStatusReader
 }
 
 func NewHandler(service *application.Service, environment string) (*Handler, error) {
 	if service == nil || environment == "" {
 		return nil, domain.ErrInvalid
 	}
-	return &Handler{service, environment}, nil
+	return &Handler{service: service, environment: environment}, nil
+}
+
+// ConfigureRuntimeStatus 挂接运行时协调状态读取；nil 表示协调器不可用，
+// 此时状态接口仍可解析，仅把运行执行为空表示。
+func (h *Handler) ConfigureRuntimeStatus(reader runtimeStatusReader) {
+	h.runtime = reader
 }
 func principal(w http.ResponseWriter, r *http.Request, manage bool) (domain.Actor, bool) {
 	p, ok := authctx.PrincipalFromContext(r.Context())
@@ -85,14 +99,101 @@ func writeError(w http.ResponseWriter, r *http.Request, e error) {
 	httpresponse.WriteError(w, r, status, httperror.New(code, message, nil))
 }
 
-type appState struct {
-	Code      string `json:"code"`
-	Status    string `json:"status"`
-	NotBefore int64  `json:"not_before,omitempty"`
-	ExpiresAt int64  `json:"expires_at,omitempty"`
-	Kind      string `json:"kind,omitempty"`
+// appEnforcement 是单个应用的运行强制执行聚合；不可用或未登记也保留结构，
+// 便于前端区分“未接入”与“已接入但未登记”。
+type appEnforcement struct {
+	Available          bool   `json:"available"`
+	Registration       string `json:"registration"`
+	Status             string `json:"status"`
+	Revision           uint64 `json:"revision"`
+	DeploymentRevision uint64 `json:"deployment_revision"`
+	MemberCount        int    `json:"member_count"`
+	ReadyCount         int    `json:"ready_count"`
+	AckCount           int    `json:"ack_count"`
+	LatestReadyAt      string `json:"latest_ready_at"`
+	LatestAckAt        string `json:"latest_ack_at"`
+	SnapshotCurrent    bool   `json:"snapshot_current"`
 }
 
+type appState struct {
+	Code        string          `json:"code"`
+	Status      string          `json:"status"`
+	ReasonCode  string          `json:"reason_code"`
+	NotBefore   int64           `json:"not_before,omitempty"`
+	ExpiresAt   int64           `json:"expires_at,omitempty"`
+	Kind        string          `json:"kind,omitempty"`
+	Enforcement *appEnforcement `json:"enforcement"`
+}
+
+// licenseReasonCode 把应用授权状态映射为稳定的原因码。VALID 没有原因码，
+// 其余状态与原因码一一对应；校验失败对外仍报 VALIDATION_ERROR 状态，
+// 原因码用 STATE_INVALID 表示持久状态校验失败。
+func licenseReasonCode(status string) string {
+	switch status {
+	case "NOT_EFFECTIVE", "EXPIRED", "NO_LICENSE", "NOT_PURCHASED", "CLOCK_ABNORMAL":
+		return status
+	case "VALIDATION_ERROR":
+		return "STATE_INVALID"
+	}
+	return ""
+}
+
+// runtimeEnforcement 汇总单个应用的协调状态。任何读取失败都收敛为可解析的
+// 聚合结果，不返回错误：单个应用不可读不得影响其他应用或整体响应。
+func (h *Handler) runtimeEnforcement(ctx context.Context, application string) *appEnforcement {
+	if h.runtime == nil {
+		return nil
+	}
+	out := appEnforcement{Available: true, Registration: "UNREGISTERED", Status: "UNREGISTERED"}
+	status, e := h.runtime.Status(ctx, application)
+	switch {
+	case errors.Is(e, coordination.ErrNotReady):
+		return &out
+	case e != nil:
+		return &appEnforcement{Available: false, Registration: "UNKNOWN", Status: "UNKNOWN"}
+	}
+	out.Registration = "REGISTERED"
+	out.Status = string(status.State)
+	if out.Status == "" {
+		out.Status = "UNKNOWN"
+	}
+	out.Revision = status.Revision
+	out.DeploymentRevision = status.DeploymentRevision
+	out.SnapshotCurrent = status.SnapshotCurrent
+	var readyAt, ackAt time.Time
+	for _, member := range status.Members {
+		// 退役成员不参与任何计数与时间聚合，避免历史成员污染当前覆盖度。
+		if member.RetiredAt != nil {
+			continue
+		}
+		out.MemberCount++
+		if member.ReadyAt != nil {
+			out.ReadyCount++
+			if member.ReadyAt.After(readyAt) {
+				readyAt = *member.ReadyAt
+			}
+		}
+		if member.AckAt != nil {
+			if member.AckAt.After(ackAt) {
+				ackAt = *member.AckAt
+			}
+			if member.AckRevision == status.Revision {
+				out.AckCount++
+			}
+		}
+	}
+	// 零值时间输出空串，避免出现 0001-01-01 这类假时间。
+	if !readyAt.IsZero() {
+		out.LatestReadyAt = readyAt.UTC().Format(time.RFC3339)
+	}
+	if !ackAt.IsZero() {
+		out.LatestAckAt = ackAt.UTC().Format(time.RFC3339)
+	}
+	return &out
+}
+
+// Status 返回部署实例与各应用的授权事实，并附带运行强制执行聚合，
+// 使前端无需逐应用回查协调器（避免 N+1）。
 func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	if _, ok := principal(w, r, false); !ok {
 		return
@@ -105,6 +206,9 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	items := []appState{}
+	// runtimeReads 统计本次请求内真正读到协调状态的应用数（含“未登记”），
+	// 用于把顶层 runtime_enforcement 从“是否注入”修正为“实际可用性”。
+	runtimeReads := 0
 	for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal"} {
 		item := appState{Code: code, Status: "NO_LICENSE"}
 		if st.Current != nil {
@@ -128,9 +232,20 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(e, domain.ErrCorrupt) {
 			item.Status = "VALIDATION_ERROR"
 		}
+		item.ReasonCode = licenseReasonCode(item.Status)
+		item.Enforcement = h.runtimeEnforcement(r.Context(), code)
+		if item.Enforcement != nil && item.Enforcement.Available {
+			runtimeReads++
+		}
 		items = append(items, item)
 	}
-	httpresponse.WriteSuccess(w, r, 200, "商业授权状态查询成功", map[string]any{"initialized": initialized, "deployment": st, "systems": items, "server_time": now.Format(time.RFC3339), "configured_environment": h.environment, "runtime_enforcement": "NOT_CONNECTED"})
+	// 顶层只区分 AVAILABLE/UNAVAILABLE（前端契约）：协调器未注入，或已注入但
+	// 本次请求没有任何应用成功读取，均视为运行强制执行不可用。
+	runtimeEnforcement := "UNAVAILABLE"
+	if h.runtime != nil && runtimeReads > 0 {
+		runtimeEnforcement = "AVAILABLE"
+	}
+	httpresponse.WriteSuccess(w, r, 200, "商业授权状态查询成功", map[string]any{"initialized": initialized, "deployment": st, "systems": items, "server_time": now.Format(time.RFC3339), "configured_environment": h.environment, "runtime_enforcement": runtimeEnforcement, "runtime_enforcement_source": "per_application_coordination"})
 }
 
 // Artifact 导出已持久化许可证产物。厂商续签只能由上一版许可证推导版本号
