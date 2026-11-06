@@ -1027,6 +1027,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       PROJECT_BACKGROUND_BUILD_ID: ${PROJECT_BACKGROUND_BUILD_ID:-}
+      PROJECT_RUN_WORKER_WITH_API: "false"
     depends_on:
       project-mysql:
         condition: service_healthy
