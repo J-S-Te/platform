@@ -97,7 +97,7 @@ type eventQueryRow struct {
 }
 
 // dedupModel 映射 audit_event_dedup：去重维度是（应用、环境、事件）三元组。
-// 环境维度自 000133 起进入主键——同一应用在不同环境复用同一 event_id 是合法场景
+// 环境维度自 000135 起进入主键——同一应用在不同环境复用同一 event_id 是合法场景
 // （环境克隆/共用发布批次），只有同环境内重复才算 DUPLICATE。
 type dedupModel struct {
 	ApplicationID string `gorm:"column:application_id;primaryKey"`
@@ -258,7 +258,7 @@ func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environme
 
 func (r *Repository) ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environmentModel, input application.EventInput, now time.Time) (domain.Receipt, error) {
 	// 去重键按（应用、环境）隔离，同环境重试相同 event_id 返回 DUPLICATE，跨环境同名
-	// event_id 必须是独立事件（000133 起主键含 environment_id）；事件行和去重行在同一
+	// event_id 必须是独立事件（000135 起主键含 environment_id）；事件行和去重行在同一
 	// 事务写入，即使并发竞争唯一键，也不会留下只有一侧记录的不完整状态。
 	var existing dedupModel
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("application_id = ? AND environment_id = ? AND event_id = ?", app.ID, env.ID, input.EventID).Take(&existing).Error
@@ -488,23 +488,54 @@ func (r *Repository) ClaimExportJob(ctx context.Context, workerID string, now, s
 	return result, result.JobID != "", nil
 }
 
-const maxAuditExportEvents = 10000
-
-// ListExportEvents 按导出快照的过滤条件读取事件，供 worker 生成 CSV。
-func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery) ([]domain.Event, error) {
-	db := r.eventQuery(ctx, tenantID, pageRequest(query))
+// ListExportEvents 按 (occurred_at DESC, id DESC) 的稳定排序分批读取导出事件，供 worker
+// 边读边写 CSV。游标是上一批最后一行的（occurred_at, id）：同一 occurred_at 下靠 id 去重，
+// 因此相邻批次不会重复或遗漏已固定排序位置的记录。每批多取一行只用于判断是否还有
+// 后续批次，该探测行不会出现在返回值中。总量不再设失败阈值。
+func (r *Repository) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery, cursor domain.ExportCursor, limit int) (domain.ExportEventPage, error) {
+	if limit < 1 {
+		return domain.ExportEventPage{}, errors.New("audit export batch size must be positive")
+	}
+	if limit > application.ExportEventBatchSize {
+		limit = application.ExportEventBatchSize
+	}
 	var rows []eventQueryRow
-	if err := db.Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").Joins("JOIN platform_application app ON app.id = audit_event.application_id").Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").Order("audit_event.occurred_at DESC, audit_event.id DESC").Limit(maxAuditExportEvents + 1).Scan(&rows).Error; err != nil {
-		return nil, err
+	if err := r.exportEventQuery(ctx, tenantID, query, cursor, limit).Scan(&rows).Error; err != nil {
+		return domain.ExportEventPage{}, err
 	}
-	if len(rows) > maxAuditExportEvents {
-		return nil, fmt.Errorf("audit export contains more than %d events; narrow the filters before retrying", maxAuditExportEvents)
+	return exportEventPage(rows, limit), nil
+}
+
+// exportEventQuery 组装导出批次查询：过滤条件与列表一致，排序固定，LIMIT 为批量加一
+// 的探测上限。游标用 occurred_at/id 的行值比较，避免大 OFFSET 的漂移与开销。
+func (r *Repository) exportEventQuery(ctx context.Context, tenantID string, query domain.ExportQuery, cursor domain.ExportCursor, limit int) *gorm.DB {
+	db := r.eventQuery(ctx, tenantID, pageRequest(query))
+	if !cursor.OccurredAt.IsZero() || cursor.ID != 0 {
+		db = db.Where("(audit_event.occurred_at < ? OR (audit_event.occurred_at = ? AND audit_event.id < ?))", cursor.OccurredAt, cursor.OccurredAt, cursor.ID)
 	}
-	items := make([]domain.Event, 0, len(rows))
+	return db.Select("audit_event.*, app.code AS application_code, app.name AS application_name, env.environment AS environment_code").
+		Joins("JOIN platform_application app ON app.id = audit_event.application_id").
+		Joins("JOIN platform_application_environment env ON env.id = audit_event.environment_id").
+		Order("audit_event.occurred_at DESC, audit_event.id DESC").
+		Limit(limit + 1)
+}
+
+// exportEventPage 把探测行截断为单批结果并派生续读游标；无更多数据时游标为 nil，
+// worker 以“游标为空”作为唯一终止条件。
+func exportEventPage(rows []eventQueryRow, limit int) domain.ExportEventPage {
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	page := domain.ExportEventPage{Events: make([]domain.Event, 0, len(rows))}
 	for _, row := range rows {
-		items = append(items, toEvent(row.Event, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
+		page.Events = append(page.Events, toEvent(row.Event, row.ApplicationCode, row.ApplicationName, row.EnvironmentCode))
 	}
-	return items, nil
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1].Event
+		page.NextCursor = &domain.ExportCursor{OccurredAt: last.OccurredAt, ID: last.ID}
+	}
+	return page
 }
 
 // CompleteExportJob 在单事务发布导出文件对象、首个版本并置任务为 SUCCEEDED；
@@ -551,17 +582,132 @@ func (r *Repository) FailExportJob(ctx context.Context, work domain.ExportWork, 
 }
 
 // GetExportFile 返回已完成导出任务的文件元数据；物理路径仅限服务端内部使用。
+// status 取自 file_version，供服务层把已清理的产物映射为“已过期”而不是可下载文件。
 func (r *Repository) GetExportFile(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
 	type row struct {
-		FileID, StorageRelativePath, OriginalName, MediaType string
-		CreatedAt                                            time.Time
+		FileID, StorageRelativePath, OriginalName, MediaType, Status string
+		CreatedAt                                                    time.Time
 	}
 	var result row
-	err := r.database.WithContext(ctx).Table("async_job").Select("file_object.id AS file_id, file_version.storage_relative_path, file_version.original_name, file_version.media_type, file_version.created_at").Joins("JOIN file_object ON file_object.id = async_job.result_file_id").Joins("JOIN file_version ON file_version.id = file_object.current_version_id").Where("async_job.tenant_id = ? AND async_job.public_id = ? AND async_job.job_type = ? AND async_job.status = ?", tenantID, jobID, "AUDIT_EXPORT", "SUCCEEDED").Take(&result).Error
+	err := r.database.WithContext(ctx).Table("async_job").Select("file_object.id AS file_id, file_version.storage_relative_path, file_version.original_name, file_version.media_type, file_version.status, file_version.created_at").Joins("JOIN file_object ON file_object.id = async_job.result_file_id").Joins("JOIN file_version ON file_version.id = file_object.current_version_id").Where("async_job.tenant_id = ? AND async_job.public_id = ? AND async_job.job_type = ? AND async_job.status = ?", tenantID, jobID, "AUDIT_EXPORT", "SUCCEEDED").Take(&result).Error
 	if err != nil {
 		return domain.ExportFile{}, r.mapError(err)
 	}
-	return domain.ExportFile{FileID: result.FileID, StorageRelativePath: result.StorageRelativePath, OriginalName: result.OriginalName, MediaType: result.MediaType, CreatedAt: result.CreatedAt}, nil
+	return domain.ExportFile{FileID: result.FileID, StorageRelativePath: result.StorageRelativePath, OriginalName: result.OriginalName, MediaType: result.MediaType, Status: result.Status, CreatedAt: result.CreatedAt}, nil
+}
+
+// auditExportDownloadTicketModel 映射 audit_export_download_ticket（000139）：只保存
+// 明文 token 的 SHA-256 摘要，明文永不落库，因此拿到整表也无法兑换文件。
+type auditExportDownloadTicketModel struct {
+	ID        string
+	TenantID  string
+	JobID     string
+	TokenHash []byte
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+	CreatedAt time.Time
+}
+
+func (auditExportDownloadTicketModel) TableName() string { return "audit_export_download_ticket" }
+
+// auditExportDownloadTicketStaleAfter 是签发新票据时顺带清理旧票据的窗口。
+// 票据 TTL 只有几分钟，1 小时前的行不可能再被核销；清理只作用于同一租户同一任务，
+// 避免票据表随下载次数无界增长，也不影响其他任务或其他租户的记录。
+const auditExportDownloadTicketStaleAfter = time.Hour
+
+// CreateExportDownloadTicket 写入一次性下载票据摘要。与历史票据的清理放在同一事务，
+// 因此要么票据可用且旧行已回收，要么两者都不发生。
+func (r *Repository) CreateExportDownloadTicket(ctx context.Context, ticket domain.ExportDownloadTicket) error {
+	return r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("tenant_id = ? AND job_id = ? AND created_at < ?", ticket.TenantID, ticket.JobID, ticket.CreatedAt.Add(-auditExportDownloadTicketStaleAfter)).Delete(&auditExportDownloadTicketModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&auditExportDownloadTicketModel{ID: ticket.ID, TenantID: ticket.TenantID, JobID: ticket.JobID, TokenHash: ticket.TokenHash, ExpiresAt: ticket.ExpiresAt.UTC(), UsedAt: ticket.UsedAt, CreatedAt: ticket.CreatedAt.UTC()}).Error
+	})
+}
+
+// ConsumeExportDownloadTicket 用一条条件 UPDATE 原子核销票据（审计导出下载契约变更）：
+// WHERE 同时锁定（租户, 任务, 摘要）并要求 used_at IS NULL、expires_at > now，因此
+// 并发兑换同一票据时 MySQL 行锁会让后到的事务看到 used_at 已写、RowsAffected = 0，
+// 只有一个调用方能拿到 1。票据永远不能跨任务或跨租户兑换，哪怕摘要相同。
+//
+// 未命中时再按同样范围只读一次，用于把“已过期”与“无效/已用”区分成 410 与 403；
+// 该查询只读取同一租户同一任务的同摘要行，不泄露其他租户的票据存在性。
+func (r *Repository) ConsumeExportDownloadTicket(ctx context.Context, tenantID, jobID string, tokenHash []byte, now time.Time) (domain.ExportDownloadTicketState, error) {
+	now = now.UTC()
+	result := r.database.WithContext(ctx).Model(&auditExportDownloadTicketModel{}).
+		Where("tenant_id = ? AND job_id = ? AND token_hash = ? AND used_at IS NULL AND expires_at > ?", tenantID, jobID, tokenHash, now).
+		Update("used_at", now)
+	if result.Error != nil {
+		return "", result.Error
+	}
+	if result.RowsAffected == 1 {
+		return domain.ExportDownloadTicketConsumed, nil
+	}
+	var existing auditExportDownloadTicketModel
+	err := r.database.WithContext(ctx).Where("tenant_id = ? AND job_id = ? AND token_hash = ?", tenantID, jobID, tokenHash).Take(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ExportDownloadTicketInvalid, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if existing.UsedAt == nil && !existing.ExpiresAt.After(now) {
+		return domain.ExportDownloadTicketExpired, nil
+	}
+	return domain.ExportDownloadTicketInvalid, nil
+}
+
+// expiredExportArtifactRow 是保留期清理选择结果的扫描目标。
+type expiredExportArtifactRow struct {
+	ID                  string `gorm:"column:id"`
+	StorageRelativePath string `gorm:"column:storage_relative_path"`
+}
+
+// ListExpiredExportArtifacts 选择已完成且超过保留期的 AUDIT_EXPORT 产物版本。
+// 删除范围有意限定为（审计导出任务 → 结果文件对象 → 当前版本）这条链路：
+// 其他 job_type、file_binding 绑定的文件或其他模块的文件永远不会被选中。
+func (r *Repository) ListExpiredExportArtifacts(ctx context.Context, completedBefore time.Time, limit int) ([]domain.ExportArtifact, error) {
+	if limit < 1 {
+		return nil, errors.New("audit export cleanup batch size must be positive")
+	}
+	var rows []expiredExportArtifactRow
+	err := r.expiredExportArtifactQuery(completedBefore, limit).WithContext(ctx).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	artifacts := make([]domain.ExportArtifact, 0, len(rows))
+	for _, row := range rows {
+		artifacts = append(artifacts, domain.ExportArtifact{FileVersionID: row.ID, StorageRelativePath: row.StorageRelativePath})
+	}
+	return artifacts, nil
+}
+
+func (r *Repository) expiredExportArtifactQuery(completedBefore time.Time, limit int) *gorm.DB {
+	return r.database.Table("async_job").
+		Select("file_version.id AS id, file_version.storage_relative_path AS storage_relative_path").
+		Joins("JOIN file_object ON file_object.id = async_job.result_file_id").
+		Joins("JOIN file_version ON file_version.id = file_object.current_version_id").
+		Where("async_job.job_type = ? AND async_job.status = ? AND async_job.completed_at IS NOT NULL AND async_job.completed_at < ?", "AUDIT_EXPORT", "SUCCEEDED", completedBefore.UTC()).
+		Where("file_version.status NOT IN ?", []string{"DELETED", "REMOVED"}).
+		Order("async_job.completed_at ASC, async_job.id ASC").
+		Limit(limit)
+}
+
+// MarkExportArtifactsDeleted 把已删除磁盘文件的版本标记为 DELETED；只改写 file_version.status，
+// 保留 file_object 与 async_job 行，因此下载审计历史与任务状态仍然可查。
+func (r *Repository) MarkExportArtifactsDeleted(ctx context.Context, fileVersionIDs []string) error {
+	if len(fileVersionIDs) == 0 {
+		return nil
+	}
+	return r.exportArtifactDeleteQuery(fileVersionIDs).WithContext(ctx).Update("status", "DELETED").Error
+}
+
+// exportArtifactDeleteQuery 只按调用方提供的版本 ID 更新，并跳过已处于删除态的版本，
+// 避免把并发清理或保留期策略已改动过的版本重新标记。
+func (r *Repository) exportArtifactDeleteQuery(fileVersionIDs []string) *gorm.DB {
+	return r.database.Model(&fileVersionModel{}).
+		Where("id IN ? AND status NOT IN ?", fileVersionIDs, []string{"DELETED", "REMOVED"})
 }
 
 func exportQuery(query application.PageRequest) domain.ExportQuery {
@@ -835,7 +981,17 @@ func redactMetadataValue(value any) any {
 		return value
 	}
 }
+
+// sensitiveField 是只追加存储前的最后一道凭据打码。
+//
+// 与 HTTP 摄取边界共用 domain.IsSensitiveAuditField（精确词/后缀/少量前缀），
+// 并保留历史任意包含匹配（password/token/secret/cookie），覆盖
+// `my_password_hash` 这类词表中没有的中缀形态。平台内部适配器不经过 HTTP 层，
+// 只有这里同源升级才能阻止 private_key/otp/pin/jwt/signature 明文入 changes 列。
 func sensitiveField(field string) bool {
+	if domain.IsSensitiveAuditField(field) {
+		return true
+	}
 	field = strings.ToLower(field)
 	return strings.Contains(field, "password") || strings.Contains(field, "token") || strings.Contains(field, "secret") || strings.Contains(field, "cookie")
 }

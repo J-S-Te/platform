@@ -647,3 +647,11 @@ start/resume 会走发布、备份和迁移，不是仅 docker start。基础 ve
 
 专用 Keycloak 恢复的 verify-only 仍需 Docker／数据库，实际恢复缺少通用恢复的全容器写入者及统一锁门禁；
 优先按 [备份恢复](BACKUP_RECOVERY.md) 采用完整批次。多节点须人工全部停写，单库导入失败没有 SQL 自动回滚。
+
+## 2026-11-05 升级期新增语义（数据库重建与验收等待）
+
+平台阶段在数据库容器被重建后会强制重建其强依赖（`keycloak-db -> keycloak`、`contract-mysql -> contract-api / contract-worker`），
+并把判定持久化到 `runtime/database-refresh-state`；刷新失败写 advisory 标记 `runtime/database-refresh-failed.json`，
+由 `deploy.sh status` / `verify` 展示、不阻断发布。健康收敛改为「每服务窗口 `UIP_HEALTH_WAIT_SECONDS` + 总预算 `UIP_HEALTH_TOTAL_SECONDS`」，
+`RestartCount` 只判窗口内新增。Keycloak 探针改用管理端口 `/health/ready`，发布证明另做 OIDC 发现文档两级判定（master 硬性、租户 realm 404 仅告警）。
+Temporal 只在启用合同 / 项目 / CRM 任一消费子系统时启动，`verify` 门禁同步条件化。完整说明见 `OFFLINE_RUNBOOK.md` 9.6。

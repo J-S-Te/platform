@@ -44,19 +44,35 @@ type LoginTargetResolver interface {
 }
 
 // LoginTargetService 围绕精确持久化查询做输入校验与防御性结果复核。
-// 目标缺失、非 ACTIVE 或边界不一致一律按 not found 报告，让调用方
-// 失败关闭，而不是跳转到未批准的地址。
+// 目标缺失、非 ACTIVE、边界不一致或解析出的绝对地址不在允许来源集合内，
+// 一律按 not found 报告，让调用方失败关闭，而不是跳转到未批准的地址。
 type LoginTargetService struct {
-	repository LoginTargetRepository
+	repository              LoginTargetRepository
+	postLoginRedirectPolicy PostLoginRedirectPolicy
+}
+
+// LoginTargetServiceOption 调整解析器的可选行为，不改变既有构造调用。
+type LoginTargetServiceOption func(*LoginTargetService)
+
+// WithLoginTargetRedirectPolicy 注入登录后跳转的绝对地址来源集合。未注入时只做结构
+// 校验（保持既有口径），装配层始终注入真实集合。
+func WithLoginTargetRedirectPolicy(policy PostLoginRedirectPolicy) LoginTargetServiceOption {
+	return func(service *LoginTargetService) { service.postLoginRedirectPolicy = policy }
 }
 
 // NewLoginTargetService 构造内部登录目标解析器；repository 缺失时拒绝构造，
 // 避免出现绕过注册数据的服务实例。
-func NewLoginTargetService(repository LoginTargetRepository) (*LoginTargetService, error) {
+func NewLoginTargetService(repository LoginTargetRepository, options ...LoginTargetServiceOption) (*LoginTargetService, error) {
 	if repository == nil {
 		return nil, errors.New("application login target repository must not be nil")
 	}
-	return &LoginTargetService{repository: repository}, nil
+	service := &LoginTargetService{repository: repository}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service, nil
 }
 
 // ResolveActiveTargetURI 解析恰好一个 ACTIVE 的业务落地目标。返回的 URI 是
@@ -88,7 +104,19 @@ func (service *LoginTargetService) ResolveActiveTargetURI(ctx context.Context, i
 		if err != nil || environment.BaseURL == nil || *environment.BaseURL == "" {
 			return "", ErrNotFound
 		}
-		return joinEnvironmentBaseURLAndTargetURI(*environment.BaseURL, environment.PathPrefix, target.TargetURI)
+		location, err := joinEnvironmentBaseURLAndTargetURI(*environment.BaseURL, environment.PathPrefix, target.TargetURI)
+		if err != nil {
+			return "", err
+		}
+		// 拼接结果才是浏览器最终跳转地址：存量环境可能登记了明文或未批准的公开基址，
+		// 因此这里对解析结果再执行一次来源集合判定，失败关闭为 not found。
+		if !service.postLoginRedirectPolicy.ValidAbsoluteRedirect(location) {
+			return "", ErrNotFound
+		}
+		return location, nil
+	}
+	if !service.postLoginRedirectPolicy.ValidAbsoluteRedirect(target.TargetURI) {
+		return "", ErrNotFound
 	}
 	return target.TargetURI, nil
 }
@@ -106,11 +134,13 @@ func validLoginTargetIdentifier(value string) bool {
 
 // validLoginTargetURI 同时接受绝对公开 URL 与门户下的绝对路径。
 //
-//   - 绝对公开 URL：scheme 必须为 https、host 非空、无 userinfo、无 opaque 成分。
+//   - 绝对公开 URL：scheme 必须为 https（明文 http 仅限回环主机）、host 非空、
+//     无 userinfo、无 opaque 成分。
 //   - 相对路径：单个前导 '/'，不含 scheme、query/fragment，仅限 ASCII 可打印字符。
 //
 // 纯主机名字符串（如 "example.com"）、协议相对地址（"//x"）及带协议的杂项
-// 一律拒绝，防止本函数被滥用为开放重定向构造器。
+// 一律拒绝，防止本函数被滥用为开放重定向构造器。主机白名单由
+// PostLoginRedirectPolicy 在登记与解析路径追加判定。
 func validLoginTargetURI(value string) bool {
 	if value == "" || len(value) > 2048 {
 		return false
@@ -124,8 +154,13 @@ func validLoginTargetURI(value string) bool {
 		return true
 	}
 	parsed, err := url.Parse(value)
-	return err == nil && parsed.IsAbs() && parsed.Host != "" && parsed.User == nil &&
-		parsed.Opaque == "" && strings.EqualFold(parsed.Scheme, "https")
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" {
+		return false
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return true
+	}
+	return strings.EqualFold(parsed.Scheme, "http") && isLoopbackRedirectHost(parsed.Hostname())
 }
 
 // isRelativeLoginTargetURI 判定 value 是否为解析器允许基于所属环境 BaseURL

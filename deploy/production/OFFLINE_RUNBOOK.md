@@ -665,7 +665,7 @@ cd /opt/unified-identity-platform
 ./bin/deploy.sh status
 ```
 
-预期关键服务：本地 Registry、公共数据库、Keycloak、Temporal、File Gateway、Docker Socket Proxy、Subsystem Provisioner、Platform API/Worker 和 Frontend；健康检查必须为 healthy，Worker 重启计数应稳定。`verify` 同时检查平台 `/readyz`、外部 `/healthz`、OIDC discovery、平台到 File Gateway 的容器网络和匿名文件 API 被正确拒绝。
+预期关键服务：本地 Registry、公共数据库、Keycloak、File Gateway、Docker Socket Proxy、Subsystem Provisioner、Platform API/Worker 和 Frontend；健康检查必须为 healthy，Worker 重启计数应稳定。Temporal 只在启用合同 / 项目 / CRM 任一消费子系统时启动，纯平台、纯结算或纯数据看板的安装不会拉起它，`verify` 的门禁也随之条件化（详见 9.6）。`verify` 同时检查平台 `/readyz`、外部 `/healthz`、OIDC discovery、平台到 File Gateway 的容器网络和匿名文件 API 被正确拒绝。
 
 失败处理：
 
@@ -897,6 +897,38 @@ HTTPS→HTTP 降级在准备阶段会把 `iam_session`、`oauth_token_family`、
 - 升级到本版本之前的降级切换没有 cap 记录，无法恢复（迁移不做历史回填）。
 
 `abort` 只撤销本次切换，不重启容器、不改 `PUBLIC_HTTPS_ENABLED`。确认 `public-transport-coordinator status` 已回到原模式（`State`/`Mode` 一致且无 `TransitionID`、无 `DrainUntil`）后，再按 9.2 的正常发布路径把运行配置收敛回当前模式。
+
+### 9.6 升级期数据库重建、强依赖刷新与验收等待（2026-11-05 起的新发行）
+
+含 2026-11-05 平台修复的发行才有以下语义；旧签名介质不含。现场事故形态：`keycloak-db` 被重建、`keycloak` 未重建，旧 Hikari 连接与 Infinispan clientscopes 缓存卡死，而纯 TCP 探针一直报 healthy，最终 platform-worker 反复崩溃、升级被中止两次。
+
+平台阶段会做什么：
+
+1. DB 容器（`platform-mysql` / `keycloak-db` / `contract-mysql`）在本轮被重建时，按映射强制重建强依赖：
+   - `keycloak-db -> keycloak`：在同一条启动命令上追加 `--force-recreate`，并且与共享 Temporal 分条启动（避免连带重建 Temporal、打断在途工作流）。
+   - `contract-mysql -> contract-api / contract-worker`：只重建**已存在**的容器，带 `--no-deps`；失败**只告警不中止**平台发布，由该子系统自己的发布/verify 阶段判定。
+   - `platform-mysql` / `file-gateway-mysql` 的强依赖本来就在后续步骤无条件强制重建，不重复重启。
+2. 重建判定持久化在 `runtime/database-refresh-state`（0600，格式 `数据库=容器ID`），因此 `--resume` 不会丢失上一轮的重建事实。**不要手工编辑**；若怀疑状态可疑，删除该文件可强制下一次发布重新判定（代价是多一次 keycloak 重启）。
+3. 刷新失败会写 `runtime/database-refresh-failed.json`（0600，advisory）：`./bin/deploy.sh status` 与 `verify` 会打印「数据库 X → 服务 Y（原因/时间）」及补救说明。它**不阻断**发布，但**必须**在对应子系统发布阶段重新部署该服务，否则该服务可能继续使用指向旧数据库容器的连接池。
+4. DB 身份探测（`docker compose ps`）失败会重试 3 次后**中止**平台发布，并且不记录任何刷新状态；「未知」绝不被当作「未重建」。`--resume` 在探测恢复后自愈。
+
+验收等待参数（都可按现场调整）：
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `UIP_HEALTH_WAIT_SECONDS` | 180 | **每个**服务的健康收敛窗口（1..3600） |
+| `UIP_HEALTH_TOTAL_SECONDS` | 600 | 整次校验的**总预算**（1..7200）；超时信息会写明耗尽的是单服务窗口还是总预算 |
+| `UIP_VERIFY_STABILITY_SECONDS` | 10 | 收敛后的稳定性窗口（1..60） |
+
+`RestartCount` 口径：**历史重启不判失败**（现场由外部依赖触发的重启属可容忍），只有「稳定性窗口内新增重启」才判失败。
+
+上述「每服务窗口 + 总预算」同时适用于安装阶段 B 与 `verify` 前置的必要服务就绪门禁（`wait_for_required_service_health`），不再使用单一共享截止时间；超时信息会明确写出耗尽的预算层与该服务真实等待时长。
+
+Keycloak 探针与门禁：
+
+- 容器 healthcheck 改为管理端口 `9000` 的 `/health/ready`（HTTP 200 才算就绪）。注意：26.2 只有 `metrics-enabled=true` 时才注册数据库检查（本编排默认 true，`.env.example` 亦为 true）；关掉 metrics 会退化成「仅端口可用」。该检查对「请求已被卡住」并非完全覆盖，因此发布证明另有 OIDC 发现文档探测兜底。
+- 发布证明直连 keycloak 自己发布的宿主端口（`KEYCLOAK_BIND_ADDRESS` / `KEYCLOAK_HTTP_PORT`，从 compose 模型解析，兼容引号、行内注释与 IPv6）做两级判定：`realms/master` 必须可用（否则按「Keycloak 卡死」失败并给出诊断）；租户 realm 返回 404 视为「realm 尚未创建或名称不一致」，仅告警不阻断（该 realm 由 platform-worker 启动期的 Keycloak bootstrap 创建，`KEYCLOAK_MANAGEMENT_ENABLED=false` 时不会执行）。
+- `./bin/deploy.sh verify` 对公网 issuer 采用同样口径：404 仅告警，连接拒绝 / 超时 / 5xx 才失败关闭。
 
 ## 10. 备份恢复与排错
 

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/csv"
 	"os"
 	"testing"
@@ -12,7 +13,6 @@ import (
 // 统一审计方案 §2.4：列表、详情、导出必须对同一条件返回一致的事件范围与字段。
 // 导出新增稳定定位字段与三类地址，且历史空值以空单元格输出（不编造）。
 func TestExportIncludesStableIdentityColumns(t *testing.T) {
-	worker := &ExportWorker{}
 	received := time.Date(2026, 10, 25, 2, 3, 4, 0, time.UTC)
 	event := domain.Event{
 		EventID: "evt-1", OccurredAt: received.Add(-time.Hour), ReceivedAt: received,
@@ -23,7 +23,8 @@ func TestExportIncludesStableIdentityColumns(t *testing.T) {
 		IngestPeerIP: "172.31.255.32", IPSource: "DIRECT",
 	}
 	history := domain.Event{EventID: "evt-2", OccurredAt: received}
-	file, path, err := worker.writeCSV(domain.ExportWork{TenantID: "tenant-1", ApplicationID: "app-1", JobID: "job-1"}, []domain.Event{event, history})
+	worker := newExportTestWorker(t, &exportRepositoryStub{events: []domain.Event{event, history}}, t.TempDir())
+	file, path, _, err := worker.writeCSV(context.Background(), domain.ExportWork{TenantID: "tenant-1", ApplicationID: "app-1", JobID: "job-1"})
 	if err != nil {
 		t.Fatalf("writeCSV: %v", err)
 	}

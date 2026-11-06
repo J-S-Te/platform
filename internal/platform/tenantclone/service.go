@@ -156,7 +156,9 @@ func cloneCatalog(tx *gorm.DB, source, target, operator string, now time.Time, r
 		if err != nil {
 			return err
 		}
-		if err = tx.Exec("INSERT INTO authz_permission (id,tenant_id,application_id,resource_id,code,action,name,description,risk_level,status,version,created_at,updated_at,created_by,updated_by) SELECT ?,?,?,?,?,?,name,description,risk_level,status,1,?,?,?,? FROM authz_permission WHERE id=? AND tenant_id=?", id, target, appID, resID, p.Code, p.Action, now, now, nullableOperator(operator), nullableOperator(operator), p.ID, source).Error; err != nil {
+		// 授予策略（grant_policy）必须随权限整行直拷：漏拷会把 SUPER_ADMIN_ONLY
+		// 降级为 DEFAULT，使克隆租户丢失"仅超管可授予"的限制。
+		if err = tx.Exec("INSERT INTO authz_permission (id,tenant_id,application_id,resource_id,code,action,name,description,risk_level,grant_policy,status,version,created_at,updated_at,created_by,updated_by) SELECT ?,?,?,?,?,?,name,description,risk_level,grant_policy,status,1,?,?,?,? FROM authz_permission WHERE id=? AND tenant_id=?", id, target, appID, resID, p.Code, p.Action, now, now, nullableOperator(operator), nullableOperator(operator), p.ID, source).Error; err != nil {
 			return err
 		}
 		permMap[p.ID] = id

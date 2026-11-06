@@ -70,12 +70,9 @@ runtime:
         NOTIFICATION_ENABLED: "true"
         PLATFORM_NOTIFICATION_URL: http://platform-api:8080/api/v1/notifications/events
         PLATFORM_NOTIFICATION_SCOPE: notification.ingest
-        CONTRACT_APPROVAL_VALIDATION_ENABLED: "true"
         CONTRACT_APPROVAL_VALIDATION_URL: http://contract-api:8081/internal/v1/project/approved-contracts
         CONTRACT_APPROVAL_VALIDATION_SCOPE: contract.approved.internal.read
         # 合同生效投递与检测类别目录共用一个独立、最小权限的机器身份。
-        CONTRACT_INTEGRATION_ENABLED: "true"
-        CONTRACT_INTEGRATION_REQUIRE_BEARER: "true"
         CONTRACT_INTEGRATION_CLIENT_ID: contract_management-prod-project-integration
         CONTRACT_INTEGRATION_AUDIENCE: basic-platform-application
         CONTRACT_INTEGRATION_ISSUER: basic-platform

@@ -41,17 +41,17 @@ type SubsystemAccessReadinessAdapter struct {
 	configuration SubsystemAccessConfigurationDriftReader
 	builtin       application.RuntimeComponentCatalogSource
 	database      *gorm.DB
-	approvals     application.RuntimeLicenseApprovalSource
 	images        SubsystemAccessImageReadinessReader
 	observation   SubsystemAccessAuthObservationReader
 }
 
-// NewSubsystemAccessReadinessAdapter 构造适配器；数据库与批准来源必需。
-func NewSubsystemAccessReadinessAdapter(database *gorm.DB, approvals application.RuntimeLicenseApprovalSource, images SubsystemAccessImageReadinessReader, observation SubsystemAccessAuthObservationReader) (*SubsystemAccessReadinessAdapter, error) {
-	if database == nil || approvals == nil {
-		return nil, errors.New("subsystem access readiness adapter requires database and runtime approval source")
+// NewSubsystemAccessReadinessAdapter 构造适配器；数据库必需，运行目录由
+// SetBuiltinRuntimeSource 注入（V2 是唯一登记协议）。
+func NewSubsystemAccessReadinessAdapter(database *gorm.DB, images SubsystemAccessImageReadinessReader, observation SubsystemAccessAuthObservationReader) (*SubsystemAccessReadinessAdapter, error) {
+	if database == nil {
+		return nil, errors.New("subsystem access readiness adapter requires database")
 	}
-	return &SubsystemAccessReadinessAdapter{database: database, approvals: approvals, images: images, observation: observation}, nil
+	return &SubsystemAccessReadinessAdapter{database: database, images: images, observation: observation}, nil
 }
 
 // ReadSubsystemAccessReadiness 读取就绪事实。
@@ -65,33 +65,16 @@ func (adapter *SubsystemAccessReadinessAdapter) ReadSubsystemAccessReadiness(ctx
 
 	readiness := SubsystemAccessReadiness{}
 	environments := subsystemAccessEnvironmentAliases(environmentCode)
-	approvalVersion := ""
-	if adapter.builtin != nil {
-		var err error
-		approvalVersion, err = builtinAccessCatalogVersion(ctx, adapter.builtin, applicationCode, environmentCode)
-		if err != nil {
-			return SubsystemAccessReadiness{}, fmt.Errorf("read builtin runtime components: %w", err)
-		}
-		readiness.ApprovalReady = true
-	} else {
-		var components []application.RuntimeLicenseApproval
-		for _, candidate := range environments {
-			approved, approvalErr := adapter.approvals.ApprovedRuntimeLicenseComponents(ctx, applicationCode, candidate)
-			if approvalErr != nil {
-				// 批准域的诊断（不可用 / 不匹配 / 启动校验失败 / 运行时不可用 / 未初始化）
-				// 都是「未就绪」的正常结果，不是传输失败：记为未就绪并继续尝试其它别名，
-				// 不能因此把整个预览打成 500。
-				if application.RuntimeLicenseApprovalErrorCode(approvalErr) != "" {
-					continue
-				}
-				return SubsystemAccessReadiness{}, fmt.Errorf("read approved runtime license components: %w", approvalErr)
-			}
-			components = append(components, approved...)
-		}
-		readiness.ApprovalReady = len(components) > 0
-		approvalVersion = approvalComponentsVersion(components)
-
+	// V1 审批源已下线：就绪判定只认内置运行目录。目录未注入属于部署装配错误，
+	// 直接失败关闭，不退回任何按文件审批的路径。
+	if adapter.builtin == nil {
+		return SubsystemAccessReadiness{}, fmt.Errorf("read builtin runtime components: %w", application.ErrRuntimeComponentCatalogUnavailable)
 	}
+	approvalVersion, err := builtinAccessCatalogVersion(ctx, adapter.builtin, applicationCode, environmentCode)
+	if err != nil {
+		return SubsystemAccessReadiness{}, fmt.Errorf("read builtin runtime components: %w", err)
+	}
+	readiness.ApprovalReady = true
 
 	var artifacts int64
 	if err := adapter.database.WithContext(ctx).Table("license_artifact").Count(&artifacts).Error; err != nil {

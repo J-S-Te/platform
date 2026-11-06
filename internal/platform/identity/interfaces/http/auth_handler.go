@@ -44,8 +44,11 @@ type Handler struct {
 	loginTargets    applicationregistry.LoginTargetResolver
 	oidc            oidcLoginConfig
 	idTokenVerifier oidcIDTokenVerifier
-	central         *sessionstore.Store
-	centralVerifier centralTokenVerifier
+	// postLoginRedirectPolicy 是登录完成后允许跳转的绝对地址来源集合。处理器不把
+	// "解析器返回了地址"当作"地址已被批准"：发现未批准来源即回落到同源页面。
+	postLoginRedirectPolicy applicationregistry.PostLoginRedirectPolicy
+	central                 *sessionstore.Store
+	centralVerifier         centralTokenVerifier
 }
 
 // centralTokenVerifier 返回完整且成对验签的原始认证声明。
@@ -82,9 +85,12 @@ type oidcIDTokenVerifier interface {
 	VerifyIDToken(ctx context.Context, rawToken, expectedNonce, expectedClientID string) (identityID string, err error)
 }
 
+// HandlerOption 调整认证 HTTP 适配器的可选依赖；零值保持既有行为。
+type HandlerOption func(*Handler)
+
 // IDTokenVerifierOption 允许装配层注入平台 OIDC 登录的 ID Token 验证器；未注入时
 // 回调退化为 userinfo 单一声明校验（本地开发兼容路径）。
-type IDTokenVerifierOption func(*Handler)
+type IDTokenVerifierOption = HandlerOption
 
 // WithIDTokenVerifier 注入 ID Token 验证器（nil 被忽略）。
 func WithIDTokenVerifier(verifier oidcIDTokenVerifier) IDTokenVerifierOption {
@@ -93,6 +99,12 @@ func WithIDTokenVerifier(verifier oidcIDTokenVerifier) IDTokenVerifierOption {
 			handler.idTokenVerifier = verifier
 		}
 	}
+}
+
+// WithPostLoginRedirectPolicy 注入登录后跳转的绝对地址来源集合。未注入时处理器只做
+// 结构校验，装配层始终注入真实集合。
+func WithPostLoginRedirectPolicy(policy applicationregistry.PostLoginRedirectPolicy) HandlerOption {
+	return func(handler *Handler) { handler.postLoginRedirectPolicy = policy }
 }
 
 type applicationService interface {
@@ -119,7 +131,7 @@ type cookieConfig struct {
 }
 
 // NewHandler 构造身份 HTTP 适配器；service 由装配层在 bootstrap 时校验。
-func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig, auditRecorder lifecycleAuditRecorder, auditConfig config.AuditConfig, loginTargetResolver applicationregistry.LoginTargetResolver, options ...IDTokenVerifierOption) (*Handler, error) {
+func NewHandler(service applicationService, logger *slog.Logger, authConfig config.AuthConfig, auditRecorder lifecycleAuditRecorder, auditConfig config.AuditConfig, loginTargetResolver applicationregistry.LoginTargetResolver, options ...HandlerOption) (*Handler, error) {
 	if service == nil || logger == nil || auditRecorder == nil {
 		return nil, errors.New("identity HTTP handler dependencies must not be nil")
 	}
@@ -544,6 +556,12 @@ func (handler *Handler) resolveLoginRedirect(ctx context.Context, tenantID strin
 	})
 	if err != nil {
 		handler.logger.Warn("login target resolution failed", "error", err, "tenant_id", tenantID, "application_id", payload.ApplicationID, "environment_id", payload.EnvironmentID, "target_code", payload.LoginTargetCode)
+		return "/"
+	}
+	// 服务端在解析器之外再复核一次来源：即使仓储返回了历史遗留的明文或未批准地址，
+	// 登录也在平台同源页面收尾，绝不把浏览器送去未批准的站点。
+	if !handler.postLoginRedirectPolicy.ValidAbsoluteRedirect(redirectURI) {
+		handler.logger.Warn("login target redirect is not an approved absolute destination", "tenant_id", tenantID, "application_id", payload.ApplicationID, "environment_id", payload.EnvironmentID, "target_code", payload.LoginTargetCode)
 		return "/"
 	}
 	return redirectURI

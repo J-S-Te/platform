@@ -338,8 +338,9 @@ onboard_run_interactive_wizard() {
 
 # print_deployment_failed_summary 打印后台部署失败的真实错误与下一步指引，
 # 不再伪装成 HTTP 503（避免误导操作者去查无关的依赖可用性）。
+# 失败摘要写 stderr：脚本化消费时成功摘要在 stdout，失败信息在 stderr，二者不混流。
 print_deployment_failed_summary() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" >&2 <<'PY'
 import json
 import sys
 try:
@@ -479,6 +480,11 @@ cmd_onboard() {
   require_command curl
   require_command python3
   apply_preset
+
+  # 与 update 一致：在任何平台请求之前校验等待预算（dry-run 不部署，因此不校验）。
+  if [[ "$DRY_RUN" != true ]] && ! resolve_deploy_wait_timeout; then
+    exit 2
+  fi
 
   TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/subsystem-onboard.XXXXXX")"
   RESPONSE_FILE="$TEMP_DIR/onboarding-response.json"

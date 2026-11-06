@@ -230,9 +230,9 @@ func (provisioner *ProductionComposeSubsystemProvisioner) Capabilities() applica
 	return capabilities
 }
 
-// AvailableCapabilities 只返回镜像集已完整准备进 .release.env（不可变 digest）的目标。
-// 完整的 Capabilities 策略仍是权威白名单；这一更窄的投影防止本次交付未携带的可选子系统
-// 在控制面里显示为可安装。
+// AvailableCapabilities 投影不可变镜像已准备的审核目标与精确结算来源模式。
+// 参数：ctx控制只读文件校验，不读取或返回运行凭据。
+// 返回值：比静态白名单更窄的安装可用性；坏文件或来源模式返回错误。
 func (provisioner *ProductionComposeSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
 	if provisioner == nil {
 		return application.SubsystemProvisioningCapabilities{}, provisioningError("production subsystem deployment is unavailable")
@@ -260,6 +260,28 @@ func (provisioner *ProductionComposeSubsystemProvisioner) AvailableCapabilities(
 	}
 	capabilities := productionSubsystemCapabilities(availableProfiles)
 	capabilities.Enabled = provisioner.enabled
+	if !provisioner.enabled {
+		return capabilities, nil
+	}
+	for _, profile := range availableProfiles {
+		if profile.Manifest.Application.Code != "settlement" {
+			continue
+		}
+		target, err := provisioner.target("settlement", profile.Manifest.Application.Environment)
+		if err != nil {
+			return application.SubsystemProvisioningCapabilities{}, err
+		}
+		environment, err := target.settlementContractOptionalEnvironment()
+		if err != nil {
+			return application.SubsystemProvisioningCapabilities{}, err
+		}
+		if environment != "" {
+			capabilities.SettlementContractOptionalEnvironments = append(capabilities.SettlementContractOptionalEnvironments, environment)
+		}
+	}
+	if err := application.ValidateRelatedServiceCapabilityProjection(capabilities); err != nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("Settlement source capability is invalid")
+	}
 	return capabilities, nil
 }
 
@@ -576,6 +598,9 @@ func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID st
 	return nil
 }
 
+// deployLocked 在已持有发布锁时按实际能力执行备份、迁移和受控启动。
+// 参数：ctx限制部署时间，redactValues为诊断中必须隐藏的凭据值。
+// 返回值：任一步失败返回脱敏错误并保留恢复证据。
 func (target *productionComposeTarget) deployLocked(ctx context.Context, redactValues ...string) error {
 	// 取得部署锁后重读服务开关：排队等待的请求必须尊重预检之后被移除的子系统封锁。
 	if err := target.validateEnabledServices(ctx); err != nil {
@@ -585,6 +610,7 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 	// 不自动删除已写入的运行配置或数据库状态，后续重试/人工恢复可从同一现场继续判断。
 	compose := target.config.Profile.Manifest.Compose
 	compose.RuntimeServices = target.selectedRuntimeServices()
+	compose.InitializationServices = target.selectOptionalServices(compose.InitializationServices, true)
 	if len(compose.DependencyServices) > 0 {
 		// 依赖启动必须与共享平台服务隔离。缺少 --no-deps 时 Compose 可能连带重建
 		// platform-api 和 Agent，在子系统切换期间让所有浏览器请求短暂 502。
@@ -894,11 +920,19 @@ func (target *productionComposeTarget) composeCommand(arguments ...string) ([]st
 	return append(prefix, arguments...), runnerEnvironment
 }
 
-// YAML 中的服务归属是唯一的部署启用开关。用已配置的 .env/.release.env 解析受审 Compose
-// 文件，只打印服务名；镜像/secret 值在服务归属确定后再针对本目标校验。不要在此加
-// --no-interpolate 或 --no-env-resolution：旧版 Compose 要么拒绝后者，要么无法校验含
-// 字面 ${...:-...} 冒号的 bind-mount 表达式。
+// validateEnabledServices 校验受控Compose包含当前能力需要的全部服务。
+// 参数：ctx限制只输出服务名的解析请求，不输出配置或秘密。
+// 返回值：缺服务、模式非法或Compose不可解析时返回错误。
 func (target *productionComposeTarget) validateEnabledServices(ctx context.Context) error {
+	if _, err := target.portalLocalDirectory(); err != nil {
+		return err
+	}
+	// 非法功能配置不能借“缺服务”路径静默省略任何进程。
+	for _, feature := range target.config.Profile.Manifest.OptionalFeatures {
+		if _, err := target.optionalFeatureEnabled(feature); err != nil {
+			return err
+		}
+	}
 	checkContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	output, err := target.runComposeOutput(checkContext, "config", "--services")
@@ -911,9 +945,9 @@ func (target *productionComposeTarget) validateEnabledServices(ctx context.Conte
 	}
 	target.enabledServices = services
 	compose := target.config.Profile.Manifest.Compose
-	required := append([]string{}, compose.RuntimeServices...)
+	required := target.selectOptionalServices(compose.RuntimeServices, false)
 	required = append(required, compose.DependencyServices...)
-	required = append(required, compose.InitializationServices...)
+	required = append(required, target.selectOptionalServices(compose.InitializationServices, true)...)
 	required = append(required, compose.MigrateService, compose.CatalogSyncService)
 	if compose.Database != nil {
 		required = append(required, compose.Database.Service)
@@ -926,9 +960,16 @@ func (target *productionComposeTarget) validateEnabledServices(ctx context.Conte
 	return nil
 }
 
+// selectedRuntimeFiles 选择已具备依赖的运行文件，本地门户不跨写CRM。
+// 参数：无。
+// 返回值：本次允许写入及重载的运行文件集合。
 func (target *productionComposeTarget) selectedRuntimeFiles() []productionSubsystemRuntimeFileManifest {
 	var files []productionSubsystemRuntimeFileManifest
+	localPortal, modeErr := target.portalLocalDirectory()
 	for _, file := range target.config.Profile.Manifest.Runtime.Files {
+		if file.Path == "runtime/customer.env" && (localPortal || modeErr != nil) {
+			continue
+		}
 		if file.WhenService != "" {
 			if !target.enabledServices[file.WhenService] {
 				continue
@@ -943,6 +984,9 @@ func (target *productionComposeTarget) selectedRuntimeFiles() []productionSubsys
 	return files
 }
 
+// selectedRuntimeServices 选出本应用实际启用的消费者和可选基础设施。
+// 参数：无。
+// 返回值：保留清单顺序的服务集合，不省略必需业务消费者。
 func (target *productionComposeTarget) selectedRuntimeServices() []string {
 	files := make(map[string]bool)
 	for _, file := range target.selectedRuntimeFiles() {
@@ -956,7 +1000,7 @@ func (target *productionComposeTarget) selectedRuntimeServices() []string {
 		}
 		services = append(services, service)
 	}
-	return services
+	return target.selectOptionalServices(services, false)
 }
 
 // writeRuntimeFixedValues 更新清单值及受控身份，保留符合条件的一次性秘密。
@@ -990,6 +1034,9 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		values := make(map[string]string, len(runtimeFile.Values)+len(generatedValues))
 		for key, value := range runtimeFile.Values {
 			values[key] = value
+		}
+		if err := target.optionalFeatureValues(path, values); err != nil {
+			return err
 		}
 		for key, value := range generatedValues {
 			values[key] = value
@@ -1052,7 +1099,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 				}
 			default:
 				if strings.HasPrefix(source, "related_service.") {
-					value, err := resolveProductionBinding(input, source)
+					value, err := target.resolveRuntimeBinding(input, runtimeFile, source)
 					if err != nil {
 						return err
 					}
@@ -1091,6 +1138,10 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					}
 				}
 			}
+		}
+		// C07：联动关闭不注入对端业务 URL，联动开启时端点必须可用。
+		if err := applyProductionLinkageURLValues(target.config.Profile.Manifest.Application.Code, currentValues, values); err != nil {
+			return err
 		}
 		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
 			return err
@@ -1139,11 +1190,14 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 		for key, value := range runtimeFile.Values {
 			values[key] = value
 		}
+		if err := target.optionalFeatureValues(path, values); err != nil {
+			return err
+		}
 		for key, value := range generatedValues {
 			values[key] = value
 		}
 		for key, source := range runtimeFile.Bindings {
-			value, resolveErr := resolveProductionBinding(input, source)
+			value, resolveErr := target.resolveRuntimeBinding(input, runtimeFile, source)
 			if resolveErr != nil {
 				return resolveErr
 			}
@@ -1151,6 +1205,11 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 				return serviceCredentialRetryError()
 			}
 			values[key] = value
+		}
+		// C07：初装路径同样按现场模式键裁剪对端业务 URL；文件尚不存在时按
+		// "键缺失=联动开启"处理，注入清单值。
+		if err := applyProductionLinkageURLValues(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values); err != nil {
+			return err
 		}
 		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
 			return err
@@ -1365,6 +1424,9 @@ func validateProductionAuthenticationUpdate(input application.SubsystemProvision
 	return nil
 }
 
+// validateDeploymentFiles 校验受限部署文件及当前已启用能力的材料。
+// 参数：requireWritableEnvironment允许初始化受控运行文件，validateInfrastructureSecrets要求基础设施凭据。
+// 返回值：路径、权限、材料或镜像声明不完整时返回脱敏错误。
 func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEnvironment, validateInfrastructureSecrets bool) error {
 	root, err := canonicalProductionDeployRoot(target.config.DeployRoot)
 	if err != nil {
@@ -1430,7 +1492,7 @@ func (target *productionComposeTarget) validateDeploymentFiles(requireWritableEn
 			return err
 		}
 	}
-	return nil
+	return target.validateOptionalFeatureRuntime()
 }
 
 // ensureProductionRuntimeFile 将人工步骤压缩为可重复的 Agent 操作：缺失时复制审核模板，
@@ -1826,6 +1888,9 @@ func validPublicTransportHost(value string) bool {
 	return value != "" && !strings.ContainsAny(value, "/?#\\\r\n\x00 \t") && !strings.Contains(value, "://")
 }
 
+// validateProvisioningInput 在写文件前验证目标、租户、认证及全部正式映射。
+// 参数：input为控制面已授权目标与一次性凭据，运行模式只从审核目标文件读取。
+// 返回值：任一身份、地址或来源不完整返回错误，不放宽许可和租户门禁。
 func (target *productionComposeTarget) validateProvisioningInput(input application.SubsystemProvisioningInput) error {
 	if !target.matches(input.ApplicationCode, input.Environment) || input.ManifestChecksum != "" && input.ManifestChecksum != target.config.Profile.Checksum {
 		return provisioningError("production subsystem deployment request is invalid")
@@ -1847,7 +1912,7 @@ func (target *productionComposeTarget) validateProvisioningInput(input applicati
 	// 先解析所有映射，确保缺少任一用途凭据时不会先写入部分运行时文件。
 	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		for _, source := range runtimeFile.Bindings {
-			value, err := resolveProductionBinding(input, source)
+			value, err := target.resolveRuntimeBinding(input, runtimeFile, source)
 			if err != nil || !validEnvironmentValue(value) {
 				return provisioningError("production subsystem integration credential is incomplete")
 			}

@@ -244,6 +244,19 @@ func TestShouldRecordAuditTrailNeverSuppressesBusinessAuditRoutes(t *testing.T) 
 	}
 }
 
+// 审计导出下载契约变更：签发一次性票据（POST）与凭票据兑换文件（GET）都属于会泄露
+// 安全信息的审计操作，必须各留一条通用审计轨迹；GET 下载尤其不能因为“只读”而漏记。
+func TestShouldRecordAuditTrailCoversExportDownloadTickets(t *testing.T) {
+	issueRoute := "/api/v1/audit/export-jobs/:job_id/download-tickets"
+	downloadRoute := "/api/v1/audit/export-jobs/:job_id/download"
+	if !shouldRecordAuditTrail(http.MethodPost, issueRoute) {
+		t.Fatal("export download ticket issuance must produce a generic audit record")
+	}
+	if !shouldRecordAuditTrail(http.MethodGet, downloadRoute) {
+		t.Fatal("export download must produce a generic audit record")
+	}
+}
+
 func TestAuditTrailRecordsGenericEventForBusinessAuditRoute(t *testing.T) {
 	// 端到端兜底断言：即使业务审计（applicationaccess 层）摄取失败，通用轨迹中间件
 	// 对该路由也必须实际产出一条记录——即“业务审计失败 → 通用轨迹仍有记录”。

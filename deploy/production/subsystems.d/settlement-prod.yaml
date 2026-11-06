@@ -33,10 +33,8 @@ runtime:
         OIDC_SESSION_IDLE_TTL: 30m
         OIDC_SESSION_ABSOLUTE_TTL: 8h
         SETTLEMENT_DEVELOPMENT_AUTH: "false"
-        SETTLEMENT_INTEGRATION_ENABLED: "true"
         SETTLEMENT_OUTBOX_BATCH_SIZE: "50"
         SETTLEMENT_INVOICE_ISSUANCE_MODE: manual
-        SETTLEMENT_CRM_CREDIT_SYNC_ENABLED: "false"
         # 结算→CRM 回款/冲销信用事实同步的固定接线：scope 与 CRM 机器权限白名单
         # （customer.credit.payment.ingest）及平台用途 crm_credit_payment_ingest 一致。
         CRM_CREDIT_SYNC_ENDPOINT: http://customer-api:8090/api/v1/internal/credit/payment-events

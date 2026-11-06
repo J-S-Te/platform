@@ -93,10 +93,56 @@ type ExportQuery struct {
 	EventID, ActorID, CorrelationID, ClientIP, LoginIP, ResourceID, RequestID string
 }
 
+// ExportCursor 是审计导出分批读取的稳定游标：上一批最后一行的（occurred_at, id）。
+// 零值表示从头读取；排序固定为 occurred_at DESC, id DESC，因此同一快照内不会重复或遗漏。
+type ExportCursor struct {
+	OccurredAt time.Time
+	ID         uint64
+}
+
+// ExportEventPage 是导出分页读取的一批事件。NextCursor 为 nil 表示已读完；
+// 仓储多取一行来判断是否还有后续批次，因此调用方无需额外查询。
+type ExportEventPage struct {
+	Events     []Event
+	NextCursor *ExportCursor
+}
+
+// ExportArtifact 是导出任务产物在存储层的定位信息，供保留期清理使用。
+// 只暴露 file_version 标识与相对路径，不暴露租户或其他模块的文件。
+type ExportArtifact struct {
+	FileVersionID       string
+	StorageRelativePath string
+}
+
 // ExportFile 描述已完成的审计导出任务附带的本地文件。
+// Status 取自 file_version.status：DELETED/REMOVED 表示产物已过期或已被清理。
 type ExportFile struct {
 	FileID, VersionID, StorageRelativePath, OriginalName, MediaType string
+	Status                                                          string
 	SizeBytes                                                       uint64
 	SHA256                                                          []byte
 	CreatedAt                                                       time.Time
 }
+
+// ExportDownloadTicket 是一次性导出下载票据的服务端记录（审计导出下载契约变更）。
+// TokenHash 是明文 token 的 SHA-256 摘要：明文只在签发响应里出现一次，绝不进入本结构、
+// 日志或审计载荷，因此本表泄露也无法兑换文件。
+type ExportDownloadTicket struct {
+	ID, TenantID, JobID string
+	TokenHash           []byte
+	ExpiresAt           time.Time
+	UsedAt              *time.Time
+	CreatedAt           time.Time
+}
+
+// ExportDownloadTicketState 是票据原子核销的结果。
+type ExportDownloadTicketState string
+
+const (
+	// ExportDownloadTicketConsumed 表示本次调用成功核销票据，可以输出文件。
+	ExportDownloadTicketConsumed ExportDownloadTicketState = "CONSUMED"
+	// ExportDownloadTicketInvalid 表示票据不存在、不属于该租户/任务，或已被使用。
+	ExportDownloadTicketInvalid ExportDownloadTicketState = "INVALID"
+	// ExportDownloadTicketExpired 表示票据存在且未使用，但已超过有效期。
+	ExportDownloadTicketExpired ExportDownloadTicketState = "EXPIRED"
+)

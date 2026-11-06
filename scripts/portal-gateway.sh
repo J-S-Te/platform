@@ -10,6 +10,15 @@
 # 配置的 path_prefix（例如 /external_system/）反代到子系真实内网地址。这样子系不需要对外暴露端口，
 # 也不需要在 OAuth redirect_uri、LoginTarget.TargetURI 里写任何子系端口。
 #
+# 分工：本脚本只保留 shell 侧职责——CLI 分发与缺失参数校验、跨进程写锁
+# （flock 优先，macOS 回退原子 mkdir 目录锁）、把渲染结果用 cat 覆盖写回 include
+# 文件（保留 bind mount inode）、nginx -t / nginx -s reload。
+# 渲染与解析逻辑在 scripts/lib/gateway_render.py（仅标准库，Python 3.9+）：
+#   * nginx location 片段渲染、托管头、parse_entry 解析；
+#   * curl --config 值转义、code/path_prefix/upstream_url/page_limit 校验；
+#   * sync 的分页拉取、空页守卫、聚合与 path_prefix 去重判定。
+# 解释器默认 python3，可用 PORTAL_GATEWAY_PYTHON 指定（例如固定到某个 python3.x）。
+#
 # 用法：
 #   portal-gateway.sh add <code> <path_prefix> <upstream_url>
 #   portal-gateway.sh remove <code>
@@ -35,19 +44,18 @@ PAGE_LIMIT="${PORTAL_GATEWAY_PAGE_LIMIT:-100}"
 LOCK_FILE="${PORTAL_GATEWAY_LOCK_FILE:-${NGINX_INCLUDE}.lock}"
 LOCK_TIMEOUT="${PORTAL_GATEWAY_LOCK_TIMEOUT:-60}"
 # 这些模块已经编译进统一 Vue 前端，只允许代理其后端 API 子路径，不能生成整站反代。
+# 判定逻辑在 gateway_render.is_integrated_frontend_code，这里只负责取值与透传。
 INTEGRATED_FRONTEND_CODES="${PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES:-contract_management customer_and_opportunity customer-opportunity}"
-# 安全（SEC-5）：承载 Bearer Token 的临时 curl 配置文件路径；由 do_sync 创建并在退出时删除。
-AUTH_CONFIG_FILE=""
+PYTHON_BIN="${PORTAL_GATEWAY_PYTHON:-python3}"
+RENDER_SCRIPT="${PROJECT_ROOT}/scripts/lib/gateway_render.py"
+# 渲染器退出码约定（见 gateway_render.py 模块文档）：
+#   0=stdout 为需要写入的 include 全文；1=运行时失败；2=输入非法；3=幂等跳过无需写入。
+RENDER_NO_WRITE=3
 
 log() {
   local level="$1"
   shift
   printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >&2
-}
-
-# 转义要写入 curl --config 的双引号字符串值，避免 token 中的 " 或 \ 破坏配置。
-escape_curl_config() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 usage() {
@@ -103,7 +111,9 @@ run_with_gateway_lock() {
     local rc
     exec 9>"$LOCK_FILE"
     if ! flock -w "$LOCK_TIMEOUT" 9; then
-      log "ERROR" "等待网关配置锁超时：$LOCK_FILE（操作：$operation）"
+      # 全角括号紧跟变量时必须用 ${var} 形式：bash 3.2 会把非 ASCII 字节当作变量名的一部分，
+      # 退化成 unbound variable，导致这条超时诊断整行丢失。
+      log "ERROR" "等待网关配置锁超时：${LOCK_FILE}（操作：${operation}）"
       exec 9>&-
       return 1
     fi
@@ -117,7 +127,7 @@ run_with_gateway_lock() {
   local lock_dir="${LOCK_FILE}.d" waited=0 rc
   while ! mkdir -- "$lock_dir" 2>/dev/null; do
     if (( waited >= LOCK_TIMEOUT )); then
-      log "ERROR" "等待网关配置目录锁超时：$lock_dir（操作：$operation）"
+      log "ERROR" "等待网关配置目录锁超时：${lock_dir}（操作：${operation}）"
       return 1
     fi
     sleep 1
@@ -136,258 +146,89 @@ require_arg() {
   fi
 }
 
-is_integrated_frontend_code() {
-  local target="$1" item
-  local items=()
-  # INTEGRATED_FRONTEND_CODES 默认是空格分隔，历史配置可能写成逗号分隔。
-  # 只按逗号切分会把整个默认值当成一个应用编码，内置 SPA 的整站代理保护随之失效；
-  # 这里先把逗号归一化为空格，再按空白切分并忽略空项。
-  local normalized="${INTEGRATED_FRONTEND_CODES//,/ }"
-  read -r -a items <<<"$normalized"
-  for item in "${items[@]}"; do
-    [[ "$target" != "$item" ]] || return 0
-  done
-  return 1
-}
-
-validate_code() {
-  local code="$1"
-  # sync 会用 <application-code>-<environment> 生成稳定且唯一的条目标识。
-  if [[ ! "$code" =~ ^[a-z0-9][a-z0-9_.-]{0,79}$ ]]; then
-    log "ERROR" "code 必须是 ^[a-z0-9][a-z0-9_.-]{0,79}\$：$code"
-    exit 2
+# 调用 Python 渲染器：stdout 是 include 全文（add/remove/sync）或列表输出（list），
+# stderr 是日志，退出码见 RENDER_NO_WRITE 约定。
+# 环境变量显式透传，保持与旧脚本相同的注入面（默认值在 shell 侧解析）。
+run_renderer() {
+  if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    log "ERROR" "未找到 Python 3 解释器：${PYTHON_BIN}（渲染与解析由 scripts/lib/gateway_render.py 承担）"
+    return 1
   fi
+  PORTAL_GATEWAY_NGINX_INCLUDE="$NGINX_INCLUDE" \
+    PORTAL_GATEWAY_API_BASE_URL="$API_BASE_URL" \
+    PORTAL_GATEWAY_API_TOKEN="$API_TOKEN" \
+    PORTAL_GATEWAY_PAGE_LIMIT="$PAGE_LIMIT" \
+    PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES="$INTEGRATED_FRONTEND_CODES" \
+    "$PYTHON_BIN" -B "$RENDER_SCRIPT" "$@"
 }
 
-validate_path_prefix() {
-  local prefix="$1"
-  # 门户根路径保留给门户自身；不接受重复斜杠、点段、编码字符或 nginx 特殊字符。
-  local pattern='^/[A-Za-z0-9._~!+/\-]*$'
-  if [[ ${#prefix} -gt 128 || "$prefix" == "/" || ! "$prefix" =~ $pattern ]]; then
-    log "ERROR" "path_prefix 必须是非根绝对路径（最长 128，字母数字 . _ ~ ! - + /）：$prefix"
-    exit 2
-  fi
-  if [[ "$prefix" == *"//"* ]]; then
-    log "ERROR" "path_prefix 不能包含 //：$prefix"
-    exit 2
-  fi
-  local segment
-  local segments=()
-  IFS='/' read -r -a segments <<<"$prefix"
-  for segment in "${segments[@]}"; do
-    if [[ "$segment" == "." || "$segment" == ".." ]]; then
-      log "ERROR" "path_prefix 不能包含 . 或 .. 路径段：$prefix"
-      exit 2
-    fi
-  done
-}
-
-validate_upstream_url() {
-  local url="$1"
-  # 支持域名、IPv4 和方括号 IPv6；禁止 query/fragment/空白及 nginx 配置注入字符。
-  local pattern='^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~-]+)(:([0-9]{1,5}))?(/[A-Za-z0-9._~!%+/@-]*)?$'
-  if [[ ${#url} -gt 512 || ! "$url" =~ $pattern ]]; then
-    log "ERROR" "upstream_url 必须是安全的 http(s) 绝对 URL（支持 [IPv6]:port）：$url"
-    exit 2
-  fi
-  local port="${BASH_REMATCH[3]:-}"
-  if [[ -n "$port" && (10#$port -lt 1 || 10#$port -gt 65535) ]]; then
-    log "ERROR" "upstream_url 端口必须在 1..65535：$url"
-    exit 2
-  fi
-}
-
-validate_page_limit() {
-  if [[ ! "$PAGE_LIMIT" =~ ^[0-9]+$ ]] || (( PAGE_LIMIT < 1 || PAGE_LIMIT > 100 )); then
-    log "ERROR" "PORTAL_GATEWAY_PAGE_LIMIT 必须在 1..100（后端最大页大小为 100）：$PAGE_LIMIT"
-    exit 2
-  fi
-}
-
-trim_trailing_slash() {
-  local value="$1"
-  value="${value%/}"
-  printf '%s' "$value"
-}
-
-ensure_include_file() {
-  local file="$1"
-  mkdir -p "$(dirname -- "$file")"
-  if [[ ! -f "$file" ]]; then
-    install -m 0644 /dev/null "$file"
-    cat > "$file" <<'HEADER'
-# DO NOT EDIT: managed by scripts/portal-gateway.sh.
-# 任何手动修改会在下一次 add/remove/sync 时被覆盖。
-HEADER
-  fi
-}
-
-render_location() {
-  local code="$1"
-  local path_prefix="$2"
-  local upstream_url="$3"
-  local trimmed_prefix
-  trimmed_prefix="$(trim_trailing_slash "$path_prefix")"
-  local trimmed_upstream
-  trimmed_upstream="$(trim_trailing_slash "$upstream_url")"
-  # 上游结尾斜杠与 location 成对规范化，使 Nginx 去掉门户前缀后再转发，并把原前缀传给子系统。
-  cat <<EOF
-
-# redirect code=${code}
-location = ${trimmed_prefix} {
-    return 308 ${trimmed_prefix}/;
-}
-
-# code=${code}
-location ${trimmed_prefix}/ {
-    proxy_pass ${trimmed_upstream}/;
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-Prefix ${trimmed_prefix};
-}
-EOF
-}
-
-parse_entry() {
-  # 解析 include 文件中由本脚本写入的 entry（用注释行 # code=xxx 标识）。
-  # 输出 "code<TAB>prefix<TAB>upstream"。只依赖 grep / sed / awk 基础功能。
-  awk '
-    function trim(s) { sub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
-    /^# code=/ {
-      current_code = substr($0, length("# code=") + 1)
-      in_block = 1
-      prefix = ""
-      upstream = ""
-      next
-    }
-    in_block {
-      if ($0 ~ /^[[:space:]]*location[[:space:]]+/) {
-        # location 后面第一个非空白 token 就是前缀；忽略尾部 { 和空白。
-        line = $0
-        sub(/^[[:space:]]*location[[:space:]]+/, "", line)
-        sub(/[[:space:]]*\{.*$/, "", line)
-        prefix = trim(line)
-      } else if ($0 ~ /proxy_pass[[:space:]]+/) {
-        line = $0
-        sub(/^[[:space:]]*proxy_pass[[:space:]]+/, "", line)
-        sub(/;[[:space:]]*$/, "", line)
-        upstream = trim(line)
-      } else if ($0 ~ /^[[:space:]]*\}[[:space:]]*$/) {
-        if (current_code != "" && prefix != "" && upstream != "") {
-          printf "%s\t%s\t%s\n", current_code, prefix, upstream
-        }
-        current_code = ""
-        in_block = 0
-      }
-    }
-  ' "$1"
-}
-
-write_combined() {
-  local file="$1"
-  local mode="$2"  # "rewrite" | "append"
-  shift 2
-  local tmp
+# 把渲染器输出写入 include 文件：先落到 0600 临时文件，再 cat 覆盖。
+# 该文件通常以单文件方式 bind mount 到 Nginx 容器，不能用 mv 替换 inode，
+# 否则运行中的容器仍会读取旧文件；外层互斥锁保证覆盖期间没有另一写者。
+# 返回 0 表示已写入，RENDER_NO_WRITE 表示渲染器判定无需写入，其余为渲染器错误码。
+render_into_include() {
+  local tmp rc
   tmp="$(mktemp)"
-  if [[ "$mode" == "rewrite" ]]; then
-    cat > "$tmp" <<'HEADER'
-# DO NOT EDIT: managed by scripts/portal-gateway.sh.
-# 任何手动修改会在下一次 add/remove/sync 时被覆盖。
-HEADER
+  if run_renderer "$@" >"$tmp"; then
+    mkdir -p -- "$(dirname -- "$NGINX_INCLUDE")"
+    if [[ ! -f "$NGINX_INCLUDE" ]]; then
+      install -m 0644 /dev/null "$NGINX_INCLUDE"
+    fi
+    if cat -- "$tmp" >"$NGINX_INCLUDE"; then
+      chmod 0644 "$NGINX_INCLUDE"
+      rc=0
+    else
+      rc=$?
+    fi
   else
-    cp -- "$file" "$tmp"
+    rc=$?
   fi
-  local entry entry_code entry_prefix entry_upstream
-  for entry in "$@"; do
-    IFS=$'\t' read -r entry_code entry_prefix entry_upstream <<<"$entry"
-    render_location "$entry_code" "$entry_prefix" "$entry_upstream" >> "$tmp"
-  done
-  # 该文件通常以单文件方式 bind mount 到 Nginx 容器。不能用 mv 替换 inode，
-  # 否则运行中的容器仍会读取旧文件；外层互斥锁保证覆盖期间没有另一写者，reload 前再做语法校验。
-  cat -- "$tmp" > "$file"
   rm -f -- "$tmp"
-  chmod 0644 "$file"
+  return "$rc"
 }
 
 do_add() {
-  local code="$1" path_prefix="$2" upstream_url="$3"
-  validate_code "$code"
-  validate_path_prefix "$path_prefix"
-  validate_upstream_url "$upstream_url"
-
-  if is_integrated_frontend_code "$code"; then
-    # 已编译进统一前端的模块只能保留 API 专用路由；整站代理会遮蔽 SPA 静态资源和前端路由。
-    do_remove "$code"
-    log "INFO" "${code} 已内置于统一前端，跳过整站反向代理登记"
+  local code="$1" path_prefix="$2" upstream_url="$3" rc=0
+  render_into_include add "$code" "$path_prefix" "$upstream_url" || rc=$?
+  if (( rc == RENDER_NO_WRITE )); then
+    # 内置统一前端模块：渲染器已清理历史整站代理并记录 INFO，按既有语义成功返回。
     return 0
   fi
-
-  ensure_include_file "$NGINX_INCLUDE"
-
-  local entries=()
-  if [[ -s "$NGINX_INCLUDE" ]]; then
-    while IFS=$'\t' read -r existing_code existing_prefix existing_upstream; do
-      if [[ -n "$existing_code" && "$existing_code" != "$code" ]]; then
-        # 同一路径只能有一个 ACTIVE 上游，避免 Nginx 匹配顺序把请求送往错误子系统。
-        if [[ "$(trim_trailing_slash "$existing_prefix")" == "$(trim_trailing_slash "$path_prefix")" ]]; then
-          log "ERROR" "path_prefix 已被子系 ${existing_code} 占用：$path_prefix"
-          exit 2
-        fi
-        entries+=("${existing_code}"$'\t'"${existing_prefix}"$'\t'"${existing_upstream}")
-      fi
-    done < <(parse_entry "$NGINX_INCLUDE")
+  if (( rc != 0 )); then
+    return "$rc"
   fi
-
-  entries+=("${code}"$'\t'"${path_prefix}"$'\t'"${upstream_url}")
-  write_combined "$NGINX_INCLUDE" rewrite "${entries[@]}"
   log "INFO" "已注册子系 ${code} -> ${path_prefix} -> ${upstream_url}"
 }
 
 do_remove() {
-  local code="$1"
-  validate_code "$code"
-
-  if [[ ! -f "$NGINX_INCLUDE" ]]; then
-    log "INFO" "include 文件不存在，无需清理"
-    return
+  local code="$1" rc=0
+  render_into_include remove "$code" || rc=$?
+  if (( rc == RENDER_NO_WRITE )); then
+    # include 不存在或目标条目不存在：渲染器已记录幂等 INFO，不改动文件。
+    return 0
   fi
-
-  local entries=()
-  local found=false
-  while IFS=$'\t' read -r existing_code existing_prefix existing_upstream; do
-    if [[ -n "$existing_code" && "$existing_code" != "$code" ]]; then
-      entries+=("${existing_code}"$'\t'"${existing_prefix}"$'\t'"${existing_upstream}")
-    elif [[ "$existing_code" == "$code" ]]; then
-      found=true
-    fi
-  done < <(parse_entry "$NGINX_INCLUDE")
-
-  if [[ "$found" != "true" ]]; then
-    log "INFO" "子系 ${code} 不存在，跳过"
-    return
-  fi
-  if (( ${#entries[@]} > 0 )); then
-    write_combined "$NGINX_INCLUDE" rewrite "${entries[@]}"
-  else
-    # macOS 自带 Bash 3.2 在 set -u 下展开空数组会报 unbound variable。
-    write_combined "$NGINX_INCLUDE" rewrite
+  if (( rc != 0 )); then
+    return "$rc"
   fi
   log "INFO" "已移除子系 ${code}"
 }
 
 do_list() {
-  if [[ ! -f "$NGINX_INCLUDE" ]]; then
-    log "INFO" "include 文件不存在"
-    return
+  local rc=0
+  run_renderer list || rc=$?
+  if (( rc == RENDER_NO_WRITE )); then
+    return 0
   fi
-  printf '%-32s %-40s %s\n' "code" "path_prefix" "upstream_url"
-  parse_entry "$NGINX_INCLUDE" | while IFS=$'\t' read -r code prefix upstream; do
-    printf '%-32s %-40s %s\n' "$code" "$prefix" "$upstream"
-  done
+  return "$rc"
+}
+
+do_sync() {
+  local rc=0
+  render_into_include sync || rc=$?
+  if (( rc != 0 )); then
+    return "$rc"
+  fi
+  log "INFO" "sync 完成，请执行 reload 让 nginx 生效"
 }
 
 resolve_compose_file() {
@@ -426,131 +267,6 @@ do_reload() {
   docker compose -f "$compose_file" exec -T frontend nginx -t
   log "INFO" "触发 nginx reload: docker compose -f ${compose_file} exec -T frontend nginx -s reload"
   docker compose -f "$compose_file" exec -T frontend nginx -s reload
-}
-
-# sync 子命令：从平台管理后台拉取所有 ACTIVE 的 application/environment，
-# 全量重写 include 文件。当前管理接口默认使用会话 Cookie，而此实现发送 Bearer Token；
-# 只有部署受控认证适配层并授予只读权限后才能使用。默认部署请使用 add + reload。
-do_sync() {
-  require_arg "$API_TOKEN" "sync 需要 PORTAL_GATEWAY_API_TOKEN"
-  validate_page_limit
-  ensure_include_file "$NGINX_INCLUDE"
-
-  # 安全（SEC-5）：Bearer Token 不进入 curl 的 argv（ps 可见）。
-  # 写入 0600 临时 curl 配置文件，以 --config 传入，语义等同 -H "Authorization: ..."。
-  AUTH_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/portal-gateway-auth.XXXXXX")"
-  trap 'rm -f -- "${AUTH_CONFIG_FILE:-}"' EXIT
-  chmod 0600 "$AUTH_CONFIG_FILE"
-  printf 'header = "Authorization: Bearer %s"\n' "$(escape_curl_config "$API_TOKEN")" >"$AUTH_CONFIG_FILE"
-
-  local sync_input
-  sync_input="$(mktemp "${NGINX_INCLUDE}.sync-input.XXXXXX")"
-  local page=1
-  while :; do
-    local payload
-    payload=$(curl -fsS -G \
-      --data-urlencode "page=${page}" \
-      --data-urlencode "page_size=${PAGE_LIMIT}" \
-      --data-urlencode "status=ACTIVE" \
-      --config "${AUTH_CONFIG_FILE}" \
-      "${API_BASE_URL}/api/v1/applications") || {
-      rm -f "$sync_input"
-      log "ERROR" "拉取 application 列表失败（page=${page}）"
-      return 1
-    }
-    if ! printf '%s' "$payload" | jq -e '.data.items | arrays' >/dev/null; then
-      rm -f "$sync_input"
-      log "ERROR" "application 列表响应格式无效（page=${page}）"
-      return 1
-    fi
-
-    local count
-    count=$(printf '%s' "$payload" | jq -r '.data.items | length')
-    if [[ "$count" -eq 0 ]]; then
-      break
-    fi
-
-    while IFS=$'\t' read -r application_id application_code; do
-      [[ -z "$application_id" || -z "$application_code" ]] && continue
-      if is_integrated_frontend_code "$application_code"; then
-        log "INFO" "跳过统一前端内置模块的整站反代：${application_code}"
-        continue
-      fi
-      local environment_page=1
-      while :; do
-        local env_payload
-        env_payload=$(curl -fsS -G \
-          --data-urlencode "page=${environment_page}" \
-          --data-urlencode "page_size=${PAGE_LIMIT}" \
-          --data-urlencode "status=ACTIVE" \
-          --config "${AUTH_CONFIG_FILE}" \
-          "${API_BASE_URL}/api/v1/applications/${application_id}/environments") || {
-          rm -f "$sync_input"
-          log "ERROR" "拉取 environment 列表失败（application=${application_id}, page=${environment_page}）"
-          return 1
-        }
-        if ! printf '%s' "$env_payload" | jq -e '.data.items | arrays' >/dev/null; then
-          rm -f "$sync_input"
-          log "ERROR" "environment 列表响应格式无效（application=${application_id}, page=${environment_page}）"
-          return 1
-        fi
-
-        while IFS=$'\t' read -r environment_code prefix upstream; do
-          [[ -z "$environment_code" || -z "$prefix" || -z "$upstream" ]] && continue
-          local entry_code="${application_code}-${environment_code}"
-          validate_code "$entry_code"
-          validate_path_prefix "$prefix"
-          validate_upstream_url "$upstream"
-          printf '%s\t%s\t%s\n' "$entry_code" "$prefix" "$upstream" >> "$sync_input"
-        done < <(printf '%s' "$env_payload" | jq -r '
-          .data.items[]
-          | select(.upstream_url != null and .upstream_url != "" and .path_prefix != null and .path_prefix != "")
-          | [.environment, .path_prefix, .upstream_url]
-          | @tsv
-        ')
-
-        local environment_total
-        environment_total=$(printf '%s' "$env_payload" | jq -r '.data.total // 0')
-        if (( environment_page * PAGE_LIMIT >= environment_total )); then
-          break
-        fi
-        environment_page=$((environment_page + 1))
-      done
-    done < <(printf '%s' "$payload" | jq -r '.data.items[] | [.application_id, .code] | @tsv')
-
-    local total
-    total=$(printf '%s' "$payload" | jq -r '.data.total // 0')
-    if (( page * PAGE_LIMIT >= total )); then
-      break
-    fi
-    page=$((page + 1))
-  done
-
-  local duplicate_prefix
-  # 全量写入前先在规范化路径上查重，发现冲突时保留旧 include，不产生部分更新。
-  duplicate_prefix=$(cut -f2 "$sync_input" | sed 's:/*$::' | sort | uniq -d)
-  if [[ -n "$duplicate_prefix" ]]; then
-    rm -f "$sync_input"
-    log "ERROR" "多个 ACTIVE environment 使用了同一 path_prefix：$duplicate_prefix"
-    return 1
-  fi
-
-  local rendered
-  rendered="$(mktemp "${NGINX_INCLUDE}.rendered.XXXXXX")"
-  cat > "$rendered" <<'HEADER'
-# DO NOT EDIT: managed by scripts/portal-gateway.sh sync.
-# 任何手动修改会在下一次 add/remove/sync 时被覆盖。
-HEADER
-  while IFS=$'\t' read -r code prefix upstream; do
-    [[ -z "$code" || -z "$prefix" || -z "$upstream" ]] && continue
-    render_location "$code" "$prefix" "$upstream" >> "$rendered"
-  done < <(sort -t $'\t' -k1,1 "$sync_input")
-
-  # 保留单文件 bind mount 的 inode，确保运行中的 Nginx 容器看到新内容。
-  cat -- "$rendered" > "$NGINX_INCLUDE"
-  rm -f -- "$rendered" "$sync_input"
-  chmod 0644 "$NGINX_INCLUDE"
-  log "INFO" "sync 完成，请执行 reload 让 nginx 生效"
 }
 
 main() {

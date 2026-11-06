@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
+	authzdomain "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -41,6 +44,10 @@ type PermissionInput struct {
 	ResourceCode string `json:"resource_code"`
 	ResourceName string `json:"resource_name,omitempty"`
 	RiskLevel    string `json:"risk_level,omitempty"`
+	// GrantPolicy 是权限的授予策略：空串（未声明）或 DEFAULT 表示通用规则，
+	// SUPER_ADMIN_ONLY 表示该权限所属角色只能由租户级平台超级管理员授予。
+	// 字段顺序参与 canonical 摘要，必须与子系统发布方逐字节一致。
+	GrantPolicy string `json:"grant_policy,omitempty"`
 }
 
 // CatalogRoleInput 是目录提交中的角色声明项；permissions 必须引用本次目录
@@ -87,17 +94,20 @@ type CatalogPermissionView struct {
 	Action       string `json:"action"`
 	ResourceCode string `json:"resource_code"`
 	RiskLevel    string `json:"risk_level"`
+	GrantPolicy  string `json:"grant_policy,omitempty"`
 	Status       string `json:"status"`
 }
 
 // CatalogRoleView 是目录视图中单个角色的展示项；Permissions 为启用状态且
-// effect=ALLOW 的权限编码列表。
+// effect=ALLOW 的权限编码列表。Assignable 表示当前操作者能否把该角色授予他人：
+// 角色含 SUPER_ADMIN_ONLY 权限时只有租户级平台超级管理员可分配。
 type CatalogRoleView struct {
 	Code        string   `json:"code"`
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
 	Status      string   `json:"status"`
 	Permissions []string `json:"permissions"`
+	Assignable  bool     `json:"assignable"`
 }
 
 type catalogMetadataRow struct {
@@ -124,6 +134,7 @@ type catalogPermissionRow struct {
 	Action       string `gorm:"column:action"`
 	ResourceCode string `gorm:"column:resource_code"`
 	RiskLevel    string `gorm:"column:risk_level"`
+	GrantPolicy  string `gorm:"column:grant_policy"`
 	Status       string `gorm:"column:status"`
 }
 
@@ -469,6 +480,13 @@ func normalizeCatalog(input CatalogInput) (CatalogInput, string, error) {
 		if item.Code == "" || item.Name == "" || item.Action == "" || item.ResourceCode == "" {
 			return CatalogInput{}, "", validation("permission code, name, action and resource_code are required")
 		}
+		// 授予策略参与 canonical 摘要，因此只做大小写/空白归一：未声明（空串）保持
+		// 空串，不在这里回落 DEFAULT；回落只发生在入库时，否则"未声明"和"显式默认"
+		// 会得到同一摘要，子系统无法用摘要区分真正的目录内容。
+		item.GrantPolicy = authzdomain.NormalizeGrantPolicy(item.GrantPolicy)
+		if !authzdomain.IsSupportedGrantPolicy(item.GrantPolicy) {
+			return CatalogInput{}, "", validation("grant_policy must be DEFAULT or SUPER_ADMIN_ONLY")
+		}
 		if _, exists := permissions[item.Code]; exists {
 			return CatalogInput{}, "", validation("duplicate permission code: " + item.Code)
 		}
@@ -589,7 +607,7 @@ func (s *Service) upsertCatalogPermission(tx *gorm.DB, tenantID, appID, operator
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		err = catalogPermissionByResourceAction(tx, tenantID, appID, resourceID, item.Action).Take(&row).Error
 	}
-	values := map[string]any{"tenant_id": tenantID, "application_id": appID, "resource_id": resourceID, "code": item.Code, "action": item.Action, "name": item.Name, "risk_level": item.RiskLevel, "status": activeStatus, "version": 1, "updated_at": now, "updated_by": operatorID}
+	values := map[string]any{"tenant_id": tenantID, "application_id": appID, "resource_id": resourceID, "code": item.Code, "action": item.Action, "name": item.Name, "risk_level": item.RiskLevel, "grant_policy": catalogGrantPolicy(item.GrantPolicy), "status": activeStatus, "version": 1, "updated_at": now, "updated_by": operatorID}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		id, e := s.ids.New(now)
 		if e != nil {
@@ -609,6 +627,33 @@ func (s *Service) upsertCatalogPermission(tx *gorm.DB, tenantID, appID, operator
 		return "", err
 	}
 	return row.ID, nil
+}
+
+// catalogGrantPolicy 把（已归一的）目录授予策略转换成入库取值：未声明按 DEFAULT
+// 存储，使存量与内置权限的行语义保持不变。校验已由 normalizeCatalog 完成。
+func catalogGrantPolicy(value string) string {
+	if normalized := authzdomain.NormalizeGrantPolicy(value); normalized != "" {
+		return normalized
+	}
+	return authzdomain.GrantPolicyDefault
+}
+
+// catalogRoleAssignable 判定目录视图中的角色能否由当前操作者授予他人。角色含
+// SUPER_ADMIN_ONLY 权限时只有租户级平台超级管理员可分配；其余角色保持可分配，
+// 与引入授予策略之前的响应一致。
+func catalogRoleAssignable(restricted, superAdmin bool) bool {
+	return !restricted || superAdmin
+}
+
+// catalogSuperAdmin 只使用认证中间件装入的控制台主体判定租户级超级管理员。
+// 应用 Bearer（authorization.catalog.sync）路径没有控制台主体，按非超管处理：
+// 它本来就不能把角色授予他人，该判定只影响只读视图里的 assignable 标记。
+func catalogSuperAdmin(ctx context.Context, tenantID string) bool {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || strings.TrimSpace(principal.User.ID) == "" {
+		return false
+	}
+	return delegation.IsPlatformSuperAdmin(ctx, tenantID, principal.User.ID)
 }
 
 func catalogPermissionByCode(tx *gorm.DB, tenantID, appID, code string) *gorm.DB {
@@ -661,24 +706,38 @@ func (s *Service) catalogView(ctx context.Context, app applicationRow, metadata 
 		return CatalogView{}, err
 	}
 	var permissions []catalogPermissionRow
-	if err := s.db.WithContext(ctx).Table("authz_permission AS p").Select("p.id, p.code, p.name, p.action, r.code AS resource_code, p.risk_level, p.status").Joins("JOIN authz_resource AS r ON r.id = p.resource_id").Where("p.tenant_id = ? AND p.application_id = ?", app.TenantID, app.ID).Order("p.code ASC").Find(&permissions).Error; err != nil {
+	if err := s.db.WithContext(ctx).Table("authz_permission AS p").Select("p.id, p.code, p.name, p.action, r.code AS resource_code, p.risk_level, p.grant_policy, p.status").Joins("JOIN authz_resource AS r ON r.id = p.resource_id").Where("p.tenant_id = ? AND p.application_id = ?", app.TenantID, app.ID).Order("p.code ASC").Find(&permissions).Error; err != nil {
 		return CatalogView{}, err
 	}
 	var roles []catalogRoleRow
 	if err := s.db.WithContext(ctx).Table("authz_role").Where("tenant_id = ? AND application_id = ? AND role_type <> ?", app.TenantID, app.ID, "COMPATIBILITY").Order("code ASC").Find(&roles).Error; err != nil {
 		return CatalogView{}, err
 	}
+	superAdmin := catalogSuperAdmin(ctx, app.TenantID)
 	permissionViews := make([]CatalogPermissionView, 0, len(permissions))
 	for _, p := range permissions {
-		permissionViews = append(permissionViews, CatalogPermissionView{Code: p.Code, Name: p.Name, Action: p.Action, ResourceCode: p.ResourceCode, RiskLevel: p.RiskLevel, Status: p.Status})
+		permissionViews = append(permissionViews, CatalogPermissionView{Code: p.Code, Name: p.Name, Action: p.Action, ResourceCode: p.ResourceCode, RiskLevel: p.RiskLevel, GrantPolicy: p.GrantPolicy, Status: p.Status})
 	}
 	roleViews := make([]CatalogRoleView, 0, len(roles))
 	for _, role := range roles {
-		var perms []string
-		if err := s.db.WithContext(ctx).Table("authz_role_permission AS rp").Select("p.code").Joins("JOIN authz_permission AS p ON p.id = rp.permission_id AND p.status = ?", activeStatus).Where("rp.role_id = ? AND rp.effect = ?", role.ID, "ALLOW").Find(&perms).Error; err != nil {
+		// 同时取权限码与授予策略：判断角色是否含受限权限不需要额外查询，
+		// 也不会因为分两次读取而错过同一快照内的授予策略变化。
+		var rolePermissions []struct {
+			Code        string `gorm:"column:code"`
+			GrantPolicy string `gorm:"column:grant_policy"`
+		}
+		if err := s.db.WithContext(ctx).Table("authz_role_permission AS rp").Select("p.code, p.grant_policy").Joins("JOIN authz_permission AS p ON p.id = rp.permission_id AND p.status = ?", activeStatus).Where("rp.role_id = ? AND rp.effect = ?", role.ID, "ALLOW").Find(&rolePermissions).Error; err != nil {
 			return CatalogView{}, err
 		}
-		roleViews = append(roleViews, CatalogRoleView{Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, Permissions: sortedUnique(perms)})
+		codes := make([]string, 0, len(rolePermissions))
+		restricted := false
+		for _, item := range rolePermissions {
+			codes = append(codes, item.Code)
+			if item.GrantPolicy == authzdomain.GrantPolicySuperAdminOnly {
+				restricted = true
+			}
+		}
+		roleViews = append(roleViews, CatalogRoleView{Code: role.Code, Name: role.Name, Description: role.Description, Status: role.Status, Permissions: sortedUnique(codes), Assignable: catalogRoleAssignable(restricted, superAdmin)})
 	}
 	compatibleVersions := catalogCompatibilityVersions(metadata)
 	return CatalogView{ApplicationID: app.ID, ApplicationCode: app.Code, CatalogVersion: metadata.CatalogVersion, Checksum: metadata.CatalogHash, ClaimsRoleConfigHash: metadata.ClaimsRoleConfigHash, CompatibleVersions: compatibleVersions, SourceType: metadata.SourceType, SourceIdentifier: metadata.SourceIdentifier, SyncStatus: metadata.SyncStatus, LastSyncedAt: metadata.LastSyncedAt, LastSyncedBy: metadata.LastSyncedBy, ErrorMessage: metadata.ErrorMessage, Policy: policy, Permissions: permissionViews, Roles: roleViews}, nil

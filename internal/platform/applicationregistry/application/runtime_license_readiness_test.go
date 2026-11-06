@@ -63,7 +63,7 @@ func TestRuntimeConfirmationRequiresCompleteNaturalCurrentAcknowledgements(t *te
 }
 func TestWaitRuntimeConfirmationReadsWithoutChangingEnforcement(t *testing.T) {
 	status, expected := confirmationFixture()
-	registrar := &runtimeLifecycleRegistrarStub{status: status}
+	registrar := &statusRegistrarStub{status: status}
 	s := &RuntimeLicenseEnrollmentService{registrar: registrar}
 	list := []RuntimeLicenseCredential{}
 	for _, c := range expected {
@@ -72,7 +72,7 @@ func TestWaitRuntimeConfirmationReadsWithoutChangingEnforcement(t *testing.T) {
 	if err := s.WaitForRuntimeConfirmation(context.Background(), "customer_and_opportunity", "dev", list); err != nil {
 		t.Fatal(err)
 	}
-	if len(registrar.requests) != 0 || len(registrar.specs) != 0 || registrar.status.State != licenseruntime.Pending {
+	if len(registrar.specs) != 0 || registrar.status.State != licenseruntime.Pending {
 		t.Fatal("readiness changed enforcement or membership")
 	}
 	registrar.status.Members[0].AckRevision = 0

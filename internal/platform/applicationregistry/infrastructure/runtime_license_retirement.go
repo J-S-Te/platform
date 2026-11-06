@@ -23,28 +23,32 @@ func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx contex
 		return nil
 	}
 	// 纯 V2 且控制面核对持久成员集合没有移除项时，无旧进程退役需求。
-	// 未核验、V1、混合或成员减少仍必须执行原有受审退役链，不能仅凭协议跳过。
+	// 退役集合由「内置目录全集 − 本次凭据覆盖集合」推导，不再读取按文件审批的 V1 清单。
+	retained := map[string]bool{}
 	noRetirement := true
 	for _, credential := range input.RuntimeLicenseCredentials {
-		if credential.RegistrationProtocol != catalog.RegistrationProtocolV2 || !credential.RetirementNotRequired {
+		if credential.RegistrationProtocol != catalog.RegistrationProtocolV2 {
+			return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: legacy V1 runtime credential is no longer supported")
+		}
+		retained[credential.Approval.ServiceID] = true
+		if !credential.RetirementNotRequired {
 			noRetirement = false
 		}
 	}
 	if noRetirement {
 		return nil
 	}
-	path, err := productionRuntimeApprovalPath(target.config.DeployRoot, "runtime-license-"+target.config.Profile.Manifest.Application.Code+"-"+target.config.Profile.Manifest.Application.Environment+".json")
+	catalogSet, err := (BuiltinRuntimeComponentCatalog{}).RuntimeComponentSet(ctx, target.config.Profile.Manifest.Application.Code, target.config.Profile.Manifest.Application.Environment)
 	if err != nil {
-		return err
+		return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: runtime component catalog unavailable")
 	}
-	release, err := loadRuntimeLicenseReleaseDocument(path, target.config.Profile)
-	if err != nil {
-		return err
+	retire := []string{}
+	for _, component := range catalogSet.Components {
+		if !retained[component.ServiceID] {
+			retire = append(retire, component.ServiceID)
+		}
 	}
-	if err = target.verifyRuntimeLicenseRelease(input, release); err != nil {
-		return err
-	}
-	if len(release.RetireServiceIDs) == 0 {
+	if len(retire) == 0 {
 		return nil
 	}
 	outputRunner, ok := target.runner.(interface {
@@ -68,7 +72,7 @@ func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx contex
 	}
 	ids := []string{}
 	seen := map[string]bool{}
-	for _, service := range release.RetireServiceIDs {
+	for _, service := range retire {
 		prefix := runtimeLicenseRetirementPrefix(target.config.Profile.Manifest.Application.Code)
 		if prefix == "" || !strings.HasPrefix(service, prefix) || forbidden[service] {
 			return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: protected or selected component")
@@ -108,9 +112,9 @@ func (target *productionComposeTarget) retireRuntimeLicenseContainers(ctx contex
 	}
 	// 在第一个破坏性进程操作之前重新校验 Agent 固有的已批准快照；
 	// 不允许按前缀、服务名或未检视的 ID 停止进程。
-	current, err := loadRuntimeLicenseReleaseDocument(path, target.config.Profile)
-	if err != nil || !reflect.DeepEqual(release, current) {
-		return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: release changed during inspection")
+	recheck, err := (BuiltinRuntimeComponentCatalog{}).RuntimeComponentSet(ctx, target.config.Profile.Manifest.Application.Code, target.config.Profile.Manifest.Application.Environment)
+	if err != nil || !reflect.DeepEqual(catalogSet, recheck) {
+		return provisioningError("LICENSE_RUNTIME_RETIREMENT_FAILED: catalog changed during inspection")
 	}
 	for _, id := range ids {
 		if err := target.runner.Run(ctx, target.config.DeployRoot, nil, target.config.DockerBinary, "container", "stop", "--time", "40", id); err != nil {

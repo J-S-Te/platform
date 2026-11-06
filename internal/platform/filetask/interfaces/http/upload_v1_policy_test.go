@@ -212,14 +212,19 @@ func TestV1UploadRejectsEmptyPurpose(t *testing.T) {
 	}
 }
 
-// 允许矩阵：策略表中每个用途都必须能按其白名单媒体上传，并把命名空间、用途、
-// 策略版本与保留类原样交给服务层（逐条目遍历，登记表增长时自动纳入）。
+// TestV1UploadAppliesEveryPurposePolicy 锁定旧用途上传策略及新本地用途的v1拒绝。
+// 参数：t为测试上下文，遍历全部登记用途。
+// 返回值：无；旧用途策略或本地用途隔离退化时失败。
 func TestV1UploadAppliesEveryPurposePolicy(t *testing.T) {
 	if len(uploadPolicies) < 16 {
 		t.Fatalf("policy table shrank to %d entries; the v1 matrix expects at least the 16 registered purposes", len(uploadPolicies))
 	}
 	for key, item := range uploadPolicies {
 		t.Run(key, func(t *testing.T) {
+			if key == portalLocalReportPurpose {
+				assertPortalLocalV1Rejected(t, v1AllowedMedia(item))
+				return
+			}
 			accountCode, known := v1PurposeAccountCodes[item.Namespace]
 			if !known {
 				t.Fatalf("policy %q uses namespace %q without a mapped application code", key, item.Namespace)
@@ -244,10 +249,16 @@ func TestV1UploadAppliesEveryPurposePolicy(t *testing.T) {
 	}
 }
 
-// 拒绝矩阵：同一批登记用途，媒体不在白名单时一律 422，而不是只对两个合同用途生效。
+// TestV1UploadRejectsMediaOutsideEveryPurposePolicy 锁定每个旧用途的媒体拒绝和新用途禁入。
+// 参数：t为测试上下文，遍历全部登记用途。
+// 返回值：无；非法媒体到达文件服务或新用途可降级时失败。
 func TestV1UploadRejectsMediaOutsideEveryPurposePolicy(t *testing.T) {
 	for key, item := range uploadPolicies {
 		t.Run(key, func(t *testing.T) {
+			if key == portalLocalReportPurpose {
+				assertPortalLocalV1Rejected(t, v1DisallowedMedia(item))
+				return
+			}
 			accountCode, known := v1PurposeAccountCodes[item.Namespace]
 			if !known {
 				t.Fatalf("policy %q uses namespace %q without a mapped application code", key, item.Namespace)
@@ -266,10 +277,15 @@ func TestV1UploadRejectsMediaOutsideEveryPurposePolicy(t *testing.T) {
 	}
 }
 
-// 大小上限按用途生效：对每个不同的 MaxBytes 取上限 +1 字节，一律 422。
+// TestV1UploadRejectsOversizeForEveryDistinctLimit 锁定每种旧v1文件上限。
+// 参数：t为测试上下文；本地报告上限由专用v2矩阵验证。
+// 返回值：无；任何既有大小限制放宽时失败。
 func TestV1UploadRejectsOversizeForEveryDistinctLimit(t *testing.T) {
 	limits := map[uint64]string{}
 	for key, item := range uploadPolicies {
+		if key == portalLocalReportPurpose {
+			continue
+		}
 		limits[item.MaxBytes] = key
 	}
 	for maxBytes, key := range limits {
@@ -305,8 +321,9 @@ func TestV1UploadRejectsCrossNamespacePurpose(t *testing.T) {
 	}
 }
 
-// v1/v2 策略一致性：同一用途键在 v1 上传与 v2 会话里必须落到相同的命名空间、
-// 用途与策略版本。v2 侧通过实际的 CreateSession 落库语句断言，避免只比较常量。
+// TestV1AndV2UploadsResolveSamePurposePolicy 核对共享用途映射及本地报告v2专有规则。
+// 参数：t为测试上下文，通过真实handler和落库SQL比较策略。
+// 返回值：无；旧映射变化、专有用途降级或v2不能落库时失败。
 func TestV1AndV2UploadsResolveSamePurposePolicy(t *testing.T) {
 	v2Handler, script := newActorProbeHandler(t)
 	for key, item := range uploadPolicies {
@@ -328,6 +345,15 @@ func TestV1AndV2UploadsResolveSamePurposePolicy(t *testing.T) {
 					t.Fatalf("v2 session lost policy value %q: args = %s", expected, stored)
 				}
 			}
+			if key == portalLocalReportPurpose {
+				assertPortalLocalV1Rejected(t, v1AllowedMedia(item))
+				for _, expected := range []string{"PORTAL_REPORT_REQUEST", "12", "REPORT"} {
+					if !strings.Contains(stored, expected) {
+						t.Fatalf("local report v2 binding missing %q: %s", expected, stored)
+					}
+				}
+				return
+			}
 
 			files := &stubV1FileService{file: v1PolicyReadyFile()}
 			handler := newV1PolicyHandler(t, files)
@@ -343,15 +369,21 @@ func TestV1AndV2UploadsResolveSamePurposePolicy(t *testing.T) {
 	}
 }
 
-// v2PolicySessionRequest 构造该用途的最小合法 v2 上传会话请求。
+// v2PolicySessionRequest 构造该用途的最小合法v2会话声明。
+// 参数：t为测试上下文，accountCode为应用，purpose/item为登记策略。
+// 返回值：带可信主体的请求，本地报告独立使用机器及申请绑定。
 func v2PolicySessionRequest(t *testing.T, accountCode, purpose string, item uploadPolicy) *http.Request {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{
+	input := map[string]any{
 		"purpose": purpose, "original_name": "payload",
 		"media_type": v1AllowedMedia(item), "sha256": strings.Repeat("a", 64), "size_bytes": 1024,
 		"resource_type": "CONTRACT", "resource_id": "contract-1", "binding_type": "PRIMARY",
 		"idempotency_key": "idem-consistency-" + purpose,
-	})
+	}
+	if purpose == portalLocalReportPurpose {
+		input["resource_type"], input["resource_id"], input["binding_type"] = "PORTAL_REPORT_REQUEST", "12", "REPORT"
+	}
+	body, err := json.Marshal(input)
 	if err != nil {
 		t.Fatalf("marshal v2 session request: %v", err)
 	}
@@ -359,6 +391,9 @@ func v2PolicySessionRequest(t *testing.T, accountCode, purpose string, item uplo
 	request.Header.Set("Content-Type", "application/json")
 	principal := v1Principal()
 	principal.Account.Code = accountCode
+	if purpose == portalLocalReportPurpose {
+		principal.User = authctx.ReferenceName{}
+	}
 	return request.WithContext(authctx.WithPrincipal(request.Context(), principal))
 }
 

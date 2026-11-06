@@ -226,7 +226,7 @@ func TestProductionDataAnalysisProfileOmitsUnusedFileGatewayCredentials(t *testi
 
 func TestProductionCustomerCatalogHashMatchesIntegratedRuntime(t *testing.T) {
 	t.Parallel()
-	const embeddedCRMHash = "sha256:1c1d94091fdfd3f5665d04215b91089434a737b0f43e9f1a9901755af97f621a"
+	const embeddedCRMHash = "sha256:858b32508d50185dc3b1551683b3c64b98617cae7d3a8b6e1ed967cbd4fb7f93"
 	if integratedCustomerRoleConfigHash != embeddedCRMHash {
 		t.Fatalf("integrated CRM role hash = %s, want %s", integratedCustomerRoleConfigHash, embeddedCRMHash)
 	}

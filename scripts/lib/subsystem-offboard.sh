@@ -16,6 +16,8 @@ offboard 是深清理子系统的入口。默认会依次：
   --environment ENV             要撤销的环境，只允许 test、staging 或 prod
   --confirm CODE/ENV            必填，必须精确等于 <application-code>/<environment>
   --shallow                     退回旧版语义：只删 DB 记录（仅供紧急修复使用）
+  --skip-teardown               跳过第 1 步 teardown，只删 DB 记录；
+                                用于 teardown 已成功、DB 记录删除失败后的续跑
   --delete-application          在 environment 删除后顺带删除 application（需 environment 已是最后一个）
 
 安全边界：
@@ -23,6 +25,9 @@ offboard 是深清理子系统的入口。默认会依次：
   2. 不提供 --force。若环境仍有关联配置命名空间或审计回执，平台会拒绝删除。
   3. 默认深清理：停止容器 + 删除 .env.local + 删除门户网关入口 + 重新加载 nginx + 删除 DB 记录。
   4. 只适用于该环境永久下线；绝不能为了代码、镜像、功能模块或日常发布而撤销后重建。
+  5. teardown 成功但 DB 记录删除失败时，会出现「基础设施已拆、DB 记录仍在」的半完成态；
+     按错误提示用 --skip-teardown 续跑即可只补做 DB 删除，不会重复 teardown。
+     --skip-teardown 不构成确认绕过：仍要求 --confirm 精确匹配，并且仍需 -y/--yes 或交互确认。
 USAGE
 }
 
@@ -236,6 +241,9 @@ EOF_SUMMARY
   if [[ "$SHALLOW_OFFBOARD" == true ]]; then
     printf '  模式：shallow — 仅删除 DB 记录（环境派生的 LoginTarget 与 OAuth Client）\n' >&2
     printf '  容器 / .env.local / 门户网关：不会清理\n' >&2
+  elif [[ "${SKIP_TEARDOWN:-false}" == true ]]; then
+    printf '  模式：--skip-teardown（续跑）— 跳过 teardown，仅删除 DB 记录\n' >&2
+    printf '  容器 / .env.local / 门户网关：视为已清理，本次不会重复拆解\n' >&2
   else
     printf '  模式：deep（默认）— 停止容器 + 删除 .env.local + 移除门户网关入口 + 重新加载 nginx + 删除 DB 记录\n' >&2
   fi
@@ -273,6 +281,22 @@ print("  保留：Application（除非同时指定 --delete-application）、其
 PY
 }
 
+# offboard_print_db_delete_resume_hint 在「DB 记录删除」失败时给出可续跑命令。
+# 前置 teardown 成功后，基础设施（容器 / .env.local / 门户网关入口）已拆而 DB 记录仍在，
+# 直接重跑默认深清理会重复 teardown；--skip-teardown 只补做 DB 删除，因此是安全的续跑方式。
+# 该提示只输出命令，不放宽 --confirm 精确匹配与 -y/--yes 的确认门槛。
+offboard_print_db_delete_resume_hint() {
+  local resume_command="bash scripts/subsystem.sh offboard --application-code ${APPLICATION_CODE} --environment ${ENVIRONMENT} --confirm ${CONFIRMATION_CODE} --skip-teardown"
+  if [[ "${SKIP_TEARDOWN:-false}" == true ]]; then
+    log "ERROR" "当前状态：基础设施已拆（本次已跳过 teardown），DB 记录仍未清理（环境及派生的 LoginTarget / OAuth Client 配置）。"
+  else
+    log "ERROR" "当前状态：基础设施已拆，DB 记录仍未清理（环境及派生的 LoginTarget / OAuth Client 配置）。"
+  fi
+  log "ERROR" "补齐认证参数（--account 或 --cookie-file）后重跑以下命令，只补做 DB 删除且不会重复 teardown："
+  log "ERROR" "  ${resume_command} --account <平台管理员账号> -y"
+  log "ERROR" "该续跑命令仍要求 --confirm 精确等于 <application-code>/<environment>，并需要 -y/--yes 或交互确认。"
+}
+
 parse_offboard_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -305,6 +329,8 @@ parse_offboard_args() {
         CONFIRMATION_CODE="$2"; shift 2 ;;
       --shallow)
         SHALLOW_OFFBOARD=true; shift ;;
+      --skip-teardown)
+        SKIP_TEARDOWN=true; shift ;;
       --delete-application)
         DELETE_APPLICATION=true; shift ;;
       -h|--help)
@@ -380,7 +406,7 @@ cmd_offboard() {
     IFS= read -r environment_version
   } <<<"$environment_details"
 
-  if [[ "$SHALLOW_OFFBOARD" != true ]]; then
+  if [[ "$SHALLOW_OFFBOARD" != true && "${SKIP_TEARDOWN:-false}" != true ]]; then
     offboard_write_teardown_payload "$teardown_payload"
     log "INFO" "深清理 ${APPLICATION_CODE}/${ENVIRONMENT}：停止容器、删除 .env.local、移除门户网关入口、重新加载 nginx"
     status="$(http_post_json "/subsystem-teardown" "$teardown_payload" "$teardown_response" 300)" || {
@@ -398,10 +424,12 @@ cmd_offboard() {
   log "INFO" "开始删除 ${APPLICATION_CODE}/${ENVIRONMENT} 的 DB 记录（环境派生的 LoginTarget 与 OAuth Client 配置）"
   status="$(http_delete_json "/applications/${application_id}/environments/${environment_id}" "$delete_payload" "$delete_response")" || {
     log "ERROR" "无法连接环境删除接口：${API_BASE_URL}/applications/${application_id}/environments/${environment_id}"
+    offboard_print_db_delete_resume_hint
     exit 1
   }
   if [[ "$status" != "200" ]]; then
     print_api_error "$status" "$delete_response" "/applications/${application_id}/environments/${environment_id}"
+    offboard_print_db_delete_resume_hint
     exit 1
   fi
 

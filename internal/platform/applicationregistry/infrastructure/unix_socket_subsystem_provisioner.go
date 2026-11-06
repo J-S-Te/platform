@@ -56,13 +56,12 @@ type subsystemAccessApplyPayload struct {
 }
 
 type subsystemProvisioningReply struct {
-	RecoveryEvidence        *application.SubsystemAccessRecoveryEvidence  `json:"recovery_evidence,omitempty"`
-	DeploymentOutcome       *application.SubsystemAccessDeploymentOutcome `json:"deployment_outcome,omitempty"`
-	DeploymentCompleted     bool                                          `json:"deployment_completed,omitempty"`
-	ErrorCode               string                                        `json:"error_code,omitempty"`
-	RuntimeLicenseLifecycle *application.RuntimeLicenseReleaseApproval    `json:"runtime_license_lifecycle,omitempty"`
-	RuntimeLicenseApproval  []application.RuntimeLicenseApproval          `json:"runtime_license_approval,omitempty"`
-	Success                 bool                                          `json:"success"`
+	RecoveryEvidence       *application.SubsystemAccessRecoveryEvidence  `json:"recovery_evidence,omitempty"`
+	DeploymentOutcome      *application.SubsystemAccessDeploymentOutcome `json:"deployment_outcome,omitempty"`
+	DeploymentCompleted    bool                                          `json:"deployment_completed,omitempty"`
+	ErrorCode              string                                        `json:"error_code,omitempty"`
+	RuntimeLicenseApproval []application.RuntimeLicenseApproval          `json:"runtime_license_approval,omitempty"`
+	Success                bool                                          `json:"success"`
 	// Message 是单行短摘要，供平台 next_action 稳定匹配；可能包含换行的脱敏日志详情
 	// 单独放 Detail，避免被安全过滤整段吞掉。
 	Message      string                                         `json:"message,omitempty"`
@@ -149,8 +148,9 @@ func dialProvisioningSocket(ctx context.Context, socketPath string) (net.Conn, e
 	return nil, lastErr
 }
 
-// NewUnixSocketSubsystemProvisioner 构造 API 侧自动部署客户端；socket 路径和超时在此固定，
-// 浏览器输入不能改变特权通信端点。
+// NewUnixSocketSubsystemProvisioner 构造API侧客户端并固定特权socket，拒绝静态伪造动态模式。
+// 参数：enabled/socketPath/timeout为服务端配置，policies为静态部署白名单。
+// 返回值：客户端或错误，浏览器不能修改端点或声明结算可选依赖。
 func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout time.Duration, policies ...application.SubsystemProvisioningCapabilities) (*UnixSocketSubsystemProvisioner, error) {
 	socketPath = strings.TrimSpace(socketPath)
 	if timeout <= 0 {
@@ -164,6 +164,9 @@ func NewUnixSocketSubsystemProvisioner(enabled bool, socketPath string, timeout 
 		SupportedEnvironments: []string{"dev", "test", "staging", "prod"},
 	}
 	if len(policies) == 1 {
+		if len(policies[0].SettlementContractOptionalEnvironments) != 0 {
+			return nil, errors.New("Settlement runtime policy cannot be supplied as static capabilities")
+		}
 		capabilities = normalizeSubsystemProvisioningCapabilities(policies[0])
 		capabilities.Enabled = enabled
 	}
@@ -186,9 +189,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) Capabilities() application.Su
 	return capabilities
 }
 
-// AvailableCapabilities 向特权 Agent 询问当前非敏感的可用性投影。它与 Capabilities 有意分离：
-// 安全检查仍使用静态策略，而实时可用性跟随 prepare/remove 操作，且不把 .release.env 或其
-// 其他值暴露给 API 容器。
+// AvailableCapabilities 向固定特权Agent读取非敏感可用性及明确来源模式。
+// 参数：ctx控制socket往返，静态部署白名单仍独立约束安装动作。
+// 返回值：真实只读投影；坏模式、重复目标或失败响应均拒绝，不暴露运行凭据。
 func (provisioner *UnixSocketSubsystemProvisioner) AvailableCapabilities(ctx context.Context) (application.SubsystemProvisioningCapabilities, error) {
 	if !provisioner.enabled {
 		capabilities := provisioner.Capabilities()
@@ -232,6 +235,9 @@ func (provisioner *UnixSocketSubsystemProvisioner) AvailableCapabilities(ctx con
 	if !reply.Success || reply.Capabilities == nil {
 		return application.SubsystemProvisioningCapabilities{}, provisioningRejectionError(reply.Message, reply.Detail)
 	}
+	if err := application.ValidateRelatedServiceCapabilityProjection(*reply.Capabilities); err != nil {
+		return application.SubsystemProvisioningCapabilities{}, provisioningError("Settlement runtime capability projection is invalid")
+	}
 	capabilities := normalizeSubsystemProvisioningCapabilities(*reply.Capabilities)
 	capabilities.Enabled = reply.Capabilities.Enabled
 	return capabilities, nil
@@ -250,7 +256,11 @@ func watchProvisioningCancellation(ctx context.Context, connection net.Conn) <-c
 	return done
 }
 
+// normalizeSubsystemProvisioningCapabilities 规范静态目标并复制Agent只读来源投影。
+// 参数：capabilities为已校验的Agent响应或不带动态模式的静态白名单。
+// 返回值：独立副本，不通过去重或大小写修复掩盖非法动态声明。
 func normalizeSubsystemProvisioningCapabilities(capabilities application.SubsystemProvisioningCapabilities) application.SubsystemProvisioningCapabilities {
+	capabilities.SettlementContractOptionalEnvironments = append([]string(nil), capabilities.SettlementContractOptionalEnvironments...)
 	capabilities.Mode = strings.ToLower(strings.TrimSpace(capabilities.Mode))
 	if capabilities.Mode == "" {
 		capabilities.Mode = "local"
@@ -502,9 +512,6 @@ func (provisioner *UnixSocketSubsystemProvisioner) exchange(ctx context.Context,
 	if !reply.Success {
 		if reply.ErrorCode == application.AccessCredentialRetryRequired {
 			return serviceCredentialRetryError()
-		}
-		if known := runtimeApprovalReplyError(reply.ErrorCode); application.RuntimeLicenseApprovalErrorCode(known) == reply.ErrorCode {
-			return known
 		}
 		return provisioningRejectionError(reply.Message, reply.Detail)
 	}
@@ -759,32 +766,6 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		}
 		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, DeploymentCompleted: completed})
 		return
-	case "LICENSE_RUNTIME_LIFECYCLE_APPROVAL":
-		provider, ok := executor.(runtimeLicenseLifecycleProvider)
-		if !ok || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" || request.TenantID != "" {
-			err = provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: approved lifecycle action unavailable")
-			break
-		}
-		approval, approvalErr := provider.ApprovedRuntimeLicenseLifecycle(operationContext, request.Code, request.Environment)
-		if approvalErr != nil {
-			err = approvalErr
-			break
-		}
-		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RuntimeLicenseLifecycle: &approval})
-		return
-	case "LICENSE_RUNTIME_APPROVAL":
-		provider, ok := executor.(runtimeLicenseApprovalProvider)
-		if !ok || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" || request.TenantID != "" {
-			err = provisioningError("LICENSE_RUNTIME_APPROVAL_UNAVAILABLE: approved release action unavailable")
-			break
-		}
-		items, approvalErr := provider.ApprovedRuntimeLicenseComponents(operationContext, request.Code, request.Environment)
-		if approvalErr != nil {
-			err = approvalErr
-			break
-		}
-		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RuntimeLicenseApproval: items})
-		return
 	case "LICENSE_MIGRATION_INSTALLATION_EVIDENCE":
 		provider, ok := executor.(migrationInstallationEvidenceProvider)
 		if !ok || request.Code != "" || request.Environment != "" || request.TenantID != "" || request.Input != nil || request.Preflight != nil || request.Access != nil || request.Discovery != nil || request.ManifestChecksum != "" {
@@ -952,7 +933,7 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		if errors.Is(err, application.ErrServiceCredentialRetryRequired) {
 			reply.ErrorCode = application.AccessCredentialRetryRequired
 		}
-		if application.RuntimeLicenseApprovalErrorCode(err) != "" || request.Action == "LICENSE_RUNTIME_APPROVAL" || request.Action == "LICENSE_RUNTIME_LIFECYCLE_APPROVAL" {
+		if application.RuntimeLicenseApprovalErrorCode(err) != "" {
 			err = application.RuntimeLicenseApprovalFailure(err)
 			reply.ErrorCode = application.RuntimeLicenseApprovalErrorCode(err)
 		}

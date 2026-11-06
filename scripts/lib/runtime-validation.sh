@@ -67,6 +67,14 @@ portal_configured() {
 		[[ -n "$(env_value "$portal_env_file" PORTAL_ROLE_CONFIG_HASH)" ]]
 }
 
+contract_configured() {
+	# 合同管理改为 discovery 接入后，只有四项接入产物齐全才允许本地启动。
+	# 用 runtime_value_configured 让 PENDING_ONBOARDING / REPLACE_WITH_* 等占位符视为未接入。
+	runtime_value_configured "$(env_value "$contract_env_file" OIDC_CLIENT_ID)" &&
+		runtime_value_configured "$(env_value "$contract_env_file" OIDC_CLIENT_SECRET)" &&
+		runtime_value_configured "$(env_value "$contract_env_file" OIDC_TENANT_ID)"
+}
+
 ensure_catalog_publisher_credentials_consistent() {
     local runtime_id runtime_secret platform_id platform_secret
     runtime_id="$(env_value "$contract_env_file" PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID)"
@@ -167,6 +175,13 @@ validate_keycloak_runtime() {
     expected_issuer="$(keycloak_realm_issuer)"
     expected_backchannel="$(keycloak_internal_origin)"
     expected_client_id="${application_code}-${environment_code}-web"
+    # 客户自助门户在平台中央 Broker 登录模式下使用平台托管的中转 Client
+    # （bootstrap/customer_portal_broker_reconciler 签发并登记为应用 Client）。
+    # 与 validate_local_runtime_target 的既有豁免保持同一口径，不能因为改用 Broker
+    # Client 就把合法的本地接入判成跨环境错配。
+    if [[ "$application_code" == customer_portal && "$client_id" == keycloak-customer-portal-broker ]]; then
+        expected_client_id="$client_id"
+    fi
 
     validate_runtime_value "$description" "$issuer_key" "$issuer"
     validate_runtime_value "$description" "$backchannel_key" "$backchannel"

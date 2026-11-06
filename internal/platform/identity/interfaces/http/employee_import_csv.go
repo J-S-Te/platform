@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -30,6 +31,12 @@ type employeeCSVSelection struct {
 }
 
 func parseEmployeeCSV(content []byte, selectedLines []int) (employeeBatchCreateRequest, error) {
+	// 导入文件统一按 UTF-8 解析：去掉首部 BOM（无表头时它会影响第一列），
+	// 并显式拒绝非 UTF-8 字节，避免 GBK 等编码被静默当成乱码姓名导入。
+	content = bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF})
+	if !utf8.Valid(content) {
+		return employeeBatchCreateRequest{}, errors.New("employee CSV must be UTF-8")
+	}
 	reader := csv.NewReader(bytes.NewReader(content))
 	reader.FieldsPerRecord = -1
 	reader.ReuseRecord = false

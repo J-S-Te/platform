@@ -178,6 +178,7 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 	onboardingService, err := application.NewSubsystemOnboardingService(
 		onboardingRepository, ulid.Generator{}, application.SystemClock{},
 		application.RedirectURIValidationPolicy{AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs},
+		application.WithSubsystemOnboardingRedirectPolicy(postLoginRedirectPolicy(cfg)),
 	)
 	if err != nil {
 		return nil, err
@@ -275,13 +276,13 @@ func newSubsystemAccessRunnerFromConfig(cfg config.Config, database *gorm.DB, lo
 		return nil, err
 	}
 	deploymentPort.SetCentralSessionPolicy(*centralSessionPolicy)
-	configurationTracker, err := infrastructure.NewSubsystemAccessConfigurationTracker(database, provisioner, provisioner)
+	// 配置指纹走内置运行时目录 + 已验证镜像快照（V1 审批源已下线），与
+	// operational_modules.go 的同名构造保持一致的两参签名。
+	configurationTracker, err := infrastructure.NewSubsystemAccessConfigurationTracker(database, provisioner)
 	if err != nil {
 		return nil, err
 	}
-	if strings.EqualFold(cfg.SubsystemOnboarding.Mode, "production") {
-		configurationTracker.SetBuiltinRuntimeSource(infrastructure.BuiltinRuntimeComponentCatalog{}, provisioner)
-	}
+	configurationTracker.SetBuiltinRuntimeSource(infrastructure.BuiltinRuntimeComponentCatalog{}, provisioner)
 	configurationTracker.SetRuntimeRegistrationCheck(provisioner)
 	deploymentPort.SetConfigurationEvidence(configurationTracker)
 	if err := configureSubsystemAccessRuntimeEnrollment(cfg, database, oauthService, provisioner, deploymentPort); err != nil {

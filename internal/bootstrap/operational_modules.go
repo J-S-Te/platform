@@ -52,7 +52,10 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	loginTargetService, err := applicationregistryapplication.NewLoginTargetManagementService(loginTargetRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{})
+	loginTargetService, err := applicationregistryapplication.NewLoginTargetManagementService(
+		loginTargetRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+		applicationregistryapplication.WithLoginTargetManagementRedirectPolicy(postLoginRedirectPolicy(cfg)),
+	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
@@ -74,6 +77,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		applicationregistryapplication.RedirectURIValidationPolicy{
 			AllowInsecureHTTP: cfg.Auth.OAuthClientAllowInsecureHTTPRedirectURIs,
 		},
+		applicationregistryapplication.WithSubsystemOnboardingRedirectPolicy(postLoginRedirectPolicy(cfg)),
 	)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
@@ -154,18 +158,18 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	subsystemAccessReadiness, err := applicationregistryinfrastructure.NewSubsystemAccessReadinessAdapter(database, subsystemProvisioner, subsystemImageReadiness, subsystemHandler)
+	subsystemAccessReadiness, err := applicationregistryinfrastructure.NewSubsystemAccessReadinessAdapter(database, subsystemImageReadiness, subsystemHandler)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	subsystemConfiguration, err := applicationregistryinfrastructure.NewSubsystemAccessConfigurationTracker(database, subsystemProvisioner, subsystemProvisioner)
+	subsystemConfiguration, err := applicationregistryinfrastructure.NewSubsystemAccessConfigurationTracker(database, subsystemProvisioner)
 	if err != nil {
 		return httptransport.OperationalModules{}, err
 	}
-	if strings.EqualFold(cfg.SubsystemOnboarding.Mode, "production") {
-		subsystemAccessReadiness.SetBuiltinRuntimeSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{})
-		subsystemConfiguration.SetBuiltinRuntimeSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{}, subsystemProvisioner)
-	}
+	// V2 是唯一登记协议：本地与生产都按内置运行目录计算就绪与配置指纹。
+	// 不再存在"本地走文件审批、生产走目录"的分叉。
+	subsystemAccessReadiness.SetBuiltinRuntimeSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{})
+	subsystemConfiguration.SetBuiltinRuntimeSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{}, subsystemProvisioner)
 	subsystemConfiguration.SetRuntimeRegistrationCheck(subsystemProvisioner)
 	subsystemAccessReadiness.SetConfigurationDriftReader(subsystemConfiguration)
 	// 登记查询器与阶段执行器的目录登记端口共用同一实现，保证口径一致。

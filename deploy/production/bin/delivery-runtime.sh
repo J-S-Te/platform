@@ -57,9 +57,247 @@ delivery_compose_image_matches() {
     delivery_runtime_error "$service 的实际审核编排未绑定本次目标镜像"
 }
 
+# 平台发布证明的 Keycloak HTTP 门禁。容器状态/healthcheck 只能证明进程与端口还在，
+# 2026-11-05 事故中 keycloak-db 重建后 Keycloak 仍接受 TCP 连接、却无法处理任何请求
+# （Hikari 连接陈旧 + Infinispan clientscopes 缓存卡死），交付证明因此漏检。
+#
+# 探针必须直连 Keycloak 自己发布到宿主机上的端口，绝不能改用公开 issuer
+# （PUBLIC_KEYCLOAK_ISSUER = PUBLIC_SSO_ORIGIN/realms/<realm>）：
+# 公开入口由 frontend nginx 容器提供（frontend/nginx/gateway-*.conf.template 把 /realms 反代到
+# keycloak，这些端口只由前端的 frontend 服务发布），而阶段 B（平台发布证明）先于阶段 C（发布前端）
+# 执行。全新安装时公开入口还没有任何监听，走公开地址就会把“前端尚未部署”误判成“Keycloak 卡死”，
+# 阶段 B 因此永久失败、--resume 只会反复重试；升级场景前端早已运行，才看不出这个问题。
+# keycloak 一旦启动就同时具备 /health/ready 与已发布的宿主端口，所以回环探针在全新安装和
+# 升级两种场景下都成立，也不依赖任何公开入口是否已经就绪。
+
+# 按 docker compose 的 .env 语义归一化取值：去首尾空白、剥一层成对引号、去行内 `#` 注释。
+# env_get 只做裸值读取；直接把它的结果拼进 URL，会把 `"0.0.0.0"`、`0.0.0.0 ` 或
+# `0.0.0.0 # 备注` 变成 http://"0.0.0.0":18090/... 这类 curl 直接拒绝的地址，进而把一份
+# 健康部署判成“Hikari 卡死”。compose 自己会正确归一化这几种写法（见 docker compose config），
+# 所以门禁也必须以同样的语义解释 .env。
+keycloak_trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+keycloak_dotenv_value() {
+  local value
+  value="$(keycloak_trim "${1-}")"
+  case "$value" in
+    \"*)
+      # 取到闭合双引号为止：`"0.0.0.0" # 备注` 与 `"0.0.0.0"` 都归一化为 0.0.0.0。
+      value="${value#\"}"
+      value="$(keycloak_trim "${value%\"*}")"
+      ;;
+    \'*)
+      value="${value#\'}"
+      value="$(keycloak_trim "${value%\'*}")"
+      ;;
+    \#*) value='' ;;
+    *)
+      # 未加引号：compose 视“空白 + #”之后为行内注释。
+      case "$value" in
+        *[[:space:]]'#'*) value="${value%%[[:space:]]'#'*}" ;;
+      esac
+      value="$(keycloak_trim "$value")"
+      ;;
+  esac
+  printf '%s' "$value"
+}
+
+# 宿主地址的客户端形态：通配监听（空/0.0.0.0/::）换成回环，IPv6 字面量加方括号。
+keycloak_host_literal() {
+  local host="$1"
+  case "$host" in
+    ''|0.0.0.0|::|'[::]') host=127.0.0.1 ;;
+  esac
+  case "$host" in
+    *:*)
+      case "$host" in
+        \[*\]) ;;
+        *) host="[$host]" ;;
+      esac
+      ;;
+  esac
+  printf '%s' "$host"
+}
+
+# 从已解析的 compose 模型读取 keycloak 服务容器端口 8080 的宿主发布映射（host_ip<TAB>published）。
+# compose 已完成 .env 归一化与端口展开，因此这是“实际发布出去的端点”的唯一权威来源；
+# 读不到模型或没有该映射时返回非零，由调用方回退到归一化后的 .env 取值。
+keycloak_published_endpoint() {
+  local resolved="$1"
+  [[ -n "$resolved" ]] || return 1
+  python3 - "$resolved" <<'PY'
+import json, sys
+try:
+    model = json.loads(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+if not isinstance(model, dict):
+    raise SystemExit(1)
+services = model.get("services")
+service = services.get("keycloak") if isinstance(services, dict) else None
+ports = service.get("ports") if isinstance(service, dict) else None
+if not isinstance(ports, list):
+    raise SystemExit(1)
+for entry in ports:
+    if not isinstance(entry, dict):
+        continue
+    try:
+        target = int(entry.get("target"))
+    except (TypeError, ValueError):
+        continue
+    if target != 8080:
+        continue
+    published = entry.get("published")
+    if published is None:
+        continue
+    published = str(published).strip()
+    if not published.isdigit():
+        continue
+    host_ip = entry.get("host_ip")
+    host_ip = "" if host_ip is None else str(host_ip).strip()
+    sys.stdout.write("%s\t%s\n" % (host_ip, published))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+# 拆分“响应体 + --write-out 追加的 3 位状态码”，供调用方区分 404（realm 未创建）与其他失败。
+keycloak_probe_body=''
+keycloak_probe_code=''
+keycloak_split_probe_output() {
+  local raw="$1" last
+  keycloak_probe_body="$raw"
+  keycloak_probe_code=''
+  [[ -n "$raw" ]] || return 0
+  if [[ "$raw" == *$'\n'* ]]; then
+    last="${raw##*$'\n'}"
+    [[ "$last" =~ ^[0-9]{3}$ ]] || return 0
+    keycloak_probe_code="$last"
+    keycloak_probe_body="${raw%$'\n'*}"
+  elif [[ "$raw" =~ ^[0-9]{3}$ ]]; then
+    keycloak_probe_code="$raw"
+    keycloak_probe_body=''
+  fi
+}
+
+# “卡死”诊断：连接/超时/非 200 都走这里，措辞与 2026-11-05 事故一致。
+keycloak_http_wedged_diagnostic() {
+  local url="$1" detail="${2:-}"
+  delivery_runtime_error "Keycloak 未提供可用的 OIDC 发现文档：$url${detail:+
+$detail}
+最可能的原因：Keycloak 仍接受该端口的 TCP 连接，但请求处理已被卡死（2026-11-05 事故同型：
+keycloak-db 重建后连接池持有陈旧的 Hikari 连接，或 Infinispan clientscopes 缓存死锁）。
+请检查 keycloak 与 keycloak-db 日志、确认数据库可达，必要时重启 keycloak 后重新执行本次交付核验。
+本门禁直连 Keycloak 自己发布的宿主端口，不经过公开入口；公开入口是否可用不是本判据。"
+}
+
+require_keycloak_http_ready() {
+  local resolved="${1:-}" mapping address port realm
+  local master_url tenant_url document raw code attempt
+  local -r realm_retry_attempts=6 realm_retry_seconds=5
+  [[ -f "$runtime_file" && -r "$runtime_file" && ! -L "$runtime_file" ]] || {
+    delivery_runtime_error "缺少可读的运行配置 $runtime_file，无法确定 Keycloak 探针地址，拒绝在缺少 HTTP 证据时通过发布核验"
+    return 1
+  }
+  # 端点优先级：已解析 compose 模型的发布映射（compose 已按 .env 语义归一化）> 归一化后的 .env。
+  if [[ -z "$resolved" ]]; then resolved="$(compose config --format json 2>/dev/null || true)"; fi
+  mapping="$(keycloak_published_endpoint "$resolved" 2>/dev/null || true)"
+  if [[ -n "$mapping" ]]; then
+    address="${mapping%%$'\t'*}"
+    port="${mapping##*$'\t'}"
+    [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || {
+      delivery_runtime_error "当前审核编排中 keycloak 发布的宿主端口不合法：$port"
+      return 1
+    }
+    address="$(keycloak_host_literal "$address")"
+  else
+    # 运行配置回退路径：同样的 .env 归一化，避免引号/行内注释/通配地址污染 URL。
+    address="$(keycloak_host_literal "$(keycloak_dotenv_value "$(env_get "$runtime_file" KEYCLOAK_BIND_ADDRESS)")")"
+    port="$(keycloak_dotenv_value "$(env_get "$runtime_file" KEYCLOAK_HTTP_PORT)")"
+    port="${port:-18090}"
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+      delivery_runtime_error "运行配置的 KEYCLOAK_HTTP_PORT 不是合法端口：$port"
+      return 1
+    fi
+  fi
+  realm="$(keycloak_dotenv_value "$(env_get "$runtime_file" KEYCLOAK_REALM)")"
+  realm="${realm:-basic-platform}"
+  if [[ ! "$realm" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    delivery_runtime_error "运行配置的 KEYCLOAK_REALM 不是合法 realm 名：$realm"
+    return 1
+  fi
+  master_url="http://$address:$port/realms/master/.well-known/openid-configuration"
+  tenant_url="http://$address:$port/realms/$realm/.well-known/openid-configuration"
+
+  # (a) 硬性要求：Keycloak 真的在提供 HTTP 服务。master realm 由 Keycloak 自己创建，
+  # 因此 200 + 含 issuer 的发现文档即可证明“进程还能处理请求”，卡死的 Keycloak 必然过不了。
+  raw="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 20 \
+    --write-out '\n%{http_code}' "$master_url")" || {
+    keycloak_http_wedged_diagnostic "$master_url" 'curl 未能完成请求（连接被拒绝、超时或返回非 2xx/3xx）'
+    return 1
+  }
+  keycloak_split_probe_output "$raw"
+  document="$keycloak_probe_body"
+  code="$keycloak_probe_code"
+  if [[ -n "$code" && "$code" != 200 ]]; then
+    keycloak_http_wedged_diagnostic "$master_url" "master realm 的发现文档返回 HTTP $code（期望 200）"
+    return 1
+  fi
+  jq -er '.issuer' <<< "$document" >/dev/null || {
+    delivery_runtime_error "Keycloak OIDC 发现文档缺少 issuer 字段（$master_url），响应不是可用的 OIDC 元数据"
+    return 1
+  }
+
+  # (b) 租户 realm：由 platform-worker 启动期的 bootstrap（EnsureKeycloakBroker）创建，
+  # 而 platform-worker 的 healthcheck 只是 PID1 进程探针，所以“平台健康”必然早于 realm 创建；
+  # KEYCLOAK_MANAGEMENT_ENABLED=false 或 bootstrap 慢/失败时 realm 会一直 404。
+  # 404 => realm 未创建/名称不一致：有界重试后只警告不阻断（HTTP 服务已由 (a) 证明）。
+  # 其他失败（拒绝连接/超时/5xx）= 卡死形态，保持与 (a) 相同的 fail-closed 诊断。
+  for ((attempt = 1; attempt <= realm_retry_attempts; attempt++)); do
+    raw="$(curl --silent --show-error --connect-timeout 5 --max-time 20 \
+      --write-out '\n%{http_code}' "$tenant_url")" || {
+      keycloak_http_wedged_diagnostic "$tenant_url" 'curl 未能完成请求（连接被拒绝或超时）'
+      return 1
+    }
+    keycloak_split_probe_output "$raw"
+    document="$keycloak_probe_body"
+    code="$keycloak_probe_code"
+    if [[ "$code" == 404 ]]; then
+      ((attempt < realm_retry_attempts)) || break
+      sleep "$realm_retry_seconds"
+      continue
+    fi
+    if [[ -n "$code" && "$code" != 200 ]]; then
+      keycloak_http_wedged_diagnostic "$tenant_url" \
+        "realm $realm 的发现文档返回 HTTP $code（既不是 200 也不是 404），说明 Keycloak 可连接但没有正常提供该 realm 的 OIDC 元数据"
+      return 1
+    fi
+    jq -er '.issuer' <<< "$document" >/dev/null || {
+      delivery_runtime_error "Keycloak OIDC 发现文档缺少 issuer 字段（$tenant_url），响应不是可用的 OIDC 元数据"
+      return 1
+    }
+    printf 'Keycloak OIDC 发现文档可用（issuer 已声明）：%s\n' "$tenant_url"
+    return 0
+  done
+  printf 'Keycloak OIDC 发现文档可用（issuer 已声明）：%s\n' "$master_url"
+  printf '警告：Keycloak 已在正常提供 HTTP 服务（master realm 发现文档 200 且含 issuer），但 realm %s 尚不存在（HTTP 404：realm 未创建或名称不一致）。\n' "$realm" >&2
+  printf '      该租户 realm 由 platform-worker 启动期的 Keycloak bootstrap（EnsureKeycloakBroker）创建，\n' >&2
+  printf '      所以 platform-worker 的 healthcheck 可以先于 realm 创建变健康；KEYCLOAK_MANAGEMENT_ENABLED=false\n' >&2
+  printf '      时该 bootstrap 不会执行，realm 需要由运营流程显式创建。\n' >&2
+  printf '      本次发布证明不因此失败（Keycloak 的 HTTP 服务已单独证明）；请在 platform-worker 启动/健康后\n' >&2
+  printf '      重新核验 realm %s，并确认 KEYCLOAK_MANAGEMENT_ENABLED 与 KEYCLOAK_REALM 配置是否符合预期。\n' "$realm" >&2
+  return 0
+}
+
 delivery_release_matches() (
   local component="${1:?component required}" archive="${2:?archive required}" common_archive="${3:-}"
   local facts common_facts image gateway proxy resolved selected service expected key provisioner api
+  local -a platform_services=()
   require_initialized || return 1
   [[ ! -e "$deploy_dir/runtime/.assets-install-transaction" && ! -L "$deploy_dir/runtime/.assets-install-transaction" &&
      ! -e "$deploy_dir/runtime/.control-plane-reload-required" && ! -L "$deploy_dir/runtime/.control-plane-reload-required" ]] || return 1
@@ -85,8 +323,17 @@ delivery_release_matches() (
         delivery_release_key_matches DOCKER_SOCKET_PROXY_IMAGE "$proxy" || return 1
         delivery_compose_image_matches "$resolved" docker-socket-proxy "$proxy" || return 1
       fi
-      verify_current_services platform-api platform-worker subsystem-provisioner file-gateway docker-socket-proxy \
-        platform-mysql keycloak-db contract-mysql file-gateway-mysql keycloak temporal || return 1
+      # 共享 Temporal 只在确有消费子系统启用时才由 deploy-service.sh 启动（temporal_consumers_enabled）；
+      # 未启用时它根本不存在，仍硬要求它健康会让“仅平台 / 仅结算 / 仅数据看板”安装无法通过
+      # 自己的发布证明。其余服务保持无条件必需。
+      platform_services=(platform-api platform-worker subsystem-provisioner file-gateway docker-socket-proxy
+        platform-mysql keycloak-db contract-mysql file-gateway-mysql keycloak)
+      if temporal_consumers_enabled; then platform_services+=(temporal); fi
+      verify_current_services "${platform_services[@]}" || return 1
+      # 健康探针只证明 Keycloak 端口还在；发布证明还必须证明它真的在提供 OIDC 元数据。
+      # 这里把上面已解析的编排模型传进去：compose 已完成 .env 归一化与端口展开，是本门禁
+      # 判定“实际发布出去的端点”的权威来源（也不必再执行一次只读 compose 解析）。
+      require_keycloak_http_ready "$resolved" || return 1
       provisioner="$(compose ps -q subsystem-provisioner)" || return 1
       api="$(compose ps -q platform-api)" || return 1
       [[ -n "$provisioner" && -n "$api" ]] || return 1

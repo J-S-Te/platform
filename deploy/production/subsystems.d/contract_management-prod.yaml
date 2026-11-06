@@ -39,7 +39,6 @@ runtime:
         CONTRACT_IMPORT_REPORT_READ_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         CONTRACT_IMPORT_REPORT_READ_CLIENT_ID: data_analysis-prod-contract-import-report-read
         CONTRACT_IMPORT_REPORT_READ_CALLER_ENVIRONMENT_CODE: prod
-        SETTLEMENT_INTEGRATION_OUTBOUND_ENABLED: "true"
         SETTLEMENT_API_BASE_URL: http://settlement-api:8085
         SETTLEMENT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         SETTLEMENT_INTEGRATION_AUDIENCE: basic-platform-application
@@ -108,7 +107,6 @@ runtime:
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
         STAMPED_FILE_GATEWAY_MODE: dual
-        CRM_REFERENCE_ENABLED: "true"
         CRM_REFERENCE_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_REFERENCE_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_REFERENCE_SCOPE: customer.contract_reference.read

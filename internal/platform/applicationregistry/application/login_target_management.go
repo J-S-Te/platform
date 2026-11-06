@@ -69,18 +69,34 @@ type LoginTargetManagementRepository interface {
 // LoginTargetManagementService 管理登录后的跨应用落点；运行时解析由独立只读服务完成。
 // 登录目标不是 OAuth 授权码回调地址，两类白名单不能共用，否则会把门户导航能力扩大成凭据回传能力。
 type LoginTargetManagementService struct {
-	repository LoginTargetManagementRepository
-	ids        IdentifierGenerator
-	clock      Clock
+	repository              LoginTargetManagementRepository
+	ids                     IdentifierGenerator
+	clock                   Clock
+	postLoginRedirectPolicy PostLoginRedirectPolicy
+}
+
+// LoginTargetManagementServiceOption 调整管理服务的可选行为，不改变既有构造调用。
+type LoginTargetManagementServiceOption func(*LoginTargetManagementService)
+
+// WithLoginTargetManagementRedirectPolicy 注入登录后跳转的绝对地址来源集合，使登记
+// 路径拒绝未批准的绝对目标。未注入时只做结构校验，装配层始终注入真实集合。
+func WithLoginTargetManagementRedirectPolicy(policy PostLoginRedirectPolicy) LoginTargetManagementServiceOption {
+	return func(service *LoginTargetManagementService) { service.postLoginRedirectPolicy = policy }
 }
 
 // NewLoginTargetManagementService 构造登录目标管理用例；任一依赖缺失即拒绝构造，
 // 管理面不允许降级为无审计时钟或无 ID 生成的半可用服务。
-func NewLoginTargetManagementService(repository LoginTargetManagementRepository, ids IdentifierGenerator, clock Clock) (*LoginTargetManagementService, error) {
+func NewLoginTargetManagementService(repository LoginTargetManagementRepository, ids IdentifierGenerator, clock Clock, options ...LoginTargetManagementServiceOption) (*LoginTargetManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("application login target management dependencies must not be nil")
 	}
-	return &LoginTargetManagementService{repository: repository, ids: ids, clock: clock}, nil
+	service := &LoginTargetManagementService{repository: repository, ids: ids, clock: clock}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service, nil
 }
 
 // ListLoginTargets 在核验父级边界之后才列出目标，防止合法租户借列表接口
@@ -101,7 +117,7 @@ func (service *LoginTargetManagementService) ListLoginTargets(ctx context.Contex
 // URI 合法性与边界校验失败一律返回 ErrValidation，不做部分创建。
 func (service *LoginTargetManagementService) CreateLoginTarget(ctx context.Context, input LoginTargetCreateInput) (LoginTargetManagementItem, error) {
 	input = normalizeLoginTargetCreate(input)
-	if !validLoginTargetCreate(input) {
+	if !validLoginTargetCreate(input) || !service.postLoginRedirectPolicy.ValidTargetURI(input.TargetURI) {
 		return LoginTargetManagementItem{}, ErrValidation
 	}
 	if err := service.repository.EnsureLoginTargetBoundary(ctx, input.TenantID, input.ApplicationID, input.EnvironmentID); err != nil {
@@ -131,7 +147,7 @@ func (service *LoginTargetManagementService) GetLoginTarget(ctx context.Context,
 // 版本冲突由仓储返回，调用方不得静默重试覆盖他人修改。
 func (service *LoginTargetManagementService) UpdateLoginTarget(ctx context.Context, input LoginTargetUpdateInput) (LoginTargetManagementItem, error) {
 	input = normalizeLoginTargetUpdate(input)
-	if !validLoginTargetUpdate(input) {
+	if !validLoginTargetUpdate(input) || !service.postLoginRedirectPolicy.ValidTargetURI(input.TargetURI) {
 		return LoginTargetManagementItem{}, ErrValidation
 	}
 	return service.repository.UpdateLoginTarget(ctx, input, service.clock.Now().UTC())

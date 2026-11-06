@@ -682,6 +682,83 @@ class IntegrationWiringTest(unittest.TestCase):
             f"{TEMPLATE.name} 与 {MANIFEST.name} 的 {key} 不一致",
         )
 
+    def test_contract_import_crm_provision_scope_is_registered_and_bound(self) -> None:
+        """历史导入开立 CRM 客户/商机的机器 scope 必须登记并绑定成专用凭据。
+
+        平台按“一用途一 client 一 scope”授予：客户 scope 由
+        crm_customer_import_provision 承载，商机 scope 由
+        crm_opportunity_import_provision 承载。清单只补一对 client 却让合同侧
+        同时请求两个 scope 时，平台 token 端点会以 invalid_scope 拒绝，故障点
+        被推迟到导入联调阶段；因此这里把“用途后缀已登记 + 两个 scope 各自绑定
+        到自己的用途 + 开关默认关闭且模板/清单同值”绑成同一门禁。
+        """
+        pairs = (
+            ("crm-customer-import-provision", "crm_customer_import_provision"),
+            ("crm-opportunity-import-provision", "crm_opportunity_import_provision"),
+        )
+        allowed_bindings = next(
+            (
+                line.strip()
+                for line in MANIFEST.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("allowed_service_bindings:")
+            ),
+            "",
+        )
+        self.assertTrue(allowed_bindings, f"{MANIFEST.name} 缺少 allowed_service_bindings")
+        for suffix, purpose in pairs:
+            with self.subTest(purpose=purpose):
+                self.assertIn(
+                    suffix,
+                    UPDATE_CREDENTIAL_SUFFIXES["contract_management"],
+                    f"用途后缀 {suffix} 未登记：清单引用的 client_id 无法由受控接入推导",
+                )
+                self.assertIn(
+                    purpose,
+                    allowed_bindings,
+                    f"{MANIFEST.name} 的 allowed_service_bindings 缺少 {purpose}："
+                    "受控接入不会创建对应凭据客户端",
+                )
+        bindings = parse_manifest_block(MANIFEST, "bindings")
+        values = parse_manifest_block(MANIFEST, "values")
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_CLIENT_ID"),
+            "service.crm_customer_import_provision.client_id",
+            "清单缺少客户导入开立 client_id 受控绑定",
+        )
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_CLIENT_SECRET"),
+            "service.crm_customer_import_provision.client_secret",
+            "清单缺少客户导入开立 client_secret 受控绑定",
+        )
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_OPPORTUNITY_CLIENT_ID"),
+            "service.crm_opportunity_import_provision.client_id",
+            "清单缺少商机导入开立 client_id 受控绑定",
+        )
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_OPPORTUNITY_CLIENT_SECRET"),
+            "service.crm_opportunity_import_provision.client_secret",
+            "清单缺少商机导入开立 client_secret 受控绑定",
+        )
+        self.assertEqual(values.get("CRM_PROVISION_SCOPE"), "customer.import_provision")
+        self.assertEqual(values.get("CRM_PROVISION_OPPORTUNITY_SCOPE"), "opportunity.import_provision")
+        for key in ("CRM_PROVISION_BASE_URL", "CRM_PROVISION_TOKEN_URL"):
+            self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}")
+        key = "CONTRACT_IMPORT_CRM_PROVISION_ENABLED"
+        template = parse_env_template(TEMPLATE)
+        self.assertIn(key, template, f"{TEMPLATE.name} 缺少 {key}（按模板重建会静默丢键）")
+        self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}（受控更新无键可下发）")
+        self.assertEqual(
+            template[key].strip().lower(),
+            "false",
+            f"{TEMPLATE.name} 的 {key} 默认必须关闭（fail-closed）",
+        )
+        self.assertEqual(
+            template[key].strip().lower(),
+            values[key].strip().lower(),
+            f"{TEMPLATE.name} 与 {MANIFEST.name} 的 {key} 不一致",
+        )
+
     def test_aggregation_worker_receives_all_read_only_dsns(self) -> None:
         environment = parse_compose_service_environment(COMPOSE, "data-analysis-aggregation-worker")
         for key in AGGREGATION_READ_DSNS:

@@ -21,6 +21,11 @@ compose.observability.yaml 是被权威编排 monitoring 子系统取代的历�
 4b. 健康检查的覆盖规则（O6）：常驻服务（restart 不是 "no"）必须有 healthcheck，
    一次性任务（restart: "no"）必须没有；无 HTTP 端点的 Worker 用 PID1 可执行文件探针，
    探针里的二进制必须与容器实际命令/镜像 ENTRYPOINT 一致（见 PID1_EXPECTED）；
+4c. Keycloak 的就绪探针必须证明 HTTP 就绪（2026-11-05 现场事故）：keycloak-db 重建后
+   Keycloak 容器没换、仍接受 9000/8080 的 TCP 连接，但请求处理已被卡死（Hikari 陈旧连接
+   + Infinispan clientscopes 缓存），裸 /dev/tcp 探针一直报 healthy，Docker 和发布校验
+   都没发现。两份编排的探针都必须命中管理端口 /health/ready（含数据库连接检查并断言
+   HTTP 200），且不得退化回“只连端口”的裸 /dev/tcp 形式；
 5. Prometheus 抓取目标必须都是已声明的服务，且 contract / platform / settlement 的
    /metrics 已被抓取；平台 job 的鉴权必须按 RequireMetricsAccess 实现配置为
    Bearer + credentials_file，仓库与 prometheus.yml 内不得出现真实 token；
@@ -220,6 +225,16 @@ HEALTHCHECK_KEYS = ("test", "interval", "timeout", "retries")
 # 容器退出后 healthcheck 只会停在 unhealthy，`compose up --wait` 会把它当成启动失败，
 # 于是“给短命任务补探针”不是加固而是把发布门禁改坏。常驻服务则相反，必须可判定。
 ONE_SHOT_RESTART = "no"
+# Keycloak 就绪探针必须命中管理端口的 /health/ready（它同时执行 Keycloak 数据库连接检查），
+# 并断言 HTTP 状态行含 200。2026-11-05 现场事故：keycloak-db 重建后 Keycloak 仍接受 9000
+# 的 TCP 连接，但 :8080 请求全被卡死，裸 /dev/tcp 探针一直报 healthy，Docker 与发布校验
+# 都没发现，平台 worker 因此反复崩溃。
+KEYCLOAK_SERVICE = "keycloak"
+KEYCLOAK_READINESS_PATH = "/health/ready"
+# 裸连接探针全文形如 `exec 3<>/dev/tcp/127.0.0.1/9000`（历史上还包过 bash -lc）。
+KEYCLOAK_BARE_TCP_PROBE = re.compile(
+    r"^\s*(?:bash\s+-lc\s+)?['\"]?exec\s+\d+<>/dev/tcp/\S+?['\"]?\s*$"
+)
 # 无 HTTP 端点的常驻 Worker 用 PID1 可执行文件探针（与 platform-worker 同一判据）：
 # `test "$(readlink /proc/1/exe)" = /app/<binary>`。探针二进制 = 镜像 WORKDIR(/app) +
 # command 声明的可执行文件；未覆盖 command 的服务由镜像 ENTRYPOINT 决定。
@@ -358,6 +373,23 @@ def healthcheck_of(service: dict, keys: tuple[str, ...] = HEALTHCHECK_KEYS) -> d
     """返回健康检查中被门禁比较的键；服务没有健康检查时返回空映射。"""
     healthcheck = service.get("healthcheck") or {}
     return {key: healthcheck.get(key) for key in keys if key in healthcheck}
+
+
+def healthcheck_command(service: dict) -> str:
+    """把 healthcheck.test 归一成 shell 命令文本（去掉 CMD-SHELL/CMD 执行器标记）。
+
+    归一后断言的是“容器里真正会执行的探针”，而不是 YAML 里的数组/执行器写法，
+    这样 `["CMD-SHELL", "command"]` 与 `"command"` 两种等价写法不会造成漏判。
+    """
+    test = (service.get("healthcheck") or {}).get("test") or []
+    if isinstance(test, str):
+        return test
+    if not isinstance(test, list):
+        return ""
+    parts = [str(part) for part in test]
+    if parts and parts[0] in ("CMD-SHELL", "CMD", "NONE"):
+        parts = parts[1:]
+    return " ".join(parts)
 
 
 def pid1_probe_binary(service: dict) -> str | None:
@@ -856,6 +888,48 @@ class OrchestrationConsistencyTest(unittest.TestCase):
                         f"{filename} 的 {name} command 是 {command[0]!r}，"
                         f"PID1 探针必须断言 {expected!r}：实际 {binary!r}",
                     )
+
+    def test_keycloak_probe_asserts_http_readiness_not_a_bare_tcp_connect(self) -> None:
+        """Keycloak 探针必须证明 HTTP 就绪，不能只证明端口还在（2026-11-05 现场事故）。
+
+        事故形态：keycloak-db 重建后 Keycloak 容器没换（已运行两周），仍接受 9000/8080 的
+        TCP 连接，但请求处理被卡死（Hikari 持有陈旧连接 + Infinispan clientscopes 缓存），
+        Docker 因此一直报 healthy，交付证明也只看容器状态，直到 platform-worker 因 Keycloak
+        admin API 调用失败而反复崩溃才暴露。所以探针必须命中管理端口的 /health/ready
+        （它同时执行 Keycloak 数据库连接检查）并断言 HTTP 200；退化成“只连端口”的裸
+        /dev/tcp 探针即视为缺口复现。两份编排都必须满足，参考副本会被评审当作等价样本照抄。
+        """
+        for filename, document in ((CANONICAL, self.canonical), (REFERENCE, self.reference)):
+            services = self.services(document, filename)
+            with self.subTest(filename=filename, check="service-declared"):
+                self.assertIn(
+                    KEYCLOAK_SERVICE,
+                    services,
+                    f"{filename} 没有 {KEYCLOAK_SERVICE} 服务：Keycloak 就绪守卫失去检查对象",
+                )
+            command = healthcheck_command(services[KEYCLOAK_SERVICE])
+            with self.subTest(filename=filename, check="readiness-path"):
+                self.assertIn(
+                    KEYCLOAK_READINESS_PATH,
+                    command,
+                    f"{filename} 的 {KEYCLOAK_SERVICE} 探针没有请求 {KEYCLOAK_READINESS_PATH}："
+                    f"实际探针 {command!r}；纯 TCP/端口探针在请求处理卡死时仍会报 healthy"
+                    "（2026-11-05 事故形态），必须改用带数据库连接检查的就绪端点",
+                )
+            with self.subTest(filename=filename, check="not-bare-tcp"):
+                self.assertNotRegex(
+                    command,
+                    KEYCLOAK_BARE_TCP_PROBE.pattern,
+                    f"{filename} 的 {KEYCLOAK_SERVICE} 探针退化成了裸 /dev/tcp 连接"
+                    f"（{command!r}）：它只能证明端口在监听，不能证明 Keycloak 还能处理请求",
+                )
+            with self.subTest(filename=filename, check="http-status-assertion"):
+                self.assertIn(
+                    "200",
+                    command,
+                    f"{filename} 的 {KEYCLOAK_SERVICE} 探针没有断言 HTTP 200（实际探针 "
+                    f"{command!r}）：不做状态码判断的探针会把 5xx/404 也当成就绪",
+                )
 
     # ---------- 3. 监控抓取 ----------
     def test_prometheus_scrapes_contract_metrics_inside_the_cluster(self) -> None:

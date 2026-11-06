@@ -13,6 +13,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -28,6 +29,12 @@ const (
 	roleTypeApplication = "APPLICATION"
 	roleTypePlatform    = "PLATFORM"
 	catalogStatusSynced = "SYNCED"
+	// maxTemplateRoles 限制单个模板的角色条目数：每条条目都会物化为任职用户的授权
+	// 绑定，条目数量直接决定单次写入与物化事务的工作量。
+	maxTemplateRoles = 50
+	// maxPositionTemplateAssignments 限制单个岗位可分配的模板数量，避免一个岗位的
+	// 对账写入无界放大为多轮物化与 revision 推进。
+	maxPositionTemplateAssignments = 100
 )
 
 var (
@@ -282,6 +289,9 @@ type authorizationTargetRow struct {
 	RoleName          string `gorm:"column:role_name"`
 	RoleType          string `gorm:"column:role_type"`
 	RoleStatus        string `gorm:"column:role_status"`
+	// GrantRestricted 标记该角色是否含 SUPER_ADMIN_ONLY 权限；含受限权限的角色
+	// 只对租户级平台超级管理员可分配。
+	GrantRestricted bool `gorm:"column:grant_restricted"`
 }
 
 type templateModel struct {
@@ -339,11 +349,14 @@ type bindingProjection struct {
 // ListAuthorizationTargets 只返回岗位模板可选的角色。平台原生角色以平台库为权威，
 // 无需应用自有目录；子系统角色必须在其目录 SYNCED 之后才暴露。把目录状态并入这个
 // 专用响应，也避免仅为了构建模板就要求更宽的 platform:application:read 权限。
+//
+// 含 SUPER_ADMIN_ONLY 权限的角色仍然出现在列表里，但只对租户级平台超级管理员标记
+// assignable=true：非超管看不到它可选，避免提交后才被委派守卫 403。
 func (s *Service) ListAuthorizationTargets(ctx context.Context, tenantID string) ([]AuthorizationTargetView, error) {
 	var rows []authorizationTargetRow
 	err := s.db.WithContext(ctx).
 		Table("platform_application AS application").
-		Select("application.id AS application_id, application.code AS application_code, application.name AS application_name, COALESCE(catalog.catalog_version, '') AS catalog_version, COALESCE(catalog.sync_status, '') AS catalog_sync_status, COALESCE(policy.max_effective_roles, 0) AS max_effective_roles, role.id AS role_id, role.code AS role_code, role.name AS role_name, role.role_type AS role_type, role.status AS role_status").
+		Select("application.id AS application_id, application.code AS application_code, application.name AS application_name, COALESCE(catalog.catalog_version, '') AS catalog_version, COALESCE(catalog.sync_status, '') AS catalog_sync_status, COALESCE(policy.max_effective_roles, 0) AS max_effective_roles, role.id AS role_id, role.code AS role_code, role.name AS role_name, role.role_type AS role_type, role.status AS role_status, "+grantRestrictedSelectExpression, grantPolicyConstrainedValue).
 		Joins("JOIN authz_role AS role ON role.tenant_id=application.tenant_id AND role.application_id=application.id AND role.status=?", activeStatus).
 		Joins("LEFT JOIN authz_authorization_catalog AS catalog ON catalog.tenant_id=application.tenant_id AND catalog.application_id=application.id").
 		Joins("LEFT JOIN authz_application_authorization_policy AS policy ON policy.tenant_id=application.tenant_id AND policy.application_id=application.id").
@@ -354,10 +367,29 @@ func (s *Service) ListAuthorizationTargets(ctx context.Context, tenantID string)
 	if err != nil {
 		return nil, fmt.Errorf("list position authorization targets: %w", err)
 	}
-	return authorizationTargetViews(rows), nil
+	return authorizationTargetViews(rows, platformSuperAdminFromContext(ctx, tenantID)), nil
 }
 
-func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTargetView {
+// grantRestrictedSelectExpression 标记当前角色是否含 SUPER_ADMIN_ONLY 权限。
+// 授予策略是固定枚举常量，因此这里用 GORM Select 的 ? 占位绑定
+// grantPolicyConstrainedValue 而不用字符串拼接：既保留参数绑定，
+// 也避免把授予策略字面量散落到 SQL 文本里。
+const grantRestrictedSelectExpression = `EXISTS(SELECT 1 FROM authz_role_permission AS rp JOIN authz_permission AS gp ON gp.id = rp.permission_id AND gp.grant_policy = ? WHERE rp.role_id = role.id AND rp.effect = 'ALLOW') AS grant_restricted`
+
+// grantPolicyConstrainedValue 是上面 EXISTS 子查询绑定的授予策略取值。
+const grantPolicyConstrainedValue = domain.GrantPolicySuperAdminOnly
+
+// platformSuperAdminFromContext 只使用认证中间件装入的租户级主体判定超级管理员，
+// 与委派守卫共用同一身份来源（零数据库查询）。
+func platformSuperAdminFromContext(ctx context.Context, tenantID string) bool {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || strings.TrimSpace(principal.User.ID) == "" {
+		return false
+	}
+	return delegation.IsPlatformSuperAdmin(ctx, tenantID, principal.User.ID)
+}
+
+func authorizationTargetViews(rows []authorizationTargetRow, superAdmin bool) []AuthorizationTargetView {
 	targets := make([]AuthorizationTargetView, 0)
 	indexes := make(map[string]int)
 	for _, row := range rows {
@@ -385,7 +417,8 @@ func authorizationTargetViews(rows []authorizationTargetRow) []AuthorizationTarg
 		}
 		targets[index].Roles = append(targets[index].Roles, AuthorizationTargetRoleView{
 			RoleID: row.RoleID, RoleCode: row.RoleCode, RoleName: row.RoleName,
-			RoleType: row.RoleType, RoleStatus: row.RoleStatus, Assignable: true,
+			RoleType: row.RoleType, RoleStatus: row.RoleStatus,
+			Assignable: !row.GrantRestricted || superAdmin,
 		})
 	}
 	return targets
@@ -759,6 +792,11 @@ func (s *Service) ListPositionAssignments(ctx context.Context, tenantID, positio
 func (s *Service) ReplacePositionAssignments(ctx context.Context, tenantID, operatorID, positionID string, input ReplaceAssignmentsInput) (AssignmentSetView, error) {
 	if len(input.ExpectedRevision) != 67 || !strings.HasPrefix(input.ExpectedRevision, "v1:") {
 		return AssignmentSetView{}, validation("expected_revision from the current assignment snapshot is required")
+	}
+	// 数量上限属于纯输入契约：在解析快照、加锁与任何写入之前拒绝，避免超限请求
+	// 触发无界事务。
+	if len(input.Assignments) > maxPositionTemplateAssignments {
+		return AssignmentSetView{}, validation(fmt.Sprintf("a position can bind at most %d authorization templates", maxPositionTemplateAssignments))
 	}
 	if err := s.ensurePosition(ctx, tenantID, positionID); err != nil {
 		return AssignmentSetView{}, err
@@ -1418,6 +1456,9 @@ func generatedTemplateCode(id string) string {
 }
 
 func normalizeTemplateInput(in *TemplateInput) error {
+	if len(in.Roles) > maxTemplateRoles {
+		return validation(fmt.Sprintf("a template can contain at most %d roles", maxTemplateRoles))
+	}
 	in.Name = strings.TrimSpace(in.Name)
 	in.Description = strings.TrimSpace(in.Description)
 	in.Status = strings.ToUpper(strings.TrimSpace(in.Status))
@@ -1474,6 +1515,9 @@ func normalizeTemplateInput(in *TemplateInput) error {
 	return nil
 }
 func normalizeAssignments(inputs []AssignmentInput) ([]AssignmentInput, error) {
+	if len(inputs) > maxPositionTemplateAssignments {
+		return nil, validation(fmt.Sprintf("a position can bind at most %d authorization templates", maxPositionTemplateAssignments))
+	}
 	seen := map[string]struct{}{}
 	out := make([]AssignmentInput, 0, len(inputs))
 	for _, item := range inputs {

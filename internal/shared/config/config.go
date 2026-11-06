@@ -127,6 +127,11 @@ type AuthConfig struct {
 	// OAuthClientAllowInsecureHTTPRedirectURIs 仅放宽非回环 HTTP 回调登记；是否在
 	// Keycloak 切换时强制 HTTPS 由 KEYCLOAK_REQUIRE_HTTPS 单独控制。
 	OAuthClientAllowInsecureHTTPRedirectURIs bool
+	// LoginTargetAllowedOrigins 是登录成功后允许浏览器跳转到的绝对地址来源白名单
+	// （逗号分隔 origin）。平台公开 origin、CORS 允许来源与 OIDC issuer 始终自动并入；
+	// 本项只用于补齐子系统自己的公开来源。未列入的绝对目标在登记与解析路径一律拒绝，
+	// 登录流程回落到平台同源页面。留空即只允许平台自身与 OIDC issuer 来源。
+	LoginTargetAllowedOrigins []string
 	// OAuthClientSecretPreviousRetirement 控制签发新 Secret 时对既有 ACTIVE Secret
 	// 的处置：keep（默认，旧值继续可用，保持既有轮换窗口与客户端兼容）、revoke
 	// （立即吊销）、grace（收紧到 OAuthClientSecretPreviousGrace 宽限窗口）。
@@ -383,6 +388,7 @@ func Load() (Config, error) {
 			AllowLegacyPlatformAccessToken:           legacyPlatformAccessTokenEnabled,
 			AuthzContextCustomerRefEnabled:           authzContextCustomerRefEnabled,
 			OAuthClientAllowInsecureHTTPRedirectURIs: oauthClientAllowInsecureHTTPRedirectURIs,
+			LoginTargetAllowedOrigins:                commaSeparated(value("AUTH_LOGIN_TARGET_ALLOWED_ORIGINS", "")),
 			OAuthClientSecretPreviousRetirement:      oauthClientSecretPreviousRetirement,
 			OAuthClientSecretPreviousGrace:           oauthClientSecretPreviousGrace,
 			KeycloakOIDCEnabled:                      keycloakEnabled && strings.EqualFold(value("KEYCLOAK_PLATFORM_OIDC_ENABLED", "false"), "true"),
@@ -563,6 +569,18 @@ func (cfg Config) Validate() error {
 	oidcIssuer, err := url.ParseRequestURI(cfg.Auth.OIDCIssuer)
 	if err != nil || oidcIssuer.Scheme == "" || oidcIssuer.Host == "" || oidcIssuer.RawQuery != "" || oidcIssuer.Fragment != "" {
 		return fmt.Errorf("OIDC_ISSUER must be an absolute origin URL without query or fragment")
+	}
+	// 登录目标白名单是开放重定向的显式例外清单：通配符、相对路径与带凭据的条目
+	// 都会让"允许集合"失去意义，因此在监听端口之前就拒绝启动。
+	for _, origin := range cfg.Auth.LoginTargetAllowedOrigins {
+		if strings.Contains(origin, "*") {
+			return fmt.Errorf("AUTH_LOGIN_TARGET_ALLOWED_ORIGINS must not contain wildcard origin %q", origin)
+		}
+		parsed, parseErr := url.ParseRequestURI(origin)
+		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("AUTH_LOGIN_TARGET_ALLOWED_ORIGINS contains invalid origin %q; use an absolute http(s) origin without credentials, query or fragment", origin)
+		}
 	}
 	if strings.TrimSpace(cfg.Identity.BootstrapToken) != "" && len(strings.TrimSpace(cfg.Identity.BootstrapToken)) < 32 {
 		return fmt.Errorf("IAM_BOOTSTRAP_TOKEN must be at least 32 characters when set")

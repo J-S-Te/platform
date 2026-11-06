@@ -656,6 +656,11 @@ func (service *OAuthClientManagementService) CreateOAuthClientSecret(ctx context
 	if err != nil {
 		return OAuthClientSecretResult{}, err
 	}
+	// 自检：返回给调用方的明文必须与落库哈希同源。不同源会让部署出来的服务端
+	// 拿着一个永远换不到令牌的 Secret，且直到运行时 401 才能发现。
+	if verifyErr := bcrypt.CompareHashAndPassword(write.SecretHash, []byte(plaintext)); verifyErr != nil {
+		return OAuthClientSecretResult{}, fmt.Errorf("new OAuth client secret hash mismatch: %w", verifyErr)
+	}
 	return OAuthClientSecretResult{Credential: credential, PlaintextSecret: plaintext}, nil
 }
 

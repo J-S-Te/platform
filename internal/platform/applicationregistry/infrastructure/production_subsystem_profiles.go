@@ -26,11 +26,12 @@ const (
 // 固定 Compose 服务、运行时文件及“平台输入 -> 环境变量”映射，不提供命令、脚本或宿主机
 // 任意路径字段，因此新增子系统不需要修改 Agent 代码，也不会把浏览器输入变成 shell 参数。
 type productionSubsystemManifest struct {
-	Version     int                                    `yaml:"version"`
-	Default     bool                                   `yaml:"default"`
-	Application productionSubsystemApplicationManifest `yaml:"application"`
-	Runtime     productionSubsystemRuntimeManifest     `yaml:"runtime"`
-	Compose     productionSubsystemComposeManifest     `yaml:"compose"`
+	Version          int                                    `yaml:"version"`
+	Default          bool                                   `yaml:"default"`
+	Application      productionSubsystemApplicationManifest `yaml:"application"`
+	Runtime          productionSubsystemRuntimeManifest     `yaml:"runtime"`
+	Compose          productionSubsystemComposeManifest     `yaml:"compose"`
+	OptionalFeatures []productionOptionalFeature            `yaml:"optional_features"`
 }
 
 type productionSubsystemApplicationManifest struct {
@@ -229,6 +230,9 @@ func decodeProductionSubsystemProfile(root, path string) (productionSubsystemPro
 	return productionSubsystemProfile{SourcePath: resolved, Manifest: manifest, Checksum: "sha256:" + hex.EncodeToString(digest[:])}, nil
 }
 
+// normalizeAndValidateProductionSubsystemManifest 规范化并校验审核部署清单及可选基础设施。
+// 参数：manifest为待规范化的应用部署策略。
+// 返回值：合法时为空；版本、归属或能力策略非法时返回错误。
 func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsystemManifest) error {
 	// 规范化同时消除路径别名和空白差异；校验失败必须在进入 Docker 前返回，避免审核清单
 	// 通过一个相对路径或未声明环境键扩大实际写入范围。
@@ -470,7 +474,7 @@ func normalizeAndValidateProductionSubsystemManifest(manifest *productionSubsyst
 		images = append(images, key)
 	}
 	compose.ReleaseImageKeys = images
-	return nil
+	return validateOptionalFeaturePolicies(manifest)
 }
 
 // normalizedProductionTemplatePath 允许随发布包增加新的受控模板，而不要求为每个
@@ -774,9 +778,12 @@ func validateProductionPortalBroker(appCode string, files []productionSubsystemR
 	return errors.New("customer_portal must set PORTAL_OIDC_IDP_HINT=basic-platform-customer")
 }
 
+// allowedProductionInheritedKey 仅允许API向Worker继承审核过的模式与安全材料。
+// 参数：key为profile声明的运行配置键。
+// 返回值：是否允许继承，不能借此传递任意机器凭据。
 func allowedProductionInheritedKey(key string) bool {
 	switch key {
-	case "PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64", "PORTAL_REPORT_CONTENT_KEY_BASE64", "PORTAL_OIDC_TENANT_ID", "PORTAL_REPORT_STORE_ROOT":
+	case "PORTAL_CUSTOMER_DIRECTORY_MODE", "PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64", "PORTAL_REPORT_CONTENT_KEY_BASE64", "PORTAL_OIDC_TENANT_ID", "PORTAL_REPORT_STORE_ROOT":
 		return true
 	}
 	return false

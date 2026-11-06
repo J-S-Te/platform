@@ -3,8 +3,6 @@ package infrastructure
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"sort"
 	"strings"
-	"time"
-	"unicode"
 )
 
 // 这是经过审核的开发拓扑。生产继续使用单独审核的清单；dev 源指纹不能批准 prod。
@@ -59,10 +54,6 @@ type localRuntimeRelease struct {
 	Services      []licenseevidence.Service            `json:"services"`
 }
 
-func localDigest(b []byte) string { h := sha256.Sum256(b); return "sha256:" + hex.EncodeToString(h[:]) }
-
-// 路径由宿主配置固定，绝不由 HTTP 请求决定。解析整个父级链，符号链接便无法重定向
-// 特权读或写。
 func safeLocalPath(path string, missingLeaf bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("unsafe local runtime path")
@@ -109,64 +100,6 @@ func readLocalPrivateJSON(path string, out any) error {
 	}
 	return nil
 }
-func localSourceDigest(root string) (string, error) {
-	if err := safeLocalPath(filepath.Join(root, "go.mod"), false); err != nil {
-		return "", err
-	}
-	if err := safeLocalPath(filepath.Join(root, "Dockerfile"), false); err != nil {
-		return "", err
-	}
-	files := []string{}
-	for _, name := range []string{"cmd", "internal", "migrations", "authz", "third_party/license-core", "go.mod", "go.sum", "Dockerfile", "docker-entrypoint.sh"} {
-		path := filepath.Join(root, name)
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			continue
-		}
-		err := filepath.WalkDir(path, func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if resolved, err := filepath.EvalSymlinks(path); err != nil || resolved != path {
-					return fmt.Errorf("unsafe development source directory")
-				}
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("symlink in development source")
-			}
-			if !entry.IsDir() {
-				if !entry.Type().IsRegular() {
-					return fmt.Errorf("invalid development source")
-				}
-				if err := safeLocalPath(path, false); err != nil {
-					return err
-				}
-				rel, e := filepath.Rel(root, path)
-				if e != nil {
-					return e
-				}
-				files = append(files, filepath.ToSlash(rel))
-			}
-			return nil
-		})
-		if err != nil {
-			return "", err
-		}
-	}
-	if len(files) == 0 {
-		return "", fmt.Errorf("development source unavailable")
-	}
-	sort.Strings(files)
-	var b strings.Builder
-	for _, name := range files {
-		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(&b, "%s\x00%s\n", name, localDigest(raw))
-	}
-	return localDigest([]byte(b.String())), nil
-}
 func (p *LocalDockerSubsystemProvisioner) localPlatformRoot() string {
 	return filepath.Dir(filepath.Dir(p.config.GatewayScriptPath))
 }
@@ -177,82 +110,6 @@ func (p *LocalDockerSubsystemProvisioner) localComposeFile() string {
 		name = "compose.local.yaml"
 	}
 	return filepath.Join(p.localPlatformRoot(), name)
-}
-func (p *LocalDockerSubsystemProvisioner) localRelease(ctx context.Context, app, env string) (localRuntimeRelease, error) {
-	fail := func() (localRuntimeRelease, error) {
-		return localRuntimeRelease{}, application.ErrRuntimeLicenseApprovalMismatch
-	}
-	if p == nil || !p.config.Enabled || env != "dev" || p.config.PlatformComposeProject != "basic-platform-local" || len(localLicenseServices[app]) == 0 {
-		return localRuntimeRelease{}, application.ErrRuntimeLicenseApprovalUnavailable
-	}
-	root := p.localPlatformRoot()
-	var release localRuntimeRelease
-	if readLocalPrivateJSON(filepath.Join(root, "runtime-approvals", "local-"+app+"-dev.json"), &release) != nil {
-		return localRuntimeRelease{}, application.ErrRuntimeLicenseApprovalUnavailable
-	}
-	if release.Version != 1 || release.Project != p.config.PlatformComposeProject || release.Application != app || release.Environment != env || !release.Reviewed || !validLocalReviewer(release.Operator) || application.ValidateRuntimeLicenseApprovals(release.Components) != nil {
-		return fail()
-	}
-	if err := safeLocalPath(p.localComposeFile(), false); err != nil {
-		return fail()
-	}
-	raw, err := os.ReadFile(p.localComposeFile())
-	if err != nil || localDigest(raw) != release.ComposeSHA256 {
-		return fail()
-	}
-	directory := app
-	if app == "customer_portal" {
-		directory = "customer_and_opportunity"
-	}
-	if app == "settlement" {
-		directory = "Settlement"
-	}
-	source, err := localSourceDigest(filepath.Join(filepath.Dir(root), directory))
-	if err != nil || source != release.SourceDigest {
-		return fail()
-	}
-	expected := localLicenseServices[app]
-	if len(release.Components) != len(expected) || len(release.Services) != len(expected) {
-		return fail()
-	}
-	coverage := localDigest([]byte("dev-source-fingerprint\x00" + app + "\x00" + source))
-	components := map[string]application.RuntimeLicenseApproval{}
-	services := map[string]licenseevidence.Service{}
-	for _, item := range release.Components {
-		components[item.ServiceID] = item
-	}
-	for _, item := range release.Services {
-		if _, ok := services[item.Name]; ok {
-			return fail()
-		}
-		services[item.Name] = item
-	}
-	for _, id := range expected {
-		c, ok := components[id]
-		s := services[id]
-		if !ok || c.CoverageDigest != coverage || s.Application != app || s.Environment != env || s.Protocol != "1" || s.Replicas != 1 || s.ImageDigest != c.ImageDigest || !localRuntimeVersion.MatchString(s.Version) {
-			return fail()
-		}
-		b, err := p.localImageProjection(ctx, c.ImageDigest)
-		if err != nil {
-			return localRuntimeRelease{}, err
-		}
-		if b.ID != c.ImageDigest || b.Version != s.Version || b.Protocol != "1" {
-			return fail()
-		}
-	}
-	m := release.Migration
-	if m.Service != localLicenseMigrations[app] || !localRuntimeDigest.MatchString(m.ImageDigest) || !localRuntimeVersion.MatchString(m.Version) || m.Protocol != "1" {
-		return fail()
-	}
-	image, e := p.localImageProjection(ctx, m.ImageDigest)
-	if e != nil {
-		return localRuntimeRelease{}, e
-	}
-	if image.ID != m.ImageDigest || image.Version != m.Version || image.Protocol != m.Protocol {
-		return fail()
-	}
-	return release, nil
 }
 
 type localImageMetadata struct {
@@ -315,70 +172,40 @@ func (p *LocalDockerSubsystemProvisioner) localDockerProjectionLimit(ctx context
 	return nil, application.ErrRuntimeLicenseDockerUnavailable
 }
 
-// ApprovedRuntimeLicenseComponents 返回本地发行已批准的运行时组件清单；读取全程持有
-// provisioner 互斥锁，未建立本地发行审批时返回错误而非空清单。
-func (p *LocalDockerSubsystemProvisioner) ApprovedRuntimeLicenseComponents(ctx context.Context, app, env string) ([]application.RuntimeLicenseApproval, error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	r, e := p.localRelease(ctx, app, env)
-	return r.Components, e
-}
-
-// SubsystemImageReadiness 检查批准清单中的镜像在本机是否存在（只读，不改变任何状态）。
-// 语义：摘要匹配 → Present=true；镜像缺失 → Present=false；Docker 不可用 → 返回错误（由上层按「未验证」处理，不谎报缺失）。
+// SubsystemImageReadiness 按内置运行目录与当前本地 Compose 镜像检查可用性。
+// V1 批准清单已下线：不再用批准文件里的 digest 充当就绪依据。
 func (p *LocalDockerSubsystemProvisioner) SubsystemImageReadiness(ctx context.Context, applicationCode, environment string) ([]application.SubsystemImageReadiness, error) {
-	components, err := p.ApprovedRuntimeLicenseComponents(ctx, applicationCode, environment)
+	set, err := (BuiltinRuntimeComponentCatalog{}).RuntimeComponentSet(ctx, applicationCode, environment)
 	if err != nil {
 		return nil, err
 	}
-	readiness := make([]application.SubsystemImageReadiness, 0, len(components))
-	for _, component := range components {
-		item := application.SubsystemImageReadiness{ServiceID: component.ServiceID, ImageDigest: component.ImageDigest}
-		projection, projectionErr := p.localImageProjection(ctx, component.ImageDigest)
+	images, err := p.localComposeImages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	readiness := make([]application.SubsystemImageReadiness, 0, len(set.Components))
+	for _, component := range set.Components {
+		imageRef := images[localComposeService(component.ServiceID)]
+		item := application.SubsystemImageReadiness{ServiceID: component.ServiceID}
+		if imageRef == "" {
+			readiness = append(readiness, item)
+			continue
+		}
+		projection, projectionErr := p.localImageProjection(ctx, imageRef)
 		if errors.Is(projectionErr, application.ErrRuntimeLicenseDockerUnavailable) {
 			return nil, projectionErr
 		}
-		item.Present = projectionErr == nil && strings.EqualFold(strings.TrimSpace(projection.ID), strings.TrimSpace(component.ImageDigest))
+		item.ImageDigest = strings.TrimSpace(projection.ID)
+		item.Present = projectionErr == nil && localRuntimeDigest.MatchString(item.ImageDigest)
 		readiness = append(readiness, item)
 	}
 	return readiness, nil
 }
 
-// ApprovedRuntimeLicenseLifecycle 返回本地发行的许可证生命周期视图，包含组件与由发行内容
-// 摘要派生的 ReleaseGeneration；未建立本地发行审批时失败关闭。
-func (p *LocalDockerSubsystemProvisioner) ApprovedRuntimeLicenseLifecycle(ctx context.Context, app, env string) (application.RuntimeLicenseReleaseApproval, error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	r, e := p.localRelease(ctx, app, env)
-	if e != nil {
-		return application.RuntimeLicenseReleaseApproval{}, e
-	}
-	return localLifecycle(r), nil
-}
-func localLifecycle(r localRuntimeRelease) application.RuntimeLicenseReleaseApproval {
-	binding, _ := json.Marshal([]any{r.ComposeSHA256, r.SourceDigest, r.Migration})
-	generation := "dev-" + strings.TrimPrefix(localDigest(binding), "sha256:")[:32]
-	out := application.RuntimeLicenseReleaseApproval{Components: r.Components, ReleaseGeneration: generation}
-	for _, c := range r.Components {
-		out.RequiredServiceIDs = append(out.RequiredServiceIDs, c.ServiceID)
-	}
-	return out
-}
-
-// CollectLicenseEvidence 基于已评审的本地 dev 发行采集许可证证据；发行未建立时返回
-// LICENSE_EVIDENCE_UNSUPPORTED，Docker 投影仅限白名单只读命令。
+// CollectLicenseEvidence 在本地 V2 模式下不采集运行证据：证据采集依赖按文件审批的
+// 评审发行（V1），该路径已下线。返回明确的不支持错误，绝不伪造报告。
 func (p *LocalDockerSubsystemProvisioner) CollectLicenseEvidence(ctx context.Context, app, env string) (licenseevidence.Report, error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	r, err := p.localRelease(ctx, app, env)
-	if err != nil {
-		return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: reviewed local dev release required")
-	}
-	collector, err := licenseevidence.NewCollector(localLicenseEvidenceRunner{p}, licenseevidence.Config{Project: r.Project, Services: r.Services, Timeout: 30 * time.Second})
-	if err != nil {
-		return licenseevidence.Report{}, err
-	}
-	return collector.Collect(ctx), nil
+	return licenseevidence.Report{}, provisioningError("LICENSE_EVIDENCE_UNSUPPORTED: local evidence collection requires the retired V1 review flow")
 }
 
 type localPinnedService struct {
@@ -446,118 +273,20 @@ func (p *LocalDockerSubsystemProvisioner) localRuntimeOverride() (string, error)
 	}
 	return path, nil
 }
-func (p *LocalDockerSubsystemProvisioner) deliverLocalRuntimeLicense(ctx context.Context, input application.SubsystemProvisioningInput) error {
-	var legacy, builtin []application.RuntimeLicenseCredential
-	for _, credential := range input.RuntimeLicenseCredentials {
-		if credential.RegistrationProtocol == catalog.RegistrationProtocolV2 {
-			builtin = append(builtin, credential)
-		} else {
-			legacy = append(legacy, credential)
-		}
-	}
-	if len(legacy) > 0 && len(builtin) > 0 {
-		legacyInput, builtinInput := input, input
-		legacyInput.RuntimeLicenseCredentials = legacy
-		builtinInput.RuntimeLicenseCredentials = builtin
-		if err := p.deliverLocalLegacyRuntimeLicense(ctx, legacyInput, true); err != nil {
-			return err
-		}
-		return p.deliverLocalBuiltinRuntimeLicense(ctx, builtinInput, true)
-	}
-	if len(builtin) > 0 {
-		return p.deliverLocalBuiltinRuntimeLicense(ctx, input, false)
-	}
-	return p.deliverLocalLegacyRuntimeLicense(ctx, input, false)
-}
 
-func (p *LocalDockerSubsystemProvisioner) deliverLocalLegacyRuntimeLicense(ctx context.Context, input application.SubsystemProvisioningInput, allowSubset bool) error {
-	path := filepath.Join(p.localPlatformRoot(), "runtime-approvals", "local-"+input.ApplicationCode+"-dev.json")
+// deliverLocalRuntimeLicense 只交付内置目录组件身份；出现任何 V1 凭据即失败关闭。
+// 凭据为空表示该应用尚未登记商业运行时（例如首次接入前），按未授权兼容模式继续部署，
+// 与生产交付口径一致；一旦有凭据就必须是完整的 V2 绑定。
+func (p *LocalDockerSubsystemProvisioner) deliverLocalRuntimeLicense(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if len(input.RuntimeLicenseCredentials) == 0 {
-		if _, err := os.Lstat(path); err == nil {
-			// 同时保留子系统供应失败语义（既有错误处理）与授权实例未初始化语义（用户可读诊断）。
-			return localReleaseCredentialError{message: "LICENSE_RUNTIME_DELIVERY_FAILED: 已批准本地发行必须交付组件凭据；请先在「商业授权」完成部署实例初始化并导入签发产物，再回到当前环境重试接入"}
-		}
 		return nil
 	}
-	release, err := p.localRelease(ctx, input.ApplicationCode, input.Environment)
-	if err != nil {
-		return err
-	}
-	digest, err := application.RuntimeLicenseReleaseDigest(localLifecycle(release))
-	if err != nil {
-		return err
-	}
-	settings := input.RuntimeLicenseSettings
-	if settings.InstanceID == "" || settings.Environment == "" || settings.PlatformBaseURL != "http://platform-api:8080" || settings.PlatformPublicKeyPath != "/app/data/keys/jwt-ed25519-public.pem" || settings.StateDirectory != "/var/lib/commercial-license" || !settings.AllowHTTP {
-		return provisioningError("LICENSE_RUNTIME_DELIVERY_FAILED: local runtime binding incomplete")
-	}
-	if !allowSubset && len(input.RuntimeLicenseCredentials) != len(release.Components) {
-		return provisioningError("LICENSE_RUNTIME_DELIVERY_FAILED: local component set mismatch")
-	}
-	expected := map[string]application.RuntimeLicenseApproval{}
-	for _, c := range release.Components {
-		expected[c.ServiceID] = c
-	}
-	root := p.localPlatformRoot()
-	runtimeDir := filepath.Join(root, "runtime")
-	if err := ensureLocalRuntimeDirectory(runtimeDir); err != nil {
-		return err
-	}
-	if resolved, err := filepath.EvalSymlinks(runtimeDir); err != nil || resolved != runtimeDir {
-		return provisioningError("unsafe local runtime directory")
-	}
-	override := localPinnedCompose{Services: map[string]localPinnedService{}, Volumes: map[string]struct{}{}}
-	overridePath := filepath.Join(runtimeDir, "local-license.compose.json")
-	if existing, err := p.localRuntimeOverride(); err != nil {
-		return err
-	} else if existing != "" {
-		if err = readLocalPrivateJSON(existing, &override); err != nil {
-			return err
-		}
-	}
-	// 升级早期 pin 文档，但不改变镜像或状态身份。
-	for id, item := range override.Services {
-		item.PullPolicy = "never"
-		item.Environment = localProjectBackgroundEnvironment(id, item.Image)
-		override.Services[id] = item
-	}
-	updates := map[string]map[string]string{}
 	for _, credential := range input.RuntimeLicenseCredentials {
-		c := credential.Approval
-		if wanted, ok := expected[c.ServiceID]; !ok || !reflect.DeepEqual(wanted, c) || credential.ClientID == "" || credential.ClientSecret == "" || credential.ReleaseDigest != digest {
-			return provisioningError("LICENSE_RUNTIME_DELIVERY_FAILED: local approved binding mismatch")
-		}
-		delete(expected, c.ServiceID)
-		values := map[string]string{"COMMERCIAL_LICENSE_ENABLED": "true", "COMMERCIAL_LICENSE_INSTANCE_ID": settings.InstanceID, "COMMERCIAL_LICENSE_ENVIRONMENT": settings.Environment, "COMMERCIAL_LICENSE_SERVICE_ID": c.ServiceID, "COMMERCIAL_LICENSE_STATE_PATH": runtimeLicenseStatePath(settings, credential), "COMMERCIAL_LICENSE_PLATFORM_PUBLIC_KEY_PATH": settings.PlatformPublicKeyPath, "COMMERCIAL_LICENSE_PLATFORM_BASE_URL": settings.PlatformBaseURL, "COMMERCIAL_LICENSE_CLIENT_ID": credential.ClientID, "COMMERCIAL_LICENSE_CLIENT_SECRET": credential.ClientSecret, "COMMERCIAL_LICENSE_COVERAGE_DIGEST": c.CoverageDigest, "COMMERCIAL_LICENSE_IMAGE_DIGEST": c.ImageDigest, "COMMERCIAL_LICENSE_ALLOW_HTTP": "true"}
-		for k, v := range values {
-			if !validEnvironmentKey(k) || !validEnvironmentValue(v) {
-				return provisioningError("invalid local runtime credential")
-			}
-		}
-		envPath := filepath.Join(runtimeDir, "license-"+c.ServiceID+".env")
-		if err := safeLocalPath(envPath, true); err != nil {
-			return err
-		}
-		updates[envPath] = values
-		// 具名卷继承不可变镜像目录的属主，使非 root 的 Project 与 Settlement 消费者可以
-		// 持久化其状态。
-		override.Volumes["license-state-"+c.ServiceID] = struct{}{}
-		override.Services[c.ServiceID] = localPinnedService{PullPolicy: "never", Image: c.ImageDigest, EnvFile: []string{envPath}, Volumes: []string{"license-state-" + c.ServiceID + ":/var/lib/commercial-license", filepath.Join(root, "data", "keys") + ":/app/data/keys:ro"}}
-		item := override.Services[c.ServiceID]
-		item.Environment = localProjectBackgroundEnvironment(c.ServiceID, c.ImageDigest)
-		override.Services[c.ServiceID] = item
-	}
-	for path, values := range updates {
-		if err := writeIsolatedRuntimeLicenseEnvironment(path, values); err != nil {
-			return err
+		if credential.RegistrationProtocol != catalog.RegistrationProtocolV2 {
+			return provisioningError("LICENSE_RUNTIME_DELIVERY_FAILED: legacy V1 runtime credential is no longer supported")
 		}
 	}
-	override.Services[release.Migration.Service] = localPinnedService{PullPolicy: "never", Image: release.Migration.ImageDigest}
-	raw, err := json.Marshal(override)
-	if err != nil {
-		return err
-	}
-	return writeLocalRuntimeJSON(overridePath, raw)
+	return p.deliverLocalBuiltinRuntimeLicense(ctx, input, false)
 }
 func localComposeService(serviceID string) string {
 	switch serviceID {
@@ -851,21 +580,6 @@ func ensureLocalRuntimeDirectory(path string) error {
 	}
 	return os.Mkdir(path, 0700)
 }
-
-func validLocalReviewer(value string) bool {
-	if strings.TrimSpace(value) == "" || len([]rune(value)) > 128 {
-		return false
-	}
-	for _, c := range value {
-		if unicode.IsControl(c) {
-			return false
-		}
-	}
-	return true
-}
-
-// encoding/json 默认接受重复键。批准与 pin 文档对 Python 审阅器和 Go Agent 必须只有
-// 一种含义。
 func validateLocalJSONKeys(d *json.Decoder, depth int) error {
 	if depth > 64 {
 		return fmt.Errorf("JSON nesting exceeds limit")

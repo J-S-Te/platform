@@ -36,7 +36,11 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 	current := map[string]string{}
 	if _, err := os.Stat(path); err == nil {
 		var err error
-		current, err = readEnvironmentValues(path)
+		if input.ApplicationCode == "settlement" {
+			current, err = readSettlementSourceValues(path)
+		} else {
+			current, err = readEnvironmentValues(path)
+		}
 		if err != nil {
 			return provisioningError("read business runtime configuration")
 		}
@@ -67,14 +71,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		if strings.EqualFold(strings.TrimSpace(current["SETTLEMENT_DEVELOPMENT_AUTH"]), "true") {
 			return nil
 		}
-		for _, field := range []struct{ key, source string }{{"CLIENT_ID", "client_id"}, {"OAUTH_CLIENT_ID", "oauth_client_id"}, {"APPLICATION_ID", "application_id"}, {"ENVIRONMENT_ID", "environment_id"}} {
-			value, err := resolveProductionBinding(input, "related_service.contract_management.settlement_contract_ingest."+field.source)
-			if err != nil {
-				return err
-			}
-			values["CONTRACT_INTEGRATION_"+field.key] = value
+		if err := settlementContractRuntimeValues(input, current, values); err != nil {
+			return err
 		}
-		values["SETTLEMENT_INTEGRATION_ENABLED"] = "true"
 		values["CONTRACT_INTEGRATION_AUDIENCE"] = "basic-platform-application"
 		values["PLATFORM_MACHINE_TOKEN_PUBLIC_KEY_PATH"] = "/app/data/keys/jwt-ed25519-public.pem"
 		values["PLATFORM_MACHINE_TOKEN_ISSUER"] = "basic-platform"
@@ -82,11 +81,23 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		values["PLATFORM_ENVIRONMENT_CODE"] = input.Environment
 		return nil
 	}
-	if err := p1CredentialValues(input, application.ServiceCredentialPortalReportDownloadIdentityRead, "PORTAL_REPORT_IDENTITY_CLIENT_ID", "PORTAL_REPORT_IDENTITY_CLIENT_SECRET", current, values); err != nil {
-		return err
+	localPortal, modeErr := localPortalMode(current, values)
+	if modeErr != nil {
+		return modeErr
+	}
+	if localPortal {
+		if _, err := os.Stat(path); err == nil {
+			if _, err := localPortalModeFromFile(path); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := p1CredentialValues(input, application.ServiceCredentialPortalReportDownloadIdentityRead, "PORTAL_REPORT_IDENTITY_CLIENT_ID", "PORTAL_REPORT_IDENTITY_CLIENT_SECRET", current, values); err != nil {
+			return err
+		}
+		values["PORTAL_REPORT_IDENTITY_URL"] = "http://customer-api:8090/customer-opportunity/api/v1/internal/portal-report/download-identity"
 	}
 	values["PORTAL_REPORT_STORE_ROOT"] = "/app/data/portal-reports"
-	values["PORTAL_REPORT_IDENTITY_URL"] = "http://customer-api:8090/customer-opportunity/api/v1/internal/portal-report/download-identity"
 	values["PORTAL_PDF_CONFIG_ROOT"] = "/app/data/portal-reports/pdfcpu"
 	values["PORTAL_CJK_FONT_PATH"] = "/app/assets/fonts/UIPPortalSans-Regular.ttf"
 	if !fresh {
@@ -100,6 +111,11 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 	}
 	if !validProductionGeneratedEnvironmentValue("PORTAL_REPORT_CONTENT_KEY_BASE64", values["PORTAL_REPORT_CONTENT_KEY_BASE64"]) || !validProductionGeneratedEnvironmentValue("PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64", values["PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64"]) || values["PORTAL_REPORT_CONTENT_KEY_BASE64"] == values["PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64"] {
 		return provisioningError("report vault requires distinct valid content and descriptor keys")
+	}
+	if localPortal {
+		if err := portalLocalRuntimeValues(input, current, values); err != nil {
+			return err
+		}
 	}
 	workerPath := strings.TrimSuffix(path, ".env.portal.local") + ".env.portal-report-worker.local"
 	if workerPath == path+".env.portal-report-worker.local" {
@@ -116,11 +132,23 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		return provisioningError("read report worker runtime")
 	}
 	workerValues := map[string]string{"PORTAL_REPORT_WORKER_MYSQL_DSN": values["PORTAL_MYSQL_DSN"], "PORTAL_OIDC_TENANT_ID": input.TenantID, "PORTAL_REPORT_STORE_ROOT": values["PORTAL_REPORT_STORE_ROOT"], "PORTAL_REPORT_CONTENT_KEY_BASE64": values["PORTAL_REPORT_CONTENT_KEY_BASE64"], "PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64": values["PORTAL_REPORT_INGEST_DESCRIPTOR_KEY_BASE64"], "PORTAL_REPORT_SOURCE_BASE_URL": "http://file-gateway:8086", "PORTAL_REPORT_SOURCE_TOKEN_URL": "http://platform-api:8080/oauth2/token", "PLATFORM_APPLICATION_CODE": "customer_portal", "PLATFORM_ENVIRONMENT_CODE": input.Environment}
+	if localPortal {
+		workerValues["PORTAL_CUSTOMER_DIRECTORY_MODE"] = "local"
+		workerValues["PORTAL_REPORT_WORKER_INGEST_ONLY"] = "true"
+	} else {
+		workerValues["PORTAL_CUSTOMER_DIRECTORY_MODE"] = "crm"
+	}
 	if !usableProductionCredential(worker["PORTAL_REPORT_WORKER_INGEST_ONLY"]) {
 		workerValues["PORTAL_REPORT_WORKER_INGEST_ONLY"] = "true"
 	}
-	if err := p1CredentialValues(input, application.ServiceCredentialPortalReportFileRead, "PORTAL_REPORT_SOURCE_CLIENT_ID", "PORTAL_REPORT_SOURCE_CLIENT_SECRET", worker, workerValues); err != nil {
-		return err
+	if localPortal {
+		if err := portalLocalCredentialValues(input, application.ServiceCredentialPortalReportFileRead, "PORTAL_REPORT_SOURCE", worker, workerValues); err != nil {
+			return err
+		}
+	} else {
+		if err := p1CredentialValues(input, application.ServiceCredentialPortalReportFileRead, "PORTAL_REPORT_SOURCE_CLIENT_ID", "PORTAL_REPORT_SOURCE_CLIENT_SECRET", worker, workerValues); err != nil {
+			return err
+		}
 	}
 	if _, err := os.Lstat(workerPath); os.IsNotExist(err) {
 		if err := os.WriteFile(workerPath, []byte("# Controlled independent report worker runtime\n"), 0600); err != nil {

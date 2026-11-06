@@ -37,7 +37,7 @@ func TestEventQueryRowMapsAuditEventColumns(t *testing.T) {
 
 // TestDedupModelKeysOnEnvironment 固定审计去重维度为（应用、环境、事件）。
 // 缺环境维度会让跨环境同名 event 被当成 DUPLICATE 丢弃（RUNTIME-08），
-// 因此这里同时校验列映射与主键顺序，防止模型与 000133 迁移再次漂移。
+// 因此这里同时校验列映射与主键顺序，防止模型与 000135 迁移再次漂移。
 func TestDedupModelKeysOnEnvironment(t *testing.T) {
 	parsed, err := schema.Parse(&dedupModel{}, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {

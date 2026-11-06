@@ -375,7 +375,10 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	loginTargetResolver, err := applicationregistryapplication.NewLoginTargetService(loginTargetRepository)
+	loginTargetResolver, err := applicationregistryapplication.NewLoginTargetService(
+		loginTargetRepository,
+		applicationregistryapplication.WithLoginTargetRedirectPolicy(postLoginRedirectPolicy(cfg)),
+	)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -410,6 +413,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		}
 		authHandlerOptions = append(authHandlerOptions, identityhttp.WithIDTokenVerifier(oidcIDTokenVerifierAdapter{verifier: idTokenVerifier}))
 	}
+	// 登录完成的重定向在处理器侧再执行一次来源判定：解析器之外的兜底，未批准来源
+	// 一律回落到平台同源页面。
+	authHandlerOptions = append(authHandlerOptions, identityhttp.WithPostLoginRedirectPolicy(postLoginRedirectPolicy(cfg)))
 	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth, auditService, cfg.Audit, loginTargetResolver, authHandlerOptions...)
 	if err != nil {
 		_ = database.Close(db)
@@ -572,6 +578,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	applicationManagementService, err := applicationregistryapplication.NewManagementService(
 		applicationManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+		applicationregistryapplication.WithManagementRedirectPolicy(postLoginRedirectPolicy(cfg)),
 	)
 	if err != nil {
 		_ = database.Close(oidcDB)
@@ -829,15 +836,6 @@ func NewAPI(cfg config.Config) (*API, error) {
 		licensecoordination.WithApplicationEnvironment(cfg.Audit.EnvironmentCode),
 		licensecoordination.WithBuiltinComponentSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{}),
 	}
-	if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseLifecycleApprovalSource); ok {
-		verifier, verifierErr := applicationregistryapplication.NewRuntimeLicenseLifecycleVerifier(source)
-		if verifierErr != nil {
-			_ = database.Close(db)
-			_ = logFile.Close()
-			return nil, verifierErr
-		}
-		licenseCoordinatorOptions = append(licenseCoordinatorOptions, licensecoordination.WithLifecycleApprovalVerifier(verifier))
-	}
 	licenseCoordinator, err := licensecoordination.NewService(db, licenseService, licensetrust.Keys(), licenseSnapshotSigner{applicationTokenManager, licensetrust.Keys()}, time.Now, licenseCoordinatorOptions...)
 	// 授权协调服务就绪后交接 inventory 即可读取真实授权状态。
 	handoverLicenseReader = licenseCoordinator
@@ -849,6 +847,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	// 状态接口在协调器之前创建，因此协调器就绪后再挂接运行状态读取，
+	// 让单次状态查询即可带出各应用的强制执行聚合（避免前端 N+1）。
+	operational.Licenses.ConfigureRuntimeStatus(licenseCoordinator)
 	operational.RuntimeLicenses, err = licensehttp.NewRuntimeHandler(licenseCoordinator)
 	if err != nil {
 		_ = database.Close(db)
@@ -863,12 +864,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		operational.RuntimeLicenses.ConfigureObserver(observer)
 	}
 	if operational.SubsystemOnboarding != nil {
-		var approvalSource applicationregistryapplication.RuntimeLicenseApprovalSource
-		if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseApprovalSource); ok {
-			approvalSource = source
-		}
-		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentServiceWithCatalog(
-			approvalSource,
+		// V2 是唯一登记协议：组件身份只来自内置目录，不再读取按文件审批的 V1 清单。
+		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentService(
 			applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{},
 			oauthClientManagementService,
 			licenseCoordinator,

@@ -92,6 +92,22 @@ func verifyRolePermissions(ctx context.Context, tx *gorm.DB, tenantID, operatorI
 		}
 		return nil
 	}
+	// 授予策略守卫必须先于任何 bypass 生效：SUPER_ADMIN_ONLY 权限所属角色只能由
+	// 租户级平台超级管理员授予。若放在 bypass.allows 之后，岗位模板路径的安全管理员
+	// 豁免会绕过它，等于让安全管理员把"仅超管可授"的权限转授给他人。超管本身在这里
+	// 短路返回，保持零额外查询。
+	if len(permissionIDs) > 0 && !IsPlatformSuperAdmin(ctx, tenantID, operatorID) {
+		var restricted int64
+		restrictedQuery := tx.WithContext(ctx).Table("authz_permission").
+			Where("tenant_id = ? AND application_id = ? AND id IN ? AND grant_policy = ?", tenantID, applicationID, permissionIDs, domain.GrantPolicySuperAdminOnly).
+			Count(&restricted)
+		if restrictedQuery.Error != nil {
+			return fmt.Errorf("load super-administrator-only permissions for delegation: %w", restrictedQuery.Error)
+		}
+		if restricted > 0 {
+			return fmt.Errorf("role %s contains permissions only a platform super administrator may delegate: %w", roleID, application.ErrForbidden)
+		}
+	}
 	// 平台超级管理员是租户控制面最高权限身份。其有效应用角色由
 	// applicationaccess 以只读投影展开，并不会逐个应用写入普通绑定；如果这里仍按
 	// 实际绑定判断，会把“超管看得到全部应用，却无法配置岗位标准模板”变成永久缺口。

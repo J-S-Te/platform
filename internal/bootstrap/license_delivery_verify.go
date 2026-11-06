@@ -96,7 +96,6 @@ func (r *OfflineDeliveryRunner) verifyEnforcement(ctx context.Context, verify of
 		status  coordination.Status
 	}
 	approved := make(map[string]approvedApplication, len(apps))
-	var source registry.RuntimeLicenseLifecycleApprovalSource
 	for _, app := range apps {
 		if err = ctx.Err(); err != nil {
 			return out, err
@@ -126,35 +125,8 @@ func (r *OfflineDeliveryRunner) verifyEnforcement(ctx context.Context, verify of
 		case catalog.BridgingComponentV2:
 			return out, fmt.Errorf("%w: %s bridging runtime proof is not supported", ErrOfflineEnforcementIncomplete, app)
 		default:
-			if source == nil {
-				var ok bool
-				source, ok = r.source.(registry.RuntimeLicenseLifecycleApprovalSource)
-				if !ok {
-					return out, fmt.Errorf("%w: isolated release approval reader unavailable", ErrOfflineEnforcementIncomplete)
-				}
-			}
-			release, e := source.ApprovedRuntimeLicenseLifecycle(ctx, app, "prod")
-			if e != nil {
-				return out, fmt.Errorf("%w: %s release approval unavailable", ErrOfflineEnforcementIncomplete, app)
-			}
-			digest, e := registry.RuntimeLicenseReleaseDigest(release)
-			if e != nil {
-				return out, fmt.Errorf("%w: %s release approval invalid", ErrOfflineEnforcementIncomplete, app)
-			}
-			lifecycle, e := registry.NewRuntimeLicenseLifecycleVerifier(source)
-			if e != nil {
-				return out, fmt.Errorf("%w: release verification unavailable", ErrOfflineEnforcementIncomplete)
-			}
-			// 复用真实的、感知代际的 OAuth 绑定。第二次可信读取必须与完整规范发布
-			// 一致，包括条件选择逻辑。
-			binding, e := lifecycle.VerifyRuntimeLifecycle(ctx, coordination.LifecycleInput{Application: app, Environment: "prod", ReleaseDigest: digest})
-			if e != nil {
-				return out, fmt.Errorf("%w: %s release approval changed", ErrOfflineEnforcementIncomplete, app)
-			}
-			if e = offlineEnforcementStatus(state, app, status, binding.Specs, verify, clock().UTC()); e != nil {
-				return out, e
-			}
-			approved[app] = approvedApplication{digest: digest, specs: binding.Specs, status: status}
+			// V1 审批路径已下线：离线交付只证明 BUILTIN_COMPONENT_V2 目标态。
+			return out, fmt.Errorf("%w: %s runtime registration mode is not V2; complete a controlled onboarding/update to migrate first", ErrOfflineEnforcementIncomplete, app)
 		}
 	}
 	// 后一个应用的检查不得掩盖前一个应用的续期、成员变化或心跳丢失。
@@ -164,36 +136,19 @@ func (r *OfflineDeliveryRunner) verifyEnforcement(ctx context.Context, verify of
 			return out, err
 		}
 		first := approved[app]
-		var digest string
-		if first.builtin {
-			set, e := r.builtinRuntimeComponentSet(ctx, app)
-			if e != nil {
-				return out, fmt.Errorf("%w: %s runtime component catalog changed during verification", ErrOfflineEnforcementIncomplete, app)
-			}
-			digest, e = runtimeComponentSetDigest(set)
-			if e != nil || digest != first.digest {
-				return out, fmt.Errorf("%w: %s release changed during verification", ErrOfflineEnforcementIncomplete, app)
-			}
-		} else {
-			release, e := source.ApprovedRuntimeLicenseLifecycle(ctx, app, "prod")
-			if e != nil {
-				return out, fmt.Errorf("%w: %s final release approval unavailable", ErrOfflineEnforcementIncomplete, app)
-			}
-			digest, e = registry.RuntimeLicenseReleaseDigest(release)
-			if e != nil || digest != first.digest {
-				return out, fmt.Errorf("%w: %s release changed during verification", ErrOfflineEnforcementIncomplete, app)
-			}
+		set, e := r.builtinRuntimeComponentSet(ctx, app)
+		if e != nil {
+			return out, fmt.Errorf("%w: %s runtime component catalog changed during verification", ErrOfflineEnforcementIncomplete, app)
+		}
+		digest, digestErr := runtimeComponentSetDigest(set)
+		if digestErr != nil || digest != first.digest {
+			return out, fmt.Errorf("%w: %s release changed during verification", ErrOfflineEnforcementIncomplete, app)
 		}
 		status, e := r.coordinator.Status(ctx, app)
 		if e != nil || status.Revision != first.status.Revision {
 			return out, fmt.Errorf("%w: %s runtime changed during verification", ErrOfflineEnforcementIncomplete, app)
 		}
-		if first.builtin {
-			e = offlineEnforcementStatusV2(state, app, status, first.specs, verify, clock().UTC())
-		} else {
-			e = offlineEnforcementStatus(state, app, status, first.specs, verify, clock().UTC())
-		}
-		if e != nil {
+		if e = offlineEnforcementStatusV2(state, app, status, first.specs, verify, clock().UTC()); e != nil {
 			return out, e
 		}
 		proof := OfflineEnforcementApplicationProof{Application: app, Environment: "prod", Revision: status.Revision, ReleaseDigest: digest}

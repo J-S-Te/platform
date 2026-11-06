@@ -359,6 +359,31 @@ func (handler *SubsystemOnboardingHandler) ensureUpdateServiceCredentials(ctx co
 	return credentials, nil
 }
 
+// keycloakBrowserClientMissing 判断规范化浏览器客户端是否真的不存在（或非 ACTIVE）。
+// 只按 client_id 判定，不读取或轮换既有 Secret；查询失败按"不缺失"处理，避免把
+// 基础设施故障误判成需要新建凭据。
+func (handler *SubsystemOnboardingHandler) keycloakBrowserClientMissing(ctx context.Context, tenantID, applicationCode, environment string) bool {
+	if handler.serviceCredentials == nil {
+		return false
+	}
+	// 轻量服务实现（测试替身或只读装配）不具备回调解析能力时保持原语义：
+	// 不补建也不会误轮换，避免把能力缺失变成部署失败。
+	if _, ok := handler.service.(subsystemEnvironmentRedirectURIResolver); !ok {
+		return false
+	}
+	canonical := strings.ToLower(strings.TrimSpace(applicationCode)) + "-" + strings.ToLower(strings.TrimSpace(environment)) + "-web"
+	clients, err := handler.serviceCredentials.ListOAuthClients(ctx, tenantID)
+	if err != nil {
+		return false
+	}
+	for _, client := range clients {
+		if strings.EqualFold(client.ClientID, canonical) && strings.EqualFold(client.Status, "ACTIVE") {
+			return false
+		}
+	}
+	return true
+}
+
 // ensureInitialPlatformBrowserCredential 面向只写的平台浏览器初始 Secret：
 // 仅受信任的首次接管/重试路径可为既有绑定客户端铸造新版本。
 func (handler *SubsystemOnboardingHandler) ensureInitialPlatformBrowserCredential(ctx context.Context, tenantID, applicationID, environmentID, applicationCode, environment, operatorID, redirectURI string) (application.OAuthClientView, string, error) {
@@ -597,13 +622,33 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	// 此前普通 UPDATE 会保留过期的运行时 Secret，即使 Client 映射与容器都健康，
 	// OIDC 回调仍会报 unauthorized_client。EnsureClient 只读取既有 Secret，
 	// 不轮换、也不暴露给浏览器。
-	keycloakRuntimeCredentialRefresh := strings.EqualFold(effectiveIssuerAlias, "keycloak") &&
-		!keycloakCutover && strings.TrimSpace(updateInput.RedirectURI) != ""
+	// Keycloak 环境每次受控更新都调和一次 RP 凭据：EnsureClient 只读取既有 Secret、
+	// 不轮换，但会把控制面当前 Secret 重新下发到运行文件。此前只在携带显式网关字段时
+	// 调和，导致 Keycloak 侧 Secret 漂移后子系统一直用旧值，回调交换返回
+	// unauthorized_client。回调地址优先用请求值，否则从控制面已登记字段推导。
+	_, keycloakRedirectResolvable := handler.service.(subsystemEnvironmentRedirectURIResolver)
+	keycloakRuntimeCredentialRefresh := strings.EqualFold(effectiveIssuerAlias, "keycloak") && !keycloakCutover &&
+		(strings.TrimSpace(updateInput.RedirectURI) != "" || keycloakRedirectResolvable)
 	ensureKeycloakCredentials := func(applicationID, environmentID string) bool {
 		if keycloakRuntimeCredentialRefresh {
 			if handler.keycloakControl == nil {
 				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 				return false
+			}
+			redirectURI := strings.TrimSpace(updateInput.RedirectURI)
+			if redirectURI == "" {
+				// 只从控制面已登记的 base_url + path_prefix 推导，不接受请求体提供的地址。
+				resolver, ok := handler.service.(subsystemEnvironmentRedirectURIResolver)
+				if !ok {
+					handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
+					return false
+				}
+				resolved, resolveErr := resolver.ResolveApplicationEnvironmentRedirectURI(request.Context(), principal.Tenant.ID, applicationID, environmentID)
+				if resolveErr != nil {
+					handler.writeError(writer, request, resolveErr)
+					return false
+				}
+				redirectURI = resolved
 			}
 			canonicalClientID := strings.ToLower(applicationCode) + "-" + strings.ToLower(environment) + "-web"
 			resolution := KeycloakClientResolution{ClientID: canonicalClientID, CanonicalClientID: canonicalClientID, Source: "canonical"}
@@ -617,7 +662,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 					resolution = effective
 				}
 			}
-			client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, updateInput.RedirectURI)
+			client, clientErr := handler.keycloakControl.EnsureClient(request.Context(), resolution.ClientID, "Basic Platform "+resolution.ClientID, redirectURI)
 			if clientErr != nil || client.ClientID != resolution.ClientID || strings.TrimSpace(client.ClientSecret) == "" {
 				handler.writeError(writer, request, application.ErrSubsystemProvisioningUnavailable)
 				return false

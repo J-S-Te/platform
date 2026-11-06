@@ -242,11 +242,24 @@ func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string
 	return r.resolveSessionSubject(ctx, r.database, sessionID, now, false)
 }
 
+// resolveSessionSubject 是授权、换码、刷新令牌、userinfo 与授权码消费共同复用的会话
+// 门禁，因此空闲超时必须落在这一条 SQL 上：否则浏览器会话已经因空闲被身份侧判定为
+// 未认证，OIDC 仍能用同一个会话无感续期（安全审计 M-1）。
+//
+// 语义逐字对齐 identity/infrastructure.FindPrincipalBySession：
+//   - sec_login_policy 无该租户行（LEFT JOIN 为 NULL）→ 使用默认 1800 秒，等同
+//     security 模块 GetLoginPolicy 对 ErrNotFound 合成 defaultLoginPolicy 的行为；
+//   - 策略值为 0 → 失败关闭，全部拒绝（身份侧 idleTimeout <= 0 直接返回
+//     ErrUnauthenticated），绝不被当作“禁用空闲检查”而放行；
+//   - 其余正值 → 生效，谓词为 last_interactive_at > now - idle（严格大于，与身份侧
+//     LastInteractiveAt.After(idleCutoff) 一致，恰好等于截止时刻视为超窗）。
+//
 // 非中央模式使用 IAM 空闲策略；中央模式的真实交互只更新 sgov_session，
 // 因此必须由下方 PlatformState 统一裁决，不能再叠加已停止推进的旧活动时钟。
-// resolveSessionSubject 从未撤销、未过期且满足租户空闲策略的会话恢复主体。
-// 参数：ctx 为调用上下文，database 为数据库连接，sessionID 为会话标识，now 为校验时间，lock 控制行锁。
-// 返回值：有效会话主体；失效会话返回 ErrNotFound，数据库失败返回原错误。
+//
+// 精度：iam_session.last_interactive_at 是 DATETIME(3)，比较前把 now 截断到毫秒，
+// 避免亚毫秒差让边界值被误判为仍在窗口内；截断只影响毫秒以下，不改变上述边界。
+// 时区：now 由调用方按 UTC 传入，SQL 内只做 SECONDS 减法，不引入会话时区换算。
 func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.DB, sessionID string, now time.Time, lock bool) (domain.SessionSubject, error) {
 	var row struct {
 		TenantID, SessionID, AccountID, UserID string
@@ -255,6 +268,7 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 		MustChangePassword                     bool
 		AuthenticatedAt                        time.Time
 	}
+	idleCutoffBase := now.UTC().Truncate(time.Millisecond)
 	query := database.WithContext(ctx).Table("iam_session").
 		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at, iam_session.created_at AS authenticated_at, COALESCE(iam_password_credential.must_change, FALSE) AS must_change_password").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
@@ -263,7 +277,6 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 		Joins("LEFT JOIN iam_password_credential ON iam_password_credential.account_id = iam_account.id AND iam_password_credential.status = ?", activeStatus).
 		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now)
 	if !r.central {
-		idleCutoffBase := now.UTC().Truncate(time.Millisecond)
 		query = query.Joins("LEFT JOIN sec_login_policy ON sec_login_policy.tenant_id = iam_session.tenant_id").
 			Where("COALESCE(sec_login_policy.idle_timeout_seconds, ?) > 0 AND iam_session.last_interactive_at > DATE_SUB(?, INTERVAL COALESCE(sec_login_policy.idle_timeout_seconds, ?) SECOND)", defaultSessionIdleTimeoutSeconds, idleCutoffBase, defaultSessionIdleTimeoutSeconds)
 	}

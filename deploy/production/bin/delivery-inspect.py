@@ -502,6 +502,9 @@ class Inspection:
         with self.media.open(name) as source:
             return read_bytes(source, limit)
 
+    # 用途：只读校验总清单、实际介质与已绑定构建选择，不由运行参数取消依赖。
+    # 参数：无；使用当前介质及检查阶段。
+    # 返回值：无；记录结构证据，未知来源或绑定错误抛出Invalid。
     def structure(self):
         self.current_id = "media.checksums"
         manifest_raw = self.raw("SHA256SUMS")
@@ -608,7 +611,15 @@ class Inspection:
         else:
             self.pending("assets.recovery-tools", "MEDIA", "旧资产缺少新版分阶段恢复工具，不能套用新版安装入口", True)
             self.action("MAC", "REBUILD_MATCHING_BASELINE", "使用新批次重新制作匹配平台与资产；原介质继续配套原安装入口，不修改原包摘要")
-        if "customer_portal" in self.report["applications"] and "customer_and_opportunity" not in self.report["applications"]:
+        portal_mode = self.build_info.get("PORTAL_CUSTOMER_DIRECTORY_MODE", "crm")
+        if portal_mode not in ("crm", "local"):
+            raise Invalid("invalid bound Portal build directory mode")
+        if portal_mode == "local" and not HEX.fullmatch(self.build_info.get("SOURCE_INPUT_SHA256", "")):
+            raise Invalid("local Portal build mode lacks source input binding")
+        self.report["portal_build_directory_mode"] = portal_mode
+        if "customer_portal" in self.report["applications"] and portal_mode == "local":
+            self.check("media.portal-local-mode", "PASS", "MEDIA", "介质明确绑定本地Portal发行；首次安装仍须显式选择runtime local并通过authority及运行依赖检查")
+        if "customer_portal" in self.report["applications"] and "customer_and_opportunity" not in self.report["applications"] and portal_mode == "crm":
             # 已有 CRM 仅在声明扩容时可满足此条件，下方 authorization() 检查该确切场景。
             self.portal_needs_existing = True
         else:

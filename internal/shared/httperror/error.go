@@ -17,6 +17,8 @@ func New(code, message string, details any) Error {
 var (
 	// NotFound 表示调用方可解析范围内不存在该路由或资源，而非全局不存在。
 	NotFound = New("PLATFORM_NOT_FOUND", "请求的资源不存在", nil)
+	// Gone 表示资源曾经存在但已过期或不可再获取（例如超过保留期被清理的审计导出文件）。
+	Gone = New("PLATFORM_GONE", "请求的资源已过期或不可用", nil)
 	// MethodNotAllowed 表示路由存在但不支持该 HTTP 方法。
 	MethodNotAllowed = New("PLATFORM_METHOD_NOT_ALLOWED", "请求方法不被支持", nil)
 	// Validation 表示请求未满足 OpenAPI 输入契约。

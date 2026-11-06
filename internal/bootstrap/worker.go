@@ -258,6 +258,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			}
 			managementService, managementErr := applicationregistryapplication.NewManagementService(
 				managementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+				applicationregistryapplication.WithManagementRedirectPolicy(postLoginRedirectPolicy(cfg)),
 			)
 			if managementErr != nil {
 				_ = database.Close(db)
@@ -380,11 +381,31 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			}
 		} else if customerPortalBrokerClientID != "" {
 			if err := controlPlane.VerifyCustomerPortalBrokerExists(context.Background()); err != nil {
-				_ = database.Close(db)
-				_ = logFile.Close()
-				return nil, fmt.Errorf("verify customer portal Broker exists: %w", err)
+				// 门户 Broker 与主 Broker 同构：OAuth client 已有活动凭据时 registrar 不会返回
+				// secret，此时若 Keycloak 侧 IdP 配置缺失/损坏（例如平台库恢复后 Keycloak 重建），
+				// 必须按既有恢复语义轮换凭据并重建 IdP，而不是让整个 API/Worker 启动失败。
+				// 只对已定性的配置漂移恢复，不对瞬时网络/服务故障轮换凭据。
+				if !applicationregistryhttp.IsRecoverableKeycloakBrokerConfigurationError(err) {
+					_ = database.Close(db)
+					_ = logFile.Close()
+					return nil, fmt.Errorf("verify customer portal Broker exists: %w", err)
+				}
+				recoveredClientID, recoveredClientSecret, recoveryErr := brokerRegistrar.RecoverCustomerPortalBroker(context.Background(), brokerTenantID, "system-keycloak")
+				if recoveryErr != nil {
+					_ = database.Close(db)
+					_ = logFile.Close()
+					return nil, fmt.Errorf("recover incomplete customer portal Broker credential: %w", recoveryErr)
+				}
+				customerPortalBrokerClientID, customerPortalBrokerClientSecret = recoveredClientID, recoveredClientSecret
+				if err := controlPlane.EnsureCustomerPortalBroker(context.Background(), customerPortalBrokerClientID, customerPortalBrokerClientSecret); err != nil {
+					_ = database.Close(db)
+					_ = logFile.Close()
+					return nil, fmt.Errorf("reconcile recovered customer portal Broker policy: %w", err)
+				}
+				logger.Warn("recovered incomplete customer portal Broker IdP configuration", "client_id", customerPortalBrokerClientID)
+			} else {
+				logger.Info("verified customer portal Broker IdP exists with active credentials", "client_id", customerPortalBrokerClientID)
 			}
-			logger.Info("verified customer portal Broker IdP exists with active credentials", "client_id", customerPortalBrokerClientID)
 		}
 		mappingStore, err := keycloakauthorizationinfrastructure.NewClientMappingStore(db)
 		if err != nil {

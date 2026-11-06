@@ -25,14 +25,28 @@
 #     值只写入 0700 临时目录内的 0600 文件，再以 curl -b <file> 发送，不进入命令行；
 #   - --cookie 保留兼容旧用法，但值会进入 shell 历史与进程列表，脚本会打印警告；
 #   - 只调用 POST /api/v1/security/locked-accounts/{account_id}/unlock；
+#   - 账号/密码进入登录体前按 JSON 字符串转义：有 python3 时等价于
+#     json.dumps(text, ensure_ascii=False)（覆盖 \" \\ \n \r \t \b \f 与全部 <0x20 控制字符，
+#     中文等非 ASCII 原样保留）；无 python3 时降级实现只覆盖 \ " \n \r \t，
+#     口令含 \b \f 或其他控制字符时仍可能拼出非法 JSON（平台回 400/422）；
+#   - 临时目录 0700，其中的 Cookie jar、响应体、登录体一律 0600（启动即 umask 077）；
 #   - 解锁不会恢复锁定期间已被撤销的会话，目标账号需要重新登录；
 #   - 该操作会被平台请求审计记录（操作者、来源地址、结果）。
+#
+# 退出码：
+#   0  成功（解锁完成并通过复核；--list 无锁定账号；--probe 探测完成；用户取消）
+#   1  错误（登录/权限/接口失败、复核未通过、Cookie 文件校验失败等）
+#   2  用法错误（未知参数、缺少必填参数、互斥参数同时指定）
+#   3  目标未锁定或未找到（--target 指定的账号不在锁定列表中）
 set -euo pipefail
+# SEC：临时 cookie jar、响应体、登录体不依赖调用方 umask，统一 0600。
+umask 077
 
 BASE_URL=""
 ORIGIN=""
 ADMIN=""
 TARGET="admins"
+TARGET_SET=0
 ACCOUNT_ID=""
 LIST_ONLY=0
 ASSUME_YES=0
@@ -56,13 +70,19 @@ usage() {
 
 log() { printf '[unlock] %s\n' "$*" >&2; }
 fail() { printf '[unlock] ERROR: %s\n' "$*" >&2; exit 1; }
+# 用法错误统一退出码 2（与 usage 注释块的退出码说明一致）。
+usage_error() {
+    printf '[unlock] ERROR: %s\n' "$*" >&2
+    printf '[unlock] 提示：--help 可查看用法与退出码说明\n' >&2
+    exit 2
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --base-url) BASE_URL="${2:-}"; shift 2 ;;
         --origin) ORIGIN="${2:-}"; shift 2 ;;
         --admin) ADMIN="${2:-}"; shift 2 ;;
-        --target) TARGET="${2:-}"; shift 2 ;;
+        --target) TARGET="${2:-}"; TARGET_SET=1; shift 2 ;;
         --account-id) ACCOUNT_ID="${2:-}"; shift 2 ;;
         --list) LIST_ONLY=1; shift ;;
         --yes) ASSUME_YES=1; shift ;;
@@ -73,11 +93,11 @@ while [[ $# -gt 0 ]]; do
         --probe) PROBE=1; shift ;;
         --cookie-name) COOKIE_NAME="${2:-bp_session}"; shift 2 ;;
         -h|--help) usage 0 ;;
-        *) usage 1 ;;
+        *) usage 2 ;;
     esac
 done
 
-[[ -n "${BASE_URL}" ]] || fail "缺少 --base-url"
+[[ -n "${BASE_URL}" ]] || usage_error "缺少 --base-url"
 BASE_URL="${BASE_URL%/}"
 [[ -n "${ORIGIN}" ]] || ORIGIN="${BASE_URL}"
 if [[ "${PROBE}" -eq 1 ]]; then
@@ -103,13 +123,13 @@ if [[ "${PROBE}" -eq 1 ]]; then
 fi
 
 [[ -n "${ADMIN}" || -n "${COOKIE}" || "${COOKIE_STDIN}" -eq 1 || -n "${COOKIE_FILE_IN}" ]] ||
-    fail "缺少 --admin（有解锁权限的账号名）或会话 Cookie（--cookie-stdin / --cookie-file / --cookie）"
+    usage_error "缺少 --admin（有解锁权限的账号名）或会话 Cookie（--cookie-stdin / --cookie-file / --cookie）"
 [[ "${BASE_URL}" == https://* ]] || log "警告：入口不是 https，密码与会话将以明文传输"
 
 command -v curl >/dev/null 2>&1 || fail "需要 curl"
 
 if [[ "${LIST_ONLY}" -eq 0 && -z "${ACCOUNT_ID}" && -z "${TARGET}" ]]; then
-    fail "缺少 --target 或 --account-id"
+    usage_error "缺少 --target 或 --account-id"
 fi
 
 # 安全（SEC-4）：会话 Cookie 不进入 curl 的 argv（会留在 shell 历史与 ps 输出里）。
@@ -119,7 +139,7 @@ cookie_sources=0
 [[ -z "${COOKIE}" ]] || cookie_sources=$((cookie_sources + 1))
 [[ "${COOKIE_STDIN}" -eq 0 ]] || cookie_sources=$((cookie_sources + 1))
 [[ -z "${COOKIE_FILE_IN}" ]] || cookie_sources=$((cookie_sources + 1))
-[[ "${cookie_sources}" -le 1 ]] || fail "--cookie / --cookie-stdin / --cookie-file 只能指定一个"
+[[ "${cookie_sources}" -le 1 ]] || usage_error "--cookie / --cookie-stdin / --cookie-file 只能指定一个"
 
 file_mode() { # 输出八进制权限位；Linux 用 stat -c，macOS 用 stat -f
     stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
@@ -219,8 +239,33 @@ api() {
     curl "${args[@]}" || true
 }
 
+# json_escape <text> -> 打印可直接嵌入 JSON 双引号字符串的转义文本（不含外层引号）。
+#
+# 有 python3 时等价于 json.dumps(text, ensure_ascii=False)[1:-1]：
+#   - 转义 " 与 \，以及 \n \r \t \b \f；
+#   - 其余 <0x20 控制字符转成 \u00XX；
+#   - UTF-8 中文/emoji 等非 ASCII 字符原样保留（JSON 允许字面量）；
+#   - 以字节读入、UTF-8 解码，不受调用方 locale 影响（非法字节用 surrogateescape 原样输出）。
+# 无 python3 时降级为确定性纯 bash 实现，只覆盖 \ " \n \r \t；
+#   降级边界：\b \f 与其他控制字符（如 \x01）不会被转义，含这类字符的账号/口令
+#   仍会拼出非法 JSON（平台回 400/422）；需要完整覆盖时请安装 python3。
 json_escape() {
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$1" | python3 -c '
+import json,sys
+text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+out = json.dumps(text, ensure_ascii=False)[1:-1]
+sys.stdout.buffer.write(out.encode("utf-8", "surrogateescape"))
+'
+        return
+    fi
+    local escaped="$1"
+    escaped="${escaped//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    escaped="${escaped//$'\n'/\\n}"
+    escaped="${escaped//$'\r'/\\r}"
+    escaped="${escaped//$'\t'/\\t}"
+    printf '%s' "${escaped}"
 }
 
 # 从锁定列表响应提取行：account_id<TAB>account_name<TAB>locked_until<TAB>failure_count
@@ -240,6 +285,35 @@ for item in data.get("items") or []:
     tr '{' '\n' | sed -n 's/.*"account_id":"\([^"]*\)".*"account_name":"\([^"]*\)".*/\1	\2		/p'
 }
 
+# json_total <body> -> 打印响应信封的分页总数（.data.total；取不到时回退顶层 total，仍无则空）。
+#
+# 有 python3 时按 JSON 结构精确取值，避免响应里出现多个 "total" 字段（如顶层/meta/分页块）
+# 时被贪心匹配误判成别的数字；无 python3 时退化为 grep 取第一个 "total" 数字字段。
+json_total() {
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$1" | python3 -c '
+import json,sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+total = None
+if isinstance(doc, dict):
+    data = doc.get("data")
+    if isinstance(data, dict):
+        total = data.get("total")
+    if total is None:
+        total = doc.get("total")
+if isinstance(total, int) and not isinstance(total, bool):
+    sys.stdout.write("%d\n" % total)
+'
+        return
+    fi
+    printf '%s' "$1" |
+        grep -oE '"total"[[:space:]]*:[[:space:]]*[0-9]+' |
+        sed -e 's/[^0-9]//g' -e '1!d' || true
+}
+
 # 分页收集锁定账号，输出全部行。
 collect_locked() {
     local page=1 code body total
@@ -252,8 +326,9 @@ collect_locked() {
             *)   fail "查询锁定账号失败，HTTP ${code}：$(printf '%s' "${body}" | head -c 200)" ;;
         esac
         printf '%s' "${body}" | locked_rows
-        total="$(printf '%s' "${body}" | sed -n 's/.*"total":\([0-9]*\).*/\1/p' | head -1)"
-        if [[ -z "${total}" || "${total}" -le $((page * 100)) ]]; then
+        total="$(json_total "${body}")"
+        # 保持既有语义：total > page*page_size 时继续翻页；取不到总数则视为最后一页。
+        if [[ ! "${total}" =~ ^[0-9]+$ || "${total}" -le $((page * 100)) ]]; then
             break
         fi
         page=$((page + 1))
@@ -269,6 +344,7 @@ else
 login_payload="${WORKDIR}/login.json"
 printf '{"account":"%s","password":"%s","login_type":"password"}' \
     "$(json_escape "${ADMIN}")" "$(json_escape "${PASSWORD}")" > "${login_payload}"
+chmod 600 "${login_payload}"
 
 login_code="$(api POST /api/v1/auth/login "${login_payload}")"
 login_body="$(cat "${BODY_FILE}")"
@@ -302,9 +378,23 @@ if [[ -z "${ACCOUNT_ID}" ]]; then
         printf '%s\n' "${rows}" | sed -n '1,20p' >&2
         exit 3
     fi
+    log "目标账号：${TARGET}（account_id=${ACCOUNT_ID}）"
+else
+    # 显式 --account-id：文案必须反映真实目标——在锁定列表里就打印 account_name，
+    # 不在列表（已解锁/超出分页/ID 写错）时如实说明，但仍按指定 ID 尝试解锁，
+    # 由解锁响应的 404/409 兜底给出原因。
+    explicit_name="$(printf '%s\n' "${rows}" | awk -F'\t' -v id="${ACCOUNT_ID}" '$1 == id {print $2; exit}')"
+    if [[ -n "${explicit_name}" ]]; then
+        explicit_desc="${explicit_name}（account_id=${ACCOUNT_ID}，在锁定列表中）"
+    else
+        explicit_desc="account_id=${ACCOUNT_ID} 未在锁定列表中（可能已解锁/超出分页），仍按指定 ID 尝试"
+    fi
+    if [[ "${TARGET_SET}" -eq 1 && -n "${TARGET}" ]]; then
+        log "目标账号：--target ${TARGET}；--account-id ${explicit_desc}"
+    else
+        log "目标账号：${explicit_desc}"
+    fi
 fi
-
-log "目标账号：${TARGET:-${ACCOUNT_ID}}（account_id=${ACCOUNT_ID}）"
 if [[ "${ASSUME_YES}" -eq 0 ]]; then
     [[ -t 0 ]] || fail "非交互环境请加 --yes"
     read -r -p "确认解除该账号锁定？[y/N] " answer

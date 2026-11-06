@@ -73,6 +73,9 @@ publish_registered_customer() (
   fi
 )
 
+# 用途：恢复已经完成平台接入的单个组件及其选中能力。
+# 参数：第一个参数为业务组件编码。
+# 返回值：备份、迁移或启动失败返回非零，不伪造就绪。
 start_registered() (
   local component="$1" service database migration current_id configured services item selected
   scope_require "$component" || return
@@ -112,9 +115,12 @@ start_registered() (
   compose up -d --no-deps --wait --wait-timeout 240 "$database" || return
   "$script_dir/backup-all.sh" --deployment-lock-fd 7 || return
   [[ "$component" != project ]] || project_background_prepare || return
-  if [[ "$component" == data-analysis ]]; then
-    compose run --no-deps data-analysis-metabase-init || return
-  fi
+  local initializers
+  initializers="$(scope_initialization_services "$component")" || return
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    compose run --no-deps "$service" || return
+  done <<< "$initializers"
   # 失败的一次性容器保留，docker ps -a / docker logs 可直接排查。
   compose run --no-deps "$migration" || return
   case "$component" in

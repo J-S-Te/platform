@@ -173,6 +173,16 @@ func (c *writeBoundaryConn) QueryContext(_ context.Context, query string, args [
 			return nil, errors.New("role permission check lost tenant/application/role")
 		}
 		return &writeBoundaryRows{columns: []string{"permission_id"}, values: [][]driver.Value{{"permission-read"}, {"permission-manage"}}}, nil
+	case strings.Contains(q, "grant_policy"):
+		// 授予策略守卫：本场景的目标角色只含 DEFAULT 权限；委派判定必须先于任何
+		// 授权写入，并保留租户/应用边界。
+		if c.scenario.writes > 0 {
+			return nil, errors.New("grant policy checked after authorization write")
+		}
+		if !boundaryArg(args, "tenant-1") || !boundaryArg(args, "app-1") || !boundaryArg(args, "SUPER_ADMIN_ONLY") {
+			return nil, fmt.Errorf("grant policy check lost tenant/application/policy boundary: %s", query)
+		}
+		return &writeBoundaryRows{columns: []string{"count"}, values: [][]driver.Value{{int64(0)}}}, nil
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}

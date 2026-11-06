@@ -989,21 +989,20 @@ dev_up() {
     docker_control_available || fail "Docker 不可用：请确认 OrbStack 已启动，并执行 docker context use orbstack"
     # 控制面：含平台迁移、首个超级管理员初始化、六个子系统探测候选。
     start_control_plane_only
-    # 运行批准：只生成候选并打印核对单；发布仍是独立的人工审核动作。
-    local operator="${LOCAL_DEV_OPERATOR:-${admin_account_name:-local-dev}}"
-    log "生成运行批准候选（只生成，不发布；operator=${operator}）"
-    python3 "${script_dir}/refresh-local-runtime-approvals.py" \
-        --workspace "${workspace_root}" --operator "$operator" || true
+    # V2 是唯一登记协议：组件身份来自编译进版本的内置目录（catalog.Version），
+    # 不再生成 V1 运行批准候选；已有批准文件也不会再被运行时读取。
+    log "跳过运行批准候选：V2 内置目录不需要按文件审批（refresh-approvals/dev-approve 已下线）"
     # 收尾：状态总览给出唯一下一步。
     python3 "${script_dir}/local-status.py" || true
     return 0
 }
 
-# 发布运行批准：仍要求显式 --approve 才会写入批准文件。
+# V1 运行批准已下线：V2 的组件集合由内置目录（catalog.Version）决定，
+# 变更组件需要升级平台/Agent 版本并走受控接入，不能靠生成审批文件。
 dev_approve() {
-    local operator="${LOCAL_DEV_OPERATOR:-${admin_account_name:-local-dev}}"
-    exec python3 "${script_dir}/refresh-local-runtime-approvals.py" \
-        --workspace "${workspace_root}" --operator "$operator" "$@"
+    log "V1 运行批准已下线：组件身份来自编译进版本的内置目录，无需人工批准"
+    log "如需变更组件集合，请升级平台/Agent 镜像后走受控接入（subsystem.sh onboard/retry）"
+    return 2
 }
 
 # 独立候选构建入口：只准备本地候选镜像。不检查旧运行镜像是否存在、不执行迁移、
@@ -1226,6 +1225,18 @@ public_url_to_route() {
     printf '%s' "$route"
 }
 
+# contract_api_running 只读探测当前 Compose 项目里是否有运行中的 contract-api 容器。
+# 合同改为 discovery 接入后，"已接入"与"本次确实启动了合同后端"是两件事：配置齐全
+# 但目录发布失败时 contract-api 不会启动，此时不能对前端发起合同路由断言。
+contract_api_running() {
+	local container_id
+	container_id="$(docker ps \
+		--filter "label=com.docker.compose.project=${compose_project}" \
+		--filter "label=com.docker.compose.service=contract-api" \
+		--format '{{.ID}}' 2>/dev/null || true)"
+	[[ -n "$container_id" ]]
+}
+
 verify_gateway_routes() {
 	local platform_membership_status contract_health_status contract_session_status contract_login_status settlement_session_status
 	local customer_health_status customer_session_status portal_health_status portal_session_status
@@ -1242,8 +1253,7 @@ verify_gateway_routes() {
     [[ "$platform_membership_status" == "401" ]] || \
         fail "基础平台任职关系接口返回 ${platform_membership_status}，预期未登录状态为 401；请重新构建并启动 api 与 frontend 容器"
 
-    wait_for_frontend_status /contract_management/healthz 200 "合同管理健康检查路径"
-	wait_for_frontend_status /settlement/healthz 200 "结算与开票健康检查路径"
+    wait_for_frontend_status /settlement/healthz 200 "结算与开票健康检查路径"
 	settlement_session_status="$(frontend_http_status /settlement/api/v1/auth/me)" || \
 		fail "无法访问结算与开票登录状态接口"
 	# 结算已接入平台统一身份 OIDC；自检请求不携带 Cookie，未登录应为 401。
@@ -1255,51 +1265,61 @@ verify_gateway_routes() {
 	[[ "$settlement_session_status" == "$settlement_expected_auth_status" ]] || \
 		fail "本地结算登录状态接口返回 ${settlement_session_status}，预期为 ${settlement_expected_auth_status}"
 
-    # 自检请求不携带登录 Cookie，因此 /auth/me 应返回 401。若返回 404，说明
-    # /contract_management 前缀未被正确移除，部署必须立即失败。
-    contract_session_status="$(frontend_http_status /contract_management/api/v1/auth/me)" || \
-        fail "无法访问合同管理登录状态接口"
-    [[ "$contract_session_status" == "401" ]] || \
-        fail "合同管理登录状态接口返回 ${contract_session_status}，预期未登录状态为 401"
+    # 合同管理改为 discovery 接入后不再由平台迁移预置应用行：未接入（或无运行中的
+    # contract-api）时前端没有该上游，健康检查只会 502，因此整段合同检查按跳过处理。
+    if [[ "${contract_catalog_ready:-true}" != false ]] && contract_configured && contract_api_running; then
+        wait_for_frontend_status /contract_management/healthz 200 "合同管理健康检查路径"
 
-    contract_login_status="$(frontend_http_status /contract_management/auth/login)" || \
-        fail "无法访问合同管理登录入口"
-    [[ "$contract_login_status" == "302" ]] || \
-        fail "合同管理登录入口返回 ${contract_login_status}，预期为 302 OIDC 跳转"
+        # 自检请求不携带登录 Cookie，因此 /auth/me 应返回 401。若返回 404，说明
+        # /contract_management 前缀未被正确移除，部署必须立即失败。
+        contract_session_status="$(frontend_http_status /contract_management/api/v1/auth/me)" || \
+            fail "无法访问合同管理登录状态接口"
+        [[ "$contract_session_status" == "401" ]] || \
+            fail "合同管理登录状态接口返回 ${contract_session_status}，预期未登录状态为 401"
 
-    # 继续验证合同后端生成的真实授权地址。若 Nginx 在转发 /authorize 时丢失
-    # client_id、redirect_uri、state、nonce 或 PKCE 参数，此处会得到 400 并阻止部署。
-    contract_authorize_url="$(frontend_http_location /contract_management/auth/login)" || \
-        fail "合同管理登录入口未返回 OIDC 授权地址"
-    contract_issuer="$(env_value "$contract_env_file" OIDC_ISSUER)"
-    case "$contract_authorize_url" in
-        */realms/*/protocol/openid-connect/auth\?*)
-            # Keycloak RP：合同 API 启动时已经通过同一环境的私网后通道完成
-            # discovery；这里仅验证浏览器被正确导向公开 Realm，而不让前端
-            # 容器错误地以 localhost 访问浏览器专用的公开地址。
-            [[ "$contract_issuer" == */realms/* ]] || \
-                fail "合同管理登录入口跳转到 Keycloak，但 OIDC_ISSUER 不是 Realm 地址"
-            ;;
-        *)
-            # 兼容尚未迁移的基础平台 OIDC 环境。
-            contract_authorize_route="$(public_url_to_route "$contract_authorize_url")" || \
-                fail "合同管理登录入口返回了无法识别的 OIDC 授权地址"
-            [[ "$contract_authorize_route" == /authorize\?* ]] || \
-                fail "合同管理登录入口未跳转到基础平台 /authorize 或 Keycloak Realm"
+        contract_login_status="$(frontend_http_status /contract_management/auth/login)" || \
+            fail "无法访问合同管理登录入口"
+        [[ "$contract_login_status" == "302" ]] || \
+            fail "合同管理登录入口返回 ${contract_login_status}，预期为 302 OIDC 跳转"
 
-            platform_authorize_status="$(frontend_http_status "$contract_authorize_route")" || \
-                fail "无法通过统一前端访问 OIDC 授权端点"
-            [[ "$platform_authorize_status" == "302" ]] || \
-                fail "OIDC 授权端点返回 ${platform_authorize_status}，预期未登录状态为 302；请检查 /authorize 是否完整保留查询参数"
+        # 继续验证合同后端生成的真实授权地址。若 Nginx 在转发 /authorize 时丢失
+        # client_id、redirect_uri、state、nonce 或 PKCE 参数，此处会得到 400 并阻止部署。
+        contract_authorize_url="$(frontend_http_location /contract_management/auth/login)" || \
+            fail "合同管理登录入口未返回 OIDC 授权地址"
+        contract_issuer="$(env_value "$contract_env_file" OIDC_ISSUER)"
+        case "$contract_authorize_url" in
+            */realms/*/protocol/openid-connect/auth\?*)
+                # Keycloak RP：合同 API 启动时已经通过同一环境的私网后通道完成
+                # discovery；这里仅验证浏览器被正确导向公开 Realm，而不让前端
+                # 容器错误地以 localhost 访问浏览器专用的公开地址。
+                [[ "$contract_issuer" == */realms/* ]] || \
+                    fail "合同管理登录入口跳转到 Keycloak，但 OIDC_ISSUER 不是 Realm 地址"
+                ;;
+            *)
+                # 兼容尚未迁移的基础平台 OIDC 环境。
+                contract_authorize_route="$(public_url_to_route "$contract_authorize_url")" || \
+                    fail "合同管理登录入口返回了无法识别的 OIDC 授权地址"
+                [[ "$contract_authorize_route" == /authorize\?* ]] || \
+                    fail "合同管理登录入口未跳转到基础平台 /authorize 或 Keycloak Realm"
 
-            platform_login_url="$(frontend_http_location "$contract_authorize_route")" || \
-                fail "OIDC 授权端点未返回统一登录页地址"
-            case "$platform_login_url" in
-                /login.html\?return_to=*|http://*/login.html\?return_to=*|https://*/login.html\?return_to=*) ;;
-                *) fail "OIDC 授权端点未跳转到统一登录页" ;;
-            esac
-            ;;
-    esac
+                platform_authorize_status="$(frontend_http_status "$contract_authorize_route")" || \
+                    fail "无法通过统一前端访问 OIDC 授权端点"
+                [[ "$platform_authorize_status" == "302" ]] || \
+                    fail "OIDC 授权端点返回 ${platform_authorize_status}，预期未登录状态为 302；请检查 /authorize 是否完整保留查询参数"
+
+                platform_login_url="$(frontend_http_location "$contract_authorize_route")" || \
+                    fail "OIDC 授权端点未返回统一登录页地址"
+                case "$platform_login_url" in
+                    /login.html\?return_to=*|http://*/login.html\?return_to=*|https://*/login.html\?return_to=*) ;;
+                    *) fail "OIDC 授权端点未跳转到统一登录页" ;;
+                esac
+                ;;
+        esac
+        contract_checked=true
+    else
+        contract_checked=false
+        log "跳过合同管理网关检查（尚未接入）"
+    fi
 
     if [[ "${crm_catalog_ready:-true}" == true ]]; then
         wait_for_frontend_status /customer-opportunity/healthz 200 "客户与商机管理健康检查路径"
@@ -1338,7 +1358,11 @@ verify_gateway_routes() {
 			fail "数据看板登录状态接口返回 ${data_analysis_session_status}，预期未登录状态为 401"
 	fi
 
-	log "统一网关校验通过：platform API=401，contract healthz=200，settlement healthz=200，customer healthz=200"
+	if [[ "${contract_checked:-false}" == true ]]; then
+		log "统一网关校验通过：platform API=401，contract healthz=200，settlement healthz=200，customer healthz=200"
+	else
+		log "统一网关校验通过：platform API=401，settlement healthz=200，customer healthz=200（合同管理未接入，已跳过其网关检查）"
+	fi
 }
 
 start_stack() {
@@ -1394,10 +1418,22 @@ start_stack() {
     if ! sync_crm_authorization_catalog; then
         log "跳过客户与商机管理后端与相关 Worker（尚未接入平台）；完成接入后重新执行 up 即可"
     fi
-    log "启动合同管理后端前发布当前镜像内嵌授权目录"
-    sync_contract_authorization_catalog
-    log "启动合同管理后端"
-    compose_up_wait "合同管理 API 与 Worker" contract-api contract-worker
+    # 合同不再由平台迁移预置应用行，只能经 discovery 候选完成应用接入后才本地启动。
+    # 未接入时强制启动会让 `up --wait` 因 contract-api 反复重启而中止整套部署。
+    contract_catalog_ready=false
+    if contract_configured; then
+        log "启动合同管理后端前发布当前镜像内嵌授权目录"
+        if sync_contract_authorization_catalog; then
+            contract_catalog_ready=true
+        fi
+    fi
+    if [[ "$contract_catalog_ready" == true ]]; then
+        log "启动合同管理后端"
+        compose_up_wait "合同管理 API 与 Worker" contract-api contract-worker
+    else
+        log "跳过合同管理后端与 Worker（尚未完成平台接入或目录发布失败）；完成接入后重新执行 up 即可"
+        contract_onboarding_remediation >&2
+    fi
     if [[ "$crm_catalog_ready" == true ]]; then
         log "启动客户与商机管理后端"
         compose_up_wait "客户与商机管理后端" customer-api
@@ -1526,6 +1562,12 @@ refresh_contract_backend() {
 	ensure_project_env_file
 	ensure_portal_env_file
 	ensure_settlement_env_file
+	# 合同管理不再由平台迁移预置应用行：未接入时不能构建或启动 contract-api，
+	# 否则会把"尚未接入"误报成镜像或凭据问题。
+	if ! contract_configured; then
+		contract_onboarding_remediation >&2
+		fail "合同管理尚未接入平台；先完成接入再执行 refresh-contract-api"
+	fi
 	validate_local_runtime_target "合同管理" "$contract_env_file" contract_management "$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)" OIDC_CLIENT_ID
     ensure_catalog_publisher_credentials_consistent
     disable_contract_startup_catalog_sync
@@ -1613,6 +1655,28 @@ sync_crm_authorization_catalog() {
 # 即将启动的同一镜像内嵌清单，避免平台目录仍停留在旧版本而新 API 拒绝登录。
 sync_contract_authorization_catalog() {
 	compose_run run --rm --no-deps contract-api ./authz-catalog publish
+}
+
+# contract_onboarding_remediation 给出可直接执行的首次接入命令：合同管理不再由平台
+# 迁移预置应用行，全新库必须先经 discovery 候选完成应用接入才能启动 contract-api。
+contract_onboarding_remediation() {
+	cat <<'REMEDIATION'
+
+请先完成一次性合同管理接入，然后重新执行 up：
+
+  bash scripts/subsystem.sh onboard \
+    --application-code contract_management \
+    --application-name 合同管理系统 \
+    --environment dev \
+    --api-base-url http://localhost:8081/api/v1 \
+    --platform-origin http://localhost:8081 \
+    --public-base-url http://localhost:8081 \
+    --upstream-url http://contract-api:8081 \
+    --path-prefix /contract_management \
+    --account <平台管理员账号>
+
+门户网关 http://localhost:8081（up 会先启动统一前端）可直接执行上面的命令。
+REMEDIATION
 }
 
 # crm_onboarding_remediation 给出可直接执行的首次接入命令：发布失败的原始输出只有

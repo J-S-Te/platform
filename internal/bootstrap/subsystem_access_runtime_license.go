@@ -48,10 +48,7 @@ func (p subsystemAccessRuntimeEnrollment) WaitForRuntimeConfirmation(ctx context
 	}
 	return service.WaitForRuntimeConfirmation(ctx, app, env, credentials)
 }
-func configureSubsystemAccessRuntimeEnrollment(cfg config.Config, db *gorm.DB, clients registry.RuntimeLicenseClientManager, source interface {
-	registry.RuntimeLicenseApprovalSource
-	registryinfra.SubsystemAccessImageReader
-}, adapter *registryinfra.SubsystemAccessDeploymentAdapter) error {
+func configureSubsystemAccessRuntimeEnrollment(cfg config.Config, db *gorm.DB, clients registry.RuntimeLicenseClientManager, source registryinfra.SubsystemAccessImageReader, adapter *registryinfra.SubsystemAccessDeploymentAdapter) error {
 	repository, err := licenseinfra.NewRepository(db)
 	if err != nil {
 		return err
@@ -66,18 +63,11 @@ func configureSubsystemAccessRuntimeEnrollment(cfg config.Config, db *gorm.DB, c
 			return nil, err
 		}
 		options := []coordination.Option{coordination.WithApplicationEnvironment(cfg.Audit.EnvironmentCode), coordination.WithBuiltinComponentSource(registryinfra.BuiltinRuntimeComponentCatalog{})}
-		if lifecycle, ok := source.(registry.RuntimeLicenseLifecycleApprovalSource); ok {
-			verifier, err := registry.NewRuntimeLicenseLifecycleVerifier(lifecycle)
-			if err != nil {
-				return nil, err
-			}
-			options = append(options, coordination.WithLifecycleApprovalVerifier(verifier))
-		}
 		coordinator, err := coordination.NewService(db, reader, trust.Keys(), licenseSnapshotSigner{signer, trust.Keys()}, time.Now, options...)
 		if err != nil {
 			return nil, err
 		}
-		return registry.NewRuntimeLicenseEnrollmentServiceWithCatalog(source, registryinfra.BuiltinRuntimeComponentCatalog{}, clients, coordinator)
+		return registry.NewRuntimeLicenseEnrollmentService(registryinfra.BuiltinRuntimeComponentCatalog{}, clients, coordinator)
 	}}
 	adapter.SetRuntimeLicenseEnrollment(port, func(ctx context.Context) (registry.RuntimeLicenseSettings, error) {
 		state, err := reader.Read(ctx)

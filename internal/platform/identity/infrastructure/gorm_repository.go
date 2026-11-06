@@ -676,8 +676,10 @@ func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB,
 			return fmt.Errorf("generate back-channel logout event ID: %w", err)
 		}
 		row := backchannelLogoutOutboxRow(id, target, now)
-		// map 插入没有模型 Schema，MySQL 的 DoNothing 无法推导无操作更新列。
-		// 显式保留已有 ID，避免重复入队覆盖事件标识、jti 或投递进度；其他错误仍回滚。
+		// map 插入没有模型 Schema，MySQL 的 DoNothing 无法推导无操作更新列，
+		// 会生成空的 ON DUPLICATE KEY UPDATE 子句（1064 语法错误）；同时不能吞错，
+		// 否则 Outbox 失败会被伪装成注销成功。这里显式保留已有 ID：冲突时既保持幂等，
+		// 又避免重复入队覆盖事件标识、jti 或投递进度；其他数据库错误仍回滚整个撤销。
 		if err = transaction.Table("platform_oauth_backchannel_logout_outbox").
 			Clauses(clause.OnConflict{
 				Columns: []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}},

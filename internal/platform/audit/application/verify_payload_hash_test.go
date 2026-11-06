@@ -16,6 +16,8 @@ type verifyRepositoryStub struct {
 	gotPayload            []byte
 	result                domain.PayloadHashVerification
 	err                   error
+	exportFile            domain.ExportFile
+	exportFileErr         error
 }
 
 func (s *verifyRepositoryStub) VerifyPayloadHash(_ context.Context, tenantID, eventID string, payload []byte) (domain.PayloadHashVerification, error) {
@@ -46,8 +48,8 @@ func (s *verifyRepositoryStub) GetExportJob(context.Context, string, string) (do
 func (s *verifyRepositoryStub) ClaimExportJob(context.Context, string, time.Time, time.Time) (domain.ExportWork, bool, error) {
 	return domain.ExportWork{}, false, nil
 }
-func (s *verifyRepositoryStub) ListExportEvents(context.Context, string, domain.ExportQuery) ([]domain.Event, error) {
-	return nil, nil
+func (s *verifyRepositoryStub) ListExportEvents(context.Context, string, domain.ExportQuery, domain.ExportCursor, int) (domain.ExportEventPage, error) {
+	return domain.ExportEventPage{}, nil
 }
 func (s *verifyRepositoryStub) CompleteExportJob(context.Context, domain.ExportWork, domain.ExportFile, time.Time) error {
 	return nil
@@ -56,7 +58,13 @@ func (s *verifyRepositoryStub) FailExportJob(context.Context, domain.ExportWork,
 	return nil
 }
 func (s *verifyRepositoryStub) GetExportFile(context.Context, string, string) (domain.ExportFile, error) {
-	return domain.ExportFile{}, nil
+	return s.exportFile, s.exportFileErr
+}
+func (s *verifyRepositoryStub) ListExpiredExportArtifacts(context.Context, time.Time, int) ([]domain.ExportArtifact, error) {
+	return nil, nil
+}
+func (s *verifyRepositoryStub) MarkExportArtifactsDeleted(context.Context, []string) error {
+	return nil
 }
 func (s *verifyRepositoryStub) VerifyEventChain(context.Context, string, string, string, uint64, int) (domain.ChainVerification, error) {
 	return domain.ChainVerification{}, nil

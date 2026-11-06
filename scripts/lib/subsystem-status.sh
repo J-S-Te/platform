@@ -25,6 +25,15 @@ cmd_status() {
     fi
   done
   parse_update_args "$@"
+
+  # status 复用 update 的参数解析器，但 --issuer-alias 只对 update/retry/adopt 有意义。
+  # 静默接受会让操作者误以为 status 会顺带切换认证提供方，因此显式拒绝。
+  if [[ -n "${ISSUER_ALIAS//[[:space:]]/}" ]]; then
+    log "ERROR" "status 不接受 --issuer-alias；该参数只对 update/retry/adopt 生效"
+    status_usage >&2
+    exit 2
+  fi
+
   require_command curl
   require_command python3
 

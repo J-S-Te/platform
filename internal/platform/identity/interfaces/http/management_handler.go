@@ -505,7 +505,8 @@ func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, r
 }
 
 // CreateEmployeesBatch 先在租户内解析组织与岗位名称，再把完整员工批次
-// 委托给原子的应用服务。
+// 委托给原子的应用服务。逐行预校验一次性收集整批问题（见下方 422 的 details.issues），
+// 只要存在任一行问题就整批拒绝，绝不产生部分写入。
 func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -565,7 +566,17 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		}
 		membershipScope = scope
 	}
-	hasRoles := false
+	// 应用角色是整批的附加授权动作：只要任意一行携带角色就要求角色绑定更新权限。
+	// 这是与逐行数据无关的整批前置条件，缺失时仍立即 403（失败关闭），不会因为先发现
+	// 其它行的数据问题而降级成 422。
+	if employeeBatchHasApplicationRoles(payload.Items) && !principalHasPermission(principal, "platform:role-binding:update") {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.New("AUTH_FORBIDDEN", "没有执行此操作的权限", employeeBatchValidationDetails{Issues: []employeeBatchIssue{{Row: 0, Field: "application_roles", Code: "ROLE_BINDING_FORBIDDEN", Message: "导入应用角色需要 platform:role-binding:update 权限"}}}))
+		return
+	}
+	// 逐行预校验累计问题，而不是首个错误即返回：导入管理员一次就能看到所有需要修正
+	// 的行，不必按单条错误反复重试。整批仍然原子——只要存在任一 issue 就整批 422，
+	// 绝不调用应用服务，因此不会有部分写入。
+	issues := make([]employeeBatchIssue, 0)
 	for index, item := range payload.Items {
 		row := item.LineNo
 		if row <= 0 {
@@ -573,45 +584,67 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 		}
 		organization := firstNonEmpty(item.Organization, item.OrganizationName)
 		position := firstNonEmpty(item.Position, item.PositionName)
-		orgID, err := resolveExactOrganization(request.Context(), handler.service, principal.Tenant.ID, organization)
-		if err != nil {
-			if errors.Is(err, application.ErrValidation) {
-				handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "organization", Code: "AMBIGUOUS_ORGANIZATION", Message: "组织名称匹配到多个有效组织，请改用唯一名称"})
+		rowIssues := make([]employeeBatchIssue, 0, 3)
+		orgID := ""
+		if organization == "" {
+			rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "organization", Code: "ORGANIZATION_REQUIRED", Message: "组织名称必填，请填写系统中的组织中文名称"})
+		} else {
+			resolved, err := resolveExactOrganization(request.Context(), handler.service, principal.Tenant.ID, organization)
+			switch {
+			case err == nil && resolved != "":
+				orgID = resolved
+				// 组织越出 platform:membership:create 可管理范围时整批不可继续，直接拒绝。
+				if !membershipScope.Allows(orgID, "") {
+					handler.forbidden(writer, request)
+					return
+				}
+			case err != nil && !errors.Is(err, application.ErrValidation):
+				handler.writeError(writer, request, err)
 				return
+			case err != nil:
+				rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "organization", Code: "AMBIGUOUS_ORGANIZATION", Message: "组织名称匹配到多个有效组织，请改用唯一名称"})
+			default:
+				rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "organization", Code: "ORGANIZATION_NOT_FOUND", Message: "组织不存在或已停用"})
 			}
-			handler.writeError(writer, request, err)
-			return
 		}
-		if orgID == "" {
-			handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "organization", Code: "ORGANIZATION_NOT_FOUND", Message: "组织不存在或已停用"})
-			return
-		}
-		if !membershipScope.Allows(orgID, "") {
-			handler.forbidden(writer, request)
-			return
-		}
-		positionID, err := resolveExactPosition(request.Context(), handler.service, principal.Tenant.ID, orgID, position)
-		if err != nil {
-			if errors.Is(err, application.ErrValidation) {
-				handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "position", Code: "AMBIGUOUS_POSITION", Message: "岗位名称匹配到多个有效岗位，请改用唯一名称"})
-				return
+		positionID := ""
+		// 组织无法解析时岗位归属无从判定，此时不再追加岗位错误，避免同一行出现
+		// 一条根因和一条由其派生的误导性问题。
+		if orgID != "" {
+			if position == "" {
+				rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "position", Code: "POSITION_REQUIRED", Message: "岗位名称必填，请填写系统中的岗位中文名称"})
+			} else {
+				resolved, err := resolveExactPosition(request.Context(), handler.service, principal.Tenant.ID, orgID, position)
+				switch {
+				case err == nil && resolved != "":
+					positionID = resolved
+				case err != nil && !errors.Is(err, application.ErrValidation):
+					handler.writeError(writer, request, err)
+					return
+				case err != nil:
+					rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "position", Code: "AMBIGUOUS_POSITION", Message: "岗位名称匹配到多个有效岗位，请改用唯一名称"})
+				default:
+					rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "position", Code: "POSITION_NOT_FOUND", Message: "岗位不存在、已停用或不属于该组织"})
+				}
 			}
-			handler.writeError(writer, request, err)
-			return
-		}
-		if positionID == "" {
-			handler.batchValidation(writer, request, employeeBatchIssue{Row: row, Field: "position", Code: "POSITION_NOT_FOUND", Message: "岗位不存在、已停用或不属于该组织"})
-			return
 		}
 		roles := make([]application.ApplicationRoleAssignment, 0, len(item.ApplicationRoles))
 		for _, role := range item.ApplicationRoles {
-			hasRoles = true
 			roles = append(roles, application.ApplicationRoleAssignment{ApplicationCode: role.ApplicationCode, ApplicationName: role.ApplicationName, RoleCode: role.RoleCode, RoleName: role.RoleName})
+		}
+		// 角色授权条目的存在性由仓储在事务内判定；这里只做与服务层同一份形状校验，
+		// 让“应用/角色编码或名称缺失、超长或重复”也能定位到具体行号。
+		if err := application.ValidateApplicationRoleAssignments(roles); err != nil {
+			rowIssues = append(rowIssues, employeeBatchIssue{Row: row, Field: "application_roles", Code: "ROLE_ASSIGNMENT_INVALID", Message: "应用角色条目无效：每条需同时填写应用与角色（编码或名称二选一），长度不超过 128，且同一行不能重复"})
+		}
+		issues = append(issues, rowIssues...)
+		if len(rowIssues) > 0 {
+			continue
 		}
 		items = append(items, application.EmployeeCreateInput{DisplayName: item.DisplayName, Email: item.Email, Mobile: item.Mobile, Status: valueOrDefault(item.Status, domain.StatusActive), Membership: &application.EmployeeMembershipCreateInput{OrgUnitID: orgID, PositionID: positionID, MembershipType: domain.MembershipPrimary}, ApplicationRoles: roles})
 	}
-	if hasRoles && !principalHasPermission(principal, "platform:role-binding:update") {
-		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.New("AUTH_FORBIDDEN", "没有执行此操作的权限", employeeBatchValidationDetails{Issues: []employeeBatchIssue{{Row: 0, Field: "application_roles", Code: "ROLE_BINDING_FORBIDDEN", Message: "导入应用角色需要 platform:role-binding:update 权限"}}}))
+	if len(issues) > 0 {
+		handler.batchValidation(writer, request, issues...)
 		return
 	}
 	result, err := handler.service.CreateEmployeesBatch(request.Context(), application.EmployeeBatchCreateInput{TenantID: principal.Tenant.ID, OperatorID: principal.User.ID, Items: items})
@@ -692,6 +725,17 @@ func resolveExactPosition(ctx context.Context, service managementApplicationServ
 		}
 	}
 	return found, nil
+}
+
+// employeeBatchHasApplicationRoles 判断整批是否包含任何应用角色条目；批量导入需要据此
+// 在逐行校验之前完成平台:role-binding:update 的整批前置权限判定。
+func employeeBatchHasApplicationRoles(items []employeeBatchCreateItemRequest) bool {
+	for _, item := range items {
+		if len(item.ApplicationRoles) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(values ...string) string {

@@ -11,6 +11,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// reviewedP1PortalFixture 构造独立临时门户及当前登记契约的最小机器凭据。
+// 参数：t为测试上下文，不读取实际运行密钥。
+// 返回值：测试目标和合成登记输入，文件仅在本轮临时目录。
 func reviewedP1PortalFixture(t *testing.T) (*productionComposeTarget, application.SubsystemProvisioningInput) {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -44,9 +47,19 @@ func reviewedP1PortalFixture(t *testing.T) (*productionComposeTarget, applicatio
 		}
 	}
 	input := application.SubsystemProvisioningInput{TenantID: "tenant-1", ApplicationID: "portal-app-1", EnvironmentID: "env-1", ApplicationCode: "customer_portal", Environment: "prod", AuthenticationProvider: "platform", Issuer: "https://identity.example", PublicURL: "https://identity.example/customer-portal/", PathPrefix: "/customer-portal", ClientID: "portal-web", ClientSecret: "browser-secret", RedirectURI: "https://identity.example/customer-portal/auth/callback"}
-	for _, purpose := range []string{application.ServiceCredentialPortalReportFileRead, application.ServiceCredentialPortalReportDownloadIdentityRead, application.ServiceCredentialAuditIngest, application.ServiceCredentialFileGatewayWrite, application.ServiceCredentialPortalMappingProvision, application.ServiceCredentialPortalMappingDisable, application.ServiceCredentialPortalInviteVerify} {
-		scope := p1FixtureScope(purpose)
-		input.ServiceCredentials = append(input.ServiceCredentials, application.SubsystemServiceCredential{Purpose: purpose, PlaintextSecret: "distinct-" + purpose, OAuthClient: application.OAuthClientView{ID: "uid-" + purpose, TenantID: input.TenantID, ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID, ClientID: "portal-prod-" + purpose, Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{scope}}})
+	for _, requirement := range application.SubsystemUpdateServiceCredentialRequirements(input.ApplicationCode) {
+		purpose := requirement.Purpose
+		input.ServiceCredentials = append(input.ServiceCredentials, application.SubsystemServiceCredential{
+			Purpose: purpose, PlaintextSecret: "distinct-" + purpose,
+			OAuthClient: application.OAuthClientView{
+				ID: "uid-" + purpose, TenantID: input.TenantID,
+				ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID,
+				ClientID: input.ApplicationCode + "-" + input.Environment + "-" + requirement.Suffix,
+				Status:   "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic",
+				GrantTypes: []string{"client_credentials"},
+				Scopes:     application.SubsystemUpdateServiceCredentialScopes(requirement),
+			},
+		})
 	}
 	return &productionComposeTarget{config: productionComposeTargetConfig{DeployRoot: root, Profile: profile}}, input
 }

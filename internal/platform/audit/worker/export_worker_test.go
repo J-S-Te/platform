@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/csv"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ func TestEscapeCSVFormulaCellNeutralizesFivePayloadClasses(t *testing.T) {
 		{name: "减号公式", input: "-2+3", want: "'-2+3"},
 		{name: "AT符号公式", input: "@SUM(A1)", want: "'@SUM(A1)"},
 		{name: "前导tab公式", input: "	=1+1", want: "'	=1+1"},
-		{name: "前导CR公式", input: "=1+1", want: "'=1+1"},
+		{name: "前导CR公式", input: "\r=1+1", want: "'\r=1+1"},
 		{name: "普通文本不动", input: "张三", want: "张三"},
 		{name: "空串不动", input: "", want: ""},
 	}
@@ -41,7 +42,6 @@ func TestEscapeCSVFormulaCellNeutralizesFivePayloadClasses(t *testing.T) {
 // 且普通行内容不被改写。
 func TestWriteCSVEscapesAttackerControlledCells(t *testing.T) {
 	storageRoot := t.TempDir()
-	worker := &ExportWorker{storageRoot: storageRoot}
 	hostile := domain.Event{
 		EventID:             "evt-1",
 		OccurredAt:          time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
@@ -73,15 +73,23 @@ func TestWriteCSVEscapesAttackerControlledCells(t *testing.T) {
 		ClientIP:            "198.51.100.7",
 		UserAgent:           "Mozilla/5.0",
 	}
-	_, absolutePath, err := worker.writeCSV(domain.ExportWork{TenantID: "tenant-1", ApplicationID: "app-1", JobID: "job-1"}, []domain.Event{hostile, normal})
+	worker := newExportTestWorker(t, &exportRepositoryStub{events: []domain.Event{hostile, normal}}, storageRoot)
+	_, absolutePath, count, err := worker.writeCSV(context.Background(), domain.ExportWork{TenantID: "tenant-1", ApplicationID: "app-1", JobID: "job-1"})
 	if err != nil {
 		t.Fatalf("writeCSV() error = %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("written event count = %d, want 2", count)
 	}
 	raw, err := os.ReadFile(filepath.Clean(absolutePath))
 	if err != nil {
 		t.Fatalf("read export: %v", err)
 	}
 	content := string(raw)
+	if !strings.HasPrefix(content, "\xef\xbb\xbf") {
+		t.Fatal("audit export CSV missing UTF-8 BOM")
+	}
+	content = strings.TrimPrefix(content, "\xef\xbb\xbf")
 	for _, escaped := range []string{
 		"'=HYPERLINK(",
 		"'+86遥测",

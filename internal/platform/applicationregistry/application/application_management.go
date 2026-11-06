@@ -222,17 +222,44 @@ type ManagementRepository interface {
 
 // ManagementService 串联受控且租户隔离的应用与环境变更；跨租户读取一律按 not found 处理。
 type ManagementService struct {
-	repository ManagementRepository
-	ids        IdentifierGenerator
-	clock      Clock
+	repository              ManagementRepository
+	ids                     IdentifierGenerator
+	clock                   Clock
+	postLoginRedirectPolicy PostLoginRedirectPolicy
+}
+
+// ManagementServiceOption 调整显式登记服务的可选行为，不改变既有构造调用。
+type ManagementServiceOption func(*ManagementService)
+
+// WithManagementRedirectPolicy 注入登录后跳转的绝对地址来源集合，使环境公开基址
+// 在登记路径即拒绝未批准的来源与非回环明文。未注入时只做结构校验。
+func WithManagementRedirectPolicy(policy PostLoginRedirectPolicy) ManagementServiceOption {
+	return func(service *ManagementService) { service.postLoginRedirectPolicy = policy }
 }
 
 // NewManagementService 构造应用/环境管理用例；任一依赖缺失即拒绝构造。
-func NewManagementService(repository ManagementRepository, ids IdentifierGenerator, clock Clock) (*ManagementService, error) {
+func NewManagementService(repository ManagementRepository, ids IdentifierGenerator, clock Clock, options ...ManagementServiceOption) (*ManagementService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("application registry management dependencies must not be nil")
 	}
-	return &ManagementService{repository: repository, ids: ids, clock: clock}, nil
+	service := &ManagementService{repository: repository, ids: ids, clock: clock}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service, nil
+}
+
+// acceptsEnvironmentCreate 在结构化校验之上追加公开基址来源判定：BaseURL 与相对
+// 登录目标拼接后就是浏览器跳转地址，登记路径必须与解析路径同口径。
+func (service *ManagementService) acceptsEnvironmentCreate(input EnvironmentCreateInput) bool {
+	return validEnvironmentCreate(input) && service.postLoginRedirectPolicy.ValidOptionalBaseURL(input.BaseURL)
+}
+
+// acceptsEnvironmentUpdate 是更新路径的同口径判定。
+func (service *ManagementService) acceptsEnvironmentUpdate(input EnvironmentUpdateInput) bool {
+	return validEnvironmentUpdate(input) && service.postLoginRedirectPolicy.ValidOptionalBaseURL(input.BaseURL)
 }
 
 // ListApplications 返回认证租户内可见的应用，分页参数有硬上限防刷。
@@ -352,7 +379,7 @@ func (service *ManagementService) ListEnvironments(ctx context.Context, tenantID
 // DRAFT 应用允许在上线前预置。
 func (service *ManagementService) CreateEnvironment(ctx context.Context, input EnvironmentCreateInput) (Environment, error) {
 	input = normalizeEnvironmentCreate(input)
-	if !validEnvironmentCreate(input) {
+	if !service.acceptsEnvironmentCreate(input) {
 		return Environment{}, ErrValidation
 	}
 
@@ -386,7 +413,7 @@ func (service *ManagementService) GetEnvironment(ctx context.Context, tenantID, 
 // UpdateEnvironment 以乐观锁变更部署元数据与生命周期状态。
 func (service *ManagementService) UpdateEnvironment(ctx context.Context, input EnvironmentUpdateInput) (Environment, error) {
 	input = normalizeEnvironmentUpdate(input)
-	if !validEnvironmentUpdate(input) {
+	if !service.acceptsEnvironmentUpdate(input) {
 		return Environment{}, ErrValidation
 	}
 	return service.repository.UpdateEnvironment(ctx, input, service.clock.Now().UTC())
@@ -645,7 +672,9 @@ func validOptionalURL(value *string) bool {
 }
 
 // validOptionalBaseURL 校验用于拼装浏览器跳转的公开门户地址。与普通主页 URL 不同，
-// 它不得包含凭据、query 或 fragment。
+// 它不得包含凭据、query 或 fragment。协议与主机来源判定由
+// PostLoginRedirectPolicy.ValidOptionalBaseURL 在服务层追加：明文 HTTP 只允许回环
+// 主机，或该来源已被运维显式声明为明文部署。
 func validOptionalBaseURL(value *string) bool {
 	if value == nil || *value == "" {
 		return true

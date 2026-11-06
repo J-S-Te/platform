@@ -32,6 +32,18 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 				"next_action":      "该环境的控制面记录已存在。子系统日常代码、镜像、功能模块和业务迁移发布无需执行接入或撤销脚本；仅基础设施入口参数变更时使用环境、登录目标或 OAuth 客户端的受控更新接口。若此前部署 Agent 失败，请先查询 subsystem-status，再使用 subsystem-retry，不要重复 onboard",
 			},
 		))
+	case errors.Is(err, application.ErrSubsystemOnboardingAlreadyExists):
+		// 预检在写控制面之前拦下"应用+环境已存在"时返回的是哨兵值，而不是
+		// *SubsystemOnboardingConflict；这里补齐映射，避免落到通用 500。
+		handler.logger.Warn("subsystem onboarding skipped because environment already exists",
+			"path", request.URL.Path, "error", err)
+		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+			"IAM_SUBSYSTEM_ALREADY_ONBOARDED",
+			"该应用环境已存在；接入脚本不会覆盖已有登录目标或 OAuth 客户端",
+			map[string]string{
+				"next_action": "该环境的控制面记录已存在。若此前未完成部署，请使用 subsystem.sh update/retry 继续受控部署，不要重复 onboard",
+			},
+		))
 	case errors.Is(err, errRelatedSettlementReferenceDependency):
 		handler.logger.Warn("subsystem source credential dependency unavailable",
 			"path", request.URL.Path, "source_application", "settlement", "error", err)

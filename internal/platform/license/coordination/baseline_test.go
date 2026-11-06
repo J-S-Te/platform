@@ -17,7 +17,6 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/infrastructure"
 	"github.com/J-S-Te/Basic-Platform/migrations"
-	runtime "github.com/J-S-Te/license-core/runtime"
 	driver "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -171,7 +170,7 @@ func TestMySQLInstallationBaseline(t *testing.T) {
 	}
 	actor := domain.Actor{TenantID: "baseline-tenant", UserID: "baseline-user"}
 	reset := func() {
-		for _, model := range []any{&InstallationBaseline{}, &Inventory{}, &Member{}, &Application{}, &LifecycleEvent{}, &RetiredClient{}, &domain.Event{}, &domain.Artifact{}, &domain.Deployment{}} {
+		for _, model := range []any{&InstallationBaseline{}, &Inventory{}, &Member{}, &Application{}, &RetiredClient{}, &domain.Event{}, &domain.Artifact{}, &domain.Deployment{}} {
 			if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(model).Error; err != nil {
 				t.Fatal(err)
 			}
@@ -229,35 +228,6 @@ func TestMySQLInstallationBaseline(t *testing.T) {
 				}
 				if st.MigrationEligible != (legacy && app == "contract_management") {
 					t.Fatal("eligibility leaked", app)
-				}
-				if app == "contract_management" && legacy {
-					spec.OAuthClientID += "-replacement"
-					spec.ImageDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-					s.lifecycleApproval = fixtureApproval{LifecycleApproval{Specs: []ServiceSpec{spec}, RequiredServiceIDs: []string{spec.ServiceID}}}
-					in := LifecycleInput{Application: app, Environment: "prod", ExpectedRevision: st.Revision, OperationID: "baseline-first-replacement", ReleaseDigest: spec.ImageDigest}
-					if err = s.ReconcileComponents(ctx, in, actor); err != nil {
-						t.Fatal(err)
-					}
-					st, err = s.Status(ctx, app)
-					if err != nil || !st.MigrationEligible || st.State != runtime.Pending {
-						t.Fatal("first rollout erased qualification", err)
-					}
-					if err = db.Model(&Application{}).Where("application = ?", app).Updates(map[string]any{"state": runtime.Enforced, "migration_eligible": false}).Error; err != nil {
-						t.Fatal(err)
-					}
-					spec.OAuthClientID += "-v3"
-					spec.ImageDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-					s.lifecycleApproval = fixtureApproval{LifecycleApproval{Specs: []ServiceSpec{spec}, RequiredServiceIDs: []string{spec.ServiceID}}}
-					in.ExpectedRevision = st.Revision
-					in.OperationID = "baseline-enforced-replacement"
-					in.ReleaseDigest = spec.ImageDigest
-					if err = s.ReconcileComponents(ctx, in, actor); err != nil {
-						t.Fatal(err)
-					}
-					st, err = s.Status(ctx, app)
-					if err != nil || st.MigrationEligible || st.State != runtime.Applying {
-						t.Fatal("enforced qualification restored", err)
-					}
 				}
 			}
 			old := baselineFixture(now, true)

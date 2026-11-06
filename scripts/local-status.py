@@ -218,7 +218,8 @@ def main():
         if mismatched:
             blockers.append(
                 "这些服务正在运行与固定记录不一致的镜像：%s。"
-                "下一步：重新发布批准并走受控更新（refresh-approvals --approve → 应用接入受控更新 → up），不要直接 compose up。"
+                "下一步：走受控更新让部署 Agent 重新下发 V2 绑定（应用接入页或 subsystem.sh retry），完成后执行 up；"
+                "V1 运行批准已下线，不再需要 refresh-approvals。"
                 % "、".join(mismatched[:8])
             )
 
