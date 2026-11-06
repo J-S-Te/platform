@@ -35,6 +35,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1363,34 +1364,57 @@ class LockTest(unittest.TestCase):
         """两个并发 add 必须串行化，最终文件同时包含两个入口且内容完整。"""
         harness = GatewayHarness(self, path_mode="fallback")
         env = harness.env(PORTAL_GATEWAY_LOCK_TIMEOUT="30")
+        # 临时诊断（根因确认后移除）：让脚本把抢锁时间线写到 stderr，
+        # 便于在 CI 日志里看到两个写者的锁路径、抢锁分支与是否发生等待。
+        env["PORTAL_GATEWAY_LOCK_DEBUG"] = "1"
         commands = [
             ("demo", "/demo/", "http://10.0.0.1:1"),
             ("other", "/other/", "http://10.0.0.2:2"),
         ]
-        processes = [
-            subprocess.Popen(
-                [bash_executable(), str(SCRIPT), "add", *argv],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                env=env,
+        processes = []
+        started = []
+        for argv in commands:
+            started.append(time.monotonic())
+            processes.append(
+                subprocess.Popen(
+                    [bash_executable(), str(SCRIPT), "add", *argv],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    errors="replace",
+                    env=env,
+                )
             )
-            for argv in commands
-        ]
         outputs = [process.communicate(timeout=120) for process in processes]
+        elapsed = [round(time.monotonic() - start, 3) for start in started]
+        diagnostics = [
+            f"锁文件：{harness.lock}",
+            f"include：{harness.include}",
+            "PATH 解析："
+            + repr(
+                {
+                    name: shutil.which(name, path=harness.path)
+                    for name in ("flock", "mkdir", "rmdir", "sleep", "cat", "install", "mktemp")
+                }
+            ),
+            f"耗时：{elapsed}",
+            f"剩余锁目录：{Path(str(harness.lock) + '.d').exists()}",
+        ]
+        for argv, process, (stdout, stderr) in zip(commands, processes, outputs):
+            diagnostics.append(f"=== {argv[0]} rc={process.returncode} ===\n{stderr}")
+        detail = "\n".join(diagnostics)
         for process, (stdout, stderr) in zip(processes, outputs):
-            self.assertEqual(0, process.returncode, stderr)
+            self.assertEqual(0, process.returncode, detail)
         content = harness.read_include()
-        self.assertIn(render_block("demo", "/demo", "http://10.0.0.1:1"), content)
-        self.assertIn(render_block("other", "/other", "http://10.0.0.2:2"), content)
+        self.assertIn(render_block("demo", "/demo", "http://10.0.0.1:1"), content, detail)
+        self.assertIn(render_block("other", "/other", "http://10.0.0.2:2"), content, detail)
         # 抢锁先后决定写入顺序，因此断言「两条都在且各一次、无残块」，不锁定顺序。
-        self.assertEqual(2, content.count("# code="))
-        self.assertEqual(2, content.count("location = "))
-        self.assertTrue(content.startswith(HEADER_ADD), content)
+        self.assertEqual(2, content.count("# code="), detail)
+        self.assertEqual(2, content.count("location = "), detail)
+        self.assertTrue(content.startswith(HEADER_ADD), detail)
         self.assertEqual(len(render_block("demo", "/demo", "http://10.0.0.1:1")) + len(
             render_block("other", "/other", "http://10.0.0.2:2")
-        ) + len(HEADER_ADD), len(content), f"文件存在多余内容：{content}")
+        ) + len(HEADER_ADD), len(content), f"文件存在多余内容：{content}\n{detail}")
 
     def test_flock_path_passes_wait_timeout(self):
         """存在 flock 时必须走 flock 路径，并把 LOCK_TIMEOUT 传给 -w。"""
