@@ -129,6 +129,32 @@ docker inspect uip-platform-api
 
 验收必须包括全系统、单块及多块裁剪、平台独立启动、重复启动、故障迁移、Worker 重启和工作流恢复。Compose 解析与脚本测试不等于真实业务验收；真实登录、恢复演练需要可用镜像、凭据和隔离服务器环境。
 
+## 7. 许可运行态门禁（宣布部署成功之前必做）
+
+业务子系统的运行配置要求商业许可（平台受控接入会写入 `COMMERCIAL_LICENSE_ENABLED=true`）。
+若容器没有许可状态卷，或容器持有的许可实例与平台库不一致，容器会启动失败并**每分钟重启**，
+而平台页面只显示**「部署 Agent 执行失败」**：重试不会补卷、也不会纠正实例，所以看起来像
+"重试无效"。部署成功之前必须显式核对这一点。
+
+```bash
+# 不通过即中止，不打印成功结论；也可只查一个应用（project_management 等）
+sudo ./bin/deploy.sh license-runtime
+sudo ./bin/deploy.sh license-runtime project_management --json
+```
+
+- **故障现象**：子系统 API 容器反复重启（RestartCount 持续增长），日志含
+  `commercial license configuration failed`；平台显示「部署 Agent 执行失败」。
+- **根因**：① 缺 `license-state-<服务>:/var/lib/commercial-license` 卷挂载；
+  ② 容器 `COMMERCIAL_LICENSE_INSTANCE_ID` 与平台库 `license_deployment.instance_id` 不一致。
+- **正确顺序**：导入并激活许可 → 接入/受控更新 → 运行许可运行态门禁
+  （`sudo ./bin/deploy.sh license-runtime`）→ 再宣布部署成功。`continue`、`verify`、`start`
+  末尾已内置该门禁；平台页面的受控更新/重试之后仍需单独跑一次。
+- **禁止动作**：不要重复点「重试」；不要手工改固定记录（`runtime/` 授权固定文件、
+  `.release.env` 镜像绑定）；不要用 `docker run` 手工挂卷或 `docker restart` 冒充修复；
+  不要删除 `/var/lib/commercial-license` 卷或关闭 `COMMERCIAL_LICENSE_ENABLED` 绕过。
+
+四项检查、输出样例与逐条处置见 [OFFLINE_RUNBOOK.md](OFFLINE_RUNBOOK.md) 的「8.3 许可运行态门禁」。
+
 ## 2026-10-13 核验后的操作条件
 
 由生产运维选择批准的目标目录和介质，应用管理员完成租户内采用／更新，业务人员做登录／业务验收；本次未实际部署。
