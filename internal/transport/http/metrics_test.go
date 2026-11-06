@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/backchannel"
+	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -251,6 +252,88 @@ func TestOperationalMetricsSkipsClientSecretGaugesOnCollectionFailure(t *testing
 	}
 	if !strings.Contains(body, "platform_metric_collection_errors_total 1") {
 		t.Fatalf("secret collection failure was not counted:\n%s", body)
+	}
+}
+
+// 安全审查 SEC-B4 自我计量豁免：/metrics 的响应正文就是这些计数器，抓取自身不得
+// 计入 requests/duration；否则抓取频率会直接改写被观测值（自我计量的正反馈）。
+// 普通业务路径的计数语义必须保持原样——豁免只针对 /metrics 一个路径。
+func TestOperationalMetricsMiddlewareSkipsSelfScrape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	metrics := NewOperationalMetrics(nil)
+	router := gin.New()
+	router.Use(metrics.Middleware())
+	router.GET(metricsPath, gin.WrapH(metrics))
+	router.GET("/protected", func(context *gin.Context) { context.Status(http.StatusForbidden) })
+
+	scrape := func() {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("scrape status = %d, want 200", recorder.Code)
+		}
+	}
+
+	// 连续两次抓取：计数必须还是 0，不能因为抓取自己而增长。
+	scrape()
+	scrape()
+	body := httptest.NewRecorder()
+	metrics.ServeHTTP(body, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+	for _, expected := range []string{
+		"platform_http_requests_total 0",
+		"platform_http_request_duration_seconds_count 0",
+		"platform_http_errors_total 0",
+	} {
+		if !strings.Contains(body.Body.String(), expected) {
+			t.Fatalf("自抓取污染了计数，metrics missing %q:\n%s", expected, body.Body.String())
+		}
+	}
+
+	// 普通路径仍然计数（含错误与授权失败），确认豁免没有扩大到其它路由。
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/protected", nil))
+	scrape()
+	body = httptest.NewRecorder()
+	metrics.ServeHTTP(body, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+	for _, expected := range []string{
+		"platform_http_requests_total 1",
+		"platform_http_errors_total 1",
+		"platform_authz_failures_total 1",
+		"platform_http_request_duration_seconds_count 1",
+	} {
+		if !strings.Contains(body.Body.String(), expected) {
+			t.Fatalf("普通路径计数语义被改变，metrics missing %q:\n%s", expected, body.Body.String())
+		}
+	}
+}
+
+// 未授权抓取（RequireMetricsAccess 401/403）同样不计入 authz_failures：
+// 令牌配错是抓取端配置问题，不该伪装成业务侧“登录/鉴权被拒”触发告警。
+func TestOperationalMetricsMiddlewareSkipsRejectedScrapeAuthzFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	metrics := NewOperationalMetrics(nil)
+	router := gin.New()
+	router.Use(metrics.Middleware())
+	router.GET(metricsPath, middleware.RequireMetricsAccess("expected-token"), gin.WrapH(metrics))
+
+	// 无 Authorization 头：RequireMetricsAccess 返回 401（token 已配置时）。
+	for attempt := 0; attempt < 2; attempt++ {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", response.Code)
+		}
+	}
+	body := httptest.NewRecorder()
+	metrics.ServeHTTP(body, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+	for _, expected := range []string{
+		"platform_http_requests_total 0",
+		"platform_authz_failures_total 0",
+		"platform_http_errors_total 0",
+	} {
+		if !strings.Contains(body.Body.String(), expected) {
+			t.Fatalf("被拒绝的抓取污染了计数，metrics missing %q:\n%s", expected, body.Body.String())
+		}
 	}
 }
 

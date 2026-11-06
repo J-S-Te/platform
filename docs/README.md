@@ -1,6 +1,6 @@
 # Basic Platform 文档索引
 
-> 源码校准：2026-10-15（新增本地开发商业授权与子系统接入 Runbook）；2026-10-23 增补 MySQL binlog 减量与备份位点方案索引（减量未执行；位点方案已实施、未部署）。当前操作手册与带日期历史记录分开使用；本轮不宣称生产验收完成。
+> 源码校准：2026-10-15（新增本地开发商业授权与子系统接入 Runbook）；2026-10-23 增补 MySQL binlog 减量与备份位点方案索引（减量未执行；位点方案已实施、未部署）；2026-11-06 增补 OpenAPI 归档索引（`docs/openapi/` 3 份补充契约，CI 仅做语法级校验，未做 spec 与 handler 的语义校验）。当前操作手册与带日期历史记录分开使用；本轮不宣称生产验收完成。
 
 | 文档 | 读者 | 内容 |
 | --- | --- | --- |
@@ -23,6 +23,27 @@
 | [平台治理能力审计与整改方案](./platform-governance-audit-and-remediation-plan.md) | 架构、安全、各子系统负责人、测试 | 登录管控/权限赋权、站内通知、集中审计、外网 IP、并发控制五项需求的实现差距与三阶段整改路线（2026-09-12 静态审计快照，不作当前缺陷清单） |
 | [平台治理整改方案（轻量化 · 企业级）](./governance-remediation-lite-plan.md) | 架构、各子系统负责人、发布负责人 | 保留 2026-09-12 四个工作包与取舍，按历史方案阅读，当前实现回到操作/能力文档核对 |
 | [Go 代码注释规范](../../sharedDocs/04_后端开发/Go代码注释规范.md) | Go 开发、代码审查 | 中文说明性注释、导出符号、关键边界和文档同步要求 |
+
+## OpenAPI 归档契约（`docs/openapi/`）
+
+平台**没有**一份覆盖全部 REST 接口的主 OpenAPI 契约：控制台自身接口由 handler 与
+`docs/` 各能力文档描述，没有机器可读的总契约。`docs/openapi/` 里归档的是三条
+**机器对机器**的点对点补充契约（调用方是子系统或外部系统，不是浏览器），因此下表
+每一行都标注了“是否主契约”的答案——全部为**否（补充契约）**，不要把它们当成全量 API 清单。
+
+| 契约文件 | 一句话用途 | 覆盖范围 | 是否主契约 |
+| --- | --- | --- | --- |
+| [external-customer-identity-openapi.yaml](./openapi/external-customer-identity-openapi.yaml) | 外部客户身份预置与 Portal 应用角色收敛（预置登录账号但不设口令，口令初始化与 MFA 仍由平台管理员负责） | `POST /internal/external-users`、`POST /internal/application-roles`、`POST /internal/application-roles/revoke` | 否，补充契约 |
+| [file-gateway-v2-openapi.yaml](./openapi/file-gateway-v2-openapi.yaml) | File Gateway v2 上传会话/票据/内容/绑定全流程（仅本地目录存储） | `/api/v2/upload-sessions*`、`/api/v2/files/*`（9 个 path） | 否，补充契约 |
+| [owner-directory-openapi.yaml](./openapi/owner-directory-openapi.yaml) | 负责人目录机器接口，供 CRM 客户与商机子系统挑选负责人及其有效授权组织 | `GET /api/v1/internal/owner-directory` | 否，补充契约 |
+
+维护边界（如实记录当前状态，避免高估覆盖）：
+
+1. CI 只做**语法级**校验（`.github/workflows/ci-cd.yml` 的
+   `Validate OpenAPI archive YAML syntax` 步骤：Ruby/Psych 能解析即通过，并断言归档非空）。
+2. **没有**做 spec 与 handler 的语义一致性校验（路径/字段/状态码对不上不会红）。
+   这项一旦接入会立刻大面积失败，属于另立项，不应临时塞进现有 job。
+3. 因此“spec 能解析”**不等于**“接口实现与 spec 一致”；联调仍以实际响应为准。
 
 ## 最重要的操作原则
 

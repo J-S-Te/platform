@@ -166,8 +166,11 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 		// handler 不执行——这才是真正的 fail-closed：既没有副作用，也没有“已生效但未确认”
 		// 的重试陷阱。意图写入成功后才扣留响应（oversized 仍需能如实记录并拒绝）。
 		intentEventID := ""
+		// 该请求是否属于“留痕但响应体不采集”的路由（审计导出下载）。只在必开模式下有意义：
+		// 非必开模式本来就不缓冲任何响应，标记留空以免夸大语义。
+		bodyNotCaptured := auditedRequest && !shouldCaptureAuditResponseBody(auditRoute)
 		if auditedRequest {
-			intent := newPlatformAuditInput(context, source, auditedPrincipal, platformAuditEventFields{route: auditRoute, phase: "intent"})
+			intent := newPlatformAuditInput(context, source, auditedPrincipal, platformAuditEventFields{route: auditRoute, phase: "intent", bodyNotCaptured: bodyNotCaptured})
 			if _, err := recorder.Ingest(context.Request.Context(), auditedPrincipal.Tenant.ID, intent); err != nil {
 				logger.Error("write platform audit intent event", "error", err, "request_id", intent.RequestID, "path", auditRoute)
 				gate.recordFailure(time.Now().UTC())
@@ -182,8 +185,13 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 			}
 			intentEventID = intent.EventID
 			gate.recordSuccess()
-			buffered = newPlatformAuditBuffer(origWriter, maxPlatformAuditBufferedResponseBytes, logger)
-			context.Writer = buffered
+			// 审计导出下载是流式二进制响应（可能是任意大小的 zip），扣留它既没有审计价值，
+			// 又会把内容写进 /tmp 或直接触发 AUDIT_RESPONSE_TOO_LARGE 503；因此只对需要
+			// 扣留正文的路由装缓冲，下载路由直接写真实连接、仍然留痕。
+			if shouldCaptureAuditResponseBody(auditRoute) {
+				buffered = newPlatformAuditBuffer(origWriter, maxPlatformAuditBufferedResponseBytes, logger)
+				context.Writer = buffered
+			}
 		}
 		// handler panic 展平时先恢复真实 writer，外层 gin.Recovery 才能把 500 写出去；
 		// 缓冲中的半成品响应被直接丢弃，不会被当成成功提交；溢写的临时文件一并清理。
@@ -226,7 +234,7 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 		if oversized {
 			statusCode = http.StatusServiceUnavailable
 		}
-		fields := platformAuditEventFields{route: route, statusCode: statusCode, handlerStatusCode: handlerStatusCode, oversized: oversized}
+		fields := platformAuditEventFields{route: route, statusCode: statusCode, handlerStatusCode: handlerStatusCode, oversized: oversized, bodyNotCaptured: bodyNotCaptured}
 		retries := 0
 		if intentEventID != "" {
 			// 必开模式：结果事件与意图事件通过 correlates_to 关联，需要同步重试 + 死信兜底。
@@ -261,6 +269,15 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 				if applied {
 					detail["next_action"] = "do_not_retry"
 					message = "审计结果写入失败且无法落死信，业务操作已生效，请勿重复提交"
+				}
+				if buffered == nil {
+					// 该路由按策略不扣留响应体（审计导出下载），响应已经直接流给客户端，
+					// 状态码与响应体都无法再撤回；此时追加 503 只会污染一个已完成的文件下载，
+					// 因此只保留错误日志与已经写入的意图/死信事实。
+					logger.Error("platform audit result event unavailable after the response was already streamed",
+						"request_id", input.RequestID, "path", route, "event_id", input.EventID, "intent_event_id", intentEventID,
+						"operation_applied", applied)
+					return
 				}
 				context.Writer = origWriter
 				httpresponse.WriteError(context.Writer, context.Request, http.StatusServiceUnavailable, httperror.New("AUDIT_RESULT_WRITE_REJECTED", message, detail))
@@ -331,6 +348,10 @@ type platformAuditEventFields struct {
 	// handlerStatusCode 只在响应超限时用于保留业务真实状态码供追溯。
 	handlerStatusCode int
 	oversized         bool
+	// bodyNotCaptured 表示该路由按策略不采集响应体（审计导出下载）：事件仍然完整记录
+	// 方法/路径/主体/状态码/结果，只在 metadata 里如实标注正文未采集，避免取证方误判
+	// “有审计记录 ⇒ 响应体已被审计覆盖”。
+	bodyNotCaptured bool
 }
 
 // newPlatformAuditInput 组装中间件审计事件。必开模式下同一请求产生两条事件：业务链之前
@@ -355,6 +376,10 @@ func newPlatformAuditInput(context *gin.Context, source AuditSource, principal a
 	if fields.oversized {
 		metadata["audit_rejection"] = "AUDIT_RESPONSE_TOO_LARGE"
 		metadata["handler_status_code"] = fields.handlerStatusCode
+	}
+	if fields.bodyNotCaptured {
+		// 取证口径：这条路由仍留痕，但响应体按策略未采集（不缓冲、不落盘）。
+		metadata["response_body"] = "not_captured"
 	}
 	if loginIPValue != "" && clientIP != "" && clientIP != loginIPValue {
 		// 历史字段：只在“登录后换了网络”时保留差异线索，供旧版审计页读取；
@@ -474,6 +499,28 @@ func shouldRecordAuditTrail(method, route string) bool {
 		return true
 	}
 	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+}
+
+// auditExportDownloadRoutePrefix 是审计导出下载的路由前缀：GET
+// <prefix><job_id>/download 直接回流导出文件。它与 download-tickets（签发一次性票据）
+// 不同，是唯一会把任意大小二进制内容写进响应体的审计路由。
+const auditExportDownloadRoutePrefix = "/api/v1/audit/export-jobs/"
+
+// isAuditExportDownloadRoute 判定审计导出下载路由，同时接受路由模板与原始路径两种口径
+// （中间件在业务链前后都用 auditRequestRoute 解析，未命中模板时会退回原始路径）。
+func isAuditExportDownloadRoute(route string) bool {
+	return strings.HasPrefix(route, auditExportDownloadRoutePrefix) && strings.HasSuffix(route, "/download")
+}
+
+// shouldCaptureAuditResponseBody 报告该路由的响应体是否需要被审计缓冲扣留。
+//
+// 审计导出下载必须留痕（谁在什么时候下载了哪个导出），但它的响应体是流式二进制文件：
+// 扣留正文既不增加审计价值，又会把内容写进临时文件，并在超过 512MiB 硬上限时把一次
+// 合法下载变成 AUDIT_RESPONSE_TOO_LARGE 503。因此下载路由仍然产生审计事件（方法/路径/
+// 主体/状态码/结果），只是响应体按策略不采集（metadata.response_body=not_captured）。
+// 其余路由（含审计查询、票据签发）保持原扣留语义不变。
+func shouldCaptureAuditResponseBody(route string) bool {
+	return !isAuditExportDownloadRoute(route)
 }
 
 func auditResourceType(route string) string {

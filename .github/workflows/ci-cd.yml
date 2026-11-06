@@ -38,6 +38,29 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # docs/openapi/ 的归档契约此前没有任何 CI 覆盖：改动后没人知道文件还能不能解析。
+      # 这里只做**语法级**校验（YAML 可解析 + 归档数量非空）；spec 与 handler 的语义
+      # 一致性属于另立项，塞进本 job 会立刻红，因此刻意不做（见 docs/README.md 的索引说明）。
+      # 使用 ruby+YAML 而非 PyYAML：本 job 已通过
+      # deploy/production/tests/test-compose-orchestration-consistency.py 依赖 ruby -ryaml，
+      # 是已经验证过的 runner 依赖；不额外引入未在本仓库验证过的 python 包。
+      - name: Validate OpenAPI archive YAML syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          specs=0
+          for spec in docs/openapi/*.yaml; do
+            ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$spec"
+            echo "openapi syntax ok: $spec"
+            specs=$((specs + 1))
+          done
+          test "$specs" -ge 1 || { echo "docs/openapi 下没有归档契约" >&2; exit 1; }
+          echo "validated $specs OpenAPI specs (syntax only)"
+      # 本地模板与生产模板的键集漂移：两侧面向不同环境，键集本来不等，此前没有任何门禁，
+      # 新增变量只能到部署时以“容器起不来 / 静默用默认值”暴露。脚本内置分组白名单，
+      # 白名单外的差异直接失败；纯标准库实现，不接触 Docker/MySQL/网络。
+      - name: Verify local/production env template drift
+        run: timeout 120 python3 -B scripts/check-env-template-drift.py
       - run: go test ./...
       - name: Verify account logout transaction on isolated MySQL
         env:
@@ -169,9 +192,110 @@ jobs:
       - name: Verify license-core sync guard
         run: sh scripts/license-core-sync-test.sh
 
+  # 迁移 SQL 全量验证（此前是最大盲区）。现状事实：migrations/ 有 140 个 SQL，
+  # migrations/*_test.go 依赖 9 个不同的 *_TEST_DSN，但 test job 的 MySQL 8.0 service
+  # 只给 PLATFORM_IDENTITY_TEST_DSN / PLATFORM_OIDC_IDLE_TEST_DSN 供值，且全文件没有
+  # 任何步骤跑 `go test ./migrations/...`——于是主力用例
+  # migrations/mysql_integration_test.go:17-21 缺 DSN 即 t.Skip，覆盖率为零。
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      migration-mysql:
+        # 刻意用 mysql:8.4 而不是 test job 的 8.0，并且**不改** test job 的 8.0 service：
+        # 生产与验收口径是 8.4，8.0→8.4 之间确有 DDL/参数差异（8.4 已移除
+        # default-authentication-plugin），必须由独立 job 覆盖，不能把 8.0 的语义改掉。
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+        ports:
+          - "127.0.0.1::3306"
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --silent"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=30
+          --character-set-server=utf8mb4
+          --collation-server=utf8mb4_unicode_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # 每个 DSN 一个独立库：这些用例的契约不同，共用一个库会互相踩。
+      #   platform_migration_test  跑完整迁移链并要求“第二次运行为空”（可重试性）
+      #   platform_operations_test 要求库为空（拒绝非空库，防止误连业务库）
+      #   platform_refresh_test    用例硬编码库名，只认 127.0.0.1 + 该库名
+      #   platform_audit_dedup_test 用例自己 DROP/CREATE 该库，故不能与其它用例共用
+      - name: Create disposable migration databases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker exec '${{ job.services.migration-mysql.id }}' mysql -uroot -e "
+            CREATE DATABASE platform_migration_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            CREATE DATABASE platform_operations_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            CREATE DATABASE platform_refresh_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            CREATE DATABASE platform_audit_dedup_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+      # 仍然有 5 个 DSN 刻意不给值（用例继续 t.Skip），因为本地在 MySQL 8.4 上实测为
+      # **用例自身过期**导致的失败，属于既有缺陷，不在本次 CI 接线范围内：
+      #   PLATFORM_BOOTSTRAP_TEST_DSN
+      #     TestBootstrapAfterFullMigrationChainOnMySQL 跳过 000103 后继续喂 000104，
+      #     internal/migration/migration.go:103-110 的连续性校验直接报
+      #     “expected 000103, found 000104”。
+      #   PLATFORM_PORTAL_ACCESS_MIGRATION_TEST_DSN / PLATFORM_LEGACY_CONTRACT_MIGRATION_TEST_DSN
+      #     同因：用例把待验证的修复迁移从中间抽掉（000112 / 000111），
+      #     其后继版本让连续性校验失败。
+      #   AUDIT_APPEND_ONLY_TEST_DSN / AUDIT_CHAIN_TEST_DSN
+      #     用例内联 DDL 建的 audit_event_dedup 缺 environment_id 列，
+      #     而仓储 internal/platform/audit/infrastructure/gorm_repository.go:264 已按
+      #     environment_id 查询 → “Unknown column 'environment_id' in 'where clause'”。
+      # 修复方式是用例跟上最新 schema/迁移清单；在修好之前给值只会让本 job 永久红。
+      - name: Verify migration SQL on isolated MySQL 8.4
+        shell: bash
+        env:
+          PLATFORM_MIGRATION_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.migration-mysql.ports[3306] }})/platform_migration_test?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+          PLATFORM_OPERATIONS_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.migration-mysql.ports[3306] }})/platform_operations_test?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+          MYSQL_REFRESH_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.migration-mysql.ports[3306] }})/platform_refresh_test?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+          AUDIT_DEDUP_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.migration-mysql.ports[3306] }})/platform_audit_dedup_test?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+        run: |
+          set -Eeuo pipefail
+          log="$RUNNER_TEMP/migrations-test.log"
+          go test ./migrations/... -count=1 -timeout 20m -v 2>&1 | tee "$log"
+          # 反向断言：DSN 没生效时用例只会 t.Skip，CI 依旧全绿——这正是本 job 要防的失败模式，
+          # 所以必须确认拿到 DSN 的用例真的 PASS 过，而不是“没红就算过”。
+          for test in \
+            TestMigrations95To99OnMySQL \
+            TestOperationalModulesOnIsolatedMySQL \
+            TestMySQLManagedRefreshRepairBoundaries \
+            TestAuditEventDedupEnvironmentMySQL; do
+            grep -q -- "--- PASS: $test " "$log" \
+              || { echo "migration test did not run (skipped?): $test" >&2; exit 1; }
+          done
+
+  # 数据竞争检测。test job 已经跑过 `go test ./...`，把 -race 叠在同一个 job 里等于把
+  # 整套用例再跑一遍（耗时翻倍且互相拖慢），所以独立成 job 且只覆盖 ./internal/...。
+  # 不挂 MySQL service：DSN 未配置时数据库用例仍是 t.Skip，竞态检测的价值在纯逻辑路径，
+  # 真实 SQL 由上面的 migrations job 覆盖。
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # 非阻断观察期：-race 在 4vCPU/16GB runner 上耗时 6–12min 且更易受环境影响；先以非阻断方式收集真实失败率，稳定后再改为阻断。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Run ./internal/... under the race detector
+        run: go test -race -count=1 -timeout 30m ./internal/...
+
   image:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: test
+    # 迁移 SQL 全量验证阻断发布：任一红都不应继续构建/部署镜像，否则会出现
+    # “测试红但镜像已推到生产”的窗口。race 处于观察期，不阻断发布。
+    needs: [test, migrations]
     runs-on: ubuntu-latest
     outputs:
       image_ref: ${{ steps.result.outputs.image_ref }}
