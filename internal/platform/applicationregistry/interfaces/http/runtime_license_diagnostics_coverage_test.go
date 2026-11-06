@@ -17,6 +17,7 @@ func TestRuntimeLicenseDiagnosticsCoverEveryPersistedLicenseCode(t *testing.T) {
 		"LICENSE_RUNTIME_ENROLLMENT_FAILED":    "登记",
 		"LICENSE_RUNTIME_CONFIRMATION_FAILED":  "确认",
 		"LICENSE_RUNTIME_BINDING_FAILED":       "绑定",
+		"LICENSE_RUNTIME_STATE_UNAVAILABLE":    "许可运行态",
 		"LICENSE_NOT_INITIALIZED":              "许可",
 		"LICENSE_CONFIRMATION_REQUIRED":        "确认",
 		"LICENSE_BINDING_MISMATCH":             "绑定",

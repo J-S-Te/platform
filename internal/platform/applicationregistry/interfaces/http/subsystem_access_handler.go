@@ -255,6 +255,14 @@ func (handler *SubsystemAccessHandler) writeError(writer http.ResponseWriter, re
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
 	case errors.Is(err, application.ErrSubsystemAccessOperationNotFound):
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
+	case errors.Is(err, application.ErrSubsystemAccessRecoveryRequired):
+		// 派发效果未知不能靠重排解决：同一持久代次不会从 DISPATCHED 退回 PREPARED，
+		// 重排只会清错误码再回到未知。这里必须引导到人工核验通道。
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New(
+			"SUBSYSTEM_ACCESS_DEPLOYMENT_EFFECT_UNKNOWN",
+			"部署已派发但结果未知，不能通过恢复重排；请先人工核验原代次",
+			map[string]any{"next_action": "先调用该操作的 recovery-preview 核对原代次、当前清单摘要以及是否无成功回执/无终止结果，" +
+				"再经人工恢复（mode=fenced 或 mode=superseded）失败收口原代次；不要重复部署"}))
 	case errors.Is(err, application.ErrSubsystemAccessOperationConflict), errors.Is(err, application.ErrSubsystemAccessOperationLeaseLost):
 		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.Conflict)
 	default:

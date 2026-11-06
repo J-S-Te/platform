@@ -14,6 +14,15 @@ HARNESS = r'''
 set -Eeuo pipefail
 source "$DEPLOY_SOURCE"
 deploy_dir="$FIXTURE_ROOT"
+# 许可运行态门禁的四项检查（容器健康/许可状态卷/许可实例/受控部署核验）由
+# tests/test-license-runtime.py 独立覆盖；本文件只验证完成路径（阶段推进、成员与镜像
+# 门禁、稳定性窗口）本身，因此为门禁提供记录调用的通过替身，避免真实门禁在隔离
+# 夹具里因缺少 platform-api/mysql 容器而失败关闭、把完成路径整体挡住。
+license_runtime_gate_calls="$deploy_dir/license-gate-calls"
+license_runtime_gate() {
+  printf '%s\n' "${*:-<all>}" >> "$license_runtime_gate_calls"
+  return 0
+}
 runtime_file="$deploy_dir/.env"
 release_file="$deploy_dir/.release.env"
 manifest_dir="$deploy_dir/manifests"

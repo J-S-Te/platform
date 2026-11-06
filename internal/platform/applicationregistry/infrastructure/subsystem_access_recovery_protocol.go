@@ -74,6 +74,26 @@ func (p *UnixSocketSubsystemProvisioner) CheckAccessDeploymentRecovery(ctx conte
 	return value, validateRecoveryEvidence(value, request.Receipt)
 }
 
+// ReadAccessDeploymentSupersession 经受限协议读取原代次的否定证明与当前清单摘要。
+// 参数：ctx控制请求，request包含平台原代次绑定（清单摘要可能已被新发布取代）。
+// 返回值：只读证明；旧端、错绑定、终止/成功事实或通信失败时拒绝。
+func (p *UnixSocketSubsystemProvisioner) ReadAccessDeploymentSupersession(ctx context.Context,
+	request application.SubsystemAccessAbandonRequest) (application.SubsystemAccessRecoveryEvidence, error) {
+	var value application.SubsystemAccessRecoveryEvidence
+	reply, err := p.exchangeAccessRecovery(ctx, "access-deployment-supersession", request)
+	if err != nil {
+		return value, err
+	}
+	if reply.RecoveryEvidence == nil {
+		return value, provisioningError("deployment supersession evidence missing")
+	}
+	value = *reply.RecoveryEvidence
+	if value.Receipt != request.Receipt || !application.ValidSubsystemAccessChecksum(value.CurrentProfileChecksum) {
+		return value, application.ErrSubsystemAccessOperationConflict
+	}
+	return value, nil
+}
+
 // AbandonAccessDeployment 仅请求Agent保存已审查原代次的人工终止栅栏。
 // 参数：request包含原绑定、摘要及可信操作者原因，ctx控制请求。
 // 返回值：真实持久人工决定；错绑定或非人工终止结果失败关闭。

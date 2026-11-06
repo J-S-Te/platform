@@ -457,8 +457,13 @@ verify() {
   echo '基础平台核心服务健康检查已通过；不代表任何业务子系统已部署，也不代表外部客户端/安全组已验证。'
   if [[ -n "$component" ]]; then
     verify_subsystem_current_health "$component" || return
+    # 许可运行态门禁：健康与受控状态都通过后，还要证明“许可运行态”没有把容器留在重启
+    # 循环里（缺许可状态卷 / 许可实例与平台不一致）。必须在打印成功结论之前，并且失败即中止：
+    # 现场故障正是通过这一层被漏掉，平台只显示「部署 Agent 执行失败」，重试完全无效。
+    license_runtime_gate "$subsystem_app_code" || return
     printf '%s/prod 子系统当前数据库、API、Worker 与跨系统依赖验收已通过。\n' "$subsystem_app_code"
   else
+    license_runtime_gate || return
     echo '如需验收业务子系统，请执行：deploy.sh verify <component>。'
   fi
 }

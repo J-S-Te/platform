@@ -100,7 +100,12 @@ func (stub *accessRepositoryStub) RequeueOperation(_ context.Context, tenantID, 
 		return false, nil
 	}
 	stub.requeued++
+	// 真实仓储在重排时会清错误码、递增加领取轮次与乐观版本；桩件保持同一语义，
+	// 否则“拒绝路径不得改变 attempt_count/version”的断言会失去意义。
 	operation.Status = SubsystemAccessStatusPending
+	operation.ErrorCode = ""
+	operation.AttemptCount++
+	operation.Version++
 	stub.operations[id] = operation
 	return true, nil
 }

@@ -34,6 +34,15 @@ public_transport_prepare() { :; }
 scope_services() { printf '%s\n' platform-api frontend contract-api data-analysis-api; }
 # 本文件验证阶段切换和刷新顺序；完整运行时镜像、成员和状态校验由 test-subsystem-completion.py 执行。
 verify_selected_runtime() { [[ "$mock_runtime_verified" == true ]]; }
+# 许可运行态门禁的四项检查（容器健康/许可状态卷/许可实例/受控部署核验）由
+# tests/test-license-runtime.py 独立覆盖；这里只验证它被接在“删候选、进 VERIFIED”之前，
+# 并且失败时失败关闭（不删候选、不进入 VERIFIED）。
+license_runtime_gate_calls="$test_root/license-gate-calls"
+mock_license_gate=0
+license_runtime_gate() {
+  printf '%s\n' "$*" >> "$license_runtime_gate_calls"
+  return "$mock_license_gate"
+}
 compose() {
   if [[ "$*" == 'config --images docker-socket-proxy' ]]; then
     printf 'ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459\n'
@@ -220,7 +229,23 @@ fi
 [[ -e "$mock_candidate_marker" && "$mock_removed" == false ]]
 mock_runtime_verified=true
 assert_phase READY_TO_CONTINUE
+# 门禁失败必须失败关闭：保留候选、不进入 VERIFIED（否则重启循环的容器会被记成部署完成）。
+mock_license_gate=1
+if continue_subsystem contract > "$test_root/license-gate-fail.out" 2>&1; then
+  echo '许可运行态门禁失败仍被判定为部署完成' >&2; exit 1
+fi
+[[ -e "$mock_candidate_marker" && "$mock_removed" == false ]] || {
+  echo '许可运行态门禁失败后候选容器被删除' >&2; exit 1
+}
+assert_phase READY_TO_CONTINUE
+grep -q '许可运行态门禁未通过' "$test_root/license-gate-fail.out" || {
+  echo '许可运行态门禁失败缺少可执行指引' >&2; exit 1
+}
+mock_license_gate=0
 continue_subsystem contract > "$test_root/continue.out"
+grep -qx 'contract_management' "$license_runtime_gate_calls" || {
+  echo 'continue 未按应用编码执行许可运行态门禁' >&2; exit 1
+}
 [[ ! -e "$mock_candidate_marker" && "$mock_removed" == true ]]
 grep -q 'VERIFIED' "$test_root/continue.out"
 assert_phase VERIFIED

@@ -151,6 +151,15 @@ continue_subsystem() {
     exec 7>&-
     return 1
   }
+  # 许可运行态门禁：删除候选容器就等于宣布“部署完成”，因此必须在删除之前确认 API 容器
+  # 真的带上了许可状态卷、且许可实例与平台一致——缺卷的容器会健康检查失败并每分钟重启，
+  # 而平台只会显示「部署 Agent 执行失败」。失败时保留候选，避免把不可用运行态记成 VERIFIED。
+  license_runtime_gate "$subsystem_app_code" || {
+    printf '错误：许可运行态门禁未通过；已保留候选容器，未进入 VERIFIED。\n' >&2
+    flock -u 7
+    exec 7>&-
+    return 1
+  }
   container="$(compose ps -q "$subsystem_service" 2>/dev/null || true)"
   health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
   docker rm "$subsystem_candidate" >/dev/null || die '服务已就绪，但候选容器删除失败，请检查后重试'
