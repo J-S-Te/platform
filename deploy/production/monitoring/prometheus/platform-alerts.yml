@@ -4,27 +4,44 @@
 #   platform_oauth_backchannel_unregistered_rp
 #   platform_oauth_backchannel_logout_no_endpoint
 #     → platform/internal/platform/oidc/backchannel/observability.go:16,18
-#   platform_http_requests_total / platform_http_errors_total /
-#   platform_http_request_duration_seconds_sum / platform_http_request_duration_seconds_count /
+#   platform_http_requests_total{method,route,status} /
+#   platform_http_errors_total{method,route,status} /
+#   platform_http_request_duration_seconds_bucket{method,route,status,le} /
+#   platform_http_request_duration_seconds_sum{method,route,status} /
+#   platform_http_request_duration_seconds_count{method,route,status} /
 #   platform_authz_failures_total / platform_oidc_login_failures_total
-#     → platform/internal/transport/http/metrics.go:176-180（ServeHTTP 无条件输出）。
-#       重要限制：这几个计数器/汇总值**没有标签维度**——既不按 status、也不按 handler
-#       展开，所以本文件不能写 `platform_http_requests_total{status=~"5.."}` 这类选择器
-#       （那样只会得到空结果、规则静默永不触发），也不能用 histogram_quantile 算 p95
-#       （没有 *_bucket）。下面的规则按这个真实形态编写，不臆造标签。
+#     → platform/internal/transport/http/metrics.go 的 HTTP 指标常量块与 writeHTTPMetrics
+#       （Middleware 逐请求累加，ServeHTTP 每次抓取无条件输出 TYPE 行）。
+#       标签口径（C1 起）：requests/errors/duration 三条指标共用同一组标签
+#       {method, route, status}：
+#         method ∈ GET/POST/PUT/PATCH/DELETE/OPTIONS/HEAD/OTHER（非白名单方法记 OTHER）
+#         route  = gin 注册模式（如 /api/v1/users/:id），未匹配路由（404/405）固定
+#                  "__unmatched__"；常规序列数超 maxHTTPSeries(1000) 后新组合折叠为
+#                  {method="OTHER",route="__overflow__",status="other"} 继续计数。
+#         status ∈ 1xx/2xx/3xx/4xx/5xx（畸形状态码兜底 "other"）
+#       → 标签值是**分桶枚举字符串**，不是数字：只有 `status="5xx"` 能命中；
+#         `status=~"5.."`、`status=~"5.*"`、`status>=500` 这类写法**永远匹配不到**任何
+#         序列（正则是对字符串 "5xx" 匹配，比较运算在字符串标签上直接丢弃），规则会
+#         静默永不触发。以后写 5xx 相关选择器必须写等值 `status="5xx"`。
+#       延迟指标是 histogram：有 *_bucket（桶上界 0.005/0.01/0.025/0.05/0.1/0.25/0.5/1/
+#       2.5/5/10 秒 + le="+Inf"，+Inf 恒等于 _count），因此 histogram_quantile 可用。
+#       但 p95 告警另立项，本文件目前只有 _sum/_count 比值的**平均值**规则。
+#       另注意：带标签后进程刚启动、还没有任何请求时，这三条指标**没有样本**（只有 TYPE
+#       行）——"没有流量"不是故障，所以"抓取成功但内容为空"的 absent() 兜底必须用
+#       platform_metric_collection_errors_total（每次抓取都无条件输出）。
 #   platform_database_open_connections / platform_database_in_use_connections /
 #   platform_database_wait_count_total
-#     → platform/internal/transport/http/metrics.go:198-200（gorm/sql.DB.Stats()）。
+#     → platform/internal/transport/http/metrics.go:438-440（gorm/sql.DB.Stats()）。
 #       连接池上限 50 见 platform/internal/shared/database/mysql.go:21
 #       的 OpenMySQLWithPool(cfg, 50, 20, 15m, 2m)。
 #   platform_metric_collection_errors_total
-#     → platform/internal/transport/http/metrics.go:182（采集失败计数）
+#     → platform/internal/transport/http/metrics.go:422（每次抓取无条件输出，采集失败计数）
 #   platform_keycloak_outbox_backlog / platform_keycloak_outbox_dead /
 #   platform_async_job_backlog / platform_async_job_dead /
 #   platform_oidc_backchannel_logout_backlog / platform_oidc_backchannel_logout_failed
-#     → platform/internal/transport/http/metrics.go:73-79
+#     → platform/internal/transport/http/metrics.go:364-370
 #   platform_async_job_last_success_timestamp_seconds
-#     → platform/internal/transport/http/metrics.go:160
+#     → platform/internal/transport/http/metrics.go:455
 #   platform_oauth_client_secret_active{status} /
 #   platform_oauth_client_secret_active_client{client_id} /
 #   platform_oauth_client_secret_active_clients /
@@ -59,17 +76,24 @@ groups:
 
       # up 为 1 但没有任何平台指标样本：token 不匹配（RequireMetricsAccess 返回 401）、
       # 路由缺失或被反代拦截。这条规则是“抓取成功但内容为空”的唯一信号。
+      #
+      # 探测指标必须选**每次抓取都无条件输出**的那一条：platform_metric_collection_errors_total
+      # 在 ServeHTTP 末尾无条件输出（采集失败也照常打印计数）。不能再用
+      # platform_http_requests_total 探测——C1 起它带 {method,route,status} 标签，
+      # 进程刚启动、还没有任何请求时本来就没有样本，用它会让 absent() 在健康进程上误报。
       - alert: PlatformMetricsSamplesMissing
-        expr: absent(platform_http_requests_total{job="platform-api"})
+        expr: absent(platform_metric_collection_errors_total{job="platform-api"})
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: Platform /metrics is reachable but exposes no samples
           description: >-
-            platform_http_requests_total 在每次抓取时无条件输出，样本缺失说明抓取被
+            platform_metric_collection_errors_total 在每次抓取时无条件输出，样本缺失说明抓取被
             RequireMetricsAccess 拒绝（METRICS_ACCESS_TOKEN 与
             runtime/prometheus-secrets/platform-metrics-token 不一致）或 /metrics 路由失效。
+            注意 HTTP 请求面指标（platform_http_*）带 method/route/status 标签，空闲进程没有
+            样本是正常的，不能用它们判断抓取是否可用。
           runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
 
       # 采集失败只在写库/查询出错时累加；对应 gauge 会被跳过（不以 0 冒充“没有缺口”）。
@@ -266,21 +290,25 @@ groups:
   # 永久静默的假告警（absent() 也会长期红），必须等指标先落地再加规则。
   - name: platform-http-db
     rules:
-      # 错误率：platform_http_errors_total / platform_http_requests_total。
+      # 错误率：status="5xx" 的 errors / 全部 requests。
       #
-      # 为什么不是“5xx 率”：metrics.go:176-177 输出的是两个**无标签**的全局计数器，
-      # 代码里没有 `status` 维度（见 Middleware 只对计数器做 Add，没有 status 标签），
-      # 所以 `platform_http_requests_total{status=~"5.."}` 匹配不到任何序列。
-      # 这里退一步用“status >= 400 的占比”（errors 在 Middleware 里按 status>=400 累加），
-      # 它同时覆盖 4xx 与 5xx：宁可多报（含鉴权拒绝/参数错误），也不留永不触发的空规则。
-      # 需要真正的 5xx 率时必须先给 metrics.go 加 status 标签，属于代码改动，不在本文件范围。
+      # C1 起 metrics.go 的 HTTP 指标带 {method,route,status} 标签，所以终于能把分子
+      # 收敛到 5xx：`platform_http_errors_total{status="5xx"}`。分母保持无标签选择器，
+      # 由 sum() 把所有序列加总（等价于全站请求量）。
       #
-      # 阈值 5%：正常业务里 4xx 主要是登录失败、参数校验和权限拒绝；持续超过 5%
-      # 要么是前端/客户端回归，要么是某个调用方在重试风暴里刷接口。
+      # 两种写法必须区分清楚：
+      #   - 对：`status="5xx"`——status 是分桶枚举字符串，等值才能命中。
+      #   - 错：`status=~"5.."`/`status=~"5.*"` 看起来“5 开头”，但标签值实际是 "5xx"
+      #     这三个字符：正则要写成 `status=~"5xx"` 才命中，而原意是数字区间时更该用
+      #     等值。写成 `status=~"5.."` 会得到空结果，规则静默永不触发。
+      #
+      # 阈值 5%：5xx 是服务端责任（4xx 归 authz/参数校验，由
+      # PlatformAuthzFailuresSurge 与访问日志覆盖），持续超过 5% 说明数据库、下游依赖
+      # 或应用本身在稳定失败，不是客户端行为。
       # for: 10m 用于过滤一次性批处理、健康探针与发布瞬间的抖动。
       - alert: PlatformHTTPErrorRateHigh
         expr: >-
-          sum(rate(platform_http_errors_total[5m]))
+          sum(rate(platform_http_errors_total{status="5xx"}[5m]))
           /
           sum(rate(platform_http_requests_total[5m]))
           > 0.05
@@ -288,22 +316,26 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: Platform HTTP error ratio is above 5 percent
+          summary: Platform HTTP 5xx ratio is above 5 percent
           description: >-
-            platform_http_errors_total / platform_http_requests_total 的 5 分钟速率比超过 5%
-            并持续 10 分钟。该指标口径是 status>=400（含 4xx），不是纯 5xx——平台没有
-            按 status 展开的序列。先按审计与访问日志区分“鉴权拒绝为主”还是“服务端错误为主”：
-            前者查客户端凭据/令牌配置，后者查应用日志与数据库可用性。该比值同时受
-            /metrics 抓取影响：抓取自身已从计数中排除（Middleware 对 /metrics 不计数），
-            因此抓取频率不会污染这个比值。
+            sum(rate(platform_http_errors_total{status="5xx"})) /
+            sum(rate(platform_http_requests_total)) 的 5 分钟速率比超过 5% 并持续 10 分钟。
+            分子只统计 status="5xx" 的序列（4xx 不计入），分母是全站请求总量，因此这是
+            **服务端错误率**：先看应用日志与数据库可用性，再看下游依赖超时；如果是某个
+            路由独大，用 `sum by (route) (rate(platform_http_errors_total{status="5xx"}[5m]))`
+            定位。注意标签值是分桶枚举字符串，"5xx" 必须等值匹配（`status=~"5.."` 永远
+            匹配不到）。该比值不受 /metrics 抓取影响：抓取自身已从计数中排除
+            （Middleware 对 /metrics 不计数）。
           runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
 
       # 平均延迟：platform_http_request_duration_seconds_sum / _count。
-      # 必须说清口径：metrics.go:178 把延迟以 **summary** 类型输出，但只输出 _sum 与
-      # _count 两条序列，没有 `{quantile="0.95"}`，也没有 *_bucket，因此
-      # histogram_quantile 与 quantile over 这两个值都算不出 p95——_sum/_count 只能得到
-      # 算术平均值。这里就如实按平均值告警，不把平均值冒充 p95。
-      # 想要真正的 p95 必须先改代码用 histogram 输出 *_bucket，属于另立项。
+      # 口径说明（C1 起）：延迟指标已由 summary 改为 **histogram**，现在有 *_bucket
+      # （0.005…10 秒 + le="+Inf"），因此 histogram_quantile 已经可用。但这条规则**故意
+      # 仍然只看 _sum/_count 的算术平均值**：p95 的阈值、分位与“按 route 分组还是全站”
+      # 需要单独评审口径，p95 告警另立项，不在本轮顺手加。所以不要以为“有桶了就等于
+      # 有尾延迟告警”——没有这条 p95 规则时，平均值正常不代表 p99 正常。
+      # 想临时看尾延迟可以在 Prometheus 控制台手工查：
+      #   histogram_quantile(0.95, sum by (le) (rate(platform_http_request_duration_seconds_bucket[5m])))
       # 阈值 1.5s：平台 API 以短事务 CRUD 为主，均值 1.5s 已经说明有明显慢路径
       # （典型是锁等待/连接池排队）；for: 15m 避开备份、迁移与批处理的周期性抖动。
       - alert: PlatformHTTPMeanLatencyHigh
@@ -319,14 +351,15 @@ groups:
           summary: Platform HTTP mean latency is above 1.5 seconds
           description: >-
             platform_http_request_duration_seconds_sum / _count 得到的**平均**响应时间超过
-            1.5 秒并持续 15 分钟。注意这是平均值而不是 p95：代码只输出 summary 的
-            _sum/_count，没有分位或桶序列，所以“平均值正常”不代表尾延迟正常。
+            1.5 秒并持续 15 分钟。注意这是平均值而不是 p95：指标本身已是 histogram（有
+            *_bucket），但本规则未使用分位，所以“平均值正常”不代表尾延迟正常。
             先看 platform_database_in_use_connections 与 platform_database_wait_count_total
-            判断是不是连接池排队，再看慢查询与外部依赖。
+            判断是不是连接池排队，再看慢查询与外部依赖；需要定位是哪类路由时按
+            {method,route,status} 标签下钻。
           runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
 
       # 连接池高水位：platform_database_in_use_connections 是
-      # gorm sql.DB.Stats().InUse（metrics.go:199），即“已被请求占用”的连接数。
+      # gorm sql.DB.Stats().InUse（metrics.go:439），即“已被请求占用”的连接数。
       # 平台主池上限 50（internal/shared/database/mysql.go:21 → OpenMySQLWithPool(cfg,50,20,...)），
       # 代码不输出 MaxOpenConnections，因此写不出“占上限的百分比”，只能给绝对高水位：
       # 40 = 上限的 80%。80% 是“还有余量但已经开始排队”的位置；真正耗尽时表现为
@@ -348,7 +381,7 @@ groups:
           runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
 
       # 认证授权失败突增：platform_authz_failures_total 在 Middleware 里按
-      # status == 401/403 累加（metrics.go:179），是“被拒绝”而不是“被拒绝的原因”。
+      # status == 401/403 累加（metrics.go:419），是“被拒绝”而不是“被拒绝的原因”。
       # 突增的两种典型含义必须区分：攻击/凭据失效（外部）与权限配置回归（内部，
       # 例如某角色映射漏配导致批量 403）。用 increase 看 10 分钟增量而不是绝对值，
       # 因为它是进程启动以来的累计计数，重启会归零、绝对值无法比较。
@@ -368,7 +401,7 @@ groups:
           runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
 
       # OIDC 登录失败突增：platform_oidc_login_failures_total 是上面 401/403 的子集，
-      # 只统计 /oauth2/、/authorize、/api/v1/auth/ 前缀的拒绝（metrics.go:180）。
+      # 只统计 /oauth2/、/authorize、/api/v1/auth/ 前缀的拒绝（metrics.go:420）。
       # 它比总量更贴近“用户登不进来”：总量突增可能是某个内部调用方令牌过期，
       # 而这条规则命中意味着交互式登录链路本身在拒绝用户。
       # 阈值 20 次/10 分钟：登录失败的用户可见度高，且往往成批出现（issuer/client 配错
