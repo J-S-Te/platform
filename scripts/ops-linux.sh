@@ -209,11 +209,29 @@ current_release_is_valid() {
 
 require_current_release() {
     local release_path
-    release_path="$(current_release_path)" || fatal "未找到当前发布版本：${DEPLOY_ROOT}/current"
-    [[ "$release_path" == "${DEPLOY_ROOT}/releases/"* ]] || fatal "当前发布版本不在 releases 目录内：${release_path}"
-    [[ -x "${release_path}/bin/api" ]] || fatal "当前 API 二进制不存在或不可执行：${release_path}/bin/api"
-    [[ -x "${release_path}/bin/worker" ]] || fatal "当前 Worker 二进制不存在或不可执行：${release_path}/bin/worker"
-    [[ -x "${release_path}/bin/migrate" ]] || fatal "当前迁移二进制不存在或不可执行：${release_path}/bin/migrate"
+    # 本函数总在命令替换里调用（release_path="$(require_current_release)"）。
+    # fatal 的 exit 只结束命令替换的子 shell，父进程随后被 set -e 静默终止，
+    # 具体原因会丢失；因此这里把原因写到 stderr 并返回失败码，由调用点显式失败。
+    if ! release_path="$(current_release_path)"; then
+        log "ERROR" "未找到当前发布版本：${DEPLOY_ROOT}/current" >&2
+        return 1
+    fi
+    if [[ "$release_path" != "${DEPLOY_ROOT}/releases/"* ]]; then
+        log "ERROR" "当前发布版本不在 releases 目录内：${release_path}" >&2
+        return 1
+    fi
+    if [[ ! -x "${release_path}/bin/api" ]]; then
+        log "ERROR" "当前 API 二进制不存在或不可执行：${release_path}/bin/api" >&2
+        return 1
+    fi
+    if [[ ! -x "${release_path}/bin/worker" ]]; then
+        log "ERROR" "当前 Worker 二进制不存在或不可执行：${release_path}/bin/worker" >&2
+        return 1
+    fi
+    if [[ ! -x "${release_path}/bin/migrate" ]]; then
+        log "ERROR" "当前迁移二进制不存在或不可执行：${release_path}/bin/migrate" >&2
+        return 1
+    fi
     printf '%s\n' "$release_path"
 }
 
@@ -266,7 +284,14 @@ require_nonempty_env_value() {
     local key="$1"
     local value
     value="$(read_env_value "$key")"
-    [[ -n "$value" ]] || fatal "环境文件缺少非空配置 ${key}：${ENV_FILE}"
+    # 本函数总在命令替换里调用（xxx="$(require_nonempty_env_value KEY)"）。
+    # fatal 的 exit 只结束子 shell，父进程随后被 set -e 静默终止，真正“缺哪个键”的文案会丢失，
+    # 生产里只剩 on_error 的通用提示。因此这里把缺失键名写到 stderr 并返回失败码，
+    # 由调用点显式失败（`if ! value="$(require_nonempty_env_value KEY)"; then exit 1; fi`）。
+    if [[ -z "$value" ]]; then
+        log "ERROR" "环境文件缺少非空配置 ${key}：${ENV_FILE}" >&2
+        return 1
+    fi
     printf '%s\n' "$value"
 }
 
@@ -450,15 +475,27 @@ backup_database() {
     require_command mysqldump
     require_command gzip
     require_command sha256sum
+
+    # 配置校验必须先于创建目录、收紧权限与生成临时文件：被拒绝时不得留下副作用。
+    local mysql_host mysql_port mysql_database mysql_username mysql_password timestamp temporary_file backup_file
+    if ! mysql_host="$(require_nonempty_env_value MYSQL_HOST)"; then
+        exit 1
+    fi
+    if ! mysql_port="$(require_nonempty_env_value MYSQL_PORT)"; then
+        exit 1
+    fi
+    if ! mysql_database="$(require_nonempty_env_value MYSQL_DATABASE)"; then
+        exit 1
+    fi
+    if ! mysql_username="$(require_nonempty_env_value MYSQL_USERNAME)"; then
+        exit 1
+    fi
+    if ! mysql_password="$(require_nonempty_env_value MYSQL_PASSWORD)"; then
+        exit 1
+    fi
+
     mkdir -p -- "${BACKUP_DIR}/mysql"
     chmod 0700 -- "$BACKUP_DIR" "${BACKUP_DIR}/mysql"
-
-    local mysql_host mysql_port mysql_database mysql_username mysql_password timestamp temporary_file backup_file
-    mysql_host="$(require_nonempty_env_value MYSQL_HOST)"
-    mysql_port="$(require_nonempty_env_value MYSQL_PORT)"
-    mysql_database="$(require_nonempty_env_value MYSQL_DATABASE)"
-    mysql_username="$(require_nonempty_env_value MYSQL_USERNAME)"
-    mysql_password="$(require_nonempty_env_value MYSQL_PASSWORD)"
     timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
     temporary_file="$(mktemp "${BACKUP_DIR}/mysql/.${mysql_database}-${timestamp}.XXXXXX.sql.gz")"
     backup_file="${BACKUP_DIR}/mysql/${mysql_database}-${timestamp}.sql.gz"
@@ -488,24 +525,41 @@ backup_database() {
     log "INFO" "MySQL 备份完成：${backup_file}"
 }
 
+validate_backup_dir_layout() {
+    # 共用校验：backup_uploads 与 command_prune_backups 都必须确认备份目录不在上传根目录内（或反之）。
+    # 重叠会导致备份归档写进被备份的数据树，清理时还可能删到上传文件所在的目录。
+    local storage_root="$1"
+    local canonical_storage canonical_backup
+    canonical_storage="$(canonical_path "$storage_root")"
+    canonical_backup="$(canonical_path "$BACKUP_DIR")"
+    if [[ "$canonical_storage" == "$canonical_backup" \
+        || "$canonical_storage" == "$canonical_backup/"* \
+        || "$canonical_backup" == "$canonical_storage/"* ]]; then
+        fatal "FILE_STORAGE_ROOT 与备份目录不能相同或互为父子目录：${canonical_storage} / ${canonical_backup}"
+        return 1
+    fi
+    return 0
+}
+
 backup_uploads() {
     CURRENT_STEP="备份本地上传文件"
     require_env_file
     require_command tar
     require_command sha256sum
-    mkdir -p -- "${BACKUP_DIR}/uploads"
-    chmod 0700 -- "$BACKUP_DIR" "${BACKUP_DIR}/uploads"
 
+    # 所有校验（含与备份目录的重叠校验）都必须先于 mkdir/chmod：
+    # 拒绝时不得创建备份目录，也不得收紧已有目录的权限。
     local storage_root timestamp temporary_file backup_file
-    storage_root="$(require_nonempty_env_value FILE_STORAGE_ROOT)"
+    if ! storage_root="$(require_nonempty_env_value FILE_STORAGE_ROOT)"; then
+        exit 1
+    fi
     [[ "$storage_root" == /* ]] || fatal "生产环境 FILE_STORAGE_ROOT 必须是绝对路径：${storage_root}"
     reject_dangerous_directory "FILE_STORAGE_ROOT" "$storage_root"
-    local canonical_storage canonical_backup
-    canonical_storage="$(canonical_path "$storage_root")"
-    canonical_backup="$(canonical_path "$BACKUP_DIR")"
-    [[ "$canonical_storage" != "$canonical_backup" && "$canonical_storage" != "$canonical_backup/"* && "$canonical_backup" != "$canonical_storage/"* ]] || \
-        fatal "FILE_STORAGE_ROOT 与备份目录不能相同或互为父子目录：${canonical_storage} / ${canonical_backup}"
+    validate_backup_dir_layout "$storage_root"
     [[ -d "$storage_root" ]] || fatal "上传文件目录不存在：${storage_root}"
+
+    mkdir -p -- "${BACKUP_DIR}/uploads"
+    chmod 0700 -- "$BACKUP_DIR" "${BACKUP_DIR}/uploads"
     timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
     temporary_file="$(mktemp "${BACKUP_DIR}/uploads/.uploads-${timestamp}.XXXXXX.tar.gz")"
     backup_file="${BACKUP_DIR}/uploads/uploads-${timestamp}.tar.gz"
@@ -538,7 +592,10 @@ command_migrate() {
     require_root
     require_env_file
     local release_path
-    release_path="$(require_current_release)"
+    # 具体原因已由 require_current_release 写到 stderr，这里只需保持失败退出码。
+    if ! release_path="$(require_current_release)"; then
+        exit 1
+    fi
     confirm "将先备份数据库，再执行当前版本的数据库迁移，是否继续？" || {
         log "INFO" "迁移已取消。"
         return 0
@@ -595,7 +652,10 @@ command_rollback() {
     [[ -n "$target_path" && -d "$target_path" ]] || fatal "目标发布版本不存在：${DEPLOY_ROOT}/releases/${ROLLBACK_TARGET}"
     [[ "$target_path" == "${DEPLOY_ROOT}/releases/"* ]] || fatal "目标发布版本越出了 releases 目录：${target_path}"
     [[ -x "${target_path}/bin/api" && -x "${target_path}/bin/worker" ]] || fatal "目标发布版本缺少可执行 API 或 Worker 二进制：${target_path}"
-    previous_path="$(require_current_release)"
+    if ! previous_path="$(require_current_release)"; then
+        # 具体原因已由 require_current_release 写到 stderr，这里只需保持失败退出码。
+        exit 1
+    fi
     [[ "$previous_path" != "$target_path" ]] || fatal "目标版本已经是当前版本：${ROLLBACK_TARGET}"
 
     log "WARN" "应用回退不会回退 MySQL 数据库。目标=${target_path}，当前=${previous_path}。"
@@ -639,18 +699,35 @@ command_prune_backups() {
     CURRENT_STEP="清理历史备份"
     require_root
     [[ -n "$RETAIN_DAYS" && "$RETAIN_DAYS" =~ ^[1-9][0-9]*$ ]] || fatal "prune-backups 必须提供正整数 --retain-days N。"
+    # 清理是破坏性操作，必须复用 backup_uploads 的重叠校验：备份目录与上传根目录相同或互为父子时，
+    # 删除范围会覆盖上传数据，因此先拒绝（零删除），不做任何目录探测或删除。
+    require_env_file
+    local storage_root
+    if ! storage_root="$(require_nonempty_env_value FILE_STORAGE_ROOT)"; then
+        exit 1
+    fi
+    validate_backup_dir_layout "$storage_root"
     [[ -d "$BACKUP_DIR" ]] || fatal "备份目录不存在：${BACKUP_DIR}"
     confirm "将删除 ${BACKUP_DIR}/mysql 与 ${BACKUP_DIR}/uploads 中超过 ${RETAIN_DAYS} 天、由本脚本生成的备份及校验文件，是否继续？" || {
         log "INFO" "清理已取消。"
         return 0
     }
 
-    local backup_subdirectory
-    # 只删除脚本约定扩展名且位于两个固定子目录中的文件，避免清理人工备份或密钥。
-    for backup_subdirectory in "$BACKUP_DIR/mysql" "$BACKUP_DIR/uploads"; do
-        [[ -d "$backup_subdirectory" ]] || continue
-        find "$backup_subdirectory" -type f \( -name '*.sql.gz' -o -name '*.sql.gz.sha256' -o -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -mtime "+${RETAIN_DAYS}" -print -delete
-    done
+    local timestamp_pattern pattern
+    # 只删除本脚本实际生成的文件名（见 backup_database / backup_uploads 的 date -u '+%Y%m%dT%H%M%SZ'）：
+    #   mysql/  <库名>-<UTC 时间戳>.sql.gz
+    #   uploads/uploads-<UTC 时间戳>.tar.gz
+    # 以及它们同名旁文件 .sha256。人工放进来的同扩展名文件（例如手工 mysqldump 的结果）
+    # 不匹配该命名模式，必须保留；扫描范围仍限定在 mysql/ 与 uploads/ 两个固定子目录。
+    timestamp_pattern='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+    if [[ -d "${BACKUP_DIR}/mysql" ]]; then
+        pattern="*-${timestamp_pattern}.sql.gz"
+        find "${BACKUP_DIR}/mysql" -type f \( -name "$pattern" -o -name "${pattern}.sha256" \) -mtime "+${RETAIN_DAYS}" -print -delete
+    fi
+    if [[ -d "${BACKUP_DIR}/uploads" ]]; then
+        pattern="uploads-${timestamp_pattern}.tar.gz"
+        find "${BACKUP_DIR}/uploads" -type f \( -name "$pattern" -o -name "${pattern}.sha256" \) -mtime "+${RETAIN_DAYS}" -print -delete
+    fi
     log "INFO" "历史备份清理完成。"
 }
 

@@ -21,3 +21,21 @@ func TestParseEmployeeCSVRejectsUnknownSelectedLine(t *testing.T) {
 		t.Fatal("expected invalid selected line to fail")
 	}
 }
+
+func TestParseEmployeeCSVStripsBOMWithoutHeader(t *testing.T) {
+	content := append([]byte{0xEF, 0xBB, 0xBF}, []byte("张三,a@example.com,,启用,销售部,销售员,crm:sales\n")...)
+	request, err := parseEmployeeCSV(content, nil)
+	if err != nil {
+		t.Fatalf("parse employee CSV: %v", err)
+	}
+	if len(request.Items) != 1 || request.Items[0].DisplayName != "张三" {
+		t.Fatalf("BOM leaked into first column: %#v", request.Items)
+	}
+}
+
+func TestParseEmployeeCSVRejectsNonUTF8(t *testing.T) {
+	// GBK 编码的“张三”不是合法 UTF-8；必须失败关闭，不能按乱码姓名导入。
+	if _, err := parseEmployeeCSV([]byte{0xD5, 0xC5, 0xC8, 0xFD, ',', 'a', '\n'}, nil); err == nil {
+		t.Fatal("expected non-UTF-8 employee CSV to fail")
+	}
+}

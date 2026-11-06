@@ -180,3 +180,13 @@ sudo bash ./服务器一键离线部署.sh \
 本次不增加镜像缓存或断点续跑参数。若构建已成功而签名/总归档未完成，应先核验冻结介质再使用现有 `finalize` / `package`；不要把修改当前 Dockerfile 后补证据当作旧镜像的真实构建证明。
 
 公共镜像平台检查兼容 OrbStack 的描述符布局：顶层 Os/Architecture 为空时，只接受有效单镜像 Descriptor.platform 的 linux/amd64；不把“未知平台”当成功。仓库索引按 linux/amd64 描述符检查，单平台清单按固定 digest 读取 Image 配置确认；实现参考 Docker 官方 imagetools inspect 的 Manifest/Image JSON 输出（https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/）。
+
+## 升级期数据库重建与验收等待（2026-11-05 起）
+
+- 数据库容器被重建后，平台阶段会强制重建 `keycloak`（以及在已部署时重建 `contract-api` / `contract-worker`）；判定持久化在
+  `runtime/database-refresh-state`，`--resume` 不会丢失上一轮的重建事实。
+- 刷新失败写 `runtime/database-refresh-failed.json`（advisory，不阻断发布），由 `deploy.sh status` / `verify` 展示；
+  看到该提示后必须在对应子系统发布阶段重新部署该服务。
+- 健康收敛为「每服务窗口 + 总预算」；`RestartCount` 只判稳定性窗口内新增，历史重启不判失败。
+- Keycloak 探针改为管理端口 `/health/ready`；发布证明做 OIDC 两级判定（master 硬性、租户 realm 404 仅告警）。
+- Temporal 仅在启用合同 / 项目 / CRM 任一消费子系统时启动。详见 `OFFLINE_RUNBOOK.md` 9.6。

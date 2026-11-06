@@ -36,7 +36,7 @@ runtime:
         OIDC_IDP_HINT: basic-platform
         DEV_AUTH_ENABLED: "false"
         OIDC_SCOPES: openid profile
-        OIDC_ROLE_CONFIG_HASH: sha256:1c1d94091fdfd3f5665d04215b91089434a737b0f43e9f1a9901755af97f621a
+        OIDC_ROLE_CONFIG_HASH: sha256:858b32508d50185dc3b1551683b3c64b98617cae7d3a8b6e1ed967cbd4fb7f93
         OIDC_MAX_EFFECTIVE_ROLES: "10"
         OIDC_SESSION_COOKIE_NAME: customer_opportunity_session
         OIDC_SESSION_IDLE_TTL: 30m
@@ -45,6 +45,7 @@ runtime:
         PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: customer_and_opportunity
         PLATFORM_ENVIRONMENT_CODE: prod
+        PLATFORM_AUDIT_REQUIRED: "true"
         OWNER_DIRECTORY_ENABLED: "true"
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
@@ -52,14 +53,12 @@ runtime:
         # 合同摘要端点与双向机器凭据已由受控接入创建；生产必须开启，
         # 否则商机“确认签约/赢单”会因 verifier 为空返回 503。
         # 手工/灾后环境在凭据未交付前保持关闭，由受控更新补齐后再开启。
-        CONTRACT_VERIFICATION_ENABLED: "true"
         CONTRACT_SUMMARY_URL: http://contract-api:8081/internal/contract-summary
         CONTRACT_SUMMARY_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_SUMMARY_SCOPE: contract.summary.read
         CONTRACT_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_OPPORTUNITY_INTAKE_URL: http://contract-api:8081/internal/opportunity-signed-events
         CONTRACT_SCOPE: opportunity.signed.write
-        CONTRACT_SIGNED_COUNT_ENABLED: "true"
         CONTRACT_SIGNED_COUNT_URL: http://contract-api:8081/contract_management/internal/opportunity-contract-counts/query
         CONTRACT_SIGNED_COUNT_TOKEN_URL: http://platform-api:8080/oauth2/token
         CONTRACT_SIGNED_COUNT_SCOPE: contract.opportunity_signed_count.read

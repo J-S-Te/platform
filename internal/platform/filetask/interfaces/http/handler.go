@@ -159,6 +159,11 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	resolved, exists := uploadPolicies[purposeKey]
+	// 本地报告必须通过v2会话固定申请与版本；v1没有相同业务绑定契约。
+	if purposeKey == portalLocalReportPurpose {
+		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
+		return
+	}
 	if !exists || !validPurposeApplication(principal.Account.Code, resolved.Namespace) {
 		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 		return

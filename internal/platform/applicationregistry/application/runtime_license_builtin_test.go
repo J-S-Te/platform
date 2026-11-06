@@ -39,7 +39,7 @@ func (s *builtinRegistrarStub) Status(context.Context, string) (coordination.Sta
 func TestBuiltinEnrollmentUsesCatalogWithoutApprovalDirectory(t *testing.T) {
 	clients := &runtimeClientsStub{}
 	registrar := &builtinRegistrarStub{}
-	service, err := NewRuntimeLicenseEnrollmentServiceWithCatalog(nil, builtinCatalogStub{}, clients, registrar)
+	service, err := NewRuntimeLicenseEnrollmentService(builtinCatalogStub{}, clients, registrar)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func (s *builtinBridgeRegistrarStub) ReconcileBuiltinComponents(_ context.Contex
 func TestBuiltinEnrollmentBridgesExistingApplicationViaCatalog(t *testing.T) {
 	clients := &runtimeClientsStub{}
 	registrar := &builtinBridgeRegistrarStub{}
-	service, err := NewRuntimeLicenseEnrollmentServiceWithCatalog(nil, builtinCatalogStub{}, clients, registrar)
+	service, err := NewRuntimeLicenseEnrollmentService(builtinCatalogStub{}, clients, registrar)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestBuiltinEnrollmentBridgesExistingApplicationViaCatalog(t *testing.T) {
 func TestBuiltinEnrollmentBridgesSelectedMemberOnly(t *testing.T) {
 	clients := &runtimeClientsStub{}
 	registrar := &builtinBridgeRegistrarStub{}
-	service, err := NewRuntimeLicenseEnrollmentServiceWithCatalog(nil, builtinCatalogStub{}, clients, registrar)
+	service, err := NewRuntimeLicenseEnrollmentService(builtinCatalogStub{}, clients, registrar)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,11 +110,13 @@ func TestBuiltinEnrollmentBridgesSelectedMemberOnly(t *testing.T) {
 }
 
 func TestBuiltinEnrollmentRequiresInstanceBinding(t *testing.T) {
-	service, err := NewRuntimeLicenseEnrollmentServiceWithCatalog(nil, builtinCatalogStub{}, &runtimeClientsStub{}, &builtinRegistrarStub{})
+	service, err := NewRuntimeLicenseEnrollmentService(builtinCatalogStub{}, &runtimeClientsStub{}, &builtinRegistrarStub{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.PrepareWithSettings(context.Background(), "tenant", "app", "env", "contract_management", "prod", "operator", RuntimeLicenseSettings{}); !errors.Is(err, ErrValidation) {
+	// 未绑定商业实例即"实例未初始化"：诊断链按 LICENSE_NOT_INITIALIZED 上报，
+	// 不再退化为无原因的字段校验失败。
+	if _, err := service.PrepareWithSettings(context.Background(), "tenant", "app", "env", "contract_management", "prod", "operator", RuntimeLicenseSettings{}); !errors.Is(err, ErrRuntimeLicenseNotInitialized) {
 		t.Fatalf("missing instance error = %v", err)
 	}
 }
@@ -139,7 +141,7 @@ func TestBuiltinRetirementProofRequiresNoRemovedMembers(t *testing.T) {
 		if removed {
 			registrar.members = append(registrar.members, coordination.Member{ServiceID: "contract-old-worker"})
 		}
-		service, err := NewRuntimeLicenseEnrollmentServiceWithCatalog(nil, builtinCatalogStub{}, &runtimeClientsStub{}, registrar)
+		service, err := NewRuntimeLicenseEnrollmentService(builtinCatalogStub{}, &runtimeClientsStub{}, registrar)
 		if err != nil {
 			t.Fatal(err)
 		}

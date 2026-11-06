@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/domain"
@@ -29,6 +30,20 @@ import (
 )
 
 const maxRequestBytes = 256 << 10
+
+// exportDownloadTicketHeader 是下载导出文件时携带一次性票据的请求头。
+// 刻意不支持 ?ticket= 查询参数：URL 会被浏览器历史、代理与访问日志留存，
+// 等于把 bearer 能力写进日志链（与文件网关 v2 票据的取舍一致）。
+const exportDownloadTicketHeader = "X-Audit-Export-Ticket"
+
+var (
+	// errExportDownloadTicketRequired 表示下载请求缺少一次性票据。
+	errExportDownloadTicketRequired = httperror.New("PLATFORM_AUDIT_EXPORT_TICKET_REQUIRED", "下载审计导出文件前必须先申请一次性下载票据", nil)
+	// errExportDownloadTicketInvalid 表示票据不存在、跨任务/跨租户或已被使用。
+	errExportDownloadTicketInvalid = httperror.New("PLATFORM_AUDIT_EXPORT_TICKET_INVALID", "审计导出下载票据无效或已使用，请重新申请", nil)
+	// errExportDownloadTicketExpired 表示票据已超过有效期。
+	errExportDownloadTicketExpired = httperror.New("PLATFORM_AUDIT_EXPORT_TICKET_EXPIRED", "审计导出下载票据已过期，请重新申请", nil)
+)
 
 // Handler 适配审计用例到统一 HTTP 响应协议；租户范围取自认证上下文，
 // 导出下载受 storageRoot 约束。
@@ -158,6 +173,16 @@ type exportResponse struct {
 	ErrorMessage string     `json:"error_message,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
+// exportDownloadTicketResponse 是签发一次性下载票据的响应。
+//
+// ticket 是明文 bearer 能力，只在本次响应里出现一次：不写日志、不入审计载荷、前端不持久化。
+// download_url 仍指向原下载地址，但该地址现在必须携带 ticket 才能兑换文件。
+type exportDownloadTicketResponse struct {
+	Ticket      string    `json:"ticket"`
+	DownloadURL string    `json:"download_url"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 // ingestionValidationResponse 有意不含任何凭据。它让审计发布方证明平台已接受其
@@ -298,6 +323,15 @@ func (h *Handler) VerifyEventHash(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
+	// 核验口径必须与摄取一致：摄取侧先对敏感 change_summary 打码，再对规范化输入计算
+	// payload_hash。候选输入走同一条打码路径，才不会把"提交了原始明文"的合法载荷误判
+	// 为篡改（打码是幂等的，提交已打码值同样通过）。
+	changes, err := sanitizeChangeSummary(input.Changes)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	input.Changes = changes
 	verification, err := h.service.VerifyPayloadHash(r.Context(), principal.Tenant.ID, r.PathValue("event_id"), input)
 	if err != nil {
 		h.writeError(w, r, err)
@@ -393,21 +427,82 @@ func (h *Handler) CreateExportJob(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "审计导出任务已创建", exportToResponse(job))
 }
 
-// DownloadExport 从本地存储根流式返回一个已完成的租户隔离导出。
-// 绝不从请求接受存储路径，并在打开文件前校验路径合法性。
+// CreateExportDownloadTicket 为已完成的审计导出签发短时一次性下载票据。
+//
+// 签发前置条件：任务属于当前租户、状态 SUCCEEDED、产物版本仍可下载且磁盘文件存在。
+// 服务端只保存票据摘要，明文票据只在本响应里出现一次；调用方不得记录日志或持久化。
+func (h *Handler) CreateExportDownloadTicket(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	jobID := strings.TrimSpace(r.PathValue("job_id"))
+	// 先确认产物真实存在于本地存储：任务标记 SUCCEEDED 但文件已丢失时，不签发
+	// 注定无法兑换的票据。
+	if _, err := h.exportArtifact(r.Context(), principal.Tenant.ID, jobID); err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	ticket, token, err := h.service.IssueExportDownloadTicket(r.Context(), principal.Tenant.ID, jobID)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusCreated, "审计导出下载票据已签发", exportDownloadTicketResponse{Ticket: token, DownloadURL: auditExportDownloadPath(jobID), ExpiresAt: ticket.ExpiresAt.UTC()})
+}
+
+// exportArtifact 解析任务产物元数据并确认磁盘文件存在且是普通文件。
+// 错误语义与既有下载保持一致：任务不存在/未完成 → ErrNotFound，产物被清理 → ErrExpired；
+// 磁盘文件缺失同样按 ErrNotFound 处理（与“从未存在”一致），底层 IO 错误交给 writeError 记录。
+func (h *Handler) exportArtifact(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
+	file, err := h.service.GetExportFile(ctx, tenantID, jobID)
+	if err != nil {
+		return domain.ExportFile{}, err
+	}
+	absolutePath, err := storagePath(h.storageRoot, file.StorageRelativePath)
+	if err != nil {
+		return domain.ExportFile{}, err
+	}
+	info, err := os.Stat(absolutePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return domain.ExportFile{}, application.ErrNotFound
+		}
+		return domain.ExportFile{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return domain.ExportFile{}, application.ErrNotFound
+	}
+	return file, nil
+}
+
+// DownloadExport 用一次性票据兑换并流式返回一个已完成的租户隔离导出。
+// 票据原子核销成功后才会读取文件；绝不从请求接受存储路径，并在打开文件前校验路径合法性。
 func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
 		return
 	}
-	file, err := h.service.GetExportFile(r.Context(), principal.Tenant.ID, r.PathValue("job_id"))
+	jobID := strings.TrimSpace(r.PathValue("job_id"))
+	ticket := strings.TrimSpace(r.Header.Get(exportDownloadTicketHeader))
+	if ticket == "" {
+		httpresponse.WriteError(w, r, http.StatusUnauthorized, errExportDownloadTicketRequired)
+		return
+	}
+	// 核销先于任何文件访问：无效、已用、过期或跨任务/跨租户的票据在这里被拒绝，
+	// 服务端不会因为一次失败的兑换暴露文件是否存在。
+	if err := h.service.ConsumeExportDownloadTicket(r.Context(), principal.Tenant.ID, jobID, ticket); err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	file, err := h.exportArtifact(r.Context(), principal.Tenant.ID, jobID)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
 	absolutePath, err := storagePath(h.storageRoot, file.StorageRelativePath)
 	if err != nil {
-		h.logger.Error("resolve audit export path", "job_id", r.PathValue("job_id"), "error", err)
+		h.logger.Error("resolve audit export path", "job_id", jobID, "error", err)
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
@@ -417,7 +512,7 @@ func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 			httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
 			return
 		}
-		h.logger.Error("open audit export", "job_id", r.PathValue("job_id"), "error", err)
+		h.logger.Error("open audit export", "job_id", jobID, "error", err)
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
@@ -425,7 +520,7 @@ func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 
 	info, err := opened.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		h.logger.Error("inspect audit export", "job_id", r.PathValue("job_id"), "error", err)
+		h.logger.Error("inspect audit export", "job_id", jobID, "error", err)
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
@@ -472,12 +567,28 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
 	case errors.Is(err, application.ErrNotFound):
 		httpresponse.WriteError(w, r, http.StatusNotFound, httperror.NotFound)
+	case errors.Is(err, application.ErrDownloadTicketExpired):
+		// 票据存在但已过期：410 让前端提示“重新申请票据”，与“票据根本无效”的 403 区分。
+		httpresponse.WriteError(w, r, http.StatusGone, errExportDownloadTicketExpired)
+	case errors.Is(err, application.ErrDownloadTicketInvalid):
+		// 不存在、跨任务/跨租户与已使用统一 403，避免向调用方区分“猜错的票据”和“已兑换的票据”。
+		httpresponse.WriteError(w, r, http.StatusForbidden, errExportDownloadTicketInvalid)
+	case errors.Is(err, application.ErrExpired):
+		// 导出产物超过保留期被清理：410 明确告知“曾存在但不可再获取”，
+		// 与从未存在的 404 区分，前端可以给出“请重新发起导出”的提示。
+		httpresponse.WriteError(w, r, http.StatusGone, httperror.Gone)
 	case errors.Is(err, application.ErrConflict):
 		httpresponse.WriteError(w, r, http.StatusConflict, httperror.Conflict)
 	default:
 		h.logger.Error("audit request failed", "error", err)
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 	}
+}
+
+// auditExportDownloadPath 是导出文件的受控下载地址。下载现在必须携带一次性票据，
+// 但地址本身仍由服务端给出，前端不自行拼接。
+func auditExportDownloadPath(jobID string) string {
+	return "/api/v1/audit/export-jobs/" + url.PathEscape(jobID) + "/download"
 }
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -569,6 +680,13 @@ func toInput(payload eventInputPayload, r *http.Request) (application.EventInput
 	if err != nil {
 		return application.EventInput{}, err
 	}
+	// change_summary 与 metadata 不同：它是合法审计内容，不能因为出现敏感字段就整条
+	// 拒绝（否则密码重置这类事件无法留痕）。命中敏感键的值打码保留 field 名称，
+	// 条数/长度超限才按校验失败拒绝（HTTP 422）。
+	changes, err := sanitizeChangeSummary(payload.ChangeSummary)
+	if err != nil {
+		return application.EventInput{}, err
+	}
 	// method 与 path 可以描述被审计的子系统操作。保留上报方提供的值，仅在
 	// 上报应用未提供时补充接收侧的值。
 	if _, ok := metadata["method"]; !ok {
@@ -581,7 +699,7 @@ func toInput(payload eventInputPayload, r *http.Request) (application.EventInput
 	if err != nil {
 		return application.EventInput{}, err
 	}
-	return application.EventInput{LoginIP: loginIP, ClientIP: clientIP, IngestPeerIP: deliveryPeerIP(r), IPSource: sourceFlag, LoginIPSource: loginIPSource, EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: payload.ChangeSummary, SourceIP: legacySourceIP, UserAgent: r.UserAgent()}, nil
+	return application.EventInput{LoginIP: loginIP, ClientIP: clientIP, IngestPeerIP: deliveryPeerIP(r), IPSource: sourceFlag, LoginIPSource: loginIPSource, EventID: payload.EventID, ApplicationCode: payload.ApplicationCode, EnvironmentCode: payload.EnvironmentCode, ActorType: payload.ActorType, ActorID: payload.ActorID, ActorName: payload.ActorName, SessionID: payload.SessionID, OccurredAt: payload.OccurredAt, Action: payload.Action, ResourceType: payload.ResourceType, ResourceID: payload.ResourceID, ResourceName: payload.ResourceName, BusinessID: payload.BusinessID, RequestID: payload.RequestID, TraceID: payload.TraceID, CorrelationID: payload.CorrelationID, Result: payload.Result, ReasonCode: payload.ReasonCode, RiskLevel: payload.RiskLevel, Classification: payload.Classification, Summary: payload.Summary, Metadata: metadata, Changes: changes, SourceIP: legacySourceIP, UserAgent: r.UserAgent()}, nil
 }
 
 // resolveEventIPs 依据统一审计来源协议解析三类地址。
@@ -667,26 +785,82 @@ func deliveryPeerIP(r *http.Request) string {
 //
 // 只用"精确键 + 词缀"匹配，不做任意包含匹配——`authorization_revision` 是合法的
 // 授权版本号，含 "authorization" 但不是凭据，不能被误杀。
+//
+// 具体规则与存储层共用 domain.IsSensitiveAuditField：平台内部适配器不经过 HTTP
+// 摄取边界，两份词表必须同源，否则 private_key/otp/pin/jwt/signature 等字段仍可能
+// 以明文进入只追加审计存储。
 func isSensitiveMetadataKey(key string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(key))
-	normalized = strings.NewReplacer("-", "_", ".", "_").Replace(normalized)
-	switch normalized {
-	case "password", "passwd", "token", "secret", "authorization", "cookie", "set_cookie",
-		"dsn", "private_key", "api_key", "apikey", "session_key", "client_secret",
-		"access_token", "refresh_token", "id_token":
-		return true
+	return domain.IsSensitiveAuditField(key)
+}
+
+// sensitiveRedaction 是敏感值在审计载荷中的固定替换串：保留字段名以便审计读者知道
+// "这个字段变更过"，但不保留任何原文内容或长度特征。
+const sensitiveRedaction = "***"
+
+// maxChangeSummaryFieldRunes 限制 change_summary 的 field 名称长度。changes 列是 JSON，
+// 没有列宽约束，这里只防"字段名本身被用来放大载荷"。
+const maxChangeSummaryFieldRunes = 255
+
+// sanitizeChangeSummary 在摄取边界对 change_summary 做敏感键打码与边界校验：
+//   - field 命中敏感词表（与 metadata 共用）时，before/after 一律替换为 "***"，
+//     仍保留 field 名称供审计追溯；
+//   - before/after 内部嵌套的对象键与数组元素同样递归打码，避免
+//     {"before":{"password":"x"}} 这类嵌套凭据绕过；
+//   - 条数或单值长度超限返回校验错误（HTTP 422），不做静默截断。
+func sanitizeChangeSummary(changes []domain.FieldChange) ([]domain.FieldChange, error) {
+	if len(changes) == 0 {
+		return nil, nil
 	}
-	for _, suffix := range []string{"_password", "_passwd", "_token", "_secret", "_api_key", "_apikey", "_private_key", "_session_key", "_dsn"} {
-		if strings.HasSuffix(normalized, suffix) {
-			return true
+	if len(changes) > application.MaxChangeSummaryEntries {
+		return nil, fmt.Errorf("%w: change_summary must not exceed %d entries", application.ErrValidation, application.MaxChangeSummaryEntries)
+	}
+	sanitized := make([]domain.FieldChange, 0, len(changes))
+	for _, change := range changes {
+		// field 名称原样保留（审计定位用），仅用裁剪后的副本做敏感键判定与长度校验。
+		field := strings.TrimSpace(change.Field)
+		if utf8.RuneCountInString(field) > maxChangeSummaryFieldRunes {
+			return nil, fmt.Errorf("%w: change_summary field exceeds %d characters", application.ErrValidation, maxChangeSummaryFieldRunes)
 		}
-	}
-	for _, prefix := range []string{"password_", "passwd_", "token_", "secret_"} {
-		if strings.HasPrefix(normalized, prefix) {
-			return true
+		current := domain.FieldChange{Field: change.Field}
+		if isSensitiveMetadataKey(field) {
+			current.Before = sensitiveRedaction
+			current.After = sensitiveRedaction
+		} else {
+			current.Before = redactChangeValue(change.Before)
+			current.After = redactChangeValue(change.After)
 		}
+		sanitized = append(sanitized, current)
 	}
-	return false
+	// 长度校验放在打码之后：超长的凭据值已经被替换成 "***"，不应因为原文过长而
+	// 反过来拒绝整条事件（也避免把"值很大"作为可观测信号）。
+	if err := application.ValidateChangeSummary(sanitized); err != nil {
+		return nil, err
+	}
+	return sanitized, nil
+}
+
+// redactChangeValue 递归打码变更值内部的对象键与数组元素。
+func redactChangeValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, child := range typed {
+			if isSensitiveMetadataKey(key) {
+				redacted[key] = sensitiveRedaction
+				continue
+			}
+			redacted[key] = redactChangeValue(child)
+		}
+		return redacted
+	case []any:
+		redacted := make([]any, len(typed))
+		for index, child := range typed {
+			redacted[index] = redactChangeValue(child)
+		}
+		return redacted
+	default:
+		return value
+	}
 }
 
 // copyMetadata 复制上报方的 metadata，并在摄取侧做敏感键防御。
@@ -700,14 +874,36 @@ func copyMetadata(metadata map[string]any) (map[string]any, error) {
 		if isSensitiveMetadataKey(key) {
 			return nil, fmt.Errorf("%w: metadata contains sensitive field %q", application.ErrValidation, key)
 		}
-		if nested, ok := value.(map[string]any); ok {
-			if _, err := copyMetadata(nested); err != nil {
-				return nil, err
-			}
+		if err := rejectSensitiveMetadataValue(value); err != nil {
+			return nil, err
 		}
 		copy[key] = value
 	}
 	return copy, nil
+}
+
+// rejectSensitiveMetadataValue 递归检查 metadata 值内的对象与数组。数组分支不能省略：
+// 旧实现只递归 map，{"metadata":{"items":[{"password":"x"}]}} 会整体绕过敏感键检查。
+// 写法对齐文件任务的载荷检查（filetask/application/job_service.go）。
+func rejectSensitiveMetadataValue(value any) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if isSensitiveMetadataKey(key) {
+				return fmt.Errorf("%w: metadata contains sensitive field %q", application.ErrValidation, key)
+			}
+			if err := rejectSensitiveMetadataValue(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if err := rejectSensitiveMetadataValue(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 func eventToResponse(event domain.Event) eventResponse {
 	response := eventResponse{

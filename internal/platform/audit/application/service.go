@@ -3,12 +3,16 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
@@ -24,6 +28,13 @@ var (
 	ErrConflict = errors.New("audit resource conflict")
 	// ErrValidation 表示调用方可自行修正的输入错误。
 	ErrValidation = errors.New("audit validation failed")
+	// ErrExpired 表示资源曾经存在但已超过保留期或产物已被清理，调用方不应重试。
+	ErrExpired = errors.New("audit resource expired")
+	// ErrDownloadTicketInvalid 表示下载票据不存在、跨租户/跨任务或已被使用。
+	// 三种情形统一语义，避免向调用方区分“猜错的票据”与“已兑换的票据”。
+	ErrDownloadTicketInvalid = errors.New("audit export download ticket invalid")
+	// ErrDownloadTicketExpired 表示票据存在且未使用，但已超过有效期；调用方应重新申请。
+	ErrDownloadTicketExpired = errors.New("audit export download ticket expired")
 )
 
 // IdentifierGenerator 生成审计事件与导出任务的稳定公开标识。
@@ -109,10 +120,18 @@ type Repository interface {
 	CreateExportJob(context.Context, string, string, PageRequest, string, time.Time) (domain.ExportJob, error)
 	GetExportJob(context.Context, string, string) (domain.ExportJob, error)
 	ClaimExportJob(context.Context, string, time.Time, time.Time) (domain.ExportWork, bool, error)
-	ListExportEvents(context.Context, string, domain.ExportQuery) ([]domain.Event, error)
+	// ListExportEvents 按 (occurred_at DESC, id DESC) 稳定排序读取一批事件；cursor 为零值
+	// 时从头开始，limit 有硬上限，保证单批内存可控。
+	ListExportEvents(context.Context, string, domain.ExportQuery, domain.ExportCursor, int) (domain.ExportEventPage, error)
 	CompleteExportJob(context.Context, domain.ExportWork, domain.ExportFile, time.Time) error
 	FailExportJob(context.Context, domain.ExportWork, string, string, time.Time, time.Time) error
 	GetExportFile(context.Context, string, string) (domain.ExportFile, error)
+	// ListExpiredExportArtifacts 只选择已完成且完成时间早于 completedBefore 的 AUDIT_EXPORT
+	// 产物版本；不得返回其他 job_type 或其他模块的文件版本。
+	ListExpiredExportArtifacts(context.Context, time.Time, int) ([]domain.ExportArtifact, error)
+	// MarkExportArtifactsDeleted 把给定 file_version 行标记为 DELETED；不删除 file_object
+	// 或 async_job 行，保留下载审计历史。
+	MarkExportArtifactsDeleted(context.Context, []string) error
 	// VerifyPayloadHash 按存储行的算法标签重算候选规范 payload 的摘要并比对（HMAC 密钥由实现持有）。
 	VerifyPayloadHash(context.Context, string, string, []byte) (domain.PayloadHashVerification, error)
 	VerifyEventChain(context.Context, string, string, string, uint64, int) (domain.ChainVerification, error)
@@ -375,12 +394,82 @@ func normalizeBatchDelivery(delivery BatchDeliveryInput) BatchDeliveryInput {
 	return delivery
 }
 
+// 变更摘要与自由文本快照的存储上限。超限一律按校验失败拒绝（HTTP 422），不做静默
+// 截断：截断会让审计记录"看起来像"原始事实，却丢失真实取值。
+const (
+	// MaxChangeSummaryEntries 是单事件 change_summary 的最大条数。
+	MaxChangeSummaryEntries = 100
+	// MaxChangeSummaryValueRunes 是 change_summary 单个 before/after 值的最大长度。
+	MaxChangeSummaryValueRunes = 4096
+	// 以下上限与 audit_event 的 actor_name_snapshot / resource_name_snapshot /
+	// reason_code / business_id 列宽（字符数）对齐，避免把超长自由文本留给 DB 报错。
+	MaxActorNameRunes    = 128
+	MaxResourceNameRunes = 255
+	MaxReasonCodeRunes   = 128
+	MaxBusinessIDRunes   = 128
+)
+
+// ValidateChangeSummary 限制变更摘要的条数与单值长度。摄取边界（HTTP 适配层打码后）
+// 与应用服务都会调用它：前者尽早返回 422，后者覆盖平台内部写入。
+func ValidateChangeSummary(changes []domain.FieldChange) error {
+	if len(changes) > MaxChangeSummaryEntries {
+		return validation(fmt.Sprintf("change_summary must not exceed %d entries", MaxChangeSummaryEntries))
+	}
+	for _, change := range changes {
+		if length, err := changeSummaryValueRunes(change.Before); err != nil {
+			return err
+		} else if length > MaxChangeSummaryValueRunes {
+			return validation(fmt.Sprintf("change_summary before of field %q exceeds %d characters", change.Field, MaxChangeSummaryValueRunes))
+		}
+		if length, err := changeSummaryValueRunes(change.After); err != nil {
+			return err
+		} else if length > MaxChangeSummaryValueRunes {
+			return validation(fmt.Sprintf("change_summary after of field %q exceeds %d characters", change.Field, MaxChangeSummaryValueRunes))
+		}
+	}
+	return nil
+}
+
+// changeSummaryValueRunes 统计变更值的字符数：字符串按 rune 计，其它 JSON 值按序列化
+// 结果计——避免调用方用嵌套对象绕过单值长度上限。
+func changeSummaryValueRunes(value any) (int, error) {
+	switch typed := value.(type) {
+	case nil:
+		return 0, nil
+	case string:
+		return utf8.RuneCountInString(typed), nil
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return 0, validation("change_summary value must be JSON serializable")
+		}
+		return utf8.RuneCountInString(string(encoded)), nil
+	}
+}
+
 func validateInput(tenantID string, input EventInput) error {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(input.EventID) == "" || strings.TrimSpace(input.ApplicationCode) == "" || strings.TrimSpace(input.EnvironmentCode) == "" || input.OccurredAt.IsZero() || strings.TrimSpace(input.Action) == "" || strings.TrimSpace(input.Result) == "" {
 		return validation("event_id, application_code, environment_code, occurred_at, action and result are required")
 	}
 	if len(input.EventID) > 128 || len(input.Action) > 128 || len(input.Summary) > 1000 || len(input.RequestID) > 128 || len(input.CorrelationID) > 128 {
 		return validation("audit field exceeds storage limit")
+	}
+	if err := ValidateChangeSummary(input.Changes); err != nil {
+		return err
+	}
+	// 自由文本快照字段同样限长：它们会原样落库并展示给审计读者，超长既是存储风险
+	// 也是日志/报表放大面。
+	if utf8.RuneCountInString(input.ActorName) > MaxActorNameRunes {
+		return validation("actor_name exceeds storage limit")
+	}
+	if utf8.RuneCountInString(input.ResourceName) > MaxResourceNameRunes {
+		return validation("resource_name exceeds storage limit")
+	}
+	if utf8.RuneCountInString(input.ReasonCode) > MaxReasonCodeRunes {
+		return validation("reason_code exceeds storage limit")
+	}
+	if utf8.RuneCountInString(input.BusinessID) > MaxBusinessIDRunes {
+		return validation("business_id exceeds storage limit")
 	}
 	if input.RequestID != "" && !correlationIdentifierPattern.MatchString(input.RequestID) {
 		return validation("request_id is invalid")
@@ -447,10 +536,23 @@ func (s *Service) ClaimExportJob(ctx context.Context, workerID string, staleBefo
 	return s.repository.ClaimExportJob(ctx, strings.TrimSpace(workerID), s.clock.Now(), staleBefore.UTC())
 }
 
-// ListExportEvents 返回导出快照使用的完整过滤结果；这里有硬上限，防止一次导出把审计表
-// 和本地内存拖垮，超限任务由 worker 标记为不可自动重试的失败。
-func (s *Service) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery) ([]domain.Event, error) {
-	return s.repository.ListExportEvents(ctx, tenantID, query)
+// ExportEventBatchSize 是审计导出分批读取的默认单批行数，同时作为单批上限。
+// 导出不再对总量设硬失败阈值：worker 按游标边读边写，内存只与单批大小相关。
+const ExportEventBatchSize = 1000
+
+// ExportArtifactCleanupBatchSize 是保留期清理单次选择的产物上限，避免一次锁住过多行。
+const ExportArtifactCleanupBatchSize = 200
+
+// ListExportEvents 分批返回导出快照的过滤结果。total 不再设上限，因此超过任意总量的
+// 导出都能完成；limit 被收敛到 [1, ExportEventBatchSize]，防止调用方绕过分批约束。
+func (s *Service) ListExportEvents(ctx context.Context, tenantID string, query domain.ExportQuery, cursor domain.ExportCursor, limit int) (domain.ExportEventPage, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return domain.ExportEventPage{}, validation("tenant_id is required")
+	}
+	if limit < 1 || limit > ExportEventBatchSize {
+		limit = ExportEventBatchSize
+	}
+	return s.repository.ListExportEvents(ctx, strings.TrimSpace(tenantID), query, cursor, limit)
 }
 
 // CompleteExportJob 由导出 worker 记录任务完成与产物元数据。
@@ -464,12 +566,165 @@ func (s *Service) FailExportJob(ctx context.Context, work domain.ExportWork, cod
 }
 
 // GetExportFile 只读取已完成任务关联的文件元数据。物理路径仍是仓储/下载适配器内部信息，
-// API 调用方不能通过提交路径选择服务器上的任意文件。
+// API 调用方不能通过提交路径选择服务器上的任意文件。产物版本被保留期清理标记为
+// DELETED/REMOVED 后返回 ErrExpired，下载端据此返回明确的“已过期/不可用”。
 func (s *Service) GetExportFile(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return domain.ExportFile{}, validation("job_id is required")
 	}
-	return s.repository.GetExportFile(ctx, tenantID, strings.TrimSpace(jobID))
+	file, err := s.repository.GetExportFile(ctx, tenantID, strings.TrimSpace(jobID))
+	if err != nil {
+		return domain.ExportFile{}, err
+	}
+	if !exportFileAvailable(file.Status) {
+		return domain.ExportFile{}, ErrExpired
+	}
+	return file, nil
+}
+
+// exportFileAvailable 判定导出产物是否仍可下载：只有明确标记为已删除/已移除的版本
+// 视为过期；空状态（历史数据或未选择该列）按可用处理，避免误伤既有导出。
+func exportFileAvailable(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "DELETED", "REMOVED":
+		return false
+	default:
+		return true
+	}
+}
+
+// ExportDownloadTicketTTL 是一次性导出下载票据的有效期。票据只覆盖“点下载 → 取字节”
+// 这一小段窗口，短 TTL 让被复制的票据几乎无法再被利用；过期后必须重新申请。
+const ExportDownloadTicketTTL = 2 * time.Minute
+
+// ExportDownloadTicketRepository 是一次性导出下载票据的持久化能力。
+//
+// 与 DeadLetterRepository 一样按能力接口声明：只需要读写审计事件的实现不必伪造票据存储；
+// 生产仓储（MySQL）必须同时实现两者。
+type ExportDownloadTicketRepository interface {
+	// CreateExportDownloadTicket 只写入票据摘要；实现不得保存或返回明文 token。
+	CreateExportDownloadTicket(context.Context, domain.ExportDownloadTicket) error
+	// ConsumeExportDownloadTicket 必须用一条条件 UPDATE（used_at IS NULL 且未过期）
+	// 原子核销，返回是否命中。并发兑换同一票据时最多一个调用返回 Consumed。
+	ConsumeExportDownloadTicket(context.Context, string, string, []byte, time.Time) (domain.ExportDownloadTicketState, error)
+}
+
+// IssueExportDownloadTicket 为已完成的导出任务签发一次性下载票据，返回票据记录与明文
+// token。明文 token 只在这里出现一次：调用方必须只把它放进签发响应，不得记录日志、
+// 写入审计载荷或持久化；服务端只保存 SHA-256 摘要。
+//
+// 签发前置条件：任务属于当前租户、状态 SUCCEEDED，且产物版本仍可下载。磁盘文件是否
+// 真实存在由 HTTP 适配层（持有存储根）检查，避免服务层假设本地存储布局。
+func (s *Service) IssueExportDownloadTicket(ctx context.Context, tenantID, jobID string) (domain.ExportDownloadTicket, string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	jobID = strings.TrimSpace(jobID)
+	if tenantID == "" {
+		return domain.ExportDownloadTicket{}, "", validation("tenant_id is required")
+	}
+	if jobID == "" {
+		return domain.ExportDownloadTicket{}, "", validation("job_id is required")
+	}
+	repository, ok := s.repository.(ExportDownloadTicketRepository)
+	if !ok {
+		return domain.ExportDownloadTicket{}, "", errors.New("audit repository does not support export download tickets")
+	}
+	// GetExportFile 的查询同时强制（租户、SUCCEEDED、AUDIT_EXPORT）三个条件，因此这里
+	// 不需要再单独判断任务状态：未完成、失败或属于其他租户的任务都是 ErrNotFound。
+	file, err := s.repository.GetExportFile(ctx, tenantID, jobID)
+	if err != nil {
+		return domain.ExportDownloadTicket{}, "", err
+	}
+	if !exportFileAvailable(file.Status) {
+		return domain.ExportDownloadTicket{}, "", ErrExpired
+	}
+	now := s.clock.Now().UTC()
+	id, err := s.ids.New(now)
+	if err != nil {
+		return domain.ExportDownloadTicket{}, "", fmt.Errorf("generate audit export download ticket ID: %w", err)
+	}
+	token, digest, err := newExportDownloadTicketToken()
+	if err != nil {
+		return domain.ExportDownloadTicket{}, "", err
+	}
+	ticket := domain.ExportDownloadTicket{ID: id, TenantID: tenantID, JobID: jobID, TokenHash: digest, ExpiresAt: now.Add(ExportDownloadTicketTTL), CreatedAt: now}
+	if err := repository.CreateExportDownloadTicket(ctx, ticket); err != nil {
+		return domain.ExportDownloadTicket{}, "", err
+	}
+	return ticket, token, nil
+}
+
+// ConsumeExportDownloadTicket 原子核销一次性下载票据。只有未使用且未过期的、属于
+// （租户, 任务）的票据能核销成功；其余情形分别返回 ErrDownloadTicketInvalid（不存在/
+// 跨范围/已用）与 ErrDownloadTicketExpired（已过期），由 HTTP 层映射为 403/410。
+func (s *Service) ConsumeExportDownloadTicket(ctx context.Context, tenantID, jobID, token string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	jobID = strings.TrimSpace(jobID)
+	if tenantID == "" {
+		return validation("tenant_id is required")
+	}
+	if jobID == "" {
+		return validation("job_id is required")
+	}
+	repository, ok := s.repository.(ExportDownloadTicketRepository)
+	if !ok {
+		return errors.New("audit repository does not support export download tickets")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrDownloadTicketInvalid
+	}
+	digest := sha256.Sum256([]byte(token))
+	state, err := repository.ConsumeExportDownloadTicket(ctx, tenantID, jobID, digest[:], s.clock.Now().UTC())
+	if err != nil {
+		return err
+	}
+	switch state {
+	case domain.ExportDownloadTicketConsumed:
+		return nil
+	case domain.ExportDownloadTicketExpired:
+		return ErrDownloadTicketExpired
+	default:
+		return ErrDownloadTicketInvalid
+	}
+}
+
+// newExportDownloadTicketToken 生成 32 字节随机 token（base64url 无填充）并返回其
+// SHA-256 摘要。32 字节熵远高于可暴力猜测的范围；摘要用于入库，明文只返回给签发调用方。
+func newExportDownloadTicketToken() (string, []byte, error) {
+	data := make([]byte, 32)
+	if _, err := rand.Read(data); err != nil {
+		return "", nil, fmt.Errorf("generate audit export download ticket: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(data)
+	digest := sha256.Sum256([]byte(token))
+	return token, digest[:], nil
+}
+
+// ListExpiredExportArtifacts 选择超过保留期的已完成 AUDIT_EXPORT 产物，供 worker 删除
+// 磁盘文件并标记版本。只处理审计导出任务，其他 job_type 与其他模块的文件不受影响。
+func (s *Service) ListExpiredExportArtifacts(ctx context.Context, completedBefore time.Time, limit int) ([]domain.ExportArtifact, error) {
+	if completedBefore.IsZero() {
+		return nil, validation("completed_before is required")
+	}
+	if limit < 1 || limit > ExportArtifactCleanupBatchSize {
+		limit = ExportArtifactCleanupBatchSize
+	}
+	return s.repository.ListExpiredExportArtifacts(ctx, completedBefore.UTC(), limit)
+}
+
+// MarkExportArtifactsDeleted 把已清理磁盘文件的版本标记为 DELETED。只改写 file_version.status，
+// 保留 file_object/async_job 行，因而下载审计历史与任务状态不受影响。
+func (s *Service) MarkExportArtifactsDeleted(ctx context.Context, fileVersionIDs []string) error {
+	normalized := make([]string, 0, len(fileVersionIDs))
+	for _, id := range fileVersionIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			normalized = append(normalized, id)
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return s.repository.MarkExportArtifactsDeleted(ctx, normalized)
 }
 
 // IngestionHealth 返回平台侧审计摄取健康度；recentAfter 之前的窗口由调用方决定。

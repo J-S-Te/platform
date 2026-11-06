@@ -64,7 +64,11 @@ func (oauthClientEnvironmentModel) TableName() string { return "platform_applica
 type oauthClientApplicationModel struct {
 	ID       string `gorm:"column:id;primaryKey"`
 	TenantID string `gorm:"column:tenant_id"`
-	Status   string `gorm:"column:status"`
+	// Code 与 OwnerUserID 用于在写入客户端前判定控制面应用与属主边界，不能只
+	// 依赖全局唯一 ID：应用归属决定谁可以管理其 OAuth 客户端。
+	Code        string  `gorm:"column:code"`
+	OwnerUserID *string `gorm:"column:owner_user_id"`
+	Status      string  `gorm:"column:status"`
 }
 
 // TableName 指定 GORM 行映射的应用表名。
@@ -157,7 +161,13 @@ type oauthClientCredentialViewRow struct {
 func (repository *OAuthClientManagementRepository) CreateOAuthClient(ctx context.Context, input application.OAuthClientCreateInput, oauthClientID string, secret *application.SecretWrite, now time.Time) (application.OAuthClientView, error) {
 	var result application.OAuthClientView
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if err := verifyOAuthClientParent(transaction, input.TenantID, input.ApplicationID, input.EnvironmentID); err != nil {
+		parent, err := verifyOAuthClientParent(transaction, input.TenantID, input.ApplicationID, input.EnvironmentID)
+		if err != nil {
+			return err
+		}
+		// 控制面应用绝不能经任何入口保留目录同步 scope：这条判定与操作者无关，
+		// 因此在最终写入前、父应用锁内再执行一次（控制台归属判定在应用服务层）。
+		if err := application.ValidateOAuthClientApplicationScopes(parent.Code, input.Scopes); err != nil {
 			return err
 		}
 
@@ -234,6 +244,15 @@ func (repository *OAuthClientManagementRepository) ReplaceOAuthClientScopes(ctx 
 		}
 		if client.Version != input.Version {
 			return application.ErrManagementConflict
+		}
+		// scope 替换与创建走同一套父应用复核：否则他人可以先在普通应用创建客户端，
+		// 再把 scope 换成控制面目录通道，绕过创建时的归属与保留 scope 判定。
+		parent, err := loadOAuthClientParentApplication(transaction, input.TenantID, client.ApplicationID)
+		if err != nil {
+			return err
+		}
+		if err := application.AuthorizeOAuthClientMutation(ctx, input.TenantID, input.OperatorID, oauthClientParentApplication(parent), input.Scopes); err != nil {
+			return err
 		}
 		if err := transaction.Where("oauth_client_id = ?", client.ID).Delete(&oauthClientScopeModel{}).Error; err != nil {
 			return err
@@ -504,20 +523,46 @@ func (repository *OAuthClientManagementRepository) DisableOAuthClientSecret(ctx 
 	return mapOAuthClientManagementError(err)
 }
 
-func verifyOAuthClientParent(transaction *gorm.DB, tenantID, applicationID, environmentID string) error {
-	// 创建客户端前同时锁定应用和环境父记录，并要求环境确实属于该租户与应用；
-	// 不能仅依赖全局唯一 ID 或前端级联选择来保证多租户归属。
+// verifyOAuthClientParent 锁定并返回父应用（含 code 与 owner_user_id），同时要求
+// 环境确实属于该租户与应用；不能仅依赖全局唯一 ID 或前端级联选择来保证归属。
+func verifyOAuthClientParent(transaction *gorm.DB, tenantID, applicationID, environmentID string) (oauthClientApplicationModel, error) {
 	var applicationRow oauthClientApplicationModel
 	if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ? AND tenant_id = ? AND status = ?", applicationID, tenantID, "ACTIVE").Take(&applicationRow).Error; err != nil {
-		return mapOAuthClientManagementError(err)
+		return oauthClientApplicationModel{}, mapOAuthClientManagementError(err)
 	}
 	var environment oauthClientEnvironmentModel
 	if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ? AND tenant_id = ? AND application_id = ? AND status = ?", environmentID, tenantID, applicationID, "ACTIVE").Take(&environment).Error; err != nil {
-		return mapOAuthClientManagementError(err)
+		return oauthClientApplicationModel{}, mapOAuthClientManagementError(err)
 	}
-	return nil
+	return applicationRow, nil
+}
+
+// GetOAuthClientParentApplication 读取父应用的归属判定属性，供应用服务在写入前
+// 复核控制台操作者是否有权管理该应用的 OAuth 客户端。
+func (repository *OAuthClientManagementRepository) GetOAuthClientParentApplication(ctx context.Context, tenantID, applicationID string) (application.OAuthClientParentApplication, error) {
+	var row oauthClientApplicationModel
+	err := repository.database.WithContext(ctx).Where("id = ? AND tenant_id = ?", applicationID, tenantID).Take(&row).Error
+	if err != nil {
+		return application.OAuthClientParentApplication{}, mapOAuthClientManagementError(err)
+	}
+	return oauthClientParentApplication(row), nil
+}
+
+// loadOAuthClientParentApplication 在同一事务内重新读取并锁定客户端的父应用，
+// 供 scope 替换复核归属与保留 scope 使用。
+func loadOAuthClientParentApplication(transaction *gorm.DB, tenantID, applicationID string) (oauthClientApplicationModel, error) {
+	var row oauthClientApplicationModel
+	err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ? AND tenant_id = ?", applicationID, tenantID).Take(&row).Error
+	return row, mapOAuthClientManagementError(err)
+}
+
+func oauthClientParentApplication(parent oauthClientApplicationModel) application.OAuthClientParentApplication {
+	return application.OAuthClientParentApplication{
+		ID: parent.ID, Code: parent.Code, OwnerUserID: stringValue(parent.OwnerUserID),
+	}
 }
 
 func lockOAuthClient(transaction *gorm.DB, tenantID, oauthClientID string) (oauthClientManagementModel, error) {

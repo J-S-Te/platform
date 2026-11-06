@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
@@ -53,128 +52,6 @@ type RuntimeLicenseSettings struct {
 
 // RuntimeLicenseApprovalSource 提供 V1 遗留路径的已审批组件清单；
 // 实现只读审批产物，不得在读取时生成或修补审批内容。
-type RuntimeLicenseApprovalSource interface {
-	ApprovedRuntimeLicenseComponents(context.Context, string, string) ([]RuntimeLicenseApproval, error)
-}
-
-// RuntimeLicenseReleaseApproval 是一次完整的发行审批：组件清单、必选/退役
-// 服务集合与发行代次。摘要绑定全部字段，任一改动都会改变 ReleaseDigest。
-type RuntimeLicenseReleaseApproval struct {
-	ReleaseGeneration  string                   `json:"release_generation,omitempty"`
-	Components         []RuntimeLicenseApproval `json:"components"`
-	RequiredServiceIDs []string                 `json:"required_service_ids"`
-	RetireServiceIDs   []string                 `json:"retire_service_ids"`
-}
-
-// RuntimeLicenseLifecycleApprovalSource 提供带发行代次的完整生命周期审批；
-// 缺失时协调层只能做无 CAS 的注册，不允许用于成员变更。
-type RuntimeLicenseLifecycleApprovalSource interface {
-	ApprovedRuntimeLicenseLifecycle(context.Context, string, string) (RuntimeLicenseReleaseApproval, error)
-}
-
-type runtimeLicenseLifecycleVerifier struct {
-	source RuntimeLicenseLifecycleApprovalSource
-}
-
-// NewRuntimeLicenseLifecycleVerifier 构造协调层的审批校验器；source 缺失按
-// ErrValidation 拒绝，绝不允许出现"无审批源也放行"的校验器。
-func NewRuntimeLicenseLifecycleVerifier(source RuntimeLicenseLifecycleApprovalSource) (coordination.LifecycleApprovalVerifier, error) {
-	if source == nil {
-		return nil, ErrValidation
-	}
-	return runtimeLicenseLifecycleVerifier{source}, nil
-}
-
-// RuntimeLicenseClientID 从应用、环境与审批内容推导 V1 组件的稳定机器身份；
-// 不含凭据代次，因此凭据轮换不改变客户端标识。
-func RuntimeLicenseClientID(app, env string, item RuntimeLicenseApproval) string {
-	return runtimeLicenseClientIDWithGeneration(app, env, item, "")
-}
-
-// runtimeLicenseClientIDWithGeneration 在 V1 基础上混入凭据代次派生客户端 ID。
-// 前缀截断到 95 字符以兼容 OAuth 客户端 ID 长度约束，剩余区分度由摘要保证。
-func runtimeLicenseClientIDWithGeneration(app, env string, item RuntimeLicenseApproval, generation string) string {
-	raw, _ := json.Marshal([]any{app, env, item.ServiceID, item.Protocol, item.CoverageDigest, item.ImageDigest, generation})
-	digest := sha256.Sum256(raw)
-	prefix := app + "-" + env + "-license-" + item.ServiceID
-	if len(prefix) > 95 {
-		prefix = prefix[:95]
-	}
-	return prefix + "-" + hex.EncodeToString(digest[:16])
-}
-
-// canonicalRuntimeRelease 校验并规范化一次发行审批：组件/必选/退役清单通过
-// 校验、必选项必须都在组件内、退役项不得与组件重叠；随后深拷贝并按 ServiceID
-// 排序，保证同一审批内容无论字段顺序如何都得到同一摘要，供 CAS 比对。
-func canonicalRuntimeRelease(release RuntimeLicenseReleaseApproval) (RuntimeLicenseReleaseApproval, string, error) {
-	if ValidateRuntimeLicenseApprovals(release.Components) != nil || len(release.RequiredServiceIDs) == 0 || (release.ReleaseGeneration != "" && !runtimeLicenseID.MatchString(release.ReleaseGeneration)) {
-		return release, "", ErrValidation
-	}
-	release.Components = append([]RuntimeLicenseApproval(nil), release.Components...)
-	release.RequiredServiceIDs = append([]string(nil), release.RequiredServiceIDs...)
-	release.RetireServiceIDs = append([]string(nil), release.RetireServiceIDs...)
-	ids := map[string]bool{}
-	for _, item := range release.Components {
-		ids[item.ServiceID] = true
-	}
-	seen := map[string]bool{}
-	for _, id := range release.RequiredServiceIDs {
-		if !ids[id] || seen[id] {
-			return release, "", ErrValidation
-		}
-		seen[id] = true
-	}
-	seen = map[string]bool{}
-	for _, id := range release.RetireServiceIDs {
-		if !runtimeLicenseID.MatchString(id) || ids[id] || seen[id] {
-			return release, "", ErrValidation
-		}
-		seen[id] = true
-	}
-	sort.Slice(release.Components, func(i, j int) bool { return release.Components[i].ServiceID < release.Components[j].ServiceID })
-	sort.Strings(release.RequiredServiceIDs)
-	sort.Strings(release.RetireServiceIDs)
-	raw, err := json.Marshal(release)
-	if err != nil {
-		return release, "", err
-	}
-	digest := sha256.Sum256(raw)
-	return release, "sha256:" + hex.EncodeToString(digest[:]), nil
-}
-
-// RuntimeLicenseReleaseDigest 把交付与退役绑定到同一份完整审批（含组件选择、
-// 必选清单与发行代次），作为协调层 CAS 的期望摘要；审批内容任何改动都会
-// 使旧摘要失效，防止两次发行被拼接执行。
-func RuntimeLicenseReleaseDigest(release RuntimeLicenseReleaseApproval) (string, error) {
-	_, digest, err := canonicalRuntimeRelease(release)
-	return digest, err
-}
-
-// VerifyRuntimeLifecycle 实现 coordination.LifecycleApprovalVerifier：
-// 读取审批并重算规范化摘要，与输入的 ReleaseDigest 不一致即拒绝，
-// 保证协调层只执行与审批摘要完全一致的成员变更。
-func (v runtimeLicenseLifecycleVerifier) VerifyRuntimeLifecycle(ctx context.Context, in coordination.LifecycleInput) (coordination.LifecycleApproval, error) {
-	release, err := v.source.ApprovedRuntimeLicenseLifecycle(ctx, in.Application, in.Environment)
-	if err != nil {
-		return coordination.LifecycleApproval{}, err
-	}
-	release, digest, err := canonicalRuntimeRelease(release)
-	if err != nil || digest != in.ReleaseDigest {
-		return coordination.LifecycleApproval{}, coordination.ErrForbidden
-	}
-	approved := coordination.LifecycleApproval{RequiredServiceIDs: release.RequiredServiceIDs, RetireServiceIDs: release.RetireServiceIDs}
-	for _, item := range release.Components {
-		approved.Specs = append(approved.Specs, coordination.ServiceSpec{Application: in.Application, Environment: in.Environment, ServiceID: item.ServiceID, OAuthClientID: runtimeLicenseClientIDWithGeneration(in.Application, in.Environment, item, release.ReleaseGeneration), CoverageDigest: item.CoverageDigest, ImageDigest: item.ImageDigest})
-	}
-	return approved, nil
-}
-
-// runtimeLicenseLifecycleCoordinator 是 V1 路径所需的协调器能力子集：
-// 读状态与显式 CAS 成员调和；不支持时回退为逐组件 Register。
-type runtimeLicenseLifecycleCoordinator interface {
-	Status(context.Context, string) (coordination.Status, error)
-	ReconcileComponents(context.Context, coordination.LifecycleInput, domain.Actor) error
-}
 
 // RuntimeLicenseClientManager 暴露登记流程所需的 OAuth 客户端管理能力；
 // 实现必须把明文 Secret 仅经返回值交付一次，不得持久化明文。
@@ -190,41 +67,33 @@ type RuntimeLicenseRegistrar interface {
 	Register(context.Context, coordination.ServiceSpec) error
 }
 
-// RuntimeLicenseEnrollmentService 把已评审发行转换为可交付的组件凭据：
+// RuntimeLicenseEnrollmentService 把内置运行时目录转换为可交付的组件凭据：
 // 建立或复用机器客户端、执行受控成员调和，并在注册成功后才轮换 Secret。
+// V1 遗留审批源已下线：组件身份只来自编译进构建的目录（catalog.Version）。
 type RuntimeLicenseEnrollmentService struct {
-	source    RuntimeLicenseApprovalSource
 	catalog   RuntimeComponentCatalogSource
 	clients   RuntimeLicenseClientManager
 	registrar RuntimeLicenseRegistrar
 }
 
-// ErrRuntimeLicenseNotInitialized 表示商业运行实例尚未初始化（无任何审批源）；
+// ErrRuntimeLicenseNotInitialized 表示商业运行实例尚未初始化；
 // 它是用户可诊断的根因，不得折叠为通用部署失败。
 var ErrRuntimeLicenseNotInitialized = errors.New("commercial runtime instance not initialized")
 
-// NewRuntimeLicenseEnrollmentService 构造仅含 V1 审批源的登记服务，
-// 供尚未启用内置目录的既有安装使用。
-func NewRuntimeLicenseEnrollmentService(source RuntimeLicenseApprovalSource, clients RuntimeLicenseClientManager, registrar RuntimeLicenseRegistrar) (*RuntimeLicenseEnrollmentService, error) {
-	return NewRuntimeLicenseEnrollmentServiceWithCatalog(source, nil, clients, registrar)
-}
-
-// NewRuntimeLicenseEnrollmentServiceWithCatalog 为新 V2 安装启用内置目录路径，
-// 同时保留 V1 审批源服务遗留应用；既有 V2 应用的桥接仍由 coordination 层的
-// 受控调和完成（Task 5）。两个来源同时缺失时拒绝构造。
-func NewRuntimeLicenseEnrollmentServiceWithCatalog(source RuntimeLicenseApprovalSource, catalogSource RuntimeComponentCatalogSource, clients RuntimeLicenseClientManager, registrar RuntimeLicenseRegistrar) (*RuntimeLicenseEnrollmentService, error) {
-	if (source == nil && catalogSource == nil) || clients == nil || registrar == nil {
+// NewRuntimeLicenseEnrollmentService 构造只按内置目录登记的服务。
+// catalogSource 缺失时拒绝构造，不再回退到已下线的 V1 审批源路径。
+func NewRuntimeLicenseEnrollmentService(catalogSource RuntimeComponentCatalogSource, clients RuntimeLicenseClientManager, registrar RuntimeLicenseRegistrar) (*RuntimeLicenseEnrollmentService, error) {
+	if catalogSource == nil || clients == nil || registrar == nil {
 		return nil, ErrValidation
 	}
-	return &RuntimeLicenseEnrollmentService{source: source, catalog: catalogSource, clients: clients, registrar: registrar}, nil
+	return &RuntimeLicenseEnrollmentService{catalog: catalogSource, clients: clients, registrar: registrar}, nil
 }
 
 var runtimeLicenseID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 var runtimeLicenseDigest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
-// ValidateRuntimeLicenseApprovals 校验 V1 审批清单：数量 1..32、ServiceID 命名
-// 合规且不重复、协议固定为 1、两个摘要必须是规范的 sha256 表示。
-// 任一不满足返回 ErrValidation。
+// ValidateRuntimeLicenseApprovals 只保留对历史存档组件清单的格式校验；
+// 运行组件登记不再使用 V1 审批清单。
 func ValidateRuntimeLicenseApprovals(items []RuntimeLicenseApproval) error {
 	if len(items) == 0 || len(items) > 32 {
 		return ErrValidation
@@ -246,36 +115,39 @@ func (s *RuntimeLicenseEnrollmentService) Prepare(ctx context.Context, tenant, a
 	return s.PrepareWithSettings(ctx, tenant, applicationID, environmentID, app, env, operator, RuntimeLicenseSettings{})
 }
 
-// PrepareWithSettings 为新安装、已持久化的 V2/桥接应用选择内置目录路径，
-// 为遗留 V1 应用选择审批源路径（受控升级经 ReconcileBuiltinComponents 桥接，
-// 不再要求重新提供审批文件）。返回的凭据只在注册成功后包含明文 Secret。
+// PrepareWithSettings 只按内置运行时目录交付组件身份。V1 审批源已下线：
+// 目录缺失、商业实例未初始化或应用未迁移到 V2 时一律 fail-closed，
+// 绝不回退到任何按文件审批的路径。返回的凭据只在注册成功后包含明文 Secret。
 func (s *RuntimeLicenseEnrollmentService) PrepareWithSettings(ctx context.Context, tenant, applicationID, environmentID, app, env, operator string, settings RuntimeLicenseSettings) ([]RuntimeLicenseCredential, error) {
 	if ctx == nil || strings.TrimSpace(tenant) == "" || applicationID == "" || environmentID == "" || operator == "" || !runtimeLicenseID.MatchString(app) || !runtimeLicenseID.MatchString(env) {
 		return nil, ErrValidation
 	}
-	if s.catalog != nil {
-		if coordinator, ok := s.registrar.(interface {
-			Status(context.Context, string) (coordination.Status, error)
-		}); ok {
-			status, statusErr := coordinator.Status(ctx, app)
-			if errors.Is(statusErr, coordination.ErrNotReady) {
-				return s.prepareBuiltin(ctx, tenant, applicationID, environmentID, app, env, operator, settings)
-			}
-			if statusErr == nil {
-				switch status.Application.RegistrationMode {
-				case catalogBridgingMode, catalogBuiltinMode, catalogLegacyMode, "":
-					return s.prepareBuiltin(ctx, tenant, applicationID, environmentID, app, env, operator, settings)
-				default:
-					return nil, ErrValidation
-				}
-			} else if !errors.Is(statusErr, coordination.ErrNotReady) {
-				return nil, statusErr
-			}
-		} else if settings.InstanceID != "" {
+	if s.catalog == nil {
+		return nil, ErrRuntimeComponentCatalogUnavailable
+	}
+	if strings.TrimSpace(settings.InstanceID) == "" {
+		return nil, ErrRuntimeLicenseNotInitialized
+	}
+	if coordinator, ok := s.registrar.(interface {
+		Status(context.Context, string) (coordination.Status, error)
+	}); ok {
+		status, statusErr := coordinator.Status(ctx, app)
+		if errors.Is(statusErr, coordination.ErrNotReady) {
 			return s.prepareBuiltin(ctx, tenant, applicationID, environmentID, app, env, operator, settings)
 		}
+		if statusErr != nil {
+			return nil, statusErr
+		}
+		// LEGACY_IMAGE_V1 仍在白名单内：存量应用第一次走 V2 时由本次登记
+		// 迁到 BRIDGING_COMPONENT_V2，这是 V1→V2 的唯一入口，不能被误拒。
+		switch status.Application.RegistrationMode {
+		case catalogBridgingMode, catalogBuiltinMode, catalogLegacyMode, "":
+			return s.prepareBuiltin(ctx, tenant, applicationID, environmentID, app, env, operator, settings)
+		default:
+			return nil, ErrValidation
+		}
 	}
-	return s.prepareApproved(ctx, tenant, applicationID, environmentID, app, env, operator)
+	return s.prepareBuiltin(ctx, tenant, applicationID, environmentID, app, env, operator, settings)
 }
 
 const (
@@ -399,130 +271,6 @@ func (s *RuntimeLicenseEnrollmentService) prepareBuiltin(ctx context.Context, te
 				return nil, errors.New("commercial runtime credential delivery failed")
 			}
 			result[index].ClientSecret = rotated.PlaintextSecret
-		}
-	}
-	return result, nil
-}
-
-func (s *RuntimeLicenseEnrollmentService) prepareApproved(ctx context.Context, tenant, applicationID, environmentID, app, env, operator string) ([]RuntimeLicenseCredential, error) {
-	if s.source == nil {
-		return nil, ErrRuntimeLicenseNotInitialized
-	}
-	items, err := s.source.ApprovedRuntimeLicenseComponents(ctx, app, env)
-	if err != nil {
-		return nil, RuntimeLicenseApprovalFailure(err)
-	}
-	if ValidateRuntimeLicenseApprovals(items) != nil {
-		return nil, ErrRuntimeLicenseApprovalMismatch
-	}
-	var release RuntimeLicenseReleaseApproval
-	var releaseDigest string
-	if source, ok := s.source.(RuntimeLicenseLifecycleApprovalSource); ok {
-		release, err = source.ApprovedRuntimeLicenseLifecycle(ctx, app, env)
-		if err != nil {
-			return nil, RuntimeLicenseApprovalFailure(err)
-		}
-		release, releaseDigest, err = canonicalRuntimeRelease(release)
-		if err != nil {
-			return nil, ErrRuntimeLicenseApprovalMismatch
-		}
-		// 重读可变审批时必须核对一致性：绝不允许把一次发行的凭据与另一次
-		// 发行的退役权限拼接使用。
-		base, _, e := canonicalRuntimeRelease(RuntimeLicenseReleaseApproval{Components: items, RequiredServiceIDs: release.RequiredServiceIDs})
-		if e != nil {
-			return nil, ErrRuntimeLicenseApprovalMismatch
-		}
-		baseJSON, _ := json.Marshal(base.Components)
-		releaseJSON, _ := json.Marshal(release.Components)
-		if string(baseJSON) != string(releaseJSON) {
-			return nil, ErrRuntimeLicenseApprovalMismatch
-		}
-		items = release.Components
-	}
-	clients, err := s.clients.ListOAuthClients(ctx, tenant)
-	if err != nil {
-		return nil, errors.New("commercial runtime client lookup failed")
-	}
-	byID := map[string]OAuthClientView{}
-	for _, c := range clients {
-		byID[c.ClientID] = c
-	}
-	result := make([]RuntimeLicenseCredential, 0, len(items))
-	specs := make([]coordination.ServiceSpec, 0, len(items))
-	rotate := make([]OAuthClientView, 0, len(items))
-	for _, item := range items {
-		id := runtimeLicenseClientIDWithGeneration(app, env, item, release.ReleaseGeneration)
-		client, found := byID[id]
-		var secret string
-		if !found {
-			created, e := s.clients.CreateOAuthClient(ctx, OAuthClientCreateInput{TenantID: tenant, ApplicationID: applicationID, EnvironmentID: environmentID, OperatorID: operator, ClientID: id, ClientName: app + " Runtime " + item.ServiceID, ClientType: "service", TokenAuthMethod: "client_secret_basic", AccessTokenTTLSeconds: 300, GrantTypes: []string{"client_credentials"}, Scopes: []string{"license.runtime"}})
-			if e != nil {
-				return nil, errors.New("commercial runtime client creation failed")
-			}
-			client, secret = created.Client, created.PlaintextSecret
-		}
-		if client.ClientID != id || client.ApplicationID != applicationID || client.EnvironmentID != environmentID || client.Status != "ACTIVE" || client.ClientType != "service" || client.TokenAuthMethod != "client_secret_basic" || len(client.Scopes) != 1 || client.Scopes[0] != "license.runtime" || len(client.GrantTypes) != 1 || client.GrantTypes[0] != "client_credentials" {
-			return nil, ErrConflict
-		}
-		if client.ClientID == "" || (!found && secret == "") {
-			return nil, errors.New("commercial runtime credential incomplete")
-		}
-		specs = append(specs, coordination.ServiceSpec{Application: app, Environment: env, ServiceID: item.ServiceID, OAuthClientID: client.ClientID, CoverageDigest: item.CoverageDigest, ImageDigest: item.ImageDigest})
-		if found {
-			rotate = append(rotate, client)
-		} else {
-			rotate = append(rotate, OAuthClientView{})
-		}
-		result = append(result, RuntimeLicenseCredential{Approval: item, ClientID: client.ClientID, ClientSecret: secret, ReleaseDigest: releaseDigest})
-	}
-	registered := false
-	if coordinator, ok := s.registrar.(runtimeLicenseLifecycleCoordinator); ok {
-		status, e := coordinator.Status(ctx, app)
-		if e != nil && !errors.Is(e, coordination.ErrNotReady) {
-			return nil, errors.New("commercial runtime component status unavailable")
-		}
-		if e == nil {
-			current := map[string]coordination.ServiceSpec{}
-			for _, member := range status.Members {
-				if member.RetiredAt == nil {
-					current[member.ServiceID] = coordination.ServiceSpec{Application: member.Application, Environment: member.Environment, ServiceID: member.ServiceID, OAuthClientID: member.OAuthClientID, CoverageDigest: member.CoverageDigest, ImageDigest: member.ImageDigest}
-				}
-			}
-			changed := len(current) != len(specs)
-			for _, spec := range specs {
-				if current[spec.ServiceID] != spec {
-					changed = true
-				}
-			}
-			if changed {
-				if releaseDigest == "" {
-					return nil, errors.New("commercial runtime explicit replacement approval required")
-				}
-				operationDigest := sha256.Sum256([]byte(app + "\x00" + env + "\x00" + releaseDigest))
-				operationID := fmt.Sprintf("release-%x-%d", operationDigest, status.Revision)
-				if e = coordinator.ReconcileComponents(ctx, coordination.LifecycleInput{Application: app, Environment: env, ExpectedRevision: status.Revision, OperationID: operationID, ReleaseDigest: releaseDigest}, domain.Actor{TenantID: tenant, UserID: operator}); e != nil {
-					return nil, errors.New("commercial runtime controlled component replacement failed")
-				}
-			}
-			registered = true
-		}
-	}
-	if !registered {
-		for _, spec := range specs {
-			if e := s.registrar.Register(ctx, spec); e != nil {
-				return nil, errors.New("commercial runtime component registration failed")
-			}
-		}
-	}
-	// 只有注册/CAS 全部成功后才轮换 Secret；被拒绝的发行绝不能毁掉
-	// 当前仍在工作的组件凭据。
-	for i, client := range rotate {
-		if client.ID != "" {
-			rotated, e := s.clients.CreateOAuthClientSecret(ctx, OAuthClientSecretCreateInput{TenantID: tenant, OAuthClientID: client.ID, OperatorID: operator})
-			if e != nil || rotated.PlaintextSecret == "" {
-				return nil, errors.New("commercial runtime credential delivery failed")
-			}
-			result[i].ClientSecret = rotated.PlaintextSecret
 		}
 	}
 	return result, nil

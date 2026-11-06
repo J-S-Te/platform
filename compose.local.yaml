@@ -324,6 +324,7 @@ services:
       # 合法日志级别（parse fatal → 代理崩溃循环）；'warning' 新旧 haproxy 通用。
       LOG_LEVEL: warning
       POST: "1"        # compose up/down/run 需要非 GET 方法
+      DELETE: "1"      # 部署助手用一次性容器读取镜像内嵌授权目录哈希（docker run --rm）
       CONTAINERS: "1"  # 容器生命周期/日志/inspect/exec-create
       EXEC: "1"        # docker exec（frontend nginx -t、nginx -s reload）
       IMAGES: "1"      # 镜像拉取与检查
@@ -489,6 +490,13 @@ services:
       SETTLEMENT_PUBLIC_ORIGIN: ${APP_PUBLIC_BASE_URL:-http://localhost:8081}
       PLATFORM_BASE_URL: http://platform-api:8080
       SETTLEMENT_INVOICE_ISSUANCE_MODE: ${SETTLEMENT_INVOICE_ISSUANCE_MODE:-manual}
+    # 平台机器令牌公钥与商业授权状态卷：与 contract-api 对齐。此前这两项只由本地部署
+    # Agent 写入的 runtime/local-license.compose.json 补挂，导致未登记（无固定记录）时
+    # settlement-api 读不到 /app/data/keys 而崩溃重启。挂载同一 target，Agent 登记后的
+    # fixed 记录按 target 合并覆盖，不会产生重复挂载。
+    volumes:
+      - ./data/keys:/app/data/keys:ro
+      - license-state-settlement-api:/var/lib/commercial-license
     depends_on:
       settlement-mysql:
         condition: service_healthy
@@ -1390,6 +1398,9 @@ services:
       PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
       PORTAL_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       PORTAL_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+      # 安全审计 M-10：本地 frontend 固定地址为 172.31.255.250；缺失会让登录限流退化为
+      # 网关单桶。仅信任网关与 frontend，其它容器伪造 XFF 仍被忽略。
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.31.255.250/32}
       GIN_MODE: release
     command: ["./portal-server"]
     volumes:
@@ -1535,6 +1546,7 @@ services:
 volumes:
   license-state-contract-api:
   license-state-contract-worker:
+  license-state-settlement-api:
   file_gateway_mysql_local_data:
     name: basic-platform-local-file-gateway-mysql-data
   file_gateway_local_data:

@@ -137,7 +137,20 @@ func (handler *SubsystemOnboardingHandler) VerifyKeycloakBrokerLogin(writer stdh
 	payload.IdentityID = strings.TrimSpace(payload.IdentityID)
 	payload.Issuer = strings.TrimRight(strings.TrimSpace(payload.Issuer), "/")
 	payload.ClientID = strings.TrimSpace(payload.ClientID)
-	if payload.ApplicationCode == "" || payload.Environment == "" || payload.IdentityID == "" || payload.Issuer == "" || payload.ClientID == "" || payload.IdentityID != claims.IdentityID || !containsExactAudience(claims.Audience, payload.ClientID) {
+	if payload.ApplicationCode == "" || payload.Environment == "" || payload.IdentityID == "" || payload.Issuer == "" || payload.IdentityID != claims.IdentityID {
+		handler.writeError(writer, request, application.ErrValidation)
+		return
+	}
+	// 安全（M-2）：Client 身份只能由已验证令牌的授权方（azp）推导。azp 必须非空且出现
+	// 在令牌自身 audience 中（平台 mapper 为同步过的 RP 同时下发 token_use=access_token
+	// 与 aud）；请求体自报的 client_id 只作为一致性断言，必须非空且与 azp 精确相等，
+	// 否则 422。下文写验证记录一律使用推导值，杜绝用请求体把证据绑定到别的 Client。
+	clientID := strings.TrimSpace(claims.AuthorizedParty)
+	if clientID == "" || !containsExactAudience(claims.Audience, clientID) {
+		handler.writeError(writer, request, application.ErrValidation)
+		return
+	}
+	if payload.ClientID == "" || payload.ClientID != clientID {
 		handler.writeError(writer, request, application.ErrValidation)
 		return
 	}
@@ -159,7 +172,7 @@ func (handler *SubsystemOnboardingHandler) VerifyKeycloakBrokerLogin(writer stdh
 	}
 	if err := recorder.RecordBrokerLoginVerification(request.Context(), KeycloakBrokerLoginVerification{
 		TenantID: claims.TenantID, ApplicationID: applicationID, EnvironmentID: environmentID,
-		IdentityID: payload.IdentityID, Issuer: payload.Issuer, ClientID: payload.ClientID,
+		IdentityID: payload.IdentityID, Issuer: payload.Issuer, ClientID: clientID,
 		VerifiedByID: claims.IdentityID, SessionID: claims.SessionID,
 	}); err != nil {
 		handler.logger.Warn("Keycloak broker login verification rejected", "application_code", payload.ApplicationCode, "environment", payload.Environment, "identity_id", payload.IdentityID, "error", err)

@@ -57,6 +57,7 @@ auto_install_packages() {
   scope_report
   local component archive index
   local -a packages=()
+  local -a basic_platform_services=()
   local -a ordered=(common platform frontend customer-opportunity customer-portal contract project settlement data-analysis)
 
   printf '扫描镜像包目录：%s\n' "$package_dir"
@@ -94,7 +95,11 @@ auto_install_packages() {
   else
     deploy_component platform
   fi
-  if ! wait_for_required_service_health platform-api platform-worker file-gateway keycloak temporal; then
+  # 共享 Temporal 由 deploy-service.sh 按 temporal_consumers_enabled 条件启动：没有合同/项目/CRM
+  # 消费子系统时它不会被启动，阶段 B 的门禁必须同步条件化，否则安装会卡在一个永不出现的容器上。
+  basic_platform_services=(platform-api platform-worker file-gateway keycloak)
+  if temporal_consumers_enabled; then basic_platform_services+=(temporal); fi
+  if ! wait_for_required_service_health "${basic_platform_services[@]}"; then
     printf '自动安装暂停于基础平台验收；已完成的迁移和服务会保留。修复问题后执行：sudo ./bin/deploy.sh verify\n' >&2
     return 1
   fi

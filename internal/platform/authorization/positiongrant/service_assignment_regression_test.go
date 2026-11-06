@@ -146,6 +146,9 @@ func TestReplaceAssignmentsChecksDelegationBeforeAnyMutation(t *testing.T) {
 					return regressionRows("id,role_type,code", []driver.Value{"role-1", typ, code}), nil
 				case strings.Contains(q, "authz_role_permission as role_permission") && !strings.Contains(q, "authz_role_binding as binding"):
 					return regressionRows("permission_id", []driver.Value{"permission-1"}), nil
+				case strings.Contains(q, "grant_policy"):
+					// 授予策略守卫：本用例的目标角色只含 DEFAULT 权限。
+					return regressionRows("count", []driver.Value{int64(0)}), nil
 				case strings.Contains(q, "count(distinct("):
 					scenario.permissionChecks++
 					if scenario.writes != 0 {
@@ -222,6 +225,9 @@ func TestPreviewIntersectsTemplateValidity(t *testing.T) {
 					return regressionRows("template_id,template_name,application_id,role_id,template_from,template_until", []driver.Value{"template-1", "Standard", "app-1", "role-1", regressionTimeValue(tc.from), regressionTimeValue(tc.until)}), nil
 				case strings.Contains(q, "authz_application_authorization_policy"):
 					return regressionRows("application_id,max_effective_roles"), nil
+				case strings.Contains(q, "grant_policy"):
+					// 授予策略守卫：预览路径上的目标角色只含 DEFAULT 权限。
+					return regressionRows("count", []driver.Value{int64(0)}), nil
 				default:
 					return nil, fmt.Errorf("unexpected query: %s", q)
 				}
@@ -324,6 +330,9 @@ func TestReplaceAssignmentsChecksWholeBatchBeforeWrites(t *testing.T) {
 				case strings.Contains(q, "authz_role_permission as role_permission") && !strings.Contains(q, "authz_role_binding as binding"):
 					requestedRole = args[3].Value.(string)
 					return regressionRows("permission_id", []driver.Value{"permission-1"}), nil
+				case strings.Contains(q, "grant_policy"):
+					// 授予策略守卫：本用例的目标角色只含 DEFAULT 权限。
+					return regressionRows("count", []driver.Value{int64(0)}), nil
 				case strings.Contains(q, "count(distinct("):
 					scenario.permissionChecks++
 					var count int64

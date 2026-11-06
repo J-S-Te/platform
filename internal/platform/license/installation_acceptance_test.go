@@ -159,7 +159,7 @@ func TestIsolatedInstallationProtocolScenarios(t *testing.T) {
 	// 仅删除这些场景使用的许可证行。
 	reset := func() {
 		t.Helper()
-		for _, model := range []any{&coordination.LifecycleEvent{}, &coordination.RetiredClient{}, &coordination.Member{}, &coordination.Application{}, &coordination.Inventory{}, &domain.ClockRecovery{}, &domain.Event{}, &domain.Deployment{}, &domain.Artifact{}} {
+		for _, model := range []any{&coordination.RetiredClient{}, &coordination.Member{}, &coordination.Application{}, &coordination.Inventory{}, &domain.ClockRecovery{}, &domain.Event{}, &domain.Deployment{}, &domain.Artifact{}} {
 			if e := db.Where("1 = 1").Delete(model).Error; e != nil {
 				t.Fatal(e)
 			}

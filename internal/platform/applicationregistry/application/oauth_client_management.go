@@ -21,6 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/delegation"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -32,7 +34,24 @@ var (
 	ErrManagementConflict = errors.New("OAuth client resource conflict")
 	// ErrManagementValidation 表示调用方可自行修正的登记输入错误。
 	ErrManagementValidation = errors.New("invalid OAuth client management input")
+	// ErrManagementForbidden 表示当前操作者无权管理目标应用的 OAuth 客户端。
+	// HTTP 适配层应把它映射为 403；在适配层补齐映射前，它仍按失败关闭处理
+	// （不产生任何写入），不会退化为成功响应。
+	ErrManagementForbidden = errors.New("OAuth client management operation forbidden")
 )
+
+// OAuthClientReservedCatalogSyncScope 是控制面授权目录的唯一写入通道凭据。
+// 该目录由 API bootstrap 镜像维护，平台应用自身的 OAuth 客户端无论由谁创建都
+// 不得持有它，否则可以经目录同步改写平台内置角色（H-1）。
+const OAuthClientReservedCatalogSyncScope = "authorization.catalog.sync"
+
+// OAuthClientParentApplication 是 OAuth 客户端归属判定所需的父应用属性。
+// 它由仓储在同一事务内读取并锁定，避免判定与写入之间的归属漂移。
+type OAuthClientParentApplication struct {
+	ID          string
+	Code        string
+	OwnerUserID string
+}
 
 const (
 	oauthClientStatusActive   = "ACTIVE"
@@ -62,6 +81,9 @@ type ManagementIdentifierGenerator interface {
 // 不允许出现聚合主记录与子记录不一致的中间状态。
 type OAuthClientManagementRepository interface {
 	CreateOAuthClient(context.Context, OAuthClientCreateInput, string, *SecretWrite, time.Time) (OAuthClientView, error)
+	// GetOAuthClientParentApplication 读取客户端归属判定所需的父应用属性；
+	// 控制台创建/改 scope 必须据此复核应用归属，不能只信任调用方提交的 ID。
+	GetOAuthClientParentApplication(context.Context, string, string) (OAuthClientParentApplication, error)
 	ListOAuthClients(context.Context, string) ([]OAuthClientView, error)
 	GetOAuthClient(context.Context, string, string) (OAuthClientView, error)
 	GetOAuthClientByClientID(context.Context, string, string) (OAuthClientView, error)
@@ -369,11 +391,84 @@ func NewOAuthClientManagementService(repository OAuthClientManagementRepository,
 	return service, nil
 }
 
+// AuthorizeOAuthClientMutation 判定操作者能否为父应用创建 OAuth 客户端、或整体
+// 替换其 scope 集合。判定必须在写入前完成，失败关闭且不产生任何持久化副作用。
+//
+//   - 控制面应用（code=platform）：只有平台超级管理员可以管理它的 OAuth 客户端。
+//   - 普通应用：应用属主（owner_user_id）、平台超级管理员，或持有
+//     platform:application:update 的控制台管理员。
+//   - 控制面应用的任何客户端都不得持有 authorization.catalog.sync：控制面授权
+//     目录由 bootstrap 镜像维护，应用通道无权发布。
+//
+// 只有"与目标租户匹配、且 OperatorID 就是当前已认证主体"的请求才按控制台口径
+// 判定。没有主体或操作者不是当前主体时视为进程内受信调用（Keycloak Broker 以
+// system-keycloak 身份登记平台客户端、后台作业续跑），保留既有内部路径；HTTP
+// 入口在处理器之前已强制认证，且 console 处理器固定 OperatorID = principal.User.ID，
+// 因此人类请求不会落入该分支。
+func AuthorizeOAuthClientMutation(ctx context.Context, tenantID, operatorID string, parent OAuthClientParentApplication, scopes []string) error {
+	if err := authorizeOAuthClientParentApplication(ctx, tenantID, operatorID, parent); err != nil {
+		return err
+	}
+	return ValidateOAuthClientApplicationScopes(parent.Code, scopes)
+}
+
+func authorizeOAuthClientParentApplication(ctx context.Context, tenantID, operatorID string, parent OAuthClientParentApplication) error {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || strings.TrimSpace(principal.Tenant.ID) != strings.TrimSpace(tenantID) {
+		return nil
+	}
+	if strings.TrimSpace(principal.User.ID) != strings.TrimSpace(operatorID) {
+		// 操作者不是当前已认证主体：这是进程内受信路径（Keycloak Broker 以
+		// system-keycloak 身份为平台应用登记 broker 客户端、后台作业以记录下来的
+		// 操作者续跑）。控制台入口一律把 OperatorID 固定为 principal.User.ID，
+		// 因此人类请求永远走下面的归属判定，不会落入本分支。
+		return nil
+	}
+	if delegation.IsPlatformSuperAdmin(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(operatorID)) {
+		return nil
+	}
+	if strings.TrimSpace(parent.Code) == builtInApplicationCode {
+		return fmt.Errorf("%w: the platform application's OAuth clients may only be managed by a platform super administrator", ErrManagementForbidden)
+	}
+	ownerUserID := strings.TrimSpace(parent.OwnerUserID)
+	if ownerUserID != "" && ownerUserID == strings.TrimSpace(principal.User.ID) {
+		return nil
+	}
+	for _, permissionCode := range principal.PermissionCodes {
+		if permissionCode == PermissionApplicationUpdate {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: operator is neither the application owner nor allowed to update the application", ErrManagementForbidden)
+}
+
+// ValidateOAuthClientApplicationScopes 拒绝在控制面应用的客户端上保留
+// authorization.catalog.sync。该判定与操作者无关：控制面目录只能由 bootstrap
+// 镜像发布，连平台超级管理员也不能通过 OAuth 客户端恢复这条写入通道。
+func ValidateOAuthClientApplicationScopes(applicationCode string, scopes []string) error {
+	if strings.TrimSpace(applicationCode) != builtInApplicationCode {
+		return nil
+	}
+	for _, scope := range scopes {
+		if strings.TrimSpace(scope) == OAuthClientReservedCatalogSyncScope {
+			return fmt.Errorf("%w: scope %s is reserved for the bootstrap-managed platform authorization catalog", ErrManagementValidation, OAuthClientReservedCatalogSyncScope)
+		}
+	}
+	return nil
+}
+
 // CreateOAuthClient 登记 OAuth 客户端；仅 client_secret_basic 登记会生成初始 Secret，
 // 公开客户端不产生任何可持久化凭据。
 func (service *OAuthClientManagementService) CreateOAuthClient(ctx context.Context, input OAuthClientCreateInput) (OAuthClientCreateResult, error) {
 	input, err := normalizeOAuthClientCreate(input, service.redirectURIValidationPolicy)
 	if err != nil {
+		return OAuthClientCreateResult{}, err
+	}
+	// 控制台入口在这里失败关闭：先解析父应用的 code/owner_user_id，再判定调用者
+	// 是否有权为该应用登记客户端。子系统目录创建直接使用仓储写入，Keycloak
+	// Broker 等内部路径以非主操作者（system-keycloak）身份调用，都不受控制台
+	// 归属口径误伤（见 AuthorizeOAuthClientMutation）。
+	if err := service.authorizeApplicationMutation(ctx, input.TenantID, input.ApplicationID, input.OperatorID, input.Scopes); err != nil {
 		return OAuthClientCreateResult{}, err
 	}
 	now := service.clock.Now().UTC()
@@ -440,7 +535,25 @@ func (service *OAuthClientManagementService) ReplaceOAuthClientScopes(ctx contex
 	if input.TenantID == "" || input.OAuthClientID == "" || input.OperatorID == "" || input.Version == 0 || !validScopes(input.Scopes) {
 		return OAuthClientView{}, ErrManagementValidation
 	}
+	// 与创建一致地复核父应用归属：否则可以先在自有应用创建客户端，再把 scope
+	// 换成控制面目录通道，从而绕过创建时的归属与保留 scope 判定。
+	client, err := service.repository.GetOAuthClient(ctx, input.TenantID, input.OAuthClientID)
+	if err != nil {
+		return OAuthClientView{}, err
+	}
+	if err := service.authorizeApplicationMutation(ctx, input.TenantID, client.ApplicationID, input.OperatorID, input.Scopes); err != nil {
+		return OAuthClientView{}, err
+	}
 	return service.repository.ReplaceOAuthClientScopes(ctx, input, service.clock.Now().UTC())
+}
+
+// authorizeApplicationMutation 读取父应用属性并应用统一的 OAuth 客户端归属策略。
+func (service *OAuthClientManagementService) authorizeApplicationMutation(ctx context.Context, tenantID, applicationID, operatorID string, scopes []string) error {
+	parent, err := service.repository.GetOAuthClientParentApplication(ctx, tenantID, applicationID)
+	if err != nil {
+		return err
+	}
+	return AuthorizeOAuthClientMutation(ctx, tenantID, operatorID, parent, scopes)
 }
 
 // ReplaceOAuthClientRedirectURIs 整体替换客户端登记的回调地址；新集合先经
@@ -542,6 +655,11 @@ func (service *OAuthClientManagementService) CreateOAuthClientSecret(ctx context
 	credential, err := service.repository.CreateOAuthClientSecret(ctx, input, write, now)
 	if err != nil {
 		return OAuthClientSecretResult{}, err
+	}
+	// 自检：返回给调用方的明文必须与落库哈希同源。不同源会让部署出来的服务端
+	// 拿着一个永远换不到令牌的 Secret，且直到运行时 401 才能发现。
+	if verifyErr := bcrypt.CompareHashAndPassword(write.SecretHash, []byte(plaintext)); verifyErr != nil {
+		return OAuthClientSecretResult{}, fmt.Errorf("new OAuth client secret hash mismatch: %w", verifyErr)
 	}
 	return OAuthClientSecretResult{Credential: credential, PlaintextSecret: plaintext}, nil
 }

@@ -52,18 +52,26 @@ func (handler *SubsystemOnboardingHandler) resolveApplicationContext(writer stdh
 	return handler.resolveApplicationContextForIdentity(request, principal.Tenant.ID, principal.User.ID, applicationCode, environment)
 }
 
+// resolveApplicationContextForIdentity 以（编码, 环境名）解析（应用 ID, 环境 ID）。
+// 安全（M-2）：这里不再保留“先按登记表直查、失败再退回门户列表”的快捷分支——
+// ResolveApplicationEnvironment 不套用身份可见性，任何只拿身份 ID 调用的路径都会因此
+// 越过门户可见范围。统一走 ListPortalApplications（仓储内按当前身份过滤），
+// 非可见应用与不存在应用返回同一失败结果，调用方无法据此探测目标是否存在。
 func (handler *SubsystemOnboardingHandler) resolveApplicationContextForIdentity(request *stdhttp.Request, tenantID, identityID, applicationCode, environment string) (string, string, bool) {
-	if applicationID, environmentID, err := handler.service.ResolveApplicationEnvironment(request.Context(), tenantID, applicationCode, environment); err == nil {
-		return applicationID, environmentID, true
-	}
 	items, err := handler.service.ListPortalApplications(request.Context(), tenantID, identityID, environment)
 	if err != nil {
 		return "", "", false
 	}
 	for _, item := range items {
+		applicationID, environmentID := strings.TrimSpace(item.ApplicationID), strings.TrimSpace(item.EnvironmentID)
 		if strings.EqualFold(strings.TrimSpace(item.Code), applicationCode) &&
 			strings.EqualFold(strings.TrimSpace(item.Environment), environment) {
-			return strings.TrimSpace(item.ApplicationID), strings.TrimSpace(item.EnvironmentID), true
+			// 命中项缺少任一主键时失败关闭：下游会用这两个值写验证证据或定位部署，
+			// 空值只会把请求绑定到不存在（或不确定）的环境上。
+			if applicationID == "" || environmentID == "" {
+				return "", "", false
+			}
+			return applicationID, environmentID, true
 		}
 	}
 	return "", "", false

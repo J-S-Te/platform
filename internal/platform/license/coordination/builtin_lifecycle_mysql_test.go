@@ -74,7 +74,7 @@ func TestMySQLReconcileBuiltinComponentsPreservesEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.Where("application = ?", "contract_management").Delete(&LifecycleEvent{}).Error
+	_ = db.Exec("DELETE FROM license_runtime_lifecycle_event WHERE application = ?", "contract_management").Error
 	_ = db.Where("service_id IN ?", []string{"contract-api", "contract-worker"}).Delete(&RetiredClient{}).Error
 	_ = db.Where("application = ?", "contract_management").Delete(&Member{}).Error
 	_ = db.Where("application = ?", "contract_management").Delete(&Application{}).Error

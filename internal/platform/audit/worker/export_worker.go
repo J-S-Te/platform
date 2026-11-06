@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"os"
@@ -21,7 +22,18 @@ import (
 
 const (
 	exportMediaType = "text/csv; charset=utf-8"
+
+	// ExportRetentionPeriod 是审计导出产物的保留期：任务成功超过该时长后，worker 每轮
+	// 开始时删除磁盘文件并把 file_version 标记为 DELETED；file_object/async_job 行保留。
+	ExportRetentionPeriod = 30 * 24 * time.Hour
+
+	// exportCleanupMaxRounds 限定单轮清理的有界工作量：每轮最多处理
+	// ExportArtifactCleanupBatchSize*exportCleanupMaxRounds 个产物，避免一次清理长期占用 worker。
+	exportCleanupMaxRounds = 5
 )
+
+// exportHeader 是审计导出 CSV 的固定表头列；顺序是对外契约，不能随意调整。
+var exportHeader = []string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent", "actor_id", "actor_type", "reason_code", "business_id", "login_ip", "login_ip_source", "ingest_peer_ip", "ip_source", "received_at"}
 
 // ExportWorker 单次处理一个导出任务。任务所有权保存在 MySQL 而不是进程内，因此多个实例
 // 可以并行轮询，无需依赖 Redis 或消息队列来避免重复领取。
@@ -32,6 +44,10 @@ type ExportWorker struct {
 	workerID         string
 	pollInterval     time.Duration
 	staleLockTimeout time.Duration
+	// exportBatchSize 只用于测试注入小批量；生产固定使用 application.ExportEventBatchSize。
+	exportBatchSize int
+	// retention 只用于测试注入保留期；生产固定使用 ExportRetentionPeriod。
+	retention time.Duration
 }
 
 // NewExportWorker 组装一次性导出 worker 并校验配置。
@@ -44,7 +60,7 @@ func NewExportWorker(service *application.Service, logger *slog.Logger, storageR
 	if strings.TrimSpace(storageRoot) == "" || strings.TrimSpace(workerID) == "" || pollInterval <= 0 || staleLockTimeout <= 0 {
 		return nil, errors.New("audit export worker configuration is invalid")
 	}
-	return &ExportWorker{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot), workerID: workerID, pollInterval: pollInterval, staleLockTimeout: staleLockTimeout}, nil
+	return &ExportWorker{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot), workerID: workerID, pollInterval: pollInterval, staleLockTimeout: staleLockTimeout, retention: ExportRetentionPeriod}, nil
 }
 
 // Run 持续轮询直到上下文取消。单个任务的错误会写回任务状态，不会终止后续任务处理。
@@ -52,13 +68,20 @@ func (w *ExportWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
-		w.ProcessOne(ctx)
+		w.RunOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// RunOnce 是单轮工作：先清理超过保留期的导出产物（失败只告警，绝不阻断导出），
+// 再至多领取一个到期任务。返回值表示本轮是否领取到任务。
+func (w *ExportWorker) RunOnce(ctx context.Context) bool {
+	w.cleanupExpiredExports(ctx)
+	return w.ProcessOne(ctx)
 }
 
 // ProcessOne 至多领取一个到期任务；返回值仅表示是否成功领取，不表示导出成功。
@@ -78,12 +101,7 @@ func (w *ExportWorker) ProcessOne(ctx context.Context) bool {
 		if len(message) > 1000 {
 			message = message[:1000]
 		}
-		errorCode := "AUDIT_EXPORT_FAILED"
-		if strings.Contains(message, "more than 10000 events") {
-			errorCode = "AUDIT_EXPORT_TOO_LARGE"
-			work.Attempts = work.MaxAttempts
-		}
-		if failErr := w.service.FailExportJob(ctx, work, errorCode, message, time.Now().UTC().Add(backoff(work.Attempts))); failErr != nil {
+		if failErr := w.service.FailExportJob(ctx, work, "AUDIT_EXPORT_FAILED", message, time.Now().UTC().Add(backoff(work.Attempts))); failErr != nil {
 			w.logger.Error("mark audit export job failed", "job_id", work.JobID, "error", failErr)
 		}
 	}
@@ -91,11 +109,7 @@ func (w *ExportWorker) ProcessOne(ctx context.Context) bool {
 }
 
 func (w *ExportWorker) process(ctx context.Context, work domain.ExportWork) error {
-	events, err := w.service.ListExportEvents(ctx, work.TenantID, work.Query)
-	if err != nil {
-		return fmt.Errorf("list audit events: %w", err)
-	}
-	file, absolutePath, err := w.writeCSV(work, events)
+	file, absolutePath, eventCount, err := w.writeCSV(ctx, work)
 	if err != nil {
 		return err
 	}
@@ -104,83 +118,223 @@ func (w *ExportWorker) process(ctx context.Context, work domain.ExportWork) erro
 		_ = os.Remove(absolutePath)
 		return fmt.Errorf("record audit export file: %w", err)
 	}
-	w.logger.Info("audit export completed", "job_id", work.JobID, "event_count", len(events))
+	w.logger.Info("audit export completed", "job_id", work.JobID, "event_count", eventCount)
 	return nil
 }
 
-func (w *ExportWorker) writeCSV(work domain.ExportWork, events []domain.Event) (domain.ExportFile, string, error) {
+// writeCSV 按稳定排序分批读取事件并流式写入 CSV：内存占用只与单批大小相关，导出总量
+// 不再构成失败条件。任一批次读取或写入失败都会中止并删除临时文件。
+func (w *ExportWorker) writeCSV(ctx context.Context, work domain.ExportWork) (domain.ExportFile, string, int, error) {
+	file, err := w.newExportCSV(work)
+	if err != nil {
+		return domain.ExportFile{}, "", 0, err
+	}
+	defer file.abort()
+
+	eventCount := 0
+	cursor := domain.ExportCursor{}
+	for {
+		page, err := w.service.ListExportEvents(ctx, work.TenantID, work.Query, cursor, w.batchSize())
+		if err != nil {
+			return domain.ExportFile{}, "", eventCount, fmt.Errorf("list audit events: %w", err)
+		}
+		if len(page.Events) == 0 {
+			break
+		}
+		if err := file.writeEvents(page.Events); err != nil {
+			return domain.ExportFile{}, "", eventCount, err
+		}
+		eventCount += len(page.Events)
+		if page.NextCursor == nil {
+			break
+		}
+		next := *page.NextCursor
+		if next == cursor {
+			return domain.ExportFile{}, "", eventCount, fmt.Errorf("audit export cursor did not advance after %d events", eventCount)
+		}
+		cursor = next
+	}
+	exportFile, err := file.publish()
+	if err != nil {
+		return domain.ExportFile{}, "", eventCount, err
+	}
+	return exportFile, file.absolutePath, eventCount, nil
+}
+
+// batchSize 返回本 worker 的单批行数；测试可注入更小的批量以覆盖多批次场景。
+func (w *ExportWorker) batchSize() int {
+	if w.exportBatchSize > 0 && w.exportBatchSize <= application.ExportEventBatchSize {
+		return w.exportBatchSize
+	}
+	return application.ExportEventBatchSize
+}
+
+// retentionPeriod 返回产物保留期；测试可注入更短的保留期。
+func (w *ExportWorker) retentionPeriod() time.Duration {
+	if w.retention > 0 {
+		return w.retention
+	}
+	return ExportRetentionPeriod
+}
+
+// cleanupExpiredExports 删除超过保留期的审计导出磁盘文件，并把对应 file_version 标记为
+// DELETED。选择范围由仓储限定为 AUDIT_EXPORT 任务产物；路径必须落在 storageRoot 内。
+// 任何清理失败都只记录告警，让下一轮重试，不影响导出任务领取与执行。
+func (w *ExportWorker) cleanupExpiredExports(ctx context.Context) {
+	cutoff := time.Now().UTC().Add(-w.retentionPeriod())
+	cleaned := 0
+	for round := 0; round < exportCleanupMaxRounds; round++ {
+		artifacts, err := w.service.ListExpiredExportArtifacts(ctx, cutoff, application.ExportArtifactCleanupBatchSize)
+		if err != nil {
+			w.logger.Warn("list expired audit export artifacts", "error", err)
+			return
+		}
+		if len(artifacts) == 0 {
+			break
+		}
+		deleted := make([]string, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			absolutePath, err := safeStoragePath(w.storageRoot, artifact.StorageRelativePath)
+			if err != nil {
+				w.logger.Warn("skip expired audit export artifact with unsafe path", "file_version_id", artifact.FileVersionID, "error", err)
+				continue
+			}
+			if err := os.Remove(absolutePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				w.logger.Warn("delete expired audit export file", "file_version_id", artifact.FileVersionID, "error", err)
+				continue
+			}
+			deleted = append(deleted, artifact.FileVersionID)
+		}
+		if err := w.service.MarkExportArtifactsDeleted(ctx, deleted); err != nil {
+			w.logger.Warn("mark expired audit export artifacts deleted", "count", len(deleted), "error", err)
+			return
+		}
+		cleaned += len(deleted)
+		if len(deleted) < len(artifacts) {
+			// 有文件删除失败：其版本保持可用状态，留待下一轮重试，本轮不再热循环。
+			break
+		}
+		if len(artifacts) < application.ExportArtifactCleanupBatchSize {
+			break
+		}
+	}
+	if cleaned > 0 {
+		w.logger.Info("expired audit export artifacts cleaned", "count", cleaned, "retention", w.retentionPeriod().String())
+	}
+}
+
+// exportCSV 是流式写出的导出文件：临时文件 → 逐批追加行 → Sync → 同目录 rename 发布。
+// 发布前下载端看不到半成品；发布后只有完整文件可见。
+type exportCSV struct {
+	work          domain.ExportWork
+	fileID        string
+	versionID     string
+	createdAt     time.Time
+	relativePath  string
+	absolutePath  string
+	temporaryPath string
+	output        *os.File
+	hash          hash.Hash
+	writer        *csv.Writer
+	published     bool
+}
+
+// newExportCSV 创建临时文件并写入 UTF-8 BOM 与表头。BOM 进入 SHA-256 摘要，保证下载
+// 校验覆盖最终文件精确字节。
+func (w *ExportWorker) newExportCSV(work domain.ExportWork) (*exportCSV, error) {
 	now := time.Now().UTC()
 	fileID, err := ulid.New(now)
 	if err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("generate export file ID: %w", err)
+		return nil, fmt.Errorf("generate export file ID: %w", err)
 	}
 	versionID, err := ulid.New(now.Add(time.Millisecond))
 	if err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("generate export version ID: %w", err)
+		return nil, fmt.Errorf("generate export version ID: %w", err)
 	}
 	relativePath := filepath.Join(work.TenantID, work.ApplicationID, fmt.Sprintf("%04d", now.Year()), fmt.Sprintf("%02d", now.Month()), fileID, versionID+".csv")
 	absolutePath, err := safeStoragePath(w.storageRoot, relativePath)
 	if err != nil {
-		return domain.ExportFile{}, "", err
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o750); err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("create audit export directory: %w", err)
+		return nil, fmt.Errorf("create audit export directory: %w", err)
 	}
 	temporaryPath := absolutePath + ".tmp"
 	output, err := os.OpenFile(temporaryPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("create audit export file: %w", err)
+		return nil, fmt.Errorf("create audit export file: %w", err)
 	}
-	completed := false
-	defer func() {
-		if !completed {
-			_ = output.Close()
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-
-	hash := sha256.New()
+	file := &exportCSV{work: work, relativePath: relativePath, absolutePath: absolutePath, temporaryPath: temporaryPath, output: output, hash: sha256.New(), createdAt: now, fileID: fileID, versionID: versionID}
 	// CSV 字节在写盘的同时进入哈希，避免二次读取大文件；摘要覆盖最终文件的精确内容。
-	writer := csv.NewWriter(io.MultiWriter(output, hash))
-	if err := writer.Write([]string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent", "actor_id", "actor_type", "reason_code", "business_id", "login_ip", "login_ip_source", "ingest_peer_ip", "ip_source", "received_at"}); err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("write audit export header: %w", err)
+	// Excel 中文环境需要 UTF-8 BOM 才会按 UTF-8 解析；BOM 也进入摘要，保证下载校验一致。
+	sink := io.MultiWriter(output, file.hash)
+	if _, err := sink.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		file.abort()
+		return nil, fmt.Errorf("write audit export BOM: %w", err)
 	}
+	file.writer = csv.NewWriter(sink)
+	if err := file.writer.Write(exportHeader); err != nil {
+		file.abort()
+		return nil, fmt.Errorf("write audit export header: %w", err)
+	}
+	return file, nil
+}
+
+// writeEvents 追加一批事件行。安全审查 SEC-B6：所有数据单元格统一做公式注入转义——
+// 攻击者可控字段（User-Agent/资源名/路径等）若以 = + - @ 或前导 tab/CR 开头，审计员用
+// Excel/WPS 打开导出文件时会被解释为公式并可能执行。
+func (file *exportCSV) writeEvents(events []domain.Event) error {
 	for _, event := range events {
 		receivedAt := ""
 		if !event.ReceivedAt.IsZero() {
 			receivedAt = event.ReceivedAt.UTC().Format(time.RFC3339Nano)
 		}
 		row := []string{event.EventID, event.OccurredAt.UTC().Format(time.RFC3339Nano), event.ApplicationCode, event.EnvironmentCode, event.Action, event.Result, event.ResourceType, event.ResourceID, event.ResourceName, event.OperatorDisplayName, event.RiskLevel, event.Summary, event.RequestID, event.TraceID, event.CorrelationID, event.Method, event.Path, event.ClientIP, event.UserAgent, event.ActorID, event.ActorType, event.ReasonCode, event.BusinessID, event.LoginIP, event.LoginIPSource, event.IngestPeerIP, event.IPSource, receivedAt}
-		// 安全审查 SEC-B6：所有数据单元格统一做公式注入转义——攻击者可控字段
-		// （User-Agent/资源名/路径等）若以 = + - @ 或前导 tab/CR 开头，审计员用
-		// Excel/WPS 打开导出文件时会被解释为公式并可能执行。
 		for index := range row {
 			row[index] = escapeCSVFormulaCell(row[index])
 		}
-		if err := writer.Write(row); err != nil {
-			return domain.ExportFile{}, "", fmt.Errorf("write audit export row: %w", err)
+		if err := file.writer.Write(row); err != nil {
+			return fmt.Errorf("write audit export row: %w", err)
 		}
 	}
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("flush audit export CSV: %w", err)
+	return nil
+}
+
+// publish 刷盘并原子发布文件，返回可供任务完成记录的文件元数据。
+func (file *exportCSV) publish() (domain.ExportFile, error) {
+	file.writer.Flush()
+	if err := file.writer.Error(); err != nil {
+		return domain.ExportFile{}, fmt.Errorf("flush audit export CSV: %w", err)
 	}
-	if err := output.Sync(); err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("sync audit export file: %w", err)
+	if err := file.output.Sync(); err != nil {
+		return domain.ExportFile{}, fmt.Errorf("sync audit export file: %w", err)
 	}
-	if err := output.Close(); err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("close audit export file: %w", err)
+	if err := file.output.Close(); err != nil {
+		return domain.ExportFile{}, fmt.Errorf("close audit export file: %w", err)
 	}
-	if err := os.Rename(temporaryPath, absolutePath); err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("publish audit export file: %w", err)
+	if err := os.Rename(file.temporaryPath, file.absolutePath); err != nil {
+		return domain.ExportFile{}, fmt.Errorf("publish audit export file: %w", err)
 	}
 	// 同目录 rename 是发布边界：下载端只会看到完整文件，不会读到仍在生成的 CSV。
-	info, err := os.Stat(absolutePath)
+	info, err := os.Stat(file.absolutePath)
 	if err != nil {
-		return domain.ExportFile{}, "", fmt.Errorf("stat audit export file: %w", err)
+		// 发布后无法确认大小属于异常路径：删除已重命名的文件，避免留下元数据未登记的孤儿。
+		_ = os.Remove(file.absolutePath)
+		return domain.ExportFile{}, fmt.Errorf("stat audit export file: %w", err)
 	}
-	completed = true
-	return domain.ExportFile{FileID: fileID, VersionID: versionID, StorageRelativePath: filepath.ToSlash(relativePath), OriginalName: "audit-export-" + work.JobID + ".csv", MediaType: exportMediaType, SizeBytes: uint64(info.Size()), SHA256: hash.Sum(nil), CreatedAt: now}, absolutePath, nil
+	file.published = true
+	return domain.ExportFile{FileID: file.fileID, VersionID: file.versionID, StorageRelativePath: filepath.ToSlash(file.relativePath), OriginalName: "audit-export-" + file.work.JobID + ".csv", MediaType: exportMediaType, SizeBytes: uint64(info.Size()), SHA256: file.hash.Sum(nil), CreatedAt: file.createdAt}, nil
+}
+
+// abort 在未发布时关闭并删除临时文件；已发布文件由调用方在元数据提交失败时删除。
+func (file *exportCSV) abort() {
+	if file == nil || file.published {
+		return
+	}
+	if file.output != nil {
+		_ = file.output.Close()
+	}
+	_ = os.Remove(file.temporaryPath)
 }
 
 // escapeCSVFormulaCell 对公式注入载荷加前导单引号（OWASP CSV Injection 防御）：

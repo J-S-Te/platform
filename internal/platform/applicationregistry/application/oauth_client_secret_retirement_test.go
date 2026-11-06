@@ -166,6 +166,12 @@ func (repository *secretRetirementRepository) CreateOAuthClient(context.Context,
 	return OAuthClientView{}, nil
 }
 
+// GetOAuthClientParentApplication 只是满足仓储接口：本文件覆盖 Secret 退役策略，
+// 应用归属判定见 oauth_client_management_authorization_test.go。
+func (repository *secretRetirementRepository) GetOAuthClientParentApplication(context.Context, string, string) (OAuthClientParentApplication, error) {
+	return OAuthClientParentApplication{ID: "app-1", Code: "contract_management"}, nil
+}
+
 func (repository *secretRetirementRepository) ListOAuthClients(context.Context, string) ([]OAuthClientView, error) {
 	return nil, nil
 }

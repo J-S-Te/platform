@@ -340,6 +340,10 @@ type roleBindingRepositoryScenario struct {
 	protectedAdminCount int64
 	referenceCount      *int64
 	execCount           int
+	// applicationCode 是委派门禁读取 platform_application.code 时的返回值。
+	// 本组夹具以普通子系统应用为背景，默认 billing；需要覆盖控制面语义的
+	// 用例显式设为 platform。
+	applicationCode string
 }
 
 type roleBindingTestDriver struct {
@@ -437,6 +441,12 @@ func (c *roleBindingTestConn) QueryContext(_ context.Context, query string, args
 			return emptyRows(roleBindingColumns()), nil
 		}
 		return roleBindingRows(*c.scenario.existingBinding), nil
+	case strings.Contains(normalized, "from `platform_application`"):
+		code := c.scenario.applicationCode
+		if code == "" {
+			code = "billing"
+		}
+		return &roleBindingTestRows{columns: []string{"code"}, values: [][]driver.Value{{code}}}, nil
 	case strings.Contains(normalized, "from `authz_roles`") || strings.Contains(normalized, "from `authz_role`"):
 		roleID := namedString(args, 0)
 		role, ok := c.scenario.roles[roleID]

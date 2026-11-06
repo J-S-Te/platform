@@ -73,6 +73,15 @@ scope_runtime_services() {
   printf '%s\n' "$services" | scope_profile_services runtime "$1"
 }
 
+# 用途：读取当前产品能力实际需要的初始化进程。
+# 参数：第一个参数为业务组件编码。
+# 返回值：逐行输出服务；清单、配置或服务集合异常时返回非零。
+scope_initialization_services() {
+  local services
+  services="$(scope_services)" || return
+  printf '%s\n' "$services" | scope_profile_services initialization "$1"
+}
+
 scope_project() {
   local project
   project="$(awk -F= '$1=="COMPOSE_PROJECT_NAME" {sub(/^[^=]*=/, ""); print; exit}' "$runtime_file")"
@@ -125,4 +134,31 @@ scope_disable() {
       printf '已停止 %s（%s），保留容器、数据库卷和密钥。\n' "$service" "$id"
     done <<< "$ids"
   done <<< "$owned"
+}
+
+# temporal_consumers_enabled 判断统一 Compose 是否启用了需要共享 Temporal 的业务
+# 子系统（合同、项目标准后台与 CRM 售前 Worker）。共享 Temporal 与 TemporalVisibility
+# 库驻留在 contract-mysql 命名实例中，属共享技术底座：不随合同停售而删除或改名（C11），
+# 仅在确认无任何消费者启用时才允许跳过启动。
+# 位置：本函数被 deploy.sh 侧（阶段 B 门禁、verify 门禁、平台发布证明）与
+# deploy-service.sh（真正的启动方）同时使用；deploy-service.sh 是带参数解析的自执行
+# 脚本、不能被 deploy.sh source，因此统一放在两处都会 source 的 compose-scope.sh，
+# 避免生产/消费两侧各写一份后语义漂移（历史缺陷：一侧按需启动、另一侧仍硬要求，
+# 「仅平台 / 仅结算 / 仅数据看板」安装会永远等待一个不会启动的容器）。
+# 参数：无；读取统一 Compose 的启用状态。
+# 返回值：存在任一消费者启用返回零；scope 解析失败同样返回零，与本函数的保守默认
+#        一致——宁可多启动一次共享 Temporal，也不能因为一次模板解析失败静默停掉
+#        全部消费子系统；只有成功读到服务清单、且其中确实没有任何消费者启用时才返回一。
+temporal_consumers_enabled() {
+  local component services
+  if ! services="$(scope_services)"; then
+    printf '无法解析统一 Compose 服务清单，按保守默认视为需要启动共享 Temporal\n' >&2
+    return 0
+  fi
+  for component in contract project customer-opportunity; do
+    if grep -Fxq "$(scope_service_for "$component")" <<<"$services"; then
+      return 0
+    fi
+  done
+  return 1
 }

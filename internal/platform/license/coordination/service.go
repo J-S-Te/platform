@@ -43,7 +43,6 @@ type Service struct {
 	vendor                 map[string]ed25519.PublicKey
 	signer                 Signer
 	now                    func() time.Time
-	lifecycleApproval      LifecycleApprovalVerifier
 	builtinCatalog         BuiltinComponentSource
 }
 

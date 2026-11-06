@@ -351,7 +351,9 @@ func (service *stubSubsystemOnboardingService) ListPortalApplications(context.Co
 	if code == "" {
 		code = "contract_management"
 	}
-	return []application.PortalApplication{{ApplicationID: applicationID, Code: code, Environment: environment}}, nil
+	// 与真实门户投影一致：命中项必须同时带应用与环境主键，否则调用方无法定位
+	// 具体环境（resolveApplicationContextForIdentity 会按失败关闭处理）。
+	return []application.PortalApplication{{ApplicationID: applicationID, EnvironmentID: "env-1", Code: code, Environment: environment}}, nil
 }
 
 func (service *stubSubsystemOnboardingService) ListRegisteredApplicationCodes(context.Context, string) ([]string, error) {
@@ -597,6 +599,37 @@ func TestDiscoverSubsystemCandidatesExcludesRegisteredApplicationsAcrossEnvironm
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store, private" {
 		t.Fatalf("Cache-Control = %q", got)
+	}
+}
+
+func TestDiscoverSubsystemCandidatesOffersContractWhenNotRegistered(t *testing.T) {
+	t.Parallel()
+	// 合同管理改为探测接入后：全新库（迁移 000136 删除引导应用）没有登记记录时，
+	// 合同候选必须和其它子系统一样出现在 discovery 结果里，供管理员走统一接入流程。
+	service := &stubSubsystemOnboardingService{}
+	provisioner := &recordingHTTPSubsystemProvisioner{candidates: []application.SubsystemDiscoveryCandidate{
+		{ApplicationCode: "contract_management", Environment: "dev", ApplicationName: "合同管理系统", ServiceName: "contract-api"},
+	}}
+	handler, err := NewSubsystemOnboardingHandler(
+		service, provisioner, &recordingSubsystemAccessManager{},
+		"http://localhost:8081", slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("construct handler: %v", err)
+	}
+	request := httptest.NewRequest(stdhttp.MethodGet, "/api/v1/subsystem-discovery", nil)
+	request = request.WithContext(authctx.WithPrincipal(request.Context(), authctx.Principal{
+		Tenant: authctx.ReferenceName{ID: "tenant-1"}, User: authctx.ReferenceName{ID: "user-1"},
+	}))
+	response := httptest.NewRecorder()
+
+	handler.DiscoverSubsystemCandidates(response, request)
+
+	if response.Code != stdhttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if body := response.Body.String(); !strings.Contains(body, `"application_code":"contract_management"`) {
+		t.Fatalf("unregistered contract candidate missing: %s", body)
 	}
 }
 

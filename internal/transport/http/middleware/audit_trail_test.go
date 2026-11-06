@@ -244,6 +244,19 @@ func TestShouldRecordAuditTrailNeverSuppressesBusinessAuditRoutes(t *testing.T) 
 	}
 }
 
+// 审计导出下载契约变更：签发一次性票据（POST）与凭票据兑换文件（GET）都属于会泄露
+// 安全信息的审计操作，必须各留一条通用审计轨迹；GET 下载尤其不能因为“只读”而漏记。
+func TestShouldRecordAuditTrailCoversExportDownloadTickets(t *testing.T) {
+	issueRoute := "/api/v1/audit/export-jobs/:job_id/download-tickets"
+	downloadRoute := "/api/v1/audit/export-jobs/:job_id/download"
+	if !shouldRecordAuditTrail(http.MethodPost, issueRoute) {
+		t.Fatal("export download ticket issuance must produce a generic audit record")
+	}
+	if !shouldRecordAuditTrail(http.MethodGet, downloadRoute) {
+		t.Fatal("export download must produce a generic audit record")
+	}
+}
+
 func TestAuditTrailRecordsGenericEventForBusinessAuditRoute(t *testing.T) {
 	// 端到端兜底断言：即使业务审计（applicationaccess 层）摄取失败，通用轨迹中间件
 	// 对该路由也必须实际产出一条记录——即“业务审计失败 → 通用轨迹仍有记录”。
@@ -824,5 +837,33 @@ func TestAuditTrailNonRequiredModeWritesSingleEventWithoutPhase(t *testing.T) {
 	}
 	if len(recorder.spooled) != 0 {
 		t.Fatalf("dead letters = %d, want 0 in non-required mode", len(recorder.spooled))
+	}
+}
+
+// SEC-D4b 平台侧必开判定：显式键可解析时用解析值，空值回退 APP_ENV=production，
+// 显式值非法（如 "notabool"）按失败关闭返回 true——强制审计被配错不得静默关闭，
+// 与 project_management / Settlement 的同类实现同语义。
+func TestPlatformAuditRequiredFailsClosedOnInvalidExplicitValue(t *testing.T) {
+	cases := []struct {
+		name         string
+		explicit     string
+		appEnv       string
+		wantRequired bool
+	}{
+		{name: "非法显式值按失败关闭", explicit: "notabool", appEnv: "dev", wantRequired: true},
+		{name: "空值回退 production 判定", explicit: "", appEnv: "production", wantRequired: true},
+		{name: "空值非 production 不要求必开", explicit: "", appEnv: "dev", wantRequired: false},
+		{name: "显式 false 在 production 下关闭必开", explicit: "false", appEnv: "production", wantRequired: false},
+		{name: "显式 true 在非 production 下要求必开", explicit: "true", appEnv: "dev", wantRequired: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("PLATFORM_AUDIT_REQUIRED", testCase.explicit)
+			t.Setenv("APP_ENV", testCase.appEnv)
+			if required := platformAuditRequired(); required != testCase.wantRequired {
+				t.Fatalf("platformAuditRequired() = %v, want %v (PLATFORM_AUDIT_REQUIRED=%q, APP_ENV=%q)",
+					required, testCase.wantRequired, testCase.explicit, testCase.appEnv)
+			}
+		})
 	}
 }

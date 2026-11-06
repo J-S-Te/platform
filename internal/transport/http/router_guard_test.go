@@ -82,6 +82,82 @@ func TestOutboundAuthFlowRoutesStayBehindIPRateLimit(t *testing.T) {
 	}
 }
 
+// 安全审查 M-9 路由表守卫：POST /api/v1/auth/credential-challenges 是匿名端点，每次
+// 调用都会向 credential_encryption_challenge 插入一行。它必须挂在独立的 IP 固定窗口
+// 限流上（120/min，与 /login 的 IP 兜底桶同量级），且不得与 authFlowRateLimit 共用
+// 实例——共池会让打满挑战桶的攻击者连带耗尽登录跳转/回调额度。任何人删除或替换该
+// 中间件都会在此失败，强制重新评估匿名写入放大面。
+func TestCredentialChallengesRouteStaysBehindDedicatedIPRateLimit(t *testing.T) {
+	source, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	content := string(source)
+	if !strings.Contains(content, "credentialChallengeRateLimit := middleware.FixedWindowRateLimit(120, time.Minute)") {
+		t.Fatal("credentialChallengeRateLimit must be defined as middleware.FixedWindowRateLimit(120, time.Minute)")
+	}
+	matched := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `authRouter.POST("/credential-challenges",`) {
+			continue
+		}
+		matched = true
+		if !strings.Contains(line, "credentialChallengeRateLimit") {
+			t.Fatalf("route POST /credential-challenges is missing the dedicated IP rate limiter: %s", trimmed)
+		}
+		if strings.Contains(line, "authFlowRateLimit") {
+			t.Fatalf("route POST /credential-challenges must not share the outbound auth bucket: %s", trimmed)
+		}
+	}
+	if !matched {
+		t.Fatal("route POST /credential-challenges not found in router.go")
+	}
+}
+
+// 安全审查 SEC-B7 路由表守卫：登录的账号维度限流必须在凭据解密**之后**执行。凭据加密
+// 模式下 account 位于 credential_envelope 密文内，挂在最外层的 gin 中间件只能读到密文，
+// 账号桶会静默退化为只计 IP 桶（账号维度限流失效）。本守卫锁定：限流用
+// LoginRateLimitHTTP 包住明文 handler，且该 handler 再交给 WrapJSON 解密。
+func TestLoginRouteRateLimitsAfterCredentialDecryption(t *testing.T) {
+	source, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	content := string(source)
+	limitWrapping := `middleware.LoginRateLimitHTTP("account", 30, 120, time.Minute)(authHandler.Login)`
+	limitIndex := strings.Index(content, limitWrapping)
+	if limitIndex < 0 {
+		t.Fatalf("login rate limit must wrap the plaintext handler: %s", limitWrapping)
+	}
+	decryptWrapping := `loginHandler = operational.CredentialEncryption.WrapJSON(credentialcrypto.PurposeLogin, "auth.login", loginHandler)`
+	decryptIndex := strings.Index(content, decryptWrapping)
+	if decryptIndex < 0 {
+		t.Fatalf("encrypted login must wrap loginHandler with WrapJSON: %s", decryptWrapping)
+	}
+	if limitIndex > decryptIndex {
+		t.Fatal("the rate-limited handler must be built before WrapJSON wraps it, otherwise decryption happens after rate limiting")
+	}
+	// 旧实现（限流挂在解密外层的 gin 中间件）不得回归：那种写法在加密模式下账号桶失效。
+	loginRouteFound := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `authRouter.POST("/login",`) {
+			continue
+		}
+		loginRouteFound = true
+		if !strings.Contains(line, "adaptHandler(loginHandler)") {
+			t.Fatalf("route POST /login must register the decrypted, rate-limited handler: %s", trimmed)
+		}
+		if strings.Contains(line, "middleware.LoginRateLimit(") {
+			t.Fatalf("route POST /login must not rate limit before decryption: %s", trimmed)
+		}
+	}
+	if !loginRouteFound {
+		t.Fatal("route POST /login not found in router.go")
+	}
+}
+
 // 安全审查 SEC-X5（task-33 平台侧重定义）：逐路由核对结论——所有依赖会话 Cookie 的
 // 不安全方法路由都必须留在带 Origin/Sec-Fetch-Site 校验的分组或显式守卫之后。本守卫
 // 锁定各分组中间件与两个 logout 守卫，防止未来重构把路由移出受保护分组或删除分组

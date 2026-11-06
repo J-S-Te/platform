@@ -5,7 +5,7 @@ default: false
 application:
   code: data_analysis
   initial_admin_roles: [dashboard_admin]
-  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, file_gateway_write, contract_import_report_read]
+  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, contract_import_report_read]
   name: 数据看板与统计分析系统
   description: 经营总览、合同项目分析、预警与指标看板
   environment: prod
@@ -20,8 +20,8 @@ runtime:
     - path: runtime/data-analysis.env
       template_path: subsystem-templates/data-analysis.env.example
       compose_environment_key: DATA_ANALYSIS_RUNTIME_ENV_FILE
-      # Metabase 的嵌入密钥必须与 Metabase 管理端保持一致，不能由平台临时生成。
-      required_existing_keys: [METABASE_EMBEDDING_SECRET]
+      # 嵌入密钥只在已启用嵌入能力时要求，校验见文末optional_features。
+      required_existing_keys: []
       # 会话编解码密钥仅用于本系统 Cookie；首次接入生成并长期复用。
       generated_keys: [OIDC_CODEC_KEY]
       values:
@@ -86,9 +86,6 @@ runtime:
         CONTRACT_MACHINE_CLIENT_SECRET: service.contract_dashboard_read.client_secret
         PROJECT_MACHINE_CLIENT_ID: service.project_dashboard_read.client_id
         PROJECT_MACHINE_CLIENT_SECRET: service.project_dashboard_read.client_secret
-        FILE_GATEWAY_APPLICATION_ID: application_id
-        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
-        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
 compose:
   dependency_services: [data-analysis-mysql]
   initialization_services: [data-analysis-metabase-init]
@@ -103,3 +100,11 @@ compose:
     - DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE
     - DATA_ANALYSIS_ALERT_WORKER_IMAGE
     - DATA_ANALYSIS_MIGRATE_IMAGE
+optional_features:
+  - name: dashboard_embed
+    runtime_file: runtime/data-analysis.env
+    enabled_key: DASHBOARD_EMBED_ENABLED
+    default_enabled: true
+    required_existing_keys: [METABASE_EMBEDDING_SECRET]
+    runtime_services: [data-analysis-metabase]
+    initialization_services: [data-analysis-metabase-init]

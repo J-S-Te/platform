@@ -279,23 +279,36 @@ class DevUpTest(unittest.TestCase):
         return subprocess.run(["bash", "-c", harness], text=True, capture_output=True,
                               env={"PATH": "/usr/bin:/bin"})
 
-    def test_dev_up_runs_control_plane_then_candidates_then_status(self):
+    def test_dev_up_runs_control_plane_then_retirement_notice_then_status(self):
         result = self.run_entry()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         lines = result.stdout.splitlines()
-        control = next(i for i, line in enumerate(lines) if line == "CONTROL-PLANE")
-        candidates = next(i for i, line in enumerate(lines) if "refresh-local-runtime-approvals" in line)
-        status = next(i for i, line in enumerate(lines) if "local-status.py" in line)
-        self.assertLess(control, candidates)
-        self.assertLess(candidates, status)
+
+        def position(marker, exact=False):
+            if exact:
+                return next((i for i, line in enumerate(lines) if line == marker), None)
+            return next((i for i, line in enumerate(lines) if marker in line), None)
+
+        control = position("CONTROL-PLANE", exact=True)
+        retirement = position("跳过运行批准候选")
+        status = position("local-status.py")
+        for label, index in (("CONTROL-PLANE", control), ("跳过运行批准候选", retirement),
+                             ("local-status.py", status)):
+            self.assertIsNotNone(index, "缺少阶段 " + label + " in " + repr(lines))
+        self.assertLess(control, retirement, result.stdout)
+        self.assertLess(retirement, status, result.stdout)
+        # 候选批准生成入口已下线：不再有 refresh-local-runtime-approvals 阶段。
+        self.assertNotIn("refresh-local-runtime-approvals", result.stdout)
 
     def test_dev_up_never_publishes_approvals(self):
+        # 批准发布路径整体退役：既没有候选生成行，也没有任何批准标志。
         result = self.run_entry()
-        self.assertIn("只生成，不发布", result.stdout)
-        for line in result.stdout.splitlines():
-            if "refresh-local-runtime-approvals" in line:
-                self.assertNotIn("--approve", line, result.stdout)
-                self.assertIn("--operator", line, result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        combined = result.stdout + result.stderr
+        self.assertIn("跳过运行批准候选", combined)
+        self.assertIn("已下线", combined)
+        self.assertNotIn("refresh-local-runtime-approvals", combined)
+        self.assertNotIn("--approve", combined)
 
     def test_dev_up_stops_immediately_when_docker_is_unavailable(self):
         result = self.run_entry(docker_ok=False)
@@ -303,13 +316,90 @@ class DevUpTest(unittest.TestCase):
         self.assertIn("docker context use orbstack", result.stdout)
         self.assertNotIn("CONTROL-PLANE", result.stdout)
 
-    def test_dev_approve_forwards_caller_flags_and_requires_them(self):
-        # 发布必须由调用方显式给出 --approve：本命令只做转发，不自行加上批准标志。
+    def test_dev_approve_reports_retirement_and_has_no_publication_path(self):
+        # 函数边界守卫：dev-approve 只说明下线并返回非零，不转发参数、不调用 helper。
         body = block("dev_approve")
-        self.assertIn("refresh-local-runtime-approvals.py", body)
-        self.assertIn("--operator", body)
-        self.assertIn('"$@"', body)
+        self.assertIn("已下线", body)
+        self.assertIn("return 2", body)
+        self.assertNotIn("refresh-local-runtime-approvals.py", body)
         self.assertNotIn("--approve", body)
+        self.assertNotIn('"$@"', body)
+
+
+class StartStackContractTest(unittest.TestCase):
+    """up 的合同分支：已接入才发布目录并启动 contract-api/worker，否则跳过并给出接入指引。"""
+
+    def run_entry(self, *, contract_ready, publish_ok=True):
+        harness = HEADER + "".join([
+            "frontend_public_origin=http://localhost:8081\n",
+            "force_build=false\n",
+            "ensure_platform_env_file() { :; }\n",
+            "ensure_contract_env_file() { :; }\n",
+            "ensure_customer_env_file() { :; }\n",
+            "ensure_portal_env_file() { :; }\n",
+            "ensure_project_env_file() { :; }\n",
+            "ensure_data_analysis_env_file() { :; }\n",
+            "ensure_settlement_env_file() { :; }\n",
+            "validate_all_local_runtime_targets() { :; }\n",
+            "validate_all_keycloak_runtimes() { :; }\n",
+            "portal_configured() { return 1; }\n",
+            "portal_compensation_configured() { return 1; }\n",
+            "project_configured() { return 1; }\n",
+            "data_analysis_configured() { return 1; }\n",
+            "ensure_catalog_publisher_credentials_consistent() { :; }\n",
+            "disable_contract_startup_catalog_sync() { :; }\n",
+            "prepare_gateway_config() { :; }\n",
+            "build_images() { :; }\n",
+            "preflight_local_license_images() { :; }\n",
+            "run_migrations() { :; }\n",
+            "bootstrap_admin_if_needed() { :; }\n",
+            "compose_up_wait() { printf 'UP %s\\n' \"$*\" >&3; }\n",
+            "compose_run() { printf 'RUN %s\\n' \"$*\" >&3; }\n",
+            "verify_local_file_gateway() { :; }\n",
+            "ensure_subsystem_discovery_candidates() { :; }\n",
+            "sync_crm_authorization_catalog() { return 0; }\n",
+            "start_customer_notification_workers() { :; }\n",
+            "start_presale_worker() { :; }\n",
+            "verify_gateway_routes() { :; }\n",
+            "contract_configured() { [[ \"$CONTRACT_READY\" == \"1\" ]]; }\n",
+            "sync_contract_authorization_catalog() { printf 'CONTRACT-PUBLISH\\n' >&3; [[ \"$PUBLISH_OK\" == \"1\" ]]; }\n",
+            "contract_onboarding_remediation() { printf 'REMEDIATION subsystem.sh onboard\\n' >&3; }\n",
+            function("start_stack"),
+            "start_stack\n",
+        ])
+        return subprocess.run(["bash", "-c", harness], text=True, capture_output=True, env={
+            "PATH": "/usr/bin:/bin",
+            "CONTRACT_READY": "1" if contract_ready else "0",
+            "PUBLISH_OK": "1" if publish_ok else "0",
+        })
+
+    def test_unconfigured_contract_is_skipped_with_onboarding_guidance(self):
+        result = self.run_entry(contract_ready=False)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn("CONTRACT-PUBLISH", result.stdout)
+        self.assertNotIn("UP 合同管理 API 与 Worker", result.stdout)
+        self.assertIn("跳过合同管理后端与 Worker", result.stdout)
+        self.assertIn("subsystem.sh onboard", result.stdout)
+        # 其它子系统的启动不变：结算与 CRM 仍照常启动。
+        self.assertIn("UP 结算与开票 API", result.stdout)
+        self.assertIn("UP 客户与商机管理后端", result.stdout)
+
+    def test_configured_contract_publishes_catalog_then_starts_contract_services(self):
+        result = self.run_entry(contract_ready=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("CONTRACT-PUBLISH", result.stdout)
+        self.assertIn("UP 合同管理 API 与 Worker contract-api contract-worker", result.stdout)
+        self.assertLess(result.stdout.index("CONTRACT-PUBLISH"),
+                        result.stdout.index("UP 合同管理 API 与 Worker"))
+        self.assertNotIn("跳过合同管理后端与 Worker", result.stdout)
+
+    def test_catalog_publish_failure_skips_contract_without_aborting_up(self):
+        result = self.run_entry(contract_ready=True, publish_ok=False)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("CONTRACT-PUBLISH", result.stdout)
+        self.assertNotIn("UP 合同管理 API 与 Worker", result.stdout)
+        self.assertIn("跳过合同管理后端与 Worker", result.stdout)
+        self.assertIn("subsystem.sh onboard", result.stdout)
 
 
 class NoArgumentGuardTest(unittest.TestCase):

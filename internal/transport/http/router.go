@@ -194,14 +194,25 @@ func NewRouter(
 		// 安全审查 SEC-B7：登录改双桶限流——账号维度30/min先限（换 IP 不豁免）、
 		// IP 维度120/min兜底（随机换号撞库有界），消灭原“全客户端共用一个30/min IP 桶、
 		// 单攻击者可触发全员锁定”的问题。多副本与反代配置要求见 platform/docs/rate-limiting.md。
+		// 安全审查 M-9：/credential-challenges 是匿名端点，每次调用都会向
+		// credential_encryption_challenge 插入一行，必须与登录同量级地约束写入放大。
+		// 该桶本身独立于 authFlowRateLimit（出站协议桶）：两者共池会让打满挑战桶的
+		// 攻击者连带耗尽登录跳转/回调额度。阈值 120/min/IP 与 /login 的 IP 兜底桶
+		// 同量级，高于人类正常登录前的挑战频次，但把无限流时代的刷库速率压到可清理
+		// 的量级。本路由仅在 CREDENTIAL_ENCRYPTION_MODE != disabled 时注册。
+		credentialChallengeRateLimit := middleware.FixedWindowRateLimit(120, time.Minute)
 		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
-			authRouter.POST("/credential-challenges", adaptHandler(operational.CredentialEncryption.IssueChallenge))
+			authRouter.POST("/credential-challenges", credentialChallengeRateLimit, adaptHandler(operational.CredentialEncryption.IssueChallenge))
 		}
-		loginHandler := authHandler.Login
+		// 限流必须包在解密之后的 handler 上：凭据加密模式下账号位于
+		// credential_envelope 密文内部，挂在最外层的 gin 中间件只能读到密文，
+		// 账号桶会静默退化为只计 IP 桶（等于账号维度限流失效）。LoginRateLimitHTTP
+		// 与 LoginRateLimit 共用同一套双桶语义，因此未启用加密时阈值与计账口径不变。
+		loginHandler := middleware.LoginRateLimitHTTP("account", 30, 120, time.Minute)(authHandler.Login)
 		if operational.CredentialEncryption != nil && operational.CredentialEncryption.Enabled() {
 			loginHandler = operational.CredentialEncryption.WrapJSON(credentialcrypto.PurposeLogin, "auth.login", loginHandler)
 		}
-		authRouter.POST("/login", middleware.LoginRateLimit("account", 30, 120, time.Minute), adaptHandler(loginHandler))
+		authRouter.POST("/login", adaptHandler(loginHandler))
 		// 安全审查 AUD-2026-010：GET /login 与 GET /oidc/callback 每次都会触发对身份源的
 		// 出站协议动作（授权重定向 / token 交换 + userinfo + DB 查询），复用 /oauth2/token 的
 		// IP 固定窗口限流（60/min）约束出站放大面。与 protocolRouter 共享同一限流器实例，
@@ -519,6 +530,9 @@ func NewRouter(
 			apiRouter.GET("/audit/ingestion-health", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.IngestionHealth))
 			apiRouter.POST("/audit/export-jobs", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.CreateExportJob))
 			apiRouter.GET("/audit/export-jobs/:job_id", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.GetExportJob))
+			// 下载改为“先签发短时一次性票据，再凭票据兑换文件字节”：两个动作共用现有审计
+			// 导出权限（platform:audit:export），票据本身不额外授予任何数据范围。
+			apiRouter.POST("/audit/export-jobs/:job_id/download-tickets", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.CreateExportDownloadTicket))
 			apiRouter.GET("/audit/export-jobs/:job_id/download", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.DownloadExport))
 		}
 
@@ -658,9 +672,9 @@ func NewRouter(
 			integrationRouter.POST("/internal/external-users", middleware.RequireApplicationScope("external_user.provision"), adaptHandler(operational.ExternalIdentity.Provision))
 			// 外部客户绑定：CRM 机器客户端专用。scope 与子系统接入的按用途凭据一致，
 			// 浏览器会话或任何其他机器客户端都不能读写客户绑定。
-			integrationRouter.PUT("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal_mapping_provision"), adaptHandler(operational.ExternalIdentity.BindCustomer))
-			integrationRouter.POST("/internal/external-users/:platform_user_id/customer-binding/disable", middleware.RequireApplicationScope("portal_mapping_disable"), adaptHandler(operational.ExternalIdentity.DisableCustomerBinding))
-			integrationRouter.GET("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal_mapping_provision"), adaptHandler(operational.ExternalIdentity.GetCustomerBinding))
+			integrationRouter.PUT("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal.identity_mapping.provision"), adaptHandler(operational.ExternalIdentity.BindCustomer))
+			integrationRouter.POST("/internal/external-users/:platform_user_id/customer-binding/disable", middleware.RequireApplicationScope("portal.identity_mapping.disable"), adaptHandler(operational.ExternalIdentity.DisableCustomerBinding))
+			integrationRouter.GET("/internal/external-users/:platform_user_id/customer-binding", middleware.RequireApplicationScope("portal.identity_mapping.provision"), adaptHandler(operational.ExternalIdentity.GetCustomerBinding))
 			integrationRouter.POST("/internal/application-roles", middleware.RequireApplicationScope("application_role.assign"), adaptHandler(operational.ExternalIdentity.AssignRole))
 			integrationRouter.POST("/internal/application-roles/revoke", middleware.RequireApplicationScope("application_role.revoke"), adaptHandler(operational.ExternalIdentity.RevokeRole))
 		}

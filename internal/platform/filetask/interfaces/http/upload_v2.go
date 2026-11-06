@@ -70,6 +70,7 @@ var uploadPolicies = map[string]uploadPolicy{
 	"crm.customer.import":               policy("crm", "customer-import", true, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
 	"crm.opportunity.attachment":        policy("crm", "opportunity-attachment", false, "application/pdf", "image/png", "image/jpeg", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
 	"portal.filing.material":            policy("portal", "filing-material", false, "application/pdf", "image/png", "image/jpeg"),
+	"portal.local_report":               policyWithMax("portal", "local-report", false, 20<<20, "application/pdf"),
 	"contract.external.source":          policyWithMax("contract", "external-source", false, 10<<20, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
 	"contract.external.pdf-source":      policyWithMax("contract", "external-pdf-source", false, 20<<20, "application/pdf"),
 	"contract.import.source":            policyWithMax("contract", "import-source", true, 20<<20, "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
@@ -164,8 +165,9 @@ type createUploadRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
-// CreateSession 按白名单用途创建上传会话：校验大小、SHA256、绑定与幂等键后落库，
-// 此时尚未接收任何字节。
+// CreateSession 按白名单用途校验大小、摘要、身份、业务绑定与幂等键后创建会话。
+// 参数：w为响应，r包含已认证应用和会话声明，此时尚未接收文件字节。
+// 返回值：无；不合法声明失败关闭，不创建部分会话。
 func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	p, ok := v2Principal(w, r)
 	if !ok {
@@ -191,6 +193,16 @@ func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) 
 	if !validPurposeApplication(p.Account.Code, selected.Namespace) {
 		v2Error(w, http.StatusForbidden, "FILE_PURPOSE_FORBIDDEN", "当前应用不能使用该文件用途")
 		return
+	}
+	if input.Purpose == portalLocalReportPurpose {
+		if !portalLocalReportUploadCaller(p) {
+			v2Error(w, http.StatusForbidden, "FILE_PURPOSE_FORBIDDEN", "本地报告用途仅允许门户应用机器身份")
+			return
+		}
+		if !portalLocalReportUploadBinding(input) {
+			v2Error(w, http.StatusUnprocessableEntity, "FILE_UPLOAD_INVALID", "本地报告必须绑定规范的报告申请及REPORT类型")
+			return
+		}
 	}
 	// 操作人只能来自已认证主体。请求体的 actor_user_id 为兼容留存字段，服务端不再信任：
 	// 声明值与主体不一致立即失败关闭，否则调用方可以替任意用户声明文件归属；机器主体

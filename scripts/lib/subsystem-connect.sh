@@ -219,7 +219,7 @@ PY
 connect_watch_operation() {
   # connect_watch_operation OPERATION_ID：轮询到终态或"等待处理"；--no-watch 时只查一次。
   local operation_id="$1"
-  local endpoint="/api/v1/subsystem-access/operations/${operation_id}"
+  local endpoint="/subsystem-access/operations/${operation_id}"
   local attempt=0
   local state=""
   local max_attempts="$CONNECT_WATCH_MAX"
@@ -272,11 +272,15 @@ cmd_connect() {
     exit 2
   fi
 
+  # 登录链路第一步是 POST /auth/credential-challenges，它受平台同源防线保护：缺失 Origin 一律 403。
+  # 与 update/offboard 保持一致，未显式提供时按 api-base-url 推导，绝不把空 Origin 发给服务端。
+  normalize_platform_origin || exit 2
+
   ensure_authenticated
 
   # 恢复模式：材料补齐后继续既有操作（服务端会重新检查一次）。
   if [[ -n "$CONNECT_RESUME_ID" ]]; then
-    local resume_endpoint="/api/v1/subsystem-access/operations/${CONNECT_RESUME_ID}/resume"
+    local resume_endpoint="/subsystem-access/operations/${CONNECT_RESUME_ID}/resume"
     local resume_status=""
     resume_status="$(http_post_json "$resume_endpoint" "" "$RESPONSE_FILE")" || {
       diagnose_connection_failure "$resume_endpoint"
@@ -294,7 +298,7 @@ cmd_connect() {
   local preview_payload="$TEMP_DIR/preview.json"
   connect_write_preview_payload "$preview_payload"
   local preview_status=""
-  preview_status="$(http_post_json "/api/v1/subsystem-access/preview" "$preview_payload" "$RESPONSE_FILE")" || {
+  preview_status="$(http_post_json "/subsystem-access/preview" "$preview_payload" "$RESPONSE_FILE")" || {
     diagnose_connection_failure "/subsystem-access/preview"
     exit 1
   }
@@ -335,7 +339,7 @@ cmd_connect() {
   local submit_payload="$TEMP_DIR/submit.json"
   connect_write_submit_payload "$submit_payload" "$preview_version" "$idempotency_key"
   local submit_status=""
-  submit_status="$(http_post_json "/api/v1/subsystem-access/operations" "$submit_payload" "$RESPONSE_FILE")" || {
+  submit_status="$(http_post_json "/subsystem-access/operations" "$submit_payload" "$RESPONSE_FILE")" || {
     diagnose_connection_failure "/subsystem-access/operations"
     exit 1
   }

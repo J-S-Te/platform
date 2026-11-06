@@ -19,6 +19,9 @@ customer_override_file="${project_root}/docker/.env.customer.lan"
 placeholder_file="${project_root}/docker/.env.lan.disabled"
 compose_project="basic-platform-local"
 
+# shellcheck source=lib/access-mode.sh
+source "${script_dir}/lib/access-mode.sh"
+
 log() { printf '[lan-access] %s\n' "$*"; }
 fail() { printf '[lan-access] ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -77,35 +80,6 @@ done
 [[ -f "$placeholder_file" ]] || fail "局域网占位环境文件不存在：$placeholder_file"
 command -v docker >/dev/null 2>&1 || fail '未找到 docker 命令'
 docker compose version >/dev/null 2>&1 || fail '当前 Docker 不支持 docker compose 子命令'
-
-is_ipv4() {
-    local candidate="$1" octet
-    [[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-    IFS='.' read -r -a octets <<< "$candidate"
-    for octet in "${octets[@]}"; do
-        ((10#$octet <= 255)) || return 1
-    done
-}
-
-detect_lan_address() {
-    local iface candidate
-    iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
-    if [[ -n "$iface" ]]; then
-        candidate="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
-        if is_ipv4 "$candidate" && [[ "$candidate" != 127.* ]]; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    fi
-
-    while IFS= read -r candidate; do
-        if is_ipv4 "$candidate" && [[ "$candidate" != 127.* ]]; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    done < <(ifconfig 2>/dev/null | awk '/inet / {print $2}')
-    return 1
-}
 
 compose_with_lan() {
     BASIC_PLATFORM_RUNTIME_ENV_FILE="$platform_env_file" \
@@ -173,7 +147,7 @@ EOF
 case "$command_name" in
     enable)
         if [[ -z "$address" ]]; then
-            address="$(detect_lan_address || true)"
+            address="$(detect_current_lan_ipv4 || true)"
         fi
         is_ipv4 "$address" || fail '未检测到可用局域网 IPv4；请显式传入 --address，例如 --address 192.168.1.25'
         [[ "$address" != 127.* ]] || fail '--address 不能是 127.0.0.1'

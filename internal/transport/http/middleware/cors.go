@@ -33,7 +33,9 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 				return
 			}
 			context.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			context.Header("Access-Control-Allow-Headers", "Accept, Content-Type, X-Request-ID")
+			// X-Audit-Export-Ticket 是审计导出下载的一次性票据头：跨源部署时预检必须放行该头，
+			// 否则浏览器会在发出请求前丢弃下载（同源部署不触发预检）。
+			context.Header("Access-Control-Allow-Headers", "Accept, Content-Type, X-Request-ID, X-Audit-Export-Ticket")
 			context.Header("Access-Control-Max-Age", "600")
 			context.AbortWithStatus(http.StatusNoContent)
 			return

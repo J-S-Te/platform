@@ -49,9 +49,9 @@ type KeycloakBrokerJWTVerifier struct {
 // KeycloakAuthorizationAccessTokenClaims 是 authorization-context 端点使用的严格、
 // 应用绑定令牌视图。broker 校验维持较窄的兼容契约，而授权查询必须额外证明该令牌
 // 是 access token，且其授权方（azp）出现在调用方 Client 的 audience 中。
+// 令牌用途取自嵌入的 BrokerClaims.TokenUse（M-2 起 Verify 统一解析），不再重复字段。
 type KeycloakAuthorizationAccessTokenClaims struct {
 	keycloakctx.BrokerClaims
-	TokenUse string
 }
 
 // keycloakJWKSCache 合并并发刷新且不持锁跨越网络请求。完成的抓取以整体替换 map
@@ -99,6 +99,9 @@ func validKeycloakIssuerURL(value string) bool {
 // KeycloakBrokerAuthentication 仅服务于专用的 broker 校验路由，接受 bearer token。
 // 校验使用有界缓存的“已成功解析”Keycloak JWKS 文档：Keycloak 短暂故障不会让所有
 // 在途 broker 校验同时失败，但缓存绝不接受未知密钥，也不会超出其短暂过期窗口。
+// 安全（M-2）：broker 路由只接受 token_use=access_token 的令牌。签名有效但用途为
+// id_token 或缺失 token_use 的令牌一律 401——否则同一 realm 的 ID token（受众是浏览器
+// Client、可用于登录无关应用）就能当作 broker 取证凭据使用。
 func KeycloakBrokerAuthentication(verifier *KeycloakBrokerJWTVerifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if verifier == nil {
@@ -114,6 +117,20 @@ func KeycloakBrokerAuthentication(verifier *KeycloakBrokerJWTVerifier) gin.Handl
 		}
 		claims, err := verifier.Verify(c.Request.Context(), token)
 		if err != nil {
+			c.Abort()
+			httpresponse.WriteError(c.Writer, c.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+			return
+		}
+		// 失败关闭：缺失 token_use（未同步 mapper 的存量 client）同样拒绝，不存在
+		// “缺失即放行”的兼容降级。同时要求令牌的授权方（azp）非空且出现在自身
+		// audience 中——平台 mapper 为同步过的 RP 同时下发 token_use=access_token 与
+		// aud，因此这条绑定不引入额外依赖，只拒绝“签名有效但与任何 Client 绑不上”的令牌。
+		if claims.TokenUse != keycloakctx.TokenUseAccessToken {
+			c.Abort()
+			httpresponse.WriteError(c.Writer, c.Request, http.StatusUnauthorized, httperror.Unauthenticated)
+			return
+		}
+		if claims.AuthorizedParty == "" || !keycloakAudienceContains(claims.Audience, claims.AuthorizedParty) {
 			c.Abort()
 			httpresponse.WriteError(c.Writer, c.Request, http.StatusUnauthorized, httperror.Unauthenticated)
 			return
@@ -160,6 +177,9 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 		TenantID        string          `json:"tenant_id"`
 		IdentityID      string          `json:"identity_id"`
 		AuthorizedParty string          `json:"azp"`
+		// 安全（M-2）：token_use 由平台 mapper 下发；本层只解析透传，用途约束由各
+		// 认证边界强制（broker 路由要求 access_token，ID token 场景要求 id_token）。
+		TokenUse string `json:"token_use"`
 	}
 	if err := decodeKeycloakJSONObject(parts[1], &payload); err != nil {
 		return keycloakctx.BrokerClaims{}, errors.New("invalid Keycloak broker JWT claims")
@@ -184,7 +204,7 @@ func (verifier *KeycloakBrokerJWTVerifier) Verify(ctx context.Context, raw strin
 			return keycloakctx.BrokerClaims{}, errors.New("Keycloak broker JWT is not yet valid")
 		}
 	}
-	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, AuthorizedParty: strings.TrimSpace(payload.AuthorizedParty), Audience: audience}, nil
+	return keycloakctx.BrokerClaims{Issuer: payload.Issuer, Subject: payload.Subject, SessionID: payload.SessionID, TenantID: payload.TenantID, IdentityID: payload.IdentityID, AuthorizedParty: strings.TrimSpace(payload.AuthorizedParty), Audience: audience, TokenUse: strings.TrimSpace(payload.TokenUse)}, nil
 }
 
 // KeycloakIDTokenClaims 是平台自身 OIDC 登录回调使用的严格 ID-token 视图。
@@ -248,10 +268,10 @@ func (verifier *KeycloakBrokerJWTVerifier) VerifyAuthorizationAccessToken(ctx co
 	}
 	tokenUse := strings.TrimSpace(payload.TokenUse)
 	clientID := strings.TrimSpace(claims.AuthorizedParty)
-	if tokenUse != "access_token" || clientID == "" || !keycloakAudienceContains(claims.Audience, clientID) {
+	if tokenUse != keycloakctx.TokenUseAccessToken || clientID == "" || !keycloakAudienceContains(claims.Audience, clientID) {
 		return KeycloakAuthorizationAccessTokenClaims{}, errors.New("Keycloak access token is not bound to its authorized Client")
 	}
-	return KeycloakAuthorizationAccessTokenClaims{BrokerClaims: claims, TokenUse: tokenUse}, nil
+	return KeycloakAuthorizationAccessTokenClaims{BrokerClaims: claims}, nil
 }
 
 // keyFor 返回经过校验的 Keycloak 签名密钥。缓存命中仅在新鲜期内使用；kid 未知时

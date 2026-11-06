@@ -74,8 +74,32 @@ rm -rf -- "$asset_stage"
 (cd "$baseline" && sha256sum deployment-assets-base-v1.tar.gz > deployment-assets-base-v1.tar.gz.sha256)
 
 source "$repo_root/platform/deploy/production/bin/offline-build-inputs.sh"
+source "$repo_root/platform/deploy/production/bin/offline-frontend-selection.sh"
+# platform_assets_input_fingerprint 按当前根入口契约构造真实夹具指纹。
+# 参数：可选交付组件列表，默认 CRM。
+# 返回值：共享源码与前端参数的摘要。
 platform_assets_input_fingerprint() {
-  offline_build_input_fingerprint "$repo_root" shared
+  local selection source_digest
+  selection="$(offline_frontend_enabled_modules true "${1-customer-opportunity}")"
+  source_digest="$(offline_build_input_fingerprint "$repo_root" shared)"
+  offline_bind_build_arguments "$source_digest" "VITE_ENABLED_MODULES=$selection" \
+    "PORTAL_CUSTOMER_DIRECTORY_MODE=crm" \
+    "NPM_CONFIG_REGISTRY=${OFFLINE_NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}"
+}
+
+# refresh_baseline_frontend_selection 生成与指定组合一致且总校验绑定的测试基线。
+# 参数：基线目录和交付组件列表。
+# 返回值：无；生成失败时终止测试。
+refresh_baseline_frontend_selection() {
+  local directory="$1" selection
+  selection="$(offline_frontend_enabled_modules true "$2")"
+  jq -n --argjson codes "$(offline_frontend_manifest_codes "$selection")" \
+    '{schema_version:1,enabled_modules:$codes,compiled_modules:$codes}' > "$directory/frontend-modules.json"
+  sed -i.bak "s/^PLATFORM_ASSETS_INPUT_SHA256=.*/PLATFORM_ASSETS_INPUT_SHA256=$(platform_assets_input_fingerprint "$2")/" \
+    "$directory/PLATFORM_ASSETS_COMPATIBILITY.env"
+  rm -f -- "$directory/PLATFORM_ASSETS_COMPATIBILITY.env.bak"
+  (cd "$directory" && sha256sum -- *.tar.gz PLATFORM_ASSETS_COMPATIBILITY.env \
+    install-assets.sh frontend-modules.json > SHA256SUMS)
 }
 
 cat > "$baseline/PLATFORM_ASSETS_COMPATIBILITY.env" <<EOF
@@ -96,6 +120,7 @@ exit 0
 STUB
 chmod 0755 "$baseline/install-assets.sh"
 (cd "$baseline" && sha256sum install-assets.sh > install-assets.sh.sha256)
+refresh_baseline_frontend_selection "$baseline" customer-opportunity
 (
   cd "$baseline"
   sha256sum -- \
@@ -105,6 +130,7 @@ chmod 0755 "$baseline/install-assets.sh"
     contract-backend-base-v1-linux-amd64.tar.gz \
     deployment-assets-base-v1.tar.gz \
     PLATFORM_ASSETS_COMPATIBILITY.env \
+    frontend-modules.json \
     install-assets.sh > SHA256SUMS
 )
 
@@ -115,10 +141,24 @@ case "${1:-} ${2:-}" in
   'context inspect'|'buildx inspect') exit 0 ;;
   'buildx version') printf 'github.com/docker/buildx v0.test\n' ;;
   'buildx build')
+    for argument in "$@"; do
+      case "$argument" in VITE_ENABLED_MODULES=*) printf '%s\n' "${argument#*=}" > "$STUB_WORK_ROOT/frontend-selection" ;; esac
+    done
     printf 'build:%s\n' "$*" >> "${STUB_WORK_ROOT:?}/docker-events"
     exit 0
     ;;
   tag\ *) exit 0 ;;
+  'create --platform') printf 'fixture-frontend-stopped\n' ;;
+  'cp fixture-frontend-stopped:/usr/share/nginx/html/frontend-modules.json')
+    python3 - "$3" "$STUB_WORK_ROOT/frontend-selection" <<'PYMANIFEST'
+import json, pathlib, sys
+selection = pathlib.Path(sys.argv[2]).read_text().strip()
+order = ['project_management','settlement','contract_management','customer_and_opportunity','customer_portal','data_analysis']
+codes = ['basic-platform'] + (order if selection == 'all' else [code for code in order if code in selection.split(',')])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'schema_version':1,'enabled_modules':codes,'compiled_modules':codes})+'\n')
+PYMANIFEST
+    ;;
+  'rm fixture-frontend-stopped') exit 0 ;;
   'image inspect')
     case "$*" in
       *'{{.Id}}'*) printf 'sha256:%064d\n' 1 ;;
@@ -209,6 +249,7 @@ if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root"
 fi
 grep -q '必须同时显式指定 --components' "$fixture/missing-components.log" || fail 'missing component selection guidance absent'
 
+refresh_baseline_frontend_selection "$baseline" data-analysis
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
   bash "$wrapper" --candidate --version compatible-data-analysis --output "$fixture/compatible-data-analysis" \
     --extend-from "$baseline" --components data-analysis --skip-host-deps --preflight-only --no-pause \
@@ -243,6 +284,7 @@ rm -f -- "$fixture/legacy-data-analysis-base/PLATFORM_ASSETS_COMPATIBILITY.env.b
     contract-backend-base-v1-linux-amd64.tar.gz \
     deployment-assets-base-v1.tar.gz \
     PLATFORM_ASSETS_COMPATIBILITY.env \
+    frontend-modules.json \
     install-assets.sh > SHA256SUMS
 )
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
@@ -255,6 +297,7 @@ grep -Eq 'file_gateway_write|File Gateway 运行时绑定' "$fixture/legacy-data
   fail 'legacy data-analysis asset guidance missing'
 [[ ! -e "$fixture/legacy-data-analysis-output" ]] || fail 'incompatible data-analysis baseline created an output directory'
 
+refresh_baseline_frontend_selection "$baseline" customer-opportunity
 cp -R "$baseline" "$fixture/legacy-no-lock-base"
 rm -f -- "$fixture/legacy-no-lock-base/PLATFORM_ASSETS_COMPATIBILITY.env"
 (
@@ -291,6 +334,7 @@ rm -f -- "$fixture/shared-input-drift-base/PLATFORM_ASSETS_COMPATIBILITY.env.bak
     contract-backend-base-v1-linux-amd64.tar.gz \
     deployment-assets-base-v1.tar.gz \
     PLATFORM_ASSETS_COMPATIBILITY.env \
+    frontend-modules.json \
     install-assets.sh > SHA256SUMS
 )
 if PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
@@ -320,7 +364,7 @@ PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \
   bash "$wrapper" --candidate --version full-v1 --output "$full_output" \
     --components none --skip-host-deps --no-pause > "$fixture/full-v1.log"
 [[ -f "$full_output/PLATFORM_ASSETS_COMPATIBILITY.env" ]] || fail 'full baseline compatibility lock missing'
-grep -Fxq "PLATFORM_ASSETS_INPUT_SHA256=$(platform_assets_input_fingerprint)" \
+grep -Fxq "PLATFORM_ASSETS_INPUT_SHA256=$(platform_assets_input_fingerprint '')" \
   "$full_output/PLATFORM_ASSETS_COMPATIBILITY.env" || fail 'full baseline shared-input fingerprint incorrect'
 grep -Eq '^PLATFORM_PACKAGE_SHA256=[a-f0-9]{64}$' "$full_output/PLATFORM_ASSETS_COMPATIBILITY.env" ||
   fail 'full baseline platform package digest missing'
@@ -408,6 +452,8 @@ for helper in license-upgrade.sh forward-recover.sh; do
 done
 (cd "$licensed_full" && sha256sum --check SHA256SUMS >/dev/null) || fail 'licensed full checksums failed'
 
+refresh_baseline_frontend_selection "$baseline" contract
+base_manifest_digest="$(sha256sum "$baseline/SHA256SUMS" | awk '{print $1}')"
 licensed_extension="$fixture/licensed-extension"
 prepare_licensed_fixture licensed-extension
 PATH="$tools:$PATH" STUB_WORK_ROOT="$fixture" STUB_DOCKER_ROOT="$docker_root" \

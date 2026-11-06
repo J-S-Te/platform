@@ -23,6 +23,15 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "$@" > "$STUB_WORK_ROOT/build-args"
     exit 0
     ;;
+  'create --platform')
+    printf 'fixture-frontend-stopped\n'
+    exit 0
+    ;;
+  'cp fixture-frontend-stopped:/usr/share/nginx/html/frontend-modules.json')
+    printf '{"schema_version":1,"enabled_modules":["basic-platform","project_management","settlement","contract_management","customer_and_opportunity","customer_portal","data_analysis"],"compiled_modules":["basic-platform","project_management","settlement","contract_management","customer_and_opportunity","customer_portal","data_analysis"]}\n' > "$3"
+    exit 0
+    ;;
+  'rm fixture-frontend-stopped') exit 0 ;;
   'image inspect')
     [[ "${STUB_PULL_FAILURE:-false}" != true ]] || exit 1
     printf 'amd64/linux\n'

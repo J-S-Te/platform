@@ -42,9 +42,6 @@ func TestBuiltinStatePathIgnoresImageAndCoverage(t *testing.T) {
 
 func TestBuiltinDeliveryNeedsNoApprovalFileAndOmitsDigests(t *testing.T) {
 	target, input := runtimeLicenseFixture(t)
-	if err := os.Remove(filepath.Join(target.config.DeployRoot, "runtime-license-contract_management-prod.json")); err != nil {
-		t.Fatal(err)
-	}
 	set, err := (BuiltinRuntimeComponentCatalog{}).RuntimeComponentSet(context.Background(), "contract_management", "prod")
 	if err != nil {
 		t.Fatal(err)
@@ -80,58 +77,8 @@ func TestBuiltinDeliveryNeedsNoApprovalFileAndOmitsDigests(t *testing.T) {
 	}
 }
 
-func TestMixedLegacyAndBuiltinDeliveryKeepsEachProtocol(t *testing.T) {
-	target, input := runtimeLicenseFixture(t)
-	var legacy application.RuntimeLicenseCredential
-	for _, credential := range input.RuntimeLicenseCredentials {
-		if credential.Approval.ServiceID == "contract-api" {
-			legacy = credential
-		}
-	}
-	if legacy.ClientID == "" {
-		t.Fatal("missing legacy fixture")
-	}
-	set, err := (BuiltinRuntimeComponentCatalog{}).RuntimeComponentSet(context.Background(), "contract_management", "prod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var worker application.RuntimeComponentSpec
-	for _, component := range set.Components {
-		if component.ServiceID == "contract-worker" {
-			worker = component
-		}
-	}
-	builtin := application.RuntimeLicenseCredential{
-		Approval:             application.RuntimeLicenseApproval{ServiceID: worker.ServiceID, Protocol: catalog.RegistrationProtocolV2},
-		RegistrationProtocol: catalog.RegistrationProtocolV2, CatalogVersion: catalog.Version,
-		CredentialGeneration: worker.CredentialGeneration, ClientID: "mixed-worker", ClientSecret: "mixed-worker-secret",
-	}
-	input.RuntimeLicenseCredentials = []application.RuntimeLicenseCredential{legacy, builtin}
-	if err := target.writeRuntimeLicenseCredentials(input); err != nil {
-		t.Fatal(err)
-	}
-	read := func(service string) map[string]string {
-		raw, err := os.ReadFile(filepath.Join(target.config.DeployRoot, "runtime", "license-"+service+".env"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return parseEnvironmentValues(string(raw))
-	}
-	legacyValues := read("contract-api")
-	if legacyValues["COMMERCIAL_LICENSE_REGISTRATION_PROTOCOL"] != "" || legacyValues["COMMERCIAL_LICENSE_COVERAGE_DIGEST"] == "" || legacyValues["COMMERCIAL_LICENSE_IMAGE_DIGEST"] == "" {
-		t.Fatalf("legacy env changed: %v", legacyValues)
-	}
-	builtinValues := read("contract-worker")
-	if builtinValues["COMMERCIAL_LICENSE_REGISTRATION_PROTOCOL"] != "2" || builtinValues["COMMERCIAL_LICENSE_CATALOG_VERSION"] != "1" || builtinValues["COMMERCIAL_LICENSE_COVERAGE_DIGEST"] != "" || builtinValues["COMMERCIAL_LICENSE_IMAGE_DIGEST"] != "" {
-		t.Fatalf("builtin env changed: %v", builtinValues)
-	}
-}
-
 func TestBuiltinRetirementDoesNotReadLegacyApprovalWithoutRemovedMembers(t *testing.T) {
 	target, input := runtimeLicenseFixture(t)
-	if err := os.Remove(filepath.Join(target.config.DeployRoot, "runtime-license-contract_management-prod.json")); err != nil {
-		t.Fatal(err)
-	}
 	for i := range input.RuntimeLicenseCredentials {
 		input.RuntimeLicenseCredentials[i].RegistrationProtocol = 2
 		input.RuntimeLicenseCredentials[i].RetirementNotRequired = true
@@ -139,9 +86,14 @@ func TestBuiltinRetirementDoesNotReadLegacyApprovalWithoutRemovedMembers(t *test
 	if err := target.retireRuntimeLicenseContainers(context.Background(), input); err != nil {
 		t.Fatalf("unchanged V2 topology requires legacy approval: %v", err)
 	}
-	input.RuntimeLicenseCredentials[0].RetirementNotRequired = false
+	// 有成员从目录中消失时，不得静默跳过退役：必须真的走到容器枚举/停止路径。
+	// 这里剔除一个凭据模拟"成员减少"，runner 未提供容器检查能力，因此必须失败关闭。
+	input.RuntimeLicenseCredentials = input.RuntimeLicenseCredentials[:len(input.RuntimeLicenseCredentials)-1]
+	for i := range input.RuntimeLicenseCredentials {
+		input.RuntimeLicenseCredentials[i].RetirementNotRequired = false
+	}
 	if err := target.retireRuntimeLicenseContainers(context.Background(), input); err == nil {
-		t.Fatal("unverified retirement bypassed approval")
+		t.Fatal("retirement with removed members was silently skipped")
 	}
 }
 

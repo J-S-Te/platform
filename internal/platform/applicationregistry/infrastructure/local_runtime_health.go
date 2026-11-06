@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
+	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	licenseevidence "github.com/J-S-Te/Basic-Platform/internal/platform/license/evidence"
@@ -35,37 +35,30 @@ func (r localLicenseEvidenceRunner) RunOutput(ctx context.Context, limit int, na
 	}
 	return b, nil
 }
+
+// verifyLicensedLocalStartup 校验内置运行目录中的每个组件容器都已在运行。
+// V1 的“按评审发行采集证据”路径已下线：这里只核对真实运行事实，
+// 不生成替代证据，也不把缺失容器误判为通过。
 func (p *LocalDockerSubsystemProvisioner) verifyLicensedLocalStartup(ctx context.Context, app, env string) error {
-	release, err := p.localRelease(ctx, app, env)
+	set, err := (BuiltinRuntimeComponentCatalog{}).RuntimeComponentSet(ctx, app, env)
 	if err != nil {
-		return err
-	}
-	collector, err := licenseevidence.NewCollector(localLicenseEvidenceRunner{p}, licenseevidence.Config{Project: release.Project, Services: release.Services, Timeout: 30 * time.Second})
-	if err != nil {
-		return err
-	}
-	first := collector.Collect(ctx)
-	if !first.Complete {
 		return application.ErrRuntimeLicenseStartupFailed
 	}
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-	}
-	second := collector.Collect(ctx)
-	if !second.Complete || len(second.Facts) != len(first.Facts) {
+	runner, ok := p.runner.(interface {
+		RunOutput(context.Context, string, []string, string, ...string) ([]byte, error)
+	})
+	if !ok {
 		return application.ErrRuntimeLicenseStartupFailed
 	}
-	for i, f := range first.Facts {
-		next := second.Facts[i]
-		if f.Service != next.Service || f.ContainerID != next.ContainerID || !f.StartedAt.Equal(next.StartedAt) {
+	for _, component := range set.Components {
+		service := localComposeService(component.ServiceID)
+		out, runErr := runner.RunOutput(ctx, p.localPlatformRoot(), os.Environ(), p.config.DockerBinary,
+			"ps", "--quiet",
+			"--filter", "label=com.docker.compose.project="+p.config.PlatformComposeProject,
+			"--filter", "label=com.docker.compose.service="+service)
+		if runErr != nil || strings.TrimSpace(string(out)) == "" {
 			return application.ErrRuntimeLicenseStartupFailed
 		}
 	}
-	// 已获许可的 Worker 在激活前或过期后暂停业务工作都是正确行为。业务心跳不能证明
-	// 部署就绪；API 另行要求每个消费者给出自然的 READY/最新 ACK。
 	return nil
 }

@@ -356,7 +356,10 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	loginTargetResolver, err := applicationregistryapplication.NewLoginTargetService(loginTargetRepository)
+	loginTargetResolver, err := applicationregistryapplication.NewLoginTargetService(
+		loginTargetRepository,
+		applicationregistryapplication.WithLoginTargetRedirectPolicy(postLoginRedirectPolicy(cfg)),
+	)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -374,6 +377,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		}
 		authHandlerOptions = append(authHandlerOptions, identityhttp.WithIDTokenVerifier(oidcIDTokenVerifierAdapter{verifier: idTokenVerifier}))
 	}
+	// 登录完成的重定向在处理器侧再执行一次来源判定：解析器之外的兜底，未批准来源
+	// 一律回落到平台同源页面。
+	authHandlerOptions = append(authHandlerOptions, identityhttp.WithPostLoginRedirectPolicy(postLoginRedirectPolicy(cfg)))
 	authHandler, err := identityhttp.NewHandler(authService, logger, cfg.Auth, auditService, cfg.Audit, loginTargetResolver, authHandlerOptions...)
 	if err != nil {
 		_ = database.Close(db)
@@ -533,6 +539,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	applicationManagementService, err := applicationregistryapplication.NewManagementService(
 		applicationManagementRepository, ulid.Generator{}, applicationregistryapplication.SystemClock{},
+		applicationregistryapplication.WithManagementRedirectPolicy(postLoginRedirectPolicy(cfg)),
 	)
 	if err != nil {
 		_ = database.Close(oidcDB)
@@ -728,7 +735,13 @@ func NewAPI(cfg config.Config) (*API, error) {
 			TTL:              cfg.CredentialEncryption.ChallengeTTL,
 			CleanupBatchSize: cfg.CredentialEncryption.CleanupBatch,
 		}
-		challengeService.StartCleanup(context.Background(), time.Minute, func(cleanupErr error) {
+		// 安全审查 M-9：挑战行只保留一个 TTL 宽限期，回收必须比签发速度快得多。
+		// 原 1 分钟间隔下，匿名端点持续插入的过期行最多可积压“1 分钟插入量”，
+		// 与限流后的每分钟上限叠加成可观测的堆积；15s 间隔把单次清理批量的时间窗
+		// 缩小到 1/4，配合 challenge.Cleanup 的 cutoff=now-TTL 保持
+		// CHALLENGE_EXPIRED 的错误码语义。批量上限仍为 MaxCleanupBatch(1000)，
+		// DeleteExpired 的 clamp 与之相同，无需同步调整。
+		challengeService.StartCleanup(context.Background(), 15*time.Second, func(cleanupErr error) {
 			logger.Warn("credential challenge cleanup failed", "error", cleanupErr)
 		})
 		operational.CredentialEncryption = &credentialhttp.Handler{
@@ -776,26 +789,17 @@ func NewAPI(cfg config.Config) (*API, error) {
 		licensecoordination.WithApplicationEnvironment(cfg.Audit.EnvironmentCode),
 		licensecoordination.WithBuiltinComponentSource(applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{}),
 	}
-	if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseLifecycleApprovalSource); ok {
-		verifier, verifierErr := applicationregistryapplication.NewRuntimeLicenseLifecycleVerifier(source)
-		if verifierErr != nil {
-			_ = database.Close(db)
-			_ = logFile.Close()
-			return nil, verifierErr
-		}
-		licenseCoordinatorOptions = append(licenseCoordinatorOptions, licensecoordination.WithLifecycleApprovalVerifier(verifier))
-	}
 	licenseCoordinator, err := licensecoordination.NewService(db, licenseService, licensetrust.Keys(), licenseSnapshotSigner{applicationTokenManager, licensetrust.Keys()}, time.Now, licenseCoordinatorOptions...)
 	// 授权协调服务就绪后交接 inventory 即可读取真实授权状态。
 	handoverLicenseReader = licenseCoordinator
-	// 状态接口在协调器之前创建，因此协调器就绪后再挂接运行状态读取，
-	// 让单次状态查询即可带出各应用的强制执行聚合（避免前端 N+1）。
-	operational.Licenses.ConfigureRuntimeStatus(licenseCoordinator)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
 		return nil, err
 	}
+	// 状态接口在协调器之前创建，因此协调器就绪后再挂接运行状态读取，
+	// 让单次状态查询即可带出各应用的强制执行聚合（避免前端 N+1）。
+	operational.Licenses.ConfigureRuntimeStatus(licenseCoordinator)
 	operational.RuntimeLicenses, err = licensehttp.NewRuntimeHandler(licenseCoordinator)
 	if err != nil {
 		_ = database.Close(db)
@@ -810,12 +814,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 		operational.RuntimeLicenses.ConfigureObserver(observer)
 	}
 	if operational.SubsystemOnboarding != nil {
-		var approvalSource applicationregistryapplication.RuntimeLicenseApprovalSource
-		if source, ok := operational.AccessApplier.(applicationregistryapplication.RuntimeLicenseApprovalSource); ok {
-			approvalSource = source
-		}
-		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentServiceWithCatalog(
-			approvalSource,
+		// V2 是唯一登记协议：组件身份只来自内置目录，不再读取按文件审批的 V1 清单。
+		enrollment, enrollErr := applicationregistryapplication.NewRuntimeLicenseEnrollmentService(
 			applicationregistryinfrastructure.BuiltinRuntimeComponentCatalog{},
 			oauthClientManagementService,
 			licenseCoordinator,

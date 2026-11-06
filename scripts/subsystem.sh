@@ -8,12 +8,19 @@
 #
 # 这是基础平台子系统接入的官方入口；请勿在子系统代码、镜像、功能模块或业务迁移的日常发布中重复执行。
 # 旧版 subsystem-onboarding.sh / subsystem-offboarding.sh 现在改为薄壳，转发到本脚本以保持向后兼容。
+#
+# 实现分布（CLI 契约不变，仅实现语言不同）：
+#   connect / status / update / retry / adopt / offboard → Python 包 scripts/lib/uipctl/
+#   onboard                                            → 仍为 Shell（scripts/lib/subsystem-onboard.sh）
+#
+# 本文件只负责子命令识别与分发：已迁移的子命令 exec 到 `python3 -m uipctl`，
+# 其余（onboard）继续 source Shell 库并原地执行，保证旧路径可用。
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-# ============================ 全局默认值与共享状态 ============================
+# ============================ Shell 路径（onboard）默认值与共享状态 ============================
 API_BASE_URL="${BASIC_PLATFORM_API_BASE_URL:-http://localhost:8081/api/v1}"
 PLATFORM_ORIGIN="${BASIC_PLATFORM_ORIGIN:-}"
 ALLOW_INSECURE_HTTP_API="${BASIC_PLATFORM_ALLOW_INSECURE_HTTP_API:-false}"
@@ -40,31 +47,44 @@ ISSUER_ALIAS=""
 
 # 通用控制
 SUBCOMMAND=""
-RETRY_MODE=false
 PRESET=""
 INTERACTIVE=false
 ASSUME_YES=false
 DRY_RUN=false
-SHALLOW_OFFBOARD=false   # 旧版 offboard 行为：仅删 DB，不做容器/gateway 清理
-DELETE_APPLICATION=false  # offboard 是否在 environment 删除后顺带删除 application
 OWNS_SESSION=false
 TEMP_DIR=""
 RESPONSE_FILE=""
-CONFIRMATION_CODE=""      # offboard 必填
 
 # 库文件定位：入口被 source 时 BASH_SOURCE[0] 仍是本文件路径。
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 顶层用法与 log 只依赖 common 库；Python 子命令不加载其余 Shell 库。
 source "${script_dir}/lib/subsystem-common.sh"
-source "${script_dir}/lib/subsystem-http.sh"
-source "${script_dir}/lib/subsystem-onboard.sh"
-source "${script_dir}/lib/subsystem-update.sh"
-source "${script_dir}/lib/subsystem-status.sh"
-source "${script_dir}/lib/subsystem-offboard.sh"
-source "${script_dir}/lib/subsystem-connect.sh"
 
 
 # ============================ 子命令分发 ============================
+# onboard 仍由 Shell 实现（下一轮迁移）：只加载它真正依赖的库。
+shell_onboard() {
+  require_command curl
+  require_command python3
+  # shellcheck source=lib/subsystem-http.sh
+  source "${script_dir}/lib/subsystem-http.sh"
+  # shellcheck source=lib/subsystem-update.sh
+  source "${script_dir}/lib/subsystem-update.sh"
+  # shellcheck source=lib/subsystem-onboard.sh
+  source "${script_dir}/lib/subsystem-onboard.sh"
+  cmd_onboard "$@"
+}
+
+# python_subcommand 已迁移到 scripts/lib/uipctl/：用同一份参数、同一份环境进入 Python 入口。
+python_subcommand() {
+  require_command python3
+  PYTHONPATH="${script_dir}/lib${PYTHONPATH:+:${PYTHONPATH}}"
+  export PYTHONPATH
+  # -B 避免在仓库里生成 __pycache__，保持工作树干净。
+  exec python3 -B -m uipctl "$@"
+}
+
 dispatch() {
   if [[ $# -eq 0 ]]; then
     usage >&2
@@ -73,12 +93,9 @@ dispatch() {
   SUBCOMMAND="$1"
   shift
   case "$SUBCOMMAND" in
-    onboard)   cmd_onboard   "$@" ;;
-    update)    RETRY_MODE=false; cmd_update "$@" ;;
-    retry)     RETRY_MODE=true; cmd_update "$@" ;;
-    status)    cmd_status    "$@" ;;
-    connect)   cmd_connect   "$@" ;;
-    offboard)  cmd_offboard  "$@" ;;
+    onboard)   shell_onboard "$@" ;;
+    connect|status|update|retry|adopt|offboard)
+      python_subcommand "$SUBCOMMAND" "$@" ;;
     -h|--help|help) usage; exit 0 ;;
     *)
       log "ERROR" "未知子命令：${SUBCOMMAND}。支持：connect、onboard、update、retry、status、offboard"
@@ -89,10 +106,6 @@ dispatch() {
 }
 
 main() {
-  require_command curl
-  require_command python3
-  # 通用认证/控制参数先扫一遍（包含子命令自身支持的相同参数），剩余的留给子命令解析。
-  # 兼容做法：每个子命令的 parse_*_args 独立解析自己的参数集合。
   dispatch "$@"
 }
 

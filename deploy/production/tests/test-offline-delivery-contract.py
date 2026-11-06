@@ -180,10 +180,18 @@ class DeliveryContract(unittest.TestCase):
         self.assertIn('no migrations found', result.stderr)
         self.assertFalse((output / 'deployment-assets-invalid-v1.tar.gz').exists())
 
+    # 用途：按根入口契约绑定合同前端选择与共享源码。
+    # 参数：self 为当前隔离交付测试。
+    # 返回值：共享构建指纹；执行失败时断言失败。
     def fingerprint(self):
         helper = self.production / "bin/offline-build-inputs.sh"
         result = self.command(["bash", "-Eeuo", "pipefail", "-c",
-                               'source "$1"; offline_build_input_fingerprint "$2" shared',
+                               'source "$1"; source "$(dirname -- "$1")/offline-frontend-selection.sh"; '
+                               'digest="$(offline_build_input_fingerprint "$2" shared)"; '
+                               'offline_bind_build_arguments "$digest" '
+                               '"VITE_ENABLED_MODULES=contract_management" '
+                               '"PORTAL_CUSTOMER_DIRECTORY_MODE=crm" '
+                               '"NPM_CONFIG_REGISTRY=https://registry.npmjs.org"',
                                "fixture", str(helper), str(self.workspace)])
         return result.stdout.strip()
 
@@ -206,6 +214,9 @@ class DeliveryContract(unittest.TestCase):
             Path(str(archive)+".sha256").write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+"  "+name+"\n")
             packages[component.upper()] = name
         packages["ASSETS"] = "deployment-assets-reviewed-v1.tar.gz"
+        (baseline / "frontend-modules.json").write_text(json.dumps({
+            "schema_version": 1, "enabled_modules": ["basic-platform", "contract_management"],
+            "compiled_modules": ["basic-platform", "contract_management"]}) + "\n")
         compatibility = "FORMAT=1\nPLATFORM_ASSETS_INPUT_SHA256="+self.fingerprint()+"\n"
         for component, name in packages.items():
             compatibility += component+"_PACKAGE="+name+"\n"+component+"_PACKAGE_SHA256="+hashlib.sha256((baseline / name).read_bytes()).hexdigest()+"\n"

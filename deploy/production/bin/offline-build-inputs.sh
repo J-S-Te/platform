@@ -17,8 +17,12 @@ offline_license_build_input_paths() {
   fi
 }
 
+# offline_frontend_build_input_paths 枚举影响前端镜像的源码与构建工具。
+# 参数：无；从工作区根目录调用。
+# 返回值：以 NUL 分隔的构建输入路径。
 offline_frontend_build_input_paths() {
   find frontend/src frontend/public frontend/nginx -type f -print0
+  [[ ! -d frontend/build ]] || find frontend/build -type f -print0
   printf '%s\0' frontend/Dockerfile frontend/.dockerignore frontend/package.json frontend/package-lock.json \
     frontend/index.html frontend/login.html frontend/vite.config.js
 }

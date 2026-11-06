@@ -103,8 +103,31 @@ func TestKeycloakBrokerAuthenticationFailsClosed(t *testing.T) {
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	verifier.now = func() time.Time { return now }
-	valid := signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject"})
-	for name, token := range map[string]string{"missing": "", "expired": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(-time.Second).Unix(), "iat": now.Add(-time.Minute).Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject"}), "wrong issuer": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": "https://evil.example/realms/basic-platform", "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject"}), "identity mismatch": signedKeycloakBrokerJWT(t, privateKey, "current", map[string]any{"iss": issuer, "sub": "subject", "aud": "client", "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "other-subject"}), "valid": valid} {
+	// 安全（M-2）：broker 边界要求 token_use=access_token 且 azp 在自身 audience 中，
+	// 因此全部样例都按 mapper 下发的真实形态构造，只让被测字段失效。
+	brokerClaims := func(overrides map[string]any) map[string]any {
+		claims := map[string]any{
+			"iss": issuer, "sub": "subject", "aud": "client", "azp": "client", "token_use": "access_token",
+			"exp": now.Add(time.Minute).Unix(), "iat": now.Unix(), "sid": "sid", "tenant_id": "tenant", "identity_id": "subject",
+		}
+		for key, value := range overrides {
+			claims[key] = value
+		}
+		return claims
+	}
+	valid := signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(nil))
+	for name, token := range map[string]string{
+		"missing":           "",
+		"expired":           signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"exp": now.Add(-time.Second).Unix(), "iat": now.Add(-time.Minute).Unix()})),
+		"wrong issuer":      signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"iss": "https://evil.example/realms/basic-platform"})),
+		"invalid signature": signedKeycloakBrokerJWT(t, newTestKeycloakRSAKey(t), "current", brokerClaims(nil)),
+		"id token":          signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"token_use": "id_token"})),
+		"missing token use": signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"token_use": ""})),
+		"azp outside aud":   signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"aud": []string{"other-client"}})),
+		"missing azp":       signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"azp": ""})),
+		"identity mismatch": signedKeycloakBrokerJWT(t, privateKey, "current", brokerClaims(map[string]any{"identity_id": "other-subject"})),
+		"valid":             valid,
+	} {
 		t.Run(name, func(t *testing.T) {
 			router := gin.New()
 			router.POST("/", KeycloakBrokerAuthentication(verifier), func(c *gin.Context) {

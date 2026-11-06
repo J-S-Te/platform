@@ -70,6 +70,9 @@ def list_value(lines, index, indent, value, pattern):
     return values
 
 
+# 用途：读取生产应用的服务归属、运行文件及有限可选能力策略。
+# 参数：content为审核清单文本，application为目标应用编码。
+# 返回值：服务、条件、运行文件投影；非法策略失败关闭。
 def projection(content, application):
     lines = content.splitlines()
     if any("\t" in line[:len(line) - len(line.lstrip())] for line in lines):
@@ -167,7 +170,82 @@ def projection(content, application):
     for service, path in conditional.items():
         if service not in runtime or path not in files or not files[path].get("when"):
             raise ValueError("conditional service requires a reviewed conditional runtime file")
+    compose["optional_features"] = optional_features(lines, application, compose, files)
     return compose, conditional, files
+
+
+# 用途：解析审核过的嵌入基础设施策略，与Agent有限能力校验保持一致。
+# 参数：lines为清单行，application为应用编码，compose/files为已校验服务和运行文件。
+# 返回值：可选策略；未审核字段、服务或配置边界返回错误。
+def optional_features(lines, application, compose, files):
+    features = []
+    active = False
+    feature = None
+    list_fields = {"runtime_services", "initialization_services", "required_existing_keys"}
+    key = ""
+    for index, line in enumerate(lines):
+        if line == "optional_features:":
+            active = True
+            continue
+        if not active or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        match = re.fullmatch(r"  - name: (.+)", line)
+        if match:
+            feature = {"name": scalar(match[1], ENV_KEY)}
+            features.append(feature)
+            continue
+        match = re.fullmatch(r"    ([a-z_]+):(?: (.*))?", line)
+        if match and feature is not None:
+            key, value = match[1], match[2] or ""
+            if key in feature:
+                raise ValueError("duplicate optional feature field")
+            if key in list_fields:
+                feature[key] = list_value(lines, index, 4, value,
+                                          ENV_KEY if key == "required_existing_keys" else SERVICE)
+            elif key in {"runtime_file", "enabled_key", "default_enabled"}:
+                pattern = {"runtime_file": RUNTIME_PATH, "enabled_key": ENV_KEY,
+                           "default_enabled": re.compile(r"(?:true|false)\Z")}[key]
+                feature[key] = scalar(value, pattern)
+            else:
+                raise ValueError("unreviewed optional feature field")
+        elif not (key in list_fields and re.fullmatch(r"      - .+", line)):
+            raise ValueError("unsupported optional feature policy")
+    if len(features) > 1:
+        raise ValueError("duplicate or unsupported optional feature")
+    for feature in features:
+        if (application != "data_analysis" or feature["name"] != "dashboard_embed" or
+                feature.get("enabled_key") != "DASHBOARD_EMBED_ENABLED" or
+                feature.get("runtime_file") not in files or
+                feature.get("runtime_services") != ["data-analysis-metabase"] or
+                any(k != "METABASE_EMBEDDING_SECRET" for k in feature.get("required_existing_keys", []))):
+            raise ValueError("optional feature is outside reviewed capability policy")
+        for kind in ("runtime_services", "initialization_services"):
+            if any(service not in compose.get(kind, []) for service in feature.get(kind, [])):
+                raise ValueError("optional service is not declared by the application")
+    return features
+
+
+# 用途：只移除显式关闭的可选基础设施，启用模式继续检查必要材料。
+# 参数：root为私有部署根，compose为受控策略，kind为进程或初始化集合。
+# 返回值：保持原顺序的集合；非法开关、缺材料或不安全路径返回错误。
+def feature_services(root, compose, kind):
+    disabled = set()
+    for feature in compose.get("optional_features", []):
+        path = root / feature["runtime_file"]
+        if path.exists() and stat.S_IMODE(path.lstat().st_mode) & 0o077:
+            raise ValueError("optional feature runtime file must be private")
+        values = environment_values(read_regular(path)) if path.exists() else {}
+        enabled = values.get(feature["enabled_key"], "").strip() or feature.get("default_enabled", "false")
+        if enabled not in {"true", "false"}:
+            raise ValueError("optional feature flag must be true or false")
+        if enabled == "false":
+            disabled.update(feature.get(kind, []))
+        elif any(not values.get(key, "").strip() or values[key].startswith(("PENDING_", "REPLACE_WITH_"))
+                 for key in feature.get("required_existing_keys", [])):
+            raise ValueError("enabled optional feature configuration is incomplete")
+    return [service for service in compose.get(kind, []) if service not in disabled]
 
 
 def environment_values(content):
@@ -185,13 +263,37 @@ def environment_values(content):
     return result
 
 
+# 用途：读取门户唯一客户来源，防止本地模式启动旧CRM邀请链。
+# 参数：root为部署根，compose及files为当前已审核清单。
+# 返回值：是否为本地来源；文件不安全或模式非法时拒绝投影。
+def portal_local_directory(root, compose, files):
+    if "portal-api" not in compose.get("runtime_services", []) or "runtime/portal.env" not in files:
+        return False
+    path = root / "runtime/portal.env"
+    if not path.exists() and not path.is_symlink():
+        return False
+    content = read_regular(path)
+    if path.stat().st_mode & 0o077:
+        raise ValueError("portal directory runtime file is not private")
+    mode = environment_values(content).get("PORTAL_CUSTOMER_DIRECTORY_MODE", "").strip()
+    if mode not in ("", "crm", "local"):
+        raise ValueError("portal customer directory mode is invalid")
+    return mode == "local"
+
+
+# 用途：选取本轮已安装且配置就绪的应用进程。
+# 参数：root为部署根，其余参数为已校验策略与实际Compose服务集合。
+# 返回值：当前启动集合；必需服务缺失或能力材料非法时返回错误。
 def selected_services(root, compose, conditional, files, enabled):
     root = root.resolve()
-    runtime = compose["runtime_services"]
+    runtime = feature_services(root, compose, "runtime_services")
     if any(service not in enabled for service in runtime):
         raise ValueError("required production runtime service is disabled or missing")
     selected_files = set()
+    local_portal = portal_local_directory(root, compose, files)
     for path, file in files.items():
+        if local_portal and path == "runtime/customer.env":
+            continue
         if file.get("when"):
             if file["when"] not in enabled:
                 continue
@@ -216,9 +318,12 @@ def owned_services(component, compose):
     return list(dict.fromkeys(service for service in result if service))
 
 
+# 用途：向受控发布入口输出运行、初始化或归属服务投影。
+# 参数：无；参数来自命令行和仅含服务名的标准输入。
+# 返回值：正常输出集合；非法策略由入口转换为非零退出码。
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("runtime", "owned"))
+    parser.add_argument("action", choices=("runtime", "owned", "initialization"))
     parser.add_argument("--target", required=True)
     parser.add_argument("--profiles-dir")
     parser.add_argument("--component", choices=PROFILES, required=True)
@@ -240,7 +345,12 @@ def main():
         enabled = enabled_text.split()
         if len(enabled_text) > 1024 * 1024 or any(not SERVICE.fullmatch(service) for service in enabled):
             raise ValueError("enabled Compose service inventory is invalid")
-        services = selected_services(root, compose, conditional, files, set(enabled))
+        if args.action == "initialization":
+            services = feature_services(root, compose, "initialization_services")
+            if any(service not in enabled for service in services):
+                raise ValueError("required initialization service is disabled or missing")
+        else:
+            services = selected_services(root, compose, conditional, files, set(enabled))
     print("\n".join(services))
 
 

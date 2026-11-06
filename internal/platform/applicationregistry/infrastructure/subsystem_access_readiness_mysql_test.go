@@ -6,20 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
-
-type accessApprovalSourceStub struct {
-	components []application.RuntimeLicenseApproval
-	err        error
-}
-
-func (stub accessApprovalSourceStub) ApprovedRuntimeLicenseComponents(context.Context, string, string) ([]application.RuntimeLicenseApproval, error) {
-	return stub.components, stub.err
-}
 
 type accessImageReaderStub struct {
 	ready    bool
@@ -62,16 +52,18 @@ func TestSubsystemAccessReadinessAdapterOnMySQL(t *testing.T) {
 	now := time.Now().UTC()
 
 	// A) 无产物、无部署：许可证不就绪；未接线的镜像/观察期/漂移/历史演示标记为未验证。
-	adapter, err := NewSubsystemAccessReadinessAdapter(db, accessApprovalSourceStub{}, nil, nil)
+	adapter, err := NewSubsystemAccessReadinessAdapter(db, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// V2 是唯一登记协议：就绪判定只认内置运行目录，不再依赖 V1 批准文件。
+	adapter.SetBuiltinRuntimeSource(BuiltinRuntimeComponentCatalog{})
 	readiness, err := adapter.ReadSubsystemAccessReadiness(context.Background(), "tenant-1", "settlement", "dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if readiness.LicenseReady || readiness.ApprovalReady {
-		t.Fatalf("readiness = %+v, want neither license nor approval ready", readiness)
+	if readiness.LicenseReady || !readiness.ApprovalReady {
+		t.Fatalf("readiness = %+v, want license not ready and approval (catalog) ready", readiness)
 	}
 	unverified := map[string]bool{}
 	for _, code := range readiness.Unverified {
@@ -92,12 +84,11 @@ func TestSubsystemAccessReadinessAdapterOnMySQL(t *testing.T) {
 		1, "instance-1", "customer-1", "dev", 5, "digest-a", 3, now.Unix(), false, now, now).Error; err != nil {
 		t.Fatal(err)
 	}
-	approvals := accessApprovalSourceStub{components: []application.RuntimeLicenseApproval{
-		{ServiceID: "settlement-api", CoverageDigest: "coverage-1", ImageDigest: "sha256:aaa"}}}
-	withSources, err := NewSubsystemAccessReadinessAdapter(db, approvals, accessImageReaderStub{ready: true, version: "images-1", verified: true}, accessObservationReaderStub{})
+	withSources, err := NewSubsystemAccessReadinessAdapter(db, accessImageReaderStub{ready: true, version: "images-1", verified: true}, accessObservationReaderStub{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	withSources.SetBuiltinRuntimeSource(BuiltinRuntimeComponentCatalog{})
 	ready, err := withSources.ReadSubsystemAccessReadiness(context.Background(), "tenant-1", "settlement", "dev")
 	if err != nil {
 		t.Fatal(err)
@@ -122,10 +113,11 @@ func TestSubsystemAccessReadinessAdapterOnMySQL(t *testing.T) {
 	}
 
 	// D) 观察期未结束 → AuthObservationPending（等待，不得绕过）。
-	pending, err := NewSubsystemAccessReadinessAdapter(db, approvals, accessImageReaderStub{ready: true, version: "images-1", verified: true}, accessObservationReaderStub{pending: true})
+	pending, err := NewSubsystemAccessReadinessAdapter(db, accessImageReaderStub{ready: true, version: "images-1", verified: true}, accessObservationReaderStub{pending: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	pending.SetBuiltinRuntimeSource(BuiltinRuntimeComponentCatalog{})
 	observation, err := pending.ReadSubsystemAccessReadiness(context.Background(), "tenant-1", "settlement", "dev")
 	if err != nil {
 		t.Fatal(err)

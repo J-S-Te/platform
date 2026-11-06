@@ -531,6 +531,9 @@ settlement_runtime_ready() {
   require_runtime_value SETTLEMENT_MYSQL_ROOT_PASSWORD
 }
 
+# 用途：核对数析身份、授权和已选能力所需的运行材料。
+# 参数：无；读取当前受控运行文件。
+# 返回值：材料完整返回零，未配置或非法能力返回非零。
 data_analysis_runtime_ready() {
   local key value
   for key in \
@@ -542,14 +545,14 @@ data_analysis_runtime_ready() {
     PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID \
     PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET \
     PLATFORM_AUDIT_CLIENT_ID \
-    PLATFORM_AUDIT_CLIENT_SECRET \
-    METABASE_EMBEDDING_SECRET; do
+    PLATFORM_AUDIT_CLIENT_SECRET; do
     value="$(data_analysis_env_value "$key")"
     if [[ -z "$value" || "$value" == REPLACE_WITH_* || "$value" == PENDING_* ]]; then
       return 1
     fi
   done
   [[ "$(data_analysis_env_value PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED)" == "true" ]] || return 1
+  scope_runtime_services data-analysis >/dev/null || return 1
   require_runtime_value DASHBOARD_MYSQL_PASSWORD || return 1
   require_runtime_value DASHBOARD_MYSQL_ROOT_PASSWORD
 }
@@ -953,11 +956,550 @@ dump_platform_runtime_debug() {
   done
 }
 
+# database_probe_attempts / database_probe_retry_delay 控制数据库身份探测的重试节奏。
+# 参数：无。
+# 说明：取值不影响 fail-closed 语义——连续 database_probe_attempts 次失败仍然中止平台
+#      发布。测试可把间隔覆盖为 0 以免真的等待；生产固定 3 次、间隔 2 秒。
+database_probe_attempts=3
+database_probe_retry_delay=2
+
+# database_container_id_snapshot 记录一组数据库服务在本轮 compose up 之前的容器 ID。
+# 参数：$1.. 为 docker-compose.yml 中的数据库服务名（如 platform-mysql keycloak-db）。
+# 输出：标准输出每行 "服务=容器 ID"；服务尚未部署（首次安装）时写空值。
+# 返回值：成功为零；任一数据库的容器身份探测连续失败则返回非零，且不输出任何快照。
+#        必须 fail-closed：快照缺失会让"本轮是否重建"永远判定为否，进而把新容器 ID
+#        记成"已处置"，让 keycloak 带着指向已消失容器的 Hikari 池永久失修。
+database_container_id_snapshot() {
+  local database container_id snapshot=""
+  for database in "$@"; do
+    container_id="$(database_container_current_id_strict "$database")" || return 1
+    snapshot+="$database=$container_id"$'\n'
+  done
+  printf '%s' "$snapshot"
+}
+
+# database_container_current_id_strict 严格读取某个服务当前（包含已退出容器）的容器 ID。
+# 参数：$1 为服务名。
+# 输出：容器 ID；探测成功但容器不存在（尚未部署）时输出空行——"空"只表示未部署。
+# 返回值：探测成功返回零；连续 database_probe_attempts 次探测失败返回非零且不输出内容。
+# 说明：这里既不做 2>/dev/null，也不加 || true，重试 3 次仍失败即把"未知"显式交给调用方
+#      处理（中止平台发布），绝不用空字符串冒充"未部署/未重建"——一次瞬时 docker/
+#      compose 故障不能让数据库生命周期守卫静默降级（现场 P0 的根因）。
+#      这里必须用 ps -a：ps -q 只列 running/restarting，会把已退出的强依赖误判成
+#      "未部署"，于是永远跳过修复。
+database_container_current_id_strict() {
+  local service="$1"
+  local attempts="${database_probe_attempts:-3}" delay="${database_probe_retry_delay:-2}"
+  local attempt=1 output line first_line
+  while ((attempt <= attempts)); do
+    if output="$(compose ps -a -q "$service")"; then
+      first_line=""
+      while IFS= read -r line; do
+        first_line="$line"
+        break
+      done <<<"$output"
+      printf '%s\n' "$first_line"
+      return 0
+    fi
+    if ((attempt < attempts)); then
+      printf '[警告] 探测容器状态失败，%s 秒后重试（第 %s/%s 次）：compose ps -a -q %s\n' \
+        "$delay" "$attempt" "$attempts" "$service" >&2
+      sleep "$delay"
+    fi
+    attempt=$((attempt + 1))
+  done
+  printf '[错误] 无法探测数据库容器身份：服务=%s，探测命令=compose ps -a -q %s；已尝试 %s 次仍失败\n' \
+    "$service" "$service" "$attempts" >&2
+  printf '[错误] 数据库生命周期守卫无法评估（身份未知不等于"未重建"），中止平台发布；请先修复 docker/compose 后重跑\n' >&2
+  return 1
+}
+
+# database_snapshot_container_id 从快照文本中取出某数据库在本轮启动前的容器 ID。
+# 参数：$1 为快照文本；$2 为数据库服务名。
+# 输出：启动前的容器 ID；首次安装（启动前不存在）输出空行。
+database_snapshot_container_id() {
+  printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key {print $2; exit}'
+}
+
+# database_container_recreated 判断某个数据库服务在本轮 compose up 之后是否被重建。
+# 参数：$1 为 database_container_id_snapshot 输出的快照文本；$2 为数据库服务名；
+#      $3 为本轮启动后的容器 ID，必须由 database_container_current_id_strict 取得。
+# 返回值：容器 ID 发生变化返回零（本轮被重建）；未变化返回一；快照中为空（首次安装，
+#        启动前不存在）同样返回一，保证首次安装不会触发额外的依赖重启。
+# 说明：本函数不再自行探测"启动后 ID"——那会把一次探测失败悄悄退化成"未重建"。
+database_container_recreated() {
+  local snapshot="$1" database="$2" before after="${3:-}"
+  before="$(database_snapshot_container_id "$snapshot" "$database")"
+  [[ -n "$before" ]] || return 1
+  [[ -n "$after" ]] || return 1
+  [[ "$after" != "$before" ]]
+}
+
+# database_refresh_state_file 输出"数据库强依赖刷新状态"文件路径。
+#
+# 这是跨轮次的持久化事实：本轮快照只能证明"这次 compose up 有没有重建数据库"，
+# 一旦发布在记录之前失败（现场序列：require_mysql_ready/备份/config-check/migrate
+# 任一失败后重跑 --resume），下一次的快照已经是被重建之后的新容器 ID，只靠本轮
+# 比对会得出"未重建"，于是 keycloak 带着指向已消失容器的 Hikari 池继续运行。
+# 参数：无。
+# 输出：runtime/database-refresh-state 的绝对路径。
+# 返回值：恒为零。
+database_refresh_state_file() {
+  printf '%s\n' "$deploy_dir/runtime/database-refresh-state"
+}
+
+# database_refresh_state_read 读取某个数据库"上一次已成功处置强依赖"时的容器 ID。
+# 参数：$1 为数据库服务名。
+# 输出：已记录的容器 ID。
+# 返回值：读到返回零；状态文件不存在、是符号链接、不是普通文件、权限不是 0600，
+#        或其中没有该数据库的记录时返回一（一律按"没有历史记录"处理，保守地再
+#        刷新一次强依赖，宁可多做一次重建也不要留下失效连接池）。
+# 说明：文件只保存容器 ID（不含凭据），仍拒绝符号链接与宽权限文件，避免有人用
+#      可替换文件伪造"已刷新"而跳过真正的修复。
+database_refresh_state_read() {
+  local database="$1" state_file value
+  state_file="$(database_refresh_state_file)"
+  if [[ -L "$state_file" ]]; then
+    printf '拒绝读取符号链接的数据库刷新状态文件：%s；按首次安装处理\n' "$state_file" >&2
+    return 1
+  fi
+  if [[ ! -f "$state_file" ]]; then
+    return 1
+  fi
+  if [[ "$(stat -c '%a' "$state_file" 2>/dev/null || true)" != '600' ]]; then
+    printf '数据库刷新状态文件权限过宽（期望 0600），忽略其内容：%s\n' "$state_file" >&2
+    return 1
+  fi
+  value="$(awk -F= -v key="$database" '
+    $0 ~ /^[[:space:]]*#/ {next}
+    $1 == key {print $2; exit}
+  ' "$state_file" 2>/dev/null || true)"
+  if [[ -z "$value" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+# database_refresh_state_record 把某个数据库当前的容器 ID 记为"强依赖已处置"。
+# 参数：$1 为数据库服务名；$2 为当前容器 ID（为空表示容器还没创建，跳过不记）。
+# 副作用：原子更新 runtime/database-refresh-state（0600，先 mktemp 再 mv，mv 只替换
+#      目录项，绝不像重定向那样写穿符号链接）。
+# 返回值：恒为零。状态文件写不进去只告警，不阻断已经通过健康检查的发布；代价只是
+#        下一次发布多刷新一次强依赖（安全方向），不会留下未修复的死连接池。
+database_refresh_state_record() {
+  local database="$1" container_id="$2" state_file runtime_dir temporary
+  [[ -n "$container_id" ]] || return 0
+  state_file="$(database_refresh_state_file)"
+  runtime_dir="$deploy_dir/runtime"
+  if [[ -L "$state_file" ]]; then
+    printf '拒绝写入符号链接的数据库刷新状态文件：%s；本次不记录，下次发布将再次刷新强依赖\n' "$state_file" >&2
+    return 0
+  fi
+  if ! install -d -m 700 "$runtime_dir"; then
+    printf '无法创建运行时目录，跳过数据库刷新状态记录：%s\n' "$runtime_dir" >&2
+    return 0
+  fi
+  temporary="$(mktemp "$runtime_dir/.database-refresh-state.XXXXXX")" || {
+    printf '无法创建数据库刷新状态临时文件，跳过记录：%s\n' "$runtime_dir" >&2
+    return 0
+  }
+  if {
+    printf '# 数据库强依赖刷新状态：记录上一次成功处置后各数据库容器的 ID，\n'
+    printf '# 供下一次发布判断跨轮次是否重建。由 bin/deploy-service.sh 自动维护，请勿手工编辑。\n'
+    if [[ -f "$state_file" ]]; then
+      awk -F= -v key="$database" '
+        $0 ~ /^[[:space:]]*#/ {next}
+        $1 == key {next}
+        NF {print}
+      ' "$state_file"
+    fi
+    printf '%s=%s\n' "$database" "$container_id"
+  } >"$temporary"; then
+    if mv -f "$temporary" "$state_file"; then
+      chmod 600 "$state_file" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  rm -f "$temporary"
+  printf '数据库刷新状态写入失败：%s；本次不记录，下次发布将再次刷新强依赖\n' "$state_file" >&2
+  return 0
+}
+
+# database_refresh_state_record_current 把若干数据库当前的容器 ID 一并记为已处置。
+# 参数：$1.. 为数据库服务名。
+# 返回值：恒为零；只读容器 ID 并写状态文件。
+# 说明：容器 ID 必须经 fail-closed 探测取得；探测失败时跳过该数据库的记录（宁可下次
+#      多刷新一次强依赖，也不能把未知 ID 记成"已处置"）。
+database_refresh_state_record_current() {
+  local database container_id
+  for database in "$@"; do
+    if ! container_id="$(database_container_current_id_strict "$database")"; then
+      printf '[警告] 无法探测数据库容器 ID，跳过刷新状态记录：%s；下次发布将再次刷新其强依赖\n' \
+        "$database" >&2
+      continue
+    fi
+    database_refresh_state_record "$database" "$container_id"
+  done
+  return 0
+}
+
+# database_refresh_failure_marker_file 输出"数据库强依赖刷新失败"持久标记的文件路径。
+#
+# 背景（X3）：强依赖刷新失败原来只写两行标准错误，长时间发布日志里滚过去就没了，
+# status/verify/doctor 也读不到任何信号。因此把失败落成持久标记，供运维与后续检查
+# 命令直接读取：
+#   路径：<deploy_dir>/runtime/database-refresh-failed.json
+#   结构：{"schema":"uip.database-refresh-failed/v1","failures":[
+#            {"database":"<数据库服务名>","service":"<强依赖服务名>",
+#             "reason":"<失败原因>","at":"<UTC ISO8601 时间>"}]}
+#   生命周期：本轮平台发布里任一强依赖刷新/探测失败即原子写入（0600，拒绝符号链接）；
+#            之后某一次平台发布的强依赖处置全部成功时删除它。
+# 文件只含服务名与固定原因文本，不含凭据、地址或容器 ID。
+# 参数：无。
+# 输出：runtime/database-refresh-failed.json 的绝对路径。
+# 返回值：恒为零。
+database_refresh_failure_marker_file() {
+  printf '%s\n' "$deploy_dir/runtime/database-refresh-failed.json"
+}
+
+# database_refresh_json_string 把文本转义成合法的 JSON 字符串内容。
+# 参数：$1 为原文。
+# 输出：转义后的内容（不含两侧双引号）。
+# 返回值：恒为零。
+database_refresh_json_string() {
+  local text="$1"
+  text="${text//\\/\\\\}"
+  text="${text//\"/\\\"}"
+  text="${text//$'\n'/\\n}"
+  text="${text//$'\r'/\\r}"
+  text="${text//$'\t'/\\t}"
+  printf '%s' "$text"
+}
+
+# database_refresh_failures 在进程内累计本次发布的强依赖刷新失败记录。
+# 元素格式：<数据库服务名>\t<强依赖服务名>\t<原因>\t<UTC ISO8601>。
+# 说明：只在进程内聚合，落盘只发生在 database_refresh_failure_marker_write。
+database_refresh_failures=()
+
+# database_refresh_failure_note 记录一条强依赖刷新/探测失败，供本轮结束时写持久标记。
+# 参数：$1 为数据库服务名；$2 为强依赖服务名（数据库自身身份探测失败时填该数据库名）；
+#      $3 为固定原因文本（不得包含凭据、地址等现场敏感内容）。
+# 返回值：恒为零。
+database_refresh_failure_note() {
+  database_refresh_failures+=("$1"$'\t'"$2"$'\t'"$3"$'\t'"$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  return 0
+}
+
+# database_refresh_failure_marker_write 原子写入"强依赖刷新失败"持久标记。
+# 参数：无（读取进程内 database_refresh_failures）。
+# 副作用：在 runtime 目录内先 mktemp 写临时文件，再 mv -f 替换目标；chmod 600；
+#       目标已是符号链接时拒绝写入（mv 只替换目录项，绝不像重定向那样写穿链接）。
+# 返回值：恒为零。标记写不进去只告警，不改变发布结论（刷新失败本身仍是"只告警、
+#        不记录状态、下次重试"），代价只是少一个持久信号。
+database_refresh_failure_marker_write() {
+  local marker runtime_dir temporary entry database service reason at first=true
+  marker="$(database_refresh_failure_marker_file)"
+  runtime_dir="$deploy_dir/runtime"
+  if [[ -L "$marker" ]]; then
+    printf '拒绝写入符号链接的数据库刷新失败标记：%s；本次不写标记，请人工核对\n' "$marker" >&2
+    return 0
+  fi
+  if ! install -d -m 700 "$runtime_dir"; then
+    printf '无法创建运行时目录，跳过数据库刷新失败标记：%s\n' "$runtime_dir" >&2
+    return 0
+  fi
+  temporary="$(mktemp "$runtime_dir/.database-refresh-failed.XXXXXX")" || {
+    printf '无法创建数据库刷新失败标记临时文件，跳过写入：%s\n' "$runtime_dir" >&2
+    return 0
+  }
+  if {
+    printf '{"schema":"uip.database-refresh-failed/v1","failures":['
+    if ((${#database_refresh_failures[@]} > 0)); then
+      for entry in "${database_refresh_failures[@]}"; do
+        IFS=$'\t' read -r database service reason at <<<"$entry"
+        if [[ "$first" != true ]]; then
+          printf ','
+        fi
+        first=false
+        printf '{"database":"%s","service":"%s","reason":"%s","at":"%s"}' \
+          "$(database_refresh_json_string "$database")" \
+          "$(database_refresh_json_string "$service")" \
+          "$(database_refresh_json_string "$reason")" \
+          "$(database_refresh_json_string "$at")"
+      done
+    fi
+    printf ']}\n'
+  } >"$temporary"; then
+    if mv -f -- "$temporary" "$marker"; then
+      chmod 600 -- "$marker" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  rm -f -- "$temporary"
+  printf '数据库刷新失败标记写入失败：%s；本次不留持久信号，请查看上方 [警告]\n' "$marker" >&2
+  return 0
+}
+
+# database_refresh_failure_marker_clear 删除持久失败标记（本次发布刷新全部成功）。
+# 参数：无。
+# 返回值：恒为零。rm 不跟随符号链接，因此即使有人把标记换成链接也只会删掉链接本身。
+database_refresh_failure_marker_clear() {
+  local marker
+  marker="$(database_refresh_failure_marker_file)"
+  [[ -e "$marker" || -L "$marker" ]] || return 0
+  if rm -f -- "$marker"; then
+    printf '数据库强依赖刷新已全部成功，已清除历史失败标记：%s\n' "$marker"
+  else
+    printf '[警告] 无法清除数据库刷新失败标记：%s；请人工核对上一次失败是否已经修复\n' "$marker" >&2
+  fi
+  return 0
+}
+
+# database_refresh_state_stale 判断跨轮次是否需要按"数据库已重建"处置（D1 修复核心）。
+# 参数：$1 为数据库服务名；$2 为当前容器 ID；$3 为本轮 compose up 之前的容器 ID。
+# 返回值：需要刷新强依赖时返回零：
+#        - 持久化记录存在且与当前容器 ID 不同：数据库在平台发布之外被重建过；
+#        - 持久化记录缺失、但本轮启动前该数据库容器已存在：上一轮发布在记录之前
+#          中止（现场"发布中止两次"的序列），必须重试修复，不能当成未重建。
+#        当前容器尚不存在（首次安装）或记录与当前 ID 一致时返回一。
+database_refresh_state_stale() {
+  local database="$1" current_id="$2" before_id="$3" persisted
+  [[ -n "$current_id" ]] || return 1
+  if persisted="$(database_refresh_state_read "$database")"; then
+    if [[ "$persisted" == "$current_id" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+  [[ -n "$before_id" ]] || return 1
+  return 0
+}
+
+# database_dependent_disposition 登记"数据库容器被重建后其强依赖如何处置"的唯一映射表。
+#
+# 背景（现场 P0 事故，2026-11-05 协调升级）：deploy_platform 只用一条
+# compose up -d --wait 启动 platform-mysql、keycloak-db、contract-mysql。compose 会
+# 重建配置变化的数据库容器，但不会重建使用这些数据库的服务。现场 keycloak-db 已是
+# 2026-11-05T04:00:04Z 的新容器，keycloak 仍是 2026-10-19 的旧容器：Hikari 连接池
+# 指向已消失的旧容器，Infinispan clientscopes 缓存卡死；因为健康探针只测 TCP，
+# keycloak 仍报告 healthy，全部请求处理被阻塞 20 分钟以上，platform-worker 随后在
+# Keycloak 管理 API 上崩溃重启，发布被中止两次。因此数据库容器重建后必须显式刷新
+# 强依赖，不能指望 compose 或健康检查兜底。
+#
+# 处置方式（第一列）：
+#   inline  由 deploy_platform 在同一条启动命令里追加 --force-recreate，避免同一服务
+#           在一次发布里被启动两次（keycloak 与按需 Temporal 合并启动）。
+#   refresh 由 refresh_recreated_database_dependents 立即强制重建，只针对已存在且所属
+#           子系统仍在当前 Compose 中的容器，且必须带 --no-deps；失败只告警不中止
+#           平台发布（业务子系统不能硬门禁平台发布）。
+#   later   该强依赖在 deploy_platform 后续步骤中已经无条件 --force-recreate，此处只输出
+#           证据，不再重复重启，避免一次发布内两次重建同一服务。
+#   none    未登记的数据库：不改动任何容器（保守默认）。
+# 参数：$1 为数据库服务名。
+# 输出：标准输出一行 "<处置方式> [强依赖服务名...]"。
+database_dependent_disposition() {
+  case "$1" in
+    # Keycloak 进程内持有到 keycloak-db 的 Hikari 连接和 Infinispan clientscopes 缓存，
+    # 数据库容器重建后必须一起重建（本次事故的直接原因）。
+    keycloak-db) printf 'inline keycloak\n' ;;
+    # contract-api 与 contract-worker 进程内都持有到 contract-mysql 的连接池；
+    # worker 还会按自己的重试节奏反复报错，因此两者必须一起刷新。
+    contract-mysql) printf 'refresh contract-api contract-worker\n' ;;
+    # platform-api/platform-worker/subsystem-provisioner 在本函数后续步骤中已经
+    # 无条件 --force-recreate，这里不重复重启。
+    platform-mysql) printf 'later platform-api platform-worker subsystem-provisioner\n' ;;
+    # file-gateway 同样在后续步骤中无条件 --force-recreate。
+    file-gateway-mysql) printf 'later file-gateway\n' ;;
+    *) printf 'none\n' ;;
+  esac
+}
+
+# database_dependent_scope_component 登记强依赖所属的子系统编码，供 scope_enabled 校验。
+# 参数：$1 为强依赖服务名。
+# 输出：子系统编码；未登记返回非零（表示不受子系统开关约束）。
+database_dependent_scope_component() {
+  case "$1" in
+    contract-api|contract-worker) printf 'contract\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# database_dependent_kept_running 登记"数据库重建后明确不自动重启"的依赖及原因。
+# 参数：$1 为数据库服务名。
+# 输出：每行 "<服务名>\t<原因>"；没有登记时输出空。
+# 说明：Temporal 的可见性库也在 contract-mysql 中，但 Go database/sql 会自行重连，
+#      且重启会打断在途工作流；这里只输出证据，避免运维误以为漏刷了 Temporal。
+database_dependent_kept_running() {
+  case "$1" in
+    contract-mysql) printf 'temporal\t共享 Temporal 的可见性库同在 contract-mysql，database/sql 会自行重连；重启会打断在途工作流，因此不随平台发布重建\n' ;;
+    *) : ;;
+  esac
+}
+
+# refresh_recreated_database_dependents 刷新被重建的数据库容器的强依赖服务。
+# 参数：$1 为 database_container_id_snapshot 生成的快照文本；$2.. 为本轮 compose up
+#      启动过的数据库服务名。
+# 输出：标准输出逐行打印可 grep 的中文证据，例如
+#      "数据库已重建，强制重建强依赖：keycloak-db -> keycloak"、
+#      "数据库未重建，保持现有依赖容器：platform-mysql"。
+#      refresh 处置失败时向标准错误打印以 "[警告]" 开头的行，明确"平台发布继续；
+#      该子系统随后由自身发布/verify 阶段判定"。
+# 副作用：把需要调用方在同一条启动命令里追加 --force-recreate 的强依赖写入
+#      database_refresh_inline_dependents（空格分隔）；把 inline 处置对应的数据库写入
+#      database_refresh_inline_databases（数组，供调用方在强依赖真正启动成功后记录状态）。
+#      每个数据库处置成功后把当前容器 ID 写入 runtime/database-refresh-state。
+#      本轮只要有强依赖刷新或探测失败，就把失败明细原子写入
+#      runtime/database-refresh-failed.json（0600）；本轮全部成功则删除该标记。
+# 返回值：成功为零；已存在强依赖的强制重建失败只告警并继续（业务子系统故障不能升级为
+#      平台发布失败），但失败的那条数据库不记录状态，下一次发布仍会重试；
+#      未部署或所属子系统未启用的强依赖只打印跳过证据，绝不新建容器或启动停用子系统。
+#      唯一例外：数据库自身的容器身份无法探测时返回非零（生命周期守卫不可评估，不能
+#      静默降级成"未重建"），由 deploy_platform 中止平台发布。
+refresh_recreated_database_dependents() {
+  local snapshot="$1"
+  shift
+  local database disposition dependent container_id current_id before_id component dependent_service
+  local refresh_failed defer_record kept reason_text index
+  local scope_resolved=false identity_unknown=false enabled_services=""
+  local -a fields
+  database_refresh_inline_dependents=""
+  database_refresh_inline_databases=()
+  database_refresh_failures=()
+  # 启用范围只解析一次：每条数据库都要判定"强依赖所属子系统是否启用"，逐条重解析既慢，
+  # 又会把一次瞬时解析失败误传成多条"未启用/未部署"的假结论（X2）。解析失败时下面
+  # 绝不猜"未启用"，而是按"无法判定"处理：不记录状态并留下持久失败标记。
+  if enabled_services="$(scope_services)"; then
+    scope_resolved=true
+  else
+    printf '[警告] 无法解析统一 Compose 服务清单；本轮无法判定强依赖是否启用，相关数据库不记录刷新状态\n' >&2
+  fi
+  for database in "$@"; do
+    before_id="$(database_snapshot_container_id "$snapshot" "$database")"
+    if ! current_id="$(database_container_current_id_strict "$database")"; then
+      # 数据库身份未知：既不能当作"未重建"，也不能记成"已处置"。
+      refresh_failed=true
+      identity_unknown=true
+      printf '[错误] 无法探测数据库容器身份，本条数据库不记录刷新状态：%s\n' "$database" >&2
+      database_refresh_failure_note "$database" "$database" \
+        '无法探测数据库容器身份（compose ps -a -q 连续失败）'
+      continue
+    fi
+    refresh_failed=false
+    defer_record=false
+    if ! database_container_recreated "$snapshot" "$database" "$current_id" &&
+       ! database_refresh_state_stale "$database" "$current_id" "$before_id"; then
+      printf '数据库未重建，保持现有依赖容器：%s\n' "$database"
+      database_refresh_state_record "$database" "$current_id"
+      continue
+    fi
+    read -r -a fields <<<"$(database_dependent_disposition "$database")"
+    disposition="${fields[0]:-none}"
+    case "$disposition" in
+      inline)
+        for ((index = 1; index < ${#fields[@]}; index++)); do
+          dependent="${fields[index]}"
+          printf '数据库已重建，强制重建强依赖：%s -> %s\n' "$database" "$dependent"
+          database_refresh_inline_dependents="${database_refresh_inline_dependents:+$database_refresh_inline_dependents }$dependent"
+        done
+        # inline 的强依赖在本函数返回后才真正启动，因此由调用方在启动成功后记录；
+        # 否则启动失败会被记成"已刷新"，下一次发布就再也不会修复。
+        defer_record=true
+        database_refresh_inline_databases+=("$database")
+        ;;
+      refresh)
+        for ((index = 1; index < ${#fields[@]}; index++)); do
+          dependent="${fields[index]}"
+          # 子系统被注释掉时必须什么都不做：对不存在的服务 compose up 会直接失败，
+          # 那会把"未启用该子系统"变成平台发布故障。
+          component="$(database_dependent_scope_component "$dependent" 2>/dev/null || true)"
+          if [[ -n "$component" ]]; then
+            if [[ "$scope_resolved" != true ]]; then
+              # 解析失败 ≠ 未启用：不能把一次探针故障永久固化成"该子系统不部署"。
+              printf '[警告] 无法解析统一 Compose 服务清单，本条数据库不记录刷新状态：%s（强依赖 %s 是否启用无法判定）\n' \
+                "$database" "$dependent" >&2
+              refresh_failed=true
+              database_refresh_failure_note "$database" "$dependent" \
+                '无法解析统一 Compose 服务清单，未能判定强依赖是否启用'
+              continue
+            fi
+            dependent_service="$(scope_service_for "$component" 2>/dev/null || true)"
+            if [[ -n "$dependent_service" ]] &&
+               ! grep -Fxq "$dependent_service" <<<"$enabled_services"; then
+              printf '数据库已重建，强依赖所属子系统未启用，跳过：%s -> %s（当前 docker-compose.yml 未启用 %s 子系统）\n' \
+                "$database" "$dependent" "$component"
+              continue
+            fi
+          fi
+          # 只刷新已经存在的容器，且必须用 ps -a：ps -q 只列 running/restarting，
+          # 会把已退出（exited）的强依赖误判成"未部署"而永远不修复。
+          # 探测失败同样不等于"未部署"：重试 3 次仍失败就按失败处置（不记录状态、
+          # 留持久标记），绝不用「未部署」把一次探针故障说成事实。
+          if ! container_id="$(database_container_current_id_strict "$dependent")"; then
+            printf '[警告] 无法探测强依赖容器状态：%s -> %s（compose ps -a -q 连续失败）；本条数据库不记录刷新状态，下次发布将重试\n' \
+              "$database" "$dependent" >&2
+            refresh_failed=true
+            database_refresh_failure_note "$database" "$dependent" \
+              '无法探测强依赖容器状态（compose ps -a -q 连续失败）'
+            continue
+          fi
+          if [[ -z "$container_id" ]]; then
+            printf '数据库已重建，强依赖未部署，跳过：%s -> %s\n' "$database" "$dependent"
+            continue
+          fi
+          printf '数据库已重建，强制重建强依赖：%s -> %s\n' "$database" "$dependent"
+          # 等待上限必须覆盖 contract-api/contract-worker 自身的健康检查视界：
+          # healthcheck interval 10s × retries 15 + start_period 10s ≈ 160s。原来的
+          # 120s 会在"慢但最终健康"时误报失败，于是该数据库不被记录，导致每一次平台
+          # 发布都强制重建一次；这里取 240s 留余量，其他超时保持原值。
+          if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 240 "$dependent"; then
+            printf '[警告] 数据库已重建，但强依赖刷新失败：%s -> %s；平台发布继续；该子系统随后由自身发布/verify 阶段判定。请在该子系统发布阶段重新部署它，否则它可能继续使用指向旧数据库容器的连接池\n' \
+              "$database" "$dependent" >&2
+            refresh_failed=true
+            database_refresh_failure_note "$database" "$dependent" \
+              '强依赖强制重建未通过 --wait 健康检查'
+            continue
+          fi
+        done
+        ;;
+      later)
+        printf '数据库已重建，强依赖由后续发布步骤强制重建：%s\n' "$database"
+        ;;
+      *)
+        printf '数据库已重建，未登记强依赖，保持不变：%s\n' "$database"
+        ;;
+    esac
+    while IFS=$'\t' read -r kept reason_text; do
+      [[ -n "$kept" ]] || continue
+      printf '数据库已重建，保持运行不重启：%s -> %s（%s）\n' "$database" "$kept" "$reason_text"
+    done < <(database_dependent_kept_running "$database")
+    if [[ "$refresh_failed" == true ]]; then
+      printf '数据库刷新未完成，不记录刷新状态，下次发布将重试：%s\n' "$database" >&2
+    elif [[ "$defer_record" == true ]]; then
+      printf '数据库强依赖将在启动成功后记录刷新状态：%s\n' "$database"
+    else
+      database_refresh_state_record "$database" "$current_id"
+    fi
+  done
+  # 本轮所有数据库处置完毕后统一落持久信号：有失败写标记，全部成功则清除历史标记。
+  # 标记是给运维和 status/verify 看的持久证据，不影响"业务子系统故障不阻断平台发布"
+  # 的既有语义。
+  if ((${#database_refresh_failures[@]} > 0)); then
+    database_refresh_failure_marker_write
+  else
+    database_refresh_failure_marker_clear
+  fi
+  [[ "$identity_unknown" != true ]] || return 1
+  return 0
+}
+
 # deploy_platform 备份并迁移数据库，再升级同版本平台控制面与后台进程。
 # 参数：无，使用已校验的候选镜像及当前部署目录。
 # 返回值：成功为零；备份、迁移、配置、镜像或健康校验失败则中止发布。
 deploy_platform() {
 	local file_gateway_root file_gateway_db_name file_gateway_container file_gateway_health
+	local database_snapshot database_refresh_inline_dependents database
+	local -a database_refresh_inline_databases=()
+	local -a keycloak_start_options
   prepare_managed_public_proxy_image || return 1
 	file_gateway_root="$(env_value FILE_GATEWAY_HOST_ROOT)"
 	file_gateway_root="${file_gateway_root:-$deploy_dir/data/file-gateway}"
@@ -978,6 +1520,14 @@ deploy_platform() {
 		return 1
 	fi
   compose run --rm --no-deps platform-key-init || return
+  # 数据库容器配置变化时 compose 只重建数据库本身，持有旧连接的强依赖会继续运行。
+  # 启动前记录容器 ID，启动后比对即可判断"本轮是否重建"；跨轮次的重建（上一次发布
+  # 在记录之前中止，或数据库在平台发布之外被重建）由 runtime/database-refresh-state
+  # 中的持久化容器 ID 兜底，见 database_refresh_state_stale。
+  # 首次安装时 ID 为空，按"未重建"处理，避免首装多做一次重启。
+  # 快照探测是 fail-closed 的：任一数据库的容器身份连续探测失败即中止发布，
+  # 不能带着空快照继续（那会把"未知"变成"未重建"，再记成"已处置"而永久失修）。
+  database_snapshot="$(database_container_id_snapshot platform-mysql keycloak-db contract-mysql)" || return 1
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" platform-mysql keycloak-db contract-mysql || {
     diagnose_mysql_container platform-mysql
     diagnose_mysql_container keycloak-db
@@ -995,7 +1545,46 @@ deploy_platform() {
   initialize_platform_audit_hash_key || return 1
   provision_iam_import_client || return 1
   ensure_temporal_application_network || return
-  compose up -d --wait --wait-timeout 180 keycloak temporal || return
+  # ensure_temporal_application_network 也可能重建 contract-mysql，因此在其之后比对快照。
+  refresh_recreated_database_dependents "$database_snapshot" platform-mysql keycloak-db contract-mysql || return
+  # C11：Temporal 按需启动。无任何 Temporal 消费子系统时平台发布不再拉起共享
+  # Temporal；已运行的实例不受影响（compose 不提及即不触碰）。
+  # keycloak-db 本轮被重建时，keycloak 必须与数据库一起重建，否则会复用指向旧容器的
+  # Hikari 连接和卡死的 Infinispan clientscopes 缓存；未重建时启动参数保持不变。
+  if [[ " $database_refresh_inline_dependents " == *' keycloak '* ]]; then
+    # --force-recreate 作用于该命令列出的全部服务：共享 Temporal 不能被连带重建，
+    # 否则会打断在途工作流，因此拆成两条命令，Temporal 仍按原参数单独启动。
+    if ! compose up -d --wait --wait-timeout 180 --force-recreate keycloak; then
+      # 这里已经重建过数据库，keycloak 却没能起来：必须留下持久失败标记，
+      # 否则运维只会在长日志里错过这次失败（X3）。
+      if ((${#database_refresh_inline_databases[@]} > 0)); then
+        for database in "${database_refresh_inline_databases[@]}"; do
+          database_refresh_failure_note "$database" keycloak \
+            'inline 强制重建 keycloak 未通过 --wait 健康检查'
+        done
+      fi
+      database_refresh_failure_marker_write
+      return 1
+    fi
+    # keycloak 确实重建成功后才把 keycloak-db 记成"已处置"：启动失败时保持待刷新，
+    # 下一次发布仍会强制重建 keycloak，不会再次留下指向旧数据库容器的连接池。
+    if ((${#database_refresh_inline_databases[@]} > 0)); then
+      database_refresh_state_record_current "${database_refresh_inline_databases[@]}"
+    fi
+    if temporal_consumers_enabled; then
+      compose up -d --wait --wait-timeout 180 temporal || return
+    else
+      echo '未启用 Temporal 消费子系统，跳过共享 Temporal 启动'
+    fi
+  else
+    keycloak_start_options=(-d --wait --wait-timeout 180)
+    if temporal_consumers_enabled; then
+      compose up "${keycloak_start_options[@]}" keycloak temporal || return
+    else
+      compose up "${keycloak_start_options[@]}" keycloak || return
+      echo '未启用 Temporal 消费子系统，跳过共享 Temporal 启动'
+    fi
+  fi
 	compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" file-gateway-mysql || {
 	  diagnose_mysql_container file-gateway-mysql
 	  return 1
@@ -1307,13 +1896,28 @@ restore_data_analysis_role_config_hash() {
   echo '已移除本次发布新增的数据看板授权目录哈希'
 }
 
+# 用途：按受控能力发布数析进程并校验实际不可变镜像。
+# 参数：无；使用当前已通过发布门禁的发行与运行配置。
+# 返回值：成功返回零，备份、迁移、能力或健康校验失败返回非零。
 deploy_data_analysis() {
+  local selected initializers service
+  local -a runtime_services=() remaining_services=()
+  selected="$(scope_runtime_services data-analysis)" || return
+  initializers="$(scope_initialization_services data-analysis)" || return
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    runtime_services+=("$service")
+    [[ "$service" == data-analysis-api ]] || remaining_services+=("$service")
+  done <<< "$selected"
   # data_analysis 由 API、两个常驻 Worker 和一次性迁移镜像组成，四个镜像必须
   # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" data-analysis-mysql || return
   require_mysql_ready data-analysis-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
   backup_database_if_initialized data-analysis-mysql dashboard_aggregation || return
-  compose run --rm --no-deps data-analysis-metabase-init || return
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    compose run --rm --no-deps "$service" || return
+  done <<< "$initializers"
   compose run --rm --no-deps data-analysis-migrate || return
   # 角色配置哈希必须与实际运行的不可变镜像一致：从迁移镜像内嵌的 authz-catalog
   # 读取哈希并原子写回受管 runtime/data-analysis.env；否则新镜像启动会因
@@ -1328,13 +1932,13 @@ deploy_data_analysis() {
   update_runtime_value "$data_analysis_runtime_file" OIDC_ROLE_CONFIG_HASH "$embedded_data_analysis_hash" || return 1
   echo "已写入数据看板镜像内嵌授权目录哈希：$embedded_data_analysis_hash"
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
-    data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || {
+    "${runtime_services[@]}" || {
     # 服务器编排中 data-analysis-api 的健康窗口较窄；新版本启动超过该窗口时
     # compose 依赖等待会先行失败，但容器仍在运行且 Docker healthcheck 持续执行。
     # 先兜底等待 API 转 healthy 再补拉依赖它的 Worker，不立即回滚。
     wait_container_healthy data-analysis-api || return
     compose up -d --no-deps --wait --wait-timeout 120 \
-      data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase || return
+      "${remaining_services[@]}" || return
   }
   if ! wait_for_health "http://127.0.0.1:$(port_value DATA_ANALYSIS_API_PORT 18086)/data_analysis/readyz"; then
     echo "---- data-analysis-api 最近日志 ----" >&2

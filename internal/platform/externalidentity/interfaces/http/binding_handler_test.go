@@ -70,7 +70,7 @@ func newBindingHTTPRequest(method, path, body string) *http.Request {
 	request = request.WithContext(appctx.WithPrincipal(request.Context(), appctx.Principal{
 		OAuthClientID: "oauth-1", ClientID: "crm-external", TenantID: "tenant-a",
 		ApplicationID: "crm-app", ApplicationCode: "crm", EnvironmentID: "env-1", EnvironmentCode: "prod",
-		Scopes: map[string]struct{}{"portal_mapping_provision": {}},
+		Scopes: map[string]struct{}{"portal.identity_mapping.provision": {}},
 	}))
 	return request
 }
@@ -155,7 +155,7 @@ func TestBindingHandlerRejectsInvalidProof(t *testing.T) {
 	request = request.WithContext(appctx.WithPrincipal(request.Context(), appctx.Principal{
 		OAuthClientID: "oauth-1", ClientID: "crm-external", TenantID: "tenant-a",
 		ApplicationID: "crm-app", ApplicationCode: "crm", EnvironmentID: "env-1", EnvironmentCode: "prod",
-		Scopes: map[string]struct{}{"portal_mapping_provision": {}},
+		Scopes: map[string]struct{}{"portal.identity_mapping.provision": {}},
 	}))
 	// 缺少防重放请求头。
 	response := httptest.NewRecorder()

@@ -40,6 +40,7 @@ PROJECT_MANIFEST = PRODUCTION / "subsystems.d" / "project_management-prod.yaml"
 SETTLEMENT_TEMPLATE = PRODUCTION / "subsystem-templates" / "settlement.env.example"
 SETTLEMENT_MANIFEST = PRODUCTION / "subsystems.d" / "settlement-prod.yaml"
 PORTAL_MANIFEST = PRODUCTION / "subsystems.d" / "customer_portal-prod.yaml"
+PORTAL_TEMPLATE = PRODUCTION / "subsystem-templates" / "portal.env.example"
 DATA_ANALYSIS_MANIFEST = PRODUCTION / "subsystems.d" / "data-analysis-prod.yaml"
 DATA_ANALYSIS_TEMPLATE = PRODUCTION / "subsystem-templates" / "data-analysis.env.example"
 SUBSYSTEMS_DIR = PRODUCTION / "subsystems.d"
@@ -60,6 +61,8 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "owner-directory",
         "crm-contract-reference",
         "crm-contract-link",
+        "crm-customer-import-provision",
+        "crm-opportunity-import-provision",
         "project-integration",
         "settlement-integration",
         FILE_GATEWAY_SUFFIX,
@@ -176,6 +179,21 @@ TEMPLATE_MANIFEST_EXPECTATIONS = (
         DATA_ANALYSIS_MANIFEST,
     ),
 )
+
+# 审计必开门禁（BIZ-XAPI-10）：生产清单的 API 运行配置必须显式声明
+# PLATFORM_AUDIT_REQUIRED=true。显式键为空时各子系统按 PLATFORM_ENVIRONMENT_CODE=prod
+# 兜底，语义上仍是必开，但“显式声明”能防止模板/清单被改成非生产口径后审计静默降级。
+# customer_portal 只约束承载 portal-api 的 portal.env；portal-report-worker.env 是后台
+# worker 配置，不承载 API 进程。
+AUDIT_REQUIRED_PAIRS = (
+    ("contract_management", MANIFEST, TEMPLATE),
+    ("customer_and_opportunity", CRM_MANIFEST, CUSTOMER_TEMPLATE),
+    ("project_management", PROJECT_MANIFEST, PROJECT_TEMPLATE),
+    ("settlement", SETTLEMENT_MANIFEST, SETTLEMENT_TEMPLATE),
+    ("customer_portal", PORTAL_MANIFEST, PORTAL_TEMPLATE),
+    ("data_analysis", DATA_ANALYSIS_MANIFEST, DATA_ANALYSIS_TEMPLATE),
+)
+AUDIT_REQUIRED_KEY = "PLATFORM_AUDIT_REQUIRED"
 
 MACHINE_KEY_SUFFIXES = (
     "ENABLED",
@@ -537,6 +555,40 @@ class IntegrationWiringTest(unittest.TestCase):
                     f"{template_path.name} 与 {manifest.name} 的 {key} 不一致",
                 )
 
+    def test_production_templates_require_audit(self) -> None:
+        """六个生产子系统的审计必开必须是显式配置，而不是只靠环境编码兜底。
+
+        模板是重建入口、清单是生产权威取值来源：任一侧缺键都会让“审计必开”退回
+        PLATFORM_ENVIRONMENT_CODE=prod 兜底，一旦环境编码被改成非生产口径，审计就从
+        必开静默降级为可选，且没有任何启动期报错。缺失时失败信息打印具体文件名。
+        """
+        for label, manifest, template in AUDIT_REQUIRED_PAIRS:
+            with self.subTest(subsystem=label):
+                template_values = parse_env_template(template)
+                self.assertIn(
+                    AUDIT_REQUIRED_KEY,
+                    template_values,
+                    f"{template.name}（{label}）缺少 {AUDIT_REQUIRED_KEY}："
+                    "按模板重建会让生产审计退回环境编码兜底",
+                )
+                self.assertEqual(
+                    template_values[AUDIT_REQUIRED_KEY].strip().lower(),
+                    "true",
+                    f"{template.name} 的 {AUDIT_REQUIRED_KEY} 必须显式为 true",
+                )
+                declared = manifest_values_for(manifest, template)
+                self.assertIn(
+                    AUDIT_REQUIRED_KEY,
+                    declared,
+                    f"{manifest.name}（{label}）缺少 {AUDIT_REQUIRED_KEY}："
+                    "受控更新没有键可下发审计必开",
+                )
+                self.assertEqual(
+                    declared[AUDIT_REQUIRED_KEY].strip().lower(),
+                    "true",
+                    f"{manifest.name} 的 {AUDIT_REQUIRED_KEY} 必须显式为 true",
+                )
+
     def test_data_analysis_oidc_values_match_manifest(self) -> None:
         """数析运行配置的 OIDC 组必须与清单同值。
 
@@ -617,6 +669,83 @@ class IntegrationWiringTest(unittest.TestCase):
         key = "CONTRACT_FINANCIAL_CHANGE_ENABLED"
         template = parse_env_template(TEMPLATE)
         values = parse_manifest_block(MANIFEST, "values")
+        self.assertIn(key, template, f"{TEMPLATE.name} 缺少 {key}（按模板重建会静默丢键）")
+        self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}（受控更新无键可下发）")
+        self.assertEqual(
+            template[key].strip().lower(),
+            "false",
+            f"{TEMPLATE.name} 的 {key} 默认必须关闭（fail-closed）",
+        )
+        self.assertEqual(
+            template[key].strip().lower(),
+            values[key].strip().lower(),
+            f"{TEMPLATE.name} 与 {MANIFEST.name} 的 {key} 不一致",
+        )
+
+    def test_contract_import_crm_provision_scope_is_registered_and_bound(self) -> None:
+        """历史导入开立 CRM 客户/商机的机器 scope 必须登记并绑定成专用凭据。
+
+        平台按“一用途一 client 一 scope”授予：客户 scope 由
+        crm_customer_import_provision 承载，商机 scope 由
+        crm_opportunity_import_provision 承载。清单只补一对 client 却让合同侧
+        同时请求两个 scope 时，平台 token 端点会以 invalid_scope 拒绝，故障点
+        被推迟到导入联调阶段；因此这里把“用途后缀已登记 + 两个 scope 各自绑定
+        到自己的用途 + 开关默认关闭且模板/清单同值”绑成同一门禁。
+        """
+        pairs = (
+            ("crm-customer-import-provision", "crm_customer_import_provision"),
+            ("crm-opportunity-import-provision", "crm_opportunity_import_provision"),
+        )
+        allowed_bindings = next(
+            (
+                line.strip()
+                for line in MANIFEST.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("allowed_service_bindings:")
+            ),
+            "",
+        )
+        self.assertTrue(allowed_bindings, f"{MANIFEST.name} 缺少 allowed_service_bindings")
+        for suffix, purpose in pairs:
+            with self.subTest(purpose=purpose):
+                self.assertIn(
+                    suffix,
+                    UPDATE_CREDENTIAL_SUFFIXES["contract_management"],
+                    f"用途后缀 {suffix} 未登记：清单引用的 client_id 无法由受控接入推导",
+                )
+                self.assertIn(
+                    purpose,
+                    allowed_bindings,
+                    f"{MANIFEST.name} 的 allowed_service_bindings 缺少 {purpose}："
+                    "受控接入不会创建对应凭据客户端",
+                )
+        bindings = parse_manifest_block(MANIFEST, "bindings")
+        values = parse_manifest_block(MANIFEST, "values")
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_CLIENT_ID"),
+            "service.crm_customer_import_provision.client_id",
+            "清单缺少客户导入开立 client_id 受控绑定",
+        )
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_CLIENT_SECRET"),
+            "service.crm_customer_import_provision.client_secret",
+            "清单缺少客户导入开立 client_secret 受控绑定",
+        )
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_OPPORTUNITY_CLIENT_ID"),
+            "service.crm_opportunity_import_provision.client_id",
+            "清单缺少商机导入开立 client_id 受控绑定",
+        )
+        self.assertEqual(
+            bindings.get("CRM_PROVISION_OPPORTUNITY_CLIENT_SECRET"),
+            "service.crm_opportunity_import_provision.client_secret",
+            "清单缺少商机导入开立 client_secret 受控绑定",
+        )
+        self.assertEqual(values.get("CRM_PROVISION_SCOPE"), "customer.import_provision")
+        self.assertEqual(values.get("CRM_PROVISION_OPPORTUNITY_SCOPE"), "opportunity.import_provision")
+        for key in ("CRM_PROVISION_BASE_URL", "CRM_PROVISION_TOKEN_URL"):
+            self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}")
+        key = "CONTRACT_IMPORT_CRM_PROVISION_ENABLED"
+        template = parse_env_template(TEMPLATE)
         self.assertIn(key, template, f"{TEMPLATE.name} 缺少 {key}（按模板重建会静默丢键）")
         self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}（受控更新无键可下发）")
         self.assertEqual(

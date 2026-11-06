@@ -75,7 +75,7 @@ func (r *localBackgroundOutputRunner) RunOutput(_ context.Context, _ string, env
 	return []byte("owned-background-container"), nil
 }
 func TestLocalProjectBackgroundInspectionUsesIntegratedPinnedCompose(t *testing.T) {
-	p, _, _, _ := localLicenseFixture(t)
+	p, _, _ := localLicenseFixture(t)
 	runner := &localBackgroundOutputRunner{}
 	p.runner = runner
 	path := filepath.Join(p.localPlatformRoot(), "runtime", "local-license.compose.json")
@@ -152,7 +152,7 @@ func (r *localBackgroundLifecycleRunner) RunOutput(ctx context.Context, dir stri
 	return r.localLicenseRunner.RunOutput(ctx, dir, env, command, args...)
 }
 func TestLocalProjectDeploymentCannotMigrateWhenBackgroundDrainFails(t *testing.T) {
-	p, _, input, _ := localLicenseFixture(t)
+	p, input, _ := localLicenseFixture(t)
 	input.ApplicationCode = "project_management"
 	input.TenantID = "tenant-a"
 	input.Environment = "dev"

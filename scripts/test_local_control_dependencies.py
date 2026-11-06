@@ -6,6 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "scripts/docker-local.sh").read_text()
+RUNTIME_LIB = (ROOT / "scripts/lib/runtime-validation.sh").read_text()
 
 
 def function(name):
@@ -65,6 +66,14 @@ env_value() {
 
     def test_stale_metadata_still_skips_validation(self):
         self.validate("customer_portal", "dev", "", application_code="", environment_code="")
+
+    def test_keycloak_runtime_accepts_portal_broker_client(self):
+        # 中央 Broker 登录模式下 Portal 的浏览器 Client 是平台托管的中转 Client；
+        # validate_keycloak_runtime 必须与 validate_local_runtime_target 同一豁免口径。
+        block = RUNTIME_LIB.split("validate_keycloak_runtime()", 1)[1].split("\n}", 1)[0]
+        self.assertIn('"$application_code" == customer_portal', block)
+        self.assertIn("keycloak-customer-portal-broker", block)
+
 
 
 class CrmWorkerInventoryTest(unittest.TestCase):
@@ -147,11 +156,12 @@ docker() {
 
 
 class LocalControlDependenciesTest(unittest.TestCase):
-    def run_refresh(self, target, fail_service=""):
+    def run_refresh(self, target, fail_service="", contract_ready=True):
         harness = """
 set -Eeuo pipefail
 exec 3>&1
 """ + source_lib("compose") + """
+fail() { printf 'FAIL: %s\\n' "$*" >&2; exit 1; }
 force_build=false
 log() { :; }
 sleep() { :; }
@@ -172,6 +182,12 @@ runtime_target_environment() { printf dev; }
 disable_contract_startup_catalog_sync() { :; }
 sync_contract_authorization_catalog() { :; }
 verify_gateway_routes() { :; }
+# 合同改为 discovery 接入后，refresh-contract-api 必须先判定接入状态；
+# 用环境变量驱动替身，保持与真实 runtime-validation.sh 的返回语义一致。
+contract_configured() { [[ "$CONTRACT_READY" == "1" ]]; }
+contract_onboarding_remediation() {
+    printf 'REMEDIATION: bash scripts/subsystem.sh onboard --application-code contract_management\\n' >&2
+}
 contract_env_file=fixture
 compose() { printf 'build %s\\n' "$*"; }
 compose_run() {
@@ -188,7 +204,8 @@ compose_run() {
             harness += function(name)
         harness += target + "\n"
         return subprocess.run(["bash", "-c", harness], text=True, capture_output=True,
-                              env={"PATH": "/usr/bin:/bin", "FAIL_SERVICE": fail_service})
+                              env={"PATH": "/usr/bin:/bin", "FAIL_SERVICE": fail_service,
+                                   "CONTRACT_READY": "1" if contract_ready else "0"})
 
     def test_both_refresh_paths_restore_dependencies_before_agent(self):
         for target in ("refresh_platform_api", "refresh_contract_backend"):
@@ -226,6 +243,26 @@ compose_run() {
         self.assertIn("DOCKER_HOST: tcp://docker-socket-proxy:2375", helper)
         self.assertNotIn("/var/run/docker.sock:", helper)
         self.assertIn("timeout: 3s", helper)
+
+
+class ContractRefreshGuardTest(unittest.TestCase):
+    def test_unconfigured_contract_refresh_fails_before_building_images(self):
+        # 合同改为 discovery 接入后，未接入时必须直接给出 onboard 指引，
+        # 不能先构建镜像再让使用者误以为是镜像/凭据问题。
+        result = LocalControlDependenciesTest().run_refresh(
+            "refresh_contract_backend", contract_ready=False)
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, combined)
+        self.assertIn("合同管理尚未接入平台；先完成接入再执行 refresh-contract-api", result.stderr)
+        self.assertIn("subsystem.sh onboard", combined)
+        self.assertNotIn("build", result.stdout)
+        self.assertNotIn("up -d", result.stdout)
+
+    def test_configured_contract_refresh_keeps_building_and_publishing(self):
+        result = LocalControlDependenciesTest().run_refresh("refresh_contract_backend")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("build contract-api contract-worker", result.stdout)
+        self.assertIn("up -d --wait --no-deps contract-api contract-worker", result.stdout)
 
 
 if __name__ == "__main__":

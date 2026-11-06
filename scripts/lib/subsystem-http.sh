@@ -65,6 +65,62 @@ http_delete_json() {
   http_request DELETE "$1" "$2" "$3" "${4:-120}"
 }
 
+# normalize_platform_origin：确定 Cookie 写请求的可信 Origin 并回写 PLATFORM_ORIGIN。
+# 与 update/offboard 的归一化规则一致：未显式提供时按 api-base-url 推导；显式值必须是纯
+# origin（无路径、query、fragment、用户信息）。平台同源防线对缺失或不匹配的 Origin 一律
+# 403，因此不合法来源必须在发请求前拦下，而不是让它在挑战端点上伪装成权限不足。
+normalize_platform_origin() {
+  local normalized=""
+  if ! normalized="$(python3 - "$API_BASE_URL" "$PLATFORM_ORIGIN" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+api_base, platform_origin = (value.strip() for value in sys.argv[1:3])
+
+
+def origin_of(raw, allow_path):
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    if not allow_path and parsed.path not in {"", "/"}:
+        return None
+    if port is not None and not 1 <= port <= 65535:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+if platform_origin:
+    origin = origin_of(platform_origin, allow_path=False)
+    if origin is None:
+        print(
+            "--platform-origin 必须是纯 origin（如 http://localhost:8081），不能带路径、query、fragment 或用户信息。",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+else:
+    origin = origin_of(api_base, allow_path=True)
+    if origin is None:
+        print("无法从 --api-base-url 推导 platform-origin，请显式传入 --platform-origin。", file=sys.stderr)
+        raise SystemExit(2)
+    print(f"未提供 --platform-origin，按 --api-base-url 推导为 {origin}", file=sys.stderr)
+
+print(origin)
+PY
+)"; then
+    return 2
+  fi
+  PLATFORM_ORIGIN="$(printf '%s\n' "$normalized" | tail -n 1)"
+  log "INFO" "平台请求 Origin：${PLATFORM_ORIGIN}"
+}
+
 diagnose_connection_failure() {
   local endpoint="$1"
   log "ERROR" "无法连接平台接口：${API_BASE_URL}${endpoint}"
@@ -117,10 +173,10 @@ elif code in {"PLATFORM_DEPENDENCY_UNAVAILABLE", "PLATFORM_INTERNAL_ERROR"} or s
     print("处理建议：基础平台 API 或受控 provisioner 当前不可用。执行 `bash scripts/docker-local.sh ps`，再执行 `bash scripts/docker-local.sh logs api subsystem-provisioner`；如刚更新后端，执行 `bash scripts/docker-local.sh refresh-api` 后重试。", file=sys.stderr)
 elif code in {"AUTH_UNAUTHENTICATED", "AUTH_SESSION_EXPIRED"} or status == "401":
     print("处理建议：登录状态无效或 Cookie 已过期。不要复用旧 Cookie，改用 --account 重新登录；使用 --cookie-file 时请确认文件来自同一基础平台地址。", file=sys.stderr)
-elif status == "403" and endpoint == "/auth/login":
-    print(f"处理建议：登录请求被同源保护拒绝。当前请求 Origin 为 {platform_origin}；请确认它已配置在平台 APP_CORS_ALLOWED_ORIGINS 中，并与 OIDC_ISSUER 的 origin 一致。可使用 --platform-origin 或 BASIC_PLATFORM_ORIGIN 修正。", file=sys.stderr)
+elif status == "403" and endpoint in {"/auth/login", "/auth/credential-challenges"}:
+    print(f"处理建议：登录请求被同源保护拒绝（{endpoint} 缺失或不匹配可信 Origin 时一律返回 403）。当前请求 Origin 为 {platform_origin or '（空）'}；请确认它已配置在平台 APP_CORS_ALLOWED_ORIGINS 中，并与 OIDC_ISSUER 的 origin 一致。可使用 --platform-origin 或 BASIC_PLATFORM_ORIGIN 修正。", file=sys.stderr)
 elif status == "403":
-    print("处理建议：当前账号没有子系统接入所需的基础平台管理权限。请由超级管理员核对应用、环境、登录目标和 OAuth 客户端的创建/更新/删除权限。", file=sys.stderr)
+    print("处理建议：当前账号没有子系统接入所需的基础平台管理权限。请由超级管理员核对应用、环境、登录目标和 OAuth 客户端的创建/更新/删除权限；若使用 Cookie 会话，也请确认请求 Origin 已列入平台 APP_CORS_ALLOWED_ORIGINS。", file=sys.stderr)
 elif status == "422":
     print("处理建议：检查参数：BaseURL 只能是对外 origin；UpstreamURL 必须为网关可达的内网 http/https 地址；PathPrefix 必须是非根绝对路径。", file=sys.stderr)
 elif code == "PLATFORM_METHOD_NOT_ALLOWED" or status == "405":

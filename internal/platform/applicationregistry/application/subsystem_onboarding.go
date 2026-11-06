@@ -351,18 +351,47 @@ type SubsystemOnboardingService struct {
 	ids                         ManagementIdentifierGenerator
 	clock                       Clock
 	redirectURIValidationPolicy RedirectURIValidationPolicy
+	// postLoginRedirectPolicy 判定接入时登记的公开基址与登录目标是否落在批准来源内；
+	// 未注入时只做结构校验（装配层始终注入真实集合）。
+	postLoginRedirectPolicy PostLoginRedirectPolicy
 	// backchannelAudit 在模块组装后注入；显式 opt-out 没有它即失败关闭。
 	backchannelAudit BackchannelLogoutAuditSink
 }
 
+// SubsystemOnboardingServiceOption 调整接入服务的可选行为，不改变既有构造调用。
+type SubsystemOnboardingServiceOption func(*SubsystemOnboardingService)
+
+// WithSubsystemOnboardingRedirectPolicy 注入登录后跳转的绝对地址来源集合，使接入
+// 路径对环境公开基址与登录目标执行与解析路径相同的来源判定。
+func WithSubsystemOnboardingRedirectPolicy(policy PostLoginRedirectPolicy) SubsystemOnboardingServiceOption {
+	return func(service *SubsystemOnboardingService) { service.postLoginRedirectPolicy = policy }
+}
+
 // 构造时要求 ID、时钟和仓储齐备；回调 URI 策略允许由环境控制是否接受受限 HTTP。
-func NewSubsystemOnboardingService(repository SubsystemOnboardingRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy) (*SubsystemOnboardingService, error) {
+func NewSubsystemOnboardingService(repository SubsystemOnboardingRepository, ids ManagementIdentifierGenerator, clock Clock, redirectURIValidationPolicy RedirectURIValidationPolicy, options ...SubsystemOnboardingServiceOption) (*SubsystemOnboardingService, error) {
 	if repository == nil || ids == nil || clock == nil {
 		return nil, errors.New("subsystem onboarding dependencies must not be nil")
 	}
-	return &SubsystemOnboardingService{
+	service := &SubsystemOnboardingService{
 		repository: repository, ids: ids, clock: clock, redirectURIValidationPolicy: redirectURIValidationPolicy,
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service, nil
+}
+
+// acceptsEnvironmentRegistration 在结构化环境校验之上追加公开基址来源判定：
+// 公开基址与相对登录目标拼接后即浏览器最终跳转地址。
+func (service *SubsystemOnboardingService) acceptsEnvironmentRegistration(input EnvironmentCreateInput) bool {
+	return validEnvironmentCreate(input) && service.postLoginRedirectPolicy.ValidOptionalBaseURL(input.BaseURL)
+}
+
+// acceptsLoginTargetRegistration 拒绝接入时登记的未批准绝对目标。
+func (service *SubsystemOnboardingService) acceptsLoginTargetRegistration(input LoginTargetCreateInput) bool {
+	return validLoginTargetCreate(input) && service.postLoginRedirectPolicy.ValidTargetURI(input.TargetURI)
 }
 
 // SetBackchannelLogoutAuditSink 在模块组装完成后注入 Back-Channel Logout 决定的
@@ -481,7 +510,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		Environment: input.Environment, BaseURL: stringPointer(input.PublicBaseURL),
 		UpstreamURL: stringPointer(input.UpstreamURL), PathPrefix: stringPointer(input.PathPrefix), IssuerAlias: input.IssuerAlias, Status: "ACTIVE",
 	})
-	if !validEnvironmentCreate(environmentInput) {
+	if !service.acceptsEnvironmentRegistration(environmentInput) {
 		return SubsystemOnboardingResult{}, ErrValidation
 	}
 	loginTargetInput := normalizeLoginTargetCreate(LoginTargetCreateInput{
@@ -489,7 +518,7 @@ func (service *SubsystemOnboardingService) OnboardSubsystem(ctx context.Context,
 		EnvironmentID: environmentID, TargetCode: "home", Name: input.ApplicationName + "首页",
 		TargetURI: input.PathPrefix + "/", Status: "ACTIVE",
 	})
-	if !validLoginTargetCreate(loginTargetInput) {
+	if !service.acceptsLoginTargetRegistration(loginTargetInput) {
 		return SubsystemOnboardingResult{}, ErrValidation
 	}
 	oauthClientInput, err := normalizeOAuthClientCreate(OAuthClientCreateInput{
@@ -648,7 +677,7 @@ func (service *SubsystemOnboardingService) RegisterSubsystemDirectory(ctx contex
 		EnvironmentID: environmentID, TargetCode: "home", Name: input.ApplicationName + "首页",
 		TargetURI: input.PathPrefix + "/", Status: "ACTIVE",
 	})
-	if !validApplicationCreate(applicationInput) || !validEnvironmentCreate(environmentInput) || !validLoginTargetCreate(loginTargetInput) {
+	if !validApplicationCreate(applicationInput) || !service.acceptsEnvironmentRegistration(environmentInput) || !service.acceptsLoginTargetRegistration(loginTargetInput) {
 		return SubsystemDirectoryRegistrationResult{}, ErrValidation
 	}
 

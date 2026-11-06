@@ -8,7 +8,23 @@ import subprocess
 import json
 import shutil
 import os
+import sys
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def interpreter_directory():
+    """子进程 PATH 必须能找到当前解释器：CI 在 /usr/bin，容器常在 /usr/local/bin。"""
+    directory = Path(sys.executable).resolve().parent
+    if not (directory / 'python3').exists():
+        found = shutil.which('python3')
+        if found:
+            directory = Path(found).resolve().parent
+    return str(directory)
+
+
+def base_path():
+    return os.pathsep.join([interpreter_directory(), '/usr/bin', '/bin', '/usr/sbin', '/sbin'])
+
 
 class LocalProjectBackgroundTests(unittest.TestCase):
     def test_local_compose_runs_separate_background_with_bootstrap_probe(self):
@@ -70,7 +86,7 @@ class ComposeRuntimeEnvironmentTests(unittest.TestCase):
                                '\nPROJECT_BACKGROUND_HEALTH_ADDRESS=' + address + '\n')
             empty = root / 'empty.env'
             empty.write_text('')
-            env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
+            env = {'PATH': os.environ.get('PATH') or base_path()}
             # Only synthetic mandatory host inputs; Build/address deliberately absent.
             for name in re.findall(r'\$\{([A-Z_]+):\?', text):
                 env[name] = 'qa-synthetic'
@@ -153,7 +169,7 @@ docker() {
 local_project_background prepare
 local_project_background activate
 '''
-            result=subprocess.run(['/bin/bash','-c',script],env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','ADAPTER':str(ROOT/'scripts/local-project-background.sh'),'TASK_ROOT':str(root),'FAIL_ACTION':fail},text=True,capture_output=True,timeout=20)
+            result=subprocess.run(['/bin/bash','-c',script],env={'PATH':base_path(),'ADAPTER':str(ROOT/'scripts/local-project-background.sh'),'TASK_ROOT':str(root),'FAIL_ACTION':fail},text=True,capture_output=True,timeout=20)
             state=root/'runtime/project-background/operation.json'
             return result,(root/'calls').read_text(),json.loads(state.read_text()) if state.exists() else None
 

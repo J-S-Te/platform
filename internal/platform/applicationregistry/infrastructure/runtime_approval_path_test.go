@@ -1,74 +1,10 @@
 package infrastructure
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-func TestRuntimeApprovalDirectoryIsAuthoritative(t *testing.T) {
-	target, input := runtimeLicenseFixture(t)
-	root := target.config.DeployRoot
-	name := "runtime-license-contract_management-prod.json"
-	legacy := filepath.Join(root, name)
-	path, err := productionRuntimeApprovalPath(root, name)
-	if err != nil || path != legacy {
-		t.Fatal("legacy compatibility unavailable", path, err)
-	}
-	raw, err := os.ReadFile(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(root, "runtime-approvals")
-	if err := os.Mkdir(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	path, err = productionRuntimeApprovalPath(root, name)
-	if err != nil || path != filepath.Join(dir, name) {
-		t.Fatal("new directory not authoritative", path, err)
-	}
-	for _, content := range []string{"", "not-json"} {
-		if content != "" {
-			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := target.writeRuntimeLicenseCredentials(input); err == nil {
-			t.Fatal("delivery fell back to legacy approval")
-		}
-		if err := target.retireRuntimeLicenseContainers(context.Background(), input); err == nil {
-			t.Fatal("retirement fell back to legacy approval")
-		}
-	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacy, []byte("obsolete-invalid"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := target.writeRuntimeLicenseCredentials(input); err != nil {
-		t.Fatal("new delivery approval rejected", err)
-	}
-	if err := target.retireRuntimeLicenseContainers(context.Background(), input); err != nil {
-		t.Fatal("new retirement approval rejected", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacy, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(legacy, path); err != nil {
-		t.Fatal(err)
-	}
-	if err := target.writeRuntimeLicenseCredentials(input); err == nil {
-		t.Fatal("symlink release accepted by delivery")
-	}
-	if err := target.retireRuntimeLicenseContainers(context.Background(), input); err == nil {
-		t.Fatal("symlink release accepted by retirement")
-	}
-}
 
 func TestRuntimeApprovalPathRejectsUnsafeDirectoryAndNames(t *testing.T) {
 	for _, kind := range []string{"symlink", "file", "writable"} {

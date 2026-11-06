@@ -25,29 +25,16 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
-	mysqlconfig "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// 使用本测试独占的临时 schema 和实际 file-gateway 进程。
-// 测试不伪造认证主体，也不替换生产令牌中间件、
-// FileService、SQL 仓储、本地内容存储或 HTTP 处理器。
+// TestPortalReportSourceProductionProcessOnMySQL 使用独占schema及真实网关验证来源读取。
+// 参数：t为测试上下文，显式使用独占DSN文件或本轮随机空库，不替换认证和存储。
+// 返回值：无；上传、真实绑定、内容或授权证据不一致时失败。
 func TestPortalReportSourceProductionProcessOnMySQL(t *testing.T) {
-	path := os.Getenv("UIP_P1_FILE_GATEWAY_TEST_DSN_FILE")
-	if path == "" {
-		t.Fatal("owned MySQL DSN file is required")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal("read owned MySQL DSN file failed")
-	}
-	dsn := strings.TrimSpace(string(raw))
-	parsed, err := mysqlconfig.ParseDSN(dsn)
-	if err != nil || parsed.DBName != "file_gateway_p1_test_20261013" {
-		t.Fatal("refuse non-owned MySQL schema")
-	}
+	dsn, disposable := portalGatewayOwnedDSN(t)
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal("connect owned MySQL schema failed")
@@ -57,6 +44,12 @@ func TestPortalReportSourceProductionProcessOnMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sqlDB.Close()
+	if disposable {
+		var tables int64
+		if err := sqlDB.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()").Scan(&tables); err != nil || tables != 0 {
+			t.Fatal("disposable gateway test requires a new empty schema")
+		}
+	}
 	module, err := filepath.Abs("../../../../..")
 	if err != nil {
 		t.Fatal(err)
@@ -347,6 +340,10 @@ func TestPortalReportSourceProductionProcessOnMySQL(t *testing.T) {
 	if err := db.Model(&accessAudit{}).Where("file_id=? AND action='PORTAL_REPORT_SOURCE_AUTHORIZED'", fileID).Count(&authorized).Error; err != nil || authorized != 1 {
 		t.Fatal("denied requests created successful authorization audit")
 	}
+	t.Run("portal_local", func(t *testing.T) {
+		portalLocalMySQLCase(t, portalLocalMySQLFixture{db: db, request: request, token: token,
+			tenant: tenant, application: portalApp, newID: newID, content: content})
+	})
 }
 
 func cleanPortalGatewayTestEnv() []string {

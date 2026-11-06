@@ -17,6 +17,12 @@ import (
 
 const activeStatus = "ACTIVE"
 
+// defaultSessionIdleTimeoutSeconds 是租户尚未持久化登录策略时的会话空闲窗口默认值。
+// 与 security 模块 application.defaultIdleTimeoutSeconds（30*60）一致，也与迁移 000039
+// 给 sec_login_policy.idle_timeout_seconds 定义的 DEFAULT 1800 一致；三处必须同步，
+// 不得在本包另造魔数。
+const defaultSessionIdleTimeoutSeconds = 1800
+
 // Repository 是 OIDC/OAuth 运行时协议状态的 MySQL 持久化实现。
 type Repository struct{ database *gorm.DB }
 
@@ -225,6 +231,21 @@ func (r *Repository) ResolveSessionSubject(ctx context.Context, sessionID string
 	return r.resolveSessionSubject(ctx, r.database, sessionID, now, false)
 }
 
+// resolveSessionSubject 是授权、换码、刷新令牌、userinfo 与授权码消费共同复用的会话
+// 门禁，因此空闲超时必须落在这一条 SQL 上：否则浏览器会话已经因空闲被身份侧判定为
+// 未认证，OIDC 仍能用同一个会话无感续期（安全审计 M-1）。
+//
+// 语义逐字对齐 identity/infrastructure.FindPrincipalBySession：
+//   - sec_login_policy 无该租户行（LEFT JOIN 为 NULL）→ 使用默认 1800 秒，等同
+//     security 模块 GetLoginPolicy 对 ErrNotFound 合成 defaultLoginPolicy 的行为；
+//   - 策略值为 0 → 失败关闭，全部拒绝（身份侧 idleTimeout <= 0 直接返回
+//     ErrUnauthenticated），绝不被当作“禁用空闲检查”而放行；
+//   - 其余正值 → 生效，谓词为 last_interactive_at > now - idle（严格大于，与身份侧
+//     LastInteractiveAt.After(idleCutoff) 一致，恰好等于截止时刻视为超窗）。
+//
+// 精度：iam_session.last_interactive_at 是 DATETIME(3)，比较前把 now 截断到毫秒，
+// 避免亚毫秒差让边界值被误判为仍在窗口内；截断只影响毫秒以下，不改变上述边界。
+// 时区：now 由调用方按 UTC 传入，SQL 内只做 SECONDS 减法，不引入会话时区换算。
 func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.DB, sessionID string, now time.Time, lock bool) (domain.SessionSubject, error) {
 	var row struct {
 		TenantID, SessionID, AccountID, UserID string
@@ -232,13 +253,16 @@ func (r *Repository) resolveSessionSubject(ctx context.Context, database *gorm.D
 		ExpiresAt                              time.Time
 		MustChangePassword                     bool
 	}
+	idleCutoffBase := now.UTC().Truncate(time.Millisecond)
 	query := database.WithContext(ctx).Table("iam_session").
 		Select("iam_session.tenant_id, iam_session.id AS session_id, iam_session.account_id, iam_account.user_id, iam_session.ip_address AS login_ip, iam_session.expires_at, COALESCE(iam_password_credential.must_change, FALSE) AS must_change_password").
 		Joins("JOIN iam_tenant ON iam_tenant.id = iam_session.tenant_id AND iam_tenant.status = ?", activeStatus).
 		Joins("JOIN iam_account ON iam_account.id = iam_session.account_id AND iam_account.tenant_id = iam_session.tenant_id AND iam_account.status = ? AND (iam_account.valid_until IS NULL OR iam_account.valid_until > ?)", activeStatus, now).
 		Joins("JOIN iam_user ON iam_user.id = iam_account.user_id AND iam_user.tenant_id = iam_session.tenant_id AND iam_user.status = ?", activeStatus).
 		Joins("LEFT JOIN iam_password_credential ON iam_password_credential.account_id = iam_account.id AND iam_password_credential.status = ?", activeStatus).
-		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now)
+		Joins("LEFT JOIN sec_login_policy ON sec_login_policy.tenant_id = iam_session.tenant_id").
+		Where("iam_session.id = ? AND iam_session.status = ? AND iam_session.revoked_at IS NULL AND iam_session.expires_at > ?", sessionID, activeStatus, now).
+		Where("COALESCE(sec_login_policy.idle_timeout_seconds, ?) > 0 AND iam_session.last_interactive_at > DATE_SUB(?, INTERVAL COALESCE(sec_login_policy.idle_timeout_seconds, ?) SECOND)", defaultSessionIdleTimeoutSeconds, idleCutoffBase, defaultSessionIdleTimeoutSeconds)
 	if lock {
 		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 	}

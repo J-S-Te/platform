@@ -87,7 +87,6 @@ func (c *accessConfigurationSQLConn) QueryContext(_ context.Context, q string, a
 }
 func TestSubsystemAccessConfigurationSQLRecovery(t *testing.T) {
 	ctx := context.Background()
-	approvals := accessApprovalSourceStub{components: []application.RuntimeLicenseApproval{{ServiceID: "api", ImageDigest: "sha256:one"}}}
 	for _, scenario := range []string{"same", "changed", "missing", "database failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			store := &accessConfigurationSQLDriver{t: t, manifest: "manifest-aaa"}
@@ -102,10 +101,11 @@ func TestSubsystemAccessConfigurationSQLRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tracker, err := NewSubsystemAccessConfigurationTracker(db, accessCatalogWithTarget(), approvals)
+			tracker, err := NewSubsystemAccessConfigurationTracker(db, accessCatalogWithTarget())
 			if err != nil {
 				t.Fatal(err)
 			}
+			tracker.SetBuiltinRuntimeSource(BuiltinRuntimeComponentCatalog{}, accessConfigurationImagesStub{})
 			op := onboardingOperation()
 			store.digest, err = tracker.Snapshot(ctx, op)
 			if err != nil {
@@ -130,7 +130,8 @@ func TestSubsystemAccessConfigurationSQLRecovery(t *testing.T) {
 				t.Fatalf("drift=%v err=%v", drift, err)
 			}
 			// 新 tracker 没有任何内存部署产物，仍从既有阶段证据恢复 Verify。
-			recovered, _ := NewSubsystemAccessConfigurationTracker(db, accessCatalogWithTarget(), approvals)
+			recovered, _ := NewSubsystemAccessConfigurationTracker(db, accessCatalogWithTarget())
+			recovered.SetBuiltinRuntimeSource(BuiltinRuntimeComponentCatalog{}, accessConfigurationImagesStub{})
 			verified, err := recovered.Verify(ctx, op)
 			if err != nil || verified != (scenario == "same") {
 				t.Fatalf("verified=%v err=%v", verified, err)
@@ -140,4 +141,11 @@ func TestSubsystemAccessConfigurationSQLRecovery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// accessConfigurationImagesStub 提供 V2 配置指纹所需的已核验镜像快照。
+type accessConfigurationImagesStub struct{}
+
+func (accessConfigurationImagesStub) ReadSubsystemAccessImages(context.Context, string, string) ([]application.SubsystemImageReadiness, bool, error) {
+	return []application.SubsystemImageReadiness{{ServiceID: "settlement-api", ImageDigest: "registry.example.com/settlement-api@sha256:" + strings.Repeat("a", 64), Present: true}}, true, nil
 }

@@ -33,9 +33,13 @@ builtin_v2_no_approvals=false
 release_spec=''
 selected_optional_components=''
 selected_components_provided=false
+portal_directory_mode="${PORTAL_CUSTOMER_DIRECTORY_MODE:-crm}"
 # 选择项同时接受 CLI 名（contract/customer-opportunity/...）与应用编码
 # （contract_management/customer_and_opportunity/...）：发布流程会把应用编码原样传进来，
 # 若不归一化，所有可选块都会被当成"未选择"而整体注释掉，受控升级随后必失败。
+# normalize_selected_components 统一交付组件的 CLI 名与应用编码。
+# 参数：原始组件文本。
+# 返回值：去重后的 CLI 组件列表。
 normalize_selected_components() {
   local raw="${1-}" token out=""
   raw="${raw//,/ }"
@@ -52,6 +56,7 @@ normalize_selected_components() {
   done
   printf '%s\n' "$out"
 }
+source "$script_dir/offline-frontend-selection.sh"
 reuse_approved_crm_image=false
 runtime_approval_digest=''
 installation_scenario=''
@@ -76,12 +81,16 @@ build_npm_registry="${OFFLINE_NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}"
 pull_retries="${OFFLINE_PULL_RETRIES:-3}"
 pull_retry_delay="${OFFLINE_PULL_RETRY_DELAY_SECONDS:-5}"
 
+# usage 展示离线构建参数及安全交付约束。
+# 参数：无。
+# 返回值：标准输出帮助文本。
 usage() {
   cat <<'EOF'
 用法：build-offline-packages.sh [--component 组件名|all] [--version 版本] [--output 输出目录]
   [--license-file 客户许可证.jws --runtime-approval-dir 批准目录 --runtime-approval-approved]
   [--reuse-approved-crm-image] 复用批准目录绑定的本机CRM镜像，避免重建改变ID
-  [--selected-components <可选项列表>] 生成 deployment-assets 时按实际交付范围投影 Compose/模板
+  [--selected-components <可选项列表>] 按交付范围构建前端并投影部署 Compose/模板
+  [--portal-customer-directory-mode crm|local] 发行依赖选择；缺省crm，CLI优先于PORTAL_CUSTOMER_DIRECTORY_MODE
   [--installation-scenario fresh|migrate|platform-only|expand --customer-id 客户标识]
 
 可用组件：
@@ -130,6 +139,7 @@ while (($#)); do
     --runtime-approval-approved) runtime_approval_approved=true; shift ;;
     --builtin-v2-no-runtime-approvals) builtin_v2_no_approvals=true; shift ;;
     --release-spec) release_spec="${2:?缺少 release spec}"; shift 2 ;;
+    --portal-customer-directory-mode) portal_directory_mode="${2:?缺少Portal发行来源}"; shift 2 ;;
     --selected-components) selected_optional_components="${2-}"; selected_components_provided=true; shift 2 ;;
     --reuse-approved-crm-image) reuse_approved_crm_image=true; shift ;;
     --installation-scenario) installation_scenario="${2:?缺少安装场景}"; shift 2 ;;
@@ -146,8 +156,13 @@ fi
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "版本号格式不正确" >&2; exit 2; }
 case "$installation_scenario" in ''|fresh|migrate|platform-only|expand) ;; *) echo '安装场景无效' >&2; exit 2 ;; esac
 [[ -n "$installation_scenario" || -z "$installation_customer" ]] || { echo '--customer-id 必须与安装场景同时提供' >&2; exit 2; }
+portal_directory_mode="$(offline_portal_directory_mode "$portal_directory_mode")" || exit 2
 if [[ "$selected_components_provided" == true ]]; then
   selected_optional_components="$(normalize_selected_components "$selected_optional_components")"
+fi
+frontend_enabled_modules="$(offline_frontend_enabled_modules "$selected_components_provided" "$selected_optional_components" "$portal_directory_mode")" || exit 2
+if [[ "$portal_directory_mode" == local && " $selected_optional_components " == *' customer-portal '* ]]; then
+  printf '%s\n' 'Portal本地发行不会自动配置运行来源；首次独立安装必须显式将 runtime/portal.env 的 PORTAL_CUSTOMER_DIRECTORY_MODE 选择为 local，并通过Portal authority及运行依赖门禁。' >&2
 fi
 [[ "$reuse_approved_crm_image" != true || ( -n "$runtime_approval_dir" && "$runtime_approval_approved" == true ) ]] || { echo '复用CRM镜像需要已审核运行批准' >&2; exit 2; }
 [[ -z "$installation_scenario" || -n "$runtime_approval_dir" ]] || { echo '四场景安装必须提供已批准目录' >&2; exit 2; }
@@ -405,10 +420,20 @@ mkdir -p "$output_root"
 output_root="$(cd -- "$output_root" && pwd)"
 
 source "$script_dir/offline-build-inputs.sh"
+# source_input_fingerprint 绑定实际源码及构建参数，阻断不同组合复用。
+# 参数：无。
+# 返回值：本次完整构建输入的 SHA256。
 source_input_fingerprint() {
-  offline_build_input_fingerprint "$workspace_root" full
+  local source_digest
+  source_digest="$(offline_build_input_fingerprint "$workspace_root" full)" || return 1
+  offline_bind_build_arguments "$source_digest" \
+    "VITE_ENABLED_MODULES=$frontend_enabled_modules" "PORTAL_CUSTOMER_DIRECTORY_MODE=$portal_directory_mode" "NPM_CONFIG_REGISTRY=$build_npm_registry" \
+    "GOPROXY=$build_goproxy" "GOSUMDB=$build_gosumdb" "APP_VERSION=$version"
 }
 
+# render_build_info 输出构建输入、选择与工具链的基线证据。
+# 参数：无。
+# 返回值：标准输出构建记录；采集失败时返回非零。
 render_build_info() {
   local source_fingerprint docker_client docker_server buildx_version
   source_fingerprint="$(source_input_fingerprint)"
@@ -418,6 +443,8 @@ render_build_info() {
   printf 'RELEASE_VERSION=%s\n' "$version"
   printf 'TARGET_PLATFORM=%s\n' "$platform"
   printf 'SOURCE_INPUT_SHA256=%s\n' "$source_fingerprint"
+  printf 'FRONTEND_ENABLED_MODULES=%s\n' "$frontend_enabled_modules"
+  printf 'PORTAL_CUSTOMER_DIRECTORY_MODE=%s\n' "$portal_directory_mode"
   [[ -z "$license_digest" ]] || printf 'LICENSE_SHA256=%s\n' "$license_digest"
   [[ -z "$runtime_approval_digest" ]] || printf 'RUNTIME_APPROVAL_SHA256=%s\n' "$runtime_approval_digest"
   [[ -z "$installation_digest" ]] || printf 'INSTALLATION_PLAN_SHA256=%s\n' "$installation_digest"
@@ -718,11 +745,15 @@ package_images() (
   printf '已生成镜像包：%s\n' "$archive"
 )
 
+# build_image 使用明确构建参数生成指定平台的组件镜像。
+# 参数：构建目录、Dockerfile、镜像标签及可选构建阶段。
+# 返回值：构建且架构核验成功返回零，失败时停止。
 build_image() {
   local context="$1" dockerfile="$2" tag="$3" target="${4:-}"
   local args=(docker buildx build --platform "$platform" --load --pull=false --file "$dockerfile" --tag "$tag")
   if [[ "$dockerfile" == "$workspace_root/frontend/Dockerfile" ]]; then
-    args+=(--build-arg "NPM_CONFIG_REGISTRY=$build_npm_registry")
+    args+=(--build-arg "NPM_CONFIG_REGISTRY=$build_npm_registry"
+      --build-arg "VITE_ENABLED_MODULES=$frontend_enabled_modules")
   else
     args+=(--build-arg "GOPROXY=$build_goproxy" --build-arg "GOSUMDB=$build_gosumdb" --build-arg "APP_VERSION=$version")
   fi
@@ -864,6 +895,7 @@ fi
 if want frontend; then
   tag="uip-package/frontend:$version"
   build_image "$workspace_root/frontend" "$workspace_root/frontend/Dockerfile" "$tag"
+  offline_copy_frontend_manifest "$tag" "$platform" "$frontend_enabled_modules" "$output_root"
   package_images frontend frontend "$tag"
 fi
 if want customer-opportunity; then
@@ -940,7 +972,7 @@ package_assets() (
     bin/install-host-dependencies.sh bin/initialize-audit-hash-key.py bin/platform-mysql-command.py
     bin/release-backup-policy.py
     bin/project-compose-assets.py bin/check-asset-bundle.py
-    bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-image-identities.py
+    bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-frontend-selection.sh bin/offline-image-identities.py
     bin/export-license-inventory.py bin/frontend-network.py bin/check-frontend-network.sh bin/subsystem-runtime.py
     bin/delivery-inspect.py bin/delivery-inspect-images.py bin/delivery-inspect-v2.py bin/delivery-runtime.py bin/delivery-runtime.sh
     bin/deployment-session.py bin/deployment-plan.py bin/build-deployment-compatibility.py bin/deployment-workflow.sh bin/delivery-files.py
@@ -952,6 +984,7 @@ package_assets() (
     bin/test-file-gateway-wiring.sh bin/test-lifecycle.sh bin/test-offline-configure.sh bin/test-offline-import.sh bin/test-offline-registry-network.sh
     bin/test-offline-package-metadata.sh bin/test-offline-transport.sh bin/test-public-transport.sh bin/test-start-enabled.sh
     bin/test-backup-recovery-safety.sh bin/test-control-plane-reload.sh bin/test-release-reliability.sh bin/test-deployment-plan.py bin/test-first-failure.sh bin/test-recovery-status.sh bin/test-subsystem-state-machine.sh bin/test-verify-readiness.sh
+    bin/test-database-dependent-refresh.sh bin/test-keycloak-probe.sh
     monitoring/prometheus/file-gateway-alerts.yml monitoring/prometheus/integration-alerts.yml monitoring/prometheus/keycloak-alerts.yml monitoring/prometheus/platform-alerts.yml monitoring/prometheus/prometheus.yml
     mysql-init/contract-databases.sql mysql-init/data-analysis-metabase.sql nginx/basic-platform.conf.example
     subsystem-templates/contract.env.example subsystem-templates/customer.env.example subsystem-templates/data-analysis.env.example
@@ -1095,6 +1128,7 @@ if compgen -G "$output_root/*.tar.gz" >/dev/null ||
     cd "$output_root"
     shopt -s nullglob
     checksum_files=(*.tar.gz BUILD_INFO.txt)
+    [[ ! -f frontend-modules.json ]] || checksum_files+=(frontend-modules.json)
     [[ ! -f build-evidence.json ]] || checksum_files+=(build-evidence.json)
     [[ ! -f source-input-index.tsv ]] || checksum_files+=(source-input-index.tsv)
     [[ ! -f base-image-evidence.tsv ]] || checksum_files+=(base-image-evidence.tsv)

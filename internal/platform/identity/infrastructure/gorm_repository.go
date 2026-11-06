@@ -19,6 +19,15 @@ import (
 
 const consoleApplicationCode = "platform"
 
+// sessionLastSeenWriteInterval 是普通已认证请求刷新 iam_session.last_seen_at 的最小间隔。
+//
+// last_seen_at 只承载观测数据：空闲判定使用 last_interactive_at（见
+// migrations/000042_add_session_last_interactive_at.sql 的注释以及 RecordSessionInteraction），
+// 所以节流不会改变空闲或绝对到期语义。60 秒与前端活动上报/控制台轮询的粒度一致：观测精度
+// 足够，同时把每个会话的写放大从“每个请求一次行锁”压到“每分钟一次”。边界取“达到即写”：
+// 距上次观测达到 60 秒就刷新，未达到则不写。
+const sessionLastSeenWriteInterval = 60 * time.Second
+
 // GORMRepository 在迁移所管的平台 schema 中持久化身份凭据、组织数据与浏览器会话状态；
 // 它不使用 GORM 的 schema 迁移 API。
 type GORMRepository struct {
@@ -224,6 +233,8 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 }
 
 // FindPrincipalBySession 校验当前会话及主体状态，加载实时授权与权威空闲期限。
+// last_seen_at 的观测写入按 sessionLastSeenWriteInterval 节流，空闲与绝对到期判定只读
+// last_interactive_at / expires_at，不受节流影响。
 // 参数：ctx 为请求上下文，sessionID 为 Cookie 会话，now 为校验时间，idleTimeout 为当前租户策略。
 // 返回值：有效主体；过期或撤销返回未认证，数据库异常返回对应错误。
 func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, sessionID string, now time.Time, idleTimeout time.Duration) (domain.Principal, error) {
@@ -269,25 +280,36 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	if result.RowsAffected == 0 {
 		return domain.Principal{}, application.ErrUnauthenticated
 	}
-	touch := repository.database.WithContext(ctx).Model(&sessionModel{}).
-		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
-		Update("last_seen_at", now)
-	if touch.Error != nil {
-		return domain.Principal{}, fmt.Errorf("touch authenticated session: %w", touch.Error)
-	}
-	if touch.RowsAffected == 0 {
-		// MySQL 在并发浏览器请求写入相同 DATETIME(3) 值时报零变更行。这里复核而不是把无害
-		// 的 no-op 当作登出；多出的读操作仍能拒绝与本请求并发被吊销的会话。
-		var activeSession sessionModel
-		check := repository.database.WithContext(ctx).
-			Select("id").
+	// 只在距上次观测达到 sessionLastSeenWriteInterval 时刷新 last_seen_at。控制台一次
+	// 打开“应用目录”会扇出数十个并发已认证 GET，逐请求更新同一行会让 InnoDB 行锁把这些
+	// 请求串行化。节流分两层，且都不额外加锁、不改变任何校验路径：
+	//  1. 先用本次查询到的 last_seen_at 直接跳过 UPDATE，间隔内的请求连写语句都不发；
+	//  2. 写语句再带 last_seen_at <= cutoff，让并发的“冷启动突发”（窗口刚过期时同时到达的
+	//     数十个请求）只有第一个真正写入，其余零变更行后走下面的有效性复核。判断依据仍是
+	//     行自身已提交的值，最坏情况多写一次，不会漏写或让会话状态错乱。
+	if now.Sub(session.LastSeenAt) >= sessionLastSeenWriteInterval {
+		touch := repository.database.WithContext(ctx).Model(&sessionModel{}).
 			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
-			Take(&activeSession)
-		if check.Error != nil {
-			if errors.Is(check.Error, gorm.ErrRecordNotFound) {
-				return domain.Principal{}, application.ErrUnauthenticated
+			Where("last_seen_at <= ?", now.Add(-sessionLastSeenWriteInterval)).
+			Update("last_seen_at", now)
+		if touch.Error != nil {
+			return domain.Principal{}, fmt.Errorf("touch authenticated session: %w", touch.Error)
+		}
+		if touch.RowsAffected == 0 {
+			// 零变更行的两种无害来源：并发请求已写入同样新的观测值（含上面第二层节流跳过的
+			// 竞争者），或 MySQL 在并发请求写入相同 DATETIME(3) 值时报零变更。这里复核而不是
+			// 把无害的 no-op 当作登出；多出的读操作仍能拒绝与本请求并发被吊销的会话。
+			var activeSession sessionModel
+			check := repository.database.WithContext(ctx).
+				Select("id").
+				Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+				Take(&activeSession)
+			if check.Error != nil {
+				if errors.Is(check.Error, gorm.ErrRecordNotFound) {
+					return domain.Principal{}, application.ErrUnauthenticated
+				}
+				return domain.Principal{}, fmt.Errorf("recheck authenticated session after touch: %w", check.Error)
 			}
-			return domain.Principal{}, fmt.Errorf("recheck authenticated session after touch: %w", check.Error)
 		}
 	}
 
@@ -350,7 +372,8 @@ func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID 
 }
 
 // RecordSessionInteraction 只记录用户显式发起的浏览器事件。普通已认证请求不得调用本方法：
-// 它们只在 FindPrincipalBySession 中更新 last_seen_at，使后台轮询无法为空闲会话续命。
+// 它们只在 FindPrincipalBySession 中按 sessionLastSeenWriteInterval 节流更新 last_seen_at，
+// 使后台轮询无法为空闲会话续命。
 func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error {
 	if idleTimeout <= 0 {
 		return application.ErrUnauthenticated
@@ -541,8 +564,14 @@ func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB,
 		}
 		row := backchannelLogoutOutboxRow(id, target, now)
 		// 其他数据库错误仍向上传播，不能把 Outbox 失败伪装成注销成功。
+		// MySQL 不支持 ON CONFLICT DO NOTHING，DoNothing 会生成空的
+		// ON DUPLICATE KEY UPDATE 子句（1064 语法错误）。这里改用幂等的空更新：
+		// 冲突时把 status 赋回自身，保留既有投递状态且不产生重复任务。
 		if err = transaction.Table("platform_oauth_backchannel_logout_outbox").
-			Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}}, DoNothing: true}).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}},
+				DoUpdates: clause.Assignments(map[string]any{"status": gorm.Expr("status")}),
+			}).
 			Create(row).Error; err != nil {
 			return fmt.Errorf("enqueue OIDC back-channel logout: %w", err)
 		}

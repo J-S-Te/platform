@@ -36,7 +36,11 @@ func (handler *SubsystemOnboardingHandler) relatedServiceClients(ctx context.Con
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", dependencyErr, err)
 	}
-	clients, err := resolver.Resolve(ctx, tenant, app, environment)
+	policy, err := handler.relatedServiceResolutionPolicy(ctx, app, environment)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", dependencyErr, err)
+	}
+	clients, err := resolver.ResolveWithPolicy(ctx, tenant, app, environment, policy)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", dependencyErr, err)
 	}

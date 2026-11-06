@@ -350,6 +350,15 @@ func (service *ManagementService) CreateUsersBatch(ctx context.Context, input Us
 	return nil, ErrMembershipRequired
 }
 
+// ValidateApplicationRoleAssignments 暴露角色授权条目的形状校验，供 HTTP 适配层逐行预检：
+// 批量导入需要把“应用/角色编码或名称缺失、超长或重复”的问题定位到具体行号，而不是整批
+// 一条 BATCH_VALIDATION_FAILED。权威校验仍在服务层由 normalizeApplicationRoleAssignments
+// 执行，这里只复用同一份规则，避免两套判定漂移。
+func ValidateApplicationRoleAssignments(assignments []ApplicationRoleAssignment) error {
+	_, err := normalizeApplicationRoleAssignments(assignments)
+	return err
+}
+
 func normalizeApplicationRoleAssignments(assignments []ApplicationRoleAssignment) ([]ApplicationRoleAssignment, error) {
 	if len(assignments) == 0 {
 		return nil, nil

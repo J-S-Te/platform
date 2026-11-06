@@ -21,10 +21,11 @@ usage() {
   status     查询部署 Agent 状态（PROVISIONING/READY/PROVISION_FAILED 等）
   offboard   深清理子系统（停止容器 + 删除 .env.local + 删除门户网关入口 + 删除 DB 记录）
              --shallow   退回旧版语义：只删 DB 记录（仅供紧急修复使用）
+             --skip-teardown  跳过 teardown，只删 DB 记录（teardown 已成功、DB 未清时的续跑）
 
 通用认证参数：
   --api-base-url URL             平台 API 根地址；默认 BASIC_PLATFORM_API_BASE_URL
-  --platform-origin URL          Cookie 写请求的可信 Origin；默认 BASIC_PLATFORM_ORIGIN
+  --platform-origin URL          Cookie 写请求的可信 Origin；默认 BASIC_PLATFORM_ORIGIN，仍未设置时按 api-base-url 推导
   --account ACCOUNT              具备对应权限的平台管理员账号
   --password-stdin               从标准输入读取一行密码；未指定时安全交互输入
   --cookie-file FILE             复用已登录的平台 Cookie 文件
@@ -99,40 +100,3 @@ lowercase() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-# ============================ 通用参数解析 ============================
-parse_common_args() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --api-base-url)
-        [[ $# -ge 2 ]] || { log "ERROR" "--api-base-url 缺少参数"; exit 2; }
-        API_BASE_URL="$2"; shift 2 ;;
-      --platform-origin)
-        [[ $# -ge 2 ]] || { log "ERROR" "--platform-origin 缺少参数"; exit 2; }
-        PLATFORM_ORIGIN="$2"; shift 2 ;;
-      --account)
-        [[ $# -ge 2 ]] || { log "ERROR" "--account 缺少参数"; exit 2; }
-        ACCOUNT="$2"; shift 2 ;;
-      --password-stdin)
-        PASSWORD_STDIN=true; shift ;;
-      --cookie-file)
-        [[ $# -ge 2 ]] || { log "ERROR" "--cookie-file 缺少参数"; exit 2; }
-        COOKIE_FILE="$2"; shift 2 ;;
-      --replace-existing-session)
-        REPLACE_EXISTING_SESSION=true; shift ;;
-      -y|--yes)
-        ASSUME_YES=true; shift ;;
-      -h|--help)
-        usage; exit 0 ;;
-      --)
-        shift; break ;;
-      -*)
-        log "ERROR" "未知参数：$1"
-        usage >&2
-        exit 2 ;;
-      *)
-        log "ERROR" "未预期的位置参数：$1（所有参数必须带选项名）"
-        usage >&2
-        exit 2 ;;
-    esac
-  done
-}

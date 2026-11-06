@@ -60,6 +60,126 @@ func FixedWindowRateLimit(limit int, window time.Duration) gin.HandlerFunc {
 // loginRateLimitBodyBytes 是登录 JSON 载荷上限；超限视为无法识别账号，只计 IP 兜底桶。
 const loginRateLimitBodyBytes = 8 << 10
 
+// loginRateLimitMessage 是两条登录限流路径（gin 中间件与 HTTP 包装器）共用的拒绝文案。
+const loginRateLimitMessage = "请求过于频繁，请稍后再试"
+
+// loginBucket 是固定窗口的计数单元。
+type loginBucket struct {
+	startedAt time.Time
+	count     int
+}
+
+// loginLimiter 是登录双桶限流的共享状态。抽成结构体的目的是让 gin 中间件
+// （LoginRateLimit）与 HTTP 层包装器（LoginRateLimitHTTP，在凭据解密之后执行）
+// 共用同一套计数语义，避免两条路径出现阈值/计账口径漂移。
+type loginLimiter struct {
+	accountField string
+	accountLimit int
+	ipLimit      int
+	window       time.Duration
+	mutex        sync.Mutex
+	buckets      map[string]loginBucket
+	lastCleanup  time.Time
+}
+
+func newLoginLimiter(accountField string, accountLimit, ipLimit int, window time.Duration) *loginLimiter {
+	return &loginLimiter{
+		accountField: accountField,
+		accountLimit: accountLimit,
+		ipLimit:      ipLimit,
+		window:       window,
+		buckets:      make(map[string]loginBucket),
+		lastCleanup:  time.Now(),
+	}
+}
+
+// cleanupLocked 必须在持有 mutex 的临界区内调用：计数与清理共用临界区，
+// 避免删除刚被另一请求刷新过的桶；清理频率最多每窗口一次。
+func (limiter *loginLimiter) cleanupLocked(now time.Time) {
+	if now.Sub(limiter.lastCleanup) < limiter.window {
+		return
+	}
+	for candidate, current := range limiter.buckets {
+		if now.Sub(current.startedAt) >= limiter.window {
+			delete(limiter.buckets, candidate)
+		}
+	}
+	limiter.lastCleanup = now
+}
+
+// accountFailuresLocked 只读当前窗口内的账号失败计数，不修改任何状态：窗口过期或
+// 桶不存在都视为 0，保证请求入口不会预增账号额度。
+func (limiter *loginLimiter) accountFailuresLocked(now time.Time, key string) int {
+	current, ok := limiter.buckets[key]
+	if !ok || current.startedAt.IsZero() || now.Sub(current.startedAt) >= limiter.window {
+		return 0
+	}
+	return current.count
+}
+
+// recordAccountFailureLocked 只在认证失败（401）后 +1；窗口起点由本窗口第一次失败
+// 建立，窗口过期后重新从 0 开始。
+func (limiter *loginLimiter) recordAccountFailureLocked(now time.Time, key string) {
+	current := limiter.buckets[key]
+	if current.startedAt.IsZero() || now.Sub(current.startedAt) >= limiter.window {
+		current = loginBucket{startedAt: now}
+	}
+	current.count++
+	limiter.buckets[key] = current
+}
+
+// allowIPLocked 保持 IP 兜底桶“所有请求预计数”的语义：随机账号撞库只能靠它兜底。
+func (limiter *loginLimiter) allowIPLocked(now time.Time, key string, limit int) bool {
+	current := limiter.buckets[key]
+	if current.startedAt.IsZero() || now.Sub(current.startedAt) >= limiter.window {
+		current = loginBucket{startedAt: now}
+	}
+	current.count++
+	limiter.buckets[key] = current
+	return current.count <= limit
+}
+
+// admit 执行入口检查并返回本次请求命中的账号键（未识别出账号时为空）。
+// 账号桶只做预检查不预增额度；IP 桶对所有放行的请求计数。
+func (limiter *loginLimiter) admit(request *http.Request) (string, bool) {
+	now := time.Now()
+	accountKey := ""
+	if account := loginRateLimitAccount(request, limiter.accountField); account != "" {
+		accountKey = "account:" + account
+	}
+	ipKey := RequestClientIP(request)
+	if ipKey == "" {
+		ipKey = "unknown"
+	}
+	limiter.mutex.Lock()
+	defer limiter.mutex.Unlock()
+	limiter.cleanupLocked(now)
+	// 账号桶入口只做预检查：已打满窗口就不放行，且本次请求不预增失败计数。
+	allowed := accountKey == "" || limiter.accountFailuresLocked(now, accountKey) < limiter.accountLimit
+	if allowed {
+		allowed = limiter.allowIPLocked(now, "ip:"+ipKey, limiter.ipLimit)
+	}
+	return accountKey, allowed
+}
+
+// observe 在响应结束后计账：仅 401（认证失败）消耗账号额度；2xx/3xx 成功登录清零历史
+// 失败，避免故障期积累的失败拖累正常登录；429 等其它状态（含限流自身的拒绝）不计数。
+func (limiter *loginLimiter) observe(accountKey string, status int) {
+	if accountKey == "" {
+		return
+	}
+	switch {
+	case status == http.StatusUnauthorized:
+		limiter.mutex.Lock()
+		limiter.recordAccountFailureLocked(time.Now(), accountKey)
+		limiter.mutex.Unlock()
+	case status >= http.StatusOK && status < http.StatusBadRequest:
+		limiter.mutex.Lock()
+		delete(limiter.buckets, accountKey)
+		limiter.mutex.Unlock()
+	}
+}
+
 // LoginRateLimit 登录专用双桶固定窗口限流（安全审查 SEC-B7 / M-2）：
 //   - 账号维度先判（accountLimit，主防线，阈值与原登录30/min一致）：账号桶只统计
 //     **失败尝试**（响应 401），请求进入时仅做预检查，不因本次请求预增额度。同 IP
@@ -80,104 +200,78 @@ const loginRateLimitBodyBytes = 8 << 10
 // 并发语义：预检查与响应后的失败计数不在同一临界区，并发请求允许少量越过阈值；
 // 计数与清理仍共用同一 mutex，无数据竞争。
 //
+// 加密凭据链路：本中间件只能读明文 JSON，因此**不得**直接挂在凭据加密登录路由的
+// 最外层（加密封套下 body 里没有 account，账号桶会静默失效）；那种路由必须改用
+// LoginRateLimitHTTP，把限流包在解密之后的 handler 上。
+//
 // 部署要求（与 platform/docs/rate-limiting.md 一致，缺一不可）：
 //  1. 多副本：本桶为进程内状态，N 个副本总额度≈N 倍——多副本部署必须改用共享限流
 //     存储（Redis 等）或入口网关限流策略，本中间件只作单副本兜底；
 //  2. 反代：IP 桶依赖 RequestClientIP（受 APP_TRUSTED_PROXIES 约束）——必须把真实
 //     入口网关纳入可信代理，否则所有请求对端都落在网关 IP，退化为“全员共桶”。
 func LoginRateLimit(accountField string, accountLimit, ipLimit int, window time.Duration) gin.HandlerFunc {
-	type bucket struct {
-		startedAt time.Time
-		count     int
-	}
-	var mutex sync.Mutex
-	buckets := make(map[string]bucket)
-	lastCleanup := time.Now()
-	// cleanupLocked 必须在持有 mutex 的临界区内调用：计数与清理共用临界区，
-	// 避免删除刚被另一请求刷新过的桶；清理频率最多每窗口一次。
-	cleanupLocked := func(now time.Time) {
-		if now.Sub(lastCleanup) < window {
-			return
-		}
-		for candidate, current := range buckets {
-			if now.Sub(current.startedAt) >= window {
-				delete(buckets, candidate)
-			}
-		}
-		lastCleanup = now
-	}
-	// accountFailuresLocked 只读当前窗口内的账号失败计数，不修改任何状态：窗口过期或
-	// 桶不存在都视为 0，保证请求入口不会预增账号额度。
-	accountFailuresLocked := func(now time.Time, key string) int {
-		current, ok := buckets[key]
-		if !ok || current.startedAt.IsZero() || now.Sub(current.startedAt) >= window {
-			return 0
-		}
-		return current.count
-	}
-	// recordAccountFailureLocked 只在认证失败（401）后 +1；窗口起点由本窗口第一次失败
-	// 建立，窗口过期后重新从 0 开始。
-	recordAccountFailureLocked := func(now time.Time, key string) {
-		current := buckets[key]
-		if current.startedAt.IsZero() || now.Sub(current.startedAt) >= window {
-			current = bucket{startedAt: now}
-		}
-		current.count++
-		buckets[key] = current
-	}
-	// allowIPLocked 保持 IP 兜底桶“所有请求预计数”的语义：随机账号撞库只能靠它兜底。
-	allowIPLocked := func(now time.Time, key string, limit int) bool {
-		current := buckets[key]
-		if current.startedAt.IsZero() || now.Sub(current.startedAt) >= window {
-			current = bucket{startedAt: now}
-		}
-		current.count++
-		buckets[key] = current
-		return current.count <= limit
-	}
-	reject := func(context *gin.Context) {
-		context.Abort()
-		httpresponse.WriteError(context.Writer, context.Request, http.StatusTooManyRequests, httperror.New("PLATFORM_RATE_LIMITED", "请求过于频繁，请稍后再试", nil))
-	}
+	limiter := newLoginLimiter(accountField, accountLimit, ipLimit, window)
 	return func(context *gin.Context) {
-		now := time.Now()
-		accountKey := ""
-		if account := loginRateLimitAccount(context.Request, accountField); account != "" {
-			accountKey = "account:" + account
-		}
-		ipKey := RequestClientIP(context.Request)
-		if ipKey == "" {
-			ipKey = "unknown"
-		}
-		mutex.Lock()
-		cleanupLocked(now)
-		// 账号桶入口只做预检查：已打满窗口就不放行，且本次请求不预增失败计数。
-		allowed := accountKey == "" || accountFailuresLocked(now, accountKey) < accountLimit
-		if allowed {
-			allowed = allowIPLocked(now, "ip:"+ipKey, ipLimit)
-		}
-		mutex.Unlock()
+		accountKey, allowed := limiter.admit(context.Request)
 		if !allowed {
-			reject(context)
+			context.Abort()
+			httpresponse.WriteError(context.Writer, context.Request, http.StatusTooManyRequests, httperror.New("PLATFORM_RATE_LIMITED", loginRateLimitMessage, nil))
 			return
 		}
 		context.Next()
-		// 响应后计账：仅 401（认证失败）消耗账号额度；2xx/3xx 成功登录清零历史失败，
-		// 避免故障期积累的失败拖累正常登录；429 等其它状态（含本中间件自身的拒绝）不计数。
-		if accountKey == "" {
-			return
-		}
-		switch status := context.Writer.Status(); {
-		case status == http.StatusUnauthorized:
-			mutex.Lock()
-			recordAccountFailureLocked(time.Now(), accountKey)
-			mutex.Unlock()
-		case status >= http.StatusOK && status < http.StatusBadRequest:
-			mutex.Lock()
-			delete(buckets, accountKey)
-			mutex.Unlock()
+		limiter.observe(accountKey, context.Writer.Status())
+	}
+}
+
+// LoginRateLimitHTTP 返回 HTTP 层限流包装器，计数语义与 LoginRateLimit 完全一致
+// （账号失败桶 + IP 兜底桶、只统计 401、成功清零），只是不依赖 gin 上下文。
+//
+// 它的存在意义是**执行位置**：登录请求的账号在凭据加密模式下位于
+// credential_envelope 密文里，解密前任何中间件都读不到 account。把限流包在解密后的
+// handler 上（见 transport/http/router.go 的 /login 注册），账号桶才真正生效；未启用
+// 加密时同样使用它，保证两条路径的限流行为一致。
+func LoginRateLimitHTTP(accountField string, accountLimit, ipLimit int, window time.Duration) func(http.HandlerFunc) http.HandlerFunc {
+	limiter := newLoginLimiter(accountField, accountLimit, ipLimit, window)
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			accountKey, allowed := limiter.admit(r)
+			if !allowed {
+				httpresponse.WriteError(w, r, http.StatusTooManyRequests, httperror.New("PLATFORM_RATE_LIMITED", loginRateLimitMessage, nil))
+				return
+			}
+			recorder := &loginStatusRecorder{ResponseWriter: w}
+			next(recorder, r)
+			limiter.observe(accountKey, recorder.statusCode())
 		}
 	}
+}
+
+// loginStatusRecorder 只观察业务 handler 写出的状态码，供账号失败桶计账使用；
+// 其余行为（Header/Body）原样透传，不改变响应语义。
+type loginStatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (recorder *loginStatusRecorder) WriteHeader(status int) {
+	if recorder.status == 0 {
+		recorder.status = status
+	}
+	recorder.ResponseWriter.WriteHeader(status)
+}
+
+func (recorder *loginStatusRecorder) Write(value []byte) (int, error) {
+	if recorder.status == 0 {
+		recorder.status = http.StatusOK
+	}
+	return recorder.ResponseWriter.Write(value)
+}
+
+func (recorder *loginStatusRecorder) statusCode() int {
+	if recorder.status == 0 {
+		return http.StatusOK
+	}
+	return recorder.status
 }
 
 // loginRateLimitAccount 缓冲并还原请求体，从 JSON 提取限流账号键。

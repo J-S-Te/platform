@@ -268,6 +268,8 @@ type SubsystemProvisioningCapabilities struct {
 	// ReleaseIntegrity 是 Agent 已接线的发布完整性能力名；空表示未启用。
 	// 它只声明能力，不表示某个候选已经验签通过。
 	ReleaseIntegrity string `json:"release_integrity,omitempty"`
+	// 此只读Agent投影仅描述结算明确原生且关闭合同接入的环境，不是浏览器授权输入。
+	SettlementContractOptionalEnvironments []string `json:"settlement_contract_optional_environments,omitempty"`
 }
 
 // SubsystemProvisioningTarget 是一份已评审部署清单的非敏感投影。PublicBaseURL 由

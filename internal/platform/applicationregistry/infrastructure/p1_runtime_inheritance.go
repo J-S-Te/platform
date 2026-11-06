@@ -35,6 +35,9 @@ func isP1ProductionServiceBinding(source string) bool {
 	}
 	return false
 }
+// inheritProductionRuntimeValues 让报告API与Worker共享审核过的来源及独立安全材料。
+// 参数：root为部署根，file为目标声明，staged为已验证源，values接收本次继承值。
+// 返回值：无错误表示来源一致；非法模式、缺安全材料或越界路径失败关闭。
 func inheritProductionRuntimeValues(root string, file productionSubsystemRuntimeFileManifest, staged map[string]map[string]string, values map[string]string) error {
 	if file.InheritFrom == "" {
 		return nil
@@ -52,10 +55,21 @@ func inheritProductionRuntimeValues(root string, file productionSubsystemRuntime
 		return provisioningError("report vault requires distinct valid content and descriptor keys")
 	}
 	for _, key := range file.InheritKeys {
-		if !allowedProductionInheritedKey(key) || !usableProductionCredential(source[key]) {
+		value := source[key]
+		if key == "PORTAL_CUSTOMER_DIRECTORY_MODE" {
+			switch strings.TrimSpace(value) {
+			case "", "crm":
+				value = "crm"
+			case "local":
+				value = "local"
+			default:
+				return provisioningError("portal customer directory mode is invalid")
+			}
+		}
+		if !allowedProductionInheritedKey(key) || !usableProductionCredential(value) {
 			return provisioningError("runtime inherited value is unavailable")
 		}
-		values[key] = source[key]
+		values[key] = value
 	}
 	return nil
 }

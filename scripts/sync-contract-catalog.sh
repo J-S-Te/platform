@@ -12,6 +12,9 @@
 # 也会被 docker-local.sh 的 subsystem onboarding 流程复用。
 # 手动执行时通过下列 PLATFORM_* 环境变量传入；敏感值不接受命令行参数，
 # 避免进入 shell history、CI 日志和进程 argv。
+#
+# 兼容性：本脚本会被拷进平台镜像，也可能在 macOS 自带 bash 3.2 上直接执行，
+# 因此只使用 bash 3.2 支持的语法（不使用关联数组等 bash 4 特性）。
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -57,6 +60,10 @@ command -v curl >/dev/null 2>&1 || {
   echo "$LOG_PREFIX ERROR: curl is required" >&2
   exit 2
 }
+command -v awk >/dev/null 2>&1 || {
+  echo "$LOG_PREFIX ERROR: awk is required" >&2
+  exit 2
+}
 
 if [[ "$CATALOG_VERSION" == "auto" ]]; then
   CATALOG_VERSION="v1-$(date -u +%Y%m%d%H%M%S)"
@@ -64,12 +71,25 @@ fi
 
 # 1) 拉 access_token
 echo "$LOG_PREFIX step 1: requesting access_token from ${ISSUER%/}/oauth2/token" >&2
-CURL_CONFIG_FILE="$(mktemp)"
+
+# 所有临时文件（凭据配置、payload、DB 查询映射、mysql stderr）统一由 cleanup trap 删除。
+# 先声明再挂 trap，保证任何退出路径都不会留下凭据/目录数据。
+CURL_CONFIG_FILE=""
 PAYLOAD_FILE=""
+RESOURCES_FILE=""
+ROLE_PERMS_FILE=""
+MYSQL_ERR_FILE=""
 cleanup() {
-  rm -f -- "$CURL_CONFIG_FILE" ${PAYLOAD_FILE:+"$PAYLOAD_FILE"}
+  local tmp_file
+  for tmp_file in "$CURL_CONFIG_FILE" "$PAYLOAD_FILE" "$RESOURCES_FILE" "$ROLE_PERMS_FILE" "$MYSQL_ERR_FILE"; do
+    if [[ -n "$tmp_file" ]]; then
+      rm -f -- "$tmp_file" || true
+    fi
+  done
+  return 0
 }
 trap cleanup EXIT
+CURL_CONFIG_FILE="$(mktemp)"
 chmod 0600 "$CURL_CONFIG_FILE"
 [[ "$ISSUER" =~ ^https?://[^/?#]+$ ]] || {
   echo "$LOG_PREFIX ERROR: PLATFORM_BASE_URL must be an absolute HTTP(S) URL" >&2
@@ -100,36 +120,67 @@ echo "$LOG_PREFIX step 1: got access_token (length=${#ACCESS_TOKEN})" >&2
 
 # 2) 从 platform DB 读出该应用的 resources / permissions / roles
 #    用 docker exec（容器内 mysql 客户端），密码从 env 传入，ps 不可见。
+#
+#    mysql/docker 失败时会输出可诊断错误并以退出码 6 中止，绝不带着部分结果发 PUT。
+#    错误信息只包含容器名/步骤/mysql stderr 摘要（stdout 是 SQL 结果，被调用方捕获）。
+MYSQL_ERR_FILE="$(mktemp)"
+chmod 0600 "$MYSQL_ERR_FILE"
 run_mysql() {
+  local step="$1" sql="$2" status=0 db_error=""
   # 安全（SEC-F6）：MYSQL_PWD 按名转发（-e 后不带值，取自本进程环境），
   # 口令值不再出现在 docker CLI 的 argv（/proc/*/cmdline），与本文件上方注释一致。
   MYSQL_PWD="$MYSQL_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -u"$MYSQL_USER" --default-character-set=utf8mb4 -N -B \
-    "$DB_NAME" -e "$1" 2>/dev/null
+    "$DB_NAME" -e "$sql" 2>"$MYSQL_ERR_FILE" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    # 只截取合并后的一行摘要；不打印 SQL 与查询结果。
+    db_error=$(head -c 2000 -- "$MYSQL_ERR_FILE" 2>/dev/null || true)
+    db_error=${db_error//$'\r'/ }
+    db_error=${db_error//$'\n'/ }
+    db_error=${db_error:0:300}
+    echo "$LOG_PREFIX ERROR: step 2 ($step): reading from MySQL container $MYSQL_CONTAINER failed (exit $status)${db_error:+: $db_error}" >&2
+    exit 6
+  fi
 }
 
 echo "$LOG_PREFIX step 2: reading resources / permissions / roles from $MYSQL_CONTAINER" >&2
-RESOURCES_TSV=$(run_mysql "SELECT code, name FROM authz_resource WHERE application_id='$APP_ID' AND status='ACTIVE' ORDER BY code;")
-PERMS_TSV=$(run_mysql "
+RESOURCES_TSV=$(run_mysql "resources" "SELECT code, name FROM authz_resource WHERE application_id='$APP_ID' AND status='ACTIVE' ORDER BY code;")
+PERMS_TSV=$(run_mysql "permissions" "
   SELECT p.code, p.name, p.action, UPPER(IFNULL(p.risk_level,'LOW')), r.code
   FROM authz_permission p JOIN authz_resource r ON r.id=p.resource_id
   WHERE p.application_id='$APP_ID' AND p.status='ACTIVE'
   ORDER BY p.code;")
-ROLE_PERMS_TSV=$(run_mysql "
+ROLE_PERMS_TSV=$(run_mysql "role permissions" "
   SELECT ro.code, p.code
   FROM authz_role_permission rp
   JOIN authz_role ro ON ro.id=rp.role_id
   JOIN authz_permission p ON p.id=rp.permission_id
   WHERE ro.application_id='$APP_ID'
   ORDER BY ro.code, p.code;")
-ROLES_TSV=$(run_mysql "SELECT code, name, IFNULL(description,'') FROM authz_role WHERE application_id='$APP_ID' AND status='ACTIVE' AND role_type<>'COMPATIBILITY' ORDER BY code;")
+ROLES_TSV=$(run_mysql "roles" "SELECT code, name, IFNULL(description,'') FROM authz_role WHERE application_id='$APP_ID' AND status='ACTIVE' AND role_type<>'COMPATIBILITY' ORDER BY code;")
 
-# 拼 resources map (key -> name)，用资源代码作 fallback
-declare -A RESOURCE_NAME
-while IFS=$'\t' read -r code name; do
-  [[ -z "$code" ]] && continue
-  RESOURCE_NAME["$code"]="$name"
-done <<< "$RESOURCES_TSV"
+# 拼 resources map (key -> name)，用资源代码作 fallback。
+# bash 3.2 没有关联数组：映射落到 0600 临时 TSV，用 awk 按首列精确匹配查找。
+RESOURCES_FILE="$(mktemp)"
+chmod 0600 "$RESOURCES_FILE"
+printf '%s\n' "$RESOURCES_TSV" >"$RESOURCES_FILE"
+
+# 拼 role -> permissions 映射（role-permission TSV 落到 0600 临时文件，按角色顺序扫描）。
+ROLE_PERMS_FILE="$(mktemp)"
+chmod 0600 "$ROLE_PERMS_FILE"
+printf '%s\n' "$ROLE_PERMS_TSV" >"$ROLE_PERMS_FILE"
+
+# 取资源 code 对应的 name；未命中或 name 为空时回退到资源 code 本身
+# （语义与旧的 ${RESOURCE_NAME[$rcode]:-$rcode} 一致；重复 code 取最后一行，同旧映射覆盖行为）。
+resource_name() {
+  local key="$1" found=""
+  found=$(CATALOG_RESOURCE_KEY="$key" awk -F '\t' '$1 == ENVIRON["CATALOG_RESOURCE_KEY"] { value = $2 } END { print value }' "$RESOURCES_FILE")
+  if [[ -n "$found" ]]; then
+    printf '%s' "$found"
+  else
+    printf '%s' "$key"
+  fi
+}
 
 # 拼 permissions 数组
 PERMS_JSON="["
@@ -137,31 +188,23 @@ first=1
 while IFS=$'\t' read -r code name action risk rcode; do
   [[ -z "$code" ]] && continue
   obj=$(jq -cn --arg code "$code" --arg name "$name" --arg action "$action" \
-    --arg rcode "$rcode" --arg rname "${RESOURCE_NAME[$rcode]:-$rcode}" --arg risk "$risk" \
+    --arg rcode "$rcode" --arg rname "$(resource_name "$rcode")" --arg risk "$risk" \
     '{code:$code,name:$name,action:$action,resource_code:$rcode,resource_name:$rname,risk_level:$risk}')
   if [[ $first -eq 1 ]]; then PERMS_JSON+="$obj"; first=0; else PERMS_JSON+=",$obj"; fi
 done <<< "$PERMS_TSV"
 PERMS_JSON+="]"
 
-# 拼 role -> permissions map
-declare -A ROLE_PERMS
-while IFS=$'\t' read -r rcode pcode; do
-  [[ -z "$rcode" || -z "$pcode" ]] && continue
-  ROLE_PERMS["$rcode"]+="${pcode}|"
-done <<< "$ROLE_PERMS_TSV"
-
-# 拼 roles 数组
+# 拼 roles 数组（权限列表按 TSV 顺序保留重复项，与旧的关联数组累加顺序一致）。
 ROLES_JSON="["
 first=1
 while IFS=$'\t' read -r code name desc; do
   [[ -z "$code" ]] && continue
-  IFS='|' read -ra perms_arr <<< "${ROLE_PERMS[$code]:-}"
   PERMS_LIST=""
-  for p in "${perms_arr[@]}"; do
+  while IFS= read -r p; do
     [[ -z "$p" ]] && continue
     p_json=$(jq -cn --arg value "$p" '$value')
     PERMS_LIST+=",$p_json"
-  done
+  done <<< "$(CATALOG_ROLE_KEY="$code" awk -F '\t' '$1 == ENVIRON["CATALOG_ROLE_KEY"] && $2 != "" { print $2 }' "$ROLE_PERMS_FILE")"
   PERMS_LIST="${PERMS_LIST#,}"
   obj=$(jq -cn --arg code "$code" --arg name "$name" --arg description "$desc" \
     --argjson permissions "[$PERMS_LIST]" '{code:$code,name:$name,description:$description,permissions:$permissions}')

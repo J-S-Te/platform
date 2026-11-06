@@ -73,6 +73,12 @@ if name=='curl':
     if '--head' in arguments:
         if url not in state['registry']: stop()
         raise SystemExit(0)
+    # 交付证明对 Keycloak 追加 OIDC 发现文档门禁（2026-11-05 现场事故）：
+    # 真实实现必须能从 issuer 读到 {"issuer": ...}；keycloak_wedged 模拟
+    # “仍接受 TCP 连接但请求处理已卡死”的现场形态，让门禁按 curl 非零退出被拒。
+    if url.endswith('/.well-known/openid-configuration'):
+        if state.get('keycloak_wedged'): stop()
+        sys.stdout.write(json.dumps({'issuer':url.rsplit('/.well-known/',1)[0]})); raise SystemExit(0)
     if url not in state['registry']: stop()
     sys.stdout.write(state['registry'][url]); raise SystemExit(0)
 if arguments[:2]==['image','inspect']:
@@ -129,6 +135,9 @@ stop()
 
 
 class RuntimeTests(unittest.TestCase):
+    # 用途：创建仅含合成身份的独立发布检查夹具。
+    # 参数：无。
+    # 返回值：无；所有运行配置符合生产私有文件约束。
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="delivery-runtime-")
         self.addCleanup(self.temporary.cleanup)
@@ -183,7 +192,11 @@ class RuntimeTests(unittest.TestCase):
                       "PLATFORM_AUTHORIZATION_CONTEXT_URL", "PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID", "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID",
                       "PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET", "OIDC_SESSION_ENCRYPTION_KEY_BASE64", "OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET",
                       "OIDC_REDIRECT_URI", "OIDC_TENANT_ID", "PLATFORM_OWNER_DIRECTORY_CLIENT_ID", "PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"]
-            (self.target / "runtime" / (runtime + ".env")).write_text("".join(key + "=fixture-value\n" for key in values))
+            if component == "data-analysis":
+                values.append("METABASE_EMBEDDING_SECRET")
+            runtime_path = self.target / "runtime" / (runtime + ".env")
+            runtime_path.write_text("".join(key + "=fixture-value\n" for key in values))
+            runtime_path.chmod(0o600)
         self.state["compose_services"]["data-analysis-migrate"] = {"image": self.refs[BI_KEYS[3]]}
         build_id = "customer-presale-" + self.refs["customer-opportunity"].rsplit("@sha256:", 1)[1][:16]
         self.release["CUSTOMER_PRESALE_TEMPORAL_WORKER_BUILD_ID"] = build_id
@@ -274,6 +287,17 @@ class RuntimeTests(unittest.TestCase):
     def service(self, name, image):
         self.state["compose_services"][name] = {"image": image}
         self.state["services"][name] = {"native": self.state["images"][image]["id"]}
+
+    # 用途：返回子系统档案声明的常驻运行服务（与 setUp 使用同一权威来源）。
+    # 参数：component 为 APPLICATIONS 中的子系统标识。
+    # 返回值：服务名列表；档案缺少 runtime_services 时抛出断言错误。
+    def profile_runtime_services(self, component):
+        application, _runtime, _key = APPLICATIONS[component]
+        name = "data-analysis-prod.yaml" if component == "data-analysis" else application + "-prod.yaml"
+        for line in (self.target / "subsystems.d" / name).read_text().splitlines():
+            if line.startswith("  runtime_services: "):
+                return line.partition("[")[2].partition("]")[0].split(", ")
+        raise AssertionError("子系统档案缺少 runtime_services：" + name)
 
     def save(self):
         self.state_path.write_text(json.dumps(self.state))
@@ -374,6 +398,34 @@ class RuntimeTests(unittest.TestCase):
 
     def test_platform_release_matches_exact_tuple_and_real_runtime(self):
         self.invoke("delivery_release_matches", "platform")
+        self.assertFalse(any(call[1:2] in (["network"], ["up"], ["pull"]) for call in self.calls()))
+
+    # 用途：证明没有 Temporal 消费者的“仅平台”安装能通过平台发布证明。
+    # 参数：无；夹具移除合同/项目/CRM 的子系统服务（scope_enabled 因此全为假）与共享 temporal
+    #       （deploy-service.sh 在这种情况下不会启动它）。contract-mysql 是共享技术底座，
+    #       仍属平台阶段必需服务，故保留。
+    # 返回值：无；断言平台发布证明通过，且未出现未定义函数的调用失败。
+    def test_platform_proof_passes_without_temporal_consumers(self):
+        for component in ("contract", "project", "customer-opportunity"):
+            for service in self.profile_runtime_services(component):
+                self.state["compose_services"].pop(service, None)
+                self.state["services"].pop(service, None)
+        for service in ("temporal",):
+            self.state["compose_services"].pop(service, None)
+            self.state["services"].pop(service, None)
+        for service in ("contract-api", "project-api", "customer-api", "temporal"):
+            self.assertNotIn(service, self.state["compose_services"])
+        result = self.invoke("delivery_release_matches", "platform")
+        self.assertNotIn("command not found", result.stderr)
+        self.assertFalse(any(call[1:2] in (["network"], ["up"], ["pull"]) for call in self.calls()))
+
+    # 用途：证明“TCP 可连但请求处理卡死”的 Keycloak 不能通过平台发布证明。
+    # 参数：无；夹具把 OIDC 发现文档置为不可用，模拟 2026-11-05 现场的僵死形态。
+    # 返回值：无；断言证明失败且诊断包含 OIDC 发现文档说明，且不出现任何写操作。
+    def test_platform_proof_rejects_wedged_keycloak(self):
+        self.state["keycloak_wedged"] = True
+        result = self.invoke("delivery_release_matches", "platform", False)
+        self.assertIn("OIDC 发现文档", result.stderr)
         self.assertFalse(any(call[1:2] in (["network"], ["up"], ["pull"]) for call in self.calls()))
 
     def test_platform_requires_explicit_common_and_refuses_stale_agent(self):

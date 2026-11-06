@@ -7,12 +7,24 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/local-status.py"
+
+
+def interpreter_directory():
+    """子进程 PATH 必须能找到当前解释器：CI 在 /usr/bin，容器常在 /usr/local/bin。"""
+    directory = Path(sys.executable).resolve().parent
+    if not (directory / "python3").exists():
+        found = shutil.which("python3")
+        if found:
+            directory = Path(found).resolve().parent
+    return str(directory)
 
 DOCKER_STUB = """#!/bin/sh
 # 替身：按环境变量回答，不接触真实引擎。
@@ -78,7 +90,7 @@ class LocalStatusTest(unittest.TestCase):
                         "migration": {"service": "customer-migrate", "image_digest": digest}}))
 
     def run_status(self, **env):
-        environment = {"PATH": str(self.binaries) + ":/usr/bin:/bin",
+        environment = {"PATH": os.pathsep.join([str(self.binaries), interpreter_directory(), "/usr/bin", "/bin"]),
                        "STUB_DOCKER_OK": "1", "STUB_CONTAINERS": "api-1", "STUB_CONTAINER_IDS": "",
                        "STUB_IMAGES": "", "STUB_DISCOVERY": "", "STUB_APPCODE": "",
                        "STUB_INSTANCES": "1", "STUB_ARTIFACTS": "1", "STUB_ACCOUNTS": "1"}
@@ -109,7 +121,8 @@ class LocalStatusTest(unittest.TestCase):
         command = shlex.split(match.group(0).replace("<应用编码>", "customer_and_opportunity"))
         # --help 在参数解析阶段退出；不会认证、联网或触发受控更新。
         parsed = subprocess.run(command + ["--help"], cwd=ROOT, text=True,
-                                capture_output=True, env={"PATH": "/usr/bin:/bin"})
+                                capture_output=True,
+                                env={"PATH": os.pathsep.join([interpreter_directory(), "/usr/bin", "/bin"])})
         self.assertEqual(parsed.returncode, 0, parsed.stdout + parsed.stderr)
 
     def test_stale_approval_asks_for_republish(self):

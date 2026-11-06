@@ -165,6 +165,9 @@ fail('unexpected Docker invocation ' + repr(a))
 
 
 class OfflinePlatformSelection(unittest.TestCase):
+    # 用途：建立无网络的隔离打包工作区与 Docker 夹具。
+    # 参数：self 为当前测试。
+    # 返回值：无。
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="uip-offline-platform-selection-")
         self.addCleanup(self.temp.cleanup)
@@ -173,7 +176,7 @@ class OfflinePlatformSelection(unittest.TestCase):
         self.production = self.workspace / "platform/deploy/production"
         (self.production / "bin").mkdir(parents=True)
         # 完整生产脚本保持原样执行；使用小型夹具工作区，避免源指纹扫描到用户的无关改动。
-        for name in ("build-offline-packages.sh", "offline-package-metadata.sh", "offline-build-inputs.sh", "build-evidence.py"):
+        for name in ("build-offline-packages.sh", "offline-package-metadata.sh", "offline-build-inputs.sh", "offline-frontend-selection.sh", "build-evidence.py"):
             shutil.copyfile(PRODUCTION / "bin" / name, self.production / "bin" / name)
         for module in ("platform", "customer_and_opportunity", "contract_management",
                        "project_management", "Settlement", "data_analysis"):

@@ -21,22 +21,17 @@ type SubsystemAccessConfigurationTracker struct {
 	registrationImages SubsystemAccessImageReader
 	database           *gorm.DB
 	catalog            SubsystemAccessCatalogSource
-	approvals          application.RuntimeLicenseApprovalSource
 	builtin            application.RuntimeComponentCatalogSource
 	images             SubsystemAccessImageReader
 }
 
-func NewSubsystemAccessConfigurationTracker(db *gorm.DB, catalog SubsystemAccessCatalogSource, approvals application.RuntimeLicenseApprovalSource) (*SubsystemAccessConfigurationTracker, error) {
-	if db == nil || catalog == nil || approvals == nil {
-		return nil, errors.New("configuration tracker requires database, catalog and approvals")
+func NewSubsystemAccessConfigurationTracker(db *gorm.DB, catalog SubsystemAccessCatalogSource) (*SubsystemAccessConfigurationTracker, error) {
+	if db == nil || catalog == nil {
+		return nil, errors.New("configuration tracker requires database and catalog")
 	}
-	return &SubsystemAccessConfigurationTracker{database: db, catalog: catalog, approvals: approvals}, nil
+	return &SubsystemAccessConfigurationTracker{database: db, catalog: catalog}, nil
 }
 
-func accessConfigurationFingerprint(manifest string, components []application.RuntimeLicenseApproval) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(manifest) + "|" + approvalComponentsVersion(components)))
-	return hex.EncodeToString(sum[:])
-}
 func accessCandidateFromEvidence(evidence string) string {
 	if !strings.HasPrefix(evidence, accessCandidatePrefix) {
 		return ""
@@ -85,21 +80,8 @@ func (tracker *SubsystemAccessConfigurationTracker) Snapshot(ctx context.Context
 		sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
 		return hex.EncodeToString(sum[:]), nil
 	}
-	var components []application.RuntimeLicenseApproval
-	for _, environment := range subsystemAccessEnvironmentAliases(operation.EnvironmentCode) {
-		approved, err := tracker.approvals.ApprovedRuntimeLicenseComponents(ctx, operation.ApplicationCode, environment)
-		if err != nil {
-			if application.RuntimeLicenseApprovalErrorCode(err) != "" {
-				continue
-			}
-			return "", err
-		}
-		components = append(components, approved...)
-	}
-	if len(components) == 0 {
-		return "", errors.New("configuration snapshot requires approved images")
-	}
-	return accessConfigurationFingerprint(target.ManifestChecksum, components), nil
+	// V1 审批源已下线：配置指纹只允许按内置目录 + 已验证镜像快照计算。
+	return "", application.ErrRuntimeComponentCatalogUnavailable
 }
 
 // ReadSubsystemAccessConfigurationDrift 用途：比较成功部署基线，并核对受控组件登记是否完整。
