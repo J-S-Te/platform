@@ -17,7 +17,9 @@
   * 分页健壮性：以实际返回条数为准（total 少报仍翻到真实末页）、恰好整页后探到空页不报错、
     application 与 environment 两处空页自相矛盾都必须拒绝写入 include；
   * 依赖面：sync 在 PATH 中没有 jq 时仍可工作（渲染与解析已迁到 Python，禁止回退到 jq）；
-  * flock 锁路径与 macOS mkdir 目录锁回退路径的超时语义、并发串行化；
+  * 写锁（shell 打开锁文件、渲染器在继承 fd 上取内核 flock）的超时语义、
+    等待后继续、成功后释放，以及两个并发 add 的串行化；用例不依赖 flock(1) 或
+    mkdir 目录原子性——CI 的 uutils coreutils 上旧 mkdir 目录锁会静默失效；
   * 非法 code / path_prefix / upstream_url / 超时参数必须拒绝且不写 include 文件；
   * reload 不再执行环境变量命令串（SEC-F10）并强制先 nginx -t。
 
@@ -27,6 +29,7 @@ PATH 桩目录（桩把 argv 写入临时日志），TMPDIR 指向临时目录�
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import re
@@ -35,6 +38,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -174,8 +178,10 @@ class GatewayHarness:
 
     def __init__(self, testcase: unittest.TestCase, path_mode: str = "fallback",
                  skipped_commands=("flock",)):
-        """参数：testcase 用于注册清理；path_mode 为 "fallback"（无 flock）或 "host"（真实 PATH）；
+        """参数：testcase 用于注册清理；path_mode 为 "fallback"（农场里没有 flock）或 "host"（真实 PATH）；
         skipped_commands 为 fallback 农场里不软链的命令名。
+        说明：写锁已改为继承 fd 上的内核 flock，fallback 模式依然有价值——它证明
+        加锁不依赖 flock(1) 命令是否存在（macOS 上没有该命令）。
         """
         self._testcase = testcase
         self.tmp = Path(tempfile.mkdtemp(prefix="portal-gateway-test-"))
@@ -296,10 +302,6 @@ if body is None:
 sys.stdout.write(json.dumps(body, ensure_ascii=False))
 '''
         return write_stub(self.bin, "curl", stub, interpreter=sys.executable)
-
-    def write_flock_stub(self, exit_code: int = 0) -> Path:
-        """写入 flock 桩：记录 argv 并以指定退出码返回。"""
-        return self.write_recorder_stub("flock", {"exit": exit_code})
 
     def write_docker_stub(self, ps_output: str = "") -> Path:
         """写入 docker 桩：compose ps 输出预置服务名，其余子命令成功并记录 argv。"""
@@ -463,6 +465,16 @@ class RenderContractTest(unittest.TestCase):
                     gateway_render.validate_upstream_url(value)
                 self.assertIn(expected, str(caught.exception))
 
+    def test_validate_lock_timeout_accepts_and_rejects(self):
+        """PORTAL_GATEWAY_LOCK_TIMEOUT 必须是正整数秒。"""
+        self.assertEqual(1, gateway_render.validate_lock_timeout("1"))
+        self.assertEqual(60, gateway_render.validate_lock_timeout("60"))
+        for value in ("0", "-1", "1.5", "abc", ""):
+            with self.subTest(lock_timeout=value):
+                with self.assertRaises(gateway_render.GatewayInputError) as caught:
+                    gateway_render.validate_lock_timeout(value)
+                self.assertIn("PORTAL_GATEWAY_LOCK_TIMEOUT", str(caught.exception))
+
     def test_validate_page_limit_accepts_and_rejects(self):
         """PORTAL_GATEWAY_PAGE_LIMIT 必须是 1..100 的十进制整数。"""
         self.assertEqual(1, gateway_render.validate_page_limit("1"))
@@ -525,7 +537,6 @@ class AddRemoveListTest(unittest.TestCase):
         self.assertEqual(HEADER_ADD + render_block("demo", "/demo/api", "http://127.0.0.1:9001"), self.harness.read_include())
         mode = stat.S_IMODE(self.harness.include.stat().st_mode)
         self.assertEqual(0o644, mode)
-        self.assertFalse(Path(f"{self.harness.lock}.d").exists(), "目录锁未被清理")
         self.assertIn("已注册子系 demo", result.stderr)
 
     def test_add_is_idempotent(self):
@@ -1322,6 +1333,10 @@ class ShellDependencyTest(unittest.TestCase):
         allowed = {
             "__future__",
             "datetime",
+            # 跨进程写锁改成在继承的 fd 上取内核 flock 后，模块需要 fcntl 与 time；
+            # 两者都是标准库，白名单只用于拦截第三方依赖。
+            "fcntl",
+            "time",
             "json",
             "os",
             "re",
@@ -1335,38 +1350,74 @@ class ShellDependencyTest(unittest.TestCase):
 
 
 class LockTest(unittest.TestCase):
-    """写锁：mkdir 回退路径、flock 路径、超时参数与并发串行化。"""
+    """写锁：超时语义、等待后继续、正常释放与并发串行化。
 
-    def test_mkdir_fallback_times_out_without_writing(self):
-        """目录锁已被持有时，第二个写者按约定超时失败且不写文件。"""
+    锁由 shell 打开锁文件、渲染器在继承的 fd 上取内核 flock 实现；用例一律用真实
+    的第二个 lock holder（本进程 fcntl.flock），不再依赖 flock(1)/mkdir 之类的
+    外部命令行为——旧 mkdir 目录锁在 uutils coreutils 上会静默失效。
+    """
+
+    @staticmethod
+    def _close_quietly(descriptor: int) -> None:
+        """关闭 fd 释放锁；已被定时器关过时忽略（同一 fd 不能重复关闭）。"""
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+    def hold_lock(self, harness: GatewayHarness) -> int:
+        """在测试进程内按住写锁，返回必须保持打开的 fd（清理时关闭即释放）。"""
+        harness.lock.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(str(harness.lock), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(self._close_quietly, descriptor)
+        return descriptor
+
+    def test_lock_held_elsewhere_times_out_without_writing(self):
+        """锁被其他进程持有时，写者按约定超时退出 1 且不写 include。"""
         harness = GatewayHarness(self, path_mode="fallback")
-        self.assertIsNone(shutil.which("flock", path=harness.path), "回退路径不应找到 flock")
-        lock_dir = Path(f"{harness.lock}.d")
-        lock_dir.mkdir(parents=True)
-        result = harness.run("add", "demo", "/demo/", "http://10.0.0.1:1", PORTAL_GATEWAY_LOCK_TIMEOUT=1)
+        self.assertIsNone(shutil.which("flock", path=harness.path), "不该依赖 flock(1)")
+        self.hold_lock(harness)
+        result = harness.run(
+            "add", "demo", "/demo/", "http://10.0.0.1:1", PORTAL_GATEWAY_LOCK_TIMEOUT=1
+        )
         self.assertEqual(1, result.returncode, result.stderr)
         self.assertFalse(harness.include.exists(), "未获得锁时不得写 include")
-        self.assertTrue(lock_dir.exists(), "失败方不得删除他人持有的目录锁")
         self.assertNotIn("已注册子系", result.stderr)
         # bash 3.2 回归：全角括号紧跟变量名会让诊断退化成 unbound variable。
-        self.assertIn("等待网关配置目录锁超时", result.stderr)
+        self.assertIn("等待网关配置锁超时", result.stderr)
         self.assertIn("操作：add", result.stderr)
         self.assertNotIn("unbound variable", result.stderr)
 
-    def test_mkdir_fallback_releases_lock_after_success(self):
-        """正常完成后必须删除目录锁，允许后续写者进入。"""
+    def test_waiting_writer_proceeds_after_holder_releases(self):
+        """锁在超时预算内被释放时，写者必须等待后继续完成写入。"""
+        harness = GatewayHarness(self, path_mode="fallback")
+        descriptor = self.hold_lock(harness)
+        releaser = threading.Timer(1.0, self._close_quietly, [descriptor])
+        releaser.start()
+        self.addCleanup(releaser.cancel)
+        started = time.monotonic()
+        result = harness.run(
+            "add", "demo", "/demo/", "http://10.0.0.1:1", PORTAL_GATEWAY_LOCK_TIMEOUT=10
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("proxy_pass http://10.0.0.1:1/;", harness.read_include())
+        self.assertGreaterEqual(elapsed, 0.9, f"写者没有等待锁：{elapsed}s")
+
+    def test_lock_is_released_after_success(self):
+        """正常完成后必须释放锁，允许后续写者立刻进入。"""
         harness = GatewayHarness(self, path_mode="fallback")
         self.assertEqual(0, harness.run("add", "demo", "/demo/", "http://10.0.0.1:1").returncode)
-        self.assertFalse(Path(f"{harness.lock}.d").exists())
-        self.assertEqual(0, harness.run("add", "other", "/other/", "http://10.0.0.2:2").returncode)
+        follow = harness.run("add", "other", "/other/", "http://10.0.0.2:2", PORTAL_GATEWAY_LOCK_TIMEOUT=1)
+        self.assertEqual(0, follow.returncode, follow.stderr)
+        content = harness.read_include()
+        self.assertEqual(2, content.count("# code="), content)
 
     def test_concurrent_adds_are_serialized(self):
         """两个并发 add 必须串行化，最终文件同时包含两个入口且内容完整。"""
         harness = GatewayHarness(self, path_mode="fallback")
         env = harness.env(PORTAL_GATEWAY_LOCK_TIMEOUT="30")
-        # 临时诊断（根因确认后移除）：让脚本把抢锁时间线写到 stderr，
-        # 便于在 CI 日志里看到两个写者的锁路径、抢锁分支与是否发生等待。
-        env["PORTAL_GATEWAY_LOCK_DEBUG"] = "1"
         commands = [
             ("demo", "/demo/", "http://10.0.0.1:1"),
             ("other", "/other/", "http://10.0.0.2:2"),
@@ -1398,7 +1449,6 @@ class LockTest(unittest.TestCase):
                 }
             ),
             f"耗时：{elapsed}",
-            f"剩余锁目录：{Path(str(harness.lock) + '.d').exists()}",
         ]
         for argv, process, (stdout, stderr) in zip(commands, processes, outputs):
             diagnostics.append(f"=== {argv[0]} rc={process.returncode} ===\n{stderr}")
@@ -1416,29 +1466,55 @@ class LockTest(unittest.TestCase):
             render_block("other", "/other", "http://10.0.0.2:2")
         ) + len(HEADER_ADD), len(content), f"文件存在多余内容：{content}\n{detail}")
 
-    def test_flock_path_passes_wait_timeout(self):
-        """存在 flock 时必须走 flock 路径，并把 LOCK_TIMEOUT 传给 -w。"""
-        harness = GatewayHarness(self, path_mode="host")
-        harness.write_flock_stub(exit_code=0)
-        result = harness.run("add", "demo", "/demo/", "http://10.0.0.1:1", PORTAL_GATEWAY_LOCK_TIMEOUT=7)
-        self.assertEqual(0, result.returncode, result.stderr)
-        records = harness.stub_records("flock")
-        self.assertTrue(records, "flock 桩未被调用")
-        self.assertEqual(["-w", "7", "9"], records[0]["argv"])
-        self.assertIn("proxy_pass http://10.0.0.1:1/;", harness.read_include())
+    def test_concurrent_adds_serialized_even_if_mkdir_never_excludes(self):
+        """回归：mkdir 在并发竞态下不可靠时，写锁仍必须互斥且不丢更新。
 
-    def test_flock_path_timeout_fails_without_writing(self):
-        """flock 拿不到锁时退出 1、不写文件，并给出可诊断信息。"""
-        harness = GatewayHarness(self, path_mode="host")
-        harness.write_flock_stub(exit_code=1)
-        result = harness.run("add", "demo", "/demo/", "http://10.0.0.1:1", PORTAL_GATEWAY_LOCK_TIMEOUT=2)
-        self.assertEqual(1, result.returncode, result.stderr)
-        self.assertFalse(harness.include.exists())
-        self.assertTrue(harness.stub_records("flock"))
-        # 必须真的输出超时诊断（bash 3.2 上也不得退化成 unbound variable）。
-        self.assertIn("等待网关配置锁超时", result.stderr)
-        self.assertIn("操作：add", result.stderr)
-        self.assertNotIn("unbound variable", result.stderr)
+        根因（CI 复现证据）：GitHub ubuntu-latest 的 coreutils 已换成 uutils 0.10，
+        它的 mkdir 在两个进程同时创建同一目录时会让双方都返回成功，旧 mkdir
+        目录锁因此静默失效——两个 add 同时进入临界区，后写者用陈旧读覆盖先写者。
+        这里用「mkdir 永远成功」的桩把该环境特性放大，锁必须仍然互斥。
+        """
+        harness = GatewayHarness(self, path_mode="fallback")
+        write_stub(
+            harness.bin,
+            "mkdir",
+            f"""import os, sys
+for argument in [item for item in sys.argv[1:] if item != "--"]:
+    try:
+        os.makedirs(argument, exist_ok=True)
+    except OSError:
+        pass
+sys.exit(0)""",
+            interpreter=sys.executable,
+        )
+        self.assertEqual(0, subprocess.run(
+            [str(harness.bin / "mkdir"), str(harness.tmp / "always-ok")],
+            capture_output=True, text=True,
+        ).returncode)
+        env = harness.env(PORTAL_GATEWAY_LOCK_TIMEOUT="30")
+        commands = [
+            ("demo", "/demo/", "http://10.0.0.1:1"),
+            ("other", "/other/", "http://10.0.0.2:2"),
+        ]
+        processes = [
+            subprocess.Popen(
+                [bash_executable(), str(SCRIPT), "add", *argv],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                env=env,
+            )
+            for argv in commands
+        ]
+        outputs = [process.communicate(timeout=120) for process in processes]
+        detail = "\n".join(stderr for _, stderr in outputs)
+        for process in processes:
+            self.assertEqual(0, process.returncode, detail)
+        content = harness.read_include()
+        self.assertIn(render_block("demo", "/demo", "http://10.0.0.1:1"), content, detail)
+        self.assertIn(render_block("other", "/other", "http://10.0.0.2:2"), content, detail)
+        self.assertEqual(2, content.count("# code="), content)
 
     def test_lock_timeout_must_be_positive_integer(self):
         """LOCK_TIMEOUT 非正整数时必须退出 2；空值按脚本约定回退默认 60 秒。"""

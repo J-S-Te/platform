@@ -47,12 +47,21 @@ for oneoff in \
   contract-migrate \
   project-migrate \
   settlement-migrate \
-  data-analysis-metabase-init \
   data-analysis-migrate; do
   grep -Fq "compose run --rm --no-deps $oneoff" "$deploy_service" ||
     fail "one-shot task does not remove its completed container: $oneoff"
 done
-pass 'all migration/init one-shot containers are removed after completion'
+pass 'all migration one-shot containers are removed after completion'
+
+# 子系统初始化服务（如 data-analysis-metabase-init）由生产子系统 provisioner 以
+# 具名容器运行并在成功后精确删除，不能要求 deploy-service.sh 也拥有 --rm 调用；
+# 但必须继续验证该清理路径存在，否则失败现场会被丢给 --rm 或产生 orphan 容器。
+provisioner="$bin_dir/../../../internal/platform/applicationregistry/infrastructure/production_compose_subsystem_provisioner.go"
+grep -Fq 'target.runComposeOutput(ctx, "run", "--name", initializationContainer, "--no-deps", service)' "$provisioner" ||
+  fail 'subsystem initialization service is not run with a stable container name'
+grep -Fq '"container", "rm", initializationContainer' "$provisioner" ||
+  fail 'subsystem initialization container is not removed after success'
+pass 'subsystem initialization containers are named and removed after success'
 
 # 平台配置校验必须复用 API 解析器且只读，并在迁移前失败关闭。
 grep -Fq 'platform-migrate ./api config-check' "$deploy_service" ||
@@ -266,6 +275,13 @@ docker() {
     * ) : ;;
   esac
 }
+scope_runtime_services() {
+  printf '%s\n' data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker data-analysis-metabase
+}
+scope_initialization_services() { printf '%s\n' data-analysis-metabase-init; }
+require_mysql_ready() { return 0; }
+backup_database_if_initialized() { return 0; }
+capture_data_analysis_role_config_hash() { :; }
 data_analysis_image_refs=('ref-api' 'ref-aggregation' 'ref-alert' 'ref-migrate')
 data_analysis_runtime_file="$test_root/runtime/data-analysis.env"
 mkdir -p "$test_root/runtime"

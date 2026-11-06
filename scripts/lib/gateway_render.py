@@ -1,19 +1,21 @@
 """portal-gateway 的渲染、解析与 sync 聚合核心（仅标准库，兼容 Python 3.9）。
 
-由 scripts/portal-gateway.sh 以子进程方式调用。shell 侧继续负责跨进程写锁
-（flock / mkdir 回退）、最终的文件写入（用 cat 覆盖以保留 bind mount inode）以及
-nginx -t / nginx -s reload；本模块负责纯逻辑：
+由 scripts/portal-gateway.sh 以子进程方式调用。shell 侧继续负责最终的文件写入
+（用 cat 覆盖以保留 bind mount inode）以及 nginx -t / nginx -s reload；本模块负责：
 
+  * 跨进程写锁：在 shell 已打开的锁文件描述符上取内核 flock（lock-fd 子命令），
+    不再依赖外部 flock(1) 命令，也不依赖 mkdir 的目录原子性；
   * nginx 托管头与 location 片段渲染（render_location）；
   * include 文件条目解析（parse_entry）；
   * curl --config 值转义（escape_curl_config）；
-  * code / path_prefix / upstream_url / page_limit 校验；
+  * code / path_prefix / upstream_url / page_limit / lock_timeout 校验；
   * sync 的分页拉取、聚合、空页守卫与 path_prefix 去重判定。
 
 进程约定（与 shell 封装严格对应）：
   stdin   不使用。
   stdout  成功时为「完整 include 内容」（add/remove/sync）或「列表输出」（list）。
-          shell 只在这个输出上做一次 cat 覆盖写，避免渲染与写入交错。
+          shell 只在这个输出上做一次 cat 覆盖写，避免渲染与写入交错；
+          lock-fd 子命令不使用 stdout，只把锁结果写进退出码。
   stderr  与 shell 版逐字一致的日志行 `[YYYY-mm-dd HH:MM:SS] [LEVEL] 消息`。
   退出码  0  stdout 有内容，需要写入/输出；
           1  运行时失败（curl 失败、分页自相矛盾等），禁止写文件；
@@ -27,12 +29,14 @@ PORTAL_GATEWAY_INTEGRATED_FRONTEND_CODES。
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from typing import List, Optional, Sequence, Tuple
 
 # nginx include 文件的托管头：add/remove/list 与 sync 使用不同首行，但落盘内容逐字节固定。
@@ -81,6 +85,10 @@ _UPSTREAM_URL_RE = re.compile(
 )
 _PAGE_LIMIT_RE = re.compile(r"[0-9]+")
 
+# 抢锁失败后的重试间隔（秒）。锁本身由内核 flock 提供，这里只是轮询的粒度；
+# 50ms 既不会明显放大延迟，也不会像 1s 轮询那样让第二个写者白等整秒。
+LOCK_POLL_INTERVAL = 0.05
+
 _MAX_PATH_PREFIX_LENGTH = 128
 _MAX_UPSTREAM_URL_LENGTH = 512
 _MAX_PORT = 65535
@@ -100,6 +108,10 @@ class GatewayInputError(Exception):
 
 class GatewayRuntimeError(Exception):
     """运行时失败（网络/分页异常）：shell 侧按退出码 1 处理。"""
+
+
+class GatewayLockTimeout(Exception):
+    """抢锁超时：shell 侧按退出码 1 处理，且不得继续写 include。"""
 
 
 class _CurlFailure(Exception):
@@ -304,6 +316,46 @@ def validate_page_limit(value: str) -> int:
             "PORTAL_GATEWAY_PAGE_LIMIT 必须在 1..100（后端最大页大小为 100）：%s" % value
         )
     return int(value)
+
+
+def validate_lock_timeout(value: str) -> int:
+    """校验 PORTAL_GATEWAY_LOCK_TIMEOUT 必须是正整数秒，返回其数值。"""
+    if not re.fullmatch(r"[1-9][0-9]*", value or ""):
+        raise GatewayInputError(
+            "PORTAL_GATEWAY_LOCK_TIMEOUT 必须是正整数：%s" % value
+        )
+    return int(value)
+
+
+def command_lock_fd(args: Sequence[str]) -> None:
+    """在 shell 传入的文件描述符上取排他 flock（非阻塞重试到超时）。
+
+    参数：<timeout> <lock_path> <operation> <fd>。锁挂在打开的 file description 上，
+    因此本进程退出后锁仍然由持有该 fd 的 shell 保持，直到 shell 关闭该 fd——
+    与 `flock -w TIMEOUT FD` 的内核语义完全一致，但不再依赖外部 flock(1) 命令。
+    """
+    if len(args) != 4:
+        raise GatewayInputError("lock-fd 需要 <timeout> <lock_path> <operation> <fd>")
+    timeout_text, lock_path, operation, fd_text = args
+    timeout_seconds = validate_lock_timeout(timeout_text)
+    try:
+        descriptor = int(fd_text)
+    except ValueError:
+        raise GatewayInputError("lock-fd 的 fd 必须是整数：%s" % fd_text)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                # 文案必须保留「等待网关配置锁超时」与「操作：」两段，运维脚本按此匹配。
+                log(
+                    "ERROR",
+                    "等待网关配置锁超时：%s（操作：%s）" % (lock_path, operation),
+                )
+                raise GatewayLockTimeout()
+            time.sleep(LOCK_POLL_INTERVAL)
 
 
 def duplicate_prefixes(entries: Sequence[Entry]) -> List[str]:
@@ -719,13 +771,16 @@ def _remove_entries(code: str, include_path: str) -> Optional[str]:
 
 
 def main(argv: Sequence[str]) -> int:
-    """CLI 入口：分发 add/remove/list/sync，把异常映射为稳定的退出码。"""
+    """CLI 入口：分发 add/remove/list/sync/lock-fd，把异常映射为稳定的退出码。"""
     command = argv[0] if argv else ""
     include_path = os.environ.get("PORTAL_GATEWAY_NGINX_INCLUDE", "")
     if command in ("add", "remove", "list", "sync") and not include_path:
         log("ERROR", "缺少 PORTAL_GATEWAY_NGINX_INCLUDE（由 portal-gateway.sh 注入）")
         return EXIT_INPUT
     try:
+        if command == "lock-fd":
+            command_lock_fd(argv[1:])
+            return EXIT_OK
         if command == "add":
             rendered = command_add(argv[1:], include_path)
         elif command == "remove":
@@ -742,6 +797,9 @@ def main(argv: Sequence[str]) -> int:
         return EXIT_INPUT
     except GatewayRuntimeError as error:
         log("ERROR", str(error))
+        return EXIT_RUNTIME
+    except GatewayLockTimeout:
+        # 文案已由 command_lock_fd 输出；退出码 1 让 shell 放弃本次写入。
         return EXIT_RUNTIME
     if rendered is None:
         return EXIT_NO_WRITE

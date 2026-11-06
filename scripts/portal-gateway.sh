@@ -11,8 +11,8 @@
 # 也不需要在 OAuth redirect_uri、LoginTarget.TargetURI 里写任何子系端口。
 #
 # 分工：本脚本只保留 shell 侧职责——CLI 分发与缺失参数校验、跨进程写锁
-# （flock 优先，macOS 回退原子 mkdir 目录锁）、把渲染结果用 cat 覆盖写回 include
-# 文件（保留 bind mount inode）、nginx -t / nginx -s reload。
+# （打开锁文件后由渲染器在继承的 fd 上取内核 flock，跨平台一致）、把渲染结果用
+# cat 覆盖写回 include 文件（保留 bind mount inode）、nginx -t / nginx -s reload。
 # 渲染与解析逻辑在 scripts/lib/gateway_render.py（仅标准库，Python 3.9+）：
 #   * nginx location 片段渲染、托管头、parse_entry 解析；
 #   * curl --config 值转义、code/path_prefix/upstream_url/page_limit 校验；
@@ -58,13 +58,6 @@ log() {
   printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >&2
 }
 
-# 临时诊断钩子（PORTAL_GATEWAY_LOCK_DEBUG=1）：把抢锁时间线写到 stderr，
-# 便于在 CI 上定位并发丢更新。默认关闭，开销是一次 [[ -n ]]。
-lock_debug() {
-  [[ -n "${PORTAL_GATEWAY_LOCK_DEBUG:-}" ]] || return 0
-  printf '[LOCKDBG] %s pid=%s %s\n' "${EPOCHREALTIME:-$(date '+%s')}" "$$" "$*" >&2
-}
-
 usage() {
   cat <<'USAGE'
 用法：
@@ -103,8 +96,17 @@ usage() {
 USAGE
 }
 
-# Linux 优先使用 util-linux flock；macOS 等缺少 flock 的环境回退到原子 mkdir 锁。
-# 锁覆盖完整的 read/merge/write 流程，避免 CI、provisioner 与人工操作并发时丢路由。
+# 跨进程写锁：由 shell 打开锁文件并把 fd 传给渲染器，渲染器在该 fd 上取内核
+# flock（LOCK_EX|LOCK_NB + 轮询到 PORTAL_GATEWAY_LOCK_TIMEOUT）。锁挂在打开的
+# file description 上，所以渲染器退出后锁仍由持有该 fd 的本进程保持，直到这里
+# 执行 exec 9>&- 释放——与 `flock -w TIMEOUT 9` 的内核语义一致。
+#
+# 这是唯一的加锁路径，不再区分 flock(1) 与 mkdir 目录锁：
+#   * flock(1) 在 macOS 上不存在，旧实现因此有两套分支；
+#   * 旧 mkdir 回退依赖「目录原子创建」，但 uutils coreutils 0.10（GitHub
+#     ubuntu-latest 镜像）的 mkdir 在并发竞态下会让两个进程都返回成功，
+#     目录锁静默失效并丢路由（CI 上 LockTest 偶发只剩一个条目）。
+# 内核 flock 与外部命令实现无关，两个平台的语义完全一致。
 run_with_gateway_lock() {
   local operation="$1"
   shift
@@ -114,41 +116,20 @@ run_with_gateway_lock() {
   }
   mkdir -p -- "$(dirname -- "$LOCK_FILE")"
 
-  if command -v flock >/dev/null 2>&1; then
-    local rc
-    lock_debug "branch=flock path=${LOCK_FILE} begin"
-    exec 9>"$LOCK_FILE"
-    if ! flock -w "$LOCK_TIMEOUT" 9; then
-      # 全角括号紧跟变量时必须用 ${var} 形式：bash 3.2 会把非 ASCII 字节当作变量名的一部分，
-      # 退化成 unbound variable，导致这条超时诊断整行丢失。
-      log "ERROR" "等待网关配置锁超时：${LOCK_FILE}（操作：${operation}）"
-      exec 9>&-
-      return 1
-    fi
-    lock_debug "branch=flock path=${LOCK_FILE} acquired"
-    if ( "$@" ); then rc=0; else rc=$?; fi
-    flock -u 9 || true
-    exec 9>&-
-    return "$rc"
+  if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    log "ERROR" "未找到 Python 3 解释器：${PYTHON_BIN}（写锁与渲染都由 scripts/lib/gateway_render.py 承担）"
+    return 1
   fi
 
-  # macOS 没有系统 flock 时，mkdir 的原子性提供互斥；锁目录只使用固定后缀，不拼入操作参数。
-  local lock_dir="${LOCK_FILE}.d" waited=0 rc
-  lock_debug "branch=mkdir path=${lock_dir} begin"
-  while ! mkdir -- "$lock_dir" 2>/dev/null; do
-    lock_debug "branch=mkdir path=${lock_dir} busy attempt=${waited}"
-    if (( waited >= LOCK_TIMEOUT )); then
-      log "ERROR" "等待网关配置目录锁超时：${lock_dir}（操作：${operation}）"
-      return 1
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  lock_debug "branch=mkdir path=${lock_dir} acquired"
-  # 子进程隔离可确保被调用函数中的 exit 不会跳过目录锁清理。
+  exec 9>"$LOCK_FILE"
+  if ! "$PYTHON_BIN" -B "$RENDER_SCRIPT" lock-fd "$LOCK_TIMEOUT" "$LOCK_FILE" "$operation" 9; then
+    exec 9>&-
+    return 1
+  fi
+  local rc
+  # 子进程隔离可确保被调用函数中的 exit 不会跳过锁释放。
   if ( "$@" ); then rc=0; else rc=$?; fi
-  lock_debug "branch=mkdir path=${lock_dir} release rc=${rc}"
-  rmdir -- "$lock_dir" 2>/dev/null || true
+  exec 9>&-
   return "$rc"
 }
 
