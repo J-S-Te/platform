@@ -16,14 +16,18 @@ import (
 	"gorm.io/gorm"
 )
 
-// 本验收在隔离 MySQL 8.4 上端到端验证迁移 000133（审计去重键补环境维度）：
-//   * 历史去重行一行不丢：能通过 audit_row_id 解析环境的行补 environment_id，
+// 本验收在隔离 MySQL 8.4 上端到端验证迁移 000135（审计去重键补环境维度）：
+//   - 历史去重行一行不丢：能通过 audit_row_id 解析环境的行补 environment_id，
 //     事件已被留存清理/行缺失的历史行保留在空环境，不再阻塞任何真实环境的摄取；
-//   * 同一应用不同环境的同名 event_id 各自被接受（此前后到环境被判 DUPLICATE 丢弃），
+//   - 同一应用不同环境的同名 event_id 各自被接受（此前后到环境被判 DUPLICATE 丢弃），
 //     同环境内重试仍返回 DUPLICATE；
-//   * 迁移语句可整体重跑：DDL 中途失败后用同一脚本重试不会因列/主键已存在而失败。
+//   - 迁移语句可整体重跑：DDL 中途失败后用同一脚本重试不会因列/主键已存在而失败。
+//
 // 运行方式：AUDIT_DEDUP_TEST_DSN 指向一个“可整体重建”的一次性数据库
 // （测试会 DROP/CREATE 该库），未配置时跳过。
+// TestAuditEventDedupEnvironmentMySQL 验证旧去重行迁移、环境隔离及重试幂等。
+// 参数：t为显式一次性MySQL测试上下文，未提供隔离DSN时不连接数据库。
+// 返回值：无；丢行、错误去重、迁移或重复执行失败时报告失败。
 func TestAuditEventDedupEnvironmentMySQL(t *testing.T) {
 	dsn := os.Getenv("AUDIT_DEDUP_TEST_DSN")
 	if dsn == "" {
@@ -96,7 +100,7 @@ func TestAuditEventDedupEnvironmentMySQL(t *testing.T) {
 		t.Fatalf("migration %06d not found in embedded set", version)
 	}
 	// 129/130/131 是当前审计表的既有形态（payload_hash_alg、只追加触发器、哈希链）；
-	// 133 之前的历史去重行必须在旧形态下才能写入。
+	// 135 之前的历史去重行必须在旧形态下才能写入。
 	for _, version := range []uint64{129, 130, 131} {
 		applyMigrationVersion(version)
 	}
@@ -136,7 +140,7 @@ func TestAuditEventDedupEnvironmentMySQL(t *testing.T) {
 	insertLegacyDedup("evt-purged", &orphanRow)
 	insertLegacyDedup("evt-unlinked", nil)
 
-	const migrationVersion = 133
+	const migrationVersion = 135
 	applyMigrationVersion(migrationVersion)
 
 	// 断言一：历史去重行一行不丢，可解析的补齐环境，不可解析的保留在空环境。

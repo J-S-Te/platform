@@ -1,12 +1,96 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# portal_proxy_preflight 用途：确认 Portal 渲染配置一致并信任实际前端对端。
+# 参数：无；读取当前发布使用的 Compose 模型与只读容器网络。
+# 返回值：成功保存预期代理值；缺失、非法或地址未覆盖时返回非零。
+portal_proxy_preflight() {
+  local rendered frontend_id frontend_networks
+  rendered="$(compose config --format json | python3 -c '
+import json
+import sys
+try:
+    model = json.load(sys.stdin)
+    services = model["services"]
+    api = services["portal-api"]
+    proxy = api.get("environment", {}).get("APP_TRUSTED_PROXIES")
+    migrate = services["portal-migrate"].get("environment", {}).get("APP_TRUSTED_PROXIES")
+    if not isinstance(proxy, str) or not proxy.strip() or proxy != migrate:
+        raise ValueError()
+    common = set(api["networks"]) & set(services["frontend"]["networks"])
+    networks = [model["networks"][name]["name"] for name in common]
+    if not networks:
+        raise ValueError()
+    print(json.dumps({"proxy": proxy, "networks": networks}))
+except (ValueError, KeyError, TypeError):
+    sys.exit("Portal 可信代理渲染配置缺失、不一致或没有共享前端网络")
+')" || return 1
+  frontend_id="$(compose ps -q frontend)" || return 1
+  [[ -n "$frontend_id" ]] || {
+    echo '缺少实际前端容器，无法核对 Portal 可信代理地址链' >&2
+    return 1
+  }
+  frontend_networks="$(docker inspect "$frontend_id" \
+    --format '{{json .NetworkSettings.Networks}}')" || return 1
+  portal_expected_proxies="$(python3 - "$rendered" "$frontend_networks" <<'PY'
+import ipaddress
+import json
+import sys
+
+try:
+    expected, actual = map(json.loads, sys.argv[1:])
+    prefixes = [ipaddress.ip_network(value.strip(), strict=False)
+                for value in expected['proxy'].split(',')]
+    addresses = [entry[key] for name in expected['networks']
+                 for entry in [actual.get(name, {})]
+                 for key in ('IPAddress', 'GlobalIPv6Address') if entry.get(key)]
+    if not addresses or any(not any(ipaddress.ip_address(address) in prefix
+                                    for prefix in prefixes) for address in addresses):
+        raise ValueError()
+    print(expected['proxy'])
+except (ValueError, KeyError, TypeError):
+    sys.exit('Portal 可信代理未覆盖实际前端地址，拒绝发布')
+PY
+)" || return 1
+}
+
+# verify_portal_proxy_runtime 用途：拒绝健康新镜像在旧环境配置下冒充发布成功。
+# 参数：无；读取预检预期值与实际 Portal 容器的单一非敏感配置键。
+# 返回值：实际环境与渲染值一致时成功，否则返回非零。
+verify_portal_proxy_runtime() {
+  local container_id actual
+  container_id="$(compose ps -q portal-api)" || return 1
+  [[ -n "$container_id" && -n "${portal_expected_proxies:-}" ]] || return 1
+  actual="$(docker inspect "$container_id" --format '{{json .Config.Env}}' | python3 -c '
+import json
+import sys
+try:
+    values = [entry.partition("=")[2] for entry in json.load(sys.stdin)
+              if entry.startswith("APP_TRUSTED_PROXIES=")]
+    if len(values) != 1:
+        raise ValueError()
+    print(values[0])
+except (ValueError, TypeError, AttributeError):
+    sys.exit("Portal 实际容器缺少唯一可信代理配置")
+')" || return 1
+  [[ "$actual" == "$portal_expected_proxies" ]] || {
+    echo 'Portal 实际容器可信代理与发布渲染值不一致' >&2
+    return 1
+  }
+}
+
 # 单模块入口不依赖另一模块的镜像或 runtime；旧双 digest 调用保留兼容。
 if [[ "${1:-}" == customer-opportunity || "${1:-}" == customer-portal ]]; then
   [[ $# == 2 ]] || { echo '用法：deploy-customer-opportunity.sh <customer-opportunity|customer-portal> <image@sha256:digest>' >&2; exit 2; }
   selected_component="$1"; selected_image="$2"
   source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/deploy.sh"
+  if [[ "$selected_component" == customer-portal ]]; then
+    portal_proxy_preflight || exit 1
+  fi
   publish_registered_customer "$selected_component" "$selected_image"
+  if [[ "$selected_component" == customer-portal ]]; then
+    verify_portal_proxy_runtime || exit 1
+  fi
   exit
 fi
 
@@ -526,6 +610,12 @@ if ! infrastructure_ready || ! customer_runtime_ready || ! portal_runtime_ready 
   exit 0
 fi
 
+if ! portal_proxy_preflight; then
+  restore_release || exit 1
+  echo 'Portal 可信代理预检失败，未执行业务迁移或容器切换' >&2
+  exit 1
+fi
+
 # 直接发布与 Agent 采用同一份已审核配置，新增运行 worker 不能在旧兼容入口中被遗漏。
 crm_selected_runtime="$(scope_runtime_services customer-opportunity)" || exit 1
 portal_selected_runtime="$(scope_runtime_services customer-portal)" || exit 1
@@ -809,11 +899,11 @@ if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 portal-a
   echo "Portal 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
   exit 1
 fi
-verify_service_image portal-api "$portal_image_ref" || {
+if ! verify_service_image portal-api "$portal_image_ref" || ! verify_portal_proxy_runtime; then
   rollback_runtime
   rm -f "$previous_release"
   exit 1
-}
+fi
 
 echo "切换 CRM Workers 与 Portal 邀请补偿 Worker"
 if ! compose up -d --force-recreate --no-deps "${customer_worker_services[@]}" || ! wait_for_workers; then

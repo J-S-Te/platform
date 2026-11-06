@@ -8,7 +8,7 @@ import (
 // 审计导出一次性下载票据表契约：只保存 SHA-256 摘要，唯一键保证一张票据只有一行，
 // 租户/任务索引支撑按"当前租户 + 当前任务"的兑换与清理查询。
 func TestAuditExportDownloadTicketMigrationStoresOnlyDigests(t *testing.T) {
-	body, err := Files.ReadFile("000137_audit_export_download_ticket.sql")
+	body, err := Files.ReadFile("000139_audit_export_download_ticket.sql")
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}

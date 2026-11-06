@@ -141,7 +141,7 @@ type exportDownloadClock struct{}
 func (exportDownloadClock) Now() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 // exportDownloadRepositoryStub 让 GetExportFile 返回夹具文件，并用内存票据表模拟
-// 000137 的原子核销语义：同一票据的并发兑换最多一个成功。
+// 000139 的原子核销语义：同一票据的并发兑换最多一个成功。
 type exportDownloadRepositoryStub struct {
 	mu      sync.Mutex
 	file    domain.ExportFile

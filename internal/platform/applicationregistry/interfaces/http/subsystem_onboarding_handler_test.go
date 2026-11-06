@@ -604,7 +604,7 @@ func TestDiscoverSubsystemCandidatesExcludesRegisteredApplicationsAcrossEnvironm
 
 func TestDiscoverSubsystemCandidatesOffersContractWhenNotRegistered(t *testing.T) {
 	t.Parallel()
-	// 合同管理改为探测接入后：全新库（迁移 000136 删除引导应用）没有登记记录时，
+	// 合同管理改为探测接入后：全新库（迁移 000138 删除引导应用）没有登记记录时，
 	// 合同候选必须和其它子系统一样出现在 discovery 结果里，供管理员走统一接入流程。
 	service := &stubSubsystemOnboardingService{}
 	provisioner := &recordingHTTPSubsystemProvisioner{candidates: []application.SubsystemDiscoveryCandidate{

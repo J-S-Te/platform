@@ -19,6 +19,12 @@ const (
 	keycloakRealmSSOIdleTimeoutSeconds          = int64(30 * 60)
 )
 
+// ensureRealm 调和受控Realm的事件、安全与技术会话基线。
+// 参数：ctx为调用上下文与取消边界。
+//
+//	token为待验证的服务器端令牌。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token string) error {
 	response, err := control.request(ctx, token, stdhttp.MethodGet, "/admin/realms/"+url.PathEscape(control.realm), nil)
 	if err != nil {
@@ -39,7 +45,7 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		if err := json.Unmarshal(body, &realm); err != nil {
 			return err
 		}
-		changed, updatePayload := realmEventSettingsPatch(realm)
+		changed, updatePayload := realmEventSettingsPatch(realm, control.centralSessionGovernance)
 		if !changed {
 			return nil
 		}
@@ -58,7 +64,7 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		return keycloakStatusError("read Keycloak Realm", response, stdhttp.StatusNotFound)
 	}
 	response.Body.Close()
-	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", map[string]any{
+	payload := map[string]any{
 		"realm": control.realm, "enabled": true,
 		"registrationAllowed": false, "verifyEmail": false,
 		"bruteForceProtected": true, "permanentLockout": false,
@@ -66,7 +72,9 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 		"maxFailureWaitSeconds": keycloakRealmTemporaryLockSeconds,
 		"ssoSessionIdleTimeout": keycloakRealmSSOIdleTimeoutSeconds,
 		"eventsEnabled":         true, "adminEventsEnabled": true, "eventsExpiration": keycloakDefaultRealmEventsExpirationSeconds,
-	})
+	}
+	_, payload = centralRealmSessionPatch(payload, control.centralSessionGovernance)
+	response, err = control.request(ctx, token, stdhttp.MethodPost, "/admin/realms", payload)
 	if err != nil {
 		return err
 	}
@@ -77,11 +85,22 @@ func (control *keycloakControlPlane) ensureRealm(ctx context.Context, token stri
 	return nil
 }
 
-func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
+// realmEventSettingsPatch 生成保留无关设置的Realm基线修正。
+// 参数：realm为既有受控Realm配置。
+//
+//	central为平台统一会话策略开关。
+//
+// 返回值：是否需要更新的标记及保留无关设置的补丁。
+func realmEventSettingsPatch(realm map[string]any, central ...bool) (bool, map[string]any) {
 	if realm == nil {
 		return false, nil
 	}
-	payload := make(map[string]any, 12)
+	idleTimeout := keycloakRealmSSOIdleTimeoutSeconds
+	enabled := len(central) > 0 && central[0]
+	if enabled {
+		idleTimeout = 28800
+	}
+	payload := make(map[string]any, 16)
 	changed := false
 	payload["registrationAllowed"] = false
 	payload["verifyEmail"] = false
@@ -92,7 +111,7 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 	payload["failureFactor"] = keycloakRealmMaxLoginFailures
 	payload["waitIncrementSeconds"] = keycloakRealmTemporaryLockSeconds
 	payload["maxFailureWaitSeconds"] = keycloakRealmTemporaryLockSeconds
-	payload["ssoSessionIdleTimeout"] = keycloakRealmSSOIdleTimeoutSeconds
+	payload["ssoSessionIdleTimeout"] = idleTimeout
 	payload["eventsEnabled"] = true
 	payload["adminEventsEnabled"] = true
 	payload["eventsExpiration"] = keycloakDefaultRealmEventsExpirationSeconds
@@ -126,8 +145,13 @@ func realmEventSettingsPatch(realm map[string]any) (bool, map[string]any) {
 	if !asInt64Equal(realm["maxFailureWaitSeconds"], keycloakRealmTemporaryLockSeconds) {
 		changed = true
 	}
-	if !asInt64Equal(realm["ssoSessionIdleTimeout"], keycloakRealmSSOIdleTimeoutSeconds) {
+	if !asInt64Equal(realm["ssoSessionIdleTimeout"], idleTimeout) {
 		changed = true
+	}
+	if enabled {
+		centralChanged, _ := centralRealmSessionPatch(realm, true)
+		_, payload = centralRealmSessionPatch(payload, true)
+		changed = changed || centralChanged
 	}
 	if changed {
 		return true, payload

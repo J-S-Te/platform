@@ -124,6 +124,7 @@ runtime:
         CRM_PROVISION_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_PROVISION_SCOPE: customer.import_provision
         CRM_PROVISION_OPPORTUNITY_SCOPE: opportunity.import_provision
+        PROJECT_INTEGRATION_ENABLED: "true"
         PROJECT_API_BASE_URL: http://project-api:8082
         PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         PROJECT_INTEGRATION_AUDIENCE: basic-platform-application
@@ -148,6 +149,8 @@ runtime:
         CONTRACT_IMPORT_FINANCE_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
         SETTLEMENT_INTEGRATION_CLIENT_ID: service.settlement_contract_ingest.client_id
         SETTLEMENT_INTEGRATION_CLIENT_SECRET: service.settlement_contract_ingest.client_secret
+        CENTRAL_SESSION_ENABLED: central_session_enabled
+        CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
         OIDC_ISSUER: issuer
         OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
         OIDC_CLIENT_ID: client_id

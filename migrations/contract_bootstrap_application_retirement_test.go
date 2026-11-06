@@ -7,10 +7,10 @@ import (
 	"github.com/J-S-Te/Basic-Platform/migrations"
 )
 
-// 合同管理不再由迁移内嵌注册：000136 只在完全没有使用证据时删除 000045 的引导应用行。
+// 合同管理不再由迁移内嵌注册：000138 只在完全没有使用证据时删除 000045 的引导应用行。
 // 该静态门禁锁定安全边界，避免后续误改成无条件删除真实接入记录。
 func TestLegacyContractBootstrapApplicationRetirementKeepsEvidence(t *testing.T) {
-	content, err := migrations.Files.ReadFile("000136_retire_contract_management_bootstrap_application.sql")
+	content, err := migrations.Files.ReadFile("000138_retire_contract_management_bootstrap_application.sql")
 	if err != nil {
 		t.Fatalf("read contract bootstrap retirement migration: %v", err)
 	}

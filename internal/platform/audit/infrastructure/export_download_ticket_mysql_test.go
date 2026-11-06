@@ -37,7 +37,7 @@ func TestExportDownloadTicketConsumeIsAtomicOnMySQL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	// 只应用本表迁移：它是独立新增表，不依赖既有业务表，便于在空的一次性库上重复执行。
-	body, err := migrations.Files.ReadFile("000137_audit_export_download_ticket.sql")
+	body, err := migrations.Files.ReadFile("000139_audit_export_download_ticket.sql")
 	if err != nil {
 		t.Fatalf("read ticket migration: %v", err)
 	}

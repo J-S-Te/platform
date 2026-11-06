@@ -997,9 +997,18 @@ func debugOIDCUpdateFingerprint(input application.SubsystemProvisioningInput) {
 		input.ApplicationCode, input.Environment, input.AuthenticationRuntimeUpdate, input.ClientID, fingerprint)
 }
 
+// updateOIDCRuntimeConfiguration 通过既有受控运行配置更新OIDC与统一会话接线。
+// 参数：input为经过调用方边界校验的业务输入。
+//
+//	environmentPath为受控运行环境文件路径。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfiguration(input application.SubsystemProvisioningInput, environmentPath string) error {
 	debugOIDCUpdateFingerprint(input)
-	values := map[string]string{}
+	values, policyErr := managedSessionEnvironment(input.CentralSessionPolicy, input.ApplicationCode)
+	if policyErr != nil {
+		return policyErr
+	}
 	backchannel := provisioner.oidcBackchannelBaseURL(input.Issuer)
 	currentContent, readErr := os.ReadFile(environmentPath)
 	if readErr != nil {
@@ -1098,9 +1107,17 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateOIDCRuntimeConfigurati
 	return nil
 }
 
-// applyLocked 在调用方持锁后原子写入本地配置并执行受控编排，保留明确独立来源选择。
-// 参数：ctx为操作上下文，input为已授权目标、身份和服务凭据。
-// 返回值：配置、许可、部署或同步失败时返回错误并保留现场，便于诊断和安全重试。
+// applyLocked 在部署互斥保护内执行已授权的接入请求。
+//
+//	applyLocked 包含 Provision 的实际写入与启动流程，调用方必须先持有互斥锁；环境文件采用
+//	临时文件加原子替换，Compose 或网关失败时保留现场，便于诊断和安全重试；已明确选择的
+//	独立业务来源不会被自动更新覆盖。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	input为经过调用方边界校验的业务输入。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	if err := provisioner.deliverLocalRuntimeLicense(ctx, input); err != nil {
 		return err
@@ -1436,6 +1453,15 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 	if err := provisioner.p1LocalRuntimeValues(input, environmentPath, values, true); err != nil {
 		return err
 	}
+	policyValues, policyErr := managedSessionEnvironment(input.CentralSessionPolicy, input.ApplicationCode)
+	if policyErr != nil {
+		return policyErr
+	}
+	for key, value := range policyValues {
+		values[key] = value
+	}
+	// 统一会话值写入后再保留运维已明确选择的独立业务来源：两者键空间不重叠，
+	// 保留逻辑只覆盖白名单业务开关，不改变平台会话开关。
 	if err := preserveLocalBusinessIntegrationFlags(input.ApplicationCode, environmentSource, environmentSource, values); err != nil {
 		return provisioningError("read adopted subsystem business source selection")
 	}

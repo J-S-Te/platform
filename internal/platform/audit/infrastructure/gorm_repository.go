@@ -97,7 +97,7 @@ type eventQueryRow struct {
 }
 
 // dedupModel 映射 audit_event_dedup：去重维度是（应用、环境、事件）三元组。
-// 环境维度自 000133 起进入主键——同一应用在不同环境复用同一 event_id 是合法场景
+// 环境维度自 000135 起进入主键——同一应用在不同环境复用同一 event_id 是合法场景
 // （环境克隆/共用发布批次），只有同环境内重复才算 DUPLICATE。
 type dedupModel struct {
 	ApplicationID string `gorm:"column:application_id;primaryKey"`
@@ -258,7 +258,7 @@ func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environme
 
 func (r *Repository) ingestEvent(tx *gorm.DB, tenantID string, app applicationModel, env environmentModel, input application.EventInput, now time.Time) (domain.Receipt, error) {
 	// 去重键按（应用、环境）隔离，同环境重试相同 event_id 返回 DUPLICATE，跨环境同名
-	// event_id 必须是独立事件（000133 起主键含 environment_id）；事件行和去重行在同一
+	// event_id 必须是独立事件（000135 起主键含 environment_id）；事件行和去重行在同一
 	// 事务写入，即使并发竞争唯一键，也不会留下只有一侧记录的不完整状态。
 	var existing dedupModel
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("application_id = ? AND environment_id = ? AND event_id = ?", app.ID, env.ID, input.EventID).Take(&existing).Error
@@ -596,7 +596,7 @@ func (r *Repository) GetExportFile(ctx context.Context, tenantID, jobID string) 
 	return domain.ExportFile{FileID: result.FileID, StorageRelativePath: result.StorageRelativePath, OriginalName: result.OriginalName, MediaType: result.MediaType, Status: result.Status, CreatedAt: result.CreatedAt}, nil
 }
 
-// auditExportDownloadTicketModel 映射 audit_export_download_ticket（000137）：只保存
+// auditExportDownloadTicketModel 映射 audit_export_download_ticket（000139）：只保存
 // 明文 token 的 SHA-256 摘要，明文永不落库，因此拿到整表也无法兑换文件。
 type auditExportDownloadTicketModel struct {
 	ID        string

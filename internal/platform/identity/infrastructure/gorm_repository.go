@@ -12,6 +12,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/backchannel"
+	sessiondomain "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/domain"
+	sessionstore "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/infrastructure"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -32,6 +34,14 @@ const sessionLastSeenWriteInterval = 60 * time.Second
 // 它不使用 GORM 的 schema 迁移 API。
 type GORMRepository struct {
 	database *gorm.DB
+	central  *sessionstore.Store
+}
+
+// EnableCentralSessions 由组合根在受控启用时注入平台唯一生命周期权威。
+// 参数：central为已迁移的中央存储，不接受请求动态修改。
+// 返回值：无。
+func (repository *GORMRepository) EnableCentralSessions(central *sessionstore.Store) {
+	repository.central = central
 }
 
 // NewGORMRepository 使用应用共享的 GORM 句柄构造身份仓储；句柄为 nil 时返回错误。
@@ -131,8 +141,19 @@ func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx conte
 	})
 }
 
-// CreateSession 以账号行的排他锁串行化同一账号的登录。清理过期会话、判断并发会话、
-// 可选替换旧会话和插入新会话处于同一事务，两个终端不能同时越过活动会话检查。
+// CreateSession 创建平台会话并按启用策略附着中央周期。
+//
+//	CreateSession 以账号行的排他锁串行化同一账号的登录。清理过期会话、判断并发会话、
+//	可选替换旧会话和插入新会话处于同一事务，两个终端不能同时越过活动会话检查。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	account为当前租户内账号记录。
+//	session为当前浏览器的服务端会话。
+//	idleTimeout为平台策略给出的空闲期限。
+//	replaceExisting为是否显式替换原登录会话。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
 	if idleTimeout <= 0 {
 		return application.ErrUnauthenticated
@@ -180,17 +201,18 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 		}
 
 		idleTimeoutReason := "IDLE_TIMEOUT"
-		if err := transaction.Model(&sessionModel{}).
-			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?", account.TenantID, account.AccountID, domain.StatusActive, now).
-			Where("COALESCE(last_interactive_at, last_seen_at) <= ?", idleCutoff).
+		idleQuery := transaction.Model(&sessionModel{}).
+			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?", account.TenantID, account.AccountID, domain.StatusActive, now)
+		if err := repository.withSessionActivity(idleQuery, now, idleCutoff, false).
 			Updates(map[string]any{"status": "EXPIRED", "revoked_at": now, "revoke_reason": idleTimeoutReason}).Error; err != nil {
 			return fmt.Errorf("expire idle account sessions before login: %w", err)
 		}
 
 		var activeSessionCount int64
-		if err := transaction.Model(&sessionModel{}).
+		activeQuery := transaction.Model(&sessionModel{}).
 			Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", account.TenantID, account.AccountID, domain.StatusActive).
-			Where("expires_at > ? AND COALESCE(last_interactive_at, last_seen_at) > ?", now, idleCutoff).
+			Where("expires_at > ?", now)
+		if err := repository.withSessionActivity(activeQuery, now, idleCutoff, true).
 			Count(&activeSessionCount).Error; err != nil {
 			return fmt.Errorf("count active account sessions before login: %w", err)
 		}
@@ -198,6 +220,12 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 			return application.ErrConcurrentSession
 		}
 		if activeSessionCount > 0 {
+			if repository.central != nil {
+				if err := sessionstore.RevokeIdentityTx(transaction, account.TenantID, account.UserID, now,
+					"REPLACED_BY_PASSWORD_LOGIN", session.CentralSessionID); err != nil {
+					return err
+				}
+			}
 			if err := transaction.Model(&sessionModel{}).
 				Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", account.TenantID, account.AccountID, domain.StatusActive).
 				Updates(map[string]any{
@@ -228,6 +256,14 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 		}).Error; err != nil {
 			return fmt.Errorf("insert browser session: %w", err)
 		}
+		if repository.central != nil {
+			_, err := sessionstore.LinkPlatformTx(transaction, sessiondomain.PlatformAnchor{ID: session.ID,
+				TenantID: session.TenantID, IdentityID: account.UserID, AuthenticatedAt: now,
+				LastInteractiveAt: now, ExpiresAt: session.ExpiresAt}, session.CentralSessionID)
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -243,6 +279,17 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	}
 	now = now.UTC()
 	idleCutoff := now.Add(-idleTimeout)
+	var centralState sessionstore.Context
+	if repository.central != nil {
+		var err error
+		centralState, err = repository.central.PlatformState(ctx, sessionID, now, false)
+		if errors.Is(err, sessiondomain.ErrInactive) {
+			return domain.Principal{}, application.ErrUnauthenticated
+		}
+		if err != nil {
+			return domain.Principal{}, err
+		}
+	}
 
 	var session sessionModel
 	if err := repository.database.WithContext(ctx).
@@ -256,8 +303,8 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	if session.Status != domain.StatusActive || session.RevokedAt != nil || !session.ExpiresAt.After(now) {
 		return domain.Principal{}, application.ErrUnauthenticated
 	}
-	if !session.LastInteractiveAt.After(idleCutoff) {
-		if err := repository.RevokeAccountSessions(ctx, session.TenantID, session.AccountID, now, "IDLE_TIMEOUT"); err != nil {
+	if repository.central == nil && !session.LastInteractiveAt.After(idleCutoff) {
+		if err := repository.RevokeSession(ctx, sessionID, now, "IDLE_TIMEOUT"); err != nil && !errors.Is(err, application.ErrUnauthenticated) {
 			return domain.Principal{}, err
 		}
 		return domain.Principal{}, application.ErrUnauthenticated
@@ -271,7 +318,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 		Joins("JOIN iam_account AS account ON account.id = session.account_id AND account.tenant_id = session.tenant_id AND account.status = ? AND (account.valid_until IS NULL OR account.valid_until > ?)", domain.StatusActive, now).
 		Joins("JOIN iam_user AS user ON user.id = account.user_id AND user.tenant_id = session.tenant_id AND user.status = ? AND (user.valid_until IS NULL OR user.valid_until > ?)", domain.StatusActive, now).
 		Where("session.id = ? AND session.status = ?", sessionID, domain.StatusActive).
-		Where("session.revoked_at IS NULL AND session.expires_at > ? AND session.last_interactive_at > ?", now, idleCutoff).
+		Where("session.revoked_at IS NULL AND session.expires_at > ? AND (? OR session.last_interactive_at > ?)", now, repository.central != nil, idleCutoff).
 		Limit(1).
 		Find(&row)
 	if result.Error != nil {
@@ -289,7 +336,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	//     行自身已提交的值，最坏情况多写一次，不会漏写或让会话状态错乱。
 	if now.Sub(session.LastSeenAt) >= sessionLastSeenWriteInterval {
 		touch := repository.database.WithContext(ctx).Model(&sessionModel{}).
-			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND (? OR last_interactive_at > ?)", sessionID, domain.StatusActive, now, repository.central != nil, idleCutoff).
 			Where("last_seen_at <= ?", now.Add(-sessionLastSeenWriteInterval)).
 			Update("last_seen_at", now)
 		if touch.Error != nil {
@@ -302,7 +349,7 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 			var activeSession sessionModel
 			check := repository.database.WithContext(ctx).
 				Select("id").
-				Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND last_interactive_at > ?", sessionID, domain.StatusActive, now, idleCutoff).
+				Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ? AND (? OR last_interactive_at > ?)", sessionID, domain.StatusActive, now, repository.central != nil, idleCutoff).
 				Take(&activeSession)
 			if check.Error != nil {
 				if errors.Is(check.Error, gorm.ErrRecordNotFound) {
@@ -320,6 +367,9 @@ func (repository *GORMRepository) FindPrincipalBySession(ctx context.Context, se
 	permissions, err := repository.findPermissionCodes(ctx, row.TenantID, row.UserID, row.AccountID, now)
 	if err != nil {
 		return domain.Principal{}, err
+	}
+	if repository.central != nil {
+		session.LastInteractiveAt = now.Add(time.Duration(centralState.IdleRemainingMS)*time.Millisecond - idleTimeout)
 	}
 	return domain.Principal{
 		SessionID:           row.SessionID,
@@ -344,9 +394,27 @@ func sessionIdleDeadline(session sessionModel, idleTimeout time.Duration) time.T
 	return deadline.UTC()
 }
 
-// RefreshSession 保持登录时确定的不可变到期时间，只记录当前活动。返回持久化的到期时间，
-// 让调用方签发的替换 Cookie/JWT 永远不会超出原始登录会话的生命周期。
+// RefreshSession 核验会话与在线身份并读取权威期限。
+//
+//	RefreshSession 保持登录时确定的不可变到期时间，只记录当前活动。返回持久化的到期时间，
+//	让调用方签发的替换 Cookie/JWT 永远不会超出原始登录会话的生命周期。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	sessionID为当前会话持久标识。
+//	refreshedAt为本次服务端核验时间。
+//
+// 返回值：经过核验的主体或会话；明确失效与暂时依赖错误分别返回。
 func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID string, refreshedAt time.Time) (time.Time, error) {
+	if repository.central != nil {
+		_, err := repository.central.PlatformState(ctx, sessionID, refreshedAt, false)
+		if errors.Is(err, sessiondomain.ErrInactive) {
+			return time.Time{}, application.ErrUnauthenticated
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
 	var session sessionModel
 	lookup := repository.database.WithContext(ctx).
 		Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?", sessionID, domain.StatusActive, refreshedAt.UTC()).
@@ -365,16 +433,43 @@ func (repository *GORMRepository) RefreshSession(ctx context.Context, sessionID 
 	if result.Error != nil {
 		return time.Time{}, fmt.Errorf("refresh fixed session activity: %w", result.Error)
 	}
-	if result.RowsAffected != 1 {
-		return time.Time{}, application.ErrUnauthenticated
+	if result.RowsAffected == 0 {
+		// MySQL同毫秒写相同last_seen返回零变更；必须复核撤销和原截止，不能误判为退出。
+		recheck := repository.database.WithContext(ctx).
+			Select("id", "expires_at").
+			Where("id = ? AND status = ? AND revoked_at IS NULL AND expires_at > ?",
+				sessionID, domain.StatusActive, refreshedAt.UTC()).Take(&session)
+		if errors.Is(recheck.Error, gorm.ErrRecordNotFound) {
+			return time.Time{}, application.ErrUnauthenticated
+		}
+		if recheck.Error != nil {
+			return time.Time{}, fmt.Errorf("recheck fixed session refresh: %w", recheck.Error)
+		}
 	}
 	return session.ExpiresAt.UTC(), nil
 }
 
-// RecordSessionInteraction 只记录用户显式发起的浏览器事件。普通已认证请求不得调用本方法：
-// 它们只在 FindPrincipalBySession 中按 sessionLastSeenWriteInterval 节流更新 last_seen_at，
-// 使后台轮询无法为空闲会话续命。
+// RecordSessionInteraction 原子核验并推进当前会话的真实活动时间。
+//
+//	RecordSessionInteraction 只记录用户显式发起的浏览器事件。普通已认证请求不得调用本方法：
+//	它们只在 FindPrincipalBySession 中按 sessionLastSeenWriteInterval 节流更新 last_seen_at，
+//	使后台轮询无法为空闲会话续命。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	sessionID为当前会话持久标识。
+//	interactedAt为经过校验的真实交互时间。
+//	idleTimeout为平台策略给出的空闲期限。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, sessionID string, interactedAt time.Time, idleTimeout time.Duration) error {
+	if repository.central != nil {
+		_, err := repository.central.PlatformState(ctx, sessionID, interactedAt, true)
+		if errors.Is(err, sessiondomain.ErrInactive) {
+			return application.ErrUnauthenticated
+		}
+		return err
+	}
 	if idleTimeout <= 0 {
 		return application.ErrUnauthenticated
 	}
@@ -408,24 +503,40 @@ func (repository *GORMRepository) RecordSessionInteraction(ctx context.Context, 
 	return nil
 }
 
-// RevokeSession 把当前活跃会话标记为已吊销。API 从不删除会话行。
+// RevokeSession 撤销当前会话及其匹配的中央周期。
+//
+//	RevokeSession 把当前活跃会话标记为已吊销。API 从不删除会话行。
+//
+// 参数：ctx为调用上下文与取消边界。
+//
+//	sessionID为当前会话持久标识。
+//	revokedAt为本次服务端撤销时间。
+//	reason为本次撤销的明确业务原因。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (repository *GORMRepository) RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time, reason string) error {
-	result := repository.database.WithContext(ctx).
-		Model(&sessionModel{}).
-		Where("id = ? AND status = ?", sessionID, domain.StatusActive).
-		Where("revoked_at IS NULL").
-		Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt.UTC(), "revoke_reason": reason})
-	if result.Error != nil {
-		return fmt.Errorf("revoke session: %w", result.Error)
-	}
-	if result.RowsAffected != 1 {
-		return application.ErrUnauthenticated
-	}
-	return nil
+	return repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.
+			Model(&sessionModel{}).
+			Where("id = ? AND status = ?", sessionID, domain.StatusActive).
+			Where("revoked_at IS NULL").
+			Updates(map[string]any{"status": "REVOKED", "revoked_at": revokedAt.UTC(), "revoke_reason": reason})
+		if result.Error != nil {
+			return fmt.Errorf("revoke session: %w", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrUnauthenticated
+		}
+		if repository.central != nil {
+			return sessionstore.RevokePlatformTx(tx, sessionID, revokedAt, reason)
+		}
+		return nil
+	})
 }
 
-// RevokeAccountSessions 使一个租户账号的全部活跃 SSO 会话及由其派生的每个 OIDC 刷新
-// 令牌族失效。它同时服务于显式全局登出，以及任一子系统发现的不活跃过期。
+// RevokeAccountSessions 将账号对应身份的中央周期、IAM会话及OIDC刷新族整体撤销。
+// 参数：ctx为请求，tenantID/accountID为可信账号范围，revokedAt/reason为撤销证据。
+// 返回值：数据库失败或旧模式无活跃会话时错误；中央模式覆盖无IAM关联的业务周期。
 func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error {
 	hadActiveSessions := false
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -442,19 +553,15 @@ func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, ten
 	// 保留调用方依赖的登出语义：没有活跃会话时仍返回未认证。与旧实现不同的是，本次已经
 	// 完成的令牌族/授权码撤销会提交而不是随之回滚——否则“会话已过期但刷新令牌仍有效”的
 	// 账号永远无法被清理。
-	if !hadActiveSessions {
+	if !hadActiveSessions && repository.central == nil {
 		return application.ErrUnauthenticated
 	}
 	return nil
 }
 
-// revokeAccountSessionsTx 在调用方事务内执行完整的账号撤销：锁定活跃会话、撤销由这些
-// 会话派生的 OAuth 刷新令牌与令牌族、作废未消费授权码，并为已登录 RP 入队 Back-Channel
-// Logout。返回是否存在被锁定的活跃会话。
-//
-// 没有活跃会话的账号是合法场景（从未登录、会话已过期、离职流程重复执行），此时仍然继续
-// 撤销令牌族与授权码，调用方不要用“无会话”作为跳过撤销的理由。事务句柄必须来自调用方的
-// 业务事务：任一步失败都要让整个业务写入回滚。
+// revokeAccountSessionsTx 在同一事务撤销中央周期、平台会话及OAuth凭据并登记退出通知。
+// 参数：transaction为调用方业务事务，tenantID/accountID限定账号，revokedAt/reason为撤销证据。
+// 返回值：是否有活跃平台会话；即使没有仍清理其余凭据，任一依赖失败让整个业务事务回滚。
 func (repository *GORMRepository) revokeAccountSessionsTx(transaction *gorm.DB, tenantID, accountID string, revokedAt time.Time, reason string) (bool, error) {
 	if transaction == nil {
 		return false, errors.New("account session revocation requires a transaction")
@@ -467,6 +574,11 @@ func (repository *GORMRepository) revokeAccountSessionsTx(transaction *gorm.DB, 
 		Select("id").Where("tenant_id = ? AND account_id = ? AND status = ? AND revoked_at IS NULL", tenantID, accountID, domain.StatusActive).
 		Find(&lockedSessions).Error; err != nil {
 		return false, fmt.Errorf("lock account sessions before revocation: %w", err)
+	}
+	if repository.central != nil {
+		if err := sessionstore.RevokeAccountTx(transaction, tenantID, accountID, revokedAt, reason); err != nil {
+			return false, err
+		}
 	}
 	// 趁会话 ID 仍可用，先吊销 OAuth 刷新令牌族，防止 RP 在全局登出后为旧用户刷新
 	// ID/访问令牌。
@@ -544,7 +656,8 @@ func backchannelLogoutOutboxRow(id string, target backchannelLogoutTarget, now t
 }
 
 // enqueueBackchannelLogout 在调用方事务中为已登录 RP 创建持久投递任务。
-// 参数 transaction 必须是 RevokeAccountSessions 的事务句柄；返回错误时调用方必须回滚整个会话撤销。
+// 参数：transaction 为撤销事务，tenantID/accountID 为账号范围，sessions/now 为会话及撤销时钟。
+// 返回值：生成或持久化通知失败时返回错误，由调用方回滚整个会话撤销。
 func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB, tenantID, accountID string, sessions []sessionModel, now time.Time) error {
 	if transaction == nil || len(sessions) == 0 {
 		return nil
@@ -563,14 +676,16 @@ func (repository *GORMRepository) enqueueBackchannelLogout(transaction *gorm.DB,
 			return fmt.Errorf("generate back-channel logout event ID: %w", err)
 		}
 		row := backchannelLogoutOutboxRow(id, target, now)
-		// 其他数据库错误仍向上传播，不能把 Outbox 失败伪装成注销成功。
-		// MySQL 不支持 ON CONFLICT DO NOTHING，DoNothing 会生成空的
-		// ON DUPLICATE KEY UPDATE 子句（1064 语法错误）。这里改用幂等的空更新：
-		// 冲突时把 status 赋回自身，保留既有投递状态且不产生重复任务。
+		// map 插入没有模型 Schema，MySQL 的 DoNothing 无法推导无操作更新列，
+		// 会生成空的 ON DUPLICATE KEY UPDATE 子句（1064 语法错误）；同时不能吞错，
+		// 否则 Outbox 失败会被伪装成注销成功。这里显式保留已有 ID：冲突时既保持幂等，
+		// 又避免重复入队覆盖事件标识、jti 或投递进度；其他数据库错误仍回滚整个撤销。
 		if err = transaction.Table("platform_oauth_backchannel_logout_outbox").
 			Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}},
-				DoUpdates: clause.Assignments(map[string]any{"status": gorm.Expr("status")}),
+				Columns: []clause.Column{{Name: "oauth_client_id"}, {Name: "session_id"}},
+				DoUpdates: clause.Set{{
+					Column: clause.Column{Name: "id"}, Value: clause.Column{Name: "id"},
+				}},
 			}).
 			Create(row).Error; err != nil {
 			return fmt.Errorf("enqueue OIDC back-channel logout: %w", err)
