@@ -1,6 +1,9 @@
 package infrastructure
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // preserveLocalBusinessIntegrationFlags 保留已明确选择独立来源后的业务联动关闭决定。
 // 参数：code为目标应用，modePath为来源选择文件，currentPath为旗标文件，values为自动更新值。
@@ -75,4 +78,46 @@ func localBusinessModeFlagKeys(code string, modes map[string]string) []string {
 		}
 	}
 	return nil
+}
+
+// explicitBusinessModeKeys 是各应用在受控更新中必须保留运维明确选择的联动开关。
+// 与 localBusinessModeFlagKeys 的差异：这里用于正式环境更新，已有运行文件里的显式
+// 布尔值代表运维已经做出的来源/联动决定，不能在下发清单默认值时被静默覆盖。
+var explicitBusinessModeKeys = map[string][]string{
+	integratedContractApplicationCode: {
+		"CRM_REFERENCE_ENABLED", "PROJECT_INTEGRATION_ENABLED",
+		"SETTLEMENT_INTEGRATION_OUTBOUND_ENABLED", "CRM_LINK_ENABLED",
+	},
+	integratedCustomerApplicationCode: {
+		"CONTRACT_VERIFICATION_ENABLED", "CONTRACT_SIGNED_COUNT_ENABLED",
+	},
+	integratedProjectApplicationCode: {
+		"CONTRACT_INTEGRATION_ENABLED", "CONTRACT_APPROVAL_VALIDATION_ENABLED",
+		"CONTRACT_INTEGRATION_REQUIRE_BEARER", "PROJECT_CONTRACT_IMPORT_ENABLED",
+		"SETTLEMENT_REFERENCE_ENABLED",
+	},
+	integratedSettlementApplicationCode: {
+		"SETTLEMENT_INTEGRATION_ENABLED", "SETTLEMENT_CONTRACT_IMPORT_ENABLED",
+		"SETTLEMENT_CRM_CREDIT_SYNC_ENABLED",
+	},
+	integratedPortalApplicationCode: {"PORTAL_INVITE_ENABLED"},
+}
+
+// preserveExplicitBusinessModeValues 保留正式运行文件中已明确写入的联动布尔选择。
+// 参数：code为应用，current为当前运行文件，values为本次受控更新准备写入的键值。
+// 返回值：无；仅覆盖 values 中同时存在、且 current 为合法布尔值的联动键。
+func preserveExplicitBusinessModeValues(code string, current, values map[string]string) {
+	for _, key := range explicitBusinessModeKeys[code] {
+		raw, exists := current[key]
+		if !exists {
+			continue
+		}
+		if _, err := strconv.ParseBool(strings.TrimSpace(raw)); err != nil {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			continue
+		}
+		values[key] = raw
+	}
 }
