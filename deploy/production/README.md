@@ -634,7 +634,38 @@ chmod 750 bin/deploy-customer-opportunity.sh
 
 恢复演练要验证数据库、文件、Issuer、Client 凭据和上一镜像能共同恢复；只回退镜像不能逆转不兼容迁移。通用 MySQL 恢复会在统一部署锁内检查全部实际运行写入者；恢复 `contract-mysql` 还需要独立 Temporal 维护确认，文件网关数据库禁止脱离对象文件单独恢复。
 
-### 6.1 Keycloak 数据库逻辑备份与恢复
+### 6.1 备份保留与磁盘清理
+
+发布前备份和灾备批次都落在 `backups/`，长期只增不减会把磁盘撑满（2026-11-06 测试服务器曾因多仓并发部署触发 `gzip: stdout: No space left on device`，4 个仓发布被拒）。清理入口是 `bin/prune-backups.sh`：
+
+- 默认 **dry-run**，只打印 `KEEP`/`DELETE`/`SKIP` 计划、`df -h` 与预计释放空间；只有显式 `--apply` 才删除。
+- 一个备份“组”必须**同时满足**两条才删除：组的最新写入时间早于 `keep-days`（默认 7），且该组不属于最近 `keep-count` 份完整备份组（默认 5，最小 1）。最近一组永远保留。
+- 组是最小删除单位，绝不拆散文件：`backups/<label>-<release>.sql.gz` 与 `.sha256`、`backups/system/<stamp>-<pid>/` 灾备批次目录、`backups/file-gateway/<stamp>/`、`backups/keycloak/keycloak-<stamp>.sql.gz` 及其摘要/位点 sidecar 都整组处置。
+- 安全边界：只接受 `--deploy-dir` 之下的路径；拒绝符号链接、特殊文件、越界路径和不完整组；`backups/releases/*.env`、`configuration-*`、`install-assets.*` 等运行配置快照与未知文件一律跳过。重复执行是幂等的。
+
+```bash
+cd /opt/unified-identity-platform
+# 1) 只看计划（默认）；2) 确认后显式 --apply
+./bin/prune-backups.sh --keep-days 7 --keep-count 5
+./bin/prune-backups.sh --keep-days 7 --keep-count 5 --apply
+```
+
+`bin/backup-all.sh` 在**新备份已验证并落盘成功之后**自动执行同一策略，清理失败只告警，不改变备份/发布结论。可用环境变量调整：
+
+- `BACKUP_RETENTION_DAYS`：保留天数，默认 `7`；`<=0` 关闭自动清理。
+- `BACKUP_RETENTION_MIN_COUNT`：至少保留的最近完整备份组数，默认 `5`，最小 `1`。
+- 非法值会 `WARNING` 并回落默认值，不会阻断发布。
+
+磁盘告急时也可以从 GitHub Actions 手动触发 `backup-cleanup` workflow（仅 `workflow_dispatch`）：输入 `keep_days`（默认 7）、`keep_count`（默认 5）、`dry_run`（默认 true），使用与部署相同的 `DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_SSH_KEY`/`DEPLOY_KNOWN_HOSTS`/`DEPLOY_PORT`/`DEPLOY_PATH`。工作流先在远端打印 `df -h`，再把 `bin/prune-backups.sh` 通过 ssh stdin 交给 `bash -s -- ...` 执行；**默认 dry-run，只有显式把 `dry_run` 设为 false 才会 `--apply`**。
+
+磁盘满时的处置顺序：
+
+1. `df -h` 与 `du -sh backups/*` 定位占用；不要手工 `rm -rf backups`，也不要删除最新一组或 `backups/releases`。
+2. 先跑 `bin/prune-backups.sh`（或 `backup-cleanup` 默认 dry-run），核对计划中保留的最近 5 组和将删除的旧组。
+3. 确认无误后再 `--apply`；保留的灾备批次应能通过 `bin/backup-all.sh --verify-only --backup <批次>`，发布前数据库备份按需保留回滚窗口。
+4. 清理后重跑被拒的发布；长期按实际 RPO/磁盘容量调整 `BACKUP_RETENTION_DAYS`/`BACKUP_RETENTION_MIN_COUNT`，或扩容 `/opt/basic-platform`。
+
+### 6.2 Keycloak 数据库逻辑备份与恢复
 
 生产包提供两项不改变网络入口、不会强制 HTTPS 的运维资产：
 

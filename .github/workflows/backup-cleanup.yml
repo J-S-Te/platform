@@ -1,0 +1,79 @@
+name: backup-cleanup
+
+# 磁盘被历史备份撑满时的受控清理入口（2026-11-06 测试服务器事故后新增）。
+# 默认 dry-run：只打印保留/删除计划与 df -h；只有显式把 dry_run 设为 false 才 --apply。
+on:
+  workflow_dispatch:
+    inputs:
+      keep_days:
+        description: '保留天数：早于该天数且不在最近 keep_count 份内的备份组才会删除'
+        required: false
+        default: '7'
+        type: string
+      keep_count:
+        description: '至少保留最近多少份完整备份组（最小 1）'
+        required: false
+        default: '5'
+        type: string
+      dry_run:
+        description: '仅打印清理计划（保持勾选）；取消勾选才会真正删除'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-cleanup
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prune backups on the deploy host
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          KEEP_DAYS: ${{ inputs.keep_days }}
+          KEEP_COUNT: ${{ inputs.keep_count }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
+          [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || { echo "invalid keep_days: $KEEP_DAYS" >&2; exit 1; }
+          [[ "$KEEP_COUNT" =~ ^[0-9]+$ && "$KEEP_COUNT" -ge 1 ]] || { echo "invalid keep_count: $KEEP_COUNT" >&2; exit 1; }
+          test -f deploy/production/bin/prune-backups.sh
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
+          # 默认 dry-run；只有显式 dry_run=false 才追加 --apply。
+          apply_arg=""
+          if [[ "$DRY_RUN" == "false" ]]; then
+            apply_arg=' --apply'
+          fi
+          echo "== backup cleanup mode: dry_run=$DRY_RUN keep_days=$KEEP_DAYS keep_count=$KEEP_COUNT =="
+
+          # 先在远端打印 df -h，再把本地校验过的脚本经 stdin 交给远端 bash 执行，
+          # 避免 heredoc/引号被本地 shell、ssh 和远端 shell 多次解析。
+          printf -v remote_command \
+            'df -h %q; exec bash -s -- --deploy-dir %q --keep-days %q --keep-count %q%s' \
+            "$DEPLOY_PATH" "$DEPLOY_PATH" "$KEEP_DAYS" "$KEEP_COUNT" "$apply_arg"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command" \
+            < deploy/production/bin/prune-backups.sh
