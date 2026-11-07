@@ -36,6 +36,11 @@
 #       的 OpenMySQLWithPool(cfg, 50, 20, 15m, 2m)。
 #   platform_metric_collection_errors_total
 #     → platform/internal/transport/http/metrics.go:422（每次抓取无条件输出，采集失败计数）
+#   platform_audit_write_failures_total{stage}
+#     → platform/internal/shared/metrics/events.go（C2 事件级失败计数，stage 固定枚举
+#       intent / result / dead_letter / result_streamed / unavailable，全部枚举恒有样本；
+#       result_streamed 只出现在“审计导出下载的响应已流出、结果事件与死信都写不进去”
+#       这一条 fail-closed 例外路径上，见 deploy/production/README.md 的审计语义说明）
 #   platform_keycloak_outbox_backlog / platform_keycloak_outbox_dead /
 #   platform_async_job_backlog / platform_async_job_dead /
 #   platform_oidc_backchannel_logout_backlog / platform_oidc_backchannel_logout_failed
@@ -419,4 +424,28 @@ groups:
             批量拒绝。按顺序核对 Keycloak 侧 Client（client_id/secret/redirect_uri）、
             issuer 与平台 OIDC 配置是否一致，再看是否有登出后的旧会话在重放。
             该指标不含失败原因，必须结合 Keycloak 与应用日志定位。
+          runbook: platform/deploy/production/README.md#观测接入指标告警与凭据
+
+  # 审计写入失败的事件级计数（C2）。这里只针对“已流出失败”这一条例外路径：
+  # 审计导出下载的响应体已经直接流给客户端、意图事件也已在库，结果事件与死信都写不进去时，
+  # 服务端既不能补 503（会污染一个已完整送达的文件）也不能回滚，只能记账 stage=result_streamed。
+  # 它不改变 fail-closed 语义：非下载路由在同一失败序列下仍然 503（stage=result+dead_letter），
+  # 意图事件写不进去仍然 stage=intent 并在业务链之前拒绝。因此这条告警只对应“审计结论缺口”，
+  # 不是“审计管道整体不可用”，处理方式是定位审计库/死信写入故障并按事件 id 补录或受控重放。
+  - name: platform-audit
+    rules:
+      - alert: PlatformAuditResultStreamedFailure
+        expr: increase(platform_audit_write_failures_total{stage="result_streamed"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit export download completed without a persisted result audit event
+          description: >-
+            最近 10 分钟出现 platform_audit_write_failures_total{stage="result_streamed"} > 0：
+            审计导出下载已经把响应对流给客户端，但结果事件写入（含同步重试）与审计死信
+            落库同时失败，因此这次下载只有意图事件、没有审计结论。意图事件仍在库（可证明
+            谁在何时请求了哪个导出），但“是否真的流出、流出了多少”不再有服务端审计记录。
+            这不是普通的审计管道不可用（那会以 intent/dead_letter 计数并在业务链前 503），
+            而是无法回滚的审计结论缺口：先查审计库与死信表写入失败原因，再按 intent_event_id
+            与 request_id 对账并补录/受控重放。不要用删除审计行或回退例外语义来消除告警。
           runbook: platform/deploy/production/README.md#观测接入指标告警与凭据

@@ -195,8 +195,12 @@ func (service *Service) Login(ctx context.Context, input LoginInput) (SessionRes
 	if err != nil {
 		return SessionResult{}, fmt.Errorf("verify password credential: %w", err)
 	}
+	// 不可登录判定必须带上本次密码比对结果：停用/锁定/凭据过期的账号在密码错误时仍然
+	// 属于“凭据无效”，否则失败原因（account_disabled）会变成“账号存在且被停用”的
+	// 枚举侧信道——攻击者不需要正确密码就能读到账号状态。锁定计数语义不变：该分支
+	// 依然不调用 RecordFailedLogin。
 	if !isLoginEligible(account, now) {
-		return SessionResult{}, loginFailedError(account, true)
+		return SessionResult{}, loginFailedError(account, matched)
 	}
 	if !matched {
 		_, err := service.loginSecurity.RecordFailedLogin(ctx, securityapplication.LoginFailureInput{

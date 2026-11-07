@@ -190,6 +190,7 @@ EXPR_KEYWORDS = {
     "severity",
     "sort",
     "sort_desc",
+    "stage",
     "status",
     "stddev",
     "sum",

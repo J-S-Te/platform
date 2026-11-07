@@ -33,6 +33,7 @@ func TestOperationalMetricsExposesEventCounters(t *testing.T) {
 		`platform_audit_write_failures_total{stage="intent"} 1`,
 		`platform_audit_write_failures_total{stage="result"} 0`,
 		`platform_audit_write_failures_total{stage="dead_letter"} 0`,
+		`platform_audit_write_failures_total{stage="result_streamed"} 0`,
 		`platform_audit_write_failures_total{stage="unavailable"} 0`,
 		// 原有启发式指标保留（C2 只新增事件级指标，不移除既有口径）。
 		"platform_oidc_login_failures_total",

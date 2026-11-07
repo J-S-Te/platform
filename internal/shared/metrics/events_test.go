@@ -51,6 +51,7 @@ func TestRegistryRecordsAuditWriteFailureStages(t *testing.T) {
 	registry.RecordAuditWriteFailure(AuditStageResult)
 	registry.RecordAuditWriteFailure(AuditStageResult)
 	registry.RecordAuditWriteFailure(AuditStageDeadLetter)
+	registry.RecordAuditWriteFailure(AuditStageResultStreamed)
 	registry.RecordAuditWriteFailure(AuditStageUnavailable)
 	registry.RecordAuditWriteFailure("tenant-42")
 
@@ -59,6 +60,7 @@ func TestRegistryRecordsAuditWriteFailureStages(t *testing.T) {
 		`platform_audit_write_failures_total{stage="intent"} 1`,
 		`platform_audit_write_failures_total{stage="result"} 2`,
 		`platform_audit_write_failures_total{stage="dead_letter"} 1`,
+		`platform_audit_write_failures_total{stage="result_streamed"} 1`,
 		`platform_audit_write_failures_total{stage="unavailable"} 2`,
 	} {
 		if !strings.Contains(body, expected) {

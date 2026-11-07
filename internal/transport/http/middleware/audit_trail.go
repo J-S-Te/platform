@@ -305,9 +305,14 @@ func auditTrailHandler(recorder AuditRecorder, logger *slog.Logger, source Audit
 					// 该路由按策略不扣留响应体（审计导出下载），响应已经直接流给客户端，
 					// 状态码与响应体都无法再撤回；此时追加 503 只会污染一个已完成的文件下载，
 					// 因此只保留错误日志与已经写入的意图/死信事实。
+					//
+					// 但“业务已流出、审计结论缺失”不能只留一行日志：单独记 stage=result_streamed，
+					// 让平台告警能发现这类无法回滚的审计缺口。该计数不改变失败关闭语义——
+					// 非下载路由仍在下面被 503 拒绝。
 					logger.Error("platform audit result event unavailable after the response was already streamed",
 						"request_id", input.RequestID, "path", route, "event_id", input.EventID, "intent_event_id", intentEventID,
 						"operation_applied", applied)
+					gate.recordWriteFailure(eventmetrics.AuditStageResultStreamed)
 					return
 				}
 				context.Writer = origWriter

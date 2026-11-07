@@ -53,21 +53,25 @@ var loginFailureReasons = [...]string{
 }
 
 // auditStageUnavailableIndex 是 stage 兜底桶下标（unavailable，列表末位）。
-const auditStageUnavailableIndex = 3
+const auditStageUnavailableIndex = 4
 
 // 审计写入失败阶段枚举。它对应审计中间件的“意图→结果→死信→拒绝”链路：
 //   - intent：业务链之前的意图事件写不进去（请求当场 503，handler 未执行）；
 //   - result：业务链之后的结果事件写入（含同步重试）失败；
 //   - dead_letter：结果事件只能落审计死信，且死信本身也写不进去；
+//   - result_streamed：结果事件与死信都写不进去，但响应已经直接流给客户端
+//     （审计导出下载），无法再补 503——这是“业务已流出、审计结论缺失”的失败，
+//     只保留日志就无法被发现，因此单独成桶供告警使用；
 //   - unavailable：审计管道处于失败窗口，请求在业务写入之前被拒绝——这是失败的
 //     后果而不是一次写入尝试，但同样是“审计不可用”的可观测信号。
 //
 // 本指标只计数，不参与快速失败窗口判定：审计的失败关闭语义完全由 auditGate 决定。
 const (
-	AuditStageIntent      = "intent"
-	AuditStageResult      = "result"
-	AuditStageDeadLetter  = "dead_letter"
-	AuditStageUnavailable = "unavailable"
+	AuditStageIntent         = "intent"
+	AuditStageResult         = "result"
+	AuditStageDeadLetter     = "dead_letter"
+	AuditStageResultStreamed = "result_streamed"
+	AuditStageUnavailable    = "unavailable"
 )
 
 // auditWriteFailureStages 是 stage 的固定输出顺序；unavailable 必须在末尾（兜底桶）。
@@ -75,6 +79,7 @@ var auditWriteFailureStages = [...]string{
 	AuditStageIntent,
 	AuditStageResult,
 	AuditStageDeadLetter,
+	AuditStageResultStreamed,
 	AuditStageUnavailable,
 }
 
