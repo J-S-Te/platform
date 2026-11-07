@@ -297,25 +297,23 @@ printf 'backup prune: policy keep-days=%s keep-count=%s; deletion requires age >
 printf 'backup prune: candidate groups=%s\n' "${#group_paths[@]}"
 
 # 按组的“最新写入时间”排序：目录组取目录 mtime，文件组取 sql.gz mtime。
-rank_file="$(mktemp "${TMPDIR:-/tmp}/prune-backups.XXXXXX")"
-ranked_file="$rank_file.ranked"
-trap 'rm -f -- "$rank_file" "$ranked_file"' EXIT
-# Bash 3.2（macOS 测试环境）在 set -u 下展开空数组会报 unbound variable，因此按索引遍历。
-group_index=0
-while ((group_index < ${#group_paths[@]})); do
-  group="${group_paths[$group_index]}"
-  printf '%s\t%s\n' "$(mtime_of "$group")" "$group" >>"$rank_file"
-  group_index=$((group_index + 1))
-done
-LC_ALL=C sort -t $'\t' -k1,1nr -k2,2 "$rank_file" >"$ranked_file"
-
+# 注意：这里刻意不使用 mktemp/临时文件。磁盘已满时 mktemp 会失败并让清理工具本身
+# 无法运行（2026-11-07 真实事故：磁盘 100% 时 prune 在 candidate groups 之后 exit 1）。
+# 用进程替换把排序结果直接读入内存，清理工具必须能在“零可用字节”时仍然工作。
 ranked=()
 mtimes=()
 while IFS=$'\t' read -r mtime group; do
   [[ -n "$group" ]] || continue
   ranked+=("$group")
   mtimes+=("$mtime")
-done <"$ranked_file"
+done < <(
+  group_index=0
+  while ((group_index < ${#group_paths[@]})); do
+    group="${group_paths[$group_index]}"
+    printf '%s\t%s\n' "$(mtime_of "$group")" "$group"
+    group_index=$((group_index + 1))
+  done | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2
+)
 
 now="$(date -u +%s)"
 delete_groups=()
