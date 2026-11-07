@@ -64,14 +64,18 @@ func TestDownloadExportReturnsNotFoundWhenFileIsMissing(t *testing.T) {
 
 func TestDownloadExportServesAvailableArtifact(t *testing.T) {
 	relativePath := filepath.ToSlash(filepath.Join("tenant-1", "app-1", "2026", "01", "file-1", "version-1.csv"))
+	content := "event_id\n"
+	digest := sha256.Sum256([]byte(content))
 	handler, storageRoot, repository := newExportDownloadHandler(t, domain.ExportFile{
 		FileID:              "file-1",
 		StorageRelativePath: relativePath,
 		OriginalName:        "audit-export-job-1.csv",
 		MediaType:           "text/csv; charset=utf-8",
 		Status:              "ACTIVE",
+		SizeBytes:           uint64(len(content)),
+		SHA256:              digest[:],
 	})
-	seedExportFile(t, storageRoot, relativePath, "event_id\n")
+	seedExportFile(t, storageRoot, relativePath, content)
 	repository.addTicket("tenant-1", "job-1", "ticket-for-available-artifact", testTicketExpiry())
 
 	response := httptest.NewRecorder()

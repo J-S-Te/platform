@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,14 +24,47 @@ import (
 const (
 	exportMediaType = "text/csv; charset=utf-8"
 
-	// ExportRetentionPeriod 是审计导出产物的保留期：任务成功超过该时长后，worker 每轮
+	// ExportRetentionDaysEnv 是审计导出产物保留期的唯一配置入口，单位是天。
+	ExportRetentionDaysEnv = "AUDIT_EXPORT_RETENTION_DAYS"
+
+	// defaultExportRetentionDays 是未配置或配置非法时 fail-closed 采用的保留期（30 天）。
+	defaultExportRetentionDays = 30
+
+	// maxExportRetentionDays 是保留期硬上限（3650 天）。超过上限按上限截断，避免一次
+	// 误配把审计导出产物事实上永久留在磁盘上。
+	maxExportRetentionDays = 3650
+
+	// ExportRetentionPeriod 是审计导出产物的默认保留期：任务成功超过该时长后，worker 每轮
 	// 开始时删除磁盘文件并把 file_version 标记为 DELETED；file_object/async_job 行保留。
-	ExportRetentionPeriod = 30 * 24 * time.Hour
+	// 实际生效值可由 AUDIT_EXPORT_RETENTION_DAYS 覆盖，见 ParseExportRetention。
+	ExportRetentionPeriod = defaultExportRetentionDays * 24 * time.Hour
 
 	// exportCleanupMaxRounds 限定单轮清理的有界工作量：每轮最多处理
 	// ExportArtifactCleanupBatchSize*exportCleanupMaxRounds 个产物，避免一次清理长期占用 worker。
 	exportCleanupMaxRounds = 5
 )
+
+// ParseExportRetention 解析 AUDIT_EXPORT_RETENTION_DAYS 的原始值，返回生效天数与保留期。
+// 未设置、空白、非整数或 <=0 一律 fail-closed 回落默认 30 天（宁可多留证据，不可提前
+// 销毁）；超过硬上限 3650 天按上限截断。
+func ParseExportRetention(raw string) (int, time.Duration) {
+	days := defaultExportRetentionDays
+	if trimmed := strings.TrimSpace(raw); trimmed != "" {
+		if parsed, err := strconv.Atoi(trimmed); err == nil && parsed > 0 {
+			days = parsed
+		}
+	}
+	if days > maxExportRetentionDays {
+		days = maxExportRetentionDays
+	}
+	return days, time.Duration(days) * 24 * time.Hour
+}
+
+// ExportRetentionFromEnv 读取 AUDIT_EXPORT_RETENTION_DAYS 并解析为生效保留期。
+// 返回值同时包含生效天数，供装配侧写启动日志，避免“配了但不知道是否生效”。
+func ExportRetentionFromEnv() (int, time.Duration) {
+	return ParseExportRetention(os.Getenv(ExportRetentionDaysEnv))
+}
 
 // exportHeader 是审计导出 CSV 的固定表头列；顺序是对外契约，不能随意调整。
 var exportHeader = []string{"event_id", "occurred_at", "application_code", "environment_code", "action", "result", "resource_type", "resource_id", "resource_name", "operator", "risk_level", "summary", "request_id", "trace_id", "correlation_id", "method", "path", "client_ip", "user_agent", "actor_id", "actor_type", "reason_code", "business_id", "login_ip", "login_ip_source", "ingest_peer_ip", "ip_source", "received_at"}
@@ -46,21 +80,23 @@ type ExportWorker struct {
 	staleLockTimeout time.Duration
 	// exportBatchSize 只用于测试注入小批量；生产固定使用 application.ExportEventBatchSize。
 	exportBatchSize int
-	// retention 只用于测试注入保留期；生产固定使用 ExportRetentionPeriod。
+	// retention 是生效的产物保留期：由装配侧按 AUDIT_EXPORT_RETENTION_DAYS 注入，
+	// 零值或负值回落 ExportRetentionPeriod（默认 30 天）。
 	retention time.Duration
 }
 
 // NewExportWorker 组装一次性导出 worker 并校验配置。
-// 返回值携带 MySQL 作业队列连接、导出目录、执行实例标识、轮询周期与租约超时；
-// pollInterval 或 staleLockTimeout 小于等于 0、存储根目录空或依赖为空会返回错误。
-func NewExportWorker(service *application.Service, logger *slog.Logger, storageRoot, workerID string, pollInterval, staleLockTimeout time.Duration) (*ExportWorker, error) {
+// 返回值携带 MySQL 作业队列连接、导出目录、执行实例标识、轮询周期、租约超时与
+// 产物保留期；pollInterval 或 staleLockTimeout 小于等于 0、存储根目录空或依赖为空会返回错误。
+// exportRetention <= 0 表示采用默认保留期，由 retentionPeriod 统一回落。
+func NewExportWorker(service *application.Service, logger *slog.Logger, storageRoot, workerID string, pollInterval, staleLockTimeout, exportRetention time.Duration) (*ExportWorker, error) {
 	if service == nil || logger == nil {
 		return nil, errors.New("audit export worker dependencies must not be nil")
 	}
 	if strings.TrimSpace(storageRoot) == "" || strings.TrimSpace(workerID) == "" || pollInterval <= 0 || staleLockTimeout <= 0 {
 		return nil, errors.New("audit export worker configuration is invalid")
 	}
-	return &ExportWorker{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot), workerID: workerID, pollInterval: pollInterval, staleLockTimeout: staleLockTimeout, retention: ExportRetentionPeriod}, nil
+	return &ExportWorker{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot), workerID: workerID, pollInterval: pollInterval, staleLockTimeout: staleLockTimeout, retention: exportRetention}, nil
 }
 
 // Run 持续轮询直到上下文取消。单个任务的错误会写回任务状态，不会终止后续任务处理。

@@ -223,7 +223,11 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	exportRunner, err := auditworker.NewExportWorker(service, logger, cfg.FileStorageRoot, cfg.Worker.ID, cfg.Worker.PollInterval, cfg.Worker.StaleLockTimeout)
+	// 导出产物保留期由 AUDIT_EXPORT_RETENTION_DAYS 配置（默认 30 天，非法/<=0 回落 30，
+	// 硬上限 3650 天）。启动即打印生效值，便于核对生产环境的证据保留承诺是否被环境变量改写。
+	exportRetentionDays, exportRetention := auditworker.ExportRetentionFromEnv()
+	logger.Info("audit export retention resolved", "environment_variable", auditworker.ExportRetentionDaysEnv, "days", exportRetentionDays, "retention", exportRetention.String())
+	exportRunner, err := auditworker.NewExportWorker(service, logger, cfg.FileStorageRoot, cfg.Worker.ID, cfg.Worker.PollInterval, cfg.Worker.StaleLockTimeout, exportRetention)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
