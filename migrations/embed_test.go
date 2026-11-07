@@ -17,7 +17,7 @@ func TestEmbeddedMigrationsAreContiguousAndParseable(t *testing.T) {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
 	// 新增迁移时同步推进该常量；它同时锁定"版本号连续且可解析"这一不变量。
-	const latestMigrationVersion = 140
+	const latestMigrationVersion = 141
 	if len(items) == 0 || items[len(items)-1].Version != latestMigrationVersion {
 		t.Fatalf("last migration version = %d, want %d", items[len(items)-1].Version, latestMigrationVersion)
 	}

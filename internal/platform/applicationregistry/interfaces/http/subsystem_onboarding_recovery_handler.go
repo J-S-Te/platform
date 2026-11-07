@@ -348,11 +348,11 @@ func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Con
 		errorCode = code
 		errorMessage, _ = runtimeLicenseApprovalDiagnostic(code)
 	} else if errorCode == "DEPLOYMENT_AGENT_FAILED" {
-		// 部署 Agent 的失败原因必须作为稳定诊断码 + 脱敏单行摘要落库：只写“部署 Agent
-		// 执行失败”会让状态表、诊断接口和站内通知同时丢掉“commercial license
-		// configuration failed”这类可执行根因。裸哨兵与上下文取消不携带新信息，仍保留通用文案。
-		if detail := subsystemDeploymentFailureDetail(cause); detail != "" {
-			errorCode = subsystemProvisioningErrorCode(cause)
+		// 部署 Agent 的失败原因必须进状态机：只有“部署 Agent 执行失败”时，运维无法
+		// 判断是许可运行态、镜像还是数据库问题，只能反复重试。裸哨兵与上下文取消不
+		// 提供新信息，保持既有文案。
+		if detail, detailCode := deploymentFailureCause(cause); detail != "" {
+			errorCode = detailCode
 			errorMessage = detail
 		}
 	}
@@ -365,6 +365,26 @@ func (handler *SubsystemOnboardingHandler) closeFailedDeployment(ctx context.Con
 	if notify {
 		handler.notifySubsystemLifecycle(ctx, job.TenantID, job.OperatorUserID, job.ApplicationName, job.ApplicationCode, job.Environment, false, subsystemLifecycleFailureDetail(cause))
 	}
+}
+
+// deploymentFailureCause 从下层原因推导可持久化的失败摘要与稳定错误码；无法提供额外
+// 信息时返回空摘要，调用方保持既有的“部署 Agent 执行失败”文案。
+func deploymentFailureCause(cause error) (string, string) {
+	if cause == nil {
+		return "", ""
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return "", ""
+	}
+	raw := strings.TrimSpace(cause.Error())
+	if raw == "" || raw == application.ErrSubsystemProvisioningUnavailable.Error() {
+		return "", ""
+	}
+	detail := persistedDeploymentFailureDetail(cause)
+	if detail == "" {
+		return "", ""
+	}
+	return detail, subsystemProvisioningErrorCode(cause)
 }
 
 // waitForDeploymentJobs 等待全部已受理的后台部署完成。本包测试用它使异步编排

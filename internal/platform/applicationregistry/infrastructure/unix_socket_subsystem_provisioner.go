@@ -748,6 +748,21 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 		}
 		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, DeploymentOutcome: &value})
 		return
+	case "access-deployment-supersession":
+		reader, ok := executor.(accessDeploymentSupersessionReader)
+		if !ok || request.Recovery == nil || request.Receipt != nil || request.Input != nil ||
+			request.Preflight != nil || request.Access != nil || request.Discovery != nil ||
+			request.Code != "" || request.Environment != "" || request.TenantID != "" || request.ManifestChecksum != "" {
+			err = provisioningError("deployment supersession query unavailable")
+			break
+		}
+		value, readErr := reader.ReadAccessDeploymentSupersession(operationContext, *request.Recovery)
+		if readErr != nil {
+			err = readErr
+			break
+		}
+		_ = json.NewEncoder(connection).Encode(subsystemProvisioningReply{Success: true, RecoveryEvidence: &value})
+		return
 	case "access-deployment-outcome":
 		reader, ok := executor.(accessDeploymentOutcomeReader)
 		if !ok || request.Receipt == nil || request.Input != nil || request.Preflight != nil ||
@@ -951,7 +966,8 @@ func handleSubsystemProvisioningConnection(ctx context.Context, connection net.C
 			err = application.RuntimeLicenseApprovalFailure(err)
 			reply.ErrorCode = application.RuntimeLicenseApprovalErrorCode(err)
 		}
-		if reply.ErrorCode == "" && (request.Action == "access-deployment-recovery-check" || request.Action == "access-deployment-abandon") {
+		if reply.ErrorCode == "" && (request.Action == "access-deployment-recovery-check" ||
+			request.Action == "access-deployment-abandon" || request.Action == "access-deployment-supersession") {
 			if errors.Is(err, application.ErrSubsystemAccessOperationConflict) {
 				reply.ErrorCode = "ACCESS_RECOVERY_CONFLICT"
 			} else if errors.Is(err, application.ErrValidation) {

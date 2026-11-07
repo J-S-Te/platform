@@ -1816,7 +1816,8 @@ deploy_project() {
   backup_database_if_initialized project-mysql project_management || return
   project_background_prepare || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
-  compose run --rm --no-deps project-migrate || return
+  # 服务端 Compose 可能保留旧 environment（模块裁剪不覆盖），用 run -e 强制迁移进程关闭内嵌 Worker。
+  compose run --rm --no-deps -e PROJECT_RUN_WORKER_WITH_API=false project-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 project-api project-sla-notifier || return
   if ! wait_for_health "http://127.0.0.1:$(port_value PROJECT_API_PORT 18085)/healthz"; then
     echo "---- project-api 最近日志 ----" >&2

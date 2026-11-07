@@ -48,6 +48,11 @@ func (r *firstInstallContractRunner) RunOutput(ctx context.Context, dir string, 
 	if err := r.recordingSubsystemRunner.Run(ctx, dir, env, name, args...); err != nil {
 		return nil, err
 	}
+	// 受控 Compose 操作现在也走 RunOutput（失败时要带回真实原因），因此不再算“意外的
+	// 输出命令”；夹具仍拒绝其它未声明的只读探测，保持既有断言强度。
+	if len(args) > 0 && args[0] == "compose" {
+		return nil, nil
+	}
 	if len(args) < 2 || args[0] != "volume" || args[1] != "ls" {
 		return nil, errors.New("fixture: unexpected output command")
 	}

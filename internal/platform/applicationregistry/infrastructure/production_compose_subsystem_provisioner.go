@@ -1139,6 +1139,11 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 				}
 			}
 		}
+		// 来源自动解析（档一）：显式值保留；键缺失按对端接入事实解析 crm/project|local，
+		// 并连带一致的联动开关——先于 URL 门禁执行，让门禁看到解析后的开关。
+		if target.config.Profile.Manifest.Application.Code == integratedContractApplicationCode {
+			resolveContractSourceAutoDefaults(target.config.DeployRoot, currentValues, values)
+		}
 		// C07：联动关闭不注入对端业务 URL，联动开启时端点必须可用。
 		if err := applyProductionLinkageURLValues(target.config.Profile.Manifest.Application.Code, currentValues, values); err != nil {
 			return err
@@ -1207,6 +1212,11 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 				return serviceCredentialRetryError()
 			}
 			values[key] = value
+		}
+		// 来源自动解析（档一）：初装路径同样按对端接入事实解析；兄弟运行文件尚不
+		// 存在视为对端未就绪，独立合同（local）即为首次安装的正确解析结果。
+		if target.config.Profile.Manifest.Application.Code == integratedContractApplicationCode {
+			resolveContractSourceAutoDefaults(target.config.DeployRoot, currentRuntimeLinkageModes(path), values)
 		}
 		// C07：初装路径同样按现场模式键裁剪对端业务 URL；文件尚不存在时按
 		// "键缺失=联动开启"处理，注入清单值。

@@ -37,6 +37,49 @@ install_delivery_license() {
   fi
 }
 
+# license_runtime_gate 在**宣布部署成功之前**核对许可运行态：API 容器健康、许可状态卷
+# 挂载、许可实例与平台库一致、受控部署已确认。现场故障（project_management 的 API 容器
+# 少了 /var/lib/commercial-license 卷挂载 → 启动即 commercial license configuration
+# failed → 每分钟重启 → 平台只显示「部署 Agent 执行失败」，重试 7 次无效）说明这些前提
+# 过去是隐含的：重试既不会补卷，也不会纠正实例。因此这里 fail-closed，并把处置顺序写进输出。
+# 参数：可选应用编码（project_management 等），以及 --json / --dry-run 等透传给门禁的选项；
+#       不带应用编码时检查全部已登记商业应用。
+# 返回值：通过返回零；任一检查未通过返回非零，由调用方中止，不得继续打印成功结论。
+license_runtime_gate() {
+  local apps="" argument explicit_apps=false
+  local -a passthrough=() codes=()
+  # 取值型选项必须连同它的值一起透传，否则值会被误当成应用编码。
+  while (($# > 0)); do
+    argument="$1"
+    shift
+    case "$argument" in
+      --deploy-dir|--compose-project|--apps|--fixture|--verify-timeout)
+        [[ "$argument" != --apps ]] || explicit_apps=true
+        (($# > 0)) || die "$argument 缺少取值"
+        passthrough+=("$argument" "$1")
+        shift
+        ;;
+      -*) passthrough+=("$argument") ;;
+      *) codes+=("$argument") ;;
+    esac
+  done
+  if ((${#codes[@]} != 0)); then
+    [[ "$explicit_apps" == false ]] || die '应用编码与 --apps 只能给出一种形式'
+    apps="$(IFS=,; printf '%s' "${codes[*]}")"
+  fi
+  require_initialized
+  local -a gate_args=(--deploy-dir "$deploy_dir" --compose-project "$(scope_project)")
+  ((${#passthrough[@]} == 0)) || gate_args+=("${passthrough[@]}")
+  [[ -z "$apps" ]] || gate_args+=(--apps "$apps")
+  if python3 "$script_dir/check-license-runtime.py" "${gate_args[@]}"; then
+    return 0
+  fi
+  printf '错误：许可运行态门禁未通过，未判定部署成功。\n' >&2
+  printf '处置顺序：导入并激活许可 → 重新执行接入/受控更新 → %s license-runtime 复核 → 再宣布部署成功。\n' "$0" >&2
+  printf '不要重复点击「重试」接入，也不要手工修改固定记录：它们都不会补上缺失的许可状态卷，也不会纠正许可实例。\n' >&2
+  return 1
+}
+
 renew_delivery_license() {
   local source="${1:?必须提供已签署续期许可证路径}" source_dir source_name staged
   require_initialized

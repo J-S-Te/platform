@@ -121,11 +121,16 @@ runtime:
         # CRM_PROVISION_* 服务客户查询/创建，CRM_PROVISION_OPPORTUNITY_* 服务
         # 商机创建与推进；任一 pair 缺失时合同侧启动必须失败关闭。
         CONTRACT_IMPORT_CRM_PROVISION_ENABLED: "false"
+        # 能力开关（默认关闭）：开启后历史导入才允许自动审批；开启后仍须由合同
+        # 系统超级管理员（角色 admin）在控制台按租户开启运行开关（默认关闭），
+        # 两者同时开启才生效。与模板 contract.env.example 同值，改一处必须同步另一处。
+        CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL: "false"
         CRM_PROVISION_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_PROVISION_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_PROVISION_SCOPE: customer.import_provision
         CRM_PROVISION_OPPORTUNITY_SCOPE: opportunity.import_provision
-        PROJECT_INTEGRATION_ENABLED: "true"
+        # PROJECT_INTEGRATION_ENABLED 由部署层按 project.env 接入就绪事实解析写入
+        #（来源自动解析，档一），不在清单预置；URL/凭据键仍由清单下发。
         PROJECT_API_BASE_URL: http://project-api:8082
         PROJECT_INTEGRATION_TOKEN_URL: http://platform-api:8080/oauth2/token
         PROJECT_INTEGRATION_AUDIENCE: basic-platform-application

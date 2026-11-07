@@ -201,8 +201,8 @@ type LocalDockerSubsystemProvisioner struct {
 	// roleConfigHashes 缓存从本地子镜像内嵌 authz-catalog 读到的目录哈希，
 	// 避免平台侧硬编码常量与业务仓库授权目录漂移。
 	roleConfigHashes map[string]string
-	// operationSecrets 是部署 Agent 侧配置里真实携带的凭据明文，仅用于失败诊断输出
-	// （Compose 输出、容器日志）脱敏；不得外泄到错误摘要之外，也不写回状态表或日志。
+	// operationSecrets 保存本次受控操作交付的明文凭据，仅用于失败诊断脱敏；
+	// 它在部署互斥内设置并清除，绝不写入日志、错误文本或返回值。
 	operationSecrets []string
 }
 
@@ -385,6 +385,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) Provision(ctx context.Contex
 	}
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
+	provisioner.operationSecrets = deploymentDiagnosticSecrets(input)
+	defer func() { provisioner.operationSecrets = nil }()
 	if needsRoleConfigHashes(input.ApplicationCode) {
 		provisioner.refreshRoleConfigHashes(ctx)
 	}
@@ -403,6 +405,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) Update(ctx context.Context, 
 	}
 	provisioner.mutex.Lock()
 	defer provisioner.mutex.Unlock()
+	provisioner.operationSecrets = deploymentDiagnosticSecrets(input)
+	defer func() { provisioner.operationSecrets = nil }()
 	if needsRoleConfigHashes(input.ApplicationCode) {
 		provisioner.refreshRoleConfigHashes(ctx)
 	}
@@ -524,6 +528,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 		return err
 	}
 
+	// 许可 fail-closed 前置判定已在上方自动合并保留（同一检查，不重复执行）。
 	operationCtx, cancel := context.WithTimeout(ctx, provisioner.config.Timeout)
 	defer cancel()
 	// Settlement 编译进统一的平台 Compose 拓扑，绝不能落入独立项目分支——那会在同一浏览器
@@ -600,8 +605,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 		if locateErr != nil {
 			return provisioningError("subsystem Compose file is unavailable")
 		}
-		rebuildErr = provisioner.runner.Run(operationCtx, projectDirectory, os.Environ(), provisioner.config.DockerBinary,
-			"compose", "--project-directory", projectDirectory, "--env-file", environmentPath, "-f", composeFile, "up", "-d", "--build")
+		rebuildErr = provisioner.runStandaloneCompose(operationCtx, projectDirectory, environmentPath, composeFile,
+			"up", "-d", "--build")
 	}
 	if rebuildErr != nil {
 		return localRuntimeDeploymentError(rebuildErr, "rebuild subsystem containers")
@@ -1928,7 +1933,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		}
 		return runner.RunOutput(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
 	}
-	return nil, provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+	outputRunner, ok := provisioner.runner.(subsystemCommandOutputRunner)
+	if !ok {
+		return nil, provisioner.runner.Run(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+	}
+	output, runErr := outputRunner.RunOutput(ctx, platformRoot, runnerEnvironment, provisioner.config.DockerBinary, composeArguments...)
+	if runErr == nil {
+		return nil, nil
+	}
+	// 下层原因必须随错误一起返回：平台把外层短语写进 last_error_message 时，运维只剩
+	// 一句无信息量的“部署 Agent 执行失败”，只能反复重试。
+	if reason := provisioner.localComposeFailureReason(ctx, composeArguments, output); reason != "" {
+		return nil, fmt.Errorf("%w: %s", runErr, reason)
+	}
+	return nil, runErr
 }
 
 func localRuntimeEnvironment(path, applicationCode, clientKey string) string {
@@ -2559,6 +2577,9 @@ func (e localReleaseCredentialError) Unwrap() []error {
 	return []error{application.ErrSubsystemProvisioningUnavailable, application.ErrRuntimeLicenseNotInitialized}
 }
 
+// localRuntimeDeploymentError 把重建失败收口为稳定的部署不可用错误，同时保留下层原因：
+// 只留外层短语会让运维在状态表里只看到“部署 Agent 执行失败”，无法判断是许可运行态、
+// 镜像还是数据库。下层摘要已在抓取处截断并脱敏，这里再压成单行并限长。
 func localRuntimeDeploymentError(err error, fallback string) error {
 	if application.RuntimeLicenseApprovalErrorCode(err) != "" {
 		return application.RuntimeLicenseApprovalFailure(err)
