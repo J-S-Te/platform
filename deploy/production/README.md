@@ -653,6 +653,8 @@ cd /opt/unified-identity-platform
 `bin/backup-all.sh` 在**新备份已验证并落盘成功之后**自动执行同一策略，清理失败只告警，不改变备份/发布结论。可用环境变量调整：
 
 - `BACKUP_RETENTION_DAYS`：保留天数，默认 `7`；`<=0` 关闭自动清理。
+- `BACKUP_EMERGENCY_MIN_FREE_KIB`：备份前可用空间阈值，默认 `3145728`（3 GiB）。低于阈值时 backup-all 会在创建新备份前先做一次紧急保留清理（`--keep-days 0 --keep-count 2 --apply`），避免"磁盘已满 → mktemp/备份先失败 → 成功后才清理的策略永远不触发"的自锁。
+
 - `BACKUP_RETENTION_MIN_COUNT`：至少保留的最近完整备份组数，默认 `5`，最小 `1`。
 - 非法值会 `WARNING` 并回落默认值，不会阻断发布。
 

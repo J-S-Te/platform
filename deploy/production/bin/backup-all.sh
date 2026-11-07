@@ -45,7 +45,7 @@ else
   [[ "$mode" != drill || -n "$drill_root" ]] || usage
 fi
 
-for command_name in gzip sha256sum flock install mktemp tar awk find grep head cp chmod stat realpath wc python3; do
+for command_name in gzip sha256sum flock install mktemp tar awk find grep head cp chmod stat realpath wc python3 df; do
   command -v "$command_name" >/dev/null || { echo "missing command: $command_name" >&2; exit 127; }
 done
 
@@ -162,6 +162,27 @@ validate_encryption_key() {
 # 新备份验证并落盘后按保留策略清理旧备份。清理是维护动作：任何失败只告警，
 # 绝不把已成功的备份/发布结论改写成失败。默认保留 7 天且至少最近 5 份完整备份组；
 # BACKUP_RETENTION_DAYS<=0 显式关闭。非法值告警后回落默认值。
+# emergency_prune_before_backup 在创建新备份前按剩余空间做一次紧急清理。
+# 背景（2026-11-07 真实事故）：磁盘被历史备份写满后，mktemp/备份本身先失败，而
+# "备份成功后再保留清理"的策略永远没有机会执行，形成自锁。这里在创建 work 目录前，
+# 若可用空间低于阈值，就按最保守策略（只留最新 2 组）先清理一轮。
+# 参数：无（读取 deploy_dir/backup_root 与 BACKUP_EMERGENCY_MIN_FREE_KIB）。
+# 返回值：恒为 0；清理失败只告警，不改变发布结论（备份本身仍会因空间不足而失败）。
+emergency_prune_before_backup() {
+  local min_free_kib="${BACKUP_EMERGENCY_MIN_FREE_KIB:-3145728}"
+  local available_kib pruner
+  [[ "$min_free_kib" =~ ^[0-9]+$ ]] || min_free_kib=3145728
+  pruner="$deploy_dir/bin/prune-backups.sh"
+  [[ -x "$pruner" ]] || return 0
+  available_kib="$(df -P -k "$backup_root" 2>/dev/null | awk 'NR==2 {print $4}')"
+  [[ "$available_kib" =~ ^[0-9]+$ ]] || return 0
+  (( available_kib < min_free_kib )) || return 0
+  echo "备份前可用空间 ${available_kib} KiB 低于阈值 ${min_free_kib} KiB，先执行紧急保留清理" >&2
+  bash "$pruner" --deploy-dir "$deploy_dir" --keep-days 0 --keep-count 2 --apply >&2 || \
+    echo '紧急清理失败，继续尝试备份（可能因空间不足失败）' >&2
+  return 0
+}
+
 run_backup_retention() {
   local retention_days="${BACKUP_RETENTION_DAYS:-7}"
   local retention_count="${BACKUP_RETENTION_MIN_COUNT:-5}"
@@ -408,6 +429,8 @@ fi
 exec {backup_lock_fd}>"$backup_root/.backup.lock"
 flock -n "$backup_lock_fd" || { echo "another system backup is running" >&2; exit 1; }
 [[ ! -e "$batch" ]] || { echo "backup batch already exists: $batch" >&2; exit 1; }
+# 空间不足时先清理再创建 work 目录；否则 mktemp 本身就会失败，保留策略永远跑不到。
+emergency_prune_before_backup
 work="$(mktemp -d "$backup_root/.${stamp}.XXXXXX")"
 cleanup_work() {
   if [[ -n "${work:-}" && -d "$work" && "$work" == "$backup_root/.${stamp}."* ]]; then
