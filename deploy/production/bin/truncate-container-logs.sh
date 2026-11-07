@@ -43,6 +43,15 @@ for arg in "$@"; do
   esac
 done
 
+# /var/lib/docker 通常 root:root 0710，即使部署用户在 docker 组里也无法列目录。
+# 需要读取/截断时用 sudo -n 重新执行自身（不引入交互式密码提示）。
+if [[ "${EUID:-$(id -u)}" -ne 0 && ! -r "$DOCKER_ROOT/containers" ]]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    export DOCKER_ROOT
+    exec sudo -n -- "$0" "$@"
+  fi
+fi
+
 if [[ ! -d "$DOCKER_ROOT/containers" ]]; then
   echo "container log directory not found: $DOCKER_ROOT/containers" >&2
   echo "---- docker data root diagnostics ----" >&2
