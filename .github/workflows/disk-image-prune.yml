@@ -1,0 +1,49 @@
+name: disk-image-prune
+
+# 测试机根分区被历史镜像/构建缓存占满时的受控清理入口。
+# 默认 dry-run：只打印磁盘与 Docker 占用；显式取消勾选才会清理未使用镜像与构建缓存。
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '仅统计（保持勾选）；取消勾选才会执行清理'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disk-image-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prune unused Docker images and build cache on the deploy host
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          echo "== disk/image prune mode: dry_run=$DRY_RUN =="
+          remote='df -h /; docker system df; if [ "'"$DRY_RUN"'" = "false" ]; then docker image prune -af; docker builder prune -af; fi; df -h /'
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote"
