@@ -349,8 +349,11 @@ require_backup_tree_accessible() {
   unreadable=""
   while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
-    if [[ ! -r "$entry" || ! -x "$entry" ]]; then
-      unreadable+="$entry"$'\n'
+    # 目录需要可读+可遍历；普通文件只需要可读（备份产物本来就是 600，没有执行位）。
+    if [[ -d "$entry" ]]; then
+      [[ -r "$entry" && -x "$entry" ]] || unreadable+="$entry"$'\n'
+    else
+      [[ -r "$entry" ]] || unreadable+="$entry"$'\n'
     fi
   done < <(find "$deploy_dir/backups" -maxdepth 2 -print 2>/dev/null || true)
   if [[ -n "$traversal_errors" || -n "$unreadable" ]]; then
