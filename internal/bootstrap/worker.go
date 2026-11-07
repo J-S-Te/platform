@@ -198,11 +198,19 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)
 	}
+	// 导出产物写到独立的 AUDIT_EXPORT_STORAGE_ROOT（默认 <FILE_STORAGE_ROOT>/audit-exports）：
+	// 与上传根分开后，导出保留期清理不会波及业务上传文件。
+	exportStorage, err := ensureAuditExportStorageRoot(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	logger, logFile, err := observability.NewLogger(cfg.Logging, cfg.AppName, cfg.Environment)
 	if err != nil {
 		return nil, err
 	}
+	// 启动即打印生效的导出根与兼容只读根，便于核对迁移是否完成（是否有产物仍在旧根）。
+	logger.Info("audit export storage root resolved", "audit_export_storage_root", exportStorage.Root, "legacy_file_storage_root", exportStorage.LegacyRoot)
 
 	db, err := database.OpenMySQL(cfg.MySQL)
 	if err != nil {
@@ -227,7 +235,7 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 	// 硬上限 3650 天）。启动即打印生效值，便于核对生产环境的证据保留承诺是否被环境变量改写。
 	exportRetentionDays, exportRetention := auditworker.ExportRetentionFromEnv()
 	logger.Info("audit export retention resolved", "environment_variable", auditworker.ExportRetentionDaysEnv, "days", exportRetentionDays, "retention", exportRetention.String())
-	exportRunner, err := auditworker.NewExportWorker(service, logger, cfg.FileStorageRoot, cfg.Worker.ID, cfg.Worker.PollInterval, cfg.Worker.StaleLockTimeout, exportRetention)
+	exportRunner, err := newAuditExportWorker(cfg, service, logger, exportRetention)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()

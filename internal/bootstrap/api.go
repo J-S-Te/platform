@@ -18,7 +18,6 @@ import (
 	applicationregistryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/interfaces/http"
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	auditinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/audit/infrastructure"
-	audithttp "github.com/J-S-Te/Basic-Platform/internal/platform/audit/interfaces/http"
 	authorizationapplication "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/application"
 	applicationaccess "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/applicationaccess"
 	authorizationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/authorization/infrastructure"
@@ -99,6 +98,11 @@ type API struct {
 func NewAPI(cfg config.Config) (*API, error) {
 	if err := os.MkdirAll(cfg.FileStorageRoot, 0o750); err != nil {
 		return nil, fmt.Errorf("create file storage root: %w", err)
+	}
+	// 下载 handler 读取的导出根必须与导出 worker 写入的根一致；这里创建同一个独立目录，
+	// 并保留 FILE_STORAGE_ROOT 作为兼容窗口的只读回退根。
+	if _, err := ensureAuditExportStorageRoot(cfg); err != nil {
+		return nil, err
 	}
 
 	logger, logFile, err := observability.NewLogger(cfg.Logging, cfg.AppName, cfg.Environment)
@@ -441,7 +445,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		return nil, err
 	}
 
-	auditHandler, err := audithttp.NewHandler(auditService, logger, cfg.FileStorageRoot)
+	auditHandler, err := newAuditExportHandler(cfg, auditService, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()

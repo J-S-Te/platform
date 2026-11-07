@@ -99,6 +99,10 @@ func NewExportWorker(service *application.Service, logger *slog.Logger, storageR
 	return &ExportWorker{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot), workerID: workerID, pollInterval: pollInterval, staleLockTimeout: staleLockTimeout, retention: exportRetention}, nil
 }
 
+// StorageRoot 返回导出产物根目录（写入/清理的唯一位置），供装配测试断言它与下载
+// handler 使用同一个根。绝不返回平台上传根。
+func (w *ExportWorker) StorageRoot() string { return w.storageRoot }
+
 // Run 持续轮询直到上下文取消。单个任务的错误会写回任务状态，不会终止后续任务处理。
 func (w *ExportWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
