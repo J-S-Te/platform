@@ -33,9 +33,13 @@ type Config struct {
 	// PortalApplicationCode 是外部客户门户应用编码（B4 解耦，默认 customer_portal）。
 	PortalApplicationCode string
 	FileStorageRoot       string
-	IAMImportFileGateway  FileGatewayClientConfig
-	CORSOrigins           []string
-	CommercialRuntime     CommercialRuntimeConfig
+	// AuditExportStorageRoot 是审计导出产物的独立根目录（默认 FILE_STORAGE_ROOT/audit-exports）。
+	// 导出 worker 写入/清理与 API 下载读取都必须使用它，不能与平台上传共用同一个根：
+	// 保留期清理是破坏性操作，共用根会让清理与配额直接波及业务上传文件。
+	AuditExportStorageRoot string
+	IAMImportFileGateway   FileGatewayClientConfig
+	CORSOrigins            []string
+	CommercialRuntime      CommercialRuntimeConfig
 	// Handover 配置离职交接的跨系统机器协议连接；未启用时不注入编排器，保持既有交接闸门。
 	Handover             HandoverConfig
 	CredentialEncryption CredentialEncryptionConfig
@@ -343,6 +347,14 @@ func Load() (Config, error) {
 	publicBaseURL := value("APP_PUBLIC_BASE_URL", "http://localhost:8080")
 	oidcIssuer := valueOrDefault("OIDC_ISSUER", publicBaseURL)
 
+	// 审计导出产物必须落在独立根目录：默认是 FILE_STORAGE_ROOT 下的 audit-exports 子目录，
+	// 因此默认部署不需要新增 compose 卷；显式覆盖时做路径清理并拒绝逃逸配置。
+	fileStorageRoot := resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads")))
+	auditExportStorageRoot, err := resolveAuditExportStorageRoot(envFile, fileStorageRoot, value("AUDIT_EXPORT_STORAGE_ROOT", ""))
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Environment: value("APP_ENV", "development"),
 		AppName:     value("APP_NAME", "basic-platform"),
@@ -450,7 +462,9 @@ func Load() (Config, error) {
 			InitialAdminRolesFromManifest: value("SUBSYSTEM_INITIAL_ADMIN_ROLES_FROM_MANIFEST", "") == "true",
 			DefaultIssuerAlias:            strings.ToLower(value("SUBSYSTEM_DEFAULT_ISSUER_ALIAS", "platform")),
 		},
-		FileStorageRoot: resolveConfigPath(envFile, value("FILE_STORAGE_ROOT", filepath.Join("data", "uploads"))),
+		FileStorageRoot: fileStorageRoot,
+		// 导出根在 Load 中已解析；Validate 再校验它不能等于上传根。
+		AuditExportStorageRoot: auditExportStorageRoot,
 		IAMImportFileGateway: FileGatewayClientConfig{
 			BaseURL: value("IAM_IMPORT_FILE_GATEWAY_BASE_URL", ""), TokenURL: value("IAM_IMPORT_FILE_GATEWAY_TOKEN_URL", ""),
 			ClientID: value("IAM_IMPORT_FILE_GATEWAY_CLIENT_ID", ""), ClientSecret: value("IAM_IMPORT_FILE_GATEWAY_CLIENT_SECRET", ""),
@@ -610,6 +624,14 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Logging.Directory == "" || cfg.FileStorageRoot == "" {
 		return fmt.Errorf("LOG_DIRECTORY and FILE_STORAGE_ROOT must not be empty")
+	}
+	// 审计导出根与平台上传根共用会让导出产物的保留期清理直接波及业务上传文件，
+	// 因此共享根配置在监听端口之前就拒绝启动。空值由装配侧（bootstrap）失败关闭，
+	// 这里只校验"显式给出却与上传根相同"的危险配置。
+	if cfg.AuditExportStorageRoot != "" &&
+		filepath.Clean(cfg.AuditExportStorageRoot) == filepath.Clean(cfg.FileStorageRoot) {
+		return fmt.Errorf("AUDIT_EXPORT_STORAGE_ROOT must not equal FILE_STORAGE_ROOT; use a dedicated directory such as %s",
+			filepath.Join(filepath.Clean(cfg.FileStorageRoot), auditExportStorageSubdirectory))
 	}
 	configuredGatewayFields := 0
 	for _, field := range []string{cfg.IAMImportFileGateway.BaseURL, cfg.IAMImportFileGateway.TokenURL, cfg.IAMImportFileGateway.ClientID, cfg.IAMImportFileGateway.ClientSecret} {
@@ -773,6 +795,27 @@ func defaultEnvFilePath(workingDirectory string) string {
 		}
 	}
 	return candidates[0]
+}
+
+// auditExportStorageSubdirectory 是未显式配置 AUDIT_EXPORT_STORAGE_ROOT 时的默认子目录：
+// 它位于 FILE_STORAGE_ROOT 之内，因此默认部署沿用既有持久化卷，无需修改 compose。
+const auditExportStorageSubdirectory = "audit-exports"
+
+// resolveAuditExportStorageRoot 解析审计导出产物的独立根目录。
+//
+// 显式配置优先（相对路径锚定到环境文件目录，与 FILE_STORAGE_ROOT 的处理一致）；
+// 未配置时返回 "<FILE_STORAGE_ROOT>/audit-exports"。解析后统一做路径清理，
+// 清理后仍残留 ".." 元素说明配置试图逃出环境文件所在目录，直接拒绝而不是猜测意图。
+func resolveAuditExportStorageRoot(envFile, fileStorageRoot, configured string) (string, error) {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return filepath.Clean(filepath.Join(fileStorageRoot, auditExportStorageSubdirectory)), nil
+	}
+	root := filepath.Clean(resolveConfigPath(envFile, configured))
+	if root == ".." || strings.HasPrefix(root, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("AUDIT_EXPORT_STORAGE_ROOT must not escape the environment file directory: %q", configured)
+	}
+	return root, nil
 }
 
 // resolveConfigPath 将相对路径锚定到选中的环境文件目录，而不是当前工作目录，

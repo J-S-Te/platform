@@ -63,15 +63,33 @@ type Handler struct {
 	service     *application.Service
 	logger      *slog.Logger
 	storageRoot string
+	// legacyStorageRoot 是兼容窗口期（一个 release）的只读回退根：新根缺失产物时仍可从
+	// 旧的 FILE_STORAGE_ROOT 读取上一版本写下的导出文件。写入与清理永不使用它。
+	legacyStorageRoot string
 }
 
 // NewHandler 构造审计 HTTP 处理器；任一依赖缺失时失败关闭。
-func NewHandler(service *application.Service, logger *slog.Logger, storageRoot string) (*Handler, error) {
+//
+// storageRoot 是审计导出产物的新根（AUDIT_EXPORT_STORAGE_ROOT），也是唯一写入位置；
+// legacyStorageRoot 是兼容窗口期的只读回退根（FILE_STORAGE_ROOT），可为空表示不回退。
+// 两个根相同（含清理后相同）时按"未配置回退"处理，避免把同一目录读两次。
+func NewHandler(service *application.Service, logger *slog.Logger, storageRoot, legacyStorageRoot string) (*Handler, error) {
 	if service == nil || logger == nil || strings.TrimSpace(storageRoot) == "" {
 		return nil, errors.New("audit HTTP handler dependencies must not be nil")
 	}
-	return &Handler{service: service, logger: logger, storageRoot: filepath.Clean(storageRoot)}, nil
+	root := filepath.Clean(storageRoot)
+	legacy := filepath.Clean(strings.TrimSpace(legacyStorageRoot))
+	if strings.TrimSpace(legacyStorageRoot) == "" || legacy == root {
+		legacy = ""
+	}
+	return &Handler{service: service, logger: logger, storageRoot: root, legacyStorageRoot: legacy}, nil
 }
+
+// StorageRoot 返回审计导出产物的主根目录，供装配测试断言 worker 与 API 使用同一个根。
+func (h *Handler) StorageRoot() string { return h.storageRoot }
+
+// LegacyStorageRoot 返回兼容回退的只读根；未配置时为空字符串。
+func (h *Handler) LegacyStorageRoot() string { return h.legacyStorageRoot }
 
 type eventInputPayload struct {
 	EventID         string    `json:"event_id"`
@@ -185,6 +203,12 @@ type exportResponse struct {
 	ErrorMessage string     `json:"error_message,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	// 证据字段只在该任务仍有可下发产物时出现：file_version_id 指向 file_version 行，
+	// size_bytes/sha256(hex) 与下载响应头、库内证据同源，调用方可在下载前独立核对。
+	// 未完成、产物已清理或元数据缺失时三者为空，查询本身不报错。
+	FileVersionID string `json:"file_version_id,omitempty"`
+	SizeBytes     uint64 `json:"size_bytes,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
 }
 
 // exportDownloadTicketResponse 是签发一次性下载票据的响应。
@@ -451,7 +475,7 @@ func (h *Handler) CreateExportDownloadTicket(w http.ResponseWriter, r *http.Requ
 	jobID := strings.TrimSpace(r.PathValue("job_id"))
 	// 先确认产物真实存在于本地存储：任务标记 SUCCEEDED 但文件已丢失时，不签发
 	// 注定无法兑换的票据。
-	if _, err := h.exportArtifact(r.Context(), principal.Tenant.ID, jobID); err != nil {
+	if _, _, err := h.exportArtifact(r.Context(), principal.Tenant.ID, jobID); err != nil {
 		h.writeError(w, r, err)
 		return
 	}
@@ -463,29 +487,61 @@ func (h *Handler) CreateExportDownloadTicket(w http.ResponseWriter, r *http.Requ
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "审计导出下载票据已签发", exportDownloadTicketResponse{Ticket: token, DownloadURL: auditExportDownloadPath(jobID), ExpiresAt: ticket.ExpiresAt.UTC()})
 }
 
-// exportArtifact 解析任务产物元数据并确认磁盘文件存在且是普通文件。
+// exportArtifact 解析任务产物元数据并确认磁盘文件存在且是普通文件，返回元数据与解析后的
+// 绝对路径（下载端必须使用同一个路径，避免兼容回退时再次按新根查找）。
 // 错误语义与既有下载保持一致：任务不存在/未完成 → ErrNotFound，产物被清理 → ErrExpired；
 // 磁盘文件缺失同样按 ErrNotFound 处理（与“从未存在”一致），底层 IO 错误交给 writeError 记录。
-func (h *Handler) exportArtifact(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
+func (h *Handler) exportArtifact(ctx context.Context, tenantID, jobID string) (domain.ExportFile, string, error) {
 	file, err := h.service.GetExportFile(ctx, tenantID, jobID)
 	if err != nil {
-		return domain.ExportFile{}, err
+		return domain.ExportFile{}, "", err
 	}
-	absolutePath, err := storagePath(h.storageRoot, file.StorageRelativePath)
+	absolutePath, err := h.artifactPath(file.StorageRelativePath)
 	if err != nil {
-		return domain.ExportFile{}, err
+		return domain.ExportFile{}, "", err
+	}
+	return file, absolutePath, nil
+}
+
+// artifactPath 在新根（AUDIT_EXPORT_STORAGE_ROOT）中定位产物；仅当新根不存在该相对路径
+// 时只读回退旧的 FILE_STORAGE_ROOT 并打 WARN（一个 release 的兼容窗口）。
+// 回退只发生在“新根确实缺失”时：新根存在但类型不是普通文件、或 stat 失败，都按失败处理，
+// 绝不因为本地状态异常去读另一个根。
+func (h *Handler) artifactPath(relativePath string) (string, error) {
+	absolutePath, err := storagePath(h.storageRoot, relativePath)
+	if err != nil {
+		return "", err
 	}
 	info, err := os.Stat(absolutePath)
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		return absolutePath, nil
+	case err == nil:
+		// 目录/设备等非普通文件不是可下发产物，也不触发兼容回退。
+		return "", application.ErrNotFound
+	case !errors.Is(err, os.ErrNotExist):
+		return "", err
+	}
+	if h.legacyStorageRoot == "" {
+		return "", application.ErrNotFound
+	}
+	legacyPath, err := storagePath(h.legacyStorageRoot, relativePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return domain.ExportFile{}, application.ErrNotFound
-		}
-		return domain.ExportFile{}, err
+		return "", err
 	}
-	if !info.Mode().IsRegular() {
-		return domain.ExportFile{}, application.ErrNotFound
+	legacyInfo, err := os.Stat(legacyPath)
+	switch {
+	case err == nil && legacyInfo.Mode().IsRegular():
+		h.logger.Warn("audit export artifact read from legacy file storage root",
+			"relative_path", relativePath, "audit_export_storage_root", h.storageRoot, "legacy_file_storage_root", h.legacyStorageRoot)
+		return legacyPath, nil
+	case err == nil:
+		return "", application.ErrNotFound
+	case errors.Is(err, os.ErrNotExist):
+		return "", application.ErrNotFound
+	default:
+		return "", err
 	}
-	return file, nil
 }
 
 // DownloadExport 用一次性票据兑换并流式返回一个已完成的租户隔离导出。
@@ -507,15 +563,9 @@ func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	file, err := h.exportArtifact(r.Context(), principal.Tenant.ID, jobID)
+	file, absolutePath, err := h.exportArtifact(r.Context(), principal.Tenant.ID, jobID)
 	if err != nil {
 		h.writeError(w, r, err)
-		return
-	}
-	absolutePath, err := storagePath(h.storageRoot, file.StorageRelativePath)
-	if err != nil {
-		h.logger.Error("resolve audit export path", "job_id", jobID, "error", err)
-		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
 	opened, err := os.Open(absolutePath)
@@ -571,7 +621,7 @@ func (h *Handler) exportEvidenceIntact(w http.ResponseWriter, r *http.Request, j
 	return false
 }
 
-// GetExportJob 返回导出任务状态与下载地址。
+// GetExportJob 返回导出任务状态与下载地址；任务完成时附带 file_version 证据。
 func (h *Handler) GetExportJob(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
 	if !ok {
@@ -582,7 +632,30 @@ func (h *Handler) GetExportJob(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计导出任务查询成功", exportToResponse(job))
+	result := exportToResponse(job)
+	if evidence, found := h.exportEvidence(r.Context(), principal.Tenant.ID, job); found {
+		result.FileVersionID = evidence.VersionID
+		result.SizeBytes = evidence.SizeBytes
+		result.SHA256 = hex.EncodeToString(evidence.SHA256)
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计导出任务查询成功", result)
+}
+
+// exportEvidence 读取已完成任务的 file_version 证据（标识、大小、摘要）。
+// 未完成或产物不存在/已清理时返回 found=false：任务状态查询不能因为产物消失而失败。
+func (h *Handler) exportEvidence(ctx context.Context, tenantID string, job domain.ExportJob) (domain.ExportFile, bool) {
+	if job.Status != "SUCCEEDED" {
+		return domain.ExportFile{}, false
+	}
+	file, err := h.service.GetExportFile(ctx, tenantID, job.JobID)
+	if err != nil {
+		// 常见原因是保留期清理（ErrExpired）或历史数据缺行；证据缺省为空即可。
+		if !errors.Is(err, application.ErrNotFound) && !errors.Is(err, application.ErrExpired) {
+			h.logger.Warn("read audit export evidence", "job_id", job.JobID, "error", err)
+		}
+		return domain.ExportFile{}, false
+	}
+	return file, true
 }
 func (h *Handler) applicationPrincipal(w http.ResponseWriter, r *http.Request) (appctx.Principal, bool) {
 	principal, ok := appctx.PrincipalFromContext(r.Context())

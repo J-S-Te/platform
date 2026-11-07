@@ -97,7 +97,7 @@ func newExportDownloadHandler(t *testing.T, file domain.ExportFile) (*Handler, s
 	if err != nil {
 		t.Fatalf("new audit service: %v", err)
 	}
-	handler, err := NewHandler(service, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})), storageRoot)
+	handler, err := NewHandler(service, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})), storageRoot, "")
 	if err != nil {
 		t.Fatalf("new audit handler: %v", err)
 	}
@@ -150,6 +150,9 @@ type exportDownloadRepositoryStub struct {
 	mu      sync.Mutex
 	file    domain.ExportFile
 	fileErr error
+	// job 是 GetExportJob 返回的任务夹具；零值时按"任务不存在"处理，保持既有下载用例语义。
+	job     domain.ExportJob
+	jobErr  error
 	tickets map[string]exportDownloadTicketRecord
 }
 
@@ -240,7 +243,13 @@ func (stub *exportDownloadRepositoryStub) CreateExportJob(context.Context, strin
 	return domain.ExportJob{}, nil
 }
 func (stub *exportDownloadRepositoryStub) GetExportJob(context.Context, string, string) (domain.ExportJob, error) {
-	return domain.ExportJob{}, application.ErrNotFound
+	if stub.jobErr != nil {
+		return domain.ExportJob{}, stub.jobErr
+	}
+	if stub.job.JobID == "" {
+		return domain.ExportJob{}, application.ErrNotFound
+	}
+	return stub.job, nil
 }
 func (stub *exportDownloadRepositoryStub) ClaimExportJob(context.Context, string, time.Time, time.Time) (domain.ExportWork, bool, error) {
 	return domain.ExportWork{}, false, nil
