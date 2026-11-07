@@ -159,6 +159,31 @@ validate_encryption_key() {
   command -v openssl >/dev/null || { echo "openssl is required for encrypted disaster backups" >&2; return 1; }
 }
 
+# 新备份验证并落盘后按保留策略清理旧备份。清理是维护动作：任何失败只告警，
+# 绝不把已成功的备份/发布结论改写成失败。默认保留 7 天且至少最近 5 份完整备份组；
+# BACKUP_RETENTION_DAYS<=0 显式关闭。非法值告警后回落默认值。
+run_backup_retention() {
+  local retention_days="${BACKUP_RETENTION_DAYS:-7}"
+  local retention_count="${BACKUP_RETENTION_MIN_COUNT:-5}"
+  if [[ ! "$retention_days" =~ ^-?[0-9]+$ ]]; then
+    echo "WARNING: invalid BACKUP_RETENTION_DAYS='$retention_days'; falling back to 7 (<=0 disables retention)" >&2
+    retention_days=7
+  fi
+  if [[ ! "$retention_count" =~ ^[0-9]+$ ]] || ((retention_count < 1)); then
+    echo "WARNING: invalid BACKUP_RETENTION_MIN_COUNT='$retention_count'; falling back to 5 (minimum 1)" >&2
+    retention_count=5
+  fi
+  if ((retention_days <= 0)); then
+    echo "backup retention disabled: BACKUP_RETENTION_DAYS=$retention_days; existing backups are left untouched"
+    return 0
+  fi
+  echo "backup retention: keep-days=$retention_days keep-count=$retention_count; pruning old backup groups"
+  if ! "$script_dir/prune-backups.sh" --deploy-dir "$deploy_dir" \
+    --keep-days "$retention_days" --keep-count "$retention_count" --apply; then
+    echo "WARNING: backup retention pruning failed; the verified backup at $batch is kept and the release result is unchanged" >&2
+  fi
+}
+
 validate_sha_manifest() {
   local root="$1"
   [[ -f "$root/SHA256SUMS" && ! -L "$root/SHA256SUMS" ]] || { echo "SHA256SUMS is missing or unsafe" >&2; return 1; }
@@ -625,3 +650,5 @@ printf 'verified disaster recovery backup: %s\n' "$batch"
 if [[ "$encrypted" == false ]]; then
   echo 'WARNING: recovery state is protected by 0700/0600 permissions but is not encrypted; copy it only to access-controlled encrypted storage.' >&2
 fi
+# 只有新备份已验证并提交后才清理旧备份；清理失败只告警，不改变本次发布结论。
+run_backup_retention

@@ -185,6 +185,8 @@ jobs:
           bash deploy/production/bin/test-offline-import.sh
           bash deploy/production/bin/test-verify-readiness.sh
           bash deploy/production/tests/test-key-init.sh
+          bash deploy/production/tests/test_prune_backups.sh
+          bash deploy/production/tests/test-backup-retention.sh
           test -x deploy/production/bin/deploy-service.sh
           test -x deploy/production/bin/deploy-customer-opportunity.sh
           # 每次切换不可变镜像都必须重建业务容器，并核对容器最终使用的 digest，
