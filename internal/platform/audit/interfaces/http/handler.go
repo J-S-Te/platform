@@ -3,6 +3,7 @@ package http
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,17 @@ const maxRequestBytes = 256 << 10
 // 刻意不支持 ?ticket= 查询参数：URL 会被浏览器历史、代理与访问日志留存，
 // 等于把 bearer 能力写进日志链（与文件网关 v2 票据的取舍一致）。
 const exportDownloadTicketHeader = "X-Audit-Export-Ticket"
+
+const (
+	// exportDigestHeader 是 RFC 9530 的响应完整性摘要：算法名 + base64(摘要原始字节)。
+	// 与库内 file_version.sha256（BINARY(32) 原始字节）一一对应，可被客户端独立复算。
+	exportDigestHeader = "Digest"
+	// exportChecksumHeader 是十六进制摘要头，兼容既有 sha256sum/curl 校验习惯。
+	exportChecksumHeader = "X-Checksum-Sha256"
+	// exportSHA256Length 是 SHA-256 摘要的固定字节长度；file_version.sha256 为 BINARY(32)，
+	// 长度不符说明证据元数据不完整，不能用于证明下发内容的完整性。
+	exportSHA256Length = 32
+)
 
 var (
 	// errExportDownloadTicketRequired 表示下载请求缺少一次性票据。
@@ -524,13 +536,39 @@ func (h *Handler) DownloadExport(w http.ResponseWriter, r *http.Request) {
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 		return
 	}
+	// 证据完整性门禁：库内 size_bytes/sha256 必须与磁盘产物一致。任何不符都在写出
+	// 响应体之前 fail-closed，绝不下发被截断或无法被摘要验证的审计证据文件。
+	if !h.exportEvidenceIntact(w, r, jobID, file, info.Size()) {
+		return
+	}
 	mediaType := strings.TrimSpace(file.MediaType)
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": file.OriginalName}))
+	// 摘要头只声明库内证据，不重新计算全文件摘要：下载端可用它校验流式收到的字节。
+	w.Header().Set(exportDigestHeader, "sha-256="+base64.StdEncoding.EncodeToString(file.SHA256))
+	w.Header().Set(exportChecksumHeader, hex.EncodeToString(file.SHA256))
 	http.ServeContent(w, r, file.OriginalName, info.ModTime(), opened)
+}
+
+// exportEvidenceIntact 校验下载产物的证据完整性并记录完整性事件。
+// 通过时返回 true；不通过时已写出 500 响应，调用方必须立即返回。
+// 两类拒绝原因都属服务端证据链故障（元数据缺失或产物与元数据不符），统一记 ERROR。
+func (h *Handler) exportEvidenceIntact(w http.ResponseWriter, r *http.Request, jobID string, file domain.ExportFile, actualSize int64) bool {
+	switch {
+	case len(file.SHA256) != exportSHA256Length:
+		h.logger.Error("audit export integrity violation: digest metadata missing",
+			"job_id", jobID, "digest_bytes", len(file.SHA256), "expected_bytes", exportSHA256Length)
+	case actualSize < 0 || uint64(actualSize) != file.SizeBytes:
+		h.logger.Error("audit export integrity violation: size mismatch",
+			"job_id", jobID, "expected_size", file.SizeBytes, "actual_size", actualSize)
+	default:
+		return true
+	}
+	httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
+	return false
 }
 
 // GetExportJob 返回导出任务状态与下载地址。

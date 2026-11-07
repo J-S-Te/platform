@@ -88,15 +88,22 @@ KNOWN_METRICS = {
     # platform/internal/platform/oidc/backchannel/observability.go:16,18
     "platform_oauth_backchannel_unregistered_rp",
     "platform_oauth_backchannel_logout_no_endpoint",
-    # platform/internal/transport/http/metrics.go:113-119（每次抓取无条件输出）
+    # platform/internal/transport/http/metrics.go 的 HTTP 指标常量块与 writeHTTPMetrics
+    # （Middleware 逐请求累加，每次抓取无条件输出 TYPE 行）。C1 起带
+    # {method,route,status} 标签，延迟从 summary 改为 histogram（多了 _bucket{le}）。
     "platform_http_requests_total",
     "platform_http_errors_total",
+    "platform_http_request_duration_seconds_bucket",
     "platform_http_request_duration_seconds_sum",
     "platform_http_request_duration_seconds_count",
     "platform_authz_failures_total",
     "platform_oidc_login_failures_total",
+    # C2 事件级失败计数（platform/internal/shared/metrics/events.go）：
+    # 登录失败按受约束 reason 枚举、审计写入失败按 stage 枚举；标签仅这两个维度。
+    "platform_login_failures_total",
+    "platform_audit_write_failures_total",
     "platform_metric_collection_errors_total",
-    # platform/internal/transport/http/metrics.go:73-79（队列/可靠性计数）
+    # platform/internal/transport/http/metrics.go:364-370（queueMetricSpecs，队列/可靠性计数）
     "platform_keycloak_outbox_backlog",
     "platform_keycloak_outbox_dead",
     "platform_async_job_backlog",
@@ -104,7 +111,7 @@ KNOWN_METRICS = {
     "platform_oidc_backchannel_logout_backlog",
     "platform_oidc_backchannel_logout_failed",
     "platform_oidc_backchannel_logout_delivered",
-    # platform/internal/transport/http/metrics.go:135-137,159-160
+    # platform/internal/transport/http/metrics.go:438-440,452-455
     "platform_database_open_connections",
     "platform_database_in_use_connections",
     "platform_database_wait_count_total",
@@ -153,6 +160,7 @@ EXPR_KEYWORDS = {
     "floor",
     "group_left",
     "group_right",
+    "handler",
     "histogram_quantile",
     "hour",
     "idelta",
@@ -162,6 +170,8 @@ EXPR_KEYWORDS = {
     "irate",
     "job",
     "kind",
+    "le",
+    "method",
     "label_join",
     "label_replace",
     "max",
@@ -175,10 +185,13 @@ EXPR_KEYWORDS = {
     "rate",
     "resets",
     "round",
+    "route",
     "scalar",
     "severity",
     "sort",
     "sort_desc",
+    "stage",
+    "status",
     "stddev",
     "sum",
     "time",

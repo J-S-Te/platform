@@ -583,17 +583,26 @@ func (r *Repository) FailExportJob(ctx context.Context, work domain.ExportWork, 
 
 // GetExportFile 返回已完成导出任务的文件元数据；物理路径仅限服务端内部使用。
 // status 取自 file_version，供服务层把已清理的产物映射为“已过期”而不是可下载文件。
+// size_bytes 与 sha256 是下载端的证据完整性依据（大小/摘要校验），必须随元数据一起读出，
+// 否则下载端只能盲发文件。
 func (r *Repository) GetExportFile(ctx context.Context, tenantID, jobID string) (domain.ExportFile, error) {
 	type row struct {
-		FileID, StorageRelativePath, OriginalName, MediaType, Status string
-		CreatedAt                                                    time.Time
+		FileID              string
+		VersionID           string `gorm:"column:version_id"`
+		StorageRelativePath string
+		OriginalName        string
+		MediaType           string
+		Status              string
+		SizeBytes           uint64
+		SHA256              []byte `gorm:"column:sha256"`
+		CreatedAt           time.Time
 	}
 	var result row
-	err := r.database.WithContext(ctx).Table("async_job").Select("file_object.id AS file_id, file_version.storage_relative_path, file_version.original_name, file_version.media_type, file_version.status, file_version.created_at").Joins("JOIN file_object ON file_object.id = async_job.result_file_id").Joins("JOIN file_version ON file_version.id = file_object.current_version_id").Where("async_job.tenant_id = ? AND async_job.public_id = ? AND async_job.job_type = ? AND async_job.status = ?", tenantID, jobID, "AUDIT_EXPORT", "SUCCEEDED").Take(&result).Error
+	err := r.database.WithContext(ctx).Table("async_job").Select("file_object.id AS file_id, file_version.id AS version_id, file_version.storage_relative_path, file_version.original_name, file_version.media_type, file_version.status, file_version.size_bytes, file_version.sha256, file_version.created_at").Joins("JOIN file_object ON file_object.id = async_job.result_file_id").Joins("JOIN file_version ON file_version.id = file_object.current_version_id").Where("async_job.tenant_id = ? AND async_job.public_id = ? AND async_job.job_type = ? AND async_job.status = ?", tenantID, jobID, "AUDIT_EXPORT", "SUCCEEDED").Take(&result).Error
 	if err != nil {
 		return domain.ExportFile{}, r.mapError(err)
 	}
-	return domain.ExportFile{FileID: result.FileID, StorageRelativePath: result.StorageRelativePath, OriginalName: result.OriginalName, MediaType: result.MediaType, Status: result.Status, CreatedAt: result.CreatedAt}, nil
+	return domain.ExportFile{FileID: result.FileID, VersionID: result.VersionID, StorageRelativePath: result.StorageRelativePath, OriginalName: result.OriginalName, MediaType: result.MediaType, Status: result.Status, SizeBytes: result.SizeBytes, SHA256: result.SHA256, CreatedAt: result.CreatedAt}, nil
 }
 
 // auditExportDownloadTicketModel 映射 audit_export_download_ticket（000139）：只保存

@@ -94,6 +94,16 @@ healthcheck:
 - `COMMERCIAL_LICENSE_COMPATIBILITY` 是**兼容放行开关**（`license-core/consumer/consumer.go`：只有归一后等于 `true` 才放行，且仅适用于从未登记的组件），生产必须缺省——缺省即 fail-closed。任何模板、清单或 Compose 默认值都不许打开它，否则 `COMMERCIAL_LICENSE_ENABLED=false` 就能冒充“已授权”。
 - 回归守卫：`tests/test-compose-orchestration-consistency.py` 的 `test_license_compatibility_switch_is_never_wired_in_production` 断言这两类键不出现在两份编排的 `environment` 里，且 7 份模板与 6 份清单都不声明它们；发布前核对项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 的「12.4 许可运行环境文件的键位核对」。
 
+### 许可运行态判读口径（D5：只看 status 端点，不混用 readyz）
+
+许可是否**在应用级生效**只有一个判据：`GET /api/v1/licenses/status`（需 `platform:license:read`）。响应里看两处：逐应用条目 `systems[]`（每个含 `code`/`status`/`enforcement`，前端契约里也可能称 `items[]`）与顶层 `runtime_enforcement`（`AVAILABLE`/`UNAVAILABLE`，来源 `per_application_coordination`）。`systems[].status` 只有 `VALID`/`NOT_EFFECTIVE`/`EXPIRED`/`NOT_PURCHASED`/`NO_LICENSE`/`CLOCK_ABNORMAL`/`VALIDATION_ERROR` 这几种结论；`enforcement` 为 `null` 或不可用说明该消费者的协调状态读不到，按“未接通”处理，不能当作“没有限制”。
+
+- `/licenses/enforcement/:application`（及 `/overview`、`/evidence`）是**诊断单个消费者**的协调状态/证据入口（同样需要 `platform:license:read`），只用于定位“为什么被拒”；不作为“许可是否生效”的判据，也不要把某个应用的单条诊断当成全平台结论。
+- **禁止**用单服务 `/readyz` 的许可字段或容器健康检查（`docker inspect` 的 `healthy`）作为判据：`/readyz` 是未认证探针，回答的是进程依赖与配置是否就绪，不是合规结论；容器 healthy 更不能说明许可有效。`readyz` 降级也不代表许可失效（例如审计凭据缺失、数据库抖动），两者必须分开看。
+- 固定排障顺序：① 查 `/api/v1/licenses/status` 的 `systems[].status` 与 `enforcement`，确认是哪个应用、哪种结论 → ② 对应该消费者的 `runtime/license-<service>.env` 键位（只核键名，不记录取值）→ ③ 该消费者日志里的许可拒绝原因 → ④ 最后才看容器健康（`readyz` 仅作进程依赖参考，不作为判据）。
+- **已知盲点**：status 聚合是**平台视角**。如果子系统本地许可键（`runtime/license-*.env` 的 `COMMERCIAL_LICENSE_*` 组）与平台签发集不一致，会出现“聚合 `VALID` 但业务被拒”。此时按 `runtime/license-*.env` 与子系统日志逐项核对，必要时走受控接入重新下发；不得靠改库、手改状态文件或 `COMMERCIAL_LICENSE_COMPATIBILITY` 绕过。
+- 门禁：`tests/test_license_status_reading.py` 静态断言本节仍以 `/api/v1/licenses/status` 为唯一判据，并禁止把 `readyz` 与许可结论并列的措辞；验收对照项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 的「12.5 许可运行态判读核对」。本轮只做文档与静态门禁，**未做**真实环境下的许可状态对照（需在隔离环境按 12.5 执行）。
+
 ### 检查清单（发版前手动执行）
 
 改过生产编排、监控规则、子系统清单或 runtime 模板后，在本仓库根执行：
@@ -121,7 +131,23 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 - `/metrics` 只由网络层保护：业务服务的指标端口仅允许回环发布（平台 8080、合同 8081、结算 8085），File Gateway 8086、Prometheus 9090、node-exporter 9100 完全不发布端口；前端 nginx 只代理显式业务路径，没有 `/metrics` 路由。禁止为了抓取补 `ports:`，也不要加公网 Ingress/反代。
 - contract 的 `/metrics` 不校验凭据，但只暴露聚合计数（不含租户/合同/事件 id），且与 `/healthz`、`/readyz` 同级注册、不进 `/api/v1`。它的唯一边界就是上面这条网络限制，因此“临时放开抓取端口”不是可接受的排障手段。
 - 平台 `/metrics` 额外有应用层鉴权（`RequireMetricsAccess`，SEC-B4）：配置 `METRICS_ACCESS_TOKEN` 时必须带 `Authorization: Bearer`，未配置时只放行回环对端。因此平台 job 必须用部署方提供的凭据文件抓取，见下一节。结算 `/metrics` 与合同的同级实现一致，不做应用层鉴权。
-- 数析（data-analysis）与项目管理（project）当前**没有** HTTP `/metrics` 端点，本编排刻意不为它们新增抓取 job（没有端点就写 job 只会得到永远 `up == 0` 的假目标）。它们的集成缺口只能通过各自的 `/readyz` 与日志观察；需要指标时先实现端点，再改本文件与门禁。
+- 数析（data-analysis）与项目管理（project）已经**各自暴露**了指标端点，但**权威 `prometheus.yml` 尚未接入**（采集另立项）：
+  - 数析 `data-analysis-api` 的 `/metrics` 挂在服务根路径（`:8080`，与 `APP_PATH_PREFIX` 无关），由 `MetricsAccess` 保护——配置 `METRICS_ACCESS_TOKEN` 时必须带 `Authorization: Bearer`，未配置时只放行回环对端；输出 `data_analysis_audit_outbox_pending`/`_delivered`/`_dead`/`_counts_error`、`data_analysis_build_info`、`data_analysis_process_start_time_seconds`、`data_analysis_process_goroutines`。
+  - 项目管理 Temporal Worker 在私有的 `TEMPORAL_METRICS_ADDRESS`（代码默认 `:9092`）暴露 `/metrics`，输出 `project_audit_outbox_pending`/`_dead` 与 `project_audit_outbox_query_errors_total`；该端口只在 `application` 内网可达，不发布宿主机端口。
+  - 本轮**不新增抓取 job**（目标服务名/端口/鉴权与采集触发条件另立项评审），因此这两个端点的指标在 Prometheus 里**没有样本**。**不要基于未抓取指标写告警**：规则会永久静默，`absent()` 也会长期红，比没有规则更危险。接入顺序是先改 `monitoring/prometheus/prometheus.yml`（job + 凭据 + 网络边界），再同步本文件与 `tests/test-compose-orchestration-consistency.py` 门禁。
+
+#### 指标目录归属（D3：platform 持有唯一目录，缺口显式登记）
+
+决策：接受“platform 持有唯一指标目录”，入口固定在 `deploy/production`，不在其它仓库或子系统私有文档里维护第二份。目录由四处组成：`monitoring/prometheus/prometheus.yml` 的 job 清单、本文件「1. 新增抓取 job 与指标清单」的已采集/未采集两张表、`monitoring/prometheus/*-alerts.yml` 的告警规则，以及 `tests/test-compose-orchestration-consistency.py` 的 `KNOWN_METRICS` 白名单。新增指标或改变采集状态时必须**同时**改四处，缺一处即视为目录残缺：
+
+1. `monitoring/prometheus/prometheus.yml`：新增/调整 job、target 与 `# access:` 声明；若本轮**不采集**，必须在上面“未采集”表显式登记 `不采集 + 原因 + 主责人（owner=...）`，不能静默缺省（默认不新增 scrape job 也是登记，不是遗漏）。
+2. 告警：新增一条使用该指标的规则，或在指标表声明“仅采集不告警 + 原因”（例如只做容量趋势、阈值未定）。禁止对无样本的指标写告警——规则会永久静默，`absent()` 也会长期红。
+3. `tests/test-compose-orchestration-consistency.py` 的 `KNOWN_METRICS`：加入指标名，否则告警表达式会被判为“臆造指标”而门禁失败。
+4. 本文件「1. 新增抓取 job 与指标清单」的指标表：补 job/端点/指标/代码来源，并把采集状态写清楚。
+
+已登记缺口（本轮仍 scope-out、不新增 scrape job）：数析 `data-analysis-api:8080` 与项目管理 `project-worker:9092` 均已暴露 `/metrics`，采集另立项，主责人=平台运维；两者在 Prometheus 里没有 job、没有样本。其中项目 `:9092` **无应用层鉴权**、仅 `application` 内网可达，不得为了抓取发布宿主机端口或经过前端网关。
+
+门禁（`tests/test_metrics_endpoint_registry.py`，已登记 CI）：已采集行必须有同名 job 且 target 一致、未采集行必须没有 job/target、未采集行必须有 `owner=` 登记、每个 job 必须有且仅有一次 `# access: token|loopback-only|network-only` 声明并与 `docker-compose.yml` 的 `ports` 交叉校验（`network-only` 不得有 `ports:`，`loopback-only` 只能 `127.0.0.1` 绑定，`token` 必须配 `credentials_file`）、`platform-alerts.yml` 的 5xx 选择器必须是等值 `status="5xx"`（`status=~"5.."` 永远匹配不到序列）。改指标、改抓取或改告警后先跑它。
 
 ### 观测接入：指标、告警与凭据
 
@@ -132,17 +158,36 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 | 抓取 job | 端点 | 指标 | 来源（代码实际输出） |
 | --- | --- | --- | --- |
 | `platform-api` | `http://platform-api:8080/metrics`（Bearer） | `platform_oauth_backchannel_unregistered_rp`、`platform_oauth_backchannel_logout_no_endpoint` | `platform/internal/platform/oidc/backchannel/observability.go:16,18` |
-| `platform-api` | 同上 | `platform_http_requests_total`、`platform_http_errors_total`、`platform_http_request_duration_seconds_*`、`platform_authz_failures_total`、`platform_oidc_login_failures_total`、`platform_metric_collection_errors_total` | `platform/internal/transport/http/metrics.go:113-119` |
-| `platform-api` | 同上 | `platform_keycloak_outbox_backlog`/`_dead`、`platform_async_job_backlog`/`_dead`、`platform_oidc_backchannel_logout_backlog`/`_failed`/`_delivered` | `platform/internal/transport/http/metrics.go:73-79` |
-| `platform-api` | 同上 | `platform_async_job_retries_total`、`platform_async_job_last_success_timestamp_seconds`、`platform_database_*` | `platform/internal/transport/http/metrics.go:135-137,159-160` |
+| `platform-api` | 同上 | `platform_http_requests_total{method,route,status}`、`platform_http_errors_total{method,route,status}`、`platform_http_request_duration_seconds_bucket{method,route,status,le}`/`_sum`/`_count`、`platform_authz_failures_total`、`platform_oidc_login_failures_total`、`platform_metric_collection_errors_total` | `platform/internal/transport/http/metrics.go:62-66`（指标名）、`:261-285`（`writeHTTPMetrics`） |
+| `platform-api` | 同上 | `platform_login_failures_total{reason}`、`platform_audit_write_failures_total{stage}`（C2 事件级失败计数，全部枚举恒有样本） | `platform/internal/shared/metrics/events.go`（枚举与渲染）、`internal/transport/http/metrics.go`（`ServeHTTP` 调用 `eventMetrics().Write`）；失败点：`internal/platform/identity/interfaces/http/auth_handler.go`、`internal/transport/http/middleware/audit_trail.go`、`middleware/rate_limit.go` |
+| `file-gateway` | `http://file-gateway:8086/metrics`（无应用层鉴权，仅内网） | `file_gateway_http_requests_total{route,status}`、`file_gateway_http_request_duration_seconds_bucket{route,le}`/`_sum`/`_count`、`file_gateway_storage_used_percent`、`file_gateway_storage_warning_threshold_percent`、`file_gateway_storage_high_threshold_percent`、`file_gateway_metric_collection_errors`、`file_gateway_database_open_connections`/`_in_use_connections` | `platform/cmd/file-gateway/metrics.go`（请求面，`routes()` 注册点标注路由枚举）、`platform/cmd/file-gateway/main.go`（`/metrics` 手写 exposition） |
+| `platform-api` | 同上 | `platform_keycloak_outbox_backlog`/`_dead`、`platform_async_job_backlog`/`_dead`、`platform_oidc_backchannel_logout_backlog`/`_failed`/`_delivered` | `platform/internal/transport/http/metrics.go:364-370` |
+| `platform-api` | 同上 | `platform_async_job_retries_total`、`platform_async_job_last_success_timestamp_seconds`、`platform_database_*` | `platform/internal/transport/http/metrics.go:438-440,452-455` |
 | `settlement-api` | `http://settlement-api:8085/metrics` | `settlement_outbox_pending{destination}`、`settlement_integration_destination_configured{destination}`、`settlement_integration_audit_required`、`settlement_outbox_unconfigured_pending`、`settlement_outbox_pending_query_error` | `Settlement/internal/httpapi/integration_status.go:101-130`；目的地字面量 `Settlement/internal/outbox/destinations.go:13,15` 与 `integration_status.go:31` |
 | `contract`（既有） | `http://contract-api:8081/metrics` | `contract_integration_outbox_dead{kind}`、`contract_integration_outbox_dead_total` | `contract_management/internal/transport/httpapi/metrics.go:54-66` |
+
+已暴露但**未采集**的端点（`prometheus.yml` 暂无 job，采集另立项；本轮不写告警）：
+
+| 服务（无抓取 job） | 端点 | 已暴露指标 | 状态 |
+| --- | --- | --- | --- |
+| `data-analysis-api`（数析） | `http://data-analysis-api:8080/metrics`（`MetricsAccess`：`METRICS_ACCESS_TOKEN` Bearer 或回环对端） | `data_analysis_audit_outbox_pending`/`_delivered`/`_dead`/`_counts_error`、`data_analysis_build_info`、`data_analysis_process_start_time_seconds`、`data_analysis_process_goroutines` | **已暴露 / 未采集**（无 job、无样本；采集另立项，owner=平台运维） |
+| `project-worker`（项目管理） | `http://project-worker:9092/metrics`（Temporal Worker 私有指标端口 `TEMPORAL_METRICS_ADDRESS`，默认 `:9092`，无应用层鉴权、仅 `application` 内网） | `project_audit_outbox_pending`、`project_audit_outbox_dead`、`project_audit_outbox_query_errors_total` | **已暴露 / 未采集**（无 job、无样本；采集另立项，owner=平台运维） |
 
 采集语义要在排障前读懂，否则会把“没有样本”当成“一切正常”：
 
 - back-channel 两条 gauge 在采集失败时**不输出**（不以 0 兜底）。所以 `up == 1` 但指标缺失，本身就是故障信号。
 - `settlement_outbox_pending{destination}` 只在该目的地有积压行时才有样本（`Settlement/internal/outbox/worker.go:75-94` 按 destination 分组），空 outbox 没有样本是正常的——不要对它写 `absent()`，否则健康集群会被误报。样本缺失的兜底用始终输出的 `settlement_integration_audit_required`。
 - 合同 `/metrics` 在计数能力缺失或查询失败时返回 503 且不输出任何样本（`contract_management/internal/transport/httpapi/metrics.go:37-44`），同样必须用 `absent()` 才能看见。
+- 平台 HTTP 请求面（`platform_http_requests_total` / `platform_http_errors_total` / `platform_http_request_duration_seconds_*`）自 C1 起共用同一组标签 `{method, route, status}`，延迟指标是 **histogram**（桶上界 `0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10` 秒加 `le="+Inf"`，`+Inf` 恒等于 `_count`）。三个维度的取值域都由代码限死：`method` 白名单（`GET/POST/PUT/PATCH/DELETE/OPTIONS/HEAD`，其它记 `OTHER`）、`route` 只取 gin 注册模式（如 `/api/v1/users/:id`，未匹配的 404/405 固定 `__unmatched__`）、`status` 只分 `1xx/2xx/3xx/4xx/5xx`（畸形状态码兜底 `other`）。真实路径与查询串**永不进入标签**：那既是高基数入口，也会把 URL 里的 token/手机号复制进指标。
+- 序列数有硬上限 `maxHTTPSeries = 1000`（`platform/internal/transport/http/metrics.go:80`）：超过后新组合折叠进 `{method="OTHER",route="__overflow__",status="other"}` 继续计数，请求量不丢、基数不涨。所以看到 `__overflow__` 说明进程内的 `(method, route, status)` 组合真的超过了 1000 个，要按路由表排查“动态路由”，而不是去调大上限。
+- 因为带标签，**进程空闲时这三条指标没有样本**（只有 `# TYPE` 行）：零请求不是故障，不要用它们写 `absent()` 兜底。抓取可用性的兜底统一用每次抓取都无条件输出的 `platform_metric_collection_errors_total`。
+- 写 PromQL 时 `status` 是**分桶枚举字符串**，必须等值：`status="5xx"` 能命中；`status=~"5.."`、`status=~"5.*"`、`status>=500` 这类“按数字区间”的写法**永远匹配不到**任何序列（空结果 = 规则静默永不触发）。这是最容易写错也最难发现的一类坑。
+- C2 新增的两条事件级失败指标与上面的启发式指标互补，不是替换：`platform_oidc_login_failures_total` 仍是“401/403 + `/oauth2/`、`/authorize`、`/api/v1/auth/` 路径前缀”的启发式，只能说明某类路径上出现过拒绝；`platform_login_failures_total{reason}` 在登录失败发生点记账，能说明**为什么**失败。
+  - `reason` 只有六个固定取值：`invalid_credentials`（凭据不匹配或未知账号，两者共用同一桶以防账号枚举）、`account_disabled`（凭据正确但租户/用户/账号停用、锁定或凭据过期）、`idp_error`（上游 OIDC 交换/验签/身份查询失败）、`rate_limited`（登录双桶限流拒绝）、`session_expired`（OIDC state/nonce/verifier 事务过期、刷新时服务端会话失效）、`other`（并发会话冲突、依赖故障等兜底）。未知原因一律折叠 `other`，**绝不允许**出现账号、租户、IP 或原始错误文本标签。
+  - `platform_audit_write_failures_total{stage}` 的 `stage` 只有五个固定取值：`intent`（业务链前意图事件写入失败）、`result`（结果事件含同步重试写入失败）、`dead_letter`（结果事件落审计死信也失败）、`result_streamed`（结果事件与死信都写不进去，而响应已经直接流给客户端——见下面的审计例外）、`unavailable`（审计处于失败窗口，请求在业务写入前被拒绝；也是未知 stage 的兜底桶）。该指标**只记账**：审计的失败关闭窗口仍由 `auditGate` 决定，指标不参与放行/拒绝判定，因此“结果事件已落死信但业务放行”的降级路径只增 `result`，不增 `dead_letter`。
+  - 审计语义的唯一 fail-closed 例外是**审计导出下载**（`GET /api/v1/audit/export-jobs/:job_id/download`）：它不扣留响应体（`metadata.response_body=not_captured`），响应体直接流给客户端。因此当“意图事件已成功 + 结果事件写入失败 + 死信也失败”时，服务端不能再补 503（那会污染一个已完整送达的导出文件），只保留 ERROR 日志并记 `stage=result_streamed`，由 `PlatformAuditResultStreamedFailure` 告警暴露这个无法回滚的审计结论缺口。该例外**只适用于下载路由、只适用于结果事件**：意图事件仍然必须写成功（失败即业务链之前 503），非下载路由的同一失败序列仍然 503（`stage=result`+`dead_letter`），不得把例外扩展到任何其它路由。
+  - 两条指标都无条件输出全部枚举（含 0），空闲进程也有样本；它们可以安全地用于 `rate()` 与 `absent()`，不会把“零失败”伪装成“抓取不到”。
+- file-gateway 请求面（`file_gateway_http_requests_total` / `file_gateway_http_request_duration_seconds_*`）的 `route` 只取固定模板枚举 `upload`/`download`/`ticket`/`other`（由 `routes()` 注册点显式标注，未标注的健康检查、绑定、清理、404 统一 `other`），`status` 只分 `2xx`/`4xx`/`5xx`（`1xx`/`3xx`/畸形码兜底 `other`）。`file_id`、`upload_id`、票据与查询串**永不进入标签**。延迟直方图桶上界为 `0.05 0.1 0.25 0.5 1 2.5 5 10 30 60` 秒加 `le="+Inf"`（`+Inf` 恒等于 `_count`），按 `route` 展开（不按 `status`），覆盖大文件传输的长尾。`/metrics` 抓取自身不计量（避免抓取频率改写被观测值）。
 
 #### 2. 新增告警规则与清单
 
@@ -152,7 +197,7 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 | --- | --- | --- |
 | `keycloak-alerts.yml`（既有） | Keycloak 与备份时间戳 | `KeycloakMetricsUnavailable` 等 |
 | `file-gateway-alerts.yml`（既有） | File Gateway 容量 | `FileGatewayStorage*` 等 |
-| `platform-alerts.yml`（新增） | 平台抓取、backchannel 缺口、队列 | `PlatformBackchannelUnregisteredRP`（`unregistered_rp > 0`，15m，warning）；`PlatformBackchannelNoEndpointBacklog`（`logout_no_endpoint > 0`，30m，warning）；`PlatformBackchannelNoEndpointBacklogPersistent`（同一指标 6h，critical）；`PlatformBackchannelLogoutDeliveryFailed`（`logout_failed > 0`，30m，warning）；`PlatformMetricsScrapeDown`（`up{job="platform-api"} == 0`，5m，critical）；`PlatformMetricsSamplesMissing`（`absent(platform_http_requests_total{job="platform-api"})`，15m，warning，覆盖 token 不匹配导致的 401）；`PlatformMetricCollectionErrors`；`PlatformKeycloakOutboxBacklog`/`_Dead`；`PlatformAsyncJobDead`/`_Stalled` |
+| `platform-alerts.yml`（新增） | 平台抓取、backchannel 缺口、队列 | `PlatformBackchannelUnregisteredRP`（`unregistered_rp > 0`，15m，warning）；`PlatformBackchannelNoEndpointBacklog`（`logout_no_endpoint > 0`，30m，warning）；`PlatformBackchannelNoEndpointBacklogPersistent`（同一指标 6h，critical）；`PlatformBackchannelLogoutDeliveryFailed`（`logout_failed > 0`，30m，warning）；`PlatformMetricsScrapeDown`（`up{job="platform-api"} == 0`，5m，critical）；`PlatformMetricsSamplesMissing`（`absent(platform_metric_collection_errors_total{job="platform-api"})`，15m，warning，覆盖 token 不匹配导致的 401；探测指标必须是每次抓取都无条件输出的那一条，`platform_http_*` 带标签且空闲时无样本，不能用来探测）；`PlatformHTTPErrorRateHigh`（`sum(rate(platform_http_errors_total{status="5xx"}[5m])) / sum(rate(platform_http_requests_total[5m])) > 0.05`，10m，warning，分子只统计 5xx，分母是全站请求总量）；`PlatformHTTPMeanLatencyHigh`（`_sum`/`_count` 速率的**平均值** `> 1.5`s，15m，warning；指标已是 histogram，但本轮不新增 p95 规则，p95 告警另立项）；`PlatformMetricCollectionErrors`；`PlatformKeycloakOutboxBacklog`/`_Dead`；`PlatformAsyncJobDead`/`_Stalled`；`PlatformAuditResultStreamedFailure`（`increase(platform_audit_write_failures_total{stage="result_streamed"}[10m]) > 0`，warning：审计导出下载的响应已流出、意图事件在库但结果事件与死信都写不进去，属无法回滚的审计结论缺口，见上面的审计例外） |
 | `integration-alerts.yml`（新增） | 结算与合同集成 | `SettlementMetricsScrapeDown`（5m，critical）；`SettlementMetricsSamplesMissing`；按 destination 的积压阈值 `SettlementAuditOutboxBacklog`（`PLATFORM_AUDIT > 200`，30m）、`SettlementNotificationOutboxBacklog`（`PLATFORM_NOTIFICATION > 500`，30m）、`SettlementTaxOutboxBacklog`（`TAX_INVOICE_COMMAND > 200`，30m）、`SettlementOutboxBacklogTotalCritical`（合计 `> 2000`，2h）；`SettlementOutboxUnconfiguredPending`（`> 0`，15m）；`SettlementAuditDestinationRequiredButUnconfigured`（`audit_required == 1` 且 `PLATFORM_AUDIT` 未配置，5m，critical）；`SettlementNotificationDestinationUnconfigured`（6h）；`SettlementOutboxPendingQueryError`；`ContractMetricsScrapeDown`（5m，critical）；`ContractMetricsUnavailable`（`absent(contract_integration_outbox_dead_total)`，10m）；`ContractIntegrationOutboxDead`（`> 0`，10m）、`_Critical`（`> 100`，1h）、`_PerEdge`（单条出边 `> 50`，30m） |
 
 告警语义与取舍：
@@ -545,6 +590,8 @@ CI 远端调用：
 前端工作流同步到服务器。
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。首次发布 contract 或 project 且接入凭据仍为占位值时只保存不可变镜像指针，实际迁移和启动由基础平台页面接入触发。
+停机（SIGTERM/SIGINT）的预算、取消顺序、退出码与在途批次语义见 [停机契约](../../docs/shutdown-contract.md)。
+隔离环境演练步骤与记录表见 [停机演练 Runbook](../../docs/shutdown-drill.md)（计划中，未执行）。
 
 CI 发布不删除或重建 Application、Environment、LoginTarget、OAuth Client；资产安装保护运行 Secret，但发布会更新 `.release.env`，并按发布链路受控更新 runtime 的目录哈希／管理键，不能理解为这些文件永不改写；它会更新随代码审核的 `subsystems.d` 清单。首次接入及受控更新／重试会更新目标清单明确列出的运行时字段，其他长期业务密钥保持不变。
 
@@ -640,6 +687,18 @@ cd /opt/unified-identity-platform
 审核清单可提供 `release_generation`（回滚或恢复旧逻辑服务必须使用新的批准代次）与 `retire_service_ids`（明确允许的旧成员）。清单未声明的成员不能退役；启用中的必需/条件组件不能退役。此流程的协议和隔离数据库测试不代替全栈安装验收。
 
 API 与 Agent 应同步升级：每组件交付需携带完整审核摘要，Agent 在写凭据和停止进程前严格复核组件、必需成员、退役名单及代次，缺失摘要或审核文件漂移都会拒绝。状态文件名绑定实例、环境、机器身份和镜像/覆盖摘要，新身份不能继承旧迁移缓存；同身份 Secret 轮转保留持久状态。退役只停止经完整容器 ID 和项目/服务标签复核的本应用进程，不删除容器、状态卷或业务数据；跨应用及基础设施名单被拒绝。
+
+## Temporal 共享边界（D4：登记为共享例外，不排期独立实例）
+
+决策：Temporal 继续与 `contract-mysql` 共用命名实例，作为**共享技术底座**登记为例外；本轮不排期独立实例、不改编排。权威事实与边界如下：
+
+- 连接与库名：`temporal` 服务的 `MYSQL_SEEDS: contract-mysql`、`DBNAME: temporal`（可见性库 `VISIBILITY_DBNAME: temporal_visibility`）；各消费方用 `TEMPORAL_NAMESPACE=default`（CRM 走 `CUSTOMER_TEMPORAL_NAMESPACE` 默认值 `default`）。不得为单个子系统改共享库名或挂第二个 Temporal。
+- 备份随 `contract-mysql`：`bin/backup-all.sh` 的数据库清单含 `contract-mysql`，导出用 `--all-databases`，因此 `temporal`/`temporal_visibility` 与合同库在同一批次内。恢复演练必须把 Temporal 库与合同库作为**同一恢复单元**核对；通用 MySQL 恢复对 `contract-mysql` 另需 Temporal 维护确认（见「恢复和备份」）。
+- 停售不删库（C11）：合同停售只停容器、不停止也不删除共享 `contract-mysql` 与 Temporal 库；判定逻辑在 `bin/compose-scope.sh` 的 `temporal_consumers_enabled`（注释锚点是该约束的唯一登记处，不得删除）。「停用合同不得停止项目仍需的共享 Temporal/contract-mysql」是验收判据。
+- 升级顺序：先 `contract-mysql`（含 `temporal`/`temporal_visibility` 库结构与权限的备份），再 `temporal`，最后才滚动消费方 Worker（合同/项目/CRM）；回退顺序相反。不要在 Temporal 未就绪时先升级 Worker。
+- 触发独立实例的三个条件（满足任一才重新评审，不满足就继续共享）：① 需要 namespace 级 RBAC/按租户隔离 workflow 可见性；② 消费方负载争抢导致任务延迟或历史库压力影响合同业务；③ 合同停售但仍有在途 workflow 需要保留。
+- 安全边界：Temporal 是**共享可信区**——payload 不得包含凭据（token/密码/私钥）与高敏 PII，跨应用可见的 workflow 只传业务 ID 与最小状态；task queue 名必须带应用前缀（如 `contract-management`、`project-management`、`customer-opportunity-presale`），不得使用无前缀的公共队列名。
+- 门禁：`tests/test_temporal_shared_boundary.py` 断言 `docker-compose.yml` 的 `MYSQL_SEEDS`/`DBNAME`/namespace 缺省、`bin/backup-all.sh` 备份清单含 `contract-mysql`、`bin/compose-scope.sh` 的 C11 注释锚点仍在；升级后核对项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 13.3。本轮**未做**：独立 Temporal 实例、namespace RBAC、Temporal 库单独恢复演练、payload 字段级校验，均需另立项并在隔离环境验收。
 
 ## 2026-10-13 当前操作判据
 

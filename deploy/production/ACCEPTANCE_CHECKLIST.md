@@ -380,6 +380,7 @@ import 包
 - [ ] 新增告警已加载：Prometheus `/rules` 页能看到 `platform-alerts.yml` 与 `integration-alerts.yml` 两个 group，且无规则报错（`rule_files` 与只读挂载见 README 表格）。
 - [ ] 抓取令牌由部署方提供且不进版本库：`runtime/prometheus-secrets/platform-metrics-token` 存在且权限 `600`；`git status` 与资产包清单中都不含该文件；`prometheus.yml` 里没有内联 `credentials`/`bearer_token`。
 - [ ] 数析与项目未被伪造抓取：`prometheus.yml` 中不存在指向 `data-analysis-*`/`project-*` 的 job（它们没有 HTTP `/metrics` 端点）。
+- [ ] 指标目录归属（D3）：每个 job 上方都有 `# access: token|loopback-only|network-only`，且 `network-only` 的 target 服务无 `ports:`、`loopback-only` 的端口只绑 `127.0.0.1`；README「未采集」表两行都写了 `owner=`（数析/项目采集另立项，owner=平台运维），项目 `:9092` 注明无应用层鉴权、仅内网。`tests/test_metrics_endpoint_registry.py` 通过。
 
 ### 12.3 观测接入的发布前核对（XAPI-10 新键与集成目的地）
 
@@ -398,6 +399,13 @@ import 包
 - [ ] 运行态键完整：每个启用的受控组件在 `runtime/license-<service>.env` 里有平台签发的 `COMMERCIAL_LICENSE_ENABLED`、`COMMERCIAL_LICENSE_INSTANCE_ID`、`COMMERCIAL_LICENSE_SERVICE_ID`、`COMMERCIAL_LICENSE_STATE_PATH`、`COMMERCIAL_LICENSE_PLATFORM_*`、`COMMERCIAL_LICENSE_CLIENT_ID`/`_SECRET` 等键（只核对键名，不记录取值），且挂载了 `license-state-*:/var/lib/commercial-license` 持久状态目录。
 - [ ] 重建安全：按 `subsystem-templates/*.env.example` 重建运行文件后仍不出现上述两类键（模板只保留说明注释）；重建流程不得把模板里的注释当成键写回 `.env`。
 - [ ] 门禁覆盖：`tests/test-compose-orchestration-consistency.py` 的 `test_license_compatibility_switch_is_never_wired_in_production` 通过；该用例锁住“缺说明先补文档/注释，而不是补默认值”。
+
+### 12.5 许可运行态判读核对（D5：只看 status 端点，不混用 readyz）
+
+判读口径见 [README.md](README.md) 的「许可运行态判读口径」。本轮只落文档与静态门禁，下列两项需要真实环境执行：
+
+- [ ] 每个启用组件在 `GET /api/v1/licenses/status`（需 `platform:license:read`）里都有明确 `systems[].status`（`VALID`/`NOT_EFFECTIVE`/`EXPIRED`/`NOT_PURCHASED`/`NO_LICENSE`/`CLOCK_ABNORMAL`/`VALIDATION_ERROR`），且 `systems[].enforcement` 可见、顶层 `runtime_enforcement=AVAILABLE`；任何组件缺条目或 `enforcement` 为空都按“未接通”记录，不得用 `/readyz` 或容器 healthy 替代。
+- [ ] 做一次“`readyz` 降级但许可 `VALID`”对照：记录某服务 `/readyz` 返回 503/`degraded` 的同一时刻 `/api/v1/licenses/status` 仍为 `VALID`，并在验收记录写明结论只取 status 端点；证明排查时没有把 `readyz`/容器健康与许可结论混用。对照命令与时间窗口要写进报告，不复制响应中的敏感字段。
 
 ## 13. 阶段 J：裁剪、故障和升级回归
 
@@ -428,6 +436,7 @@ import 包
 - API 及所有该系统 Worker 都切换到新镜像。
 - 主动注入健康失败时，发布返回非零并恢复 API、Worker 和上一 digest；失败容器证据保留。
 - 数据库迁移不承诺自动反向回滚，报告必须写明 schema 兼容策略。
+- [ ] Temporal 共享边界（D4）：升级后 `docker compose --env-file .env --env-file .release.env -f docker-compose.yml config` 解析 `temporal` 仍为 `MYSQL_SEEDS: contract-mysql`、`DBNAME: temporal`；`bin/backup-all.sh` 的数据库备份清单仍含 `contract-mysql`（`--all-databases` 覆盖 `temporal`/`temporal_visibility`），且 `tests/test_temporal_shared_boundary.py` 通过。
 
 ## 14. 阶段 K：备份和恢复演练
 

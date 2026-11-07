@@ -20,9 +20,18 @@ import (
 	filemigrations "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/migrations"
 	fileworker "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/worker"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/shutdown"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
+)
+
+const (
+	// fileGatewayHTTPShutdownBudget 是 HTTP 停止接收并排空在途请求的上限，沿用整改前的 10s。
+	fileGatewayHTTPShutdownBudget = 10 * time.Second
+	// fileGatewayDrainBudget 覆盖“HTTP 排空 + 对账/容量监控协程退出”，
+	// 明显小于容器 stop_grace_period（60s），保证超时前能留下可读日志。
+	fileGatewayDrainBudget = 30 * time.Second
 )
 
 func main() {
@@ -108,8 +117,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	runner, err := fileworker.NewRunner(files, tenantSource{database}, durationEnv("FILE_GATEWAY_RECONCILIATION_INTERVAL", time.Minute), durationEnv("FILE_GATEWAY_RECONCILIATION_STALE_AFTER", 15*time.Minute), intEnv("FILE_GATEWAY_RECONCILIATION_BATCH_SIZE", 100), slog.Default())
 	if err != nil {
 		return err
@@ -121,22 +128,59 @@ func run() error {
 	if err := runner.ConfigureCleanup(cleanupEnabled, durationEnv("FILE_GATEWAY_CLEANUP_INTERVAL", time.Hour), durationEnv("FILE_GATEWAY_CLEANUP_MINIMUM_AGE", 24*time.Hour), intEnv("FILE_GATEWAY_CLEANUP_BATCH_SIZE", 100)); err != nil {
 		return fmt.Errorf("file gateway cleanup configuration: %w", err)
 	}
-	go runner.Run(ctx)
+
+	// 停机骨架：HTTP 先停止接收并在预算内排空在途请求，随后等待对账/清理与容量监控协程退出。
+	manager := shutdown.New(fileGatewayDrainBudget).WithLogger(slog.Default())
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignal)
+	drainContext, cancelDrain := context.WithCancel(context.Background())
+	defer cancelDrain()
+
+	manager.Go("file-reconciliation", runner.Run)
 	if localStore != nil {
-		go monitorLocalCapacity(ctx, localStore, slog.Default())
+		manager.Go("local-capacity-monitor", func(ctx context.Context) {
+			monitorLocalCapacity(ctx, localStore, slog.Default())
+		})
 	}
+
 	server := &http.Server{Addr: address, Handler: routes(handler, v2Handler, evidenceHandler, tokenMiddleware{verifier}, ready, database, localStore), ReadHeaderTimeout: 10 * time.Second}
+	manager.Register(shutdown.Hook{
+		Name:   "http-server",
+		Budget: fileGatewayHTTPShutdownBudget,
+		Run: func(hookContext context.Context) error {
+			slog.Default().Info("file gateway draining", "address", address, "in_flight_budget", fileGatewayHTTPShutdownBudget.String())
+			return server.Shutdown(hookContext)
+		},
+	})
+
+	serverErrors := make(chan error, 1)
+	// 监听协程由 Manager 跟踪：Shutdown 结束后必须等它返回，后台协程才算真正收尾。
+	manager.Go("http-listener", func(context.Context) {
+		serverErrors <- server.ListenAndServe()
+	})
+
+	drained := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
+		drained <- manager.Run(drainContext)
 	}()
-	err = server.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+
+	var serveErr error
+	select {
+	case serveErr = <-serverErrors:
+		// 监听提前失败（例如端口被占用）：同样走排空路径，保证后台协程被有界收尾。
+		cancelDrain()
+	case signalValue := <-shutdownSignal:
+		slog.Default().Info("file gateway shutdown signal received", "signal", signalValue.String())
+		cancelDrain()
 	}
-	return err
+
+	drainErr := <-drained
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
+	}
+	// 后台协程或 HTTP 排空超时必须暴露为非零退出，不能静默返回 nil。
+	return drainErr
 }
 
 func monitorLocalCapacity(ctx context.Context, store interface{ UsagePercent() (uint64, error) }, logger *slog.Logger) {
@@ -163,6 +207,8 @@ func monitorLocalCapacity(ctx context.Context, store interface{ UsagePercent() (
 
 func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *filehttp.EvidenceHandler, middleware tokenMiddleware, ready func(context.Context) error, database *gorm.DB, capacity interface{ UsagePercent() (uint64, error) }) http.Handler {
 	mux := http.NewServeMux()
+	// 请求级指标：路由维度由注册点显式给出固定枚举，未标注路由统一由外层记 other。
+	requestMetrics := newFileGatewayRequestMetrics()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /readyz", func(writer http.ResponseWriter, request *http.Request) {
 		ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
@@ -189,6 +235,8 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *f
 		fmt.Fprintln(writer, "# TYPE file_gateway_storage_warning_threshold_percent gauge\nfile_gateway_storage_warning_threshold_percent 70")
 		fmt.Fprintln(writer, "# TYPE file_gateway_storage_high_threshold_percent gauge\nfile_gateway_storage_high_threshold_percent 80")
 		fmt.Fprintf(writer, "# TYPE file_gateway_metric_collection_errors gauge\nfile_gateway_metric_collection_errors %d\n", collectionError)
+		// 请求级指标（C2）：命名空间与容量/连接数指标一致，均由 /metrics 手写 exposition 输出。
+		requestMetrics.write(writer)
 		if database != nil {
 			if sqlDB, dbErr := database.DB(); dbErr == nil {
 				stats := sqlDB.Stats()
@@ -197,30 +245,31 @@ func routes(handler *filehttp.Handler, v2 *filehttp.UploadV2Handler, evidence *f
 			}
 		}
 	})
-	mux.Handle("POST /api/v1/files", middleware.wrap(http.HandlerFunc(handler.Upload), "platform:file:upload"))
-	mux.Handle("GET /api/v1/file-upload-requests/{request_id}", middleware.wrap(http.HandlerFunc(handler.ResolveUploadRequest), "platform:file:upload"))
-	mux.Handle("POST /api/v1/file-upload-requests/{request_id}/retire", middleware.wrap(http.HandlerFunc(handler.RetireUploadRequest), "platform:file:upload"))
-	mux.Handle("GET /api/v1/files/{file_id}/content", middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download"))
+	mux.Handle("POST /api/v1/files", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(handler.Upload), "platform:file:upload")))
+	mux.Handle("GET /api/v1/file-upload-requests/{request_id}", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(handler.ResolveUploadRequest), "platform:file:upload")))
+	mux.Handle("POST /api/v1/file-upload-requests/{request_id}/retire", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(handler.RetireUploadRequest), "platform:file:upload")))
+	mux.Handle("GET /api/v1/files/{file_id}/content", requestMetrics.track(fileGatewayRouteDownload, middleware.wrap(http.HandlerFunc(handler.Download), "platform:file:download")))
 	// 只读证据元数据：业务子系统在提交现场证据/报告证据前回源核验，返回元数据而非内容。
 	if evidence != nil {
-		mux.Handle("GET /api/v1/files/{file_id}/evidence-metadata", middleware.wrap(http.HandlerFunc(evidence.StatFile), "platform:file:download"))
+		mux.Handle("GET /api/v1/files/{file_id}/evidence-metadata", requestMetrics.track(fileGatewayRouteDownload, middleware.wrap(http.HandlerFunc(evidence.StatFile), "platform:file:download")))
 	}
 	mux.Handle("POST /api/v1/files/{file_id}/bindings", middleware.wrap(http.HandlerFunc(handler.BindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/{file_id}/bindings/release", middleware.wrap(http.HandlerFunc(handler.ReleaseFileBinding), "platform:file:bind"))
 	mux.Handle("DELETE /api/v1/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(handler.UnbindFile), "platform:file:bind"))
 	mux.Handle("POST /api/v1/files/cleanup", middleware.wrap(http.HandlerFunc(handler.CleanupFiles), "platform:file:cleanup"))
 	mux.Handle("POST /api/v1/files/reconcile", middleware.wrap(http.HandlerFunc(handler.ReconcileFiles), "platform:file:cleanup"))
-	mux.Handle("POST /api/v2/upload-sessions", middleware.wrap(http.HandlerFunc(v2.CreateSession), "platform:file:upload"))
-	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/tickets", middleware.wrap(http.HandlerFunc(v2.IssueUploadTicket), "platform:file:upload"))
-	mux.HandleFunc("PUT /api/v2/upload-sessions/{upload_id}/content", v2.UploadContent)
-	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/complete", middleware.wrap(http.HandlerFunc(v2.Complete), "platform:file:upload"))
-	mux.Handle("GET /api/v2/upload-sessions/{upload_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:upload"))
-	mux.Handle("GET /api/v2/files/{file_id}", middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:download"))
-	mux.Handle("POST /api/v2/files/{file_id}/download-tickets", middleware.wrap(http.HandlerFunc(v2.IssueDownloadTicket), "platform:file:download"))
-	mux.Handle("POST /api/v2/portal-report-files/{file_id}/content", middleware.wrap(http.HandlerFunc(v2.PortalReportContent), "platform:file:portal_report"))
-	mux.HandleFunc("GET /api/v2/files/{file_id}/content", v2.DownloadContent)
+	mux.Handle("POST /api/v2/upload-sessions", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.CreateSession), "platform:file:upload")))
+	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/tickets", requestMetrics.track(fileGatewayRouteTicket, middleware.wrap(http.HandlerFunc(v2.IssueUploadTicket), "platform:file:upload")))
+	mux.Handle("PUT /api/v2/upload-sessions/{upload_id}/content", requestMetrics.track(fileGatewayRouteUpload, http.HandlerFunc(v2.UploadContent)))
+	mux.Handle("POST /api/v2/upload-sessions/{upload_id}/complete", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.Complete), "platform:file:upload")))
+	mux.Handle("GET /api/v2/upload-sessions/{upload_id}", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:upload")))
+	mux.Handle("GET /api/v2/files/{file_id}", requestMetrics.track(fileGatewayRouteDownload, middleware.wrap(http.HandlerFunc(v2.GetSession), "platform:file:download")))
+	mux.Handle("POST /api/v2/files/{file_id}/download-tickets", requestMetrics.track(fileGatewayRouteTicket, middleware.wrap(http.HandlerFunc(v2.IssueDownloadTicket), "platform:file:download")))
+	mux.Handle("POST /api/v2/portal-report-files/{file_id}/content", requestMetrics.track(fileGatewayRouteUpload, middleware.wrap(http.HandlerFunc(v2.PortalReportContent), "platform:file:portal_report")))
+	mux.Handle("GET /api/v2/files/{file_id}/content", requestMetrics.track(fileGatewayRouteDownload, http.HandlerFunc(v2.DownloadContent)))
 	mux.Handle("DELETE /api/v2/files/{file_id}/bindings/{binding_id}", middleware.wrap(http.HandlerFunc(v2.UnbindFile), "platform:file:bind"))
-	return mux
+	// 外层兜底：未被 track 标注的路由（健康检查、绑定、清理、404 等）记 route="other"。
+	return requestMetrics.wrap(mux)
 }
 
 type tenantSource struct{ database *gorm.DB }

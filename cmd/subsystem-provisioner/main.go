@@ -18,34 +18,92 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/infrastructure"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/shutdown"
 )
+
+// subsystemProvisionerDrainBudget 是“停止接收 + 排空在途部署请求”的总上限；
+// 与 worker 的后台循环 join 预算（internal/bootstrap/worker.go 的 defaultRunnerJoinBudget，20s）对齐。
+const subsystemProvisionerDrainBudget = 20 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	timeout := 15 * time.Minute
-	if raw := strings.TrimSpace(os.Getenv("SUBSYSTEM_ONBOARDING_TIMEOUT")); raw != "" {
-		parsed, err := time.ParseDuration(raw)
-		if err != nil || parsed <= 0 {
-			logger.Error("invalid subsystem provisioning timeout")
-			os.Exit(1)
-		}
-		timeout = parsed
-	}
-
-	executor, err := subsystemExecutor(timeout)
-	if err != nil {
-		logger.Error("initialize subsystem provisioning executor", "error", err)
-		os.Exit(1)
-	}
-
+	// 信号只负责触发排空；逆序钩子、被跟踪协程的 join 与预算由 shutdown.Manager 统一编排。
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	socketPath := envOrDefault("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock")
-	logger.Info("subsystem provisioning helper started")
-	if err := infrastructure.RunSubsystemProvisioningServer(ctx, socketPath, executor); err != nil {
-		logger.Error("subsystem provisioning helper stopped unexpectedly", "error", err)
+	if err := run(ctx, logger, subsystemProvisionerDrainBudget, nil); err != nil {
+		logger.Error("subsystem provisioning helper stopped with an error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// run 装配部署 Agent 并接入统一停机骨架：ctx 结束（SIGINT/SIGTERM）后，Manager 先取消
+// 服务 context 让 socket 停止接收，再在预算内等待监听协程（含在途连接处理）退出。
+// 超预算或装配失败都返回错误，由 main 换成非零退出码，不静默退出 0。
+//
+// executor 为 nil 时按环境变量装配真实执行器（Docker/宿主机写权限）；装配测试注入
+// fake 执行器，避免真起容器或触碰宿主机运行时。
+func run(ctx context.Context, logger *slog.Logger, budget time.Duration, executor application.SubsystemProvisioner) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if executor == nil {
+		timeout, err := onboardingTimeout()
+		if err != nil {
+			return err
+		}
+		built, err := subsystemExecutor(timeout)
+		if err != nil {
+			return fmt.Errorf("initialize subsystem provisioning executor: %w", err)
+		}
+		executor = built
+	}
+
+	socketPath := envOrDefault("SUBSYSTEM_PROVISIONING_SOCKET_PATH", "/run/basic-platform-provisioner/provisioner.sock")
+	manager := shutdown.New(budget).WithLogger(logger)
+	serverErrors := make(chan error, 1)
+	// 只有一个被跟踪协程：协议服务在监听退出后还会等在途连接处理完，
+	// 因此 Manager 的 join 同时覆盖“停止接收”和“排空在途”。
+	// 缓冲槽避免排空路径不读取 serverErrors 时阻塞该协程。
+	manager.Go("provisioning-server", func(serverContext context.Context) {
+		logger.Info("subsystem provisioning helper started", "socket", socketPath)
+		serverErrors <- infrastructure.RunSubsystemProvisioningServer(serverContext, socketPath, executor)
+	})
+
+	drainContext, cancelDrain := context.WithCancel(ctx)
+	defer cancelDrain()
+	drained := make(chan error, 1)
+	go func() {
+		drained <- manager.Run(drainContext)
+	}()
+
+	// 监听退出（信号取消或启动失败）后统一走有界排空；若排空先结束（在途请求未在预算内
+	// 退出），直接以排空结果收尾，不再无界等待监听协程。
+	var serveErr, drainErr error
+	select {
+	case serveErr = <-serverErrors:
+		cancelDrain()
+		drainErr = <-drained
+	case drainErr = <-drained:
+	}
+
+	if serveErr != nil {
+		return serveErr
+	}
+	// 排空失败（在途请求超预算、钩子报错）必须交给进程退出码，不能静默吞掉。
+	return drainErr
+}
+
+// onboardingTimeout 解析单个部署操作的超时；非法值返回错误，由调用方换成非零退出。
+func onboardingTimeout() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("SUBSYSTEM_ONBOARDING_TIMEOUT"))
+	if raw == "" {
+		return 15 * time.Minute, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("invalid subsystem provisioning timeout: %q", raw)
+	}
+	return parsed, nil
 }
 
 func subsystemExecutor(timeout time.Duration) (application.SubsystemProvisioner, error) {

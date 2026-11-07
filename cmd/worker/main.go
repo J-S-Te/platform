@@ -36,6 +36,11 @@ func run() error {
 
 	app.Logger.Info("asynchronous worker started", "worker_id", cfg.Worker.ID, "environment", cfg.Environment)
 	app.Runner.Run(ctx)
+	// 有界 join：预算内未退出的后台循环必须以非零退出码暴露，不能只留一行告警后静默退出 0。
+	if err := app.JoinError(); err != nil {
+		app.Logger.Error("asynchronous worker stopped before all runners drained", "worker_id", cfg.Worker.ID, "error", err)
+		return err
+	}
 	app.Logger.Info("asynchronous worker stopped", "worker_id", cfg.Worker.ID)
 	return nil
 }

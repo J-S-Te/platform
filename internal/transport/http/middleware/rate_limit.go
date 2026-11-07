@@ -11,6 +11,7 @@ import (
 
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
+	eventmetrics "github.com/J-S-Te/Basic-Platform/internal/shared/metrics"
 	"github.com/gin-gonic/gin"
 )
 
@@ -236,6 +237,9 @@ func LoginRateLimitHTTP(accountField string, accountLimit, ipLimit int, window t
 		return func(w http.ResponseWriter, r *http.Request) {
 			accountKey, allowed := limiter.admit(r)
 			if !allowed {
+				// 登录失败的事件级计数：限流拒绝发生在业务 handler 之外，处理器看不到这次
+				// 失败，因此必须在本层记账（reason 只有 rate_limited，不含账号/IP）。
+				eventmetrics.Shared().RecordLoginFailure(eventmetrics.LoginFailureRateLimited)
 				httpresponse.WriteError(w, r, http.StatusTooManyRequests, httperror.New("PLATFORM_RATE_LIMITED", loginRateLimitMessage, nil))
 				return
 			}

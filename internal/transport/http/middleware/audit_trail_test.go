@@ -16,6 +16,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/audit/domain"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	eventmetrics "github.com/J-S-Te/Basic-Platform/internal/shared/metrics"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/requestctx"
 	"github.com/gin-gonic/gin"
 )
@@ -1040,5 +1041,84 @@ func TestPlatformAuditRequiredFailsClosedOnInvalidExplicitValue(t *testing.T) {
 					required, testCase.wantRequired, testCase.explicit, testCase.appEnv)
 			}
 		})
+	}
+}
+
+// 审计导出下载是“已流出失败”的唯一场景：响应体已直接流给客户端，意图事件已在库，
+// 结果事件与死信都写不进去时既不能补写 503（会污染一个已完整送达的文件），也不能只留
+// 一行 ERROR 日志——那种“审计结论缺失但业务已流出”的失败必须进入
+// platform_audit_write_failures_total{stage="result_streamed"} 才可能被告警发现。
+func TestAuditTrailCountsStreamedResultFailureOnExportDownload(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	payload := "zip-bytes-payload"
+	registry := eventmetrics.NewRegistry()
+	recorder := &auditRecorderScript{
+		ingestErrs: []error{nil, errors.New("audit store unavailable"), errors.New("audit store unavailable")},
+		spoolErrs:  []error{errors.New("audit dead letter unavailable")},
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(auditTrailHandler(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AuditSource{ApplicationCode: "platform", EnvironmentCode: "dev"}, &auditGate{events: registry}))
+	router.GET("/api/v1/audit/export-jobs/:job_id/download", func(context *gin.Context) {
+		_, _ = context.Writer.WriteString(payload)
+	})
+
+	response := newAuditTrailRequest(router, http.MethodGet, "/api/v1/audit/export-jobs/job-1/download")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (已流出的下载不得被补写 503); body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.String() != payload {
+		t.Fatalf("body = %q, want the intact download %q", response.Body.String(), payload)
+	}
+	if len(recorder.ingested) == 0 || recorder.ingested[0].Metadata["response_body"] != "not_captured" {
+		t.Fatalf("intent metadata response_body = %v, want not_captured",
+			recorder.ingested[0].Metadata["response_body"])
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageResultStreamed); got != 1 {
+		t.Fatalf("result_streamed stage count = %d, want 1 (已流出失败必须可观测)", got)
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageResult); got != 1 {
+		t.Fatalf("result stage count = %d, want 1 (结果事件写入失败仍按 result 计)", got)
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageDeadLetter); got != 1 {
+		t.Fatalf("dead_letter stage count = %d, want 1", got)
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageUnavailable); got != 0 {
+		t.Fatalf("unavailable stage count = %d, want 0 (拒绝窗口不因下载例外被打开)", got)
+	}
+}
+
+// 同一失败序列在非下载路由上必须保持 fail-closed：响应被 503 拒绝，且绝不产生
+// result_streamed 计数——否则这个例外会被误解成“所有路由都可以放过审计结论缺失”。
+func TestAuditTrailStreamedResultStageStaysLimitedToDownloadRoutes(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	registry := eventmetrics.NewRegistry()
+	recorder := &auditRecorderScript{
+		ingestErrs: []error{nil, errors.New("audit store unavailable"), errors.New("audit store unavailable")},
+		spoolErrs:  []error{errors.New("audit dead letter unavailable")},
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(auditTrailHandler(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AuditSource{ApplicationCode: "platform", EnvironmentCode: "dev"}, &auditGate{events: registry}))
+	router.POST("/api/v1/dictionaries", func(context *gin.Context) {
+		context.String(http.StatusCreated, "business payload")
+	})
+
+	response := newAuditTrailRequest(router, http.MethodPost, "/api/v1/dictionaries")
+
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "AUDIT_RESULT_WRITE_REJECTED") {
+		t.Fatalf("status=%d body=%s, want 503 AUDIT_RESULT_WRITE_REJECTED", response.Code, response.Body.String())
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageResultStreamed); got != 0 {
+		t.Fatalf("result_streamed stage count = %d, want 0 (例外只适用于下载路由)", got)
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageResult); got != 1 {
+		t.Fatalf("result stage count = %d, want 1", got)
+	}
+	if got := registry.AuditWriteFailureCount(eventmetrics.AuditStageDeadLetter); got != 1 {
+		t.Fatalf("dead_letter stage count = %d, want 1", got)
 	}
 }

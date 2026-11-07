@@ -24,12 +24,16 @@ const (
 )
 
 func availableExportFile() domain.ExportFile {
+	// 夹具必须携带真实证据元数据：下载端会校验落盘大小与 sha256，缺失即拒绝下发。
+	digest := sha256.Sum256([]byte(testExportContent))
 	return domain.ExportFile{
 		FileID:              "file-1",
 		StorageRelativePath: testExportRelativePath,
 		OriginalName:        "审计导出.csv",
 		MediaType:           "text/csv; charset=utf-8",
 		Status:              "ACTIVE",
+		SizeBytes:           uint64(len(testExportContent)),
+		SHA256:              digest[:],
 	}
 }
 
