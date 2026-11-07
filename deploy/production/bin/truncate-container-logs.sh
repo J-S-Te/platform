@@ -43,7 +43,18 @@ for arg in "$@"; do
   esac
 done
 
-[[ -d "$DOCKER_ROOT/containers" ]] || { echo "container log directory not found: $DOCKER_ROOT/containers" >&2; exit 1; }
+if [[ ! -d "$DOCKER_ROOT/containers" ]]; then
+  echo "container log directory not found: $DOCKER_ROOT/containers" >&2
+  echo "---- docker data root diagnostics ----" >&2
+  id >&2 || true
+  command -v docker >&2 || echo 'docker CLI not in PATH' >&2
+  docker info --format '{{.DockerRootDir}}' 2>&1 | head -3 >&2 || true
+  sudo -n docker info --format '{{.DockerRootDir}}' 2>&1 | head -3 >&2 || true
+  for base in /data /mnt /opt /home /var/lib /srv; do
+    find "$base" -maxdepth 4 -type d -name containers 2>/dev/null | head -5 >&2 || true
+  done
+  exit 1
+fi
 
 truncate_file() {
   local file="$1"
