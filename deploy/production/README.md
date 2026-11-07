@@ -667,6 +667,23 @@ cd /opt/unified-identity-platform
 3. 确认无误后再 `--apply`；保留的灾备批次应能通过 `bin/backup-all.sh --verify-only --backup <批次>`，发布前数据库备份按需保留回滚窗口。
 4. 清理后重跑被拒的发布；长期按实际 RPO/磁盘容量调整 `BACKUP_RETENTION_DAYS`/`BACKUP_RETENTION_MIN_COUNT`，或扩容 `/opt/basic-platform`。
 
+#### Docker 镜像保留
+
+备份之外，**镜像**是第二个磁盘增长源：每次发布都按不可变 digest 拉一个新镜像，旧镜像留在宿主机上从不回收（2026-11-07 测试服务器两次因镜像/备份累积导致磁盘 100%，发布被 fail-closed 拒绝）。清理入口是 `bin/prune-images.sh`：
+
+- 默认 **dry-run**：只打印 `docker system df`、保留小时数与将执行的命令；只有显式 `--apply` 才删除。
+- 只执行 `docker image prune -a -f --filter "until=<N>h"`，默认保留 **72 小时**（`--keep-hours`，0 表示清理所有未被容器使用的镜像）。运行中容器引用的镜像由 docker 自身保护；脚本**不使用 `docker system prune`**，不删除数据卷、不删除容器，重复执行幂等。
+- **发布成功后自动执行一次**：`bin/deploy-service.sh` 在 release 指针已更新、服务发布成功之后调用同一脚本 `--apply`，保留小时数由 `PLATFORM_IMAGE_RETENTION_HOURS` 控制（默认 `72`）；非法值 `WARN` 后回落 `72`，清理失败只 `WARN`，**绝不改变发布结论**。
+- 手动入口：GitHub Actions 的 `image-prune` workflow（仅 `workflow_dispatch`），输入 `keep_hours`（默认 72）、`dry_run`（默认 true），使用与部署相同的 `DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_SSH_KEY`/`DEPLOY_KNOWN_HOSTS`/`DEPLOY_PORT`。工作流先在远端执行 `docker system df`，再把 `bin/prune-images.sh` 通过 ssh stdin 交给 `bash -s -- ...` 执行；**默认 dry-run，只有显式把 `dry_run` 设为 false 才会 `--apply`**。
+- 回滚不受影响：`.release.env` 里是不可变 digest，被清理的旧镜像仍可从 ACR 按 digest 重新 `docker pull`；需要更长离线回滚窗口时调大 `PLATFORM_IMAGE_RETENTION_HOURS`。
+
+```bash
+cd /opt/unified-identity-platform
+# 1) 只看计划（默认）；2) 确认后显式 --apply
+./bin/prune-images.sh --keep-hours 72
+./bin/prune-images.sh --keep-hours 72 --apply
+```
+
 ### 6.2 Keycloak 数据库逻辑备份与恢复
 
 生产包提供两项不改变网络入口、不会强制 HTTPS 的运维资产：

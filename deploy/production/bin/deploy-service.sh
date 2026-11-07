@@ -334,12 +334,40 @@ write_service_runtime_dsns() {
   write_runtime_dsn_value "$target" "$key" "$dsn"
 }
 
+# require_backup_tree_accessible 在发布前确认备份目录对当前部署用户可读可遍历。
+#
+# 背景（2026-11-07 事故）：backups/file-gateway 属主漂移到 root 后，发布前的完整备份
+# 在 find 阶段报 "Permission denied" 并被 fail-closed 拒绝；错误发生在备份中途，
+# 提示不明确、白跑一轮发布。这里在用锁和做备份之前先自检，给出可执行的修复命令。
+require_backup_tree_accessible() {
+  local traversal_errors unreadable
+  [[ -d "$deploy_dir/backups" ]] || return 0
+  # 遍历错误（无权限/IO）与不可读项分开收集：两者都可能让完整备份中途失败。
+  # 刻意不用 GNU find 的 -readable/-executable：CI 与本机都可能有 BSD find，
+  # 用可移植的 shell 测试逐个判断更稳。
+  traversal_errors="$(find "$deploy_dir/backups" -maxdepth 2 -print 2>&1 >/dev/null || true)"
+  unreadable=""
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    if [[ ! -r "$entry" || ! -x "$entry" ]]; then
+      unreadable+="$entry"$'\n'
+    fi
+  done < <(find "$deploy_dir/backups" -maxdepth 2 -print 2>/dev/null || true)
+  if [[ -n "$traversal_errors" || -n "$unreadable" ]]; then
+    echo '发布前检查失败：备份目录存在当前部署用户无法读取/遍历的项，完整备份会中途失败：' >&2
+    { printf '%s\n%s\n' "$unreadable" "$traversal_errors"; } | sed '/^$/d' | head -8 >&2
+    echo "修复：以 root 把属主/权限归还部署用户，例如 chown -R $(id -u):$(id -g) '$deploy_dir/backups' && chmod -R u+rwX '$deploy_dir/backups'；保持 600/700 语义，勿用 777。" >&2
+    return 1
+  fi
+}
+
 install -d -m 700 "$deploy_dir/runtime"
 mkdir -p "$deploy_dir/backups/releases"
 [[ -w "$deploy_dir/backups/releases" ]] || {
   echo "发布备份目录不可写：$deploy_dir/backups/releases；请将其属主调整为当前 CI 部署用户" >&2
   exit 1
 }
+require_backup_tree_accessible || exit 1
 exec 9>"$deploy_dir/runtime/.deploy.lock"
 # 锁覆盖“备份—迁移—切镜像—健康检查—回退”完整窗口，防止并发发布互相覆盖 .release.env。
 flock -w 900 9 || {
@@ -2330,6 +2358,19 @@ deploy_function="deploy_${service//-/_}"
 if "$deploy_function"; then
   rm -f "$previous_release" "$deploy_dir/runtime/recovery-status.json" 2>/dev/null || true
   echo "$service 发布成功：$image_ref"
+  # 发布成功后的镜像保留清理：按不可变 digest 反复拉取新镜像会把磁盘撑满
+  # （2026-11-07 测试服务器两次磁盘 100%，发布被 fail-closed 拒绝）。
+  # 默认只清理 72 小时前且未被任何容器使用的镜像，可用 PLATFORM_IMAGE_RETENTION_HOURS 调整；
+  # 0 表示清理所有未使用镜像（会缩短回滚窗口，回滚镜像仍可从 ACR 按 digest 重拉）。
+  # 这一步是维护动作：失败只 WARN，绝不改变已成功的发布结论；dry-run 由 prune-images.sh
+  # 自身控制，本发布路径只调用 --apply。脚本缺失时 bash 返回非零，同样只告警。
+  image_retention_hours="${PLATFORM_IMAGE_RETENTION_HOURS:-72}"
+  if [[ ! "$image_retention_hours" =~ ^[0-9]+$ ]]; then
+    warn "PLATFORM_IMAGE_RETENTION_HOURS='$image_retention_hours' 不是非负整数，回落默认 72 小时"
+    image_retention_hours=72
+  fi
+  bash "$script_dir/prune-images.sh" --keep-hours "$image_retention_hours" --apply >&2 || \
+    warn "镜像保留清理失败（不影响发布结论）"
   exit 0
 fi
 
