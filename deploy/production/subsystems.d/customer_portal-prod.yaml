@@ -48,8 +48,10 @@ runtime:
         PLATFORM_APPLICATION_CODE: customer_portal
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
-        # 审计清理显式关闭（0=不清理；开启前须完成保留期审批，见对应子系统模板注释）。
-        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "0"
+        # 审计清理已启用：保留 60 天（已批准，2026-11-07 决策）。针对本子系统
+        # portal_application_request_audit_outbox；删除对象是仅保存在本地的已投递审计证据，
+        # 平台侧另有副本；保留期不得低于审计要求，变更需重新审批（见对应子系统模板注释）。
+        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "60"
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
       bindings:

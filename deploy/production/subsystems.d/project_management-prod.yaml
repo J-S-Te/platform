@@ -60,8 +60,10 @@ runtime:
         PLATFORM_APPLICATION_CODE: project_management
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
-        # 审计清理显式关闭（0=不清理；开启前须完成保留期审批，见对应子系统模板注释）。
-        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "0"
+        # 审计清理已启用：保留 60 天（已批准，2026-11-07 决策）。删除对象是仅保存在本地的
+        # 已投递审计证据，平台侧另有副本；保留期不得低于审计要求，变更需重新审批
+        # （见对应子系统模板注释）。
+        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "60"
         PROJECT_RUN_WORKER_WITH_API: "false"
         PROJECT_BACKGROUND_ENGINE: temporal
         PROJECT_BACKGROUND_TASK_QUEUE: project-management-background-v1

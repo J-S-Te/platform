@@ -48,8 +48,10 @@ runtime:
         PLATFORM_APPLICATION_CODE: customer_and_opportunity
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
-        # 审计清理显式关闭（0=不清理；开启前须完成保留期审批，见对应子系统模板注释）。
-        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "0"
+        # 审计清理已启用：保留 60 天（已批准，2026-11-07 决策）。删除对象是仅保存在本地的
+        # 已投递审计证据，平台侧另有副本；保留期不得低于审计要求，变更需重新审批
+        # （见对应子系统模板注释）。
+        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "60"
         OWNER_DIRECTORY_ENABLED: "true"
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
