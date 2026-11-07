@@ -1,0 +1,57 @@
+name: docker-log-cleanup
+
+# 宿主机磁盘被容器 JSON 日志占满时的受控清理入口（2026-11-07 事故追加）。
+# 默认 dry-run：只打印每个容器日志大小与 df；只有显式把 dry_run 设为 false 才截断。
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '仅统计（保持勾选）；取消勾选才会把容器日志截断为 0 字节'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-log-cleanup
+  cancel-in-progress: false
+
+jobs:
+  truncate:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Truncate container logs on the deploy host
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          test -f deploy/production/bin/truncate-container-logs.sh
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
+          apply_arg=""
+          if [[ "$DRY_RUN" == "false" ]]; then
+            apply_arg=' --apply'
+          fi
+          echo "== container log cleanup mode: dry_run=$DRY_RUN =="
+          printf -v remote_command 'df -h / && exec bash -s --%s' "$apply_arg"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command" \
+            < deploy/production/bin/truncate-container-logs.sh
