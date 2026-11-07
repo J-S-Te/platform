@@ -349,13 +349,12 @@ require_backup_tree_accessible() {
   unreadable=""
   while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
-    # 目录需要可读+可遍历；普通文件只需要可读（备份产物本来就是 600，没有执行位）。
-    if [[ -d "$entry" ]]; then
-      [[ -r "$entry" && -x "$entry" ]] || unreadable+="$entry"$'\n'
-    else
-      [[ -r "$entry" ]] || unreadable+="$entry"$'\n'
-    fi
-  done < <(find "$deploy_dir/backups" -maxdepth 2 -print 2>/dev/null || true)
+    # 只检查目录：完整备份需要遍历目录树，目录不可读/不可遍历才会中途失败；
+    # 历史遗留的 600 文件（如 *-onboarding-*.sql.backup）不属于发布必读内容，
+    # 不能因为它们把整个发布拦下（2026-11-07 回归）。
+    [[ -d "$entry" ]] || continue
+    [[ -r "$entry" && -x "$entry" ]] || unreadable+="$entry"$'\n'
+  done < <(find "$deploy_dir/backups" -maxdepth 2 -type d -print 2>/dev/null || true)
   if [[ -n "$traversal_errors" || -n "$unreadable" ]]; then
     echo '发布前检查失败：备份目录存在当前部署用户无法读取/遍历的项，完整备份会中途失败：' >&2
     { printf '%s\n%s\n' "$unreadable" "$traversal_errors"; } | sed '/^$/d' | head -8 >&2
