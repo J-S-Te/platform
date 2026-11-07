@@ -1,0 +1,70 @@
+name: image-prune
+
+# 宿主机磁盘被历史 Docker 镜像占满时的受控清理入口（2026-11-07 事故追加）。
+# 默认 dry-run：只打印 docker system df 与将执行的命令；只有显式把 dry_run 设为 false 才 --apply。
+on:
+  workflow_dispatch:
+    inputs:
+      keep_hours:
+        description: '保留小时数：只清理早于该小时数且未被容器使用的镜像（默认 72；0 = 清理所有未使用镜像）'
+        required: false
+        default: '72'
+        type: string
+      dry_run:
+        description: '仅打印清理计划（保持勾选）；取消勾选才会真正执行 docker image prune'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prune unused docker images on the deploy host
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          KEEP_HOURS: ${{ inputs.keep_hours }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          [[ "$KEEP_HOURS" =~ ^[0-9]+$ ]] || { echo "invalid keep_hours: $KEEP_HOURS" >&2; exit 1; }
+          test -f deploy/production/bin/prune-images.sh
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
+          # 默认 dry-run；只有显式 dry_run=false 才追加 --apply。
+          apply_arg=""
+          if [[ "$DRY_RUN" == "false" ]]; then
+            apply_arg=' --apply'
+          fi
+          echo "== image retention prune mode: dry_run=$DRY_RUN keep_hours=$KEEP_HOURS =="
+
+          # 先在远端打印 docker system df（prune 之前），再把本地校验过的脚本经 stdin 交给
+          # 远端 bash 执行，避免 heredoc/引号被本地 shell、ssh 和远端 shell 多次解析。
+          printf -v remote_command \
+            'docker system df; exec bash -s -- --keep-hours %q%s' \
+            "$KEEP_HOURS" "$apply_arg"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command" \
+            < deploy/production/bin/prune-images.sh

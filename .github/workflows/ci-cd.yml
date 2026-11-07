@@ -149,6 +149,8 @@ jobs:
           python3 -B deploy/production/tests/test_temporal_shared_boundary.py
           python3 -B deploy/production/tests/test_deploy_service_backup_names.py
           bash deploy/production/tests/test_truncate_container_logs.sh
+          bash deploy/production/tests/test_prune_images.sh
+          bash deploy/production/tests/test-deploy-backup-access.sh
           python3 -B deploy/production/tests/test_license_status_reading.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py

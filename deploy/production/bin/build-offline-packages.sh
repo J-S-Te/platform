@@ -966,7 +966,7 @@ package_assets() (
   local assets_archive assets_temporary sidecar_temporary assets_stage relative destination assets_digest
   local -a asset_files=(
     .env.example .gitignore .release.env.example ACCEPTANCE_CHECKLIST.md BACKUP_RECOVERY.md DEPLOYMENT_COMPATIBILITY.md deployment-compatibility.json DELIVERY_WORKFLOW.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md README.md docker-compose.yml
-    bin/acceptance-evidence.sh bin/apply-public-transport.sh bin/backup-all.sh bin/backup-file-gateway.sh bin/backup-keycloak-mysql.sh bin/portal-report-backup.sh bin/prune-backups.sh
+    bin/acceptance-evidence.sh bin/apply-public-transport.sh bin/backup-all.sh bin/backup-file-gateway.sh bin/backup-keycloak-mysql.sh bin/portal-report-backup.sh bin/prune-backups.sh bin/prune-images.sh
     bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-common.sh bin/deploy-import.sh bin/deploy-subsystem.sh bin/deploy-license.sh bin/deploy-doctor.sh bin/deploy-package.sh bin/deploy-status.sh bin/deploy-verify.sh bin/deploy-menu.sh bin/deploy-registry.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
     bin/install-host-dependencies.sh bin/initialize-audit-hash-key.py bin/platform-mysql-command.py
