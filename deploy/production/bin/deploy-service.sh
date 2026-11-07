@@ -1559,7 +1559,7 @@ deploy_platform() {
   # compose 报告成功不等于此刻能执行 SQL：必须再做一次真实连接探测，
   # 否则 mysqld 被杀/重启时会把“数据库没起来”误报成备份失败。
   require_mysql_ready platform-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
-  backup_database_if_initialized platform-mysql basic_platform || return
+  backup_database_if_initialized platform-mysql basic_platform platform || return
   compose run --rm --no-deps platform-migrate ./api config-check || return
   migration_state=attempted
   compose run --rm --no-deps platform-migrate ./migrate || return
@@ -1772,7 +1772,7 @@ deploy_contract() {
   ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" contract-mysql temporal || return
   require_mysql_ready contract-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
-  backup_database_if_initialized contract-mysql contract_management || return
+  backup_database_if_initialized contract-mysql contract_management contract || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   compose run --rm --no-deps contract-migrate || return
   if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${runtime_services[@]}"; then
@@ -1813,7 +1813,7 @@ deploy_project() {
   ensure_temporal_application_network || return
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" project-mysql temporal || return
   require_mysql_ready project-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
-  backup_database_if_initialized project-mysql project_management || return
+  backup_database_if_initialized project-mysql project_management project || return
   project_background_prepare || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   # 服务端 Compose 可能保留旧 environment（模块裁剪不覆盖），用 run -e 强制迁移进程关闭内嵌 Worker。
@@ -1851,7 +1851,7 @@ deploy_settlement() {
   }
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" settlement-mysql || return
   require_mysql_ready settlement-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
-  backup_database_if_initialized settlement-mysql settlement || return
+  backup_database_if_initialized settlement-mysql settlement settlement || return
   compose run --rm --no-deps settlement-migrate || return
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 settlement-api settlement-worker || return
   if ! wait_for_health "http://127.0.0.1:$(port_value SETTLEMENT_API_PORT 18087)/healthz"; then
@@ -1927,23 +1927,26 @@ restore_data_analysis_role_config_hash() {
 # 参数：无；使用当前已通过发布门禁的发行与运行配置。
 # 返回值：成功返回零，备份、迁移、能力或健康校验失败返回非零。
 deploy_data_analysis() {
-  local selected initializers service
+  # 注意：这里的循环变量不能叫 service——那会遮蔽全局 $service（发布目标名），
+  # 使 backup_database_if_initialized 的默认 backup_name 变成空串，产出以 "-" 开头的
+  # 备份文件名，进而被 sha256sum 当成选项（invalid option），备份校验必然失败。
+  local selected initializers runtime_service
   local -a runtime_services=() remaining_services=()
   selected="$(scope_runtime_services data-analysis)" || return
   initializers="$(scope_initialization_services data-analysis)" || return
-  while IFS= read -r service; do
-    [[ -n "$service" ]] || continue
-    runtime_services+=("$service")
-    [[ "$service" == data-analysis-api ]] || remaining_services+=("$service")
+  while IFS= read -r runtime_service; do
+    [[ -n "$runtime_service" ]] || continue
+    runtime_services+=("$runtime_service")
+    [[ "$runtime_service" == data-analysis-api ]] || remaining_services+=("$runtime_service")
   done <<< "$selected"
   # data_analysis 由 API、两个常驻 Worker 和一次性迁移镜像组成，四个镜像必须
   # 独立校验，不能用单一 tag 或只校验 dashboard-api 代替。
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" data-analysis-mysql || return
   require_mysql_ready data-analysis-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
-  backup_database_if_initialized data-analysis-mysql dashboard_aggregation || return
-  while IFS= read -r service; do
-    [[ -n "$service" ]] || continue
-    compose run --rm --no-deps "$service" || return
+  backup_database_if_initialized data-analysis-mysql dashboard_aggregation data-analysis || return
+  while IFS= read -r runtime_service; do
+    [[ -n "$runtime_service" ]] || continue
+    compose run --rm --no-deps "$runtime_service" || return
   done <<< "$initializers"
   compose run --rm --no-deps data-analysis-migrate || return
   # 角色配置哈希必须与实际运行的不可变镜像一致：从迁移镜像内嵌的 authz-catalog
