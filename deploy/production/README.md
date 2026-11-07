@@ -567,6 +567,8 @@ CI 远端调用：
 前端工作流同步到服务器。
 
 脚本使用 `flock` 串行发布，校验 Compose，后端发布前备份数据库，执行迁移，更新单个服务并检查健康状态。应用失败会恢复上一镜像；已成功执行的数据库迁移不会自动反向迁移。首次发布 contract 或 project 且接入凭据仍为占位值时只保存不可变镜像指针，实际迁移和启动由基础平台页面接入触发。
+停机（SIGTERM/SIGINT）的预算、取消顺序、退出码与在途批次语义见 [停机契约](../../docs/shutdown-contract.md)。
+隔离环境演练步骤与记录表见 [停机演练 Runbook](../../docs/shutdown-drill.md)（计划中，未执行）。
 
 CI 发布不删除或重建 Application、Environment、LoginTarget、OAuth Client；资产安装保护运行 Secret，但发布会更新 `.release.env`，并按发布链路受控更新 runtime 的目录哈希／管理键，不能理解为这些文件永不改写；它会更新随代码审核的 `subsystems.d` 清单。首次接入及受控更新／重试会更新目标清单明确列出的运行时字段，其他长期业务密钥保持不变。
 

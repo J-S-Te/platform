@@ -15,6 +15,8 @@
 | [Keycloak 生产运维 Runbook](./keycloak-production-operations.md) | IAM/平台运维、值班人员 | 凭据、备份恢复、健康检查、HA、监控告警和灾备演练 |
 | [MySQL binlog 减量与保留方案](./operations/mysql-binlog-volume-plan.md) | 数据库/平台运维 | `platform-mysql` 与 `keycloak-db` 的只读核对、分阶段参数调整、回滚与验证（2026-10-23 编制，未执行） |
 | [MySQL 备份 binlog 位点方案](./operations/mysql-backup-binlog-position-plan.md) | 数据库/平台运维、发布人员 | 为 `platform-mysql` 与 `keycloak-db` 的逻辑备份补记位点、sidecar、失败策略与重放验证（已实施并本地验证，未部署） |
+| [停机契约（预算/顺序/退出码/在途批次）](./shutdown-contract.md) | 架构、各仓开发、运维与发布负责人 | 六套停机实现的预算来源、非法值行为、取消顺序、退出码与在途批次语义，含已知不一致与未决事项 |
+| [停机演练 Runbook（计划中，未执行）](./shutdown-drill.md) | 运维、发布人员、验收 | 隔离环境 SIGTERM/`docker stop` 演练步骤、断言与记录表模板 |
 | [外部客户绑定机器契约](./external-customer-binding-contract.md) | CRM、Portal、平台开发与联调 | 客户绑定、解绑、幂等、防重放、授权上下文和迁移边界 |
 | [Keycloak V2 切换执行基线](./keycloak-v2-execution.md) | IAM/平台运维、发布人员 | 分应用、分环境切换、观察期、回滚窗口和旧认证退役 |
 | [Keycloak Broker 隔离记录](./operations/keycloak-broker-isolation.md) | IAM/平台运维、应用联调 | 平台与客户 Portal 的 Broker、Client、Realm 与 claims 隔离 |
