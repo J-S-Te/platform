@@ -12,7 +12,14 @@
 # 退出码：0 成功；1 环境不满足；2 参数错误。
 set -Eeuo pipefail
 
-DOCKER_ROOT="${DOCKER_ROOT:-/var/lib/docker}"
+# Docker 数据根目录可能被运维改到独立磁盘（测试服务器就不是 /var/lib/docker）。
+# 未显式指定时优先从 docker 自身读取，避免"目录不存在"误判。
+if [[ -z "${DOCKER_ROOT:-}" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  fi
+  DOCKER_ROOT="${DOCKER_ROOT:-/var/lib/docker}"
+fi
 APPLY=false
 for arg in "$@"; do
   case "$arg" in
