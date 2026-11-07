@@ -26,6 +26,11 @@ check "accessible backups passes" "run_check '$deploy_dir'"
 deploy_dir="$WORK/files"; mkdir -p "$deploy_dir/backups"; : >"$deploy_dir/backups/portal-20260101T000000Z.sql.gz"; chmod 600 "$deploy_dir/backups/portal-20260101T000000Z.sql.gz"
 check "readable 600 file passes" "run_check '$deploy_dir'"
 
+# 1c) 600 的遗留备份文件在多层目录里也不得拦发布（历史 onboarding 产物）
+deploy_dir="$WORK/legacy"; mkdir -p "$deploy_dir/backups/system/20260101T000000Z-1"
+: >"$deploy_dir/backups/system/20260101T000000Z-1/lineage-onboarding.sql.backup"; chmod 600 "$deploy_dir/backups/system/20260101T000000Z-1/lineage-onboarding.sql.backup"
+check "legacy 600 file in nested dir passes" "run_check '$deploy_dir'"
+
 # 2) 子目录 000：失败且给出修复提示（等价于属主/权限漂移）
 deploy_dir="$WORK/bad"; mkdir -p "$deploy_dir/backups/file-gateway"; chmod 000 "$deploy_dir/backups/file-gateway"
 check "unreadable child fails" "! run_check '$deploy_dir'"
