@@ -13,12 +13,25 @@
 set -Eeuo pipefail
 
 # Docker 数据根目录可能被运维改到独立磁盘（测试服务器就不是 /var/lib/docker）。
-# 未显式指定时优先从 docker 自身读取，避免"目录不存在"误判。
+# 探测顺序：显式 DOCKER_ROOT → docker CLI（普通/sudo）→ 常见安装路径 → 默认值。
+detect_docker_root() {
+  local candidate
+  for candidate in \
+    "$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)" \
+    "$(sudo -n docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"; do
+    candidate="${candidate//$'\n'/}"
+    if [[ -n "$candidate" && -d "$candidate/containers" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  for candidate in /var/lib/docker /data/docker /opt/docker /var/lib/containers /mnt/docker; do
+    [[ -d "$candidate/containers" ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  printf '/var/lib/docker\n'
+}
 if [[ -z "${DOCKER_ROOT:-}" ]]; then
-  if command -v docker >/dev/null 2>&1; then
-    DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
-  fi
-  DOCKER_ROOT="${DOCKER_ROOT:-/var/lib/docker}"
+  DOCKER_ROOT="$(detect_docker_root)"
 fi
 APPLY=false
 for arg in "$@"; do
