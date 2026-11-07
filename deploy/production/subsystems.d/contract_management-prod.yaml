@@ -53,10 +53,14 @@ runtime:
         OIDC_SESSION_COOKIE_NAME: contract_management_session
         OIDC_SESSION_IDLE_TTL: 30m
         OIDC_SESSION_ABSOLUTE_TTL: 8h
+        # 中央会话只读缓存显式关闭（0=关闭；开启后平台撤销/登出的本地生效延迟≤该毫秒值，上限 5000）。
+        CENTRAL_SESSION_CACHE_MS: "0"
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: contract_management
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
+        # 审计清理显式关闭（0=不清理；开启前须完成保留期审批，见对应子系统模板注释）。
+        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "0"
         CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
         CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
         CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem

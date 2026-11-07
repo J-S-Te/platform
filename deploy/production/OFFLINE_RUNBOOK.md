@@ -1084,6 +1084,68 @@ File Gateway 数据库禁止单独恢复，必须使用同批次数据库+文件
 
 客户门户的两类身份不可混用：外部客户由 CRM 邀请流程获得 `portal_customer` 和客户数据范围；受控接入操作人只获得内部 `portal_super_admin`。000112 是旧空角色策略升级的一次性修复：历史库无法区分“从未授予”与“曾手工授予后撤销”，因此升级后的首次受控更新/重试可能补发一次内部角色；补偿写回完成 marker 后，后续日常更新不会恢复再次被管理员主动撤销的角色。
 
+### 10.5 审计清理与会话缓存开关（生产默认关闭，已显式登记）
+
+两个开关都是“代码支持、生产默认关闭”的能力，已在生产清单 `subsystems.d/*-prod.yaml` 的
+`runtime.files[].values` 与配套模板 `subsystem-templates/*.env.example` 中同时显式写成关闭值：
+运维可见、可改，且按模板重建或灾后恢复不会静默改变行为；改值时清单与模板必须同时改。
+
+| 开关 | 生产显式值 | 生效子系统（运行配置文件） |
+| --- | --- | --- |
+| `AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS` | `0`（关闭；**不要留空**） | 合同 `contract.env`、客户 `customer.env`、项目 `project.env`、数析 `data-analysis.env`、门户 `portal.env` |
+| `CENTRAL_SESSION_CACHE_MS` | `0`（关闭），上限 `5000` | 合同、客户、项目、结算、数析、门户六个子系统的运行配置文件 |
+
+一个子系统的运行配置文件由该子系统的 API 与 Worker 共同加载（Compose 的 `env_file`/`environment`），
+因此改这两个键要按 `9.2` 的受控更新/重试重新下发 runtime，而不是只重启单个容器。
+
+**审计清理（`AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS`）**
+
+- 单位天：`0` 或负数 = 不清理（缺省行为）；正整数 = 删除 `delivery_status='delivered'` 且
+  `delivered_at` 早于保留天数的行，按批删除。
+- 删除对象是**仅保存在本地的已投递审计证据**。平台侧虽有副本，本地行仍是现场取证与追溯的原始记录，
+  因此开启前必须完成保留期审批（结论写进本次验收证据），保留期不得短于审计要求；未审批一律保持 `0`。
+- 生产必须显式写 `0`，不能靠留空：子系统代码缺省值历史上不一致（合同子系统曾缺省 30 天清理），
+  留空会让不同子系统行为不同，并可能开始删除本不该删的行。
+- 投递器未启动（`PLATFORM_AUDIT_CLIENT_ID/SECRET` 等缺失）时清理循环也不存在，此时表只增不减，
+  由 `/readyz` 的 `audit_outbox_dispatcher=disabled` 暴露；审批开启清理前先确认该字段为 `running`。
+
+**会话缓存（`CENTRAL_SESSION_CACHE_MS`）**
+
+- 单位毫秒：`0` = 关闭只读缓存；上限 `5000`（超过按 5000 截断，非法值回退代码缺省 `2000`）。
+- 缓存只减少“读中央会话状态”的重复调用，不改变会话有效期；开启后平台侧撤销/登出在本系统的生效延迟
+  ≤ 该毫秒值。只有在该延迟可被业务接受时才设置（例如要求撤销在 1s 内生效时，只能保持 `0` 或配置 ≤1000）。
+- 保持 `0` 时每次判定都回源平台，吊销立即生效，代价是判定路径上多一次内部调用。
+
+**开启后如何观测**
+
+1. 就绪探针（子系统 API 容器内，端口见各清单 `upstream_url`）：
+
+```bash
+# 合同 8081 / 项目 8082 / 数析 8080：投递器启动状态
+curl -fsS localhost:<8081|8082|8080>/readyz | jq '{audit_outbox_dispatcher, audit_outbox_required}'
+# 客户 8090 / 门户 8091：客户子系统把投递状态、积压与挂起行放在 audit_outbox 字段
+curl -fsS localhost:<8090|8091>/readyz | jq '.audit_outbox'
+```
+
+2. 审计 outbox 行数趋势（按天对比，只看不删）：
+
+```sql
+-- 合同 con_audit_outbox / 客户 application_request_audit_outbox /
+-- 项目 prj_audit_outbox / 数析 bi_audit_outbox / 门户 portal_application_request_audit_outbox
+SELECT delivery_status, COUNT(*) FROM <上表之一> GROUP BY delivery_status;
+```
+
+3. 积压指标（合同、数析在 API 根路径 `/metrics`；项目在私有指标端口，见 `docker-compose.yml`）：
+
+```bash
+curl -fsS localhost:<端口>/metrics | grep -E 'audit_outbox_(pending|dead)'
+```
+
+- 清理生效判定：启用后 `delivered` 行数按保留期稳定下降，`pending`/`dead` 不增长；行数不降说明键没真正下发
+  （检查 `runtime/<子系统>.env` 中该键的值，并按 `9.2` 受控重试）。
+- 回退：把键改回 `0` 后受控更新；**已删除的行无法回退**，只能按 `10.1`/`10.3` 从备份恢复。
+- 会话缓存开启/关闭只影响延迟，回退时同样改回 `0` 并受控更新，无需动数据库。
+
 ## 11. 验收记录与完成标准
 
 每次发布至少保存以下脱敏证据：
@@ -1095,6 +1157,7 @@ File Gateway 数据库禁止单独恢复，必须使用同批次数据库+文件
 - 每个已登记商业应用的许可运行态证据：`sudo ./bin/deploy.sh license-runtime --json` 的
   `ok=true`、四项检查结论和许可实例前缀（**不要**记录完整实例、密钥或凭据；见 8.3）；
 - 故障演练、恢复批次、恢复后业务核对和清理结果；
+- 两个运维开关（审计清理、会话缓存）的当前取值、是否开启及审批/延迟评估结论（见 10.5）；
 - 所有阻塞项、未执行项及原因。
 
 脚本单测、Compose 解析或文档推演不能写成真实部署通过。宿主机重启、长期稳定性、外部安全组和跨网络客户端未执行时分别标记“未执行”；不能用容器重启代替。
