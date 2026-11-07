@@ -94,6 +94,16 @@ healthcheck:
 - `COMMERCIAL_LICENSE_COMPATIBILITY` 是**兼容放行开关**（`license-core/consumer/consumer.go`：只有归一后等于 `true` 才放行，且仅适用于从未登记的组件），生产必须缺省——缺省即 fail-closed。任何模板、清单或 Compose 默认值都不许打开它，否则 `COMMERCIAL_LICENSE_ENABLED=false` 就能冒充“已授权”。
 - 回归守卫：`tests/test-compose-orchestration-consistency.py` 的 `test_license_compatibility_switch_is_never_wired_in_production` 断言这两类键不出现在两份编排的 `environment` 里，且 7 份模板与 6 份清单都不声明它们；发布前核对项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 的「12.4 许可运行环境文件的键位核对」。
 
+### 许可运行态判读口径（D5：只看 status 端点，不混用 readyz）
+
+许可是否**在应用级生效**只有一个判据：`GET /api/v1/licenses/status`（需 `platform:license:read`）。响应里看两处：逐应用条目 `systems[]`（每个含 `code`/`status`/`enforcement`，前端契约里也可能称 `items[]`）与顶层 `runtime_enforcement`（`AVAILABLE`/`UNAVAILABLE`，来源 `per_application_coordination`）。`systems[].status` 只有 `VALID`/`NOT_EFFECTIVE`/`EXPIRED`/`NOT_PURCHASED`/`NO_LICENSE`/`CLOCK_ABNORMAL`/`VALIDATION_ERROR` 这几种结论；`enforcement` 为 `null` 或不可用说明该消费者的协调状态读不到，按“未接通”处理，不能当作“没有限制”。
+
+- `/licenses/enforcement/:application`（及 `/overview`、`/evidence`）是**诊断单个消费者**的协调状态/证据入口（同样需要 `platform:license:read`），只用于定位“为什么被拒”；不作为“许可是否生效”的判据，也不要把某个应用的单条诊断当成全平台结论。
+- **禁止**用单服务 `/readyz` 的许可字段或容器健康检查（`docker inspect` 的 `healthy`）作为判据：`/readyz` 是未认证探针，回答的是进程依赖与配置是否就绪，不是合规结论；容器 healthy 更不能说明许可有效。`readyz` 降级也不代表许可失效（例如审计凭据缺失、数据库抖动），两者必须分开看。
+- 固定排障顺序：① 查 `/api/v1/licenses/status` 的 `systems[].status` 与 `enforcement`，确认是哪个应用、哪种结论 → ② 对应该消费者的 `runtime/license-<service>.env` 键位（只核键名，不记录取值）→ ③ 该消费者日志里的许可拒绝原因 → ④ 最后才看容器健康（`readyz` 仅作进程依赖参考，不作为判据）。
+- **已知盲点**：status 聚合是**平台视角**。如果子系统本地许可键（`runtime/license-*.env` 的 `COMMERCIAL_LICENSE_*` 组）与平台签发集不一致，会出现“聚合 `VALID` 但业务被拒”。此时按 `runtime/license-*.env` 与子系统日志逐项核对，必要时走受控接入重新下发；不得靠改库、手改状态文件或 `COMMERCIAL_LICENSE_COMPATIBILITY` 绕过。
+- 门禁：`tests/test_license_status_reading.py` 静态断言本节仍以 `/api/v1/licenses/status` 为唯一判据，并禁止把 `readyz` 与许可结论并列的措辞；验收对照项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 的「12.5 许可运行态判读核对」。本轮只做文档与静态门禁，**未做**真实环境下的许可状态对照（需在隔离环境按 12.5 执行）。
+
 ### 检查清单（发版前手动执行）
 
 改过生产编排、监控规则、子系统清单或 runtime 模板后，在本仓库根执行：
@@ -126,6 +136,19 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
   - 项目管理 Temporal Worker 在私有的 `TEMPORAL_METRICS_ADDRESS`（代码默认 `:9092`）暴露 `/metrics`，输出 `project_audit_outbox_pending`/`_dead` 与 `project_audit_outbox_query_errors_total`；该端口只在 `application` 内网可达，不发布宿主机端口。
   - 本轮**不新增抓取 job**（目标服务名/端口/鉴权与采集触发条件另立项评审），因此这两个端点的指标在 Prometheus 里**没有样本**。**不要基于未抓取指标写告警**：规则会永久静默，`absent()` 也会长期红，比没有规则更危险。接入顺序是先改 `monitoring/prometheus/prometheus.yml`（job + 凭据 + 网络边界），再同步本文件与 `tests/test-compose-orchestration-consistency.py` 门禁。
 
+#### 指标目录归属（D3：platform 持有唯一目录，缺口显式登记）
+
+决策：接受“platform 持有唯一指标目录”，入口固定在 `deploy/production`，不在其它仓库或子系统私有文档里维护第二份。目录由四处组成：`monitoring/prometheus/prometheus.yml` 的 job 清单、本文件「1. 新增抓取 job 与指标清单」的已采集/未采集两张表、`monitoring/prometheus/*-alerts.yml` 的告警规则，以及 `tests/test-compose-orchestration-consistency.py` 的 `KNOWN_METRICS` 白名单。新增指标或改变采集状态时必须**同时**改四处，缺一处即视为目录残缺：
+
+1. `monitoring/prometheus/prometheus.yml`：新增/调整 job、target 与 `# access:` 声明；若本轮**不采集**，必须在上面“未采集”表显式登记 `不采集 + 原因 + 主责人（owner=...）`，不能静默缺省（默认不新增 scrape job 也是登记，不是遗漏）。
+2. 告警：新增一条使用该指标的规则，或在指标表声明“仅采集不告警 + 原因”（例如只做容量趋势、阈值未定）。禁止对无样本的指标写告警——规则会永久静默，`absent()` 也会长期红。
+3. `tests/test-compose-orchestration-consistency.py` 的 `KNOWN_METRICS`：加入指标名，否则告警表达式会被判为“臆造指标”而门禁失败。
+4. 本文件「1. 新增抓取 job 与指标清单」的指标表：补 job/端点/指标/代码来源，并把采集状态写清楚。
+
+已登记缺口（本轮仍 scope-out、不新增 scrape job）：数析 `data-analysis-api:8080` 与项目管理 `project-worker:9092` 均已暴露 `/metrics`，采集另立项，主责人=平台运维；两者在 Prometheus 里没有 job、没有样本。其中项目 `:9092` **无应用层鉴权**、仅 `application` 内网可达，不得为了抓取发布宿主机端口或经过前端网关。
+
+门禁（`tests/test_metrics_endpoint_registry.py`，已登记 CI）：已采集行必须有同名 job 且 target 一致、未采集行必须没有 job/target、未采集行必须有 `owner=` 登记、每个 job 必须有且仅有一次 `# access: token|loopback-only|network-only` 声明并与 `docker-compose.yml` 的 `ports` 交叉校验（`network-only` 不得有 `ports:`，`loopback-only` 只能 `127.0.0.1` 绑定，`token` 必须配 `credentials_file`）、`platform-alerts.yml` 的 5xx 选择器必须是等值 `status="5xx"`（`status=~"5.."` 永远匹配不到序列）。改指标、改抓取或改告警后先跑它。
+
 ### 观测接入：指标、告警与凭据
 
 本节是 BIZ-XEVT2-07（back-channel logout 可观测）与 BIZ-XAPI-10（集成目的地必开）落地后新增观测面的唯一入口：新增指标清单、告警清单、部署方必须提供的凭据文件，以及发布前核对项。改指标名或改抓取配置时，必须同步本文件与 `tests/test-compose-orchestration-consistency.py`（它把指标名、规则文件挂载、凭据挂载都做成了门禁）。
@@ -147,8 +170,8 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 
 | 服务（无抓取 job） | 端点 | 已暴露指标 | 状态 |
 | --- | --- | --- | --- |
-| `data-analysis-api`（数析） | `http://data-analysis-api:8080/metrics`（`MetricsAccess`：`METRICS_ACCESS_TOKEN` Bearer 或回环对端） | `data_analysis_audit_outbox_pending`/`_delivered`/`_dead`/`_counts_error`、`data_analysis_build_info`、`data_analysis_process_start_time_seconds`、`data_analysis_process_goroutines` | **已暴露 / 未采集**（无 job、无样本） |
-| `project-worker`（项目管理） | `http://project-worker:9092/metrics`（Temporal Worker 私有指标端口 `TEMPORAL_METRICS_ADDRESS`，默认 `:9092`，仅 `application` 内网） | `project_audit_outbox_pending`、`project_audit_outbox_dead`、`project_audit_outbox_query_errors_total` | **已暴露 / 未采集**（无 job、无样本） |
+| `data-analysis-api`（数析） | `http://data-analysis-api:8080/metrics`（`MetricsAccess`：`METRICS_ACCESS_TOKEN` Bearer 或回环对端） | `data_analysis_audit_outbox_pending`/`_delivered`/`_dead`/`_counts_error`、`data_analysis_build_info`、`data_analysis_process_start_time_seconds`、`data_analysis_process_goroutines` | **已暴露 / 未采集**（无 job、无样本；采集另立项，owner=平台运维） |
+| `project-worker`（项目管理） | `http://project-worker:9092/metrics`（Temporal Worker 私有指标端口 `TEMPORAL_METRICS_ADDRESS`，默认 `:9092`，无应用层鉴权、仅 `application` 内网） | `project_audit_outbox_pending`、`project_audit_outbox_dead`、`project_audit_outbox_query_errors_total` | **已暴露 / 未采集**（无 job、无样本；采集另立项，owner=平台运维） |
 
 采集语义要在排障前读懂，否则会把“没有样本”当成“一切正常”：
 
@@ -664,6 +687,18 @@ cd /opt/unified-identity-platform
 审核清单可提供 `release_generation`（回滚或恢复旧逻辑服务必须使用新的批准代次）与 `retire_service_ids`（明确允许的旧成员）。清单未声明的成员不能退役；启用中的必需/条件组件不能退役。此流程的协议和隔离数据库测试不代替全栈安装验收。
 
 API 与 Agent 应同步升级：每组件交付需携带完整审核摘要，Agent 在写凭据和停止进程前严格复核组件、必需成员、退役名单及代次，缺失摘要或审核文件漂移都会拒绝。状态文件名绑定实例、环境、机器身份和镜像/覆盖摘要，新身份不能继承旧迁移缓存；同身份 Secret 轮转保留持久状态。退役只停止经完整容器 ID 和项目/服务标签复核的本应用进程，不删除容器、状态卷或业务数据；跨应用及基础设施名单被拒绝。
+
+## Temporal 共享边界（D4：登记为共享例外，不排期独立实例）
+
+决策：Temporal 继续与 `contract-mysql` 共用命名实例，作为**共享技术底座**登记为例外；本轮不排期独立实例、不改编排。权威事实与边界如下：
+
+- 连接与库名：`temporal` 服务的 `MYSQL_SEEDS: contract-mysql`、`DBNAME: temporal`（可见性库 `VISIBILITY_DBNAME: temporal_visibility`）；各消费方用 `TEMPORAL_NAMESPACE=default`（CRM 走 `CUSTOMER_TEMPORAL_NAMESPACE` 默认值 `default`）。不得为单个子系统改共享库名或挂第二个 Temporal。
+- 备份随 `contract-mysql`：`bin/backup-all.sh` 的数据库清单含 `contract-mysql`，导出用 `--all-databases`，因此 `temporal`/`temporal_visibility` 与合同库在同一批次内。恢复演练必须把 Temporal 库与合同库作为**同一恢复单元**核对；通用 MySQL 恢复对 `contract-mysql` 另需 Temporal 维护确认（见「恢复和备份」）。
+- 停售不删库（C11）：合同停售只停容器、不停止也不删除共享 `contract-mysql` 与 Temporal 库；判定逻辑在 `bin/compose-scope.sh` 的 `temporal_consumers_enabled`（注释锚点是该约束的唯一登记处，不得删除）。「停用合同不得停止项目仍需的共享 Temporal/contract-mysql」是验收判据。
+- 升级顺序：先 `contract-mysql`（含 `temporal`/`temporal_visibility` 库结构与权限的备份），再 `temporal`，最后才滚动消费方 Worker（合同/项目/CRM）；回退顺序相反。不要在 Temporal 未就绪时先升级 Worker。
+- 触发独立实例的三个条件（满足任一才重新评审，不满足就继续共享）：① 需要 namespace 级 RBAC/按租户隔离 workflow 可见性；② 消费方负载争抢导致任务延迟或历史库压力影响合同业务；③ 合同停售但仍有在途 workflow 需要保留。
+- 安全边界：Temporal 是**共享可信区**——payload 不得包含凭据（token/密码/私钥）与高敏 PII，跨应用可见的 workflow 只传业务 ID 与最小状态；task queue 名必须带应用前缀（如 `contract-management`、`project-management`、`customer-opportunity-presale`），不得使用无前缀的公共队列名。
+- 门禁：`tests/test_temporal_shared_boundary.py` 断言 `docker-compose.yml` 的 `MYSQL_SEEDS`/`DBNAME`/namespace 缺省、`bin/backup-all.sh` 备份清单含 `contract-mysql`、`bin/compose-scope.sh` 的 C11 注释锚点仍在；升级后核对项见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md) 13.3。本轮**未做**：独立 Temporal 实例、namespace RBAC、Temporal 库单独恢复演练、payload 字段级校验，均需另立项并在隔离环境验收。
 
 ## 2026-10-13 当前操作判据
 

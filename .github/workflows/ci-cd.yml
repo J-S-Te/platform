@@ -144,6 +144,10 @@ jobs:
           # 默认值必须为空，避免凭据入库与部署方漏配时静默错连。全部只读文件、不发请求。
           python3 -B deploy/production/tests/test_metrics_endpoint_registry.py
           python3 -B deploy/production/tests/test_readonly_dsn_defaults.py
+          # D4/D5 的文档与边界门禁：Temporal 共享边界（compose/backup/compose-scope/README
+          # 对齐）与许可运行态判读口径（status 端点为唯一判据，readyz 不作判据）。全部只读文件。
+          python3 -B deploy/production/tests/test_temporal_shared_boundary.py
+          python3 -B deploy/production/tests/test_license_status_reading.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 -B deploy/production/tests/test-deploy-service-env-set.py
