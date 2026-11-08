@@ -157,6 +157,8 @@ jobs:
           python3 deploy/production/tests/test-runtime-env-hygiene.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
+          python3 -B deploy/production/tests/test-contract-runtime-rollout.py
+          python3 -B deploy/production/tests/test-portal-migration-maintenance.py
           python3 -B deploy/production/tests/test-deploy-service-env-set.py
           python3 -B deploy/production/tests/test-portal-proxy-deployment.py
           # 监控挂载定向补齐：历史活动编排只挂 2 个规则文件 + 缺凭据目录时，
