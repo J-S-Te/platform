@@ -1768,6 +1768,45 @@ audit_contract_number_registry() {
   return 0
 }
 
+# 用途：在维护窗口中先验证合同后台，再开放 API，避免不同版本混跑。
+# 参数：首项为目标不可变镜像，其余为受控选择的合同运行服务。
+# 返回值：全部组件启动且镜像、健康和稳定性验证通过为零，任一步失败为非零。
+replace_contract_runtime() {
+  local expected_image="$1" runtime_service api_selected=false
+  local -a background_services=()
+  shift
+  (($# > 0)) || return 1
+  for runtime_service in "$@"; do
+    if [[ "$runtime_service" == contract-api ]]; then
+      api_selected=true
+    else
+      background_services+=("$runtime_service")
+    fi
+  done
+  # 先阻断新请求，再按 Compose 的 stop_grace_period 等待旧后台退出。
+  # 保留选中集合，不为单组件发布启动未选择的 Worker 或改动其许可身份。
+  if [[ "$api_selected" == true ]]; then
+    compose stop contract-api || return 1
+  fi
+  if ((${#background_services[@]} > 0)); then
+    compose stop "${background_services[@]}" || return 1
+    compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
+      "${background_services[@]}" || return 1
+    for runtime_service in "${background_services[@]}"; do
+      verify_service_image compose "$runtime_service" "$expected_image" || return 1
+      verify_service_stable "$runtime_service" || return 1
+    done
+  fi
+  if [[ "$api_selected" == true ]]; then
+    compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api || return 1
+    verify_service_image compose contract-api "$expected_image" || return 1
+    verify_service_stable contract-api || return 1
+  fi
+}
+
+# 用途：在备份和迁移成功后受控发布合同运行组件，并执行只读编号巡检。
+# 参数：无，使用候选镜像、部署范围及合同运行配置。
+# 返回值：运行组件通过健康验证为零，凭据、备份、迁移或发布失败为非零。
 deploy_contract() {
   local selected runtime_service
   local -a runtime_services=()
@@ -1805,7 +1844,7 @@ deploy_contract() {
   backup_database_if_initialized contract-mysql contract_management contract || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   compose run --rm --no-deps contract-migrate || return
-  if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${runtime_services[@]}"; then
+  if ! replace_contract_runtime "$image_ref" "${runtime_services[@]}"; then
     echo "---- 合同运行组件启动失败日志 ----" >&2
     compose logs --no-color --tail 120 "${runtime_services[@]}" >&2 || true
     return 1
@@ -1815,10 +1854,6 @@ deploy_contract() {
     compose logs --no-color --tail 120 contract-api >&2 || true
     return 1
   fi
-  for runtime_service in "${runtime_services[@]}"; do
-    verify_service_image compose "$runtime_service" "$image_ref" || return 1
-    verify_service_stable "$runtime_service" || return 1
-  done
   # 合同编号巡检是非致命现场校验：它恒返回 0，只采集证据并告警，
   # 既不在 || return 链上，也不改变本次发布的成功判定。
   audit_contract_number_registry
@@ -2088,6 +2123,9 @@ PY
   fi
 }
 
+# 用途：使用已恢复的不可变镜像指针重建并核验相应服务运行态。
+# 参数：无，使用服务标识、恢复后的发布配置和受控组件范围。
+# 返回值：恢复核验成功或无可回滚镜像时为零，重建或核验失败为非零。
 rollback_runtime() {
   rollback_skipped=false
   local -a restored_images=()
@@ -2154,11 +2192,7 @@ rollback_runtime() {
         [[ -n "$contract_runtime_service" ]] && restored_contract_services+=("$contract_runtime_service")
       done <<< "$selected_contract_runtime"
       ((${#restored_contract_services[@]} > 0)) || return 1
-      compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${restored_contract_services[@]}" || return 1
-      for contract_runtime_service in "${restored_contract_services[@]}"; do
-        verify_service_image compose "$contract_runtime_service" "$restored_contract_image" || return 1
-        verify_service_stable "$contract_runtime_service" || return 1
-      done
+      replace_contract_runtime "$restored_contract_image" "${restored_contract_services[@]}" || return 1
       ;;
     project)
       local restored_project_image
