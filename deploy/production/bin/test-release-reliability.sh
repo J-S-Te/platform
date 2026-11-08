@@ -156,11 +156,26 @@ eval "$(extract_function audit_contract_number_registry "$deploy_service")"
 warn() { printf '[警告] %s\n' "$*" >&2; }
 release_id=contract-runtime-fixture
 mkdir -p "$deploy_dir/backups"
+eval "$(extract_function replace_contract_runtime "$deploy_service")"
 eval "$(extract_function deploy_contract "$deploy_service")"
 image_ref='127.0.0.1:5000/uip/contract@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 : >"$project_calls"
 deploy_contract
-grep -Fq 'contract-api contract-worker' "$project_calls" || fail 'contract release omitted workflow worker'
+# 用途：验证真实合同维护窗口保留全部组件且按先停API、先启Worker执行。
+# 参数：$1为隔离Compose调用日志，$2为发布或回滚的诊断标签。
+# 返回值：顺序完整时成功，缺组件或顺序错误时终止测试。
+assert_contract_rollout_calls() {
+  local calls_file="$1" label="$2" stop_api stop_worker start_worker start_api
+  stop_api="$(grep -nFx 'compose stop contract-api' "$calls_file" | head -n1 | cut -d: -f1)"
+  stop_worker="$(grep -nFx 'compose stop contract-worker' "$calls_file" | head -n1 | cut -d: -f1)"
+  start_worker="$(grep -nFx 'compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-worker' "$calls_file" | head -n1 | cut -d: -f1)"
+  start_api="$(grep -nFx 'compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api' "$calls_file" | head -n1 | cut -d: -f1)"
+  [[ -n "$stop_api" && -n "$stop_worker" && -n "$start_worker" && -n "$start_api" ]] ||
+    fail "$label omitted a selected runtime stop or start"
+  [[ "$stop_api" -lt "$stop_worker" && "$stop_worker" -lt "$start_worker" &&
+     "$start_worker" -lt "$start_api" ]] || fail "$label opened API before replacing the worker"
+}
+assert_contract_rollout_calls "$project_calls" 'contract release'
 grep -Fq 'verify compose contract-worker ' "$project_calls" || fail 'contract worker release image was not verified'
 grep -Fxq 'stable contract-worker' "$project_calls" || fail 'contract worker stability was not verified'
 grep -Fxq 'compose run --rm --no-deps -T contract-number-audit' "$project_calls" ||
@@ -171,7 +186,7 @@ printf 'CONTRACT_IMAGE=%s\n' "$image_ref" >"$release_file"
 service=contract
 : >"$project_calls"
 rollback_runtime
-grep -Fq 'contract-api contract-worker' "$project_calls" || fail 'contract rollback omitted workflow worker'
+assert_contract_rollout_calls "$project_calls" 'contract rollback'
 grep -Fq 'verify compose contract-worker ' "$project_calls" || fail 'contract worker rollback image was not verified'
 failed_contract_worker=true
 if deploy_contract; then fail 'contract release accepted an unstable worker'; fi
