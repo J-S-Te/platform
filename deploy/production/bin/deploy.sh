@@ -81,7 +81,10 @@ usage() {
   disable <子系统>              显式停止单系统，保留数据卷与密钥
   status [子系统]               查看容器状态；带子系统时显示阶段与唯一下一步
   verify [子系统]               健康检查；带子系统时对该子系统做部署验收
-                               两者都会在给出成功结论前执行许可运行态门禁
+                               两者都会在给出成功结论前执行运行配置门禁与许可运行态门禁
+  runtime-env [--apps <编码>]   只读复核运行配置：runtime/*.env 无重复键，编排里
+                                PROJECT_RUN_WORKER_WITH_API 全部为 false（含 project-migrate）。
+                               部署成功前自动执行；失败即先修配置再发布
   license-runtime [应用编码...] 只读复核许可运行态：API 容器健康、许可状态卷、
                                 许可实例与平台一致、受控部署已确认；不带参数检查全部
                                 已登记商业应用。接入/受控更新后必须先跑通再宣布成功
@@ -125,7 +128,7 @@ EOF
 command="${1:-menu}"
 if [[ -e "$control_plane_reload_marker" || -L "$control_plane_reload_marker" ]]; then
   case "$command" in
-    reload-control-plane|doctor|status|plan|logs|help|--help|-h|license-runtime) ;;
+    reload-control-plane|doctor|status|plan|logs|help|--help|-h|license-runtime|runtime-env) ;;
     import|recover-platform|delivery-import-proof) ;; # Pure import proofs do not publish or reload.
     deploy)
       [[ "${2:-}" == platform && "${DEPLOY_PLATFORM_CONTROL_PLANE_UPGRADE:-false}" == true ]] ||
@@ -198,6 +201,11 @@ case "$command" in
     # 不带应用编码时检查全部已登记商业应用；接入/受控更新之后必须先跑通它再宣布成功。
     shift
     license_runtime_gate "$@"
+    ;;
+  runtime-env)
+    # 只读复核运行配置（runtime/*.env 重复键、生产 worker 标志）；不通过即先修配置再发布。
+    shift
+    runtime_env_hygiene_gate "$@"
     ;;
   timezone-apply) UIP_TIMEZONE_CONTROLLED_APPLY=1 bash "$script_dir/set-container-timezone.sh" internal-apply --dir "$deploy_dir" ;;
   start) start_enabled ;;
