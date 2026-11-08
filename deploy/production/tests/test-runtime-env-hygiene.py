@@ -9,6 +9,11 @@
   2. `project-migrate` 服务把 `PROJECT_RUN_WORKER_WITH_API` 写成 `"true"`
      -> 生产校验报 `PROJECT_RUN_WORKER_WITH_API must be false in production`。
 
+扫描范围同样被固定成断言：**只校验权威编排 `docker-compose.yml`**。非发布副本
+（`compose.production.yaml`、评审样本 `compose.yaml`）不参与生产编排校验，出现时只告警、
+退出码仍为 0——2026-11 现场曾把运维手工投放的 `compose.production.yaml` 的 `:-true`
+当生产编排判失败，运维被迫手工改非发布文件。
+
 另外覆盖：干净配置放行、`${...:-true}` 插值失败、`--apps` 过滤、无 runtime 目录时
 明确跳过（不误报），以及 `--dry-run` 零副作用（不改文件、不产生新文件）。
 """
@@ -170,8 +175,9 @@ class RuntimeEnvHygieneGateTests(unittest.TestCase):
         result = self.run_gate()
         self.assert_failure(result, "worker-flag-default-true", "project-migrate", ":-true")
 
-    # 覆盖生产叠加编排：compose.production.yaml 里的 true 同样要拦住。
-    def test_production_compose_overlay_true_fails(self):
+    # 非发布副本 compose.production.yaml 里的 true 只告警、不失败（退出码 0）。
+    # 它不在交付资产包内，可能是运维手工投放的历史 overlay，不参与生产编排校验。
+    def test_production_compose_overlay_true_only_warns(self):
         self.write_fixture(
             runtime={"project.env": "PROJECT_RUN_WORKER_WITH_API=false\n"},
             compose={
@@ -183,8 +189,79 @@ class RuntimeEnvHygieneGateTests(unittest.TestCase):
                     '      PROJECT_RUN_WORKER_WITH_API: "true"\n'),
             })
         result = self.run_gate()
-        self.assert_failure(result, "worker-flag-true", "compose.production.yaml",
-                            "project-migrate")
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("告警", output)
+        self.assertIn("compose.production.yaml", output)
+        self.assertIn("非发布", output)
+        self.assertIn("不参与", output)
+        # 告警不是失败：既不能出现失败项，也不能把非发布副本写进 worker 标志证据。
+        self.assertNotIn("运行配置门禁失败", output)
+        self.assertIn("通过", output)
+
+    # 部署目录只放 compose.production.yaml（且值为 :-true）时也必须放行：没有权威编排，
+    # worker 标志检查按显式跳过处理，只对非发布副本告警。
+    def test_only_production_compose_copy_does_not_fail(self):
+        (self.deploy_dir / "runtime" / "project.env").write_text(
+            "PROJECT_RUN_WORKER_WITH_API=false\n", encoding="utf-8")
+        (self.deploy_dir / "compose.production.yaml").write_text(
+            "services:\n"
+            "  project-migrate:\n"
+            "    environment:\n"
+            "      PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}\n",
+            encoding="utf-8")
+        result = self.run_gate()
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("compose.production.yaml", output)
+        self.assertIn("非发布", output)
+        self.assertIn("跳过生产 worker 标志检查", output)
+        self.assertNotIn("运行配置门禁失败", output)
+
+    # 评审对照样本 compose.yaml（文件头明文禁止用于部署）同样只告警、不失败。
+    def test_review_sample_compose_yaml_only_warns(self):
+        self.write_fixture(
+            runtime={"project.env": "PROJECT_RUN_WORKER_WITH_API=false\n"},
+            compose={
+                "docker-compose.yml": CLEAN_COMPOSE,
+                "compose.yaml": (
+                    "services:\n"
+                    "  project-migrate:\n"
+                    "    environment:\n"
+                    "      PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}\n"),
+            })
+        result = self.run_gate()
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("compose.yaml", output)
+        self.assertIn("告警", output)
+        self.assertNotIn("运行配置门禁失败", output)
+
+    # --json 证据里 warnings 与 failures 分离：非发布副本只进 warnings，证据 ok 为真。
+    def test_json_evidence_separates_warnings_from_failures(self):
+        self.write_fixture(
+            runtime={"project.env": "PROJECT_RUN_WORKER_WITH_API=false\n"},
+            compose={
+                "docker-compose.yml": CLEAN_COMPOSE,
+                "compose.production.yaml": (
+                    "services:\n"
+                    "  project-migrate:\n"
+                    "    environment:\n"
+                    '      PROJECT_RUN_WORKER_WITH_API: "true"\n'),
+            })
+        result = self.run_gate("--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads(result.stdout)
+        self.assertTrue(evidence["ok"])
+        self.assertEqual(evidence["failures"], [])
+        self.assertEqual(evidence["non_release_compose_copies"], ["compose.production.yaml"])
+        warning = evidence["warnings"][0]
+        self.assertEqual(warning["code"], "non-release-compose-copy")
+        self.assertEqual(warning["subject"], "compose.production.yaml")
+        self.assertIn("不参与", warning["message"])
+        # 权威编排是唯一的校验对象。
+        self.assertEqual(evidence["compose_files"], ["docker-compose.yml"])
+        self.assertTrue(all(item["ok"] for item in evidence["worker_flags"]))
 
     # --apps 只检查指定子系统的 runtime 文件；未指定的文件即使有重复也不判定。
     def test_apps_filter_limits_runtime_files(self):
