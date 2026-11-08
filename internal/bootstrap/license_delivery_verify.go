@@ -205,49 +205,6 @@ func offlineCurrentPurchase(state domain.State, environment string, now time.Tim
 	return apps, nil
 }
 
-func offlineEnforcementStatus(state domain.State, app string, status coordination.Status, specs []coordination.ServiceSpec, verify offlineSnapshotVerification, now time.Time) error {
-	failure := func() error {
-		return fmt.Errorf("%w: %s requires the full approved current snapshot and fresh consumer ACKs", ErrOfflineEnforcementIncomplete, app)
-	}
-	if status.Application.Application != app || status.State != runtime.Enforced || status.MigrationEligible || status.Revision == 0 || status.DeploymentRevision != state.Revision || !status.SnapshotCurrent || len(specs) == 0 || len(status.Members) != len(specs) {
-		return failure()
-	}
-	expected := make(map[string]coordination.ServiceSpec, len(specs))
-	for _, spec := range specs {
-		if spec.Application != app || spec.Environment != "prod" || spec.ServiceID == "" || expected[spec.ServiceID].ServiceID != "" {
-			return failure()
-		}
-		expected[spec.ServiceID] = spec
-	}
-	for _, member := range status.Members {
-		spec, ok := expected[member.ServiceID]
-		if !ok || member.Application != app || member.Environment != spec.Environment || member.OAuthClientID != spec.OAuthClientID || member.ImageDigest != spec.ImageDigest || member.CoverageDigest != spec.CoverageDigest || member.RetiredAt != nil || member.IssuedRevision != status.Revision || member.AckRevision != status.Revision || member.ReadyAt == nil || member.AckAt == nil {
-			return failure()
-		}
-		for _, heartbeat := range []*time.Time{member.ReadyAt, member.AckAt} {
-			if heartbeat.IsZero() || now.Sub(*heartbeat) > time.Minute || heartbeat.After(now.Add(time.Second)) {
-				return failure()
-			}
-		}
-		digest := sha256.Sum256([]byte(member.RawJWS))
-		if member.RawJWS == "" || member.IssuedDigest != hex.EncodeToString(digest[:]) {
-			return failure()
-		}
-		snapshot, err := verify(member.RawJWS, runtime.Binding{InstanceID: state.InstanceID, Environment: state.Environment, Application: app, ServiceID: member.ServiceID})
-		if err != nil || snapshot.Revision != status.Revision || snapshot.EnforcementState != runtime.Enforced || snapshot.MigrationEligible || snapshot.HighestLicenseVersion != state.HighestVersion || snapshot.SnapshotIssuedAt > now.Unix() {
-			return failure()
-		}
-		for _, slot := range []struct{ raw, digest string }{{snapshot.CurrentLicenseJWS, state.CurrentDigest}, {snapshot.PendingLicenseJWS, state.PendingDigest}} {
-			hash := sha256.Sum256([]byte(slot.raw))
-			if (slot.digest == "" && slot.raw != "") || (slot.digest != "" && (slot.raw == "" || hex.EncodeToString(hash[:]) != slot.digest)) {
-				return failure()
-			}
-		}
-		delete(expected, member.ServiceID)
-	}
-	return nil
-}
-
 func (r *OfflineDeliveryRunner) builtinRuntimeComponentSet(ctx context.Context, app string) (registry.RuntimeComponentSet, error) {
 	if r.catalog == nil {
 		return registry.RuntimeComponentSet{}, errors.New("runtime component catalog is not configured")

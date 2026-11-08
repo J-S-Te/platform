@@ -3,7 +3,9 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	core "github.com/J-S-Te/license-core"
+	"strings"
 	"time"
 )
 
@@ -27,7 +29,137 @@ var (
 	ErrInvalid = errors.New("invalid license management input")
 	// ErrTrustNotConfigured 表示厂商信任密钥未配置，验签失败关闭。
 	ErrTrustNotConfigured = errors.New("LICENSE_TRUST_NOT_CONFIGURED")
+	// ErrExpectationMismatch 表示提交携带的期望值与服务端预览结果不一致，属确定性失败：
+	// 期望值没有随状态推进而更新，重试同一请求不会成功，必须先重新预览核对。
+	ErrExpectationMismatch = errors.New("license commit expectation mismatch")
 )
+
+// ExpectationDiff 是单个期望字段的差异；Expected 是调用方声明值，Actual 是服务端当前值。
+type ExpectationDiff struct {
+	Field    string `json:"field"`
+	Expected string `json:"expected"`
+	Actual   string `json:"actual"`
+}
+
+// ExpectationError 汇总一次提交中全部不一致的期望字段，顺序固定为
+// digest → revision → current_version → pending_digest，便于运维与脚本定位。
+type ExpectationError struct {
+	Diffs []ExpectationDiff `json:"diffs"`
+}
+
+// Error 只输出可安全下发的摘要；原始期望值可能来自客户端，绝不进入错误文本。
+func (e *ExpectationError) Error() string {
+	if e == nil {
+		return ErrExpectationMismatch.Error()
+	}
+	return ErrExpectationMismatch.Error() + ": " + ExpectationMessage(e.Diffs)
+}
+
+// Is 让 errors.Is(err, ErrExpectationMismatch) 成立，同时不把确定性失败并入瞬时的 ErrConflict。
+func (e *ExpectationError) Is(target error) bool { return target == ErrExpectationMismatch }
+
+// NewExpectationError 归一化差异值并构造错误：摘要字段只在形状合法时回显，其余落成固定文案，
+// 避免把客户端提交的任意超长字符串写进响应。
+func NewExpectationError(diffs []ExpectationDiff) *ExpectationError {
+	out := &ExpectationError{Diffs: make([]ExpectationDiff, 0, len(diffs))}
+	for _, d := range diffs {
+		out.Diffs = append(out.Diffs, ExpectationDiff{
+			Field:    d.Field,
+			Expected: expectationValue(d.Field, d.Expected),
+			Actual:   expectationValue(d.Field, d.Actual),
+		})
+	}
+	return out
+}
+
+// expectationFieldLabels 是差异字段的中文名；未知字段保持中性描述，不猜测语义。
+var expectationFieldLabels = map[string]string{
+	"digest":          "许可证摘要",
+	"revision":        "授权修订号",
+	"current_version": "当前生效版本",
+	"pending_digest":  "待生效许可证摘要",
+}
+
+// expectationValue 归一化单个字段值：摘要为空表示“没有”，形状不合法则不复述原文。
+// 写法与 commitExpectationDiffs 一致且幂等，重复归一化不会改变结果。
+func expectationValue(field, value string) string {
+	if value == "" || value == expectationAbsent {
+		return expectationAbsent
+	}
+	switch field {
+	case "digest", "pending_digest":
+		if isLicenseDigest(value) {
+			return value
+		}
+		return expectationInvalidDigest
+	}
+	return truncateRunes(value, expectationValueLimit)
+}
+
+// ExpectationMessage 生成中文摘要，供 HTTP 层直接下发。文案要穿过前端过滤器，
+// 因此只使用中文字段名与契约内的安全取值：不出现全大写 token、请求标识、URL 或长十六进制串。
+func ExpectationMessage(diffs []ExpectationDiff) string {
+	const lead = "提交的期望值与当前授权状态不一致"
+	if len(diffs) == 0 {
+		return lead + "，请重新预览后按最新状态再次确认"
+	}
+	parts := make([]string, 0, len(diffs))
+	for _, d := range diffs {
+		label := expectationFieldLabels[d.Field]
+		if label == "" {
+			label = "授权状态字段"
+		}
+		parts = append(parts, fmt.Sprintf("%s 期望 %s，实际 %s", label, shortExpectationValue(d.Expected), shortExpectationValue(d.Actual)))
+	}
+	return truncateRunes(lead+"："+strings.Join(parts, "；")+"。请重新预览后按最新状态再次确认", expectationMessageLimit)
+}
+
+const (
+	// expectationMessageLimit 与前端提示的最大长度一致，超出即被丢弃。
+	expectationMessageLimit = 400
+	// expectationValueLimit 是单个非摘要字段值的回显上限。
+	expectationValueLimit = 20
+	// expectationDigestPreview 是长摘要只保留的字符数，避免文案带出长十六进制串。
+	expectationDigestPreview = 12
+	// expectationAbsent 表示该字段当前没有值（例如没有待生效许可证）。
+	expectationAbsent = "（无）"
+	// expectationInvalidDigest 是形状不合法摘要的固定替代文案，绝不回显客户端原文。
+	expectationInvalidDigest = "无效摘要"
+)
+
+// shortExpectationValue 为文案压缩取值：长摘要只留前缀，其余限长，空值表示“没有”。
+func shortExpectationValue(value string) string {
+	if value == "" {
+		return expectationAbsent
+	}
+	if isLicenseDigest(value) {
+		return truncateRunes(value, expectationDigestPreview) + "…"
+	}
+	return truncateRunes(value, expectationValueLimit)
+}
+
+// isLicenseDigest 只接受小写 64 位十六进制摘要，与许可证产物摘要的形状一致。
+func isLicenseDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// truncateRunes 按 rune 截断，保证不切断多字节字符。
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
+}
 
 // Actor 记录触发授权状态变更的操作者。
 type Actor struct {

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/coordination"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
@@ -170,6 +171,7 @@ func TestLicenseHTTPDistinguishesDeterministicFailuresFromConflicts(t *testing.T
 	}{
 		{domain.ErrVersionNotIncreasing, "LICENSE_VERSION_NOT_INCREASING", "更高版本"},
 		{domain.ErrBindingMismatch, "LICENSE_BINDING_MISMATCH", "已绑定"},
+		{domain.ErrExpectationMismatch, "LICENSE_EXPECTATION_MISMATCH", "重新预览"},
 		{domain.ErrConflict, "LICENSE_VERSION_CONFLICT", "重新预览"},
 	}
 	for _, c := range cases {
@@ -181,11 +183,107 @@ func TestLicenseHTTPDistinguishesDeterministicFailuresFromConflicts(t *testing.T
 	}
 }
 
+// 期望值不一致必须在 details 里逐字段给出期望/实际值，同时不得回显客户端提交的任意超长字符串。
+func TestLicenseHTTPExpectationMismatchListsFieldDiffs(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	mismatch := domain.NewExpectationError([]domain.ExpectationDiff{
+		{Field: "digest", Expected: digest, Actual: strings.Repeat("b", 64)},
+		{Field: "revision", Expected: "3", Actual: "2"},
+		{Field: "pending_digest", Expected: strings.Repeat("z", 4096), Actual: ""},
+	})
+	w := httptest.NewRecorder()
+	writeError(w, requestWith("", "platform:license:manage"), mismatch)
+	body := w.Body.String()
+	if w.Code != 409 || !strings.Contains(body, "LICENSE_EXPECTATION_MISMATCH") || !strings.Contains(body, "重新预览") {
+		t.Fatalf("expectation mismatch %d %s", w.Code, body)
+	}
+	var envelope struct {
+		Message string `json:"message"`
+		Details struct {
+			Mismatched []domain.ExpectationDiff `json:"mismatched"`
+		} `json:"details"`
+	}
+	if e := json.Unmarshal(w.Body.Bytes(), &envelope); e != nil {
+		t.Fatal(e)
+	}
+	items := envelope.Details.Mismatched
+	if len(items) != 3 || items[0].Field != "digest" || items[0].Expected != digest || items[1].Expected != "3" || items[1].Actual != "2" {
+		t.Fatalf("mismatched details = %+v", items)
+	}
+	if items[2].Expected != "无效摘要" {
+		t.Fatalf("oversized client digest echoed back: %+v", items[2])
+	}
+	if strings.Contains(body, strings.Repeat("z", 4096)) {
+		t.Fatal("oversized client digest leaked into the response")
+	}
+	if strings.Contains(envelope.Message, digest) || !strings.Contains(envelope.Message, "重新预览") {
+		t.Fatalf("message = %q", envelope.Message)
+	}
+}
+
+// 端到端：真实服务返回的期望值错误必须映射成 409 与逐字段 details，且不回显客户端的超长摘要。
+func TestLicenseHTTPCommitReportsExpectationMismatchEndToEnd(t *testing.T) {
+	pub, priv, e := ed25519.GenerateKey(rand.Reader)
+	if e != nil {
+		t.Fatal(e)
+	}
+	repo := &handlerRepository{}
+	now := time.Unix(1900000000, 0)
+	service, e := application.NewService(repo, map[string]ed25519.PublicKey{"vendor": pub}, func() time.Time { return now })
+	if e != nil {
+		t.Fatal(e)
+	}
+	h, e := NewHandler(service, "production")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if w := invoke(h.Initialize, requestWith(`{"customer_id":"customer","environment":"production"}`, "platform:license:manage")); w.Code != 200 {
+		t.Fatalf("initialize %d %s", w.Code, w.Body.String())
+	}
+	raw, e := core.Sign(core.License{ProtocolVersion: 1, Issuer: core.Issuer, ID: "license", Version: 1, CustomerID: "customer", ProductID: core.Product, Environment: "production", InstanceID: repo.d.InstanceID, IssuedAt: now.Unix(), NotBefore: now.Unix(), Applications: []core.Application{{Code: "contract_management", NotBefore: now.Unix(), ExpiresAt: now.Unix() + 86400, Kind: "FULL"}}}, "vendor", priv)
+	if e != nil {
+		t.Fatal(e)
+	}
+	preview := invoke(h.Preview, requestWith(`{"raw_jws":"`+raw+`"}`, "platform:license:manage"))
+	if preview.Code != 200 {
+		t.Fatalf("preview %d %s", preview.Code, preview.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Revision       uint64 `json:"revision"`
+			CurrentVersion uint64 `json:"current_version"`
+		} `json:"data"`
+	}
+	if e := json.Unmarshal(preview.Body.Bytes(), &envelope); e != nil {
+		t.Fatal(e)
+	}
+	oversized := strings.Repeat("z", 4096)
+	commit := fmt.Sprintf(`{"raw_jws":%q,"digest":%q,"expected_revision":%d,"expected_current_version":%d,"expected_pending_digest":"","confirm_changes":true,"confirm_replace_pending":true}`,
+		raw, oversized, envelope.Data.Revision, envelope.Data.CurrentVersion)
+	w := invoke(h.Commit, requestWith(commit, "platform:license:manage"))
+	body := w.Body.String()
+	if w.Code != 409 || !strings.Contains(body, "LICENSE_EXPECTATION_MISMATCH") || !strings.Contains(body, "重新预览") {
+		t.Fatalf("commit expectation mismatch %d %s", w.Code, body)
+	}
+	if strings.Contains(body, oversized) || !strings.Contains(body, "无效摘要") {
+		t.Fatalf("oversized client digest echoed back: %s", body)
+	}
+	if repo.calls == 0 {
+		t.Fatal("commit never reached storage")
+	}
+}
+
 // 前端 userError.js 的 safeUserMessage 会丢弃含技术细节的文案，尤其是大写带下划线的 token。
 // 文案一旦被丢弃，409 会降级成“请刷新页面”，等于本次修复失效，因此这里做回归保护。
 func TestLicenseHTTPMessagesSurviveTheFrontendFilter(t *testing.T) {
 	technical := regexp.MustCompile("[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
-	for _, sentinel := range []error{domain.ErrVersionNotIncreasing, domain.ErrBindingMismatch, domain.ErrConflict} {
+	expectation := domain.NewExpectationError([]domain.ExpectationDiff{
+		{Field: "digest", Expected: strings.Repeat("a", 64), Actual: strings.Repeat("b", 64)},
+		{Field: "revision", Expected: "3", Actual: "2"},
+		{Field: "current_version", Expected: "1", Actual: "2"},
+		{Field: "pending_digest", Expected: "", Actual: strings.Repeat("c", 64)},
+	})
+	for _, sentinel := range []error{domain.ErrVersionNotIncreasing, domain.ErrBindingMismatch, domain.ErrExpectationMismatch, expectation, domain.ErrConflict} {
 		w := httptest.NewRecorder()
 		writeError(w, requestWith("", "platform:license:manage"), sentinel)
 		var envelope struct {
@@ -197,6 +295,10 @@ func TestLicenseHTTPMessagesSurviveTheFrontendFilter(t *testing.T) {
 		}
 		if !hasHan(envelope.Message) || len([]rune(envelope.Message)) > 400 || technical.MatchString(envelope.Message) {
 			t.Fatalf("frontend would discard the message for %s: %q", envelope.Code, envelope.Message)
+		}
+		// 长十六进制摘要、请求标识与 URL 同样会被前端判为技术细节。
+		if regexp.MustCompile(`[0-9a-f]{64}|request_id|https?://`).MatchString(envelope.Message) {
+			t.Fatalf("message carries technical detail for %s: %q", envelope.Code, envelope.Message)
 		}
 	}
 }
