@@ -598,6 +598,49 @@ func (target *productionComposeTarget) Teardown(ctx context.Context, tenantID st
 	return nil
 }
 
+// handoffBackupOwnership 把 Agent（uid0）与容器写入的备份路径交还给部署根属主。
+//
+// 背景（2026-11-07 事故）：子系统接入时 Agent 以 uid0 创建 backups/ 与数据库备份批次，
+// 宿主机部署用户随后在"发布前完整备份"里无法遍历这些 0700/root 目录，发布被 fail-closed
+// 拒绝，只能人工 chown 才能恢复发布。备份是部署用户的恢复资产，属主必须与其一致。
+//
+// 参数：reference 为部署根内用于取属主的参考目录（不存在时退回 DeployRoot）；paths 为要
+// 递归交还属主的路径。非 root（本地开发/测试）静默跳过：没有能力改属主时不能伪成功。
+// 返回值：chown 失败时返回错误（备份已生成，错误用于阻止后续静默漂移）。
+func (target *productionComposeTarget) handoffBackupOwnership(reference string, paths ...string) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	info, err := os.Stat(reference)
+	if err != nil {
+		info, err = os.Stat(target.config.DeployRoot)
+	}
+	if err != nil {
+		return err
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if err := filepath.Walk(path, func(current string, entry os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			return os.Lchown(current, int(owner.Uid), int(owner.Gid))
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // deployLocked 在已持有发布锁时按实际能力执行备份、迁移和受控启动。
 // 参数：ctx限制部署时间，redactValues为诊断中必须隐藏的凭据值。
 // 返回值：任一步失败返回脱敏错误并保留恢复证据。
@@ -635,12 +678,22 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		if info, err := os.Lstat(backupRoot); err != nil || !info.IsDir() {
 			return provisioningError("production subsystem backup directory is unsafe")
 		}
+		// Agent 以 uid0 运行，MkdirAll 会把 backups/ 建/留成 root 属主；宿主机部署用户随后
+		// 发布前的完整备份会因无法遍历它而 fail-closed（2026-11-07 实测事故）。这里把备份
+		// 根目录交还给部署根属主，容器内写入的批次目录在完成后同样交还。
+		if err := target.handoffBackupOwnership(backupRoot, backupRoot); err != nil {
+			return provisioningError("handoff production subsystem backup root ownership")
+		}
 		// 整个数据库容器都备份：合同库还承载 Temporal，BI 库还承载 Metabase。
 		// SQL 和摘要一起原子发布；校验失败不留下看似完整的最终恢复点。
 		if err := target.runCompose(ctx, "exec", "-T", compose.Database.Service, "sh", "-c",
 			productionDatabaseBackupCommand,
 			"_", backupName, "/backups"); err != nil {
 			return provisioningError("backup production subsystem database")
+		}
+		backupPath := filepath.Join(backupRoot, backupName+".backup")
+		if err := target.handoffBackupOwnership(backupRoot, backupPath); err != nil {
+			return provisioningError("handoff production subsystem backup ownership")
 		}
 		target.stepLog("step=backup-complete recovery_directory=%s.backup", backupName)
 	}
