@@ -159,6 +159,9 @@ jobs:
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 -B deploy/production/tests/test-deploy-service-env-set.py
           python3 -B deploy/production/tests/test-portal-proxy-deployment.py
+          # 监控挂载定向补齐：历史活动编排只挂 2 个规则文件 + 缺凭据目录时，
+          # prometheus 静默 fail-open（规则少一半）且 platform-api job 永远缺凭据。
+          python3 -B deploy/production/tests/test-prometheus-mounts-install.py
           python3 -B deploy/production/tests/test-release-backup-policy.py
           python3 deploy/production/tests/test-runtime-dsn-dotenv.py
           python3 -B deploy/production/tests/test-upgrade-config-preservation.py

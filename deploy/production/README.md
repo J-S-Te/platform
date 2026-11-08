@@ -213,20 +213,34 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 
 ```bash
 cd /opt/unified-identity-platform
-install -d -m 700 runtime/prometheus-secrets
-umask 077
-openssl rand -hex 32 > runtime/prometheus-secrets/platform-metrics-token
-# 把同一个值写入 .env 的 METRICS_ACCESS_TOKEN，然后重启两个消费者
+# prometheus 镜像以 nobody(65534) 运行：目录必须可遍历、文件必须可读，
+# 否则容器里表现为 permission denied（prometheus 照常启动，job 报凭据读取失败）。
+install -d -m 750 -g 65534 runtime/prometheus-secrets
+umask 027
+openssl rand -hex 32 > runtime/prometheus-secrets/platform-metrics-token   # 0640 root:65534
+chgrp 65534 runtime/prometheus-secrets/platform-metrics-token
+# 把同一个值写入 .env 的 METRICS_ACCESS_TOKEN（两侧必须一致），然后重启两个消费者
 docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d platform-api
-docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d prometheus
+docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d --no-deps prometheus
 ```
+
+> 只有部署方持有该 token：`install-assets.sh` 只会创建空的 `runtime/prometheus-secrets`（`0750`，尝试把属组设为 `65534`），**不会**生成、猜测或覆盖 token；`METRICS_ACCESS_TOKEN` 未在 `.env`/`runtime/*.env` 配置时，prometheus 侧补文件也不会让 `platform-api` job 变绿（见下面的失败症状）。
+
+历史活动编排的监控挂载由 `install-assets.sh` 定向补齐（现场编排只保留模块裁剪、不随资产包整体替换，`docker-compose.yml.dist` 才是新模板）：
+
+- 4 个规则文件（`keycloak-alerts.yml`、`file-gateway-alerts.yml`、`platform-alerts.yml`、`integration-alerts.yml`）中缺失的挂载会补进活动 `prometheus` 服务。**只有 2 个规则挂载时 `rule_files` 的另外 2 个文件不会被加载，prometheus 不报错**（静默 fail-open）：`/api/v1/rules` 只会出现 `file-gateway-production` 与 `keycloak-production` 两组。
+- `./runtime/prometheus-secrets` 缺失时只创建空目录（`0750`，属组尝试设为容器用户组 `65534`），**不会生成、猜测或改写 token**；目录就绪后补 `/etc/prometheus/secrets` 只读挂载（现场已是符号链接或非目录时跳过挂载并提示，不阻断安装）。
+- 结构不受支持（flow 式 `volumes`、继承字段、重复的 `prometheus` 服务）时只告警并保留原编排：监控挂载不值得让整次资产安装失败。补完仍需人工核对一次 `/api/v1/rules`。
+- 资产同步**不重建容器**：挂载变化要生效必须显式重建 prometheus（`docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d --no-deps prometheus`）。
 
 约束与失败症状：
 
 - 目录 `runtime/prometheus-secrets/` 被 `.gitignore` 的 `runtime/` 覆盖：不进版本库、不随资产包发布，也**不得**复制进 `monitoring/`（`install-assets.sh` 会整体替换 `monitoring/`）。
 - prometheus 只按 `credentials_file: /etc/prometheus/secrets/platform-metrics-token` 读取，令牌目录以只读方式挂载（`./runtime/prometheus-secrets:/etc/prometheus/secrets:ro`）。**不要在 `prometheus.yml` 或编排里内联 `credentials`/`bearer_token`**：门禁会失败。
-- 文件缺失时 prometheus **启动即失败**（日志出现 `unable to read authorization credentials file`）。这是有意的 fail-closed：静默 401 会让 backchannel 缺口与队列指标长期无样本而无人发现。补文件后重启 prometheus 即可。
+- token 文件缺失或不可读时 prometheus **照常启动**（`/-/ready` 200），但 `platform-api` job 变成 `down`，`lastError` 为 `unable to read authorization credentials`（容器内 `/etc/prometheus/secrets` 不存在或文件缺失时同样是这个症状）。缺口由 `PlatformMetricsScrapeDown`（5m, critical）与 `PlatformMetricsSamplesMissing`（15m）暴露，2026-11-08 生产实测即为此形态；补文件后重启 prometheus 即可。
 - token 与 `platform-api` 的 `METRICS_ACCESS_TOKEN` 不一致时 prometheus 能起来但平台 job 无样本，触发 `PlatformMetricsSamplesMissing`（15m）。轮换 token 必须两侧同时改。
+- `METRICS_ACCESS_TOKEN` 完全未配置时 `RequireMetricsAccess` 退回“只放行回环对端”，`application` 网络内的 prometheus 会被 403：此时**即使** token 文件已就绪，`platform-api` job 仍然 `down`。缺口 2 的正确修法是两侧同时配置同一个值（`.env` 的 `METRICS_ACCESS_TOKEN` + 令牌文件），不能只补文件。
+- 容器内读取令牌的是 prometheus 镜像的运行用户 `nobody(65534)`：宿主上 `runtime/prometheus-secrets` 取 `0750` 且属组 `65534`、token 文件取 `0640` 且属组 `65534`，否则容器里读不到（`permission denied`），症状与“文件缺失”相同。
 - 不发布宿主机端口：不要为抓取给 `platform-api`/`settlement-api` 增加 `ports:`，也不要改前端 nginx 增加 `/metrics` 路由；跨容器抓取只走 `application` 网络。
 
 #### 4. XAPI-10 新键发布前核对（`SETTLEMENT_AUDIT_REQUIRED` / `PROJECT_AUDIT_REQUIRED`）

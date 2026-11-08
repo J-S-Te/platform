@@ -278,6 +278,32 @@ for base in "$target" "$stage"; do
 done
 find "$stage/runtime-approvals" -type f -exec chmod 600 {} +
 
+# 平台 /metrics 抓取令牌目录的 fail-safe 处理：缺失时补空目录（0750），
+# 但绝不生成、猜测或改写 token——token 只能由部署方按 README 提供。
+# 目录存在而 token 缺失时 prometheus 仍然正常启动（2026-11-08 生产实测：
+# /-/ready 200，platform-api job 报 “unable to read authorization credentials”），
+# 由 PlatformMetricsScrapeDown 暴露；反过来让 prometheus 起不来是不可接受的退路，
+# 因此本步骤无论成败都不阻断安装。
+# 权限取 0750 而不是 0700：prometheus 镜像以 nobody(65534) 运行，目录不可遍历时
+# 即使 token 存在也读不到（permission denied），属组可设为容器用户组。
+prometheus_secrets_dir="$target/runtime/prometheus-secrets"
+prometheus_secrets_mount=false
+if [[ -L "$prometheus_secrets_dir" || ( -e "$prometheus_secrets_dir" && ! -d "$prometheus_secrets_dir" ) ]]; then
+  echo '提示：runtime/prometheus-secrets 不是普通目录，跳过凭据目录只读挂载' >&2
+elif [[ -d "$prometheus_secrets_dir" ]]; then
+  prometheus_secrets_mount=true
+elif { [[ -d "$target/runtime" ]] || install -d -m 700 "$target/runtime"; } \
+     && install -d -m 750 "$prometheus_secrets_dir"; then
+  prometheus_secrets_mount=true
+  echo '已创建空的抓取令牌目录：runtime/prometheus-secrets（0750，未生成 token）'
+  if ! chgrp 65534 "$prometheus_secrets_dir" 2>/dev/null; then
+    echo '提示：无法把 runtime/prometheus-secrets 属组设为 65534（prometheus 容器用户 nobody）；' \
+      'token 就绪后容器可能读不到，请按 README 调整目录/文件权限' >&2
+  fi
+else
+  echo '提示：无法创建 runtime/prometheus-secrets，跳过凭据目录只读挂载' >&2
+fi
+
 # 保留操作人选择的服务。仅已知受管 Docker Hub 代理引用变更仓库；版本、代理 ACL 和其他所有 YAML 行均保持不变。
 if [[ -f "$target/docker-compose.yml" ]]; then
   [[ ! -L "$target/docker-compose.yml" ]] || { echo '统一编排不能是符号链接' >&2; exit 1; }
@@ -391,6 +417,132 @@ PY
     exit 1
   fi
   mv -f -- "$mount_update" "$compose_update"
+  # 历史活动编排不随资产包整体替换（只保留模块裁剪），因此 monitoring 子系统的
+  # 只读挂载必须定向补齐：活动现场只有 2 个规则文件挂载时，prometheus 的
+  # rule_files 声明了 4 个文件而缺 2 个，缺文件时 prometheus 静默 fail-open
+  # （规则不加载、/api/v1/rules 少一半且无任何报错）。这里只补挂载行。
+  mount_update="$(mktemp "$target/.compose-prometheus-mounts.XXXXXX")"
+  if python3 - "$compose_update" "$stage/monitoring/prometheus" "$prometheus_secrets_mount" >"$mount_update" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+
+def split_mount(entry):
+    """用途：把 '源:目标[:模式]' 形式的挂载拆成源与容器内目标。
+    参数：entry 为去掉列表符号与注释后的挂载文本。
+    返回值：(源, 容器内目标)；无冒号时源与目标相同。
+    """
+    parts = entry.split(':')
+    if len(parts) < 2:
+        return entry, entry
+    return parts[0], parts[1]
+
+
+def volume_signature(lines):
+    """用途：收集普通块式 volumes 列表里已声明的挂载文本（去掉注释）。
+    参数：lines 为 volumes 块内属于该列表的行。
+    返回值：挂载文本列表；遇到不支持的结构（长语法、非列表行）抛出异常。
+    """
+    entries = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if not stripped.startswith('- '):
+            raise ValueError('volumes 含非列表结构')
+        entry = stripped[2:].split('#', 1)[0].strip()
+        if not entry:
+            continue
+        if entry.startswith('type:') or entry.startswith('source:') or entry.startswith('target:'):
+            raise ValueError('volumes 使用长语法映射，须人工审核')
+        entries.append(entry)
+    return entries
+
+
+def update_prometheus_mounts(source, rules_dir, allow_secrets):
+    """用途：只为活动 prometheus 服务补缺失的规则文件与凭据目录只读挂载。
+    参数：source 为安装事务中的活动 Compose 文本；rules_dir 为本次资产内的
+         monitoring/prometheus 目录（缺哪个规则文件就不挂哪个）；allow_secrets
+         表示宿主 token 目录已就绪、可以挂 /etc/prometheus/secrets。
+    返回值：(新文本, 说明)。结构不受支持时抛出异常，由调用方保留原编排。
+    """
+    lines = source.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines)
+              if re.fullmatch(r'  prometheus:\s*(?:#.*)?\n?', line)]
+    if not starts:
+        return source, '活动编排没有 prometheus 服务，跳过监控挂载补齐'
+    if len(starts) > 1:
+        raise ValueError('prometheus 服务重复，须人工审核')
+    start = starts[0]
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r'^(?:  [^\s#]|[^\s#])', lines[i])), len(lines))
+    block = lines[start:end]
+    desired = []
+    for name in ('keycloak-alerts.yml', 'file-gateway-alerts.yml',
+                 'platform-alerts.yml', 'integration-alerts.yml'):
+        if (Path(rules_dir) / name).is_file():
+            desired.append(f'./monitoring/prometheus/{name}:/etc/prometheus/{name}:ro')
+    if allow_secrets == 'true':
+        desired.append('./runtime/prometheus-secrets:/etc/prometheus/secrets:ro')
+    volumes = [i for i, line in enumerate(block) if re.match(r'    volumes:', line)]
+    if len(volumes) > 1:
+        raise ValueError('prometheus volumes 重复，须人工审核')
+    added = []
+    if not volumes:
+        if any(re.match(r'    <<:', line) for line in block):
+            raise ValueError('prometheus 使用继承字段，禁止覆盖继承的 volumes')
+        added = list(desired)
+        block[1:1] = ['    volumes:\n'] + [f'      - {entry}\n' for entry in added]
+        return ''.join(lines[:start] + block + lines[end:]), \
+            '已为 prometheus 添加挂载：' + '、'.join(added)
+    index = volumes[0]
+    if not re.fullmatch(r'    volumes:\s*(?:#.*)?\n?', block[index]):
+        raise ValueError('prometheus volumes 须为普通块式列表')
+    stop = next((i for i in range(index + 1, len(block))
+                 if re.match(r'    [^\s#]', block[i])), len(block))
+    existing = volume_signature(block[index + 1:stop])
+    sources = {split_mount(entry)[0] for entry in existing}
+    targets = {split_mount(entry)[1] for entry in existing}
+    for entry in desired:
+        source_path, target_path = split_mount(entry)
+        if source_path in sources:
+            continue
+        if target_path in targets:
+            print('提示：prometheus 已有目标为 ' + target_path +
+                  ' 的挂载但不是资产期望的来源，保留现场值', file=sys.stderr)
+            continue
+        added.append(entry)
+        sources.add(source_path)
+        targets.add(target_path)
+    if not added:
+        return source, 'prometheus 挂载已完整，无需补齐'
+    block[stop:stop] = [f'      - {entry}\n' for entry in added]
+    return ''.join(lines[:start] + block + lines[end:]), \
+        '已为 prometheus 添加只读挂载：' + '、'.join(added)
+
+
+try:
+    updated, note = update_prometheus_mounts(
+        Path(sys.argv[1]).read_text(), sys.argv[2], sys.argv[3])
+except ValueError as error:
+    # fail-safe：监控挂载不值得让整次资产安装失败，保留原编排并明确告警。
+    print('提示：无法自动补齐 prometheus 挂载（' + str(error) +
+          '），已保留现有编排，请人工核对监控子系统挂载', file=sys.stderr)
+    updated = Path(sys.argv[1]).read_text()
+except OSError as error:
+    print('提示：读取活动编排失败（' + str(error) + '），已保留现有编排', file=sys.stderr)
+    raise SystemExit(1)
+else:
+    print(note, file=sys.stderr)
+sys.stdout.write(updated)
+PY
+  then
+    mv -f -- "$mount_update" "$compose_update"
+  else
+    rm -f -- "$mount_update"
+    echo '提示：prometheus 挂载补齐失败，已保留原编排；请人工核对监控子系统挂载' >&2
+  fi
   # 保留现场裁剪时也必须传递迁移 000130 所需数据库启动参数；只改平台库，
   # 不覆盖其他 MySQL、卷、镜像或自定义参数。实际重建仍在备份校验后的发布阶段。
   if grep -Eq '^  platform-mysql:[[:space:]]*(#.*)?$' "$compose_update"; then

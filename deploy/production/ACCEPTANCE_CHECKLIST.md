@@ -377,8 +377,8 @@ import 包
 - [ ] 结算 job 有样本：Prometheus 能查到 `settlement_integration_audit_required`、`settlement_integration_destination_configured{destination}`、`settlement_outbox_unconfigured_pending` 与 `settlement_outbox_pending_query_error`；`settlement_outbox_pending{destination}` 在空 outbox 时没有样本属正常（不要据此判定采集失败）。
 - [ ] 指标端点未对外暴露：`docker compose ... config` 中 file-gateway/prometheus/keycloak-backup-metrics 无 `ports`；平台/合同/**结算**仅 `127.0.0.1` 回环绑定；公网域名下 `/metrics` 返回前端静态 404，不是代理转发。
 - [ ] 告警收敛保持默认关闭：`data-analysis-alert-worker` 的 `ALERT_AUTO_RESOLVE` 解析结果为 `false`，且告警列表行为与升级前一致（只增不关）。
-- [ ] 新增告警已加载：Prometheus `/rules` 页能看到 `platform-alerts.yml` 与 `integration-alerts.yml` 两个 group，且无规则报错（`rule_files` 与只读挂载见 README 表格）。
-- [ ] 抓取令牌由部署方提供且不进版本库：`runtime/prometheus-secrets/platform-metrics-token` 存在且权限 `600`；`git status` 与资产包清单中都不含该文件；`prometheus.yml` 里没有内联 `credentials`/`bearer_token`。
+- [ ] 新增告警已加载：`curl -s localhost:9090/api/v1/rules` 的 `file` 字段覆盖 `keycloak-alerts.yml`、`file-gateway-alerts.yml`、`platform-alerts.yml`、`integration-alerts.yml` 四个文件（只有 2 个说明活动编排缺挂载——`install-assets.sh` 会补，补完需 `up -d --no-deps prometheus` 重建容器）；`/rules` 页无规则报错（`rule_files` 与只读挂载见 README 表格）。
+- [ ] 抓取令牌由部署方提供且不进版本库：`runtime/prometheus-secrets/platform-metrics-token` 存在，权限为 `0640` 且属组 `65534`（prometheus 镜像以 `nobody(65534)` 运行，`600` 会导致容器内 `permission denied`）；`git status` 与资产包清单中都不含该文件；`prometheus.yml` 里没有内联 `credentials`/`bearer_token`。
 - [ ] 数析与项目未被伪造抓取：`prometheus.yml` 中不存在指向 `data-analysis-*`/`project-*` 的 job（它们没有 HTTP `/metrics` 端点）。
 - [ ] 指标目录归属（D3）：每个 job 上方都有 `# access: token|loopback-only|network-only`，且 `network-only` 的 target 服务无 `ports:`、`loopback-only` 的端口只绑 `127.0.0.1`；README「未采集」表两行都写了 `owner=`（数析/项目采集另立项，owner=平台运维），项目 `:9092` 注明无应用层鉴权、仅内网。`tests/test_metrics_endpoint_registry.py` 通过。
 
