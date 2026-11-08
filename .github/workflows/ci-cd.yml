@@ -152,6 +152,9 @@ jobs:
           bash deploy/production/tests/test_prune_images.sh
           bash deploy/production/tests/test-deploy-backup-access.sh
           python3 -B deploy/production/tests/test_license_status_reading.py
+          # 运行配置门禁：runtime/*.env 重复键（provisioner 报 validate runtime environment
+          # group）与编排里 PROJECT_RUN_WORKER_WITH_API 非 false（生产校验拒绝）的回归。
+          python3 deploy/production/tests/test-runtime-env-hygiene.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
           python3 -B deploy/production/tests/test-deploy-service-env-set.py

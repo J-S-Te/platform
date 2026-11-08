@@ -1072,6 +1072,7 @@ File Gateway 数据库禁止单独恢复，必须使用同批次数据库+文件
 | Agent 配置摘要不一致 | 按发布/repair 路径强制重建 Agent | 只做 `docker restart` |
 | 提示“部署资产已更新但控制面尚未成对重载” | 执行 `sudo ./bin/deploy.sh reload-control-plane` 后重试 | 手工删除 `runtime/.control-plane-reload-required`、只重启 Agent |
 | 受控采用反复报 `production subsystem manifest drift detected` | 先 `reload-control-plane` 让两侧清单一致，再在原环境重试 | 重复新增接入、只重建单个进程 |
+| 受控接入报 `validate runtime environment group`，或生产校验报 `PROJECT_RUN_WORKER_WITH_API must be false in production` | 跑 `sudo ./bin/deploy.sh runtime-env`（等价 `python3 bin/check-runtime-env-hygiene.py --deploy-dir <部署目录>`）：按输出的 `文件:键:行号` 删掉 `runtime/*.env` 里重复的键行（值相同也算重复），把编排里每处 `PROJECT_RUN_WORKER_WITH_API`（含 `project-migrate`）写成字面量 `"false"`，门禁返回 0 后再发布 | 保留重复键、把迁移服务写成 `true` 或 `${...:-true}` 插值、用重试/`docker restart` 代替修配置 |
 | API unhealthy | 看失败容器、迁移容器和 runtime 日志 | 删除数据库卷、吞掉探针 |
 | 子系统 API 每分钟重启、日志含 `commercial license configuration failed`、平台只显示「部署 Agent 执行失败」 | 先跑 `sudo ./bin/deploy.sh license-runtime <应用编码>` 定性（缺许可状态卷 / 许可实例不一致），再按当前平台实例重新执行受控更新或接入，返回 0 后才算完成（见 8.3） | 重复点「重试」、`docker run` 手工挂卷、改 `runtime/` 固定记录或 `.release.env` 绑定、关闭 `COMMERCIAL_LICENSE_ENABLED` |
 | 子系统凭据缺失 | 在原环境修复控制面用途 Client 后重试 | 重复创建应用环境、填占位凭据 |

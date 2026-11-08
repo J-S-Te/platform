@@ -412,6 +412,42 @@ verify_subsystem_current_health() {
   verify_controlled_deployment "$component"
 }
 
+# 运行配置门禁：runtime/*.env 重复键 + 编排里的生产 worker 标志必须为字面量 false。
+# 现场两次故障：contract.env 重复受管键 -> provisioner 报 validate runtime environment
+# group；project-migrate 的 PROJECT_RUN_WORKER_WITH_API="true" -> 生产校验报
+# PROJECT_RUN_WORKER_WITH_API must be false in production。两类问题都能在发布前静态发现，
+# 因此这里 fail-closed：不通过就不打印成功结论（与许可运行态门禁同一位置/风格）。
+# 参数：可选 --apps/--json/--dry-run/--deploy-dir（透传给门禁脚本）。
+# 返回值：通过返回零；未通过返回非零，由调用方中止。
+runtime_env_hygiene_gate() {
+  local -a passthrough=()
+  while (($# > 0)); do
+    case "$1" in
+      --deploy-dir|--apps)
+        (($# > 1)) || die "$1 缺少取值"
+        passthrough+=("$1" "$2")
+        shift 2
+        ;;
+      --json|--dry-run)
+        passthrough+=("$1")
+        shift
+        ;;
+      *) die "不支持的运行配置门禁参数：$1" ;;
+    esac
+  done
+  local -a gate_args=(--deploy-dir "$deploy_dir")
+  ((${#passthrough[@]} == 0)) || gate_args+=("${passthrough[@]}")
+  if python3 "$script_dir/check-runtime-env-hygiene.py" "${gate_args[@]}"; then
+    return 0
+  fi
+  printf '错误：运行配置门禁未通过，先修配置再发布（未判定部署成功）。\n' >&2
+  printf '处置：runtime/*.env 里每个键只保留一行——重复键会让 provisioner 报 validate runtime environment group；\n' >&2
+  printf '      编排里 PROJECT_RUN_WORKER_WITH_API 全部写死 false（project-migrate 也不例外），\n' >&2
+  printf '      否则生产校验报 PROJECT_RUN_WORKER_WITH_API must be false in production。\n' >&2
+  printf '复核：%s runtime-env（只读，可反复执行）\n' "$0" >&2
+  return 1
+}
+
 verify() {
   require_initialized
   local component="${1:-}"
@@ -457,12 +493,16 @@ verify() {
   echo '基础平台核心服务健康检查已通过；不代表任何业务子系统已部署，也不代表外部客户端/安全组已验证。'
   if [[ -n "$component" ]]; then
     verify_subsystem_current_health "$component" || return
+    # 运行配置门禁：runtime/*.env 重复键与生产 worker 标志。静态缺陷在容器重启或接入
+    # 失败之前就拦住；必须先于许可运行态门禁与成功结论，失败即中止（fail-closed）。
+    runtime_env_hygiene_gate || return
     # 许可运行态门禁：健康与受控状态都通过后，还要证明“许可运行态”没有把容器留在重启
     # 循环里（缺许可状态卷 / 许可实例与平台不一致）。必须在打印成功结论之前，并且失败即中止：
     # 现场故障正是通过这一层被漏掉，平台只显示「部署 Agent 执行失败」，重试完全无效。
     license_runtime_gate "$subsystem_app_code" || return
     printf '%s/prod 子系统当前数据库、API、Worker 与跨系统依赖验收已通过。\n' "$subsystem_app_code"
   else
+    runtime_env_hygiene_gate || return
     license_runtime_gate || return
     echo '如需验收业务子系统，请执行：deploy.sh verify <component>。'
   fi
