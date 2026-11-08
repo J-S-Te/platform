@@ -20,11 +20,15 @@
     同一文件内同名键出现两次及以上即失败——**值相同也失败**，因为 provisioner 只看行数，
     不看值。失败信息给出 `文件:键:行号` 与保留/删除建议。
 
-  检查 B（worker 标志）：解析 `<deploy-dir>/docker-compose.yml`、
-    `compose.production.yaml`、`compose.yaml` 中 `PROJECT_RUN_WORKER_WITH_API` 的每一处
-    字面值。要求**全部为字面量 false**（`project-migrate`、`project-api`、Worker、锚点
-    一视同仁）。出现 `"true"`、空值、`${...}` 插值（尤其 `:-true` 默认值）都失败，并给出
-    `文件:行号` 与服务名。
+  检查 B（worker 标志）：解析 `<deploy-dir>/docker-compose.yml`（**唯一权威生产编排**，
+    也是离线资产包唯一发布的编排）中 `PROJECT_RUN_WORKER_WITH_API` 的每一处字面值。要求
+    **全部为字面量 false**（`project-migrate`、`project-api`、Worker、锚点一视同仁）。出现
+    `"true"`、空值、`${...}` 插值（尤其 `:-true` 默认值）都失败，并给出 `文件:行号` 与服务名。
+
+  非发布副本只告警（不失败）：`compose.yaml` 是**评审对照样本**（文件头明文禁止用于部署），
+    `compose.production.yaml` 全历史不在仓库里；两者都不在交付资产包中，但部署目录里可能
+    被运维手工投放。它们**不参与生产编排校验**——不解析、不作为失败项，只输出一条告警说明
+    其性质（`--json` 证据里进 `warnings` 数组），避免把非发布文件当成生产编排误报。
 
 安全与副作用：只读 `<deploy-dir>` 下的文本文件，不启动容器、不执行 compose、不写任何文件；
 输出只给键名与行号，不打印任何键值（runtime env 里可能有凭据）。`--dry-run` 只打印计划，
@@ -50,9 +54,14 @@ WORKER_KEY = "PROJECT_RUN_WORKER_WITH_API"
 WORKER_REQUIRED = "false"
 RUNTIME_DIR_NAME = "runtime"
 RUNTIME_GLOB = "*.env"
-# 生产编排文件按优先级列出；只检查实际存在的那几个，避免在只带 docker-compose.yml 的
-# 部署目录里误报“compose.production.yaml 缺失”。
-COMPOSE_FILE_NAMES = ("docker-compose.yml", "compose.production.yaml", "compose.yaml")
+# 生产编排**只认** docker-compose.yml：部署脚本、provisioner
+# （SUBSYSTEM_PRODUCTION_COMPOSE_FILE）与离线资产包静态清单都以它为准。
+AUTHORITATIVE_COMPOSE_FILE = "docker-compose.yml"
+# 部署目录里可能出现的**非发布副本**：compose.yaml 是评审对照样本（文件头明文禁止用于部署），
+# compose.production.yaml 全历史不在仓库、也不在资产包。运维手工投放时它们会出现在部署目录，
+# 因此只告警、不参与生产编排校验（2026-11 现场：把 compose.production.yaml 的
+# `${PROJECT_RUN_WORKER_WITH_API:-true}` 当生产编排判失败，运维被迫手工改非发布文件）。
+NON_RELEASE_COMPOSE_FILES = ("compose.production.yaml", "compose.yaml")
 # 子系统应用编码 -> 该子系统的 runtime 环境文件（--apps 过滤用）。
 APPLICATIONS = {
     "contract_management": ("contract.env",),
@@ -150,15 +159,23 @@ def duplicate_keys(path):
 
 
 def compose_files(deploy_dir, emit):
-    found = []
-    for name in COMPOSE_FILE_NAMES:
+    """只返回权威编排 docker-compose.yml（存在且不是符号链接）；非发布副本不参与校验。"""
+    path = Path(deploy_dir) / AUTHORITATIVE_COMPOSE_FILE
+    if path.is_file() and not path.is_symlink():
+        return [path]
+    emit("[运行配置门禁] 部署目录没有权威编排文件（%s）：跳过生产 worker 标志检查，"
+         "不视为失败" % AUTHORITATIVE_COMPOSE_FILE)
+    return []
+
+
+def non_release_compose_copies(deploy_dir):
+    """部署目录里存在的非发布编排副本名；只用于告警，绝不参与生产编排校验。"""
+    copies = []
+    for name in NON_RELEASE_COMPOSE_FILES:
         path = Path(deploy_dir) / name
-        if path.is_file() and not path.is_symlink():
-            found.append(path)
-    if not found:
-        emit("[运行配置门禁] 部署目录没有可解析的编排文件（%s）：跳过生产 worker 标志检查，"
-             "不视为失败" % "、".join(COMPOSE_FILE_NAMES))
-    return found
+        if path.is_file():
+            copies.append(name)
+    return copies
 
 
 def classify_worker_value(value):
@@ -225,6 +242,7 @@ def worker_occurrences(path):
 
 def collect_failures(deploy_dir, files, composites, emit):
     """执行检查 A/B，返回 (证据, 失败列表)；发现的失败不中断，全部汇总后判定。"""
+    copies = non_release_compose_copies(deploy_dir)
     evidence = {
         "schema": SCHEMA,
         "ok": False,
@@ -232,15 +250,32 @@ def collect_failures(deploy_dir, files, composites, emit):
         "runtime_dir": RUNTIME_DIR_NAME if files is not None else None,
         "runtime_files": [path.name for path in (files or [])],
         "compose_files": [path.name for path in composites],
+        "non_release_compose_copies": copies,
         "duplicate_keys": [],
         "worker_flags": [],
+        "warnings": [],
         "failures": [],
     }
     failures = []
+    warnings = []
 
     def fail(code, subject, message):
         failures.append({"code": code, "subject": subject, "message": message})
         emit("[运行配置门禁失败] %s：%s" % (code, message))
+
+    def warn(code, subject, message):
+        warnings.append({"code": code, "subject": subject, "message": message})
+        emit("[运行配置门禁告警] %s：%s" % (code, message))
+
+    # 非发布副本：只告警，不解析、不计失败。它们不在交付资产里（离线包只发布
+    # docker-compose.yml），出现在部署目录通常是运维手工投放的评审样本/历史 overlay，
+    # 用它们判断生产编排会误报（现场就此被迫手工改非发布文件）。
+    for name in copies:
+        warn("non-release-compose-copy", name,
+             "部署目录存在非发布编排副本 %s：它不在交付资产包内（唯一权威生产编排是 %s），"
+             "可能是运维手工投放的评审样本/历史 overlay，**不参与本次生产编排校验**；"
+             "请勿据此判断发布状态，也不要把 %s 当作部署入口"
+             % (name, AUTHORITATIVE_COMPOSE_FILE, name))
 
     # 检查 A：同一 runtime 文件内的重复键。provisioner 遇到受管键重复直接失败，
     # 与两行值是否相同无关，因此这里也不比较值。
@@ -305,6 +340,7 @@ def collect_failures(deploy_dir, files, composites, emit):
                     WORKER_KEY, WORKER_REQUIRED))
 
     evidence["failures"] = failures
+    evidence["warnings"] = warnings
     evidence["ok"] = not failures
     return evidence, failures
 
@@ -318,8 +354,10 @@ def report(options, emit):
         emit("[运行配置门禁] 计划检查：")
         emit("  1) %s/*.env 内同名的 KEY= 不得重复（值相同也算重复），失败给出 文件:键:行号"
              % RUNTIME_DIR_NAME)
-        emit("  2) %s 中每处 %s 必须是字面量 %s，失败给出 文件:行号:服务名"
-             % ("/".join(COMPOSE_FILE_NAMES), WORKER_KEY, WORKER_REQUIRED))
+        emit("  2) 权威编排 %s 中每处 %s 必须是字面量 %s，失败给出 文件:行号:服务名；"
+             "非发布副本（%s）只告警、不参与校验"
+             % (AUTHORITATIVE_COMPOSE_FILE, WORKER_KEY, WORKER_REQUIRED,
+                "、".join(NON_RELEASE_COMPOSE_FILES)))
         return 0
 
     files = runtime_env_files(options.deploy_dir, options.apps, emit)
@@ -331,16 +369,24 @@ def report(options, emit):
             "runtime/*.env 无重复键（%d 个文件）" % len(files) if files is not None
             else "无 runtime/ 目录，重复键检查跳过")
         compose_note = (
-            "%d 个编排文件中的 %s 全部为字面量 %s"
-            % (len(composites), WORKER_KEY, WORKER_REQUIRED) if composites
-            else "无编排文件，worker 标志检查跳过")
+            "权威编排 %s 中的 %s 全部为字面量 %s"
+            % (AUTHORITATIVE_COMPOSE_FILE, WORKER_KEY, WORKER_REQUIRED) if composites
+            else "无权威编排文件（%s），worker 标志检查跳过" % AUTHORITATIVE_COMPOSE_FILE)
         emit("[运行配置门禁] 通过：%s；%s" % (runtime_note, compose_note))
+        if evidence["warnings"]:
+            emit("[运行配置门禁] 另有 %d 条告警（不阻断）：非发布编排副本（%s）不参与生产"
+                 "编排校验，详见上方告警。"
+                 % (len(evidence["warnings"]),
+                    "、".join(evidence["non_release_compose_copies"])))
     else:
         emit("[运行配置门禁] 未通过：共 %d 项问题（逐条见上）。先修配置再发布。" % len(failures))
-        emit("处置：runtime/*.env 保留每个键唯一一行；编排里 %s 全部写死 %s"
-             % (WORKER_KEY, WORKER_REQUIRED))
+        emit("处置：runtime/*.env 保留每个键唯一一行；权威编排 %s 里 %s 全部写死 %s"
+             % (AUTHORITATIVE_COMPOSE_FILE, WORKER_KEY, WORKER_REQUIRED))
         emit("说明：这两类问题分别对应 provisioner 的 validate runtime environment group "
              "与生产校验 PROJECT_RUN_WORKER_WITH_API must be false in production。")
+        if evidence["warnings"]:
+            emit("[运行配置门禁] 另有 %d 条告警（不阻断）：非发布编排副本不参与生产编排校验。"
+                 % len(evidence["warnings"]))
     if options.json:
         json.dump(evidence, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
         sys.stdout.write("\n")
