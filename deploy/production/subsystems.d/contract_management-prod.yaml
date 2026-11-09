@@ -120,17 +120,28 @@ runtime:
         CRM_LINK_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_LINK_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_LINK_SCOPE: opportunity.signed.write
-        # 历史导入自动开立 CRM 客户/商机（导入专用通道，开关默认关闭）：与合同核验、
+        # 导入总闸与历史模式：历史导入确认要求两者同时为 true（合同侧 SubmitImportConfirmation
+        # 同时校验），且 CONTRACT_IMPORT_ENABLED 依赖文件网关凭据与 FILE_GATEWAY_SCOPE。
+        CONTRACT_IMPORT_ENABLED: "true"
+        CONTRACT_IMPORT_HISTORY_ENABLED: "true"
+        # 历史导入确认的受派角色集：人工批次按角色解析受派人，缺任一角色受派人即拒绝受理；
+        # 自动审批批次不解受派人，但会写入 approved_roles 用于审计。只允许
+        # admin/sales_director/tech_director/finance_director，历史模式开启时必须非空。
+        # 取值定为 admin,sales_director,finance_director：admin 必存在，业务与财务两个
+        # 总监覆盖商务与财务签认；客户如需不同组合按客户改清单（受控更新会下发）。
+        CONTRACT_IMPORT_CONFIRMATION_ROLES: "admin,sales_director,finance_director"
+        # 历史导入自动开立 CRM 客户/商机（导入专用通道；交付件默认开启能力，租户运行
+        # 开关仍默认关闭）：与合同核验、
         # 签约回写分开的最小权限凭据。客户/商机两个 scope 在平台侧是两个独立用途
         # （crm_customer_import_provision / crm_opportunity_import_provision），
         # 平台按“一用途一 client 一 scope”授予，因此这里也必须给两对 client：
         # CRM_PROVISION_* 服务客户查询/创建，CRM_PROVISION_OPPORTUNITY_* 服务
         # 商机创建与推进；任一 pair 缺失时合同侧启动必须失败关闭。
-        CONTRACT_IMPORT_CRM_PROVISION_ENABLED: "false"
-        # 能力开关（默认关闭）：开启后历史导入才允许自动审批；开启后仍须由合同
-        # 系统超级管理员（角色 admin）在控制台按租户开启运行开关（默认关闭），
+        CONTRACT_IMPORT_CRM_PROVISION_ENABLED: "true"
+        # 自动审批能力开关（交付件默认开启能力）：开启后历史导入才允许自动审批；开启后
+        # 仍须由合同系统超级管理员（角色 admin）在控制台按租户开启运行开关（默认关闭），
         # 两者同时开启才生效。与模板 contract.env.example 同值，改一处必须同步另一处。
-        CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL: "false"
+        CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL: "true"
         CRM_PROVISION_BASE_URL: http://customer-api:8090/customer-opportunity
         CRM_PROVISION_TOKEN_URL: http://platform-api:8080/oauth2/token
         CRM_PROVISION_SCOPE: customer.import_provision

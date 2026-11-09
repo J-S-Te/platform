@@ -160,7 +160,7 @@ validate_encryption_key() {
 }
 
 # 新备份验证并落盘后按保留策略清理旧备份。清理是维护动作：任何失败只告警，
-# 绝不把已成功的备份/发布结论改写成失败。默认保留 3 天且至少最近 2 份完整备份组；
+# 绝不把已成功的备份/发布结论改写成失败。默认保留 7 天且至少最近 5 份完整备份组；
 # BACKUP_RETENTION_DAYS<=0 显式关闭。非法值告警后回落默认值。
 # emergency_prune_before_backup 在创建新备份前按剩余空间做一次紧急清理。
 # 背景（2026-11-07 真实事故）：磁盘被历史备份写满后，mktemp/备份本身先失败，而
@@ -184,15 +184,15 @@ emergency_prune_before_backup() {
 }
 
 run_backup_retention() {
-  local retention_days="${BACKUP_RETENTION_DAYS:-3}"
-  local retention_count="${BACKUP_RETENTION_MIN_COUNT:-2}"
+  local retention_days="${BACKUP_RETENTION_DAYS:-7}"
+  local retention_count="${BACKUP_RETENTION_MIN_COUNT:-5}"
   if [[ ! "$retention_days" =~ ^-?[0-9]+$ ]]; then
-    echo "WARNING: invalid BACKUP_RETENTION_DAYS='$retention_days'; falling back to 3 (<=0 disables retention)" >&2
-    retention_days=3
+    echo "WARNING: invalid BACKUP_RETENTION_DAYS='$retention_days'; falling back to 7 (<=0 disables retention)" >&2
+    retention_days=7
   fi
   if [[ ! "$retention_count" =~ ^[0-9]+$ ]] || ((retention_count < 1)); then
-    echo "WARNING: invalid BACKUP_RETENTION_MIN_COUNT='$retention_count'; falling back to 2 (minimum 1)" >&2
-    retention_count=2
+    echo "WARNING: invalid BACKUP_RETENTION_MIN_COUNT='$retention_count'; falling back to 5 (minimum 1)" >&2
+    retention_count=5
   fi
   if ((retention_days <= 0)); then
     echo "backup retention disabled: BACKUP_RETENTION_DAYS=$retention_days; existing backups are left untouched"

@@ -39,8 +39,9 @@ type membershipRow struct {
 	IsPrimary        bool   `gorm:"column:is_primary"`
 }
 
-// List 返回有效且在调用应用/环境中实际持有授权的内部用户分页；
-// 结果同时排除受保护的部署初始化管理员。
+// List 返回当前应用环境内的有效负责人，并排除受保护的部署初始化管理员。
+// 参数：ctx为查询上下文，三个ID限定可信租户/应用/环境，query为搜索和分页条件。
+// 返回值：授权候选人分页；目录、数据库或初始化记录异常时返回错误。
 func (repository *Repository) List(ctx context.Context, tenantID, applicationID, environmentID string, query application.Query) (domain.Page, error) {
 	now := repository.now().UTC()
 	identity, initialized, err := bootstrapadmin.Resolve(ctx, repository.db, tenantID)
@@ -109,7 +110,13 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 		// LIKE 通配符按字面转义，搜索词不能借助 % 或 _ 扩大结果集；精确用户 ID 仍可直接命中。
 		like := "%" + strings.ReplaceAll(strings.ReplaceAll(query.Keyword, "\\", "\\\\"), "%", "\\%") + "%"
 		like = strings.ReplaceAll(like, "_", "\\_")
-		authorized = authorized.Where("user.display_name LIKE ? ESCAPE '\\\\' OR user.id = ?", like, query.Keyword)
+		search := repository.db.Where("user.display_name LIKE ? ESCAPE '\\\\'", like)
+		// 用户ID为26位ASCII；中文姓名不能绑定到ascii_bin列，否则MySQL报3988。
+		if len(query.Keyword) == 26 && strings.IndexFunc(query.Keyword,
+			func(value rune) bool { return value > 127 }) < 0 {
+			search = search.Or("user.id = ?", query.Keyword)
+		}
+		authorized = authorized.Where(search)
 	}
 
 	var total int64

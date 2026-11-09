@@ -52,7 +52,9 @@ type ApplicationJWTManager struct {
 	publicKey  ed25519.PublicKey
 }
 
-// LoadApplicationJWTManager 加载应用令牌使用的 Ed25519 签名密钥。
+// LoadApplicationJWTManager 加载并核验机器令牌签名密钥，避免签发无法验真的令牌。
+// 参数：issuer/audience为令牌信任边界，两个路径为已有私钥和公钥文件。
+// 返回值：签名管理器；配置缺失、密钥无法读取或公私钥不匹配时返回错误。
 func LoadApplicationJWTManager(issuer, audience, privateKeyPath, publicKeyPath string) (*ApplicationJWTManager, error) {
 	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(audience) == "" {
 		return nil, errors.New("application JWT issuer and audience must not be empty")
@@ -64,6 +66,9 @@ func LoadApplicationJWTManager(issuer, audience, privateKeyPath, publicKeyPath s
 	publicKey, err := loadEd25519PublicKey(publicKeyPath)
 	if err != nil {
 		return nil, err
+	}
+	if !privateKey.Public().(ed25519.PublicKey).Equal(publicKey) {
+		return nil, errors.New("application JWT private key does not match application JWT public key")
 	}
 	return &ApplicationJWTManager{issuer: issuer, audience: audience, privateKey: privateKey, publicKey: publicKey}, nil
 }
