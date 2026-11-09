@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       keep_hours:
-        description: '保留小时数：只清理早于该小时数且未被容器使用的镜像（默认 72；0 = 清理所有未使用镜像）'
+        description: '保留小时数：只清理早于该小时数且未被容器使用的镜像（默认 24；0 = 清理所有未使用镜像）'
         required: false
-        default: '72'
+        default: '24'
         type: string
       dry_run:
         description: '仅打印清理计划（保持勾选）；取消勾选才会真正执行 docker image prune'

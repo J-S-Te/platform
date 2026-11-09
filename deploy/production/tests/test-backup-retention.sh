@@ -63,15 +63,15 @@ assert_log_re() {
   grep -Eq -- "$1" <<<"$output" || { printf '%s\n' "$output" >&2; fail "$2"; }
 }
 
-# 1. 默认策略：7 天 / 最少 5 份，成功后以 --apply 调用 prune。
+# 1. 默认策略：3 天 / 最少 2 份，成功后以 --apply 调用 prune。
 unset BACKUP_RETENTION_DAYS BACKUP_RETENTION_MIN_COUNT 2>/dev/null || true
 run_retention
 [[ "$status" == 0 ]] || { printf '%s\n' "$output" >&2; fail 'default retention must succeed'; }
-grep -Fxq -- "--deploy-dir $deploy_dir --keep-days 7 --keep-count 5 --apply" "$calls" ||
-  { cat "$calls" >&2; fail 'default policy did not call prune with 7 days / 5 groups / --apply'; }
-assert_log 'keep-days=7' 'retention log must state keep-days'
-assert_log 'keep-count=5' 'retention log must state keep-count'
-pass 'defaults are 7 days / 5 groups and prune is invoked with --apply'
+grep -Fxq -- "--deploy-dir $deploy_dir --keep-days 3 --keep-count 2 --apply" "$calls" ||
+  { cat "$calls" >&2; fail 'default policy did not call prune with 3 days / 2 groups / --apply'; }
+assert_log 'keep-days=3' 'retention log must state keep-days'
+assert_log 'keep-count=2' 'retention log must state keep-count'
+pass 'defaults are 3 days / 2 groups and prune is invoked with --apply'
 
 # 2. 环境变量覆盖必须原样传给 prune。
 BACKUP_RETENTION_DAYS=3 BACKUP_RETENTION_MIN_COUNT=2 run_retention
@@ -92,13 +92,13 @@ pass 'BACKUP_RETENTION_DAYS <= 0 disables retention'
 # 4. 非法值 WARN 并回落默认，不阻断发布。
 BACKUP_RETENTION_DAYS=seven BACKUP_RETENTION_MIN_COUNT=0 run_retention
 [[ "$status" == 0 ]] || fail 'invalid env values must not fail the release'
-grep -Fxq -- "--deploy-dir $deploy_dir --keep-days 7 --keep-count 5 --apply" "$calls" ||
+grep -Fxq -- "--deploy-dir $deploy_dir --keep-days 3 --keep-count 2 --apply" "$calls" ||
   { cat "$calls" >&2; fail 'invalid env values did not fall back to defaults'; }
 assert_log_re 'WARNING: invalid BACKUP_RETENTION_DAYS' 'invalid days must warn'
 assert_log_re 'WARNING: invalid BACKUP_RETENTION_MIN_COUNT' 'invalid count must warn'
 BACKUP_RETENTION_MIN_COUNT=-3 run_retention
 assert_log_re 'WARNING: invalid BACKUP_RETENTION_MIN_COUNT' 'negative count must warn and fall back'
-grep -Fq -- '--keep-count 5' "$calls" || fail 'negative count did not fall back to 5'
+grep -Fq -- '--keep-count 2' "$calls" || fail 'negative count did not fall back to 2'
 pass 'invalid retention env values warn and fall back to defaults'
 
 # 5. prune 失败只 WARN，不改变发布/备份结论。
