@@ -748,10 +748,12 @@ class IntegrationWiringTest(unittest.TestCase):
         template = parse_env_template(TEMPLATE)
         self.assertIn(key, template, f"{TEMPLATE.name} 缺少 {key}（按模板重建会静默丢键）")
         self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}（受控更新无键可下发）")
+        # 本批交付件按产品决定默认开启导入能力（历史导入自动审批需前置），
+        # 但自动跳过会签仍由租户运行开关控制且默认关闭；此处只保证模板与清单一致。
         self.assertEqual(
             template[key].strip().lower(),
-            "false",
-            f"{TEMPLATE.name} 的 {key} 默认必须关闭（fail-closed）",
+            "true",
+            f"{TEMPLATE.name} 的 {key} 必须与清单一致为 true（产品决定默认具备能力）",
         )
         self.assertEqual(
             template[key].strip().lower(),
@@ -880,10 +882,12 @@ class IntegrationWiringTest(unittest.TestCase):
         template = parse_env_template(TEMPLATE)
         self.assertIn(key, template, f"{TEMPLATE.name} 缺少 {key}（按模板重建会静默丢键）")
         self.assertIn(key, values, f"{MANIFEST.name} 缺少 {key}（受控更新无键可下发）")
+        # 本批交付件按产品决定默认开启导入能力（历史导入自动审批需前置），
+        # 但自动跳过会签仍由租户运行开关控制且默认关闭；此处只保证模板与清单一致。
         self.assertEqual(
             template[key].strip().lower(),
-            "false",
-            f"{TEMPLATE.name} 的 {key} 默认必须关闭（fail-closed）",
+            "true",
+            f"{TEMPLATE.name} 的 {key} 必须与清单一致为 true（产品决定默认具备能力）",
         )
         self.assertEqual(
             template[key].strip().lower(),

@@ -80,8 +80,26 @@ license_runtime_gate() {
   return 1
 }
 
+# preserve_renewal_license 把已导入平台、但未能替换为正式交付件的新许可证复制到可写的
+# runtime/ 作为恢复件。交付许可证目录整体以只读方式挂载进容器，替换失败本身也可能来自
+# 宿主机许可目录不可写，因此恢复件优先落在 runtime/；复制失败时不动暂存件，由调用方打印
+# 暂存件路径。成功时输出恢复件的绝对路径，失败时返回非零且不留下空文件。
+preserve_renewal_license() {
+  local staged="${1:?暂存许可证必填}" recovery
+  if [[ ! -d "$deploy_dir/runtime" ]]; then
+    mkdir -p -- "$deploy_dir/runtime" || return 1
+  fi
+  recovery="$(mktemp "$deploy_dir/runtime/.commercial-license.recovery.XXXXXX")" || return 1
+  if install -m 600 -- "$staged" "$recovery"; then
+    printf '%s\n' "$recovery"
+    return 0
+  fi
+  rm -f -- "$recovery"
+  return 1
+}
+
 renew_delivery_license() {
-  local source="${1:?必须提供已签署续期许可证路径}" source_dir source_name staged
+  local source="${1:?必须提供已签署续期许可证路径}" source_dir source_name staged recovery
   require_initialized
   [[ -f "$source" && ! -L "$source" ]] || die '续期许可证必须是常规文件'
   source_dir="$(cd -- "$(dirname -- "$source")" && pwd)"
@@ -94,14 +112,27 @@ renew_delivery_license() {
     exec 8>"$deploy_dir/runtime/.license-import.lock"
     flock -w 5 8 || die '另一个授权操作正在执行'
     staged="$(mktemp "$deploy_dir/license/.renewal.XXXXXX")"
-    trap 'rm -f -- "$staged"' EXIT
+    # 失败时是否保留暂存件由 staged 是否被清空决定：导入失败可以清理，替换失败必须保留。
+    trap '[[ -z "${staged:-}" ]] || rm -f -- "$staged"' EXIT
     install -m 600 -- "$source_dir/$source_name" "$staged"
     # 续期导入只持久化签名续期；等原子替换为正式许可证文件后，再由下面一次显式
     # activate 完成整条激活流水线，避免对临时暂存文件激活或重复执行同一流水线。
     compose run -T --rm --no-deps -v "$deploy_dir/license:/delivery-license:ro" platform-api \
       ./license-install import --no-activate --file "/delivery-license/$(basename -- "$staged")" || exit 1
     [[ ! -L "$deploy_dir/license/commercial-license.jws" ]] || die '现有许可证不能是符号链接'
-    mv -f -- "$staged" "$deploy_dir/license/commercial-license.jws"
+    if ! mv -f -- "$staged" "$deploy_dir/license/commercial-license.jws"; then
+      # 平台已持久化本次续期；此时删除暂存件会让唯一的新证消失，下次续期又会和旧交付件
+      # 冲突（409）。因此保留新证、只打印绝对路径与可直接执行的恢复命令，并且不继续激活。
+      recovery="$(preserve_renewal_license "$staged")" || recovery=""
+      printf '错误：续期许可证已导入平台，但替换交付许可证文件失败；未执行激活。\n' >&2
+      printf '恢复件（0600 普通文件）：%s\n' "${recovery:-$staged}" >&2
+      [[ -z "$recovery" ]] || printf '暂存副本（0600）：%s\n' "$staged" >&2
+      printf '恢复命令：install -m 600 -- %q %q && %q license-activate\n' \
+        "${recovery:-$staged}" "$deploy_dir/license/commercial-license.jws" "$script_dir/deploy.sh" >&2
+      printf '先排除许可目录或 runtime 目录不可写、只读挂载等原因再执行；不要删除恢复件，也不要重复导入同一续期许可证。\n' >&2
+      staged=''
+      exit 1
+    fi
   ) || return 1
   install_delivery_license activate
 }

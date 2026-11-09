@@ -28,6 +28,22 @@ deploy_component() { printf 'deploy:%s\n' "$1" >> "$events"; }
 verify() { printf 'verify\n' >> "$events"; }
 wait_for_required_service_health() { printf 'verify\n' >> "$events"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  fi
+}
+# 目标部署入口在 Linux 上使用 GNU stat -c；本机可能是 macOS，因此按可用性回退。
+file_mode() {
+  local mode
+  if mode="$(stat -c '%a' -- "$1" 2>/dev/null)" && [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s' "$mode"
+    return 0
+  fi
+  stat -f '%Lp' -- "$1"
+}
 
 if (auto_install_packages) >"$test_root/missing.log" 2>&1; then fail 'missing core packages accepted'; fi
 grep -q '缺少基础组件镜像包：common' "$test_root/missing.log" || { cat "$test_root/missing.log" >&2; fail 'missing core package message absent'; }
@@ -120,6 +136,64 @@ if (
   renew_delivery_license "$test_root/rejected.jws"
 ) > "$test_root/renewal-failure.log" 2>&1; then fail 'rejected renewal returned success'; fi
 cmp "$test_root/renewal.jws" "$deploy_dir/license/commercial-license.jws" || fail 'rejected renewal replaced the installed license'
+# 落盘失败保护：平台已导入续期，但替换交付许可证失败时必须保留新证、旧证不变、非零退出且不激活。
+# 用 PATH 注入假 mv（以及假 install 不让 runtime 恢复件落盘）复现宿主机写入失败。
+fake_bin="$test_root/fake-bin"
+mkdir -p "$fake_bin/mv" "$fake_bin/mv-install"
+real_install="$(command -v install)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_bin/mv/mv"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_bin/mv-install/mv"
+cat > "$fake_bin/mv-install/install" <<EOF
+#!/usr/bin/env bash
+for argument in "\$@"; do
+  case "\$argument" in
+    */runtime/*) exit 1 ;;
+  esac
+done
+exec "$real_install" "\$@"
+EOF
+chmod +x "$fake_bin/mv/mv" "$fake_bin/mv-install/mv" "$fake_bin/mv-install/install"
+
+installed_sha="$(sha256_of "$deploy_dir/license/commercial-license.jws")"
+printf 'mv-failure-renewal\n' > "$test_root/mv-failure.jws"
+: > "$events"
+if (
+  PATH="$fake_bin/mv:$PATH"
+  renew_delivery_license "$test_root/mv-failure.jws"
+) > "$test_root/mv-failure.log" 2>&1; then fail 'license replacement failure returned success'; fi
+[[ "$(sha256_of "$deploy_dir/license/commercial-license.jws")" == "$installed_sha" ]] || fail 'failed replacement changed the installed license'
+if grep -q '^license:activate$' "$events"; then fail 'activation ran after a failed license replacement'; fi
+recovery_path="$(sed -n 's/^恢复件（0600 普通文件）：//p' "$test_root/mv-failure.log")"
+[[ -n "$recovery_path" && "$recovery_path" == /* ]] || fail 'recovery artifact path is not printed as an absolute path'
+[[ "$recovery_path" == "$deploy_dir/runtime/"* ]] || fail 'recovery artifact was not written under runtime/'
+[[ -f "$recovery_path" && ! -L "$recovery_path" ]] || fail 'recovery artifact is not a regular file'
+[[ "$(file_mode "$recovery_path")" == 600 ]] || fail 'recovery artifact permissions are not 0600'
+cmp -s "$test_root/mv-failure.jws" "$recovery_path" || fail 'recovery artifact does not contain the new renewal license'
+staged_path="$(sed -n 's/^暂存副本（0600）：//p' "$test_root/mv-failure.log")"
+[[ -f "$staged_path" && ! -L "$staged_path" ]] || fail 'staged renewal was not preserved'
+[[ "$(file_mode "$staged_path")" == 600 ]] || fail 'preserved staged renewal permissions are not 0600'
+cmp -s "$test_root/mv-failure.jws" "$staged_path" || fail 'preserved staged renewal content changed'
+grep -q '^恢复命令：install -m 600 -- .* license-activate$' "$test_root/mv-failure.log" || fail 'executable recovery command absent'
+if grep -q 'mv-failure-renewal' "$test_root/mv-failure.log"; then fail 'license document content leaked into the failure log'; fi
+rm -f -- "$recovery_path" "$staged_path"
+
+printf 'double-failure-renewal\n' > "$test_root/double-failure.jws"
+: > "$events"
+if (
+  PATH="$fake_bin/mv-install:$PATH"
+  renew_delivery_license "$test_root/double-failure.jws"
+) > "$test_root/double-failure.log" 2>&1; then fail 'double failure returned success'; fi
+[[ "$(sha256_of "$deploy_dir/license/commercial-license.jws")" == "$installed_sha" ]] || fail 'double failure changed the installed license'
+if grep -q '^license:activate$' "$events"; then fail 'activation ran after a double failure'; fi
+staged_fallback="$(sed -n 's/^恢复件（0600 普通文件）：//p' "$test_root/double-failure.log")"
+[[ "$staged_fallback" == "$deploy_dir/license/.renewal."* ]] || fail 'double failure did not fall back to the staged renewal'
+[[ -f "$staged_fallback" && ! -L "$staged_fallback" ]] || fail 'staged renewal was deleted after a double failure'
+[[ "$(file_mode "$staged_fallback")" == 600 ]] || fail 'fallback staged renewal permissions are not 0600'
+cmp -s "$test_root/double-failure.jws" "$staged_fallback" || fail 'fallback staged renewal content changed'
+if compgen -G "$deploy_dir/runtime/.commercial-license.recovery.*" >/dev/null; then fail 'failed recovery copy was left in runtime/'; fi
+grep -q '^恢复命令：install -m 600 -- .* license-activate$' "$test_root/double-failure.log" || fail 'fallback recovery command absent'
+if grep -q 'double-failure-renewal' "$test_root/double-failure.log"; then fail 'license document content leaked into the double-failure log'; fi
+rm -f -- "$staged_fallback"
 rm "$deploy_dir/license/commercial-license.jws"
 rmdir "$deploy_dir/license"
 # 仅覆盖控制流程夹具；真实注册和 ACK 检查由 Go 测试执行。
