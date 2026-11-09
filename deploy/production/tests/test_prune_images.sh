@@ -67,23 +67,23 @@ dry_out="$(run_tool 2>&1)" || fail 'dry-run must exit 0'
 grep -q 'docker system df' <<<"$dry_out" || fail 'dry-run must print a docker system df snapshot'
 grep -q 'Images' <<<"$dry_out" || fail 'dry-run must show the docker system df table'
 grep -q 'dry-run' <<<"$dry_out" || fail 'dry-run must state that nothing was deleted'
-grep -q 'docker image prune -a -f --filter until=72h' <<<"$dry_out" || \
-  fail 'dry-run must print the planned docker image prune command with the default 72h'
+grep -q 'docker image prune -a -f --filter until=24h' <<<"$dry_out" || \
+  fail 'dry-run must print the planned docker image prune command with the default 24h'
 [[ "$(image_prune_calls)" -eq 0 ]] || fail 'dry-run must not call docker image prune'
 [[ "$(system_df_calls)" -eq 1 ]] || fail 'dry-run must query docker system df exactly once'
 grep -q '^info' "$fake_log" || fail 'dry-run must verify the docker daemon before reporting a plan'
 pass 'dry-run prints docker system df and the planned command without pruning'
 
-# 2) --apply：只调用一次 docker image prune，参数必须是 -a -f --filter until=72h。
+# 2) --apply：只调用一次 docker image prune，参数必须是 -a -f --filter until=24h。
 reset_log
 apply_out="$(run_tool --apply 2>&1)" || fail 'apply must exit 0'
 [[ "$(image_prune_calls)" -eq 1 ]] || fail 'apply must call docker image prune exactly once'
-grep -qx 'image prune -a -f --filter until=72h' "$fake_log" || \
-  fail 'apply must pass: image prune -a -f --filter until=72h'
+grep -qx 'image prune -a -f --filter until=24h' "$fake_log" || \
+  fail 'apply must pass: image prune -a -f --filter until=24h'
 grep -q 'Total reclaimed space' <<<"$apply_out" || fail 'apply must surface the docker prune output'
 grep -q 'reclaimed 1.5GB' <<<"$apply_out" || fail 'apply must report reclaimed bytes parsed from docker'
 [[ "$(system_df_calls)" -eq 2 ]] || fail 'apply must print docker system df before and after pruning'
-pass 'apply prunes once with -a -f --filter until=72h and reports reclaimed space'
+pass 'apply prunes once with -a -f --filter until=24h and reports reclaimed space'
 
 # 3) --keep-hours 0：until=0h（清理所有未被容器使用的镜像）。
 reset_log
