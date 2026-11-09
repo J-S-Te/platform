@@ -8,15 +8,15 @@
 # 用法：
 #   prune-images.sh                     # 只打印 docker system df 与将执行的命令（dry-run）
 #   prune-images.sh --keep-hours 24     # 只清理 24 小时前的未使用镜像（仍是 dry-run）
-#   prune-images.sh --keep-hours 24 --apply   # 真正删除
+#   prune-images.sh --keep-hours 72 --apply   # 真正删除
 #
 # 参数：
-#   --keep-hours N  只清理时间戳早于 N 小时、且未被任何容器使用的镜像；默认 24；
+#   --keep-hours N  只清理时间戳早于 N 小时、且未被任何容器使用的镜像；默认 72；
 #                   0 表示清理所有未被容器使用的镜像（慎用：回滚窗口随之消失）。
 #   --apply         真正执行 docker image prune；缺省只打印计划，不删除任何内容。
 #
 # 发布侧环境变量（deploy-service.sh 读取，非法值 WARN 后回落默认值）：
-#   PLATFORM_IMAGE_RETENTION_HOURS  默认 24，等价于这里的 --keep-hours。
+#   PLATFORM_IMAGE_RETENTION_HOURS  默认 72，等价于这里的 --keep-hours。
 #
 # 安全边界：
 #   - 只执行 `docker image prune -a -f --filter "until=<N>h"`；绝不使用 `docker system prune`
@@ -34,7 +34,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: prune-images.sh [--keep-hours N] [--apply]
 
-  --keep-hours N  只清理早于 N 小时、且未被任何容器使用的镜像（默认 24；0 = 清理所有未使用镜像）
+  --keep-hours N  只清理早于 N 小时、且未被任何容器使用的镜像（默认 72；0 = 清理所有未使用镜像）
   --apply         真正执行 docker image prune；缺省只打印计划与 docker system df（dry-run）
 
 只执行 `docker image prune -a -f --filter "until=<N>h"`：不使用 docker system prune，
@@ -43,7 +43,7 @@ EOF
   exit "${1:-2}"
 }
 
-keep_hours=24
+keep_hours=72
 apply=false
 
 while (($#)); do

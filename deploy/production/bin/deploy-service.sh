@@ -2396,14 +2396,14 @@ if "$deploy_function"; then
   echo "$service 发布成功：$image_ref"
   # 发布成功后的镜像保留清理：按不可变 digest 反复拉取新镜像会把磁盘撑满
   # （2026-11-07 测试服务器两次磁盘 100%，发布被 fail-closed 拒绝）。
-  # 默认只清理 24 小时前且未被任何容器使用的镜像，可用 PLATFORM_IMAGE_RETENTION_HOURS 调整；
+  # 默认只清理 72 小时前且未被任何容器使用的镜像，可用 PLATFORM_IMAGE_RETENTION_HOURS 调整；
   # 0 表示清理所有未使用镜像（会缩短回滚窗口，回滚镜像仍可从 ACR 按 digest 重拉）。
   # 这一步是维护动作：失败只 WARN，绝不改变已成功的发布结论；dry-run 由 prune-images.sh
   # 自身控制，本发布路径只调用 --apply。脚本缺失时 bash 返回非零，同样只告警。
-  image_retention_hours="${PLATFORM_IMAGE_RETENTION_HOURS:-24}"
+  image_retention_hours="${PLATFORM_IMAGE_RETENTION_HOURS:-72}"
   if [[ ! "$image_retention_hours" =~ ^[0-9]+$ ]]; then
-    warn "PLATFORM_IMAGE_RETENTION_HOURS='$image_retention_hours' 不是非负整数，回落默认 24 小时"
-    image_retention_hours=24
+    warn "PLATFORM_IMAGE_RETENTION_HOURS='$image_retention_hours' 不是非负整数，回落默认 72 小时"
+    image_retention_hours=72
   fi
   bash "$script_dir/prune-images.sh" --keep-hours "$image_retention_hours" --apply >&2 || \
     warn "镜像保留清理失败（不影响发布结论）"
