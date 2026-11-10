@@ -218,6 +218,25 @@ jobs:
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1
           fi
+      - name: Verify offline recovery and versioned root tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd tools/offline-delivery && sha256sum --strict --check SHA256SUMS)
+          engineering_root="$(mktemp -d "$RUNNER_TEMP/offline-engineering.XXXXXX")"
+          trap 'rm -rf -- "$engineering_root"' EXIT
+          cp -R tools/offline-delivery/engineering-root/. "$engineering_root/"
+          ln -s "$GITHUB_WORKSPACE" "$engineering_root/platform"
+          export UIP_ENGINEERING_ROOT="$engineering_root"
+          while IFS= read -r -d '' script; do bash -n "$script"; done \
+            < <(find tools/offline-delivery/engineering-root -type f -name '*.sh' -print0)
+          python3 -B deploy/production/tests/test-release-image-prune.py
+          python3 -B deploy/production/tests/test-workflow-import-diagnostics.py
+          python3 -B deploy/production/tests/test-oneclick-media-compatibility.py
+          python3 -B deploy/production/tests/test-oneclick-archive-metadata.py
+          python3 -B deploy/production/tests/test-oneclick-upgrade-safety.py
+          sudo -n env UIP_ENGINEERING_ROOT="$engineering_root" \
+            python3 -B deploy/production/tests/test-oneclick-upgrade-preflight.py
       # license-core 在三处（consumer 快照、权威源、vendor）各有一份副本，重复副本的
       # 漂移此前只能靠人工比对发现；这里把副本门禁与其自测一起纳入 CI。
       - name: Verify license-core mirror stays in sync

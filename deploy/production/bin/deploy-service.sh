@@ -2398,14 +2398,16 @@ if "$deploy_function"; then
   # （2026-11-07 测试服务器两次磁盘 100%，发布被 fail-closed 拒绝）。
   # 默认只清理 72 小时前且未被任何容器使用的镜像，可用 PLATFORM_IMAGE_RETENTION_HOURS 调整；
   # 0 表示清理所有未使用镜像（会缩短回滚窗口，回滚镜像仍可从 ACR 按 digest 重拉）。
-  # 这一步是维护动作：失败只 WARN，绝不改变已成功的发布结论；dry-run 由 prune-images.sh
-  # 自身控制，本发布路径只调用 --apply。脚本缺失时 bash 返回非零，同样只告警。
+  # 自动清理与安装持同一长锁：未完成或已放弃的会话一律延后，保护升级中的回退镜像。
+  # 锁覆盖会话检查与整个 prune 子进程，避免检查后有新安装并发启动。
+  # 维护失败只 WARN，不改变发布结论；手工 prune 仍须先停止部署并核对回退材料。
   image_retention_hours="${PLATFORM_IMAGE_RETENTION_HOURS:-72}"
   if [[ ! "$image_retention_hours" =~ ^[0-9]+$ ]]; then
     warn "PLATFORM_IMAGE_RETENTION_HOURS='$image_retention_hours' 不是非负整数，回落默认 72 小时"
     image_retention_hours=72
   fi
-  bash "$script_dir/prune-images.sh" --keep-hours "$image_retention_hours" --apply >&2 || \
+  python3 "$script_dir/release-image-prune.py" --deploy-dir "$deploy_dir" \
+    --keep-hours "$image_retention_hours" >&2 || \
     warn "镜像保留清理失败（不影响发布结论）"
   exit 0
 fi

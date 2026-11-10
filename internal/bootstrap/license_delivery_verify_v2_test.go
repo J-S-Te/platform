@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +163,107 @@ func TestOfflineVerifyEnforcementRejectsIncompleteV2Facts(t *testing.T) {
 			runner.coordinator = v2VerifyCoordinator{status: status}
 			if _, err := runner.verifyEnforcement(context.Background(), verify, func() time.Time { return now }); !errors.Is(err, ErrOfflineEnforcementIncomplete) {
 				t.Fatalf("%s must fail closed, got %v", mutation, err)
+			}
+		})
+	}
+}
+
+// TestOfflineVerifyEnforcementReportsFailureCause 用途：证明验收能定位失败事实且不泄漏验签材料。
+// 参数：t 为测试上下文。
+// 返回值：无；诊断缺失、误放行或泄密时失败。
+func TestOfflineVerifyEnforcementReportsFailureCause(t *testing.T) {
+	cases := []struct{ change, want string }{
+		{"deployment", "DEPLOYMENT_REVISION_CHANGED"},
+		{"content", "SNAPSHOT_CONTENT_STALE"},
+		{"revision", "MEMBER_REVISION_MISMATCH"},
+		{"ready-missing", "READY_MISSING"},
+		{"ready-stale", "READY_STALE"},
+		{"ready-future", "READY_FUTURE"},
+		{"ack-missing", "ACK_MISSING"},
+		{"ack-stale", "ACK_STALE"},
+		{"ack-future", "ACK_FUTURE"},
+		{"signature", "SNAPSHOT_SIGNATURE_INVALID"},
+		{"digest", "SNAPSHOT_DIGEST_MISMATCH"},
+		{"snapshot-revision", "SNAPSHOT_PAYLOAD_MISMATCH"},
+		{"application-revision", "APPLICATION_REVISION_INVALID"},
+		{"exact-minute", ""},
+		{"future-tolerance", ""},
+		{"other-application-revision", ""},
+	}
+	for _, item := range cases {
+		t.Run(item.change, func(t *testing.T) {
+			runner, verify, now := v2VerifyFixture(t)
+			status := runner.coordinator.(v2VerifyCoordinator).status
+			member := &status.Members[0]
+			old, future := now.Add(-61*time.Second), now.Add(2*time.Second)
+			switch item.change {
+			case "deployment":
+				status.DeploymentRevision++
+			case "content":
+				status.SnapshotCurrent = false
+			case "revision":
+				member.AckRevision--
+			case "ready-missing":
+				member.ReadyAt = nil
+			case "ready-stale":
+				member.ReadyAt = &old
+			case "ready-future":
+				member.ReadyAt = &future
+			case "ack-missing":
+				member.AckAt = nil
+			case "ack-stale":
+				member.AckAt = &old
+			case "ack-future":
+				member.AckAt = &future
+			case "signature":
+				verify = func(string, runtime.Binding) (runtime.PlatformSnapshot, error) {
+					return runtime.PlatformSnapshot{}, errors.New("private-signature-material")
+				}
+			case "digest":
+				member.IssuedDigest = "invalid"
+			case "snapshot-revision":
+				original := verify
+				verify = func(raw string, binding runtime.Binding) (runtime.PlatformSnapshot, error) {
+					snapshot, err := original(raw, binding)
+					snapshot.Revision--
+					return snapshot, err
+				}
+			case "other-application-revision":
+				status.Revision--
+				for index := range status.Members {
+					status.Members[index].IssuedRevision--
+					status.Members[index].AckRevision--
+				}
+				original := verify
+				verify = func(raw string, binding runtime.Binding) (runtime.PlatformSnapshot, error) {
+					snapshot, err := original(raw, binding)
+					snapshot.Revision--
+					return snapshot, err
+				}
+			case "application-revision":
+				status.Revision = 0
+			case "exact-minute":
+				edge := now.Add(-time.Minute)
+				member.ReadyAt, member.AckAt = &edge, &edge
+			case "future-tolerance":
+				edge := now.Add(time.Second)
+				member.ReadyAt, member.AckAt = &edge, &edge
+			}
+			runner.coordinator = v2VerifyCoordinator{status: status}
+			_, err := runner.verifyEnforcement(context.Background(), verify, func() time.Time { return now })
+			if item.want == "" {
+				if err != nil {
+					t.Fatalf("existing heartbeat boundary changed: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrOfflineEnforcementIncomplete) ||
+				!strings.Contains(err.Error(), item.want) || !strings.Contains(err.Error(), v2VerifyApp) {
+				t.Fatalf("want application and %s diagnosis, got %v", item.want, err)
+			}
+			if strings.Contains(err.Error(), "private-signature-material") ||
+				strings.Contains(err.Error(), member.RawJWS) {
+				t.Fatal("diagnosis leaked snapshot or verification material")
 			}
 		})
 	}
