@@ -80,7 +80,7 @@ func validBinding(b Binding) bool {
 		return false
 	}
 	switch b.Application {
-	case "customer_and_opportunity", "customer_portal", "contract_management", "project_management", "settlement", "data_analysis":
+	case "customer_and_opportunity", "customer_portal", "contract_management", "project_management", "settlement", "data_analysis", "reimbursement":
 		return true
 	}
 	return false

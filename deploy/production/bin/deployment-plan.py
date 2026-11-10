@@ -27,6 +27,7 @@ COMPONENTS = {
     "customer-portal": ["CUSTOMER_PORTAL_IMAGE"],
     "contract": ["CONTRACT_IMAGE"],
     "project": ["PROJECT_IMAGE"],
+    "reimbursement": ["REIMBURSEMENT_IMAGE"],
     "settlement": ["SETTLEMENT_IMAGE"],
     "data-analysis": ["DATA_ANALYSIS_IMAGE", "DATA_ANALYSIS_DASHBOARD_API_IMAGE",
                       "DATA_ANALYSIS_AGGREGATION_WORKER_IMAGE", "DATA_ANALYSIS_ALERT_WORKER_IMAGE",

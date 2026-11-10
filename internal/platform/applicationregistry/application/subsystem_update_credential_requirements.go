@@ -9,6 +9,16 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 		ClientName: "文件网关写入器", Scopes: []string{"platform:file:upload"}, Rotate: true,
 	}
 	switch applicationCode {
+	case "reimbursement":
+		return []SubsystemUpdateServiceCredentialRequirement{
+			{Purpose: ServiceCredentialReimbursementProjectReferenceRead, Suffix: "project-reference", ClientName: "报销项目引用读取", Scopes: []string{"reimbursement.project_reference.read"}, Rotate: true},
+			{Purpose: ServiceCredentialProjectReimbursementCostWrite, Suffix: "project-cost-writer", ClientName: "报销项目支出写入", Scopes: []string{"project.reimbursement_cost.write"}, Rotate: true},
+			{Purpose: ServiceCredentialOwnerDirectoryRead, Suffix: "owner-directory", ClientName: "报销人员目录", Scopes: []string{"owner_directory.read"}, Rotate: true},
+			{Purpose: ServiceCredentialNotificationIngest, Suffix: "notification-publisher", ClientName: "报销通知投递", Scopes: []string{"notification.ingest"}, Rotate: true},
+			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "报销审计投递", Scopes: []string{"audit.ingest"}, Rotate: true},
+			fileGateway,
+		}
+
 	case "contract_management":
 		return []SubsystemUpdateServiceCredentialRequirement{
 			{Purpose: ServiceCredentialAnalysisContractImportReportStatus, Suffix: "analysis-import-report-status", ClientName: "历史导入报表水位读取器", Scopes: []string{"analysis.contract-import.report-status"}, Rotate: true},

@@ -127,7 +127,7 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 
 ### 监控抓取与指标端点边界
 
-- `monitoring/prometheus/prometheus.yml` 抓取 `keycloak`、`keycloak-backup`、`file-gateway`、`contract`（`contract-api:8081`）、`platform-api`（`platform-api:8080`，平台自身 `/metrics`）与 `settlement-api`（`settlement-api:8085`）。所有 target 都是 Compose 服务名，只走 `application` 内网，不含宿主机地址。
+- `monitoring/prometheus/prometheus.yml` 抓取 `keycloak`、`keycloak-backup`、`file-gateway`、`contract`（`contract-api:8081`）、`platform-api`（`platform-api:8080`，平台自身 `/metrics`）、`settlement-api`（`settlement-api:8085`）与 `reimbursement-worker`（`reimbursement-worker:9097`）。所有 target 都是 Compose 服务名，只走 `application` 内网，不含宿主机地址。
 - `/metrics` 只由网络层保护：业务服务的指标端口仅允许回环发布（平台 8080、合同 8081、结算 8085），File Gateway 8086、Prometheus 9090、node-exporter 9100 完全不发布端口；前端 nginx 只代理显式业务路径，没有 `/metrics` 路由。禁止为了抓取补 `ports:`，也不要加公网 Ingress/反代。
 - contract 的 `/metrics` 不校验凭据，但只暴露聚合计数（不含租户/合同/事件 id），且与 `/healthz`、`/readyz` 同级注册、不进 `/api/v1`。它的唯一边界就是上面这条网络限制，因此“临时放开抓取端口”不是可接受的排障手段。
 - 平台 `/metrics` 额外有应用层鉴权（`RequireMetricsAccess`，SEC-B4）：配置 `METRICS_ACCESS_TOKEN` 时必须带 `Authorization: Bearer`，未配置时只放行回环对端。因此平台 job 必须用部署方提供的凭据文件抓取，见下一节。结算 `/metrics` 与合同的同级实现一致，不做应用层鉴权。
@@ -165,6 +165,7 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 | `platform-api` | 同上 | `platform_async_job_retries_total`、`platform_async_job_last_success_timestamp_seconds`、`platform_database_*` | `platform/internal/transport/http/metrics.go:438-440,452-455` |
 | `settlement-api` | `http://settlement-api:8085/metrics` | `settlement_outbox_pending{destination}`、`settlement_integration_destination_configured{destination}`、`settlement_integration_audit_required`、`settlement_outbox_unconfigured_pending`、`settlement_outbox_pending_query_error` | `Settlement/internal/httpapi/integration_status.go:101-130`；目的地字面量 `Settlement/internal/outbox/destinations.go:13,15` 与 `integration_status.go:31` |
 | `contract`（既有） | `http://contract-api:8081/metrics` | `contract_integration_outbox_dead{kind}`、`contract_integration_outbox_dead_total` | `contract_management/internal/transport/httpapi/metrics.go:54-66` |
+| `reimbursement-worker` | `http://reimbursement-worker:9097/metrics`（无应用层鉴权，仅内网） | `reimbursement_queue_records{queue,kind,status}`、`reimbursement_queue_oldest_age_seconds{queue,kind,status}`；失败或超时积压由 `reimbursement-alerts.yml` 告警 | `reimbursement/internal/observability/metrics.go`；不含租户、主体或单据标识 |
 
 已暴露但**未采集**的端点（`prometheus.yml` 暂无 job，采集另立项；本轮不写告警）：
 

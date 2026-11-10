@@ -401,6 +401,7 @@ verify_subsystem_current_health() {
         printf '[验收证据] Portal 邀请补偿未满足既有启用条件，不要求补偿 Worker 常驻。\n'
       fi
       ;;
+    reimbursement) services+=(reimbursement-mysql) ;;
     settlement) services+=(settlement-mysql) ;;
     data-analysis)
       services+=(data-analysis-mysql contract-api project-api)

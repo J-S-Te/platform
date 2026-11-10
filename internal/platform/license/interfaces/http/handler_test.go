@@ -391,8 +391,8 @@ func readLicenseStatus(t *testing.T, h *Handler) statusPayload {
 	if e := json.Unmarshal(w.Body.Bytes(), &envelope); e != nil {
 		t.Fatal(e)
 	}
-	if len(envelope.Data.Systems) != 6 {
-		t.Fatalf("expected six systems, got %d", len(envelope.Data.Systems))
+	if len(envelope.Data.Systems) != 7 {
+		t.Fatalf("expected seven systems, got %d", len(envelope.Data.Systems))
 	}
 	return envelope.Data
 }
@@ -458,6 +458,14 @@ func TestLicenseHTTPStatusReasonCodes(t *testing.T) {
 		{name: "NOT_PURCHASED", build: func(t *testing.T) (*Handler, *handlerRepository) {
 			return signedStatusFixture(t, now, false, validApps...)
 		}, system: "customer_portal", status: "NOT_PURCHASED", reason: "NOT_PURCHASED"},
+		// 报销是目录内第七个商业应用：授权状态列表必须带出它，并按许可证事实
+		// 投影 VALID / NOT_PURCHASED，而不是静默缺行。
+		{name: "REIMBURSEMENT_VALID", build: func(t *testing.T) (*Handler, *handlerRepository) {
+			return signedStatusFixture(t, now, false, core.Application{Code: "reimbursement", NotBefore: now.Unix() - 3600, ExpiresAt: now.Unix() + 3600, Kind: "FULL"})
+		}, system: "reimbursement", status: "VALID", reason: ""},
+		{name: "REIMBURSEMENT_NOT_PURCHASED", build: func(t *testing.T) (*Handler, *handlerRepository) {
+			return signedStatusFixture(t, now, false, validApps...)
+		}, system: "reimbursement", status: "NOT_PURCHASED", reason: "NOT_PURCHASED"},
 		{name: "EXPIRED", build: func(t *testing.T) (*Handler, *handlerRepository) {
 			return signedStatusFixture(t, now, false, core.Application{Code: "contract_management", NotBefore: now.Unix() - 7200, ExpiresAt: now.Unix() - 60, Kind: "FULL"})
 		}, system: "contract_management", status: "EXPIRED", reason: "EXPIRED"},
@@ -526,7 +534,7 @@ func TestLicenseHTTPStatusRuntimeEnforcement(t *testing.T) {
 		if other == nil || !other.Available || other.Registration != "UNREGISTERED" || other.Status != "UNREGISTERED" || other.MemberCount != 0 || other.LatestReadyAt != "" || other.LatestAckAt != "" {
 			t.Fatalf("unregistered enforcement %+v", other)
 		}
-		if len(reader.called) != 6 {
+		if len(reader.called) != 7 {
 			t.Fatalf("expected one read per application, got %v", reader.called)
 		}
 	})
@@ -573,7 +581,7 @@ func TestLicenseHTTPStatusRuntimeEnforcement(t *testing.T) {
 	t.Run("全部读取失败", func(t *testing.T) {
 		h, _ := handlerFixture(t)
 		errs := map[string]error{}
-		for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal"} {
+		for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal", "reimbursement"} {
 			errs[code] = errors.New("coordination storage unavailable")
 		}
 		data := readLicenseStatus(t, withRuntimeStatus(h, &fakeRuntimeStatusReader{errs: errs}))
@@ -589,12 +597,12 @@ func TestLicenseHTTPStatusRuntimeEnforcement(t *testing.T) {
 			}
 		}
 	})
-	// 五个失败一个成功：顶层可用，成功行正常，失败行仍是 UNKNOWN。
-	t.Run("五失败一成功", func(t *testing.T) {
+	// 六个失败一个成功：顶层可用，成功行正常，失败行仍是 UNKNOWN。
+	t.Run("六失败一成功", func(t *testing.T) {
 		h, _ := handlerFixture(t)
 		okCode := "data_analysis"
 		errs := map[string]error{}
-		for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "customer_portal"} {
+		for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "customer_portal", "reimbursement"} {
 			errs[code] = errors.New("coordination timeout")
 		}
 		reader := &fakeRuntimeStatusReader{

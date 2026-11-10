@@ -13,6 +13,7 @@ stage_upgrade() {
     customer-portal) key=CUSTOMER_PORTAL_IMAGE ;;
     contract) key=CONTRACT_IMAGE ;;
     project) key=PROJECT_IMAGE ;;
+    reimbursement) key=REIMBURSEMENT_IMAGE ;;
     settlement) key=SETTLEMENT_IMAGE ;;
     data-analysis) key=DATA_ANALYSIS_IMAGE ;;
     *) die "不支持的组件：$component" ;;
@@ -40,6 +41,7 @@ subsystem_metadata() {
     customer-portal) subsystem_key=CUSTOMER_PORTAL_IMAGE; subsystem_service=portal-api; subsystem_app_code=customer_portal; subsystem_app_name='客户自助门户'; subsystem_internal_host=portal-api; subsystem_internal_port=8091; subsystem_health=/customer-portal/healthz; subsystem_path=/customer-portal; subsystem_callback=/customer-portal/auth/callback; subsystem_runtime="$deploy_dir/runtime/portal.env" ;;
     contract) subsystem_key=CONTRACT_IMAGE; subsystem_service=contract-api; subsystem_app_code=contract_management; subsystem_app_name='合同管理系统'; subsystem_internal_host=contract-api; subsystem_internal_port=8081; subsystem_health=/healthz; subsystem_path=/contract_management; subsystem_callback=/contract_management/auth/callback; subsystem_runtime="$deploy_dir/runtime/contract.env" ;;
     project) subsystem_key=PROJECT_IMAGE; subsystem_service=project-api; subsystem_app_code=project_management; subsystem_app_name='项目服务内容管理系统'; subsystem_internal_host=project-api; subsystem_internal_port=8082; subsystem_health=/healthz; subsystem_path=/project_management; subsystem_callback=/project_management/auth/callback; subsystem_runtime="$deploy_dir/runtime/project.env" ;;
+    reimbursement) subsystem_key=REIMBURSEMENT_IMAGE; subsystem_service=reimbursement-api; subsystem_app_code=reimbursement; subsystem_app_name='报销管理系统'; subsystem_internal_host=reimbursement-api; subsystem_internal_port=8087; subsystem_health=/healthz; subsystem_path=/reimbursement; subsystem_callback=/reimbursement/auth/callback; subsystem_runtime="$deploy_dir/runtime/reimbursement.env" ;;
     settlement) subsystem_key=SETTLEMENT_IMAGE; subsystem_service=settlement-api; subsystem_app_code=settlement; subsystem_app_name='结算与开票管理系统'; subsystem_internal_host=settlement-api; subsystem_internal_port=8085; subsystem_health=/healthz; subsystem_path=/settlement; subsystem_callback=/settlement/auth/callback; subsystem_runtime="$deploy_dir/runtime/settlement.env" ;;
     data-analysis) subsystem_key=DATA_ANALYSIS_IMAGE; subsystem_service=data-analysis-api; subsystem_app_code=data_analysis; subsystem_app_name='数据看板与统计分析系统'; subsystem_internal_host=data-analysis-api; subsystem_internal_port=8080; subsystem_health=/data_analysis/healthz; subsystem_path=/data_analysis; subsystem_callback=/data_analysis/auth/callback; subsystem_runtime="$deploy_dir/runtime/data-analysis.env" ;;
     *) die "不支持的子系统：$component" ;;

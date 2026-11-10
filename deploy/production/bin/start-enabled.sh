@@ -122,11 +122,16 @@ start_registered() (
     compose run --no-deps "$service" || return
   done <<< "$initializers"
   # 失败的一次性容器保留，docker ps -a / docker logs 可直接排查。
-  compose run --no-deps "$migration" || return
+  if [[ "$component" == reimbursement ]]; then
+    compose run --no-deps -e REIMBURSEMENT_MIGRATION_BACKUP_VERIFIED=true "$migration" || return
+  else
+    compose run --no-deps "$migration" || return
+  fi
   case "$component" in
     contract) compose run --no-deps contract-api ./authz-catalog publish || return ;;
     customer-opportunity) compose run --no-deps customer-api ./authz-catalog publish crm || return ;;
     customer-portal) compose run --no-deps portal-api ./authz-catalog publish portal || return ;;
+    reimbursement) compose run --no-deps reimbursement-catalog-sync || return ;;
     settlement) compose run --no-deps settlement-catalog-sync || return ;;
   esac
   compose up -d --no-deps --wait --wait-timeout 180 "${applications[@]}" || return
@@ -146,7 +151,7 @@ start_enabled() {
   frontend_image="$(env_get "$release_file" FRONTEND_IMAGE)"
   "$script_dir/deploy-service.sh" platform "$platform_image" "$gateway_image" || return
   "$script_dir/deploy-service.sh" frontend "$frontend_image" || return
-  for component in contract project customer-opportunity customer-portal settlement data-analysis; do
+  for component in contract project reimbursement customer-opportunity customer-portal settlement data-analysis; do
     scope_enabled "$component" || continue
     subsystem_metadata "$component"
     if ! runtime_ready "$subsystem_runtime" false; then

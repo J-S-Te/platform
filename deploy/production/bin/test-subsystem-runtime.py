@@ -23,7 +23,7 @@ class RuntimePolicyTests(unittest.TestCase):
         app, name = RUNTIME.PROFILES[component]
         return RUNTIME.projection((PRODUCTION / "subsystems.d" / name).read_text(), app)
 
-    def test_all_six_shipped_profiles_parse(self):
+    def test_all_seven_shipped_profiles_parse(self):
         for component in RUNTIME.PROFILES:
             with self.subTest(component=component):
                 compose, _, _ = self.load(component)

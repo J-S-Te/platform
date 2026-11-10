@@ -48,6 +48,21 @@ func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tena
 // 参数：ctx和目标限定读取，policy来自受控Agent投影，空策略保留原默认。
 // 返回值：已登记的权威来源；仅可选来源未登记/客户端未创建返回空，其他失败返回错误。
 func (resolver *RelatedServiceClientsResolver) ResolveWithPolicy(ctx context.Context, tenantID, applicationCode, environment string, policy SubsystemRelatedServicePolicy) ([]RelatedSubsystemServiceClient, error) {
+	result, err := resolver.resolveLegacySources(ctx, tenantID, applicationCode, environment, policy)
+	if err != nil || applicationCode != "project_management" {
+		return result, err
+	}
+	reimbursement, err := resolver.resolveReimbursementSources(ctx, tenantID, environment)
+	if err != nil {
+		return nil, err
+	}
+	return append(result, reimbursement...), nil
+}
+
+// resolveLegacySources 保留既有结算和合同来源解析语义。
+// 参数：ctx和目标限定查询，policy为受控可选来源策略。
+// 返回值：已核验的既有来源身份；读取或身份漂移时返回错误。
+func (resolver *RelatedServiceClientsResolver) resolveLegacySources(ctx context.Context, tenantID, applicationCode, environment string, policy SubsystemRelatedServicePolicy) ([]RelatedSubsystemServiceClient, error) {
 	if selected := policy.SettlementContractOptionalEnvironment; selected != "" &&
 		(applicationCode != "settlement" || selected != environment ||
 			!slices.Contains([]string{"dev", "test", "staging", "prod"}, selected)) {

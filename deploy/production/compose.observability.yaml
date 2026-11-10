@@ -19,6 +19,7 @@ services:
       - ./monitoring/prometheus/file-gateway-alerts.yml:/etc/prometheus/file-gateway-alerts.yml:ro
       - ./monitoring/prometheus/platform-alerts.yml:/etc/prometheus/platform-alerts.yml:ro
       - ./monitoring/prometheus/integration-alerts.yml:/etc/prometheus/integration-alerts.yml:ro
+      - ./monitoring/prometheus/reimbursement-alerts.yml:/etc/prometheus/reimbursement-alerts.yml:ro
       - prometheus-data:/prometheus
       # 与权威编排一致：部署方提供的只读抓取凭据目录（runtime/ 下，不随资产包发布）。
       - ./runtime/prometheus-secrets:/etc/prometheus/secrets:ro

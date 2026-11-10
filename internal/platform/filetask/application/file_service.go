@@ -62,12 +62,16 @@ func NewFileService(repository FileRepository, store LocalStore, ids IDGenerator
 
 // DefaultUploadPolicy 只开放平台明确处理的少量格式。业务模块需要其他类型时必须修改服务端
 // 白名单，浏览器声明的 Content-Type 不能扩大信任边界。
+// DefaultUploadPolicy 返回受控文件网关基础媒体类型与大小上限。
+// 参数：无。
+// 返回值：基础策略；具体应用仍受独立purpose策略限制。
 func DefaultUploadPolicy() UploadPolicy {
 	return UploadPolicy{
 		MaxBytes: defaultUploadMaxBytes,
 		AllowedMediaTypes: map[string]struct{}{
-			"application/pdf": {},
-			"application/zip": {},
+			"application/pdf":  {},
+			"application/json": {},
+			"application/zip":  {},
 			"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   {},
 			"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         {},
 			"application/vnd.openxmlformats-officedocument.presentationml.presentation": {},
@@ -681,6 +685,9 @@ func (service *FileService) finalizeRecoveredUploadSession(ctx context.Context, 
 	}
 }
 
+// resolveMediaType 交叉核对声明、扩展名及内容探测并收敛受控容器类型。
+// 参数：declared为声明类型，extension为扩展名，header为实际内容前缀。
+// 返回值：可信媒体类型；形状冲突或白名单外类型返回校验错误。
 func (service *FileService) resolveMediaType(declared, extension string, header []byte) (string, error) {
 	detected := canonicalDetectedMediaType(http.DetectContentType(header))
 	declaredCanonical := ""
@@ -700,6 +707,9 @@ func (service *FileService) resolveMediaType(declared, extension string, header 
 
 	// CSV 常被内容探测识别为 text/plain；只有扩展名和声明类型同时确认 CSV 时才修正。
 	// 其他“声明/扩展名/内容”不一致一律拒绝，防止仅靠客户端 MIME 绕过白名单。
+	if extension == "json" && detected == "text/plain" && declaredCanonical == "application/json" {
+		detected = "application/json"
+	}
 	if extension == "csv" && detected == "text/plain" && declaredCanonical == "text/csv" {
 		detected = "text/csv"
 	}

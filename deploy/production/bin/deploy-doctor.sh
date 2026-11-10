@@ -18,6 +18,7 @@ doctor_release_keys() {
     customer-portal) printf 'CUSTOMER_PORTAL_IMAGE\n' ;;
     contract) printf 'CONTRACT_IMAGE\n' ;;
     project) printf 'PROJECT_IMAGE\n' ;;
+    reimbursement) printf 'REIMBURSEMENT_IMAGE\n' ;;
     settlement) printf 'SETTLEMENT_IMAGE\n' ;;
     data-analysis)
       printf '%s\n' DATA_ANALYSIS_IMAGE DATA_ANALYSIS_DASHBOARD_API_IMAGE \
@@ -371,7 +372,7 @@ doctor_check_subsystem() {
   printf '\n[7/7] 子系统 %s\n' "$component"
 
   case "$component" in
-    customer-opportunity|customer-portal|contract|project|settlement|data-analysis) ;;
+    customer-opportunity|customer-portal|contract|project|reimbursement|settlement|data-analysis) ;;
     *)
       doctor_fail "不支持的子系统：${component}（可用：contract | project | settlement | data-analysis | customer-opportunity | customer-portal）"
       return 0

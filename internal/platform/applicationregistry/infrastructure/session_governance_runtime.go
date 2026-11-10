@@ -12,7 +12,7 @@ func managedSessionEnvironment(policy *application.CentralSessionRuntimePolicy, 
 	}
 	switch code {
 	case integratedContractApplicationCode, integratedProjectApplicationCode, integratedSettlementApplicationCode,
-		integratedCustomerApplicationCode, integratedPortalApplicationCode, "data_analysis":
+		integratedCustomerApplicationCode, integratedPortalApplicationCode, "data_analysis", "reimbursement":
 	default:
 		return values, nil
 	}

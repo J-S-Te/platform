@@ -501,6 +501,9 @@ func validProductionGeneratedEnvironmentKey(value string) bool {
 // 参数：source 为绑定来源。
 // 返回值：来源和字段是否受支持。
 func validProductionBindingSource(source string) bool {
+	if source == "reimbursement_integration_enabled" || strings.HasPrefix(source, reimbursementRelatedPrefix) {
+		return source == "reimbursement_integration_enabled" || source == reimbursementRelatedPrefix+application.ServiceCredentialReimbursementProjectReferenceRead+".client_id" || source == reimbursementRelatedPrefix+application.ServiceCredentialProjectReimbursementCostWrite+".client_id"
+	}
 	if strings.HasPrefix(source, "related_service.settlement.settlement_project_reference_read.") {
 		return strings.TrimPrefix(source, "related_service.settlement.settlement_project_reference_read.") == "client_id"
 	}
@@ -523,6 +526,9 @@ func validProductionBindingSource(source string) bool {
 // 参数：app 为接收应用清单，source 为待解析来源。
 // 返回值：是否允许该应用消费该用途或关联身份。
 func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest, source string) bool {
+	if strings.HasPrefix(source, reimbursementRelatedPrefix) || source == "reimbursement_integration_enabled" {
+		return app.Code == "project_management" && validProductionBindingSource(source)
+	}
 	if strings.HasPrefix(source, "related_service.") {
 		return (app.Code == "settlement" && strings.HasPrefix(source, "related_service.contract_management.settlement_contract_ingest.") ||
 			app.Code == "project_management" && strings.HasPrefix(source, "related_service.settlement.settlement_project_reference_read.")) && validProductionBindingSource(source)
@@ -554,6 +560,8 @@ func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest
 // 清单未声明 allowed_service_bindings 时使用，保证既有子系统行为不变。
 func hardcodedProductionServiceBindingPurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
+	case "reimbursement":
+		return []string{application.ServiceCredentialReimbursementProjectReferenceRead, application.ServiceCredentialProjectReimbursementCostWrite, application.ServiceCredentialOwnerDirectoryRead, application.ServiceCredentialNotificationIngest, application.ServiceCredentialFileGatewayWrite}
 	case "customer_and_opportunity":
 		return []string{
 			application.ServiceCredentialOwnerDirectoryRead,

@@ -70,6 +70,8 @@ const (
 	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
 	ServiceCredentialContractApprovedRead               = "contract_approved_read"
 	ServiceCredentialProjectContractImport              = "project_contract_import"
+	ServiceCredentialReimbursementProjectReferenceRead  = "reimbursement_project_reference_read"
+	ServiceCredentialProjectReimbursementCostWrite      = "project_reimbursement_cost_write"
 	ServiceCredentialSettlementProjectReferenceRead     = "settlement_project_reference_read"
 	ServiceCredentialSettlementContractIngest           = "settlement_contract_ingest"
 	// ServiceCredentialCRMCreditPaymentIngest 是结算→CRM 回款/冲销信用事实写入的
@@ -79,7 +81,7 @@ const (
 	ServiceCredentialPortalReportFileRead             = "portal_report_file_read"
 	ServiceCredentialPortalReportDownloadIdentityRead = "portal_report_download_identity_read"
 	// ServiceCredentialFileGatewayWrite 是业务子系统上传并绑定自身文件的最小组合凭据；
-	// 下载凭据不包含在内，避免写入型 Worker 同时取得任意文件读取能力。
+	// 精确包含上传、绑定和下载三scope，仍受同应用资源绑定与业务ACL约束。
 	ServiceCredentialFileGatewayWrite = "file_gateway_write"
 )
 
@@ -704,6 +706,8 @@ type integratedServicePurposeDefinition struct {
 }
 
 var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefinition{
+	ServiceCredentialReimbursementProjectReferenceRead:  {ServiceCredentialReimbursementProjectReferenceRead, "project-reference", "Reimbursement Project Reference Reader", "reimbursement.project_reference.read"},
+	ServiceCredentialProjectReimbursementCostWrite:      {ServiceCredentialProjectReimbursementCostWrite, "project-cost-writer", "Reimbursement Project Cost Writer", "project.reimbursement_cost.write"},
 	ServiceCredentialContractImportReportRead:           {ServiceCredentialContractImportReportRead, "contract-import-report-read", "Historical Contract Report Source Reader", "contract.import.report.read"},
 	ServiceCredentialAnalysisContractImportReportStatus: {ServiceCredentialAnalysisContractImportReportStatus, "analysis-import-report-status", "Historical Contract Report Status Reader", "analysis.contract-import.report-status"},
 	ServiceCredentialSettlementProjectReferenceRead:     {ServiceCredentialSettlementProjectReferenceRead, "project-reference", "Settlement Project Reference Reader", "settlement.project_reference.read"},
@@ -739,6 +743,8 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 // 返回值：默认用途，不含所有应用必有的审计基线。
 func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
+	case "reimbursement":
+		return []string{ServiceCredentialReimbursementProjectReferenceRead, ServiceCredentialProjectReimbursementCostWrite, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialFileGatewayWrite}
 	case integratedCustomerApplicationCode:
 		// 合同核验与签约回写是 CRM 的默认跨系统能力：本地/首次接入也必须
 		// 用 CRM 自己的 client 身份（customer_and_opportunity-<env>-*）创建，
@@ -771,6 +777,9 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	return nil
 }
 
+// buildIntegratedServiceClients 按受控用途注册表创建用途隔离的机器客户端。
+// 参数：input为接入清单，applicationID/environmentID为目标，now为统一时间。
+// 返回值：客户端写入与一次性密钥；未知用途或生成失败返回错误。
 func (service *SubsystemOnboardingService) buildIntegratedServiceClients(input SubsystemOnboardingInput, applicationID, environmentID string, now time.Time) ([]SubsystemServiceClientWrite, map[string]string, error) {
 	// 集中审计写入是所有接入环境的基线，而不是特定应用的可选集成；每个环境都使用
 	// 自己的单 scope 客户端，平台可据此绑定来源应用和环境。

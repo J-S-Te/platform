@@ -1,0 +1,17 @@
+groups:
+  - name: reimbursement-recovery
+    rules:
+      - alert: ReimbursementDeadLetter
+        expr: sum(reimbursement_queue_records{status="FAILED"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 报销存在失败任务或投递，需在异常恢复页面核对原因
+      - alert: ReimbursementQueueStalled
+        expr: max(reimbursement_queue_oldest_age_seconds{status=~"PENDING|PROCESSING"}) > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 报销任务或集成投递积压超过30分钟

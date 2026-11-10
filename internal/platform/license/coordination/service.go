@@ -94,7 +94,7 @@ func NewService(db *gorm.DB, reader LicenseReader, vendor map[string]ed25519.Pub
 }
 func validApplication(app string) bool {
 	switch app {
-	case "contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal":
+	case "reimbursement", "contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal":
 		return true
 	}
 	return false

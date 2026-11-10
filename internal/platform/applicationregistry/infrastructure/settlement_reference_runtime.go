@@ -127,7 +127,7 @@ func strictProductionServiceBinding(input application.SubsystemProvisioningInput
 	if isP1ProductionServiceBinding(source) {
 		return true
 	}
-	if input.ApplicationCode != "settlement" && input.ApplicationCode != "settlement_and_invoicing" {
+	if input.ApplicationCode != "reimbursement" && input.ApplicationCode != "settlement" && input.ApplicationCode != "settlement_and_invoicing" {
 		return false
 	}
 	parts := strings.Split(source, ".")

@@ -102,6 +102,14 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "contract-approved-reader",
         FILE_GATEWAY_SUFFIX,
     ),
+    "reimbursement": (
+        "project-reference",
+        "project-cost-writer",
+        "owner-directory",
+        "notification-publisher",
+        "audit-publisher",
+        FILE_GATEWAY_SUFFIX,
+    ),
     "settlement": (
         "audit-publisher",
         "notification-publisher",

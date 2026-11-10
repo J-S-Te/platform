@@ -26,12 +26,13 @@ import (
 // v1PurposeAccountCodes 是各存储命名空间对应的代表应用编码，取值与
 // validPurposeApplication 的别名表一致：v1 上传必须同时通过用途与命名空间绑定。
 var v1PurposeAccountCodes = map[string]string{
-	"platform":   "platform",
-	"crm":        "customer_and_opportunity",
-	"portal":     "customer_portal",
-	"contract":   "contract_management",
-	"project":    "project_management",
-	"settlement": "settlement",
+	"reimbursement": "reimbursement",
+	"platform":      "platform",
+	"crm":           "customer_and_opportunity",
+	"portal":        "customer_portal",
+	"contract":      "contract_management",
+	"project":       "project_management",
+	"settlement":    "settlement",
 }
 
 // v1AllowedMedia 返回该策略白名单里字典序最小的合法媒体类型，供允许矩阵使用。

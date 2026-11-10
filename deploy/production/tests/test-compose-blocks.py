@@ -65,7 +65,7 @@ LOG_BIN_TRUST_FLAG = "--log-bin-trust-function-creators=1"
 MYSQL_CLIENT_SERVICES = {"data-analysis-metabase-init"}
 EXPECTED_MYSQL_SERVERS = {
     "keycloak-db", "platform-mysql", "contract-mysql", "file-gateway-mysql",
-    "project-mysql", "customer-mysql", "portal-mysql", "settlement-mysql",
+    "project-mysql", "customer-mysql", "portal-mysql", "reimbursement-mysql", "settlement-mysql",
     "data-analysis-mysql",
 }
 

@@ -1579,6 +1579,7 @@ func TestUpdateServiceCredentialRequirementsRedeliverPortalAuditPublisher(t *tes
 func TestCatalogPublisherCredentialRequiredForStartupCatalogPublishers(t *testing.T) {
 	t.Parallel()
 	for _, applicationCode := range []string{
+		"reimbursement",
 		"contract_management",
 		"customer_and_opportunity",
 		"customer_portal",

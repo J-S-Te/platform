@@ -87,10 +87,10 @@ func (service *SubsystemUpdateCatalogPublisherCredentialsService) Ensure(ctx con
 }
 
 // RequiresSubsystemCatalogPublisherCredential 判断该应用在受控更新时是否需要目录发布者凭据。
-// 与既有实现逐条一致：六个已交付子系统需要，其它不需要。
+// 报销与既有六个已交付子系统都会在启动时发布自有授权目录，其它不需要。
 func RequiresSubsystemCatalogPublisherCredential(applicationCode string) bool {
 	switch strings.TrimSpace(applicationCode) {
-	case "contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "settlement":
+	case "reimbursement", "contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "settlement":
 		return true
 	default:
 		return false

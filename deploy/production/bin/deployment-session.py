@@ -27,7 +27,7 @@ SESSION = re.compile(r"[a-f0-9]{32}\Z")
 DIGEST = re.compile(r"sha256:[a-f0-9]{64}\Z")
 CUSTOMER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 COMPONENTS = frozenset({"common", "platform", "frontend", "customer-opportunity",
-                        "customer-portal", "contract", "project", "settlement", "data-analysis"})
+                        "customer-portal", "contract", "project", "reimbursement", "settlement", "data-analysis"})
 TERMINAL = frozenset({"DONE", "SKIPPED"})
 UPDATE_STATUSES = frozenset({"RUNNING", "DONE", "FAILED", "WAITING", "SKIPPED"})
 TEMP_NAME = re.compile(r"\.session-[a-f0-9]{32}\.tmp\Z")

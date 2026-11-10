@@ -108,6 +108,7 @@ runtime_file_for() {
     customer-portal) printf '%s/runtime/portal.env' "$deploy_dir" ;;
     contract) printf '%s/runtime/contract.env' "$deploy_dir" ;;
     project) printf '%s/runtime/project.env' "$deploy_dir" ;;
+    reimbursement) printf '%s/runtime/reimbursement.env' "$deploy_dir" ;;
     settlement) printf '%s/runtime/settlement.env' "$deploy_dir" ;;
     data-analysis) printf '%s/runtime/data-analysis.env' "$deploy_dir" ;;
     *) return 1 ;;
@@ -181,6 +182,7 @@ repair_subsystem() {
     customer-portal) release_image_ready CUSTOMER_PORTAL_IMAGE || die 'CUSTOMER_PORTAL_IMAGE 尚非不可变 digest';;
     contract) release_image_ready CONTRACT_IMAGE || die 'CONTRACT_IMAGE 尚非不可变 digest';;
     project) release_image_ready PROJECT_IMAGE || die 'PROJECT_IMAGE 尚非不可变 digest';;
+    reimbursement) release_image_ready REIMBURSEMENT_IMAGE || die 'REIMBURSEMENT_IMAGE 尚非不可变 digest';;
     settlement) release_image_ready SETTLEMENT_IMAGE || die 'SETTLEMENT_IMAGE 尚非不可变 digest';;
     data-analysis) release_image_ready DATA_ANALYSIS_DASHBOARD_API_IMAGE || die 'DATA_ANALYSIS_DASHBOARD_API_IMAGE 尚非不可变 digest';;
   esac
@@ -213,14 +215,14 @@ repair() {
     frontend)
       repair_core frontend
       ;;
-    customer-opportunity|customer-portal|contract|project|settlement|data-analysis)
+    customer-opportunity|customer-portal|contract|project|reimbursement|settlement|data-analysis)
       acquire_lock; repair_subsystem "$target"
       "$deploy_dir/bin/deploy.sh" verify "$target"
       ;;
     all)
       # 修复核心之前就验证全部已接管子系统的完整运行策略，防止后续配置损坏导致只完成部分修复。
       enabled="$(scope_services)" || return
-      for subsystem in customer-opportunity customer-portal contract project settlement data-analysis; do
+      for subsystem in customer-opportunity customer-portal contract project reimbursement settlement data-analysis; do
         service="$(scope_service_for "$subsystem")" || return
         grep -Fxq "$service" <<< "$enabled" || continue
         if runtime_ready "$(runtime_file_for "$subsystem")"; then
@@ -229,7 +231,7 @@ repair() {
       done
       repair_core platform
       repair_core frontend
-      for subsystem in customer-opportunity customer-portal contract project settlement data-analysis; do
+      for subsystem in customer-opportunity customer-portal contract project reimbursement settlement data-analysis; do
         scope_enabled "$subsystem" || continue
         if runtime_ready "$(runtime_file_for "$subsystem")"; then
           if docker container inspect "uip-${subsystem}-candidate" >/dev/null 2>&1; then
@@ -289,7 +291,7 @@ remove_all_applications() {
   confirm_exact REMOVE_ALL_AFTER_RETIREMENT "$token" '确认所有子系统 prod 环境均已退役，输入确认字符串'
   require_config; need docker; acquire_lock
   project="$(compose_project_name)"
-  for component in customer-opportunity customer-portal contract project settlement data-analysis; do
+  for component in customer-opportunity customer-portal contract project reimbursement settlement data-analysis; do
     owned="$(scope_owned_services "$component")" || return
     [[ -n "$owned" ]] || die "$component 没有登记的受控组件"
     while IFS= read -r service; do services+=("$service"); done <<< "$owned"
@@ -390,7 +392,7 @@ destroy_environment() {
   local -a db_volumes=(
     platform-mysql-data:platform-mysql keycloak-mysql-data:keycloak-db file-gateway-mysql-data:file-gateway-mysql
     customer-mysql-data:customer-mysql portal-mysql-data:portal-mysql contract-mysql-data:contract-mysql
-    project-mysql-data:project-mysql settlement-mysql-data:settlement-mysql data-analysis-mysql-data:data-analysis-mysql
+    project-mysql-data:project-mysql reimbursement-mysql-data:reimbursement-mysql settlement-mysql-data:settlement-mysql data-analysis-mysql-data:data-analysis-mysql
   )
   for logical in "${db_volumes[@]}"; do
     volume="${logical%%:*}"; service="${logical#*:}"

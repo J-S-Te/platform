@@ -22,7 +22,7 @@ func usableProductionCredential(value string) bool {
 // p1StrictServicePurposes 是需要严格登记校验与密钥补发保护的机器身份用途。
 // 每个用途都必须在 p1ServiceCredentialScopes 声明唯一允许的 scope；遗漏会让
 // 对应清单绑定在校验阶段必然失败（contract_management 的 crm_contract_link_write 曾因此阻断接入）。
-var p1StrictServicePurposes = []string{"contract_import_report_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "crm_contract_link_write", "portal_report_file_read", "portal_report_download_identity_read"}
+var p1StrictServicePurposes = []string{"reimbursement_project_reference_read", "project_reimbursement_cost_write", "contract_import_report_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "crm_contract_link_write", "portal_report_file_read", "portal_report_download_identity_read"}
 
 // isP1ProductionServiceBinding 识别需要严格登记校验和密钥补发保护的绑定。
 // 参数：source 为清单的服务绑定来源。
@@ -35,6 +35,7 @@ func isP1ProductionServiceBinding(source string) bool {
 	}
 	return false
 }
+
 // inheritProductionRuntimeValues 让报告API与Worker共享审核过的来源及独立安全材料。
 // 参数：root为部署根，file为目标声明，staged为已验证源，values接收本次继承值。
 // 返回值：无错误表示来源一致；非法模式、缺安全材料或越界路径失败关闭。
