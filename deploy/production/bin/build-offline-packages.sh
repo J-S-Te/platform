@@ -973,6 +973,7 @@ package_assets() (
     bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-common.sh bin/deploy-import.sh bin/deploy-subsystem.sh bin/deploy-license.sh bin/deploy-doctor.sh bin/deploy-package.sh bin/deploy-status.sh bin/deploy-verify.sh bin/deploy-menu.sh bin/deploy-registry.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
     bin/install-host-dependencies.sh bin/initialize-audit-hash-key.py bin/platform-mysql-command.py
+    bin/prepare-reimbursement-infrastructure.py
     bin/release-backup-policy.py bin/release-image-prune.py
     bin/project-compose-assets.py bin/check-asset-bundle.py bin/check-license-runtime.py bin/check-runtime-env-hygiene.py
     bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-frontend-selection.sh bin/offline-image-identities.py
